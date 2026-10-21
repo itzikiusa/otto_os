@@ -11,7 +11,9 @@ impl GameKind {
     pub fn maps(self) -> &'static [&'static str] {
         match self {
             GameKind::Shooter => &["isle", "mesa"],
-            GameKind::Kart => &["meadow", "downtown", "canyon", "frost"],
+            GameKind::Kart => &[
+                "meadow", "downtown", "canyon", "frost", "lagoon", "volcano", "skyway",
+            ],
         }
     }
     /// Active members, host included (the host fills the rest with bots/CPUs).

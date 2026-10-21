@@ -9,6 +9,8 @@
   import { confirmer } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import Icon from '../../lib/components/Icon.svelte';
   import Badge from '../../lib/components/Badge.svelte';
   import ConflictFilePane from './ConflictFilePane.svelte';
@@ -73,9 +75,16 @@
     if (isMobile) secFilesOpen = false;
   }
 
+  // A failed merge-status read with no seed to fall back on: shown with Retry
+  // instead of a neutral "No conflicted files." while the repo is mid-merge.
+  let loadError = $state<string | null>(null);
+  let reloadKey = $state(0);
+
   $effect(() => {
     const id = repoId;
+    void reloadKey;
     loading = true;
+    loadError = null;
     void git
       .getMergeStatus(id)
       .then((s) => {
@@ -91,7 +100,8 @@
           onleave();
         }
       })
-      .catch(() => {
+      .catch((e) => {
+        loadError = loadErrorText(e);
         // Fall back to the seed list from the merge that brought us here.
         status = { merging: initialFiles.length > 0, source: initialSource, conflicted_files: initialFiles };
         pending = [...initialFiles];
@@ -228,6 +238,12 @@
   <div class="resolver-body">
     {#if loading}
       <div style="padding: 16px; flex: 1"><Skeleton rows={6} height={28} /></div>
+    {:else if loadError && allFiles.length === 0}
+      <!-- The seed is empty, so there is nothing to fall back on: the repo
+           may still be mid-merge, so this must not read as "nothing to do". -->
+      <div class="load-fail">
+        <LoadState what="the merge status" error={loadError} empty variant="page" onretry={() => reloadKey++} />
+      </div>
     {:else}
       {#if isMobile}
         <!-- Mobile: collapsible files strip above the detail pane. -->
@@ -389,6 +405,11 @@
     letter-spacing: 0.06em;
     text-transform: uppercase;
     color: var(--text-dim);
+  }
+  .load-fail {
+    flex: 1;
+    min-width: 0;
+    overflow-y: auto;
   }
   .files-empty {
     padding: 6px 12px;

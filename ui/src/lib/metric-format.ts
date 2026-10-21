@@ -28,17 +28,32 @@ function trim(n: number, digits: number): string {
   return n.toLocaleString(undefined, { maximumFractionDigits: digits });
 }
 
-export function formatBytes(n: number): string {
+export interface FormatBytesOptions {
+  /** What a missing size (null / undefined / NaN / ±Infinity) renders as.
+   *  Default `—`; a surface that hides the cell instead passes `''`. */
+  empty?: string;
+  /** IEC quantity suffixes the way kubectl prints them — `Ki` / `Mi` / `Gi`…
+   *  with no space ("128Mi") — instead of "128 MB". Same 1024 steps. */
+  iec?: boolean;
+}
+
+const UNITS = ['KB', 'MB', 'GB', 'TB', 'PB'];
+const IEC_UNITS = ['Ki', 'Mi', 'Gi', 'Ti', 'Pi'];
+
+/** The one human byte size: 1024 steps up to PB, one decimal under 100
+ *  ("1.5 KB", "5 GB", "512 B"). Nullable — see `FormatBytesOptions.empty`. */
+export function formatBytes(n: number | null | undefined, opts: FormatBytesOptions = {}): string {
+  if (n == null || !Number.isFinite(n)) return opts.empty ?? '—';
   const a = Math.abs(n);
   if (a < 1024) return `${trim(n, 0)} B`;
-  const u = ['KB', 'MB', 'GB', 'TB', 'PB'];
+  const u = opts.iec ? IEC_UNITS : UNITS;
   let v = n / 1024;
   let i = 0;
   while (Math.abs(v) >= 1024 && i < u.length - 1) {
     v /= 1024;
     i++;
   }
-  return `${trim(v, Math.abs(v) >= 100 ? 0 : 1)} ${u[i]}`;
+  return `${trim(v, Math.abs(v) >= 100 ? 0 : 1)}${opts.iec ? '' : ' '}${u[i]}`;
 }
 
 export function formatCount(n: number): string {

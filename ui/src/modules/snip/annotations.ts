@@ -429,24 +429,3 @@ export async function flatten(
     return encodeOnMain(canvas);
   }
 }
-
-export async function blobToB64(blob: Blob): Promise<string> {
-  // Native encoder (FileReader) instead of a String.fromCharCode loop over
-  // ~8 MB of PNG on the main thread.
-  if (typeof FileReader !== 'undefined') {
-    const url = await new Promise<string>((resolve, reject) => {
-      const r = new FileReader();
-      r.onload = () => resolve(String(r.result ?? ''));
-      r.onerror = () => reject(r.error ?? new Error('Could not read the image'));
-      r.readAsDataURL(blob);
-    });
-    return url.slice(url.indexOf(',') + 1);
-  }
-  const buf = new Uint8Array(await blob.arrayBuffer());
-  let bin = '';
-  const CHUNK = 0x8000;
-  for (let i = 0; i < buf.length; i += CHUNK) {
-    bin += String.fromCharCode(...buf.subarray(i, i + CHUNK));
-  }
-  return btoa(bin);
-}

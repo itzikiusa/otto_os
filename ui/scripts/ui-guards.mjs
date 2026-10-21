@@ -185,6 +185,11 @@
 //                     `documentElement.style.setProperty(…)` → a
 //                     full-document style recalc per write (SF-02/SF-03);
 //                     use lib/dragCursor.ts (overlay) / a scoped custom prop.
+//   clipboard-write   `navigator.clipboard.writeText(…)` outside lib/clipboard.ts
+//                     → copyText / copyTextOrThrow (lib/clipboard.ts). The async
+//                     API is secure-context only and dies on an unfocused
+//                     document; the helper falls back to execCommand so a Copy
+//                     button still works over LAN http / the self-signed listener.
 //
 // One ratcheted rule scans the E2E SPECS (ui/e2e/*.ts, top level):
 //
@@ -214,8 +219,9 @@ const SRC = join(UI, 'src');
 const BASELINE = join(UI, 'scripts', 'ui-guards-baseline.json');
 const UPDATE = process.argv.includes('--update-baseline');
 
-/** Custom properties set by libraries we style against, not by our code. */
-const EXTERNAL_PREFIXES = ['--xy-'];
+/** Custom properties set by libraries we style against, not by our code
+ *  (empty since @xyflow/svelte, the `--xy-` owner, was dropped). */
+const EXTERNAL_PREFIXES = [];
 
 function walk(dir, out = []) {
   for (const name of readdirSync(dir).sort()) {
@@ -352,6 +358,7 @@ const RULES = {
   'smooth-scroll': "literal behavior: 'smooth' — use scrollBehavior() from lib/motion.ts (reduced motion)",
   'disabled-opacity': 'opacity literal on a disabled state — use var(--disabled-opacity) (scripts/codemods/disabled-opacity.mjs)',
   'body-style': 'document-level style write (body cursor/userSelect, documentElement setProperty) — use lib/dragCursor.ts or a scoped custom property',
+  'clipboard-write': 'navigator.clipboard.writeText outside lib/clipboard.ts — use copyText / copyTextOrThrow (insecure-origin + unfocused-document fallback)',
 };
 
 /** Clocks, UI animation and explicitly bounded protocol/media lifecycles, not
@@ -786,11 +793,12 @@ for (const f of files) {
 }
 
 // script-code rules: setInterval / document-level style writes / smooth scroll
-// / destructive confirms.
+// / raw clipboard writes / destructive confirms.
 const DESTRUCTIVE_LABEL = /^(?:Delete|Remove|Revoke|Stop|Discard|Purge|Erase|Wipe|Drop|Uninstall|Reset|Disconnect|Kill|Terminate|Cancel run|Force)\b/;
 const INTERVAL = /(?<![\w$.])(?:(?:window|globalThis|self)\.)?setInterval\s*\(/g;
 const BODY_STYLE =
   /\bdocument\.(?:body|documentElement)\.style\.(?:(?:cursor|userSelect|webkitUserSelect)\s*=(?!=)|setProperty\s*\()/g;
+const CLIPBOARD_WRITE = /\bnavigator\s*\.\s*clipboard\s*\??\.\s*writeText\b/g;
 for (const f of files) {
   if (!/\.(svelte|ts|js)$/.test(f.path)) continue;
   let code = stripComments(f.text);
@@ -803,6 +811,9 @@ for (const f of files) {
   }
   if (f.rel !== 'src/lib/dragCursor.ts') {
     for (const m of code.matchAll(BODY_STYLE)) hit('body-style', f, m.index, m[0].replace(/\s+/g, ' '));
+  }
+  if (f.rel !== 'src/lib/clipboard.ts') {
+    for (const m of code.matchAll(CLIPBOARD_WRITE)) hit('clipboard-write', f, m.index, m[0].replace(/\s+/g, ''));
   }
   // destructive-confirm: a confirm whose button deletes / removes / revokes /
   // stops / discards must be the red `danger` variant (S17-305).

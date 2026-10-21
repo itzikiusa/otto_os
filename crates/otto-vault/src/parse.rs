@@ -52,13 +52,15 @@ fn yaml_to_json(v: serde_yaml::Value) -> serde_json::Value {
     serde_json::to_value(&v).unwrap_or(serde_json::Value::Null)
 }
 
-/// A frontmatter value that may be a scalar or a list → Vec<String>.
+/// A frontmatter value that may be a scalar or a list → Vec<String>, in
+/// first-seen order without repeats: `tags: [api, "#api"]` used to yield
+/// `["api","api"]`, double-counting the tag and crashing the structured view
+/// (which keys chips by tag). Inline `#tags` dedupe the same way.
 fn str_list(v: Option<&serde_json::Value>) -> Vec<String> {
-    match v {
+    let items: Vec<String> = match v {
         Some(serde_json::Value::String(s)) => s
             .split(',')
             .map(|t| t.trim().trim_start_matches('#').to_string())
-            .filter(|t| !t.is_empty())
             .collect(),
         Some(serde_json::Value::Array(a)) => a
             .iter()
@@ -67,10 +69,16 @@ fn str_list(v: Option<&serde_json::Value>) -> Vec<String> {
                 serde_json::Value::Number(n) => Some(n.to_string()),
                 _ => None,
             })
-            .filter(|t| !t.is_empty())
             .collect(),
         _ => Vec::new(),
+    };
+    let mut out: Vec<String> = Vec::with_capacity(items.len());
+    for t in items {
+        if !t.is_empty() && !out.contains(&t) {
+            out.push(t);
+        }
     }
+    out
 }
 
 fn str_field(v: Option<&serde_json::Value>) -> Option<String> {
@@ -617,6 +625,13 @@ mod tests {
             Some("kept")
         );
         assert_eq!(n.word_count, 2);
+    }
+
+    #[test]
+    fn frontmatter_tags_and_aliases_dedupe_in_order() {
+        let n = parse_note("---\ntags: [api, \"#api\", auth, api]\naliases: \"a, b, a\"\n---\nx\n");
+        assert_eq!(n.tags, vec!["api", "auth"]);
+        assert_eq!(n.aliases, vec!["a", "b"]);
     }
 
     #[test]

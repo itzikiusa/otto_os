@@ -26,6 +26,7 @@ use otto_core::{new_id, Result};
 use sqlx::Row;
 
 use crate::convert::{dberr, fmt};
+use crate::workbench::sha256_hex;
 
 /// String values longer than this (in chars) are truncated before insert.
 pub const ARG_STRING_CAP: usize = 1024;
@@ -39,11 +40,6 @@ pub const ARGS_JSON_MAX_BYTES: usize = 16 * 1024;
 /// stored marker is ≈ these + JSON escaping of the kept text.
 const DOC_HEAD_BYTES: usize = 8 * 1024;
 const DOC_TAIL_BYTES: usize = 4 * 1024;
-
-fn sha256_hex(s: &str) -> String {
-    use sha2::{Digest, Sha256};
-    hex::encode(Sha256::digest(s.as_bytes()))
-}
 
 /// Shape `args_json` for storage (see the module doc). The result is always
 /// valid JSON: input that doesn't parse and is itself over the cap is stored
@@ -102,7 +98,7 @@ fn cap_doc(shaped: String, original: &str) -> String {
     serde_json::json!({
         "_otto_truncated": true,
         "bytes": original.len(),
-        "sha256": sha256_hex(original),
+        "sha256": sha256_hex(original.as_bytes()),
         "head": head,
         "tail": tail,
     })
@@ -119,7 +115,7 @@ fn truncate_str(s: &str) -> Option<String> {
     let tail: String = s.chars().skip(total - ARG_STRING_EDGE).collect();
     Some(format!(
         "{head}…[truncated: {total} chars, sha256 {}]…{tail}",
-        sha256_hex(s)
+        sha256_hex(s.as_bytes())
     ))
 }
 
@@ -255,7 +251,7 @@ mod tests {
         assert!(
             c.contains(&format!(
                 "…[truncated: 5000 chars, sha256 {}]…",
-                sha256_hex(&body)
+                sha256_hex(body.as_bytes())
             )),
             "{c}"
         );
@@ -285,7 +281,7 @@ mod tests {
         let stored = out["sql"].as_str().unwrap();
         assert!(stored.len() < sql.len());
         assert!(stored.ends_with("DROP TABLE users;"), "{stored}");
-        assert!(stored.contains(&sha256_hex(&sql)));
+        assert!(stored.contains(&sha256_hex(sql.as_bytes())));
     }
 
     #[test]
@@ -304,7 +300,7 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&stored).unwrap();
         assert_eq!(v["_otto_truncated"], true);
         assert_eq!(v["bytes"], arg.len());
-        assert_eq!(v["sha256"], sha256_hex(&arg));
+        assert_eq!(v["sha256"], sha256_hex(arg.as_bytes()));
         assert!(v["head"]
             .as_str()
             .unwrap()

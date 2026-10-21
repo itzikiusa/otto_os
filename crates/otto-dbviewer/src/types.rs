@@ -167,11 +167,6 @@ impl ResolvedConfig {
             .map(str::to_string)
     }
 
-    /// Read a bool field from the original profile params.
-    pub fn param_bool(&self, key: &str) -> Option<bool> {
-        self.params.get(key).and_then(Value::as_bool)
-    }
-
     /// A stable key identifying every session-affecting facet of this config,
     /// so a driver's connection cache reuses a handle only for a *truly*
     /// equivalent connection. Two configs that differ in anything that changes

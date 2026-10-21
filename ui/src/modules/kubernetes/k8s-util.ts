@@ -97,37 +97,6 @@ export function formatMillicores(m: number | null | undefined): string {
   return m >= 1000 ? `${(m / 1000).toFixed(2)} cores` : `${Math.round(m)}m`;
 }
 
-/** Parse a kubectl quantity ("250m", "1.5", "128Mi", "2Gi") into millicores
- *  or bytes — used for the metrics bars when the daemon returns raw strings. */
-export function parseCpu(q: string | null | undefined): number | null {
-  if (!q) return null;
-  const m = /^([\d.]+)(m|n|u)?$/.exec(q.trim());
-  if (!m) return null;
-  const v = parseFloat(m[1]);
-  if (m[2] === 'm') return v;
-  if (m[2] === 'u') return v / 1000;
-  if (m[2] === 'n') return v / 1_000_000;
-  return v * 1000;
-}
-export function parseMem(q: string | null | undefined): number | null {
-  if (!q) return null;
-  const m = /^([\d.]+)(Ki|Mi|Gi|Ti|K|M|G|T)?$/i.exec(q.trim());
-  if (!m) return null;
-  const v = parseFloat(m[1]);
-  const mult: Record<string, number> = {
-    '': 1,
-    ki: 1024,
-    mi: 1024 ** 2,
-    gi: 1024 ** 3,
-    ti: 1024 ** 4,
-    k: 1e3,
-    m: 1e6,
-    g: 1e9,
-    t: 1e12,
-  };
-  return v * (mult[(m[2] ?? '').toLowerCase()] ?? 1);
-}
-
 export function healthClass(h: K8sHealth | null | undefined, status?: string): string {
   if (h) return `health-${h}`;
   const s = (status ?? '').toLowerCase();

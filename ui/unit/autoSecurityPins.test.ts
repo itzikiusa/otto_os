@@ -15,19 +15,22 @@ test('the insights report frame is script-only: no popups, no same-origin', () =
   }
 });
 
-test('the insights link bridge only honours the frame, http(s), a user gesture and a rate limit', () => {
+// The link bridge and the plugin frame's message/init rules are tested by
+// behaviour in frameMessages.test.ts; these pins only check the components
+// still route through those helpers (markup/wiring, not logic).
+test('the insights report frame routes messages through reportLinkBridge', () => {
   const s = src('insights/ReportDetail.svelte');
-  const fn = s.slice(s.indexOf('function onFrameMessage'), s.indexOf('let html = $state'));
-  assert.match(fn, /ev\.source !== frameEl\.contentWindow/);
-  assert.match(fn, /\^https\?:/);
-  assert.match(fn, /userActivation/);
-  assert.match(fn, /OPEN_GAP_MS/);
+  assert.match(s, /from '\.\/reportFrame'/);
+  assert.match(s, /const onFrameMessage = reportLinkBridge\(/);
+  assert.match(s, /<svelte:window onmessage=\{onFrameMessage\} \/>/);
 });
 
-test('plugin frames: messages are source-checked and the slug is validated before framing', () => {
+test('plugin frames: messages and otto:init go through pluginFrame.ts; the URL encodes the slug', () => {
   const s = src('plugins/PluginFrame.svelte');
-  assert.match(s, /ev\.source !== frame\.contentWindow/);
-  assert.match(s, /const slugOk = \$derived\(\/\^\[a-z\]\[a-z0-9-\]/);
-  assert.match(s, /if \(!slugOk\) return;/, 'otto:init (with the token) is never posted for an invalid slug');
+  assert.match(s, /const slugOk = \$derived\(pluginSlugOk\(slug\)\)/);
+  assert.match(s, /pluginFrameAction\(ev, frame\?\.contentWindow\)/);
+  assert.match(s, /postPluginInit\(slug,/);
+  assert.match(s, /postPluginInit\(slug, \(extra\) => postTheme\('otto:init', extra\)/);
+  assert.equal(s.split("postTheme('otto:init'").length - 1, 1, 'otto:init is posted only through postPluginInit');
   assert.match(s, /encodeURIComponent\(slug\)/);
 });

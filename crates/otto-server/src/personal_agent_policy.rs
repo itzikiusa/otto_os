@@ -513,6 +513,14 @@ const READ_ONLY_POST_ALLOW: &[&str] = &[
     "/connections/{}/db/object",
     "/connections/{}/db/mcp-query",
     "/workspaces/{}/browser/summarize",
+    // Reads the governed catalog classes non-mutating (each a Viewer/View
+    // read on its own route), so a read-only session's self-call must pass:
+    // the context packet, a broker peek (a fresh consumer group, no commit to
+    // a real one) and a Logs Insights query. Pinned against the catalog by
+    // `read_only_allow_list_covers_every_non_mutating_post_tool`.
+    "/workspaces/{}/mcp/context-packet",
+    "/brokers/clusters/{}/topics/{}/consume",
+    "/aws/accounts/{}/logs/insights",
 ];
 
 fn template_matches(pattern: &str, template: &str) -> bool {
@@ -928,6 +936,114 @@ mod tests {
         ] {
             assert!(!read_only_route_allowed(&m, t), "{m} {t} must be refused");
         }
+    }
+
+    /// Catalog tools a read-only session may call (`!read_only_denies`) but
+    /// whose self-call is a non-GET the allow-list deliberately does not
+    /// cover, each with why the refusal changes nothing.
+    const READ_ONLY_POST_EXEMPT: &[(&str, &str)] = &[(
+        // `/assistant/agent/{tool}` is one template for remember/forget/
+        // recall AND the task/reminder/delegate/approval writes, so it cannot
+        // be allow-listed by template. A read-only session (a proactive or
+        // read-only personal-agent run, a read-only schedule) never carries
+        // `meta.assistant_thread`, so `otto_assistant::assistant::tools` would
+        // refuse it 403 "not an Otto Assistant session" anyway.
+        "assistant_recall",
+        "no read-only session is an assistant thread",
+    )];
+
+    /// A sample value per input-schema type. Strings use one sentinel so the
+    /// concrete self-call path can be turned back into its `{}` template.
+    const SAMPLE: &str = "zzsample";
+
+    fn sample_args(schema: &Value) -> Value {
+        let mut args = serde_json::Map::new();
+        let props = schema.get("properties").and_then(Value::as_object);
+        for key in schema
+            .get("required")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+        {
+            let p = props.and_then(|m| m.get(key)).cloned().unwrap_or_default();
+            let v = if let Some(first) = p.get("enum").and_then(|e| e.get(0)) {
+                first.clone()
+            } else {
+                match p.get("type").and_then(Value::as_str) {
+                    Some("integer" | "number") => json!(7),
+                    Some("boolean") => json!(true),
+                    Some("array") => json!([]),
+                    Some("object") => json!({}),
+                    _ => json!(SAMPLE),
+                }
+            };
+            args.insert(key.to_string(), v);
+        }
+        Value::Object(args)
+    }
+
+    /// The `{}`-templated form of a concrete self-call path (query dropped).
+    fn templated(path: &str) -> String {
+        let path = path.split('?').next().unwrap_or(path);
+        path.split('/')
+            .map(|seg| {
+                if seg == SAMPLE || seg == "7" {
+                    "{v}"
+                } else {
+                    seg
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("/")
+    }
+
+    /// access-control-1-01: every non-mutating catalog tool whose self-call
+    /// is a non-GET must clear the read-only HTTP guard, or the tool is
+    /// advertised and allowed by policy yet always 403s.
+    #[test]
+    fn read_only_allow_list_covers_every_non_mutating_post_tool() {
+        use crate::mcp_outward::{otto_tool_specs, route_for};
+        let mut checked = 0;
+        let mut missing = Vec::new();
+        for spec in otto_tool_specs() {
+            let name = spec["name"].as_str().unwrap_or_default();
+            let bare = name.strip_prefix("otto.").unwrap_or(name);
+            if read_only_denies(bare) || READ_ONLY_POST_EXEMPT.iter().any(|(t, _)| *t == bare) {
+                continue;
+            }
+            let Ok(call) = route_for(bare, &sample_args(&spec["inputSchema"])) else {
+                continue; // handled before routing (UI commands, approvals)
+            };
+            if call.method == crate::mcp_outward::Method::Get {
+                continue;
+            }
+            checked += 1;
+            let t = templated(&call.path);
+            if !read_only_route_allowed(&Method::POST, &t) {
+                missing.push(format!("{bare}: {:?} {t}", call.method));
+            }
+        }
+        assert!(checked >= 3, "the walk reached only {checked} POST reads");
+        assert!(
+            missing.is_empty(),
+            "non-mutating tools a read-only session can never complete — add the \
+             route to READ_ONLY_POST_ALLOW (or deny the tool):\n{}",
+            missing.join("\n")
+        );
+        // The positive side of the three routes this pins.
+        for t in [
+            "/api/v1/workspaces/{wid}/mcp/context-packet",
+            "/api/v1/brokers/clusters/{id}/topics/{topic}/consume",
+            "/api/v1/aws/accounts/{id}/logs/insights",
+        ] {
+            assert!(read_only_route_allowed(&Method::POST, t), "{t}");
+        }
+        // Still refused: the broker PRODUCE beside the consume peek.
+        assert!(!read_only_route_allowed(
+            &Method::POST,
+            "/api/v1/brokers/clusters/{id}/topics/{topic}/produce"
+        ));
     }
 
     #[test]

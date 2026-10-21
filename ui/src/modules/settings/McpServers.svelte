@@ -272,7 +272,22 @@
         } catch (e) {
           // Never leave the server live in BOTH registries (written to
           // .mcp.json twice): undo the Control Plane copy, then report.
-          await mcpCpApi.cpDelete(created.id).catch(() => {});
+          try {
+            await mcpCpApi.cpDelete(created.id);
+          } catch (rollback) {
+            // The undo failed too: the server IS live in both registries.
+            // Say so (with both causes) and point at the Control Plane copy
+            // instead of reporting a plain failed move.
+            await load(wsId);
+            toasts.push(
+              'error',
+              `${s.name} is now enabled in BOTH registries`,
+              `Turning it off here failed (${errMsg(e)}), and removing the new Control Plane copy failed too (${errMsg(rollback)}). The Control Plane copy still exists and is enabled — disable one of them.`,
+              12000,
+              { action: { label: 'Open Control Plane', run: () => router.go('mcp/servers') } },
+            );
+            return;
+          }
           throw e;
         }
       }

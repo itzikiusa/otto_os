@@ -13,10 +13,8 @@ import type {
   BrowserAskReq,
   BrowserCreateCredentialReq,
   BrowserCredential,
-  BrowserLoginResp,
   BrowserPage,
   BrowserPatchCredentialReq,
-  BrowserQueryResp,
   BrowserRevealCredentialResp,
   BrowserSummarizeResp,
   BrowserTab,
@@ -50,12 +48,6 @@ export function getPage(ws: string, url: string, opts: { fresh?: boolean } = {})
   // `fresh=1` bypasses the daemon's one-minute page cache (an explicit retry).
   const fresh = opts.fresh ? '&fresh=1' : '';
   return api.get<BrowserPage>(`${base(ws)}/page?url=${enc(url)}&include_html=0${fresh}`);
-}
-
-export function queryPage(ws: string, url: string, selector: string) {
-  return api.get<BrowserQueryResp>(
-    `${base(ws)}/query?url=${enc(url)}&selector=${enc(selector)}`,
-  );
 }
 
 export function listAnnotations(ws: string, url?: string) {
@@ -132,16 +124,4 @@ export function revealCredential(id: string) {
   return api.post<BrowserRevealCredentialResp>(`/browser/credentials/${id}/reveal`, {
     confirm: true,
   });
-}
-
-/** Governed AGENT sign-in (the `browser_login` MCP tool's own HTTP route) —
- *  the server resolves the credential for `domain` (must exist and have
- *  `allow_agent_use: true`) and drives an off-screen CDP fill+submit itself;
- *  the password never travels through this call. NOT what user-triggered
- *  autofill in a live tab should call — that fills the user's own visible
- *  webview via `revealCredential` + `nativeBrowser.eval` instead (see
- *  `BrowserView.svelte`'s `autofill()`), since this route drives a separate,
- *  invisible navigation rather than the tab the user is looking at. */
-export function browserLogin(ws: string, domain: string) {
-  return api.post<BrowserLoginResp>(`${base(ws)}/login`, { domain });
 }

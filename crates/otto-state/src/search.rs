@@ -172,4 +172,34 @@ mod tests {
             .unwrap()
             .is_empty());
     }
+
+    /// The per-keystroke canvas / API-request projections are answered from a
+    /// covering index (0188) — they never read the multi-MB table rows.
+    #[tokio::test]
+    async fn heavy_row_sources_use_a_covering_index() {
+        let pool = crate::db::test_pool().await;
+        for (source, index) in [
+            (Source::Canvas, "idx_canvas_scenes_search"),
+            (Source::ApiRequest, "idx_api_requests_search"),
+        ] {
+            let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
+                "EXPLAIN QUERY PLAN {}",
+                source.sql()
+            )))
+            .bind("w")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            let plan = rows
+                .iter()
+                .map(|r| r.get::<String, _>("detail"))
+                .collect::<Vec<_>>()
+                .join(" | ");
+            assert!(
+                plan.contains(&format!("COVERING INDEX {index}")),
+                "{}: {plan}",
+                source.kind()
+            );
+        }
+    }
 }

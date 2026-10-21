@@ -50,7 +50,7 @@
     {#if model.owners.length}<div><dt>Owners</dt><dd>{model.owners.join(', ')}</dd></div>{/if}
     {#if model.resource && !model.operation}<div><dt>Resource</dt><dd class="mono" title={model.resource}>{model.resource}</dd></div>{/if}
     {#if model.tags.length}
-      <div><dt>Tags</dt><dd class="tags">{#each model.tags as t (t)}<button class="chip tag" onclick={() => vault.searchTag(t)} title="Search #{t}">#{t}</button>{/each}</dd></div>
+      <div><dt>Tags</dt><dd class="tags">{#each model.tags as t, i (i)}<button class="chip tag" onclick={() => vault.searchTag(t)} title="Search #{t}">#{t}</button>{/each}</dd></div>
     {/if}
   </dl>
 
@@ -92,7 +92,7 @@
       <h4>Links to <span class="n">{outgoing.length}</span></h4>
       {#if outgoing.length === 0}<p class="dim">No outgoing links</p>{/if}
       <div class="chips">
-        {#each outgoing.slice(0, 40) as o (o.dst_path ?? o.raw_target)}
+        {#each outgoing.slice(0, 40) as o (o.dst_path ?? `?${o.raw_target}`)}
           <button
             class="chip lnkchip"
             class:unresolved={!o.dst_path}

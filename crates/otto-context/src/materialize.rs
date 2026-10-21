@@ -202,42 +202,6 @@ pub fn resume_injection_with_home(
     }
 }
 
-/// Generic delimited-append helper: add one extra markdown block to the
-/// bundle's context file for `provider`, then return the (re-read) launch
-/// injection so inline-context providers (codex) pick the addition up.
-/// Best-effort: if the bundle isn't there yet, returns the resume injection
-/// unchanged. Idempotent per spawn — the block is delimited so a re-provision
-/// doesn't stack copies. Currently unused: its one caller was the Vault v2
-/// "Repo Brain" spawn injection, removed in Vault v3 (the docs home); the
-/// legacy `OTTO:VAULT-BRAIN` markers are kept so old bundles still de-dup.
-pub fn append_context_block(
-    ctx_root: &Path,
-    cwd: &str,
-    provider: &str,
-    block: &str,
-) -> SpawnInjection {
-    let dir = bundle_dir(ctx_root, provider, cwd);
-    if !dir.is_dir() {
-        return SpawnInjection::default();
-    }
-    let path = dir.join(context_file_name(provider));
-    let existing = std::fs::read_to_string(&path).unwrap_or_default();
-    const START: &str = "<!-- OTTO:VAULT-BRAIN:START -->";
-    const END: &str = "<!-- OTTO:VAULT-BRAIN:END -->";
-    // Strip any previous delimited block, then re-append the fresh one.
-    let base = match (existing.find(START), existing.find(END)) {
-        (Some(s), Some(e)) if e > s => {
-            let mut t = existing[..s].to_string();
-            t.push_str(&existing[e + END.len()..]);
-            t.trim_end().to_string()
-        }
-        _ => existing.trim_end().to_string(),
-    };
-    let merged = format!("{base}\n\n{START}\n{}\n{END}\n", block.trim());
-    let _ = std::fs::write(&path, merged);
-    injection_for(provider, &dir)
-}
-
 /// The launch flags/env that make `provider`'s CLI load the bundle at `dir`.
 /// Mirrors the per-client recipes verified against the live CLIs:
 /// - **claude** — `--add-dir` loads skills from `<dir>/.claude/skills`; the
@@ -249,10 +213,6 @@ pub fn append_context_block(
 ///   Codex home; context stays inline via `developer_instructions`.
 /// - **grok** — `--rules=<bundle>/CONTEXT.md` appends Otto's context to this
 ///   launch only. Grok currently has no per-launch native skill-root flag.
-fn injection_for(provider: &str, dir: &Path) -> SpawnInjection {
-    injection_for_home(provider, dir, None)
-}
-
 fn injection_for_home(provider: &str, dir: &Path, provider_home: Option<&Path>) -> SpawnInjection {
     let d = dir.to_string_lossy().into_owned();
     let ctx = dir.join(context_file_name(provider));

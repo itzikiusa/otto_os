@@ -280,6 +280,25 @@ impl ReviewsRepo {
         ReviewStatus::parse(&status).ok_or_else(|| Error::Internal("bad review status".into()))
     }
 
+    /// A review's status plus its agent rows — what a waiter surfacing the
+    /// reviewers' live sessions needs. One row, no comments: the workflow
+    /// `review_run` node used to load the whole review AND decode every
+    /// comment every 2 s for the review's lifetime.
+    pub async fn review_agents(&self, id: &Id) -> Result<(ReviewStatus, Vec<ReviewAgentState>)> {
+        let row = sqlx::query("SELECT status, agents_json FROM pr_reviews WHERE id = ?")
+            .bind(id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(dberr("review agents"))?;
+        let status = ReviewStatus::parse(&row.get::<String, _>("status"))
+            .ok_or_else(|| Error::Internal("bad review status".into()))?;
+        let agents_raw: String = row.try_get("agents_json").unwrap_or_default();
+        Ok((
+            status,
+            serde_json::from_str(&agents_raw).unwrap_or_default(),
+        ))
+    }
+
     /// Fetch a review by id, loading its comments.
     pub async fn get_review(&self, id: &Id) -> Result<Review> {
         let row = sqlx::query("SELECT * FROM pr_reviews WHERE id = ?")
@@ -946,5 +965,25 @@ mod tests {
             repo.get_review(&review.id).await.unwrap().summary_fallback,
             Some(true)
         );
+    }
+
+    /// The narrow waiter read returns the same status and agent rows as the
+    /// full `get_review`, without the comments.
+    #[tokio::test]
+    async fn review_agents_matches_the_full_row() {
+        let pool = mem_pool().await;
+        let repo = ReviewsRepo::new(pool.clone());
+        let review = repo.create_review(&"r".to_string(), 3).await.unwrap();
+        let mut running = agent("a", "running");
+        running.session_id = Some("s1".into());
+        repo.set_agents(&review.id, &[running, agent("Summarizer", "pending")])
+            .await
+            .unwrap();
+        let (status, agents) = repo.review_agents(&review.id).await.unwrap();
+        let full = repo.get_review(&review.id).await.unwrap();
+        assert_eq!(status, full.status);
+        assert_eq!(agents.len(), 2);
+        assert_eq!(agents[0].session_id.as_deref(), Some("s1"));
+        assert!(repo.review_agents(&"missing".to_string()).await.is_err());
     }
 }

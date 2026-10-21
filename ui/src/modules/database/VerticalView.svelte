@@ -38,7 +38,7 @@
     setExpansionMode,
     type ExpansionState,
   } from './expansion-plan';
-  import { ALT_BATCH, cellStr, copyText, isComplex, prettyJson, SET_EMPTY, SET_NULL } from './results-format';
+  import { ALT_BATCH, cellStr, copyWithToast, isComplex, prettyJson, SET_EMPTY, SET_NULL } from './results-format';
   import { LineIndex, revealSteps, type FindTop, type RevealState } from './json-find';
 
   interface Props {
@@ -394,12 +394,12 @@
       items.push({ separator: true });
     }
     items.push(
-      { label: 'Copy path', icon: 'file', action: () => copyText(ctx.path) },
+      { label: 'Copy path', icon: 'file', action: () => copyWithToast(ctx.path) },
       {
         label: 'Copy value',
         icon: 'file',
         action: () =>
-          copyText(ctx.value === null || ctx.value === undefined ? '' : isComplex(ctx.value) ? prettyJson(ctx.value) : cellStr(ctx.value)),
+          copyWithToast(ctx.value === null || ctx.value === undefined ? '' : isComplex(ctx.value) ? prettyJson(ctx.value) : cellStr(ctx.value)),
       },
     );
     if (sqlColumn && canEdit) {
@@ -420,7 +420,7 @@
     }
     items.push(
       { label: flow.rawDocLabel, icon: 'eye', action: () => flow.openRawDoc(idx) },
-      { label: 'Copy as JSON', icon: 'file', action: () => copyText(prettyJson(obj), ['Copied', 'Record JSON copied']) },
+      { label: 'Copy as JSON', icon: 'file', action: () => copyWithToast(prettyJson(obj), ['Copied', 'Record JSON copied']) },
       { label: 'Export…', icon: 'arrowDown', action: () => exportRecord(obj, ri) },
     );
     if (oncompare) {

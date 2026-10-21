@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { formatBytes } from '../../lib/metric-format';
   import { focusOnMount } from '../../lib/focusOnMount';
   // The expandable cell viewer: full value in a modal, SQL formatting toggle,
   // Copy, and — when the cell belongs to an editable column — an in-viewer
@@ -8,7 +9,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import type { EditFlow } from './EditFlow.svelte';
-  import { copyText, fmtBytes } from './results-format';
+  import { copyWithToast } from './results-format';
 
   interface Props {
     flow: EditFlow;
@@ -54,7 +55,7 @@
             <Icon name="edit" size={12} />Edit
           </button>
         {/if}
-        <button class="btn small" onclick={() => copyText(flow.viewerText, ['Copied', 'Full cell value copied'])} title="Copy full value"><Icon name="file" size={12} />Copy</button>
+        <button class="btn small" onclick={() => copyWithToast(flow.viewerText, ['Copied', 'Full cell value copied'])} title="Copy full value"><Icon name="file" size={12} />Copy</button>
       </div>
       {#if nestedPending}
         <div class="cv-pending">Nested change pending on this field — saving a whole value here replaces it.</div>
@@ -80,7 +81,7 @@
         <pre class="cv-body mono">{shownText}</pre>
         {#if clipped}
           <div class="cv-more">
-            <span>Showing the first {fmtBytes(VIEW_MAX)} of {fmtBytes(flow.viewerText.length)} — Copy copies the full value.</span>
+            <span>Showing the first {formatBytes(VIEW_MAX)} of {formatBytes(flow.viewerText.length)} — Copy copies the full value.</span>
             <button class="btn small ghost" onclick={() => (expandedFor = flow.viewer)}>Show all</button>
           </div>
         {/if}

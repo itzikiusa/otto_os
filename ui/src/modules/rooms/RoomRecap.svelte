@@ -16,7 +16,7 @@
   let prepare = $state(false), panel = $state(false), settings = $state(false), busy = $state(false), error = $state(''), partial = $state(false);
   let speechAvailable = $state(false);
   let capability = $state<RecapCapabilities | null>(null);
-  let captureStatus = $state<RecapCaptureStatus>({audioSources: 0, screenSources: 0, gaps: []});
+  let captureStatus = $state<RecapCaptureStatus>({audioSources: 0, screenSources: 0, gaps: [], speechIssue: null});
   let capture: RoomRecapCapture | null = null;
   const host = $derived(room.member_id === room.host_member_id);
   const consented = $derived(room.recap?.consented_member_ids.includes(room.member_id) ?? false);
@@ -66,7 +66,8 @@
       <p class="hint">Consented: {room.members?.filter(m => room.recap?.consented_member_ids.includes(m.id)).map(m => m.name).join(', ') || 'Waiting for everyone'}</p>
     {/if}
     {#if host}<div class="actions"><button class="btn small" onclick={() => panel = true}>Open recap</button>{#if room.recap.state === 'stopped'}<button class="btn small" onclick={openPrepare}>Prepare another recap…</button>{/if}</div>
-      {#if room.recap.state === 'capturing'}<p class="hint">Capturing {captureStatus.audioSources} microphone {captureStatus.audioSources === 1 ? 'source' : 'sources'} and sampling {captureStatus.screenSources} shared {captureStatus.screenSources === 1 ? 'screen' : 'screens'}. Hidden or unavailable screens have reduced coverage.</p><button class="btn small" onclick={() => capture?.resumeAudio()}>Retry speech capture</button>{/if}
+      {#if room.recap.state === 'capturing'}<p class="hint">Capturing {captureStatus.audioSources} microphone {captureStatus.audioSources === 1 ? 'source' : 'sources'} and sampling {captureStatus.screenSources} shared {captureStatus.screenSources === 1 ? 'screen' : 'screens'}. Hidden or unavailable screens have reduced coverage.</p>
+        {#if captureStatus.speechIssue}<p class="speech-issue" role="status">Speech capture is paused: {captureStatus.speechIssue}</p><button class="btn small" onclick={() => capture?.resumeAudio()}>Retry speech capture</button>{/if}{/if}
       {#if captureStatus.gaps.length}<details><summary>Capture coverage notes ({captureStatus.gaps.length})</summary><ul>{#each captureStatus.gaps as gap}<li>{gap}</li>{/each}</ul></details>{/if}
     {/if}
   {:else if host}<button class="btn small" onclick={openPrepare}>Prepare a full recap…</button><span class="hint">Capture starts only after everyone consents.</span>{/if}
@@ -85,5 +86,5 @@
 {#if panel && room.recap}<Modal title="Room recap" width={960} onclose={() => panel = false}>{#key room.recap.id}<RecapPanel recapId={room.recap.id} />{/key}</Modal>{/if}
 <style>
   .recap-banner { padding: 8px 16px; border-bottom: 1px solid var(--border); background: var(--surface); max-height: 35%; overflow: auto; }
-  .recap-banner:empty { display: none; } .status, .actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; } .status span, .hint { font-size: var(--fs-s); color: var(--text-dim); } p, li { line-height: 1.5; overflow-wrap: anywhere; } .recap-banner p { margin-block: 8px; font-size: var(--fs-s); } [role='alert'] { color: var(--danger); } .check { display: flex; gap: 8px; align-items: start; margin-block: 16px; } details { margin-block-start: 8px; font-size: var(--fs-s); }
+  .recap-banner:empty { display: none; } .status, .actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; } .status span, .hint { font-size: var(--fs-s); color: var(--text-dim); } p, li { line-height: 1.5; overflow-wrap: anywhere; } .recap-banner p { margin-block: 8px; font-size: var(--fs-s); } [role='alert'] { color: var(--danger); } .speech-issue { color: var(--warning); } .check { display: flex; gap: 8px; align-items: start; margin-block: 16px; } details { margin-block-start: 8px; font-size: var(--fs-s); }
 </style>

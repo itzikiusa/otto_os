@@ -120,6 +120,14 @@
   let paneH = $state(0);
   /** Conversation viewport kept visible however tall the draft gets (~5 lines). */
   const MIN_CHAT = 96;
+  /** `paneBudget()`, cached. Measuring walks every pane child (computed style
+   *  + offsetHeight), which on a keystroke forces a full layout of the chat —
+   *  so it's refreshed only when the pane resizes or the composer's own rows
+   *  change (attachments), never per keystroke. Plain `let`: nothing renders it. */
+  let budget = Infinity;
+  function measureBudget(): void {
+    budget = paneBudget();
+  }
   function paneBudget(): number {
     const pane = composerEl?.parentElement;
     if (!pane || !composerEl || !ta) return Infinity;
@@ -131,9 +139,9 @@
     const chrome = composerEl.offsetHeight - ta.offsetHeight;
     return pane.clientHeight - fixed - chrome - MIN_CHAT;
   }
+  /** One forced layout: reset → read scrollHeight → set. */
   function autosize(): void {
     if (!ta) return;
-    const budget = paneBudget();
     ta.style.height = 'auto';
     const byWindow = Math.floor(window.innerHeight * 0.4);
     const byPane = paneH > 0 ? Math.floor(paneH * 0.5) : byWindow;
@@ -149,6 +157,7 @@
       const h = pane.clientHeight;
       if (Math.abs(h - paneH) > 1) {
         paneH = h;
+        measureBudget();
         autosize();
       }
     };
@@ -157,7 +166,19 @@
     ro.observe(pane);
     return () => ro.disconnect();
   });
-  // A draft restored on mount / reopened session sizes the box too.
+  // The composer's own optional rows (the attachment strip, the "In terminal"
+  // line) eat into the pane budget: re-measure when they appear or go.
+  $effect(() => {
+    void attachments.length;
+    void !!termInput;
+    void tick().then(() => {
+      measureBudget();
+      autosize();
+    });
+  });
+  // The ONE per-keystroke resize: typing updates the bound draft, which re-runs
+  // this (there is no `oninput` resize too); a draft restored on mount, a
+  // reopened session or an accepted /command lands here the same way.
   $effect(() => {
     void text;
     void tick().then(autosize);
@@ -411,7 +432,6 @@
           autocapitalize="off"
           autocomplete="off"
           dir="auto"
-          oninput={autosize}
           onkeydown={onKeydown}
           onpaste={onPaste}
           aria-autocomplete="list"

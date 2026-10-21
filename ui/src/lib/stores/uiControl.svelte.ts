@@ -29,6 +29,7 @@ import { router } from '../router.svelte';
 import { isEmbedded } from '../desktop';
 import { moduleLabel } from '../sidebar';
 import { DRIVING_LINGER_MS, RECENT_MAX, commandLabel, providerName } from '../uiCommands/frames';
+import { WriteMemory } from '../uiCommands/writeMemory';
 
 export interface UiControlRequest {
   session_id: Id;
@@ -68,7 +69,6 @@ export interface UiDriving {
 }
 
 const DENIED_KEY = 'otto_ui_control_denied';
-const WRITES_KEY = 'otto_ui_write_allow';
 
 function readJson<T>(key: string, fallback: T): T {
   const raw = lsGet(key);
@@ -283,35 +283,21 @@ class UiControlStore {
     }
   }
 
-  // ── write memory ─────────────────────────────────────────────────────────
+  // ── write memory (rules: lib/uiCommands/writeMemory.ts) ─────────────────
 
-  private writes(): Record<Id, string[]> {
-    const v = readJson<Record<Id, unknown>>(WRITES_KEY, {});
-    const out: Record<Id, string[]> = {};
-    for (const [k, list] of Object.entries(v ?? {})) {
-      if (Array.isArray(list)) out[k] = list.filter((x): x is string => typeof x === 'string');
-    }
-    return out;
-  }
+  private writeMemory = new WriteMemory({ get: lsGet, set: lsSet });
 
   /** The user ticked "Allow writes on ‹scope› for this session" before. */
   writesAllowed(sessionId: Id, scope: string): boolean {
-    return (this.writes()[sessionId] ?? []).includes(scope);
+    return this.writeMemory.allowed(sessionId, scope);
   }
 
   rememberWrites(sessionId: Id, scope: string): void {
-    const all = this.writes();
-    const list = all[sessionId] ?? [];
-    if (list.includes(scope)) return;
-    all[sessionId] = [...list, scope].slice(-100);
-    lsSet(WRITES_KEY, JSON.stringify(all));
+    this.writeMemory.remember(sessionId, scope);
   }
 
   forgetWrites(sessionId: Id): void {
-    const all = this.writes();
-    if (!(sessionId in all)) return;
-    delete all[sessionId];
-    lsSet(WRITES_KEY, JSON.stringify(all));
+    this.writeMemory.forget(sessionId);
   }
 
   // ── driving (runtime hooks) ──────────────────────────────────────────────

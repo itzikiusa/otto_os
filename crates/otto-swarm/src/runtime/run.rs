@@ -27,23 +27,11 @@ use serde::Serialize;
 
 /// run_id → cancel flag (the shared `otto_core::cancel` registry).
 pub use otto_core::cancel::{new_cancel_registry, CancelRegistry};
+use otto_core::cancel::{CancelGuard, CancelRegistryExt};
 
-pub fn register_cancel(reg: &CancelRegistry, run_id: &str) -> Arc<AtomicBool> {
-    let flag = Arc::new(AtomicBool::new(false));
-    reg.lock()
-        .unwrap()
-        .insert(run_id.to_string(), Arc::clone(&flag));
-    flag
-}
-
+/// Trip `run_id`'s cancel flag if its turn is in flight.
 pub fn signal_cancel(reg: &CancelRegistry, run_id: &str) {
-    if let Some(flag) = reg.lock().unwrap().get(run_id) {
-        flag.store(true, Ordering::Relaxed);
-    }
-}
-
-pub fn unregister_cancel(reg: &CancelRegistry, run_id: &str) {
-    reg.lock().unwrap().remove(run_id);
+    reg.signal(run_id);
 }
 
 const TURN_TIMEOUT: Duration = Duration::from_secs(20 * 60);
@@ -246,27 +234,26 @@ async fn find_agent_session(ctx: &SwarmRt, ws: &Id, agent_id: &str) -> Option<Id
 /// persists the parsed result, emits events. Returns the parsed result on
 /// success so the Coordinator can route handoffs/subtasks/reviews.
 pub async fn run_turn(ctx: SwarmRt, run: SwarmRun) -> Option<SwarmTurnResult> {
-    let cancel = register_cancel(ctx.swarm_run_cancels(), &run.id);
     // RAII (S4-25b): the registry entry and the `$TMPDIR` result file go away
     // however the turn ends — including a panic or a dropped future.
-    let _cleanup = TurnCleanup {
-        reg: ctx.swarm_run_cancels().clone(),
-        run_id: run.id.clone(),
+    let cleanup = TurnCleanup {
+        registration: ctx.swarm_run_cancels().register(&run.id),
     };
+    let cancel = Arc::clone(cleanup.registration.flag());
     run_turn_inner(&ctx, &run, &cancel).await
 }
 
-/// Drop guard for [`run_turn`]: unregisters the cancel flag and deletes the
-/// turn's result file (it was never cleaned up, so one file leaked per run).
+/// Drop guard for [`run_turn`]: unregisters the cancel flag (via the shared
+/// [`CancelGuard`], so a re-dispatched turn's newer flag survives) and deletes
+/// the turn's result file (it was never cleaned up, so one file leaked per run).
 struct TurnCleanup {
-    reg: CancelRegistry,
-    run_id: String,
+    registration: CancelGuard,
 }
 
 impl Drop for TurnCleanup {
     fn drop(&mut self) {
-        unregister_cancel(&self.reg, &self.run_id);
-        let _ = std::fs::remove_file(out_path(&self.run_id));
+        let _ = std::fs::remove_file(out_path(self.registration.id()));
+        // `registration` drops right after, unregistering the flag.
     }
 }
 
@@ -1148,12 +1135,9 @@ mod shared_files_tests {
     fn turn_cleanup_unregisters_and_removes_the_out_file() {
         let reg: CancelRegistry = Default::default();
         let rid = format!("cleanup-test-{}", std::process::id());
-        let _flag = register_cancel(&reg, &rid);
+        let registration = reg.register(&rid);
         std::fs::write(out_path(&rid), "{}").unwrap();
-        drop(TurnCleanup {
-            reg: reg.clone(),
-            run_id: rid.clone(),
-        });
+        drop(TurnCleanup { registration });
         assert!(reg.lock().unwrap().get(&rid).is_none());
         assert!(!out_path(&rid).exists());
     }

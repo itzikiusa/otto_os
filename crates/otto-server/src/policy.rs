@@ -91,19 +91,29 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p == "/room-recap-settings" {
         return Require(Settings, Admin);
     }
+    // Rooms show at Agents:View (the sidebar's `agents` feature), so READING
+    // your rooms and recaps is View: every read is owner-scoped in its handler
+    // (`rooms::http::list` filters `room.owner`, recaps go through
+    // `get_archive(…, owner)`) and `owner_auth` refuses agent, MCP, share and
+    // impersonation credentials. Recording, summarising and ending stay Edit.
     if p == "/room-recap-capabilities" || p.starts_with("/room-recaps") || p == "/rooms/{id}/recaps"
     {
-        return Require(Agents, Edit);
+        return Require(Agents, if get { View } else { Edit });
     }
     if p == "/room-settings" {
         return Require(Settings, Admin);
     }
-    if p == "/game-rooms"
-        || p == "/rooms"
-        || p == "/rooms/{id}"
-        || p == "/rooms/{id}/invites"
-        || p == "/sessions/{id}/room"
-    {
+    if p == "/rooms" {
+        return Require(Agents, if get { View } else { Edit });
+    }
+    // A game room is session-less: `owner_auth` + per-owner room limits in
+    // the handler, so a View member may host one (game-rooms.md "HTTP").
+    if p == "/game-rooms" {
+        return Require(Agents, if method == Method::POST { View } else { Edit });
+    }
+    // Hosting a session room needs a running session of your own (itself
+    // Agents:Edit); ending one and inviting are writes.
+    if p == "/rooms/{id}" || p == "/rooms/{id}/invites" || p == "/sessions/{id}/room" {
         return Require(Agents, Edit);
     }
 
@@ -1838,8 +1848,40 @@ mod tests {
             "/api/v1/room-recaps/{id}",
             "/api/v1/room-recaps/{id}/revision",
         ] {
-            assert_eq!(pol(Method::GET, path), Require(Agents, Edit));
+            assert_eq!(pol(Method::GET, path), Require(Agents, View));
         }
+    }
+
+    /// access-control-1-03: the Rooms module shows at Agents:View, so a View
+    /// member reads their own rooms/recaps and hosts a game room; recording,
+    /// summarising, ending, inviting and hosting a SESSION room stay Edit.
+    #[test]
+    fn rooms_reads_and_game_hosting_are_view_writes_stay_edit() {
+        for (m, p) in [
+            (Method::GET, "/api/v1/rooms"),
+            (Method::GET, "/api/v1/room-recaps"),
+            (Method::GET, "/api/v1/room-recaps/{id}/export"),
+            (Method::GET, "/api/v1/room-recaps/{id}/images/{image}"),
+            (Method::GET, "/api/v1/room-recap-capabilities"),
+            (Method::POST, "/api/v1/game-rooms"),
+        ] {
+            assert_eq!(pol(m.clone(), p), Require(Agents, View), "{m} {p}");
+        }
+        for (m, p) in [
+            (Method::POST, "/api/v1/sessions/{id}/room"),
+            (Method::DELETE, "/api/v1/rooms/{id}"),
+            (Method::POST, "/api/v1/rooms/{id}/invites"),
+            (Method::POST, "/api/v1/rooms/{id}/recaps"),
+            (Method::POST, "/api/v1/room-recaps/{id}/audio"),
+            (Method::POST, "/api/v1/room-recaps/{id}/summary"),
+            (Method::DELETE, "/api/v1/room-recaps/{id}/summary"),
+        ] {
+            assert_eq!(pol(m.clone(), p), Require(Agents, Edit), "{m} {p}");
+        }
+        assert_eq!(
+            pol(Method::PUT, "/api/v1/room-settings"),
+            Require(Settings, Admin)
+        );
     }
 
     // ---- AWS S3 --------------------------------------------------------------

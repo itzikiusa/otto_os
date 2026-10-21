@@ -649,10 +649,22 @@ async fn agent_drives_the_window_end_to_end() {
     );
 
     // Every window closes: reads fall back headless, the rest is no_ui_client.
+    // Poll until the daemon has processed both WS closes (a fixed sleep is no
+    // bound on a busy runner); the assertions below then hold or fail for real.
     drop(main);
     drop(side);
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    let out = d.invoke("ui_state", json!({})).await.unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let out = loop {
+        let out = d.invoke("ui_state", json!({})).await.unwrap();
+        let closed = out["content"]["ui_visible"] == false
+            && out["content"]["documents"]
+                .as_array()
+                .is_some_and(|a| a.is_empty());
+        if closed || std::time::Instant::now() >= deadline {
+            break out;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
     assert_eq!(out["decision"], "allowed", "{out}");
     assert_eq!(out["content"]["ui_visible"], false);
     assert!(out["content"]["documents"].as_array().unwrap().is_empty());

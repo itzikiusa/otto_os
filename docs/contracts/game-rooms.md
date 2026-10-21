@@ -9,12 +9,14 @@ multiplayer, not a competitive anti-cheat service.
 ## HTTP
 
 - `POST /api/v1/game-rooms` requires a normal authenticated owner credential
-  (no impersonation, managed-session, share or MCP-only credentials). Body:
+  (no impersonation, managed-session, share or MCP-only credentials) and
+  `Agents:View` — the level the Rooms module is shown at. It needs no session or
+  workspace; the per-owner room limits apply in the handler. Body:
   `{"name":"Alex","config":{"game":"shooter","map":"isle"}}`.
   Returns `GameRoomCredential` (TypeScript: `ui/src/lib/api/game-room-types.ts`):
   `room_id`, `member_id`, `role:"host"`, `token`, `config`, `invite`, `invite_url`.
   Names trim to 1–40 characters, no controls. Shooter maps: `isle`/`mesa`;
-  kart maps: `meadow`/`downtown`/`canyon`/`frost`. Mismatched maps return 400.
+  kart maps: `meadow`/`downtown`/`canyon`/`frost`/`lagoon`/`volcano`/`skyway`. Mismatched maps return 400.
 - `POST /api/v1/game-room-join` is public, authorized only by its body:
   `{"room_id":"…","invite":"…","name":"Sam"}`. Returns the same credential
   fields with `role:"guest"`, omitting invite fields. The invitation admits

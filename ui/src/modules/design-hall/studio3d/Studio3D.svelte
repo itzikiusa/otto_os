@@ -163,12 +163,15 @@
   // ── Agent turns (Blockout / Text→3D / Image→3D / Refine in Blender) ───────
   let agent = $state<{ turnId: string; label: string } | null>(null);
   let pollTimer: ReturnType<typeof setTimeout> | null = null;
+  // Set on unmount: a poll in flight must not re-arm a timer (or toast) from a dead view.
+  let destroyed = false;
   function track(turn: DesignAssistTurn, label: string): void {
     agent = { turnId: turn.turn_id, label };
     toasts.info('Otto is working on it', `${label}. The result lands as a new agent version you can review.`);
     schedulePoll();
   }
   function schedulePoll(): void {
+    if (destroyed) return;
     if (pollTimer) clearTimeout(pollTimer);
     pollTimer = setTimeout(() => void poll(), 3000);
   }
@@ -177,6 +180,7 @@
     if (!a) return;
     try {
       const turns = await listTurns(artifact.id);
+      if (destroyed) return;
       const t = turns.find((x) => x.turn_id === a.turnId);
       if (!t || t.status === 'starting' || t.status === 'running') {
         if (agent?.turnId === a.turnId) schedulePoll();
@@ -188,10 +192,12 @@
       else if (t.status === 'conflict') toasts.warn('Saved as a side version', 'The scene changed while Otto worked — compare and accept it from history.');
       else toasts.error('Otto couldn’t finish', t.error ?? 'The turn failed; the scene is unchanged.');
     } catch {
+      if (destroyed) return;
       if (agent?.turnId === a.turnId) schedulePoll();
     }
   }
   $effect(() => () => {
+    destroyed = true;
     if (pollTimer) clearTimeout(pollTimer);
   });
 
@@ -612,7 +618,7 @@
           <Icon name="refresh" size={12} /> Turntable
         </button>
         <button class="btn small" class:on={play} aria-pressed={play} onclick={() => (play = !play)} data-testid="s3d-play">
-          <Icon name="play" size={12} /> {play ? 'Stop' : 'Play'}
+          <Icon name="play" size={12} /> Play
         </button>
         <button class="btn small" onclick={exportMenu} aria-haspopup="menu" data-testid="s3d-export">
           <Icon name="download" size={12} /> Export <Icon name="chevronDown" size={12} />

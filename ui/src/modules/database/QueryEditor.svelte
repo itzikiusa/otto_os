@@ -1044,52 +1044,28 @@
 <div class="query-editor" bind:this={rootEl}>
   <div class="qe-tabs scroll-thin" role="tablist" aria-label="Query tabs">
     {#each database.tabs as t, i (t.id)}
+      <!-- The tab and its ✕ are SIBLING buttons in a presentational wrapper (as
+           in BrokersPage / TabBar), so the close control isn't nested inside an
+           interactive role=tab. The wrapper keeps the click / right-click /
+           double-click (a click on the tab button bubbles here), the `.qe-tab`
+           class and `data-db-tab-id` the e2e specs select on. -->
       <div use:rowMenu
         class="qe-tab"
         class:active={i === database.activeTab}
         class:agent={!!t.agent}
         data-db-tab-id={t.id}
-        role="tab"
-        tabindex={i === database.activeTab ? 0 : -1}
-        aria-selected={i === database.activeTab}
+        role="presentation"
         onclick={() => database.switchTab(i)}
         ondblclick={() => startRename(i, t)}
         oncontextmenu={(e) => tabMenu(e, i, t)}
-        onkeydown={(e) => {
-          if (e.target !== e.currentTarget) return;
-          let next = i;
-          const forward = getComputedStyle(e.currentTarget).direction === 'rtl' ? 'ArrowLeft' : 'ArrowRight';
-          if (e.key === forward) next = (i + 1) % database.tabs.length;
-          else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') next = (i - 1 + database.tabs.length) % database.tabs.length;
-          else if (e.key === 'Home') next = 0;
-          else if (e.key === 'End') next = database.tabs.length - 1;
-          if (next !== i) {
-            e.preventDefault();
-            database.switchTab(next);
-            const bar = e.currentTarget.parentElement;
-            queueMicrotask(() => bar?.querySelectorAll<HTMLElement>('[role="tab"]')[next]?.focus());
-          }
-          if (e.key === 'Enter' || e.key === ' ') {
-            e.preventDefault();
-            database.switchTab(i);
-          }
-        }}
       >
-        {#if t.pinned}
-          <span class="qe-tab-pin" title="Pinned"><Icon name="pin" size={12} /></span>
-        {/if}
-        {#if t.agent}
-          <!-- Opened by an agent session over UI control: always attributed. -->
-          <span class="qe-tab-agent" title="Opened by {t.agent.label}" aria-label="Opened by {t.agent.label}">
-            <Icon name="sparkle" size={12} />
-          </span>
-        {/if}
         {#if renaming === i}
           <input dir="ltr" aria-label="Rename query tab"
             class="qe-tab-rename mono"
             bind:value={renameText}
             use:focusOnMount
             onclick={(e) => e.stopPropagation()}
+            ondblclick={(e) => e.stopPropagation()}
             onblur={() => commitRename(t)}
             onkeydown={(e) => {
               e.stopPropagation();
@@ -1098,18 +1074,64 @@
             }}
           />
         {:else}
-          <span class="qe-tab-label">{tabLabel(t, i)}</span>
-          {#if t.running}<span class="qe-tab-dot running" title="Running"></span>
-          {:else if t.error}<span class="qe-tab-dot error" title="Error"></span>{/if}
+          <button
+            class="qe-tab-main"
+            role="tab"
+            tabindex={i === database.activeTab ? 0 : -1}
+            aria-selected={i === database.activeTab}
+            aria-keyshortcuts={database.tabs.length > 1 && !t.pinned ? 'Delete Backspace' : undefined}
+            onkeydown={(e) => {
+              if (e.metaKey || e.ctrlKey || e.altKey) return;
+              // Delete / Backspace closes the focused tab (as TabBar does);
+              // a pinned or last tab has no close, so the keys do nothing.
+              if (e.key === 'Delete' || e.key === 'Backspace') {
+                if (database.tabs.length > 1 && !t.pinned) {
+                  e.preventDefault();
+                  const bar = e.currentTarget.closest('[role="tablist"]');
+                  void closeTabAt(i).then(() =>
+                    queueMicrotask(() => bar?.querySelectorAll<HTMLElement>('[role="tab"]')[database.activeTab]?.focus()),
+                  );
+                }
+                return;
+              }
+              let next = i;
+              const forward = getComputedStyle(e.currentTarget).direction === 'rtl' ? 'ArrowLeft' : 'ArrowRight';
+              if (e.key === forward) next = (i + 1) % database.tabs.length;
+              else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') next = (i - 1 + database.tabs.length) % database.tabs.length;
+              else if (e.key === 'Home') next = 0;
+              else if (e.key === 'End') next = database.tabs.length - 1;
+              if (next !== i) {
+                e.preventDefault();
+                database.switchTab(next);
+                const bar = e.currentTarget.closest('[role="tablist"]');
+                queueMicrotask(() => bar?.querySelectorAll<HTMLElement>('[role="tab"]')[next]?.focus());
+              }
+            }}
+          >
+            {#if t.pinned}
+              <span class="qe-tab-pin" title="Pinned"><Icon name="pin" size={12} /></span>
+            {/if}
+            {#if t.agent}
+              <!-- Opened by an agent session over UI control: always attributed. -->
+              <span class="qe-tab-agent" title="Opened by {t.agent.label}" aria-label="Opened by {t.agent.label}">
+                <Icon name="sparkle" size={12} />
+              </span>
+            {/if}
+            <span class="qe-tab-label">{tabLabel(t, i)}</span>
+            {#if t.running}<span class="qe-tab-dot running" title="Running"></span>
+            {:else if t.error}<span class="qe-tab-dot error" title="Error"></span>{/if}
+          </button>
           {#if database.tabs.length > 1 && !t.pinned}
             <button
               class="qe-tab-close"
               title="Close tab"
-              aria-label="Close tab"
+              aria-label="Close {tabLabel(t, i)}"
+              tabindex={i === database.activeTab ? 0 : -1}
               onclick={(e) => {
                 e.stopPropagation();
                 void closeTabAt(i);
               }}
+              ondblclick={(e) => e.stopPropagation()}
             >
               <Icon name="x" size={12} />
             </button>
@@ -1597,10 +1619,10 @@
   .qe-tab {
     display: inline-flex;
     align-items: center;
-    gap: 6px;
+    gap: 2px;
     height: 26px;
     max-width: 220px;
-    padding-block: 0; padding-inline: 10px 4px;
+    padding-block: 0; padding-inline: 0 4px;
     border: 1px solid transparent;
     border-bottom: none;
     border-top-left-radius: var(--radius-s);
@@ -1613,6 +1635,32 @@
     user-select: none;
     flex: 0 0 auto;
     transition: background var(--dur-fast), color var(--dur-fast);
+  }
+  /* The role=tab button: fills the tab (so a click on its middle hits it), and
+     inherits the wrapper's look — the wrapper carries active / hover. */
+  .qe-tab-main {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    flex: 1 1 auto;
+    min-width: 0;
+    height: 100%;
+    padding-block: 0; padding-inline: 10px 2px;
+    border: none;
+    border-radius: var(--radius-s);
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+  }
+  /* Inset: the strip scrolls (overflow-x), which would clip the global ring. */
+  .qe-tab-main:focus-visible,
+  .qe-tab-close:focus-visible {
+    outline: 2px solid var(--accent-text);
+    outline-offset: -2px;
+  }
+  .qe-tab:has(.qe-tab-rename) {
+    padding-inline-start: 10px;
   }
   .qe-tab:hover {
     background: var(--hover);
@@ -1682,11 +1730,9 @@
     color: var(--text-dim);
     cursor: pointer;
     flex: 0 0 auto;
-    opacity: 0.6;
-  }
-  .qe-tab:hover .qe-tab-close,
-  .qe-tab.active .qe-tab-close {
-    opacity: 1;
+    /* Full --text-dim, no opacity: a dimmed glyph fell below 3:1 in the light
+       themes (WCAG 1.4.11), and touch has no hover to restore it. "Inactive"
+       is carried by the missing hover background instead (as in TabBar). */
   }
   .qe-tab-close:hover {
     background: color-mix(in srgb, var(--status-exited) 22%, transparent);

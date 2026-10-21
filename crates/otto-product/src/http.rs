@@ -1492,7 +1492,6 @@ mod tests {
     #[derive(Clone)]
     struct TestCtx {
         repo: ProductRepo,
-        #[allow(dead_code)]
         issues: IssuesRepo,
         svc: Arc<ProductService>,
         roles: Arc<dyn RoleChecker>,

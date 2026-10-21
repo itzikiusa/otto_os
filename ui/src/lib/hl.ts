@@ -279,11 +279,6 @@ export function highlightLines(text: string, lang: string | null): string[] {
   return out;
 }
 
-/** True once the lazy hljs load has landed. */
-export function hljsLoaded(): boolean {
-  return hljs != null;
-}
-
 /** hljs's registered id for a fence tag / alias ("ts" → "typescript"), or
  *  null when unknown (or hljs is not loaded yet). */
 export function canonicalLang(tag: string | null | undefined): string | null {

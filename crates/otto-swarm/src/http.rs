@@ -81,9 +81,9 @@ pub fn router<S: SwarmCtx>() -> Router<S> {
         )
         .route(
             "/swarm/swarms/{sid}",
-            get(get_swarm::<S>)
-                .patch(update_swarm::<S>)
-                .delete(delete_swarm::<S>),
+            // DELETE lives in `runtime::engine::routes`: it must halt the
+            // swarm's live runs and sessions before the rows go.
+            get(get_swarm::<S>).patch(update_swarm::<S>),
         )
         // Agents
         .route(
@@ -99,9 +99,10 @@ pub fn router<S: SwarmCtx>() -> Router<S> {
             "/swarm/swarms/{sid}/projects",
             get(list_projects::<S>).post(create_project::<S>),
         )
+        // DELETE: `runtime::engine::routes` (halts the project's runs first).
         .route(
             "/swarm/projects/{pid}",
-            axum::routing::patch(update_project::<S>).delete(delete_project::<S>),
+            axum::routing::patch(update_project::<S>),
         )
         // Tasks
         .route(
@@ -223,17 +224,6 @@ async fn update_swarm<S: SwarmCtx>(
     Ok(Json(s.swarm().update_swarm(&sid, req).await?))
 }
 
-async fn delete_swarm<S: SwarmCtx>(
-    State(s): State<S>,
-    Extension(user): Extension<AuthUser>,
-    Path(sid): Path<Id>,
-) -> ApiResult<StatusCode> {
-    let swarm = s.swarm().get_swarm(&sid).await?;
-    check(&s, &user, &swarm.workspace_id, WorkspaceRole::Editor).await?;
-    s.swarm().delete_swarm(&sid).await?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
 // -- Agents -----------------------------------------------------------------
 
 async fn list_agents<S: SwarmCtx>(
@@ -313,17 +303,6 @@ async fn update_project<S: SwarmCtx>(
     let project = s.swarm().get_project(&pid).await?;
     check(&s, &user, &project.workspace_id, WorkspaceRole::Editor).await?;
     Ok(Json(s.swarm().update_project(&pid, req).await?))
-}
-
-async fn delete_project<S: SwarmCtx>(
-    State(s): State<S>,
-    Extension(user): Extension<AuthUser>,
-    Path(pid): Path<Id>,
-) -> ApiResult<StatusCode> {
-    let project = s.swarm().get_project(&pid).await?;
-    check(&s, &user, &project.workspace_id, WorkspaceRole::Editor).await?;
-    s.swarm().delete_project(&pid).await?;
-    Ok(StatusCode::NO_CONTENT)
 }
 
 // -- Tasks ------------------------------------------------------------------

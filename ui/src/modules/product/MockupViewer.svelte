@@ -13,7 +13,7 @@
   // exactly over the mockup.
   import { onMount } from 'svelte';
   import { renderMermaid } from '../canvas/mermaid';
-  import { authedBlobUrl, baseUrl, getToken } from '../../lib/api/client';
+  import { authedBlobUrl, authedText } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import MockupAnnotations from './MockupAnnotations.svelte';
@@ -70,13 +70,9 @@
 
   // ── Helpers ─────────────────────────────────────────────────────────────────
 
-  /** Fetch attachment bytes as text with the bearer token. */
-  async function fetchText(id: string): Promise<string> {
-    const token = getToken();
-    const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
-    const resp = await fetch(`${baseUrl()}/api/v1/product/attachments/${encodeURIComponent(id)}`, { headers });
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    return resp.text();
+  /** Fetch attachment bytes as text (authed; a 401 re-auths like any call). */
+  function fetchText(id: string): Promise<string> {
+    return authedText(`/product/attachments/${encodeURIComponent(id)}`);
   }
 
   /** Wrap an SVG string in a minimal sandboxed HTML doc for iframe srcdoc. */

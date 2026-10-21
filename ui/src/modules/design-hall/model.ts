@@ -263,8 +263,6 @@ export function formatForFile(name: string, mime = ''): string | null {
 
 export type Tone = 'neutral' | 'info' | 'warn' | 'ok' | 'bad';
 
-export const STATUS_ORDER: DesignStatus[] = ['draft', 'review', 'approved', 'shipped'];
-
 // The status vocabulary lives in lib/status.ts (`designStatus`) so the pill,
 // the status menu and the activity log read the same words and tones.
 export function statusLabel(s: DesignStatus | string): string {
@@ -295,11 +293,6 @@ export function relLabel(rel: DesignLinkRel | string): string {
     created_in: 'created in',
   };
   return m[rel] ?? rel.replace(/_/g, ' ');
-}
-
-/** Render relations are the ones a cycle check guards (embeds / components / tokens). */
-export function isRenderRel(rel: string): boolean {
-  return rel === 'embeds' || rel === 'uses_component' || rel === 'uses_tokens';
 }
 
 /** The relations a person can create by hand in the Links panel. */

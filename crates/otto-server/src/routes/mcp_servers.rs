@@ -22,9 +22,10 @@ use axum::http::StatusCode;
 use axum::Json;
 use otto_core::api::{CreateMcpServerReq, UpdateMcpServerReq};
 use otto_core::domain::{McpServer, WorkspaceRole};
-use otto_core::hooks::{McpServerProvider, McpServerSpec};
+use otto_core::hooks::McpServerSpec;
 use otto_core::secrets::SecretStore;
 use otto_core::{Error, Id};
+use otto_sessions::mcp::McpServerSource;
 use otto_state::{McpServersRepo, NewMcpServer};
 use serde_json::{json, Value};
 
@@ -298,14 +299,13 @@ pub async fn delete(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// `McpServerProvider` backed by the SQLite repo: resolves a workspace's enabled
+/// `McpServerSource` backed by the SQLite repo: resolves a workspace's enabled
 /// servers for the session manager to reconcile into `.mcp.json` at spawn. Sync
 /// trait over an async repo, so it blocks briefly on a bridge thread — fine for
-/// the handful of rows per workspace, and best-effort per the trait contract
-/// (a lookup failure returns empty so the spawn proceeds) — but every failure
-/// path is logged with the workspace context: an empty result silently standing
-/// in for "the DB query failed" is exactly how a session ends up minus its MCP
-/// servers with nothing in the logs to say why.
+/// the handful of rows per workspace. A lookup failure is returned as `Err`,
+/// never as an empty list: "nothing enabled" REMOVES every managed user entry
+/// from the cwd-shared launcher files, so the session manager must be able to
+/// tell the two apart (it preserves the entries and records the error instead).
 ///
 /// Keychain-backed secret env values are resolved HERE, at merge time — the
 /// rendered `.mcp.json` on disk still contains real values (the agent CLI
@@ -323,8 +323,8 @@ impl DbMcpServerProvider {
     }
 }
 
-impl McpServerProvider for DbMcpServerProvider {
-    fn enabled_servers(&self, workspace_id: &str) -> Vec<McpServerSpec> {
+impl McpServerSource for DbMcpServerProvider {
+    fn enabled_servers(&self, workspace_id: &str) -> Result<Vec<McpServerSpec>, String> {
         let repo = McpServersRepo::new(self.pool.clone());
         let ws = workspace_id.to_string();
         // Bridge the async repo onto the calling thread without holding the
@@ -344,9 +344,9 @@ impl McpServerProvider for DbMcpServerProvider {
             .unwrap_or_else(|_| Err("mcp server lookup thread panicked".into()))
         });
         // "no servers enabled" (Ok, possibly empty) vs "lookup failed" (Err):
-        // only the latter is a fault, and it must reach the logs.
+        // only the latter is a fault, and it must reach the logs AND the caller.
         match servers {
-            Ok(rows) => rows
+            Ok(rows) => Ok(rows
                 .into_iter()
                 .map(|r| {
                     let env = if r.secret_env_keys.is_empty() {
@@ -362,10 +362,10 @@ impl McpServerProvider for DbMcpServerProvider {
                         env,
                     }
                 })
-                .collect(),
+                .collect()),
             Err(e) => {
                 tracing::warn!(workspace = %workspace_id, "mcp servers unavailable for spawn: {e}");
-                Vec::new()
+                Err(e)
             }
         }
     }

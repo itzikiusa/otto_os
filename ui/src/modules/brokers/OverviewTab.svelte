@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { formatBytes } from '../../lib/metric-format';
   import { pluralNoun } from '../../lib/plural';
   import { api } from '../../lib/api/client';
   import LoadState from '../../lib/components/LoadState.svelte';
@@ -25,18 +26,6 @@
   /** Metrics cadence: 4 s while traffic moves, up to 10 s on an idle cluster. */
   const METRICS_MIN_MS = 4000;
   const METRICS_MAX_MS = 10_000;
-
-  function fmtBytes(n: number | null): string {
-    if (n === null || !isFinite(n)) return '—';
-    const u = ['B', 'KB', 'MB', 'GB', 'TB'];
-    let v = n;
-    let i = 0;
-    while (v >= 1024 && i < u.length - 1) {
-      v /= 1024;
-      i++;
-    }
-    return `${v.toFixed(v < 10 && i > 0 ? 1 : 0)} ${u[i]}`;
-  }
 
   function fmtNum(n: number): string {
     return n.toLocaleString();
@@ -215,8 +204,8 @@
                   ></div>
                 </div>
                 <span class="mv">
-                  {fmtBytes(bm.memory_used_bytes)}{bm.memory_total_bytes
-                    ? ` / ${fmtBytes(bm.memory_total_bytes)}`
+                  {formatBytes(bm.memory_used_bytes)}{bm.memory_total_bytes
+                    ? ` / ${formatBytes(bm.memory_total_bytes)}`
                     : ''}
                 </span>
               </div>

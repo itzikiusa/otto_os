@@ -67,7 +67,7 @@
     'mark false positive': 'Marking false positive…',
     'require approval': 'Requiring approval…',
     'add to repo rule': 'Adding to repo rules…',
-    'convert to Jira': 'Creating the Jira issue…',
+    'convert to Jira': 'Creating the issue…',
     accept: 'Accepting…',
     waive: 'Waiving…',
     approve: 'Approving…',
@@ -195,11 +195,29 @@
   function trackerName(a: IssueAccount): string {
     return a.provider === 'linear' ? 'Linear' : 'Jira';
   }
+  /** The tracker a converted finding landed in, read off its stored issue link (the finding
+   *  keeps no provider). Null when the link doesn't say — the label then stays neutral. */
+  function trackerFromUrl(url: string | null): string | null {
+    if (!url) return null;
+    try {
+      const u = new URL(url);
+      if (/(^|\.)linear\.app$/i.test(u.hostname)) return 'Linear';
+      if (/(^|\.)atlassian\.net$/i.test(u.hostname) || u.pathname.includes('/browse/')) return 'Jira';
+    } catch {
+      /* not a URL — unknown tracker */
+    }
+    return null;
+  }
+  const convertedLabel = $derived.by((): string | null => {
+    if (!finding.jira_key) return null;
+    const tracker = trackerFromUrl(finding.jira_url);
+    return tracker ? `In ${tracker} as ${finding.jira_key}` : `Tracked as ${finding.jira_key}`;
+  });
 
   async function submitJira(): Promise<void> {
     const key = jiraKey.trim().toUpperCase();
     if (!key) {
-      toasts.warn('Enter a Jira project or Linear team key');
+      toasts.warn('Enter a project or team key');
       return;
     }
     if (busy) return;
@@ -253,7 +271,7 @@
   function openOverflow(e: MouseEvent): void {
     const items: MenuItem[] = [
       {
-        label: finding.jira_key ? `In Jira as ${finding.jira_key}` : 'Convert to Jira issue…',
+        label: convertedLabel ?? 'Convert to issue…',
         icon: 'ticket',
         disabled: !canJira || !!busy,
         action: openJira,
@@ -355,7 +373,7 @@
     <input dir="auto"
       class="fa-jira-input"
       placeholder="PROJ"
-      aria-label="Jira project key"
+      aria-label="Project or team key"
       bind:value={jiraKey}
       onkeydown={(e) => {
         if (e.key === 'Enter') void submitJira();

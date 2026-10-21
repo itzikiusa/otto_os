@@ -4,7 +4,9 @@ import { join } from 'node:path';
 import AxeBuilder from '@axe-core/playwright';
 
 // The top-level routable pages (hash router: #/<module>). `share` is excluded
-// (it needs a scoped token) and is covered separately.
+// (it needs a scoped token) and is covered separately. Every sidebar module must
+// be listed here (or exempted, with a reason, in unit/pagesCoverage.test.ts) so
+// the axe / RTL / theme sweeps reach it.
 export const PAGES = [
   'agents',
   'rooms',
@@ -41,6 +43,7 @@ export const PAGES = [
   'mcp',
   'scheduled-tasks',
   'personal-agents',
+  'workbench',
 ] as const;
 
 export type PageId = (typeof PAGES)[number];

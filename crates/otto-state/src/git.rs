@@ -300,26 +300,6 @@ impl GitStore {
         self.get_repo(id).await
     }
 
-    /// Refresh the remote URL + detected provider recorded for a repo. The
-    /// remote is read once at registration, so a repo registered before its
-    /// `origin` was added (or re-pointed since) carries stale/empty hosting
-    /// info; re-detection is what makes such a repo bindable at all.
-    pub async fn set_repo_remote(
-        &self,
-        id: &Id,
-        remote_url: Option<&str>,
-        provider: Option<GitProviderKind>,
-    ) -> Result<Repo> {
-        sqlx::query("UPDATE repos SET remote_url = ?, provider = ? WHERE id = ?")
-            .bind(remote_url)
-            .bind(provider.map(|p| p.as_str()))
-            .bind(id)
-            .execute(&self.pool)
-            .await
-            .map_err(dberr("set repo remote"))?;
-        self.get_repo(id).await
-    }
-
     /// Refresh the observed origin and its account association together. A
     /// stale reader must not overwrite an explicit rebind or restore a binding
     /// another request already invalidated.

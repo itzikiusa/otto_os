@@ -333,16 +333,6 @@ impl AssistantRepo {
         Ok(row_to_thread(&r))
     }
 
-    /// Owner-less read for daemon-internal callers (tick, reply indexer).
-    pub async fn get_thread_any(&self, id: &str) -> Result<AssistantThread> {
-        let r = sqlx::query("SELECT * FROM assistant_threads WHERE id = ?")
-            .bind(id)
-            .fetch_one(&self.pool)
-            .await
-            .map_err(dberr("assistant thread"))?;
-        Ok(row_to_thread(&r))
-    }
-
     /// Slotted threads first (by slot), then most recently updated.
     pub async fn list_threads(&self, owner: &str) -> Result<Vec<AssistantThread>> {
         self.list_threads_page(owner, 100, 0).await
@@ -494,16 +484,6 @@ impl AssistantRepo {
             .await
             .map_err(dberr("delete assistant thread"))?;
         Ok(t)
-    }
-
-    /// The thread a session backs, if any (by `session_id`).
-    pub async fn thread_by_session(&self, session_id: &str) -> Result<Option<AssistantThread>> {
-        let r = sqlx::query("SELECT * FROM assistant_threads WHERE session_id = ? LIMIT 1")
-            .bind(session_id)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(dberr("assistant thread by session"))?;
-        Ok(r.as_ref().map(row_to_thread))
     }
 
     /// Incognito threads idle since before `cutoff` (RFC3339) — deleted by the tick.

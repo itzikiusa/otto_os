@@ -357,7 +357,7 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use otto_core::auth::AuthContext;
-    use otto_core::domain::{User, WorkspaceRole};
+    use otto_core::domain::User;
 
     fn fake_ctx(user_id: &str) -> AuthContext {
         let u = User {
@@ -642,8 +642,4 @@ mod tests {
             assert!(cache.get("fresh-h").is_some());
         }
     }
-
-    /// The `WorkspaceRole` import is needed for a `scope`-bearing context test.
-    #[allow(dead_code)]
-    fn _uses_workspace_role(_: WorkspaceRole) {}
 }

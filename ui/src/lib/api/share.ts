@@ -6,7 +6,7 @@
 // session on the same device.
 
 import type { Session, VerifyShareReq, VerifyShareResp, ExtendShareReq } from './types';
-import { baseUrl, ApiError, WS_BEARER_SUBPROTOCOL } from './client';
+import { baseUrl, ApiError } from './client';
 import type { Problem } from './types';
 
 /**
@@ -49,21 +49,6 @@ export async function getSharedSession(id: string, token: string): Promise<Sessi
     throw new ApiError(resp.status, problem);
   }
   return (await resp.json()) as Session;
-}
-
-/**
- * Open a WebSocket to `/ws/term/{id}` authenticated with the share token via
- * the `otto-bearer` Sec-WebSocket-Protocol subprotocol (keeps the token off
- * the URL / query string and out of access logs).
- *
- * The subprotocol is the ONLY place the daemon accepts the token — a `?token=`
- * query is refused (S11-312).
- */
-export function openShareTerminalWs(sessionId: string, token: string): WebSocket {
-  const base = new URL(baseUrl());
-  const proto = base.protocol === 'https:' ? 'wss:' : 'ws:';
-  const url = `${proto}//${base.host}/ws/term/${encodeURIComponent(sessionId)}`;
-  return new WebSocket(url, [WS_BEARER_SUBPROTOCOL, token]);
 }
 
 // ---------------------------------------------------------------------------

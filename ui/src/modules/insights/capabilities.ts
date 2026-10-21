@@ -69,15 +69,6 @@ export function statusLabel(s: CapabilityStatus): string {
   }
 }
 
-/** CSS class suffix used for status badges and status-dot colours. */
-export function statusClass(s: CapabilityStatus): string {
-  switch (s) {
-    case 'ready': return 'green';
-    case 'degraded': return 'yellow';
-    case 'missing_setup': return 'gray';
-  }
-}
-
 /** Feature slug → human-readable label (sentence case). */
 export function featureLabel(slug: string): string {
   const map: Record<string, string> = {

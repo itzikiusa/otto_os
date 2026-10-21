@@ -5,6 +5,7 @@
   // feature: calling `uploadBlob(blob)` is the shared entry-point used by both
   // the panel's own paste handler and the body-textarea paste handler in
   // OverviewTab (which also splices a markdown ref into draftBody).
+  import { formatBytes } from '../../lib/metric-format';
 
   import { product } from '../../lib/stores/product.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
@@ -92,13 +93,6 @@
       };
       reader.readAsDataURL(blob);
     });
-  }
-
-  /** Format bytes as human-readable. */
-  function fmtBytes(n: number): string {
-    if (n < 1024) return `${n} B`;
-    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-    return `${(n / 1024 / 1024).toFixed(1)} MB`;
   }
 
   /** Load the attachment list from the server. */
@@ -315,7 +309,7 @@
           <!-- Name + meta -->
           <div class="att-meta-row">
             <span class="att-fname" title={att.filename}>{att.filename}</span>
-            <span class="att-size">{fmtBytes(att.size_bytes)}</span>
+            <span class="att-size">{formatBytes(att.size_bytes)}</span>
             {#if att.kind && att.kind !== 'image'}
               <span class="att-kind-badge">{kindLabel(att.kind)}</span>
             {/if}

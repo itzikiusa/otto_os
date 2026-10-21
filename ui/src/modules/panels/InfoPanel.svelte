@@ -1,6 +1,6 @@
 <script lang="ts">
   import { NO_WORKSPACE } from '../../lib/labels';
-  // Info tab: shows active session metadata + attached Jira issue.
+  // Info tab: shows active session metadata + the attached tracker issue (Jira or Linear).
   import { ws } from '../../lib/stores/workspace.svelte';
   import { toastError } from '../../lib/toastError';
   import { auth } from '../../lib/stores/auth.svelte';
@@ -200,21 +200,30 @@
     {/if}
 
     <section class="section">
-      <div class="section-title">Jira issue</div>
+      <div class="section-title">Issue</div>
       {#if attachedIssue}
         <div class="issue-card">
           <div class="issue-head">
-            <a
-              class="issue-key"
-              href={attachedIssue.url}
-              target="_blank"
-              rel="noopener noreferrer"
-              title="Open in browser"
-            >
-              {attachedIssue.key}
-              <Icon name="external" size={12} />
-            </a>
-            <span class="chip">{attachedIssue.status}</span>
+            <!-- Sessions attached before the picker carried the tracker link/status hold ''
+                 there: a link with an empty href would open the app itself, and an empty
+                 chip is a blank pill — so show plain text / nothing instead. -->
+            {#if attachedIssue.url}
+              <a
+                class="issue-key"
+                href={attachedIssue.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                title="Open in browser"
+              >
+                {attachedIssue.key}
+                <Icon name="external" size={12} />
+              </a>
+            {:else}
+              <span class="issue-key plain">{attachedIssue.key}</span>
+            {/if}
+            {#if attachedIssue.status}
+              <span class="chip">{attachedIssue.status}</span>
+            {/if}
           </div>
           <div class="issue-summary">{attachedIssue.summary}</div>
           <div class="issue-actions">
@@ -227,7 +236,7 @@
           <p>No issue attached.</p>
           <!-- Secondary: a side panel never carries the view's primary action. -->
           <button class="btn small" onclick={() => (attachOpen = true)}>
-            Attach Jira issue…
+            Attach issue…
           </button>
         </div>
       {/if}
@@ -347,8 +356,11 @@
     align-items: center;
     gap: 4px;
   }
-  .issue-key:hover {
+  a.issue-key:hover {
     text-decoration: underline;
+  }
+  .issue-key.plain {
+    color: var(--text);
   }
   .issue-summary {
     font-size: var(--fs-s);

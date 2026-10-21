@@ -3,14 +3,13 @@
 // versions) is the ordinary Design Hall client (`lib/api/design`).
 // Contract: docs/contracts/api.md § Brand Kit.
 
-import { api, ApiError, baseUrl, getToken } from '../../../lib/api/client';
+import { api, authedResponse } from '../../../lib/api/client';
 import type {
   BrandDoc,
   BrandExportFormat,
   BrandImpactResp,
   DesignLearnedResp,
   Id,
-  Problem,
 } from '../../../lib/api/types';
 
 const enc = encodeURIComponent;
@@ -33,18 +32,7 @@ export interface BrandExport {
 /** The kit exported as CSS vars, a Tailwind v4 `@theme`, or DTCG JSON. */
 export async function brandExport(id: Id, format: BrandExportFormat, version?: string): Promise<BrandExport> {
   const q = `?format=${enc(format)}${version ? `&version=${enc(version)}` : ''}`;
-  const token = getToken();
-  const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
-  const resp = await fetch(`${baseUrl()}/api/v1/design/artifacts/${enc(id)}/brand/export${q}`, { headers });
-  if (!resp.ok) {
-    let problem: Problem = { code: 'internal', message: resp.statusText };
-    try {
-      problem = await resp.json();
-    } catch {
-      /* non-JSON error body */
-    }
-    throw new ApiError(resp.status, problem);
-  }
+  const resp = await authedResponse(`/design/artifacts/${enc(id)}/brand/export${q}`);
   const cd = resp.headers.get('Content-Disposition') ?? '';
   const fileName = /filename="([^"]+)"/.exec(cd)?.[1] ?? `brand.${format === 'dtcg' ? 'json' : 'css'}`;
   return { text: await resp.text(), fileName, mime: resp.headers.get('Content-Type') ?? 'text/plain' };

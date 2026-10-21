@@ -4,16 +4,21 @@
   import { api } from '../../lib/api/client';
   import { loadErrorText } from '../../lib/loadError';
   import LoadState from '../../lib/components/LoadState.svelte';
-  import type { IssueAccount, IssueProject, IssueSummary, ListingPage } from '../../lib/api/types';
+  import type { IssueAccount, IssueProject, IssueProviderKind, IssueSummary, ListingPage } from '../../lib/api/types';
   import { truncatedNote, unwrapListing } from '../../lib/listingPage';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { router } from '../../lib/router.svelte';
 
+  /** What a pick hands back: enough to persist a session's `AttachedIssue` without a second
+   *  lookup — the tracker link and status from the search hit, and the picked account's provider. */
   interface PickedIssue {
     account_id: string;
+    provider: IssueProviderKind;
     key: string;
     summary: string;
+    url: string;
+    status: string;
   }
 
   interface Props {
@@ -151,7 +156,15 @@
   }
 
   function pick(issue: IssueSummary): void {
-    onpick({ account_id: selectedAccountId, key: issue.key, summary: issue.summary });
+    const provider = accounts.find((a) => a.id === selectedAccountId)?.provider ?? 'jira';
+    onpick({
+      account_id: selectedAccountId,
+      provider,
+      key: issue.key,
+      summary: issue.summary,
+      url: issue.url ?? '',
+      status: issue.status ?? '',
+    });
   }
 
   function goToJiraSettings(): void {

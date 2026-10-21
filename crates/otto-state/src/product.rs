@@ -843,18 +843,6 @@ impl ProductRepo {
         rows.iter().map(row_to_story).collect()
     }
 
-    pub async fn set_watch_cursor(&self, id: &Id, cursor: &str) -> Result<()> {
-        let now = fmt(Utc::now());
-        sqlx::query("UPDATE product_stories SET watch_cursor = ?, updated_at = ? WHERE id = ?")
-            .bind(cursor)
-            .bind(&now)
-            .bind(id)
-            .execute(&self.pool)
-            .await
-            .map_err(dberr("set watch cursor"))?;
-        Ok(())
-    }
-
     // -----------------------------------------------------------------------
     // Versions
     // -----------------------------------------------------------------------

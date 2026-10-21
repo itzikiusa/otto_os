@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { formatBytes } from '../../../lib/metric-format';
   import { rowMenu as rowMenuKeys } from '../../../lib/rowMenu';
   import { plural } from '../../../lib/plural';
   // DesignArena — the Product → **Design** tab (design/product-design-arena.md §4).
@@ -787,9 +788,6 @@
   }
 
   const resolveAttachment = (aid: string) => product.attachmentBlobUrl(aid);
-  function fmtBytes(n: number): string {
-    return n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`;
-  }
 </script>
 
 <div class="arena-container">
@@ -1026,7 +1024,7 @@
         <section class="insp-sec">
           <div class="insp-row"><span class="k">File</span><span class="v mono" title={att.filename}>{att.filename}</span></div>
           <div class="insp-row"><span class="k">Type</span><span class="v">{typeLabel(att)} <small class="mono">{att.mime}</small></span></div>
-          <div class="insp-row"><span class="k">Size</span><span class="v">{fmtBytes(att.size_bytes)}</span></div>
+          <div class="insp-row"><span class="k">Size</span><span class="v">{formatBytes(att.size_bytes)}</span></div>
           <div class="insp-row"><span class="k">Group</span><span class="v">{groupOf(att)}</span></div>
           {#if selected?.owner && selected.owner.id !== storyId}
             <div class="insp-row"><span class="k">Story</span><span class="v">{selected.owner.title}</span></div>

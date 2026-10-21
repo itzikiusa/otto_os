@@ -1,11 +1,18 @@
 /**
  * Kart Grand Prix simulation (host-authoritative, fixed 60 Hz, no three.js).
  * Up to 8 racers: humans plus CPU drivers. Drifting with three mini-turbo
- * levels, item boxes, six items, jumps with tricks, dash panels, ice, walls,
- * rescue when out of bounds, laps with progress tracking and live ranking.
+ * levels, item boxes, six items, jumps with tricks, launch ramps and the
+ * glider, dash panels, ice, off-road patches, banking, walls and rails,
+ * branching routes, drawbridges, half-pipe trick lips, coins (up to ten raise
+ * top speed; hits and falls cost some), underwater driving, water/lava/chasm
+ * rescues, rolling and crushing obstacles, laps with progress tracking and
+ * live ranking.
  */
 import { approach, clamp, Rng, wrapAngle } from '../common/math.ts';
-import { nearest, pointAt, trackFor, type Near, type Track, type TrackId } from './tracks.ts';
+import {
+  advance, circ, coinSpots, CRUSHER_HALF, DRAW_ANGLE, drawLift, F_ICE, F_OFFROAD, F_RAILS, F_UNDER, inLaunchZone, inOffroad, locate, nearest, newNear, obstacleAt,
+  pointAt, progressOf, ROLLER_RADIUS, sampleAt, trackFor, type Near, type Spot, type Track, type TrackId,
+} from './tracks.ts';
 import { racerDef, type RacerId } from './roster.ts';
 import { cpuInput } from './cpu.ts';
 import { rollItem, type ItemKind } from './items.ts';
@@ -21,6 +28,20 @@ export const COUNTDOWN_SECONDS = 3;
 /** Drift charge (seconds) needed for each mini-turbo level. */
 export const DRIFT_LEVELS = [0.85, 1.7, 2.7];
 export const TURBO_SECONDS = [0.6, 1.0, 1.45];
+export const GRAVITY = 24;
+/** Glider: gentle gravity and a capped sink rate. */
+export const GLIDE_GRAVITY = 9;
+export const GLIDE_SINK = 6.5;
+/** Underwater the karts float: lower gravity and a little drag. */
+export const WATER_GRAVITY = 12;
+/** A racer this far below the road (no ground under it) has fallen and is rescued. */
+export const FALL_DEPTH = 12;
+/** Coins: each one up to MAX_COINS raises top speed by COIN_SPEED; a spin-out or a fall costs COIN_LOSS. */
+export const MAX_COINS = 10;
+export const COIN_SPEED = 0.006;
+export const COIN_LOSS = 3;
+/** Seconds before a collected coin reappears. */
+export const COIN_RESPAWN = 12;
 
 export interface KartInput { throttle: number; steer: number; drift: boolean; item: boolean; respawn: boolean }
 export const idleInput = (): KartInput => ({ throttle: 0, steer: 0, drift: false, item: false, respawn: false });
@@ -32,27 +53,45 @@ export interface Racer {
   drift: number; driftCharge: number; driftLevel: number;
   boost: number; boostPower: number; spin: number; star: number; slow: number;
   item: ItemKind | null; itemCount: number; roll: number; prevItem: boolean; prevDrift: boolean;
+  /** `lastS` is lap progress (main-loop distance); `seg`/`segS` the path and local distance on it. */
   travel: number; lastS: number; hint: number; lateral: number; surface: 'road' | 'grass' | 'ice';
+  seg: number; segS: number; glide: boolean; under: boolean;
+  /** Last on-road spot (rescues return here, never into a chasm). */
+  safeSeg: number; safeS: number;
   lap: number; lapStart: number; lapTimes: number[]; finish: number | null; place: number;
   respawn: number; wrong: number; startCharge: number; bumpCd: number;
   cpuLane: number; cpuThink: number; cpuItemDelay: number; cpuMistake: number;
+  /** CPU route: bit k-1 set = take branch k this lap. */
+  cpuRoute: number;
+  coins: number;
 }
 export interface ItemBox { x: number; y: number; z: number; timer: number }
+/** A coin on the road; `timer` > 0 while it is collected and waiting to reappear. */
+export interface Coin { x: number; y: number; z: number; timer: number }
 export interface Hazard { id: number; x: number; y: number; z: number; owner: number }
-export interface Shell { id: number; x: number; y: number; z: number; yaw: number; target: number; owner: number; life: number; hint: number }
-export type KartEventType = 'box' | 'item' | 'boost' | 'turbo' | 'spin' | 'explode' | 'bump' | 'lap' | 'final' | 'finish' | 'bolt' | 'drop' | 'throw' | 'star' | 'respawn' | 'trick' | 'land' | 'go' | 'count';
+export interface Shell { id: number; x: number; y: number; z: number; yaw: number; target: number; owner: number; life: number; hint: number; seg: number }
+export type KartEventType = 'box' | 'item' | 'boost' | 'turbo' | 'spin' | 'explode' | 'bump' | 'lap' | 'final' | 'finish' | 'bolt' | 'drop' | 'throw' | 'star' | 'respawn' | 'trick' | 'land' | 'go' | 'count' | 'splash' | 'glide' | 'crush';
 export interface KartEvent { id: number; type: KartEventType; racer: number; x: number; y: number; z: number; value?: number }
 export interface KartSeat { racer: RacerId; human: boolean; slot: number; name: string }
 export interface KartState {
   track: TrackId; difficulty: Difficulty; laps: number;
   phase: 'intro' | 'countdown' | 'race' | 'done';
   clock: number; countdown: number; raceTime: number; endTimer: number; firstFinish: number | null;
-  racers: Racer[]; boxes: ItemBox[]; hazards: Hazard[]; shells: Shell[];
+  racers: Racer[]; boxes: ItemBox[]; coins: Coin[]; hazards: Hazard[]; shells: Shell[];
   events: KartEvent[]; eventSeq: number; nextId: number; rng: number; accumulator: number;
 }
 
-const _near: Near = { index: 0, t: 0, s: 0, lateral: 0, y: 0, tx: 0, tz: 1, distance: 0 };
+const _near: Near = newNear();
 const _pt = [0, 0, 0, 0];
+const _ob = [0, 0, 0, 0];
+const _spot: Spot = { seg: 0, s: 0 };
+const DIFF_INDEX: Record<Difficulty, number> = { easy: 0, normal: 1, hard: 2 };
+/** Rolls a CPU's routes for one lap: each branch is taken with its per-difficulty chance. */
+export function pickRoute(track: Track, difficulty: Difficulty, rng: Rng): number {
+  let route = 0;
+  for (let b = 1; b < track.paths.length; b++) if (rng.chance(track.paths[b].cpu[DIFF_INDEX[difficulty]])) route |= 1 << (b - 1);
+  return route;
+}
 
 export function createRace(trackId: TrackId, seats: KartSeat[], difficulty: Difficulty, seed: number): KartState {
   const track = trackFor(trackId);
@@ -66,35 +105,48 @@ export function createRace(trackId: TrackId, seats: KartSeat[], difficulty: Diff
     const row = Math.floor(i / 2), side = i % 2 ? -1 : 1;
     const s = -9 - row * 7.5 - (i % 2) * 3.2;
     pointAt(track, s, side * track.halfWidth * 0.42, _pt);
+    const lap = ((s % track.length) + track.length) % track.length;
     return {
       id: i, racer: seat.racer, human: seat.human, slot: seat.slot, name: seat.name,
       x: _pt[0], y: _pt[1], z: _pt[2], yaw: _pt[3], vx: 0, vz: 0, vy: 0,
       speed: 0, steer: 0, grounded: true, air: 0, trick: 0, trickReady: false, trickDone: false,
       drift: 0, driftCharge: 0, driftLevel: 0, boost: 0, boostPower: 0, spin: 0, star: 0, slow: 0,
       item: null, itemCount: 0, roll: 0, prevItem: false, prevDrift: false,
-      travel: s, lastS: ((s % track.length) + track.length) % track.length, hint: -1, lateral: 0, surface: 'road',
+      travel: s, lastS: lap, hint: -1, lateral: 0, surface: 'road',
+      seg: 0, segS: lap, glide: false, under: false, safeSeg: 0, safeS: lap,
       lap: 0, lapStart: 0, lapTimes: [], finish: null, place: i + 1, respawn: 0, wrong: 0, startCharge: -1, bumpCd: 0,
       cpuLane: rng.range(-0.45, 0.45), cpuThink: 0, cpuItemDelay: rng.range(0.5, 2.5), cpuMistake: 0,
+      cpuRoute: seat.human ? 0 : pickRoute(track, difficulty, rng), coins: 0,
     };
   });
   const boxes = itemBoxes(track);
   const state: KartState = {
     track: track.def.id, difficulty, laps: LAPS, phase: 'intro', clock: 0, countdown: COUNTDOWN_SECONDS, raceTime: 0,
-    endTimer: 0, firstFinish: null, racers, boxes, hazards: [], shells: [], events: [], eventSeq: 0, nextId: 1,
+    endTimer: 0, firstFinish: null, racers, boxes, coins: trackCoins(track), hazards: [], shells: [], events: [], eventSeq: 0, nextId: 1,
     rng: rng.state, accumulator: 0,
   };
   rank(state);
   return state;
 }
 
-/** Rows of five item boxes across the road. */
+/** Rows of item boxes across the road (five on full-width roads, three on narrow branches). */
 export function itemBoxes(track: Track): ItemBox[] {
   const boxes: ItemBox[] = [];
-  for (const at of track.def.itemRows) for (let k = 0; k < 5; k++) {
-    pointAt(track, at * track.length, (k - 2) * track.halfWidth * 0.34, _pt);
-    boxes.push({ x: _pt[0], y: _pt[1] + 1.1, z: _pt[2], timer: 0 });
+  for (const path of track.paths) {
+    const per = path.halfWidth < 6 ? 3 : 5;
+    for (const at of path.features.itemRows) for (let k = 0; k < per; k++) {
+      pointAt(path, at * path.length, (k - (per - 1) / 2) * path.halfWidth * (per === 5 ? 0.34 : 0.5), _pt);
+      boxes.push({ x: _pt[0], y: _pt[1] + 1.1, z: _pt[2], timer: 0 });
+    }
   }
   return boxes;
+}
+
+/** Every coin of the track, all in place. */
+export function trackCoins(track: Track): Coin[] {
+  const spots = coinSpots(track), coins: Coin[] = [];
+  for (let i = 0; i < spots.length; i += 3) coins.push({ x: spots[i], y: spots[i + 1], z: spots[i + 2], timer: 0 });
+  return coins;
 }
 
 function emit(state: KartState, type: KartEventType, r: { id: number; x: number; y: number; z: number }, value?: number): void {
@@ -170,7 +222,9 @@ export function tick(state: KartState, inputs: (KartInput | undefined)[]): void 
     driveRacer(state, track, r, input, rng, leader, humanBest);
   }
   collideRacers(state);
+  collideObstacles(state, track);
   updateBoxes(state);
+  updateCoins(state);
   updateHazards(state);
   updateShells(state, track);
   rank(state);
@@ -207,14 +261,21 @@ function driveRacer(state: KartState, track: Track, r: Racer, input: KartInput, 
   const spinning = r.spin > 0;
   r.spin = Math.max(0, r.spin - STEP);
 
-  // Surface & bounds from the centre line.
-  const near = nearest(track, r.x, r.z, r.hint, _near, r.hint < 0 ? 0 : 24);
-  r.hint = near.index;
+  // Surface & bounds from the centre line of the path the racer is on
+  // (switching between the main loop and a branch inside fork/merge zones).
+  const near = locate(track, r.x, r.y, r.z, r.seg, r.hint, _near);
+  r.seg = near.seg; r.hint = near.index; r.segS = near.s;
   r.lateral = near.lateral;
-  const off = Math.abs(near.lateral) - track.halfWidth;
-  const frac = near.s / track.length;
-  const onIce = track.def.ice.some(([a, b]) => frac >= a && frac <= b) && off < 0;
-  r.surface = off > 0.4 ? 'grass' : onIce ? 'ice' : 'road';
+  const path = track.paths[r.seg];
+  const flags = path.flags[near.index];
+  const off = Math.abs(near.lateral) - path.halfWidth;
+  const onIce = (flags & F_ICE) !== 0 && off < 0;
+  const muddy = (flags & F_OFFROAD) !== 0 && off < 0 && inOffroad(path, near.s, near.lateral);
+  r.surface = off > 0.4 || muddy ? 'grass' : onIce ? 'ice' : 'road';
+  const liquid = track.liquid;
+  const wasUnder = r.under;
+  r.under = liquid !== null && !track.lava && r.y + 0.3 < liquid && (flags & F_UNDER) !== 0;
+  if (r.under && !wasUnder) emit(state, 'splash', r, 1);
 
   // Target speed.
   let top = st.top;
@@ -226,17 +287,21 @@ function driveRacer(state: KartState, track: Track, r: Racer, input: KartInput, 
   } else if (r !== leader) {
     top *= 1 + clamp((leader.travel - r.travel) * 0.00015, 0, 0.04);
   }
-  if (r.surface === 'grass' && r.boost <= 0 && r.star <= 0) top *= 0.55;
+  // Off-road; the deep mud of a boost-only shortcut is far worse without a mushroom or star.
+  if (r.surface === 'grass' && r.boost <= 0 && r.star <= 0) top *= muddy && path.boost ? 0.32 : 0.55;
   if (r.slow > 0) top *= 0.7;
   if (r.star > 0) top *= 1.15;
+  if (r.under) top *= 0.93;
+  top *= 1 + Math.min(r.coins, MAX_COINS) * COIN_SPEED;
   if (r.boost > 0) top = Math.max(top, st.top * r.boostPower);
   if (r.drift !== 0) top *= 0.97;
 
   const throttle = spinning ? 0 : input.throttle;
-  if (r.boost > 0) r.speed = approach(r.speed, top, 3.5, STEP);
-  else if (throttle > 0.05) r.speed += (r.speed < top ? st.accel * throttle * (1 - Math.max(0, r.speed) / (top * 1.25)) : -(r.speed - top) * 2.5) * STEP;
+  if (r.glide) r.speed = Math.max(r.speed, st.top * 0.95);
+  else if (r.boost > 0) r.speed = approach(r.speed, top, 3.5, STEP);
+  else if (throttle > 0.05) r.speed += (r.speed < top ? st.accel * throttle * (r.under ? 0.8 : 1) * (1 - Math.max(0, r.speed) / (top * 1.25)) : -(r.speed - top) * 2.5) * STEP;
   else if (throttle < -0.05) r.speed -= (r.speed > 0 ? 34 : 10) * -throttle * STEP;
-  else r.speed = approach(r.speed, 0, 0.7, STEP);
+  else r.speed = approach(r.speed, 0, r.under ? 1.2 : 0.7, STEP);
   r.speed = clamp(r.speed, -9, 48);
   if (spinning) r.speed = approach(r.speed, 0, 2.2, STEP);
 
@@ -257,7 +322,7 @@ function driveRacer(state: KartState, track: Track, r: Racer, input: KartInput, 
     if (r.drift !== 0 && (!input.drift || r.speed < st.top * 0.3 || spinning)) releaseDrift(state, r);
   } else if (driftPressed && r.trickReady && r.air > 0.12) {
     r.trick = 0.45; r.trickReady = false; r.trickDone = true; emit(state, 'trick', r);
-  } else if (r.drift === 0 && input.drift && Math.abs(input.steer) > 0.25 && r.speed > st.top * 0.45 && r.air < 0.4 && !r.trickReady) {
+  } else if (r.drift === 0 && input.drift && Math.abs(input.steer) > 0.25 && r.speed > st.top * 0.45 && r.air < 0.4 && !r.trickReady && !r.glide) {
     r.drift = Math.sign(input.steer);
   }
 
@@ -273,21 +338,24 @@ function driveRacer(state: KartState, track: Track, r: Racer, input: KartInput, 
     yawRate = -r.steer * st.turn * grip * (1.45 - 0.45 * clamp(speedRatio, 0, 1)) * Math.sign(r.speed || 1);
   }
   if (r.surface === 'ice') yawRate *= 0.8;
+  // Banked turns hold the line a little better; the glider steers gently.
+  if (path.bank[near.index] !== 0 && r.grounded) yawRate *= 1.12;
+  if (r.glide) yawRate *= 0.7;
   r.yaw = wrapAngle(r.yaw + yawRate * STEP);
 
   // Velocity follows heading according to grip (low on ice, partial when drifting).
   const fx = Math.sin(r.yaw), fz = Math.cos(r.yaw);
-  const gripRate = !r.grounded ? 0.4 : r.surface === 'ice' ? 1.6 : r.drift !== 0 ? 5.5 : 11;
+  const gripRate = r.glide ? 2.2 : !r.grounded ? 0.4 : r.surface === 'ice' ? 1.6 : r.drift !== 0 ? 5.5 : 11;
   r.vx = approach(r.vx, fx * r.speed, gripRate, STEP);
   r.vz = approach(r.vz, fz * r.speed, gripRate, STEP);
   const prevS = near.s;
   r.x += r.vx * STEP;
   r.z += r.vz * STEP;
 
-  // Walls (city / canyon) bounce racers back onto the road.
-  if (track.def.edge === 'wall') {
-    const limit = track.halfWidth + 1.3;
-    const lat = nearest(track, r.x, r.z, r.hint, _near, 4).lateral;
+  // Walls (city / canyon), bridge rails and tunnels bounce racers back onto the road.
+  if (path.edge === 'wall' || (flags & F_RAILS) !== 0) {
+    const limit = path.halfWidth + 1.3;
+    const lat = nearest(path, r.x, r.z, r.hint, _near, 4).lateral;
     if (Math.abs(lat) > limit) {
       const push = Math.abs(lat) - limit, sign = Math.sign(lat);
       // Left-hand normal is (tz, -tx).
@@ -297,7 +365,7 @@ function driveRacer(state: KartState, track: Track, r: Racer, input: KartInput, 
       if (Math.abs(r.speed) > 8 && r.bumpCd <= 0) { r.speed *= 0.86; r.bumpCd = 0.4; emit(state, 'bump', r); }
       r.yaw = wrapAngle(r.yaw + sign * 0.02);
     }
-  } else if (off > track.def.outOfBounds) {
+  } else if (off > path.outOfBounds && r.grounded && path.drop[near.index] < 0.5) {
     r.respawn = 1.4; r.speed = 0; r.vx = r.vz = 0; r.drift = 0; r.driftCharge = 0; r.driftLevel = 0;
     emit(state, 'respawn', r);
     return;
@@ -306,42 +374,93 @@ function driveRacer(state: KartState, track: Track, r: Racer, input: KartInput, 
     r.respawn = 0.6; emit(state, 'respawn', r); return;
   }
 
-  // Height: ground following, ramps, flight.
-  nearest(track, r.x, r.z, r.hint, _near, 4);
-  const ground = track.ground(r.x, r.z, _near);
-  for (const at of track.def.ramps) {
-    const rs = at * track.length;
+  // Height: ground following, ramps, launches, drawbridges, half-pipe lips, flight, the glider.
+  nearest(path, r.x, r.z, r.hint, _near, 4);
+  const ground = track.ground(r.x, r.z, _near, state.raceTime);
+  const onRoad = Math.abs(_near.lateral) < path.halfWidth;
+  for (const at of path.features.ramps) {
+    const rs = at * path.length;
     const crossed = prevS < rs && _near.s >= rs && _near.s - prevS < 20;
-    if (crossed && r.grounded && Math.abs(_near.lateral) < track.halfWidth && r.speed > 10) {
+    if (crossed && r.grounded && onRoad && r.speed > 10) {
       r.vy = 7.5 + r.speed * 0.22; r.grounded = false; r.air = 0; r.trickReady = true;
       emit(state, 'boost', r, 0);
     }
   }
-  for (const pad of track.def.boostPads) {
-    const ps = pad.at * track.length;
-    if (r.grounded && Math.abs(_near.s - ps) < 2.2 && Math.abs(_near.lateral - pad.lane * track.halfWidth) < 2.4 && r.boost < 0.6) {
+  for (const l of path.features.launches) {
+    const ls = l.at * path.length;
+    const crossed = prevS < ls && _near.s >= ls && _near.s - prevS < 20;
+    // Mid drift-hop counts: anyone on the ramp surface at the lip takes off.
+    if (crossed && (r.grounded || r.y < ground + 1.6) && onRoad && r.speed > 6) {
+      // Launch ramps double as dash ramps so a racer at speed always clears the gap.
+      r.speed = Math.max(r.speed, st.top * (l.glide ? 1 : 1.05));
+      // The ramp throws the kart straight down the road at that speed.
+      r.vx = _near.tx * r.speed; r.vz = _near.tz * r.speed;
+      r.vy = l.power; r.grounded = false; r.air = 0; r.trickReady = true;
+      r.drift = 0; r.driftCharge = 0; r.driftLevel = 0;
+      if (l.glide) { r.glide = true; emit(state, 'glide', r); } else emit(state, 'boost', r, 0);
+    }
+  }
+  // A raised drawbridge throws a racer cresting its first leaf over the opening.
+  for (const d of path.features.drawbridges) {
+    const lift = drawLift(d, state.raceTime);
+    if (lift < 0.3) continue;
+    const a = d.from * path.length, half = (d.to - d.from) * path.length / 2, th = DRAW_ANGLE * lift, tip = a + half * Math.cos(th);
+    const crossed = prevS < tip && _near.s >= tip && _near.s - prevS < 20;
+    if (crossed && (r.grounded || r.y < ground + 1.6) && r.speed > 4) {
+      r.vy = r.speed * Math.sin(th) + 1.5; r.grounded = false; r.air = 0; r.trickReady = true;
+      r.drift = 0; r.driftCharge = 0; r.driftLevel = 0;
+      emit(state, 'boost', r, 0);
+    }
+  }
+  // Riding high on a half-pipe wall off its end lip: a trick jump.
+  for (const [, to] of path.features.halfpipes) {
+    const ps = to * path.length;
+    const crossed = prevS < ps && _near.s >= ps && _near.s - prevS < 20;
+    if (crossed && r.grounded && r.y > ground + 1.2 && r.speed > 8) {
+      r.vy = 6 + r.speed * 0.12; r.grounded = false; r.air = 0; r.trickReady = true;
+      emit(state, 'boost', r, 0);
+    }
+  }
+  for (const pad of path.features.boostPads) {
+    const ps = pad.at * path.length;
+    if (r.grounded && Math.abs(_near.s - ps) < 2.2 && Math.abs(_near.lateral - pad.lane * path.halfWidth) < 2.4 && r.boost < 0.6) {
       r.boost = 0.9; r.boostPower = 1.42; emit(state, 'boost', r);
     }
   }
   if (r.grounded) {
-    if (ground < r.y - 1.2) { r.grounded = false; r.air = 0; r.vy = 0; } // drove off a crest
+    if (ground < r.y - 1.2) { r.grounded = false; r.air = 0; r.vy = 0; } // drove off a crest, a ledge or into a chasm
     else r.y = ground;
   }
   if (!r.grounded) {
     r.air += STEP;
-    r.vy -= 24 * STEP;
+    r.vy -= (r.glide ? GLIDE_GRAVITY : r.under ? WATER_GRAVITY : GRAVITY) * STEP;
+    if (r.glide) r.vy = Math.max(r.vy, -GLIDE_SINK);
     r.y += r.vy * STEP;
     if (r.trick > 0) r.trick = Math.max(0, r.trick - STEP);
     if (r.y <= ground && r.vy <= 0) {
       r.y = ground; r.grounded = true; r.vy = 0;
       if (r.air > 0.5) emit(state, 'land', r);
       if (r.trickDone) { r.boost = Math.max(r.boost, 0.8); r.boostPower = Math.max(r.boostPower, 1.32); emit(state, 'boost', r); }
-      r.trick = 0; r.trickReady = false; r.trickDone = false;
+      r.trick = 0; r.trickReady = false; r.trickDone = false; r.glide = false;
     }
   }
+  // Fell in: lava always, water unless the road runs under the surface here; or down a chasm.
+  const diveable = !track.lava && (path.flags[_near.index] & F_UNDER) !== 0 && Math.abs(_near.lateral) - path.halfWidth < Math.max(2, path.outOfBounds);
+  if (liquid !== null && r.y + 0.3 < liquid && !diveable) {
+    r.respawn = 1.3; r.speed = 0; r.vx = r.vz = 0; r.vy = 0; r.drift = 0; r.driftCharge = 0; r.driftLevel = 0; r.glide = false;
+    emit(state, 'splash', r, track.lava ? 2 : 0);
+    return;
+  }
+  if (!r.grounded && r.y < _near.y - FALL_DEPTH) {
+    r.respawn = 1.2; r.speed = 0; r.vx = r.vz = 0; r.vy = 0; r.drift = 0; r.driftCharge = 0; r.driftLevel = 0; r.glide = false;
+    emit(state, 'respawn', r);
+    return;
+  }
+  if (r.grounded && Math.abs(_near.lateral) < path.halfWidth && !inLaunchZone(path, _near.s)) { r.safeSeg = r.seg; r.safeS = _near.s; }
 
-  // Progress / laps.
-  const s = _near.s;
+  // Progress / laps (main-loop distance, mapped from branches).
+  const s = progressOf(track, r.seg, _near.s);
+  r.segS = _near.s;
   let ds = s - r.lastS;
   if (ds > track.length / 2) ds -= track.length;
   if (ds < -track.length / 2) ds += track.length;
@@ -353,6 +472,7 @@ function driveRacer(state: KartState, track: Track, r: Racer, input: KartInput, 
       r.lap++;
       r.lapTimes.push(state.raceTime - r.lapStart);
       r.lapStart = state.raceTime;
+      if (!r.human) r.cpuRoute = pickRoute(track, state.difficulty, rng);
       if (r.lap >= state.laps) {
         r.finish = state.raceTime;
         state.firstFinish ??= state.raceTime;
@@ -377,12 +497,26 @@ function releaseDrift(state: KartState, r: Racer): void {
 }
 
 function rescue(state: KartState, track: Track, r: Racer): void {
-  // Back to the centre a little behind where the racer left the road.
-  pointAt(track, r.lastS - 4, 0, _pt);
+  // Back to the centre a little behind the last spot the racer was on the road,
+  // stepping back further if that lands in a chasm or a launch run-up.
+  let seg = r.safeSeg, s = r.safeS - 6;
+  let path = track.paths[seg] ?? track;
+  for (let k = 0; k < 80; k++) {
+    if (seg !== 0 && s < 0) { s += path.from; seg = 0; path = track; }
+    if (!inLaunchZone(path, s)) break;
+    s -= 4;
+  }
+  if (seg === 0) s = ((s % track.length) + track.length) % track.length;
+  pointAt(path, s, 0, _pt);
   r.x = _pt[0]; r.y = _pt[1]; r.z = _pt[2]; r.yaw = _pt[3];
-  r.vx = r.vz = r.vy = 0; r.speed = 0; r.grounded = true; r.hint = -1; r.spin = 0;
-  r.lastS = nearest(track, r.x, r.z, -1, _near).s;
-  r.hint = _near.index;
+  r.vx = r.vz = r.vy = 0; r.speed = 0; r.grounded = true; r.spin = 0; r.glide = false; r.under = false;
+  r.coins = Math.max(0, r.coins - COIN_LOSS);
+  r.seg = seg; r.segS = s; r.hint = sampleAt(path, s);
+  r.y = track.ground(r.x, r.z, nearest(path, r.x, r.z, r.hint, _near, 4), state.raceTime);
+  // Progress follows the racer back: no lap credit for distance flown or fallen.
+  const prog = progressOf(track, seg, s);
+  r.travel += circ(prog - r.lastS, track.length);
+  r.lastS = prog;
   emit(state, 'land', r);
 }
 
@@ -390,6 +524,7 @@ export function spinOut(state: KartState, r: Racer, seconds = 1.0): boolean {
   if (r.star > 0 || r.respawn > 0 || r.finish !== null && r.speed < 1) return false;
   r.spin = Math.max(r.spin, seconds);
   r.boost = 0; r.drift = 0; r.driftCharge = 0; r.driftLevel = 0;
+  r.coins = Math.max(0, r.coins - COIN_LOSS);
   emit(state, 'spin', r);
   return true;
 }
@@ -409,7 +544,7 @@ function useItem(state: KartState, track: Track, r: Racer): void {
     }
     case 'bomb': {
       const ahead = state.racers.find(o => o.place === r.place - 1 && o.finish === null);
-      state.shells.push({ id: state.nextId++, x: r.x + fx * 2.8, y: r.y + 0.6, z: r.z + fz * 2.8, yaw: r.yaw, target: ahead ? ahead.id : -1, owner: r.id, life: 7, hint: r.hint });
+      state.shells.push({ id: state.nextId++, x: r.x + fx * 2.8, y: r.y + 0.6, z: r.z + fz * 2.8, yaw: r.yaw, target: ahead ? ahead.id : -1, owner: r.id, life: 7, hint: r.hint, seg: r.seg });
       if (state.shells.length > MAX_SHELLS) state.shells.shift();
       emit(state, 'throw', r);
       break;
@@ -450,6 +585,29 @@ function collideRacers(state: KartState): void {
   }
 }
 
+/** Rolling boulders and crushers (poses are a pure function of race time). */
+function collideObstacles(state: KartState, track: Track): void {
+  for (const o of track.obstacles) {
+    obstacleAt(track, o, state.raceTime, _ob);
+    for (const r of state.racers) {
+      if (r.respawn > 0 || r.star > 0 || r.spin > 0.3) continue;
+      const dx = r.x - _ob[0], dz = r.z - _ob[2];
+      if (o.kind === 'roller') {
+        if (dx * dx + dz * dz > (ROLLER_RADIUS + 1.1) ** 2 || Math.abs(r.y + 0.6 - _ob[1]) > ROLLER_RADIUS + 1) continue;
+        const d = Math.hypot(dx, dz) || 1;
+        r.x = _ob[0] + dx / d * (ROLLER_RADIUS + 1.15); r.z = _ob[2] + dz / d * (ROLLER_RADIUS + 1.15);
+        r.speed *= 0.5;
+        if (spinOut(state, r, 0.9)) emit(state, 'bump', r);
+      } else {
+        // A crusher only hurts while it is (nearly) down.
+        if (_ob[3] > 1.6 || dx * dx + dz * dz > (CRUSHER_HALF + 0.9) ** 2 || Math.abs(r.y - _ob[1]) > 3) continue;
+        r.speed = Math.min(r.speed, 4);
+        if (spinOut(state, r, 1.4)) emit(state, 'crush', r);
+      }
+    }
+  }
+}
+
 function updateBoxes(state: KartState): void {
   for (const box of state.boxes) {
     if (box.timer > 0) { box.timer = Math.max(0, box.timer - STEP); continue; }
@@ -460,6 +618,22 @@ function updateBoxes(state: KartState): void {
         box.timer = 2;
         emit(state, 'box', r);
         if (!r.item && r.roll <= 0 && r.finish === null) r.roll = 1.1;
+        break;
+      }
+    }
+  }
+}
+
+/** Coins: driving through one adds it to the racer's purse (capped); it reappears later. No event per coin (the HUD counts). */
+function updateCoins(state: KartState): void {
+  for (const c of state.coins) {
+    if (c.timer > 0) { c.timer = Math.max(0, c.timer - STEP); continue; }
+    for (const r of state.racers) {
+      if (r.respawn > 0 || r.finish !== null) continue;
+      const dx = r.x - c.x, dz = r.z - c.z;
+      if (dx * dx + dz * dz < 1.9 * 1.9 && Math.abs(r.y + 0.6 - c.y) < 2.2) {
+        c.timer = COIN_RESPAWN;
+        r.coins = Math.min(MAX_COINS, r.coins + 1);
         break;
       }
     }
@@ -485,16 +659,21 @@ function updateShells(state: KartState, track: Track): void {
     const sh = state.shells[i];
     sh.life -= STEP;
     const target = sh.target >= 0 ? state.racers[sh.target] : undefined;
-    const near = nearest(track, sh.x, sh.z, sh.hint, _near, sh.hint < 0 ? 0 : 24);
-    sh.hint = near.index;
+    const near = locate(track, sh.x, sh.y, sh.z, sh.seg, sh.hint, _near);
+    sh.hint = near.index; sh.seg = near.seg;
     let tx: number, tz: number;
     if (target && target.respawn <= 0 && Math.hypot(target.x - sh.x, target.z - sh.z) < 45) { tx = target.x; tz = target.z; }
-    else { pointAt(track, near.s + 16, 0, _pt); tx = _pt[0]; tz = _pt[2]; }
+    else {
+      // Follow the road (onto the target's route when it is on a branch).
+      advance(track, near.seg, near.s, 16, target && target.seg > 0 ? 1 << (target.seg - 1) : 0, _spot);
+      pointAt(track.paths[_spot.seg], _spot.s, 0, _pt); tx = _pt[0]; tz = _pt[2];
+    }
     const want = Math.atan2(tx - sh.x, tz - sh.z);
     sh.yaw = wrapAngle(sh.yaw + clamp(wrapAngle(want - sh.yaw), -4 * STEP, 4 * STEP));
     sh.x += Math.sin(sh.yaw) * 42 * STEP;
     sh.z += Math.cos(sh.yaw) * 42 * STEP;
-    sh.y = approach(sh.y, track.ground(sh.x, sh.z, near) + 0.7, 10, STEP);
+    // Bombs skim over gaps and water at road height.
+    sh.y = approach(sh.y, Math.max(track.ground(sh.x, sh.z, near, state.raceTime), near.y - 0.5) + 0.7, 10, STEP);
     let gone = sh.life <= 0;
     for (const r of state.racers) {
       if (gone || r.respawn > 0 || (r.id === sh.owner && sh.life > 6.6)) continue;

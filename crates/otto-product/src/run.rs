@@ -16,7 +16,6 @@
 //! each lens's terminal afterward.
 
 use std::collections::HashSet;
-use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -417,9 +416,10 @@ pub const MAX_AGENT_ATTEMPTS: u32 = 3;
 const MAX_RESUME_ATTEMPTS: i64 = 2;
 
 // ---------------------------------------------------------------------------
-// Per-agent cancellation registry (mirrors skill_eval::CancelRegistry)
+// Per-agent cancellation registry (the shared `otto_core::cancel` registry)
 // ---------------------------------------------------------------------------
 
+use otto_core::cancel::CancelRegistryExt;
 /// Maps analysis-agent id → a cancel flag, so a manual Stop (or shutdown) can
 /// signal an in-flight `run_agent_with_recovery` to abort without it being
 /// mistaken for a failure (which would auto-retry).
@@ -427,9 +427,7 @@ pub use otto_core::cancel::{new_cancel_registry, CancelRegistry};
 
 /// Trip the cancel flag for `agent_id` if it is registered (in-flight).
 pub fn signal_cancel(reg: &CancelRegistry, agent_id: &str) {
-    if let Some(flag) = reg.lock().unwrap().get(agent_id) {
-        flag.store(true, Ordering::Relaxed);
-    }
+    reg.signal(agent_id);
 }
 
 /// Cancel-registry key prefix of a story run WITHOUT an agent row (rewrite,
@@ -448,12 +446,7 @@ pub fn story_run_cancel_key(story_id: &str) -> String {
 
 /// Trip every in-flight rewrite / test / plan run of `story_id` (S4-23).
 pub fn signal_story_cancels(reg: &CancelRegistry, story_id: &str) {
-    let prefix = format!("{STORY_RUN_CANCEL_PREFIX}{story_id}:");
-    for (key, flag) in reg.lock().unwrap().iter() {
-        if key.starts_with(&prefix) {
-            flag.store(true, Ordering::Relaxed);
-        }
-    }
+    reg.signal_prefix(&format!("{STORY_RUN_CANCEL_PREFIX}{story_id}:"));
 }
 
 /// One lens agent's outcome after running as a real session.

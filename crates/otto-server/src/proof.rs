@@ -978,11 +978,6 @@ pub fn preview(content: &str) -> (String, bool) {
     core_preview(content)
 }
 
-/// Resolve the workspace a pack belongs to, erroring if not found.
-pub async fn pack_workspace(ctx: &ServerCtx, pack_id: &str) -> Result<String> {
-    Ok(ctx.proof_repo.get_pack(pack_id).await?.workspace_id)
-}
-
 /// Look up the proof pack for a work item, returning None if absent. Convenience
 /// for gates that should not create a pack (e.g. the PR gate read path).
 pub async fn pack_for_work_item(
@@ -1230,17 +1225,6 @@ pub async fn gate_pr(
 /// `allow_unproven` flag. Pure — the decision core of [`gate_pr`].
 fn pr_should_block(status: ProofStatus, allow_unproven: bool) -> bool {
     !matches!(status, ProofStatus::Passed | ProofStatus::Waived) && !allow_unproven
-}
-
-/// Map an error to a not-found-tolerant unit (used by best-effort gates).
-pub fn ignore_err<T>(r: Result<T>) -> Option<T> {
-    match r {
-        Ok(v) => Some(v),
-        Err(e) => {
-            tracing::debug!("proof gate best-effort error: {e}");
-            None
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------

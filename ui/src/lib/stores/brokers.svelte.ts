@@ -5,6 +5,7 @@ import { api } from '../api/client';
 import type { BrokerCluster, ConnectionSection, Id, UpsertClusterReq } from '../api/types';
 import { ws } from './workspace.svelte';
 import { loadErrorText } from '../loadError';
+import { latestOnly } from '../latest';
 
 class BrokersStore {
   clusters: BrokerCluster[] = $state([]);
@@ -28,30 +29,53 @@ class BrokersStore {
     this.openIds.map((id) => this.clusters.find((c) => c.id === id)).filter(Boolean) as BrokerCluster[],
   );
 
+  /** The workspace the lists above belong to, and the latest-load guard: a
+   *  switch A→B must never let A's slower response land under B — Test,
+   *  Remove and Move act on these ids by id alone (`/brokers/clusters/{id}`). */
+  private loadedWs: Id | null = null;
+  private loadGen = latestOnly();
+
   async load(wsId: Id): Promise<void> {
+    if (this.loadedWs !== wsId) {
+      // Entering another workspace: drop the previous one's clusters, tabs and
+      // sections so a failed load can't leave them listed under this one.
+      this.clusters = [];
+      this.sections = [];
+      this.openIds = [];
+      this.selectedId = null;
+      this.loadError = null;
+      this.loadedWs = wsId;
+    }
+    const t = this.loadGen.begin();
+    const current = () => t.current && wsId === ws.currentId;
     this.loading = true;
     try {
-      this.clusters = await api.get<BrokerCluster[]>(`/workspaces/${wsId}/brokers/clusters`);
+      const clusters = await api.get<BrokerCluster[]>(`/workspaces/${wsId}/brokers/clusters`);
+      if (!current()) return;
+      this.clusters = clusters;
       this.loadError = null;
       // Prune tabs/selection for clusters that no longer exist.
-      const exists = (id: Id) => this.clusters.some((c) => c.id === id);
+      const exists = (id: Id) => clusters.some((c) => c.id === id);
       this.openIds = this.openIds.filter(exists);
       if (this.selectedId && !exists(this.selectedId)) this.selectedId = null;
       if (!this.selectedId && this.openIds.length > 0) this.selectedId = this.openIds[0];
     } catch (e) {
-      // Inline (LoadState + Retry), never a toast — and the previous list stays.
-      this.loadError = loadErrorText(e);
+      // Inline (LoadState + Retry), never a toast — and this workspace's previous list stays.
+      if (current()) this.loadError = loadErrorText(e);
     } finally {
-      this.loading = false;
+      // A superseded load must not clear the spinner of the load that replaced it.
+      if (current()) this.loading = false;
     }
+    if (!current()) return;
     // Sections are best-effort: a failure shouldn't blank the cluster list.
     // Read the ONE global connection-section tree (shared with Connections + DB).
     try {
-      this.sections = await api.get<ConnectionSection[]>(
+      const sections = await api.get<ConnectionSection[]>(
         `/workspaces/${wsId}/connection-sections`,
       );
+      if (current()) this.sections = sections;
     } catch {
-      this.sections = [];
+      if (current()) this.sections = [];
     }
   }
 

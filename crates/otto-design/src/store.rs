@@ -690,26 +690,34 @@ impl Store {
     /// Hard-delete an EMPTY project (its artifacts are never deleted with it —
     /// a project that still files any artifact is a 409).
     pub async fn delete_project(&self, id: &str) -> Result<()> {
+        // ONE conditional statement: a separate count-then-delete let an
+        // artifact filed between the two keep a `project_id` pointing at a
+        // deleted project (no FK stops it), neither unfiled nor in any project.
+        let res = sqlx::query(
+            "DELETE FROM design_projects WHERE id = ?
+                AND NOT EXISTS (SELECT 1 FROM design_artifacts WHERE project_id = ?)",
+        )
+        .bind(id)
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("design.project.delete"))?;
+        if res.rows_affected() == 1 {
+            return Ok(());
+        }
+        // Nothing deleted: say why (missing vs still filing artifacts).
         let n: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM design_artifacts WHERE project_id = ?")
                 .bind(id)
                 .fetch_one(&self.pool)
                 .await
                 .map_err(dberr("design.project.delete.count"))?;
-        if n > 0 {
+        if n > 0 && self.get_project(id).await?.is_some() {
             return Err(Error::Conflict(format!(
                 "design project {id} still files {n} artifact(s); move or archive them first"
             )));
         }
-        let res = sqlx::query("DELETE FROM design_projects WHERE id = ?")
-            .bind(id)
-            .execute(&self.pool)
-            .await
-            .map_err(dberr("design.project.delete"))?;
-        if res.rows_affected() == 0 {
-            return Err(Error::NotFound(format!("design project {id}")));
-        }
-        Ok(())
+        Err(Error::NotFound(format!("design project {id}")))
     }
 
     /// Distinct workspaces that own any project / artifact (for the caller's
@@ -2458,6 +2466,40 @@ mod tests {
             meta: serde_json::json!({}),
             created_by: "u1".into(),
         }
+    }
+
+    /// The hard delete removes only an EMPTY project, in one statement, and
+    /// names why when it removed nothing.
+    #[tokio::test]
+    async fn delete_project_refuses_a_filing_project_and_reports_missing() {
+        let s = store().await;
+        let new = || NewProject {
+            workspace_id: "w".into(),
+            name: "P".into(),
+            description: String::new(),
+            epic_story_id: None,
+            swarm_project_id: None,
+            brand_kit_id: None,
+            meta: serde_json::json!({}),
+            created_by: "u1".into(),
+        };
+        let filing = s.create_project(new()).await.unwrap();
+        let mut a = art("A", "w");
+        a.project_id = Some(filing.id.clone());
+        s.insert_artifact(&a).await.unwrap();
+        assert!(matches!(
+            s.delete_project(&filing.id).await,
+            Err(Error::Conflict(_))
+        ));
+        assert!(s.get_project(&filing.id).await.unwrap().is_some());
+
+        let empty = s.create_project(new()).await.unwrap();
+        s.delete_project(&empty.id).await.unwrap();
+        assert!(s.get_project(&empty.id).await.unwrap().is_none());
+        assert!(matches!(
+            s.delete_project(&empty.id).await,
+            Err(Error::NotFound(_))
+        ));
     }
 
     #[tokio::test]

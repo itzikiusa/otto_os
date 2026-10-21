@@ -10,14 +10,16 @@ function analysis(getAnalysis: (id: string) => Promise<any>) {
   return componentFunctions(new URL('../src/modules/product/AnalysisTab.svelte', import.meta.url),
     ['pollOnce', 'clearPoll', 'isTerminal', 'selectHistory', 'startPolling'], {
       activeId: 'A', activeDetail: null, pollStartedAt: 0, pollTimer: null,
-      POLL_MAX_MS: 120_000, POLL_INTERVAL_MS: 3000, viewGeneration: 0, readSequence: 0,
+      POLL_MAX_MS: 30 * 60_000, POLL_INTERVAL_MS: 3000, viewGeneration: 0, readSequence: 0,
+      polling: false, pollFailures: 0, lastPollError: null, pollStopped: null, loadErrorText: String,
       product, toasts: { warn() { throw new Error('Client must not claim server timed out'); } },
       toastError() {}, liveQuery() { return { stop() {} }; },
     });
 }
 test('analysis still observes completion after two minutes', async () => {
   const state = analysis(async id => ({ analysis: { id, status: 'done' } }));
-  await state.pollOnce(); assert.equal(state.activeDetail.analysis.status, 'done');
+  state.polling = true; state.pollStartedAt = Date.now() - 2 * 60_000 - 1;
+  await state.pollOnce(); assert.equal(state.pollStopped, null); assert.equal(state.activeDetail.analysis.status, 'done');
 });
 test('late analysis refresh cannot overwrite a newly selected run', async () => {
   const old = deferred<any>();

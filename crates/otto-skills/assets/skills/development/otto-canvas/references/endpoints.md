@@ -8,7 +8,7 @@ back as `{"code","message"}` with the HTTP status.
 
 Verified against `crates/otto-canvas/src/http.rs`,
 `crates/otto-canvas/src/assist.rs`, and
-`crates/otto-server/src/product_chat.rs`.
+`crates/otto-product/src/chat.rs`.
 
 ---
 

@@ -14,12 +14,6 @@ use std::borrow::Cow;
 /// concrete, independent of the embedding implementation and generated data.
 pub type AssetLoader = fn(&str) -> Option<Cow<'static, [u8]>>;
 
-/// Root fallback handler: API/WS paths that reached here are true 404s;
-/// everything else is the unembedded development placeholder.
-pub async fn spa_fallback(uri: Uri) -> Response {
-    spa_fallback_with_assets(uri, None).await
-}
-
 /// Serve the binary's assets without making them server compilation inputs.
 pub async fn spa_fallback_with_assets(uri: Uri, assets: Option<AssetLoader>) -> Response {
     let path = uri.path();

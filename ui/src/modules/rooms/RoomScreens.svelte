@@ -20,7 +20,7 @@
   <div class="sources" class:pinned={!!pin}>{#each sources as source (source.id)}
     {@const presenter = room.members?.find(m => m.id === source.member_id)}
     <article class:focused={pin === source.id}>
-      <div class="source-head"><strong>{presenter?.name ?? 'Participant'} · {source.title}</strong><button class="btn small" aria-pressed={pin === source.id} aria-label={`${pin === source.id ? 'Unpin' : 'Pin'} ${presenter?.name ?? 'participant'}’s screen`} onclick={() => pin = pin === source.id ? null : source.id}>{pin === source.id ? 'Unpin' : 'Pin'}</button>
+      <div class="source-head"><strong>{presenter?.name ?? 'Participant'} · {source.title}</strong><button class="btn small pin" aria-pressed={pin === source.id} aria-label={`Pin ${presenter?.name ?? 'participant'}’s screen`} title={pin === source.id ? 'Unpin this screen' : 'Pin this screen'} onclick={() => pin = pin === source.id ? null : source.id}>Pin</button>
         {#if room.member_id === room.host_member_id || room.member_id === source.member_id}<button class="btn small" onclick={() => send({type: 'stop_present', source_id: source.id})}>Stop</button>{/if}
       </div>
       <div class="source-body">
@@ -42,5 +42,7 @@
   article { min-width: 0; border: 1px solid var(--border); border-radius: var(--radius-m); overflow: hidden; background: var(--surface); }
   .focused { grid-column: 1 / -1; order: -1; } .source-head { padding: 8px; } strong { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-s); }
   .video-stage { position: relative; aspect-ratio: 16/9; min-height: 120px; } video { width: 100%; height: 100%; object-fit: contain; display: block; } p { padding: 16px; color: var(--text-dim); }
+  /* Pinned is a toggle state (aria-pressed), shown with the selection tint. */
+  .pin[aria-pressed='true'] { background: var(--accent-soft); color: var(--accent-text); }
   @media (max-width: 640px) { .sources, .sources.pinned { grid-template-columns: minmax(0, 1fr); } .pinned article:not(.focused) .source-body { display: none; } }
 </style>

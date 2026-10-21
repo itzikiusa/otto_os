@@ -23,26 +23,9 @@ pub(crate) fn key_perm_warning(path: &str, mode: u32) -> Option<String> {
     }
 }
 
-/// Expand a leading `~` / `~/` to `$HOME`. Anything else is returned as-is.
-/// (Only a leading bare `~` is expanded — `~user` is left alone, matching how
-/// the keys are typically stored, e.g. `~/.ssh/id_rsa`.)
-fn expand_tilde(path: &str) -> String {
-    if path == "~" {
-        if let Some(home) = std::env::var_os("HOME") {
-            return home.to_string_lossy().into_owned();
-        }
-    } else if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
-            let mut p = home.to_string_lossy().into_owned();
-            if !p.ends_with('/') {
-                p.push('/');
-            }
-            p.push_str(rest);
-            return p;
-        }
-    }
-    path.to_string()
-}
+// Only a leading `~` / `~/` is expanded — `~user` is left alone, matching how
+// the keys are typically stored, e.g. `~/.ssh/id_rsa`.
+use otto_core::paths::expand_tilde;
 
 /// Stat the key file and return a permission warning if it is group/other
 /// accessible. Returns `None` on non-unix, or when the file is missing /

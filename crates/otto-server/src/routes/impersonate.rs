@@ -140,8 +140,8 @@ pub async fn start<C: ImpersonateCtx>(
         return Err(Error::Forbidden("cannot impersonate a Users-admin".into()).into());
     }
 
-    // TODO(mobile): reject when ctx has a share scope (guest tokens may never
-    // impersonate). `scope` does not exist until the mobile feature lands.
+    // Share (guest) tokens never get here: `require_human` above refuses any
+    // scoped credential (`AuthContext::is_scoped`), as it does agent and MCP ones.
 
     // Guardrail 6 — SHORT FIXED TTL (never slid in `authenticate`). The token's
     // `user_id` is the admin (real); `acting_as_user_id` is the target.

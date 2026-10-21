@@ -72,10 +72,6 @@ export function createProject(body: CreateDesignProjectReq) {
   return api.post<DesignProject>('/design/projects', body);
 }
 
-export function getProject(id: Id) {
-  return api.get<DesignProject>(`/design/projects/${enc(id)}`);
-}
-
 export function updateProject(id: Id, body: UpdateDesignProjectReq) {
   return api.patch<DesignProject>(`/design/projects/${enc(id)}`, body);
 }

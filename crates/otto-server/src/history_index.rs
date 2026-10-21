@@ -24,10 +24,6 @@ static RUNNING: AtomicBool = AtomicBool::new(false);
 /// Emit progress every this many files.
 const PROGRESS_EVERY: u64 = 25;
 
-pub fn is_running() -> bool {
-    RUNNING.load(Ordering::Relaxed)
-}
-
 /// Start a scan unless one is already running. Returns whether it started.
 pub fn spawn_scan(ctx: ServerCtx, workspace_id: Option<Id>) -> bool {
     if RUNNING.swap(true, Ordering::AcqRel) {

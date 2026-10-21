@@ -263,6 +263,8 @@ export interface SwarmDetail extends Swarm {
   counts: SwarmCounts;
 }
 
+/** `GET /swarm/swarms/{sid}/graph` (contract #83) — API-only: no UI view reads it since the
+ *  task/run graph view was replaced by the agent-centric `AgentGraph`. Kept as the wire mirror. */
 export interface GraphNode {
   id: string;
   kind: 'task' | 'run';

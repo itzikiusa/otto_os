@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { formatBytes } from '../../lib/metric-format';
   import { plural } from '../../lib/plural';
   import Badge from '../../lib/components/Badge.svelte';
   import { sentenceCase } from '../../lib/labels';
@@ -60,12 +61,6 @@
     generation++;
     result = null; loading = false; openFile = null;
   });
-
-  function fmtBytes(n: number): string {
-    if (n < 1024) return `${n} B`;
-    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-    return `${(n / (1024 * 1024)).toFixed(1)} MB`;
-  }
 
   // Last path segment, for a compact file label (the absolute path is in title).
   function leaf(path: string): string {
@@ -153,7 +148,7 @@
               <span class="file-kind kind-{f.kind}">{kindLabels[f.kind] ?? f.kind}</span>
               <span class="file-name mono" title={f.path}>{leaf(f.path)}</span>
               <Badge tone={f.enforcement === 'enforced' ? 'accent' : 'neutral'} label={sentenceCase(f.enforcement)} />
-              <span class="file-size dim">{fmtBytes(f.size)}</span>
+              <span class="file-size dim">{formatBytes(f.size)}</span>
               <span class="chevron" class:open={openFile === f.path}><Icon name="chevronRight" noflip size={12} /></span>
             </button>
             {#if openFile === f.path}

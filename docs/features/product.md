@@ -48,7 +48,7 @@ the session manager + improvement engine), and a Svelte UI module.
 | · memory | `crates/otto-product/src/memory_facade.rs`, `extract.rs` | Ingest structured artifacts into `otto-memory`; deterministic extractors |
 | Persistence | `crates/otto-state/src/product.rs` | `ProductRepo` + the `product_*` tables |
 | Orchestration | `crates/otto-product/src/run.rs` + `host.rs` | `run_analysis` / `run_rewrite` / `run_generate_tests` / `run_generate_plan`, retries, summarizers — generic over the `ProductRunHost` trait |
-| · PTY mechanics | `crates/otto-server/src/product_agent.rs` | `ProductRunHost` for `ServerCtx`: spawn a provider as a real session, inject the prompt (codex settle + repaste), watch to a result with bounded recovery |
+| · PTY mechanics | `crates/otto-server/src/product_host.rs` (`impl ProductRunHost for ServerCtx`) | `ProductRunHost` for `ServerCtx`: spawn a provider as a real session, inject the prompt (codex settle + repaste), watch to a result with bounded recovery |
 | Watcher | `crates/otto-product/src/watcher.rs` | The background poll/reconcile supervisor |
 | Swarm bridge | `crates/otto-product/src/swarm.rs` | `story_to_swarm` (Plan → Swarm), discovery runs |
 | Discovery chat / refinement | `crates/otto-product/src/chat.rs`, `refine.rs` | Conversational story agents — generic over the `ProductStudioHost` trait (`host.rs`), implemented for `ServerCtx` in `crates/otto-server/src/product_host.rs` |

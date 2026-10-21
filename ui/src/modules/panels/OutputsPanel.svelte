@@ -13,6 +13,7 @@
   //
   // Hosted two ways: as the right-panel **Outputs** tab (no props → the focused
   // agent session) and embedded under the History conversation (`embedded`).
+  import { copyText } from '../../lib/clipboard';
   import { untrack } from 'svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { ws } from '../../lib/stores/workspace.svelte';
@@ -221,12 +222,8 @@
 
   async function copyPath(a: Artifact): Promise<void> {
     const v = a.path ?? a.url ?? '';
-    try {
-      await navigator.clipboard.writeText(v);
-      toasts.info('Copied', v);
-    } catch {
-      toasts.error('Couldn’t copy', v);
-    }
+    if (await copyText(v)) toasts.info('Copied', v);
+    else toasts.error('Couldn’t copy', v);
   }
 
   /** Absolute time for the hover title next to the relative `rel()` label. */
@@ -298,7 +295,7 @@
       {/snippet}
       <ul class="alist" role="listbox" aria-label="Artifacts">
         {#each list as a, index (a.id)}
-          <li>
+          <li role="none">
             <button
               class="arow"
               class:on={selectedId === a.id}

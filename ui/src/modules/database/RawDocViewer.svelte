@@ -5,11 +5,12 @@
   // value is on the page and ⌘F / Find searches all of it (the JSON tree only
   // renders its open branches). CodeMirror virtualizes, so a 100 KB+ document
   // opens instantly. Mounted by ResultsGrid while `flow.rawDoc` is set.
+  import { formatBytes } from '../../lib/metric-format';
   import Icon from '../../lib/components/Icon.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import CodeEditor from '../../lib/components/CodeEditor.svelte';
   import type { EditFlow } from './EditFlow.svelte';
-  import { copyText, fmtBytes } from './results-format';
+  import { copyWithToast } from './results-format';
   import { claimFind, editorEscGuard } from './doc-modal';
 
   interface Props {
@@ -33,7 +34,7 @@
   <Modal title={flow.engine === 'mongodb' ? 'Full document' : 'Raw JSON'} width={760} onclose={() => (flow.rawDoc = null)}>
     <div class="raw-doc">
       <div class="rd-tools">
-        <span class="rd-meta">{fmtBytes(doc.text.length)} · read-only</span>
+        <span class="rd-meta">{formatBytes(doc.text.length)} · read-only</span>
         <span class="grow"></span>
         <button class="icon-btn" onclick={() => editor?.openSearch()} aria-label="Find in document" title="Find in document (⌘F)">
           <Icon name="search" size={13} />
@@ -41,7 +42,7 @@
         <button class="icon-btn wrap-toggle" aria-pressed={wrap} onclick={() => (wrap = !wrap)} aria-label="Wrap long lines" title="Wrap long lines">
           <Icon name="text" size={13} />
         </button>
-        <button class="btn small" onclick={() => copyText(doc.text, ['Copied', 'Full document copied'])} title="Copy the full document">
+        <button class="btn small" onclick={() => copyWithToast(doc.text, ['Copied', 'Full document copied'])} title="Copy the full document">
           <Icon name="copy" size={12} />Copy
         </button>
       </div>

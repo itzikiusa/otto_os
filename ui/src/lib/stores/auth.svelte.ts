@@ -84,6 +84,11 @@ function metaWithin(ms: number): Promise<MetaResp> {
   return Promise.race([api.get<MetaResp>('/meta', ctl.signal), expired]).finally(() => clearTimeout(timer));
 }
 
+/** Backoff after a failed `/auth/capabilities` read (ms); the last repeats.
+ *  A failure used to leave the map empty — a silent all-deny shell for a
+ *  non-root user — until a manual reload (error-handling-1-05). */
+export const CAPABILITIES_RETRY_MS = [2_000, 5_000, 15_000, 30_000, 60_000];
+
 /** Tab-scoped (sessionStorage) wizard step, saved once the root account
  *  exists: a reload mid-setup then RESUMES the wizard instead of landing in
  *  the app with the workspace / usage / tool steps silently skipped (S20-11).
@@ -101,6 +106,12 @@ class AuthStore {
   realUser: User | null = $state(null);
   /** Effective capabilities map — feature → capability string. Populated after boot. */
   capabilities: Record<string, string> = $state({});
+  /** The last `/auth/capabilities` read FAILED: the empty map above is not
+   *  the user's real access. The shell shows "Couldn’t load your permissions
+   *  — Retry" while it is set; retries run with backoff and on reconnect. */
+  capabilitiesError = $state(false);
+  private capsRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  private capsAttempt = 0;
 
   /** True when the active bearer is an impersonation token. */
   get isImpersonating(): boolean {
@@ -147,16 +158,71 @@ class AuthStore {
     }
   }
 
+  /** Forget any capabilities failure + pending retry (identity change, sign-out). */
+  private resetCapabilitiesRetry(): void {
+    if (this.capsRetryTimer) clearTimeout(this.capsRetryTimer);
+    this.capsRetryTimer = null;
+    this.capsAttempt = 0;
+    this.capabilitiesError = false;
+  }
+
+  private capabilitiesLoaded(caps: Record<string, string>): void {
+    this.resetCapabilitiesRetry();
+    this.capabilities = caps;
+  }
+
+  /** A read for `token` failed: flag it (never a silent all-deny) and retry
+   *  with backoff — unless the bearer changed meanwhile. */
+  private capabilitiesFailed(token: string | null): void {
+    if (token !== getToken()) return;
+    this.capabilitiesError = true;
+    if (this.capsRetryTimer) clearTimeout(this.capsRetryTimer);
+    const delay = CAPABILITIES_RETRY_MS[Math.min(this.capsAttempt, CAPABILITIES_RETRY_MS.length - 1)];
+    this.capsAttempt += 1;
+    this.capsRetryTimer = setTimeout(() => {
+      this.capsRetryTimer = null;
+      void this.retryCapabilities();
+    }, delay);
+    // A background retry never keeps a Node test process alive.
+    (this.capsRetryTimer as { unref?: () => void } | null)?.unref?.();
+  }
+
+  /** Re-read `/auth/capabilities` for the signed-in user (the banner's Retry,
+   *  the backoff timer, a reconnect). True when the map is now loaded. */
+  async retryCapabilities(): Promise<boolean> {
+    if (this.capsRetryTimer) clearTimeout(this.capsRetryTimer);
+    this.capsRetryTimer = null;
+    const token = getToken();
+    if (!token || !this.me) return false;
+    try {
+      const resp = await api.get<CapabilitiesResp>('/auth/capabilities');
+      if (token !== getToken()) return false;
+      this.capabilitiesLoaded(resp.capabilities);
+      return true;
+    } catch {
+      this.capabilitiesFailed(token);
+      return false;
+    }
+  }
+
+  /** The events socket (re)connected — the daemon answers again, possibly a
+   *  restarted one: retry at once when the last capabilities read failed. */
+  noteConnected(): void {
+    if (this.capabilitiesError) void this.retryCapabilities();
+  }
+
   /** Fetch the caller's effective capabilities from /auth/capabilities. */
   private async loadCapabilities(): Promise<void> {
     // Never show the previous identity's grants while refreshing or on failure.
     const token = getToken();
+    this.resetCapabilitiesRetry();
     this.capabilities = {};
     try {
       const resp = await api.get<CapabilitiesResp>('/auth/capabilities');
-      if (token === getToken()) this.capabilities = resp.capabilities;
+      if (token === getToken()) this.capabilitiesLoaded(resp.capabilities);
     } catch {
-      // non-fatal: capabilities stay empty (all-deny for non-root)
+      // Non-fatal for boot, but flagged and retried (capabilitiesError).
+      this.capabilitiesFailed(token);
     }
   }
 
@@ -175,6 +241,7 @@ class AuthStore {
     this.me = null;
     this.realUser = null;
     this.capabilities = {};
+    this.resetCapabilitiesRetry();
     this.phase = 'loading';
     try {
       await this.loadMe();
@@ -245,12 +312,14 @@ class AuthStore {
     try {
       if (early && token === getToken()) {
         this.applyMe(await early.me);
+        this.resetCapabilitiesRetry();
         this.capabilities = {};
         try {
           const resp = await early.caps;
-          if (token === getToken()) this.capabilities = resp.capabilities;
+          if (token === getToken()) this.capabilitiesLoaded(resp.capabilities);
         } catch {
-          // non-fatal: capabilities stay empty (all-deny for non-root)
+          // Non-fatal for boot, but flagged and retried (capabilitiesError).
+          this.capabilitiesFailed(token);
         }
       } else {
         await this.loadMe();
@@ -354,6 +423,7 @@ class AuthStore {
       this.me = null;
       this.realUser = null;
       this.capabilities = {};
+      this.resetCapabilitiesRetry();
       this.phase = 'login';
       return;
     }
@@ -391,6 +461,7 @@ class AuthStore {
       this.me = null;
       this.realUser = null;
       this.capabilities = {};
+      this.resetCapabilitiesRetry();
       this.phase = 'login';
     } finally {
       this.verifying401 = false;
@@ -417,6 +488,7 @@ class AuthStore {
     this.me = null;
     this.realUser = null;
     this.capabilities = {};
+    this.resetCapabilitiesRetry();
     this.phase = 'login';
   }
 }

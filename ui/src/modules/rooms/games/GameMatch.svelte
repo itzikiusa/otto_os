@@ -6,7 +6,7 @@
   import { kartSeats, shooterSeats, type HumanSeat } from './setup';
   import KartGame, { type KartLink, type KartSetup } from './kart/KartGame.svelte';
   import ShooterGame from './shooter/ShooterGame.svelte';
-  import type { ShooterLink, ShooterSetup } from './shooter/sim';
+  import type { ShooterLink, ShooterSetup, TeamSize } from './shooter/sim';
   import * as kartNet from './kart/net';
   import * as shooterNet from './shooter/net';
   import { standings, type KartEvent, type KartInput, type KartState } from './kart/sim';
@@ -14,8 +14,8 @@
   import type { FighterId } from './shooter/catalog';
   import { shooterResults, type ShooterEvent, type ShooterInput, type ShooterState } from './shooter/sim';
 
-  interface Props { credential: GameRoomCredential; origin: string; pick?: string; difficulty?: Difficulty; bots?: number; onexit: () => void }
-  let { credential, origin, pick = '', difficulty = 'normal', bots = 9, onexit }: Props = $props();
+  interface Props { credential: GameRoomCredential; origin: string; pick?: string; difficulty?: Difficulty; bots?: number; teamSize?: TeamSize; onexit: () => void }
+  let { credential, origin, pick = '', difficulty = 'normal', bots = 9, teamSize = 1, onexit }: Props = $props();
   const kind = $derived(credential.config.game);
   const game = $derived(gameFor(kind));
   const isHost = $derived(credential.role === 'host');
@@ -57,7 +57,7 @@
       kartSetup = isHost ? { track: state.config.map as KartSetup['track'], difficulty: cpuLevel, seed, seats: kartSeats(humans.map(h => ({ ...h, pick: h.pick || RACERS[h.slot % RACERS.length].id })), cpuFill) } : null;
     } else {
       shooterLink.role = isHost ? 'host' : 'guest';
-      shooterSetup = isHost ? { map: state.config.map as ShooterSetup['map'], difficulty: cpuLevel, seed, seats: shooterSeats(humans.map(h => ({ ...h, pick: h.pick || FIGHTERS[(h.slot * 3) % FIGHTERS.length].id })), botCount) } : null;
+      shooterSetup = isHost ? { map: state.config.map as ShooterSetup['map'], difficulty: cpuLevel, seed, seats: shooterSeats(humans.map(h => ({ ...h, pick: h.pick || FIGHTERS[(h.slot * 3) % FIGHTERS.length].id })), botCount), teamSize } : null;
     }
   }
 
@@ -83,8 +83,8 @@
         const state = kartNet.decodeSnapshot(event.data, (slot, racer) => (slot >= 0 ? memberName(slot) : RACERS.find(r => r.id === racer)?.name ?? 'CPU'));
         if (state) { kartLink.snapshots!.push({ state, at }); if (kartLink.snapshots!.length > 4) kartLink.snapshots!.shift(); }
       } else {
-        const prev = shooterLink.snapshots!.at(-1)?.state.loot ?? null;
-        const state = shooterNet.decodeSnapshot(event.data, slot => memberName(slot), prev);
+        const prev = shooterLink.snapshots!.at(-1)?.state;
+        const state = shooterNet.decodeSnapshot(event.data, slot => memberName(slot), prev?.loot ?? null, prev?.builds ?? null);
         if (state) { shooterLink.snapshots!.push({ state, at }); if (shooterLink.snapshots!.length > 4) shooterLink.snapshots!.shift(); }
       }
     }
@@ -116,7 +116,7 @@
     const result = standings(state).map(r => ({ place: r.place, name: r.name.slice(0, 40), time: Math.round(r.time * 1000) / 1000 }));
     client.send({ type: 'finish', round: room.round, generation: room.generation, result: { game: 'kart', standings: result } });
   }
-  function shooterFrame(state: ShooterState, events: ShooterEvent[], withLoot: boolean) { sendSnapshot(shooterNet.encodeSnapshot(state, events, withLoot)); }
+  function shooterFrame(state: ShooterState, events: ShooterEvent[], withLoot: boolean, withBuilds = false) { sendSnapshot(shooterNet.encodeSnapshot(state, events, withLoot, withBuilds)); }
   function shooterInput(input: ShooterInput, fighter: FighterId) { if (live() && room) client.send({ type: 'input', round: room.round, generation: room.generation, seq: ++seq, data: shooterNet.encodeInput(input, fighter) }); }
   function shooterFinish(state: ShooterState) {
     if (!isHost || !room) return;

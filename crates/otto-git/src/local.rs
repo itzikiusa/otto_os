@@ -805,30 +805,34 @@ impl DiffTarget {
 /// The `(label, rev)` integration branches a branch can have "landed in": the
 /// cleanup base first, then whichever of `develop` / `main` / `master` exist —
 /// the local branch when there is one (a merge not pushed yet still counts),
-/// else `origin/<name>`. Read off the `for-each-ref` listings already in hand
-/// (`refs_with_base`), so it costs no extra spawn.
+/// else `origin/<name>`. The base resolves the same way: a default branch
+/// that only exists as `origin/<base>` (a `-b develop` clone, a deleted local
+/// `main`) is walked as `origin/<base>`, never as a bare name git can't
+/// resolve. A label whose `origin/`-stripped name is already present is not
+/// added twice (`origin/develop` as the base hides the `develop` candidate).
+/// Read off the `for-each-ref` listings already in hand (`refs_with_base`),
+/// so it costs no extra spawn.
 fn integration_bases(
     base: Option<&str>,
     local_out: &str,
     remote_out: &str,
 ) -> Vec<(String, String)> {
-    let local_has = |name: &str| {
-        local_out
-            .lines()
-            .any(|l| l.split('\t').next() == Some(name))
-    };
-    let remote_has = |name: &str| {
-        let full = format!("refs/remotes/origin/{name}");
-        remote_out
-            .lines()
-            .any(|l| l.split('\t').next() == Some(full.as_str()))
-    };
+    let local_has = |name: &str| listed_oid_local(local_out, name).is_some();
+    let remote_has =
+        |name: &str| listed_oid_remote(remote_out, &format!("origin/{name}")).is_some();
     let mut out: Vec<(String, String)> = base
-        .map(|b| (b.to_string(), b.to_string()))
+        .map(|b| {
+            let rev = if !local_has(b) && remote_has(b) {
+                format!("origin/{b}")
+            } else {
+                b.to_string()
+            };
+            (b.to_string(), rev)
+        })
         .into_iter()
         .collect();
     for cand in ["develop", "main", "master"] {
-        if out.iter().any(|(label, _)| label == cand) {
+        if out.iter().any(|(label, _)| integration_name(label) == cand) {
             continue;
         }
         if local_has(cand) {
@@ -838,6 +842,39 @@ fn integration_bases(
         }
     }
     out
+}
+
+/// An integration label with its `origin/` prefix dropped — `origin/develop`
+/// and `develop` name the same integration branch.
+fn integration_name(label: &str) -> &str {
+    label.strip_prefix("origin/").unwrap_or(label)
+}
+
+/// The tip of local branch `name` from the `refs_with_base` local listing
+/// (`name TAB upstream TAB HEAD TAB sha TAB track`).
+fn listed_oid_local<'a>(local_out: &'a str, name: &str) -> Option<&'a str> {
+    local_out.lines().find_map(|l| {
+        let mut cols = l.split('\t');
+        (cols.next() == Some(name))
+            .then(|| cols.nth(2).map(str::trim))
+            .flatten()
+    })
+}
+
+/// The tip of remote-tracking branch `short` (`origin/x`) from the
+/// `refs_with_base` remote listing (`refs/remotes/<short> TAB sha`).
+fn listed_oid_remote<'a>(remote_out: &'a str, short: &str) -> Option<&'a str> {
+    let full = format!("refs/remotes/{short}");
+    remote_out.lines().find_map(|l| {
+        let (name, sha) = l.split_once('\t')?;
+        (name.trim() == full).then(|| sha.trim())
+    })
+}
+
+/// The commit `rev` names, read from the listings when it is a branch there
+/// (local first, as git resolves a bare name) — `None` for anything else.
+fn listed_oid<'a>(rev: &str, local_out: &'a str, remote_out: &'a str) -> Option<&'a str> {
+    listed_oid_local(local_out, rev).or_else(|| listed_oid_remote(remote_out, rev))
 }
 
 /// A full-length (SHA-1 or SHA-256) hex object id.
@@ -2294,8 +2331,8 @@ impl LocalGit {
 
     /// List refs, flagging every local/remote branch already contained in the
     /// cleanup base branch (`base_override` if valid, else the detected default).
-    /// Containment is computed with two bulk `git branch --merged <base>` calls
-    /// (one local, one remote) — never a per-branch merge-base spawn. The base
+    /// Containment is computed with one bulk `git for-each-ref --merged=<base>`
+    /// per integration branch — never a per-branch merge-base spawn. The base
     /// branch itself is never flagged (it always "contains" itself). `base_branch`
     /// in the response echoes the resolved base so the UI can exclude/label it.
     pub async fn refs_with_base(&self, base_override: Option<&str>) -> Result<RefsResp> {
@@ -2341,7 +2378,11 @@ impl LocalGit {
             Some(_) => landed_sets.first().unwrap_or(&empty),
             None => &empty,
         };
-        let is_integration = |name: &str| integrations.iter().any(|(label, _)| label == name);
+        let is_integration = |name: &str| {
+            integrations
+                .iter()
+                .any(|(label, _)| integration_name(label) == name)
+        };
         // Labels of every integration branch holding `name` (none for an
         // integration branch itself — main ⊂ develop is not a cleanup hint).
         let landed_in = |name: &str, remote: bool| -> Vec<String> {
@@ -2469,10 +2510,13 @@ impl LocalGit {
 
     /// [`Self::merged_sets`] memoized per repo on the ref state: the base's
     /// commit id plus every branch tip (the `for-each-ref` listings already in
-    /// hand). `branch --merged` walks history once per branch tip — O(branches
-    /// × merge-base) — and the Git page asks every 30 s; while nothing moved
+    /// hand). `--merged` walks history once per branch tip — O(branches ×
+    /// merge-base) — and the Git page asks every 30 s; while nothing moved
     /// the answer is the same, so only a fetch/commit/checkout that changes a
-    /// tip (or the base) pays for it again.
+    /// tip (or the base) pays for it again. A base that is a listed branch
+    /// (every integration branch) is already hashed with the listings, so the
+    /// memo check costs no spawn; only an override naming a tag or a sha is
+    /// resolved first.
     async fn merged_sets_cached(
         &self,
         base: Option<&str>,
@@ -2493,8 +2537,14 @@ impl LocalGit {
         let Some(b) = base else {
             return (Default::default(), Default::default());
         };
-        let Ok(base_oid) = self.resolve_commit(b).await else {
-            return self.merged_sets(base).await.0;
+        let base_oid = match listed_oid(b, local_out, remote_out) {
+            Some(oid) => oid.to_string(),
+            // An unresolvable base can't be walked either: skip the doomed
+            // `--merged` spawn instead of repeating it on every poll.
+            None => match self.resolve_commit(b).await {
+                Ok(oid) => oid,
+                Err(_) => return (Default::default(), Default::default()),
+            },
         };
         let state = {
             use std::hash::{Hash, Hasher};
@@ -2513,7 +2563,7 @@ impl LocalGit {
             }
         }
         let (sets, complete) = self.merged_sets(base).await;
-        // A failed `branch --merged` (timeout, lock) is never memoized: its
+        // A failed `--merged` walk (timeout, lock) is never memoized: its
         // empty set would stick until a ref moved.
         if complete {
             memo.lock().unwrap_or_else(|p| p.into_inner()).insert(
@@ -2525,8 +2575,9 @@ impl LocalGit {
     }
 
     /// The `(local, remote)` sets of branch short-names whose tip is contained in
-    /// `base` — one bulk `git branch --merged` each. Empty when `base` is `None`
-    /// or the git call fails (best-effort: cleanup hints must never break `refs`).
+    /// `base` — ONE bulk `git for-each-ref --merged` over both namespaces.
+    /// Empty when `base` is `None` or the git call fails (best-effort: cleanup
+    /// hints must never break `refs`).
     async fn merged_sets(
         &self,
         base: Option<&str>,
@@ -2540,30 +2591,30 @@ impl LocalGit {
         let Some(base) = base else {
             return (Default::default(), true);
         };
-        let parse = |out: String| {
-            out.lines()
-                .map(str::trim)
-                .filter(|l| !l.is_empty() && !l.ends_with("/HEAD"))
-                .map(str::to_string)
-                .collect::<std::collections::HashSet<String>>()
-        };
-        let local_args = ["branch", "--merged", base, "--format=%(refname:lstrip=2)"];
-        let remote_args = [
-            "branch",
-            "-r",
-            "--merged",
-            base,
-            "--format=%(refname:lstrip=2)",
-        ];
-        let (local, remote) = tokio::join!(self.run_read(&local_args), self.run_read(&remote_args));
-        let complete = local.is_ok() && remote.is_ok();
-        (
-            (
-                local.map(parse).unwrap_or_default(),
-                remote.map(parse).unwrap_or_default(),
-            ),
-            complete,
-        )
+        let merged = format!("--merged={base}");
+        let out = self
+            .run_read(&[
+                "for-each-ref",
+                &merged,
+                "--format=%(refname)",
+                "refs/heads",
+                "refs/remotes",
+            ])
+            .await;
+        let complete = out.is_ok();
+        let mut local = std::collections::HashSet::new();
+        let mut remote = std::collections::HashSet::new();
+        for full in out.unwrap_or_default().lines().map(str::trim) {
+            if let Some(name) = full.strip_prefix("refs/heads/") {
+                local.insert(name.to_string());
+            } else if let Some(name) = full.strip_prefix("refs/remotes/") {
+                // Skip the symbolic `<remote>/HEAD`.
+                if !name.ends_with("/HEAD") {
+                    remote.insert(name.to_string());
+                }
+            }
+        }
+        ((local, remote), complete)
     }
 
     /// Compute a diff for `target`. When `pathspec` is `Some(path)`, every git
@@ -3420,17 +3471,20 @@ impl LocalGit {
     /// Callers point this ONLY at dedicated run worktrees, never at a user's
     /// main checkout.
     pub async fn commit_all_if_dirty(&self, message: &str) -> Result<Option<String>> {
-        self.run(&[
-            "add",
-            "-A",
-            "--",
-            ".",
-            ":(exclude).mcp.json",
+        // Otto's own launcher files (`.mcp.json`, agy's `.agents/mcp_config.json`,
+        // grok's `.grok/config.toml` — secret env included) are never swept in.
+        let launcher: Vec<String> = otto_core::paths::LAUNCHER_ARTIFACTS
+            .iter()
+            .map(|p| format!(":(exclude){p}"))
+            .collect();
+        let mut args = vec!["add", "-A", "--", "."];
+        args.extend(launcher.iter().map(String::as_str));
+        args.extend([
             ":(exclude).env",
             ":(exclude).env.*",
             ":(exclude,glob)**/.DS_Store",
-        ])
-        .await?;
+        ]);
+        self.run(&args).await?;
         let staged = self.run(&["diff", "--cached", "--name-only"]).await?;
         if staged.trim().is_empty() {
             return Ok(None);
@@ -4439,6 +4493,14 @@ impl LocalGit {
     ) -> Result<MergeResult> {
         Self::guard_ref(source)?;
         Self::guard_ref(target)?;
+        // Merging a branch into itself is a no-op git reports as "Already up
+        // to date" — and the MergeCommit path would then record an empty
+        // "Merge branch 'x' into x" commit. Refuse it up front.
+        if source.trim() == target.trim() {
+            return Err(Error::Invalid(format!(
+                "cannot merge '{source}' into itself — pick a different target branch"
+            )));
+        }
         // Refuse to START a merge over an unfinished one (or a rebase /
         // cherry-pick / revert). The old "already merging" exemption then
         // checked out `target`, which git refuses with "you need to resolve
@@ -4560,9 +4622,18 @@ impl LocalGit {
             // into develop after develop already contains it). Build an explicit
             // 2-parent merge commit by hand and fast-forward onto it: its tree is
             // target's current tree, so the working tree is left untouched.
-            if up_to_date && matches!(strategy, LocalMergeStrategy::MergeCommit) {
+            // When source's tip IS target's tip (a branch just cut from target
+            // with no commits) there is nothing to record: `-p X -p X` collapses
+            // to one parent and would land an empty "Merge branch" commit, so
+            // that case falls through to the plain `up_to_date` result.
+            let heads = if up_to_date && matches!(strategy, LocalMergeStrategy::MergeCommit) {
                 let target_head = self.run(&["rev-parse", "HEAD"]).await?.trim().to_string();
                 let source_head = self.resolve_commit(source).await?;
+                (source_head != target_head).then_some((target_head, source_head))
+            } else {
+                None
+            };
+            if let Some((target_head, source_head)) = heads {
                 let tree = self
                     .run(&["rev-parse", "HEAD^{tree}"])
                     .await?
@@ -5515,3 +5586,198 @@ pub const HEAD_REMOTES_CAP: usize = 20;
 #[cfg(test)]
 #[path = "local/tests.rs"]
 mod tests;
+
+/// Merged marks, the up-to-date merge guard and the launcher-file sweep.
+/// Kept beside the code (not in `local/tests.rs`) so each fix carries the
+/// test that fails without it.
+#[cfg(test)]
+mod merge_and_marks_tests {
+    use super::*;
+
+    fn sh(dir: &Path, args: &[&str]) -> String {
+        let mut cmd = std::process::Command::new("git");
+        test_hermetic(&mut cmd);
+        let out = cmd
+            .current_dir(dir)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .args(args)
+            .output()
+            .expect("spawn git");
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn repo(branch: &str) -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("repo");
+        std::fs::create_dir(&dir).unwrap();
+        sh(&dir, &["init", "-q", "-b", branch]);
+        sh(&dir, &["config", "user.email", "otto@test.local"]);
+        sh(&dir, &["config", "user.name", "Otto Test"]);
+        sh(&dir, &["config", "commit.gpgsign", "false"]);
+        std::fs::write(dir.join("a.txt"), "a\n").unwrap();
+        sh(&dir, &["add", "."]);
+        sh(&dir, &["commit", "-qm", "init"]);
+        (tmp, dir)
+    }
+
+    fn commit(dir: &Path, file: &str) {
+        std::fs::write(dir.join(file), file).unwrap();
+        sh(dir, &["add", file]);
+        sh(dir, &["commit", "-qm", file]);
+    }
+
+    /// A branch cut from `main` with no commits, merged back with
+    /// MergeCommit, is up to date — no empty "Merge branch" commit lands.
+    #[tokio::test]
+    async fn merge_commit_of_an_identical_tip_reports_up_to_date_without_a_commit() {
+        let (_tmp, dir) = repo("main");
+        sh(&dir, &["branch", "feature"]);
+        let before = sh(&dir, &["rev-parse", "HEAD"]);
+        let git = LocalGit::new(&dir);
+        let res = git
+            .merge_branch("feature", "main", LocalMergeStrategy::MergeCommit, false)
+            .await
+            .unwrap();
+        assert_eq!(res.status, "up_to_date");
+        assert!(res.commit.is_none());
+        assert_eq!(
+            sh(&dir, &["rev-parse", "HEAD"]),
+            before,
+            "main did not move"
+        );
+        // Merging a branch into itself is refused outright.
+        let err = git
+            .merge_branch("main", "main", LocalMergeStrategy::MergeCommit, false)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Invalid(_)), "{err}");
+        assert_eq!(sh(&dir, &["rev-parse", "HEAD"]), before);
+    }
+
+    /// No local `main`, only `origin/main` (a `-b develop` clone): the base
+    /// is walked as `origin/main`, so a branch it holds is marked "main".
+    #[tokio::test]
+    async fn merged_into_reports_a_remote_only_default_branch() {
+        let (_tmp, dir) = repo("develop");
+        sh(&dir, &["branch", "old"]); // at the shared tip
+        sh(&dir, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        commit(&dir, "dev.txt"); // develop moves ahead of origin/main
+        let git = LocalGit::new(&dir);
+        let local = sh(
+            &dir,
+            &[
+                "for-each-ref",
+                "--format=%(refname:lstrip=2)\t%(upstream:short)\t%(HEAD)\t%(objectname)\t%(upstream:track,nobracket)",
+                "refs/heads",
+            ],
+        );
+        let remote = sh(
+            &dir,
+            &[
+                "for-each-ref",
+                "--format=%(refname)\t%(objectname)",
+                "refs/remotes",
+            ],
+        );
+        let bases = integration_bases(Some("main"), &local, &remote);
+        assert_eq!(
+            bases,
+            [
+                ("main".to_string(), "origin/main".to_string()),
+                ("develop".to_string(), "develop".to_string()),
+            ]
+        );
+        // End to end through `origin/HEAD` → main (the detected default).
+        sh(
+            &dir,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ],
+        );
+        let refs = git.refs_with_base(None).await.unwrap();
+        assert_eq!(refs.base_branch.as_deref(), Some("main"));
+        let old = refs.local.iter().find(|b| b.name == "old").unwrap();
+        let mut landed = old.merged_into.clone();
+        landed.sort();
+        assert_eq!(landed, ["develop", "main"]);
+        assert!(old.merged_into_base, "origin/main holds old");
+        let develop = refs.local.iter().find(|b| b.name == "develop").unwrap();
+        assert!(develop.merged_into.is_empty(), "integration branch");
+    }
+
+    /// An `origin/develop` base override does not also add a `develop` label.
+    #[test]
+    fn integration_labels_dedupe_after_stripping_origin() {
+        let local = "develop\t\t*\tabc\t\nfeature\t\t\tdef\t\n";
+        let remote = "refs/remotes/origin/develop\tabc\nrefs/remotes/origin/main\t123\n";
+        let bases = integration_bases(Some("origin/develop"), local, remote);
+        assert_eq!(
+            bases,
+            [
+                ("origin/develop".to_string(), "origin/develop".to_string()),
+                ("main".to_string(), "origin/main".to_string()),
+            ]
+        );
+        assert_eq!(listed_oid("develop", local, remote), Some("abc"));
+        assert_eq!(listed_oid("origin/main", local, remote), Some("123"));
+        assert_eq!(listed_oid("v1.0", local, remote), None);
+    }
+
+    /// The merged sets come from ONE `for-each-ref --merged` covering both
+    /// namespaces, and skip the symbolic `origin/HEAD`.
+    #[tokio::test]
+    async fn merged_sets_split_local_and_remote_from_one_listing() {
+        let (_tmp, dir) = repo("main");
+        sh(&dir, &["branch", "done"]);
+        sh(&dir, &["update-ref", "refs/remotes/origin/done", "HEAD"]);
+        sh(&dir, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        sh(
+            &dir,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ],
+        );
+        sh(&dir, &["checkout", "-qb", "ahead"]);
+        commit(&dir, "x.txt");
+        sh(&dir, &["checkout", "-q", "main"]);
+        let git = LocalGit::new(&dir);
+        let ((local, remote), complete) = git.merged_sets(Some("main")).await;
+        assert!(complete);
+        let mut l: Vec<_> = local.into_iter().collect();
+        l.sort();
+        let mut r: Vec<_> = remote.into_iter().collect();
+        r.sort();
+        assert_eq!(l, ["done", "main"]);
+        assert_eq!(r, ["origin/done", "origin/main"]);
+        // A base no listing or rev-parse resolves yields empty sets.
+        let (none_l, none_r) = git.merged_sets_cached(Some("no-such-branch"), "", "").await;
+        assert!(none_l.is_empty() && none_r.is_empty());
+    }
+
+    /// agy's `.agents/mcp_config.json` and grok's `.grok/config.toml` carry
+    /// resolved secret env — the workflow sweep must never commit them.
+    #[tokio::test]
+    async fn commit_all_if_dirty_skips_every_launcher_artifact() {
+        let (_tmp, dir) = repo("main");
+        std::fs::create_dir_all(dir.join(".agents")).unwrap();
+        std::fs::create_dir_all(dir.join(".grok")).unwrap();
+        std::fs::write(dir.join(".agents/mcp_config.json"), "{\"secret\":1}").unwrap();
+        std::fs::write(dir.join(".grok/config.toml"), "secret = 1").unwrap();
+        std::fs::write(dir.join(".mcp.json"), "{}").unwrap();
+        let git = LocalGit::new(&dir);
+        assert!(git.commit_all_if_dirty("noop").await.unwrap().is_none());
+        std::fs::write(dir.join("work.txt"), "w").unwrap();
+        assert!(git.commit_all_if_dirty("sweep").await.unwrap().is_some());
+        let committed = sh(&dir, &["show", "--name-only", "--format=", "HEAD"]);
+        assert_eq!(committed, "work.txt");
+    }
+}

@@ -182,7 +182,8 @@
     const generation = formGeneration;
     saving = true;
     const rawBuild = typeof fBuild === 'string' ? fBuild.trim() : '';
-    const rawTags = typeof fTags === 'string' ? fTags.split(',').map((s) => s.trim()).filter(Boolean) : undefined;
+    // Deduped: the list keys chips by position, but a repeated tag is still noise.
+    const rawTags = typeof fTags === 'string' ? [...new Set(fTags.split(',').map((s) => s.trim()).filter(Boolean))] : undefined;
     const body: GoldenTaskReq = {
       name: fName.trim(),
       prompt: fPrompt.trim(),
@@ -410,7 +411,7 @@
 
               {#if t.tags.length > 0}
                 <div class="gt-tags">
-                  {#each t.tags as tag (tag)}
+                  {#each t.tags as tag, i (i)}
                     <span class="gt-tag"><Icon name="tag" size={12} /> {tag}</span>
                   {/each}
                 </div>

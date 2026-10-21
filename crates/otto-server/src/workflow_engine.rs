@@ -12,12 +12,12 @@
 //! replace its 700ms poll loop with a WS subscription. A capped poll is kept as
 //! a fallback in case events are missed (network drop, reconnect).
 //!
-//! ## Node-result caching
-//! When a node is re-run with the same params and the same assembled input (both
-//! hashed as SHA-256), the engine reuses the stored output from
-//! `workflow_node_cache` and marks the node `NodeStatus::Success` with a
-//! "(cached)" log line. The cache is upserted on every successful node execution
-//! so subsequent re-runs can skip unchanged steps.
+//! ## No node-result caching
+//! Every node executes in its own run. Cross-run caching was removed (it
+//! replayed outputs whose real input — repos, worktrees, external state — had
+//! changed); read the "Cross-run node-result caching removed" note above
+//! `RUN_WALL_CLOCK_TIMEOUT` before re-adding anything like it.
+//! `workflow_node_cache` is a dormant table.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
@@ -27,6 +27,7 @@ use otto_brokers::types::{ConsumeReq, ValueFormat};
 use otto_channels::adapter::Adapter;
 use otto_core::domain::{Channel, User, Workspace};
 use otto_core::event::Event;
+use otto_core::paths::expand_tilde;
 use otto_core::text::{clip_bytes as truncate, extract_json};
 use otto_core::workflows::{
     NodeActivity, NodeRunState, NodeStatus, RunScope, RunStatus, SubagentActivity, Workflow,
@@ -176,6 +177,54 @@ impl CancelWatch {
     }
 }
 const LOG_PERSIST_LINES: usize = 20;
+
+/// Block until an event `is_wake` accepts arrives, the bus lags (ours may have
+/// been dropped — re-check), or `wake_at` passes. Other events are skipped; a
+/// closed bus degrades to sleeping until `wake_at`. The building block of the
+/// event-driven waits (a long-poll subscribes BEFORE its first read, then
+/// re-reads only when this returns) that replaced fixed-interval row polls.
+pub(crate) async fn wake_on_event(
+    rx: &mut tokio::sync::broadcast::Receiver<Event>,
+    is_wake: impl Fn(&Event) -> bool,
+    wake_at: tokio::time::Instant,
+) {
+    use tokio::sync::broadcast::error::RecvError;
+    loop {
+        match tokio::time::timeout_at(wake_at, rx.recv()).await {
+            Err(_) => return,                        // safety / deadline tick
+            Ok(Ok(ev)) if is_wake(&ev) => return,    // ours
+            Ok(Ok(_)) => continue,                   // someone else's
+            Ok(Err(RecvError::Lagged(_))) => return, // may have missed ours
+            Ok(Err(RecvError::Closed)) => {
+                tokio::time::sleep_until(wake_at).await;
+                return;
+            }
+        }
+    }
+}
+
+/// Slowest re-read of a parked `human_approval` gate. The decision is
+/// announced (`approve_run` → `Event::WorkflowRunUpdated` for the gate node)
+/// and wakes the gate at once; this only covers a decision written by a path
+/// that does not announce.
+const APPROVAL_SAFETY_RECHECK: Duration = Duration::from_secs(30);
+
+/// Whether `ev` announces a decision on `run_id`'s approval gate `node_id`:
+/// `approve_run` emits a NON-waiting update for the gate node (the engine's
+/// own pause announcement for it is a waiting one).
+fn is_gate_decision(ev: &Event, run_id: &str, node_id: &str) -> bool {
+    matches!(ev, Event::WorkflowRunUpdated {
+        run_id: rid,
+        node_id: Some(nid),
+        waiting_approval: false,
+        ..
+    } if rid == run_id && nid == node_id)
+}
+
+/// Slowest re-read of an awaited `review_run` review. Status transitions are
+/// announced (`Event::ReviewChanged`); this read also surfaces reviewer
+/// sessions as they spawn, which is not announced.
+const REVIEW_WAIT_SAFETY_RECHECK: Duration = Duration::from_secs(5);
 
 /// Live-log persist coalescing for one running node (see
 /// [`LOG_PERSIST_EVERY`]): the first line after a quiet spell is written at
@@ -1766,8 +1815,8 @@ pub async fn resume_queued_runs(ctx: &ServerCtx) -> usize {
 /// Emits `Event::WorkflowRunUpdated` on the shared event bus at every node
 /// transition and at run completion; the UI subscribes to these events and
 /// replaces its 700ms poll loop with a WS-driven refresh (a capped poll is kept
-/// as a fallback). Cache-eligible nodes are skipped if a matching
-/// `workflow_node_cache` entry exists; their state is logged as "Success (cached)".
+/// as a fallback). Every node executes — there is no cross-run node cache
+/// (see the "Cross-run node-result caching removed" note in this file).
 #[allow(clippy::too_many_arguments)]
 pub async fn run_workflow(
     ctx: ServerCtx,
@@ -4538,9 +4587,10 @@ async fn execute_node(
         // --- Human Approval -------------------------------------------------
         // Pauses the run until an operator calls
         // `POST /workflow-runs/{id}/approve` with `{"node_id": ..., "approved": true}`.
-        // The engine sets `waiting_approval = 1` on the run row and then polls
-        // every 2s, up to `params.timeout_s` (default 24h, min 60s), for the
-        // row to be cleared. If the operator rejects (`approved: false`) the
+        // The engine sets `waiting_approval = 1` on the run row and then waits
+        // — woken by the decision's announcement, re-reading at least every
+        // [`APPROVAL_SAFETY_RECHECK`] — up to `params.timeout_s` (default 24h,
+        // min 60s), for the row to be cleared. If the operator rejects (`approved: false`) the
         // node errors. If the deadline expires the node errors with
         // "approval timed out".
         "human_approval" => {
@@ -4554,6 +4604,9 @@ async fn execute_node(
             // `waiting_approval = 0` and records the decision. Bump `rev` so
             // clients treat the pause as a fresh state, and announce it over
             // WS immediately — the approval banner/badge must not wait on a poll.
+            // Subscribe BEFORE the gate opens so a decision announced the moment
+            // it does is never missed.
+            let mut decisions = ctx.events.subscribe();
             let pool = &ctx.pool;
             let rev: i64 = sqlx::query_scalar(
                 "UPDATE workflow_runs
@@ -4594,8 +4647,20 @@ async fn execute_node(
             // (up to 24h) and re-takes it — FIFO — once decided.
             let released = release_run_permit();
             let approval_pause = env.budget.pause();
+            let tokio_deadline = tokio::time::Instant::from_std(deadline);
             let decision = loop {
-                tokio::time::sleep(Duration::from_secs(2)).await;
+                // Wake on THIS gate's decision (`approve_run` emits a
+                // non-waiting update for the gate node), else re-read on the
+                // safety cadence. It used to read the row every 2 s for up to
+                // 24 h (~43 k reads per parked run).
+                let wake_at =
+                    (tokio::time::Instant::now() + APPROVAL_SAFETY_RECHECK).min(tokio_deadline);
+                wake_on_event(
+                    &mut decisions,
+                    |ev| is_gate_decision(ev, run_id, &node.id),
+                    wake_at,
+                )
+                .await;
                 if Instant::now() >= deadline {
                     // Clear the pause flag before erroring so the run doesn't
                     // appear stuck after it errors out.
@@ -5611,11 +5676,21 @@ async fn execute_node(
                     std::collections::HashSet::new();
                 if await_done {
                     let deadline = Instant::now() + Duration::from_secs(timeout_s);
+                    // Event-driven: subscribe BEFORE the first read, then
+                    // re-read only the status + agent rows (never the
+                    // comments) when this review's `ReviewChanged` or a run
+                    // cancel arrives, or every [`REVIEW_WAIT_SAFETY_RECHECK`].
+                    // It used to load the full review and decode every
+                    // comment every 2 s for the review's whole lifetime.
+                    let mut review_events = ctx.events.subscribe();
+                    let mut run_cancels = otto_state::workflows::subscribe_cancels();
+                    let runs = WorkflowsRepo::new(ctx.pool.clone());
                     loop {
-                        tokio::time::sleep(Duration::from_secs(2)).await;
-                        if let Ok(r) = ctx.reviews_store.get_review(&review_id).await {
+                        if let Ok((review_status, agents)) =
+                            ctx.reviews_store.review_agents(&review_id).await
+                        {
                             use otto_core::domain::ReviewStatus as RS;
-                            for a in &r.agents {
+                            for a in &agents {
                                 if let Some(sid) = &a.session_id {
                                     if seen_sessions.insert(sid.clone()) {
                                         let _ =
@@ -5623,7 +5698,7 @@ async fn execute_node(
                                     }
                                 }
                             }
-                            match r.status {
+                            match review_status {
                                 RS::Done => {
                                     status = "done".into();
                                     break;
@@ -5639,10 +5714,7 @@ async fn execute_node(
                                 RS::Running => {}
                             }
                         }
-                        if WorkflowsRepo::new(ctx.pool.clone())
-                            .is_canceled(run_id)
-                            .await
-                        {
+                        if runs.is_canceled(run_id).await {
                             // Stop HERE: breaking out went on to the goals
                             // agent / the next target's review before the
                             // engine's cancel poll dropped this future, and a
@@ -5660,12 +5732,24 @@ async fn execute_node(
                             }
                             break;
                         }
+                        let wake_at = tokio::time::Instant::now() + REVIEW_WAIT_SAFETY_RECHECK;
+                        let wake_at = wake_at.min(tokio::time::Instant::from_std(deadline));
+                        tokio::select! {
+                            () = wake_on_event(
+                                &mut review_events,
+                                |ev| matches!(ev, Event::ReviewChanged { review_id: rid, .. } if *rid == review_id),
+                                wake_at,
+                            ) => {}
+                            // Any run's cancel (rare): the status read above
+                            // decides whether it was this run's.
+                            _ = run_cancels.recv() => {}
+                        }
                     }
                 } else {
                     // Fire-and-forget review: still surface any reviewer sessions that
                     // have already spawned so they're attributable under this step.
-                    if let Ok(r) = ctx.reviews_store.get_review(&review_id).await {
-                        for a in &r.agents {
+                    if let Ok((_, agents)) = ctx.reviews_store.review_agents(&review_id).await {
+                        for a in &agents {
                             if let Some(sid) = &a.session_id {
                                 if seen_sessions.insert(sid.clone()) {
                                     let _ = session_tx.send(AgentAssociation::Session(sid.clone()));
@@ -7538,21 +7622,6 @@ async fn e2e_subagent_sequence(
     let _ = log_tx.send("✓ step complete (handoff + idle turn)".to_string());
 }
 
-/// Expand a leading `~`/`~/` to the user's home directory.
-fn expand_tilde(p: &str) -> String {
-    if p == "~" {
-        return dirs::home_dir()
-            .map(|h| h.to_string_lossy().into_owned())
-            .unwrap_or_else(|| p.to_string());
-    }
-    if let Some(rest) = p.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(rest).to_string_lossy().into_owned();
-        }
-    }
-    p.to_string()
-}
-
 /// Resolve the repo_id a repo-needing step (`review_run`, `git_pr`) should use:
 /// an explicit `repo_id` (step params → run input) wins; otherwise derive it from
 /// the step's `worktree_path`, the run's `working_directory`, or `run_cwd`.
@@ -8556,6 +8625,73 @@ fn canvas_rel(run_id: &str, node_id: &str, ext: &str) -> String {
         .map(str::to_string)
         .unwrap_or_else(|| crate::workflow_context::slug(node_id));
     format!("workflow-canvas/{run_id}/{name}.{ext}")
+}
+
+#[cfg(test)]
+mod event_wait_tests {
+    use super::{is_gate_decision, wake_on_event, Event};
+    use std::time::Duration;
+
+    fn update(run: &str, node: Option<&str>, waiting: bool) -> Event {
+        Event::WorkflowRunUpdated {
+            workspace_id: "ws".into(),
+            run_id: run.into(),
+            status: "running".into(),
+            node_id: node.map(Into::into),
+            rev: 1,
+            node: None,
+            nodes_done: 0,
+            nodes_total: 0,
+            waiting_approval: waiting,
+        }
+    }
+
+    /// Only `approve_run`'s non-waiting update for THIS gate wakes it — not
+    /// the engine's own pause announcement, another node, or another run.
+    #[test]
+    fn a_gate_wakes_only_on_its_own_decision() {
+        assert!(is_gate_decision(
+            &update("r", Some("gate"), false),
+            "r",
+            "gate"
+        ));
+        assert!(!is_gate_decision(
+            &update("r", Some("gate"), true),
+            "r",
+            "gate"
+        ));
+        assert!(!is_gate_decision(
+            &update("r", Some("other"), false),
+            "r",
+            "gate"
+        ));
+        assert!(!is_gate_decision(
+            &update("r2", Some("gate"), false),
+            "r",
+            "gate"
+        ));
+        assert!(!is_gate_decision(&update("r", None, false), "r", "gate"));
+    }
+
+    /// A buffered decision (sent right after subscribing, before the wait
+    /// starts) wakes at once; otherwise the wait lasts until the safety tick.
+    #[tokio::test]
+    async fn wake_on_event_returns_on_a_buffered_match_or_the_deadline() {
+        let (tx, mut rx) = tokio::sync::broadcast::channel(8);
+        tx.send(update("r", Some("other"), false)).unwrap();
+        tx.send(update("r", Some("gate"), false)).unwrap();
+        let far = tokio::time::Instant::now() + Duration::from_secs(30);
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            wake_on_event(&mut rx, |ev| is_gate_decision(ev, "r", "gate"), far),
+        )
+        .await
+        .expect("woke on the buffered decision");
+        let soon = tokio::time::Instant::now() + Duration::from_millis(50);
+        let started = tokio::time::Instant::now();
+        wake_on_event(&mut rx, |ev| is_gate_decision(ev, "r", "gate"), soon).await;
+        assert!(started.elapsed() >= Duration::from_millis(45));
+    }
 }
 
 #[cfg(test)]

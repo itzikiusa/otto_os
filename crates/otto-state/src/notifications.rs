@@ -135,6 +135,16 @@ impl NotificationsRepo {
             None => None,
         };
 
+        // Lookup + insert in ONE `BEGIN IMMEDIATE` transaction: as two
+        // autocommits, concurrent creates of the same key both inserted — a
+        // duplicate global notice (the unique index ignores NULL owners), or a
+        // "create notification" error for a per-user key instead of the
+        // documented refresh-in-place.
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(dberr("notification begin"))?;
         if let Some(key) = &n.source_key {
             // De-dupe within the same owner: a NULL `user_id` (global notice)
             // must match other global rows, so use NULL-safe equality (`IS`)
@@ -143,7 +153,7 @@ impl NotificationsRepo {
                 sqlx::query("SELECT id FROM notifications WHERE source_key = ? AND user_id IS ?")
                     .bind(key)
                     .bind(&n.user_id)
-                    .fetch_optional(&self.pool)
+                    .fetch_optional(&mut *tx)
                     .await
                     .map_err(dberr("notification dedupe"))?;
             if let Some(row) = existing {
@@ -161,9 +171,12 @@ impl NotificationsRepo {
                 .bind(&n.body)
                 .bind(&action_json)
                 .bind(&id)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await
                 .map_err(dberr("refresh notification"))?;
+                tx.commit()
+                    .await
+                    .map_err(dberr("refresh notification commit"))?;
                 return self.get(&id).await;
             }
         }
@@ -184,9 +197,12 @@ impl NotificationsRepo {
         .bind(&n.source_key)
         .bind(&action_json)
         .bind(&n.user_id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(dberr("create notification"))?;
+        tx.commit()
+            .await
+            .map_err(dberr("create notification commit"))?;
         self.get(&id).await
     }
 
@@ -480,6 +496,44 @@ mod tests {
         let fresh = r.create(notice("n", None, None)).await.unwrap();
         let fresh2 = r.create(notice("n", None, None)).await.unwrap();
         assert_ne!(fresh.id, fresh2.id, "no key → always a new row");
+    }
+
+    /// Concurrent creates of one key (several connections, as in the daemon)
+    /// leave exactly ONE row per owner and never surface the unique-index error.
+    #[tokio::test]
+    async fn concurrent_creates_of_one_key_dedupe_atomically() {
+        let dir = tempfile::tempdir().unwrap();
+        let opts = SqliteConnectOptions::new()
+            .filename(dir.path().join("n.db"))
+            .create_if_missing(true)
+            .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+            .busy_timeout(std::time::Duration::from_secs(10));
+        let pool = SqlitePoolOptions::new()
+            .max_connections(6)
+            .connect_with(opts)
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        let r = NotificationsRepo::new(pool);
+        let mut tasks = Vec::new();
+        for i in 0..12 {
+            let r = r.clone();
+            let user = if i % 2 == 0 { None } else { Some("u1") };
+            tasks.push(tokio::spawn(async move {
+                r.create(notice(&format!("t{i}"), Some("same"), user)).await
+            }));
+        }
+        for t in tasks {
+            t.await
+                .unwrap()
+                .expect("create never fails on a racing key");
+        }
+        let n: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM notifications WHERE source_key = 'same'")
+                .fetch_one(&r.pool)
+                .await
+                .unwrap();
+        assert_eq!(n, 2, "one global + one per-user row");
     }
 
     #[tokio::test]

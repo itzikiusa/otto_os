@@ -360,7 +360,6 @@
             onclick={() => ui.toggleRightWide()}
             title={ui.rightWide ? 'Restore panel width' : 'Expand panel'}
             aria-label={ui.rightWide ? 'Restore panel width' : 'Expand panel'}
-            aria-pressed={ui.rightWide}
           >
             <Icon name={ui.rightWide ? 'minimize' : 'maximize'} size={13} />
           </button>

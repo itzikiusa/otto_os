@@ -126,6 +126,89 @@ mod dispatch_tests {
     }
 
     #[tokio::test]
+    async fn deleting_a_swarm_halts_its_live_run_and_leaves_no_rows() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("../otto-state/migrations")
+            .run(&pool)
+            .await
+            .unwrap();
+        let repo = otto_state::SwarmRepo::new(pool.clone());
+        let sid = "delete-halt-test".to_string();
+        let live = repo
+            .create_run(NewRun {
+                swarm_id: sid.clone(),
+                workspace_id: "ws".into(),
+                project_id: None,
+                task_id: None,
+                agent_id: "agent".into(),
+                kind: "task".into(),
+                trigger: "coordinator".into(),
+            })
+            .await
+            .unwrap();
+        repo.update_run(
+            &live.id,
+            RunPatch {
+                session_id: Some(Some("sess-live".into())),
+                status: Some("running".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        repo.create_message(otto_state::swarm::NewMessage {
+            swarm_id: sid.clone(),
+            workspace_id: "ws".into(),
+            project_id: None,
+            task_id: None,
+            run_id: Some(live.id.clone()),
+            author_agent_id: None,
+            author_user_id: None,
+            to_agent_id: None,
+            kind: "status".into(),
+            body: "working".into(),
+            meta: json!({}),
+        })
+        .await
+        .unwrap();
+        let cancels = run::new_cancel_registry();
+        let flag = Arc::new(AtomicBool::new(false));
+        cancels
+            .lock()
+            .unwrap()
+            .insert(live.id.clone(), Arc::clone(&flag));
+        let killed = Mutex::new(Vec::<Id>::new());
+
+        let stopped = delete_swarm_halting(&repo, &cancels, &sid, |s| {
+            killed.lock().unwrap().push(s);
+            async {}
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(stopped, vec![live.id.clone()]);
+        assert!(
+            flag.load(Ordering::Relaxed),
+            "the run's cancel flag tripped"
+        );
+        assert_eq!(*killed.lock().unwrap(), vec!["sess-live".to_string()]);
+        for tbl in ["swarm_messages", "swarm_runs"] {
+            let n: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                "SELECT COUNT(*) FROM {tbl} WHERE swarm_id = ?"
+            )))
+            .bind(&sid)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(n, 0, "{tbl} rows survived the swarm delete");
+        }
+    }
+
+    #[tokio::test]
     async fn stopping_during_readiness_does_not_wait_or_send_late_input() {
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)
@@ -1820,6 +1903,13 @@ where
         .route("/workspaces/{id}/swarm/recruit", post(recruit))
         .route("/workspaces/{id}/swarm/projects/{pid}/plan", post(plan))
         .route("/swarm/projects/{pid}/clear", post(clear_project_h))
+        // The DELETE verbs of `http.rs`'s item routes (axum merges methods
+        // per path): deleting must halt live runs first (see `delete_swarm_h`).
+        .route("/swarm/swarms/{sid}", axum::routing::delete(delete_swarm_h))
+        .route(
+            "/swarm/projects/{pid}",
+            axum::routing::delete(delete_project_h),
+        )
         .route("/swarm/swarms/{sid}/utilization", get(utilization_h))
         .route("/swarm/swarms/{sid}/waiting", get(waiting_h))
         .route(
@@ -2611,6 +2701,106 @@ async fn waiting_h(
 /// project-scoped feed, and broadcast one `SwarmProjectCleared` so every open
 /// client drops its local state. The project itself (and the run history —
 /// spend accounting) stays.
+/// Halt runs the repo just marked `stopped`: trip each run's cancel flag (its
+/// attempt loop ends) AND kill its agent session — the flag alone left the
+/// agent working (and burning tokens) in its worktree on a board that no
+/// longer exists. `kill` is injected so the sequence is testable without a
+/// session manager.
+async fn halt_runs<K, F>(
+    repo: &otto_state::SwarmRepo,
+    cancels: &run::CancelRegistry,
+    stopped: &[Id],
+    kill: K,
+) where
+    K: Fn(Id) -> F,
+    F: std::future::Future<Output = ()>,
+{
+    for rid in stopped {
+        run::signal_cancel(cancels, rid);
+        if let Some(sid) = repo.get_run(rid).await.ok().and_then(|r| r.session_id) {
+            kill(sid).await;
+        }
+    }
+}
+
+async fn kill_quietly(ctx: &SwarmRt, session_id: Id) {
+    let _ = ctx.manager().kill_session(&session_id).await;
+}
+
+/// Delete a swarm with its live runs halted FIRST. Without this, a turn
+/// already in flight kept going after the delete and its settle path wrote
+/// feed posts against a swarm that no longer existed. The caller holds the
+/// swarm's `operation_guard`, so no settle path interleaves with the cascade.
+async fn delete_swarm_halting<K, F>(
+    repo: &otto_state::SwarmRepo,
+    cancels: &run::CancelRegistry,
+    swarm_id: &Id,
+    kill: K,
+) -> otto_core::Result<Vec<Id>>
+where
+    K: Fn(Id) -> F,
+    F: std::future::Future<Output = ()>,
+{
+    let stopped = repo.stop_active_runs(swarm_id).await?;
+    halt_runs(repo, cancels, &stopped, kill).await;
+    repo.delete_swarm(swarm_id).await?;
+    Ok(stopped)
+}
+
+/// `DELETE /swarm/swarms/{sid}` — lives with the runtime (not `http.rs`)
+/// because deleting must stop the coordinator, verifications, runs and
+/// sessions exactly like Abort does, then remove the rows under the same guard.
+async fn delete_swarm_h(
+    State(ctx): State<SwarmRt>,
+    Extension(user): Extension<AuthUser>,
+    Path(sid): Path<Id>,
+) -> ApiResult<axum::http::StatusCode> {
+    let swarm = ctx.swarm_repo().get_swarm(&sid).await.map_err(ApiError)?;
+    check(&ctx, &user, &swarm.workspace_id, WorkspaceRole::Editor).await?;
+    let _operation = operation_guard(&sid).await;
+    stop_coordinator(&ctx, &sid);
+    crate::runtime::verify::stop_swarm(&ctx, &sid).await;
+    delete_swarm_halting(ctx.swarm_repo(), ctx.swarm_run_cancels(), &sid, |s| {
+        kill_quietly(&ctx, s)
+    })
+    .await
+    .map_err(ApiError)?;
+    // Sessions no run row points at (recruit/plan helpers) — Abort's sweep.
+    for s in swarm_session_ids(&ctx, &swarm.workspace_id, &sid).await {
+        kill_quietly(&ctx, s).await;
+    }
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+/// `DELETE /swarm/projects/{pid}` — the board-clear sequence (guard, stop,
+/// cancel, kill) followed by the project delete, still under the guard.
+async fn delete_project_h(
+    State(ctx): State<SwarmRt>,
+    Extension(user): Extension<AuthUser>,
+    Path(pid): Path<Id>,
+) -> ApiResult<axum::http::StatusCode> {
+    let project = ctx.swarm_repo().get_project(&pid).await.map_err(ApiError)?;
+    check(&ctx, &user, &project.workspace_id, WorkspaceRole::Editor).await?;
+    let _operation = operation_guard(&project.swarm_id).await;
+    let stopped = ctx
+        .swarm_repo()
+        .stop_active_runs_for_project(&pid)
+        .await
+        .map_err(ApiError)?;
+    halt_runs(ctx.swarm_repo(), ctx.swarm_run_cancels(), &stopped, |s| {
+        kill_quietly(&ctx, s)
+    })
+    .await;
+    ctx.swarm_repo()
+        .delete_project(&pid)
+        .await
+        .map_err(ApiError)?;
+    for rid in &stopped {
+        run::emit_run(&ctx, rid).await;
+    }
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
 async fn clear_project_h(
     State(ctx): State<SwarmRt>,
     Extension(user): Extension<AuthUser>,
@@ -2624,19 +2814,11 @@ async fn clear_project_h(
         .stop_active_runs_for_project(&pid)
         .await
         .map_err(ApiError)?;
+    halt_runs(ctx.swarm_repo(), ctx.swarm_run_cancels(), &stopped, |s| {
+        kill_quietly(&ctx, s)
+    })
+    .await;
     for rid in &stopped {
-        run::signal_cancel(ctx.swarm_run_cancels(), rid);
-        // Stop the agent itself — the flag alone left it working (and
-        // burning tokens) in its worktree on a board that no longer exists.
-        if let Some(sid) = ctx
-            .swarm_repo()
-            .get_run(rid)
-            .await
-            .ok()
-            .and_then(|r| r.session_id)
-        {
-            let _ = ctx.manager().kill_session(&sid).await;
-        }
         run::emit_run(&ctx, rid).await;
     }
     let (tasks_deleted, messages_deleted) = ctx

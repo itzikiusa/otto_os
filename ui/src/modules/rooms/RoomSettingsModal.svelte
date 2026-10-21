@@ -21,7 +21,7 @@
     const settings: RoomSettingsUpdate = {public_origin: origin.trim(), stun_urls: lines(stun), turn_urls: lines(turn), relay_only: relayOnly};
     if (secret || clearSecret) settings.turn_secret = clearSecret ? '' : secret;
     try { await api.put('/room-settings', settings); secret = ''; onclose(); }
-    catch (e) { error = e instanceof Error ? e.message : 'Could not save room settings.'; }
+    catch (e) { error = e instanceof TypeError ? loadErrorText(e) : e instanceof Error ? e.message : 'Could not save room settings.'; }
     finally { busy = false; }
   }
 </script>

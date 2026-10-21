@@ -387,6 +387,10 @@ authorization model.
 - **Revocation evicts:** `DELETE /api/v1/auth/shares/{share_id}` (or
   `POST /api/v1/auth/shares/revoke-all`) revokes **and** evicts — any still-attached
   viewer immediately gets `{"type":"terminated"}` and the WS closes.
+- **Who may revoke one link:** its minter, or anyone who may list and mint links on
+  its session (the session owner or a workspace Admin) — so an owner can take back a
+  link an admin minted on their session, and the reverse. An unknown id answers
+  **404**, never a false 204.
 
 ### 9.2 The email-OTP gate (recommended for anything outward-facing)
 
@@ -460,7 +464,8 @@ or root`; `root`. Authoritative source: [`../contracts/api.md`](../contracts/api
 |---|---|---|
 | `POST /auth/tokens` · `GET /auth/tokens` · `DELETE /auth/tokens/{id}` | member (self; mint blocked while impersonating) | PATs, secret shown once |
 | `POST /sessions/{id}/share` · `GET /sessions/{id}/shares` | session owner / ws admin | mint/list scoped shares (role viewer/editor) |
-| `DELETE /auth/shares/{share_id}` · `POST /auth/shares/revoke-all` | member (self-owned) | revoke + evict; idempotent |
+| `DELETE /auth/shares/{share_id}` | the link's minter, or the session owner / a workspace Admin | revoke + evict; idempotent; 404 when no share has that id |
+| `POST /auth/shares/revoke-all` | member (self-owned) | revoke all the caller's own links + evict |
 | `PUT /email-sender` · `GET /email-sender` | member (self-owned) | Gmail App-Password sender; pw in Keychain |
 | `POST /share/verify` · `POST /share/extend` | **public** (the share token is the auth) | OTP redeem / re-send; IP rate-limited |
 

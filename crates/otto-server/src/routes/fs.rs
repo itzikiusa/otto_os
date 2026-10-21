@@ -106,14 +106,17 @@ pub struct FsRead {
     pub truncated: bool,
 }
 
-/// Expand a leading `~` to the user's home directory.
-fn expand_home(path: &str) -> String {
-    if let Some(rest) = path.strip_prefix('~') {
-        let home = std::env::var("HOME").unwrap_or_default();
-        format!("{home}{rest}")
-    } else {
-        path.to_string()
+/// Expand a leading `~` / `~/` to the user's home directory (the shared
+/// [`otto_core::paths::expand_tilde`]). `~user/…` is refused: it names another
+/// account's home, and the old any-`~` prefix strip turned `~bob/notes.txt`
+/// into `$HOMEbob/notes.txt` — a confusing not-found for what the user typed.
+fn expand_home(path: &str) -> ApiResult<String> {
+    if path.starts_with('~') && path != "~" && !path.starts_with("~/") {
+        return Err(ApiError(Error::Invalid(format!(
+            "unsupported home path {path:?}: use ~/… or an absolute path"
+        ))));
     }
+    Ok(otto_core::paths::expand_tilde(path))
 }
 
 /// Simple extension → language hint used by the front-end syntax highlighter.
@@ -211,7 +214,7 @@ fn browse_canceled(flag: &std::sync::atomic::AtomicBool) -> ApiResult<()> {
 /// expanded + canonicalized here so `..`/symlinks can't dodge the prefixes.
 fn non_root_fs_denied(raw: &str) -> ApiResult<()> {
     use std::path::Path;
-    let expanded = expand_home(if raw.is_empty() { "~" } else { raw });
+    let expanded = expand_home(if raw.is_empty() { "~" } else { raw })?;
     // A path that doesn't resolve is left to the handler's own error.
     let Ok(canonical) = Path::new(&expanded).canonicalize() else {
         return Ok(());
@@ -270,7 +273,7 @@ fn browse_sync(
         .as_deref()
         .filter(|p| !p.is_empty())
         .unwrap_or("~");
-    let expanded = expand_home(raw);
+    let expanded = expand_home(raw)?;
     let target = std::path::Path::new(&expanded);
 
     let metadata =
@@ -384,7 +387,7 @@ fn stat_sync(raw: &str) -> ApiResult<FsStat> {
     if raw.trim().is_empty() {
         return Err(ApiError(Error::Invalid("path is required".into())));
     }
-    let expanded = expand_home(raw.trim());
+    let expanded = expand_home(raw.trim())?;
     let target = std::path::Path::new(&expanded);
     let canonical = target
         .canonicalize()
@@ -432,7 +435,7 @@ pub async fn read_file(
 }
 
 fn read_file_sync(path: &str, restricted: bool) -> ApiResult<FsRead> {
-    let expanded = expand_home(path);
+    let expanded = expand_home(path)?;
     let target = std::path::Path::new(&expanded);
     let canonical = target
         .canonicalize()
@@ -524,6 +527,22 @@ fn read_at_most(path: &std::path::Path, limit: usize) -> std::io::Result<Vec<u8>
 
 #[cfg(test)]
 mod tests {
+    /// `~` and `~/x` expand to the home directory; `~user/x` is refused
+    /// instead of becoming `$HOMEuser/x`; anything else passes through.
+    #[test]
+    fn expand_home_expands_only_the_callers_own_home() {
+        let home = std::env::var("HOME").expect("HOME set in tests");
+        assert_eq!(super::expand_home("~").unwrap(), home);
+        assert_eq!(
+            super::expand_home("~/notes.txt").unwrap(),
+            format!("{}/notes.txt", home.trim_end_matches('/'))
+        );
+        assert!(super::expand_home("~bob/notes.txt").is_err());
+        assert!(super::expand_home("~bob").is_err());
+        assert_eq!(super::expand_home("/abs/x").unwrap(), "/abs/x");
+        assert_eq!(super::expand_home("rel/~x").unwrap(), "rel/~x");
+    }
+
     fn fixture_user() -> otto_core::domain::User {
         otto_core::domain::User {
             id: "fixture".into(),

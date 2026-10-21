@@ -230,13 +230,9 @@ fn secret_ref_for(id: &Id) -> String {
 // Pure helpers (unit-tested)
 // ---------------------------------------------------------------------------
 
-/// Static credentials as the CLI wants them in the environment.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StaticCreds {
-    pub access_key_id: String,
-    pub secret_access_key: String,
-    pub session_token: Option<String>,
-}
+/// Static credentials as the CLI wants them in the environment (the shared
+/// `otto_core::aws_env` type, so otto-k8s builds the same env).
+pub use otto_core::aws_env::AwsStaticCreds as StaticCreds;
 
 /// Validate a caller-supplied custom endpoint: `http://` / `https://` only
 /// (no `ws`/`grpc`/`file`), plain `http` only for loopback hosts (the same
@@ -264,14 +260,13 @@ pub fn validate_endpoint_url(raw: &str) -> Result<String> {
     Ok(s)
 }
 
-/// The env every `aws` subprocess gets (§1 "Auth injection"). `profile` mode
-/// sets `AWS_PROFILE`; keys mode sets the three `AWS_*` credential vars.
-/// Both set the region (+ `AWS_DEFAULT_REGION` for older code paths), disable
-/// the pager and the v2 auto-prompt. A custom `endpoint_url` (LocalStack, VPC
-/// endpoints, S3-compatible stores) becomes `AWS_ENDPOINT_URL` — honoured by
-/// every CLI v2 ≥ 2.13 command, `s3 cp` included — plus
-/// `AWS_EC2_METADATA_DISABLED=true` so the CLI never stalls on the IMDS
-/// credential provider when pointed at a non-AWS host.
+/// The env every `aws` subprocess gets (§1 "Auth injection") — the shared
+/// [`otto_core::aws_env::build_aws_env`] (otto-k8s's EKS credential plugin
+/// gets the same env). Profile mode sets `AWS_PROFILE`; keys mode sets the
+/// three `AWS_*` credential vars; a custom `endpoint_url` becomes
+/// `AWS_ENDPOINT_URL`. A stray daemon `AWS_PROFILE` must be REMOVED by the
+/// spawn, never blanked ([`otto_core::aws_env::AWS_ENV_REMOVE`]):
+/// `cli::run_raw` and the S3 download spawn strip it before applying this env.
 pub fn build_env(
     mode: AuthMode,
     profile: Option<&str>,
@@ -279,38 +274,12 @@ pub fn build_env(
     creds: Option<&StaticCreds>,
     endpoint_url: Option<&str>,
 ) -> Vec<(String, String)> {
-    let mut env = vec![
-        ("AWS_REGION".to_string(), region.to_string()),
-        ("AWS_DEFAULT_REGION".to_string(), region.to_string()),
-        ("AWS_PAGER".to_string(), String::new()),
-        ("AWS_CLI_AUTO_PROMPT".to_string(), "off".to_string()),
-    ];
-    if let Some(u) = endpoint_url.map(str::trim).filter(|u| !u.is_empty()) {
-        env.push(("AWS_ENDPOINT_URL".into(), u.to_string()));
-        env.push(("AWS_EC2_METADATA_DISABLED".into(), "true".into()));
-    }
-    match mode {
-        AuthMode::Profile => {
-            if let Some(p) = profile {
-                env.push(("AWS_PROFILE".into(), p.to_string()));
-            }
-        }
-        AuthMode::AccessKeys => {
-            if let Some(c) = creds {
-                env.push(("AWS_ACCESS_KEY_ID".into(), c.access_key_id.clone()));
-                env.push(("AWS_SECRET_ACCESS_KEY".into(), c.secret_access_key.clone()));
-                if let Some(t) = &c.session_token {
-                    env.push(("AWS_SESSION_TOKEN".into(), t.clone()));
-                }
-            }
-            // A stray AWS_PROFILE in the daemon env must not override the keys —
-            // but it must be REMOVED, not blanked: CLI v2 treats `AWS_PROFILE=""`
-            // as a profile literally named "" and fails every call with
-            // `The config profile () could not be found`. `cli::run_raw` and the
-            // S3 download spawn strip it before applying this env.
-        }
-    }
-    env
+    use otto_core::aws_env::{build_aws_env, AwsEnvAuth};
+    let auth = match mode {
+        AuthMode::Profile => AwsEnvAuth::Profile(profile),
+        AuthMode::AccessKeys => AwsEnvAuth::AccessKeys(creds),
+    };
+    build_aws_env(auth, region, endpoint_url)
 }
 
 /// Add static creds to a profile-mode env. `AWS_PROFILE` stays: env

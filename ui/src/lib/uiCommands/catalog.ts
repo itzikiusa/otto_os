@@ -17,11 +17,6 @@ export const UI_CATALOG: UiCommandsCatalog = {
 
 const byName = new Map(UI_CATALOG.commands.map((c) => [c.name, c]));
 
-/** The catalog entry for a command name (`db_run_query`), if any. */
-export function uiCommandSpec(name: string): UiCommandSpec | undefined {
-  return byName.get(name);
-}
-
 /**
  * Registered handlers vs the catalog: names the catalog has but no handler
  * implements (`missing`), handlers the catalog doesn't know (`extra`), and

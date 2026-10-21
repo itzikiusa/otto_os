@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
   import type { RoomAction, RoomSnapshot, RoomPresentation, RoomAnnotationTool, RoomPoint } from '../../lib/api/room-types';
-  import { normalizedPoint } from './room-state';
+  import { normalizedPoint, nextExpiry } from './room-state';
   let { room, source, send, children }: {room: RoomSnapshot; source: RoomPresentation; send: (action: RoomAction) => boolean; children: Snippet} = $props();
   let tool = $state<RoomAnnotationTool>('pointer'), drawing = $state(false), points = $state<RoomPoint[]>([]);
   let strokeEpoch = 0, grantEpoch = 0, now = $state(Date.now());
@@ -9,8 +9,16 @@
   const allowed = $derived(room.annotations_enabled !== false && grant?.allowed && !grant.blocked);
   const owner = $derived(source.member_id === room.member_id);
   const host = $derived(room.host_member_id === room.member_id);
-  const marks = $derived((room.annotations ?? []).filter(a => a.source_id === source.id && a.source_generation === source.generation && a.clear_epoch === source.clear_epoch && Date.parse(a.expires_at) > now));
-  $effect(() => { const timer = setInterval(() => now = Date.now(), 500); return () => clearInterval(timer); });
+  // Expiry is parsed once per mark; `now` advances only when the earliest live
+  // mark expires (one timer, re-armed when marks change), never on a fixed tick.
+  const sourceMarks = $derived((room.annotations ?? []).filter(a => a.source_id === source.id && a.source_generation === source.generation && a.clear_epoch === source.clear_epoch).map(mark => ({mark, expires: Date.parse(mark.expires_at)})));
+  const marks = $derived(sourceMarks.filter(m => m.expires > now).map(m => m.mark));
+  $effect(() => {
+    const at = nextExpiry(sourceMarks.map(m => m.expires), now);
+    if (at === null) return;
+    const timer = setTimeout(() => now = Date.now(), Math.max(0, at - Date.now()) + 16);
+    return () => clearTimeout(timer);
+  });
   // Keyboard placement (Point / Highlight): a focusable surface with a visible cursor.
   let kb = $state<{x: number, y: number} | null>(null), anchor = $state<RoomPoint | null>(null), kbNote = $state('');
   const keyboardTool = $derived(tool !== 'pen');

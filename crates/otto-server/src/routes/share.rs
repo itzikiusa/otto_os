@@ -898,34 +898,64 @@ pub async fn list_my_shares(
 
 /// `DELETE /api/v1/auth/shares/{share_id}`
 ///
-/// Revoke one of the caller's share tokens by id. After revocation, calls
-/// `SessionManager::evict` on the share's session so any attached viewer is
-/// dropped immediately. Returns 204.
+/// Revoke one share link by id. Allowed for the link's MINTER (Settings →
+/// Sharing's "Active links") and for whoever may see and mint links on its
+/// session — the session owner or a workspace admin, the same authority as
+/// [`list_shares`] / [`mint_share`] — so an owner can take back a link someone
+/// else minted on their session (access-control-1-02). After revocation,
+/// calls `SessionManager::evict` on the share's session so any attached
+/// viewer is dropped immediately. 204, or 404 when no share has that id.
+/// Idempotent: revoking a revoked link again is still 204.
 pub async fn revoke_share(
     State(ctx): State<ServerCtx>,
     Path(share_id): Path<String>,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<StatusCode> {
-    let repo = AuthRepo::new(ctx.pool.clone());
+    use sqlx::Row;
+    let not_found = || ApiError(Error::NotFound(format!("share '{share_id}'")));
 
-    // Look up the session this share is pinned to (for eviction after revoke).
-    let session_id_opt = repo.share_session_id(&user.id, &share_id).await?;
+    // The row, by id and kind (never another credential kind).
+    let row = sqlx::query(
+        "SELECT user_id, session_scope FROM auth_sessions WHERE id = ? AND kind = 'share'",
+    )
+    .bind(&share_id)
+    .fetch_optional(&ctx.pool)
+    .await
+    .map_err(|e| ApiError(Error::Internal(format!("load share: {e}"))))?
+    .ok_or_else(not_found)?;
+    let minter: String = row.get("user_id");
+    let session_id: Option<Id> = row.get("session_scope");
 
-    // Revoke the share (owner-scoped; idempotent).
-    repo.revoke_share(&user.id, &share_id).await?;
+    // The minter always may; anyone else needs owner-or-admin on the session
+    // (a gone session leaves only its minter able to revoke).
+    if minter != user.id.as_str() {
+        let sid = session_id.clone().ok_or_else(not_found)?;
+        let session = ctx.manager.get(&sid).await.map_err(|_| not_found())?;
+        require_session_owner_or_admin(&ctx, &user, &session).await?;
+    }
 
-    // Evict attached viewers for the share's session (if we found one).
-    if let Some(session_id) = &session_id_opt {
-        ctx.manager.evict(session_id);
+    let res = sqlx::query("UPDATE auth_sessions SET revoked = 1 WHERE id = ? AND kind = 'share'")
+        .bind(&share_id)
+        .execute(&ctx.pool)
+        .await
+        .map_err(|e| ApiError(Error::Internal(format!("revoke share: {e}"))))?;
+    if res.rows_affected() == 0 {
+        return Err(not_found());
+    }
+
+    // Evict attached viewers for the share's session.
+    if let Some(sid) = &session_id {
+        ctx.manager.evict(sid);
     }
 
     ctx.audit(NewAuditEntry {
         user_id: Some(user.id.clone()),
         action: "share.revoke".into(),
         target: Some(share_id.clone()),
-        detail: session_id_opt
-            .as_ref()
-            .map(|sid| serde_json::json!({ "session_id": sid })),
+        detail: Some(serde_json::json!({
+            "session_id": session_id,
+            "minted_by": minter,
+        })),
         ip: None,
     })
     .await;
@@ -987,6 +1017,129 @@ pub async fn share_whoami(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A root minter, Bob (an Editor who owns the session), Carol (an
+    /// unrelated Editor), and one Editor link ROOT minted on Bob's session.
+    struct RevokeFixture {
+        _tmp: tempfile::TempDir,
+        ctx: ServerCtx,
+        root: otto_core::domain::User,
+        bob: otto_core::domain::User,
+        carol: otto_core::domain::User,
+        raw: String,
+        share_id: String,
+    }
+
+    async fn revoke_fixture() -> RevokeFixture {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = crate::test_support::mem_pool().await;
+        let ctx = ServerCtx::for_tests(&pool, tmp.path().join("data")).await;
+        let users = otto_state::UsersRepo::new(pool.clone());
+        let root = users.create("root", "x", "Root", true).await.unwrap();
+        let bob = users.create("bob", "x", "Bob", false).await.unwrap();
+        let carol = users.create("carol", "x", "Carol", false).await.unwrap();
+        let ws = ctx
+            .workspaces
+            .create("w", tmp.path().to_str().unwrap(), &root.id)
+            .await
+            .unwrap();
+        for u in [&bob, &carol] {
+            ctx.workspaces
+                .set_member(&ws.id, &u.id, WorkspaceRole::Editor)
+                .await
+                .unwrap();
+        }
+        let session = otto_state::SessionsRepo::new(pool.clone())
+            .create(otto_state::NewSession {
+                workspace_id: ws.id.clone(),
+                kind: otto_core::domain::SessionKind::Agent,
+                provider: "shell".into(),
+                title: "bob's agent".into(),
+                cwd: tmp.path().to_string_lossy().into(),
+                provider_session_id: None,
+                connection_id: None,
+                created_by: bob.id.clone(),
+                meta: serde_json::json!({}),
+            })
+            .await
+            .unwrap();
+        let (raw, info) = AuthRepo::new(pool.clone())
+            .issue_share_token(&root.id, &session.id, WorkspaceRole::Editor, 3600, None)
+            .await
+            .unwrap();
+        RevokeFixture {
+            _tmp: tmp,
+            ctx,
+            root,
+            bob,
+            carol,
+            raw,
+            share_id: info.id,
+        }
+    }
+
+    async fn revoke_as(
+        f: &RevokeFixture,
+        user: &otto_core::domain::User,
+        id: &str,
+    ) -> std::result::Result<StatusCode, Error> {
+        revoke_share(
+            State(f.ctx.clone()),
+            Path(id.to_string()),
+            crate::auth::CurrentUser(user.clone()),
+        )
+        .await
+        .map_err(|e| e.0)
+    }
+
+    async fn link_works(f: &RevokeFixture) -> bool {
+        AuthRepo::new(f.ctx.pool.clone())
+            .authenticate(&f.raw)
+            .await
+            .is_ok()
+    }
+
+    /// access-control-1-02: the session owner revokes a link someone else
+    /// minted on their session — and the link really stops working.
+    #[tokio::test]
+    async fn session_owner_revokes_a_link_another_user_minted() {
+        let f = revoke_fixture().await;
+        assert!(link_works(&f).await);
+        assert_eq!(
+            revoke_as(&f, &f.bob, &f.share_id).await.unwrap(),
+            StatusCode::NO_CONTENT
+        );
+        assert!(!link_works(&f).await, "the owner's revoke must take effect");
+    }
+
+    /// The minter keeps Settings → Sharing's revoke; a repeat is idempotent.
+    #[tokio::test]
+    async fn minter_revokes_its_own_link_idempotently() {
+        let f = revoke_fixture().await;
+        for _ in 0..2 {
+            assert_eq!(
+                revoke_as(&f, &f.root, &f.share_id).await.unwrap(),
+                StatusCode::NO_CONTENT
+            );
+        }
+        assert!(!link_works(&f).await);
+    }
+
+    /// An unrelated member is refused and the link stays live; an unknown id
+    /// is a 404, never a false "revoked".
+    #[tokio::test]
+    async fn unrelated_member_cannot_revoke_and_unknown_id_is_404() {
+        let f = revoke_fixture().await;
+        assert!(matches!(
+            revoke_as(&f, &f.carol, &f.share_id).await,
+            Err(Error::Forbidden(_))
+        ));
+        assert!(link_works(&f).await, "a refused revoke changes nothing");
+        assert!(matches!(
+            revoke_as(&f, &f.bob, "no-such-share").await,
+            Err(Error::NotFound(_))
+        ));
+    }
 
     /// S8-06: a share may be extended at most `EXTEND_MAX_PER_WINDOW` times
     /// per window; other shares keep their own budget.

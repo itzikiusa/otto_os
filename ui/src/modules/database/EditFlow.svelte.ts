@@ -18,7 +18,7 @@ import { database } from '../../lib/stores/database.svelte';
 import {
   cellStr,
   compactJson,
-  copyText,
+  copyWithToast,
   formatSql,
   isComplex,
   looksLikeSql,
@@ -882,8 +882,8 @@ export class EditFlow {
     } else {
       where = idxs.map((i) => `(${whereByPk(ctx, i)})`).join(' OR ');
     }
-    void copyText(where);
-    toasts.success('Copied', `WHERE for ${plural(idxs.length, 'row')}`);
+    // copyWithToast reports a failed copy itself; "Copied" only when it landed.
+    void copyWithToast(where, ['Copied', `WHERE for ${plural(idxs.length, 'row')}`]);
   }
 
   // ── Cell viewer ────────────────────────────────────────────────────────────

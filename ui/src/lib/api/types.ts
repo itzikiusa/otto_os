@@ -3948,6 +3948,9 @@ export type ReviewCommentState = 'draft' | 'approved' | 'declined';
  *  `lens`, another provider) had already finished the lens. */
 export type ReviewAgentStatus = 'pending' | 'running' | 'waiting' | 'done' | 'error' | 'skipped';
 
+/** One raw finding from a single review agent (mirrors Rust `otto_core::domain::ReviewFinding`).
+ *  It carries no fingerprint or lifecycle state: those live on the persisted
+ *  `ReviewFindingRow` from `/reviews/{id}/findings`. */
 export interface ReviewFinding {
   path: string | null;
   line: number | null;
@@ -3955,10 +3958,6 @@ export interface ReviewFinding {
   line_end?: number | null;
   severity: string; // 'info' | 'warn' | 'bug'
   body: string;
-  /** Stable sha2 fingerprint for cross-run deduplication (added A1). */
-  fingerprint?: string | null;
-  /** Lifecycle state: open | fixing | resolved | regressed | declined (added A1). */
-  state?: string | null;
   /** Lens slug that produced the finding (orchestrator mode keeps it through the merge, so one
    *  agent row's findings span several lenses); absent for fan-out reviewers and pre-field rows. */
   lens?: string | null;
@@ -4050,6 +4049,10 @@ export interface ReviewAgentCfg {
   model: string;
   /** The lens/instructions for this agent */
   prompt: string;
+  /** Optional Library/bundled skill name. When non-empty its full text (SKILL.md + references)
+   *  is inlined into the prompt at review time, for every provider. Rust `#[serde(default)]`:
+   *  always sent by the server (empty = none); optional on writes. */
+  skill?: string;
 }
 
 /** Review execution mode: one reviewer per lens × provider, or one orchestrator per provider running every lens as sub-agents. */
@@ -4406,8 +4409,11 @@ export interface IssueDetail {
   assignee: string | null;
 }
 
+/** `session.meta.issue` — client-owned (no Rust struct: the daemon stores the JSON verbatim).
+ *  `url` / `status` are copied from the picked `IssueSummary`; sessions attached before that
+ *  carry `''`, so renderers treat an empty `url` as "no link" and an empty `status` as "no chip". */
 export interface AttachedIssue {
-  provider: 'jira';
+  provider: IssueProviderKind;
   account_id: Id;
   key: string;
   summary: string;
@@ -4564,7 +4570,8 @@ export interface LspCapabilities {
 // ---------------------------------------------------------------------------
 
 export type Autonomy = 'tiered' | 'propose' | 'auto';
-export type ImprovementTrigger = 'scheduled' | 'manual';
+/** What kicked off an improvement run: the schedule, a person, or the in-loop evolver ('live', after a watched interaction concludes). */
+export type ImprovementTrigger = 'scheduled' | 'manual' | 'live';
 export type ImprovementRunStatus = 'running' | 'done' | 'skipped' | 'failed';
 export type ImprovementTarget = 'skill' | 'memory';
 export type ImprovementEditKind = 'add' | 'modify' | 'remove';
@@ -6112,6 +6119,9 @@ export interface WorkflowVersion {
   instructions: string;
   graph: WorkflowGraph;
   note: string;
+  /** Restart policy snapshot (Rust `#[serde(default = "default_on_restart")]`, so always sent;
+   *  pre-field rows read back as 'resume'). Restoring a version round-trips it. */
+  on_restart: 'resume' | 'fail';
   created_by: string;
   created_at: string;
 }
@@ -6132,6 +6142,8 @@ export interface UpdateWorkflowReq {
   description?: string | null;
   instructions?: string | null;
   graph?: WorkflowGraph | null;
+  /** Restart policy: 'resume' | 'fail' (see `Workflow.on_restart`); absent/null leaves it unchanged. */
+  on_restart?: 'resume' | 'fail' | null;
 }
 
 export interface GenerateWorkflowReq {
@@ -9399,8 +9411,12 @@ export interface K8sCluster {
   color?: string | null;
   /** Persisted namespaces offered in the picker even when the cluster forbids listing them. */
   known_namespaces?: string[];
+  /** Non-secret extras (`eks_region`, `eks_cluster`, …); always sent (`color` is lifted out
+   *  of it into its own field). */
+  params: Record<string, unknown>;
   capabilities?: K8sCapabilities | null;
-  created_by: Id;
+  /** `null` for a row with no recorded creator (Rust `Option<Id>`, serialized as null). */
+  created_by: Id | null;
   created_at: string;
   updated_at: string;
   last_used_at?: string | null;
@@ -9426,6 +9442,7 @@ export interface ImportK8sClusterReq {
   context_name?: string | null;
   default_namespace?: string | null;
   environment?: Environment;
+  color?: string | null;
 }
 
 /** `POST /k8s/clusters/{id}/test`. */
@@ -11319,7 +11336,7 @@ export interface BrandImpactResp {
 }
 
 // ---------------------------------------------------------------------------
-// ── Otto Assistant (mirror of crates/otto-server/src/assistant/types.rs —
+// ── Otto Assistant (mirror of crates/otto-assistant/src/assistant/types.rs —
 // docs/contracts/api.md "Otto Assistant"; keep in lockstep)
 // ---------------------------------------------------------------------------
 

@@ -593,50 +593,12 @@ async fn shutdown_retires_every_session_within_its_budget_despite_held_locks() {
     assert_eq!(manager.live_count(), 0);
 }
 
+#[path = "agent_cwd.rs"]
+mod agent_cwd;
 #[path = "archive.rs"]
 mod archive;
 #[path = "grid.rs"]
 mod grid;
-
-/// Sweep 2026-10-11 M2: an agent may open a worker in a repo registered
-/// in its workspace even outside the workspace root; an unregistered
-/// folder is still refused.
-#[tokio::test]
-async fn agent_cwd_accepts_a_registered_repo_outside_the_root() {
-    let (mgr, repo, mut ws, _user) = test_manager().await;
-    let root = tempfile::tempdir().unwrap(); // the fixture's /tmp holds every Linux tempdir
-    ws.root_path = root.path().to_string_lossy().into_owned();
-    let checkout = tempfile::tempdir().unwrap();
-    let path = std::fs::canonicalize(checkout.path()).unwrap();
-    let path_s = path.to_string_lossy().into_owned();
-    let caller: Id = new_id();
-    assert!(matches!(
-        mgr.check_agent_cwd(&ws, &caller, Some(&path_s)).await,
-        Err(Error::Forbidden(_))
-    ));
-    sqlx::query(
-        "INSERT INTO repos (id, workspace_id, name, path, created_at) VALUES (?, ?, 'r', ?, ?)",
-    )
-    .bind(new_id())
-    .bind(&ws.id)
-    .bind(&path_s)
-    .bind(chrono::Utc::now().to_rfc3339())
-    .execute(&repo.pool())
-    .await
-    .unwrap();
-    mgr.check_agent_cwd(&ws, &caller, Some(&path_s))
-        .await
-        .expect("registered repo");
-    std::fs::create_dir_all(path.join("src")).unwrap();
-    mgr.check_agent_cwd(&ws, &caller, Some(&format!("{path_s}/src")))
-        .await
-        .expect("a folder inside it");
-    let other = tempfile::tempdir().unwrap();
-    assert!(mgr
-        .check_agent_cwd(&ws, &caller, Some(other.path().to_str().unwrap()))
-        .await
-        .is_err());
-}
 
 async fn test_manager() -> (Arc<SessionManager>, SessionsRepo, Workspace, Id) {
     // A migrated on-disk sqlite (in a tempdir) via otto-state's opener.
@@ -2020,6 +1982,57 @@ async fn room_authority_delayed_submit_keeps_its_original_epoch() {
     mgr.end_room_authority(&id, "room").await;
     mgr.live.remove(&id);
 }
+/// concurrency-async-1-02: two submissions racing into one session (an
+/// agent→agent message and a human's message within the 200 ms paste delay)
+/// must each arrive as paste + Enter — never paste A, paste B, Enter, Enter,
+/// which the TUI submits as ONE merged prompt plus an empty line.
+#[tokio::test]
+async fn concurrent_submits_do_not_interleave() {
+    let (mgr, repo, ws, owner) = test_manager().await;
+    let id = seed_session(&repo, &ws, &owner, None).await;
+    let dir = tempfile::tempdir().unwrap();
+    let sink = dir.path().join("pty-input");
+    // `cat` records exactly what reached the PTY; each `\r` (or the `\n` the
+    // line discipline maps it to) ends one submission.
+    let spec = CommandSpec {
+        program: "/bin/sh".into(),
+        args: vec!["-c".into(), format!("exec cat > '{}'", sink.display())],
+        cwd: Some("/".into()),
+        env: vec![],
+    };
+    mgr.live
+        .insert(id.clone(), Arc::new(PtyHandle::spawn(&spec).unwrap()));
+    let (a, b) = tokio::join!(
+        mgr.submit_text(&id, "from-agent"),
+        mgr.human_submit_text(&id, &owner, false, "from-human"),
+    );
+    a.unwrap();
+    b.unwrap();
+    let mut lines = Vec::new();
+    for _ in 0..60 {
+        let got = std::fs::read_to_string(&sink).unwrap_or_default();
+        lines = got
+            .split(['\r', '\n'])
+            .filter(|l| !l.is_empty())
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        if lines.len() >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    lines.sort();
+    assert_eq!(
+        lines,
+        vec![
+            "\x1b[200~from-agent\x1b[201~".to_string(),
+            "\x1b[200~from-human\x1b[201~".to_string(),
+        ],
+        "each submission must be its own paste + Enter"
+    );
+    mgr.live.remove(&id);
+}
+
 /// Resume-fork guard: a rollout that another live process is appending to
 /// must be detected so ensure_live refuses to `codex resume` a fork of it.
 #[tokio::test]

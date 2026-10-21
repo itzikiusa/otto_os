@@ -39,6 +39,7 @@
   import Modal from '../../lib/components/Modal.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { toasts } from '../../lib/toast.svelte';
+  import { copyTextOrThrow } from '../../lib/clipboard';
   import { database } from '../../lib/stores/database.svelte';
   import type { ObjectDetail } from '../../lib/api/types';
   import {
@@ -781,7 +782,7 @@
   }
   async function copySql(): Promise<void> {
     try {
-      await navigator.clipboard.writeText(sql);
+      await copyTextOrThrow(sql);
       toasts.success('Copied', 'Generated SQL copied');
     } catch {
       toasts.error('Couldn’t copy');

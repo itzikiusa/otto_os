@@ -3,6 +3,7 @@
   import PathField from '../../lib/components/PathField.svelte';
   import { focusOnMount } from '../../lib/focusOnMount';
   import { toastError } from '../../lib/toastError';
+  import { loadErrorText } from '../../lib/loadError';
   // One pane: a compact, width-adaptive session header (status + title first;
   // everything secondary in the details chip or the ⋯ menu) + terminal or chat.
   import Terminal from '../../lib/components/Terminal.svelte';
@@ -327,6 +328,10 @@
   $effect(() => {
     if (!isAgent) return;
     const onKey = (e: KeyboardEvent): void => {
+      // A split starts with the SAME session in both panes, so two listeners
+      // pass the active-session guard; the first one handles it (and
+      // preventDefaults) — a second flip would undo it.
+      if (e.defaultPrevented) return;
       if (!(e.metaKey || e.ctrlKey) || !e.shiftKey || e.altKey) return;
       if (e.key !== 'c' && e.key !== 'C') return;
       // Only the active pane reacts (tiled/split views mount several).
@@ -384,17 +389,28 @@
     if (alsoRestart && !(await ws.confirmRestart(sessionId))) return;
     dirsBusy = true;
     try {
-      const dirs = collectDirs();
-      await ws.updateSessionMeta(sessionId, { extra_dirs: dirs });
-      if (alsoRestart) {
+      try {
+        await ws.updateSessionMeta(sessionId, { extra_dirs: collectDirs() });
+      } catch (e) {
+        // Nothing was saved: keep the dialog open so the edit isn't lost.
+        toastError('Couldn’t save the session', e);
+        return;
+      }
+      // The directories ARE saved from here on: close the dialog (a second
+      // Save would only repeat it), and report a failed restart as exactly that.
+      dirsOpen = false;
+      if (!alsoRestart) {
+        toasts.success('Directories saved', 'Applies the next time this session restarts.');
+        return;
+      }
+      try {
         await ws.restartSession(sessionId, { quiet: true });
         toasts.success('Directories saved', 'Session restarted with the new directories.');
-      } else {
-        toasts.success('Directories saved', 'Applies the next time this session restarts.');
+      } catch (e) {
+        toasts.push('error', 'Directories saved, but the session didn’t restart', loadErrorText(e), 12000, {
+          action: { label: 'Restart', run: () => ws.requestRestart(sessionId) },
+        });
       }
-      dirsOpen = false;
-    } catch (e) {
-      toastError('Couldn’t save the session', e);
     } finally {
       dirsBusy = false;
     }
@@ -683,7 +699,7 @@
             { label: 'Share…', icon: 'share', action: () => void openShare() } as MenuItem,
             { separator: true } as MenuItem,
             {
-              label: attachedIssue ? 'Change Jira issue…' : 'Attach Jira issue…',
+              label: attachedIssue ? 'Change issue…' : 'Attach issue…',
               icon: 'ticket',
               action: openAttachIssue,
             } as MenuItem,

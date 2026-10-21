@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { formatBytes } from '../../lib/metric-format';
   import { untrack } from 'svelte';
   import { plural } from '../../lib/plural';
   // The governed-call audit ledger — every invoke (UI tester, gateway, inward
@@ -107,12 +108,6 @@
     untrack(() => void load());
   });
 
-  function fmtBytes(b: number | null): string {
-    if (b == null) return '—';
-    if (b < 1024) return `${b} B`;
-    if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`;
-    return `${(b / 1024 / 1024).toFixed(1)} MB`;
-  }
   /** Tool tooltip naming the agent session behind the call, when known. */
   function callTitle(r: McpCallLogRow): string {
     const sid = r.caller_session_id;
@@ -216,7 +211,7 @@
               {#if r.ok}<span class="ok" title="Succeeded"><Icon name="check" size={13} /><span class="cl">OK</span></span>{:else}<span class="bad" title={r.error ?? 'Failed'}><Icon name="x" size={13} /><span class="cl">Failed</span></span>{/if}
             </span>
             <span class="cell num"><span class="cl">Latency</span>{r.latency_ms != null ? `${r.latency_ms}ms` : '—'}</span>
-            <span class="cell num"><span class="cl">Bytes</span>{fmtBytes(r.bytes)}</span>
+            <span class="cell num"><span class="cl">Bytes</span>{formatBytes(r.bytes)}</span>
             <details class="call-details">
               <summary>Call details</summary>
               <dl>

@@ -8,7 +8,7 @@
 // `token:color.<name>` resolves against the scene's brand kit, and boxes with a
 // `radius` use three's RoundedBoxGeometry (registered by the lazy loader).
 import type * as THREE_NS from 'three';
-import type { Scene3dLight, Scene3dMaterial, Scene3dObject, Vec3 } from './types';
+import type { Scene3dLight, Scene3dMaterial, Scene3dObject } from './types';
 import { resolveMaterial, type ResolvedMaterial } from './presets';
 import { resolveColor } from './tokens';
 
@@ -46,9 +46,6 @@ export function geometryKey(o: Scene3dObject): string {
 
 export const DEG = Math.PI / 180;
 export const RAD = 180 / Math.PI;
-
-export const degToRad = (v: Vec3): Vec3 => [v[0] * DEG, v[1] * DEG, v[2] * DEG];
-export const radToDeg = (v: Vec3): Vec3 => [v[0] * RAD, v[1] * RAD, v[2] * RAD];
 
 /** Every object the viewer creates is tagged so picking / export can filter helpers out. */
 export const USERDATA_ID = 'scene3dId';

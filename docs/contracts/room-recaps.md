@@ -9,6 +9,11 @@ archive. Settings mutation additionally requires root. No API-key fallback exist
 ## HTTP
 
 All paths are below `/api/v1`; request/response bodies are JSON unless stated.
+Every route is owner-scoped in its handler (another owner, including root, gets
+403). Reads — the `GET /room-recaps…` family and `GET /room-recap-capabilities` —
+need `Agents:View`; recording, summarising and cancelling (`POST /rooms/{id}/recaps`
+and the `POST`/`DELETE` routes under `/room-recaps/{id}`) need `Agents:Edit`;
+`/room-recap-settings` is `Settings:Admin`.
 Rust definitions in `crates/otto-core/src/api/recap.rs` are canonical; UI mirrors
 are in `ui/src/lib/api/room-recap-types.ts`.
 
@@ -61,7 +66,7 @@ summary and export. Export emits the complete prefix plus that gap. Metadata dur
 every 64 data events or one second of active appends; lifecycle changes persist
 immediately.
 `RecapRevision` is `{metadata:RecapMetadata,events_revision:string,draft_revision:string|null}`.
-The ordinary owner and Agents:Edit checks are identical to detail (401 for invalid
+The ordinary owner and Agents:View checks are identical to detail (401 for invalid
 credentials, 403 for another owner, including root). Revision strings are opaque
 and must only be compared for equality; null means no draft exists. This endpoint
 clones current metadata and stats the journal/draft files without opening or

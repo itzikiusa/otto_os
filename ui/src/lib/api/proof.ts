@@ -7,7 +7,6 @@ import type {
   AddArtifactReq,
   ApiEvidenceReq,
   AssembleReq,
-  AttachMediaReq,
   CiRefreshReq,
   CreateProofPackReq,
   CreateSnapshotReq,
@@ -19,7 +18,6 @@ import type {
   ProofArchiveSessionsResp,
   ProofPackDetail,
   ProofPackResp,
-  ProofSnapshotMeta,
   ProofSnapshotResp,
   ProofSummaryResp,
   RepoProofConfig,
@@ -32,16 +30,6 @@ export interface ProofPackFilter {
   status?: string;
   work_item_kind?: string;
   work_item_id?: string;
-}
-
-/** List a workspace's proof packs, optionally filtered. */
-export function listProofPacks(wsId: string, q?: ProofPackFilter): Promise<ProofPackResp[]> {
-  const params = new URLSearchParams();
-  if (q?.status) params.set('status', q.status);
-  if (q?.work_item_kind) params.set('work_item_kind', q.work_item_kind);
-  if (q?.work_item_id) params.set('work_item_id', q.work_item_id);
-  const qs = params.toString();
-  return api.get<ProofPackResp[]>(`/workspaces/${wsId}/proof-packs${qs ? `?${qs}` : ''}`);
 }
 
 /** One keyset page of the pack list: `next` is the `x-next-cursor` header
@@ -109,14 +97,6 @@ export function getProofPack(id: string): Promise<ProofPackDetail> {
   return api.get<ProofPackDetail>(`/proof-packs/${id}`);
 }
 
-/** Update a pack's title/summary. */
-export function patchProofPack(
-  id: string,
-  body: { title?: string; summary?: string },
-): Promise<ProofPackResp> {
-  return api.patch<ProofPackResp>(`/proof-packs/${id}`, body);
-}
-
 /** Delete a pack (and its artifacts). */
 export function deleteProofPack(id: string): Promise<void> {
   return api.del<void>(`/proof-packs/${id}`);
@@ -161,19 +141,9 @@ export function createSnapshot(id: string, body: CreateSnapshotReq = {}): Promis
   return api.post<ProofSnapshotResp>(`/proof-packs/${id}/snapshot`, body);
 }
 
-/** List a pack's snapshots (newest first). */
-export function listSnapshots(id: string): Promise<ProofSnapshotMeta[]> {
-  return api.get<ProofSnapshotMeta[]>(`/proof-packs/${id}/snapshots`);
-}
-
 /** Fetch a full snapshot (bundle + reports). */
 export function getSnapshot(id: string): Promise<ProofSnapshotResp> {
   return api.get<ProofSnapshotResp>(`/proof-snapshots/${id}`);
-}
-
-/** Attach screenshot/video evidence (base64; ≤25 MiB). */
-export function attachMedia(id: string, body: AttachMediaReq): Promise<ProofPackResp> {
-  return api.post<ProofPackResp>(`/proof-packs/${id}/media`, body);
 }
 
 /** Attach media as a RAW body (`Content-Type` = the file's mime) — no base64

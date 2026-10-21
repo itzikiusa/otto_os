@@ -875,9 +875,20 @@ impl SwarmRepo {
     }
 
     pub async fn delete_swarm(&self, id: &Id) -> Result<()> {
-        // Cascade-delete children (no FK cascade in the schema).
+        // Cascade-delete children (no FK cascade in the schema) in ONE write
+        // transaction: a failure midway (e.g. SQLITE_BUSY) used to leave the
+        // swarm row behind with its runs and tasks already gone. Goals and
+        // channel triggers carry `swarm_id` too — left behind, every inbound
+        // channel message kept matching the orphaned triggers.
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(dberr("delete swarm begin"))?;
         for tbl in [
             "swarm_messages",
+            "swarm_goals",
+            "swarm_channel_triggers",
             "swarm_runs",
             "swarm_tasks",
             "swarm_projects",
@@ -887,15 +898,16 @@ impl SwarmRepo {
                 "DELETE FROM {tbl} WHERE swarm_id = ?"
             )))
             .bind(id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(dberr("delete swarm children"))?;
         }
         sqlx::query("DELETE FROM swarms WHERE id = ?")
             .bind(id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(dberr("delete swarm"))?;
+        tx.commit().await.map_err(dberr("delete swarm commit"))?;
         Ok(())
     }
 
@@ -1192,23 +1204,40 @@ impl SwarmRepo {
     }
 
     pub async fn delete_project(&self, id: &Id) -> Result<()> {
-        // A removed project takes its board history with it: tasks AND the
-        // project-scoped feed. Runs stay — they are the spend/audit record.
+        // A removed project takes its board history with it: tasks, their and
+        // the project's goals, AND the project-scoped feed. Runs stay — they
+        // are the spend/audit record. One transaction, so a failure midway
+        // never leaves a project whose tasks are already gone.
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(dberr("delete project begin"))?;
+        sqlx::query(
+            "DELETE FROM swarm_goals WHERE project_id = ?
+                OR task_id IN (SELECT id FROM swarm_tasks WHERE project_id = ?)",
+        )
+        .bind(id)
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .map_err(dberr("delete project goals"))?;
         sqlx::query("DELETE FROM swarm_tasks WHERE project_id = ?")
             .bind(id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(dberr("delete project tasks"))?;
         sqlx::query("DELETE FROM swarm_messages WHERE project_id = ?")
             .bind(id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(dberr("delete project messages"))?;
         sqlx::query("DELETE FROM swarm_projects WHERE id = ?")
             .bind(id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(dberr("delete project"))?;
+        tx.commit().await.map_err(dberr("delete project commit"))?;
         Ok(())
     }
 
@@ -2066,18 +2095,6 @@ impl SwarmRepo {
         .await
         .map_err(dberr("latest task sessions"))?;
         Ok(rows.into_iter().map(|(tid, sid, _)| (tid, sid)).collect())
-    }
-
-    pub async fn runs_for_swarm(&self, swarm_id: &Id, limit: i64) -> Result<Vec<SwarmRun>> {
-        let rows = sqlx::query(
-            "SELECT * FROM swarm_runs WHERE swarm_id = ? ORDER BY enqueued_at DESC LIMIT ?",
-        )
-        .bind(swarm_id)
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(dberr("runs for swarm"))?;
-        rows.iter().map(row_to_run).collect()
     }
 
     /// Fail every swarm run left in a non-terminal state (daemon-startup

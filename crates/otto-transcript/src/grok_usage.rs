@@ -85,6 +85,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::usage::ParsedUsage;
+use crate::util::format_rfc3339_millis;
 
 /// Usage-event provider string. Not a `Provider` enum variant.
 pub const PROVIDER: &str = "grok";
@@ -521,35 +522,6 @@ fn from_hex(byte: u8) -> Option<u8> {
         b'A'..=b'F' => Some(byte - b'A' + 10),
         _ => None,
     }
-}
-
-fn format_rfc3339_millis(ms: i64) -> String {
-    let secs = ms.div_euclid(1000);
-    let millis = ms.rem_euclid(1000) as u32;
-    let days = secs.div_euclid(86_400);
-    let tod = secs.rem_euclid(86_400) as u32;
-    let (year, month, day) = civil_from_days(days);
-    let hour = tod / 3600;
-    let minute = (tod % 3600) / 60;
-    let second = tod % 60;
-    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{millis:03}Z")
-}
-
-/// Howard Hinnant's `civil_from_days`. `days` is Unix epoch days.
-fn civil_from_days(days: i64) -> (i32, u32, u32) {
-    let z = days + 719_468;
-    let era = (if z >= 0 { z } else { z - 146_096 }) / 146_097;
-    let doe = (z - era * 146_097) as u64;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
-    let mut year = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    if month <= 2 {
-        year += 1;
-    }
-    (year as i32, month as u32, day as u32)
 }
 
 fn collect_updates(dir: &Path, out: &mut Vec<PathBuf>) -> io::Result<()> {

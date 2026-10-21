@@ -144,8 +144,8 @@
     >
       <Icon name={iconFor(d.language)} size={13} />
       <span class="wb-name">{d.name}</span>
-      {#if d.scope === 'global'}<span class="wb-scope" title="Shows in every workspace" aria-label="All workspaces"><Icon name="globe" size={12} /></span>{/if}
-      {#if workbench.isDirty(d.id)}<span class="wb-dot" title="Unsaved changes" aria-label="Unsaved changes"></span>{/if}
+      {#if d.scope === 'global'}<span class="wb-scope" role="img" title="Shows in every workspace" aria-label="All workspaces"><Icon name="globe" size={12} /></span>{/if}
+      {#if workbench.isDirty(d.id)}<span class="wb-dot" role="img" title="Unsaved changes" aria-label="Unsaved changes"></span>{/if}
       <span class="wb-when"><RelTime iso={d.updated_at} /></span>
     </button>
   </li>
@@ -185,7 +185,7 @@
           {#each trashed as d (d.id)}
             <li use:rowMenuKeys class="wb-trash-row" data-testid="wb-trash-row" oncontextmenu={(e) => trashMenu(e, d)}>
               <span class="wb-name" title={d.name}>{d.name}</span>
-              {#if d.scope === 'global'}<span class="wb-scope" title="Shows in every workspace" aria-label="All workspaces"><Icon name="globe" size={12} /></span>{/if}
+              {#if d.scope === 'global'}<span class="wb-scope" role="img" title="Shows in every workspace" aria-label="All workspaces"><Icon name="globe" size={12} /></span>{/if}
               <span class="wb-when">{sizeLabel(d.size)}</span>
               <button class="btn small" onclick={() => void restore(d)} title="Restore with its full history">Restore</button>
               <button class="icon-btn wb-purge" onclick={() => void purge(d)} aria-label={`Delete ${d.name} forever`} title="Delete forever">
@@ -242,7 +242,7 @@
     {/if}
   </div>
 
-  <button class="wb-trash-toggle" class:on={workbench.showTrash} onclick={toggleTrash} data-testid="wb-trash-toggle" aria-pressed={workbench.showTrash}>
+  <button class="wb-trash-toggle" class:on={workbench.showTrash} onclick={toggleTrash} data-testid="wb-trash-toggle">
     <Icon name={workbench.showTrash ? 'chevronLeft' : 'trash'} size={12} />
     {workbench.showTrash ? 'Back to files' : 'Trash'}
   </button>

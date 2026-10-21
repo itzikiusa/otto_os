@@ -43,7 +43,7 @@
           onclick={() => workbench.openDoc(id)}
         >
           <span class="wb-tab-name">{nameOf(id)}</span>
-          {#if workbench.isDirty(id)}<span class="wb-tab-dot" aria-label="Unsaved changes"></span>{/if}
+          {#if workbench.isDirty(id)}<span class="wb-tab-dot" role="img" aria-label="Unsaved changes"></span>{/if}
         </button>
         <button
           class="wb-tab-close"

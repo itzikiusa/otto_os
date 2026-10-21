@@ -17,7 +17,8 @@ export function kartSeats(humans: HumanSeat[], cpuFill: boolean, total = 8): Kar
   return seats;
 }
 
-export interface ShooterSeat { fighter: FighterId; human: boolean; slot: number; name: string }
+/** `team` pins the seat to a team in duos / squads (otherwise seats fill teams in order). */
+export interface ShooterSeat { fighter: FighterId; human: boolean; slot: number; name: string; team?: number }
 export function shooterSeats(humans: HumanSeat[], bots: number): ShooterSeat[] {
   const seats: ShooterSeat[] = humans.map(h => ({ fighter: (FIGHTERS.some(f => f.id === h.pick) ? h.pick : 'male-a') as FighterId, human: true, slot: h.slot, name: h.name }));
   const taken = new Set(seats.map(s => s.fighter));

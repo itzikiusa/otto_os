@@ -137,10 +137,6 @@ export function buildTree(stories: ProductStory[]): TreeNode[] {
   return nodes;
 }
 
-function errMsg(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
-}
-
 class ProductStore {
   // ── Story list ─────────────────────────────────────────────────────────────
   stories: ProductStory[] = $state([]);
@@ -488,7 +484,7 @@ class ProductStore {
         this.transcriptNextCursor = page.next_cursor;
       }
     } catch (e) {
-      if (current()) this.transcriptsError = errMsg(e);
+      if (current()) this.transcriptsError = loadErrorText(e);
     } finally {
       if (current()) this.loadingTranscripts = false;
     }
@@ -538,7 +534,7 @@ class ProductStore {
         const transcript = await this.getTranscript(id);
         if (current()) this.cacheTranscriptBody(id, transcript.body);
       } catch (e) {
-        if (current()) this.transcriptBodyErrors = { ...this.transcriptBodyErrors, [id]: errMsg(e) };
+        if (current()) this.transcriptBodyErrors = { ...this.transcriptBodyErrors, [id]: loadErrorText(e) };
       } finally {
         if (current()) this.transcriptBodyLoading = { ...this.transcriptBodyLoading, [id]: false };
       }
@@ -1376,7 +1372,9 @@ class ProductStore {
   }
 
   // ── Error helper (convenience for callers) ─────────────────────────────────
-  errMsg = errMsg;
+  /** The human cause for a failed product call (the shared `loadErrorText`:
+   *  never a raw "Load failed"; a Problem's own message is kept). */
+  errMsg = loadErrorText;
 }
 
 export const product = new ProductStore();

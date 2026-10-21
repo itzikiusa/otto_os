@@ -11,8 +11,8 @@
   // source, with live preview), (3) — nothing is converted to Excalidraw; this stays
   // Mermaid. Mermaid's own renderer draws the full rich spectrum (subgraphs, classDef
   // colours, every shape). Pan/zoom the preview.
-  import { PAN_LABEL, panDelta } from './panKeys';
-  import { PointerZoom } from './pointerZoom';
+  import { PAN_LABEL } from './panKeys';
+  import { PanZoom, type Transform } from './pointerZoom';
   import { toastAgentEdit } from './agentUndo';
   import { toastError } from '../../lib/toastError';
   import { onMount, onDestroy, tick, untrack } from 'svelte';
@@ -47,18 +47,21 @@
   let generating = $state(false);
   let codeOpen = $state(false);
 
-  // Pan/zoom transform.
-  let scale = $state(1);
-  let tx = $state(0);
-  let ty = $state(0);
+  // Pan/zoom transform (driven by PanZoom — pointerZoom.ts).
+  let view = $state<Transform>({ scale: 1, tx: 0, ty: 0 });
   let userAdjusted = false;
-  let natW = 800;
-  let natH = 600;
+  let dragging = $state(false);
+  const pz = new PanZoom({
+    surface: () => surface,
+    get: () => view,
+    set: (t) => (view = t),
+    adjusted: () => userAdjusted,
+    setAdjusted: (on) => (userAdjusted = on),
+    onDragging: (on) => (dragging = on),
+  });
   let renderToken = 0;
   let lastRendered = '';
   let lastRenderedDark = false;
-
-  const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
 
   // The agent + the user share ONE file. Save the edited Mermaid SOURCE to THIS
   // scene (guarded: if the scene switched, drop the stale save).
@@ -138,96 +141,11 @@
     lastRenderedDark = dark;
     svgHtml = out.svg;
     await tick();
-    sizeSvg();
-    if (!userAdjusted) fit();
-  }
-
-  function sizeSvg(): void {
-    const svg = content?.querySelector('svg');
-    if (!svg) return;
-    const vb = svg.viewBox?.baseVal;
-    natW = (vb && vb.width) || svg.getBoundingClientRect().width || 800;
-    natH = (vb && vb.height) || svg.getBoundingClientRect().height || 600;
-    svg.style.maxWidth = 'none';
-    svg.style.width = `${natW}px`;
-    svg.style.height = `${natH}px`;
-  }
-
-  function fit(): void {
-    if (!surface) return;
-    const r = surface.getBoundingClientRect();
-    if (!r.width || !r.height) return;
-    const s = clamp(Math.min(r.width / natW, r.height / natH) * 0.92, 0.1, 4);
-    scale = s;
-    tx = (r.width - natW * s) / 2;
-    ty = (r.height - natH * s) / 2;
+    pz.sizeSvg(content);
   }
 
   export function fitView(): void {
-    userAdjusted = false;
-    fit();
-  }
-  function zoomBy(factor: number): void {
-    if (!surface) return;
-    userAdjusted = true;
-    const r = surface.getBoundingClientRect();
-    const cx = r.width / 2;
-    const cy = r.height / 2;
-    const ns = clamp(scale * factor, 0.1, 6);
-    tx = cx - (cx - tx) * (ns / scale);
-    ty = cy - (cy - ty) * (ns / scale);
-    scale = ns;
-  }
-  function onWheel(e: WheelEvent): void {
-    e.preventDefault();
-    if (!surface) return;
-    userAdjusted = true;
-    // Pinch (ctrl+wheel on macOS) zooms; a plain two-finger scroll pans.
-    if (!e.ctrlKey) {
-      tx -= e.deltaX;
-      ty -= e.deltaY;
-      return;
-    }
-    const r = surface.getBoundingClientRect();
-    const cx = e.clientX - r.left;
-    const cy = e.clientY - r.top;
-    const factor = Math.exp(-e.deltaY * 0.0015);
-    const ns = clamp(scale * factor, 0.1, 6);
-    tx = cx - (cx - tx) * (ns / scale);
-    ty = cy - (cy - ty) * (ns / scale);
-    scale = ns;
-  }
-
-  /** Arrow-key pan while the surface itself has focus (same state as a drag). */
-  function onSurfaceKey(e: KeyboardEvent): void {
-    const d = panDelta(e);
-    if (!d) return;
-    e.preventDefault();
-    userAdjusted = true;
-    tx -= d.dx;
-    ty -= d.dy;
-  }
-
-  let dragging = $state(false);
-  const pointers = new PointerZoom();
-  function onPointerDown(e: PointerEvent): void {
-    if ((e.target as HTMLElement)?.closest('a') || !surface) return;
-    const r = surface.getBoundingClientRect();
-    pointers.down(e.pointerId, e.clientX - r.left, e.clientY - r.top);
-    dragging = true;
-    userAdjusted = true;
-    (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
-  }
-  function onPointerMove(e: PointerEvent): void {
-    if (!surface || !dragging) return;
-    const r = surface.getBoundingClientRect();
-    ({ scale, tx, ty } = pointers.move(e.pointerId, e.clientX - r.left, e.clientY - r.top, { scale, tx, ty }));
-  }
-  function onPointerUp(e: PointerEvent): void {
-    pointers.up(e.pointerId);
-    dragging = pointers.active;
-    const target = e.currentTarget as HTMLElement;
-    if (target.hasPointerCapture?.(e.pointerId)) target.releasePointerCapture(e.pointerId);
+    pz.fitView();
   }
 
   function fileBase(): string {
@@ -345,7 +263,7 @@
 
   onMount(() => {
     liveId = canvas.currentId;
-    const observer = new ResizeObserver(() => { if (!userAdjusted && svgHtml) fit(); });
+    const observer = new ResizeObserver(() => { if (!userAdjusted && svgHtml) pz.fit(); });
     if (surface) observer.observe(surface);
     return () => observer.disconnect();
   });
@@ -387,18 +305,18 @@
         aria-label={PAN_LABEL}
         title="Drag to pan · scroll to zoom · arrow keys pan when focused (Shift = bigger steps)"
         bind:this={surface}
-        onkeydown={onSurfaceKey}
-        onwheel={onWheel}
-        onpointerdown={onPointerDown}
-        onpointermove={onPointerMove}
-        onpointerup={onPointerUp}
-        onpointercancel={onPointerUp}
+        onkeydown={(e) => pz.key(e)}
+        onwheel={(e) => pz.wheel(e)}
+        onpointerdown={(e) => pz.pointerDown(e)}
+        onpointermove={(e) => pz.pointerMove(e)}
+        onpointerup={(e) => pz.pointerUp(e)}
+        onpointercancel={(e) => pz.pointerUp(e)}
       >
         {#if svgHtml}
           <div
             class="content"
             bind:this={content}
-            style="transform: translate({tx}px, {ty}px) scale({scale}); transform-origin: 0 0;"
+            style="transform: translate({view.tx}px, {view.ty}px) scale({view.scale}); transform-origin: 0 0;"
           >
             <!-- eslint-disable-next-line svelte/no-at-html-tags -->
             {@html svgHtml}
@@ -437,11 +355,11 @@
 
       {#if svgHtml}
         <div class="zoombar">
-          <button onclick={() => zoomBy(1 / 1.2)} title="Zoom out" aria-label="Zoom out">
+          <button onclick={() => pz.zoomBy(1 / 1.2)} title="Zoom out" aria-label="Zoom out">
             <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><path d="M3.5 8h9" /></svg>
           </button>
-          <button class="pct" onclick={fitView} title="Fit to screen" aria-label="Zoom {Math.round(scale * 100)}% — fit to screen">{Math.round(scale * 100)}%</button>
-          <button onclick={() => zoomBy(1.2)} title="Zoom in" aria-label="Zoom in"><Icon name="plus" size={14} /></button>
+          <button class="pct" onclick={fitView} title="Fit to screen" aria-label="Zoom {Math.round(view.scale * 100)}% — fit to screen">{Math.round(view.scale * 100)}%</button>
+          <button onclick={() => pz.zoomBy(1.2)} title="Zoom in" aria-label="Zoom in"><Icon name="plus" size={14} /></button>
           <span class="sep"></span>
           <button onclick={() => void downloadSvg()} title="Download SVG" aria-label="Download SVG">
             <Icon name="file" size={14} />

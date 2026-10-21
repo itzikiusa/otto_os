@@ -543,7 +543,7 @@
         <button onclick={(e) => onaction('up', sid, e)} aria-label="Move up" title="Move up"><Icon name="arrowUp" size={12} /></button>
         <button onclick={(e) => onaction('down', sid, e)} aria-label="Move down" title="Move down"><Icon name="arrowDown" size={12} /></button>
         <button onclick={(e) => onaction('duplicate', sid, e)} aria-label="Duplicate" title="Duplicate"><Icon name="copy" size={12} /></button>
-        <button onclick={(e) => onaction('hide-mobile', sid, e)} aria-label={selHiddenMobile ? 'Show on mobile' : 'Hide on mobile'} title={selHiddenMobile ? 'Show on mobile' : 'Hide on mobile'} aria-pressed={selHiddenMobile}>
+        <button onclick={(e) => onaction('hide-mobile', sid, e)} aria-label="Hidden on mobile" title={selHiddenMobile ? 'Show on mobile' : 'Hide on mobile'} aria-pressed={selHiddenMobile}>
           <Icon name={selHiddenMobile ? 'eyeOff' : 'eye'} size={12} />
         </button>
         <button onclick={(e) => onaction('more', sid, e)} aria-label="More section actions" title="More" aria-haspopup="menu"><Icon name="more" size={12} /></button>

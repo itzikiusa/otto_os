@@ -88,12 +88,3 @@ export function providerSupportsModel(provider: string): boolean {
   if (flags && provider in flags) return flags[provider];
   return provider === 'claude' || provider === 'codex' || provider === 'agy';
 }
-
-/** token → canonical provider alias map for the ⌘K deterministic parser: the
- *  built-in aliases PLUS every registered provider name mapped to itself, so a
- *  custom provider (`grok`) resolves in the no-LLM fast-path. */
-export function providerAliasMap(): Record<string, string> {
-  const map: Record<string, string> = {};
-  for (const name of allProviders()) map[name.toLowerCase()] = name;
-  return map;
-}

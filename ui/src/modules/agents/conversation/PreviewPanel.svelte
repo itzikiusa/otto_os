@@ -4,6 +4,7 @@
   // Diff tabs where they apply, Wrap, Reload, Open in Files, Copy path and a
   // full view (Modal). The host (ConversationView) owns placement: beside the
   // chat when the pane is wide, over it when narrow. Esc closes.
+  import { copyTextOrThrow } from '../../../lib/clipboard';
   import { getContext, untrack } from 'svelte';
   import { toastError } from '../../../lib/toastError';
   import Icon from '../../../lib/components/Icon.svelte';
@@ -73,7 +74,7 @@
   async function copyPath(): Promise<void> {
     if (!path) return;
     try {
-      await navigator.clipboard.writeText(path);
+      await copyTextOrThrow(path);
       toasts.info('Path copied', path);
     } catch (e) {
       toastError('Couldn’t copy to the clipboard', e);

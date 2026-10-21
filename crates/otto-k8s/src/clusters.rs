@@ -135,19 +135,10 @@ fn clean_ns(s: Option<String>) -> Option<String> {
     clean(s).map(|v| v.to_ascii_lowercase())
 }
 
-/// `~` / `~/x` → home-relative absolute path.
+/// `~` / `~/x` → home-relative absolute path ([`otto_core::paths::expand_tilde`]
+/// as a `PathBuf`).
 pub fn expand_tilde(p: &str) -> PathBuf {
-    if let Some(rest) = p.strip_prefix("~/") {
-        if let Some(h) = dirs::home_dir() {
-            return h.join(rest);
-        }
-    }
-    if p == "~" {
-        if let Some(h) = dirs::home_dir() {
-            return h;
-        }
-    }
-    PathBuf::from(p)
+    PathBuf::from(otto_core::paths::expand_tilde(p))
 }
 
 /// Program path for kubectl: located binary, else bare `kubectl` (PATH).
@@ -234,12 +225,11 @@ fn with_kubeconfig(cluster: &K8sCluster, path: &Path) -> K8sCluster {
 
 /// AWS credential environment for an `eks`-source cluster (contract §1 "Auth
 /// injection"): profile accounts ⇒ `AWS_PROFILE`; access-key accounts ⇒ the
-/// three `AWS_*` credential vars read from the Keychain (`aws-<id>`). Empty for
-/// every other source or when the linked account is gone (FK set NULL).
-///
-/// TODO(otto-aws): share `otto_aws::accounts::build_env` once the AWS crate
-/// exports it — this is a deliberately minimal mirror so the k8s crate has no
-/// dependency on otto-aws while both are built in parallel.
+/// three `AWS_*` credential vars read from the Keychain (`aws-<id>`); the
+/// account's custom `endpoint_url` too. Built by the same
+/// [`otto_core::aws_env::build_aws_env`] otto-aws uses. Empty for every other
+/// source or when the linked account is gone (FK set NULL). Spawns applying it
+/// must `env_remove` [`otto_core::aws_env::AWS_ENV_REMOVE`] first.
 pub async fn aws_env_for<S: K8sCtx>(
     ctx: &S,
     cluster: &K8sCluster,
@@ -280,7 +270,8 @@ pub async fn aws_env_for<S: K8sCtx>(
 }
 
 /// Pure half of [`aws_env_for`] — `params` / `secret_json` are the ACCOUNT's
-/// `params_json` and Keychain payload.
+/// `params_json` and Keychain payload. Access keys are passed only when both
+/// halves are present (a partial pair can only fail the CLI's auth anyway).
 pub fn build_aws_env(
     auth_mode: &str,
     profile: Option<&str>,
@@ -288,44 +279,32 @@ pub fn build_aws_env(
     params: &Value,
     secret_json: Option<&str>,
 ) -> Vec<(String, String)> {
-    let mut env = vec![
-        ("AWS_REGION".to_string(), region.to_string()),
-        ("AWS_DEFAULT_REGION".to_string(), region.to_string()),
-        ("AWS_PAGER".to_string(), String::new()),
-        ("AWS_CLI_AUTO_PROMPT".to_string(), "off".to_string()),
-    ];
-    match auth_mode {
-        "profile" => {
-            if let Some(p) = profile.map(str::trim).filter(|p| !p.is_empty()) {
-                env.push(("AWS_PROFILE".into(), p.to_string()));
-            }
-        }
-        _ => {
-            let key_id = params
-                .get("access_key_id")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let secret: Value = secret_json
-                .and_then(|s| serde_json::from_str(s).ok())
-                .unwrap_or(Value::Null);
-            if !key_id.is_empty() {
-                env.push(("AWS_ACCESS_KEY_ID".into(), key_id.to_string()));
-            }
-            if let Some(sk) = secret.get("secret_access_key").and_then(Value::as_str) {
-                env.push(("AWS_SECRET_ACCESS_KEY".into(), sk.to_string()));
-            }
-            if let Some(t) = secret
+    use otto_core::aws_env::{AwsEnvAuth, AwsStaticCreds};
+    let endpoint_url = params.get("endpoint_url").and_then(Value::as_str);
+    if auth_mode == "profile" {
+        return otto_core::aws_env::build_aws_env(
+            AwsEnvAuth::Profile(profile),
+            region,
+            endpoint_url,
+        );
+    }
+    let secret: Value = secret_json
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or(Value::Null);
+    let creds = params
+        .get("access_key_id")
+        .and_then(Value::as_str)
+        .filter(|k| !k.is_empty())
+        .zip(secret.get("secret_access_key").and_then(Value::as_str))
+        .map(|(key_id, secret_key)| AwsStaticCreds {
+            access_key_id: key_id.to_string(),
+            secret_access_key: secret_key.to_string(),
+            session_token: secret
                 .get("session_token")
                 .and_then(Value::as_str)
-                .filter(|t| !t.is_empty())
-            {
-                env.push(("AWS_SESSION_TOKEN".into(), t.to_string()));
-            }
-            // A stray AWS_PROFILE in the daemon env must not override the keys.
-            env.push(("AWS_PROFILE".into(), String::new()));
-        }
-    }
-    env
+                .map(str::to_string),
+        });
+    otto_core::aws_env::build_aws_env(AwsEnvAuth::AccessKeys(creds.as_ref()), region, endpoint_url)
 }
 
 /// The registry service — thin wrapper over the repo + kubectl.
@@ -1030,7 +1009,19 @@ mod tests {
         assert!(env.contains(&("AWS_ACCESS_KEY_ID".into(), "AKIAEXAMPLE".into())));
         assert!(env.contains(&("AWS_SECRET_ACCESS_KEY".into(), "s3cr3t".into())));
         assert!(env.contains(&("AWS_SESSION_TOKEN".into(), "tok".into())));
-        assert!(env.contains(&("AWS_PROFILE".into(), String::new())));
+        // Never a blank AWS_PROFILE (CLI v2 reads it as a profile named "");
+        // the spawn removes a stray one instead.
+        assert!(!env.iter().any(|(k, _)| k == "AWS_PROFILE"));
+
+        // The account's custom endpoint reaches the credential plugin too.
+        let env = build_aws_env(
+            "profile",
+            Some("dev"),
+            "us-east-1",
+            &json!({"endpoint_url": "http://localhost:4566"}),
+            None,
+        );
+        assert!(env.contains(&("AWS_ENDPOINT_URL".into(), "http://localhost:4566".into())));
     }
 
     #[test]
