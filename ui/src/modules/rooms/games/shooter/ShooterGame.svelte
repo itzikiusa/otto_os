@@ -2,17 +2,18 @@
   import { onMount } from 'svelte';
   import LoadState from '../../../../lib/components/LoadState.svelte';
   import {
-    aliveCount, createMatch, heldItem, idleShooterInput, nearestClosedChest, nearestWeaponLoot, PICKAXE_KEY, PICKAXE_SLOT, shooterResults, SLOTS, stepMatch, STORM,
+    aliveCount, createMatch, DOWN_HP, heldItem, idleShooterInput, nearestClosedChest, nearestDowned, nearestDrop, nearestWeaponLoot, PICKAXE_KEY, PICKAXE_SLOT, REVIVE_RANGE, REVIVE_TIME,
+    shooterResults, SLOTS, stepMatch, STORM, teamsAlive,
     type Fighter, type Held, type ShooterEvent, type ShooterInput, type ShooterLink, type ShooterSetup, type ShooterState,
   } from './sim';
   import { mapFor, HALF, waterLevel } from './map';
   import { AMMO_KINDS, BUILD_COST, CONSUMABLES, canUse, isConsumable, isWeapon, itemName, MATERIAL_COLOURS, MATERIAL_NAMES, RARITY_COLOURS, RARITY_NAMES, WEAPONS } from './weapons';
   import { BUILD_KIND_NAMES } from './builds';
-  import { fighterName, type FighterId } from './catalog';
+  import { fighterName, TEAM_MODES, teamColour, type FighterId } from './catalog';
   import { InputState } from '../common/input';
   import { GameAudio } from '../common/audio';
   import { clamp, lerp, ordinal, wrapAngle } from '../common/math';
-  import type { ShooterRenderer } from './render';
+  import type { LocalBuild, ShooterRenderer } from './render';
 
   interface Props {
     setup: ShooterSetup | null; selfSlot: number; fighter: FighterId; link?: ShooterLink;
@@ -45,7 +46,11 @@
   const numbers: { x: number; y: number; z: number; text: string; color: string; t: number }[] = [];
   const GUN_ICON: Record<string, string> = { pistol: 'gun-pistol', smg: 'gun-smg', rifle: 'gun-rifle', shotgun: 'gun-shotgun', sniper: 'gun-sniper', rocket: 'gun-rocket' };
   const hex = (n: number) => `#${n.toString(16).padStart(6, '0')}`;
-  const KILL_HOW = ['Sidearm', 'Buzz SMG', 'Assault Blaster', 'Pump Scatter', 'Longshot Rail', 'Boom Tube', 'the storm', 'Pickaxe'];
+  const KILL_HOW = ['Sidearm', 'Buzz SMG', 'Assault Blaster', 'Pump Scatter', 'Longshot Rail', 'Boom Tube', 'the storm', 'Pickaxe', 'bled out'];
+  /** Build intent for the preview ghost, predicted locally (reused every frame). */
+  const local: LocalBuild = { building: false, piece: 0, mat: 0, yaw: 0, pitch: 0, x: 0, y: 0, z: 0 };
+  /** E2E hook: `window.__ottoGameTest = { stormScale }` shortens the storm so a match ends in about a minute. */
+  const testHook = () => (globalThis as { __ottoGameTest?: { stormScale?: number } }).__ottoGameTest;
 
   const selfOf = (s: ShooterState) => Math.max(0, s.players.findIndex(p => p.human && p.slot === selfSlot));
 
@@ -102,6 +107,10 @@
   }
 
   function say(text: string, ms = 1800) { toast = text; const shown = text; setTimeout(() => { if (toast === shown) toast = ''; }, ms); }
+  function post(id: number, text: string, mine: boolean) {
+    feed = [...feed.slice(-4), { id, text, mine }];
+    setTimeout(() => { feed = feed.filter(f => f.id !== id); }, 6000);
+  }
   function nameOf(state: ShooterState, id: number): string { if (id === -2) return 'the storm'; if (id < 0) return 'a fall'; return state.players[id]?.name ?? 'someone'; }
   const SHOT_SOUNDS = ['pistol', 'smg', 'rifle', 'shotgun', 'sniper', 'rocket'];
 
@@ -128,19 +137,42 @@
         const killer = nameOf(state, e.player), victim = nameOf(state, e.target);
         const how = e.player === -2 ? 'was caught in the storm' : e.player < 0 ? 'fell' : `eliminated by ${killer}`;
         const weapon = KILL_HOW[e.value] ?? '';
-        feed = [...feed.slice(-4), { id: e.id, text: e.player >= 0 ? `${killer} ⟶ ${victim}${weapon ? ` · ${weapon}` : ''}` : `${victim} ${how}`, mine: e.player === me || e.target === me }];
-        setTimeout(() => { feed = feed.filter(f => f.id !== e.id); }, 6000);
+        post(e.id, e.player >= 0 ? `${killer} ⟶ ${victim}${weapon ? ` · ${weapon}` : ''}` : e.target === me ? `You ${how.replace('was ', 'were ')}` : `${victim} ${how}`, e.player === me || e.target === me);
         if (e.player === me && e.target !== me) { audio.play('eliminated'); say(`You eliminated ${victim} · ${aliveCount(state)} left`); }
-        if (e.target === me) { audio.play('voice-over'); say(e.player >= 0 ? `Eliminated by ${killer}` : `You ${how.replace('was ', 'were ')}`, 3000); spectate = e.player >= 0 ? e.player : -1; }
+        if (e.target === me) {
+          audio.play('voice-over'); say(e.player >= 0 ? `Eliminated by ${killer}` : `You ${how.replace('was ', 'were ')}`, 3000);
+          // Team modes: watch a teammate who is still in it first.
+          const mate = state.squad > 1 ? state.players.find(q => q.team === p?.team && q.id !== me && q.mode !== 'dead') : undefined;
+          spectate = mate ? mate.id : e.player >= 0 ? e.player : -1;
+        }
         break;
       }
+      case 'knock': {
+        const killer = nameOf(state, e.player), victim = nameOf(state, e.target);
+        post(e.id, `${e.player >= 0 ? killer : e.player === -2 ? 'The storm' : 'A fall'} knocked ${victim}${KILL_HOW[e.value] && e.player >= 0 ? ` · ${KILL_HOW[e.value]}` : ''}`, e.player === me || e.target === me);
+        if (e.target === me) { audio.play('voice-hurry'); say('Knocked! Crawl to a teammate — they can revive you', 3000); }
+        else if (e.player === me) { audio.play('eliminated', { volume: 0.6 }); say(`You knocked ${victim}`); }
+        else if (p && state.players[e.target]?.team === p.team) say(`${victim} is down — hold E next to them to revive`, 2600);
+        break;
+      }
+      case 'revive':
+        post(e.id, `${nameOf(state, e.player)} revived ${nameOf(state, e.target)}`, e.player === me || e.target === me);
+        if (e.target === me || e.player === me) { audio.play('shield'); say(e.target === me ? `${nameOf(state, e.player)} got you back up` : `You revived ${nameOf(state, e.target)}`); }
+        break;
+      case 'supply':
+        if (e.flag === 0) { audio.play('voice-go', { volume: 0.7 }); say('Supply drop incoming — look for the beam (M)', 2600); }
+        else if (e.flag === 1) audio.play('land', { distance: dist, volume: 0.9 });
+        else { audio.play('chest', { distance: dist }); if (e.player === me) say('Supply drop opened'); }
+        break;
+      case 'launch': audio.play('select', { distance: e.player === me ? 0 : dist, volume: 0.8 }); break;
+      case 'fell': audio.play('bump', { distance: dist, volume: 0.9, throttle: 0.05 }); break;
       case 'pickup': if (e.player === me) audio.play('pickup', { volume: 0.5 }); break;
       case 'reload': if (e.player === me) audio.play('reload', { volume: 0.6 }); break;
       case 'chest': audio.play('chest', { distance: dist }); break;
       case 'explode': audio.play('explosion', { distance: dist, volume: 1.2 }); break;
       case 'land': if (e.player === me) audio.play('land'); break;
       case 'storm': audio.play('storm', { volume: 0.7 }); if (e.flag === 1) { audio.play('voice-hurry'); say(`Storm phase ${e.value + 1} of ${STORM.length} — the storm is closing in!`); } else say('Storm eye revealed — check the map (M)', 2200); break;
-      case 'win': if (e.player === me) { audio.play('voice-win'); say('Victory Royale!', 4000); } break;
+      case 'win': if (e.player === me || (p && state.squad > 1 && e.value === p.team)) { audio.play('voice-win'); say('Victory Royale!', 4000); } break;
       case 'jump': if (e.player === me) audio.play('select'); break;
       case 'build': audio.play('drop', { distance: e.player === me ? 0 : dist, volume: 0.5, throttle: 0.05 }); break;
       case 'break': audio.play('bump', { distance: dist, volume: 0.8, throttle: 0.05 }); break;
@@ -174,7 +206,7 @@
     mapImage = c;
     return c;
   }
-  /** Island map with the storm, flight path, POIs, structures and teammates; `big` is the full-screen view. */
+  /** Island map with the storm, flight path, POIs, structures, supply drops, launch pads and teammates; `big` is the full-screen view. */
   function drawMap(c: HTMLCanvasElement | undefined, state: ShooterState, me: number, big: boolean) {
     if (!c) return;
     const g = c.getContext('2d'); if (!g) return;
@@ -197,11 +229,22 @@
       g.lineWidth = 3; g.strokeStyle = 'rgba(0,0,0,0.55)'; g.strokeText(poi.name, mx(poi.x), mz(poi.z));
       g.fillStyle = 'rgba(255,255,255,0.95)'; g.fillText(poi.name, mx(poi.x), mz(poi.z));
     }
-    for (const p of state.players) {
-      if (p.mode === 'dead' || p.id === me || !p.human) continue;
-      g.fillStyle = '#ffd23f'; g.beginPath(); g.arc(mx(p.x), mz(p.z), big ? 6 : 4, 0, Math.PI * 2); g.fill();
+    for (const d of state.drops) {
+      g.fillStyle = '#4aa8ff'; g.strokeStyle = '#ffffff'; g.lineWidth = 1.5;
+      const r = big ? 7 : 4.5; g.fillRect(mx(d.x) - r, mz(d.z) - r, r * 2, r * 2); g.strokeRect(mx(d.x) - r, mz(d.z) - r, r * 2, r * 2);
     }
-    const p = state.players[me];
+    g.fillStyle = 'rgba(98,224,255,0.95)';
+    for (const pad of state.pads) { g.beginPath(); g.arc(mx(pad.x), mz(pad.z), big ? 4 : 2.5, 0, Math.PI * 2); g.fill(); }
+    const self = state.players[me];
+    // Teammates in the team colour (team modes), other people in yellow (solo).
+    for (const p of state.players) {
+      if (p.mode === 'dead' || p.id === me) continue;
+      const mate = state.squad > 1 && p.team === self?.team;
+      if (!mate && (state.squad > 1 || !p.human)) continue;
+      g.fillStyle = mate ? hex(teamColour(p.team)) : '#ffd23f'; g.strokeStyle = p.mode === 'down' ? '#ff5a4a' : '#000'; g.lineWidth = p.mode === 'down' ? 2.5 : 1;
+      g.beginPath(); g.arc(mx(p.x), mz(p.z), big ? 6 : 4, 0, Math.PI * 2); g.fill(); g.stroke();
+    }
+    const p = self;
     if (p && p.mode !== 'dead') {
       const k = big ? 1.6 : 1;
       g.save(); g.translate(mx(p.x), mz(p.z)); g.rotate(cam.yaw); g.scale(k, k);
@@ -253,7 +296,8 @@
     stop?.();
     const abort = new AbortController();
     let disposed = false, frame = 0, last = performance.now(), lastHud = 0, lastSend = 0, lastEvent = 0, bootStarted = false, finished = false, lastLootRev = -1, lastBuildRev = -1, preferBuilds = false, sentAt = 0;
-    let state: ShooterState | null = setup ? createMatch(setup) : null;
+    const hook = testHook();
+    let state: ShooterState | null = setup ? createMatch(hook?.stormScale ? { ...setup, stormScale: hook.stormScale } : setup) : null;
     const latch = { jump: false, interact: false, reload: false, fire: false, edit: false, slot: 0 };
     const bootAt = performance.now();
     let pending: ShooterEvent[] = [];
@@ -264,7 +308,7 @@
       if (disposed) return;
       const me = selfOf(first);
       cam.yaw = first.players[me]?.yaw ?? 0;
-      const created = new ShooterRenderer(stage, first.map, first.players.map(p => ({ fighter: p.fighter, human: p.human, name: p.name })), me, abort.signal);
+      const created = new ShooterRenderer(stage, first.map, first.players.map(p => ({ fighter: p.fighter, human: p.human, name: p.name, team: p.team })), me, abort.signal);
       try { await created.load(); } catch (e) { created.dispose(); throw e; }
       if (disposed) { created.dispose(); return; }
       renderer = created;
@@ -327,20 +371,35 @@
       let watch = me;
       if (p?.mode === 'dead') {
         building = false;
-        if (spectate < 0 || state.players[spectate]?.mode === 'dead') spectate = state.players.findIndex(q => q.mode !== 'dead');
+        if (spectate < 0 || state.players[spectate]?.mode === 'dead') {
+          const mate = state.squad > 1 ? state.players.findIndex(q => q.mode !== 'dead' && q.team === p.team) : -1;
+          spectate = mate >= 0 ? mate : state.players.findIndex(q => q.mode !== 'dead');
+        }
         watch = spectate >= 0 ? spectate : me;
         if (watch !== me) { const w = state.players[watch]; cam.yaw = cam.yaw + wrapAngle(w.yaw - cam.yaw) * Math.min(1, dt * 3); }
       }
-      if (renderer) renderer.frame(state, me, cam, dt, watch);
+      if (renderer && p) {
+        // The ghost follows this player's own intent at once; guests place it from the newest snapshot, extrapolated.
+        local.building = building && p.mode === 'ground'; local.piece = piece; local.mat = material; local.yaw = cam.yaw; local.pitch = cam.pitch;
+        const fresh = isGuest ? link?.snapshots?.at(-1) : undefined, src = fresh?.state.players[me] ?? p;
+        const age = fresh ? clamp((now - fresh.at) / 1000, 0, 0.15) : 0;
+        local.x = src.x + src.vx * age; local.y = src.y; local.z = src.z + src.vz * age;
+      }
+      if (renderer) renderer.frame(state, me, cam, dt, watch, p ? local : undefined);
       input?.endFrame();
       drawOverlay(now);
       if (now - lastHud > 80) {
         hud = { ...state, storm: { ...state.storm }, bus: { ...state.bus }, chests: [...state.chests], players: state.players.map(q => ({ ...q, weapons: q.weapons.map(w => w && { ...w }), ammo: { ...q.ammo }, mats: [...q.mats] as Fighter['mats'] })) };
         ghostOk = renderer?.ghostValid ?? false;
         if (p && p.mode === 'ground') {
+          const mate = nearestDowned(state, p, REVIVE_RANGE);
           const chest = nearestClosedChest(state, p);
+          const drop = nearestDrop(state, p);
           const w = nearestWeaponLoot(state, p);
-          prompt = building ? '' : chest >= 0 ? (p.interact > 0 ? 'Opening…' : 'Hold E — open chest') : w?.weapon ? `E — pick up ${RARITY_NAMES[w.rarity]} ${itemName(w.weapon)}${isConsumable(w.weapon) ? ` ×${w.amount}` : ''}` : p.swimming ? 'Swimming — head for the shore' : '';
+          prompt = building ? '' : mate >= 0 ? (p.interact > 0 ? `Reviving ${state.players[mate].name}… ${Math.round((p.interact / REVIVE_TIME) * 100)}%` : `Hold E — revive ${state.players[mate].name}`)
+            : chest >= 0 ? (p.interact > 0 ? 'Opening…' : 'Hold E — open chest')
+              : drop >= 0 ? (p.interact > 0 ? 'Opening supply drop…' : 'Hold E — open supply drop')
+                : w?.weapon ? `E — pick up ${RARITY_NAMES[w.rarity]} ${itemName(w.weapon)}${isConsumable(w.weapon) ? ` ×${w.amount}` : ''}` : p.swimming ? 'Swimming — head for the shore' : '';
         } else prompt = p?.mode === 'bus' ? 'Press Space to drop' : '';
         drawMap(minimap, state, me, false);
         if (showMap) drawMap(bigmap, state, me, true);
@@ -375,13 +434,17 @@
   /** Hotbar labels: a weapon shows mag / reserve, a consumable its count. */
   const slotAmmo = (w: Held) => (isWeapon(w.w) ? `${w.mag}` : `×${w.mag}`);
   const slotReserve = (p: Fighter, w: Held) => (isWeapon(w.w) ? `/${p.ammo[WEAPONS[w.w].ammo]}` : '');
-  const consumableKind = (w: Held) => (isConsumable(w.w) ? (CONSUMABLES[w.w].heal ? 'heal' : 'shield') : '');
+  const consumableKind = (w: Held) => (isConsumable(w.w) ? (CONSUMABLES[w.w].pad ? 'pad' : CONSUMABLES[w.w].heal ? 'heal' : 'shield') : '');
 
   const me = $derived(hud ? hud.players[selfOf(hud)] : null);
   const held = $derived(me ? heldItem(me) : null);
   const heldWeapon = $derived(held && isWeapon(held.w) ? WEAPONS[held.w] : null);
   const heldUse = $derived(held && isConsumable(held.w) ? CONSUMABLES[held.w] : null);
   const alive = $derived(hud ? aliveCount(hud) : 0);
+  const squad = $derived(hud?.squad ?? 1);
+  const teams = $derived(hud && squad > 1 ? teamsAlive(hud) : 0);
+  const mates = $derived(hud && me && squad > 1 ? hud.players.filter(q => q.team === me.team && q.id !== me.id) : []);
+  const modeName = $derived(TEAM_MODES.find(m => m.size === squad)?.name ?? 'Solo');
   const storm = $derived(hud?.storm);
   const outside = $derived(!!(me && storm && me.mode !== 'dead' && Math.hypot(me.x - storm.cx, me.z - storm.cz) > storm.r));
   const results = $derived(hud && hud.phase === 'done' ? shooterResults(hud) : []);
@@ -403,6 +466,7 @@
     <div class="br-top">
       <div class="br-stats" aria-label="Match status">
         <span title="Survivors left"><b>{alive}</b> alive</span>
+        {#if squad > 1}<span title={`${modeName}: teams still in the match`}><b>{teams}</b> {teams === 1 ? 'team' : 'teams'}</span>{/if}
         <span title="Your eliminations"><b>{me.kills}</b> {me.kills === 1 ? 'elim' : 'elims'}</span>
         {#if storm && hud.phase === 'play'}<span class="br-storm" class:shrinking={storm.shrinking}>{storm.stage < 0 ? 'Storm forms in' : storm.shrinking ? 'Storm shrinking' : storm.stage >= STORM.length - 1 ? 'Final circle' : 'Storm moves in'} <b>{mm(storm.timer)}</b>{#if storm.stage >= 0}<small> · phase {Math.min(STORM.length, storm.stage + 1)}/{STORM.length}</small>{/if}</span>{/if}
         {#if hud.phase === 'bus'}<span>Drop ship · <b>{mm(hud.bus.duration - hud.bus.t)}</b></span>{/if}
@@ -417,6 +481,18 @@
     <div class="br-mapbox"><canvas class="br-minimap" bind:this={minimap} width="200" height="200" aria-label="Island map"></canvas>
       <ol class="br-feed" aria-live="polite">{#each feed as f (f.id)}<li class:mine={f.mine}>{f.text}</li>{/each}</ol>
     </div>
+    {#if mates.length}
+      <ul class="br-team" aria-label={`Your ${modeName.toLowerCase().replace(/s$/, '')} team`} style:--team={hex(teamColour(me.team))}>
+        {#each mates as m (m.id)}
+          <li class:down={m.mode === 'down'} class:out={m.mode === 'dead'}>
+            <i aria-hidden="true"></i><span>{m.name}</span>
+            {#if m.mode === 'dead'}<em>Out</em>
+            {:else if m.mode === 'down'}<em>{m.revive > 0 ? 'Reviving…' : 'Knocked'}</em><b class="bleed" role="meter" aria-label={`${m.name} bleeding out`} aria-valuemin={0} aria-valuemax={DOWN_HP} aria-valuenow={Math.round(m.hp)}><span style:width={`${(m.hp / DOWN_HP) * 100}%`}></span></b>
+            {:else}<b role="meter" aria-label={`${m.name} health and shield`} aria-valuemin={0} aria-valuemax={200} aria-valuenow={Math.round(m.hp + m.shield)}><span class="hp" style:width={`${m.hp / 2}%`}></span><span class="sh" style:width={`${m.shield / 2}%`}></span></b>{/if}
+          </li>
+        {/each}
+      </ul>
+    {/if}
     {#if showMap && hud.phase !== 'done'}
       <div class="br-bigmap"><canvas bind:this={bigmap} width="640" height="640" aria-label="Full island map"></canvas><p>{mapFor(hud.map).pois.length} landmarks · white ring: next safe zone · orange: structures · M to close</p></div>
     {/if}
@@ -427,6 +503,14 @@
     {#if toast}<div class="br-toast" aria-live="polite">{toast}</div>{/if}
     {#if me.reload > 0 && heldWeapon}<div class="br-reload" aria-label="Reloading"><span style:width={`${(1 - me.reload / heldWeapon.reload) * 100}%`}></span><em>Reloading</em></div>{/if}
     {#if me.useT > 0 && heldUse}<div class="br-reload use" aria-label={`Using ${heldUse.name}`}><span style:width={`${Math.min(1, me.useT / heldUse.time) * 100}%`}></span><em>Using {heldUse.name}</em></div>{/if}
+    {#if me.mode === 'down'}
+      <div class="br-knocked" role="status">
+        <h2>Knocked</h2>
+        <p>{me.revive > 0 ? 'A teammate is reviving you — hold on' : 'Crawl to a teammate; they can revive you (E)'}</p>
+        <div class="br-reload" aria-label="Bleeding out"><span style:width={`${(me.hp / DOWN_HP) * 100}%`}></span><em>Bleeding out</em></div>
+        {#if me.revive > 0}<div class="br-reload use" aria-label="Revive progress"><span style:width={`${Math.min(1, me.revive / REVIVE_TIME) * 100}%`}></span><em>Revive</em></div>{/if}
+      </div>
+    {/if}
     {#if me.mode !== 'dead'}
       <div class="br-vitals" aria-label="Health and shield">
         <div class="br-bar shield" role="meter" aria-label="Shield" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(me.shield)}><span style:width={`${me.shield}%`}></span><b><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2 4 5v6c0 5 3.4 9.4 8 11 4.6-1.6 8-6 8-11V5z" /></svg>Shield {Math.round(me.shield)}</b></div>
@@ -448,36 +532,36 @@
           <div class="br-slot" class:active={i === me.current && !building} style:border-color={w ? hex(RARITY_COLOURS[w.rarity]) : undefined}>
             <small>{i + 1}</small>
             {#if w && isWeapon(w.w)}<img src={`/room-games/portraits/${GUN_ICON[w.w]}.webp`} alt={itemName(w.w)} /><span>{slotAmmo(w)}<em>{slotReserve(me, w)}</em></span>
-            {:else if w}<svg class={`br-item ${consumableKind(w)}`} viewBox="0 0 24 24" role="img" aria-label={itemName(w.w)}>{#if consumableKind(w) === 'heal'}<path d="M10 3h4v7h7v4h-7v7h-4v-7H3v-4h7z" />{:else}<path d="M12 2 4 5v6c0 5 3.4 9.4 8 11 4.6-1.6 8-6 8-11V5z" />{/if}</svg><span>{slotAmmo(w)}</span>
+            {:else if w}<svg class={`br-item ${consumableKind(w)}`} viewBox="0 0 24 24" role="img" aria-label={itemName(w.w)}>{#if consumableKind(w) === 'heal'}<path d="M10 3h4v7h7v4h-7v7h-4v-7H3v-4h7z" />{:else if consumableKind(w) === 'pad'}<path d="M4 18h16v3H4zM7 15h10l-2-3h3l-6-9-6 9h3z" />{:else}<path d="M12 2 4 5v6c0 5 3.4 9.4 8 11 4.6-1.6 8-6 8-11V5z" />{/if}</svg><span>{slotAmmo(w)}</span>
             {:else}<span class="br-empty">Empty</span>{/if}
           </div>
         {/each}
         {#if building}<p class="br-held">Building · {BUILD_KIND_NAMES[piece]}</p>
-        {:else if held}<p class="br-held">{RARITY_NAMES[held.rarity]} {itemName(held.w)}{#if heldUse && !canUse(heldUse.id, me.hp, me.shield)} · {heldUse.heal ? 'health' : 'shield'} full{/if}</p>
+        {:else if held}<p class="br-held">{RARITY_NAMES[held.rarity]} {itemName(held.w)}{#if heldUse?.pad} · click to deploy ahead, step on it to launch{:else if heldUse && !canUse(heldUse.id, me.hp, me.shield)} · {heldUse.heal ? 'health' : 'shield'} full{/if}</p>
         {:else if me.current === PICKAXE_SLOT}<p class="br-held">Pickaxe — swing at trees, rocks and cars for materials</p>{/if}
         <p class="br-ammo" aria-label="Ammo reserve">{#each AMMO_KINDS as k (k)}<span class:has={me.ammo[k] > 0}>{k} <b>{me.ammo[k]}</b></span>{/each}</p>
       </div>
     {:else if hud.phase !== 'done'}
-      <div class="br-spectate"><p>#{me.place} · {me.kills} elims · {watched ? `Spectating ${watched.name || fighterName(watched.fighter)} (${watched.kills} elims)` : 'Match in progress'}</p>
+      <div class="br-spectate"><p>{me.place ? `#${me.place} · ` : squad > 1 ? 'Your team is still in it · ' : ''}{me.kills} elims · {watched ? `Spectating ${watched.name || fighterName(watched.fighter)} (${watched.kills} elims)` : 'Match in progress'}</p>
         <button class="btn small" onclick={() => { if (!hud) return; const list = hud.players.filter(q => q.mode !== 'dead'); const idx = list.findIndex(q => q.id === spectate); spectate = list[(idx + 1) % list.length]?.id ?? -1; }}>Next player</button>
         <button class="btn small" onclick={onexit}>Leave</button></div>
     {/if}
-    {#if !focused && !locked && hud.phase !== 'done' && !menu && !paused}<div class="br-hint">Click the game to aim · WASD move · Mouse aim · Click fire / use · Right-click zoom · 1–5 hotbar · F pickaxe · Q build (1 wall, 2 floor, 3 ramp, R material, G edit) · E pick up / open · R reload · Space jump / drop · Shift sprint · M map</div>{/if}
+    {#if !focused && !locked && hud.phase !== 'done' && !menu && !paused}<div class="br-hint">Click the game to aim · WASD move · Mouse aim · Click fire / use · Right-click zoom · 1–5 hotbar · F pickaxe · Q build (1 wall, 2 floor, 3 ramp, R material, G edit) · E pick up / open / revive · R reload · Space jump / drop · Shift sprint · M map</div>{/if}
     {#if paused && hud.phase !== 'done'}<div class="br-cover" role="status"><h2>Waiting for players</h2><p>The match is paused while someone reconnects.</p><button class="btn" onclick={onexit}>Leave match</button></div>
     {:else if hud.phase === 'done'}
       <div class="br-cover br-results" aria-live="polite">
-        <p class="br-kicker">{mapFor(hud.map).id === 'isle' ? 'Palm Isle' : 'Red Mesa'} · Match results · {mm(hud.clock)}</p>
-        <h2 class:victory={me.place === 1}>{me.place === 1 ? 'Victory Royale!' : `You placed ${ordinal(me.place)}`}</h2>
+        <p class="br-kicker">{mapFor(hud.map).id === 'isle' ? 'Palm Isle' : 'Red Mesa'} · {modeName} · Match results · {mm(hud.clock)}</p>
+        <h2 class:victory={me.place === 1}>{me.place === 1 ? 'Victory Royale!' : squad > 1 ? `Your team placed ${ordinal(me.place)}` : `You placed ${ordinal(me.place)}`}</h2>
         <p>{me.kills} eliminations · {Math.round(me.damage)} damage · survived {mm(me.aliveTime)}</p>
         <table>
           <thead><tr><th scope="col">Place</th><th scope="col">Survivor</th><th scope="col">Elims</th><th scope="col">Damage</th></tr></thead>
-          <tbody>{#each results.slice(0, 8) as r (r.id)}<tr class:me={r.id === me.id}><td>#{r.place}</td><td><img src={`/room-games/portraits/fighter-${r.fighter}.webp`} alt="" /><span>{r.name}{r.human ? '' : ' (bot)'}</span></td><td>{r.kills}</td><td>{r.damage}</td></tr>{/each}</tbody>
+          <tbody>{#each results.filter((r, i) => i < 8 || (squad > 1 ? r.team === me.team : r.id === me.id)) as r (r.id)}<tr class:me={r.id === me.id} class:mate={squad > 1 && r.team === me.team}><td>#{r.place}</td><td>{#if squad > 1}<i class="br-swatch" style:background={hex(teamColour(r.team))} title={`Team ${r.team + 1}`}></i>{/if}<img src={`/room-games/portraits/fighter-${r.fighter}.webp`} alt="" /><span>{r.name}{r.human ? '' : ' (bot)'}</span></td><td>{r.kills}</td><td>{r.damage}</td></tr>{/each}</tbody>
         </table>
         <div class="br-actions"><button class="btn primary" disabled={rematchDisabled} onclick={onrematch}>{rematchLabel}</button><button class="btn" onclick={onexit}>Back to games</button></div>
       </div>
     {:else if menu}
       <div class="br-cover"><h2>Paused</h2><p>{link ? 'The match continues for everyone else while this menu is open.' : 'The island waits for you.'}</p>
-        <p class="br-keys">WASD move · Mouse aim · Left click fire (hold to use heals and shields) · Right click / Z aim down sights · 1–5 or wheel switch hotbar slots · F pickaxe (harvest materials) · Q build mode: 1 wall, 2 floor, 3 ramp, R material, G edit your piece (door / window, flip ramp), click to place · E pick up / hold to open chests · R reload · Space jump (and drop from the balloon) · Shift sprint · M full map · Esc release the mouse</p>
+        <p class="br-keys">WASD move · Mouse aim · Left click fire (hold to use heals, shields and launch pads) · Right click / Z aim down sights · 1–5 or wheel switch hotbar slots · F pickaxe (harvest materials) · Q build mode: 1 wall, 2 floor, 3 ramp, R material, G edit your piece (door / window, flip ramp), click to place · E pick up / hold to open chests and supply drops / hold next to a knocked teammate to revive · R reload · Space jump (and drop from the balloon) · Shift sprint · M full map · Esc release the mouse</p>
         <button class="btn primary" onclick={() => { menu = false; renderer?.view.canvas.focus(); }}>Resume</button><button class="btn" onclick={onexit}>Leave match</button></div>
     {/if}
     <div class="br-touch" aria-label="Touch controls">
@@ -554,6 +638,7 @@
   .br-slot .br-item { width: 30px; height: 30px; stroke: none; }
   .br-item.heal { fill: var(--success); }
   .br-item.shield { fill: var(--info); }
+  .br-item.pad { fill: var(--accent-text); }
   .br-slot small { position: absolute; inset-block-start: 2px; inset-inline-start: 6px; font-size: var(--fs-xs); opacity: .8; }
   .br-slot span { font-size: var(--fs-m); font-weight: 600; font-variant-numeric: tabular-nums; }
   .br-slot span em { font-style: normal; font-weight: 400; opacity: .7; font-size: var(--fs-s); }
@@ -580,11 +665,30 @@
   .br-results td:nth-child(2) { display: flex; align-items: center; gap: 8px; }
   .br-results td img { width: 32px; height: 32px; object-fit: contain; }
   .br-results tr.me td { background: var(--accent-soft); font-weight: 600; }
+  .br-results tr.mate td:first-child { box-shadow: inset 3px 0 0 var(--accent-solid); }
+  .br-swatch { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+  /* Team panel: one row per teammate (health + shield, or the bleed-out bar when knocked). */
+  .br-team { position: absolute; inset-block-start: 64px; inset-inline-start: 14px; margin: 0; padding: 6px; list-style: none; display: grid; gap: 4px; width: 210px; background: var(--scrim-media); color: var(--on-scrim); border-radius: var(--radius-m); border: 1px solid color-mix(in srgb, var(--on-scrim) 18%, transparent); pointer-events: none; font-size: var(--fs-s); }
+  .br-team li { display: grid; grid-template-columns: 10px 1fr auto; grid-template-rows: auto 5px; column-gap: 6px; align-items: center; }
+  .br-team li i { width: 10px; height: 10px; border-radius: 50%; background: var(--team); }
+  .br-team li span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .br-team li em { font-style: normal; font-weight: 600; }
+  .br-team li.down em { color: var(--danger); }
+  .br-team li.out { opacity: .55; }
+  .br-team b { grid-column: 2 / -1; grid-row: 2; display: flex; height: 5px; border-radius: 999px; overflow: hidden; background: color-mix(in srgb, var(--on-scrim) 15%, transparent); }
+  .br-team b .hp { background: var(--success); } .br-team b .sh { background: var(--info); }
+  .br-team b.bleed span { background: var(--danger); }
+  .br-knocked { position: absolute; inset-block-start: 30%; inset-inline: 12px; margin-inline: auto; max-width: 360px; text-align: center; color: var(--on-scrim); pointer-events: none; }
+  .br-knocked h2 { margin: 0; color: var(--danger); font-size: var(--fs-2xl); text-shadow: 0 2px 8px var(--scrim-media); }
+  .br-knocked p { margin: 4px 0 8px; font-size: var(--fs-m); text-shadow: 0 1px 4px var(--scrim-media); }
+  .br-knocked .br-reload { position: relative; inset: auto; transform: none; width: 220px; margin: 0 auto 22px; }
+  .br-knocked .br-reload span { background: var(--danger); }
+  .br-knocked .br-reload.use span { background: var(--success); }
   .br-kicker { text-transform: uppercase; letter-spacing: .06em; font-size: var(--fs-s); }
   .br-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
   .br-keys { font-size: var(--fs-s); }
   .br-touch { display: none; }
-  @media (max-width: 640px) { .br-mapbox { width: 130px; } .br-minimap { width: 130px; height: 130px; } .br-tools { margin-inline-end: 144px; flex-wrap: wrap; } .br-inventory { grid-template-columns: repeat(6, 50px); } .br-slot { height: 54px; } .br-slot img { width: 40px; } .br-stats { flex-wrap: wrap; gap: 8px; } .br-buildbar { inset-block-end: 210px; } }
+  @media (max-width: 640px) { .br-team { width: 150px; inset-block-start: 96px; } .br-mapbox { width: 130px; } .br-minimap { width: 130px; height: 130px; } .br-tools { margin-inline-end: 144px; flex-wrap: wrap; } .br-inventory { grid-template-columns: repeat(6, 50px); } .br-slot { height: 54px; } .br-slot img { width: 40px; } .br-stats { flex-wrap: wrap; gap: 8px; } .br-buildbar { inset-block-end: 210px; } }
   @media (pointer: coarse) {
     .br-touch { position: absolute; inset-inline: 10px; inset-block-end: 130px; display: flex; justify-content: space-between; align-items: flex-end; gap: 8px; }
     .br-touch-move { display: grid; grid-template-columns: repeat(3, 48px); grid-template-rows: repeat(2, 48px); gap: 4px; }

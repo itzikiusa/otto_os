@@ -45,14 +45,19 @@ export function applyDamage(hp: number, shield: number, amount: number): { hp: n
   return { hp: Math.max(0, hp - (amount - absorbed)), shield: shield - absorbed, absorbed };
 }
 
-/** Consumables: hold fire to use; `cap` is the most this item can heal / shield up to. */
-export type ConsumableId = 'bandage' | 'medkit' | 'minishield' | 'shieldpot';
-export interface ConsumableDef { id: ConsumableId; name: string; heal: number; shield: number; cap: number; time: number; stack: number; rarity: Rarity }
+/**
+ * Consumables: hold fire to use; `cap` is the most this item can heal / shield
+ * up to. The launch pad is a utility in the same hotbar mechanics: using it
+ * deploys a pad on the ground ahead instead of healing.
+ */
+export type ConsumableId = 'bandage' | 'medkit' | 'minishield' | 'shieldpot' | 'launchpad';
+export interface ConsumableDef { id: ConsumableId; name: string; heal: number; shield: number; cap: number; time: number; stack: number; rarity: Rarity; pad?: boolean }
 export const CONSUMABLES: Record<ConsumableId, ConsumableDef> = {
   bandage: { id: 'bandage', name: 'Bandages', heal: 15, shield: 0, cap: 75, time: 3, stack: 15, rarity: 0 },
   medkit: { id: 'medkit', name: 'Med Kit', heal: 100, shield: 0, cap: 100, time: 7, stack: 3, rarity: 1 },
   minishield: { id: 'minishield', name: 'Mini Shield', heal: 0, shield: 25, cap: 50, time: 2, stack: 6, rarity: 1 },
   shieldpot: { id: 'shieldpot', name: 'Shield Potion', heal: 0, shield: 50, cap: 100, time: 5, stack: 3, rarity: 2 },
+  launchpad: { id: 'launchpad', name: 'Launch Pad', heal: 0, shield: 0, cap: 0, time: 0.6, stack: 2, rarity: 3, pad: true },
 };
 export const CONSUMABLE_IDS = Object.keys(CONSUMABLES) as ConsumableId[];
 export type ItemId = WeaponId | ConsumableId;
@@ -60,20 +65,23 @@ export type ItemId = WeaponId | ConsumableId;
 export const ITEM_IDS: ItemId[] = [...WEAPON_IDS, ...CONSUMABLE_IDS];
 export const isWeapon = (id: ItemId | null | undefined): id is WeaponId => !!id && id in WEAPONS;
 export const isConsumable = (id: ItemId | null | undefined): id is ConsumableId => !!id && id in CONSUMABLES;
+/** Wire slots for an item index (+1 for "no item"): the loot code packs one of these. */
+export const ITEM_SLOTS = ITEM_IDS.length + 1;
 export const itemName = (id: ItemId): string => (isWeapon(id) ? WEAPONS[id].name : CONSUMABLES[id].name);
 /** Would using `id` do anything for a fighter with this hp / shield? */
 export function canUse(id: ConsumableId, hp: number, shield: number): boolean {
   const c = CONSUMABLES[id];
+  if (c.pad) return true;
   return c.heal > 0 ? hp < c.cap : shield < c.cap;
 }
-/** Floor/chest consumable table (bandages and minis are common, pots rare). */
+/** Floor/chest consumable table (bandages and minis are common, pots rare, launch pads rarer). */
 export function rollConsumable(r: number): ConsumableId {
-  const table: [ConsumableId, number][] = [['bandage', 34], ['minishield', 32], ['shieldpot', 18], ['medkit', 16]];
+  const table: [ConsumableId, number][] = [['bandage', 34], ['minishield', 32], ['shieldpot', 18], ['medkit', 16], ['launchpad', 7]];
   let pick = r * table.reduce((a, [, w]) => a + w, 0);
   for (const [id, w] of table) { pick -= w; if (pick <= 0) return id; }
   return 'bandage';
 }
-export const CONSUMABLE_PACK: Record<ConsumableId, number> = { bandage: 5, medkit: 1, minishield: 3, shieldpot: 1 };
+export const CONSUMABLE_PACK: Record<ConsumableId, number> = { bandage: 5, medkit: 1, minishield: 3, shieldpot: 1, launchpad: 1 };
 
 /** Building materials: harvested with the pickaxe, spent on walls / floors / ramps. */
 export type Material = 0 | 1 | 2;

@@ -1,9 +1,9 @@
 /**
  * Procedural three.js geometry for Storm Royale: the walk-in architecture
  * (one merged, vertex-coloured mesh), player structures (one merged mesh per
- * material, rebuilt when they change), generated wood / brick / metal
- * textures, build-preview ghosts and the pickaxe. Everything here is made at
- * runtime; no image or model files.
+ * material, rewritten in place when they change), generated wood / brick /
+ * metal textures, build-preview ghosts, launch pads and the pickaxe.
+ * Everything here is made at runtime; no image or model files.
  */
 import * as THREE from 'three';
 import { Rng } from '../common/math';
@@ -68,44 +68,120 @@ export function blockGeometry(blocks: Block[]): THREE.BufferGeometry {
   return w.geometry();
 }
 
-/** The sloped slab of a ramp as eight corners. */
-function rampCorners(b: Build): number[][] {
-  const x0 = tileX(b.gx), z0 = tileX(b.gz), y = baseY(b.level), t = 0.22;
-  // Local frame: s runs up the slope, across is the tile width; map to world per direction.
-  const at = (s: number, a: number, h: number): number[] => {
-    const yy = y + (LEVEL * s) / TILE + h;
-    switch (b.dir) {
-      case 1: return [x0 + s, yy, z0 + a];
-      case 2: return [x0 + a, yy, z0 + TILE - s];
-      case 3: return [x0 + TILE - s, yy, z0 + a];
-      default: return [x0 + a, yy, z0 + s];
+/** Structure tint: pieces still going up glow blue, damaged ones darken. */
+function structureTint(b: Build, out: THREE.Color): THREE.Color {
+  const k = Math.min(1, Math.max(0, b.hp / maxHp(b)));
+  if (b.grow > 0) return out.setRGB(1, 1, 1).lerp(_growing, 0.6);
+  return out.setRGB(1, 1, 1).lerp(_worn, (1 - k) * 0.6);
+}
+const _growing = new THREE.Color(0.55, 0.8, 1.25), _worn = new THREE.Color(0.45, 0.42, 0.4), _tint = new THREE.Color();
+/** Quads per structure: six faces per box, at most four boxes (a window wall). */
+const QUADS_PER_PIECE = 24;
+const _c = new Float32Array(24);
+
+/**
+ * Player structures of one material as one mesh whose buffers are written in
+ * place: capacity grows by doubling (never shrinks), the index pattern is
+ * shared, and only the written range is uploaded. A health-only change
+ * rewrites just the colours.
+ */
+export class StructureMesh {
+  readonly geometry = new THREE.BufferGeometry();
+  private pieces = 0;
+  private pos = new Float32Array(0); private nor = new Float32Array(0); private uv = new Float32Array(0); private col = new Float32Array(0);
+  private quads = 0;
+
+  /** Rewrites the pieces of `mat`; returns the number of pieces drawn. */
+  update(builds: readonly Build[], mat: number, coloursOnly = false): number {
+    let n = 0;
+    for (const b of builds) if (b.mat === mat) n++;
+    if (n > this.pieces) { this.grow(n); coloursOnly = false; }
+    let q = 0;
+    for (const b of builds) {
+      if (b.mat !== mat) continue;
+      structureTint(b, _tint);
+      if (b.kind === 2) { rampCornersInto(b, _c); q = this.hexa(q, _c, _tint, coloursOnly); }
+      else for (const box of b.boxes) {
+        const { minX: x0, minY: y0, minZ: z0, maxX: x1, maxY: y1, maxZ: z1 } = box;
+        _c[0] = x0; _c[1] = y0; _c[2] = z0; _c[3] = x1; _c[4] = y0; _c[5] = z0; _c[6] = x1; _c[7] = y0; _c[8] = z1; _c[9] = x0; _c[10] = y0; _c[11] = z1;
+        _c[12] = x0; _c[13] = y1; _c[14] = z0; _c[15] = x1; _c[16] = y1; _c[17] = z0; _c[18] = x1; _c[19] = y1; _c[20] = z1; _c[21] = x0; _c[22] = y1; _c[23] = z1;
+        q = this.hexa(q, _c, _tint, coloursOnly);
+      }
     }
-  };
-  const raw = [at(0, 0, -t), at(0, TILE, -t), at(TILE, TILE, -t), at(TILE, 0, -t), at(0, 0, 0), at(0, TILE, 0), at(TILE, TILE, 0), at(TILE, 0, 0)];
-  // Reorder into the x0z0, x1z0, x1z1, x0z1 corner convention so faces wind outward.
-  const order = (pts: number[][]) => {
-    const cx = pts.reduce((a, p) => a + p[0], 0) / 4, cz = pts.reduce((a, p) => a + p[2], 0) / 4;
-    const key = (p: number[]) => (p[0] < cx ? (p[2] < cz ? 0 : 3) : p[2] < cz ? 1 : 2);
-    const out: number[][] = [];
-    for (const p of pts) out[key(p)] = p;
-    return out;
-  };
-  return [...order(raw.slice(0, 4)), ...order(raw.slice(4))];
+    const g = this.geometry;
+    const touch = (name: string, size: number) => {
+      const a = g.getAttribute(name) as THREE.BufferAttribute;
+      a.clearUpdateRanges(); a.addUpdateRange(0, q * 4 * size); a.needsUpdate = true;
+    };
+    touch('color', 3);
+    if (!coloursOnly) { touch('position', 3); touch('normal', 3); touch('uv', 2); }
+    if (!coloursOnly || q !== this.quads) g.setDrawRange(0, q * 6);
+    this.quads = q;
+    if (!coloursOnly) g.computeBoundingSphere();
+    return n;
+  }
+
+  private grow(pieces: number): void {
+    const cap = Math.max(16, this.pieces * 2, pieces), verts = cap * QUADS_PER_PIECE * 4;
+    this.pieces = cap;
+    this.pos = new Float32Array(verts * 3); this.nor = new Float32Array(verts * 3); this.uv = new Float32Array(verts * 2); this.col = new Float32Array(verts * 3);
+    const idx = new Uint32Array(cap * QUADS_PER_PIECE * 6);
+    for (let k = 0, v = 0; k < idx.length; k += 6, v += 4) { idx[k] = v; idx[k + 1] = v + 1; idx[k + 2] = v + 2; idx[k + 3] = v; idx[k + 4] = v + 2; idx[k + 5] = v + 3; }
+    const g = this.geometry;
+    // Frees the old GPU buffers; the geometry re-uploads the new ones on its next draw.
+    if (g.getAttribute('position')) g.dispose();
+    g.setAttribute('position', new THREE.BufferAttribute(this.pos, 3).setUsage(THREE.DynamicDrawUsage));
+    g.setAttribute('normal', new THREE.BufferAttribute(this.nor, 3).setUsage(THREE.DynamicDrawUsage));
+    g.setAttribute('uv', new THREE.BufferAttribute(this.uv, 2).setUsage(THREE.DynamicDrawUsage));
+    g.setAttribute('color', new THREE.BufferAttribute(this.col, 3).setUsage(THREE.DynamicDrawUsage));
+    g.setIndex(new THREE.BufferAttribute(idx, 1));
+  }
+
+  /** Writes a hexahedron (corner layout as FACES) from quad `q`; returns the next quad. */
+  private hexa(q: number, c: Float32Array, color: THREE.Color, coloursOnly: boolean): number {
+    for (let f = 0; f < 6; f++, q++) {
+      const face = FACES[f], shade = f === 1 ? 1.06 : f === 0 ? 0.8 : 1;
+      const r = Math.min(1, color.r * shade), gg = Math.min(1, color.g * shade), bb = Math.min(1, color.b * shade);
+      let v = q * 4;
+      for (let k = 0; k < 4; k++) { const o = (v + k) * 3; this.col[o] = r; this.col[o + 1] = gg; this.col[o + 2] = bb; }
+      if (coloursOnly) continue;
+      const a = face[0] * 3, b = face[1] * 3, d = face[2] * 3;
+      const ax = c[b] - c[a], ay = c[b + 1] - c[a + 1], az = c[b + 2] - c[a + 2];
+      const bx = c[d] - c[a], by = c[d + 1] - c[a + 1], bz = c[d + 2] - c[a + 2];
+      let nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx;
+      const nl = Math.hypot(nx, ny, nz) || 1; nx /= nl; ny /= nl; nz /= nl;
+      const anx = Math.abs(nx), any = Math.abs(ny), anz = Math.abs(nz);
+      for (let k = 0; k < 4; k++, v++) {
+        const i = face[k] * 3, x = c[i], y = c[i + 1], z = c[i + 2];
+        this.pos[v * 3] = x; this.pos[v * 3 + 1] = y; this.pos[v * 3 + 2] = z;
+        this.nor[v * 3] = nx; this.nor[v * 3 + 1] = ny; this.nor[v * 3 + 2] = nz;
+        const u = any >= anx && any >= anz ? x : anx >= anz ? z : x, w = any >= anx && any >= anz ? z : y;
+        this.uv[v * 2] = u / TILE; this.uv[v * 2 + 1] = w / TILE;
+      }
+    }
+    return q;
+  }
+
+  dispose(): void { this.geometry.dispose(); }
 }
 
-/** Player structures of one material as a single mesh; pieces still going up glow blue, damaged ones darken. */
-export function structureGeometry(builds: readonly Build[], mat: number): THREE.BufferGeometry | null {
-  const w = new MeshWriter(1 / TILE);
-  const base = new THREE.Color(1, 1, 1), growing = new THREE.Color(0.55, 0.8, 1.25), worn = new THREE.Color(0.45, 0.42, 0.4), c = new THREE.Color();
-  for (const b of builds) {
-    if (b.mat !== mat) continue;
-    const k = Math.min(1, Math.max(0, b.hp / maxHp(b)));
-    if (b.grow > 0) c.copy(base).lerp(growing, 0.6);
-    else c.copy(base).lerp(worn, (1 - k) * 0.6);
-    if (b.kind === 2) w.hexa(rampCorners(b), c);
-    else for (const box of b.boxes) w.box(box, c);
+/** A ramp's sloped slab as eight corners (x0z0, x1z0, x1z1, x0z1 bottom, then top) into `out`. */
+function rampCornersInto(b: Build, out: Float32Array): void {
+  const x0 = tileX(b.gx), z0 = tileX(b.gz), y = baseY(b.level), t = 0.22, cx = x0 + TILE / 2, cz = z0 + TILE / 2;
+  for (let k = 0; k < 4; k++) {
+    // (s up the slope, a across) for the four footprint corners.
+    const sv = k === 2 || k === 3 ? TILE : 0, av = k === 1 || k === 2 ? TILE : 0;
+    let x: number, z: number;
+    switch (b.dir) {
+      case 1: x = x0 + sv; z = z0 + av; break;
+      case 2: x = x0 + av; z = z0 + TILE - sv; break;
+      case 3: x = x0 + TILE - sv; z = z0 + av; break;
+      default: x = x0 + av; z = z0 + sv;
+    }
+    const slot = x < cx ? (z < cz ? 0 : 3) : z < cz ? 1 : 2, top = y + (LEVEL * sv) / TILE;
+    out[slot * 3] = x; out[slot * 3 + 1] = top - t; out[slot * 3 + 2] = z;
+    out[12 + slot * 3] = x; out[12 + slot * 3 + 1] = top; out[12 + slot * 3 + 2] = z;
   }
-  return w.pos.length ? w.geometry() : null;
 }
 
 function canvas(size: number): [HTMLCanvasElement, CanvasRenderingContext2D] {
@@ -172,3 +248,9 @@ export function pickaxeMesh(handle: THREE.Material, head: THREE.Material, geos: 
   return g;
 }
 export const pickaxeGeometries = (): THREE.BufferGeometry[] => [new THREE.CylinderGeometry(0.025, 0.03, 0.7, 6), new THREE.BoxGeometry(0.5, 0.07, 0.07)];
+
+/** Launch pad: a squat metal drum (base) and a glowing spring disc (top), both unit-sized and centred on the floor. */
+export const padGeometries = (): THREE.BufferGeometry[] => [
+  new THREE.CylinderGeometry(1.15, 1.25, 0.28, 20).translate(0, 0.14, 0),
+  new THREE.CylinderGeometry(0.95, 0.95, 0.08, 20).translate(0, 0.32, 0),
+];

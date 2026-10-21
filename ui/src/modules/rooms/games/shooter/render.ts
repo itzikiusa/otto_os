@@ -1,11 +1,13 @@
 /**
- * Storm Royale renderer: island terrain + sea / lake, instanced Kenney props,
- * the merged walk-in architecture, player structures (one merged mesh per
- * material, rebuilt when they change) with a build-preview ghost, chests,
- * floor loot (nearest items only), animated mini-character fighters holding
- * Blaster Kit weapons / heals / the pickaxe, the drop balloon, gliders,
- * tracers, rockets, explosions, debris and the storm wall. Third-person
- * camera with shoulder offset, aim zoom and collision.
+ * Storm Royale renderer: island terrain + sea / lake, instanced Kenney props
+ * (felled trees hidden until they regrow), the merged walk-in architecture,
+ * player structures (one persistent mesh per material, rewritten in place)
+ * with a locally predicted build-preview ghost, chests, supply drops, launch
+ * pads, floor loot (nearest items only), animated mini-character fighters
+ * holding Blaster Kit weapons / heals / the pickaxe (crawling when knocked;
+ * teammates ringed and labelled in their team colour), the drop balloon,
+ * gliders, tracers, rockets, explosions, debris and the storm wall.
+ * Third-person camera with shoulder offset, aim zoom and collision.
  */
 import * as THREE from 'three';
 import { AssetLibrary, PropBatch } from '../common/assets';
@@ -14,12 +16,12 @@ import { Particles } from '../common/particles';
 import { approach, clamp, lerp, smoothstep } from '../common/math';
 import { groundDetailTexture, labelTexture } from '../common/textures';
 import { chestY, GRID, HALF, SEA_SURFACE, mapFor, terrainHeight, type ShooterMap } from './map';
-import { groundAt, raycast, worldFor, type World } from './collide';
-import { BUS_HEIGHT, EYE, heldItem, PICKAXE_SLOT, rayFighter, type Fighter, type Loot, type ShooterEvent, type ShooterState } from './sim';
+import { groundAt, raycast, syncFelled, worldFor, type World } from './collide';
+import { BUS_HEIGHT, EYE, heldItem, MAX_PADS, PICKAXE_SLOT, rayFighter, type Drop, type Fighter, type Loot, type Pad, type ShooterEvent, type ShooterState } from './sim';
 import { BUILD_COST, CONSUMABLES, isConsumable, MATERIAL_COLOURS, RARITY_COLOURS, WEAPONS } from './weapons';
-import { canPlace, packBuild, planBuild, type Build } from './builds';
-import { FIGHTER_IDS, type FighterId } from './catalog';
-import { blockGeometry, ghostGeometries, materialTexture, pickaxeGeometries, pickaxeMesh, placeGhost, structureGeometry } from './meshes';
+import { canPlace, packBuild, planBuild, type BuildKind } from './builds';
+import { FIGHTER_IDS, teamColour, type FighterId } from './catalog';
+import { blockGeometry, ghostGeometries, materialTexture, padGeometries, pickaxeGeometries, pickaxeMesh, placeGhost, StructureMesh } from './meshes';
 
 const THEMES: Record<ShooterMap['theme'], Theme & { low: number; mid: number; high: number; rock: number; sand: number }> = {
   isle: { skyTop: 0x3d84d6, skyHorizon: 0xcbe7ff, fog: 0xcfe6fb, fogNear: 140, fogFar: 620, sun: 0xfff2da, sunIntensity: 2.7, ambientSky: 0xd4e8ff, ambientGround: 0x5e7a3c, ambient: 1.1, low: 0x7cc35a, mid: 0x5da746, high: 0x8fbf63, rock: 0x8d8f8c, sand: 0xe8d39a },
@@ -30,6 +32,8 @@ const UPPER = new Set(['arm-left', 'arm-right']);
 const LOOT_RANGE = 70;
 const _v = new THREE.Vector3();
 const _q = new THREE.Quaternion();
+const _m4 = new THREE.Matrix4();
+const ZERO = new THREE.Matrix4().makeScale(0, 0, 0);
 const UP = new THREE.Vector3(0, 1, 0);
 const PROBE_HEIGHTS = [1.65, 1.1];
 const MAT_KEYS = ['surv-box', 'surv-rock-a', 'surv-metal-panel-screws'];
@@ -40,6 +44,14 @@ interface FighterVisual {
   lowerName: string; upperName: string; dead: boolean; gun: THREE.Object3D | null; gunKey: string; glider: THREE.Mesh; label: THREE.Sprite | null;
 }
 interface Tracer { line: THREE.Line; life: number }
+/** A seat as the renderer sees it: model, label, and team (for teammate markers). */
+export interface SeatView { fighter: FighterId; human: boolean; name: string; team: number }
+/**
+ * The local survivor's build intent, applied to the preview ghost before the
+ * host has echoed it (guests would otherwise see the ghost trail the camera by
+ * a round trip). Position is the freshest known one.
+ */
+export interface LocalBuild { building: boolean; piece: number; mat: number; yaw: number; pitch: number; x: number; y: number; z: number }
 
 export interface CameraState { yaw: number; pitch: number; aiming: boolean; zoom: number }
 
@@ -64,14 +76,36 @@ export class ShooterRenderer {
   private beamMats = RARITY_COLOURS.map(c => new THREE.MeshBasicMaterial({ color: c, transparent: true, opacity: 0.35, blending: THREE.AdditiveBlending, depthWrite: false }));
   private gliderGeo = new THREE.SphereGeometry(1.6, 16, 8, 0, Math.PI * 2, 0, Math.PI / 2.2);
   private gliderMat = new THREE.MeshLambertMaterial({ color: 0xff5a5a, side: THREE.DoubleSide });
-  /** Structures: one mesh per material, rebuilt (throttled) when the set or their health changes. */
+  /** Structures: one persistent mesh per material, rewritten in place (throttled) when the set or their health changes. */
   private structMats = [0, 1, 2].map(() => new THREE.MeshLambertMaterial({ vertexColors: true }));
-  private structMeshes: (THREE.Mesh | null)[] = [null, null, null];
+  private structs = [0, 1, 2].map(() => new StructureMesh());
+  private structMeshes: THREE.Mesh[] = [];
   private structRev = -1;
-  private structList: Build[] | null = null;
-  /** Shape key of the meshed structures (layout, kind, material, edits; not health). */
+  private structList: unknown = null;
+  /** Shape key of the meshed structures (layout, kind, material, edits; not health), overall and per material. */
   private structShape = -1;
+  private matShape = new Int32Array([-1, -1, -1]);
+  private matCount = new Int32Array(3);
+  private matKey = new Int32Array(3);
   private structAge = 0;
+  private structCount = 0;
+  /** Felled trees: the instanced meshes + instance drawing each trunk, and the matrices hidden away. */
+  private trees: { meshes: THREE.InstancedMesh[]; index: number }[] = [];
+  private felledFrom: readonly number[] | null = null;
+  private felledShown = new Uint8Array(0);
+  private treeSaved = new Map<number, THREE.Matrix4[]>();
+  /** Launch pads (instanced) and supply drops. */
+  private padGeos = padGeometries();
+  private padBase = new THREE.MeshLambertMaterial({ color: 0x3b4656 });
+  private padTop = new THREE.MeshBasicMaterial({ color: 0x62e0ff });
+  private pads: THREE.InstancedMesh[] = [];
+  private padKey = NaN;
+  private drops = new Map<number, THREE.Group>();
+  private dropBalloon = new THREE.SphereGeometry(2.6, 16, 10);
+  private dropBalloonMat = new THREE.MeshLambertMaterial({ color: 0x4aa8ff });
+  /** Teammate ring under the feet. */
+  private ringGeo = new THREE.RingGeometry(0.62, 0.86, 28).rotateX(-Math.PI / 2);
+  private ringMats = new Map<number, THREE.MeshBasicMaterial>();
   private ghosts: THREE.Mesh[] = [];
   private ghostOk = new THREE.MeshBasicMaterial({ color: 0x62b4ff, transparent: true, opacity: 0.35, depthWrite: false });
   private ghostBad = new THREE.MeshBasicMaterial({ color: 0xff5a5a, transparent: true, opacity: 0.3, depthWrite: false });
@@ -82,13 +116,15 @@ export class ShooterRenderer {
   private time = 0;
   private camPos = new THREE.Vector3();
   private self: number;
-  private seats: { fighter: FighterId; human: boolean; name: string }[];
+  private seats: SeatView[];
+  /** Team modes: teammates get rings and labels; enemies get neither. */
+  private teams: boolean;
   private alive = new Set<number>();
   aimPoint = new THREE.Vector3();
   /** Whether the current build preview can be placed (for the HUD). */
   ghostValid = false;
 
-  constructor(host: HTMLElement, mapId: string, seats: { fighter: FighterId; human: boolean; name: string }[], self: number, signal: AbortSignal) {
+  constructor(host: HTMLElement, mapId: string, seats: SeatView[], self: number, signal: AbortSignal) {
     this.map = mapFor(mapId);
     this.world = worldFor(this.map);
     this.view = new GameView(host, THEMES[this.map.theme]);
@@ -96,6 +132,7 @@ export class ShooterRenderer {
     this.lib = new AssetLibrary(signal);
     this.seats = seats;
     this.self = self;
+    this.teams = seats.some((s, i) => i !== self && s.team === seats[self]?.team);
     this.stormMat = new THREE.ShaderMaterial({
       transparent: true, side: THREE.DoubleSide, depthWrite: false,
       uniforms: { time: { value: 0 } },
@@ -119,13 +156,26 @@ export class ShooterRenderer {
     this.seats.forEach((seat, i) => this.fighters.push(this.buildFighter(seat, i)));
     this.view.scene.add(this.sparks.points, this.smoke.points, this.storm);
     this.structMats.forEach((m, i) => { m.map = this.lib.own(materialTexture(i)); });
+    this.structMeshes = this.structs.map((st, i) => {
+      const mesh = new THREE.Mesh(st.geometry, this.structMats[i]);
+      mesh.castShadow = true; mesh.receiveShadow = true; mesh.visible = false;
+      this.view.scene.add(mesh);
+      return mesh;
+    });
+    this.pads = [this.padBase, this.padTop].map((m, i) => {
+      const mesh = new THREE.InstancedMesh(this.padGeos[i], m, MAX_PADS);
+      mesh.count = 0; mesh.frustumCulled = false; mesh.receiveShadow = true;
+      this.view.scene.add(mesh);
+      return mesh;
+    });
     this.ghosts = ghostGeometries().map(g => {
       const mesh = new THREE.Mesh(this.lib.own(g), this.ghostOk);
       mesh.visible = false; mesh.renderOrder = 5;
       this.view.scene.add(mesh);
       return mesh;
     });
-    for (const r of [this.tracerMat, this.beamGeo, ...this.beamMats, this.gliderGeo, this.gliderMat, this.stormMat, this.storm.geometry, ...this.structMats, this.ghostOk, this.ghostBad, ...this.pickGeos, this.pickHandle, this.pickHead]) this.lib.own(r);
+    for (const r of [this.tracerMat, this.beamGeo, ...this.beamMats, this.gliderGeo, this.gliderMat, this.stormMat, this.storm.geometry, ...this.structMats, ...this.structs, this.ghostOk, this.ghostBad, ...this.pickGeos, this.pickHandle, this.pickHead,
+      ...this.padGeos, this.padBase, this.padTop, this.dropBalloon, this.dropBalloonMat, this.ringGeo]) this.lib.own(r);
   }
 
   private buildWorld(): void {
@@ -188,10 +238,16 @@ export class ShooterRenderer {
       scene.add(arch);
     }
     const batch = new PropBatch(this.lib);
-    for (const p of map.props) batch.add(p.key, p.x, p.y - 0.05, p.z, p.yaw, p.scale);
+    // Instance index of every prop within its model's batch (trees hide theirs once felled).
+    const perKey = new Map<string, number>(), instance = new Int32Array(map.props.length);
+    map.props.forEach((p, i) => { const n = perKey.get(p.key) ?? 0; instance[i] = n; perKey.set(p.key, n + 1); batch.add(p.key, p.x, p.y - 0.05, p.z, p.yaw, p.scale); });
     const group = new THREE.Group();
     batch.build(group, true);
     scene.add(group);
+    const byKey = new Map<string, THREE.InstancedMesh[]>();
+    for (const o of group.children) if (o instanceof THREE.InstancedMesh) { const l = byKey.get(o.name) ?? []; l.push(o); byKey.set(o.name, l); }
+    this.trees = map.trunkProps.map(prop => ({ meshes: byKey.get(map.props[prop].key) ?? [], index: instance[prop] }));
+    this.felledShown = new Uint8Array(map.cylinders.length);
     for (const ch of map.chests) {
       const o = this.lib.instance('gun-crate-wide');
       o.scale.setScalar(2.4);
@@ -211,7 +267,13 @@ export class ShooterRenderer {
     scene.add(this.balloon);
   }
 
-  private buildFighter(seat: { fighter: FighterId; human: boolean; name: string }, index: number): FighterVisual {
+  private ringMat(team: number): THREE.MeshBasicMaterial {
+    let m = this.ringMats.get(team);
+    if (!m) { m = this.lib.own(new THREE.MeshBasicMaterial({ color: teamColour(team), transparent: true, opacity: 0.85, depthWrite: false })); this.ringMats.set(team, m); }
+    return m;
+  }
+
+  private buildFighter(seat: SeatView, index: number): FighterVisual {
     const root = new THREE.Group();
     const model = this.lib.character(seat.fighter);
     model.scale.setScalar(CHAR_SCALE);
@@ -234,10 +296,18 @@ export class ShooterRenderer {
     glider.position.y = 3.6; glider.visible = false;
     root.add(glider);
     let label: THREE.Sprite | null = null;
-    if (seat.human && index !== this.self) {
-      label = new THREE.Sprite(this.lib.own(new THREE.SpriteMaterial({ map: this.lib.own(labelTexture(seat.name, '#ffffff')), depthTest: false, transparent: true })));
+    // Teammates (team modes) are labelled in the team colour and ringed; in solo, other people are labelled.
+    const mate = this.teams && index !== this.self && seat.team === this.seats[this.self]?.team;
+    if ((seat.human && index !== this.self && !this.teams) || mate) {
+      const tint = mate ? `#${teamColour(seat.team).toString(16).padStart(6, '0')}` : '#ffffff';
+      label = new THREE.Sprite(this.lib.own(new THREE.SpriteMaterial({ map: this.lib.own(labelTexture(seat.name, tint)), depthTest: false, transparent: true })));
       label.scale.set(3.2, 0.8, 1); label.position.y = 2.5; label.renderOrder = 10;
       root.add(label);
+    }
+    if (mate || (this.teams && index === this.self)) {
+      const ring = new THREE.Mesh(this.ringGeo, this.ringMat(seat.team));
+      ring.position.y = 0.06; ring.renderOrder = 3;
+      root.add(ring);
     }
     this.view.scene.add(root);
     return { fighter: seat.fighter, root, model, mixer, hand, lower, upper, die, lowerName: 'idle', upperName: 'idle', dead: false, gun: null, gunKey: '', glider, label };
@@ -270,15 +340,33 @@ export class ShooterRenderer {
         for (let i = 0; i < 10; i++) this.smoke.spawn(e.x, e.y, e.z, (Math.random() - 0.5) * 5, Math.random() * 2, (Math.random() - 0.5) * 5, 0xb7ab98, 2.2, 1.1, 0, 1.4);
         break;
       case 'harvest': this.sparks.burst(e.x, e.y, e.z, 8, MATERIAL_COLOURS[e.value] ?? 0xc8955a, 3, 0.3, 0.5, 2); break;
-      case 'use': this.sparks.burst(e.x, e.y + 1.2, e.z, 24, e.value === 1 ? 0x62b4ff : 0x6fe07a, 2.5, 0.4, 0.8); break;
+      case 'use': this.sparks.burst(e.x, e.y + (e.flag === 1 ? 0.4 : 1.2), e.z, 24, e.value === 2 ? 0x62e0ff : e.value === 1 ? 0x62b4ff : 0x6fe07a, 2.5, 0.4, 0.8); break;
+      case 'knock': this.sparks.burst(e.x, e.y + 0.6, e.z, 36, 0xff5a4a, 5, 0.5, 0.8, 2); break;
+      case 'revive': this.sparks.burst(e.x, e.y + 0.8, e.z, 40, 0x6fe07a, 4, 0.6, 1, -1); break;
+      case 'launch':
+        this.sparks.burst(e.x, e.y + 0.4, e.z, 30, 0x62e0ff, 8, 0.4, 0.6);
+        for (let i = 0; i < 8; i++) this.smoke.spawn(e.x, e.y + 0.2, e.z, (Math.random() - 0.5) * 4, 1.5, (Math.random() - 0.5) * 4, 0xd8e6ee, 1.4, 0.7, 0, 1.6);
+        break;
+      case 'fell':
+        this.sparks.burst(e.x, e.y + 1.5, e.z, 50, 0x6b8f3a, 6, 0.8, 1.2, 2);
+        for (let i = 0; i < 10; i++) this.smoke.spawn(e.x, e.y + 1, e.z, (Math.random() - 0.5) * 4, Math.random() * 2, (Math.random() - 0.5) * 4, 0xa58a62, 1.8, 1, 0, 1.4);
+        break;
+      case 'supply':
+        if (e.flag === 1) for (let i = 0; i < 16; i++) this.smoke.spawn(e.x, e.y + 0.3, e.z, (Math.random() - 0.5) * 7, 0.6, (Math.random() - 0.5) * 7, 0xcbb894, 2, 0.9, 0, 2);
+        if (e.flag === 2) this.sparks.burst(e.x, e.y + 1, e.z, 60, 0x62b4ff, 7, 0.7, 0.9);
+        break;
       default: break;
     }
     void state;
   }
 
-  /** Renders a frame; returns the world point under the crosshair. */
-  frame(state: ShooterState, selfIndex: number, cam: CameraState, dt: number, spectate: number): THREE.Vector3 {
+  /** Renders a frame; returns the world point under the crosshair. `local` drives the build ghost. */
+  frame(state: ShooterState, selfIndex: number, cam: CameraState, dt: number, spectate: number, local?: LocalBuild): THREE.Vector3 {
     this.time += dt;
+    syncFelled(this.world, state.felled);
+    this.syncTrees(state.felled);
+    this.syncPads(state.pads);
+    this.syncDrops(state.drops);
     this.stormMat.uniforms.time.value = this.time;
     const s = state.storm;
     // The wall appears once the first circle is announced.
@@ -300,13 +388,14 @@ export class ShooterRenderer {
       }
       this.updateFighter(this.fighters[i], p, dt);
     });
+    this.padTop.color.setHSL(0.53, 0.9, 0.55 + Math.sin(this.time * 5) * 0.12);
     state.chests.forEach((open, i) => { const o = this.chests[i]; if (o) { o.scale.y = open ? 1.2 : 2.4; if (!open && Math.random() < 0.05) this.sparks.spawn(o.position.x + (Math.random() - 0.5) * 2, o.position.y + 1, o.position.z + (Math.random() - 0.5) * 2, 0, 1.2, 0, 0xffd34d, 0.35, 0.8); } });
     this.lootCheck -= dt;
     if (this.lootCheck <= 0) { this.lootCheck = 0.2; this.syncLoot(state.loot); }
     for (const [, o] of this.loot) { o.rotation.y += dt * 1.2; }
     this.syncRockets(state);
     this.syncStructures(state, dt);
-    this.updateGhost(state, state.players[selfIndex]);
+    this.updateGhost(state, state.players[selfIndex], local);
     for (let i = this.tracers.length - 1; i >= 0; i--) {
       const tr = this.tracers[i];
       tr.life -= dt;
@@ -320,35 +409,108 @@ export class ShooterRenderer {
     return aim;
   }
 
-  /** Rebuilds the structure meshes when the list or its revision changed (health-only changes at most four times a second). */
+  /**
+   * Rewrites the structure meshes when the list or its revision changed: new,
+   * removed or edited pieces show at once (only the materials whose layout
+   * changed are rewritten); health-only changes (damage, finished growing)
+   * are batched to four times a second and only touch the colours.
+   */
   private syncStructures(state: ShooterState, dt: number): void {
     this.structAge += dt;
     if (state.buildRev === this.structRev && state.builds === this.structList) return;
-    // New, removed or edited pieces show at once; health-only changes (damage, finished growing) are batched.
     let shape = state.builds.length;
-    for (const b of state.builds) shape = (Math.imul(shape, 31) + packBuild(b)) | 0;
+    const ms = this.matCount, keys = this.matKey;
+    ms[0] = ms[1] = ms[2] = 0; keys[0] = 3; keys[1] = 5; keys[2] = 7;
+    for (const b of state.builds) {
+      const code = packBuild(b);
+      shape = (Math.imul(shape, 31) + code) | 0;
+      keys[b.mat] = (Math.imul(keys[b.mat], 31) + code) | 0;
+      ms[b.mat]++;
+    }
     if (this.structAge < 0.25 && shape === this.structShape) return;
-    this.structRev = state.buildRev; this.structList = state.builds; this.structShape = shape; this.structAge = 0;
+    const coloursOnly = shape === this.structShape;
+    this.structRev = state.buildRev; this.structList = state.builds; this.structShape = shape; this.structAge = 0; this.structCount = state.builds.length;
     for (let m = 0; m < 3; m++) {
-      const old = this.structMeshes[m];
-      if (old) { old.removeFromParent(); old.geometry.dispose(); this.structMeshes[m] = null; }
-      const geo = structureGeometry(state.builds, m);
-      if (!geo) continue;
-      const mesh = new THREE.Mesh(geo, this.structMats[m]);
-      mesh.castShadow = true; mesh.receiveShadow = true;
-      this.view.scene.add(mesh);
-      this.structMeshes[m] = mesh;
+      const mesh = this.structMeshes[m];
+      if (!mesh) continue;
+      mesh.visible = ms[m] > 0;
+      if (!ms[m]) { this.matShape[m] = keys[m]; continue; }
+      if (coloursOnly || keys[m] === this.matShape[m]) this.structs[m].update(state.builds, m, true);
+      else this.structs[m].update(state.builds, m, false);
+      this.matShape[m] = keys[m];
     }
   }
 
-  /** Blue (placeable) or red ghost for the local survivor's build mode. */
-  private updateGhost(state: ShooterState, p: Fighter | undefined): void {
+  /** Hides felled trees (zero-scale instance) and brings regrown ones back; only on change. */
+  private syncTrees(list: readonly number[]): void {
+    if (list === this.felledFrom) return;
+    this.felledFrom = list;
+    const want = this.world.felled;
+    for (let i = 0; i < this.trees.length; i++) {
+      if (want[i] === this.felledShown[i]) continue;
+      this.felledShown[i] = want[i];
+      const t = this.trees[i];
+      if (want[i]) {
+        const saved = t.meshes.map(m => { const mx = new THREE.Matrix4(); m.getMatrixAt(t.index, mx); m.setMatrixAt(t.index, ZERO); m.instanceMatrix.needsUpdate = true; return mx; });
+        this.treeSaved.set(i, saved);
+      } else {
+        const saved = this.treeSaved.get(i);
+        if (saved) t.meshes.forEach((m, k) => { m.setMatrixAt(t.index, saved[k]); m.instanceMatrix.needsUpdate = true; });
+        this.treeSaved.delete(i);
+      }
+    }
+  }
+
+  /** Launch pads: instance matrices rewritten only when the set moves. */
+  private syncPads(pads: readonly Pad[]): void {
+    let key = pads.length;
+    for (const p of pads) key = key * 1.0001 + p.x * 3.1 + p.z * 7.3 + p.y;
+    if (key === this.padKey) return;
+    this.padKey = key;
+    const n = Math.min(pads.length, MAX_PADS);
+    for (const mesh of this.pads) {
+      for (let i = 0; i < n; i++) { _m4.makeTranslation(pads[i].x, pads[i].y, pads[i].z); mesh.setMatrixAt(i, _m4); }
+      mesh.count = n; mesh.instanceMatrix.needsUpdate = true;
+    }
+  }
+
+  /** Supply drops: a big crate under a balloon while it falls, with a beam so it can be found. */
+  private syncDrops(drops: readonly Drop[]): void {
+    const seen = this.alive;
+    seen.clear();
+    for (const d of drops) {
+      seen.add(d.id);
+      let g = this.drops.get(d.id);
+      if (!g) {
+        g = new THREE.Group();
+        const crate = this.lib.instance('gun-crate-wide');
+        crate.scale.setScalar(3.4);
+        const balloon = new THREE.Mesh(this.dropBalloon, this.dropBalloonMat);
+        balloon.position.y = 6; balloon.name = 'balloon';
+        const beam = new THREE.Mesh(this.beamGeo, this.beamMats[4]);
+        beam.scale.set(3, 30, 3); beam.position.y = 45;
+        g.add(crate, balloon, beam);
+        this.view.scene.add(g);
+        this.drops.set(d.id, g);
+      }
+      g.position.set(d.x, d.y, d.z);
+      g.rotation.y = d.landed ? 0 : this.time * 0.6;
+      const balloon = g.getObjectByName('balloon');
+      if (balloon) balloon.visible = !d.landed;
+      if (Math.random() < 0.08) this.sparks.spawn(d.x + (Math.random() - 0.5) * 3, d.y + 1.6, d.z + (Math.random() - 0.5) * 3, 0, 1.4, 0, 0x62b4ff, 0.4, 0.9);
+    }
+    for (const [id, g] of this.drops) if (!seen.has(id)) { g.removeFromParent(); this.drops.delete(id); }
+  }
+
+  /** Blue (placeable) or red ghost for the local survivor's build mode (local intent first, see LocalBuild). */
+  private updateGhost(state: ShooterState, p: Fighter | undefined, local?: LocalBuild): void {
     for (const g of this.ghosts) g.visible = false;
     this.ghostValid = false;
-    if (!p || !p.building || p.mode !== 'ground') return;
-    const slot = planBuild(p.piece, p.x, p.y, p.z, p.yaw, p.pitch, state.builds);
+    if (!p || p.mode !== 'ground' || p.swimming || !(local ? local.building : p.building)) return;
+    const kind = (local ? local.piece : p.piece) as BuildKind, mat = local ? local.mat : p.mat;
+    const slot = local ? planBuild(kind, local.x, local.y, local.z, local.yaw, local.pitch, state.builds) : planBuild(kind, p.x, p.y, p.z, p.yaw, p.pitch, state.builds);
     const g = this.ghosts[slot.kind];
-    this.ghostValid = p.mats[p.mat] >= BUILD_COST && canPlace(slot, state.builds, this.ground);
+    this.ghostValid = p.mats[mat] >= BUILD_COST && canPlace(slot, state.builds, this.ground);
     g.material = this.ghostValid ? this.ghostOk : this.ghostBad;
     placeGhost(g, slot.kind, slot.gx, slot.gz, slot.level, slot.dir);
     g.visible = true;
@@ -377,15 +539,20 @@ export class ShooterRenderer {
       return;
     }
     if (v.dead) { v.dead = false; v.die.stop(); v.lowerName = ''; v.upperName = ''; }
+    // Knocked: pitched forward on hands and knees, crawling; the label reddens.
+    const down = p.mode === 'down';
+    v.model.rotation.x = down ? 1.15 : 0;
+    v.model.position.y = down ? 0.45 : 0;
+    if (v.label) (v.label.material as THREE.SpriteMaterial).color.setHex(down ? 0xff7a6a : 0xffffff);
     const speed = Math.hypot(p.vx, p.vz);
-    const air = p.mode === 'sky' || p.mode === 'glide' || (!p.grounded && !p.swimming);
+    const air = p.mode === 'sky' || p.mode === 'glide' || (!p.grounded && !p.swimming && !down);
     const lower = air ? (p.vy > 1 ? 'jump' : 'fall') : speed > 6.2 ? 'sprint' : speed > 0.6 ? 'walk' : 'idle';
     v.lowerName = this.play(v.lower, v.lowerName, lower);
     v.lower.get('walk')!.timeScale = clamp(speed / 4, 0.6, 1.6);
     const held = heldItem(p);
     const pick = p.current === PICKAXE_SLOT && !p.building;
     const oneHand = held?.w === 'pistol' || pick || (!!held && isConsumable(held.w));
-    const armed = (!!held || pick) && !p.building && !p.swimming;
+    const armed = (!!held || pick) && !p.building && !p.swimming && !down;
     const firing = p.shootT > 0 || p.swingT > 0 || p.useT > 0;
     const upper = !armed || p.mode !== 'ground' ? (air ? 'fall' : lower === 'jump' ? 'fall' : lower) : p.sprinting ? 'sprint' : firing ? (oneHand ? 'holding-right-shoot' : 'holding-both-shoot') : oneHand ? 'holding-right' : 'holding-both';
     v.upperName = this.play(v.upper, v.upperName, upper, 0.08);
@@ -476,6 +643,7 @@ export class ShooterRenderer {
       px = this.balloon.position.x; pz = this.balloon.position.z; baseY = this.balloon.position.y;
     } else if (p.mode === 'sky' || p.mode === 'glide') { back = 10; side = 0; up = 3.5; }
     else if (p.mode === 'dead' || !own) { back = 6.5; side = 0.6; up = 2.2; }
+    else if (p.mode === 'down') { back = 4.6; side = 0.8; up = 1.4; }
     else if (cam.aiming) { back = 2.8; side = 1.15; up = 1.95; }
     // Building: pull back a little so the ghost piece is in view.
     else if (p.building) { back = 6.6; side = 1.3; up = 2.6; }
@@ -492,7 +660,7 @@ export class ShooterRenderer {
     // Keep the survivor in view: cast from the head and the chest to the
     // camera; a prop in between (car, barrel, crate stack) pulls the camera in
     // front of it, or lifts it over the prop when that would be too close.
-    if (p.mode === 'ground' || p.mode === 'dead') {
+    if (p.mode === 'ground' || p.mode === 'dead' || p.mode === 'down') {
       for (let attempt = 0; attempt < 3; attempt++) {
         let nearest = Infinity, ox = 0, oy = 0, oz = 0, ex = 0, ey = 0, ez = 0, el = 0;
         for (const h of PROBE_HEIGHTS) {
@@ -541,11 +709,10 @@ export class ShooterRenderer {
 
   eye(p: Fighter): [number, number, number] { return [p.x - Math.cos(p.yaw) * 0.3, p.y + EYE, p.z + Math.sin(p.yaw) * 0.3]; }
 
-  stats() { return { ...this.view.stats(), camera: { x: this.camPos.x, y: this.camPos.y, z: this.camPos.z }, loot: this.loot.size, structures: this.structList?.length ?? 0 }; }
+  stats() { return { ...this.view.stats(), camera: { x: this.camPos.x, y: this.camPos.y, z: this.camPos.z }, loot: this.loot.size, structures: this.structCount, pads: this.pads[0]?.count ?? 0, drops: this.drops.size }; }
 
   dispose(): void {
     for (const tr of this.tracers) tr.line.geometry.dispose();
-    for (const m of this.structMeshes) m?.geometry.dispose();
     this.sparks.dispose(); this.smoke.dispose();
     for (const f of this.fighters) f.mixer.stopAllAction();
     this.view.dispose();

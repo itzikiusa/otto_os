@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { decodeBuilds, decodeInput, decodeSnapshot, encodeInput, encodeSnapshot, FIGHTER_FIELDS, type ShooterSnapshot } from '../src/modules/rooms/games/shooter/net.ts';
 import { createMatch, idleShooterInput, MAX_LOOT, MAX_ROCKETS, PICKAXE_KEY, SLOTS, tickMatch, type ShooterEvent, type ShooterInput, type ShooterState } from '../src/modules/rooms/games/shooter/sim.ts';
 import { makeBuild, MAX_BUILDS, packBuild, TILES, type Build } from '../src/modules/rooms/games/shooter/builds.ts';
-import { ITEM_IDS } from '../src/modules/rooms/games/shooter/weapons.ts';
+import { ITEM_IDS, ITEM_SLOTS } from '../src/modules/rooms/games/shooter/weapons.ts';
 import { FIGHTER_IDS } from '../src/modules/rooms/games/shooter/catalog.ts';
 import { shooterSeats } from '../src/modules/rooms/games/setup.ts';
 
@@ -143,17 +143,30 @@ test('snapshots without loot reuse the previous loot list', () => {
 test('decodeSnapshot rejects malformed payloads', () => {
   const row = (s: ShooterSnapshot, i: number, v: number) => { const f = s.f.map(r => [...r]); f[0][i] = v; return { ...s, f }; };
   const bad: [string, (s: ShooterSnapshot) => unknown][] = [
-    ['version', s => ({ ...s, v: 1 })],
+    ['version', s => ({ ...s, v: 2 })],
     ['missing buildRev', s => ({ ...s, br: undefined })],
     ['bad structure code', s => ({ ...s, b: [-5, 100] })],
     ['structure hp zero', s => ({ ...s, b: [packBuild({ kind: 1, gx: 3, gz: 3, level: 0, dir: 0, mat: 0, variant: 0 }), 0] })],
     ['odd structure list', s => ({ ...s, b: [1, 2, 3] })],
     ['structure hp over the material max', s => ({ ...s, b: [packBuild({ kind: 1, gx: 3, gz: 3, level: 0, dir: 0, mat: 0, variant: 0 }), 151] })],
     ['fractional structure hp', s => ({ ...s, b: [packBuild({ kind: 1, gx: 3, gz: 3, level: 0, dir: 0, mat: 0, variant: 0 }), -12.5] })],
-    ['mats over the cap', s => row(s, FIGHTER_FIELDS - 7, 501)],
-    ['fractional mats', s => row(s, FIGHTER_FIELDS - 6, 1.5)],
-    ['bad build piece', s => row(s, FIGHTER_FIELDS - 4, 3)],
-    ['bad build material', s => row(s, FIGHTER_FIELDS - 3, -1)],
+    ['mats over the cap', s => row(s, FIGHTER_FIELDS - 8, 501)],
+    ['fractional mats', s => row(s, FIGHTER_FIELDS - 7, 1.5)],
+    ['bad build piece', s => row(s, FIGHTER_FIELDS - 5, 3)],
+    ['bad build material', s => row(s, FIGHTER_FIELDS - 4, -1)],
+    ['negative revive progress', s => row(s, FIGHTER_FIELDS - 1, -1)],
+    ['revive progress past the revive time', s => row(s, FIGHTER_FIELDS - 1, 99)],
+    ['bad team size', s => ({ ...s, sq: 3 })],
+    ['missing winning team', s => ({ ...s, wt: undefined })],
+    ['team out of range', s => ({ ...s, q: [[0, 0, -1, 16], ...s.q.slice(1)] })],
+    ['short q row (no team)', s => ({ ...s, q: [s.q[0].slice(0, 3), ...s.q.slice(1)] })],
+    ['pads not triples', s => ({ ...s, pd: [1, 2] })],
+    ['too many pads', s => ({ ...s, pd: Array(17 * 3).fill(1) })],
+    ['bad supply drop', s => ({ ...s, dr: [[1, 2, 3, 4, 5, 2]] })],
+    ['too many supply drops', s => ({ ...s, dr: Array.from({ length: 5 }, (_, i) => [i, 0, 90, 0, 1, 0]) })],
+    ['felled trunk out of range', s => ({ ...s, fl: [999999] })],
+    ['fractional felled trunk', s => ({ ...s, fl: [1.5] })],
+    ['felled not an array', s => ({ ...s, fl: 'x' })],
     ['map', s => ({ ...s, m: 'moon' })],
     ['phase', s => ({ ...s, p: 3 })],
     ['difficulty', s => ({ ...s, d: 5 })],
@@ -173,21 +186,22 @@ test('decodeSnapshot rejects malformed payloads', () => {
     ['NaN in fighter row', s => row(s, 0, NaN)],
     ['null in fighter row (JSON NaN)', s => wire(row(s, 0, NaN))],
     ['bad mode', s => row(s, 8, 9)],
+    ['knocked with impossible health', s => row(row(s, 8, 5), 9, 150)],
     ['bad current slot', s => row(s, 13, SLOTS + 1)],
     ['fractional current slot', s => row(s, 13, 1.5)],
-    ['bad fighter id', s => ({ ...s, q: [[99, 0, -1], ...s.q.slice(1)] })],
+    ['bad fighter id', s => ({ ...s, q: [[99, 0, -1, 0], ...s.q.slice(1)] })],
     ['too many rockets', s => ({ ...s, r: Array.from({ length: MAX_ROCKETS + 1 }, (_, i) => [i, 0, 0, 0, 0, 0, 0]) })],
     ['short rocket', s => ({ ...s, r: [[1, 2, 3]] })],
     ['too many events', s => ({ ...s, e: Array.from({ length: 65 }, (_, i) => [i, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]) })],
     ['bad event type', s => ({ ...s, e: [[1, 99, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]] })],
     ['too much loot', s => ({ ...s, l: Array.from({ length: MAX_LOOT + 1 }, (_, i) => [i, 1, 10, 0, 0, 0]) })],
     ['loot not an array', s => ({ ...s, l: 'x' })],
-    ['loot code too big', s => ({ ...s, l: [[1, 6 * 11 * 5 * 6, 10, 0, 0, 0]] })],
+    ['loot code too big', s => ({ ...s, l: [[1, 6 * ITEM_SLOTS * 5 * 6, 10, 0, 0, 0]] })],
     ['loot code fractional', s => ({ ...s, l: [[1, 2.5, 10, 0, 0, 0]] })],
-    // code = ((kind * 11 + item + 1) * 5 + rarity) * 6 + sub + 1; ITEM_IDS: six weapons, then four consumables.
-    ['weapon loot carrying a consumable', s => ({ ...s, l: [[1, ((0 * 11 + 7 + 1) * 5 + 0) * 6, 10, 0, 0, 0]] })],
-    ['item loot carrying a weapon', s => ({ ...s, l: [[1, ((4 * 11 + 1 + 1) * 5 + 0) * 6, 10, 0, 0, 0]] })],
-    ['ammo loot carrying an item', s => ({ ...s, l: [[1, ((1 * 11 + 1 + 1) * 5 + 0) * 6 + 1, 10, 0, 0, 0]] })],
+    // code = ((kind * ITEM_SLOTS + item + 1) * 5 + rarity) * 6 + sub + 1; ITEM_IDS: six weapons, then the consumables.
+    ['weapon loot carrying a consumable', s => ({ ...s, l: [[1, ((0 * ITEM_SLOTS + 7 + 1) * 5 + 0) * 6, 10, 0, 0, 0]] })],
+    ['item loot carrying a weapon', s => ({ ...s, l: [[1, ((4 * ITEM_SLOTS + 1 + 1) * 5 + 0) * 6, 10, 0, 0, 0]] })],
+    ['ammo loot carrying an item', s => ({ ...s, l: [[1, ((1 * ITEM_SLOTS + 1 + 1) * 5 + 0) * 6 + 1, 10, 0, 0, 0]] })],
     ['short loot', s => ({ ...s, l: [[1, 0, 0, 0]] })],
   ];
   assert.ok(decodeSnapshot(fresh(), names), 'baseline decodes');
@@ -205,7 +219,10 @@ test('a full 16-player snapshot with loot stays under 16 KiB, even at the caps',
     loot: Array.from({ length: MAX_LOOT }, (_, i) => ({ id: 100000 + i, kind: 'weapon' as const, weapon: 'sniper' as const, rarity: 4 as const, ammo: null, mat: null, amount: 30, x: -123.45, y: -12.34, z: 156.78 })),
     rockets: Array.from({ length: MAX_ROCKETS }, (_, i) => ({ id: 200000 + i, owner: 15, rarity: 4 as const, x: -123.456, y: 12.345, z: 156.789, vx: -47.123, vy: -1.234, vz: 12.345, life: 4 })),
     builds: Array.from({ length: MAX_BUILDS }, (_, i): Build => ({ ...makeBuild(i, { kind: 0, gx: TILES - 1 - (i % 50), gz: TILES - 1, level: 100 + (i % 10), dir: 1 }, 2, 15, 2), hp: 449.6 })),
-    players: s.players.map(p => ({ ...p, x: -123.456, y: 12.345, z: 156.789, vx: -12.345, vy: -12.345, vz: -12.345, yaw: -3.141, pitch: -1.234, damage: 12345, aliveTime: 456.7, reload: 2.345, useT: 6.789, swingT: 0.345, mats: [500, 500, 500] as [number, number, number],
+    pads: Array.from({ length: 16 }, (_, i) => ({ id: i, x: -123.45, y: 12.34, z: 156.78 })),
+    drops: Array.from({ length: 4 }, (_, i) => ({ id: 300000 + i, x: -123.45, y: 89.99, z: 156.78, ground: 12.34, landed: i % 2 === 0 })),
+    felled: Array.from({ length: 128 }, (_, i) => 200 + i),
+    players: s.players.map(p => ({ ...p, revive: 3.21, x: -123.456, y: 12.345, z: 156.789, vx: -12.345, vy: -12.345, vz: -12.345, yaw: -3.141, pitch: -1.234, damage: 12345, aliveTime: 456.7, reload: 2.345, useT: 6.789, swingT: 0.345, mats: [500, 500, 500] as [number, number, number],
       weapons: Array.from({ length: SLOTS }, () => ({ w: ITEM_IDS.at(-1)!, rarity: 4 as const, mag: 15 })), ammo: { light: 240, medium: 240, shells: 40, heavy: 24, rockets: 6 } })),
   };
   const evs: ShooterEvent[] = Array.from({ length: 64 }, (_, i) => ({ id: 900000 + i, type: 'hit', player: 15, target: 14, value: 123, flag: 3, x: -123.456, y: 12.345, z: 156.789, x2: -123.456, y2: 12.345, z2: 156.789 }));

@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { applyDamage, damageAt, rollRarity, rollWeapon, WEAPON_IDS, WEAPONS, type Rarity, type WeaponId } from '../src/modules/rooms/games/shooter/weapons.ts';
 import { dryLand, GRID, HALF, harvestOf, mapFor, SEA_SURFACE, terrainHeight, waterLevel, type Box, type Cylinder, type ShooterMap } from '../src/modules/rooms/games/shooter/map.ts';
-import { groundAt, RADIUS, raycast, resolve, STEP, visible, worldFor, type Body } from '../src/modules/rooms/games/shooter/collide.ts';
+import { groundAt, RADIUS, raycast, resolve, STEP, syncFelled, visible, worldFor, type Body } from '../src/modules/rooms/games/shooter/collide.ts';
 import type { ShooterMapId } from '../src/modules/rooms/games/shooter/catalog.ts';
 
 // ---------------------------------------------------------------- weapons
@@ -193,7 +193,7 @@ function flatMap(id: string, boxes: Box[], cylinders: Cylinder[], height: (x: nu
   const size = HALF * 2 / GRID + 1;
   const heights = new Float32Array(size * size);
   for (let iz = 0; iz < size; iz++) for (let ix = 0; ix < size; ix++) heights[iz * size + ix] = height(-HALF + ix * GRID, -HALF + iz * GRID);
-  return { id: id as ShooterMapId, theme: 'mesa', heights, size, props: [], boxes, cylinders, pois: [], boxMats: boxes.map(() => 0), blocks: [], waters: [], river: [], lootSpots: [], chests: [] };
+  return { id: id as ShooterMapId, theme: 'mesa', heights, size, props: [], boxes, cylinders, pois: [], boxMats: boxes.map(() => 0), trunkProps: cylinders.map(() => -1), blocks: [], waters: [], river: [], lootSpots: [], chests: [], climbs: [], pads: [] };
 }
 const crate: Box = { minX: 10, minY: -1, minZ: -1, maxX: 12, maxY: 3, maxZ: 1 };
 const trunk: Cylinder = { x: 0, z: 20, r: 1, y0: -1, y1: 7 };
@@ -274,4 +274,25 @@ test('groundAt stands on a crate top only when stepping up is possible', () => {
   const isle = mapFor('isle'), world = worldFor(isle);
   const chest = isle.chests[0], gy = terrainHeight(isle, chest.x, chest.z);
   assert.ok(groundAt(world, chest.x, chest.z, gy + 0.8) >= gy + 0.8 - 1e-6);
+});
+
+test('syncFelled: a felled trunk stops blocking rays and bodies until the list brings it back', () => {
+  const ray = () => raycast(flat, 0, 1.5, 10, 0, 0, 1, 20);
+  assert.equal(ray().kind, 'prop');
+  const felled = [0];
+  syncFelled(flat, felled);
+  assert.equal(ray().kind, 'none');
+  const p = body(0, 0, 20.3); // standing where the trunk was
+  assert.equal(resolve(flat, p), false);
+  assert.equal(p.z, 20.3);
+  // The same list is a no-op; a new (empty) list restores the trunk.
+  flat.felled[0] = 0;
+  syncFelled(flat, felled);
+  assert.equal(flat.felled[0], 0, 'unchanged list: mask not rebuilt');
+  syncFelled(flat, []);
+  assert.equal(ray().kind, 'prop');
+  assert.equal(resolve(flat, p), true);
+  // Out-of-range indices are ignored.
+  syncFelled(flat, [5, -1]);
+  assert.equal(ray().kind, 'prop');
 });

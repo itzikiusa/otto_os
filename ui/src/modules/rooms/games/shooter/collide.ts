@@ -1,7 +1,8 @@
 /**
  * Collision for Storm Royale: a uniform grid over the static box and
  * cylinder colliders, plus the (few hundred, linearly scanned) player
- * structures passed in per call. Capsule-vs-world movement with step-up,
+ * structures passed in per call (trunks harvested away are masked out, see
+ * `syncFelled`). Capsule-vs-world movement with step-up,
  * standing on props / floors / ramps and head-bumping ceilings, and a
  * cell-walking (DDA) raycast against props, structures and terrain.
  * Allocation-free in the hot paths.
@@ -18,7 +19,11 @@ export const STEP = 0.6;
 /** A box whose underside is this close below the head is a ceiling: bump down instead of sideways. */
 const BUMP = 0.35;
 
-export interface World { map: ShooterMap; boxCells: number[][]; cylCells: number[][]; stamp: Uint32Array; cylStamp: Uint32Array; mark: number }
+/**
+ * `felled` marks tree trunks that were harvested away (no collision until they
+ * regrow); `felledFrom` is the list it was filled from (see `syncFelled`).
+ */
+export interface World { map: ShooterMap; boxCells: number[][]; cylCells: number[][]; stamp: Uint32Array; cylStamp: Uint32Array; mark: number; felled: Uint8Array; felledFrom: readonly number[] | null }
 
 const cell = (v: number) => Math.max(0, Math.min(N - 1, Math.floor((v + HALF) / CELL)));
 
@@ -34,9 +39,17 @@ export function worldFor(map: ShooterMap): World {
   map.cylinders.forEach((c, i) => {
     for (let cz = cell(c.z - c.r); cz <= cell(c.z + c.r); cz++) for (let cx = cell(c.x - c.r); cx <= cell(c.x + c.r); cx++) cylCells[cz * N + cx].push(i);
   });
-  const world: World = { map, boxCells, cylCells, stamp: new Uint32Array(map.boxes.length), cylStamp: new Uint32Array(map.cylinders.length), mark: 0 };
+  const world: World = { map, boxCells, cylCells, stamp: new Uint32Array(map.boxes.length), cylStamp: new Uint32Array(map.cylinders.length), mark: 0, felled: new Uint8Array(map.cylinders.length), felledFrom: null };
   worlds.set(map.id, world);
   return world;
+}
+
+/** Points the world's trunk mask at a match's felled-tree list (cheap no-op while the list is unchanged). */
+export function syncFelled(w: World, list: readonly number[]): void {
+  if (w.felledFrom === list) return;
+  w.felled.fill(0);
+  for (let k = 0; k < list.length; k++) if (list[k] >= 0 && list[k] < w.felled.length) w.felled[list[k]] = 1;
+  w.felledFrom = list;
 }
 
 type Builds = readonly Build[] | null | undefined;
@@ -108,7 +121,7 @@ export function resolve(w: World, p: Body, builds?: Builds): boolean {
       if (w.cylStamp[i] === w.mark) continue;
       w.cylStamp[i] = w.mark;
       const c = w.map.cylinders[i];
-      if (p.y + HEIGHT <= c.y0 || p.y >= c.y1) continue;
+      if (w.felled[i] || p.y + HEIGHT <= c.y0 || p.y >= c.y1) continue;
       let ox = p.x - c.x, oz = p.z - c.z;
       const d = Math.hypot(ox, oz), min = c.r + RADIUS;
       if (d >= min || d < 1e-6) continue;
@@ -190,7 +203,7 @@ export function raycast(w: World, ox: number, oy: number, oz: number, dx: number
       const cyls = trunks ? w.cylCells[cz * N + cx] : EMPTY;
       for (let k = 0; k < cyls.length; k++) {
         const i = cyls[k];
-        if (w.cylStamp[i] === w.mark) continue;
+        if (w.cylStamp[i] === w.mark || w.felled[i]) continue;
         w.cylStamp[i] = w.mark;
         const h = rayCyl(ox, oz, oy, dx, dz, dy, w.map.cylinders[i], best);
         if (h >= 0 && h < best) { best = h; kind = 'prop'; index = i; isCyl = true; }

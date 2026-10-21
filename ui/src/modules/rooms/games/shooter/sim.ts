@@ -1,14 +1,16 @@
 /**
  * Storm Royale simulation (host-authoritative, fixed 60 Hz, no three.js).
- * Battle royale for up to 16 fighters (humans + bots): drop from the flight
- * path, skydive and glide, loot weapons / ammo / consumables / materials and
- * chests into a five-slot hotbar, fight with hitscan weapons and splash
- * rockets, harvest with the pickaxe and build walls / floors / ramps (edit
- * and destroy them), swim, and survive a storm that closes in seven phases.
+ * Battle royale for up to 16 fighters (humans + bots) solo, in duos or in
+ * squads: drop from the flight path, skydive and glide, loot weapons / ammo /
+ * consumables / launch pads / materials, chests and supply drops into a
+ * five-slot hotbar, fight with hitscan weapons and splash rockets, harvest
+ * with the pickaxe (trees and rocks run dry, then regrow) and build walls /
+ * floors / ramps (edit and destroy them), swim, ride launch pads, get knocked
+ * and revived by teammates, and survive a storm that closes in seven phases.
  */
 import { approach, clamp, Rng, wrapAngle } from '../common/math.ts';
 import { chestY, HALF, mapFor, terrainHeight, waterLevel, dryLand, type ShooterMap } from './map.ts';
-import { groundAt, HEIGHT, raycast, resolve, worldFor, type World } from './collide.ts';
+import { groundAt, HEIGHT, raycast, resolve, syncFelled, worldFor, type World } from './collide.ts';
 import {
   AMMO_KINDS, AMMO_MAX, AMMO_PACK, applyDamage, BUILD_COST, canUse, CONSUMABLE_PACK, CONSUMABLES, damageAt, isConsumable, isWeapon, MATERIALS, MAX_MATS, PICKAXE,
   rollConsumable, rollRarity, rollWeapon, WEAPONS, WEAPON_IDS, type AmmoKind, type ItemId, type Material, type Rarity, type WeaponId,
@@ -32,7 +34,15 @@ export const PICKAXE_SLOT = SLOTS;
 export const PICKAXE_KEY = SLOTS + 1;
 /** Feet sit this far under the surface while swimming. */
 export const SWIM_DEPTH = 0.85;
-export interface ShooterSetup { map: ShooterMapId; difficulty: Difficulty; seed: number; seats: ShooterSeat[] }
+/** Team size: solo, duos or squads. */
+export type TeamSize = 1 | 2 | 4;
+export const TEAM_SIZES: TeamSize[] = [1, 2, 4];
+/**
+ * `teamSize` groups seats into teams (a seat's own `team` wins, otherwise
+ * seats fill teams in order, so humans who join together play together).
+ * `stormScale` shortens every storm wait and shrink (a test hook; 1 = normal).
+ */
+export interface ShooterSetup { map: ShooterMapId; difficulty: Difficulty; seed: number; seats: ShooterSeat[]; teamSize?: TeamSize; stormScale?: number }
 export interface ShooterLink {
   role: 'host' | 'guest';
   inputs?: Map<number, { input: ShooterInput; fighter: FighterId }>;
@@ -59,10 +69,19 @@ export interface BotMemory {
   buildT: number; calm: number;
   /** Harvest target (cylinder index, or -1) and a cover spot to run to while reloading. */
   harvest: number; coverX: number; coverZ: number; coverT: number;
+  /** Goal height (NaN: on the ground) and the building being climbed toward it (-1: none). */
+  goalY: number; climb: number;
+  /** Ramp rush: seconds left pushing toward the target and pieces placed. */
+  pushT: number; pushN: number;
+  /** Seconds left on a detour (a random nearby goal after getting stuck) before picking goals again. */
+  detour: number;
 }
-export type FighterMode = 'bus' | 'sky' | 'glide' | 'ground' | 'dead';
+/** `down`: knocked (team modes), crawling and bleeding out until a teammate revives them. */
+export type FighterMode = 'bus' | 'sky' | 'glide' | 'ground' | 'dead' | 'down';
 export interface Fighter {
   id: number; fighter: FighterId; name: string; human: boolean; slot: number;
+  /** Team index (solo: everyone is their own team), revive progress (s, while knocked) and who knocked them. */
+  team: number; revive: number; knocker: number;
   x: number; y: number; z: number; vx: number; vy: number; vz: number; yaw: number; pitch: number; grounded: boolean;
   mode: FighterMode; hp: number; shield: number; kills: number; damage: number; place: number; killedBy: number; aliveTime: number;
   weapons: (Held | null)[]; current: number; ammo: Record<AmmoKind, number>;
@@ -80,13 +99,26 @@ export type LootKind = 'weapon' | 'ammo' | 'heal' | 'shield' | 'item' | 'mats';
 export interface Loot { id: number; kind: LootKind; weapon: ItemId | null; rarity: Rarity; ammo: AmmoKind | null; mat: Material | null; amount: number; x: number; y: number; z: number }
 export interface Rocket { id: number; owner: number; rarity: Rarity; x: number; y: number; z: number; vx: number; vy: number; vz: number; life: number }
 export interface Storm { stage: number; cx: number; cz: number; r: number; fromX: number; fromZ: number; fromR: number; toX: number; toZ: number; toR: number; timer: number; shrinking: boolean; damage: number }
-export type ShooterEventType = 'shot' | 'hit' | 'kill' | 'pickup' | 'chest' | 'explode' | 'reload' | 'land' | 'jump' | 'storm' | 'win' | 'glide' | 'build' | 'break' | 'harvest' | 'use' | 'swing' | 'edit';
+/** A launch pad on the ground (map set pieces and pads survivors deploy). */
+export interface Pad { id: number; x: number; y: number; z: number }
+/** A supply drop: falls from the sky to `ground`, then opens like a chest. */
+export interface Drop { id: number; x: number; y: number; z: number; ground: number; landed: boolean }
+/** A prop someone harvested (host only): materials left and seconds until it is whole again. Key: box index, or -1 - trunk index. */
+export interface HarvestNode { key: number; left: number; regrow: number }
+export type ShooterEventType = 'shot' | 'hit' | 'kill' | 'pickup' | 'chest' | 'explode' | 'reload' | 'land' | 'jump' | 'storm' | 'win' | 'glide' | 'build' | 'break' | 'harvest' | 'use' | 'swing' | 'edit'
+  | 'knock' | 'revive' | 'supply' | 'launch' | 'fell';
 export interface ShooterEvent { id: number; type: ShooterEventType; player: number; target: number; value: number; flag: number; x: number; y: number; z: number; x2: number; y2: number; z2: number }
 export interface ShooterState {
   map: ShooterMapId; difficulty: Difficulty; phase: 'bus' | 'play' | 'done'; clock: number; endTimer: number;
   bus: { ax: number; az: number; bx: number; bz: number; t: number; duration: number };
   players: Fighter[]; loot: Loot[]; lootRev: number; chests: boolean[]; rockets: Rocket[]; storm: Storm;
   builds: Build[]; buildRev: number;
+  /** Team size and the winning team (-1 until crowned). */
+  squad: TeamSize; winTeam: number;
+  pads: Pad[]; drops: Drop[];
+  /** Harvested props (host only) and the trunks harvested away (replaced, never mutated, when it changes). */
+  nodes: HarvestNode[]; felled: number[];
+  stormScale: number;
   events: ShooterEvent[]; eventSeq: number; nextId: number; rng: number; accumulator: number; winner: number;
 }
 
@@ -101,15 +133,54 @@ export const STORM: { wait: number; shrink: number; radius: number; damage: numb
   { wait: 15, shrink: 12, radius: 0, damage: 14 },
 ];
 const START_RADIUS = HALF * 1.45;
-/** Kill-event weapon codes: weapon index, 6 storm, 7 pickaxe. */
+/** Kill-event weapon codes: weapon index, 6 storm, 7 pickaxe, 8 bled out while knocked. */
 export const KILL_STORM = 6;
 export const KILL_PICKAXE = 7;
+export const KILL_BLEED = 8;
+/** Knocked: health to bleed through (per second), crawl speed; revive time, reach and the health it restores. */
+export const DOWN_HP = 100;
+export const BLEED = 3;
+export const CRAWL = 1.7;
+export const REVIVE_TIME = 4;
+export const REVIVE_RANGE = 2.1;
+export const REVIVE_HP = 30;
+/** Launch pads: take-off speed (about 20 m of climb before the glider opens) and the deploy cap. */
+export const LAUNCH_SPEED = 30;
+export const MAX_PADS = 16;
+/** Supply drops: one falls when these storm phases start closing; spawn height and fall speed. */
+export const SUPPLY_STAGES = [0, 2, 4];
+export const MAX_DROPS = 4;
+export const DROP_HEIGHT = 90;
+export const DROP_SPEED = 7;
+/** Harvesting: tracked props, seconds until a harvested prop is whole again, materials per prop. */
+export const MAX_NODES = 128;
+export const REGROW = 60;
+export const HARVEST_LEFT = [60, 72, 54];
 
 const emptyAmmo = (): Record<AmmoKind, number> => ({ light: 0, medium: 0, shells: 0, heavy: 0, rockets: 0 });
 export const emptyBot = (think = 0): BotMemory => ({
   goalX: 0, goalZ: 0, think, target: -1, seen: 0, strafe: 1, strafeT: 0, stuck: 0, lastX: 0, lastZ: 0, dropAt: 0, burst: 0, errX: 0, errY: 0, loot: -1, jumpT: 0,
-  buildT: 0, calm: 0, harvest: -1, coverX: 0, coverZ: 0, coverT: 0,
+  buildT: 0, calm: 0, harvest: -1, coverX: 0, coverZ: 0, coverT: 0, goalY: NaN, climb: -1, pushT: 0, pushN: 0, detour: 0,
 });
+/** Standing: alive and not knocked. */
+export const standing = (p: Pick<Fighter, 'mode'>): boolean => p.mode !== 'dead' && p.mode !== 'down';
+/** Does `team` have anyone still standing, other than fighter `except`? */
+export function teamUp(state: ShooterState, team: number, except = -1): boolean {
+  for (const p of state.players) if (p.team === team && p.id !== except && standing(p)) return true;
+  return false;
+}
+/** Teams with anyone not yet eliminated (knocked fighters still count). */
+export function teamsAlive(state: ShooterState): number {
+  let n = 0;
+  const ps = state.players;
+  for (let i = 0; i < ps.length; i++) {
+    if (ps[i].mode === 'dead') continue;
+    let first = true;
+    for (let j = 0; j < i; j++) if (ps[j].team === ps[i].team && ps[j].mode !== 'dead') { first = false; break; }
+    if (first) n++;
+  }
+  return n;
+}
 /** The hotbar item in hand (null with the pickaxe out or an empty slot). */
 export const heldItem = (p: Pick<Fighter, 'weapons' | 'current'>): Held | null => (p.current >= 0 && p.current < SLOTS ? p.weapons[p.current] ?? null : null);
 
@@ -120,9 +191,12 @@ export function createMatch(setup: ShooterSetup): ShooterState {
   const angle = rng.range(0, Math.PI * 2), off = rng.range(-60, 60);
   const cx = Math.cos(angle + Math.PI / 2) * off, cz = Math.sin(angle + Math.PI / 2) * off;
   const reach = HALF + 20;
+  const squad: TeamSize = setup.teamSize === 2 || setup.teamSize === 4 ? setup.teamSize : 1;
+  const stormScale = clamp(Number.isFinite(setup.stormScale) ? setup.stormScale! : 1, 0.02, 1);
   const bus = { ax: cx - Math.cos(angle) * reach, az: cz - Math.sin(angle) * reach, bx: cx + Math.cos(angle) * reach, bz: cz + Math.sin(angle) * reach, t: 0, duration: (reach * 2) / BUS_SPEED };
   const players = setup.seats.slice(0, MAX_FIGHTERS).map((seat, i): Fighter => ({
     id: i, fighter: seat.fighter, name: seat.name, human: seat.human, slot: seat.slot,
+    team: squad === 1 ? i : Number.isInteger(seat.team) && seat.team! >= 0 ? seat.team! : Math.floor(i / squad), revive: 0, knocker: -1,
     x: bus.ax, y: BUS_HEIGHT, z: bus.az, vx: 0, vy: 0, vz: 0, yaw: Math.atan2(Math.cos(angle), Math.sin(angle)), pitch: -0.3, grounded: false,
     mode: 'bus', hp: 100, shield: 0, kills: 0, damage: 0, place: 0, killedBy: -1, aliveTime: 0,
     weapons: Array.from({ length: SLOTS }, () => null), current: PICKAXE_SLOT, ammo: emptyAmmo(), mats: [0, 0, 0],
@@ -133,7 +207,9 @@ export function createMatch(setup: ShooterSetup): ShooterState {
   }));
   for (const p of players) {
     if (!p.human) {
-      // Bots pick a landing spot and jump when the flight passes closest to it.
+      // Bots pick a landing spot and jump when the flight passes closest to it (teammates drop together).
+      const lead = squad > 1 ? players.find(q => q.team === p.team && q.id < p.id && !q.human) : undefined;
+      if (lead) { p.bot.goalX = lead.bot.goalX + rng.range(-5, 5); p.bot.goalZ = lead.bot.goalZ + rng.range(-5, 5); p.bot.dropAt = lead.bot.dropAt + rng.range(0, 0.6); continue; }
       const spot = rng.chance(0.75) ? rng.pick(map.lootSpots) : rng.pick(map.pois);
       p.bot.goalX = spot.x + rng.range(-6, 6); p.bot.goalZ = spot.z + rng.range(-6, 6);
       const dx = bus.bx - bus.ax, dz = bus.bz - bus.az, len = Math.hypot(dx, dz);
@@ -144,9 +220,12 @@ export function createMatch(setup: ShooterSetup): ShooterState {
   const state: ShooterState = {
     map: map.id, difficulty: setup.difficulty, phase: 'bus', clock: 0, endTimer: 0, bus, players,
     loot: [], lootRev: 1, chests: map.chests.map(() => false), rockets: [], builds: [], buildRev: 1,
-    storm: { stage: -1, cx: 0, cz: 0, r: START_RADIUS, fromX: 0, fromZ: 0, fromR: START_RADIUS, toX: 0, toZ: 0, toR: START_RADIUS, timer: STORM[0].wait, shrinking: false, damage: 0 },
+    squad, winTeam: -1, pads: [], drops: [], nodes: [], felled: [], stormScale,
+    storm: { stage: -1, cx: 0, cz: 0, r: START_RADIUS, fromX: 0, fromZ: 0, fromR: START_RADIUS, toX: 0, toZ: 0, toR: START_RADIUS, timer: STORM[0].wait * stormScale, shrinking: false, damage: 0 },
     events: [], eventSeq: 0, nextId: 1, rng: 0, accumulator: 0, winner: -1,
   };
+  for (const pad of map.pads) state.pads.push({ id: state.nextId++, x: pad.x, y: pad.y, z: pad.z });
+  syncFelled(worldFor(map), state.felled);
   for (const spot of map.lootSpots) {
     if (!rng.chance(0.85)) continue;
     const y = spot.y ?? terrainHeight(map, spot.x, spot.z);
@@ -226,12 +305,15 @@ export function sanitizeInput(i: ShooterInput | undefined): ShooterInput {
 export function tickMatch(state: ShooterState, inputs: (ShooterInput | undefined)[]): void {
   if (state.phase === 'done') return;
   const map = mapFor(state.map), world = worldFor(map);
+  syncFelled(world, state.felled);
   const rng = new Rng(state.rng || 1);
   state.clock += STEP;
   if (state.phase === 'bus') {
     state.bus.t += STEP;
     if (state.players.every(p => p.mode !== 'bus') || state.bus.t > state.bus.duration) state.phase = 'play';
   }
+  // Revive progress only lasts while a teammate keeps holding interact this tick.
+  for (const p of state.players) if (p.mode === 'down') p.revive = 0;
   for (const p of state.players) {
     if (p.mode === 'dead') continue;
     p.aliveTime += STEP;
@@ -240,25 +322,41 @@ export function tickMatch(state: ShooterState, inputs: (ShooterInput | undefined
   }
   stepRockets(state, world);
   growBuilds(state);
-  stepStorm(state, rng);
-  const alive = aliveCount(state);
-  const humansAlive = state.players.some(p => p.human && p.mode !== 'dead');
+  stepStorm(state, map, world, rng);
+  stepNodes(state);
+  stepDrops(state);
+  const teams = teamsAlive(state);
+  // A team with a person on it is still in the match while any member is (they spectate their teammates).
+  const humansAlive = state.players.some(p => p.mode !== 'dead' && (p.human || (state.squad > 1 && state.players.some(h => h.human && h.team === p.team))));
   const hadHumans = state.players.some(p => p.human);
-  if ((alive <= 1 || (hadHumans && !humansAlive)) && state.phase === 'play') {
-    if (state.endTimer === 0) {
-      const last = state.players.filter(p => p.mode !== 'dead');
-      if (alive <= 1 && last[0]) { last[0].place = 1; state.winner = last[0].id; emit(state, 'win', last[0].id, last[0].x, last[0].y, last[0].z); }
+  if ((teams <= 1 || (hadHumans && !humansAlive)) && state.phase === 'play') {
+    if (state.endTimer === 0 && teams <= 1) {
+      const last = state.players.find(p => standing(p)) ?? state.players.find(p => p.mode !== 'dead');
+      if (last) { crown(state, last.team); emit(state, 'win', state.winner, last.x, last.y, last.z, { value: last.team }); }
     }
     state.endTimer += STEP;
     if (state.endTimer > 3) {
-      // Bots still standing when every human is out share the remaining places.
-      const standing = state.players.filter(p => p.mode !== 'dead' && p.place === 0).sort((a, b) => b.hp + b.shield - (a.hp + a.shield));
-      standing.forEach((p, i) => { p.place = i + 1; });
-      if (state.winner < 0 && standing[0]) state.winner = standing[0].id;
+      // Teams still in it when every human is out share the remaining places (healthiest first).
+      const ranked: { team: number; health: number }[] = [];
+      for (const p of state.players) {
+        if (p.mode === 'dead' || p.place !== 0) continue;
+        const health = p.mode === 'down' ? p.hp * 0.25 : p.hp + p.shield;
+        const t = ranked.find(r => r.team === p.team);
+        if (t) t.health += health; else ranked.push({ team: p.team, health });
+      }
+      ranked.sort((a, b) => b.health - a.health).forEach((t, i) => { for (const p of state.players) if (p.team === t.team && p.place === 0) p.place = i + 1; });
+      if (state.winner < 0 && ranked[0]) { state.winTeam = ranked[0].team; state.winner = (state.players.find(p => p.team === ranked[0].team && standing(p)) ?? state.players.find(p => p.team === ranked[0].team))!.id; }
       state.phase = 'done';
     }
   }
   state.rng = rng.state;
+}
+
+/** Crowns a team: every member places first; `winner` is a standing member. */
+function crown(state: ShooterState, team: number): void {
+  state.winTeam = team;
+  for (const p of state.players) if (p.team === team) p.place = 1;
+  state.winner = (state.players.find(p => p.team === team && standing(p)) ?? state.players.find(p => p.team === team && p.mode !== 'dead'))!.id;
 }
 
 const fwd = (yaw: number): [number, number] => [Math.sin(yaw), Math.cos(yaw)];
@@ -292,12 +390,13 @@ function stepFighter(state: ShooterState, map: ShooterMap, world: World, p: Figh
   }
   if (p.mode === 'sky' || p.mode === 'glide') {
     const g = terrainHeight(map, p.x, p.z);
-    if (p.mode === 'sky' && p.y - g < 34) { p.mode = 'glide'; emit(state, 'glide', p.id, p.x, p.y, p.z); }
+    if (p.mode === 'sky' && p.y - g < 34 && p.vy <= 0) { p.mode = 'glide'; emit(state, 'glide', p.id, p.x, p.y, p.z); }
     const glide = p.mode === 'glide';
     const maxH = glide ? 11 : 17, fall = glide ? -6.5 : -32 - Math.max(0, input.mz) * 6;
     p.vx = approach(p.vx, dirX * maxH, glide ? 1.6 : 1.2, STEP);
     p.vz = approach(p.vz, dirZ * maxH, glide ? 1.6 : 1.2, STEP);
-    p.vy = approach(p.vy, fall, glide ? 3 : 1.4, STEP);
+    // Off a launch pad: a ballistic climb first, the glider opens on the way down.
+    p.vy = p.vy > 0 ? p.vy - 22 * STEP : approach(p.vy, fall, glide ? 3 : 1.4, STEP);
     p.x = clamp(p.x + p.vx * STEP, -HALF + 4, HALF - 4); p.z = clamp(p.z + p.vz * STEP, -HALF + 4, HALF - 4); p.y += p.vy * STEP;
     const floor = groundAt(world, p.x, p.z, p.y + 50, state.builds), surface = waterLevel(map, p.x, p.z) - SWIM_DEPTH;
     const land = Math.max(floor, surface);
@@ -309,20 +408,26 @@ function stepFighter(state: ShooterState, map: ShooterMap, world: World, p: Figh
     return;
   }
 
-  // Ground movement.
-  if (input.slot >= 1 && input.slot <= PICKAXE_KEY && input.slot - 1 !== p.current) { p.current = input.slot - 1; p.reload = 0; p.useT = 0; p.cooldown = Math.max(p.cooldown, 0.25); }
-  const held = heldItem(p);
-  p.building = input.build && !p.swimming;
+  // Ground movement (knocked: a slow crawl while bleeding out, nothing else).
+  const down = p.mode === 'down';
+  if (down) {
+    p.hp -= BLEED * STEP;
+    if (p.hp <= 0) { eliminate(state, p, p.knocker, KILL_BLEED); return; }
+  } else if (input.slot >= 1 && input.slot <= PICKAXE_KEY && input.slot - 1 !== p.current) { p.current = input.slot - 1; p.reload = 0; p.useT = 0; p.cooldown = Math.max(p.cooldown, 0.25); }
+  const held = down ? null : heldItem(p);
+  p.building = !down && input.build && !p.swimming;
   p.piece = input.piece as BuildKind; p.mat = input.mat as Material;
   const using = !p.building && !!held && isConsumable(held.w) && input.fire && canUse(held.w, p.hp, p.shield);
-  p.aiming = input.aim && p.grounded && !p.building && !p.swimming;
-  p.sprinting = input.sprint && input.mz > 0.3 && !input.fire && !p.aiming && !p.swimming && !using;
-  const speed = (p.aiming ? 3.6 : p.sprinting ? 7.8 : 5.4) * (p.swimming ? 0.55 : using ? 0.55 : 1);
-  p.moving = wl > 0.1;
+  // Reviving a knocked teammate roots the survivor in place.
+  const mate = !down && input.interact && p.grounded ? nearestDowned(state, p, REVIVE_RANGE) : -1;
+  p.aiming = !down && input.aim && p.grounded && !p.building && !p.swimming;
+  p.sprinting = !down && input.sprint && input.mz > 0.3 && !input.fire && !p.aiming && !p.swimming && !using;
+  const speed = mate >= 0 ? 0 : down ? CRAWL : (p.aiming ? 3.6 : p.sprinting ? 7.8 : 5.4) * (p.swimming ? 0.55 : using ? 0.55 : 1);
+  p.moving = wl > 0.1 && speed > 0;
   const accel = p.grounded ? 14 : 3;
   p.vx = approach(p.vx, dirX * speed, accel, STEP);
   p.vz = approach(p.vz, dirZ * speed, accel, STEP);
-  if (p.grounded && jumpPressed) { p.vy = 7.4; p.grounded = false; }
+  if (p.grounded && jumpPressed && !down) { p.vy = 7.4; p.grounded = false; }
   p.vy -= 22 * STEP;
   p.x += p.vx * STEP; p.z += p.vz * STEP;
   resolve(world, p, state.builds);
@@ -339,15 +444,41 @@ function stepFighter(state: ShooterState, map: ShooterMap, world: World, p: Figh
   const surface = waterLevel(map, p.x, p.z) - SWIM_DEPTH;
   p.swimming = p.y <= surface + 0.02 && g < surface;
   if (p.swimming) { p.y = Math.max(p.y, surface); if (p.vy < 0) p.vy = 0; p.grounded = true; }
+  if (down) { p.interact = 0; return; }
+  // Launch pads: step on one to be thrown into the sky (the glider opens on the way down).
+  if (!p.swimming && p.vy <= 0.1) for (const pad of state.pads) {
+    const dx = pad.x - p.x, dz = pad.z - p.z;
+    if (dx * dx + dz * dz > 1.2 * 1.2 || p.y - pad.y > 0.8 || p.y - pad.y < -0.6) continue;
+    p.mode = 'sky'; p.vy = LAUNCH_SPEED; p.grounded = false; p.building = false; p.useT = 0; p.reload = 0; p.interact = 0;
+    emit(state, 'launch', p.id, pad.x, pad.y, pad.z, { value: pad.id });
+    return;
+  }
 
-  // Interact: chests and item swaps.
+  // Interact: revive a teammate, open chests and supply drops, swap items.
   pickupAuto(state, p);
   if (input.interact) {
-    const chest = nearestChest(state, map, p, 2.4);
-    if (chest >= 0) {
+    const chest = mate >= 0 ? -1 : nearestChest(state, map, p, 2.4);
+    const drop = mate >= 0 || chest >= 0 ? -1 : nearestDrop(state, p, 2.6);
+    if (mate >= 0) {
+      const q = state.players[mate];
+      p.interact += STEP;
+      q.revive = p.interact;
+      if (p.interact >= REVIVE_TIME) {
+        q.mode = 'ground'; q.hp = REVIVE_HP; q.shield = 0; q.revive = 0; q.knocker = -1; q.grounded = true;
+        p.interact = 0;
+        emit(state, 'revive', p.id, q.x, q.y, q.z, { target: q.id });
+      }
+    } else if (chest >= 0) {
       p.interact += STEP;
       if (p.interact >= 0.55) { openChest(state, map, chest, rng); p.interact = 0; }
-    } else if (interactPressed) swapWeapon(state, p);
+    } else if (drop >= 0) {
+      p.interact += STEP;
+      if (p.interact >= 1) { openDrop(state, drop, p.id, rng); p.interact = 0; }
+    } else {
+      // Nothing to hold E on in reach (walked away mid-revive): progress is lost.
+      p.interact = 0;
+      if (interactPressed) swapWeapon(state, p);
+    }
   } else p.interact = 0;
 
   const reloadPressed = input.reload && !p.prevReload;
@@ -370,12 +501,13 @@ function stepFighter(state: ShooterState, map: ShooterMap, world: World, p: Figh
     p.useT += STEP;
     const c = CONSUMABLES[held.w];
     if (p.useT >= c.time) {
+      if (c.pad && !placePad(state, world, p)) { p.useT = 0; return; }
       if (c.heal) p.hp = Math.min(Math.max(p.hp, c.cap), p.hp + c.heal);
       if (c.shield) p.shield = Math.min(Math.max(p.shield, c.cap), p.shield + c.shield);
       held.mag--;
       if (held.mag <= 0) p.weapons[p.current] = null;
       p.useT = 0;
-      emit(state, 'use', p.id, p.x, p.y, p.z, { value: c.heal ? 0 : 1 });
+      emit(state, 'use', p.id, p.x, p.y, p.z, { value: c.pad ? 2 : c.heal ? 0 : 1 });
     }
     return;
   }
@@ -466,7 +598,7 @@ function swing(state: ShooterState, map: ShooterMap, world: World, p: Fighter): 
   const hit = raycast(world, ox, oy, oz, dx, dy, dz, PICKAXE.range, true, state.builds);
   let victim = -1, tEnd = hit.t;
   for (const q of state.players) {
-    if (q.id === p.id || q.mode !== 'ground') continue;
+    if (q.id === p.id || (q.mode !== 'ground' && q.mode !== 'down') || q.team === p.team) continue;
     const h = rayFighter(ox, oy, oz, dx, dy, dz, q, tEnd);
     if (h.t >= 0 && h.t < tEnd) { tEnd = h.t; victim = q.id; }
   }
@@ -476,9 +608,39 @@ function swing(state: ShooterState, map: ShooterMap, world: World, p: Fighter): 
   if (hit.kind !== 'prop') return;
   const mat = hit.cyl ? 0 : map.boxMats[hit.index];
   if (mat < 0) return;
+  // Every prop holds a limited amount: trees fall when spent, rocks and cars run dry; all regrow later.
+  const key = hit.cyl ? -1 - hit.index : hit.index;
+  let node: HarvestNode | null = null;
+  for (const n of state.nodes) if (n.key === key) { node = n; break; }
+  if (!node) {
+    if (state.nodes.length >= MAX_NODES) dropNode(state, 0);
+    node = { key, left: HARVEST_LEFT[mat], regrow: REGROW };
+    state.nodes.push(node);
+  }
+  node.regrow = REGROW;
   const before = p.mats[mat];
-  p.mats[mat] = Math.min(MAX_MATS, before + PICKAXE.harvest);
-  emit(state, 'harvest', p.id, ox + dx * tEnd, oy + dy * tEnd, oz + dz * tEnd, { value: mat, flag: p.mats[mat] - before });
+  const ex = ox + dx * tEnd, ey = oy + dy * tEnd, ez = oz + dz * tEnd;
+  if (node.left > 0) {
+    const take = Math.min(PICKAXE.harvest, node.left);
+    node.left -= take;
+    p.mats[mat] = Math.min(MAX_MATS, before + take);
+    if (node.left <= 0 && hit.cyl) {
+      state.felled = [...state.felled, hit.index];
+      const c = map.cylinders[hit.index];
+      emit(state, 'fell', p.id, c.x, c.y0 + 1, c.z, { value: hit.index });
+    }
+  }
+  emit(state, 'harvest', p.id, ex, ey, ez, { value: mat, flag: p.mats[mat] - before });
+}
+
+/** Forgets a harvested prop (it is whole again; a felled tree stands back up). */
+function dropNode(state: ShooterState, index: number): void {
+  const n = state.nodes[index];
+  state.nodes.splice(index, 1);
+  if (n.key < 0 && state.felled.includes(-1 - n.key)) state.felled = state.felled.filter(i => i !== -1 - n.key);
+}
+function stepNodes(state: ShooterState): void {
+  for (let i = state.nodes.length - 1; i >= 0; i--) if ((state.nodes[i].regrow -= STEP) <= 0) dropNode(state, i);
 }
 
 // ------------------------------------------------------------ loot
@@ -566,6 +728,74 @@ export function nearestWeaponLoot(state: ShooterState, p: Fighter, range = 2.3):
 }
 export function nearestClosedChest(state: ShooterState, p: Fighter, range = 2.4): number { return nearestChest(state, mapFor(state.map), p, range); }
 
+/** Nearest knocked teammate within reach (index into players, or -1). */
+export function nearestDowned(state: ShooterState, p: Fighter, range: number): number {
+  let best = -1, bd = range;
+  for (const q of state.players) {
+    if (q.mode !== 'down' || q.team !== p.team || q.id === p.id || Math.abs(q.y - p.y) > 2) continue;
+    const d = Math.hypot(q.x - p.x, q.z - p.z);
+    if (d < bd) { bd = d; best = q.id; }
+  }
+  return best;
+}
+/** Nearest landed supply drop within reach (index into drops, or -1). */
+export function nearestDrop(state: ShooterState, p: Fighter, range = 2.6): number {
+  let best = -1, bd = range;
+  state.drops.forEach((d, i) => {
+    if (!d.landed || Math.abs(d.y - p.y) > 2.2) return;
+    const r = Math.hypot(d.x - p.x, d.z - p.z);
+    if (r < bd) { bd = r; best = i; }
+  });
+  return best;
+}
+
+/** A supply drop over a dry spot inside the next safe circle. */
+function spawnDrop(state: ShooterState, map: ShooterMap, world: World, rng: Rng): void {
+  if (state.drops.length >= MAX_DROPS) return;
+  const s = state.storm;
+  for (let tries = 0; tries < 20; tries++) {
+    const a = rng.range(0, Math.PI * 2), r = rng.range(0, Math.max(4, s.toR * 0.6));
+    const x = clamp(s.toX + Math.cos(a) * r, -HALF + 12, HALF - 12), z = clamp(s.toZ + Math.sin(a) * r, -HALF + 12, HALF - 12);
+    if (!dryLand(map, x, z) && tries < 19) continue;
+    const ground = Math.max(groundAt(world, x, z, DROP_HEIGHT, state.builds), waterLevel(map, x, z));
+    state.drops.push({ id: state.nextId++, x, y: DROP_HEIGHT, z, ground, landed: false });
+    emit(state, 'supply', -1, x, DROP_HEIGHT, z, { value: state.drops[state.drops.length - 1].id, flag: 0 });
+    return;
+  }
+}
+function stepDrops(state: ShooterState): void {
+  for (const d of state.drops) {
+    if (d.landed) continue;
+    d.y = Math.max(d.ground, d.y - DROP_SPEED * STEP);
+    if (d.y <= d.ground) { d.landed = true; emit(state, 'supply', -1, d.x, d.y, d.z, { value: d.id, flag: 1 }); }
+  }
+}
+/** Opens a supply drop: an epic-or-better weapon with ammo, shield potions, metal and sometimes a launch pad. */
+function openDrop(state: ShooterState, index: number, by: number, rng: Rng): void {
+  const d = state.drops[index];
+  state.drops.splice(index, 1);
+  const weapon = rollWeapon(rng.next());
+  dropItem(state, 'weapon', weapon, Math.max(3, rollRarity(rng.next(), 2)) as Rarity, WEAPONS[weapon].mag, d.x + 1.4, d.y, d.z);
+  dropLoot(state, 'ammo', WEAPONS[weapon].ammo, AMMO_PACK[WEAPONS[weapon].ammo] * 2, d.x + 1.2, d.y, d.z + 1.2);
+  dropItem(state, 'item', 'shieldpot', 2, 2, d.x - 1.3, d.y, d.z + 0.4);
+  dropMats(state, 2, 60, d.x - 0.6, d.y, d.z - 1.3);
+  if (rng.chance(0.4)) dropItem(state, 'item', 'launchpad', 3, 1, d.x + 0.4, d.y, d.z - 1.5);
+  state.lootRev++;
+  emit(state, 'supply', by, d.x, d.y, d.z, { value: d.id, flag: 2 });
+}
+/** Deploys a launch pad on open ground just ahead (false when there is no room). */
+function placePad(state: ShooterState, world: World, p: Fighter): boolean {
+  if (state.pads.length >= MAX_PADS) return false;
+  const [fx, fz] = fwd(p.yaw);
+  const x = p.x + fx * 2.2, z = p.z + fz * 2.2;
+  const y = groundAt(world, x, z, p.y + 0.6, state.builds);
+  if (Math.abs(y - p.y) > 1.2 || y < waterLevel(mapFor(state.map), x, z)) return false;
+  for (const pad of state.pads) if (Math.hypot(pad.x - x, pad.z - z) < 3) return false;
+  state.pads.push({ id: state.nextId++, x, y, z });
+  emit(state, 'use', p.id, x, y, z, { value: 2, flag: 1 });
+  return true;
+}
+
 function swapWeapon(state: ShooterState, p: Fighter): void {
   const l = nearestWeaponLoot(state, p);
   if (!l || !l.weapon) return;
@@ -616,7 +846,8 @@ function fire(state: ShooterState, map: ShooterMap, world: World, p: Fighter, he
     let tEnd = wall.t, victim = -1, head = false;
     const struct = wall.kind === 'build' ? state.builds[wall.index] : null;
     for (const q of state.players) {
-      if (q.id === p.id || q.mode === 'dead' || q.mode === 'bus') continue;
+      // Shots pass through teammates.
+      if (q.id === p.id || q.mode === 'dead' || q.mode === 'bus' || q.team === p.team) continue;
       const t = rayFighter(ox, oy, oz, dx, dy, dz, q, tEnd);
       if (t.t >= 0 && t.t < tEnd) { tEnd = t.t; victim = q.id; head = t.head; }
     }
@@ -639,11 +870,12 @@ function fire(state: ShooterState, map: ShooterMap, world: World, p: Fighter, he
 
 const _fh = { t: -1, head: false };
 const SPHERES: [number, number, boolean][] = [[1.62, 0.3, true], [1.15, 0.46, false], [0.55, 0.42, false]];
-/** Ray vs fighter: head sphere + two body spheres. */
-export function rayFighter(ox: number, oy: number, oz: number, dx: number, dy: number, dz: number, q: { x: number; y: number; z: number }, max: number): { t: number; head: boolean } {
+/** Ray vs fighter: head sphere + two body spheres (squashed low while knocked). */
+export function rayFighter(ox: number, oy: number, oz: number, dx: number, dy: number, dz: number, q: { x: number; y: number; z: number; mode?: FighterMode }, max: number): { t: number; head: boolean } {
   _fh.t = -1; _fh.head = false;
+  const low = q.mode === 'down' ? 0.3 : 1;
   for (const [h, r, head] of SPHERES) {
-    const cx = q.x - ox, cy = q.y + h - oy, cz = q.z - oz;
+    const cx = q.x - ox, cy = q.y + h * low + (low < 1 ? 0.2 : 0) - oy, cz = q.z - oz;
     const b = cx * dx + cy * dy + cz * dz;
     if (b < 0) continue;
     const c = cx * cx + cy * cy + cz * cz - r * r;
@@ -655,21 +887,36 @@ export function rayFighter(ox: number, oy: number, oz: number, dx: number, dy: n
   return _fh;
 }
 
+/** Kill / knock event weapon code for a source and weapon. */
+const killCode = (from: number, weapon: WeaponId | 'pickaxe'): number => (from === -2 ? KILL_STORM : weapon === 'pickaxe' ? KILL_PICKAXE : WEAPON_IDS.indexOf(weapon));
+
 function hurt(state: ShooterState, q: Fighter, amount: number, from: number, head: boolean, useShield: boolean, weapon: WeaponId | 'pickaxe'): void {
-  // Once the last survivor is crowned nothing can take it away (storm, splash, falls).
+  // Once the last survivor is crowned nothing can take it away (storm, splash, falls); no friendly fire.
   if (q.mode === 'dead' || amount <= 0 || state.phase === 'done' || state.winner >= 0) return;
+  if (from >= 0 && from !== q.id && state.players[from]?.team === q.team) return;
   const res = useShield ? applyDamage(q.hp, q.shield, amount) : { hp: Math.max(0, q.hp - amount), shield: q.shield, absorbed: 0 };
   q.hp = res.hp; q.shield = res.shield; q.hurtT = 0.4; q.useT = 0;
-  if (from >= 0 && from !== q.id) { state.players[from].damage += amount; if (!q.human) { q.bot.target = from; q.bot.seen = 0.6; q.bot.calm = 0; } }
-  emit(state, 'hit', from, q.x, q.y + (head ? 1.7 : 1.1), q.z, { target: q.id, value: amount, flag: (res.absorbed > 0 ? 1 : 0) | (head ? 2 : 0) });
-  if (q.hp <= 0) eliminate(state, q, from, weapon);
+  if (from >= 0 && from !== q.id) { state.players[from].damage += amount; if (!q.human && q.mode !== 'down') { q.bot.target = from; q.bot.seen = 0.6; q.bot.calm = 0; q.bot.pushT = 0; } }
+  emit(state, 'hit', from, q.x, q.y + (q.mode === 'down' ? 0.5 : head ? 1.7 : 1.1), q.z, { target: q.id, value: amount, flag: (res.absorbed > 0 ? 1 : 0) | (head ? 2 : 0) });
+  if (q.hp > 0) return;
+  // The last team in it cannot be wiped out in the same instant as the one before it (storm ticks, splash): it wins instead.
+  if (teamsAlive(state) <= 1) { q.hp = 1; return; }
+  // Team modes: knocked while a teammate still stands; finishing a knocked survivor eliminates them.
+  if (q.mode !== 'down' && state.squad > 1 && teamUp(state, q.team, q.id)) knock(state, q, from, weapon);
+  else if (q.mode === 'down' && from < 0 && q.knocker >= 0) eliminate(state, q, q.knocker, KILL_BLEED);
+  else eliminate(state, q, from, killCode(from, weapon));
 }
 
-function eliminate(state: ShooterState, q: Fighter, from: number, weapon: WeaponId | 'pickaxe'): void {
-  q.place = aliveCount(state);
-  q.mode = 'dead'; q.killedBy = from; q.hp = 0; q.shield = 0; q.building = false; q.useT = 0;
+function knock(state: ShooterState, q: Fighter, from: number, weapon: WeaponId | 'pickaxe'): void {
+  q.mode = 'down'; q.hp = DOWN_HP; q.shield = 0; q.knocker = from; q.revive = 0;
+  q.building = false; q.useT = 0; q.reload = 0; q.aiming = false; q.sprinting = false; q.interact = 0;
+  emit(state, 'knock', from, q.x, q.y, q.z, { target: q.id, value: killCode(from, weapon) });
+}
+
+function eliminate(state: ShooterState, q: Fighter, from: number, code: number): void {
+  q.mode = 'dead'; q.killedBy = from; q.hp = 0; q.shield = 0; q.building = false; q.useT = 0; q.revive = 0;
   if (from >= 0 && from !== q.id) state.players[from].kills++;
-  emit(state, 'kill', from, q.x, q.y, q.z, { target: q.id, value: from === -2 ? KILL_STORM : weapon === 'pickaxe' ? KILL_PICKAXE : WEAPON_IDS.indexOf(weapon) });
+  emit(state, 'kill', from, q.x, q.y, q.z, { target: q.id, value: code });
   // Drop the inventory in a little ring.
   let k = 0;
   const ring = (i: number): [number, number] => [q.x + Math.cos(i * 1.1) * (1.3 + i * 0.12), q.z + Math.sin(i * 1.1) * (1.3 + i * 0.12)];
@@ -683,6 +930,12 @@ function eliminate(state: ShooterState, q: Fighter, from: number, weapon: Weapon
   q.current = PICKAXE_SLOT;
   q.ammo = emptyAmmo();
   q.mats = [0, 0, 0];
+  // Nobody left standing on the team: the knocked go too (credited to whoever knocked them).
+  if (!teamUp(state, q.team)) for (const m of state.players) if (m.team === q.team && m.mode === 'down') eliminate(state, m, m.knocker, KILL_BLEED);
+  // Team wiped: every member takes the team's place (solo: the fighter's own).
+  if (state.players.some(m => m.team === q.team && m.mode !== 'dead')) return;
+  const place = teamsAlive(state) + 1;
+  for (const m of state.players) if (m.team === q.team && m.place === 0) m.place = place;
 }
 
 function stepRockets(state: ShooterState, world: World): void {
@@ -693,8 +946,9 @@ function stepRockets(state: ShooterState, world: World): void {
     const sp = Math.hypot(r.vx, r.vy, r.vz), dx = r.vx / sp, dy = r.vy / sp, dz = r.vz / sp, step = sp * STEP;
     const hit = raycast(world, r.x, r.y, r.z, dx, dy, dz, step, true, state.builds);
     let t = hit.kind === 'none' ? -1 : hit.t;
+    const team = state.players[r.owner]?.team ?? -1;
     for (const q of state.players) {
-      if (q.id === r.owner || q.mode === 'dead' || q.mode === 'bus') continue;
+      if (q.id === r.owner || q.mode === 'dead' || q.mode === 'bus' || q.team === team) continue;
       const h = rayFighter(r.x, r.y, r.z, dx, dy, dz, q, step);
       if (h.t >= 0 && (t < 0 || h.t < t)) t = h.t;
     }
@@ -727,37 +981,38 @@ function explode(state: ShooterState, world: World, r: Rocket, x: number, y: num
   for (let i = 0; i < hits.length; i++) if (state.builds.includes(hits[i])) damageBuild(state, world, hits[i], dmg[i]);
 }
 
-function stepStorm(state: ShooterState, rng: Rng): void {
+function stepStorm(state: ShooterState, map: ShooterMap, world: World, rng: Rng): void {
   if (state.phase !== 'play') return;
-  const s = state.storm;
+  const s = state.storm, scale = state.stormScale || 1;
   s.timer -= STEP;
   if (!s.shrinking && s.timer <= 0) {
     const next = STORM[Math.min(STORM.length - 1, s.stage + 1)];
     s.stage = Math.min(STORM.length - 1, s.stage + 1);
-    s.shrinking = true; s.timer = next.shrink;
+    s.shrinking = true; s.timer = next.shrink * scale;
     s.fromX = s.cx; s.fromZ = s.cz; s.fromR = s.r;
     s.damage = next.damage;
     emit(state, 'storm', -1, s.toX, 0, s.toZ, { value: s.stage, flag: 1 });
+    if (SUPPLY_STAGES.includes(s.stage)) spawnDrop(state, map, world, rng);
   } else if (s.shrinking) {
-    const total = STORM[s.stage].shrink, k = clamp(1 - s.timer / total, 0, 1);
+    const total = STORM[s.stage].shrink * scale, k = clamp(1 - s.timer / total, 0, 1);
     s.cx = s.fromX + (s.toX - s.fromX) * k; s.cz = s.fromZ + (s.toZ - s.fromZ) * k; s.r = s.fromR + (s.toR - s.fromR) * k;
     if (s.timer <= 0) {
       s.shrinking = false; s.cx = s.toX; s.cz = s.toZ; s.r = s.toR;
-      if (s.stage < STORM.length - 1) { s.timer = STORM[s.stage + 1].wait; pickStormTarget(state, rng); emit(state, 'storm', -1, s.toX, 0, s.toZ, { value: s.stage + 1, flag: 0 }); }
+      if (s.stage < STORM.length - 1) { s.timer = STORM[s.stage + 1].wait * scale; pickStormTarget(state, rng); emit(state, 'storm', -1, s.toX, 0, s.toZ, { value: s.stage + 1, flag: 0 }); }
       else s.timer = 9999;
     }
   }
   for (const p of state.players) {
-    if (p.mode !== 'ground' && p.mode !== 'glide') continue;
+    if (p.mode !== 'ground' && p.mode !== 'glide' && p.mode !== 'down') continue;
     if (Math.hypot(p.x - s.cx, p.z - s.cz) <= s.r) { p.stormT = 0; continue; }
     p.stormT += STEP;
     if (p.stormT >= 1) { p.stormT -= 1; hurt(state, p, Math.max(1, s.damage), -2, false, false, 'pistol'); }
   }
 }
 
-export interface ShooterResult { id: number; name: string; fighter: FighterId; human: boolean; slot: number; place: number; kills: number; damage: number; time: number }
+export interface ShooterResult { id: number; name: string; fighter: FighterId; human: boolean; slot: number; team: number; place: number; kills: number; damage: number; time: number }
 export function shooterResults(state: ShooterState): ShooterResult[] {
-  return [...state.players].sort((a, b) => (a.place || 99) - (b.place || 99) || b.kills - a.kills)
-    .map(p => ({ id: p.id, name: p.name, fighter: p.fighter, human: p.human, slot: p.slot, place: p.place || aliveCount(state), kills: p.kills, damage: Math.round(p.damage), time: p.aliveTime }));
+  return [...state.players].sort((a, b) => (a.place || 99) - (b.place || 99) || (state.squad > 1 ? a.team - b.team : 0) || b.kills - a.kills)
+    .map(p => ({ id: p.id, name: p.name, fighter: p.fighter, human: p.human, slot: p.slot, team: p.team, place: p.place || teamsAlive(state), kills: p.kills, damage: Math.round(p.damage), time: p.aliveTime }));
 }
 export { HEIGHT };

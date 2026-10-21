@@ -56,14 +56,24 @@ export const BLOCK_PALETTE = [0xe9e1cf, 0xa8774a, 0x7a4a3a, 0x9c6b42, 0x8d98a3, 
 const BLOCK_HARVEST = [1, 0, 0, 0, 2, 1, 1, 0, 0];
 export interface Water { x: number; z: number; r: number; y: number }
 export interface Spot { x: number; z: number; y?: number }
+/**
+ * A walk-in building's stair layout, so bots can climb to upper floors and the
+ * roof (see `climbStep`): the local frame (centre, quarter turn, size), the
+ * ground-floor height, storey count and the shared flight geometry.
+ */
+export interface Climb { cx: number; cz: number; q: number; w: number; d: number; base: number; floors: number; z0: number; run: number; sw: number; roof: number; box: Box; doors: number }
 export interface ShooterMap {
   id: ShooterMapId; theme: 'isle' | 'mesa';
   heights: Float32Array; size: number;
   props: Prop[]; boxes: Box[]; cylinders: Cylinder[]; pois: Poi[];
   /** Harvest material per box (0 wood, 1 brick, 2 metal, -1 nothing), aligned with `boxes`. */
   boxMats: number[];
+  /** The prop drawn for each tree trunk, aligned with `cylinders` (felled trees hide it). */
+  trunkProps: number[];
   blocks: Block[]; waters: Water[]; river: [number, number][];
   lootSpots: Spot[]; chests: { x: number; z: number; yaw: number; y?: number }[];
+  /** Walk-in buildings bots can climb, and the fixed launch pads (set pieces). */
+  climbs: Climb[]; pads: { x: number; z: number; y: number }[];
 }
 
 const POIS: Record<ShooterMapId, Poi[]> = {
@@ -149,9 +159,9 @@ export function mapFor(id: string): ShooterMap {
   for (let iz = 0; iz < size; iz++) for (let ix = 0; ix < size; ix++) heights[iz * size + ix] = raw(-HALF + ix * GRID, -HALF + iz * GRID);
   const lake = pois.find(p => p.kind === 'lake')!;
   const map: ShooterMap = {
-    id: mapId, theme, heights, size, props: [], boxes: [], cylinders: [], pois, boxMats: [], blocks: [],
+    id: mapId, theme, heights, size, props: [], boxes: [], cylinders: [], pois, boxMats: [], trunkProps: [], blocks: [],
     waters: isle ? [] : [{ x: lake.x, z: lake.z, r: lake.r * 1.2, y: MESA_LAKE_SURFACE }], river: isle ? RIVER : [],
-    lootSpots: [], chests: [],
+    lootSpots: [], chests: [], climbs: [], pads: [],
   };
   populate(map);
   cache.set(mapId, map);
@@ -261,10 +271,12 @@ function building(map: ShooterMap, cx: number, cz: number, q: number, w: number,
   }
   const base = hi + 0.25;
   f.block(-w / 2, -d / 2, w / 2, d / 2, lo - 1, base, style.trim);
-  // Door steps where the foundation stands proud of the ground.
+  // Door steps where the foundation stands proud of the ground; a door more than the steps (plus a step-up) above the ground is out of reach.
+  let doors = 0;
   for (const side of [1, -1]) {
     const [x, z] = f.world(0, side * (d / 2 + 0.6));
     const drop = base - terrainHeight(map, x, z);
+    if (drop <= 2.5) doors |= side > 0 ? 1 : 2;
     for (let k = 1; drop - k * 0.4 > 0.15 && k < 6; k++) f.block(-1.2, side > 0 ? d / 2 + (k - 1) * 0.5 : -d / 2 - k * 0.5, 1.2, side > 0 ? d / 2 + k * 0.5 : -d / 2 - (k - 1) * 0.5, lo - 1, base - k * 0.4, style.trim);
   }
   const sw = 1.3; // stair width
@@ -311,7 +323,90 @@ function building(map: ShooterMap, cx: number, cz: number, q: number, w: number,
       map.chests.push({ x: chx, z: chz, yaw: q * Math.PI / 2, y });
     }
   }
+  const [ax, az] = f.world(-w / 2, -d / 2), [bx, bz] = f.world(w / 2, d / 2);
+  map.climbs.push({
+    cx, cz, q, w, d, base, floors, z0, run, sw, roof: base + floors * STOREY,
+    box: { minX: Math.min(ax, bx), minY: lo, minZ: Math.min(az, bz), maxX: Math.max(ax, bx), maxY: base + floors * STOREY + 1.1, maxZ: Math.max(az, bz) }, doors,
+  });
   return base + floors * STOREY;
+}
+
+/** World (x, z) to a climb's local frame (front = +z), inverting Frame.world. */
+function toLocal(c: Climb, x: number, z: number): [number, number] {
+  const dx = x - c.cx, dz = z - c.cz;
+  switch (c.q & 3) {
+    case 1: return [-dz, dx];
+    case 2: return [-dx, -dz];
+    case 3: return [dz, -dx];
+    default: return [dx, dz];
+  }
+}
+function toWorld(c: Climb, lx: number, lz: number, out: [number, number]): [number, number] {
+  switch (c.q & 3) {
+    case 1: out[0] = c.cx + lz; out[1] = c.cz - lx; break;
+    case 2: out[0] = c.cx - lx; out[1] = c.cz - lz; break;
+    case 3: out[0] = c.cx - lz; out[1] = c.cz + lx; break;
+    default: out[0] = c.cx + lx; out[1] = c.cz + lz;
+  }
+  return out;
+}
+/** Is (x, z) inside the building's footprint (plus `pad` metres)? */
+export const inClimb = (c: Climb, x: number, z: number, pad = 0): boolean =>
+  x > c.box.minX - pad && x < c.box.maxX + pad && z > c.box.minZ - pad && z < c.box.maxZ + pad;
+
+const _step: [number, number] = [0, 0];
+/**
+ * Where a survivor at (x, y, z) should walk next to reach a goal at
+ * (goalX, goalY, goalZ) through this building: round the corner to a door,
+ * through it, along the back wall to the flight that goes up from this storey
+ * and up it (switchback stairs, see `building`), or down through the stairwell
+ * hole it arrived by and out of the door on the goal's side. Null when no
+ * help is needed (on the goal's floor, or outside with the goal outside too):
+ * walk straight to the goal. A goal height of NaN means "on the ground".
+ * Allocation-free: the returned pair is reused.
+ */
+export function climbStep(c: Climb, x: number, y: number, z: number, goalX: number, goalY: number, goalZ: number): [number, number] | null {
+  const [lx, lz] = toLocal(c, x, z);
+  const hw = c.w / 2, hd = c.d / 2, door = c.w * 0.15;
+  const goalIn = inClimb(c, goalX, goalZ);
+  if (!(Math.abs(lx) < hw && Math.abs(lz) < hd && y > c.base - 0.4)) {
+    if (!goalIn) return null;
+    // Outside: the nearer door that can be reached (front +z, back -z); round the corners to it first.
+    let side = lz >= 0 ? 1 : -1;
+    if (!(c.doors & (side > 0 ? 1 : 2))) side = -side;
+    if (!(c.doors & (side > 0 ? 1 : 2))) return null;
+    const sx = lx >= 0 ? 1 : -1, dx = side * door, face = lz * side;
+    if (face < -hd + 0.2 && Math.abs(lx) <= hw + 0.3) return toWorld(c, sx * (hw + 1.6), -side * (hd + 1.8), _step);
+    if (Math.abs(lx) > hw + 0.3 && face < hd + 1.2) return toWorld(c, sx * (hw + 1.6), side * (hd + 1.8), _step);
+    if (Math.abs(lx - dx) > 0.7 || face < hd) return toWorld(c, dx, side * (hd + 1.6), _step);
+    return toWorld(c, dx, side * (hd - 1.4), _step);
+  }
+  // A goal outside the building (or on the ground) is reached from the ground floor.
+  const want = goalIn && Number.isFinite(goalY) ? goalY : c.base;
+  // Storey under the feet (on a flight it is the one the flight leaves from).
+  const storey = Math.max(0, Math.min(c.floors, Math.floor((y - c.base + 0.4) / STOREY)));
+  const floorY = c.base + storey * STOREY;
+  const flightX = (s: number) => (s % 2 === 0 ? -hw + 0.3 : hw - 0.3 - c.sw) + c.sw / 2;
+  const fx = flightX(storey), top = c.z0 + c.run + 0.7, back = c.z0 - 0.45;
+  const onFlight = storey < c.floors && Math.abs(lx - fx) < c.sw / 2 + 0.25 && lz > c.z0 - 0.3 && lz < c.z0 + c.run + 0.3 && y > floorY + 0.25;
+  if (onFlight) return toWorld(c, fx, want > floorY + 1.2 ? top : back, _step);
+  if (Math.abs(want - floorY) < 1.2) {
+    if (goalIn || storey > 0) return null;
+    // Ground floor, goal outside: out of the door on the goal's side (or the one that is usable).
+    let side = toLocal(c, goalX, goalZ)[1] >= 0 ? 1 : -1;
+    if (!(c.doors & (side > 0 ? 1 : 2)) && c.doors) side = -side;
+    // Beside a flight: step out to the centre line first so the way to the door does not run up the stairs.
+    if (Math.abs(lx) > 1.2 && lz < c.z0 + c.run + 0.3) return toWorld(c, 0, lz, _step);
+    return toWorld(c, side * door, side * (hd + 2.2), _step);
+  }
+  if (want > floorY) {
+    if (storey >= c.floors) return null;
+    // Centre line to the back wall, along it to the flight, then up.
+    if (lz > c.z0 + 0.2) return toWorld(c, 0, Math.abs(lx) > 1.2 ? lz : back, _step);
+    return toWorld(c, fx, Math.abs(lx - fx) > 0.5 ? back : top, _step);
+  }
+  // Down: drop through the hole over the flight that arrives at this storey.
+  return toWorld(c, flightX(storey - 1), c.z0 + c.run * 0.5, _step);
 }
 
 /** Big open hall: wide doors, high windows, a catwalk along the back reached by stairs. */
@@ -402,6 +497,7 @@ function populate(map: ShooterMap): void {
     } else if (solid && TRUNK.has(key)) {
       if (!free(x, z, 0.8)) return false;
       map.cylinders.push({ x, z, r: 0.45 * scale / 6, y0: gy - 1, y1: gy + 7 * scale / 6 });
+      map.trunkProps.push(map.props.length);
     }
     map.props.push({ key, x, y: gy, z, yaw, scale });
     return true;
@@ -552,6 +648,17 @@ function populate(map: ShooterMap): void {
   for (let n = 0; n < 12; n++) {
     const x = rng.range(-170, 170), z = rng.range(-170, 170);
     if (!nearPoi(x, z) && free(x, z, 2)) map.chests.push({ x, z, yaw: rng.range(0, 6.28) });
+  }
+  // Launch pad set pieces: a pad on the camp / crossroads square and at the foot of each hill.
+  for (const poi of map.pois) {
+    if (poi.kind !== 'camp' && poi.kind !== 'hill' && poi.kind !== 'town') continue;
+    for (let k = 0; k < 12; k++) {
+      const a = k * 2.1 + 0.4, r = poi.kind === 'hill' ? poi.r * 1.35 : poi.kind === 'town' ? 12 + k : 5 + k * 0.6;
+      const x = poi.x + Math.cos(a) * r, z = poi.z + Math.sin(a) * r;
+      if (!free(x, z, 1.6) || map.chests.some(c => Math.hypot(c.x - x, c.z - z) < 3)) continue;
+      map.pads.push({ x, z, y: ground(x, z) });
+      break;
+    }
   }
   for (const c of map.chests) {
     const gy = c.y ?? ground(c.x, c.z);

@@ -12,3 +12,7 @@ export const FIGHTERS: { id: FighterId; name: string }[] = [
 ];
 export const FIGHTER_IDS = FIGHTERS.map(f => f.id);
 export const fighterName = (id: string): string => FIGHTERS.find(f => f.id === id)?.name ?? 'Survivor';
+/** Team colours (duos / squads): markers, map dots, HUD and results. */
+export const TEAM_COLOURS = [0x4aa8ff, 0xff6b5a, 0x5fd35f, 0xffb02e, 0xc06bff, 0x37d2c8, 0xff7ad9, 0xd8d84a] as const;
+export const teamColour = (team: number): number => TEAM_COLOURS[((team % TEAM_COLOURS.length) + TEAM_COLOURS.length) % TEAM_COLOURS.length];
+export const TEAM_MODES = [{ size: 1, name: 'Solo' }, { size: 2, name: 'Duos' }, { size: 4, name: 'Squads' }] as const;
