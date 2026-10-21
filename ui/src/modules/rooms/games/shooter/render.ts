@@ -1,9 +1,11 @@
 /**
- * Storm Royale renderer: island terrain + sea, instanced Kenney props, chests,
+ * Storm Royale renderer: island terrain + sea / lake, instanced Kenney props,
+ * the merged walk-in architecture, player structures (one merged mesh per
+ * material, rebuilt when they change) with a build-preview ghost, chests,
  * floor loot (nearest items only), animated mini-character fighters holding
- * Blaster Kit weapons, the drop balloon, gliders, tracers, rockets,
- * explosions and the storm wall. Third-person camera with shoulder offset,
- * aim zoom and collision.
+ * Blaster Kit weapons / heals / the pickaxe, the drop balloon, gliders,
+ * tracers, rockets, explosions, debris and the storm wall. Third-person
+ * camera with shoulder offset, aim zoom and collision.
  */
 import * as THREE from 'three';
 import { AssetLibrary, PropBatch } from '../common/assets';
@@ -11,15 +13,17 @@ import { GameView, owned, type Theme } from '../common/view';
 import { Particles } from '../common/particles';
 import { approach, clamp, lerp, smoothstep } from '../common/math';
 import { groundDetailTexture, labelTexture } from '../common/textures';
-import { GRID, HALF, SEA_LEVEL, mapFor, terrainHeight, type ShooterMap } from './map';
-import { raycast, worldFor, type World } from './collide';
-import { EYE, rayFighter, type Fighter, type Loot, type ShooterEvent, type ShooterState } from './sim';
-import { RARITY_COLOURS, WEAPONS } from './weapons';
+import { chestY, GRID, HALF, SEA_SURFACE, mapFor, terrainHeight, type ShooterMap } from './map';
+import { groundAt, raycast, worldFor, type World } from './collide';
+import { BUS_HEIGHT, EYE, heldItem, PICKAXE_SLOT, rayFighter, type Fighter, type Loot, type ShooterEvent, type ShooterState } from './sim';
+import { BUILD_COST, CONSUMABLES, isConsumable, MATERIAL_COLOURS, RARITY_COLOURS, WEAPONS } from './weapons';
+import { canPlace, packBuild, planBuild, type Build } from './builds';
 import { FIGHTER_IDS, type FighterId } from './catalog';
+import { blockGeometry, ghostGeometries, materialTexture, pickaxeGeometries, pickaxeMesh, placeGhost, structureGeometry } from './meshes';
 
 const THEMES: Record<ShooterMap['theme'], Theme & { low: number; mid: number; high: number; rock: number; sand: number }> = {
-  isle: { skyTop: 0x3d84d6, skyHorizon: 0xcbe7ff, fog: 0xcfe6fb, fogNear: 120, fogFar: 520, sun: 0xfff2da, sunIntensity: 2.7, ambientSky: 0xd4e8ff, ambientGround: 0x5e7a3c, ambient: 1.1, low: 0x7cc35a, mid: 0x5da746, high: 0x8fbf63, rock: 0x8d8f8c, sand: 0xe8d39a },
-  mesa: { skyTop: 0x3c7ccb, skyHorizon: 0xf4d6ab, fog: 0xf0d3a8, fogNear: 120, fogFar: 520, sun: 0xffe3bb, sunIntensity: 2.9, ambientSky: 0xffe6c6, ambientGround: 0x9a5b36, ambient: 1.05, low: 0xd99a5c, mid: 0xc97a45, high: 0xe3b276, rock: 0xa65a34, sand: 0xe7c08a },
+  isle: { skyTop: 0x3d84d6, skyHorizon: 0xcbe7ff, fog: 0xcfe6fb, fogNear: 140, fogFar: 620, sun: 0xfff2da, sunIntensity: 2.7, ambientSky: 0xd4e8ff, ambientGround: 0x5e7a3c, ambient: 1.1, low: 0x7cc35a, mid: 0x5da746, high: 0x8fbf63, rock: 0x8d8f8c, sand: 0xe8d39a },
+  mesa: { skyTop: 0x3c7ccb, skyHorizon: 0xf4d6ab, fog: 0xf0d3a8, fogNear: 140, fogFar: 620, sun: 0xffe3bb, sunIntensity: 2.9, ambientSky: 0xffe6c6, ambientGround: 0x9a5b36, ambient: 1.05, low: 0xd99a5c, mid: 0xc97a45, high: 0xe3b276, rock: 0xa65a34, sand: 0xe7c08a },
 };
 const CHAR_SCALE = 2.7;
 const UPPER = new Set(['arm-left', 'arm-right']);
@@ -28,6 +32,7 @@ const _v = new THREE.Vector3();
 const _q = new THREE.Quaternion();
 const UP = new THREE.Vector3(0, 1, 0);
 const PROBE_HEIGHTS = [1.65, 1.1];
+const MAT_KEYS = ['surv-box', 'surv-rock-a', 'surv-metal-panel-screws'];
 
 interface FighterVisual {
   fighter: FighterId; root: THREE.Group; model: THREE.Object3D; mixer: THREE.AnimationMixer; hand: THREE.Object3D | null;
@@ -59,18 +64,35 @@ export class ShooterRenderer {
   private beamMats = RARITY_COLOURS.map(c => new THREE.MeshBasicMaterial({ color: c, transparent: true, opacity: 0.35, blending: THREE.AdditiveBlending, depthWrite: false }));
   private gliderGeo = new THREE.SphereGeometry(1.6, 16, 8, 0, Math.PI * 2, 0, Math.PI / 2.2);
   private gliderMat = new THREE.MeshLambertMaterial({ color: 0xff5a5a, side: THREE.DoubleSide });
+  /** Structures: one mesh per material, rebuilt (throttled) when the set or their health changes. */
+  private structMats = [0, 1, 2].map(() => new THREE.MeshLambertMaterial({ vertexColors: true }));
+  private structMeshes: (THREE.Mesh | null)[] = [null, null, null];
+  private structRev = -1;
+  private structList: Build[] | null = null;
+  /** Shape key of the meshed structures (layout, kind, material, edits; not health). */
+  private structShape = -1;
+  private structAge = 0;
+  private ghosts: THREE.Mesh[] = [];
+  private ghostOk = new THREE.MeshBasicMaterial({ color: 0x62b4ff, transparent: true, opacity: 0.35, depthWrite: false });
+  private ghostBad = new THREE.MeshBasicMaterial({ color: 0xff5a5a, transparent: true, opacity: 0.3, depthWrite: false });
+  private pickGeos = pickaxeGeometries();
+  private pickHandle = new THREE.MeshLambertMaterial({ color: 0x8a5a2b });
+  private pickHead = new THREE.MeshLambertMaterial({ color: 0xb8c4cc });
+  private ground = (x: number, z: number, feet: number) => groundAt(this.world, x, z, feet);
   private time = 0;
   private camPos = new THREE.Vector3();
   private self: number;
   private seats: { fighter: FighterId; human: boolean; name: string }[];
   private alive = new Set<number>();
   aimPoint = new THREE.Vector3();
+  /** Whether the current build preview can be placed (for the HUD). */
+  ghostValid = false;
 
   constructor(host: HTMLElement, mapId: string, seats: { fighter: FighterId; human: boolean; name: string }[], self: number, signal: AbortSignal) {
     this.map = mapFor(mapId);
     this.world = worldFor(this.map);
     this.view = new GameView(host, THEMES[this.map.theme]);
-    this.view.camera.far = 1200;
+    this.view.camera.far = 1400;
     this.lib = new AssetLibrary(signal);
     this.seats = seats;
     this.self = self;
@@ -83,7 +105,7 @@ export class ShooterRenderer {
           float a = 0.32 + band * 0.12 + swirl * 0.1; a *= smoothstep(0.0, 0.05, vUv.y) * (1.0 - smoothstep(0.85, 1.0, vUv.y));
           gl_FragColor = vec4(mix(vec3(0.42, 0.18, 0.78), vec3(0.75, 0.45, 1.0), swirl), a); }`,
     });
-    this.storm = new THREE.Mesh(new THREE.CylinderGeometry(1, 1, 220, 96, 1, true), this.stormMat);
+    this.storm = new THREE.Mesh(new THREE.CylinderGeometry(1, 1, 260, 128, 1, true), this.stormMat);
     this.storm.frustumCulled = false;
     this.storm.renderOrder = 4;
     this.balloon = new THREE.Group();
@@ -96,7 +118,14 @@ export class ShooterRenderer {
     this.buildWorld();
     this.seats.forEach((seat, i) => this.fighters.push(this.buildFighter(seat, i)));
     this.view.scene.add(this.sparks.points, this.smoke.points, this.storm);
-    for (const r of [this.tracerMat, this.beamGeo, ...this.beamMats, this.gliderGeo, this.gliderMat, this.stormMat, this.storm.geometry]) this.lib.own(r);
+    this.structMats.forEach((m, i) => { m.map = this.lib.own(materialTexture(i)); });
+    this.ghosts = ghostGeometries().map(g => {
+      const mesh = new THREE.Mesh(this.lib.own(g), this.ghostOk);
+      mesh.visible = false; mesh.renderOrder = 5;
+      this.view.scene.add(mesh);
+      return mesh;
+    });
+    for (const r of [this.tracerMat, this.beamGeo, ...this.beamMats, this.gliderGeo, this.gliderMat, this.stormMat, this.storm.geometry, ...this.structMats, this.ghostOk, this.ghostBad, ...this.pickGeos, this.pickHandle, this.pickHead]) this.lib.own(r);
   }
 
   private buildWorld(): void {
@@ -104,6 +133,7 @@ export class ShooterRenderer {
     const n = map.size;
     const pos = new Float32Array(n * n * 3), col = new Float32Array(n * n * 3), uv = new Float32Array(n * n * 2);
     const c = new THREE.Color(), low = new THREE.Color(theme.low), mid = new THREE.Color(theme.mid), high = new THREE.Color(theme.high), rock = new THREE.Color(theme.rock), sand = new THREE.Color(theme.sand);
+    const lake = map.waters[0];
     for (let iz = 0; iz < n; iz++) for (let ix = 0; ix < n; ix++) {
       const k = iz * n + ix, x = -HALF + ix * GRID, z = -HALF + iz * GRID, h = map.heights[k];
       pos[k * 3] = x; pos[k * 3 + 1] = h; pos[k * 3 + 2] = z;
@@ -117,7 +147,11 @@ export class ShooterRenderer {
       c.lerp(map.theme === 'isle' ? mid : high, smoothstep(0.2, 0.8, patch) * 0.5);
       c.multiplyScalar(0.92 + 0.08 * Math.sin(x * 0.31) * Math.sin(z * 0.27));
       if (map.theme === 'isle') c.lerp(sand, 1 - smoothstep(0.6, 2.2, h));
-      else c.lerp(sand, smoothstep(0.3, 0.6, Math.sin(x * 0.05) * Math.cos(z * 0.04) * 0.5 + 0.5) * 0.35);
+      else {
+        c.lerp(sand, smoothstep(0.3, 0.6, Math.sin(x * 0.05) * Math.cos(z * 0.04) * 0.5 + 0.5) * 0.35);
+        // Wet sand and reeds-green around the oasis.
+        if (lake) c.lerp(sand, 1 - smoothstep(lake.y + 0.2, lake.y + 1.6, h)).lerp(mid, smoothstep(lake.r + 10, lake.r, Math.hypot(x - lake.x, z - lake.z)) * 0.25);
+      }
       c.lerp(rock, smoothstep(0.45, 0.9, slope));
       col[k * 3] = c.r; col[k * 3 + 1] = c.g; col[k * 3 + 2] = c.b;
     }
@@ -128,18 +162,30 @@ export class ShooterRenderer {
     geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
     geo.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
     geo.setIndex(index); geo.computeVertexNormals();
-    const terrain = owned(new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ vertexColors: true, map: this.lib.own(groundDetailTexture()) })));
+    const detail = this.lib.own(groundDetailTexture());
+    const terrain = owned(new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ vertexColors: true, map: detail })));
     terrain.receiveShadow = true;
     scene.add(terrain);
     if (map.theme === 'isle') {
       const sea = owned(new THREE.Mesh(new THREE.PlaneGeometry(3000, 3000), new THREE.MeshLambertMaterial({ color: 0x2e8fd0, transparent: true, opacity: 0.88 })));
-      sea.rotation.x = -Math.PI / 2; sea.position.y = SEA_LEVEL - 0.25;
+      sea.rotation.x = -Math.PI / 2; sea.position.y = SEA_SURFACE;
       scene.add(sea);
     } else {
-      // Desert floor beyond the playable cliffs.
+      // Desert floor beyond the playable cliffs, and the oasis water.
       const floor = owned(new THREE.Mesh(new THREE.PlaneGeometry(3000, 3000), new THREE.MeshLambertMaterial({ color: theme.mid })));
       floor.rotation.x = -Math.PI / 2; floor.position.y = -1;
       scene.add(floor);
+      for (const w of map.waters) {
+        const water = owned(new THREE.Mesh(new THREE.CircleGeometry(w.r, 64), new THREE.MeshLambertMaterial({ color: 0x2f9ad6, transparent: true, opacity: 0.86 })));
+        water.rotation.x = -Math.PI / 2; water.position.set(w.x, w.y, w.z);
+        scene.add(water);
+      }
+    }
+    // Walk-in architecture: one merged mesh.
+    if (map.blocks.length) {
+      const arch = owned(new THREE.Mesh(blockGeometry(map.blocks), new THREE.MeshLambertMaterial({ vertexColors: true, map: detail })));
+      arch.castShadow = true; arch.receiveShadow = true;
+      scene.add(arch);
     }
     const batch = new PropBatch(this.lib);
     for (const p of map.props) batch.add(p.key, p.x, p.y - 0.05, p.z, p.yaw, p.scale);
@@ -149,7 +195,7 @@ export class ShooterRenderer {
     for (const ch of map.chests) {
       const o = this.lib.instance('gun-crate-wide');
       o.scale.setScalar(2.4);
-      o.position.set(ch.x, terrainHeight(map, ch.x, ch.z), ch.z);
+      o.position.set(ch.x, chestY(map, ch), ch.z);
       o.rotation.y = ch.yaw;
       scene.add(o);
       this.chests.push(o);
@@ -217,6 +263,14 @@ export class ShooterRenderer {
       case 'chest': this.sparks.burst(e.x, e.y + 0.8, e.z, 40, 0xffd34d, 7, 0.6, 0.8); break;
       case 'land': for (let i = 0; i < 12; i++) this.smoke.spawn(e.x, e.y + 0.2, e.z, (Math.random() - 0.5) * 6, 0.8, (Math.random() - 0.5) * 6, 0xcbb894, 1.6, 0.8, 0, 2); break;
       case 'kill': this.sparks.burst(e.x, e.y + 1, e.z, 50, 0xd9a8ff, 6, 0.6, 1.0, 2); break;
+      case 'build': this.sparks.burst(e.x, e.y + 0.4, e.z, 16, 0x8fd0ff, 3, 0.4, 0.5); break;
+      case 'edit': this.sparks.burst(e.x, e.y, e.z, 14, 0xffffff, 3, 0.3, 0.4); break;
+      case 'break':
+        this.sparks.burst(e.x, e.y, e.z, 40, MATERIAL_COLOURS[e.flag] ?? 0xc8955a, 7, 0.6, 0.9, 2);
+        for (let i = 0; i < 10; i++) this.smoke.spawn(e.x, e.y, e.z, (Math.random() - 0.5) * 5, Math.random() * 2, (Math.random() - 0.5) * 5, 0xb7ab98, 2.2, 1.1, 0, 1.4);
+        break;
+      case 'harvest': this.sparks.burst(e.x, e.y, e.z, 8, MATERIAL_COLOURS[e.value] ?? 0xc8955a, 3, 0.3, 0.5, 2); break;
+      case 'use': this.sparks.burst(e.x, e.y + 1.2, e.z, 24, e.value === 1 ? 0x62b4ff : 0x6fe07a, 2.5, 0.4, 0.8); break;
       default: break;
     }
     void state;
@@ -229,12 +283,12 @@ export class ShooterRenderer {
     const s = state.storm;
     // The wall appears once the first circle is announced.
     this.storm.visible = s.stage >= 0 || s.timer < 20;
-    this.storm.position.set(s.cx, 70, s.cz);
+    this.storm.position.set(s.cx, 80, s.cz);
     this.storm.scale.set(Math.max(0.5, s.r), 1, Math.max(0.5, s.r));
     // Balloon follows the flight path while anyone is aboard.
     const t = clamp(state.bus.t / state.bus.duration, 0, 1);
     this.balloon.visible = state.phase === 'bus' || state.players.some(p => p.mode === 'bus');
-    this.balloon.position.set(lerp(state.bus.ax, state.bus.bx, t), 86, lerp(state.bus.az, state.bus.bz, t));
+    this.balloon.position.set(lerp(state.bus.ax, state.bus.bx, t), BUS_HEIGHT - 9, lerp(state.bus.az, state.bus.bz, t));
     this.balloon.rotation.y = Math.atan2(state.bus.bx - state.bus.ax, state.bus.bz - state.bus.az);
     state.players.forEach((p, i) => {
       const v = this.fighters[i];
@@ -251,6 +305,8 @@ export class ShooterRenderer {
     if (this.lootCheck <= 0) { this.lootCheck = 0.2; this.syncLoot(state.loot); }
     for (const [, o] of this.loot) { o.rotation.y += dt * 1.2; }
     this.syncRockets(state);
+    this.syncStructures(state, dt);
+    this.updateGhost(state, state.players[selfIndex]);
     for (let i = this.tracers.length - 1; i >= 0; i--) {
       const tr = this.tracers[i];
       tr.life -= dt;
@@ -262,6 +318,40 @@ export class ShooterRenderer {
     this.view.focusShadow(focus.x, focus.y, focus.z);
     this.view.render();
     return aim;
+  }
+
+  /** Rebuilds the structure meshes when the list or its revision changed (health-only changes at most four times a second). */
+  private syncStructures(state: ShooterState, dt: number): void {
+    this.structAge += dt;
+    if (state.buildRev === this.structRev && state.builds === this.structList) return;
+    // New, removed or edited pieces show at once; health-only changes (damage, finished growing) are batched.
+    let shape = state.builds.length;
+    for (const b of state.builds) shape = (Math.imul(shape, 31) + packBuild(b)) | 0;
+    if (this.structAge < 0.25 && shape === this.structShape) return;
+    this.structRev = state.buildRev; this.structList = state.builds; this.structShape = shape; this.structAge = 0;
+    for (let m = 0; m < 3; m++) {
+      const old = this.structMeshes[m];
+      if (old) { old.removeFromParent(); old.geometry.dispose(); this.structMeshes[m] = null; }
+      const geo = structureGeometry(state.builds, m);
+      if (!geo) continue;
+      const mesh = new THREE.Mesh(geo, this.structMats[m]);
+      mesh.castShadow = true; mesh.receiveShadow = true;
+      this.view.scene.add(mesh);
+      this.structMeshes[m] = mesh;
+    }
+  }
+
+  /** Blue (placeable) or red ghost for the local survivor's build mode. */
+  private updateGhost(state: ShooterState, p: Fighter | undefined): void {
+    for (const g of this.ghosts) g.visible = false;
+    this.ghostValid = false;
+    if (!p || !p.building || p.mode !== 'ground') return;
+    const slot = planBuild(p.piece, p.x, p.y, p.z, p.yaw, p.pitch, state.builds);
+    const g = this.ghosts[slot.kind];
+    this.ghostValid = p.mats[p.mat] >= BUILD_COST && canPlace(slot, state.builds, this.ground);
+    g.material = this.ghostValid ? this.ghostOk : this.ghostBad;
+    placeGhost(g, slot.kind, slot.gx, slot.gz, slot.level, slot.dir);
+    g.visible = true;
   }
 
   private play(map: Map<string, THREE.AnimationAction>, current: string, next: string, fade = 0.15): string {
@@ -288,33 +378,41 @@ export class ShooterRenderer {
     }
     if (v.dead) { v.dead = false; v.die.stop(); v.lowerName = ''; v.upperName = ''; }
     const speed = Math.hypot(p.vx, p.vz);
-    const air = p.mode === 'sky' || p.mode === 'glide' || !p.grounded;
+    const air = p.mode === 'sky' || p.mode === 'glide' || (!p.grounded && !p.swimming);
     const lower = air ? (p.vy > 1 ? 'jump' : 'fall') : speed > 6.2 ? 'sprint' : speed > 0.6 ? 'walk' : 'idle';
     v.lowerName = this.play(v.lower, v.lowerName, lower);
     v.lower.get('walk')!.timeScale = clamp(speed / 4, 0.6, 1.6);
-    const held = p.weapons[p.current];
-    const pistol = held?.w === 'pistol';
-    const upper = !held || p.mode !== 'ground' ? (air ? 'fall' : lower === 'jump' ? 'fall' : lower) : p.sprinting ? 'sprint' : p.shootT > 0 ? (pistol ? 'holding-right-shoot' : 'holding-both-shoot') : pistol ? 'holding-right' : 'holding-both';
+    const held = heldItem(p);
+    const pick = p.current === PICKAXE_SLOT && !p.building;
+    const oneHand = held?.w === 'pistol' || pick || (!!held && isConsumable(held.w));
+    const armed = (!!held || pick) && !p.building && !p.swimming;
+    const firing = p.shootT > 0 || p.swingT > 0 || p.useT > 0;
+    const upper = !armed || p.mode !== 'ground' ? (air ? 'fall' : lower === 'jump' ? 'fall' : lower) : p.sprinting ? 'sprint' : firing ? (oneHand ? 'holding-right-shoot' : 'holding-both-shoot') : oneHand ? 'holding-right' : 'holding-both';
     v.upperName = this.play(v.upper, v.upperName, upper, 0.08);
     v.mixer.update(dt);
     v.glider.visible = p.mode === 'glide';
-    // Weapon in the right hand.
-    const key = held && p.mode === 'ground' ? WEAPONS[held.w].model : '';
+    // Item in the right hand: a blaster, a heal / shield, or the pickaxe.
+    const key = !armed || p.mode !== 'ground' ? '' : pick ? 'pickaxe' : held && isConsumable(held.w) ? (CONSUMABLES[held.w].heal ? 'plat-heart' : 'plat-jewel') : held ? WEAPONS[held.w as keyof typeof WEAPONS].model : '';
     if (key !== v.gunKey) {
       v.gun?.removeFromParent();
       v.gun = null; v.gunKey = key;
       if (key) {
         // Held at chest height in front of the right shoulder, barrel forward
         // (+Z); the holding pose raises the arms to meet it.
-        const gun = this.lib.instance(key);
-        const pistol = held?.w === 'pistol';
-        gun.scale.setScalar(pistol ? 0.3 : 0.34);
-        gun.position.set(-0.12, 0.3, pistol ? 0.19 : 0.16);
+        const gun = key === 'pickaxe' ? pickaxeMesh(this.pickHandle, this.pickHead, this.pickGeos) : this.lib.instance(key);
+        const small = held?.w === 'pistol';
+        if (key === 'pickaxe') { gun.scale.setScalar(0.42); gun.position.set(-0.12, 0.32, 0.16); }
+        else if (key.startsWith('plat-')) { gun.scale.setScalar(0.22); gun.position.set(-0.14, 0.3, 0.18); }
+        else { gun.scale.setScalar(small ? 0.3 : 0.34); gun.position.set(-0.12, 0.3, small ? 0.19 : 0.16); }
         v.model.add(gun);
         v.gun = gun;
       }
     }
-    if (v.gun) v.gun.visible = true;
+    if (v.gun) {
+      v.gun.visible = true;
+      // Pickaxe chop: tip the head forward through the swing.
+      if (v.gunKey === 'pickaxe') v.gun.rotation.x = p.swingT > 0 ? Math.sin((1 - p.swingT / 0.35) * Math.PI) * 1.4 : 0;
+    }
   }
 
   private syncLoot(items: Loot[]): void {
@@ -326,18 +424,20 @@ export class ShooterRenderer {
       alive.add(l.id);
       if (this.loot.has(l.id)) continue;
       const g = new THREE.Group();
-      let key: string, scale: number, lift = 0.5;
-      if (l.kind === 'weapon' && l.weapon) { key = WEAPONS[l.weapon].model; scale = 1.5; lift = 0.7; }
+      let key: string, scale: number, lift = 0.5, beam = 0;
+      if (l.kind === 'weapon' && l.weapon && l.weapon in WEAPONS) { key = WEAPONS[l.weapon as keyof typeof WEAPONS].model; scale = 1.5; lift = 0.7; beam = l.rarity; }
+      else if (l.kind === 'item' && isConsumable(l.weapon)) { key = CONSUMABLES[l.weapon].heal ? 'plat-heart' : 'plat-jewel'; scale = 1.7; beam = l.rarity; }
+      else if (l.kind === 'mats') { key = MAT_KEYS[l.mat ?? 0]; scale = l.mat === 2 ? 2.4 : 2.2; lift = 0.1; }
       else if (l.kind === 'ammo') { key = l.ammo === 'shells' || l.ammo === 'rockets' ? 'gun-clip-large' : 'gun-clip-small'; scale = 3.2; }
-      else if (l.kind === 'heal') { key = 'plat-heart'; scale = 2.2; }
-      else { key = 'plat-jewel'; scale = 2.2; }
+      else if (l.kind === 'heal') { key = 'plat-heart'; scale = 2.2; beam = 1; }
+      else { key = 'plat-jewel'; scale = 2.2; beam = 2; }
       const m = this.lib.instance(key);
       m.scale.setScalar(scale); m.position.y = lift;
       if (l.kind === 'weapon') m.rotation.z = Math.PI / 2.4;
       g.add(m);
-      const beam = new THREE.Mesh(this.beamGeo, this.beamMats[l.kind === 'weapon' ? l.rarity : l.kind === 'shield' ? 2 : l.kind === 'heal' ? 1 : 0]);
-      beam.position.y = 1.5;
-      g.add(beam);
+      const ray = new THREE.Mesh(this.beamGeo, this.beamMats[beam]);
+      ray.position.y = 1.5;
+      g.add(ray);
       g.position.set(l.x, l.y, l.z);
       this.view.scene.add(g);
       this.loot.set(l.id, g);
@@ -377,13 +477,15 @@ export class ShooterRenderer {
     } else if (p.mode === 'sky' || p.mode === 'glide') { back = 10; side = 0; up = 3.5; }
     else if (p.mode === 'dead' || !own) { back = 6.5; side = 0.6; up = 2.2; }
     else if (cam.aiming) { back = 2.8; side = 1.15; up = 1.95; }
+    // Building: pull back a little so the ghost piece is in view.
+    else if (p.building) { back = 6.6; side = 1.3; up = 2.6; }
     // Over the right shoulder: the survivor sits in the lower-left third and
     // the crosshair stays clear.
     else { back = 5.6; side = 1.55; up = 2.3; }
     const py = baseY + up;
     const pivotX = px + rx * side, pivotZ = pz + rz * side;
     // Pull the camera in front of walls between the pivot and the desired spot.
-    const hit = raycast(this.world, pivotX, py, pivotZ, -fx, -fy, -fz, back + 0.3, false);
+    const hit = raycast(this.world, pivotX, py, pivotZ, -fx, -fy, -fz, back + 0.3, false, state.builds);
     const dist = Math.max(0.6, Math.min(back, hit.t - 0.3));
     _v.set(pivotX - fx * dist, py - fy * dist, pivotZ - fz * dist);
     _v.y = Math.max(_v.y, terrainHeight(this.map, _v.x, _v.z) + 0.4);
@@ -397,7 +499,7 @@ export class ShooterRenderer {
           const sx = p.x, sy = p.y + h, sz = p.z;
           const dx = _v.x - sx, dy = _v.y - sy, dz = _v.z - sz, dl = Math.hypot(dx, dy, dz);
           if (dl < 0.5) continue;
-          const block = raycast(this.world, sx, sy, sz, dx / dl, dy / dl, dz / dl, dl, false);
+          const block = raycast(this.world, sx, sy, sz, dx / dl, dy / dl, dz / dl, dl, false, state.builds);
           if (block.kind !== 'none' && block.t < dl && block.t < nearest) { nearest = block.t; ox = sx; oy = sy; oz = sz; ex = dx; ey = dy; ez = dz; el = dl; }
         }
         if (nearest === Infinity) break;
@@ -414,9 +516,9 @@ export class ShooterRenderer {
     c.lookAt(this.camPos.x + fx, this.camPos.y + fy, this.camPos.z + fz);
     c.fov = approach(c.fov, cam.zoom, 14, dt);
     c.updateProjectionMatrix();
-    // Crosshair target: first prop/terrain/fighter along the view ray.
+    // Crosshair target: first prop/structure/terrain/fighter along the view ray.
     const max = 320;
-    const wall = raycast(this.world, c.position.x, c.position.y, c.position.z, fx, fy, fz, max);
+    const wall = raycast(this.world, c.position.x, c.position.y, c.position.z, fx, fy, fz, max, true, state.builds);
     let tEnd = wall.t;
     for (const q of state.players) {
       if (q.id === p.id || q.mode === 'dead' || q.mode === 'bus') continue;
@@ -439,10 +541,11 @@ export class ShooterRenderer {
 
   eye(p: Fighter): [number, number, number] { return [p.x - Math.cos(p.yaw) * 0.3, p.y + EYE, p.z + Math.sin(p.yaw) * 0.3]; }
 
-  stats() { return { ...this.view.stats(), camera: { x: this.camPos.x, y: this.camPos.y, z: this.camPos.z }, loot: this.loot.size }; }
+  stats() { return { ...this.view.stats(), camera: { x: this.camPos.x, y: this.camPos.y, z: this.camPos.z }, loot: this.loot.size, structures: this.structList?.length ?? 0 }; }
 
   dispose(): void {
     for (const tr of this.tracers) tr.line.geometry.dispose();
+    for (const m of this.structMeshes) m?.geometry.dispose();
     this.sparks.dispose(); this.smoke.dispose();
     for (const f of this.fighters) f.mixer.stopAllAction();
     this.view.dispose();

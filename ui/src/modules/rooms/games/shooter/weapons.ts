@@ -1,4 +1,9 @@
-/** Storm Royale arsenal (Kenney Blaster Kit models). Damage is per bullet/pellet. */
+/**
+ * Storm Royale arsenal (Kenney Blaster Kit models), healing/shield
+ * consumables, building materials and the harvesting pickaxe. Damage is per
+ * bullet/pellet. A hotbar slot holds either a weapon (`mag` = rounds loaded)
+ * or a consumable stack (`mag` = count).
+ */
 export type WeaponId = 'pistol' | 'smg' | 'rifle' | 'shotgun' | 'sniper' | 'rocket';
 export type AmmoKind = 'light' | 'medium' | 'shells' | 'heavy' | 'rockets';
 export type Rarity = 0 | 1 | 2 | 3 | 4;
@@ -39,6 +44,51 @@ export function applyDamage(hp: number, shield: number, amount: number): { hp: n
   const absorbed = Math.min(shield, amount);
   return { hp: Math.max(0, hp - (amount - absorbed)), shield: shield - absorbed, absorbed };
 }
+
+/** Consumables: hold fire to use; `cap` is the most this item can heal / shield up to. */
+export type ConsumableId = 'bandage' | 'medkit' | 'minishield' | 'shieldpot';
+export interface ConsumableDef { id: ConsumableId; name: string; heal: number; shield: number; cap: number; time: number; stack: number; rarity: Rarity }
+export const CONSUMABLES: Record<ConsumableId, ConsumableDef> = {
+  bandage: { id: 'bandage', name: 'Bandages', heal: 15, shield: 0, cap: 75, time: 3, stack: 15, rarity: 0 },
+  medkit: { id: 'medkit', name: 'Med Kit', heal: 100, shield: 0, cap: 100, time: 7, stack: 3, rarity: 1 },
+  minishield: { id: 'minishield', name: 'Mini Shield', heal: 0, shield: 25, cap: 50, time: 2, stack: 6, rarity: 1 },
+  shieldpot: { id: 'shieldpot', name: 'Shield Potion', heal: 0, shield: 50, cap: 100, time: 5, stack: 3, rarity: 2 },
+};
+export const CONSUMABLE_IDS = Object.keys(CONSUMABLES) as ConsumableId[];
+export type ItemId = WeaponId | ConsumableId;
+/** Wire order: weapons first so the original weapon indices are unchanged. */
+export const ITEM_IDS: ItemId[] = [...WEAPON_IDS, ...CONSUMABLE_IDS];
+export const isWeapon = (id: ItemId | null | undefined): id is WeaponId => !!id && id in WEAPONS;
+export const isConsumable = (id: ItemId | null | undefined): id is ConsumableId => !!id && id in CONSUMABLES;
+export const itemName = (id: ItemId): string => (isWeapon(id) ? WEAPONS[id].name : CONSUMABLES[id].name);
+/** Would using `id` do anything for a fighter with this hp / shield? */
+export function canUse(id: ConsumableId, hp: number, shield: number): boolean {
+  const c = CONSUMABLES[id];
+  return c.heal > 0 ? hp < c.cap : shield < c.cap;
+}
+/** Floor/chest consumable table (bandages and minis are common, pots rare). */
+export function rollConsumable(r: number): ConsumableId {
+  const table: [ConsumableId, number][] = [['bandage', 34], ['minishield', 32], ['shieldpot', 18], ['medkit', 16]];
+  let pick = r * table.reduce((a, [, w]) => a + w, 0);
+  for (const [id, w] of table) { pick -= w; if (pick <= 0) return id; }
+  return 'bandage';
+}
+export const CONSUMABLE_PACK: Record<ConsumableId, number> = { bandage: 5, medkit: 1, minishield: 3, shieldpot: 1 };
+
+/** Building materials: harvested with the pickaxe, spent on walls / floors / ramps. */
+export type Material = 0 | 1 | 2;
+export const MATERIAL_NAMES = ['Wood', 'Brick', 'Metal'] as const;
+export const MATERIAL_COLOURS = [0xc8955a, 0xb5574a, 0x9aa6b2] as const;
+/** Structure hp grows from `start` to `hp` over `time` seconds after placement. */
+export const MATERIALS: { hp: number; start: number; time: number }[] = [
+  { hp: 150, start: 0.35, time: 2.5 },
+  { hp: 300, start: 0.3, time: 4 },
+  { hp: 450, start: 0.25, time: 6 },
+];
+export const MAX_MATS = 500;
+export const BUILD_COST = 10;
+/** The pickaxe: always in hand when no hotbar slot is selected. */
+export const PICKAXE = { damage: 20, structure: 60, rate: 2.2, range: 2.6, harvest: 9 };
 
 /** Weighted rarity roll; chests roll `bonus` tiers higher on average. */
 export function rollRarity(r: number, bonus = 0): Rarity {

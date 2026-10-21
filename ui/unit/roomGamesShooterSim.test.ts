@@ -1,10 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mapFor, terrainHeight, type ShooterMap } from '../src/modules/rooms/games/shooter/map.ts';
+import { mapFor, terrainHeight, waterLevel, type ShooterMap } from '../src/modules/rooms/games/shooter/map.ts';
 import { groundAt, worldFor } from '../src/modules/rooms/games/shooter/collide.ts';
 import { AMMO_MAX, damageAt, WEAPONS, type WeaponId } from '../src/modules/rooms/games/shooter/weapons.ts';
 import {
-  aliveCount, BUS_HEIGHT, createMatch, EYE, idleShooterInput, MAX_FIGHTERS, sanitizeInput, shooterResults, STEP, stepMatch, STORM, tickMatch,
+  aliveCount, BUS_HEIGHT, createMatch, EYE, idleShooterInput, MAX_FIGHTERS, PICKAXE_KEY, sanitizeInput, SWIM_DEPTH, shooterResults, SLOTS, STEP, stepMatch, STORM, tickMatch,
   type Difficulty, type Fighter, type Loot, type ShooterEventType, type ShooterInput, type ShooterState,
 } from '../src/modules/rooms/games/shooter/sim.ts';
 import { weaponFor } from '../src/modules/rooms/games/shooter/bots.ts';
@@ -51,7 +51,7 @@ function groundMatch(n: number, bots = 0): ShooterState {
   return s;
 }
 const loot = (s: ShooterState, l: Partial<Loot> & Pick<Loot, 'kind'>): Loot => {
-  const item: Loot = { id: s.nextId++, weapon: null, rarity: 0, ammo: null, amount: 0, x: 0, y: 0, z: 0, ...l };
+  const item: Loot = { id: s.nextId++, weapon: null, rarity: 0, ammo: null, mat: null, amount: 0, x: 0, y: 0, z: 0, ...l };
   s.loot.push(item);
   return item;
 };
@@ -99,7 +99,10 @@ test('humans jump on input; sky -> glide -> ground; the bus phase ends once ever
   }
   assert.deepEqual(modes, ['sky', 'glide', 'ground']);
   assert.ok(a.grounded);
-  assert.ok(Math.abs(a.y - groundAt(worldFor(mapFor('isle')), a.x, a.z, a.y)) < 1e-6);
+  // Lands on the ground, or floats at the surface when the drop ends in water.
+  const floor = groundAt(worldFor(mapFor('isle')), a.x, a.z, a.y), surface = waterLevel(mapFor('isle'), a.x, a.z) - SWIM_DEPTH;
+  assert.ok(Math.abs(a.y - Math.max(floor, surface)) < 1e-6);
+  assert.equal(a.swimming, surface > floor);
   assert.ok(events(s, 'glide').length >= 1 && events(s, 'land').length >= 1);
   // The idle human rides the bus along its line until the auto-jump near the end.
   assert.equal(b.mode, 'bus');
@@ -154,8 +157,8 @@ test('weapon pickup fills a free slot, never a full inventory or a worse duplica
   const p = s.players[0];
   loot(s, { kind: 'weapon', weapon: 'smg', rarity: 1, amount: 30, x: p.x, y: p.y, z: p.z });
   tickMatch(s, []);
-  assert.deepEqual(p.weapons, [{ w: 'smg', rarity: 1, mag: 30 }, null, null]);
-  assert.equal(p.current, 0);
+  assert.deepEqual(p.weapons, [{ w: 'smg', rarity: 1, mag: 30 }, null, null, null, null]);
+  assert.equal(p.current, 0, 'drawn from the pickaxe');
   // Same weapon, same or lower rarity: skipped.
   const dup = loot(s, { kind: 'weapon', weapon: 'smg', rarity: 0, amount: 30, x: p.x, y: p.y, z: p.z });
   tickMatch(s, []);
@@ -164,7 +167,11 @@ test('weapon pickup fills a free slot, never a full inventory or a worse duplica
   loot(s, { kind: 'weapon', weapon: 'rifle', rarity: 2, amount: 30, x: p.x, y: p.y, z: p.z });
   loot(s, { kind: 'weapon', weapon: 'sniper', rarity: 3, amount: 4, x: p.x, y: p.y, z: p.z });
   tickMatch(s, []);
-  assert.deepEqual(p.weapons.map(w => w?.w), ['smg', 'sniper', 'rifle']);
+  assert.deepEqual(p.weapons.map(w => w?.w), ['smg', 'sniper', 'rifle', undefined, undefined]);
+  assert.equal(p.current, 0, 'already holding a gun: no auto-switch');
+  loot(s, { kind: 'weapon', weapon: 'pistol', rarity: 0, amount: 16, x: p.x, y: p.y, z: p.z });
+  loot(s, { kind: 'weapon', weapon: 'rocket', rarity: 0, amount: 1, x: p.x, y: p.y, z: p.z });
+  tickMatch(s, []);
   const extra = loot(s, { kind: 'weapon', weapon: 'shotgun', rarity: 4, amount: 5, x: p.x, y: p.y, z: p.z });
   tickMatch(s, []);
   assert.deepEqual(s.loot, [extra], 'full inventory: auto-pickup skips');
@@ -173,9 +180,11 @@ test('weapon pickup fills a free slot, never a full inventory or a worse duplica
   assert.equal(p.weapons[p.current]?.w, 'shotgun');
   assert.equal(s.loot.length, 1);
   assert.equal(s.loot[0].weapon, 'smg');
-  // Slot selection (1-based) switches weapons.
+  // Slot selection (1-based) switches weapons; the key after the hotbar draws the pickaxe.
   tickMatch(s, [press({ slot: 3 })]);
   assert.equal(p.current, 2);
+  tickMatch(s, [press({ slot: PICKAXE_KEY })]);
+  assert.equal(p.current, SLOTS);
 });
 
 test('firing consumes the magazine; semi-auto needs a fresh press; reload refills from reserve', () => {
@@ -183,6 +192,7 @@ test('firing consumes the magazine; semi-auto needs a fresh press; reload refill
   const p = s.players[0];
   p.yaw = 0;
   p.weapons[0] = { w: 'rifle', rarity: 0, mag: 30 };
+  p.current = 0;
   p.ammo.medium = 60;
   // Fire straight up (nothing to hit) for one second.
   const seq = s.eventSeq;
@@ -221,6 +231,7 @@ test('empty magazine: fire starts a reload from reserve; with no reserve nothing
   const s = groundMatch(2);
   const p = s.players[0];
   p.weapons[0] = { w: 'shotgun', rarity: 0, mag: 0 };
+  p.current = 0;
   p.ammo.shells = 3;
   tickMatch(s, [press({ fire: true, pitch: 1.4 })]);
   assert.ok(p.reload > 0);
@@ -240,6 +251,7 @@ test('hitscan damage goes to the shield first', () => {
   put(s, b, a.x, a.z + 10);
   b.shield = 50;
   a.weapons[0] = { w: 'rifle', rarity: 0, mag: 30 };
+  a.current = 0;
   const aim = aimAt(a, b);
   tickMatch(s, [press({ ...aim, aim: true, fire: true })]);
   const expected = damageAt(WEAPONS.rifle, 0, 10, false);
@@ -264,6 +276,7 @@ test('rocket splash: direct hit hurts most, falls off with distance, shields abs
   put(s, d, b.x + 10, b.z);
   c.shield = 100;
   a.weapons[0] = { w: 'rocket', rarity: 0, mag: 1 };
+  a.current = 0;
   tickMatch(s, [press({ ...aimAt(a, b, 1), aim: true, fire: true })]);
   assert.equal(s.rockets.length, 1);
   assert.equal(a.weapons[0]!.mag, 0);
@@ -282,22 +295,27 @@ test('elimination drops the inventory, credits the killer, and the last fighter 
   const [a, b, c] = s.players;
   put(s, b, a.x, a.z + 10);
   b.hp = 10;
-  b.weapons = [{ w: 'smg', rarity: 1, mag: 20 }, null, null];
+  b.weapons = [{ w: 'smg', rarity: 1, mag: 20 }, { w: 'medkit', rarity: 1, mag: 2 }, null, null, null];
   b.ammo.light = 50;
+  b.mats = [40, 0, 12];
   a.weapons[0] = { w: 'rifle', rarity: 0, mag: 30 };
+  a.current = 0;
   tickMatch(s, [press({ ...aimAt(a, b), aim: true, fire: true })]);
   assert.equal(b.mode, 'dead');
   assert.equal(b.place, 3);
   assert.equal(b.killedBy, a.id);
   assert.equal(a.kills, 1);
   assert.equal(aliveCount(s), 2);
-  assert.deepEqual(b.weapons, [null, null, null]);
+  assert.deepEqual(b.weapons, [null, null, null, null, null]);
   assert.equal(b.ammo.light, 0);
+  assert.deepEqual(b.mats, [0, 0, 0]);
   const kill = events(s, 'kill').at(-1)!;
   assert.equal(kill.target, b.id);
   const dropped = s.loot.filter(l => Math.hypot(l.x - b.x, l.z - b.z) < 2);
   assert.ok(dropped.some(l => l.kind === 'weapon' && l.weapon === 'smg' && l.rarity === 1 && l.amount === 20));
   assert.ok(dropped.some(l => l.kind === 'ammo' && l.ammo === 'light' && l.amount === 50));
+  assert.ok(dropped.some(l => l.kind === 'item' && l.weapon === 'medkit' && l.amount === 2));
+  assert.ok(dropped.some(l => l.kind === 'mats' && l.mat === 0 && l.amount === 40) && dropped.some(l => l.kind === 'mats' && l.mat === 2 && l.amount === 12));
   // The dead don't take part any more.
   const frozen = [b.x, b.z, b.aliveTime];
   run(s, 0.5, []);
@@ -327,9 +345,10 @@ test('elimination of a shielded victim also drops a heal', () => {
   const [a, b] = s.players;
   put(s, b, a.x, a.z + 10);
   b.hp = 5; b.shield = 1;
-  b.weapons = [{ w: 'smg', rarity: 1, mag: 20 }, null, null];
+  b.weapons = [{ w: 'smg', rarity: 1, mag: 20 }, null, null, null, null];
   b.ammo.light = 50;
   a.weapons[0] = { w: 'sniper', rarity: 4, mag: 4 };
+  a.current = 0;
   tickMatch(s, [press({ ...aimAt(a, b), aim: true, fire: true })]);
   assert.equal(b.mode, 'dead');
   assert.ok(s.loot.some(l => l.kind === 'heal' && Math.hypot(l.x - b.x, l.z - b.z) < 2));
@@ -409,8 +428,9 @@ test('sanitizeInput clamps and coerces bad input', () => {
   assert.equal(c.pitch, 1.45);
   assert.deepEqual([c.fire, c.aim, c.jump, c.sprint, c.reload, c.interact], [false, false, false, false, false, false]);
   assert.equal(c.slot, 0);
-  const n = sanitizeInput({ mx: NaN, mz: Infinity, yaw: 1e12, pitch: -Infinity, slot: 4 } as unknown as ShooterInput);
-  assert.deepEqual([n.mx, n.mz, n.pitch, n.slot], [0, 0, 0, 0]);
+  const n = sanitizeInput({ mx: NaN, mz: Infinity, yaw: 1e12, pitch: -Infinity, slot: PICKAXE_KEY + 1, piece: 3, mat: -1, build: 'yes', edit: 1 } as unknown as ShooterInput);
+  assert.deepEqual([n.mx, n.mz, n.pitch, n.slot, n.piece, n.mat, n.build, n.edit], [0, 0, 0, 0, 0, 0, false, false]);
+  assert.equal(sanitizeInput(press({ slot: PICKAXE_KEY, piece: 2, mat: 2, build: true })).slot, PICKAXE_KEY);
   assert.ok(n.yaw > -Math.PI && n.yaw <= Math.PI);
   assert.equal(sanitizeInput(press({ slot: -1 })).slot, 0);
 });
@@ -466,7 +486,10 @@ for (const map of ['isle', 'mesa'] as ShooterMapId[]) {
       assert.deepEqual(s.players.map(p => p.place).sort((a, b) => a - b), [...Array(16).keys()].map(i => i + 1), `${label} places`);
       const kills = s.players.reduce((a, p) => a + p.kills, 0);
       assert.ok(kills <= 15 && kills > 0, `${label} kills ${kills}`);
-      for (const type of ['jump', 'land', 'pickup', 'shot', 'hit', 'kill', 'storm', 'win'] as ShooterEventType[]) assert.ok(seen.has(type), `${label} saw ${type}`);
+      // Bots loot, fight, heal, harvest with the pickaxe and build when shot.
+      for (const type of ['jump', 'land', 'pickup', 'shot', 'hit', 'kill', 'storm', 'win', 'use', 'swing', 'harvest', 'build'] as ShooterEventType[]) assert.ok(seen.has(type), `${label} saw ${type}`);
+      // Several minutes of play: the storm runs through most of its phases.
+      assert.ok(s.clock > 180, `${label} lasted ${s.clock.toFixed(0)} s`);
       const results = shooterResults(s);
       assert.deepEqual(results.map(r => r.place), [...Array(16).keys()].map(i => i + 1));
       assert.equal(results[0].id, s.winner);

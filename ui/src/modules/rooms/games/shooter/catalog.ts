@@ -1,8 +1,8 @@
 /** Storm Royale menu data: islands and survivors (Kenney Mini Characters, CC0). */
 export type ShooterMapId = 'isle' | 'mesa';
 export const SHOOTER_MAPS: { id: ShooterMapId; name: string; blurb: string }[] = [
-  { id: 'isle', name: 'Palm Isle', blurb: 'Green island with a seaside town, farm, forest hills and a busy container port.' },
-  { id: 'mesa', name: 'Red Mesa', blurb: 'Desert plateaus, a dusty frontier town, an oil yard and long canyon sightlines.' },
+  { id: 'isle', name: 'Palm Isle', blurb: 'Eight landmarks: Harbor Town, the Rustworks factory, Whispering Woods, Loot Lake and its river, a hilltop lookout, farm and port.' },
+  { id: 'mesa', name: 'Red Mesa', blurb: 'Desert plateaus: Dust Town, the Oil Works, an oasis lake, Cactus Grove, Mesa Top and long canyon sightlines.' },
 ];
 export type FighterId = 'male-a' | 'male-b' | 'male-c' | 'male-d' | 'male-e' | 'male-f' | 'female-a' | 'female-b' | 'female-c' | 'female-d' | 'female-e' | 'female-f';
 export const FIGHTERS: { id: FighterId; name: string }[] = [
