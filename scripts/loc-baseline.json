@@ -4,15 +4,12 @@
   "files": {
     "crates/otto-dbviewer/src/drivers/mongodb.rs": 4975,
     "crates/otto-dbviewer/src/service.rs": 4104,
-    "crates/otto-git/src/http.rs": 3222,
     "crates/otto-git/src/local.rs": 5783,
     "crates/otto-server/src/modules.rs": 7703,
     "crates/otto-server/src/routes/api_client.rs": 4444,
-    "crates/otto-server/src/routes/browser.rs": 1941,
     "crates/otto-server/src/vault_docs_agent.rs": 4093,
     "crates/otto-server/src/workflow_engine.rs": 8725,
     "crates/otto-sessions/src/manager.rs": 6900,
-    "crates/otto-sessions/src/ws.rs": 3755,
     "crates/ottod/src/mcp_tools.rs": 7394
   },
   "totals": {
