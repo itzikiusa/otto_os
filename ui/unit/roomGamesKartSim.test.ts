@@ -2,11 +2,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { clamp, Rng, wrapAngle } from '../src/modules/rooms/games/common/math.ts';
 import {
-  advance, circ, CRUSHER_HALF, F_RAILS, F_UNDER, inLaunchZone, nearest, newNear, obstacleAt, pointAt, progressOf, ROLLER_RADIUS, RUN_UP, sampleAt, TRACK_IDS, trackFor, type TrackId,
+  advance, circ, CRUSHER_HALF, drawLift, F_RAILS, F_UNDER, inLaunchZone, nearest, newNear, obstacleAt, pointAt, progressOf, ROLLER_RADIUS, RUN_UP, sampleAt, TRACK_IDS, trackFor, type TrackId,
 } from '../src/modules/rooms/games/kart/tracks.ts';
 import {
-  COUNTDOWN_SECONDS, createRace, DRIFT_LEVELS, idleInput, INTRO_SECONDS, LAPS, MAX_RACERS, pickRoute, rank, sanitize, spinOut, standings, STEP, stepRace, tick, TURBO_SECONDS,
-  type Difficulty, type KartEventType, type KartInput, type KartSeat, type KartState, type Racer,
+  COIN_LOSS, COIN_RESPAWN, COUNTDOWN_SECONDS, createRace, DRIFT_LEVELS, idleInput, INTRO_SECONDS, itemBoxes, LAPS, MAX_COINS, MAX_RACERS, pickRoute, rank, sanitize, spinOut, standings, STEP, stepRace, tick,
+  TURBO_SECONDS, type Difficulty, type KartEventType, type KartInput, type KartSeat, type KartState, type Racer,
 } from '../src/modules/rooms/games/kart/sim.ts';
 import { cpuInput } from '../src/modules/rooms/games/kart/cpu.ts';
 import { kartSeats } from '../src/modules/rooms/games/setup.ts';
@@ -71,8 +71,10 @@ test('createRace: humans start mid-grid with CPU rivals ahead and behind', () =>
     assert.ok(Math.abs(near.lateral) < track.halfWidth);
     for (const b of s.racers) if (a !== b) assert.ok(Math.hypot(a.x - b.x, a.z - b.z) > 2.3, `${a.id}/${b.id} overlap`);
   }
-  // Item boxes: five per row.
-  assert.equal(s.boxes.length, track.def.itemRows.length * 5);
+  // Item boxes: five per row on the main road, plus the rows on its branches; every coin in place.
+  assert.equal(s.boxes.length, itemBoxes(track).length);
+  assert.ok(s.boxes.length > track.def.itemRows.length * 5);
+  assert.ok(s.coins.length > 0 && s.coins.every(c => c.timer === 0) && s.racers.every(r => r.coins === 0));
   // More than MAX_RACERS seats are cut.
   assert.equal(createRace('meadow', [...seats, ...seats], 'easy', 1).racers.length, MAX_RACERS);
 });
@@ -731,7 +733,8 @@ test('CPU routes: per-difficulty odds, re-rolled each lap, and CPUs really take 
     for (const r of s.racers) { if (r.seg === 1) onBranch++; routes.add(r.cpuRoute); }
   }
   assert.ok(onBranch > 100, `CPU ticks on the boardwalk: ${onBranch}`);
-  assert.deepEqual([...routes].sort(), [0, 1]);
+  // Two branches: each bit gets rolled on (and off) across the field and the laps.
+  assert.ok(routes.has(0) && [...routes].some(r => r & 1) && [...routes].some(r => r & 2), `routes ${[...routes]}`);
 });
 
 test('races on branching tracks are deterministic for a seed', () => {
@@ -743,7 +746,7 @@ test('races on branching tracks are deterministic for a seed', () => {
 });
 
 test('progress never jumps: travel tracks lap distance across every fork, merge, jump and dive', () => {
-  for (const id of ['lagoon', 'volcano', 'skyway'] as TrackId[]) {
+  for (const id of TRACK_IDS) {
     const s = createRace(id, kartSeats([], true), 'normal', 13);
     const t = trackFor(id);
     const prev = s.racers.map(r => r.travel), seg = s.racers.map(r => r.seg);
@@ -753,10 +756,10 @@ test('progress never jumps: travel tracks lap distance across every fork, merge,
       s.racers.forEach((r, k) => {
         if (r.respawn > 0) { prev[k] = r.travel; seg[k] = r.seg; return; }
         const d = r.travel - prev[k];
-        // < 1 m per tick at top speed; switching between a branch and the main loop may add a few metres
-        // (the two centre lines differ slightly in length through a fork zone).
+        // < 1 m per tick at top speed (a little more cutting a corner on the grass); switching between a
+        // branch and the main loop may add a few metres (the centre lines part ways through a fork zone).
         if (r.seg !== seg[k]) switches++;
-        assert.ok(d < (r.seg !== seg[k] ? 4.5 : 1.6), `${id} racer ${k}: +${d.toFixed(2)} m in one tick (seg ${seg[k]} -> ${r.seg})`);
+        assert.ok(d < (r.seg !== seg[k] ? 10 : 2), `${id} racer ${k}: +${d.toFixed(2)} m in one tick (seg ${seg[k]} -> ${r.seg})`);
         seg[k] = r.seg;
         // travel mirrors lap progress
         assert.ok(Math.abs(circ(r.travel - r.lastS, t.length)) < 1e-6 || r.respawn > 0, `${id} racer ${k}: travel ${r.travel} vs lastS ${r.lastS}`);
@@ -765,4 +768,151 @@ test('progress never jumps: travel tracks lap distance across every fork, merge,
     }
     assert.ok(switches > 0, `${id}: some CPU took the branch`);
   }
+});
+
+// ── Coins, drawbridges, half-pipes, boost-only shortcuts ─────────────────────
+
+/** Autopilot holding lateral offset `lane` (metres) along the racer's current path. */
+function lanePilot(state: KartState, r: Racer, lane: number, extra: Partial<KartInput> = {}): KartInput {
+  const track = trackFor(state.track), path = track.paths[r.seg];
+  const p = pointAt(path, r.segS + 8 + Math.max(0, r.speed) * 0.3, lane);
+  const angle = wrapAngle(Math.atan2(p[0] - r.x, p[2] - r.z) - r.yaw);
+  return { ...idleInput(), throttle: 1, steer: clamp(-angle * 2.4, -1, 1), ...extra };
+}
+
+test('coins: driving through a line fills the purse (capped at ten), they reappear later, and top speed rises with them', () => {
+  const s = humansRace(1, 'meadow');
+  const r = s.racers[0];
+  const c0 = s.coins[0];
+  // Drop the racer just behind the first coin line, on its lane.
+  const t = trackFor('meadow');
+  const n = nearest(t, c0.x, c0.z, -1, newNear());
+  put(s, r, n.s - 12, n.lateral, 20);
+  run(s, 2, () => [lanePilot(s, r, n.lateral)]);
+  assert.ok(r.coins >= 4, `collected ${r.coins}`);
+  const taken = s.coins.filter(c => c.timer > 0).length;
+  assert.equal(taken, r.coins);
+  // They come back after COIN_RESPAWN seconds.
+  run(s, COIN_RESPAWN + 0.1, [idleInput()]);
+  assert.ok(s.coins.every(c => c.timer === 0));
+  // The purse never passes ten.
+  r.coins = MAX_COINS - 1;
+  put(s, r, n.s - 12, n.lateral, 20);
+  run(s, 2, () => [lanePilot(s, r, n.lateral)]);
+  assert.equal(r.coins, MAX_COINS);
+  // Ten coins are faster than none on the same straight.
+  const top = (coins: number) => {
+    const x = humansRace(1, 'meadow');
+    put(x, x.racers[0], 20, 0, 0);
+    x.racers[0].coins = coins;
+    for (const c of x.coins) c.timer = 999; // nothing to pick up on the way
+    run(x, 4, () => [pilot(x, x.racers[0], 0)]);
+    return x.racers[0].speed;
+  };
+  assert.ok(top(MAX_COINS) > top(0) * 1.04, `${top(MAX_COINS).toFixed(2)} vs ${top(0).toFixed(2)}`);
+});
+
+test('coins: a spin-out or a rescue costs some of the purse', () => {
+  const s = humansRace(1, 'meadow');
+  const r = s.racers[0];
+  r.coins = 7;
+  assert.ok(spinOut(s, r, 1));
+  assert.equal(r.coins, 7 - COIN_LOSS);
+  r.coins = 2;
+  r.spin = 0;
+  spinOut(s, r, 1);
+  assert.equal(r.coins, 0, 'never below zero');
+  // A star blocks the hit and keeps the coins.
+  r.coins = 5; r.spin = 0; r.star = 3;
+  assert.equal(spinOut(s, r, 1), false);
+  assert.equal(r.coins, 5);
+  // Rescued after driving off the grass edge.
+  r.star = 0; r.coins = 6;
+  put(s, r, 300, trackFor('meadow').halfWidth + 30, 0);
+  run(s, 2.5, [idleInput()]);
+  assert.ok(events(s, 'respawn').length > 0);
+  assert.equal(r.coins, 6 - COIN_LOSS);
+});
+
+test('drawbridge: raised, it throws a racer at speed over the opening; lowered, it is a plain deck', () => {
+  const t = trackFor('meadow'), d = t.def.drawbridges![0], a = d.from * t.length, b = d.to * t.length;
+  for (const raised of [true, false]) {
+    const s = humansRace(1, 'meadow');
+    const r = s.racers[0];
+    // Arrives about a second and a half later: while the leaves are up (or long before they rise).
+    s.raceTime = raised ? d.period * 0.55 : 0;
+    put(s, r, a - 40, 0, 28);
+    const run1 = drive(s, r, 0, 6, x => x.grounded && x.lastS > b + 10);
+    assert.ok(r.lastS > b + 5, `raised=${raised}: crossed`);
+    assert.equal(run1.events('splash').length + run1.events('respawn').length, 0, `raised=${raised}: dry`);
+    if (raised) {
+      assert.ok(drawLift(d, s.raceTime - run1.time + 1.5) > 0.3);
+      assert.ok(run1.maxAir > 0.4 && run1.events('land').length > 0, `airtime ${run1.maxAir.toFixed(2)}`);
+    } else assert.ok(run1.maxAir < 0.2, `flat: ${run1.maxAir.toFixed(2)}`);
+  }
+  // Stopped in the opening while the leaves are up: into the lake, rescued before the run-up.
+  const s = humansRace(1, 'meadow');
+  const r = s.racers[0];
+  put(s, r, (a + b) / 2, 0, 0);
+  r.safeS = a + 2;
+  s.raceTime = d.period * 0.7;
+  let n = 0;
+  while (r.respawn <= 0 && n++ < 300) tick(s, [idleInput()]);
+  assert.ok(r.respawn > 0 && events(s, 'splash').some(e => e.value === 0), 'fell in');
+  run(s, 1.6, [idleInput()]);
+  assert.ok(r.grounded && r.respawn <= 0, 'back on the road');
+  assert.ok(!inLaunchZone(t, r.segS - 0.5) && r.segS < a - RUN_UP + 1, `rescued at ${r.segS.toFixed(1)} (bridge at ${a.toFixed(1)})`);
+});
+
+test('half-pipe: riding high on the wall off the lip is a trick jump (boost on landing); the floor is not', () => {
+  const t = trackFor('downtown'), [, to] = t.def.halfpipes![0], b = to * t.length, hw = t.halfWidth;
+  for (const lane of [hw * 0.8, 0]) {
+    const s = humansRace(1, 'downtown');
+    const r = s.racers[0];
+    put(s, r, b - 30, lane, 24);
+    let launched = false, boosted = false;
+    for (let i = 0; i < 60 * 4; i++) {
+      const trick = !r.grounded && r.trickReady && r.air > 0.15;
+      tick(s, [lanePilot(s, r, lane, { drift: trick && i % 2 === 0 })]);
+      launched ||= !r.grounded && r.vy > 3;
+      if (launched && r.grounded && r.boost > 0) boosted = true;
+    }
+    if (lane) {
+      assert.ok(launched, 'off the lip');
+      assert.ok(events(s, 'trick').length > 0 && boosted, 'trick boost on landing');
+    } else assert.ok(!launched && events(s, 'trick').length === 0, 'the flat floor does not launch');
+  }
+});
+
+test('boost-only shortcut: CPUs take it only holding a mushroom, fire it in the mud; without one the mud is crawling', () => {
+  const t = trackFor('downtown'), b = t.paths[1];
+  assert.ok(b.boost && b.shortcut);
+  for (const item of [null, 'mushroom'] as const) {
+    const s = createRace('downtown', [{ racer: 'kai', human: false, slot: -1, name: 'CPU' }], 'hard', 3);
+    toRace(s);
+    const r = s.racers[0];
+    put(s, r, b.from - 120, 0, 25);
+    r.cpuRoute = 1; r.item = item; r.itemCount = item ? 1 : 0; r.cpuItemDelay = 0;
+    for (const box of s.boxes) box.timer = 999; // no item boxes on the way: only what it holds counts
+    let onBranch = 0;
+    const from = s.eventSeq;
+    for (let i = 0; i < 60 * 30 && !(r.seg === 0 && r.lastS > b.to + 20); i++) { tick(s, []); if (r.seg === 1 && r.segS > 50) onBranch++; }
+    assert.ok(r.lastS > b.to + 20, `item=${item}: got past the merge`);
+    if (item) {
+      assert.ok(onBranch > 30, 'took the market cut');
+      assert.ok(events(s, 'boost', from).some(e => e.value === 1), 'used the mushroom');
+      assert.equal(r.item, null);
+    } else {
+      assert.equal(onBranch, 0, 'stayed on the boulevard');
+      assert.equal(r.cpuRoute & 1, 0, 'dropped the cut from its route');
+    }
+  }
+  // A human crawls through the deep mud without a boost (well under the grass speed).
+  const s = humansRace(1, 'downtown');
+  const r = s.racers[0];
+  const mud = b.features.offroad[0];
+  putOn(s, r, 1, (mud.from + 0.02) * b.length, 0, 25);
+  run(s, 2, [press({ throttle: 1 })]);
+  assert.equal(r.surface, 'grass');
+  assert.ok(r.speed < 13, `mud speed ${r.speed.toFixed(1)}`);
 });

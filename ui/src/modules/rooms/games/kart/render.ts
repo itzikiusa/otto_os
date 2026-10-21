@@ -1,8 +1,10 @@
 /**
  * Kart Grand Prix renderer: builds the track world (terrain, every route's road,
- * curbs, walls and rails, banking, bridges with pillars, tunnels, water or lava,
- * ramps, launch pads, dash panels, item boxes, obstacles, themed Kenney props)
- * and animates karts, drivers, gliders, items and effects from
+ * curbs, walls and rails, banking, bridges with pillars and abutments,
+ * embankments where the land falls away, tunnels, water or lava, ramps with
+ * side faces, launch pads, half-pipes, drawbridges, dash panels, item boxes,
+ * coins, obstacles, fork signage, themed Kenney props) and animates karts,
+ * drivers, gliders, items, coins, drawbridge leaves and effects from
  * simulation/snapshot state. Under the water surface the camera fogs over blue.
  */
 import * as THREE from 'three';
@@ -12,8 +14,8 @@ import { Particles } from '../common/particles';
 import { approach, clamp, fbm, hashString, lerp, makeNoise, Rng, smoothstep, wrapAngle } from '../common/math';
 import { asphaltTexture, checkerTexture, chevronTexture, curbTexture, groundDetailTexture, labelTexture, stripeTexture } from '../common/textures';
 import {
-  circ, CRUSHER_HALF, F_BRIDGE, FORK_ZONE, F_GAP, F_GLASS, F_RAILS, F_TUNNEL, LAUNCH_HEIGHT, LAUNCH_LENGTH, nearest, RAIL_SHOULDER, newNear, obstacleAt, pointAt, rampOn,
-  RAMP_HEIGHT, RAMP_LENGTH, ROLLER_RADIUS, sampleAt, TUNNEL_HEIGHT, type Near, type Path, type ThemeId, type Track,
+  CHASM, circ, coinSpots, CRUSHER_HALF, DRAW_ANGLE, drawLift, F_BRIDGE, F_DRAW, FORK_ZONE, F_GAP, F_GLASS, F_PIPE, F_RAILS, F_TUNNEL, LAUNCH_HEIGHT, LAUNCH_LENGTH, nearest, PIPE_ENTRY, PIPE_HEIGHT,
+  pipeOn, RAIL_SHOULDER, newNear, obstacleAt, pointAt, rampOn, RAMP_HEIGHT, RAMP_LENGTH, ROLLER_RADIUS, sampleAt, TUNNEL_HEIGHT, type Drawbridge, type Near, type Path, type ThemeId, type Track,
 } from './tracks';
 import { racerDef, RACERS, type RacerId } from './roster';
 import type { KartEvent, KartState } from './sim';
@@ -55,6 +57,8 @@ interface KartVisual {
   wheelSpin: number; tilt: number; bounce: number; visualYaw: number; spinAngle: number; pitch: number; wingOpen: number;
 }
 interface ObstacleVisual { mesh: THREE.Mesh; roll: number }
+/** A drawbridge's two leaves, each a group pivoting about its hinge. */
+interface DrawbridgeVisual { def: Drawbridge; leaves: THREE.Group[] }
 
 export interface RenderRacer { id: number; racer: RacerId; human: boolean; name: string }
 
@@ -68,6 +72,8 @@ export class KartRenderer {
   private bananas = new Map<number, THREE.Object3D>();
   private bombs = new Map<number, THREE.Object3D>();
   private obstacles: ObstacleVisual[] = [];
+  private drawbridges: DrawbridgeVisual[] = [];
+  private coins: THREE.InstancedMesh | null = null;
   private particles = new Particles(2400, true);
   private smoke = new Particles(700, false);
   private camPos = new THREE.Vector3();
@@ -234,6 +240,7 @@ export class KartRenderer {
       scene.add(surface);
     }
     for (const p of track.paths) this.buildRoad(p);
+    this.buildCoins();
     this.buildStart();
     this.buildObstacles();
     this.buildProps();
@@ -344,7 +351,8 @@ export class KartRenderer {
     const scene = view.scene;
     const hw = path.halfWidth;
     const flag = (i: number, f: number) => (path.flags[i] & f) !== 0;
-    const notGap = (i: number) => !flag(i, F_GAP);
+    // Plain tarmac: not over a gap, and not where a drawbridge leaf or a half-pipe carries the surface.
+    const paved = (i: number) => !flag(i, F_GAP | F_DRAW | F_PIPE);
     // Edge furniture stops where the edge runs over the other road at a fork or merge.
     const clearL = new Uint8Array(path.count), clearR = new Uint8Array(path.count);
     for (let i = 0; i < path.count; i++) { clearL[i] = this.onOtherRoad(path, i, hw + 0.8) ? 0 : 1; clearR[i] = this.onOtherRoad(path, i, -hw - 0.8) ? 0 : 1; }
@@ -353,36 +361,40 @@ export class KartRenderer {
     // Branches sit a hair above the main road where they overlap at the fork and merge.
     const lift = path.index === 0 ? 0.06 : 0.075;
     const asphalt = this.lib.own(asphaltTexture(theme.road));
-    scene.add(this.strip(path, -hw, hw, lift, 14, new THREE.MeshLambertMaterial({ map: asphalt }), notGap));
+    const asphaltMat = new THREE.MeshLambertMaterial({ map: asphalt });
+    scene.add(this.strip(path, -hw, hw, lift, 14, asphaltMat, paved));
     const ice = path.features.ice;
     if (ice.length) {
       const iceMat = new THREE.MeshLambertMaterial({ color: 0xbfe6ff, transparent: true, opacity: 0.75 });
-      scene.add(this.strip(path, -hw, hw, lift + 0.03, 10, iceMat, i => ice.some(([a, b]) => frac(i) >= a && frac(i) <= b)));
+      scene.add(this.strip(path, -hw, hw, lift + 0.03, 10, iceMat, i => paved(i) && ice.some(([a, b]) => frac(i) >= a && frac(i) <= b)));
     }
     // Off-road patches: sand, gravel or cinders laid over the tarmac.
     for (const o of path.features.offroad) {
       const [l0, l1] = o.lanes ?? [-1, 1];
       const mat = new THREE.MeshLambertMaterial({ color: theme.bed, map: this.lib.own(groundDetailTexture()) });
-      scene.add(this.strip(path, l0 * hw, l1 * hw, lift + 0.04, 6, mat, i => frac(i) >= o.from && frac(i) <= o.to && notGap(i)));
+      scene.add(this.strip(path, l0 * hw, l1 * hw, lift + 0.04, 6, mat, i => frac(i) >= o.from && frac(i) <= o.to && paved(i)));
     }
     // Edges: curbs on open grass road, barriers on walled roads, rails on bridges and in tunnels.
     const [wa, wb] = theme.wall;
     const wallMat = new THREE.MeshLambertMaterial({ map: this.lib.own(curbTexture(wa, wb)) });
     if (path.edge === 'grass') {
       const curb = new THREE.MeshLambertMaterial({ map: this.lib.own(curbTexture()) });
-      const curbed = (i: number) => notGap(i) && !flag(i, F_BRIDGE) && !flag(i, F_TUNNEL);
+      const curbed = (i: number) => paved(i) && !flag(i, F_BRIDGE) && !flag(i, F_TUNNEL);
       scene.add(this.strip(path, hw, hw + 1.1, lift + 0.02, 3, curb, i => curbed(i) && clearL[i] === 1), this.strip(path, -hw - 1.1, -hw, lift + 0.02, 3, curb, i => curbed(i) && clearR[i] === 1));
-      const railed = (i: number) => flag(i, F_RAILS) && !flag(i, F_TUNNEL) && notGap(i);
+      const railed = (i: number) => flag(i, F_RAILS) && !flag(i, F_TUNNEL) && paved(i);
       let rails = false;
       for (let i = 0; i < path.count && !rails; i++) rails = railed(i);
       if (rails) for (const side of [-1, 1]) scene.add(this.wall(path, side * (hw + 1.4), side, wallMat, i => railed(i) && clear(side)(i), 1.0));
     } else {
       // Continuous barrier walls matching the collision limit (none over gaps, open at forks).
       const h = track.def.theme === 'city' || track.def.theme === 'dusk' ? 1.0 : 1.3;
-      for (const side of [-1, 1]) scene.add(this.wall(path, side * (hw + 1.4), side, wallMat, i => notGap(i) && !flag(i, F_TUNNEL) && clear(side)(i), h));
+      for (const side of [-1, 1]) scene.add(this.wall(path, side * (hw + 1.4), side, wallMat, i => paved(i) && !flag(i, F_TUNNEL) && clear(side)(i), h));
     }
     this.buildBridges(path);
+    this.buildEmbankments(path);
     this.buildTunnels(path);
+    this.buildHalfpipes(path, asphaltMat, wallMat);
+    this.buildDrawbridges(path, asphaltMat, wallMat);
     // Dash panels.
     const chevron = new THREE.MeshBasicMaterial({ map: this.lib.own(chevronTexture()), toneMapped: false });
     for (const pad of path.features.boostPads) {
@@ -399,6 +411,7 @@ export class KartRenderer {
       const s0 = at * path.length - RAMP_LENGTH;
       scene.add(this.strip(path, -hw, hw, lift + 0.04, 2, stripes, i => { const d = path.dist[i] - s0; return d >= -2 && d <= RAMP_LENGTH + 2; }));
       this.lip(path, at, RAMP_HEIGHT, 0x333333);
+      this.rampSides(path, s0, at * path.length, 0x333333);
     }
     // Launch ramps (and glider pads): long striped ramp, chevrons, a gantry with a banner.
     const glideStripes = new THREE.MeshLambertMaterial({ map: this.lib.own(stripeTexture('#38b6ff', '#ffffff')) });
@@ -406,22 +419,15 @@ export class KartRenderer {
       const s0 = l.at * path.length - LAUNCH_LENGTH;
       scene.add(this.strip(path, -hw, hw, lift + 0.04, 3, l.glide ? glideStripes : stripes, i => { const d = path.dist[i] - s0; return d >= -2 && d <= LAUNCH_LENGTH + 1; }));
       this.lip(path, l.at, LAUNCH_HEIGHT, l.glide ? 0x1f6fb2 : 0x333333);
-      const label = this.lib.own(labelTexture(l.glide ? 'GLIDER' : 'JUMP', l.glide ? '#38b6ff' : '#ffcc00'));
-      pointAt(path, s0 - 6, 0, _pt);
-      const banner = owned(new THREE.Mesh(new THREE.PlaneGeometry(hw * 1.4, hw * 0.35), new THREE.MeshBasicMaterial({ map: label, transparent: true, side: THREE.DoubleSide })));
-      banner.position.set(_pt[0], _pt[1] + 6.5, _pt[2]);
-      banner.rotation.y = _pt[3] + Math.PI;
-      scene.add(banner);
-      for (const side of [-1, 1]) {
-        pointAt(path, s0 - 6, side * (hw + 1.2), _pt);
-        const post = owned(new THREE.Mesh(new THREE.BoxGeometry(0.5, 7.2, 0.5), new THREE.MeshLambertMaterial({ color: 0x333333 })));
-        post.position.set(_pt[0], _pt[1] + 3.6, _pt[2]);
-        scene.add(post);
-      }
+      this.rampSides(path, s0, l.at * path.length, l.glide ? 0x1f6fb2 : 0x333333);
+      this.gantry(path, s0 - 6, l.glide ? 'GLIDER' : 'JUMP', l.glide ? '#38b6ff' : '#ffcc00');
     }
+    for (const d of path.features.drawbridges) this.gantry(path, d.from * path.length - 40, 'DRAWBRIDGE', '#ff9a2e');
+    for (const [a] of path.features.halfpipes) this.gantry(path, a * path.length - 12, 'HALF-PIPE', '#9ff6ff');
     // A sign in the gore where each branch splits from the main road, facing the oncoming racers.
     if (path.index > 0) {
-      const tex = this.lib.own(labelTexture(path.shortcut ? `${path.name} · shortcut` : path.name, path.shortcut ? '#ffcc00' : '#ffffff'));
+      this.forkGantry(path);
+      const tex = this.lib.own(labelTexture(routeLabel(path), path.shortcut ? '#ffcc00' : '#ffffff'));
       let at = -1;
       for (let s = 24; s < Math.min(120, path.length / 2) && at < 0; s += 4) {
         pointAt(path, s, 0, _pt);
@@ -454,10 +460,257 @@ export class KartRenderer {
     this.view.scene.add(face);
   }
 
+  /** Solid side faces under a ramp, from below the road up to the ramp deck, between `s0` and the lip `s1`. */
+  private rampSides(path: Path, s0: number, s1: number, color: number): void {
+    const hw = path.halfWidth;
+    const mat = new THREE.MeshLambertMaterial({ color, side: THREE.DoubleSide });
+    const inRamp = (i: number) => path.dist[i] >= s0 - 2 && path.dist[i] <= s1 + 0.5;
+    for (const side of [-1, 1]) {
+      this.view.scene.add(this.skirt(path, side * (hw + 0.02), inRamp, i => 0.08 + rampOn(path, Math.min(path.dist[i], s1 - 1e-6)), () => -0.6, mat));
+    }
+  }
+
+  /**
+   * Vertical ribbon along `path` at `lateral`, from `bottom(i)` to `top(i)`
+   * (heights relative to the centre line, banking applied), where `filter` allows.
+   */
+  private skirt(path: Path, lateral: number, filter: (i: number) => boolean, top: (i: number) => number, bottom: (i: number) => number, material: THREE.Material): THREE.Mesh {
+    const pos: number[] = [], idx: number[] = [];
+    const n = path.count, last = path.closed ? n : n - 1;
+    let open = false;
+    for (let i = 0; i <= last; i++) {
+      const k = i % n;
+      if (!filter(k)) { open = false; continue; }
+      const lx = path.tz[k], lz = -path.tx[k];
+      const x = path.px[k] + lx * lateral, z = path.pz[k] + lz * lateral, y = path.py[k] - lateral * path.bank[k];
+      pos.push(x, y + bottom(k), z, x, y + top(k), z);
+      const m = pos.length / 3;
+      if (open) idx.push(m - 4, m - 3, m - 2, m - 3, m - 1, m - 2);
+      open = true;
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    geo.setIndex(idx);
+    geo.computeVertexNormals();
+    const mesh = owned(new THREE.Mesh(geo, material));
+    mesh.castShadow = true; mesh.receiveShadow = true;
+    return mesh;
+  }
+
+
+  /**
+   * Where the land beside the road falls away (the approaches to bridges and
+   * jumps), solid embankment faces run from the road edge down to the ground;
+   * gap edges and bridge ends get an abutment face across the road, so no
+   * road ever ends in a floating sliver.
+   */
+  private buildEmbankments(path: Path): void {
+    const hw = path.halfWidth;
+    const { track } = this;
+    const flag = (i: number, f: number) => (path.flags[i] & f) !== 0;
+    const rock = track.def.theme === 'canyon' || track.def.theme === 'volcano';
+    const mat = new THREE.MeshLambertMaterial({ color: rock ? this.theme.obstacle : 0x8f8f96, side: THREE.DoubleSide });
+    // Embankments: drop > 0 on solid road (not a bridge deck, a leaf or a gap).
+    const solid = (i: number) => path.drop[i] > 0.05 && !flag(i, F_BRIDGE | F_GAP | F_TUNNEL);
+    let any = false;
+    for (let i = 0; i < path.count && !any; i++) any = solid(i);
+    if (any) {
+      for (const side of [-1, 1]) {
+        const shoulder = (i: number) => (flag(i, F_RAILS) ? RAIL_SHOULDER : 0.6);
+        const depth = new Float32Array(path.count);
+        for (let i = 0; i < path.count; i++) {
+          if (!solid(i)) continue;
+          const lat = side * (hw + shoulder(i) + 2.5);
+          pointAt(path, path.dist[i], lat, _pt);
+          const land = this.terrainY(_pt[0], _pt[2]) - (path.py[i] - lat * path.bank[i]);
+          depth[i] = Math.min(-0.5, land - 0.8);
+        }
+        this.view.scene.add(this.skirt(path, side * (hw + 0.6), solid, i => 0.04 + (flag(i, F_PIPE) ? 0 : rampOn(path, path.dist[i])), i => depth[i], mat));
+      }
+    }
+    // Abutments: a face across the road wherever a deck or a gap begins or ends (stopping short of any
+    // road below), all merged into one mesh per route.
+    const n = path.count, last = path.closed ? n : n - 1;
+    const deck = (i: number) => flag(i, F_BRIDGE | F_GAP);
+    const pos: number[] = [], idx: number[] = [];
+    for (let i = 1; i < last; i++) {
+      const a = (i - 1 + n) % n, b = i % n;
+      if (deck(a) === deck(b)) continue;
+      const k = deck(a) ? b : a;
+      const roadY = path.py[k], top = roadY + 0.05 + rampOn(path, path.dist[k]);
+      const floor = this.roadBelow(path.px[k], path.pz[k], roadY) ? roadY - 3 : roadY - CHASM;
+      const w = hw + (flag(k, F_RAILS) ? RAIL_SHOULDER : 0.6), lx = path.tz[k] * w, lz = -path.tx[k] * w;
+      const m = pos.length / 3;
+      pos.push(path.px[k] - lx, floor, path.pz[k] - lz, path.px[k] + lx, floor, path.pz[k] + lz, path.px[k] - lx, top, path.pz[k] - lz, path.px[k] + lx, top, path.pz[k] + lz);
+      idx.push(m, m + 1, m + 2, m + 1, m + 3, m + 2);
+    }
+    if (!idx.length) return;
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    geo.setIndex(idx);
+    geo.computeVertexNormals();
+    const faces = owned(new THREE.Mesh(geo, mat));
+    faces.castShadow = true;
+    this.view.scene.add(faces);
+  }
+
+  /** Overhead gantry across the road at local distance `s` carrying a banner. */
+  private gantry(path: Path, s: number, text: string, color: string): void {
+    // Never inside a tunnel (the banner would cut through its roof): back up to open road first,
+    // or, in a long tunnel, hang the banner from the roof instead.
+    const roofed = (at: number) => [-3, 0, 3].some(d => (path.flags[sampleAt(path, path.closed ? circ(at + d, path.length) : at + d)] & F_TUNNEL) !== 0);
+    for (let back = 0; back <= 120 && roofed(s); back += 4) s -= 4;
+    if (path.closed) s = circ(s, path.length);
+    if (!path.closed && (s < 4 || s > path.length - 4)) return;
+    const scene = this.view.scene, hw = path.halfWidth, inside = roofed(s);
+    const label = this.lib.own(labelTexture(text, color));
+    pointAt(path, s, 0, _pt);
+    const banner = owned(new THREE.Mesh(new THREE.PlaneGeometry(hw * 1.4, hw * 0.35), new THREE.MeshBasicMaterial({ map: label, transparent: true, side: THREE.DoubleSide })));
+    banner.position.set(_pt[0], _pt[1] + (inside ? TUNNEL_HEIGHT - 0.6 - hw * 0.175 : 6.5), _pt[2]);
+    banner.rotation.y = _pt[3] + Math.PI;
+    scene.add(banner);
+    if (inside) return;
+    for (const side of [-1, 1]) {
+      pointAt(path, s, side * (hw + 1.2), _pt);
+      const post = owned(new THREE.Mesh(new THREE.BoxGeometry(0.5, 7.2, 0.5), new THREE.MeshLambertMaterial({ color: 0x333333 })));
+      post.position.set(_pt[0], _pt[1] + 3.6, _pt[2]);
+      scene.add(post);
+    }
+  }
+
+  /** On the main road ~70 m before a fork: an arrow sign naming the branch, on the side it leaves. */
+  private forkGantry(branch: Path): void {
+    const { track } = this;
+    pointAt(branch, Math.min(FORK_ZONE, branch.length / 3), 0, _pt);
+    const n = nearest(track, _pt[0], _pt[2], sampleAt(track, branch.from + FORK_ZONE), _tn, 30);
+    const left = n.lateral > 0;
+    const text = left ? `◀ ${routeLabel(branch)}` : `${routeLabel(branch)} ▶`;
+    this.gantry(track, branch.from - 70, text, branch.boost ? '#ff9a2e' : branch.shortcut ? '#ffcc00' : '#ffffff');
+  }
+
+  /** Half-pipes: a U-shaped deck (walls rising to PIPE_HEIGHT, flat coping out to the rail) with skirts, an end lip face and rails on top. */
+  private buildHalfpipes(path: Path, deckMat: THREE.Material, railMat: THREE.Material): void {
+    const hw = path.halfWidth, W = hw + RAIL_SHOULDER, M = 18;
+    const scene = this.view.scene;
+    const skirtMat = new THREE.MeshLambertMaterial({ color: 0xb8b4ae, side: THREE.DoubleSide });
+    for (const [f, t] of path.features.halfpipes) {
+      const a = f * path.length, b = t * path.length;
+      const pos: number[] = [], uv: number[] = [], idx: number[] = [];
+      const lats: number[] = [];
+      for (let k = 0; k <= M; k++) lats.push(-W + (2 * W * k) / M);
+      let rows = 0, lastI = -1;
+      for (let i = 0; i < path.count; i++) {
+        const s = path.dist[i];
+        if (s < a || s > b) continue;
+        const lx = path.tz[i], lz = -path.tx[i];
+        for (const lat of lats) {
+          const h = pipeOn(path, s, Math.max(-hw, Math.min(hw, lat)));
+          pos.push(path.px[i] + lx * lat, path.py[i] - lat * path.bank[i] + h + 0.07, path.pz[i] + lz * lat);
+          uv.push((lat + W) / (2 * W), s / 14);
+        }
+        if (rows > 0) {
+          const r1 = rows * (M + 1), r0 = r1 - (M + 1);
+          for (let k = 0; k < M; k++) idx.push(r0 + k, r1 + k, r0 + k + 1, r0 + k + 1, r1 + k, r1 + k + 1);
+        }
+        rows++; lastI = i;
+      }
+      if (rows < 2) continue;
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+      geo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+      geo.setIndex(idx);
+      geo.computeVertexNormals();
+      const pipe = owned(new THREE.Mesh(geo, deckMat));
+      pipe.receiveShadow = true;
+      scene.add(pipe);
+      const inPipe = (i: number) => path.dist[i] >= a && path.dist[i] <= b;
+      const wallTop = (i: number) => pipeOn(path, path.dist[i], hw) + 0.07;
+      for (const side of [-1, 1]) {
+        // Outer skirt down to the ground, and the rail along the coping once the walls are up.
+        scene.add(this.skirt(path, side * W, inPipe, wallTop, () => -1.2, skirtMat));
+        scene.add(this.wall(path, side * (W - 0.2), side, railMat, i => inPipe(i) && path.dist[i] >= a + PIPE_ENTRY, PIPE_HEIGHT + 1.1, PIPE_HEIGHT, 0.4));
+      }
+      // The lip: each wall ends in a vertical face at the end of the range.
+      const lx = path.tz[lastI], lz = -path.tx[lastI];
+      const lp: number[] = [], li: number[] = [];
+      for (const lat of lats) {
+        const h = pipeOn(path, path.dist[lastI], Math.max(-hw, Math.min(hw, lat)));
+        const x = path.px[lastI] + lx * lat, z = path.pz[lastI] + lz * lat, y = path.py[lastI] - lat * path.bank[lastI];
+        lp.push(x, y + 0.05, z, x, y + h + 0.07, z);
+      }
+      for (let k = 0; k < M; k++) { const p0 = k * 2; li.push(p0, p0 + 2, p0 + 1, p0 + 1, p0 + 2, p0 + 3); }
+      const lipGeo = new THREE.BufferGeometry();
+      lipGeo.setAttribute('position', new THREE.Float32BufferAttribute(lp, 3));
+      lipGeo.setIndex(li);
+      lipGeo.computeVertexNormals();
+      scene.add(owned(new THREE.Mesh(lipGeo, skirtMat)));
+    }
+  }
+
+  /**
+   * Drawbridges: the two leaves (deck, rails and a dark underside) pivot about
+   * hinges at the ends of the span, posed every frame from the race clock; a
+   * pair of bascule towers stands at each hinge.
+   */
+  private buildDrawbridges(path: Path, deckMat: THREE.Material, railMat: THREE.Material): void {
+    const scene = this.view.scene, hw = path.halfWidth, W = hw + RAIL_SHOULDER;
+    const under = new THREE.MeshLambertMaterial({ color: 0x4a4a52 });
+    const tower = new THREE.MeshLambertMaterial({ color: this.track.def.theme === 'dusk' ? 0x3e4049 : 0x8a6a4a });
+    for (const d of path.features.drawbridges) {
+      const a = d.from * path.length, b = d.to * path.length, half = (b - a) / 2;
+      const leaves: THREE.Group[] = [];
+      for (const [s, flip] of [[a, 0], [b, Math.PI]] as [number, number][]) {
+        pointAt(path, s, 0, _pt);
+        const group = new THREE.Group();
+        group.position.set(_pt[0], _pt[1] + 0.09, _pt[2]);
+        group.rotation.order = 'YXZ';
+        group.rotation.y = _pt[3] + flip;
+        // Each leaf reaches TAIL metres back past its hinge, under the road (the paved strip stops at the
+        // last whole sample before the span); raised, that tail tips down out of sight.
+        const TAIL = 2.2;
+        const deck = new THREE.Mesh(new THREE.BoxGeometry(hw * 2, 0.06, half + TAIL), deckMat);
+        deck.position.set(0, -0.03, (half - TAIL) / 2);
+        const body = new THREE.Mesh(new THREE.BoxGeometry(W * 2, 0.9, half + TAIL), under);
+        body.position.set(0, -0.52, (half - TAIL) / 2);
+        deck.receiveShadow = true; body.castShadow = true;
+        group.add(deck, body);
+        for (const side of [-1, 1]) {
+          const rail = new THREE.Mesh(new THREE.BoxGeometry(0.4, 1.0, half), railMat);
+          rail.position.set(side * (W - 0.2), 0.5, half / 2);
+          rail.castShadow = true;
+          group.add(rail);
+        }
+        scene.add(owned(group));
+        leaves.push(group);
+        // Bascule towers either side of the hinge.
+        for (const side of [-1, 1]) {
+          pointAt(path, s + (flip ? 2 : -2), side * (W + 1.6), _pt);
+          const t = owned(new THREE.Mesh(new THREE.BoxGeometry(2.4, 9, 2.4), tower));
+          t.position.set(_pt[0], _pt[1] + 3, _pt[2]);
+          t.castShadow = true;
+          scene.add(t);
+        }
+      }
+      this.drawbridges.push({ def: d, leaves });
+    }
+  }
+
+  /** Every coin of the track as one instanced mesh (gold discs standing on edge), posed each frame. */
+  private buildCoins(): void {
+    const count = coinSpots(this.track).length / 3;
+    if (!count) return;
+    const geo = new THREE.CylinderGeometry(0.75, 0.75, 0.16, 18);
+    geo.rotateX(Math.PI / 2);
+    this.coins = owned(new THREE.InstancedMesh(geo, new THREE.MeshLambertMaterial({ color: 0xffc928, emissive: 0x6a4800 }), count));
+    this.coins.castShadow = true;
+    this.coins.frustumCulled = false;
+    this.view.scene.add(this.coins);
+  }
+
   /** Deck slab under bridge stretches and pillars down to the land (never onto a road below). */
   private buildBridges(path: Path): void {
     const hw = path.halfWidth;
-    const bridge = (i: number) => (path.flags[i] & F_BRIDGE) !== 0 && !(path.flags[i] & F_GAP);
+    const bridge = (i: number) => (path.flags[i] & F_BRIDGE) !== 0 && !(path.flags[i] & (F_GAP | F_DRAW));
     let any = false;
     for (let i = 0; i < path.count && !any; i++) any = bridge(i);
     if (!any) return;
@@ -772,6 +1025,11 @@ export class KartRenderer {
       box.rotation.set(0.3, this.time * 1.5 + i, 0.2);
     });
     this.updateObstacles(state);
+    this.updateCoins(state);
+    for (const db of this.drawbridges) {
+      const th = DRAW_ANGLE * drawLift(db.def, state.raceTime);
+      for (const leaf of db.leaves) leaf.rotation.x = -th;
+    }
     this.syncPool(this.bananas, state.hazards, 'toy-item-banana', 5, (o, h) => { o.position.set(h.x, h.y + 0.05, h.z); });
     this.syncPool(this.bombs, state.shells, 'plat-bomb', 2.6, (o, s) => {
       o.position.set(s.x, s.y - 0.4 + Math.abs(Math.sin(this.time * 9)) * 0.4, s.z); o.rotation.y = s.yaw;
@@ -809,6 +1067,21 @@ export class KartRenderer {
         v.roll = _ob[3];
       }
     });
+  }
+
+  /** Coins spin in place; collected ones shrink away until they reappear. */
+  private updateCoins(state: KartState): void {
+    const mesh = this.coins;
+    if (!mesh) return;
+    const n = Math.min(mesh.count, state.coins.length);
+    for (let i = 0; i < n; i++) {
+      const c = state.coins[i];
+      const shown = c.timer <= 0 ? 1 : 0;
+      _p.set(c.x, c.y + Math.sin(this.time * 2.4 + i * 0.7) * 0.15, c.z);
+      _q.setFromAxisAngle(_up, this.time * 3 + i * 0.4);
+      mesh.setMatrixAt(i, _m.compose(_p, _q, _s.set(shown, shown, shown)));
+    }
+    mesh.instanceMatrix.needsUpdate = true;
   }
 
   private alive = new Set<number>();
@@ -918,7 +1191,7 @@ export class KartRenderer {
     _v.set(self.x - Math.sin(heading) * dist * back, self.y + 3.4 + (self.glide ? 1.6 : 0), self.z - Math.cos(heading) * dist * back);
     // Keep the camera above the terrain, and under the roof in tunnels.
     const n = nearest(path, _v.x, _v.z, self.hint, _near, 20);
-    const ground = this.track.ground(_v.x, _v.z, n);
+    const ground = this.track.ground(_v.x, _v.z, n, state.raceTime);
     if (Math.abs(n.lateral) < path.halfWidth + 6 || !(path.drop[n.index] > 0)) _v.y = Math.max(_v.y, ground + 1.5);
     if (path.flags[n.index] & F_TUNNEL && Math.abs(n.lateral) < path.halfWidth + 1) _v.y = Math.min(_v.y, n.y + TUNNEL_HEIGHT - 1.4);
     _look.set(self.x + Math.sin(heading) * 4 * back, self.y + 1.3, self.z + Math.cos(heading) * 4 * back);
@@ -942,6 +1215,11 @@ export class KartRenderer {
     this.view.dispose();
     this.lib.dispose();
   }
+}
+
+/** Sign text for a branch: its name and what kind of route it is. */
+function routeLabel(path: Path): string {
+  return path.boost ? `${path.name} · mushroom!` : path.shortcut ? `${path.name} · shortcut` : path.name;
 }
 
 /** Camera follows the direction of travel (velocity) blended with the heading. */

@@ -9,9 +9,11 @@
  *
  * Per-sample flags carry the course furniture the simulation needs in O(1):
  * bridges (the ground falls away beside the deck), gaps (no road: jump or
- * glide), tunnels, rails, ice, off-road patches, banking and stretches that run
- * under the water surface. Overpasses (a stretch passing above another) are
- * detected and railed automatically.
+ * glide), tunnels, rails, ice, off-road patches, banking, drawbridges,
+ * half-pipes and stretches that run under the water surface. Overpasses (a
+ * stretch passing above another) are detected and railed automatically.
+ * Everything that moves (rollers, crushers, drawbridge leaves) is a pure
+ * function of the race clock, so guests animate it with no extra net data.
  */
 import { clamp, fbm, hashString, makeNoise, smoothstep } from '../common/math.ts';
 
@@ -31,6 +33,12 @@ export interface Tunnel { from: number; to: number; glass?: boolean }
 export type ObstacleKind = 'roller' | 'crusher';
 /** Course hazard. Rollers sweep across the road; crushers slam down on `lane`. Motion is a pure function of race time. */
 export interface ObstacleDef { at: number; kind: ObstacleKind; period: number; phase?: number; lane?: number }
+/**
+ * Bascule drawbridge over [from, to]: two leaves hinged at the ends tilt up
+ * together on a cycle. Up, the pair is a jump (crest it at speed); a racer
+ * stopped in the opening between the tips drops into the water.
+ */
+export interface Drawbridge { from: number; to: number; period: number; phase?: number }
 export interface Features {
   /** Fractions of the path carrying a row of item boxes. */
   itemRows: number[];
@@ -49,6 +57,9 @@ export interface Features {
   /** Ranges banked from their curvature (outside edge raised). */
   banked: Range[];
   obstacles: ObstacleDef[];
+  drawbridges: Drawbridge[];
+  /** Half-pipes: both edges curve up into riding walls that end in a trick lip at the range's end. */
+  halfpipes: Range[];
 }
 export interface BranchDef extends Partial<Features> {
   name: string;
@@ -61,6 +72,8 @@ export interface BranchDef extends Partial<Features> {
   cpu: [number, number, number];
   /** Shorter but riskier (narrow, off-road or unrailed). */
   shortcut?: boolean;
+  /** Only pays off with a boost: deep off-road a mushroom (or star) blasts through. CPUs take it only holding one. */
+  boost?: boolean;
 }
 export interface TrackDef extends Partial<Features> {
   id: TrackId; name: string; blurb: string;
@@ -97,31 +110,97 @@ function arc(cx: number, cz: number, r: number, a0: number, a1: number, y0: numb
 
 export const TRACK_DEFS: Record<TrackId, TrackDef> = {
   meadow: {
-    id: 'meadow', name: 'Sunny Meadow', blurb: 'Rolling farmland, a lakeside sweep and a hilltop jump. A friendly first Grand Prix.',
-    points: [[0, 0, 0], [100, 0, 0], [150, 20, 1], [170, 60, 3], [150, 100, 5], [110, 110, 6], [80, 140, 7], [90, 185, 8], [140, 200, 7], [200, 190, 5], [250, 210, 4], [270, 260, 4], [230, 300, 3], [150, 300, 2], [60, 290, 3], [-10, 260, 5], [-40, 210, 7], [-20, 160, 8], [-50, 110, 6], [-100, 100, 4], [-130, 60, 2], [-100, 15, 0], [-50, 0, 0]],
-    width: 17, edge: 'grass', outOfBounds: 16, itemRows: [0.16, 0.47, 0.76], boostPads: [{ at: 0.31, lane: 0.35 }, { at: 0.62, lane: -0.35 }, { at: 0.9, lane: 0 }],
-    ramps: [0.555], ice: [], hills: 9, theme: 'meadow',
+    id: 'meadow', name: 'Sunny Meadow', blurb: 'Rolling farmland, a hilltop jump and a lake crossing: race the drawbridge over the water or splash through the ford beneath it.',
+    points: [
+      [0, 0, 0], [100, 0, 0], [150, 20, 1], [170, 60, 3], [150, 100, 5], [110, 110, 6], [80, 140, 7], [90, 185, 8], [140, 200, 7], [200, 190, 5], [250, 210, 4],
+      // South to the lake: the main road bows north over the drawbridge, the ford bows south under the water.
+      [285, 262, 4], [295, 325, 3], [275, 380, 2], [230, 402, 1.5], [175, 385, 1.5], [120, 374, 1.5], [65, 378, 1.5], [15, 395, 1.5], [-20, 405, 2],
+      [-60, 385, 3], [-70, 330, 5], [-55, 270, 6], [-35, 215, 7], [-20, 160, 8], [-50, 110, 6], [-100, 100, 4], [-130, 60, 2], [-100, 15, 0], [-50, 0, 0],
+    ],
+    width: 17, edge: 'grass', outOfBounds: 16, itemRows: [0.131, 0.44, 0.804], boostPads: [{ at: 0.253, lane: 0.35 }, { at: 0.668, lane: -0.35 }, { at: 0.918, lane: 0 }],
+    ramps: [0.785], ice: [], hills: 9, theme: 'meadow',
+    liquid: { level: -2.5, kind: 'water' },
+    pools: [[105, 410, 80]],
+    bridges: [{ from: 0.515, to: 0.598, rails: true }],
+    drawbridges: [{ from: 0.545, to: 0.567, period: 9 }],
+    branches: [{
+      name: 'Ford', from: 0.47, to: 0.635, cpu: [0.3, 0.45, 0.5],
+      points: [[180, 435, 0], [125, 448, -6], [70, 446, -6], [15, 424, -1]],
+      itemRows: [0.5],
+    }],
   },
   downtown: {
     id: 'downtown', name: 'Downtown Dash', blurb: 'Tight city blocks between towers, barrier-lined corners and a boulevard boost lane.',
-    points: [[0, 0, 0], [120, 0, 0], [150, 15, 0], [160, 45, 0], [160, 90, 1], [140, 115, 2], [100, 120, 3], [80, 140, 4], [80, 190, 5], [100, 215, 5], [150, 220, 4], [175, 245, 3], [170, 290, 2], [130, 305, 1], [40, 305, 0], [0, 290, 0], [-20, 260, 0], [-20, 200, 1], [-50, 180, 2], [-90, 175, 2], [-110, 150, 1], [-110, 60, 0], [-90, 20, 0], [-50, 0, 0]],
-    width: 16, edge: 'wall', outOfBounds: 0, itemRows: [0.14, 0.43, 0.7], boostPads: [{ at: 0.05, lane: -0.4 }, { at: 0.36, lane: 0.3 }, { at: 0.58, lane: 0 }, { at: 0.86, lane: 0.4 }],
-    ramps: [0.27], ice: [], hills: 0, theme: 'city',
+    points: [
+      [0, 0, 0], [120, 0, 0], [150, 15, 0], [160, 45, 0], [160, 90, 1], [140, 115, 2], [100, 120, 3], [80, 140, 4], [80, 190, 5], [100, 215, 5], [150, 220, 4], [175, 245, 3], [170, 290, 2], [130, 305, 1], [40, 305, 0], [0, 290, 0], [-20, 260, 0], [-20, 215, 1],
+      // West side: the interchange. A climbing 270° loop flies back over its own entry road.
+      [-50, 185, 1], [-90, 180, 1], [-130, 180, 1], ...arc(-150, 220, 40, -90, -360, 1, 12, 45).slice(1), [-110, 180, 12], [-112, 140, 9], [-114, 100, 4],
+      [-110, 60, 1], [-90, 20, 0], [-50, 0, 0],
+    ],
+    width: 16, edge: 'wall', outOfBounds: 0, itemRows: [0.113, 0.34, 0.565], boostPads: [{ at: 0.04, lane: -0.4 }, { at: 0.291, lane: 0.3 }, { at: 0.48, lane: 0 }, { at: 0.887, lane: 0.4 }],
+    ramps: [0.219], ice: [], hills: 0, theme: 'city',
+    // The skate park on the boulevard: ride a wall off the lip for a trick.
+    halfpipes: [[0.405, 0.455]],
+    branches: [{
+      name: 'Market Arcade', from: 0.145, to: 0.365, shortcut: true, boost: true, cpu: [0.4, 0.7, 0.9],
+      width: 10, edge: 'wall',
+      points: [[170, 120, 1.5], [185, 170, 2.5], [190, 215, 3]],
+      offroad: [{ from: 0.35, to: 0.65 }],
+    }],
   },
   canyon: {
     id: 'canyon', name: 'Canyon Run', blurb: 'Red-rock switchbacks, steep climbs and a big jump over the dry riverbed.',
-    points: [[0, 0, 0], [90, -10, 2], [140, 10, 5], [160, 50, 8], [130, 90, 10], [80, 100, 11], [60, 130, 12], [80, 170, 13], [140, 175, 15], [190, 150, 17], [230, 170, 18], [240, 220, 16], [200, 260, 13], [130, 270, 10], [70, 250, 9], [20, 270, 10], [-40, 260, 11], [-70, 220, 9], [-60, 170, 7], [-100, 140, 6], [-110, 90, 4], [-80, 40, 2], [-50, 10, 0]],
-    width: 16, edge: 'wall', outOfBounds: 0, itemRows: [0.18, 0.5, 0.77], boostPads: [{ at: 0.33, lane: 0 }, { at: 0.64, lane: 0.4 }, { at: 0.92, lane: -0.3 }],
-    ramps: [0.41, 0.84], ice: [], hills: 22, theme: 'canyon',
+    points: [
+      [0, 0, 0], [90, -10, 2], [140, 10, 5], [160, 50, 8], [130, 90, 10], [80, 100, 11], [60, 130, 12], [80, 170, 13], [140, 175, 15], [190, 150, 17], [230, 170, 18],
+      // East rim: out along the mesa, then the gorge launch over the dry river and down the far side.
+      [285, 175, 18], [322, 205, 17], [332, 245, 16], [332, 300, 11], [312, 338, 9], [255, 348, 9], [195, 312, 10],
+      [130, 275, 10], [70, 250, 9], [20, 270, 10], [-40, 260, 11], [-70, 220, 9], [-60, 170, 7], [-100, 140, 6], [-110, 90, 4], [-80, 40, 2], [-50, 10, 0],
+    ],
+    width: 16, edge: 'wall', outOfBounds: 0, itemRows: [0.148, 0.53, 0.81], boostPads: [{ at: 0.272, lane: 0 }, { at: 0.703, lane: 0.4 }, { at: 0.934, lane: -0.3 }],
+    ramps: [0.338, 0.868], ice: [], hills: 22, theme: 'canyon',
+    launches: [{ at: 0.452, power: 11 }],
+    gaps: [[0.456, 0.476]],
+    // The dry gulch: ride the walls off the end for a trick.
+    halfpipes: [[0.6, 0.655]],
+    branches: [{
+      name: 'Mine Shaft', from: 0.755, to: 0.9, cpu: [0.3, 0.45, 0.55],
+      width: 11, edge: 'wall',
+      points: [[-75, 258, 10], [-118, 222, 8], [-135, 172, 7], [-132, 125, 5]],
+      tunnels: [{ from: 0.14, to: 0.86 }],
+      boostPads: [{ at: 0.22, lane: 0 }, { at: 0.8, lane: 0 }],
+      obstacles: [
+        { at: 0.36, kind: 'crusher', period: 2.8, lane: -0.5 }, { at: 0.5, kind: 'crusher', period: 2.8, phase: 0.4, lane: 0.5 }, { at: 0.64, kind: 'crusher', period: 2.8, phase: 0.75, lane: -0.5 },
+      ],
+    }],
   },
   frost: {
     id: 'frost', name: 'Frostbite Pass', blurb: 'Snowy pines, an icy lake crossing and a mountain-pass descent. Watch your grip.',
-    points: [[0, 0, 0], [110, 0, 1], [160, -30, 3], [220, -30, 5], [260, 0, 7], [270, 50, 9], [240, 90, 11], [190, 100, 12], [160, 130, 12], [170, 180, 13], [220, 200, 14], [250, 240, 12], [220, 280, 9], [150, 290, 6], [80, 270, 4], [40, 230, 3], [0, 240, 3], [-50, 250, 4], [-90, 220, 5], [-90, 170, 4], [-60, 130, 3], [-80, 90, 2], [-90, 40, 1], [-50, 5, 0]],
-    width: 17, edge: 'grass', outOfBounds: 15, itemRows: [0.15, 0.44, 0.73], boostPads: [{ at: 0.28, lane: -0.3 }, { at: 0.57, lane: 0.3 }, { at: 0.88, lane: 0 }],
-    ramps: [0.66], ice: [[0.47, 0.55]], hills: 16, theme: 'frost',
+    points: [
+      [0, 0, 0], [110, 0, 1], [160, -30, 3], [220, -30, 5], [260, 0, 7], [270, 50, 9], [240, 90, 11], [190, 100, 12], [160, 130, 12], [170, 180, 13], [220, 200, 14],
+      // Glacier spiral: a banked helix winds down the mountain, passing under its own first turn.
+      ...arc(275, 245, 40, -90, 360, 16, 3.5, 30),
+      [312, 295, 3], [285, 335, 3.5], [225, 345, 5], [170, 318, 6], [110, 288, 5], [65, 262, 4], [35, 236, 3], [0, 240, 3],
+      // West: the road skirts the frozen lake; the Thin Ice shortcut slides straight across it.
+      [-50, 262, 3], [-110, 250, 4], [-150, 195, 4], [-155, 125, 3], [-135, 60, 2], [-95, 18, 1], [-50, 3, 0],
+    ],
+    width: 17, edge: 'grass', outOfBounds: 15, itemRows: [0.108, 0.318, 0.75], boostPads: [{ at: 0.202, lane: -0.3 }, { at: 0.653, lane: 0.3 }, { at: 0.94, lane: 0 }],
+    ramps: [0.717], ice: [[0.62, 0.69]], hills: 16, theme: 'frost',
+    banked: [[0.345, 0.54]],
+    // The bobsled run out of the spiral: ride the ice walls off the lip.
+    halfpipes: [[0.556, 0.6]],
+    liquid: { level: -2.5, kind: 'water' },
+    pools: [[-80, 150, 62]],
+    branches: [{
+      name: 'Thin Ice', from: 0.765, to: 0.93, shortcut: true, cpu: [0.15, 0.35, 0.55],
+      width: 12, outOfBounds: 8,
+      points: [[-75, 222, 2.5], [-82, 165, 2], [-84, 105, 2]],
+      ice: [[0.42, 0.95]],
+      bridges: [{ from: 0.18, to: 0.84, rails: false }],
+      itemRows: [0.5],
+    }],
   },
   lagoon: {
-    id: 'lagoon', name: 'Coral Lagoon', blurb: 'A figure-eight over and under a tropical lagoon: a seabed run beneath the bridge, a glider leap off the sea cliffs and a rail-less boardwalk shortcut.',
+    id: 'lagoon', name: 'Coral Lagoon', blurb: 'A figure-eight over and under a tropical lagoon: a seabed run beneath the bridge, then the sea-cliff glider or the glass Reef Tunnel, and a rail-less boardwalk shortcut.',
     points: [
       [460, 175, 2], [380, 195, 2], [300, 200, 2], [235, 175, 2],
       // Dive: the coast road slopes under the lagoon and crosses the seabed beneath the bridge.
@@ -131,30 +210,38 @@ export const TRACK_DEFS: Record<TrackId, TrackDef> = {
       // The bridge back across the lagoon, over the seabed road.
       [-200, 140, 6], [-120, 85, 8], [-40, 28, 9], [40, -30, 9], [120, -88, 8], [190, -135, 6],
       // East lobe: climb onto the sea cliffs, glide across the cove, sweep home.
-      [255, -175, 8], [335, -205, 13], [420, -200, 18], [490, -160, 22], [535, -95, 23], [555, -20, 15], [560, 55, 5], [535, 125, 3],
+      [255, -175, 8], [335, -205, 13], [420, -200, 18], [490, -160, 22], [535, -95, 23], [555, -20, 15], [560, 55, 5], [562, 125, 3], [530, 168, 2.5],
     ],
     width: 17, edge: 'grass', outOfBounds: 15,
-    itemRows: [0.1, 0.4, 0.62, 0.86], boostPads: [{ at: 0.05, lane: 0 }, { at: 0.2, lane: 0.4 }, { at: 0.47, lane: -0.4 }, { at: 0.68, lane: 0 }],
-    ramps: [0.36], ice: [],
-    launches: [{ at: 0.902, power: 10, glide: true }],
-    gaps: [[0.905, 0.945]],
-    bridges: [{ from: 0.575, to: 0.745, rails: true }],
-    offroad: [{ from: 0.3, to: 0.33, lanes: [0.35, 1] }],
-    banked: [[0.42, 0.52]],
+    itemRows: [0.099, 0.396, 0.614, 0.851], boostPads: [{ at: 0.049, lane: 0 }, { at: 0.198, lane: 0.4 }, { at: 0.465, lane: -0.4 }, { at: 0.673, lane: 0 }],
+    ramps: [0.338], ice: [],
+    launches: [{ at: 0.893, power: 10, glide: true }],
+    gaps: [[0.896, 0.935]],
+    bridges: [{ from: 0.569, to: 0.737, rails: true }],
+    offroad: [{ from: 0.297, to: 0.327, lanes: [0.35, 1] }],
+    banked: [[0.416, 0.515]],
     hills: 10, theme: 'lagoon',
     liquid: { level: 0, kind: 'water' },
-    pools: [[0, 0, 230], [-410, -10, 105], [445, -40, 95]],
+    pools: [[0, 0, 230], [-410, -10, 105], [445, -40, 110]],
     branches: [{
-      name: 'Boardwalk', from: 0.36, to: 0.535, shortcut: true, cpu: [0.1, 0.35, 0.6],
+      name: 'Boardwalk', from: 0.356, to: 0.53, shortcut: true, cpu: [0.1, 0.35, 0.6],
       width: 10, edge: 'grass', outOfBounds: 8,
       points: [[-470, -110, 3], [-440, -30, 2.5], [-420, 60, 2.5], [-395, 140, 3]],
       bridges: [{ from: 0.16, to: 0.86, rails: false }],
       boostPads: [{ at: 0.42, lane: 0 }],
       itemRows: [0.62],
+    }, {
+      // Under the east cove in a glass tube, dodging rolling sea mines, instead of the cliff climb and the glider.
+      name: 'Reef Tunnel', from: 0.76, to: 0.95, cpu: [0.3, 0.45, 0.5],
+      width: 11, edge: 'wall',
+      points: [[283, -161, 5], [345, -112, 1], [410, -60, -7], [470, -15, -8], [530, 60, -2]],
+      tunnels: [{ from: 0.22, to: 0.78, glass: true }],
+      obstacles: [{ at: 0.38, kind: 'roller', period: 3.1 }, { at: 0.52, kind: 'roller', period: 2.7, phase: 0.5 }, { at: 0.66, kind: 'roller', period: 3.4, phase: 0.25 }],
+      itemRows: [0.2],
     }],
   },
   volcano: {
-    id: 'volcano', name: 'Magma Peak', blurb: 'Jump the lava river, corkscrew up the cinder tower, dodge the crater-tunnel crushers and glide off the summit. Rail-less ridge shortcut for the brave.',
+    id: 'volcano', name: 'Magma Peak', blurb: 'Jump the lava river, corkscrew up the cinder tower, dodge the crater-tunnel crushers, then glide off the summit or take the Switchback Trail down. Rail-less ridge shortcut for the brave.',
     points: [
       [300, 120, 1], [300, 40, 2], [305, -20, 3],
       // Lava river: boulders roll across the approach, then a launch ramp over the flow.
@@ -184,14 +271,23 @@ export const TRACK_DEFS: Record<TrackId, TrackDef> = {
     liquid: { level: -1, kind: 'lava' },
     pools: [[-230, 320, 95], [330, -110, 60]],
     branches: [{
-      name: 'Obsidian Ridge', from: 0.65, to: 0.82, shortcut: true, cpu: [0.05, 0.3, 0.55],
+      // Off the summit by road instead of the glider: banked serpentine bends down the cinder slope, boulders rolling across.
+      name: 'Switchback Trail', from: 0.5, to: 0.645, cpu: [0.3, 0.45, 0.5],
+      width: 11, edge: 'grass', outOfBounds: 9,
+      points: [[-31, -144, 45], [-42, -92, 43], [-62, -42, 39], [-76, 6, 34], [-82, 55, 27], [-120, 100, 16], [-165, 133, 8]],
+      banked: [[0.1, 0.9]],
+      boostPads: [{ at: 0.3, lane: 0 }, { at: 0.62, lane: 0 }],
+      obstacles: [{ at: 0.46, kind: 'roller', period: 3.0 }, { at: 0.78, kind: 'roller', period: 3.3, phase: 0.4 }],
+      itemRows: [0.15],
+    }, {
+      name: 'Obsidian Ridge', from: 0.665, to: 0.82, shortcut: true, cpu: [0.05, 0.3, 0.55],
       width: 9, edge: 'grass', outOfBounds: 8,
-      points: [[-225, 235, 4], [-185, 285, 4], [-215, 335, 4], [-175, 385, 4]],
+      points: [[-262, 262, 4], [-215, 300, 4], [-218, 345, 4], [-178, 388, 4]],
       bridges: [{ from: 0.1, to: 0.9, rails: false }],
     }],
   },
   skyway: {
-    id: 'skyway', name: 'Neon Skyway', blurb: 'Sunset city loop: a broken-freeway jump, a corkscrew garage ramp, an old-town alley shortcut and a glass tunnel under the harbour.',
+    id: 'skyway', name: 'Neon Skyway', blurb: 'Sunset city loop: a broken-freeway jump, a corkscrew garage ramp, an old-town alley shortcut, then a glass tunnel under the harbour or the drawbridge over it.',
     points: [
       [360, 96, 1], [360, 0, 1], [358, -72, 3],
       // Freeway on-ramp and the elevated freeway with its broken section.
@@ -201,7 +297,7 @@ export const TRACK_DEFS: Record<TrackId, TrackDef> = {
       // Old town S-bends (the back alley cuts straight through).
       [-240, -130, 1], [-300, -80, 1], [-335, 0, 1], [-310, 80, 1], [-255, 125, 1],
       // Glass tunnel under the harbour.
-      [-195, 150, -1], [-130, 190, -6], [-50, 220, -9], [40, 225, -9], [120, 210, -6], [190, 190, -1],
+      [-195, 150, 0.5], [-130, 190, -6], [-50, 220, -9], [40, 225, -9], [120, 210, -6], [190, 190, -1],
       [270, 192, 1], [335, 160, 1],
     ],
     width: 16, edge: 'wall', outOfBounds: 0,
@@ -209,11 +305,12 @@ export const TRACK_DEFS: Record<TrackId, TrackDef> = {
     ramps: [0.66], ice: [],
     launches: [{ at: 0.232, power: 16 }],
     gaps: [[0.236, 0.252]],
-    tunnels: [{ from: 0.73, to: 0.9, glass: true }],
+    tunnels: [{ from: 0.745, to: 0.9, glass: true }],
     banked: [[0.3, 0.46]],
     hills: 0, theme: 'dusk',
     liquid: { level: 0, kind: 'water' },
-    pools: [[-20, 250, 170]],
+    // The harbour, and the inlet where the tunnel road dives and the bridge road leaves.
+    pools: [[-20, 250, 170], [-160, 178, 45]],
     branches: [{
       name: 'Back Alley', from: 0.555, to: 0.715, shortcut: true, cpu: [0.15, 0.4, 0.65],
       width: 10, edge: 'wall',
@@ -221,13 +318,22 @@ export const TRACK_DEFS: Record<TrackId, TrackDef> = {
       offroad: [{ from: 0.2, to: 0.8 }],
       boostPads: [{ at: 0.08, lane: 0 }],
       obstacles: [{ at: 0.4, kind: 'roller', period: 2.6 }, { at: 0.62, kind: 'roller', period: 3.0, phase: 0.5 }],
+    }, {
+      // Over the harbour instead of under it: time the drawbridge (or jump it as it lifts).
+      name: 'Harbour Bridge', from: 0.728, to: 0.93, cpu: [0.35, 0.45, 0.5],
+      width: 14, edge: 'wall',
+      points: [[-168, 202, 1.5], [-100, 268, 6], [0, 300, 7], [100, 282, 7], [185, 232, 3]],
+      bridges: [{ from: 0.14, to: 0.86, rails: true }],
+      drawbridges: [{ from: 0.47, to: 0.535, period: 10, phase: 0.3 }],
+      boostPads: [{ at: 0.25, lane: 0 }],
+      itemRows: [0.7],
     }],
   },
 };
 export const TRACK_IDS = Object.keys(TRACK_DEFS) as TrackId[];
 
 // ── Sample flags ────────────────────────────────────────────────────────────
-export const F_BRIDGE = 1, F_RAILS = 2, F_GAP = 4, F_TUNNEL = 8, F_UNDER = 16, F_ICE = 32, F_OFFROAD = 64, F_BANK = 128, F_GLASS = 256;
+export const F_BRIDGE = 1, F_RAILS = 2, F_GAP = 4, F_TUNNEL = 8, F_UNDER = 16, F_ICE = 32, F_OFFROAD = 64, F_BANK = 128, F_GLASS = 256, F_DRAW = 512, F_PIPE = 1024;
 /** Below a bridge or gap the ground drops this far (no liquid). */
 export const CHASM = 18;
 /** Tunnel ceiling above the road. */
@@ -254,6 +360,8 @@ export interface Path {
   from: number; to: number;
   features: Features;
   shortcut: boolean;
+  /** Pays off only with a boost item (see BranchDef.boost). */
+  boost: boolean;
   cpu: [number, number, number];
 }
 export interface Obstacle { seg: number; s: number; kind: ObstacleKind; period: number; phase: number; lane: number }
@@ -264,8 +372,8 @@ export interface Track extends Path {
   liquid: number | null;
   lava: boolean;
   obstacles: Obstacle[];
-  /** Height a racer drives on at (x, z), measured from its nearest centre-line point. */
-  ground: (x: number, z: number, near: Near) => number;
+  /** Height a racer drives on at (x, z), measured from its nearest centre-line point, at race time `time` (drawbridges). */
+  ground: (x: number, z: number, near: Near, time?: number) => number;
   /** Landscape height (for the renderer): the road bed on the road, the land below bridge decks and gaps. */
   terrain: (x: number, z: number, near: Near) => number;
 }
@@ -309,6 +417,46 @@ export function rampOn(path: Path, s: number): number {
   for (const l of path.features.launches) {
     const d = l.at * path.length - s;
     if (d >= 0 && d < LAUNCH_LENGTH) return LAUNCH_HEIGHT * (1 - d / LAUNCH_LENGTH);
+  }
+  return 0;
+}
+
+/** Drawbridge leaves tilt up to this angle (radians). */
+export const DRAW_ANGLE = 0.3;
+/** Drawbridge cycle at race time `time`: 0 = down … 1 = fully up (down 45 %, rising 15 %, up 25 %, lowering 15 % of the period). */
+export function drawLift(d: Drawbridge, time: number): number {
+  const u = (((time / d.period + (d.phase ?? 0)) % 1) + 1) % 1;
+  return u < 0.45 ? 0 : u < 0.6 ? smoothstep(0.45, 0.6, u) : u < 0.85 ? 1 : 1 - smoothstep(0.85, 1, u);
+}
+/**
+ * Height of a drawbridge leaf above the road at local distance `s` and time
+ * `time`: 0 off the bridge or while it is down, NaN in the opening between the
+ * raised tips (each leaf, rotating about its hinge, pulls back from the middle).
+ */
+export function drawOn(path: Path, s: number, time: number): number {
+  for (const d of path.features.drawbridges) {
+    const a = d.from * path.length, b = d.to * path.length;
+    if (s < a || s > b) continue;
+    const lift = drawLift(d, time);
+    if (lift <= 0) return 0;
+    const th = DRAW_ANGLE * lift, half = (b - a) / 2;
+    const dist = s < a + half ? s - a : b - s;
+    if (dist > half * Math.cos(th)) return NaN;
+    return dist * Math.tan(th);
+  }
+  return 0;
+}
+/** Half-pipe wall height at the road edge (the shoulder out to the rail stays at this height). */
+export const PIPE_HEIGHT = 3.4;
+/** Half-pipes ease in over this many metres and end abruptly in the lip. */
+export const PIPE_ENTRY = 14;
+/** Half-pipe wall height above the road at local distance `s`, lateral offset `lateral`. */
+export function pipeOn(path: Path, s: number, lateral: number): number {
+  for (const [f, t] of path.features.halfpipes) {
+    const a = f * path.length, b = t * path.length;
+    if (s < a || s > b) continue;
+    const w = clamp((Math.abs(lateral) / path.halfWidth - 0.35) / 0.65, 0, 1);
+    return PIPE_HEIGHT * w * w * smoothstep(a, a + PIPE_ENTRY, s);
   }
   return 0;
 }
@@ -365,14 +513,14 @@ function sampleLine(ctrl: number[][], closed: boolean): Line {
   return { count, length, px, py, pz, tx, tz, dist, curve };
 }
 
-const FEATURE_KEYS = ['itemRows', 'boostPads', 'ramps', 'ice', 'launches', 'offroad', 'bridges', 'gaps', 'tunnels', 'banked', 'obstacles'] as const;
+const FEATURE_KEYS = ['itemRows', 'boostPads', 'ramps', 'ice', 'launches', 'offroad', 'bridges', 'gaps', 'tunnels', 'banked', 'obstacles', 'drawbridges', 'halfpipes'] as const;
 function features(src: Partial<Features>): Features {
   const f = {} as Record<(typeof FEATURE_KEYS)[number], unknown>;
   for (const k of FEATURE_KEYS) f[k] = src[k] ?? [];
   return f as unknown as Features;
 }
 
-function makePath(index: number, name: string, line: Line, closed: boolean, opts: { width: number; edge: EdgeKind; outOfBounds: number; features: Features; from: number; to: number; cpu: [number, number, number]; shortcut: boolean }): Path {
+function makePath(index: number, name: string, line: Line, closed: boolean, opts: { width: number; edge: EdgeKind; outOfBounds: number; features: Features; from: number; to: number; cpu: [number, number, number]; shortcut: boolean; boost: boolean }): Path {
   const { count } = line;
   const flags = new Uint16Array(count);
   const f = opts.features;
@@ -386,13 +534,15 @@ function makePath(index: number, name: string, line: Line, closed: boolean, opts
     for (const [a, b] of f.gaps) if (inside(frac, a, b)) v |= F_GAP;
     for (const t of f.tunnels) if (inside(frac, t.from, t.to)) v |= F_TUNNEL | F_RAILS | (t.glass ? F_GLASS : 0);
     for (const [a, b] of f.banked) if (inside(frac, a, b)) v |= F_BANK;
+    for (const d of f.drawbridges) if (inside(frac, d.from, d.to)) v |= F_BRIDGE | F_RAILS | F_DRAW;
+    for (const [a, b] of f.halfpipes) if (inside(frac, a, b)) v |= F_PIPE | F_RAILS;
     flags[i] = v;
   }
   const bank = new Float64Array(count), drop = new Float32Array(count);
   return {
     index, name, closed, ...line, bank, drop, flags,
     halfWidth: opts.width / 2, edge: opts.edge, outOfBounds: opts.outOfBounds,
-    from: opts.from, to: opts.to, features: f, shortcut: opts.shortcut, cpu: opts.cpu,
+    from: opts.from, to: opts.to, features: f, shortcut: opts.shortcut, boost: opts.boost, cpu: opts.cpu,
   };
 }
 
@@ -443,7 +593,7 @@ export function trackFor(id: string): Track {
   const mainLine = sampleLine(def.points.map(([x, z, y]) => [x, y, z]), true);
   const main = makePath(0, def.name, mainLine, true, {
     width: def.width, edge: def.edge, outOfBounds: def.outOfBounds, features: features(def),
-    from: 0, to: mainLine.length, cpu: [1, 1, 1], shortcut: false,
+    from: 0, to: mainLine.length, cpu: [1, 1, 1], shortcut: false, boost: false,
   });
   const paths: Path[] = [main];
   const pt = [0, 0, 0, 0];
@@ -453,7 +603,7 @@ export function trackFor(id: string): Track {
     const ctrl = [at(F - 16), at(F), ...b.points.map(([x, z, y]) => [x, y, z]), at(T), at(T + 16)];
     paths.push(makePath(paths.length, b.name, sampleLine(ctrl, false), false, {
       width: b.width ?? def.width, edge: b.edge ?? def.edge, outOfBounds: b.outOfBounds ?? def.outOfBounds, features: features(b),
-      from: F, to: T, cpu: b.cpu, shortcut: b.shortcut === true,
+      from: F, to: T, cpu: b.cpu, shortcut: b.shortcut === true, boost: b.boost === true,
     }));
   }
   const liquid = def.liquid ? def.liquid.level : null, lava = def.liquid?.kind === 'lava';
@@ -519,14 +669,21 @@ export function trackFor(id: string): Track {
     const low = sink > 0.5 ? wet : near.y - CHASM;
     return natural + (low - natural) * drop;
   };
-  track.ground = (x, z, near) => {
+  track.ground = (x, z, near, time = 0) => {
     const p = paths[near.seg] ?? main;
     const off = Math.abs(near.lateral) - p.halfWidth;
     const flags = p.flags[near.index] ?? 0;
     // On the road, and on a railed deck's shoulder out to the rail.
     if (off <= 0 || (off <= RAIL_SHOULDER && flags & F_RAILS && !(flags & F_GAP))) {
       if (flags & F_GAP) return near.y - CHASM * 3;
-      return near.y + (off <= 0 ? rampOn(p, near.s) : 0) - near.lateral * (p.bank[near.index] ?? 0);
+      let lift = off <= 0 ? rampOn(p, near.s) : 0;
+      if (flags & F_DRAW) {
+        const leaf = drawOn(p, near.s, time);
+        if (leaf !== leaf) return near.y - CHASM * 3; // the opening between raised leaves
+        lift += leaf;
+      }
+      if (flags & F_PIPE) lift += pipeOn(p, near.s, near.lateral);
+      return near.y + lift - near.lateral * (p.bank[near.index] ?? 0);
     }
     return beside(x, z, near, p, off);
   };
@@ -707,12 +864,13 @@ export const sampleAt = (path: Path, s: number): number => {
 };
 /** Run-up before a launch ramp: rescues never drop a racer here (it could not reach take-off speed). */
 export const RUN_UP = 60;
-/** Whether local distance `s` lies in the run-up, on the ramp or over the gap of one of the path's launches. */
+/** Whether local distance `s` lies in the run-up, on the ramp or over the gap of one of the path's launches (or on a drawbridge and its run-up). */
 export function inLaunchZone(path: Path, s: number): boolean {
   for (const l of path.features.launches) {
     const d = l.at * path.length - s;
     if (d > -16 && d < RUN_UP) return true;
   }
+  for (const d of path.features.drawbridges) if (s > d.from * path.length - RUN_UP && s < d.to * path.length + 8) return true;
   return (path.flags[sampleAt(path, s)] & F_GAP) !== 0;
 }
 /** Whether lateral offset `lateral` at local distance `s` lies in one of the path's off-road patches. */
@@ -752,4 +910,50 @@ export function obstacleAt(track: Track, o: Obstacle, time: number, out: number[
   pointAt(path, o.s, o.lane * path.halfWidth * 0.5, out);
   out[3] = lift;
   return out;
+}
+
+/** Coins per line, metres between them, and the spacing of lines on the main loop / on branches. */
+export const COIN_LINE = 5;
+const COIN_GAP = 4, COIN_EVERY_MAIN = 150, COIN_EVERY_BRANCH = 70;
+const LANES = [-0.45, 0.45, 0, -0.6, 0.6];
+const coinCache = new Map<TrackId, Float64Array>();
+/**
+ * Coin positions, flat [x, y, z] per coin: lines of five down the road, one
+ * every ~150 m of the main loop and every ~70 m of a branch (the riskier
+ * routes pay better), clear of the start grid, forks and merges, jumps,
+ * drawbridges, half-pipes, item rows and obstacles.
+ */
+export function coinSpots(track: Track): Float64Array {
+  const hit = coinCache.get(track.def.id);
+  if (hit) return hit;
+  const out: number[] = [];
+  const near = newNear(), pt = [0, 0, 0, 0];
+  let line = 0;
+  for (const p of track.paths) {
+    const every = p.index === 0 ? COIN_EVERY_MAIN : COIN_EVERY_BRANCH, span = (COIN_LINE - 1) * COIN_GAP;
+    const clear = (s: number): boolean => {
+      if (p.index === 0) {
+        if (s < 40 || s > p.length - 30) return false;
+        for (const b of track.paths) if (b.index > 0 && (Math.abs(circ(s - b.from, p.length)) < FORK_ZONE + 12 || Math.abs(circ(s - b.to, p.length)) < FORK_ZONE + 12)) return false;
+      } else if (s < FORK_ZONE + 8 || s > p.length - FORK_ZONE - 8) return false;
+      if (inLaunchZone(p, s) || p.flags[sampleAt(p, s)] & (F_GAP | F_DRAW | F_PIPE)) return false;
+      if (p.features.itemRows.some(a => Math.abs(a * p.length - s) < 14)) return false;
+      if (p.features.ramps.some(a => Math.abs(a * p.length - s) < 12)) return false;
+      return !track.obstacles.some(o => o.seg === p.index && Math.abs(o.s - s) < 14);
+    };
+    for (let s0 = every * 0.6; s0 + span < p.length; s0 += every) {
+      let s = -1;
+      for (let k = 0; k < 4 && s < 0; k++) { const c = s0 + k * 18; if (clear(c) && clear(c + span)) s = c; }
+      if (s < 0) continue;
+      const lane = LANES[line++ % LANES.length] * p.halfWidth;
+      for (let k = 0; k < COIN_LINE; k++) {
+        pointAt(p, s + k * COIN_GAP, lane, pt);
+        nearest(p, pt[0], pt[2], sampleAt(p, s + k * COIN_GAP), near, 6);
+        out.push(pt[0], track.ground(pt[0], pt[2], near) + 1.0, pt[2]);
+      }
+    }
+  }
+  const spots = Float64Array.from(out);
+  coinCache.set(track.def.id, spots);
+  return spots;
 }

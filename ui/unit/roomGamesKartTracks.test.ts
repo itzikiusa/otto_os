@@ -2,8 +2,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Rng } from '../src/modules/rooms/games/common/math.ts';
 import {
-  advance, CRUSHER_RISE, F_BRIDGE, F_GAP, F_RAILS, F_TUNNEL, F_UNDER, inLaunchZone, inOffroad, locate, nearest, newNear, obstacleAt, pointAt, progressOf,
-  RAMP_HEIGHT, RAMP_LENGTH, rampHeight, rampOn, ROLLER_RADIUS, RUN_UP, sampleAt, TRACK_DEFS, TRACK_IDS, trackFor, type Spot, type TrackId,
+  advance, coinSpots, COIN_LINE, CRUSHER_RISE, DRAW_ANGLE, drawLift, drawOn, F_BANK, F_BRIDGE, F_DRAW, F_GAP, F_ICE, F_PIPE, F_RAILS, F_TUNNEL, F_UNDER, FORK_ZONE, inLaunchZone, inOffroad,
+  locate, nearest, newNear, obstacleAt, PIPE_ENTRY, PIPE_HEIGHT, pipeOn, pointAt, progressOf, RAMP_HEIGHT, RAMP_LENGTH, rampHeight, rampOn, ROLLER_RADIUS, RUN_UP, sampleAt,
+  TRACK_DEFS, TRACK_IDS, trackFor, type Spot, type TrackId,
 } from '../src/modules/rooms/games/kart/tracks.ts';
 import { itemBoxes } from '../src/modules/rooms/games/kart/sim.ts';
 import { ITEM_KINDS, itemWeights, rollItem, type ItemKind } from '../src/modules/rooms/games/kart/items.ts';
@@ -67,7 +68,8 @@ test('no track runs into itself: non-adjacent stretches are a road width apart o
       min = Math.min(min, d);
     }
     assert.ok(min > t.def.width, `${id}: closest non-adjacent samples ${min.toFixed(1)} m vs width ${t.def.width}`);
-    if (['meadow', 'downtown', 'canyon', 'frost'].includes(id)) assert.equal(crossings, 0, `${id} is flat`);
+    // Downtown's interchange loop and Frostbite's glacier spiral fly over their own road, like the Grand Prix tracks.
+    if (['meadow', 'canyon'].includes(id)) assert.equal(crossings, 0, `${id} is flat`);
     else assert.ok(crossings > 0, `${id} passes over itself`);
     // Even the tightest corner leaves the inside edge a positive radius.
     let maxCurve = 0;
@@ -181,21 +183,86 @@ test('track definitions are internally consistent', () => {
       // Every gap is preceded by a launch ramp just before it (and every launch clears into a gap).
       for (const [a] of f.gaps ?? []) assert.ok((f.launches ?? []).some(l => l.at < a && a - l.at < 0.01), `${id}: launch before the gap at ${a}`);
       for (const l of f.launches ?? []) assert.ok(frac(l.at) && l.power > 0 && (f.gaps ?? []).some(([a]) => a > l.at && a - l.at < 0.01), `${id}: gap after the launch at ${l.at}`);
+      // Drawbridges span water inside a railed bridge; half-pipes are plain ranges.
+      for (const d of f.drawbridges ?? []) {
+        assert.ok(range([d.from, d.to]) && d.period > 0, `${id}: drawbridge ${d.from}..${d.to}`);
+        assert.ok((f.bridges ?? []).some(b => b.rails && b.from < d.from && b.to > d.to), `${id}: drawbridge inside a railed bridge`);
+      }
+      assert.ok((f.halfpipes ?? []).every(range));
     }
     for (const b of d.branches ?? []) {
       assert.ok(frac(b.from) && frac(b.to) && b.from < b.to, `${id}/${b.name} forks before it merges, never across the line`);
       assert.ok(b.cpu.every(p => p >= 0 && p <= 1) && b.cpu[0] <= b.cpu[1] && b.cpu[1] <= b.cpu[2], `${id}/${b.name}: harder CPUs take it more`);
+      if (b.boost) assert.ok(b.shortcut && (b.offroad ?? []).length > 0, `${id}/${b.name}: a boost-only cut is a shortcut through deep off-road`);
+    }
+    // Branches never overlap each other's fork or merge zones.
+    const spans = (d.branches ?? []).map(b => [b.from, b.to]).sort((a, b) => a[0] - b[0]);
+    const L = trackFor(id).length;
+    for (let i = 1; i < spans.length; i++) assert.ok((spans[i][0] - spans[i - 1][1]) * L > 20, `${id}: a merge at ${spans[i - 1][1]} and the next fork at ${spans[i][0]} are too close`);
+  }
+});
+
+const ORIGINALS: TrackId[] = ['meadow', 'downtown', 'canyon', 'frost'];
+const GRAND_PRIX: TrackId[] = ['lagoon', 'volcano', 'skyway'];
+/** Whether any route of `id` carries flag `f`. */
+const has = (id: TrackId, f: number) => trackFor(id).paths.some(p => p.flags.some(v => (v & f) !== 0));
+
+test('the classic circuits grew: longer laps, a route choice and a new set-piece each', () => {
+  // Round-1 lap lengths (m): every classic now runs well over them.
+  const before: Record<string, number> = { meadow: 1346, downtown: 1167, canyon: 1262, frost: 1340 };
+  for (const id of ORIGINALS) {
+    const t = trackFor(id);
+    assert.ok(t.length > before[id] * 1.15 && t.length > 1400, `${id}: ${t.length.toFixed(0)} m`);
+    assert.ok(t.paths.length >= 2, `${id} has a branch`);
+  }
+  // Sunny Meadow: a drawbridge over the lake, and the ford beneath the surface beside it.
+  assert.ok(has('meadow', F_DRAW) && trackFor('meadow').paths[1].flags.some(v => (v & F_UNDER) !== 0));
+  // Downtown Dash: the interchange flies over its own road; a skate-park half-pipe; a boost-only market cut.
+  assert.ok(has('downtown', F_BRIDGE) && has('downtown', F_PIPE) && trackFor('downtown').paths.some(p => p.boost));
+  // Canyon Run: a gorge launch, a gulch half-pipe and a mine shaft with crushers.
+  assert.ok(has('canyon', F_GAP) && has('canyon', F_PIPE) && trackFor('canyon').paths[1].flags.some(v => (v & F_TUNNEL) !== 0));
+  assert.ok(trackFor('canyon').obstacles.some(o => o.seg === 1 && o.kind === 'crusher'));
+  // Frostbite Pass: a banked glacier spiral over itself, a bobsled half-pipe and rail-less thin ice over the lake.
+  assert.ok(has('frost', F_BANK) && has('frost', F_PIPE) && has('frost', F_BRIDGE));
+  const thin = trackFor('frost').paths[1];
+  assert.ok(thin.shortcut && thin.flags.some(v => (v & F_ICE) !== 0) && thin.flags.some(v => (v & F_BRIDGE) !== 0 && (v & F_RAILS) === 0));
+});
+
+test('route choices: every Grand Prix track offers three routes through its forks, each a real choice', () => {
+  for (const id of GRAND_PRIX) {
+    const t = trackFor(id);
+    assert.ok(t.paths.length >= 3, `${id}: ${t.paths.length - 1} branches`);
+    // A shortcut, and a split whose two sides are similar in length (different hazards decide it).
+    assert.ok(t.paths.some(p => p.shortcut), `${id} has a shortcut`);
+    assert.ok(t.paths.some(p => p.index > 0 && !p.shortcut && p.length > (p.to - p.from) * 0.7 && p.length < (p.to - p.from) * 1.35), `${id} has an even split`);
+  }
+  // The split sides carry their own hazards: rollers in the reef tube and on the switchbacks, a drawbridge on the harbour bridge.
+  assert.ok(trackFor('lagoon').obstacles.some(o => o.seg === 2) && trackFor('volcano').obstacles.some(o => o.seg === 1));
+  assert.ok(trackFor('skyway').paths[2].flags.some(v => (v & F_DRAW) !== 0));
+});
+
+test('branches keep clear of every other road away from their forks and merges (or pass well above / below)', () => {
+  for (const id of TRACK_IDS) {
+    const t = trackFor(id);
+    for (const p of t.paths.slice(1)) for (let i = 0; i < p.count; i++) {
+      if (p.dist[i] < FORK_ZONE + 10 || p.dist[i] > p.length - FORK_ZONE - 10) continue;
+      for (const q of t.paths) {
+        if (q === p) continue;
+        for (let j = 0; j < q.count; j++) {
+          if (Math.abs(p.py[i] - q.py[j]) >= 6) continue;
+          const gap = Math.hypot(p.px[i] - q.px[j], p.pz[i] - q.pz[j]) - p.halfWidth - q.halfWidth;
+          assert.ok(gap > 3, `${id}/${p.name}@${p.dist[i].toFixed(0)} is ${gap.toFixed(1)} m from ${q.name}@${q.dist[j].toFixed(0)}`);
+        }
+      }
     }
   }
 });
 
-test('new Grand Prix tracks: each lap is far longer than the originals and has every course element', () => {
-  const longestOriginal = Math.max(...(['meadow', 'downtown', 'canyon', 'frost'] as TrackId[]).map(id => trackFor(id).length));
-  for (const id of ['lagoon', 'volcano', 'skyway'] as TrackId[]) {
+test('new Grand Prix tracks: each lap is far longer than the classics and has every course element', () => {
+  const longestOriginal = Math.max(...ORIGINALS.map(id => trackFor(id).length));
+  for (const id of GRAND_PRIX) {
     const t = trackFor(id);
-    assert.ok(t.length > longestOriginal * 1.6, `${id}: ${t.length.toFixed(0)} m vs ${longestOriginal.toFixed(0)} m`);
-    assert.ok(t.paths.length >= 2, `${id} has a branch`);
-    assert.ok(t.paths.some(p => p.shortcut), `${id} has a shortcut`);
+    assert.ok(t.length > longestOriginal * 1.2, `${id}: ${t.length.toFixed(0)} m vs ${longestOriginal.toFixed(0)} m`);
     const all = (f: number) => t.paths.some(p => p.flags.some(v => (v & f) !== 0));
     assert.ok(all(F_GAP) && all(F_BRIDGE), `${id}: jumps and bridges`);
     assert.ok(t.liquid !== null, `${id}: water or lava`);
@@ -478,4 +545,74 @@ test('kartSeats: invalid picks fall back, no fill without cpuFill, caps at total
   // More CPUs than racers: the pool wraps.
   const wrap = kartSeats([], true, 8);
   assert.ok(wrap.every(s => RACER_IDS.includes(s.racer)));
+});
+
+test('drawbridges: a pure function of the race clock; leaves rise from the hinges and open in the middle', () => {
+  const t = trackFor('meadow'), d = t.def.drawbridges![0], a = d.from * t.length, b = d.to * t.length, half = (b - a) / 2;
+  // Down 45 % of the period, rising, up 25 %, lowering; periodic and deterministic.
+  assert.equal(drawLift(d, 0), 0);
+  assert.equal(drawLift(d, d.period * 0.3), 0);
+  assert.equal(drawLift(d, d.period * 0.7), 1);
+  assert.ok(drawLift(d, d.period * 0.52) > 0 && drawLift(d, d.period * 0.52) < 1);
+  assert.ok(drawLift(d, d.period * 0.92) > 0 && drawLift(d, d.period * 0.92) < 1);
+  for (let k = 0; k < 50; k++) { const time = k * 0.37; assert.ok(Math.abs(drawLift(d, time) - drawLift(d, time + d.period * 3)) < 1e-9); }
+  const up = d.period * 0.7;
+  // Down: flush with the road. Up: height grows with distance from either hinge, nothing over the opening.
+  for (const s of [a + 1, a + half / 2, b - 1]) assert.equal(drawOn(t, s, 0), 0);
+  assert.ok(Math.abs(drawOn(t, a + 4, up) - 4 * Math.tan(DRAW_ANGLE)) < 1e-9);
+  assert.ok(Math.abs(drawOn(t, b - 4, up) - 4 * Math.tan(DRAW_ANGLE)) < 1e-9);
+  assert.ok(Number.isNaN(drawOn(t, a + half, up)), 'the opening between the raised tips');
+  assert.equal(drawOn(t, a - 5, up), 0);
+  // The ground follows the leaves (the lane at the drawbridge is flagged and railed over water).
+  const s = a + 6, p = pointAt(t, s, 0), n = nearest(t, p[0], p[2], sampleAt(t, s), newNear());
+  assert.ok((t.flags[n.index] & (F_DRAW | F_RAILS | F_BRIDGE)) === (F_DRAW | F_RAILS | F_BRIDGE));
+  assert.ok(Math.abs(t.ground(p[0], p[2], n, 0) - n.y) < 0.05);
+  assert.ok(Math.abs(t.ground(p[0], p[2], n, up) - (n.y + drawOn(t, n.s, up))) < 0.05 && t.ground(p[0], p[2], n, up) > n.y + 1.5);
+  const m = pointAt(t, a + half, 0), mn = nearest(t, m[0], m[2], sampleAt(t, a + half), newNear());
+  assert.ok(t.ground(m[0], m[2], mn, up) < m[1] - 20, 'nothing to drive on in the opening');
+  // A rescue never lands on the bridge or its run-up.
+  assert.ok(inLaunchZone(t, a - RUN_UP + 2) && inLaunchZone(t, a + half) && !inLaunchZone(t, b + 20));
+});
+
+test('half-pipes: walls curve up to the edge after an easy entry and end at the lip; the middle stays flat', () => {
+  for (const id of ['downtown', 'canyon', 'frost'] as TrackId[]) {
+    const t = trackFor(id), [f, to] = t.def.halfpipes![0], a = f * t.length, b = to * t.length, hw = t.halfWidth;
+    const mid = (a + b) / 2;
+    assert.equal(pipeOn(t, mid, 0), 0, `${id}: flat floor`);
+    assert.ok(Math.abs(pipeOn(t, mid, hw) - PIPE_HEIGHT) < 1e-9 && Math.abs(pipeOn(t, mid, -hw) - PIPE_HEIGHT) < 1e-9, `${id}: full walls`);
+    assert.ok(pipeOn(t, mid, hw * 0.8) > 1.2 && pipeOn(t, mid, hw * 0.8) < PIPE_HEIGHT, `${id}: a CPU riding at 80 % is high enough for the lip`);
+    assert.equal(pipeOn(t, a + 0.01, hw) < 0.05, true, `${id}: eases in`);
+    assert.ok(pipeOn(t, a + PIPE_ENTRY, hw) > PIPE_HEIGHT * 0.99);
+    assert.equal(pipeOn(t, b + 0.5, hw), 0, `${id}: ends at the lip`);
+    // The ground carries the walls; the shoulder out to the rail is the coping at full height.
+    const p = pointAt(t, mid, hw * 0.9), n = nearest(t, p[0], p[2], sampleAt(t, mid), newNear());
+    assert.ok((t.flags[n.index] & (F_PIPE | F_RAILS)) === (F_PIPE | F_RAILS));
+    assert.ok(Math.abs(t.ground(p[0], p[2], n) - (n.y + pipeOn(t, n.s, n.lateral) - n.lateral * t.bank[n.index])) < 1e-6);
+    const c = pointAt(t, mid, hw + 1), cn = nearest(t, c[0], c[2], sampleAt(t, mid), newNear());
+    assert.ok(Math.abs(t.ground(c[0], c[2], cn) - (cn.y + PIPE_HEIGHT - cn.lateral * t.bank[cn.index])) < 0.05);
+  }
+});
+
+test('coins: lines of five on every route, on the tarmac and clear of jumps, drawbridges, half-pipes and forks', () => {
+  for (const id of TRACK_IDS) {
+    const t = trackFor(id), spots = coinSpots(t);
+    assert.equal(coinSpots(t), spots, 'cached');
+    assert.ok(spots.length > 0 && spots.length % (COIN_LINE * 3) === 0, `${id}: ${spots.length / 3} coins`);
+    const perPath = t.paths.map(() => 0);
+    for (let k = 0; k < spots.length; k += 3) {
+      const [x, y, z] = [spots[k], spots[k + 1], spots[k + 2]];
+      // Whichever route the coin lies on: on its tarmac, hovering a metre over the road.
+      let found = false;
+      for (const p of t.paths) {
+        const n = nearest(p, x, z, -1, newNear(), 24, y - 1);
+        if (Math.abs(n.lateral) > p.halfWidth || Math.abs(y - 1 - t.ground(x, z, n)) > 0.2) continue;
+        found = true; perPath[p.index]++;
+        assert.ok(!inLaunchZone(p, n.s), `${id}: coin in a launch zone at ${p.name}@${n.s.toFixed(0)}`);
+        assert.equal(p.flags[n.index] & (F_GAP | F_DRAW | F_PIPE), 0, `${id}: coin on a gap, leaf or pipe`);
+        break;
+      }
+      assert.ok(found, `${id}: coin ${k / 3} sits on a road`);
+    }
+    assert.ok(perPath.every(c => c > 0), `${id}: coins on every route (${perPath.join('/')})`);
+  }
 });

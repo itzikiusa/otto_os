@@ -3,12 +3,14 @@
  * Up to 8 racers: humans plus CPU drivers. Drifting with three mini-turbo
  * levels, item boxes, six items, jumps with tricks, launch ramps and the
  * glider, dash panels, ice, off-road patches, banking, walls and rails,
- * branching routes, underwater driving, water/lava/chasm rescues, rolling and
- * crushing obstacles, laps with progress tracking and live ranking.
+ * branching routes, drawbridges, half-pipe trick lips, coins (up to ten raise
+ * top speed; hits and falls cost some), underwater driving, water/lava/chasm
+ * rescues, rolling and crushing obstacles, laps with progress tracking and
+ * live ranking.
  */
 import { approach, clamp, Rng, wrapAngle } from '../common/math.ts';
 import {
-  advance, circ, CRUSHER_HALF, F_ICE, F_OFFROAD, F_RAILS, F_UNDER, inLaunchZone, inOffroad, locate, nearest, newNear, obstacleAt,
+  advance, circ, coinSpots, CRUSHER_HALF, DRAW_ANGLE, drawLift, F_ICE, F_OFFROAD, F_RAILS, F_UNDER, inLaunchZone, inOffroad, locate, nearest, newNear, obstacleAt,
   pointAt, progressOf, ROLLER_RADIUS, sampleAt, trackFor, type Near, type Spot, type Track, type TrackId,
 } from './tracks.ts';
 import { racerDef, type RacerId } from './roster.ts';
@@ -34,6 +36,12 @@ export const GLIDE_SINK = 6.5;
 export const WATER_GRAVITY = 12;
 /** A racer this far below the road (no ground under it) has fallen and is rescued. */
 export const FALL_DEPTH = 12;
+/** Coins: each one up to MAX_COINS raises top speed by COIN_SPEED; a spin-out or a fall costs COIN_LOSS. */
+export const MAX_COINS = 10;
+export const COIN_SPEED = 0.006;
+export const COIN_LOSS = 3;
+/** Seconds before a collected coin reappears. */
+export const COIN_RESPAWN = 12;
 
 export interface KartInput { throttle: number; steer: number; drift: boolean; item: boolean; respawn: boolean }
 export const idleInput = (): KartInput => ({ throttle: 0, steer: 0, drift: false, item: false, respawn: false });
@@ -55,8 +63,11 @@ export interface Racer {
   cpuLane: number; cpuThink: number; cpuItemDelay: number; cpuMistake: number;
   /** CPU route: bit k-1 set = take branch k this lap. */
   cpuRoute: number;
+  coins: number;
 }
 export interface ItemBox { x: number; y: number; z: number; timer: number }
+/** A coin on the road; `timer` > 0 while it is collected and waiting to reappear. */
+export interface Coin { x: number; y: number; z: number; timer: number }
 export interface Hazard { id: number; x: number; y: number; z: number; owner: number }
 export interface Shell { id: number; x: number; y: number; z: number; yaw: number; target: number; owner: number; life: number; hint: number; seg: number }
 export type KartEventType = 'box' | 'item' | 'boost' | 'turbo' | 'spin' | 'explode' | 'bump' | 'lap' | 'final' | 'finish' | 'bolt' | 'drop' | 'throw' | 'star' | 'respawn' | 'trick' | 'land' | 'go' | 'count' | 'splash' | 'glide' | 'crush';
@@ -66,7 +77,7 @@ export interface KartState {
   track: TrackId; difficulty: Difficulty; laps: number;
   phase: 'intro' | 'countdown' | 'race' | 'done';
   clock: number; countdown: number; raceTime: number; endTimer: number; firstFinish: number | null;
-  racers: Racer[]; boxes: ItemBox[]; hazards: Hazard[]; shells: Shell[];
+  racers: Racer[]; boxes: ItemBox[]; coins: Coin[]; hazards: Hazard[]; shells: Shell[];
   events: KartEvent[]; eventSeq: number; nextId: number; rng: number; accumulator: number;
 }
 
@@ -105,13 +116,13 @@ export function createRace(trackId: TrackId, seats: KartSeat[], difficulty: Diff
       seg: 0, segS: lap, glide: false, under: false, safeSeg: 0, safeS: lap,
       lap: 0, lapStart: 0, lapTimes: [], finish: null, place: i + 1, respawn: 0, wrong: 0, startCharge: -1, bumpCd: 0,
       cpuLane: rng.range(-0.45, 0.45), cpuThink: 0, cpuItemDelay: rng.range(0.5, 2.5), cpuMistake: 0,
-      cpuRoute: seat.human ? 0 : pickRoute(track, difficulty, rng),
+      cpuRoute: seat.human ? 0 : pickRoute(track, difficulty, rng), coins: 0,
     };
   });
   const boxes = itemBoxes(track);
   const state: KartState = {
     track: track.def.id, difficulty, laps: LAPS, phase: 'intro', clock: 0, countdown: COUNTDOWN_SECONDS, raceTime: 0,
-    endTimer: 0, firstFinish: null, racers, boxes, hazards: [], shells: [], events: [], eventSeq: 0, nextId: 1,
+    endTimer: 0, firstFinish: null, racers, boxes, coins: trackCoins(track), hazards: [], shells: [], events: [], eventSeq: 0, nextId: 1,
     rng: rng.state, accumulator: 0,
   };
   rank(state);
@@ -129,6 +140,13 @@ export function itemBoxes(track: Track): ItemBox[] {
     }
   }
   return boxes;
+}
+
+/** Every coin of the track, all in place. */
+export function trackCoins(track: Track): Coin[] {
+  const spots = coinSpots(track), coins: Coin[] = [];
+  for (let i = 0; i < spots.length; i += 3) coins.push({ x: spots[i], y: spots[i + 1], z: spots[i + 2], timer: 0 });
+  return coins;
 }
 
 function emit(state: KartState, type: KartEventType, r: { id: number; x: number; y: number; z: number }, value?: number): void {
@@ -206,6 +224,7 @@ export function tick(state: KartState, inputs: (KartInput | undefined)[]): void 
   collideRacers(state);
   collideObstacles(state, track);
   updateBoxes(state);
+  updateCoins(state);
   updateHazards(state);
   updateShells(state, track);
   rank(state);
@@ -268,10 +287,12 @@ function driveRacer(state: KartState, track: Track, r: Racer, input: KartInput, 
   } else if (r !== leader) {
     top *= 1 + clamp((leader.travel - r.travel) * 0.00015, 0, 0.04);
   }
-  if (r.surface === 'grass' && r.boost <= 0 && r.star <= 0) top *= 0.55;
+  // Off-road; the deep mud of a boost-only shortcut is far worse without a mushroom or star.
+  if (r.surface === 'grass' && r.boost <= 0 && r.star <= 0) top *= muddy && path.boost ? 0.32 : 0.55;
   if (r.slow > 0) top *= 0.7;
   if (r.star > 0) top *= 1.15;
   if (r.under) top *= 0.93;
+  top *= 1 + Math.min(r.coins, MAX_COINS) * COIN_SPEED;
   if (r.boost > 0) top = Math.max(top, st.top * r.boostPower);
   if (r.drift !== 0) top *= 0.97;
 
@@ -353,9 +374,9 @@ function driveRacer(state: KartState, track: Track, r: Racer, input: KartInput, 
     r.respawn = 0.6; emit(state, 'respawn', r); return;
   }
 
-  // Height: ground following, ramps, launches, flight, the glider.
+  // Height: ground following, ramps, launches, drawbridges, half-pipe lips, flight, the glider.
   nearest(path, r.x, r.z, r.hint, _near, 4);
-  const ground = track.ground(r.x, r.z, _near);
+  const ground = track.ground(r.x, r.z, _near, state.raceTime);
   const onRoad = Math.abs(_near.lateral) < path.halfWidth;
   for (const at of path.features.ramps) {
     const rs = at * path.length;
@@ -377,6 +398,27 @@ function driveRacer(state: KartState, track: Track, r: Racer, input: KartInput, 
       r.vy = l.power; r.grounded = false; r.air = 0; r.trickReady = true;
       r.drift = 0; r.driftCharge = 0; r.driftLevel = 0;
       if (l.glide) { r.glide = true; emit(state, 'glide', r); } else emit(state, 'boost', r, 0);
+    }
+  }
+  // A raised drawbridge throws a racer cresting its first leaf over the opening.
+  for (const d of path.features.drawbridges) {
+    const lift = drawLift(d, state.raceTime);
+    if (lift < 0.3) continue;
+    const a = d.from * path.length, half = (d.to - d.from) * path.length / 2, th = DRAW_ANGLE * lift, tip = a + half * Math.cos(th);
+    const crossed = prevS < tip && _near.s >= tip && _near.s - prevS < 20;
+    if (crossed && (r.grounded || r.y < ground + 1.6) && r.speed > 4) {
+      r.vy = r.speed * Math.sin(th) + 1.5; r.grounded = false; r.air = 0; r.trickReady = true;
+      r.drift = 0; r.driftCharge = 0; r.driftLevel = 0;
+      emit(state, 'boost', r, 0);
+    }
+  }
+  // Riding high on a half-pipe wall off its end lip: a trick jump.
+  for (const [, to] of path.features.halfpipes) {
+    const ps = to * path.length;
+    const crossed = prevS < ps && _near.s >= ps && _near.s - prevS < 20;
+    if (crossed && r.grounded && r.y > ground + 1.2 && r.speed > 8) {
+      r.vy = 6 + r.speed * 0.12; r.grounded = false; r.air = 0; r.trickReady = true;
+      emit(state, 'boost', r, 0);
     }
   }
   for (const pad of path.features.boostPads) {
@@ -468,8 +510,9 @@ function rescue(state: KartState, track: Track, r: Racer): void {
   pointAt(path, s, 0, _pt);
   r.x = _pt[0]; r.y = _pt[1]; r.z = _pt[2]; r.yaw = _pt[3];
   r.vx = r.vz = r.vy = 0; r.speed = 0; r.grounded = true; r.spin = 0; r.glide = false; r.under = false;
+  r.coins = Math.max(0, r.coins - COIN_LOSS);
   r.seg = seg; r.segS = s; r.hint = sampleAt(path, s);
-  r.y = track.ground(r.x, r.z, nearest(path, r.x, r.z, r.hint, _near, 4));
+  r.y = track.ground(r.x, r.z, nearest(path, r.x, r.z, r.hint, _near, 4), state.raceTime);
   // Progress follows the racer back: no lap credit for distance flown or fallen.
   const prog = progressOf(track, seg, s);
   r.travel += circ(prog - r.lastS, track.length);
@@ -481,6 +524,7 @@ export function spinOut(state: KartState, r: Racer, seconds = 1.0): boolean {
   if (r.star > 0 || r.respawn > 0 || r.finish !== null && r.speed < 1) return false;
   r.spin = Math.max(r.spin, seconds);
   r.boost = 0; r.drift = 0; r.driftCharge = 0; r.driftLevel = 0;
+  r.coins = Math.max(0, r.coins - COIN_LOSS);
   emit(state, 'spin', r);
   return true;
 }
@@ -580,6 +624,22 @@ function updateBoxes(state: KartState): void {
   }
 }
 
+/** Coins: driving through one adds it to the racer's purse (capped); it reappears later. No event per coin (the HUD counts). */
+function updateCoins(state: KartState): void {
+  for (const c of state.coins) {
+    if (c.timer > 0) { c.timer = Math.max(0, c.timer - STEP); continue; }
+    for (const r of state.racers) {
+      if (r.respawn > 0 || r.finish !== null) continue;
+      const dx = r.x - c.x, dz = r.z - c.z;
+      if (dx * dx + dz * dz < 1.9 * 1.9 && Math.abs(r.y + 0.6 - c.y) < 2.2) {
+        c.timer = COIN_RESPAWN;
+        r.coins = Math.min(MAX_COINS, r.coins + 1);
+        break;
+      }
+    }
+  }
+}
+
 function updateHazards(state: KartState): void {
   for (let h = state.hazards.length - 1; h >= 0; h--) {
     const hz = state.hazards[h];
@@ -613,7 +673,7 @@ function updateShells(state: KartState, track: Track): void {
     sh.x += Math.sin(sh.yaw) * 42 * STEP;
     sh.z += Math.cos(sh.yaw) * 42 * STEP;
     // Bombs skim over gaps and water at road height.
-    sh.y = approach(sh.y, Math.max(track.ground(sh.x, sh.z, near), near.y - 0.5) + 0.7, 10, STEP);
+    sh.y = approach(sh.y, Math.max(track.ground(sh.x, sh.z, near, state.raceTime), near.y - 0.5) + 0.7, 10, STEP);
     let gone = sh.life <= 0;
     for (const r of state.racers) {
       if (gone || r.respawn > 0 || (r.id === sh.owner && sh.life > 6.6)) continue;

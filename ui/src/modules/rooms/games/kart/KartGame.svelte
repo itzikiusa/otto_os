@@ -15,8 +15,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import LoadState from '../../../../lib/components/LoadState.svelte';
-  import { createRace, idleInput, standings, stepRace, type KartEvent } from './sim';
-  import { F_GAP, trackFor, type Path } from './tracks';
+  import { createRace, idleInput, MAX_COINS, standings, stepRace, type KartEvent } from './sim';
+  import { drawLift, F_GAP, pointAt, trackFor, type Path } from './tracks';
   import { racerDef } from './roster';
   import { ITEMS } from './items';
   import { InputState } from '../common/input';
@@ -136,14 +136,29 @@
     };
     g.clearRect(0, 0, w, h);
     g.lineJoin = 'round';
-    // Branches first, dashed when they are shortcuts; then the main loop on top.
+    // Branches first (shortcuts dashed yellow, boost-only cuts dashed orange, alternative
+    // routes light blue); then the main loop on top.
     for (const p of [...track.paths.slice(1), track]) {
       trace(p);
       g.setLineDash(p.shortcut ? [5, 4] : []);
       g.strokeStyle = 'rgba(0,0,0,0.55)'; g.lineWidth = p.index === 0 ? 9 : 7; g.stroke();
-      g.strokeStyle = p.shortcut ? 'rgba(255,214,90,0.95)' : 'rgba(255,255,255,0.9)'; g.lineWidth = p.index === 0 ? 5 : 3.5; g.stroke();
+      g.strokeStyle = p.index === 0 ? 'rgba(255,255,255,0.9)' : p.boost ? 'rgba(255,154,46,0.95)' : p.shortcut ? 'rgba(255,214,90,0.95)' : 'rgba(140,215,255,0.95)';
+      g.lineWidth = p.index === 0 ? 5 : 3.5; g.stroke();
     }
     g.setLineDash([]);
+    // Forks: a marker where each route splits off.
+    for (const p of track.paths.slice(1)) {
+      g.beginPath(); g.arc(mx(p.px[0]), mz(p.pz[0]), 4, 0, Math.PI * 2);
+      g.fillStyle = p.boost ? '#ff9a2e' : p.shortcut ? '#ffd65a' : '#8cd7ff'; g.fill();
+      g.lineWidth = 1.5; g.strokeStyle = '#111'; g.stroke();
+    }
+    // Drawbridges: a bar across the road, red while the leaves are up.
+    for (const p of track.paths) for (const d of p.features.drawbridges) {
+      pointAt(p, (d.from + d.to) / 2 * p.length, 0, _mp);
+      const ax = Math.cos(_mp[3]) * 6, az = Math.sin(_mp[3]) * 6; // across the road (the map mirrors X)
+      g.beginPath(); g.moveTo(mx(_mp[0]) - ax, mz(_mp[2]) - az); g.lineTo(mx(_mp[0]) + ax, mz(_mp[2]) + az);
+      g.lineWidth = 3; g.strokeStyle = drawLift(d, state.raceTime) > 0.05 ? '#ff4d4d' : '#5ad17a'; g.stroke();
+    }
     g.fillStyle = '#111'; g.fillRect(mx(track.px[0]) - 4, mz(track.pz[0]) - 4, 8, 8);
     for (const b of state.shells) { g.fillStyle = '#ff7a2a'; g.beginPath(); g.arc(mx(b.x), mz(b.z), 3, 0, Math.PI * 2); g.fill(); }
     const order = [...state.racers].sort((a, b) => b.place - a.place);
@@ -154,6 +169,8 @@
       g.lineWidth = own ? 3 : 1.5; g.strokeStyle = own ? '#fff' : 'rgba(0,0,0,0.6)'; g.stroke();
     }
   }
+
+  const _mp = [0, 0, 0, 0];
 
   /** Guest view: interpolate between buffered snapshots ~100 ms behind real time. */
   let view: KartState | null = null;
@@ -181,7 +198,7 @@
   function start(): void {
     stop?.();
     const abort = new AbortController();
-    let disposed = false, frame = 0, last = performance.now(), lastHud = 0, lastSend = 0, lastEvent = 0, rouletteAt = 0;
+    let disposed = false, frame = 0, last = performance.now(), lastHud = 0, lastSend = 0, lastEvent = 0, rouletteAt = 0, coinsSeen = 0;
     const bootAt = performance.now();
     const latch = { item: false, drift: false, respawn: false };
     let state: KartState | null = setup ? createRace(setup.track, setup.seats, setup.difficulty, setup.seed) : null;
@@ -246,6 +263,9 @@
       if (renderer) {
         renderer.frame(state, dt, input?.down('KeyQ', 'KeyC', 'Back') ?? false);
         const me = state.racers[mineIndex];
+        // Coins have no event of their own: chime when our purse grows.
+        if (me.coins > coinsSeen) audio.play('pickup', { volume: 0.35, rate: 1.6 });
+        coinsSeen = me.coins;
         audio.engineLevel(Math.abs(me.speed) / 30, me.boost > 0, !paused && !menu && state.phase !== 'done' && me.respawn <= 0);
       }
       input?.endFrame();
@@ -299,6 +319,7 @@
     <div class="kart-top">
       <div class="kart-lap" aria-label="Lap"><span>Lap</span><strong>{lapNow}<small>/{hud.laps}</small></strong><time>{raceClock(hud.raceTime)}</time>
         {#if self.seg > 0}<em class="kart-route">{trackFor(hud.track).paths[self.seg]?.name ?? ''}</em>{/if}
+        <div class="kart-coins" class:full={self.coins >= MAX_COINS} aria-label={`${self.coins} of ${MAX_COINS} coins`}><i aria-hidden="true"></i>{self.coins}<small>/{MAX_COINS}</small></div>
         {#if self.lapTimes.length}<ol class="kart-laptimes">{#each self.lapTimes as t, i (i)}<li class:best={t === best}>L{i + 1} {raceClock(t)}</li>{/each}</ol>{/if}
       </div>
       <div class="kart-item" class:rolling={self.roll > 0} aria-label="Item">
@@ -358,6 +379,10 @@
   .kart-stage :global(canvas) { display: block; width: 100%; height: 100%; }
   .kart-stage :global(canvas:focus-visible) { outline: 2px solid var(--accent-line-strong); outline-offset: -2px; }
   .kart-underwater { position: absolute; inset: 0; pointer-events: none; background: radial-gradient(ellipse at center, color-mix(in srgb, var(--info) 8%, transparent), color-mix(in srgb, var(--info) 30%, transparent)); }
+  .kart-lap .kart-coins { grid-column: 1 / -1; display: flex; align-items: center; gap: 6px; font-size: var(--fs-l); font-variant-numeric: tabular-nums; margin-block-start: 2px; }
+  .kart-lap .kart-coins i { width: 14px; height: 14px; border-radius: 50%; background: var(--warning); box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--on-scrim) 35%, transparent); }
+  .kart-lap .kart-coins small { font-size: var(--fs-s); opacity: .75; }
+  .kart-lap .kart-coins.full { color: var(--warning); font-weight: 600; }
   .kart-route { grid-column: 1 / -1; font-style: normal; font-size: var(--fs-s); color: var(--warning); text-transform: uppercase; letter-spacing: .06em; }
   .kart-overlay { position: absolute; inset: 0; z-index: 6; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 24px; text-align: center; background: color-mix(in srgb, var(--surface) 90%, transparent); }
   .kart-overlay h2 { margin: 0; font-size: var(--fs-2xl); }
