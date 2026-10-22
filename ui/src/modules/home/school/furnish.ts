@@ -45,7 +45,8 @@ export type KitNode =
   | 'Ceiling_Light'
   // Decor (optional — the scene skips any the kit lacks).
   | 'Backpack'
-  | 'Trashcan';
+  | 'Trashcan'
+  | 'Corkboard';
 
 export const KIT_NODES: readonly KitNode[] = [
   'Workstation', 'Chair', 'TeacherDesk', 'Board', 'Bookshelf', 'Plant', 'Clock', 'Bench',
@@ -64,6 +65,11 @@ export interface Placement {
 }
 
 const PI = Math.PI;
+/** Ceiling height (every kit wall is 3 m tall); the scene closes rooms and
+ *  the corridor with a ceiling here. */
+export const CEIL_Y = 3;
+/** A ceiling light panel's origin (its 0.12 m housing hangs under CEIL_Y). */
+export const LIGHT_Y = CEIL_Y - 0.12;
 const posterNode = (i: number): KitNode => `Poster_${(i % 6) + 1}` as KitNode;
 
 /** The bookshelf's floor spot (room-local) — kids browse it (life.ts). */
@@ -74,6 +80,20 @@ export function bookshelfAt(room: Pick<Room, 'width' | 'depth'>): P2 {
 /** Where the headmaster stands to address the class (room-local). */
 export function lecternAt(room: Pick<Room, 'width' | 'depth'>): P2 {
   return { x: -1.3, z: frontLaneZ(room) };
+}
+
+/** Ceiling light panels (room-local): a row over every second desk row
+ *  plus the front, two to three across — the scene hangs warm lamps on a
+ *  few of them. */
+export function ceilingLights(room: Pick<Room, 'width' | 'depth'>): P2[] {
+  const across = room.width >= 12 ? 3 : 2;
+  const rows = Math.max(2, Math.round(room.depth / 4));
+  const out: P2[] = [];
+  for (let j = 0; j < rows; j++) {
+    const z = -room.depth / 2 + (room.depth / rows) * (j + 0.5);
+    for (let i = 0; i < across; i++) out.push({ x: -room.width / 2 + (room.width / across) * (i + 0.5), z });
+  }
+  return out;
 }
 
 /** Every desk the room has — a full grid, so a half-empty class still looks
@@ -113,6 +133,9 @@ export function furnishRoom(room: Room): Placement[] {
     put('Wall', { x: W / 2, z }, -PI / 2);
   }
 
+  // Ceiling lights (the scene adds the ceiling itself).
+  for (const l of ceilingLights(room)) put('Ceiling_Light', l, 0, LIGHT_Y);
+
   // Front of the class.
   put('Board', { x: 0, z: -D / 2 + 0.02 }, 0, 0, `board:${room.id}`);
   put('Clock', { x: W / 2 - 1.3, z: -D / 2 + 0.02 }, 0, 2.45);
@@ -124,12 +147,19 @@ export function furnishRoom(room: Room): Placement[] {
   put('Plant', { x: W / 2 - 0.45, z: D / 2 - 0.45 }, 0);
   put('Bench', { x: benchSlot(room, 1).x, z: benchSlot(room, 1).z }, 0);
 
-  // Posters: back wall (skipping the door) at eye height, east wall too.
+  // Posters: back wall (skipping the door) at eye height, east wall too —
+  // the first east-wall spot past the bookshelf is a corkboard instead.
   let p = 0;
+  let cork = false;
   for (let i = 0; i < nx - 1; i++) put(posterNode(p++), { x: -W / 2 + SEG / 2 + i * SEG, z: D / 2 - 0.02 }, PI, 1.75);
   for (let j = 1; j < nz - 1; j += 1) {
     const z = -D / 2 + SEG / 2 + j * SEG;
     if (Math.abs(z - bookshelfAt(room).z) < 1.4) continue;
+    if (!cork) {
+      cork = true;
+      put('Corkboard', { x: W / 2 - 0.02, z }, -PI / 2, 1.6);
+      continue;
+    }
     put(posterNode(p++), { x: W / 2 - 0.02, z }, -PI / 2, 1.75);
   }
 
@@ -161,7 +191,7 @@ export function furnishCorridor(rooms: readonly Pick<Room, 'id' | 'doorX'>[], le
         : { node: 'Corridor_Wall', x, y: 0, z: -CORRIDOR_HALF, rotY: 0 },
     );
     out.push({ node: 'Corridor_Wall', x, y: 0, z: CORRIDOR_HALF, rotY: PI });
-    if (i % 2 === 0) out.push({ node: 'Ceiling_Light', x, y: 2.95, z: 0, rotY: 0 });
+    if (i % 2 === 0) out.push({ node: 'Ceiling_Light', x, y: LIGHT_Y, z: 0, rotY: 0 });
   }
   for (const z of [-CORRIDOR_HALF + SEG / 2, CORRIDOR_HALF - SEG / 2]) {
     out.push({ node: 'Corridor_Wall', x: 0, y: 0, z, rotY: PI / 2 });

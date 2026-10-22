@@ -10,7 +10,7 @@ pub enum GameKind {
 impl GameKind {
     pub fn maps(self) -> &'static [&'static str] {
         match self {
-            GameKind::Shooter => &["isle", "mesa"],
+            GameKind::Shooter => &["isle", "mesa", "deadcity"],
             GameKind::Kart => &[
                 "meadow", "downtown", "canyon", "frost", "lagoon", "volcano", "skyway",
             ],

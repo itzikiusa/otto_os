@@ -459,21 +459,20 @@ test('item boxes: rows on every route, five across main roads, three on narrow b
   }
 });
 
-test('itemWeights: the leader never gets a star, bolt or triple', () => {
+test('itemWeights: the leader never gets a star, lightning, blue shell or triple / golden mushroom', () => {
   const w = itemWeights(1, 8);
-  assert.equal(w.star, 0);
-  assert.equal(w.bolt, 0);
-  assert.equal(w.triple, 0);
-  assert.ok(w.banana > w.mushroom);
+  for (const k of ['star', 'bolt', 'blue', 'triple', 'golden'] as ItemKind[]) assert.equal(w[k], 0, k);
+  // Defence up front: bananas and green shells.
+  assert.ok(w.banana > w.mushroom && w.green > w.mushroom);
   // A single racer counts as the front.
   assert.deepEqual(itemWeights(1, 1), w);
 });
 
 test('itemWeights: the back of the pack gets more catch-up items', () => {
   const front = itemWeights(1, 8), back = itemWeights(8, 8);
-  for (const k of ['star', 'bolt', 'triple'] as ItemKind[]) assert.ok(back[k] > front[k], k);
-  assert.ok(back.banana < front.banana);
-  assert.deepEqual(back, { mushroom: 14, triple: 28, banana: 4, bomb: 16, star: 24, bolt: 14 });
+  for (const k of ['star', 'bolt', 'triple', 'golden', 'blue'] as ItemKind[]) assert.ok(back[k] > front[k], k);
+  assert.ok(back.banana < front.banana && back.green < front.green);
+  assert.deepEqual(back, { mushroom: 10, triple: 22, banana: 2, bomb: 3, star: 14, bolt: 15, golden: 12, green: 4, red: 10, blue: 8 });
 });
 
 test('itemWeights interpolate front -> middle -> back', () => {
@@ -482,7 +481,7 @@ test('itemWeights interpolate front -> middle -> back', () => {
     assert.ok(Math.abs(quarter[k] - (front[k] + mid[k]) / 2) < 1e-9, `${k} at 1/4`);
     assert.ok(Math.abs(threeQ[k] - (mid[k] + back[k]) / 2) < 1e-9, `${k} at 3/4`);
   }
-  assert.deepEqual(mid, { mushroom: 26, triple: 14, banana: 18, bomb: 30, star: 9, bolt: 3 });
+  assert.deepEqual(mid, { mushroom: 22, triple: 10, banana: 12, bomb: 8, star: 3, bolt: 2, golden: 3, green: 18, red: 18, blue: 4 });
   for (let place = 1; place <= 8; place++) {
     const w = itemWeights(place, 8);
     assert.ok(ITEM_KINDS.every(k => w[k] >= 0));
@@ -499,8 +498,8 @@ class FixedRng extends Rng {
 test('rollItem respects the weights', () => {
   assert.equal(rollItem(new FixedRng(0), 1, 8), 'mushroom');
   // The top of the range never lands on a zero-weight item for the leader.
-  assert.equal(rollItem(new FixedRng(0.999999), 1, 8), 'bomb');
-  assert.equal(rollItem(new FixedRng(0.999999), 8, 8), 'bolt');
+  assert.equal(rollItem(new FixedRng(0.999999), 1, 8), 'red');
+  assert.equal(rollItem(new FixedRng(0.999999), 8, 8), 'blue');
   const rng = new Rng(7);
   const count = (place: number) => {
     const c: Record<string, number> = {};
@@ -508,13 +507,11 @@ test('rollItem respects the weights', () => {
     return c;
   };
   const front = count(1), back = count(8);
-  assert.equal(front.star ?? 0, 0);
-  assert.equal(front.bolt ?? 0, 0);
-  assert.equal(front.triple ?? 0, 0);
-  const catchUp = (c: Record<string, number>) => (c.star ?? 0) + (c.bolt ?? 0) + (c.triple ?? 0);
-  assert.ok(catchUp(back) > 1500, `back catch-up rolls ${catchUp(back)}`);
-  // ~4% bananas at the back vs ~50% at the front.
-  assert.ok((back.banana ?? 0) < 400 && (front.banana ?? 0) > 1700);
+  for (const k of ['star', 'bolt', 'triple', 'golden', 'blue']) assert.equal(front[k] ?? 0, 0, k);
+  const catchUp = (c: Record<string, number>) => (c.star ?? 0) + (c.bolt ?? 0) + (c.triple ?? 0) + (c.golden ?? 0) + (c.blue ?? 0);
+  assert.ok(catchUp(back) > 2200, `back catch-up rolls ${catchUp(back)}`);
+  // ~2% bananas at the back vs ~40% at the front.
+  assert.ok((back.banana ?? 0) < 250 && (front.banana ?? 0) > 1350, `bananas back ${back.banana} front ${front.banana}`);
 });
 
 test('kartSeats: CPU fill to 8 with distinct racers first', () => {

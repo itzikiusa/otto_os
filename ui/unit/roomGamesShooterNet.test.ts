@@ -1,10 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { decodeBuilds, decodeInput, decodeSnapshot, encodeInput, encodeSnapshot, FIGHTER_FIELDS, type ShooterSnapshot } from '../src/modules/rooms/games/shooter/net.ts';
+import { decodeBuilds, decodeInput, decodeSnapshot, encodeInput, encodeSnapshot, FIGHTER_FIELDS, GEAR_AT, type ShooterSnapshot } from '../src/modules/rooms/games/shooter/net.ts';
 import { createMatch, idleShooterInput, MAX_LOOT, MAX_ROCKETS, PICKAXE_KEY, SLOTS, tickMatch, type ShooterEvent, type ShooterInput, type ShooterState } from '../src/modules/rooms/games/shooter/sim.ts';
 import { makeBuild, MAX_BUILDS, packBuild, TILES, type Build } from '../src/modules/rooms/games/shooter/builds.ts';
 import { ITEM_IDS, ITEM_SLOTS } from '../src/modules/rooms/games/shooter/weapons.ts';
 import { FIGHTER_IDS } from '../src/modules/rooms/games/shooter/catalog.ts';
+import { emptyMode } from '../src/modules/rooms/games/shooter/modes/index.ts';
+import { MAX_AREAS, MAX_DRONES, MAX_FLYING } from '../src/modules/rooms/games/shooter/modes/gear.ts';
+import { APOC_CAP, MAX_INFECTED, ZOMBIE_LOOT_CAP, type Zombie } from '../src/modules/rooms/games/shooter/zombies.ts';
 import { shooterSeats } from '../src/modules/rooms/games/setup.ts';
 
 const names = (slot: number) => `Human ${slot}`;
@@ -25,8 +28,11 @@ function midMatch(): ShooterState {
   s.builds[2].hp = 123.4;
   s.builds[2].grow = 0; // finished; the others are still going up
   // Every kind of hotbar item and materials on the first fighter.
-  s.players[0].weapons = [{ w: 'rifle', rarity: 2, mag: 17 }, { w: 'bandage', rarity: 0, mag: 9 }, null, { w: 'shieldpot', rarity: 2, mag: 2 }, { w: 'shotgun', rarity: 4, mag: 3 }];
+  s.players[0].weapons = [{ w: 'rifle', rarity: 2, mag: 17, att: 0 }, { w: 'bandage', rarity: 0, mag: 9, att: 0 }, null, { w: 'shieldpot', rarity: 2, mag: 2, att: 0 }, { w: 'shotgun', rarity: 4, mag: 3, att: 0 }];
   s.players[0].mats = [120, 30, 7];
+  // Gunplay and gear on the second fighter: sights half up, recoil, sliding, grenades, streaks, a class, points.
+  Object.assign(s.players[1], { ads: 0.5, kick: 0.034, kickYaw: -0.012, crouch: true, slideT: 0.4, lethal: 1, lethalN: 2, tacKind: 3, tacN: 1, streak: 4.25, ready: 5, cls: 2, points: 1234, respawn: 2.5, blind: 1.2, deaths: 3, spotted: 0.8 });
+  s.players[1].weapons[0] = { w: 'smg', rarity: 3, mag: 44, att: 15 };
   cached = s;
   return s;
 }
@@ -66,7 +72,12 @@ test('encodeSnapshot/decodeSnapshot round-trip', () => {
     assert.ok(Math.abs(b.useT - p.useT) <= 0.005 + 1e-9 && Math.abs(b.swingT - p.swingT) <= 0.005 + 1e-9);
     assert.equal(b.killedBy, p.killedBy);
     assert.equal(b.grounded, p.grounded);
+    // Gunplay, stance, grenades, killstreaks, class, points, respawn.
+    for (const k of ['ads', 'kick', 'kickYaw', 'tacT', 'streak', 'respawn', 'blind', 'spotted'] as const) assert.ok(Math.abs(b[k] - p[k]) <= 0.05 + 1e-9, `${i}.${k}`);
+    assert.deepEqual([b.crouch, b.slideT > 0, b.tactical, b.lethal, b.lethalN, b.tacKind, b.tacN, b.ready, b.cls, b.points, b.deaths], [p.crouch, p.slideT > 0, p.tactical, p.lethal, p.lethalN, p.tacKind, p.tacN, p.ready, p.cls, p.points, p.deaths]);
   });
+  assert.equal(back.mode, 'royale');
+  assert.deepEqual(back.players[1].weapons[0], { w: 'smg', rarity: 3, mag: 44, att: 15 }, 'attachments ride with the weapon');
   assert.equal(back.loot.length, s.loot.length);
   back.loot.forEach((l, i) => {
     const o = s.loot[i];
@@ -144,18 +155,37 @@ test('decodeSnapshot rejects malformed payloads', () => {
   const row = (s: ShooterSnapshot, i: number, v: number) => { const f = s.f.map(r => [...r]); f[0][i] = v; return { ...s, f }; };
   const bad: [string, (s: ShooterSnapshot) => unknown][] = [
     ['version', s => ({ ...s, v: 2 })],
+    ['old version', s => ({ ...s, v: 3 })],
+    ['bad mode', s => ({ ...s, mo: 9 })],
+    ['missing mode', s => ({ ...s, mo: undefined })],
+    ['short mode state', s => ({ ...s, ms: s.ms.slice(1) })],
+    ['bad Zombies phase', s => ({ ...s, ms: s.ms.map((v, i) => (i === 9 ? 7 : v)) })],
+    ['capture point owner out of range', s => ({ ...s, cp: [0, 0, 0, 6, 2, 0, -1] })],
+    ['capture progress past full', s => ({ ...s, cp: [0, 0, 0, 6, -1, 1.5, 0] })],
+    ['too many capture points', s => ({ ...s, cp: Array(4 * 7).fill(0) })],
+    ['infected list not whole records', s => ({ ...s, zb: [1, 0, 0, 0] })],
+    ['infected kind code out of range', s => ({ ...s, zb: [1, 16, 0, 0, 0, 0, 100] })],
+    ['infected health over 100%', s => ({ ...s, zb: [1, 0, 0, 0, 0, 0, 101] })],
+    ['too many infected', s => ({ ...s, zb: Array(65 * 7).fill(1) })],
+    ['grenades not whole records', s => ({ ...s, nd: [0, 1, 2] })],
+    ['too many areas', s => ({ ...s, ar: Array(17 * 7).fill(0) })],
+    ['too many drones', s => ({ ...s, dn: Array(5 * 5).fill(0) })],
+    ['UAV time not finite', s => ({ ...s, uv: [NaN] })],
+    ['grenade code out of range', s => row(s, GEAR_AT + 5, 55)],
+    ['streak bits out of range', s => row(s, GEAR_AT + 8, 8)],
+    ['class out of range', s => row(s, GEAR_AT + 9, 4)],
     ['missing buildRev', s => ({ ...s, br: undefined })],
     ['bad structure code', s => ({ ...s, b: [-5, 100] })],
     ['structure hp zero', s => ({ ...s, b: [packBuild({ kind: 1, gx: 3, gz: 3, level: 0, dir: 0, mat: 0, variant: 0 }), 0] })],
     ['odd structure list', s => ({ ...s, b: [1, 2, 3] })],
     ['structure hp over the material max', s => ({ ...s, b: [packBuild({ kind: 1, gx: 3, gz: 3, level: 0, dir: 0, mat: 0, variant: 0 }), 151] })],
     ['fractional structure hp', s => ({ ...s, b: [packBuild({ kind: 1, gx: 3, gz: 3, level: 0, dir: 0, mat: 0, variant: 0 }), -12.5] })],
-    ['mats over the cap', s => row(s, FIGHTER_FIELDS - 8, 501)],
-    ['fractional mats', s => row(s, FIGHTER_FIELDS - 7, 1.5)],
-    ['bad build piece', s => row(s, FIGHTER_FIELDS - 5, 3)],
-    ['bad build material', s => row(s, FIGHTER_FIELDS - 4, -1)],
-    ['negative revive progress', s => row(s, FIGHTER_FIELDS - 1, -1)],
-    ['revive progress past the revive time', s => row(s, FIGHTER_FIELDS - 1, 99)],
+    ['mats over the cap', s => row(s, GEAR_AT - 8, 501)],
+    ['fractional mats', s => row(s, GEAR_AT - 7, 1.5)],
+    ['bad build piece', s => row(s, GEAR_AT - 5, 3)],
+    ['bad build material', s => row(s, GEAR_AT - 4, -1)],
+    ['negative revive progress', s => row(s, GEAR_AT - 1, -1)],
+    ['revive progress past the revive time', s => row(s, GEAR_AT - 1, 99)],
     ['bad team size', s => ({ ...s, sq: 3 })],
     ['missing winning team', s => ({ ...s, wt: undefined })],
     ['team out of range', s => ({ ...s, q: [[0, 0, -1, 16], ...s.q.slice(1)] })],
@@ -194,17 +224,22 @@ test('decodeSnapshot rejects malformed payloads', () => {
     ['short rocket', s => ({ ...s, r: [[1, 2, 3]] })],
     ['too many events', s => ({ ...s, e: Array.from({ length: 65 }, (_, i) => [i, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]) })],
     ['bad event type', s => ({ ...s, e: [[1, 99, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]] })],
-    ['too much loot', s => ({ ...s, l: Array.from({ length: MAX_LOOT + 1 }, (_, i) => [i, 1, 10, 0, 0, 0]) })],
+    ['too much loot', s => ({ ...s, l: Array.from({ length: MAX_LOOT + 1 }, () => [1, 1, 10, 0, 0, 0]).flat() })],
     ['loot not an array', s => ({ ...s, l: 'x' })],
-    ['loot code too big', s => ({ ...s, l: [[1, 6 * ITEM_SLOTS * 5 * 6, 10, 0, 0, 0]] })],
-    ['loot code fractional', s => ({ ...s, l: [[1, 2.5, 10, 0, 0, 0]] })],
+    ['loot as rows (the old format)', s => ({ ...s, l: [[1, 1, 10, 0, 0, 0]] })],
+    ['loot code too big', s => ({ ...s, l: [1, 8 * ITEM_SLOTS * 5 * 6, 10, 0, 0, 0] })],
+    ['grenade loot of no such kind', s => ({ ...s, l: [1, ((7 * ITEM_SLOTS + 0) * 5 + 1) * 6, 4, 0, 0, 0] })],
+    ['loot code fractional', s => ({ ...s, l: [1, 2.5, 10, 0, 0, 0] })],
     // code = ((kind * ITEM_SLOTS + item + 1) * 5 + rarity) * 6 + sub + 1; ITEM_IDS: six weapons, then the consumables.
-    ['weapon loot carrying a consumable', s => ({ ...s, l: [[1, ((0 * ITEM_SLOTS + 7 + 1) * 5 + 0) * 6, 10, 0, 0, 0]] })],
-    ['item loot carrying a weapon', s => ({ ...s, l: [[1, ((4 * ITEM_SLOTS + 1 + 1) * 5 + 0) * 6, 10, 0, 0, 0]] })],
-    ['ammo loot carrying an item', s => ({ ...s, l: [[1, ((1 * ITEM_SLOTS + 1 + 1) * 5 + 0) * 6 + 1, 10, 0, 0, 0]] })],
-    ['short loot', s => ({ ...s, l: [[1, 0, 0, 0]] })],
+    ['weapon loot carrying a consumable', s => ({ ...s, l: [1, ((0 * ITEM_SLOTS + 7 + 1) * 5 + 0) * 6, 10, 0, 0, 0] })],
+    ['item loot carrying a weapon', s => ({ ...s, l: [1, ((4 * ITEM_SLOTS + 1 + 1) * 5 + 0) * 6, 10, 0, 0, 0] })],
+    ['ammo loot carrying an item', s => ({ ...s, l: [1, ((1 * ITEM_SLOTS + 1 + 1) * 5 + 0) * 6 + 1, 10, 0, 0, 0] })],
+    ['attachment loot with no such attachment', s => ({ ...s, l: [1, ((6 * ITEM_SLOTS + 0) * 5 + 2) * 6, 4, 0, 0, 0] })],
+    ['short loot', s => ({ ...s, l: [1, 0, 0, 0] })],
   ];
   assert.ok(decodeSnapshot(fresh(), names), 'baseline decodes');
+  // A hotbar slot with an impossible rarity / attachment code reads as empty (the rest still decodes).
+  assert.equal(decodeSnapshot(row(fresh(), 20, 80), names)?.players[0].weapons[0], null);
   for (const [label, mutate] of bad) assert.equal(decodeSnapshot(mutate(fresh()), names), null, label);
   for (const junk of [null, undefined, 1, 'x', [], {}, { v: 1, m: 'isle' }]) assert.equal(decodeSnapshot(junk, names), null, String(junk));
 });
@@ -223,12 +258,25 @@ test('a full 16-player snapshot with loot stays under 16 KiB, even at the caps',
     drops: Array.from({ length: 4 }, (_, i) => ({ id: 300000 + i, x: -123.45, y: 89.99, z: 156.78, ground: 12.34, landed: i % 2 === 0 })),
     felled: Array.from({ length: 128 }, (_, i) => 200 + i),
     players: s.players.map(p => ({ ...p, revive: 3.21, x: -123.456, y: 12.345, z: 156.789, vx: -12.345, vy: -12.345, vz: -12.345, yaw: -3.141, pitch: -1.234, damage: 12345, aliveTime: 456.7, reload: 2.345, useT: 6.789, swingT: 0.345, mats: [500, 500, 500] as [number, number, number],
-      weapons: Array.from({ length: SLOTS }, () => ({ w: ITEM_IDS.at(-1)!, rarity: 4 as const, mag: 15 })), ammo: { light: 240, medium: 240, shells: 40, heavy: 24, rockets: 6 } })),
+      weapons: Array.from({ length: SLOTS }, () => ({ w: ITEM_IDS.at(-1)!, rarity: 4 as const, mag: 15, att: 15 })), ammo: { light: 240, medium: 240, shells: 40, heavy: 24, rockets: 6 },
+      ads: 0.555, kick: -0.1234, kickYaw: -0.1234, crouch: true, slideT: 0.5, tactical: true, mantleT: 0.3, tacT: 3.456, lethal: 1 as const, lethalN: 9, tacKind: 3 as const, tacN: 9, streak: 12.25, ready: 7, cls: 3, points: 123456, respawn: 3.45, blind: 2.345, deaths: 123, spotted: 1.234 })),
+    // Every mode list at its cap with long coordinates: the infected, grenades, areas, drones, UAVs, capture points.
+    infected: Array.from({ length: MAX_INFECTED }, (_, i) => ({ ...s.players[0], id: 400000 + i * 977, kind: 2 as const, x: -123.456, y: -12.345, z: 156.789, yaw: -3.14159, hp: 333, max: 420, swing: 0.3, stun: 1 } as unknown as Zombie)),
+    nades: Array.from({ length: MAX_FLYING }, (_, i) => ({ id: i, owner: 15, team: 15, kind: 4 as const, x: -123.456, y: -12.345, z: 156.789, vx: 0, vy: 0, vz: 0, fuse: 1, rest: false })),
+    areas: Array.from({ length: MAX_AREAS }, (_, i) => ({ id: i, kind: 3, owner: 15, team: 15, x: -123.456, y: -12.345, z: 156.789, r: 18.25, t: 11.75, tick: 0 })),
+    drones: Array.from({ length: MAX_DRONES }, (_, i) => ({ id: i, owner: 15, team: 15, x: -123.456, y: -12.345, z: 156.789, yaw: -3.14159, t: 20, cool: 0 })),
+    uav: Array.from({ length: 16 }, () => 21.75),
+    obj: { ...emptyMode(), score: [149, 148] as [number, number], limit: 150, time: 359.9, points: Array.from({ length: 3 }, () => ({ x: -123.456, y: -12.345, z: 156.789, r: 6, own: 1, cap: 0.555, by: 0 })), lzX: -123.456, lzY: -12.345, lzZ: 156.789, round: 29, left: 99 },
   };
   const evs: ShooterEvent[] = Array.from({ length: 64 }, (_, i) => ({ id: 900000 + i, type: 'hit', player: 15, target: 14, value: 123, flag: 3, x: -123.456, y: 12.345, z: 156.789, x2: -123.456, y2: 12.345, z2: 156.789 }));
   // The two bulky lists never ride together; each worst case fits on its own.
   const worstLoot = JSON.stringify(encodeSnapshot(big, evs, true, false));
   assert.ok(worstLoot.length < 16 * 1024, `worst-case loot snapshot ${worstLoot.length} bytes`);
+  assert.equal(decodeSnapshot(JSON.parse(worstLoot), names)?.infected.length, APOC_CAP, 'a full floor of loot rides with the royale horde at most');
+  // Zombies: the full horde with Zombies' capped floor loot.
+  const horde = JSON.stringify(encodeSnapshot({ ...big, mode: 'zombies', loot: big.loot.slice(0, ZOMBIE_LOOT_CAP) }, evs, true, false));
+  assert.ok(horde.length < 16 * 1024, `worst-case Zombies snapshot ${horde.length} bytes`);
+  assert.equal(decodeSnapshot(JSON.parse(horde), names)?.infected.length, MAX_INFECTED, 'every infected decodes');
   const worstBuilds = JSON.stringify(encodeSnapshot(big, evs, false, true));
   assert.ok(worstBuilds.length < 16 * 1024, `worst-case structures snapshot ${worstBuilds.length} bytes`);
   assert.ok(decodeSnapshot(JSON.parse(worstLoot), names), 'worst loot case decodes');
@@ -236,25 +284,28 @@ test('a full 16-player snapshot with loot stays under 16 KiB, even at the caps',
 });
 
 test('encodeInput/decodeInput round-trip', () => {
-  const input: ShooterInput = { mx: -0.71, mz: 1, yaw: -2.345, pitch: 0.4, fire: true, aim: false, jump: true, sprint: false, reload: true, interact: false, slot: PICKAXE_KEY, build: true, piece: 2, mat: 1, edit: true };
+  const input: ShooterInput = { mx: -0.71, mz: 1, yaw: -2.345, pitch: 0.4, fire: true, aim: false, jump: true, sprint: false, reload: true, interact: false, slot: PICKAXE_KEY, build: true, piece: 2, mat: 1, edit: true, crouch: true, tac: false, lethal: true, tactical: false, streak: true, cls: 3 };
   for (const fighter of FIGHTER_IDS) {
     const w = encodeInput(input, fighter);
     assert.ok(JSON.stringify(w).length < 1024);
     assert.deepEqual(decodeInput(wire(w)), { input, fighter });
   }
-  for (let flags = 0; flags < 256; flags++) {
-    const i: ShooterInput = { ...idleShooterInput(), fire: (flags & 1) > 0, aim: (flags & 2) > 0, jump: (flags & 4) > 0, sprint: (flags & 8) > 0, reload: (flags & 16) > 0, interact: (flags & 32) > 0, edit: (flags & 64) > 0, build: (flags & 128) > 0, piece: flags % 3, mat: (flags >> 2) % 3 };
+  for (let flags = 0; flags < 8192; flags += flags < 256 ? 1 : 37) {
+    const i: ShooterInput = {
+      ...idleShooterInput(), fire: (flags & 1) > 0, aim: (flags & 2) > 0, jump: (flags & 4) > 0, sprint: (flags & 8) > 0, reload: (flags & 16) > 0, interact: (flags & 32) > 0, edit: (flags & 64) > 0, build: (flags & 128) > 0, piece: flags % 3, mat: (flags >> 2) % 3,
+      crouch: (flags & 256) > 0, tac: (flags & 512) > 0, lethal: (flags & 1024) > 0, tactical: (flags & 2048) > 0, streak: (flags & 4096) > 0, cls: flags % 4,
+    };
     assert.deepEqual(decodeInput(wire(encodeInput(i, 'male-a')))?.input, i);
   }
 });
 
 test('decodeInput rejects malformed input', () => {
-  const ok = [0, 0, 0, 0, 0, 0, 0, 0, 0];
+  const ok = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
   const with_ = (i: number, v: unknown) => ({ k: ok.map((x, j) => (j === i ? v : x)) });
   assert.ok(decodeInput({ k: ok }));
   for (const junk of [
     null, undefined, 'k', 3, [], {}, { k: ok.slice(1) }, { k: [...ok, 0] }, { k: 'abcdefghi' },
-    with_(0, 1.01), with_(1, -2), with_(2, 7.5), with_(3, 1.7), with_(4, 256), with_(4, -1), with_(4, 1.5),
+    with_(0, 1.01), with_(1, -2), with_(2, 7.5), with_(3, 1.7), with_(4, 8192), with_(4, -1), with_(4, 1.5), with_(9, 4), with_(9, -1), with_(9, 0.5),
     with_(5, 1.5), with_(5, -1), with_(5, PICKAXE_KEY + 1), with_(6, 12), with_(6, -1),
     with_(7, 3), with_(7, -1), with_(7, 0.5), with_(8, 3), with_(8, -1),
     with_(0, NaN), with_(2, Infinity), with_(3, null), with_(1, '0'),

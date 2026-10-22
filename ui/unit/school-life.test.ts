@@ -77,7 +77,8 @@ test('status → pose: only real output is typing; an alive-but-quiet process si
   assert.equal(poseFor('idle'), 'idle');
   assert.equal(poseFor('needs-you'), 'needs-you');
   assert.equal(poseFor('suspended'), 'away');
-  assert.equal(poseFor('ended'), 'away');
+  assert.equal(poseFor('ended'), 'done');
+  assert.equal(poseFor('failed'), 'error');
 });
 
 test('each provider gets its own kid; unknown providers the custom kid', () => {

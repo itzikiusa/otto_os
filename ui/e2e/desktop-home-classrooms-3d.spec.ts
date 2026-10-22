@@ -64,9 +64,12 @@ type Debug = {
   view: { kind: string; roomId?: string; kidId?: string };
   frames: number;
   missing: string[];
-  kids: { id: string; clip: string; mode: string; visible: boolean }[];
+  kids: { id: string; clip: string; mode: string; visible: boolean; pin?: string | null }[];
   head: { clip: string; mode: string; target: string | null } | null;
   screens: Record<string, string>;
+  hiRes?: string | null;
+  lamps?: number;
+  ceiling?: boolean;
 };
 
 function debug(page: Page): Promise<Debug | null> {
@@ -112,8 +115,8 @@ test.beforeAll(async () => {
   ids.kick = await shell('Kick Me Kid');
   ids.bench = await shell('Detention Kid');
   // Two quiet kids: a long sleep keeps the shell alive without output or a
-  // prompt (idle — free to wander). A shell AT its prompt counts as "needs
-  // you" (hand up), which is what Kick Me / Detention Kid stay at.
+  // prompt (idle — free to wander). Kick Me / Detention Kid stay at their
+  // prompt (idle too: the daemon never flags a plain shell as "needs you").
   for (const id of [ids.idle1, ids.idle2]) await ctx.post(`${base}/api/v1/sessions/${id}/input`, { data: { text: 'sleep 3600', submit: true } });
   // The printer keeps producing output (a "working" kid with a live screen).
   await ctx.post(`${base}/api/v1/sessions/${ids.printer}/input`, {
@@ -549,4 +552,63 @@ test('hidden document suspends the School render loop and resumes without losing
   });
   await expect.poll(() => debug(page).then(d => d?.frames ?? 0)).toBeGreaterThan(before.frames);
   expect((await debug(page))!.view).toEqual(before.view);
+});
+
+test.describe('At a glance', () => {
+  // Cheap functional rendering (reduced motion, ¼ pixels), like the
+  // regressions above: these check what the room TELLS you, not animation.
+  test.describe.configure({ mode: 'default', timeout: 120_000 });
+  test.use({ reducedMotion: 'reduce', viewport: { width: 1280, height: 860 }, deviceScaleFactor: 0.5 });
+
+  test('the needs-you queue lists a waiting kid and one click walks into its room onto it', async ({ page }) => {
+    // The daemon raises "needs you" only for agent providers at a turn end,
+    // never for a plain shell (monitor.rs `attention_wanted`), and the E2E
+    // daemon runs no real agent CLI. So the flag arrives the way a reload
+    // restores one: persisted in `otto_attention` (lib/attention.ts) for an
+    // idle session, which the store keeps until the session works or exits —
+    // so the shell first settles at its prompt (its startup output is "working").
+    const id = await shell('Queue Kid');
+    try {
+      await expect
+        .poll(async () => ((await (await ctx.get(`${base}/api/v1/sessions/${id}`)).json()) as { status?: string }).status, { timeout: 30_000 })
+        .toBe('idle');
+      await page.addInitScript((sid) => {
+        localStorage.setItem('otto_attention', JSON.stringify({ raised: { [sid]: Date.now() }, seen: {}, notice: {} }));
+      }, id);
+      await boot(page);
+      const row = box(page).locator('.queue .qmain', { hasText: 'Queue Kid' });
+      await expect(row).toBeVisible({ timeout: 45_000 });
+      await expectFullyInViewport(page, box(page).locator('.queue'), 'school needs-you queue');
+      // Keyboard / screen-reader parity: the list carries the same section.
+      await expect(box(page).locator(`.lattn [data-attn-id="${id}"]`)).toHaveCount(1);
+      await row.click();
+      await expect.poll(() => debug(page).then((d) => `${d?.view.kind}:${d?.view.roomId}`), { timeout: 45_000 }).toBe(`room:${wsId}`);
+      await expect(card(page)).toContainText('Queue Kid');
+      await expect(card(page)).toContainText('Needs you');
+      // Its pin says so, and its monitor switched to the crisp 2× canvas.
+      await expect.poll(() => debug(page).then((d) => d?.kids.find((k) => k.id === id)?.pin ?? null)).toBe('needs-you');
+      await expect.poll(() => debug(page).then((d) => d?.hiRes ?? null), { timeout: 15_000 }).not.toBeNull();
+      await box(page).locator('.stage').screenshot({ path: test.info().outputPath('school-queue.png') });
+    } finally {
+      await ctx.delete(`${base}/api/v1/sessions/${id}`).catch(() => undefined);
+    }
+  });
+
+  test('hovering a kid shows its state, last activity and a live terminal peek; the room is lit and closed', async ({ page }) => {
+    await boot(page);
+    await enterOurRoom(page);
+    const d = (await debug(page))!;
+    expect(d.ceiling).toBe(true);
+    expect(d.lamps).toBeGreaterThan(0);
+    await expect.poll(() => debug(page).then((x) => x?.kids.find((k) => k.id === ids.printer)?.pin ?? null), { timeout: 30_000 }).toBe('working');
+    await expect.poll(async () => (await project(page, { kind: 'kid', id: ids.printer }))?.visible ?? false, { timeout: 15_000 }).toBe(true);
+    const p = (await project(page, { kind: 'kid', id: ids.printer }))!;
+    await page.mouse.move(p.x, p.y + 30);
+    const tag = box(page).locator('.hover-tag');
+    await expect(tag).toContainText('Printer Kid');
+    await expect(tag).toContainText(/active \d+[smhd] ago/);
+    await expect(tag.locator('.peek')).toContainText(MARKER, { timeout: 30_000 });
+    await expectFullyInViewport(page, tag, 'school hover peek');
+    await box(page).locator('.stage').screenshot({ path: test.info().outputPath('school-peek.png') });
+  });
 });

@@ -18,9 +18,9 @@ export const GAMES: GameChoice[] = [
     maps: (Object.keys(TRACK_DEFS) as TrackId[]).map(id => ({ id, name: TRACK_DEFS[id].name, blurb: TRACK_DEFS[id].blurb })),
   },
   {
-    kind: 'shooter', title: 'Storm Royale', tagline: 'Drop in, loot up, outlast the storm.',
+    kind: 'shooter', title: 'Storm Royale', tagline: 'Battle royale, team gunfights and zombie survival.',
     cover: '/room-games/cover-shooter.webp', coverAlt: 'Third-person survivors fighting across an island town',
-    summary: 'Battle royale · up to 16 · solo, duos or squads', maxPlayers: 4,
+    summary: 'Royale · Team Deathmatch · Domination · Zombies · Apocalypse · up to 16', maxPlayers: 4,
     maps: SHOOTER_MAPS.map(m => ({ id: m.id, name: m.name, blurb: m.blurb })),
   },
 ];

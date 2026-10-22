@@ -162,7 +162,7 @@ test('build mode places a wall in front, spends materials, blocks bullets and br
   assert.equal(wall.hp, MATERIALS[0].hp);
   // A shooter behind the wall hits the wall, not its builder.
   put(s, b, a.x, a.z + 12, Math.PI);
-  b.weapons[0] = { w: 'rifle', rarity: 0, mag: 30 }; b.current = 0;
+  b.weapons[0] = { w: 'rifle', rarity: 0, mag: 30, att: 0 }; b.current = 0;
   const aim = { yaw: Math.atan2(a.x - b.x, a.z - b.z), pitch: Math.atan2(a.y + 1.15 - (b.y + EYE), 12) };
   const seq = s.eventSeq;
   run(s, 0.4, [press({}), press({ ...aim, aim: true, fire: true })]);
@@ -256,7 +256,7 @@ test('pickaxe: harvests wood from a trunk and brick from a rock, and hits surviv
 test('consumables: hold fire to use, capped, interrupted by damage, stack on pickup', () => {
   const s = groundMatch(2);
   const [a, b] = s.players;
-  a.weapons = [{ w: 'bandage', rarity: 0, mag: 13 }, null, null, null, null];
+  a.weapons = [{ w: 'bandage', rarity: 0, mag: 13, att: 0 }, null, null, null, null];
   a.current = 0; a.hp = 50;
   run(s, CONSUMABLES.bandage.time - 0.2, [press({ fire: true })]);
   assert.equal(a.hp, 50, 'not done yet');
@@ -271,9 +271,9 @@ test('consumables: hold fire to use, capped, interrupted by damage, stack on pic
   assert.equal(a.hp, 75);
   assert.equal(a.useT, 0, 'nothing to heal');
   // Shield potions: a hit interrupts the drink.
-  a.weapons[1] = { w: 'shieldpot', rarity: 2, mag: 1 };
+  a.weapons[1] = { w: 'shieldpot', rarity: 2, mag: 1, att: 0 };
   put(s, b, a.x, a.z + 6, Math.PI);
-  b.weapons[0] = { w: 'pistol', rarity: 0, mag: 16 }; b.current = 0;
+  b.weapons[0] = { w: 'pistol', rarity: 0, mag: 16, att: 0 }; b.current = 0;
   run(s, 2, [press({ slot: 2, fire: true })]);
   assert.ok(a.useT > 1);
   tickMatch(s, [press({ slot: 2, fire: true }), press({ yaw: Math.atan2(a.x - b.x, a.z - b.z), pitch: Math.atan2(a.y + 1.15 - (b.y + EYE), 6), fire: true })]);
@@ -287,7 +287,7 @@ test('consumables: hold fire to use, capped, interrupted by damage, stack on pic
   s.loot.push({ id: 7777, kind: 'item', weapon: 'bandage', rarity: 0, ammo: null, mat: null, amount: 5, x: a.x, y: a.y, z: a.z });
   tickMatch(s, []);
   assert.equal(a.weapons[0]!.mag, 15);
-  assert.deepEqual(a.weapons[1], { w: 'bandage', rarity: 0, mag: 5 - (15 - had) });
+  assert.deepEqual(a.weapons[1], { w: 'bandage', rarity: 0, mag: 5 - (15 - had), att: 0 });
   assert.equal(s.loot.length, 0);
 });
 
@@ -297,7 +297,7 @@ test('water: survivors float and swim slowly, and cannot shoot or build while sw
   const lake = mapFor('isle').pois.find(p => p.kind === 'lake')!;
   const a = s.players[0];
   put(s, a, lake.x, lake.z);
-  a.weapons[0] = { w: 'rifle', rarity: 0, mag: 30 }; a.current = 0; a.mats = [50, 0, 0];
+  a.weapons[0] = { w: 'rifle', rarity: 0, mag: 30, att: 0 }; a.current = 0; a.mats = [50, 0, 0];
   tickMatch(s, []);
   const surface = waterLevel(mapFor('isle'), a.x, a.z) - SWIM_DEPTH;
   assert.ok(a.swimming);
@@ -361,8 +361,8 @@ test('a hard bot that gets shot walls up toward the shooter', () => {
     const [me, bot] = s.players;
     put(s, me, SPOT.x, SPOT.z);
     put(s, bot, SPOT.x, SPOT.z + 22, Math.PI);
-    bot.weapons[0] = { w: 'rifle', rarity: 0, mag: 30 }; bot.current = 0; bot.ammo.medium = 90; bot.mats = [60, 0, 0]; bot.shield = 100;
-    me.weapons[0] = { w: 'smg', rarity: 4, mag: 30 }; me.current = 0; me.ammo.light = 200; me.hp = 1000; me.shield = 1000;
+    bot.weapons[0] = { w: 'rifle', rarity: 0, mag: 30, att: 0 }; bot.current = 0; bot.ammo.medium = 90; bot.mats = [60, 0, 0]; bot.shield = 100;
+    me.weapons[0] = { w: 'smg', rarity: 4, mag: 30, att: 0 }; me.current = 0; me.ammo.light = 200; me.hp = 1000; me.shield = 1000;
     run(s, 4, st => {
       const p = st.players[0], q = st.players[1];
       const d = Math.hypot(q.x - p.x, q.z - p.z);
@@ -391,7 +391,7 @@ test('coverFrom picks a spot behind a tall prop, on the far side from the threat
 test('loot the survivor cannot carry does not churn the loot revision (no needless loot snapshots)', () => {
   const s = groundMatch(1);
   const a = s.players[0];
-  a.weapons = [{ w: 'bandage', rarity: 0, mag: 15 }, { w: 'pistol', rarity: 0, mag: 16 }, { w: 'smg', rarity: 0, mag: 30 }, { w: 'rifle', rarity: 0, mag: 30 }, { w: 'medkit', rarity: 1, mag: 3 }];
+  a.weapons = [{ w: 'bandage', rarity: 0, mag: 15, att: 0 }, { w: 'pistol', rarity: 0, mag: 16, att: 0 }, { w: 'smg', rarity: 0, mag: 30, att: 0 }, { w: 'rifle', rarity: 0, mag: 30, att: 0 }, { w: 'medkit', rarity: 1, mag: 3, att: 0 }];
   a.mats = [500, 0, 0]; a.ammo.light = 240;
   s.loot.push(
     { id: 1, kind: 'item', weapon: 'bandage', rarity: 0, ammo: null, mat: null, amount: 5, x: a.x, y: a.y, z: a.z },

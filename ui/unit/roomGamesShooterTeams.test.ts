@@ -60,7 +60,9 @@ const aimAt = (from: Fighter, to: Fighter, h = 1.15): { yaw: number; pitch: numb
 };
 /** Fighter `a` fires one sniper round at `b` (b left with `hp` health and no shield first). */
 function snipe(s: ShooterState, a: Fighter, b: Fighter, hp: number): void {
-  a.weapons[0] = { w: 'sniper', rarity: 0, mag: 4 }; a.current = 0; a.cooldown = 0; a.reload = 0; a.prevFire = false; a.bloom = 0;
+  a.weapons[0] = { w: 'sniper', rarity: 0, mag: 4, att: 0 }; a.current = 0; a.cooldown = 0; a.reload = 0; a.prevFire = false; a.bloom = 0;
+  // Sights already up, no recoil left over from the last shot.
+  a.ads = 1; a.kick = 0; a.kickYaw = 0;
   b.hp = hp; b.shield = 0;
   const inputs: Inputs = [];
   inputs[a.id] = press({ ...aimAt(a, b), fire: true, aim: true });
@@ -100,7 +102,7 @@ test('knocked, not eliminated, while a teammate stands: crawl, no weapons, bleed
   assert.equal(c.kills, 0, 'a knock is not an elimination');
   assert.equal(teamsAlive(s), 2);
   // Crawling is slow, and nothing else works.
-  a.weapons[0] = { w: 'smg', rarity: 0, mag: 30 }; a.current = 0;
+  a.weapons[0] = { w: 'smg', rarity: 0, mag: 30, att: 0 }; a.current = 0;
   const x0 = a.x, seq = s.eventSeq;
   run(s, 2, [press({ mz: 1, sprint: true, fire: true, jump: true, build: true })]);
   const crawled = Math.hypot(a.x - x0, 0) + Math.abs(a.z - SPOT.z);
@@ -145,13 +147,13 @@ test('no friendly fire: shots pass through teammates and hit the enemy behind', 
   const s = teamMatch(4, 2);
   const [a, b, c] = s.players;
   put(s, b, a.x, a.z + 6); put(s, c, a.x, a.z + 14);
-  a.weapons[0] = { w: 'rifle', rarity: 0, mag: 30 }; a.current = 0;
+  a.weapons[0] = { w: 'rifle', rarity: 0, mag: 30, att: 0 }; a.current = 0;
   b.shield = 0; c.shield = 0;
   run(s, 0.5, st => [press({ ...aimAt(st.players[0], st.players[2]), fire: true, aim: true })]);
   assert.equal(b.hp, 100, 'teammate untouched');
   assert.ok(c.hp < 100, 'enemy behind was hit');
   // Rocket splash spares teammates too (but not the shooter).
-  b.hp = 100; a.weapons[1] = { w: 'rocket', rarity: 0, mag: 1 }; a.current = 1; a.cooldown = 0; a.prevFire = false;
+  b.hp = 100; a.weapons[1] = { w: 'rocket', rarity: 0, mag: 1, att: 0 }; a.current = 1; a.cooldown = 0; a.prevFire = false;
   put(s, b, a.x + 3, a.z);
   run(s, 1, [press({ yaw: Math.PI / 2, pitch: -0.6, fire: true })]);
   assert.ok(events(s, 'explode').length > 0);
@@ -261,7 +263,7 @@ test('launch pads: a map pad throws a survivor ~20 m up, the glider opens on the
   assert.equal(a.mode, 'ground');
   // Deploy one from the hotbar.
   put(s, a, SPOT.x, SPOT.z);
-  a.weapons[0] = { w: 'launchpad', rarity: 3, mag: 1 }; a.current = 0;
+  a.weapons[0] = { w: 'launchpad', rarity: 3, mag: 1, att: 0 }; a.current = 0;
   const pads = s.pads.length;
   run(s, CONSUMABLES.launchpad.time + 0.1, [press({ fire: true })]);
   assert.equal(s.pads.length, pads + 1);
@@ -368,7 +370,7 @@ test('a hard bot ramp-rushes an enemy holding high ground', () => {
     me.y = level * 0.8; me.hp = 1e6;
     put(s, bot, SPOT.x, SPOT.z - 2);
     calm(s, bot.x, bot.z);
-    bot.weapons[0] = { w: 'rifle', rarity: 0, mag: 30 }; bot.current = 0; bot.ammo.medium = 90; bot.mats = [200, 0, 0];
+    bot.weapons[0] = { w: 'rifle', rarity: 0, mag: 30, att: 0 }; bot.current = 0; bot.ammo.medium = 90; bot.mats = [200, 0, 0];
     const y0 = bot.y, seq = s.eventSeq;
     let top = y0;
     run(s, 5, st => { top = Math.max(top, st.players[1].y); return []; });

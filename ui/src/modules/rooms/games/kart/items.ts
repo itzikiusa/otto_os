@@ -1,25 +1,40 @@
-/** Item roulette: racers further back get stronger catch-up items. */
+/**
+ * Item roulette: odds by race position, Mario Kart style. The leader draws
+ * defence (bananas, green shells, the odd bomb); the middle of the pack gets
+ * shells and mushrooms; the back gets the catch-up items (triple and golden
+ * mushrooms, stars, lightning, the blue shell). `icon` names a portrait under
+ * /room-games/portraits (item-<icon>.webp) the HUD can show for each item.
+ */
 import type { Rng } from '../common/math.ts';
 
-export type ItemKind = 'mushroom' | 'triple' | 'banana' | 'bomb' | 'star' | 'bolt';
-export const ITEMS: Record<ItemKind, { name: string; hint: string }> = {
-  mushroom: { name: 'Turbo Mushroom', hint: 'A burst of speed — cuts across grass' },
-  triple: { name: 'Triple Mushroom', hint: 'Three turbo bursts' },
-  banana: { name: 'Banana', hint: 'Dropped behind you; spins out whoever hits it' },
-  bomb: { name: 'Homing Bomb', hint: 'Chases the racer ahead of you' },
-  star: { name: 'Super Star', hint: 'Seven seconds of invincibility and extra speed' },
-  bolt: { name: 'Thunderbolt', hint: 'Spins and slows every racer ahead of you' },
+/** Wire order: new kinds are only ever appended (the snapshot sends the index). */
+export type ItemKind = 'mushroom' | 'triple' | 'banana' | 'bomb' | 'star' | 'bolt' | 'golden' | 'green' | 'red' | 'blue';
+export const ITEMS: Record<ItemKind, { name: string; hint: string; icon: string }> = {
+  mushroom: { name: 'Turbo Mushroom', hint: 'A long, strong burst of speed — blasts through grass and mud', icon: 'mushroom' },
+  triple: { name: 'Triple Mushroom', hint: 'Three turbo bursts, one per press', icon: 'mushroom' },
+  golden: { name: 'Golden Mushroom', hint: 'Unlimited turbo bursts for 7.5 seconds after the first press', icon: 'mushroom' },
+  banana: { name: 'Banana', hint: 'Dropped behind you; spins out whoever hits it', icon: 'banana' },
+  green: { name: 'Green Shell', hint: 'Fired straight ahead (hold brake: behind); bounces off walls', icon: 'bomb' },
+  red: { name: 'Red Shell', hint: 'Homes in on the racer ahead of you', icon: 'bomb' },
+  blue: { name: 'Blue Shell', hint: 'Flies over the pack and blasts whoever is leading', icon: 'bomb' },
+  bomb: { name: 'Fuse Bomb', hint: 'Lobbed ahead (hold brake: behind); blows up on contact or when the fuse runs out', icon: 'bomb' },
+  star: { name: 'Super Star', hint: 'Seven seconds of invincibility and extra speed; off-road cannot slow you', icon: 'star' },
+  bolt: { name: 'Lightning', hint: 'Strikes every opponent — never you — spinning, shrinking and slowing them', icon: 'star' },
 };
-export const ITEM_KINDS = Object.keys(ITEMS) as ItemKind[];
+export const ITEM_KINDS: ItemKind[] = ['mushroom', 'triple', 'banana', 'bomb', 'star', 'bolt', 'golden', 'green', 'red', 'blue'];
 
 /** Weights per item for the front, middle and back of the pack. */
 const TABLE: Record<ItemKind, [number, number, number]> = {
-  mushroom: [20, 26, 14],
-  triple: [0, 14, 28],
-  banana: [50, 18, 4],
-  bomb: [30, 30, 16],
-  star: [0, 9, 24],
-  bolt: [0, 3, 14],
+  mushroom: [10, 22, 10],
+  triple: [0, 10, 22],
+  golden: [0, 3, 12],
+  banana: [40, 12, 2],
+  green: [35, 18, 4],
+  red: [5, 18, 10],
+  blue: [0, 4, 8],
+  bomb: [10, 8, 3],
+  star: [0, 3, 14],
+  bolt: [0, 2, 15],
 };
 
 /** Weighted item for `place` (1-based) out of `count` racers. */
