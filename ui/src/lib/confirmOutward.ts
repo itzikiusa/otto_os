@@ -45,3 +45,58 @@ export function confirmOutward(o: OutwardConfirm): Promise<boolean> {
     danger: o.danger ?? false,
   });
 }
+
+/** A saved delivery destination (`{type: slack|telegram|email|webhook|none,
+ *  chat_id?, to?, url?}`) — a scheduled task's `destination` or a personal
+ *  agent's `delivery`. */
+export type DeliveryDestination = Record<string, unknown> | null | undefined;
+
+/** Where a saved destination points, in words; '' for none (no confirm). */
+export function savedDestWhere(dest: DeliveryDestination): string {
+  const d = dest ?? {};
+  const chat = typeof d.chat_id === 'string' ? d.chat_id.trim() : '';
+  switch (d.type as string) {
+    case 'slack':
+      return chat ? `the Slack channel ${chat}` : 'the Slack integration’s default channel';
+    case 'telegram':
+      return chat ? `the Telegram chat ${chat}` : 'the Telegram integration’s default chat';
+    case 'email':
+      return typeof d.to === 'string' && d.to ? d.to : 'an email address';
+    case 'webhook':
+      return typeof d.url === 'string' && d.url ? d.url : 'a webhook';
+    default:
+      return '';
+  }
+}
+
+/** Who can read a delivered report — by destination type, or a saved destination. */
+export function destWho(dest: string | DeliveryDestination): string {
+  const type = typeof dest === 'string' ? dest : ((dest ?? {}).type as string | undefined) ?? '';
+  switch (type) {
+    case 'slack':
+      return 'Everyone in that Slack channel.';
+    case 'telegram':
+      return 'Everyone in that Telegram chat.';
+    case 'email':
+      return 'The recipients of that email, and anyone they forward it to.';
+    case 'webhook':
+      return 'Whatever service receives that URL.';
+    default:
+      return 'Anyone who can read it there.';
+  }
+}
+
+/** Confirm a run that delivers its report as soon as it finishes ("Run now" on a
+ *  scheduled task or a personal agent). Resolves true at once when nothing is
+ *  delivered. */
+export function confirmRunAndDeliver(name: string, dest: DeliveryDestination): Promise<boolean> {
+  const where = savedDestWhere(dest);
+  if (!where) return Promise.resolve(true);
+  return confirmOutward({
+    verb: 'Run and deliver',
+    title: 'Run and deliver now?',
+    where,
+    what: `The report of “${name}”, produced by a run that starts now.`,
+    who: destWho(dest),
+  });
+}

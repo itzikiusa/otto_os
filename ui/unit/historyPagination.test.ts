@@ -4,10 +4,11 @@ import {readFileSync} from 'node:fs';
 import {runInNewContext} from 'node:vm';
 import ts from 'typescript';
 import { strictRequire } from './strictRequire.ts';
+import * as loadError from '../src/lib/loadError.ts';
 function setup(get: (url: string) => Promise<any>) {
   const context = {exports: {} as Record<string, any>, $state: (v: any) => v,
     $derived: Object.assign((v: any) => v, {by: (f: () => any) => f()}), URLSearchParams,
-    require: strictRequire([['/api/client', {api: {get}}], ['/activity.svelte', {activity: {}}]])};
+    require: strictRequire([['/api/client', {api: {get}}], ['/activity.svelte', {activity: {}}], ['/loadError', loadError]])};
   runInNewContext(ts.transpileModule(readFileSync(new URL('../src/modules/agents/history/history.svelte.ts', import.meta.url), 'utf8'), {compilerOptions: {module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022}}).outputText, context);
   return context.exports.history;
 }

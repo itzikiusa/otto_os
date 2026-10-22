@@ -856,18 +856,16 @@ pub(crate) fn owed_followup(result: Option<&Value>) -> Option<&str> {
         .filter(|text| !text.trim().is_empty())
 }
 
-fn paste_bytes(text: &str) -> Vec<u8> {
-    let text = otto_orchestrator::claude_pty::sanitize_paste(text);
-    let mut bytes = Vec::with_capacity(text.len() + 16);
-    bytes.extend_from_slice(b"\x1b[200~");
-    bytes.extend_from_slice(text.as_bytes());
-    bytes.extend_from_slice(b"\x1b[201~");
-    bytes
-}
-
 /// Paste the answer into the delegated personal-agent session when that run
 /// is still live. The assistant thread is a separate conversation.
-async fn deliver_delegation_answer<C: AssistantCtx>(
+///
+/// Goes through `SessionManager::submit_text`: it sanitises the paste, holds
+/// the session's submit lock (a human typing into the same live session, or a
+/// workspace broadcast, can't interleave its paste/Enter with ours) and waits
+/// the paste-to-Enter window, without which the TUI can treat the Enter as
+/// pasted content and never submit.
+#[doc(hidden)]
+pub async fn deliver_delegation_answer<C: AssistantCtx>(
     ctx: &C,
     run_id: Option<&str>,
     text: &str,
@@ -887,10 +885,7 @@ async fn deliver_delegation_answer<C: AssistantCtx>(
     let Some(sid) = run.session_id.as_ref() else {
         return false;
     };
-    if ctx.manager().input(sid, &paste_bytes(text)).await.is_err() {
-        return false;
-    }
-    ctx.manager().input(sid, b"\r").await.is_ok()
+    ctx.manager().submit_text(sid, text).await.is_ok()
 }
 
 /// Only the first canonical decision wins. A card that has not received the
@@ -1458,13 +1453,169 @@ async fn expire_incognito<C: AssistantCtx>(ctx: &C) {
         if let Some(sid) = t.session_id.as_ref() {
             let _ = ctx.manager().remove(sid).await;
         }
-        let _ = repo(ctx).delete_thread(&t.owner_user_id, &t.id).await;
+        if let Ok((_, paths)) = repo(ctx).delete_thread(&t.owner_user_id, &t.id).await {
+            remove_attachment_files(ctx, &t.owner_user_id, &paths).await;
+        }
     }
+    sweep_orphan_inbox(ctx).await;
+}
+
+/// An inbox file with no `assistant_attachments` row is removed once it is
+/// older than this. The grace covers an upload in flight (the file is written
+/// before its row) and leaves anything a person dropped there by hand for a day.
+const INBOX_ORPHAN_GRACE: Duration = Duration::from_secs(24 * 3600);
+/// The orphan sweep walks every user's inbox — once an hour, not every tick.
+const INBOX_SWEEP_EVERY: Duration = Duration::from_secs(3600);
+
+/// The owner's `inbox/` dir — the only place an attachment path may point.
+fn inbox_dir<C: AssistantCtx>(ctx: &C, owner: &str) -> std::path::PathBuf {
+    super::assistant_dir(ctx, owner).join("inbox")
+}
+
+/// Whether `path` names a file directly inside `inbox` (lexically: a stored
+/// attachment path is always `inbox.join("<id>-<name>")`). Anything else — a
+/// path elsewhere, a `..` segment, a nested dir — is never touched.
+fn in_inbox(inbox: &std::path::Path, path: &std::path::Path) -> bool {
+    path.parent() == Some(inbox)
+        && path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| otto_core::paths::safe_component(n).is_some())
+}
+
+/// Remove a deleted thread's attachment files, after its rows are committed
+/// away. Confined to the owner's inbox; a file that is already gone is fine.
+pub async fn remove_attachment_files<C: AssistantCtx>(ctx: &C, owner: &str, paths: &[String]) {
+    let inbox = inbox_dir(ctx, owner);
+    for p in paths {
+        let path = std::path::Path::new(p);
+        if !in_inbox(&inbox, path) {
+            warn!(path = %p, "assistant: attachment path outside the inbox; not removed");
+            continue;
+        }
+        if let Err(e) = tokio::fs::remove_file(path).await {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                warn!(path = %p, "assistant: couldn't remove attachment file: {e}");
+            }
+        }
+    }
+}
+
+/// Hourly: remove inbox files no attachment row references and that are older
+/// than [`INBOX_ORPHAN_GRACE`] — files leaked before deletes cleaned up after
+/// themselves, or by a delete whose file removal failed.
+async fn sweep_orphan_inbox<C: AssistantCtx>(ctx: &C) {
+    use std::sync::Mutex;
+    use std::time::Instant;
+    static LAST: Mutex<Option<Instant>> = Mutex::new(None);
+    {
+        let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+        if last.is_some_and(|t| t.elapsed() < INBOX_SWEEP_EVERY) {
+            return;
+        }
+        *last = Some(Instant::now());
+    }
+    let root = ctx.data_dir().join("personal").join("assistant");
+    let Ok(mut users) = tokio::fs::read_dir(&root).await else {
+        return;
+    };
+    while let Ok(Some(user)) = users.next_entry().await {
+        let Some(owner) = user.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        let inbox = inbox_dir(ctx, &owner);
+        if inbox.parent() != Some(user.path().as_path()) {
+            continue; // not a valid user id dir (assistant_dir mapped it elsewhere)
+        }
+        let Ok(keep) = repo(ctx).attachment_paths(&owner).await else {
+            continue; // can't tell what's referenced — remove nothing
+        };
+        for path in orphan_inbox_files(&inbox, &keep, INBOX_ORPHAN_GRACE).await {
+            if let Err(e) = tokio::fs::remove_file(&path).await {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    warn!(path = %path.display(), "assistant: couldn't remove orphan inbox file: {e}");
+                }
+            }
+        }
+    }
+}
+
+/// Regular files directly in `inbox`, older than `grace`, whose path is not in
+/// `keep`. Symlinks and directories are skipped.
+async fn orphan_inbox_files(
+    inbox: &std::path::Path,
+    keep: &[String],
+    grace: Duration,
+) -> Vec<std::path::PathBuf> {
+    let keep: std::collections::HashSet<&str> = keep.iter().map(String::as_str).collect();
+    let mut out = Vec::new();
+    let Ok(mut files) = tokio::fs::read_dir(inbox).await else {
+        return out;
+    };
+    while let Ok(Some(f)) = files.next_entry().await {
+        let path = f.path();
+        let Ok(meta) = tokio::fs::symlink_metadata(&path).await else {
+            continue;
+        };
+        if !meta.is_file() || !in_inbox(inbox, &path) {
+            continue;
+        }
+        let old = meta
+            .modified()
+            .ok()
+            .and_then(|m| m.elapsed().ok())
+            .is_some_and(|age| age >= grace);
+        if old && !path.to_str().is_some_and(|p| keep.contains(p)) {
+            out.push(path);
+        }
+    }
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// data-integrity-3-03: only an unreferenced inbox file past the grace is
+    /// an orphan; a referenced one, a fresh one and a nested dir are kept.
+    #[tokio::test]
+    async fn the_orphan_sweep_keeps_referenced_and_fresh_inbox_files() {
+        let dir = std::env::temp_dir().join(format!("otto-inbox-{}", otto_core::new_id()));
+        let inbox = dir.join("inbox");
+        tokio::fs::create_dir_all(inbox.join("nested"))
+            .await
+            .unwrap();
+        let kept = inbox.join("a1-kept.pdf");
+        let orphan = inbox.join("a2-orphan.pdf");
+        tokio::fs::write(&kept, b"k").await.unwrap();
+        tokio::fs::write(&orphan, b"o").await.unwrap();
+        let keep = vec![kept.to_string_lossy().to_string()];
+        let found = orphan_inbox_files(&inbox, &keep, Duration::ZERO).await;
+        assert_eq!(found, vec![orphan.clone()]);
+        assert!(
+            orphan_inbox_files(&inbox, &keep, Duration::from_secs(3600))
+                .await
+                .is_empty(),
+            "a file younger than the grace may still be an upload in flight"
+        );
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[test]
+    fn attachment_removal_is_confined_to_the_inbox() {
+        let inbox = std::path::Path::new("/data/personal/assistant/u1/inbox");
+        assert!(in_inbox(inbox, &inbox.join("a1-r.pdf")));
+        assert!(!in_inbox(
+            inbox,
+            std::path::Path::new("/data/personal/assistant/u1/profile.md")
+        ));
+        assert!(!in_inbox(inbox, &inbox.join("nested/a1-r.pdf")));
+        assert!(!in_inbox(
+            inbox,
+            std::path::Path::new("/data/personal/assistant/u1/inbox/../profile.md")
+        ));
+        assert!(!in_inbox(inbox, std::path::Path::new("/etc/passwd")));
+    }
 
     #[test]
     fn an_answer_stays_owed_until_the_thread_can_take_it() {

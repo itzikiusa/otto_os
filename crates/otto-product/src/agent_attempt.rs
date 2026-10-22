@@ -1,30 +1,19 @@
 //! Exclusive ownership of an analysis agent through final result publication.
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock, Weak};
-use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
+use otto_core::keyed_lock::KeyedLocks;
+use tokio::sync::OwnedMutexGuard;
 
-fn lock(agent: &str) -> Arc<AsyncMutex<()>> {
-    static LOCKS: OnceLock<Mutex<HashMap<String, Weak<AsyncMutex<()>>>>> = OnceLock::new();
-    let mut locks = LOCKS.get_or_init(Default::default).lock().unwrap();
-    locks.retain(|_, lock| lock.strong_count() > 0);
-    if let Some(lock) = locks.get(agent).and_then(Weak::upgrade) {
-        return lock;
-    }
-    let lock = Arc::new(AsyncMutex::new(()));
-    locks.insert(agent.to_owned(), Arc::downgrade(&lock));
-    lock
-}
+static LOCKS: KeyedLocks<String> = KeyedLocks::new();
 
 /// Claim before spawning, and keep the guard until all row writes finish.
 pub(crate) fn claim(agent: &str) -> otto_core::Result<OwnedMutexGuard<()>> {
-    lock(agent).try_lock_owned().map_err(|_| {
+    LOCKS.try_lock(agent).ok_or_else(|| {
         otto_core::Error::Conflict("this analysis agent is still running or stopping".into())
     })
 }
 
 /// Stop first signals cancellation, then drains the owner before publishing.
 pub(crate) async fn drain(agent: &str) -> OwnedMutexGuard<()> {
-    lock(agent).lock_owned().await
+    LOCKS.lock(agent).await
 }
 
 /// Registration can happen after Stop arrives (before provider startup). Keep
@@ -58,6 +47,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[tokio::test]
     async fn stop_interrupts_active_work_before_waiting_for_publication() {

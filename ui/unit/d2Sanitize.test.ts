@@ -287,7 +287,8 @@ test('serialized style text is entity-decoded for parsing and re-escaped after',
     '<svg class="d2-7"><style>.a &gt; .b{content:"&lt;/style&gt;&lt;img src=x onerror=alert(1)&gt;"}</style></svg>',
     cssom,
   );
-  assert.ok(out.includes('.d2-7 .a &gt; .b{content:"&lt;/style&gt;&lt;img'), out);
+  // Re-escaped with the shared lib/html escaper (quotes too — inert in style text).
+  assert.ok(out.includes('.d2-7 .a &gt; .b{content:&quot;&lt;/style&gt;&lt;img'), out);
   assert.ok(!/<img|<\/style><img/.test(out), out);
 });
 

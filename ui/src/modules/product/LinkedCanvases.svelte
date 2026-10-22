@@ -2,6 +2,7 @@
   // Canvases linked to this story (canvas scenes whose story_id == this story).
   // Lists them with a click-to-open deep-link into the Canvas module, and a
   // "New canvas" action that creates one already linked to the story.
+  import { rel } from '../../lib/stores/now.svelte';
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import { toastError } from '../../lib/toastError';
   import { api } from '../../lib/api/client';
@@ -128,17 +129,8 @@
     }
   }
 
-  function ago(iso: string): string {
-    const t = Date.parse(iso);
-    if (!t) return '';
-    const s = Math.max(0, Math.floor((Date.now() - t) / 1000));
-    if (s < 60) return 'just now';
-    const m = Math.floor(s / 60);
-    if (m < 60) return `${m}m ago`;
-    const h = Math.floor(m / 60);
-    if (h < 24) return `${h}h ago`;
-    return `${Math.floor(h / 24)}d ago`;
-  }
+  // The shared, reactive relative time (content.md §7).
+  const ago = (iso: string): string => rel(iso);
 </script>
 
 <div class="linked-canvases">

@@ -35,19 +35,23 @@ pub enum VarType {
     Raw,
 }
 
-/// Placeholder grammar: `;`-delimited engines vs Redis' one-command-per-line.
+/// Placeholder grammar: `;`-delimited engines vs Redis' one-command-per-line,
+/// with PostgreSQL's own lexing (the editor's `pg` split mode).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlaceholderMode {
     Sql,
+    /// PostgreSQL: `#` is an operator (`#>>`, XOR), not a comment; `$tag$…$tag$`
+    /// bodies are literals; `\` escapes only inside `E'…'`; no backtick quote.
+    Postgres,
     Line,
 }
 
 impl PlaceholderMode {
     pub fn for_engine(engine: Engine) -> Self {
-        if engine == Engine::Redis {
-            PlaceholderMode::Line
-        } else {
-            PlaceholderMode::Sql
+        match engine {
+            Engine::Redis => PlaceholderMode::Line,
+            Engine::Postgres => PlaceholderMode::Postgres,
+            _ => PlaceholderMode::Sql,
         }
     }
 }
@@ -67,6 +71,9 @@ pub struct Placeholder {
 /// char and a doubled quote is a literal quote). Every delimiter is ASCII, so
 /// scanning bytes is safe on UTF-8 input.
 fn code_mask(s: &[u8], mode: PlaceholderMode) -> Vec<bool> {
+    if mode == PlaceholderMode::Postgres {
+        return pg_code_mask(s);
+    }
     let n = s.len();
     let mut mask = vec![true; n];
     let mut off = |a: usize, b: usize| {
@@ -119,6 +126,111 @@ fn code_mask(s: &[u8], mode: PlaceholderMode) -> Vec<bool> {
             off(i, j);
             i = j;
             continue;
+        }
+        i += 1;
+    }
+    mask
+}
+
+/// [`code_mask`] for PostgreSQL — the port of the editor's `pgSpanEnd`: `--`
+/// line comments, NESTED `/* */` comments, `'…'` with only `''` doubling
+/// (a backslash escapes only in an `E'…'` string), `"…"` identifiers, and
+/// `$tag$…$tag$` dollar bodies (the same opener/closer rules as
+/// [`crate::split`]). `#` and backtick are plain code.
+fn pg_code_mask(s: &[u8]) -> Vec<bool> {
+    let n = s.len();
+    let mut mask = vec![true; n];
+    let mut off = |a: usize, b: usize| {
+        for m in mask.iter_mut().take(b.min(n)).skip(a) {
+            *m = false;
+        }
+    };
+    // Dollar tags are scanned by char like the splitter; built lazily since
+    // most statements have no `$`.
+    let mut chars: Option<Vec<(usize, char)>> = None;
+    let mut i = 0;
+    while i < n {
+        let c = s[i];
+        let c2 = s.get(i + 1).copied();
+        if c == b'-' && c2 == Some(b'-') {
+            let mut j = i;
+            while j < n && s[j] != b'\n' {
+                j += 1;
+            }
+            off(i, j);
+            i = j;
+            continue;
+        }
+        if c == b'/' && c2 == Some(b'*') {
+            let mut depth = 1;
+            let mut j = i + 2;
+            while j < n && depth > 0 {
+                if s[j] == b'/' && s.get(j + 1) == Some(&b'*') {
+                    depth += 1;
+                    j += 2;
+                } else if s[j] == b'*' && s.get(j + 1) == Some(&b'/') {
+                    depth -= 1;
+                    j += 2;
+                } else {
+                    j += 1;
+                }
+            }
+            let j = j.min(n);
+            off(i, j);
+            i = j;
+            continue;
+        }
+        if c == b'\'' || c == b'"' {
+            let prev = if i > 0 { s[i - 1] } else { 0 };
+            let before = if i > 1 { s[i - 2] } else { 0 };
+            let escape = c == b'\'' && (prev == b'E' || prev == b'e') && !is_word(before);
+            let mut j = i + 1;
+            while j < n {
+                if escape && s[j] == b'\\' {
+                    j += 2;
+                    continue;
+                }
+                if s[j] == c {
+                    if s.get(j + 1) == Some(&c) {
+                        j += 2;
+                        continue;
+                    }
+                    j += 1;
+                    break;
+                }
+                j += 1;
+            }
+            let j = j.min(n);
+            off(i, j);
+            i = j;
+            continue;
+        }
+        // `$tag$` only opens where it can't be the tail of an identifier
+        // (`a$b$`) — PostgreSQL allows `$` inside identifiers.
+        if c == b'$' && !(i > 0 && (is_word(s[i - 1]) || s[i - 1] == b'$')) {
+            let chars = chars.get_or_insert_with(|| {
+                String::from_utf8_lossy(s)
+                    .char_indices()
+                    .collect::<Vec<_>>()
+            });
+            if let Ok(k) = chars.binary_search_by_key(&i, |&(b, _)| b) {
+                if let Some((tag, body)) = crate::split::try_open_dollar(chars, k) {
+                    let mut end = n;
+                    let mut m = body;
+                    while m < chars.len() {
+                        if chars[m].1 == '$' {
+                            if let Some(after) = crate::split::try_close_dollar(chars, m, &tag) {
+                                end = chars.get(after).map_or(n, |&(b, _)| b);
+                                break;
+                            }
+                        }
+                        m += 1;
+                    }
+                    off(i, end);
+                    i = end;
+                    continue;
+                }
+            }
         }
         i += 1;
     }
@@ -478,5 +590,47 @@ mod tests {
         assert!(!valid_name("1x"));
         assert!(!valid_name("a-b"));
         assert!(!valid_name(""));
+    }
+
+    #[test]
+    fn postgres_hash_operators_are_code_and_dollar_bodies_are_literals() {
+        let pg = |sql: &str| placeholder_names(sql, PlaceholderMode::Postgres);
+        assert_eq!(
+            PlaceholderMode::for_engine(Engine::Postgres),
+            PlaceholderMode::Postgres
+        );
+        // `#>>` / `#>` / `#` are operators, not a MySQL line comment.
+        assert_eq!(
+            pg("SELECT data #>> '{a,b}', data #> '{c}', 5 # 3 FROM t WHERE id = :id AND k = {k}"),
+            vec!["id", "k"]
+        );
+        // The Sql mode would have hidden them — the bug this mode fixes.
+        assert!(placeholder_names(
+            "SELECT data #>> '{a}' FROM t WHERE id = :id",
+            PlaceholderMode::Sql
+        )
+        .is_empty());
+        // `$$` and `$tag$` bodies are literals; `$1` is a positional param.
+        assert_eq!(
+            pg("DO $$ BEGIN PERFORM :inner; END $$; SELECT $fn$ :x $fn$, $1, :outer"),
+            vec!["outer"]
+        );
+        // Standard strings: a backslash does NOT escape the closing quote …
+        assert_eq!(pg(r"SELECT 'a\' || :v"), vec!["v"]);
+        // … but does inside E'…'.
+        assert!(pg(r"SELECT E'a\' :v'").is_empty());
+        // Nested block comments and `--` still hide placeholders.
+        assert_eq!(pg("/* a /* :b */ :c */ SELECT :d -- :e"), vec!["d"]);
+        let mut rendered = HashMap::new();
+        rendered.insert("id".to_string(), "7".to_string());
+        rendered.insert("inner".to_string(), "X".to_string());
+        assert_eq!(
+            substitute(
+                "SELECT data #>> '{a}' FROM t WHERE id = :id; DO $$ :inner $$",
+                PlaceholderMode::Postgres,
+                &rendered
+            ),
+            "SELECT data #>> '{a}' FROM t WHERE id = 7; DO $$ :inner $$"
+        );
     }
 }

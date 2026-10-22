@@ -1,4 +1,5 @@
-//! Additive bounded History listing. The legacy array route is unchanged.
+//! Bounded, paged History listing. The legacy array route
+//! (`transcript::history`) delegates here.
 use super::transcript;
 use crate::{
     auth::{require_ws_role, CurrentUser},
@@ -101,10 +102,55 @@ pub async fn list(
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<Json<HistoryPage>> {
-    require_ws_role(&ctx, &user, &wid, WorkspaceRole::Viewer).await?;
-    let admin = transcript::is_ws_admin(&ctx, &user, &wid).await;
+    page(ctx, &user, wid, &q, None).await.map(Json)
+}
+
+/// Keyset key that sorts after every session id / `path:` key, so a legacy
+/// `before` timestamp is exclusive (`at = before AND id > KEY` never holds).
+const LEGACY_BEFORE_KEY: &str = "\u{10FFFF}";
+
+/// The legacy `GET /workspaces/{wid}/history` array: the same bounded page,
+/// with its `before` timestamp (exclusive) in place of the opaque cursor.
+pub(crate) async fn legacy_entries(
+    ctx: &ServerCtx,
+    user: &otto_core::domain::User,
+    wid: &Id,
+    legacy: transcript::HistoryQuery,
+    limit: usize,
+) -> ApiResult<Vec<HistoryEntry>> {
+    let q = HistoryPageQuery {
+        q: legacy.q,
+        provider: legacy.provider,
+        status: legacy.status,
+        cwd: legacy.cwd,
+        cursor: None,
+        limit: Some(limit),
+    };
+    let before = clean(legacy.before.as_deref()).map(str::to_string);
+    Ok(page(ctx.clone(), user, wid.clone(), &q, before)
+        .await?
+        .entries)
+}
+
+async fn page(
+    ctx: ServerCtx,
+    user: &otto_core::domain::User,
+    wid: Id,
+    q: &HistoryPageQuery,
+    legacy_before: Option<String>,
+) -> ApiResult<HistoryPage> {
+    require_ws_role(&ctx, user, &wid, WorkspaceRole::Viewer).await?;
+    let admin = transcript::is_ws_admin(&ctx, user, &wid).await;
     let scope = q.scope(&wid, &user.id, admin);
-    let cursor = q.cursor(&scope)?;
+    let cursor = match legacy_before {
+        Some(at) => Some(Cursor {
+            version: 1,
+            scope: scope.clone(),
+            at,
+            key: LEGACY_BEFORE_KEY.into(),
+        }),
+        None => q.cursor(&scope)?,
+    };
     let limit = q.limit.unwrap_or(100).clamp(1, 1000);
     let budget = 4 * limit;
     let candidates = crate::telemetry::measure(
@@ -128,6 +174,9 @@ pub async fn list(
     let data_dir = ctx.data_dir.clone();
     // Only the selected bounded window enters filesystem resolution. Preserve
     // actual resolver provider/path rather than trusting stale metadata hints.
+    // A persisted path costs one stat (a pruned file is `TranscriptMissing`,
+    // never a root scan); only a row with no persisted path scans the roots,
+    // and a path found that way is persisted below so it scans at most once.
     let resolved = tokio::task::spawn_blocking(move || {
         candidates
             .into_iter()
@@ -140,7 +189,6 @@ pub async fn list(
                         session,
                     )
                     .ok()
-                    .map(|(r, _)| r)
                 });
                 (candidate, resolved)
             })
@@ -148,6 +196,18 @@ pub async fn list(
     })
     .await
     .map_err(|e| ApiError(Error::Internal(format!("history resolve task: {e}"))))?;
+    let sessions_repo = otto_state::SessionsRepo::new(ctx.pool.clone());
+    for (candidate, resolved) in &resolved {
+        if let (Some(session), Some((r, true))) = (candidate.session.as_ref(), resolved) {
+            let _ = sessions_repo
+                .set_transcript_path(&session.id, &r.path.to_string_lossy())
+                .await;
+        }
+    }
+    let resolved: Vec<_> = resolved
+        .into_iter()
+        .map(|(candidate, r)| (candidate, r.map(|(r, _)| r)))
+        .collect();
     let paths: Vec<_> = resolved
         .iter()
         .filter_map(|(_, r)| r.as_ref().map(|r| r.path.to_string_lossy().into_owned()))
@@ -210,7 +270,7 @@ pub async fn list(
         };
         (candidate, entry)
     });
-    Ok(Json(finish_page(&q, &scope, limit, total, entries)))
+    Ok(finish_page(q, &scope, limit, total, entries))
 }
 
 fn finish_page(

@@ -588,36 +588,30 @@ impl McpToolsRepo {
     pub async fn upsert_discovered(&self, server_id: &Id, tools: &[DiscoveredTool]) -> Result<()> {
         let now = fmt(Utc::now());
         for t in tools {
-            let existing = sqlx::query(
-                "SELECT id, risk_overridden FROM mcp_tools WHERE server_id = ? AND name = ?",
-            )
-            .bind(server_id)
-            .bind(&t.name)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(dberr("lookup mcp tool"))?;
+            let existing: Option<String> =
+                sqlx::query_scalar("SELECT id FROM mcp_tools WHERE server_id = ? AND name = ?")
+                    .bind(server_id)
+                    .bind(&t.name)
+                    .fetch_optional(&self.pool)
+                    .await
+                    .map_err(dberr("lookup mcp tool"))?;
             let schema = serde_json::to_string(&t.input_schema).unwrap_or_else(|_| "{}".into());
             let annot = serde_json::to_string(&t.annotations).unwrap_or_else(|_| "{}".into());
             match existing {
-                Some(row) => {
-                    let id: String = row.get("id");
-                    let overridden = row.get::<i64, _>("risk_overridden") != 0;
-                    if overridden {
-                        sqlx::query(
-                            "UPDATE mcp_tools SET title=?, description=?, input_schema_json=?, annotations_json=?, mutating=?, supports_dry_run=?, updated_at=? WHERE id=?",
-                        )
-                        .bind(&t.title).bind(&t.description).bind(&schema).bind(&annot)
-                        .bind(t.mutating as i64).bind(t.supports_dry_run as i64).bind(&now).bind(&id)
-                        .execute(&self.pool).await.map_err(dberr("update mcp tool"))?;
-                    } else {
-                        sqlx::query(
-                            "UPDATE mcp_tools SET title=?, description=?, input_schema_json=?, annotations_json=?, risk_label=?, injection_risk=?, mutating=?, supports_dry_run=?, updated_at=? WHERE id=?",
-                        )
-                        .bind(&t.title).bind(&t.description).bind(&schema).bind(&annot)
-                        .bind(&t.risk_label).bind(&t.injection_risk).bind(t.mutating as i64)
-                        .bind(t.supports_dry_run as i64).bind(&now).bind(&id)
-                        .execute(&self.pool).await.map_err(dberr("update mcp tool"))?;
-                    }
+                Some(id) => {
+                    // The pin guard lives IN the UPDATE: an admin `patch` landing
+                    // between a separate read and this write would otherwise have
+                    // its label overwritten while the row stays `risk_overridden`.
+                    sqlx::query(
+                        "UPDATE mcp_tools SET title=?, description=?, input_schema_json=?, annotations_json=?, \
+                         risk_label = CASE WHEN risk_overridden = 1 THEN risk_label ELSE ? END, \
+                         injection_risk = CASE WHEN risk_overridden = 1 THEN injection_risk ELSE ? END, \
+                         mutating=?, supports_dry_run=?, updated_at=? WHERE id=?",
+                    )
+                    .bind(&t.title).bind(&t.description).bind(&schema).bind(&annot)
+                    .bind(&t.risk_label).bind(&t.injection_risk).bind(t.mutating as i64)
+                    .bind(t.supports_dry_run as i64).bind(&now).bind(&id)
+                    .execute(&self.pool).await.map_err(dberr("update mcp tool"))?;
                 }
                 None => {
                     sqlx::query(
@@ -1617,6 +1611,143 @@ mod tests {
         })
         .await
         .unwrap()
+    }
+
+    fn discovered(name: &str, risk: &str, description: &str) -> DiscoveredTool {
+        DiscoveredTool {
+            name: name.into(),
+            title: None,
+            description: Some(description.into()),
+            input_schema: serde_json::json!({}),
+            annotations: serde_json::json!({}),
+            risk_label: risk.into(),
+            injection_risk: "low".into(),
+            mutating: false,
+            supports_dry_run: false,
+        }
+    }
+
+    /// test-quality-2-03: a human-pinned `dangerous` label is what keeps the
+    /// approval gate on, so rediscovery (every discover/refresh) must never
+    /// lower it, while still refreshing the description. An un-pinned tool
+    /// does follow the server's new label.
+    #[tokio::test]
+    async fn rediscovery_keeps_a_pinned_risk_label_and_refreshes_the_rest() {
+        let pool = mem_pool().await;
+        let (ws, user) = seed(&pool).await;
+        let s = mk_server(&pool, &ws, &user).await;
+        let repo = McpToolsRepo::new(pool.clone());
+        repo.upsert_discovered(
+            &s.id,
+            &[
+                discovered("pinned", "read", "v1"),
+                discovered("free", "read", "v1"),
+            ],
+        )
+        .await
+        .unwrap();
+        let pinned = repo.get_by_name(&s.id, "pinned").await.unwrap();
+        assert!(!pinned.risk_overridden);
+
+        let pinned = repo
+            .patch(&pinned.id, None, None, Some("dangerous"), None)
+            .await
+            .unwrap();
+        assert_eq!(pinned.risk_label, "dangerous");
+        assert!(pinned.risk_overridden);
+
+        // Rediscover both as `read`... the free one as `write` to prove the
+        // un-pinned path takes the server's label.
+        repo.upsert_discovered(
+            &s.id,
+            &[
+                discovered("pinned", "read", "v2"),
+                discovered("free", "write", "v2"),
+            ],
+        )
+        .await
+        .unwrap();
+        let pinned = repo.get_by_name(&s.id, "pinned").await.unwrap();
+        assert_eq!(pinned.risk_label, "dangerous");
+        assert!(pinned.risk_overridden);
+        assert_eq!(pinned.description.as_deref(), Some("v2"));
+        let free = repo.get_by_name(&s.id, "free").await.unwrap();
+        assert_eq!(free.risk_label, "write");
+        assert!(!free.risk_overridden);
+        assert_eq!(free.description.as_deref(), Some("v2"));
+    }
+
+    /// Omitted PATCH fields keep their value, and only a label change pins.
+    #[tokio::test]
+    async fn tool_patch_leaves_omitted_fields_alone() {
+        let pool = mem_pool().await;
+        let (ws, user) = seed(&pool).await;
+        let s = mk_server(&pool, &ws, &user).await;
+        let repo = McpToolsRepo::new(pool.clone());
+        // `dangerous` on first discovery defaults require_approval on.
+        repo.upsert_discovered(&s.id, &[discovered("t", "dangerous", "d")])
+            .await
+            .unwrap();
+        let t = repo.get_by_name(&s.id, "t").await.unwrap();
+        assert!(t.require_approval);
+        let t = repo
+            .patch(&t.id, Some(false), None, None, None)
+            .await
+            .unwrap();
+        assert!(!t.enabled);
+        assert!(t.require_approval);
+        assert_eq!(t.risk_label, "dangerous");
+        assert_eq!(t.injection_risk, "low");
+        assert!(
+            !t.risk_overridden,
+            "an enable toggle must not pin the labels"
+        );
+        let t = repo
+            .patch(&t.id, None, None, None, Some("high"))
+            .await
+            .unwrap();
+        assert_eq!(t.injection_risk, "high");
+        assert_eq!(t.risk_label, "dangerous");
+        assert!(t.risk_overridden);
+        assert!(!t.enabled);
+    }
+
+    #[tokio::test]
+    async fn policy_update_leaves_omitted_fields_alone() {
+        let pool = mem_pool().await;
+        let (ws, user) = seed(&pool).await;
+        let repo = McpPolicyRepo::new(pool.clone());
+        let p = repo
+            .create(NewPolicy {
+                workspace_id: Some(ws.clone()),
+                name: "block writes".into(),
+                enabled: true,
+                priority: 5,
+                match_json: serde_json::json!({"risk": "write"}),
+                effect: "deny".into(),
+                reason: Some("no writes".into()),
+                created_by: user.clone(),
+            })
+            .await
+            .unwrap();
+        let u = repo
+            .update(&p.id, None, Some(false), None, None, None, None)
+            .await
+            .unwrap();
+        assert!(!u.enabled);
+        assert_eq!(u.name, "block writes");
+        assert_eq!(u.priority, 5);
+        assert_eq!(u.match_json, serde_json::json!({"risk": "write"}));
+        assert_eq!(u.effect, "deny");
+        assert_eq!(u.reason.as_deref(), Some("no writes"));
+        let u = repo
+            .update(&p.id, Some("renamed"), None, Some(9), None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(u.name, "renamed");
+        assert_eq!(u.priority, 9);
+        assert!(!u.enabled);
+        assert_eq!(u.effect, "deny");
     }
 
     #[tokio::test]

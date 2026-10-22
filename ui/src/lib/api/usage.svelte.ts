@@ -223,6 +223,9 @@ export interface UsageStatus {
   /** Date the pricing rate table was last reconciled (YYYY-MM-DD). Used by the
    *  UI to label cost estimates as "priced as of <date>". */
   priced_as_of?: string | null;
+  /** The transcript tailer's ingestion state (PC-2). Absent until the daemon
+   *  starts one; `retrying` / `stopped` mean new usage isn't being recorded. */
+  tailer?: { state: 'running' | 'retrying' | 'stopped'; cause?: string | null };
 }
 
 export interface UsageConfigReq {

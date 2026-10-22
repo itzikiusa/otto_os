@@ -568,7 +568,7 @@ pub async fn read_rows(conn: &mut SqliteConnection, table: &str) -> ApiResult<Ve
     // ones out) instead of `SELECT *`, which returns generated columns too —
     // e.g. `sessions.source` (migration 0162) — that `insert_row` can't write
     // back and that `schema()` doesn't list.
-    let columns: Vec<String> = sqlx::query(sqlx::AssertSqlSafe(format!(
+    let info: Vec<(String, i64)> = sqlx::query(sqlx::AssertSqlSafe(format!(
         "PRAGMA table_info({})",
         quoted(table)
     )))
@@ -576,12 +576,27 @@ pub async fn read_rows(conn: &mut SqliteConnection, table: &str) -> ApiResult<Ve
     .await
     .map_err(super::db_error)?
     .iter()
-    .map(|r| quoted(&r.get::<String, _>("name")))
+    .map(|r| (quoted(&r.get::<String, _>("name")), r.get::<i64, _>("pk")))
     .collect();
+    let columns: Vec<&str> = info.iter().map(|(c, _)| c.as_str()).collect();
+    // Deterministic row order (a git snapshot must not churn between runs)
+    // comes from SQL: the primary key first (SQLite walks its index), then
+    // every other stored column as the tiebreak, so a table without a key —
+    // or with NULLs in a legacy non-INTEGER key — still sorts totally. This
+    // replaced an in-memory sort whose comparator re-serialized both rows to
+    // JSON on every comparison (backend-performance-3-03).
+    let mut order: Vec<&(String, i64)> = info.iter().collect();
+    order.sort_by_key(|(_, pk)| if *pk > 0 { *pk } else { i64::MAX });
+    let order: Vec<&str> = order.iter().map(|(c, _)| c.as_str()).collect();
     let sql = if columns.is_empty() {
         format!("SELECT * FROM {}", quoted(table))
     } else {
-        format!("SELECT {} FROM {}", columns.join(","), quoted(table))
+        format!(
+            "SELECT {} FROM {} ORDER BY {}",
+            columns.join(","),
+            quoted(table),
+            order.join(",")
+        )
     };
     let mut rows = sqlx::query(sqlx::AssertSqlSafe(sql.as_str())).fetch(conn);
     let mut output = Vec::new();
@@ -618,7 +633,6 @@ pub async fn read_rows(conn: &mut SqliteConnection, table: &str) -> ApiResult<Ve
         }
         output.push(values);
     }
-    output.sort_by_key(|row| serde_json::to_string(row).unwrap_or_default());
     Ok(output)
 }
 pub async fn insert_row(

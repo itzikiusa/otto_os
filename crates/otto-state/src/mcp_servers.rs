@@ -134,58 +134,33 @@ impl McpServersRepo {
         env: Option<&BTreeMap<String, String>>,
         enabled: Option<bool>,
     ) -> Result<McpServer> {
-        if let Some(v) = name {
-            sqlx::query("UPDATE mcp_servers SET name = ? WHERE id = ?")
-                .bind(v)
-                .bind(id)
-                .execute(&self.pool)
-                .await
-                // A rename can collide with `UNIQUE(workspace_id, name)` → 409.
-                .map_err(dberr_unique(
-                    "update mcp server",
-                    "an MCP server with this name already exists in the workspace",
-                ))?;
-        }
-        if let Some(v) = command {
-            sqlx::query("UPDATE mcp_servers SET command = ? WHERE id = ?")
-                .bind(v)
-                .bind(id)
-                .execute(&self.pool)
-                .await
-                .map_err(dberr("update mcp server"))?;
-        }
-        if let Some(v) = args {
-            let s = serde_json::to_string(v).unwrap_or_else(|_| "[]".into());
-            sqlx::query("UPDATE mcp_servers SET args_json = ? WHERE id = ?")
-                .bind(&s)
-                .bind(id)
-                .execute(&self.pool)
-                .await
-                .map_err(dberr("update mcp server"))?;
-        }
-        if let Some(v) = env {
-            let s = serde_json::to_string(v).unwrap_or_else(|_| "{}".into());
-            sqlx::query("UPDATE mcp_servers SET env_json = ? WHERE id = ?")
-                .bind(&s)
-                .bind(id)
-                .execute(&self.pool)
-                .await
-                .map_err(dberr("update mcp server"))?;
-        }
-        if let Some(v) = enabled {
-            sqlx::query("UPDATE mcp_servers SET enabled = ? WHERE id = ?")
-                .bind(v as i64)
-                .bind(id)
-                .execute(&self.pool)
-                .await
-                .map_err(dberr("update mcp server"))?;
-        }
-        sqlx::query("UPDATE mcp_servers SET updated_at = ? WHERE id = ?")
-            .bind(fmt(Utc::now()))
-            .bind(id)
-            .execute(&self.pool)
-            .await
-            .map_err(dberr("update mcp server"))?;
+        // One statement (data-integrity-2-03): a server's command and env can
+        // never disagree after a half-applied PATCH. Omitted fields keep their
+        // value; `updated_at` always bumps, as before.
+        sqlx::query(
+            "UPDATE mcp_servers SET
+                name = COALESCE(?, name),
+                command = COALESCE(?, command),
+                args_json = COALESCE(?, args_json),
+                env_json = COALESCE(?, env_json),
+                enabled = COALESCE(?, enabled),
+                updated_at = ?
+             WHERE id = ?",
+        )
+        .bind(name)
+        .bind(command)
+        .bind(args.map(|v| serde_json::to_string(v).unwrap_or_else(|_| "[]".into())))
+        .bind(env.map(|v| serde_json::to_string(v).unwrap_or_else(|_| "{}".into())))
+        .bind(enabled.map(|v| v as i64))
+        .bind(fmt(Utc::now()))
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        // A rename can collide with `UNIQUE(workspace_id, name)` → 409.
+        .map_err(dberr_unique(
+            "update mcp server",
+            "an MCP server with this name already exists in the workspace",
+        ))?;
         self.get(id).await
     }
 

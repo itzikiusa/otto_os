@@ -708,14 +708,11 @@ pub(crate) async fn open_sftp_with_connection<S: ConnectionsCtx>(
     Ok((conn, session))
 }
 
-/// Expand a leading `~` to the daemon user's `$HOME`.
-pub(crate) fn expand_home(path: &str) -> String {
-    if let Some(rest) = path.strip_prefix('~') {
-        let home = std::env::var("HOME").unwrap_or_default();
-        format!("{home}{rest}")
-    } else {
-        path.to_string()
-    }
+/// A user-supplied local path with `~` / `~/…` expanded and `~user/…`
+/// refused (the shared [`otto_core::paths::expand_home_strict`]); the old
+/// any-`~` strip turned `~bob/x` into `$HOMEbob/x`.
+pub(crate) fn expand_home(path: &str) -> Result<std::path::PathBuf, ApiErr> {
+    otto_core::paths::expand_home_strict(path).map_err(|e| ApiErr(Error::Invalid(e)))
 }
 
 /// Query params for `GET …/sftp/list` and `…/sftp/read`.
@@ -792,7 +789,7 @@ async fn sftp_download<S: ConnectionsCtx>(
 ) -> ApiResult<Json<SftpDownloadResp>> {
     require_root_for_host_path(&ctx, &user).await?;
     let sftp = open_sftp(&ctx, &user, &id, WorkspaceRole::Editor, "sftp_read").await?;
-    let local = expand_home(&req.local_path);
+    let local = expand_home(&req.local_path)?;
     // If the destination is an existing directory, sftp `get` lands the file
     // under it using the remote basename; otherwise treat it as a full file
     // path and ensure its parent dir exists.
@@ -832,8 +829,8 @@ async fn sftp_upload<S: ConnectionsCtx>(
 ) -> ApiResult<StatusCode> {
     require_root_for_host_path(&ctx, &user).await?;
     let sftp = open_sftp(&ctx, &user, &id, WorkspaceRole::Editor, "sftp_write").await?;
-    let local = expand_home(&req.local_path);
-    sftp.upload(&local, &req.remote_path)
+    let local = expand_home(&req.local_path)?;
+    sftp.upload(&local.to_string_lossy(), &req.remote_path)
         .await
         .map_err(ApiErr)?;
     Ok(StatusCode::OK)

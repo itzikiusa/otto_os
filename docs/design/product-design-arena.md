@@ -13,7 +13,7 @@ Status: **design, reviewed** (2026-09-05; rev 3 after two code-grounded review p
 Everything below builds on what already exists: `product_attachments` for the
 artifacts, `mockup_assist.rs` for the in-place file-backed agent turn, the
 `otto-*` helpers materialized into swarm agent cwds, and the skill seeding in
-`crates/otto-product/src/skills.rs`.
+`crates/otto-skills/src/product.rs`.
 
 ---
 
@@ -275,7 +275,7 @@ the Database Explorer):
 - **New ▾**: Screen (HTML) · Board (Excalidraw) · Diagram (Mermaid) · 3D scene ·
   Blender script · **From template** (Canva-like starters: mobile app screen,
   dashboard, landing page, user flow, game level blockout, product shot).
-  Templates are static files under `ui/src/modules/product/design/templates/`.
+  Templates are static files under `ui/src/lib/design/templates/`.
 - **Import**: files (existing upload) incl. `.glb/.gltf/.png/.svg/.excalidraw`.
 - **Export ▾**: PNG (viewport/board snapshot), SVG (mermaid/excalidraw), source
   file, GLB (scene3d via three `GLTFExporter`), **Blender script** (scene3d).
@@ -366,7 +366,7 @@ the Database Explorer):
 | `GET /product/design/blender`, `POST …/design/{aid}/blender-render`, `GET …/design/{aid}/blender-script` | new `otto-server/src/design_blender.rs`, `design_scene3d.rs`; `otto-sandbox::SandboxPolicy::for_tool` |
 | `otto-product --folder --kind`, `otto-mockup --format --folder`, non-silent failures; ingest resolves the epic | `swarm_workspace.rs`, `routes/swarm_ingest.rs`, `swarm_run.rs` prompt; `otto-state/swarm.rs::update_project` conflict mapping |
 | `Event::MockupUpdated.content: Option<String>`; `ProductChanged section:"tree"` | `otto-core/event.rs`, `docs/contracts/ws.md`, `ui/src/lib/stores/mockup-assist.svelte.ts` |
-| Skills `otto-design-2d`, `otto-design-3d`; `otto-mockup` updated | `crates/otto-skills/assets/skills/development/` (NOT `otto-product`'s versioned array, whose bump overwrites every seeded product skill). Because `otto-skills` bundles are never auto-installed, `resolve_skill_inline` in `otto-server/src/modules.rs` gains an `otto_skills::bundled_body(name)` arm after the product-skill arm so the assist prompts can inline them |
+| Skills `otto-design-2d`, `otto-design-3d`; `otto-mockup` updated | `crates/otto-skills/assets/skills/development/` (NOT `otto-product`'s versioned array, whose bump overwrites every seeded product skill). Because `otto-skills` bundles are never auto-installed, `resolve_skill_inline` (now `otto-review/src/engine.rs`) gains an `otto_skills::bundled_body(name)` arm after the product-skill arm so the assist prompts can inline them |
 | MCP **template** (UI-side) | `ui/src/modules/mcp/templates.ts`, `ServerForm.svelte` |
 | e2e | update `ui/e2e/product-mockups.spec.ts` (tab label → **Design**), add `ui/e2e/product-design-arena.spec.ts` |
 
@@ -416,7 +416,7 @@ API summary text for it into §8 and C folds it in.
    `mockup_assist.rs` (+ excalidraw/scene3d stubs and prompts) and `swarm_ingest.rs`.
 6. `product_media.rs`: mime allow-list + sniff + `ext_for_mime` +
    `default_kind_for_mime`; `PUT /product/attachments/{aid}/content`;
-   `modules.rs` route + body-limit layer; `resolve_skill_inline` bundled-skill arm.
+   `modules.rs` route + body-limit layer; `resolve_skill_inline` bundled-skill arm (now in `otto-review/src/engine.rs`).
 7. `otto-core/event.rs`: `MockupUpdated.content: Option<String>`; `ws.md`.
 8. `design_scene3d.rs` (validate + `to_blender_script`), `design_blender.rs`
    (detect / render job + in-memory job map + `GET /design/jobs/{id}` / script

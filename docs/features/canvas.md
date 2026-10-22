@@ -428,7 +428,7 @@ Scene create (#103) and update (#105) accept bodies up to 25 MiB — an Excalidr
 board inlines pasted images as base64 in its source, which used to exceed axum's
 2 MB default and fail every autosave with 413.
 
-`POST /api/v1/product/stories/{sid}/linked-canvases` is the related Product route
+`GET /api/v1/product/stories/{sid}/linked-canvases` is the related Product route
 that lists the Canvas scenes linked to a story.
 
 ---

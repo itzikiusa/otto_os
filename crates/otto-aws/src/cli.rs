@@ -370,17 +370,18 @@ pub async fn run_raw(
     // The child never inherits the daemon's own AWS_PROFILE: keys-mode accounts
     // would otherwise be resolved through it (and blanking it instead makes
     // the CLI look for a profile named ""). Profile mode re-adds it via `env`.
-    cmd.args(args)
-        .env_remove("AWS_PROFILE")
-        .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
-        .stdin(if stdin.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
+    otto_core::aws_env::apply_aws_env(
+        cmd.args(args),
+        env.iter().map(|(k, v)| (k.as_str(), v.as_str())),
+    )
+    .stdin(if stdin.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    })
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .kill_on_drop(true);
     let mut child = cmd.spawn().map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             Error::Invalid(NOT_INSTALLED_MSG.into())

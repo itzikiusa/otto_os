@@ -166,7 +166,13 @@ export class RoomMediaClient {
       if (!snapshot.members?.some(m => m.id === viewer && m.connected)) this.subscriptions.delete(viewer);
       else for (const [id, sub] of subs) if (this.source(id)?.generation !== sub.generation) subs.delete(id);
     }
-    this.rebuildGraph(); this.publishStreams(); this.schedule();
+    // Every state change (a chat line included) arrives as a snapshot. Rebuild
+    // the host audio mix only when an input of the mix changed — a teardown
+    // per chat message churned nodes and risked audible clicks. schedule()
+    // stays unconditional: a pending reconcile abandons itself on ANY newer
+    // snapshot (its `stale()` check), so skipping it here could strand it.
+    this.refreshGraph();
+    this.publishStreams(); this.schedule();
   }
 
   async joinAudio(): Promise<void> {
@@ -490,7 +496,7 @@ export class RoomMediaClient {
       if (key !== peer.bindingKey) { peer.bindingKey = key; this.signal(peer, { version: 1, kind: 'bindings', bindings }); }
       if (!wantAudio && !wanted.length && !needIncoming) this.closePeer(peer.id);
     }
-    this.rebuildGraph();
+    this.refreshGraph();
     const outgoing = [...this.peers.values()].flatMap(peer => [...peer.outgoing.values()].map(video => ({ peer, video })));
     const budgets = allocateVideoBudget(outgoing.map(({ peer, video }) => {
       const settings = video.sender.track?.getSettings();
@@ -562,9 +568,37 @@ export class RoomMediaClient {
     if (peer.audioSender) void this.replaceAudio(peer, null).catch(() => {});
     if (peer.mix) { for (const t of peer.mix.stream.getTracks()) t.stop(); peer.mix.disconnect(); peer.mix = null; }
   }
-  private clearGraph(): void { for (const node of this.graphNodes) node.disconnect(); this.graphNodes = []; }
+  private clearGraph(): void { for (const node of this.graphNodes) node.disconnect(); this.graphNodes = []; this.graphSig = ''; }
+  /** Signature of everything `rebuildGraph` reads: who may be heard by whom,
+   *  and which live track carries each voice. Equal ⇒ the graph is current. */
+  private graphSig = '';
+  private graphSignature(): string {
+    const trackKey = (t: MediaStreamTrack | null | undefined): string => (t && t.readyState === 'live' ? this.objId(t) : '-');
+    const parts = [this.context ? 'c' : '-', this.state.audioJoined ? 'j' : '-', this.state.muted ? 'm' : '-',
+      this.isHost ? 'h' : '-', this.snapshot?.host_member_id ?? ''];
+    for (const m of this.snapshot?.members ?? []) {
+      const local = m.id === this.options.memberId;
+      const track = local ? this.mic.value?.getAudioTracks()[0] : this.peers.get(m.id)?.audio;
+      parts.push(`${m.id}:${m.generation}:${m.admission}:${+m.connected}${+m.audio_joined}${+m.muted}${+m.room_muted}:${trackKey(track)}`);
+    }
+    for (const [id, peer] of this.peers) parts.push(`p${id}:${peer.generation}:${peer.mix ? this.objId(peer.mix) : '-'}`);
+    return parts.join('|');
+  }
+  /** Stable per-object ids for the signature (track / mix-node identity). */
+  private objIds = new WeakMap<object, string>();
+  private nextObjId = 0;
+  private objId(o: object): string {
+    let id = this.objIds.get(o);
+    if (!id) this.objIds.set(o, (id = String(++this.nextObjId)));
+    return id;
+  }
+  /** Rebuild the mix only when its inputs changed (see `graphSignature`). */
+  private refreshGraph(): void {
+    if (this.graphSignature() !== this.graphSig) this.rebuildGraph();
+  }
   private rebuildGraph(): void {
     this.clearGraph();
+    this.graphSig = this.graphSignature();
     if (!this.context || !this.state.audioJoined) return;
     if (!this.isHost) {
       const host = this.peers.get(this.snapshot?.host_member_id ?? '');

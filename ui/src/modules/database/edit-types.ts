@@ -4,6 +4,7 @@
 // DELETE` vs `deleteMany`, …). Adapters are pure: every input arrives in the
 // ctx, nothing reads the store.
 import type { DbEngine } from '../../lib/api/types';
+import type { TypedKind } from '../../lib/jsonTree/expansion-plan';
 import { sqlAdapter } from './edit-sql';
 import { mongoAdapter } from './edit-mongo';
 import { redisAdapter } from './edit-redis';
@@ -11,7 +12,7 @@ import { redisAdapter } from './edit-redis';
 /** Typed values from the nested-field editor (Vertical view): `raw` is the
  *  editor text, validated per `kind` (24-hex ObjectId, ISO date, digit-only
  *  long, …); the Mongo adapter turns it into the matching EJSON sentinel. */
-export type TypedKind = 'string' | 'number' | 'bool' | 'null' | 'objectId' | 'date' | 'long' | 'decimal' | 'json';
+export type { TypedKind };
 export interface TypedValue {
   kind: TypedKind;
   raw: string;

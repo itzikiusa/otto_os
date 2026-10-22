@@ -9,8 +9,7 @@
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
-  import { now } from '../../lib/stores/now.svelte';
-  import { relTime } from '../mission-control/lib';
+  import { now, rel } from '../../lib/stores/now.svelte';
   import { today, type TodayRow } from './today.svelte';
 
   const ROWS = 3;
@@ -53,15 +52,9 @@
     return parts.length ? parts.join(' · ') : 'All quiet';
   });
 
-  /** "3m ago" for past rows, "in 2h" for what's coming (Up next) — the
-   *  compact relTime clamps future times to "0s". */
-  function when(iso: string): string {
-    const t = Date.parse(iso);
-    if (!Number.isFinite(t)) return '';
-    if (t <= Date.now()) return `${relTime(iso)} ago`;
-    const mins = Math.round((t - Date.now()) / 60_000);
-    return mins < 1 ? 'now' : mins < 60 ? `in ${mins}m` : `in ${Math.round(mins / 60)}h`;
-  }
+  /** "3m ago" for past rows, "in 2h" for what's coming (Up next): the
+   *  shared `rel()` handles both directions. */
+  const when = (iso: string): string => rel(iso);
 
   interface Card {
     id: string;
@@ -130,7 +123,7 @@
                   </span>
                   <span class="gc-text">
                     <span class="gc-title">{r.title}</span>
-                    <span class="gc-sub" title={r.detail}>{r.detail}{#if r.at && now() && when(r.at)}{` · ${when(r.at)}`}{/if}</span>
+                    <span class="gc-sub" title={r.detail}>{r.detail}{#if r.at && when(r.at)}{` · ${when(r.at)}`}{/if}</span>
                   </span>
                 </button>
               </li>

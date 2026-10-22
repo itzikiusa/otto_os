@@ -4,8 +4,9 @@
 //!
 //! 1. **Suspend** an idle, unattached, resumable LIVE session — release its
 //!    RAM-holding PTY without losing the conversation (it stays resumable via
-//!    `--resume`). Lives on [`crate::manager::SessionManager`]; the decision
-//!    logic that picks which sessions to suspend is [`should_suspend`].
+//!    `--resume`). Lives on [`crate::manager::SessionManager`]; the sweep that
+//!    picks which sessions to suspend is
+//!    [`SessionManager::suspend_idle_unattached`](crate::manager::SessionManager::suspend_idle_unattached).
 //! 2. **Prune** non-live sessions whose provider-side transcript no longer
 //!    exists (un-resumable) — the existence checks here ([`Resumability`] /
 //!    [`claude_transcript_exists`]) tell the manager when a row is safe to

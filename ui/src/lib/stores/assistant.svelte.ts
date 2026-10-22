@@ -310,12 +310,6 @@ class AssistantStore {
     }
   }
 
-  /** Drop a cached sign-in result (after a login/logout flow for `id`). */
-  forgetSignIn(id?: string): void {
-    if (id) this.signedInCache.delete(id);
-    else this.signedInCache.clear();
-  }
-
   async loadLimits(): Promise<void> {
     await this.load('limits', () => assistantApi.limits(), (v) => (this.limits = v), () => this.limits);
   }

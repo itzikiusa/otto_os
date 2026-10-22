@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { importRunes, svelteClient } from './runesHarness.ts';
 
-type Clock = { rel: (ts: number) => string };
+type Clock = { rel: (ts: number, opts?: { compact?: boolean }) => string };
 
 // The store starts its interval at import only when `window` exists: stand
 // in for the browser, capture the tick, and drive Date.now by hand.
@@ -83,4 +83,12 @@ test('labels follow the clock at their own granularity', async (t) => {
   assert.equal(labels.old, '3h ago');
   assert.equal(labels.recent, '1h ago');
   stop();
+});
+
+test('compact style drops "ago" for past deltas but keeps "in …" for future ones', () => {
+  const t0 = fakeNow; // the clock last ticked at fakeNow
+  assert.equal(mod.rel(t0 - 3 * 60_000, { compact: true }), '3m');
+  assert.equal(mod.rel(t0 - 3 * 60_000), '3m ago');
+  assert.equal(mod.rel(t0 + 2 * 3_600_000, { compact: true }), 'in 2h');
+  assert.equal(mod.rel(t0, { compact: true }), 'now');
 });

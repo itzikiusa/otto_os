@@ -25,7 +25,16 @@
   });
 </script>
 
-<div class="skeleton-list" class:grace aria-busy="true" role={announce ? 'status' : undefined}>
+<!-- No aria-busy here: a busy live region defers its changes until busy is
+     false, and the skeleton unmounts while still loading, so the delayed text
+     would never be spoken. The region is NAMED after what loads, so callers
+     (and tests) find it by "Loading {label}" without a wrapper of their own. -->
+<div
+  class="skeleton-list"
+  class:grace
+  role={announce ? 'status' : undefined}
+  aria-label={announce && label ? `Loading ${label}` : undefined}
+>
   {#if announce && speak}<span class="sr-only">Loading{label ? ` ${label}` : ''}</span>{/if}
   {#each Array(rows) as _, i (i)}
     <div class="skeleton-row" style="height:{height}px; --stagger:{i * 90}ms"></div>

@@ -861,14 +861,10 @@ struct ExportToPathReq {
     max_rows: Option<usize>,
 }
 
-/// Expand a leading `~` to the daemon user's `$HOME` (mirrors the SFTP handler).
-fn expand_home(path: &str) -> String {
-    if let Some(rest) = path.strip_prefix('~') {
-        let home = std::env::var("HOME").unwrap_or_default();
-        format!("{home}{rest}")
-    } else {
-        path.to_string()
-    }
+/// Expand a leading `~` / `~/` to the daemon user's home — the shared strict
+/// helper, so `~bob/x` is a clear 400 instead of `$HOMEbob/x`.
+fn expand_home(path: &str) -> Result<std::path::PathBuf, ApiErr> {
+    otto_core::paths::expand_home_strict(path).map_err(|e| ApiErr(Error::Invalid(e)))
 }
 
 /// Resolve `local_path` (with `~` expanded) + the format's extension into the
@@ -876,8 +872,8 @@ fn expand_home(path: &str) -> String {
 /// path is an existing directory, the file is `<dir>/export.<ext>`; otherwise the
 /// path is taken as the full file path and its parent dir is created.
 fn resolve_export_dest(local_path: &str, format: PathFormat) -> Result<std::path::PathBuf, ApiErr> {
-    let expanded = expand_home(local_path);
-    let p = std::path::Path::new(&expanded);
+    let expanded = expand_home(local_path)?;
+    let p = expanded.as_path();
     let dest = if p.is_dir() {
         p.join(format!("export.{}", format.extension()))
     } else {
@@ -1043,7 +1039,7 @@ async fn import_query<S: DbViewerCtx>(
     }
     // Root-only: a clean 403 rather than an `{error}` line mid-stream.
     ctx.db().require_local_path_access(&id, &user.id).await?;
-    let path = expand_home(&req.local_path);
+    let path = expand_home(&req.local_path)?.to_string_lossy().into_owned();
     let batch_size = req.batch_size.unwrap_or(500).clamp(1, 5000);
 
     let db = ctx.db().clone();

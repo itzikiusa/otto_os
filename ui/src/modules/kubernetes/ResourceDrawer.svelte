@@ -316,7 +316,7 @@
           {#if row.images?.length}
             <div class="sec">
               <div class="sec-title">Images</div>
-              {#each row.images as im (im)}<div class="mono small ell" title={im}>{im}</div>{/each}
+              {#each row.images as im, i (i)}<div class="mono small ell" title={im}>{im}</div>{/each}
             </div>
           {/if}
           {#if selector}

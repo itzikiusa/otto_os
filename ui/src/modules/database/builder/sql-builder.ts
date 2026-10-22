@@ -483,6 +483,20 @@ export interface Issue {
 
 const refKey = (r: ColRef): string => `${r.alias}.${r.column}`;
 
+/** First occurrence of each column, in order. The select list may name the same
+ *  column twice ("+ Column" always appends the first column), and the GROUP BY
+ *  chips are keyed by `alias.column` — a duplicate ref there threw. */
+function uniqueRefs(refs: readonly ColRef[]): ColRef[] {
+  return [...new Map(refs.map((r) => [refKey(r), r] as const)).values()];
+}
+
+/** `groupBy` plus the refs it doesn't already hold — what the "Group by them"
+ *  fix applies (the same guard the GROUP BY picker has). */
+export function mergeGroupBy(groupBy: readonly ColRef[], refs: readonly ColRef[]): ColRef[] {
+  const have = new Set(groupBy.map(refKey));
+  return [...groupBy, ...uniqueRefs(refs).filter((r) => !have.has(refKey(r)))];
+}
+
 /** Things that would make the server reject the statement (or surprise the
  *  user), stated in words. */
 export function validate(q: BuilderQuery): Issue[] {
@@ -491,10 +505,12 @@ export function validate(q: BuilderQuery): Issue[] {
   const aggregated = q.select.some((s) => s.kind === 'aggregate') || q.groupBy.length > 0;
   if (aggregated) {
     const grouped = new Set(q.groupBy.map(refKey));
-    const loose = q.select
-      .filter((s): s is Extract<SelectItem, { kind: 'column' }> => s.kind === 'column')
-      .filter((s) => s.ref.column !== '*' && !grouped.has(refKey(s.ref)))
-      .map((s) => s.ref);
+    const loose = uniqueRefs(
+      q.select
+        .filter((s): s is Extract<SelectItem, { kind: 'column' }> => s.kind === 'column')
+        .filter((s) => s.ref.column !== '*' && !grouped.has(refKey(s.ref)))
+        .map((s) => s.ref),
+    );
     if (loose.length) {
       out.push({
         level: 'error',
@@ -533,10 +549,12 @@ export function validate(q: BuilderQuery): Issue[] {
 /** Plain column items not covered by GROUP BY — what "Group by them" adds. */
 export function suggestGroupBy(q: BuilderQuery): ColRef[] {
   const grouped = new Set(q.groupBy.map(refKey));
-  return q.select
-    .filter((s): s is Extract<SelectItem, { kind: 'column' }> => s.kind === 'column' && s.ref.column !== '*')
-    .map((s) => s.ref)
-    .filter((r) => !grouped.has(refKey(r)));
+  return uniqueRefs(
+    q.select
+      .filter((s): s is Extract<SelectItem, { kind: 'column' }> => s.kind === 'column' && s.ref.column !== '*')
+      .map((s) => s.ref)
+      .filter((r) => !grouped.has(refKey(r))),
+  );
 }
 
 // ── Round trip: parse a SELECT back into the model ───────────────────────────

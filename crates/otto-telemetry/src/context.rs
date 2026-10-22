@@ -1,10 +1,10 @@
 //! Explicit async operation scopes. No global subscriber and no argument capture.
-use crate::{SpanRecord, TelemetryService};
+use crate::{SpanRecord, SpanSink};
 use std::{future::Future, sync::Arc, time::Instant};
 
 #[derive(Clone)]
 struct Context {
-    service: Arc<TelemetryService>,
+    service: Arc<dyn SpanSink>,
     trace_id: String,
     span_id: String,
     component: String,
@@ -12,7 +12,7 @@ struct Context {
 tokio::task_local! { static CURRENT: Context; }
 
 pub async fn scope<T>(
-    service: Arc<TelemetryService>,
+    service: Arc<dyn SpanSink>,
     parent: &SpanRecord,
     work: impl Future<Output = T>,
 ) -> T {
@@ -75,6 +75,48 @@ pub async fn measure_result<T, E>(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// A sink that keeps what it is handed.
+    struct Collect(Mutex<Vec<SpanRecord>>, bool);
+    impl SpanSink for Collect {
+        fn enabled(&self) -> bool {
+            self.1
+        }
+        fn record(&self, span: SpanRecord) {
+            self.0.lock().unwrap().push(span);
+        }
+    }
+
+    #[tokio::test]
+    async fn scoped_phases_reach_the_sink_as_children() {
+        let sink = Arc::new(Collect(Mutex::new(Vec::new()), true));
+        let parent = SpanRecord::new("request", "server", 0.0);
+        let out = scope(sink.clone(), &parent, async {
+            measure_result("phase", async { Err::<(), _>("boom") }).await
+        })
+        .await;
+        assert_eq!(out, Err("boom"));
+        let spans = sink.0.lock().unwrap();
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].name, "phase");
+        assert_eq!(spans[0].status, "error");
+        assert_eq!(spans[0].trace_id, parent.trace_id);
+        assert_eq!(
+            spans[0].parent_span_id.as_deref(),
+            Some(parent.span_id.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_disabled_sink_records_nothing() {
+        let sink = Arc::new(Collect(Mutex::new(Vec::new()), false));
+        let parent = SpanRecord::new("request", "server", 0.0);
+        scope(sink.clone(), &parent, measure("phase", async {})).await;
+        assert!(sink.0.lock().unwrap().is_empty());
+    }
+
     #[tokio::test]
     async fn uninstrumented_work_keeps_value_and_error() {
         assert_eq!(super::measure("phase", async { 7 }).await, 7);

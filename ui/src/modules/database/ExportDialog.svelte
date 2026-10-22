@@ -108,6 +108,14 @@
   let exportName = $state(defaultExportName());
   // svelte-ignore state_referenced_locally
   let exportLimit = $state(initialMaxRows ? String(initialMaxRows) : '');
+  /** Inline row-limit problem. `bind:value` on a number input yields a number
+   *  (or null when cleared), so normalise before reading it. */
+  const limitError = $derived.by(() => {
+    const raw = String(exportLimit ?? '').trim();
+    if (!raw) return null;
+    const n = Number(raw);
+    return Number.isFinite(n) && n > 0 ? null : 'Leave blank for all rows, or enter a positive number.';
+  });
   let exportingPath = $state(false);
   // Live progress for the streaming export (bytes written so far). Null when no
   // export is running; drives the dialog's progress bar.
@@ -137,11 +145,11 @@
     const name = exportName.trim() || defaultExportName();
     const dir = exportDir.trim() || '~/Downloads';
     const localPath = joinPath(dir, name);
-    const maxRows = exportLimit.trim() ? Number(exportLimit.trim()) : undefined;
-    if (maxRows !== undefined && (!Number.isFinite(maxRows) || maxRows <= 0)) {
-      toasts.error('Invalid row limit', 'Leave blank for all rows, or enter a positive number.');
-      return;
-    }
+    // An invalid limit is shown inline and keeps Export disabled — this only
+    // guards a call that slipped past the disabled button.
+    if (limitError) return;
+    const rawLimit = String(exportLimit ?? '').trim();
+    const maxRows = rawLimit ? Number(rawLimit) : undefined;
     exportingPath = true;
     exportProgress = { bytes: 0 };
     exportAbort = new AbortController();
@@ -261,8 +269,11 @@
         min="1"
         spellcheck="false"
         placeholder="all rows"
+        aria-invalid={limitError ? 'true' : undefined}
+        aria-describedby={limitError ? 'exp-limit-err' : undefined}
       />
     </label>
+    {#if limitError}<p class="exp-err" id="exp-limit-err">{limitError}</p>{/if}
 
     <div class="exp-dest mono" title="Resolved destination on the daemon host">
       → {joinPath(exportDir.trim() || '~/Downloads', exportName.trim() || defaultExportName())}
@@ -289,7 +300,7 @@
     <button
       class="btn primary"
       onclick={() => void runPathExport()}
-      disabled={exportingPath || !!writeVerb || !auth.isRoot}
+      disabled={exportingPath || !!writeVerb || !auth.isRoot || limitError !== null}
       title={writeVerb ? 'Export re-runs the statement — not available for a write' : undefined}
     >
       {exportingPath ? 'Exporting…' : 'Export all'}
@@ -310,6 +321,11 @@
 {/if}
 
 <style>
+  .exp-err {
+    margin: -4px 0 0;
+    color: var(--danger);
+    font-size: var(--fs-s);
+  }
   /* ── Local-file export dialog ─────────────────────────────────────────────── */
   .exp-form {
     display: flex;

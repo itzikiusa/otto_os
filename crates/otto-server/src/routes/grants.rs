@@ -158,8 +158,9 @@ pub fn encode_grants(pairs: &[(Feature, Capability)]) -> Vec<GrantEntry> {
 
 /// `GET /api/v1/users/{id}/grants`
 ///
-/// Returns the stored grants for user `{id}`.  Requires `Users:Admin` (enforced
-/// by the feature guard via the `/users/` prefix rule) or root.
+/// Returns the stored grants for user `{id}`.  Root only: the feature guard
+/// admits `Users:Admin` to `/users/*`, and this handler narrows it further so a
+/// non-root admin can't read (or, below, change) anyone's capabilities.
 pub async fn get_grants<C: GrantsCtx>(
     Path(id): Path<Id>,
     State(ctx): State<C>,
@@ -178,7 +179,7 @@ pub async fn get_grants<C: GrantsCtx>(
 ///
 /// Atomically replaces all grants for user `{id}`.  Writes a `"grant.changed"`
 /// audit entry (actor = calling user; target = `{id}`; detail = old→new).
-/// Requires `Users:Admin` (feature guard) or root.
+/// Root only — a non-root `Users:Admin` granting would let it escalate itself.
 pub async fn put_grants<C: GrantsCtx>(
     Path(id): Path<Id>,
     State(ctx): State<C>,

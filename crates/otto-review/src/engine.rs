@@ -1691,19 +1691,34 @@ pub fn exclude_otto_dir(repo: &std::path::Path) -> std::io::Result<()> {
     let info = git_dir.join("info");
     std::fs::create_dir_all(&info)?;
     let exclude = info.join("exclude");
-    let current = std::fs::read_to_string(&exclude).unwrap_or_default();
-    if current
+    // Bytes, not a String: a file that isn't valid UTF-8 must still be read
+    // (it used to read as empty and be rewritten as just our line).
+    let current = match std::fs::read(&exclude) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => return Err(e),
+    };
+    if String::from_utf8_lossy(&current)
         .lines()
         .any(|l| matches!(l.trim(), "/.otto/" | ".otto/" | "/.otto" | ".otto"))
     {
         return Ok(());
     }
-    let mut next = current;
-    if !next.is_empty() && !next.ends_with('\n') {
-        next.push('\n');
+    // Append only the missing lines, never rewrite: the file holds the user's
+    // own ignore rules, an in-place truncate + write lost them on a crash or a
+    // full disk, and it dropped lines a concurrent writer appended in between
+    // (otto-sessions' MCP launcher entries are appended the same way).
+    let mut body = String::new();
+    if current.last().is_some_and(|b| *b != b'\n') {
+        body.push('\n');
     }
-    next.push_str("# Otto review notes (local only)\n/.otto/\n");
-    std::fs::write(&exclude, next)
+    body.push_str("# Otto review notes (local only)\n/.otto/\n");
+    use std::io::Write;
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&exclude)?
+        .write_all(body.as_bytes())
 }
 
 #[cfg(test)]
@@ -1750,6 +1765,29 @@ mod exclude_tests {
         exclude_otto_dir(&wt).unwrap();
         let ex = std::fs::read_to_string(repo.join(".git/info/exclude")).unwrap();
         assert_eq!(ex.matches("/.otto/").count(), 1);
+    }
+
+    /// data-integrity-3-06: the user's rules are appended to, never rewritten
+    /// — even when the file is not valid UTF-8 (it used to read as empty and be
+    /// replaced by our line alone).
+    #[test]
+    fn exclude_keeps_the_users_bytes_and_only_appends() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("r");
+        std::fs::create_dir_all(repo.join(".git/info")).unwrap();
+        let original: &[u8] = b"*.log\n# caf\xe9\nbuild/";
+        std::fs::write(repo.join(".git/info/exclude"), original).unwrap();
+        exclude_otto_dir(&repo).unwrap();
+        exclude_otto_dir(&repo).unwrap();
+        let ex = std::fs::read(repo.join(".git/info/exclude")).unwrap();
+        assert!(ex.starts_with(original), "the user's bytes are kept");
+        let tail = String::from_utf8_lossy(&ex[original.len()..]).into_owned();
+        assert_eq!(tail, "\n# Otto review notes (local only)\n/.otto/\n");
+        // A missing file is created.
+        std::fs::remove_file(repo.join(".git/info/exclude")).unwrap();
+        exclude_otto_dir(&repo).unwrap();
+        let ex = std::fs::read_to_string(repo.join(".git/info/exclude")).unwrap();
+        assert_eq!(ex, "# Otto review notes (local only)\n/.otto/\n");
     }
 }
 

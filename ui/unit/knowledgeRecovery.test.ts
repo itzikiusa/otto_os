@@ -4,7 +4,17 @@ import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
 import { webcrypto } from 'node:crypto';
-import { deferred } from './sourceHarness.ts';
+import { deferred, loadSource } from './sourceHarness.ts';
+import { unwrapListing } from '../src/lib/listingPage.ts';
+
+/** The REAL issue client (lib/api/issues.ts) over the test's `get` stub, so a
+ *  fixture sees the exact (encoded) URLs the components request. */
+function issueClient(get: (path: string) => Promise<unknown>) {
+  return loadSource(new URL('../src/lib/api/issues.ts', import.meta.url), {
+    './client': { api: { get }, authedBlobUrl: async () => '' },
+    '../listingPage': { unwrapListing },
+  });
+}
 
 function functions(path: string, names: string[], state: Record<string, any>) {
   const text = readFileSync(new URL(path, import.meta.url), 'utf8').split('<script lang="ts">')[1].split('</script>')[0];
@@ -125,7 +135,7 @@ test('SourceSearch preserves existing results and retries the failed page contex
     selectedProjectKey:'P',selectedSpaceKey:'',searching:false,loadingMore:false,searched:true,mode:'text',rawMode:false,
     jiraResults:[{key:'P-1'}],confluenceResults:[],jiraOffset:25,jiraHasMore:true,lastRun:null,
     AbortController,loadErrorText:String,
-    api:{get:async(url:string)=>{urls.push(url);if(fail)throw new Error('offline');return [{key:'P-2'}];}},
+    ...issueClient(async(url:string)=>{urls.push(url);if(fail)throw new Error('offline');return [{key:'P-2'}];}),
   });
   await s.search('hello',25,true);assert.match(s.searchError,/offline/);assert.equal(s.jiraResults[0].key,'P-1');
   fail=false;s.retrySearch();await new Promise(resolve=>setTimeout(resolve,0));
@@ -142,9 +152,9 @@ test('SourceSearch Load more continues the listed query and mode', async () => {
     selectedProjectKey:'',selectedSpaceKey:'',searching:false,loadingMore:false,searched:false,mode:'raw',rawMode:true,linear:false,
     jiraResults:[],confluenceResults:[],jiraOffset:0,jiraHasMore:false,lastRun:null,query:'',
     AbortController,loadErrorText:String,
-    api:{get:async(url:string)=>{urls.push(url);if(fail)throw new Error('bad jql');
+    ...issueClient(async(url:string)=>{urls.push(url);if(fail)throw new Error('bad jql');
       const start=Number(new URL(url,'http://x').searchParams.get('start_at'));
-      return Array.from({length:25},(_,i)=>({key:`P-${start+i}`}));}},
+      return Array.from({length:25},(_,i)=>({key:`P-${start+i}`}));}),
   });
   await s.search('project = P',0,false);
   s.query='project = Q AND';         // edited, not run

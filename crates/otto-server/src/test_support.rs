@@ -106,11 +106,14 @@ impl ServerCtx {
             events: events.clone(),
             library_root: data_dir.join("lib"),
         });
-        let brokers = Arc::new(otto_brokers::BrokersService::new(
-            otto_state::BrokerClustersRepo::new(pool.clone()),
-            secrets.clone(),
-            None,
-        ));
+        let brokers = Arc::new(
+            otto_brokers::BrokersService::new(
+                otto_state::BrokerClustersRepo::new(pool.clone()),
+                secrets.clone(),
+                None,
+            )
+            .with_ops(otto_state::BrokerOpsRepo::new(pool.clone())),
+        );
         let usage = otto_usage::UsageEngine::start(
             otto_usage::UsageConfig {
                 enabled: false, // Fixtures never start ClickHouse.

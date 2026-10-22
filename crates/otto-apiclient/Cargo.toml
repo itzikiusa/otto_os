@@ -30,9 +30,14 @@ prost-reflect.workspace = true
 prost-types.workspace = true
 tonic.workspace = true
 boa_engine = "0.22.0"
+# `matches` assertions in `rest` (same version otto-server pins).
+regex = "1.13"
+# Basic-auth decoding in `rest`'s curl parser.
+base64.workspace = true
 libc = "0.2.190"
 
 [dev-dependencies]
+chrono.workspace = true
 # The gRPC endpoint test builds a TLS config, which needs the process-level
 # rustls provider `ottod` installs at startup. Same version/feature ottod pins.
 rustls = { version = "0.23.45", default-features = false, features = ["ring"] }

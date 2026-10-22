@@ -12,8 +12,9 @@ Conventions match `api.md`: JSON snake_case, RFC3339 timestamps, ULID ids,
 
 DTO names: persisted row structs live in `crates/otto-state/src/product.rs`; request
 DTOs + response wrappers in `crates/otto-product/src/types.rs` (NOT `otto-core`). The
-TypeScript mirror is `ui/src/modules/product/types.ts` (not the shared
-`ui/src/lib/api/types.ts`).
+TypeScript mirror is `ui/src/lib/api/types/product.ts` + `product-studio.ts`, re-exported
+by `ui/src/modules/product/types.ts` (import from there; the shared `lib/api/types`
+barrel re-exports only the few names `lib/` code needs).
 
 Routing is two-tier: **workspace-collection** routes are `/workspaces/{id}/product/...`;
 **item** routes are flat `/product/<entity>/{id}` and resolve+role-check the workspace

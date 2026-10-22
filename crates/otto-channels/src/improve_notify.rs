@@ -51,11 +51,6 @@ pub const NOTIFY_SWARM_KEY: &str = "channels.notify_swarm_done";
 pub const NOTIFY_REVIEW_KEY: &str = "channels.notify_review_done";
 /// Forward budget-exceeded events (spend cap crossed while enforcement is on).
 pub const NOTIFY_BUDGET_KEY: &str = "channels.notify_budget_exceeded";
-/// Forward approval-required events (same as `notify_self_improvement` but only
-/// the `ImprovementApprovalPending` signal, kept as a superset alias).
-/// We reuse `NOTIFY_SETTING_KEY` for backward compatibility and add this
-/// constant only for documentation clarity.
-pub const NOTIFY_APPROVAL_KEY: &str = "channels.notify_approval_required";
 
 /// Spawn the self-improvement notifier task. Returns immediately; the task runs
 /// until `cancel` is set or the broadcast sender is dropped.

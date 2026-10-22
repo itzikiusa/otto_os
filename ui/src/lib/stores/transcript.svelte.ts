@@ -7,6 +7,7 @@
 // and the per-session Terminal · Chat view (winKey-namespaced, like the rest of
 // the pane layout state).
 import { api } from '../api/client';
+import { loadErrorText } from '../loadError';
 import { winKey } from '../win';
 import { TranscriptLifecycle } from './transcriptLifecycle';
 import { parseSessionView, type SessionViewMode } from '../paneHeader';
@@ -180,9 +181,6 @@ export class Conversation {
   liveStatus = $state('');
   /** Git branch of the session cwd (`transcript_live.branch`). */
   liveBranch: string | null = $state(null);
-  /** Bumped on every `transcript_appended` — the draft is hidden until the
-   *  screen text moves past what the folded turn already shows. */
-  lastAppendAt = $state(0);
   /** Lazy subagent bodies keyed by agent id (`?sub=`). Raw and replaced
    *  whole on every change (`setSub`), so a body's turns are never proxied. */
   subagents: Record<string, SubagentBody> = $state.raw({});
@@ -282,7 +280,7 @@ export class Conversation {
       this.tailTick++;
       return true;
     } catch (e) {
-      if (!ac.signal.aborted && this.isActive()) this.error = e instanceof Error ? e.message : String(e);
+      if (!ac.signal.aborted && this.isActive()) this.error = loadErrorText(e);
       return false;
     } finally {
       signal?.removeEventListener('abort', abort);
@@ -307,7 +305,7 @@ export class Conversation {
       if (page.turns.length) this.headBounds.set(page.turns[0].id, page.cursor);
       this.holdCap = true;
     } catch (e) {
-      if (epoch === this.readEpoch && this.isActive()) this.error = e instanceof Error ? e.message : String(e);
+      if (epoch === this.readEpoch && this.isActive()) this.error = loadErrorText(e);
     } finally {
       if (epoch === this.readEpoch) this.loadingEarlier = false;
     }
@@ -374,7 +372,6 @@ export class Conversation {
     }
     if (transcript !== this.transcript) this.transcript = transcript;
     this.tailTick += 1;
-    this.lastAppendAt = Date.now();
   }
 
   /** Apply a `transcript_live` frame (the screen draft + input + status). */

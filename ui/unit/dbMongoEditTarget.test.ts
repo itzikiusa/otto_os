@@ -7,12 +7,16 @@ import { loadSource } from './sourceHarness.ts';
 
 // Compile the production adapter, including its target parser. The tiny formatting
 // dependencies do not participate in target detection or write identity.
-function pureModule(name: string): Record<string, any> {
+// The JSON-tree helpers (expansion-plan, bson) live in lib/jsonTree/.
+const JSON_TREE = /^(?:\.\/|\.\.\/\.\.\/lib\/jsonTree\/)(expansion-plan|bson)$/;
+function pureModule(name: string, dir = '../src/modules/database/'): Record<string, any> {
   const context = { exports: {} as Record<string, any>, require: (path: string) =>
-    ['./edit-sql','./sql-dialect.ts','./expansion-plan','./bson'].includes(path)
-      ? pureModule(path.replace('./','').replace(/\.ts$/, ''))
+    JSON_TREE.test(path)
+      ? pureModule(JSON_TREE.exec(path)![1], '../src/lib/jsonTree/')
+      : ['./edit-sql','./sql-dialect.ts'].includes(path)
+      ? pureModule(path.replace('./','').replace(/\.ts$/, ''), dir)
       : ({cellStr:String, isComplex:(v: unknown)=>v!==null && typeof v==='object', compactJson:JSON.stringify}) };
-  runInNewContext(ts.transpileModule(readFileSync(new URL(`../src/modules/database/${name}.ts`, import.meta.url), 'utf8'),
+  runInNewContext(ts.transpileModule(readFileSync(new URL(`${dir}${name}.ts`, import.meta.url), 'utf8'),
     { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, context);
   return context.exports;
 }
@@ -60,7 +64,7 @@ test('lossy results clear stale edit targets; row pagination and ordinary marker
   const { EditFlow } = loadSource(new URL('../src/modules/database/EditFlow.svelte.ts', import.meta.url), {
     '../../lib/toast.svelte': {}, '../../lib/stores/database.svelte': {database:{}},
     './results-format': {}, './edit-types': {adapterFor: () => mongo.mongoAdapter},
-    './edit-sql': pureModule('edit-sql'), './edit-mongo': mongo, './expansion-plan': {},
+    './edit-sql': pureModule('edit-sql'), './edit-mongo': mongo, '../../lib/jsonTree/expansion-plan': {},
     '../../lib/toastError': {}, '../../lib/plural': {},
   });
   const flow = new EditFlow();

@@ -1,8 +1,10 @@
-//! S2-11 guard: daemon code outside `otto-git` never spawns a bare `git`.
+//! S2-11 guard: daemon code outside `otto-git` / `otto-git-cmd` never spawns
+//! a bare `git`.
 //! A bare `Command::new("git")` skips the hardening every daemon git needs
 //! (repo config must not pick a program for the unconfined daemon to run:
 //! fsmonitor, hooks) — use `otto_git::LocalGit`, or
-//! `otto_git::hardened_command()` / `hardened_std_command()` where LocalGit
+//! `otto_git::hardened_command()` / `hardened_std_command()` (or the leaf
+//! `otto_git_cmd::` builders they wrap) where LocalGit
 //! doesn't fit. Test modules (everything from a file's first `#[cfg(test)]`)
 //! are exempt: they build fixture repos.
 
@@ -45,7 +47,8 @@ fn no_bare_git_spawns() {
     let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let mut files = Vec::new();
     for c in std::fs::read_dir(crates).unwrap().flatten() {
-        if c.file_name() == "otto-git" {
+        // The two crates that OWN the hardened builders.
+        if c.file_name() == "otto-git" || c.file_name() == "otto-git-cmd" {
             continue;
         }
         rust_files(&c.path().join("src"), &mut files);
@@ -62,7 +65,7 @@ fn no_bare_git_spawns() {
     }
     assert!(
         hits.is_empty(),
-        "bare git spawns outside otto-git (use otto_git::hardened_command / LocalGit):\n{}",
+        "bare git spawns outside otto-git (use otto_git::hardened_command / otto_git_cmd / LocalGit):\n{}",
         hits.join("\n")
     );
 }

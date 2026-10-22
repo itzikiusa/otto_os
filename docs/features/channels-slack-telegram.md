@@ -583,10 +583,10 @@ Authoritative source: `docs/contracts/api.md` (*Channel integrations* and
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
 | `GET /workspaces/{id}/integrations` | ws viewer | — | `Integration[]` (presence flags only — no tokens) |
-| `PUT /workspaces/{id}/integrations/{channel}` | ws editor | `UpsertIntegrationReq` | `Integration` (upsert; stores any provided tokens in Keychain) |
+| `PUT /workspaces/{id}/integrations/{channel}` | ws editor + root (bridge sessions act as the owner; non-root → 403) | `UpsertIntegrationReq` | `Integration` (upsert; stores any provided tokens in Keychain) |
 | `DELETE /workspaces/{id}/integrations/{channel}` | ws editor | — | `204` (also deletes the Keychain secrets) |
 | `POST /workspaces/{id}/integrations/{channel}/test` | ws editor | — | `{ ok, error? }` — sends "Otto is connected ✅" to `channel_id` |
-| `POST /workspaces/{id}/integrations/seed-from-loom` | ws editor | — | `Integration[]` — bulk-seed from a `.loom.env` (see §9) |
+| `POST /workspaces/{id}/integrations/seed-from-loom` | ws editor + root (bridge sessions act as the owner; non-root → 403) | — | `Integration[]` — bulk-seed from a `.loom.env` (see §9) |
 | `POST /workspaces/{id}/broadcast` | ws editor | `BroadcastReq {text, session_ids?}` | `BroadcastResp {session_ids}` |
 
 `{channel}` is `slack` or `telegram`. `UpsertIntegrationReq` carries write-only
@@ -681,6 +681,11 @@ retried every ~15 s), *Reconnecting* (the network or Slack dropped the
 connection; self-healing), *Not connected* (the token or app config was
 rejected — fix it, the listener keeps retrying every 60 s), *Token in use*
 (another enabled workspace already uses this app/bot token).
+
+**403 "only the owner can configure a channel bridge".** Saving a Slack/Telegram
+card or seeding from `.loom.env` needs root as well as workspace Editor: the bridge
+spawns sessions that act as the daemon owner, so a non-root Editor can't configure
+one. Ask the root account to save it.
 
 **Slack listener never starts / "app token missing".** Socket Mode needs the
 `xapp-` App-Level Token *in addition to* the `xoxb-` Bot token. Add it in

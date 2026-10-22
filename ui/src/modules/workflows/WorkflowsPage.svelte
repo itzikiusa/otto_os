@@ -4,11 +4,10 @@
   import { toastError } from '../../lib/toastError';
   import { focusOnMount } from '../../lib/focusOnMount';
   import { liveQuery } from '../../lib/live';
-  import PathField from '../../lib/components/PathField.svelte';
   // Workflows: build automations by *describing* them (agent mode) or by hand
   // on the canvas. Left = generate + list + running; center = node-graph editor + run.
   import { tick, untrack } from 'svelte';
-  import { marked } from 'marked';
+  import { renderMarkdownGfm } from '../../lib/md';
   import ApprovalActions from '../../lib/components/ApprovalActions.svelte';
   import ApprovalOutcome from '../../lib/components/ApprovalOutcome.svelte';
   import Icon, { asIcon } from '../../lib/components/Icon.svelte';
@@ -31,18 +30,19 @@
   import RunAgents from './RunAgents.svelte';
   import FileTree from '../panels/FileTree.svelte';
   import TriggersPanel from './TriggersPanel.svelte';
+  import NodeParams from './inspector/NodeParams.svelte';
+  import { InspectorOptions } from './inspector/options.svelte';
+  import { jsonValue, paramJson, withParam } from './inspector/util';
   import { ui, WF_CTX_MIN, WF_CTX_MAX } from '../../lib/stores/ui.svelte';
   import { startMouseDrag } from '../../lib/dragCursor';
   import { LIST_PANE, loadPaneWidth, paneResizer } from '../../lib/paneResizer';
   import { onTabKey } from '../../lib/tabKeys';
-  import { agentProviders, defaultAgentProvider } from '../../lib/providers';
-  import ModelPicker from '../../lib/components/ModelPicker.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
-  import { api } from '../../lib/api/client';
-  import { workflowProgress, workflowNodeDetail, listWorkflowVersions, restoreWorkflowVersion } from '../../lib/api/workflows';
+  import { api, ApiError } from '../../lib/api/client';
+  import { browseRunContext, readRunContext, patchWorkflow, workflowProgress, workflowNodeDetail, listWorkflowVersions, restoreWorkflowVersion } from '../../lib/api/workflows';
   import { applyLiveNode, mergeRunProgress, fmtStepMs, sharedNodeBodies } from './runProgress';
   import RelTime from '../../lib/components/RelTime.svelte';
   import { workflowRunBus } from '../../lib/events.svelte';
@@ -51,8 +51,8 @@
   import { guardUnsaved } from '../../lib/leaveGuard';
   import { registry } from '../../lib/commands.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
-  import { copyTextOrThrow } from '../../lib/clipboard';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
+  import { runContextPath } from './runContext';
   import { findPlaceholder, resultDestinations, runInputExample, runInputSkeleton } from './runInput';
   import type {
     Workflow,
@@ -63,8 +63,6 @@
     WorkflowTemplate,
     WorkflowTrigger,
     WorkflowVersionSummary,
-    FsRead,
-    Repo,
     ReviewMode,
     RunWorkflowReq,
   } from '../../lib/api/types';
@@ -128,6 +126,8 @@
   let finalOutputRunId = $state<string | null>(null);
   let finalOutputHtml = $state('');
   let finalOutputAvailable = $state(false);
+  /** A failed read that isn't a plain "no deliverable" (404): shown inline with Retry. */
+  let finalOutputError = $state<{ runId: string; text: string } | null>(null);
 
   const runStates = $derived<Record<string, NodeRunState>>(
     Object.fromEntries((run?.nodes ?? []).map((n) => [n.node_id, n])),
@@ -356,10 +356,9 @@
 
   // ── final-output panel ──────────────────────────────────────────────────
   // On a successful run, `<context_dir>/final-output.md` holds the run's
-  // deliverable (see workflow_context.rs's write_final_output). Rendered the
-  // same way FileTree previews markdown: `marked` → a sandboxed iframe
-  // (srcdoc, no scripts run) — that's the only "sanitizer" FileTree applies,
-  // so mirror it exactly rather than injecting raw HTML into the page.
+  // deliverable (see workflow_context.rs's write_final_output). Rendered
+  // into a sandboxed iframe (srcdoc, no scripts run), never raw HTML in the
+  // page; the shared renderer also sanitizes it.
   // The srcdoc is themed from the app's tokens (resolved values copied in,
   // like PluginFrame's `otto:init` theme) so it reads in light AND dark; it
   // re-renders when the theme/scheme/accent changes (`finalOutputSrcdoc`).
@@ -374,12 +373,13 @@
   `;
   const FINAL_OUTPUT_TOKENS = ['--text', '--text-dim', '--border', '--border-strong', '--surface-2', '--accent-text', '--font-ui', '--font-mono'];
   /** Markdown → HTML body (stored); the themed document is `finalOutputSrcdoc`. */
+  /** Through the shared GFM renderer (lib/md): sanitized on top of the
+   *  sandbox, and it never throws (a parse failure falls back to the escaped
+   *  tiny renderer). */
   function renderFinalOutputSrcdoc(md: string): string {
-    try {
-      return marked.parse(md, { async: false, gfm: true, breaks: true }) as string;
-    } catch {
-      return `<pre>${md.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c] ?? c))}</pre>`;
-    }
+    // `breaks`: final-output.md is an agent report written line by line
+    // ("Status: done" / "Files: 3" / "PR: …"), not reflowed prose.
+    return renderMarkdownGfm(md, { breaks: true });
   }
   function themedFinalOutput(body: string, scheme: 'light' | 'dark'): string {
     const cs = getComputedStyle(document.documentElement);
@@ -393,27 +393,42 @@
     void ui.accent;
     return finalOutputHtml ? themedFinalOutput(finalOutputHtml, ui.resolvedScheme) : '';
   });
-  async function loadFinalOutput(runId: string, contextDir: string): Promise<void> {
+  /** The Context panel's FileTree source: the run-scoped context routes. */
+  function contextFs(runId: string, contextDir: string) {
+    return {
+      lister: (path: string, signal?: AbortSignal) => browseRunContext(runId, runContextPath(contextDir, path), signal),
+      reader: (path: string, signal?: AbortSignal) => readRunContext(runId, runContextPath(contextDir, path), signal),
+    };
+  }
+  async function loadFinalOutput(runId: string): Promise<void> {
     finalOutputRunId = runId; // mark attempted up front — no duplicate fetches
     finalOutputAvailable = false;
     finalOutputHtml = '';
+    finalOutputError = null;
     try {
-      const data = await api.get<FsRead>(`/fs/read?path=${encodeURIComponent(`${contextDir}/final-output.md`)}`);
+      // The run-scoped route (ws Viewer), not /fs/read: that refuses the Otto
+      // data dir — where every run's context lives — to everyone but root.
+      const data = await readRunContext(runId, 'final-output.md');
       if (run?.id !== runId) return; // the view moved on while this was in flight
       finalOutputHtml = renderFinalOutputSrcdoc(data.content);
       finalOutputAvailable = true;
-    } catch {
-      // no final-output.md (or unreadable) — the panel just stays hidden
+    } catch (e) {
+      if (run?.id !== runId) return;
+      // No final-output.md (404) is normal: the panel just stays hidden.
+      // Anything else (403, a timeout, a restarting daemon) says so with Retry,
+      // and forgets the attempt so the next run update tries again.
+      if (e instanceof ApiError && e.status === 404) return;
+      finalOutputError = { runId, text: loadErrorText(e) };
+      finalOutputRunId = null;
     }
   }
   $effect(() => {
     const cur = run;
     if (!cur || cur.status !== 'success' || !cur.context_dir) return;
     const runId = cur.id;
-    const contextDir = cur.context_dir;
     untrack(() => {
       if (finalOutputRunId === runId) return;
-      void loadFinalOutput(runId, contextDir);
+      void loadFinalOutput(runId);
     });
   });
 
@@ -706,6 +721,7 @@
     finalOutputRunId = null;
     finalOutputHtml = '';
     finalOutputAvailable = false;
+    finalOutputError = null;
     void loadRuns();
     dirty = false;
   }
@@ -775,7 +791,7 @@
     const submitted = JSON.stringify($state.snapshot(graph));
     savingGraph = true;
     try {
-      const wf = await api.patch<Workflow>(`/workflows/${workflowId}`, { graph: JSON.parse(submitted) });
+      const wf = await patchWorkflow(workflowId, { graph: JSON.parse(submitted) as WorkflowGraph });
       applySavedWorkflow(wf);
       // Editing stays available during Save; only the submitted graph is saved.
       if (current?.id === workflowId && JSON.stringify($state.snapshot(graph)) === submitted) dirty = false;
@@ -795,7 +811,7 @@
     if (!current) return;
     savingInstructions = true;
     try {
-      const wf = await api.patch<Workflow>(`/workflows/${current.id}`, { instructions: wfInstructions });
+      const wf = await patchWorkflow(current.id, { instructions: wfInstructions });
       applySavedWorkflow(wf);
       toasts.success('Instructions saved');
     } catch (e) {
@@ -810,7 +826,7 @@
   async function saveOnRestart(resume: boolean): Promise<void> {
     if (!current) return;
     try {
-      const wf = await api.patch<Workflow>(`/workflows/${current.id}`, {
+      const wf = await patchWorkflow(current.id, {
         on_restart: resume ? 'resume' : 'fail',
       });
       applySavedWorkflow(wf);
@@ -943,7 +959,7 @@
       return;
     }
     try {
-      const updated = await api.patch<Workflow>(`/workflows/${wf.id}`, { name });
+      const updated = await patchWorkflow(wf.id, { name });
       workflows = workflows.map((w) => (w.id === wf.id ? { ...w, name: updated.name } : w));
       if (current?.id === wf.id) current = { ...current, name: updated.name };
       toasts.success(`Renamed to “${updated.name}”`);
@@ -1278,29 +1294,6 @@
     void save();
   }
 
-  // Copy-paste Slack message that triggers THIS workflow by name (shown on the
-  // Start node inspector + the Triggers panel).
-  let mtCopied = $state(false);
-  const mtSlackSnippet = $derived(
-    `@otto\n` +
-      `Action: Workflow\n` +
-      `Name: ${current?.name ?? '<workflow name>'}\n` +
-      `Msg: what you want done — instructions for the agents\n` +
-      `Jira ticket: PROJ-1234\n` +
-      `Working Directory: ~/path/to/repo\n` +
-      `Relevant Info: ~/path/a, ~/path/b\n` +
-      `Goals:\n  - 100% test coverage (services)\n  - under 2 minutes runtime`,
-  );
-  async function copyMtSlack(): Promise<void> {
-    try {
-      await copyTextOrThrow(mtSlackSnippet);
-      mtCopied = true;
-      setTimeout(() => (mtCopied = false), 1500);
-    } catch {
-      toasts.error('Couldn’t copy to the clipboard', 'Select the text and copy it manually.');
-    }
-  }
-
   // Stopping can't be undone (the run halts after its current step and must
   // be started again), so it asks first — the same Stop wording as the header's
   // "Stop run…" and a Stop in Goal Loops; "Keep running" is the safe way out.
@@ -1491,37 +1484,9 @@
       next: graph.edges.filter((e) => e.source === nodeId).map((e) => nodeName(e.target)),
     };
   }
-  // The workspace's repositories, for the repo pickers on review / PR /
-  // manual-trigger nodes — fetched once per workspace, only when such a node
-  // is open in the inspector.
-  let wfRepos = $state<Repo[]>([]);
-  let reposLoading = $state(false);
-  let reposError = $state<string | null>(null);
-  let reposFor: string | null = null;
-  async function loadWfRepos(force = false): Promise<void> {
-    const wsId = ws.currentId;
-    if (!wsId || (!force && reposFor === wsId)) return;
-    reposFor = wsId;
-    reposLoading = true;
-    reposError = null;
-    try {
-      const rows = await api.get<Repo[]>(`/workspaces/${wsId}/repos`);
-      if (reposFor === wsId) wfRepos = rows;
-    } catch (e) {
-      if (reposFor === wsId) {
-        reposError = loadErrorText(e);
-        reposFor = null;
-      }
-    } finally {
-      if (reposFor === wsId || reposFor === null) reposLoading = false;
-    }
-  }
-  const REPO_NODE_KINDS = new Set(['manual_trigger', 'review_run', 'git_pr']);
-  $effect(() => {
-    const kind = selectedNode?.kind;
-    void ws.currentId;
-    if (kind && REPO_NODE_KINDS.has(kind)) untrack(() => void loadWfRepos());
-  });
+  // The node forms' picker lists (repos, swarms, connections, …), fetched on
+  // demand once per workspace / key for the life of the page.
+  const pickers = new InspectorOptions();
   /** "you" for the signed-in approver, a name as given, nothing for a bare id. */
   function approverLabel(by: string | null | undefined): string | null {
     if (!by) return null;
@@ -1532,279 +1497,16 @@
 
   function onParam(field: string, value: unknown): void {
     if (!selectedNode) return;
-    const params = { ...((selectedNode.params as Record<string, unknown>) ?? {}) };
-    if (value === '' || value === null || value === undefined) {
-      delete params[field];
-    } else {
-      params[field] = value;
-    }
-    selectedNode.params = params;
+    selectedNode.params = withParam(selectedNode.params, field, value);
     graph = graph;
     dirty = true;
-  }
-
-  // swarm_task node: pick the swarm / project instead of pasting raw ids.
-  // Loaded on demand when such a node is selected (null = not loaded / failed —
-  // the inputs fall back to free text so a saved id is still editable).
-  let swarmOpts = $state<{ id: string; name: string }[] | null>(null);
-  let swarmProjectOpts = $state<Record<string, { id: string; name: string }[]>>({});
-  let swarmOptsWs: string | null = null;
-  // Each list / project lookup is tried ONCE per workspace (pending or
-  // failed): the effect re-runs per keystroke in the free-text fallback, and
-  // used to re-fetch the list — and `GET /swarm/swarms/<partial id>` — per
-  // character after a failure.
-  let swarmListTried = false;
-  const swarmProjectsTried = new Set<string>();
-  $effect(() => {
-    const wsId = current?.workspace_id;
-    if (selectedNode?.kind !== 'swarm_task' || !wsId) return;
-    const sid = paramStr('swarm_id');
-    untrack(() => {
-      if (swarmOptsWs !== wsId) {
-        swarmOptsWs = wsId;
-        swarmOpts = null;
-        swarmListTried = false;
-        swarmProjectsTried.clear();
-      }
-      if (swarmOpts === null && !swarmListTried) {
-        swarmListTried = true;
-        api
-          .get<{ id: string; name: string }[]>(`/workspaces/${wsId}/swarm/swarms`)
-          .then((l) => {
-            if (swarmOptsWs === wsId) swarmOpts = l.map((x) => ({ id: x.id, name: x.name }));
-          })
-          .catch(() => {});
-      }
-      // Only a COMPLETE id: one the list knows, or (free text) a full ULID.
-      const complete = swarmOpts ? swarmOpts.some((o) => o.id === sid) : /^[0-9A-HJKMNP-TV-Z]{26}$/i.test(sid);
-      if (sid && complete && !swarmProjectOpts[sid] && !swarmProjectsTried.has(sid)) {
-        swarmProjectsTried.add(sid);
-        api
-          .get<{ projects: { id: string; name: string }[] }>(`/swarm/swarms/${encodeURIComponent(sid)}`)
-          .then((d) => (swarmProjectOpts = { ...swarmProjectOpts, [sid]: d.projects.map((x) => ({ id: x.id, name: x.name })) }))
-          .catch(() => {});
-      }
-    });
-  });
-
-  function paramStr(field: string): string {
-    const p = selectedNode?.params as Record<string, unknown> | undefined;
-    const v = p?.[field];
-    return typeof v === 'string' ? v : v != null ? String(v) : '';
-  }
-
-  function paramNum(field: string, def: number): number {
-    const p = selectedNode?.params as Record<string, unknown> | undefined;
-    const v = p?.[field];
-    return typeof v === 'number' ? v : typeof v === 'string' && v !== '' ? Number(v) : def;
-  }
-
-  function paramJson(field: string): string {
-    const p = selectedNode?.params as Record<string, unknown> | undefined;
-    const v = p?.[field];
-    if (v == null) return '';
-    return typeof v === 'string' ? v : JSON.stringify(v, null, 2);
   }
 
   // JSON param field zoom (R10): open a big modal editor for the cramped node-form
   // JSON textareas (Steps / Merge JSON / Body). Edits write straight back to the param.
   let jsonZoom = $state<{ field: string; label: string } | null>(null);
-
   function onParamJson(field: string, raw: string): void {
-    if (!selectedNode) return;
-    try {
-      const parsed = JSON.parse(raw);
-      onParam(field, parsed);
-    } catch {
-      // Keep invalid JSON as a string so the user can see what they typed
-      // without losing the edit; the engine will reject it on run.
-      onParam(field, raw);
-    }
-  }
-
-  function paramBool(field: string, def = false): boolean {
-    const p = selectedNode?.params as Record<string, unknown> | undefined;
-    const v = p?.[field];
-    return typeof v === 'boolean' ? v : def;
-  }
-
-  /** A string[] param rendered one-per-line (e.g. review goals). */
-  function paramLines(field: string): string {
-    const p = selectedNode?.params as Record<string, unknown> | undefined;
-    const v = p?.[field];
-    if (Array.isArray(v)) return v.filter((x) => typeof x === 'string').join('\n');
-    return typeof v === 'string' ? v : '';
-  }
-  function onParamLines(field: string, raw: string): void {
-    const lines = raw.split('\n').map((s) => s.trim()).filter((s) => s !== '');
-    onParam(field, lines.length ? lines : undefined);
-  }
-
-  /** A string[] param rendered comma-separated (e.g. skills, providers, lenses). */
-  function paramList(field: string): string {
-    const p = selectedNode?.params as Record<string, unknown> | undefined;
-    const v = p?.[field];
-    if (Array.isArray(v)) return v.filter((x) => typeof x === 'string').join(', ');
-    return typeof v === 'string' ? v : '';
-  }
-  function onParamList(field: string, raw: string): void {
-    const items = raw.split(',').map((s) => s.trim()).filter((s) => s !== '');
-    onParam(field, items.length ? items : undefined);
-  }
-
-  // --- review_run rich config: per-lens reviewers + summarizer + scoring -----
-  // Mirrors the PR-review config (each lens gets its own provider set + optional
-  // custom instructions), plus a generic per-severity scoring guideline.
-  interface ReviewerRow {
-    lens?: string;
-    providers?: string[];
-    instructions?: string;
-  }
-  // Reviewer providers come from the live registry (built-ins + custom).
-  const REVIEW_PROVIDERS = $derived(agentProviders());
-
-  function reviewers(): ReviewerRow[] {
-    const p = selectedNode?.params as Record<string, unknown> | undefined;
-    return Array.isArray(p?.reviewers) ? (p?.reviewers as ReviewerRow[]) : [];
-  }
-  function setReviewers(rows: ReviewerRow[]): void {
-    onParam('reviewers', rows.length ? rows : undefined);
-  }
-  function addReviewer(): void {
-    setReviewers([...reviewers(), { lens: '', providers: [defaultAgentProvider()] }]);
-  }
-  function removeReviewer(i: number): void {
-    setReviewers(reviewers().filter((_, idx) => idx !== i));
-  }
-  function updateReviewer(i: number, patch: Partial<ReviewerRow>): void {
-    setReviewers(reviewers().map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
-  }
-  function toggleReviewerProvider(i: number, prov: string): void {
-    const cur = reviewers()[i]?.providers ?? [];
-    const next = cur.includes(prov) ? cur.filter((x) => x !== prov) : [...cur, prov];
-    updateReviewer(i, { providers: next.length ? next : [defaultAgentProvider()] });
-  }
-  function summarizerField(field: 'provider' | 'instructions'): string {
-    const p = selectedNode?.params as Record<string, unknown> | undefined;
-    const s = p?.summarizer as Record<string, unknown> | undefined;
-    const v = s?.[field];
-    return typeof v === 'string' ? v : '';
-  }
-  function updateSummarizer(field: string, value: string): void {
-    const p = selectedNode?.params as Record<string, unknown> | undefined;
-    const next = { ...((p?.summarizer as Record<string, unknown>) ?? {}) };
-    if (value === '') delete next[field];
-    else next[field] = value;
-    onParam('summarizer', Object.keys(next).length ? next : undefined);
-  }
-  function scoringField(sev: 'bug' | 'warn' | 'info', def: number): number {
-    const p = selectedNode?.params as Record<string, unknown> | undefined;
-    const s = p?.scoring as Record<string, unknown> | undefined;
-    const v = s?.[sev];
-    return typeof v === 'number' ? v : def;
-  }
-  function updateScoring(sev: string, value: number): void {
-    const p = selectedNode?.params as Record<string, unknown> | undefined;
-    const next = { ...((p?.scoring as Record<string, unknown>) ?? {}), [sev]: value };
-    onParam('scoring', next);
-  }
-
-  // --- loop sub-steps: each step is a node-like {kind,name,params}. The loop
-  // runs them in order each iteration. Agent-running sub-steps (agent_prompt,
-  // prepare_context, review_run, product_*, canvas) get a real Provider/Model
-  // editor here — no more hand-editing raw JSON to set a sub-step's provider. ---
-  interface LoopStep {
-    kind: string;
-    name?: string;
-    params?: Record<string, unknown>;
-  }
-  // Sub-step kinds that spawn a single agent → Provider + Model (+ Prompt).
-  const LOOP_AGENT_KINDS = [
-    'agent_prompt',
-    'prepare_context',
-    'product_analyze',
-    'product_rewrite',
-    'product_plan',
-    'canvas',
-  ];
-  // Kinds a loop sub-step can be (agent kinds + review_run + the common
-  // non-agent utilities). Anything else stays editable via Advanced JSON.
-  const LOOP_STEP_KINDS = [...LOOP_AGENT_KINDS, 'review_run', 'http_request', 'db_query', 'delay', 'transform'];
-
-  // Kinds that render their OWN Provider control (inline or a richer multi-agent
-  // config). EVERY OTHER kind gets the shared universal Provider+Model block, so
-  // NO node is ever missing a provider selector — including git_pr (drafts the PR
-  // message with an agent), swarm_task, and the utility nodes.
-  const KINDS_WITH_OWN_PROVIDER = [
-    'agent_prompt',
-    'prepare_context',
-    'product_analyze',
-    'product_rewrite',
-    'product_plan',
-    'canvas',
-    'review_run',
-    'self_improve',
-    'loop',
-    'budget_gate',
-  ];
-
-  function loopSteps(): LoopStep[] {
-    const p = selectedNode?.params as Record<string, unknown> | undefined;
-    return Array.isArray(p?.steps) ? (p?.steps as LoopStep[]) : [];
-  }
-  function setLoopSteps(steps: LoopStep[]): void {
-    onParam('steps', steps.length ? steps : undefined);
-  }
-  function addLoopStep(): void {
-    setLoopSteps([...loopSteps(), { kind: 'agent_prompt', name: '', params: {} }]);
-  }
-  function removeLoopStep(i: number): void {
-    setLoopSteps(loopSteps().filter((_, idx) => idx !== i));
-  }
-  function updateLoopStep(i: number, patch: Partial<LoopStep>): void {
-    setLoopSteps(loopSteps().map((s, idx) => (idx === i ? { ...s, ...patch } : s)));
-  }
-  function loopStepParam(i: number, key: string): string {
-    const v = (loopSteps()[i]?.params ?? {})[key];
-    return typeof v === 'string' ? v : v != null ? String(v) : '';
-  }
-  function loopStepParamList(i: number, key: string): string {
-    const v = (loopSteps()[i]?.params ?? {})[key];
-    if (Array.isArray(v)) return v.filter((x) => typeof x === 'string').join(', ');
-    return typeof v === 'string' ? v : '';
-  }
-  function updateLoopStepParam(i: number, key: string, value: unknown): void {
-    const step = loopSteps()[i];
-    if (!step) return;
-    const params = { ...(step.params ?? {}) };
-    if (value == null || value === '' || (Array.isArray(value) && value.length === 0)) delete params[key];
-    else params[key] = value;
-    updateLoopStep(i, { params });
-  }
-  function updateLoopStepSummarizer(i: number, provider: string): void {
-    const step = loopSteps()[i];
-    if (!step) return;
-    const params = { ...(step.params ?? {}) };
-    if (provider.trim() === '') delete params.summarizer;
-    else params.summarizer = { ...((params.summarizer as Record<string, unknown>) ?? {}), provider };
-    updateLoopStep(i, { params });
-  }
-  function loopStepSummarizer(i: number): string {
-    const s = (loopSteps()[i]?.params ?? {}).summarizer as Record<string, unknown> | undefined;
-    return typeof s?.provider === 'string' ? s.provider : '';
-  }
-
-  // --- self_improve: reflection can run on one or more agents; the node's
-  // `providers` array overrides the workspace's Self-Improvement providers. Empty
-  // ⇒ use the configured set (Settings → Self-Improvement). ---
-  function selfImproveProviders(): string[] {
-    const p = selectedNode?.params as Record<string, unknown> | undefined;
-    return Array.isArray(p?.providers) ? (p.providers as string[]) : [];
-  }
-  function toggleSelfImproveProvider(prov: string): void {
-    const cur = selfImproveProviders();
-    const next = cur.includes(prov) ? cur.filter((x) => x !== prov) : [...cur, prov];
-    onParam('providers', next.length ? next : undefined);
+    if (selectedNode) onParam(field, jsonValue(raw));
   }
 
   // --- Per-node retry policy (writes node.retry, not params) ----------------
@@ -1897,22 +1599,6 @@
   }
 
 </script>
-
-<!-- Label + zoom button for a cramped node-form JSON field (R10). -->
-{#snippet jsonLabel(forId: string, label: string, field: string)}
-  <div class="np-jsonlabel">
-    <label for={forId}>{label}</label>
-    <button
-      type="button"
-      class="np-zoom"
-      title="Zoom — edit in a big editor"
-      aria-label="Zoom JSON editor"
-      onclick={() => (jsonZoom = { field, label })}
-    >
-      <Icon name="maximize" size={12} />
-    </button>
-  </div>
-{/snippet}
 
 <!-- The "new workflow" form: describe it (an agent wires the graph), start
      blank, or start from a template. Lives at the top of the list pane; with no
@@ -2010,31 +1696,6 @@
       {/if}
     {/if}
   </div>
-{/snippet}
-
-<!-- A node's `repo_id` param as a picker over the workspace's repositories
-     (it used to be a free-text "Repo ID" to copy from the Git tab). A value
-     that isn't in the list — another workspace's repo, or a stale id — stays
-     selectable so opening the node never silently rewrites it. -->
-{#snippet repoPicker(id: string, emptyLabel: string)}
-  {@const value = paramStr('repo_id')}
-  <select
-    {id}
-    {value}
-    disabled={reposLoading && wfRepos.length === 0}
-    onchange={(e) => onParam('repo_id', e.currentTarget.value)}
-  >
-    <option value="">{reposLoading && wfRepos.length === 0 ? 'Loading repositories…' : emptyLabel}</option>
-    {#each wfRepos as r (r.id)}
-      <option value={r.id} title={r.path}>{r.name}</option>
-    {/each}
-    {#if value && !wfRepos.some((r) => r.id === value)}
-      <option value={value}>{value} (not in this workspace)</option>
-    {/if}
-  </select>
-  {#if reposError}
-    <LoadState what="repositories" variant="compact" error={reposError} empty onretry={() => void loadWfRepos(true)} />
-  {/if}
 {/snippet}
 
 <div class="wf-root">
@@ -2570,6 +2231,9 @@
                 </summary>
                 <iframe class="final-output-frame" title="Final output" sandbox="allow-same-origin" srcdoc={finalOutputSrcdoc}></iframe>
               </details>
+            {:else if finalOutputError?.runId === run.id && !viewport.isDesktop}
+              {@const runId = run.id}
+              <LoadState what="the final output" variant="compact" error={finalOutputError.text} empty onretry={() => void loadFinalOutput(runId)} />
             {/if}
             {#if run.context_dir && !viewport.isDesktop}
               <!-- Mobile/tablet: the run's context files inline (instruction brief,
@@ -2582,7 +2246,7 @@
                   <span>Context files</span>
                   <code class="dim">{run.context_dir}</code>
                 </summary>
-                <div class="ctx-files-tree"><FileTree root={run.context_dir} /></div>
+                <div class="ctx-files-tree"><FileTree root={run.context_dir} {...contextFs(run.id, run.context_dir)} /></div>
               </details>
             {/if}
           {/if}
@@ -2597,892 +2261,15 @@
               <button class="btn small" disabled={running} onclick={() => runFrom(selectedNode.id, false)} title="Run this node and everything downstream"><Icon name="play" size={12} /> From here</button>
               <button class="btn small" disabled={running} onclick={() => runFrom(selectedNode.id, true)} title="Run only this node">Only this</button>
             </div>
-            <!-- Shared Provider + Model editor for every agent-running node —
-                 sourced from the live registry (built-ins + custom, e.g. grok)
-                 so no node is hardcoded to claude. Empty provider = default. -->
-            {#snippet agentProviderModel()}
-              <label for="np-provider">Provider</label>
-              <select
-                id="np-provider"
-                value={paramStr('provider') || ''}
-                onchange={(e) => onParam('provider', e.currentTarget.value || undefined)}
-              >
-                <option value="">default ({defaultAgentProvider()})</option>
-                {#each agentProviders() as p (p)}<option value={p}>{p}</option>{/each}
-              </select>
-              <!-- Empty provider = default → resolve so the picker lists the
-                   models that will actually run. Hides itself for a provider
-                   with no model-flag template. -->
-              <ModelPicker
-                provider={paramStr('provider') || defaultAgentProvider()}
-                value={paramStr('model')}
-                onchange={(m) => onParam('model', m)}
-              />
-            {/snippet}
-            <!-- Per-kind param forms. Each kind exposes only its meaningful
-                 params; unrecognised kinds fall through to a raw JSON editor. -->
-            {#if selectedNode.kind === 'manual_trigger'}
-              <p class="insp-note">
-                These fields are the <strong>run input</strong> the workflow starts with — fill them
-                in here, then press <strong>Run</strong> (top-right). A Slack trigger or the
-                <strong>Run…</strong> editor override them per key.
-              </p>
-              <label for="mt-msg">Message / prompt</label>
-              <textarea dir="auto"
-                id="mt-msg"
-                class="np-prompt"
-                rows="6"
-                placeholder="What you want done — instructions for the agents"
-                value={paramStr('msg')}
-                oninput={(e) => onParam('msg', e.currentTarget.value)}
-              ></textarea>
-              <label for="mt-wd">Working folder (where agents run)</label>
-              <PathField value={paramStr('working_directory')} onpick={(path) => onParam('working_directory', path)}><input dir="ltr"
-                id="mt-wd"
-                type="text"
-                placeholder="~/path/to/repo (default: workspace root)"
-                value={paramStr('working_directory')}
-                oninput={(e) => onParam('working_directory', e.currentTarget.value)}
-              /></PathField>
-              <label for="mt-repo">Repository (for review / PR steps)</label>
-              {@render repoPicker('mt-repo', 'None')}
-              <label for="mt-base">Base branch</label>
-              <input dir="auto"
-                id="mt-base"
-                type="text"
-                placeholder="main"
-                value={paramStr('base')}
-                oninput={(e) => onParam('base', e.currentTarget.value)}
-              />
-              <label for="mt-story">Story ID (for product steps)</label>
-              <input dir="auto"
-                id="mt-story"
-                type="text"
-                placeholder="product story id"
-                value={paramStr('story_id')}
-                oninput={(e) => onParam('story_id', e.currentTarget.value)}
-              />
-              <label for="mt-jira">Jira ticket</label>
-              <input dir="auto"
-                id="mt-jira"
-                type="text"
-                placeholder="PROJ-1234"
-                value={paramStr('jira_ticket')}
-                oninput={(e) => onParam('jira_ticket', e.currentTarget.value)}
-              />
-              <label for="mt-goals">Goals (one per line)</label>
-              <textarea dir="auto"
-                id="mt-goals"
-                class="np-prompt"
-                rows="6"
-                placeholder={'100% test coverage (services)\nunder 2 minutes runtime'}
-                value={paramLines('goals')}
-                oninput={(e) => onParamLines('goals', e.currentTarget.value)}
-              ></textarea>
-              <div class="insp-slack">
-                <div class="is-head">
-                  <strong>Or trigger from Slack</strong>
-                  <button class="btn small" onclick={copyMtSlack}>{mtCopied ? 'Copied' : 'Copy'}</button>
-                </div>
-                <p class="insp-note">Post this where the Otto bot is configured for your workspace (matched by Name):</p>
-                <pre class="is-snip">{mtSlackSnippet}</pre>
-              </div>
-            {:else if selectedNode.kind === 'agent_prompt'}
-              <label for="np-prompt">Prompt</label>
-              <textarea dir="auto"
-                id="np-prompt"
-                class="np-prompt np-prompt-lg"
-                rows="14"
-                value={paramStr('prompt')}
-                oninput={(e) => onParam('prompt', e.currentTarget.value)}
-              ></textarea>
-              {@render agentProviderModel()}
-              <label for="np-skills">Skills (comma-separated)</label>
-              <input dir="auto"
-                id="np-skills"
-                type="text"
-                placeholder="e.g. golang-testing, golang-code-review"
-                value={paramList('skills')}
-                oninput={(e) => onParamList('skills', e.currentTarget.value)}
-              />
-            {:else if selectedNode.kind === 'prepare_context'}
-              <p class="insp-note">
-                Fetches the Jira ticket from the input (if any) into a context file, then
-                — if you give it a prompt — runs an agent to consolidate a brief. The
-                Provider/Model below drive that agent phase.
-              </p>
-              <label for="np-pc-prompt">Prompt (optional — runs an agent when set)</label>
-              <textarea dir="auto"
-                id="np-pc-prompt"
-                class="np-prompt np-prompt-lg"
-                rows="14"
-                placeholder="e.g. Read the ticket + repos and produce a consolidated brief…"
-                value={paramStr('prompt')}
-                oninput={(e) => onParam('prompt', e.currentTarget.value)}
-              ></textarea>
-              {@render agentProviderModel()}
-              <label for="np-pc-skills">Skills (comma-separated)</label>
-              <input dir="auto"
-                id="np-pc-skills"
-                type="text"
-                placeholder="e.g. golang-testing"
-                value={paramList('skills')}
-                oninput={(e) => onParamList('skills', e.currentTarget.value)}
-              />
-              <label for="np-pc-account">Jira account ID (optional — else the default)</label>
-              <input dir="auto"
-                id="np-pc-account"
-                type="text"
-                placeholder="inherits the default Jira account"
-                value={paramStr('account_id')}
-                oninput={(e) => onParam('account_id', e.currentTarget.value || undefined)}
-              />
-              <label class="np-chk">
-                <input
-                  type="checkbox"
-                  checked={paramBool('require')}
-                  onchange={(e) => onParam('require', e.currentTarget.checked || undefined)}
-                /> Fail the run if the Jira fetch fails
-              </label>
-            {:else if selectedNode.kind === 'http_request'}
-              <label for="np-method">Method</label>
-              <select
-                id="np-method"
-                value={paramStr('method') || 'GET'}
-                onchange={(e) => onParam('method', e.currentTarget.value)}
-              >
-                {#each ['GET','POST','PUT','PATCH','DELETE','HEAD'] as m (m)}
-                  <option value={m}>{m}</option>
-                {/each}
-              </select>
-              <label for="np-url">URL</label>
-              <input dir="ltr"
-                id="np-url"
-                type="url"
-                placeholder="https://example.com/api"
-                value={paramStr('url')}
-                oninput={(e) => onParam('url', e.currentTarget.value)}
-              />
-              {@render jsonLabel('np-body', 'Body (JSON, optional)', 'body')}
-              <textarea dir="ltr"
-                id="np-body"
-                rows="3"
-                placeholder="&#123;&#125;"
-                value={paramJson('body')}
-                oninput={(e) => onParamJson('body', e.currentTarget.value)}
-              ></textarea>
-            {:else if selectedNode.kind === 'delay'}
-              <label for="np-ms">Wait (ms)</label>
-              <input
-                id="np-ms"
-                type="number"
-                min="0"
-                max="10000"
-                step="100"
-                value={paramNum('ms', 0)}
-                oninput={(e) => onParam('ms', Number(e.currentTarget.value))}
-              />
-            {:else if selectedNode.kind === 'transform'}
-              {@render jsonLabel('np-json', 'Merge JSON (object)', 'json')}
-              <textarea dir="ltr"
-                id="np-json"
-                rows="4"
-                placeholder="&#123;&#125;"
-                value={paramJson('json')}
-                oninput={(e) => onParamJson('json', e.currentTarget.value)}
-              ></textarea>
-            {:else if selectedNode.kind === 'game_engine'}
-              <label for="np-game">Game type</label>
-              <select
-                id="np-game"
-                value={paramStr('game') || 'slots'}
-                onchange={(e) => onParam('game', e.currentTarget.value)}
-              >
-                <option value="slots">Slots (5×3)</option>
-                <option value="crash">Crash (Aviator-style)</option>
-                <option value="scratch">Scratch card</option>
-              </select>
-            {:else if selectedNode.kind === 'db_query'}
-              <label for="np-conn">Connection ID</label>
-              <input dir="auto"
-                id="np-conn"
-                type="text"
-                placeholder="DB-Explorer connection id"
-                value={paramStr('connection_id')}
-                oninput={(e) => onParam('connection_id', e.currentTarget.value)}
-              />
-              <label for="np-stmt">SQL / query statement</label>
-              <textarea dir="ltr"
-                id="np-stmt"
-                rows="4"
-                placeholder="SELECT * FROM users LIMIT 100"
-                value={paramStr('statement')}
-                oninput={(e) => onParam('statement', e.currentTarget.value)}
-              ></textarea>
-              <label for="np-maxrows">Max rows (default 100)</label>
-              <input
-                id="np-maxrows"
-                type="number"
-                min="1"
-                max="1000"
-                value={paramNum('max_rows', 100)}
-                oninput={(e) => onParam('max_rows', Number(e.currentTarget.value))}
-              />
-            {:else if selectedNode.kind === 'broker_peek'}
-              <label for="np-cid">Cluster ID</label>
-              <input dir="ltr"
-                id="np-cid"
-                type="text"
-                placeholder="Broker cluster id"
-                value={paramStr('cluster_id')}
-                oninput={(e) => onParam('cluster_id', e.currentTarget.value)}
-              />
-              <label for="np-topic">Topic</label>
-              <input dir="ltr"
-                id="np-topic"
-                type="text"
-                placeholder="my-topic"
-                value={paramStr('topic')}
-                oninput={(e) => onParam('topic', e.currentTarget.value)}
-              />
-              <label for="np-limit">Limit (max 50)</label>
-              <input
-                id="np-limit"
-                type="number"
-                min="1"
-                max="50"
-                value={paramNum('limit', 20)}
-                oninput={(e) => onParam('limit', Number(e.currentTarget.value))}
-              />
-            {:else if selectedNode.kind === 'channel_notify'}
-              <label for="np-msg">Message</label>
-              <textarea dir="auto"
-                id="np-msg"
-                rows="3"
-                placeholder="Workflow step completed: &#123;reply&#125;"
-                value={paramStr('message')}
-                oninput={(e) => onParam('message', e.currentTarget.value)}
-              ></textarea>
-              <label for="np-ch">Channel (optional)</label>
-              <select
-                id="np-ch"
-                value={paramStr('channel') || ''}
-                onchange={(e) => onParam('channel', e.currentTarget.value || undefined)}
-              >
-                <option value="">Any enabled</option>
-                <option value="slack">Slack</option>
-                <option value="telegram">Telegram</option>
-              </select>
-            {:else if selectedNode.kind === 'budget_gate'}
-              <label for="np-provider">Provider (whose usage budget to check)</label>
-              <select
-                id="np-provider"
-                value={paramStr('provider') || defaultAgentProvider()}
-                onchange={(e) => onParam('provider', e.currentTarget.value)}
-              >
-                {#each agentProviders() as pv (pv)}<option value={pv}>{pv}</option>{/each}
-              </select>
-              <p class="node-hint">Errors the run if the provider budget is exceeded and enforcement is on.</p>
-            {:else if selectedNode.kind === 'human_approval'}
-              <label for="np-aprompt">Approval prompt</label>
-              <input dir="auto"
-                id="np-aprompt"
-                type="text"
-                placeholder="Please review and approve to continue"
-                value={paramStr('prompt')}
-                oninput={(e) => onParam('prompt', e.currentTarget.value)}
-              />
-              <p class="node-hint">Pauses the run until an operator calls the resume endpoint or clicks Approve above.</p>
-            {:else if selectedNode.kind === 'swarm_task'}
-              {@const sid = paramStr('swarm_id')}
-              {@const projOpts = sid ? swarmProjectOpts[sid] : undefined}
-              <label for="np-swarm">Swarm</label>
-              {#if swarmOpts}
-                <select
-                  id="np-swarm"
-                  value={sid}
-                  onchange={(e) => { onParam('swarm_id', e.currentTarget.value); onParam('project_id', ''); }}
-                >
-                  <option value="">Choose a swarm…</option>
-                  {#each swarmOpts as o (o.id)}<option value={o.id}>{o.name}</option>{/each}
-                  {#if sid && !swarmOpts.some((o) => o.id === sid)}<option value={sid}>Unknown swarm ({sid})</option>{/if}
-                </select>
-                {#if swarmOpts.length === 0}<p class="node-hint">No swarms in this workspace yet — create one on the Swarm page.</p>{/if}
-              {:else}
-                <input dir="auto"
-                  id="np-swarm"
-                  type="text"
-                  placeholder="Swarm id"
-                  value={sid}
-                  oninput={(e) => onParam('swarm_id', e.currentTarget.value)}
-                />
-              {/if}
-              <label for="np-proj">Project</label>
-              {#if projOpts}
-                <select
-                  id="np-proj"
-                  value={paramStr('project_id')}
-                  onchange={(e) => onParam('project_id', e.currentTarget.value)}
-                >
-                  <option value="">Choose a project…</option>
-                  {#each projOpts as o (o.id)}<option value={o.id}>{o.name}</option>{/each}
-                  {#if paramStr('project_id') && !projOpts.some((o) => o.id === paramStr('project_id'))}
-                    <option value={paramStr('project_id')}>Unknown project ({paramStr('project_id')})</option>
-                  {/if}
-                </select>
-              {:else}
-                <input dir="auto"
-                  id="np-proj"
-                  type="text"
-                  placeholder={sid ? 'Swarm project id' : 'Choose a swarm first'}
-                  value={paramStr('project_id')}
-                  oninput={(e) => onParam('project_id', e.currentTarget.value)}
-                />
-              {/if}
-              <label for="np-title">Task title</label>
-              <input dir="auto"
-                id="np-title"
-                type="text"
-                placeholder="Workflow-generated task title"
-                value={paramStr('title')}
-                oninput={(e) => onParam('title', e.currentTarget.value)}
-              />
-              <label for="np-desc">Description (optional)</label>
-              <textarea dir="auto"
-                id="np-desc"
-                class="np-prompt"
-                rows="6"
-                placeholder="Task details…"
-                value={paramStr('description')}
-                oninput={(e) => onParam('description', e.currentTarget.value)}
-              ></textarea>
-            {:else if selectedNode.kind === 'api_run'}
-              <label for="np-method">Method</label>
-              <select
-                id="np-method"
-                value={paramStr('method') || 'GET'}
-                onchange={(e) => onParam('method', e.currentTarget.value)}
-              >
-                {#each ['GET','POST','PUT','PATCH','DELETE'] as m (m)}
-                  <option value={m}>{m}</option>
-                {/each}
-              </select>
-              <label for="np-url">URL</label>
-              <input dir="ltr"
-                id="np-url"
-                type="url"
-                placeholder="https://api.example.com/endpoint"
-                value={paramStr('url')}
-                oninput={(e) => onParam('url', e.currentTarget.value)}
-              />
-              {@render jsonLabel('np-body', 'Body (JSON, optional)', 'body')}
-              <textarea dir="ltr"
-                id="np-body"
-                rows="3"
-                placeholder="&#123;&#125;"
-                value={paramJson('body')}
-                oninput={(e) => onParamJson('body', e.currentTarget.value)}
-              ></textarea>
-            {:else if selectedNode.kind === 'condition'}
-              <label for="np-expr">Expression</label>
-              <input dir="ltr"
-                id="np-expr"
-                type="text"
-                placeholder="e.g. score >= 80"
-                value={paramStr('expr')}
-                oninput={(e) => onParam('expr', e.currentTarget.value)}
-              />
-              <p class="node-hint">Truthy → downstream nodes run; falsy → they’re skipped.</p>
-            {:else if selectedNode.kind === 'loop'}
-              <label for="np-maxiter">Max iterations (1–10)</label>
-              <input
-                id="np-maxiter"
-                type="number"
-                min="1"
-                max="10"
-                value={paramNum('max_iterations', 3)}
-                oninput={(e) => onParam('max_iterations', Number(e.currentTarget.value))}
-              />
-              <label for="np-until">Until (expression, optional)</label>
-              <input dir="auto"
-                id="np-until"
-                type="text"
-                placeholder="e.g. passed == true"
-                value={paramStr('until')}
-                oninput={(e) => onParam('until', e.currentTarget.value)}
-              />
-              <!-- Structured sub-step editor: the loop body runs these in order
-                   each iteration. Agent sub-steps expose Provider + Model + Prompt
-                   directly (no more raw-JSON editing to set a provider). -->
-              <div class="rv-h np-sec">
-                <span class="np-label">Steps — run in order each iteration</span>
-                <button class="btn small ghost" type="button" onclick={addLoopStep}>
-                  <Icon name="plus" size={12} /> Add step
-                </button>
-              </div>
-              {#if loopSteps().length === 0}
-                <p class="insp-note">No steps yet — add one (e.g. a <code>review_run</code> then an <code>agent_prompt</code> “fix”).</p>
-              {/if}
-              {#each loopSteps() as step, i (i)}
-                <div class="rv-row">
-                  <div class="rv-top">
-                    <select aria-label="Step kind"
-                      class="ls-kind"
-                      value={step.kind}
-                      onchange={(e) => updateLoopStep(i, { kind: e.currentTarget.value })}
-                    >
-                      {#each LOOP_STEP_KINDS as k (k)}<option value={k}>{k}</option>{/each}
-                      {#if !LOOP_STEP_KINDS.includes(step.kind)}<option value={step.kind}>{step.kind}</option>{/if}
-                    </select>
-                    <input dir="auto" aria-label="Step name"
-                      class="rv-lens"
-                      type="text"
-                      placeholder="name (e.g. fix)"
-                      value={step.name ?? ''}
-                      oninput={(e) => updateLoopStep(i, { name: e.currentTarget.value || undefined })}
-                    />
-                    <button class="rv-del" type="button" title="Remove step" aria-label="Remove step" onclick={() => removeLoopStep(i)}>
-                      <Icon name="trash" size={12} />
-                    </button>
-                  </div>
-                  {#if LOOP_AGENT_KINDS.includes(step.kind)}
-                    <textarea dir="auto" aria-label="Step prompt"
-                      class="rv-instr np-prompt"
-                      rows="6"
-                      placeholder="prompt / instructions for this agent step"
-                      value={loopStepParam(i, 'prompt')}
-                      oninput={(e) => updateLoopStepParam(i, 'prompt', e.currentTarget.value)}
-                    ></textarea>
-                    <div class="ls-pm">
-                      <select aria-label="Step provider"
-                        class="ls-prov"
-                        value={loopStepParam(i, 'provider')}
-                        onchange={(e) => updateLoopStepParam(i, 'provider', e.currentTarget.value || undefined)}
-                      >
-                        <option value="">default ({defaultAgentProvider()})</option>
-                        {#each agentProviders() as pv (pv)}<option value={pv}>{pv}</option>{/each}
-                      </select>
-                      <input dir="ltr" aria-label="Step model"
-                        class="ls-model"
-                        type="text"
-                        placeholder="model (optional)"
-                        value={loopStepParam(i, 'model')}
-                        oninput={(e) => updateLoopStepParam(i, 'model', e.currentTarget.value || undefined)}
-                      />
-                    </div>
-                  {:else if step.kind === 'review_run'}
-                    <input dir="auto" aria-label="Reviewer providers"
-                      class="rv-lens"
-                      type="text"
-                      placeholder="reviewer providers (comma-separated, e.g. claude, codex)"
-                      value={loopStepParamList(i, 'providers')}
-                      oninput={(e) => updateLoopStepParam(i, 'providers', e.currentTarget.value.split(',').map((s) => s.trim()).filter(Boolean))}
-                    />
-                    <input dir="auto" aria-label="Summarizer provider"
-                      class="rv-lens"
-                      type="text"
-                      placeholder="summarizer provider (optional)"
-                      value={loopStepSummarizer(i)}
-                      oninput={(e) => updateLoopStepSummarizer(i, e.currentTarget.value)}
-                    />
-                  {:else}
-                    <p class="insp-note">
-                      <code>{step.kind}</code> takes no agent — edit its params in Advanced (JSON) below.
-                    </p>
-                  {/if}
-                </div>
-              {/each}
-              <label class="np-chk">
-                <input
-                  type="checkbox"
-                  checked={paramBool('continue_on_error')}
-                  onchange={(e) => onParam('continue_on_error', e.currentTarget.checked)}
-                /> Continue on step error
-              </label>
-              <details class="ls-advanced">
-                <summary>Advanced — edit steps as raw JSON</summary>
-                {@render jsonLabel('np-steps', 'Steps (JSON array)', 'steps')}
-                <textarea dir="ltr"
-                  id="np-steps"
-                  rows="5"
-                  placeholder={'[ { "kind": "agent_prompt", "params": {} } ]'}
-                  value={paramJson('steps')}
-                  oninput={(e) => onParamJson('steps', e.currentTarget.value)}
-                ></textarea>
-              </details>
-            {:else if selectedNode.kind === 'review_run'}
-              <p class="insp-note">
-                Leave Repository and Base on “inherit” to review exactly where the implementer worked
-                (the run’s working folder + base). Set them only to override.
-              </p>
-              <label for="np-repo">Repository (optional — inherits from the implementer)</label>
-              {@render repoPicker('np-repo', 'Inherit from the working folder')}
-              <label for="np-base">Base branch (optional — inherits, else main)</label>
-              <input dir="auto"
-                id="np-base"
-                type="text"
-                placeholder="inherits from the run, else main"
-                value={paramStr('base')}
-                oninput={(e) => onParam('base', e.currentTarget.value)}
-              />
-              <label for="np-threshold">Pass threshold (0–100)</label>
-              <input
-                id="np-threshold"
-                type="number"
-                min="0"
-                max="100"
-                value={paramNum('threshold', 80)}
-                oninput={(e) => onParam('threshold', Number(e.currentTarget.value))}
-              />
-              <!-- How the lenses are spread over sessions. Empty value = no
-                   `mode` key at all, so the run override / stored config wins. -->
-              <label for="np-review-mode">Execution mode</label>
-              <select
-                id="np-review-mode"
-                data-testid="review-mode-select"
-                value={paramStr('mode')}
-                onchange={(e) => onParam('mode', e.currentTarget.value || undefined)}
-              >
-                <option value="">Default (fan-out unless the run overrides it)</option>
-                <option value="fan_out">Fan-out — one reviewer agent per lens × provider</option>
-                <option value="orchestrator">Orchestrator — one agent per provider runs every lens as its own sub-agents</option>
-              </select>
-              <p class="insp-note">
-                Both modes end with one summarizer. Orchestrator opens N sessions instead of
-                N × lenses; fan-out finishes sooner on a fast machine, orchestrator is easier on
-                file descriptors and CPU. A run started with an explicit review mode overrides
-                this setting.
-              </p>
-              <div class="rv-h np-sec">
-                <span class="np-label">Reviewers — one per lens, each its own agents (like PR review)</span>
-                <button class="btn small ghost" type="button" onclick={addReviewer}>
-                  <Icon name="plus" size={12} /> Add
-                </button>
-              </div>
-              {#if reviewers().length === 0}
-                <p class="insp-note">
-                  No reviewers — leave empty to use the default PR-review config, or add one
-                  (e.g. <code>correctness-review</code> on claude + codex).
-                </p>
-              {/if}
-              <div class="rv-list">
-              {#each reviewers() as r, i (i)}
-                <div class="rv-row">
-                  <div class="rv-top">
-                    <input dir="auto" aria-label="Reviewer lens / skill"
-                      class="rv-lens"
-                      type="text"
-                      placeholder="lens / skill (e.g. correctness-review)"
-                      value={r.lens ?? ''}
-                      oninput={(e) => updateReviewer(i, { lens: e.currentTarget.value })}
-                    />
-                    <button class="rv-del" type="button" title="Remove reviewer" aria-label="Remove reviewer" onclick={() => removeReviewer(i)}>
-                      <Icon name="trash" size={12} />
-                    </button>
-                  </div>
-                  <div class="rv-provs">
-                    {#each REVIEW_PROVIDERS as prov (prov)}
-                      <label class="rv-chip" class:on={(r.providers ?? []).includes(prov)}>
-                        <input
-                          type="checkbox"
-                          checked={(r.providers ?? []).includes(prov)}
-                          onchange={() => toggleReviewerProvider(i, prov)}
-                        />
-                        {prov}
-                      </label>
-                    {/each}
-                  </div>
-                  <textarea dir="auto" aria-label="Reviewer instructions"
-                    class="rv-instr np-prompt"
-                    rows="5"
-                    placeholder="custom instructions for this reviewer (optional)"
-                    value={r.instructions ?? ''}
-                    oninput={(e) => updateReviewer(i, { instructions: e.currentTarget.value })}
-                  ></textarea>
-                </div>
-              {/each}
-              </div>
-
-              <label class="np-sec" for="np-sum-prov">Summarizer (consolidates + scores)</label>
-              <input dir="auto"
-                id="np-sum-prov"
-                type="text"
-                placeholder="provider (e.g. claude)"
-                value={summarizerField('provider')}
-                oninput={(e) => updateSummarizer('provider', e.currentTarget.value)}
-              />
-              <textarea dir="auto" aria-label="Summarizer instructions"
-                class="np-prompt np-prompt-lg"
-                rows="14"
-                placeholder="summarizer instructions (optional)"
-                value={summarizerField('instructions')}
-                oninput={(e) => updateSummarizer('instructions', e.currentTarget.value)}
-              ></textarea>
-
-              <span class="np-label np-sec">Scoring guideline — % deducted per open finding</span>
-              <div class="rv-score">
-                <label class="rv-sc">
-                  Critical
-                  <input type="number" min="0" max="100" value={scoringField('bug', 20)}
-                    oninput={(e) => updateScoring('bug', Number(e.currentTarget.value))} />
-                </label>
-                <label class="rv-sc">
-                  High
-                  <input type="number" min="0" max="100" value={scoringField('warn', 5)}
-                    oninput={(e) => updateScoring('warn', Number(e.currentTarget.value))} />
-                </label>
-                <label class="rv-sc">
-                  Low
-                  <input type="number" min="0" max="100" value={scoringField('info', 5)}
-                    oninput={(e) => updateScoring('info', Number(e.currentTarget.value))} />
-                </label>
-              </div>
-              <label class="np-sec" for="np-goals">Goals (one per line, optional)</label>
-              <textarea dir="auto"
-                id="np-goals"
-                class="np-prompt"
-                rows="7"
-                placeholder={'No N+1 queries\nAll inputs validated'}
-                value={paramLines('goals')}
-                oninput={(e) => onParamLines('goals', e.currentTarget.value)}
-              ></textarea>
-              <label class="np-sec" for="np-checks">Checks — commands the reviewer runs (one per line, optional)</label>
-              <textarea dir="ltr"
-                id="np-checks"
-                class="np-prompt"
-                rows="7"
-                placeholder={'go test -tags=component ./...\ngo test -tags=integration ./...'}
-                value={paramLines('checks')}
-                oninput={(e) => onParamLines('checks', e.currentTarget.value)}
-              ></textarea>
-              <p class="insp-note">
-                The reviewer agent runs these in the repo and reports any failure as a blocking
-                finding — a safety net for a check the implementer may have skipped.
-              </p>
-              <label class="np-chk">
-                <input
-                  type="checkbox"
-                  checked={paramBool('await', true)}
-                  onchange={(e) => onParam('await', e.currentTarget.checked)}
-                /> Wait for the review to finish
-              </label>
-              <label class="np-chk">
-                <input
-                  type="checkbox"
-                  checked={paramBool('require_pass')}
-                  onchange={(e) => onParam('require_pass', e.currentTarget.checked)}
-                /> Require pass (fail this step if below threshold)
-              </label>
-            {:else if selectedNode.kind === 'product_analyze' || selectedNode.kind === 'product_rewrite' || selectedNode.kind === 'product_plan'}
-              <label for="np-story">Story ID</label>
-              <input dir="auto"
-                id="np-story"
-                type="text"
-                placeholder="product story id"
-                value={paramStr('story_id')}
-                oninput={(e) => onParam('story_id', e.currentTarget.value)}
-              />
-              <label for="np-instruction">Extra instruction (optional)</label>
-              <input dir="auto"
-                id="np-instruction"
-                type="text"
-                placeholder="Focus on…"
-                value={paramStr('instruction')}
-                oninput={(e) => onParam('instruction', e.currentTarget.value)}
-              />
-              {@render agentProviderModel()}
-              {#if selectedNode.kind !== 'product_analyze'}
-                <label class="np-chk">
-                  <input
-                    type="checkbox"
-                    checked={paramBool('persist')}
-                    onchange={(e) => onParam('persist', e.currentTarget.checked)}
-                  /> Persist as a product version
-                </label>
-              {/if}
-            {:else if selectedNode.kind === 'product_publish'}
-              <label class="np-chk">
-                <input
-                  type="checkbox"
-                  checked={paramBool('dry_run', true)}
-                  onchange={(e) => onParam('dry_run', e.currentTarget.checked)}
-                /> Dry run (preview only)
-              </label>
-              {#if paramBool('dry_run', true)}
-              <label for="np-story">Story ID</label>
-              <input dir="auto"
-                id="np-story"
-                type="text"
-                placeholder="product story id"
-                value={paramStr('story_id')}
-                oninput={(e) => onParam('story_id', e.currentTarget.value)}
-              />
-              <label for="np-pubkind">Publish as</label>
-              <select
-                id="np-pubkind"
-                value={paramStr('kind') || 'rfc'}
-                onchange={(e) => onParam('kind', e.currentTarget.value)}
-              >
-                <option value="rfc">RFC (Confluence)</option>
-                <option value="jira">Jira story</option>
-              </select>
-
-                <label for="np-account">Account ID</label>
-                <input dir="auto"
-                  id="np-account"
-                  type="text"
-                  placeholder="Jira/Confluence account id"
-                  value={paramStr('account_id')}
-                  oninput={(e) => onParam('account_id', e.currentTarget.value)}
-                />
-                {#if (paramStr('kind') || 'rfc') === 'jira'}
-                  <label for="np-project">Project key</label>
-                  <input dir="auto"
-                    id="np-project"
-                    type="text"
-                    placeholder="e.g. PROJ"
-                    value={paramStr('project_key')}
-                    oninput={(e) => onParam('project_key', e.currentTarget.value)}
-                  />
-                  <label for="np-issuetype">Issue type</label>
-                  <input dir="auto"
-                    id="np-issuetype"
-                    type="text"
-                    placeholder="Story"
-                    value={paramStr('issue_type')}
-                    oninput={(e) => onParam('issue_type', e.currentTarget.value)}
-                  />
-                {:else}
-                  <label for="np-space">Space key</label>
-                  <input dir="auto"
-                    id="np-space"
-                    type="text"
-                    placeholder="Confluence space key"
-                    value={paramStr('space_key')}
-                    oninput={(e) => onParam('space_key', e.currentTarget.value)}
-                  />
-                  <label for="np-parent">Parent page id (optional)</label>
-                  <input dir="auto"
-                    id="np-parent"
-                    type="text"
-                    placeholder="parent page id"
-                    value={paramStr('parent_id')}
-                    oninput={(e) => onParam('parent_id', e.currentTarget.value)}
-                  />
-                  <label for="np-pubtitle">Title (optional)</label>
-                  <input dir="auto"
-                    id="np-pubtitle"
-                    type="text"
-                    placeholder="page title"
-                    value={paramStr('title')}
-                    oninput={(e) => onParam('title', e.currentTarget.value)}
-                  />
-                {/if}
-              {:else}
-                <p class="insp-note">Connect a preview Product Publish node to Human Approval, then this node. It publishes the approved content and destination from that run. Existing destination overrides must match the preview; clear them or create a new live node.</p>
-              {/if}
-            {:else if selectedNode.kind === 'canvas'}
-              <label for="np-cprompt">Prompt</label>
-              <textarea dir="auto"
-                id="np-cprompt"
-                class="np-prompt"
-                rows="7"
-                placeholder="Diagram the request flow described in the input…"
-                value={paramStr('prompt')}
-                oninput={(e) => onParam('prompt', e.currentTarget.value)}
-              ></textarea>
-              <label for="np-cmode">Mode</label>
-              <select
-                id="np-cmode"
-                value={paramStr('mode') || 'mermaid'}
-                onchange={(e) => onParam('mode', e.currentTarget.value)}
-              >
-                <option value="mermaid">Mermaid</option>
-                <option value="excalidraw">Excalidraw</option>
-              </select>
-              {@render agentProviderModel()}
-            {:else if selectedNode.kind === 'git_pr'}
-              <p class="insp-note">
-                Leave Repository and Base empty to <strong>inherit the reference</strong> the
-                implementer/reviewer used (the run’s working folder and base, or the upstream
-                review). Set them only to override. A run that changed several repos opens
-                <strong>one PR per repo</strong> (from fanned-in reviews, or enable “detect changed”).
-              </p>
-              <label for="np-repo">Repository (optional — inherits from reference)</label>
-              {@render repoPicker('np-repo', 'Inherit from the upstream review / working folder')}
-              <label for="np-base">Base branch (optional — inherits from reference)</label>
-              <input dir="auto"
-                id="np-base"
-                type="text"
-                placeholder="inherits (per-repo base), else main"
-                value={paramStr('base')}
-                oninput={(e) => onParam('base', e.currentTarget.value)}
-              />
-              <label class="np-chk">
-                <input
-                  type="checkbox"
-                  checked={paramBool('open')}
-                  onchange={(e) => onParam('open', e.currentTarget.checked)}
-                /> Open PR automatically on pass (gate the incoming edge on the review passing)
-              </label>
-              <label class="np-chk">
-                <input
-                  type="checkbox"
-                  checked={paramBool('detect_changed')}
-                  onchange={(e) => onParam('detect_changed', e.currentTarget.checked)}
-                /> Detect changed repos — open a PR for every registered repo that has changes
-              </label>
-            {:else if selectedNode.kind === 'self_improve'}
-              <p class="insp-note">
-                Reflects on the workspace’s recent agent sessions and <strong>offers</strong>
-                skill/memory improvements. They are <strong>queued for approval</strong> in
-                Self-Improvement — never auto-applied — and the offered list is posted to the
-                trigger’s chat thread.
-              </p>
-              <span class="np-label">Providers — the agent(s) that reflect (override Self-Improvement settings)</span>
-              <div class="rv-provs">
-                {#each agentProviders() as prov (prov)}
-                  <label class="rv-chip" class:on={selfImproveProviders().includes(prov)}>
-                    <input
-                      type="checkbox"
-                      checked={selfImproveProviders().includes(prov)}
-                      onchange={() => toggleSelfImproveProvider(prov)}
-                    />
-                    {prov}
-                  </label>
-                {/each}
-              </div>
-              <p class="node-hint">
-                Leave all unchecked to use the providers configured in
-                <strong>Settings → Self-Improvement</strong>.
-              </p>
-            {:else if selectedNode.kind !== 'manual_trigger' && selectedNode.kind !== 'log' && selectedNode.kind !== 'verifier'}
-              <!-- Fallback raw-JSON editor for unrecognised or future node kinds -->
-              <label for="np-raw">Params (JSON)</label>
-              <textarea dir="ltr"
-                id="np-raw"
-                rows="5"
-                placeholder="&#123;&#125;"
-                value={selectedNode.params != null ? JSON.stringify(selectedNode.params, null, 2) : ''}
-                oninput={(e) => {
-                  try {
-                    selectedNode.params = JSON.parse(e.currentTarget.value);
-                    graph = graph;
-                    dirty = true;
-                  } catch { /* keep typing */ }
-                }}
-              ></textarea>
-            {/if}
-
-            <!-- Universal Provider + Model: EVERY node that doesn't render its own
-                 provider control gets one here, so no node is ever missing it.
-                 For agent-running kinds (git_pr drafts the PR message, swarm_task,
-                 …) it drives the agent; for pure utility nodes it's simply present
-                 and unused. Kinds with their own control are excluded to avoid a
-                 duplicate. -->
-            {#if !KINDS_WITH_OWN_PROVIDER.includes(selectedNode.kind) && selectedNode.kind !== 'manual_trigger'}
-              {@render agentProviderModel()}
-            {/if}
+            <NodeParams
+              node={selectedNode}
+              set={onParam}
+              setParams={(params) => { if (selectedNode) { selectedNode.params = params; graph = graph; dirty = true; } }}
+              wsId={current?.workspace_id ?? ws.currentId ?? ''}
+              {pickers}
+              workflowName={current?.name}
+              onzoom={(field, label) => (jsonZoom = { field, label })}
+            />
 
             <!-- Retry policy (any node): extra attempts with exponential backoff. -->
             {#if selectedNode.kind !== 'manual_trigger'}
@@ -3649,10 +2436,13 @@
             </summary>
             <iframe class="final-output-frame" title="Final output" sandbox="allow-same-origin" srcdoc={finalOutputSrcdoc}></iframe>
           </details>
+        {:else if finalOutputError?.runId === run.id}
+          {@const runId = run.id}
+          <LoadState what="the final output" variant="compact" error={finalOutputError.text} empty onretry={() => void loadFinalOutput(runId)} />
         {/if}
         <div class="ctx-body">
           {#key run.context_dir}
-            <FileTree root={run.context_dir} primary={false} />
+            <FileTree root={run.context_dir} primary={false} {...contextFs(run.id, run.context_dir)} />
           {/key}
         </div>
       {:else}
@@ -3674,7 +2464,7 @@
     <textarea dir="ltr" aria-label={jz.label}
       class="json-zoom mono"
       data-testid="json-zoom-editor"
-      value={paramJson(jz.field)}
+      value={paramJson(selectedNode, jz.field)}
       oninput={(e) => onParamJson(jz.field, e.currentTarget.value)}
       spellcheck="false"
       placeholder={'[ { "kind": "agent_prompt", "params": {} } ]'}
@@ -3815,38 +2605,10 @@
     background: var(--surface-2);
     color: var(--text);
   }
-  /* EVERY textarea in the inspector holds a prompt, an instruction list or a
-     JSON blob — the things you actually need to read. A `rows="2"` box showing
-     four lines of a 2,000-word prompt is not an editor. Give them all a
-     readable floor, cap them against the viewport, and scroll the CONTENT
-     inside the box; the panel itself scrolls for the rest. Node-kind agnostic
-     on purpose — this must hold for every agent and every step, not just the
-     reviewer. */
-  .inspector textarea {
-    min-height: 110px;
-    max-height: min(45vh, 460px);
-    overflow-y: auto;
-  }
   textarea:focus {
     outline: none;
     border-color: var(--accent-text);
     box-shadow: 0 0 0 3px var(--accent-soft-strong);
-  }
-  /* Prompt-sized textareas (reviewer/summarizer instructions, goals, checks).
-     `rows` alone loses to the inspector's own scroll: a 3-row box holding a
-     2,000-word summarizer prompt shows four lines of it and the rest is
-     reachable only by dragging the resize corner. Give them real height, cap
-     it against the viewport, and let the text scroll INSIDE the box so the
-     panel around it doesn't have to grow. */
-  .inspector textarea.np-prompt {
-    min-height: 120px;
-    max-height: min(40vh, 380px);
-    overflow-y: auto;
-    resize: vertical;
-  }
-  .inspector textarea.np-prompt-lg {
-    min-height: 260px;
-    max-height: min(60vh, 620px);
   }
   .full {
     width: 100%;
@@ -4332,39 +3094,6 @@
   .insp-bar .grow {
     flex: 1;
   }
-  .insp-note {
-    margin: 0;
-    font-size: var(--fs-s);
-    color: var(--text-dim);
-    line-height: 1.5;
-  }
-  .insp-slack {
-    margin-top: 8px;
-    padding-top: 8px;
-    border-top: 1px solid var(--border);
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
-  .is-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-  }
-  .is-snip {
-    margin: 0;
-    padding: 8px 10px;
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    font-family: var(--font-mono);
-    font-size: var(--fs-xs);
-    line-height: 1.5;
-    white-space: pre-wrap;
-    color: var(--text);
-    overflow-x: auto;
-  }
   .insp-h {
     display: flex;
     align-items: center;
@@ -4392,30 +3121,12 @@
        you want is impossible to find by eye. Applies to EVERY node kind. */
     margin-top: 6px;
   }
-  /* …except the first one, and labels that are part of a compact row
-     (checkbox rows, the per-reviewer score fields) — those set their own. */
-  .inspector label:first-child,
-  .inspector .np-chk,
-  .inspector .rv-sc,
-  .inspector .rv-chip {
+  /* …except the first one. The node forms' labels (and their compact rows)
+     are styled with the forms, in inspector/NodeParams.svelte. */
+  .inspector label:first-child {
     margin-top: 0;
   }
-  /* Opens a major section inside a node's params (Reviewers, Summarizer,
-     Scoring, Goals, Checks, loop Steps …). A rule, not a per-node style: any
-     node kind can mark a group with it and get the same separation. */
-  .inspector .np-sec {
-    margin-top: 16px;
-    padding-top: 12px;
-    border-top: 1px solid var(--border);
-  }
-  .np-label {
-    display: block;
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    color: var(--text-dim);
-  }
   .inspector input[type='text'],
-  .inspector input[type='url'],
   .inspector input[type='number'] {
     width: 100%;
     font: inherit;
@@ -4427,24 +3138,7 @@
     color: var(--text);
   }
   .inspector input[type='text']:focus,
-  .inspector input[type='url']:focus,
   .inspector input[type='number']:focus {
-    outline: none;
-    border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px var(--accent-soft-strong);
-  }
-  .inspector select {
-    width: 100%;
-    font: inherit;
-    font-size: var(--fs-m);
-    padding: 6px 8px;
-    border-radius: var(--radius-s);
-    border: 1px solid var(--border);
-    background: var(--surface-2);
-    color: var(--text);
-    cursor: pointer;
-  }
-  .inspector select:focus {
     outline: none;
     border-color: var(--accent-text);
     box-shadow: 0 0 0 3px var(--accent-soft-strong);
@@ -4687,29 +3381,6 @@
     flex-direction: column;
   }
 
-  /* Node-form JSON field: label + zoom button; the editor lives in a modal. (R10) */
-  .np-jsonlabel {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 6px;
-  }
-  .np-zoom {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    border: none;
-    background: transparent;
-    color: var(--text-dim);
-    padding: 2px 4px;
-    border-radius: var(--radius-s);
-    cursor: pointer;
-    flex-shrink: 0;
-  }
-  .np-zoom:hover {
-    color: var(--text);
-    background: var(--accent-soft);
-  }
   .json-zoom {
     width: 100%;
     min-height: 60vh;
@@ -4948,132 +3619,6 @@
     font-size: var(--fs-s);
     color: var(--text-dim);
     margin: 2px 0 0;
-  }
-  /* Inspector checkbox row */
-  .np-chk {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-size: var(--fs-s);
-    color: var(--text);
-    margin-top: 2px;
-  }
-  .np-chk input {
-    width: auto;
-  }
-  /* review_run reviewer editor (per-lens agents + summarizer + scoring) */
-  .rv-h {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-    margin-top: 4px;
-  }
-  /* A reviewer list is never capped or scrolled on its own: hiding agents to
-     make the sections below reachable just moves the invisibility. EVERY agent
-     renders at full size and the inspector panel scrolls. */
-  .rv-list {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-  }
-  .rv-row {
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    padding: 10px;
-    /* A tint so each agent reads as its own card in a long list. */
-    background: color-mix(in srgb, var(--surface-2) 55%, transparent);
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }
-  .rv-top {
-    display: flex;
-    gap: 6px;
-    align-items: center;
-  }
-  .rv-lens {
-    flex: 1;
-  }
-  /* loop sub-step editor */
-  .ls-kind {
-    flex: 0 0 auto;
-    max-width: 150px;
-  }
-  .ls-pm {
-    display: flex;
-    gap: 6px;
-  }
-  .ls-prov {
-    flex: 1;
-    min-width: 0;
-  }
-  .ls-model {
-    flex: 1;
-    min-width: 0;
-  }
-  .ls-advanced {
-    margin-top: 2px;
-  }
-  .ls-advanced summary {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    cursor: pointer;
-    user-select: none;
-  }
-  .rv-del {
-    background: none;
-    border: none;
-    color: var(--text-dim);
-    cursor: pointer;
-    padding: 2px;
-  }
-  .rv-del:hover {
-    color: var(--danger);
-  }
-  .rv-provs {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 4px;
-  }
-  .rv-chip {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    font-size: var(--fs-xs);
-    padding: 2px 6px;
-    border: 1px solid var(--border);
-    border-radius: 999px;
-    cursor: pointer;
-    color: var(--text-dim);
-  }
-  .rv-chip.on {
-    background: var(--accent-soft);
-    border-color: var(--accent);
-    color: var(--text);
-  }
-  .rv-chip input {
-    width: auto;
-    margin: 0;
-  }
-  .rv-instr {
-    width: 100%;
-    font-size: var(--fs-s);
-  }
-  .rv-score {
-    display: flex;
-    gap: 8px;
-  }
-  .rv-sc {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    flex: 1;
-  }
-  .rv-sc input {
-    width: 100%;
   }
   /* Per-node retry sub-form */
   .retry-form {

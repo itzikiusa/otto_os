@@ -6,7 +6,7 @@ import {
   normalizeHex,
   resolveColor,
   tokenName,
-} from '../src/modules/product/design/scene3d/tokens.ts';
+} from '../src/lib/design/scene3d/tokens.ts';
 import { resolveToken } from '../src/modules/design-hall/brand/tokens.ts';
 import {
   applyMaterialPreset,
@@ -17,7 +17,7 @@ import {
   MATERIAL_PRESETS,
   resolveMaterial,
   WEB_BUDGET_BYTES,
-} from '../src/modules/product/design/scene3d/presets.ts';
+} from '../src/lib/design/scene3d/presets.ts';
 import {
   ease,
   initialState,
@@ -27,8 +27,8 @@ import {
   statePoses,
   stateTiming,
   transitionProgress,
-} from '../src/modules/product/design/scene3d/states.ts';
-import type { Scene3dDoc } from '../src/modules/product/design/scene3d/types.ts';
+} from '../src/lib/design/scene3d/states.ts';
+import type { Scene3dDoc } from '../src/lib/design/scene3d/types.ts';
 
 // A Brand Kit v1 (`otto-brand/1`) document — Brand Kit owns resolution.
 const brand = {
@@ -119,7 +119,7 @@ test('applyMaterialPreset clears what the preset owns and keeps colour/opacity',
 test('web budget readout', () => {
   assert.equal(formatBytes(512), '512 B');
   assert.equal(formatBytes(1536), '1.5 KB');
-  assert.equal(formatBytes(3 * 1024 * 1024), '3.00 MB');
+  assert.equal(formatBytes(3 * 1024 * 1024), '3 MB', 'the shared formatter (lib/metric-format)');
   assert.equal(budgetStatus(WEB_BUDGET_BYTES / 2).tone, 'ok');
   assert.equal(budgetStatus(WEB_BUDGET_BYTES * 0.9).tone, 'warn');
   const over = budgetStatus(WEB_BUDGET_BYTES * 2);

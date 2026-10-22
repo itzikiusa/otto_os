@@ -257,13 +257,9 @@
     if (!wsId) return;
     const blank = fAllowedUsers.trim() === '';
     const listened = editChannel !== 'webhook';
-    if (listened && blank && fEnabled && !fOpenToAll) {
-      toasts.error(
-        `Add an allowed user before enabling ${channelLabel(editChannel)}`,
-        'A blank list admits nobody. Add user IDs, or explicitly open the bot to everyone.',
-      );
-      return;
-    }
+    // The field error is inline under Allowed users (`needsAllowedUser`), and
+    // Save is disabled while it shows — never a toast over an open form.
+    if (listened && blank && fEnabled && !fOpenToAll) return;
     const wasOpen = integrations.find((i) => i.channel === editChannel)?.open_to_all ?? false;
     if (listened && blank && fOpenToAll && !wasOpen) {
       const ok = await confirmer.ask(
@@ -831,7 +827,7 @@
             Anyone who can message the bot — in any {editChannel === 'slack' ? 'channel it’s in, or by DM' : 'chat it’s in'} — can run an agent on this Mac.
           </span>
         {:else if needsAllowedUser}
-          <span class="hint warn" role="alert">
+          <span class="hint warn" id="ch-users-err" role="alert">
             Add at least one allowed user ID above, or check “Open to everyone” before enabling {channelLabel(editChannel)}.
           </span>
         {/if}
@@ -879,8 +875,12 @@
       <button class="btn" onclick={() => (editOpen = false)}>Cancel</button>
       <button
         class="btn primary"
-        disabled={editBusy || needsSecret}
-        title={needsSecret ? `Enter the ${editChannel === 'webhook' ? 'webhook key' : 'bot token'} first` : undefined}
+        disabled={editBusy || needsSecret || needsAllowedUser}
+        title={needsSecret
+          ? `Enter the ${editChannel === 'webhook' ? 'webhook key' : 'bot token'} first`
+          : needsAllowedUser
+            ? 'Add an allowed user, or check “Open to everyone”, first'
+            : undefined}
         onclick={save}
       >
         {editBusy ? 'Saving…' : 'Save'}

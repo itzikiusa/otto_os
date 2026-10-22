@@ -871,6 +871,58 @@ impl Http {
         Ok(all)
     }
 
+    /// Every page BODY of a `Link: rel="next"`-paginated endpoint whose items
+    /// sit inside an object (GitHub `check-runs` → `{total_count,
+    /// check_runs}`, combined `status` → `{statuses}`), which the array
+    /// paginators above would drop. `cached` reads each page through the
+    /// TTL/ETag cache (the CI rollup); otherwise every page is a fresh GET (the
+    /// merge-gate check list). Same 20-page cap and same-origin rule.
+    pub async fn json_pages(
+        &self,
+        first_rb: reqwest::RequestBuilder,
+        client: &reqwest::Client,
+        auth_header: (&'static str, String),
+        cached: bool,
+    ) -> Result<Vec<Value>> {
+        const MAX_PAGES: usize = 20;
+        let origin = first_rb
+            .try_clone()
+            .and_then(|b| b.build().ok())
+            .map(|r| r.url().clone());
+        let mut pages: Vec<Value> = Vec::new();
+        let mut rb = Some(first_rb);
+        while let Some(b) = rb.take() {
+            let (body, next) = if cached {
+                self.get_cached_page(b).await?
+            } else {
+                let resp = self.send(b).await?;
+                let next = parse_next_link(resp.headers());
+                let body = resp
+                    .text()
+                    .await
+                    .map_err(|e| Error::Upstream(format!("{}: body read: {e}", self.provider)))?;
+                (body, next)
+            };
+            pages.push(
+                serde_json::from_str(&body)
+                    .map_err(|e| Error::Upstream(format!("{}: bad json: {e}", self.provider)))?,
+            );
+            let Some(url) = next else { break };
+            if pages.len() >= MAX_PAGES {
+                break;
+            }
+            if !same_origin(origin.as_ref(), &url) {
+                tracing::warn!(
+                    provider = self.provider,
+                    "pagination link leaves the API origin — not followed"
+                );
+                break;
+            }
+            rb = Some(client.get(&url).header(auth_header.0, &auth_header.1));
+        }
+        Ok(pages)
+    }
+
     /// Fetch all pages of a JSON array endpoint by following GitHub-style
     /// `Link: <url>; rel="next"` headers. Collects into a flat `Vec<Value>`.
     /// Stops after 20 pages as a safety guard against runaway pagination.

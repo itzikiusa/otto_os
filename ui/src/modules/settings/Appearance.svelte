@@ -13,6 +13,7 @@
     type Direction,
   } from '../../lib/stores/ui.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import { radioKey } from '../../lib/radioKey';
   import { AUTO_VERTICAL_ENGINES } from '../../lib/db-view-prefs';
   import { dbPrefs } from '../../lib/stores/dbPrefs.svelte';
   import { clipHistory } from '../../lib/stores/clipHistory.svelte';
@@ -202,8 +203,7 @@
       <button
         class="theme-card"
         class:selected={ui.ambient === m.id}
-        role="radio"
-        aria-checked={ui.ambient === m.id}
+        role="radio" aria-checked={ui.ambient === m.id} tabindex={ui.ambient === m.id ? 0 : -1} onkeydown={radioKey}
         data-ambient-option={m.id}
         onclick={() => ui.setAmbient(m.id)}
       >
@@ -311,8 +311,7 @@
   <div class="segmented" role="radiogroup" aria-label="Floating bar">
     {#each barPrefs as b (b.id)}
       <button
-        role="radio"
-        aria-checked={barStore.pref === b.id}
+        role="radio" aria-checked={barStore.pref === b.id} tabindex={barStore.pref === b.id ? 0 : -1} onkeydown={radioKey}
         class:active={barStore.pref === b.id}
         onclick={() => barStore.setPref(b.id)}
       >{b.label}</button>

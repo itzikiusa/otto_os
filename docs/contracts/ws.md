@@ -79,6 +79,11 @@ cadence, when the server force-terminates the session (`{"type":"terminated"}`,
 below). Clients need no change: keep sending, and treat a dropped socket or a
 `forbidden` error frame as the authoritative answer.
 
+**Liveness.** Same rules as `/ws/events` (§2): a server Ping every 30 s; no
+client frame (a Pong counts) for 60 s closes the socket, and so does one server
+send blocked for 10 s. The viewer's PTY subscription is dropped with it;
+reconnect on close (`crates/otto-sessions/src/ws.rs`).
+
 ### Client → server (JSON text frames)
 
 ```json
@@ -438,8 +443,12 @@ event's workspace **and** is the session's owner (`created_by`), a workspace
 every member (`viewer`+) of the workspace. Root receives all. `Notice` events
 are delivered to all authenticated clients.
 
-Ping/pong handled by the transport layer (axum auto-responds to pings; server
-sends a ping every 30s).
+**Liveness.** The server sends a Ping every 30 s (axum also auto-answers client
+pings). A client must send *some* frame — a Pong is enough, and every browser
+answers Pings on its own — at least every 60 s, or the server closes the socket as
+a half-open peer. A single server send that stays blocked for 10 s (a dead peer's
+full buffer) also closes it. Clients reconnect on close (`crates/otto-server/src/
+ws_events.rs`: `PING_INTERVAL`, `INBOUND_DEADLINE`, `SEND_TIMEOUT`).
 
 **Credential re-validation.** The socket's token is re-checked every 60 s and
 within ~1 s of any token revocation (logout, "revoke all", API/MCP/session

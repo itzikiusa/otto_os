@@ -4,6 +4,7 @@
   // send a request. You type what you want; the agent edits the scene's file and
   // the board re-renders. The Terminal attaches to /ws/term/{id} directly, so it
   // shows live output regardless of whether the session is in the workspace store.
+  import { rel } from '../../lib/stores/now.svelte';
   import { onMount } from 'svelte';
   import { toastError } from '../../lib/toastError';
   import LiveWorkingDot from '../../lib/components/LiveWorkingDot.svelte';
@@ -98,13 +99,8 @@
     user: 'Manual edit',
     restore: 'Before restore',
   };
-  function ago(iso: string): string {
-    const s = Math.max(0, (Date.now() - Date.parse(iso)) / 1000);
-    if (s < 60) return 'just now';
-    if (s < 3600) return `${Math.round(s / 60)} min ago`;
-    if (s < 86400) return `${Math.round(s / 3600)} h ago`;
-    return new Date(iso).toLocaleString();
-  }
+  // The shared relative time (content.md §7), not a local ladder.
+  const ago = (iso: string): string => rel(iso);
   let restoring = $state(false);
   async function restorePrevious(): Promise<void> {
     const id = canvas.currentId;

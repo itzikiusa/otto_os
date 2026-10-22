@@ -418,6 +418,9 @@ impl DbExplorerRepo {
         self.get_dashboard(&id).await
     }
 
+    /// Patch a dashboard. Omitted fields keep the value the row has AT WRITE
+    /// TIME (`COALESCE` / `CASE` in the one UPDATE), so two PATCHes touching
+    /// different fields — a layout save racing a rename — never undo each other.
     pub async fn update_dashboard(
         &self,
         id: &Id,
@@ -425,39 +428,62 @@ impl DbExplorerRepo {
         layout: Option<&Value>,
         refresh_secs: Option<Option<i64>>,
     ) -> Result<Dashboard> {
-        let existing = self.get_dashboard(id).await?;
-        let name = name.unwrap_or(&existing.name);
-        let layout_json = match layout {
-            Some(v) => v.to_string(),
-            None => existing.layout.to_string(),
-        };
-        let refresh = match refresh_secs {
-            Some(v) => v,
-            None => existing.refresh_secs,
-        };
+        let layout_json = layout.map(Value::to_string);
         let now = fmt(Utc::now());
         sqlx::query(
-            "UPDATE db_dashboards SET name = ?, layout_json = ?, refresh_secs = ?, updated_at = ?
+            "UPDATE db_dashboards SET name = COALESCE(?, name),
+                                      layout_json = COALESCE(?, layout_json),
+                                      refresh_secs = CASE WHEN ? THEN ? ELSE refresh_secs END,
+                                      updated_at = ?
              WHERE id = ?",
         )
         .bind(name)
         .bind(&layout_json)
-        .bind(refresh)
+        .bind(refresh_secs.is_some())
+        .bind(refresh_secs.flatten())
         .bind(&now)
         .bind(id)
         .execute(&self.pool)
         .await
         .map_err(dberr("update dashboard"))?;
+        // An unknown id surfaces as the read's not-found.
         self.get_dashboard(id).await
     }
 
+    /// Delete a dashboard AND its widgets in one transaction — the UI promises
+    /// "… and its widgets", and `db_widgets.dashboard_id` has no FK to cascade,
+    /// so leaving them would strand rows no screen can show or delete.
     pub async fn delete_dashboard(&self, id: &Id) -> Result<()> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(dberr("delete dashboard tx"))?;
+        sqlx::query("DELETE FROM db_widgets WHERE dashboard_id = ?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(dberr("delete dashboard widgets"))?;
         sqlx::query("DELETE FROM db_dashboards WHERE id = ?")
             .bind(id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(dberr("delete dashboard"))?;
+        tx.commit()
+            .await
+            .map_err(dberr("delete dashboard commit"))?;
         Ok(())
+    }
+
+    /// The workspace a dashboard belongs to, `None` when it doesn't exist —
+    /// the widget routes refuse a `dashboard_id` outside the widget's
+    /// workspace.
+    pub async fn dashboard_workspace(&self, id: &str) -> Result<Option<Id>> {
+        sqlx::query_scalar::<_, String>("SELECT workspace_id FROM db_dashboards WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(dberr("dashboard workspace"))
     }
 
     // -- Widgets ------------------------------------------------------------
@@ -522,6 +548,9 @@ impl DbExplorerRepo {
         self.get_widget(&id).await
     }
 
+    /// Patch a widget with one UPDATE: omitted fields keep the row's value at
+    /// write time (`COALESCE`), and the tri-state `dashboard_id` (omit / move /
+    /// unfile) is a `CASE`, so a title edit racing a move keeps both.
     #[allow(clippy::too_many_arguments)]
     pub async fn update_widget(
         &self,
@@ -533,27 +562,21 @@ impl DbExplorerRepo {
         mapping: Option<&Value>,
         options: Option<&Value>,
     ) -> Result<Widget> {
-        let existing = self.get_widget(id).await?;
-        let dash = match dashboard_id {
-            Some(v) => v.map(str::to_string),
-            None => existing.dashboard_id.clone(),
-        };
-        let title = title.unwrap_or(&existing.title);
-        let statement = statement.unwrap_or(&existing.statement);
-        let viz = viz.unwrap_or(&existing.viz);
-        let mapping_json = mapping
-            .map(|v| v.to_string())
-            .unwrap_or_else(|| existing.mapping.to_string());
-        let options_json = options
-            .map(|v| v.to_string())
-            .unwrap_or_else(|| existing.options.to_string());
+        let mapping_json = mapping.map(Value::to_string);
+        let options_json = options.map(Value::to_string);
         let now = fmt(Utc::now());
         sqlx::query(
-            "UPDATE db_widgets SET dashboard_id = ?, title = ?, statement = ?, viz = ?,
-                                   mapping_json = ?, options_json = ?, updated_at = ?
+            "UPDATE db_widgets SET dashboard_id = CASE WHEN ? THEN ? ELSE dashboard_id END,
+                                   title = COALESCE(?, title),
+                                   statement = COALESCE(?, statement),
+                                   viz = COALESCE(?, viz),
+                                   mapping_json = COALESCE(?, mapping_json),
+                                   options_json = COALESCE(?, options_json),
+                                   updated_at = ?
              WHERE id = ?",
         )
-        .bind(&dash)
+        .bind(dashboard_id.is_some())
+        .bind(dashboard_id.flatten())
         .bind(title)
         .bind(statement)
         .bind(viz)
@@ -654,6 +677,87 @@ mod tests {
         .await
         .unwrap();
         conn_id
+    }
+
+    // ── Dashboards & widgets ────────────────────────────────────────────────
+
+    /// Deleting a dashboard removes its widgets in the same transaction, and a
+    /// partial PATCH keeps the other fields as they are at write time.
+    #[tokio::test]
+    async fn dashboard_delete_takes_its_widgets_and_patches_are_partial() {
+        let pool = mem_pool().await;
+        let repo = DbExplorerRepo::new(pool.clone());
+        let user = seed_user(&pool, "alice", false).await;
+        let ws_id = seed_workspace(&pool).await;
+        let conn_id = seed_connection(&pool, &ws_id, &user).await;
+        let dash = repo.create_dashboard(&ws_id, "ops", &user).await.unwrap();
+        let other = repo.create_dashboard(&ws_id, "keep", &user).await.unwrap();
+        let widget = |dashboard_id: Option<Id>| NewWidget {
+            workspace_id: ws_id.clone(),
+            dashboard_id,
+            connection_id: conn_id.clone(),
+            title: "w".into(),
+            statement: "SELECT 1".into(),
+            viz: "table".into(),
+            mapping: serde_json::json!({}),
+            options: serde_json::json!({}),
+            created_by: user.clone(),
+        };
+        let filed = repo
+            .create_widget(widget(Some(dash.id.clone())))
+            .await
+            .unwrap();
+        let kept = repo
+            .create_widget(widget(Some(other.id.clone())))
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.dashboard_workspace(&dash.id).await.unwrap().as_deref(),
+            Some(ws_id.as_str())
+        );
+        assert_eq!(repo.dashboard_workspace("nope").await.unwrap(), None);
+
+        // Two PATCHes on different fields both land.
+        repo.update_dashboard(&other.id, None, None, Some(Some(30)))
+            .await
+            .unwrap();
+        let d = repo
+            .update_dashboard(&other.id, Some("renamed"), None, None)
+            .await
+            .unwrap();
+        assert_eq!((d.name.as_str(), d.refresh_secs), ("renamed", Some(30)));
+        let d = repo
+            .update_dashboard(&other.id, None, None, Some(None))
+            .await
+            .unwrap();
+        assert_eq!((d.name.as_str(), d.refresh_secs), ("renamed", None));
+        repo.update_widget(&kept.id, None, Some("t2"), None, None, None, None)
+            .await
+            .unwrap();
+        let w = repo
+            .update_widget(&kept.id, Some(None), None, None, None, None, None)
+            .await
+            .unwrap();
+        assert_eq!((w.title.as_str(), w.dashboard_id.as_deref()), ("t2", None));
+        assert!(repo
+            .update_dashboard(&"missing".to_string(), Some("x"), None, None)
+            .await
+            .is_err());
+
+        repo.delete_dashboard(&dash.id).await.unwrap();
+        let left: Vec<Id> = repo
+            .list_widgets(&ws_id)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|w| w.id)
+            .collect();
+        assert_eq!(
+            left,
+            vec![kept.id.clone()],
+            "the deleted dashboard's widget {} must go",
+            filed.id
+        );
     }
 
     // ── History isolation (#L11) ─────────────────────────────────────────────

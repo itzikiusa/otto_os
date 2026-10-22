@@ -540,7 +540,7 @@
             {:else if active.loadError && !doc}
               <LoadState what="this file" error={active.loadError} empty onretry={() => void workbench.retryLoad(active.id)} />
             {:else if !doc}
-              <div class="wb-skel" aria-busy="true" aria-label="Loading file">
+              <div class="wb-skel" role="status" aria-busy="true" aria-label="Loading file">
                 <span></span><span></span><span></span>
               </div>
             {:else}

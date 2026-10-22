@@ -198,21 +198,28 @@ pub fn parse_window(s: &str) -> Result<Duration> {
     if t.is_empty() {
         return Ok(Duration::hours(24));
     }
-    let (num, unit) = t.split_at(t.len() - 1);
+    // Split before the last CHAR, not byte: `1é` must be a 400, not a
+    // char-boundary panic in the handler task.
+    let unit_at = t.char_indices().last().map_or(0, |(i, _)| i);
+    let (num, unit) = t.split_at(unit_at);
     let n: i64 = num
         .parse()
         .map_err(|_| Error::Invalid(format!("bad window '{s}'")))?;
     if n <= 0 {
         return Err(Error::Invalid(format!("bad window '{s}'")));
     }
+    // Checked constructors: a parseable but huge count (`9999999999999d`)
+    // is out of `TimeDelta` range and would panic in the unchecked ones.
+    let too_long = || Error::Invalid("window must be at most 90d".into());
     let d = match unit {
-        "m" => Duration::minutes(n),
-        "h" => Duration::hours(n),
-        "d" => Duration::days(n),
+        "m" => Duration::try_minutes(n),
+        "h" => Duration::try_hours(n),
+        "d" => Duration::try_days(n),
         _ => return Err(Error::Invalid(format!("bad window '{s}' (use m/h/d)"))),
-    };
+    }
+    .ok_or_else(too_long)?;
     if d > Duration::days(90) {
-        return Err(Error::Invalid("window must be at most 90d".into()));
+        return Err(too_long());
     }
     Ok(d)
 }
@@ -1174,6 +1181,14 @@ mod tests {
         assert!(parse_window("1y").is_err());
         assert!(parse_window("0h").is_err());
         assert!(parse_window("91d").is_err());
+        // Multi-byte unit: an error, not a char-boundary panic.
+        assert!(parse_window("1é").is_err());
+        assert!(parse_window("5µ").is_err());
+        // Out of TimeDelta range: the 90d error, not an out-of-bounds panic.
+        match parse_window("9999999999999d") {
+            Err(Error::Invalid(m)) => assert_eq!(m, "window must be at most 90d"),
+            other => panic!("expected the 90d error, got {other:?}"),
+        }
         assert!(ident_ok("http_requests_total"));
         assert!(ident_ok("gowithdrawal-confsrv"));
         assert!(!ident_ok("x; DROP"));

@@ -35,10 +35,11 @@ pub trait Adapter: Send + Sync {
 
     /// Post a message with channel-native rich-text formatting enabled.
     ///
-    /// For Slack this sets `mrkdwn: true` so `*bold*`, `_italic_`, `` `code` ``
-    /// and `<URL|label>` links render. For Telegram this uses `Markdown` parse
-    /// mode (V1 legacy — less strict than MarkdownV2) so `*bold*`, `_italic_`,
-    /// `` `code` `` and `[text](url)` links render.
+    /// `text` is GitHub-flavoured Markdown (what agents write); each adapter
+    /// converts it to its dialect ([`crate::gfm`]). For Slack this sets
+    /// `mrkdwn: true` so `*bold*`, `_italic_`, `` `code` `` and `<URL|label>`
+    /// links render. For Telegram this uses `HTML` parse mode with escaped
+    /// text, so bold, italics, `code`, code blocks and links render.
     ///
     /// The default implementation falls back to plain `send` so adapters that
     /// don't support formatted text still work.

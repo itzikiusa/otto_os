@@ -146,30 +146,22 @@ impl UsersRepo {
         password_hash: Option<&str>,
         disabled: Option<bool>,
     ) -> Result<User> {
-        if let Some(d) = display_name {
-            sqlx::query("UPDATE users SET display_name = ? WHERE id = ?")
-                .bind(d)
-                .bind(id)
-                .execute(&self.pool)
-                .await
-                .map_err(dberr("update user"))?;
-        }
-        if let Some(p) = password_hash {
-            sqlx::query("UPDATE users SET password_hash = ? WHERE id = ?")
-                .bind(p)
-                .bind(id)
-                .execute(&self.pool)
-                .await
-                .map_err(dberr("update user"))?;
-        }
-        if let Some(dis) = disabled {
-            sqlx::query("UPDATE users SET disabled = ? WHERE id = ?")
-                .bind(dis as i64)
-                .bind(id)
-                .execute(&self.pool)
-                .await
-                .map_err(dberr("update user"))?;
-        }
+        // One statement (data-integrity-2-03): a password reset + disable
+        // can't half-apply. Omitted fields keep their value.
+        sqlx::query(
+            "UPDATE users SET
+                display_name = COALESCE(?, display_name),
+                password_hash = COALESCE(?, password_hash),
+                disabled = COALESCE(?, disabled)
+             WHERE id = ?",
+        )
+        .bind(display_name)
+        .bind(password_hash)
+        .bind(disabled.map(|d| d as i64))
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("update user"))?;
         self.get(id).await
     }
 }

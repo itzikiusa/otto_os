@@ -249,33 +249,35 @@ fn is_remote_ref(reference: &str) -> bool {
         && (reference.contains("://") || reference.contains('/') || reference.contains('@'))
 }
 
-/// Expand a leading `~` and drop trailing separators.
-fn normalize_path(p: &str) -> String {
-    let expanded = match p.strip_prefix('~') {
-        Some(rest) => match std::env::var("HOME") {
-            Ok(home) => format!("{}{}", home.trim_end_matches('/'), rest),
-            Err(_) => p.to_string(),
-        },
-        None => p.to_string(),
-    };
+/// Expand a leading `~` / `~/` (the shared [`otto_core::paths::expand_tilde`])
+/// and drop trailing separators. `None` for `~user/…`: another account's home
+/// is never a registered repo here, and the old any-`~` strip turned `~bob/x`
+/// into `$HOMEbob/x`.
+fn normalize_path(p: &str) -> Option<String> {
+    if p.starts_with('~') && p != "~" && !p.starts_with("~/") {
+        return None;
+    }
+    let expanded = otto_core::paths::expand_tilde(p);
     let trimmed = expanded.trim_end_matches('/');
-    if trimmed.is_empty() {
+    Some(if trimmed.is_empty() {
         "/".into()
     } else {
         trimmed.to_string()
-    }
+    })
 }
 
 /// Entries whose registered path IS `path` or an ancestor of it — keeping only
 /// the deepest (a nested repo beats its parent). Paths are globally unique, so
 /// this is at most one entry in practice.
 fn match_path<'a>(entries: &'a [RepoEntry], path: &str) -> Vec<&'a RepoEntry> {
-    let path = normalize_path(path);
+    let Some(path) = normalize_path(path) else {
+        return Vec::new();
+    };
     let hits: Vec<&RepoEntry> = entries
         .iter()
         .filter(|e| {
-            let root = normalize_path(&e.repo.path);
-            path == root || path.starts_with(&format!("{root}/"))
+            normalize_path(&e.repo.path)
+                .is_some_and(|root| path == root || path.starts_with(&format!("{root}/")))
         })
         .collect();
     let deepest = hits.iter().map(|e| e.repo.path.len()).max().unwrap_or(0);
@@ -525,8 +527,8 @@ pub(crate) async fn resolve_repo_in(
         // An absolute path outside every registered root (a clone, a worktree):
         // match its checkout's `origin` remote instead. Only ever lands on a
         // repo already in `entries`, so this widens nothing.
-        if is_path_ref(r) {
-            if let Some(hit) = resolve_checkout_remote(&entries, &normalize_path(r), prefer)
+        if let Some(path) = normalize_path(r).filter(|_| is_path_ref(r)) {
+            if let Some(hit) = resolve_checkout_remote(&entries, &path, prefer)
                 .await
                 .map(|m| found(m, r))
                 .transpose()?
@@ -767,6 +769,22 @@ mod tests {
             RefMatch::One(e, by) => (e.repo.id.clone(), by),
             other => panic!("expected one match, got {other:?}"),
         }
+    }
+
+    /// `~bob/x` is another account's home: no match, never `$HOMEbob/x`.
+    #[test]
+    fn normalize_path_expands_only_the_callers_home() {
+        let home = std::env::var("HOME").expect("HOME set in tests");
+        let home = home.trim_end_matches('/');
+        assert_eq!(
+            normalize_path("~/repo/").as_deref(),
+            Some(&*format!("{home}/repo"))
+        );
+        assert_eq!(normalize_path("~").as_deref(), Some(home));
+        assert_eq!(normalize_path("/a/b//").as_deref(), Some("/a/b"));
+        assert_eq!(normalize_path("~bob/repo"), None);
+        let entries = vec![entry("r", "ws", "repo", &format!("{home}bob/repo"), None)];
+        assert!(match_path(&entries, "~bob/repo").is_empty());
     }
 
     #[test]

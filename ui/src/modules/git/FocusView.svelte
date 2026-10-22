@@ -1,5 +1,6 @@
 <script lang="ts">
   import { plural } from '../../lib/plural';
+  import { rel } from '../../lib/stores/now.svelte';
   // Focus view (GitKraken-style): everything "mine" across the whole install in
   // one place — MY PULL REQUESTS (open PRs aggregated across every registered
   // repo, grouped by forge) and MY WORK (Jira issues assigned to me, rebuilt
@@ -8,6 +9,7 @@
   import { untrack } from 'svelte';
   import { dialogFocus } from '../../lib/dialogFocus';
   import { api } from '../../lib/api/client';
+  import { getIssue, listIssueAccounts, myWork } from '../../lib/api/issues';
   import { mapLimit } from '../../lib/poll';
   import type {
     GitAccount,
@@ -110,7 +112,7 @@
     accountsError = null;
     workLoading = true;
     try {
-      issueAccounts = await api.get<IssueAccount[]>('/issue/accounts');
+      issueAccounts = await listIssueAccounts();
       if (!issueAccountId && issueAccounts[0]) issueAccountId = issueAccounts[0].id;
     } catch (e) {
       accountsError = (e instanceof Error ? e.message : String(e)) || 'The account service did not answer.';
@@ -126,9 +128,7 @@
     workLoading = true;
     workError = null;
     try {
-      const next = await api.get<MyWorkIssue[]>(
-        `/issue/my-work?account_id=${encodeURIComponent(accountId)}`,
-      );
+      const next = await myWork(accountId);
       if (revision === workRevision && accountId === issueAccountId) work = next;
     } catch (e) {
       if (revision !== workRevision || accountId !== issueAccountId) return;
@@ -244,9 +244,7 @@
     quickIssue = null;
     quickLoading = true;
     try {
-      const next = await api.get<IssueDetail>(
-        `/issue/${encodeURIComponent(accountId)}/${encodeURIComponent(key)}`,
-      );
+      const next = await getIssue(accountId, key);
       if (revision === quickRevision && accountId === issueAccountId) quickIssue = next;
     } catch (e) {
       if (revision === quickRevision) {
@@ -266,16 +264,9 @@
   }
 
   // ── Formatting ──────────────────────────────────────────────────────────────
+  /** Dense "3m" / "2h" label via the shared clock (`rel`, compact style). */
   function ago(iso: string | null): string {
-    if (!iso) return '';
-    const t = Date.parse(iso);
-    if (Number.isNaN(t)) return '';
-    const mins = Math.max(0, Math.round((Date.now() - t) / 60_000));
-    if (mins < 60) return `${mins}m`;
-    const hours = Math.round(mins / 60);
-    if (hours < 24) return `${hours}h`;
-    const days = Math.round(hours / 24);
-    return `${days}d`;
+    return iso ? rel(iso, { compact: true }) : '';
   }
 
   const CI_LABEL: Record<string, string> = {

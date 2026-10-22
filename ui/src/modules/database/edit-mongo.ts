@@ -5,7 +5,7 @@
 // …}`, …) — the same ones the results carry — so a round-trip is lossless.
 import { cellStr, isComplex, SET_EMPTY, SET_NULL } from './results-format';
 import { parseSimpleSelect } from './edit-sql';
-import { getAtPath } from './expansion-plan';
+import { getAtPath } from '../../lib/jsonTree/expansion-plan';
 import type { DiffLine, EditAdapter, RowPatch, TypedValue } from './edit-types';
 import { plural } from '../../lib/plural';
 

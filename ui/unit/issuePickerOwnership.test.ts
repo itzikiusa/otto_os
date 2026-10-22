@@ -1,7 +1,17 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { componentFunctions } from './componentFunctions.ts';
-import { deferred } from './sourceHarness.ts';
+import { deferred, loadSource } from './sourceHarness.ts';
+import { unwrapListing } from '../src/lib/listingPage.ts';
+
+/** The REAL issue client (lib/api/issues.ts) over the test's `get` stub, so a
+ *  fixture sees the exact (encoded) URLs the components request. */
+function issueClient(get: (path: string) => Promise<unknown>) {
+  return loadSource(new URL('../src/lib/api/issues.ts', import.meta.url), {
+    './client': { api: { get }, authedBlobUrl: async () => '' },
+    '../listingPage': { unwrapListing },
+  });
+}
 
 // The shared issue picker (Attach issue / Review → Jira). A search or project
 // list started under one account must not land after the user switched to
@@ -14,8 +24,8 @@ function picker(get: Get) {
     new URL('../src/modules/agents/JiraIssuePicker.svelte', import.meta.url),
     ['loadProjects', 'resetSearch', 'search', 'pick', 'loadAccounts'],
     {
-      api: { get },
-      unwrapListing: (p: { items: unknown[]; truncated: boolean }) => p,
+      ...issueClient(get),
+      issueAccounts: { load: () => get('/issue/accounts') },
       loadErrorText: (e: Error) => e.message,
       accounts: [], accountsLoading: true, accountsError: null,
       selectedAccountId: 'A', projects: [], projectsLoading: false, projectsTruncated: false,

@@ -4,7 +4,7 @@ import { deferred, loadSource } from './sourceHarness.ts';
 import * as livePaths from '../src/lib/gitLivePaths.ts';
 import * as latest from '../src/lib/latest.ts';
 
-// S13-03: switching A→B must never leave repo A's status / PRs under repo B.
+// S13-03: switching A→B must never leave repo A's status under repo B.
 
 const flush = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
 const status = (branch: string) => ({ branch, upstream: null, ahead: 0, behind: 0, changes: [] });
@@ -33,35 +33,45 @@ function fixture() {
 const A = { id: 'A', name: 'a' };
 const B = { id: 'B', name: 'b' };
 
-test('out-of-order selectPrimary keeps the latest repo\'s status and PRs', async () => {
+test('out-of-order selectPrimary keeps the latest repo\'s status', async () => {
   const { git, find } = fixture();
   void git.selectPrimary(A);
   void git.selectPrimary(B);
   find('/repos/B/status').resolve(status('b-branch'));
   await flush();
-  find('/repos/B/prs?state=open').resolve({ items: [{ number: 2 }] });
-  await flush();
-  // A's slow responses land last.
+  // A's slow response lands last.
   find('/repos/A/status').resolve(status('a-branch'));
   await flush();
   assert.equal(git.primary.id, 'B');
   assert.equal(git.primaryStatus.branch, 'b-branch');
   assert.equal(git.statusById.A?.branch, 'a-branch', 'A still lands in the per-repo cache');
-  assert.deepEqual(git.prs.map((p: any) => p.number), [2]);
 });
 
-test('a stale PR list for a repo that is no longer primary is dropped', async () => {
+test('a stale failed status for a superseded repo does not clear the primary\'s', async () => {
   const { git, find } = fixture();
-  git.primary = A;
-  void git.loadPrs('A');
-  git.primary = B;
-  void git.loadPrs('B');
-  find('/repos/B/prs?state=open').resolve({ items: [{ number: 2 }] });
+  void git.selectPrimary(A);
+  void git.selectPrimary(B);
+  find('/repos/B/status').resolve(status('b-branch'));
   await flush();
-  find('/repos/A/prs?state=open').resolve({ items: [{ number: 1 }] });
+  find('/repos/A/status').reject(new Error('gone'));
   await flush();
-  assert.deepEqual(git.prs.map((p: any) => p.number), [2]);
-  assert.equal(git.prsLoading, false);
+  assert.equal(git.primary.id, 'B');
+  assert.equal(git.primaryStatus.branch, 'b-branch');
+});
+
+// maintainability-3-01: nothing renders a store-level PR list (PrList and
+// FocusView fetch their own), so selecting a repo must not spend a forge call.
+test('selecting a primary repo does not fetch its pull requests', async () => {
+  const { git, calls, find } = fixture();
+  void git.selectPrimary(A);
+  find('/repos/A/status').resolve(status('main'));
+  await flush();
+  const before = calls.length;
+  const refreshed = git.refreshPrimary();
+  for (const c of calls.slice(before)) c.result.resolve(status('main'));
+  await refreshed;
+  await flush();
+  assert.deepEqual(calls.filter((c) => c.url.includes('/prs')).map((c) => c.url), []);
 });
 
 test('workspace switch: the older repo list never overwrites the newer one', async () => {

@@ -82,9 +82,22 @@ impl Bitbucket {
     /// Capped at the same 20 pages as `Http::paginate_json`: a PR's comments
     /// must be whole, but a runaway cursor must not hang the request.
     async fn paginate_values(&self, path: &str) -> Result<Vec<Value>> {
+        self.paginate_values_with(path, true).await
+    }
+
+    /// [`Self::paginate_values`]; `cached: false` reads every page fresh (the
+    /// merge-gate check list must not lag a just-finished build by a TTL).
+    async fn paginate_values_with(&self, path: &str, cached: bool) -> Result<Vec<Value>> {
         const MAX_PAGES: usize = 20;
+        let get = move |p: String| async move {
+            if cached {
+                self.get_json_cached(&p).await
+            } else {
+                self.send_json(reqwest::Method::GET, &p, None).await
+            }
+        };
         let mut all: Vec<Value> = Vec::new();
-        let mut page = self.get_json_cached(path).await?;
+        let mut page = get(path.to_string()).await?;
         let mut fetched = 1usize;
         // An absolute `next` is fetched WITH the account's credentials, so it
         // must stay on the API origin (the shared paginator's rule) — a forged
@@ -100,7 +113,7 @@ impl Bitbucket {
                 tracing::warn!("bitbucket: ignoring cross-origin `next` page link");
                 break;
             }
-            page = self.get_json_cached(&next).await?;
+            page = get(next).await?;
             fetched += 1;
         }
         Ok(all)
@@ -192,6 +205,77 @@ impl Bitbucket {
             .map_err(|e| Error::Upstream(format!("bitbucket read: {e}")))
     }
 
+    /// `POST …/pullrequests/{id}/merge`, then — when Bitbucket answers **202
+    /// Accepted** (a merge that outran its synchronous window) — poll the
+    /// `Location` task-status URL until it settles (PC-6, integrations-3-02):
+    /// `SUCCESS` → `Ok` (the route's 204), `FAILED` → `Error::Conflict` with
+    /// Bitbucket's reason (409), still `PENDING` after `budget` → a 409 that
+    /// says so. Before, any 2xx read as "merged" while the merge could still
+    /// fail on a hook or a merge check. `interval`/`budget` are parameters only
+    /// so the wire tests need not wait a minute.
+    pub(crate) async fn merge_polling(
+        &self,
+        r: &RemoteRef,
+        number: u64,
+        strategy: MergeStrategy,
+        delete_source_branch: bool,
+        interval: std::time::Duration,
+        budget: std::time::Duration,
+    ) -> Result<()> {
+        let body = merge_body(strategy, delete_source_branch);
+        let path = Self::pr_path(r, &format!("/{number}/merge"));
+        let resp = self.send(reqwest::Method::POST, &path, Some(&body)).await?;
+        if resp.status() != reqwest::StatusCode::ACCEPTED {
+            return Ok(());
+        }
+        let location = resp
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        let still_running = || {
+            Error::Conflict(
+                "Bitbucket accepted the merge but hasn't finished it yet. \
+                 Refresh the PR in a moment."
+                    .into(),
+            )
+        };
+        // The task URL is fetched WITH the account's credentials, so it must
+        // stay on the API origin (the same rule as a `next` page cursor).
+        let merge_url = reqwest::Url::parse(&self.url(&path)).ok();
+        let task_url = match (location, merge_url.as_ref()) {
+            (Some(loc), Some(base)) => base.join(&loc).ok().map(String::from),
+            _ => None,
+        };
+        let Some(task_url) = task_url.filter(|u| super::client::same_origin(merge_url.as_ref(), u))
+        else {
+            tracing::warn!("bitbucket: 202 merge without a same-origin task-status Location");
+            return Err(still_running());
+        };
+        let deadline = tokio::time::Instant::now() + budget;
+        loop {
+            tokio::time::sleep(interval).await;
+            match self.send_json(reqwest::Method::GET, &task_url, None).await {
+                Ok(task) => match task.get("task_status").and_then(Value::as_str) {
+                    Some("SUCCESS") => return Ok(()),
+                    Some("FAILED") => {
+                        return Err(Error::Conflict(format!(
+                            "bitbucket: the merge failed: {}",
+                            merge_task_failure(&task)
+                        )))
+                    }
+                    _ => {}
+                },
+                // A blip while polling says nothing about the merge itself:
+                // keep asking until the budget runs out.
+                Err(e) => tracing::warn!("bitbucket: merge task-status poll failed: {e}"),
+            }
+            if tokio::time::Instant::now() + interval > deadline {
+                return Err(still_running());
+            }
+        }
+    }
+
     /// Workspace members — Bitbucket's reviewer pool. Cached process-wide per
     /// workspace for 10 minutes (membership changes rarely; PR creation may
     /// resolve several names against the same list).
@@ -230,17 +314,18 @@ impl Bitbucket {
     /// Fetch Bitbucket Cloud commit build statuses for the source-branch HEAD
     /// commit of PR `number`. Aggregates all statuses into a [`CiStatus`].
     /// `GET /2.0/repositories/{workspace}/{repo_slug}/pullrequests/{id}/statuses`
-    /// Falls back to `CiStatus::none()` on any error.
+    /// Falls back to `CiStatus::none()` on any error. Follows `next`: a status
+    /// past the first page used to be dropped, so a failing build there read
+    /// as green.
     pub async fn fetch_ci_status(&self, r: &RemoteRef, number: u64) -> CiStatus {
         let path = format!(
-            "{}?pagelen=50",
+            "{}?pagelen=100",
             Self::pr_path(r, &format!("/{number}/statuses"))
         );
-        let v = match self.send_json(reqwest::Method::GET, &path, None).await {
+        let items = match self.paginate_values_with(&path, false).await {
             Ok(v) => v,
             Err(_) => return CiStatus::none(),
         };
-        let items = varr(&v, &["values"]);
         if items.is_empty() {
             return CiStatus::none();
         }
@@ -249,7 +334,7 @@ impl Bitbucket {
         let mut failed = 0u32;
         let mut pending = 0u32;
         let mut url: Option<String> = None;
-        for item in items {
+        for item in &items {
             if url.is_none() {
                 url = vstr_opt(item, &["url"]);
             }
@@ -742,14 +827,15 @@ impl super::GitProvider for Bitbucket {
         strategy: MergeStrategy,
         delete_source_branch: bool,
     ) -> Result<()> {
-        let body = merge_body(strategy, delete_source_branch);
-        self.send(
-            reqwest::Method::POST,
-            &Self::pr_path(r, &format!("/{number}/merge")),
-            Some(&body),
+        self.merge_polling(
+            r,
+            number,
+            strategy,
+            delete_source_branch,
+            MERGE_POLL_INTERVAL,
+            MERGE_POLL_BUDGET,
         )
         .await
-        .map(|_| ())
     }
 
     /// Bitbucket's merge endpoint takes no expected-head pin, so read the PR
@@ -951,11 +1037,13 @@ impl super::GitProvider for Bitbucket {
     /// [`Bitbucket::fetch_ci_status`] aggregates, kept unfolded.
     async fn list_checks(&self, r: &RemoteRef, number: u64) -> Result<Vec<PrCheck>> {
         let path = format!(
-            "{}?pagelen=50",
+            "{}?pagelen=100",
             Self::pr_path(r, &format!("/{number}/statuses"))
         );
-        let v = self.send_json(reqwest::Method::GET, &path, None).await?;
-        Ok(checks_from_statuses(&v))
+        let values = self.paginate_values_with(&path, false).await?;
+        Ok(checks_from_statuses(
+            &serde_json::json!({ "values": values }),
+        ))
     }
 }
 
@@ -1030,6 +1118,26 @@ pub(crate) fn checks_from_statuses(v: &Value) -> Vec<PrCheck> {
             }
         })
         .collect()
+}
+
+/// How long a 202 merge's task status is polled before the route answers
+/// "accepted but not finished" (PC-6), and how often.
+const MERGE_POLL_BUDGET: std::time::Duration = std::time::Duration::from_secs(60);
+const MERGE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The human reason of a `FAILED` merge task: `merge_result.error.message`,
+/// then `merge_result.message`, else a generic line.
+fn merge_task_failure(task: &Value) -> String {
+    let result = task.get("merge_result");
+    result
+        .and_then(|m| m.get("error"))
+        .and_then(|e| e.get("message"))
+        .or_else(|| result.and_then(|m| m.get("message")))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            "Bitbucket reported the merge as failed (a conflict, a hook or a merge check)".into()
+        })
 }
 
 /// Pull-request merge body. `close_source_branch` is Bitbucket's spelling of
@@ -1195,5 +1303,125 @@ mod tests {
         let b = super::merge_body(MergeStrategy::Merge, false);
         assert_eq!(b["merge_strategy"], "merge_commit");
         assert_eq!(b["close_source_branch"], false);
+    }
+}
+
+/// PC-6 wire tests: a merge that Bitbucket answers with 202 is polled on its
+/// `Location` task-status URL, against a local stub.
+#[cfg(test)]
+mod merge_202_tests {
+    use super::{Bitbucket, RemoteRef};
+    use otto_core::api::MergeStrategy;
+    use otto_core::Error;
+    use serde_json::json;
+    use std::time::Duration;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const MERGE: &str = "/repositories/acme/app/pullrequests/7/merge";
+    const TASK: &str = "/repositories/acme/app/pullrequests/7/merge/task-status/t1";
+
+    fn rr() -> RemoteRef {
+        RemoteRef {
+            owner: "acme".into(),
+            repo: "app".into(),
+        }
+    }
+
+    async fn accepted(server: &MockServer, location: &str) {
+        Mock::given(method("POST"))
+            .and(path(MERGE))
+            .respond_with(ResponseTemplate::new(202).insert_header("Location", location))
+            .mount(server)
+            .await;
+    }
+
+    async fn task(server: &MockServer, status: &str, times: Option<u64>) {
+        let mut m = Mock::given(method("GET")).and(path(TASK)).respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({
+                "task_status": status,
+                "merge_result": if status == "FAILED" {
+                    json!({"type": "error", "error": {"message": "Merge conflict in a.rs"}})
+                } else {
+                    json!(null)
+                }
+            })),
+        );
+        if let Some(n) = times {
+            m = m.up_to_n_times(n);
+        }
+        m.mount(server).await;
+    }
+
+    async fn merge(bb: &Bitbucket, budget_ms: u64) -> otto_core::Result<()> {
+        bb.merge_polling(
+            &rr(),
+            7,
+            MergeStrategy::Squash,
+            false,
+            Duration::from_millis(5),
+            Duration::from_millis(budget_ms),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn accepted_then_pending_then_success_is_merged() {
+        let server = MockServer::start().await;
+        accepted(&server, &format!("{}{TASK}", server.uri())).await;
+        task(&server, "PENDING", Some(2)).await;
+        task(&server, "SUCCESS", None).await;
+        let bb = Bitbucket::with_base("user".into(), "tok".into(), server.uri());
+        merge(&bb, 5_000).await.expect("SUCCESS settles as merged");
+    }
+
+    #[tokio::test]
+    async fn accepted_then_failed_is_a_conflict_with_the_reason() {
+        let server = MockServer::start().await;
+        accepted(&server, &format!("{}{TASK}", server.uri())).await;
+        task(&server, "PENDING", Some(1)).await;
+        task(&server, "FAILED", None).await;
+        let bb = Bitbucket::with_base("user".into(), "tok".into(), server.uri());
+        match merge(&bb, 5_000).await {
+            Err(Error::Conflict(m)) => assert!(m.contains("Merge conflict in a.rs"), "{m}"),
+            other => panic!("expected Conflict, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn still_pending_at_the_budget_is_a_conflict_not_merged() {
+        let server = MockServer::start().await;
+        accepted(&server, &format!("{}{TASK}", server.uri())).await;
+        task(&server, "PENDING", None).await;
+        let bb = Bitbucket::with_base("user".into(), "tok".into(), server.uri());
+        match merge(&bb, 40).await {
+            Err(Error::Conflict(m)) => assert!(m.contains("hasn't finished"), "{m}"),
+            other => panic!("expected Conflict, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_cross_origin_task_location_is_never_fetched() {
+        let server = MockServer::start().await;
+        accepted(&server, "https://evil.example/task-status/t1").await;
+        let bb = Bitbucket::with_base("user".into(), "tok".into(), server.uri());
+        match merge(&bb, 5_000).await {
+            Err(Error::Conflict(m)) => assert!(m.contains("hasn't finished"), "{m}"),
+            other => panic!("expected Conflict, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_plain_200_merge_does_not_poll() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(MERGE))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": 7})))
+            .mount(&server)
+            .await;
+        let bb = Bitbucket::with_base("user".into(), "tok".into(), server.uri());
+        merge(&bb, 5_000).await.unwrap();
+        // Only the POST reached the stub.
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
     }
 }

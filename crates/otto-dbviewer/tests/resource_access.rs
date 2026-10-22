@@ -334,6 +334,140 @@ async fn postgres_native_credentials_isolate_schema_and_writes() {
     native_fixture(ConnectionKind::Postgres, "OTTO_RESOURCE_PG_PORT").await;
 }
 
+/// The reviewed-change executor gate (`approved_attempt`) refuses every
+/// tampered or stale claim BEFORE any driver call, so it runs on the
+/// never-reached port-1 fixture in every CI run (test-quality-3-02): a
+/// tampered script, a stale content hash, another executor, a requested
+/// cancellation, a policy edited after the claim, and a finished attempt.
+#[tokio::test]
+async fn executor_gate_refuses_tampered_or_stale_claims_before_any_network() {
+    use otto_state::database_changes::{
+        ChangeInput, ChangeTarget, DatabaseChangesRepo, TargetSnapshot,
+    };
+    let f = Fixture::new(ConnectionKind::Mysql, 1).await;
+    let repo = DatabaseChangesRepo::new(f.pool.clone());
+    let script = "CREATE TABLE shop.gate_probe (id INT)".to_string();
+    let target = ChangeTarget {
+        connection_id: f.conn.clone(),
+        node: "shop".into(),
+    };
+    let fingerprint = f
+        .service
+        .change_target_fingerprint(&f.conn, &f.root.id, Some("shop"))
+        .await
+        .unwrap();
+    let access = ResourceAccessRepo::new(f.pool.clone());
+    let policy = access
+        .get_policy(ResourceKind::Connection, &f.conn)
+        .await
+        .unwrap();
+    let snapshots = vec![TargetSnapshot {
+        target: target.clone(),
+        environment: "dev".into(),
+        policy_revision: policy.revision,
+        connection_fingerprint: fingerprint,
+    }];
+    let change = repo
+        .create(
+            &ChangeInput {
+                title: "Gate probe".into(),
+                description: String::new(),
+                script: script.clone(),
+                targets: vec![target],
+            },
+            &f.reader.id,
+            &f.reader.id,
+        )
+        .await
+        .unwrap();
+    let change = repo
+        .validate(&change, &f.root.id, &snapshots, &f.reader.id, &f.reader.id)
+        .await
+        .unwrap();
+    let change = repo
+        .transition(&change, "awaiting_review", &f.reader.id, &f.reader.id, "")
+        .await
+        .unwrap();
+    let change = repo
+        .transition(&change, "approved", &f.root.id, &f.root.id, "gate probe")
+        .await
+        .unwrap();
+    let attempts = repo
+        .claim(&change, &snapshots, &f.root.id, &f.root.id)
+        .await
+        .unwrap();
+    let attempt = attempts[0].id.clone();
+    repo.start_attempt(&attempt).await.unwrap();
+    let refused = |e: &Error| matches!(e, Error::Forbidden(_) | Error::Conflict(_));
+    let exec = |user: Id| {
+        let (svc, change_id, attempt) = (&f.service, change.id.clone(), attempt.clone());
+        async move {
+            svc.execute_approved_change(&change_id, &attempt, &user)
+                .await
+        }
+    };
+    let set = |sql: &'static str, value: String| {
+        let (pool, attempt, change_id) = (f.pool.clone(), attempt.clone(), change.id.clone());
+        async move {
+            let id = if sql.contains("database_changes SET") {
+                change_id
+            } else {
+                attempt
+            };
+            sqlx::query(sql)
+                .bind(value)
+                .bind(id)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+    };
+
+    // 1. Another executor than the one that claimed it.
+    let e = exec(f.reader.id.clone()).await.unwrap_err();
+    assert!(refused(&e), "other executor: {e:?}");
+    // 2. A tampered script.
+    let attempt_script = "UPDATE database_change_attempts SET script=? WHERE id=?";
+    set(attempt_script, "DROP TABLE shop.orders".into()).await;
+    let e = exec(f.root.id.clone()).await.unwrap_err();
+    assert!(refused(&e), "tampered script: {e:?}");
+    set(attempt_script, script.clone()).await;
+    // 3. A stale content hash.
+    let attempt_hash = "UPDATE database_change_attempts SET content_hash=? WHERE id=?";
+    set(attempt_hash, "stale".into()).await;
+    let e = exec(f.root.id.clone()).await.unwrap_err();
+    assert!(refused(&e), "stale hash: {e:?}");
+    set(attempt_hash, change.content_hash.clone()).await;
+    // 4. A requested cancellation.
+    let cancel = "UPDATE database_changes SET cancellation_requested=? WHERE id=?";
+    set(cancel, "1".into()).await;
+    let e = exec(f.root.id.clone()).await.unwrap_err();
+    assert!(refused(&e), "cancellation requested: {e:?}");
+    set(cancel, "0".into()).await;
+    // 5. The access policy was edited after the claim (revision bump).
+    let current = access
+        .get_policy(ResourceKind::Connection, &f.conn)
+        .await
+        .unwrap();
+    let actor = AccessActor {
+        real_user_id: f.root.id.clone(),
+        effective_user_id: None,
+    };
+    access
+        .put_policy(&current, current.revision, &actor)
+        .await
+        .unwrap();
+    let e = exec(f.root.id.clone()).await.unwrap_err();
+    assert!(
+        matches!(e, Error::Conflict(_)),
+        "policy edited after claim: {e:?}"
+    );
+    // 6. A finished attempt never replays.
+    repo.finish_attempt(&attempt, true).await.unwrap();
+    let e = exec(f.root.id.clone()).await.unwrap_err();
+    assert!(refused(&e), "finished attempt: {e:?}");
+}
+
 async fn approved_native_fixture(kind: ConnectionKind, env: &str, partial: bool) {
     use otto_state::database_changes::{
         ChangeInput, ChangeTarget, DatabaseChangesRepo, TargetSnapshot,

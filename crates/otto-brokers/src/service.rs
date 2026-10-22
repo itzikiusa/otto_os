@@ -25,6 +25,20 @@ use std::time::{Duration, Instant};
 const POOL_TTL: Duration = Duration::from_secs(30 * 60);
 const POLICY_TTL: Duration = Duration::from_secs(10 * 60);
 const MAX_CONSUME: usize = 5000;
+/// Cap on a peek's client-sent `max_wait_ms`. The poll runs on an
+/// uncancellable blocking thread holding a pooled consumer, so a dropped
+/// request cannot stop it; 30 s is the largest internal caller's wait.
+const MAX_CONSUME_WAIT_MS: u64 = 30_000;
+
+/// `req` with its client-controlled bounds clamped: `limit` to
+/// `1..=MAX_CONSUME` and `max_wait_ms` to `MAX_CONSUME_WAIT_MS`.
+fn bounded_consume_req(req: &ConsumeReq) -> ConsumeReq {
+    ConsumeReq {
+        limit: req.limit.clamp(1, MAX_CONSUME),
+        max_wait_ms: req.max_wait_ms.map(|w| w.min(MAX_CONSUME_WAIT_MS)),
+        ..req.clone()
+    }
+}
 
 /// One operation owns all resources needed by its client, including across
 /// uncancellable blocking calls. Eviction only prevents future reuse.
@@ -130,18 +144,12 @@ impl BrokersService {
         }
     }
 
-    /// Attach the operator-workflow repo (lag alerts + replay evidence). Called
-    /// by the server wiring after the pool is available.
+    /// Attach the operator-workflow repo (lag alerts + replay evidence). The
+    /// daemon wiring (`otto-server` `boot/build.rs`) and its test fixture chain
+    /// this; without it every lag-alert call fails "ops repo not initialised".
     pub fn with_ops(mut self, ops: BrokerOpsRepo) -> Self {
         self.ops = Some(ops);
         self
-    }
-
-    /// Whether the broker has refused consumer-group access for this cluster
-    /// (cached). The UI reads this to gate the Consumer Groups tab without
-    /// triggering another denied probe.
-    pub fn group_access_denied(&self, id: &Id) -> bool {
-        self.group_denied.contains_key(id)
     }
 
     /// Record/clear the group-access verdict from a group-op result, returning
@@ -1151,10 +1159,7 @@ impl BrokersService {
         let raw = {
             let client = client.clone();
             let t = topic.to_string();
-            let req2 = ConsumeReq {
-                limit: req.limit.clamp(1, MAX_CONSUME),
-                ..req.clone()
-            };
+            let req2 = bounded_consume_req(req);
             let starts: Option<std::collections::HashMap<i32, i64>> = opts
                 .start_offsets
                 .as_ref()
@@ -1582,6 +1587,35 @@ fn lag_alert_from_row(
         enabled: r.enabled,
         created_at: r.created_at,
         breach_lag,
+    }
+}
+
+#[cfg(test)]
+mod consume_bounds_tests {
+    use super::*;
+
+    /// concurrency-async-3-05: a direct API caller cannot pin a blocking
+    /// thread and a pooled consumer for longer than the cap.
+    #[test]
+    fn consume_wait_and_limit_are_clamped() {
+        let req: ConsumeReq =
+            serde_json::from_value(serde_json::json!({"limit": 0, "max_wait_ms": 86_400_000}))
+                .unwrap();
+        let b = bounded_consume_req(&req);
+        assert_eq!(b.max_wait_ms, Some(MAX_CONSUME_WAIT_MS));
+        assert_eq!(b.limit, 1);
+        let req: ConsumeReq =
+            serde_json::from_value(serde_json::json!({"limit": 99_999, "max_wait_ms": 1500}))
+                .unwrap();
+        let b = bounded_consume_req(&req);
+        assert_eq!(b.max_wait_ms, Some(1500), "a short wait is kept");
+        assert_eq!(b.limit, MAX_CONSUME);
+        let req: ConsumeReq = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(
+            bounded_consume_req(&req).max_wait_ms,
+            None,
+            "unset stays the default"
+        );
     }
 }
 

@@ -13,7 +13,7 @@ test('Load more pages the applied filters, not the half-typed tool box', async (
     {
       PAGE: 200, generation: 0, nextOffset: 0, hasMore: false, loading: false, loadingMore: false,
       moreError: null, loadError: null, rows: [],
-      applied: { server: '', tool: '', decision: '' },
+      applied: { server: '', tool: '', decision: '' }, filtered: false,
       fServer: 'srv', fTool: ' fs.read ', fDecision: 'denied',
       loadErrorText: (e: Error) => e.message,
       mcpCpApi: {
@@ -33,4 +33,5 @@ test('Load more pages the applied filters, not the half-typed tool box', async (
     ['srv', 'fs.read', 'denied', 200],
   ]);
   assert.equal(s.rows.length, 2);
+  assert.equal(s.filtered, true);
 });

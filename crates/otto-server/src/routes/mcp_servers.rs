@@ -280,7 +280,20 @@ pub async fn update(
     if let Some(secret_env) = &req.secret_env {
         server = write_secret_env(&ctx.secrets, &repo, &id, secret_env).await?;
     }
+    // Disabled or renamed: the old name's launcher env files (which hold the
+    // resolved secrets) no longer back any entry; drop them in every cwd now
+    // rather than waiting for a spawn in each.
+    if (existing.enabled && !server.enabled) || existing.name != server.name {
+        sweep_env_files(existing.name).await;
+    }
     Ok(Json(server))
+}
+
+/// [`otto_sessions::mcp::sweep_launcher_env_files`] off the runtime thread.
+async fn sweep_env_files(name: String) {
+    let _ =
+        tokio::task::spawn_blocking(move || otto_sessions::mcp::sweep_launcher_env_files(&name))
+            .await;
 }
 
 /// `DELETE /api/v1/mcp-servers/{id}` — ws editor (workspace resolved from the row).
@@ -294,8 +307,10 @@ pub async fn delete(
     resource_check(&ctx, &user, &id, "configure").await?;
     require_ws_role(&ctx, &user, &existing.workspace_id, WorkspaceRole::Editor).await?;
     repo.delete(&id).await?;
-    // Best-effort: drop the server's Keychain blob with it.
+    // Best-effort: drop the server's Keychain blob with it, and the launcher
+    // env files that carry its resolved values.
     let _ = otto_core::secrets::delete_async(&ctx.secrets, &secret_ref(&id)).await;
+    sweep_env_files(existing.name).await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -307,10 +322,12 @@ pub async fn delete(
 /// from the cwd-shared launcher files, so the session manager must be able to
 /// tell the two apart (it preserves the entries and records the error instead).
 ///
-/// Keychain-backed secret env values are resolved HERE, at merge time — the
-/// rendered `.mcp.json` on disk still contains real values (the agent CLI
-/// needs them; the file is user-local and out-of-tree), but Otto's DB no
-/// longer does. That residual is documented in the connections feature guide.
+/// Keychain-backed secret env values are resolved HERE, at merge time. They
+/// never reach `.mcp.json` (or agy's / grok's launcher): the entry execs
+/// through `/bin/sh` with the env in a 0600 `<tmp>/otto-mcp/launch-*.env`
+/// file, which reconcile deletes once the server leaves the launcher and the
+/// delete/disable routes sweep. Otto's DB holds none of the values. The
+/// mechanism is documented in the connections feature guide.
 #[derive(Clone)]
 pub struct DbMcpServerProvider {
     pool: otto_state::DbPool,

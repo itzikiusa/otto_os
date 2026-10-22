@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
 import { strictRequire, unused } from './strictRequire.ts';
+import * as loadError from '../src/lib/loadError.ts';
 const page = () => ({turns: [{id: 'turn', blocks: [], role: 'user'}], stats: {turns: 1}, cursor: '0', has_earlier: false, provider: 'claude'});
 const settle = async () => {for (let i = 0; i < 16; i++) await Promise.resolve();};
 function setup(get?: (url: string, signal?: AbortSignal) => Promise<any>) {
@@ -16,7 +17,7 @@ function setup(get?: (url: string, signal?: AbortSignal) => Promise<any>) {
       if (p.endsWith('/client')) { const post = async (url: string) => {posts.push(url);}; return {api: {get: async (url: string, signal?: AbortSignal) => {gets.push(url); return get ? get(url, signal) : page();}, post, bg: {post}}}; }
       if (p.endsWith('/win')) return {winKey: (k: string) => k};
       if (p.endsWith('transcriptLifecycle')) return load(new URL('../src/lib/stores/transcriptLifecycle.ts', import.meta.url));
-      return strictRequire([['/paneHeader', unused('/paneHeader')]])(p);
+      return strictRequire([['/paneHeader', unused('/paneHeader')], ['/loadError', loadError]])(p);
     }};
     runInNewContext(ts.transpileModule(readFileSync(file, 'utf8'), {compilerOptions: {module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022}}).outputText, context);
     return context.exports;

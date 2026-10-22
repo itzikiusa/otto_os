@@ -184,8 +184,18 @@ impl SshTunnel {
         Err(last_err.unwrap_or_else(|| Error::Upstream("ssh tunnel failed".into())))
     }
 
-    /// Spawn `ssh` with the prepared args and wait for the local port to become
-    /// usable. Shared by both forwarding modes.
+    /// Spawn `ssh` with the prepared args and wait for the forward to come up.
+    /// Shared by both forwarding modes.
+    ///
+    /// Readiness is ssh's OWN "Local forwarding listening on 127.0.0.1 port N"
+    /// line (`LogLevel=DEBUG1`, see [`base_args`]), not a bare TCP probe. The
+    /// reserved port is released before ssh binds it, and OpenSSH binds `-L` /
+    /// `-D` only AFTER authentication — so for the whole connect, host-key and
+    /// auth phase a foreign process that grabbed the port would answer a probe
+    /// while ssh is still alive, and the tunnel's first client (a DB driver,
+    /// with its password) would talk to that process. Once ssh has logged the
+    /// bind, the listener on the port is ssh's (a lost bind exits instead,
+    /// `ExitOnForwardFailure`); the probe then only confirms it accepts.
     async fn launch(args: Vec<String>, local_port: u16) -> Result<SshTunnel> {
         let mut cmd = Command::new("ssh");
         cmd.args(&args).kill_on_drop(true);
@@ -196,78 +206,123 @@ impl SshTunnel {
         let mut child = cmd
             .spawn()
             .map_err(|e| Error::Upstream(format!("failed to start ssh tunnel: {e}")))?;
+        // Drain stderr from the start, for the tunnel's lifetime: it carries
+        // the readiness line, and ssh warnings (rekey, keepalive, channel
+        // errors, debug1) otherwise fill the ~64 KiB pipe buffer and BLOCK ssh
+        // — wedging the tunnel while `is_alive()` still reports true.
+        let mut tap = StderrTap::spawn(child.stderr.take(), local_port);
 
-        // Wait for the local end to accept connections (the forward is live).
         let deadline = Instant::now() + Duration::from_secs(12);
         loop {
             if let Ok(Some(status)) = child.try_wait() {
                 // ssh exited early — surface its stderr.
-                return Err(exit_error(&mut child, &format!("exited early ({status})")).await);
+                return Err(tap.exit_error(&format!("exited early ({status})")).await);
             }
-            if TcpStream::connect(("127.0.0.1", local_port)).await.is_ok() {
-                // TOCTOU guard: the reserved port was released before ssh bound
-                // it, so the successful probe could have reached a FOREIGN
-                // process that grabbed the port first (ssh then exits — it uses
-                // ExitOnForwardFailure). Only bless the tunnel if the ssh child
-                // is still running after the probe; an exit here is a failure,
-                // never a live tunnel pointing at someone else's listener.
-                if let Ok(Some(status)) = child.try_wait() {
-                    return Err(exit_error(&mut child, &format!("exited early ({status})")).await);
-                }
-                // Drain stderr for the tunnel's lifetime: ssh warnings (rekey,
-                // keepalive, channel errors) otherwise fill the ~64 KiB pipe
-                // buffer and BLOCK ssh — wedging the tunnel while `is_alive()`
-                // still reports true. Keep the last line for the death report.
-                let last_stderr = std::sync::Arc::new(Mutex::new(String::new()));
-                if let Some(err) = child.stderr.take() {
-                    let sink = std::sync::Arc::clone(&last_stderr);
-                    tokio::spawn(async move {
-                        use tokio::io::AsyncBufReadExt;
-                        let mut lines = tokio::io::BufReader::new(err).lines();
-                        while let Ok(Some(line)) = lines.next_line().await {
-                            let line = line.trim().to_string();
-                            if line.is_empty() {
-                                continue;
-                            }
-                            tracing::debug!(target: "otto_ssh", "ssh tunnel stderr: {line}");
-                            if let Ok(mut slot) = sink.lock() {
-                                *slot = line;
-                            }
-                        }
-                    });
-                }
+            if tap.forward_ready() && TcpStream::connect(("127.0.0.1", local_port)).await.is_ok() {
                 return Ok(SshTunnel {
                     child: Mutex::new(child),
                     local_port,
-                    last_stderr,
+                    last_stderr: tap.last,
                 });
             }
             if Instant::now() >= deadline {
                 // Killing ssh closes its stderr, so whatever it said about the
                 // stall (a hung jump host, an unanswered DNS lookup) is readable.
                 let _ = child.start_kill();
-                return Err(exit_error(&mut child, "did not become ready within 12s").await);
+                return Err(tap.exit_error("did not become ready within 12s").await);
             }
             tokio::time::sleep(Duration::from_millis(150)).await;
         }
     }
 }
 
-/// The error for a tunnel whose `ssh` exited (or was killed) before the forward
-/// came up: ssh's own explanation, de-noised and with a fix hint
-/// ([`diagnose::diagnose`]), else `fallback`. Reading stderr is bounded — a
-/// grandchild (ProxyCommand) can keep the pipe open after ssh itself is gone.
-async fn exit_error(child: &mut Child, fallback: &str) -> Error {
-    let mut buf = String::new();
-    if let Some(mut err) = child.stderr.take() {
-        use tokio::io::AsyncReadExt;
-        let _ = tokio::time::timeout(Duration::from_secs(2), err.read_to_string(&mut buf)).await;
+/// True for ssh's debug1 line announcing its own bind of `127.0.0.1:port`
+/// (`Local forwarding listening on 127.0.0.1 port N.`, logged for both `-L` and
+/// `-D`). The trailing `.` keeps port 80 from matching a line about port 8080.
+fn is_forward_ready_line(line: &str, port: u16) -> bool {
+    line.contains(&format!(
+        "Local forwarding listening on 127.0.0.1 port {port}."
+    ))
+}
+
+/// ssh's stderr, read line by line from spawn on. Keeps the non-debug text for
+/// the early-exit diagnosis (bounded), the last non-debug line for a death
+/// report, and flips `ready` on the forward's readiness line.
+struct StderrTap {
+    ready: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    text: std::sync::Arc<Mutex<String>>,
+    last: std::sync::Arc<Mutex<String>>,
+    task: Option<tokio::task::JoinHandle<()>>,
+}
+
+/// Cap on the stderr text kept for a diagnosis — the explanation is in the
+/// first lines; a chatty ssh must not grow the buffer for the tunnel's life.
+const STDERR_KEEP: usize = 16 * 1024;
+
+impl StderrTap {
+    fn spawn(err: Option<tokio::process::ChildStderr>, port: u16) -> StderrTap {
+        use std::sync::atomic::Ordering;
+        let ready = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let text = std::sync::Arc::new(Mutex::new(String::new()));
+        let last = std::sync::Arc::new(Mutex::new(String::new()));
+        let task = err.map(|err| {
+            let (ready, text, last) = (ready.clone(), text.clone(), last.clone());
+            tokio::spawn(async move {
+                use tokio::io::AsyncBufReadExt;
+                let mut lines = tokio::io::BufReader::new(err).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    let line = line.trim().to_string();
+                    if line.is_empty() {
+                        continue;
+                    }
+                    if is_forward_ready_line(&line, port) {
+                        ready.store(true, Ordering::Release);
+                    }
+                    if line.starts_with("debug") {
+                        tracing::trace!(target: "otto_ssh", "ssh tunnel stderr: {line}");
+                        continue;
+                    }
+                    tracing::debug!(target: "otto_ssh", "ssh tunnel stderr: {line}");
+                    if let Ok(mut t) = text.lock() {
+                        if t.len() < STDERR_KEEP {
+                            t.push_str(&line);
+                            t.push('\n');
+                        }
+                    }
+                    if let Ok(mut slot) = last.lock() {
+                        *slot = line;
+                    }
+                }
+            })
+        });
+        StderrTap {
+            ready,
+            text,
+            last,
+            task,
+        }
     }
-    let diagnosis = diagnose::diagnose(&buf);
-    if diagnosis.is_empty() {
-        Error::Upstream(format!("ssh tunnel {fallback}"))
-    } else {
-        Error::Upstream(format!("ssh tunnel failed: {diagnosis}"))
+
+    fn forward_ready(&self) -> bool {
+        self.ready.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// The error for a tunnel whose `ssh` exited (or was killed) before the
+    /// forward came up: ssh's own explanation, de-noised and with a fix hint
+    /// ([`diagnose::diagnose`]), else `fallback`. Waiting for stderr's end is
+    /// bounded — a grandchild (ProxyCommand) can keep the pipe open after ssh
+    /// itself is gone.
+    async fn exit_error(&mut self, fallback: &str) -> Error {
+        if let Some(task) = self.task.take() {
+            let _ = tokio::time::timeout(Duration::from_secs(2), task).await;
+        }
+        let buf = self.text.lock().map(|t| t.clone()).unwrap_or_default();
+        let diagnosis = diagnose::diagnose(&buf);
+        if diagnosis.is_empty() {
+            Error::Upstream(format!("ssh tunnel {fallback}"))
+        } else {
+            Error::Upstream(format!("ssh tunnel failed: {diagnosis}"))
+        }
     }
 }
 
@@ -323,6 +378,10 @@ fn base_args(cfg: &SshTunnelConfig) -> Vec<String> {
         // three left a network-dead tunnel reporting "alive" for ~45s.
         "-o".into(),
         "ServerAliveCountMax=2".into(),
+        // debug1 carries "Local forwarding listening on … port N", the only
+        // proof the forwarded port is ssh's own listener (see `launch`).
+        "-o".into(),
+        "LogLevel=DEBUG1".into(),
         "-p".into(),
         cfg.port.to_string(),
     ];
@@ -445,10 +504,48 @@ mod tests {
             .spawn()
             .unwrap();
         let _ = child.wait().await;
-        let msg = exit_error(&mut child, "exited early").await.to_string();
+        let mut tap = StderrTap::spawn(child.stderr.take(), 1);
+        let msg = tap.exit_error("exited early").await.to_string();
         assert!(msg.contains("Permission denied (publickey)"), "{msg}");
         assert!(msg.contains("ssh-add"), "{msg}");
         assert!(!msg.contains("Permanently added"), "{msg}");
+    }
+
+    /// Only ssh's own bind line for THIS port marks the forward ready — the
+    /// TCP probe alone could reach a foreign listener during ssh's auth phase.
+    #[test]
+    fn forward_ready_line_matches_only_this_port() {
+        let line = "debug1: Local forwarding listening on 127.0.0.1 port 54321.";
+        assert!(is_forward_ready_line(line, 54321));
+        assert!(!is_forward_ready_line(line, 5432));
+        assert!(!is_forward_ready_line(
+            "debug1: Local connections to 127.0.0.1:54321 forwarded to remote address db:3306",
+            54321
+        ));
+        assert!(local_forward_args(&cfg(), 1, "h", 2)
+            .iter()
+            .any(|a| a == "LogLevel=DEBUG1"));
+    }
+
+    /// debug1 chatter (on for the readiness line) neither reaches the
+    /// diagnosis nor wins the death report's last line.
+    #[tokio::test]
+    async fn stderr_tap_flags_ready_and_drops_debug_lines() {
+        let mut child = Command::new("sh")
+            .args([
+                "-c",
+                "echo 'debug1: Local forwarding listening on 127.0.0.1 port 7001.' >&2; \
+                 echo 'channel 0: open failed' >&2; echo 'debug1: keepalive' >&2",
+            ])
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let _ = child.wait().await;
+        let mut tap = StderrTap::spawn(child.stderr.take(), 7001);
+        let _ = tap.exit_error("x").await;
+        assert!(tap.forward_ready());
+        assert_eq!(*tap.last.lock().unwrap(), "channel 0: open failed");
+        assert!(!tap.text.lock().unwrap().contains("debug1"));
     }
 
     #[test]

@@ -835,10 +835,9 @@
     cursor: pointer;
     border-radius: var(--radius-s);
     padding: 2px;
-    opacity: 0.6;
   }
   .ctab-x:hover {
-    opacity: 1;
+    color: var(--text);
     background: var(--hover);
   }
   .tabs {

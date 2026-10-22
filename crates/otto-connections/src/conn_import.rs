@@ -1011,7 +1011,7 @@ fn scan_dbeaver() -> ImportScanResult {
         source: ImportSource::Dbeaver,
         path: first_path,
         connections: dedupe(found),
-        warnings,
+        warnings: dedupe_warnings(warnings),
     }
 }
 
@@ -1073,7 +1073,7 @@ fn scan_datagrip() -> ImportScanResult {
         source: ImportSource::Datagrip,
         path: first_path,
         connections: dedupe(found),
-        warnings,
+        warnings: dedupe_warnings(warnings),
     }
 }
 
@@ -1198,6 +1198,18 @@ fn dedupe(conns: Vec<ParsedConnection>) -> Vec<ParsedConnection> {
         }
     }
     out
+}
+
+/// Drop repeated warnings, keeping first-seen order. JetBrains copies
+/// `dataSources.xml` forward on every IDE upgrade (and DBeaver workspaces
+/// repeat profiles), so one bad data source yields the same "skipped" line
+/// per installed version — and the import preview keys its list by text.
+fn dedupe_warnings(warnings: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    warnings
+        .into_iter()
+        .filter(|w| seen.insert(w.clone()))
+        .collect()
 }
 
 #[cfg(test)]

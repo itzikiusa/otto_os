@@ -96,7 +96,10 @@ pub async fn create(
     }
     // Expand ~ and make sure the directory exists — agent CLIs are spawned
     // with this as cwd, and a missing dir silently falls back to $HOME.
-    let root_path = expand_home(req.root_path.trim());
+    let root_path = otto_core::paths::expand_home_strict(req.root_path.trim())
+        .map_err(Error::Invalid)?
+        .to_string_lossy()
+        .into_owned();
     std::fs::create_dir_all(&root_path)
         .map_err(|e| Error::Invalid(format!("cannot create workspace directory: {e}")))?;
     let ws = repo(&ctx)
@@ -192,16 +195,6 @@ async fn list_members(
             role: m.role,
         })
         .collect())
-}
-
-/// Expand a leading `~/` to the user's home directory.
-fn expand_home(path: &str) -> String {
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Ok(home) = std::env::var("HOME") {
-            return format!("{home}/{rest}");
-        }
-    }
-    path.to_string()
 }
 
 #[cfg(test)]

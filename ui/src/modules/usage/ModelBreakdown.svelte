@@ -3,7 +3,7 @@
   // per-day stacked chart by model. Tokens lead; cost is a secondary column.
   // Data comes straight from UsageSummary.models / daily_models.
   import Icon from '../../lib/components/Icon.svelte';
-  import { formatCount } from '../../lib/metric-format';
+  import { formatCount, formatUsd } from '../../lib/metric-format';
   import type { ModelUsage, DailyModelUsage } from '../../lib/api/usage.svelte';
 
   let {
@@ -85,17 +85,12 @@
     const m = iso.match(/^\d{4}-(\d{2})-(\d{2})/);
     return m ? `${MONTHS[parseInt(m[1], 10) - 1] ?? m[1]} ${parseInt(m[2], 10)}` : iso;
   }
-  function fmtCost(n: number): string {
-    if (n === 0) return '$0';
-    if (n < 0.01) return '<$0.01';
-    return '$' + n.toFixed(n < 100 ? 2 : 0);
-  }
   function dayTitle(d: Day): string {
     const parts = series
       .map((s) => [s.name, d.parts.get(s.name) ?? 0] as const)
       .filter(([, v]) => v > 0)
       .map(([n, v]) => `${n} ${v.toLocaleString()}`);
-    return `${shortDay(d.day)} · ${d.total.toLocaleString()} tokens (≈ ${fmtCost(d.cost)})\n${parts.join('\n')}`;
+    return `${shortDay(d.day)} · ${d.total.toLocaleString()} tokens (≈ ${formatUsd(d.cost)})\n${parts.join('\n')}`;
   }
 </script>
 
@@ -200,7 +195,7 @@
               <td class="num" title={m.cache_write_tokens.toLocaleString()}>{formatCount(m.cache_write_tokens)}</td>
               <td class="num" title={m.cache_read_tokens.toLocaleString()}>{formatCount(m.cache_read_tokens)}</td>
               <td class="num strong" title={m.total_tokens.toLocaleString()}>{formatCount(m.total_tokens)}</td>
-              <td class="num dim">{fmtCost(m.cost_usd)}</td>
+              <td class="num dim">{formatUsd(m.cost_usd)}</td>
             </tr>
           {/each}
         </tbody>

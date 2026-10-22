@@ -11,6 +11,7 @@
   import { exportCsv, downloadJson, copyAsJson } from '../../lib/components/exporters';
   import type { AttributionRow, AttributionDim } from './types';
   import { DIM_LABELS } from './types';
+  import { formatCount, formatUsd } from '../../lib/metric-format';
 
   // Injected from the parent (UsagePage) — the current look-back window.
   let { days = 30 }: { days?: number } = $props();
@@ -78,16 +79,6 @@
   const totalCost = $derived(rows.reduce((s, r) => s + r.cost_usd, 0));
   const totalTokens = $derived(rows.reduce((s, r) => s + r.tokens, 0));
 
-  function fmtCost(n: number): string {
-    if (n === 0) return '$0';
-    if (n < 0.01) return '<$0.01';
-    return '$' + n.toFixed(2);
-  }
-  function fmtNum(n: number): string {
-    if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
-    if (n >= 1_000) return (n / 1_000).toFixed(1) + 'k';
-    return String(n);
-  }
   function pct(cost: number): number {
     return totalCost > 0 ? (cost / totalCost) * 100 : 0;
   }
@@ -189,9 +180,9 @@
                   <div class="bar-fill" style="width: {pct(r.cost_usd).toFixed(1)}%"></div>
                 </div>
               </td>
-              <td class="col-cost">{fmtCost(r.cost_usd)}</td>
+              <td class="col-cost">{formatUsd(r.cost_usd)}</td>
               <td class="col-pct dim-pct">{pct(r.cost_usd).toFixed(1)}%</td>
-              <td class="col-tokens" title="{r.tokens.toLocaleString()} tokens">{fmtNum(r.tokens)}</td>
+              <td class="col-tokens" title="{r.tokens.toLocaleString()} tokens">{formatCount(r.tokens)}</td>
               <td class="col-sessions">{r.sessions}</td>
               <td class="col-copy">
                 <button
@@ -210,9 +201,9 @@
           <tr class="attr-total">
             <td class="col-key">Total</td>
             <td class="col-bar"></td>
-            <td class="col-cost">{fmtCost(totalCost)}</td>
+            <td class="col-cost">{formatUsd(totalCost)}</td>
             <td class="col-pct">100%</td>
-            <td class="col-tokens">{fmtNum(totalTokens)}</td>
+            <td class="col-tokens">{formatCount(totalTokens)}</td>
             <td class="col-sessions"></td>
             <td class="col-copy"></td>
           </tr>

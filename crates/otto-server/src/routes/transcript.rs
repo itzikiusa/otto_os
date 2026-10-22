@@ -13,7 +13,7 @@
 //! nosniff). A session without a resolvable transcript gets
 //! `200 { unavailable_reason }`, never 404.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use axum::body::Body;
@@ -29,7 +29,7 @@ use otto_core::domain::{
 };
 use otto_core::event::Event;
 use otto_core::{Error, Id};
-use otto_state::{NewSession, NewTrail, SessionsRepo, TranscriptIndexRepo};
+use otto_state::{NewSession, NewTrail, SessionsRepo};
 use otto_transcript::{
     fold_file_limited, read_subagents_limited, subagent_path, Artifact, ArtifactKind, FoldOpts,
     Folded, HistoryEntry, ImageStore, Provider, Transcript, UnavailableReason,
@@ -144,11 +144,16 @@ pub(crate) fn resolve_transcript_sync(
         }
     }
     // O(1) path: the persisted row (set by the capture scan or a prior read).
+    // A persisted path whose file is gone was pruned by the provider (Claude
+    // drops transcripts after ~30 days): the root scan would re-find nothing,
+    // at one stat per project dir (Codex: a whole rollout-tree walk), on every
+    // History page and search keystroke — so stop here.
     if let Some(p) = persisted {
         let p = PathBuf::from(p);
         if p.is_file() {
             return Ok((Resolved { provider, path: p }, false));
         }
+        return Err(UnavailableReason::TranscriptMissing);
     }
     let cwd = session
         .meta
@@ -701,6 +706,14 @@ async fn session_artifacts(ctx: &ServerCtx, session: &Session) -> ApiResult<Vec<
     let Ok(resolved) = resolve_transcript(ctx, session).await else {
         return Ok(Vec::new());
     };
+    // A live session's tail already holds the folded artifacts: copy them
+    // rather than refold a file that grew since the cached fold (which is
+    // then never stored as current).
+    if let Some(arts) =
+        crate::transcript_tail::live_artifacts(&session.id, resolved.provider, &resolved.path).await
+    {
+        return Ok(newest_first(&arts));
+    }
     let snapshot = cached_fold(ctx, resolved.provider, &resolved.path, None).await?;
     Ok(newest_first(&snapshot.folded.artifacts))
 }
@@ -713,23 +726,20 @@ pub async fn list_artifacts(
 ) -> ApiResult<Json<Vec<Artifact>>> {
     let session = session_gate(&ctx, &user, &id, WorkspaceRole::Viewer).await?;
     let arts = session_artifacts(&ctx, &session).await?;
-    // Best-effort work-graph registration, off the request path.
+    // Best-effort work-graph registration, off the request path. The live
+    // tail already registers each artifact as it appears, so this usually
+    // inserts nothing: one item lookup + one key read, never a per-artifact
+    // query pair (the panel re-fetches on every open and WS resync).
     let cx = ctx.clone();
     let s = session.clone();
     let snapshot = arts.clone();
-    tokio::spawn(async move {
-        for a in &snapshot {
-            register_work_artifact(&cx, &s, a).await;
-        }
-    });
+    tokio::spawn(async move { register_work_artifacts(&cx, &s, &snapshot).await });
     Ok(Json(arts))
 }
 
-/// Mirror an artifact into `work_artifacts` for the session's work item (once
-/// per reference). Silent on any failure — Mission Control is a projection.
-pub(crate) async fn register_work_artifact(ctx: &ServerCtx, session: &Session, a: &Artifact) {
-    let Ok(Some(item)) = ctx
-        .workgraph
+/// The session's Mission Control work item, if the projector made one.
+async fn session_work_item(ctx: &ServerCtx, session: &Session) -> Option<otto_state::WorkItem> {
+    ctx.workgraph
         .repo()
         .find_by_source(
             &session.workspace_id,
@@ -737,28 +747,33 @@ pub(crate) async fn register_work_artifact(ctx: &ServerCtx, session: &Session, a
             &session.id,
         )
         .await
-    else {
-        return;
-    };
-    let reference = a.path.clone().or_else(|| a.url.clone());
-    if let Ok(existing) = ctx.workgraph.repo().artifacts_for(&item.id).await {
-        if existing
-            .iter()
-            .any(|e| e.reference == reference && e.reference.is_some())
-        {
-            return;
-        }
-    }
+        .ok()
+        .flatten()
+}
+
+/// The work-graph `(kind, ref)` an artifact registers under — the
+/// `work_artifacts` unique key within one item.
+fn work_artifact_key(a: &Artifact) -> (otto_state::ArtifactKind, Option<String>) {
     let kind = match a.kind {
         ArtifactKind::Pr => otto_state::ArtifactKind::Pr,
         ArtifactKind::Report => otto_state::ArtifactKind::Report,
         ArtifactKind::Url => otto_state::ArtifactKind::Link,
         ArtifactKind::File | ArtifactKind::Image => otto_state::ArtifactKind::File,
     };
+    (kind, a.path.clone().or_else(|| a.url.clone()))
+}
+
+async fn insert_work_artifact(
+    ctx: &ServerCtx,
+    session: &Session,
+    item_id: &Id,
+    a: &Artifact,
+    (kind, reference): (otto_state::ArtifactKind, Option<String>),
+) {
     let _ = ctx
         .workgraph
         .add_artifact(otto_state::NewArtifact {
-            work_item_id: item.id.clone(),
+            work_item_id: item_id.clone(),
             workspace_id: session.workspace_id.clone(),
             kind,
             title: a.label.clone(),
@@ -766,6 +781,47 @@ pub(crate) async fn register_work_artifact(ctx: &ServerCtx, session: &Session, a
             payload: serde_json::to_value(a).unwrap_or(serde_json::Value::Null),
         })
         .await;
+}
+
+/// Mirror an artifact into `work_artifacts` for the session's work item (once
+/// per `(kind, ref)`). Silent on any failure — Mission Control is a projection.
+pub(crate) async fn register_work_artifact(ctx: &ServerCtx, session: &Session, a: &Artifact) {
+    let Some(item) = session_work_item(ctx, session).await else {
+        return;
+    };
+    let key = work_artifact_key(a);
+    // One indexed existence probe; on a probe error fall through to the insert
+    // (`ON CONFLICT DO NOTHING` keeps it idempotent).
+    if let Ok(true) = ctx
+        .workgraph
+        .repo()
+        .has_artifact(&item.id, key.0, key.1.as_deref())
+        .await
+    {
+        return;
+    }
+    insert_work_artifact(ctx, session, &item.id, a, key).await;
+}
+
+/// [`register_work_artifact`] for a whole list: resolves the work item once,
+/// reads the attached `(kind, ref)` set once (no payloads), and inserts only
+/// the artifacts that are missing.
+async fn register_work_artifacts(ctx: &ServerCtx, session: &Session, arts: &[Artifact]) {
+    if arts.is_empty() {
+        return;
+    }
+    let Some(item) = session_work_item(ctx, session).await else {
+        return;
+    };
+    let Ok(mut known) = ctx.workgraph.repo().artifact_keys(&item.id).await else {
+        return;
+    };
+    for a in arts {
+        let key = work_artifact_key(a);
+        if known.insert((key.0.as_str().to_string(), key.1.clone())) {
+            insert_work_artifact(ctx, session, &item.id, a, key).await;
+        }
+    }
 }
 
 /// The artifact-serving allow-list (design §4.7): the session cwd, the daemon
@@ -1091,194 +1147,23 @@ pub(crate) fn history_resumable(s: &Session) -> bool {
 }
 
 /// `GET /workspaces/{wid}/history?q=&provider=&cwd=&status=&before=&limit=` —
-/// the workspace's sessions (all statuses incl. archived; own sessions only for
-/// non-admins) merged with indexed transcripts no session claims (`on_disk`),
-/// newest activity first (design §4.6).
+/// the legacy array form of History. It delegates to the bounded, paged
+/// [`super::history_page::list`] (same scoping, filters and resolution) and
+/// returns that page's entries; `before` (an entry's `last_active_at`,
+/// exclusive) stands in for the opaque cursor.
 pub async fn history(
     AxPath(wid): AxPath<Id>,
     Query(q): Query<HistoryQuery>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<Json<Vec<HistoryEntry>>> {
-    require_ws_role(&ctx, &user, &wid, WorkspaceRole::Viewer).await?;
-    let is_admin = is_ws_admin(&ctx, &user, &wid).await;
-    let sessions = if is_admin {
-        ctx.manager
-            .list_by_workspace(&wid)
-            .await
-            .map_err(ApiError)?
-    } else {
-        ctx.manager
-            .list_by_workspace_for_user(&wid, &user.id)
-            .await
-            .map_err(ApiError)?
-    };
     let limit = q
         .limit
         .unwrap_or(HISTORY_DEFAULT_LIMIT)
         .clamp(1, HISTORY_MAX_LIMIT);
-    let before = q.before.as_deref().map(str::trim).filter(|s| !s.is_empty());
-    let repo = SessionsRepo::new(ctx.pool.clone());
-    let index = TranscriptIndexRepo::new(ctx.pool.clone());
-    // `on_disk` rows are machine-wide files no session owns → admins/root only
-    // (a Viewer/Editor sees exactly their own sessions). LIMIT/before are
-    // pushed into SQL; the claimed filter below only shrinks the page.
-    let rows = if is_admin {
-        index
-            .list_page(before, limit as i64)
-            .await
-            .map_err(ApiError)?
-    } else {
-        Vec::new()
-    };
-    let persisted: HashMap<Id, Option<String>> = repo
-        .transcript_paths_for_workspace(&wid)
+    super::history_page::legacy_entries(&ctx, &user, &wid, q, limit)
         .await
-        .map_err(ApiError)?
-        .into_iter()
-        .collect();
-    let claimed_paths: HashSet<String> = repo
-        .transcript_paths()
-        .await
-        .map_err(ApiError)?
-        .into_iter()
-        .collect();
-    let claimed_psids: HashSet<String> = repo
-        .provider_session_ids()
-        .await
-        .map_err(ApiError)?
-        .into_iter()
-        .collect();
-    // Resolve every session in ONE blocking hop (pure fs; no DB writes from a
-    // GET — the transcript route persists on first open).
-    let data_dir = ctx.data_dir.clone();
-    let agent_sessions: Vec<Session> = sessions
-        .into_iter()
-        .filter(|s| s.kind == SessionKind::Agent)
-        .collect();
-    let resolved: Vec<(Session, Resolved)> = tokio::task::spawn_blocking(move || {
-        agent_sessions
-            .into_iter()
-            .filter_map(|s| {
-                let p = persisted.get(&s.id).cloned().flatten();
-                // Same resolver as the transcript route (persisted path → roots →
-                // the OTTO_E2E fixture hook), so what the list shows is what opens.
-                resolve_transcript_sync(&data_dir, p.as_deref(), &s)
-                    .ok()
-                    .map(|(r, _)| (s, r))
-            })
-            .collect()
-    })
-    .await
-    .map_err(|e| ApiError(Error::Internal(format!("resolve task: {e}"))))?;
-    let session_paths: Vec<String> = resolved
-        .iter()
-        .map(|(_, r)| r.path.to_string_lossy().into_owned())
-        .collect();
-    let rows_for_sessions = if session_paths.is_empty() {
-        Vec::new()
-    } else {
-        // Index metadata (first prompt / turns) for the sessions' own files.
-        let mut v = Vec::new();
-        for p in &session_paths {
-            if let Ok(Some(r)) = index.get(p).await {
-                v.push(r);
-            }
-        }
-        v
-    };
-    let by_path: HashMap<&str, &otto_state::TranscriptIndexRow> = rows_for_sessions
-        .iter()
-        .map(|r| (r.path.as_str(), r))
-        .collect();
-
-    let mut out: Vec<HistoryEntry> = Vec::new();
-    for (s, resolved) in &resolved {
-        let provider = resolved.provider;
-        let path_str = resolved.path.to_string_lossy().into_owned();
-        let row = by_path.get(path_str.as_str()).copied();
-        out.push(HistoryEntry {
-            session_id: Some(s.id.clone()),
-            provider,
-            title: Some(s.title.clone())
-                .filter(|t| !t.trim().is_empty())
-                .or_else(|| row.and_then(|r| r.title.clone())),
-            first_prompt: row.and_then(|r| r.first_prompt.clone()),
-            cwd: s.cwd.clone(),
-            repo_name: repo_name(&s.cwd),
-            started_at: s.created_at.to_rfc3339(),
-            last_active_at: s.last_active_at.to_rfc3339(),
-            turns: row.and_then(|r| r.turns).map(|t| t.max(0) as u64),
-            status: s.status.as_str().to_string(),
-            transcript_path: path_str,
-            resumable: history_resumable(s),
-            archived: s.archived,
-        });
-    }
-    for r in &rows {
-        if claimed_paths.contains(&r.path)
-            || r.provider_session_id
-                .as_deref()
-                .is_some_and(|p| claimed_psids.contains(p))
-        {
-            continue;
-        }
-        let Some(provider) = Provider::parse(&r.provider) else {
-            continue;
-        };
-        let cwd = r.cwd.clone().unwrap_or_default();
-        out.push(HistoryEntry {
-            session_id: None,
-            provider,
-            title: r.title.clone(),
-            first_prompt: r.first_prompt.clone(),
-            repo_name: repo_name(&cwd),
-            cwd,
-            started_at: r
-                .started_at
-                .clone()
-                .unwrap_or_else(|| r.last_active_at.clone().unwrap_or_default()),
-            last_active_at: r
-                .last_active_at
-                .clone()
-                .unwrap_or_else(|| r.started_at.clone().unwrap_or_default()),
-            turns: r.turns.map(|t| t.max(0) as u64),
-            status: "on_disk".into(),
-            transcript_path: r.path.clone(),
-            resumable: r.provider_session_id.is_some(),
-            archived: false,
-        });
-    }
-
-    // Filters.
-    let needle =
-        q.q.as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_lowercase);
-    let provider_f = q.provider.as_deref().and_then(Provider::parse);
-    let cwd_f = q.cwd.as_deref().map(str::trim).filter(|s| !s.is_empty());
-    let status_f = q.status.as_deref().map(str::trim).filter(|s| !s.is_empty());
-    out.retain(|e| {
-        provider_f.is_none_or(|p| e.provider == p)
-            && cwd_f.is_none_or(|c| {
-                e.cwd == c || e.cwd.starts_with(&format!("{}/", c.trim_end_matches('/')))
-            })
-            && status_f.is_none_or(|s| e.status == s)
-            && before.is_none_or(|b| e.last_active_at.as_str() < b)
-            && needle.as_deref().is_none_or(|n| {
-                e.title
-                    .as_deref()
-                    .is_some_and(|t| t.to_lowercase().contains(n))
-                    || e.first_prompt
-                        .as_deref()
-                        .is_some_and(|t| t.to_lowercase().contains(n))
-                    || e.cwd.to_lowercase().contains(n)
-            })
-    });
-    out.sort_by(|a, b| b.last_active_at.cmp(&a.last_active_at));
-    out.truncate(limit);
-    Ok(Json(out))
+        .map(Json)
 }
 
 pub(crate) fn repo_name(cwd: &str) -> Option<String> {

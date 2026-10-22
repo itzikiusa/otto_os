@@ -310,9 +310,28 @@ pub async fn run_claimed(ctx: ServerCtx, change: DatabaseChange, auth: AuthConte
                     }
                 };
                 // A concurrent cancellation already records unknown; never overwrite
-                // that outcome with a late success response.
-                let _ = repo.finish_attempt_progress(&attempt.id, success, completed).await;
-                if !success {
+                // that outcome with a late success response (the guarded write
+                // answers Conflict). Any other error (SQLITE_BUSY past the busy
+                // timeout, a full disk) is retried; if it still fails, stop
+                // before the next target — `finish` then records the attempt,
+                // still `running`, as outcome_unknown rather than failed.
+                let mut recorded = false;
+                for delay_ms in [0u64, 250, 1_000] {
+                    if delay_ms > 0 {
+                        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                    }
+                    match repo.finish_attempt_progress(&attempt.id, success, completed).await {
+                        Ok(()) => {
+                            recorded = true;
+                            break;
+                        }
+                        Err(Error::Conflict(_)) => break,
+                        Err(error) => {
+                            tracing::warn!(change_id=%change.id,attempt_id=%attempt.id,error=%error,"could not record attempt outcome; retrying")
+                        }
+                    }
+                }
+                if !success || !recorded {
                     break;
                 }
             }

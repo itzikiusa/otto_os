@@ -8,7 +8,6 @@ use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 struct Story {
     gate: Arc<RwLock<()>>,
     cancel: CancelSignal,
-    flag: Arc<std::sync::atomic::AtomicBool>,
 }
 fn story(id: &str) -> Arc<Story> {
     static STORIES: OnceLock<Mutex<HashMap<String, Weak<Story>>>> = OnceLock::new();
@@ -50,18 +49,12 @@ pub struct Deleting {
 /// Keep this guard until the story deletion/cleanup finishes.
 pub async fn begin_delete(id: &str) -> Deleting {
     let state = story(id);
-    state.flag.store(true, std::sync::atomic::Ordering::Release);
     state.cancel.cancel();
     let write = state.gate.clone().write_owned().await;
     Deleting {
         _state: state,
         _write: write,
     }
-}
-
-/// Atomic cancellation passed to the host's existing managed-turn lifecycle.
-pub fn cancellation_flag(id: &str) -> Arc<std::sync::atomic::AtomicBool> {
-    story(id).flag.clone()
 }
 
 /// The handler's Turn owns this state until all publication writes complete.

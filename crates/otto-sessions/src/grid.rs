@@ -141,11 +141,17 @@ pub(crate) async fn send_grid(
     }
     let g = *r.borrow_and_update();
     let frame = grid_frame(g, conn_id);
-    socket
-        .send(Message::Text(frame.into()))
-        .await
-        .map_err(|_| ())
+    // Bounded like every other terminal-socket write (`ws::send_frame`): a
+    // viewer that vanished without a FIN must not park the select! loop —
+    // and with it the liveness, evict and re-auth arms — for minutes.
+    match tokio::time::timeout(SEND_GRID_TIMEOUT, socket.send(Message::Text(frame.into()))).await {
+        Ok(Ok(())) => Ok(()),
+        _ => Err(()),
+    }
 }
+
+/// Same bound as `ws::SEND_TIMEOUT`.
+const SEND_GRID_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 #[cfg(test)]
 mod tests {

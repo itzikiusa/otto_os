@@ -6,6 +6,7 @@
   import { untrack } from 'svelte';
   import { api } from '../../lib/api/client';
   import type { ForecastReq, ForecastResp } from './types';
+  import { formatUsd } from '../../lib/metric-format';
 
   interface Props {
     /** Otto feature label ("review" | "product" | "agent" | "channel" | …). */
@@ -54,12 +55,6 @@
     untrack(() => void load(f, p, est));
   });
 
-  function fmtCost(n: number): string {
-    if (n === 0) return '$0';
-    if (n < 0.001) return '<$0.001';
-    if (n < 0.01) return '$' + n.toFixed(4);
-    return '$' + n.toFixed(2);
-  }
 </script>
 
 <!-- A quiet, one-line projection under a figure: sans + tabular-nums like
@@ -68,7 +63,7 @@
      project from — "no data" next to a KPI was noise. -->
 {#if !loading && resp && resp.projected_cost_usd > 0}
   <span class="forecast" title="Estimated cost of the next {feature === 'agent' ? 'agent run' : `${feature} run`} on {provider}. {resp.basis}">
-    · next run ≈ {fmtCost(resp.projected_cost_usd)}
+    · next run ≈ {formatUsd(resp.projected_cost_usd)}
   </span>
 {/if}
 

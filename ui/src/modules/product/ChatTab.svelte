@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rel } from '../../lib/stores/now.svelte';
   // ChatTab — Discovery Chat for the current story.
   // Left: "New chat" + a list of this story's DiscoveryChats (newest first, with
   // an archive action), in a shared ListPane. Right: the active DiscoveryChat
@@ -116,22 +117,6 @@
 
   // ── Helpers ──────────────────────────────────────────────────────────────────
 
-  function relDate(iso: string): string {
-    try {
-      const diff = Date.now() - new Date(iso).getTime();
-      const s = Math.floor(diff / 1000);
-      if (s < 60) return 'just now';
-      const m = Math.floor(s / 60);
-      if (m < 60) return `${m}m ago`;
-      const h = Math.floor(m / 60);
-      if (h < 24) return `${h}h ago`;
-      const d = Math.floor(h / 24);
-      if (d < 30) return `${d}d ago`;
-      return new Date(iso).toLocaleDateString();
-    } catch {
-      return iso;
-    }
-  }
 </script>
 
 <div class="chat-tab">
@@ -171,7 +156,7 @@
                   <span class="chat-status" class:status-archived={c.status === 'archived'}>
                     {c.status === 'archived' ? 'Archived' : 'Active'}
                   </span>
-                  <span class="chat-date">{relDate(c.updated_at)}</span>
+                  <span class="chat-date" title={new Date(c.updated_at).toLocaleString()}>{rel(c.updated_at)}</span>
                 </span>
               </button>
               {#if c.status === 'active'}

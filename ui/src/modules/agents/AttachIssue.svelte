@@ -23,6 +23,8 @@
     url: string;
     status: string;
   }): Promise<void> {
+    // A second pick while the first is in flight attached the issue twice.
+    if (attaching) return;
     attaching = true;
     try {
       // Store the tracker link + status the search returned, and the account's real provider,

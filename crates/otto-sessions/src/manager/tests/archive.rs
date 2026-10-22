@@ -126,3 +126,46 @@ async fn quality_auto_archive_ignores_irrelevant_history_and_reaches_later_candi
     }
     drop(guard);
 }
+
+/// backend-correctness-2-01: a huge `session_auto_archive_days` must not
+/// panic (chrono's `Duration::days` overflow) or wrap to a future cutoff
+/// (`u64::MAX as i64 == -1`), which would archive every eligible session.
+#[test]
+fn auto_archive_cutoff_treats_out_of_range_days_as_off() {
+    let now = chrono::Utc::now();
+    assert_eq!(
+        auto_archive_cutoff(now, 3),
+        Some(now - chrono::TimeDelta::days(3))
+    );
+    assert_eq!(auto_archive_cutoff(now, u64::MAX), None);
+    assert_eq!(auto_archive_cutoff(now, i64::MAX as u64), None);
+    assert_eq!(auto_archive_cutoff(now, 99_999_999_999), None);
+    if let Some(c) = auto_archive_cutoff(now, 1_000_000) {
+        assert!(c < now, "the cutoff is never in the future");
+    }
+}
+
+#[tokio::test]
+async fn auto_archive_with_an_out_of_range_day_count_archives_nothing() {
+    let (mut manager, repo, workspace, user) = test_manager().await;
+    let settings = otto_state::SettingsRepo::new(repo.pool());
+    settings
+        .put("session_auto_archive_days", &serde_json::json!(u64::MAX))
+        .await
+        .unwrap();
+    Arc::get_mut(&mut manager).unwrap().settings = Some(settings);
+    sqlx::query("INSERT INTO sessions(id,workspace_id,kind,provider,title,status,cwd,created_by,created_at,last_active_at,archived,meta_json) VALUES('quality-huge-days',?,'agent','claude','t','exited','/tmp',?,'2000-01-01T00:00:00Z','2000-01-01T00:00:00Z',0,'{}')")
+        .bind(&workspace.id)
+        .bind(&user)
+        .execute(&repo.pool())
+        .await
+        .unwrap();
+    assert_eq!(manager.auto_archive_stale().await, 0);
+    assert!(
+        !repo
+            .get(&"quality-huge-days".into())
+            .await
+            .unwrap()
+            .archived
+    );
+}

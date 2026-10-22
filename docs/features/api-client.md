@@ -632,7 +632,7 @@ mutations and execution require Editor.** Cross-workspace IDs 404
 | `POST /automation-runs/{id}/cancel` | Editor | Cancel current execution |
 | `POST /oauth2/authorize` / `GET /oauth2/flows/{id}` | Editor | Start browser flow / poll status |
 | `POST /api-client/import-curl` *(not workspace-scoped)* | member | `{curl}` → `ParsedCurl` |
-| `GET /ws/api-client/stream?token=…&workspace_id=…` *(root WS)* | Editor + API Edit | SSE/WebSocket relay |
+| `GET /ws/api-client/stream?workspace_id=…` *(root WS; token only via `Sec-WebSocket-Protocol: otto-bearer, <token>`, `?token=` → 401)* | Editor + API Edit | SSE/WebSocket relay |
 
 ### Persisted shapes (the server-side source of truth)
 

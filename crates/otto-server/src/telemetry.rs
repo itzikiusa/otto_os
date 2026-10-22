@@ -182,8 +182,8 @@ pub async fn middleware(
         untimed,
     };
     let parent = guard.span.clone().expect("span present until finish");
-    let mut response =
-        otto_telemetry::context::scope(Arc::clone(service), &parent, next.run(req)).await;
+    let sink: Arc<dyn otto_telemetry::SpanSink> = service.clone();
+    let mut response = otto_telemetry::context::scope(sink, &parent, next.run(req)).await;
     guard.finish(response.status().as_u16());
     if let Ok(value) = traceparent.parse() {
         response.headers_mut().insert("traceparent", value);

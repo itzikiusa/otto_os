@@ -369,3 +369,30 @@ test('local preview demand never subscribes to the publisher through the server'
   client.setSubscriptions([{sourceId: 'remote', generation: 1, tier: 'grid'}]);
   assert.deepEqual(actions.filter(action => action.type === 'subscribe'), [{type: 'subscribe', source_id: 'remote', source_generation: 1, tier: 'grid'}]);
 });
+
+test('a snapshot that changes nothing the mix reads (a chat line) does not rebuild the host audio graph', async t => {
+  const fixture = mediaPeerFixture();
+  let sources = 0;
+  const baseContext = fixture.environment.createAudioContext!;
+  const environment: Partial<RoomMediaEnvironment> = {...fixture.environment,
+    getUserMedia: async () => fakeStream('audio').stream,
+    createAudioContext: () => {
+      const ctx = baseContext() as unknown as {createMediaStreamSource: () => unknown};
+      const create = ctx.createMediaStreamSource;
+      ctx.createMediaStreamSource = () => { sources++; return create(); };
+      return ctx as unknown as AudioContext;
+    }};
+  const client = new RoomMediaClient({memberId: 'host', send: () => {}, environment});
+  t.after(() => client.dispose());
+  const room: RoomSnapshot = {...snapshot, members: [{...snapshot.members![0], audio_joined: true, muted: false}, guestMember]};
+  client.update(room); await client.joinAudio(); await client.unmute(); await flushMedia();
+  client.update({...room}); await flushMedia();
+  const built = sources;
+  assert.ok(built > 0, 'the host mic feeds the guest mix');
+  for (let i = 0; i < 5; i++) client.update({...room, members: room.members!.map(m => ({...m}))});
+  await flushMedia();
+  assert.equal(sources, built, 'identical membership/audio state reuses the existing graph');
+  client.update({...room, members: [room.members![0], {...guestMember, room_muted: true}]});
+  client.update({...room, members: [room.members![0], guestMember]});
+  assert.ok(sources > built, 'a change the mix reads still rebuilds it');
+});

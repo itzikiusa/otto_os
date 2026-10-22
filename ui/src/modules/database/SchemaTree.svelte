@@ -238,16 +238,19 @@
   // One member per node-bearing tag: a shared `t: 'node' | 'failed' | 'redis'`
   // member never narrows away in the template's {:else} chain.
   type NodeRow<T extends string> = { t: T; node: SchemaNode; depth: number; key: string };
+  // `pos` / `size`: the node's 1-based place among its siblings and their
+  // count, for aria-posinset / aria-setsize — the flat, windowed list carries
+  // no DOM nesting a screen reader could derive the hierarchy from.
   type FlatRow =
-    | NodeRow<'node'>
+    | (NodeRow<'node'> & { pos: number; size: number })
     | NodeRow<'failed'>
     | NodeRow<'redis'>
     | { t: 'empty'; depth: number; text: string; key: string }
     | { t: 'more'; depth: number; shown: number; key: string };
   const flat = $derived.by<FlatRow[]>(() => {
     const out: FlatRow[] = [];
-    const walk = (node: SchemaNode, depth: number): void => {
-      out.push({ t: 'node', node, depth, key: node.id });
+    const walk = (node: SchemaNode, depth: number, pos: number, size: number): void => {
+      out.push({ t: 'node', node, depth, key: node.id, pos, size });
       const open = database.isExpanded(node.id);
       if (!open) {
         if (failedNodes.has(node.id)) out.push({ t: 'failed', node, depth, key: `failed:${node.id}` });
@@ -261,10 +264,11 @@
         const text = treeFilterQ && children.length > 0 ? 'no match' : 'empty';
         out.push({ t: 'empty', depth, text, key: `empty:${node.id}` });
       }
-      for (const child of shown.length > CHILD_CAP ? shown.slice(0, CHILD_CAP) : shown) walk(child, depth + 1);
+      const kids = shown.length > CHILD_CAP ? shown.slice(0, CHILD_CAP) : shown;
+      kids.forEach((child, i) => walk(child, depth + 1, i + 1, shown.length));
       if (shown.length > CHILD_CAP) out.push({ t: 'more', depth, shown: shown.length, key: `more:${node.id}` });
     };
-    for (const n of filteredRoot) walk(n, 0);
+    filteredRoot.forEach((n, i) => walk(n, 0, i + 1, filteredRoot.length));
     return out;
   });
 
@@ -331,7 +335,12 @@
   function onTreeKey(e: KeyboardEvent): void {
     const items = visibleItems();
     if (items.length === 0) return;
-    const cur = items.indexOf(document.activeElement as HTMLElement);
+    // Focus usually sits on a row's inner label button (a click, or a
+    // programmatic focus), not the treeitem itself: resolve it to its row, or
+    // ↑/↓ restarted at the top and ←/→/Enter did nothing.
+    const active = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const row = active?.closest<HTMLElement>('[role="treeitem"]') ?? null;
+    const cur = row ? items.indexOf(row) : -1;
     if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
       e.preventDefault();
       const next =
@@ -517,7 +526,10 @@
   }
 </script>
 
-<div class="schema-tree" role="tree" aria-label="Schema" tabindex="0" bind:this={treeEl} onkeydown={onTreeKey}>
+<!-- The search / scope / counts controls and the search-hit list sit OUTSIDE
+     the role="tree" element: a tree may own only treeitems (one roving-tabindex
+     widget, entered with Tab, walked with the arrows). -->
+<div class="schema-tree" bind:this={treeEl}>
   {#if !database.schemaLoading && database.schemaRoot.length > 0}
     <div class="tree-search">
       <Icon name="search" size={12} />
@@ -632,13 +644,13 @@
   {:else if filteredRoot.length === 0}
     <div class="tree-empty">No match for "{database.objectSearchQuery}".</div>
   {:else}
-    <div class="tree-rows" bind:this={listEl}>
+    <div class="tree-rows" role="tree" aria-label="Schema" tabindex="0" bind:this={listEl} onkeydown={onTreeKey}>
       {#if windowed && start > 0}
         <div class="tree-pad" style="height: {start * ROW_H}px" aria-hidden="true"></div>
       {/if}
       {#each visibleFlat as row (row.key)}
         {#if row.t === 'node'}
-          {@render nodeRow(row.node, row.depth)}
+          {@render nodeRow(row.node, row.depth, row.pos, row.size)}
         {:else if row.t === 'failed'}
           <div class="node-failed" class:fixed-h={windowed} style="padding-inline-start: {(row.depth + 1) * 13 + 18}px">
             <Icon name="x" size={12} />
@@ -664,7 +676,7 @@
   {/if}
 </div>
 
-{#snippet nodeRow(node: SchemaNode, depth: number)}
+{#snippet nodeRow(node: SchemaNode, depth: number, pos: number, size: number)}
   {@const open = database.isExpanded(node.id)}
   {@const selected = database.selectedObjectPath === node.id}
   <div use:rowMenu
@@ -675,6 +687,9 @@
     style="padding-inline-start: {depth * 13 + 4}px"
     role="treeitem"
     tabindex="-1"
+    aria-level={depth + 1}
+    aria-posinset={pos}
+    aria-setsize={size}
     aria-expanded={node.has_children ? open : undefined}
     aria-selected={selected}
     data-node-id={node.id}
@@ -693,8 +708,10 @@
       <span class="caret-spacer"></span>
     {/if}
     <span class="node-icon {node.kind}"><Icon name={iconFor(node.kind)} size={12} /></span>
+    <!-- tabindex -1: the treeitem is the one Tab stop (Enter on it opens). -->
     <button
       class="node-label"
+      tabindex="-1"
       onclick={() => onClick(node)}
       title={node.detail ? `${node.label} — ${node.detail}` : node.label}
     >

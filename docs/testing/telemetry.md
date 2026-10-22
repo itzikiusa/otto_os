@@ -7,8 +7,8 @@ Run one heavy command at a time. A worktree must have its own Cargo target.
 ## Reproduce
 
 ```sh
-CARGO_BUILD_JOBS=2 cargo test -p otto-telemetry --lib
-CARGO_BUILD_JOBS=2 cargo test -p otto-telemetry real_collector_delivers_all_signals_and_recovers -- --ignored --nocapture --test-threads=1
+CARGO_BUILD_JOBS=2 cargo test -p otto-telemetry -p otto-telemetry-collector --lib
+CARGO_BUILD_JOBS=2 cargo test -p otto-telemetry-collector real_collector_delivers_all_signals_and_recovers -- --ignored --nocapture --test-threads=1
 CARGO_BUILD_JOBS=2 cargo build -p ottod
 cd ui
 npm run check

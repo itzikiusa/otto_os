@@ -4,15 +4,11 @@
 // `node --test`; every interpolated string goes through `esc`.
 
 import type { UsageReport, TokenTotals } from '../../lib/api/usage.svelte';
+import { escapeHtml } from '../../lib/html.ts';
 
 /** HTML-escape text for element content and double-quoted attributes. */
 export function esc(v: unknown): string {
-  return String(v ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
+  return escapeHtml(String(v ?? ''));
 }
 
 /** Full integer with thousands separators (report tables want exact counts). */

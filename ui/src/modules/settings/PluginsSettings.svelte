@@ -52,7 +52,28 @@
   onMount(() => void load());
 
   function errText(e: unknown): string {
-    return e instanceof Error ? e.message : String(e);
+    return loadErrorText(e);
+  }
+
+  /** Enabled but its service is down (failed to start, or exited). */
+  function stopped(p: PluginRecord): boolean {
+    return p.enabled && p.running === false;
+  }
+
+  /** Start an enabled plugin's stopped service again (re-runs enable). */
+  async function startAgain(p: PluginRecord): Promise<void> {
+    busy = p.slug;
+    try {
+      await api.post(`/plugin-admin/${p.slug}/enable`);
+      toasts.success(`${p.name} is running again`);
+      await load();
+      await plugins.load();
+    } catch (e) {
+      toasts.error(`Couldn’t start ${p.name}`, errText(e));
+      await load();
+    } finally {
+      busy = null;
+    }
   }
 
   async function install(): Promise<void> {
@@ -177,12 +198,26 @@
             <div class="pname">
               <span class="name-text" title={p.name}>{p.name}</span>
               {#if p.version}<span class="chip version" dir="ltr" title="v{p.version}">v{p.version}</span>{/if}
-              <StatusBadge variant="text" tone={p.enabled ? 'success' : 'neutral'} label={p.enabled ? 'Enabled' : 'Disabled'} />
+              {#if stopped(p)}
+                <StatusBadge variant="text" tone="warning" label="Enabled · not running" />
+              {:else}
+                <StatusBadge variant="text" tone={p.enabled ? 'success' : 'neutral'} label={p.enabled ? 'Enabled' : 'Disabled'} />
+              {/if}
             </div>
+            {#if stopped(p)}
+              <div class="pstopped" role="status">
+                Its service isn’t running{p.last_error ? ` — ${p.last_error}` : ''}. Its page loads, but nothing in it works until it starts.
+              </div>
+            {/if}
             {#if p.description}<div class="pdesc" title={p.description}>{p.description}</div>{/if}
             <div class="psrc mono" dir="ltr" title={p.source}>{p.slug} · {p.source}{#if installedLabel(p.installed_at)}{' · '}{installedLabel(p.installed_at)}{/if}</div>
           </div>
           <div class="pactions">
+            {#if stopped(p)}
+              <button class="btn small primary" onclick={() => void startAgain(p)} disabled={busy !== null}>
+                {busy === p.slug ? 'Starting…' : 'Start again'}
+              </button>
+            {/if}
             <button class="btn small" onclick={() => void toggle(p)} disabled={busy !== null}>
               {busy === p.slug ? 'Working…' : p.enabled ? 'Disable' : 'Enable'}
             </button>
@@ -337,6 +372,11 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .pstopped {
+    font-size: var(--fs-xs);
+    color: var(--warning);
+    overflow-wrap: anywhere;
   }
   .pdesc,
   .psrc {

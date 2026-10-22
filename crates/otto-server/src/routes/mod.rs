@@ -62,6 +62,7 @@ pub mod usage;
 pub mod users;
 pub mod workbench;
 pub mod workflow_progress;
+pub mod workflow_run_files;
 pub mod workflows;
 pub mod workgraph;
 pub mod workspaces;
@@ -765,6 +766,17 @@ pub fn protected_routes() -> Router<ServerCtx> {
         .route(
             "/workflow-runs/{id}/nodes/{node_id}",
             get(workflow_progress::node_detail),
+        )
+        // Run-scoped context files (PC-1): ws Viewer on the run, paths confined
+        // to `<data_dir>/workflow-context/<run_id>` — `/fs/*` refuses Otto's
+        // data dir to non-root callers.
+        .route(
+            "/workflow-runs/{id}/context/browse",
+            get(workflow_run_files::browse),
+        )
+        .route(
+            "/workflow-runs/{id}/context/read",
+            get(workflow_run_files::read),
         )
         .route("/workflow-runs/{id}/cancel", post(workflows::cancel_run))
         .route(

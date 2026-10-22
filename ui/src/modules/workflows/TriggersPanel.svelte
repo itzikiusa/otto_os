@@ -14,6 +14,7 @@
   import type { WorkflowTrigger, TriggerKind } from '../../lib/api/types';
   import { buildTriggerSpec, defaultTriggerForm, formFromTrigger, EVENT_KINDS } from './triggerForm';
   import { copyTextOrThrow } from '../../lib/clipboard';
+  import { cadenceLabel } from '../../lib/cadence';
 
   interface Props {
     workflowId: string;
@@ -174,7 +175,7 @@
   // (Pausing is the reversible option: the on/off toggle.)
   async function remove(t: WorkflowTrigger): Promise<void> {
     const ok = await confirmer.ask(
-      `Delete this ${t.kind} trigger (${describeSpec(t)})?${t.kind === 'webhook' ? ' Its webhook URL stops working.' : ''} To pause it instead, switch it off.`,
+      `Delete this ${(KIND_LABEL[t.kind] ?? t.kind).toLowerCase()} trigger (${describeSpec(t)})?${t.kind === 'webhook' ? ' Its webhook URL stops working.' : ''} To pause it instead, switch it off.`,
       { title: 'Delete trigger', danger: true, confirmLabel: 'Delete trigger' },
     );
     if (!ok) return;
@@ -183,9 +184,9 @@
       if (!alive) return;
       triggers = triggers.filter((x) => x.id !== t.id);
       ontriggers?.(triggers);
-      toasts.success('Trigger removed');
+      toasts.success('Trigger deleted');
     } catch (e) {
-      toastError('Couldn’t remove the trigger', e);
+      toastError('Couldn’t delete the trigger', e);
     }
   }
 
@@ -193,15 +194,11 @@
     const s = t.spec as Record<string, unknown>;
     if (t.kind === 'schedule') {
       const c = s.cadence as string | undefined;
-      if (c === 'interval') return `every ${s.every_min ?? 60} min`;
-      if (c === 'daily') return `daily at ${s.at ?? '09:00'} ${s.timezone ?? 'UTC'}`;
-      if (c === 'weekly') {
-        const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-        const wd = typeof s.weekday === 'number' ? (days[s.weekday] ?? 'Mon') : 'Mon';
-        return `weekly ${wd} at ${s.at ?? '09:00'} ${s.timezone ?? 'UTC'}`;
+      // The shared label (ux-design-2-04): "Every day", not "every 1440 min".
+      if (c && ['interval', 'daily', 'weekly', 'cron', 'once'].includes(c)) {
+        return cadenceLabel(s, typeof s.timezone === 'string' ? s.timezone : 'UTC');
       }
-      if (c === 'cron') return `${s.expr ?? ''} (${s.timezone ?? 'UTC'})`;
-      return 'custom schedule';
+      return 'Custom schedule';
     }
     if (t.kind === 'webhook') {
       const tok = s.token as string | undefined;

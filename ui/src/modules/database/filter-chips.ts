@@ -4,7 +4,7 @@
 // database store (which re-exports everything here) so it is unit-testable and
 // so the SQL rendering goes through the ONE dialect module (`sql-dialect.ts`)
 // shared with the edit builders and "Query by value".
-import { bsonScalar } from './bson.ts';
+import { bsonScalar } from '../../lib/jsonTree/bson.ts';
 import { boolLiteral, quoteIdent, stringLiteral, type EngineLike } from './sql-dialect.ts';
 
 /** A single value in a column filter condition. */

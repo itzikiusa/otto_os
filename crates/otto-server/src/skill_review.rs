@@ -1,6 +1,6 @@
 //! Skills Lab — multi-agent review of a `SKILL.md` package.
 //!
-//! Mirrors the code-review engine (`modules.rs::run_review_core`) but targets a
+//! Mirrors the code-review engine (`modules/review/`, `run_review_core`) but targets a
 //! skill package instead of a diff. A review has three layers:
 //!
 //! 1. **Static pass** — a deterministic, dependency-free port of the bundled

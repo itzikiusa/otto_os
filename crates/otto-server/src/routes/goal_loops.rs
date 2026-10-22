@@ -322,6 +322,7 @@ async fn patch(
                 "config can only be edited while the loop is a draft".into(),
             )));
         }
+        require_config_owner(&ctx, &user, &loop_, config).await?;
     }
     if req.limits.is_some() || req.config.is_some() {
         validate_settings(
@@ -339,6 +340,37 @@ async fn patch(
         .await
         .map_err(ApiError)?;
     Ok(Json(ctx.goal_loops_repo.get(&id).await.map_err(ApiError)?))
+}
+
+/// Every role turn (planner, executors, evaluator, digester) runs AS
+/// `created_by`, so the config — each role's prompt, provider and model,
+/// `allow_commits`, skills and sources — is the owner's call: another Editor
+/// rewriting it would run their prompts under the owner's identity and git
+/// accounts (S3-05, as for scheduled tasks). The owner, a workspace Admin or
+/// root may (`roles.check` passes root); name and limits edits and the
+/// start / pause / resume / stop lifecycle stay open to Editors. A full-form
+/// PATCH re-sending the unchanged config is not a change.
+async fn require_config_owner(
+    ctx: &ServerCtx,
+    user: &AuthUser,
+    loop_: &GoalLoop,
+    config: &GoalLoopConfig,
+) -> ApiResult<()> {
+    let unchanged = serde_json::to_value(config).ok() == serde_json::to_value(&loop_.config).ok();
+    if unchanged || loop_.created_by == user.0.id {
+        return Ok(());
+    }
+    if check(ctx, user, &loop_.workspace_id, WorkspaceRole::Admin)
+        .await
+        .is_ok()
+    {
+        return Ok(());
+    }
+    Err(ApiError(Error::Forbidden(
+        "This loop runs as its owner; only the owner or a workspace admin can change its \
+         configuration."
+            .into(),
+    )))
 }
 
 async fn remove(
@@ -607,6 +639,107 @@ fn require_human_credential(managed_session_id: Option<&str>, mcp_only: bool) ->
         return Err(ApiError(Error::Forbidden("a person must record goal verification or answer decisions; managed agent credentials cannot approve work".into())));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod owner_tests {
+    use super::*;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    /// access-control-2-03: a non-owner Editor can't rewrite a draft loop's
+    /// config (403) but may rename it; the owner and a workspace Admin may
+    /// change the config (200).
+    #[tokio::test]
+    async fn only_the_owner_or_an_admin_changes_a_loop_config() {
+        use crate::routes::browser::tests::{mem_pool, seed_workspace, test_ctx};
+        let tmp = tempfile::TempDir::new().unwrap();
+        let pool = mem_pool().await;
+        seed_workspace(&pool, "ws").await;
+        let now = chrono::Utc::now();
+        let mk = |id: &str| otto_core::domain::User {
+            id: id.into(),
+            username: id.into(),
+            display_name: id.into(),
+            is_root: false,
+            disabled: false,
+            created_at: now,
+        };
+        for (id, role) in [("owner", "editor"), ("bob", "editor"), ("adm", "admin")] {
+            sqlx::query("INSERT INTO users (id, username, password_hash, display_name, is_root, created_at) VALUES (?, ?, 'x', ?, 0, ?)")
+                .bind(id).bind(id).bind(id).bind(now.to_rfc3339()).execute(&pool).await.unwrap();
+            sqlx::query(
+                "INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ('ws', ?, ?)",
+            )
+            .bind(id)
+            .bind(role)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let ctx = test_ctx(&pool, tmp.path().to_path_buf()).await;
+        let loop_ = ctx
+            .goal_loops_repo
+            .create(NewGoalLoop {
+                workspace_id: "ws".into(),
+                name: "goal".into(),
+                repo_path: tmp.path().to_string_lossy().to_string(),
+                definition: serde_json::from_value(serde_json::json!({
+                    "title": "goal", "acceptance_criteria": []
+                }))
+                .unwrap(),
+                limits: GoalLoopLimits::default(),
+                config: GoalLoopConfig::default(),
+                created_by: "owner".into(),
+            })
+            .await
+            .unwrap();
+        let app = routes().with_state(ctx.clone());
+        let patch = |who: &str, body: serde_json::Value| {
+            let mut req = Request::builder()
+                .method("PATCH")
+                .uri(format!("/goal-loops/{}", loop_.id))
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(body.to_string()))
+                .unwrap();
+            req.extensions_mut().insert(AuthUser(mk(who)));
+            let app = app.clone();
+            async move { app.oneshot(req).await.unwrap().status() }
+        };
+        let mut evil = serde_json::to_value(GoalLoopConfig::default()).unwrap();
+        evil["allow_commits"] = serde_json::json!(true);
+        let same = serde_json::to_value(GoalLoopConfig::default()).unwrap();
+        assert_eq!(
+            patch("bob", serde_json::json!({"config": evil.clone()})).await,
+            StatusCode::FORBIDDEN
+        );
+        assert!(
+            !ctx.goal_loops_repo
+                .get(&loop_.id)
+                .await
+                .unwrap()
+                .config
+                .allow_commits
+        );
+        // Rename, and a full-form save with the unchanged config, stay open.
+        assert_eq!(
+            patch(
+                "bob",
+                serde_json::json!({"name": "renamed", "config": same})
+            )
+            .await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            patch("owner", serde_json::json!({"config": evil.clone()})).await,
+            StatusCode::OK
+        );
+        evil["allow_commits"] = serde_json::json!(false);
+        assert_eq!(
+            patch("adm", serde_json::json!({"config": evil})).await,
+            StatusCode::OK
+        );
+    }
 }
 
 #[cfg(test)]

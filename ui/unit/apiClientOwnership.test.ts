@@ -6,6 +6,7 @@ import {randomUUID} from 'node:crypto';
 import ts from 'typescript';
 import { deferred } from './sourceHarness.ts';
 import { strictRequire } from './strictRequire.ts';
+import * as loadError from '../src/lib/loadError.ts';
 import { HistoryRefresh, HistoryDetail } from '../src/lib/stores/apiHistory.ts';
 import * as scriptRuntime from '../src/lib/api/scripts.ts';
 import * as graphqlVars from '../src/modules/api/graphqlVars.ts';
@@ -36,6 +37,7 @@ function setup(overrides: Record<string, unknown> = {}, runScript?: (...args: an
       ['/api/scripts', scriptRuntime],
       ['/importers', {isImportedEnvironment: (d: any) => d.format === 'postman-env'}],
       ['/api/types', {isSecretRef: (v: any) => !!v?.$secret}],
+      ['/loadError', loadError],
     ]),
   };
   runInNewContext(ts.transpileModule(readFileSync(new URL('../src/lib/stores/apiClient.svelte.ts',import.meta.url),'utf8'),

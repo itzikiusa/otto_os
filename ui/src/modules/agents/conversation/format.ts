@@ -4,6 +4,7 @@
 // the app-style "user bubble / assistant response" rhythm.
 import type { IconName } from '../../../lib/components/Icon.svelte';
 import type { Block, DiffLine, DiffResp, FileDiff, Hunk, ToolKind, Turn, TurnUsage, SystemNote } from '../../../lib/api/types';
+import { formatCount, formatUsd } from '../../../lib/metric-format.ts';
 
 /** "21m 17s" / "4.2s" / "850ms". */
 export function fmtDuration(ms: number | null | undefined): string {
@@ -19,16 +20,14 @@ export function fmtDuration(ms: number | null | undefined): string {
   return rm ? `${h}h ${rm}m` : `${h}h`;
 }
 
+/** Turn cost via the shared {@link formatUsd}; '' when unknown. */
 export function fmtCost(usd: number | null | undefined): string {
-  if (usd == null) return '';
-  return usd < 0.01 ? `$${usd.toFixed(4)}` : `$${usd.toFixed(2)}`;
+  return formatUsd(usd, { empty: '' });
 }
 
+/** Token count via the shared {@link formatCount}; '' when unknown. */
 export function fmtTokens(n: number | null | undefined): string {
-  if (n == null) return '';
-  if (n < 1000) return String(n);
-  if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}k`;
-  return `${(n / 1_000_000).toFixed(1)}M`;
+  return n == null ? '' : formatCount(n);
 }
 
 /** Clock time for a turn timestamp ("14:07"), or '' when unknown. */

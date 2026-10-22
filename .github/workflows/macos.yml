@@ -4,7 +4,7 @@ name: macOS
 # (ci.yml) never compiles the `cfg(target_os = "macos")` branches: the
 # Seatbelt sandbox (otto-sandbox, and the sessions + scheduled tasks it
 # confines), the objc2 Vision FFI and Darwin resource probes (otto-server,
-# otto-telemetry), ottod's launchd/Keychain wiring, otto-pty's Darwin PTY
+# otto-telemetry-collector), ottod's launchd/Keychain wiring, otto-pty's Darwin PTY
 # semantics, the Keychain store, otto-ssh's real-OpenSSH SFTP test, and the
 # standalone Tauri desktop workspace (apps/desktop/src-tauri — not part of the
 # root workspace).
@@ -36,7 +36,6 @@ on:
       - 'crates/otto-connections/**'
       - 'crates/otto-dbviewer/**'
       - 'crates/otto-design-assist/**'
-      - 'crates/otto-git/**'
       - 'crates/otto-improve/**'
       - 'crates/otto-insights/**'
       - 'crates/otto-k8s/**'
@@ -50,8 +49,7 @@ on:
       - 'crates/otto-sessions/**'
       - 'crates/otto-ssh/**'
       - 'crates/otto-swarm/**'
-      - 'crates/otto-telemetry/**'
-      - 'crates/otto-vault/**'
+      - 'crates/otto-telemetry-collector/**'
       - 'crates/otto-workflows/**'
       - 'crates/ottod/**'
       - 'Cargo.toml'
@@ -73,7 +71,6 @@ on:
       - 'crates/otto-connections/**'
       - 'crates/otto-dbviewer/**'
       - 'crates/otto-design-assist/**'
-      - 'crates/otto-git/**'
       - 'crates/otto-improve/**'
       - 'crates/otto-insights/**'
       - 'crates/otto-k8s/**'
@@ -87,8 +84,7 @@ on:
       - 'crates/otto-sessions/**'
       - 'crates/otto-ssh/**'
       - 'crates/otto-swarm/**'
-      - 'crates/otto-telemetry/**'
-      - 'crates/otto-vault/**'
+      - 'crates/otto-telemetry-collector/**'
       - 'crates/otto-workflows/**'
       - 'crates/ottod/**'
       - 'Cargo.toml'
@@ -176,7 +172,7 @@ jobs:
       - name: cargo clippy (macOS cfg)
         run: >-
           cargo clippy
-          -p otto-apiclient -p otto-automation -p otto-browser -p otto-keychain -p otto-pty -p otto-sandbox -p otto-server -p otto-sessions -p otto-ssh -p otto-telemetry -p ottod
+          -p otto-apiclient -p otto-automation -p otto-browser -p otto-keychain -p otto-pty -p otto-sandbox -p otto-server -p otto-sessions -p otto-ssh -p otto-telemetry-collector -p ottod
           --all-targets -- -D warnings
 
       # Unit tests plus each crate's integration binaries — except
@@ -186,7 +182,7 @@ jobs:
       - name: cargo nextest
         run: >-
           cargo nextest run
-          -p otto-apiclient -p otto-automation -p otto-browser -p otto-keychain -p otto-pty -p otto-sandbox -p otto-server -p otto-sessions -p otto-ssh -p otto-telemetry -p ottod
+          -p otto-apiclient -p otto-automation -p otto-browser -p otto-keychain -p otto-pty -p otto-sandbox -p otto-server -p otto-sessions -p otto-ssh -p otto-telemetry-collector -p ottod
           --profile ci --no-fail-fast
           -E 'not (package(otto-server) & binary(it))'
 

@@ -1,44 +1,9 @@
 //! Confluence Cloud REST API v1 client (storage-format XHTML ↔ Markdown helpers included).
 
-use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
-
-use base64::engine::general_purpose::STANDARD as B64;
-use base64::Engine;
 use otto_core::{Error, Result};
 
+use crate::atlassian::AtlassianTransport;
 use crate::jira::CommentRef;
-
-/// How long to wait for the TCP/TLS connection to a Confluence endpoint.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-/// Overall per-request deadline so a hung endpoint can't block the caller.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// Process-wide cache: composite key (site_base + auth_header) → shared client.
-static CLIENT_CACHE: OnceLock<Mutex<HashMap<String, reqwest::Client>>> = OnceLock::new();
-
-/// Return a cached `reqwest::Client`, building one on first use for this key.
-fn get_or_build_client(cache_key: &str) -> reqwest::Client {
-    let cache = CLIENT_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Ok(mut map) = cache.lock() {
-        if let Some(c) = map.get(cache_key) {
-            return c.clone();
-        }
-        let client = reqwest::Client::builder()
-            .connect_timeout(CONNECT_TIMEOUT)
-            .timeout(REQUEST_TIMEOUT)
-            .build()
-            .unwrap_or_default();
-        map.insert(cache_key.to_string(), client.clone());
-        return client;
-    }
-    reqwest::Client::builder()
-        .connect_timeout(CONNECT_TIMEOUT)
-        .timeout(REQUEST_TIMEOUT)
-        .build()
-        .unwrap_or_default()
-}
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Domain types
@@ -89,13 +54,10 @@ pub struct PageComment {
 
 /// A thin Confluence REST client scoped to one Atlassian site.
 pub struct ConfluenceClient {
-    /// Site root, e.g. `https://site.atlassian.net` (no trailing `/wiki`).
-    site_base: String,
-    auth_header: String,
-    http: reqwest::Client,
-    /// Set when the base URL fails the TLS-or-loopback gate; every request
-    /// then refuses to send the basic-auth header over the cleartext link.
-    transport_err: Option<String>,
+    /// The shared Atlassian transport; `t.base` is the site root, e.g.
+    /// `https://site.atlassian.net` (no trailing `/wiki`). It refuses every
+    /// request when the base would carry the Basic header in cleartext.
+    t: AtlassianTransport,
 }
 
 impl ConfluenceClient {
@@ -117,34 +79,21 @@ impl ConfluenceClient {
         let site_base = site_base.strip_suffix("/wiki").unwrap_or(site_base);
         let site_base = site_base.trim_end_matches('/').to_string();
 
-        let credentials = format!("{email}:{token}");
-        let auth_header = format!("Basic {}", B64.encode(credentials.as_bytes()));
-        // Reuse a cached client keyed by site + credentials to avoid rebuilding the
-        // connection pool on every request.
-        let http = get_or_build_client(&format!("{site_base}\x00{auth_header}"));
-        // Credentials ride every request as a Basic header — require https for
-        // the site (plain http stays allowed for loopback dev servers only).
-        let transport_err = otto_netguard::require_tls_or_loopback(&site_base).err();
         Self {
-            site_base,
-            auth_header,
-            http,
-            transport_err,
+            t: AtlassianTransport::new("confluence", site_base, email, token),
         }
     }
 
     /// Convenience: build the Confluence REST API root.
     fn api(&self, path: &str) -> String {
-        format!("{}/wiki/rest/api{}", self.site_base, path)
+        format!("{}/wiki/rest/api{}", self.t.base, path)
     }
 
     /// Fail before sending when the base URL would carry the auth header in
-    /// cleartext (see `transport_err`). Called at the top of every request.
+    /// cleartext. Kept at the top of each request for an early, clear error;
+    /// `t.http()` enforces the same rule where the request is built.
     fn ensure_tls(&self) -> Result<()> {
-        match &self.transport_err {
-            None => Ok(()),
-            Some(e) => Err(Error::Invalid(format!("confluence base url: {e}"))),
-        }
+        self.t.ensure_tls()
     }
 
     /// Resolve a v1 collection's `_links.next` against this site. Confluence
@@ -158,14 +107,14 @@ impl ConfluenceClient {
         }
         if next.starts_with("http://") || next.starts_with("https://") {
             let same_site = next
-                .strip_prefix(self.site_base.as_str())
+                .strip_prefix(self.t.base.as_str())
                 .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'));
             return same_site.then(|| next.to_string());
         }
         if next.starts_with("/wiki/") {
-            Some(format!("{}{next}", self.site_base))
+            Some(format!("{}{next}", self.t.base))
         } else if next.starts_with('/') {
-            Some(format!("{}/wiki{next}", self.site_base))
+            Some(format!("{}/wiki{next}", self.t.base))
         } else {
             None
         }
@@ -203,11 +152,11 @@ impl ConfluenceClient {
         for _ in 0..max_pages {
             let req = match &next {
                 // The next link already carries start/limit/expand.
-                Some(n) => self.http.get(n),
-                None => self.http.get(url).query(query),
+                Some(n) => self.t.http()?.get(n),
+                None => self.t.http()?.get(url).query(query),
             };
             let resp = req
-                .header("Authorization", &self.auth_header)
+                .header("Authorization", &self.t.auth_header)
                 .header("Accept", "application/json")
                 .send()
                 .await
@@ -255,9 +204,10 @@ impl ConfluenceClient {
         self.ensure_tls()?;
         let url = self.api(&format!("/content/{}", crate::jira::path_seg(id)));
         let resp = self
-            .http
+            .t
+            .http()?
             .get(&url)
-            .header("Authorization", &self.auth_header)
+            .header("Authorization", &self.t.auth_header)
             .header("Accept", "application/json")
             .query(&[("expand", "body.storage,version,space")])
             .send()
@@ -277,7 +227,7 @@ impl ConfluenceClient {
             .await
             .map_err(|e| Error::Upstream(format!("confluence get_page parse: {e}")))?;
 
-        parse_page(&self.site_base, &body)
+        parse_page(&self.t.base, &body)
     }
 
     /// Create a new page in `space_key` with the given Confluence storage-format body.
@@ -309,31 +259,22 @@ impl ConfluenceClient {
             payload["ancestors"] = serde_json::json!([{ "id": pid }]);
         }
 
-        let resp = self
-            .http
+        let req = self
+            .t
+            .http()?
             .post(&url)
-            .header("Authorization", &self.auth_header)
+            .header("Authorization", &self.t.auth_header)
             .header("Accept", "application/json")
             .header("Content-Type", "application/json")
-            .json(&payload)
-            .send()
-            .await
-            .map_err(|e| Error::Upstream(format!("confluence create_page request: {e}")))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(Error::Upstream(format!(
-                "confluence create_page failed ({status}): {body}"
-            )));
-        }
+            .json(&payload);
+        let resp = self.t.send(req, "confluence create_page").await?;
 
         let body: serde_json::Value = resp
             .json()
             .await
             .map_err(|e| Error::Upstream(format!("confluence create_page parse: {e}")))?;
 
-        let page = parse_page(&self.site_base, &body)?;
+        let page = parse_page(&self.t.base, &body)?;
         // Confluence defaults new pages to the NARROW fixed-width column, which
         // makes a table-heavy page (test-case matrices, coverage grids) close to
         // unreadable. Width is a content PROPERTY, invisible to the storage body,
@@ -347,15 +288,15 @@ impl ConfluenceClient {
     /// Mark a page full-width (`content-appearance-published`/`-draft`).
     /// Best-effort and silent: never fails the caller's publish.
     async fn set_full_width(&self, page_id: &str) {
+        let Ok(http) = self.t.http() else { return };
         for key in ["content-appearance-published", "content-appearance-draft"] {
             let url = self.api(&format!(
                 "/content/{}/property",
                 crate::jira::path_seg(page_id)
             ));
-            let _ = self
-                .http
+            let _ = http
                 .post(&url)
-                .header("Authorization", &self.auth_header)
+                .header("Authorization", &self.t.auth_header)
                 .header("Content-Type", "application/json")
                 .json(&serde_json::json!({ "key": key, "value": "full-width" }))
                 .send()
@@ -387,9 +328,10 @@ impl ConfluenceClient {
         });
 
         let resp = self
-            .http
+            .t
+            .http()?
             .put(&url)
-            .header("Authorization", &self.auth_header)
+            .header("Authorization", &self.t.auth_header)
             .header("Accept", "application/json")
             .header("Content-Type", "application/json")
             .json(&payload)
@@ -418,7 +360,7 @@ impl ConfluenceClient {
             .await
             .map_err(|e| Error::Upstream(format!("confluence update_page parse: {e}")))?;
 
-        parse_page(&self.site_base, &body)
+        parse_page(&self.t.base, &body)
     }
 
     /// Add a footer comment to a page.  Returns a [`CommentRef`] (reused from Jira).
@@ -437,9 +379,10 @@ impl ConfluenceClient {
         });
 
         let resp = self
-            .http
+            .t
+            .http()?
             .post(&url)
-            .header("Authorization", &self.auth_header)
+            .header("Authorization", &self.t.auth_header)
             .header("Accept", "application/json")
             .header("Content-Type", "application/json")
             .json(&payload)
@@ -550,9 +493,10 @@ impl ConfluenceClient {
         let results_vec: Vec<serde_json::Value> = if start == 0 {
             let limit_s = limit.to_string();
             let resp = self
-                .http
+                .t
+                .http()?
                 .get(&url)
-                .header("Authorization", &self.auth_header)
+                .header("Authorization", &self.t.auth_header)
                 .header("Accept", "application/json")
                 .query(&[
                     ("cql", cql),
@@ -638,9 +582,9 @@ impl ConfluenceClient {
                 if !links_base.is_empty() && !webui.is_empty() {
                     format!("{}{}", links_base.trim_end_matches('/'), webui)
                 } else if !webui.is_empty() {
-                    format!("{}/wiki{}", self.site_base, webui)
+                    format!("{}/wiki{}", self.t.base, webui)
                 } else {
-                    format!("{}/wiki/spaces/{}/pages/{}", self.site_base, sk, id)
+                    format!("{}/wiki/spaces/{}/pages/{}", self.t.base, sk, id)
                 }
             };
 
@@ -2235,19 +2179,19 @@ mod tests {
     #[test]
     fn test_new_strips_wiki_suffix() {
         let client = ConfluenceClient::new("https://site.atlassian.net/wiki", "e", "t");
-        assert_eq!(client.site_base, "https://site.atlassian.net");
+        assert_eq!(client.t.base, "https://site.atlassian.net");
     }
 
     #[test]
     fn test_new_strips_trailing_slash() {
         let client = ConfluenceClient::new("https://site.atlassian.net/", "e", "t");
-        assert_eq!(client.site_base, "https://site.atlassian.net");
+        assert_eq!(client.t.base, "https://site.atlassian.net");
     }
 
     #[test]
     fn test_new_no_change_needed() {
         let client = ConfluenceClient::new("https://site.atlassian.net", "e", "t");
-        assert_eq!(client.site_base, "https://site.atlassian.net");
+        assert_eq!(client.t.base, "https://site.atlassian.net");
     }
 
     #[test]

@@ -864,7 +864,7 @@
     {#if conv.error && !t}
       <EmptyState icon="warning" title="Couldn’t load the conversation" body={conv.error} actionLabel="Retry" actionIcon="refresh" actionKind="secondary" onaction={() => void conv.load()} />
     {:else if conv.loading && !t}
-      <div class="skeleton" aria-busy="true" aria-label="Loading the conversation">
+      <div class="skeleton" role="status" aria-busy="true" aria-label="Loading the conversation">
         <div class="sk sk-user chat-bubble-end"></div>
         <div class="sk sk-agent"></div>
         <div class="sk sk-line"></div>

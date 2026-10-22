@@ -9,10 +9,12 @@
   import Icon from '../../lib/components/Icon.svelte';
   import { router } from '../../lib/router.svelte';
   import { api, ApiError } from '../../lib/api/client';
+  import { listConfluenceSpaces, listIssueProjects, listIssueTypes } from '../../lib/api/issues';
+  import { issueAccounts } from '../../lib/stores/issueAccounts.svelte';
   import { product } from '../../lib/stores/product.svelte';
   import { toasts } from '../../lib/toast.svelte';
-  import type { IssueAccount, IssueProject, ListingPage } from '../../lib/api/types';
-  import { truncatedNote, unwrapListing } from '../../lib/listingPage';
+  import type { IssueAccount, IssueProject } from '../../lib/api/types';
+  import { truncatedNote } from '../../lib/listingPage';
   import type { ConfluenceSpace, ProductStoryVersion, ProductStoryDetail, ReviewedContent } from './types';
 
   interface Props {
@@ -145,7 +147,7 @@
   async function loadAccounts(): Promise<void> {
     accountsLoading = true;
     try {
-      const all = await api.get<IssueAccount[]>('/issue/accounts');
+      const all = await issueAccounts.load();
       accounts = mode === 'story' ? all : all.filter((a) => a.provider === 'jira');
       if (accounts.length > 0) {
         accountId = accounts[0].id;
@@ -177,9 +179,7 @@
     issueTypes = [];
     issueType = 'Story';
     try {
-      const next = unwrapListing(
-        await api.get<ListingPage<IssueProject>>(`/issue/projects?account_id=${account}&meta=1`),
-      );
+      const next = await listIssueProjects(account, { meta: true });
       if (!current()) return;
       projects = next.items;
       projectsTruncated = next.truncated;
@@ -201,7 +201,7 @@
     const current = () => sequence === issueTypesSequence && accountId === account && projectKey === project && mode === 'story';
     issueTypesLoading = true;
     try {
-      const next = await api.get<string[]>(`/issue/${account}/${project}/issue-types`);
+      const next = await listIssueTypes(account, project);
       if (!current()) return;
       issueTypes = next;
       issueType = issueTypes.includes('Story')
@@ -224,9 +224,7 @@
     spacesError = ''; spaces = []; spacesTruncated = false;
     spaceKey = '';
     try {
-      const next = unwrapListing(
-        await api.get<ListingPage<ConfluenceSpace>>(`/issue/confluence/spaces?account_id=${account}&meta=1`),
-      );
+      const next = await listConfluenceSpaces(account);
       if (!current()) return;
       spaces = next.items;
       spacesTruncated = next.truncated;

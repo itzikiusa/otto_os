@@ -29,3 +29,15 @@ export function loadErrorText(e: unknown): string {
   const s = String(e ?? '');
   return s && s !== 'undefined' ? s : 'Something went wrong.';
 }
+
+/**
+ * `loadErrorText` for surfaces that front a cloud CLI (kubectl, aws): the
+ * daemon maps the PROVIDER's own refusal ("cluster RBAC: pods is forbidden…",
+ * "AccessDenied …") to a 403, and that text — which verb, which resource — is
+ * the actionable part. Keep it on a 403; every other case reads as
+ * `loadErrorText` (no raw "Load failed", the 401 sign-in line…).
+ */
+export function providerErrorText(e: unknown): string {
+  if (isStatusError(e) && e.status === 403 && e.message) return e.message;
+  return loadErrorText(e);
+}

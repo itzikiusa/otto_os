@@ -3,6 +3,8 @@
 import type { IconName } from '../../lib/components/Icon.svelte';
 import type { WorkKind, WorkStatus, RiskLevel, WorkActor, ArtifactKind } from '../../lib/api/types';
 import { runStatus, type StatusInfo, type Tone } from '../../lib/status';
+import { rel } from '../../lib/stores/now.svelte';
+import { formatUsd } from '../../lib/metric-format.ts';
 
 export const KIND_LABEL: Record<WorkKind, string> = {
   session: 'Session',
@@ -170,22 +172,13 @@ export function riskIsElevated(r: RiskLevel): boolean {
   return r === 'high' || r === 'critical';
 }
 
+/** Cost cell: the shared {@link formatUsd} ("—" when unknown, not "$0.00"). */
 export function fmtCost(n: number | null | undefined): string {
-  const v = typeof n === 'number' ? n : 0;
-  return `$${v.toFixed(2)}`;
+  return formatUsd(n);
 }
 
-/** Compact relative time ("3m", "2h", "5d") from an ISO timestamp. */
+/** Compact relative time ("3m", "2h", "5d") from an ISO timestamp — the
+ *  shared reactive `rel()` in its compact style; "—" when unknown. */
 export function relTime(iso: string | null | undefined): string {
-  if (!iso) return '—';
-  const t = Date.parse(iso);
-  if (Number.isNaN(t)) return '—';
-  const secs = Math.max(0, Math.floor((Date.now() - t) / 1000));
-  if (secs < 60) return `${secs}s`;
-  const mins = Math.floor(secs / 60);
-  if (mins < 60) return `${mins}m`;
-  const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return `${hrs}h`;
-  const days = Math.floor(hrs / 24);
-  return `${days}d`;
+  return (iso && rel(iso, { compact: true })) || '—';
 }

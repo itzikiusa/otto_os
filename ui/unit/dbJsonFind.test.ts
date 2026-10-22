@@ -2,12 +2,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { loadSource } from './sourceHarness.ts';
 
-// ⌘F over the JSON / Vertical result views (src/modules/database/json-find.ts):
+// ⌘F over the JSON / Vertical result views (src/lib/jsonTree/json-find.ts):
 // the find model covers lines inside CLOSED branches, past "show more" slices
 // and inside clipped strings, and a reveal opens exactly the path to a line.
 
-const bson = loadSource(new URL('../src/modules/database/bson.ts', import.meta.url), {});
-const jf = loadSource(new URL('../src/modules/database/json-find.ts', import.meta.url), { './bson': bson });
+const bson = loadSource(new URL('../src/lib/jsonTree/bson.ts', import.meta.url), {});
+const jf = loadSource(new URL('../src/lib/jsonTree/json-find.ts', import.meta.url), { './bson': bson });
 
 type Top = [string, string, unknown];
 // The module runs in its own vm realm: compare its arrays structurally.

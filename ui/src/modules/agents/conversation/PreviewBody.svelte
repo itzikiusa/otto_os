@@ -198,7 +198,7 @@
       />
     </div>
   {:else if loading || (content == null && !imageUrl)}
-    <div class="pb-loading" aria-busy="true" aria-label="Loading the file">
+    <div class="pb-loading" role="status" aria-busy="true" aria-label="Loading the file">
       <div class="sk"></div>
       <div class="sk short"></div>
       <div class="sk"></div>

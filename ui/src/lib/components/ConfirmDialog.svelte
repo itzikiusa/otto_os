@@ -20,7 +20,10 @@
       <input dir="auto"
         class="input cf-input"
         aria-label={confirmer.message || confirmer.title}
+        aria-invalid={confirmer.inputError ? 'true' : undefined}
+        aria-describedby={confirmer.inputError ? 'cf-input-error' : undefined}
         bind:value={confirmer.inputValue}
+        oninput={() => (confirmer.inputError = '')}
         placeholder={confirmer.placeholder}
         data-autofocus
         spellcheck="false"
@@ -38,6 +41,9 @@
       {#if confirmer.browseFolder}
         <PathField bind:value={confirmer.inputValue}>{@render promptInput()}</PathField>
       {:else}{@render promptInput()}{/if}
+      {#if confirmer.inputError}
+        <p class="field-error" id="cf-input-error" role="alert">{confirmer.inputError}</p>
+      {/if}
     {/if}
     {#if confirmer.choices && confirmer.checkboxLabel}
       <label class="cf-remember">
@@ -90,6 +96,11 @@
   .cf-input {
     width: 100%;
     margin-top: 4px;
+  }
+  .field-error {
+    margin: 4px 0 0;
+    font-size: var(--fs-s);
+    color: var(--danger);
   }
   .cf-remember {
     display: inline-flex;

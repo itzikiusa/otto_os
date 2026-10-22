@@ -160,7 +160,7 @@ async fn which_async(name: &str) -> bool {
     matches!(
         tokio::time::timeout(
             Duration::from_secs(2),
-            Command::new("which").arg(name).output(),
+            Command::new("which").arg(name).kill_on_drop(true).output(),
         )
         .await,
         Ok(Ok(o)) if o.status.success()

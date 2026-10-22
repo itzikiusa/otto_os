@@ -188,6 +188,26 @@ impl AuthContext {
     pub fn is_scoped(&self) -> bool {
         self.scope.is_some()
     }
+
+    /// The credential of an automated run Otto performs on behalf of `user`
+    /// (a workflow step, a scheduled task): `user` is both the real and the
+    /// effective identity, unscoped, not an MCP token and not tied to an
+    /// agent session. `kind` names the automation (`"workflow"`, …) for the
+    /// caller's attribution header and is checked to be non-empty; it is not
+    /// stored on the context, so it can never widen what the credential may do.
+    pub fn automation(user: &User, kind: &str) -> Self {
+        debug_assert!(!kind.trim().is_empty(), "automation kind must be named");
+        Self {
+            real_user: user.clone(),
+            effective_user: user.clone(),
+            scope: None,
+            mcp_only: false,
+            mcp_scope: None,
+            mcp_internal: false,
+            mcp_session_id: None,
+            managed_session_id: None,
+        }
+    }
 }
 
 /// Validates a bearer token (HTTP header or the WS `otto-bearer` subprotocol) into an [`AuthContext`].

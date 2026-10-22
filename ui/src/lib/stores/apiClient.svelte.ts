@@ -8,32 +8,11 @@ import type { ApiAutomationRun, StartApiAutomationRunReq } from '../api/types';
 import { api, isAbortError, newHostConfirmHost } from '../api/client';
 import { confirmer } from '../confirm.svelte';
 import type {
-  ApiAuth,
-  ApiAutomation,
-  ApiBodyMode,
-  ApiClientStorage,
-  ApiCollection,
-  ApiEnvironment,
-  ApiHistoryEntry,
-  ApiHistorySummary,
-  ApiKeyVal,
-  ApiOverviewRequest,
-  ApiRequest,
-  ApiRequestItem,
-  ApiRequestExtras,
-  ApiResponse,
-  ApiRunResult,
-  ApiSecretable,
-  Connection,
-  ExecuteApiReq,
-  GrpcInvokeReq,
-  Id,
-  ImportCurlReq,
-  ParsedCurl,
-  UpsertApiAutomationReq,
-  UpsertApiCollectionReq,
-  UpsertApiEnvironmentReq,
-  UpsertApiRequestReq,
+  ApiAuth, ApiAutomation, ApiBodyMode, ApiClientWsSettings, ApiClientStorage, ApiCollection, ApiEnvironment,
+  ApiHistoryEntry, ApiHistorySummary, ApiKeyVal, ApiOverviewRequest, ApiRequest, ApiRequestItem,
+  ApiRequestExtras, ApiResponse, ApiRunResult, ApiSecretable, Connection, ExecuteApiReq, GrpcInvokeReq, Id,
+  ImportCurlReq, ParsedCurl, UpsertApiAutomationReq, UpsertApiCollectionReq, UpsertApiEnvironmentReq,
+  UpsertApiRequestReq
 } from '../api/types';
 import { isSecretRef } from '../api/types';
 import { forDuplicate, stripSecretsForStorage, unmaskHistory } from '../api/apiSecretShapes';
@@ -41,16 +20,12 @@ import { ws } from './workspace.svelte';
 import { announceModule } from '../lazyModule';
 import { HistoryRefresh, HistoryDetail } from './apiHistory';
 import { toasts } from '../toast.svelte';
+import { loadErrorText, providerErrorText } from '../loadError';
 import type { PreRequestReq, TestResult } from '../api/scripts';
 import { runScript } from '../api/scriptRunner';
 import { parseGraphqlVariables } from '../../modules/api/graphqlVars';
 import {
-  detectAndParse,
-  collectionToPostman,
-  isImportedEnvironment,
-  environmentUpsertFor,
-  type ImportedDoc,
-  type ImportedEnvironment,
+  detectAndParse, collectionToPostman, isImportedEnvironment, environmentUpsertFor, type ImportedDoc, type ImportedEnvironment,
 } from '../api/importers';
 
 /** Request transport: classic HTTP, server-sent events, WebSocket, or gRPC. */
@@ -331,9 +306,8 @@ function sanitizeDraft(raw: unknown): ApiDraft | null {
   };
 }
 
-function errMsg(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
-}
+/** A non-negative integer setting, else 0 ("no limit"). */
+const countOr0 = (v: unknown): number => (typeof v === 'number' && Number.isInteger(v) && v >= 0 ? v : 0);
 
 class ApiClientStore {
   // Raw: both lists are replaced wholesale (map/filter/spread), and a deep
@@ -375,6 +349,27 @@ class ApiClientStore {
   requestViewTick = $state(0);
   showRequestView(): void {
     this.requestViewTick++;
+  }
+
+  // Workspace `settings.api_client` — owned here, not by the shell's ws store
+  // (architecture-2-03). Writes are admin-gated atomic key patches.
+  private get wsSettings(): ApiClientWsSettings | undefined { return ws.current?.settings?.api_client; }
+  /** Opt-in for localhost/private-network targets (`allow_local`, off by default). */
+  get allowLocal(): boolean { return this.wsSettings?.allow_local === true; }
+  /** History retention (`history_max_rows` / `history_max_days`; the daemon
+   *  trims after every run). 0 = no limit: pruning deletes runs, so it is opt-in. */
+  get historyRetention(): { rows: number; days: number } {
+    return { rows: countOr0(this.wsSettings?.history_max_rows), days: countOr0(this.wsSettings?.history_max_days) };
+  }
+  /** Newest finished runs kept per automation (`automation_runs_keep`; 0 = all). */
+  get runsKeep(): number { return countOr0(this.wsSettings?.automation_runs_keep); }
+  setAllowLocal(allow: boolean): Promise<void> { return this.patchWsSettings({ allow_local: allow }); }
+  setHistoryRetention(rows: number, days: number): Promise<void> {
+    return this.patchWsSettings({ history_max_rows: rows, history_max_days: days });
+  }
+  setRunsKeep(keep: number): Promise<void> { return this.patchWsSettings({ automation_runs_keep: keep }); }
+  private async patchWsSettings(patch: ApiClientWsSettings): Promise<void> {
+    if (ws.currentId && ws.current) await ws.patchSettings(ws.currentId, { api_client: patch });
   }
 
   /** Load the current workspace's API client unless this document already
@@ -601,12 +596,6 @@ class ApiClientStore {
   get responseFromHistory(): TabResponse['history'] {
     return this.slot(this.draft?.tabId)?.history ?? null;
   }
-  /** Record a result for `tabId` (e.g. a gRPC invoke), whether or not that
-   *  tab is in front. Ignored once the tab is closed. */
-  setTabResult(tabId: string | null | undefined, resp: ApiResponse | null, error: string | null): void {
-    if (!tabId || !this.tabs.some((t) => t.tabId === tabId)) return;
-    this.patchSlot(tabId, { resp, error, history: null });
-  }
   /** Tab-chip indicator: `sending` while in flight, else the outcome of the
    *  tab's last send (`ok` 2xx/3xx, `fail` 4xx/5xx or an error), or null. */
   tabStatus(tabId: string | null | undefined): 'sending' | 'ok' | 'fail' | null {
@@ -731,8 +720,8 @@ class ApiClientStore {
       for (const t of this.tabs) if (t.requestId) void this.ensureRequest(t.requestId);
     } catch (e) {
       if (current()) {
-        this.requestsLoadError = errMsg(e);
-        this.envLoadError = errMsg(e);
+        this.requestsLoadError = loadErrorText(e);
+        this.envLoadError = loadErrorText(e);
       }
     } finally {
       if (current()) {
@@ -763,9 +752,9 @@ class ApiClientStore {
    *  the failed refresh is reported as the action result it followed. The
    *  list's next successful load clears its error. */
   private refreshFailed(what: string, list: 'requests' | 'environments', empty: boolean, e: unknown): void {
-    if (!empty) toasts.error(`Couldn’t refresh ${what}`, errMsg(e));
-    else if (list === 'environments') this.envLoadError = errMsg(e);
-    else this.requestsLoadError = errMsg(e);
+    if (!empty) toasts.error(`Couldn’t refresh ${what}`, loadErrorText(e));
+    else if (list === 'environments') this.envLoadError = loadErrorText(e);
+    else this.requestsLoadError = loadErrorText(e);
   }
 
   async loadCollections(): Promise<void> {
@@ -819,8 +808,8 @@ class ApiClientStore {
     fetch: (wid, signal) => api.get<ApiHistorySummary[]>(`/workspaces/${wid}/api-client/history/summaries`, signal),
     publish: (rows) => { this.history = rows; this.historyLoaded = true; this.historyLoadError = null; },
     error: (error) => {
-      if (this.history.length === 0) this.historyLoadError = errMsg(error);
-      else toasts.error('Couldn’t refresh history', errMsg(error));
+      if (this.history.length === 0) this.historyLoadError = loadErrorText(error);
+      else toasts.error('Couldn’t refresh history', loadErrorText(error));
     },
   });
 
@@ -829,7 +818,7 @@ class ApiClientStore {
     fetch: (id, signal) => api.get<ApiHistoryEntry>(`${this.base()}/history/${encodeURIComponent(id)}`, signal),
     publish: (entry) => this.loadHistoryIntoDraft(entry),
     pending: (id) => { this.historyLoadingId = id; },
-    error: (error) => toasts.error('Couldn’t load history request', errMsg(error)),
+    error: (error) => toasts.error('Couldn’t load history request', loadErrorText(error)),
   });
 
   async loadHistory(): Promise<void> {
@@ -899,7 +888,7 @@ class ApiClientStore {
       void this.historyRefresh.request();
       return true;
     } catch (e) {
-      toasts.error('Couldn’t apply retention', errMsg(e));
+      toasts.error('Couldn’t apply retention', loadErrorText(e));
       return false;
     }
   }
@@ -981,7 +970,7 @@ class ApiClientStore {
     try {
       this.cookies = await api.get<ApiCookie[]>(`${base}/cookies`);
     } catch (e) {
-      toasts.error('Couldn’t load cookies', errMsg(e));
+      toasts.error('Couldn’t load cookies', loadErrorText(e));
     }
   }
   async clearCookies(): Promise<void> {
@@ -992,7 +981,7 @@ class ApiClientStore {
       this.cookies = [];
       toasts.success('Cookies cleared');
     } catch (e) {
-      toasts.error('Couldn’t clear cookies', errMsg(e));
+      toasts.error('Couldn’t clear cookies', loadErrorText(e));
     }
   }
 
@@ -1013,7 +1002,7 @@ class ApiClientStore {
       void this.loadRequests();
       void this.loadEnvironments();
     } catch (e) {
-      toasts.error('Couldn’t secure the secrets', errMsg(e));
+      toasts.error('Couldn’t secure the secrets', loadErrorText(e));
     }
   }
 
@@ -1035,7 +1024,7 @@ class ApiClientStore {
       return saved;
     } catch (e) {
       if (!current()) return null;
-      toasts.error('Couldn’t save collection', errMsg(e));
+      toasts.error('Couldn’t save collection', loadErrorText(e));
       return null;
     }
   }
@@ -1050,7 +1039,7 @@ class ApiClientStore {
       const text = await file.text();
       if (current()) await this.importParsed(detectAndParse(text, file.name));
     } catch (error) {
-      if (current()) toasts.error('Couldn’t import the file', errMsg(error));
+      if (current()) toasts.error('Couldn’t import the file', loadErrorText(error));
     }
   }
 
@@ -1074,7 +1063,7 @@ class ApiClientStore {
     const folderCache = new Map<string, Id>();
     let failed = 0;
     let firstError = '';
-    const note = (e: unknown): void => { failed++; firstError ||= errMsg(e); };
+    const note = (e: unknown): void => { failed++; firstError ||= loadErrorText(e); };
     // Our own N creates echo back as N `api_client_changed` events: the one
     // reload below covers them (see noteClientChanged).
     this.bulkWrites++;
@@ -1147,7 +1136,7 @@ class ApiClientStore {
         remember,
       });
     } catch (e) {
-      toasts.error('Couldn’t postman sync', errMsg(e));
+      toasts.error('Couldn’t sync with Postman', loadErrorText(e));
       return false;
     }
     let cols = 0;
@@ -1161,7 +1150,7 @@ class ApiClientStore {
         if ((await this.importParsed(detectAndParse(JSON.stringify(doc), 'postman.json'), true)).created) cols++;
         else failed.push({ name, error: 'The collection couldn’t be saved.' });
       } catch (e) {
-        failed.push({ name, error: errMsg(e) });
+        failed.push({ name, error: loadErrorText(e) });
       }
     }
     for (const env of res.environments) {
@@ -1173,7 +1162,7 @@ class ApiClientStore {
         if (created) envs++;
         else failed.push({ name: env.name ?? 'environment', error: 'The environment couldn’t be saved.' });
       } catch (e) {
-        failed.push({ name: env.name ?? 'environment', error: errMsg(e) });
+        failed.push({ name: env.name ?? 'environment', error: loadErrorText(e) });
       }
     }
     toasts.success(
@@ -1246,7 +1235,7 @@ class ApiClientStore {
       toasts.success('Pushed to git', `${res.files} file(s) · ${res.commit.slice(0, 8)}`);
       return true;
     } catch (e) {
-      toasts.error('Couldn’t git push', errMsg(e));
+      toasts.error('Couldn’t git push', loadErrorText(e));
       return false;
     }
   }
@@ -1276,7 +1265,7 @@ class ApiClientStore {
       }
     } catch (e) {
       if (!current()) return;
-      toasts.error('Couldn’t delete collection', errMsg(e));
+      toasts.error('Couldn’t delete collection', loadErrorText(e));
     }
   }
 
@@ -1295,7 +1284,7 @@ class ApiClientStore {
       return saved;
     } catch (e) {
       if (!current()) return null;
-      toasts.error('Couldn’t save the request', errMsg(e));
+      toasts.error('Couldn’t save the request', loadErrorText(e));
       return null;
     }
   }
@@ -1370,7 +1359,7 @@ class ApiClientStore {
       if (this.draft.requestId === id) this.draft = { ...this.draft, requestId: null };
     } catch (e) {
       if (!current()) return;
-      toasts.error('Couldn’t delete request', errMsg(e));
+      toasts.error('Couldn’t delete request', loadErrorText(e));
     }
   }
 
@@ -1391,7 +1380,7 @@ class ApiClientStore {
       return saved;
     } catch (e) {
       if (!current()) return null;
-      toasts.error('Couldn’t save environment', errMsg(e));
+      toasts.error('Couldn’t save environment', loadErrorText(e));
       return null;
     }
   }
@@ -1406,7 +1395,7 @@ class ApiClientStore {
       this.environments = this.environments.filter((e) => e.id !== id);
     } catch (e) {
       if (!current()) return;
-      toasts.error('Couldn’t delete environment', errMsg(e));
+      toasts.error('Couldn’t delete environment', loadErrorText(e));
     }
   }
 
@@ -1421,7 +1410,7 @@ class ApiClientStore {
       this.environments = this.environments.map((e) => ({ ...e, is_active: e.id === id }));
     } catch (e) {
       if (!current()) return;
-      toasts.error('Couldn’t activate environment', errMsg(e));
+      toasts.error('Couldn’t activate environment', loadErrorText(e));
     }
   }
 
@@ -1502,7 +1491,7 @@ class ApiClientStore {
       this.patchSlot(tabId, {resp,error:null});
       return resp;
     } catch (e) {
-      if (current() && !isAbortError(e)) this.patchSlot(tabId, {resp:null,error:errMsg(e)});
+      if (current() && !isAbortError(e)) this.patchSlot(tabId, {resp:null,error:providerErrorText(e)});
       return null;
     } finally {
       if (this.slot(tabId)?.ctrl === controller) this.patchSlot(tabId, {sending:false,ctrl:null});
@@ -1607,13 +1596,13 @@ class ApiClientStore {
       if (ownsView()) this.patchSlot(tabId, { logs });
       return resp;
     } catch (e) {
-      if (ownsView()) this.patchSlot(tabId, { logs: [...logs, `[error] ${errMsg(e)}`] });
+      if (ownsView()) this.patchSlot(tabId, { logs: [...logs, `[error] ${providerErrorText(e)}`] });
       if (!signal.aborted && ownsExecution() && !isAbortError(e)) {
         // The tab's response pane shows the failure in place (with the
         // reason); a send failing on a background tab also toasts, since
         // nobody is looking at that pane.
-        this.patchSlot(tabId, { error: errMsg(e), resp: null });
-        if (this.draft.tabId !== tabId) toasts.error('Couldn’t request', errMsg(e));
+        this.patchSlot(tabId, { error: providerErrorText(e), resp: null });
+        if (this.draft.tabId !== tabId) toasts.error('Couldn’t send the request', providerErrorText(e));
       }
       return null;
     } finally {
@@ -1665,7 +1654,7 @@ class ApiClientStore {
       this.graphqlLoaded = {wid: this.wsId(), tabId: draft.tabId, url: draft.url, auth: draft.auth, environmentId, types};
       toasts.success('Schema introspected', `${types.length} types`);
     } catch (e) {
-      if (current()) toasts.error('Couldn’t introspect the schema', errMsg(e));
+      if (current()) toasts.error('Couldn’t introspect the schema', loadErrorText(e));
     } finally {
       if (this.graphqlGeneration === generation) this.graphqlIntrospecting = false;
     }
@@ -1702,7 +1691,7 @@ class ApiClientStore {
       return true;
     } catch (e) {
       if (!current()) return false;
-      toasts.error('Couldn’t import curl', errMsg(e));
+      toasts.error('Couldn’t import curl', loadErrorText(e));
       return false;
     }
   }
@@ -1789,7 +1778,7 @@ class ApiClientStore {
       this.history = [];
       await this.loadHistory();
     } catch (e) {
-      toasts.error('Couldn’t clear history', errMsg(e));
+      toasts.error('Couldn’t clear history', loadErrorText(e));
     }
   }
 
@@ -1808,7 +1797,7 @@ class ApiClientStore {
       this.automationsLoadedAt = { base, at: Date.now() };
     } catch (e) {
       if (!current()) return;
-      toasts.error('Couldn’t load automations', errMsg(e));
+      toasts.error('Couldn’t load automations', loadErrorText(e));
     }
   }
 
@@ -1830,7 +1819,7 @@ class ApiClientStore {
       return saved;
     } catch (e) {
       if (!current()) return null;
-      toasts.error('Couldn’t save automation', errMsg(e));
+      toasts.error('Couldn’t save automation', loadErrorText(e));
       return null;
     }
   }
@@ -1846,7 +1835,7 @@ class ApiClientStore {
       if (this.lastRun?.automation_id === id) this.lastRun = null;
     } catch (e) {
       if (!current()) return;
-      toasts.error('Couldn’t delete automation', errMsg(e));
+      toasts.error('Couldn’t delete automation', loadErrorText(e));
     }
   }
 
@@ -1903,7 +1892,7 @@ class ApiClientStore {
   async getAutomationRun(id: Id): Promise<ApiAutomationRun | null> {
     const base = this.base(); if (!base) return null;
     try {return await api.get<ApiAutomationRun>(`${base}/automation-runs/${id}`);}
-    catch (e) {toasts.error('Couldn’t load run',errMsg(e)); return null;}
+    catch (e) {toasts.error('Couldn’t load run',loadErrorText(e)); return null;}
   }
 
   async loadAutomationRuns(automationId?: Id, before?: Id): Promise<void> {
@@ -1914,12 +1903,12 @@ class ApiClientStore {
     try {
       const runs = await api.get<ApiAutomationRun[]>(`${base}/automation-runs?${query}`);
       if (base === this.base()) this.automationRuns = before ? [...this.automationRuns,...runs] : runs;
-    } catch (e) {toasts.error('Couldn’t load run history',errMsg(e));}
+    } catch (e) {toasts.error('Couldn’t load run history',loadErrorText(e));}
   }
   async cancelAutomationRun(id: Id): Promise<void> {
     const base = this.base(); if (!base) return;
     try {await api.post(`${base}/automation-runs/${id}/cancel`,{});}
-    catch (e) {toasts.error('Couldn’t cancel run',errMsg(e));}
+    catch (e) {toasts.error('Couldn’t cancel run',loadErrorText(e));}
   }
   async runAutomation(id: Id, options: StartApiAutomationRunReq = {}): Promise<ApiRunResult | null> {
     const base = this.base(); if (!base) return null;
@@ -1955,7 +1944,7 @@ class ApiClientStore {
         this.currentRun = run; this.lastRun = run.report;
       }
       return null;
-    } catch (e) {if (current()) toasts.error('Couldn’t run automation',errMsg(e)); return null;}
+    } catch (e) {if (current()) toasts.error('Couldn’t run automation',loadErrorText(e)); return null;}
     finally {if (current()) this.running = false;}
   }
 
@@ -2062,7 +2051,7 @@ class ApiClientStore {
           return r;
         })
         .catch((e: unknown) => {
-          toasts.error('Couldn’t open the saved request', errMsg(e));
+          toasts.error('Couldn’t open the saved request', loadErrorText(e));
           return null;
         })
         .finally(() => this.fullInflight.delete(id));

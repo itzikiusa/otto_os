@@ -49,7 +49,7 @@
   import { EditFlow, SET_EMPTY, SET_NULL, type RowPatch } from './EditFlow.svelte';
   import { qid, valueLiteral } from './edit-sql';
   import { ALT_BATCH, cellStr, copyWithToast, isComplex } from './results-format';
-  import { newExpansionState } from './expansion-plan';
+  import { newExpansionState } from '../../lib/jsonTree/expansion-plan';
   import { cellMatchesFilter } from './grid-format';
   import {
     colScanFor as cachedColScan,
@@ -208,7 +208,7 @@
   const emptyResultLabel = $derived(
     result?.message ??
       (result?.rows_affected != null
-        ? `${result.rows_affected} row(s) affected`
+        ? `${result.rows_affected.toLocaleString()} ${pluralNoun(result.rows_affected, 'row')} affected`
         : result
           ? 'No rows returned'
           : 'Statement OK'),
@@ -1382,7 +1382,7 @@
         onclick={() => (resultIdx = i)}
       >
         {#if rs.errored}<span class="rg-seg-dot" aria-hidden="true"></span>{/if}
-        Result {i + 1}
+        Result {i + 1}{#if rs.errored}<span class="sr-only">, failed</span>{/if}
       </button>
     {/each}
   </div>

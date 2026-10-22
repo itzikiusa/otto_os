@@ -299,6 +299,16 @@ the agent's Runs tab. A clean run ends the streak.
 
 ## 9. Troubleshooting
 
+- **403 "This agent runs as its owner; only the owner or a workspace admin can
+  change …"** — the agent runs with its creator's identity, so its owner-only
+  fields (`soul_md`, provider, model, cwd, browser, delivery, its memory and
+  context (`PUT …/memory`, `PUT …/context`), and a schedule's directive and
+  permission) can be changed only by the owner, a workspace Admin or root
+  (`PATCH /personal-agents/{id}`, `PUT /personal-agents/{id}/memory`,
+  `PUT /personal-agents/{id}/context`, `PATCH /personal-agents/schedules/{id}`).
+  An ownerless preset is adopted by the first caller who writes it. Any Editor can still rename it,
+  change its avatar, enable or pause it, change cadence, Run now, cancel a run
+  and manage rooms.
 - **"this agent session is read-only" in a run** — the run is Proactive or its
   schedule's permission set is Read-only. Change the schedule to Directed, or
   use Run now (Directed), to let it act.

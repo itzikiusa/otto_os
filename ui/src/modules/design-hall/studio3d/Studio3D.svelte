@@ -55,10 +55,10 @@
     type BrandSwatch,
     type EnvPresetId,
     type Scene3dDoc,
-  } from '../../product/design/scene3d';
-  import type { ColorResolver } from '../../product/design/scene3d/build';
+  } from '../../../lib/design/scene3d';
+  import type { ColorResolver } from '../../../lib/design/scene3d/build';
   import { colorTokens, resolveToken, tokenRef } from '../brand/tokens';
-  import type { OptimizeResult } from '../../product/design/scene3d/optimize';
+  import type { OptimizeResult } from '../../../lib/design/scene3d/optimize';
   import ArtifactStage from '../ArtifactStage.svelte';
   import StatesBar from './StatesBar.svelte';
   import GenerateModal from './GenerateModal.svelte';
@@ -316,7 +316,7 @@
       const root = vp.contentRoot();
       if (!root) throw new Error('The viewport isn’t ready yet');
       const glb = await exportObjectToGlb(root);
-      const { optimizeGlb } = await import('../../product/design/scene3d/optimize');
+      const { optimizeGlb } = await import('../../../lib/design/scene3d/optimize');
       const result = await optimizeGlb(await glb.arrayBuffer());
       opt = { phase: 'done', result };
     } catch (e) {

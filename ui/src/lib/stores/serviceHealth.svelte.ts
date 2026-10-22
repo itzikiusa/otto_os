@@ -10,8 +10,6 @@ const HIDE_AFTER_MS = 90_000;
 class ServiceHealth {
   /** True while a recent gateway error indicates the provider is unavailable. */
   down = $state(false);
-  /** Epoch ms of the most recent gateway error (for "last seen" display). */
-  lastDownAt: number | null = $state(null);
   /** User dismissed the current outage banner. */
   private dismissed = $state(false);
   private timer: ReturnType<typeof setTimeout> | null = null;
@@ -21,7 +19,6 @@ class ServiceHealth {
     if (status === 502 || status === 503 || status === 504) {
       if (!this.down) this.dismissed = false; // a fresh outage → show again
       this.down = true;
-      this.lastDownAt = Date.now();
       if (this.timer) clearTimeout(this.timer);
       this.timer = setTimeout(() => {
         this.down = false;

@@ -12,6 +12,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
+  import { escapeHtml } from '../../lib/html';
   import { copyText } from '../../lib/clipboard';
 
   type LogMode = 'all' | 'tail';
@@ -114,9 +115,7 @@
   // Severity markers: the level word on each line gets a tone (ERROR/WARN),
   // never the whole line (patterns.md → Logs). Escaped first, so log text can
   // never inject markup.
-  function esc(t: string): string {
-    return t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  }
+  const esc = escapeHtml;
   const highlighted = $derived(
     esc(visibleContent).replace(
       /(^|\s)(ERROR|WARN|WARNING)(?=\s)/gm,

@@ -17,7 +17,6 @@
     ARTIFACT_LABEL,
     riskColor,
     fmtCost,
-    relTime,
     workStatus,
     ownerLabel,
     shortId,
@@ -27,7 +26,7 @@
   import ApprovalActions from '../../lib/components/ApprovalActions.svelte';
   import ApprovalOutcome from '../../lib/components/ApprovalOutcome.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
-  import { now } from '../../lib/stores/now.svelte';
+  import { rel } from '../../lib/stores/now.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
@@ -314,11 +313,7 @@
   }
 
   /** "3m ago" that keeps counting (shared clock); "—" when unknown. */
-  function ago(iso: string | null | undefined): string {
-    void now();
-    const r = relTime(iso);
-    return r === '—' ? r : `${r} ago`;
-  }
+  const ago = (iso: string | null | undefined): string => (iso && rel(iso)) || '—';
   function localTime(iso: string | null | undefined): string | undefined {
     const t = iso ? Date.parse(iso) : NaN;
     return Number.isFinite(t) ? new Date(t).toLocaleString() : undefined;
