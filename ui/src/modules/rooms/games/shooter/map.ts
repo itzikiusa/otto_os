@@ -1,13 +1,21 @@
 /**
- * Storm Royale islands: a deterministic heightfield, named points of interest
+ * Storm Royale worlds: a deterministic heightfield, named points of interest
  * built from Kenney kits plus procedural multi-storey buildings (stairs, upper
  * floors, roof access), a lake (and a river to the sea on Palm Isle),
- * colliders for every solid prop, loot spots (indoors too) and chests. Pure
- * data (no three.js) so the host simulation, guests and tests all derive the
- * identical world from the map id.
+ * colliders for every solid prop, loot spots (indoors too) and chests. Dead
+ * City (`maps/deadcity.ts`) reuses the same architecture for a ruined
+ * downtown. Every map also exports mode anchors (team bases, flags, the
+ * zombies arena, a street nav graph; `maps/anchors.ts`). Pure data (no
+ * three.js) so the host simulation, guests and tests all derive the identical
+ * world from the map id.
  */
 import { clamp, fbm, hashString, lerp, makeNoise, Rng, smoothstep } from '../common/math.ts';
 import type { ShooterMapId } from './catalog.ts';
+import { buildAnchors, type ModeAnchors } from './maps/anchors.ts';
+import { deadCityHeight, populateDeadCity, DEAD_CITY_HINTS, DEAD_CITY_POIS } from './maps/deadcity.ts';
+
+export type { AnchorHints, ModeAnchors, Flag, Spawn, Barricade, BuyWall, NavGraph, ZombieArena } from './maps/anchors.ts';
+export { navNext, nearestNavNode } from './maps/anchors.ts';
 
 export const HALF = 240;
 export const GRID = 2;
@@ -31,6 +39,7 @@ export const PROP_SIZE: Record<string, [number, number, number]> = {
   'nat-rock_largeA': [0.78, 0.26, 1.02], 'nat-rock_largeC': [1.06, 0.32, 1.02], 'nat-rock_tallB': [0.76, 0.88, 0.77], 'nat-rock_tallE': [0.46, 0.44, 0.53],
   'nat-stone_tallB': [0.76, 0.88, 0.77], 'nat-log_large': [1.0, 0.42, 0.55],
   'car-sedan': [1.5, 1.3, 2.55], 'car-suv': [1.5, 1.3, 2.7], 'car-police': [1.5, 1.3, 3.1], 'car-delivery': [1.5, 1.65, 3.25],
+  'surv-fence': [0.5, 0.52, 0.04], 'surv-campfire-pit': [0.28, 0.11, 0.27], 'house-planter': [0.4, 0.18, 0.3], 'house-fence-low': [1.28, 0.17, 0.84],
 };
 /** Trees collide only with their trunk. */
 const TRUNK = new Set(['nat-tree_default', 'nat-tree_oak', 'nat-tree_detailed', 'nat-tree_pineTallA', 'nat-tree_pineRoundC', 'nat-tree_palmTall', 'nat-tree_palmBend', 'nat-tree_palmDetailedShort', 'surv-tree', 'surv-tree-tall', 'surv-tree-autumn', 'house-tree-large', 'nat-cactus_tall']);
@@ -41,19 +50,36 @@ export function harvestOf(key: string): number {
   return 0;
 }
 
-export interface Prop { key: string; x: number; y: number; z: number; yaw: number; scale: number }
+/** `burnt`: drawn charred (Dead City wrecks). */
+export interface Prop { key: string; x: number; y: number; z: number; yaw: number; scale: number; burnt?: true }
 export interface Box { minX: number; minY: number; minZ: number; maxX: number; maxY: number; maxZ: number }
 export interface Cylinder { x: number; z: number; r: number; y0: number; y1: number }
-export type PoiKind = 'town' | 'port' | 'farm' | 'camp' | 'hill' | 'factory' | 'forest' | 'lake';
+export type PoiKind = 'town' | 'port' | 'farm' | 'camp' | 'hill' | 'factory' | 'forest' | 'lake'
+  | 'tower' | 'hospital' | 'mall' | 'subway' | 'checkpoint' | 'park';
 export interface Poi { name: string; x: number; z: number; r: number; kind: PoiKind }
 /**
  * A piece of procedural architecture: also a collider in `boxes`. `mat` picks
  * the render palette (BLOCK_PALETTE) and what the pickaxe harvests from it.
  */
 export interface Block extends Box { mat: number }
-/** Render palette for blocks: plaster, floor boards, roof, stairs, metal sheet, concrete, brick trim, dock planks, barn red. */
-export const BLOCK_PALETTE = [0xe9e1cf, 0xa8774a, 0x7a4a3a, 0x9c6b42, 0x8d98a3, 0xb9b6ad, 0xb5574a, 0x8a6a48, 0xa8483a] as const;
-const BLOCK_HARVEST = [1, 0, 0, 0, 2, 1, 1, 0, 0];
+/**
+ * Render palette for blocks: plaster, floor boards, roof, stairs, metal sheet,
+ * concrete, brick trim, dock planks, barn red, then the Dead City set: rubble,
+ * charred, sandbags, asphalt slab, hospital tile, dark glass, rust, hazard
+ * paint, planter soil and olive drab.
+ */
+export const BLOCK_PALETTE = [
+  0xe9e1cf, 0xa8774a, 0x7a4a3a, 0x9c6b42, 0x8d98a3, 0xb9b6ad, 0xb5574a, 0x8a6a48, 0xa8483a,
+  0x8f8a82, 0x3b3532, 0xb3a27a, 0x505357, 0xdfe4e2, 0x34444f, 0x8a5a3c, 0xd2ae38, 0x5e6b3a, 0x59613f,
+] as const;
+/** Block material names (index = `Block.mat`), for the renderer's texture sets. */
+export const BLOCK_KINDS = [
+  'plaster', 'wood', 'roof', 'wood', 'metal', 'concrete', 'brick', 'wood', 'brick',
+  'rubble', 'charred', 'sandbag', 'asphalt', 'tile', 'glass', 'rust', 'hazard', 'planter', 'metal',
+] as const;
+const BLOCK_HARVEST = [1, 0, 0, 0, 2, 1, 1, 0, 0, 1, 0, 0, 1, 1, 2, 2, 2, 0, 2];
+/** Named block materials (indices into BLOCK_PALETTE). */
+export const MAT = { plaster: 0, floor: 1, roof: 2, stair: 3, metal: 4, concrete: 5, brick: 6, deck: 7, barn: 8, rubble: 9, charred: 10, sandbag: 11, asphalt: 12, tile: 13, glass: 14, rust: 15, hazard: 16, planter: 17, olive: 18 } as const;
 export interface Water { x: number; z: number; r: number; y: number }
 export interface Spot { x: number; z: number; y?: number }
 /**
@@ -62,8 +88,19 @@ export interface Spot { x: number; z: number; y?: number }
  * ground-floor height, storey count and the shared flight geometry.
  */
 export interface Climb { cx: number; cz: number; q: number; w: number; d: number; base: number; floors: number; z0: number; run: number; sw: number; roof: number; box: Box; doors: number }
+/**
+ * A ground-floor door or window of a walk-in building (Zombies boards these
+ * up): centre of the hole at its sill, outward facing (forward = sin/cos
+ * yaw, like fighters), width and height.
+ */
+export interface Opening { x: number; y: number; z: number; yaw: number; w: number; h: number; door: boolean }
+/** A fire the renderer keeps burning (wrecks, barrels, ruins); `s` scales it. */
+export interface Fire { x: number; y: number; z: number; s: number }
+/** A paved street segment (render + minimap): centre line from (x0, z0) to (x1, z1), full width `w`. */
+export interface Road { x0: number; z0: number; x1: number; z1: number; w: number }
+export type ShooterTheme = 'isle' | 'mesa' | 'city';
 export interface ShooterMap {
-  id: ShooterMapId; theme: 'isle' | 'mesa';
+  id: ShooterMapId; theme: ShooterTheme;
   heights: Float32Array; size: number;
   props: Prop[]; boxes: Box[]; cylinders: Cylinder[]; pois: Poi[];
   /** Harvest material per box (0 wood, 1 brick, 2 metal, -1 nothing), aligned with `boxes`. */
@@ -74,9 +111,12 @@ export interface ShooterMap {
   lootSpots: Spot[]; chests: { x: number; z: number; yaw: number; y?: number }[];
   /** Walk-in buildings bots can climb, and the fixed launch pads (set pieces). */
   climbs: Climb[]; pads: { x: number; z: number; y: number }[];
+  /** Ground-floor doors and windows, fires, streets (Dead City) and the anchors every mode spawns from. */
+  openings: Opening[]; fires: Fire[]; roads: Road[];
+  anchors: ModeAnchors;
 }
 
-const POIS: Record<ShooterMapId, Poi[]> = {
+const POIS: Record<Exclude<ShooterMapId, 'deadcity'>, Poi[]> = {
   isle: [
     { name: 'Harbor Town', x: -110, z: 80, r: 48, kind: 'town' },
     { name: 'Rustworks', x: 115, z: -115, r: 42, kind: 'factory' },
@@ -117,9 +157,16 @@ function polyDistance(path: [number, number][], x: number, z: number): number {
 }
 
 export function mapFor(id: string): ShooterMap {
-  const mapId: ShooterMapId = id === 'mesa' ? 'mesa' : 'isle';
+  const mapId: ShooterMapId = id === 'mesa' ? 'mesa' : id === 'deadcity' ? 'deadcity' : 'isle';
   const hit = cache.get(mapId);
   if (hit) return hit;
+  if (mapId === 'deadcity') {
+    const map = emptyMap(mapId, 'city', deadCityHeight, DEAD_CITY_POIS);
+    populateDeadCity(map);
+    map.anchors = buildAnchors(map, DEAD_CITY_HINTS);
+    cache.set(mapId, map);
+    return map;
+  }
   const theme = mapId;
   const noise = makeNoise(hashString(mapId));
   const pois = POIS[mapId];
@@ -154,18 +201,26 @@ export function mapFor(id: string): ShooterMap {
     }
     return h;
   };
+  const lake = pois.find(p => p.kind === 'lake')!;
+  const map = emptyMap(mapId, theme, raw, pois);
+  if (!isle) map.waters.push({ x: lake.x, z: lake.z, r: lake.r * 1.2, y: MESA_LAKE_SURFACE });
+  if (isle) map.river = RIVER;
+  populate(map);
+  map.anchors = buildAnchors(map);
+  cache.set(mapId, map);
+  return map;
+}
+
+/** A map with its heightfield sampled from `raw` and nothing placed yet. */
+function emptyMap(id: ShooterMapId, theme: ShooterTheme, raw: (x: number, z: number) => number, pois: Poi[]): ShooterMap {
   const size = HALF * 2 / GRID + 1;
   const heights = new Float32Array(size * size);
   for (let iz = 0; iz < size; iz++) for (let ix = 0; ix < size; ix++) heights[iz * size + ix] = raw(-HALF + ix * GRID, -HALF + iz * GRID);
-  const lake = pois.find(p => p.kind === 'lake')!;
-  const map: ShooterMap = {
-    id: mapId, theme, heights, size, props: [], boxes: [], cylinders: [], pois, boxMats: [], trunkProps: [], blocks: [],
-    waters: isle ? [] : [{ x: lake.x, z: lake.z, r: lake.r * 1.2, y: MESA_LAKE_SURFACE }], river: isle ? RIVER : [],
-    lootSpots: [], chests: [], climbs: [], pads: [],
+  return {
+    id, theme, heights, size, props: [], boxes: [], cylinders: [], pois, boxMats: [], trunkProps: [], blocks: [],
+    waters: [], river: [], lootSpots: [], chests: [], climbs: [], pads: [], openings: [], fires: [], roads: [],
+    anchors: { spawns: [], teamSpawns: [[], []], flags: [], zombies: { cx: 0, cz: 0, r: 0, start: [], spawns: [], barricades: [], buyWalls: [], extraction: { x: 0, y: 0, z: 0, r: 0 } }, nav: { nodes: [], links: [] } },
   };
-  populate(map);
-  cache.set(mapId, map);
-  return map;
 }
 
 /** Bilinear terrain height. */
@@ -198,7 +253,7 @@ const RUN = 0.45;
  * Builds axis-aligned architecture in a local frame (front = +z) turned by a
  * quarter `q` and placed at (cx, cz). Every rectangle becomes a Block.
  */
-class Frame {
+export class Frame {
   private map: ShooterMap; private cx: number; private cz: number; private q: number;
   constructor(map: ShooterMap, cx: number, cz: number, q: number) { this.map = map; this.cx = cx; this.cz = cz; this.q = q; }
   world(lx: number, lz: number): [number, number] {
@@ -248,20 +303,33 @@ class Frame {
   }
 }
 
-interface BuildingStyle { wall: number; floor: number; roof: number; stair: number; trim: number }
-const STYLES: Record<string, BuildingStyle> = {
+export interface BuildingStyle { wall: number; floor: number; roof: number; stair: number; trim: number }
+export const STYLES: Record<string, BuildingStyle> = {
   house: { wall: 0, floor: 1, roof: 2, stair: 3, trim: 6 },
   brick: { wall: 6, floor: 1, roof: 5, stair: 3, trim: 5 },
   barn: { wall: 8, floor: 1, roof: 2, stair: 3, trim: 7 },
   metal: { wall: 4, floor: 5, roof: 4, stair: 4, trim: 5 },
+  // Dead City: concrete office blocks, the tiled hospital, the mall's glass and steel.
+  office: { wall: 5, floor: 12, roof: 5, stair: 5, trim: 9 },
+  tenement: { wall: 6, floor: 1, roof: 10, stair: 3, trim: 9 },
+  hospital: { wall: 13, floor: 5, roof: 5, stair: 5, trim: 5 },
+  mall: { wall: 14, floor: 5, roof: 4, stair: 4, trim: 5 },
 };
+/**
+ * Ruined walk-ins (Dead City): random upper-storey windows blown out into
+ * walk-through breaches (plus the `breaches` asked for, `[storey, side]` with
+ * side 0 front, 1 back, 2 left, 3 right), a broken parapet with jagged stubs,
+ * and now and then a fire on an upper floor.
+ */
+export interface BuildingOptions { ruin?: boolean; breaches?: [number, number][] }
+const _wrapYaw = (a: number): number => Math.atan2(Math.sin(a), Math.cos(a));
 
 /**
  * A walk-in building: foundation, door front and back, windows on every
  * side, switchback stairs to each upper floor and onto a parapet roof. Adds
  * a loot spot on every floor; returns the roof height.
  */
-function building(map: ShooterMap, cx: number, cz: number, q: number, w: number, d: number, floors: number, style: BuildingStyle, rng: Rng): number {
+export function building(map: ShooterMap, cx: number, cz: number, q: number, w: number, d: number, floors: number, style: BuildingStyle, rng: Rng, opts: BuildingOptions = {}): number {
   const f = new Frame(map, cx, cz, q);
   let lo = Infinity, hi = -Infinity;
   for (const [lx, lz] of [[-w / 2, -d / 2], [w / 2, -d / 2], [-w / 2, d / 2], [w / 2, d / 2], [0, 0]]) {
@@ -298,20 +366,56 @@ function building(map: ShooterMap, cx: number, cz: number, q: number, w: number,
       f.block(holeX0, z0 + run, holeX1, d / 2, y - SLAB, y, mat);
     }
     if (roof) {
-      // Parapet: waist-high cover around the roof.
-      f.wallX(-w / 2, w / 2, d / 2 - WT, d / 2, y, y + 1.1, style.trim);
-      f.wallX(-w / 2, w / 2, -d / 2, -d / 2 + WT, y, y + 1.1, style.trim);
-      f.wallZ(-d / 2 + WT, d / 2 - WT, -w / 2, -w / 2 + WT, y, y + 1.1, style.trim);
-      f.wallZ(-d / 2 + WT, d / 2 - WT, w / 2 - WT, w / 2, y, y + 1.1, style.trim);
+      // Parapet: waist-high cover around the roof (ruins: broken runs and jagged column stubs).
+      if (opts.ruin) {
+        const cut = (a: number, b: number): [number, number] => { const k = rng.next(); return k < 0.3 ? [a, lerp(a, b, rng.range(0.25, 0.6))] : k < 0.55 ? [lerp(a, b, rng.range(0.35, 0.7)), b] : [a, b]; };
+        let [a, b] = cut(-w / 2, w / 2); f.wallX(a, b, d / 2 - WT, d / 2, y, y + 1.1, style.trim);
+        [a, b] = cut(-w / 2, w / 2); f.wallX(a, b, -d / 2, -d / 2 + WT, y, y + 1.1, style.trim);
+        [a, b] = cut(-d / 2 + WT, d / 2 - WT); f.wallZ(a, b, -w / 2, -w / 2 + WT, y, y + 1.1, style.trim);
+        [a, b] = cut(-d / 2 + WT, d / 2 - WT); f.wallZ(a, b, w / 2 - WT, w / 2, y, y + 1.1, style.trim);
+        for (const [sx, sz] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) {
+          if (rng.chance(0.35)) continue;
+          f.block(sx * w / 2 - (sx > 0 ? 0.7 : 0), sz * d / 2 - (sz > 0 ? 0.7 : 0), sx * w / 2 + (sx < 0 ? 0.7 : 0), sz * d / 2 + (sz < 0 ? 0.7 : 0), y, y + rng.range(1.4, 4.2), style.trim);
+        }
+        if (rng.chance(0.3)) {
+          const [fx, fz] = f.world(rng.range(-w / 4, w / 4), rng.range(0, d / 4));
+          map.fires.push({ x: fx, y, z: fz, s: rng.range(0.8, 1.3) });
+        }
+      } else {
+        f.wallX(-w / 2, w / 2, d / 2 - WT, d / 2, y, y + 1.1, style.trim);
+        f.wallX(-w / 2, w / 2, -d / 2, -d / 2 + WT, y, y + 1.1, style.trim);
+        f.wallZ(-d / 2 + WT, d / 2 - WT, -w / 2, -w / 2 + WT, y, y + 1.1, style.trim);
+        f.wallZ(-d / 2 + WT, d / 2 - WT, w / 2 - WT, w / 2, y, y + 1.1, style.trim);
+      }
       break;
     }
     const top = y + STOREY - SLAB;
     const win = (c: number): [number, number, number, number] => [c, 1.6, 1.0, 2.3];
     const door = (c: number): [number, number, number, number] => [c, 1.7, 0, 2.5];
-    f.wallX(-w / 2, w / 2, d / 2 - WT, d / 2, y, top, style.wall, s === 0 ? [door(w * 0.15), win(-w * 0.3)] : [win(-w * 0.25), win(w * 0.25)]);
-    f.wallX(-w / 2, w / 2, -d / 2, -d / 2 + WT, y, top, style.wall, s === 0 ? [door(-w * 0.15), win(w * 0.3)] : [win(0)]);
-    f.wallZ(-d / 2 + WT, d / 2 - WT, -w / 2, -w / 2 + WT, y, top, style.wall, [win(d * 0.2)]);
-    f.wallZ(-d / 2 + WT, d / 2 - WT, w / 2 - WT, w / 2, y, top, style.wall, [win(-d * 0.2)]);
+    // A blown-out window: floor to near the ceiling, wide enough to walk through.
+    const breach = (c: number): [number, number, number, number] => [c, 3.0, 0, 2.9];
+    const holes: [number, number, number, number][][] = s === 0
+      ? [[door(w * 0.15), win(-w * 0.3)], [door(-w * 0.15), win(w * 0.3)], [win(d * 0.2)], [win(-d * 0.2)]]
+      : [[win(-w * 0.25), win(w * 0.25)], [win(0)], [win(d * 0.2)], [win(-d * 0.2)]];
+    if (s > 0) for (let side = 0; side < 4; side++) {
+      const asked = opts.breaches?.some(([fl, sd]) => fl === s && sd === side) ?? false;
+      if (asked || (opts.ruin && rng.chance(0.3))) holes[side] = holes[side].map(h => breach(h[0]));
+    }
+    if (s === 0) {
+      // Ground-floor doors and windows, outward-facing, for the zombies' boards.
+      const sides: [number, number][] = [[0, 0], [Math.PI, 0], [-Math.PI / 2, 0], [Math.PI / 2, 0]];
+      holes.forEach((list, side) => {
+        for (const [c, hw, b, t] of list) {
+          const [lx, lz] = side === 0 ? [c, d / 2] : side === 1 ? [c, -d / 2] : side === 2 ? [-w / 2, c] : [w / 2, c];
+          const [x, z] = f.world(lx, lz);
+          map.openings.push({ x, y: y + b, z, yaw: _wrapYaw(sides[side][0] + q * Math.PI / 2), w: hw, h: t - b, door: b === 0 });
+        }
+      });
+    }
+    f.wallX(-w / 2, w / 2, d / 2 - WT, d / 2, y, top, style.wall, holes[0]);
+    f.wallX(-w / 2, w / 2, -d / 2, -d / 2 + WT, y, top, style.wall, holes[1]);
+    f.wallZ(-d / 2 + WT, d / 2 - WT, -w / 2, -w / 2 + WT, y, top, style.wall, holes[2]);
+    f.wallZ(-d / 2 + WT, d / 2 - WT, w / 2 - WT, w / 2, y, top, style.wall, holes[3]);
     // This storey's flight (left on even storeys, right on odd), back to front.
     const sx0 = s % 2 === 0 ? -w / 2 + WT : w / 2 - WT - sw;
     f.stairs(sx0, sx0 + sw, z0, 1, y, 10, RISE, style.stair);
@@ -410,7 +514,7 @@ export function climbStep(c: Climb, x: number, y: number, z: number, goalX: numb
 }
 
 /** Big open hall: wide doors, high windows, a catwalk along the back reached by stairs. */
-function factory(map: ShooterMap, cx: number, cz: number, q: number, w: number, d: number, style: BuildingStyle): number {
+export function factory(map: ShooterMap, cx: number, cz: number, q: number, w: number, d: number, style: BuildingStyle): number {
   const f = new Frame(map, cx, cz, q);
   let lo = Infinity, hi = -Infinity;
   for (const [lx, lz] of [[-w / 2, -d / 2], [w / 2, -d / 2], [-w / 2, d / 2], [w / 2, d / 2]]) {
@@ -422,6 +526,10 @@ function factory(map: ShooterMap, cx: number, cz: number, q: number, w: number, 
   f.block(-w / 2, -d / 2, w / 2, d / 2, lo - 1, y, style.trim);
   const big = (c: number): [number, number, number, number] => [c, 5, 0, 5.2];
   const high = (c: number): [number, number, number, number] => [c, 3, 5.6, 7.6];
+  for (const [lx, lz, yaw, hw] of [[-w * 0.22, d / 2, 0, 5], [w * 0.22, d / 2, 0, 5], [0, -d / 2, Math.PI, 5], [-w / 2, d * 0.15, -Math.PI / 2, 3.4]]) {
+    const [x, z] = f.world(lx, lz);
+    map.openings.push({ x, y, z, yaw: _wrapYaw(yaw + q * Math.PI / 2), w: hw, h: hw === 5 ? 5.2 : 3.4, door: true });
+  }
   f.wallX(-w / 2, w / 2, d / 2 - WT, d / 2, y, y + H, style.wall, [big(-w * 0.22), big(w * 0.22)]);
   f.wallX(-w / 2, w / 2, -d / 2, -d / 2 + WT, y, y + H, style.wall, [big(0), high(-w * 0.32), high(w * 0.32)]);
   f.wallZ(-d / 2 + WT, d / 2 - WT, -w / 2, -w / 2 + WT, y, y + H, style.wall, [[d * 0.15, 3.4, 0, 3.4], high(-d * 0.25)]);
@@ -470,10 +578,15 @@ function bridge(map: ShooterMap, x: number, zc: number, half: number): void {
   }
 }
 
-function populate(map: ShooterMap): void {
-  const rng = new Rng(hashString(map.id) ^ 0xa11ce);
+/**
+ * Prop placement for a map: `free` checks the ground is dry, inside the play
+ * area and clear of colliders; `place` adds a kit prop with its collider (a
+ * box squared to the nearest quarter turn, or a trunk for trees). `y` places
+ * the prop on a floor (indoors), skipping the clearance check against it;
+ * `burnt` draws it charred.
+ */
+export function makePlacer(map: ShooterMap) {
   const ground = (x: number, z: number) => terrainHeight(map, x, z);
-  const isle = map.theme === 'isle';
   const wet = (x: number, z: number) => ground(x, z) < waterLevel(map, x, z) + 0.6;
   const free = (x: number, z: number, r: number) => {
     if (Math.abs(x) > HALF - 8 || Math.abs(z) > HALF - 8) return false;
@@ -482,8 +595,7 @@ function populate(map: ShooterMap): void {
     for (const c of map.cylinders) if (Math.hypot(x - c.x, z - c.z) < c.r + r) return false;
     return true;
   };
-  /** `y` places the prop on a floor (indoors), skipping the clearance check against that floor. */
-  const place = (key: string, x: number, z: number, yaw: number, scale: number, solid = true, y?: number): boolean => {
+  const place = (key: string, x: number, z: number, yaw: number, scale: number, solid = true, y?: number, burnt = false): boolean => {
     const gy = y ?? ground(x, z);
     const size = PROP_SIZE[key];
     if (solid && size) {
@@ -499,9 +611,18 @@ function populate(map: ShooterMap): void {
       map.cylinders.push({ x, z, r: 0.45 * scale / 6, y0: gy - 1, y1: gy + 7 * scale / 6 });
       map.trunkProps.push(map.props.length);
     }
-    map.props.push({ key, x, y: gy, z, yaw, scale });
+    const prop: Prop = { key, x, y: gy, z, yaw, scale };
+    if (burnt) prop.burnt = true;
+    map.props.push(prop);
     return true;
   };
+  return { ground, wet, free, place };
+}
+
+function populate(map: ShooterMap): void {
+  const rng = new Rng(hashString(map.id) ^ 0xa11ce);
+  const isle = map.theme === 'isle';
+  const { ground, wet, free, place } = makePlacer(map);
   const lootNear = (x: number, z: number) => map.lootSpots.push({ x, z });
   const houses = ['house-building-type-a', 'house-building-type-c', 'house-building-type-d', 'house-building-type-f', 'house-building-type-h', 'house-building-type-k', 'house-building-type-m', 'house-building-type-o', 'house-building-type-r', 'house-building-type-t'];
   const cars = ['car-sedan', 'car-suv', 'car-police', 'car-delivery'];

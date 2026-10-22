@@ -15,7 +15,7 @@ multiplayer, not a competitive anti-cheat service.
   `{"name":"Alex","config":{"game":"shooter","map":"isle"}}`.
   Returns `GameRoomCredential` (TypeScript: `ui/src/lib/api/game-room-types.ts`):
   `room_id`, `member_id`, `role:"host"`, `token`, `config`, `invite`, `invite_url`.
-  Names trim to 1–40 characters, no controls. Shooter maps: `isle`/`mesa`;
+  Names trim to 1–40 characters, no controls. Shooter maps: `isle`/`mesa`/`deadcity`;
   kart maps: `meadow`/`downtown`/`canyon`/`frost`/`lagoon`/`volcano`/`skyway`. Mismatched maps return 400.
 - `POST /api/v1/game-room-join` is public, authorized only by its body:
   `{"room_id":"…","invite":"…","name":"Sam"}`. Returns the same credential

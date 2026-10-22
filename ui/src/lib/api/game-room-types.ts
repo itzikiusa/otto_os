@@ -1,6 +1,6 @@
 /** Capability-isolated game relay. See docs/contracts/game-rooms.md. */
 export type GameRoomKind = 'shooter' | 'kart';
-export type GameRoomMap = 'isle' | 'mesa' | 'meadow' | 'downtown' | 'canyon' | 'frost' | 'lagoon' | 'volcano' | 'skyway';
+export type GameRoomMap = 'isle' | 'mesa' | 'deadcity' | 'meadow' | 'downtown' | 'canyon' | 'frost' | 'lagoon' | 'volcano' | 'skyway';
 export type GameRoomRole = 'host' | 'guest';
 export interface GameRoomConfig { game: GameRoomKind; map: GameRoomMap }
 export interface GameRoomCredential {
