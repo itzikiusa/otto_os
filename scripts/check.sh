@@ -211,6 +211,28 @@ if [ -n "$RUST_CHANGED" ]; then
   run python3 scripts/loc-ratchet.py
 fi
 
+# Per-key async lock registries go through otto_core::keyed_lock::KeyedLocks
+# (pruned, poison-tolerant). A hand-rolled `HashMap<K, Arc|Weak<Mutex<()>>>`
+# drifted into three pruning rules and two poison policies (architecture-3-04).
+# The allowlist is the files not migrated yet: shrink it, never grow it.
+if [ -n "$RUST_CHANGED" ]; then
+  step "keyed-lock registry guard"
+  KEYED_LOCK_ALLOW='^crates/(otto-core/src/keyed_lock\.rs|otto-assistant/src/assistant/tasks\.rs|otto-automation/src/goal_loop\.rs|otto-aws/src/(accounts|regions)\.rs|otto-brokers/src/service\.rs|otto-browser/src/lib\.rs|otto-channels/src/(bridge|telegram)\.rs|otto-dbviewer/src/(complete/mod|service)\.rs|otto-design/src/service\.rs|otto-k8s/src/(eks_token|monitor/cache)\.rs|otto-server/src/(agent_session_lifecycle|api_secrets|eval_score|proof|routes/backup_git|routes/mission|routes/personal_agents)\.rs|otto-sessions/src/(manager|mcp)\.rs|otto-state/src/workflow_progress\.rs|otto-vault/src/engine\.rs)$'
+  KEYED_LOCK_HITS=$(grep -rlE --include='*.rs' '(HashMap|BTreeMap|DashMap)<[^;]*(Arc|Weak)<(tokio::sync::)?(Mutex|AsyncMutex)<\(\)>>' crates | sort | grep -vE "$KEYED_LOCK_ALLOW" || true)
+  if [ -n "$KEYED_LOCK_HITS" ]; then
+    echo "new hand-rolled per-key lock registry — use otto_core::keyed_lock::KeyedLocks:" >&2
+    printf '  %s\n' $KEYED_LOCK_HITS >&2
+    [ "$DRY" = 1 ] || exit 1
+  fi
+fi
+
+# Intra-doc links that point at renamed or deleted items (maintainability-3-11)
+# — only in --all (a full doc build is not cheap).
+if [ "$ALL" = 1 ]; then
+  step "rustdoc: broken intra-doc links"
+  run env RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links" "$CARGO" doc --workspace --no-deps
+fi
+
 # ── UI ────────────────────────────────────────────────────────────────────────
 if [ "$UI" = 1 ] && [ "$UI_CHANGED" = 1 ]; then
   step "ui: npm run check + test:unit + build + bundle budget"

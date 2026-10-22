@@ -169,6 +169,12 @@
 //                     `aria-selected`/`aria-checked` or `role="tab|radio"` —
 //                     VoiceOver reads identical buttons with no state. Plain
 //                     action groups (no `active`) are fine.
+//   radio-key         a `role="radio"` button with no arrow-key model: its tag
+//                     has no `radioKey` / `onkeydown`, and the enclosing
+//                     `role="radiogroup"` has no `onkeydown` either. The APG
+//                     radio contract is one Tab stop and arrows that move the
+//                     selection → `tabindex={checked ? 0 : -1}` plus
+//                     `onkeydown={radioKey}` (lib/radioKey.ts).
 //
 // Two more ratcheted rules scan SCRIPT code (.ts/.js files and the non-style
 // part of .svelte files, comments blanked) — perf patterns (GAPS §0 G):
@@ -372,6 +378,7 @@ const RULES = {
   'local-tablist': 'local role="tablist" — use <Tabs> (lib/components/Tabs.svelte; components.md §3)',
   'focus-ring-token': 'focus ring in var(--accent-solid) — under 3:1 on dark grounds; use var(--accent-text) like the global :focus-visible (app.css)',
   'destructive-confirm': 'confirmer.ask whose confirmLabel deletes / removes / revokes / stops without danger: true — destructive confirms use the red button (components.md)',
+  'radio-key': 'role="radio" with no arrow-key model — add tabindex={checked ? 0 : -1} and onkeydown={radioKey} (lib/radioKey.ts), or an onkeydown on the radiogroup',
   'segmented-state': 'picker / view-switch button (in .segmented, .seg*, role="group" or <nav>) marked active|on|selected without aria-pressed / aria-current / role="tab|radio" — the state is invisible to a screen reader (components.md §3)',
   'smooth-scroll': "literal behavior: 'smooth' — use scrollBehavior() from lib/motion.ts (reduced motion)",
   'disabled-opacity': 'opacity literal on a disabled state — use var(--disabled-opacity) (scripts/codemods/disabled-opacity.mjs)',
@@ -742,6 +749,9 @@ for (const f of files) {
     if (id && /^[\w-]+$/.test(id) && markup.split(new RegExp(`['"]${id}['"]`)).length > 2) continue;
     if (id && /^\w+$/.test(id) && new RegExp(`\\{#snippet\\s+\\w+\\([^)]*\\b${id}\\b`).test(markup)) continue;
     if (spans.some(([a, b]) => t.start > a && t.start < b)) continue;
+    // A field component whose REQUIRED `id: string` prop lands on the control
+    // (`<select {id}>`): the caller names it with its own `<label for={id}>`.
+    if (/(?:^|\s)(?:\{\s*id\s*\}|id\s*=\s*\{\s*id\s*\})/.test(t.attrs) && /\bid:\s*string\s*[;,]/.test(f.text)) continue;
     hit('unlabeled-control', f, t.start, `<${t.tag}> with no accessible name`);
   }
 }
@@ -782,6 +792,23 @@ for (const f of files) {
       }
       hit('local-tablist', f, m.index, m[0].slice(0, 80));
     }
+  }
+  // radio-key: every role="radio" needs arrow keys, on itself (radioKey or its
+  // own onkeydown) or on the radiogroup that encloses it (the nearest
+  // preceding radiogroup start tag; groups don't nest).
+  const radioGroups = [...markup.matchAll(/<[a-z][\w-]*\b[^>]*\brole="radiogroup"/g)].map((g) => {
+    const end = tagEnd(markup, g.index + 1);
+    return { at: g.index, keyed: end !== -1 && /\sonkeydown=/.test(markup.slice(g.index, end)) };
+  });
+  for (const m of markup.matchAll(/\brole="radio"/g)) {
+    const start = markup.lastIndexOf('<', m.index);
+    const end = tagEnd(markup, start + 1);
+    if (start === -1 || end === -1) continue;
+    const tag = markup.slice(start, end);
+    if (/\bradioKey\b|\sonkeydown=/.test(tag)) continue;
+    const group = radioGroups.filter((g) => g.at < start).pop();
+    if (group?.keyed) continue;
+    hit('radio-key', f, start, tag.replace(/\s+/g, ' ').slice(0, 80));
   }
   // A value picker / view switch — a `.segmented` or `.seg*` group, a
   // `role="group"`, or a `<nav>` (up to its first closing tag; segments don't
