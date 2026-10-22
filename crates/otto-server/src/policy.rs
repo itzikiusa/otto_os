@@ -616,6 +616,13 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         // Composer completions / live screen: the transcript's read gate.
         return Require(Agents, View);
     }
+    if p == "/sessions/{id}/files/browse" || p == "/sessions/{id}/files/read" {
+        // Session-scoped working-folder files (PC-1): a read of the session's
+        // cwd, gated per session in the handler (owner-or-admin + ws Viewer).
+        // Agent-session credentials are refused by the feature guard as on
+        // `/fs/*`; share and MCP-only tokens never reach it. Non-GET: Edit.
+        return Require(Agents, if get { View } else { Edit });
+    }
     if p == "/sessions/{id}/transcript/touch" {
         // Keep-alive for an open chat: whoever may read the transcript may
         // keep its tail warm.
@@ -3277,6 +3284,15 @@ mod tests {
             "/api/v1/workflow-runs/{id}/context/read",
         ] {
             assert_eq!(pol(Method::GET, p), Require(Workflows, View), "{p}");
+            assert_eq!(route_class(&Method::GET, p), None, "{p}");
+        }
+        // Session-scoped working-folder files (PC-1, access-control-4-03):
+        // Agents:View reads, gated per session in the handler.
+        for p in [
+            "/api/v1/sessions/{id}/files/browse",
+            "/api/v1/sessions/{id}/files/read",
+        ] {
+            assert_eq!(pol(Method::GET, p), Require(Agents, View), "{p}");
             assert_eq!(route_class(&Method::GET, p), None, "{p}");
         }
         assert_eq!(

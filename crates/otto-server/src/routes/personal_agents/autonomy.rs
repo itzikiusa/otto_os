@@ -168,6 +168,30 @@ fn merge_autonomy(mut cfg: AgentAutonomy, req: SaveAutonomyReq) -> Result<AgentA
     Ok(cfg)
 }
 
+/// The owner-only parts of an autonomy save (PC-3): the standing-goal TEXTS
+/// (added, removed or edited — toggling a goal's `enabled` is not a change)
+/// and the rule set (texts). Order is ignored, so a full-form save that
+/// re-sends unchanged goals and rules is no change. Pure — unit-tested.
+fn owner_only_autonomy_changes(old: &AgentAutonomy, new: &AgentAutonomy) -> Vec<&'static str> {
+    fn texts<'a>(it: impl Iterator<Item = &'a str>) -> Vec<&'a str> {
+        let mut v: Vec<&str> = it.collect();
+        v.sort_unstable();
+        v
+    }
+    let mut out = Vec::new();
+    if texts(old.goals.iter().map(|g| g.text.as_str()))
+        != texts(new.goals.iter().map(|g| g.text.as_str()))
+    {
+        out.push("standing goals");
+    }
+    if texts(old.rules.iter().map(|r| r.text.as_str()))
+        != texts(new.rules.iter().map(|r| r.text.as_str()))
+    {
+        out.push("rules");
+    }
+    out
+}
+
 /// `PUT /personal-agents/{id}/autonomy` — partial: omitted sections are kept.
 /// Making an agent primary clears the flag on every other agent of the
 /// workspace (one "your agent" per workspace).
@@ -181,7 +205,17 @@ async fn save_autonomy(
     let repo = agents(&ctx);
     let current = repo.autonomy(&id).await.map_err(ApiError)?;
     let becomes_primary = req.primary == Some(true) && !current.primary;
-    let next = merge_autonomy(current, req)?;
+    let next = merge_autonomy(current.clone(), req)?;
+    // Goals become proactive-run prompts and rules are written into the
+    // persona as binding instructions, so changing either is the owner's call
+    // (PC-3, access-control-4-02); toggles, budget and `primary` stay Editor.
+    super::require_agent_owner(
+        &ctx,
+        &user,
+        &agent,
+        &owner_only_autonomy_changes(&current, &next),
+    )
+    .await?;
     repo.save_autonomy(&id, &next).await.map_err(ApiError)?;
     if becomes_primary {
         for other in repo
@@ -395,6 +429,8 @@ async fn edit_memory(
     Json(req): Json<EditMemoryReq>,
 ) -> ApiResult<Json<Value>> {
     let agent = load(&ctx, &user, &id, WorkspaceRole::Editor).await?;
+    // The same `memory/notes.md` that `PUT …/memory` guards (PC-3).
+    super::require_agent_owner(&ctx, &user, &agent, &["memory"]).await?;
     let root = personal_agents_engine::agent_directory(&ctx, &agent).map_err(ApiError)?;
     let doc = crate::personal_agent_documents::read_memory(&root)
         .await
@@ -479,6 +515,42 @@ async fn reset(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn owner_only_changes_cover_goal_and_rule_texts_not_toggles() {
+        let mut cur = AgentAutonomy::default();
+        cur.goals.push(StandingGoal {
+            id: "g1".into(),
+            text: "Watch CI".into(),
+            enabled: true,
+            last_run_at: None,
+        });
+        cur.rules.push(AgentRule {
+            id: "r1".into(),
+            text: "ask before any kubectl action".into(),
+            enforce: None,
+        });
+        // Toggles, budget and primary: not owner-only.
+        let mut toggled = cur.clone();
+        toggled.goals[0].enabled = false;
+        toggled.proactive.enabled = true;
+        toggled.primary = true;
+        assert!(owner_only_autonomy_changes(&cur, &toggled).is_empty());
+        // A goal edit / a dropped rule are.
+        let mut edited = cur.clone();
+        edited.goals[0].text = "SELECT * FROM users".into();
+        assert_eq!(
+            owner_only_autonomy_changes(&cur, &edited),
+            vec!["standing goals"]
+        );
+        let mut dropped = cur.clone();
+        dropped.rules.clear();
+        assert_eq!(owner_only_autonomy_changes(&cur, &dropped), vec!["rules"]);
+        // A re-sent full form with a fresh goal id but the same text: no change.
+        let mut resent = cur.clone();
+        resent.goals[0].id = "g-new".into();
+        assert!(owner_only_autonomy_changes(&cur, &resent).is_empty());
+    }
 
     #[test]
     fn merge_keeps_server_fields_and_derives_enforcement() {

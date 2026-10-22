@@ -113,7 +113,7 @@ fn expand_home(path: &str) -> ApiResult<std::path::PathBuf> {
 }
 
 /// Simple extension → language hint used by the front-end syntax highlighter.
-fn lang_from_path(path: &std::path::Path) -> String {
+pub(crate) fn lang_from_path(path: &std::path::Path) -> String {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
@@ -396,9 +396,9 @@ fn stat_sync(raw: &str) -> ApiResult<FsStat> {
 }
 
 /// Max file size we'll serve in full (~400 KB).
-const MAX_READ_BYTES: u64 = 400 * 1024;
+pub(crate) const MAX_READ_BYTES: u64 = 400 * 1024;
 /// Number of bytes to probe for binary detection (NUL character check).
-const BINARY_PROBE_BYTES: usize = 8 * 1024;
+pub(crate) const BINARY_PROBE_BYTES: usize = 8 * 1024;
 
 /// `GET /api/v1/fs/read?path=<abs-or-~-path>`
 pub async fn read_file(
@@ -491,7 +491,7 @@ fn read_file_sync(path: &str, restricted: bool) -> ApiResult<FsRead> {
 }
 
 /// Read at most `limit` bytes from a file.
-fn read_at_most(path: &std::path::Path, limit: usize) -> std::io::Result<Vec<u8>> {
+pub(crate) fn read_at_most(path: &std::path::Path, limit: usize) -> std::io::Result<Vec<u8>> {
     use std::io::Read;
     let mut options = std::fs::OpenOptions::new();
     options.read(true);

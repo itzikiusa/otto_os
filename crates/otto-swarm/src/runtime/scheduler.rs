@@ -338,7 +338,9 @@ async fn check_utilization(
 
     let agents = repo.list_agents(&swarm.id).await?;
     // One busy-agents read, not a COUNT per agent (perf §15 F3).
-    let busy = repo.busy_agents(&swarm.id).await.unwrap_or_default();
+    // A failed read is an error (the tick logs it and retries on the next
+    // check), never "nobody is busy".
+    let busy = repo.busy_agents(&swarm.id).await?;
     let idle = idle_agents(
         &agents,
         &busy,
@@ -354,7 +356,9 @@ async fn check_utilization(
     let mut moved: Vec<String> = Vec::new();
     for (i, agent) in plan_rebalance(&ready, &idle, cap, active) {
         let t = &ready[i];
-        let _ = repo
+        // Count and announce only the moves that were saved: a failed write
+        // must not post a reassignment the task list doesn't show.
+        if let Err(e) = repo
             .update_task(
                 &t.id,
                 TaskPatch {
@@ -362,7 +366,16 @@ async fn check_utilization(
                     ..Default::default()
                 },
             )
-            .await;
+            .await
+        {
+            tracing::warn!(
+                "swarm {}: utilization rebalance of task {} → {} not saved: {e}",
+                swarm.id,
+                t.id,
+                agent.id
+            );
+            continue;
+        }
         crate::runtime::engine::emit_task_pub(ctx, &t.id).await;
         moved.push(format!("“{}” → {}", t.title, agent.name));
     }

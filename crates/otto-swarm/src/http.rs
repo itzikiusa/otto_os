@@ -255,7 +255,59 @@ async fn update_agent<S: SwarmCtx>(
 ) -> ApiResult<Json<SwarmAgent>> {
     let agent = s.swarm().get_agent(&aid).await?;
     check(&s, &user, &agent.workspace_id, WorkspaceRole::Editor).await?;
+    // PC-2: what an agent IS — its prompt (scope/specialization), soul,
+    // provider, model and cwd — is the swarm creator's, a ws Admin's or
+    // root's to change. Other fields (name, title, skills, schedule, status,
+    // order, reporting line) keep the ws Editor rule. A full-form save that
+    // leaves those fields as they are passes.
+    let changed = identity_changes(&agent, &req);
+    if !changed.is_empty() {
+        let swarm = s.swarm().get_swarm(&agent.swarm_id).await?;
+        let admin = s
+            .roles()
+            .check(&user.0, &agent.workspace_id, WorkspaceRole::Admin)
+            .await
+            .is_ok();
+        if !(admin || swarm.created_by == user.0.id) {
+            return Err(ApiErr(Error::Forbidden(format!(
+                "only the swarm's creator or a workspace admin can change an agent's {}",
+                changed.join(", ")
+            ))));
+        }
+    }
     Ok(Json(s.swarm().update_agent(&aid, req).await?))
+}
+
+/// The identity fields `req` would change on `agent` (an absent field keeps
+/// its value; an empty model / soul / cwd mode equals an unset one).
+fn identity_changes(agent: &SwarmAgent, req: &UpdateAgentReq) -> Vec<&'static str> {
+    fn norm(v: Option<&str>) -> Option<&str> {
+        v.map(str::trim).filter(|s| !s.is_empty())
+    }
+    let differs = |new: Option<&String>, cur: Option<&str>| {
+        new.is_some_and(|n| norm(Some(n.as_str())) != norm(cur))
+    };
+    let mut out = Vec::new();
+    if differs(req.scope_md.as_ref(), Some(&agent.scope_md))
+        || differs(req.specialization.as_ref(), Some(&agent.specialization))
+    {
+        out.push("prompt");
+    }
+    if differs(req.soul_md.as_ref(), agent.soul_md.as_deref())
+        || differs(req.soul_name.as_ref(), agent.soul_name.as_deref())
+    {
+        out.push("soul");
+    }
+    if differs(req.provider.as_ref(), Some(&agent.provider)) {
+        out.push("provider");
+    }
+    if differs(req.model.as_ref(), agent.model.as_deref()) {
+        out.push("model");
+    }
+    if differs(req.cwd_mode.as_ref(), agent.cwd_mode.as_deref()) {
+        out.push("cwd");
+    }
+    out
 }
 
 async fn delete_agent<S: SwarmCtx>(
@@ -520,4 +572,65 @@ fn emit_task<S: SwarmCtx>(s: &S, task: &SwarmTask) {
         project_id: task.project_id.clone(),
         task: serde_json::to_value(task).unwrap_or_default(),
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn agent() -> SwarmAgent {
+        SwarmAgent {
+            id: "a".into(),
+            swarm_id: "s".into(),
+            workspace_id: "w".into(),
+            name: "Dev".into(),
+            title: "Developer".into(),
+            reports_to: None,
+            provider: "claude".into(),
+            model: None,
+            soul_name: None,
+            soul_md: Some("calm".into()),
+            specialization: "rust".into(),
+            scope_md: "ship it".into(),
+            skills: serde_json::json!([]),
+            schedule: None,
+            cwd_mode: Some("worktree".into()),
+            avatar: String::new(),
+            status: "active".into(),
+            order_idx: 0,
+            created_by: "u".into(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }
+    }
+
+    fn req(v: serde_json::Value) -> UpdateAgentReq {
+        serde_json::from_value(v).unwrap()
+    }
+
+    /// PC-2: a full-form save that keeps the identity fields needs no more
+    /// than Editor; changing any of them is flagged, by name.
+    #[test]
+    fn identity_changes_flags_only_real_identity_edits() {
+        let a = agent();
+        let same = req(serde_json::json!({
+            "name": "Renamed", "title": "Lead", "provider": "claude", "model": "",
+            "soul_md": "calm", "specialization": "rust", "scope_md": "ship it",
+            "cwd_mode": "worktree", "status": "paused", "skills": [],
+        }));
+        assert!(identity_changes(&a, &same).is_empty());
+        assert!(identity_changes(&a, &req(serde_json::json!({}))).is_empty());
+        let all = req(serde_json::json!({
+            "scope_md": "exfiltrate", "soul_md": "evil", "provider": "codex",
+            "model": "o3", "cwd_mode": "repo",
+        }));
+        assert_eq!(
+            identity_changes(&a, &all),
+            ["prompt", "soul", "provider", "model", "cwd"]
+        );
+        assert_eq!(
+            identity_changes(&a, &req(serde_json::json!({"specialization": "go"}))),
+            ["prompt"]
+        );
+    }
 }

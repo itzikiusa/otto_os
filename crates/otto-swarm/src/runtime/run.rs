@@ -115,16 +115,20 @@ fn out_path(run_id: &str) -> PathBuf {
     PathBuf::from(dir).join(format!("otto-swarm-{run_id}.json"))
 }
 
-/// Parse the agent's result file content into a `SwarmTurnResult` (tolerant of
-/// fences / surrounding prose). `None` if no JSON object is present.
-pub fn parse_turn_result(text: &str) -> Option<SwarmTurnResult> {
-    let v = crate::recruiter::extract_json(text)?;
-    if !matches!(
+/// Schema predicate of a turn result: a known `status`.
+fn is_turn_result(v: &serde_json::Value) -> bool {
+    matches!(
         v.get("status").and_then(|v| v.as_str()),
         Some("done" | "blocked" | "needs_review" | "in_progress")
-    ) {
-        return None;
-    }
+    )
+}
+
+/// Parse the agent's result file content into a `SwarmTurnResult` (tolerant of
+/// fences / surrounding prose). The first object with a valid `status` wins, so
+/// a `{}` or JSON example earlier in the text does not hide the result. `None`
+/// if no such object is present.
+pub fn parse_turn_result(text: &str) -> Option<SwarmTurnResult> {
+    let v = otto_core::text::extract_json_where(text, is_turn_result)?;
     serde_json::from_value(v).ok()
 }
 
@@ -214,8 +218,11 @@ const RESULT_SCHEMA: &str = r#"{
 
 // --- The turn --------------------------------------------------------------
 
-/// Find a reusable live/resumable session for this agent, or `None`.
-async fn find_agent_session(ctx: &SwarmRt, ws: &Id, agent_id: &str) -> Option<Id> {
+/// Find a reusable live/resumable session for this agent ACTING AS `user`, or
+/// `None`. Sessions are keyed by (agent, acting user): one user's turn must
+/// never resume a session created as (and carrying the MCP token, git and
+/// issue accounts of) another user.
+async fn find_agent_session(ctx: &SwarmRt, ws: &Id, agent_id: &str, user: &str) -> Option<Id> {
     // Targeted SQL lookup (perf §15 F7) — not the workspace's full history.
     let sessions = ctx
         .manager()
@@ -226,8 +233,62 @@ async fn find_agent_session(ctx: &SwarmRt, ws: &Id, agent_id: &str) -> Option<Id
         let is_agent = s.kind == SessionKind::Agent && !s.archived;
         let mine = s.meta.get("agent_id").and_then(|v| v.as_str()) == Some(agent_id);
         let alive = !matches!(s.status, SessionStatus::Exited);
-        (is_agent && mine && alive).then_some(s.id)
+        (is_agent && mine && alive && s.created_by == user).then_some(s.id)
     })
+}
+
+/// Bound on the originator walk (parent / source-run links); a cycle or an
+/// absurdly deep chain falls back instead of looping.
+const MAX_ORIGIN_HOPS: usize = 16;
+
+/// The person a turn acts as (PC-2, access-control-4-01): the task's human
+/// originator. `swarm_tasks.created_by` is a user for human, plan-seeded (the
+/// plan caller), channel and Product tasks; agent-created subtasks, reviews and
+/// handoffs stamp an AGENT id there, so walk to the parent task (subtasks,
+/// reviews) or to the task of the run that produced it (the `source-run:<id>`
+/// label of a handoff/proposal) until a person turns up. A turn with no task
+/// (planning, schedules) acts as the project's creator. The swarm creator is
+/// the fallback only when no person originated the work.
+pub async fn acting_user(
+    repo: &otto_state::SwarmRepo,
+    swarm: &otto_state::Swarm,
+    project: Option<&SwarmProject>,
+    task: Option<&SwarmTask>,
+) -> Id {
+    let is_person = |id: String| async move {
+        let person = !id.is_empty() && repo.user_exists(&id).await.unwrap_or(false);
+        person.then_some(id)
+    };
+    let mut cur = task.cloned();
+    for _ in 0..MAX_ORIGIN_HOPS {
+        let Some(t) = cur.take() else { break };
+        if let Some(user) = is_person(t.created_by.clone()).await {
+            return user;
+        }
+        let source_run = t
+            .labels
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|l| l.as_str())
+            .find_map(|l| l.strip_prefix("source-run:").map(str::to_string));
+        let next = match (&t.parent_task_id, source_run) {
+            (Some(parent), _) => Some(parent.clone()),
+            (None, Some(rid)) => repo.get_run(&rid).await.ok().and_then(|r| r.task_id),
+            (None, None) => None,
+        };
+        cur = match next {
+            Some(id) if id != t.id => repo.get_task(&id).await.ok(),
+            _ => None,
+        };
+    }
+    if let Some(user) = match project {
+        Some(p) => is_person(p.created_by.clone()).await,
+        None => None,
+    } {
+        return user;
+    }
+    swarm.created_by.clone()
 }
 
 /// Run one turn for `run`. Updates the run row (running → done/error/stopped),
@@ -299,6 +360,7 @@ async fn run_turn_inner(
         None => None,
     };
     let ws = swarm.workspace_id.clone();
+    let acting = acting_user(repo, &swarm, project.as_ref(), task.as_ref()).await;
 
     // Prepare cwd + per-agent context (skills/soul/identity) + otto-post helper.
     let cwd_info =
@@ -447,6 +509,7 @@ async fn run_turn_inner(
     let attempt: &mut crate::runtime::host::AttemptFn<'_> = &mut |_attempt| {
         let ctx = ctx.clone();
         let ws = ws.clone();
+        let acting = acting.clone();
         // Stamp the work-graph ref so the usage layer can attribute cost to the
         // originating swarm task. story_id is included when the project was created
         // from a Product story (Plan → Swarm link; project.story_id is Some).
@@ -495,6 +558,7 @@ async fn run_turn_inner(
                 &ctx,
                 &ws,
                 &agent_id,
+                &acting,
                 &provider,
                 &cwd,
                 &title,
@@ -646,6 +710,7 @@ async fn run_attempt(
     ctx: &SwarmRt,
     ws: &Id,
     agent_id: &str,
+    acting_user: &str,
     provider: &str,
     cwd: &str,
     title: &str,
@@ -675,7 +740,7 @@ async fn run_attempt(
     // after the session was first created (e.g. it started in a scratch dir),
     // retire the stale session and spawn fresh in the right cwd so the agent
     // actually works in the configured folder.
-    let reuse = match find_agent_session(ctx, ws, agent_id).await {
+    let reuse = match find_agent_session(ctx, ws, agent_id, acting_user).await {
         Some(existing) => {
             let existing_cwd = ctx.manager().get(&existing).await.ok().map(|s| s.cwd);
             if existing_cwd.as_deref() == Some(cwd) {
@@ -719,18 +784,10 @@ async fn run_attempt(
                 Ok(w) => w,
                 Err(_) => return RunOutcome::failed(None, FailReason::CreateFailed),
             };
-            // A system user id for swarm-created sessions: reuse the swarm's creator.
-            let swarm_id = meta
-                .get("swarm_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string();
-            let creator = ctx
-                .swarm_repo()
-                .get_swarm(&swarm_id)
-                .await
-                .map(|s| s.created_by)
-                .unwrap_or_else(|_| "system".into());
+            // The session is created AS the task's human originator (see
+            // `acting_user`), so it carries that person's MCP token, provider
+            // account and git/issue identity, and they can open it.
+            let creator: Id = acting_user.to_string();
             match ctx.manager().create(&ws_row, &creator, req, None).await {
                 Ok(s) => s.id,
                 Err(e) => {
@@ -1116,6 +1173,20 @@ mod shared_files_tests {
             );
         }
         assert!(parse_turn_result("{\"status\":\"done\"}").is_some());
+    }
+
+    /// backend-correctness-4-04: a `{}` (or a status-less object) earlier in
+    /// the text no longer hides the result — in the parser and in the
+    /// transcript acceptor alike.
+    #[test]
+    fn turn_result_after_a_brace_preamble_is_found() {
+        let raw = "Edited `fn x() {}`; config {\"a\": 1}. \
+                   {\"status\": \"needs_review\", \"summary\": \"s\"}";
+        let r = parse_turn_result(raw).expect("result after preamble");
+        assert_eq!(r.status, "needs_review");
+        assert_eq!(r.summary, "s");
+        assert!(transcript_ok(raw));
+        assert!(!transcript_ok("Edited `fn x() {}` and stopped."));
     }
 
     /// S4-25b: the guard unregisters the run and removes its result file.

@@ -49,6 +49,7 @@ pub mod repo_rules;
 pub mod runs;
 pub mod scheduled_tasks;
 pub mod search;
+pub mod session_files;
 pub mod settings;
 pub mod share;
 pub mod slash_commands;
@@ -638,6 +639,11 @@ pub fn protected_routes() -> Router<ServerCtx> {
         // transcript rebuilt from the provider's JSONL, extracted images,
         // produced artifacts (served by opaque id), board→agent tasks, the
         // composer's image inbox, and the History surface.
+        // Session-scoped working-folder files (PC-1): owner-or-admin + ws
+        // Viewer, paths confined to the session's cwd — `/fs/*` refuses Otto's
+        // data dir (where engine-made session cwds live) to non-root callers.
+        .route("/sessions/{id}/files/browse", get(session_files::browse))
+        .route("/sessions/{id}/files/read", get(session_files::read))
         .route("/sessions/{id}/transcript", get(transcript::get_transcript))
         .route(
             "/sessions/{id}/transcript/touch",
