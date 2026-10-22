@@ -51,6 +51,12 @@ use Capability::{Admin, Edit, View};
 use Feature::*;
 use PolicyDecision::{Deny, Exempt, Require};
 
+/// `/mcp/auto-approve[/{id}]` and `/mcp/profiles…`: View to read, Admin to
+/// change (see [`policy_for`]).
+fn is_mcp_rules_path(p: &str) -> bool {
+    p == "/mcp/auto-approve" || p == "/mcp/auto-approve/{id}" || p.starts_with("/mcp/profiles")
+}
+
 /// Map an `(method, matched_path)` pair to its feature-axis [`PolicyDecision`].
 ///
 /// `matched_path` is the Axum route **template** with `{id}`-style placeholders,
@@ -862,12 +868,9 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         if p == "/mcp/policies" || p.starts_with("/mcp/policies/") {
             return Require(Mcp, Admin);
         }
-        // Auto-approve rules loosen the approval posture: reading them is View,
-        // every change is Admin (like policy writes).
-        if p == "/mcp/auto-approve"
-            || p == "/mcp/auto-approve/{id}"
-            || p.starts_with("/mcp/profiles")
-        {
+        // Auto-approve rules and MCP profiles: reading them is View, every
+        // change is Admin (like policy writes).
+        if is_mcp_rules_path(p) {
             return Require(Mcp, if get { View } else { Admin });
         }
         // Posture-changing routes → Admin: outward-server config, policy

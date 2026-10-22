@@ -6,11 +6,11 @@
     "crates/otto-git/src/local.rs": 5497,
     "crates/otto-server/src/vault_docs_agent.rs": 4087,
     "crates/otto-server/src/workflow_engine.rs": 5853,
-    "crates/otto-sessions/src/manager.rs": 6694,
-    "crates/ottod/src/mcp_tools.rs": 4942
+    "crates/otto-sessions/src/manager.rs": 6641,
+    "crates/ottod/src/mcp_tools.rs": 4882
   },
   "totals": {
-    "otto-server": 108337
+    "otto-server": 108300
   },
   "functions": {
     "crates/otto-automation/src/goal_loop.rs::controller_inner": 472,
@@ -19,8 +19,8 @@
     "crates/otto-issues/src/confluence.rs::storage_to_markdown": 535,
     "crates/otto-issues/src/jira.rs::parse_issue_full": 427,
     "crates/otto-k8s/src/monitor/collector.rs::run_cycle_with": 413,
-    "crates/otto-mcp/src/outward/catalog.rs::otto_tool_specs": 675,
-    "crates/otto-mcp/src/outward/exec.rs::route_for": 1616,
+    "crates/otto-mcp/src/outward/catalog.rs::otto_tool_specs": 624,
+    "crates/otto-mcp/src/outward/exec.rs::route_for": 1555,
     "crates/otto-product/src/run.rs::run_analysis": 580,
     "crates/otto-product/src/run.rs::run_generate_plan": 446,
     "crates/otto-server/src/mcp_outward.rs::governed_invoke": 557,
