@@ -96,7 +96,9 @@ jobs:
           CREATE TABLE hidden.secrets (id INT PRIMARY KEY, secret VARCHAR(64));
           INSERT INTO hidden.secrets VALUES (1, 'fixture-only');
           CREATE USER 'otto_reader'@'%' IDENTIFIED BY 'otto_fixture_only';
-          GRANT SELECT ON shop.* TO 'otto_reader'@'%';
+          -- SHOW VIEW: native_access refuses a query credential that can't
+          -- inspect definer-view privileges.
+          GRANT SELECT, SHOW VIEW ON shop.* TO 'otto_reader'@'%';
           SQL
           cat > "$fixture/pg/seed.sql" <<'SQL'
           CREATE SCHEMA shop;
@@ -107,6 +109,9 @@ jobs:
           INSERT INTO hidden.secrets VALUES (1, 'fixture-only');
           CREATE ROLE otto_reader LOGIN PASSWORD 'otto_fixture_only';
           REVOKE ALL ON SCHEMA public FROM PUBLIC;
+          -- PUBLIC holds TEMP on every new database by default, and the
+          -- postgres driver refuses a native role with TEMP or CREATE authority.
+          REVOKE CREATE, TEMPORARY ON DATABASE resourcefixture FROM PUBLIC;
           GRANT USAGE ON SCHEMA shop TO otto_reader;
           GRANT SELECT ON shop.orders TO otto_reader;
           SQL

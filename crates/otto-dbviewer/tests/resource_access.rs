@@ -708,8 +708,14 @@ async fn mysql_cancellation_mid_run_revokes_the_executing_claim() {
     let f = Fixture::new(ConnectionKind::Mysql, port).await;
     let table = format!("slow_{}", otto_core::new_id().replace('-', ""));
     // A real write (so it is a reviewable change) that holds the session for
-    // longer than several recheck ticks.
-    let script = format!("CREATE TABLE shop.{table} AS SELECT SLEEP(5) AS s");
+    // longer than several recheck ticks. Restricted SQL refuses SLEEP(), so the
+    // delay is a 10^9-row cross join of a 1000-row recursive CTE (MySQL's
+    // default recursion cap).
+    let script = format!(
+        "CREATE TABLE shop.{table} AS WITH RECURSIVE n (i) AS \
+         (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 1000) \
+         SELECT COUNT(*) AS s FROM n a, n b, n c"
+    );
     let (repo, change, attempts) = claimed_change(&f, &script).await;
     repo.start_attempt(&attempts[0].id).await.unwrap();
     let native = sqlx::MySqlPool::connect(&format!(
