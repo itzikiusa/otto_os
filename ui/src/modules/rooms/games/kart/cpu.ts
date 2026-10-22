@@ -3,7 +3,9 @@
  * worth of branch picks in `cpuRoute`), take the inside of corners, drift
  * through long bends for mini-turbos (normal/hard), keep to the middle of
  * narrow rail-less decks, dodge bananas, rollers and crushers, ride half-pipe
- * walls for the trick lip, and use items situationally. A boost-only shortcut
+ * walls for the trick lip, and use items situationally (green shells when a
+ * rival is lined up, red ones on whoever is close ahead, lightning from the
+ * back, a golden mushroom pumped down the straights). A boost-only shortcut
  * is taken only with a mushroom (or star) in hand, saved for its off-road.
  * Easy CPUs wobble, never drift and do not read hazards.
  */
@@ -30,7 +32,7 @@ function exposedAt(track: Track, r: Racer, d: number): boolean {
 }
 
 /** Holding something that blasts through off-road. */
-const hasBoost = (r: Racer): boolean => r.roll <= 0 && (r.item === 'mushroom' || r.item === 'triple' || r.item === 'star');
+const hasBoost = (r: Racer): boolean => r.roll <= 0 && (r.item === 'mushroom' || r.item === 'triple' || r.item === 'golden' || r.item === 'star');
 /** Metres to the fork of the next boost-only branch on the racer's route within `d` (Infinity if none). */
 function boostForkAhead(track: Track, r: Racer, d: number): number {
   if (r.seg !== 0) return Infinity;
@@ -137,15 +139,26 @@ export function cpuInput(state: KartState, track: Track, r: Racer, rng: Rng, cru
       const behind = state.racers.some(o => o.id !== r.id && o.travel < r.travel && r.travel - o.travel < 18);
       const ahead = state.racers.find(o => o.place === r.place - 1);
       const gap = ahead ? ahead.travel - r.travel : Infinity;
+      // A rival in the crosshairs: 4–40 m ahead, within a few degrees of the nose.
+      const lined = state.racers.some(o => {
+        if (o === r || o.respawn > 0) return false;
+        const dx = o.x - r.x, dz = o.z - r.z, d = Math.hypot(dx, dz);
+        return d > 4 && d < 40 && Math.abs(wrapAngle(Math.atan2(dx, dz) - r.yaw)) < 0.12;
+      });
+      const straight = Math.abs(curveNear) < 0.012 || r.surface === 'grass';
       let use = false;
       switch (r.item) {
-        case 'mushroom': case 'triple': use = (Math.abs(curveNear) < 0.012 || r.surface === 'grass') && !exposed && !saving && !boostPath; break;
+        case 'mushroom': case 'triple': use = straight && !exposed && !saving && !boostPath; break;
+        case 'golden': use = straight && !exposed && !boostPath && r.boost < 0.3; break;
         case 'banana': use = behind || rng.chance(0.004); break;
-        case 'bomb': use = gap < 70 || rng.chance(0.003); break;
+        case 'green': use = lined || rng.chance(0.002); break;
+        case 'red': use = gap < 70 || rng.chance(0.003); break;
+        case 'blue': use = r.place > 2 || rng.chance(0.002); break;
+        case 'bomb': use = lined || behind || rng.chance(0.003); break;
         case 'star': use = (gap < 30 || rng.chance(0.004)) && !saving && !boostPath; break;
         case 'bolt': use = r.place > 2; break;
       }
-      if (use) { input.item = !r.prevItem; r.cpuItemDelay = rng.range(0.4, 2.2); }
+      if (use) { input.item = !r.prevItem; r.cpuItemDelay = r.item === 'golden' ? rng.range(0.25, 0.6) : rng.range(0.4, 2.2); }
     }
   }
   return input;

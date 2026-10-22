@@ -1,12 +1,21 @@
 /**
  * Kart Grand Prix simulation (host-authoritative, fixed 60 Hz, no three.js).
  * Up to 8 racers: humans plus CPU drivers. Drifting with three mini-turbo
- * levels, item boxes, six items, jumps with tricks, launch ramps and the
- * glider, dash panels, ice, off-road patches, banking, walls and rails,
+ * tiers (blue, orange, purple sparks: longer and stronger each), a rocket
+ * start (or a burnout if the gas goes down too early), slipstreaming, item
+ * boxes with position-weighted odds, ten items (mushrooms, triple and golden
+ * mushrooms, banana, green / red / blue shells, fuse bomb, star, lightning),
+ * jumps with trick boosts, launch ramps and the glider, dash panels, ice,
+ * off-road patches (any boost blasts through), banking, walls and rails,
  * branching routes, drawbridges, half-pipe trick lips, coins (up to ten raise
- * top speed; hits and falls cost some), underwater driving, water/lava/chasm
- * rescues, rolling and crushing obstacles, laps with progress tracking and
- * live ranking.
+ * top speed; hits and falls cost some), underwater driving, quick fair
+ * rescues (back on the road with a moment of invulnerability), rolling and
+ * crushing obstacles, laps with progress tracking and live ranking.
+ *
+ * Nothing a racer fires or drops can hurt its owner: lightning strikes every
+ * opponent and never the user, shells and bombs spare their thrower (a green
+ * shell only after a short grace, once it has bounced back), and a banana is
+ * harmless to whoever dropped it for its first moments.
  */
 import { approach, clamp, Rng, wrapAngle } from '../common/math.ts';
 import {
@@ -25,9 +34,49 @@ export const MAX_HAZARDS = 20;
 export const MAX_SHELLS = 8;
 export const INTRO_SECONDS = 2.5;
 export const COUNTDOWN_SECONDS = 3;
-/** Drift charge (seconds) needed for each mini-turbo level. */
-export const DRIFT_LEVELS = [0.85, 1.7, 2.7];
-export const TURBO_SECONDS = [0.6, 1.0, 1.45];
+/** Drift charge (seconds) needed for each mini-turbo tier: blue, orange, purple sparks. */
+export const DRIFT_LEVELS = [0.7, 1.45, 2.4];
+/** Mini-turbo per tier: seconds and top-speed multiplier (each tier longer and stronger). */
+export const TURBO_SECONDS = [0.7, 1.2, 1.9];
+export const TURBO_POWER = [1.3, 1.38, 1.46];
+/** Turbo mushroom (one each of a triple; every press inside a golden mushroom's window): a long, strong burst. */
+export const MUSHROOM_SECONDS = 1.5;
+export const MUSHROOM_POWER = 1.55;
+/** Golden mushroom: unlimited mushrooms for this long after the first press. */
+export const GOLDEN_SECONDS = 7.5;
+/** Dash panels and trick landings. */
+export const PAD_SECONDS = 1.1, PAD_POWER = 1.45;
+export const TRICK_SECONDS = 1.0, TRICK_POWER = 1.38;
+/**
+ * Rocket start, by the countdown value when the gas went down (and stayed
+ * down through GO): a perfect window around "2" fading, a good one later, and
+ * a burnout (a stalled moment) when floored before then.
+ */
+export const START_PERFECT: [number, number] = [0.75, 1.45];
+export const START_GOOD = 0.2;
+export const START_BURNOUT = 1.9;
+export const BURNOUT_SECONDS = 0.8;
+/** Slipstream: this long in another racer's wake (3–20 m behind, in line) fires a draft boost. */
+export const DRAFT_SECONDS = 1.1;
+export const DRAFT_BOOST = 1.0, DRAFT_POWER = 1.32;
+/** After a rescue: a moment of invulnerability and a rolling restart. */
+export const GHOST_SECONDS = 2;
+export const RESCUE_SECONDS = 1.0;
+/** Gas down as a rescued kart lands: a short boost away. */
+export const RESPAWN_BOOST = 0.7;
+/** Shells and bombs: lifetime, speed, the owner's grace and the blast radius. */
+export type ShellKind = 'green' | 'red' | 'blue' | 'bomb';
+export const SHELL_KINDS: ShellKind[] = ['green', 'red', 'blue', 'bomb'];
+export const SHELL: Record<ShellKind, { life: number; speed: number; blast: number }> = {
+  green: { life: 5, speed: 52, blast: 0 },
+  red: { life: 7, speed: 50, blast: 0 },
+  blue: { life: 14, speed: 68, blast: 7 },
+  bomb: { life: 2.6, speed: 26, blast: 7.5 },
+};
+/** A green shell can come back for its thrower only after this long (never a red, a blue or a bomb). */
+export const GREEN_GRACE = 1.0;
+/** A dropped banana never trips its owner during this long. */
+export const BANANA_GRACE = 1.5;
 export const GRAVITY = 24;
 /** Glider: gentle gravity and a capped sink rate. */
 export const GLIDE_GRAVITY = 9;
@@ -52,6 +101,8 @@ export interface Racer {
   speed: number; steer: number; grounded: boolean; air: number; trick: number; trickReady: boolean; trickDone: boolean;
   drift: number; driftCharge: number; driftLevel: number;
   boost: number; boostPower: number; spin: number; star: number; slow: number;
+  /** Golden mushroom window left; `ghost` post-rescue invulnerability; `draft` slipstream charge; `stall` burnout. */
+  golden: number; ghost: number; draft: number; stall: number;
   item: ItemKind | null; itemCount: number; roll: number; prevItem: boolean; prevDrift: boolean;
   /** `lastS` is lap progress (main-loop distance); `seg`/`segS` the path and local distance on it. */
   travel: number; lastS: number; hint: number; lateral: number; surface: 'road' | 'grass' | 'ice';
@@ -68,9 +119,17 @@ export interface Racer {
 export interface ItemBox { x: number; y: number; z: number; timer: number }
 /** A coin on the road; `timer` > 0 while it is collected and waiting to reappear. */
 export interface Coin { x: number; y: number; z: number; timer: number }
-export interface Hazard { id: number; x: number; y: number; z: number; owner: number }
-export interface Shell { id: number; x: number; y: number; z: number; yaw: number; target: number; owner: number; life: number; hint: number; seg: number }
-export type KartEventType = 'box' | 'item' | 'boost' | 'turbo' | 'spin' | 'explode' | 'bump' | 'lap' | 'final' | 'finish' | 'bolt' | 'drop' | 'throw' | 'star' | 'respawn' | 'trick' | 'land' | 'go' | 'count' | 'splash' | 'glide' | 'crush';
+/** A banana on the road; `age` seconds since it was dropped (host only). */
+export interface Hazard { id: number; x: number; y: number; z: number; owner: number; age: number }
+/** A shell or bomb in flight: `vy` for a bomb's arc, `speed` its current ground speed (host only). */
+export interface Shell { id: number; kind: ShellKind; x: number; y: number; z: number; yaw: number; target: number; owner: number; life: number; hint: number; seg: number; vy: number; speed: number }
+/**
+ * `boost` value: 0 ramp / pad, 1 mushroom, 2 perfect start, 3 golden; `turbo`
+ * value: mini-turbo tier; `bolt`: the user's strike (value = racers hit), then
+ * a `zap` per opponent struck; `draft`: slipstream boost; `burnout`: floored
+ * too early at the start; `explode` value: shell kind index.
+ */
+export type KartEventType = 'box' | 'item' | 'boost' | 'turbo' | 'spin' | 'explode' | 'bump' | 'lap' | 'final' | 'finish' | 'bolt' | 'drop' | 'throw' | 'star' | 'respawn' | 'trick' | 'land' | 'go' | 'count' | 'splash' | 'glide' | 'crush' | 'zap' | 'draft' | 'burnout';
 export interface KartEvent { id: number; type: KartEventType; racer: number; x: number; y: number; z: number; value?: number }
 export interface KartSeat { racer: RacerId; human: boolean; slot: number; name: string }
 export interface KartState {
@@ -111,6 +170,7 @@ export function createRace(trackId: TrackId, seats: KartSeat[], difficulty: Diff
       x: _pt[0], y: _pt[1], z: _pt[2], yaw: _pt[3], vx: 0, vz: 0, vy: 0,
       speed: 0, steer: 0, grounded: true, air: 0, trick: 0, trickReady: false, trickDone: false,
       drift: 0, driftCharge: 0, driftLevel: 0, boost: 0, boostPower: 0, spin: 0, star: 0, slow: 0,
+      golden: 0, ghost: 0, draft: 0, stall: 0,
       item: null, itemCount: 0, roll: 0, prevItem: false, prevDrift: false,
       travel: s, lastS: lap, hint: -1, lateral: 0, surface: 'road',
       seg: 0, segS: lap, glide: false, under: false, safeSeg: 0, safeS: lap,
@@ -168,6 +228,20 @@ const stats = (r: Racer) => {
   return { top: 29 + (d.speed - 3) * 0.9, accel: 15 + (d.accel - 3) * 2.2, turn: 1.9 + (d.handling - 3) * 0.14, weight: 0.8 + d.weight * 0.1 };
 };
 const CPU_SPEED: Record<Difficulty, number> = { easy: 0.86, normal: 0.94, hard: 1.0 };
+/** Countdown value at which CPUs floor the throttle. */
+const CPU_START: Record<Difficulty, number> = { easy: 0.12, normal: 0.6, hard: 1.2 };
+
+/**
+ * Starts (or extends) a boost: `seconds` at `power` × the racer's top speed,
+ * with a shove of `kick` of the way there at once so it is felt straight away.
+ * The strongest boost running wins; a later one can only lengthen it.
+ */
+export function giveBoost(r: Racer, seconds: number, power: number, kick = 0.3): void {
+  const top = stats(r).top * power;
+  r.boostPower = r.boost > 0 ? Math.max(r.boostPower, power) : power;
+  r.boost = Math.max(r.boost, seconds);
+  if (r.speed < top) r.speed += (top - r.speed) * kick;
+}
 
 /** Advances the race by real time `dt` using fixed steps (at most 6 per call). */
 export function stepRace(state: KartState, inputs: (KartInput | undefined)[], dt: number): void {
@@ -192,9 +266,9 @@ export function tick(state: KartState, inputs: (KartInput | undefined)[]): void 
     const after = Math.ceil(state.countdown);
     for (const r of state.racers) {
       const input = r.human ? inputs[r.id] : undefined;
-      // CPUs press the throttle around "1" and hold it through GO.
-      const gas = r.human ? (input?.throttle ?? 0) > 0.5 : state.countdown < 1.2;
-      // Rocket start: press the throttle around "2 … 1" and hold through GO.
+      // CPUs floor it on cue: hard ones as "2" fades, normal ones a beat later, easy ones at GO.
+      const gas = r.human ? (input?.throttle ?? 0) > 0.5 : state.countdown < CPU_START[state.difficulty];
+      // Rocket start: press the throttle as "2" fades and hold through GO.
       if (gas && r.startCharge < 0) r.startCharge = state.countdown;
       if (!gas) r.startCharge = -1;
     }
@@ -203,7 +277,10 @@ export function tick(state: KartState, inputs: (KartInput | undefined)[]): void 
       state.phase = 'race';
       emit(state, 'go', state.racers[0]);
       for (const r of state.racers) {
-        if (r.startCharge > 0.25 && r.startCharge < 1.6) { r.boost = 1.1; r.boostPower = 1.35; emit(state, 'boost', r); }
+        const c = r.startCharge;
+        if (c >= START_PERFECT[0] && c <= START_PERFECT[1]) { giveBoost(r, 1.4, 1.5, 0.55); emit(state, 'boost', r, 2); }
+        else if (c > START_GOOD && c < START_PERFECT[0]) { giveBoost(r, 0.8, 1.38, 0.35); emit(state, 'boost', r); }
+        else if (c > START_BURNOUT) { r.stall = BURNOUT_SECONDS; emit(state, 'burnout', r); }
         r.lapStart = 0;
       }
     }
@@ -222,6 +299,7 @@ export function tick(state: KartState, inputs: (KartInput | undefined)[]): void 
     driveRacer(state, track, r, input, rng, leader, humanBest);
   }
   collideRacers(state);
+  updateDrafts(state);
   collideObstacles(state, track);
   updateBoxes(state);
   updateCoins(state);
@@ -242,7 +320,8 @@ function driveRacer(state: KartState, track: Track, r: Racer, input: KartInput, 
   const st = stats(r);
   if (r.respawn > 0) {
     r.respawn -= STEP;
-    if (r.respawn <= 0) rescue(state, track, r);
+    // Back on the road: gas down as the wheels touch (or held through the wait) fires a respawn boost.
+    if (r.respawn <= 0) rescue(state, track, r, input.throttle > 0.5);
     return;
   }
   if (r.roll > 0) {
@@ -258,6 +337,13 @@ function driveRacer(state: KartState, track: Track, r: Racer, input: KartInput, 
   r.star = Math.max(0, r.star - STEP);
   r.slow = Math.max(0, r.slow - STEP);
   r.bumpCd = Math.max(0, r.bumpCd - STEP);
+  r.ghost = Math.max(0, r.ghost - STEP);
+  r.stall = Math.max(0, r.stall - STEP);
+  if (r.golden > 0) {
+    r.golden = Math.max(0, r.golden - STEP);
+    // The golden mushroom's window closed: it is used up.
+    if (r.golden <= 0 && r.item === 'golden') { r.item = null; r.itemCount = 0; }
+  }
   const spinning = r.spin > 0;
   r.spin = Math.max(0, r.spin - STEP);
 
@@ -296,10 +382,12 @@ function driveRacer(state: KartState, track: Track, r: Racer, input: KartInput, 
   if (r.boost > 0) top = Math.max(top, st.top * r.boostPower);
   if (r.drift !== 0) top *= 0.97;
 
-  const throttle = spinning ? 0 : input.throttle;
+  // A burnout spins the wheels in place for a moment.
+  const throttle = spinning || r.stall > 0 ? 0 : input.throttle;
   if (r.glide) r.speed = Math.max(r.speed, st.top * 0.95);
-  else if (r.boost > 0) r.speed = approach(r.speed, top, 3.5, STEP);
-  else if (throttle > 0.05) r.speed += (r.speed < top ? st.accel * throttle * (r.under ? 0.8 : 1) * (1 - Math.max(0, r.speed) / (top * 1.25)) : -(r.speed - top) * 2.5) * STEP;
+  else if (r.boost > 0) r.speed = approach(r.speed, top, 6, STEP);
+  // Past top speed (a boost just ended) the extra bleeds off gently: boosts carry.
+  else if (throttle > 0.05) r.speed += (r.speed < top ? st.accel * throttle * (r.under ? 0.8 : 1) * (1 - Math.max(0, r.speed) / (top * 1.25)) : -(r.speed - top) * 1.8) * STEP;
   else if (throttle < -0.05) r.speed -= (r.speed > 0 ? 34 : 10) * -throttle * STEP;
   else r.speed = approach(r.speed, 0, r.under ? 1.2 : 0.7, STEP);
   r.speed = clamp(r.speed, -9, 48);
@@ -366,7 +454,7 @@ function driveRacer(state: KartState, track: Track, r: Racer, input: KartInput, 
       r.yaw = wrapAngle(r.yaw + sign * 0.02);
     }
   } else if (off > path.outOfBounds && r.grounded && path.drop[near.index] < 0.5) {
-    r.respawn = 1.4; r.speed = 0; r.vx = r.vz = 0; r.drift = 0; r.driftCharge = 0; r.driftLevel = 0;
+    r.respawn = RESCUE_SECONDS; r.speed = 0; r.vx = r.vz = 0; r.drift = 0; r.driftCharge = 0; r.driftLevel = 0;
     emit(state, 'respawn', r);
     return;
   }
@@ -382,7 +470,7 @@ function driveRacer(state: KartState, track: Track, r: Racer, input: KartInput, 
     const rs = at * path.length;
     const crossed = prevS < rs && _near.s >= rs && _near.s - prevS < 20;
     if (crossed && r.grounded && onRoad && r.speed > 10) {
-      r.vy = 7.5 + r.speed * 0.22; r.grounded = false; r.air = 0; r.trickReady = true;
+      r.vy = 7.5 + Math.min(r.speed, 40) * 0.22; r.grounded = false; r.air = 0; r.trickReady = true;
       emit(state, 'boost', r, 0);
     }
   }
@@ -423,8 +511,8 @@ function driveRacer(state: KartState, track: Track, r: Racer, input: KartInput, 
   }
   for (const pad of path.features.boostPads) {
     const ps = pad.at * path.length;
-    if (r.grounded && Math.abs(_near.s - ps) < 2.2 && Math.abs(_near.lateral - pad.lane * path.halfWidth) < 2.4 && r.boost < 0.6) {
-      r.boost = 0.9; r.boostPower = 1.42; emit(state, 'boost', r);
+    if (r.grounded && Math.abs(_near.s - ps) < 2.2 && Math.abs(_near.lateral - pad.lane * path.halfWidth) < 2.4 && r.boost < PAD_SECONDS * 0.5) {
+      giveBoost(r, PAD_SECONDS, PAD_POWER, 0.4); emit(state, 'boost', r);
     }
   }
   if (r.grounded) {
@@ -440,19 +528,19 @@ function driveRacer(state: KartState, track: Track, r: Racer, input: KartInput, 
     if (r.y <= ground && r.vy <= 0) {
       r.y = ground; r.grounded = true; r.vy = 0;
       if (r.air > 0.5) emit(state, 'land', r);
-      if (r.trickDone) { r.boost = Math.max(r.boost, 0.8); r.boostPower = Math.max(r.boostPower, 1.32); emit(state, 'boost', r); }
+      if (r.trickDone) { giveBoost(r, TRICK_SECONDS, TRICK_POWER, 0.3); emit(state, 'boost', r); }
       r.trick = 0; r.trickReady = false; r.trickDone = false; r.glide = false;
     }
   }
   // Fell in: lava always, water unless the road runs under the surface here; or down a chasm.
   const diveable = !track.lava && (path.flags[_near.index] & F_UNDER) !== 0 && Math.abs(_near.lateral) - path.halfWidth < Math.max(2, path.outOfBounds);
   if (liquid !== null && r.y + 0.3 < liquid && !diveable) {
-    r.respawn = 1.3; r.speed = 0; r.vx = r.vz = 0; r.vy = 0; r.drift = 0; r.driftCharge = 0; r.driftLevel = 0; r.glide = false;
+    r.respawn = RESCUE_SECONDS; r.speed = 0; r.vx = r.vz = 0; r.vy = 0; r.drift = 0; r.driftCharge = 0; r.driftLevel = 0; r.glide = false;
     emit(state, 'splash', r, track.lava ? 2 : 0);
     return;
   }
   if (!r.grounded && r.y < _near.y - FALL_DEPTH) {
-    r.respawn = 1.2; r.speed = 0; r.vx = r.vz = 0; r.vy = 0; r.drift = 0; r.driftCharge = 0; r.driftLevel = 0; r.glide = false;
+    r.respawn = RESCUE_SECONDS; r.speed = 0; r.vx = r.vz = 0; r.vy = 0; r.drift = 0; r.driftCharge = 0; r.driftLevel = 0; r.glide = false;
     emit(state, 'respawn', r);
     return;
   }
@@ -481,25 +569,25 @@ function driveRacer(state: KartState, track: Track, r: Racer, input: KartInput, 
     }
   }
 
-  // Items.
+  // Items (holding the brake throws a green shell or a bomb backwards).
   const itemPressed = input.item && !r.prevItem;
   r.prevItem = input.item;
-  if (itemPressed && r.item && r.roll <= 0 && !spinning) useItem(state, track, r);
+  if (itemPressed && r.item && r.roll <= 0 && !spinning) useItem(state, track, r, input.throttle < -0.5);
 }
 
 function releaseDrift(state: KartState, r: Racer): void {
   if (r.driftLevel > 0) {
-    r.boost = Math.max(r.boost, TURBO_SECONDS[r.driftLevel - 1]);
-    r.boostPower = Math.max(r.boost > 0 ? r.boostPower : 0, 1.28 + r.driftLevel * 0.04);
+    const tier = r.driftLevel - 1;
+    giveBoost(r, TURBO_SECONDS[tier], TURBO_POWER[tier], 0.2 + tier * 0.1);
     emit(state, 'turbo', r, r.driftLevel);
   }
   r.drift = 0; r.driftCharge = 0; r.driftLevel = 0;
 }
 
-function rescue(state: KartState, track: Track, r: Racer): void {
-  // Back to the centre a little behind the last spot the racer was on the road,
+function rescue(state: KartState, track: Track, r: Racer, revving: boolean): void {
+  // Back to the centre just behind the last spot the racer was on the road,
   // stepping back further if that lands in a chasm or a launch run-up.
-  let seg = r.safeSeg, s = r.safeS - 6;
+  let seg = r.safeSeg, s = r.safeS - 3;
   let path = track.paths[seg] ?? track;
   for (let k = 0; k < 80; k++) {
     if (seg !== 0 && s < 0) { s += path.from; seg = 0; path = track; }
@@ -509,7 +597,9 @@ function rescue(state: KartState, track: Track, r: Racer): void {
   if (seg === 0) s = ((s % track.length) + track.length) % track.length;
   pointAt(path, s, 0, _pt);
   r.x = _pt[0]; r.y = _pt[1]; r.z = _pt[2]; r.yaw = _pt[3];
-  r.vx = r.vz = r.vy = 0; r.speed = 0; r.grounded = true; r.spin = 0; r.glide = false; r.under = false;
+  // Pointed down the road and briefly untouchable (items, bananas, obstacles).
+  r.vx = r.vz = r.vy = 0; r.speed = 0;
+  r.grounded = true; r.spin = 0; r.glide = false; r.under = false; r.stall = 0; r.ghost = GHOST_SECONDS;
   r.coins = Math.max(0, r.coins - COIN_LOSS);
   r.seg = seg; r.segS = s; r.hint = sampleAt(path, s);
   r.y = track.ground(r.x, r.z, nearest(path, r.x, r.z, r.hint, _near, 4), state.raceTime);
@@ -518,47 +608,110 @@ function rescue(state: KartState, track: Track, r: Racer): void {
   r.travel += circ(prog - r.lastS, track.length);
   r.lastS = prog;
   emit(state, 'land', r);
+  if (revving) { giveBoost(r, RESPAWN_BOOST, 1.3, 0.5); emit(state, 'boost', r); }
 }
 
 export function spinOut(state: KartState, r: Racer, seconds = 1.0): boolean {
-  if (r.star > 0 || r.respawn > 0 || r.finish !== null && r.speed < 1) return false;
+  if (r.star > 0 || r.ghost > 0 || r.respawn > 0 || r.finish !== null && r.speed < 1) return false;
   r.spin = Math.max(r.spin, seconds);
-  r.boost = 0; r.drift = 0; r.driftCharge = 0; r.driftLevel = 0;
+  r.boost = 0; r.drift = 0; r.driftCharge = 0; r.driftLevel = 0; r.draft = 0;
   r.coins = Math.max(0, r.coins - COIN_LOSS);
   emit(state, 'spin', r);
   return true;
 }
 
-function useItem(state: KartState, track: Track, r: Racer): void {
+/** The best-placed unfinished racer other than `r` (a blue shell's target), or undefined. */
+function leaderBesides(state: KartState, r: Racer): Racer | undefined {
+  let best: Racer | undefined;
+  for (const o of state.racers) if (o !== r && o.finish === null && (!best || o.place < best.place)) best = o;
+  return best;
+}
+
+function launch(state: KartState, r: Racer, kind: ShellKind, back: boolean, target: number): void {
+  const yaw = back ? wrapAngle(r.yaw + Math.PI) : r.yaw, fx = Math.sin(yaw), fz = Math.cos(yaw);
+  const spec = SHELL[kind];
+  // Thrown ahead it leaves at the shell's speed (or the kart's, if faster); a bomb is lobbed.
+  const speed = kind === 'bomb' ? spec.speed + (back ? -12 : Math.max(0, r.speed) * 0.4) : Math.max(spec.speed, back ? 0 : r.speed + 8);
+  state.shells.push({
+    id: state.nextId++, kind, x: r.x + fx * 2.8, y: r.y + 0.6, z: r.z + fz * 2.8, yaw, target, owner: r.id,
+    life: spec.life, hint: r.hint, seg: r.seg, vy: kind === 'bomb' ? (back ? 4 : 8) : 0, speed,
+  });
+  if (state.shells.length > MAX_SHELLS) state.shells.shift();
+  emit(state, 'throw', r, SHELL_KINDS.indexOf(kind));
+}
+
+function useItem(state: KartState, track: Track, r: Racer, back: boolean): void {
   const fx = Math.sin(r.yaw), fz = Math.cos(r.yaw);
   switch (r.item) {
     case 'mushroom':
     case 'triple':
-      r.boost = Math.max(r.boost, 1.15); r.boostPower = 1.48; emit(state, 'boost', r, 1);
+      giveBoost(r, MUSHROOM_SECONDS, MUSHROOM_POWER, 0.45); emit(state, 'boost', r, 1);
       break;
+    case 'golden':
+      // The first press opens the window; every press inside it is another mushroom. Not used up per press.
+      if (r.golden <= 0) r.golden = GOLDEN_SECONDS;
+      giveBoost(r, MUSHROOM_SECONDS, MUSHROOM_POWER, 0.45); emit(state, 'boost', r, 3);
+      return;
     case 'banana': {
-      state.hazards.push({ id: state.nextId++, x: r.x - fx * 2.6, y: r.y, z: r.z - fz * 2.6, owner: r.id });
+      // Dropped just behind the kart.
+      state.hazards.push({ id: state.nextId++, x: r.x - fx * 2.6, y: r.y, z: r.z - fz * 2.6, owner: r.id, age: 0 });
       if (state.hazards.length > MAX_HAZARDS) state.hazards.shift();
       emit(state, 'drop', r);
       break;
     }
-    case 'bomb': {
+    case 'green': launch(state, r, 'green', back, -1); break;
+    case 'red': {
       const ahead = state.racers.find(o => o.place === r.place - 1 && o.finish === null);
-      state.shells.push({ id: state.nextId++, x: r.x + fx * 2.8, y: r.y + 0.6, z: r.z + fz * 2.8, yaw: r.yaw, target: ahead ? ahead.id : -1, owner: r.id, life: 7, hint: r.hint, seg: r.seg });
-      if (state.shells.length > MAX_SHELLS) state.shells.shift();
-      emit(state, 'throw', r);
+      launch(state, r, 'red', false, ahead ? ahead.id : -1);
       break;
     }
+    case 'blue': launch(state, r, 'blue', false, leaderBesides(state, r)?.id ?? -1); break;
+    case 'bomb': launch(state, r, 'bomb', back, -1); break;
     case 'star':
       r.star = 7; r.spin = 0; emit(state, 'star', r);
       break;
-    case 'bolt':
-      for (const o of state.racers) if (o.place < r.place && o.finish === null && spinOut(state, o, 0.8)) o.slow = 3;
-      emit(state, 'bolt', r);
+    case 'bolt': {
+      // Lightning strikes every opponent, never the user (who keeps every bit of speed): a short spin, then
+      // shrunk and slowed — longest for the leaders — and whatever they were holding is lost. A star or a
+      // post-rescue moment shrugs it off.
+      const n = state.racers.length;
+      let hits = 0;
+      for (const o of state.racers) {
+        if (o === r || o.finish !== null || o.respawn > 0 || o.star > 0 || o.ghost > 0) continue;
+        spinOut(state, o, 0.7);
+        o.slow = Math.max(o.slow, 2 + 2.5 * (1 - (o.place - 1) / Math.max(1, n - 1)));
+        if (o.roll <= 0) { o.item = null; o.itemCount = 0; o.golden = 0; }
+        emit(state, 'zap', o);
+        hits++;
+      }
+      emit(state, 'bolt', r, hits);
       break;
+    }
   }
   r.itemCount--;
   if (r.itemCount <= 0) { r.item = null; r.itemCount = 0; }
+}
+
+/**
+ * Slipstream: a racer tucked in behind another at speed (3–20 m back, nearly
+ * in line, heading the same way) charges a draft; held long enough, it fires a
+ * boost past them.
+ */
+function updateDrafts(state: KartState): void {
+  for (const r of state.racers) {
+    if (r.respawn > 0 || !r.grounded || r.speed < 18 || r.boost > 0 || r.finish !== null) { r.draft = Math.max(0, r.draft - STEP * 2); continue; }
+    const fx = Math.sin(r.yaw), fz = Math.cos(r.yaw);
+    let tucked = false;
+    for (const o of state.racers) {
+      if (o === r || o.respawn > 0 || o.speed < 15) continue;
+      const dx = o.x - r.x, dz = o.z - r.z;
+      const ahead = dx * fx + dz * fz, side = Math.abs(dx * fz - dz * fx);
+      if (ahead > 3 && ahead < 20 && side < 2.4 && Math.abs(o.y - r.y) < 2 && Math.abs(wrapAngle(o.yaw - r.yaw)) < 0.35) { tucked = true; break; }
+    }
+    if (!tucked) { r.draft = Math.max(0, r.draft - STEP * 2); continue; }
+    r.draft += STEP;
+    if (r.draft >= DRAFT_SECONDS) { r.draft = 0; giveBoost(r, DRAFT_BOOST, DRAFT_POWER, 0.3); emit(state, 'draft', r); }
+  }
 }
 
 function collideRacers(state: KartState): void {
@@ -590,7 +743,7 @@ function collideObstacles(state: KartState, track: Track): void {
   for (const o of track.obstacles) {
     obstacleAt(track, o, state.raceTime, _ob);
     for (const r of state.racers) {
-      if (r.respawn > 0 || r.star > 0 || r.spin > 0.3) continue;
+      if (r.respawn > 0 || r.star > 0 || r.ghost > 0 || r.spin > 0.3) continue;
       const dx = r.x - _ob[0], dz = r.z - _ob[2];
       if (o.kind === 'roller') {
         if (dx * dx + dz * dz > (ROLLER_RADIUS + 1.1) ** 2 || Math.abs(r.y + 0.6 - _ob[1]) > ROLLER_RADIUS + 1) continue;
@@ -643,7 +796,10 @@ function updateCoins(state: KartState): void {
 function updateHazards(state: KartState): void {
   for (let h = state.hazards.length - 1; h >= 0; h--) {
     const hz = state.hazards[h];
+    hz.age += STEP;
     for (const r of state.racers) {
+      // Its owner drives clear of a banana it just dropped.
+      if (r.id === hz.owner && hz.age < BANANA_GRACE) continue;
       const dx = r.x - hz.x, dz = r.z - hz.z;
       if (dx * dx + dz * dz < 1.7 * 1.7 && Math.abs(r.y - hz.y) < 1.5 && r.respawn <= 0) {
         spinOut(state, r, 1.0);
@@ -654,39 +810,90 @@ function updateHazards(state: KartState): void {
   }
 }
 
+/** An explosion at a shell: everyone but its owner inside `radius` spins out. */
+function blast(state: KartState, sh: Shell, radius: number): void {
+  emit(state, 'explode', { id: sh.owner, x: sh.x, y: sh.y, z: sh.z }, SHELL_KINDS.indexOf(sh.kind));
+  for (const o of state.racers) if (o.id !== sh.owner && Math.hypot(o.x - sh.x, o.z - sh.z) < radius && Math.abs(o.y - sh.y) < 4) spinOut(state, o, 1.3);
+}
+
+/**
+ * Shells and bombs. Green: straight on, bouncing off walls and rails. Red:
+ * down the road, homing in on its target once close. Blue: high over the
+ * pack along the leader's route, then down onto them in a blast. Bomb: lobbed,
+ * rolls to a stop, goes off on contact or when its fuse runs out. None of them
+ * touches its owner (a green shell only after GREEN_GRACE).
+ */
 function updateShells(state: KartState, track: Track): void {
   for (let i = state.shells.length - 1; i >= 0; i--) {
     const sh = state.shells[i];
     sh.life -= STEP;
-    const target = sh.target >= 0 ? state.racers[sh.target] : undefined;
     const near = locate(track, sh.x, sh.y, sh.z, sh.seg, sh.hint, _near);
     sh.hint = near.index; sh.seg = near.seg;
-    let tx: number, tz: number;
-    if (target && target.respawn <= 0 && Math.hypot(target.x - sh.x, target.z - sh.z) < 45) { tx = target.x; tz = target.z; }
-    else {
-      // Follow the road (onto the target's route when it is on a branch).
-      advance(track, near.seg, near.s, 16, target && target.seg > 0 ? 1 << (target.seg - 1) : 0, _spot);
-      pointAt(track.paths[_spot.seg], _spot.s, 0, _pt); tx = _pt[0]; tz = _pt[2];
-    }
-    const want = Math.atan2(tx - sh.x, tz - sh.z);
-    sh.yaw = wrapAngle(sh.yaw + clamp(wrapAngle(want - sh.yaw), -4 * STEP, 4 * STEP));
-    sh.x += Math.sin(sh.yaw) * 42 * STEP;
-    sh.z += Math.cos(sh.yaw) * 42 * STEP;
-    // Bombs skim over gaps and water at road height.
-    sh.y = approach(sh.y, Math.max(track.ground(sh.x, sh.z, near, state.raceTime), near.y - 0.5) + 0.7, 10, STEP);
-    let gone = sh.life <= 0;
-    for (const r of state.racers) {
-      if (gone || r.respawn > 0 || (r.id === sh.owner && sh.life > 6.6)) continue;
-      const dx = r.x - sh.x, dz = r.z - sh.z;
-      if (dx * dx + dz * dz < 2.2 * 2.2) {
-        emit(state, 'explode', { id: r.id, x: sh.x, y: sh.y, z: sh.z });
-        for (const o of state.racers) if (Math.hypot(o.x - sh.x, o.z - sh.z) < 4) spinOut(state, o, 1.2);
-        gone = true;
+    const path = track.paths[near.seg];
+    // The blue shell re-targets whoever leads (never its owner); a red one keeps its pick.
+    if (sh.kind === 'blue') { const owner = state.racers[sh.owner]; sh.target = owner ? leaderBesides(state, owner)?.id ?? -1 : -1; }
+    const target = sh.target >= 0 ? state.racers[sh.target] : undefined;
+    const ground = Math.max(track.ground(sh.x, sh.z, near, state.raceTime), near.y - 0.5);
+    // Spent green and red shells just vanish; a blue one or a bomb goes off where it is.
+    let gone = sh.life <= 0 && (sh.kind === 'green' || sh.kind === 'red');
+    if (sh.kind === 'green' || sh.kind === 'bomb') {
+      if (sh.kind === 'bomb') {
+        // Lobbed: arcs, lands, rolls to a stop.
+        sh.vy -= GRAVITY * STEP; sh.y += sh.vy * STEP;
+        if (sh.y <= ground + 0.5) { sh.y = ground + 0.5; sh.vy = 0; sh.speed = approach(sh.speed, 0, 4, STEP); }
+      } else sh.y = approach(sh.y, ground + 0.7, 10, STEP);
+      sh.x += Math.sin(sh.yaw) * sh.speed * STEP;
+      sh.z += Math.cos(sh.yaw) * sh.speed * STEP;
+      const edge = Math.abs(near.lateral) - path.halfWidth;
+      if (path.edge === 'wall' || (path.flags[near.index] & F_RAILS) !== 0) {
+        if (edge > 0.9 && near.lateral * (Math.sin(sh.yaw) * near.tz - Math.cos(sh.yaw) * near.tx) > 0) {
+          // Bounce: mirror the heading about the road's direction.
+          sh.yaw = wrapAngle(2 * Math.atan2(near.tx, near.tz) - sh.yaw);
+        }
+      } else if (edge > path.outOfBounds) gone = true; // off into the scenery
+    } else {
+      let tx: number, tz: number;
+      const close = sh.kind === 'blue' ? 40 : 45;
+      if (target && target.respawn <= 0 && Math.hypot(target.x - sh.x, target.z - sh.z) < close) { tx = target.x; tz = target.z; }
+      else {
+        // Follow the road (onto the target's route when it is on a branch).
+        advance(track, near.seg, near.s, sh.kind === 'blue' ? 24 : 16, target && target.seg > 0 ? 1 << (target.seg - 1) : 0, _spot);
+        pointAt(track.paths[_spot.seg], _spot.s, 0, _pt); tx = _pt[0]; tz = _pt[2];
       }
+      const want = Math.atan2(tx - sh.x, tz - sh.z), turn = sh.kind === 'blue' ? 7 : 4;
+      sh.yaw = wrapAngle(sh.yaw + clamp(wrapAngle(want - sh.yaw), -turn * STEP, turn * STEP));
+      sh.x += Math.sin(sh.yaw) * sh.speed * STEP;
+      sh.z += Math.cos(sh.yaw) * sh.speed * STEP;
+      // Red shells skim the road (over gaps and water at road height); the blue one flies high until it dives.
+      const dive = sh.kind === 'blue' && target ? clamp((Math.hypot(target.x - sh.x, target.z - sh.z) - 3) / 14, 0, 1) : 1;
+      sh.y = approach(sh.y, ground + 0.7 + (sh.kind === 'blue' ? 6 * dive : 0), 10, STEP);
     }
-    if (!gone) for (let h = state.hazards.length - 1; h >= 0; h--) {
+    if (!gone && sh.kind === 'blue') {
+      // Only its target stops it: it passes over everyone else.
+      if (target && target.respawn <= 0 && Math.hypot(target.x - sh.x, target.z - sh.z) < 3) { blast(state, sh, SHELL[sh.kind].blast); gone = true; }
+      else if (sh.life <= 0) { blast(state, sh, SHELL[sh.kind].blast); gone = true; }
+    } else if (!gone) {
+      for (const r of state.racers) {
+        if (r.respawn > 0 || r.id === sh.owner && (sh.kind !== 'green' || SHELL.green.life - sh.life < GREEN_GRACE)) continue;
+        const dx = r.x - sh.x, dz = r.z - sh.z;
+        if (dx * dx + dz * dz < 2.2 * 2.2 && Math.abs(r.y + 0.6 - sh.y) < 2.2) {
+          if (sh.kind === 'bomb') blast(state, sh, SHELL.bomb.blast);
+          else { emit(state, 'explode', { id: r.id, x: sh.x, y: sh.y, z: sh.z }, SHELL_KINDS.indexOf(sh.kind)); spinOut(state, r, 1.0); }
+          gone = true;
+          break;
+        }
+      }
+      // A bomb's fuse runs out where it lies.
+      if (!gone && sh.kind === 'bomb' && sh.life <= 0) { blast(state, sh, SHELL.bomb.blast); gone = true; }
+    }
+    if (!gone && sh.kind !== 'blue') for (let h = state.hazards.length - 1; h >= 0; h--) {
       const hz = state.hazards[h];
-      if (Math.hypot(hz.x - sh.x, hz.z - sh.z) < 1.6) { state.hazards.splice(h, 1); gone = true; emit(state, 'explode', { id: sh.owner, x: sh.x, y: sh.y, z: sh.z }); break; }
+      if (Math.hypot(hz.x - sh.x, hz.z - sh.z) < 1.6) {
+        state.hazards.splice(h, 1); gone = true;
+        if (sh.kind === 'bomb') blast(state, sh, SHELL.bomb.blast);
+        else emit(state, 'explode', { id: sh.owner, x: sh.x, y: sh.y, z: sh.z }, SHELL_KINDS.indexOf(sh.kind));
+        break;
+      }
     }
     if (gone) state.shells.splice(i, 1);
   }

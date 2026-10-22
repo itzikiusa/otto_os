@@ -261,11 +261,12 @@ export const TRACK_DEFS: Record<TrackId, TrackDef> = {
     ramps: [0.75], ice: [],
     launches: [{ at: 0.075, power: 14 }, { at: 0.555, power: 8, glide: true }],
     gaps: [[0.078, 0.088], [0.558, 0.63]],
-    tunnels: [{ from: 0.45, to: 0.53 }],
+    // The crater tunnel ends well before the Switchback Trail forks off (its tube never spans the fork's mouth).
+    tunnels: [{ from: 0.435, to: 0.488 }],
     banked: [[0.11, 0.33]],
     obstacles: [
       { at: 0.105, kind: 'roller', period: 3.4 }, { at: 0.125, kind: 'roller', period: 2.9, phase: 0.45 },
-      { at: 0.465, kind: 'crusher', period: 3.2, lane: -0.55 }, { at: 0.485, kind: 'crusher', period: 3.2, phase: 0.33, lane: 0.55 }, { at: 0.505, kind: 'crusher', period: 3.2, phase: 0.66, lane: -0.55 },
+      { at: 0.447, kind: 'crusher', period: 3.2, lane: -0.55 }, { at: 0.462, kind: 'crusher', period: 3.2, phase: 0.33, lane: 0.55 }, { at: 0.477, kind: 'crusher', period: 3.2, phase: 0.66, lane: -0.55 },
     ],
     hills: 14, theme: 'volcano',
     liquid: { level: -1, kind: 'lava' },
@@ -283,7 +284,8 @@ export const TRACK_DEFS: Record<TrackId, TrackDef> = {
       name: 'Obsidian Ridge', from: 0.665, to: 0.82, shortcut: true, cpu: [0.05, 0.3, 0.55],
       width: 9, edge: 'grass', outOfBounds: 8,
       points: [[-262, 262, 4], [-215, 300, 4], [-218, 345, 4], [-178, 388, 4]],
-      bridges: [{ from: 0.1, to: 0.9, rails: false }],
+      // The deck starts once the ridge has left the main road's tarmac (and ends before it rejoins).
+      bridges: [{ from: 0.17, to: 0.83, rails: false }],
     }],
   },
   skyway: {
@@ -296,8 +298,8 @@ export const TRACK_DEFS: Record<TrackId, TrackDef> = {
       ...arc(-180, -210, 50, -90, -540, 12, 1, 30),
       // Old town S-bends (the back alley cuts straight through).
       [-240, -130, 1], [-300, -80, 1], [-335, 0, 1], [-310, 80, 1], [-255, 125, 1],
-      // Glass tunnel under the harbour.
-      [-195, 150, 0.5], [-130, 190, -6], [-50, 220, -9], [40, 225, -9], [120, 210, -6], [190, 190, -1],
+      // Glass tunnel under the harbour: the road holds its level until the Harbour Bridge has split off, then dives.
+      [-195, 150, 1], [-160, 170, 0.3], [-120, 195, -6.2], [-50, 220, -9], [40, 225, -9], [120, 210, -6], [190, 190, -1],
       [270, 192, 1], [335, 160, 1],
     ],
     width: 16, edge: 'wall', outOfBounds: 0,
@@ -585,6 +587,25 @@ function markOverpasses(paths: Path[]): void {
   }
 }
 
+/**
+ * Where a branch still shares tarmac with the main loop (the mouth of a fork
+ * or merge), its road surface is the main road's: it may only climb or dive
+ * once the two have pulled apart. Otherwise one strip runs under the other
+ * and a racer swapping paths drops off (or into) a ledge.
+ */
+function matchForkHeights(main: Path, line: Line, from: number, to: number, halfWidth: number): void {
+  const near = newNear(), touch = main.halfWidth + halfWidth;
+  for (let i = 0; i < line.count; i++) {
+    const s = line.dist[i];
+    if (s > FORK_ZONE * 2.5 && s < line.length - FORK_ZONE * 2.5) continue;
+    const hint = sampleAt(main, s < line.length / 2 ? from + s : to - (line.length - s));
+    nearest(main, line.px[i], line.pz[i], hint, near, 40);
+    const w = 1 - smoothstep(touch - 2, touch + 12, near.distance);
+    if (w <= 0) continue;
+    line.py[i] += (near.y - line.py[i]) * w;
+  }
+}
+
 const cache = new Map<TrackId, Track>();
 export function trackFor(id: string): Track {
   const def = TRACK_DEFS[(id in TRACK_DEFS ? id : 'meadow') as TrackId];
@@ -601,7 +622,9 @@ export function trackFor(id: string): Track {
     const F = b.from * main.length, T = b.to * main.length;
     const at = (s: number): number[] => { pointAt(main, s, 0, pt); return [pt[0], pt[1], pt[2]]; };
     const ctrl = [at(F - 16), at(F), ...b.points.map(([x, z, y]) => [x, y, z]), at(T), at(T + 16)];
-    paths.push(makePath(paths.length, b.name, sampleLine(ctrl, false), false, {
+    const line = sampleLine(ctrl, false);
+    matchForkHeights(main, line, F, T, (b.width ?? def.width) / 2);
+    paths.push(makePath(paths.length, b.name, line, false, {
       width: b.width ?? def.width, edge: b.edge ?? def.edge, outOfBounds: b.outOfBounds ?? def.outOfBounds, features: features(b),
       from: F, to: T, cpu: b.cpu, shortcut: b.shortcut === true, boost: b.boost === true,
     }));
