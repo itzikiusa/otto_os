@@ -755,7 +755,7 @@
               {#each node.folders as f (f.name)}
                 {#if f.name}
                   <button
-                    class="folder-head"
+                    class="folder-head" data-epic-id={node.story.id}
                     onclick={() => toggleFolder(node.story.id, f.name)}
                     aria-expanded={!collapsedFolders[`${node.story.id}/${f.name}`]}
                   >

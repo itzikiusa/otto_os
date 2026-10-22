@@ -82,7 +82,9 @@ test('many repos: names only (active may keep its branch); a wider window brings
   // Close tabs and widen the window until they fit: branches come back
   // without a reload.
   await page.setViewportSize({ width: 1800, height: 800 });
-  for (let i = 7; i >= 2; i--) await tab(page, i).getByRole('button', { name: `Close ${repos[i].name}` }).click();
+  // The close button is the tab's sibling, not its child (axe
+  // nested-interactive), so it is found in the strip by its own name.
+  for (let i = 7; i >= 2; i--) await list.getByRole('button', { name: `Close ${repos[i].name}`, exact: true }).click();
   await expect(list).toHaveAttribute('data-branches', 'all');
   await expect(tab(page, 1).locator('.git-tab-branch')).toBeVisible();
 });
