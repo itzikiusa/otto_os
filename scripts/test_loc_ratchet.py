@@ -39,12 +39,84 @@ class RatchetTest(unittest.TestCase):
         new = mod.raised(BASE, {"a.rs": 200}, {"otto-server": 1100}, ["otto-server"])
         self.assertEqual(new["totals"]["otto-server"], 1100)
 
+    def test_production_lines_skip_top_level_test_items(self):
+        src = "\n".join([
+            "fn a() {",
+            "    1",
+            "}",
+            "#[cfg(test)]",
+            "fn helper() {",
+            "    // test-only",
+            "}",
+            "fn b() {}",
+            "#[cfg(test)]",
+            "mod tests;",
+            "#[cfg(test)]",
+            "#[allow(dead_code)]",
+            "mod tests {",
+            "    #[test]",
+            "    fn t() {",
+            "    }",
+            "}",
+        ])
+        self.assertEqual(mod.production_lines(src), ["fn a() {", "    1", "}", "fn b() {}"])
+        # An indented #[cfg(test)] (inside an impl) is not a top-level item.
+        self.assertEqual(len(mod.production_lines("impl X {\n    #[cfg(test)]\n    fn t() {}\n}")), 4)
+        # A bare top-level `mod tests { … }` counts as tests too.
+        self.assertEqual(mod.production_lines("fn a() {}\nmod tests {\n    fn t() {}\n}\nfn b() {}"), ["fn a() {}", "fn b() {}"])
+
+    def test_moving_tests_out_no_longer_creates_headroom(self):
+        with_tests = "fn a() {}\n" * 10 + "#[cfg(test)]\nmod tests {\n" + "    // t\n" * 50 + "}\n"
+        self.assertEqual(len(mod.production_lines(with_tests)), 10)
+
+    def test_function_lengths(self):
+        src = "\n".join([
+            "pub(crate) async fn big(",
+            "    x: u8,",
+            ") -> u8 {",
+            "    let s = \"{\";",
+            "    x",
+            "}",
+            "impl Y {",
+            "    fn big(&self) {",
+            "    }",
+            "    fn decl(&self);",
+            "}",
+        ])
+        lens = mod.function_lengths(src)
+        self.assertEqual(lens["big"], 6, "longest definition wins; braces in strings are ignored")
+        self.assertNotIn("decl", lens)
+
+    def test_function_caps(self):
+        base = {**BASE, "functions": {"execute_node": 100}}
+        self.assertEqual(mod.check(base, {}, {"otto-server": 1}, {"execute_node": 100}), [])
+        errs = mod.check(base, {}, {"otto-server": 1}, {"execute_node": 101})
+        self.assertEqual(len(errs), 1)
+        self.assertIn("fn execute_node: 101 lines > ratchet 100", errs[0])
+        errs = mod.check(base, {}, {"otto-server": 1}, {})
+        self.assertIn("not found", errs[0])
+        self.assertEqual(mod.lowered(base, {}, {"otto-server": 1}, {"execute_node": 80})["functions"], {"execute_node": 80})
+        self.assertEqual(mod.raised(base, {}, {"otto-server": 1}, ["fn:execute_node"], {"execute_node": 120})["functions"], {"execute_node": 120})
+
+    def test_test_files_are_not_production(self):
+        self.assertTrue(mod.is_test_file("crates/otto-server/tests/it.rs"))
+        self.assertTrue(mod.is_test_file("crates/otto-sessions/src/manager/tests/mod.rs"))
+        self.assertTrue(mod.is_test_file("crates/x/src/foo_tests.rs"))
+        self.assertTrue(mod.is_test_file("crates/x/src/tests.rs"))
+        self.assertFalse(mod.is_test_file("crates/x/src/testsuite.rs"))
+
+    def test_lowered_drops_files_under_the_cap(self):
+        new = mod.lowered(BASE, {"a.rs": 99, "gone.rs": 110}, {"otto-server": 900})
+        self.assertEqual(new["files"], {"gone.rs": 110})
+
     def test_repo_baseline_shape(self):
         b = json.loads(mod.BASELINE.read_text())
         self.assertGreater(b["new_file_max"], 0)
         self.assertIn("crates/otto-server/src/workflow_engine.rs", b["files"])
         self.assertIn("crates/otto-server/src/modules.rs", b["files"])
         self.assertIn("otto-server", b["totals"])
+        for name in ("execute_node", "run_workflow_with_budget", "run_review_core"):
+            self.assertIn(name, b["functions"])
         for f, n in b["files"].items():
             self.assertGreaterEqual(n, b["new_file_max"], f"{f} is below the cap; drop it")
 

@@ -1,18 +1,20 @@
 {
-  "//": "Rust LOC ratchet (scripts/loc-ratchet.py, S12-307): tracked files and otto-server's src total may only shrink. Lower with --update-baseline; raising needs --raise PATH and a reason in the PR.",
+  "//": "Rust LOC ratchet (scripts/loc-ratchet.py, S12-307): tracked files, otto-server's src total and the tracked god functions may only shrink. PRODUCTION lines only (top-level #[cfg(test)] items, `mod tests`, tests/ dirs and *tests.rs excluded). `functions` are keyed by name and searched across crates/otto-server/src. Lower with --update-baseline; raising needs --raise PATH|fn:NAME and a reason in the PR.",
   "new_file_max": 4000,
   "files": {
-    "crates/otto-dbviewer/src/drivers/mongodb.rs": 4975,
-    "crates/otto-dbviewer/src/service.rs": 4104,
-    "crates/otto-git/src/local.rs": 5783,
-    "crates/otto-server/src/modules.rs": 7703,
-    "crates/otto-server/src/routes/api_client.rs": 4444,
-    "crates/otto-server/src/vault_docs_agent.rs": 4093,
-    "crates/otto-server/src/workflow_engine.rs": 8725,
-    "crates/otto-sessions/src/manager.rs": 6900,
-    "crates/ottod/src/mcp_tools.rs": 7394
+    "crates/otto-dbviewer/src/drivers/mongodb.rs": 4225,
+    "crates/otto-git/src/local.rs": 5568,
+    "crates/otto-server/src/vault_docs_agent.rs": 4087,
+    "crates/otto-server/src/workflow_engine.rs": 5867,
+    "crates/otto-sessions/src/manager.rs": 6897,
+    "crates/ottod/src/mcp_tools.rs": 4938
   },
   "totals": {
-    "otto-server": 131580
+    "otto-server": 108401
+  },
+  "functions": {
+    "execute_node": 206,
+    "run_review_core": 406,
+    "run_workflow_with_budget": 1253
   }
 }

@@ -200,6 +200,24 @@
 //                     proves ABSENCE ("nothing else fires within 1 s") is
 //                     legitimate — mark it `ui-guards: allow`.
 //
+// Size and layering ratchets (architecture-2-07 — the UI god files grew
+// unchecked while only style rules were ratcheted):
+//
+//   file-loc          a src/**/*.{svelte,ts} file at or over NEW_FILE_MAX (800)
+//                     lines. Its "count" is its line count: a recorded god file
+//                     may shrink, never grow, and a NEW file (or one crossing
+//                     800) fails until it is split into a sibling directory.
+//   lib-imports-modules  an import in src/lib/** that resolves into
+//                     src/modules/** — shared code must not depend on a
+//                     feature. Move the shared piece into lib/ instead.
+//   raw-error         `e instanceof Error ? e.message : String(e)` under
+//                     src/lib/stores or src/modules — a raw exception (WebKit's
+//                     bare "Load failed") shown to a person → loadErrorText
+//                     (lib/loadError.ts; providerErrorText for kubectl/aws).
+//   html-escape       a hand-written `.replace(/&/g, '&amp;')` chain outside
+//                     lib/html.ts → escapeHtml (one character set, quotes
+//                     included, so it is safe in attributes too).
+//
 // Updating the baseline: `node scripts/ui-guards.mjs --update-baseline`
 // rewrites scripts/ui-guards-baseline.json from the current tree (sorted keys,
 // deterministic). Do it when you PAY DOWN debt (so the lower count sticks) —
@@ -359,6 +377,10 @@ const RULES = {
   'disabled-opacity': 'opacity literal on a disabled state — use var(--disabled-opacity) (scripts/codemods/disabled-opacity.mjs)',
   'body-style': 'document-level style write (body cursor/userSelect, documentElement setProperty) — use lib/dragCursor.ts or a scoped custom property',
   'clipboard-write': 'navigator.clipboard.writeText outside lib/clipboard.ts — use copyText / copyTextOrThrow (insecure-origin + unfocused-document fallback)',
+  'file-loc': 'a .svelte/.ts file at or over 800 lines grew (or a new one appeared) — split it into a sibling directory with re-exports',
+  'lib-imports-modules': 'src/lib imports from src/modules — shared code must not depend on a feature; move the shared piece into lib/',
+  'raw-error': 'raw `e instanceof Error ? e.message : String(e)` shown to a person — use loadErrorText (lib/loadError.ts)',
+  'html-escape': "hand-written .replace(/&/g, '&amp;') escape chain — use escapeHtml (lib/html.ts)",
 };
 
 /** Clocks, UI animation and explicitly bounded protocol/media lifecycles, not
@@ -834,6 +856,33 @@ for (const f of files) {
     if (!label || !DESTRUCTIVE_LABEL.test(label[1].trim())) continue;
     if (/\bdanger\s*:/.test(call)) continue;
     hit('destructive-confirm', f, m.index, `confirmLabel: '${label[1].trim()}' without danger`);
+  }
+}
+
+// Size + layering + shared-helper ratchets (architecture-2-07, error-handling-2-02,
+// maintainability-2-11). `file-loc` records the line count itself as the count.
+const NEW_FILE_MAX = 800;
+const RAW_ERROR = /\b(\w+)\s+instanceof\s+Error\s*\?\s*\1\.message\s*:\s*String\(\s*\1\s*\)/g;
+const AMP_CHAIN = /\.replace\(\s*\/&\/g\s*,\s*(['"`])&amp;\1\s*\)/g;
+const IMPORT_SPEC = /(?:\bfrom\s*|\bimport\s*\(\s*|^\s*import\s+)(['"])(\.{1,2}\/[^'"]+)\1/gm;
+for (const f of files) {
+  if (!/\.(svelte|ts)$/.test(f.path)) continue;
+  const lines = f.text.split('\n').length - (f.text.endsWith('\n') ? 1 : 0);
+  if (lines >= NEW_FILE_MAX && !allowed(f.text, 0)) {
+    found['file-loc'][f.rel] = { count: lines, hits: [`${f.rel}: ${lines} lines (new files stay under ${NEW_FILE_MAX})`] };
+  }
+  const code = stripComments(f.text);
+  if (f.rel.startsWith('src/lib/')) {
+    for (const m of code.matchAll(IMPORT_SPEC)) {
+      const target = relative(UI, join(f.path, '..', m[2]));
+      if (target.startsWith('src/modules/')) hit('lib-imports-modules', f, m.index, m[2]);
+    }
+  }
+  if (f.rel.startsWith('src/lib/stores/') || f.rel.startsWith('src/modules/')) {
+    for (const m of code.matchAll(RAW_ERROR)) hit('raw-error', f, m.index, m[0]);
+  }
+  if (f.rel !== 'src/lib/html.ts') {
+    for (const m of code.matchAll(AMP_CHAIN)) hit('html-escape', f, m.index, m[0]);
   }
 }
 
