@@ -39,9 +39,9 @@ even though the on-disk HTML uses the same report style (see §7).
 | Scheduler enable/disable (Settings → Insights) | `ui/src/modules/settings/InsightsSettings.svelte` |
 | UI API client | `ui/src/lib/api/insights.ts` |
 | TypeScript DTOs | `ui/src/lib/api/types.ts` (`InsightsConfig`, `InsightReport`, `InsightKind`, `RunInsightsReq`, `RunInsightsResp`) |
-| Backend (scheduler + generator + HTTP API) | `crates/otto-insights/src/lib.rs` (host glue: `InsightsCtx` impl in `crates/otto-server/src/modules.rs`) |
+| Backend (scheduler + generator + HTTP API) | `crates/otto-insights/src/lib.rs` (host glue: `InsightsCtx` impl in `crates/otto-server/src/modules/ctx_impls.rs`) |
 | Scheduler start-up wiring | `crates/otto-server/src/boot/tasks.rs` (`start_insights_scheduler`) |
-| Route mount | `crates/otto-server/src/modules.rs` (`crate::insights::routes()`) |
+| Route mount | `crates/otto-server/src/modules.rs` (`module_routers` merges `otto_insights::routes()`) |
 | RBAC policy | `crates/otto-server/src/policy.rs` (the `Insights` feature) |
 | WS event source | `crates/otto-insights/src/lib.rs` → `Event::InsightReady` |
 | Channel notifier | `crates/otto-channels/src/improve_notify.rs` (`channels.notify_insight_ready`) |
@@ -439,8 +439,7 @@ to all enabled integrations.
 
 | Symptom | Cause / fix |
 |---|---|
-| *Run now* returns "Insights skill not available" / `started:false` | The `insights` skill isn't installed. Install it from **Settings → Skills**; the scheduler and runs depend on it. |
-| `started:false` with a "no workspace available" reason | Every workspace is archived; the headless run needs a non-archived workspace + member to attribute the session to. Create/unarchive one. |
+| *Run now* returns `started:false` with "the 'insights' skill is not installed, or no workspace is available to host the run" | One of two causes, reported together. (1) The `insights` skill isn't installed: install it from **Settings → Skills** — the scheduler and runs depend on it. (2) Every workspace is archived: the headless run needs a non-archived workspace + member to attribute the session to — create or unarchive one. |
 | `403` on `PUT /insights/config` or `POST /insights/run` | Needs a **root** token (handler `require_root`). Mint one per the `otto-api` skill. |
 | `403` on `GET /insights/report?path=` | The path resolved outside the insights directory — only paths under `<data_dir>/insights/` are served. Use the exact `html_path` from `GET /insights/reports`. |
 | Report card shows but won't open / `404` | `html_path` is `null` or the file isn't written yet (a run still in progress). Re-list after a moment. |

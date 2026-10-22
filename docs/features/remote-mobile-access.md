@@ -472,7 +472,7 @@ Types:
   (`ui/src/lib/router.svelte.ts`, `history.replaceState`).
 - The guest WebSocket carries the token via the **`otto-bearer` `Sec-WebSocket-Protocol`
   subprotocol** (`ui/src/lib/api/share.ts`), keeping it off the URL/query string and
-  out of access logs; `?token=` is a fallback only.
+  out of access logs. It is the only accepted form: `?token=` is refused (401).
 - Guest REST/WS calls use the scoped token directly — **never** the owner's stored
   login token — so a guest's capability is strictly isolated from any owner session
   on the same device.

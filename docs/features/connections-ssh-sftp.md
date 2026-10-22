@@ -215,10 +215,11 @@ a stale result.
 
 ### Pinning & recency
 
-`PATCH /connections/{id}/pin` `{pinned: bool}` toggles a flag that surfaces the
-connection in a **Pinned** group above **Recent**. The sidebar's "Recent" group is
-pinned-first, then most-recently-opened (`last_opened_at`), capped to a fixed
-count.
+`PATCH /connections/{id}/pin` `{pinned: bool}` sets a stored `pinned` flag on
+the connection, and opening a connection stamps `last_opened_at`. Both are kept
+for API clients and a future sidebar group, but the current UI doesn't read
+either: there is no **Pinned** group, and the connections list keeps its own
+section order.
 
 ---
 
@@ -446,11 +447,14 @@ is only written once you flip it on **and** a session then spawns in the workspa
 (`McpServer{name, command, args, env, secret_env_keys, enabled, …}`). `env`
 holds NON-secret pairs; put tokens/keys in the write-only `secret_env` map
 instead — values are stored in the macOS **Keychain** (never Otto's DB) and
-responses return only the key names. Secret values are resolved when
-`.mcp.json` is rendered at agent spawn, so **the rendered `.mcp.json` on disk
-does contain the real values** — the agent CLI needs them; that file is
-user-local and out-of-tree. That residual is the accepted trade-off (fixing it
-would require per-CLI env-passing support).
+responses return only the key names. Secret values are resolved at agent spawn
+but never written into `.mcp.json` (or agy's `.agents/mcp_config.json` or grok's
+`.grok/config.toml`): a server with env runs through `/bin/sh` with its
+variables in a private 0600 file, `<tmp>/otto-mcp/launch-<cwd>.<server>.env`,
+outside the work tree. That file is the one place the plaintext values live on
+disk. Otto deletes it when a later spawn in that cwd no longer launches the
+server (or the server no longer has env), and deleting or disabling the server
+removes its env file from every cwd.
 
 > Database-Explorer engine routes (`/connections/{id}/db/*`) reuse these same
 > connection profiles — see [`./database-explorer.md`](./database-explorer.md).

@@ -329,7 +329,8 @@ with the **same authorization** as the issuing user.
 - Manage at **Settings → API Tokens** (`PersonalAccessTokens.svelte`). The raw
   secret is shown **exactly once** at creation (only its SHA-256 hash is stored);
   copy it then. Pass it as `Authorization: Bearer <token>` on any route, or
-  `?token=<token>` on the WS endpoints; the conventional env var is
+  `Sec-WebSocket-Protocol: otto-bearer, <token>` on the WS endpoints (`?token=`
+  is refused with 401); the conventional env var is
   `OTTO_API_TOKEN`.
 - A PAT (`kind='api'`) has a **~10-year fixed lifetime** whose expiry is **never
   slid** (unlike the 30-day sliding login token).
@@ -430,7 +431,7 @@ PWA, touch terminal, responsive shell, and Cloudflare-Tunnel exposure runbook.
 ## 10. API / contract reference
 
 All routes are under `/api/v1` with bearer auth (`Authorization: Bearer <token>`
-or `?token=` on WS). Role column meaning: `member` = any authed user; `Users:Admin
+or the `otto-bearer` subprotocol on WS — `?token=` → 401). Role column meaning: `member` = any authed user; `Users:Admin
 or root`; `root`. Authoritative source: [`../contracts/api.md`](../contracts/api.md).
 
 ### Accounts & identity

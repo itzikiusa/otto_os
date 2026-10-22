@@ -48,6 +48,8 @@ Otto.app (Tauri / otto-desktop)
 | `otto-dbviewer` | Database Explorer engine |
 | `otto-apiclient` | HTTP API-client engines split out of `otto-server`: dynamic gRPC describe/reflect/invoke (tonic + protox + prost-reflect) and server-side `pm` request scripts (boa_engine); thin axum handlers stay in `otto-server` |
 | `otto-brokers` | Message Brokers (Kafka viewer) |
+| `otto-aws` | AWS console — accounts (DB rows + Keychain secrets), the `aws` CLI v2 wrapper and per-service normalizers (S3, SQS, Athena, Logs, EC2, EKS, RDS, …) and the `/aws/*` router; host glue (`AwsCtx`) in `otto-server`'s `modules/ctx_impls.rs` |
+| `otto-k8s` | Kubernetes console — everything via `kubectl -o json` (resources, logs, actions, `exec`/k9s PTY sessions, pod HTTP, monitoring) and the `/k8s/*` router; host glue (`K8sCtx`) in `otto-server`'s `modules/ctx_impls.rs` |
 | `otto-browser` | In-app browser — reader/live tabs, DOM annotations, Lightpanda-sidecar-or-plain-fetch fetch engine |
 | `otto-orchestrator` | Claude-PTY agent runner + ⌘K plan parsing (summaries, PR/commit drafts) |
 | `otto-git` | Repos, diffs, commits, PRs |
@@ -67,6 +69,7 @@ Otto.app (Tauri / otto-desktop)
 | `otto-workflows` | Workflow engine pieces with no server dependency — node catalog, graph validation, retry policy, loop checkpoints, run context files, `prepare_context` helpers, chat + event triggers — behind the `WorkflowCtx` trait (the executor itself is still `otto-server/src/workflow_engine.rs`) |
 | `otto-workgraph` | Mission Control work-graph service (persist + audit + broadcast; projection lives in `otto-server`) |
 | `otto-usage` | Embedded ClickHouse usage/metrics |
+| `otto-transcript` | The one parser for the agent CLIs' on-disk transcripts (Claude Code, Codex, …): the usage store's per-line token parsers + cursor stores, and the conversation-view fold into a normalized transcript |
 | `otto-telemetry` | Instrumentation leaf: span context, `measure`/`scope` and the `SpanSink` trait (no collector, no otto-usage) |
 | `otto-telemetry-collector` | The daemon's `TelemetryService` (implements `SpanSink`), collector, schema and analysis; otto-server/ottod link it under the dependency name `otto-telemetry` |
 | `otto-skills` | Bundled, versioned skill library |
@@ -85,15 +88,18 @@ Otto.app (Tauri / otto-desktop)
 
 ### UI module areas (`ui/src/modules/`)
 
-`agents`, `api` (REST client), `brokers` (Kafka viewer), `browser`, `canvas`,
+`agents`, `api` (REST client), `assistant` (Personal Assistant), `aws` (AWS
+console), `brokers` (Kafka viewer), `browser`, `canvas`,
 `connections`, `database` (Database Explorer), `design-hall` (Design Hall:
-lobby, artifact view, brand kit, learning log), `git`, `help`, `home` (personal
-dashboard of live boxes), `insights`,
+lobby, artifact view, brand kit, learning log), `desktop` (menu-bar tray
+pages), `git`, `help`, `home` (personal
+dashboard of live boxes), `insights`, `kubernetes` (Kubernetes console),
 `loops` (goal loops), `mcp` (MCP control plane), `mission-control`, `panels`,
-`plugins`, `product`, `proof` (proof packs), `run-with-otto`,
+`personal-agents`, `plugins`, `product`, `proof` (proof packs), `rooms`
+(session rooms), `run-with-otto`,
 `scheduled-tasks`, `settings`, `share` (remote/mobile), `skills-eval`,
 `skills-lab`, `snip` (snipping tool), `swarm`, `usage`, `vault` (docs home),
-`workflows`. Shared code lives in `ui/src/lib/`
+`workbench`, `workflows`. Shared code lives in `ui/src/lib/`
 (`api/`, `components/`, `stores/`); the app shell is `ui/src/shell/` +
 `ui/src/App.svelte`.
 

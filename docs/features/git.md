@@ -59,7 +59,7 @@ Each repo tab has its own sub-tabs: **Graph**, **Changes**, **History**,
 | Local git (shells out to system `git`) | `crates/otto-git/src/local.rs` |
 | Hosted-provider clients | `crates/otto-git/src/providers/{github,bitbucket,gitlab}.rs` |
 | Remote-URL → provider detection | `crates/otto-git/src/providers/detect.rs` |
-| Agent PR/commit drafting | `crates/otto-server/src/modules.rs` (`draft_pr`, `draft_commit_message`) |
+| Agent PR/commit drafting | `crates/otto-server/src/modules/pr_draft.rs` (`draft_pr`, `draft_commit_message`) |
 | Secret (token) storage | `crates/otto-keychain/src/lib.rs` |
 | API contract | `docs/contracts/api.md` (#31–#56 and the "Git — repos & PR extras" table) |
 
@@ -593,6 +593,14 @@ in parallel too).
 | `merge` | `merge` | `merge_commit` | merge (no squash) |
 | `squash` | `squash` | `squash` | `squash: true` |
 | `rebase` | `rebase` | `fast_forward` (Bitbucket has no rebase-merge) | merge (squash off) |
+
+**Bitbucket async merges.** On a large repository Bitbucket Cloud may answer the
+merge with `202 Accepted` and finish it in the background. Otto then polls the
+task-status URL from the `Location` header (same origin, same credentials) for up
+to about 60 s: `SUCCESS` reports merged (204); `FAILED` reports **409** with
+Bitbucket's reason (a conflict, a hook or a merge check); still pending reports
+**409** "Bitbucket accepted the merge but hasn't finished it yet. Refresh the PR in
+a moment." — never "merged" for a merge that may still fail.
 
 ### What about draft PRs?
 

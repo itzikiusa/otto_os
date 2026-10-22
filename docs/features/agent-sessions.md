@@ -246,8 +246,8 @@ WebSocket.
 
 **Auth:** a bearer token validated **before** the upgrade. Preferred:
 `Sec-WebSocket-Protocol: otto-bearer, <token>` (the server echoes `otto-bearer`,
-keeping the token out of the URL). `?token=<bearer>` is accepted as a
-backward-compatible fallback. An IP that fails token validation too many times
+keeping the token out of the URL). That is the only accepted form: a
+`?token=<bearer>` query is refused with 401. An IP that fails token validation too many times
 is locked out (HTTP 429) — see §11.
 
 **Role:** workspace **viewer** may attach read-only; **editor**+ may send
