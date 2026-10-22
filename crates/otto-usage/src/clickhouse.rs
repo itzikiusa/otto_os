@@ -35,7 +35,7 @@ const QUERY_SETTINGS: &str =
 /// nothing reads or writes a few MB of usage data. [`Self::maybe_park`] stops
 /// it (SIGTERM → clean flush) once no request has run for an idle window and
 /// none is in flight; the next query / insert / DDL transparently restarts it
-/// ([`Self::ensure_running`], ~0.5 s on a small dir) on a fresh port. Callers
+/// (`begin` → `unpark`, ~0.5 s on a small dir) on a fresh port. Callers
 /// never see the difference: the usage writer and the metrics batch keep
 /// buffering in memory while the request that woke the server waits.
 ///

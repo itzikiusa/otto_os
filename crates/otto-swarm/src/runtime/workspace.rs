@@ -215,27 +215,9 @@ pub async fn ensure_integration_worktree(
 
 /// Per-project lock serializing [`ensure_integration_worktree`].
 fn integration_lock(project_id: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
-    type Locks =
-        std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>;
-    static LOCKS: std::sync::OnceLock<Locks> = std::sync::OnceLock::new();
-    LOCKS
-        .get_or_init(Default::default)
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .entry(project_id.to_string())
-        .or_default()
-        .clone()
-}
-
-/// Ensure the agent has a prepared, unique working directory. Returns its path.
-/// Thin wrapper over [`ensure_cwd_info`] for callers that only need the path.
-pub async fn ensure_cwd(
-    ctx: &SwarmRt,
-    swarm: &Swarm,
-    agent: &SwarmAgent,
-    project: Option<&SwarmProject>,
-) -> Result<String> {
-    Ok(ensure_cwd_info(ctx, swarm, agent, project).await?.path)
+    static LOCKS: otto_core::keyed_lock::KeyedLocks<String> =
+        otto_core::keyed_lock::KeyedLocks::new();
+    LOCKS.handle(project_id)
 }
 
 /// Ensure the agent's working directory and report how it was provisioned.

@@ -30,13 +30,13 @@
   // forces paths open, grows "show more" slices and unclips strings.
   import Self from './VerticalTree.svelte';
   import ValueEditor from './ValueEditor.svelte';
-  import { bsonScalar } from './bson';
+  import { bsonScalar } from '../../lib/jsonTree/bson';
   import type { DbEngine } from '../../lib/api/types';
   import { typedRaw, type EditFlow } from './EditFlow.svelte';
   import type { FieldCtx, TypedValue } from './edit-types';
-  import { CHUNK, entriesOf, setOverride, stickyKey, valueKind, type ExpansionState } from './expansion-plan';
+  import { CHUNK, entriesOf, setOverride, stickyKey, valueKind, type ExpansionState } from '../../lib/jsonTree/expansion-plan';
   import { cellStr } from './results-format';
-  import { searchableLabel, STR_MAX, type RevealState } from './json-find';
+  import { searchableLabel, STR_MAX, type RevealState } from '../../lib/jsonTree/json-find';
 
   interface Props {
     value: unknown;

@@ -102,11 +102,6 @@ pub struct ResourceQuery {
     pub name: String,
 }
 
-#[derive(Debug, Default, Deserialize)]
-pub struct NsQuery {
-    pub ns: Option<String>,
-}
-
 /// `GET …/metrics?ns=&pod=` — `pod` (with `ns`) narrows to one pod.
 #[derive(Debug, Deserialize)]
 pub struct MetricsQuery {

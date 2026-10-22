@@ -113,6 +113,22 @@ fn db_error(error: sqlx::Error) -> ApiError {
 fn digest(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
+/// Serialized JSON size of `value`, counted without buffering the bytes.
+fn json_len(value: &impl Serialize) -> ApiResult<usize> {
+    struct Count(usize);
+    impl std::io::Write for Count {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0 += buf.len();
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut count = Count(0);
+    serde_json::to_writer(&mut count, value).map_err(|e| invalid(&e.to_string()))?;
+    Ok(count.0)
+}
 fn archive_bytes(archive: &StateArchive) -> ApiResult<Vec<u8>> {
     let bytes = serde_json::to_vec(archive).map_err(|e| invalid(&e.to_string()))?;
     if bytes.len() > MAX_ARCHIVE_BYTES {
@@ -169,9 +185,7 @@ pub(crate) async fn build_snapshot_parts(
         for row in &mut rows {
             schema::sanitize(name, spec, row, &mut reconnect);
         }
-        total += serde_json::to_vec(&rows)
-            .map_err(|e| invalid(&e.to_string()))?
-            .len();
+        total += json_len(&rows)?;
         if total > MAX_ARCHIVE_BYTES {
             return Err(invalid(
                 "Saved records exceed 256 MiB; no partial archive was exported",
@@ -181,7 +195,7 @@ pub(crate) async fn build_snapshot_parts(
     }
     let schema_version = version(&mut tx).await?;
     tx.commit().await.map_err(db_error)?;
-    let mut archive = StateArchive {
+    let archive = StateArchive {
         archive_format: 2,
         schema_version,
         daemon_version: daemon_version.into(),
@@ -192,6 +206,24 @@ pub(crate) async fn build_snapshot_parts(
         excluded,
         reconnect: reconnect.into_iter().collect(),
     };
+    // The file-tree walk (synchronous reads of every data/vault file) and the
+    // final size-checked serialization are blocking work: run them off the
+    // async runtime so a large export does not stall a tokio worker.
+    let data_dir = data_dir.to_path_buf();
+    tokio::task::spawn_blocking(move || assemble(archive, &data_dir, &options, total))
+        .await
+        .map_err(|e| ApiError(Error::Internal(format!("Archive assembly: {e}"))))?
+}
+
+/// Attach the file roots to the table snapshot and size-check the result.
+/// Blocking (filesystem walk + serialization); callers run it on the
+/// blocking pool.
+fn assemble(
+    mut archive: StateArchive,
+    data_dir: &std::path::Path,
+    options: &SnapshotOptions,
+    mut total: usize,
+) -> ApiResult<StateArchive> {
     if options.include_files {
         let mut sources = Vec::new();
         for directory in files::DATA_ROOTS {

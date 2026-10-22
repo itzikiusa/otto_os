@@ -651,17 +651,23 @@ impl SessionsRepo {
             .collect())
     }
 
-    /// Every non-null `transcript_path` across all sessions — with
-    /// [`Self::provider_session_ids`] this is the "claimed" set that keeps an
-    /// indexed on-disk transcript from ALSO showing up as an `on_disk` History
-    /// entry.
-    pub async fn transcript_paths(&self) -> Result<Vec<String>> {
-        let rows =
-            sqlx::query("SELECT transcript_path FROM sessions WHERE transcript_path IS NOT NULL")
-                .fetch_all(&self.pool)
-                .await
-                .map_err(dberr("sessions"))?;
-        Ok(rows.iter().map(|r| r.get("transcript_path")).collect())
+    /// The cwds of the sessions among `ids` that opted into browser tools
+    /// (`meta.browser == true`) — the MCP launcher's per-cwd browser union, in
+    /// ONE query instead of a row fetch per live session.
+    pub async fn browser_session_cwds(&self, ids: &[Id]) -> Result<Vec<String>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let ids = serde_json::to_string(ids).map_err(|e| Error::Internal(e.to_string()))?;
+        let rows = sqlx::query(
+            "SELECT cwd FROM sessions WHERE id IN (SELECT value FROM json_each(?)) \
+             AND json_extract(meta_json, '$.browser') = 1",
+        )
+        .bind(ids)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("sessions"))?;
+        Ok(rows.iter().map(|r| r.get("cwd")).collect())
     }
 
     /// The session (any workspace) that already owns `provider_session_id`, if
@@ -1042,6 +1048,32 @@ mod tests {
             .await
             .unwrap();
         (user, ws)
+    }
+
+    /// backend-performance-3-02: the browser union is one query over the live
+    /// ids — only `meta.browser == true` rows among them come back.
+    #[tokio::test]
+    async fn browser_session_cwds_returns_only_listed_browser_rows() {
+        let pool = mem_pool().await;
+        let (user, ws) = seed_user_ws(&pool).await;
+        let now = fmt(Utc::now());
+        let browser = insert_session(&pool, &ws, &user, &now, r#"{"browser":true}"#, 0).await;
+        let plain = insert_session(&pool, &ws, &user, &now, r#"{"browser":false}"#, 0).await;
+        let unlisted = insert_session(&pool, &ws, &user, &now, r#"{"browser":true}"#, 0).await;
+        let repo = SessionsRepo::new(pool);
+        assert_eq!(
+            repo.browser_session_cwds(&[browser.clone(), plain.clone()])
+                .await
+                .unwrap(),
+            ["/tmp"]
+        );
+        assert!(repo
+            .browser_session_cwds(&[plain])
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(repo.browser_session_cwds(&[]).await.unwrap().is_empty());
+        let _ = unlisted;
     }
 
     async fn insert_session(

@@ -91,9 +91,10 @@ fn jira_error_text(body: &Value) -> String {
 impl JiraClient {
     async fn get_json(&self, url: &str, what: &str) -> Result<(reqwest::StatusCode, Value)> {
         let resp = self
-            .http
+            .t
+            .http()?
             .get(url)
-            .header("Authorization", &self.auth_header)
+            .header("Authorization", &self.t.auth_header)
             .header("Accept", "application/json")
             .send()
             .await
@@ -115,7 +116,7 @@ impl JiraClient {
         for _ in 0..META_PAGES_MAX {
             let url = format!(
                 "{}/rest/api/3/issue/createmeta/{path}?startAt={}&maxResults=100",
-                self.base_url,
+                self.t.base,
                 items.len()
             );
             let (status, body) = self.get_json(&url, "createmeta").await?;
@@ -208,7 +209,7 @@ impl JiraClient {
     async fn issue_type_of(&self, key: &str) -> Result<Option<(String, i64)>> {
         let url = format!(
             "{}/rest/api/3/issue/{}?fields=issuetype",
-            self.base_url,
+            self.t.base,
             path_seg(key)
         );
         let (status, body) = self.get_json(&url, "parent lookup").await?;
@@ -370,9 +371,10 @@ impl JiraClient {
         }
 
         let resp = self
-            .http
-            .post(format!("{}/rest/api/3/issue", self.base_url))
-            .header("Authorization", &self.auth_header)
+            .t
+            .http()?
+            .post(format!("{}/rest/api/3/issue", self.t.base))
+            .header("Authorization", &self.t.auth_header)
             .header("Accept", "application/json")
             .json(&json!({ "fields": fields }))
             .send()
@@ -405,7 +407,7 @@ impl JiraClient {
         };
         let verification = self.verify_created(&key, &expected).await;
         Ok(CreateIssueResp {
-            url: format!("{}/browse/{key}", self.base_url),
+            url: format!("{}/browse/{key}", self.t.base),
             key,
             verification: Some(verification),
         })
@@ -414,7 +416,7 @@ impl JiraClient {
     async fn verify_created(&self, key: &str, exp: &Expected) -> IssueVerification {
         let url = format!(
             "{}/rest/api/3/issue/{}?fields=summary,description,issuetype,project,labels,priority,parent",
-            self.base_url,
+            self.t.base,
             path_seg(key)
         );
         let body = match self.get_json(&url, "verify").await {

@@ -30,6 +30,7 @@
     ValueFormat,
   } from '../../lib/api/types';
   import { ws } from '../../lib/stores/workspace.svelte';
+  import { viewport } from '../../lib/stores/viewport.svelte';
   import { brokersTopicPort } from '../../lib/uiCommands/brokers';
   import ContextPacketDialog from '../../lib/components/ContextPacketDialog.svelte';
 
@@ -438,6 +439,7 @@
       ...(preview ? { preview: true } : {}),
     };
     consuming = true;
+    const prev = selected;
     selected = null;
     fullCtl?.abort();
     tailAdded = 0;
@@ -451,6 +453,13 @@
       tw.reset(msgListEl);
       // Reset tail cursors: a manual peek replaces the view and reseeds offsets.
       tailOffsets = new Map();
+      // Never land on an empty "Pick a message" pane when there are messages
+      // (layout.md): keep the previous message if it is still in range, else
+      // open the first. Phones stack list over detail, so they stay on the list.
+      if (!viewport.isPhone && next.messages.length) {
+        const keep = prev && next.messages.find((m) => m.partition === prev.partition && m.offset === prev.offset);
+        selectMessage(keep ?? next.messages[0]);
+      }
       // An empty range renders inline ("No messages in the selected range.");
       // no toast for what is already on screen.
     } catch (e) {

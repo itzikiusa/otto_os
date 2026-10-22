@@ -477,7 +477,7 @@ status/score. (The timed poll remains a fallback if the socket is down.)
 |---|---|
 | Start button stays disabled | Missing task, no Implementation CLI, no skill source selected/typed, or a validation with an empty name or criteria. Fill the required fields. |
 | A validation agent stuck on `waiting` | It blocked on an input prompt. **Open** its session and respond, or **Retry** that validation. |
-| Validation ends `error` / "validation did not complete" | The agent never wrote a usable findings file (timed out or produced no JSON). **Retry** it; check the CLI is installed/logged in. |
+| Validation ends `error` / "validation produced {n} of {passes} required findings verdicts" | The agent never wrote a usable findings file (timed out or produced no JSON). **Retry** it; check the CLI is installed/logged in. |
 | Iteration shows score **100** with no validations | An iteration with no completed validation scores defaults to 100 — confirm the validations actually ran (open them). |
 | `error` on the run with a `worktree:` message | `git worktree add` failed (bad `base_ref`, dirty/locked repo). Use a valid ref, or rely on the scratch repo by pointing at a non-git workspace root. |
 | `NotFound` for a `provider`/`path` skill | The `SKILL.md` isn't at `~/.{provider}/skills/<name>/SKILL.md`, or the path/archive has no `SKILL.md`/`.md`. Check the location/contents. |

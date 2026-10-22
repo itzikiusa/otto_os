@@ -413,10 +413,12 @@ fn hex_val(c: u8) -> Option<u8> {
 pub fn rewrite_links(content: &str, mut f: impl FnMut(&str, &str) -> Option<String>) -> String {
     let (yaml, body) = split_frontmatter(content);
     let mut out = String::with_capacity(content.len() + 64);
-    if let Some(y) = yaml {
-        out.push_str("---\n");
-        out.push_str(y);
-        out.push_str("---\n");
+    if yaml.is_some() {
+        // `body` is a suffix of `content`, so this prefix is the frontmatter
+        // block EXACTLY as written: a CRLF opener, a `...` closer or a closer
+        // with no trailing newline survive (rebuilding it as "---\n" + yaml +
+        // "---\n" rewrote every linking note's fences on a rename).
+        out.push_str(&content[..content.len() - body.len()]);
     }
     let mut in_fence: Option<Fence> = None;
     for line in body.split_inclusive('\n') {
@@ -782,9 +784,22 @@ mod tests {
 
     #[test]
     fn rewrite_noop_is_bytes_identical() {
-        let src = "---\na: 1\n---\nBody [[Keep]] and [x](keep.md) and #tag.\n\nmore\n";
-        let out = rewrite_links(src, |_, _| None);
-        assert_eq!(src, out);
+        for src in [
+            "---\na: 1\n---\nBody [[Keep]] and [x](keep.md) and #tag.\n\nmore\n",
+            // CRLF fences + body, a `...` closer, trailing blanks on a fence.
+            "---\r\na: 1\r\n---\r\nBody [[Keep]]\r\nmore\r\n",
+            "---\na: 1\n...\nBody [[Keep]]\n",
+            "---\na: 1\n---  \nBody [[Keep]]\n",
+        ] {
+            assert_eq!(rewrite_links(src, |_, _| None), src, "{src:?}");
+        }
+    }
+
+    #[test]
+    fn rewrite_keeps_the_frontmatter_fences_verbatim() {
+        let src = "---\r\ntitle: A\r\n...\r\nSee [[Old]].\r\n";
+        let out = rewrite_links(src, |_, t| (t == "Old").then(|| "New".to_string()));
+        assert_eq!(out, "---\r\ntitle: A\r\n...\r\nSee [[New]].\r\n");
     }
 
     #[test]

@@ -55,7 +55,7 @@
         await invoke<string>('open_room_window', {url: invitation.url});
         joinOpen = false; link = '';
       } else { window.location.assign(invitation.url); }
-    } catch (e) { joinError = e instanceof Error ? e.message : 'Could not open this room. Try again.'; }
+    } catch (e) { joinError = e instanceof Error ? e.message : 'Couldn’t open this room. Try again.'; }
     finally { joining = false; }
   }
 </script>

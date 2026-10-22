@@ -105,6 +105,11 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufRea
 
 use crate::config::Config;
 
+// Per-route upstream budgets and the pure read-call descriptor:
+// `mcp_tools/budgets.rs`.
+mod budgets;
+use budgets::{wait_session_budget, ReadCall, SUMMARIZE_CALL_TIMEOUT};
+
 /// Protocol version we advertise in `initialize`. Mirrors the spec revision the
 /// bundled CLIs negotiate; clients echo their own and tolerate a match.
 const PROTOCOL_VERSION: &str = "2024-11-05";
@@ -200,11 +205,21 @@ impl Ctx {
     /// and the body-size cap, returning parsed JSON. Read-only by construction —
     /// this is the ONLY upstream verb the tools use.
     async fn get_json(&self, path: &str) -> Result<Value, String> {
+        self.get_json_within(path, CALL_TIMEOUT).await
+    }
+
+    /// [`Self::get_json`] with an explicit wall-clock budget — for reads whose
+    /// route legitimately blocks longer than [`CALL_TIMEOUT`] (the
+    /// `otto_wait_session` long-poll, see [`wait_session_budget`]).
+    async fn get_json_within(&self, path: &str, budget: Duration) -> Result<Value, String> {
         let url = format!("{}/api/v1{}", self.base.trim_end_matches('/'), path);
         let resp = tokio::time::timeout(
-            CALL_TIMEOUT,
+            budget,
             self.http
                 .get(&url)
+                // Per-request: the client has no default timeout, so every
+                // request states its own budget (body read included).
+                .timeout(budget)
                 .bearer_auth(&self.token)
                 .header(
                     "X-Otto-Session",
@@ -213,7 +228,7 @@ impl Ctx {
                 .send(),
         )
         .await
-        .map_err(|_| format!("upstream timeout after {}s", CALL_TIMEOUT.as_secs()))?
+        .map_err(|_| format!("upstream timeout after {}s", budget.as_secs()))?
         .map_err(|e| format!("request failed: {e}"))?;
         let status = resp.status();
         // Read the body with a size cap. reqwest's `bytes()` would buffer the
@@ -306,6 +321,7 @@ impl Ctx {
             CALL_TIMEOUT,
             self.http
                 .put(&url)
+                .timeout(CALL_TIMEOUT)
                 .bearer_auth(&self.token)
                 .header(
                     "X-Otto-Session",
@@ -347,6 +363,7 @@ impl Ctx {
             CALL_TIMEOUT,
             self.http
                 .patch(&url)
+                .timeout(CALL_TIMEOUT)
                 .bearer_auth(&self.token)
                 .header(
                     "X-Otto-Session",
@@ -390,6 +407,7 @@ impl Ctx {
             CALL_TIMEOUT,
             self.http
                 .delete(&url)
+                .timeout(CALL_TIMEOUT)
                 .bearer_auth(&self.token)
                 .header(
                     "X-Otto-Session",
@@ -421,8 +439,7 @@ impl Ctx {
             TEXT_CALL_TIMEOUT,
             self.http
                 .get(&url)
-                // The client's default 20 s timeout would cut the 60 s kubectl
-                // budget short; a per-request timeout overrides it.
+                // The 60 s kubectl budget needs more than CALL_TIMEOUT.
                 .timeout(TEXT_CALL_TIMEOUT)
                 .bearer_auth(&self.token)
                 .header(
@@ -1271,8 +1288,8 @@ fn base_tool_catalog() -> Value {
             },
             {
                 "name": "otto_wait_session",
-                "description": "Read-only: block up to 25 s until a session's status is one of the awaited set (default `idle,exited`), then return it with `reached`. Loop it for longer waits — `idle` means the agent's turn ended.",
-                "inputSchema": { "type": "object", "properties": { "session_id": { "type": "string" }, "status": { "type": "string", "description": "comma-separated: running,working,idle,exited,reconnectable" }, "timeout_secs": { "type": "integer", "description": "1..25, default 20" } }, "required": ["session_id"] }
+                "description": "Read-only: block up to `timeout_secs` (at most 25 s) until a session's status is one of the awaited set (default `idle,exited`), then return it with `reached` (`false` when the wait ran out — call it again). Loop it for longer waits — `idle` means the agent's turn ended.",
+                "inputSchema": { "type": "object", "properties": { "session_id": { "type": "string" }, "status": { "type": "string", "description": "comma-separated: running,working,idle,exited,reconnectable" }, "timeout_secs": { "type": "integer", "description": "seconds to wait, 1..25 (larger values wait 25), default 20; a timed-out wait returns reached:false, not an error" } }, "required": ["session_id"] }
             },
             {
                 "name": "otto_open_session",
@@ -2326,33 +2343,6 @@ fn opt_query(args: &Value, pairs: &[(&str, &str)]) -> String {
     q
 }
 
-/// A resolved upstream read call: GET (or a read-only viewer POST), the `/api/v1`-
-/// relative path, and an optional JSON body. Built purely from `(name, args, ws)`
-/// by [`read_route`] so each feature read's endpoint binding is unit-tested.
-#[derive(Debug, Clone, PartialEq)]
-struct ReadCall {
-    post: bool,
-    path: String,
-    body: Option<Value>,
-}
-
-impl ReadCall {
-    fn get(path: String) -> Self {
-        Self {
-            post: false,
-            path,
-            body: None,
-        }
-    }
-    fn post(path: String, body: Value) -> Self {
-        Self {
-            post: true,
-            path,
-            body: Some(body),
-        }
-    }
-}
-
 /// Workspace-scoped base path for the saved-request API client.
 fn api_base(ctx: &Ctx) -> Result<String, String> {
     let ws = ctx
@@ -2578,7 +2568,8 @@ fn read_route(name: &str, args: &Value, ws: Option<&str>) -> Result<ReadCall, St
                 &[("status", "status"), ("timeout_secs", "timeout_secs")]
             )
             .trim_start_matches('&')
-        )),
+        ))
+        .within(wait_session_budget(args)),
         "otto_list_findings" => ReadCall::get(format!(
             "/reviews/{}/findings",
             seg(&arg_str(args, "review_id")?)
@@ -4030,10 +4021,13 @@ async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<
                 );
             };
             let url = arg_str(args, "url")?;
+            // A whole agent turn: CALL_TIMEOUT would drop the request (and
+            // so kill the summarizing agent) mid-turn.
             let raw = ctx
-                .post_json(
+                .post_json_within(
                     &format!("/workspaces/{}/browser/summarize", seg(ws)),
                     &json!({ "url": url }),
+                    SUMMARIZE_CALL_TIMEOUT,
                 )
                 .await?;
             Ok(finalize(raw))
@@ -4258,10 +4252,14 @@ async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<
                 .or(ctx.workspace_id.as_deref());
             let call = read_route(name, args, ws)?;
             let raw = if call.post {
-                ctx.post_json(&call.path, call.body.as_ref().unwrap_or(&json!({})))
-                    .await?
+                ctx.post_json_within(
+                    &call.path,
+                    call.body.as_ref().unwrap_or(&json!({})),
+                    call.budget,
+                )
+                .await?
             } else {
-                ctx.get_json(&call.path).await?
+                ctx.get_json_within(&call.path, call.budget).await?
             };
             Ok(finalize(raw))
         }
@@ -4728,8 +4726,10 @@ pub async fn run() -> Result<(), String> {
     // bridge held a writer on the live DB just for these inserts).
     let audit = true;
 
+    // No client-wide timeout: each request sets its own (`.timeout(budget)`),
+    // so a long-poll or an agent-turn route is not cut off at CALL_TIMEOUT
+    // underneath its per-route budget (integrations-3-01).
     let http = reqwest::Client::builder()
-        .timeout(CALL_TIMEOUT)
         .build()
         .map_err(|e| format!("build http client: {e}"))?;
 
@@ -4954,6 +4954,8 @@ mod tests {
 
     // Catalog-shape tests (twin schema parity, byte budget): `tests/catalog_tests.rs`.
     mod catalog_tests;
+    // Per-route upstream budgets (the wait_session long-poll): `tests/budget_tests.rs`.
+    mod budget_tests;
 
     /// S5-20: an over-long line is dropped (to its newline) and the next one
     /// still reads; memory never holds more than the cap.
@@ -6360,7 +6362,8 @@ mod tests {
             ReadCall {
                 post: false,
                 path: "/workspaces/ws1/sessions".into(),
-                body: None
+                body: None,
+                budget: CALL_TIMEOUT,
             }
         );
         assert_eq!(

@@ -1,6 +1,6 @@
 //! The swarm orchestration runtime (moved out of otto-server): the per-swarm
 //! Coordinator + lifecycle/recruit/plan/goals/triggers HTTP surface
-//! ([`engine`]), the one-turn runner ([`run`]) and standalone agent runner
+//! ([`engine`]; the activate/pause/abort transitions are [`lifecycle`]), the one-turn runner ([`run`]) and standalone agent runner
 //! ([`agent_run`]), the agent scheduler ([`scheduler`]) and its event bell
 //! ([`wake`]), the goal verifier ([`verify`]), branch merge ([`merge`]),
 //! channel triggers ([`channels`]) and per-agent workspaces ([`workspace`]).
@@ -11,6 +11,7 @@ pub mod agent_run;
 pub mod channels;
 pub mod engine;
 pub mod host;
+pub mod lifecycle;
 pub mod merge;
 pub mod run;
 pub mod scheduler;

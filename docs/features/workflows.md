@@ -312,9 +312,10 @@ do simple `{key}` substitution from the incoming object (see §4).
   checkout verbatim and review the wrong scope. `workflow_node_cache` survives
   only as a dormant table: migrations are append-only.)
 - **Global wall clock:** a run cannot execute forever. At each node boundary the
-  engine checks an overall `RUN_WALL_CLOCK_TIMEOUT`; exceeding it marks all
-  un-run nodes `skipped` and fails the run with "run exceeded the N-minute time
-  limit". Individual agent/approval nodes also have their own `NODE_AGENT_TIMEOUT`.
+  engine checks an overall `RUN_WALL_CLOCK_TIMEOUT` (10 hours of active time);
+  exceeding it marks the RUNNING step `error` ("workflow active time budget
+  exhausted", still retryable), the un-run steps `skipped`, and fails the run with
+  "run exceeded the 10-hour time limit". Individual agent/approval nodes also have their own `NODE_AGENT_TIMEOUT`.
 - **Typed-output validation (warn-only):** after a node succeeds, its output is
   checked against the kind's declared `output_schema` (`validate_node_output`);
   mismatches are appended to the node log as `⚠ …` lines and **never fail the run**.
@@ -1024,7 +1025,12 @@ loop's worktree) **merge it back into `repos.json`** as the run progresses.
 
 Every run owns `<data_dir>/workflow-context/<run_id>/` (`otto-workflows/src/context.rs`)
 — browsable in the run view under **Context files** (same tree + viewer as the
-agent Files panel, scoped to this run). Every write here is best-effort — a
+agent Files panel, scoped to this run). The tree and the **Final output** panel
+read it through run-scoped routes, `GET /workflow-runs/{id}/context/browse?path=`
+and `…/context/read?path=` (paths relative to the context dir), gated at ws
+**Viewer** on the run's workspace like the run itself — not through `/fs/*`, which
+refuses Otto's data dir to every non-root caller. An absolute path, `..` or a
+symlink escaping the dir is 400. Every write here is best-effort — a
 failure logs a warning and the run continues; context files never fail a node:
 
 ```
@@ -1074,7 +1080,7 @@ work ran) produces no `final-output.md`.
 
 The run view's **Final output** panel (a sandboxed `<iframe>`, shown only when
 `run.status === 'success'` and the run has a `context_dir`) fetches
-`final-output.md` once per run and renders it — it just stays hidden when the
+`final-output.md` once per run (`GET /workflow-runs/{id}/context/read?path=final-output.md`) and renders it — it just stays hidden when the
 file doesn't exist. Chat/webhook delivery prefers it too: see *Result delivery*
 in §5. This is why the `ui-test-authoring`/`api-acceptance-test-authoring`
 templates' last step is an explicit "Final report" `agent_prompt` (§6) — it's
@@ -1252,6 +1258,8 @@ build on.
 | `POST /workflows/{id}/run` | ws editor | `RunWorkflowReq?` `{input?, start_node?, only_node?, review_mode?}` → `WorkflowRun`. `review_mode` (`fan_out`/`orchestrator`) is seeded into `input.review_mode` and overrides every `review_run` node of the run (§4 *Execution mode*); any other value, or a non-object `input` alongside it, is a **400** |
 | `GET /workflows/{id}/runs` | ws viewer | `WorkflowRun[]` |
 | `GET /workflow-runs/{id}` | ws viewer | one run (poll/refresh target) |
+| `GET /workflow-runs/{id}/context/browse?path=` | ws viewer (the run's workspace) | `FsBrowse` of the run's context dir; `path` and entry paths are relative to it (empty = its root). 400 absolute / `..` / escaping symlink; 404 unknown run or path |
+| `GET /workflow-runs/{id}/context/read?path=` | ws viewer (the run's workspace) | `FsRead` of one context file (~400 KiB bound); the deliverable is `?path=final-output.md` |
 | `POST /workflow-runs/{id}/cancel` | ws editor | cancel a run |
 | `POST /workflows/{id}/validate` | ws viewer | `{graph?}` → `{valid, issues}`; no execution |
 | `GET /workflows/{id}/versions` | ws viewer | `WorkflowVersion[]` (snapshot history, newest first) |
@@ -1419,6 +1427,18 @@ are **append-only** — never edit or renumber an existing one.
   all trigger mutations + run approval, are **ws editor** (`Workflows:Edit`).
   Runs resolve the workspace from the workflow/run row. (See `./daemon-http-api.md`
   and the multi-user RBAC doc for how feature grants and roles compose.)
+- **Run identity.** A manual run acts as the person who started it. A trigger,
+  schedule, webhook or chat run acts as whichever is LATER of: the author of the
+  graph version the run is pinned to (`workflow_versions.created_by` — the last
+  person to change that graph) and the `updated_by` of any of the workflow's
+  triggers (set to the caller when a trigger is created or its spec changes, with
+  the time in `updated_by_at`; migration 0189). The firing trigger is not stored
+  on the run, so every trigger counts; that can only pick a more recent changer,
+  never an older one. It acts as the
+  workflow's creator only when both are unset or are the creator. So an Editor who
+  edits someone else's workflow, or adds a trigger to it, cannot make later
+  unattended runs use the creator's private connections or root authority — those
+  runs act as the Editor.
 - **Webhook triggers are public-by-token.** `POST /workflows/{id}/webhook/{token}`
   requires **no bearer auth** — the 32-byte URL-safe token in the path *is* the
   credential, matched against an enabled webhook trigger. Treat the URL as a
@@ -1427,8 +1447,8 @@ are **append-only** — never edit or renumber an existing one.
 - **Chat-started runs (`Action: Workflow`, `run <name>: <prompt>`, or a channel
   binding) run on the channel-trust model.** A message in a configured
   Slack/Telegram/webhook channel can start a run by name (the run acts as the
-  workflow's `created_by`, falling back to a synthetic "Workflow" user for
-  system-initiated runs). Anyone who can post to a wired channel can start any
+  workflow's latest changer — see *Run identity* above — falling back to a
+  synthetic "Workflow" user for system-initiated runs). Anyone who can post to a wired channel can start any
   workflow in that workspace by name — treat channel access as run-start
   capability. This is unaffected by the `workflow_triggers.kind` `CHECK` bug
   (§10) — the message-based paths never touch that table.
@@ -1482,7 +1502,7 @@ are **append-only** — never edit or renumber an existing one.
 | `channel_notify` does nothing | No enabled Slack/Telegram integration, or the selected `channel` isn't configured (`./channels-slack-telegram.md`). |
 | Run UI stops updating but isn't finished | WS dropped → the uncapped 2.5s fallback poll keeps the viewed run converging; the run still runs server-side. If the view is genuinely frozen, re-open the run or reload. |
 | Webhook returns 401 | Token doesn't match an **enabled** webhook trigger on that workflow id. Re-check the token / re-enable the trigger. |
-| Run "exceeded the N-minute time limit" | The global wall-clock fired; the graph (often an `agent_prompt` chain) is too long. Split it or reduce work. |
+| Run "exceeded the 10-hour time limit" (running step: "workflow active time budget exhausted") | The global wall-clock fired; the graph (often an `agent_prompt` chain) is too long. Split it or reduce work. |
 | Approve/Reject button does nothing | The run must actually be paused at a `human_approval` node (`waiting_approval`), and you need `Workflows:Edit`. |
 | API-client automation step fails on a 2xx | It has a failing assertion. With **no** assertions a step passes on any 2xx; check the assertion `desc` in the report. |
 | `prepare_context` node errors "required Jira fetch failed" | `params.require: true` and the fetch failed (no matching Jira key, no configured Jira account, or the API call errored) — check `jira-<KEY>.md` in the run's context dir for the reason, or drop `require`. |

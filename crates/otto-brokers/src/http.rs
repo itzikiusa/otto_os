@@ -621,3 +621,311 @@ async fn delete_lag_alert<S: BrokersCtx>(
     ctx.brokers().delete_lag_alert(&alert_id).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
+
+#[cfg(test)]
+mod lag_alert_route_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use futures_util::future::BoxFuture;
+    use otto_state::{BrokerClustersRepo, BrokerOpsRepo};
+    use tower::ServiceExt;
+
+    struct NoSecrets;
+    impl otto_core::secrets::SecretStore for NoSecrets {
+        fn get(&self, _: &str) -> otto_core::Result<Option<String>> {
+            Ok(None)
+        }
+        fn put(&self, _: &str, _: &str) -> otto_core::Result<()> {
+            Ok(())
+        }
+        fn delete(&self, _: &str) -> otto_core::Result<()> {
+            Ok(())
+        }
+    }
+    struct AllowAll;
+    impl RoleChecker for AllowAll {
+        fn check<'a>(
+            &'a self,
+            _u: &'a User,
+            _ws: &'a Id,
+            _m: WorkspaceRole,
+        ) -> BoxFuture<'a, otto_core::Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+    #[derive(Clone)]
+    struct Ctx {
+        brokers: Arc<BrokersService>,
+        roles: Arc<dyn RoleChecker>,
+        pool: Option<otto_state::DbPool>,
+    }
+    impl BrokersCtx for Ctx {
+        fn brokers(&self) -> &Arc<BrokersService> {
+            &self.brokers
+        }
+        fn roles(&self) -> &Arc<dyn RoleChecker> {
+            &self.roles
+        }
+        fn pool(&self) -> Option<otto_state::DbPool> {
+            self.pool.clone()
+        }
+    }
+
+    /// The wiring the daemon uses (`new(..).with_ops(..)`) serves the lag
+    /// alerts list: 200 with an empty list, not the "ops repo not
+    /// initialised" 500 the unwired service returned.
+    #[tokio::test]
+    async fn lag_alerts_list_is_200_when_wired_like_the_daemon() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = otto_state::open(&dir.path().join("b.db")).await.unwrap();
+        let user = otto_core::new_id();
+        sqlx::query("INSERT INTO users(id,username,password_hash,display_name,is_root,disabled,created_at) VALUES(?,?, 'hash','Fixture',1,0,strftime('%Y-%m-%dT%H:%M:%fZ','now'))")
+            .bind(&user).bind(&user).execute(&pool).await.unwrap();
+        let svc = BrokersService::new(
+            BrokerClustersRepo::new(pool.clone()),
+            Arc::new(NoSecrets),
+            None,
+        )
+        .with_ops(BrokerOpsRepo::new(pool.clone()));
+        let req: UpsertClusterReq = serde_json::from_value(serde_json::json!({
+            "name":"c", "bootstrap_servers":"127.0.0.1:1", "security_protocol":"plaintext"
+        }))
+        .unwrap();
+        let cluster = svc.create_cluster(None, user.clone(), req).await.unwrap();
+        let ctx = Ctx {
+            brokers: Arc::new(svc),
+            roles: Arc::new(AllowAll),
+            pool: None,
+        };
+        let root = User {
+            id: user,
+            username: "root".into(),
+            display_name: "Root".into(),
+            is_root: true,
+            disabled: false,
+            created_at: chrono::Utc::now(),
+        };
+        let app = api_router::<Ctx>()
+            .layer(Extension(AuthUser(root)))
+            .with_state(ctx);
+        let res = app
+            .oneshot(
+                Request::get(format!("/brokers/clusters/{}/lag-alerts", cluster.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    // ---- test-quality-3-03: the prod / read-only guard and the global grant ----
+
+    /// A state DB with one user; `is_root` picks the account kind.
+    async fn fixture(is_root: bool) -> (tempfile::TempDir, otto_state::DbPool, User) {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = otto_state::open(&dir.path().join("b.db")).await.unwrap();
+        let id = otto_core::new_id();
+        sqlx::query("INSERT INTO users(id,username,password_hash,display_name,is_root,disabled,created_at) VALUES(?,?, 'hash','Fixture',?,0,strftime('%Y-%m-%dT%H:%M:%fZ','now'))")
+            .bind(&id).bind(&id).bind(is_root).execute(&pool).await.unwrap();
+        let user = User {
+            id,
+            username: "u".into(),
+            display_name: "U".into(),
+            is_root,
+            disabled: false,
+            created_at: chrono::Utc::now(),
+        };
+        (dir, pool, user)
+    }
+
+    /// A global cluster at an unreachable broker: the guard runs before any
+    /// broker call, so no Kafka is needed to see it refuse.
+    async fn cluster(svc: &BrokersService, owner: &User, extra: serde_json::Value) -> Id {
+        let mut body = serde_json::json!({
+            "name": "c", "bootstrap_servers": "127.0.0.1:1", "security_protocol": "plaintext"
+        });
+        for (k, v) in extra.as_object().unwrap() {
+            body[k] = v.clone();
+        }
+        let req: UpsertClusterReq = serde_json::from_value(body).unwrap();
+        svc.create_cluster(None, owner.id.clone(), req)
+            .await
+            .unwrap()
+            .id
+    }
+
+    fn app_for(svc: BrokersService, user: User, pool: Option<otto_state::DbPool>) -> Router {
+        let ctx = Ctx {
+            brokers: Arc::new(svc),
+            roles: Arc::new(AllowAll),
+            pool,
+        };
+        api_router::<Ctx>()
+            .layer(Extension(AuthUser(user)))
+            .with_state(ctx)
+    }
+
+    async fn call(
+        app: &Router,
+        method: &str,
+        uri: &str,
+        body: Option<serde_json::Value>,
+    ) -> (StatusCode, String) {
+        let mut req = Request::builder().method(method).uri(uri);
+        let body = match body {
+            Some(v) => {
+                req = req.header("content-type", "application/json");
+                Body::from(v.to_string())
+            }
+            None => Body::empty(),
+        };
+        let res = app.clone().oneshot(req.body(body).unwrap()).await.unwrap();
+        let status = res.status();
+        let bytes = http_body_util::BodyExt::collect(res.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    /// The six mutating routes, each with a body that deserializes. The replay
+    /// selector is out of range, so once past the guard it fails validation
+    /// (400) before any broker connection.
+    fn mutations(
+        id: &str,
+        confirm: bool,
+    ) -> Vec<(&'static str, String, Option<serde_json::Value>)> {
+        let q = if confirm { "?confirm=true" } else { "" };
+        vec![
+            (
+                "POST",
+                format!("/brokers/clusters/{id}/topics"),
+                Some(serde_json::json!({"name": "t", "confirm": confirm})),
+            ),
+            (
+                "DELETE",
+                format!("/brokers/clusters/{id}/topics/t{q}"),
+                None,
+            ),
+            (
+                "PUT",
+                format!("/brokers/clusters/{id}/topics/t/configs"),
+                Some(serde_json::json!({"configs": [], "confirm": confirm})),
+            ),
+            (
+                "POST",
+                format!("/brokers/clusters/{id}/topics/t/produce"),
+                Some(serde_json::json!({"value": "v", "confirm": confirm})),
+            ),
+            (
+                "POST",
+                format!("/brokers/clusters/{id}/groups/g/reset"),
+                Some(serde_json::json!({"mode": "earliest", "confirm": confirm})),
+            ),
+            (
+                "POST",
+                format!("/brokers/clusters/{id}/replay"),
+                Some(serde_json::json!({
+                    "source_topic": "a", "target_topic": "b",
+                    "selector": {"type": "latest", "count": 0}, "confirm": confirm
+                })),
+            ),
+        ]
+    }
+
+    #[tokio::test]
+    async fn guarded_clusters_refuse_every_mutation_without_confirm() {
+        for (extra, why) in [
+            (serde_json::json!({"environment": "prod"}), "production"),
+            (serde_json::json!({"read_only": true}), "read-only"),
+        ] {
+            let (_dir, pool, root) = fixture(true).await;
+            let svc = BrokersService::new(
+                BrokerClustersRepo::new(pool.clone()),
+                Arc::new(NoSecrets),
+                None,
+            );
+            let id = cluster(&svc, &root, extra).await;
+            let app = app_for(svc, root, None);
+            for (method, uri, body) in mutations(&id, false) {
+                let (status, text) = call(&app, method, &uri, body).await;
+                assert_eq!(status, StatusCode::FORBIDDEN, "{method} {uri}: {text}");
+                assert!(text.contains(why), "{method} {uri} names the guard: {text}");
+            }
+            // The guard honours confirm: replay then fails its own validation.
+            let (method, uri, body) = mutations(&id, true).pop().unwrap();
+            let (status, text) = call(&app, method, &uri, body).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "confirmed replay: {text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_dev_cluster_and_a_guarded_dry_run_pass_the_guard() {
+        let (_dir, pool, root) = fixture(true).await;
+        let svc = BrokersService::new(
+            BrokerClustersRepo::new(pool.clone()),
+            Arc::new(NoSecrets),
+            None,
+        );
+        let dev = cluster(&svc, &root, serde_json::json!({"environment": "dev"})).await;
+        let prod = cluster(&svc, &root, serde_json::json!({"environment": "prod"})).await;
+        let app = app_for(svc, root, None);
+        // Dev: no confirm needed — replay reaches its selector validation.
+        let (method, uri, body) = mutations(&dev, false).pop().unwrap();
+        let (status, text) = call(&app, method, &uri, body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "dev replay: {text}");
+        // A dry-run reset on prod writes nothing, so the guard lets it through
+        // without confirm. It then talks to the unreachable broker: any
+        // non-403 answer, or still waiting on the broker, is past the guard.
+        let dry_run = format!("/brokers/clusters/{prod}/groups/g/reset?dry_run=true");
+        let fut = call(
+            &app,
+            "POST",
+            &dry_run,
+            Some(serde_json::json!({"mode": "earliest"})),
+        );
+        if let Ok((status, text)) =
+            tokio::time::timeout(std::time::Duration::from_secs(3), fut).await
+        {
+            assert_ne!(status, StatusCode::FORBIDDEN, "dry run refused: {text}");
+        }
+    }
+
+    /// A global (workspace-less) cluster answers to the caller's Database
+    /// grant: View can't delete it, Edit can.
+    #[tokio::test]
+    async fn global_cluster_mutations_need_the_database_edit_grant() {
+        let (_dir, pool, user) = fixture(false).await;
+        let svc = BrokersService::new(
+            BrokerClustersRepo::new(pool.clone()),
+            Arc::new(NoSecrets),
+            None,
+        );
+        let id = cluster(&svc, &user, serde_json::json!({})).await;
+        let grants = otto_state::GrantsRepo::new(pool.clone());
+        grants
+            .set_grants(
+                &user.id,
+                &[(Feature::Database, otto_core::domain::Capability::View)],
+            )
+            .await
+            .unwrap();
+        let app = app_for(svc, user.clone(), Some(pool.clone()));
+        let uri = format!("/brokers/clusters/{id}");
+        let (status, text) = call(&app, "DELETE", &uri, None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{text}");
+        assert!(text.contains("Database"), "{text}");
+        grants
+            .set_grants(
+                &user.id,
+                &[(Feature::Database, otto_core::domain::Capability::Edit)],
+            )
+            .await
+            .unwrap();
+        let (status, text) = call(&app, "DELETE", &uri, None).await;
+        assert_ne!(status, StatusCode::FORBIDDEN, "{text}");
+        assert!(status.is_success(), "{status}: {text}");
+    }
+}

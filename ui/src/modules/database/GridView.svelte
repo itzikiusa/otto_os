@@ -17,7 +17,7 @@
   import { onDestroy, tick, untrack } from 'svelte';
   import type { Attachment } from 'svelte/attachments';
   import Icon from '../../lib/components/Icon.svelte';
-  import { bsonScalar } from './bson';
+  import { bsonScalar } from '../../lib/jsonTree/bson';
   import type { QueryResult } from '../../lib/api/types';
   import type { EditFlow } from './EditFlow.svelte';
   import { CELL_MAX, cellDisplay, cellStr, clip, copyWithToast, isComplex, previewJson } from './results-format';

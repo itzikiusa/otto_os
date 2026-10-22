@@ -21,8 +21,10 @@ use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions, MySqlRow, MySqlSslMode}
 use sqlx::{Column as _, Connection as _, Executor as _, Row, TypeInfo};
 
 use crate::driver::Driver;
+use crate::drivers::sql_common::{acquire_error, float_to_json};
 use crate::export::{ExportCounts, ExportFormat, ExportSink};
 use crate::split::{split_statements, SqlDialect, StatementScanner};
+use crate::sql_class::ReadClass;
 use crate::tls::TlsFiles;
 use crate::types::{
     self, compact_count, CancelToken, Capabilities, Column, ColumnDef, CompletionContext,
@@ -597,7 +599,7 @@ impl Driver for MysqlDriver {
         schema: &str,
         max_tables: usize,
     ) -> Result<Option<types::SchemaGraph>> {
-        use crate::drivers::postgres::{assemble_bulk_graph, BulkCol, BulkFk, BulkRel};
+        use crate::drivers::sql_common::{assemble_bulk_graph, BulkCol, BulkFk, BulkRel};
         let pool = self.pool(cfg).await?;
         // Same objects and order as the lazy tree's Tables then Views folders.
         let rels_q = sqlx::query_as::<_, (String, String)>(
@@ -2018,60 +2020,17 @@ async fn authorize_local_infile(
     Ok(())
 }
 
-/// First-keyword detection of read (returns rows) vs write statements.
+/// First-keyword detection of read (returns rows) vs write statements — the
+/// MySQL row of the shared table in `sql_class` (`WITH` only when provable).
 fn is_read_statement(statement: &str) -> bool {
-    let kw = first_keyword(statement);
-    matches!(
-        kw.as_str(),
-        "SELECT" | "SHOW" | "DESC" | "DESCRIBE" | "EXPLAIN"
-    ) || (kw == "WITH" && crate::access::read_is_provable(Engine::Mysql, statement))
-}
-
-/// The first SQL keyword (uppercased), skipping leading whitespace and
-/// line/block comments.
-fn first_keyword(statement: &str) -> String {
-    let mut s = statement.trim_start();
-    loop {
-        if let Some(rest) = s.strip_prefix("--") {
-            // Line comment: skip to end of line.
-            s = rest
-                .split_once('\n')
-                .map(|x| x.1)
-                .unwrap_or("")
-                .trim_start();
-        } else if let Some(rest) = s.strip_prefix("/*") {
-            // Block comment: skip to closing.
-            s = rest
-                .split_once("*/")
-                .map(|x| x.1)
-                .unwrap_or("")
-                .trim_start();
-        } else {
-            break;
-        }
-    }
-    s.chars()
-        .take_while(|c| c.is_ascii_alphabetic())
-        .collect::<String>()
-        .to_ascii_uppercase()
+    ReadClass::of(Engine::Mysql, statement).returns_rows()
 }
 
 /// Acquire a pooled session, mapping sqlx's pool timeout to a clear message.
 async fn acquire(pool: &sqlx::MySqlPool) -> Result<sqlx::pool::PoolConnection<sqlx::MySql>> {
-    pool.acquire().await.map_err(acquire_error)
-}
-
-/// `PoolTimedOut` means every pooled session stayed busy for
-/// [`POOL_ACQUIRE_TIMEOUT`]: say so instead of sqlx's generic text.
-fn acquire_error(e: sqlx::Error) -> otto_core::Error {
-    match e {
-        sqlx::Error::PoolTimedOut => types::upstream(format!(
-            "connection busy: all {POOL_MAX_CONNECTIONS} sessions to this server are in use \
-             (waited {}s); stop a running query or retry",
-            POOL_ACQUIRE_TIMEOUT.as_secs()
-        )),
-        other => types::upstream(other),
-    }
+    pool.acquire()
+        .await
+        .map_err(|e| acquire_error(e, POOL_MAX_CONNECTIONS, POOL_ACQUIRE_TIMEOUT))
 }
 
 /// The ONE text-protocol round trip that scopes a pooled session for a
@@ -2794,16 +2753,6 @@ fn temporal_to_json<T: ToString>(v: Option<T>) -> Value {
         .unwrap_or(Value::Null)
 }
 
-/// Pure shaping of an optional f64 (Null if absent or non-finite).
-fn float_to_json(v: Option<f64>) -> Value {
-    match v {
-        Some(n) => serde_json::Number::from_f64(n)
-            .map(Value::Number)
-            .unwrap_or(Value::Null),
-        None => Value::Null,
-    }
-}
-
 /// Escape a backtick identifier for interpolation into `\`db\`.\`tbl\`` (the
 /// only unavoidable interpolation — these come from the schema tree, not user
 /// input, but we still double any backticks defensively).
@@ -3260,6 +3209,7 @@ mod tests {
 
     #[test]
     fn first_keyword_skips_comments() {
+        use crate::sql_class::first_keyword;
         assert_eq!(first_keyword("-- a comment\nSELECT 1"), "SELECT");
         assert_eq!(first_keyword("/* block */ UPDATE t"), "UPDATE");
         assert_eq!(first_keyword("   \n  select"), "SELECT");

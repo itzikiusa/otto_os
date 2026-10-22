@@ -828,11 +828,32 @@ impl AuthRepo {
         label: Option<&str>,
         scope: &McpScope,
     ) -> Result<(String, McpTokenInfo)> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| Error::Internal(format!("issue mcp token: {e}")))?;
+        let issued = Self::insert_mcp_token(&mut tx, user_id, label, scope).await?;
+        tx.commit()
+            .await
+            .map_err(|e| Error::Internal(format!("issue mcp token: {e}")))?;
+        Ok(issued)
+    }
+
+    /// The INSERT behind [`Self::issue_mcp_token_with_scope`], on a caller-owned
+    /// connection so [`Self::rotate_mcp_token`] can mint inside the same
+    /// transaction as its delete.
+    async fn insert_mcp_token(
+        conn: &mut sqlx::SqliteConnection,
+        user_id: &Id,
+        label: Option<&str>,
+        scope: &McpScope,
+    ) -> Result<(String, McpTokenInfo)> {
         // Resolve the owning user's username up front (and prove the user exists)
         // so the returned metadata can be displayed without a second round-trip.
         let username: String = sqlx::query("SELECT username FROM users WHERE id = ?")
             .bind(user_id)
-            .fetch_optional(&self.pool)
+            .fetch_optional(&mut *conn)
             .await
             .map_err(|e| Error::Internal(format!("issue mcp token (user): {e}")))?
             .map(|r| r.get::<String, _>("username"))
@@ -861,7 +882,7 @@ impl AuthRepo {
         .bind(label)
         .bind(&prefix)
         .bind(&scope_json)
-        .execute(&self.pool)
+        .execute(&mut *conn)
         .await
         .map_err(|e| Error::Internal(format!("issue mcp token: {e}")))?;
         Ok((
@@ -1029,40 +1050,66 @@ impl AuthRepo {
         Ok(res.rows_affected() > 0)
     }
 
+    /// The owner (`user_id`) of the outward MCP token `id`, or `None` when `id`
+    /// is not a `kind='mcp'` token. The rotate route checks it before minting:
+    /// a rotated token authenticates AS its owner, so only the owner or root may
+    /// rotate it (same rule as minting one for another user).
+    pub async fn mcp_token_owner(&self, id: &Id) -> Result<Option<Id>> {
+        Ok(
+            sqlx::query("SELECT user_id FROM auth_sessions WHERE id = ? AND kind = 'mcp'")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|e| Error::Internal(format!("mcp token owner: {e}")))?
+                .map(|r| r.get::<String, _>("user_id")),
+        )
+    }
+
     /// Replace exactly one outward MCP token while preserving its owner, label,
     /// and scope. No other token is touched. Returns `None` when `id` does not
     /// identify a `kind='mcp'` token.
+    ///
+    /// One transaction: the `DELETE … RETURNING` is the guard and runs first, the
+    /// new token is inserted only when it removed a row, and both commit
+    /// together. A failed insert therefore leaves the old token valid (no live
+    /// credential nobody holds), and two concurrent rotations of the same id
+    /// mint one token, not two — the loser's delete finds no row.
     pub async fn rotate_mcp_token(&self, id: &Id) -> Result<Option<(String, McpTokenInfo)>> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| Error::Internal(format!("rotate mcp token: {e}")))?;
         let row = sqlx::query(
-            "SELECT user_id, label, mcp_scope
-             FROM auth_sessions
-             WHERE id = ? AND kind = 'mcp'",
+            "DELETE FROM auth_sessions
+             WHERE id = ? AND kind = 'mcp'
+             RETURNING user_id, label, mcp_scope, token_hash",
         )
         .bind(id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await
-        .map_err(|e| Error::Internal(format!("rotate mcp token (lookup): {e}")))?;
+        .map_err(|e| Error::Internal(format!("rotate mcp token (delete old): {e}")))?;
         let Some(row) = row else {
+            // Dropping `tx` rolls back the (empty) transaction.
             return Ok(None);
         };
 
         let user_id: Id = row.get("user_id");
         let label: Option<String> = row.get("label");
         let raw_scope: Option<String> = row.get("mcp_scope");
+        let old_hash: String = row.get("token_hash");
         let scope = raw_scope
             .as_deref()
             .and_then(|s| serde_json::from_str::<McpScope>(s).ok())
             .unwrap_or_else(McpScope::unrestricted);
-        let (token, info) = self
-            .issue_mcp_token_with_scope(&user_id, label.as_deref(), &scope)
-            .await?;
-
-        sqlx::query("DELETE FROM auth_sessions WHERE id = ? AND kind = 'mcp'")
-            .bind(id)
-            .execute(&self.pool)
+        let (token, info) =
+            Self::insert_mcp_token(&mut tx, &user_id, label.as_deref(), &scope).await?;
+        tx.commit()
             .await
-            .map_err(|e| Error::Internal(format!("rotate mcp token (delete old): {e}")))?;
+            .map_err(|e| Error::Internal(format!("rotate mcp token (commit): {e}")))?;
+        self.evict_hash(&old_hash);
         self.evict_user(&user_id);
+        signal_revocation();
         Ok(Some((token, info)))
     }
 
@@ -2399,6 +2446,68 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn mcp_token_owner_names_the_owner_of_mcp_tokens_only() {
+        let pool = mem_pool().await;
+        let repo = AuthRepo::new(pool.clone());
+        let alice = seed_user(&pool, "owner-alice").await;
+        let (_t, info) = repo
+            .issue_mcp_token_with_scope(&alice, Some("a"), &McpScope::unrestricted())
+            .await
+            .unwrap();
+        assert_eq!(repo.mcp_token_owner(&info.id).await.unwrap(), Some(alice));
+        assert_eq!(repo.mcp_token_owner(&Id::from("nope")).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn rotate_mcp_token_failed_insert_keeps_the_old_token() {
+        let pool = mem_pool().await;
+        let repo = AuthRepo::new(pool.clone());
+        let alice = seed_user(&pool, "rotate-fail-alice").await;
+        let (old_token, info) = repo
+            .issue_mcp_token_with_scope(&alice, Some("a1"), &McpScope::unrestricted())
+            .await
+            .unwrap();
+        // Make every later insert fail, AFTER the guard delete has run.
+        sqlx::query(
+            "CREATE TRIGGER fail_mcp_insert BEFORE INSERT ON auth_sessions
+             BEGIN SELECT RAISE(ABORT, 'disk full'); END",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert!(repo.rotate_mcp_token(&info.id).await.is_err());
+        // Rolled back: the old token still authenticates and is still listed,
+        // and no second (orphaned) token exists.
+        assert_eq!(
+            repo.authenticate(&old_token)
+                .await
+                .unwrap()
+                .effective_user
+                .id,
+            alice
+        );
+        let listed = repo.list_mcp_tokens().await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, info.id);
+    }
+
+    #[tokio::test]
+    async fn rotate_mcp_token_twice_on_the_same_id_mints_one_token() {
+        let pool = mem_pool().await;
+        let repo = AuthRepo::new(pool.clone());
+        let alice = seed_user(&pool, "rotate-twice-alice").await;
+        let (_old, info) = repo
+            .issue_mcp_token_with_scope(&alice, Some("a1"), &McpScope::unrestricted())
+            .await
+            .unwrap();
+        assert!(repo.rotate_mcp_token(&info.id).await.unwrap().is_some());
+        // The second rotation of the (now deleted) id finds no row and mints
+        // nothing, so exactly one live token remains.
+        assert!(repo.rotate_mcp_token(&info.id).await.unwrap().is_none());
+        assert_eq!(repo.list_mcp_tokens().await.unwrap().len(), 1);
     }
 
     #[tokio::test]

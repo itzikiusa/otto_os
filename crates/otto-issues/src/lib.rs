@@ -3,6 +3,7 @@
 
 pub mod adf;
 pub mod adf_check;
+mod atlassian;
 pub mod confluence;
 pub mod http;
 pub mod issue_create;

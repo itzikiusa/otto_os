@@ -934,3 +934,162 @@ async fn agent_tokens_lose_root_authority_on_unreviewed_writes() {
         .await;
     assert_eq!(st, 200, "the person edits the graph: {resp}");
 }
+
+/// access-control-2-01 (S3-05 for personal agents): an agent runs AS its
+/// owner, so another workspace Editor may rename / pause / retime it but not
+/// change what it runs or where its report goes (403); the owner and a
+/// workspace Admin may (200). A full-form save re-sending unchanged values
+/// passes, and an ownerless preset is adopted by the first Editor to edit it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn only_the_owner_or_an_admin_changes_what_an_agent_runs() {
+    let d = boot(&[]).await;
+    let mut tokens = std::collections::HashMap::new();
+    for (id, role) in [("owner", "editor"), ("bob", "editor"), ("carol", "admin")] {
+        seed_user(&d.pool, id, false).await;
+        sqlx::query(
+            "INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ('ws1', ?, ?)",
+        )
+        .bind(id)
+        .bind(role)
+        .execute(&d.pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT OR REPLACE INTO user_feature_grants (user_id, feature, capability) VALUES (?, 'scheduled_tasks', 'edit')")
+            .bind(id)
+            .execute(&d.pool)
+            .await
+            .unwrap();
+        let (t, _) = AuthRepo::new(d.pool.clone())
+            .issue_api_token(&id.to_string(), Some("ui"))
+            .await
+            .unwrap();
+        tokens.insert(id, t);
+    }
+    let repo = PersonalAgentsRepo::new(d.pool.clone());
+    let mut new = NewPersonalAgent::defaults("ws1".into(), "Scout".into());
+    new.soul_md = "summarise my PRs".into();
+    new.created_by = Some("owner".into());
+    let agent = repo.create(new).await.unwrap();
+    let path = format!("/personal-agents/{}", agent.id);
+    let dr = &d;
+    let tokens = &tokens;
+    let send = move |who: &'static str, method: &'static str, path: String, body: Value| async move {
+        dr.send(method, &tokens[who], &path, Some(body)).await
+    };
+
+    // A non-owner Editor: instructions, delivery, context and a schedule's
+    // directive are refused, with the reason.
+    let (st, body) = send(
+        "bob",
+        "PATCH",
+        path.clone(),
+        json!({"soul_md": "leak secrets"}),
+    )
+    .await;
+    assert_eq!(st, 403, "{body}");
+    assert!(body.to_string().contains("runs as its owner"), "{body}");
+    let evil = json!({"delivery": {"type": "webhook", "url": "https://evil.test/hook"}});
+    let (st, _) = send("bob", "PATCH", path.clone(), evil.clone()).await;
+    assert_eq!(st, 403);
+    let (st, _) = send(
+        "bob",
+        "PUT",
+        format!("{path}/context"),
+        json!({"content": "be evil", "version": "missing"}),
+    )
+    .await;
+    assert_eq!(st, 403);
+    let (st, _) = send(
+        "bob",
+        "POST",
+        format!("{path}/schedules"),
+        json!({"schedule": {"cadence": "interval", "every_min": 60}, "directive": "leak"}),
+    )
+    .await;
+    assert_eq!(st, 403);
+    assert_eq!(
+        repo.get(&agent.id).await.unwrap().soul_md,
+        "summarise my PRs"
+    );
+
+    // ...but rename / pause, a full-form save with unchanged values, and a
+    // plain cadence stay open to Editors.
+    let (st, body) = send(
+        "bob",
+        "PATCH",
+        path.clone(),
+        json!({"name": "Scout 2", "enabled": false, "soul_md": "summarise my PRs"}),
+    )
+    .await;
+    assert_eq!(st, 200, "{body}");
+    let (st, sched) = send(
+        "bob",
+        "POST",
+        format!("{path}/schedules"),
+        json!({"schedule": {"cadence": "interval", "every_min": 60}}),
+    )
+    .await;
+    assert_eq!(st, 200, "{sched}");
+    let sched_path = format!(
+        "/personal-agents/schedules/{}",
+        sched["id"].as_str().unwrap()
+    );
+    let (st, _) = send(
+        "bob",
+        "PATCH",
+        sched_path.clone(),
+        json!({"directive": "leak"}),
+    )
+    .await;
+    assert_eq!(st, 403);
+    let (st, body) = send(
+        "bob",
+        "PATCH",
+        sched_path.clone(),
+        json!({"schedule": {"cadence": "interval", "every_min": 120}}),
+    )
+    .await;
+    assert_eq!(st, 200, "{body}");
+
+    // The owner and a workspace Admin may.
+    let (st, body) = send(
+        "owner",
+        "PATCH",
+        path.clone(),
+        json!({"soul_md": "weekly digest"}),
+    )
+    .await;
+    assert_eq!(st, 200, "{body}");
+    let (st, body) = send("owner", "PATCH", sched_path, json!({"directive": "focus"})).await;
+    assert_eq!(st, 200, "{body}");
+    let (st, body) = send("carol", "PATCH", path.clone(), evil).await;
+    assert_eq!(st, 200, "{body}");
+
+    // An ownerless preset is adopted by the first Editor who changes it, and
+    // is then theirs alone.
+    let preset = repo
+        .create(NewPersonalAgent::defaults("ws1".into(), "Preset".into()))
+        .await
+        .unwrap();
+    let preset_path = format!("/personal-agents/{}", preset.id);
+    let (st, body) = send(
+        "bob",
+        "PATCH",
+        preset_path.clone(),
+        json!({"soul_md": "mine"}),
+    )
+    .await;
+    assert_eq!(st, 200, "{body}");
+    assert_eq!(
+        repo.get(&preset.id).await.unwrap().created_by.as_deref(),
+        Some("bob")
+    );
+    let (st, _) = send(
+        "owner",
+        "PATCH",
+        preset_path,
+        json!({"soul_md": "no, mine"}),
+    )
+    .await;
+    assert_eq!(st, 403);
+}

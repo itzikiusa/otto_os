@@ -337,8 +337,15 @@ const SUSPEND_REASONS: Record<string, string> = {
   released: 'released to free memory',
 };
 
-function agoLabel(ms: number): string {
-  const s = Math.max(0, Math.floor(ms / 1000));
+/** Formats a past instant (epoch ms) as a relative label. In the UI pass
+ *  `rel` from `lib/stores/now.svelte` — the one relative-time formatter
+ *  (content.md §7) — so the note reads like every other "3h ago". */
+export type AgoFormatter = (atMs: number) => string;
+
+/** Fallback for callers without the shared clock (node tests; unit/status.test.ts
+ *  pins this wording). The UI passes `rel` instead. */
+function agoLabel(atMs: number, nowMs: number): string {
+  const s = Math.max(0, Math.floor((nowMs - atMs) / 1000));
   if (s < 60) return 'just now';
   if (s < 3600) return `${Math.floor(s / 60)}m ago`;
   if (s < 86_400) return `${Math.floor(s / 3600)}h ago`;
@@ -349,16 +356,20 @@ function agoLabel(ms: number): string {
  * "Suspended 3h ago · idle too long" from `meta.suspended`, or null when the
  * session carries no (readable) stamp. Callers show it only while the session
  * is actually dormant — a resume clears the stamp, but a stale meta copy must
- * never relabel a live session.
+ * never relabel a live session. `ago` formats the stamp (pass `rel`).
  */
-export function suspendedNote(meta: Record<string, unknown> | null | undefined, nowMs: number): string | null {
+export function suspendedNote(
+  meta: Record<string, unknown> | null | undefined,
+  nowMs: number,
+  ago?: AgoFormatter,
+): string | null {
   const raw = meta?.suspended;
   if (!raw || typeof raw !== 'object') return null;
   const s = raw as SuspendedMeta;
   const at = typeof s.at === 'string' ? Date.parse(s.at) : NaN;
   const why = typeof s.reason === 'string' ? (SUSPEND_REASONS[s.reason] ?? null) : null;
   if (Number.isNaN(at) && !why) return null;
-  const when = Number.isNaN(at) ? '' : ` ${agoLabel(nowMs - at)}`;
+  const when = Number.isNaN(at) ? '' : ` ${ago ? ago(at) : agoLabel(at, nowMs)}`;
   return `Suspended${when}${why ? ` · ${why}` : ''}`;
 }
 

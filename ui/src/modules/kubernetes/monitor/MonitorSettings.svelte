@@ -5,6 +5,7 @@
   // retention, and a "Test probes" dry run that shows what one pod parses to.
   // Client-side validation mirrors the daemon's limits so most mistakes never
   // round-trip.
+  import { rel } from '../../../lib/stores/now.svelte';
   import { loadErrorText } from '../../../lib/loadError';
   import { toastError } from '../../../lib/toastError';
   import { kindLabel } from '../../../lib/labels';
@@ -184,7 +185,7 @@
     running = true;
     try {
       status = await k8sApi.monitorRun(cluster.id);
-      toasts.success('Cycle finished', collectorLine(status, true));
+      toasts.success('Cycle finished', collectorLine(status, true, rel));
       if (cfg) onsaved?.(cfg, status);
     } catch (e) {
       toastError('Couldn’t run the monitor cycle', e);
@@ -317,7 +318,7 @@
           {/if}
         </div>
       </div>
-      <div class="dim status">{collectorLine(status, cfg.enabled)}</div>
+      <div class="dim status">{collectorLine(status, cfg.enabled, rel)}</div>
       <div class="dim">The switch saves immediately. Use Save for changes to the settings below.</div>
       {#if toggleError}<p class="error" role="alert">Couldn’t update monitoring: {toggleError} Try the switch again.</p>{/if}
       {#if rbacMessage(status?.metrics_server)}

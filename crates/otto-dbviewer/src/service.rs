@@ -3433,7 +3433,23 @@ impl DbViewerService {
             .await?;
         self.ensure_widget_statement_reads(&w.connection_id, &w.statement)
             .await?;
+        if let Some(dash) = w.dashboard_id.as_deref() {
+            self.ensure_dashboard_in_workspace(&w.workspace_id, dash)
+                .await?;
+        }
         self.repo.create_widget(w).await
+    }
+
+    /// A widget may only be filed under a dashboard of its OWN workspace — an
+    /// unknown or foreign id would leave it invisible on every screen (no FK
+    /// guards `db_widgets.dashboard_id`).
+    async fn ensure_dashboard_in_workspace(&self, ws: &Id, dashboard_id: &str) -> Result<()> {
+        match self.repo.dashboard_workspace(dashboard_id).await? {
+            Some(owner) if &owner == ws => Ok(()),
+            _ => Err(Error::Invalid(format!(
+                "dashboard '{dashboard_id}' does not exist in this workspace"
+            ))),
+        }
     }
 
     /// Widgets re-run unattended on every refresh, so only a statement the
@@ -3462,10 +3478,16 @@ impl DbViewerService {
         mapping: Option<&Value>,
         options: Option<&Value>,
     ) -> Result<Widget> {
-        if let Some(statement) = statement {
+        if statement.is_some() || matches!(dashboard_id, Some(Some(_))) {
             let widget = self.repo.get_widget(id).await?;
-            self.ensure_widget_statement_reads(&widget.connection_id, statement)
-                .await?;
+            if let Some(statement) = statement {
+                self.ensure_widget_statement_reads(&widget.connection_id, statement)
+                    .await?;
+            }
+            if let Some(Some(dash)) = dashboard_id {
+                self.ensure_dashboard_in_workspace(&widget.workspace_id, dash)
+                    .await?;
+            }
         }
         self.repo
             .update_widget(id, dashboard_id, title, statement, viz, mapping, options)

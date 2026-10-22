@@ -44,7 +44,7 @@ the token kind, and the routes.
 | **Outbound client** | `otto-mcp` connects out to each server: `stdio` (spawn a command) or `http` (Streamable-HTTP, SSRF-pinned). |
 | **Governance** | One pipeline (`McpService::invoke`): allowlist → per-tool permission → policy → risk/approval → dry-run → execute → guaranteed audit → stats. |
 | **Outward server** | `ottod mcp-server` (stdio) **and** the Streamable-HTTP transport `POST /mcp/http`, authenticated by a **restricted `kind='mcp'` token** that can reach only the governed choke point. Reachable over loopback HTTP and (opt-in) the TLS `network_listener`. |
-| **Scoped tokens** | **Multiple** MCP tokens, each owned by a user and carrying an **McpScope** (tools / read-only / workspace pin) enforced at the choke point — different users get different access. Tokens can be rotated or revoked individually (`mcp:admin`). |
+| **Scoped tokens** | **Multiple** MCP tokens, each owned by a user and carrying an **McpScope** (tools / read-only / workspace pin) enforced at the choke point — different users get different access. Tokens can be revoked individually (`mcp:admin`) and rotated by `mcp:admin` when the caller owns the token or is root. |
 | **Gateway** | `ottod mcp-tools` surfaces governed downstream tools (namespaced `mcp__<server>__<tool>`) and proxies them through the same pipeline. |
 | **Persistence** | SQLite (migration **0077**): augmented `mcp_servers` + `mcp_tools`, `mcp_allowlist`, `mcp_policies`, `mcp_call_log`, `mcp_approvals`. |
 | **RBAC** | `Feature::Mcp` (`mcp`): reads = **View**, mutations/invoke = **Edit**, posture (policy writes/import, outward config, approvals) = **Admin**; stdio registration = **Admin** in-handler. |
@@ -287,7 +287,7 @@ over the API (`mcp:admin`):
 ```
 GET    /api/v1/mcp/tokens            # list all (no secrets), with owner + scope
 POST   /api/v1/mcp/tokens            # {user_id?, label?, scope?} → {token, info} (once)
-POST   /api/v1/mcp/tokens/{id}/rotate # replace only this token → {token, info, revoked_id} (once)
+POST   /api/v1/mcp/tokens/{id}/rotate # replace only this token → {token, info, revoked_id} (once); owner or root
 DELETE /api/v1/mcp/tokens/{id}       # revoke (evicts the auth cache immediately)
 ```
 
@@ -295,7 +295,8 @@ DELETE /api/v1/mcp/tokens/{id}       # revoke (evicts the auth cache immediately
 
 Choose **Rotate** on that token's row and confirm. Otto preserves its owner, label,
 and scope, immediately revokes only the selected old secret, and shows the replacement
-secret once. Every other token — including tokens owned by the same user — keeps
+secret once. You can rotate your own tokens; only root can rotate a token another user
+owns (the new secret signs in as that owner), and anyone else gets 403. Every other token — including tokens owned by the same user — keeps
 working. Update the external client before dismissing the one-time secret.
 
 ### 3.3 The outward tool catalog — every Otto feature
@@ -866,7 +867,7 @@ the workspace role.
 | `POST /mcp/tool-calls` | **CP26a** — the stdio bridge's audit append, stamped with the calling session | session credential only |
 | `GET /mcp/gateway/tools` (`?workspace_id=`) | Namespaced governed downstream tools | View |
 | `POST /mcp/gateway/invoke` | Proxy a downstream call through the pipeline | Edit |
-| `POST /mcp/tokens/{id}/rotate` | **CP37** — rotate only the selected token; returns its new secret once | **Admin** |
+| `POST /mcp/tokens/{id}/rotate` | **CP37** — rotate only the selected token; returns its new secret once | **Admin**, and the token's owner or root |
 | `GET /workspaces/{wid}/mcp/session-attach` | **CP38** — read whether new sessions receive Otto's built-in server | View + workspace Viewer |
 | `PATCH /workspaces/{wid}/mcp/session-attach` | **CP39** — set `{enabled}` in the per-workspace settings map | **Admin** + workspace Editor |
 | `GET /workspaces/{wid}/mcp/code-search` (`?q=&path=&max=`) | Pure-Rust confined code search | View |

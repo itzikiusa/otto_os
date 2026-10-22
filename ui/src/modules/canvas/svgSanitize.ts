@@ -11,6 +11,7 @@
 // exercise the hook without a DOM; the caller passes the DOMPurify instance.
 
 import type { Config, DOMPurify, UponSanitizeAttributeHookEvent } from 'dompurify';
+import { escapeHtml } from '../../lib/html.ts';
 
 /** DOMPurify config: SVG (with filters) + the HTML profile, which D2 needs for
  *  `<foreignObject>` markdown labels; `<style>` stays (D2 themes via classes)
@@ -341,7 +342,7 @@ function decodeStyleText(text: string): string {
 }
 
 function encodeStyleText(text: string): string {
-  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return escapeHtml(text);
 }
 
 /** Scope every `<style>` in a (sanitized) D2 SVG to its diagram; without a

@@ -104,7 +104,7 @@ All paths below are under `/api/v1`. The authoritative request/response fields a
 | `POST /workspaces/{id}/goal-loops/define` | Draft/refine a definition with a managed definer. |
 | `POST /workspaces/{id}/goal-loops` | Save the configured goal. |
 | `GET /goal-loops/{id}` | Read loop, ledger and iteration details. |
-| `PATCH /goal-loops/{id}` | Rename, adjust limits, or edit draft configuration. |
+| `PATCH /goal-loops/{id}` | Rename, adjust limits, or edit draft configuration. Any Editor may rename or adjust limits; changing `config` (the prompts and roles the loop runs with under its creator's identity) needs the creator, a workspace Admin or root, else 403. |
 | `DELETE /goal-loops/{id}` | Stop and remove history while retaining files. |
 | `POST /goal-loops/{id}/start` | Start a draft. |
 | `POST /goal-loops/{id}/pause` | Interrupt work and bank active time. |
@@ -120,6 +120,7 @@ All paths below are under `/api/v1`. The authoritative request/response fields a
 
 | Symptom | What to inspect or do |
 | --- | --- |
+| Saving a draft's configuration returns 403 | Only the loop's creator, a workspace Admin or root can change `config`; another Editor can still rename it, adjust limits, and pause, resume or stop it. |
 | Build cannot create its worktree | Confirm the repository has a commit and the retained path/branch is not occupied by unrelated work. Otto refuses destructive replacement. |
 | Definer/role fails during startup | Inspect provider authentication/configuration and the managed session. The phase deadline includes startup. |
 | A role stays running after its chat reply | The role must finish its validated result file; a chat reply alone does not satisfy that protocol. |

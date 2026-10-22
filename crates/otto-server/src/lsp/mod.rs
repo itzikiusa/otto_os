@@ -319,10 +319,15 @@ async fn lsp_ws(
     let root = std::fs::canonicalize(root_path)
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or(root);
-    // 5. The caller must be able to see a workspace containing `root` (the
-    //    server indexes — and answers queries about — everything under it).
-    //    Root users own the host, like the Files routes.
+    // 5. The caller must be able to see a workspace — or a repo registered in
+    //    one — containing `root` (the server indexes, and answers queries
+    //    about, everything under it). Root users own the host, like the Files
+    //    routes. A non-root root may never sit in Otto's data dir or a
+    //    credential dir, whatever workspace contains it (the `/fs/*` deny).
     if !user.is_root {
+        if let Some(why) = secret_root_denial(std::path::Path::new(&root)) {
+            return ws_problem(StatusCode::FORBIDDEN, "forbidden", &why);
+        }
         match root_visible_to(&st.ctx, &user, std::path::Path::new(&root)).await {
             Ok(true) => {}
             Ok(false) => {
@@ -357,21 +362,28 @@ async fn lsp_ws(
 }
 
 /// Is canonical `root` equal to — or inside — the canonical root of a
-/// workspace `user` is a member of? The scratch workspace (every user is an
-/// implicit Editor; its root is the daemon user's HOME) matches only EXACTLY,
-/// so it cannot turn into "anything under ~".
+/// workspace `user` is a member of, or of a repo registered in one? A
+/// registered repo may live outside its workspace root (the agent-cwd check,
+/// `SessionManager::check_agent_cwd`, accepts it for the same reason: a person
+/// chose it for this workspace, and `/fs/read` already serves its files to
+/// this user). The scratch workspace (every user is an implicit Editor; its
+/// root is the daemon user's HOME) matches only EXACTLY, so it cannot turn
+/// into "anything under ~".
 async fn root_visible_to(
     ctx: &ServerCtx,
     user: &otto_core::domain::User,
     root: &std::path::Path,
 ) -> otto_core::Result<bool> {
-    let member_roots: Vec<String> = ctx
-        .workspaces
-        .list_for_user(&user.id)
-        .await?
-        .into_iter()
-        .map(|(w, _)| w.root_path)
-        .collect();
+    let workspaces = ctx.workspaces.list_for_user(&user.id).await?;
+    let git = otto_state::GitStore::new(ctx.pool.clone());
+    let mut member_roots: Vec<String> = Vec::with_capacity(workspaces.len());
+    for (w, _) in workspaces {
+        match git.list_repos(&w.id).await {
+            Ok(repos) => member_roots.extend(repos.into_iter().map(|r| r.path)),
+            Err(e) => tracing::warn!(workspace = %w.id, "lsp root check: list repos: {e}"),
+        }
+        member_roots.push(w.root_path);
+    }
     let scratch_root = ctx
         .workspaces
         .get(&otto_core::domain::SCRATCH_WORKSPACE_ID.to_string())
@@ -385,6 +397,19 @@ async fn root_visible_to(
     })
     .await
     .map_err(|e| otto_core::Error::Internal(format!("lsp root check: {e}")))
+}
+
+/// The non-root secret deny of `/fs/*` (`non_root_canonical_denied`), applied
+/// to a canonical LSP root: Otto's data dir, the credential dirs (`~/.ssh`, …)
+/// and key-like file names. `None` = allowed.
+fn secret_root_denial(canonical: &std::path::Path) -> Option<String> {
+    use otto_core::secret_paths as sp;
+    (sp::in_protected_dir(canonical) || sp::is_denied_file(canonical)).then(|| {
+        format!(
+            "{} holds credentials or Otto's own state; only the root user can open it",
+            canonical.display()
+        )
+    })
 }
 
 fn canonical_of(p: &str) -> Option<std::path::PathBuf> {
@@ -511,9 +536,35 @@ mod root_tests {
         let evil = d.path().join("repo-evil");
         std::fs::create_dir_all(&evil).unwrap();
         assert!(!root_under_any(&canon(&evil), &roots));
+        // A repo registered in a member workspace but OUTSIDE its root is
+        // listed alongside the roots, so it (and its subtree) opens; a path in
+        // neither stays refused.
+        let repo = d.path().join("outside-repo");
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        let with_repo = vec![
+            ws.to_string_lossy().into_owned(),
+            repo.to_string_lossy().into_owned(),
+        ];
+        assert!(!root_under_any(&canon(&repo), &roots));
+        assert!(root_under_any(&canon(&repo), &with_repo));
+        assert!(root_under_any(&canon(&repo.join("src")), &with_repo));
+        assert!(!root_under_any(&canon(&other), &with_repo));
         // Scratch (HOME) matches exactly, never its subtree.
         let home = d.path().to_string_lossy().into_owned();
         assert!(canonical_eq(&canon(d.path()), &home));
         assert!(!canonical_eq(&canon(&other), &home));
+    }
+
+    #[test]
+    fn lsp_root_keeps_the_fs_secret_deny() {
+        let Ok(home) = std::env::var("HOME") else {
+            return;
+        };
+        let home = std::path::PathBuf::from(home);
+        assert!(secret_root_denial(&home.join(".ssh")).is_some());
+        assert!(secret_root_denial(&home.join(".ssh/keys")).is_some());
+        let d = tempfile::tempdir().unwrap();
+        let plain = std::fs::canonicalize(d.path()).unwrap();
+        assert!(secret_root_denial(&plain).is_none());
     }
 }

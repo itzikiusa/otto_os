@@ -225,9 +225,18 @@
     handoverFromId ? (ws.getSession(handoverFromId) ?? null) : null,
   );
   // The source may not be a sidebar session (the list carries only those):
-  // fetch it by id once so the breadcrumb resolves.
+  // fetch it by id once so the breadcrumb resolves. Once per id: `getSession`
+  // reads a Map rebuilt on every `sessions` write (status flushes included),
+  // and a source that isn't listable here (deleted, other workspace, device
+  // isolation) never lands — without the guard every status burst re-GETs it.
+  let ensuredFrom: string | null = null;
   $effect(() => {
-    if (handoverFromId && !ws.getSession(handoverFromId)) void ws.ensureSession(handoverFromId);
+    const id = handoverFromId;
+    if (!id || id === ensuredFrom) return;
+    if (!untrack(() => ws.getSession(id))) {
+      ensuredFrom = id;
+      void ws.ensureSession(id);
+    }
   });
   const handoverPending = $derived(session?.meta?.handover_pending === true);
 

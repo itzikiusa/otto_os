@@ -93,6 +93,25 @@
 
   const sessionStatus = $derived(thread.session_id ? (ws.statusMap[thread.session_id] ?? null) : null);
   const working = $derived(thread.status === 'working' || sessionStatus === 'working' || pending.length > 0);
+  // Screen-reader announcements on the edges only ("working" → "replied"),
+  // through the always-mounted region at the end of the view. A thread switch
+  // resets the edge so opening an idle thread doesn't announce a reply.
+  let announce = $state('');
+  let wasWorking = false;
+  let announcedFor = '';
+  $effect(() => {
+    const w = working;
+    const id = thread.id;
+    if (id !== announcedFor) {
+      announcedFor = id;
+      wasWorking = w;
+      announce = '';
+      return;
+    }
+    if (wasWorking && !w) announce = 'Otto replied';
+    else if (!wasWorking && w) announce = 'Otto is working';
+    wasWorking = w;
+  });
 
   const loading = $derived(!index || (index.state === 'loading' && !index.data.length));
   const failed = $derived(index?.state === 'error' && !index.data.length);
@@ -134,8 +153,8 @@
   <div class="scroll" bind:this={listEl} onscroll={onScroll} data-testid="assistant-thread">
     <div class="col">
       {#if loading}
-        <div class="state" aria-busy="true" aria-label="Loading the conversation">
-          <Skeleton rows={4} height={44} />
+        <div class="state">
+          <Skeleton rows={4} height={44} label="the conversation" />
         </div>
       {:else if failed}
         <LoadState variant="compact" what="this conversation" error={index?.error || 'No details were reported.'} empty onretry={() => void assistant.loadTurns(thread.id)} />
@@ -193,13 +212,14 @@
           </div>
         {/each}
         {#if working}
-          <p class="working" role="status">
+          <p class="working">
             <LiveWorkingDot size={7} label="Otto is working…" />
           </p>
         {/if}
       {/if}
     </div>
   </div>
+  <div class="sr-only" aria-live="polite" aria-atomic="true">{announce}</div>
   {#if !atBottom && !loading}
     <button class="jump btn small" onclick={toBottom}><Icon name="arrowDown" size={12} /> Jump to latest</button>
   {/if}

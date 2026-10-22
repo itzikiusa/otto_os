@@ -117,7 +117,7 @@
         </button>
       </div>
       {#if sidePane.status === 'loading'}
-        <div class="sp-skeleton" aria-busy="true" aria-label={`Loading ${label}`}>
+        <div class="sp-skeleton" role="status" aria-busy="true" aria-label={`Loading ${label}`}>
           <Skeleton rows={6} height={28} />
         </div>
       {:else}

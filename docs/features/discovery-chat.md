@@ -187,12 +187,9 @@ workspace from the chat → its story. Persistence: `otto_state::product_chat`.
 
 Related Product routes the chat hands off to:
 
-- **The draft write** behind `apply_draft`: api.md lists it as
-  `POST /product/stories/{sid}/draft (PATCH)` — and the **real HTTP method is
-  `PATCH`** (`crates/otto-product/src/http.rs` registers it with `patch(update_draft_body)`).
-  The contract table writes it in the "POST" column with a `(PATCH)` annotation;
-  the code is PATCH. `apply_draft` reaches the same `update_draft_body` service
-  method server-side.
+- **The draft write** behind `apply_draft`: `PATCH /product/stories/{sid}/draft`
+  (`UpdateDraftReq {title, body_md}` → `ProductStoryDetail`); `apply_draft`
+  reaches the same `update_draft_body` service method server-side.
 - **Publish**: `POST /product/stories/{sid}/publish-as-rfc` and
   `POST /product/stories/{sid}/publish-as-story`.
 - **Undo of created items**: `DELETE /product/questions/{qid}` and

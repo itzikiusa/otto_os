@@ -1,7 +1,8 @@
 # Otto API Contract — /api/v1 (FROZEN)
 
 All DTO names refer to types in `crates/otto-core/src/api.rs` (Rust) mirrored in
-`ui/src/lib/api/types.ts` (TS). JSON: snake_case fields, RFC3339 timestamps, ULID ids.
+`ui/src/lib/api/types.ts` (TS; an export-* barrel over `ui/src/lib/api/types/<area>.ts` —
+import from the barrel, edit the area file). JSON: snake_case fields, RFC3339 timestamps, ULID ids.
 Auth: `Authorization: Bearer <token>` unless marked public. Errors: HTTP status per
 `otto_core::Error` variant + body `Problem{code,message}`.
 
@@ -67,7 +68,7 @@ connection library unusable for every non-root account.)
 | 4 | POST /api/v1/auth/login | public | LoginReq | LoginResp (401 on bad creds/disabled; 429 + `Retry-After` when the client (`ip\|user`, or `ip:<ip or IPv6 /64>` across all usernames — 20 failures) or the username is locked, or when the throttle map is saturated and the attempt can't be tracked (fail closed; never the desktop); 503 `busy` + `Retry-After: 1` when the bounded argon2 verifier (4 concurrent, off the async workers) stays saturated for 2 s) |
 | 5 | POST /api/v1/auth/logout | member | — | 204 |
 | 6 | GET /api/v1/auth/me | member | — | `MeResp {user, real_user, impersonating}` — `user` = effective (auth target); `real_user` = token owner (= `user` for normal sessions); `impersonating: bool` |
-| 7 | GET /api/v1/users | root | — | `User[]` |
+| 7 | GET /api/v1/users | Users:Admin or root (feature guard) | — | `User[]` (no secrets; the same ids/usernames `/admin/sessions` shows that role) |
 | 8 | POST /api/v1/users | root | CreateUserReq | User (409 dup username) |
 | 9 | PATCH /api/v1/users/{id} | root | UpdateUserReq `{display_name?, password?, disabled?, current_password?}` | User. Changing your OWN password requires `current_password` (400 when missing, 403 when wrong — counted on the login throttle's username key; never 401). Root resetting another user's password does not. |
 | 10 | DELETE /api/v1/users/{id} | root | — | 204 (soft: sets disabled; root user cannot be disabled → 400) |
@@ -128,7 +129,7 @@ connection library unusable for every non-root account.)
 | 53 | POST /api/v1/repos/{id}/prs/{number}/comments | ws editor | NewPrCommentReq `{body, path?, line?, in_reply_to?, side?: "old"\|"new" (default new; a deleted line sends "old" with its OLD number), old_line? (the row's old number — GitLab needs both for a context line), commit_id? (head sha the reviewer saw; GitHub skips the PR lookup)}` | PrComment (carries `resolved: bool` + `thread_id?: string` on thread heads — Bitbucket comment id, GitLab discussion id, GitHub GraphQL reviewThread node id; inline comments add `side?: "old"\|"new"` and `outdated: bool` — outdated = the forge no longer maps it onto the diff, `line` is then the original line) |
 | 53b | POST /api/v1/repos/{id}/prs/{number}/comments/{cid}/resolve | ws editor | ResolvePrThreadReq `{"resolved": bool}` — `{cid}` is `PrComment.thread_id`; `false` reopens | 204 |
 | 54 | POST /api/v1/repos/{id}/prs/{number}/approve | ws editor | — | 204 |
-| 55 | POST /api/v1/repos/{id}/prs/{number}/merge | ws editor | MergePrReq `{strategy, delete_source_branch?, expected_head_sha?}` | 204 — `expected_head_sha` (the `head_sha` the user reviewed) pins the merge: a PR whose head moved since is refused with **409 "PR changed — re-check"** (GitHub/GitLab: forwarded as the forge's `sha` pin, atomic; GitLab `rebase` and Bitbucket: the PR head is read and compared by case-insensitive prefix — Bitbucket abbreviates — before merging). Absent ⇒ unpinned. `delete_source_branch:true` also drops the source branch (GitHub: a follow-up ref delete after the merge only for a verified same-repository head; fork/missing-head-repository cleanup is skipped; GitLab: `should_remove_source_branch`; Bitbucket: `close_source_branch`). GitHub's follow-up delete is best-effort — a refused delete (protected branch, missing scope) is logged and never fails a merge that landed |
+| 55 | POST /api/v1/repos/{id}/prs/{number}/merge | ws editor | MergePrReq `{strategy, delete_source_branch?, expected_head_sha?}` | 204 — `expected_head_sha` (the `head_sha` the user reviewed) pins the merge: a PR whose head moved since is refused with **409 "PR changed — re-check"** (GitHub/GitLab: forwarded as the forge's `sha` pin, atomic; GitLab `rebase` and Bitbucket: the PR head is read and compared by case-insensitive prefix — Bitbucket abbreviates — before merging). Absent ⇒ unpinned. `delete_source_branch:true` also drops the source branch (GitHub: a follow-up ref delete after the merge only for a verified same-repository head; fork/missing-head-repository cleanup is skipped; GitLab: `should_remove_source_branch`; Bitbucket: `close_source_branch`). GitHub's follow-up delete is best-effort — a refused delete (protected branch, missing scope) is logged and never fails a merge that landed. **Bitbucket async merge:** when Bitbucket answers `202 Accepted`, the daemon polls the same-origin `Location` task-status URL (same credentials) for up to ~60 s: `SUCCESS` → 204; `FAILED` → **409** with Bitbucket's merge-failure reason; still pending (or no same-origin `Location`) → **409** "Bitbucket accepted the merge but hasn't finished it yet. Refresh the PR in a moment." |
 | 56 | POST /api/v1/repos/{id}/prs/{number}/decline | ws editor | — | 204 |
 | 56b | GET /api/v1/repos/{id}/prs/{number}/checks | ws viewer | — | `PrChecksResp {ci: CiStatus, checks: PrCheck[] {name, state, url?, started_at?, completed_at?}}` |
 | 56c | GET /api/v1/repos/{id}/prs/{number}/readiness | ws viewer | — | `PrReadiness {ci_status, approvals, mergeable, conflicts, review?, unpushed, branch_freshness}` — PR-keyed twin of `/reviews/{id}/merge-readiness`; `unpushed`/`branch_freshness` computed from the local checkout when the source branch exists locally |
@@ -140,7 +141,9 @@ Usage & metrics (embedded ClickHouse; types in `crates/otto-usage`). Reads need
 sessions they created (`scope:"own"`, external sessions excluded)**. Config, install,
 budget writes, `/usage/metrics` and `/usage/ccusage-check` stay root-only. A ClickHouse
 failure on a read returns an error (500) — never a 200 with zero totals.
-- GET /usage/status → UsageStatus (engine + ClickHouse health). For non-root callers
+- GET /usage/status → UsageStatus (engine + ClickHouse health, plus the optional
+  `tailer: {state: running|retrying|stopped, cause?}` — `stopped` only for a corrupt
+  checkpoint). For non-root callers
   `binary`/`version` are null, `data_dir` is `""` and `disk_bytes`/row counts are 0.
   `disk_bytes` comes from `system.parts` (cached 5 min; the directory walk is the fallback
   and runs off the async runtime).
@@ -233,6 +236,14 @@ Notes:
 - PR routes resolve the provider + account from the repo row (`provider`, `git_account_id`);
   if the repo has no provider/account → 400 `invalid`.
 - `/orchestrate` never executes; it only returns a plan. Execution is the separate call #24.
+- Workspace settings (`Workspace.settings`, TS `WorkspaceSettings` in
+  `ui/src/lib/api/types/core.ts`) are a free JSON object on the Rust side, written with
+  `PATCH /workspaces/{id}` `settings_patch` (#13). Keys the UI reads and writes: `notes`
+  (string), `default_provider` (string; `''`/absent = the global default) and `api_client`
+  `{allow_local?: bool, history_max_rows?: u32, history_max_days?: u32,
+  automation_runs_keep?: u32}` (0/absent = no limit; `allow_local` off by default). Unknown
+  keys round-trip untouched; `context` and its fields change only through the workspace
+  context API.
 - Settings keys used in v1: `network_listener` `{enabled:bool, port:u16}`, `providers`
   (provider registry overrides), `default_provider` (string), `cli_auto_update`
   `{enabled:bool, time_of_day:"HH:MM", use_utc:bool, reload_sessions:bool}` (daily
@@ -341,7 +352,7 @@ workspace from the row.
 | 64 | GET /api/v1/swarm/presets | member | — | `SwarmPreset[]` |
 | 65 | GET /api/v1/swarm/swarms/{sid}/agents | ws viewer | — | `SwarmAgent[]` |
 | 66 | POST /api/v1/swarm/swarms/{sid}/agents | ws editor | CreateAgentReq | SwarmAgent |
-| 67 | PATCH /api/v1/swarm/agents/{aid} | ws editor | UpdateAgentReq | SwarmAgent — present fields apply; `schedule: null` clears the schedule, an absent `schedule` keeps it. The schedule's `last_run` / `armed_at` keys are server-owned: an edit carries the stored ones (client values ignored); `armed_at` is re-stamped on create, resume (`enabled` false→true) or a change to `cadence`/`every_min`/`at`/`weekday`/`expr`/`timezone`, and the scheduler fires from `max(last_run, armed_at)`. `at` is read in the schedule's IANA `timezone` (absent = UTC); `every_min` floors at 5 |
+| 67 | PATCH /api/v1/swarm/agents/{aid} | ws editor; a change to `prompt`, `provider`, `model` or `cwd` needs the swarm's creator, a ws admin or root (else 403 "only the swarm's creator or a workspace admin can change an agent's role definition") | UpdateAgentReq | SwarmAgent — present fields apply; `schedule: null` clears the schedule, an absent `schedule` keeps it. The schedule's `last_run` / `armed_at` keys are server-owned: an edit carries the stored ones (client values ignored); `armed_at` is re-stamped on create, resume (`enabled` false→true) or a change to `cadence`/`every_min`/`at`/`weekday`/`expr`/`timezone`, and the scheduler fires from `max(last_run, armed_at)`. `at` is read in the schedule's IANA `timezone` (absent = UTC); `every_min` floors at 5 |
 | 68 | DELETE /api/v1/swarm/agents/{aid} | ws editor | — | 204 |
 | 69 | POST /api/v1/workspaces/{id}/swarm/recruit | ws editor | RecruitReq | RecruitedAgent; 409 if another recruit is already active for the requested swarm |
 | 70 | GET /api/v1/swarm/swarms/{sid}/projects | ws viewer | — | `SwarmProject[]` |
@@ -357,7 +368,7 @@ workspace from the row.
 | 76 | POST /api/v1/swarm/projects/{pid}/tasks | ws editor | CreateTaskReq | SwarmTask |
 | 77 | PATCH /api/v1/swarm/tasks/{tid} | ws editor | UpdateTaskReq | SwarmTask |
 | 78 | DELETE /api/v1/swarm/tasks/{tid} | ws editor | — | 204 |
-| 79 | POST /api/v1/swarm/tasks/{tid}/run | ws editor | — | SwarmRun. 409 when the task is not todo/blocked/backlog, the swarm is aborted or budget-paused/over budget, or the picked agent is busy (another turn / verification) |
+| 79 | POST /api/v1/swarm/tasks/{tid}/run | ws editor | — | SwarmRun. **Turn identity (PC-4):** each turn's agent session is created as the task's human originator — `task.created_by` when it is a user; for an agent-created subtask, the parent task's originator; for seeded (planned) tasks, the plan caller; the swarm's creator only when no human originated the work. Agent sessions are reused per (agent, acting user). 409 when the task is not todo/blocked/backlog, the swarm is aborted or budget-paused/over budget, or the picked agent is busy (another turn / verification) |
 | 80 | GET /api/v1/workspaces/{id}/swarm/runs?swarm_id=&project_id=&agent_id=&status=&lite= | ws viewer | — | `SwarmRun[]` — this workspace's runs only (newest first, ≤ 500). `lite=true` (additive): each run's `result` is omitted (`null`) except `kind='recruit'` runs (the Runs-list "Hire" reads the proposal) — read one run's result via `GET /swarm/runs/{rid}` |
 | 81 | GET /api/v1/swarm/runs/{rid} | ws viewer | — | SwarmRun |
 | 82 | POST /api/v1/swarm/runs/{rid}/stop | ws editor | — | SwarmRun — stops an in-flight run (conditional: a finished run is left as is) AND kills its agent session; the task is parked as `blocked` |
@@ -721,10 +732,10 @@ bearer token. `TrailAppended` / `TasksUpdated` events mirror writes over `/ws/ev
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
-| GET /workspaces/{wid}/sessions/{sid}/trail | ws viewer | — | `TrailEvent[]` (session activity trail) |
-| POST /workspaces/{wid}/sessions/{sid}/trail | ws editor | TrailEvent | 204 (append one trail entry) |
-| GET /workspaces/{wid}/sessions/{sid}/tasks | ws viewer | — | `AgentTask[]` (current task list) |
-| PUT /workspaces/{wid}/sessions/{sid}/tasks | ws editor | `AgentTask[]` | 204 (replace the task list) |
+| GET /workspaces/{wid}/sessions/{sid}/trail | ws viewer + session owner/admin (root) | — | `TrailEvent[]` (session activity trail) |
+| POST /workspaces/{wid}/sessions/{sid}/trail | ws editor + session owner/admin (root) | `AppendTrailReq {source?, kind?, level?, summary, detail?}` | `TrailEvent` (the appended row) |
+| GET /workspaces/{wid}/sessions/{sid}/tasks | ws viewer + session owner/admin (root) | — | `AgentTask[]` (current task list) |
+| PUT /workspaces/{wid}/sessions/{sid}/tasks | ws editor + session owner/admin (root) | `PutTasksReq {tasks: TaskInput[]}` (an object, not a bare array → 422) | `AgentTask[]` (the replaced list) |
 | GET /workspaces/{wid}/activity/summary | ws viewer | — | per-session activity summary for the workspace — task roll-ups for every session with tasks; `last_ts` (newest trail row) only for the sessions the sidebar shows (live, foreground + channel rows); sessions with neither are absent |
 
 A `TrailEvent.detail` is capped by the writer (hook ingest, Codex notify and the POST
@@ -748,8 +759,8 @@ same-workspace, so a scratch session hands over only to another scratch session.
 | POST /sessions/{id}/input | ws editor + **session owner-or-admin**; an agent session's credential only its own session (`403` otherwise) | `SendInputReq{text, submit?}` — `submit` omitted/true: bracketed paste + a real Enter (`SessionManager::submit_text`, the path that actually sends in Claude Code / Codex); `submit: false`: the text verbatim, no newline | 200 — `409` with "input delivery unknown" when a held (holder-backed) PTY lost its holder connection after the input was sent but before it was acknowledged: the text may already be in the terminal, so do not resend it blindly |
 | POST /sessions/{id}/message | ws editor + **session owner-or-admin**; an agent session's credential its own session, a worker whose `meta.delegated_by` is that session, or a sibling agent session (`403` otherwise) | `SessionMessageReq{text}` | `SessionMessageResp{session_id, delivered}` — one message to ONE live **agent** session via `submit_text` (paste + Enter), recorded on its trail; 400 for a connection session, 409 when the session is not live. The targeted counterpart of `/workspaces/{id}/broadcast`, for a lead agent driving a worker |
 | GET /sessions/{id}/wait?status=&timeout_secs= | session owner-or-admin | — | `WaitSessionResp{session, reached}` — blocks until the session's status is one of `status` (comma-separated, default `idle,exited`) or `timeout_secs` (default 20, cap 25) passes; `reached:false` at the deadline. `idle` = the agent's turn ended |
-| POST /sessions/{id}/handover | ws editor + **owner-or-admin of the source (and of an existing target)** | — | starts a handover; progress via `SessionMetaUpdated` |
-| POST /sessions/{id}/handover/brief | ws editor + **session owner-or-admin** (the brief digests the session's transcript) | — | generates a handover brief for the session |
+| POST /sessions/{id}/handover | ws editor + **owner-or-admin of the source (and of an existing target)** | `HandoverReq {target:{kind:"new_agent",provider}\|{kind:"existing",session_id}, focus?, title?, brief?, include_git?}` (`target` required; missing → 422) | `Session` (the target) — starts a handover; progress via `SessionMetaUpdated` |
+| POST /sessions/{id}/handover/brief | ws editor + **session owner-or-admin** (the brief digests the session's transcript) | `HandoverBriefReq {focus?, include_git?, fast?}` | `HandoverBriefResp {brief, fallback, …}` — generates a handover brief for the session |
 | POST /sessions/{session_id}/attach-product | ws editor | `{story_id}` | attaches a product story to the session |
 | POST /app/kill-sessions | **root only**, Admin-class (an agent credential → 403) | — | terminate every live PTY (desktop quit hook); non-root receives 403 |
 
@@ -761,7 +772,7 @@ Codex `~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<sid>.jsonl`) by the shared
 `otto-transcript` crate (also the usage tailer's parser). Wire types
 (`Transcript`, `Turn`, `Block`, `ToolResult`, `TaskItem`, `SystemNote`,
 `Artifact`, `HistoryEntry`, `SubagentMeta`) are `crates/otto-transcript/src/model.rs`,
-mirrored in `ui/src/lib/api/types.ts` under `// ── Transcript`. RBAC: `Agents`
+mirrored in `ui/src/lib/api/types/transcript.ts`. RBAC: `Agents`
 View for every GET, `Agents` Edit for every POST (explicit `policy.rs` arms above
 the `/sessions/{id}/*` catch-all); every session route additionally applies the
 owner-or-admin gate; history routes require workspace `viewer` (GET) / `editor`
@@ -808,7 +819,7 @@ coalesced file-change invalidations plus this read path when not admitted.
 | GET /sessions/{id}/slash-commands | ws viewer + owner-or-admin | — | `SlashCommand[]` — what the chat composer completes after `/`: the provider CLI's built-ins (`source: builtin`) plus the user's commands/skills on disk (Claude: `~/.claude/{commands,skills}` = `user`, `<cwd>/.claude/{commands,skills}` = `project`, subdirs namespaced `dir:name`; Codex: `$CODEX_HOME/skills`, `<cwd>/.codex/skills`). Description = frontmatter `description:` or the file's first line, ≤ 160 chars. Other providers → `[]` |
 | GET /sessions/{id}/screen | ws viewer + owner-or-admin | — | `SessionScreen {live, cols, rows, lines}` — the CURRENT terminal screen as plain text for the Home "Otto School" monitors (polled ~2 s): `lines` = the emulator's plain rows (no scrollback), trailing blank rows dropped, each clipped to 240 chars, the LAST ≤ 60 rows; `cols`/`rows` = emulator size. No live PTY → `{live: false, cols: 0, rows: 0, lines: []}` (200; never spawns or resumes) |
 | POST /sessions/{id}/inbox | ws editor + owner-or-admin | `InboxUploadReq {filename, mime, data_b64}` — `image/*` only, ≤ 10 MB decoded | `{path}` under `<data>/sessions/<id>/inbox/` for the composer's `[Image: <path>]` line. 415 for non-images, 413 over the cap |
-| GET /workspaces/{wid}/history?q=&provider=&cwd=&status=&before=&limit= | ws viewer | `q` (title / first prompt / cwd, case-insensitive), `provider` ∈ `claude\|codex`, `cwd` (exact or prefix), `status` ∈ `running\|working\|idle\|exited\|reconnectable\|on_disk`, `before` = `last_active_at` cursor (exclusive), `limit` (default 100, max 1000) | `HistoryEntry[]` newest activity first: the workspace's agent sessions with a resolvable transcript (all statuses incl. archived; own sessions only for non-admins; `status` from the row) merged with indexed transcripts no session claims by path or `provider_session_id` (`status: "on_disk"`, `session_id: null`) — **`on_disk` rows are returned to workspace Admins/root only**; other members see exactly their own sessions |
+| GET /workspaces/{wid}/history?q=&provider=&cwd=&status=&before=&limit= | ws viewer | `q` (title / first prompt / cwd, case-insensitive), `provider` ∈ `claude\|codex`, `cwd` (exact or prefix), `status` ∈ `running\|working\|idle\|exited\|reconnectable\|on_disk`, `before` = `last_active_at` cursor (exclusive), `limit` (default 100, max 1000) | `HistoryEntry[]` newest activity first: the workspace's agent sessions with a resolvable transcript (all statuses incl. archived; own sessions only for non-admins; `status` from the row) merged with indexed transcripts no session claims by path or `provider_session_id` (`status: "on_disk"`, `session_id: null`) — **`on_disk` rows are returned to workspace Admins/root only**; other members see exactly their own sessions. Served by the bounded `/history/page` scan (≤ `4*limit` candidates per call): with a `q`/`provider` filter a page may be short or EMPTY while more matches exist, and no cursor is returned — page with `/history/page` (only a null `next_cursor` means exhaustion) |
 | GET /workspaces/{wid}/history/transcript?path=&before=&limit=&sub= | ws viewer | `path` = an absolute `.jsonl` that must resolve (symlink-aware) under `~/.claude/projects` or `$CODEX_HOME/sessions` — the ONE route that accepts a client path | `Transcript` (same paging as the session route); 403 for any other location, and 403 unless the caller is a workspace Admin/root or the path is the transcript of one of the caller's own sessions in `wid` (same rule for `…/images/{img_id}` and `import`) |
 | GET /workspaces/{wid}/history/artifacts?path= | ws viewer | same `path` confinement and 403 rule as `history/transcript` | `Artifact[]` newest first (same order as `GET /sessions/{id}/artifacts`) — the artifacts the fold of that on-disk transcript collected. History's "Outputs" for an `on_disk` row uses this instead of paging 500 turns to pick the chips out of their blocks |
 | GET /workspaces/{wid}/history/transcript/images/{img_id}?path= | ws viewer | same `path` confinement | image bytes (same store as the session route, keyed by the provider session id in the filename) |
@@ -844,10 +855,10 @@ its list holds only user-added tasks.
 |---|---|---|---|
 | GET /workspaces/{id}/connection-sections | ws viewer | — | `ConnectionSection[]` |
 | POST /workspaces/{id}/connection-sections | ws editor | `UpsertSectionReq {name, parent_id?, scope?}` | ConnectionSection |
-| POST /workspaces/{id}/connection-sections/reorder | ws editor | `{order:[id,…]}` | 204 |
+| POST /workspaces/{id}/connection-sections/reorder | ws editor | `{ids:[id,…]}` | 204 |
 | PATCH /connection-sections/{id} | ws editor | `UpsertSectionReq` (only `name` is read; blank → 400) | ConnectionSection |
 | DELETE /connection-sections/{id} | ws editor | — | 204 |
-| POST /connection-sections/{id}/move | ws editor | MoveSectionReq | 204 |
+| POST /connection-sections/{id}/move | ws editor | MoveSectionReq | ConnectionSection (the moved section) |
 
 ## Import connections from other DB tools (`/connections/import/*`)
 
@@ -1465,7 +1476,7 @@ their credential. No response fields or request shapes change.
 | POST /repos/{id}/remotes | ws editor | `{op: "add"\|"set_url"\|"remove", name, url?}` | `RemoteInfo[]` (the list after the change). `name` must match `[A-Za-z0-9][A-Za-z0-9._/-]*`; `url` is required for `add`/`set_url` and must be `https\|http\|ssh\|git://…` or scp-like `user@host:path` — neither value may begin with `-` (400 otherwise). Push/checkout still use `origin` explicitly. |
 | GET /repos/{id}/commit-config | ws viewer | — | `{gpgsign, format, signing_key}` — the repo's signing configuration (`commit.gpgsign`, `gpg.format` limited to `openpgp\|ssh\|x509`, `user.signingkey`); unset keys are `null`. Drives the WIP composer's sign toggle. |
 | GET /repos/{id}/blame?path=&rev=HEAD | ws viewer | — | `BlameResp {path, rev, lines: BlameLine[]}` — `git blame --porcelain <rev> -- <path>` grouped into RUNS: one `BlameLine {sha, short_sha, author, at, orig_line, line_start, count, summary, text: string[], previous?: {sha, path}}` per consecutive run of lines from the same commit. `text` = the run's source lines (each capped at 1000 chars); `previous` = porcelain `previous` (parent sha + the path there, following renames; absent on a root commit) — blaming it is "blame before this change". `rev` is `guard_ref`'d, `path` rides after `--` (a leading `-` is a legal filename). |
-| GET /repos/{id}/conflict | ws viewer | — | conflict listing |
+| GET /repos/{id}/conflict | ws viewer | `?path=` (required; empty → 400) | ONE `ConflictFile` — that path's conflict sides |
 | POST /repos/{id}/conflict/resolve | ws editor | ResolveConflictReq (`content`, or `side:"ours"\|"theirs"` to take a whole side via `git checkout --ours/--theirs` + stage) | RepoStatusResp — `content` is written ONLY to a path that is conflicted right now (exact index match; else 409) and only inside the working tree: 400 for `.git` components (any case), `..`, absolute paths, a symlink as the final component, or a parent that resolves (symlinks followed) outside the tree or into the git dir. `GET /conflict` never reads through such a path (it reports `is_binary:true`; resolve by taking a side). A `content` write is also refused (400) when the working file is BINARY (any body) or ABSENT (an empty body) — those resolve via `side` only, so a recomposed `""` can never truncate a blob or resurrect a deleted file as empty. |
 | POST /repos/{id}/cherry-pick | ws editor | `{sha}` | RepoStatusResp — a CONFLICTING pick is a normal 200: CHERRY_PICK_HEAD is left in place and the status carries `op_in_progress:"cherry_pick"` + the conflicted paths (finish via merge/commit, abort via merge/abort) |
 | POST /repos/{id}/revert | ws editor | `{sha}` | RepoStatusResp — a conflicting revert is a normal 200 (see cherry-pick; `op_in_progress:"revert"`) |
@@ -1475,10 +1486,10 @@ their credential. No response fields or request shapes change.
 | POST /repos/{id}/tag | ws editor | `{name, sha, message?, push?}` | RepoStatusResp (create a tag at `sha`; annotated when `message`; pushes the new tag when `push:true`) |
 | POST /repos/{id}/tag/push | ws editor | `{name}` | RepoStatusResp (push an existing tag to origin) |
 | POST /repos/{id}/tag/delete | ws editor | `{name, remote?}` | RepoStatusResp (delete the local tag; `remote:true` also deletes it on origin) |
-| GET /repos/{id}/prs/{number}/commits | ws viewer | — | `CommitInfo[]` (PR commits) |
+| GET /repos/{id}/prs/{number}/commits | ws viewer | — | `PrCommit[]` (PR commits: `sha, short_sha, author, date, subject` — no `parents`/`refs`) |
 | POST /repos/{id}/prs/{number}/request-changes | ws editor | — | 204 (request changes review) |
 | POST /repos/{id}/api-collections/pull | ws editor | — | pull API-client collections committed in the repo |
-| POST /repos/{id}/api-collections/push | ws editor | — | commit API-client collections into the repo |
+| POST /repos/{id}/api-collections/push | ws editor | `{files:[{name,content}], message, branch?}` (`files` and `message` required) | `{commit, files}` — commit API-client collections into the repo |
 | POST /repos/{id}/pr/draft | ws editor | DraftPrReq `{base, head?}` | DraftPrResp (AI-drafted title+body, plus the `session_id` that drafted it). `head` (the PR's Source branch) drafts from `git diff <base>...<head>` — that branch's committed work vs its merge-base, never the checked-out branch or the working tree — and `source_branch` echoes it (400 for an unknown branch); absent ⇒ the checked-out branch, as before. When the bundled `pull-request` skill is installed it is prepended to the draft prompt; the branch Jira key (if any) is injected as the title prefix (never in the body). No AI attribution is added. Runs as a REAL Otto session titled `PR draft · <branch>` — it appears in Agents as soon as it spawns, so it can be opened in a pane and watched mid-draft. The turn uses the `pr_draft_model` setting (default `haiku`) and `lean_turn` (no MCP servers, no Bash/Edit/Web tools): the prompt already carries the diff and the skill, so both are pure latency. |
 | POST /repos/{id}/draft-commit-message | ws editor | DraftCommitMessageReq (empty `{}`) | DraftCommitMessageResp (AI-drafted Conventional-Commits message from the STAGED diff; falls back to the working diff when nothing is staged; plus the `session_id` that drafted it). When the bundled `commit-message` skill is installed it is prepended to the draft prompt; the branch Jira key (if any) is injected into the subject. No AI attribution is added. Runs exactly like `pr/draft`: a REAL session titled `Commit draft · <branch>` (source `commit-draft`, a background source — watchable from the WIP panel, not listed under Agents) on the `pr_draft_model` setting with `lean_turn`. |
 
@@ -1498,11 +1509,11 @@ their credential. No response fields or request shapes change.
 | POST /pr-review-comments/{cid}/decline | ws editor | — | `ReviewComment` — decline a draft (`posted` is kept: declining never un-posts). A summarizer re-run does not re-draft approved/declined/posted comments. |
 | PATCH /pr-review-comments/{cid} | ws editor | `{ body?: string, restore_draft?: bool, mark_posted?: bool }` | `ReviewComment` — a person's edit before approval: `body` replaces a **draft**'s text (non-empty); `restore_draft: true` moves a **declined** comment back to draft (both may be sent together). Never touches a posted comment; nothing is sent to the forge. 409 when the comment is not in the required state, 400 for an empty body / empty request. A summarizer re-run replaces drafts (edited ones included). `mark_posted: true` (alone) records an **approved, unposted** comment as posted without sending it — the client found the copy an earlier failed (5xx) attempt created on the PR; claimed atomically (409 otherwise). |
 | GET /reviews/{review_id} | ws viewer | — | Exact persisted `Review`, including current agents/session IDs and fallback; `404` when missing. Authorizes against the review repository workspace. |
-| POST /reviews/{review_id}/handoff | ws editor | — | hand the review findings to an agent session |
+| POST /reviews/{review_id}/handoff | ws editor | `HandoffReq {provider, comment_ids?}` (`provider` required) | `Session` — hand the review findings to an agent session |
 | POST /reviews/{review_id}/cancel | ws editor | — | cancel an in-flight review: signals the run's cancel flag, kills the live agent sessions, marks the run `cancelled`, cleans up temp files and broadcasts `review_changed`. `409` if the review is not `running`. Returns the updated Review. |
-| POST /reviews/{review_id}/agents/{index}/retry | ws editor | — | re-run one stuck/failed review agent. The agent's fully-composed prompt (and the run's diff) are DB-persisted at dispatch, so retry survives reboots / temp-dir sweeps / daemon redeploys; the `$TMPDIR` prompt file is the legacy fallback for pre-0100 reviews. `400` when neither source has the prompt. `409` unless the agent is settled (`done` / `error` / `skipped`) — stop a live one first — and `409` while the REVIEW is still `running` (the run's end-of-review sweep would delete the retried agent's diff/prompt/findings files). A branch review (pr #0) retries in the run's recorded checkout (or a throwaway worktree at its recorded head), never the user's main checkout. Budget-gated like a new review (`400` when blocked). |
+| POST /reviews/{review_id}/agents/{index}/retry | ws editor | — | re-run one stuck/failed review agent. The agent's fully-composed prompt (and the run's diff) are DB-persisted at dispatch, so retry survives reboots / temp-dir sweeps / daemon redeploys; the `$TMPDIR` prompt file is the legacy fallback for pre-0100 reviews. `400` when neither source has the prompt. `409` unless the agent is settled (`done` / `error` / `skipped`) — stop a live one first — and `409` while the REVIEW is still `running` (the run's end-of-review sweep would delete the retried agent's diff/prompt/findings files). A branch review (pr #0) retries in the run's recorded checkout (or a throwaway worktree at its recorded head), never the user's main checkout. Budget-gated like a new review (`400` when blocked). Other outcomes: `400` "no review agent at index {index}"; `409` "agent {index} is already being retried" (a concurrent retry); `409` "this review has no stored diff to retry against; start a new review" — a review recorded before migration 0100 can no longer be retried once its temp diff is swept; `500` "Couldn't write the diff …" when the stored diff can't be read or rewritten; branch reviews: `409` "review revision is unavailable" / "… cannot be checked out — start a new review". Stopping a retried agent (`POST …/agents/{index}/stop`) settles a `pending` row too, and the daemon's boot sweep marks an agent row left `pending`/`running` by a restart `error` with "Interrupted by a daemon restart" (retryable). |
 | POST /reviews/{review_id}/summarizer/retry | ws editor | — | re-run ONLY the summarize+persist stage from the STORED per-agent findings (no reviewer re-runs). Deletes the review's unposted `draft` comments (approved/declined/posted stay), flips the run back to `running` (live via `review_changed`), re-summarizes with the repo's effective config, and persists the new comments + workflow findings. Falls back to the deterministic Rust-side summary if the summarizer fails OR returns 0 comments while findings exist. `400` if the review is still running or no stored finding has content. Returns the (now `running`) Review. Budget-gated (`400` when blocked); a branch review anchors on its recorded checkout/head. Admission is atomic with reviewer retries: active reviewer rows prevent summarization, and the settled findings are read after the claim. PR retries use the original recorded head; an unavailable original revision produces an explicit error rather than using the current forge head. |
-| POST /reviews/{review_id}/agents/{index}/stop | ws editor | — | `202` + updated Review: stop one **running/waiting** review agent (trips its cancel flag, kills its session, marks the row `error`/"stopped by user" — still retryable; the rest of the run continues and the summarizer proceeds with the remaining findings). `409` if the row is not running/waiting or is the trailing summarizer; broadcasts `review_changed`. |
+| POST /reviews/{review_id}/agents/{index}/stop | ws editor | — | `202` + updated Review: stop one **running/waiting** review agent (trips its cancel flag, kills its session, marks the row `error`/"stopped by user" — still retryable; the rest of the run continues and the summarizer proceeds with the remaining findings). A `pending` row (a per-agent retry that has not spawned yet) is settled the same way, so a retry wedged at `pending` can always be stopped and retried. `409` if the row is not running/waiting/pending or is the trailing summarizer; broadcasts `review_changed`. |
 
 The trailing summarizer row uses a managed session on every configured provider
 (empty provider defaults to Claude). Its `session_id` is persisted and broadcast
@@ -1652,7 +1663,7 @@ values) and `folder`, alongside the existing `cwd/stage/watch_enabled/watch_cade
 | GET /workspaces/{id}/product/lenses | ws viewer | — | `ProductLens[]` (curated analysis-lens catalog: `{skill,label,description,default_on}`) |
 | GET /product/stories/{sid}/questions | ws viewer | — | `Question[]` |
 | POST /product/stories/{sid}/questions | ws editor | `NewQuestionReq {text, rationale?, category?}` | Question |
-| POST /product/stories/{sid}/questions/post | ws editor | — | post questions back to the source story |
+| POST /product/stories/{sid}/questions/post | ws editor | `PostQuestionsReq {ids, format?}` (`ids` required) | post questions back to the source story |
 | PATCH /product/questions/{qid} | ws editor | UpdateQuestionReq | Question |
 | DELETE /product/questions/{qid} | ws editor | — | 204 |
 | GET /product/stories/{sid}/notes | ws viewer | — | `Note[]` |
@@ -1661,22 +1672,22 @@ values) and `folder`, alongside the existing `cwd/stage/watch_enabled/watch_cade
 | DELETE /product/notes/{nid} | ws editor | — | 204 |
 | GET /product/stories/{sid}/events | ws viewer | — | story event log |
 | GET /product/stories/{sid}/testcases | ws viewer | — | testcase runs for the story |
-| PATCH /product/testcases/{tid} | ws editor | UpdateTestcaseReq | Testcase |
+| PATCH /product/testcases/{tid} | ws editor | UpdateTestcaseReq | ProductTestcase |
 | POST /product/testcase-runs/{rid}/approve | ws editor | — | approve a run (triggers skill self-improvement) |
 | POST /product/testcase-runs/{rid}/publish | ws editor | — | publish approved test cases |
 | POST /product/testcase-runs/{rid}/testcases/bulk-approve | ws editor | `{ids: string[]}` | `{approved: number}` — bulk-approve selected draft cases |
-| POST /product/testcase-runs/{rid}/testcases/reorder | ws editor | `{ordered_ids: string[]}` | `Testcase[]` — persist new display order |
-| GET /product/stories/{sid}/transcripts | ws viewer | optional `summary=true&limit=50&cursor=` | Legacy `Transcript[]` with full bodies; summary mode returns `ProductTranscriptPage` without bodies |
+| POST /product/testcase-runs/{rid}/testcases/reorder | ws editor | `{ordered_ids: string[]}` | `ProductTestcase[]` — persist new display order |
+| GET /product/stories/{sid}/transcripts | ws viewer | optional `summary=true&limit=50&cursor=` | Legacy `ProductTranscript[]` with full bodies; summary mode returns `ProductTranscriptPage` without bodies |
 | GET /product/stories/{sid}/transcripts/search | ws viewer | `q`, optional `limit=100&max_matches=5000&cursor=` | Bounded scan page `{items:(ProductTranscriptSummary & {match_count:number})[],next_cursor:string|null}` |
-| GET /product/transcripts/{trid} | owning story ws viewer | — | Full `Transcript` (authorization precedes body read) |
-| POST /product/stories/{sid}/transcripts | ws editor | `NewTranscriptReq {body, title?}` | Transcript |
+| GET /product/transcripts/{trid} | owning story ws viewer | — | Full `ProductTranscript` (authorization precedes body read) |
+| POST /product/stories/{sid}/transcripts | ws editor | `NewTranscriptReq {body, title?}` | ProductTranscript |
 | DELETE /product/transcripts/{trid} | ws editor | — | 204 |
-| PATCH /product/stories/{sid}/draft | ws editor | — | create/update the working RFC draft |
+| PATCH /product/stories/{sid}/draft | ws editor | `UpdateDraftReq {title, body_md}` (both required; partial → 422) | `ProductStoryDetail` — creates/updates the working RFC draft |
 | POST /product/stories/{sid}/publish-as-rfc | ws editor + account owner/root | `PublishAsRfcReq` | Published story detail; 409 if reviewed identity is missing/stale, no outbound call |
 | POST /product/stories/{sid}/publish-as-story | ws editor + account owner/root | `PublishAsStoryReq` | Published story detail; 409 if reviewed identity is missing/stale, no outbound call |
-| GET /workspaces/{ws}/product/learnings | ws viewer | — | `Learning[]` |
-| POST /workspaces/{ws}/product/learnings | ws editor | `NewLearningReq {kind, title, body, tags?, refs?, source_story_id?}` | Learning |
-| PATCH /product/learnings/{lid} | ws editor | UpdateLearningReq | Learning |
+| GET /workspaces/{ws}/product/learnings | ws viewer | — | `ProductLearning[]` |
+| POST /workspaces/{ws}/product/learnings | ws editor | `NewLearningReq {kind, title, body, tags?, refs?, source_story_id?}` | ProductLearning |
+| PATCH /product/learnings/{lid} | ws editor | UpdateLearningReq | ProductLearning |
 | DELETE /product/learnings/{lid} | ws editor | — | 204 |
 | POST /product/learnings/{lid}/accept | ws editor | — | accept a proposed learning |
 | POST /workspaces/{ws}/product/drafts | ws editor | `NewDraftReq {title?}` | the new standalone draft's detail (a draft story not yet tied to an epic) |
@@ -2009,7 +2020,7 @@ config/mutations = `ws editor` (config write = `ws admin`).
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
 | GET /workspaces/{id}/self-improvement | ws viewer | — | self-improvement config |
-| PUT /workspaces/{id}/self-improvement | ws admin | ImproveConfig | config |
+| PUT /workspaces/{id}/self-improvement | ws admin | UpdateSelfImprovementReq | SelfImprovementConfig |
 | POST /workspaces/{id}/self-improvement/run | ws editor | — | trigger a run now |
 | GET /workspaces/{id}/improvement/runs | ws viewer | — | `ImprovementRun[]` |
 | GET /improvement/runs/{run_id} | ws viewer | — | ImprovementRun |
@@ -2049,7 +2060,7 @@ and a `human_rating`.
 | POST /skill-evaluations/{id}/iterations/{iter_id}/rate | ws editor | RateIterationReq | SkillEval (re-scored; no command re-run) |
 | POST /skill-evaluations/{id}/iterations/{iter_id}/regression | ws editor | RegressionReq | GoldenTask (origin=regression; deduped by source iter) |
 | POST /skill-evaluations/{id}/iterations/{iter_id}/agents/{index}/retry | ws editor | — | re-run one validation agent |
-| GET /settings/skill-eval | root | — | skill-eval config (+ weights, promote_min_score, require_proof_pass, default cmds) |
+| GET /settings/skill-eval | member (SkillEval View) | — | skill-eval config (+ weights, promote_min_score, require_proof_pass, default cmds) |
 | PUT /settings/skill-eval | root | SkillEvalConfig | config |
 
 Admission accepts only `generate` (default) or `score_only`, at most 10 iterations
@@ -2153,28 +2164,28 @@ are root; per-workspace context selection is workspace-scoped.
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
-| GET /library/skills | root | — | `SkillEntry[]` |
+| GET /library/skills | member (Skills View) | — | `LibrarySkill[]` |
 | POST /library/skills | root | CreateLibrarySkillReq (`name`, `category?`, `description?`, `body?`) | LibrarySkill (new; 409 if it exists) |
 | POST /library/skills/import | root | raw `.zip` body, `?name=` override | LibrarySkill (imported; zip-slip + size guarded) |
-| GET /library/skills/{name} | root | — | skill body |
-| PUT /library/skills/{name} | root | skill body | 204 |
+| GET /library/skills/{name} | member (Skills View) | — | `LibrarySkill` |
+| PUT /library/skills/{name} | root (also Skills Admin) | `UpsertLibraryEntryReq {body}` | `LibrarySkill` |
 | DELETE /library/skills/{name} | root | — | 204 (also removes Otto-managed user-level provider copies — see Bundled skills) |
-| GET /library/skills/{name}/files | root | — | `SkillFileEntry[]` (multi-file tree) |
-| GET /library/skills/{name}/file | root | `?path=<rel>` | SkillFileContentResp (one file's text) |
+| GET /library/skills/{name}/files | member (Skills View) | — | `SkillFileEntry[]` (multi-file tree) |
+| GET /library/skills/{name}/file | member (Skills View) | `?path=<rel>` | SkillFileContentResp (one file's text) |
 | PUT /library/skills/{name}/file | root | WriteSkillFileReq (`path`, `content`, `create_only?` — default false; true → **409** when `path` already exists instead of overwriting, used by "New file") | `SkillFileEntry[]` (refreshed tree; evicts cache) |
 | DELETE /library/skills/{name}/file | root | `?path=<rel>` | 204 (SKILL.md cannot be deleted) |
-| GET /library/provider-skills | any member | — | `ProviderSkillInfo[]` (on-disk `~/.claude|.codex|.agy/skills`, read-only) |
-| GET /library/provider-skills/{provider}/{name} | any member | — | ProviderSkillContent (body + file list) |
-| GET /library/provider-skills/{provider}/{name}/file | any member | `?path=<rel>` | SkillFileContentResp |
-| GET /library/souls | root | — | `SoulEntry[]` |
-| GET /library/souls/{name} | root | — | soul body |
-| PUT /library/souls/{name} | root | soul body | 204 |
+| GET /library/provider-skills | member (Skills View) | — | `ProviderSkillInfo[]` (on-disk `~/.claude|.codex|.agy/skills`, read-only) |
+| GET /library/provider-skills/{provider}/{name} | member (Skills View) | — | ProviderSkillContent (body + file list) |
+| GET /library/provider-skills/{provider}/{name}/file | member (Skills View) | `?path=<rel>` | SkillFileContentResp |
+| GET /library/souls | member (Skills View) | — | `LibrarySoul[]` |
+| GET /library/souls/{name} | member (Skills View) | — | `LibrarySoul` |
+| PUT /library/souls/{name} | root (also Skills Admin) | `UpsertLibraryEntryReq {body}` | `LibrarySoul` |
 | DELETE /library/souls/{name} | root | — | 204 |
-| GET /library/context | root | — | `ContextEntry[]` |
-| GET /library/context/{name} | root | — | context body |
-| PUT /library/context/{name} | root | context body | 204 |
+| GET /library/context | member (Skills View) | — | `LibraryContext[]` |
+| GET /library/context/{name} | member (Skills View) | — | `LibraryContext` |
+| PUT /library/context/{name} | root (also Skills Admin) | `UpsertLibraryEntryReq {body}` | `LibraryContext` |
 | DELETE /library/context/{name} | root | — | 204 |
-| GET /library/default-soul | root | — | the default soul name |
+| GET /library/default-soul | member (Skills View) | — | the default soul name |
 | PUT /library/default-soul | root | `{name}` | set the default soul |
 | GET /workspaces/{id}/context | ws viewer | — | the workspace's active context selection |
 | PUT /workspaces/{id}/context | ws admin | `UpdateWorkspaceContextReq` | `WorkspaceContextConfig` |
@@ -2289,8 +2300,8 @@ choices. The UI surfaces this distinction in the preview.
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
-| GET /library/bundled | root | — | bundled skill catalog |
-| GET /library/bundled/{name} | root | — | BundledSkillContent (SKILL.md body + file list; view without installing) |
+| GET /library/bundled | member (Skills View) | — | bundled skill catalog |
+| GET /library/bundled/{name} | member (Skills View) | — | BundledSkillContent (SKILL.md body + file list; view without installing) |
 | POST /library/bundled/{name}/install | root | — | install/update one bundled skill → `{name, installed, backed_up, backup_path, user_owned?}`. Also mirrors it into `~/.claude/skills`, `$CODEX_HOME/skills`, `~/.gemini/skills`, but never replaces an entry Otto's `.otto-managed.json` does not own (or any symlink) — those paths come back in `user_owned` |
 | POST /library/bundled/install-all | root | `?category=&backup=&force=` | install all bundled skills (optionally one category) → `{installed, backed_up, skipped, failed: [{name, error}], user_owned}` (`user_owned`: provider skill paths left untouched because a user-owned skill of that name lives there). Skips rewriting Library copies already up to date, but still reconciles their managed provider copies so failed mirrors can be retried. Copies ahead of the bundled version are left alone unless `force=true`; a failing install or mirror is reported in `failed` and the rest still install. User-owned provider copies remain untouched. Runs off the async workers; keeps the newest 3 `skills-backup/<name>-<secs>` per skill |
 
@@ -2326,7 +2337,7 @@ workspace from the workflow/run row.
 | POST /workspaces/{wid}/workflows/from-template | ws editor | FromTemplateReq | Workflow |
 | POST /workspaces/{wid}/workflows/generate | ws editor | GenerateWorkflowReq | Workflow (AI-generated) |
 | GET /workflows/{id} | ws viewer | — | Workflow |
-| PATCH /workflows/{id} | ws editor | UpdateWorkflowReq | Workflow |
+| PATCH /workflows/{id} | ws editor | UpdateWorkflowReq | Workflow — a graph change records a new `workflow_versions` row by the caller; trigger/schedule/webhook/chat runs then act as the latest changer (PC-3) |
 | DELETE /workflows/{id} | ws editor | — | 204; **409** while the workflow has a `pending`/`running` run (cancel it first — the cascade would orphan the live driver) |
 | POST /workflows/{id}/run | ws editor | `RunWorkflowReq? {input?, start_node?, only_node?, review_mode?}` | WorkflowRun — created immediately; may start **queued** (see Run queue) — `review_mode` ("fan_out"\|"orchestrator") seeds `input.review_mode` (400 on an unknown value or a non-object `input`); the engine reads it from the run input and it takes precedence over every `review_run` node's `params.mode`, regardless of graph position (order: run input → node `mode` → stored `ReviewConfig.mode` → `fan_out`). **Run location (S3-302):** `input.working_directory` (comma-separated paths, `~` ok), `input.repos[]` (each `repo` a registered id/name/path, a `worktree`-type `name` path, `worktree`, `repo_id`) and `input.repo_id` must name a repo registered in Otto — in **any** workspace, so one workflow can work on a repo another workspace registered — or a linked git worktree of one, or the workflow's workspace root, and paths inside them; an unregistered folder, a relative path, a `..` escape or anything else is **400** naming the value, and no run row is created. A **manual** run on a person's credential, when that person is the root user, may instead name an existing absolute directory (`~` expanded, no `..` component, not `/`, not a file, not a path that does not exist yet). A path that still fails for that caller says it must already exist, be a directory, contain no `..`, and not be the filesystem root. An agent credential of that same root user keeps the registered-repo refusal and does not get that explanation. Workspace Admin and a Workflows capability do not grant that. The same registered-repo rule refuses a chat `Working Directory:` / repos, including when the workflow owner is root: nothing starts and the reply in the thread says why (`⚠️ Can't start **<workflow>**: <reason>.`) |
 | POST /workflows/{id}/validate | ws viewer | `{graph?: WorkflowGraph}` (omitted uses saved graph) | `{valid: boolean, issues: WorkflowValidationIssue[]}`; each issue has `field`, `message`, optional `node_id`/`edge_id`; no execution |
@@ -2334,6 +2345,8 @@ workspace from the workflow/run row.
 | GET /workflows/{id}/runs | ws viewer | — | `WorkflowRun[]` |
 | GET /workspaces/{wid}/workflow-runs/active | ws viewer | — | `ActiveWorkflowRun[]` — in-flight runs (pending\|running) across the workspace, newest first; backs the "Running" sidebar list |
 | GET /workflow-runs/{id} | ws viewer | — | WorkflowRun |
+| GET /workflow-runs/{id}/context/browse | ws viewer on the run's workspace (root passes; share / MCP-only / agent-session tokens 403, as `get_run`) | `?path=<rel>` — relative to the run's context dir `<data_dir>/workflow-context/<run_id>`; empty/absent = its root | `FsBrowse` (the `/fs/browse?files=true` shape) with `path`, `parent` and every entry `path` RELATIVE to the context dir (`parent: null` at its root). Symlinks are followed only to targets inside the dir; escaping or broken links are not listed. `400` absolute path, `..`, or a path whose canonical target escapes the dir (symlink); `403` not a member; `404` unknown run, no context dir, or missing path. Exists because `/fs/*` refuses Otto's data dir to non-root callers |
+| GET /workflow-runs/{id}/context/read | ws viewer on the run's workspace (as `context/browse`) | `?path=<rel>` (required) | `FsRead` (the `/fs/read` shape and ~400 KiB bound; binary → empty `content`, `truncated: true`) with a relative `path`. The run's deliverable is `?path=final-output.md`. Same `400`/`403`/`404` rules as `context/browse`; a key-like file name (the `/fs/read` deny list) is `403` for non-root |
 | POST /workflow-runs/{id}/cancel | ws editor | — | WorkflowRun — cancel a `pending`/`running` run (status-only, conditional: a no-op once the run settled; never rewrites `nodes` — the engine stops the in-flight step, marks the rest skipped and re-emits). A cancel that lands while the run is still starting up is honored: nothing executes |
 | POST /workflow-runs/{id}/retry-node | ws editor | `{node_id, include_downstream?}` | WorkflowRun — re-enter a **finished** run in place: the run reopens (back to running), out-of-scope nodes keep their prior state/output, in-scope nodes re-execute (same run id ⇒ same context dir + `otto-wf/<run_id>` worktree/branch — unlike the canvas "run from here", which mints a fresh run/worktree), then the run's final status is recomputed. Scope: the target step only (default; target must be `error`), or target + descendants with `include_downstream: true` (any settled target). A single-step retry whose target has a descendant that never succeeded (skipped because the target failed) re-runs those descendants too, as if `include_downstream` were set — otherwise the run would finish `success` with its later steps never run. `409` while the run is still active — including a just-canceled run whose engine driver has not stopped yet ("still stopping"; retry in a few seconds); `400` on a bad target. A retry starts a fresh restart-resume budget |
 | GET /workflows/{id}/versions | ws viewer | `?summary=true&limit=50&before_version=N` | Array, newest first. Default `limit=50`, clamped to 1–100; `before_version` is exclusive. `summary=true` returns `WorkflowVersionSummary[]` without definition bodies; otherwise returns full `WorkflowVersion[]` with the same page bound. Continue from the last version of a full page; an empty page ends history. |
@@ -2413,7 +2426,7 @@ revision bumped on **every** persisted progress write (node transitions, the
 human-approval pause, the approve/reject decision). Clients use it to discard
 stale/out-of-order snapshots and to order `workflow_run_updated` events; legacy
 rows report 0. The approval columns now ride the run too:
-`waiting_approval` (bool), `approval_node_id`, `approved_by`, `approval_note`, `created_by` (the user who started the run — the engine acts as them when spawning agent sessions, so the starter is their owner; null for trigger/schedule/chat runs, which act as the workflow's creator),
+`waiting_approval` (bool), `approval_node_id`, `approved_by`, `approval_note`, `created_by` (the user who started the run — the engine acts as them when spawning agent sessions, so the starter is their owner; null for trigger/schedule/webhook/chat runs). **Run identity (PC-3):** a manual run acts as its starter. A trigger, schedule, webhook or chat run acts as whichever is LATER of the `created_by` of the `workflow_versions` row the run is pinned to (the last person to change that graph) and the `updated_by` of any of the workflow's triggers (set to the caller on trigger create and on a spec change, with the time in `updated_by_at`; both nullable, migration 0189). The firing trigger is not stored on the run, so every trigger of the workflow counts — this can only pick a more recent changer, never an older one. It acts as the workflow's creator only when both are unset or are the creator — so an Editor's graph edit or new trigger runs with that Editor's access, never the creator's,
 `approved_at` — previously only surfaced on `ActiveWorkflowRun`, which made the
 run-view approval banner unreachable. Each `NodeRunState` gains `started_at`
 (set on the pending→running transition; drives the live elapsed timer on a
@@ -2629,15 +2642,15 @@ reads = `ws viewer`, mutations/execution = `ws editor`.
 |---|---|---|---|
 | GET /workspaces/{wid}/api-client/overview?q=&collection_id=&kind=all\|requests\|environments\|automations | ws viewer | — | `ApiOverview` — compact collections, saved requests, masked environments, and automation step counts |
 | GET /workspaces/{wid}/api-client/collections | ws viewer | — | `Collection[]` |
-| POST /workspaces/{wid}/api-client/collections | ws editor | `UpsertApiCollectionReq` | `ApiCollection` |
-| PATCH /workspaces/{wid}/api-client/collections/{id} | ws editor | `UpsertApiCollectionReq` | `ApiCollection` |
+| POST /workspaces/{wid}/api-client/collections | ws editor | `UpsertApiCollectionReq` | `ApiCollection`. 400 when `parent_id` is not a collection of this workspace |
+| PATCH /workspaces/{wid}/api-client/collections/{id} | ws editor | `UpsertApiCollectionReq` | `ApiCollection`. When `parent_id` changes: 400 if it is not a collection of this workspace, is the collection itself, or is one of its descendants (a cycle); an unchanged `parent_id` is not re-checked |
 | DELETE /workspaces/{wid}/api-client/collections/{id} | ws editor | — | 204 |
 | GET /workspaces/{wid}/api-client/collections/{id}/openapi | ws viewer | — | export the collection as OpenAPI |
 | GET /workspaces/{wid}/api-client/requests | ws viewer | — | `Request[]` |
 | GET /workspaces/{wid}/api-client/requests/summaries?collection_id= | ws viewer | — | `ApiOverviewRequest[]` (`{id, name, method, url, collection_id, auth_type, has_ssh, agent_authored, updated_at, position}`), same order as `/requests`; `position` is the row's sort position in its collection, so the UI tree builds from this projection alone and fetches `GET …/requests/{id}` only when a request is opened — a scalar projection: never the body, headers, query, auth values, scripts, docs or multipart files. `/overview` reads it too |
-| POST /workspaces/{wid}/api-client/requests | ws editor | `UpsertApiRequestReq` | `ApiRequest` |
+| POST /workspaces/{wid}/api-client/requests | ws editor | `UpsertApiRequestReq` | `ApiRequest`. 400 when `collection_id` is not a collection of this workspace |
 | GET /workspaces/{wid}/api-client/requests/{id}?shape=full\|agent | ws viewer | — | Request. `full` is the unchanged default; `agent` masks auth/header/query secrets and caps the body at 64 KiB |
-| PATCH /workspaces/{wid}/api-client/requests/{id} | ws editor | `UpsertApiRequestReq` | `ApiRequest`. Create/Update carry the persisted extras: `pre_request_script?`, `post_response_script?`, `settings?` (`{timeout_ms?, follow_redirects?, tls_verify?}`), `docs?`, `graphql_variables?` |
+| PATCH /workspaces/{wid}/api-client/requests/{id} | ws editor | `UpsertApiRequestReq` | `ApiRequest`. A changed `collection_id` that is not a collection of this workspace is 400. Create/Update carry the persisted extras: `pre_request_script?`, `post_response_script?`, `settings?` (`{timeout_ms?, follow_redirects?, tls_verify?}`), `docs?`, `graphql_variables?` |
 | POST /workspaces/{wid}/api-client/requests/{id}/execute | ws editor | `RunSavedRequestReq` | `RunSavedRequestResp`. GraphQL variables must be blank/absent or a JSON object; malformed/non-object JSON returns 400 before scripts or sending. 400: `vars override '<k>' must not contain '{{' (no nested substitution)`. 409: `needs_confirm=method: <METHOD> '<name>' → <url> is not a safe method; re-send with confirm:true` or `needs_confirm=new_host: host '<host>' is not used by any human-authored request or run in this workspace; re-send with confirm_new_host:true`, or the **Secret host binding** 409 (`needs_confirm=new_host: a stored secret would be sent to host '<host>' …`) when — after `vars` overrides and the pre-request script — a stored secret would leave its bound host (agents can never confirm that one). Network/send failure is 502 and still writes history |
 | DELETE /workspaces/{wid}/api-client/requests/{id} | ws editor | — | 204 |
 | GET /workspaces/{wid}/api-client/environments | ws viewer | — | `Environment[]` |
@@ -2811,8 +2824,8 @@ user may call it.
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
-| GET /users/{id}/grants | Users:Admin or root | — | `UserGrantsResp {grants: GrantEntry[]}` |
-| PUT /users/{id}/grants | Users:Admin or root | `UserGrantsReq {grants: GrantEntry[]}` | `UserGrantsResp` (atomically replaces all grants; audited) |
+| GET /users/{id}/grants | root (the feature guard admits Users:Admin to `/users/*`; the handler narrows to root, 403 otherwise) | — | `UserGrantsResp {grants: GrantEntry[]}` |
+| PUT /users/{id}/grants | root (403 for a non-root Users:Admin: granting would let it escalate itself) | `UserGrantsReq {grants: GrantEntry[]}` | `UserGrantsResp` (atomically replaces all grants; audited) |
 | GET /users/{id}/plugin-grants | root | — | `UserGrantsResp` (plugin grants; `GrantEntry.feature` = plugin slug) |
 | PUT /users/{id}/plugin-grants | root | `UserGrantsReq` (`feature` = plugin slug) | `UserGrantsResp` (atomically replaces all plugin grants; audited) |
 | GET /auth/capabilities | member (any authed user) | — | `CapabilitiesResp {capabilities: {feature-or-slug: capability}}` |
@@ -2833,10 +2846,10 @@ Plugins are external sidecar processes installed at runtime under `~/otto-plugin
 
 | Method & path | Auth | Notes |
 |---|---|---|
-| GET `/plugins` | member | Enabled plugins `[{slug,name,icon,has_ui}]` for the sidebar; UI filters by grant. Exempt in policy. |
+| GET `/plugins` | member | Enabled plugins `[{slug,name,icon,has_ui,running}]` for the sidebar (`running: bool` = the sidecar is up); UI filters by grant. Exempt in policy. |
 | ANY `/plugins/{slug}` · ANY `/plugins/{slug}/{*rest}` | plugin `<slug>` grant (GET=view, else=edit); root bypass | Reverse-proxied to the sidecar. Responses are buffered with a 64 MiB limit (502 on overflow), preserving upstream status/content type within the existing deadline. Gated by the dedicated plugin branch in the feature guard. |
 | GET `/plugins/{slug}/ui` · GET `/plugins/{slug}/ui/` · GET `/plugins/{slug}/ui/{*path}` | public static | Iframe assets served from the plugin's `ui` dir (root-mounted). |
-| GET `/plugin-admin` | root | Installed-plugin list (full records, no token). |
+| GET `/plugin-admin` | root | Installed-plugin list (full records, no token), each with `running: bool` (the sidecar is up) and `last_error: string \| null` (the spawn error or exit status that stopped it). `enabled && !running` = enabled but not running; enable again to restart it. |
 | POST `/plugin-admin/install` | root | `{source}` = local path or git URL → installs into the plugins home (disabled). Reinstall is serialized with enable/disable/remove: disables old credentials and stops the sidecar before replacing local files, then installs the new executable metadata/token disabled. A failed replacement remains disabled. Explicitly enable to start the replacement. |
 | POST `/plugin-admin/{slug}/enable` · POST `/plugin-admin/{slug}/disable` | root | Spawn / stop the sidecar. |
 | DELETE `/plugin-admin/{slug}` | root | Stop + unregister (plugin files are kept). |
@@ -3010,7 +3023,7 @@ The audit log is an **append-only** ledger written best-effort by the daemon at 
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
-| GET /usage/status | Usage:View (paths redacted for non-root) | — | engine status (installed/available) |
+| GET /usage/status | Usage:View (paths redacted for non-root) | — | engine status (installed/available); optional `tailer?: {state: "running"\|"retrying"\|"stopped", cause?: string\|null}` — the transcript tailer's state (absent when unknown). `stopped` only for a corrupt checkpoint (the tailer could not restore its position and halted; `cause` says why) |
 | GET /usage/summary | Usage:View (non-root: own sessions) | — | token-first breakdown (input/output + cache read/write, per provider/day/session/model) |
 | GET /usage/report | Usage:View (non-root: own sessions) | `sessions_limit` (1–1000, default 100), `include=daily_models` | UsageReport (daily/monthly/model/session tables; `daily_models` only when included) |
 | POST /usage/ccusage-check | root | `{days?}` | CcusageCheck (opt-in `npx ccusage` cross-check) |
@@ -3029,7 +3042,7 @@ The audit log is an **append-only** ledger written best-effort by the daemon at 
 | GET /insights/config | Insights:View | — | insights scheduler config (daily/weekly/monthly) |
 | PUT /insights/config | root | InsightsConfig | config |
 | GET /insights/reports | Insights:View | `?offset=0&limit=200&summaries=false&latest=false` | Newest-first `ReportView[]`; limit 1–200, default 200. Metadata-only by default (`summary:""`); `summaries=true` includes a preview capped at 80 lines / 64 KiB. `latest=true` returns at most one newest report per cadence (three total), ignoring offset. Only selected-page artifacts are hydrated; archive filenames are still enumerated. |
-| GET /insights/report | Insights:View | — | one report's HTML |
+| GET /insights/report | Insights:View | `?path=` (required; canonicalized — 403 outside the insights dir, 404 when missing) | one report's HTML |
 | GET /insights/report-status | Insights:View | `?key=daily:YYYYMMDD_YYYYMMDD&summary=false` (also weekly/monthly) | `{report:ReportView|null, html_revision:string|null}`. Exactly three artifact metadata checks, independent of archive size; optional bounded summary preview. Missing report is null. Bad key is 400. HTML revision changes when HTML length/mtime changes; a new summary alone does not mean completion. |
 | POST /insights/run | root | `{ period, offset? }` | `{ started, run_id?, report_key?, report_revision, reason?, attached? }` — `report_revision` is the HTML revision captured before starting (null if absent), for bounded completion polling; `run_id` when started; `report_key` identifies the requested daemon-local collector calendar period (`daily:YYYYMMDD_YYYYMMDD`, or `weekly`/`monthly`); offset 0 is current, 1 is the previous complete period. The calendar reference is frozen at acceptance and passed to a daemon-owned, content-addressed bundled collector under `insights/collectors/`, so a delayed start across midnight keeps this key. Installed skill instructions/customizations remain untouched. This manual endpoint explicitly regenerates an existing period (`--force`); scheduled catch-up remains idempotent. `reason` when not started (e.g. skill not installed). **One run per period:** while a run for the same `report_key` is still generating (its session alive and not idle for more than 10 min, its final completion manifest unpublished, inside a 2-hour hard cap — liveness follows the session, not a fixed window) the request starts nothing and returns that run with `attached: true` |
 | GET /insights/runs/active | View | — | `ActiveRun[]` = `{ run_id, report_key, report_revision, started_at }`, oldest first — runs still generating; finished/killed/timed-out runs are pruned. Lets the page restore its progress banner after it was left |
@@ -3206,8 +3219,8 @@ These self-authenticate (WS: the `otto-bearer` subprotocol; `/browser/proxy`: a 
 |---|---|---|
 | GET /ws/term/{session_id} | `otto-bearer` subprotocol only (`?token=` → 401); ws viewer attach, editor input | terminal stream (see ws.md) |
 | GET /ws/events | `Sec-WebSocket-Protocol: otto-bearer, <token>` only — keeps the token out of the URL (`?token=` → 401); member | daemon event stream (see ws.md) |
-| GET /ws/lsp?lang=&root= | `otto-bearer` subprotocol only (echoed; `?token=` → 401); ws editor | LSP WebSocket bridge. Share-link (scoped) and MCP-restricted tokens → 403 (same as `/fs/*`). A non-root caller's canonical `root` must be inside a workspace they are a member of (or exactly the scratch workspace root) → else 403. Sockets share ONE server process per `(user, lang, canonical root)` — never across users (ref-counted; reaped 60 s after the last socket leaves): request ids are rewritten per socket, `initialize` is answered from the first result, `didOpen`/`didClose` are ref-counted per URI, `publishDiagnostics` goes to sockets holding the URI. Language-server stdout frames are limited to 8 KiB of headers and 16 MiB of body; oversized or malformed framing closes the shared server transport. The server's stdin backlog is bounded (8 MiB); past it client messages are back-pressured (the socket stops being read) instead of queued. |
-| GET /ws/api-client/stream | `otto-bearer` subprotocol only (echoed; `?token=` → 401); ws editor | API-client streaming-response bridge |
+| GET /ws/lsp?lang=&root= | `otto-bearer` subprotocol only (echoed; `?token=` → 401); root, or a member (**any role**, Viewer included) of a workspace whose root — or a repo registered in it — contains `root`; share / MCP-only / agent-session tokens → 403 | LSP WebSocket bridge. Share-link (scoped) and MCP-restricted tokens → 403 (same as `/fs/*`); an agent-session credential → 403 "an agent session credential cannot open a language server". A non-root caller's canonical `root` must be inside a member workspace's root, inside a repo registered in a member workspace (even one outside the workspace root — the same rule as an agent's cwd), or exactly the scratch workspace root → else 403 "root is not inside a workspace you can access"; it may never be in Otto's data dir or a credential dir (`~/.ssh`, …) or a key-like file (the `/fs/*` non-root deny → 403). `400` for a missing/unknown `lang` or a `root` that is missing or not a directory; `503` `server_unavailable` when no language-server binary is found. Sockets share ONE server process per `(user, lang, canonical root)` — never across users (ref-counted; reaped 60 s after the last socket leaves): request ids are rewritten per socket, `initialize` is answered from the first result, `didOpen`/`didClose` are ref-counted per URI, `publishDiagnostics` goes to sockets holding the URI. Language-server stdout frames are limited to 8 KiB of headers and 16 MiB of body; oversized or malformed framing closes the shared server transport. The server's stdin backlog is bounded (8 MiB); past it client messages are back-pressured (the socket stops being read) instead of queued. |
+| GET /ws/api-client/stream?workspace_id= | `otto-bearer` subprotocol only (echoed; `?token=` → 401); ws editor + API Client Edit (else 403 "API Client edit access is required in this workspace") | API-client streaming-response bridge; `?workspace_id=` is required (400 without). Same route as the API-client row above |
 | GET /browser/proxy?url=&ticket= | single-use `?ticket=` (from `POST /api/v1/browser/proxy-ticket`, bound to `url`, 60 s TTL; `?token=` is NOT accepted) | in-app browser "Take over" HTTP proxy. Every response (HTML, pass-through bytes, errors) carries `Content-Security-Policy: sandbox allow-scripts` (opaque origin — never same-origin with the daemon), `Referrer-Policy: no-referrer`, `X-Content-Type-Options: nosniff`, `Cache-Control: no-store`. HTML gets an HTML-escaped `<base href>` + the element-picker script (posts `otto-element` to `parent`) |
 
 ## Ingest (per-session token, unauthenticated by bearer)
@@ -3554,8 +3567,8 @@ policy prefixes (`/usage/`→Usage, `/brokers/cluster`→Database, `/product/`�
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
-| GET /usage/attribution | ws viewer (Usage:View) | `?by=repo\|branch\|pr\|story\|swarm_task\|workflow\|channel\|review\|origin` | grouped `{key, cost_usd, tokens, sessions}[]` |
-| POST /usage/forecast | ws viewer (Usage:View) | `{feature, provider, est_tokens?}` | `{projected_cost_usd, basis}` |
+| GET /usage/attribution | root (Usage:View passes the guard; non-root → 403) | `?by=repo\|branch\|pr\|story\|swarm_task\|workflow\|channel\|review\|origin&days=` (`days` default 30, clamped 1–3650) | grouped `{key, cost_usd, tokens, sessions}[]` |
+| POST /usage/forecast | root (Usage:View passes the guard; non-root → 403) | `{feature, provider, est_tokens?}` | `{projected_cost_usd, basis}` |
 
 **Broker operator workflows (Database tier; `/brokers/cluster` prefix):**
 
@@ -3564,7 +3577,7 @@ policy prefixes (`/usage/`→Usage, `/brokers/cluster`→Database, `/product/`�
 | POST /brokers/clusters/{id}/replay | ws editor | `ReplayReq {source_topic, target_topic, selector, transform?}` | `ReplayResp {replay_id, source_topic, target_topic, count, evidence, error?, evidence_saved}` |
 | GET /brokers/clusters/{id}/schema-registry/subjects/{subject}/versions | ws viewer | — | `SchemaVersion[]` (`{version:number}` only; oldest first) |
 | GET /brokers/clusters/{id}/schema-registry/subjects/{subject}/versions/{version} | ws viewer | — | `SchemaVersionDetail` |
-| POST /brokers/clusters/{id}/schema-registry/subjects/{subject}/compatibility | ws editor | `{schema}` | `CompatibilityResult {compatible, messages}` |
+| POST /brokers/clusters/{id}/schema-registry/subjects/{subject}/compatibility | ws viewer (Database:Edit feature gate) | `CompatCheckReq {schema, schema_type?}` | `CompatCheckResp {compatible, messages}` |
 | GET /brokers/clusters/{id}/lag-alerts | ws viewer | — | `LagAlert[]` |
 | POST /brokers/clusters/{id}/lag-alerts | ws editor | `NewLagAlertReq {topic, group_name, threshold}` | `LagAlert` |
 | DELETE /brokers/clusters/{id}/lag-alerts/{alert_id} | ws editor | — | 204 |
@@ -3589,8 +3602,8 @@ Schema history lists identifiers only; opening it does not fetch every schema bo
 | POST /workspaces/{ws}/memory/{mid}/state | ws editor | `{state}` (suggested\|accepted\|stale\|contradicted) | updated `Memory` |
 | POST /workspaces/{ws}/memory/{mid}/forget | ws editor | — | `{undo_token}` (soft-delete) |
 | POST /workspaces/{ws}/memory/{mid}/forget/undo | ws editor | `{undo_token}` | restored `Memory`; tokens are random, single-use and expire 30 days after the forget (404 after) |
-| POST /workspaces/{ws}/memory/merge | ws editor | `{ids, title, body}` | merged `Memory` — duplicate ids count once; when `body` equals a source (after normalisation) that source IS the merged memory and stays active, only the other sources are retired |
-| POST /workspaces/{ws}/memory/{mid}/split | ws editor | `{parts}` | `Memory[]` — 400 when a part equals the parent or another part (nothing is written) |
+| POST /workspaces/{ws}/memory/merge | ws editor | `{ids, title, body}` | `MergeResp {memory: Memory}` (the merged memory) — duplicate ids count once; when `body` equals a source (after normalisation) that source IS the merged memory and stays active, only the other sources are retired |
+| POST /workspaces/{ws}/memory/{mid}/split | ws editor | `{parts}` (2 or more entries) | `SplitResp {memories: Memory[]}` — 400 when a part equals the parent or another part (nothing is written) |
 | POST /workspaces/{ws}/memory/import | ws editor | `{kind, content}` (AGENTS.md\|CLAUDE.md\|.cursorrules) | `{imported, import_id}` — `imported` counts the memories this import created (or revived from a forgotten/merged duplicate), which are parked as `suggested`; a section identical to a live memory leaves that memory's state and provenance untouched and is not counted |
 
 ## Must-have wave (Wave 3) — additional routes
@@ -3607,8 +3620,8 @@ are root; workflow trigger routes ride the Workflows prefix; the webhook is publ
 | GET /support-bundle | root | — | `SupportBundle` (versions, redacted settings, capabilities, recent audit, migration level, `orphaned_workflow_runs_swept` — runs the workflow orphan sweep errored since daemon start) |
 | POST /workflows/{id}/webhook/{token} | public-by-token | run input body | `WorkflowRun` (token validated against workflow_triggers). Reserved run-input keys in the body are dropped (see **Reserved run-input keys**); a non-object body becomes `input.payload`. **409** while the workflow already has a `pending`/`running` run (one-at-a-time admission, atomic with the insert — same as schedule/event triggers) |
 | GET /workflows/{id}/triggers | ws viewer (Workflows:View) | — | `WorkflowTrigger[]` |
-| POST /workflows/{id}/triggers | ws editor (Workflows:Edit) | `CreateTriggerReq {kind, spec?, enabled?}` (`enabled` defaults to true) | `WorkflowTrigger` |
-| PATCH /workflow-triggers/{id} | ws editor (Workflows:Edit) | `UpdateTriggerReq {spec?, enabled?}` | `WorkflowTrigger` — resuming it (`enabled` false→true) or a really different schedule key (`cadence`/`every_min`/`at`/`weekday`/`expr`/`timezone`/`run_at`) re-arms it: `armed_at` = now, and the scheduler never looks before `max(last_run, armed_at)`, so a run missed while paused is not caught up. Created triggers are armed at creation. `armed_at` is null on rows predating migration 0151 |
+| POST /workflows/{id}/triggers | ws editor (Workflows:Edit) | `CreateTriggerReq {kind, spec?, enabled?}` (`enabled` defaults to true) | `WorkflowTrigger` — records the caller as the trigger's `updated_by`; runs it fires act as the later of that and the workflow's latest version author (PC-3, see the `WorkflowRun.created_by` note) |
+| PATCH /workflow-triggers/{id} | ws editor (Workflows:Edit) | `UpdateTriggerReq {spec?, enabled?}` | `WorkflowTrigger` — resuming it (`enabled` false→true) or a really different schedule key (`cadence`/`every_min`/`at`/`weekday`/`expr`/`timezone`/`run_at`) re-arms it: `armed_at` = now, and the scheduler never looks before `max(last_run, armed_at)`, so a run missed while paused is not caught up. Created triggers are armed at creation. `armed_at` is null on rows predating migration 0151. A `spec` change sets `updated_by` to the caller (an `enabled`-only toggle does not), so later fires act as that caller when they are the latest changer (PC-3) |
 | DELETE /workflow-triggers/{id} | ws editor (Workflows:Edit) | — | 204 |
 | POST /workflow-runs/{id}/approve | ws editor (Workflows:Edit) | `{node_id,approved,note?,expected_detail_version?}` | decision result. Product preview gates require the `detail_version` of the full node body actually displayed, on approve **and deny**. `409` for missing/stale Product identity, a changed pending snapshot, non-running run or concurrent decision; `400` when not waiting at `node_id`. Ordinary non-Product gates retain the request without identity. |
 
@@ -3710,7 +3723,7 @@ routes via request flags (`timeout_ms` / `filter` / `mask`) — no new route.
 | GET /workspaces/{id}/mission | ws viewer (Agents:View) | — | `MissionView` (needs_you/working/review_ready/waiting/failed/budget_warn) |
 | GET /workspaces/{id}/mission/views | ws viewer (Agents:View) | — | `SavedView[]` |
 | POST /workspaces/{id}/mission/views | ws editor (Agents:Edit) | `{name, filter}` | `SavedView` (201) |
-| DELETE /mission-views/{id} | ws editor (Agents:Edit, owner) | — | 204 |
+| DELETE /mission-views/{id} | Agents:Edit + ws viewer + the view's owner or root | — | 204 |
 | GET /workspaces/{id}/search | ws viewer (Agents:View) | `?q=` | `SearchHit[]` (ranked cross-module: stories/workflows/api-requests/swarm/memories/vault-notes/repos/broker-clusters/canvas; each source additionally requires its feature View grant and retains workspace/private-memory visibility; at most 5 hits per source, streaming narrow metadata candidates) |
 | GET /settings/export | root | — | redacted settings JSON + `excluded_keys` |
 | POST /settings/import | root | settings JSON (secret-keyed entries rejected) | `{accepted, rejected}` |
@@ -3740,7 +3753,7 @@ UpdateGoalLoopReq}` and domain types `otto_core::domain::{GoalLoop, GoalLoopDeta
 | 93 | POST /api/v1/workspaces/{id}/goal-loops | ws editor | CreateGoalLoopReq | GoalLoop (validates non-empty `verify`; limits must be positive and `per_phase_timeout_secs` at most 86400, else 400; starts when `autostart`) |
 | 94 | GET /api/v1/goal-loops/{id}?summary= | ws viewer | — | GoalLoopDetail (`{loop, iterations}`). `summary=true` (additive): `plan`, `context_in` and `context_out` are `""` on every iteration except the newest — read one via row 94a |
 | 94a | GET /api/v1/goal-loops/{id}/iterations/{idx} | ws viewer | — | GoalLoopIteration — one iteration in full (`idx` is 1-based) |
-| 95 | PATCH /api/v1/goal-loops/{id} | ws editor | UpdateGoalLoopReq | GoalLoop (`name` non-terminal; `limits` not while Running; `config` Draft-only with at least one executor). All fields are validated before a single atomic update; rejection preserves every prior field. |
+| 95 | PATCH /api/v1/goal-loops/{id} | ws editor; a `config` change needs the loop's creator, a ws admin or root (else 403) | UpdateGoalLoopReq | GoalLoop (`name` non-terminal; `limits` not while Running; `config` Draft-only with at least one executor). All fields are validated before a single atomic update; rejection preserves every prior field. |
 | 96 | POST /api/v1/goal-loops/{id}/start | ws editor | — | GoalLoop |
 | 97 | POST /api/v1/goal-loops/{id}/pause | ws editor | — | GoalLoop |
 | 98 | POST /api/v1/goal-loops/{id}/resume | ws editor | — | GoalLoop |
@@ -4366,7 +4379,7 @@ maps allows recovery from a missing or corrupt saved blob.
 | CP34 | GET /api/v1/mcp/tokens | mcp:admin | — | `{tokens: McpTokenInfo[]}` (all users, no secrets) |
 | CP35 | POST /api/v1/mcp/tokens | mcp:admin | `{user_id?, label?, scope?:{tools?, allow_writes?, workspace_id?}}` | `{token, info}` (raw token shown once) |
 | CP36 | DELETE /api/v1/mcp/tokens/{id} | mcp:admin | — | `204` (404 if not found) |
-| CP37 | POST /api/v1/mcp/tokens/{id}/rotate | mcp:admin (in-handler) | — | `{token, info: McpTokenInfo, revoked_id}` (raw token shown once; 404 unknown id) |
+| CP37 | POST /api/v1/mcp/tokens/{id}/rotate | mcp:admin (in-handler) **and** the token's owner or root — anyone else 403 "only root may rotate an MCP token owned by another user" (the new token authenticates AS the owner; revoke stays open to mcp:admin) | — | `{token, info: McpTokenInfo, revoked_id}` (raw token shown once; 404 unknown id). One transaction: the old row is deleted first (the guard) and the new one inserted with the same owner, label and scope; a failed insert leaves the old token valid, and a concurrent second rotate of the same id gets 404 |
 | CP38 | GET /api/v1/workspaces/{wid}/mcp/session-attach | mcp:view + ws viewer | — | `{workspace_id, attached}` |
 | CP39 | PATCH /api/v1/workspaces/{wid}/mcp/session-attach | mcp:admin (in-handler) + ws editor | `{enabled}` | `{workspace_id, attached}` — writes the per-workspace map form of `otto_mcp_enabled` |
 | CP40 | GET /api/v1/mcp/auto-approve | mcp:view | — | `{rules: McpAutoApproveRule[], categories: [{category, tools: [{name, irreversible}]}]}` |
@@ -4618,11 +4631,11 @@ writes) + the workspace-role axis on the agent's workspace.
 | GET /api/v1/workspaces/{id}/personal-agents | scheduled_tasks view + ws viewer | — | `PersonalAgent[]` (first list seeds 4 disabled example agents) |
 | POST /api/v1/workspaces/{id}/personal-agents | scheduled_tasks edit + ws editor | `{name, avatar?, soul_md?, provider?, model?, cwd?, browser?, delivery?, enabled?}` — `cwd` (also on PATCH) must be empty (default dir under data_dir) or an absolute path / `~/…` with no `..` segments, else 400; re-checked at run time | PersonalAgent |
 | GET /api/v1/personal-agents/{id} | scheduled_tasks view + ws viewer | — | PersonalAgent |
-| PATCH /api/v1/personal-agents/{id} | scheduled_tasks edit + ws editor | any subset of the create body | PersonalAgent |
+| PATCH /api/v1/personal-agents/{id} | scheduled_tasks edit + ws editor; owner-only fields: the owner (`created_by`), a ws admin or root | any subset of the create body | PersonalAgent. The agent runs as its owner, so `soul_md`, `provider`, `model`, `cwd`, `browser` and `delivery` — and its memory and context (`PUT …/memory`, `PUT …/context`) — are owner-only: another Editor changing any of them → 403 ("This agent runs as its owner; only the owner or a workspace admin can change …"). Name, avatar, enable/pause stay open to Editors |
 | DELETE /api/v1/personal-agents/{id} | scheduled_tasks edit + ws editor | — | `{ok:true}`. A run in flight is stopped first and the delete waits for it to settle; `409` while a run is finishing |
 | GET /api/v1/personal-agents/{id}/schedules | scheduled_tasks view + ws viewer | — | `PersonalAgentSchedule[]` |
 | POST /api/v1/personal-agents/{id}/schedules | scheduled_tasks edit + ws editor | `{schedule, timezone?, directive?, enabled?, permission?, idempotency_key?}` — optional 1–128 ASCII `idempotency_key` deduplicates create retries within an agent, including a lost response after commit; the same key with different schedule/timezone/directive/permission returns 409. Permission is persisted atomically at creation. `permission` = `read_only` \| `directed` (default): the schedule's own permission set (see "Personal agent autonomy") (cadence format identical to scheduled tasks, plus the one-shot `{cadence:"once", run_at}` — see "Otto Assistant" — which disables the schedule after its run) | PersonalAgentSchedule |
-| PATCH /api/v1/personal-agents/schedules/{schedule_id} | scheduled_tasks edit + ws editor | `{schedule?, timezone?, directive?, enabled?, permission?}` | PersonalAgentSchedule — resuming it, or a really different `schedule`/`timezone`, re-arms it (`armed_at`; missed occurrences are not caught up) and refreshes `next_run_at`; a `once` whose `run_at` changes forgets that it fired. Resuming the AGENT (`PATCH /personal-agents/{id}` `enabled` false→true) re-arms all its schedules |
+| PATCH /api/v1/personal-agents/schedules/{schedule_id} | scheduled_tasks edit + ws editor; `directive`/`permission` need the agent's owner, a ws admin or root (else 403) | `{schedule?, timezone?, directive?, enabled?, permission?}` | PersonalAgentSchedule — resuming it, or a really different `schedule`/`timezone`, re-arms it (`armed_at`; missed occurrences are not caught up) and refreshes `next_run_at`; a `once` whose `run_at` changes forgets that it fired. Resuming the AGENT (`PATCH /personal-agents/{id}` `enabled` false→true) re-arms all its schedules |
 | DELETE /api/v1/personal-agents/schedules/{schedule_id} | scheduled_tasks edit + ws editor | — | `{ok:true}` |
 | POST /api/v1/personal-agents/{id}/run | scheduled_tasks edit + ws editor | `{schedule_id?}` (that schedule's directive and permission, even when the schedule is paused; without one, a generic check-in directive) | PersonalAgentRun — manual fire, returned at once in `running` (executes in the background; poll runs). 409 while a run of the agent — manual, delegated or scheduled — is already in progress (one run per agent at a time: its runs share a folder and memory; a due schedule waits, cursor untouched) |
 | POST /api/v1/personal-agents/runs/{run_id}/cancel | scheduled_tasks edit + ws editor | — | `{ok:true}` — stop a `running` run (its session is killed, no retry); it settles `canceled`. `409` when the run isn't running |
@@ -4720,9 +4733,9 @@ specialist work to them through a shared room.
 | Method & path | Role | Body | Response |
 |---|---|---|---|
 | GET /api/v1/personal-agents/{id}/memory | scheduled_tasks view + ws viewer | — | `PersonalAgentDocument` |
-| PUT /api/v1/personal-agents/{id}/memory | scheduled_tasks edit + ws editor | `{content, version}` | `PersonalAgentDocument` |
+| PUT /api/v1/personal-agents/{id}/memory | scheduled_tasks edit + ws editor; the agent's owner, a ws admin or root (else 403; an ownerless preset is adopted by the caller) | `{content, version}` | `PersonalAgentDocument` |
 | GET /api/v1/personal-agents/{id}/context | scheduled_tasks view + ws viewer | — | `PersonalAgentDocument` |
-| PUT /api/v1/personal-agents/{id}/context | scheduled_tasks edit + ws editor | `{content, version}` | `PersonalAgentDocument` |
+| PUT /api/v1/personal-agents/{id}/context | scheduled_tasks edit + ws editor; the agent's owner, a ws admin or root (else 403; an ownerless preset is adopted by the caller) | `{content, version}` | `PersonalAgentDocument` |
 
 `PersonalAgentDocument = {content: string, version: string, exists: boolean, path: string | null}`.
 `version` is opaque; submit the version returned by GET with a save. Memory uses
@@ -6204,7 +6217,7 @@ returns 400 rather than truncating data. Other errors: 400 invalid scope/format,
 
 `GET /api/v1/workspaces/{wid}/history/page?q=&provider=&cwd=&status=&cursor=&limit=100`
 
-Requires workspace Viewer; non-admins see only their own agent sessions in that workspace. Admin/root additionally see globally unclaimed indexed transcripts. A provider session id claimed by any workspace/provider excludes the corresponding on-disk entry. The legacy `/history` array endpoint remains unchanged.
+Requires workspace Viewer; non-admins see only their own agent sessions in that workspace. Admin/root additionally see globally unclaimed indexed transcripts. A provider session id claimed by any workspace/provider excludes the corresponding on-disk entry. The legacy `/history` array is served by the same bounded scan (≤ `4*limit` candidates) with `before` as an exclusive cursor. A filtered page may be short or empty before exhaustion and carries no cursor; use `/history/page` to page reliably.
 
 Returns `{"entries":[HistoryEntry],"next_cursor":"opaque-or-null"}`. `HistoryEntry.resumable` is true when the row carries a provider session id (or is `reconnectable`), **whatever its status** — an ended conversation resumes (`ensure_live` respawns any agent with a provider id); `on_disk` rows: an indexed provider id. `HistoryEntry.archived` (bool, default false; always false for `on_disk`) marks an archived Otto row: resume refuses those with 409, so the UI offers Unarchive first. The legacy `/history` array returns the same two fields. Limit 1–1000, default 100. Stable order is descending activity then ascending source identity. Cursor is versioned, ≤4 KiB, and bound to actor/role/workspace/filters; malformed or mismatched cursors return 400 and require reloading. Authorization is reevaluated on every page.
 

@@ -6,6 +6,7 @@ pub mod admission;
 pub mod attach_guard;
 pub mod bridge;
 pub mod email;
+pub mod gfm;
 pub mod health;
 pub mod http;
 pub mod improve_notify;

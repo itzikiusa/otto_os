@@ -75,14 +75,3 @@ pub struct McpServerSpec {
     pub args: Vec<String>,
     pub env: std::collections::BTreeMap<String, String>,
 }
-
-/// Resolves the *enabled* user-configured MCP servers for a workspace, queried
-/// by `SessionManager` just before an agent spawn so they can be merged into the
-/// workspace `.mcp.json` (alongside Otto's own managed entries).
-///
-/// **Best-effort:** implementations handle their own errors (log, return empty);
-/// a failure here must never block a session from spawning, and nothing is ever
-/// auto-enabled — only servers the user flipped on are returned.
-pub trait McpServerProvider: Send + Sync {
-    fn enabled_servers(&self, workspace_id: &str) -> Vec<McpServerSpec>;
-}

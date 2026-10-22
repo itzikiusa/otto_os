@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rel } from '../../lib/stores/now.svelte';
   // RefineTab — left: list of refinement threads with "New thread" / "New from
   // discovery run…" controls, in a shared ListPane; right: RefineChat for the
   // selected thread. Mirrors DiscoveryTab for the list+detail layout and
@@ -149,22 +150,6 @@
 
   // ── Helpers ────────────────────────────────────────────────────────────────
 
-  function relDate(iso: string): string {
-    try {
-      const diff = Date.now() - new Date(iso).getTime();
-      const s = Math.floor(diff / 1000);
-      if (s < 60) return 'just now';
-      const m = Math.floor(s / 60);
-      if (m < 60) return `${m}m ago`;
-      const h = Math.floor(m / 60);
-      if (h < 24) return `${h}h ago`;
-      const d = Math.floor(h / 24);
-      if (d < 30) return `${d}d ago`;
-      return new Date(iso).toLocaleDateString();
-    } catch {
-      return iso;
-    }
-  }
 </script>
 
 <div class="refine-tab">
@@ -193,7 +178,7 @@
             <option value="">New from discovery run…</option>
             {#each discoveryRuns as dr (dr.run.id)}
               <option value={dr.run.id}>
-                {relDate(dr.run.created_at)} — {runStatus(dr.derived_status).label}
+                {rel(dr.run.created_at)} — {runStatus(dr.derived_status).label}
               </option>
             {/each}
           </select>
@@ -235,7 +220,7 @@
                   <span class="thread-status" class:status-archived={t.status === 'archived'}>
                     {t.status === 'archived' ? 'Archived' : 'Active'}
                   </span>
-                  <span class="thread-date">{relDate(t.updated_at)}</span>
+                  <span class="thread-date" title={new Date(t.updated_at).toLocaleString()}>{rel(t.updated_at)}</span>
                 </span>
               </button>
               {#if t.status === 'active'}

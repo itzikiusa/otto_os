@@ -795,19 +795,15 @@ async fn wait_for_ready(manager: &SessionManager, id: &Id) {
 /// Type the brief into the receiving agent as a single message. Bracketed paste
 /// (`ESC[200~ … ESC[201~`) keeps the multi-line brief from submitting on its
 /// first newline; a trailing `\r` then sends it. Returns whether it landed.
-async fn inject_handover_prompt(manager: &SessionManager, id: &Id, prompt: &str) -> bool {
-    // The brief quotes another session's transcript: strip controls so an
-    // embedded `ESC[201~` can't end the paste and type the rest as keys.
-    let paste = format!(
-        "\x1b[200~{}\x1b[201~",
-        otto_orchestrator::claude_pty::sanitize_paste(prompt)
-    );
-    if let Err(e) = manager.input(id, paste.as_bytes()).await {
-        tracing::warn!(session = %id, "handover: paste failed: {e}");
-        return false;
-    }
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    if let Err(e) = manager.input(id, b"\r").await {
+///
+/// `SessionManager::submit_text` does exactly that (the same control-byte strip
+/// — the brief quotes another session's transcript, so an embedded `ESC[201~`
+/// must not end the paste — and the same 200 ms paste-to-Enter wait) while
+/// holding the session's submit lock, so a broadcast or `/message` can't land
+/// its paste or Enter between ours.
+#[doc(hidden)]
+pub async fn inject_handover_prompt(manager: &SessionManager, id: &Id, prompt: &str) -> bool {
+    if let Err(e) = manager.submit_text(id, prompt).await {
         tracing::warn!(session = %id, "handover: submit failed: {e}");
         return false;
     }

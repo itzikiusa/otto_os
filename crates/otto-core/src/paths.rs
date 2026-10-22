@@ -95,9 +95,43 @@ pub fn expand_tilde(p: &str) -> String {
     p.to_string()
 }
 
+/// [`expand_tilde`] for a user-supplied path, as a `PathBuf`, refusing
+/// `~user/…`: it names another account's home, and the old any-`~` prefix
+/// strip copies turned `~bob/notes.txt` into `$HOMEbob/notes.txt` — a
+/// confusing not-found (or a write somewhere unexpected) for what the user
+/// typed. `Err` is a user-facing message for a 400.
+pub fn expand_home_strict(p: &str) -> Result<PathBuf, String> {
+    if p.starts_with('~') && p != "~" && !p.starts_with("~/") {
+        return Err(format!(
+            "unsupported home path {p:?}: use ~/… or an absolute path"
+        ));
+    }
+    Ok(PathBuf::from(expand_tilde(p)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expand_home_strict_expands_only_the_callers_own_home() {
+        let home = std::env::var("HOME").expect("HOME set in tests");
+        assert_eq!(expand_home_strict("~").unwrap(), PathBuf::from(&home));
+        assert_eq!(
+            expand_home_strict("~/notes.txt").unwrap(),
+            PathBuf::from(format!("{}/notes.txt", home.trim_end_matches('/')))
+        );
+        assert!(expand_home_strict("~bob/notes.txt").is_err());
+        assert!(expand_home_strict("~bob").is_err());
+        assert_eq!(
+            expand_home_strict("/abs/x").unwrap(),
+            PathBuf::from("/abs/x")
+        );
+        assert_eq!(
+            expand_home_strict("rel/~x").unwrap(),
+            PathBuf::from("rel/~x")
+        );
+    }
 
     #[test]
     fn expands_home_forms() {

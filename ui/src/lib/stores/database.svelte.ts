@@ -529,6 +529,19 @@ export interface QueryTabAgent {
  * which is right for the buttons but not for an agent command that has to report
  * WHICH one happened.
  */
+/** How the typed guarded-write gate ({@link DatabaseStore.confirmGuardedWrite})
+ *  was answered: a mistyped name (`'mismatch'`) is already explained to the
+ *  person, a plain cancel (`'declined'`) is not. */
+export type GuardedWriteAnswer = 'confirmed' | 'declined' | 'mismatch';
+
+/** Why {@link DatabaseStore.runManagedStatement} ran nothing: the typed confirm
+ *  was dismissed (`'declined'`), the name was mistyped (`'mismatch'` — already
+ *  toasted by the gate, so callers add no second toast), or access / the
+ *  connection changed while it waited (`'stale'`). */
+export interface ManagedWriteCanceled {
+  canceled: 'declined' | 'mismatch' | 'stale';
+}
+
 export interface RunOutcome {
   status?: 'ok' | 'cancelled' | 'aborted' | 'failed' | 'detached' | 'invalid';
   error?: string;
@@ -823,7 +836,6 @@ class DatabaseStore {
   objectSearching = $state(false);
   objectSearchTruncated = $state(false);
   objectSearchScanned = $state(0);
-  objectSearchSupported = $state(true);
 
   // ── Selected object (Structure view) ────────────────────────────────────
   selectedObjectPath: string | null = $state(null);
@@ -2137,11 +2149,6 @@ class DatabaseStore {
     if (this.connLive(id, epoch) && this.selectedConnId === id) this.captureSnapshot();
   }
 
-  /** Backwards-compatible alias: selecting a connection opens/focuses its tab. */
-  async selectConnection(id: Id): Promise<void> {
-    await this.openConnection(id);
-  }
-
   /**
    * Close an open connection tab, discarding its snapshot. When the closed tab
    * was active, switch to a neighbor (previous index, else first remaining);
@@ -2792,7 +2799,6 @@ class DatabaseStore {
       this.objectSearchHits = r.hits;
       this.objectSearchTruncated = r.truncated;
       this.objectSearchScanned = r.scanned;
-      this.objectSearchSupported = r.supported;
     } catch (e) {
       if (seq === this.objectSearchSeq && !isAbortError(e)) {
         this.objectSearchHits = [];
@@ -3159,11 +3165,14 @@ class DatabaseStore {
           // attributed confirm, then re-runs as an ordinary run.
           const guarded = origin?.environment === 'prod' || origin?.read_only === true;
           opts?.awaitingHuman?.(guarded ? 'Waiting for the typed write confirm' : 'Waiting for you to allow the write');
-          const ok = guarded
+          const answer: GuardedWriteAnswer = guarded
             ? await this.confirmGuardedWrite(origin, e, opts?.agentLabel)
-            : await (opts?.confirmWrite?.() ?? Promise.resolve(false));
-          if (!ok || stopped()) {
-            toasts.info('Write canceled');
+            : (await (opts?.confirmWrite?.() ?? Promise.resolve(false)))
+              ? 'confirmed'
+              : 'declined';
+          if (answer !== 'confirmed' || stopped()) {
+            // A mistyped name was already explained by the gate.
+            if (answer !== 'mismatch') toasts.info('Write canceled');
             if (t.pending?.queryId === queryId) this.clearPending(t);
             if (outcome) Object.assign(outcome, { status: 'cancelled', error: 'the user declined the write' });
             return null;
@@ -3175,9 +3184,9 @@ class DatabaseStore {
           // guarded connection. Ask for a typed confirmation and, if granted,
           // retry with the explicit confirm flag.
           opts?.awaitingHuman?.('Waiting for the typed write confirm');
-          const ok = await this.confirmGuardedWrite(origin, e, opts?.agentLabel);
-          if (!ok || stopped()) {
-            toasts.info('Write canceled');
+          const answer = await this.confirmGuardedWrite(origin, e, opts?.agentLabel);
+          if (answer !== 'confirmed' || stopped()) {
+            if (answer !== 'mismatch') toasts.info('Write canceled');
             if (t.pending?.queryId === queryId) this.clearPending(t);
             if (outcome) Object.assign(outcome, { status: 'cancelled', error: 'the user declined the write' });
             return null;
@@ -3266,13 +3275,18 @@ class DatabaseStore {
     // The cursor belongs to the page the user is LEAVING — read it before the
     // re-run replaces `t.result`.
     const cursor = delta > 0 ? (t.result?.next_cursor ?? undefined) : undefined;
+    const prev = t.offset;
     t.offset = next;
+    // How the run ended — the caller's object when it passed one (an agent
+    // command reads it back), else a local one.
+    const outcome: RunOutcome = extra?.outcome ?? {};
     // Page the statement (and scope node) that PRODUCED the result — the editor
     // buffer / active DB may have been edited since the run. `ran_node` is
     // passed as-is: a `null` (ran unscoped) must stay unscoped, not fall back
     // to a database selected since. `transient` keeps the buffer untouched.
     return this.runQuery(t.ran_statement ?? undefined, t.ran_node, {
       ...extra,
+      outcome,
       keepOffset: true,
       transient: true,
       cursor,
@@ -3280,52 +3294,77 @@ class DatabaseStore {
       // may have run with a different cap (an agent's `row_limit`, or a Limit
       // changed since) than the persisted default.
       maxRows: pageSize,
+    }).then((r) => {
+      // A stopped, declined or failed page change leaves the grid on the page
+      // it was on — so must the pager (else the footer says "51–100" over rows
+      // 1–50 and the next Next skips a page). A detached run keeps `next`: its
+      // re-attach installs THAT page. A newer pager move owns the offset.
+      if (!r && outcome.status !== 'detached' && t.offset === next) t.offset = prev;
+      return r;
     });
   }
 
   /**
    * Typed confirmation gate for a write on a guarded (prod / read-only)
    * connection. The user must type the connection name verbatim, so a write to
-   * production is a deliberate, explicit act. Returns true only on an exact,
-   * case-insensitive match.
+   * production is a deliberate, explicit act. `'confirmed'` only on an exact,
+   * case-insensitive match. A typed name that doesn't match is explained here
+   * (the shared prod-gate wording) and answers `'mismatch'`, so callers don't
+   * add a second, vaguer "canceled" toast. Public so other write flows (the
+   * import dialog keeps an import-worded copy today) can take the same gate.
    */
-  private async confirmGuardedWrite(conn: Connection | null, blocked?: unknown, agentLabel?: string): Promise<boolean> {
-    if (!conn) return false;
-    const label = conn.environment === 'prod' ? 'PRODUCTION' : 'read-only';
+  async confirmGuardedWrite(
+    conn: Pick<Connection, 'name' | 'environment'> | null,
+    blocked?: unknown,
+    agentLabel?: string,
+  ): Promise<GuardedWriteAnswer> {
+    if (!conn) return 'declined';
+    const prod = conn.environment === 'prod';
+    const label = prod ? 'PRODUCTION' : 'read-only';
     // An agent-driven write names who is asking — the typed confirm is the
     // person's decision about SOMEONE ELSE's statement.
     const who = agentLabel ? `${agentLabel} wants to run this. ` : '';
     // Redis `KEYS` is gated too — not a write, but it blocks the whole server
     // while it walks every key; say that instead of "can modify data".
     const blockingKeys = blocked instanceof ApiError && blocked.message.includes('KEYS blocks');
-    const typed = await confirmer.promptText(
-      who +
-      (blockingKeys
-        ? `KEYS blocks the Redis server while it scans every key on the ${label} ` +
-            `connection "${conn.name}" — prefer SCAN with MATCH/COUNT. Type the ` +
-            `connection name to run it anyway.`
-        : `You are about to run a WRITE / schema change on the ${label} connection ` +
-            `"${conn.name}". This can modify or destroy data. Type the connection ` +
-            `name to confirm.`),
-      {
-        title: blockingKeys ? '⚠ Confirm blocking command' : '⚠ Confirm production write',
-        confirmLabel: blockingKeys ? 'Run KEYS' : 'Run write',
-        placeholder: conn.name,
-        danger: true,
-      },
-    );
-    return typed != null && typed.trim().toLowerCase() === conn.name.trim().toLowerCase();
+    const body = blockingKeys
+      ? `KEYS blocks the Redis server while it scans every key on the ${label} ` +
+        `connection "${conn.name}" — prefer SCAN with MATCH/COUNT. Type the ` +
+        `connection name to run it anyway.`
+      : `You are about to run a WRITE / schema change on the ${label} connection ` +
+        `"${conn.name}". This can modify or destroy data. Type the connection ` +
+        `name to confirm.`;
+    // Titled by what the connection IS — a read-only dev connection is not
+    // "production". The danger Modal carries the tone; no glyph.
+    const title = blockingKeys
+      ? 'Confirm blocking command'
+      : prod
+        ? 'Confirm production write'
+        : 'Confirm write on a read-only connection';
+    const typed = await confirmer.promptText(who + body, {
+      title,
+      confirmLabel: blockingKeys ? 'Run KEYS' : 'Run write',
+      placeholder: conn.name,
+      danger: true,
+    });
+    if (typed == null) return 'declined';
+    if (typed.trim().toLowerCase() !== conn.name.trim().toLowerCase()) {
+      toasts.info('Nothing was changed', 'What you typed didn’t match, so the action was canceled.');
+      return 'mismatch';
+    }
+    return 'confirmed';
   }
 
   /**
    * Run an arbitrary statement against the selected connection (used by inline
    * cell edits / row deletes), applying the production / read-only write-gate:
    * if the server blocks the write, ask for a typed confirmation and retry with
-   * the confirm flag. Returns the result, or null if cancelled.
+   * the confirm flag. Returns the result, or `{ canceled }` saying why nothing
+   * ran (see {@link ManagedWriteCanceled}).
    *
    * Throws on any non-guardrail failure so the caller keeps its own error UX.
    */
-  async runManagedStatement(sql: string, node?: string | null): Promise<QueryResult | null> {
+  async runManagedStatement(sql: string, node?: string | null): Promise<QueryResult | ManagedWriteCanceled> {
     const id = this.selectedConnId;
     const origin = this.selectedConn ? { ...this.selectedConn } : null;
     const accessEpoch = this.accessEpoch;
@@ -3345,8 +3384,9 @@ class DatabaseStore {
       return await post(false);
     } catch (e) {
       if (isWriteBlocked(e)) {
-        const ok = await this.confirmGuardedWrite(origin, e);
-        if (!ok || accessEpoch !== this.accessEpoch || connEpoch !== this.epochOf(id)) return null;
+        const answer = await this.confirmGuardedWrite(origin, e);
+        if (answer !== 'confirmed') return { canceled: answer };
+        if (accessEpoch !== this.accessEpoch || connEpoch !== this.epochOf(id)) return { canceled: 'stale' };
         return await post(true);
       }
       throw e;

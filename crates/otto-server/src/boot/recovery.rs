@@ -116,6 +116,20 @@ async fn fail_orphaned_reviews(ctx: &ServerCtx) {
         Ok(_) => {}
         Err(e) => tracing::warn!("review recovery: {e}"),
     }
+    // After the review-level sweep, so every review is settled: a per-agent
+    // retry's task died with the process too, and its `pending` / `running` /
+    // `waiting` row would otherwise block Retry, Stop and the summarizer
+    // re-run for good.
+    match ReviewsRepo::new(ctx.pool.clone())
+        .fail_orphaned_agents("Interrupted by a daemon restart")
+        .await
+    {
+        Ok(n) if n > 0 => {
+            tracing::info!("review recovery: marked {n} orphaned review agent(s) as error")
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!("review agent recovery: {e}"),
+    }
 }
 
 /// Same recovery for orphaned skill-evaluation runs.

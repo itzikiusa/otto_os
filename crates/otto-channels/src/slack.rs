@@ -447,7 +447,9 @@ impl Adapter for SlackAdapter {
     }
 
     /// Send with Slack mrkdwn rendering enabled. Slack surfaces `*bold*`,
-    /// `_italic_`, `` `code` ``, and `<URL|label>` links when `mrkdwn: true`.
+    /// `_italic_`, `` `code` ``, and `<URL|label>` links when `mrkdwn: true`;
+    /// agents answer in GitHub-flavoured Markdown, so the text is converted
+    /// first ([`crate::gfm::to_slack_mrkdwn`]).
     async fn send_formatted(
         &self,
         chat: &str,
@@ -456,7 +458,7 @@ impl Adapter for SlackAdapter {
     ) -> anyhow::Result<String> {
         let mut body = serde_json::json!({
             "channel": chat,
-            "text": text,
+            "text": crate::gfm::to_slack_mrkdwn(text),
             "mrkdwn": true,
         });
         if let Some(ts) = thread {

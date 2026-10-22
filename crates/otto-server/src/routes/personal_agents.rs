@@ -271,6 +271,86 @@ fn check_delivery(d: &Value) -> Result<(), ApiError> {
     }
 }
 
+// --- Owner-only changes (S3-05 for personal agents) ------------------------
+
+/// The PATCH fields that change WHAT the agent runs or WHERE its report goes
+/// and actually differ from the stored agent (a full-form PATCH re-sending
+/// unchanged values is not a change). Same rule as
+/// `scheduled_tasks::owner_only_changes`.
+fn owner_only_changes(agent: &PersonalAgent, req: &UpdateAgentReq) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    let diff = |new: Option<&str>, old: &str| new.is_some_and(|n| n != old);
+    if diff(req.soul_md.as_deref(), &agent.soul_md) {
+        out.push("instructions");
+    }
+    if diff(req.provider.as_deref(), &agent.provider) {
+        out.push("provider");
+    }
+    if diff(req.model.as_deref(), &agent.model) {
+        out.push("model");
+    }
+    if diff(req.cwd.as_deref(), &agent.cwd) {
+        out.push("folder");
+    }
+    if req.browser.is_some_and(|b| b != agent.browser) {
+        out.push("browser access");
+    }
+    if req.delivery.as_ref().is_some_and(|d| d != &agent.delivery) {
+        out.push("delivery");
+    }
+    out
+}
+
+/// A personal agent runs AS `created_by` (its session, git / Jira accounts,
+/// connection grants and delivery), so what it runs and where its report goes
+/// is the owner's call: another Editor changing them would make A's agent run
+/// B's instructions as A and send the result to B (S3-05). The owner, a
+/// workspace Admin or root may (`roles.check` passes root). An agent with no
+/// owner (a seeded preset) is adopted by the first Editor who changes one of
+/// these fields — it then runs as them, never as somebody else.
+async fn require_agent_owner(
+    ctx: &ServerCtx,
+    user: &User,
+    agent: &PersonalAgent,
+    changed: &[&str],
+) -> Result<(), ApiError> {
+    if changed.is_empty() || agent.created_by.as_deref() == Some(user.id.as_str()) {
+        return Ok(());
+    }
+    if require_ws_role(ctx, user, &agent.workspace_id, WorkspaceRole::Admin)
+        .await
+        .is_ok()
+    {
+        return Ok(());
+    }
+    let ownerless = agent
+        .created_by
+        .as_deref()
+        .filter(|o| !o.is_empty())
+        .is_none();
+    if ownerless && adopt(ctx, &agent.id, &user.id).await {
+        return Ok(());
+    }
+    Err(ApiError(Error::Forbidden(format!(
+        "This agent runs as its owner; only the owner or a workspace admin can change its {}.",
+        changed.join(", ")
+    ))))
+}
+
+/// Claim an ownerless agent for `user_id`. Conditional on the row still having
+/// no owner, so of two Editors racing on a preset exactly one adopts it.
+async fn adopt(ctx: &ServerCtx, agent_id: &str, user_id: &str) -> bool {
+    sqlx::query(
+        "UPDATE personal_agents SET created_by = ? \
+         WHERE id = ? AND (created_by IS NULL OR created_by = '')",
+    )
+    .bind(user_id)
+    .bind(agent_id)
+    .execute(&ctx.pool)
+    .await
+    .is_ok_and(|r| r.rows_affected() == 1)
+}
+
 // --- Agent handlers --------------------------------------------------------
 
 /// `GET /workspaces/{id}/personal-agents` — seeds the example presets (once per
@@ -281,7 +361,7 @@ async fn list(
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<Json<Vec<PersonalAgent>>> {
     require_ws_role(&ctx, &user, &ws_id, WorkspaceRole::Viewer).await?;
-    seed_presets(&ctx, &ws_id, &user).await;
+    seed_presets(&ctx, &ws_id).await;
     Ok(Json(
         agents(&ctx)
             .list_by_workspace(&ws_id)
@@ -351,6 +431,9 @@ async fn update(
     let repo = agents(&ctx);
     let agent = repo.get(&id).await.map_err(ApiError)?;
     require_ws_role(&ctx, &user, &agent.workspace_id, WorkspaceRole::Editor).await?;
+    // Name, avatar and enable/pause stay open to Editors; what runs and where
+    // the report goes is the owner's (S3-05).
+    require_agent_owner(&ctx, &user, &agent, &owner_only_changes(&agent, &req)).await?;
     if let Some(p) = req.provider.as_deref() {
         check_provider(p)?;
     }
@@ -460,6 +543,17 @@ async fn create_schedule(
     let repo = agents(&ctx);
     let agent = repo.get(&id).await.map_err(ApiError)?;
     require_ws_role(&ctx, &user, &agent.workspace_id, WorkspaceRole::Editor).await?;
+    // A schedule's directive is the prompt its runs execute and its
+    // permission what they may do — the owner's call. A cadence with the
+    // default directive and permission stays open to Editors.
+    let mut changed = Vec::new();
+    if !req.directive.trim().is_empty() {
+        changed.push("schedule directive");
+    }
+    if req.permission.as_deref().is_some_and(|p| p != "directed") {
+        changed.push("schedule permission");
+    }
+    require_agent_owner(&ctx, &user, &agent, &changed).await?;
     cadence::validate(&req.schedule).map_err(ApiError)?;
     let timezone = req.timezone.unwrap_or_else(|| "UTC".into());
     check_timezone(&timezone)?;
@@ -496,6 +590,24 @@ async fn update_schedule(
     let schedule = repo.get_schedule(&schedule_id).await.map_err(ApiError)?;
     let agent = repo.get(&schedule.agent_id).await.map_err(ApiError)?;
     require_ws_role(&ctx, &user, &agent.workspace_id, WorkspaceRole::Editor).await?;
+    // Cadence, timezone and enabled stay open; directive and permission are
+    // the owner's (S3-05).
+    let mut changed = Vec::new();
+    if req
+        .directive
+        .as_deref()
+        .is_some_and(|d| d != schedule.directive)
+    {
+        changed.push("schedule directive");
+    }
+    if req
+        .permission
+        .as_deref()
+        .is_some_and(|p| p != schedule.permission)
+    {
+        changed.push("schedule permission");
+    }
+    require_agent_owner(&ctx, &user, &agent, &changed).await?;
     if let Some(s) = &req.schedule {
         cadence::validate(s).map_err(ApiError)?;
     }
@@ -702,6 +814,8 @@ async fn save_memory(
     Json(req): Json<SaveDocumentReq>,
 ) -> ApiResult<Json<crate::personal_agent_documents::AgentDocument>> {
     let agent = document_agent(&ctx, &user, &id, WorkspaceRole::Editor).await?;
+    // Memory is injected into every run, which runs as the owner.
+    require_agent_owner(&ctx, &user, &agent, &["memory"]).await?;
     let root = personal_agents_engine::agent_directory(&ctx, &agent).map_err(ApiError)?;
     crate::personal_agent_documents::save_memory(&root, &req.version, &req.content)
         .await
@@ -730,7 +844,9 @@ async fn save_context(
     CurrentUser(user): CurrentUser,
     Json(req): Json<SaveDocumentReq>,
 ) -> ApiResult<Json<crate::personal_agent_documents::AgentDocument>> {
-    document_agent(&ctx, &user, &id, WorkspaceRole::Editor).await?;
+    let agent = document_agent(&ctx, &user, &id, WorkspaceRole::Editor).await?;
+    // The context is injected into every run, which runs as the owner.
+    require_agent_owner(&ctx, &user, &agent, &["context"]).await?;
     let version = agents(&ctx)
         .save_context(&id, &req.version, &req.content)
         .await
@@ -781,9 +897,31 @@ async fn chat_session(
     // Re-read under the lock: a concurrent call may have just pinned a chat.
     let agent = repo.get(&id).await.map_err(ApiError)?;
 
-    // Reuse the pinned session if it still exists.
-    if let Some(sid) = agent.chat_session_id.as_deref().filter(|s| !s.is_empty()) {
-        if let Ok(session) = ctx.manager.get(&sid.to_string()).await {
+    // Reuse the pinned session if it still exists AND is the caller's: a chat
+    // is opened under its creator, so another member's pinned chat is one
+    // the caller can't attach to (and must not take over).
+    let pinned = match agent.chat_session_id.as_deref().filter(|s| !s.is_empty()) {
+        Some(sid) => ctx.manager.get(&sid.to_string()).await.ok(),
+        None => None,
+    };
+    if let Some(session) = pinned.as_ref().filter(|s| s.created_by == user.id) {
+        return Ok(Json(json!({"session_id": session.id, "created": false})));
+    }
+    // Someone else's chat is pinned: reuse the caller's own live chat with
+    // this agent, so chats stay one per user without a second pin column.
+    if pinned.is_some() {
+        let own = ctx
+            .manager
+            .list_live_by_meta(&agent.workspace_id, None, "personal_agent", &agent.id)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|s| {
+                s.created_by == user.id
+                    && s.meta.get("personal_agent_chat").and_then(Value::as_bool) == Some(true)
+            })
+            .max_by(|a, b| a.created_at.cmp(&b.created_at));
+        if let Some(session) = own {
             return Ok(Json(json!({"session_id": session.id, "created": false})));
         }
     }
@@ -841,9 +979,12 @@ async fn chat_session(
             )));
         }
     }
-    repo.set_chat_session(&agent.id, Some(&session.id))
-        .await
-        .map_err(ApiError)?;
+    // Pin only into a free slot: another member's live pin stays theirs.
+    if pinned.is_none() {
+        repo.set_chat_session(&agent.id, Some(&session.id))
+            .await
+            .map_err(ApiError)?;
+    }
     Ok(Json(json!({"session_id": session.id, "created": true})))
 }
 
@@ -1122,7 +1263,7 @@ async fn post_message(
 /// Seed the four example agents once per workspace (guarded by a settings
 /// marker so deleting them doesn't resurrect them). All DISABLED, all normal
 /// fully-editable rows; model empty = provider default.
-async fn seed_presets(ctx: &ServerCtx, ws_id: &str, user: &User) {
+async fn seed_presets(ctx: &ServerCtx, ws_id: &str) {
     let settings = SettingsRepo::new(ctx.pool.clone());
     let marker = format!("personal_agents_seeded_{ws_id}");
     if matches!(settings.get(&marker).await, Ok(Some(_))) {
@@ -1136,7 +1277,7 @@ async fn seed_presets(ctx: &ServerCtx, ws_id: &str, user: &User) {
             return;
         }
     }
-    for (agent, schedules) in preset_agents(ws_id, &user.id) {
+    for (agent, schedules) in preset_agents(ws_id) {
         match repo.create(agent).await {
             Ok(created) => {
                 for mut s in schedules {
@@ -1152,12 +1293,16 @@ async fn seed_presets(ctx: &ServerCtx, ws_id: &str, user: &User) {
 
 /// The built-in example presets: (agent, its schedules). `agent_id` on each
 /// schedule is filled in after the agent row is created.
-fn preset_agents(ws_id: &str, user_id: &str) -> Vec<(NewPersonalAgent, Vec<NewAgentSchedule>)> {
+/// Seeded with NO owner: a preset seeded by whoever first opened the list
+/// (a Viewer GET) used to run as that person for any Editor who enabled it.
+/// The first Editor to change its instructions adopts it
+/// ([`require_agent_owner`]).
+fn preset_agents(ws_id: &str) -> Vec<(NewPersonalAgent, Vec<NewAgentSchedule>)> {
     let base = |name: &str, avatar: &str, soul: &str| NewPersonalAgent {
         avatar: avatar.into(),
         soul_md: soul.into(),
         enabled: false,
-        created_by: Some(user_id.to_string()),
+        created_by: None,
         ..NewPersonalAgent::defaults(ws_id.to_string(), name.to_string())
     };
     let sched = |spec: Value, directive: &str| NewAgentSchedule {
@@ -1253,9 +1398,57 @@ mod tests {
     }
 
     #[test]
+    fn owner_only_changes_ignore_unchanged_and_open_fields() {
+        let mut agent = preset_agents("ws1").remove(0).0;
+        agent.delivery = json!({"type":"none"});
+        let stored = PersonalAgent {
+            admission_generation: 0,
+            id: "a1".into(),
+            workspace_id: "ws1".into(),
+            name: agent.name.clone(),
+            avatar: agent.avatar.clone(),
+            soul_md: agent.soul_md.clone(),
+            provider: agent.provider.clone(),
+            model: agent.model.clone(),
+            cwd: agent.cwd.clone(),
+            browser: agent.browser,
+            delivery: agent.delivery.clone(),
+            enabled: false,
+            chat_session_id: None,
+            created_by: Some("alice".into()),
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        // A full-form save re-sending unchanged values, plus name / enable.
+        let same = UpdateAgentReq {
+            name: Some("Renamed".into()),
+            avatar: Some("x".into()),
+            soul_md: Some(stored.soul_md.clone()),
+            delivery: Some(stored.delivery.clone()),
+            browser: Some(stored.browser),
+            enabled: Some(true),
+            ..Default::default()
+        };
+        assert!(owner_only_changes(&stored, &same).is_empty());
+        let evil = UpdateAgentReq {
+            soul_md: Some("leak".into()),
+            delivery: Some(json!({"type":"webhook","url":"https://evil.test"})),
+            ..Default::default()
+        };
+        assert_eq!(
+            owner_only_changes(&stored, &evil),
+            vec!["instructions", "delivery"]
+        );
+    }
+
+    #[test]
     fn presets_are_disabled_editable_rows() {
-        let presets = preset_agents("ws1", "u1");
+        let presets = preset_agents("ws1");
         assert_eq!(presets.len(), 4);
+        assert!(
+            presets.iter().all(|(a, _)| a.created_by.is_none()),
+            "presets seed with no owner (they must not run as whoever listed first)"
+        );
         assert!(
             presets.iter().all(|(a, _)| !a.enabled),
             "presets seed disabled"

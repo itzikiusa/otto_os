@@ -237,3 +237,169 @@ async fn forwarding_headers_are_not_a_throttle_input() {
         "username key is case-insensitive so casing can't dodge the tally"
     );
 }
+
+// ---------------------------------------------------------------------------
+// MCP token rotation is owner-bound (access-control-3-01)
+// ---------------------------------------------------------------------------
+//
+// Through the REAL daemon router on a loopback port: `POST
+// /mcp/tokens/{id}/rotate` hands back a plaintext token that authenticates AS
+// the row's owner, so a non-root `mcp:admin` must not be able to rotate root's
+// token (it would walk away with a working root credential). Revoking stays
+// open to the admin; rotating your own, or root rotating anyone's, works.
+
+mod mcp_rotate {
+    use chrono::Utc;
+    use otto_core::domain::{Capability, Feature};
+    use otto_core::Error;
+    use otto_rbac::AuthRepo;
+    use otto_state::{DbPool, GrantsRepo};
+    use serde_json::Value;
+    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+
+    struct Daemon {
+        base: String,
+        pool: DbPool,
+        http: reqwest::Client,
+        _tmp: tempfile::TempDir,
+    }
+
+    async fn seed_user(pool: &DbPool, id: &str, is_root: bool) {
+        sqlx::query(
+            "INSERT INTO users (id, username, password_hash, display_name, is_root, created_at)
+             VALUES (?, ?, 'x', ?, ?, ?)",
+        )
+        .bind(id)
+        .bind(id)
+        .bind(id)
+        .bind(is_root as i64)
+        .bind(Utc::now().to_rfc3339())
+        .execute(pool)
+        .await
+        .expect("seed user");
+    }
+
+    async fn boot() -> Daemon {
+        let tmp = tempfile::tempdir().unwrap();
+        let opts = SqliteConnectOptions::new()
+            .filename(tmp.path().join("otto.db"))
+            .create_if_missing(true)
+            .foreign_keys(true);
+        let raw = SqlitePoolOptions::new()
+            .max_connections(4)
+            .connect_with(opts)
+            .await
+            .expect("connect sqlite");
+        sqlx::migrate!("../otto-state/migrations")
+            .run(&raw)
+            .await
+            .expect("run migrations");
+        let pool: DbPool = raw.into();
+        seed_user(&pool, "root", true).await;
+        seed_user(&pool, "carol", false).await;
+        // Carol holds the documented, grantable delegated role.
+        GrantsRepo::new(pool.clone())
+            .set_grants("carol", &[(Feature::Mcp, Capability::Admin)])
+            .await
+            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let mut ctx = otto_server::ServerCtx::for_tests(&pool, tmp.path()).await;
+        ctx.base_url = base.clone();
+        let (api_extras, root_extras) = otto_server::modules::module_routers(&ctx);
+        let app = otto_server::build_router(ctx, api_extras, root_extras);
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        Daemon {
+            base,
+            pool,
+            http: reqwest::Client::new(),
+            _tmp: tmp,
+        }
+    }
+
+    impl Daemon {
+        async fn api_token(&self, user: &str) -> String {
+            AuthRepo::new(self.pool.clone())
+                .issue_api_token(&user.to_string(), Some("ui"))
+                .await
+                .unwrap()
+                .0
+        }
+
+        async fn mcp_token(&self, user: &str) -> (String, String) {
+            let (token, info) = AuthRepo::new(self.pool.clone())
+                .issue_mcp_token_with_scope(
+                    &user.to_string(),
+                    Some("cli"),
+                    &otto_core::auth::McpScope::unrestricted(),
+                )
+                .await
+                .unwrap();
+            (token, info.id)
+        }
+
+        async fn rotate(&self, caller: &str, id: &str) -> (u16, Value) {
+            let resp = self
+                .http
+                .post(format!("{}/api/v1/mcp/tokens/{id}/rotate", self.base))
+                .bearer_auth(caller)
+                .send()
+                .await
+                .unwrap();
+            let status = resp.status().as_u16();
+            let text = resp.text().await.unwrap_or_default();
+            (status, serde_json::from_str(&text).unwrap_or(Value::Null))
+        }
+
+        async fn owner_of(&self, token: &str) -> Option<String> {
+            match AuthRepo::new(self.pool.clone()).authenticate(token).await {
+                Ok(ctx) => Some(ctx.effective_user.id),
+                Err(Error::Unauthorized) => None,
+                Err(e) => panic!("authenticate: {e}"),
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn non_root_mcp_admin_cannot_rotate_roots_token() {
+        let d = boot().await;
+        let carol = d.api_token("carol").await;
+        let (root_mcp, root_id) = d.mcp_token("root").await;
+
+        let (st, body) = d.rotate(&carol, &root_id).await;
+        assert_eq!(st, 403, "{body}");
+        assert!(
+            body.to_string()
+                .contains("only root may rotate an MCP token owned by another user"),
+            "{body}"
+        );
+        // Nothing was minted or deleted: root's token still authenticates.
+        assert_eq!(d.owner_of(&root_mcp).await.as_deref(), Some("root"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mcp_admin_rotates_own_token_and_root_rotates_any() {
+        let d = boot().await;
+        let carol = d.api_token("carol").await;
+        let root = d.api_token("root").await;
+
+        let (old, id) = d.mcp_token("carol").await;
+        let (st, body) = d.rotate(&carol, &id).await;
+        assert_eq!(st, 200, "{body}");
+        let new = body["token"].as_str().expect("token").to_string();
+        assert_eq!(d.owner_of(&old).await, None);
+        assert_eq!(d.owner_of(&new).await.as_deref(), Some("carol"));
+
+        // Root may rotate a token owned by someone else; the owner is kept.
+        let (_, carol_id) = d.mcp_token("carol").await;
+        let (st, body) = d.rotate(&root, &carol_id).await;
+        assert_eq!(st, 200, "{body}");
+        assert_eq!(body["info"]["user_id"], "carol", "{body}");
+
+        // An unknown id is 404 for anyone allowed to rotate.
+        let (st, _) = d.rotate(&carol, "no-such-token").await;
+        assert_eq!(st, 404);
+    }
+}

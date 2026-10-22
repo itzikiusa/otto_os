@@ -4,7 +4,6 @@
   // automation. 0 = no limit. Saving applies the limits right away.
   import Modal from '../../lib/components/Modal.svelte';
   import { toastError } from '../../lib/toastError';
-  import { ws } from '../../lib/stores/workspace.svelte';
   import { apiClient } from '../../lib/stores/apiClient.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { formatBytes } from './storageGauge';
@@ -13,19 +12,24 @@
   let { onclose }: Props = $props();
 
   // svelte-ignore state_referenced_locally
-  let rows = $state(String(ws.apiHistoryRetention.rows));
+  let rows = $state(String(apiClient.historyRetention.rows));
   // svelte-ignore state_referenced_locally
-  let days = $state(String(ws.apiHistoryRetention.days));
+  let days = $state(String(apiClient.historyRetention.days));
   // svelte-ignore state_referenced_locally
-  let runs = $state(String(ws.apiRunsKeep));
+  let runs = $state(String(apiClient.runsKeep));
   let busy = $state(false);
 
   const parse = (v: string): number | null => {
     const n = Number(v.trim());
     return v.trim() !== '' && Number.isInteger(n) && n >= 0 ? n : null;
   };
+  /** 100 years: the daemon rejects/clamps anything larger (a huge age once
+   *  overflowed the prune cutoff and panicked every prune — backend-correctness-2-01). */
+  const MAX_DAYS = 36_500;
   const r = $derived(parse(rows));
-  const d = $derived(parse(days));
+  const daysRaw = $derived(parse(days));
+  const daysTooBig = $derived(daysRaw !== null && daysRaw > MAX_DAYS);
+  const d = $derived(daysTooBig ? null : daysRaw);
   const k = $derived(parse(runs));
   $effect(() => { void apiClient.loadStorage(); });
   const gauge = $derived(apiClient.storage);
@@ -34,8 +38,8 @@
     if (r === null || d === null || k === null) return;
     busy = true;
     try {
-      await ws.setApiHistoryRetention(r, d);
-      if (k !== ws.apiRunsKeep) await ws.setApiRunsKeep(k);
+      await apiClient.setHistoryRetention(r, d);
+      if (k !== apiClient.runsKeep) await apiClient.setRunsKeep(k);
       const applied = r || d || k ? await apiClient.applyRetention() : true;
       if (applied) toasts.success('Retention saved', r || d || k ? 'Applied now, and after every request or run.' : 'Everything is kept.');
       onclose();
@@ -61,8 +65,9 @@
   </div>
   <div class="field">
     <label for="ret-days">Delete requests older than (days)</label>
-    <input dir="auto" id="ret-days" class="input" inputmode="numeric" bind:value={days} />
-    <span class="hint" class:bad={d === null}>{d === null ? 'Enter a whole number (0 = never).' : d === 0 ? 'Never delete by age.' : `Delete after ${d} days.`}</span>
+    <input dir="auto" id="ret-days" class="input" inputmode="numeric" bind:value={days}
+      aria-invalid={d === null ? 'true' : undefined} aria-describedby="ret-days-hint" />
+    <span class="hint" id="ret-days-hint" class:bad={d === null}>{daysTooBig ? `Enter ${MAX_DAYS.toLocaleString()} days (100 years) or fewer.` : d === null ? 'Enter a whole number (0 = never).' : d === 0 ? 'Never delete by age.' : `Delete after ${d} days.`}</span>
   </div>
   <div class="field">
     <label for="ret-runs">Automation runs to keep (per automation)</label>

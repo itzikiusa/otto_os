@@ -178,15 +178,24 @@ for (const scheme of ['light', 'dark'] as const) {
       await page.keyboard.press('Escape');
       await expect(menu).toBeHidden();
 
-      // The details chip opens the details as a menu (provider + folder).
+      // The details chip opens the details as a menu (provider + folder). It
+      // renders unconditionally and only the `< 420px` (minimal) container rule
+      // hides it, so the tier decides: never guard on `isVisible()` (that turns
+      // a dropped chip into a pass).
       const chip = heads.first().locator('[data-testid="pane-details"]');
-      if (await chip.isVisible()) {
+      if (tiers[0] === 'full' || tiers[0] === 'compact') {
+        await expect(chip).toBeVisible();
         await expect(chip).toHaveAttribute('title', /Agent: shell/);
         await chip.click();
         await expect(menu.getByRole('menuitem', { name: /^Folder: \/tmp/ })).toBeDisabled();
         await expect(menu.getByRole('menuitem', { name: 'Copy folder path' })).toBeVisible();
         await page.keyboard.press('Escape');
+      } else {
+        await expect(chip).toBeHidden();
       }
+      // Counts 1 and 2 must land on a chip-bearing tier (asserted above), so
+      // the visible branch always runs for them.
+      if (count <= 2) expect(['full', 'compact']).toContain(tiers[0]);
     });
   }
 }

@@ -161,10 +161,9 @@
   });
 
   async function evaluate(): Promise<void> {
-    if (!evalServerId || !evalTool.trim()) {
-      toasts.error('Pick a server and enter a tool name');
-      return;
-    }
+    // The button is disabled until both are set (components.md: a field
+    // error is inline, never a toast) — this is only a guard.
+    if (!evalServerId || !evalTool.trim()) return;
     evaluating = true;
     evalResult = null;
     try {
@@ -230,7 +229,12 @@
         {#each servers as s (s.id)}<option value={s.id}>{s.name}</option>{/each}
       </select>
       <input dir="ltr" aria-label="Tool name to evaluate" bind:value={evalTool} placeholder="tool name" class="mono" />
-      <button class="btn small" onclick={() => void evaluate()} disabled={evaluating || servers.length === 0}>
+      <button
+        class="btn small"
+        onclick={() => void evaluate()}
+        disabled={evaluating || servers.length === 0 || !evalServerId || !evalTool.trim()}
+        title={!evalTool.trim() ? 'Enter a tool name to preview its decision' : undefined}
+      >
         {evaluating ? '…' : 'Preview decision'}
       </button>
       {#if evalResult}

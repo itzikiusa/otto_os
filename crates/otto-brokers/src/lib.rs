@@ -16,9 +16,3 @@ pub mod types;
 
 pub use http::{api_router, BrokersCtx};
 pub use service::BrokersService;
-
-/// Linked librdkafka version, e.g. `2.12.1 (0x020c01ff)`.
-pub fn librdkafka_version() -> String {
-    let (n, v) = rdkafka::util::get_rdkafka_version();
-    format!("{v} (0x{n:08x})")
-}

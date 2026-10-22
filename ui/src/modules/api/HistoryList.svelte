@@ -89,7 +89,7 @@
     await apiClient.clearHistory();
   }
 
-  const retention = $derived(ws.apiHistoryRetention);
+  const retention = $derived(apiClient.historyRetention);
   const retentionText = $derived(
     retention.rows || retention.days
       ? `Keeping ${retention.rows ? `the newest ${retention.rows}` : 'all'}${retention.days ? ` for up to ${retention.days} days` : ''}`
@@ -109,7 +109,7 @@
     try { dismissed = localStorage.getItem(dismissKey) === '1'; } catch { dismissed = false; }
   });
   const showBanner = $derived(
-    !dismissed && suggestRetention(gauge, { rows: retention.rows, days: retention.days, runsKeep: ws.apiRunsKeep }),
+    !dismissed && suggestRetention(gauge, { rows: retention.rows, days: retention.days, runsKeep: apiClient.runsKeep }),
   );
   function dismissBanner(): void {
     dismissed = true;
@@ -129,8 +129,8 @@
     ))) return;
     applying = true;
     try {
-      await ws.setApiHistoryRetention(p.rows, p.days);
-      if (p.runsKeep !== null && !ws.apiRunsKeep) await ws.setApiRunsKeep(p.runsKeep);
+      await apiClient.setHistoryRetention(p.rows, p.days);
+      if (p.runsKeep !== null && !apiClient.runsKeep) await apiClient.setRunsKeep(p.runsKeep);
       if (await apiClient.applyRetention()) toasts.success('Retention applied', p.label);
     } catch (e) {
       toastError('Couldn’t save retention', e);

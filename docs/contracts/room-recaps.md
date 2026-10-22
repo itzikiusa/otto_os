@@ -4,7 +4,8 @@ Recaps are owner-local durable records under `data_dir/room-recaps/<uuid>`.
 Ordinary owner authentication is required for every endpoint below. Room member
 credentials never authorize these HTTP routes. Scoped, MCP, managed-session and
 impersonation credentials are rejected. Even root cannot read another owner's
-archive. Settings mutation additionally requires root. No API-key fallback exists.
+archive. Reading or changing `/room-recap-settings` additionally requires root
+(on top of Settings:Admin). No API-key fallback exists.
 
 ## HTTP
 
@@ -13,7 +14,8 @@ Every route is owner-scoped in its handler (another owner, including root, gets
 403). Reads — the `GET /room-recaps…` family and `GET /room-recap-capabilities` —
 need `Agents:View`; recording, summarising and cancelling (`POST /rooms/{id}/recaps`
 and the `POST`/`DELETE` routes under `/room-recaps/{id}`) need `Agents:Edit`;
-`/room-recap-settings` is `Settings:Admin`.
+`/room-recap-settings` is `Settings:Admin` **and root** for both `GET` and `PUT`
+(a non-root Settings:Admin passes the guard but gets 403).
 Rust definitions in `crates/otto-core/src/api/recap.rs` are canonical; UI mirrors
 are in `ui/src/lib/api/room-recap-types.ts`.
 

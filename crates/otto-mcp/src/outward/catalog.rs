@@ -811,7 +811,7 @@ pub fn otto_tool_specs() -> Vec<Value> {
             "description":"Block (up to 25 s) until a session's status is one of the awaited set (default idle,exited), then return it with `reached`. Loop it for longer waits. Read-only.",
             "inputSchema":{"type":"object","required":["session_id"],"properties":{
                 "session_id":{"type":"string"},"status":{"type":"string","description":"comma-separated: running,working,idle,exited,reconnectable"},
-                "timeout_secs":{"type":"integer","description":"1..25, default 20"}}}}),
+                "timeout_secs":{"type":"integer","description":"seconds to wait, 1..25 (larger values wait 25), default 20; a timed-out wait returns reached:false, not an error"}}}}),
         // ================= Code Review / Findings =================
         json!({"name":"otto.list_findings","mutating":false,"category":"Code Review",
             "description":"List a code review's findings (with workflow state) by review id. Read-only.",

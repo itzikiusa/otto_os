@@ -2,7 +2,7 @@
   // Autonomy tab: permission modes (Proactive / Directed / Scheduled), standing
   // goals + daily budget, custom rules, and "your agent" (primary). One form,
   // one Save — the daemon derives which rules it can enforce.
-  import { untrack } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import { personalAgentsApi } from '../../lib/api/personalAgents';
   import { personalAgents } from '../../lib/stores/personalAgents.svelte';
   import { router } from '../../lib/router.svelte';
@@ -28,6 +28,30 @@
   interface RuleDraft { id?: string; text: string; enforce: PersonalAgentRule['enforce'] }
 
   let loading = $state(true);
+  let goalsList = $state<HTMLElement>();
+  let rulesList = $state<HTMLElement>();
+  let addGoalBtn = $state<HTMLButtonElement>();
+  let addRuleBtn = $state<HTMLButtonElement>();
+
+  /** Add an empty goal/rule row and put the caret in it. */
+  async function addRow(kind: 'goal' | 'rule'): Promise<void> {
+    if (kind === 'goal') goals = [...goals, { text: '', enabled: true, last_run_at: null }];
+    else rules = [...rules, { text: '', enforce: null }];
+    await tick();
+    const inputs = (kind === 'goal' ? goalsList : rulesList)?.querySelectorAll<HTMLInputElement>('input.grow');
+    inputs?.[inputs.length - 1]?.focus();
+  }
+
+  /** Remove row `i`, then keep focus in the list (the keyed row holding the
+   *  focused button is destroyed): the same index's remove button, else the
+   *  previous one, else the list's Add button. */
+  async function removeRow(kind: 'goal' | 'rule', i: number): Promise<void> {
+    if (kind === 'goal') goals = goals.filter((_, j) => j !== i);
+    else rules = rules.filter((_, j) => j !== i);
+    await tick();
+    const btns = (kind === 'goal' ? goalsList : rulesList)?.querySelectorAll<HTMLButtonElement>('button.rm-row');
+    (btns?.[i] ?? btns?.[i - 1] ?? (kind === 'goal' ? addGoalBtn : addRuleBtn))?.focus();
+  }
   let loadError = $state<string | null>(null);
   let saving = $state(false);
   let saved = $state<PersonalAgentAutonomy | null>(null);
@@ -190,7 +214,7 @@
       <div class="card-head">
         <h2 id="goals-h">Standing goals</h2>
         {#if editable}
-          <button class="btn small" disabled={saving} onclick={() => (goals = [...goals, { text: '', enabled: true, last_run_at: null }])}>
+          <button class="btn small" disabled={saving} bind:this={addGoalBtn} onclick={() => void addRow('goal')}>
             <Icon name="plus" size={12} /> Add goal
           </button>
         {/if}
@@ -199,7 +223,7 @@
       {#if goals.length === 0}
         <p class="muted">No standing goals. Add one, e.g. “Watch the release branch CI and flag new failures”.</p>
       {:else}
-        <ul class="list">
+        <ul class="list" bind:this={goalsList}>
           {#each goals as g, i (g.id ?? `new-${i}`)}
             <li class="item">
               <input type="checkbox" bind:checked={g.enabled} disabled={!editable || saving} aria-label={g.text.trim() ? `Goal enabled: ${g.text.trim()}` : 'Goal enabled'} title="Enabled" />
@@ -209,7 +233,7 @@
                 <button class="btn small" disabled={workingGoal !== null || dirty || saving} aria-label={g.text.trim() ? `Work on it now: ${g.text.trim()}` : 'Work on it now'} title={dirty ? 'Save first' : 'Start a read-only run on this goal now'} onclick={() => g.id && workNow(g.id)}>Work on it now</button>
               {/if}
               {#if editable}
-                <button class="icon-btn" disabled={saving} aria-label="Remove goal" title="Remove goal" onclick={() => (goals = goals.filter((_, j) => j !== i))}>
+                <button class="icon-btn rm-row" disabled={saving} aria-label={g.text.trim() ? `Remove goal: ${g.text.trim()}` : `Remove goal ${i + 1}`} title="Remove goal" onclick={() => void removeRow('goal', i)}>
                   <Icon name="trash" size={14} />
                 </button>
               {/if}
@@ -223,7 +247,7 @@
       <div class="card-head">
         <h2 id="rules-h">Rules</h2>
         {#if editable}
-          <button class="btn small" disabled={saving} onclick={() => (rules = [...rules, { text: '', enforce: null }])}>
+          <button class="btn small" disabled={saving} bind:this={addRuleBtn} onclick={() => void addRow('rule')}>
             <Icon name="plus" size={12} /> Add rule
           </button>
         {/if}
@@ -232,10 +256,10 @@
       {#if rules.length === 0}
         <p class="muted">No rules. Try “Ask before touching prod”.</p>
       {:else}
-        <ul class="list">
+        <ul class="list" bind:this={rulesList}>
           {#each rules as r, i (r.id ?? `new-${i}`)}
             <li class="item rule">
-              <input dir="auto" class="input grow" bind:value={r.text} disabled={!editable || saving} placeholder="e.g. Never post in #general" aria-label="Rule" />
+              <input dir="auto" class="input grow" bind:value={r.text} disabled={!editable || saving} placeholder="e.g. Never post in #general" aria-label={rules.length > 1 ? `Rule ${i + 1}` : 'Rule'} />
               {#if r.id && saved?.rules.some((x) => x.id === r.id && x.text === r.text.trim())}
                 <span class="chip" class:pa-enf={!!r.enforce} title="Derived by Otto from the rule’s wording">
                   {#if r.enforce}<Icon name="lock" size={12} />{/if}{enforceLabel(r)}
@@ -244,7 +268,7 @@
                 <span class="meta">Save to see what Otto enforces</span>
               {/if}
               {#if editable}
-                <button class="icon-btn" disabled={saving} aria-label="Remove rule" title="Remove rule" onclick={() => (rules = rules.filter((_, j) => j !== i))}>
+                <button class="icon-btn rm-row" disabled={saving} aria-label={r.text.trim() ? `Remove rule: ${r.text.trim()}` : `Remove rule ${i + 1}`} title="Remove rule" onclick={() => void removeRow('rule', i)}>
                   <Icon name="trash" size={14} />
                 </button>
               {/if}

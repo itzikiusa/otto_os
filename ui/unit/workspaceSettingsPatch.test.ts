@@ -11,7 +11,7 @@ function fixture() {
     '../api/client': { getToken: () => 'token', api: { patch: async (path: string, body: unknown) => {
       writes.push({ path, body }); return { id: 'w', settings: {} };
     } } },
-    '../api/workflows': { listActiveWorkflowRuns: async () => [] },
+    './workflowRuns.svelte': { workflowRuns: { list: [], refresh: async () => {}, apply() {}, clear() {} } },
     '../api/workspaces': { fetchWorkspace: async () => ({ settings: { notes: 'old' } }) },
     '../router.svelte': { router: {} }, '../toast.svelte': { toasts: {} }, '../toastError': { toastError() {} },
     '../plural': { plural() {} }, '../confirm.svelte': { confirmer: {} },
@@ -32,14 +32,12 @@ test('every workspace preference sends only an atomic key patch, never cached se
   const { ws, writes } = fixture();
   await ws.saveNotes('new');
   await ws.saveDefaultAgent('codex');
-  await ws.setApiAllowLocal(true);
-  await ws.setApiHistoryRetention(0, 7);
-  await ws.setApiRunsKeep(5);
+  // The api-client keys moved to the apiClient store (unit/apiWsSettings.test.ts).
+  assert.equal(ws.setApiAllowLocal, undefined);
+  await ws.patchSettings('w', { api_client: { automation_runs_keep: 5 } });
   assert.deepEqual(JSON.parse(JSON.stringify(writes.map(w => w.body))), [
     { settings_patch: { notes: 'new' } },
     { settings_patch: { default_provider: 'codex' } },
-    { settings_patch: { api_client: { allow_local: true } } },
-    { settings_patch: { api_client: { history_max_rows: 0, history_max_days: 7 } } },
     { settings_patch: { api_client: { automation_runs_keep: 5 } } },
   ]);
 });

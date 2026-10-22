@@ -170,7 +170,9 @@ async fn delete_thread(
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<Json<Value>> {
-    let t = repo(&ctx).delete_thread(&user.id, &id).await?;
+    let (t, paths) = repo(&ctx).delete_thread(&user.id, &id).await?;
+    // The rows are gone (committed); now their uploaded files go too.
+    tasks::remove_attachment_files(&ctx, &user.id, &paths).await;
     // The Otto session row goes; the provider's own transcript on disk stays.
     if let Some(sid) = t.session_id.as_ref() {
         let _ = ctx.manager.remove(sid).await;

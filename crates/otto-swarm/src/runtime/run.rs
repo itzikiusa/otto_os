@@ -776,24 +776,15 @@ async fn run_attempt(
         .await
         == Some(true)
     {
-        if !crate::runtime::engine::send_run_input(
+        if !crate::runtime::engine::submit_run_prompt(
             ctx,
             swarm_id,
             run_id,
             &sid,
             &ctx.bracketed_paste(prompt),
+            true,
         )
         .await
-        {
-            return RunOutcome::failed(Some(sid), FailReason::Stopped);
-        }
-        tokio::time::sleep(ctx.pty_timings().paste_to_enter).await;
-        let before = ctx.manager().live_handle(&sid).map(|h| h.last_output_at());
-        if !crate::runtime::engine::send_run_input(ctx, swarm_id, run_id, &sid, b"\r").await {
-            return RunOutcome::failed(Some(sid), FailReason::Stopped);
-        }
-        if !ctx.dispatched(&sid, before).await
-            && !crate::runtime::engine::send_run_input(ctx, swarm_id, run_id, &sid, b"\r").await
         {
             return RunOutcome::failed(Some(sid), FailReason::Stopped);
         }
@@ -820,19 +811,16 @@ async fn run_attempt(
         .unwrap_or(false)
     {
         tracing::warn!("swarm: brief didn't land in session {sid} — re-injecting once");
-        if !crate::runtime::engine::send_run_input(
+        if !crate::runtime::engine::submit_run_prompt(
             ctx,
             swarm_id,
             run_id,
             &sid,
             &ctx.bracketed_paste(prompt),
+            false,
         )
         .await
         {
-            return RunOutcome::failed(Some(sid), FailReason::Stopped);
-        }
-        tokio::time::sleep(ctx.pty_timings().paste_to_enter).await;
-        if !crate::runtime::engine::send_run_input(ctx, swarm_id, run_id, &sid, b"\r").await {
             return RunOutcome::failed(Some(sid), FailReason::Stopped);
         }
         if !crate::runtime::engine::while_run_active(

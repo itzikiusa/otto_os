@@ -321,6 +321,16 @@ pub struct WorkItemUpsert {
 /// True when applying `up` to `prev` would change nothing. Mirrors the UPDATE
 /// in [`WorkGraphRepo::upsert_item`]: `title`/`status`/`owner`/`owner_kind` are
 /// overwritten, the `COALESCE(?, col)` fields only when `up` carries a value.
+/// Escape user text for a `LIKE ? ESCAPE '\\'` pattern: backslash FIRST (so
+/// the escapes added next are not themselves doubled), then `%` and `_`, so a
+/// search for `50%` or `a_b` matches that literal text, not a wildcard. Shared
+/// by every LIKE search over user input (work graph, vault, Design Hall).
+pub fn like_escape(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
 fn upsert_is_noop(prev: &WorkItem, up: &WorkItemUpsert) -> bool {
     fn same_opt<T: PartialEq>(new: &Option<T>, cur: &Option<T>) -> bool {
         new.is_none() || new == cur
@@ -744,13 +754,14 @@ impl WorkGraphRepo {
         let kind = f.kind.map(|k| k.as_str().to_string());
         let status = f.status.map(|s| s.as_str().to_string());
         let risk = f.risk.map(|r| r.as_str().to_string());
-        let like = f.q.as_ref().map(|s| format!("%{s}%"));
+        // `%` / `_` in the search box are literal text, not wildcards.
+        let like = f.q.as_ref().map(|s| format!("%{}%", like_escape(s)));
         let q = format!(
             "SELECT {ITEM_COLS} FROM work_items WHERE workspace_id = ? \
              AND (? IS NULL OR kind = ?) \
              AND (? IS NULL OR status = ?) \
              AND (? IS NULL OR risk_level = ?) \
-             AND (? IS NULL OR title LIKE ?) \
+             AND (? IS NULL OR title LIKE ? ESCAPE '\\') \
              ORDER BY updated_at DESC LIMIT ?"
         );
         let rows = sqlx::query(sqlx::AssertSqlSafe(q.as_str()))
@@ -1063,6 +1074,22 @@ impl WorkGraphRepo {
         .await
         .map_err(dberr("check work artifact"))?;
         Ok(hit.is_some())
+    }
+
+    /// The `(kind, ref)` of every artifact already attached to an item — one
+    /// indexed read without the JSON payloads, for a caller that registers a
+    /// whole batch and only inserts what is missing.
+    pub async fn artifact_keys(
+        &self,
+        work_item_id: &Id,
+    ) -> Result<std::collections::HashSet<(String, Option<String>)>> {
+        let rows: Vec<(String, Option<String>)> =
+            sqlx::query_as("SELECT kind, \"ref\" FROM work_artifacts WHERE work_item_id = ?")
+                .bind(work_item_id)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(dberr("list work artifact keys"))?;
+        Ok(rows.into_iter().collect())
     }
 
     /// Artifacts for an item, newest-first.
@@ -1457,6 +1484,90 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(list.len(), 1);
+    }
+
+    #[test]
+    fn like_escape_escapes_backslash_first() {
+        assert_eq!(like_escape("50%"), "50\\%");
+        assert_eq!(like_escape("a_b"), "a\\_b");
+        assert_eq!(like_escape("c:\\x%"), "c:\\\\x\\%");
+    }
+
+    #[tokio::test]
+    async fn title_search_treats_percent_and_underscore_literally() {
+        let repo = WorkGraphRepo::new(mem_pool().await);
+        for (src, title) in [
+            ("s1", "50% done"),
+            ("s2", "500 done"),
+            ("s3", "a_b fix"),
+            ("s4", "axb fix"),
+            ("s5", "path c:\\x"),
+        ] {
+            repo.upsert_item(&upsert(
+                "w1",
+                WorkKind::Session,
+                src,
+                title,
+                WorkStatus::Running,
+            ))
+            .await
+            .unwrap();
+        }
+        async fn titles(repo: &WorkGraphRepo, q: &str) -> Vec<String> {
+            let f = MissionFilter {
+                q: Some(q.to_string()),
+                ..Default::default()
+            };
+            let mut v: Vec<String> = repo
+                .list_items(&"w1".into(), &f)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|i| i.title)
+                .collect();
+            v.sort();
+            v
+        }
+        assert_eq!(titles(&repo, "50%").await, vec!["50% done".to_string()]);
+        assert_eq!(titles(&repo, "a_b").await, vec!["a_b fix".to_string()]);
+        assert_eq!(titles(&repo, "c:\\x").await, vec!["path c:\\x".to_string()]);
+        assert_eq!(titles(&repo, "fix").await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn artifact_keys_lists_kind_and_ref_once() {
+        let repo = WorkGraphRepo::new(mem_pool().await);
+        let item = repo
+            .upsert_item(&upsert(
+                "w1",
+                WorkKind::Session,
+                "s1",
+                "t",
+                WorkStatus::Running,
+            ))
+            .await
+            .unwrap()
+            .item;
+        assert!(repo.artifact_keys(&item.id).await.unwrap().is_empty());
+        for r in ["/a.md", "/a.md", "/b.md"] {
+            repo.add_artifact(&NewArtifact {
+                work_item_id: item.id.clone(),
+                workspace_id: "w1".into(),
+                kind: ArtifactKind::File,
+                title: r.into(),
+                reference: Some(r.into()),
+                payload: serde_json::Value::Null,
+            })
+            .await
+            .unwrap();
+        }
+        let keys = repo.artifact_keys(&item.id).await.unwrap();
+        assert_eq!(keys.len(), 2);
+        assert!(keys.contains(&("file".to_string(), Some("/a.md".to_string()))));
+        assert!(repo
+            .has_artifact(&item.id, ArtifactKind::File, Some("/b.md"))
+            .await
+            .unwrap());
     }
 
     #[tokio::test]

@@ -506,3 +506,20 @@ fn dedupe_drops_identical() {
     let out = dedupe(vec![mk(), mk()]);
     assert_eq!(out.len(), 1);
 }
+
+#[test]
+fn dedupe_warnings_keeps_first_seen_order() {
+    let w = |s: &str| s.to_string();
+    let out = dedupe_warnings(vec![
+        w("'X' has no parseable JDBC URL — skipped"),
+        w("'Y' has no host — skipped"),
+        w("'X' has no parseable JDBC URL — skipped"),
+    ]);
+    assert_eq!(
+        out,
+        vec![
+            w("'X' has no parseable JDBC URL — skipped"),
+            w("'Y' has no host — skipped"),
+        ]
+    );
+}

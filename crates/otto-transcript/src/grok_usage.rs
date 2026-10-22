@@ -363,18 +363,6 @@ pub fn read_grok_home(grok_home: &Path) -> io::Result<Vec<GrokDelta>> {
     Ok(all)
 }
 
-/// `$GROK_HOME` when it is set and non-empty, otherwise `$HOME/.grok`.
-pub fn default_grok_home() -> PathBuf {
-    if let Some(explicit) = std::env::var_os("GROK_HOME").filter(|value| !value.is_empty()) {
-        return PathBuf::from(explicit);
-    }
-    let mut home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_default();
-    home.push(".grok");
-    home
-}
-
 struct Buckets {
     input_tokens: u64,
     output: u64,

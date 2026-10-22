@@ -514,11 +514,15 @@ impl otto_product::ProductStudioHost for ServerCtx {
             reason: v.reason,
         }
     }
-    fn start_swarm_coordinator(&self, swarm_id: Id) {
-        otto_swarm::runtime::engine::start_coordinator(self.swarm_rt(), swarm_id);
-    }
-    fn emit_swarm_status(&self, workspace_id: &Id, swarm_id: &str, status: &str) {
-        otto_swarm::runtime::engine::emit_status(&self.swarm_rt(), workspace_id, swarm_id, status);
+    async fn activate_swarm(&self, workspace_id: &Id, swarm_id: &Id) -> otto_core::Result<()> {
+        otto_swarm::runtime::lifecycle::activate(
+            &self.swarm_rt(),
+            workspace_id,
+            swarm_id,
+            otto_swarm::runtime::lifecycle::ActivatePolicy::UserStart,
+        )
+        .await
+        .map(|_| ())
     }
 }
 

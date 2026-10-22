@@ -5,7 +5,7 @@
 import { toasts } from '../../lib/toast.svelte';
 import { copyText } from '../../lib/clipboard';
 import { clipHistory } from '../../lib/stores/clipHistory.svelte';
-import { bsonScalar } from './bson';
+import { bsonScalar } from '../../lib/jsonTree/bson';
 import { CELL_MAX, previewJson } from './json-preview';
 
 export { CELL_MAX, previewJson };

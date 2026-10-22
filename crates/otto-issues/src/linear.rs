@@ -26,8 +26,6 @@ use crate::jira::{
 /// The one Linear API endpoint (Linear is SaaS-only — no per-site host).
 pub const LINEAR_GRAPHQL: &str = "https://api.linear.app/graphql";
 
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Linear's connection page maximum.
 const PAGE_MAX: u32 = 100;
 /// Hard cap on GraphQL calls one offset request may make while walking cursors.
@@ -60,18 +58,10 @@ const ISSUE_FULL: &str = "id identifier title url description priority priorityL
        fromState { name } toState { name } fromAssignee { name } toAssignee { name } \
        fromPriority toPriority fromTitle toTitle } }";
 
-static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-
+/// The shared client (one pool for every Linear account: the API is one host
+/// and the key rides per request) from the bounded transport cache.
 fn http_client() -> reqwest::Client {
-    CLIENT
-        .get_or_init(|| {
-            reqwest::Client::builder()
-                .connect_timeout(CONNECT_TIMEOUT)
-                .timeout(REQUEST_TIMEOUT)
-                .build()
-                .unwrap_or_default()
-        })
-        .clone()
+    crate::atlassian::cached_client("linear\x00https://api.linear.app")
 }
 
 /// The `Authorization` value for a Linear credential: a personal API key

@@ -8,17 +8,20 @@
 
 import { marked } from 'marked';
 import { sanitizeHtml } from './sanitize';
+import { escapeHtml } from './html.ts';
 
 /** GFM markdown → sanitized HTML. Never throws: a parse failure falls back to
- *  the escaped tiny renderer. */
-export function renderMarkdownGfm(md: string): string {
+ *  the escaped tiny renderer. `breaks` turns single newlines into `<br>` (agent
+ *  reports, request docs, file previews written line-by-line). This is the one
+ *  `marked` entry point for feature modules — they never call `marked` directly. */
+export function renderMarkdownGfm(md: string, opts: { breaks?: boolean } = {}): string {
   try {
     // WebKit does not make overflow containers keyboard-focusable by default.
     // Add trusted attributes AFTER sanitizing, so wide code/tables can be
     // reached with Tab and scrolled with arrow keys without a pointer — on the
     // sanitizer's own tree (V10/SF-14: this used to serialize, re-parse and
     // re-serialize the whole document a second time).
-    return sanitizeHtml(marked.parse(md ?? '', { async: false, gfm: true, breaks: false }) as string, addBlockFocus);
+    return sanitizeHtml(marked.parse(md ?? '', { async: false, gfm: true, breaks: opts.breaks ?? false }) as string, addBlockFocus);
   } catch {
     return renderMarkdown(md);
   }
@@ -28,13 +31,7 @@ function addBlockFocus(body: HTMLElement): void {
   for (const block of body.querySelectorAll('pre, table')) block.setAttribute('tabindex', '0');
 }
 
-function esc(s: string): string {
-  return s
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
+const esc = escapeHtml;
 
 function inline(s: string): string {
   return s

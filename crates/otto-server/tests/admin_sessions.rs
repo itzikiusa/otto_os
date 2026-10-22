@@ -434,3 +434,115 @@ async fn terminate_kills_session_and_evicts_viewers() {
         "audit records the session owner"
     );
 }
+
+/// test-quality-3-05: `GET /workspaces/{id}/sessions` through the production
+/// router drops a row bound to a connection the caller can't `shell` into. A
+/// workspace Admin gets the cross-user list, yet the root-owned terminal on a
+/// managed connection with no rule for them is hidden; the unbound row and a
+/// row on a legacy-tier connection (which their Connections:Edit grant
+/// reaches) stay. Pins `visible_out` → `ctx.check_resources` end to end.
+#[tokio::test]
+async fn ws_admin_without_shell_grant_does_not_see_the_bound_row() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let pool = mk_pool().await;
+    let ctx = otto_server::ServerCtx::for_tests(&pool, tmp.path().join("data")).await;
+    let owner = seed_user(&pool, "ns-owner", true).await;
+    let admin = seed_user(&pool, "ns-wsadmin", false).await;
+    for feature in ["agents", "connections"] {
+        sqlx::query("INSERT OR REPLACE INTO user_feature_grants (user_id,feature,capability) VALUES (?,?,'edit')")
+            .bind(&admin.id)
+            .bind(feature)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let ws = ctx
+        .workspaces
+        .create("W", tmp.path().to_str().unwrap(), &owner.id)
+        .await
+        .unwrap();
+    ctx.workspaces
+        .set_member(&ws.id, &admin.id, otto_core::domain::WorkspaceRole::Admin)
+        .await
+        .unwrap();
+    let (managed, legacy) = (otto_core::new_id(), otto_core::new_id());
+    for id in [&managed, &legacy] {
+        sqlx::query("INSERT INTO connections (id,name,kind,params_json,created_by,created_at) VALUES (?,'Test','ssh','{}',?,'2026-09-05T00:00:00Z')")
+            .bind(id)
+            .bind(&owner.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let access = otto_state::ResourceAccessRepo::new(pool.clone());
+    let mut p = access
+        .get_policy(otto_core::access::ResourceKind::Connection, &legacy)
+        .await
+        .unwrap();
+    p.mode = otto_core::access::AccessMode::Legacy;
+    access
+        .put_policy(
+            &p,
+            p.revision,
+            &otto_core::access::AccessActor {
+                real_user_id: owner.id.clone(),
+                effective_user_id: None,
+            },
+        )
+        .await
+        .unwrap();
+    let sessions = SessionsRepo::new(pool.clone());
+    let mut ids = std::collections::HashMap::new();
+    for (title, conn) in [
+        ("plain", None),
+        ("managed-bound", Some(managed.clone())),
+        ("legacy-bound", Some(legacy.clone())),
+    ] {
+        let s = sessions
+            .create(NewSession {
+                workspace_id: ws.id.clone(),
+                kind: if conn.is_some() {
+                    SessionKind::Connection
+                } else {
+                    SessionKind::Agent
+                },
+                provider: "ssh".into(),
+                title: title.into(),
+                cwd: "/tmp".into(),
+                provider_session_id: None,
+                connection_id: conn,
+                created_by: owner.id.clone(),
+                meta: serde_json::json!({}),
+            })
+            .await
+            .unwrap();
+        ids.insert(s.id.clone(), title);
+    }
+    let token = otto_rbac::AuthRepo::new(pool.clone())
+        .issue(&admin.id)
+        .await
+        .unwrap();
+
+    let (api_extras, root_extras) = otto_server::modules::module_routers(&ctx);
+    let app = otto_server::build_router(ctx.clone(), api_extras, root_extras);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}/api/v1", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let r = reqwest::Client::new()
+        .get(format!("{origin}/workspaces/{}/sessions", ws.id))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let body: serde_json::Value = r.json().await.unwrap();
+    let mut seen: Vec<&str> = body
+        .as_array()
+        .expect("a session list")
+        .iter()
+        .filter_map(|row| ids.get(row["id"].as_str()?).copied())
+        .collect();
+    seen.sort_unstable();
+    assert_eq!(seen, ["legacy-bound", "plain"]);
+    server.abort();
+}

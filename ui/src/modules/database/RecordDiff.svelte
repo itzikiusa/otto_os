@@ -7,7 +7,7 @@
   // RIGHT (`set` / `unset` per leaf path) for a hand-written update. The two
   // pure helpers live in the module script so they are importable (and
   // testable) without mounting the modal.
-  import { flattenPaths } from './expansion-plan';
+  import { flattenPaths } from '../../lib/jsonTree/expansion-plan';
   import { cellStr } from './results-format';
 
   export type DiffKind = 'same' | 'changed' | 'only-left' | 'only-right';

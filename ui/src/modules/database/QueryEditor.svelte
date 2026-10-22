@@ -52,6 +52,7 @@
     type VarSpec,
   } from './sql-util';
   import { splitModeFor } from './sql-dialect';
+  import { loadErrorText } from '../../lib/loadError';
   import { api } from '../../lib/api/client';
   import type { MongoshInfo } from '../../lib/api/types';
   import { paneResizer } from '../../lib/paneResizer';
@@ -234,13 +235,18 @@
   // install hint here, before the run — never a surprise run-time error.
   const isMongoshScript = $derived(analysis.script);
   let mongoshInfo = $state<MongoshInfo | null>(null);
+  /** Why the probe itself failed (a timeout, a 403, an unreachable daemon) —
+   *  kept apart from `mongoshInfo` so a failed CHECK never reads as "mongosh
+   *  is not installed" and tells the person to install what they may have. */
+  let mongoshProbeError = $state<string | null>(null);
   let mongoshProbed = false;
   async function probeMongosh(): Promise<void> {
     mongoshInfo = null; // back to "checking…" while the re-probe runs
+    mongoshProbeError = null;
     try {
       mongoshInfo = await api.get<MongoshInfo>('/db/mongosh');
-    } catch {
-      mongoshInfo = { available: false };
+    } catch (e) {
+      mongoshProbeError = loadErrorText(e);
     }
   }
   $effect(() => {
@@ -1430,14 +1436,16 @@
   {/if}
 
   {#if isMongoshScript}
-    <div class="qe-script" class:missing={mongoshInfo?.available === false} data-testid="mongosh-script-bar">
+    <div class="qe-script" class:missing={mongoshInfo?.available === false || mongoshProbeError !== null} data-testid="mongosh-script-bar">
       <Icon name="zap" size={12} />
       <span>
         mongosh script detected — Run executes the WHOLE file through the real
         <code class="mono">mongosh</code> CLI against this connection (counts as a write).
         Select a region first to run only that part.
       </span>
-      {#if mongoshInfo === null}
+      {#if mongoshProbeError !== null}
+        <span class="qe-script-state warn">Couldn’t check for mongosh: {mongoshProbeError}</span>
+      {:else if mongoshInfo === null}
         <span class="qe-script-state dim">checking for mongosh…</span>
       {:else if mongoshInfo.available}
         <span class="qe-script-state ok" title="The daemon found the mongosh CLI on its PATH">
@@ -1447,6 +1455,8 @@
         <span class="qe-script-state warn">
           mongosh is not installed on the daemon’s PATH — <code class="mono">brew install mongosh</code>, then retry.
         </span>
+      {/if}
+      {#if mongoshProbeError !== null || (mongoshInfo !== null && !mongoshInfo.available)}
         <button
           class="qe-script-retry"
           onclick={() => void probeMongosh()}

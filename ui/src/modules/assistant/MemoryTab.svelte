@@ -173,7 +173,7 @@
 
 <div class="memory" data-testid="assistant-memory">
   {#if mem.state === 'loading' && !mem.data}
-    <div aria-busy="true" aria-label="Loading memory"><Skeleton rows={5} height={40} /></div>
+    <Skeleton rows={5} height={40} label="memory" />
   {:else if mem.state === 'unsupported'}
     <EmptyState icon="book" title="Memory isn’t available yet" body="This daemon doesn’t have the assistant’s memory. Update Otto to see and edit what it remembers about you." />
   {:else if mem.state === 'error' && !mem.data}

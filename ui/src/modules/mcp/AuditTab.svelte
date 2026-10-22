@@ -45,6 +45,19 @@
   /** The filters of the rows on screen: Load more pages THEM, never a tool
    *  name typed into the box but not yet applied. */
   let applied = { server: '', tool: '', decision: '' };
+  /** Rows on screen come from a filtered query: an empty result then means
+   *  "nothing matches", not "no calls yet" (the filter bar may be collapsed). */
+  let filtered = $state(false);
+
+  function clearFilters(): void {
+    // The $effect below already reloads when the server/decision select
+    // changes; load here only when the tool box was the sole filter.
+    const effectReloads = !!(fServer || fDecision);
+    fServer = '';
+    fTool = '';
+    fDecision = '';
+    if (!effectReloads) void load();
+  }
 
   function query(offset: number) {
     return {
@@ -59,6 +72,7 @@
   async function load(): Promise<void> {
     const gen = ++generation;
     applied = { server: fServer, tool: fTool.trim(), decision: fDecision };
+    filtered = !!(applied.server || applied.tool || applied.decision);
     loading = true;
     moreError = null;
     try {
@@ -183,7 +197,11 @@
     </div>
     <LoadState what="the audit log" {loading} error={loadError} empty={rows.length === 0} onretry={() => void load()}>
       {#snippet emptyView()}
-        <EmptyState icon="note" title="No calls yet" body="Calls made by external MCP clients and by sessions through the gateway appear here." />
+        {#if filtered}
+          <EmptyState icon="note" title="No calls match these filters" body="Change the server, tool or decision filter, or clear them to see every call." actionLabel="Clear filters" actionKind="secondary" onaction={clearFilters} />
+        {:else}
+          <EmptyState icon="note" title="No calls yet" body="Calls made by external MCP clients and by sessions through the gateway appear here." />
+        {/if}
       {/snippet}
       <div class="grid">
         <div class="thead">

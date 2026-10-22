@@ -130,28 +130,29 @@ pub async fn launch(ctx: &SwarmRt, swarm: &Swarm, opts: LaunchOpts) -> Result<St
     tokio::spawn(async move {
         ctx2.seed_tasks(&project2, &creator, &goal).await;
         if start {
-            // The same gates as the start/resume routes: a channel message
+            // The channel gate (`ActivatePolicy::Channel`): a channel message
             // used to flip an ABORTED or budget-paused swarm back to active
-            // (clearing its pause reason) and spend past the cap.
-            let operation = crate::runtime::engine::operation_guard(&swarm_id).await;
-            if let Some(why) = channel_start_refused(&ctx2, &swarm_id, &workspace_id).await {
-                // Never post (a slow Slack) while holding the swarm's lock.
-                drop(operation);
-                notify_origin(
-                    &ctx2,
-                    &project2,
-                    &format!("Tasks were added, but the swarm was not started: {why}."),
-                )
-                .await;
-                return;
-            }
-            let _ = ctx2
-                .swarm_repo()
-                .set_swarm_status(&swarm_id, "active")
-                .await;
-            crate::runtime::engine::set_paused(&ctx2, &swarm_id, false);
-            crate::runtime::engine::start_coordinator(ctx2.clone(), swarm_id.clone());
-            crate::runtime::engine::emit_status(&ctx2, &workspace_id, &swarm_id, "active");
+            // (clearing its pause reason) and spend past the cap. `activate`
+            // releases the swarm's lock before returning, so the refusal post
+            // (a slow Slack) never runs under it.
+            let refused = crate::runtime::lifecycle::activate(
+                &ctx2,
+                &workspace_id,
+                &swarm_id,
+                crate::runtime::lifecycle::ActivatePolicy::Channel,
+            )
+            .await;
+            let why = match refused {
+                Ok(_) => return,
+                Err(otto_core::Error::Conflict(why)) => why,
+                Err(e) => format!("it could not be started ({e})"),
+            };
+            notify_origin(
+                &ctx2,
+                &project2,
+                &format!("Tasks were added, but the swarm was not started: {why}."),
+            )
+            .await;
         }
     });
 
@@ -161,7 +162,7 @@ pub async fn launch(ctx: &SwarmRt, swarm: &Swarm, opts: LaunchOpts) -> Result<St
 /// Why a channel/webhook launch must not (re)start the swarm, if it must not:
 /// it was aborted, it is auto-paused for a budget/limit reason, or the
 /// workspace's spend cap blocks new work.
-async fn channel_start_refused(
+pub(crate) async fn channel_start_refused(
     ctx: &SwarmRt,
     swarm_id: &str,
     workspace_id: &str,

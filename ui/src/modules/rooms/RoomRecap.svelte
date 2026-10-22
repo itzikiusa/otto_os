@@ -34,8 +34,8 @@
   onDestroy(() => capture?.dispose());
   export async function finishCapture() { await capture?.finish(); }
   function start() { capture?.prepareAudio(); send({type: 'recap_start', epoch: room.recap!.epoch}); }
-  async function openPrepare() { partial = false; prepare = true; busy = true; error = ''; capability = null; try { capability = await recapRequest<RecapCapabilities>('/room-recap-capabilities'); } catch (e) { error = e instanceof Error ? e.message : 'Could not check local recap engines.'; } finally { busy = false; } }
-  async function create() { busy = true; error = ''; try { await recapRequest(`/rooms/${room.room_id}/recaps`, {allow_unavailable_speech: partial}); prepare = false; } catch (e) { error = e instanceof Error ? e.message : 'Could not prepare the recap.'; } finally { busy = false; } }
+  async function openPrepare() { partial = false; prepare = true; busy = true; error = ''; capability = null; try { capability = await recapRequest<RecapCapabilities>('/room-recap-capabilities'); } catch (e) { error = e instanceof Error ? e.message : 'Couldn’t check local recap engines.'; } finally { busy = false; } }
+  async function create() { busy = true; error = ''; try { await recapRequest(`/rooms/${room.room_id}/recaps`, {allow_unavailable_speech: partial}); prepare = false; } catch (e) { error = e instanceof Error ? e.message : 'Couldn’t prepare the recap.'; } finally { busy = false; } }
   async function withdraw(): Promise<void> {
     const ok = await confirmer.ask('The host stops capturing speech, chat and screens until everyone consents again.', {
       title: 'Pause capture for everyone?',

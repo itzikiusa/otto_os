@@ -193,7 +193,7 @@
         {#if showList}
           <div class="list-pane" style="--list-pane-w:{listW}px">
             {#if listState === 'loading' && !threads.length}
-              <div class="pad" aria-busy="true" aria-label="Loading threads"><Skeleton rows={6} height={28} /></div>
+              <div class="pad"><Skeleton rows={6} height={28} label="threads" /></div>
             {:else}
               <ThreadList {threads} selected={selectedId} onopen={open} onnew={() => void newThread()} onnewspace={(s) => void newSpace(s)} {creating} />
             {/if}
@@ -213,7 +213,7 @@
                   <ChatView {thread} onopentasks={() => go('tasks')} onopenmemory={() => go('memory')} />
                 {/key}
               {:else}
-                <div class="pad" aria-busy="true" aria-label="Loading the conversation"><Skeleton rows={4} height={44} /></div>
+                <div class="pad"><Skeleton rows={4} height={44} label="the conversation" /></div>
               {/if}
             {:else}
               <div class="tab-scroll">

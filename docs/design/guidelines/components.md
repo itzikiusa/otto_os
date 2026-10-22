@@ -100,6 +100,14 @@ Rules:
 - **Validation is inline.** Put the message under the field in `--danger`,
   saying what is wrong and how to fix it. Show it on blur or on submit, not on
   every keystroke. Don't use a toast for a field error.
+  - Keep a per-form `fieldErrors` map (`Record<field, string>`), set it on
+    submit, and clear a field's entry when that field changes.
+  - Render `<p class="field-error" id="…-err">` under the field, and give the
+    field `aria-invalid="true"` plus `aria-describedby` pointing at that id.
+  - Disable the primary while a required field is empty (with a `title` that
+    says which), so most errors never need a message at all.
+  - A one-field `confirmer.promptText` edit passes `validate: (v) => string |
+    null`; `ConfirmDialog` shows the message under its input and stays open.
 - **Explain disabled controls.** Give them a `title`, or a `.hint` saying why
   ("Connect a Git account to enable").
 - Paths use `PathField` / `FolderPicker`. Model selection uses `ModelPicker`.

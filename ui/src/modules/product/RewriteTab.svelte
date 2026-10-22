@@ -44,6 +44,13 @@
   let pollStartedAt = 0;
   // Count of versions when we triggered a rewrite — to detect a new one appearing.
   let versionsCountAtStart = 0;
+  // Consecutive failed reads while waiting (same as PlanTab): after
+  // POLL_FAIL_SHOWN the waiting state says why (with Check again), and a
+  // timeout after failed reads blames the read — not the agent, which may
+  // well have written the rewrite.
+  const POLL_FAIL_SHOWN = 2;
+  let pollFailures = $state(0);
+  let lastPollError = $state<string | null>(null);
 
   function clearPoll(): void {
     if (pollTimer !== null) {
@@ -52,22 +59,34 @@
     }
   }
 
-  async function pollVersions(): Promise<void> {
-    // Stop if timeout exceeded.
-    if (Date.now() - pollStartedAt > POLL_MAX_MS) {
+  /** One poll read. Resolves `false` on a failed read so the poller backs
+   *  off (lib/poll.ts) instead of hammering a daemon that is down. */
+  async function pollVersions(): Promise<boolean> {
+    // A `product_changed` nudge also lands here with no poll running: no
+    // timeout and no failure count then.
+    const polling = pollTimer !== null;
+    if (polling && Date.now() - pollStartedAt > POLL_MAX_MS) {
+      const cause = pollFailures > 0 ? lastPollError : null;
       clearPoll();
-      toasts.warn('Rewrite timed out', 'No suggested version appeared within 2 minutes.');
-      return;
+      if (cause) toasts.warn('Couldn’t check for the rewrite', cause);
+      else toasts.warn('Rewrite timed out', 'No suggested version appeared within 2 minutes.');
+      return true;
     }
     try {
       await product.loadVersions();
+      pollFailures = 0;
+      lastPollError = null;
       const suggested = latestSuggested();
       if (suggested) {
         clearPoll();
         await loadVersionBodies(suggested);
       }
+      return true;
     } catch (e) {
-      console.error('[RewriteTab] poll error', e);
+      if (!polling) return true;
+      pollFailures++;
+      lastPollError = loadErrorText(e);
+      return false;
     }
   }
 
@@ -82,6 +101,8 @@
     clearPoll();
     versionsCountAtStart = product.versions.length;
     pollStartedAt = Date.now();
+    pollFailures = 0;
+    lastPollError = null;
     // Immediate first poll, then interval.
     // Immediate first poll, then every POLL_INTERVAL_MS after each settles.
     // `product_changed` (onSectionChange, below) settles it; this chain is
@@ -287,6 +308,10 @@
             <Icon name="x" size={12} /> Stop waiting
           </button>
           <span class="polling-indicator">checking every 3s…</span>
+          {#if pollFailures >= POLL_FAIL_SHOWN && lastPollError}
+            <span class="poll-error" role="status">Couldn’t check progress: {lastPollError}</span>
+            <button class="btn small" onclick={() => pollTimer?.now()}>Check again</button>
+          {/if}
         {/if}
       </div>
     </section>
@@ -438,6 +463,7 @@
     width: auto;
     font-size: var(--fs-s);
   }
+  .poll-error { font-size: var(--fs-xs); color: var(--warning); overflow-wrap: anywhere; }
   .polling-indicator {
     font-size: var(--fs-xs);
     color: var(--text-dim);

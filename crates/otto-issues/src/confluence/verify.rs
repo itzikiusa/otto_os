@@ -46,11 +46,12 @@ pub struct CommentWriteResp {
 impl ConfluenceClient {
     /// `GET /content/{id}?expand=…` as raw JSON (errors as text for a check).
     async fn read_back(&self, id: &str, expand: &str) -> Result<Value, String> {
-        self.ensure_tls().map_err(|e| e.to_string())?;
         let resp = self
-            .http
+            .t
+            .http()
+            .map_err(|e| e.to_string())?
             .get(self.api(&format!("/content/{}", path_seg(id))))
-            .header("Authorization", &self.auth_header)
+            .header("Authorization", &self.t.auth_header)
             .header("Accept", "application/json")
             .query(&[("expand", expand)])
             .send()

@@ -479,6 +479,13 @@ From the header (`SwarmPage`) or the API (§6):
 - **Raise budget & resume** — shown when a swarm was auto-paused by a budget; bumps
   `max_total_runs` (and optionally cost) and resumes in one step.
 
+Every way a swarm becomes active — **Start**, **Resume**, a channel/webhook launch
+and Product **Discover** — runs one transition,
+`otto_swarm::runtime::lifecycle::activate`, under the swarm's operation guard, so
+it queues behind a pause or abort in progress instead of interleaving with it.
+Start, Resume and Discover apply the workspace budget gate; a channel launch also
+refuses an aborted or auto-paused swarm and posts the reason back to the channel.
+
 **Crash recovery.** On daemon start, swarm runs left `queued`/`running`/`waiting`
 by a previous process are marked `error` (their background task died with the
 process) before any coordinator is restored — so they don't permanently consume

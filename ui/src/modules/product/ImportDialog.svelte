@@ -6,7 +6,7 @@
   import LoadState from '../../lib/components/LoadState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import PathField from '../../lib/components/PathField.svelte';
-  import { api } from '../../lib/api/client';
+  import { issueAccounts } from '../../lib/stores/issueAccounts.svelte';
   import { product } from '../../lib/stores/product.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { router } from '../../lib/router.svelte';
@@ -59,7 +59,7 @@
     accountsLoading = true;
     accountsError = '';
     try {
-      accounts = await api.get<IssueAccount[]>('/issue/accounts');
+      accounts = await issueAccounts.load();
       if (accounts.length > 0) accountId = accounts[0].id;
     } catch (e) {
       accountsError = loadErrorText(e);

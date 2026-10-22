@@ -306,7 +306,7 @@ while). Files: `Cargo.toml`, `src/main.rs`, `otto-plugin.json`, `ui/index.html`.
 
 | Method & path | Notes |
 |---|---|
-| `GET /plugin-admin` | Full installed-plugin records (no secrets). Root only. |
+| `GET /plugin-admin` | Full installed-plugin records (no secrets), each with `running: bool` and `last_error: string \| null`. Root only. |
 | `POST /plugin-admin/install` | `{source}` = local path **or** git URL → installs into the plugins home (**disabled**). Root only. |
 | `POST /plugin-admin/{slug}/enable` | Enable + spawn the sidecar (rolls back if it won't start). Root only. |
 | `POST /plugin-admin/{slug}/disable` | Disable + stop the sidecar (`204`). Root only. |
@@ -389,6 +389,7 @@ feature works in `cargo run -p ottod` / `npm run dev` against this tree today.
 |---|---|
 | No **Plugins** tab in Settings | Installed 0.1.0 build predates plugins — rebuild + redeploy (§9 caveat). |
 | Enable fails with a spawn error | Bad `exec` argv, missing runtime (`node`/`cargo`), or the sidecar didn't bind `$OTTO_PLUGIN_PORT`. The enable is rolled back; check the daemon log (`plugins: spawn failed`). |
+| Settings shows **Enabled · not running** | The sidecar failed to spawn or exited (`last_error` on `GET /plugin-admin` carries the cause). Fix the cause, then **Start again** (re-enables it); the daemon does not restart a crashed sidecar on its own. |
 | Plugin shows but calls return **502** | Sidecar not running (crashed, slow start, or disabled). Re-enable; verify it binds the port and answers `GET /health` with 2xx. |
 | First enable of `dora-metrics` hangs | `cargo run` is **compiling** on first enable — wait for the build. |
 | Nav entry missing for a non-root user | No grant — give them ≥ `view` on the slug in Settings → Users. |

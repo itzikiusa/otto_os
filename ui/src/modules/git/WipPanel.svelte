@@ -5,7 +5,7 @@
   // WIP row is selected. Unstaged / Staged file trees (per-file + per-folder
   // stage toggles, discard), a per-file working diff, and the commit composer.
   // Replaces the old separate "Changes" tab — staging now lives on the graph.
-  import { onDestroy, untrack } from 'svelte';
+  import { onDestroy, tick, untrack } from 'svelte';
   import { toastError } from '../../lib/toastError';
   import { api, isAbortError } from '../../lib/api/client';
   import type {
@@ -334,14 +334,49 @@
     conflicted: '!',
   };
 
-  async function stagePaths(paths: string[], stage: boolean): Promise<void> {
+  // ── Keyboard focus across index moves ─────────────────────────────────
+  // Staging moves a path to the other list, so Svelte destroys the row —
+  // and the focused checkbox with it — and focus fell to <body>. A row
+  // control passes its origin; after the new status renders, focus goes to
+  // the checkbox now at the same index in the same section (else the last
+  // row, else the section heading), and a polite status says what happened.
+  type Origin = { section: 'unstaged' | 'staged'; key: string };
+  let panelEl = $state<HTMLDivElement | null>(null);
+  let announcement = $state('');
+  const diffId = `wp-diff-${Math.random().toString(36).slice(2, 10)}`;
+  const rowsOf = (section: 'unstaged' | 'staged'): Row[] => (section === 'unstaged' ? unstagedRows : stagedRows);
+  const indexOf = (origin: Origin | undefined): number =>
+    origin ? Math.max(0, rowsOf(origin.section).findIndex((r) => r.key === origin.key)) : -1;
+
+  async function settleFocus(origin: Origin | undefined, before: number, message: string): Promise<void> {
+    announcement = '';
+    await tick();
+    announcement = message;
+    if (!origin) return;
+    const rows = rowsOf(origin.section);
+    const head = panelEl?.querySelector<HTMLElement>(`[data-wp-head="${origin.section}"]`);
+    if (rows.length === 0) {
+      head?.focus();
+      return;
+    }
+    const key = rows[Math.min(before, rows.length - 1)].key;
+    const list = panelEl?.querySelector(`.wp-rows[data-section="${origin.section}"]`);
+    const boxes = Array.from(list?.querySelectorAll<HTMLInputElement>('input[type="checkbox"][data-row-key]') ?? []);
+    (boxes.find((b) => b.dataset.rowKey === key) ?? boxes.at(-1) ?? head)?.focus();
+  }
+
+  const pathsLabel = (paths: string[]): string => (paths.length === 1 ? paths[0] : plural(paths.length, 'file'));
+
+  async function stagePaths(paths: string[], stage: boolean, origin?: Origin): Promise<void> {
     if (paths.length === 0) return;
+    const before = indexOf(origin);
     try {
       const s = await api.post<RepoStatusResp>(
         `/repos/${repoId}/${stage ? 'stage' : 'unstage'}`,
         { paths },
       );
       onstatus(s);
+      await settleFocus(origin, before, `${stage ? 'Staged' : 'Unstaged'} ${pathsLabel(paths)}`);
     } catch (e) {
       toastError('Couldn’t finish the operation', e);
     }
@@ -354,8 +389,10 @@
     paths: string[],
     label: string,
     section: 'unstaged' | 'staged' = 'staged',
+    origin?: Origin,
   ): Promise<void> {
     if (paths.length === 0) return;
+    const before = indexOf(origin);
     const keepStaged = section === 'unstaged';
     const them = paths.length === 1 ? 'it' : 'them';
     const ok = await confirmer.ask(
@@ -374,6 +411,11 @@
       // stay listed for its STAGED half — only an unstaged remainder counts.)
       const left = paths.filter((p) =>
         s.changes.some((c) => c.path === p && (!keepStaged || c.unstaged)),
+      );
+      await settleFocus(
+        origin,
+        before,
+        left.length > 0 ? `Discard incomplete for ${pathsLabel(left)}` : `Discarded ${pathsLabel(paths)}`,
       );
       if (left.length > 0) {
         toasts.error(
@@ -733,7 +775,9 @@
     <input
       type="checkbox"
       checked={section === 'staged'}
-      onchange={() => stagePaths([file.change.path], section === 'unstaged')}
+      data-row-key="f:{file.change.path}"
+      onchange={() =>
+        stagePaths([file.change.path], section === 'unstaged', { section, key: `f:${file.change.path}` })}
       title={section === 'staged' ? 'Unstage' : 'Stage'}
       aria-label="{section === 'staged' ? 'Unstage' : 'Stage'} {file.change.path}"
     />
@@ -745,6 +789,8 @@
         selectedPath = selectedPath === file.change.path ? null : file.change.path;
       }}
       title={file.change.path}
+      aria-expanded={selectedPath === file.change.path}
+      aria-controls={selectedPath === file.change.path ? diffId : undefined}
     >
       <span class="kind k-{file.change.kind}">{kindBadge[file.change.kind]}</span>
       <span class="mono wp-fname">{file.name}</span>
@@ -757,7 +803,8 @@
       class="wp-discard"
       title={section === 'unstaged' ? 'Discard unstaged changes to this file' : 'Discard changes to this file'}
       aria-label="Discard {file.change.path}"
-      onclick={() => void discardPaths([file.change.path], file.change.path, section)}
+      onclick={() =>
+        void discardPaths([file.change.path], file.change.path, section, { section, key: `f:${file.change.path}` })}
     >
       <Icon name="trash" size={12} />
     </button>
@@ -780,7 +827,13 @@
       <input
         type="checkbox"
         checked={section === 'staged'}
-        onchange={() => stagePaths(node.files.map((f) => f.path), section === 'unstaged')}
+        data-row-key="d:{node.path}"
+        onchange={() =>
+          stagePaths(
+            node.files.map((f) => f.path),
+            section === 'unstaged',
+            { section, key: `d:${node.path}` },
+          )}
         title="{section === 'staged' ? 'Unstage' : 'Stage'} {node.path}/ ({plural(node.files.length, 'file')})"
         aria-label="{section === 'staged' ? 'Unstage' : 'Stage'} folder {node.path}"
       />
@@ -806,6 +859,7 @@
             node.files.map((f) => f.path),
             `${node.path}/ (${plural(node.files.length, 'file')})`,
             section,
+            { section, key: `d:${node.path}` },
           )}
       >
         <Icon name="trash" size={12} />
@@ -819,7 +873,7 @@
   {#if rows.length === 0}
     <div class="dim wp-empty">{empty}</div>
   {/if}
-  <div class="wp-rows" {@attach lw.attach}>
+  <div class="wp-rows" data-section={section} {@attach lw.attach}>
     {#if win.top > 0}<div class="wp-spacer" style="height:{win.top}px" aria-hidden="true"></div>{/if}
     {#each rows.slice(win.start, win.end) as r (r.key)}
       {#if r.node.type === 'folder'}
@@ -832,7 +886,8 @@
   </div>
 {/snippet}
 
-<div class="wip-panel">
+<div class="wip-panel" bind:this={panelEl}>
+  <div class="sr-only" role="status" aria-live="polite">{announcement}</div>
   <div class="wp-head">
     <span class="wp-title mono">// WIP</span>
     <span class="wp-count">{plural(status.changes.length, 'file')} changed</span>
@@ -882,7 +937,7 @@
     <!-- Unstaged -->
     <div class="wp-section">
       <div class="wp-sec-head">
-        <button type="button" class="wp-sec-toggle" onclick={() => (unstagedOpen = !unstagedOpen)} aria-expanded={unstagedOpen}>
+        <button type="button" class="wp-sec-toggle" data-wp-head="unstaged" onclick={() => (unstagedOpen = !unstagedOpen)} aria-expanded={unstagedOpen}>
           <Icon name={unstagedOpen ? 'chevronDown' : 'chevronRight'} size={12} />
           <span>Unstaged files</span>
           <span class="wp-sec-count">{unstaged.length}</span>
@@ -926,7 +981,7 @@
     <!-- Staged -->
     <div class="wp-section">
       <div class="wp-sec-head">
-        <button type="button" class="wp-sec-toggle" onclick={() => (stagedOpen = !stagedOpen)} aria-expanded={stagedOpen}>
+        <button type="button" class="wp-sec-toggle" data-wp-head="staged" onclick={() => (stagedOpen = !stagedOpen)} aria-expanded={stagedOpen}>
           <Icon name={stagedOpen ? 'chevronDown' : 'chevronRight'} size={12} />
           <span>Staged files</span>
           <span class="wp-sec-count">{staged.length}</span>
@@ -966,7 +1021,7 @@
        looked like nothing happened. As its own flex region it is visible the
        instant a file is clicked, with its own scrollbar. -->
   {#if selectedPath !== null}
-    <div class="wp-diff">
+    <div class="wp-diff" id={diffId}>
       <div class="wp-diff-head">
         <Icon name="file" size={12} />
         <span class="mono wp-diff-path" title={selectedPath}>{selectedPath}</span>

@@ -687,12 +687,14 @@ pub(crate) async fn spawn_forward(
         "127.0.0.1",
     ]);
     let mut cmd = Command::new(&k.program);
-    cmd.args(&argv)
-        .envs(k.env.iter().map(|(a, b)| (a.as_str(), b.as_str())))
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
+    otto_core::aws_env::apply_aws_env(
+        cmd.args(&argv),
+        k.env.iter().map(|(a, b)| (a.as_str(), b.as_str())),
+    )
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .kill_on_drop(true);
     let mut child = cmd
         .spawn()
         .map_err(|e| Error::Upstream(format!("spawn kubectl port-forward: {e}")))?;

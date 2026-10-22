@@ -215,10 +215,11 @@ a stale result.
 
 ### Pinning & recency
 
-`PATCH /connections/{id}/pin` `{pinned: bool}` toggles a flag that surfaces the
-connection in a **Pinned** group above **Recent**. The sidebar's "Recent" group is
-pinned-first, then most-recently-opened (`last_opened_at`), capped to a fixed
-count.
+`PATCH /connections/{id}/pin` `{pinned: bool}` sets a stored `pinned` flag on
+the connection, and opening a connection stamps `last_opened_at`. Both are kept
+for API clients and a future sidebar group, but the current UI doesn't read
+either: there is no **Pinned** group, and the connections list keeps its own
+section order.
 
 ---
 
@@ -401,9 +402,9 @@ grant is what decides access.
 |---|---|---|
 | `GET /workspaces/{id}/connections` | ws viewer | — → `Connection[]` (incl. globals; secret never present) |
 | `POST /workspaces/{id}/connections` | ws editor | `UpsertConnectionReq` → `Connection` (created workspace-independent / global) |
-| `PATCH /connections/{id}` | ws editor (global: root) | `UpsertConnectionReq` (PATCH semantics) → `Connection` |
-| `PATCH /connections/{id}/pin` | ws editor (global: root) | `{pinned}` → `Connection` |
-| `DELETE /connections/{id}` | ws editor (global: root) | — → 204 (deletes Keychain secret) |
+| `PATCH /connections/{id}` | ws editor (global: `Connections:Admin`) | `UpsertConnectionReq` (PATCH semantics) → `Connection` |
+| `PATCH /connections/{id}/pin` | ws editor (global: `Connections:Edit`) | `{pinned}` → `Connection` |
+| `DELETE /connections/{id}` | ws editor (global: `Connections:Admin`) | — → 204 (deletes Keychain secret) |
 | `POST /connections/{id}/open` | ws editor | `{title?, workspace_id?}` → `Session` |
 | `POST /connections/{id}/test` | ws editor | — → `TestConnectionResp{ok, latency_ms, message, warn_argv}` |
 
@@ -416,8 +417,8 @@ and may mutate only connections they created.
 |---|---|---|
 | `GET …/sftp/list?path=` | ws viewer | — → `SftpListResp{path, entries: SftpEntry[]}` (empty path ⇒ `pwd` then list) |
 | `GET …/sftp/read?path=` | ws viewer | — → `SftpReadResp{text, truncated}` (≤ 1 MiB UTF-8) |
-| `POST …/sftp/download` | ws editor | `{remote_path, local_path}` → `SftpDownloadResp{local_path, bytes}` |
-| `POST …/sftp/upload` | ws editor | `{local_path, remote_path}` → 200 |
+| `POST …/sftp/download` | ws editor + root (writes a daemon-host path; non-root → 403 `HOST_PATH_ROOT_ONLY`) | `{remote_path, local_path}` → `SftpDownloadResp{local_path, bytes}` |
+| `POST …/sftp/upload` | ws editor + root (reads a daemon-host path; non-root → 403 `HOST_PATH_ROOT_ONLY`) | `{local_path, remote_path}` → 200 |
 | `POST …/sftp/mkdir` | ws editor | `{path}` → 200 |
 | `POST …/sftp/remove` | ws editor | `{path, dir?}` → 200 (`dir:true` ⇒ `rmdir`, else `rm`) |
 | `POST …/sftp/rename` | ws editor | `{from, to}` → 200 |
@@ -446,11 +447,14 @@ is only written once you flip it on **and** a session then spawns in the workspa
 (`McpServer{name, command, args, env, secret_env_keys, enabled, …}`). `env`
 holds NON-secret pairs; put tokens/keys in the write-only `secret_env` map
 instead — values are stored in the macOS **Keychain** (never Otto's DB) and
-responses return only the key names. Secret values are resolved when
-`.mcp.json` is rendered at agent spawn, so **the rendered `.mcp.json` on disk
-does contain the real values** — the agent CLI needs them; that file is
-user-local and out-of-tree. That residual is the accepted trade-off (fixing it
-would require per-CLI env-passing support).
+responses return only the key names. Secret values are resolved at agent spawn
+but never written into `.mcp.json` (or agy's `.agents/mcp_config.json` or grok's
+`.grok/config.toml`): a server with env runs through `/bin/sh` with its
+variables in a private 0600 file, `<tmp>/otto-mcp/launch-<cwd>.<server>.env`,
+outside the work tree. That file is the one place the plaintext values live on
+disk. Otto deletes it when a later spawn in that cwd no longer launches the
+server (or the server no longer has env), and deleting or disabling the server
+removes its env file from every cwd.
 
 > Database-Explorer engine routes (`/connections/{id}/db/*`) reuse these same
 > connection profiles — see [`./database-explorer.md`](./database-explorer.md).

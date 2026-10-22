@@ -120,12 +120,14 @@ impl KubeProxy {
         let reject = format!("--reject-methods={reject_methods}");
         let argv = k.argv_stream(["proxy", sock_arg.as_str(), accept.as_str(), reject.as_str()]);
         let mut cmd = Command::new(&k.program);
-        cmd.args(&argv)
-            .envs(k.env.iter().map(|(a, b)| (a.as_str(), b.as_str())))
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
+        otto_core::aws_env::apply_aws_env(
+            cmd.args(&argv),
+            k.env.iter().map(|(a, b)| (a.as_str(), b.as_str())),
+        )
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
         let mut child = match cmd.spawn() {
             Ok(c) => c,
             Err(e) => {

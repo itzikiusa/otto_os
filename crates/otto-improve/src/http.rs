@@ -142,7 +142,7 @@ async fn run_now<S: ImproveCtx>(
             "a run is already in progress".into(),
         )));
     }
-    // Mirror the PR-review pattern (modules.rs::start_review): create the run
+    // Mirror the PR-review pattern (otto-server `modules/review/`, `start_review`): create the run
     // row synchronously so we can return its id immediately, then run the heavy
     // analysis in the background.
     let run = s

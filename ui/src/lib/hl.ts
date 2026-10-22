@@ -2,6 +2,8 @@
 // per-line highlight with escaped fallback. hljs itself is loaded lazily so
 // it stays out of the main bundle; lines render escaped until it arrives.
 
+import { escapeHtml } from './html.ts';
+
 type Hljs = typeof import('highlight.js/lib/common').default;
 
 let hljs: Hljs | null = null;
@@ -110,9 +112,9 @@ export function langFromPath(path: string): string | null {
   return lang;
 }
 
-export function escapeHtml(s: string): string {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-}
+// The shared escaper (lib/html.ts) — re-exported because diff highlighting
+// and older callers import it from here.
+export { escapeHtml };
 
 // Memoized highlight results. Diff lines are re-rendered on every reactive
 // flush (view-mode toggle, hljs arrival, comment updates, scrolling a windowed

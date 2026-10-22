@@ -22,5 +22,5 @@ test('presets always set a limit (none deletes by default) and sizes read', () =
   for (const p of RETENTION_PRESETS) assert.ok(p.rows > 0 || p.days > 0, p.label);
   assert.equal(formatBytes(512), '512 B');
   assert.equal(formatBytes(2048), '2 KB');
-  assert.equal(formatBytes(52 * 1024 * 1024), '52.0 MB');
+  assert.equal(formatBytes(52 * 1024 * 1024), '52 MB', 'the shared formatter trims a trailing .0');
 });

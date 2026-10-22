@@ -46,6 +46,7 @@
   import { isForeground, visibleOnThisDevice, ws } from '../stores/workspace.svelte';
   import { router } from '../router.svelte';
   import { keyContext } from '../keys';
+  import { radioKey } from '../radioKey';
   import { agentProviders, defaultAgentProvider } from '../providers';
   import { SIDEBAR_MODULES, availableModules, goToEntries } from '../sidebar';
   import { bar, onDesktopEvent, openInOtto } from '../desktop';
@@ -969,8 +970,7 @@
               {@const sp = barStore.state.spaces[i]}
               <button
                 class="space"
-                role="radio"
-                aria-checked={i === spaceIdx}
+                role="radio" aria-checked={i === spaceIdx} tabindex={i === spaceIdx ? 0 : -1} onkeydown={radioKey}
                 title="{spaceLabel(i)} · {sp.name}{i === spaceIdx ? ' — click again for settings' : ''} (⌃{i + 1})"
                 aria-label="Space {i + 1}: {sp.name}"
                 onclick={() => selectSpace(i)}

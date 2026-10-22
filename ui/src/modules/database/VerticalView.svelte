@@ -37,9 +37,9 @@
     planExpansion,
     setExpansionMode,
     type ExpansionState,
-  } from './expansion-plan';
+  } from '../../lib/jsonTree/expansion-plan';
   import { ALT_BATCH, cellStr, copyWithToast, isComplex, prettyJson, SET_EMPTY, SET_NULL } from './results-format';
-  import { LineIndex, revealSteps, type FindTop, type RevealState } from './json-find';
+  import { LineIndex, revealSteps, type FindTop, type RevealState } from '../../lib/jsonTree/json-find';
 
   interface Props {
     result: QueryResult;
@@ -245,19 +245,21 @@
   // ── Menus ────────────────────────────────────────────────────────────────────
   const canEdit = $derived(flow.editable && !flow.reviewSql);
 
+  /** A field-name problem, shown INLINE under the prompt's field (the dialog
+   *  stays open) — never a toast that fades while the field is unmarked. */
+  function fieldNameError(name: string): string | null {
+    return name.includes('.') || name.startsWith('$') ? 'Names can’t contain "." or start with "$".' : null;
+  }
   async function addField(idx: number, colIdx: number, parentPath: string): Promise<void> {
     const name = (
       await confirmer.promptText(parentPath ? `New field under ${parentPath}` : 'New top-level field', {
         title: 'Add field',
         confirmLabel: 'Add',
         placeholder: 'field name',
+        validate: fieldNameError,
       })
     )?.trim();
     if (!name) return;
-    if (name.includes('.') || name.startsWith('$')) {
-      toasts.warn('Invalid field name', 'Names can’t contain "." or start with "$"');
-      return;
-    }
     const path = parentPath ? `${parentPath}.${name}` : name;
     // Parked (as an empty string) so the row exists, then straight into its
     // editor — Escape there leaves the empty field, which Delete removes.
@@ -270,22 +272,19 @@
         title: 'Rename field',
         confirmLabel: 'Rename',
         initial: ctx.label,
+        validate: fieldNameError,
       })
     )?.trim();
     if (!name || name === ctx.label) return;
-    if (name.includes('.') || name.startsWith('$')) {
-      toasts.warn('Invalid field name', 'Names can’t contain "." or start with "$"');
-      return;
-    }
     const parent = ctx.path.includes('.') ? ctx.path.slice(0, ctx.path.lastIndexOf('.')) : '';
     flow.renamePath(ctx.rowIdx, ctx.colIdx, ctx.path, parent ? `${parent}.${name}` : name);
   }
   async function deleteField(ctx: FieldCtx): Promise<void> {
     const ok = await confirmer.ask(
       engine === 'mongodb'
-        ? `Remove “${ctx.path}” from this document? ($unset — reviewed before it runs)`
-        : `Remove “${ctx.path}” from this column’s JSON? (reviewed before it runs)`,
-      { title: 'Delete field', danger: true },
+        ? `Delete “${ctx.path}” from this document? ($unset — reviewed before it runs)`
+        : `Delete “${ctx.path}” from this column’s JSON? (reviewed before it runs)`,
+      { title: 'Delete field', confirmLabel: 'Delete', danger: true },
     );
     if (ok) flow.unsetPath(ctx.rowIdx, ctx.colIdx, ctx.path);
   }

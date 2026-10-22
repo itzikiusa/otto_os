@@ -1137,7 +1137,7 @@ fn build_summarize_prompt(url: &str, title: &str, capped_markdown: &str, nonce: 
 /// `POST /workspaces/{wid}/browser/annotations/{id}/send` — `{session_id}` ->
 /// 200. Writes the annotation's context block into the target session via the
 /// same manager call `POST /sessions/{id}/input` uses (`SendInputReq{text,
-/// submit:true}`'s effect — append `"\n"` and write, `modules.rs::send_input`),
+/// submit:true}`'s effect — append `"\n"` and write, `modules/session_input.rs::send_input`),
 /// called directly rather than over HTTP. The target session must belong to
 /// the SAME workspace as the route's `{wid}` (and thus the annotation) — an
 /// Editor of `wid` cannot use this to inject text into a session in a

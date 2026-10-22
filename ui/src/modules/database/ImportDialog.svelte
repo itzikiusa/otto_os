@@ -12,10 +12,10 @@
   import Icon from '../../lib/components/Icon.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { database } from '../../lib/stores/database.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
-  import { confirmer } from '../../lib/confirm.svelte';
   import { postNdjsonStream } from '../../lib/api/client';
   import type { ImportFormat, ImportReq, ImportResult } from '../../lib/api/types';
   import { lsGet, lsSet } from '../../lib/storage';
@@ -49,6 +49,14 @@
   let progress = $state<ImportResult | null>(null);
   // In-flight stream controller — the footer Cancel aborts it while importing.
   let importAbort: AbortController | null = null;
+  /** Inline batch-size problem (blank = the default 500). `bind:value` on a
+   *  number input yields a number (or null when cleared) — normalise first. */
+  function batchSizeError(raw: unknown): string | null {
+    const text = String(raw ?? '').trim();
+    if (!text) return null;
+    const n = Number(text);
+    return Number.isFinite(n) && n > 0 ? null : 'Enter a positive number (default 500).';
+  }
 
   // Reading a daemon-host file is the host owner's power: root only (S6-302).
   const canImport = $derived(auth.isRoot && !!database.selectedConnId && resourceAccess.can('connection',database.selectedConnId,'db_data','database','edit',databaseAccessChild(database.activeDb)));
@@ -96,15 +104,11 @@
     if (!id || importing || !canImport) return;
     const path = filePath.trim();
     const tbl = table.trim();
-    if (!path || !tbl) {
-      toasts.error('Missing field', 'A file path and a target table are both required.');
-      return;
-    }
-    const size = batchSize.trim() ? Number(batchSize.trim()) : 500;
-    if (!Number.isFinite(size) || size <= 0) {
-      toasts.error('Invalid batch size', 'Enter a positive number (default 500).');
-      return;
-    }
+    // Field problems are shown inline (and keep Import disabled) — these are
+    // only guards for a call that slipped past the disabled button.
+    if (!path || !tbl || batchSizeError(batchSize)) return;
+    const rawSize = String(batchSize ?? '').trim();
+    const size = rawSize ? Number(rawSize) : 500;
 
     importing = true;
     progress = null;
@@ -116,9 +120,10 @@
 
       if (typeof res.error === 'string' && res.error.startsWith('write_blocked:')) {
         if (!current() || importAbort?.signal.aborted) return;
-        const ok = await confirmGuardedWrite(origin);
-        if (!ok || !current() || importAbort?.signal.aborted) {
-          toasts.info('Import canceled');
+        const answer = await confirmGuardedWrite(origin);
+        if (answer !== 'confirmed' || !current() || importAbort?.signal.aborted) {
+          // A mistyped name was already explained by the gate.
+          if (answer !== 'mismatch') toasts.info('Import canceled');
           progress = null;
           return;
         }
@@ -170,17 +175,33 @@
     }
   }
 
-  /** Typed confirmation for a write on a guarded connection — mirrors the query
-   *  path's gate (type the connection name to proceed). */
-  async function confirmGuardedWrite(conn: { name: string; environment?: string | null } | null): Promise<boolean> {
-    if (!conn) return false;
-    const label = conn.environment === 'prod' ? 'PRODUCTION' : 'read-only';
+  /** Typed confirmation for an import into a guarded connection — the store's
+   *  gate (`database.confirmGuardedWrite`) worded for an import: titled by what
+   *  the connection IS (a read-only dev connection is not "production"), no
+   *  glyph, and a mistyped name is explained (`'mismatch'`) instead of reading
+   *  as a plain cancel. */
+  async function confirmGuardedWrite(
+    conn: { name: string; environment?: string | null } | null,
+  ): Promise<'confirmed' | 'declined' | 'mismatch'> {
+    if (!conn) return 'declined';
+    const prod = conn.environment === 'prod';
+    const label = prod ? 'PRODUCTION' : 'read-only';
     const typed = await confirmer.promptText(
       `You are about to IMPORT rows into the ${label} connection "${conn.name}". ` +
         `This writes data. Type the connection name to confirm.`,
-      { title: '⚠ Confirm production write', confirmLabel: 'Run import', placeholder: conn.name, danger: true },
+      {
+        title: prod ? 'Confirm production import' : 'Confirm import on a read-only connection',
+        confirmLabel: 'Run import',
+        placeholder: conn.name,
+        danger: true,
+      },
     );
-    return typed != null && typed.trim().toLowerCase() === conn.name.trim().toLowerCase();
+    if (typed == null) return 'declined';
+    if (typed.trim().toLowerCase() !== conn.name.trim().toLowerCase()) {
+      toasts.info('Nothing was changed', 'What you typed didn’t match, so the action was canceled.');
+      return 'mismatch';
+    }
+    return 'confirmed';
   }
 </script>
 
@@ -242,8 +263,11 @@
         max="5000"
         spellcheck="false"
         placeholder="500"
+        aria-invalid={batchSizeError(batchSize) ? 'true' : undefined}
+        aria-describedby={batchSizeError(batchSize) ? 'imp-batch-err' : undefined}
       />
     </label>
+    {#if batchSizeError(batchSize)}<p class="imp-err" id="imp-batch-err">{batchSizeError(batchSize)}</p>{/if}
 
     <div class="imp-dest" title="Where the rows are written">
       → <span class="mono">{table.trim() || 'target_table'}</span> on
@@ -273,7 +297,7 @@
     <button
       class="btn primary"
       onclick={() => void runImport()}
-      disabled={!canImport || importing || !filePath.trim() || !table.trim()}
+      disabled={!canImport || importing || !filePath.trim() || !table.trim() || batchSizeError(batchSize) !== null}
     >
       {importing ? 'Importing…' : 'Import'}
     </button>
@@ -295,6 +319,11 @@
 {/if}
 
 <style>
+  .imp-err {
+    margin: -4px 0 0;
+    color: var(--danger);
+    font-size: var(--fs-s);
+  }
   /* Mirrors the export dialog's form styling (ResultsGrid `.exp-*`). */
   .imp-form {
     display: flex;

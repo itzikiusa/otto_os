@@ -40,11 +40,12 @@
   import EmptyState from '../../../lib/components/EmptyState.svelte';
   import LoadState from '../../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../../lib/loadError';
+  import { rel } from '../../../lib/stores/now.svelte';
   import MockupViewer from '../MockupViewer.svelte';
   import MockupAnnotations from '../MockupAnnotations.svelte';
   import MockupAssistPanel from '../MockupAssistPanel.svelte';
-  import DesignBoard from './DesignBoard.svelte';
-  import DeviceFrame, { DEVICES, type DeviceKind } from './DeviceFrame.svelte';
+  import DesignBoard from '../../../lib/design/DesignBoard.svelte';
+  import DeviceFrame, { DEVICES, type DeviceKind } from '../../../lib/design/DeviceFrame.svelte';
   import {
     Scene3DViewport,
     Hierarchy,
@@ -57,7 +58,7 @@
     type Scene3dDoc,
     type Scene3dObject,
     type ValidationIssue,
-  } from './scene3d';
+  } from '../../../lib/design/scene3d';
   import {
     FORMATS,
     GROUP_ORDER,
@@ -74,9 +75,9 @@
     nextFilename,
     typeLabel,
     type ArtifactKind,
-  } from './format';
+  } from '../../../lib/design/format';
   import { viewport } from '../../../lib/stores/viewport.svelte';
-  import { DESIGN_TEMPLATES, blankSource, type DesignTemplate } from './templates';
+  import { DESIGN_TEMPLATES, blankSource, type DesignTemplate } from '../../../lib/design/templates';
   import {
     canvasToPng,
     downloadBlob,
@@ -218,15 +219,14 @@
 
   // ── Blender bridge (§4.4) ──────────────────────────────────────────────────
   let blender = $state<BlenderStatus | null>(null);
-  let blenderChecked = false;
+  let blenderProbeError = $state<string | null>(null); // a failed probe ≠ "not installed"
+  let blenderChecked = $state(false);
   let renderJob = $state<BlenderJob | null>(null);
   let rendering = $state(false);
 
   // ── Save status line ───────────────────────────────────────────────────────
   const saveState = $derived(att ? product.saveState[att.id] ?? 'saved' : 'saved');
-  let now = $state(Date.now());
-  const ticker = setInterval(() => (now = Date.now()), 5000);
-  onDestroy(() => clearInterval(ticker));
+  const savedAt = $derived(att ? product.savedAt[att.id] : undefined); // absolute on hover
   const saveLabel = $derived.by(() => {
     if (!att) return '';
     if (localInvalid) return `invalid document — not saved (${plural(localInvalid.length, 'issue')})`;
@@ -235,12 +235,7 @@
       case 'saving': return 'saving…';
       case 'error': return 'save failed';
       case 'conflict': return 'conflict — newer version on the server';
-      default: {
-        const t = product.savedAt[att.id];
-        if (!t) return 'saved';
-        const s = Math.max(0, Math.round((now - t) / 1000));
-        return s < 5 ? 'saved just now' : s < 60 ? `saved ${s}s ago` : `saved ${Math.round(s / 60)}m ago`;
-      }
+      default: return savedAt ? `saved ${rel(savedAt)}` : 'saved';
     }
   });
   const countLabel = $derived.by(() => {
@@ -262,18 +257,32 @@
   // Re-run whenever the selected story changes. The Assistant is a global
   // singleton — if it's still open for a DIFFERENT story, close it so a turn
   // can't target the wrong story.
+  let lastChildIds = '';
+  // Tracks ONLY the selected story: reading `mockupAssist.active` / `storyId`
+  // here made every Assistant open/close reload the whole list (1 + N GETs)
+  // and wipe the child filter — and closed a just-opened "Refine" on a child
+  // story's artifact (its storyId differs from the epic's).
   $effect(() => {
     const sid = product.selectedId;
-    if (mockupAssist.active && mockupAssist.storyId !== sid) {
-      mockupAssist.close();
-      assistMode = null;
-    }
-    childFilter = '';
-    void untrack(() => loadAll());
+    untrack(() => {
+      if (mockupAssist.active && mockupAssist.storyId !== sid) {
+        mockupAssist.close();
+        assistMode = null;
+      }
+      childFilter = '';
+      // loadAll() loads this story's children: effect (b) needn't again.
+      lastChildIds = children.map((c) => c.id).join(',');
+      void loadAll();
+    });
   });
-  // Children may arrive after the story (list reload) — refetch their artifacts.
+  // Children may arrive after the story (list reload) — refetch their
+  // artifacts, but only when the child SET changed: `childrenOf` is a fresh
+  // array on every stories write. Effect (a) records the set it loaded, so
+  // the first run and a story switch skip — `loadAll()` already loads them.
   $effect(() => {
     const ids = children.map((c) => c.id).join(',');
+    if (ids === lastChildIds) return;
+    lastChildIds = ids;
     void untrack(() => loadChildren(ids ? children : []));
   });
   onDestroy(() => {
@@ -311,7 +320,11 @@
       loading = false;
     }
   }
+  /** Overlapping child loads (story switch, list reload) race: only the
+   *  newest one commits. */
+  let childSeq = 0;
   async function loadChildren(list: ProductStory[]): Promise<void> {
+    const my = ++childSeq;
     if (!list.length) {
       childAtts = {};
       return;
@@ -319,6 +332,7 @@
     const entries = await Promise.all(
       list.map(async (c) => [c.id, await product.listAttachmentsOf(c.id).catch(() => [])] as const),
     );
+    if (my !== childSeq) return;
     childAtts = Object.fromEntries(entries);
   }
 
@@ -751,9 +765,11 @@
   $effect(() => {
     if (kind === 'scene3d' && !blenderChecked) {
       blenderChecked = true;
-      void product.blenderStatus().then((s) => (blender = s)).catch(() => (blender = { installed: false, path: null, version: null }));
+      blenderProbeError = null;
+      void product.blenderStatus().then((s) => (blender = s)).catch((e: unknown) => (blenderProbeError = loadErrorText(e)));
     }
   });
+  const recheckBlender = (): void => { blender = null; blenderChecked = false; }; // the effect re-probes
   async function downloadBlenderScript(): Promise<void> {
     if (!att) return;
     try {
@@ -775,10 +791,10 @@
         renderJob = await product.blenderJob(id);
       }
       if (renderJob.status === 'done') {
-        toasts.success('Blender render finished', `${renderJob.outputs.length} file(s) attached`);
+        toasts.success('Blender render finished', `${plural(renderJob.outputs.length, 'file')} attached`);
         await loadAll(true);
       } else {
-        toasts.error('Couldn’t blender render', renderJob.error ?? 'unknown error');
+        toasts.error('Couldn’t render with Blender', renderJob.error ?? 'The job ended without a reason. Check the Blender log.');
       }
     } catch (e) {
       toastError('Couldn’t render with Blender', e);
@@ -1001,7 +1017,7 @@
       <div class="stage-status" data-save-state={saveState}>
         <span>{countLabel}</span>
         <span class="dot">·</span>
-        <span class="save" class:warn={saveState === 'conflict' || saveState === 'error' || !!localInvalid}>{saveLabel}</span>
+        <span class="save" class:warn={saveState === 'conflict' || saveState === 'error' || !!localInvalid} title={savedAt ? `Saved ${new Date(savedAt).toLocaleString()}` : undefined}>{saveLabel}</span>
         {#if saveState === 'conflict'}
           <button class="link" onclick={() => att && resolveConflict(att, source)}>Resolve…</button>
         {/if}
@@ -1059,19 +1075,22 @@
           <Inspector doc={sceneDoc} bind:selectedId={scene3dSel} onchange={onSceneChange} />
           <section class="insp-sec">
             <div class="insp-title">Blender</div>
-            {#if blender === null}
+            {#if blenderProbeError}
+              <LoadState what="Blender status" variant="compact" error={blenderProbeError} empty onretry={recheckBlender} />
+            {:else if blender === null}
               <p class="insp-hint">Checking for Blender…</p>
             {:else if blender.installed}
               <p class="insp-hint">Blender {blender.version ?? ''} <span class="mono">{blender.path}</span></p>
-              <div class="insp-actions">
-                <button class="btn small" onclick={renderInBlender} disabled={rendering}>
-                  {rendering ? `Rendering… ${renderJob?.status ?? ''}` : 'Render + export GLB'}
-                </button>
-                <button class="btn small" onclick={downloadBlenderScript}>Download script</button>
-              </div>
             {:else}
               <p class="insp-hint">Blender isn’t installed (set <span class="mono">OTTO_BLENDER</span> or install it in /Applications). You can still download the generated script and open it in Blender by hand.</p>
+            {/if}
+            {#if blender || blenderProbeError}
               <div class="insp-actions">
+                {#if blender?.installed}
+                  <button class="btn small" onclick={renderInBlender} disabled={rendering}>
+                    {rendering ? `Rendering… ${renderJob?.status ?? ''}` : 'Render + export GLB'}
+                  </button>
+                {/if}
                 <button class="btn small" onclick={downloadBlenderScript}>Download script</button>
               </div>
             {/if}

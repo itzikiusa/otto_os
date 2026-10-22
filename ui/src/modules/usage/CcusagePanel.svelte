@@ -5,7 +5,7 @@
   // (external included) on both sides.
   import Icon from '../../lib/components/Icon.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
-  import { formatCount } from '../../lib/metric-format';
+  import { formatCount, formatUsd } from '../../lib/metric-format';
   import { usage, type TokenTotals } from '../../lib/api/usage.svelte';
 
   const RANGES = [7, 14, 30];
@@ -23,11 +23,6 @@
     const p = ((ours - theirs) / theirs) * 100;
     if (Math.abs(p) < 0.5) return 'match';
     return `${p > 0 ? '+' : '−'}${Math.abs(p).toFixed(0)}%`;
-  }
-  function fmtCost(n: number): string {
-    if (n === 0) return '$0';
-    if (n < 0.01) return '<$0.01';
-    return '$' + n.toFixed(2);
   }
   const BUCKETS: { key: keyof TokenTotals; label: string }[] = [
     { key: 'input_tokens', label: 'Input' },
@@ -94,8 +89,8 @@
           {/each}
           <tr class="cost-row">
             <th scope="row">Cost (est.)</th>
-            <td class="num dim">{fmtCost(check.totals_ours.cost_usd)}</td>
-            <td class="num dim">{fmtCost(check.totals_theirs.cost_usd)}</td>
+            <td class="num dim">{formatUsd(check.totals_ours.cost_usd)}</td>
+            <td class="num dim">{formatUsd(check.totals_theirs.cost_usd)}</td>
             <td class="num dim">{pct(check.totals_ours.cost_usd, check.totals_theirs.cost_usd)}</td>
           </tr>
         </tbody>

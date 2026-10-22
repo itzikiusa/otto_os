@@ -81,22 +81,6 @@ fn jobs() -> std::sync::MutexGuard<'static, HashMap<String, Entry>> {
     JOBS.lock().unwrap_or_else(|p| p.into_inner())
 }
 
-/// `~/x` → `$HOME/x`.
-fn expand_home(p: &str) -> PathBuf {
-    let p = p.trim();
-    if let Some(rest) = p.strip_prefix("~/") {
-        if let Some(h) = dirs::home_dir() {
-            return h.join(rest);
-        }
-    }
-    if p == "~" {
-        if let Some(h) = dirs::home_dir() {
-            return h;
-        }
-    }
-    PathBuf::from(p)
-}
-
 /// The key's last segment as a safe local file name: basename only (no
 /// separators, no control chars, never `.`/`..`) and never a dotfile — a
 /// leading `.` would let an S3 key plant `~/.zshenv`-style startup files, so
@@ -165,7 +149,7 @@ fn dest_dir_allowed(canon: &Path, home: &Path) -> bool {
 /// Resolve + validate the requested destination directory (see the module
 /// doc). Returns the CANONICAL path, so the write goes where it was checked.
 fn resolve_dest_dir(raw: &str) -> Result<PathBuf> {
-    let dir = expand_home(raw);
+    let dir = otto_core::paths::expand_home_strict(raw.trim()).map_err(Error::Invalid)?;
     if !dir.is_absolute() || !dir.is_dir() {
         return Err(Error::Invalid(format!(
             "destination is not an existing directory: {}",
@@ -265,16 +249,16 @@ pub async fn start(
     ));
     let (bin, env) = svc.bin_and_env(a, req.region.as_deref()).await?;
     let uri = format!("s3://{bucket}/{}", req.key);
-    let mut child = tokio::process::Command::new(&bin)
-        .args(["s3", "cp", &uri, "-", "--no-progress"])
-        .env_remove("AWS_PROFILE") // same rule as `cli::run_raw`
-        .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|e| Error::Internal(format!("spawn aws s3 cp: {e}")))?;
+    let mut child = otto_core::aws_env::apply_aws_env(
+        tokio::process::Command::new(&bin).args(["s3", "cp", &uri, "-", "--no-progress"]),
+        env.iter().map(|(k, v)| (k.as_str(), v.as_str())),
+    )
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .kill_on_drop(true)
+    .spawn()
+    .map_err(|e| Error::Internal(format!("spawn aws s3 cp: {e}")))?;
     let stdout = child
         .stdout
         .take()

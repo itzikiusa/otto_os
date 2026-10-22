@@ -162,6 +162,39 @@ impl SettingsRepo {
         Ok(())
     }
 
+    /// Write every key of `values` in ONE transaction — all or nothing — so a
+    /// multi-key `PUT /settings` never leaves part of a request committed. The
+    /// cache is dropped for every key before the write and again after it
+    /// (committed or not), as in [`Self::put`].
+    pub async fn put_many(
+        &self,
+        values: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<()> {
+        for key in values.keys() {
+            self.invalidate(key);
+        }
+        let r = async {
+            let mut tx = self.pool.begin().await.map_err(dberr("put settings tx"))?;
+            for (key, value) in values {
+                sqlx::query(
+                    "INSERT INTO settings (key, value_json) VALUES (?, ?)
+                     ON CONFLICT (key) DO UPDATE SET value_json = excluded.value_json",
+                )
+                .bind(key)
+                .bind(value.to_string())
+                .execute(&mut *tx)
+                .await
+                .map_err(dberr("put setting"))?;
+            }
+            tx.commit().await.map_err(dberr("put settings commit"))
+        }
+        .await;
+        for key in values.keys() {
+            self.invalidate(key);
+        }
+        r
+    }
+
     pub async fn delete(&self, key: &str) -> Result<()> {
         self.invalidate(key);
         let r = sqlx::query("DELETE FROM settings WHERE key = ?")
@@ -194,6 +227,27 @@ impl SettingsRepo {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn put_many_writes_every_key_and_refreshes_the_cache() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(sqlx::sqlite::SqliteConnectOptions::new().in_memory(true))
+            .await
+            .unwrap();
+        sqlx::migrate!().run(&pool).await.unwrap();
+        let repo = SettingsRepo::new(pool);
+        let ttl = std::time::Duration::from_secs(60);
+        repo.put("a", &json!(1)).await.unwrap();
+        assert_eq!(repo.get_cached("a", ttl).await.unwrap(), Some(json!(1)));
+        let mut batch = serde_json::Map::new();
+        batch.insert("a".into(), json!(2));
+        batch.insert("b".into(), json!({"x": true}));
+        repo.put_many(&batch).await.unwrap();
+        // The cached `a` is not pinned at its old value.
+        assert_eq!(repo.get_cached("a", ttl).await.unwrap(), Some(json!(2)));
+        assert_eq!(repo.get("b").await.unwrap(), Some(json!({"x": true})));
+    }
 
     #[test]
     fn otto_mcp_enabled_precedence() {

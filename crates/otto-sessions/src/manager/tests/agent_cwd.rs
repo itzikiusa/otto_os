@@ -49,7 +49,7 @@ async fn agent_cwd_accepts_a_registered_repo_outside_the_root() {
 /// `hardened_std_command` (the `git_spawn_guard` test forbids a bare git).
 #[allow(clippy::disallowed_methods)] // test fixture: a blocking git call is fine here
 fn git_fixture(dir: &std::path::Path, args: &[&str]) {
-    let out = otto_git::hardened_std_command()
+    let out = otto_git_cmd::hardened_std_command()
         .arg("-C")
         .arg(dir)
         .args([

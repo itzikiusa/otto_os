@@ -4,6 +4,7 @@
   // /usage endpoints the Usage page does, scoped to this box so it never
   // disturbs the Usage page's own window selection.
   import { untrack } from 'svelte';
+  import { radioKey } from '../../../lib/radioKey';
   import EmptyState from '../../../lib/components/EmptyState.svelte';
   import Skeleton from '../../../lib/components/Skeleton.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
@@ -106,7 +107,7 @@
     <span class="spacer"></span>
     <div class="seg" role="radiogroup" aria-label="Window">
       {#each DAYS as d (d)}
-        <button class:on={d === days} role="radio" aria-checked={d === days} tabindex={d === days ? 0 : -1} onclick={() => home.updateBoxConfig(viewId, box.id, { days: d })}>{d}d</button>
+        <button class:on={d === days} role="radio" aria-checked={d === days} tabindex={d === days ? 0 : -1} onkeydown={radioKey} onclick={() => home.updateBoxConfig(viewId, box.id, { days: d })}>{d}d</button>
       {/each}
     </div>
   </div>

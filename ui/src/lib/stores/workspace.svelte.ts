@@ -2,7 +2,7 @@
 
 import { api, getToken } from '../api/client';
 import { plural } from '../plural';
-import { listActiveWorkflowRuns } from '../api/workflows';
+import { workflowRuns, type WorkflowRunEvent } from './workflowRuns.svelte';
 import { router } from '../router.svelte';
 import type {
   ActiveWorkflowRun,
@@ -15,6 +15,7 @@ import type {
   Session,
   SessionStatus,
   Workspace,
+  WorkspaceSettings,
   WorkspaceWithRole,
 } from '../api/types';
 import { toasts } from '../toast.svelte';
@@ -30,6 +31,7 @@ import { applyStatusPatches, canDropExited, patchSessionIn, staleStatusIds, type
 import { bucketSessions, idChunks, isForeground, isShownKind, shownListQuery } from './sessionBuckets';
 import { whenIdle } from '../lazy-component.svelte';
 import { toastError } from '../toastError';
+import { loadErrorText } from '../loadError';
 import { flaggedIds, forget, mergeAttention, noticeIsNew, parseAttention, raise, see, serializeAttention, type Attention } from '../attention';
 
 /** Persisted raise/seen times behind the "needs you" flag (lib/attention.ts). */
@@ -146,10 +148,11 @@ class WorkspaceStore {
   private statusFlushRaf: number | null = null;
   private statusFlushTimer: ReturnType<typeof setTimeout> | null = null;
 
-  /** In-flight workflow runs (pending|running) in the current workspace, for the
-   *  "Running" sidebar list + the Workflows nav count chip. Refreshed on each
-   *  `workflow_run_updated` WS event and on workspace switch. */
-  activeWorkflowRuns: ActiveWorkflowRun[] = $state([]);
+  /** In-flight workflow runs of the current workspace. Owned by the
+   *  `workflowRuns` store; this delegate keeps existing callers working. */
+  get activeWorkflowRuns(): ActiveWorkflowRun[] {
+    return workflowRuns.list;
+  }
 
   /** view mode for Agent Mode: tabbed (one at a time), tiled (grid), or the
    *  Mission Control work-queue surface. */
@@ -272,9 +275,6 @@ class WorkspaceStore {
   /** Foreground agent sessions of the hidden scratch workspace — the sidebar
    *  "No workspace" group. Present in every workspace and with none. */
   scratchSessions: Session[] = $derived(this.buckets.scratch);
-
-  /** Active connection sessions (ssh/db/custom) — sidebar "Connections" group. */
-  connectionSessions: Session[] = $derived(this.buckets.connection);
 
   // ── All-workspaces sidebar view ────────────────────────────────────────────
 
@@ -465,57 +465,16 @@ class WorkspaceStore {
     this.setAttention(mergeAttention(this.attention, parseAttention(lsGet(LS_ATTENTION))), 'none');
   }
 
-  /** Reload the in-flight workflow runs for the current workspace. Cheap query;
-   *  called on workspace switch and on every `workflow_run_updated` WS event so
-   *  the "Running" sidebar list + nav count stay live without per-page polling. */
-  async refreshActiveWorkflowRuns(): Promise<void> {
-    const wsId = this.currentId;
-    if (!wsId) {
-      this.activeWorkflowRuns = [];
-      return;
-    }
-    try {
-      const runs = await listActiveWorkflowRuns(wsId);
-      // Guard against an out-of-order response after a workspace switch.
-      if (this.currentId === wsId) this.activeWorkflowRuns = runs;
-    } catch {
-      /* transient; the next event re-fetches */
-    }
+  /** Reload the current workspace's in-flight workflow runs (delegates to
+   *  the `workflowRuns` store). */
+  refreshActiveWorkflowRuns(): Promise<void> {
+    return workflowRuns.refresh(this.currentId);
   }
 
-  /** Apply a `workflow_run_updated` WS event to the "Running" sidebar list IN
-   *  PLACE: update a known run's status/progress/approval flag, drop it on a
-   *  terminal status, and fall back to a full refetch only for runs the list
-   *  doesn't know yet (or events from an older daemon without progress fields,
-   *  signalled by `nodes_total` 0/absent). */
-  applyWorkflowRunEvent(ev: {
-    workspace_id: Id;
-    run_id: Id;
-    status: string;
-    nodes_done?: number;
-    nodes_total?: number;
-    waiting_approval?: boolean;
-  }): void {
-    if (ev.workspace_id !== this.currentId) return;
-    const terminal = ev.status === 'success' || ev.status === 'error' || ev.status === 'canceled';
-    const idx = this.activeWorkflowRuns.findIndex((r) => r.run_id === ev.run_id);
-    if (terminal) {
-      if (idx >= 0) this.activeWorkflowRuns.splice(idx, 1);
-      return;
-    }
-    if (idx < 0) {
-      // A run the list doesn't know yet (started elsewhere) — one full refetch
-      // brings it in with its workflow name.
-      void this.refreshActiveWorkflowRuns();
-      return;
-    }
-    const r = this.activeWorkflowRuns[idx];
-    r.status = ev.status as ActiveWorkflowRun['status'];
-    if (ev.nodes_total && ev.nodes_total > 0) {
-      r.nodes_done = ev.nodes_done ?? r.nodes_done;
-      r.nodes_total = ev.nodes_total;
-    }
-    if (ev.waiting_approval !== undefined) r.waiting_approval = ev.waiting_approval;
+  /** Apply a `workflow_run_updated` WS event to the "Running" list (delegates
+   *  to the `workflowRuns` store). */
+  applyWorkflowRunEvent(ev: WorkflowRunEvent): void {
+    workflowRuns.apply(ev, this.currentId);
   }
 
   /** Lower a session's flag: the operator entered / focused it or sent it
@@ -558,7 +517,7 @@ class WorkspaceStore {
       this.scratch = null;
       this.sessions = [];
       this.otherWsSessions = [];
-      this.activeWorkflowRuns = [];
+      workflowRuns.clear();
       this.resetArchived();
     }
     const selection = this.selectionGeneration;
@@ -656,6 +615,10 @@ class WorkspaceStore {
       this.sessions = [];
       this.otherWsSessions = [];
       this.openTabs = [];
+      // The previous workspace's runs must not show under this one while its
+      // sessions load (or forever, if that load fails); a late refresh for
+      // the old id is dropped against this new target.
+      workflowRuns.clear(id);
     }
     const generation = ++this.selectionGeneration;
     this.currentId = id;
@@ -700,7 +663,7 @@ class WorkspaceStore {
     const generation = ++this.selectionGeneration;
     this.currentId = null;
     this.resetArchived();
-    this.activeWorkflowRuns = [];
+    workflowRuns.clear();
     this.otherWsSessions = [];
     this.tabsKey = SCRATCH_WORKSPACE_ID;
     this.bindTabsKey(SCRATCH_WORKSPACE_ID);
@@ -967,6 +930,11 @@ class WorkspaceStore {
       const boot =
         this.bootSessions && this.bootSessions.key === `${getToken()}|${wsId}|${q}` ? this.bootSessions : null;
       if (boot) this.bootSessions = null;
+      // Ids whose `?ids=` chunk FAILED. A failed chunk (timeout, 5xx, the
+      // daemon going down mid-resync) says nothing about those sessions, and
+      // reading it as "gone" closed the user's tabs and panes for good
+      // (error-handling-3-03) — so reconcile never prunes them.
+      const unknown = new Set<Id>();
       const [own, scratch, pinned] = await Promise.all([
         boot ? boot.own : wsId ? api.get<Session[]>(`/workspaces/${wsId}/sessions${q}`) : Promise.resolve([]),
         boot
@@ -976,7 +944,10 @@ class WorkspaceStore {
           idChunks(this.pinnedIds()).map((chunk) =>
             api
               .get<Session[]>(`/sessions?ids=${chunk.map(encodeURIComponent).join(',')}`)
-              .catch(() => [] as Session[]),
+              .catch(() => {
+                for (const id of chunk) unknown.add(id);
+                return [] as Session[];
+              }),
           ),
         ).then((pages) => pages.flat()),
       ]);
@@ -985,7 +956,9 @@ class WorkspaceStore {
       const all: Session[] = [];
       // Fetch-by-id rows span every workspace (`GET /sessions`): keep this
       // one's + scratch's.
-      for (const s of [...own, ...scratch, ...pinned.filter((p) => this.belongsHere(p.workspace_id))]) {
+      // A row whose by-id fetch failed keeps its last known copy.
+      const kept = this.sessions.filter((s) => unknown.has(s.id));
+      for (const s of [...own, ...scratch, ...pinned.filter((p) => this.belongsHere(p.workspace_id)), ...kept]) {
         if (seen.has(s.id)) continue;
         seen.add(s.id);
         all.push(s);
@@ -1023,9 +996,9 @@ class WorkspaceStore {
       this.sessions = next;
       for (const s of next) this.statusMap[s.id] = s.status;
       this.pruneStatusMap();
-      if (opts.reconcile !== false) this.reconcileTabs();
+      if (opts.reconcile !== false) this.reconcileTabs(unknown);
     } catch (e) {
-      if (current()) this.sessionsError = e instanceof Error ? e.message : String(e);
+      if (current()) this.sessionsError = loadErrorText(e);
     } finally {
       if (current()) this.sessionsLoading = false;
     }
@@ -1034,10 +1007,11 @@ class WorkspaceStore {
   /** Drop tabs/panes that reference a session no longer present (a "phantom"
    *  tab left behind when a session ends or is reaped server-side without a
    *  `session_removed` event reaching this client). Keeps the DB-Explorer
-   *  sentinel pane, which has no session row. */
-  private reconcileTabs(): void {
+   *  sentinel pane, which has no session row. Ids in `unknown` (their by-id
+   *  fetch failed this refresh) are kept: absence there is not evidence. */
+  private reconcileTabs(unknown: ReadonlySet<Id> = new Set()): void {
     const exists = (t: Id): boolean =>
-      t === DB_PANE_ID || this.sessionById.has(t);
+      t === DB_PANE_ID || this.sessionById.has(t) || unknown.has(t);
     const tabs = this.openTabs.filter(exists);
     if (tabs.length !== this.openTabs.length) {
       this.openTabs = tabs;
@@ -1176,22 +1150,6 @@ class WorkspaceStore {
     }
     this.statusMap[s.id] = s.status;
     if (this.belongsHere(s.workspace_id)) this.navigateToSession(s.id);
-  }
-
-  /**
-   * Register a freshly created session and place it **beside** the current
-   * pane(s) (a new split pane) rather than replacing the active tab — used to
-   * attach an opened connection terminal next to an agent. Mirrors `addSession`'s
-   * bookkeeping but routes the open through `openInSplit`. Returns `false` when
-   * the 1–4 pane cap was hit (caller can toast).
-   */
-  addSessionInSplit(s: Session): boolean {
-    if (this.belongsHere(s.workspace_id) && !this.sessionById.has(s.id)) {
-      this.sessions = [...this.sessions, s];
-    }
-    this.statusMap[s.id] = s.status;
-    if (!this.belongsHere(s.workspace_id)) return false;
-    return this.openInSplit(s.id);
   }
 
   /** Where a new session goes: the hidden scratch workspace when asked for a
@@ -1635,12 +1593,6 @@ class WorkspaceStore {
     this.persistPanes();
     this.maximizedId = null;
     this.setViewMode('tiled');
-  }
-
-  /** Whether the UI is currently focused on a single session (tabbed view, or
-   *  a maximized tile) — the right panel only shows in this case. */
-  get singleSessionView(): boolean {
-    return this.viewMode === 'tabs' || this.maximizedId !== null;
   }
 
   toggleMaximize(id: Id): void {
@@ -2129,25 +2081,13 @@ class WorkspaceStore {
     this.sessions = this.sessions.map((x) => (x.id === sessionId ? s : x));
   }
 
-  /** Update extra_dirs for an agent session, then restart it so the new dirs take effect. */
-  async setSessionDirs(sessionId: Id, dirs: string[]): Promise<void> {
-    const patched = await api.patch<Session>(`/sessions/${sessionId}`, {
-      meta: { extra_dirs: dirs },
-    });
-    this.sessions = this.sessions.map((x) => (x.id === sessionId ? patched : x));
-    const restarted = await api.post<Session>(`/sessions/${sessionId}/restart`);
-    this.sessions = this.sessions.map((x) => (x.id === sessionId ? restarted : x));
-    this.statusMap[sessionId] = restarted.status;
-    // The PTY was respawned: bump the nonce so the mounted terminal reconnects
-    // (restartSession does the same) instead of staring at the dead socket.
-    this.restartNonces[sessionId] = (this.restartNonces[sessionId] ?? 0) + 1;
-  }
+
 
   private settingsWrites = new Map<Id, Promise<void>>();
 
   /** Atomic key patches preserve other windows' settings. Serialize this
    *  document's writes so a delayed response cannot roll its cache backward. */
-  private patchSettings(wsId: Id, patch: Record<string, unknown>): Promise<void> {
+  patchSettings(wsId: Id, patch: Partial<WorkspaceSettings>): Promise<void> {
     const token = getToken();
     const previous = this.settingsWrites.get(wsId) ?? Promise.resolve();
     const write = previous.catch(() => {}).then(async () => {
@@ -2166,54 +2106,6 @@ class WorkspaceStore {
   async saveNotes(notes: string, wsId: Id | null = this.currentId): Promise<void> {
     if (!wsId) return;
     await this.patchSettings(wsId, { notes });
-  }
-
-  /** API-client opt-in: allow requests to localhost/private networks from this
-   *  workspace. Reads `settings.api_client.allow_local` (off by default). */
-  get apiAllowLocal(): boolean {
-    const api = this.current?.settings?.api_client as { allow_local?: boolean } | undefined;
-    return api?.allow_local === true;
-  }
-
-  /** Toggle the API client's local/private-target opt-in (admin-gated by the
-   *  workspaces PATCH route). Shallow-merges into the settings JSON. */
-  async setApiAllowLocal(allow: boolean): Promise<void> {
-    if (!this.currentId || !this.current) return;
-    await this.patchSettings(this.currentId, { api_client: { allow_local: allow } });
-  }
-
-  /** API-client history retention for this workspace (the daemon trims after
-   *  every run): `settings.api_client.history_max_rows` / `history_max_days`,
-   *  default 0 / 0 = keep everything (opt-in); 0 disables that limit. */
-  get apiHistoryRetention(): { rows: number; days: number } {
-    const api = this.current?.settings?.api_client as
-      | { history_max_rows?: number; history_max_days?: number }
-      | undefined;
-    const pick = (v: unknown, fallback: number): number =>
-      typeof v === 'number' && Number.isInteger(v) && v >= 0 ? v : fallback;
-    // 0 = no limit: retention is opt-in (pruning deletes recorded runs).
-    return { rows: pick(api?.history_max_rows, 0), days: pick(api?.history_max_days, 0) };
-  }
-
-  /** Set the API-client history retention (admin-gated by the workspaces
-   *  PATCH route). Shallow-merges into the settings JSON. */
-  async setApiHistoryRetention(rows: number, days: number): Promise<void> {
-    if (!this.currentId || !this.current) return;
-    await this.patchSettings(this.currentId, { api_client: { history_max_rows: rows, history_max_days: days } });
-  }
-
-  /** Newest finished automation runs kept per automation
-   *  (`settings.api_client.automation_runs_keep`; 0 = keep all, the opt-in
-   *  default). */
-  get apiRunsKeep(): number {
-    const v = (this.current?.settings?.api_client as { automation_runs_keep?: unknown } | undefined)?.automation_runs_keep;
-    return typeof v === 'number' && Number.isInteger(v) && v >= 0 ? v : 0;
-  }
-
-  /** Set the run-history retention (same admin-gated PATCH, shallow merge). */
-  async setApiRunsKeep(keep: number): Promise<void> {
-    if (!this.currentId || !this.current) return;
-    await this.patchSettings(this.currentId, { api_client: { automation_runs_keep: keep } });
   }
 
   /** Set this workspace's default agent CLI. '' clears it (use the global

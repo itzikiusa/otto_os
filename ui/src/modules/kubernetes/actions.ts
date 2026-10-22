@@ -92,7 +92,8 @@ export async function typedConfirm(
   );
   if (typed === null) return false;
   if (typed !== name) {
-    toasts.warn('Name did not match', 'Nothing was changed.');
+    // Same wording as every other typed gate (confirmProd, the database gate).
+    toasts.info('Nothing was changed', 'What you typed didn’t match, so the action was canceled.');
     return false;
   }
   return true;

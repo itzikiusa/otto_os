@@ -37,6 +37,11 @@ class ConfirmStore {
   inputValue = $state('');
   placeholder = $state('');
   browseFolder = $state(false);
+  /** Prompt-mode field check (components.md "Validation is inline"): the
+   *  message shown under the input, or null when the value is acceptable. */
+  validate: ((v: string) => string | null) | null = null;
+  /** The current inline field error — set on a rejected OK, cleared on edit. */
+  inputError = $state('');
   // Choice mode: N labeled buttons + an optional "remember" checkbox.
   choices: ChoiceOption[] | null = $state(null);
   checkboxLabel = $state('');
@@ -67,6 +72,8 @@ class ConfirmStore {
    * the user cancels or leaves it empty. `danger` paints the confirm button
    * red — for typed-name confirms of destructive actions (delete a topic,
    * purge a queue, a prod write), which are the most dangerous dialogs of all.
+   * `validate` checks the trimmed value on OK: a returned message is shown
+   * INLINE under the field and the dialog stays open (never a toast).
    */
   promptText(
     message: string,
@@ -77,6 +84,7 @@ class ConfirmStore {
       placeholder?: string;
       browseFolder?: boolean;
       danger?: boolean;
+      validate?: (v: string) => string | null;
     },
   ): Promise<string | null> {
     this.supersede();
@@ -90,6 +98,8 @@ class ConfirmStore {
     this.inputValue = opts?.initial ?? '';
     this.placeholder = opts?.placeholder ?? '';
     this.browseFolder = opts?.browseFolder ?? false;
+    this.validate = opts?.validate ?? null;
+    this.inputError = '';
     this.open = true;
     return new Promise<string | null>((resolve) => {
       this.resolver = resolve as (v: boolean | string | null) => void;
@@ -140,6 +150,15 @@ class ConfirmStore {
   /** Prompt-mode OK — resolve the trimmed input (null when empty). */
   submit(): void {
     const v = this.inputValue.trim();
+    if (v && this.validate) {
+      const err = this.validate(v);
+      if (err) {
+        this.inputError = err;
+        return;
+      }
+    }
+    this.inputError = '';
+    this.validate = null;
     this.open = false;
     const r = this.resolver;
     this.resolver = null;
@@ -164,6 +183,8 @@ class ConfirmStore {
       return;
     }
     const wasPrompt = this.isPrompt;
+    this.inputError = '';
+    this.validate = null;
     this.open = false;
     const r = this.resolver;
     this.resolver = null;

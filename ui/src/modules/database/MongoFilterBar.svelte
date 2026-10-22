@@ -7,6 +7,7 @@
   // statement is a single `find` the splicer can rewrite (`applyMongoFilterObject`).
   import Icon from '../../lib/components/Icon.svelte';
   import { toasts } from '../../lib/toast.svelte';
+  import { radioKey } from '../../lib/radioKey';
   import { applyMongoFilterObject, type FilterMode } from './query-filter';
 
   interface Props {
@@ -92,8 +93,8 @@
       aria-label="Mongo filter object"
     />
     <div class="mfb-mode" role="radiogroup" aria-label="Filter mode">
-      <button class="mfb-seg" class:on={mode === 'set'} role="radio" aria-checked={mode === 'set'} onclick={() => (mode = 'set')} title="Replace the current filter">Replace</button>
-      <button class="mfb-seg" class:on={mode === 'and'} role="radio" aria-checked={mode === 'and'} onclick={() => (mode = 'and')} title="Merge into the current filter">AND</button>
+      <button class="mfb-seg" class:on={mode === 'set'} role="radio" aria-checked={mode === 'set'} tabindex={mode === 'set' ? 0 : -1} onkeydown={radioKey} onclick={() => (mode = 'set')} title="Replace the current filter">Replace</button>
+      <button class="mfb-seg" class:on={mode === 'and'} role="radio" aria-checked={mode === 'and'} tabindex={mode === 'and' ? 0 : -1} onkeydown={radioKey} onclick={() => (mode = 'and')} title="Merge into the current filter">AND</button>
     </div>
     <button class="mfb-run" onclick={submit} title="Rewrite the find() filter and run (Enter)"><Icon name="play" size={12} />Run</button>
     {#if chips.length > 0}

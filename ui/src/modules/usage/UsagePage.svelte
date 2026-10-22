@@ -20,7 +20,7 @@
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   import { toasts } from '../../lib/toast.svelte';
-  import { formatBytes, formatCount } from '../../lib/metric-format';
+  import { formatBytes, formatCount, formatUsd } from '../../lib/metric-format';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
@@ -42,6 +42,8 @@
   /** Overview dashboard vs the ccusage-style report tables. */
   let view = $state<'overview' | 'report' | 'otto'>('overview');
   const ottoUsage = () => import('./OttoUsage.svelte');
+  /** Bumped by the Otto-usage Retry: re-keys the block for a fresh import(). */
+  let ottoLoad = $state(0);
   let telemetryDirty = $state(false);
   async function selectView(next: typeof view): Promise<void> {
     if (next === view) return;
@@ -286,11 +288,6 @@
   function plural(n: number, one: string, many = one + 's'): string {
     return `${formatCount(n)} ${pluralNoun(n, one, many)}`;
   }
-  function fmtCost(n: number): string {
-    if (n === 0) return '$0';
-    if (n < 0.01) return '<$0.01';
-    return '$' + n.toFixed(n < 100 ? 2 : 0);
-  }
   const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
   function shortDay(iso: string): string {
     // "2026-06-16" → "Jun 16" (a bare "06-16" reads as either order).
@@ -490,7 +487,17 @@
 
   <PageBody>
     {#if view === 'otto' && admin}
-      {#await ottoUsage()}<LoadState what="Otto usage" loading empty />{:then module}<module.default bind:dirty={telemetryDirty} />{:catch e}<LoadState what="Otto usage" error={e instanceof Error ? e.message : 'Could not load Otto usage'} empty onretry={() => (view = 'overview')} />{/await}
+      <!-- A failed chunk load (usually Otto updated in the background) gets the
+           shell's wording: Retry re-runs the import (the key bump makes a fresh
+           import() promise), Reload Otto picks up the new build, and going
+           back is its own honestly labelled action. -->
+      {#key ottoLoad}
+        {#await ottoUsage()}<LoadState what="Otto usage" loading empty />{:then module}<module.default bind:dirty={telemetryDirty} />{:catch}
+          <LoadState what="Otto usage" error="Otto may have been updated in the background. Retry, or reload Otto to pick up the new version." empty onretry={() => ottoLoad++}>
+            {#snippet errorActions()}<button class="btn" onclick={() => location.reload()}>Reload Otto</button><button class="btn" onclick={() => void selectView('overview')}>Back to overview</button>{/snippet}
+          </LoadState>
+        {/await}
+      {/key}
     {:else}
     <!-- What the numbers cover: who, how far back, how fresh. In the page body,
          not the header, so the header keeps to tabs + Refresh / Export / settings. -->
@@ -532,6 +539,17 @@
       </div>
     {/if}
 
+    <!-- Ingestion health (PC-2): a retrying or stopped tailer means the totals
+         below are going stale; say so, with the cause, instead of nothing. -->
+    {#if usage.status?.tailer && usage.status.tailer.state !== 'running'}
+      <div class="budget-banner tailer-banner" role="status">
+        <Icon name="warning" size={14} />
+        <span>
+          Usage isn’t being recorded{usage.status.tailer.state === 'retrying' ? ' — Otto is retrying' : ''}: {usage.status.tailer.cause ?? 'the usage journal is unavailable'}{usage.status.tailer.state === 'stopped' ? '. Restart Otto after fixing it.' : '.'}
+        </span>
+      </div>
+    {/if}
+
     <!-- Live budget banner (driven by the BudgetExceeded WS event).
          Dismissible; clears automatically on a "recovered" event. -->
     {#if budgetAlert}
@@ -540,12 +558,12 @@
         {#if budgetAlert.direction === 'recovered'}
           <span>
             Back under budget: <strong>{budgetAlert.provider || 'workspace'}</strong>
-            spend ({fmtCost(budgetAlert.spendUsd)}) is below its {fmtCost(budgetAlert.capUsd)} cap.
+            spend ({formatUsd(budgetAlert.spendUsd)}) is below its {formatUsd(budgetAlert.capUsd)} cap.
           </span>
         {:else}
           <span>
             Over budget: <strong>{budgetAlert.provider || 'workspace'}</strong>
-            spent {fmtCost(budgetAlert.spendUsd)} of its {fmtCost(budgetAlert.capUsd)} cap.
+            spent {formatUsd(budgetAlert.spendUsd)} of its {formatUsd(budgetAlert.capUsd)} cap.
           </span>
         {/if}
         <button class="icon-btn" onclick={dismissBudgetAlert} title="Dismiss" aria-label="Dismiss budget alert"><Icon name="x" size={14} /></button>
@@ -722,7 +740,7 @@
                 {/each}
               </div>
               <span class="stat-sub" title="Estimated at published list prices">
-                ≈ {fmtCost(usage.summary.total_cost_usd)} in the last {usage.summary.days} days
+                ≈ {formatUsd(usage.summary.total_cost_usd)} in the last {usage.summary.days} days
                 <!-- Projected cost of the next agent run on the most-used
                      provider (hidden when there's no history to base it on). -->
                 {#if usage.summary.providers.length > 0}
@@ -810,7 +828,7 @@
                         </div>
                       </div>
                       <span class="bar-val" title="{p.total_tokens.toLocaleString()} tokens">{fmtNum(p.total_tokens)}</span>
-                      <span class="bar-cost dim">{fmtCost(p.cost_usd)}</span>
+                      <span class="bar-cost dim">{formatUsd(p.cost_usd)}</span>
                     </div>
                   {/each}
                 </div>
@@ -882,7 +900,7 @@
                       class="bar-hit"
                       role="button"
                       tabindex={selectedDaily?.day === d.day ? 0 : -1}
-                      aria-label="{d.day}: {d.total_tokens.toLocaleString()} tokens, {fmtCost(d.cost_usd)}"
+                      aria-label="{d.day}: {d.total_tokens.toLocaleString()} tokens, {formatUsd(d.cost_usd)}"
                       aria-pressed={selectedDaily?.day === d.day}
                       onclick={() => (selectedDailyKey = d.day)}
                       onfocus={() => (selectedDailyKey = d.day)}
@@ -892,7 +910,7 @@
                       width={barW}
                       height={SVG_H - AXIS_B}
                     >
-                      <title>{shortDay(d.day)} · {d.total_tokens.toLocaleString()} tokens (≈ {fmtCost(d.cost_usd)}) · {breakdownTitle(d)}</title>
+                      <title>{shortDay(d.day)} · {d.total_tokens.toLocaleString()} tokens (≈ {formatUsd(d.cost_usd)}) · {breakdownTitle(d)}</title>
                     </rect>
 
                     <!-- x-axis label (thinned) -->
@@ -915,7 +933,7 @@
                     <label>Day <select class="input" aria-label="Daily tokens day" value={selectedDaily.day} onchange={(event) => (selectedDailyKey = event.currentTarget.value)}>
                       {#each days as d (d.day)}<option value={d.day}>{d.day}</option>{/each}
                     </select></label>
-                    <p role="status">{selectedDaily.day} · {selectedDaily.total_tokens.toLocaleString()} tokens · ≈ {fmtCost(selectedDaily.cost_usd)} · {breakdownTitle(selectedDaily)}</p>
+                    <p role="status">{selectedDaily.day} · {selectedDaily.total_tokens.toLocaleString()} tokens · ≈ {formatUsd(selectedDaily.cost_usd)} · {breakdownTitle(selectedDaily)}</p>
                   </div>
                 {/if}
               {:else}
@@ -956,7 +974,7 @@
                       </div>
                     </div>
                     <span class="bar-val" title="{f.total_tokens.toLocaleString()} tokens">{fmtNum(f.total_tokens)}</span>
-                    <span class="bar-cost dim">{fmtCost(f.cost_usd)}</span>
+                    <span class="bar-cost dim">{formatUsd(f.cost_usd)}</span>
                   </div>
                 {/each}
               </div>
@@ -1012,11 +1030,11 @@
                     <div
                       class="bar-fill"
                       style="width: {Math.min(100, r.used_fraction * 100)}%"
-                      title="{fmtCost(r.spent_usd)} of {fmtCost(r.limit_usd)}"
+                      title="{formatUsd(r.spent_usd)} of {formatUsd(r.limit_usd)}"
                     ></div>
                   </div>
                   <span class="budget-val">
-                    {fmtCost(r.spent_usd)} / {fmtCost(r.limit_usd)}
+                    {formatUsd(r.spent_usd)} / {formatUsd(r.limit_usd)}
                     {#if r.exceeded}<span class="over-tag">Over</span>
                     {:else if r.warning}<span class="warn-tag">{(r.used_fraction * 100).toFixed(0)}%</span>{/if}
                   </span>
@@ -1038,7 +1056,7 @@
                 <p class="dim small heads-up">
                   {r.scope === 'workspace' ? wsName(r.key) : (r.label ?? r.key)}
                   is at {(r.used_fraction * 100).toFixed(0)}% of its cap
-                  ({fmtCost(r.spent_usd)} of {fmtCost(r.limit_usd)}).
+                  ({formatUsd(r.spent_usd)} of {formatUsd(r.limit_usd)}).
                 </p>
               {/each}
             {/if}
@@ -1292,7 +1310,7 @@
                         </div>
                       </div>
                       <div class="num" title={s.fallback_priced ? 'Estimated: this model isn’t in the rate table, so it is priced at the Opus tier' : undefined}>
-                        {fmtCost(s.cost_usd)}
+                        {formatUsd(s.cost_usd)}
                         {#if s.fallback_priced}<span class="est-tag"><Badge tone="warn" label="Est." /></span>{/if}
                       </div>
                       <div class="dim">{fmtLastActive(s.last_active)}</div>
@@ -1873,6 +1891,13 @@
   .budget-banner > :global(svg:first-child) {
     color: var(--danger);
     flex-shrink: 0;
+  }
+  .tailer-banner {
+    background: var(--warning-soft);
+    border-color: color-mix(in srgb, var(--warning) 40%, transparent);
+  }
+  .tailer-banner > :global(svg:first-child) {
+    color: var(--warning);
   }
   .budget-banner.recovered {
     background: var(--success-soft);

@@ -553,10 +553,6 @@ pub fn build_reconcile_prompt(open_questions: &[ProductQuestion], new_comments_m
     prompt
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 /// Pre-trust the untrusted runner's stable scratch root for claude ONCE
 /// (S4-305): claude's folder-trust check walks parents, and the Seatbelt
 /// posture denies claude's own trust write to `~/.claude.json`, so an
@@ -568,6 +564,10 @@ fn pretrust_untrusted_root() {
         otto_sessions::trust::ensure_trusted("claude", &root.to_string_lossy());
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

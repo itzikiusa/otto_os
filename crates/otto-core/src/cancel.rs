@@ -6,6 +6,14 @@
 //! ([`CancelRegistryExt`]) — they used to be re-implemented in six engines
 //! with diverging semantics (some removed a newer retry's flag on exit, one
 //! panicked on a poisoned lock), so a fix landed in one copy and not the rest.
+//!
+//! This is the registry for a run whose loop POLLS a flag between steps.
+//! Its sibling [`crate::cancel_signal::RunCancels`] maps run ids to a
+//! wakeable [`crate::cancel_signal::CancelSignal`] instead: use that one when
+//! the run sleeps or awaits (a scheduler scan, a scheduled-task or personal
+//! agent run) and Cancel must wake it at once; use this one when the run
+//! already checks an `AtomicBool` each iteration (skill evals, swarm runs,
+//! product analysis, reviews).
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};

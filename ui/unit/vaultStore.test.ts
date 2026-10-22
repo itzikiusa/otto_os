@@ -6,6 +6,7 @@ import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
 import { deferred } from './sourceHarness.ts';
 import { strictRequire, unused } from './strictRequire.ts';
+import * as loadError from '../src/lib/loadError.ts';
 
 // Execute the actual store methods; the harness supplies only transport and
 // browser globals. State proxies are immaterial to these transition tests.
@@ -34,7 +35,7 @@ function setup(overrides: Record<string, unknown> = {}) {
       ['/workspace.svelte', {ws: {current: {id: 'ws'}}}],
       ['/toast.svelte', {toasts: {error() {}, success() {}, warn(t: string) { warned.push(t); }}}],
       ['/storage', {lsGet: () => null, lsSet(k: string, v: string) { stored.push([k, v]); }, lsRemove() {}}],
-      ['/loadError', unused('/loadError')],
+      ['/loadError', loadError],
       ['/confirm.svelte', unused('/confirm.svelte')],
       ['/poll', unused('/poll')],
     ]),

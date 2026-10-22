@@ -891,9 +891,10 @@
   </fieldset>
 
   <!-- Test outcome: the full message (wrapping, selectable) plus what to fix.
-       The footer chip only summarises it. -->
+       The footer chip only summarises it — and the chip is the ONE live
+       region, so this panel is plain content (no second announcement). -->
   {#if testResult && (!testResult.ok || testResult.hint || testResult.warn)}
-    <div class="test-panel {testResult.ok ? 'ok' : 'err'}" bind:this={testPanel} role="status" aria-live="polite">
+    <div class="test-panel {testResult.ok ? 'ok' : 'err'}" bind:this={testPanel}>
       <div class="test-panel-head">
         <Icon name={testResult.ok ? 'check' : 'x'} size={12} />
         <span>{testResult.ok ? 'Connected' : 'Test failed'}</span>
@@ -905,11 +906,17 @@
   {/if}
 
   {#snippet footer()}
-    {#if testResult}
-      <span class="test-result {testResult.ok ? 'ok' : 'err'}" title={testResult.detail} role="status">
-        <Icon name={testResult.ok ? 'check' : 'x'} size={12} /> {testResult.ok ? testResult.detail : 'Test failed — see details above'}
-      </span>
-    {/if}
+    <!-- Always mounted: a live region inserted together with its text is
+         usually silent in VoiceOver/WebKit, so this one stays in the DOM and
+         its text changes in place (Testing… → Connected / Test failed: …). -->
+    <span class="test-result {testResult ? (testResult.ok ? 'ok' : 'err') : ''}" title={testResult?.detail} role="status">
+      {#if testing}
+        <span class="sr-only">Testing…</span>
+      {:else if testResult}
+        <Icon name={testResult.ok ? 'check' : 'x'} size={12} />
+        {#if testResult.ok}{testResult.detail}{:else}Test failed<span class="sr-only">: {testResult.detail}</span><span aria-hidden="true"> — see details above</span>{/if}
+      {/if}
+    </span>
     <button class="btn" onclick={onclose}>Cancel</button>
     {#if testableKinds.has(kind)}
       <button

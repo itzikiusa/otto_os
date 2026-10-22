@@ -5,7 +5,7 @@
 //! Only content-addressed work is cached: keys carry full commit ids (a
 //! `commit:` target or both ends of a range, resolved first), never a branch
 //! name or the worktree/index. PR diffs from a provider are not
-//! content-addressed, so they live in [`PR_DIFFS`] with a short TTL instead.
+//! content-addressed, so they live in [`pr_diffs`] with a short TTL instead.
 //!
 //! Cancellation: the in-flight map holds only a WEAK handle. When every
 //! request awaiting a computation is dropped (client aborted), the shared

@@ -220,6 +220,45 @@ impl ApiClientRepo {
         row_to_collection(&r)
     }
 
+    /// The workspace a collection belongs to, or `None` when no such row
+    /// exists. The `parent_id` / `collection_id` FKs only prove the id exists
+    /// in SOME workspace, so callers check this against their own workspace
+    /// before filing a row under it (data-integrity-2-05).
+    pub async fn collection_workspace(&self, id: &str) -> Result<Option<Id>> {
+        sqlx::query_scalar("SELECT workspace_id FROM api_collections WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(dberr("api collection workspace"))
+    }
+
+    /// Whether filing collection `id` under `new_parent` would create a cycle:
+    /// `new_parent` is `id` itself or one of its descendants (i.e. `id` is on
+    /// `new_parent`'s ancestor chain). A cycle detaches the subtree from every
+    /// root, so the UI tree never reaches it (data-integrity-2-05).
+    pub async fn collection_parent_would_cycle(&self, id: &str, new_parent: &str) -> Result<bool> {
+        if id == new_parent {
+            return Ok(true);
+        }
+        // Walk up from `new_parent`. `UNION` (not ALL) de-duplicates, so a
+        // cycle already in the data terminates the walk instead of looping.
+        let hit: Option<i64> = sqlx::query_scalar(
+            "WITH RECURSIVE up(id) AS (
+                SELECT ?
+                UNION
+                SELECT c.parent_id FROM api_collections c JOIN up ON c.id = up.id
+                 WHERE c.parent_id IS NOT NULL
+             )
+             SELECT 1 FROM up WHERE id = ? LIMIT 1",
+        )
+        .bind(new_parent)
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(dberr("api collection ancestry"))?;
+        Ok(hit.is_some())
+    }
+
     pub async fn create_collection(&self, c: NewApiCollection) -> Result<ApiCollection> {
         let id = new_id();
         let now = fmt(Utc::now());
@@ -245,22 +284,22 @@ impl ApiClientRepo {
         name: Option<&str>,
         parent_id: Option<Option<&str>>,
     ) -> Result<ApiCollection> {
-        if let Some(v) = name {
-            sqlx::query("UPDATE api_collections SET name = ? WHERE id = ?")
-                .bind(v)
-                .bind(id)
-                .execute(&self.pool)
-                .await
-                .map_err(dberr("update api collection"))?;
-        }
-        if let Some(v) = parent_id {
-            sqlx::query("UPDATE api_collections SET parent_id = ? WHERE id = ?")
-                .bind(v)
-                .bind(id)
-                .execute(&self.pool)
-                .await
-                .map_err(dberr("update api collection"))?;
-        }
+        // One statement (data-integrity-2-03): a rename + reparent lands
+        // together or not at all. `parent_id` is tri-state (absent / null /
+        // id), so it is a CASE on a "present" flag rather than a COALESCE.
+        sqlx::query(
+            "UPDATE api_collections SET
+                name = COALESCE(?, name),
+                parent_id = CASE WHEN ? THEN ? ELSE parent_id END
+             WHERE id = ?",
+        )
+        .bind(name)
+        .bind(parent_id.is_some())
+        .bind(parent_id.flatten())
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("update api collection"))?;
         self.get_collection(id).await
     }
 
@@ -515,30 +554,23 @@ impl ApiClientRepo {
         variables: Option<&serde_json::Value>,
         secret_keys: Option<&[String]>,
     ) -> Result<ApiEnvironment> {
-        if let Some(v) = name {
-            sqlx::query("UPDATE api_environments SET name = ? WHERE id = ?")
-                .bind(v)
-                .bind(id)
-                .execute(&self.pool)
-                .await
-                .map_err(dberr("update api environment"))?;
-        }
-        if let Some(v) = variables {
-            sqlx::query("UPDATE api_environments SET variables_json = ? WHERE id = ?")
-                .bind(v.to_string())
-                .bind(id)
-                .execute(&self.pool)
-                .await
-                .map_err(dberr("update api environment"))?;
-        }
-        if let Some(v) = secret_keys {
-            sqlx::query("UPDATE api_environments SET secret_keys_json = ? WHERE id = ?")
-                .bind(serde_json::to_string(v).unwrap_or_else(|_| "[]".into()))
-                .bind(id)
-                .execute(&self.pool)
-                .await
-                .map_err(dberr("update api environment"))?;
-        }
+        // One statement (data-integrity-2-03): a new variable and its secret
+        // marker commit together, so a failed write can't leave a stored
+        // value that isn't flagged secret.
+        sqlx::query(
+            "UPDATE api_environments SET
+                name = COALESCE(?, name),
+                variables_json = COALESCE(?, variables_json),
+                secret_keys_json = COALESCE(?, secret_keys_json)
+             WHERE id = ?",
+        )
+        .bind(name)
+        .bind(variables.map(|v| v.to_string()))
+        .bind(secret_keys.map(|v| serde_json::to_string(v).unwrap_or_else(|_| "[]".into())))
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("update api environment"))?;
         self.get_environment(id).await
     }
 
@@ -626,24 +658,23 @@ impl ApiClientRepo {
         steps: Option<&serde_json::Value>,
     ) -> Result<ApiAutomation> {
         let now = fmt(Utc::now());
-        if let Some(v) = name {
-            sqlx::query("UPDATE api_automations SET name = ?, updated_at = ? WHERE id = ?")
-                .bind(v)
-                .bind(&now)
-                .bind(id)
-                .execute(&self.pool)
-                .await
-                .map_err(dberr("update api automation"))?;
-        }
-        if let Some(v) = steps {
-            sqlx::query("UPDATE api_automations SET steps_json = ?, updated_at = ? WHERE id = ?")
-                .bind(v.to_string())
-                .bind(&now)
-                .bind(id)
-                .execute(&self.pool)
-                .await
-                .map_err(dberr("update api automation"))?;
-        }
+        // One statement (data-integrity-2-03); `updated_at` moves only when
+        // something was actually patched, as before.
+        sqlx::query(
+            "UPDATE api_automations SET
+                name = COALESCE(?, name),
+                steps_json = COALESCE(?, steps_json),
+                updated_at = CASE WHEN ? THEN ? ELSE updated_at END
+             WHERE id = ?",
+        )
+        .bind(name)
+        .bind(steps.map(|v| v.to_string()))
+        .bind(name.is_some() || steps.is_some())
+        .bind(&now)
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("update api automation"))?;
         self.get_automation(id).await
     }
 
@@ -867,8 +898,16 @@ impl ApiClientRepo {
     /// Returns the number of rows deleted.
     pub async fn prune_history(&self, ws: &Id, max_rows: i64, max_age_days: i64) -> Result<u64> {
         let mut deleted = 0u64;
-        if max_age_days > 0 {
-            let cutoff = fmt(Utc::now() - chrono::Duration::days(max_age_days));
+        // Checked math (backend-correctness-2-01): `Utc::now() - days(n)`
+        // panics for a huge "keep N days" (~95.7 M days reaches chrono's
+        // lower bound). A cutoff before the representable range means "no
+        // age limit", so the DELETE is skipped.
+        let cutoff = (max_age_days > 0)
+            .then(|| chrono::TimeDelta::try_days(max_age_days))
+            .flatten()
+            .and_then(|d| Utc::now().checked_sub_signed(d));
+        if let Some(cutoff) = cutoff {
+            let cutoff = fmt(cutoff);
             deleted +=
                 sqlx::query("DELETE FROM api_history WHERE workspace_id = ? AND executed_at < ?")
                     .bind(ws)
@@ -999,6 +1038,108 @@ mod tests {
         .await
         .unwrap();
         (pool, ws)
+    }
+
+    async fn mk_col(repo: &ApiClientRepo, ws: &Id, name: &str, parent: Option<&Id>) -> Id {
+        repo.create_collection(NewApiCollection {
+            workspace_id: ws.clone(),
+            name: name.into(),
+            parent_id: parent.cloned(),
+            position: 0,
+        })
+        .await
+        .unwrap()
+        .id
+    }
+
+    #[tokio::test]
+    async fn collection_parent_cycle_and_workspace_checks() {
+        let (pool, ws) = setup().await;
+        let repo = ApiClientRepo::new(pool);
+        let a = mk_col(&repo, &ws, "a", None).await;
+        let b = mk_col(&repo, &ws, "b", Some(&a)).await;
+        let c = mk_col(&repo, &ws, "c", Some(&b)).await;
+        let other = mk_col(&repo, &ws, "other", None).await;
+
+        // Self-parent and any descendant are cycles; a sibling root is not.
+        assert!(repo.collection_parent_would_cycle(&a, &a).await.unwrap());
+        assert!(repo.collection_parent_would_cycle(&a, &b).await.unwrap());
+        assert!(repo.collection_parent_would_cycle(&a, &c).await.unwrap());
+        assert!(!repo
+            .collection_parent_would_cycle(&a, &other)
+            .await
+            .unwrap());
+        // Moving a leaf under an ancestor's sibling is fine.
+        assert!(!repo.collection_parent_would_cycle(&c, &a).await.unwrap());
+
+        assert_eq!(
+            repo.collection_workspace(&a).await.unwrap(),
+            Some(ws.clone())
+        );
+        assert_eq!(repo.collection_workspace("missing").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn multi_field_patches_apply_together_and_keep_omitted_fields() {
+        let (pool, ws) = setup().await;
+        let repo = ApiClientRepo::new(pool);
+        let root = mk_col(&repo, &ws, "root", None).await;
+        let col = mk_col(&repo, &ws, "col", Some(&root)).await;
+
+        // Rename only: the parent survives. Reparent to null only: the name
+        // survives.
+        let c = repo
+            .update_collection(&col, Some("renamed"), None)
+            .await
+            .unwrap();
+        assert_eq!(c.name, "renamed");
+        assert_eq!(c.parent_id.as_deref(), Some(root.as_str()));
+        let c = repo
+            .update_collection(&col, None, Some(None))
+            .await
+            .unwrap();
+        assert_eq!(c.name, "renamed");
+        assert_eq!(c.parent_id, None);
+
+        let env = repo
+            .create_environment(NewApiEnvironment {
+                workspace_id: ws.clone(),
+                name: "dev".into(),
+                variables: jval!({"a": "1"}),
+                secret_keys: vec![],
+            })
+            .await
+            .unwrap();
+        let keys = vec!["token".to_string()];
+        let e = repo
+            .update_environment(
+                &env.id,
+                None,
+                Some(&jval!({"a":"1","token":"x"})),
+                Some(&keys),
+            )
+            .await
+            .unwrap();
+        assert_eq!(e.name, "dev");
+        assert_eq!(e.variables["token"], "x");
+        assert_eq!(e.secret_keys, keys);
+        let e = repo
+            .update_environment(&env.id, Some("prod"), None, None)
+            .await
+            .unwrap();
+        assert_eq!(e.name, "prod");
+        assert_eq!(e.variables["token"], "x");
+        assert_eq!(e.secret_keys, keys);
+    }
+
+    #[tokio::test]
+    async fn prune_history_with_huge_age_limit_does_not_panic() {
+        let (pool, ws) = setup().await;
+        let repo = ApiClientRepo::new(pool);
+        // ~273k years: past chrono's lower bound, so `now - days(n)` used to
+        // panic. It now means "no age limit" and deletes nothing.
+        assert_eq!(repo.prune_history(&ws, 0, 99_999_999).await.unwrap(), 0);
+        assert_eq!(repo.prune_history(&ws, 0, i64::MAX).await.unwrap(), 0);
     }
 
     #[tokio::test]

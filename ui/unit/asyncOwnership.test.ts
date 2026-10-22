@@ -25,7 +25,7 @@ function workspace(mayChangeWorkspace: () => boolean | Promise<boolean> = () => 
     const result = deferred<any[]>(); requests.push({ path, result }); return result.promise;
   } };
   const { ws } = loadSource(new URL('../src/lib/stores/workspace.svelte.ts', import.meta.url), {
-    '../api/client': { api }, '../api/workflows': { listActiveWorkflowRuns: async () => [] }, '../api/workspaces': { fetchWorkspace: async () => ({}) },
+    '../api/client': { api }, './workflowRuns.svelte': { workflowRuns: { list: [], refresh: async () => {}, apply() {}, clear() {} } }, '../api/workspaces': { fetchWorkspace: async () => ({}) },
     '../router.svelte': { router: { mayChangeWorkspace } }, '../toast.svelte': { toasts: {} }, '../toastError': { toastError: () => {} }, '../plural': { plural: (n: number, w: string) => `${n} ${w}` }, '../confirm.svelte': { confirmer: {} },
     './ui.svelte': { ui: { sessionIsolation: false }, clientId: () => 'test' },
     '../win': { winKey: (key: string) => key }, './splitLayout.svelte': { layout }, './splitLayout': { MAX_PANES: 15, LS_PANES: 'otto_panes_' },
@@ -57,7 +57,7 @@ function bootWorkspace(saved: string, list: { id: string }[], archivedIn: string
   } };
   const layout = { panes: [], focusedIndex: 0, bindKey() {}, restore() {}, retain() {} };
   const { ws } = loadSource(new URL('../src/lib/stores/workspace.svelte.ts', import.meta.url), {
-    '../api/client': { api, getToken: () => 'tok' }, '../api/workflows': { listActiveWorkflowRuns: async () => [] }, '../api/workspaces': { fetchWorkspace: async () => ({}) },
+    '../api/client': { api, getToken: () => 'tok' }, './workflowRuns.svelte': { workflowRuns: { list: [], refresh: async () => {}, apply() {}, clear() {} } }, '../api/workspaces': { fetchWorkspace: async () => ({}) },
     '../router.svelte': { router: {} }, '../toast.svelte': { toasts: {} }, '../toastError': { toastError: () => {} }, '../plural': { plural: (n: number, w: string) => `${n} ${w}` }, '../confirm.svelte': { confirmer: {} },
     './ui.svelte': { ui: { sessionIsolation: false }, clientId: () => 'test' },
     '../win': { winKey: (key: string) => key }, './splitLayout.svelte': { layout }, './splitLayout': { MAX_PANES: 15, LS_PANES: 'otto_panes_' },
