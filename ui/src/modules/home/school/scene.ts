@@ -12,17 +12,24 @@
 //    moves (screens, board title, door leaves, door signs) are per-instance.
 //  • Only the room you are in is built. The loop runs while the box is on
 //    screen and active, at ≤ 30 fps; the corridor renders on demand.
+//  • Light: daylight from the window wall (a low sun, soft shadows) plus warm
+//    ceiling lamps; the dark theme is evening — moonlight, lamps up, the
+//    window views dimmed. Rooms and the corridor have a ceiling.
+//  • State at a glance: a glowing pin over every kid whose session is
+//    working / needs you / failed / done (one InstancedMesh), a pulsing amber
+//    ring under each kid that needs you (another), and the monitor the camera
+//    is on repainted at 2× so its live terminal stays crisp up close.
 //  • Reduced motion: camera moves cut instead of flying; life.ts keeps
-//    everybody seated.
+//    everybody seated; pins and rings hold still.
 //  • `pixelRatio` ≤ 2; `dispose()` + `forceContextLoss()` on destroy; a lost
 //    context is reported so the host can offer Retry.
 
 import type * as THREE_NS from 'three';
 import type { GLTF } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { disposeActor, assetBase, loadSchoolAssets, type SchoolAssets } from './assets.ts';
-import { KIT_NODES, furnishCorridor, furnishRoom, type KitNode, type Placement } from './furnish.ts';
+import { CEIL_Y, KIT_NODES, ceilingLights, furnishCorridor, furnishRoom, type KitNode, type Placement } from './furnish.ts';
 import { HEAD_CLIPS, Life, ONCE_CLIPS, SIT_MS, STAND_MS, NOD_MS, SCOLD_MS, type ActorView } from './life.ts';
-import { CORRIDOR_HALF, ROOM_BACK_Z, roomSummary, toWorld, type Kid, type Room, type School } from './model.ts';
+import { BENCH_SLOTS, CORRIDOR_HALF, MAX_BACK, MAX_FRONT, ROOM_BACK_Z, roomSummary, toWorld, type Kid, type Pose, type Room, type School } from './model.ts';
 import { SCREEN_H, SCREEN_W, paintScreen, screenKey, type ScreenInfo } from './screens.ts';
 
 type Three = typeof THREE_NS;
@@ -41,10 +48,30 @@ export interface SchoolDebug {
   view: SchoolView;
   frames: number;
   missing: string[];
-  kids: { id: string; clip: string; mode: string; visible: boolean; x: number; z: number }[];
+  kids: { id: string; clip: string; mode: string; visible: boolean; x: number; z: number; pin: PinKind | null }[];
   head: { clip: string; mode: string; x: number; z: number; target: string | null } | null;
   camera: { x: number; y: number; z: number };
   screens: Record<string, string>;
+  /** Desk tag of the monitor painted at 2× (the selected / screen-view kid). */
+  hiRes: string | null;
+  /** Warm ceiling lamps lighting the open room. */
+  lamps: number;
+  /** Rooms and the corridor are closed by a ceiling. */
+  ceiling: boolean;
+}
+
+/** What the pin over a kid's head says (null = no pin: idle / away). */
+export type PinKind = 'working' | 'needs-you' | 'error' | 'done' | 'stale';
+export const PIN_COLORS: Record<PinKind, number> = {
+  working: 0x3fdc6e,
+  'needs-you': 0xffb020,
+  error: 0xff4d4d,
+  done: 0x5aa8ff,
+  stale: 0x9aa4b2,
+};
+export function pinFor(pose: Pose, detention: boolean): PinKind | null {
+  if (detention) return null;
+  return pose === 'working' || pose === 'needs-you' || pose === 'error' || pose === 'done' || pose === 'stale' ? pose : null;
 }
 
 export interface SchoolHandle {
@@ -106,6 +133,12 @@ export function webglAvailable(): boolean {
 
 /** Nodes the runtime paints or moves (never instanced). */
 const LIVE_CHILDREN = new Set(['Screen', 'BoardTitle', 'NamePlate', 'DoorSign', 'DoorLeaf']);
+/** Kit pieces that never cast shadows: walls / floors / doors would shut the
+ *  low window sun out of the room; the ceiling is a separate plane. */
+const NO_CAST = new Set(['Floor_Tile', 'Corridor_Floor', 'Wall', 'Wall_Window', 'Wall_Door', 'Corridor_Wall', 'Corridor_Door', 'Ceiling_Light', 'Board', 'Clock', 'Corkboard']);
+/** Pins / rings for every seat a room can hold. */
+const SEATS = MAX_FRONT + MAX_BACK + BENCH_SLOTS;
+const LAMPS = 4;
 const EYE = 1.62;
 const FPS_MS = 1000 / 30;
 const ease = (t: number) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
@@ -180,12 +213,15 @@ function build(
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = T.PCFShadowMap;
   // A software rasteriser (SwiftShader / llvmpipe — CI, VMs, no GPU) can't
-  // afford soft shadows at 2× pixels: drop both so the room stays live.
+  // afford soft shadows at 2× pixels: drop both so the room stays live (and
+  // light the room with half the lamps).
+  let software = false;
   try {
     const gl = renderer.getContext();
     const info = gl.getExtension('WEBGL_debug_renderer_info');
     const name = String(info ? gl.getParameter(info.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER));
     if (/swiftshader|llvmpipe|softpipe|software/i.test(name)) {
+      software = true;
       renderer.shadowMap.enabled = false;
       renderer.setPixelRatio(Math.min(1, displayScale));
     }
@@ -211,13 +247,59 @@ function build(
 
   const camera = new T.PerspectiveCamera(55, 1, 0.05, 200);
   const hemi = new T.HemisphereLight(0xdfefff, 0x8a7a66, 1.1);
+  // The sun comes in low through the window wall (west), so desks throw long
+  // soft shadows across the floor; the fill is the bounce off the far wall.
   const sun = new T.DirectionalLight(0xfff1dc, 2.4);
   sun.castShadow = true;
   sun.shadow.mapSize.set(2048, 2048);
   sun.shadow.bias = -0.0004;
   sun.shadow.normalBias = 0.02;
+  sun.shadow.radius = 3;
   const fill = new T.DirectionalLight(0xcfe3ff, 0.5);
   scene.add(hemi, sun, sun.target, fill, fill.target);
+  // Warm ceiling lamps: a fixed, always-visible set (a changing light count
+  // would recompile every shader). They hang under the open room's
+  // Ceiling_Light panels, or along the corridor's.
+  const lamps: THREE_NS.PointLight[] = [];
+  for (let i = 0; i < (software ? LAMPS / 2 : LAMPS); i++) {
+    const l = new T.PointLight(0xffd6a0, 0, 9, 2);
+    lamps.push(l);
+    scene.add(l);
+  }
+  function corridorLamps(): void {
+    lamps.forEach((l, i) => l.position.set(1 + i * 4 * (LAMPS / lamps.length), CEIL_Y - 0.45, 0));
+  }
+  corridorLamps();
+
+  // Ceilings: one plane per room / corridor, facing down (never casts).
+  const ceilGeo = new T.PlaneGeometry(1, 1);
+  ceilGeo.rotateX(Math.PI / 2);
+  const ceilMat = new T.MeshStandardMaterial({ color: 0xf2eee6, roughness: 0.95, metalness: 0 });
+  function ceiling(group: THREE_NS.Group, cx: number, cz: number, w: number, d: number): void {
+    const m = new T.Mesh(ceilGeo, ceilMat);
+    m.position.set(cx, CEIL_Y, cz);
+    m.scale.set(w, 1, d);
+    m.receiveShadow = false;
+    m.castShadow = false;
+    group.add(m);
+  }
+
+  // Theme-driven kit materials: lamp panels glow, window views dim at night.
+  const glowMats: { mat: THREE_NS.MeshStandardMaterial; kind: 'panel' | 'window'; color: THREE_NS.Color; emissive: THREE_NS.Color; intensity: number }[] = [];
+  {
+    const seen = new Set<THREE_NS.Material>();
+    for (const root of assets.kit.values())
+      root.traverse((o) => {
+        const mats = (o as THREE_NS.Mesh).material;
+        for (const m of Array.isArray(mats) ? mats : mats ? [mats] : []) {
+          if (seen.has(m)) continue;
+          seen.add(m);
+          const sm = m as THREE_NS.MeshStandardMaterial;
+          const kind = m.name === 'LightPanel' ? 'panel' : m.name === 'WindowView' ? 'window' : null;
+          if (kind && sm.emissive) glowMats.push({ mat: sm, kind, color: sm.color.clone(), emissive: sm.emissive.clone(), intensity: sm.emissiveIntensity });
+        }
+      });
+  }
 
   const corridorGroup = new T.Group();
   const roomGroup = new T.Group();
@@ -261,9 +343,11 @@ function build(
   }
 
   const tmpM = new T.Matrix4();
+  const tmpR = new T.Matrix4();
   const tmpQ = new T.Quaternion();
   const tmpV = new T.Vector3();
   const one = new T.Vector3(1, 1, 1);
+  const tmpS = new T.Vector3();
   const up = new T.Vector3(0, 1, 0);
   function placeMatrix(p: Placement, out = new T.Matrix4()): THREE_NS.Matrix4 {
     tmpQ.setFromAxisAngle(up, p.rotY);
@@ -286,7 +370,7 @@ function build(
       if (!d) continue;
       for (const md of d.meshes) {
         const im = new T.InstancedMesh(md.geometry, md.material, list.length);
-        im.castShadow = shadows && node !== 'Floor_Tile' && node !== 'Corridor_Floor';
+        im.castShadow = shadows && !NO_CAST.has(node);
         im.receiveShadow = shadows;
         im.frustumCulled = false;
         list.forEach((p, i) => {
@@ -371,6 +455,18 @@ function build(
     }
   }
 
+  // The one 2× monitor canvas (the focused kid's screen borrows it).
+  const hi = (() => {
+    const c = document.createElement('canvas');
+    c.width = SCREEN_W * 2;
+    c.height = SCREEN_H * 2;
+    const ctx = c.getContext('2d')!;
+    const tex = new T.CanvasTexture(c);
+    tex.colorSpace = T.SRGBColorSpace;
+    tex.anisotropy = 8;
+    return { canvas: c, ctx, tex, tag: null as string | null };
+  })();
+
   // ── State ────────────────────────────────────────────────────────────────
   let school: School | null = null;
   let view: SchoolView = { kind: 'corridor' };
@@ -414,12 +510,42 @@ function build(
   const hitGeo = new T.BoxGeometry(1, 1, 1);
   const hitMat = new T.MeshBasicMaterial({ visible: false });
 
+  // Status pins (one glowing bead over each kid that has something to say)
+  // and the amber "needs you" floor rings: two InstancedMeshes, re-placed
+  // each frame from the actors' positions with no allocation.
+  const pinGeo = new T.SphereGeometry(0.06, 14, 10);
+  const pinMat = new T.MeshBasicMaterial({ toneMapped: false });
+  const pins = new T.InstancedMesh(pinGeo, pinMat, SEATS);
+  pins.instanceColor = new T.InstancedBufferAttribute(new Float32Array(SEATS * 3), 3);
+  pins.count = 0;
+  pins.frustumCulled = false;
+  pins.renderOrder = 3;
+  const callGeo = new T.RingGeometry(0.46, 0.62, 48);
+  callGeo.rotateX(-Math.PI / 2);
+  const callMat = new T.MeshBasicMaterial({ color: 0xffb020, transparent: true, opacity: 0.75, depthWrite: false, toneMapped: false });
+  const calls = new T.InstancedMesh(callGeo, callMat, SEATS);
+  calls.count = 0;
+  calls.frustumCulled = false;
+  calls.renderOrder = 2;
+  scene.add(pins, calls);
+  const pinColor = new T.Color();
+  /** Kid model height (standing) — pins float just over the head. */
+  let kidHeight = 1.3;
+  {
+    const any = [...assets.kids.values()][0];
+    if (any) {
+      const h = new T.Box3().setFromObject(any.scene).getSize(new T.Vector3()).y;
+      if (Number.isFinite(h) && h > 0.6 && h < 2.5) kidHeight = h;
+    }
+  }
+
   // ── Corridor ─────────────────────────────────────────────────────────────
   function buildCorridor(s: School): void {
     clearGroup(corridorGroup);
     doors.clear();
     const placements = furnishCorridor(s.rooms, s.corridorLength);
     instance(corridorGroup, placements.filter((p) => p.node !== 'Corridor_Door'), true);
+    ceiling(corridorGroup, s.corridorLength / 2, 0, s.corridorLength, CORRIDOR_HALF * 2);
     // Doors: static frame instanced, the leaf / name plate / sign live.
     const doorPl = placements.filter((p) => p.node === 'Corridor_Door');
     instance(corridorGroup, doorPl, true);
@@ -469,19 +595,30 @@ function build(
         if (d.sign.key !== key) {
           d.sign.key = key;
           const { ctx, canvas: cv } = d.sign;
-          ctx.fillStyle = '#1f2a3a';
+          // A room that needs you lights its sign amber; the rows are big
+          // enough to read from across the corridor.
+          ctx.fillStyle = c.needsYou ? '#3d2a00' : c.error ? '#3a1414' : '#18212e';
           ctx.fillRect(0, 0, cv.width, cv.height);
+          if (c.needsYou || c.error) {
+            ctx.strokeStyle = c.needsYou ? '#ffb020' : '#ff4d4d';
+            ctx.lineWidth = 12;
+            ctx.strokeRect(6, 6, cv.width - 12, cv.height - 12);
+          }
           ctx.textAlign = 'left';
           ctx.textBaseline = 'middle';
           const rows: [string, string][] = [];
-          if (c.needsYou) rows.push(['#f5b83d', `✋ ${c.needsYou} ${c.needsYou === 1 ? 'needs' : 'need'} you`]);
-          if (c.working) rows.push(['#4ccf72', `● ${c.working} working`]);
-          if (c.idle) rows.push(['#9fb4cc', `○ ${c.idle} idle`]);
-          if (!rows.length) rows.push(['#9fb4cc', c.total ? `${c.total} asleep` : 'empty']);
-          ctx.font = '600 34px -apple-system, system-ui, sans-serif';
-          rows.slice(0, 4).forEach(([col, txt], i) => {
+          if (c.needsYou) rows.push(['#ffc246', `✋ ${c.needsYou} ${c.needsYou === 1 ? 'needs' : 'need'} you`]);
+          if (c.error) rows.push(['#ff8080', `✕ ${c.error} failed`]);
+          if (c.working) rows.push(['#5fe08a', `● ${c.working} working`]);
+          if (c.idle) rows.push(['#b8c7da', `○ ${c.idle} idle`]);
+          if (c.done) rows.push(['#8cc4ff', `✓ ${c.done} done`]);
+          if (!rows.length) rows.push(['#b8c7da', c.total ? `${c.total} asleep` : 'empty']);
+          const shown = rows.slice(0, 3);
+          const step = (cv.height - 24) / shown.length;
+          ctx.font = `700 ${shown.length > 2 ? 44 : 52}px -apple-system, system-ui, sans-serif`;
+          shown.forEach(([col, txt], i) => {
             ctx.fillStyle = col;
-            ctx.fillText(txt, 20, 38 + i * 50);
+            ctx.fillText(txt, 22, 12 + step * (i + 0.5), cv.width - 40);
           });
           d.sign.tex.needsUpdate = true;
         }
@@ -497,12 +634,15 @@ function build(
     // Characters live in roomGroup too — detach them across the rebuild.
     const keep = [...characters.values()].map((c) => c.obj).concat(head ? [head.obj] : []);
     for (const o of keep) roomGroup.remove(o);
+    // Hand the 2× canvas back first, so each monitor disposes its own texture.
+    setHiRes(null);
     clearGroup(roomGroup);
     screens.clear();
     chairBack.clear();
     roomDoorPivots = [];
     const placements = furnishRoom(r);
     chairs = instance(roomGroup, placements, true);
+    ceiling(roomGroup, r.cx, r.cz, r.width, r.depth);
     boardTitle = null;
     for (const p of placements) {
       if (p.node === 'Workstation' && p.tag) {
@@ -536,10 +676,18 @@ function build(
     sc.near = 0.5;
     sc.far = 60;
     sc.updateProjectionMatrix();
-    sun.position.set(r.cx - r.width / 2 - 8, 12, r.cz - 3);
-    sun.target.position.set(r.cx, 0, r.cz);
+    // Low afternoon sun from the window wall: long desk shadows eastward.
+    sun.position.set(r.cx - r.width / 2 - 9, 7.5, r.cz - 2.5);
+    sun.target.position.set(r.cx + 1, 0, r.cz);
     fill.position.set(r.cx + 6, 8, r.cz + 8);
     fill.target.position.set(r.cx, 0, r.cz);
+    // Lamps under evenly spread ceiling panels.
+    const spots = ceilingLights(r);
+    lamps.forEach((l, i) => {
+      const at = spots[Math.min(spots.length - 1, Math.floor(((i + 0.5) * spots.length) / lamps.length))];
+      const w = toWorld(r, at);
+      l.position.set(w.x, CEIL_Y - 0.45, w.z);
+    });
     for (const s of screens.values()) s.key = '';
     for (const [id, info] of screenInfo) applyScreen(id, info);
     paintEmptyDesks(r);
@@ -574,16 +722,47 @@ function build(
     return k ? `${k.row}:${k.col}` : null;
   }
 
+  /** The kid whose monitor the camera is on (painted at 2×). */
+  function focusKid(): string | null {
+    return view.kind === 'screen' ? view.kidId : selected;
+  }
+
+  /** Point desk `tag`'s monitor at the shared 2× canvas (null = give it
+   *  back to its own canvas and repaint that). */
+  function setHiRes(tag: string | null): void {
+    if (hi.tag === tag) return;
+    const prev = hi.tag ? screens.get(hi.tag) : null;
+    hi.tag = tag;
+    if (prev) {
+      (prev.mesh.material as THREE_NS.MeshBasicMaterial).map = prev.tex;
+      prev.key = '';
+    }
+    const next = tag ? screens.get(tag) : null;
+    if (next) {
+      (next.mesh.material as THREE_NS.MeshBasicMaterial).map = hi.tex;
+      next.key = '';
+    }
+    dirty = true;
+  }
+
   function applyScreen(kidId: string, info: ScreenInfo): void {
     const tag = deskOf(kidId);
     const scr = tag ? screens.get(tag) : null;
     if (!scr) return;
+    const focused = focusKid() === kidId;
+    if (focused) setHiRes(tag);
+    else if (hi.tag === tag) setHiRes(null);
     const full = { ...info, selected: selected === kidId };
-    const key = screenKey(full);
+    const key = screenKey(full) + (focused ? '\u0002' : '');
     if (scr.key === key) return;
     scr.key = key;
-    paintScreen(scr.ctx, full);
-    scr.tex.needsUpdate = true;
+    if (focused) {
+      paintScreen(hi.ctx, full, 2);
+      hi.tex.needsUpdate = true;
+    } else {
+      paintScreen(scr.ctx, full);
+      scr.tex.needsUpdate = true;
+    }
     dirty = true;
   }
 
@@ -661,7 +840,12 @@ function build(
       const g = assets.kids.get(k.character)!;
       characters.set(id, makeCharacter(id, g, KID_CLIP_NAMES));
     }
-    if (!head) head = makeCharacter('headmaster', assets.head, HEAD_CLIPS);
+    if (!head) {
+      head = makeCharacter('headmaster', assets.head, HEAD_CLIPS);
+      // A touch smaller than the kit's: he patrols between the desks without
+      // hiding a whole row behind him.
+      head.obj.scale.setScalar(0.85);
+    }
   }
 
   function dropCharacters(): void {
@@ -701,11 +885,45 @@ function build(
       chairBack.set(tag, next);
       for (const h of chairs.get(tag) ?? []) {
         // A WORLD +z shift: kids face −Z, so +z is behind the kid.
-        const m = new T.Matrix4().makeTranslation(0, 0, next).multiply(h.base).multiply(h.rel);
-        h.mesh.setMatrixAt(h.index, m);
+        tmpM.makeTranslation(0, 0, next).multiply(h.base).multiply(h.rel);
+        h.mesh.setMatrixAt(h.index, tmpM);
         h.mesh.instanceMatrix.needsUpdate = true;
       }
     }
+  }
+
+  /** Re-place the status pins + needs-you rings over the actors. `t` (ms)
+   *  drives the bob / pulse; reduced motion holds them still. */
+  function updatePins(r: Room, t: number): void {
+    let n = 0;
+    let m = 0;
+    const bob = reduced ? 0 : Math.sin(t / 260) * 0.035;
+    const pulse = reduced ? 1 : 1 + Math.sin(t / 220) * 0.08;
+    for (const k of r.kids) {
+      const c = characters.get(k.id);
+      const v = life.kidView(k.id);
+      if (!c || !v || !v.visible || n >= SEATS) continue;
+      const kind = pinFor(k.pose, k.detention);
+      if (!kind) continue;
+      // Clear of the head (seated ≈ ¾ height), and of a raised hand.
+      const y = v.seated ? kidHeight * 0.74 + 0.45 : kidHeight + 0.32;
+      const s = kind === 'needs-you' ? 1.25 * pulse : 1;
+      tmpQ.identity();
+      tmpM.compose(tmpV.set(c.obj.position.x, y + (kind === 'needs-you' ? bob : 0), c.obj.position.z), tmpQ, tmpS.set(s, s, s));
+      pins.setMatrixAt(n, tmpM);
+      pins.setColorAt(n, pinColor.setHex(PIN_COLORS[kind]));
+      n++;
+      if (kind === 'needs-you' && m < SEATS) {
+        tmpM.compose(tmpV.set(c.obj.position.x, 0.015, c.obj.position.z), tmpQ, tmpS.set(pulse, 1, pulse));
+        calls.setMatrixAt(m++, tmpM);
+      }
+    }
+    pins.count = n;
+    calls.count = m;
+    callMat.opacity = reduced ? 0.75 : 0.55 + Math.sin(t / 220) * 0.25;
+    pins.instanceMatrix.needsUpdate = true;
+    if (pins.instanceColor) pins.instanceColor.needsUpdate = true;
+    calls.instanceMatrix.needsUpdate = true;
   }
 
   // ── Camera ───────────────────────────────────────────────────────────────
@@ -824,8 +1042,9 @@ function build(
       if (Math.abs(d.angle - d.target) < 1e-3 && pivots.every((p) => p.obj.userData.angle === d.angle)) continue;
       d.angle += (d.target - d.angle) * Math.min(1, dt / 140);
       if (Math.abs(d.angle - d.target) < 0.002) d.angle = d.target;
+      tmpR.makeRotationY(d.angle);
       for (const p of pivots) {
-        p.obj.matrix.copy(p.base).multiply(new T.Matrix4().makeRotationY(d.angle));
+        p.obj.matrix.copy(p.base).multiply(tmpR);
         p.obj.matrixWorldNeedsUpdate = true;
         p.obj.userData.angle = d.angle;
       }
@@ -881,8 +1100,12 @@ function build(
     await fly(p, t, 700);
     openDoor(r.id, false);
     dropCharacters();
+    setHiRes(null);
     clearGroup(roomGroup);
     screens.clear();
+    pins.count = 0;
+    calls.count = 0;
+    corridorLamps();
     roomDoorPivots = [];
     openRoom = null;
     roomKey = '';
@@ -917,6 +1140,9 @@ function build(
       // Monitors face +Z (toward their kid): look over the kid's shoulder.
       await fly(new T.Vector3(c.x + 0.18, c.y + 0.3, c.z + 0.95), c, 750);
       setView({ kind: 'screen', roomId: r.id, kidId });
+      // The monitor we lean over switches to the crisp 2× canvas.
+      const info = screenInfo.get(kidId);
+      if (info) applyScreen(kidId, info);
     });
   }
 
@@ -943,7 +1169,9 @@ function build(
     // reads matrixWorld without refreshing it, so sync only the pick targets
     // (and their parents), rather than waiting for the next GPU render.
     for (const target of targets) target.updateWorldMatrix(true, false);
-    const hit = ray.intersectObjects(targets, false)[0];
+    const hits = ray.intersectObjects(targets, false);
+    // The headmaster is big: a kid (or its monitor) behind him still wins.
+    const hit = hits.find((h) => (h.object.userData.pick as SchoolPick | undefined)?.kind !== 'head') ?? hits[0];
     if (!hit) return null;
     const desk = hit.object.userData.desk as string | undefined;
     if (desk) {
@@ -1082,6 +1310,9 @@ function build(
       }
       placeRing(selRing, selected);
       placeRing(hoverRing, hover?.kind === 'kid' && hover.id !== selected ? hover.id : null);
+      // Leaning over one monitor, a bead the size of a fist would block it.
+      pins.visible = calls.visible = view.kind !== 'screen';
+      if (!reduced || dirty) updatePins(r, now);
     }
     if (dirty) {
       camera.position.copy(cam.pos);
@@ -1138,15 +1369,35 @@ function build(
     for (const f of lostFns) f();
   });
 
+  /** Light theme = a sunny afternoon; dark theme = evening: moonlight
+   *  through the windows, the lamps carry the room, the views go dusky. */
   function setTheme(dark: boolean): void {
-    scene.background = new T.Color(dark ? 0x1b2433 : 0xcfe6fb);
-    hemi.intensity = dark ? 0.7 : 1.1;
-    sun.intensity = dark ? 1.1 : 2.4;
-    sun.color.set(dark ? 0xb8c8ff : 0xfff1dc);
-    renderer.toneMappingExposure = dark ? 0.95 : 1.05;
+    scene.background = new T.Color(dark ? 0x141b28 : 0xcfe6fb);
+    hemi.color.set(dark ? 0x7d8fb8 : 0xdfefff);
+    hemi.groundColor.set(dark ? 0x3a3128 : 0x8a7a66);
+    hemi.intensity = dark ? 0.45 : 1.0;
+    sun.intensity = dark ? 0.55 : 2.6;
+    sun.color.set(dark ? 0x9fb4ff : 0xfff0d6);
+    fill.intensity = dark ? 0.15 : 0.5;
+    scene.environmentIntensity = (hdr ? 0.8 : 0.55) * (dark ? 0.45 : 1);
+    const lampI = (dark ? 12 : 2.2) * (lamps.length < LAMPS ? 1.3 : 1);
+    for (const l of lamps) l.intensity = lampI;
+    for (const g of glowMats) {
+      if (g.kind === 'panel') {
+        g.mat.emissive.copy(g.emissive);
+        g.mat.emissiveIntensity = g.intensity * (dark ? 2.2 : 1);
+      } else {
+        g.mat.color.copy(g.color).multiplyScalar(dark ? 0.25 : 1);
+        g.mat.emissive.copy(g.emissive).multiply(dark ? nightTint : one3);
+        g.mat.emissiveIntensity = g.intensity * (dark ? 0.35 : 1);
+      }
+    }
+    renderer.toneMappingExposure = dark ? 1.0 : 1.05;
     dirty = true;
     kick();
   }
+  const nightTint = new T.Color(0x4a5f9a);
+  const one3 = new T.Color(1, 1, 1);
   setTheme(opts.dark);
   setView({ kind: 'corridor' });
   applyWalk();
@@ -1199,6 +1450,7 @@ function build(
     setSelected(id) {
       const prev = selected;
       selected = id;
+      if (!id && view.kind !== 'screen') setHiRes(null);
       for (const k of [prev, id]) {
         const info = k ? screenInfo.get(k) : null;
         if (k && info) applyScreen(k, info);
@@ -1309,10 +1561,16 @@ function build(
         view,
         frames,
         missing: [...assets.missing],
-        kids: life.kidViews().map((v) => ({ id: v.id, clip: v.clip, mode: v.mode, visible: v.visible, x: v.x, z: v.z })),
+        kids: life.kidViews().map((v) => {
+          const k = openRoom ? [...openRoom.kids, ...openRoom.bench].find((x) => x.id === v.id) : undefined;
+          return { id: v.id, clip: v.clip, mode: v.mode, visible: v.visible, x: v.x, z: v.z, pin: k ? pinFor(k.pose, k.detention) : null };
+        }),
         head: hv ? { clip: hv.clip, mode: hv.mode, x: hv.x, z: hv.z, target: life.headTarget() } : null,
         camera: { x: cam.pos.x, y: cam.pos.y, z: cam.pos.z },
         screens: out,
+        hiRes: hi.tag,
+        lamps: openRoom ? lamps.length : 0,
+        ceiling: true,
       };
     },
     destroy() {
@@ -1321,10 +1579,21 @@ function build(
       if (raf) cancelAnimationFrame(raf);
       ro.disconnect();
       dropCharacters();
+      setHiRes(null);
       clearGroup(roomGroup);
       clearGroup(corridorGroup);
       ringGeo.dispose();
       ringMat.dispose();
+      pinGeo.dispose();
+      pinMat.dispose();
+      pins.dispose();
+      callGeo.dispose();
+      callMat.dispose();
+      calls.dispose();
+      ceilGeo.dispose();
+      ceilMat.dispose();
+      hi.tex.dispose();
+      for (const l of lamps) l.dispose();
       hoverMat.dispose();
       hitGeo.dispose();
       hitMat.dispose();
