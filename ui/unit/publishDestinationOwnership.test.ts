@@ -1,13 +1,22 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { componentFunctions } from './componentFunctions.ts';
-import { deferred } from './sourceHarness.ts';
+import { deferred, loadSource } from './sourceHarness.ts';
 import { unwrapListing } from '../src/lib/listingPage.ts';
+
+/** The REAL issue client (lib/api/issues.ts) over the test's `get` stub, so a
+ *  fixture sees the exact (encoded) URLs the components request. */
+function issueClient(get: (path: string) => Promise<unknown>) {
+  return loadSource(new URL('../src/lib/api/issues.ts', import.meta.url), {
+    './client': { api: { get }, authedBlobUrl: async () => '' },
+    '../listingPage': { unwrapListing },
+  });
+}
 
 function fixture(get: (path: string) => Promise<unknown>, mode: 'story' | 'rfc') {
   return componentFunctions(new URL('../src/modules/product/PublishDialog.svelte', import.meta.url),
     ['loadProjects', 'loadSpaces', 'loadIssueTypes'], {
-      api: { get }, mode, accountId: 'A', projects: [], projectsLoading: false, projectKey: '',
+      ...issueClient(get), mode, accountId: 'A', projects: [], projectsLoading: false, projectKey: '',
       issueTypes: [], issueTypesLoading: false, issueType: 'Story', spaces: [], spacesLoading: false,
       spaceKey: '', parentId: '123', rfcTitle: 'My RFC title', setError() {},
       projectsSequence: 0, spacesSequence: 0, issueTypesSequence: 0,

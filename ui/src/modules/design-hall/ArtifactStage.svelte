@@ -14,7 +14,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import type { DesignArtifact } from '../../lib/api/types';
   import DeviceFrame, { type DeviceKind } from '../../lib/design/DeviceFrame.svelte';
-  import DesignBoard from '../product/design/DesignBoard.svelte';
+  import DesignBoard from '../../lib/design/DesignBoard.svelte';
   import {
     Scene3DViewport,
     emptyScene,

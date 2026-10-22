@@ -181,9 +181,6 @@ export class Conversation {
   liveStatus = $state('');
   /** Git branch of the session cwd (`transcript_live.branch`). */
   liveBranch: string | null = $state(null);
-  /** Bumped on every `transcript_appended` — the draft is hidden until the
-   *  screen text moves past what the folded turn already shows. */
-  lastAppendAt = $state(0);
   /** Lazy subagent bodies keyed by agent id (`?sub=`). Raw and replaced
    *  whole on every change (`setSub`), so a body's turns are never proxied. */
   subagents: Record<string, SubagentBody> = $state.raw({});
@@ -375,7 +372,6 @@ export class Conversation {
     }
     if (transcript !== this.transcript) this.transcript = transcript;
     this.tailTick += 1;
-    this.lastAppendAt = Date.now();
   }
 
   /** Apply a `transcript_live` frame (the screen draft + input + status). */

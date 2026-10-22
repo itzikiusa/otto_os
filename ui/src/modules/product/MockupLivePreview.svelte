@@ -9,9 +9,9 @@
   //     doesn't parse shows the raw source so you can see what the agent wrote).
   import { renderMermaid } from '../canvas/mermaid';
   import type { DesignFormat } from './types';
-  import { svgDoc } from './design/format';
-  import DesignBoard from './design/DesignBoard.svelte';
-  import { Scene3DViewport, parseScene, type Scene3dDoc } from './design/scene3d';
+  import { svgDoc } from '../../lib/design/format';
+  import DesignBoard from '../../lib/design/DesignBoard.svelte';
+  import { Scene3DViewport, parseScene, type Scene3dDoc } from '../../lib/design/scene3d';
   import { product } from '../../lib/stores/product.svelte';
 
   interface Props {

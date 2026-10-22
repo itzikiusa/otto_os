@@ -178,12 +178,10 @@ class K8sStore {
     }
     this.clusterId = null;
     this.clustersLoaded = false;
-    this.clustersLoading = false;
   }
 
   // --- tool status -------------------------------------------------------------
   status: K8sStatus | null = $state(null);
-  statusLoading = $state(false);
   /** Non-empty when `/k8s/status` failed for a reason other than "backend
    *  route missing" (which sets `unavailable`). */
   statusError = $state('');
@@ -192,7 +190,6 @@ class K8sStore {
 
   // --- clusters ------------------------------------------------------------------
   clusters: K8sCluster[] = $state([]);
-  clustersLoading = $state(false);
   clustersLoaded = $state(false);
   clustersError = $state('');
   /** cluster id → last probe (seeded from the row's cached `capabilities`). */
@@ -265,7 +262,6 @@ class K8sStore {
   // --- status / install ------------------------------------------------------------
 
   async loadStatus(): Promise<void> {
-    this.statusLoading = true;
     try {
       this.status = await k8sApi.status();
       this.statusError = '';
@@ -273,8 +269,6 @@ class K8sStore {
     } catch (e) {
       if (e instanceof ApiError && e.status === 404) this.unavailable = true;
       else this.statusError = providerErrorText(e);
-    } finally {
-      this.statusLoading = false;
     }
   }
 
@@ -288,7 +282,6 @@ class K8sStore {
 
   async loadClusters(): Promise<void> {
     const revision=this.accessRevision;
-    this.clustersLoading = true;
     try {
       const list = await k8sApi.listClusters();
       if(revision!==this.accessRevision)return;
@@ -301,7 +294,6 @@ class K8sStore {
     } catch (e) {
       this.clustersError = providerErrorText(e);
     } finally {
-      this.clustersLoading = false;
       this.clustersLoaded = true;
     }
   }
@@ -696,15 +688,12 @@ class K8sStore {
    *  however many clusters cycle, and none while the document is hidden —
    *  one fires when it is visible again. */
   monitorTick = $state(0);
-  /** The last cluster that cycled before the latest tick. */
-  monitorTickCluster: string | null = $state(null);
   /** Every cluster that cycled since the previous tick. */
   monitorTickClusters = $state.raw<ReadonlySet<string>>(new Set());
   private readonly cycles = new TickCoalescer(
     MONITOR_TICK_MIN_MS,
     (clusters) => {
       this.monitorTickClusters = new Set(clusters);
-      this.monitorTickCluster = clusters[clusters.length - 1] ?? null;
       this.monitorTick += 1;
     },
     browserTickEnv,

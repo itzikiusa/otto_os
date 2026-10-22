@@ -40,7 +40,6 @@
 
   // ── minted-link state (shown after POST) ────────────────────────────────────
   let mintedUrl = $state<string | null>(null);
-  let mintedToken = $state<string | null>(null);
   /** Whether another device can open the minted link (false ⇒ loopback-only:
    *  no Public link domain and no network listener — S20-01). */
   let mintedRemote = $state(true);
@@ -134,7 +133,6 @@
     if (!ok) return;
     generating = true;
     mintedUrl = null;
-    mintedToken = null;
     try {
       const email = recipientEmail.trim();
       const body: CreateShareReq = {
@@ -150,7 +148,6 @@
         body,
       );
       mintedUrl = resp.url;
-      mintedToken = resp.token;
       // Older daemons omit the flag — treat absence as reachable (old behaviour).
       mintedRemote = resp.reachable_remotely !== false;
       mintedLan = resp.reach === 'lan';
@@ -199,7 +196,6 @@
       // older link also wiped the fresh URL + QR).
       if (shareId === mintedShareId) {
         mintedUrl = null;
-        mintedToken = null;
         mintedShareId = null;
       }
       toasts.success('Share revoked');
@@ -236,7 +232,6 @@
     }
     if (failed.length === 0) {
       mintedUrl = null;
-      mintedToken = null;
       toasts.success('Share links revoked');
     } else {
       toasts.error('Some links were not revoked', `${failed.length} of ${n} failed: ${failed[0]}`);

@@ -18,7 +18,7 @@
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
-  import JsonTree from '../database/JsonTree.svelte';
+  import JsonTree from '../../lib/components/JsonTree.svelte';
   import ViewToolbar from './ViewToolbar.svelte';
   import RegionPicker from './RegionPicker.svelte';
   import RegionErrors from './RegionErrors.svelte';

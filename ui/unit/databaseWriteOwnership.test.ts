@@ -95,6 +95,13 @@ function setup(options: { holdCancel?: boolean; holdReplacement?: boolean } = {}
   return { v, refused, approval, prompted, queries, prompts, cancelled, replacement, cancels, deadlines, storage, expireCancel: () => expireCancel() };
 }
 
+/** What a run that wrote nothing returns: `runQuery` answers null, while
+ *  `runManagedStatement` says why (`{ canceled }`, so the grid's review modal
+ *  can skip the toast the gate already showed). */
+function canceledAs(entry: string, r: any): string | null {
+  return entry === 'runManagedStatement' ? (r?.canceled ?? `not canceled: ${JSON.stringify(r)}`) : r;
+}
+
 for (const entry of ['runManagedStatement', 'runQuery']) {
   test(`${entry}: switching connections before refusal never asks to approve B for a write to A`, async () => {
     const h = setup();
@@ -121,7 +128,9 @@ for (const entry of ['runManagedStatement', 'runQuery']) {
     h.refused.reject(new ApiError('write_blocked: production'));
     await h.prompted.promise;
     h.approval.resolve('Production A');
-    assert.ok(await pending);
+    const r = await pending;
+    assert.ok(r);
+    assert.equal(r.canceled, undefined);
     assert.equal(h.queries.length, 2);
     assert.equal(h.queries[1].body.statement, 'DELETE FROM orders');
     assert.equal(h.queries[1].body.node, 'db:app');
@@ -133,7 +142,7 @@ for (const entry of ['runManagedStatement', 'runQuery']) {
     const pending = h.v[entry]('DELETE FROM orders');
     h.refused.reject(new ApiError('write_blocked: production'));
     await h.prompted.promise; h.approval.resolve(null);
-    assert.equal(await pending, null); assert.equal(h.queries.length, 1);
+    assert.equal(canceledAs(entry, await pending), entry === 'runQuery' ? null : 'declined'); assert.equal(h.queries.length, 1);
   });
 
   test(`${entry}: revoking access while confirmation waits prevents the retry`, async () => {
@@ -143,7 +152,7 @@ for (const entry of ['runManagedStatement', 'runQuery']) {
     await h.prompted.promise;
     h.v.onAccessChange({ type: 'decision', kind: 'connection', id: 'A', before: { operations: { discover: { allowed: true }, db_query: { allowed: true } } }, after: { operations: { discover: { allowed: true }, db_query: { allowed: false } } } });
     h.approval.resolve('Production A');
-    assert.equal(await pending, null); assert.equal(h.queries.length, 1);
+    assert.equal(canceledAs(entry, await pending), entry === 'runQuery' ? null : 'stale'); assert.equal(h.queries.length, 1);
   });
 }
 

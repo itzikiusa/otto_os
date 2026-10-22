@@ -16,7 +16,10 @@
   // highlightJsonHtml path this can't emit markup from data.
   //
   // Two disclosure modes. Standalone (no `plan`): the depth/width heuristic
-  // below, local open state — the cell viewer, AWS views, dashboards.
+  // below, local open state — the cell viewer, AWS views, dashboards and the
+  // workbench JSON preview. (The API client renders its own
+  // modules/api/JsonTree.svelte.) The pure helpers live beside it in
+  // lib/jsonTree/, so this shared component imports nothing from modules/.
   // Controlled (`plan` + `expansion` given, the JSON result view): a node is
   // open iff its dotted `path` is in the owner's plan (a node budget with
   // sticky per-path overrides, see expansion-plan.ts); toggling records an
@@ -27,9 +30,9 @@
   // buttons) is `data-find-skip`. A find reveal (`reveal`, per record) forces
   // paths open, grows "show more" slices and unclips strings on top of the plan.
   import Self from './JsonTree.svelte';
-  import { bsonScalar } from '../../modules/database/bson';
-  import { setOverride, stickyKey, type ExpansionState } from '../../modules/database/expansion-plan';
-  import { searchableLabel, STR_MAX, type RevealState } from '../../modules/database/json-find';
+  import { bsonScalar } from '../jsonTree/bson';
+  import { setOverride, stickyKey, type ExpansionState } from '../jsonTree/expansion-plan';
+  import { searchableLabel, STR_MAX, type RevealState } from '../jsonTree/json-find';
 
   interface Props {
     value: unknown;

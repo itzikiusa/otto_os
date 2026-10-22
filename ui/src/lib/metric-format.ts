@@ -56,6 +56,26 @@ export function formatBytes(n: number | null | undefined, opts: FormatBytesOptio
   return `${trim(v, Math.abs(v) >= 100 ? 0 : 1)}${opts.iec ? '' : ' '}${u[i]}`;
 }
 
+export interface FormatUsdOptions {
+  /** What a missing cost (null / undefined / NaN / ±Infinity) renders as.
+   *  Default `—`; a surface that hides the cell instead passes `''`. */
+  empty?: string;
+}
+
+/** The one USD cost: "$0", "<$0.01" under a cent, two decimals below $1,000
+ *  ("$150.25"), whole grouped dollars from there ("$1,234"). Every usage,
+ *  swarm, Mission Control and conversation surface renders cost through this,
+ *  so one $150.25 never reads "$150" in one panel and "$150.25" in the next. */
+export function formatUsd(n: number | null | undefined, opts: FormatUsdOptions = {}): string {
+  if (n == null || !Number.isFinite(n)) return opts.empty ?? '—';
+  if (n === 0) return '$0';
+  const sign = n < 0 ? '−' : '';
+  const a = Math.abs(n);
+  if (a < 0.01) return `${sign}<$0.01`;
+  if (a >= 1000) return `${sign}$${Math.round(a).toLocaleString('en-US')}`;
+  return `${sign}$${a.toFixed(2)}`;
+}
+
 export function formatCount(n: number): string {
   const a = Math.abs(n);
   if (a >= 1e9) return `${trim(n / 1e9, 1)}B`;

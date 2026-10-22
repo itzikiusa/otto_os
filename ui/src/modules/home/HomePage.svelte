@@ -60,6 +60,9 @@
     if (e.defaultPrevented || ui.overlayOpen || ui.navDrawerOpen || ctxMenu.open) return;
     const t = e.target as HTMLElement | null;
     if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
+    // A composite widget in a box (window radios, tabs) owns its arrow keys —
+    // they must never slide the whole Home view away under it.
+    if (t?.closest?.('[role="radiogroup"],[role="tablist"]')) return;
     const rtl = typeof document !== 'undefined' && document.documentElement.dir === 'rtl';
     if (e.key === 'Escape' && home.zoomedId) {
       e.preventDefault();

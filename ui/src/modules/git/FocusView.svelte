@@ -9,6 +9,7 @@
   import { untrack } from 'svelte';
   import { dialogFocus } from '../../lib/dialogFocus';
   import { api } from '../../lib/api/client';
+  import { getIssue, listIssueAccounts, myWork } from '../../lib/api/issues';
   import { mapLimit } from '../../lib/poll';
   import type {
     GitAccount,
@@ -111,7 +112,7 @@
     accountsError = null;
     workLoading = true;
     try {
-      issueAccounts = await api.get<IssueAccount[]>('/issue/accounts');
+      issueAccounts = await listIssueAccounts();
       if (!issueAccountId && issueAccounts[0]) issueAccountId = issueAccounts[0].id;
     } catch (e) {
       accountsError = (e instanceof Error ? e.message : String(e)) || 'The account service did not answer.';
@@ -127,9 +128,7 @@
     workLoading = true;
     workError = null;
     try {
-      const next = await api.get<MyWorkIssue[]>(
-        `/issue/my-work?account_id=${encodeURIComponent(accountId)}`,
-      );
+      const next = await myWork(accountId);
       if (revision === workRevision && accountId === issueAccountId) work = next;
     } catch (e) {
       if (revision !== workRevision || accountId !== issueAccountId) return;
@@ -245,9 +244,7 @@
     quickIssue = null;
     quickLoading = true;
     try {
-      const next = await api.get<IssueDetail>(
-        `/issue/${encodeURIComponent(accountId)}/${encodeURIComponent(key)}`,
-      );
+      const next = await getIssue(accountId, key);
       if (revision === quickRevision && accountId === issueAccountId) quickIssue = next;
     } catch (e) {
       if (revision === quickRevision) {

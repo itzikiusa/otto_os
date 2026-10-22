@@ -191,7 +191,7 @@
                 </div>
                 <div class="meta"><StudioBadge studio={a.studio} showName /> <span class="dim">· {monthYear(a.updated_at)}</span></div>
                 <div class="meta">
-                  {#each h.story_ids.slice(0, 2) as sid (sid)}
+                  {#each [...new Set(h.story_ids)].slice(0, 2) as sid, i (i)}
                     {#if library.stories[sid]}<span class="chip mono-chip">{library.stories[sid].source_key}</span>{/if}
                   {/each}
                   <StatusPill status={a.status} />

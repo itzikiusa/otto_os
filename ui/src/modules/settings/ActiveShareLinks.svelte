@@ -4,6 +4,7 @@
   // a caller-wide Revoke all (`POST /auth/shares/revoke-all`). The per-session
   // ShareModal only shows one session's links — without this page a forgotten
   // link on another session could only be found by opening each session.
+  import { tick } from 'svelte';
   import { api } from '../../lib/api/client';
   import type { MyShare } from '../../lib/api/types';
   import { confirmer } from '../../lib/confirm.svelte';
@@ -20,6 +21,17 @@
   let error = $state('');
   let revoking = $state<Set<string>>(new Set());
   let revokingAll = $state(false);
+  let tableEl = $state<HTMLElement>();
+  let headingEl = $state<HTMLElement>();
+
+  /** After row `i` is gone, keep focus in the table: the same index's Revoke
+   *  (the next row slid up), else the previous one, else the section heading —
+   *  the confirm returned focus to a button that no longer exists. */
+  async function settleFocus(i: number): Promise<void> {
+    await tick();
+    const btns = tableEl?.querySelectorAll<HTMLButtonElement>('td.act button');
+    (btns?.[i] ?? btns?.[i - 1] ?? headingEl)?.focus();
+  }
 
   async function load(): Promise<void> {
     loading = true;
@@ -47,8 +59,10 @@
     revoking = new Set([...revoking, s.id]);
     try {
       await api.del(`/auth/shares/${encodeURIComponent(s.id)}`);
+      const at = shares.findIndex((x) => x.id === s.id);
       shares = shares.filter((x) => x.id !== s.id);
       toasts.success('Share link revoked');
+      void settleFocus(at);
     } catch (e) {
       toastError('Couldn’t revoke the link', e);
     } finally {
@@ -71,6 +85,7 @@
       await api.post('/auth/shares/revoke-all', {});
       shares = [];
       toasts.success('All share links revoked');
+      void settleFocus(0);
     } catch (e) {
       toastError('Couldn’t revoke the links', e);
       void load();
@@ -81,7 +96,7 @@
 </script>
 
 <div class="links-head">
-  <div class="section-title">Active links</div>
+  <div class="section-title" tabindex="-1" bind:this={headingEl}>Active links</div>
   {#if shares.length > 0}
     <button class="btn small danger" disabled={revokingAll} aria-busy={revokingAll} onclick={() => void revokeAll()}>
       {revokingAll ? 'Revoking…' : 'Revoke all'}
@@ -93,7 +108,7 @@
     <div class="card"><EmptyState icon="link" title="No active share links" body="Links you create from a session’s Share dialog show up here until they expire or you revoke them." /></div>
   {/snippet}
   <div class="card table-wrap">
-    <table class="links" data-testid="active-share-links">
+    <table class="links" data-testid="active-share-links" bind:this={tableEl}>
       <thead>
         <tr><th scope="col">Session</th><th scope="col">Access</th><th scope="col">Label</th><th scope="col">Expires</th><th scope="col"><span class="sr-only">Actions</span></th></tr>
       </thead>
@@ -117,7 +132,12 @@
                 : new Date(s.expires_at).toLocaleString()}
             >{s.dormant ? 'Dormant (revivable)' : rel(s.expires_at)}</td>
             <td class="act">
-              <button class="btn small" disabled={revoking.has(s.id) || revokingAll} aria-busy={revoking.has(s.id)} onclick={() => void revoke(s)}>
+              <button
+                class="btn small"
+                disabled={revoking.has(s.id) || revokingAll}
+                aria-busy={revoking.has(s.id)}
+                onclick={() => void revoke(s)}
+              >
                 {revoking.has(s.id) ? 'Revoking…' : 'Revoke'}
               </button>
             </td>

@@ -1,5 +1,6 @@
 <script lang="ts" module>
   import type { DiffResp, FileDiff, Hunk as H } from '../../lib/api/types';
+  import { loadErrorText } from '../../lib/loadError';
   import { WeightedLru, diffKey } from './graph-diff-cache';
   import { api } from '../../lib/api/client';
 
@@ -184,7 +185,7 @@
       void loadSmallBodies(id, s, resp, ctl, my);
     } catch (e) {
       if (my !== gen || isAbortError(e)) return;
-      error = (e instanceof Error ? e.message : String(e)) || 'The diff could not be loaded.';
+      error = loadErrorText(e);
     } finally {
       if (my === gen) loading = false;
     }

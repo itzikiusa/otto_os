@@ -49,8 +49,6 @@ class MockupAssistStore {
   liveContent = $state<string>('');
   /** A turn is in flight. */
   busy = $state(false);
-  /** The committed attachment from the last turn (so the arena can select it). */
-  lastResult = $state<ProductAttachment | null>(null);
   /** The most recent live update for ANY artifact (the arena filters by id). */
   lastUpdate = $state<LiveUpdate | null>(null);
   private tick = 0;
@@ -63,7 +61,6 @@ class MockupAssistStore {
     this.format = format;
     this.sessionId = null;
     this.liveContent = '';
-    this.lastResult = null;
   }
 
   /** Open the panel to REFINE an existing agent artifact. */
@@ -74,7 +71,6 @@ class MockupAssistStore {
     this.format = formatOf(att);
     this.sessionId = null;
     this.liveContent = '';
-    this.lastResult = att;
     // Seed the preview with the artifact's current bytes (best-effort).
     try {
       this.liveContent = await authedText(`/product/attachments/${att.id}`);
@@ -102,7 +98,6 @@ class MockupAssistStore {
       );
       this.attachmentId = att.id;
       this.format = formatOf(att);
-      this.lastResult = att;
       return att;
     } finally {
       this.busy = false;

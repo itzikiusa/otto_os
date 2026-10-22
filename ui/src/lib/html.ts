@@ -17,3 +17,19 @@ const ESCAPES: Record<string, string> = {
 export function escapeHtml(s: string): string {
   return String(s).replace(/[&<>"']/g, (c) => ESCAPES[c]);
 }
+
+const UNESCAPES: Record<string, string> = {
+  amp: '&',
+  lt: '<',
+  gt: '>',
+  quot: '"',
+  '#39': "'",
+  apos: "'",
+};
+
+/** The inverse of {@link escapeHtml}: decode `&amp; &lt; &gt; &quot; &#39;`
+ *  (and `&apos;`) — exactly what an escaper may have produced, decoded ONCE.
+ *  `&amp;lt;` becomes `&lt;`, never `<`. Other entities are left as written. */
+export function unescapeHtml(s: string): string {
+  return String(s).replace(/&(amp|lt|gt|quot|#39|apos);/g, (m, e: string) => UNESCAPES[e] ?? m);
+}

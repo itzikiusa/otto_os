@@ -294,7 +294,7 @@
       { title: 'Allow private addresses?', confirmLabel: 'Allow private addresses', danger: false },
     ))) return;
     try {
-      await ws.setApiAllowLocal(true);
+      await apiClient.setAllowLocal(true);
       toasts.success('Private addresses allowed', 'Send the request again.');
     } catch (e) {
       toasts.error('Couldn’t allow private addresses', e instanceof Error ? loadErrorText(e) : 'Only a workspace admin can change it.');

@@ -503,7 +503,9 @@
     background: var(--hover);
     color: var(--accent-text);
   }
-  /* Auto-fetch toggle: dim when paused, accent when on. */
+  /* Auto-fetch toggle: dim text when paused, accent when on. No opacity on the
+     paused state: it pushed the icon below 3:1 in the light theme, and
+     aria-pressed plus the accent already tell on from off. */
   .git-autofetch {
     display: inline-flex;
     align-items: center;
@@ -515,16 +517,13 @@
     padding: 0 8px;
     border-radius: var(--radius-s);
     flex-shrink: 0;
-    opacity: 0.55;
   }
   .git-autofetch:hover {
     background: var(--hover);
     color: var(--text);
-    opacity: 1;
   }
   .git-autofetch.on {
     color: var(--accent-text);
-    opacity: 1;
   }
   .mono {
     font-family: var(--font-mono);

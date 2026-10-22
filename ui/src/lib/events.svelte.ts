@@ -46,14 +46,8 @@ import {
 export class ImprovementUpdateBus {
   /** Tick counter — consumers react to its change, not the value. */
   tick: number = $state(0);
-  /** Kind of the most-recent update ("run_finished" | "approval_pending"). */
-  lastKind: string = $state('');
-  /** Id of the updated run/edit, if the server sent one. */
-  lastId: string | null = $state(null);
 
-  apply(kind: string, id?: string | null): void {
-    this.lastKind = kind;
-    this.lastId = id ?? null;
+  apply(): void {
     this.tick += 1;
   }
 }
@@ -170,7 +164,6 @@ export class FindingBus {
   tick: number = $state(0);
   reviewId: string = $state('');
   workspaceId: string = $state('');
-  findingId: string = $state('');
   /** New status (finding_updated) — empty for finding_action_started. */
   status: string = $state('');
   /** "fix" | "verify" | "regression_test" (finding_action_started) — empty otherwise. */
@@ -181,14 +174,12 @@ export class FindingBus {
   apply(
     workspaceId: string,
     reviewId: string,
-    findingId: string,
     status: string,
     action: string,
     sessionId?: string | null,
   ): void {
     this.workspaceId = workspaceId;
     this.reviewId = reviewId;
-    this.findingId = findingId;
     this.status = status;
     this.action = action;
     this.sessionId = sessionId ?? null;
@@ -378,7 +369,7 @@ export const designAssistBus = new DesignAssistBus();
 
 const busRoutes: EventRoutes = {
   // Let the Self-Improvement pane refresh without waiting for its poll.
-  improvement_updated: (parsed) => improvementBus.apply(parsed.kind, parsed.id),
+  improvement_updated: () => improvementBus.apply(),
   workflow_run_updated: (parsed) => {
     // Workflow execution progress: node-start / node-finish / approval
     // pause/resume / run complete. The Workflows page subscribes to
@@ -400,15 +391,15 @@ const busRoutes: EventRoutes = {
   // Findings board: refetch the matching review's findings on every triage
   // action / transition (status changed).
   finding_updated: (parsed) =>
-    findingBus.apply(parsed.workspace_id, parsed.review_id, parsed.finding_id, parsed.status, '', null),
+    findingBus.apply(parsed.workspace_id, parsed.review_id, parsed.status, '', null),
   // An agent-backed action (fix/verify/regression-test) spawned a live
   // session — let the board reflect the in-flight action.
   finding_action_started: (parsed) =>
-    findingBus.apply(parsed.workspace_id, parsed.review_id, parsed.finding_id, '', parsed.action, parsed.session_id),
+    findingBus.apply(parsed.workspace_id, parsed.review_id, '', parsed.action, parsed.session_id),
   // A Proof Pack snapshot was exported; the board can refresh if open. We
   // route it through the finding bus tick so subscribers re-render.
   proof_pack_exported: (parsed) =>
-    findingBus.apply(parsed.workspace_id, parsed.review_id, '', '', 'proof_pack_exported', null),
+    findingBus.apply(parsed.workspace_id, parsed.review_id, '', 'proof_pack_exported', null),
   // Surface a budget cap crossing/recovery to any subscribed banner.
   budget_exceeded: (parsed) => budgetBus.apply(parsed.provider, parsed.spend_usd, parsed.cap_usd, parsed.direction),
   // Mission Control: a work item was created or changed status. The page

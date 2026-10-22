@@ -13,6 +13,7 @@
   import { router } from '../../lib/router.svelte';
   import { api } from '../../lib/api/client';
   import { checkFolder } from '../../lib/folderCheck';
+  import { radioKey } from '../../lib/radioKey';
   import { ws, SCRATCH_WORKSPACE_ID } from '../../lib/stores/workspace.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -439,8 +440,7 @@
           type="button"
           class="seg-btn"
           class:active={!scratchMode}
-          role="radio"
-          aria-checked={!scratchMode}
+          role="radio" aria-checked={!scratchMode} tabindex={scratchMode ? -1 : 0} onkeydown={radioKey}
           title={ws.current.root_path}
           onclick={() => setScratch(false)}
         >
@@ -451,8 +451,7 @@
         type="button"
         class="seg-btn"
         class:active={scratchMode}
-        role="radio"
-        aria-checked={scratchMode}
+        role="radio" aria-checked={scratchMode} tabindex={scratchMode || !ws.current ? 0 : -1} onkeydown={radioKey}
         title="Not tied to any workspace — starts in your home folder by default"
         onclick={() => setScratch(true)}
       >

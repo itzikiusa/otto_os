@@ -111,16 +111,3 @@ async function renderNow(id: string, src: string, dark: boolean): Promise<{ svg?
     }
   }
 }
-
-/** Best-effort validity check (true = parses). Never throws. */
-export async function parseMermaid(src: string): Promise<boolean> {
-  const text = src.trim();
-  if (!text) return false;
-  try {
-    const api = await load(_dark ?? false);
-    await api.parse(text);
-    return true;
-  } catch {
-    return false;
-  }
-}

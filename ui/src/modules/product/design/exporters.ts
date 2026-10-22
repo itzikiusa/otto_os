@@ -6,7 +6,7 @@ import { renderMermaid } from '../../canvas/mermaid';
 import { downloadText } from '../../../lib/components/exporters';
 import { svgToPngDownload } from '../../canvas/export';
 import type { ProductAttachment } from '../types';
-import { FORMATS, kindOf } from './format';
+import { FORMATS, kindOf } from '../../../lib/design/format';
 
 /** Trigger a download of a Blob. */
 export function downloadBlob(blob: Blob, filename: string): void {

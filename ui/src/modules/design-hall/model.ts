@@ -576,6 +576,14 @@ export interface EpicRow {
   childCount: number;
 }
 
+/** The resolved story keys ("LOY-142") for a hit's `story_ids`, each once: an
+ *  artifact may link one story twice (`implements` + `references`, or two
+ *  origins), and the chip lists keyed by it must never see a repeat. */
+export function storyKeysFor(storyIds: readonly string[], stories: Record<string, StoryRef | undefined>): string[] {
+  const keys = storyIds.map((sid) => stories[sid]?.source_key).filter((k): k is string => !!k);
+  return [...new Set(keys)];
+}
+
 /**
  * The Linked-to-Product strip: group `implements` targets (a search hit's
  * `story_ids`) under their epics with per-studio artifact counts. Stories the
@@ -586,7 +594,8 @@ export function epicTree(hits: DesignSearchHit[], stories: StoryRef[]): EpicRow[
   const counts = new Map<string, Partial<Record<DesignStudio, number>>>();
   for (const h of hits) {
     if (h.artifact.status === 'archived') continue;
-    for (const sid of h.story_ids) {
+    // De-duplicated: one artifact counts once per story, however it links.
+    for (const sid of new Set(h.story_ids)) {
       const c = counts.get(sid) ?? {};
       c[h.artifact.studio] = (c[h.artifact.studio] ?? 0) + 1;
       counts.set(sid, c);

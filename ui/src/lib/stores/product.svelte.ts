@@ -190,8 +190,6 @@ class ProductStore {
   // ── Loading flags ──────────────────────────────────────────────────────────
   loadingStories = $state(false);
   loadingDetail = $state(false);
-  loadingVersions = $state(false);
-  loadingAnalyses = $state(false);
   loadingQuestions = $state(false);
   loadingNotes = $state(false);
   loadingEvents = $state(false);
@@ -276,7 +274,7 @@ class ProductStore {
     this.transcriptPageBeforeSearch = null;
     this.transcriptsError = ''; this.transcriptBodies = {}; this.transcriptBodyErrors = {}; this.transcriptBodyLoading = {};
     this.transcriptBodyOrder = []; this.transcriptBodyRequests.clear(); this.transcriptSearchRows = [];
-    this.loadingDetail = false; this.loadingVersions = false; this.loadingAnalyses = false;
+    this.loadingDetail = false;
     this.loadingQuestions = false; this.loadingNotes = false; this.loadingEvents = false;
     this.loadingTestcases = false; this.loadingTranscripts = false;
   }
@@ -640,13 +638,8 @@ class ProductStore {
   async loadVersions(): Promise<void> {
     const id = this.storyId();
     const current = this.owner('loadVersions', false);
-    this.loadingVersions = true;
-    try {
-      const rows = await api.get<ProductStoryVersion[]>(`/product/stories/${id}/versions`);
-      if (current()) this.versions = rows;
-    } finally {
-      if (current()) this.loadingVersions = false;
-    }
+    const rows = await api.get<ProductStoryVersion[]>(`/product/stories/${id}/versions`);
+    if (current()) this.versions = rows;
   }
 
   async getVersion(vid: string): Promise<ProductStoryVersion> {
@@ -674,13 +667,8 @@ class ProductStore {
   async loadAnalyses(): Promise<void> {
     const id = this.storyId();
     const current = this.owner('loadAnalyses', false);
-    this.loadingAnalyses = true;
-    try {
-      const rows = await api.get<ProductAnalysis[]>(`/product/stories/${id}/analyses`);
-      if (current()) this.analyses = rows;
-    } finally {
-      if (current()) this.loadingAnalyses = false;
-    }
+    const rows = await api.get<ProductAnalysis[]>(`/product/stories/${id}/analyses`);
+    if (current()) this.analyses = rows;
   }
 
   async getAnalysis(aid: string): Promise<ProductAnalysisDetail> {

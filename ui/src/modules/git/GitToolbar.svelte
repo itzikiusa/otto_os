@@ -68,21 +68,25 @@
   }
 
   // The repo's EFFECTIVE pull mode (its `pull.rebase`/`pull.ff` config), loaded
-  // once per repo so the button says what it will actually do. A failure here is
-  // cosmetic — fall back to the git default.
-  let pullMode = $state<PullMode>('merge');
+  // once per repo so the button says what it will actually do. Until it is
+  // known (or when the read fails) the button says plain "Pull": guessing
+  // "merge" mislabelled a repo configured to rebase.
+  let pullMode = $state<PullMode | null>(null);
   let pullModeFor = '';
   $effect(() => {
     const id = repoId;
     if (pullModeFor === id) return;
     pullModeFor = id;
-    pullMode = 'merge';
+    pullMode = null;
     void api
       .get<PullModeResp>(`/repos/${id}/pull-mode`)
       .then((r) => {
         if (pullModeFor === id) pullMode = r.mode;
       })
-      .catch(() => {});
+      .catch(() => {
+        // Not sticky: the next time this repo is shown, read it again.
+        if (pullModeFor === id) pullModeFor = '';
+      });
   });
 
   const MODE_LABEL: Record<PullMode, string> = {
@@ -90,6 +94,7 @@
     rebase: 'rebase',
     ff_only: 'ff-only',
   };
+  const pullLabel = $derived(pullMode ? `Pull (${MODE_LABEL[pullMode]})` : 'Pull');
 
   async function doPull(mode?: PullMode): Promise<void> {
     busy = 'pull';
@@ -127,7 +132,7 @@
       { id: 'git.fetch', title: 'Fetch', group: 'Git', keywords: 'remote refresh update', run: () => void doFetch() },
       ...(isDetached
         ? []
-        : [{ id: 'git.pull', title: `Pull (${MODE_LABEL[pullMode]})`, group: 'Git', keywords: 'upstream merge rebase', run: () => void doPull() }]),
+        : [{ id: 'git.pull', title: pullLabel, group: 'Git', keywords: 'upstream merge rebase', run: () => void doPull() }]),
       ...(canPush
         ? [{ id: 'git.push', title: upstream ? 'Push' : 'Publish branch', group: 'Git', keywords: `upload ${branch}`, run: () => void doPush() }]
         : []),
@@ -264,7 +269,7 @@
   <button
     class="btn small ghost tbtn"
     data-icon="arrowDown"
-    data-label="Pull ({MODE_LABEL[pullMode]})"
+    data-label={pullLabel}
     disabled={busy !== '' || detached}
     onclick={() => void doPull()}
     title={detached
@@ -272,7 +277,7 @@
       : "Pull from upstream using the repo’s configured mode"}
   >
     <Icon name="arrowDown" size={12} />
-    {busy === 'pull' ? 'Pulling…' : `Pull (${MODE_LABEL[pullMode]})`}
+    {busy === 'pull' ? 'Pulling…' : pullLabel}
   </button>
   <button
     class="btn small ghost tbtn caret"

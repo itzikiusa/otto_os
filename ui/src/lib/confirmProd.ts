@@ -32,6 +32,19 @@ export interface ProdConfirm {
 
 const PREVIEW_MAX = 400;
 
+/** The ONE wording every typed gate uses when the typed text doesn't match
+ *  (confirmProd, the database gate, ImportDialog, agent-driven typed confirms):
+ *  a calm "nothing happened", not a blame line. */
+export const TYPED_MISMATCH = {
+  title: 'Nothing was changed',
+  body: 'What you typed didn’t match, so the action was canceled.',
+} as const;
+
+/** Toast the shared typed-mismatch wording. */
+export function toastTypedMismatch(): void {
+  toasts.info(TYPED_MISMATCH.title, TYPED_MISMATCH.body);
+}
+
 /** True when `env` names a production target. */
 export function isProdEnv(env: string | null | undefined): boolean {
   return envTone(env).key === 'prod';
@@ -67,7 +80,7 @@ export async function confirmProd(o: ProdConfirm): Promise<boolean> {
     });
     if (v === null) return false;
     if (v !== o.typed) {
-      toasts.info('Nothing was changed', 'What you typed didn’t match, so the action was canceled.');
+      toastTypedMismatch();
       return false;
     }
     return true;

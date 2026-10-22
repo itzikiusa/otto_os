@@ -6,6 +6,7 @@
   // (ClickHouse off / monitoring disabled) so the box is never blank for a
   // user who has clusters but no metrics.
   import { untrack } from 'svelte';
+  import { radioKey } from '../../../lib/radioKey';
   import Icon from '../../../lib/components/Icon.svelte';
   import EmptyState from '../../../lib/components/EmptyState.svelte';
   import LoadState from '../../../lib/components/LoadState.svelte';
@@ -114,7 +115,7 @@
       <span class="spacer"></span>
       <div class="seg" role="radiogroup" aria-label="Window">
         {#each WINDOWS as w (w)}
-          <button class:on={w === win} role="radio" aria-checked={w === win} tabindex={w === win ? 0 : -1} onclick={() => home.updateBoxConfig(viewId, box.id, { window: w })}>{w}</button>
+          <button class:on={w === win} role="radio" aria-checked={w === win} tabindex={w === win ? 0 : -1} onkeydown={radioKey} onclick={() => home.updateBoxConfig(viewId, box.id, { window: w })}>{w}</button>
         {/each}
       </div>
     </div>

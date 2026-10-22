@@ -13,8 +13,6 @@ import type {
   MergeConflictStatus,
   MergePreview,
   MergeResult,
-  PrListResp,
-  PrSummary,
   PullMode,
   PullReq,
   PullResp,
@@ -141,10 +139,6 @@ class GitStore {
   allRepos: Repo[] = $state([]);
   primary: Repo | null = $state(null);
   primaryStatus: RepoStatusResp | null = $state.raw(null);
-  prs: PrSummary[] = $state([]);
-  prsLoading = $state(false);
-  /** Non-null when the last PR fetch failed (e.g. bad token / 401). */
-  prError: string | null = $state(null);
   loading = $state(false);
   /** True while detecting a repo from a session's cwd. */
   detecting = $state(false);
@@ -159,11 +153,10 @@ class GitStore {
    *  `loadRepos` that lands after it must not replace it with `repos[0]`. */
   private detectedRepoId: Id | null = null;
   // Stale-response guards (S13-03): switching workspace / focused session
-  // A→B used to let A's slower status / PR list / repo list land last and
-  // show repo A's branch and PRs under repo B's name.
+  // A→B used to let A's slower status / repo list land last and show repo
+  // A's branch under repo B's name.
   private reposGen = latestOnly();
   private primaryGen = latestOnly();
-  private prsGen = latestOnly();
   private detectGen = latestOnly();
 
   // ── Git page top-level repo tabs (GitKraken-style, workspace-independent) ──
@@ -383,7 +376,6 @@ class GitStore {
       this.repos = repos;
       this.primary = this.repos[0] ?? null;
       this.primaryStatus = null;
-      this.prs = [];
       if (this.primary) {
         await this.selectPrimary(this.primary);
       }
@@ -392,7 +384,6 @@ class GitStore {
       this.repos = [];
       this.primary = null;
       this.primaryStatus = null;
-      this.prs = [];
       // Not sticky: the next loadRepos for this workspace retries — the
       // panel's Retry, or App's retry on window focus (S13-305).
       this.loadedFor = null;
@@ -402,9 +393,10 @@ class GitStore {
     }
   }
 
-  /** Make `repo` the primary repo and load its status + PRs. A later
-   *  selection supersedes this one: its status/PRs are then dropped (the
-   *  per-repo status cache still takes them — they are keyed by repo). */
+  /** Make `repo` the primary repo and load its status. A later selection
+   *  supersedes this one: its status is then dropped (the per-repo status
+   *  cache still takes it — it is keyed by repo). The PR tab and FocusView
+   *  fetch their own PR lists. */
   async selectPrimary(repo: Repo): Promise<void> {
     const t = this.primaryGen.begin();
     this.primary = repo;
@@ -417,29 +409,6 @@ class GitStore {
     } catch {
       if (!t.current || this.primary?.id !== repo.id) return;
       this.primaryStatus = null;
-    }
-    void this.loadPrs(repo.id);
-  }
-
-  async loadPrs(repoId: Id): Promise<void> {
-    const t = this.prsGen.begin();
-    this.prsLoading = true;
-    this.prError = null;
-    // Results for a repo that is no longer primary (or superseded by a newer
-    // load) are dropped — they would list repo A's PRs under repo B.
-    const mine = () => t.current && (this.primary === null || this.primary.id === repoId);
-    try {
-      const items = (await api.get<PrListResp>(`/repos/${repoId}/prs?state=open`)).items;
-      if (!mine()) return;
-      this.prs = items;
-    } catch (e) {
-      if (!mine()) return;
-      this.prs = [];
-      // Surface the upstream reason (e.g. a 401 bad token) instead of a
-      // misleading "no pull requests".
-      this.prError = loadErrorText(e);
-    } finally {
-      if (t.current) this.prsLoading = false;
     }
   }
 
@@ -485,7 +454,6 @@ class GitStore {
       this.setStatus(repo.id, s);
       if (this.primary?.id !== repo.id) return; // primary moved on meanwhile
       this.primaryStatus = s;
-      void this.loadPrs(repo.id);
     } catch {
       /* keep stale status */
     }

@@ -3,6 +3,7 @@
 // a branch switch never pulls — so its reporting (conflicted merge, dirty-tree
 // retry, ff-only refusal) must read identically from all three call sites.
 import { api, isDirtyGitRefusal } from '../../lib/api/client';
+import { loadErrorText } from '../../lib/loadError';
 import type { PullMode, PullReq, PullResp, RepoStatusResp } from '../../lib/api/types';
 import { toasts } from '../../lib/toast.svelte';
 import { confirmer } from '../../lib/confirm.svelte';
@@ -61,6 +62,6 @@ export async function runPull(
       if (ok) await runPull(repoId, onstatus, { ...opts, autoStash: true });
       return;
     }
-    toasts.error('Couldn’t pull', msg);
+    toasts.error('Couldn’t pull', loadErrorText(e));
   }
 }

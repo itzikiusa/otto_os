@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { radioKey } from '../../radioKey';
   import { plural } from '../../plural';
   // Scene inspector — the game-studio right panel. With nothing selected it shows
   // the SCENE (background, grid) and CAMERA panels; an object gets Transform +
@@ -273,6 +274,8 @@
                   <button
                     role="radio"
                     aria-checked={mat.preset === p.id}
+                    tabindex={mat.preset === p.id ? 0 : -1}
+                    onkeydown={radioKey}
                     class="s3d-preset {p.id}"
                     class:on={mat.preset === p.id}
                     title={p.hint}
@@ -293,6 +296,8 @@
                       <button
                         role="radio"
                         aria-checked={mat.color === sw.ref}
+                        tabindex={mat.color === sw.ref ? 0 : -1}
+                        onkeydown={radioKey}
                         class="s3d-swatch"
                         class:on={mat.color === sw.ref}
                         style:--sw={sw.value}

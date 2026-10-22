@@ -371,8 +371,11 @@
     const host = scrollHost();
     if (!host || !tbodyEl) return;
     let raf = 0;
+    // `win` is read untracked: it changes every scrolled frame, and tracking it
+    // here tore down and re-added both listeners (plus queued an extra measure)
+    // per frame. The effect depends only on the host/tbody elements.
     const onMove = (): void => {
-      if (raf || !win) return;
+      if (raf || !untrack(() => win)) return;
       raf = requestAnimationFrame(() => {
         raf = 0;
         measure();
@@ -387,12 +390,15 @@
       if (raf) cancelAnimationFrame(raf);
     };
   });
-  // Re-measure once the rendered slice / expanded detail changes.
+  // Re-measure once the rendered slice / expanded detail changes. Keyed on the
+  // slice BOUNDS (a string, so equal bounds don't re-fire): `shown` is a fresh
+  // array on every `win` change, which re-measured on every scrolled frame.
+  const sliceKey = $derived(win ? `${win.start}:${win.end}` : 'all');
   $effect(() => {
-    void shown;
+    void sliceKey;
     void expanded;
     void seriesLoading;
-    if (win) void tick().then(() => untrack(measure));
+    if (untrack(() => win)) void tick().then(() => untrack(measure));
   });
 
   function fmtTs(ts: string): string {

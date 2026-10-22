@@ -5,9 +5,9 @@
 
 import * as design from '../../lib/api/design';
 import type { CreateDesignArtifactReq, DesignArtifactFormat, DesignStudio } from '../../lib/api/types';
-import { DESIGN_TEMPLATES, blankSource, type DesignTemplate } from '../product/design/templates';
+import { DESIGN_TEMPLATES, blankSource, type DesignTemplate } from '../../lib/design/templates';
 import { emptyScene, serializeScene, studioScene } from '../../lib/design/scene3d';
-import { fileToB64 } from '../product/design/format';
+import { fileToB64 } from '../../lib/design/format';
 import { brandStarter, formatForFile, isTextFormat, studioInfo } from './model';
 import { SITE_TEMPLATES, starterSite } from './site/engine/templates';
 import { serializeSite } from './site/engine/ops';

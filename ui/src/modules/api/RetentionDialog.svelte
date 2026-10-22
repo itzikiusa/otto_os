@@ -4,7 +4,6 @@
   // automation. 0 = no limit. Saving applies the limits right away.
   import Modal from '../../lib/components/Modal.svelte';
   import { toastError } from '../../lib/toastError';
-  import { ws } from '../../lib/stores/workspace.svelte';
   import { apiClient } from '../../lib/stores/apiClient.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { formatBytes } from './storageGauge';
@@ -13,11 +12,11 @@
   let { onclose }: Props = $props();
 
   // svelte-ignore state_referenced_locally
-  let rows = $state(String(ws.apiHistoryRetention.rows));
+  let rows = $state(String(apiClient.historyRetention.rows));
   // svelte-ignore state_referenced_locally
-  let days = $state(String(ws.apiHistoryRetention.days));
+  let days = $state(String(apiClient.historyRetention.days));
   // svelte-ignore state_referenced_locally
-  let runs = $state(String(ws.apiRunsKeep));
+  let runs = $state(String(apiClient.runsKeep));
   let busy = $state(false);
 
   const parse = (v: string): number | null => {
@@ -39,8 +38,8 @@
     if (r === null || d === null || k === null) return;
     busy = true;
     try {
-      await ws.setApiHistoryRetention(r, d);
-      if (k !== ws.apiRunsKeep) await ws.setApiRunsKeep(k);
+      await apiClient.setHistoryRetention(r, d);
+      if (k !== apiClient.runsKeep) await apiClient.setRunsKeep(k);
       const applied = r || d || k ? await apiClient.applyRetention() : true;
       if (applied) toasts.success('Retention saved', r || d || k ? 'Applied now, and after every request or run.' : 'Everything is kept.');
       onclose();

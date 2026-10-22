@@ -153,8 +153,8 @@
   <div class="scroll" bind:this={listEl} onscroll={onScroll} data-testid="assistant-thread">
     <div class="col">
       {#if loading}
-        <div class="state" role="status" aria-busy="true" aria-label="Loading the conversation">
-          <Skeleton rows={4} height={44} />
+        <div class="state">
+          <Skeleton rows={4} height={44} label="the conversation" />
         </div>
       {:else if failed}
         <LoadState variant="compact" what="this conversation" error={index?.error || 'No details were reported.'} empty onretry={() => void assistant.loadTurns(thread.id)} />

@@ -11,7 +11,7 @@ import type { DesignArtifact, DesignProject, DesignSearchHit } from '../../lib/a
 import { designBus, type DesignBusEvent } from '../../lib/events.svelte';
 import { ws } from '../../lib/stores/workspace.svelte';
 import { auth } from '../../lib/stores/auth.svelte';
-import type { StoryRef } from './model';
+import { storyKeysFor, type StoryRef } from './model';
 
 function errText(e: unknown): string {
   return loadErrorText(e);
@@ -99,11 +99,11 @@ class DesignLibrary {
     return id ? this.#projectById.get(id) : undefined;
   }
 
-  /** Story keys ("LOY-142") an artifact implements, resolved where known. */
+  /** Story keys ("LOY-142") an artifact implements, resolved where known —
+   *  each once (two stories can't share a key, and a chip list keyed by it
+   *  must never see a repeat). */
   storyKeys(artifactId: string): string[] {
-    const h = this.hitOf(artifactId);
-    if (!h) return [];
-    return h.story_ids.map((sid) => this.stories[sid]?.source_key).filter((k): k is string => !!k);
+    return storyKeysFor(this.hitOf(artifactId)?.story_ids ?? [], this.stories);
   }
 
   async load(): Promise<void> {
@@ -122,7 +122,7 @@ class DesignLibrary {
       this.truncated = hits.length >= LIBRARY_LIMIT;
       this.error = null;
       this.loaded = true;
-      void this.resolveStories(my);
+      void this.resolveStories();
     } catch (e) {
       if (my !== this.seq) return;
       this.error = errText(e);
@@ -215,7 +215,7 @@ class DesignLibrary {
    * other workspaces one by one. Product may not be granted — then chips just
    * stay unlabeled.
    */
-  private async resolveStories(my: number): Promise<void> {
+  private async resolveStories(): Promise<void> {
     const wanted = new Set<string>();
     for (const h of this.hits) for (const s of h.story_ids) wanted.add(s);
     for (const p of this.projects) if (p.epic_story_id) wanted.add(p.epic_story_id);
@@ -266,7 +266,11 @@ class DesignLibrary {
         }
       }),
     );
-    if (my === this.seq || this.loaded) this.stories = next;
+    // MERGE into the live map, never replace it: two loads overlap routinely
+    // (refreshSoon on design events), and the second skips the workspace list
+    // the first already fetched — its `next` must not drop the first's rows.
+    // A superseded load only ever ADDS stories, so no seq gate is needed.
+    this.stories = { ...this.stories, ...next };
   }
 }
 

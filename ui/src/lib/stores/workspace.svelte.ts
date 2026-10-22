@@ -31,6 +31,7 @@ import { applyStatusPatches, canDropExited, patchSessionIn, staleStatusIds, type
 import { bucketSessions, idChunks, isForeground, isShownKind, shownListQuery } from './sessionBuckets';
 import { whenIdle } from '../lazy-component.svelte';
 import { toastError } from '../toastError';
+import { loadErrorText } from '../loadError';
 import { flaggedIds, forget, mergeAttention, noticeIsNew, parseAttention, raise, see, serializeAttention, type Attention } from '../attention';
 
 /** Persisted raise/seen times behind the "needs you" flag (lib/attention.ts). */
@@ -614,6 +615,10 @@ class WorkspaceStore {
       this.sessions = [];
       this.otherWsSessions = [];
       this.openTabs = [];
+      // The previous workspace's runs must not show under this one while its
+      // sessions load (or forever, if that load fails); a late refresh for
+      // the old id is dropped against this new target.
+      workflowRuns.clear(id);
     }
     const generation = ++this.selectionGeneration;
     this.currentId = id;
@@ -925,6 +930,11 @@ class WorkspaceStore {
       const boot =
         this.bootSessions && this.bootSessions.key === `${getToken()}|${wsId}|${q}` ? this.bootSessions : null;
       if (boot) this.bootSessions = null;
+      // Ids whose `?ids=` chunk FAILED. A failed chunk (timeout, 5xx, the
+      // daemon going down mid-resync) says nothing about those sessions, and
+      // reading it as "gone" closed the user's tabs and panes for good
+      // (error-handling-3-03) — so reconcile never prunes them.
+      const unknown = new Set<Id>();
       const [own, scratch, pinned] = await Promise.all([
         boot ? boot.own : wsId ? api.get<Session[]>(`/workspaces/${wsId}/sessions${q}`) : Promise.resolve([]),
         boot
@@ -934,7 +944,10 @@ class WorkspaceStore {
           idChunks(this.pinnedIds()).map((chunk) =>
             api
               .get<Session[]>(`/sessions?ids=${chunk.map(encodeURIComponent).join(',')}`)
-              .catch(() => [] as Session[]),
+              .catch(() => {
+                for (const id of chunk) unknown.add(id);
+                return [] as Session[];
+              }),
           ),
         ).then((pages) => pages.flat()),
       ]);
@@ -943,7 +956,9 @@ class WorkspaceStore {
       const all: Session[] = [];
       // Fetch-by-id rows span every workspace (`GET /sessions`): keep this
       // one's + scratch's.
-      for (const s of [...own, ...scratch, ...pinned.filter((p) => this.belongsHere(p.workspace_id))]) {
+      // A row whose by-id fetch failed keeps its last known copy.
+      const kept = this.sessions.filter((s) => unknown.has(s.id));
+      for (const s of [...own, ...scratch, ...pinned.filter((p) => this.belongsHere(p.workspace_id)), ...kept]) {
         if (seen.has(s.id)) continue;
         seen.add(s.id);
         all.push(s);
@@ -981,9 +996,9 @@ class WorkspaceStore {
       this.sessions = next;
       for (const s of next) this.statusMap[s.id] = s.status;
       this.pruneStatusMap();
-      if (opts.reconcile !== false) this.reconcileTabs();
+      if (opts.reconcile !== false) this.reconcileTabs(unknown);
     } catch (e) {
-      if (current()) this.sessionsError = e instanceof Error ? e.message : String(e);
+      if (current()) this.sessionsError = loadErrorText(e);
     } finally {
       if (current()) this.sessionsLoading = false;
     }
@@ -992,10 +1007,11 @@ class WorkspaceStore {
   /** Drop tabs/panes that reference a session no longer present (a "phantom"
    *  tab left behind when a session ends or is reaped server-side without a
    *  `session_removed` event reaching this client). Keeps the DB-Explorer
-   *  sentinel pane, which has no session row. */
-  private reconcileTabs(): void {
+   *  sentinel pane, which has no session row. Ids in `unknown` (their by-id
+   *  fetch failed this refresh) are kept: absence there is not evidence. */
+  private reconcileTabs(unknown: ReadonlySet<Id> = new Set()): void {
     const exists = (t: Id): boolean =>
-      t === DB_PANE_ID || this.sessionById.has(t);
+      t === DB_PANE_ID || this.sessionById.has(t) || unknown.has(t);
     const tabs = this.openTabs.filter(exists);
     if (tabs.length !== this.openTabs.length) {
       this.openTabs = tabs;
@@ -2090,51 +2106,6 @@ class WorkspaceStore {
   async saveNotes(notes: string, wsId: Id | null = this.currentId): Promise<void> {
     if (!wsId) return;
     await this.patchSettings(wsId, { notes });
-  }
-
-  /** API-client opt-in: allow requests to localhost/private networks from this
-   *  workspace. Reads `settings.api_client.allow_local` (off by default). */
-  get apiAllowLocal(): boolean {
-    return this.current?.settings?.api_client?.allow_local === true;
-  }
-
-  /** Toggle the API client's local/private-target opt-in (admin-gated by the
-   *  workspaces PATCH route). Shallow-merges into the settings JSON. */
-  async setApiAllowLocal(allow: boolean): Promise<void> {
-    if (!this.currentId || !this.current) return;
-    await this.patchSettings(this.currentId, { api_client: { allow_local: allow } });
-  }
-
-  /** API-client history retention for this workspace (the daemon trims after
-   *  every run): `settings.api_client.history_max_rows` / `history_max_days`,
-   *  default 0 / 0 = keep everything (opt-in); 0 disables that limit. */
-  get apiHistoryRetention(): { rows: number; days: number } {
-    const api = this.current?.settings?.api_client;
-    const pick = (v: unknown, fallback: number): number =>
-      typeof v === 'number' && Number.isInteger(v) && v >= 0 ? v : fallback;
-    // 0 = no limit: retention is opt-in (pruning deletes recorded runs).
-    return { rows: pick(api?.history_max_rows, 0), days: pick(api?.history_max_days, 0) };
-  }
-
-  /** Set the API-client history retention (admin-gated by the workspaces
-   *  PATCH route). Shallow-merges into the settings JSON. */
-  async setApiHistoryRetention(rows: number, days: number): Promise<void> {
-    if (!this.currentId || !this.current) return;
-    await this.patchSettings(this.currentId, { api_client: { history_max_rows: rows, history_max_days: days } });
-  }
-
-  /** Newest finished automation runs kept per automation
-   *  (`settings.api_client.automation_runs_keep`; 0 = keep all, the opt-in
-   *  default). */
-  get apiRunsKeep(): number {
-    const v = this.current?.settings?.api_client?.automation_runs_keep;
-    return typeof v === 'number' && Number.isInteger(v) && v >= 0 ? v : 0;
-  }
-
-  /** Set the run-history retention (same admin-gated PATCH, shallow merge). */
-  async setApiRunsKeep(keep: number): Promise<void> {
-    if (!this.currentId || !this.current) return;
-    await this.patchSettings(this.currentId, { api_client: { automation_runs_keep: keep } });
   }
 
   /** Set this workspace's default agent CLI. '' clears it (use the global

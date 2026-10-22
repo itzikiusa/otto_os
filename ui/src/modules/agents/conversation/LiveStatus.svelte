@@ -7,6 +7,9 @@
   //     AskUserQuestion) on the terminal screen. Otto can't answer those for
   //     you from here (the transcript doesn't carry the prompt's options), so
   //     the card says what is being asked and opens the terminal to answer.
+  // None of these blocks is a live region: ConversationView's edge-only
+  // announcer speaks working / finished / waiting once. A `role="status"` here
+  // re-read every tool step ("Reading …", "Running …") over the user.
   import Icon from '../../../lib/components/Icon.svelte';
   import { now } from '../../../lib/stores/now.svelte';
   import { askQuestions, fmtDuration, toolLine, type ToolCallBlock } from './format';
@@ -47,20 +50,20 @@
 </script>
 
 {#if mode === 'working' && stale}
-  <div class="live-line stale" data-live-status="stale" role="status" title={staleHint}>
+  <div class="live-line stale" data-live-status="stale" title={staleHint}>
     <Icon name="refresh" size={12} />
     <span class="who">Reconnecting…</span>
     <span class="doing"><span class="sep" aria-hidden="true">·</span> {agentName} was working when live updates paused</span>
   </div>
 {:else if mode === 'working'}
-  <div class="live-line" data-live-status="working" role="status">
+  <div class="live-line" data-live-status="working">
     <span class="spinner" style:--spinner-size="11px" aria-hidden="true"></span>
     <span class="who">{agentName} is working</span>
     <span class="doing" title={line?.hint || doing}><span class="sep" aria-hidden="true">·</span> <span class:mono={!!line?.mono}>{doing}</span></span>
     {#if elapsed}<span class="elapsed" aria-hidden="true">{elapsed}</span>{/if}
   </div>
 {:else}
-  <div class="waiting" data-live-status="waiting" role="status">
+  <div class="waiting" data-live-status="waiting">
     <div class="w-head">
       <Icon name="warning" size={14} />
       <span class="w-title">{agentName} is waiting for you</span>

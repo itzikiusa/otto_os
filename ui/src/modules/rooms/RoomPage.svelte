@@ -76,7 +76,7 @@
     const invite = roomInvite(roomId); if (!invite || !name.trim()) return;
     joining = true; error = '';
     try { rememberRoom(location.origin, await joinRoom(location.origin, roomId, invite, name.trim())); needsName = false; attach(); }
-    catch (e) { error = e instanceof Error ? e.message : 'Could not join. Ask the host for a fresh invitation.'; }
+    catch (e) { error = e instanceof Error ? e.message : 'Couldn’t join. Ask the host for a fresh invitation.'; }
     finally { joining = false; }
   }
   function receive(event: RoomEvent) {
@@ -122,12 +122,12 @@
   async function makeInvite() {
     inviting = true; inviteError = ''; copied = false;
     try { const { api } = await import('../../lib/api/client'); invitation = await api.post<RoomInvite>(`/rooms/${encodeURIComponent(roomId)}/invites`, {role: inviteRole}); }
-    catch (e) { inviteError = e instanceof Error ? e.message : 'Could not create an invitation. Try again.'; }
+    catch (e) { inviteError = e instanceof Error ? e.message : 'Couldn’t create an invitation. Try again.'; }
     finally { inviting = false; }
   }
   async function copyInvite() {
     if (!invitation) return;
-    try { await copyTextOrThrow(invitation.url); copied = true; } catch { inviteError = 'Could not copy. Select and copy the invitation link below.'; }
+    try { await copyTextOrThrow(invitation.url); copied = true; } catch { inviteError = 'Couldn’t copy. Select and copy the invitation link below.'; }
   }
 </script>
 <div class="room-page">

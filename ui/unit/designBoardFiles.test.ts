@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { componentFunctions } from './componentFunctions.ts';
 
-const boardPath = new URL('../src/modules/product/design/DesignBoard.svelte', import.meta.url);
+const boardPath = new URL('../src/lib/design/DesignBoard.svelte', import.meta.url);
 const scene = JSON.stringify({
   elements: [],
   files: {

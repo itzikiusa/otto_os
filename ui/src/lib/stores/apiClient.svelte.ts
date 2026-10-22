@@ -8,32 +8,11 @@ import type { ApiAutomationRun, StartApiAutomationRunReq } from '../api/types';
 import { api, isAbortError, newHostConfirmHost } from '../api/client';
 import { confirmer } from '../confirm.svelte';
 import type {
-  ApiAuth,
-  ApiAutomation,
-  ApiBodyMode,
-  ApiClientStorage,
-  ApiCollection,
-  ApiEnvironment,
-  ApiHistoryEntry,
-  ApiHistorySummary,
-  ApiKeyVal,
-  ApiOverviewRequest,
-  ApiRequest,
-  ApiRequestItem,
-  ApiRequestExtras,
-  ApiResponse,
-  ApiRunResult,
-  ApiSecretable,
-  Connection,
-  ExecuteApiReq,
-  GrpcInvokeReq,
-  Id,
-  ImportCurlReq,
-  ParsedCurl,
-  UpsertApiAutomationReq,
-  UpsertApiCollectionReq,
-  UpsertApiEnvironmentReq,
-  UpsertApiRequestReq,
+  ApiAuth, ApiAutomation, ApiBodyMode, ApiClientWsSettings, ApiClientStorage, ApiCollection, ApiEnvironment,
+  ApiHistoryEntry, ApiHistorySummary, ApiKeyVal, ApiOverviewRequest, ApiRequest, ApiRequestItem,
+  ApiRequestExtras, ApiResponse, ApiRunResult, ApiSecretable, Connection, ExecuteApiReq, GrpcInvokeReq, Id,
+  ImportCurlReq, ParsedCurl, UpsertApiAutomationReq, UpsertApiCollectionReq, UpsertApiEnvironmentReq,
+  UpsertApiRequestReq
 } from '../api/types';
 import { isSecretRef } from '../api/types';
 import { forDuplicate, stripSecretsForStorage, unmaskHistory } from '../api/apiSecretShapes';
@@ -46,12 +25,7 @@ import type { PreRequestReq, TestResult } from '../api/scripts';
 import { runScript } from '../api/scriptRunner';
 import { parseGraphqlVariables } from '../../modules/api/graphqlVars';
 import {
-  detectAndParse,
-  collectionToPostman,
-  isImportedEnvironment,
-  environmentUpsertFor,
-  type ImportedDoc,
-  type ImportedEnvironment,
+  detectAndParse, collectionToPostman, isImportedEnvironment, environmentUpsertFor, type ImportedDoc, type ImportedEnvironment,
 } from '../api/importers';
 
 /** Request transport: classic HTTP, server-sent events, WebSocket, or gRPC. */
@@ -332,6 +306,9 @@ function sanitizeDraft(raw: unknown): ApiDraft | null {
   };
 }
 
+/** A non-negative integer setting, else 0 ("no limit"). */
+const countOr0 = (v: unknown): number => (typeof v === 'number' && Number.isInteger(v) && v >= 0 ? v : 0);
+
 class ApiClientStore {
   // Raw: both lists are replaced wholesale (map/filter/spread), and a deep
   // proxy made every tree filter read 3k proxied rows per keystroke.
@@ -372,6 +349,27 @@ class ApiClientStore {
   requestViewTick = $state(0);
   showRequestView(): void {
     this.requestViewTick++;
+  }
+
+  // Workspace `settings.api_client` — owned here, not by the shell's ws store
+  // (architecture-2-03). Writes are admin-gated atomic key patches.
+  private get wsSettings(): ApiClientWsSettings | undefined { return ws.current?.settings?.api_client; }
+  /** Opt-in for localhost/private-network targets (`allow_local`, off by default). */
+  get allowLocal(): boolean { return this.wsSettings?.allow_local === true; }
+  /** History retention (`history_max_rows` / `history_max_days`; the daemon
+   *  trims after every run). 0 = no limit: pruning deletes runs, so it is opt-in. */
+  get historyRetention(): { rows: number; days: number } {
+    return { rows: countOr0(this.wsSettings?.history_max_rows), days: countOr0(this.wsSettings?.history_max_days) };
+  }
+  /** Newest finished runs kept per automation (`automation_runs_keep`; 0 = all). */
+  get runsKeep(): number { return countOr0(this.wsSettings?.automation_runs_keep); }
+  setAllowLocal(allow: boolean): Promise<void> { return this.patchWsSettings({ allow_local: allow }); }
+  setHistoryRetention(rows: number, days: number): Promise<void> {
+    return this.patchWsSettings({ history_max_rows: rows, history_max_days: days });
+  }
+  setRunsKeep(keep: number): Promise<void> { return this.patchWsSettings({ automation_runs_keep: keep }); }
+  private async patchWsSettings(patch: ApiClientWsSettings): Promise<void> {
+    if (ws.currentId && ws.current) await ws.patchSettings(ws.currentId, { api_client: patch });
   }
 
   /** Load the current workspace's API client unless this document already

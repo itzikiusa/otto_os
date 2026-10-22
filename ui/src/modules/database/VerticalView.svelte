@@ -37,9 +37,9 @@
     planExpansion,
     setExpansionMode,
     type ExpansionState,
-  } from './expansion-plan';
+  } from '../../lib/jsonTree/expansion-plan';
   import { ALT_BATCH, cellStr, copyWithToast, isComplex, prettyJson, SET_EMPTY, SET_NULL } from './results-format';
-  import { LineIndex, revealSteps, type FindTop, type RevealState } from './json-find';
+  import { LineIndex, revealSteps, type FindTop, type RevealState } from '../../lib/jsonTree/json-find';
 
   interface Props {
     result: QueryResult;

@@ -17,6 +17,7 @@
   import { swarm } from '../../lib/stores/swarm.svelte';
   import type { SwarmRun, SwarmMessage, TurnResult, TurnArtifact } from './types';
   import { copyTextOrThrow } from '../../lib/clipboard';
+  import { formatCount, formatUsd } from '../../lib/metric-format';
 
   /** Finding severity → Badge tone (a warning is not a selection). */
   const SEV_TONE: Record<string, BadgeTone> = { error: 'bad', warn: 'warn', info: 'neutral' };
@@ -73,14 +74,6 @@
     run.tokens_input != null || run.tokens_output != null || run.cost_usd != null,
   );
 
-  function fmtTokens(n?: number | null): string {
-    if (n == null) return '—';
-    return n.toLocaleString();
-  }
-  function fmtCost(n?: number | null): string {
-    if (n == null) return '—';
-    return `$${n < 0.01 && n > 0 ? n.toFixed(4) : n.toFixed(2)}`;
-  }
   /** Absolute local date-time ("21/10/2026, 14:03") — NOT the shared
    *  relative `rel()`; named apart so the two are never confused. */
   function fmtWhen(ts?: string | null): string {
@@ -160,15 +153,15 @@
     <div class="stats">
       <div class="stat">
         <span class="k">Input</span>
-        <span class="v mono">{fmtTokens(run.tokens_input)}</span>
+        <span class="v mono" title={run.tokens_input?.toLocaleString()}>{run.tokens_input == null ? '—' : formatCount(run.tokens_input)}</span>
       </div>
       <div class="stat">
         <span class="k">Output</span>
-        <span class="v mono">{fmtTokens(run.tokens_output)}</span>
+        <span class="v mono" title={run.tokens_output?.toLocaleString()}>{run.tokens_output == null ? '—' : formatCount(run.tokens_output)}</span>
       </div>
       <div class="stat">
         <span class="k">Cost</span>
-        <span class="v mono">{fmtCost(run.cost_usd)}</span>
+        <span class="v mono">{formatUsd(run.cost_usd)}</span>
       </div>
     </div>
     {#if !hasTokens}

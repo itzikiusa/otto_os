@@ -11,7 +11,7 @@
   import { loadErrorText } from '../lib/loadError';
   import { api, isAbortError } from '../lib/api/client';
   import type { Action, SearchHit } from '../lib/api/types';
-  import { untrack } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import { registry, type Command } from '../lib/commands.svelte';
   import { loadFrecency, rankCommands, recordUsage } from '../lib/commandSearch';
   import {
@@ -27,6 +27,7 @@
   import { toasts } from '../lib/toast.svelte';
   import { confirmer } from '../lib/confirm.svelte';
   import { applyClose } from '../lib/orchestrate';
+  import { closeConfirm } from './closeConfirm';
   import Icon, { type IconName } from '../lib/components/Icon.svelte';
   import { lsGet, lsSet } from '../lib/storage';
   import { copyText } from '../lib/clipboard';
@@ -55,6 +56,8 @@
   /** The element focused when the palette opened (restored on close). */
   let returnFocus: HTMLElement | null = null;
   let textareaEl: HTMLTextAreaElement | null = $state(null);
+  /** The proposed plan's heading: focused when a plan arrives, so it is read. */
+  let planTitleEl: HTMLElement | null = $state(null);
   let downOnBackdrop = false;
 
   // ---- cross-module search ----
@@ -221,6 +224,10 @@
   // ↑/↓ walk all three, so a cross-module hit is reachable without a mouse.
   const hitBase = $derived(filtered.length + (askRow ? 1 : 0));
   const totalRows = $derived(hitBase + searchHits.length);
+  // The combobox's live line (always mounted, OUTSIDE the listbox, which may
+  // only own options and groups): empty, searching, failed, or the hit count.
+  const statusText = $derived(searchError ? `Search failed: ${searchError}` : searchBusy ? 'Searching…'
+    : filtered.length === 0 && !askRow ? 'No matching commands' : searchHits.length > 0 ? plural(searchHits.length, 'result') : '');
 
   $effect(() => {
     void totalRows;
@@ -262,6 +269,13 @@
 
   function close(): void {
     ui.paletteOpen = false;
+  }
+
+  /** Drop the proposed plan and put focus back in the request box (the plan
+   *  block — and the focused Cancel inside it — is unmounted). */
+  function cancelPlan(): void {
+    plan = null;
+    queueMicrotask(() => textareaEl?.focus());
   }
 
   function toggleMode(): void {
@@ -329,7 +343,7 @@
     } else if (e.key === 'Escape') {
       e.preventDefault();
       e.stopPropagation();
-      if (plan) plan = null;
+      if (plan) cancelPlan();
       else close();
     }
   }
@@ -373,21 +387,8 @@
       case 'empty':
         return;
       case 'confirm-close': {
-        const n = out.ids.length;
-        const shown = out.titles.slice(0, 5).map((t) => `• ${t}`).join('\n');
-        const more = out.titles.length > 5 ? `\n…and ${out.titles.length - 5} more` : '';
-        const busyNote =
-          out.working > 0 ? `\n\n${plural(out.working, 'session')} ${out.working === 1 ? 'is' : 'are'} working right now and will stop mid-turn.` : '';
-        const ok = out.permanent
-          ? await confirmer.ask(
-              `Permanently delete ${plural(n, 'session')} and ${n === 1 ? 'its' : 'their'} history?\n\n${shown}${more}${busyNote}`,
-              { title: n === 1 ? 'Delete session?' : 'Delete sessions?', confirmLabel: 'Delete', danger: true },
-            )
-          : await confirmer.ask(
-              `Archive ${plural(n, 'session')}? ${n === 1 ? 'It stops and keeps its' : 'They stop and keep their'} history (resumable from the Archived list).\n\n${shown}${more}${busyNote}`,
-              { title: n === 1 ? 'Archive session?' : `Archive ${n} sessions?`, confirmLabel: n === 1 ? 'Archive session' : `Archive ${n} sessions` },
-            );
-        if (!ok || !ws.currentId) return;
+        const { message, ...opts } = closeConfirm(out);
+        if (!(await confirmer.ask(message, opts)) || !ws.currentId) return;
         const count = await applyClose(storeContext(ws.currentId), out.ids, out.permanent);
         toasts.success(
           out.permanent ? 'Sessions deleted' : 'Sessions closed',
@@ -425,6 +426,9 @@
       case 'plan':
         plan = out.plan;
         optimizedText = out.optimizedText;
+        // Move to the plan's heading so it is read ("Proposed plan…, N steps").
+        await tick();
+        planTitleEl?.focus();
         return;
       case 'executed': {
         if (out.fail === 0) toasts.success('Plan executed', `${plural(out.ok, 'action')} completed`);
@@ -470,7 +474,7 @@
       downOnBackdrop = false;
     }}
   >
-    <div class="palette glass-raised" use:dialogFocus={() => { if (plan) plan = null; else close(); }} role="dialog" aria-modal="true" aria-label="Command palette">
+    <div class="palette glass-raised" use:dialogFocus={() => { if (plan) cancelPlan(); else close(); }} role="dialog" aria-modal="true" aria-label="Command palette">
       <div class="pal-mode-row">
         <div class="segmented" role="group" aria-label="Palette mode">
           <button class:active={mode === 'commands'} aria-pressed={mode === 'commands'} onclick={() => mode !== 'commands' && toggleMode()}>
@@ -498,8 +502,10 @@
             aria-controls="pal-listbox"
             aria-autocomplete="list"
             aria-activedescendant={totalRows > 0 ? `pal-opt-${selected}` : undefined}
+            aria-describedby="pal-status"
           />
         </div>
+        <div class="pal-status" id="pal-status" role="status" class:pal-error={!!searchError}>{#if searchError}{statusText} <button class="btn small" onclick={() => scheduleSearch(query)}>Retry</button>{:else if searchHits.length > 0 && !searchBusy}<span class="sr-only">{statusText}</span>{:else}{statusText}{/if}</div>
         <div class="pal-list" role="listbox" id="pal-listbox" aria-label="Commands" bind:this={listEl}>
           {#each filtered as item, i (item.cmd.id)}
             <button
@@ -518,10 +524,6 @@
               {#if item.cmd.group}<span class="pal-group">{item.cmd.group}</span>{/if}
               {#if item.cmd.shortcut}<kbd>{item.cmd.shortcut}</kbd>{/if}
             </button>
-          {:else}
-            {#if !askRow}
-              <div class="pal-empty">No matching commands</div>
-            {/if}
           {/each}
           {#if askRow}
             <button
@@ -541,17 +543,9 @@
             </button>
           {/if}
 
-          {#if searchHits.length > 0 || searchBusy || searchError}
-            <div class="pal-section-header">
-              {searchBusy ? 'Searching…' : 'Results'}
-            </div>
-          {/if}
-          {#if searchError}
-            <div role="alert" class="pal-section-header">
-              Search failed: {searchError}
-              <button class="btn small" onclick={() => scheduleSearch(query)}>Retry</button>
-            </div>
-          {/if}
+          {#if searchHits.length > 0}
+          <div role="group" aria-label="Results">
+          <div class="pal-section-header" aria-hidden="true">Results</div>
           {#each searchHits as hit, h (hit.kind + ':' + hit.id)}
             <div
               class="pal-hit"
@@ -582,6 +576,8 @@
               </div>
             </div>
           {/each}
+          </div>
+          {/if}
         </div>
       {:else}
         <div class="pal-english">
@@ -629,17 +625,20 @@
 
           {#if plan}
             <div class="pal-plan">
-              <div class="pal-plan-title">Proposed plan — confirm to execute</div>
-              {#each plan as a, i (i)}
-                <div class="pal-plan-item">
-                  <span class="pal-plan-num">{i + 1}</span>
-                  {describeAction(a)}
-                </div>
+              <h3 class="pal-plan-title" tabindex="-1" bind:this={planTitleEl}>
+                Proposed plan — confirm to execute<span class="sr-only">, {plural(plan.length, 'step')}</span>
+              </h3>
+              {#if plan.length > 0}
+                <ol class="pal-plan-steps">
+                  {#each plan as a, i (i)}
+                    <li class="pal-plan-item">{describeAction(a)}</li>
+                  {/each}
+                </ol>
               {:else}
                 <div class="pal-empty">The planner found nothing to do. Try rephrasing the request.</div>
-              {/each}
+              {/if}
               <div class="pal-plan-actions">
-                <button class="btn" onclick={() => (plan = null)}>Cancel</button>
+                <button class="btn" onclick={cancelPlan}>Cancel</button>
                 <button class="btn primary" disabled={busy || plan.length === 0} onclick={executePlan}>
                   {busy ? 'Executing…' : 'Execute plan'}
                 </button>
@@ -781,6 +780,10 @@
     color: inherit;
     border-color: color-mix(in srgb, currentColor 45%, transparent);
   }
+  /* The combobox's live line: empty (hidden) until there is something to say. */
+  .pal-status { padding: 0 14px 6px; font-size: var(--fs-xs); color: var(--text-dim); }
+  .pal-status:empty { display: none; }
+  .pal-status.pal-error { color: var(--danger); }
   .pal-empty {
     padding: 16px;
     text-align: center;
@@ -829,31 +832,18 @@
     gap: 6px;
   }
   .pal-plan-title {
+    margin: 0;
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: .06em;
     color: var(--text-dim);
   }
-  .pal-plan-item {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    font-size: var(--fs-m);
-    padding: 4px 2px;
-  }
-  .pal-plan-num {
-    width: 18px;
-    height: 18px;
-    border-radius: 50%;
-    background: var(--surface-2);
-    border: 1px solid var(--border);
-    font-size: var(--fs-xs);
-    display: grid;
-    place-items: center;
-    color: var(--text-dim);
-    flex-shrink: 0;
-  }
+  /* A real <ol> (numbered by the list, not by hand) so each step is read as
+     "1 of N"; markers keep the list semantics VoiceOver drops on list-style: none. */
+  .pal-plan-steps { margin: 0; padding-inline-start: 22px; display: flex; flex-direction: column; gap: 6px; }
+  .pal-plan-item { font-size: var(--fs-m); padding: 4px 2px; }
+  .pal-plan-item::marker { color: var(--text-dim); font-size: var(--fs-xs); }
   .pal-plan-actions {
     display: flex;
     justify-content: flex-end;

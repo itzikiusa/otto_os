@@ -7,7 +7,7 @@
   // revoked on change and on destroy.
   import { awsApi, awsDownloadBlob } from '../../lib/api/aws';
   import Skeleton from '../../lib/components/Skeleton.svelte';
-  import JsonTree from '../database/JsonTree.svelte';
+  import JsonTree from '../../lib/components/JsonTree.svelte';
   import { fmtBytes } from './util';
   import type { S3Object, S3PreviewResp } from '../../lib/api/types';
 

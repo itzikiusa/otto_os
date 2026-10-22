@@ -376,7 +376,7 @@
   <div class="mc-body">
     <div class="mc-main">
       {#if items.length === 0 && loading}
-        <div aria-label="Loading work items" role="status"><Skeleton rows={6} height={40} /></div>
+        <Skeleton rows={6} height={40} label="work items" />
       {:else if items.length === 0 && err}
         <!-- A failed load is not "no work items yet": say so, with Retry. -->
         <div class="card">
@@ -407,7 +407,7 @@
           <p class="mc-cap" role="status">Showing the newest {ITEM_LIMIT}{summary && summary.total > ITEM_LIMIT ? ` of ${summary.total}` : ''} items — filter to narrow the list.</p>
         {/if}
       {:else if loading && graph.nodes.length === 0}
-        <div aria-label="Loading work graph" role="status"><Skeleton rows={6} height={40} /></div>
+        <Skeleton rows={6} height={40} label="the work graph" />
       {:else if WorkGraphLazy.error}
         <LoadState what="the work graph" error={WorkGraphLazy.error} onretry={() => WorkGraphLazy.retry()} />
       {:else if WorkGraphLazy.component}

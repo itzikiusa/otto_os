@@ -18,14 +18,14 @@
       // Only a network failure is "unreachable": a 429 / 403 is the daemon
       // answering, and saying so tells the person what to do next.
       error = !(err instanceof ApiError)
-        ? 'Could not sign in — daemon unreachable?'
+        ? 'Couldn’t sign in — daemon unreachable?'
         : err.status === 401
           ? 'Wrong username or password.'
           : err.status === 429
             ? 'Too many sign-in attempts. Wait a minute, then try again.'
             : err.status === 403
               ? 'This account can’t sign in here (disabled, or not allowed from this address).'
-              : `Could not sign in (${err.status}). ${err.message}`;
+              : `Couldn’t sign in (${err.status}). ${err.message}`;
     } finally {
       busy = false;
     }

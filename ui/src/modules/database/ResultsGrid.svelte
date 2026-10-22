@@ -49,7 +49,7 @@
   import { EditFlow, SET_EMPTY, SET_NULL, type RowPatch } from './EditFlow.svelte';
   import { qid, valueLiteral } from './edit-sql';
   import { ALT_BATCH, cellStr, copyWithToast, isComplex } from './results-format';
-  import { newExpansionState } from './expansion-plan';
+  import { newExpansionState } from '../../lib/jsonTree/expansion-plan';
   import { cellMatchesFilter } from './grid-format';
   import {
     colScanFor as cachedColScan,

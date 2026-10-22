@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rel } from '../../lib/stores/now.svelte';
   import { formatBytes } from '../../lib/metric-format';
   import { plural } from '../../lib/plural';
   import { toastError } from '../../lib/toastError';
@@ -21,13 +22,14 @@
   import { renderMarkdown } from '../../lib/md';
   import { registerFindProvider } from '../../lib/findProviders';
   import { toasts } from '../../lib/toast.svelte';
-  import { api, authedBlobUrl } from '../../lib/api/client';
-  import type { ProductStoryVersion, IssueFull, JiraTransition, JiraUser, EditableField, FieldOption, DevStatus } from './types';
+  import { authedBlobUrl } from '../../lib/api/client';
+  import * as issues from '../../lib/api/issues';
+  import type { ProductStoryVersion, IssueFull, EditableField, DevStatus } from './types';
   import type { ProductAttachment } from './types';
   import { router } from '../../lib/router.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { confirmOutward } from '../../lib/confirmOutward';
-  import { ctxMenu, type MenuItem, type MenuOptions } from '../../lib/contextmenu.svelte';
+  import { ctxMenu } from '../../lib/contextmenu.svelte';
   import PublishDialog from './PublishDialog.svelte';
   import { reseedDraft, type DraftSeed } from './draftSeed';
   import SwarmLinkCard from './SwarmLinkCard.svelte';
@@ -35,7 +37,9 @@
   import AttachmentsPanel from './AttachmentsPanel.svelte';
   import LinkedCanvases from './LinkedCanvases.svelte';
   import ChildrenBoard from './ChildrenBoard.svelte';
-  import { escapeHtml } from '../../lib/html';
+  import { escapeHtml, unescapeHtml } from '../../lib/html';
+  import IssueEditor from './jira/IssueEditor.svelte';
+  import { JiraIssueEditor } from './jira/issueEditorState.svelte';
 
   // Version picker state — null means "show current (source) version".
   let viewingVersion = $state<ProductStoryVersion | null>(null);
@@ -73,17 +77,16 @@
   let issueLoading = $state(false);
   let issueError = $state<string | null>(null);
 
-  // Status transition
-  let transitions = $state<JiraTransition[]>([]);
-  let transitionsLoading = $state(false);
-  let transitionsLoaded = $state(false);
-  let transitionWorking = $state(false);
-
-  // Assignee
-  let assignables = $state<JiraUser[]>([]);
-  let assignablesLoading = $state(false);
-  let assignablesLoaded = $state(false);
-  let assigneeWorking = $state(false);
+  // Status, assignee and the editmeta field editor (jira/issueEditorState).
+  // Every write is a confirmed live Jira write against THIS tab's story.
+  const jira = new JiraIssueEditor({
+    issue: () => story,
+    full: () => issueFull,
+    setFull: (full) => { issueFull = full; },
+    isCurrent: (s) => onStory(s),
+    reload: () => loadIssueFull(),
+    afterTransition: () => product.refresh(),
+  });
 
   // ── Development info (linked branches / commits / PRs via Jira dev-status) ──
   // Lazily fetched once the issue opens or the section is expanded.
@@ -91,14 +94,6 @@
   let devLoading = $state(false);
   let devLoaded = $state(false); // guards the lazy-load (distinct from "has data")
   let devError = $state<string | null>(null);
-
-  // ── Editable fields (generic editmeta-driven editor) ──────────────────────
-  // editmeta is lazily fetched once per story; null = not loaded yet.
-  let editmeta = $state<EditableField[] | null>(null);
-  let editmetaLoading = $state(false);
-  let editingField = $state<string | null>(null); // field key currently in edit mode
-  let fieldDraft = $state<unknown>(null); // working value for the field being edited
-  let fieldSaving = $state(false);
 
   // ── Manual title / description edit (Jira stories) ────────────────────────
   // Jira exposes summary + description as first-class editable content — the
@@ -255,32 +250,21 @@
     // Reset Jira state.
     issueFull = null;
     issueError = null;
-    transitions = [];
-    transitionsLoaded = false;
-    assignables = [];
-    assignablesLoaded = false;
+    jira.reset();
     // Reset development info.
     devStatus = null;
     devLoaded = false;
     devLoading = false;
     devError = null;
-    // Reset editable-field state.
-    editmeta = null;
-    editmetaLoading = false;
     // Loading flags too: a stale `issueLoading` blocked B's own /full load and
     // let A's response win (S18-02). Inline editors close so A's text can
     // never be saved "to B" (S18-01).
     issueLoading = false;
-    transitionsLoading = false;
-    assignablesLoading = false;
     editingTitle = false;
     titleDraft = '';
     editingDesc = false;
     descDraft = '';
     ++resolveSeq;
-    editingField = null;
-    fieldDraft = null;
-    fieldSaving = false;
     collapsed = { details: false, links: false, development: true, comments: false, history: true, attachments: false };
     newCommentBody = '';
     postingComment = false;
@@ -313,8 +297,8 @@
   // always-on Story Points / Estimate add-row) can render. Reads issueFull only;
   // the mutation of `editmeta` happens inside ensureEditmeta(), never in a $derived.
   $effect(() => {
-    if (isJira && issueFull && editmeta === null && !editmetaLoading) {
-      void ensureEditmeta();
+    if (isJira && issueFull && jira.editmeta === null && !jira.editmetaLoading) {
+      void jira.ensureEditmeta();
     }
   });
 
@@ -410,14 +394,6 @@
     void resolveAttachmentTokens(html, ++resolveSeq);
   });
 
-  function decodeEntities(s: string): string {
-    return s.replace(/&(amp|lt|gt|quot|#39);/g, (_, e: string) =>
-      ({ amp: '&', lt: '<', gt: '>', quot: '"', '#39': "'" })[e] ?? _,
-    );
-  }
-
-  const escapeHtmlAttr = escapeHtml;
-
   async function resolveAttachmentTokens(html: string, seq: number): Promise<void> {
     // Match literal markdown image syntax `![alt](attachment:<id>)` in the HTML
     // (renderMarkdown outputs these as-is since it doesn't handle image syntax).
@@ -470,7 +446,7 @@
         // `alt` comes from already-rendered HTML (entities escaped once):
         // decode, then escape for the attribute — escaping again showed
         // "&amp;amp;". A replacer function keeps `$&`/`$1` in alt literal.
-        const img = `<img class="body-attachment" alt="${escapeHtmlAttr(decodeEntities(alt))}" src="${blobUrl}">`;
+        const img = `<img class="body-attachment" alt="${escapeHtml(unescapeHtml(alt))}" src="${blobUrl}">`;
         out = out.replace(full, () => img);
       }
     }
@@ -483,9 +459,7 @@
     issueLoading = true;
     issueError = null;
     try {
-      const full = await api.get<IssueFull>(
-        `/issue/${s.account_id}/${s.source_key}/full`,
-      );
+      const full = await issues.issueFull(s.account_id, s.source_key);
       if (!onStory(s)) return;
       issueFull = full;
     } catch (e) {
@@ -503,10 +477,7 @@
     devLoading = true;
     devError = null;
     try {
-      const idParam = issueFull?.id ? `?issueId=${encodeURIComponent(issueFull.id)}` : '';
-      const dev = await api.get<DevStatus>(
-        `/issue/${s.account_id}/${s.source_key}/devstatus${idParam}`,
-      );
+      const dev = await issues.devStatus(s.account_id, s.source_key, issueFull?.id);
       if (!onStory(s)) return;
       devStatus = dev;
     } catch (e) {
@@ -524,352 +495,9 @@
     }
   }
 
-  async function loadTransitions(): Promise<void> {
-    if (transitionsLoaded || !story) return;
-    const s = story;
-    transitionsLoading = true;
-    try {
-      const rows = await api.get<JiraTransition[]>(
-        `/issue/${s.account_id}/${s.source_key}/transitions`,
-      );
-      // Transition ids are per issue: A's ids must never be offered (and
-      // POSTed) against B after a switch during this await.
-      if (!onStory(s)) return;
-      transitions = rows;
-      transitionsLoaded = true;
-    } catch (e) {
-      if (onStory(s)) toastError('Couldn’t load transitions', e);
-    } finally {
-      if (onStory(s)) transitionsLoading = false;
-    }
-  }
-
-  // ── Live Jira writes ────────────────────────────────────────────────────
-  // Status, assignee, comments, the title and every custom field (story
-  // points, sprint, labels…) change the real issue that the whole team
-  // sees (and may fire Jira notifications / automations), so each one goes
-  // through `confirmOutward` naming the issue key and the new value. The
-  // pickers are global `ctxMenu` menus (viewport-clamped, height-capped, Esc
-  // to close) anchored under their button.
-
-  /** Destination line for a Jira write: "Jira GS-123 “Summary”". */
-  function jiraWhere(): string {
-    const key = story?.source_key ?? '';
-    const summary = issueFull?.summary ?? story?.title ?? '';
-    return summary ? `Jira ${key} “${summary}”` : `Jira ${key}`;
-  }
-
-  /** Open a ctxMenu directly under `el` (works for mouse and keyboard). */
-  function menuUnder(el: HTMLElement, items: MenuItem[], opts?: MenuOptions): void {
-    const r = el.getBoundingClientRect();
-    ctxMenu.show(new MouseEvent('click', { clientX: r.left, clientY: r.bottom + 4 }), items, opts);
-  }
-
-  async function openTransitionMenu(e: MouseEvent): Promise<void> {
-    const el = e.currentTarget as HTMLElement;
-    await loadTransitions();
-    if (!transitionsLoaded) return;
-    const items: MenuItem[] =
-      transitions.length === 0
-        ? [{ label: 'No transitions available', disabled: true }]
-        : transitions.map((t) => ({
-            label: t.name === t.to_status ? `${t.name}…` : `${t.name} → ${t.to_status}…`,
-            action: () => void applyTransition(t),
-          }));
-    menuUnder(el, items);
-  }
-
-  async function openAssigneeMenu(e: MouseEvent): Promise<void> {
-    const el = e.currentTarget as HTMLElement;
-    await loadAssignables();
-    if (!assignablesLoaded) return;
-    const items: MenuItem[] = [
-      { label: 'Unassign…', icon: 'x', pinned: true, disabled: !issueFull?.assignee, action: () => void assignUser(null) },
-      ...(assignables.length === 0
-        ? [{ label: 'No users found', disabled: true } as MenuItem]
-        : assignables.map((u) => ({ label: `${u.display_name}…`, action: () => void assignUser(u) }) as MenuItem)),
-    ];
-    menuUnder(el, items, { filter: assignables.length > 8, filterPlaceholder: 'Find a person…', maxVisible: 12 });
-  }
-
-  async function applyTransition(t: JiraTransition): Promise<void> {
-    if (!story) return;
-    const s = story;
-    const key = s.source_key;
-    const ok = await confirmOutward({
-      verb: `Move to ${t.to_status}`,
-      title: `Move ${key} to ${t.to_status}?`,
-      where: jiraWhere(),
-      what: `Status: ${issueFull?.status ?? 'current'} → ${t.to_status}${t.name !== t.to_status ? ` (transition “${t.name}”)` : ''}`,
-      who: `Everyone with access to ${key} sees the change; watchers are notified and Jira workflow rules may run.`,
-    });
-    if (!ok || !onStory(s)) return;
-    transitionWorking = true;
-    try {
-      await api.post(`/issue/${s.account_id}/${s.source_key}/transitions`, {
-        transition_id: t.id,
-      });
-      // Available transitions depend on the status — refetch on next open, or
-      // the menu (and its confirm's "from → to") offers the old status's moves.
-      transitionsLoaded = false;
-      toasts.info('Status updated');
-      await loadIssueFull();
-      await product.refresh();
-    } catch (e) {
-      toastError('Couldn’t move the issue', e);
-    } finally {
-      transitionWorking = false;
-    }
-  }
-
-  async function loadAssignables(): Promise<void> {
-    if (assignablesLoaded || !story) return;
-    const s = story;
-    assignablesLoading = true;
-    try {
-      const rows = await api.get<JiraUser[]>(
-        `/issue/${s.account_id}/${s.source_key}/assignable`,
-      );
-      if (!onStory(s)) return;
-      assignables = rows;
-      assignablesLoaded = true;
-    } catch (e) {
-      if (onStory(s)) toastError('Couldn’t load assignable users', e);
-    } finally {
-      if (onStory(s)) assignablesLoading = false;
-    }
-  }
-
-  /** Assign `u`, or unassign when null — confirmed first (see Live Jira writes). */
-  async function assignUser(u: JiraUser | null): Promise<void> {
-    if (!story) return;
-    const s = story;
-    const key = s.source_key;
-    const cur = issueFull?.assignee?.display_name ?? 'Unassigned';
-    const ok = await confirmOutward({
-      verb: u ? `Assign to ${u.display_name}` : 'Unassign',
-      title: u ? `Assign ${key}?` : `Unassign ${key}?`,
-      where: jiraWhere(),
-      what: `Assignee: ${cur} → ${u ? u.display_name : 'Unassigned'}`,
-      who: `Jira notifies the old and new assignee and ${key}'s watchers.`,
-    });
-    if (!ok || !onStory(s)) return;
-    assigneeWorking = true;
-    try {
-      await api.put(`/issue/${s.account_id}/${s.source_key}/assignee`, {
-        account_id: u ? u.account_id : '',
-      });
-      toasts.info('Assignee updated');
-      await loadIssueFull();
-    } catch (e) {
-      toastError('Couldn’t assign', e);
-    } finally {
-      assigneeWorking = false;
-    }
-  }
-
-  // ── Editable-field helpers ──────────────────────────────────────────────
-
-  /** Lazily fetch editmeta once and cache it. On error mark it loaded-but-empty
-   *  so everything stays read-only and we don't retry-loop. */
-  async function ensureEditmeta(): Promise<void> {
-    if (editmeta !== null || editmetaLoading || !story) return;
-    const s = story;
-    editmetaLoading = true;
-    try {
-      const meta = await api.get<EditableField[]>(
-        `/issue/${s.account_id}/${s.source_key}/editmeta`,
-      );
-      if (!onStory(s)) return;
-      editmeta = meta;
-    } catch (e) {
-      if (!onStory(s)) return;
-      toastError('Couldn’t load editable fields', e);
-      editmeta = []; // loaded-but-empty: every field stays read-only
-    } finally {
-      if (onStory(s)) editmetaLoading = false;
-    }
-  }
-
-  /** The EditableField metadata for a given key, or undefined if not editable. */
-  function editableFor(key: string): EditableField | undefined {
-    return editmeta?.find((f) => f.key === key);
-  }
-
-  /** The numeric estimate field (Story Points / Original Estimate), if editable.
-   *  Pure read of editmeta — safe inside $derived. Returns null when none. */
-  const estimateField = $derived(
-    editmeta?.find(
-      (f) => f.schema_type === 'number' && /story point|estimate/i.test(f.name),
-    ) ?? null,
-  );
-
-  /** Raw current numeric value for the estimate field, sourced from issueFull.fields
-   *  (parse_issue_full strips ".0", so a plain number string is fine to seed). */
-  function rawFieldValue(key: string): string {
-    const f = issueFull?.fields.find((ff) => ff.key === key);
-    return f?.value ?? '';
-  }
-
-  /** Enter edit mode for a field, seeding fieldDraft from its current value. */
-  async function beginEdit(ef: EditableField, currentRaw: string): Promise<void> {
-    await ensureEditmeta();
-    if (!editableFor(ef.key)) return; // not actually editable — stay read-only
-    if (ef.schema_type === 'array') {
-      if (ef.items === 'string') {
-        // labels / free-text array: comma text
-        fieldDraft = currentRaw;
-      } else {
-        // array of options/users: list of selected ids (best-effort from labels)
-        const labels = currentRaw.split(',').map((s) => s.trim()).filter(Boolean);
-        fieldDraft = ef.allowed_values
-          .filter((o) => labels.includes(o.label))
-          .map((o) => o.id);
-      }
-    } else if (
-      ef.schema_type === 'option' ||
-      ef.schema_type === 'priority' ||
-      ef.schema_type === 'version' ||
-      ef.schema_type === 'component'
-    ) {
-      // select: pre-select by matching label → id
-      fieldDraft = ef.allowed_values.find((o) => o.label === currentRaw)?.id ?? '';
-    } else if (ef.schema_type === 'user') {
-      await loadAssignables();
-      fieldDraft = '';
-    } else if (ef.schema_type === 'datetime') {
-      // Seed datetime-local input from an existing ISO value. Parse to local
-      // "YYYY-MM-DDTHH:mm" which is what <input type="datetime-local"> expects.
-      if (currentRaw) {
-        try {
-          const d = new Date(currentRaw);
-          // Use local time by offsetting so the user sees their TZ.
-          const offset = d.getTimezoneOffset() * 60000;
-          const local = new Date(d.getTime() - offset);
-          fieldDraft = local.toISOString().slice(0, 16); // "YYYY-MM-DDTHH:mm"
-        } catch {
-          fieldDraft = '';
-        }
-      } else {
-        fieldDraft = '';
-      }
-    } else {
-      // string / number / date / unknown → raw text
-      fieldDraft = currentRaw;
-    }
-    editingField = ef.key;
-  }
-
-  /** Cancel the in-progress field edit. */
-  function cancelEdit(): void {
-    editingField = null;
-    fieldDraft = null;
-  }
-
-  /** Toggle membership of an option id in the multi-select array draft. */
-  function toggleArrayOption(id: string): void {
-    const cur = Array.isArray(fieldDraft) ? (fieldDraft as string[]) : [];
-    fieldDraft = cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id];
-  }
-
-  /** Build the Jira-shaped value for a field from the working draft. */
-  function buildFieldValue(ef: EditableField, draft: unknown): unknown {
-    switch (ef.schema_type) {
-      case 'number': {
-        const s = String(draft ?? '').trim();
-        return s === '' ? null : Number(s);
-      }
-      case 'option':
-      case 'priority':
-      case 'version':
-      case 'component': {
-        const id = String(draft ?? '').trim();
-        return id === '' ? null : { id };
-      }
-      case 'user': {
-        const id = String(draft ?? '').trim();
-        return id === '' ? null : { accountId: id };
-      }
-      case 'array': {
-        if (ef.items === 'string') {
-          // labels / free-text: split csv
-          return String(draft ?? '')
-            .split(',')
-            .map((s) => s.trim())
-            .filter(Boolean);
-        }
-        const ids = Array.isArray(draft) ? (draft as string[]) : [];
-        if (ef.items === 'user') return ids.map((id) => ({ accountId: id }));
-        // option / version / component arrays
-        return ids.map((id) => ({ id }));
-      }
-      case 'date':
-        // <input type="date"> yields YYYY-MM-DD; Jira date fields accept this.
-        return String(draft ?? '').trim() || null;
-      case 'datetime': {
-        // <input type="datetime-local"> yields "YYYY-MM-DDTHH:mm"; Jira datetime
-        // fields require a full ISO-8601 string with offset — emit UTC.
-        const raw = String(draft ?? '').trim();
-        if (!raw) return null;
-        return new Date(raw).toISOString(); // e.g. "2024-01-15T10:00:00.000Z"
-      }
-      default:
-        // unknown → raw string
-        return String(draft ?? '');
-    }
-  }
-
-  /** Human-readable form of the working draft, for the outward confirm. */
-  function draftLabel(ef: EditableField, draft: unknown): string {
-    const opt = (id: string) => ef.allowed_values.find((o) => o.id === id)?.label ?? id;
-    const user = (id: string) => assignables.find((u) => u.account_id === id)?.display_name ?? id;
-    if (ef.schema_type === 'array' && ef.items !== 'string') {
-      const ids = Array.isArray(draft) ? (draft as string[]) : [];
-      return ids.map(ef.items === 'user' ? user : opt).join(', ');
-    }
-    const raw = String(draft ?? '').trim();
-    if (!raw) return '';
-    if (ef.schema_type === 'user') return user(raw);
-    if (['option', 'priority', 'version', 'component'].includes(ef.schema_type)) return opt(raw);
-    return raw;
-  }
-
-  /** PUT a single field then swap in the refreshed issue returned by the server. */
-  async function saveField(ef: EditableField): Promise<void> {
-    if (!story) return;
-    const s = story;
-    const draft = fieldDraft;
-    // A custom field is a live Jira write like status / title (S18-302): it
-    // notifies watchers and can fire Jira automations, so name the issue and
-    // show old → new before sending.
-    const before = rawFieldValue(ef.key).trim() || '(empty)';
-    const after = draftLabel(ef, draft) || '(empty)';
-    const ok = await confirmOutward({
-      verb: 'Update field',
-      title: `Update ${ef.name} on ${s.source_key}?`,
-      where: jiraWhere(),
-      what: `${ef.name}: “${before}” → “${after}”`,
-      who: `Everyone with access to ${s.source_key} sees the change; watchers are notified and Jira automations may run.`,
-    });
-    if (!ok || !onStory(s) || editingField !== ef.key) return;
-    fieldSaving = true;
-    try {
-      const value = buildFieldValue(ef, draft);
-      const full = await api.put<IssueFull>(
-        `/issue/${s.account_id}/${s.source_key}/fields`,
-        { fields: { [ef.key]: value } },
-      );
-      if (!onStory(s)) return;
-      issueFull = full;
-      editingField = null;
-      fieldDraft = null;
-      toasts.info('Field updated');
-    } catch (e) {
-      toastError('Couldn’t update field', e);
-    } finally {
-      fieldSaving = false;
-    }
-  }
+  // Status, assignee and the editmeta field editor live in jira/ (the
+  // `JiraIssueEditor` + its IssueEditor field component); title, description
+  // and comments stay here because they edit the story the tab renders.
 
   // ── Title (summary) edit ──────────────────────────────────────────────────
   function beginEditTitle(): void {
@@ -896,17 +524,14 @@
     const ok = await confirmOutward({
       verb: 'Rename issue',
       title: `Rename ${s.source_key}?`,
-      where: jiraWhere(),
+      where: jira.where(),
       what: `Title: “${s.title}” → “${next}”`,
       who: `Everyone with access to ${s.source_key} sees the new title; watchers are notified.`,
     });
     if (!ok || !onStory(s)) return;
     titleSaving = true;
     try {
-      const full = await api.put<IssueFull>(
-        `/issue/${s.account_id}/${s.source_key}/fields`,
-        { fields: { summary: next } },
-      );
+      const full = await issues.updateFields(s.account_id, s.source_key, { summary: next });
       // Reflect the new title in the header + story list without a full refresh.
       product.patchLocalTitle(s.id, next);
       toasts.info('Title updated', s.source_key);
@@ -940,17 +565,14 @@
     const ok = await confirmOutward({
       verb: `Replace description`,
       title: `Replace the description of ${s.source_key}?`,
-      where: jiraWhere(),
+      where: jira.where(),
       what: draft.trim() || '(empty description)',
       who: `Everyone with access to ${s.source_key} sees the new text; the previous description is only in Jira’s history.`,
     });
     if (!ok || !onStory(s)) return;
     descSaving = true;
     try {
-      const full = await api.put<IssueFull>(
-        `/issue/${s.account_id}/${s.source_key}/description`,
-        { body_md: draft },
-      );
+      const full = await issues.updateDescription(s.account_id, s.source_key, draft);
       // The body column reads from the cached source version — patch it locally
       // with exactly what we just sent so the change shows without a refresh.
       product.patchLocalBody(s.id, draft);
@@ -971,9 +593,7 @@
     const s = story;
     attachmentLoading = { ...attachmentLoading, [attId]: true };
     try {
-      const url = await authedBlobUrl(
-        `/issue/${s.account_id}/${s.source_key}/attachment/${attId}`,
-      );
+      const url = await issues.attachmentBlobUrl(s.account_id, s.source_key, attId);
       if (!onStory(s)) {
         URL.revokeObjectURL(url);
         return;
@@ -1197,16 +817,14 @@
     const ok = await confirmOutward({
       verb: 'Post comment',
       title: `Post comment to ${key}?`,
-      where: jiraWhere(),
+      where: jira.where(),
       what: body,
       who: `Everyone with access to ${key} in Jira; watchers are notified.`,
     });
     if (!ok || !onStory(s)) return;
     postingComment = true;
     try {
-      await api.post(`/issue/${s.account_id}/${s.source_key}/comment`, {
-        body,
-      });
+      await issues.addComment(s.account_id, s.source_key, body);
       newCommentBody = '';
       toasts.success('Comment posted');
       await loadIssueFull();
@@ -1241,104 +859,32 @@
     }
   }
 
-  function relDate(iso: string): string {
-    try {
-      const diff = Date.now() - new Date(iso).getTime();
-      const s = Math.floor(diff / 1000);
-      if (s < 60) return 'just now';
-      const m = Math.floor(s / 60);
-      if (m < 60) return `${m}m ago`;
-      const h = Math.floor(m / 60);
-      if (h < 24) return `${h}h ago`;
-      const d = Math.floor(h / 24);
-      if (d < 30) return `${d}d ago`;
-      return new Date(iso).toLocaleDateString();
-    } catch {
-      return iso;
-    }
-  }
 </script>
 
 <!-- Inline "Edit" pencil shown next to an editable detail value. Renders only
      when editmeta marks the field editable. `current` seeds the draft. -->
 {#snippet editBtn(key: string, current: string)}
-  {#if editableFor(key)}
+  {#if jira.editableFor(key)}
     <button
       class="field-edit-btn"
       title="Edit"
       aria-label="Edit field"
-      onclick={() => beginEdit(editableFor(key)!, current)}
+      onclick={() => jira.beginEdit(jira.editableFor(key)!, current)}
     >
       <Icon name="edit" size={12} />
     </button>
   {/if}
 {/snippet}
 
-<!-- Inline editor for a single editable field, dispatched by schema_type. -->
+<!-- Inline editor for a single editable field (jira/IssueEditor.svelte). -->
 {#snippet fieldEditor(ef: EditableField)}
-  <div class="field-editor">
-    {#if ef.schema_type === 'number'}
-      <input aria-label={ef.name} class="field-input" type="number" step="any" bind:value={fieldDraft} />
-    {:else if ef.schema_type === 'date'}
-      <input aria-label={ef.name} class="field-input" type="date" bind:value={fieldDraft} />
-    {:else if ef.schema_type === 'datetime'}
-      <input aria-label={ef.name} class="field-input" type="datetime-local" bind:value={fieldDraft} />
-    {:else if ef.schema_type === 'user'}
-      {#if assignablesLoading && assignables.length === 0}
-        <Skeleton rows={1} height={27} label="people" />
-      {:else}
-        <select aria-label={ef.name} class="field-input" bind:value={fieldDraft}>
-          <option value="">Unassigned</option>
-          {#each assignables as u (u.account_id)}
-            <option value={u.account_id}>{u.display_name}</option>
-          {/each}
-        </select>
-      {/if}
-    {:else if (ef.schema_type === 'option' || ef.schema_type === 'priority' || ef.schema_type === 'version' || ef.schema_type === 'component') && ef.allowed_values.length > 0}
-      <select aria-label={ef.name} class="field-input" bind:value={fieldDraft}>
-        {#if !ef.required}
-          <option value="">— None —</option>
-        {/if}
-        {#each ef.allowed_values as opt (opt.id)}
-          <option value={opt.id}>{opt.label}</option>
-        {/each}
-      </select>
-    {:else if ef.schema_type === 'array' && ef.items !== 'string' && ef.allowed_values.length > 0}
-      <div class="field-multiselect">
-        {#each ef.allowed_values as opt (opt.id)}
-          <label class="field-check">
-            <input
-              type="checkbox"
-              checked={Array.isArray(fieldDraft) && (fieldDraft as string[]).includes(opt.id)}
-              onchange={() => toggleArrayOption(opt.id)}
-            />
-            {opt.label}
-          </label>
-        {/each}
-      </div>
-    {:else if ef.schema_type === 'array'}
-      <!-- labels / free-text array (no allowed values) → comma-separated text -->
-      <input dir="auto" aria-label={ef.name} class="field-input" type="text" placeholder="e.g. backend, payments" bind:value={fieldDraft} />
-    {:else}
-      <!-- string / unknown → raw text -->
-      <input dir="auto" aria-label={ef.name} class="field-input" type="text" bind:value={fieldDraft} />
-      {#if ef.schema_type !== 'string'}
-        <span class="field-raw-note">raw ({ef.schema_type})</span>
-      {/if}
-    {/if}
-    <div class="field-editor-actions">
-      <button class="btn small primary" onclick={() => saveField(ef)} disabled={fieldSaving} title="Writes to the live Jira issue — everyone with access sees it">
-        {fieldSaving ? 'Saving…' : `Save to ${story?.source_key ?? 'Jira'}`}
-      </button>
-      <button class="btn small" onclick={cancelEdit} disabled={fieldSaving}>Cancel</button>
-    </div>
-  </div>
+  <IssueEditor editor={jira} {ef} issueKey={story?.source_key ?? ''} />
 {/snippet}
 
 {#if product.loadingDetail && (!detail || detail.story.id !== product.selectedId)}
   <!-- First open (or a switch to another story): a skeleton. A refresh of the
        story already on screen keeps it visible instead of blanking the tab. -->
-  <div class="loading" role="status" aria-busy="true" aria-label="Loading story"><Skeleton rows={5} height={36} /></div>
+  <div class="loading"><Skeleton rows={5} height={36} label="story" /></div>
 {:else if !detail || !story}
   <div class="muted">No story selected.</div>
 {:else}
@@ -1603,7 +1149,7 @@
                       >
                         <span class="coll-arrow" aria-hidden="true"><Icon name={expandedTranscripts[t.id] ? 'chevronDown' : 'chevronRight'} size={12} /></span>
                         <span class="transcript-title">{t.title || 'Untitled transcript'}</span>
-                        <span class="transcript-date" data-find-skip>{relDate(t.created_at)}</span>
+                        <span class="transcript-date" data-find-skip title={new Date(t.created_at).toLocaleString()}>{rel(t.created_at)}</span>
                       </button>
                       <button
                         class="del-transcript-btn"
@@ -1746,7 +1292,7 @@
                         <div class="comment-item">
                           <div class="comment-meta">
                             <span class="comment-author">{comment.author}</span>
-                            <span class="comment-date">{relDate(comment.created)}</span>
+                            <span class="comment-date" title={new Date(comment.created).toLocaleString()}>{rel(comment.created)}</span>
                           </div>
                           <div class="comment-body md-body">{@html renderMarkdown(comment.body_md)}</div>
                         </div>
@@ -1795,7 +1341,7 @@
                         <div class="history-entry">
                           <div class="history-meta">
                             <span class="history-author">{entry.author}</span>
-                            <span class="history-date">{relDate(entry.created)}</span>
+                            <span class="history-date" title={new Date(entry.created).toLocaleString()}>{rel(entry.created)}</span>
                           </div>
                           {#each entry.items as item, j (j)}
                             <div class="history-change">
@@ -1922,13 +1468,13 @@
                     <span class="status-badge">{issueFull.status}</span>
                     <button
                       class="change-btn"
-                      onclick={openTransitionMenu}
-                      disabled={transitionWorking || transitionsLoading}
+                      onclick={(e) => void jira.openTransitionMenu(e)}
+                      disabled={jira.transitionWorking || jira.transitionsLoading}
                       title="Change the status of {story.source_key} in Jira"
                       aria-haspopup="menu"
                       data-testid="ov-transition-btn"
                     >
-                      {#if transitionWorking}Working…{:else if transitionsLoading}Loading transitions…{:else}Transition <Icon name="chevronDown" size={12} />{/if}
+                      {#if jira.transitionWorking}Working…{:else if jira.transitionsLoading}Loading transitions…{:else}Transition <Icon name="chevronDown" size={12} />{/if}
                     </button>
                   </div>
                 </div>
@@ -1953,13 +1499,13 @@
                     {/if}
                     <button
                       class="change-btn"
-                      onclick={openAssigneeMenu}
-                      disabled={assigneeWorking || assignablesLoading}
+                      onclick={(e) => void jira.openAssigneeMenu(e)}
+                      disabled={jira.assigneeWorking || jira.assignablesLoading}
                       title="Change the assignee of {story.source_key} in Jira"
                       aria-haspopup="menu"
                       data-testid="ov-assignee-btn"
                     >
-                      {#if assigneeWorking}Working…{:else if assignablesLoading}Loading people…{:else}Change <Icon name="chevronDown" size={12} />{/if}
+                      {#if jira.assigneeWorking}Working…{:else if jira.assignablesLoading}Loading people…{:else}Change <Icon name="chevronDown" size={12} />{/if}
                     </button>
                   </div>
                 </div>
@@ -1980,8 +1526,8 @@
                     {#if issueFull.reporter}
                       <span class="detail-key">Reporter</span>
                       <span class="detail-val">
-                        {#if editingField === 'reporter' && editableFor('reporter')}
-                          {@render fieldEditor(editableFor('reporter')!)}
+                        {#if jira.editingField === 'reporter' && jira.editableFor('reporter')}
+                          {@render fieldEditor(jira.editableFor('reporter')!)}
                         {:else}
                           <div class="detail-val-row">
                             <div class="user-row-sm">
@@ -1998,8 +1544,8 @@
 
                     <span class="detail-key">Priority</span>
                     <span class="detail-val">
-                      {#if editingField === 'priority' && editableFor('priority')}
-                        {@render fieldEditor(editableFor('priority')!)}
+                      {#if jira.editingField === 'priority' && jira.editableFor('priority')}
+                        {@render fieldEditor(jira.editableFor('priority')!)}
                       {:else}
                         <div class="detail-val-row">
                           <span>{issueFull.priority ?? '—'}</span>
@@ -2010,11 +1556,11 @@
 
                     <!-- Story Points / Estimate — always editable when editmeta exposes a
                          numeric estimate field, even if currently empty (the "add" case). -->
-                    {#if estimateField}
-                      <span class="detail-key">{estimateField.name}</span>
+                    {#if jira.estimateField}
+                      <span class="detail-key">{jira.estimateField.name}</span>
                       <span class="detail-val">
-                        {#if editingField === estimateField.key}
-                          {@render fieldEditor(estimateField)}
+                        {#if jira.editingField === jira.estimateField.key}
+                          {@render fieldEditor(jira.estimateField)}
                         {:else}
                           <div class="detail-val-row">
                             {#if issueFull.estimate}
@@ -2022,7 +1568,7 @@
                             {:else}
                               <span class="detail-empty">No estimate</span>
                             {/if}
-                            {@render editBtn(estimateField.key, rawFieldValue(estimateField.key))}
+                            {@render editBtn(jira.estimateField.key, jira.rawFieldValue(jira.estimateField.key))}
                           </div>
                         {/if}
                       </span>
@@ -2033,8 +1579,8 @@
 
                     <span class="detail-key">Labels</span>
                     <span class="detail-val">
-                      {#if editingField === 'labels' && editableFor('labels')}
-                        {@render fieldEditor(editableFor('labels')!)}
+                      {#if jira.editingField === 'labels' && jira.editableFor('labels')}
+                        {@render fieldEditor(jira.editableFor('labels')!)}
                       {:else}
                         <div class="detail-val-row">
                           {#if issueFull.labels && issueFull.labels.length > 0}
@@ -2052,13 +1598,13 @@
                     </span>
 
                     {#each issueFull.fields.filter((f) => f.value && f.value.trim() !== '') as field (field.key)}
-                      {#if field.key === estimateField?.key || (estimateField === null && /story\s*point/i.test(field.name))}
+                      {#if field.key === jira.estimateField?.key || (jira.estimateField === null && /story\s*point/i.test(field.name))}
                         <!-- already rendered as the dedicated estimate row above, or matches story-points heuristic -->
                       {:else}
                         <span class="detail-key">{field.name}</span>
                         <span class="detail-val">
-                          {#if editingField === field.key && editableFor(field.key)}
-                            {@render fieldEditor(editableFor(field.key)!)}
+                          {#if jira.editingField === field.key && jira.editableFor(field.key)}
+                            {@render fieldEditor(jira.editableFor(field.key)!)}
                           {:else}
                             <div class="detail-val-row">
                               <span>{field.value}</span>
@@ -2071,12 +1617,12 @@
 
                     <!-- Empty-field add rows: editmeta fields with no current value,
                          not already rendered by a dedicated row above. -->
-                    {#if editmeta}
-                      {#each editmeta.filter((ef) => {
+                    {#if jira.editmeta}
+                      {#each jira.editmeta.filter((ef) => {
                         // Skip fields rendered by dedicated controls above.
                         if (ef.key === 'priority' || ef.key === 'labels') return false;
-                        if (estimateField && ef.key === estimateField.key) return false;
-                        if (!estimateField && /story\s*point/i.test(ef.name)) return false;
+                        if (jira.estimateField && ef.key === jira.estimateField.key) return false;
+                        if (!jira.estimateField && /story\s*point/i.test(ef.name)) return false;
                         // Skip if there's already a populated value row for this field.
                         const existing = issueFull?.fields.find((f) => f.key === ef.key);
                         if (existing && existing.value && existing.value.trim() !== '') return false;
@@ -2084,7 +1630,7 @@
                       }) as ef (ef.key)}
                         <span class="detail-key detail-key-empty">{ef.name}</span>
                         <span class="detail-val">
-                          {#if editingField === ef.key}
+                          {#if jira.editingField === ef.key}
                             {@render fieldEditor(ef)}
                           {:else}
                             <div class="detail-val-row">
@@ -2093,7 +1639,7 @@
                                 class="field-edit-btn"
                                 title="Set {ef.name}"
                                 aria-label="Set {ef.name}"
-                                onclick={() => beginEdit(ef, '')}
+                                onclick={() => jira.beginEdit(ef, '')}
                               ><Icon name="plus" size={12} /></button>
                             </div>
                           {/if}
@@ -2902,55 +2448,6 @@
   .field-edit-btn:hover {
     background: var(--hover);
     color: var(--text);
-  }
-  .field-editor {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    width: 100%;
-  }
-  .field-input {
-    width: 100%;
-    max-width: 240px;
-    height: 26px;
-    padding: 0 8px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    background: var(--surface);
-    color: var(--text);
-    font-size: var(--fs-s);
-  }
-  .field-input:focus {
-    outline: none;
-    border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px var(--accent-soft-strong);
-  }
-  .field-multiselect {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    max-height: 160px;
-    overflow-y: auto;
-    padding: 4px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-  }
-  .field-check {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-size: var(--fs-s);
-    color: var(--text);
-    cursor: pointer;
-  }
-  .field-raw-note {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    font-style: italic;
-  }
-  .field-editor-actions {
-    display: flex;
-    gap: 6px;
   }
   /* ── Description edit (Jira-style inline editor) ───────────────── */
   .desc-header {

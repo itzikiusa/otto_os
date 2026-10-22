@@ -4,6 +4,7 @@ import type { IconName } from '../../lib/components/Icon.svelte';
 import type { WorkKind, WorkStatus, RiskLevel, WorkActor, ArtifactKind } from '../../lib/api/types';
 import { runStatus, type StatusInfo, type Tone } from '../../lib/status';
 import { rel } from '../../lib/stores/now.svelte';
+import { formatUsd } from '../../lib/metric-format.ts';
 
 export const KIND_LABEL: Record<WorkKind, string> = {
   session: 'Session',
@@ -171,9 +172,9 @@ export function riskIsElevated(r: RiskLevel): boolean {
   return r === 'high' || r === 'critical';
 }
 
+/** Cost cell: the shared {@link formatUsd} ("—" when unknown, not "$0.00"). */
 export function fmtCost(n: number | null | undefined): string {
-  const v = typeof n === 'number' ? n : 0;
-  return `$${v.toFixed(2)}`;
+  return formatUsd(n);
 }
 
 /** Compact relative time ("3m", "2h", "5d") from an ISO timestamp — the

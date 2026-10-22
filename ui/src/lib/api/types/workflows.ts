@@ -125,7 +125,9 @@ export interface WorkflowRun {
   id: Id;
   workflow_id: Id;
   workspace_id: Id;
-  /** User who started the run (its agent sessions are owned by them); null for trigger/schedule/chat runs. */
+  /** User who started the run (its agent sessions are owned by them); null for trigger/schedule/
+   *  webhook/chat runs, which act as the workflow's latest changer: the later of the latest
+   *  version's author and the firing trigger's `updated_by` (PC-3). */
   created_by?: Id | null;
   status: WorkflowRunStatus;
   input: unknown;
@@ -155,7 +157,9 @@ export interface WorkflowRun {
   resume_attempts?: number;
   /** Absolute path of the run's context directory (instruction brief,
    *  repos.json, per-step handoff files). Present on `GET /workflow-runs/{id}`
-   *  when the directory exists on disk; absent on list endpoints. */
+   *  when the directory exists on disk; absent on list endpoints. Read its files
+   *  with `browseRunContext` / `readRunContext` (`lib/api/workflows.ts`), which
+   *  take paths RELATIVE to it — `/fs/*` refuses Otto's data dir to non-root users. */
   context_dir?: string | null;
 }
 

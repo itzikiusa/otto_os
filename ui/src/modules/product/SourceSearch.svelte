@@ -1,9 +1,9 @@
 <script lang="ts">
   // SourceSearch — unified tracker issue (Jira / Linear) / Confluence page picker.
   // Mirrors the structure and CSS of JiraIssuePicker.svelte.
-  import { api } from '../../lib/api/client';
-  import type { IssueProject, IssueProviderKind, IssueSummary, ListingPage } from '../../lib/api/types';
-  import { truncatedNote, unwrapListing } from '../../lib/listingPage';
+  import { listConfluenceSpaces, listIssueProjects, searchConfluence, searchIssues } from '../../lib/api/issues';
+  import type { IssueProject, IssueProviderKind, IssueSummary } from '../../lib/api/types';
+  import { truncatedNote } from '../../lib/listingPage';
   import type { ConfluenceSpace, ConfluencePageSummary } from './types';
   import { loadErrorText } from '../../lib/loadError';
   import Skeleton from '../../lib/components/Skeleton.svelte';
@@ -114,11 +114,7 @@
     projects = [];
     listTruncated = false;
     try {
-      const page = unwrapListing(
-        await api.get<ListingPage<IssueProject>>(
-          `/issue/projects?account_id=${encodeURIComponent(aid)}&meta=1`,
-        ),
-      );
+      const page = await listIssueProjects(aid, { meta: true });
       if (current()) {
         projects = page.items;
         listTruncated = page.truncated;
@@ -138,11 +134,7 @@
     spaces = [];
     listTruncated = false;
     try {
-      const page = unwrapListing(
-        await api.get<ListingPage<ConfluenceSpace>>(
-          `/issue/confluence/spaces?account_id=${encodeURIComponent(aid)}&meta=1`,
-        ),
-      );
+      const page = await listConfluenceSpaces(aid);
       if (current()) {
         spaces = page.items;
         listTruncated = page.truncated;
@@ -258,12 +250,10 @@
     try {
       if (sourceKind === 'jira') {
         const proj = projectOverride ?? selectedProjectKey;
-        const projectParam = proj ? `&project=${encodeURIComponent(proj)}` : '';
-        const queryParam = raw
-          ? `${linear ? 'filter' : 'jql'}=${encodeURIComponent(q)}`
-          : `q=${encodeURIComponent(q)}${projectParam}`;
-        const page = await api.get<IssueSummary[]>(
-          `/issue/search?account_id=${encodeURIComponent(accountId)}&${queryParam}&start_at=${startAt}`,
+        const page = await searchIssues(
+          raw
+            ? (linear ? { accountId, filter: q, startAt } : { accountId, jql: q, startAt })
+            : { accountId, q, project: proj || undefined, startAt },
           ctl.signal,
         );
         if (!current()) return;
@@ -282,14 +272,10 @@
         // typing, so the box can already hold an unrun expression.
         lastRun = { q, mode: runMode, project };
       } else {
-        const spaceParam = selectedSpaceKey
-          ? `&space=${encodeURIComponent(selectedSpaceKey)}`
-          : '';
-        const queryParam = raw
-          ? `cql=${encodeURIComponent(q)}`
-          : `q=${encodeURIComponent(q)}${spaceParam}${runMode === 'body' ? '&mode=text' : ''}`;
-        const pages = await api.get<ConfluencePageSummary[]>(
-          `/issue/confluence/search?account_id=${encodeURIComponent(accountId)}&${queryParam}`,
+        const pages = await searchConfluence(
+          raw
+            ? { accountId, cql: q }
+            : { accountId, q, space: selectedSpaceKey || undefined, mode: runMode === 'body' ? 'text' : undefined },
           ctl.signal,
         );
         if (!current()) return;

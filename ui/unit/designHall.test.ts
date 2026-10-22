@@ -7,6 +7,7 @@ import {
   brandColors,
   contrastRatio,
   epicTree,
+  storyKeysFor,
   filterProjects,
   formatForFile,
   formatOttoUri,
@@ -194,6 +195,15 @@ test('epic tree groups implementing artifacts under their epic with per-studio c
     ['LOY-147', { frames: 1 }],
   ]);
   assert.deepEqual(rows[1].own, { whiteboard: 1 });
+});
+
+test('an artifact linking one story twice yields one chip and one count (ui-correctness-3-02)', () => {
+  const stories = { S1: { id: 'S1', source_key: 'LOY-142', title: 'Landing', parent_id: null } };
+  // `implements` + `references` to the same story: story_ids repeats S1.
+  assert.deepEqual(storyKeysFor(['S1', 'S1', 'GONE'], stories), ['LOY-142']);
+  const a = { id: '1', studio: 'site', status: 'draft', updated_at: '2026-01-01T00:00:00Z' } as any;
+  const rows = epicTree([{ artifact: a, snippet: '', score: 0, reference_count: 0, story_ids: ['S1', 'S1'] } as any], Object.values(stories));
+  assert.deepEqual(rows.map((r) => r.own), [{ site: 1 }]);
 });
 
 test('signals read as one line from the bounded server payloads', () => {

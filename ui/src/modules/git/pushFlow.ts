@@ -6,6 +6,7 @@
 // pick, and it is always the lease form, which the daemon refuses when the
 // remote moved since it was last fetched and integrated.
 import { api, ApiError } from '../../lib/api/client';
+import { loadErrorText } from '../../lib/loadError';
 import type { PushReq, PushTarget, RepoStatusResp } from '../../lib/api/types';
 import { toasts } from '../../lib/toast.svelte';
 import { confirmer } from '../../lib/confirm.svelte';
@@ -82,7 +83,7 @@ export async function runPush(
       if (choice === 'force' && canForce) return runPush(repoId, status, onstatus, { forceWithLease: true, target });
       return false;
     }
-    toasts.error('Couldn’t push', msg);
+    toasts.error('Couldn’t push', loadErrorText(e));
     return false;
   }
 }

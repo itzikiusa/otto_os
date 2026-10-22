@@ -16,7 +16,14 @@ import { readFileSync, readdirSync } from 'node:fs';
 const root = new URL('../../', import.meta.url);
 const stripRs = (s: string) => s.split('\n').map((l) => l.replace(/\/\/.*$/, '')).join('\n');
 const rust = stripRs(
-  ['crates/otto-core/src/api.rs', 'crates/otto-core/src/domain.rs']
+  [
+    'crates/otto-core/src/api.rs',
+    // api.rs re-exports its area files (api/<area>.rs); read them all.
+    ...readdirSync(new URL('crates/otto-core/src/api/', root))
+      .sort()
+      .map((f) => `crates/otto-core/src/api/${f}`),
+    'crates/otto-core/src/domain.rs',
+  ]
     .map((p) => readFileSync(new URL(p, root), 'utf8'))
     .join('\n'),
 );

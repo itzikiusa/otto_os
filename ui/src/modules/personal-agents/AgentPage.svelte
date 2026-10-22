@@ -435,7 +435,7 @@
 <div class="agent-body" class:chat-fill={tab === 'chat'}>
   {#if !agent}
     {#if personalAgents.loadingAgents}
-      <div role="status" aria-busy="true" aria-label="Loading the agent"><Skeleton rows={3} height={64} /></div>
+      <Skeleton rows={3} height={64} label="the agent" />
     {:else}
       <EmptyState
         variant="page"
@@ -698,7 +698,7 @@
     <!-- the shared sheet: Esc works from anywhere, focus is trapped + restored -->
     <Modal title="Report" width={760} onclose={() => (reportRun = null)}>
       {#if reportLoading}
-        <div role="status" aria-busy="true" aria-label="Loading the report"><Skeleton rows={6} height={18} /></div>
+        <Skeleton rows={6} height={18} label="the report" />
       {:else if reportError}
         <LoadState what="the report" error={reportError} empty onretry={() => reportRun && viewReport(reportRun)} />
       {:else}

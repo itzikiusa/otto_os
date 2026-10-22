@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { radioKey } from '../../radioKey';
   import { plural } from '../../plural';
   // The game-studio viewport: three.js (lazy-loaded — ~650 kB, only when a scene3d
   // artifact opens), orbit camera, grid + axes, PBR lighting from the doc, shadows,
@@ -1009,9 +1010,9 @@
     <div class="s3d-hud" role="group" aria-label="Viewport tools" onpointerdown={(e) => e.stopPropagation()} onpointerup={(e) => e.stopPropagation()}>
       {#if canEdit}
         <div class="s3d-seg" role="radiogroup" aria-label="Gizmo mode">
-          <button role="radio" aria-checked={mode === 'translate'} class:on={mode === 'translate'} title="Move (W)" onclick={() => setMode('translate')}>Move</button>
-          <button role="radio" aria-checked={mode === 'rotate'} class:on={mode === 'rotate'} title="Rotate (E)" onclick={() => setMode('rotate')}>Rotate</button>
-          <button role="radio" aria-checked={mode === 'scale'} class:on={mode === 'scale'} title="Scale (R)" onclick={() => setMode('scale')}>Scale</button>
+          <button role="radio" aria-checked={mode === 'translate'} tabindex={mode === 'translate' ? 0 : -1} onkeydown={radioKey} class:on={mode === 'translate'} title="Move (W)" onclick={() => setMode('translate')}>Move</button>
+          <button role="radio" aria-checked={mode === 'rotate'} tabindex={mode === 'rotate' ? 0 : -1} onkeydown={radioKey} class:on={mode === 'rotate'} title="Rotate (E)" onclick={() => setMode('rotate')}>Rotate</button>
+          <button role="radio" aria-checked={mode === 'scale'} tabindex={mode === 'scale' ? 0 : -1} onkeydown={radioKey} class:on={mode === 'scale'} title="Scale (R)" onclick={() => setMode('scale')}>Scale</button>
         </div>
       {/if}
       <button class="s3d-hbtn" title="Frame selection (F)" onclick={frame}>Frame</button>

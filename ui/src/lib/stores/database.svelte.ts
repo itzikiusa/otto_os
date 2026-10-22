@@ -534,6 +534,14 @@ export interface QueryTabAgent {
  *  person, a plain cancel (`'declined'`) is not. */
 export type GuardedWriteAnswer = 'confirmed' | 'declined' | 'mismatch';
 
+/** Why {@link DatabaseStore.runManagedStatement} ran nothing: the typed confirm
+ *  was dismissed (`'declined'`), the name was mistyped (`'mismatch'` — already
+ *  toasted by the gate, so callers add no second toast), or access / the
+ *  connection changed while it waited (`'stale'`). */
+export interface ManagedWriteCanceled {
+  canceled: 'declined' | 'mismatch' | 'stale';
+}
+
 export interface RunOutcome {
   status?: 'ok' | 'cancelled' | 'aborted' | 'failed' | 'detached' | 'invalid';
   error?: string;
@@ -828,7 +836,6 @@ class DatabaseStore {
   objectSearching = $state(false);
   objectSearchTruncated = $state(false);
   objectSearchScanned = $state(0);
-  objectSearchSupported = $state(true);
 
   // ── Selected object (Structure view) ────────────────────────────────────
   selectedObjectPath: string | null = $state(null);
@@ -2792,7 +2799,6 @@ class DatabaseStore {
       this.objectSearchHits = r.hits;
       this.objectSearchTruncated = r.truncated;
       this.objectSearchScanned = r.scanned;
-      this.objectSearchSupported = r.supported;
     } catch (e) {
       if (seq === this.objectSearchSeq && !isAbortError(e)) {
         this.objectSearchHits = [];
@@ -3353,11 +3359,12 @@ class DatabaseStore {
    * Run an arbitrary statement against the selected connection (used by inline
    * cell edits / row deletes), applying the production / read-only write-gate:
    * if the server blocks the write, ask for a typed confirmation and retry with
-   * the confirm flag. Returns the result, or null if cancelled.
+   * the confirm flag. Returns the result, or `{ canceled }` saying why nothing
+   * ran (see {@link ManagedWriteCanceled}).
    *
    * Throws on any non-guardrail failure so the caller keeps its own error UX.
    */
-  async runManagedStatement(sql: string, node?: string | null): Promise<QueryResult | null> {
+  async runManagedStatement(sql: string, node?: string | null): Promise<QueryResult | ManagedWriteCanceled> {
     const id = this.selectedConnId;
     const origin = this.selectedConn ? { ...this.selectedConn } : null;
     const accessEpoch = this.accessEpoch;
@@ -3377,8 +3384,9 @@ class DatabaseStore {
       return await post(false);
     } catch (e) {
       if (isWriteBlocked(e)) {
-        const ok = (await this.confirmGuardedWrite(origin, e)) === 'confirmed';
-        if (!ok || accessEpoch !== this.accessEpoch || connEpoch !== this.epochOf(id)) return null;
+        const answer = await this.confirmGuardedWrite(origin, e);
+        if (answer !== 'confirmed') return { canceled: answer };
+        if (accessEpoch !== this.accessEpoch || connEpoch !== this.epochOf(id)) return { canceled: 'stale' };
         return await post(true);
       }
       throw e;

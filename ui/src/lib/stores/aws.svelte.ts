@@ -51,6 +51,8 @@ export const AWS_SERVICES: { id: AwsService; label: string; icon: IconName }[] =
 ];
 
 const INSTALL_POLL_MS = 1500;
+/** SQS attribute replies merged per store write ({@link AwsStore.fanOutSqsAttrs}). */
+const SQS_ATTR_FLUSH = 8;
 
 class AwsStore {
   accessRevision = $state(0);
@@ -310,6 +312,49 @@ class AwsStore {
     } catch {
       return null;
     }
+  }
+
+  /** Fetch one queue's attributes WITHOUT writing the store: the queue-list
+   *  fan-out collects these and commits them with {@link commitSqsAttrs}, so up
+   *  to 40 replies cost a handful of map copies / list re-renders, not 40. */
+  async fetchSqsAttrs(id: Id, url: string, region = ''): Promise<SqsQueueAttributesResp | null> {
+    try {
+      return await awsApi.sqsAttributes(id, url, region || undefined);
+    } catch {
+      return null;
+    }
+  }
+
+  /** Merge a batch of {@link fetchSqsAttrs} replies in one write. `revision` is
+   *  {@link accessRevision} captured before the fetches; a batch from before an
+   *  access change is dropped. */
+  commitSqsAttrs(batch: Record<string, SqsQueueAttributesResp>, revision: number): void {
+    if (revision !== this.accessRevision || Object.keys(batch).length === 0) return;
+    this.sqsAttrs = { ...this.sqsAttrs, ...batch };
+  }
+
+  /** Fetch the attributes of `urls`, at most 2 in flight (each is an `aws`
+   *  process), and commit them {@link SQS_ATTR_FLUSH} at a time — the list
+   *  fills in progressively at a handful of map copies per fan-out, not one per
+   *  queue. Stops fetching and committing once `live()` turns false (the view
+   *  started a newer load). Never rejects. */
+  async fanOutSqsAttrs(id: Id, urls: readonly string[], region: string, live: () => boolean): Promise<void> {
+    const revision = this.accessRevision;
+    const queue = [...urls];
+    let batch: Record<string, SqsQueueAttributesResp> = {};
+    const flush = (): void => {
+      if (live()) this.commitSqsAttrs(batch, revision);
+      batch = {};
+    };
+    const worker = async (): Promise<void> => {
+      for (let url = queue.shift(); url !== undefined && live(); url = queue.shift()) {
+        const a = await this.fetchSqsAttrs(id, url, region);
+        if (a) batch[url] = a;
+        if (Object.keys(batch).length >= SQS_ATTR_FLUSH) flush();
+      }
+    };
+    await Promise.all([worker(), worker()]);
+    flush();
   }
 
   async loadEc2(id: Id, region: string, state?: string, q?: string): Promise<Ec2Instance[]> {

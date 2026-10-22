@@ -660,7 +660,7 @@
       return;
     }
     try {
-      await ws.setApiAllowLocal(on);
+      await apiClient.setAllowLocal(on);
     } catch (e) {
       input.checked = !on;
       toasts.error('Couldn’t change the setting', e instanceof Error && e.message ? e.message : 'Only a workspace admin can change it.');
@@ -1158,7 +1158,7 @@
         <div class="ws-setting">
           <div class="section-title">Workspace</div>
           <label class="set-row toggle">
-            <input type="checkbox" checked={ws.apiAllowLocal} onchange={(e) => void setAllowLocal(e.currentTarget)} />
+            <input type="checkbox" checked={apiClient.allowLocal} onchange={(e) => void setAllowLocal(e.currentTarget)} />
             <span class="set-label">Allow private addresses</span>
             <span class="set-unit">Lets API requests reach localhost and private networks (10.x, 192.168.x…). Off by default; admins only; applies to everyone in this workspace.</span>
           </label>

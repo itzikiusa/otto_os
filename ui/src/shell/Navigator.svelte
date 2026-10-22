@@ -1,9 +1,10 @@
 <script lang="ts">
   import { rowMenu } from '../lib/rowMenu';
-  import { plural } from '../lib/plural';
   import Skeleton from '../lib/components/Skeleton.svelte';
   import { focusOnMount } from '../lib/focusOnMount';
   import { toastError } from '../lib/toastError';
+  import { loadErrorText } from '../lib/loadError';
+  import { closeConfirm } from './closeConfirm';
   // Expanded 240px navigator: modules in foldable macOS source-list sections
   // (Agents with its nested session lists in Work), workspaces section,
   // user/settings at the bottom.
@@ -118,20 +119,24 @@
     agentSelMode = on;
     if (!on) agentSel = new Set();
   }
+  /** The ⌘K palette's close confirm (closeConfirm.ts): titles + mid-turn warning. */
+  function askClose(ids: string[], permanent: boolean, from: Session[]): Promise<boolean> {
+    const titles = ids.map((id) => from.find((s) => s.id === id)?.title ?? id);
+    const working = ids.filter((id) => ws.isAgentMidTurn(id)).length;
+    const { message, ...opts } = closeConfirm({ titles, working, permanent });
+    return confirmer.ask(message, opts);
+  }
   async function archiveSelectedAgents(): Promise<void> {
     const ids = agentSelIds;
     if (ids.length === 0) return;
+    // Archiving stops a session: ask first when any of them is mid-turn.
+    if (ids.some((id) => ws.isAgentMidTurn(id)) && !(await askClose(ids, false, selectable))) return;
     await ws.archiveSessions(ids);
     setAgentSelMode(false);
   }
   async function deleteSelectedAgents(): Promise<void> {
     const ids = agentSelIds;
-    if (ids.length === 0) return;
-    const ok = await confirmer.ask(
-      `Delete ${plural(ids.length, 'session')} and their entire history? This cannot be undone.`,
-      { title: `Delete ${ids.length} sessions`, confirmLabel: 'Delete', danger: true },
-    );
-    if (!ok) return;
+    if (ids.length === 0 || !(await askClose(ids, true, selectable))) return;
     await ws.killSessions(ids);
     setAgentSelMode(false);
   }
@@ -148,7 +153,7 @@
     try {
       await ws.loadArchived(more);
     } catch (e) {
-      archivedError = e instanceof Error ? e.message : String(e);
+      archivedError = loadErrorText(e);
     }
   }
   function toggleArchSel(id: string): void {
@@ -162,12 +167,7 @@
   }
   async function deleteSelectedArchived(): Promise<void> {
     const ids = ws.archivedSessions.filter((s) => archSel.has(s.id)).map((s) => s.id);
-    if (ids.length === 0) return;
-    const ok = await confirmer.ask(
-      `Delete ${plural(ids.length, 'archived session')} and their entire history? This cannot be undone.`,
-      { title: `Delete ${ids.length} sessions`, confirmLabel: 'Delete', danger: true },
-    );
-    if (!ok) return;
+    if (ids.length === 0 || !(await askClose(ids, true, ws.archivedSessions))) return;
     await ws.killSessions(ids);
     archSel = new Set();
   }

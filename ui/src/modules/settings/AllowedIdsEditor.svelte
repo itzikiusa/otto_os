@@ -3,6 +3,7 @@
   // with the Slack member's name when the directory knows it) instead of a
   // comma-separated text box. The comma string stays the value — it is what
   // the API stores — so this is a view + editor over `value`.
+  import { tick } from 'svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import type { SlackDirUser } from '../../lib/api/types';
@@ -24,6 +25,18 @@
   const ids = $derived(allowedIds(value));
   const byId = $derived(new Map(people.map((p) => [p.id, p])));
   let typed = $state('');
+  let listEl = $state<HTMLElement>();
+  let addInput = $state<HTMLInputElement>();
+
+  /** Remove row `i`, then keep focus in the list: the same index's remove
+   *  button (the next row slid up), else the previous one, else the add box —
+   *  never `<body>` (the keyed row holding the focused button is destroyed). */
+  async function remove(id: string, i: number): Promise<void> {
+    value = withoutAllowed(value, id);
+    await tick();
+    const btns = listEl?.querySelectorAll<HTMLButtonElement>('button.rm');
+    (btns?.[i] ?? btns?.[i - 1] ?? addInput)?.focus();
+  }
 
   function addTyped(): void {
     if (!typed.trim()) return;
@@ -49,8 +62,8 @@
 
 <div class="allow-list" role="group" aria-labelledby={labelledby} data-testid="allowed-ids">
   {#if ids.length > 0}
-    <ul aria-label="Allowed user list">
-      {#each ids as id (id)}
+    <ul aria-label="Allowed user list" bind:this={listEl}>
+      {#each ids as id, i (id)}
         {@const p = byId.get(id)}
         <li>
           <Icon name={p?.is_bot ? 'sparkle' : 'user'} size={13} />
@@ -66,7 +79,7 @@
             class="rm"
             aria-label="Remove {p?.name ?? id}"
             title="Remove from the allowed users"
-            onclick={() => (value = withoutAllowed(value, id))}
+            onclick={() => void remove(id, i)}
           >
             <Icon name="x" size={12} />
           </button>
@@ -86,6 +99,7 @@
       dir="ltr"
       class="input mono add-id"
       aria-label="Add user id"
+      bind:this={addInput}
       bind:value={typed}
       {placeholder}
       spellcheck="false"

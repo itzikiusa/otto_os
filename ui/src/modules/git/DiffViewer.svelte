@@ -1,5 +1,6 @@
 <script lang="ts">
   import { scrollBehavior } from '../../lib/motion';
+  import { loadErrorText } from '../../lib/loadError';
   import { plural } from '../../lib/plural';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   // Shared diff renderer (Changes / commit / PR views): unified or
@@ -857,7 +858,7 @@
       (e: unknown) => {
         done();
         if (isAbortError(e) || ctl.signal.aborted || d !== diff) return;
-        land(d, file.path, null, e instanceof Error ? e.message : String(e));
+        land(d, file.path, null, loadErrorText(e));
       },
     );
   }

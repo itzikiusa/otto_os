@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rel } from '../../lib/stores/now.svelte';
   import { rowMenu } from '../../lib/rowMenu';
   import { plural } from '../../lib/plural';
   import { splitter } from '../../lib/paneResizer';
@@ -2215,15 +2216,13 @@
   });
 
   // ── Helpers ───────────────────────────────────────────────────────────────
+  /** The shared relative-time label (content.md §7), compact for dense rows. */
   function fmtDate(iso: string): string {
+    return rel(iso, { compact: true });
+  }
+  function fmtDateTitle(iso: string): string {
     const d = new Date(iso);
-    const now = Date.now();
-    const diff = Math.floor((now - d.getTime()) / 1000);
-    if (diff < 60) return 'just now';
-    if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-    if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-    if (diff < 86400 * 30) return `${Math.floor(diff / 86400)}d ago`;
-    return d.toLocaleDateString([], { month: 'short', day: 'numeric', year: '2-digit' });
+    return Number.isNaN(d.getTime()) ? '' : d.toLocaleString();
   }
 
 
@@ -3464,7 +3463,7 @@
                 <span class="mono ci-sha">{row.commit.short_sha}</span>
                 <span class="dim ci-author">{row.commit.author}</span>
                 <span class="grow"></span>
-                <span class="dim ci-date">{fmtDate(row.commit.date)}</span>
+                <span class="dim ci-date" title={fmtDateTitle(row.commit.date)}>{fmtDate(row.commit.date)}</span>
               </div>
             </div>
             </button>
@@ -3592,7 +3591,7 @@
           <div class="detail-meta">
             <span class="detail-author">{selectedCommit.author}</span>
             <span class="dim detail-dot">·</span>
-            <span class="dim detail-date">{fmtDate(selectedCommit.date)}</span>
+            <span class="dim detail-date" title={fmtDateTitle(selectedCommit.date)}>{fmtDate(selectedCommit.date)}</span>
             {#if selectedBranch && !chipsFor(selectedCommit).some((c) => c.label === selectedBranch)}
               <span class="on-branch-hint" title="On branch {selectedBranch}">
                 <Icon name="branch" size={12} /><span class="chip-label">{selectedBranch}</span>

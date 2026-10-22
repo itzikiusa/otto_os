@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { radioKey } from '../../lib/radioKey';
   // "New design" sheet: title, studio (+ format where a studio has several),
   // an optional starter template, the project to file it in and the story it
   // implements. Creates a draft and hands its id back — nothing is generated.
@@ -112,6 +113,8 @@
             type="button"
             role="radio"
             aria-checked={studio === s.id}
+            tabindex={studio === s.id ? 0 : -1}
+            onkeydown={radioKey}
             class="pill-toggle"
             class:on={studio === s.id}
             onclick={() => pickStudio(s.id)}>{s.name}</button

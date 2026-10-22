@@ -6,7 +6,8 @@
   import { sectionLabel } from './sections';
   import PageBody from '../../lib/components/PageBody.svelte';
   // Issue-tracker accounts (Jira, Linear) settings page.
-  import { api } from '../../lib/api/client';
+  import { createIssueAccount, deleteIssueAccount, listIssueProjects, updateIssueAccount } from '../../lib/api/issues';
+  import { issueAccounts } from '../../lib/stores/issueAccounts.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import type { IssueAccount, IssueProviderKind } from '../../lib/api/types';
   import { toasts } from '../../lib/toast.svelte';
@@ -100,8 +101,8 @@
   async function testAccount(a: IssueAccount): Promise<void> {
     testResults = { ...testResults, [a.id]: 'busy' };
     try {
-      const projects = await api.get<unknown[]>(`/issue/projects?account_id=${encodeURIComponent(a.id)}`);
-      testResults = { ...testResults, [a.id]: { ok: true, projects: Array.isArray(projects) ? projects.length : 0 } };
+      const projects = await listIssueProjects(a.id, { meta: false });
+      testResults = { ...testResults, [a.id]: { ok: true, projects: projects.items.length } };
     } catch (e) {
       testResults = { ...testResults, [a.id]: { ok: false, error: loadErrorText(e) } };
     }
@@ -117,7 +118,7 @@
     loading = true;
     loadError = '';
     try {
-      accounts = await api.get<IssueAccount[]>('/issue/accounts');
+      accounts = await issueAccounts.load(true);
     } catch (e) {
       loadError = loadErrorText(e);
     } finally {
@@ -155,7 +156,7 @@
   async function create(): Promise<void> {
     busy = true;
     try {
-      const a = await api.post<IssueAccount>('/issue/accounts', {
+      const a = await createIssueAccount({
         provider,
         label: label.trim(),
         base_url: baseUrl.trim(),
@@ -164,6 +165,7 @@
         token_expires_at: fromDateInput(tokenExpiresAt),
       });
       accounts = [...accounts, a];
+      issueAccounts.upsert(a);
       closeModal();
       toasts.success(`${providerName(a.provider)} account added`, a.label);
     } catch (e) {
@@ -184,8 +186,9 @@
         token_expires_at: fromDateInput(tokenExpiresAt),
       };
       if (token !== '') body.token = token;
-      const updated = await api.patch<IssueAccount>(`/issue/accounts/${editing.id}`, body);
+      const updated = await updateIssueAccount(editing.id, body);
       accounts = accounts.map((x) => (x.id === updated.id ? updated : x));
+      issueAccounts.upsert(updated);
       // A changed token/URL makes an earlier verdict stale.
       const { [updated.id]: _stale, ...rest } = testResults;
       testResults = rest;
@@ -206,8 +209,9 @@
     if (!(await confirmer.ask(`Delete account “${a.label}”? Its token is removed from the Keychain.`, { title: 'Delete account?', danger: true, confirmLabel: 'Delete account' }))) return;
     deleting = { ...deleting, [a.id]: true };
     try {
-      await api.del(`/issue/accounts/${a.id}`);
+      await deleteIssueAccount(a.id);
       accounts = accounts.filter((x) => x.id !== a.id);
+      issueAccounts.remove(a.id);
       toasts.success(`${providerName(a.provider)} account deleted`, a.label);
     } catch (e) {
       toasts.error(`Couldn’t delete the ${providerName(a.provider)} account`, loadErrorText(e));
