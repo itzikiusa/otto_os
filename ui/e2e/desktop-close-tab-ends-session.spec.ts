@@ -127,7 +127,13 @@ test('archived list: multi-select deletes the checked sessions in one confirm', 
   const del = page.getByTestId('archived-delete-selected');
   await expect(del).toContainText('Delete (2)');
   await del.click();
-  await expect(page.locator('.cf-msg')).toContainText('2 archived sessions');
+  // The shared bulk-close confirm (shell/closeConfirm.ts, ux-design-3-03)
+  // names the count and lists the checked sessions.
+  const msg = page.locator('.cf-msg');
+  await expect(msg).toContainText('Delete 2 sessions and their history permanently?');
+  await expect(msg).toContainText('• Kaka');
+  await expect(msg).toContainText('• Nesta');
+  await expect(msg).not.toContainText('Maldini');
   await page.getByRole('dialog').getByRole('button', { name: 'Delete', exact: true }).click();
   await expect.poll(() => exists(idByTitle.Kaka), { timeout: 15_000 }).toBe(false);
   await expect.poll(() => exists(idByTitle.Nesta), { timeout: 15_000 }).toBe(false);

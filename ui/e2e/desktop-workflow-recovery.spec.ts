@@ -33,7 +33,7 @@ test('workflow preflight identifies a broken step and cron editing preserves dis
     await page.getByRole('button', { name: 'Preview / validate', exact: true }).click();
     await expect(page.locator('.add-form')).toContainText('Next fires (Asia/Jerusalem)');
     await page.getByRole('button', { name: 'Save trigger', exact: true }).click();
-    await expect(page.locator('.trig-spec')).toContainText('15 10 * * 1-5 (Asia/Jerusalem)');
+    await expect(page.locator('.trig-spec')).toHaveText('Cron 15 10 * * 1-5 · Asia/Jerusalem');
     const saved = await (await ctx.get(`${base}/api/v1/workflows/${workflow}/triggers`)).json();
     expect(saved).toHaveLength(1);
     expect(saved[0]).toMatchObject({ enabled: false, spec: { expr: '15 10 * * 1-5', timezone: 'Asia/Jerusalem', future_extension: 'preserved' } });

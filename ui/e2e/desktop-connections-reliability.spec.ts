@@ -94,5 +94,12 @@ test('SSH settings can be tested before saving and a failure says what to fix', 
   await expect(panel).toContainText('Permission denied (publickey).');
   await expect(panel).toContainText('What to check:');
   await expect(panel).toContainText('ssh-add');
-  await expect(dialog.getByText('Test failed — see details above')).toBeVisible();
+  // The footer status is always mounted (a live region inserted with its text
+  // is silent in VoiceOver): it shows "Test failed — see details above" and
+  // carries the detail for screen readers in an sr-only span.
+  const footerStatus = dialog.locator('.test-result[role="status"]');
+  await expect(footerStatus).toBeVisible();
+  await expect(footerStatus).toContainText('Test failed');
+  await expect(footerStatus.locator('[aria-hidden="true"]', { hasText: 'see details above' })).toBeVisible();
+  await expect(footerStatus.locator('.sr-only')).toContainText('Permission denied (publickey).');
 });

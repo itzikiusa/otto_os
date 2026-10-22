@@ -102,6 +102,13 @@ function epicWrap(page: Page) {
   return page.locator('.story-row-wrap.epic', { has: page.locator('.story-title', { hasText: EPIC_TITLE }) }).first();
 }
 
+// THIS run's folder header. Other projects and other beforeAll batches seed
+// their own epics with the same folder names into the shared daemon, and every
+// epic starts expanded, so an unscoped `.folder-head` matches several.
+function folderHead(page: Page, name: string) {
+  return page.locator(`.folder-head[data-epic-id="${epicId}"]`, { hasText: `${name}/` });
+}
+
 test('epic tree: epic row, folders and indented children render; the epic collapses', async ({ page }) => {
   test.setTimeout(60_000);
   await openProduct(page);
@@ -112,8 +119,8 @@ test('epic tree: epic row, folders and indented children render; the epic collap
   await expect(epic.locator('.epic-badge')).toHaveText(/epic · 3/);
 
   // Folder headers + children (indented rows carry the `child` class).
-  await expect(page.locator('.folder-head', { hasText: 'Design/' })).toBeVisible();
-  await expect(page.locator('.folder-head', { hasText: 'PO/' })).toBeVisible();
+  await expect(folderHead(page, 'Design')).toBeVisible();
+  await expect(folderHead(page, 'PO')).toBeVisible();
   const childA = page.locator('.story-row-wrap.child', { hasText: CHILD_A });
   const childB = page.locator('.story-row-wrap.child', { hasText: CHILD_B });
   await expect(childA).toBeVisible();
@@ -123,12 +130,12 @@ test('epic tree: epic row, folders and indented children render; the epic collap
   // Collapse the epic → children + folders disappear; expand → back.
   await epic.locator('.tree-toggle').click();
   await expect(childA).toBeHidden();
-  await expect(page.locator('.folder-head', { hasText: 'PO/' })).toBeHidden();
+  await expect(folderHead(page, 'PO')).toBeHidden();
   await epic.locator('.tree-toggle').click();
   await expect(childA).toBeVisible();
 
   // Collapse just the Design folder → only its children hide.
-  await page.locator('.folder-head', { hasText: 'Design/' }).click();
+  await folderHead(page, 'Design').click();
   await expect(childA).toBeHidden();
   await expect(childB).toBeVisible();
 });
