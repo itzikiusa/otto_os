@@ -231,7 +231,9 @@ async fn http_lists_and_dispatches_only_the_profile_tools() {
     assert_eq!(v["result"]["isError"], true);
     let text = v["result"]["content"][0]["text"].as_str().unwrap();
     assert!(
-        text.contains("otto.create_pr") && text.contains("MCP profile") && text.contains("DATABASE"),
+        text.contains("otto.create_pr")
+            && text.contains("MCP profile")
+            && text.contains("DATABASE"),
         "{text}"
     );
     assert_eq!(

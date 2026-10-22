@@ -110,9 +110,9 @@ use crate::config::Config;
 mod budgets;
 // Session credentials (env / Codex creds file): `mcp_tools/creds.rs`.
 mod creds;
+use creds::load_creds;
 #[cfg(test)]
 use creds::{config_path_in, parse_creds};
-use creds::load_creds;
 // MCP profiles — the list/dispatch filter hook: `mcp_tools/profile.rs`.
 mod profile;
 use budgets::{wait_session_budget, ReadCall, SUMMARIZE_CALL_TIMEOUT};

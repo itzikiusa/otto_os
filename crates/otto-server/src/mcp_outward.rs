@@ -1470,8 +1470,7 @@ pub async fn otto_server_enabled(
     CurrentAuthContext(auth): CurrentAuthContext,
     Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> ApiResult<Json<Value>> {
-    // `?profiles=a,b` (a stdio bridge running under MCP profiles): the
-    // resolved `ToolFilter` it narrows its own listing and calls with.
+    // `?profiles=a,b`: the resolved `ToolFilter` a stdio bridge narrows by.
     let profile =
         otto_mcp::profiles::resolve_param(&ctx.pool, q.get("profiles").map(String::as_str))
             .await
