@@ -11,9 +11,14 @@ scripts/ui-guards-baseline.json ratchet:
   * otto-server's total `src/**/*.rs` lines must stay at or below `totals`;
   * a Rust file under crates/ that is NOT tracked must stay under
     `new_file_max` lines — a new god-module fails until it is split;
-  * each tracked god FUNCTION (`functions`, keyed by name and searched across
-    crates/otto-server/src, so a split that moves it to another file keeps
-    the cap) must stay at or below its recorded line count.
+  * every production function in every `crates/**/src` file stays under
+    `function_max` (400) lines (architecture-4-04), unless it is listed in
+    `functions` — then it must stay at or below its recorded span, which can
+    only shrink. Entries are keyed `path::name` (so same-named functions in
+    different files stay distinct); the three original bare-name entries
+    (`execute_node`, `run_review_core`, `run_workflow_with_budget`) are still
+    searched across crates/otto-server/src, so a split that moves one to
+    another file keeps its cap.
 
 Only PRODUCTION lines count (architecture-2-07): a top-level `#[cfg(test)]`
 item (`mod tests { … }`, a test-only fn) and a bare top-level `mod tests { … }`
@@ -22,8 +27,13 @@ production code under the old cap.
 
     scripts/loc-ratchet.py                      # check (CI: Rust job)
     scripts/loc-ratchet.py --update-baseline    # LOWER entries to today's counts
-                                                # (never raises; drops deleted files)
-    scripts/loc-ratchet.py --raise PATH|fn:NAME ...  # deliberately raise named entries
+                                                # (never raises; drops deleted files and
+                                                # functions now under `function_max`). The
+                                                # first run on a baseline without
+                                                # `function_max` seeds it and records every
+                                                # over-cap function's span.
+    scripts/loc-ratchet.py --raise PATH|fn:NAME|fn:PATH::NAME ...
+                                                # deliberately raise / add named entries
                                                 # (say why in the PR — the split is the fix)
 """
 
@@ -39,6 +49,7 @@ ROOT = Path(__file__).resolve().parent.parent
 BASELINE = ROOT / "scripts" / "loc-baseline.json"
 TOTALS = {"otto-server": "crates/otto-server/src"}
 FUNCTIONS_ROOT = "crates/otto-server/src"
+FUNCTION_MAX = 400
 
 
 def production_lines(text: str) -> list[str]:
@@ -85,6 +96,11 @@ def function_lengths(text: str) -> dict[str, int]:
         if not m:
             continue
         close = m.group("indent") + "}"
+        if "{" in line and line.count("{") == line.count("}"):
+            # A one-line body (`fn as_str(&self) -> &str { "x" }`): searching
+            # for a closing brace would run into the next item's.
+            out[m.group("name")] = max(out.get(m.group("name"), 0), 1)
+            continue
         for j in range(i, len(lines)):
             if j > i and lines[j].rstrip() == close:
                 out[m.group("name")] = max(out.get(m.group("name"), 0), j - i + 1)
@@ -94,15 +110,39 @@ def function_lengths(text: str) -> dict[str, int]:
     return out
 
 
+def production_text(path: Path) -> str:
+    return "\n".join(production_lines(path.read_text(encoding="utf-8", errors="replace")))
+
+
 def measure_functions(files: list[str], names: list[str]) -> dict[str, int]:
+    """Spans keyed `path::name` for every production function in `files`,
+    plus the legacy bare-name entries in `names` (longest match under
+    FUNCTIONS_ROOT). Test-only items are skipped (`production_lines`), and
+    `files` already excludes `tests/` dirs and `*_tests.rs`."""
     found: dict[str, int] = {}
     for f in files:
-        if not f.startswith(FUNCTIONS_ROOT + "/"):
-            continue
-        for name, n in function_lengths((ROOT / f).read_text(encoding="utf-8", errors="replace")).items():
-            if name in names:
+        spans = function_lengths(production_text(ROOT / f))
+        for name, n in spans.items():
+            found[f"{f}::{name}"] = n
+            if name in names and "::" not in name and f.startswith(FUNCTIONS_ROOT + "/"):
                 found[name] = max(found.get(name, 0), n)
     return found
+
+
+def function_max(baseline: dict) -> int:
+    return int(baseline.get("function_max", FUNCTION_MAX))
+
+
+def legacy_covers(key: str, funcs: dict[str, int]) -> bool:
+    """A `path::name` span is covered by a legacy bare-name entry when the file
+    is under FUNCTIONS_ROOT and the bare name is tracked."""
+    path, _, name = key.rpartition("::")
+    return name in funcs and path.startswith(FUNCTIONS_ROOT + "/")
+
+
+def over_cap(baseline: dict, fns: dict[str, int]) -> dict[str, int]:
+    cap = function_max(baseline)
+    return {k: n for k, n in fns.items() if "::" in k and n > cap}
 
 
 def is_test_file(path: str) -> bool:
@@ -135,12 +175,22 @@ def measure(files: list[str]) -> tuple[dict[str, int], dict[str, int]]:
 
 def check(baseline: dict, counts: dict[str, int], totals: dict[str, int], fns: dict[str, int] | None = None) -> list[str]:
     errors = []
-    for name, limit in sorted(baseline.get("functions", {}).items()):
-        n = (fns or {}).get(name)
+    fns = fns or {}
+    funcs = baseline.get("functions", {})
+    for name, limit in sorted(funcs.items()):
+        n = fns.get(name)
         if n is None:
-            errors.append(f"fn {name}: not found under {FUNCTIONS_ROOT} — renamed? update `functions` in {BASELINE.name}")
+            where = name.rpartition("::")[0] if "::" in name else FUNCTIONS_ROOT
+            errors.append(f"fn {name}: not found under {where} — renamed? update `functions` in {BASELINE.name}")
         elif n > limit:
             errors.append(f"fn {name}: {n} lines > ratchet {limit} (+{n - limit}) — extract a helper instead of adding to it")
+    cap_fn = function_max(baseline)
+    for key, n in sorted(over_cap(baseline, fns).items()):
+        if key not in funcs and not legacy_covers(key, funcs):
+            errors.append(
+                f"fn {key}: {n} lines — over the {cap_fn}-line function cap; split it "
+                f"(or track it with --raise fn:{key})"
+            )
     tracked = baseline["files"]
     for f, limit in sorted(tracked.items()):
         n = counts.get(f)
@@ -164,8 +214,28 @@ def lowered(baseline: dict, counts: dict[str, int], totals: dict[str, int], fns:
     files = {f: min(limit, counts[f]) for f, limit in baseline["files"].items() if f in counts and counts[f] >= cap}
     tots = {k: min(v, totals.get(k, v)) for k, v in baseline["totals"].items()}
     new = {**baseline, "files": dict(sorted(files.items())), "totals": tots}
-    if "functions" in baseline:
-        new["functions"] = {k: min(v, (fns or {}).get(k, v)) for k, v in sorted(baseline["functions"].items())}
+    fns = fns or {}
+    funcs = baseline.get("functions", {})
+    cap_fn = function_max(baseline)
+    # Only shrink: a bare legacy name keeps its entry while found; a
+    # `path::name` entry is dropped once the function is gone (renamed or
+    # split — the cap then covers whatever replaced it) or under the cap.
+    out = {}
+    for k, v in funcs.items():
+        n = fns.get(k)
+        if "::" not in k:
+            out[k] = min(v, n if n is not None else v)
+        elif n is not None and n > cap_fn:
+            out[k] = min(v, n)
+    if "function_max" not in baseline:
+        # First adoption of the per-function cap: seed today's over-cap spans.
+        # Afterwards a new over-cap function needs an explicit --raise.
+        new["function_max"] = cap_fn
+        for k, n in over_cap(baseline, fns).items():
+            if k not in out and not legacy_covers(k, out):
+                out[k] = n
+    if out:
+        new["functions"] = dict(sorted(out.items()))
     return new
 
 
