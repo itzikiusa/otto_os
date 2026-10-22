@@ -575,6 +575,14 @@ async fn summary_and_report_query_budget() {
     }
     let _serial = serial().await;
     let tmp = tempfile::tempdir().expect("tempdir");
+    // A fresh data dir runs the one-time compaction (count, ALTER TTL,
+    // OPTIMIZE FINAL ×2, count) in the background once the server is up; on a
+    // slow runner those statements land inside the measured windows below and
+    // the counts go flaky. Its marker says "already compacted", so the
+    // handle's counters see only the reads under test.
+    let ch_dir = tmp.path().join("clickhouse");
+    std::fs::create_dir_all(&ch_dir).expect("clickhouse dir");
+    std::fs::write(ch_dir.join(".usage_compacted_v2"), "ok").expect("compaction marker");
     let engine = UsageEngine::start(test_config(), tmp.path().to_path_buf()).await;
     assert!(engine.wait_ready(Duration::from_secs(30)).await);
     const N: u64 = 50_000;
