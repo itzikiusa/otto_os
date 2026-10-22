@@ -1,6 +1,6 @@
 {
-  "fps": 60,
-  "drawCalls": 106,
-  "triangles": 303606,
-  "frameMs": 16.665140535534746
+  "fps": 60.0640683395622,
+  "drawCalls": 130,
+  "triangles": 622660,
+  "frameMs": 16.706673697811485
 }
