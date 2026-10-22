@@ -86,25 +86,27 @@ pub(crate) fn compose_draft_prompt(skill_text: &str, base_prompt: &str) -> Strin
 /// the JSON in prose or a markdown fence). Falls back to using the branch name
 /// as the title and the whole reply as the description.
 pub(crate) fn parse_pr_draft(text: &str, fallback_title: &str) -> (String, String) {
-    if let (Some(s), Some(e)) = (text.find('{'), text.rfind('}')) {
-        if e > s {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text[s..=e]) {
-                let title = v.get("title").and_then(|x| x.as_str()).unwrap_or("").trim();
-                let desc = v
-                    .get("description")
-                    .and_then(|x| x.as_str())
-                    .unwrap_or("")
-                    .trim();
-                if !title.is_empty() || !desc.is_empty() {
-                    let title = if title.is_empty() {
-                        fallback_title
-                    } else {
-                        title
-                    };
-                    return (title.to_string(), desc.to_string());
-                }
-            }
-        }
+    let field = |v: &serde_json::Value, k: &str| -> String {
+        v.get(k)
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string()
+    };
+    // The shared string-aware extractor, taking the first object that carries
+    // a title or description: a brace in the preamble (`fn x() {}`) or a lone
+    // `{` in prose no longer breaks a first-`{`…last-`}` slice.
+    let draft = otto_core::text::extract_json_where(text, |v| {
+        !field(v, "title").is_empty() || !field(v, "description").is_empty()
+    });
+    if let Some(v) = draft {
+        let title = field(&v, "title");
+        let title = if title.is_empty() {
+            fallback_title.to_string()
+        } else {
+            title
+        };
+        return (title, field(&v, "description"));
     }
     (fallback_title.to_string(), text.trim().to_string())
 }
@@ -540,7 +542,7 @@ pub(crate) async fn draft_commit_message(
 
 #[cfg(test)]
 mod commit_pr_draft_tests {
-    use super::{compose_draft_prompt, jira_key_from_branch};
+    use super::{compose_draft_prompt, jira_key_from_branch, parse_pr_draft};
 
     #[test]
     fn jira_key_parsed_from_branch() {
@@ -593,6 +595,28 @@ mod commit_pr_draft_tests {
     #[test]
     fn compose_passthrough_when_no_skill() {
         assert_eq!(compose_draft_prompt("", "BASE PROMPT"), "BASE PROMPT");
+    }
+
+    #[test]
+    fn parse_pr_draft_skips_braces_before_the_draft() {
+        // backend-correctness-3-03: a balanced `{}` in the preamble made the
+        // first-`{`…last-`}` slice unparseable, and a lone `{` did the same.
+        let reply =
+            "Drafted from the `fn x() {}` change: {\"title\":\"Fix x\",\"description\":\"Body\"}";
+        assert_eq!(
+            parse_pr_draft(reply, "branch"),
+            ("Fix x".to_string(), "Body".to_string())
+        );
+        let lone = "The `if a {` guard moved. {\"title\":\"T\",\"description\":\"D\"}";
+        assert_eq!(
+            parse_pr_draft(lone, "branch"),
+            ("T".to_string(), "D".to_string())
+        );
+        // No draft object: the branch title and the whole reply.
+        assert_eq!(
+            parse_pr_draft("just prose {}", "branch"),
+            ("branch".to_string(), "just prose {}".to_string())
+        );
     }
 
     #[test]

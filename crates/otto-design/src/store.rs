@@ -1762,11 +1762,14 @@ impl Store {
         Ok(adj)
     }
 
-    /// Product stories an artifact `implements`.
+    /// Product stories an artifact links to (`implements`, `references`, …),
+    /// each ONCE in first-link order — the same set as the row's `story_ids`
+    /// (`split_ids` de-duplicates) and the `story_id` list filter. The unique
+    /// index is per (rel, origin), so one story can carry several links.
     pub async fn story_ids_for(&self, artifact_id: &str) -> Result<Vec<Id>> {
         sqlx::query_scalar(
             "SELECT dst_id FROM design_links WHERE src_artifact_id = ? AND dst_kind = 'story'
-             ORDER BY created_at",
+             GROUP BY dst_id ORDER BY MIN(created_at), dst_id",
         )
         .bind(artifact_id)
         .fetch_all(&self.pool)
@@ -2991,8 +2994,21 @@ mod tests {
         s.insert_link(&story).await.unwrap();
         story.dst_id = "S1".into();
         s.insert_link(&story).await.unwrap();
+        // The same story linked a second way (implements + references, the
+        // Links panel default) stays ONE id on the row and in story_ids_for
+        // (ui-correctness-3-02: a repeat crashed the keyed chip lists).
+        let mut again = story.clone();
+        again.rel = "references".into();
+        s.insert_link(&again).await.unwrap();
         let a = s.require_artifact("A").await.unwrap();
         assert_eq!(a.story_ids, vec!["S1".to_string(), "S2".to_string()]);
+        let mut ids = s.story_ids_for("A").await.unwrap();
+        ids.sort();
+        assert_eq!(
+            ids,
+            vec!["S1".to_string(), "S2".to_string()],
+            "each story once"
+        );
         assert!(s.require_artifact("B").await.unwrap().story_ids.is_empty());
         // The story filter and the per-row ids agree.
         let f = ArtifactFilter {

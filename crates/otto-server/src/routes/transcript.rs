@@ -706,6 +706,14 @@ async fn session_artifacts(ctx: &ServerCtx, session: &Session) -> ApiResult<Vec<
     let Ok(resolved) = resolve_transcript(ctx, session).await else {
         return Ok(Vec::new());
     };
+    // A live session's tail already holds the folded artifacts: copy them
+    // rather than refold a file that grew since the cached fold (which is
+    // then never stored as current).
+    if let Some(arts) =
+        crate::transcript_tail::live_artifacts(&session.id, resolved.provider, &resolved.path).await
+    {
+        return Ok(newest_first(&arts));
+    }
     let snapshot = cached_fold(ctx, resolved.provider, &resolved.path, None).await?;
     Ok(newest_first(&snapshot.folded.artifacts))
 }

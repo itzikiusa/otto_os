@@ -9,7 +9,7 @@ use crate::sql_class::{
     gate_keyword_is_read as sql_first_keyword_is_read, strip_leading_comments, GATE_PROVEN_READS,
 };
 use otto_core::domain::ConnectionKind;
-use otto_core::{Error, Result};
+use otto_core::Error;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -1258,6 +1258,13 @@ pub fn inject_row_limit(statement: &str, limit: usize, offset: Option<u64>) -> R
         "INTERSECT",
         "EXCEPT",
         "LOCK",
+        // A data-modifying CTE (`WITH t AS (…) UPDATE/DELETE/INSERT/MERGE …`)
+        // stays on Postgres's read path because it may RETURN rows, but those
+        // statements reject a trailing LIMIT — leave them unrewritten.
+        "UPDATE",
+        "DELETE",
+        "INSERT",
+        "MERGE",
     ];
     if tokens.iter().any(|token| match token {
         Token::Word(word) if word.quote_style.is_none() => {
@@ -1554,9 +1561,6 @@ pub struct MongoshInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
 }
-
-/// Re-export for drivers.
-pub type DbResult<T> = Result<T>;
 
 /// The largest integer an IEEE-754 double — what the UI's `JSON.parse` turns
 /// every JSON number into — represents exactly: 2^53 − 1.
@@ -2392,6 +2396,22 @@ mod tests {
                 !r.limited,
                 "non-paginatable read must not be flagged auto-limited: {sql}"
             );
+        }
+    }
+
+    #[test]
+    fn data_modifying_cte_is_never_auto_limited() {
+        // Postgres keeps `WITH` on the read path (a data-modifying CTE can
+        // RETURN rows), but UPDATE/DELETE/INSERT/MERGE reject a trailing LIMIT.
+        for sql in [
+            "WITH t AS (SELECT id FROM x WHERE a > 1) UPDATE y SET a = 1 FROM t WHERE y.id = t.id",
+            "WITH t AS (SELECT id FROM x) DELETE FROM y USING t WHERE y.id = t.id",
+            "WITH t AS (SELECT 1 AS id) INSERT INTO y SELECT id FROM t",
+            "with t as (select 1 as id) merge into y using t on y.id = t.id when matched then delete",
+        ] {
+            let r = inject_row_limit(sql, 1001, None);
+            assert!(!r.limited, "data-modifying CTE must not be limited: {sql}");
+            assert_eq!(r.sql, sql);
         }
     }
 

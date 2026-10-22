@@ -944,7 +944,10 @@ impl MemoriesRepo {
     }
 
     /// Soft-delete a memory: set `active=0`, `forgotten_at`, and mint an opaque
-    /// `undo_token`. Returns the token so the caller can hand it to the client.
+    /// `undo_token`. The state it had is kept in `prev_state` (0190) for the
+    /// undo — only on the FIRST forget, so re-forgetting a forgotten row never
+    /// records its interim `stale`. Returns the token so the caller can hand it
+    /// to the client.
     pub async fn soft_forget(&self, ws: &str, id: &str) -> Result<String> {
         // Verify the row exists in this workspace first (returns NotFound if absent).
         let _ = self.get(ws, id).await?;
@@ -952,8 +955,10 @@ impl MemoriesRepo {
         let epoch = Utc::now().timestamp();
         let token = Self::mint_undo_token();
         sqlx::query(
-            "UPDATE memories SET active=0, forgotten_at=?, undo_token=?, \
-             state='stale', updated_at=? WHERE id=? AND workspace_id=?",
+            "UPDATE memories SET active=0, \
+             prev_state = CASE WHEN forgotten_at IS NULL THEN state ELSE prev_state END, \
+             forgotten_at=?, undo_token=?, state='stale', updated_at=? \
+             WHERE id=? AND workspace_id=?",
         )
         .bind(epoch)
         .bind(&token)
@@ -966,8 +971,12 @@ impl MemoriesRepo {
         Ok(token)
     }
 
-    /// Undo a soft-delete: restore `active=1`, clear `forgotten_at` and
-    /// `undo_token`, set state back to `accepted`. Returns the restored memory.
+    /// Undo a soft-delete: clear `forgotten_at` and `undo_token` and restore the
+    /// state the memory had before the forget (`prev_state`; `accepted` for a
+    /// row forgotten by an older build). A pending `suggested` memory therefore
+    /// stays pending (its review item is still open), and a `contradicted` one
+    /// stays inactive — undo must not reverse a merge/supersede decision.
+    /// Returns the restored memory.
     pub async fn undo_forget(&self, ws: &str, undo_token: &str) -> Result<Memory> {
         self.undo_forget_scoped(ws, None, undo_token).await
     }
@@ -1000,8 +1009,10 @@ impl MemoriesRepo {
         let id: String = row.get("id");
         let now = fmt(Utc::now());
         sqlx::query(
-            "UPDATE memories SET active=1, forgotten_at=NULL, undo_token=NULL, \
-             state='accepted', updated_at=? WHERE id=? AND workspace_id=?",
+            "UPDATE memories SET \
+             active = (COALESCE(prev_state, 'accepted') <> 'contradicted'), \
+             state = COALESCE(prev_state, 'accepted'), prev_state = NULL, \
+             forgotten_at=NULL, undo_token=NULL, updated_at=? WHERE id=? AND workspace_id=?",
         )
         .bind(&now)
         .bind(&id)
@@ -1644,5 +1655,59 @@ mod fts_map_tests {
             .await
             .unwrap();
         assert_eq!(mapped, 0);
+    }
+}
+
+#[cfg(test)]
+mod forget_undo_tests {
+    use super::*;
+
+    async fn seed(r: &MemoriesRepo, id: &str, state: &str, active: bool) {
+        sqlx::query(
+            "INSERT OR IGNORE INTO workspaces (id, name, root_path, created_at) \
+             VALUES ('ws', 'ws', '/tmp/ws', '2026-01-01T00:00:00Z')",
+        )
+        .execute(&r.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO memories (id, workspace_id, scope, kind, title, body, source_kind, \
+             content_hash, created_by, created_at, updated_at, state, active) \
+             VALUES (?, 'ws', 'workspace', 'fact', 'T', ?, 'manual', ?, 'u', \
+             '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', ?, ?)",
+        )
+        .bind(id)
+        .bind(format!("body {id}"))
+        .bind(format!("hash {id}"))
+        .bind(state)
+        .bind(active)
+        .execute(&r.pool)
+        .await
+        .unwrap();
+    }
+
+    /// data-integrity-3-01: undo restores the state the memory had, so a
+    /// pending memory never skips review and a superseded one stays retired.
+    #[tokio::test]
+    async fn undo_restores_the_pre_forget_state() {
+        let r = MemoriesRepo::new(crate::db::test_pool().await);
+        for (id, state, active) in [
+            ("pending", "suggested", true),
+            ("merged", "contradicted", false),
+            ("plain", "accepted", true),
+        ] {
+            seed(&r, id, state, active).await;
+            let token = r.soft_forget("ws", id).await.unwrap();
+            // A second forget must not overwrite the remembered state with `stale`.
+            let token = if id == "plain" {
+                r.soft_forget("ws", id).await.unwrap()
+            } else {
+                token
+            };
+            let m = r.get("ws", id).await.unwrap();
+            assert_eq!((m.state.as_str(), m.active), ("stale", false));
+            let back = r.undo_forget("ws", &token).await.unwrap();
+            assert_eq!((back.state.as_str(), back.active), (state, active), "{id}");
+        }
     }
 }

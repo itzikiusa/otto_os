@@ -346,7 +346,7 @@ impl ReviewFindingsRepo {
         // Locate any existing row for this fingerprint within its dedup scope,
         // preferring an exact (v2) match over a legacy one, then the newest.
         let existing: Option<sqlx::sqlite::SqliteRow> = sqlx::query(
-            "SELECT id, state FROM review_findings \
+            "SELECT id FROM review_findings \
              WHERE workspace_id = ? AND repo_id = ? AND pr_number = ? \
                AND fingerprint IN (?, ?) \
              ORDER BY (fingerprint = ?) DESC, updated_at DESC \
@@ -364,20 +364,18 @@ impl ReviewFindingsRepo {
 
         if let Some(row) = existing {
             let existing_id: String = row.get("id");
-            let prev_state: String = row.try_get("state").unwrap_or_else(|_| "open".to_string());
-            // Reappearance of a resolved/declined finding → regressed (detection axis).
-            let next_state = match prev_state.as_str() {
-                "resolved" | "declined" => "regressed",
-                other => other, // open / fixing / regressed — keep as-is
-            };
+            // Reappearance of a resolved/declined finding → regressed (detection
+            // axis); open / fixing / regressed keep as-is. Decided IN the UPDATE
+            // against the row's state at write time, so a user's resolve/decline
+            // landing after the lookup becomes `regressed`, never a stale `open`.
             sqlx::query(
                 "UPDATE review_findings \
-                 SET state = ?, review_id = ?, last_seen_run = ?, last_seen_review_id = ?, \
+                 SET state = CASE WHEN state IN ('resolved', 'declined') THEN 'regressed' ELSE state END, \
+                     review_id = ?, last_seen_run = ?, last_seen_review_id = ?, \
                      fingerprint = ?, path = COALESCE(?, path), line = ?, line_end = ?, \
                      occurrence_count = occurrence_count + 1, updated_at = ? \
                  WHERE id = ?",
             )
-            .bind(next_state)
             .bind(f.review_id)
             .bind(f.run_id)
             .bind(f.review_id)

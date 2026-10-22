@@ -632,7 +632,7 @@ async fn record_finish(repo: &otto_state::ScheduledTasksRepo, run_id: &str, f: F
 /// re-running and re-delivering every minute. Retry before the guard drops
 /// (same loop as the personal-agents engine's `advance_cursor`), and on a
 /// persistent failure hold the claim across one scan before a last try.
-async fn settle_with_retry(
+pub(crate) async fn settle_with_retry(
     repo: &otto_state::ScheduledTasksRepo,
     task: &ScheduledTask,
     status: &str,
@@ -662,8 +662,12 @@ async fn settle_with_retry(
 }
 
 /// One scheduler scan (`scheduled_tasks_scheduler::SCAN`): how long a
-/// persistently failing settle keeps the in-flight claim.
+/// persistently failing settle keeps the in-flight claim. Shortened under
+/// test so the post-hold attempt is reachable in real time.
+#[cfg(not(test))]
 const SETTLE_HOLD: Duration = Duration::from_secs(60);
+#[cfg(test)]
+const SETTLE_HOLD: Duration = Duration::from_secs(2);
 
 /// A manual run's status write. It moves no cursor, so a failure only
 /// leaves a stale badge — logged, not retried.
@@ -1756,6 +1760,92 @@ async fn deliver(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// A scheduled task plus a plain (non-temp: the pool has one connection,
+    /// but this keeps it independent of that) trigger that fails every cursor
+    /// write — the settle fault, with no seam in otto-state.
+    async fn failing_settle_fixture(
+        ws: &str,
+    ) -> (
+        otto_state::ScheduledTasksRepo,
+        otto_state::DbPool,
+        ScheduledTask,
+    ) {
+        let pool = otto_state::db::test_pool().await;
+        sqlx::query("INSERT INTO workspaces(id,name,root_path,created_at) VALUES(?,'ws','/tmp','2099-10-05T00:00:00Z')").bind(ws).execute(&pool).await.unwrap();
+        let repo = otto_state::ScheduledTasksRepo::new(pool.clone());
+        let mut new = otto_state::NewScheduledTask::defaults(ws.into(), "Settle retry".into());
+        new.schedule = json!({"cadence":"once","run_at":"2099-10-05T10:00:00Z"});
+        let task = repo.create(new).await.unwrap();
+        sqlx::query("CREATE TRIGGER settle_fault BEFORE UPDATE OF last_run_at ON scheduled_tasks BEGIN SELECT RAISE(ABORT,'database is locked'); END")
+            .execute(&pool)
+            .await
+            .unwrap();
+        (repo, pool, task)
+    }
+
+    async fn cursor(repo: &otto_state::ScheduledTasksRepo, id: &str) -> Option<DateTime<Utc>> {
+        repo.get(id)
+            .await
+            .unwrap()
+            .last_run_at
+            .map(|s| s.parse().unwrap())
+    }
+
+    /// test-quality-3-06: a settle fault that clears during the backoff is
+    /// settled by the retry loop — long before the post-hold attempt (attempts
+    /// run at 0, 0.2, 0.6, 1.2 and 2.0 s; the hold ends at 5 s under test, and
+    /// a loop that gave up after one error would settle at 2.2 s at best).
+    #[tokio::test]
+    async fn settle_retry_recovers_from_a_transient_cursor_write_failure() {
+        let (repo, pool, task) = failing_settle_fixture("settle-ws-1").await;
+        let served: DateTime<Utc> = "2099-10-05T10:02:00Z".parse().unwrap();
+        let (r, t) = (repo.clone(), task.clone());
+        let handle = tokio::spawn(async move { settle_with_retry(&r, &t, "ok", served).await });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            cursor(&repo, &task.id).await,
+            None,
+            "the fault holds the cursor"
+        );
+        sqlx::query("DROP TRIGGER settle_fault")
+            .execute(&pool)
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(1_000)).await;
+        assert_eq!(
+            cursor(&repo, &task.id).await,
+            Some(served),
+            "a retry inside the backoff loop settles the served occurrence"
+        );
+        handle.await.unwrap();
+    }
+
+    /// test-quality-3-06: a fault that outlasts all five attempts is still
+    /// settled by the final attempt after `SETTLE_HOLD`.
+    #[tokio::test]
+    async fn settle_retry_makes_a_final_attempt_after_the_hold() {
+        let (repo, pool, task) = failing_settle_fixture("settle-ws-2").await;
+        let served: DateTime<Utc> = "2099-10-05T10:02:00Z".parse().unwrap();
+        let (r, t) = (repo.clone(), task.clone());
+        let handle = tokio::spawn(async move { settle_with_retry(&r, &t, "error", served).await });
+        // Past the fifth attempt (2.0 s), inside the hold (3–5 s).
+        tokio::time::sleep(Duration::from_millis(3_500)).await;
+        assert_eq!(
+            cursor(&repo, &task.id).await,
+            None,
+            "all five attempts failed"
+        );
+        sqlx::query("DROP TRIGGER settle_fault")
+            .execute(&pool)
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), handle)
+            .await
+            .expect("settle finishes after the hold")
+            .unwrap();
+        assert_eq!(cursor(&repo, &task.id).await, Some(served));
+    }
 
     async fn paused_once_settlement(status: &str, resume_before_completion: bool) {
         let pool = otto_state::db::test_pool().await;

@@ -530,4 +530,27 @@ pub struct UsageStatus {
     /// list prices (see `pricing::PRICED_AS_OF`). Lets the UI flag estimates as
     /// "priced as of <date>" rather than implying live pricing.
     pub priced_as_of: String,
+    /// The transcript tailer's ingestion state (PC-2); absent until the daemon
+    /// starts a tailer. The Usage page warns on `retrying` / `stopped`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tailer: Option<TailerStatus>,
+}
+
+/// Whether the usage tailer is ingesting (error-handling-3-05).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TailerState {
+    Running,
+    /// The journal was unavailable or a commit failed; retried with backoff.
+    Retrying,
+    /// The journal checkpoint is corrupt: ingestion stays off until restart.
+    Stopped,
+}
+
+/// [`UsageStatus::tailer`]: the state plus the cause of the last failure.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TailerStatus {
+    pub state: TailerState,
+    #[serde(default)]
+    pub cause: Option<String>,
 }

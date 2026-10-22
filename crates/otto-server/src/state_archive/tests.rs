@@ -460,3 +460,23 @@ async fn export_drops_secret_settings_hashes_and_tokens_portable_or_not() {
         assert!(!archive.records.contains_key("auth_sessions"));
     }
 }
+
+/// backend-performance-3-03: rows come out in primary-key order from SQL (the
+/// old in-memory sort compared re-serialized JSON, so id 10 sorted before 2).
+#[tokio::test]
+async fn exported_rows_follow_the_primary_key() {
+    let pool = otto_state::db::test_pool().await;
+    for statement in [
+        "INSERT INTO workspaces(id,name,root_path,created_at) VALUES('ws','Test','/r','now')",
+        "INSERT INTO vaults(id,ws_id,name,root_path,created_at) VALUES(10,'ws','Ten','/v10','now')",
+        "INSERT INTO vaults(id,ws_id,name,root_path,created_at) VALUES(2,'ws','Two','/v2','now')",
+    ] {
+        sqlx::query(statement).execute(&pool).await.unwrap();
+    }
+    let archive = snapshot(&pool).await;
+    let ids: Vec<i64> = archive.records["vaults"]
+        .iter()
+        .filter_map(|r| r.get("id").and_then(Value::as_i64))
+        .collect();
+    assert_eq!(ids, vec![2, 10]);
+}

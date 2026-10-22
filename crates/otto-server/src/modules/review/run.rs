@@ -655,9 +655,9 @@ pub(crate) async fn review_is_cancelled(ctx: &ServerCtx, review_id: &Id) -> bool
     ctx.review_cancels.is_signalled(review_id.as_str())
         || ctx
             .reviews_store
-            .get_review(review_id)
+            .review_status(review_id)
             .await
-            .is_ok_and(|r| r.status == ReviewStatus::Cancelled)
+            .is_ok_and(|s| s == ReviewStatus::Cancelled)
 }
 
 /// Open/blocker/total finding counts for a review, from the persistent store.

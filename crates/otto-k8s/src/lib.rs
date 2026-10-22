@@ -17,8 +17,9 @@
 //! | [`pod_http`] | HTTP requests to a pod / every pod of a workload (actuator actions) |
 //! | [`http`] | the `/k8s/*` axum router |
 //!
-//! Server-side wiring (ctx trait impl + router merge) lives in
-//! `crates/otto-server/src/modules.rs`.
+//! Server-side wiring: the ctx trait impl lives in
+//! `crates/otto-server/src/modules/ctx_impls.rs`, the router merge in
+//! `modules.rs::module_routers`.
 use std::sync::Arc;
 
 use axum::Router;

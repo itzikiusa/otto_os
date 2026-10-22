@@ -176,6 +176,9 @@ pub struct UsageEngine {
     last_totals: std::sync::Mutex<TotalsMemo>,
     ingestion: tokio::sync::OnceCell<Arc<crate::ingestion::IngestionJournal>>,
     ingestion_delivery: tokio::sync::Mutex<()>,
+    /// Reported by the transcript tailer ([`Self::set_tailer_status`]) and
+    /// surfaced on [`UsageStatus::tailer`].
+    tailer_status: std::sync::Mutex<Option<crate::types::TailerStatus>>,
 }
 
 /// `(days, otto_only)` → the last rollup that key produced (see `last_totals`).
@@ -336,6 +339,7 @@ impl UsageEngine {
             last_totals: std::sync::Mutex::new(HashMap::new()),
             ingestion: tokio::sync::OnceCell::new(),
             ingestion_delivery: tokio::sync::Mutex::new(()),
+            tailer_status: std::sync::Mutex::new(None),
         });
         let bg = Arc::clone(&engine);
         tokio::spawn(async move {
@@ -1999,6 +2003,19 @@ impl UsageEngine {
         Ok(out)
     }
 
+    /// The transcript tailer reports whether it is ingesting, retrying an
+    /// unavailable journal, or stopped on a corrupt checkpoint.
+    pub fn set_tailer_status(&self, status: crate::types::TailerStatus) {
+        *self.tailer_status.lock().unwrap_or_else(|e| e.into_inner()) = Some(status);
+    }
+
+    fn tailer_status(&self) -> Option<crate::types::TailerStatus> {
+        self.tailer_status
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
     /// Engine + ClickHouse status for the settings/wizard panel.
     pub async fn status(&self) -> UsageStatus {
         let cfg = self.config();
@@ -2048,6 +2065,7 @@ impl UsageEngine {
                 metric_rows,
                 disk_bytes,
                 priced_as_of: crate::PRICED_AS_OF.to_string(),
+                tailer: self.tailer_status(),
             }
         } else {
             UsageStatus {
@@ -2062,6 +2080,7 @@ impl UsageEngine {
                 metric_rows: 0,
                 disk_bytes: 0,
                 priced_as_of: crate::PRICED_AS_OF.to_string(),
+                tailer: self.tailer_status(),
             }
         }
     }

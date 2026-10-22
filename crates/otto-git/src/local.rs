@@ -2133,11 +2133,18 @@ impl LocalGit {
         Ok(true)
     }
 
-    /// Remove a linked worktree at `path` (force-removes dirty/locked trees).
-    /// Best-effort: a missing worktree is not an error.
+    /// Remove a linked worktree at `path`, dirty or locked (`--force` twice: an
+    /// in-flight `git worktree add` holds a lock one `--force` won't break).
+    /// Best-effort: a missing worktree is fine, any other failure is logged.
     pub async fn worktree_remove(&self, path: &str) -> Result<()> {
         Self::guard_ref(path)?;
-        let _ = self.run(&["worktree", "remove", "--force", path]).await;
+        let args = ["worktree", "remove", "--force", "--force", "--", path];
+        match self.run(&args).await {
+            Err(e) if !e.to_string().contains("is not a working tree") => {
+                tracing::warn!(path, error = %e, "git worktree remove failed")
+            }
+            _ => {}
+        }
         Ok(())
     }
 
@@ -5120,38 +5127,14 @@ impl LocalGit {
     }
 }
 
-/// `.git` as a path component, compared the way the default case-insensitive
-/// APFS/HFS+ volume resolves it: `.GIT/config` IS `.git/config` there.
+pub(crate) use crate::output_noise::{is_noise_line, strip_noise};
 pub use crate::remote_url::{strip_url_userinfo, validate_remote_url};
 
+/// `.git` as a path component, compared the way the default case-insensitive
+/// APFS/HFS+ volume resolves it: `.GIT/config` IS `.git/config` there.
 fn is_git_dir_name(name: &std::ffi::OsStr) -> bool {
     name.to_str()
         .is_some_and(|s| s.eq_ignore_ascii_case(".git"))
-}
-
-/// stderr lines that SSH/git emit as benign chatter — never the reason a command
-/// failed. We skip these when choosing the message to surface so the real git
-/// error (rejected push, auth failure, …) isn't masked. Newer OpenSSH (9.x/10.x)
-/// prints the post-quantum warning to stderr on every non-PQ connection and it
-/// does NOT affect the exit status — yet it sorts first, so the old "first
-/// non-empty line" logic reported it as the failure.
-fn is_noise_line(l: &str) -> bool {
-    let t = l.trim();
-    t.is_empty()
-        || t.contains("post-quantum key exchange")
-        || t.starts_with("Warning: Permanently added")
-}
-
-/// Drop benign SSH/git noise lines from combined command output (used for the
-/// success path so a successful push/pull doesn't surface the post-quantum
-/// warning).
-pub(crate) fn strip_noise(s: &str) -> String {
-    s.lines()
-        .filter(|l| !is_noise_line(l))
-        .collect::<Vec<_>>()
-        .join("\n")
-        .trim_end()
-        .to_string()
 }
 
 /// Combine a push's stdout+stderr into one denoised block (git writes its
@@ -5559,13 +5542,10 @@ pub async fn clone_repo(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Tests — real throwaway repos under the system temp dir
-// ---------------------------------------------------------------------------
-
 /// Cap on [`LocalGit::head_remote_refs`] — the UI only names a few.
 pub const HEAD_REMOTES_CAP: usize = 20;
 
+// Tests — real throwaway repos under the system temp dir.
 #[cfg(test)]
 #[path = "local/tests.rs"]
 mod tests;

@@ -194,6 +194,10 @@ struct Attribution {
     by_provider_identity: HashMap<(String, String), SessionRef>,
 }
 
+/// First and last delay of the tailer's startup retry (error-handling-3-05).
+const STARTUP_RETRY_MIN: Duration = Duration::from_secs(5);
+const STARTUP_RETRY_MAX: Duration = Duration::from_secs(300);
+
 impl UsageTailer {
     /// Build the tailer. `data_dir` holds the persisted cursor file; `home` is
     /// the root for the `~/.claude` and `~/.codex` transcript trees.
@@ -288,30 +292,63 @@ impl UsageTailer {
         let wake = Arc::new(Notify::new());
         let wake_task = Arc::clone(&wake);
         let task = tokio::spawn(async move {
-            // Adopt legacy source checkpoints without rewriting historical rows.
-            match self.usage.ingestion_checkpoint().await {
-                Ok(Some(state)) => {
-                    if let Err(e) = self.restore_checkpoint(state) {
-                        tracing::error!(
-                            "usage tailer: invalid journal checkpoint; ingestion stopped: {e}"
-                        );
-                        return;
-                    }
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    tracing::error!("usage tailer: journal unavailable; ingestion stopped: {e}");
+            use otto_usage::{TailerState, TailerStatus};
+            // Only a CORRUPT checkpoint stops ingestion. An unavailable
+            // journal (SQLITE_BUSY during a backup, a full disk at boot) or a
+            // failed initial commit is transient: retry with a capped backoff
+            // (5 s doubling to 5 min) and report `retrying` meanwhile, so the
+            // Usage page says why its totals are stale.
+            let mut backoff = STARTUP_RETRY_MIN;
+            loop {
+                if cancel_task.load(Ordering::Relaxed) {
                     return;
                 }
+                // Adopt legacy source checkpoints without rewriting historical rows.
+                let failure = match self.usage.ingestion_checkpoint().await {
+                    Ok(Some(state)) => {
+                        if let Err(e) = self.restore_checkpoint(state) {
+                            tracing::error!(
+                                "usage tailer: invalid journal checkpoint; ingestion stopped: {e}"
+                            );
+                            self.usage.set_tailer_status(TailerStatus {
+                                state: TailerState::Stopped,
+                                cause: Some(format!(
+                                    "the usage journal checkpoint is corrupt: {e}"
+                                )),
+                            });
+                            return;
+                        }
+                        None
+                    }
+                    Ok(None) => None,
+                    Err(e) => Some(format!("the usage journal is unavailable: {e}")),
+                };
+                let failure = match failure {
+                    Some(f) => Some(f),
+                    None => {
+                        // Skip remaining pre-existing history (codex, and any
+                        // claude file the rebuild couldn't touch) so old turns
+                        // aren't replayed with a now() timestamp.
+                        self.seed_existing_files().await;
+                        self.persist()
+                            .await
+                            .err()
+                            .map(|e| format!("could not commit the initial checkpoint: {e}"))
+                    }
+                };
+                let Some(cause) = failure else { break };
+                tracing::warn!("usage tailer: {cause}; retrying in {}s", backoff.as_secs());
+                self.usage.set_tailer_status(TailerStatus {
+                    state: TailerState::Retrying,
+                    cause: Some(cause),
+                });
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(STARTUP_RETRY_MAX);
             }
-            // Skip remaining pre-existing history (codex, and any claude file
-            // the rebuild couldn't touch) so old turns aren't replayed with a
-            // now() timestamp.
-            self.seed_existing_files().await;
-            if let Err(e) = self.persist().await {
-                tracing::error!("usage tailer: could not commit initial checkpoint: {e}");
-                return;
-            }
+            self.usage.set_tailer_status(TailerStatus {
+                state: TailerState::Running,
+                cause: None,
+            });
 
             let fs_wake = Arc::new(Notify::new());
             let dirty: Arc<std::sync::Mutex<DirtySet>> = Arc::default();

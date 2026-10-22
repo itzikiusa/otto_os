@@ -183,13 +183,18 @@ async fn put_skill<C: ContextCtx>(
     Json(req): Json<UpsertLibraryEntryReq>,
 ) -> ApiResult<Json<LibrarySkill>> {
     require_root(&user)?;
-    s.library()
-        .put_skill(&name, &req.body)
-        .map_err(|e| Error::Invalid(format!("put skill: {e}")))?;
-    s.library()
-        .get_skill(&name)
-        .map(Json)
-        .ok_or_else(|| Error::Internal("skill not found after put".into()).into())
+    // `write_atomic` fsyncs (F_FULLFSYNC on macOS) twice: off the runtime.
+    let library = s.library().clone();
+    let entry = off_runtime(move || {
+        library
+            .put_skill(&name, &req.body)
+            .map_err(|e| Error::Invalid(format!("put skill: {e}")))?;
+        library
+            .get_skill(&name)
+            .ok_or_else(|| Error::Internal("skill not found after put".into()))
+    })
+    .await??;
+    Ok(Json(entry))
 }
 
 async fn delete_skill<C: ContextCtx>(
@@ -285,14 +290,18 @@ async fn put_skill_file<C: ContextCtx>(
     if s.library().get_skill(&name).is_none() {
         return Err(Error::NotFound(format!("skill '{name}'")).into());
     }
-    let lib = s.library();
-    let written = if req.create_only {
-        lib.create_skill_file(&name, &req.path, &req.content)
-    } else {
-        lib.write_skill_file(&name, &req.path, &req.content)
-    };
-    written.map_err(|e| map_io("write skill file", e))?;
-    Ok(Json(s.library().list_skill_files(&name)))
+    let lib = s.library().clone();
+    let files = off_runtime(move || {
+        let written = if req.create_only {
+            lib.create_skill_file(&name, &req.path, &req.content)
+        } else {
+            lib.write_skill_file(&name, &req.path, &req.content)
+        };
+        written.map_err(|e| map_io("write skill file", e))?;
+        Ok::<_, Error>(lib.list_skill_files(&name))
+    })
+    .await??;
+    Ok(Json(files))
 }
 
 async fn delete_skill_file<C: ContextCtx>(
@@ -420,13 +429,18 @@ async fn put_soul<C: ContextCtx>(
     Json(req): Json<UpsertLibraryEntryReq>,
 ) -> ApiResult<Json<LibrarySoul>> {
     require_root(&user)?;
-    s.library()
-        .put_soul(&name, &req.body)
-        .map_err(|e| Error::Invalid(format!("put soul: {e}")))?;
-    s.library()
-        .get_soul(&name)
-        .map(Json)
-        .ok_or_else(|| Error::Internal("soul not found after put".into()).into())
+    // `write_atomic` fsyncs (F_FULLFSYNC on macOS) twice: off the runtime.
+    let library = s.library().clone();
+    let entry = off_runtime(move || {
+        library
+            .put_soul(&name, &req.body)
+            .map_err(|e| Error::Invalid(format!("put soul: {e}")))?;
+        library
+            .get_soul(&name)
+            .ok_or_else(|| Error::Internal("soul not found after put".into()))
+    })
+    .await??;
+    Ok(Json(entry))
 }
 
 async fn delete_soul<C: ContextCtx>(
@@ -470,13 +484,18 @@ async fn put_context<C: ContextCtx>(
     Json(req): Json<UpsertLibraryEntryReq>,
 ) -> ApiResult<Json<LibraryContext>> {
     require_root(&user)?;
-    s.library()
-        .put_context(&name, &req.body)
-        .map_err(|e| Error::Invalid(format!("put context: {e}")))?;
-    s.library()
-        .get_context(&name)
-        .map(Json)
-        .ok_or_else(|| Error::Internal("context not found after put".into()).into())
+    // `write_atomic` fsyncs (F_FULLFSYNC on macOS) twice: off the runtime.
+    let library = s.library().clone();
+    let entry = off_runtime(move || {
+        library
+            .put_context(&name, &req.body)
+            .map_err(|e| Error::Invalid(format!("put context: {e}")))?;
+        library
+            .get_context(&name)
+            .ok_or_else(|| Error::Internal("context not found after put".into()))
+    })
+    .await??;
+    Ok(Json(entry))
 }
 
 async fn delete_context<C: ContextCtx>(
@@ -510,12 +529,15 @@ async fn set_default_soul<C: ContextCtx>(
     Json(req): Json<GlobalSoulReq>,
 ) -> ApiResult<Json<GlobalSoulResp>> {
     require_root(&user)?;
-    s.library()
-        .set_default_soul(&req.name)
-        .map_err(|e| Error::Invalid(format!("set default soul: {e}")))?;
-    Ok(Json(GlobalSoulResp {
-        name: s.library().default_soul(),
-    }))
+    let library = s.library().clone();
+    let name = off_runtime(move || {
+        library
+            .set_default_soul(&req.name)
+            .map_err(|e| Error::Invalid(format!("set default soul: {e}")))?;
+        Ok::<_, Error>(library.default_soul())
+    })
+    .await??;
+    Ok(Json(GlobalSoulResp { name }))
 }
 
 // ---------------------------------------------------------------------------

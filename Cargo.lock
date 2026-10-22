@@ -3788,7 +3788,9 @@ dependencies = [
 name = "otto-apiclient"
 version = "0.2.0"
 dependencies = [
+ "base64 0.22.1",
  "boa_engine",
+ "chrono",
  "futures-util",
  "h2",
  "hex",
@@ -3800,6 +3802,7 @@ dependencies = [
  "prost-reflect",
  "prost-types",
  "protox",
+ "regex",
  "rustls",
  "serde",
  "serde_json",

@@ -335,6 +335,27 @@ pub async fn live_tool(
     .await
 }
 
+/// The running tail's artifact list for `path` (waiting, at most
+/// [`SETTLE_WAIT`], for its initial fold) — the Outputs panel of a live
+/// session reads it instead of folding the still-growing file again. `None`
+/// when no tail runs for this file or its fold failed: the caller falls back
+/// to the fold cache.
+pub async fn live_artifacts(
+    session_id: &Id,
+    provider: Provider,
+    path: &Path,
+) -> Option<Vec<Artifact>> {
+    let live = live_of(session_id, provider, path)?;
+    let mut settled = live.settled.subscribe();
+    let _ = tokio::time::timeout(SETTLE_WAIT, settled.wait_for(|s| *s)).await;
+    blocking(move || {
+        let guard = live.lock();
+        let st = guard.as_ref()?;
+        Some(st.folder.artifacts().to_vec())
+    })
+    .await
+}
+
 /// Refold the whole file from record 0 (initial start, replaced file, Codex
 /// era flip). The tailer resumes exactly where this read stopped — the bytes
 /// of a line still being written are carried as its partial line — so a

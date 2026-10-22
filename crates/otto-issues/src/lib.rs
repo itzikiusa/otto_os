@@ -2,6 +2,7 @@
 //! provider clients, and the [`Tracker`] facade that picks one per account.
 
 pub mod adf;
+mod atlassian;
 pub mod confluence;
 pub mod http;
 pub mod jira;

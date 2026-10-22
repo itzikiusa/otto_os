@@ -304,7 +304,7 @@ pub async fn stop_loop(ctx: &impl AutomationCtx, loop_id: &Id) -> Result<()> {
             Some("stopped by user"),
             None,
         )
-        .await;
+        .await?;
     }
     Ok(())
 }
@@ -431,7 +431,7 @@ pub async fn retry_executor(
         let _guard = operation.lock().await;
         if is_current(&ctx2, &loop_.id, &handle) {
             if handle.cancel.load(Ordering::Relaxed) {
-                finalize(
+                let _ = finalize(
                     &ctx2,
                     &loop_.id,
                     GoalLoopStatus::Stopped,
@@ -442,7 +442,7 @@ pub async fn retry_executor(
             } else if handle.paused.load(Ordering::Relaxed) {
                 cleanup_executor_sessions(&ctx2, &loop_.workspace_id, &loop_.id).await;
             } else if expired {
-                finalize(
+                let _ = finalize(
                     &ctx2,
                     &loop_.id,
                     GoalLoopStatus::Exhausted,
@@ -451,21 +451,24 @@ pub async fn retry_executor(
                 )
                 .await;
             } else {
-                block(
+                if block(
                     &ctx2,
                     &loop_.id,
                     "Executor retry finished. Resume for a fresh evaluation.",
                 )
-                .await;
-                emit(
-                    &ctx2,
-                    &loop_.workspace_id,
-                    &loop_.id,
-                    GoalLoopStatus::Blocked,
-                    GoalLoopPhase::Done,
-                    iter_idx,
-                    loop_.progress_pct,
-                );
+                .await
+                .is_ok()
+                {
+                    emit(
+                        &ctx2,
+                        &loop_.workspace_id,
+                        &loop_.id,
+                        GoalLoopStatus::Blocked,
+                        GoalLoopPhase::Done,
+                        iter_idx,
+                        loop_.progress_pct,
+                    );
+                }
             }
         }
         deregister(&ctx2, &loop_.id, &handle);
@@ -493,7 +496,7 @@ async fn controller(ctx: impl AutomationCtx, loop_id: Id, handle: LoopHandle) {
     .is_err();
     if expired && is_current(&ctx, &loop_id, &handle) {
         if handle.cancel.load(Ordering::Relaxed) {
-            finalize(
+            let _ = finalize(
                 &ctx,
                 &loop_id,
                 GoalLoopStatus::Stopped,
@@ -502,7 +505,7 @@ async fn controller(ctx: impl AutomationCtx, loop_id: Id, handle: LoopHandle) {
             )
             .await;
         } else if !handle.paused.load(Ordering::Relaxed) {
-            finalize(
+            let _ = finalize(
                 &ctx,
                 &loop_id,
                 GoalLoopStatus::Exhausted,
@@ -532,7 +535,7 @@ async fn controller_inner(ctx: impl AutomationCtx, loop_id: Id, handle: LoopHand
             // handle and cancelled ours; in that case the new controller owns
             // the loop and must NOT have its run torn down by us.
             if is_current(&ctx, &loop_id, &handle) {
-                finalize(
+                let _ = finalize(
                     &ctx,
                     &loop_id,
                     GoalLoopStatus::Stopped,
@@ -556,7 +559,7 @@ async fn controller_inner(ctx: impl AutomationCtx, loop_id: Id, handle: LoopHand
             return;
         }
         if started.elapsed() >= HARD_CAP {
-            finalize(
+            let _ = finalize(
                 &ctx,
                 &loop_id,
                 GoalLoopStatus::Exhausted,
@@ -587,7 +590,7 @@ async fn controller_inner(ctx: impl AutomationCtx, loop_id: Id, handle: LoopHand
 
         // ---- HARD-LIMIT GATE (before starting an iteration) ----
         if !verification_only && loop_.iterations_started >= limits.max_iterations {
-            finalize(
+            let _ = finalize(
                 &ctx,
                 &loop_id,
                 GoalLoopStatus::Exhausted,
@@ -599,7 +602,7 @@ async fn controller_inner(ctx: impl AutomationCtx, loop_id: Id, handle: LoopHand
             return;
         }
         if loop_.elapsed_secs_at(Utc::now()) >= limits.max_runtime_secs {
-            finalize(
+            let _ = finalize(
                 &ctx,
                 &loop_id,
                 GoalLoopStatus::Exhausted,
@@ -611,7 +614,7 @@ async fn controller_inner(ctx: impl AutomationCtx, loop_id: Id, handle: LoopHand
             return;
         }
         if limits.max_cost_usd.is_some() {
-            block(&ctx, &loop_id, "Per-loop cost accounting is unavailable. Remove the cost limit and use iteration/runtime limits to resume.").await;
+            let _ = block(&ctx, &loop_id, "Per-loop cost accounting is unavailable. Remove the cost limit and use iteration/runtime limits to resume.").await; // logged + noticed inside
             release_honouring_stop(&ctx, &loop_id, &handle).await;
             return;
         }
@@ -627,10 +630,13 @@ async fn controller_inner(ctx: impl AutomationCtx, loop_id: Id, handle: LoopHand
             loop_.ledger.verifications.clear();
             loop_.ledger.review_passed = false;
             loop_.ledger.resume_evaluation_iteration = None;
-            let _ = ctx
-                .goal_loops_repo()
-                .set_ledger(&loop_id, &loop_.ledger)
-                .await;
+            warn_on_err(
+                &loop_id,
+                "set_ledger",
+                ctx.goal_loops_repo()
+                    .set_ledger(&loop_id, &loop_.ledger)
+                    .await,
+            );
             match ctx
                 .goal_loops_repo()
                 .bump_iterations_started(&loop_id)
@@ -647,7 +653,7 @@ async fn controller_inner(ctx: impl AutomationCtx, loop_id: Id, handle: LoopHand
         let iter = match created {
             Ok(it) => it,
             Err(e) => {
-                finalize(
+                let _ = finalize(
                     &ctx,
                     &loop_id,
                     GoalLoopStatus::Failed,
@@ -689,17 +695,24 @@ async fn controller_inner(ctx: impl AutomationCtx, loop_id: Id, handle: LoopHand
                 }
             }
         };
-        let _ = ctx.goal_loops_repo().set_iter_plan(&iter.id, &plan).await;
+        warn_on_err(
+            &loop_id,
+            "set_iter_plan",
+            ctx.goal_loops_repo().set_iter_plan(&iter.id, &plan).await,
+        );
         if stop_requested(&handle) {
             continue;
         }
 
         // ---- EXECUTE (sequential) ----
         set_phase(&ctx, &ws, &loop_, GoalLoopPhase::Executing, idx).await;
-        let _ = ctx
-            .goal_loops_repo()
-            .update_iteration_status(&iter.id, "executing", false)
-            .await;
+        warn_on_err(
+            &loop_id,
+            "update_iteration_status",
+            ctx.goal_loops_repo()
+                .update_iteration_status(&iter.id, "executing", false)
+                .await,
+        );
         let mut exec_summaries: Vec<String> = if verification_only {
             iter.agents
                 .iter()
@@ -745,10 +758,13 @@ async fn controller_inner(ctx: impl AutomationCtx, loop_id: Id, handle: LoopHand
 
         // ---- EVALUATE ----
         set_phase(&ctx, &ws, &loop_, GoalLoopPhase::Evaluating, idx).await;
-        let _ = ctx
-            .goal_loops_repo()
-            .update_iteration_status(&iter.id, "evaluating", false)
-            .await;
+        warn_on_err(
+            &loop_id,
+            "update_iteration_status",
+            ctx.goal_loops_repo()
+                .update_iteration_status(&iter.id, "evaluating", false)
+                .await,
+        );
         let (mut eval, verify_caps) = evaluate(
             &ctx,
             &loop_,
@@ -778,11 +794,18 @@ async fn controller_inner(ctx: impl AutomationCtx, loop_id: Id, handle: LoopHand
             });
         }
         ledger.next_action = eval.feedback.clone();
-        let _ = ctx.goal_loops_repo().set_ledger(&loop_id, &ledger).await;
-        let _ = ctx
-            .goal_loops_repo()
-            .set_iter_evaluation(&iter.id, &eval)
-            .await;
+        warn_on_err(
+            &loop_id,
+            "set_ledger",
+            ctx.goal_loops_repo().set_ledger(&loop_id, &ledger).await,
+        );
+        warn_on_err(
+            &loop_id,
+            "set_iter_evaluation",
+            ctx.goal_loops_repo()
+                .set_iter_evaluation(&iter.id, &eval)
+                .await,
+        );
         let progress = eval.progress_pct.min(100);
         let applied = ctx
             .goal_loops_repo()
@@ -803,10 +826,13 @@ async fn controller_inner(ctx: impl AutomationCtx, loop_id: Id, handle: LoopHand
 
         // ---- DIGEST ----
         set_phase(&ctx, &ws, &loop_, GoalLoopPhase::Digesting, idx).await;
-        let _ = ctx
-            .goal_loops_repo()
-            .update_iteration_status(&iter.id, "digesting", false)
-            .await;
+        warn_on_err(
+            &loop_id,
+            "update_iteration_status",
+            ctx.goal_loops_repo()
+                .update_iteration_status(&iter.id, "digesting", false)
+                .await,
+        );
         let digest = run_role(
             &ctx,
             &loop_,
@@ -819,18 +845,27 @@ async fn controller_inner(ctx: impl AutomationCtx, loop_id: Id, handle: LoopHand
         )
         .await
         .unwrap_or(context_in);
-        let _ = ctx
-            .goal_loops_repo()
-            .set_iter_context_out(&iter.id, &digest)
-            .await;
-        let _ = ctx
-            .goal_loops_repo()
-            .set_context_digest(&loop_id, &digest)
-            .await;
-        let _ = ctx
-            .goal_loops_repo()
-            .update_iteration_status(&iter.id, "done", true)
-            .await;
+        warn_on_err(
+            &loop_id,
+            "set_iter_context_out",
+            ctx.goal_loops_repo()
+                .set_iter_context_out(&iter.id, &digest)
+                .await,
+        );
+        warn_on_err(
+            &loop_id,
+            "set_context_digest",
+            ctx.goal_loops_repo()
+                .set_context_digest(&loop_id, &digest)
+                .await,
+        );
+        warn_on_err(
+            &loop_id,
+            "update_iteration_status",
+            ctx.goal_loops_repo()
+                .update_iteration_status(&iter.id, "done", true)
+                .await,
+        );
         if stop_requested(&handle) {
             continue;
         }
@@ -898,13 +933,17 @@ async fn controller_inner(ctx: impl AutomationCtx, loop_id: Id, handle: LoopHand
                     v["approved"] == true && v["findings"].as_array().is_some_and(Vec::is_empty)
                 });
                 ledger.review_summary = review.unwrap_or_else(|e| e.to_string());
-                let _ = ctx.goal_loops_repo().set_ledger(&loop_id, &ledger).await;
+                warn_on_err(
+                    &loop_id,
+                    "set_ledger",
+                    ctx.goal_loops_repo().set_ledger(&loop_id, &ledger).await,
+                );
                 if stop_requested(&handle) {
                     continue;
                 }
                 if !ledger.review_passed {
                     clear_evaluation_continuation(&ctx, &loop_id).await;
-                    block(&ctx, &loop_id, "Completion review has unresolved findings. Inspect the review evidence before resuming.").await;
+                    let _ = block(&ctx, &loop_id, "Completion review has unresolved findings. Inspect the review evidence before resuming.").await; // logged + noticed inside
                     release_honouring_stop(&ctx, &loop_id, &handle).await;
                     return;
                 }
@@ -913,7 +952,7 @@ async fn controller_inner(ctx: impl AutomationCtx, loop_id: Id, handle: LoopHand
                 "Goal achieved in {idx} iteration(s). {}{}",
                 eval.rationale, proof_note
             );
-            finalize(
+            let _ = finalize(
                 &ctx,
                 &loop_id,
                 GoalLoopStatus::Succeeded,
@@ -928,16 +967,17 @@ async fn controller_inner(ctx: impl AutomationCtx, loop_id: Id, handle: LoopHand
         if eval.verdict == "blocked" {
             let summary = format!("Blocked — needs input. {}", eval.feedback);
             // Bank the active window and stop ticking; resume requires user action.
-            block(&ctx, &loop_id, &summary).await;
-            emit(
-                &ctx,
-                &ws,
-                &loop_id,
-                GoalLoopStatus::Blocked,
-                GoalLoopPhase::Done,
-                idx,
-                progress,
-            );
+            if block(&ctx, &loop_id, &summary).await.is_ok() {
+                emit(
+                    &ctx,
+                    &ws,
+                    &loop_id,
+                    GoalLoopStatus::Blocked,
+                    GoalLoopPhase::Done,
+                    idx,
+                    progress,
+                );
+            }
             // Surface a free-form notice so the user knows to intervene.
             let _ = ctx.events().send(Event::Notice {
                 level: "warn".into(),
@@ -1000,13 +1040,14 @@ async fn within_budget<T>(
 }
 
 async fn clear_evaluation_continuation(ctx: &impl AutomationCtx, id: &Id) {
-    let _ = ctx
+    let res = ctx
         .goal_loops_repo()
         .edit_ledger(id, |ledger| {
             ledger.resume_evaluation_iteration = None;
             Ok(())
         })
         .await;
+    warn_on_err(id, "clear evaluation continuation", res);
 }
 
 fn stop_requested(handle: &LoopHandle) -> bool {
@@ -1077,34 +1118,106 @@ async fn set_phase(
 }
 
 /// Mark the loop terminal (the repo write banks the open active window), preserve working files
-/// and release any lingering managed sessions.
+/// and release any lingering managed sessions. The status write is retried
+/// ([`settle_status`]); only the status actually stored is emitted, so open
+/// views never show a loop as settled while its row still says running. A
+/// persistent failure also raises a Notice and is returned (Stop answers it
+/// as a Problem); controller call sites have nothing left to do with it.
 async fn finalize(
     ctx: &impl AutomationCtx,
     loop_id: &Id,
     status: GoalLoopStatus,
     summary: Option<&str>,
     error: Option<&str>,
-) {
-    let loop_ = match ctx.goal_loops_repo().get(loop_id).await {
-        Ok(l) => l,
-        Err(_) => return,
-    };
-    let _ = ctx
-        .goal_loops_repo()
-        .finalize(loop_id, status, summary, error)
-        .await;
+) -> Result<()> {
+    let loop_ = ctx.goal_loops_repo().get(loop_id).await.inspect_err(
+        |e| tracing::warn!(loop_id = %loop_id, "goal loop: finalize could not read the loop: {e}"),
+    )?;
+    let written = settle_status(ctx, loop_id, status, summary, error).await;
     // Keep the worktree even on failure/stop/success: commits are optional and
     // the retained branch cannot preserve dirty or untracked work.
     cleanup_executor_sessions(ctx, &loop_.workspace_id, loop_id).await;
+    let stored = match &written {
+        Ok(()) => status,
+        Err(_) => stored_status(ctx, loop_id).await.unwrap_or(loop_.status),
+    };
     emit(
         ctx,
         &loop_.workspace_id,
         loop_id,
-        status,
-        GoalLoopPhase::Done,
+        stored,
+        if stored.is_terminal() {
+            GoalLoopPhase::Done
+        } else {
+            loop_.phase
+        },
         loop_.current_iteration,
         loop_.progress_pct,
     );
+    written
+}
+
+/// The goal loop's status write, retried like the scheduled-task engine's
+/// `settle_with_retry` (a busy or briefly failing SQLite must not leave the
+/// row `running` with no controller until a daemon restart). On a persistent
+/// failure a Notice tells the user and the last error is returned.
+async fn settle_status(
+    ctx: &impl AutomationCtx,
+    loop_id: &Id,
+    status: GoalLoopStatus,
+    summary: Option<&str>,
+    error: Option<&str>,
+) -> Result<()> {
+    let mut last = None;
+    for attempt in 0..SETTLE_ATTEMPTS {
+        match ctx
+            .goal_loops_repo()
+            .finalize(loop_id, status, summary, error)
+            .await
+        {
+            Ok(_) => return Ok(()),
+            Err(e) => {
+                tracing::warn!(
+                    loop_id = %loop_id,
+                    "goal loop: saving status {} failed (attempt {}): {e}",
+                    status.as_str(),
+                    attempt + 1
+                );
+                last = Some(e);
+                if attempt + 1 < SETTLE_ATTEMPTS {
+                    tokio::time::sleep(Duration::from_millis(200 * (u64::from(attempt) + 1))).await;
+                }
+            }
+        }
+    }
+    let e = last.unwrap_or_else(|| Error::Internal("goal loop status write failed".into()));
+    let _ = ctx.events().send(Event::Notice {
+        level: "error".into(),
+        title: "Couldn’t save the goal loop’s result".into(),
+        body: e.to_string(),
+    });
+    Err(e)
+}
+
+/// Attempts [`settle_status`] makes before giving up (≈2 s of backoff).
+const SETTLE_ATTEMPTS: u32 = 5;
+
+/// The status the row actually holds, after a failed write.
+async fn stored_status(ctx: &impl AutomationCtx, loop_id: &Id) -> Option<GoalLoopStatus> {
+    ctx.goal_loops_repo()
+        .get(loop_id)
+        .await
+        .ok()
+        .map(|l| l.status)
+}
+
+/// A per-iteration bookkeeping write the controller can't act on (ledger,
+/// evaluation, digest, iteration status, phase): a failure is logged with
+/// which write it was instead of being dropped silently.
+fn warn_on_err<T>(loop_id: &Id, what: &str, res: Result<T>) {
+    if let Err(e) = res {
+        tracing::warn!(loop_id = %loop_id, "goal loop: {what} write failed: {e}");
+    }
 }
 
 /// Leave the registry after parking the loop (Paused / Blocked). A Stop that
@@ -1122,7 +1235,7 @@ async fn release_honouring_stop(ctx: &impl AutomationCtx, loop_id: &Id, handle: 
     let _guard = operation.lock().await;
     let was_current = deregister(ctx, loop_id, handle);
     if stop_landed_while_registered(was_current, handle) {
-        finalize(
+        let _ = finalize(
             ctx,
             loop_id,
             GoalLoopStatus::Stopped,
@@ -1140,18 +1253,30 @@ fn stop_landed_while_registered(was_current: bool, handle: &LoopHandle) -> bool 
 
 /// Block the loop (awaiting user) without treating it as terminal-finished: the
 /// repo write banks the window (only if still anchored), clears it, sets Blocked. Resume re-spawns a controller.
-async fn block(ctx: &impl AutomationCtx, loop_id: &Id, summary: &str) {
-    let loop_ = match ctx.goal_loops_repo().get(loop_id).await {
-        Ok(l) => l,
-        Err(_) => return,
-    };
-    let _ = ctx
-        .goal_loops_repo()
-        .finalize(loop_id, GoalLoopStatus::Blocked, Some(summary), None)
-        .await;
+/// The write is retried ([`settle_status`]); on a persistent failure the
+/// stored status is emitted (with a Notice) and the error returned, so the
+/// caller emits Blocked only when it was stored.
+async fn block(ctx: &impl AutomationCtx, loop_id: &Id, summary: &str) -> Result<()> {
+    let loop_ = ctx.goal_loops_repo().get(loop_id).await.inspect_err(
+        |e| tracing::warn!(loop_id = %loop_id, "goal loop: block could not read the loop: {e}"),
+    )?;
+    let written = settle_status(ctx, loop_id, GoalLoopStatus::Blocked, Some(summary), None).await;
     // Blocked is resumable — KEEP the worktree (and its commits) so Resume
     // continues on top of the loop's work. Live executor sessions are killed.
     cleanup_executor_sessions(ctx, &loop_.workspace_id, loop_id).await;
+    if written.is_err() {
+        let stored = stored_status(ctx, loop_id).await.unwrap_or(loop_.status);
+        emit(
+            ctx,
+            &loop_.workspace_id,
+            loop_id,
+            stored,
+            loop_.phase,
+            loop_.current_iteration,
+            loop_.progress_pct,
+        );
+    }
+    written
 }
 
 /// List + kill all executor sessions tagged for this loop.
@@ -2010,7 +2135,11 @@ async fn run_executor_attempt_inner(
                         None,
                     )
                     .await;
-                    let _ = ctx.goal_loops_repo().set_phase(&loop_id, phase).await;
+                    warn_on_err(
+                        &loop_id,
+                        "set_phase",
+                        ctx.goal_loops_repo().set_phase(&loop_id, phase).await,
+                    );
                     emit(
                         &ctx,
                         &ws,

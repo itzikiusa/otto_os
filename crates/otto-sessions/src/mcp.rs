@@ -327,6 +327,13 @@ fn reconcile_json_launcher(
     for name in &prior {
         if !managed_names.contains(name) {
             servers.remove(name);
+            // Its launcher env file holds Keychain-resolved values; a server
+            // that is gone (deleted, disabled, renamed) must not leave them on
+            // disk. Names preserved for a failed lookup stay in
+            // `managed_names`, so their env files are kept.
+            if name != SERVER_KEY && name != OTTO_TOOLS_KEY {
+                remove_launcher_env(workspace_root, name);
+            }
         }
     }
     // A preserved name whose entry is gone (hand-deleted) is not managed any more.
@@ -358,6 +365,9 @@ fn reconcile_json_launcher(
 /// codex, rather than falling back to inline secrets.
 fn launch_via_env_file(workspace_root: &str, s: &UserMcpServer) -> Option<(String, Vec<String>)> {
     if s.env.is_empty() {
+        // The env (and with it any secret) was removed since the last spawn:
+        // the old file is no longer referenced, so it must not linger.
+        remove_launcher_env(workspace_root, &s.name);
         return Some((s.command.clone(), s.args.clone()));
     }
     if let Some(bad) = s.env.keys().find(|k| !is_shell_name(k)) {
@@ -383,15 +393,30 @@ fn launch_via_env_file(workspace_root: &str, s: &UserMcpServer) -> Option<(Strin
     Some(("/bin/sh".to_string(), args))
 }
 
-/// `<tmp>/otto-mcp/launch-<cwd hash>.<server>.env`: one file per (cwd,
-/// server), because the launcher it backs is shared by every session in that
-/// cwd and rewritten (same path) on each spawn. The `launch-` prefix keeps it
-/// clear of the per-session `<session_id>.*` files the session cleanup removes.
-/// A user server name is arbitrary text, so it is reduced to a safe segment.
+/// `<tmp>/otto-mcp/launch-<cwd hash>.<server>-<name hash>.env`: one file per
+/// (cwd, server), because the launcher it backs is shared by every session in
+/// that cwd and rewritten (same path) on each spawn. The `launch-` prefix keeps
+/// it clear of the per-session `<session_id>.*` files the session cleanup
+/// removes, so its lifetime is owned here instead: reconcile deletes it when
+/// the server leaves the launcher or loses its env, and
+/// [`sweep_launcher_env_files`] removes every cwd's copy when the server is
+/// deleted or disabled. A user server name is arbitrary text, so it is reduced
+/// to a safe segment.
 fn launcher_env_path(workspace_root: &str, server: &str) -> PathBuf {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     workspace_root.hash(&mut h);
+    std::env::temp_dir().join("otto-mcp").join(format!(
+        "launch-{:016x}.{}",
+        h.finish(),
+        launcher_env_suffix(server)
+    ))
+}
+
+/// `<safe name>-<name hash>.env`, the server-specific tail of every
+/// [`launcher_env_path`] for `server`, whatever the cwd.
+fn launcher_env_suffix(server: &str) -> String {
+    use std::hash::{Hash, Hasher};
     let safe: String = server
         .chars()
         .map(|c| {
@@ -405,11 +430,45 @@ fn launcher_env_path(workspace_root: &str, server: &str) -> PathBuf {
         .collect();
     let mut nh = std::collections::hash_map::DefaultHasher::new();
     server.hash(&mut nh);
-    std::env::temp_dir().join("otto-mcp").join(format!(
-        "launch-{:016x}.{safe}-{:08x}.env",
-        h.finish(),
-        nh.finish() as u32
-    ))
+    format!("{safe}-{:08x}.env", nh.finish() as u32)
+}
+
+/// Delete one cwd's launcher env file for `server` (absent is fine; any other
+/// failure is logged — the caller has already dropped the entry using it).
+fn remove_launcher_env(workspace_root: &str, server: &str) {
+    let path = launcher_env_path(workspace_root, server);
+    match std::fs::remove_file(&path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => tracing::warn!(server, "MCP launcher: remove stale env file failed: {e}"),
+    }
+}
+
+/// Remove `server`'s launcher env file in EVERY cwd (`<tmp>/otto-mcp/launch-*
+/// .<safe name>-<name hash>.env`): called when a server is deleted or disabled,
+/// so its Keychain-resolved values don't outlive it on disk in cwds no session
+/// reconciles again. A same-named server in another workspace loses its file
+/// too; that workspace's next spawn rewrites it. Returns how many were removed.
+/// Blocking: callers run it on the blocking pool (`spawn_blocking`).
+#[allow(clippy::disallowed_methods)] // sync helper: callers use spawn_blocking
+pub fn sweep_launcher_env_files(server: &str) -> usize {
+    let suffix = format!(".{}", launcher_env_suffix(server));
+    let Ok(dir) = std::fs::read_dir(std::env::temp_dir().join("otto-mcp")) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in dir.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if name.starts_with("launch-") && name.ends_with(&suffix) {
+            match std::fs::remove_file(entry.path()) {
+                Ok(()) => removed += 1,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => tracing::warn!(server, "MCP launcher: sweep env file failed: {e}"),
+            }
+        }
+    }
+    removed
 }
 
 /// [`write_env_file`] to a temp sibling, then rename: a CLI starting from
@@ -814,6 +873,7 @@ pub fn reconcile_user_servers_grok(
     for name in &prior {
         if !desired_names.contains(name) && name != OTTO_TOOLS_KEY {
             servers.remove(name);
+            remove_launcher_env(workspace_root, name);
         }
     }
     for s in &desired {
@@ -1742,5 +1802,54 @@ mod tests {
                 .get("private")
                 .is_some());
         }
+    }
+
+    /// integrations-3-03: a server's Keychain-resolved env file goes when the
+    /// server leaves the launcher (deleted/disabled) or loses its env, and the
+    /// delete/disable sweep removes every cwd's copy — but a failed lookup
+    /// (`user_servers: None`) keeps the preserved entry's file.
+    #[test]
+    fn reconcile_and_sweep_remove_stale_launcher_env_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let name = format!("env-gone-{}", std::process::id());
+        let mut s = user(&name);
+        s.env.insert("TOKEN".into(), "leaked-secret".into());
+        let with = |servers: Option<Vec<UserMcpServer>>| ManagedMcpConfig {
+            browser: false,
+            user_servers: servers,
+            otto_tools: None,
+        };
+        let env_path = launcher_env_path(root, &name);
+
+        reconcile_managed_servers(root, &with(Some(vec![s.clone()]))).unwrap();
+        assert!(env_path.exists(), "the env file backs the launcher entry");
+        reconcile_managed_servers(root, &with(None)).unwrap();
+        assert!(
+            env_path.exists(),
+            "a failed lookup preserves the entry and its env"
+        );
+        reconcile_managed_servers(root, &with(Some(vec![]))).unwrap();
+        assert!(!env_path.exists(), "a removed server's env file is deleted");
+        assert!(!read_servers(root).contains_key(&name));
+
+        reconcile_managed_servers(root, &with(Some(vec![s.clone()]))).unwrap();
+        assert!(env_path.exists());
+        let mut no_env = s.clone();
+        no_env.env.clear();
+        reconcile_managed_servers(root, &with(Some(vec![no_env]))).unwrap();
+        assert!(!env_path.exists(), "an env-less server keeps no env file");
+
+        let other = tempfile::tempdir().unwrap();
+        let other_root = other.path().to_str().unwrap();
+        reconcile_managed_servers(root, &with(Some(vec![s.clone()]))).unwrap();
+        reconcile_managed_servers(other_root, &with(Some(vec![s.clone()]))).unwrap();
+        let other_path = launcher_env_path(other_root, &name);
+        let keep = launcher_env_path(root, &format!("{name}-other"));
+        std::fs::write(&keep, "X=1\n").unwrap();
+        assert_eq!(sweep_launcher_env_files(&name), 2);
+        assert!(!env_path.exists() && !other_path.exists());
+        assert!(keep.exists(), "another server's env file is left alone");
+        let _ = std::fs::remove_file(&keep);
     }
 }

@@ -3,6 +3,15 @@
 
 use super::*;
 
+/// How often a running summarizer re-reads the durable review status when no
+/// `ReviewChanged` arrives (the flagless cancel paths: restart, a cancel that
+/// landed before this attempt registered).
+const SUMMARIZER_CANCEL_RECHECK: Duration = Duration::from_secs(5);
+
+/// The draft loop reads the durable review status once per this many parsed
+/// comments; the in-memory cancel flag is checked for every one.
+const CANCEL_CHECK_BATCH: usize = 25;
+
 /// Run the summarizer over the reviewers' findings and persist the result:
 /// the summarizer live-state row (last element), the draft comments, and the
 /// promoted workflow findings (+ resolve_absent + proof pack).
@@ -46,12 +55,15 @@ pub(crate) async fn summarize_and_persist(
             .or_insert_with(|| Arc::new(std::sync::atomic::AtomicBool::new(false)))
             .clone()
     });
-    let is_cancelled = || async {
+    // The in-memory flag is the fast path (the cancel endpoint always trips it
+    // first); the durable status only covers flagless paths, so it is read
+    // sparingly — see `cancelled` and the draft loop below.
+    let flag_tripped = || {
         cancel_flag
             .as_ref()
             .is_some_and(|f| f.load(std::sync::atomic::Ordering::SeqCst))
-            || review_is_cancelled(ctx, review_id).await
     };
+    let is_cancelled = || async { flag_tripped() || review_is_cancelled(ctx, review_id).await };
     let mut agent_states = ctx.reviews_store.get_review(review_id).await?.agents;
     let summarizer_idx = agent_states
         .len()
@@ -149,12 +161,32 @@ pub(crate) async fn summarize_and_persist(
                 let _ = ready_tx.send(id.clone());
             },
         );
+        // Event- and flag-driven: the cheap in-memory flag every 100 ms, the
+        // one-column status on this review's `ReviewChanged`, and a slow safety
+        // recheck. A 100 ms DB poll used to load the whole review (agents JSON
+        // plus every comment) 3,000–18,000 times per summarizer turn.
         let cancelled = async {
+            let mut events = ctx.events.subscribe();
+            let mut events_open = true;
+            let mut flag_tick = tokio::time::interval(Duration::from_millis(100));
+            let mut recheck = tokio::time::interval(SUMMARIZER_CANCEL_RECHECK);
             loop {
-                if is_cancelled().await {
+                let check_db = tokio::select! {
+                    _ = flag_tick.tick() => false,
+                    _ = recheck.tick() => true,
+                    ev = events.recv(), if events_open => match ev {
+                        Ok(Event::ReviewChanged { review_id: rid, .. }) => rid == *review_id,
+                        Ok(_) => false,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => true,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            events_open = false;
+                            false
+                        }
+                    },
+                };
+                if flag_tripped() || (check_db && review_is_cancelled(ctx, review_id).await) {
                     break;
                 }
-                tokio::time::sleep(Duration::from_millis(100)).await;
             }
         };
         crate::review_summarizer::drive(
@@ -267,8 +299,15 @@ pub(crate) async fn summarize_and_persist(
     // File contents read for fingerprint anchoring, one read per path.
     let mut anchor_files: std::collections::HashMap<String, Option<Vec<String>>> =
         std::collections::HashMap::new();
-    for c in parsed {
-        if is_cancelled().await {
+    for (n, c) in parsed.into_iter().enumerate() {
+        // The flag per comment, the durable status once per batch: the loop
+        // inserts comments, so a full review load per comment was O(N²).
+        let cancelled = if n % CANCEL_CHECK_BATCH == 0 {
+            is_cancelled().await
+        } else {
+            flag_tripped()
+        };
+        if cancelled {
             return Ok(());
         }
         let sev = CommentSeverity::normalize(&c.severity);

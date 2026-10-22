@@ -14,6 +14,7 @@ mod hooks;
 pub mod http;
 pub mod local;
 pub mod ops;
+mod output_noise;
 pub mod parse;
 pub mod patch;
 pub mod pr_checks;

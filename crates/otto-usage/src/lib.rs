@@ -49,8 +49,8 @@ pub use tailer::{
 pub use types::{
     AttributionDimension, AttributionRow, CcusageCheck, CcusageCheckReq, CcusageDayRow,
     CcusageDiffRow, DailyModelUsage, DailyUsage, FeatureUsage, ForecastReq, ForecastResp,
-    MetricPoint, ModelUsage, MonthlyUsage, ProviderUsage, SessionTotals, SessionUsage, TokenTotals,
-    UsageConfig, UsageEvent, UsageReport, UsageStatus, UsageSummary,
+    MetricPoint, ModelUsage, MonthlyUsage, ProviderUsage, SessionTotals, SessionUsage, TailerState,
+    TailerStatus, TokenTotals, UsageConfig, UsageEvent, UsageReport, UsageStatus, UsageSummary,
 };
 
 /// Max sessions in a [`UsageReport`].

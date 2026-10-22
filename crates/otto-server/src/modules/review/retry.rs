@@ -277,24 +277,30 @@ pub(crate) async fn retry_review_agent(
     // launching an agent at a missing file (it would read nothing and could
     // report a clean pass).
     if diff_len == 0 {
-        let diff = match ctx.reviews_store.get_diff(&review_id).await {
-            Ok(Some(diff)) => diff,
-            Ok(None) => {
-                return Err(crate::error::ApiError(Error::Conflict(
-                    "this review has no stored diff to retry against; start a new review".into(),
-                )))
+        let restored = match ctx.reviews_store.get_diff(&review_id).await {
+            Ok(Some(diff)) => {
+                let len = diff.len();
+                std::fs::write(&diff_file, diff)
+                    .map(|()| len)
+                    .map_err(|e| Error::Internal(diff_write_failure(&e)))
             }
-            Err(e) => {
-                return Err(crate::error::ApiError(Error::Internal(diff_write_failure(
-                    &e,
-                ))))
-            }
+            Ok(None) => Err(Error::Conflict(
+                "this review has no stored diff to retry against; start a new review".into(),
+            )),
+            Err(e) => Err(Error::Internal(diff_write_failure(&e))),
         };
-        diff_len = diff.len();
-        if let Err(e) = std::fs::write(&diff_file, diff) {
-            return Err(crate::error::ApiError(Error::Internal(diff_write_failure(
-                &e,
-            ))));
+        match restored {
+            Ok(len) => diff_len = len,
+            Err(e) => {
+                // The claim above already flipped the row to `pending`. Put the
+                // settled row back, or nothing could retry, stop or summarize
+                // this agent again (`pending` blocks all three).
+                let _ = ctx
+                    .reviews_store
+                    .set_agent_at(&review_id, index, &review.agents[index])
+                    .await;
+                return Err(crate::error::ApiError(e));
+            }
         }
     }
     let timeout = review_agent_timeout(diff_len, None);
@@ -585,6 +591,27 @@ pub(crate) async fn retry_summarizer(
     ))
 }
 
+/// Why Stop is refused for an agent row, or `None` when it may be stopped.
+/// Running and waiting rows always are. A `pending` row of a SETTLED review
+/// with no registered cancel flag is an orphan (a retry whose task died with
+/// the daemon, or one that failed after its claim): nothing will ever settle
+/// it, and while it is `pending` Retry and the summarizer re-run both refuse,
+/// so Stop settles it. A `pending` row that still has a flag is a live retry
+/// queued on the reviewer slots and is left alone.
+pub(crate) fn agent_stop_block(
+    review_status: ReviewStatus,
+    agent_status: &str,
+    flag_live: bool,
+) -> Option<String> {
+    match agent_status {
+        "running" | "waiting" => None,
+        "pending" if !flag_live && review_status != ReviewStatus::Running => None,
+        status => Some(format!(
+            "agent is {status} — only a running or waiting agent can be stopped"
+        )),
+    }
+}
+
 /// `POST /reviews/{review_id}/agents/{index}/stop` — stop one running/waiting
 /// review agent without touching the rest of the run. Trips the agent's cancel
 /// flag FIRST (so the recovery loop sees the kill as intentional, not a failure
@@ -593,7 +620,8 @@ pub(crate) async fn retry_summarizer(
 /// change and the existing retry path (error rows are retryable) immediately
 /// applies. The parent run rolls up exactly as an agent error does today: the
 /// stopped agent leaves the pending set and the summarizer proceeds with the
-/// remaining findings. 409 unless the row is running/waiting; the trailing
+/// remaining findings. 409 unless the row is running/waiting (or an orphaned
+/// `pending`, see [`agent_stop_block`]); the trailing
 /// summarizer row (no recovery loop of its own) is never stoppable.
 pub(crate) async fn stop_review_agent(
     Path((review_id, index)): Path<(Id, usize)>,
@@ -622,11 +650,11 @@ pub(crate) async fn stop_review_agent(
             "the summarizer cannot be stopped".into(),
         )));
     }
-    let status = review.agents[index].status.clone();
-    if status != "running" && status != "waiting" {
-        return Err(crate::error::ApiError(Error::Conflict(format!(
-            "agent is {status} — only a running or waiting agent can be stopped"
-        ))));
+    let flag_live = ctx
+        .review_agent_cancels
+        .is_live(&review_agent_cancel_key(&review_id, index));
+    if let Some(why) = agent_stop_block(review.status, &review.agents[index].status, flag_live) {
+        return Err(crate::error::ApiError(Error::Conflict(why)));
     }
 
     // Signal the recovery loop FIRST so the kill below reads as intentional
@@ -664,7 +692,7 @@ pub(crate) async fn stop_review_agent(
 
 #[cfg(test)]
 mod review_retry_tests {
-    use super::{agent_retry_block, same_dir, sweep_review_temp_files_if_idle};
+    use super::{agent_retry_block, agent_stop_block, same_dir, sweep_review_temp_files_if_idle};
     use otto_core::domain::{ReviewAgentState, ReviewStatus};
 
     /// S2-303: a settled agent is retryable only once the review has settled.
@@ -677,6 +705,21 @@ mod review_retry_tests {
         assert!(why.contains("still running"), "{why}");
         let why = agent_retry_block(ReviewStatus::Done, 2, "running").unwrap();
         assert!(why.contains("agent 2 is still running"), "{why}");
+    }
+
+    /// backend-correctness-3-01: an orphaned `pending` row (no cancel flag,
+    /// settled review) can be stopped; a queued live retry and a pending row
+    /// of a running review cannot.
+    #[test]
+    fn stop_settles_only_an_orphaned_pending_row() {
+        assert!(agent_stop_block(ReviewStatus::Done, "running", true).is_none());
+        assert!(agent_stop_block(ReviewStatus::Running, "waiting", true).is_none());
+        assert!(agent_stop_block(ReviewStatus::Done, "pending", false).is_none());
+        assert!(agent_stop_block(ReviewStatus::Error, "pending", false).is_none());
+        assert!(agent_stop_block(ReviewStatus::Done, "pending", true).is_some());
+        assert!(agent_stop_block(ReviewStatus::Running, "pending", false).is_some());
+        let why = agent_stop_block(ReviewStatus::Done, "done", false).unwrap();
+        assert!(why.contains("agent is done"), "{why}");
     }
 
     /// S2-304: an orchestrator row carries its lens slugs through agents_json,

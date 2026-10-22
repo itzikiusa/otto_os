@@ -74,11 +74,15 @@ pub fn clip_bytes(s: &str, max: usize) -> String {
 
 /// Balanced top-level `{…}` spans of `text`, in order. String literals and
 /// their escapes are respected, so a `}` (or `{`) inside a JSON string does
-/// not end (or open) a span. An unclosed trailing `{` yields nothing.
+/// not end (or open) a span. A candidate that never closes (a lone `{` in
+/// prose, such as "the `if x {` guard") does not end the search: the scan
+/// restarts just after its `{`, so a complete object later in the text is
+/// still found. An unclosed trailing `{` with nothing balanced after it
+/// yields nothing.
 fn balanced_object_spans(text: &str) -> impl Iterator<Item = &str> {
     let bytes = text.as_bytes();
     let mut i = 0usize;
-    std::iter::from_fn(move || {
+    std::iter::from_fn(move || loop {
         let mut depth = 0usize;
         let mut start = None;
         let mut in_str = false;
@@ -116,7 +120,9 @@ fn balanced_object_spans(text: &str) -> impl Iterator<Item = &str> {
                 _ => {}
             }
         }
-        None
+        // End of input inside an open candidate: retry from just after its
+        // `{` (depth/string state reset), else there is nothing left.
+        i = start? + 1;
     })
 }
 
@@ -134,15 +140,30 @@ pub fn find_json_object(text: &str) -> Option<&str> {
 ///    that does not parse (`{placeholder}` in prose) is skipped, not fatal.
 /// 3. `None` for prose-only input.
 pub fn extract_json(text: &str) -> Option<serde_json::Value> {
+    extract_json_where(text, |_| true)
+}
+
+/// [`extract_json`], but a candidate (the fence body, then each balanced
+/// span in order) counts only when `accept` returns true for its value — so a
+/// `{}` in a preamble ("from the `fn x() {}` change: {…}") does not shadow
+/// the object the caller actually wants.
+pub fn extract_json_where(
+    text: &str,
+    mut accept: impl FnMut(&serde_json::Value) -> bool,
+) -> Option<serde_json::Value> {
     if let Some(fence) = text.find("```json") {
         let body = &text[fence + "```json".len()..];
         if let Some(end) = body.find("```") {
             if let Ok(v) = serde_json::from_str(body[..end].trim()) {
-                return Some(v);
+                if accept(&v) {
+                    return Some(v);
+                }
             }
         }
     }
-    balanced_object_spans(text).find_map(|span| serde_json::from_str(span).ok())
+    balanced_object_spans(text)
+        .filter_map(|span| serde_json::from_str(span).ok())
+        .find(|v| accept(v))
 }
 
 /// Remove ANSI/VT escape sequences: CSI (`ESC [` … final byte `0x40..=0x7E`),
@@ -244,6 +265,25 @@ mod tests {
             extract_json("```json\n{bad}\n``` {\"a\":3}").unwrap()["a"],
             3
         );
+    }
+
+    #[test]
+    fn extract_json_skips_an_unbalanced_brace_in_prose() {
+        // backend-correctness-3-03: a lone `{` before the object used to keep
+        // the scan one level deep to the end of input, so nothing was found.
+        let reply = "Changed the `if x {` guard. {\"approved\":true,\"findings\":[]}";
+        let v = extract_json(reply).unwrap();
+        assert_eq!(v["approved"], true);
+        let draft = extract_json_where(
+            "drafted from the `fn x() {}` change: {\"title\":\"t\"}",
+            |v| v.get("title").is_some(),
+        );
+        assert_eq!(draft.unwrap()["title"], "t");
+        assert_eq!(find_json_object("a { b { \"c\": 1 }"), Some("{ \"c\": 1 }"));
+        // A balanced `{}` preamble is a span of its own; a caller that wants
+        // a particular object passes a filter to `extract_json_where`.
+        let pre = "drafted from the `fn x() {}` change: {\"title\":\"t\"}";
+        assert_eq!(balanced_object_spans(pre).count(), 2);
     }
 
     #[test]

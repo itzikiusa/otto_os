@@ -447,7 +447,7 @@ pub(crate) fn checks_from_check_runs(v: &Value) -> Vec<PrCheck> {
 
 /// Legacy Statuses API → one [`PrCheck`] per `context`. Statuses are
 /// newest-first and repeat per context, so only the first row of each wins
-/// (same de-dup as [`Github::fetch_commit_status`]).
+/// (the combined status [`Github::status_rows`] reads is reduced the same way).
 pub(crate) fn checks_from_statuses(v: &Value) -> Vec<PrCheck> {
     let mut seen: std::collections::HashSet<String> = Default::default();
     let mut out = Vec::new();

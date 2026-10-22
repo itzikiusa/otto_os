@@ -475,15 +475,49 @@ impl AssistantRepo {
         Ok(())
     }
 
-    pub async fn delete_thread(&self, owner: &str, id: &str) -> Result<AssistantThread> {
+    /// Delete the owner's thread. Its `assistant_attachments` rows cascade
+    /// away, so their on-disk `path`s are read in the SAME transaction and
+    /// returned: the caller removes those inbox files after the commit (a
+    /// failed delete never loses a file a live row still points at).
+    pub async fn delete_thread(
+        &self,
+        owner: &str,
+        id: &str,
+    ) -> Result<(AssistantThread, Vec<String>)> {
         let t = self.get_thread(owner, id).await?;
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(dberr("delete assistant thread"))?;
+        let paths: Vec<String> = sqlx::query_scalar(
+            "SELECT path FROM assistant_attachments WHERE thread_id = ? AND owner_user_id = ?",
+        )
+        .bind(id)
+        .bind(owner)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(dberr("assistant thread attachments"))?;
         sqlx::query("DELETE FROM assistant_threads WHERE id = ? AND owner_user_id = ?")
             .bind(id)
             .bind(owner)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(dberr("delete assistant thread"))?;
-        Ok(t)
+        tx.commit()
+            .await
+            .map_err(dberr("delete assistant thread"))?;
+        Ok((t, paths))
+    }
+
+    /// Every attachment path the owner's live rows still reference — the
+    /// orphan inbox sweep keeps exactly these.
+    pub async fn attachment_paths(&self, owner: &str) -> Result<Vec<String>> {
+        sqlx::query_scalar("SELECT path FROM assistant_attachments WHERE owner_user_id = ?")
+            .bind(owner)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(dberr("assistant attachment paths"))
     }
 
     /// Incognito threads idle since before `cutoff` (RFC3339) — deleted by the tick.
@@ -1378,6 +1412,37 @@ mod tests {
         ));
         assert!(r.list_threads("u2").await.unwrap().is_empty());
         assert!(r.delete_thread("u2", &t.id).await.is_err());
+    }
+
+    /// data-integrity-3-03: deleting a thread hands back its attachment
+    /// paths (read before the cascade) so the caller can remove the files;
+    /// another thread's attachments stay referenced.
+    #[tokio::test]
+    async fn deleting_a_thread_returns_its_attachment_paths() {
+        let r = repo().await;
+        let t = r.create_thread(thread("att-owner", None)).await.unwrap();
+        let keep = r.create_thread(thread("att-owner", None)).await.unwrap();
+        let att = |id: &str, path: &str| AssistantAttachment {
+            id: id.into(),
+            name: "r.pdf".into(),
+            path: path.into(),
+            mime: "application/pdf".into(),
+            size: 3,
+        };
+        r.add_attachment("att-owner", &t.id, &att("a1", "/inbox/a1-r.pdf"))
+            .await
+            .unwrap();
+        r.add_attachment("att-owner", &keep.id, &att("a2", "/inbox/a2-r.pdf"))
+            .await
+            .unwrap();
+        let (gone, paths) = r.delete_thread("att-owner", &t.id).await.unwrap();
+        assert_eq!(gone.id, t.id);
+        assert_eq!(paths, vec!["/inbox/a1-r.pdf".to_string()]);
+        assert_eq!(
+            r.attachment_paths("att-owner").await.unwrap(),
+            vec!["/inbox/a2-r.pdf".to_string()],
+            "the cascade dropped only the deleted thread's row"
+        );
     }
 
     #[tokio::test]

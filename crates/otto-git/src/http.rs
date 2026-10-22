@@ -22,6 +22,7 @@ use otto_core::api::{
 use otto_core::auth::{authorize_owner, AuthUser, RoleChecker};
 use otto_core::domain::{GitAccount, GitProviderKind, Repo, WorkspaceRole};
 use otto_core::event::Event;
+use otto_core::keyed_lock::KeyedLocks;
 use otto_core::secrets::SecretStore;
 use otto_core::{new_id, Error, Id, Result};
 use otto_state::{GitStore, NewGitAccount, NewRepo, WorkspacesRepo};
@@ -514,22 +515,15 @@ pub(crate) fn notice(s: &impl GitCtx, level: &str, title: &str, body: &str) {
     });
 }
 
-/// Process-wide registry of per-repo async locks. A merge is a multi-step
-/// sequence (checkout → merge → status); serialising all mutating merge/conflict
-/// operations on a given repo id prevents concurrent requests from interleaving
-/// and corrupting the in-progress merge state. Read-only GETs skip this.
-fn repo_locks() -> &'static StdMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>> {
-    static LOCKS: OnceLock<StdMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
-        OnceLock::new();
-    LOCKS.get_or_init(|| StdMutex::new(HashMap::new()))
-}
+/// Per-repo async locks. A merge is a multi-step sequence (checkout → merge →
+/// status); serialising all mutating merge/conflict operations on a given repo
+/// id prevents concurrent requests from interleaving and corrupting the
+/// in-progress merge state. Read-only GETs skip this.
+static REPO_LOCKS: KeyedLocks<String> = KeyedLocks::new();
 
-/// Return (creating if needed) the async mutex guarding repo `id`.
+/// Return the async mutex guarding repo `id` (pruned once nobody holds it).
 pub(crate) fn repo_lock(id: &Id) -> Arc<tokio::sync::Mutex<()>> {
-    let mut map = repo_locks().lock().expect("repo_locks poisoned");
-    map.entry(id.to_string())
-        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-        .clone()
+    REPO_LOCKS.handle(id.as_str())
 }
 
 /// Per-repo locks for the NETWORK legs (push, tag push, fetch, pull), kept
@@ -543,18 +537,11 @@ pub(crate) fn repo_lock(id: &Id) -> Arc<tokio::sync::Mutex<()>> {
 /// Lock order is ALWAYS `repo_lock` → `remote_lock` (pull holds both: it
 /// writes the worktree and the tracking refs); nothing takes them the other
 /// way round, so the pair cannot deadlock.
-fn remote_locks() -> &'static StdMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>> {
-    static LOCKS: OnceLock<StdMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
-        OnceLock::new();
-    LOCKS.get_or_init(|| StdMutex::new(HashMap::new()))
-}
+static REMOTE_LOCKS: KeyedLocks<String> = KeyedLocks::new();
 
-/// Return (creating if needed) the network-leg mutex of repo `id`.
+/// Return the network-leg mutex of repo `id`.
 pub(crate) fn remote_lock(id: &Id) -> Arc<tokio::sync::Mutex<()>> {
-    let mut map = remote_locks().lock().expect("remote_locks poisoned");
-    map.entry(id.to_string())
-        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-        .clone()
+    REMOTE_LOCKS.handle(id.as_str())
 }
 
 /// When each repo's last SUCCESSFUL fetch finished — the single-flight
@@ -599,17 +586,9 @@ where
     Ok((guard, true))
 }
 
-/// Forget a deleted repo's locks (both maps otherwise only ever grow). An
-/// in-flight holder keeps its own `Arc`, so dropping the entry is safe.
+/// Forget a deleted repo's fetch marker. Its repo/remote locks need nothing:
+/// [`KeyedLocks`] prunes an entry once nobody holds or waits on it.
 fn forget_repo_locks(id: &Id) {
-    repo_locks()
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .remove(id.as_str());
-    remote_locks()
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .remove(id.as_str());
     fetch_done()
         .lock()
         .unwrap_or_else(|p| p.into_inner())

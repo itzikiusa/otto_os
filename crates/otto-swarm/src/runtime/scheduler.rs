@@ -339,12 +339,11 @@ async fn check_utilization(
     let agents = repo.list_agents(&swarm.id).await?;
     // One busy-agents read, not a COUNT per agent (perf §15 F3).
     let busy = repo.busy_agents(&swarm.id).await.unwrap_or_default();
-    let mut idle: Vec<otto_state::SwarmAgent> = Vec::new();
-    for a in agents.iter().filter(|a| a.status == "active") {
-        if !busy.contains(&a.id) && !crate::runtime::verify::agent_under_verification(&a.id) {
-            idle.push(a.clone());
-        }
-    }
+    let idle = idle_agents(
+        &agents,
+        &busy,
+        crate::runtime::verify::agent_under_verification,
+    );
     if idle.is_empty() {
         return Ok(()); // every active agent is already busy — cap is aspirational
     }
@@ -352,30 +351,9 @@ async fn check_utilization(
     // Structural rebalance (free): ready tasks whose assignee is busy or
     // inactive move to the best-fitting idle teammate.
     let ready = repo.ready_tasks(&swarm.id).await?;
-    let mut slots = (cap - active).max(0) as usize;
     let mut moved: Vec<String> = Vec::new();
-    for t in &ready {
-        if slots == 0 || idle.is_empty() {
-            break;
-        }
-        let assignee_is_idle = t
-            .assignee_agent_id
-            .as_ref()
-            .is_some_and(|aid| idle.iter().any(|a| &a.id == aid));
-        if assignee_is_idle {
-            slots -= 1; // will be dispatched by the next coordinator tick as-is
-            continue;
-        }
-        let hay = format!("{} {}", t.title, t.description).to_lowercase();
-        let Some(pos) = idle
-            .iter()
-            .enumerate()
-            .max_by_key(|(_, a)| crate::runtime::engine::agent_fit_score(a, &hay))
-            .map(|(i, _)| i)
-        else {
-            break;
-        };
-        let agent = idle.remove(pos);
+    for (i, agent) in plan_rebalance(&ready, &idle, cap, active) {
+        let t = &ready[i];
         let _ = repo
             .update_task(
                 &t.id,
@@ -387,7 +365,6 @@ async fn check_utilization(
             .await;
         crate::runtime::engine::emit_task_pub(ctx, &t.id).await;
         moved.push(format!("“{}” → {}", t.title, agent.name));
-        slots -= 1;
     }
     if !moved.is_empty() {
         crate::runtime::engine::system_post_meta(
@@ -424,15 +401,8 @@ async fn check_utilization(
     if open == 0 {
         return Ok(()); // board is simply finished
     }
-    {
-        let mut cur = util_cursor().lock().unwrap();
-        let e = cur.entry(sid.to_string()).or_insert((None, None));
-        if e.1
-            .is_some_and(|t| Instant::now().duration_since(t) < UTIL_ESCALATE_EVERY)
-        {
-            return Ok(());
-        }
-        e.1 = Some(Instant::now());
+    if !take_escalation_slot(sid, Instant::now()) {
+        return Ok(());
     }
     // The manager: an ACTIVE agent someone reports to, itself idle right now.
     let Some(leader) = agents
@@ -526,6 +496,76 @@ async fn check_utilization(
     Ok(())
 }
 
+/// Active agents that are neither running a turn (`busy`) nor under
+/// verification — the only ones the watchdog may hand work to or wake.
+pub(crate) fn idle_agents(
+    agents: &[otto_state::SwarmAgent],
+    busy: &std::collections::HashSet<otto_core::Id>,
+    under_verification: impl Fn(&str) -> bool,
+) -> Vec<otto_state::SwarmAgent> {
+    agents
+        .iter()
+        .filter(|a| a.status == "active" && !busy.contains(&a.id) && !under_verification(&a.id))
+        .cloned()
+        .collect()
+}
+
+/// The watchdog's structural rebalance, as `(index into ready, new assignee)`
+/// moves. A ready task already on an idle agent keeps its assignee (and takes
+/// a slot: the next tick dispatches it as-is); one on a busy or inactive agent
+/// moves to the best-fitting idle teammate. At most `cap - active` slots, and
+/// nothing at all when the board is at its cap.
+pub(crate) fn plan_rebalance(
+    ready: &[otto_state::SwarmTask],
+    idle: &[otto_state::SwarmAgent],
+    cap: i64,
+    active: i64,
+) -> Vec<(usize, otto_state::SwarmAgent)> {
+    let mut idle = idle.to_vec();
+    let mut slots = (cap - active).max(0) as usize;
+    let mut moves = Vec::new();
+    for (i, t) in ready.iter().enumerate() {
+        if slots == 0 || idle.is_empty() {
+            break;
+        }
+        let assignee_is_idle = t
+            .assignee_agent_id
+            .as_ref()
+            .is_some_and(|aid| idle.iter().any(|a| &a.id == aid));
+        if assignee_is_idle {
+            slots -= 1; // will be dispatched by the next coordinator tick as-is
+            continue;
+        }
+        let hay = format!("{} {}", t.title, t.description).to_lowercase();
+        let Some(pos) = idle
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, a)| crate::runtime::engine::agent_fit_score(a, &hay))
+            .map(|(i, _)| i)
+        else {
+            break;
+        };
+        moves.push((i, idle.remove(pos)));
+        slots -= 1;
+    }
+    moves
+}
+
+/// Claim swarm `sid`'s manager escalation: true at most once per
+/// [`UTIL_ESCALATE_EVERY`], so a stuck board does not buy a paid manager turn
+/// on every 5-minute check.
+fn take_escalation_slot(sid: &str, now: Instant) -> bool {
+    let mut cur = util_cursor().lock().unwrap_or_else(|e| e.into_inner());
+    let e = cur.entry(sid.to_string()).or_insert((None, None));
+    if e.1
+        .is_some_and(|t| now.saturating_duration_since(t) < UTIL_ESCALATE_EVERY)
+    {
+        return false;
+    }
+    e.1 = Some(now);
+    true
+}
+
 fn parse_ts(v: Option<&Value>) -> Option<DateTime<Utc>> {
     v.and_then(Value::as_str)
         .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
@@ -593,6 +633,106 @@ pub fn is_due(sched: &Value, created: Option<DateTime<Utc>>, now: DateTime<Utc>)
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    fn agent(id: &str, status: &str) -> otto_state::SwarmAgent {
+        otto_state::SwarmAgent {
+            id: id.into(),
+            swarm_id: "s".into(),
+            workspace_id: "w".into(),
+            name: id.into(),
+            title: String::new(),
+            reports_to: None,
+            provider: "claude".into(),
+            model: None,
+            soul_name: None,
+            soul_md: None,
+            specialization: String::new(),
+            scope_md: String::new(),
+            skills: Value::Null,
+            schedule: None,
+            cwd_mode: None,
+            avatar: String::new(),
+            status: status.into(),
+            order_idx: 0,
+            created_by: "u".into(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    fn task(id: &str, assignee: Option<&str>) -> otto_state::SwarmTask {
+        otto_state::SwarmTask {
+            id: id.into(),
+            project_id: "p".into(),
+            swarm_id: "s".into(),
+            workspace_id: "w".into(),
+            title: id.into(),
+            description: String::new(),
+            assignee_agent_id: assignee.map(Into::into),
+            status: "todo".into(),
+            priority: "normal".into(),
+            parent_task_id: None,
+            depends_on: Value::Null,
+            labels: Value::Null,
+            result_ref: None,
+            delegated: false,
+            attempts: 0,
+            order_idx: 0,
+            created_by: "u".into(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    /// test-quality-3-01 (1): a ready task on a BUSY agent moves to the idle
+    /// teammate; a busy, verifying or inactive agent is never a target.
+    #[test]
+    fn rebalance_moves_work_off_a_busy_agent_onto_an_idle_one() {
+        let agents = [
+            agent("busy", "active"),
+            agent("idle", "active"),
+            agent("verifying", "active"),
+            agent("off", "inactive"),
+        ];
+        let busy: std::collections::HashSet<String> = ["busy".to_string()].into();
+        let idle = idle_agents(&agents, &busy, |id| id == "verifying");
+        assert_eq!(
+            idle.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(),
+            ["idle"]
+        );
+        let moves = plan_rebalance(&[task("t", Some("busy"))], &idle, 2, 1);
+        assert_eq!(moves.len(), 1);
+        assert_eq!((moves[0].0, moves[0].1.id.as_str()), (0, "idle"));
+    }
+
+    /// (2): a ready task already on an idle agent stays where it is.
+    #[test]
+    fn rebalance_leaves_a_task_on_an_idle_agent_alone() {
+        let idle = [agent("a", "active"), agent("b", "active")];
+        assert!(plan_rebalance(&[task("t", Some("a"))], &idle, 4, 0).is_empty());
+        // ...and it takes a slot: with one slot left, the next task waits.
+        let ready = [task("t", Some("a")), task("u", None)];
+        assert!(plan_rebalance(&ready, &idle, 1, 0).is_empty());
+    }
+
+    /// (3): the manager escalation is rate-limited per swarm.
+    #[test]
+    fn escalation_is_rate_limited_per_swarm() {
+        let sid = otto_core::new_id();
+        let t0 = Instant::now();
+        assert!(take_escalation_slot(&sid, t0));
+        assert!(!take_escalation_slot(&sid, t0 + Duration::from_secs(300)));
+        assert!(take_escalation_slot(&otto_core::new_id(), t0));
+        assert!(take_escalation_slot(&sid, t0 + UTIL_ESCALATE_EVERY));
+    }
+
+    /// (4): a board at its cap changes nothing.
+    #[test]
+    fn rebalance_at_cap_moves_nothing() {
+        let idle = [agent("idle", "active")];
+        assert!(plan_rebalance(&[task("t", Some("busy"))], &idle, 2, 2).is_empty());
+        assert!(plan_rebalance(&[task("t", Some("busy"))], &idle, 2, 3).is_empty());
+    }
 
     /// The scan is parked on its await. Stop is signaled before that await
     /// completes. The post-await check must not admit a launch. A worker that

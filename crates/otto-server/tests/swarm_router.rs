@@ -11,6 +11,10 @@
 //! submitter (swarm turns, handover briefs, delegation answers) holds the
 //! session's submit lock, so a concurrent `submit_text` on the same live
 //! session never interleaves into one merged prompt.
+//!
+//! The `lifecycle_*` cases pin architecture-3-01: every activation (start,
+//! resume, channel, Product discovery) goes through `lifecycle::activate`,
+//! which waits for a transition (an abort) holding the swarm's guard.
 
 use std::time::Duration;
 
@@ -543,4 +547,57 @@ async fn delegation_answer_submit_does_not_interleave_with_submit_text() {
         "each submission must be its own paste + Enter"
     );
     let _ = w.ctx.manager.kill_session(&sid).await;
+}
+
+/// architecture-3-01: an activation that arrives while an abort holds the
+/// swarm's operation guard waits for it — it never lands between the abort's
+/// status write and its session kill — and then runs its whole sequence.
+#[tokio::test]
+async fn lifecycle_activate_waits_for_an_abort_holding_the_guard() {
+    use otto_swarm::runtime::lifecycle::{activate, ActivatePolicy};
+    let w = world().await;
+    let rt = w.ctx.swarm_rt();
+    let sid = w.swarm.clone();
+    // An abort mid-sequence: holds the guard, has written its status.
+    let abort_guard = otto_swarm::runtime::engine::operation_guard(&sid).await;
+    w.ctx
+        .swarm_repo
+        .set_swarm_status(&sid, "aborted")
+        .await
+        .unwrap();
+    let act = {
+        let (rt, ws, sid) = (rt.clone(), w.ws.id.clone(), sid.clone());
+        tokio::spawn(async move { activate(&rt, &ws, &sid, ActivatePolicy::UserStart).await })
+    };
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!act.is_finished(), "activate must queue behind the abort");
+    let mid = w.ctx.swarm_repo.get_swarm(&sid).await.unwrap();
+    assert_eq!(mid.status, "aborted", "no status write inside the abort");
+    drop(abort_guard);
+    let swarm = act.await.unwrap().unwrap();
+    assert_eq!(swarm.status, "active");
+    otto_swarm::runtime::lifecycle::abort(&rt, &w.ws.id, &sid)
+        .await
+        .unwrap();
+}
+
+/// The channel policy refuses an aborted swarm (a refusal the channel can
+/// post), where a user start re-activates it.
+#[tokio::test]
+async fn lifecycle_channel_activation_refuses_an_aborted_swarm() {
+    use otto_swarm::runtime::lifecycle::{activate, ActivatePolicy};
+    let w = world().await;
+    let rt = w.ctx.swarm_rt();
+    w.ctx
+        .swarm_repo
+        .set_swarm_status(&w.swarm, "aborted")
+        .await
+        .unwrap();
+    let refused = activate(&rt, &w.ws.id, &w.swarm, ActivatePolicy::Channel).await;
+    assert!(
+        matches!(refused, Err(otto_core::Error::Conflict(_))),
+        "{refused:?}"
+    );
+    let still = w.ctx.swarm_repo.get_swarm(&w.swarm).await.unwrap();
+    assert_eq!(still.status, "aborted");
 }

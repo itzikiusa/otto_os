@@ -217,17 +217,11 @@ pub async fn analyze<C: ProductStudioHost>(
 }
 
 /// Per-story lock serializing analyze's "none running" check with its row
-/// insert (S4-306). Entries are a few bytes per story ever analyzed.
+/// insert (S4-306). Pruned once the check-and-insert finishes.
 fn story_start_lock(story_id: &str) -> Arc<tokio::sync::Mutex<()>> {
-    type Locks = std::sync::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>;
-    static LOCKS: std::sync::OnceLock<Locks> = std::sync::OnceLock::new();
-    LOCKS
-        .get_or_init(Default::default)
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .entry(story_id.to_string())
-        .or_default()
-        .clone()
+    static LOCKS: otto_core::keyed_lock::KeyedLocks<String> =
+        otto_core::keyed_lock::KeyedLocks::new();
+    LOCKS.handle(story_id)
 }
 
 /// Spawn `run` and, if it panics (or is cancelled), run `on_crash` (S4-302).

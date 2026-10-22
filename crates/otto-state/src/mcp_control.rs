@@ -588,36 +588,30 @@ impl McpToolsRepo {
     pub async fn upsert_discovered(&self, server_id: &Id, tools: &[DiscoveredTool]) -> Result<()> {
         let now = fmt(Utc::now());
         for t in tools {
-            let existing = sqlx::query(
-                "SELECT id, risk_overridden FROM mcp_tools WHERE server_id = ? AND name = ?",
-            )
-            .bind(server_id)
-            .bind(&t.name)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(dberr("lookup mcp tool"))?;
+            let existing: Option<String> =
+                sqlx::query_scalar("SELECT id FROM mcp_tools WHERE server_id = ? AND name = ?")
+                    .bind(server_id)
+                    .bind(&t.name)
+                    .fetch_optional(&self.pool)
+                    .await
+                    .map_err(dberr("lookup mcp tool"))?;
             let schema = serde_json::to_string(&t.input_schema).unwrap_or_else(|_| "{}".into());
             let annot = serde_json::to_string(&t.annotations).unwrap_or_else(|_| "{}".into());
             match existing {
-                Some(row) => {
-                    let id: String = row.get("id");
-                    let overridden = row.get::<i64, _>("risk_overridden") != 0;
-                    if overridden {
-                        sqlx::query(
-                            "UPDATE mcp_tools SET title=?, description=?, input_schema_json=?, annotations_json=?, mutating=?, supports_dry_run=?, updated_at=? WHERE id=?",
-                        )
-                        .bind(&t.title).bind(&t.description).bind(&schema).bind(&annot)
-                        .bind(t.mutating as i64).bind(t.supports_dry_run as i64).bind(&now).bind(&id)
-                        .execute(&self.pool).await.map_err(dberr("update mcp tool"))?;
-                    } else {
-                        sqlx::query(
-                            "UPDATE mcp_tools SET title=?, description=?, input_schema_json=?, annotations_json=?, risk_label=?, injection_risk=?, mutating=?, supports_dry_run=?, updated_at=? WHERE id=?",
-                        )
-                        .bind(&t.title).bind(&t.description).bind(&schema).bind(&annot)
-                        .bind(&t.risk_label).bind(&t.injection_risk).bind(t.mutating as i64)
-                        .bind(t.supports_dry_run as i64).bind(&now).bind(&id)
-                        .execute(&self.pool).await.map_err(dberr("update mcp tool"))?;
-                    }
+                Some(id) => {
+                    // The pin guard lives IN the UPDATE: an admin `patch` landing
+                    // between a separate read and this write would otherwise have
+                    // its label overwritten while the row stays `risk_overridden`.
+                    sqlx::query(
+                        "UPDATE mcp_tools SET title=?, description=?, input_schema_json=?, annotations_json=?, \
+                         risk_label = CASE WHEN risk_overridden = 1 THEN risk_label ELSE ? END, \
+                         injection_risk = CASE WHEN risk_overridden = 1 THEN injection_risk ELSE ? END, \
+                         mutating=?, supports_dry_run=?, updated_at=? WHERE id=?",
+                    )
+                    .bind(&t.title).bind(&t.description).bind(&schema).bind(&annot)
+                    .bind(&t.risk_label).bind(&t.injection_risk).bind(t.mutating as i64)
+                    .bind(t.supports_dry_run as i64).bind(&now).bind(&id)
+                    .execute(&self.pool).await.map_err(dberr("update mcp tool"))?;
                 }
                 None => {
                     sqlx::query(

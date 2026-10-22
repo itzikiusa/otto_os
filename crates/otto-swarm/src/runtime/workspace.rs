@@ -215,16 +215,9 @@ pub async fn ensure_integration_worktree(
 
 /// Per-project lock serializing [`ensure_integration_worktree`].
 fn integration_lock(project_id: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
-    type Locks =
-        std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>;
-    static LOCKS: std::sync::OnceLock<Locks> = std::sync::OnceLock::new();
-    LOCKS
-        .get_or_init(Default::default)
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .entry(project_id.to_string())
-        .or_default()
-        .clone()
+    static LOCKS: otto_core::keyed_lock::KeyedLocks<String> =
+        otto_core::keyed_lock::KeyedLocks::new();
+    LOCKS.handle(project_id)
 }
 
 /// Ensure the agent's working directory and report how it was provisioned.
