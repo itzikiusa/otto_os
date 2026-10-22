@@ -1468,7 +1468,14 @@ pub async fn otto_server_status(
 pub async fn otto_server_enabled(
     State(ctx): State<ServerCtx>,
     CurrentAuthContext(auth): CurrentAuthContext,
+    Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> ApiResult<Json<Value>> {
+    // `?profiles=a,b` (a stdio bridge running under MCP profiles): the
+    // resolved `ToolFilter` it narrows its own listing and calls with.
+    let profile =
+        otto_mcp::profiles::resolve_param(&ctx.pool, q.get("profiles").map(String::as_str))
+            .await
+            .map_err(ApiError)?;
     let on = enabled_tools(&ctx).await;
     let outward_on = outward_enabled(&ctx).await;
     let enabled: Vec<&str> = otto_tool_specs_cached()
@@ -1492,6 +1499,7 @@ pub async fn otto_server_enabled(
         "enabled": enabled,
         "outward_enabled": outward_on,
         "ui_granted": ui_granted,
+        "profile": profile,
     })))
 }
 

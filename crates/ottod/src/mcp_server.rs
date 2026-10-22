@@ -7,11 +7,19 @@
 //! ONLY route the restricted token may reach — the control plane governs (enabled?
 //! allowlisted? dangerous→approval?), audits, and executes each call. `tools/list`
 //! reflects the currently-enabled tool set from `GET /api/v1/mcp/otto-server`.
+//!
+//! **MCP profiles.** `--profile <id>[,<id>]` (or `OTTO_MCP_PROFILE`) attaches
+//! this connection as one profile ("Otto · Database"): `tools/list` shows only
+//! that profile's tools and a call outside it is refused naming the profile,
+//! before it reaches the daemon (`otto_mcp::profiles`). Without it, every
+//! enabled tool — the connection exactly as before.
 
 use std::time::Duration;
 
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+use otto_server::mcp_profiles::ToolFilter;
 
 use crate::config::Config;
 
@@ -22,6 +30,8 @@ struct Ctx {
     http: reqwest::Client,
     base: String,
     token: String,
+    /// `--profile` / `OTTO_MCP_PROFILE` (comma-separated ids); `None` ⇒ all.
+    profiles: Option<String>,
 }
 
 impl Ctx {
@@ -72,13 +82,17 @@ impl Ctx {
         // The set of currently-enabled tools (best-effort; on error list all),
         // from the light names-only read; a daemon older than this binary
         // lacks it, so fall back to the full status.
-        let enabled: Option<Vec<String>> = match self.get_json("/mcp/otto-server/enabled").await {
-            Ok(v) => v.get("enabled").and_then(Value::as_array).map(|names| {
-                names
-                    .iter()
-                    .filter_map(|n| n.as_str().map(str::to_string))
-                    .collect()
-            }),
+        let mut filter = None;
+        let enabled: Option<Vec<String>> = match self.get_json(&self.enabled_path()).await {
+            Ok(v) => {
+                filter = self.filter_in(&v);
+                v.get("enabled").and_then(Value::as_array).map(|names| {
+                    names
+                        .iter()
+                        .filter_map(|n| n.as_str().map(str::to_string))
+                        .collect()
+                })
+            }
             Err(_) => self.get_json("/mcp/otto-server").await.ok().and_then(|v| {
                 v.get("tools").and_then(Value::as_array).map(|tools| {
                     tools
@@ -97,6 +111,7 @@ impl Ctx {
                     .as_ref()
                     .map(|e| e.iter().any(|n| n == name))
                     .unwrap_or(true)
+                    && filter.as_ref().is_none_or(|f: &ToolFilter| f.allows(name))
             })
             .map(|s| {
                 json!({
@@ -109,8 +124,31 @@ impl Ctx {
         json!({ "tools": tools })
     }
 
-    /// The MCP `tools/call`: forward to the governed choke point.
+    /// The enable-list read, resolving this connection's profile when set.
+    fn enabled_path(&self) -> String {
+        match &self.profiles {
+            Some(p) => format!("/mcp/otto-server/enabled?profiles={p}"),
+            None => "/mcp/otto-server/enabled".to_string(),
+        }
+    }
+
+    /// The resolved profile filter of an enable-list answer (only when this
+    /// connection asked for one).
+    fn filter_in(&self, v: &Value) -> Option<ToolFilter> {
+        self.profiles.as_ref()?;
+        serde_json::from_value(v.get("profile")?.clone()).ok()
+    }
+
+    /// The MCP `tools/call`: forward to the governed choke point — unless the
+    /// connection's profile leaves the tool out.
     async fn tools_call(&self, name: &str, args: &Value) -> Value {
+        if self.profiles.is_some() {
+            if let Ok(v) = self.get_json(&self.enabled_path()).await {
+                if let Some(f) = self.filter_in(&v).filter(|f| !f.allows(name)) {
+                    return tool_result(&json!({ "error": f.denial(name) }), true);
+                }
+            }
+        }
         let res = self
             .post_json(
                 "/mcp/otto-tools/invoke",
@@ -208,7 +246,20 @@ pub async fn run() -> Result<(), String> {
         .timeout(CALL_TIMEOUT)
         .build()
         .map_err(|e| format!("build http client: {e}"))?;
-    let ctx = Ctx { http, base, token };
+    let profiles = profile_arg(&std::env::args().collect::<Vec<_>>())
+        .or_else(|| std::env::var("OTTO_MCP_PROFILE").ok())
+        .map(|p| p.trim().to_string())
+        .filter(|p| {
+            !p.is_empty()
+                && p.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "-_,".contains(c))
+        });
+    let ctx = Ctx {
+        http,
+        base,
+        token,
+        profiles,
+    };
 
     let stdin = tokio::io::stdin();
     let mut reader = BufReader::new(stdin);
@@ -245,6 +296,20 @@ pub async fn run() -> Result<(), String> {
     Ok(())
 }
 
+/// `--profile <ids>` / `--profile=<ids>` in `args`.
+fn profile_arg(args: &[String]) -> Option<String> {
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == "--profile" {
+            return it.next().cloned();
+        }
+        if let Some(p) = a.strip_prefix("--profile=") {
+            return Some(p.to_string());
+        }
+    }
+    None
+}
+
 async fn write_line(stdout: &mut tokio::io::Stdout, value: &Value) -> Result<(), String> {
     let mut buf = serde_json::to_vec(value).map_err(|e| format!("encode: {e}"))?;
     buf.push(b'\n');
@@ -266,6 +331,7 @@ mod tests {
             http: reqwest::Client::new(),
             base: "http://127.0.0.1:9".into(),
             token: "t".into(),
+            profiles: None,
         }
     }
 
@@ -278,6 +344,33 @@ mod tests {
         assert_eq!(handle(&ctx(), ping).await, None);
         let req = json!({"jsonrpc": "2.0", "id": 7, "method": "ping"});
         assert_eq!(handle(&ctx(), req).await.unwrap()["id"], 7);
+    }
+
+    #[test]
+    fn a_connection_profile_is_named_by_flag_and_resolved_by_the_daemon() {
+        let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            profile_arg(&a(&["ottod", "mcp-server", "--profile", "database"])).as_deref(),
+            Some("database")
+        );
+        assert_eq!(
+            profile_arg(&a(&["ottod", "mcp-server", "--profile=git,cloud"])).as_deref(),
+            Some("git,cloud")
+        );
+        assert_eq!(profile_arg(&a(&["ottod", "mcp-server"])), None);
+        let mut c = ctx();
+        assert_eq!(c.enabled_path(), "/mcp/otto-server/enabled");
+        let answer = json!({"profile": {"ids": ["database"], "label": "Database",
+            "profiles": [{"id": "database", "name": "Database", "groups": ["database"]}]}});
+        assert_eq!(c.filter_in(&answer), None, "no profile asked ⇒ no filter");
+        c.profiles = Some("database".into());
+        assert_eq!(
+            c.enabled_path(),
+            "/mcp/otto-server/enabled?profiles=database"
+        );
+        let f = c.filter_in(&answer).unwrap();
+        assert!(f.allows("otto.query_db_readonly") && !f.allows("otto.create_pr"));
+        assert!(f.denial("otto.create_pr").contains("\"Database\""));
     }
 
     #[test]

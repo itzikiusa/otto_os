@@ -195,11 +195,14 @@ fn codex_creds_preserve_session_source_for_mcp_policy() {
         "http://127.0.0.1:7700",
         "workspace",
         Some("vault-docs-review"),
+        "database,issues",
     )
     .unwrap();
     let value: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     assert_eq!(value["source"], serde_json::json!("vault-docs-review"));
+    // Codex's `otto` server reads its MCP profile from the same file.
+    assert_eq!(value["profiles"], serde_json::json!("database,issues"));
     let _ = std::fs::remove_file(path);
 }
 
@@ -236,6 +239,50 @@ fn env_based_mcp_providers_preserve_reviewer_source() {
             .get("OTTO_SESSION_SOURCE")
             .map(String::as_str),
         Some("vault-docs")
+    );
+}
+
+/// Every provider's `otto` server runs under the session's MCP profile: the
+/// env Claude/agy/grok inherit carries `OTTO_MCP_PROFILES` (the creds file
+/// carries it for Codex — `codex_creds_preserve_session_source_for_mcp_policy`),
+/// and a session with no stored profile asks for the default.
+#[test]
+fn every_provider_injection_carries_the_session_mcp_profile() {
+    let mut session = Session {
+        id: new_id(),
+        workspace_id: new_id(),
+        kind: SessionKind::Agent,
+        provider: "claude".into(),
+        title: "db work".into(),
+        status: SessionStatus::Idle,
+        cwd: "/tmp".into(),
+        provider_session_id: None,
+        connection_id: None,
+        created_by: new_id(),
+        created_at: chrono::Utc::now(),
+        last_active_at: chrono::Utc::now(),
+        archived: false,
+        meta: serde_json::json!({"mcp_profiles": ["database", " issues ", "", 7, "a,b"]}),
+    };
+    for provider in ["claude", "agy", "gemini", "grok", "codex"] {
+        session.provider = provider.into();
+        let env = otto_tools_env(&session, "token", "http://127.0.0.1:7700");
+        assert_eq!(
+            env.get("OTTO_MCP_PROFILES").map(String::as_str),
+            Some("database,issues"),
+            "provider {provider} lost the session MCP profile"
+        );
+    }
+    session.meta = serde_json::json!({});
+    assert_eq!(
+        otto_tools_env(&session, "t", "b")
+            .get("OTTO_MCP_PROFILES")
+            .map(String::as_str),
+        Some("default")
+    );
+    assert_eq!(
+        session_mcp_profiles(&serde_json::json!({"mcp_profiles": []})),
+        "default"
     );
 }
 
@@ -1268,7 +1315,8 @@ async fn lifecycle_mutations_wait_for_in_flight_restart() {
 /// delete it too. Returns (`id`'s three files, the neighbour's file).
 fn seed_credential_files(id: &Id) -> (Vec<std::path::PathBuf>, std::path::PathBuf) {
     let env = std::collections::BTreeMap::from([("API_KEY".to_string(), "s3cret".to_string())]);
-    let creds = write_codex_creds(id, "tok", "http://127.0.0.1:7700", "ws", None).unwrap();
+    let creds =
+        write_codex_creds(id, "tok", "http://127.0.0.1:7700", "ws", None, "default").unwrap();
     let mut own = vec![creds];
     for server in ["a", "b"] {
         let path = codex_server_env_path(id, server);

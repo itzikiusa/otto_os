@@ -139,6 +139,7 @@ fn tools_list_catalog_stays_within_its_byte_budget() {
     let info = EnabledInfo {
         names: all_governed_names(),
         ui_granted: false,
+        filter: None,
     };
     let listing = |source: Option<&str>, info: &EnabledInfo| -> usize {
         let mut cat = tool_catalog_for_source(source);

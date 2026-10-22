@@ -6,11 +6,11 @@
     "crates/otto-git/src/local.rs": 5548,
     "crates/otto-server/src/vault_docs_agent.rs": 4087,
     "crates/otto-server/src/workflow_engine.rs": 5853,
-    "crates/otto-sessions/src/manager.rs": 6729,
-    "crates/ottod/src/mcp_tools.rs": 4938
+    "crates/otto-sessions/src/manager.rs": 6676,
+    "crates/ottod/src/mcp_tools.rs": 4878
   },
   "totals": {
-    "otto-server": 107813
+    "otto-server": 107773
   },
   "functions": {
     "execute_node": 206,

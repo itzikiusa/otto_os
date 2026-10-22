@@ -9,7 +9,7 @@
 //! paths.
 
 use async_trait::async_trait;
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::response::Response;
 use otto_core::auth::AuthContext;
 use otto_core::Error;
@@ -48,6 +48,7 @@ pub async fn mcp_http_post(
     State(ctx): State<ServerCtx>,
     CurrentAuthContext(auth): CurrentAuthContext,
     untimed: Option<axum::Extension<crate::telemetry::UntimedMark>>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
     raw: axum::body::Bytes,
 ) -> Response {
     // Parsed here, not by the `Json` extractor: its plain-text 400 is not a
@@ -63,5 +64,20 @@ pub async fn mcp_http_post(
             mark.mark();
         }
     }
-    jsonrpc::post_response(&ServerTools(&ctx), &auth, &body, env!("CARGO_PKG_VERSION")).await
+    // `?profile=<id>[,<id>]`: this connection's MCP profile narrows tools/list
+    // and refuses calls outside it; absent ⇒ every enabled tool, as before.
+    let filter =
+        match otto_mcp::profiles::resolve_param(&ctx.pool, q.get("profile").map(String::as_str))
+            .await
+        {
+            Ok(f) => f,
+            Err(e) => {
+                return axum::response::IntoResponse::into_response(crate::error::ApiError(e))
+            }
+        };
+    let tools = otto_mcp::profiles::ProfiledTools {
+        inner: &ServerTools(&ctx),
+        filter,
+    };
+    jsonrpc::post_response(&tools, &auth, &body, env!("CARGO_PKG_VERSION")).await
 }
