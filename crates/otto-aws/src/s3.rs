@@ -632,16 +632,16 @@ pub async fn download(
     // head drops `child`, and `kill_on_drop` ends it.
     let (bin, env) = svc.bin_and_env(a, region).await?;
     let uri = format!("s3://{bucket}/{key}");
-    let mut child = tokio::process::Command::new(&bin)
-        .args(["s3", "cp", &uri, "-", "--no-progress"])
-        .env_remove("AWS_PROFILE") // same rule as `cli::run_raw`
-        .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|e| Error::Internal(format!("spawn aws s3 cp: {e}")))?;
+    let mut child = otto_core::aws_env::apply_aws_env(
+        tokio::process::Command::new(&bin).args(["s3", "cp", &uri, "-", "--no-progress"]),
+        env.iter().map(|(k, v)| (k.as_str(), v.as_str())),
+    )
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::null())
+    .kill_on_drop(true)
+    .spawn()
+    .map_err(|e| Error::Internal(format!("spawn aws s3 cp: {e}")))?;
     let head = head_object(svc, a, bucket, key, region).await?;
     if inline && head.size > INLINE_PREVIEW_CAP {
         return Err(Error::PayloadTooLarge(format!(
@@ -810,16 +810,16 @@ where
         args.extend(["--content-type", ct]);
     }
     let started = chrono::Utc::now();
-    let mut child = tokio::process::Command::new(&bin)
-        .args(&args)
-        .env_remove("AWS_PROFILE") // same rule as `cli::run_raw`
-        .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|e| Error::Internal(format!("spawn aws s3 cp: {e}")))?;
+    let mut child = otto_core::aws_env::apply_aws_env(
+        tokio::process::Command::new(&bin).args(&args),
+        env.iter().map(|(k, v)| (k.as_str(), v.as_str())),
+    )
+    .stdin(Stdio::piped())
+    .stdout(Stdio::null())
+    .stderr(Stdio::piped())
+    .kill_on_drop(true)
+    .spawn()
+    .map_err(|e| Error::Internal(format!("spawn aws s3 cp: {e}")))?;
     let mut stdin = child
         .stdin
         .take()

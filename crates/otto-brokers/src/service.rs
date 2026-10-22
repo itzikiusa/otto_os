@@ -130,18 +130,12 @@ impl BrokersService {
         }
     }
 
-    /// Attach the operator-workflow repo (lag alerts + replay evidence). Called
-    /// by the server wiring after the pool is available.
+    /// Attach the operator-workflow repo (lag alerts + replay evidence). The
+    /// daemon wiring (`otto-server` `boot/build.rs`) and its test fixture chain
+    /// this; without it every lag-alert call fails "ops repo not initialised".
     pub fn with_ops(mut self, ops: BrokerOpsRepo) -> Self {
         self.ops = Some(ops);
         self
-    }
-
-    /// Whether the broker has refused consumer-group access for this cluster
-    /// (cached). The UI reads this to gate the Consumer Groups tab without
-    /// triggering another denied probe.
-    pub fn group_access_denied(&self, id: &Id) -> bool {
-        self.group_denied.contains_key(id)
     }
 
     /// Record/clear the group-access verdict from a group-op result, returning

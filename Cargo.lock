@@ -4143,6 +4143,7 @@ dependencies = [
  "libc",
  "notify",
  "otto-core",
+ "otto-git-cmd",
  "otto-state",
  "otto-telemetry",
  "reqwest",
@@ -4156,6 +4157,13 @@ dependencies = [
  "tracing",
  "urlencoding",
  "wiremock",
+]
+
+[[package]]
+name = "otto-git-cmd"
+version = "0.2.0"
+dependencies = [
+ "tokio",
 ]
 
 [[package]]
@@ -4475,7 +4483,7 @@ dependencies = [
  "otto-ssh",
  "otto-state",
  "otto-swarm",
- "otto-telemetry",
+ "otto-telemetry-collector",
  "otto-transcript",
  "otto-usage",
  "otto-vault",
@@ -4516,7 +4524,7 @@ dependencies = [
  "http-body-util",
  "libc",
  "otto-core",
- "otto-git",
+ "otto-git-cmd",
  "otto-pty",
  "otto-rbac",
  "otto-sandbox",
@@ -4607,8 +4615,20 @@ name = "otto-telemetry"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "serde",
+ "serde_json",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "otto-telemetry-collector"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
  "chrono",
  "hex",
+ "otto-telemetry",
  "otto-usage",
  "reqwest",
  "serde",
@@ -4724,7 +4744,7 @@ dependencies = [
  "otto-server",
  "otto-sessions",
  "otto-state",
- "otto-telemetry",
+ "otto-telemetry-collector",
  "otto-transcript",
  "otto-usage",
  "rcgen",

@@ -1267,7 +1267,11 @@ async fn clone_into_workspace<S: GitCtx>(
         .map(str::trim)
         .filter(|s| !s.is_empty())
     {
-        Some(dir) => expand_home(dir),
+        // `~user/…` is refused (a 400), not mangled into `$HOMEuser/…`.
+        Some(dir) => otto_core::paths::expand_home_strict(dir)
+            .map_err(Error::Invalid)?
+            .to_string_lossy()
+            .into_owned(),
         None => ws.root_path.clone(),
     };
     let dest = FsPath::new(&base).join(&name);
@@ -1452,22 +1456,6 @@ fn derive_repo_name(url: &str) -> Option<String> {
     } else {
         Some(tail.to_string())
     }
-}
-
-/// Expand a leading `~` (or `~/…`) to the daemon user's `$HOME`. Other paths are
-/// returned unchanged. Used to resolve a user-chosen clone destination.
-fn expand_home(path: &str) -> String {
-    if path == "~" || path.starts_with("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
-            let home = home.to_string_lossy();
-            return if path == "~" {
-                home.into_owned()
-            } else {
-                format!("{home}{}", &path[1..])
-            };
-        }
-    }
-    path.to_string()
 }
 
 /// `PATCH /repos/{id}` — (re)bind the repo's hosting account. `git_account_id`

@@ -6848,8 +6848,8 @@ fn agent_cache_dir(session_id: &Id) -> std::path::PathBuf {
 /// main repo's `.git` (which holds the objects + the worktree's gitdir), which
 /// lives OUTSIDE `cwd` — without it a sandboxed agent in a worktree couldn't
 /// commit. Best-effort: `None` when `cwd` isn't a git repo.
-async fn resolve_git_common_dir(cwd: &std::path::Path) -> Option<std::path::PathBuf> {
-    let out = otto_git::hardened_command()
+pub(crate) async fn resolve_git_common_dir(cwd: &std::path::Path) -> Option<std::path::PathBuf> {
+    let out = otto_git_cmd::hardened_command()
         .arg("-C")
         .arg(cwd)
         .args(["rev-parse", "--git-common-dir"])

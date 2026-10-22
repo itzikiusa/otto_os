@@ -107,6 +107,27 @@ struct RunningPlugin {
 
 type RunningMap = std::sync::Arc<Mutex<HashMap<String, RunningPlugin>>>;
 
+/// Why each plugin is not running (a spawn error, or how its sidecar exited);
+/// cleared by a successful start. Shown in the admin list so an enabled but
+/// dead plugin is not just "Enabled".
+type LastErrors = std::sync::Arc<Mutex<HashMap<String, String>>>;
+
+/// Remove `owner`'s entry only while it still belongs to `generation`: the
+/// watcher of an older spawn must never un-publish a newer spawn's port.
+/// Returns whether it removed anything.
+fn remove_if_generation(
+    map: &mut HashMap<String, RunningPlugin>,
+    owner: &str,
+    generation: u64,
+) -> bool {
+    if map.get(owner).is_some_and(|r| r.generation == generation) {
+        map.remove(owner);
+        true
+    } else {
+        false
+    }
+}
+
 /// Supervises enabled plugin sidecars (spawn/stop) and tracks their ports for the
 /// reverse proxy.
 pub struct PluginManager {
@@ -116,6 +137,7 @@ pub struct PluginManager {
     /// Base URL the sidecar uses to call back (`…/api/v1/plugin-host`).
     host_api_base: String,
     running: RunningMap,
+    last_errors: LastErrors,
     /// Source of [`RunningPlugin::generation`].
     generations: std::sync::atomic::AtomicU64,
     /// Serialize management transitions, including copying replacement files.
@@ -136,6 +158,7 @@ impl PluginManager {
             data_dir,
             host_api_base,
             running: RunningMap::default(),
+            last_errors: LastErrors::default(),
             generations: std::sync::atomic::AtomicU64::new(0),
             lifecycle: tokio::sync::Mutex::new(()),
             http: proxy_client(PROXY_CONNECT_TIMEOUT, PROXY_TIMEOUT),
@@ -171,6 +194,7 @@ impl PluginManager {
         for p in enabled {
             if let Err(e) = self.spawn(&p).await {
                 tracing::warn!(plugin = %p.slug, "plugins: spawn failed: {e}");
+                self.set_last_error(&p.slug, e);
             }
         }
     }
@@ -242,6 +266,7 @@ impl PluginManager {
         // Keep ownership local during readiness: cancellation or failure kills
         // the child and cannot leave a stale published port.
         self.adopt(&p.slug, port, child);
+        self.last_errors.lock().unwrap().remove(&p.slug);
         tracing::info!(plugin = %p.slug, port, "plugins: sidecar started");
         Ok(port)
     }
@@ -258,6 +283,7 @@ impl PluginManager {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (stop, stop_rx) = tokio::sync::oneshot::channel::<()>();
         let running = std::sync::Arc::clone(&self.running);
+        let last_errors = std::sync::Arc::clone(&self.last_errors);
         let owner = slug.to_string();
         // Publish under the lock the watcher takes: a child that dies at once
         // cannot be reaped before its entry exists (and so stay published).
@@ -266,13 +292,19 @@ impl PluginManager {
             tokio::select! {
                 status = child.wait() => {
                     let mut map = running.lock().unwrap();
-                    if map.get(&owner).is_some_and(|r| r.generation == generation) {
-                        map.remove(&owner);
-                    }
+                    let current = remove_if_generation(&mut map, &owner, generation);
                     drop(map);
+                    let cause = match &status {
+                        Ok(status) => format!("the service exited unexpectedly ({status})"),
+                        Err(e) => format!("the service could not be supervised: {e}"),
+                    };
                     match status {
                         Ok(status) => tracing::warn!(plugin = %owner, port, %status, "plugins: sidecar exited unexpectedly; down until re-enabled or the daemon restarts"),
                         Err(e) => tracing::warn!(plugin = %owner, port, "plugins: sidecar wait failed: {e}"),
+                    }
+                    // Only the current spawn's death is the plugin's state.
+                    if current {
+                        last_errors.lock().unwrap().insert(owner, cause);
                     }
                 }
                 // A stop request, or the manager (the sender) went away.
@@ -308,6 +340,7 @@ impl PluginManager {
             ..rec
         };
         if let Err(error) = self.spawn(&enabled).await {
+            self.set_last_error(slug, error.clone());
             self.repo.set_enabled(slug, false).await?;
             return Err(Error::Internal(format!("spawn: {error}")));
         }
@@ -328,6 +361,24 @@ impl PluginManager {
 
     fn port_of(&self, slug: &str) -> Option<u16> {
         self.running.lock().unwrap().get(slug).map(|r| r.port)
+    }
+
+    fn set_last_error(&self, slug: &str, error: String) {
+        self.last_errors
+            .lock()
+            .unwrap()
+            .insert(slug.to_string(), error);
+    }
+
+    /// `(running, last_error)` for the admin list.
+    fn runtime_of(&self, slug: &str) -> (bool, Option<String>) {
+        let running = self.running.lock().unwrap().contains_key(slug);
+        let last_error = if running {
+            None
+        } else {
+            self.last_errors.lock().unwrap().get(slug).cloned()
+        };
+        (running, last_error)
     }
 }
 
@@ -394,6 +445,10 @@ struct PluginNav {
     name: String,
     icon: String,
     has_ui: bool,
+    /// Whether its service (sidecar) is up. The page is served statically
+    /// either way, so the frame uses this to show "service stopped" instead
+    /// of a page whose every call 502s. (The cause is admin-only.)
+    running: bool,
 }
 
 /// `GET /api/v1/plugins` — enabled plugins (slug/name/icon) for the UI sidebar.
@@ -403,6 +458,7 @@ async fn list_enabled(State(ctx): State<ServerCtx>) -> ApiResult<Json<Vec<Plugin
     Ok(Json(
         list.into_iter()
             .map(|p| PluginNav {
+                running: ctx.plugins.runtime_of(&p.slug).0,
                 slug: p.slug,
                 name: p.name,
                 icon: p.icon,
@@ -550,13 +606,36 @@ fn split_plugin_path(path: &str) -> Option<(String, String)> {
 // Handlers — management (root only)
 // ===========================================================================
 
+/// One `GET /api/v1/plugin-admin` row: the stored record plus the sidecar's
+/// live state, so an enabled plugin whose service failed to start or died is
+/// shown as "not running — <cause>" instead of just "Enabled".
+#[derive(Serialize)]
+struct PluginAdminRow {
+    #[serde(flatten)]
+    record: PluginRecord,
+    running: bool,
+    last_error: Option<String>,
+}
+
 /// `GET /api/v1/plugin-admin` — full installed-plugin list (admin).
 async fn admin_list(
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
-) -> ApiResult<Json<Vec<PluginRecord>>> {
+) -> ApiResult<Json<Vec<PluginAdminRow>>> {
     require_root(&user)?;
-    Ok(Json(ctx.plugins.repo().list().await.map_err(ApiError)?))
+    let rows = ctx.plugins.repo().list().await.map_err(ApiError)?;
+    Ok(Json(
+        rows.into_iter()
+            .map(|record| {
+                let (running, last_error) = ctx.plugins.runtime_of(&record.slug);
+                PluginAdminRow {
+                    record,
+                    running,
+                    last_error,
+                }
+            })
+            .collect(),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -1207,6 +1286,28 @@ mod proxy_timeout_tests {
         assert!(manager.port_of("slow").is_none());
     }
 
+    /// The watcher's guarded removal: a stale generation leaves the newer
+    /// spawn's entry published; only the owning generation removes it.
+    #[tokio::test]
+    async fn only_the_owning_generation_unpublishes_a_port() {
+        let entry = |generation| {
+            let (stop, _rx) = tokio::sync::oneshot::channel::<()>();
+            RunningPlugin {
+                port: 7,
+                generation,
+                stop,
+                watcher: tokio::spawn(async {}),
+            }
+        };
+        let mut map = HashMap::new();
+        map.insert("p".to_string(), entry(5));
+        assert!(!remove_if_generation(&mut map, "p", 4), "stale watcher");
+        assert_eq!(map.get("p").map(|r| r.generation), Some(5));
+        assert!(!remove_if_generation(&mut map, "other", 5));
+        assert!(remove_if_generation(&mut map, "p", 5));
+        assert!(map.is_empty());
+    }
+
     #[tokio::test]
     async fn a_crashed_sidecar_is_reaped_and_unpublished() {
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
@@ -1240,7 +1341,17 @@ mod proxy_timeout_tests {
             );
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        // A newer spawn's entry survives an older watcher's exit.
+        // The admin list now says why it is down.
+        let (running, last_error) = manager.runtime_of("crashy");
+        assert!(!running);
+        assert!(
+            last_error
+                .as_deref()
+                .is_some_and(|e| e.contains("exited unexpectedly")),
+            "{last_error:?}"
+        );
+        // A newer spawn's entry survives an older watcher's exit (the guard
+        // itself is unit-tested in `only_the_owning_generation_unpublishes_a_port`).
         let old = Command::new("/bin/sh")
             .args(["-c", "sleep 0.2; exit 3"])
             .kill_on_drop(true)

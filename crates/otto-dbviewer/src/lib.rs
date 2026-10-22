@@ -27,6 +27,7 @@ pub mod registry;
 mod resource_cache;
 pub mod service;
 pub mod split;
+mod sql_class;
 pub mod tls;
 pub mod types;
 

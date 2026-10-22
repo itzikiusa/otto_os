@@ -856,18 +856,16 @@ pub(crate) fn owed_followup(result: Option<&Value>) -> Option<&str> {
         .filter(|text| !text.trim().is_empty())
 }
 
-fn paste_bytes(text: &str) -> Vec<u8> {
-    let text = otto_orchestrator::claude_pty::sanitize_paste(text);
-    let mut bytes = Vec::with_capacity(text.len() + 16);
-    bytes.extend_from_slice(b"\x1b[200~");
-    bytes.extend_from_slice(text.as_bytes());
-    bytes.extend_from_slice(b"\x1b[201~");
-    bytes
-}
-
 /// Paste the answer into the delegated personal-agent session when that run
 /// is still live. The assistant thread is a separate conversation.
-async fn deliver_delegation_answer<C: AssistantCtx>(
+///
+/// Goes through `SessionManager::submit_text`: it sanitises the paste, holds
+/// the session's submit lock (a human typing into the same live session, or a
+/// workspace broadcast, can't interleave its paste/Enter with ours) and waits
+/// the paste-to-Enter window, without which the TUI can treat the Enter as
+/// pasted content and never submit.
+#[doc(hidden)]
+pub async fn deliver_delegation_answer<C: AssistantCtx>(
     ctx: &C,
     run_id: Option<&str>,
     text: &str,
@@ -887,10 +885,7 @@ async fn deliver_delegation_answer<C: AssistantCtx>(
     let Some(sid) = run.session_id.as_ref() else {
         return false;
     };
-    if ctx.manager().input(sid, &paste_bytes(text)).await.is_err() {
-        return false;
-    }
-    ctx.manager().input(sid, b"\r").await.is_ok()
+    ctx.manager().submit_text(sid, text).await.is_ok()
 }
 
 /// Only the first canonical decision wins. A card that has not received the

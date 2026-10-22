@@ -4,6 +4,10 @@
 //! implements — keep them engine-agnostic.
 
 use crate::split::{split_statements, SqlDialect};
+use crate::sql_class::{
+    first_keyword as sql_first_keyword, gate_engine_extra_read,
+    gate_keyword_is_read as sql_first_keyword_is_read, strip_leading_comments, GATE_PROVEN_READS,
+};
 use otto_core::domain::ConnectionKind;
 use otto_core::{Error, Result};
 use serde::{Deserialize, Serialize};
@@ -1174,12 +1178,6 @@ impl PlanNode {
 
 // --- Helpers ----------------------------------------------------------------
 
-/// Standard "not yet implemented" error a stub driver returns. Replaced by the
-/// per-engine agent with the real implementation.
-pub fn unimplemented(engine: Engine, op: &str) -> Error {
-    Error::Internal(format!("{}: {op} not implemented", engine.as_str()))
-}
-
 /// Convenience: turn any driver-level error into [`otto_core::Error::Upstream`]
 /// (a 502 — the failure is the database's, not the request's). Engine errors
 /// this crate knows (sqlx, Mongo, klickhouse) keep their structure as tagged
@@ -1286,30 +1284,6 @@ pub fn inject_row_limit(statement: &str, limit: usize, offset: Option<u64>) -> R
         None => format!("{trimmed}{separator}LIMIT {limit}"),
     };
     RowLimit { sql, limited: true }
-}
-
-/// Strip leading whitespace and SQL line (`--`) / block (`/* */`) comments,
-/// returning the remainder — used to find a statement's first keyword.
-fn strip_leading_comments(sql: &str) -> &str {
-    let mut s = sql.trim_start();
-    loop {
-        if let Some(rest) = s.strip_prefix("--") {
-            s = rest
-                .split_once('\n')
-                .map(|x| x.1)
-                .unwrap_or("")
-                .trim_start();
-        } else if let Some(rest) = s.strip_prefix("/*") {
-            s = rest
-                .split_once("*/")
-                .map(|x| x.1)
-                .unwrap_or("")
-                .trim_start();
-        } else {
-            break;
-        }
-    }
-    s
 }
 
 // --- Write-gate classification ----------------------------------------------
@@ -1447,9 +1421,7 @@ fn sql_is_write_for(engine: Engine, statement: &str) -> bool {
     };
     let spans = split_statements(statement, dialect);
     if spans.iter().any(|span| {
-        !sql_first_keyword_is_read(&span.text)
-            && !(engine == Engine::Clickhouse
-                && matches!(sql_first_keyword(&span.text).as_str(), "EXISTS" | "CHECK"))
+        !sql_first_keyword_is_read(&span.text) && !gate_engine_extra_read(engine, &span.text)
     }) {
         return true;
     }
@@ -1457,10 +1429,8 @@ fn sql_is_write_for(engine: Engine, statement: &str) -> bool {
         return spans.iter().any(|span| {
             // DESC / DESCRIBE are MySQL synonyms of EXPLAIN (including its
             // executing ANALYZE form), so they are proven too.
-            matches!(
-                sql_first_keyword(&span.text).as_str(),
-                "SELECT" | "WITH" | "EXPLAIN" | "DESC" | "DESCRIBE"
-            ) && !crate::access::read_is_provable(engine, &span.text)
+            GATE_PROVEN_READS.contains(&sql_first_keyword(&span.text).as_str())
+                && !crate::access::read_is_provable(engine, &span.text)
         });
     }
     false
@@ -1520,47 +1490,6 @@ pub(crate) fn sql_leaves_session_state(statement: &str) -> bool {
         || words.contains(&"GET_LOCK")
         || upper.contains("ADVISORY_LOCK")
         || words.contains(&"SET_CONFIG")
-}
-
-/// True when a single SQL statement's first keyword is a known row-returning
-/// read (mirrors the per-driver `is_read_statement`, kept conservative).
-///
-/// `SET` is deliberately NOT a read: `SET GLOBAL …` / `SET PASSWORD …` mutate
-/// server/session state, so they must require `confirm_write` on a guarded
-/// connection.
-fn sql_first_keyword_is_read(statement: &str) -> bool {
-    let kw = sql_first_keyword(statement);
-    matches!(
-        kw.as_str(),
-        "SELECT" | "SHOW" | "DESC" | "DESCRIBE" | "EXPLAIN" | "WITH" | "USE"
-    )
-}
-
-/// First SQL keyword (uppercased), skipping whitespace and `--` / `/* */`
-/// comments. (Local copy of the driver helper to keep the gate engine-agnostic.)
-fn sql_first_keyword(statement: &str) -> String {
-    let mut s = statement.trim_start();
-    loop {
-        if let Some(rest) = s.strip_prefix("--") {
-            s = rest
-                .split_once('\n')
-                .map(|x| x.1)
-                .unwrap_or("")
-                .trim_start();
-        } else if let Some(rest) = s.strip_prefix("/*") {
-            s = rest
-                .split_once("*/")
-                .map(|x| x.1)
-                .unwrap_or("")
-                .trim_start();
-        } else {
-            break;
-        }
-    }
-    s.chars()
-        .take_while(|c| c.is_ascii_alphabetic())
-        .collect::<String>()
-        .to_ascii_uppercase()
 }
 
 /// Redis: a write unless every command on its own line is a known read-only

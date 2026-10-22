@@ -621,3 +621,97 @@ async fn delete_lag_alert<S: BrokersCtx>(
     ctx.brokers().delete_lag_alert(&alert_id).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
+
+#[cfg(test)]
+mod lag_alert_route_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use futures_util::future::BoxFuture;
+    use otto_state::{BrokerClustersRepo, BrokerOpsRepo};
+    use tower::ServiceExt;
+
+    struct NoSecrets;
+    impl otto_core::secrets::SecretStore for NoSecrets {
+        fn get(&self, _: &str) -> otto_core::Result<Option<String>> {
+            Ok(None)
+        }
+        fn put(&self, _: &str, _: &str) -> otto_core::Result<()> {
+            Ok(())
+        }
+        fn delete(&self, _: &str) -> otto_core::Result<()> {
+            Ok(())
+        }
+    }
+    struct AllowAll;
+    impl RoleChecker for AllowAll {
+        fn check<'a>(
+            &'a self,
+            _u: &'a User,
+            _ws: &'a Id,
+            _m: WorkspaceRole,
+        ) -> BoxFuture<'a, otto_core::Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+    #[derive(Clone)]
+    struct Ctx {
+        brokers: Arc<BrokersService>,
+        roles: Arc<dyn RoleChecker>,
+    }
+    impl BrokersCtx for Ctx {
+        fn brokers(&self) -> &Arc<BrokersService> {
+            &self.brokers
+        }
+        fn roles(&self) -> &Arc<dyn RoleChecker> {
+            &self.roles
+        }
+    }
+
+    /// The wiring the daemon uses (`new(..).with_ops(..)`) serves the lag
+    /// alerts list: 200 with an empty list, not the "ops repo not
+    /// initialised" 500 the unwired service returned.
+    #[tokio::test]
+    async fn lag_alerts_list_is_200_when_wired_like_the_daemon() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = otto_state::open(&dir.path().join("b.db")).await.unwrap();
+        let user = otto_core::new_id();
+        sqlx::query("INSERT INTO users(id,username,password_hash,display_name,is_root,disabled,created_at) VALUES(?,?, 'hash','Fixture',1,0,strftime('%Y-%m-%dT%H:%M:%fZ','now'))")
+            .bind(&user).bind(&user).execute(&pool).await.unwrap();
+        let svc = BrokersService::new(
+            BrokerClustersRepo::new(pool.clone()),
+            Arc::new(NoSecrets),
+            None,
+        )
+        .with_ops(BrokerOpsRepo::new(pool.clone()));
+        let req: UpsertClusterReq = serde_json::from_value(serde_json::json!({
+            "name":"c", "bootstrap_servers":"127.0.0.1:1", "security_protocol":"plaintext"
+        }))
+        .unwrap();
+        let cluster = svc.create_cluster(None, user.clone(), req).await.unwrap();
+        let ctx = Ctx {
+            brokers: Arc::new(svc),
+            roles: Arc::new(AllowAll),
+        };
+        let root = User {
+            id: user,
+            username: "root".into(),
+            display_name: "Root".into(),
+            is_root: true,
+            disabled: false,
+            created_at: chrono::Utc::now(),
+        };
+        let app = api_router::<Ctx>()
+            .layer(Extension(AuthUser(root)))
+            .with_state(ctx);
+        let res = app
+            .oneshot(
+                Request::get(format!("/brokers/clusters/{}/lag-alerts", cluster.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+}

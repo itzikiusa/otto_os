@@ -227,17 +227,6 @@ fn integration_lock(project_id: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> 
         .clone()
 }
 
-/// Ensure the agent has a prepared, unique working directory. Returns its path.
-/// Thin wrapper over [`ensure_cwd_info`] for callers that only need the path.
-pub async fn ensure_cwd(
-    ctx: &SwarmRt,
-    swarm: &Swarm,
-    agent: &SwarmAgent,
-    project: Option<&SwarmProject>,
-) -> Result<String> {
-    Ok(ensure_cwd_info(ctx, swarm, agent, project).await?.path)
-}
-
 /// Ensure the agent's working directory and report how it was provisioned.
 /// In worktree mode the agent's branch (`swarm/<s>/<a>-<p>`) is based on the project's
 /// pinned integration branch so per-task work merges back cleanly.

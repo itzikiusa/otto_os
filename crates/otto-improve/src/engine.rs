@@ -786,6 +786,52 @@ impl ImprovementEngine {
                 "only applied edits can be rolled back".into(),
             ));
         }
+        // Claim the decision BEFORE touching the file (as `approve_edit`
+        // does): of two concurrent rollbacks (UI double click, UI + the MCP
+        // tool) one wins and the other gets "no longer applied" — it never
+        // reads the restored file and paints a clean rollback `Conflict`.
+        let claimed = self
+            .decide(
+                edit_id,
+                ImprovementEditStatus::Applied,
+                ImprovementEditStatus::RolledBack,
+                actor,
+            )
+            .await?;
+        match self.restore_for_rollback(&edit).await {
+            Ok(true) => Ok(claimed),
+            // The file changed since we wrote it: nothing was clobbered.
+            // Only our own claim is turned into the conflict.
+            Ok(false) => self
+                .improvements
+                .set_edit_status_if(
+                    edit_id,
+                    ImprovementEditStatus::RolledBack,
+                    ImprovementEditStatus::Conflict,
+                    Some(actor),
+                )
+                .await?
+                .ok_or_else(|| Error::Invalid("edit is no longer rolled back".into())),
+            // A failed write gives the edit back as applied.
+            Err(e) => {
+                let _ = self
+                    .improvements
+                    .set_edit_status_if(
+                        edit_id,
+                        ImprovementEditStatus::RolledBack,
+                        ImprovementEditStatus::Applied,
+                        None,
+                    )
+                    .await;
+                Err(e)
+            }
+        }
+    }
+
+    /// The file half of [`Self::rollback_edit`], run under its claim.
+    /// `Ok(false)` = conflict (the file is not what the edit wrote, or a
+    /// removed file was recreated) and nothing was written.
+    async fn restore_for_rollback(&self, edit: &ImprovementEdit) -> Result<bool> {
         let current = read_edit_target(Path::new(&edit.target_path)).await?;
         // If the file changed since we wrote it, don't clobber — flag conflict.
         let expected = if edit.kind == ImprovementEditKind::Remove {
@@ -794,10 +840,7 @@ impl ImprovementEngine {
             Some(edit.after_content.as_str())
         };
         if current.as_deref() != expected {
-            return self
-                .improvements
-                .set_edit_status(edit_id, ImprovementEditStatus::Conflict, Some(actor))
-                .await;
+            return Ok(false);
         }
         match &edit.before_content {
             Some(before) if edit.kind == ImprovementEditKind::Remove => {
@@ -813,12 +856,7 @@ impl ImprovementEngine {
                     Ok(mut file) => file.write_all(before.as_bytes()).await.map_err(|e| {
                         Error::Internal(format!("restore {}: {e}", edit.target_path))
                     })?,
-                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                        return self
-                            .improvements
-                            .set_edit_status(edit_id, ImprovementEditStatus::Conflict, Some(actor))
-                            .await
-                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
                     Err(e) => {
                         return Err(Error::Internal(format!(
                             "restore {}: {e}",
@@ -836,13 +874,7 @@ impl ImprovementEngine {
                 remove_edit_target(Path::new(&edit.target_path)).await?;
             }
         }
-        self.decide(
-            edit_id,
-            ImprovementEditStatus::Applied,
-            ImprovementEditStatus::RolledBack,
-            actor,
-        )
-        .await
+        Ok(true)
     }
 
     // ---- helpers ----
@@ -2022,6 +2054,44 @@ mod tests {
             tokio::fs::read_to_string(path).await.unwrap(),
             "new user work"
         );
+    }
+
+    /// Two rollbacks of one applied edit (a double click, or the UI plus the
+    /// MCP tool): one ends `RolledBack`, the other is refused — the loser
+    /// never re-reads the restored file and overwrites the row as `Conflict`.
+    #[tokio::test]
+    async fn concurrent_rollbacks_have_one_winner_and_no_conflict() {
+        for _ in 0..5 {
+            let (engine, ws, _, dir) = harness().await;
+            let path = dir.path().join("MEMORY.md");
+            let edit = removal_edit(
+                &engine,
+                &ws,
+                &path,
+                Some("original"),
+                ImprovementEditStatus::Applied,
+            )
+            .await;
+            let (a, b) = tokio::join!(
+                engine.rollback_edit(&edit.id, "agent"),
+                engine.rollback_edit(&edit.id, "person")
+            );
+            assert!(
+                a.is_ok() != b.is_ok(),
+                "exactly one rollback wins: {a:?} / {b:?}"
+            );
+            let loser = a.err().or(b.err()).unwrap();
+            // Refused either at the status read or at the claim (CAS) — never
+            // by turning the winner's clean rollback into a conflict.
+            assert!(
+                matches!(&loser, Error::Invalid(m)
+                    if m.contains("no longer applied") || m.contains("only applied edits")),
+                "{loser:?}"
+            );
+            let status = engine.improvements.get_edit(&edit.id).await.unwrap().status;
+            assert_eq!(status, ImprovementEditStatus::RolledBack);
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "original");
+        }
     }
 
     /// Two decisions on one edit: exactly one wins, and the edit's status

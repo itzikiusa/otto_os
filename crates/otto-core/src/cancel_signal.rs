@@ -10,6 +10,12 @@
 //! [`RunCancels`], [`until_cancelled`]). Lives in `otto-core` so leaf engine
 //! crates (`otto-assistant`, `otto-automation`) can use it without depending
 //! on `otto-server`; the daemon's `crate::cancel_signal` is a re-export of it.
+//!
+//! [`RunCancels`] is the WAKEABLE twin of [`crate::cancel::CancelRegistry`]:
+//! pick it when a run sleeps or awaits and Cancel must wake it immediately.
+//! A run whose loop already polls an `AtomicBool` between steps uses the
+//! plain registry ([`crate::cancel::CancelRegistryExt`]); a [`CancelSignal`]
+//! still exposes its flag for such pollers (`run_with_recovery`).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};

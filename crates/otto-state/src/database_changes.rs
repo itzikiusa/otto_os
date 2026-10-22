@@ -125,6 +125,33 @@ async fn event(
         .bind(otto_core::new_id()).bind(id).bind(revision).bind(action).bind(actor).bind(real).bind(encode(&data)?).bind(now()).execute(&mut **tx).await.map_err(db)?;
     Ok(())
 }
+/// Finalize a change's status from its attempts inside the caller's
+/// transaction (shared by [`DatabaseChangesRepo::finish`] and `reconcile`).
+///
+/// An attempt still `running` here never had its outcome recorded (the
+/// progress write failed after the adapter ran), so it may have committed SQL
+/// on the target: it becomes `outcome_unknown`, never `failed`, and the
+/// classifier treats `running` the same way.
+async fn finish_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    id: &str,
+    actor: &str,
+    real: &str,
+) -> Result<()> {
+    sqlx::query("UPDATE database_change_attempts SET state='cancelled',finished_at=? WHERE change_id=? AND state='queued'").bind(now()).bind(id).execute(&mut **tx).await.map_err(db)?;
+    sqlx::query("UPDATE database_change_attempts SET state='outcome_unknown',summary='Execution outcome was not recorded; inspect the target and reconcile before retrying.',finished_at=? WHERE change_id=? AND state='running'").bind(now()).bind(id).execute(&mut **tx).await.map_err(db)?;
+    let status:String=sqlx::query_scalar("SELECT CASE WHEN SUM(state IN ('outcome_unknown','running'))>0 THEN 'outcome_unknown' WHEN SUM(state='succeeded')=COUNT(*) THEN 'succeeded' WHEN SUM(state IN ('succeeded','partially_applied'))>0 THEN 'partially_applied' WHEN (SELECT cancellation_requested FROM database_changes WHERE id=change_id)=1 THEN 'cancelled' ELSE 'failed' END FROM database_change_attempts WHERE change_id=?").bind(id).fetch_one(&mut **tx).await.map_err(db)?;
+    let n=sqlx::query("UPDATE database_changes SET status=?,updated_at=? WHERE id=? AND status IN ('running','outcome_unknown')").bind(&status).bind(now()).bind(id).execute(&mut **tx).await.map_err(db)?.rows_affected();
+    if n != 1 {
+        return Err(conflict());
+    }
+    let revision: i64 = sqlx::query_scalar("SELECT revision FROM database_changes WHERE id=?")
+        .bind(id)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(db)?;
+    event(tx, id, revision, &status, actor, real, json!({})).await
+}
 /// Includes executor and required approval policy, alongside exact normalized targets.
 pub fn artifact_hash(
     change: &DatabaseChange,
@@ -373,18 +400,7 @@ impl DatabaseChangesRepo {
     }
     pub async fn finish(&self, id: &str, actor: &str, real: &str) -> Result<DatabaseChange> {
         let mut tx = self.pool.begin().await.map_err(db)?;
-        sqlx::query("UPDATE database_change_attempts SET state='cancelled',finished_at=? WHERE change_id=? AND state='queued'").bind(now()).bind(id).execute(&mut *tx).await.map_err(db)?;
-        let status:String=sqlx::query_scalar("SELECT CASE WHEN SUM(state='outcome_unknown')>0 THEN 'outcome_unknown' WHEN SUM(state='succeeded')=COUNT(*) THEN 'succeeded' WHEN SUM(state IN ('succeeded','partially_applied'))>0 THEN 'partially_applied' WHEN (SELECT cancellation_requested FROM database_changes WHERE id=change_id)=1 THEN 'cancelled' ELSE 'failed' END FROM database_change_attempts WHERE change_id=?").bind(id).fetch_one(&mut *tx).await.map_err(db)?;
-        let n=sqlx::query("UPDATE database_changes SET status=?,updated_at=? WHERE id=? AND status IN ('running','outcome_unknown')").bind(&status).bind(now()).bind(id).execute(&mut *tx).await.map_err(db)?.rows_affected();
-        if n != 1 {
-            return Err(conflict());
-        }
-        let revision: i64 = sqlx::query_scalar("SELECT revision FROM database_changes WHERE id=?")
-            .bind(id)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(db)?;
-        event(&mut tx, id, revision, &status, actor, real, json!({})).await?;
+        finish_in(&mut tx, id, actor, real).await?;
         tx.commit().await.map_err(db)?;
         self.get(id).await
     }
@@ -449,16 +465,23 @@ impl DatabaseChangesRepo {
             json!({"attempt_id":attempt,"outcome":outcome,"evidence":note}),
         )
         .await?;
+        // The attempt's new state and the change's classification commit
+        // together: a failed finish can no longer strand the change in
+        // `outcome_unknown` with no unknown attempt left to reconcile.
+        finish_in(&mut tx, &old.id, actor, real).await?;
         tx.commit().await.map_err(db)?;
-        self.finish(&old.id, actor, real).await
+        self.get(&old.id).await
     }
     /// Call once during daemon boot before accepting requests. Never resume SQL.
+    /// Also re-classifies any `outcome_unknown` change that has no unknown
+    /// attempt left (a reconcile whose classification never landed), not only
+    /// cancelled ones, so nothing stays unreconcilable forever.
     pub async fn recover_interrupted(&self) -> Result<u64> {
         let mut tx = self.pool.begin().await.map_err(db)?;
-        let interrupted=sqlx::query("SELECT id,revision FROM database_changes WHERE status='running' OR (status='outcome_unknown' AND cancellation_requested=1 AND NOT EXISTS(SELECT 1 FROM database_change_attempts a WHERE a.change_id=database_changes.id AND a.state='outcome_unknown'))").fetch_all(&mut *tx).await.map_err(db)?;
+        let interrupted=sqlx::query("SELECT id,revision FROM database_changes WHERE status='running' OR (status='outcome_unknown' AND NOT EXISTS(SELECT 1 FROM database_change_attempts a WHERE a.change_id=database_changes.id AND a.state IN ('outcome_unknown','running')))").fetch_all(&mut *tx).await.map_err(db)?;
         sqlx::query("UPDATE database_change_attempts SET state='outcome_unknown',summary='Daemon restarted during execution; inspect target before reconciliation' WHERE state='running'").execute(&mut *tx).await.map_err(db)?;
         sqlx::query("UPDATE database_change_attempts SET state='cancelled',finished_at=? WHERE state='queued'").bind(now()).execute(&mut *tx).await.map_err(db)?;
-        let n=sqlx::query("UPDATE database_changes SET status=CASE WHEN EXISTS(SELECT 1 FROM database_change_attempts a WHERE a.change_id=database_changes.id AND a.state='outcome_unknown') THEN 'outcome_unknown' WHEN EXISTS(SELECT 1 FROM database_change_attempts a WHERE a.change_id=database_changes.id AND a.state='partially_applied') THEN 'partially_applied' WHEN EXISTS(SELECT 1 FROM database_change_attempts a WHERE a.change_id=database_changes.id AND a.state='succeeded') AND EXISTS(SELECT 1 FROM database_change_attempts a WHERE a.change_id=database_changes.id AND a.state<>'succeeded') THEN 'partially_applied' WHEN EXISTS(SELECT 1 FROM database_change_attempts a WHERE a.change_id=database_changes.id AND a.state='succeeded') THEN 'succeeded' WHEN cancellation_requested=1 THEN 'cancelled' ELSE 'failed' END,updated_at=? WHERE status='running' OR (status='outcome_unknown' AND cancellation_requested=1 AND NOT EXISTS(SELECT 1 FROM database_change_attempts a WHERE a.change_id=database_changes.id AND a.state='outcome_unknown'))").bind(now()).execute(&mut *tx).await.map_err(db)?.rows_affected();
+        let n=sqlx::query("UPDATE database_changes SET status=CASE WHEN EXISTS(SELECT 1 FROM database_change_attempts a WHERE a.change_id=database_changes.id AND a.state='outcome_unknown') THEN 'outcome_unknown' WHEN EXISTS(SELECT 1 FROM database_change_attempts a WHERE a.change_id=database_changes.id AND a.state='partially_applied') THEN 'partially_applied' WHEN EXISTS(SELECT 1 FROM database_change_attempts a WHERE a.change_id=database_changes.id AND a.state='succeeded') AND EXISTS(SELECT 1 FROM database_change_attempts a WHERE a.change_id=database_changes.id AND a.state<>'succeeded') THEN 'partially_applied' WHEN EXISTS(SELECT 1 FROM database_change_attempts a WHERE a.change_id=database_changes.id AND a.state='succeeded') THEN 'succeeded' WHEN cancellation_requested=1 THEN 'cancelled' ELSE 'failed' END,updated_at=? WHERE status='running' OR (status='outcome_unknown' AND NOT EXISTS(SELECT 1 FROM database_change_attempts a WHERE a.change_id=database_changes.id AND a.state IN ('outcome_unknown','running')))").bind(now()).execute(&mut *tx).await.map_err(db)?.rows_affected();
         for change in interrupted {
             let id: String = change.get("id");
             let revision: i64 = change.get("revision");
@@ -474,3 +497,95 @@ impl DatabaseChangesRepo {
 #[cfg(test)]
 #[path = "database_changes_tests.rs"]
 mod tests;
+#[cfg(test)]
+mod finish_integrity_tests {
+    //! data-integrity-2-04: an unrecorded attempt outcome is unknown, never
+    //! `failed`, and a reconcile can't strand its change.
+    use super::*;
+    async fn claimed() -> (
+        tempfile::TempDir,
+        DatabaseChangesRepo,
+        DatabaseChange,
+        Vec<ChangeAttempt>,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = crate::open(&dir.path().join("t.db")).await.unwrap();
+        let repo = DatabaseChangesRepo::new(pool);
+        let input = ChangeInput {
+            title: "Add column".into(),
+            description: String::new(),
+            script: "ALTER TABLE t ADD x int".into(),
+            targets: vec![ChangeTarget {
+                connection_id: "conn".into(),
+                node: "db:shop".into(),
+            }],
+        };
+        let snaps = vec![TargetSnapshot {
+            target: input.targets[0].clone(),
+            environment: "prod".into(),
+            policy_revision: 2,
+            connection_fingerprint: "fp".into(),
+        }];
+        let c = repo.create(&input, "author", "author").await.unwrap();
+        let c = repo
+            .validate(&c, "executor", &snaps, "author", "author")
+            .await
+            .unwrap();
+        let c = repo
+            .transition(&c, "awaiting_review", "author", "author", "")
+            .await
+            .unwrap();
+        let c = repo
+            .transition(&c, "approved", "reviewer", "reviewer", "")
+            .await
+            .unwrap();
+        let a = repo
+            .claim(&c, &snaps, "executor", "executor")
+            .await
+            .unwrap();
+        (dir, repo, c, a)
+    }
+    #[tokio::test]
+    async fn finish_with_an_unrecorded_running_attempt_is_unknown_not_failed() {
+        let (_dir, repo, c, a) = claimed().await;
+        repo.start_attempt(&a[0].id).await.unwrap();
+        // The progress write "failed": the attempt is still `running`.
+        let done = repo.finish(&c.id, "executor", "executor").await.unwrap();
+        assert_eq!(done.status, "outcome_unknown");
+        assert_eq!(
+            repo.attempts(&c.id).await.unwrap()[0].state,
+            "outcome_unknown"
+        );
+        // ...and it stays reconcilable.
+        let r = repo
+            .reconcile(
+                &done,
+                &a[0].id,
+                "succeeded",
+                "Inspected schema: column present",
+                "executor",
+                "executor",
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status, "succeeded");
+    }
+    #[tokio::test]
+    async fn recovery_reclassifies_unknown_change_with_no_unknown_attempt() {
+        let (_dir, repo, c, a) = claimed().await;
+        repo.start_attempt(&a[0].id).await.unwrap();
+        repo.finish_attempt(&a[0].id, false).await.unwrap();
+        repo.finish(&c.id, "executor", "executor").await.unwrap();
+        // Simulate the old two-transaction reconcile whose finish never ran:
+        // the attempt is reconciled but the change is still unknown.
+        sqlx::query("UPDATE database_change_attempts SET state='failed' WHERE id=?")
+            .bind(&a[0].id)
+            .execute(&repo.pool)
+            .await
+            .unwrap();
+        assert_eq!(repo.get(&c.id).await.unwrap().status, "outcome_unknown");
+        assert_eq!(repo.recover_interrupted().await.unwrap(), 1);
+        assert_eq!(repo.get(&c.id).await.unwrap().status, "failed");
+        assert_eq!(repo.recover_interrupted().await.unwrap(), 0);
+    }
+}

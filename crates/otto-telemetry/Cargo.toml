@@ -4,16 +4,14 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+# The instrumentation LEAF: span types, `context::{scope, measure,
+# measure_result}` and the `SpanSink` trait. Library crates (otto-git,
+# otto-dbviewer, otto-agent-run) depend on this only; the ClickHouse-backed
+# service lives in `otto-telemetry-collector`, which only the daemon
+# composition root (otto-server, ottod) links.
 [dependencies]
-otto-usage.workspace = true
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-chrono.workspace = true
 anyhow.workspace = true
-reqwest.workspace = true
-sha2.workspace = true
-hex.workspace = true
 uuid.workspace = true
-sysinfo = "0.39.6"
-tempfile.workspace = true

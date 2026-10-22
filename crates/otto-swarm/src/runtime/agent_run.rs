@@ -357,27 +357,15 @@ pub async fn run_swarm_agent(
         .await
             == Some(true)
         {
-            if !crate::runtime::engine::send_run_input(
+            if !crate::runtime::engine::submit_run_prompt(
                 ctx,
                 swarm_id,
                 &run_id,
                 &sid,
                 &ctx.bracketed_paste(prompt),
+                true,
             )
             .await
-            {
-                last_reason = Some(FailReason::Stopped);
-                break;
-            }
-            tokio::time::sleep(ctx.pty_timings().paste_to_enter).await;
-            let before = ctx.manager().live_handle(&sid).map(|h| h.last_output_at());
-            if !crate::runtime::engine::send_run_input(ctx, swarm_id, &run_id, &sid, b"\r").await {
-                last_reason = Some(FailReason::Stopped);
-                break;
-            }
-            if !ctx.dispatched(&sid, before).await
-                && !crate::runtime::engine::send_run_input(ctx, swarm_id, &run_id, &sid, b"\r")
-                    .await
             {
                 last_reason = Some(FailReason::Stopped);
                 break;
@@ -405,20 +393,16 @@ pub async fn run_swarm_agent(
             tracing::warn!(
                 "swarm_agent_run: prompt didn't land in session {sid} — re-injecting once"
             );
-            if !crate::runtime::engine::send_run_input(
+            if !crate::runtime::engine::submit_run_prompt(
                 ctx,
                 swarm_id,
                 &run_id,
                 &sid,
                 &ctx.bracketed_paste(prompt),
+                false,
             )
             .await
             {
-                last_reason = Some(FailReason::Stopped);
-                break;
-            }
-            tokio::time::sleep(ctx.pty_timings().paste_to_enter).await;
-            if !crate::runtime::engine::send_run_input(ctx, swarm_id, &run_id, &sid, b"\r").await {
                 last_reason = Some(FailReason::Stopped);
                 break;
             }

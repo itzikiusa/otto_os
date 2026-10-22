@@ -508,10 +508,6 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         // the remote) = Edit. Distinct from the `/db/` (Database) prefix above.
         return Require(Connections, if get { View } else { Edit });
     }
-    if p == "/connections" {
-        // Workspace-less (global) connection create — management tier.
-        return Require(Connections, Admin);
-    }
     if p == "/connections/{id}" || p == "/connections/{id}/duplicate" {
         // PATCH / DELETE a connection profile — management tier (manage-all).
         return Require(Connections, Admin);
@@ -2359,10 +2355,8 @@ mod tests {
 
     #[test]
     fn connection_mgmt_is_admin() {
-        assert_eq!(
-            pol(Method::POST, "/api/v1/connections"),
-            Require(Connections, Admin)
-        );
+        // No workspace-less `/connections` route exists; it falls to Deny.
+        assert_eq!(pol(Method::POST, "/api/v1/connections"), Deny);
         assert_eq!(
             pol(Method::DELETE, "/api/v1/connections/{id}"),
             Require(Connections, Admin)

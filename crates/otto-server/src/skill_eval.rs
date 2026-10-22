@@ -2670,6 +2670,33 @@ fn pick_iteration<'a>(
     })
 }
 
+/// Copy an existing library skill's `SKILL.md` to
+/// `<library>/skills-backup/<name>-<secs>-<id>/SKILL.md`. `Ok(None)` when the
+/// skill does not exist yet (nothing to lose).
+fn backup_library_skill(
+    library: &otto_context::Library,
+    name: &str,
+) -> std::io::Result<Option<PathBuf>> {
+    let Some(src) = library.skill_path(name) else {
+        return Ok(None);
+    };
+    if !src.is_file() {
+        return Ok(None);
+    }
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let dir = library
+        .root
+        .join("skills-backup")
+        .join(format!("{name}-{secs}-{}", otto_core::new_id()));
+    std::fs::create_dir_all(&dir)?;
+    let dest = dir.join("SKILL.md");
+    std::fs::copy(&src, &dest)?;
+    Ok(Some(dest))
+}
+
 async fn promote_skill(
     AxPath(eval_id): AxPath<Id>,
     State(ctx): State<ServerCtx>,
@@ -2745,6 +2772,11 @@ async fn promote_skill(
         .await;
     }
 
+    // Promotion overwrites the only copy of an existing library skill: keep a
+    // backup first (same `skills-backup/<name>-<secs>-<id>/` layout as a
+    // bundled re-install with backup), then write it atomically.
+    backup_library_skill(&ctx.context_library, name)
+        .map_err(|e| ApiError(Error::Internal(format!("back up skill: {e}"))))?;
     ctx.context_library
         .put_skill(name, &body)
         .map_err(|e| ApiError(Error::Internal(format!("write skill: {e}"))))?;
@@ -3329,6 +3361,19 @@ pub fn routes() -> Router<ServerCtx> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn promotion_backs_up_an_existing_library_skill_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = otto_context::Library::new(dir.path());
+        assert!(super::backup_library_skill(&lib, "fresh")
+            .unwrap()
+            .is_none());
+        lib.put_skill("kept", "original body").unwrap();
+        let bak = super::backup_library_skill(&lib, "kept").unwrap().unwrap();
+        assert!(bak.starts_with(dir.path().join("skills-backup")));
+        assert_eq!(std::fs::read_to_string(bak).unwrap(), "original body");
+    }
+
     #[tokio::test]
     async fn cleanup_preserves_score_only_user_paths_with_a_similar_temp_prefix() {
         let pool = otto_state::db::test_pool().await;

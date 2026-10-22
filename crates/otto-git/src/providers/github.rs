@@ -285,21 +285,54 @@ impl Github {
             return CiStatus::none();
         }
         let (runs, statuses) = tokio::join!(
-            self.http
-                .get_cached_json(self.req(reqwest::Method::GET, &check_runs_path(r, sha))),
-            self.http
-                .get_cached_json(self.req(reqwest::Method::GET, &statuses_path(r, sha))),
+            self.check_run_rows(r, sha, true),
+            self.status_rows(r, sha, true),
         );
         if runs.is_err() && statuses.is_err() {
             return CiStatus::none();
         }
-        let mut rows = runs.map(|v| checks_from_check_runs(&v)).unwrap_or_default();
-        rows.extend(
-            statuses
-                .map(|v| checks_from_statuses(&v))
-                .unwrap_or_default(),
-        );
+        let mut rows = runs.unwrap_or_default();
+        rows.extend(statuses.unwrap_or_default());
         ci_from_checks(&rows)
+    }
+}
+
+impl Github {
+    /// Every check-run on `sha`, following `Link: rel="next"` (a matrix build
+    /// easily passes 100 runs, and a failing run on page 2 used to read as
+    /// green). `cached`: see [`Http::json_pages`](super::client::Http::json_pages).
+    async fn check_run_rows(&self, r: &RemoteRef, sha: &str, cached: bool) -> Result<Vec<PrCheck>> {
+        let pages = self
+            .http
+            .json_pages(
+                self.req(reqwest::Method::GET, &check_runs_path(r, sha)),
+                self.http.client(),
+                self.auth_header(),
+                cached,
+            )
+            .await?;
+        Ok(checks_from_check_run_pages(&pages))
+    }
+
+    /// The COMBINED commit status (`GET /commits/{sha}/status`): one row per
+    /// context, already reduced to its latest state. The raw statuses list
+    /// repeats every update newest-first, so a context whose latest row sat
+    /// past the first 100 vanished from the rollup.
+    async fn status_rows(&self, r: &RemoteRef, sha: &str, cached: bool) -> Result<Vec<PrCheck>> {
+        let pages = self
+            .http
+            .json_pages(
+                self.req(reqwest::Method::GET, &status_path(r, sha)),
+                self.http.client(),
+                self.auth_header(),
+                cached,
+            )
+            .await?;
+        let statuses: Vec<Value> = pages
+            .iter()
+            .flat_map(|p| varr(p, &["statuses"]).iter().cloned())
+            .collect();
+        Ok(checks_from_statuses(&Value::Array(statuses)))
     }
 }
 
@@ -310,11 +343,38 @@ fn check_runs_path(r: &RemoteRef, sha: &str) -> String {
     )
 }
 
-fn statuses_path(r: &RemoteRef, sha: &str) -> String {
+fn status_path(r: &RemoteRef, sha: &str) -> String {
     format!(
-        "/repos/{}/{}/commits/{sha}/statuses?per_page=100",
+        "/repos/{}/{}/commits/{sha}/status?per_page=100",
         r.owner, r.repo
     )
+}
+
+/// Check-run pages → rows ([`checks_from_check_runs`] per page). When the
+/// first page's `total_count` promises more runs than the pages held (the
+/// 20-page cap, or a `Link` the API left off), one `pending` row stands in for
+/// the unread ones: a rollup must never call a partly-read list green.
+pub(crate) fn checks_from_check_run_pages(pages: &[Value]) -> Vec<PrCheck> {
+    let mut rows: Vec<PrCheck> = pages.iter().flat_map(checks_from_check_runs).collect();
+    let total = pages
+        .first()
+        .and_then(|p| p.get("total_count"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let read = pages
+        .iter()
+        .map(|p| varr(p, &["check_runs"]).len() as u64)
+        .sum::<u64>();
+    if total > read {
+        rows.push(PrCheck {
+            name: format!("{} more checks (not read)", total - read),
+            state: "pending".into(),
+            url: None,
+            started_at: None,
+            completed_at: None,
+        });
+    }
+    rows
 }
 
 /// Fold per-check rows ([`checks_from_check_runs`] + [`checks_from_statuses`])
@@ -351,8 +411,8 @@ use super::PrCheck;
 /// `check_runs[]` → one [`PrCheck`] per run. The state mapping mirrors
 /// [`Github::fetch_ci_status`]'s aggregate walk, but keeps each row's own
 /// verdict instead of folding it: `success`/`neutral`/`skipped` survive
-/// verbatim, the four failing conclusions collapse to `failure`, and anything
-/// not yet concluded is `pending`.
+/// verbatim, the failing conclusions (and a terminal `stale`) collapse to
+/// `failure`, and anything not yet concluded is `pending`.
 pub(crate) fn checks_from_check_runs(v: &Value) -> Vec<PrCheck> {
     varr(v, &["check_runs"])
         .iter()
@@ -368,6 +428,10 @@ pub(crate) fn checks_from_check_runs(v: &Value) -> Vec<PrCheck> {
                 | (_, "timed_out")
                 | (_, "action_required")
                 | (_, "startup_failure") => "failure",
+                // GitHub marks a run left incomplete for 14 days `stale`. It
+                // is terminal: as `pending` it held the rollup open forever.
+                // It never passed, so it counts as not-passed.
+                ("completed", "stale") => "failure",
                 _ => "pending",
             };
             PrCheck {
@@ -1140,7 +1204,7 @@ impl super::GitProvider for Github {
         self.fetch_ci_status(r, number).await
     }
 
-    /// Check-runs for the PR head sha plus the legacy Statuses API rows — the
+    /// Check-runs for the PR head sha plus the combined commit-status rows — the
     /// same pair [`Github::fetch_ci_status_for_sha`] aggregates, kept per row.
     /// A statuses read that fails (a fine-grained token without "Commit
     /// statuses: read") doesn't hide the check-runs it can see.
@@ -1150,14 +1214,12 @@ impl super::GitProvider for Github {
             return Ok(Vec::new());
         }
         let (runs, statuses) = tokio::join!(
-            self.http
-                .json(self.req(reqwest::Method::GET, &check_runs_path(r, &sha))),
-            self.http
-                .json(self.req(reqwest::Method::GET, &statuses_path(r, &sha))),
+            self.check_run_rows(r, &sha, false),
+            self.status_rows(r, &sha, false),
         );
-        let mut rows = checks_from_check_runs(&runs?);
+        let mut rows = runs?;
         match statuses {
-            Ok(v) => rows.extend(checks_from_statuses(&v)),
+            Ok(v) => rows.extend(v),
             Err(e) if rows.is_empty() => return Err(e),
             Err(_) => {}
         }

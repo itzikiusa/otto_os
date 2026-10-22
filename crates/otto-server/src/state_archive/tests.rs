@@ -3,31 +3,24 @@ use super::*;
 fn row(value: Value) -> ArchiveRow {
     serde_json::from_value(value).unwrap()
 }
+/// The production export (`build_snapshot_parts`), never a copy of its loop:
+/// the settings secret filter and every exclusion run exactly as shipped.
+async fn snapshot_with(pool: &otto_state::DbPool, portable: bool) -> StateArchive {
+    let data_dir = tempfile::tempdir().unwrap();
+    build_snapshot_parts(
+        pool,
+        data_dir.path(),
+        "test",
+        SnapshotOptions {
+            portable,
+            include_files: false,
+        },
+    )
+    .await
+    .unwrap()
+}
 async fn snapshot(pool: &otto_state::DbPool) -> StateArchive {
-    let mut conn = pool.acquire().await.unwrap();
-    let tables = schema::schema(&mut conn).await.unwrap();
-    let mut records = BTreeMap::new();
-    let mut reconnect = BTreeSet::new();
-    for (table, spec) in &tables {
-        if !schema::excluded_table(table, false) {
-            let mut rows = schema::read_rows(&mut conn, table).await.unwrap();
-            for row in &mut rows {
-                schema::sanitize(table, spec, row, &mut reconnect);
-            }
-            records.insert(table.clone(), rows);
-        }
-    }
-    StateArchive {
-        archive_format: 2,
-        schema_version: version(&mut conn).await.unwrap(),
-        daemon_version: "test".into(),
-        snapshot_at: "test".into(),
-        records,
-        roots: vec![],
-        files: vec![],
-        excluded: vec![],
-        reconnect: reconnect.into_iter().collect(),
-    }
+    snapshot_with(pool, false).await
 }
 async fn fixture(pool: &otto_state::DbPool) {
     for statement in [
@@ -430,5 +423,40 @@ fn imported_terminal_history_keeps_its_status() {
         let mut record = row(json!({"id":"active","status":status}));
         schema::inert(table, &mut record);
         assert_eq!(record["status"], "paused");
+    }
+}
+
+#[tokio::test]
+async fn export_drops_secret_settings_hashes_and_tokens_portable_or_not() {
+    let pool = otto_state::db::test_pool().await;
+    for statement in [
+        "INSERT INTO settings VALUES('slack_bot_token','\"xoxb-plain\"')",
+        "INSERT INTO settings VALUES('openai_api_key','\"sk-plain\"')",
+        "INSERT INTO settings VALUES('mailer','{\"smtp\":{\"password\":\"smtp-plain\"}}')",
+        "INSERT INTO settings VALUES('default_provider','\"codex-harmless\"')",
+        "INSERT INTO users(id,username,password_hash,is_root,created_at) VALUES('u','name','hash-plain',1,'now')",
+        "INSERT INTO auth_sessions(id,user_id,token_hash,created_at,expires_at,last_seen_at) VALUES('login','u','session-hash-plain','now','later','now')",
+        "INSERT INTO auth_sessions(id,user_id,token_hash,created_at,expires_at,last_seen_at,kind,label,token_prefix) VALUES('api','u','api-hash-plain','now','later','now','api','ci','otto_plain')",
+    ] {
+        sqlx::query(statement).execute(&pool).await.unwrap();
+    }
+    for portable in [false, true] {
+        let archive = snapshot_with(&pool, portable).await;
+        let text = serde_json::to_string(&archive).unwrap();
+        for raw in [
+            "xoxb-plain",
+            "sk-plain",
+            "smtp-plain",
+            "hash-plain",
+            "session-hash-plain",
+            "api-hash-plain",
+        ] {
+            assert!(!text.contains(raw), "portable={portable}: {raw} leaked");
+        }
+        assert!(
+            text.contains("codex-harmless"),
+            "portable={portable}: a harmless setting must survive"
+        );
+        assert!(!archive.records.contains_key("auth_sessions"));
     }
 }

@@ -221,7 +221,7 @@ fn commit_graph_enabled() -> bool {
 /// program-valued keys (`core.sshCommand`, `credential.helper`, filters) are
 /// legitimately user-set, so the Seatbelt profile keeps agents from writing
 /// `.git/config` instead.
-pub(crate) const HARDENED_GIT_CONFIG: &str = "'core.fsmonitor=false' 'core.hooksPath=/dev/null'";
+pub(crate) use otto_git_cmd::HARDENED_GIT_CONFIG;
 /// [`HARDENED_GIT_CONFIG`] for a [`HOOK_VERBS`] spawn: the repo's hooks run.
 pub(crate) const HOOKED_GIT_CONFIG: &str = "'core.fsmonitor=false'";
 
@@ -251,46 +251,29 @@ pub(crate) fn hardened_config_for(verb: &str) -> &'static str {
     }
 }
 
-/// A `git` command for code OUTSIDE [`LocalGit`] (rev-parse probes, goal-loop
-/// evidence, skill-eval scratch repos, plugin clones…) with the same
-/// hardening every daemon git gets: repo config can't pick a program for it
-/// to run ([`HARDENED_GIT_CONFIG`]: fsmonitor off, hooks off), no pager, no
-/// credential prompt, stdin closed, killed when dropped. Prefer `LocalGit`
-/// (output cap + timeouts) where it fits; spawning a bare
-/// `Command::new("git")` outside otto-git is refused by a guard test
-/// (`otto-server` `no_bare_git_spawns`).
+/// The hardened `git` builders live in the leaf `otto-git-cmd` crate (so a
+/// crate that only RUNS git needs no otto-git dependency); otto-git re-exports
+/// them, adding [`test_hermetic`] so this crate's own fixture tests stay
+/// independent of the developer's git config.
 pub fn hardened_command() -> Command {
-    let mut cmd = Command::new("git");
-    harden(cmd.as_std_mut());
-    cmd.kill_on_drop(true);
+    let mut cmd = otto_git_cmd::hardened_command();
+    test_hermetic(cmd.as_std_mut());
     cmd
 }
 
 /// [`hardened_command`] for synchronous callers.
 pub fn hardened_std_command() -> std::process::Command {
-    let mut cmd = std::process::Command::new("git");
-    harden(&mut cmd);
+    let mut cmd = otto_git_cmd::hardened_std_command();
+    test_hermetic(&mut cmd);
     cmd
 }
 
-fn harden(cmd: &mut std::process::Command) {
-    cmd.env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_CONFIG_PARAMETERS", HARDENED_GIT_CONFIG)
-        .env("GIT_PAGER", "cat")
-        .stdin(Stdio::null());
-    test_hermetic(cmd);
-}
-
 /// This crate's unit tests run git against throwaway fixtures: the developer's
-/// own `~/.gitconfig` / system config (a `url.*.insteadOf` rewrite, a signing
-/// key, a default branch) must not leak in — CI has none, so a laptop with,
-/// say, a Bitbucket `insteadOf` failed tests CI passes. Production spawns keep
-/// the user's config.
+/// own `~/.gitconfig` / system config must not leak in (see
+/// [`otto_git_cmd::test_hermetic`]). Production spawns keep the user's config.
 #[cfg(test)]
 fn test_hermetic(cmd: &mut std::process::Command) {
-    let null = if cfg!(windows) { "NUL" } else { "/dev/null" };
-    cmd.env("GIT_CONFIG_GLOBAL", null)
-        .env("GIT_CONFIG_NOSYSTEM", "1");
+    otto_git_cmd::test_hermetic(cmd);
 }
 
 #[cfg(not(test))]

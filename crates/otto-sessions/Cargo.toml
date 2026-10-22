@@ -8,7 +8,8 @@ license.workspace = true
 shell-words.workspace = true
 otto-core = { workspace = true }
 otto-state = { workspace = true }
-otto-git = { workspace = true }
+# Only the hardened `git` builder (rev-parse probe), not the otto-git stack.
+otto-git-cmd = { workspace = true }
 # Conversation view: `UnavailableReason` for transcript resolution (design §4.2).
 otto-transcript = { workspace = true }
 otto-pty = { workspace = true }

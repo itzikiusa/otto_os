@@ -593,10 +593,6 @@ fn parse_turn(raw: &str) -> (String, Option<String>, Option<String>) {
     (reply, updated, summary)
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 /// Stop exactly the caller's turn and wait for managed-session cleanup.
 pub async fn stop_turn<C: ProductStudioHost>(
     Path(id): Path<Id>,
@@ -609,6 +605,10 @@ pub async fn stop_turn<C: ProductStudioHost>(
         crate::studio_turn::stop("refinement", &conversation.workspace_id, &id, &req.turn_id).await;
     Ok(Json(crate::chat::StopTurnResp { stopped }))
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

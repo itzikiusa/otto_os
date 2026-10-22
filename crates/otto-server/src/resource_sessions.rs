@@ -98,7 +98,15 @@ pub(crate) async fn check_with_pool(
 /// and each distinct (resource, op) is decided once — the list used to reload
 /// the user and the page grants for every k8s/aws/db row (F9).
 pub async fn check_many(ctx: &ServerCtx, user: &User, sessions: Vec<Session>) -> Vec<Session> {
-    let pool = &ctx.pool;
+    check_many_with_pool(&ctx.pool, user, sessions).await
+}
+
+/// [`check_many`] against a bare pool (what the unit tests drive).
+pub(crate) async fn check_many_with_pool(
+    pool: &otto_state::DbPool,
+    user: &User,
+    sessions: Vec<Session>,
+) -> Vec<Session> {
     let mut current: Option<Option<User>> = None;
     let mut memo: std::collections::HashMap<
         (ResourceKind, String, Option<String>, &'static str),
@@ -259,6 +267,93 @@ async fn check_page(
 mod tests {
     use super::*;
     use otto_core::access::{AccessActor, AccessMode};
+
+    async fn pool() -> otto_state::DbPool {
+        let pool = otto_state::DbPool::from(
+            sqlx::sqlite::SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect("sqlite::memory:")
+                .await
+                .unwrap(),
+        );
+        sqlx::migrate!("../otto-state/migrations")
+            .run(&pool)
+            .await
+            .unwrap();
+        pool
+    }
+
+    fn session(id: &str, connection_id: Option<&str>) -> Session {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "workspace_id": "ws", "kind": "connection", "provider": "ssh",
+            "title": id, "status": "running", "cwd": "/tmp",
+            "provider_session_id": null, "connection_id": connection_id,
+            "created_by": "someone", "created_at": "2026-09-05T00:00:00Z",
+            "last_active_at": "2026-09-05T00:00:00Z", "archived": false, "meta": {}
+        }))
+        .unwrap()
+    }
+
+    /// The batched list filter (`GET /sessions`, the workspace list): a row
+    /// bound to a connection whose access the caller lost is dropped, each
+    /// connection is decided on its own (the memo never leaks one id's allow
+    /// to another), unbound rows always stay, the input order is kept, and a
+    /// disabled caller loses every bound row.
+    #[tokio::test]
+    async fn check_many_drops_revoked_and_disabled_bound_rows_in_order() {
+        let pool = pool().await;
+        let users = otto_state::UsersRepo::new(pool.clone());
+        let user = users
+            .create("reader", "hash", "Reader", false)
+            .await
+            .unwrap();
+        let (open, revoked) = (otto_core::new_id(), otto_core::new_id());
+        for id in [&open, &revoked] {
+            sqlx::query("INSERT INTO connections (id,name,kind,params_json,created_by,created_at) VALUES (?,'Test','ssh','{}',?,'2026-09-05T00:00:00Z')").bind(id).bind(&user.id).execute(&pool).await.unwrap();
+        }
+        sqlx::query("INSERT INTO user_feature_grants (user_id,feature,capability) VALUES (?,'connections','edit')").bind(&user.id).execute(&pool).await.unwrap();
+        // `open` keeps execution through the legacy tier; `revoked` has a
+        // managed policy with no rule for this user (its grant is gone).
+        let repo = otto_state::ResourceAccessRepo::new(pool.clone());
+        let mut p = repo
+            .get_policy(ResourceKind::Connection, &open)
+            .await
+            .unwrap();
+        p.mode = AccessMode::Legacy;
+        let actor = AccessActor {
+            real_user_id: user.id.clone(),
+            effective_user_id: None,
+        };
+        repo.put_policy(&p, p.revision, &actor).await.unwrap();
+
+        let rows = || {
+            vec![
+                session("plain-1", None),
+                session("open-1", Some(open.as_str())),
+                session("revoked-1", Some(revoked.as_str())),
+                session("open-2", Some(open.as_str())),
+                session("plain-2", None),
+                session("revoked-2", Some(revoked.as_str())),
+            ]
+        };
+        let ids = |v: Vec<Session>| v.into_iter().map(|s| s.id).collect::<Vec<_>>();
+        assert_eq!(
+            ids(check_many_with_pool(&pool, &user, rows()).await),
+            ["plain-1", "open-1", "open-2", "plain-2"]
+        );
+
+        // The caller is reloaded: a disabled account keeps only unbound rows,
+        // even though the stale `user` it passed in is still enabled.
+        sqlx::query("UPDATE users SET disabled = 1 WHERE id = ?")
+            .bind(&user.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            ids(check_many_with_pool(&pool, &user, rows()).await),
+            ["plain-1", "plain-2"]
+        );
+    }
     #[tokio::test]
     async fn resource_terminal_rechecks_page_revocation_and_legacy_execution_tier() {
         let pool = otto_state::DbPool::from(

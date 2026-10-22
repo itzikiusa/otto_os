@@ -255,20 +255,17 @@ fn reconcile_json_launcher(
         if s.name == SERVER_KEY || s.name == OTTO_TOOLS_KEY {
             continue;
         }
+        // The server's env (Keychain secrets included) never lands in the
+        // work tree: it goes to a private env file the entry execs through.
+        let Some((command, args)) = launch_via_env_file(workspace_root, s) else {
+            continue;
+        };
         let mut entry = Map::new();
-        entry.insert("command".into(), Value::String(s.command.clone()));
+        entry.insert("command".into(), Value::String(command));
         entry.insert(
             "args".into(),
-            Value::Array(s.args.iter().cloned().map(Value::String).collect()),
+            Value::Array(args.into_iter().map(Value::String).collect()),
         );
-        if !s.env.is_empty() {
-            let env: Map<String, Value> = s
-                .env
-                .iter()
-                .map(|(k, v)| (k.clone(), Value::String(v.clone())))
-                .collect();
-            entry.insert("env".into(), Value::Object(env));
-        }
         desired.push((s.name.clone(), Value::Object(entry)));
     }
     let desired_names: Vec<String> = desired.iter().map(|(n, _)| n.clone()).collect();
@@ -347,7 +344,195 @@ fn reconcile_json_launcher(
         );
     }
     write_doc(path, &doc)?;
+    exclude_launcher_artifacts(workspace_root);
     Ok(desired_names)
+}
+
+/// The command/args a shared launcher file (JSON or grok TOML) carries for a
+/// user server. With env, that is `/bin/sh -c ENV_EXEC_SCRIPT <env file>
+/// <command> <args…>` — the codex mechanism — with the env in a 0600 file
+/// under `<tmp>/otto-mcp`, so no secret value is ever written under the cwd
+/// (where an agent's `git add -A`, or a tracked team `.mcp.json`, would carry
+/// it into a commit). `None` = not deliverable (an env key that isn't a shell
+/// name, or the env file couldn't be written): skipped with a warning, like
+/// codex, rather than falling back to inline secrets.
+fn launch_via_env_file(workspace_root: &str, s: &UserMcpServer) -> Option<(String, Vec<String>)> {
+    if s.env.is_empty() {
+        return Some((s.command.clone(), s.args.clone()));
+    }
+    if let Some(bad) = s.env.keys().find(|k| !is_shell_name(k)) {
+        tracing::warn!(
+            server = %s.name,
+            key = %bad,
+            "MCP launcher: env key is not a shell variable name; server not attached"
+        );
+        return None;
+    }
+    let path = launcher_env_path(workspace_root, &s.name);
+    if let Err(e) = write_env_file_atomic(&path, &s.env) {
+        tracing::warn!(server = %s.name, "MCP launcher: write env file failed: {e}");
+        return None;
+    }
+    let mut args = vec![
+        "-c".to_string(),
+        ENV_EXEC_SCRIPT.to_string(),
+        path.to_string_lossy().into_owned(),
+        s.command.clone(),
+    ];
+    args.extend(s.args.iter().cloned());
+    Some(("/bin/sh".to_string(), args))
+}
+
+/// `<tmp>/otto-mcp/launch-<cwd hash>.<server>.env`: one file per (cwd,
+/// server), because the launcher it backs is shared by every session in that
+/// cwd and rewritten (same path) on each spawn. The `launch-` prefix keeps it
+/// clear of the per-session `<session_id>.*` files the session cleanup removes.
+/// A user server name is arbitrary text, so it is reduced to a safe segment.
+fn launcher_env_path(workspace_root: &str, server: &str) -> PathBuf {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    workspace_root.hash(&mut h);
+    let safe: String = server
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .take(64)
+        .collect();
+    let mut nh = std::collections::hash_map::DefaultHasher::new();
+    server.hash(&mut nh);
+    std::env::temp_dir().join("otto-mcp").join(format!(
+        "launch-{:016x}.{safe}-{:08x}.env",
+        h.finish(),
+        nh.finish() as u32
+    ))
+}
+
+/// [`write_env_file`] to a temp sibling, then rename: a CLI starting from
+/// another session in the same cwd reads the old or the new env, never a
+/// half-written one.
+fn write_env_file_atomic(
+    path: &Path,
+    env: &std::collections::BTreeMap<String, String>,
+) -> Result<(), String> {
+    let tmp = path.with_extension(format!("env.{}.tmp", std::process::id()));
+    write_env_file(&tmp, env)?;
+    std::fs::rename(&tmp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("rename {} -> {}: {e}", tmp.display(), path.display())
+    })
+}
+
+/// Keep the launcher files out of git: append the root-anchored
+/// [`otto_core::paths::LAUNCHER_ARTIFACTS`] (anchored at `workspace_root`'s
+/// place in its work tree) to `<git-common-dir>/info/exclude`, idempotently.
+/// The common dir's exclude applies to every linked worktree, and nothing is
+/// added to a tracked file. Best-effort (not a repo, read-only `.git`: logged).
+///
+/// Sync on purpose — every reconcile runs synchronously under [`cwd_lock`] —
+/// so the git dir is resolved from the `.git` dir/file (and a worktree's
+/// `commondir`) the way `git rev-parse --git-common-dir` does, without
+/// spawning git inside a possibly untrusted repo.
+fn exclude_launcher_artifacts(workspace_root: &str) {
+    let Some((exclude, prefix)) = git_exclude_target(Path::new(workspace_root)) else {
+        return;
+    };
+    let wanted: Vec<String> = otto_core::paths::LAUNCHER_ARTIFACTS
+        .iter()
+        .map(|a| {
+            if prefix.is_empty() {
+                format!("/{a}")
+            } else {
+                format!("/{prefix}/{a}")
+            }
+        })
+        .collect();
+    if let Err(e) = append_exclude_lines(&exclude, &wanted) {
+        tracing::warn!(path = %exclude.display(), "MCP launcher: update git exclude: {e}");
+    }
+}
+
+/// `(<git-common-dir>/info/exclude, workspace_root relative to its work-tree
+/// root)`; `None` outside a git work tree.
+fn git_exclude_target(cwd: &Path) -> Option<(PathBuf, String)> {
+    let cwd = std::fs::canonicalize(cwd).ok()?;
+    for top in cwd.ancestors() {
+        let dotgit = top.join(".git");
+        let Ok(meta) = std::fs::metadata(&dotgit) else {
+            continue;
+        };
+        let gitdir = if meta.is_dir() {
+            dotgit
+        } else {
+            // Linked worktree / submodule: `.git` is a `gitdir: <path>` file.
+            let text = std::fs::read_to_string(&dotgit).ok()?;
+            let p = text.lines().find_map(|l| l.strip_prefix("gitdir:"))?.trim();
+            let p = Path::new(p);
+            if p.is_absolute() {
+                p.to_path_buf()
+            } else {
+                top.join(p)
+            }
+        };
+        let common = match std::fs::read_to_string(gitdir.join("commondir")) {
+            Ok(c) => {
+                let c = Path::new(c.trim());
+                if c.is_absolute() {
+                    c.to_path_buf()
+                } else {
+                    gitdir.join(c)
+                }
+            }
+            Err(_) => gitdir,
+        };
+        let prefix = cwd
+            .strip_prefix(top)
+            .ok()?
+            .to_string_lossy()
+            .replace('\\', "/");
+        return Some((common.join("info").join("exclude"), prefix));
+    }
+    None
+}
+
+/// Append each of `lines` not already present (exact line match) to the
+/// exclude file, creating `info/` and the file as needed.
+fn append_exclude_lines(exclude: &Path, lines: &[String]) -> std::io::Result<()> {
+    use std::io::Write;
+    let existing = match std::fs::read_to_string(exclude) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e),
+    };
+    let have: std::collections::HashSet<&str> = existing.lines().map(str::trim).collect();
+    let missing: Vec<&String> = lines
+        .iter()
+        .filter(|l| !have.contains(l.as_str()))
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    if let Some(parent) = exclude.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut body = String::new();
+    if !existing.is_empty() && !existing.ends_with('\n') {
+        body.push('\n');
+    }
+    body.push_str("# Otto MCP launchers (runtime state; never commit)\n");
+    for l in missing {
+        body.push_str(l);
+        body.push('\n');
+    }
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(exclude)?
+        .write_all(body.as_bytes())
 }
 
 /// TOML-quote a string value for a Codex `-c key=value` override (Codex parses the
@@ -632,20 +817,19 @@ pub fn reconcile_user_servers_grok(
         }
     }
     for s in &desired {
+        // Same rule as the JSON launchers: env goes to a private file, never
+        // into `.grok/config.toml`. An undeliverable server is dropped.
+        let Some((command, argv)) = launch_via_env_file(workspace_root, s) else {
+            servers.remove(&s.name);
+            continue;
+        };
         let mut entry = Table::new();
-        entry["command"] = value(s.command.clone());
+        entry["command"] = value(command);
         let mut args = Array::new();
-        for a in &s.args {
-            args.push(a.clone());
+        for a in argv {
+            args.push(a);
         }
         entry["args"] = value(args);
-        if !s.env.is_empty() {
-            let mut env = toml_edit::InlineTable::new();
-            for (k, v) in &s.env {
-                env.insert(k, v.clone().into());
-            }
-            entry["env"] = value(env);
-        }
         entry["enabled"] = value(true);
         servers.insert(&s.name, Item::Table(entry));
     }
@@ -658,7 +842,9 @@ pub fn reconcile_user_servers_grok(
         }
         doc[MANAGED_KEY_TOML] = value(marker);
     }
-    write_grok_doc(&dir, &path, &doc)
+    write_grok_doc(&dir, &path, &doc)?;
+    exclude_launcher_artifacts(workspace_root);
+    Ok(())
 }
 
 fn read_grok_doc(
@@ -722,7 +908,21 @@ fn atomic_write(path: &Path, body: &[u8]) -> Result<(), String> {
         .and_then(|n| n.to_str())
         .ok_or_else(|| format!("bad path {}", path.display()))?;
     let tmp = path.with_file_name(format!(".{file_name}.{}.tmp", std::process::id()));
-    std::fs::write(&tmp, body).map_err(|e| format!("write {}: {e}", tmp.display()))?;
+    // Owner-only (0600) from the first byte, like the codex env/creds files:
+    // a launcher names every enabled server and the local `ottod` path.
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp)
+            .map_err(|e| format!("write {}: {e}", tmp.display()))?;
+        f.write_all(body)
+            .map_err(|e| format!("write {}: {e}", tmp.display()))?;
+    }
     std::fs::rename(&tmp, path).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
         format!("rename {} -> {}: {e}", tmp.display(), path.display())
@@ -1170,6 +1370,85 @@ mod tests {
         assert!(s.contains("args = [\"mcp-tools\"]"), "{s}");
     }
 
+    /// Every file under `dir`, recursively (`.git` included).
+    #[allow(clippy::disallowed_methods)] // sync test helper over a tempdir
+    fn all_files(dir: &Path, out: &mut Vec<PathBuf>) {
+        for e in std::fs::read_dir(dir).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                all_files(&p, out);
+            } else {
+                out.push(p);
+            }
+        }
+    }
+
+    /// A reconcile with a secret-bearing user server (claude, agy and grok
+    /// launchers) never writes the value anywhere under the cwd: the launchers
+    /// exec through a 0600 env file in `<tmp>/otto-mcp`, are themselves 0600,
+    /// and the repo's `info/exclude` keeps all three out of `git add -A`.
+    #[test]
+    fn secret_env_never_lands_under_the_cwd_and_launchers_are_git_excluded() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".git").join("info")).unwrap();
+        std::fs::write(
+            dir.path().join(".git").join("info").join("exclude"),
+            "# user rules\n*.log",
+        )
+        .unwrap();
+        let ws = dir.path().join("svc");
+        std::fs::create_dir_all(&ws).unwrap();
+        let root = ws.to_str().unwrap();
+        let secret = "sk-live-do-not-commit-1234";
+        let mut jira = user("jira");
+        jira.env.insert("API_TOKEN".into(), secret.into());
+        let cfg = ManagedMcpConfig {
+            user_servers: Some(vec![jira.clone()]),
+            ..Default::default()
+        };
+        for _ in 0..2 {
+            reconcile_managed_servers(root, &cfg).unwrap();
+            reconcile_managed_servers_agy(root, &cfg).unwrap();
+            reconcile_user_servers_grok(root, std::slice::from_ref(&jira)).unwrap();
+        }
+
+        let mut files = Vec::new();
+        all_files(dir.path(), &mut files);
+        for f in &files {
+            let body = std::fs::read(f).unwrap();
+            assert!(
+                !String::from_utf8_lossy(&body).contains(secret),
+                "secret written under the cwd: {}",
+                f.display()
+            );
+        }
+        let servers = read_servers(root);
+        assert_eq!(servers["jira"]["command"], "/bin/sh");
+        assert!(servers["jira"].get("env").is_none());
+        let env_file = PathBuf::from(servers["jira"]["args"][2].as_str().unwrap());
+        assert!(env_file.starts_with(std::env::temp_dir().join("otto-mcp")));
+        assert!(std::fs::read_to_string(&env_file).unwrap().contains(secret));
+        for f in [&env_file, &mcp_path(root), &agy_mcp_path(root)] {
+            let mode = std::fs::metadata(f).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "{} must be owner-only", f.display());
+        }
+
+        // Root-anchored at the cwd's place in the repo, added once, user rules kept.
+        let exclude =
+            std::fs::read_to_string(dir.path().join(".git").join("info").join("exclude")).unwrap();
+        assert!(exclude.starts_with("# user rules\n*.log\n"), "{exclude}");
+        for a in otto_core::paths::LAUNCHER_ARTIFACTS {
+            let line = format!("/svc/{a}");
+            assert_eq!(
+                exclude.lines().filter(|l| *l == line).count(),
+                1,
+                "{line} in {exclude}"
+            );
+        }
+        let _ = std::fs::remove_file(env_file);
+    }
+
     /// grok user-server reconcile: enabled servers land as tables tracked by
     /// the `otto_managed_servers` marker; a disable removes them while the
     /// user's own tables and the managed `otto` table survive.
@@ -1187,7 +1466,14 @@ mod tests {
         reconcile_user_servers_grok(root, &[jira]).unwrap();
         let s = std::fs::read_to_string(&grok_cfg).unwrap();
         let doc: toml_edit::DocumentMut = s.parse().unwrap();
-        assert_eq!(doc["mcp_servers"]["jira"]["command"].as_str(), Some("node"));
+        // Env-carrying server: exec'd through its private env file.
+        assert_eq!(
+            doc["mcp_servers"]["jira"]["command"].as_str(),
+            Some("/bin/sh")
+        );
+        assert!(s.contains("\"node\""), "{s}");
+        assert!(!s.contains("https://x"), "env value in the work tree: {s}");
+        assert!(doc["mcp_servers"]["jira"].get("env").is_none(), "{s}");
         assert!(s.contains("otto_managed_servers"), "{s}");
 
         reconcile_user_servers_grok(root, &[]).unwrap();

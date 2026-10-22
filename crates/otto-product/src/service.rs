@@ -1876,10 +1876,6 @@ pub fn build_watch_cursor(comments: &[CommentInfo]) -> Option<String> {
     Some(format!("{newest}|{}", ids.join(",")))
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 /// Accept only Otto's three tree roles. Anything else is a 400 — never silently
 /// coerced, so a typo in `--kind` surfaces instead of filing a mislabeled row.
 pub fn validate_tree_kind(kind: &str) -> Result<&str> {
@@ -1891,6 +1887,10 @@ pub fn validate_tree_kind(kind: &str) -> Result<&str> {
         ))),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

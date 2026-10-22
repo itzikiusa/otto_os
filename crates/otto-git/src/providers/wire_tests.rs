@@ -199,12 +199,15 @@ mod github {
             )
             .mount(&server)
             .await;
+        // The COMBINED status: one row per context, already its latest state.
         Mock::given(method("GET"))
-            .and(path("/repos/acme/app/commits/deadbeef/statuses"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
-                {"context": "jenkins", "state": "failure", "target_url": "https://ci/1"},
-                {"context": "jenkins", "state": "success"}
-            ])))
+            .and(path("/repos/acme/app/commits/deadbeef/status"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "state": "failure",
+                "statuses": [
+                    {"context": "jenkins", "state": "failure", "target_url": "https://ci/1"}
+                ]
+            })))
             .mount(&server)
             .await;
 
@@ -251,13 +254,118 @@ mod github {
             .mount(&server)
             .await;
         Mock::given(method("GET"))
-            .and(path("/repos/acme/app/commits/deadbeef/statuses"))
+            .and(path("/repos/acme/app/commits/deadbeef/status"))
             .respond_with(ResponseTemplate::new(404).set_body_json(json!({"message": "Not Found"})))
             .mount(&server)
             .await;
         assert_eq!(gh.list_checks(&rr(), 7).await.unwrap().len(), 1);
         let ci = gh.fetch_ci_status(&rr(), 7).await;
         assert_eq!((ci.state.as_str(), ci.total), ("pending", 1));
+    }
+
+    /// A matrix build past 100 check-runs: the failing run sits on page 2.
+    /// Only page 1 used to be read, so the rollup and the merge gate read
+    /// green (integrations-2-02). A `stale` run is terminal, not pending
+    /// forever (integrations-2-04).
+    #[tokio::test]
+    async fn ci_reads_every_check_run_page_and_settles_stale() {
+        let server = MockServer::start().await;
+        let gh = Github::with_base("tok".into(), server.uri());
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/app/pulls/7"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(pr(7)))
+            .mount(&server)
+            .await;
+        let runs = "/repos/acme/app/commits/deadbeef/check-runs";
+        Mock::given(method("GET"))
+            .and(path(runs))
+            .and(query_param("page", "2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "total_count": 3,
+                "check_runs": [{"name": "e2e (linux)", "status": "completed", "conclusion": "failure"}]
+            })))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(runs))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header(
+                        "link",
+                        format!(
+                            r#"<{}{runs}?per_page=100&page=2>; rel="next""#,
+                            server.uri()
+                        )
+                        .as_str(),
+                    )
+                    .set_body_json(json!({
+                        "total_count": 3,
+                        "check_runs": [
+                            {"name": "build", "status": "completed", "conclusion": "success"},
+                            {"name": "nightly", "status": "completed", "conclusion": "stale"}
+                        ]
+                    })),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/app/commits/deadbeef/status"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"state": "pending", "statuses": []})),
+            )
+            .mount(&server)
+            .await;
+
+        let ci = gh.fetch_ci_status(&rr(), 7).await;
+        assert_eq!(ci.state, "failure", "page 2's failing run fails the rollup");
+        assert_eq!((ci.total, ci.passed, ci.failed), (3, 1, 2));
+
+        let rows = gh.list_checks(&rr(), 7).await.unwrap();
+        let named: Vec<(&str, &str)> = rows
+            .iter()
+            .map(|c| (c.name.as_str(), c.state.as_str()))
+            .collect();
+        assert_eq!(
+            named,
+            [
+                ("build", "success"),
+                ("nightly", "failure"),
+                ("e2e (linux)", "failure")
+            ]
+        );
+    }
+
+    /// `total_count` above what the pages held (no `Link` to the rest) is
+    /// pending, never green.
+    #[tokio::test]
+    async fn ci_with_unread_check_runs_is_pending_not_green() {
+        let server = MockServer::start().await;
+        let gh = Github::with_base("tok".into(), server.uri());
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/app/pulls/7"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(pr(7)))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/app/commits/deadbeef/check-runs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "total_count": 150,
+                "check_runs": [{"name": "build", "status": "completed", "conclusion": "success"}]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/app/commits/deadbeef/status"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"state": "pending", "statuses": []})),
+            )
+            .mount(&server)
+            .await;
+        let ci = gh.fetch_ci_status(&rr(), 7).await;
+        assert_eq!((ci.state.as_str(), ci.passed), ("pending", 1));
     }
 
     #[tokio::test]
@@ -672,6 +780,41 @@ mod bitbucket {
             "user": { "display_name": "Dev" },
             "created_on": "2026-09-01T10:00:00Z",
         })
+    }
+
+    /// Build statuses follow `next`: a FAILED build on page 2 used to be
+    /// dropped (one `pagelen=50` read), so the PR read green.
+    #[tokio::test]
+    async fn ci_statuses_read_every_page() {
+        let server = MockServer::start().await;
+        let bb = Bitbucket::with_base("user".into(), "tok".into(), server.uri());
+        let statuses = "/repositories/acme/app/pullrequests/7/statuses";
+        Mock::given(method("GET"))
+            .and(path(statuses))
+            .and(query_param("page", "2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "values": [{"key": "e2e", "name": "e2e", "state": "FAILED"}],
+            })))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(statuses))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "values": [{"key": "build", "name": "build", "state": "SUCCESSFUL"}],
+                "next": format!("{}{statuses}?pagelen=100&page=2", server.uri()),
+            })))
+            .mount(&server)
+            .await;
+        let ci = bb.fetch_ci_status(&rr(), 7).await;
+        assert_eq!(ci.state, "failure");
+        assert_eq!((ci.total, ci.passed, ci.failed), (2, 1, 1));
+        let rows = bb.list_checks(&rr(), 7).await.unwrap();
+        let named: Vec<(&str, &str)> = rows
+            .iter()
+            .map(|c| (c.name.as_str(), c.state.as_str()))
+            .collect();
+        assert_eq!(named, [("build", "success"), ("e2e", "failure")]);
     }
 
     /// PR commits and workspace members follow `next`: both stopped at the

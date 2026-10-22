@@ -523,11 +523,11 @@ async fn complete_run_with(
             )
             .await;
             if settles_schedule(trigger, false) {
-                let _ = settle_schedule(repo, task, "ok", served).await;
+                settle_with_retry(repo, task, "ok", served).await;
             } else {
                 // A manual run's outcome is the task's latest status too — a
                 // failed "Run now" used to leave the row saying "Succeeded".
-                let _ = repo.set_last_status(&task.id, "ok").await;
+                set_status_logged(repo, task, "ok").await;
             }
             prune(ctx, &task.id).await;
             emit(ctx, task, &run_id, "ok");
@@ -579,9 +579,9 @@ async fn complete_run_with(
             // A skipped overlap did not run this occurrence. Settling would
             // spend `once` and hide the slot. Status only; the cursor stays due.
             if settles_schedule(trigger, skipped) {
-                let _ = settle_schedule(repo, task, status, served).await;
+                settle_with_retry(repo, task, status, served).await;
             } else {
-                let _ = repo.set_last_status(&task.id, status).await;
+                set_status_logged(repo, task, status).await;
             }
             // Failed runs count against the history cap too — a task that
             // always fails used to grow its run list without bound.
@@ -623,6 +623,57 @@ async fn record_finish(repo: &otto_state::ScheduledTasksRepo, run_id: &str, f: F
     };
     if let Err(e) = repo.finish_run(run_id, minimal).await {
         warn!(run = %run_id, "scheduled task: minimal finish_run failed too: {e}");
+    }
+}
+
+/// Advance the cursor on completion. A dropped failed write (SQLite busy, a
+/// disk error) left `last_run_at` on the old occurrence: the in-flight guard
+/// dropped with the run and the next scan fired the same occurrence again —
+/// re-running and re-delivering every minute. Retry before the guard drops
+/// (same loop as the personal-agents engine's `advance_cursor`), and on a
+/// persistent failure hold the claim across one scan before a last try.
+async fn settle_with_retry(
+    repo: &otto_state::ScheduledTasksRepo,
+    task: &ScheduledTask,
+    status: &str,
+    now: DateTime<Utc>,
+) {
+    for attempt in 0..5u64 {
+        match settle_schedule(repo, task, status, now).await {
+            Ok(()) => return,
+            Err(e) => {
+                warn!(
+                    task = %task.id,
+                    "scheduled task: settle schedule attempt {} failed: {e}",
+                    attempt + 1
+                );
+                tokio::time::sleep(Duration::from_millis(200 * (attempt + 1))).await;
+            }
+        }
+    }
+    warn!(
+        task = %task.id,
+        "scheduled task: schedule cursor did not settle; holding the in-flight claim across one scan"
+    );
+    tokio::time::sleep(SETTLE_HOLD).await;
+    if let Err(e) = settle_schedule(repo, task, status, now).await {
+        warn!(task = %task.id, "scheduled task: schedule cursor still unset: {e}");
+    }
+}
+
+/// One scheduler scan (`scheduled_tasks_scheduler::SCAN`): how long a
+/// persistently failing settle keeps the in-flight claim.
+const SETTLE_HOLD: Duration = Duration::from_secs(60);
+
+/// A manual run's status write. It moves no cursor, so a failure only
+/// leaves a stale badge — logged, not retried.
+async fn set_status_logged(
+    repo: &otto_state::ScheduledTasksRepo,
+    task: &ScheduledTask,
+    status: &str,
+) {
+    if let Err(e) = repo.set_last_status(&task.id, status).await {
+        warn!(task = %task.id, "scheduled task: set last status failed: {e}");
     }
 }
 

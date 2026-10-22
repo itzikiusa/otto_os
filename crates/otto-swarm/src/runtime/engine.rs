@@ -103,6 +103,39 @@ pub(crate) async fn send_run_input(
     .await
 }
 
+/// Paste `paste` into a run's session, wait the paste-to-Enter window and press
+/// Enter — and, with `confirm_dispatch`, press it once more when the TUI shows
+/// no dispatch — all under the session's submit lock
+/// (`SessionManager::submit_lock`). A workspace broadcast or an agent→agent
+/// `/message` (`submit_text`) on the same session therefore can't land its
+/// paste or Enter inside our window and merge two prompts into one. Each write
+/// still goes through [`send_run_input`] (the swarm operation guard + the
+/// run-still-active check). `false` when the run stopped or a write failed.
+#[doc(hidden)]
+pub async fn submit_run_prompt(
+    ctx: &SwarmRt,
+    swarm_id: &str,
+    run_id: &str,
+    session_id: &str,
+    paste: &[u8],
+    confirm_dispatch: bool,
+) -> bool {
+    let sid: Id = session_id.to_string();
+    let lock = ctx.manager().submit_lock(&sid);
+    let _submit = lock.lock().await;
+    if !send_run_input(ctx, swarm_id, run_id, session_id, paste).await {
+        return false;
+    }
+    tokio::time::sleep(ctx.pty_timings().paste_to_enter).await;
+    let before = ctx.manager().live_handle(&sid).map(|h| h.last_output_at());
+    if !send_run_input(ctx, swarm_id, run_id, session_id, b"\r").await {
+        return false;
+    }
+    !confirm_dispatch
+        || ctx.dispatched(&sid, before).await
+        || send_run_input(ctx, swarm_id, run_id, session_id, b"\r").await
+}
+
 #[cfg(test)]
 mod dispatch_tests {
     use super::*;
@@ -1006,7 +1039,10 @@ async fn route_result(
     }
 }
 
-async fn route_result_inner(
+/// Exposed (hidden) for otto-server's `swarm_router` suite, which drives it
+/// with hand-built results.
+#[doc(hidden)]
+pub async fn route_result_inner(
     ctx: &SwarmRt,
     run: &otto_state::SwarmRun,
     task: &SwarmTask,

@@ -82,9 +82,22 @@ impl Bitbucket {
     /// Capped at the same 20 pages as `Http::paginate_json`: a PR's comments
     /// must be whole, but a runaway cursor must not hang the request.
     async fn paginate_values(&self, path: &str) -> Result<Vec<Value>> {
+        self.paginate_values_with(path, true).await
+    }
+
+    /// [`Self::paginate_values`]; `cached: false` reads every page fresh (the
+    /// merge-gate check list must not lag a just-finished build by a TTL).
+    async fn paginate_values_with(&self, path: &str, cached: bool) -> Result<Vec<Value>> {
         const MAX_PAGES: usize = 20;
+        let get = move |p: String| async move {
+            if cached {
+                self.get_json_cached(&p).await
+            } else {
+                self.send_json(reqwest::Method::GET, &p, None).await
+            }
+        };
         let mut all: Vec<Value> = Vec::new();
-        let mut page = self.get_json_cached(path).await?;
+        let mut page = get(path.to_string()).await?;
         let mut fetched = 1usize;
         // An absolute `next` is fetched WITH the account's credentials, so it
         // must stay on the API origin (the shared paginator's rule) — a forged
@@ -100,7 +113,7 @@ impl Bitbucket {
                 tracing::warn!("bitbucket: ignoring cross-origin `next` page link");
                 break;
             }
-            page = self.get_json_cached(&next).await?;
+            page = get(next).await?;
             fetched += 1;
         }
         Ok(all)
@@ -230,17 +243,18 @@ impl Bitbucket {
     /// Fetch Bitbucket Cloud commit build statuses for the source-branch HEAD
     /// commit of PR `number`. Aggregates all statuses into a [`CiStatus`].
     /// `GET /2.0/repositories/{workspace}/{repo_slug}/pullrequests/{id}/statuses`
-    /// Falls back to `CiStatus::none()` on any error.
+    /// Falls back to `CiStatus::none()` on any error. Follows `next`: a status
+    /// past the first page used to be dropped, so a failing build there read
+    /// as green.
     pub async fn fetch_ci_status(&self, r: &RemoteRef, number: u64) -> CiStatus {
         let path = format!(
-            "{}?pagelen=50",
+            "{}?pagelen=100",
             Self::pr_path(r, &format!("/{number}/statuses"))
         );
-        let v = match self.send_json(reqwest::Method::GET, &path, None).await {
+        let items = match self.paginate_values_with(&path, false).await {
             Ok(v) => v,
             Err(_) => return CiStatus::none(),
         };
-        let items = varr(&v, &["values"]);
         if items.is_empty() {
             return CiStatus::none();
         }
@@ -249,7 +263,7 @@ impl Bitbucket {
         let mut failed = 0u32;
         let mut pending = 0u32;
         let mut url: Option<String> = None;
-        for item in items {
+        for item in &items {
             if url.is_none() {
                 url = vstr_opt(item, &["url"]);
             }
@@ -951,11 +965,13 @@ impl super::GitProvider for Bitbucket {
     /// [`Bitbucket::fetch_ci_status`] aggregates, kept unfolded.
     async fn list_checks(&self, r: &RemoteRef, number: u64) -> Result<Vec<PrCheck>> {
         let path = format!(
-            "{}?pagelen=50",
+            "{}?pagelen=100",
             Self::pr_path(r, &format!("/{number}/statuses"))
         );
-        let v = self.send_json(reqwest::Method::GET, &path, None).await?;
-        Ok(checks_from_statuses(&v))
+        let values = self.paginate_values_with(&path, false).await?;
+        Ok(checks_from_statuses(
+            &serde_json::json!({ "values": values }),
+        ))
     }
 }
 

@@ -1,4 +1,6 @@
-//! Endpoints #7-10: users CRUD (root only).
+//! Endpoints #7-10: users CRUD. The list is open to `Users:Admin` (the feature
+//! guard maps `/users*` to it); create, patch and delete stay root-only, so a
+//! non-root admin can never mint or re-enable an account.
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -13,12 +15,11 @@ use crate::auth::{require_root, CurrentUser};
 use crate::error::ApiResult;
 use crate::state::ServerCtx;
 
-/// `GET /api/v1/users`
-pub async fn list(
-    State(ctx): State<ServerCtx>,
-    CurrentUser(user): CurrentUser,
-) -> ApiResult<Json<Vec<User>>> {
-    require_root(&user)?;
+/// `GET /api/v1/users` — `Users:Admin` or root, enforced by the feature guard
+/// (`policy.rs` maps `/users*` to `Require(Users, Admin)`). `User` carries no
+/// secrets, and `/admin/sessions` already shows the same ids and usernames to
+/// that role; without the list a Users:Admin could not reach impersonation.
+pub async fn list(State(ctx): State<ServerCtx>) -> ApiResult<Json<Vec<User>>> {
     Ok(Json(UsersRepo::new(ctx.pool.clone()).list().await?))
 }
 

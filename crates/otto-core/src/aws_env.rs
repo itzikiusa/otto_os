@@ -30,6 +30,26 @@ pub enum AwsEnvAuth<'a> {
 /// Profile mode puts `AWS_PROFILE` back through the env itself.
 pub const AWS_ENV_REMOVE: &[&str] = &["AWS_PROFILE"];
 
+/// Apply a spawn env that carries [`build_aws_env`]'s output: first
+/// `env_remove` every [`AWS_ENV_REMOVE`] name inherited from the daemon, then
+/// set `env`. Returns `cmd` so it sits inside a builder chain. Every `aws` /
+/// `kubectl` (EKS `aws eks get-token`) spawn goes through this, so the rule
+/// lives in one place.
+pub fn apply_aws_env<I, K, V>(
+    cmd: &mut tokio::process::Command,
+    env: I,
+) -> &mut tokio::process::Command
+where
+    I: IntoIterator<Item = (K, V)>,
+    K: AsRef<std::ffi::OsStr>,
+    V: AsRef<std::ffi::OsStr>,
+{
+    for k in AWS_ENV_REMOVE {
+        cmd.env_remove(k);
+    }
+    cmd.envs(env)
+}
+
 /// The `aws` subprocess env (contract §1 "Auth injection"). Profile mode sets
 /// `AWS_PROFILE`; keys mode sets the three `AWS_*` credential vars. Both set
 /// the region (+ `AWS_DEFAULT_REGION` for older code paths), disable the pager
@@ -74,6 +94,28 @@ pub fn build_aws_env(
 
 #[cfg(test)]
 mod tests {
+    /// The inherited `AWS_PROFILE` is removed, and an env that sets it (profile
+    /// mode) puts it back.
+    #[test]
+    fn apply_aws_env_removes_the_inherited_profile_first() {
+        let mut cmd = tokio::process::Command::new("true");
+        cmd.env("AWS_PROFILE", "daemon-default");
+        super::apply_aws_env(&mut cmd, [("AWS_REGION", "eu-west-1")]);
+        let envs: Vec<_> = cmd.as_std().get_envs().collect();
+        assert!(envs.contains(&(std::ffi::OsStr::new("AWS_PROFILE"), None)));
+        assert!(envs.contains(&(
+            std::ffi::OsStr::new("AWS_REGION"),
+            Some(std::ffi::OsStr::new("eu-west-1"))
+        )));
+        let mut cmd = tokio::process::Command::new("true");
+        super::apply_aws_env(&mut cmd, [("AWS_PROFILE", "dev")]);
+        let envs: Vec<_> = cmd.as_std().get_envs().collect();
+        assert!(envs.contains(&(
+            std::ffi::OsStr::new("AWS_PROFILE"),
+            Some(std::ffi::OsStr::new("dev"))
+        )));
+    }
+
     use super::*;
 
     fn get<'a>(env: &'a [(String, String)], k: &str) -> Option<&'a str> {

@@ -106,17 +106,10 @@ pub struct FsRead {
     pub truncated: bool,
 }
 
-/// Expand a leading `~` / `~/` to the user's home directory (the shared
-/// [`otto_core::paths::expand_tilde`]). `~user/…` is refused: it names another
-/// account's home, and the old any-`~` prefix strip turned `~bob/notes.txt`
-/// into `$HOMEbob/notes.txt` — a confusing not-found for what the user typed.
-fn expand_home(path: &str) -> ApiResult<String> {
-    if path.starts_with('~') && path != "~" && !path.starts_with("~/") {
-        return Err(ApiError(Error::Invalid(format!(
-            "unsupported home path {path:?}: use ~/… or an absolute path"
-        ))));
-    }
-    Ok(otto_core::paths::expand_tilde(path))
+/// [`otto_core::paths::expand_home_strict`] (`~`, `~/…`; `~user/…` refused)
+/// as a 400.
+fn expand_home(path: &str) -> ApiResult<std::path::PathBuf> {
+    otto_core::paths::expand_home_strict(path).map_err(|e| ApiError(Error::Invalid(e)))
 }
 
 /// Simple extension → language hint used by the front-end syntax highlighter.
@@ -529,20 +522,6 @@ fn read_at_most(path: &std::path::Path, limit: usize) -> std::io::Result<Vec<u8>
 mod tests {
     /// `~` and `~/x` expand to the home directory; `~user/x` is refused
     /// instead of becoming `$HOMEuser/x`; anything else passes through.
-    #[test]
-    fn expand_home_expands_only_the_callers_own_home() {
-        let home = std::env::var("HOME").expect("HOME set in tests");
-        assert_eq!(super::expand_home("~").unwrap(), home);
-        assert_eq!(
-            super::expand_home("~/notes.txt").unwrap(),
-            format!("{}/notes.txt", home.trim_end_matches('/'))
-        );
-        assert!(super::expand_home("~bob/notes.txt").is_err());
-        assert!(super::expand_home("~bob").is_err());
-        assert_eq!(super::expand_home("/abs/x").unwrap(), "/abs/x");
-        assert_eq!(super::expand_home("rel/~x").unwrap(), "rel/~x");
-    }
-
     fn fixture_user() -> otto_core::domain::User {
         otto_core::domain::User {
             id: "fixture".into(),

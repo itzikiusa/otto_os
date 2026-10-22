@@ -80,11 +80,11 @@ pub struct ServerCtx {
     /// Per-review cancellation flags for in-flight PR/local reviews (the Cancel
     /// button). A running review threads its flag into the agent recovery loop;
     /// cancel sets it, kills the live agent sessions and marks the run cancelled.
-    pub review_cancels: crate::skill_eval::CancelRegistry,
+    pub review_cancels: otto_core::cancel::CancelRegistry,
     /// Per-AGENT cancellation flags for in-flight review agents, keyed
     /// "{review_id}:{index}" (the per-agent Stop button). Each reviewer's
     /// recovery loop watches its own flag; whole-review cancel trips them all.
-    pub review_agent_cancels: crate::skill_eval::CancelRegistry,
+    pub review_agent_cancels: otto_core::cancel::CancelRegistry,
     /// Persistent review finding identity + lifecycle (A1 verified-review loop).
     pub findings_store: ReviewFindingsRepo,
     /// Audit trail for the findings workflow (one row per triage action).
@@ -99,10 +99,10 @@ pub struct ServerCtx {
     /// Eval-lab: provider × skill × prompt matrices.
     pub eval_matrices_store: otto_state::EvalMatricesRepo,
     /// Per-run cancellation flags for in-flight skill evaluations.
-    pub skill_eval_cancels: crate::skill_eval::CancelRegistry,
+    pub skill_eval_cancels: otto_core::cancel::CancelRegistry,
     /// Skills Lab: multi-agent skill reviews + their cancellation flags.
     pub skill_reviews_store: SkillReviewsRepo,
-    pub skill_review_cancels: crate::skill_eval::CancelRegistry,
+    pub skill_review_cancels: otto_core::cancel::CancelRegistry,
     pub orchestrator: Arc<Orchestrator>,
     pub improve_engine: Arc<ImprovementEngine>,
     pub context_library: otto_context::Library,
@@ -147,7 +147,7 @@ pub struct ServerCtx {
     /// Per-swarm Coordinator runtime handles (start/pause/abort/resume).
     pub swarm_coords: otto_swarm::runtime::engine::CoordinatorRegistry,
     /// Per-run cancellation flags for in-flight swarm runs (manual Stop / abort).
-    pub swarm_run_cancels: otto_swarm::runtime::run::CancelRegistry,
+    pub swarm_run_cancels: otto_core::cancel::CancelRegistry,
     // -- Goal Loops --------------------------------------------------------
     pub goal_loops_repo: otto_state::GoalLoopsRepo,
     /// Per-loop controller runtime handles (start/pause/resume/stop).

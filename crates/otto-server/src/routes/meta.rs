@@ -189,7 +189,10 @@ fn configure_provider_probe(
 async fn detect_tool(name: &str, program: &str) -> ToolStatus {
     let found = match timeout(
         Duration::from_secs(2),
-        Command::new("which").arg(program).output(),
+        Command::new("which")
+            .arg(program)
+            .kill_on_drop(true)
+            .output(),
     )
     .await
     {
@@ -207,7 +210,10 @@ async fn detect_tool(name: &str, program: &str) -> ToolStatus {
     if found && DETECTED_TOOLS.contains(&name) {
         if let Ok(Ok(out)) = timeout(
             Duration::from_secs(2),
-            Command::new(program).arg("--version").output(),
+            Command::new(program)
+                .arg("--version")
+                .kill_on_drop(true)
+                .output(),
         )
         .await
         {
