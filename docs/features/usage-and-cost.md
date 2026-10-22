@@ -506,7 +506,15 @@ them on. Persisted under the `usage_budgets` settings key.
 `scope`, `key`, `label`, `limit_usd`, `spent_usd`, `used_fraction`, `warning`,
 `exceeded`) — computed even when enforcement is off, so the UI can preview caps. The
 **warning** line is **80 %** of a cap; **exceeded** is ≥ 100 %. Spend is one pass over
-per-session totals folded into per-workspace and per-provider buckets.
+per-session totals folded into per-workspace and per-provider buckets. When the usage
+engine can't report spend, the status carries `spend_unavailable: true` and the page
+shows **Spend unavailable** instead of a $0 reading.
+
+A stored config that can't be read or no longer parses is an **error**, not "no
+budgets": `GET /usage/budgets` fails (the card shows it with **Retry** and offers no
+editor, so an empty form can't be saved over the real caps), and the admission check
+refuses gated work with "Budget settings unavailable…" — the same fail-closed rule as
+unavailable spend.
 
 `PUT /usage/budgets` replaces + persists the config and returns refreshed status. The
 UI editor (gated behind **Configure**) lets you toggle enforce / block, set the window,

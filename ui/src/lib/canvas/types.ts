@@ -1,0 +1,261 @@
+// Canvas Studio domain types — the portable Scene schema + API DTOs.
+//
+// A scene is ONE JSON document (`Scene`) persisted as `doc_json` on the server
+// (opaque to Rust). The UI owns the rich schema and rendering. Keep this the
+// single source of truth: every canvas component consumes these types.
+
+// ---------------------------------------------------------------------------
+// Scene document
+// ---------------------------------------------------------------------------
+
+export type NodeKind =
+  | 'shape'
+  | 'text'
+  | 'sticky'
+  | 'freehand'
+  | 'code'
+  | 'json'
+  | 'mermaid'
+  | 'image'
+  | 'group'
+  | 'frame';
+
+export type ShapeVariant =
+  | 'rect'
+  | 'roundrect'
+  | 'ellipse'
+  | 'diamond'
+  | 'triangle'
+  | 'cylinder'
+  | 'parallelogram';
+
+export interface ShapePayload {
+  variant: ShapeVariant;
+  fill?: string;
+  stroke?: string;
+  /** Hand-drawn (roughjs) look — stretch; renderers may ignore. */
+  sketch?: boolean;
+}
+export interface TextPayload {
+  value: string;
+  align?: 'left' | 'center' | 'right';
+  size?: number;
+}
+export interface StickyPayload {
+  value: string;
+  color?: string;
+}
+export interface FreehandPayload {
+  /** perfect-freehand input points: [x, y, pressure?]. */
+  points: [number, number, number?][];
+  color?: string;
+  size?: number;
+}
+export interface CodePayload {
+  value: string;
+  lang?: string;
+}
+export interface JsonPayload {
+  /** Raw JSON text, rendered as a collapsible tree (+ a Raw toggle). */
+  value: string;
+}
+export interface MermaidPayload {
+  src: string;
+  /** Diagram kind hint: 'sequence' | 'flowchart' | 'class' | 'state' | 'er' … */
+  kind?: string;
+}
+export interface ImagePayload {
+  attachmentId?: string;
+  dataUrl?: string;
+}
+
+/** A single canvas node. `x/y/w/h` are scene-space (pre-zoom). */
+export interface CanvasNode {
+  id: string;
+  kind: NodeKind;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  z?: number;
+  rotation?: number;
+  label?: string;
+  /** Parent frame/group id (for nesting / slide membership). */
+  parent?: string;
+  // Discriminated payloads (exactly one matches `kind`):
+  shape?: ShapePayload;
+  text?: TextPayload;
+  sticky?: StickyPayload;
+  freehand?: FreehandPayload;
+  code?: CodePayload;
+  json?: JsonPayload;
+  mermaid?: MermaidPayload;
+  image?: ImagePayload;
+  style?: Record<string, string | number>;
+}
+
+export interface CanvasEdge {
+  id: string;
+  source: string;
+  target: string;
+  sourceAnchor?: string;
+  targetAnchor?: string;
+  kind?: 'arrow' | 'line' | 'dashed';
+  label?: string;
+  style?: Record<string, string | number>;
+}
+
+/** One progressive-disclosure step within a presentation slide. */
+export interface RevealStep {
+  /** Node ids revealed at this step (fade/translate in). */
+  nodeIds?: string[];
+  /** For sequence playback: reveal mermaid messages in this inclusive range. */
+  mermaidMessageRange?: [number, number];
+}
+
+/** A presentation slide (PowerPoint-style). */
+export interface Slide {
+  id: string;
+  title?: string;
+  /** Optional bounding frame node that defines the slide viewport. */
+  frameNodeId?: string;
+  /** When set, this slide steps through a mermaid sequence node's messages. */
+  mermaidNodeId?: string;
+  reveal: RevealStep[];
+  notes?: string;
+}
+
+export interface AppState {
+  background?: string;
+  grid?: boolean;
+}
+
+export interface Scene {
+  schema: 1;
+  title: string;
+  nodes: CanvasNode[];
+  edges: CanvasEdge[];
+  slides: Slide[];
+  appState?: AppState;
+}
+
+// ---------------------------------------------------------------------------
+// API DTOs (mirror crates/otto-canvas + crates/otto-server/canvas_assist)
+// ---------------------------------------------------------------------------
+
+export interface CanvasScene {
+  id: string;
+  workspace_id: string;
+  story_id: string | null;
+  title: string;
+  /** The Scene JSON as a string (parse with `JSON.parse`). */
+  doc_json: string;
+  thumbnail: string | null;
+  /** The managed Otto session backing this scene's Ask-AI (shown in the Canvas
+   *  Assistant panel — hidden from the Agents list). */
+  session_id: string | null;
+  /** Which agent/provider drives Ask-AI for this scene. */
+  provider: string;
+  /** Folder path for grouping (e.g. "Platform/Staging"); null = root. */
+  section: string | null;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** One entry of a scene's version history (`GET /canvas/scenes/{id}/versions`)
+ *  — the document as it was just before an Ask Otto commit, a restore, or (at
+ *  most every 10 min) a user save. Newest 30 kept; no document in the row. */
+export interface CanvasSceneVersion {
+  id: string;
+  scene_id: string;
+  origin: 'agent' | 'user' | 'restore';
+  created_by?: string | null;
+  format?: string | null;
+  size: number;
+  created_at: string;
+}
+
+export interface CanvasSceneSummary {
+  id: string;
+  workspace_id: string;
+  story_id: string | null;
+  title: string;
+  thumbnail: string | null;
+  /** Folder path for grouping in the list (e.g. "Platform/Staging"); null = root. */
+  section: string | null;
+  /** The scene's source format, pulled out of `doc_json`. `undefined`/absent for
+   *  docs that predate/omit `format` — treat as `mermaid`. */
+  format?: CanvasFormat;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateSceneReq {
+  title: string;
+  doc?: Scene;
+  story_id?: string | null;
+  provider?: string;
+  section?: string | null;
+}
+
+export interface UpdateSceneReq {
+  title?: string;
+  doc?: Scene;
+  thumbnail?: string;
+  provider?: string;
+  section?: string | null;
+  /** Link/relink this scene to a product story. */
+  story_id?: string | null;
+}
+
+export type AssistMode = 'auto' | 'sequence' | 'flow' | 'uml' | 'nodes';
+
+export interface AssistReq {
+  prompt: string;
+  mode?: AssistMode;
+}
+
+export interface AssistResult {
+  /** Excalidraw element SKELETON (when the scene's format is `excalidraw`):
+   *  `{ elements: [...] }` (or a bare array). */
+  excalidraw?: unknown;
+  /** A mermaid diagram source (the default format — clean auto-layout). */
+  mermaid: string | null;
+  /** A D2 diagram source (when the scene's format is `d2`). */
+  d2?: string | null;
+  /** The scene's current source format — `mermaid` | `excalidraw` | `d2`.
+   *  A stop returns the format stored now, which can differ from the editor
+   *  that started the turn. Absent only on an older response. */
+  format?: CanvasFormat;
+  /** Freeform nodes when the agent produced tier-2 JSON instead of mermaid. */
+  nodes: Partial<CanvasNode>[];
+  edges: Partial<CanvasEdge>[];
+  note: string;
+}
+
+// ---------------------------------------------------------------------------
+// File-backed canvas document — the agent EDITS a per-scene source file
+// (`canvas.mermaid`, `canvas.excalidraw.json`, or `canvas.d2`); the server
+// stores its content as the opaque `doc_json` and the UI renders it (into
+// editable Excalidraw shapes, or an SVG for Mermaid/D2).
+// ---------------------------------------------------------------------------
+
+export type CanvasFormat = 'mermaid' | 'excalidraw' | 'd2';
+
+/** The opaque canvas doc shape the server + agent share (parsed from
+ *  `doc_json`). A `source` present marks the scene as agent/file-backed; a plain
+ *  Excalidraw `{elements,…}` doc (no `source`) is a hand-drawn board. */
+export interface CanvasDoc {
+  type?: 'otto-canvas' | 'excalidraw';
+  version?: number;
+  format?: CanvasFormat;
+  /** The mermaid/D2 text or Excalidraw-JSON the agent edits. */
+  source?: string;
+  /** D2 hand-drawn "sketch" render mode (D2 scenes only). */
+  sketch?: boolean;
+  /** Rendered element cache (best-effort) for instant first paint. */
+  elements?: unknown[];
+  appState?: { viewBackgroundColor?: string; gridSize?: number | null };
+  files?: Record<string, unknown>;
+}

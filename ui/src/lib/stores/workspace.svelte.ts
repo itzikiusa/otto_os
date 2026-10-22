@@ -127,9 +127,6 @@ class WorkspaceStore {
   /** Background sources a mounted panel asked to have loaded with the main
    *  list (e.g. the swarm page's `swarm` agents) — {@link includeSources}. */
   private extraSources = new Map<string, number>();
-  /** Programmatic PTY input keyed by session id, with a bump counter so the
-   *  Terminal applies each injection exactly once (e.g. DB rows → running agent). */
-  injections: Record<Id, { text: string; n: number }> = $state({});
   sessionsLoading = $state(false);
   sessionsError = $state<string | null>(null);
   /** The first workspace-list load has picked the selection (or failed).
@@ -1127,21 +1124,12 @@ class WorkspaceStore {
 
   /**
    * Write text into a session's PTY **server-side** (`POST /sessions/{id}/input`),
-   * which works even when no Terminal is mounted for the session yet — unlike
-   * {@link injectInput}, which relies on an open Terminal applying the store
-   * update. `submit` appends a newline so the agent runs it immediately (default).
+   * so it works whether or not a Terminal is mounted for the session. `submit`
+   * appends a newline so the agent runs it immediately (default).
    * Used by the first-run coach to seed a freshly launched session with a prompt.
    */
   async sendInput(sessionId: Id, text: string, submit = true): Promise<void> {
     await api.post(`/sessions/${sessionId}/input`, { text, submit });
-  }
-
-  /** Inject text into a session's PTY (the Terminal for `sessionId` applies it). */
-  injectInput(sessionId: Id, text: string): void {
-    // Sending input is attending to it — drop any "needs you" flag.
-    this.clearNeedsYou(sessionId);
-    const prev = this.injections[sessionId]?.n ?? 0;
-    this.injections = { ...this.injections, [sessionId]: { text, n: prev + 1 } };
   }
 
   /** Best agent session to receive injected input: the focused pane if it's an

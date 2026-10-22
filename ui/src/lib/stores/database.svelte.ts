@@ -2,9 +2,11 @@
 // query tabs, saved queries, history, and Superset-style dashboards/widgets.
 // Reads `ws.currentId` only (never mutates it), mirroring apiClient.svelte.ts.
 // A façade over per-concern parts in ./database/: `model` (types, tab factory,
-// view modes), `statement` (SQL text helpers) and `dashboards.svelte`
-// (dashboards + widgets, delegated through `dash`); it re-exports all of them,
-// so importers keep using `lib/stores/database.svelte`.
+// view modes), `statement` (SQL text helpers), and the sub-stores it owns and
+// delegates to — `dashboards.svelte` (`dash`), `assist.svelte` (`assist`, the
+// DB Assistant panel), `savedQueries.svelte` (`saved`) and `history.svelte`
+// (`hist`); it re-exports all of them, so importers keep using
+// `lib/stores/database.svelte`.
 
 import {
   api,
@@ -12,9 +14,6 @@ import {
   isAbortError,
   withDeadline,
   READ_DEADLINE_MS,
-  dbAssistStart,
-  dbAssistSummary,
-  dbAssistClose,
   dbCloseConnection,
 } from '../api/client';
 import { auth } from './auth.svelte';
@@ -47,7 +46,6 @@ import type {
 import { ws } from './workspace.svelte';
 import { toasts } from '../toast.svelte';
 import { router } from '../router.svelte';
-import { downloadText } from '../components/exporters';
 import { formatMongo } from '../database/mongo-format';
 import {
   defaultVarSpec,
@@ -58,8 +56,6 @@ import {
 } from '../database/sql-util';
 import { condToSql, parseFilterValText, toFilterVal, type FilterCond } from '../database/filter-chips';
 import { tableRefFromNodeId } from '../database/sql-dialect';
-export { condLabel, condToSql, filterValMatches, parseFilterValText, toFilterVal } from '../database/filter-chips';
-export type { FilterCond, FilterVal } from '../database/filter-chips';
 import { normalizeDbError } from '../database/error-normalize';
 import { copyTextOrThrow } from '../clipboard';
 import { mapLimit, pollWhileVisible, type Poller } from '../poll';
@@ -120,7 +116,13 @@ import {
 export * from './database/model';
 export * from './database/statement';
 import { DbDashboardsStore } from './database/dashboards.svelte';
+import { DbAssistStore } from './database/assist.svelte';
+import { DbSavedQueriesStore } from './database/savedQueries.svelte';
+import { DbHistoryStore } from './database/history.svelte';
 export { DbDashboardsStore, type DashboardsHost } from './database/dashboards.svelte';
+export { DbAssistStore, type AssistHost } from './database/assist.svelte';
+export { DbSavedQueriesStore, type SavedQueriesHost } from './database/savedQueries.svelte';
+export { DbHistoryStore, type HistoryHost } from './database/history.svelte';
 
 class DatabaseStore {
   // ── Connections ────────────────────────────────────────────────────────────
@@ -320,24 +322,41 @@ class DatabaseStore {
   // loadConnectionFresh); snapshots never restore 'connections' (captureSnapshot).
   sideTab: DbSideTab = $state('connections');
 
-  // ── Saved queries / history ─────────────────────────────────────────────
-  savedQueries: DbSavedQuery[] = $state([]);
-  savedQueriesLoading = $state(false);
-  savedQueriesError: string | null = $state(null);
-  private savedQueriesScope: string | null = null;
-  private savedQueriesRequest = 0;
-  historyLoading = $state(false);
-  historyError: string | null = $state(null);
-  private historyRequest = 0;
-  // Raw: only ever replaced wholesale (a refetch after each run). Deep, every
-  // refetch proxied up to 1,000 FULL statements (an import batch is a
-  // ~0.3 MB INSERT) and the sidebar's filter walked them through proxies.
-  history: DbHistoryEntry[] = $state.raw([]);
-  /** How many history rows the current window requested. Bumped by "Load more"
-   *  (100 → up to the API's 1000 cap). Reset to 100 on a fresh connection load. */
-  historyLimit = $state(100);
-  /** True while a "Load more" fetch is in flight (disables the button). */
-  historyLoadingMore = $state(false);
+  // ── Saved queries (./database/savedQueries.svelte.ts) ─────────────────────
+  readonly saved = new DbSavedQueriesStore({
+    wsBase: () => this.wsBase(),
+    accessEpoch: () => this.accessEpoch,
+    selectedConnId: () => this.selectedConnId,
+    tabs: () => this.tabs,
+    activeTab: () => this.tab ?? null,
+    locateTab: (tabId) => this.locateTab(tabId),
+    persistTabsNow: (connId) => this.persistTabsNow(connId),
+    persistTabs: () => this.persistTabs(),
+    focusQueryTab: (i) => {
+      this.switchTab(i);
+      this.setMainTab('query');
+    },
+    newTab: (statement) => this.newTab(statement),
+  });
+  get savedQueries(): DbSavedQuery[] { return this.saved.savedQueries; }
+  set savedQueries(v: DbSavedQuery[]) { this.saved.savedQueries = v; }
+  get savedQueriesLoading(): boolean { return this.saved.savedQueriesLoading; }
+  get savedQueriesError(): string | null { return this.saved.savedQueriesError; }
+
+  // ── History (./database/history.svelte.ts) ───────────────────────────────
+  readonly hist = new DbHistoryStore({
+    selectedConnId: () => this.selectedConnId,
+    accessEpoch: () => this.accessEpoch,
+    newTab: (statement) => this.newTab(statement),
+  });
+  get history(): DbHistoryEntry[] { return this.hist.history; }
+  set history(v: DbHistoryEntry[]) { this.hist.history = v; }
+  get historyLoading(): boolean { return this.hist.historyLoading; }
+  get historyError(): string | null { return this.hist.historyError; }
+  set historyError(v: string | null) { this.hist.historyError = v; }
+  get historyLimit(): number { return this.hist.historyLimit; }
+  set historyLimit(v: number) { this.hist.historyLimit = v; }
+  get historyLoadingMore(): boolean { return this.hist.historyLoadingMore; }
 
   // ── Dashboards / widgets (./database/dashboards.svelte.ts) ─────────────────
   readonly dash = new DbDashboardsStore({
@@ -362,220 +381,41 @@ class DatabaseStore {
   queryPlan: DbQueryPlan | null = $state(null);
   planOpen = $state(false);
 
-  // ── DB Assistant (embedded, file-backed agent panel) ─────────────────────
-  // The DB Assistant runs an agent as a managed Otto session beside the query
-  // editor/results. The panel binds a live `<Terminal>` to its session (the user
-  // talks to the agent IN the shell), shows the agent's proposed SQL, and can
-  // summarize → download or close → discard. The session is hidden from Agents
-  // (meta.source = 'db_assist'). State is ephemeral (no persistence) — Close
-  // (DELETE) kills the session + discards the working dir.
-  /** The DB Assistant panel is open (split beside the editor/results). */
-  assistOpen = $state(false);
-  /** Connection the current assist targets (captured at open). */
-  assistConnId: Id | null = $state(null);
-  /** Server assist id (minted by the first turn; the resume + DELETE key). */
-  assistId: string | null = $state(null);
-  /** Live agent session id — the panel mounts `<Terminal>` on it. */
-  assistSessionId: string | null = $state(null);
-  /** Entry mode (nl/ask/investigate) — drives the prompt + the panel hint. */
-  assistMode: DbAssistMode = $state('nl');
-  /** Chosen agent CLI (claude/codex/…) — picked before the first turn. */
-  assistProvider = $state('');
-  /** The agent's proposed SQL (start response + live `db_assist_updated`). */
-  assistProposedSql = $state('');
-  /** A one-line explanation/note from the agent. */
-  assistNote = $state('');
-  /** A turn (the first POST) is in flight. */
-  assistBusy = $state(false);
-  /** investigate-mode seed (statement + a small result sample); non-reactive. */
-  private assistResultContext: string | null = null;
-  /** Aborts the in-flight assist POST (Stop). Non-reactive plain field. */
-  private assistAbort: AbortController | null = null;
-
-  /**
-   * Open the DB Assistant panel in `mode`. For `investigate`, pass a compact
-   * `resultContext` (statement + result sample). Targets the active connection.
-   * Does NOT start a session — the user picks the agent and types the first
-   * question (which POSTs the first turn). Reopening resets the local view; the
-   * previous session (if any) was already discarded on Close.
-   */
-  openAssist(mode: DbAssistMode, resultContext?: string | null): void {
-    if (!auth.can('agents','edit')) return;
-    if (!this.selectedConnId) {
-      toasts.error('No connection selected');
-      return;
-    }
-    this.assistOpen = true;
-    this.assistMode = mode;
-    this.assistConnId = this.selectedConnId;
-    this.assistResultContext = resultContext ?? null;
-    this.assistId = null;
-    this.assistSessionId = null;
-    this.assistProposedSql = '';
-    this.assistNote = '';
-    this.assistBusy = false;
-  }
-
-  /** Set the chosen agent CLI for the assist (before the first turn). */
-  setAssistProvider(provider: string): void {
-    this.assistProvider = provider;
-  }
-
-  /**
-   * Run ONE agent turn — the first question (or a resume). POSTs to
-   * `…/db/assist`; the live session appears via the `db_assist_session_started`
-   * event (mirrored in the response as a fallback) and the proposed SQL streams
-   * in via `db_assist_updated`. After the first turn the user continues the
-   * conversation by typing directly in the embedded terminal.
-   */
-  async startAssist(question: string): Promise<void> {
-    const id = this.assistConnId ?? this.selectedConnId;
-    if (!id) {
-      toasts.error('No connection selected');
-      return;
-    }
-    const q = question.trim();
-    if (!q || this.assistBusy) return;
-    this.assistBusy = true;
-    // Abortable: the POST is long (agent turn) and can wedge — Stop drops the
-    // HTTP wait and releases the input (the session, if started, stays live).
-    const ac = new AbortController();
-    this.assistAbort = ac;
-    try {
-      const resp = await dbAssistStart(
-        id,
-        {
-          question: q,
-          mode: this.assistMode,
-          ...(this.activeDb ? { node: this.activeDb } : {}),
-          ...(this.assistProvider ? { provider: this.assistProvider } : {}),
-          ...(this.assistId ? { assist_id: this.assistId } : {}),
-          ...(this.assistResultContext && this.assistMode === 'investigate'
-            ? { result_context: this.assistResultContext }
-            : {}),
-        },
-        ac.signal,
-      );
-      this.assistId = resp.assist_id;
-      // The session usually arrives first (turn START) via the event; set it from
-      // the response too in case it didn't (idempotent — same id).
-      if (resp.session_id) this.assistSessionId = resp.session_id;
-      if (resp.sql) this.assistProposedSql = resp.sql;
-      if (resp.note) this.assistNote = resp.note;
-    } catch (e) {
-      if (!ac.signal.aborted) toastError('Couldn’t dB assistant', e);
-    } finally {
-      if (this.assistAbort === ac) this.assistAbort = null;
-      this.assistBusy = false;
-    }
-  }
-
-  /** Stop the in-flight assist turn: abort the POST and release the input. */
-  stopAssist(): void {
-    this.assistAbort?.abort();
-    this.assistBusy = false;
-  }
-
-  /** `db_assist_session_started` → attach the live shell. */
-  setAssistSession(assistId: string, connId: Id, sessionId: string): void {
-    if (this.adoptAssist(assistId, connId)) this.assistSessionId = sessionId;
-  }
-
-  /** `db_assist_updated` → live proposed SQL + note. */
-  applyAssistUpdate(assistId: string, connId: Id, sql: string, note: string): void {
-    if (!this.adoptAssist(assistId, connId)) return;
-    if (sql) this.assistProposedSql = sql;
-    if (note) this.assistNote = note;
-  }
-
-  /** True when an event's `assist_id` belongs to this open panel — either it
-   *  already IS our assist, or a turn is IN FLIGHT for this connection with no id
-   *  yet (the server minted the id mid-POST) and we adopt it. */
-  private adoptAssist(assistId: string, connId: Id): boolean {
-    if (!this.assistOpen) return false;
-    if (assistId === this.assistId) return true;
-    if (this.assistBusy && this.assistId === null && connId === this.assistConnId) {
-      this.assistId = assistId;
-      return true;
-    }
-    return false;
-  }
-
-  /** Insert the agent's proposed SQL into the active query tab. Replaces the
-   *  editor's text, so a non-empty, different buffer asks first — the person's
-   *  own SQL is never overwritten silently. Resolves false when kept. */
-  async insertAssistSql(): Promise<boolean> {
-    const sql = this.assistProposedSql;
-    if (!sql.trim()) return false;
-    const current = this.tab?.statement ?? '';
-    if (current.trim() && current.trim() !== sql.trim()) {
-      const ok = await confirmer.ask(
-        'The agent’s query will replace what is in the editor now. Your current text is not saved anywhere else.',
-        { title: 'Replace the current query?', confirmLabel: 'Replace', cancelLabel: 'Keep mine', danger: false },
-      );
-      if (!ok) return false;
-    }
-    this.mainTab = 'query';
-    this.setStatement(sql);
-    return true;
-  }
-
-  /** Insert the agent's proposed SQL and run it via the normal run path. The
-   *  run is READ-ONLY: a write the agent proposed is refused by the server and
-   *  only goes ahead after an attributed confirm (guarded connections take the
-   *  typed confirm) — agent SQL can never silently write. */
-  async runAssistSql(): Promise<void> {
-    if (!(await this.insertAssistSql())) return;
-    const who = this.assistProvider || 'Agent';
-    await this.runQuery(undefined, undefined, {
-      readOnly: true,
-      agentLabel: `${who} · DB assistant`,
-      confirmWrite: () =>
-        confirmer.ask(`${who} proposed a query that writes to this database. Run it anyway?`, {
-          title: 'Allow this write?',
-          confirmLabel: 'Run write',
-          danger: true,
-        }),
-    });
-  }
-
-  /** Summarize the investigation → download the returned markdown. */
-  async summarizeAssist(): Promise<void> {
-    const id = this.assistConnId ?? this.selectedConnId;
-    if (!id || !this.assistId) {
-      toasts.error('Nothing to summarize yet');
-      return;
-    }
-    this.assistBusy = true;
-    try {
-      const resp = await dbAssistSummary(id, this.assistId);
-      downloadText(resp.markdown, `db-assist-${this.assistId}.md`, 'text/markdown');
-      toasts.success('Summary downloaded');
-    } catch (e) {
-      toastError('Couldn’t summarize', e);
-    } finally {
-      this.assistBusy = false;
-    }
-  }
-
-  /** Close the panel — DELETE the assist (kills the session, discards the dir). */
-  async closeAssist(): Promise<void> {
-    const id = this.assistConnId ?? this.selectedConnId;
-    const aid = this.assistId;
-    this.assistOpen = false;
-    this.assistSessionId = null;
-    this.assistProposedSql = '';
-    this.assistNote = '';
-    this.assistId = null;
-    this.assistResultContext = null;
-    if (id && aid) {
-      try {
-        await dbAssistClose(id, aid);
-      } catch {
-        /* best-effort discard — the session is reaped on daemon restart anyway */
-      }
-    }
-  }
+  // ── DB Assistant (./database/assist.svelte.ts) ───────────────────────────
+  readonly assist = new DbAssistStore({
+    selectedConnId: () => this.selectedConnId,
+    activeDb: () => this.activeDb,
+    currentStatement: () => this.tab?.statement ?? '',
+    insertIntoQuery: (sql) => {
+      this.mainTab = 'query';
+      this.setStatement(sql);
+    },
+    runReadOnly: async (agentLabel, confirmWrite) => {
+      await this.runQuery(undefined, undefined, { readOnly: true, agentLabel, confirmWrite });
+    },
+  });
+  get assistOpen(): boolean { return this.assist.assistOpen; }
+  set assistOpen(v: boolean) { this.assist.assistOpen = v; }
+  get assistConnId(): Id | null { return this.assist.assistConnId; }
+  get assistId(): string | null { return this.assist.assistId; }
+  get assistSessionId(): string | null { return this.assist.assistSessionId; }
+  get assistMode(): DbAssistMode { return this.assist.assistMode; }
+  get assistProvider(): string { return this.assist.assistProvider; }
+  get assistProposedSql(): string { return this.assist.assistProposedSql; }
+  set assistProposedSql(v: string) { this.assist.assistProposedSql = v; }
+  get assistNote(): string { return this.assist.assistNote; }
+  set assistNote(v: string) { this.assist.assistNote = v; }
+  get assistBusy(): boolean { return this.assist.assistBusy; }
+  openAssist(mode: DbAssistMode, resultContext?: string | null): void { this.assist.openAssist(mode, resultContext); }
+  setAssistProvider(provider: string): void { this.assist.setAssistProvider(provider); }
+  startAssist(question: string): Promise<void> { return this.assist.startAssist(question); }
+  stopAssist(): void { this.assist.stopAssist(); }
+  setAssistSession(assistId: string, connId: Id, sessionId: string): void { this.assist.setAssistSession(assistId, connId, sessionId); }
+  applyAssistUpdate(assistId: string, connId: Id, sql: string, note: string): void { this.assist.applyAssistUpdate(assistId, connId, sql, note); }
+  insertAssistSql(): Promise<boolean> { return this.assist.insertAssistSql(); }
+  runAssistSql(): Promise<void> { return this.assist.runAssistSql(); }
+  summarizeAssist(): Promise<void> { return this.assist.summarizeAssist(); }
+  closeAssist(): Promise<void> { return this.assist.closeAssist(); }
 
   // ── Path helpers ────────────────────────────────────────────────────────
   private connBase(id: Id): string {
@@ -2356,7 +2196,7 @@ class DatabaseStore {
       await copyTextOrThrow(ddl);
       toasts.success('Create statement copied', node.label);
     } catch {
-      toasts.error('Couldn’t copy the create statement', 'The clipboard isn’t available here.');
+      toasts.error('Couldn’t copy the create statement', 'Select the text and copy it manually.');
     }
   }
 
@@ -2374,18 +2214,16 @@ class DatabaseStore {
    * columns + PK/FK flags) and the FK edges between them. Read-only; backed by
    * the same introspection the tree uses. `maxTables` caps the fan-out.
    */
+  /** The ERD graph for `schema`. Null ONLY with no connection selected; a
+   *  failed load throws so the diagram renders it inline with Retry — a null
+   *  must never read as "No schema selected" (same rule as listBuilderTables). */
   async fetchSchemaGraph(schema: string, maxTables = 60): Promise<DbSchemaGraph | null> {
     const id = this.selectedConnId;
     if (!id) return null;
-    try {
-      return await api.post<DbSchemaGraph>(`${this.connBase(id)}/schema-graph`, {
-        schema,
-        max_tables: maxTables,
-      });
-    } catch (e) {
-      toastError('Couldn’t load diagram', e);
-      return null;
-    }
+    return await api.post<DbSchemaGraph>(`${this.connBase(id)}/schema-graph`, {
+      schema,
+      max_tables: maxTables,
+    });
   }
 
   // ── Builder catalog (full enumeration for the visual JOIN canvas) ────────
@@ -3397,205 +3235,18 @@ class DatabaseStore {
     }
   }
 
-  // ── Saved queries ─────────────────────────────────────────────────────────
-
-  async loadSavedQueries(): Promise<void> {
-    const accessEpoch = this.accessEpoch;
-    const base = this.wsBase();
-    const request = ++this.savedQueriesRequest;
-    if (this.savedQueriesScope !== base) {
-      this.savedQueries = [];
-      this.savedQueriesError = null;
-      this.savedQueriesScope = base;
-    }
-    if (!base) { this.savedQueriesLoading = false; return; }
-    const current = () => request === this.savedQueriesRequest && base === this.wsBase() && accessEpoch === this.accessEpoch;
-    this.savedQueriesLoading = true;
-    try {
-      const queries = await api.get<DbSavedQuery[]>(`${base}/saved-queries`);
-      if (current()) { this.savedQueries = queries; this.savedQueriesError = null; }
-    } catch (e) {
-      if (current()) this.savedQueriesError = loadErrorText(e);
-    } finally {
-      if (current()) this.savedQueriesLoading = false;
-    }
-  }
-
-  /** Create a NEW saved query, associating the active tab with it so a later
-   *  "Save" updates it in place. Used by "Save as new" and first-time saves. */
-  async saveQuery(name: string, statement: string): Promise<DbSavedQuery | null> {
-    const tab = this.tab;
-    const accessEpoch = this.accessEpoch;
-    const base = this.wsBase();
-    if (!base) return null;
-    try {
-      const saved = await api.post<DbSavedQuery>(`${base}/saved-queries`, {
-        connection_id: this.selectedConnId,
-        name,
-        statement,
-      });
-      if (accessEpoch !== this.accessEpoch || base !== this.wsBase()) return saved;
-      this.savedQueries = [saved, ...this.savedQueries.filter((q) => q.id !== saved.id)];
-      // The initiating tab may be parked in another connection's snapshot.
-      // Update and persist its owner without changing the visible connection.
-      const owner = tab ? this.locateTab(tab.id) : null;
-      if (owner?.tab === tab) {
-        tab.savedQueryId = saved.id;
-        tab.name = saved.name;
-        this.persistTabsNow(owner.connId);
-      }
-      toasts.success('Query saved', saved.name);
-      return saved;
-    } catch (e) {
-      toastError('Couldn’t save query', e);
-      return null;
-    }
-  }
-
-  /** Update a saved query in place (name and/or statement) via PATCH. Callers
-   *  own the success toast; this only surfaces errors. */
-  async updateSavedQuery(
-    id: Id,
-    patch: { name?: string; statement?: string },
-  ): Promise<DbSavedQuery | null> {
-    try {
-      const updated = await api.patch<DbSavedQuery>(`/db/saved-queries/${id}`, patch);
-      this.savedQueries = this.savedQueries.map((q) => (q.id === updated.id ? updated : q));
-      return updated;
-    } catch (e) {
-      toastError('Couldn’t update the query', e);
-      return null;
-    }
-  }
-
-  /** Inline rename of a saved query (Saved list), keeping any open tab's title
-   *  in sync. */
-  async renameSavedQuery(id: Id, name: string): Promise<void> {
-    const trimmed = name.trim();
-    if (!trimmed) return;
-    const updated = await this.updateSavedQuery(id, { name: trimmed });
-    if (!updated) return;
-    for (const t of this.tabs) if (t.savedQueryId === id) t.name = updated.name;
-    this.persistTabs();
-    toasts.success('Renamed', updated.name);
-  }
-
-  /**
-   * Save the ACTIVE tab. When the tab already came from a saved query (and it
-   * still exists) this updates that one in place (PATCH); otherwise it creates a
-   * new saved query. `name` overrides the stored name when non-empty (the Save
-   * dialog supplies it for the create case).
-   */
-  async saveActiveTab(name: string): Promise<DbSavedQuery | null> {
-    const t = this.tab;
-    if (!t) return null;
-    const existing =
-      t.savedQueryId && this.savedQueries.some((q) => q.id === t.savedQueryId)
-        ? t.savedQueryId
-        : null;
-    if (existing) {
-      const updated = await this.updateSavedQuery(existing, {
-        name: name.trim() || undefined,
-        statement: t.statement,
-      });
-      if (updated) {
-        t.name = updated.name;
-        this.persistTabs();
-        toasts.success('Query updated', updated.name);
-      }
-      return updated;
-    }
-    return this.saveQuery(name.trim() || 'Query', t.statement);
-  }
-
-  async deleteSavedQuery(id: Id): Promise<void> {
-    try {
-      await api.del(`/db/saved-queries/${id}`);
-      this.savedQueries = this.savedQueries.filter((q) => q.id !== id);
-      // Detach any open tab that pointed at it (its "Save" reverts to create).
-      for (const t of this.tabs) if (t.savedQueryId === id) t.savedQueryId = undefined;
-    } catch (e) {
-      toastError('Couldn’t delete query', e);
-    }
-  }
-
-  /** Open a saved query. If a tab already carries it, focus that tab (don't
-   *  duplicate); otherwise open a fresh tab that remembers the saved-query id. */
-  openSavedQuery(q: DbSavedQuery): void {
-    const idx = this.tabs.findIndex((t) => t.savedQueryId === q.id);
-    if (idx >= 0) {
-      this.switchTab(idx);
-      this.setMainTab('query');
-      return;
-    }
-    this.newTab(q.statement);
-    const t = this.tab;
-    if (t) {
-      t.name = q.name;
-      t.savedQueryId = q.id;
-    }
-    this.persistTabs();
-  }
-
-  // ── History ─────────────────────────────────────────────────────────────
-
-  async loadHistory(connId?: Id): Promise<void> {
-    const accessEpoch = this.accessEpoch;
-    const id = connId ?? this.selectedConnId;
-    // A background query may finish after its connection is no longer visible.
-    // Its history is refreshed when the connection is reopened.
-    if (!id || id !== this.selectedConnId) return;
-    const request = ++this.historyRequest;
-    const current = () => request === this.historyRequest && this.selectedConnId === id && accessEpoch === this.accessEpoch;
-    this.historyLoading = true;
-    try {
-      const rows = await api.get<DbHistoryEntry[]>(`${this.connBase(id)}/history?limit=${this.historyLimit}`);
-      if (current()) { this.history = rows; this.historyError = null; }
-    } catch (e) {
-      if (current()) this.historyError = loadErrorText(e);
-    } finally {
-      if (current()) this.historyLoading = false;
-    }
-  }
-
-  /** Fetch a larger history window (100 → up to the API's 1000 cap). */
-  async loadMoreHistory(): Promise<void> {
-    if (this.historyLoadingMore || this.historyLimit >= 1000) return;
-    this.historyLimit = Math.min(1000, this.historyLimit + 100);
-    this.historyLoadingMore = true;
-    try {
-      await this.loadHistory();
-    } finally {
-      this.historyLoadingMore = false;
-    }
-  }
-
-  /** Whether more history rows may exist (window is full and under the cap). */
-  get canLoadMoreHistory(): boolean {
-    return this.historyLimit < 1000 && this.history.length >= this.historyLimit;
-  }
-
-  /** Load a history entry's statement into a fresh tab. */
-  /** Open a history row in a new tab. The history LIST carries a 16 KiB
-   *  preview of big statements (`statement_len` set); fetch the full text by
-   *  id first so a re-run never runs the clipped preview. */
-  async openHistory(h: DbHistoryEntry): Promise<void> {
-    if (h.statement_len === undefined || h.statement_len <= h.statement.length) {
-      this.newTab(h.statement);
-      return;
-    }
-    const id = this.selectedConnId;
-    if (!id) return;
-    try {
-      const full = await api.get<DbHistoryEntry>(
-        `${this.connBase(id)}/history/${encodeURIComponent(h.id)}`,
-      );
-      if (this.selectedConnId !== id) return; // switched connection meanwhile
-      this.newTab(full.statement);
-    } catch (e) {
-      toastError('Couldn’t open this history entry', e);
-    }
-  }
+  // ── Saved queries / history: delegated to `saved` / `hist` ─────────────────
+  loadSavedQueries(): Promise<void> { return this.saved.loadSavedQueries(); }
+  saveQuery(name: string, statement: string): Promise<DbSavedQuery | null> { return this.saved.saveQuery(name, statement); }
+  updateSavedQuery(id: Id, patch: { name?: string; statement?: string }): Promise<DbSavedQuery | null> { return this.saved.updateSavedQuery(id, patch); }
+  renameSavedQuery(id: Id, name: string): Promise<void> { return this.saved.renameSavedQuery(id, name); }
+  saveActiveTab(name: string): Promise<DbSavedQuery | null> { return this.saved.saveActiveTab(name); }
+  deleteSavedQuery(id: Id): Promise<void> { return this.saved.deleteSavedQuery(id); }
+  openSavedQuery(q: DbSavedQuery): void { this.saved.openSavedQuery(q); }
+  loadHistory(connId?: Id): Promise<void> { return this.hist.loadHistory(connId); }
+  loadMoreHistory(): Promise<void> { return this.hist.loadMoreHistory(); }
+  get canLoadMoreHistory(): boolean { return this.hist.canLoadMoreHistory; }
+  openHistory(h: DbHistoryEntry): Promise<void> { return this.hist.openHistory(h); }
 
   // ── Dashboards / widgets: delegated to `dash` ──────────────────────────────
   loadDashboards(): Promise<void> { return this.dash.loadDashboards(); }

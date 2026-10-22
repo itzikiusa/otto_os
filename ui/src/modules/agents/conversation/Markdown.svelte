@@ -83,7 +83,7 @@
       const dark = ui.resolvedScheme === 'dark';
       void (kind === 'd2'
         ? import('../../canvas/d2').then((m) => m.renderD2(id, src, { dark, isStale: () => !el.isConnected }))
-        : import('../../canvas/mermaid').then((m) => m.renderMermaid(id, src, { dark, isStale: () => !el.isConnected }))
+        : import('../../../lib/render/mermaid').then((m) => m.renderMermaid(id, src, { dark, isStale: () => !el.isConnected }))
       ).then(({ svg, error, stale }: { svg?: string; error?: string; stale?: boolean }) => {
         if (!el.isConnected || stale) return;
         if (svg) {

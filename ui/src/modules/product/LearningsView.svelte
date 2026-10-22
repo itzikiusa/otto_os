@@ -11,6 +11,7 @@
   import { confirmer } from '../../lib/confirm.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
+  import { focusFirstField, refocusEditTrigger } from '../../lib/inlineEdit';
   import type { ProductLearning, NewLearningReq, UpdateLearningReq } from './types';
 
   // ── Filter (the view's own segmented control — no side rail) ─────────────────
@@ -167,8 +168,12 @@
     }
   }
 
+  // Inline-edit focus contract (lib/inlineEdit.ts): the form takes focus on
+  // open; Cancel and a successful save hand it back to the row's Edit button.
   function cancelEdit(): void {
+    const id = editingId;
     editingId = null;
+    if (id) void refocusEditTrigger(`learning-${id}`);
   }
 
   async function saveEdit(id: string): Promise<void> {
@@ -189,6 +194,7 @@
       await product.updateLearning(id, req);
       toasts.success('Learning updated');
       editingId = null;
+      void refocusEditTrigger(`learning-${id}`);
     } catch (e) {
       toastError('Couldn’t save learning', e);
     } finally {
@@ -343,7 +349,7 @@
 
             {#if editingId === l.id}
               <!-- Edit form inline -->
-              <div class="edit-form">
+              <div class="edit-form" use:focusFirstField>
                 <div class="form-row">
                   <label class="field-label" for="ek-{l.id}">Kind</label>
                   <select id="ek-{l.id}" class="mini-select" bind:value={editKind}>
@@ -397,7 +403,7 @@
                     />
                     <span class="toggle-label">{l.active ? 'Active' : 'Inactive'}</span>
                   </label>
-                  <button class="icon-act" onclick={() => startEdit(l)} title="Edit" aria-label="Edit">
+                  <button class="icon-act" onclick={() => startEdit(l)} title="Edit" aria-label={`Edit ${l.title}`} data-edit-for={`learning-${l.id}`}>
                     <Icon name="edit" size={12} />
                   </button>
                   <button class="icon-act danger" onclick={() => askDelete(l.id)} disabled={deletingId === l.id} title="Delete" aria-label="Delete">
@@ -467,7 +473,7 @@
 
             {#if editingId === l.id}
               <!-- Edit form inline -->
-              <div class="edit-form">
+              <div class="edit-form" use:focusFirstField>
                 <div class="form-row">
                   <label class="field-label" for="ek2-{l.id}">Kind</label>
                   <select id="ek2-{l.id}" class="mini-select" bind:value={editKind}>
@@ -521,7 +527,7 @@
                     />
                     <span class="toggle-label">{l.active ? 'Active' : 'Inactive'}</span>
                   </label>
-                  <button class="icon-act" onclick={() => startEdit(l)} title="Edit" aria-label="Edit">
+                  <button class="icon-act" onclick={() => startEdit(l)} title="Edit" aria-label={`Edit ${l.title}`} data-edit-for={`learning-${l.id}`}>
                     <Icon name="edit" size={12} />
                   </button>
                   <button class="icon-act danger" onclick={() => askDelete(l.id)} disabled={deletingId === l.id} title="Delete" aria-label="Delete">

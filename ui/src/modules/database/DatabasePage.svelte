@@ -33,7 +33,7 @@
   import { PRIMARY_SCROLLBACK } from '../../lib/components/termFlow';
   import ImportDialog from './ImportDialog.svelte';
   import ExportDialog from './ExportDialog.svelte';
-  import { stmtPreview } from './sql-util';
+  import { stmtPreview } from '../../lib/database/sql-util';
   import { databaseAccessChild } from '../../lib/access-options';
   import { database, engineGlyph, type DbMainTab, type DbSideTab } from '../../lib/stores/database.svelte';
   import Tabs, { type TabItem } from '../../lib/components/Tabs.svelte';

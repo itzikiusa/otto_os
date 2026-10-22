@@ -19,8 +19,13 @@ use tokio::{
 };
 pub const VERSION: &str = "0.162.0";
 /// The collector's own stderr (export failures, rejected batches). Rotated
-/// once at each start so it stays bounded across many short flush runs.
+/// at each start (bounded across many short flush runs) and, while the
+/// collector lives, every [`LOG_CHECK_EVERY`] by copy-truncate.
 const LOG_LIMIT: u64 = 1024 * 1024;
+/// How often a running collector's log is checked against [`LOG_LIMIT`]. The
+/// collector lives as long as the daemon (days), and an exporter failing in a
+/// loop logs every batch — a check only at spawn left that growth unbounded.
+const LOG_CHECK_EVERY: Duration = Duration::from_secs(600);
 /// Go heap soft limit, kept below the memory_limiter hard limit (192 MiB) so
 /// the runtime collects before the limiter starts refusing data.
 const GOMEMLIMIT: &str = "160MiB";
@@ -28,6 +33,8 @@ pub(crate) struct Collector {
     child: Child,
     sampled: Option<crate::resource::CollectorRegistration>,
     _owner_lock: Option<Arc<std::fs::File>>,
+    /// Periodic copy-truncate of `collector.log`; aborted when dropped.
+    _log_rotator: Option<LogRotator>,
     pub endpoint: String,
     pub health: String,
     /// Loopback Prometheus endpoint for the collector's own metrics.
@@ -213,6 +220,7 @@ impl Collector {
             child,
             sampled: Some(sampled),
             _owner_lock: Some(owner_lock),
+            _log_rotator: Some(LogRotator::spawn(dir.join("collector.log"), LOG_LIMIT)),
             endpoint,
             health: format!("http://127.0.0.1:{health_port}"),
             metrics: format!("http://127.0.0.1:{metrics_port}/metrics"),
@@ -258,6 +266,56 @@ async fn open_log(dir: &Path) -> Result<std::fs::File> {
     }
     options.open(path).context("open collector log")
 }
+/// Copy-truncate `path` once it passes `cap`: its contents replace
+/// `<name>.1` and the live file is cut to zero IN PLACE. The child holds an
+/// `O_APPEND` fd, so its next write lands at the new end (a rename would leave
+/// it writing to the unlinked old file forever). Lines written between the
+/// copy and the truncate can be lost — a bounded log is worth that. Returns
+/// whether it rotated.
+pub(crate) fn copy_truncate_if_over(path: &Path, cap: u64) -> std::io::Result<bool> {
+    let len = match std::fs::metadata(path) {
+        Ok(m) => m.len(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    if len <= cap {
+        return Ok(false);
+    }
+    let mut rotated = path.as_os_str().to_owned();
+    rotated.push(".1");
+    std::fs::copy(path, PathBuf::from(rotated))?;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)?
+        .set_len(0)?;
+    Ok(true)
+}
+
+/// A background task that copy-truncates a running sidecar's log every
+/// [`LOG_CHECK_EVERY`]. Aborted on drop, so it never outlives its collector.
+pub(crate) struct LogRotator(tokio::task::JoinHandle<()>);
+impl LogRotator {
+    fn spawn(path: PathBuf, cap: u64) -> Self {
+        Self(tokio::spawn(async move {
+            let mut tick = tokio::time::interval(LOG_CHECK_EVERY);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            tick.tick().await; // immediate: open_log just checked at spawn
+            loop {
+                tick.tick().await;
+                let path = path.clone();
+                // Best effort: a failed check retries on the next tick.
+                let _ =
+                    tokio::task::spawn_blocking(move || copy_truncate_if_over(&path, cap)).await;
+            }
+        }))
+    }
+}
+impl Drop for LogRotator {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 fn port() -> Result<u16> {
     Ok(std::net::TcpListener::bind("127.0.0.1:0")?
         .local_addr()?

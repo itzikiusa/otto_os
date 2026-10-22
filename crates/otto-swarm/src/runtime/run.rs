@@ -229,12 +229,20 @@ async fn find_agent_session(ctx: &SwarmRt, ws: &Id, agent_id: &str, user: &str) 
         .list_live_by_meta(ws, Some("agent"), "agent_id", agent_id)
         .await
         .ok()?;
-    sessions.into_iter().find_map(|s| {
-        let is_agent = s.kind == SessionKind::Agent && !s.archived;
-        let mine = s.meta.get("agent_id").and_then(|v| v.as_str()) == Some(agent_id);
-        let alive = !matches!(s.status, SessionStatus::Exited);
-        (is_agent && mine && alive && s.created_by == user).then_some(s.id)
-    })
+    sessions
+        .into_iter()
+        .find_map(|s| reusable_for(&s, agent_id, user).then_some(s.id))
+}
+
+/// Whether `s` may carry a turn of `agent_id` ACTING AS `user` (test-quality-5-06):
+/// a live, unarchived agent session of that agent, created as that user —
+/// another user's session carries their MCP token, provider account and git
+/// identity, so it is never reused across acting users.
+pub(crate) fn reusable_for(s: &otto_core::domain::Session, agent_id: &str, user: &str) -> bool {
+    let is_agent = s.kind == SessionKind::Agent && !s.archived;
+    let mine = s.meta.get("agent_id").and_then(|v| v.as_str()) == Some(agent_id);
+    let alive = !matches!(s.status, SessionStatus::Exited);
+    is_agent && mine && alive && s.created_by == user
 }
 
 /// Bound on the originator walk (parent / source-run links); a cycle or an
@@ -249,6 +257,13 @@ const MAX_ORIGIN_HOPS: usize = 16;
 /// label of a handoff/proposal) until a person turns up. A turn with no task
 /// (planning, schedules) acts as the project's creator. The swarm creator is
 /// the fallback only when no person originated the work.
+///
+/// access-control-5-01: at every hop the latest person who REWROTE the task's
+/// prompt (title, description, labels) or its goals wins over its originator
+/// — mirroring `WorkflowsRepo::run_acting_user` — so an Editor's edit of
+/// another person's task runs as that Editor, never as the author. Only
+/// runtime-stamped `source-run:` labels drive the walk: a person may not add
+/// one (`SwarmService::update_task` refuses it).
 pub async fn acting_user(
     repo: &otto_state::SwarmRepo,
     swarm: &otto_state::Swarm,
@@ -262,6 +277,13 @@ pub async fn acting_user(
     let mut cur = task.cloned();
     for _ in 0..MAX_ORIGIN_HOPS {
         let Some(t) = cur.take() else { break };
+        let editor = repo.task_prompt_editor(&t.id).await.ok().flatten();
+        if let Some(user) = match editor {
+            Some(e) => is_person(e).await,
+            None => None,
+        } {
+            return user;
+        }
         if let Some(user) = is_person(t.created_by.clone()).await {
             return user;
         }
@@ -1221,5 +1243,51 @@ mod shared_files_tests {
         forget_branch_in(&mut map, "sw", "b");
         assert!(!map.contains_key("sw"));
         forget_branch_in(&mut map, "missing", "a"); // no-op
+    }
+}
+
+#[cfg(test)]
+mod reuse_tests {
+    use super::reusable_for;
+    use otto_core::domain::{Session, SessionKind, SessionStatus};
+    use serde_json::json;
+
+    fn session(agent: &str, creator: &str) -> Session {
+        Session {
+            id: "s1".into(),
+            workspace_id: "w".into(),
+            kind: SessionKind::Agent,
+            provider: "claude".into(),
+            title: "dev".into(),
+            status: SessionStatus::Idle,
+            cwd: "/tmp".into(),
+            provider_session_id: None,
+            connection_id: None,
+            created_by: creator.into(),
+            created_at: chrono::Utc::now(),
+            last_active_at: chrono::Utc::now(),
+            archived: false,
+            meta: json!({"agent_id": agent}),
+        }
+    }
+
+    /// test-quality-5-06 (PC-2): a turn reuses only a live session of the
+    /// same agent created as the SAME acting user — Bob's session carries
+    /// Bob's MCP token and accounts and must never run Alice's task.
+    #[test]
+    fn a_session_is_reused_only_by_its_agent_and_acting_user() {
+        let s = session("dev", "bob");
+        assert!(reusable_for(&s, "dev", "bob"));
+        assert!(!reusable_for(&s, "dev", "alice"), "another acting user");
+        assert!(!reusable_for(&s, "qa", "bob"), "another agent");
+        let mut archived = session("dev", "bob");
+        archived.archived = true;
+        assert!(!reusable_for(&archived, "dev", "bob"));
+        let mut exited = session("dev", "bob");
+        exited.status = SessionStatus::Exited;
+        assert!(!reusable_for(&exited, "dev", "bob"));
+        let mut conn = session("dev", "bob");
+        conn.kind = SessionKind::Connection;
+        assert!(!reusable_for(&conn, "dev", "bob"));
     }
 }

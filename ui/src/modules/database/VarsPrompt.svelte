@@ -7,7 +7,7 @@
   // when a saved query containing placeholders is opened.
   import { untrack } from 'svelte';
   import Modal from '../../lib/components/Modal.svelte';
-  import { defaultVarSpec, type VarSpec } from './sql-util';
+  import { defaultVarSpec, type VarSpec } from '../../lib/database/sql-util';
 
   interface Props {
     /** The names still lacking a value, in statement order. */

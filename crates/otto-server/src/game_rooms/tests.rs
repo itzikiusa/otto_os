@@ -3,7 +3,7 @@ use serde_json::{json, Value};
 use std::time::{Duration, Instant};
 
 fn config(game: GameKind) -> Config {
-    let map = game.maps()[0].into();
+    let map = game.maps()[0].clone();
     Config { game, map }
 }
 /// A room with `guests` joined guests (not yet connected).

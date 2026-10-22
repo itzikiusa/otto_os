@@ -6,7 +6,7 @@
   // second tile of a loaded kind renders synchronously (no skeleton flash).
   import type { Component } from 'svelte';
   import { SvelteMap } from 'svelte/reactivity';
-  // Bodies take different subsets of { box, viewId, zoomed, tick, active }.
+  // Bodies take different subsets of { box, viewId, zoomed, zoomedAway, tick, active }.
   type BoxBody = Component<any>;
   const BODY_LOADERS: Record<string, () => Promise<{ default: BoxBody }>> = {
     sessions: () => import('./boxes/SessionsBox.svelte'),
@@ -73,6 +73,10 @@
 
   const def = $derived(kindDef(box.kind));
   const Body = $derived(bodies.get(box.kind) ?? null);
+  // The grid copy of the zoomed box (it stays mounted, hidden, under the zoom):
+  // a body with a heavy scene (Classrooms' WebGL school) releases it, so only
+  // the zoomed copy holds a live graphics context.
+  const zoomedAway = $derived(!zoomed && home.zoomedId === box.id);
   const hasLoader = $derived(box.kind in BODY_LOADERS);
   let loadFailed = $state<string | null>(null);
   let loadAttempt = $state(0);
@@ -224,7 +228,7 @@
   </header>
   <div class="hb-body">
     {#if Body}
-      <Body {box} {viewId} {zoomed} {tick} {active} />
+      <Body {box} {viewId} {zoomed} {zoomedAway} {tick} {active} />
     {:else if loadFailed}
       <LoadState what="this widget" variant="compact" error={loadFailed} empty={true} onretry={retryLoad} />
     {:else if hasLoader}

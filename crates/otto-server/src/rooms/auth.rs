@@ -28,35 +28,34 @@ pub(super) fn eligible(session: &Session) -> Result<()> {
     }
     Ok(())
 }
+/// The room relays' subprotocol is `otto-room, <token>`; the shared parser
+/// also requires a well-formed (43-char) token, as the game relay always did.
 pub(super) fn socket_token(headers: &HeaderMap) -> Result<String> {
-    let mut values = headers.get_all("sec-websocket-protocol").iter();
-    let value = values
-        .next()
-        .and_then(|v| v.to_str().ok())
-        .ok_or(otto_core::Error::Unauthorized)?;
-    if values.next().is_some() {
-        return Err(otto_core::Error::Unauthorized);
-    }
-    let parts: Vec<_> = value.split(',').map(str::trim).collect();
-    if parts.len() != 2 || parts[0] != "otto-room" || parts[1].is_empty() {
-        return Err(otto_core::Error::Unauthorized);
-    }
-    Ok(parts[1].into())
+    super::capability::socket_token(headers, "otto-room")
 }
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
     fn only_exact_room_subprotocol_pair_is_accepted() {
+        let token = "t".repeat(super::super::capability::TOKEN_LEN);
         let mut headers = HeaderMap::new();
         assert!(socket_token(&headers).is_err());
         headers.insert("authorization", "Bearer owner-token".parse().unwrap());
         assert!(socket_token(&headers).is_err());
-        headers.insert("sec-websocket-protocol", "otto-room, abc".parse().unwrap());
-        assert_eq!(socket_token(&headers).unwrap(), "abc");
         headers.insert(
             "sec-websocket-protocol",
-            "otto-room, abc, extra".parse().unwrap(),
+            format!("otto-room, {token}").parse().unwrap(),
+        );
+        assert_eq!(socket_token(&headers).unwrap(), token);
+        headers.insert(
+            "sec-websocket-protocol",
+            format!("otto-game, {token}").parse().unwrap(),
+        );
+        assert!(socket_token(&headers).is_err());
+        headers.insert(
+            "sec-websocket-protocol",
+            format!("otto-room, {token}, extra").parse().unwrap(),
         );
         assert!(socket_token(&headers).is_err());
     }

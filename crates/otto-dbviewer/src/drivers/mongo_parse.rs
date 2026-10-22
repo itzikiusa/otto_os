@@ -42,6 +42,12 @@ pub fn parse_value(input: &str) -> Result<Value> {
     Ok(v)
 }
 
+/// Deepest object/array/constructor nesting accepted. The parser recurses once
+/// per level, so an unbounded `[[[[…` (10k levels in a few KB of request body)
+/// would overflow the tokio worker's stack and abort the daemon. 128 matches
+/// serde_json's own recursion limit, far beyond any real filter or pipeline.
+const MAX_DEPTH: usize = 128;
+
 fn err(msg: impl Into<String>) -> Error {
     Error::Invalid(format!("mongo parse: {}", msg.into()))
 }
@@ -51,6 +57,8 @@ struct Parser<'a> {
     text: &'a str,
     pos: usize,
     unterminated_comment: bool,
+    /// Current object/array/constructor nesting (see `MAX_DEPTH`).
+    depth: usize,
 }
 
 impl<'a> Parser<'a> {
@@ -60,7 +68,22 @@ impl<'a> Parser<'a> {
             text,
             pos: 0,
             unterminated_comment: false,
+            depth: 0,
         }
+    }
+
+    /// Run one nested container parse with the depth guard: past `MAX_DEPTH`
+    /// it fails cleanly instead of recursing further.
+    fn nested<T>(&mut self, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        if self.depth >= MAX_DEPTH {
+            return Err(err(format!(
+                "nesting is too deep (more than {MAX_DEPTH} levels)"
+            )));
+        }
+        self.depth += 1;
+        let out = f(self);
+        self.depth -= 1;
+        out
     }
 
     fn at(&self) -> Option<u8> {
@@ -114,8 +137,8 @@ impl<'a> Parser<'a> {
         self.skip_trivia();
         match self.at() {
             None => Err(err("unexpected end of input")),
-            Some(b'{') => self.object(),
-            Some(b'[') => self.array(),
+            Some(b'{') => self.nested(Self::object),
+            Some(b'[') => self.nested(Self::array),
             Some(b'"') | Some(b'\'') | Some(b'`') => Ok(Value::String(self.string()?)),
             Some(b'/') => self.regex(),
             Some(b) if b == b'-' || b == b'+' || b == b'.' || b.is_ascii_digit() => self.number(),
@@ -348,6 +371,10 @@ impl<'a> Parser<'a> {
 
     /// Parse `Name( args )` and map the known Mongo constructors to EJSON.
     fn constructor(&mut self, name: &str) -> Result<Value> {
+        self.nested(|p| p.constructor_call(name))
+    }
+
+    fn constructor_call(&mut self, name: &str) -> Result<Value> {
         self.skip_trivia();
         self.expect(b'(')?;
         let mut args = Vec::new();
@@ -530,6 +557,20 @@ fn utf8_len(b: u8) -> usize {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn deep_nesting_is_refused_not_a_stack_overflow() {
+        for open in ["[", "{a:", "ISODate("] {
+            let input = open.repeat(10_000);
+            let e = parse_value(&input).unwrap_err().to_string();
+            assert!(e.contains("nesting is too deep"), "{open}: {e}");
+        }
+        // Exactly MAX_DEPTH levels still parse.
+        let ok = format!("{}{}", "[".repeat(MAX_DEPTH), "]".repeat(MAX_DEPTH));
+        assert!(parse_value(&ok).is_ok());
+        let over = format!("{}{}", "[".repeat(MAX_DEPTH + 1), "]".repeat(MAX_DEPTH + 1));
+        assert!(parse_value(&over).is_err());
+    }
 
     #[test]
     fn unquoted_keys_and_trailing_commas() {

@@ -3,6 +3,7 @@
 
 use super::super::*;
 use super::NodeCall;
+use otto_core::domain::Integration;
 
 pub(in crate::workflow_engine) async fn execute(
     call: NodeCall<'_>,
@@ -101,16 +102,7 @@ pub(in crate::workflow_engine) async fn execute(
             otto_core::Error::Upstream(format!("channel_notify: load integrations: {e}"))
         })?;
 
-    // Filter to the workspace's enabled integrations, optionally by channel.
-    // Webhooks are inbound-only (not a proactive-push target), so they're
-    // excluded here.
-    let targets: Vec<_> = integrations
-        .into_iter()
-        .filter(|i| i.workspace_id == ws.id)
-        .filter(|i| i.channel != Channel::Webhook)
-        .filter(|i| preferred_channel.is_none() || Some(i.channel) == preferred_channel)
-        .filter(|i| !i.channel_id.trim().is_empty())
-        .collect();
+    let targets = notify_targets(integrations, &ws.id, preferred_channel);
 
     if targets.is_empty() {
         return Err(otto_core::Error::Invalid(
@@ -122,17 +114,12 @@ pub(in crate::workflow_engine) async fn execute(
     let mut sent = 0usize;
     for integ in &targets {
         let ws_id = &integ.workspace_id;
-        // Prefer the originating chat/thread when this integration is the
-        // channel the run was triggered from; otherwise fall back to the
-        // integration's configured default (a scheduled/manual run has no
-        // originating conversation to reply into).
-        let same_channel = origin_channel
-            .as_deref()
-            .is_some_and(|c| c.eq_ignore_ascii_case(integ.channel.as_str()));
-        let (chat, thread) = match (same_channel, origin_chat.as_deref()) {
-            (true, Some(c)) => (c, origin_thread.as_deref()),
-            _ => (integ.channel_id.trim(), None),
-        };
+        let (chat, thread) = reply_target(
+            integ,
+            origin_channel.as_deref(),
+            origin_chat.as_deref(),
+            origin_thread.as_deref(),
+        );
         // Build an outbound adapter reusing the same logic as
         // improve_notify (avoids a public API surface on ChannelManager).
         let send_result = match integ.channel {
@@ -184,4 +171,135 @@ pub(in crate::workflow_engine) async fn execute(
         json!({ "sent": sent, "message": message }),
         vec![format!("channel_notify: sent to {sent} integration(s)")],
     ))
+}
+
+/// The integrations a run in workspace `ws` notifies: that workspace's only
+/// (`list_all_enabled` returns every workspace's — dropping this filter sent a
+/// run's message, which can carry its input, to every other workspace's
+/// chats), never a webhook (inbound-only, not a proactive-push target), never
+/// one without a default chat, and only `preferred`'s channel when the node
+/// names one.
+pub(in crate::workflow_engine) fn notify_targets(
+    all: Vec<Integration>,
+    ws: &Id,
+    preferred: Option<Channel>,
+) -> Vec<Integration> {
+    all.into_iter()
+        .filter(|i| &i.workspace_id == ws)
+        .filter(|i| i.channel != Channel::Webhook)
+        .filter(|i| preferred.is_none() || Some(i.channel) == preferred)
+        .filter(|i| !i.channel_id.trim().is_empty())
+        .collect()
+}
+
+/// Where `integ` posts: into the originating chat + thread when it is the
+/// channel the run was triggered from, otherwise the integration's
+/// configured default chat with no thread (a scheduled/manual run, or a run
+/// from another channel, has no conversation on this one to reply into).
+pub(in crate::workflow_engine) fn reply_target<'a>(
+    integ: &'a Integration,
+    origin_channel: Option<&str>,
+    origin_chat: Option<&'a str>,
+    origin_thread: Option<&'a str>,
+) -> (&'a str, Option<&'a str>) {
+    let same_channel =
+        origin_channel.is_some_and(|c| c.eq_ignore_ascii_case(integ.channel.as_str()));
+    match (same_channel, origin_chat) {
+        (true, Some(c)) => (c, origin_thread),
+        _ => (integ.channel_id.trim(), None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn integ(ws: &str, channel: Channel, channel_id: &str) -> Integration {
+        Integration {
+            workspace_id: ws.into(),
+            channel,
+            enabled: true,
+            allowed_users: String::new(),
+            open_to_all: false,
+            agent_reply: false,
+            reply_instructions: String::new(),
+            channel_id: channel_id.into(),
+            preferred_cli: String::new(),
+            has_bot_token: true,
+            has_app_token: false,
+            updated_at: chrono::Utc::now(),
+        }
+    }
+
+    fn keys(v: &[Integration]) -> Vec<(String, &'static str, String)> {
+        v.iter()
+            .map(|i| {
+                (
+                    i.workspace_id.to_string(),
+                    i.channel.as_str(),
+                    i.channel_id.clone(),
+                )
+            })
+            .collect()
+    }
+
+    /// test-quality-5-08: only the run's workspace is targeted; webhooks and
+    /// integrations with no default chat are dropped; `preferred` narrows.
+    #[test]
+    fn notify_targets_keep_only_this_workspaces_push_channels() {
+        let all = || {
+            vec![
+                integ("ws-a", Channel::Slack, "C-A"),
+                integ("ws-a", Channel::Telegram, "  "),
+                integ("ws-a", Channel::Webhook, "hook"),
+                integ("ws-b", Channel::Slack, "C-B"),
+                integ("ws-b", Channel::Telegram, "T-B"),
+            ]
+        };
+        let ws_a: Id = "ws-a".into();
+        assert_eq!(
+            keys(&notify_targets(all(), &ws_a, None)),
+            vec![("ws-a".to_string(), "slack", "C-A".to_string())]
+        );
+        let ws_b: Id = "ws-b".into();
+        assert_eq!(
+            keys(&notify_targets(all(), &ws_b, None)),
+            vec![
+                ("ws-b".to_string(), "slack", "C-B".to_string()),
+                ("ws-b".to_string(), "telegram", "T-B".to_string()),
+            ]
+        );
+        assert_eq!(
+            keys(&notify_targets(all(), &ws_b, Some(Channel::Telegram))),
+            vec![("ws-b".to_string(), "telegram", "T-B".to_string())]
+        );
+        // A blank default chat is no target even when preferred.
+        assert!(notify_targets(all(), &ws_a, Some(Channel::Telegram)).is_empty());
+        let other: Id = "ws-c".into();
+        assert!(notify_targets(all(), &other, None).is_empty());
+    }
+
+    /// test-quality-5-08: a Slack-originated run replies in its own Slack
+    /// thread; on Telegram the same run posts to the default chat, no thread.
+    #[test]
+    fn reply_target_stays_in_the_originating_thread_only_on_its_channel() {
+        let slack = integ("ws", Channel::Slack, " C-DEFAULT ");
+        let telegram = integ("ws", Channel::Telegram, "T-DEFAULT");
+        let origin = (Some("Slack"), Some("C-ORIGIN"), Some("1700.42"));
+        assert_eq!(
+            reply_target(&slack, origin.0, origin.1, origin.2),
+            ("C-ORIGIN", Some("1700.42"))
+        );
+        assert_eq!(
+            reply_target(&telegram, origin.0, origin.1, origin.2),
+            ("T-DEFAULT", None)
+        );
+        // No originating conversation (scheduled / manual run): the default.
+        assert_eq!(reply_target(&slack, None, None, None), ("C-DEFAULT", None));
+        // The right channel but no chat recorded: the default, no thread.
+        assert_eq!(
+            reply_target(&slack, Some("slack"), None, Some("1700.42")),
+            ("C-DEFAULT", None)
+        );
+    }
 }

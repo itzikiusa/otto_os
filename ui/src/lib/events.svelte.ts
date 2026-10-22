@@ -27,6 +27,7 @@ import {
   swarmStore,
   databaseStore,
   personalAgentsStore,
+  resyncAutomation,
   type EventRoutes,
 } from './events/routes';
 import {
@@ -672,6 +673,8 @@ class EventsClient {
     // Live room messages append straight from events — a gap needs a re-read.
     // Only when the store is loaded: nothing to resync if no room view opened.
     personalAgentsStore.peek()?.resyncRooms();
+    // Scheduled Tasks / Run with Otto are event-fed only: re-read them too.
+    resyncAutomation(ws.currentId);
   }
 
   /** The daemon's boot id from `hello_ack`: a different one than before

@@ -1516,6 +1516,44 @@ impl SwarmRepo {
         Ok(hit.is_some())
     }
 
+    /// Record `user` as the last person who changed what a turn on this task
+    /// executes — its title, description or labels, or one of its goals
+    /// (access-control-5-01, migration 0195). `acting_user` prefers this
+    /// person over the task's originator.
+    pub async fn set_task_prompt_editor(&self, id: &Id, user: &str) -> Result<()> {
+        sqlx::query("UPDATE swarm_tasks SET prompt_updated_by = ? WHERE id = ?")
+            .bind(user)
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("set task prompt editor"))?;
+        Ok(())
+    }
+
+    /// The last person who rewrote this task's prompt or goals (`None` = nobody
+    /// since it was created, or a row written before migration 0195).
+    pub async fn task_prompt_editor(&self, id: &Id) -> Result<Option<Id>> {
+        let who: Option<Option<String>> =
+            sqlx::query_scalar("SELECT prompt_updated_by FROM swarm_tasks WHERE id = ?")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(dberr("task prompt editor"))?;
+        Ok(who.flatten().filter(|u| !u.is_empty()))
+    }
+
+    /// Record the last person who edited a goal (`swarm_goals.updated_by`,
+    /// migration 0195; `created_by` already names its author).
+    pub async fn set_goal_editor(&self, id: &Id, user: &str) -> Result<()> {
+        sqlx::query("UPDATE swarm_goals SET updated_by = ? WHERE id = ?")
+            .bind(user)
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("set goal editor"))?;
+        Ok(())
+    }
+
     /// Increment a task's attempt counter and return the new value. Called when
     /// the Coordinator (re-)queues a turn so `route_result` can enforce the
     /// per-task `max_attempts` ceiling.

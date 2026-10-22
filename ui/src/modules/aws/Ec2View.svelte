@@ -18,6 +18,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import { copyTextOrThrow } from '../../lib/clipboard';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import JsonTree from '../../lib/components/JsonTree.svelte';
@@ -28,6 +29,7 @@
   import RegionErrors from './RegionErrors.svelte';
   import { ALL_REGIONS } from '../../lib/api/aws';
   import { fmtAgo, fmtDate, awsErrorText } from './util';
+  import { awsLoadText } from './loadText';
   import type { AwsAccount, Ec2Action, Ec2Instance, Ec2InstanceDetail } from '../../lib/api/types';
 
   interface Props {
@@ -84,7 +86,7 @@
       error = '';
     } catch (e) {
       if (seq !== loadSeq) return;
-      error = e instanceof Error ? e.message : String(e);
+      error = awsLoadText(e);
     } finally {
       if (seq === loadSeq) loading = false;
     }
@@ -169,7 +171,7 @@
       if (detail?.inst.instance_id === i.instance_id) detail = { inst: i, full: d, error: '' };
     } catch (e) {
       if (detail?.inst.instance_id === i.instance_id)
-        detail = { inst: i, full: null, error: e instanceof Error ? e.message : String(e) };
+        detail = { inst: i, full: null, error: awsLoadText(e) };
     }
   }
 
@@ -235,7 +237,7 @@
   {#if loading && !instances}
     <div class="pad"><Skeleton rows={8} label="EC2 instances" /></div>
   {:else if error}
-    <EmptyState actionKind={loginNeeded ? 'primary' : 'secondary'} icon="warning" title="Couldn’t list instances" body={awsErrorText(error)} actionLabel={loginNeeded ? 'Sign in' : 'Retry'} onaction={loginNeeded ? onsignin : () => void load()} />
+    <LoadState what="instances" error={awsErrorText(error)} empty onretry={() => void load()}>{#snippet errorActions()}{#if loginNeeded}<button class="btn primary" onclick={onsignin}><Icon name="key" size={12} /> Sign in</button>{/if}{/snippet}</LoadState>
   {:else if shown.length === 0}
     <EmptyState icon="box" title={filter || stateFilter ? 'No matching instances' : allRegions ? 'No instances in any enabled region' : `No instances in ${region}`} />
   {:else}
@@ -329,7 +331,7 @@
     {:else}
       <div class="dt">
         {#if d.error}
-          <p class="err">{d.error}</p>
+          <p class="err" role="alert">{awsErrorText(d.error)}</p>
         {:else if !d.full}
           <Skeleton rows={5} />
         {:else}

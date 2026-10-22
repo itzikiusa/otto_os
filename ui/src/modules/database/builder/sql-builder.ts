@@ -9,7 +9,7 @@
 // emitted verbatim is an explicit "expression" select item — raw SQL the user
 // writes on purpose, exactly like the editor.
 
-import { quoteIdent, stringLiteral } from '../sql-dialect.ts';
+import { quoteIdent, stringLiteral } from '../../../lib/database/sql-dialect.ts';
 
 // ── Model ─────────────────────────────────────────────────────────────────────
 

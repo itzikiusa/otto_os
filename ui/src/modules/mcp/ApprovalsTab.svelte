@@ -32,6 +32,8 @@
   import AutoApproveForm from './AutoApproveForm.svelte';
   import { mcpCpExtraApi } from './cp-api';
   import NeedsYouLink from '../home/LazyNeedsYouLink.svelte';
+  import { userLabel } from '../../lib/userLabel';
+  import type { MemberEntry } from '../../lib/api/types';
 
   let approvals = $state<McpApproval[]>([]);
   const AGENT_REQUESTER_KINDS = ['mcp_server', 'gateway', 'agent'];
@@ -72,8 +74,25 @@
     a.kind === 'tool_call' && !a.server_id && !!a.tool?.startsWith('otto.') && canDecide(a);
   const sessionTitle = (id: string): string | null =>
     ws.getSession(id)?.title ?? null;
-  const requesterLabel = (a: McpApproval): string =>
-    a.requested_by === auth.me?.id ? 'you' : (a.requested_by ?? 'unknown');
+  /** Members of every workspace an approval came from, fetched once per
+   *  workspace: the names behind "requested by" / "decided by" (an id is never
+   *  primary text — the full one stays in a `title`). A failed fetch leaves the
+   *  shortened id. */
+  let members = $state<MemberEntry[]>([]);
+  const membersFetched = new Set<string>();
+  $effect(() => {
+    for (const a of approvals) {
+      const w = a.workspace_id;
+      if (!w || membersFetched.has(w)) continue;
+      membersFetched.add(w);
+      mcpCpExtraApi
+        .members(w)
+        .then((m) => (members = [...members, ...m]))
+        .catch(() => {});
+    }
+  });
+  const who = (id: string | null | undefined): string => userLabel(id, auth.me?.id, members);
+  const requesterLabel = (a: McpApproval): string => who(a.requested_by);
 
   async function openAlwaysAllow(a: McpApproval): Promise<void> {
     allowLoading = a.id;
@@ -195,7 +214,7 @@
             {/if}
             {#if a.requested_by_session_id}
               {@const sid = a.requested_by_session_id}
-              <span class="by">
+              <span class="by" title={a.requested_by ?? undefined}>
                 from session
                 <button class="link" type="button" onclick={() => openSession(sid)} title="Open the requesting session" data-testid="mcp-approval-session">
                   {sessionTitle(sid) ?? `${sid.slice(0, 8)}…`}
@@ -204,7 +223,7 @@
                 {#if requesterMayDecide(a)}<AgentByline name={requesterLabel(a)} />{:else}{requesterLabel(a)}{/if}
               </span>
             {:else if a.requested_by}
-              <span class="by">
+              <span class="by" title={a.requested_by}>
                 requested by
                 {#if requesterMayDecide(a)}<AgentByline name={requesterLabel(a)} />{:else}{requesterLabel(a)}{/if}
                 {a.requested_by_kind ? ` (${requesterKindLabel(a.requested_by_kind)})` : ''}
@@ -252,8 +271,8 @@
             </div>
           {:else if a.status === 'approved' || a.status === 'denied' || a.status === 'consumed'}
             <!-- `consumed` = approved and then used by the call. -->
-            <div class="decided">
-              <ApprovalOutcome outcome={a.status === 'denied' ? 'denied' : 'approved'} by={a.decided_by} at={a.decided_at} note={a.decision_note} />
+            <div class="decided" title={a.decided_by ?? undefined}>
+              <ApprovalOutcome outcome={a.status === 'denied' ? 'denied' : 'approved'} by={a.decided_by ? who(a.decided_by) : null} at={a.decided_at} note={a.decision_note} />
             </div>
           {:else if a.status === 'expired'}
             <div class="decided">
@@ -263,7 +282,7 @@
             <!-- Canceled (or a state this build doesn't know): the same one-line
                  outcome shape as ApprovalOutcome — word · by · when · note. -->
             <div class="decided outcome-line">
-              <span>{runStateLabel(a.status)}{a.decided_by ? ` by ${a.decided_by}` : ''}</span>
+              <span title={a.decided_by ?? undefined}>{runStateLabel(a.status)}{a.decided_by ? ` by ${who(a.decided_by)}` : ''}</span>
               {#if a.decided_at}<span aria-hidden="true">·</span><RelTime iso={a.decided_at} />{/if}
               {#if a.decision_note}<span aria-hidden="true">·</span><span class="note">“{a.decision_note}”</span>{/if}
             </div>

@@ -5,26 +5,16 @@
   // approve/decline individual draft comments. Supports live per-agent progress
   // cards, a configure-agents modal, and a merge-readiness panel.
   import { onDestroy, untrack } from 'svelte';
+  import { summaryFallback, summaryFallbackTitle } from './reviewFallback';
   import { toastError } from '../../lib/toastError';
   import { verdictLabel } from '../../lib/labels';
   import { api, ApiError, isAbortError } from '../../lib/api/client';
   import { prDiffFile, prDiffSummary } from './diff-load';
   import { alreadyOnPr } from './reviewPost';
   import type {
-    Review,
-    ReviewComment,
-    ReviewConfig,
-    ReviewAgentCfg,
-    ReviewConfigPreset,
-    RepoReviewBinding,
-    RepoReviewConfigResp,
-    StartReviewReq,
-    FileDiff,
-    DiffLine,
-    MergeReadiness,
-    ReviewFindingRow,
-    EditReviewCommentReq,
-    PrDetail,
+    Review, ReviewComment, ReviewConfig, ReviewAgentCfg, ReviewConfigPreset, RepoReviewBinding,
+    RepoReviewConfigResp, StartReviewReq, FileDiff, DiffLine, MergeReadiness, ReviewFindingRow,
+    EditReviewCommentReq, PrDetail,
   } from '../../lib/api/types';
   import { toasts } from '../../lib/toast.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -1261,9 +1251,9 @@
         {#if review.summary_fallback}
           <span
             class="chip warn rp-fallback-badge"
-            title="The claude summarizer was unavailable; these comments were deduped and ranked by the deterministic Rust-side fallback."
+            title={summaryFallbackTitle(summaryFallback(review.agents))}
           >
-            deterministic fallback (claude unavailable)
+            deterministic fallback ({summaryFallback(review.agents).provider} summary not used)
           </span>
         {/if}
         {#if approvedCount > 0}

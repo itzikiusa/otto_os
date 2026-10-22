@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import { plural } from '../../lib/plural';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
@@ -15,6 +15,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import type { IssueAccount, IssueProject } from '../../lib/api/types';
   import { truncatedNote } from '../../lib/listingPage';
+  import { providerErrorText } from '../../lib/loadError';
   import ConfluencePagePicker from '../../lib/components/ConfluencePagePicker.svelte';
   import type { ConfluenceSpace, ProductStoryVersion, ProductStoryDetail, ReviewedContent } from './types';
 
@@ -123,7 +124,7 @@
         previewBody = body; previewStoryId = sid;
       }
     } catch (e) {
-      if (current()) previewError = `Couldn’t load the content preview. ${e instanceof Error ? e.message : String(e)}`;
+      if (current()) previewError = `Couldn’t load the content preview. ${providerErrorText(e)}`;
     }
   }
 
@@ -141,10 +142,16 @@
       : '';
   });
 
-  // Load accounts + the preview on mount.
+  // Load accounts + the preview on mount (and on a story switch). The loaders
+  // run untracked: `issueAccounts.load()` reads its cache gate synchronously,
+  // and tracking it re-ran both loads (preview flashed back to loading,
+  // projects fetched twice) once a cold cache filled.
   $effect(() => {
-    void loadAccounts();
-    void loadPreview(product.selectedId);
+    const sid = product.selectedId;
+    untrack(() => {
+      void loadAccounts();
+      void loadPreview(sid);
+    });
   });
 
   async function loadAccounts(): Promise<void> {
@@ -192,7 +199,7 @@
       }
     } catch (e) {
       if (!current()) return;
-      projectsError = `Couldn’t load Jira projects. ${e instanceof Error ? e.message : String(e)}`;
+      projectsError = `Couldn’t load Jira projects. ${providerErrorText(e)}`;
     } finally {
       if (current()) projectsLoading = false;
     }
@@ -234,7 +241,7 @@
       if (spaces.length > 0) spaceKey = spaces[0].key;
     } catch (e) {
       if (!current()) return;
-      spacesError = `Couldn’t load Confluence spaces. ${e instanceof Error ? e.message : String(e)}`;
+      spacesError = `Couldn’t load Confluence spaces. ${providerErrorText(e)}`;
     } finally {
       if (current()) spacesLoading = false;
     }

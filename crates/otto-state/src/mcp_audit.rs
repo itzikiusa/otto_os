@@ -26,7 +26,7 @@ use otto_core::{new_id, Result};
 use sqlx::Row;
 
 use crate::convert::{dberr, fmt};
-use crate::workbench::sha256_hex;
+use crate::workbench::content_digest_hex;
 
 /// String values longer than this (in chars) are truncated before insert.
 pub const ARG_STRING_CAP: usize = 1024;
@@ -98,7 +98,7 @@ fn cap_doc(shaped: String, original: &str) -> String {
     serde_json::json!({
         "_otto_truncated": true,
         "bytes": original.len(),
-        "sha256": sha256_hex(original.as_bytes()),
+        "sha256": content_digest_hex(original.as_bytes()),
         "head": head,
         "tail": tail,
     })
@@ -115,7 +115,7 @@ fn truncate_str(s: &str) -> Option<String> {
     let tail: String = s.chars().skip(total - ARG_STRING_EDGE).collect();
     Some(format!(
         "{head}…[truncated: {total} chars, sha256 {}]…{tail}",
-        sha256_hex(s.as_bytes())
+        content_digest_hex(s.as_bytes())
     ))
 }
 
@@ -251,7 +251,7 @@ mod tests {
         assert!(
             c.contains(&format!(
                 "…[truncated: 5000 chars, sha256 {}]…",
-                sha256_hex(body.as_bytes())
+                content_digest_hex(body.as_bytes())
             )),
             "{c}"
         );
@@ -281,7 +281,7 @@ mod tests {
         let stored = out["sql"].as_str().unwrap();
         assert!(stored.len() < sql.len());
         assert!(stored.ends_with("DROP TABLE users;"), "{stored}");
-        assert!(stored.contains(&sha256_hex(sql.as_bytes())));
+        assert!(stored.contains(&content_digest_hex(sql.as_bytes())));
     }
 
     #[test]
@@ -300,7 +300,7 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&stored).unwrap();
         assert_eq!(v["_otto_truncated"], true);
         assert_eq!(v["bytes"], arg.len());
-        assert_eq!(v["sha256"], sha256_hex(arg.as_bytes()));
+        assert_eq!(v["sha256"], content_digest_hex(arg.as_bytes()));
         assert!(v["head"]
             .as_str()
             .unwrap()

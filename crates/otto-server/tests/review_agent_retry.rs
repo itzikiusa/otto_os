@@ -250,7 +250,7 @@ async fn submit_prompt_and_submit_text_do_not_interleave() {
         let manager = ctx.manager.clone();
         let sid = sid.clone();
         async move {
-            otto_review::session::submit_prompt(&manager, &sid, "from-prompt please review").await
+            otto_sessions::submit::submit_prompt(&manager, &sid, "from-prompt please review").await
         }
     });
     // Race in the moment the prompt's paste is on screen, before its Enter.

@@ -45,6 +45,7 @@
   import LiveDraft from './LiveDraft.svelte';
   import LiveStatus from './LiveStatus.svelte';
   import EmptyState from '../../../lib/components/EmptyState.svelte';
+  import LoadState from '../../../lib/components/LoadState.svelte';
   import { transcript, type TranscriptSource } from '../../../lib/stores/transcript.svelte';
   import { ws } from '../../../lib/stores/workspace.svelte';
   import { ctxMenu } from '../../../lib/contextmenu.svelte';
@@ -862,7 +863,7 @@
   >
     <div class="conv-col" bind:this={colEl}>
     {#if conv.error && !t}
-      <EmptyState icon="warning" title="Couldn’t load the conversation" body={conv.error} actionLabel="Retry" actionIcon="refresh" actionKind="secondary" onaction={() => void conv.load()} />
+      <LoadState what="the conversation" error={conv.error} empty onretry={() => void conv.load()} />
     {:else if conv.loading && !t}
       <div class="skeleton" role="status" aria-busy="true" aria-label="Loading the conversation">
         <div class="sk sk-user chat-bubble-end"></div>

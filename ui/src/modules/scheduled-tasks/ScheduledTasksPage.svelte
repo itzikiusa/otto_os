@@ -1380,7 +1380,7 @@
             <button type="button" class:active={!reportRaw} aria-pressed={!reportRaw} onclick={() => (reportRaw = false)}>Formatted</button>
             <button type="button" class:active={reportRaw} aria-pressed={reportRaw} onclick={() => (reportRaw = true)}>Plain text</button>
           </div>
-          <button class="btn" onclick={async () => (await copyText(reportText)) ? toasts.success('Report copied') : toasts.error("Couldn’t copy the report")}>
+          <button class="btn" onclick={async () => (await copyText(reportText)) ? toasts.success('Report copied') : toasts.error('Couldn’t copy the report', 'Select the text and copy it manually.')}>
             <Icon name="copy" size={12} /> Copy
           </button>
           <span class="grow"></span>

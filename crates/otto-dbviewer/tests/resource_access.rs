@@ -495,29 +495,27 @@ async fn executor_gate_refuses_tampered_or_stale_claims_before_any_network() {
     assert!(refused(&e), "finished attempt: {e:?}");
 }
 
-async fn approved_native_fixture(kind: ConnectionKind, env: &str, partial: bool) {
+/// Author (reader) → validate → review → approve (root) → claim, through the
+/// production persistence API, for `script` on the fixture's `shop` node.
+/// Returns the repo, the approved running change and its claimed attempts.
+async fn claimed_change(
+    f: &Fixture,
+    script: &str,
+) -> (
+    otto_state::database_changes::DatabaseChangesRepo,
+    otto_state::database_changes::DatabaseChange,
+    Vec<otto_state::database_changes::ChangeAttempt>,
+) {
     use otto_state::database_changes::{
         ChangeInput, ChangeTarget, DatabaseChangesRepo, TargetSnapshot,
     };
-    let port = std::env::var(env)
-        .expect("explicit fixture port")
-        .parse()
-        .unwrap();
-    let f = Fixture::new(kind, port).await;
     let repo = DatabaseChangesRepo::new(f.pool.clone());
-    let table = format!("change_{}", otto_core::new_id().replace('-', ""));
-    let create = format!("CREATE TABLE shop.{table} (id INT)");
-    let script = if partial {
-        format!("{create}; {create}")
-    } else {
-        create
-    };
     let target = ChangeTarget {
         connection_id: f.conn.clone(),
         node: "shop".into(),
     };
     f.service
-        .preflight_approved_change(&f.conn, &f.root.id, Some("shop"), &script)
+        .preflight_approved_change(&f.conn, &f.root.id, Some("shop"), script)
         .await
         .unwrap();
     let fingerprint = f
@@ -541,7 +539,7 @@ async fn approved_native_fixture(kind: ConnectionKind, env: &str, partial: bool)
             &ChangeInput {
                 title: "Fixture schema change".into(),
                 description: String::new(),
-                script: script.clone(),
+                script: script.to_owned(),
                 targets: vec![target],
             },
             &f.reader.id,
@@ -571,6 +569,23 @@ async fn approved_native_fixture(kind: ConnectionKind, env: &str, partial: bool)
         .claim(&change, &snapshots, &f.root.id, &f.root.id)
         .await
         .unwrap();
+    (repo, change, attempts)
+}
+
+async fn approved_native_fixture(kind: ConnectionKind, env: &str, partial: bool) {
+    let port = std::env::var(env)
+        .expect("explicit fixture port")
+        .parse()
+        .unwrap();
+    let f = Fixture::new(kind, port).await;
+    let table = format!("change_{}", otto_core::new_id().replace('-', ""));
+    let create = format!("CREATE TABLE shop.{table} (id INT)");
+    let script = if partial {
+        format!("{create}; {create}")
+    } else {
+        create
+    };
+    let (repo, change, attempts) = claimed_change(&f, &script).await;
     repo.start_attempt(&attempts[0].id).await.unwrap();
     // A stale/tampered artifact cannot execute even though it is marked running.
     sqlx::query("UPDATE database_change_attempts SET script='DROP TABLE shop.orders' WHERE id=?")
@@ -677,6 +692,85 @@ async fn approved_native_fixture(kind: ConnectionKind, env: &str, partial: bool)
         .await
         .unwrap();
     assert_eq!(result.rows[0][0], serde_json::json!(0));
+}
+
+/// The in-flight recheck in `execute_approved_change` (service/changes.rs):
+/// while the reviewed SQL runs, the claim is re-read every 500 ms, and a
+/// cancellation written mid-run must stop the wait with `Forbidden` (after a
+/// native cancel attempt) — not let the statement run on unsupervised.
+#[tokio::test]
+#[ignore = "requires explicitly provisioned disposable MySQL fixture"]
+async fn mysql_cancellation_mid_run_revokes_the_executing_claim() {
+    let port: u16 = std::env::var("OTTO_RESOURCE_MYSQL_PORT")
+        .expect("explicit fixture port")
+        .parse()
+        .unwrap();
+    let f = Fixture::new(ConnectionKind::Mysql, port).await;
+    let table = format!("slow_{}", otto_core::new_id().replace('-', ""));
+    // A real write (so it is a reviewable change) that holds the session for
+    // longer than several recheck ticks. Restricted SQL refuses SLEEP(), so the
+    // delay is a 10^9-row cross join of a 1000-row recursive CTE (MySQL's
+    // default recursion cap).
+    let script = format!(
+        "CREATE TABLE shop.{table} AS WITH RECURSIVE n (i) AS \
+         (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 1000) \
+         SELECT COUNT(*) AS s FROM n a, n b, n c"
+    );
+    let (repo, change, attempts) = claimed_change(&f, &script).await;
+    repo.start_attempt(&attempts[0].id).await.unwrap();
+    let native = sqlx::MySqlPool::connect(&format!(
+        "mysql://root:otto_fixture_only@127.0.0.1:{port}/shop"
+    ))
+    .await
+    .unwrap();
+    let pool = f.pool.clone();
+    let change_id = change.id.clone();
+    let probe = format!("%{table}%");
+    // Write the cancellation only once the statement is visibly running on
+    // the server, so the refusal can only come from the in-flight recheck
+    // (not the pre-run claim checks).
+    let canceller = tokio::spawn(async move {
+        let mut seen = false;
+        for _ in 0..100 {
+            let running: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM information_schema.processlist \
+                 WHERE info LIKE ? AND info NOT LIKE '%processlist%'",
+            )
+            .bind(&probe)
+            .fetch_one(&native)
+            .await
+            .unwrap();
+            if running > 0 {
+                sqlx::query("UPDATE database_changes SET cancellation_requested=1 WHERE id=?")
+                    .bind(&change_id)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+                seen = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        native.close().await;
+        seen
+    });
+    let started = std::time::Instant::now();
+    let result = f
+        .service
+        .execute_approved_change(&change.id, &attempts[0].id, &f.root.id)
+        .await;
+    assert!(
+        canceller.await.unwrap(),
+        "the reviewed statement never appeared in the processlist"
+    );
+    assert!(
+        matches!(result, Err(Error::Forbidden(ref reason)) if reason.contains("revoked during execution")),
+        "a mid-run cancellation must revoke the executing claim, got: {result:?}"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "the recheck must stop waiting before the statement finishes"
+    );
 }
 
 #[tokio::test]

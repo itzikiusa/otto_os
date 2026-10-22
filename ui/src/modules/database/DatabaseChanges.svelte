@@ -88,7 +88,7 @@
     if(!selected)return;
     title=selected.title;description=selected.description;script=selected.script;
     targetDb=selected.targets[0]?.node.replace(/^db:/,'') ?? '';
-    draftTargets=structuredClone(selected.targets);
+    draftTargets=structuredClone($state.snapshot(selected.targets));
     editing=true;
   }
   async function perform(key:string,work:()=>Promise<DatabaseChange>) {

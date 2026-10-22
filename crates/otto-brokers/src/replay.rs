@@ -8,6 +8,13 @@
 //! [`CHECKPOINT_EVERY`] acknowledgements and the row ends `done` / `failed`.
 //! A daemon stop mid-loop leaves a `running` row with the evidence up to the
 //! last checkpoint, which the next start marks `interrupted`.
+//!
+//! In-process cancellation (concurrency-async-5-01 / data-integrity-5-04): the
+//! route runs the replay in its own task, so a client that disconnects no
+//! longer drops the loop. Should the future still be dropped mid-loop (an
+//! abort, a panic in a send), [`Interrupted`] writes every acknowledged
+//! message so far and marks the row `interrupted` instead of leaving it
+//! `running` with up to [`CHECKPOINT_EVERY`]` - 1` acknowledgements unrecorded.
 
 use crate::kafka::RawMessage;
 use crate::types::{ProduceResp, ReplayEvidence, ReplayReq, ReplayResp};
@@ -63,6 +70,11 @@ where
         }
     }
     on_start(replay_id.clone()).await;
+    let mut guard = Interrupted {
+        ops: ops.filter(|_| tracked).cloned(),
+        replay_id: replay_id.clone(),
+        evidence: std::mem::take(&mut evidence),
+    };
     for mut m in messages {
         let key_preview = m.key.as_deref().and_then(|k| {
             std::str::from_utf8(k).ok().map(|s| {
@@ -87,6 +99,7 @@ where
             }
         }
         let (partition, offset) = (m.partition, m.offset);
+        let evidence = &mut guard.evidence;
         match send(m).await {
             Ok(resp) => evidence.push(ReplayEvidence {
                 partition,
@@ -103,7 +116,7 @@ where
                 break;
             }
         }
-        if tracked && evidence.len() % CHECKPOINT_EVERY == 0 {
+        if tracked && evidence.len().is_multiple_of(CHECKPOINT_EVERY) {
             if let Some(ops) = ops {
                 // A missed checkpoint only widens the gap an interruption
                 // could lose; the final write below still reports failure.
@@ -122,6 +135,10 @@ where
         }
     }
 
+    // The loop finished (sent all, or stopped on an error): disarm the guard
+    // and record the final status below.
+    let evidence = std::mem::take(&mut guard.evidence);
+    guard.ops = None;
     let mut evidence_saved = false;
     if let (true, Some(ops)) = (tracked, ops) {
         let status = if error.is_some() { "failed" } else { "done" };
@@ -152,6 +169,33 @@ where
         evidence,
         error,
         evidence_saved,
+    }
+}
+
+/// Drop guard over the publish loop: while armed (`ops` is `Some`), dropping
+/// it writes the acknowledged evidence with status `interrupted` from a
+/// spawned task (a `Drop` can't await).
+struct Interrupted {
+    ops: Option<BrokerOpsRepo>,
+    replay_id: Id,
+    evidence: Vec<ReplayEvidence>,
+}
+
+impl Drop for Interrupted {
+    fn drop(&mut self) {
+        let Some(ops) = self.ops.take() else { return };
+        let Ok(rt) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let id = std::mem::take(&mut self.replay_id);
+        let evidence = std::mem::take(&mut self.evidence);
+        rt.spawn(async move {
+            let count = evidence.len() as i64;
+            let json = serde_json::to_value(&evidence).unwrap_or_default();
+            if let Err(e) = ops.update_replay(&id, count, json, "interrupted").await {
+                tracing::warn!(replay = %id, error = %e, "interrupted replay not recorded");
+            }
+        });
     }
 }
 
@@ -230,5 +274,80 @@ mod tests {
         let evidence: serde_json::Value = serde_json::from_str(&saved.evidence_json).unwrap();
         assert_eq!(evidence[0]["offset"], 0);
         assert_eq!(evidence[0]["target_offset"], 100);
+    }
+
+    /// concurrency-async-5-01 / data-integrity-5-04: a replay future dropped
+    /// mid-loop (here after 3 acknowledgements — below the 100-ack checkpoint)
+    /// leaves the row `interrupted` with all 3 acknowledged messages, not
+    /// `running` with none.
+    #[tokio::test]
+    async fn a_dropped_replay_is_marked_interrupted_with_its_acknowledgements() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE broker_replays (id TEXT PRIMARY KEY, cluster_id TEXT, source_topic TEXT, target_topic TEXT, count INTEGER, evidence_json TEXT, status TEXT NOT NULL DEFAULT 'done', created_at TEXT)")
+            .execute(&pool).await.unwrap();
+        let ops = BrokerOpsRepo::new(pool);
+        let req: ReplayReq = serde_json::from_value(serde_json::json!({
+            "source_topic":"source", "target_topic":"target", "selector":{"type":"latest", "count":10}
+        })).unwrap();
+        let messages = (0..10)
+            .map(|offset| RawMessage {
+                partition: 0,
+                offset,
+                timestamp_ms: None,
+                key: None,
+                value: Some(vec![1]),
+                headers: vec![],
+                size: 1,
+            })
+            .collect();
+        let started = std::sync::Mutex::new(None::<Id>);
+        let (acked_tx, mut acked_rx) = tokio::sync::mpsc::unbounded_channel::<i64>();
+        let cluster: Id = "isolated".into();
+        let fut = publish(
+            Some(&ops),
+            &cluster,
+            &req,
+            messages,
+            |id: Id| {
+                *started.lock().unwrap() = Some(id);
+                std::future::ready(())
+            },
+            |m| {
+                let tx = acked_tx.clone();
+                async move {
+                    if m.offset >= 3 {
+                        // The 4th send never completes: the request goes away.
+                        std::future::pending::<()>().await;
+                    }
+                    let _ = tx.send(m.offset);
+                    Ok(ProduceResp {
+                        partition: 0,
+                        offset: 100 + m.offset,
+                    })
+                }
+            },
+        );
+        tokio::select! {
+            _ = fut => panic!("the publish loop cannot finish"),
+            _ = async { for _ in 0..3 { acked_rx.recv().await; } } => {}
+        }
+        // `fut` is dropped here; the guard's write runs on a spawned task.
+        let id = started.lock().unwrap().clone().unwrap();
+        let mut saved = ops.get_replay(&id).await.unwrap();
+        for _ in 0..50 {
+            if saved.status != "running" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            saved = ops.get_replay(&id).await.unwrap();
+        }
+        assert_eq!(saved.status, "interrupted");
+        assert_eq!(saved.count, 3);
+        let evidence: serde_json::Value = serde_json::from_str(&saved.evidence_json).unwrap();
+        assert_eq!(evidence[2]["target_offset"], 102);
     }
 }

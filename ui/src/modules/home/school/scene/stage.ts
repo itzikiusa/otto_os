@@ -10,6 +10,7 @@ import { CEIL_Y, ceilingLights } from '../furnish.ts';
 import { toWorld, type Room } from '../model.ts';
 import type { MountOpts } from './api.ts';
 import { LAMPS, type Three } from './shared.ts';
+import { cappedPixelRatio } from '../../../../lib/three/stage.ts';
 
 export type Stage = ReturnType<typeof createStage>;
 
@@ -22,8 +23,7 @@ export function createStage(
   opts: MountOpts,
 ) {
   const renderer = new T.WebGLRenderer({ antialias: true, alpha: false, powerPreference: 'high-performance' });
-  const displayScale = Number.isFinite(window.devicePixelRatio) && window.devicePixelRatio > 0 ? window.devicePixelRatio : 1;
-  renderer.setPixelRatio(Math.min(2, displayScale));
+  renderer.setPixelRatio(cappedPixelRatio(2));
   renderer.outputColorSpace = T.SRGBColorSpace;
   renderer.toneMapping = T.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.05;
@@ -40,7 +40,7 @@ export function createStage(
     if (/swiftshader|llvmpipe|softpipe|software/i.test(name)) {
       software = true;
       renderer.shadowMap.enabled = false;
-      renderer.setPixelRatio(Math.min(1, displayScale));
+      renderer.setPixelRatio(cappedPixelRatio(1));
     }
   } catch {
     /* keep the defaults */

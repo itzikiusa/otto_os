@@ -20,7 +20,7 @@ pub(in crate::workflow_engine) async fn execute(
         .get("workspace_id")
         .and_then(Value::as_str)
         .unwrap_or(&ws.id);
-    let verdict = crate::routes::usage::check_budget(ctx, workspace_id_override, provider).await;
+    let verdict = crate::budget::check_budget(ctx, workspace_id_override, provider).await;
     if verdict.blocked {
         return Err(otto_core::Error::Upstream(
             verdict

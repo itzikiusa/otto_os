@@ -6,6 +6,7 @@
   // pod can't grow the DOM or memory without bound.
   import { untrack, tick } from 'svelte';
   import VirtualList from '../../lib/components/VirtualList.svelte';
+  import { providerErrorText } from '../../lib/loadError';
   import { appendCapped, appendFiltered, pushPendingCapped } from './logRing';
   import Icon from '../../lib/components/Icon.svelte';
   import { downloadText } from '../../lib/components/exporters';
@@ -181,7 +182,7 @@
       }
       flush();
     } catch (e) {
-      if (!ac.signal.aborted) error = e instanceof Error ? e.message : String(e);
+      if (!ac.signal.aborted) error = providerErrorText(e);
     } finally {
       if (abort === ac) streaming = false;
     }

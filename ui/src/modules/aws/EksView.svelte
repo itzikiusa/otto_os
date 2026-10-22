@@ -18,6 +18,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import { copyTextOrThrow } from '../../lib/clipboard';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import Icon from '../../lib/components/Icon.svelte';
@@ -27,6 +28,7 @@
   import RegionErrors from './RegionErrors.svelte';
   import { ALL_REGIONS } from '../../lib/api/aws';
   import { fmtAgo, fmtDate, awsErrorText } from './util';
+  import { awsLoadText } from './loadText';
   import type { AwsAccount, EksClusterDetail, EksClusterSummary } from '../../lib/api/types';
 
   interface Props {
@@ -69,7 +71,7 @@
       error = '';
     } catch (e) {
       if (seq !== loadSeq) return;
-      error = e instanceof Error ? e.message : String(e);
+      error = awsLoadText(e);
     } finally {
       if (seq === loadSeq) loading = false;
     }
@@ -93,7 +95,7 @@
       const d = await awsApi.eksCluster(account.id, target.name, target.region);
       if (request === detailRequest && detail) detail = { c: target, d, error: '' };
     } catch (e) {
-      if (request === detailRequest && detail) detail = { c: target, d: null, error: e instanceof Error ? e.message : String(e) };
+      if (request === detailRequest && detail) detail = { c: target, d: null, error: awsLoadText(e) };
     }
   }
 
@@ -156,7 +158,7 @@
   {#if loading && !clusters}
     <div class="pad"><Skeleton rows={5} label="EKS clusters" /></div>
   {:else if error}
-    <EmptyState actionKind={loginNeeded ? 'primary' : 'secondary'} icon="warning" title="Couldn’t list clusters" body={awsErrorText(error)} actionLabel={loginNeeded ? 'Sign in' : 'Retry'} onaction={loginNeeded ? onsignin : () => void load()} />
+    <LoadState what="EKS clusters" error={awsErrorText(error)} empty onretry={() => void load()}>{#snippet errorActions()}{#if loginNeeded}<button class="btn primary" onclick={onsignin}><Icon name="key" size={12} /> Sign in</button>{/if}{/snippet}</LoadState>
   {:else if shown.length === 0}
     <EmptyState icon="helm" title={filter ? 'No matching clusters' : allRegions ? 'No EKS clusters in any enabled region' : `No EKS clusters in ${region}`} />
   {:else}
@@ -201,7 +203,7 @@
       </div>
       <h3>Node groups</h3>
       {#if d.error}
-        <p class="err">{d.error}</p>
+        <p class="err" role="alert">{awsErrorText(d.error)}</p>
       {:else if !d.d}
         <Skeleton rows={3} />
       {:else if d.d.nodegroups.length === 0}

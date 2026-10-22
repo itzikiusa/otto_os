@@ -220,7 +220,7 @@
   import { wsConnect, wsUrl, WS_BEARER_SUBPROTOCOL } from '../api/client';
   import type { SessionStatus, TermSearchMatch, WsSearchResultFrame, WsTermFlowFrame, WsTermProbeFrame, WsTermResyncFrame, WsTermScrollbackRequestFrame } from '../api/types';
   import type { CompactClient } from './termCompactQueue';
-  import { TermGridSync } from './termGridSync';
+  import { TermGridSync, resizeSendStep, shouldDeferLocalResize } from './termGridSync';
   import { EMBED_SCROLLBACK, QuietRepaint, TermFlow, WriteQueue, hasCursorOrErase, resizeDecision } from './termFlow';
   import { reconnectDelay } from './guestReconnect';
   import { KeyLatency, ProbeClock, fmtMs, fmtPair, loopMonitor, termLatencyEnabled, type EchoStats } from './termLatency';
@@ -1100,13 +1100,10 @@
    *  repaints the TUI, so the decision asks for a snapshot (G1). */
   let localReflowed = false;
 
-  /** Agent TUI panes measure while their box settles and resize xterm only
-   *  once the grid is stability-confirmed (confirmResizeStep): the passing
-   *  sizes of a tab switch, a split animation or a window restore never
-   *  touch the buffer. Shells (their scrollback reflows natively) and phones
-   *  (the soft keyboard must not wait) resize immediately. */
+  /** TUI panes resize only once the grid is confirmed (termGridSync.ts
+   *  `shouldDeferLocalResize`). */
   function deferLocalResize(): boolean {
-    return preferDom && connected && !viewport.isPhone;
+    return shouldDeferLocalResize({ preferDom, connected, phone: viewport.isPhone });
   }
 
   function cancelResizeTimer(): void {
@@ -1327,18 +1324,20 @@
     // Reflect the live grid on the host element — handy for debugging stale
     // grids (shows up as a too-small data-cols) and asserted by the resize E2E.
     container?.setAttribute('data-cols', String(term.cols));
-    if (force) {
-      // Connect-time / focus-reclaim sync: skip the settle wait but still
-      // require the stability confirmation (an attach can race a window
-      // restore animation just like a drag can).
+    const step = resizeSendStep({
+      force,
+      timerPending: resizeSendTimer !== null,
+      grid: !force && deferLocalResize() && measuredGrid ? measuredGrid : term,
+      last: { cols: lastCols, rows: lastRows },
+      localReflowed,
+    });
+    if (step === 'skip') return;
+    cancelResizeTimer();
+    if (step === 'confirm-now') {
       resizeForcePending = true;
-      cancelResizeTimer();
       confirmResizeStep();
       return;
     }
-    const grid = deferLocalResize() && measuredGrid ? measuredGrid : term;
-    if (resizeSendTimer === null && grid.cols === lastCols && grid.rows === lastRows && !localReflowed) return;
-    cancelResizeTimer();
     resizeSendTimer = setTimeout(confirmResizeStep, RESIZE_SETTLE_MS);
   }
 
@@ -2418,11 +2417,7 @@
     exitCode = null;
     dormantView = false;
     reconnectAttempts = 0;
-    lastInjN = 0;
     const adopted = adoptEngine(sid);
-    // An adopted socket is already OPEN: without this the injection effect
-    // below would re-send an injection that was consumed before the park.
-    if (adopted) lastInjN = ws.injections[sid]?.n ?? 0;
     if (!adopted) buildTerm();
     bindTerm();
     attachWebgl();
@@ -2462,9 +2457,6 @@
     // a Terminal's lifetime (props may already read as torn down in cleanup).
     const parkable = untrack(() => keepAlive && !shareToken && !socketFactory);
     const adopted = parkable && untrack(() => adoptEngine(sessionId));
-    // Same for a mount-time adopt (see switchEngine): injections issued
-    // before this mount were never meant for it.
-    if (adopted) lastInjN = untrack(() => ws.injections[sessionId]?.n ?? 0);
     if (!adopted) untrack(buildTerm);
     untrack(bindTerm);
     // Edit ▸ Select All (⌘A) while this terminal has focus selects the whole
@@ -2762,7 +2754,6 @@
     reconnecting = false;
     exitCode = null;
     reconnectAttempts = 0;
-    lastInjN = 0;
     // 4. Clear the xterm viewport and scrollback so old session output is gone
     //    before the new scrollback arrives. term.reset() resets the terminal state
     //    (cursor, attrs, etc.) and clears scrollback while keeping the DOM/WebGL
@@ -2884,16 +2875,6 @@
       clearWebglAtlas();
       forceViewportRefresh();
     }
-  });
-
-  // Apply programmatic input injected into this session (e.g. DB rows → a running
-  // agent), wrapped in bracketed paste so multi-line content isn't auto-submitted.
-  let lastInjN = 0;
-  $effect(() => {
-    const inj = ws.injections[sessionId];
-    if (!inj || readOnly || socketFactory || inj.n <= lastInjN) return;
-    lastInjN = inj.n;
-    sendJson({ type: 'input', data: textToBase64(`\x1b[200~${inj.text}\x1b[201~`) });
   });
 
   export function focus(): void {

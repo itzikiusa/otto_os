@@ -21,11 +21,12 @@ use otto_core::{new_id, Error, Id};
 use otto_state::{IssuesRepo, NewIssueAccount};
 
 use crate::confluence::{
-    markdown_to_storage, CommentWriteResp, ConfluenceClient, ConfluencePageSummary, PageComment,
-    PageExpect, PageWriteResp,
+    CommentWriteResp, ConfluenceClient, ConfluencePageSummary, PageComment, PageExpect,
+    PageWriteResp,
 };
 use crate::issue_create::{local_problems, problems_error, CreateIssueReq, CreateIssueResp};
 use crate::jira::{CommentRef, DevStatus, EditableField, IssueFull, JiraTransition, JiraUser};
+use crate::md_storage::markdown_to_storage;
 use crate::tracker::{RawQuery, Tracker};
 
 /// The base URL stored for a Linear account created without one.

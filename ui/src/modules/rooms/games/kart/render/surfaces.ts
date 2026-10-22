@@ -10,19 +10,10 @@
  */
 import * as THREE from 'three';
 import { Rng } from '../../common/math';
+import { canvas, finish } from '../../common/textures';
 
-function canvas(w: number, h: number): [HTMLCanvasElement, CanvasRenderingContext2D] {
-  const c = document.createElement('canvas');
-  c.width = w; c.height = h;
-  return [c, c.getContext('2d')!];
-}
-function texture(c: HTMLCanvasElement, color = true, repeat = true): THREE.CanvasTexture {
-  const t = new THREE.CanvasTexture(c);
-  t.colorSpace = color ? THREE.SRGBColorSpace : THREE.NoColorSpace;
-  if (repeat) t.wrapS = t.wrapT = THREE.RepeatWrapping;
-  t.anisotropy = 8;
-  return t;
-}
+/** Colour texture by default; `color: false` for normal / roughness data. */
+const texture = (c: HTMLCanvasElement, color = true, repeat = true): THREE.CanvasTexture => finish(c, repeat, color);
 /** Runs `draw` at the tile offsets that touch the canvas, so a mark crossing an edge wraps (tiles seamlessly). */
 function wrapped(g: CanvasRenderingContext2D, w: number, h: number, draw: () => void): void {
   for (const dx of [-w, 0, w]) for (const dy of [-h, 0, h]) { g.save(); g.translate(dx, dy); draw(); g.restore(); }
@@ -245,7 +236,7 @@ export function gridSlotTexture(): THREE.CanvasTexture {
 }
 
 /** Special surfaces laid over or instead of tarmac. */
-export type SurfaceKind = 'sand' | 'snow' | 'cinder' | 'mud' | 'ice' | 'planks' | 'metal';
+export type TerrainSurfaceKind = 'sand' | 'snow' | 'cinder' | 'mud' | 'ice' | 'planks' | 'metal';
 /**
  * A tiling texture for a special surface (u across the road, v along). The
  * off-road kinds fade to transparent at both edges so they bleed into the
@@ -253,7 +244,7 @@ export type SurfaceKind = 'sand' | 'snow' | 'cinder' | 'mud' | 'ice' | 'planks' 
  * across the road with dark gaps and nail heads; metal is diamond plate in
  * riveted panels.
  */
-export function surfaceTexture(kind: SurfaceKind): THREE.CanvasTexture {
+export function terrainSurfaceTexture(kind: TerrainSurfaceKind): THREE.CanvasTexture {
   const S = 256, rng = new Rng(kind.length * 977 + kind.charCodeAt(0));
   const [c, g] = canvas(S, S);
   const speckle = (n: number, k: number, size = 2) => { for (let i = 0; i < n; i++) { const v = rng.range(-1, 1); g.fillStyle = v > 0 ? `rgba(255,255,255,${v * k})` : `rgba(0,0,0,${-v * k})`; g.fillRect(rng.int(S), rng.int(S), 1 + rng.int(size), 1 + rng.int(size)); } };

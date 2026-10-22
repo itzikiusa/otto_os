@@ -3,6 +3,7 @@
  * frustum, fog, resize handling and render stats. One per mounted game.
  */
 import * as THREE from 'three';
+import { cappedPixelRatio, onContextLost, releaseRenderer } from '../../../../lib/three/stage.ts';
 
 export interface Theme {
   skyTop: number; skyHorizon: number; fog: number; fogNear: number; fogFar: number;
@@ -26,11 +27,12 @@ export class GameView {
   private sunOffset = new THREE.Vector3(60, 110, 40);
   private frames = 0; private frameMs = 16; private fps = 60; private last = 0;
   private host: HTMLElement;
+  private unlisten: (() => void)[] = [];
 
   constructor(host: HTMLElement, theme: Theme, shadowSize = 2048, options: ViewOptions = {}) {
     this.host = host;
     this.renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.75));
+    this.renderer.setPixelRatio(cappedPixelRatio(1.75));
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.05;
@@ -141,6 +143,12 @@ export class GameView {
     this.frames++;
   }
 
+  /** Calls `lost` when the GPU context is reclaimed; the game remounts its
+   *  renderer (lib/three/stage.ts) instead of leaving a black canvas. */
+  onContextLost(lost: () => void): void {
+    this.unlisten.push(onContextLost(this.canvas, lost));
+  }
+
   stats(): RenderStats {
     const info = this.renderer.info.render;
     return { frames: this.frames, frameMs: this.frameMs, fps: this.fps, drawCalls: info.calls, triangles: info.triangles };
@@ -148,6 +156,7 @@ export class GameView {
 
   dispose(): void {
     this.resizeObserver.disconnect();
+    for (const off of this.unlisten.splice(0)) off();
     this.scene.traverse(o => {
       const mesh = o as THREE.Mesh;
       // Kit resources are freed by AssetLibrary; free only what the scene built itself.
@@ -159,9 +168,7 @@ export class GameView {
     (this.sky.material as THREE.Material).dispose();
     this.sky.geometry.dispose();
     this.sun.shadow.map?.dispose();
-    this.renderer.dispose();
-    this.renderer.forceContextLoss();
-    this.canvas.remove();
+    releaseRenderer(this.renderer);
   }
 }
 

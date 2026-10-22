@@ -32,9 +32,36 @@
     tray,
     useGlassWindow,
   } from '../../lib/desktop';
+  import {
+    daemonSupervisor,
+    offlineDetail,
+    supervisorErrorText,
+    type DaemonReport,
+  } from './daemonState';
 
   const POLL_MS = 20_000;
   const TODAY_MAX = 6;
+
+  // The supervisor's diagnosis + Restart, mirrored from the offline screen
+  // (error-handling-5-01): a wedged daemon is recoverable from the menu bar.
+  let daemonReport = $state<DaemonReport | null>(null);
+  const daemonDetail = $derived(offlineDetail(daemonReport));
+  let restarting = $state(false);
+  let restartError = $state('');
+  async function restartDaemon(): Promise<void> {
+    if (restarting) return;
+    restarting = true;
+    restartError = '';
+    try {
+      await daemonSupervisor.restart();
+      daemonReport = null;
+      await auth.boot(true);
+    } catch (e) {
+      restartError = `Restart failed: ${supervisorErrorText(e)}`;
+    } finally {
+      restarting = false;
+    }
+  }
 
   interface RunningRow {
     session: Session;
@@ -248,8 +275,20 @@
       })
       .catch(() => {});
     let unlisten: (() => void) | null = null;
+    let unlistenDaemon: (() => void) | null = null;
     void onDesktopEvent('otto://tray-shown', refreshAll).then((fn) => (unlisten = fn));
-    return () => unlisten?.();
+    void daemonSupervisor
+      .onState((report) => (daemonReport = report))
+      .then((fn) => (unlistenDaemon = fn))
+      .catch(() => {});
+    void daemonSupervisor
+      .status()
+      .then((report) => (daemonReport ??= report))
+      .catch(() => {});
+    return () => {
+      unlisten?.();
+      unlistenDaemon?.();
+    };
   });
 </script>
 
@@ -282,7 +321,14 @@
     {:else if auth.phase === 'offline'}
       <div class="state">
         <p>The Otto daemon isn’t running yet.</p>
-        <button class="btn small" onclick={() => void auth.boot()}>Retry</button>
+        {#if daemonDetail}<p class="detail">{daemonDetail}</p>{/if}
+        {#if restartError}<p class="error" role="alert">{restartError}</p>{/if}
+        <div class="state-actions">
+          <button class="btn small" onclick={() => void auth.boot()}>Retry</button>
+          <button class="btn small" onclick={() => void restartDaemon()} disabled={restarting}>
+            {restarting ? 'Restarting…' : 'Restart daemon'}
+          </button>
+        </div>
       </div>
     {:else if auth.phase !== 'ready'}
       <div class="state">
@@ -491,6 +537,19 @@
   }
   .state p {
     margin: 0;
+  }
+  .state .detail {
+    font-size: var(--fs-s);
+    overflow-wrap: anywhere;
+  }
+  .state .error {
+    color: var(--danger);
+    font-size: var(--fs-s);
+  }
+  .state-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
   }
   .foot {
     display: flex;

@@ -1,4 +1,5 @@
 //! Capability-isolated, ephemeral collaboration rooms.
+pub(crate) mod capability;
 mod registry;
 #[cfg(test)]
 mod tests;

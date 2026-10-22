@@ -309,7 +309,7 @@ fn net_guard_blocks_internal_addresses() {
 
 #[tokio::test]
 async fn net_guard_check_url_rejects_loopback_and_schemes() {
-    use super::net_guard::check_url;
+    use otto_netguard::check_url;
     assert!(check_url("http://127.0.0.1/x").await.is_err());
     assert!(check_url("http://169.254.169.254/latest/meta-data")
         .await

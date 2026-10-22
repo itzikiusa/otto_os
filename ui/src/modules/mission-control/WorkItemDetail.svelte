@@ -9,18 +9,8 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import type { WorkItemDetail, RiskLevel } from '../../lib/api/types';
   import {
-    KIND_ICON,
-    KIND_LABEL,
-    RISK_LABEL,
-    RISK_LEVELS,
-    ACTOR_LABEL,
-    ARTIFACT_LABEL,
-    riskColor,
-    fmtCost,
-    workStatus,
-    ownerLabel,
-    shortId,
-    isUlid,
+    KIND_ICON, KIND_LABEL, RISK_LABEL, RISK_LEVELS, ACTOR_LABEL, ARTIFACT_LABEL,
+    riskColor, fmtCost, workStatus, ownerLabel, shortId, isUlid,
   } from './lib';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import ApprovalActions from '../../lib/components/ApprovalActions.svelte';
@@ -32,6 +22,7 @@
   import { confirmer } from '../../lib/confirm.svelte';
   import { openExternal } from '../../lib/external';
   import { copyText } from '../../lib/clipboard';
+  import { focusFirstField, refocusEditTrigger } from '../../lib/inlineEdit';
   import { sentenceCase, type Tone } from '../../lib/status';
   import { SOURCE_MODULE, directRoute, reviewRoute, stopPath, isActive } from './sourceLinks';
 
@@ -51,6 +42,7 @@
   let busy = $state(false);
 
   // editing
+  const EDIT_KEY = 'work-item-goal';
   let editing = $state(false);
   let editGoal = $state('');
   let editResult = $state('');
@@ -85,9 +77,11 @@
     resetDraft();
     editing = true;
   }
+  /** Close the editor (Cancel or a saved draft); focus returns to Edit. */
   function cancelEdits(): void {
     editing = false;
     resetDraft();
+    void refocusEditTrigger(EDIT_KEY);
   }
   function isDirty(): boolean {
     return !!detail && editing && !!editBaseline && !sameDraft(draftSnapshot(), editBaseline);
@@ -399,10 +393,10 @@
       <section class="d-sec">
         <div class="sec-head">
           <h3 class="section-title">Goal &amp; context</h3>
-          {#if !editing}<button class="btn ghost small" onclick={beginEdit}><Icon name="edit" size={12} />Edit</button>{/if}
+          {#if !editing}<button class="btn ghost small" data-edit-for={EDIT_KEY} aria-label="Edit goal and context" onclick={beginEdit}><Icon name="edit" size={12} />Edit</button>{/if}
         </div>
         {#if editing}
-          <label class="field"><span class="flabel">Goal</span><textarea dir="auto" class="input field-input" rows="2" bind:value={editGoal}></textarea></label>
+          <label class="field"><span class="flabel">Goal</span><textarea dir="auto" class="input field-input" rows="2" bind:value={editGoal} use:focusFirstField></textarea></label>
           <label class="field"><span class="flabel">Result summary</span><textarea dir="auto" class="input field-input" rows="2" bind:value={editResult}></textarea></label>
           <label class="field">
             <span class="flabel">Risk (policy)</span>

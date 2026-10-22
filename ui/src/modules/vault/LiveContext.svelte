@@ -76,7 +76,7 @@
     RepoStatusResp,
   } from '../../lib/api/types';
   import { matchByName, matchRepos, norm, workloadRouteKind, type EntityHints } from './structuredNote';
-  import { monitorPath, resourcesPath } from '../kubernetes/viewState';
+  import { monitorPath, resourcesPath } from '../../lib/k8s/viewState';
 
   let { hints, wsId }: { hints: EntityHints; wsId: string } = $props();
 

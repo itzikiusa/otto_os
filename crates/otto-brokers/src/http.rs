@@ -563,11 +563,18 @@ async fn replay<S: BrokersCtx>(
 ) -> ApiResult<Response> {
     let row = authorize(&ctx, &user, &id, WorkspaceRole::Editor).await?;
     guard(&row, req.confirm)?;
-    let resp = ctx.brokers().replay(&id, &req, &user.id).await?;
-    ctx.brokers()
-        .audit_write(
+    // Own the publication even if the client disconnects (concurrency-async-5-01,
+    // the `state_archive` convention): hyper drops this handler's future on
+    // client EOF, which used to stop the produce loop mid-way, leave the row
+    // `running` and skip the closing audit entry. The task finishes the loop,
+    // records the final status and writes the audit entry either way.
+    let svc = Arc::clone(ctx.brokers());
+    let user_id = user.id.clone();
+    let task = tokio::spawn(async move {
+        let resp = svc.replay(&id, &req, &user_id).await?;
+        svc.audit_write(
             &id,
-            &user.id,
+            &user_id,
             "replay",
             serde_json::json!({
                 "source_topic": req.source_topic,
@@ -579,6 +586,11 @@ async fn replay<S: BrokersCtx>(
             }),
         )
         .await;
+        Ok::<_, Error>(resp)
+    });
+    let resp = task
+        .await
+        .map_err(|e| Error::Internal(format!("replay task failed: {e}")))??;
     Ok((StatusCode::CREATED, Json(resp)).into_response())
 }
 

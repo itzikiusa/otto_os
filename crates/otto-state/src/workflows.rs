@@ -25,6 +25,10 @@ pub struct RunHead {
     pub workflow_name: Option<String>,
 }
 
+/// Why a scheduled task stopped when the workflow it runs was deleted
+/// (data-integrity-5-03) — the paused task's run history shows it.
+pub const WORKFLOW_DELETED_NOTE: &str = "workflow deleted – task paused";
+
 #[derive(Clone)]
 pub struct WorkflowsRepo {
     pool: DbPool,
@@ -440,7 +444,18 @@ impl WorkflowsRepo {
     /// The live-run check and the DELETE are one statement, so a run admitted
     /// concurrently either blocks the delete or is never admitted (its INSERT
     /// sees no parent row).
+    ///
+    /// data-integrity-5-03: `scheduled_tasks.workflow_id` is a plain column,
+    /// not a cascading FK, so a deleted workflow used to leave its scheduled
+    /// tasks enabled and failing on every occurrence. The same transaction
+    /// pauses them and records why on each one's run history (an `error` run
+    /// reading [`WORKFLOW_DELETED_NOTE`]) and `last_status`.
     pub async fn delete(&self, id: &Id) -> Result<()> {
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(dberr("begin delete workflow"))?;
         let done = sqlx::query(
             "DELETE FROM workflows WHERE id = ?
              AND NOT EXISTS (SELECT 1 FROM workflow_runs
@@ -448,7 +463,7 @@ impl WorkflowsRepo {
         )
         .bind(id)
         .bind(id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(dberr("delete workflow"))?;
         if done.rows_affected() == 0 {
@@ -457,7 +472,7 @@ impl WorkflowsRepo {
                  WHERE workflow_id = ? AND status IN ('pending','running')",
             )
             .bind(id)
-            .fetch_one(&self.pool)
+            .fetch_one(&mut *tx)
             .await
             .map_err(dberr("delete workflow live runs"))?;
             if live > 0 {
@@ -465,7 +480,47 @@ impl WorkflowsRepo {
                     "this workflow has {live} active run(s) — cancel them before deleting it"
                 )));
             }
+            return Ok(());
         }
+        let tasks: Vec<(String, String)> = sqlx::query_as(
+            "SELECT id, workspace_id FROM scheduled_tasks WHERE workflow_id = ? AND enabled = 1",
+        )
+        .bind(id)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(dberr("scheduled tasks of deleted workflow"))?;
+        let now = fmt(Utc::now());
+        for (task_id, workspace_id) in &tasks {
+            sqlx::query(
+                "INSERT INTO scheduled_task_runs (id, task_id, workspace_id, status, trigger, \
+                 started_at, finished_at, summary, delivered, error, created_at) \
+                 VALUES (?, ?, ?, 'error', 'schedule', ?, ?, ?, 0, ?, ?)",
+            )
+            .bind(new_id())
+            .bind(task_id)
+            .bind(workspace_id)
+            .bind(&now)
+            .bind(&now)
+            .bind(WORKFLOW_DELETED_NOTE)
+            .bind(WORKFLOW_DELETED_NOTE)
+            .bind(&now)
+            .execute(&mut *tx)
+            .await
+            .map_err(dberr("record paused scheduled task"))?;
+        }
+        // Paused exactly like a user's pause: eligibility (`admission_generation`)
+        // moves so a scan captured before the delete can't admit it.
+        sqlx::query(
+            "UPDATE scheduled_tasks SET enabled = 0, last_status = 'error', \
+             admission_generation = admission_generation + 1, updated_at = ? \
+             WHERE workflow_id = ? AND enabled = 1",
+        )
+        .bind(&now)
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .map_err(dberr("pause scheduled tasks of deleted workflow"))?;
+        tx.commit().await.map_err(dberr("commit delete workflow"))?;
         Ok(())
     }
 
@@ -2806,5 +2861,75 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(find(Some("t1")).await, None, "settled runs never match");
+    }
+
+    /// data-integrity-5-03: deleting a workflow pauses the scheduled tasks
+    /// that run it, in the same transaction, and records why; tasks aimed
+    /// elsewhere are untouched, and a refused delete pauses nothing.
+    #[tokio::test]
+    async fn delete_pauses_the_scheduled_tasks_that_run_it() {
+        let pool = mem_pool().await;
+        let repo = WorkflowsRepo::new(pool.clone());
+        let tasks = crate::ScheduledTasksRepo::new(pool.clone());
+        let owner: Id = "owner".into();
+        let wf = |name: &'static str| {
+            let repo = repo.clone();
+            let owner = owner.clone();
+            async move {
+                repo.create(
+                    &"ws".into(),
+                    name,
+                    "",
+                    "",
+                    &WorkflowGraph::default(),
+                    &owner,
+                )
+                .await
+                .unwrap()
+            }
+        };
+        let doomed = wf("Doomed").await;
+        let kept = wf("Kept").await;
+        let task_for = |wf_id: &Id| {
+            let mut t = crate::NewScheduledTask::defaults("ws".into(), "T".into());
+            t.kind = "workflow".into();
+            t.workflow_id = Some(wf_id.to_string());
+            t
+        };
+        let hit = tasks.create(task_for(&doomed.id)).await.unwrap();
+        let other = tasks.create(task_for(&kept.id)).await.unwrap();
+
+        // A live run refuses the delete — and pauses nothing.
+        let run = repo
+            .create_run(&doomed.id, &"ws".into(), &serde_json::json!({}), None)
+            .await
+            .unwrap();
+        assert!(matches!(
+            repo.delete(&doomed.id).await,
+            Err(Error::Conflict(_))
+        ));
+        assert!(tasks.get(&hit.id).await.unwrap().enabled);
+        sqlx::query("UPDATE workflow_runs SET status = 'success' WHERE id = ?")
+            .bind(&run.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        repo.delete(&doomed.id).await.unwrap();
+        let paused = tasks.get(&hit.id).await.unwrap();
+        assert!(!paused.enabled, "the task that ran the workflow is paused");
+        assert_eq!(paused.last_status.as_deref(), Some("error"));
+        let runs = tasks.list_runs(&hit.id, 10).await.unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].status, "error");
+        assert_eq!(runs[0].error.as_deref(), Some(WORKFLOW_DELETED_NOTE));
+        assert!(
+            tasks.get(&other.id).await.unwrap().enabled,
+            "other tasks untouched"
+        );
+        assert!(tasks.list_runs(&other.id, 10).await.unwrap().is_empty());
+        // Deleting again is a no-op, not a second note.
+        repo.delete(&doomed.id).await.unwrap();
+        assert_eq!(tasks.list_runs(&hit.id, 10).await.unwrap().len(), 1);
     }
 }

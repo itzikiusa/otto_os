@@ -14,7 +14,7 @@
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { focusOnMount } from '../../lib/focusOnMount';
-  import { refocusEditTrigger } from './inlineEdit';
+  import { refocusEditTrigger } from '../../lib/inlineEdit';
   import { loadErrorText } from '../../lib/loadError';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import { storyStage, STORY_STAGES } from '../../lib/status';
@@ -24,7 +24,7 @@
   import { renderMarkdown } from '../../lib/md';
   import { registerFindProvider } from '../../lib/findProviders';
   import { toasts } from '../../lib/toast.svelte';
-  import { authedBlobUrl } from '../../lib/api/client';
+  import { AttachmentUrls } from './attachmentUrls.svelte';
   import * as issues from '../../lib/api/issues';
   import type { ProductStoryVersion, IssueFull, EditableField, DevStatus } from './types';
   import type { ProductAttachment } from './types';
@@ -157,14 +157,10 @@
   let bodyScreenshotIdx = $state(0);
 
   // ── Body preview: attachment token resolution ─────────────────────────────
-  // Resolved authed blob URLs for `attachment:<id>` refs found in renderedBody.
-  // These are separate from Jira attachmentUrls to avoid naming collisions.
-  let bodyAttUrls = $state<Record<string, string>>({});
-  // Object URLs created for bodyAttUrls — revoked alongside createdObjectUrls.
-  let bodyAttObjectUrls: string[] = [];
-  // IDs currently being fetched — prevents duplicate in-flight requests across
-  // overlapping resolver runs (mirrors AttachmentsPanel.loadAttUrl guard).
-  const bodyAttFetching = new Set<string>();
+  // Resolved authed blob URLs for `attachment:<id>` refs found in renderedBody
+  // (attachmentUrls.svelte.ts, shared with AttachmentsPanel: de-duplicated
+  // in-flight fetches, revoked on reset). Separate from the Jira attachmentUrls.
+  const bodyAtts = new AttachmentUrls();
   /** Bumped per resolve pass and on story change — a pass that settles after a
    *  newer one (or after a switch) drops its result and frees its blobs. */
   let resolveSeq = 0;
@@ -278,11 +274,7 @@
     attachmentUrls = {};
     attachmentLoading = {};
     // Revoke body-preview attachment token object URLs.
-    for (const url of bodyAttObjectUrls) {
-      URL.revokeObjectURL(url);
-    }
-    bodyAttObjectUrls = [];
-    bodyAttUrls = {};
+    bodyAtts.reset();
     resolvedBody = '';
     lastResolvedInput = '';
   });
@@ -310,9 +302,7 @@
       for (const url of createdObjectUrls) {
         URL.revokeObjectURL(url);
       }
-      for (const url of bodyAttObjectUrls) {
-        URL.revokeObjectURL(url);
-      }
+      bodyAtts.dispose();
     };
   });
 
@@ -393,7 +383,9 @@
     const html = renderedBody;
     if (!html || html === lastResolvedInput) return;
     lastResolvedInput = html;
-    void resolveAttachmentTokens(html, ++resolveSeq);
+    // Untracked: the resolver's synchronous cache reads/writes are not inputs.
+    const seq = ++resolveSeq;
+    untrack(() => void resolveAttachmentTokens(html, seq));
   });
 
   async function resolveAttachmentTokens(html: string, seq: number): Promise<void> {
@@ -409,41 +401,23 @@
       resolvedBody = html;
       return;
     }
-    // Fetch any uncached URLs, guarding against concurrent duplicate fetches.
-    // Collect all results locally so one merged assignment updates the cache
-    // (avoids stale-snapshot overwrites from concurrent reactive spreads).
-    const uncached = matches.map(({ id }) => id).filter(
-      (id) => !bodyAttUrls[id] && !bodyAttFetching.has(id),
-    );
-    for (const id of uncached) bodyAttFetching.add(id);
-    const collected: Record<string, string> = {};
+    // Fetch any uncached URLs (the cache shares an in-flight fetch between
+    // overlapping passes and frees a blob that lands after a story switch).
+    const urls: Record<string, string> = {};
     await Promise.all(
-      uncached.map(async (id) => {
-        try {
-          const url = await authedBlobUrl(`/product/attachments/${id}`);
-          if (destroyed || seq !== resolveSeq) {
-            URL.revokeObjectURL(url); // stale pass — never cached, so free it now
-            return;
-          }
-          bodyAttObjectUrls.push(url);
-          collected[id] = url;
-        } catch (e) {
-          console.warn('[OverviewTab] attachment token resolution failed', id, e);
-        } finally {
-          bodyAttFetching.delete(id);
-        }
+      matches.map(async ({ id }) => {
+        const url = await bodyAtts.load(id);
+        if (url) urls[id] = url;
+        else if (bodyAtts.errors[id]) console.warn('[OverviewTab] attachment token resolution failed', id, bodyAtts.errors[id]);
       }),
     );
     // A newer pass (or a story switch) owns resolvedBody now: never let A's
     // body replace B's description.
     if (destroyed || seq !== resolveSeq) return;
-    if (Object.keys(collected).length > 0) {
-      bodyAttUrls = { ...bodyAttUrls, ...collected };
-    }
     // Replace each markdown image token with an <img> tag using the blob URL.
     let out = html;
     for (const { full, alt, id } of matches) {
-      const blobUrl = bodyAttUrls[id];
+      const blobUrl = urls[id];
       if (blobUrl) {
         // `alt` comes from already-rendered HTML (entities escaped once):
         // decode, then escape for the attribute — escaping again showed

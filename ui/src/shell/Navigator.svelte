@@ -1,4 +1,6 @@
 <script lang="ts">
+  import LazyMount from '../lib/components/LazyMount.svelte';
+  import { ShareModalChunk } from './overlays.svelte';
   import { rowMenu } from '../lib/rowMenu';
   import Skeleton from '../lib/components/Skeleton.svelte';
   import { focusOnMount } from '../lib/focusOnMount';
@@ -1090,7 +1092,7 @@
 {#if shareSessionId}
   <!-- Loaded on first use: it bundles the QR encoder. -->
   {@const id = shareSessionId}
-  {#await import('../modules/agents/ShareModal.svelte') then m}<m.default sessionId={id} onclose={() => (shareSessionId = null)} />{/await}
+  <LazyMount lazy={ShareModalChunk} what="the share dialog" quiet onerror={() => (shareSessionId = null)} props={{ sessionId: id, onclose: () => (shareSessionId = null) }} />
 {/if}
 
 <!-- The module the side-by-side pane shows: a quiet trailing glyph. -->

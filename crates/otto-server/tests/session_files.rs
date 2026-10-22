@@ -8,7 +8,12 @@
 //! - another non-admin member of the same workspace is refused (403);
 //! - `../../otto.db` and an absolute path are 400;
 //! - `/ws/lsp` rooted at the owner's persona dir is not refused for access,
-//!   and the same root is 403 for another member.
+//!   and the same root is 403 for another member;
+//! - with the temp data dir PROTECTED (the global data-dir deny sees it, as
+//!   it sees the real one — TQ-5-04), a session whose cwd is the data dir's
+//!   parent (the stand-in for `~`) can't read another persona folder, and
+//!   neither can an LSP rooted there, while the persona-dir session still
+//!   reads its own files.
 
 use chrono::Utc;
 use otto_core::domain::{Capability, Feature, SessionKind};
@@ -25,7 +30,13 @@ struct Daemon {
     /// Another ws Editor.
     dave: String,
     session: String,
+    /// Carol's session whose cwd is the data dir's PARENT (the `~` case).
+    home_session: String,
     persona: std::path::PathBuf,
+    /// Another user's persona dir (`<data>/personal/agent-2`).
+    other_persona: std::path::PathBuf,
+    /// The data dir's directory name, relative to the home session's cwd.
+    data_name: String,
     _tmp: tempfile::TempDir,
 }
 
@@ -46,6 +57,11 @@ async fn seed_user(pool: &DbPool, id: &str, is_root: bool) {
 
 async fn boot() -> Daemon {
     let tmp = tempfile::tempdir().unwrap();
+    // Protect this data dir like the real one, so `in_protected_dir` holds for
+    // everything under it and the work-area exception is what opens a
+    // persona dir — not an unprotected temp dir (TQ-5-04). Unique per test.
+    let canonical_data = tmp.path().canonicalize().unwrap();
+    otto_core::secret_paths::protect_dir_for_tests(&canonical_data);
     let opts = SqliteConnectOptions::new()
         .filename(tmp.path().join("otto.db"))
         .create_if_missing(true)
@@ -101,21 +117,38 @@ async fn boot() -> Daemon {
     std::fs::create_dir_all(persona.join("memory")).unwrap();
     std::fs::write(persona.join("memory/notes.md"), "- likes tea\n").unwrap();
     std::fs::write(persona.join("AGENTS.md"), "# Scout\n").unwrap();
-    let session = SessionsRepo::new(pool.clone())
-        .create(NewSession {
-            workspace_id: "ws1".into(),
-            kind: SessionKind::Agent,
-            provider: "claude".into(),
-            title: "Scout chat".into(),
-            cwd: persona.to_string_lossy().into_owned(),
-            provider_session_id: None,
-            connection_id: None,
-            created_by: "carol".into(),
-            meta: serde_json::json!({}),
-        })
+    // Someone else's persona folder in the same data dir.
+    let other_persona = tmp.path().join("personal").join("agent-2");
+    std::fs::create_dir_all(&other_persona).unwrap();
+    std::fs::write(other_persona.join("AGENTS.md"), "# Private\n").unwrap();
+    let new_session = |title: &str, cwd: &std::path::Path| NewSession {
+        workspace_id: "ws1".into(),
+        kind: SessionKind::Agent,
+        provider: "claude".into(),
+        title: title.into(),
+        cwd: cwd.to_string_lossy().into_owned(),
+        provider_session_id: None,
+        connection_id: None,
+        created_by: "carol".into(),
+        meta: serde_json::json!({}),
+    };
+    let sessions = SessionsRepo::new(pool.clone());
+    let session = sessions
+        .create(new_session("Scout chat", &persona))
         .await
         .unwrap()
         .id;
+    let home = canonical_data.parent().unwrap().to_path_buf();
+    let home_session = sessions
+        .create(new_session("Home shell", &home))
+        .await
+        .unwrap()
+        .id;
+    let data_name = canonical_data
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
 
     let auth = AuthRepo::new(pool.clone());
     let mut tokens = Vec::new();
@@ -144,18 +177,25 @@ async fn boot() -> Daemon {
         carol,
         dave,
         session,
+        home_session,
         persona,
+        other_persona,
+        data_name,
         _tmp: tmp,
     }
 }
 
 impl Daemon {
     async fn get(&self, token: &str, op: &str, path: &str) -> (u16, Value) {
+        self.get_in(&self.session, token, op, path).await
+    }
+
+    async fn get_in(&self, session: &str, token: &str, op: &str, path: &str) -> (u16, Value) {
         let resp = self
             .http
             .get(format!(
-                "{}/api/v1/sessions/{}/files/{op}",
-                self.base, self.session
+                "{}/api/v1/sessions/{session}/files/{op}",
+                self.base
             ))
             .query(&[("path", path)])
             .bearer_auth(token)
@@ -235,4 +275,31 @@ async fn lsp_opens_on_the_owners_persona_dir_only() {
     assert_eq!(d.lsp_status(&d.carol, &d.persona).await, 400);
     // Another member rooted at Carol's persona dir is refused.
     assert_eq!(d.lsp_status(&d.dave, &d.persona).await, 403);
+}
+
+/// TQ-5-04: the data-dir deny holds for a session rooted ABOVE the data dir.
+/// Deleting the `in_protected_dir` clause, or widening the exception back to
+/// "the target is in a work area", lets the first read through.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_home_cwd_session_cannot_reach_another_persona_folder() {
+    let d = boot().await;
+    let other = format!("{}/personal/agent-2/AGENTS.md", d.data_name);
+    let (st, body) = d.get_in(&d.home_session, &d.carol, "read", &other).await;
+    assert_eq!(st, 403, "{other}: {body}");
+    let (st, body) = d
+        .get_in(
+            &d.home_session,
+            &d.carol,
+            "browse",
+            &format!("{}/personal", d.data_name),
+        )
+        .await;
+    assert_eq!(st, 403, "browse personal: {body}");
+    // Her persona-dir session still reads its own files with the dir protected.
+    let (st, body) = d.get(&d.carol, "read", "memory/notes.md").await;
+    assert_eq!(st, 200, "{body}");
+    assert_eq!(body["content"], "- likes tea\n");
+    // No language server on someone else's persona dir, and still one on hers.
+    assert_eq!(d.lsp_status(&d.carol, &d.other_persona).await, 403);
+    assert_eq!(d.lsp_status(&d.carol, &d.persona).await, 400);
 }

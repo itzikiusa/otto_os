@@ -470,13 +470,14 @@ async fn complete_run_with(
             let now = Utc::now();
             let rel = report_rel(&task.id, &run_id, now);
             let abs = ctx.data_dir().join("scheduled").join(&rel);
-            let (report_path, report_rel_opt) = match write_report(&abs, &out.report).await {
-                Ok(()) => (Some(abs.to_string_lossy().to_string()), Some(rel.clone())),
-                Err(e) => {
-                    warn!(task = %task.id, "scheduled task: write report failed: {e}");
-                    (None, None)
-                }
-            };
+            let saved = SavedReport::from_write(write_report(&abs, &out.report).await, &abs, rel);
+            if let Some(e) = &saved.error {
+                warn!(task = %task.id, "scheduled task: {e}");
+            }
+            // error-handling-5-06: a report that couldn't be written fails the
+            // run (with the reason on its row and the failure notice) instead
+            // of reading as a clean `ok` with no report and no reason.
+            let status = if saved.error.is_some() { "error" } else { "ok" };
 
             // --- only notify on meaningful change ---
             let hash = report_hash(&out.report);
@@ -507,10 +508,11 @@ async fn complete_run_with(
                 repo,
                 &run_id,
                 FinishRun {
-                    status: "ok".into(),
+                    status: status.into(),
                     summary: out.summary.clone(),
-                    report_path,
-                    report_rel: report_rel_opt,
+                    report_path: saved.path,
+                    report_rel: saved.rel,
+                    error: saved.error.clone(),
                     delivered,
                     delivery_error: derr.clone(),
                     session_id: out.session_id.clone(),
@@ -519,23 +521,22 @@ async fn complete_run_with(
                     attempts: out.attempts,
                     skipped_delivery: skipped,
                     workflow_run_id: out.workflow_run_id.clone(),
-                    ..Default::default()
                 },
             )
             .await;
             if settles_schedule(trigger, false) {
-                settle_with_retry(repo, task, "ok", served).await;
+                settle_with_retry(repo, task, status, served).await;
             } else {
                 // A manual run's outcome is the task's latest status too — a
                 // failed "Run now" used to leave the row saying "Succeeded".
-                set_status_logged(repo, task, "ok").await;
+                set_status_logged(repo, task, status).await;
             }
             prune(ctx, &task.id).await;
-            emit(ctx, task, &run_id, "ok");
+            emit(ctx, task, &run_id, status);
             // The body already went out. An attachment error stays on the row
             // and must not read as "the report was not delivered".
             let notice_delivery = derr_for_notice.as_deref().filter(|_| !delivered);
-            task_notice(ctx, task, &run_id, None, notice_delivery).await;
+            task_notice(ctx, task, &run_id, saved.error.as_deref(), notice_delivery).await;
             Ok(run_id)
         }
         Err(fail) => {
@@ -552,21 +553,20 @@ async fn complete_run_with(
             }
             // Keep whatever the failed run still produced (shell output, a
             // workflow report) so the run's report view shows why it failed.
+            // A report that couldn't be written keeps its summary and says so
+            // in the run's error, next to why the run failed.
+            let mut msg = msg;
             let (report_path, report_rel_opt, summary) = match fail.report.as_deref() {
                 Some(report) => {
                     let rel = report_rel(&task.id, &run_id, Utc::now());
                     let abs = ctx.data_dir().join("scheduled").join(&rel);
-                    match write_report(&abs, report).await {
-                        Ok(()) => (
-                            Some(abs.to_string_lossy().to_string()),
-                            Some(rel),
-                            extract_summary(report),
-                        ),
-                        Err(e) => {
-                            warn!(task = %task.id, "scheduled task: write report failed: {e}");
-                            (None, None, String::new())
-                        }
+                    let saved =
+                        SavedReport::from_write(write_report(&abs, report).await, &abs, rel);
+                    if let Some(e) = saved.error {
+                        warn!(task = %task.id, "scheduled task: {e}");
+                        msg = format!("{msg}. {e}");
                     }
+                    (saved.path, saved.rel, extract_summary(report))
                 }
                 None => (None, None, String::new()),
             };
@@ -783,6 +783,32 @@ fn fail_status(fail: &ExecFailure) -> &'static str {
         "skipped"
     } else {
         "error"
+    }
+}
+
+/// Where a run's report landed, or why it didn't (error-handling-5-06).
+#[derive(Debug)]
+struct SavedReport {
+    path: Option<String>,
+    rel: Option<String>,
+    /// "The report couldn’t be saved: …" — recorded as the run's error.
+    error: Option<String>,
+}
+
+impl SavedReport {
+    fn from_write(write: Result<()>, abs: &std::path::Path, rel: String) -> Self {
+        match write {
+            Ok(()) => Self {
+                path: Some(abs.to_string_lossy().to_string()),
+                rel: Some(rel),
+                error: None,
+            },
+            Err(e) => Self {
+                path: None,
+                rel: None,
+                error: Some(format!("The report couldn’t be saved: {e}")),
+            },
+        }
     }
 }
 
@@ -1321,7 +1347,17 @@ async fn execute_workflow(
         .filter(|s| !s.is_empty())
         .ok_or_else(|| Error::Invalid("workflow task has no workflow_id".into()))?;
     let repo = WorkflowsRepo::new(ctx.pool().clone());
-    let workflow = repo.get(&wf_id.to_string()).await?;
+    let workflow = match repo.get(&wf_id.to_string()).await {
+        Ok(w) => w,
+        // data-integrity-5-03: the workflow was deleted under the task (the
+        // delete pauses its tasks; this catches one admitted just before, or a
+        // task left dangling by an older build). Pause the task here too, so
+        // it fails once — not on every later occurrence.
+        Err(Error::NotFound(_)) => {
+            return Err(pause_for_deleted_workflow(ctx.scheduled_tasks(), task).await)
+        }
+        Err(e) => return Err(e.into()),
+    };
     if workflow.workspace_id != task.workspace_id {
         return Err(Error::Invalid("workflow belongs to a different workspace".into()).into());
     }
@@ -1366,6 +1402,24 @@ async fn execute_workflow(
     // the workflow runs — and a Stop still cancels both (see `stop_run`).
     // A daemon restart meanwhile re-attaches this wait (S3-303).
     wait_workflow_outcome(&repo, &workflow.name, run_id).await
+}
+
+/// Disable a task whose target workflow is gone and fail this occurrence once
+/// with the same note the workflow delete records (data-integrity-5-03).
+async fn pause_for_deleted_workflow(
+    repo: &otto_state::ScheduledTasksRepo,
+    task: &ScheduledTask,
+) -> ExecFailure {
+    let paused = otto_state::ScheduledTaskPatch {
+        enabled: Some(false),
+        ..Default::default()
+    };
+    if let Err(e) = repo.update(&task.id, paused).await {
+        warn!(task = %task.id, "scheduled task: pausing after its workflow was deleted failed: {e}");
+    }
+    ExecFailure::from(Error::NotFound(
+        otto_state::workflows::WORKFLOW_DELETED_NOTE.into(),
+    ))
 }
 
 /// Boot (S3-303): re-attach the waiter of a scheduled run that had handed off
@@ -2592,5 +2646,62 @@ mod tests {
         assert!(git.branch_exists(&b("20260101T000005Z")).await);
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// data-integrity-5-03: an occurrence whose workflow is gone pauses its
+    /// task and fails once with the deleted-workflow note — the next tick finds
+    /// it disabled instead of failing again.
+    #[tokio::test]
+    async fn a_deleted_workflow_pauses_its_task_once() {
+        let pool = otto_state::db::test_pool().await;
+        sqlx::query("INSERT INTO workspaces(id,name,root_path,created_at) VALUES('wfdel-ws','ws','/tmp','2099-10-05T00:00:00Z')").execute(&pool).await.unwrap();
+        let repo = otto_state::ScheduledTasksRepo::new(pool);
+        let mut new = otto_state::NewScheduledTask::defaults("wfdel-ws".into(), "Nightly".into());
+        new.kind = "workflow".into();
+        new.workflow_id = Some("gone".into());
+        let task = repo.create(new).await.unwrap();
+        assert!(task.enabled);
+        let fail = pause_for_deleted_workflow(&repo, &task).await;
+        assert!(!fail.skipped && !fail.canceled);
+        assert!(
+            fail.error
+                .to_string()
+                .contains(otto_state::workflows::WORKFLOW_DELETED_NOTE),
+            "{}",
+            fail.error
+        );
+        assert!(!repo.get(&task.id).await.unwrap().enabled);
+        assert!(repo.list_enabled().await.unwrap().is_empty());
+    }
+
+    /// error-handling-5-06: a report write failure is the run's error, with
+    /// no report link — never a clean `ok` with nothing saved.
+    #[tokio::test]
+    async fn an_unwritable_report_is_recorded_as_the_runs_error() {
+        let dir = tempfile::tempdir().unwrap();
+        // The parent is a FILE, so creating the report's directory fails.
+        let blocker = dir.path().join("scheduled");
+        std::fs::write(&blocker, "not a dir").unwrap();
+        let abs = blocker.join("t1").join("r1.md");
+        let saved = SavedReport::from_write(
+            write_report(&abs, "# report").await,
+            &abs,
+            "t1/r1.md".into(),
+        );
+        assert_eq!(saved.path, None);
+        assert_eq!(saved.rel, None);
+        assert!(saved
+            .error
+            .as_deref()
+            .is_some_and(|e| e.starts_with("The report couldn’t be saved: ")));
+        let ok_abs = dir.path().join("ok").join("r1.md");
+        let ok = SavedReport::from_write(
+            write_report(&ok_abs, "# report").await,
+            &ok_abs,
+            "ok/r1.md".into(),
+        );
+        assert_eq!(ok.error, None);
+        assert_eq!(ok.rel.as_deref(), Some("ok/r1.md"));
+        assert!(ok_abs.exists());
     }
 }

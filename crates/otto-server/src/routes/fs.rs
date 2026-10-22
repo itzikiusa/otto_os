@@ -155,7 +155,10 @@ impl Drop for BrowseCancel {
     }
 }
 
-async fn filesystem_work<T, F>(
+/// Run blocking filesystem work under `admission` (busy → 409), a `deadline`
+/// (→ 504) and a cancel flag the request's drop sets. Shared with the
+/// session-scoped Files routes (`session_files`).
+pub(crate) async fn filesystem_work<T, F>(
     admission: std::sync::Arc<tokio::sync::Semaphore>,
     deadline: std::time::Duration,
     work: F,
@@ -190,7 +193,7 @@ where
     }
 }
 
-fn browse_canceled(flag: &std::sync::atomic::AtomicBool) -> ApiResult<()> {
+pub(crate) fn browse_canceled(flag: &std::sync::atomic::AtomicBool) -> ApiResult<()> {
     if flag.load(std::sync::atomic::Ordering::Relaxed) {
         Err(ApiError(Error::Conflict("Folder browsing canceled".into())))
     } else {

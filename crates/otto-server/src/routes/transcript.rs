@@ -31,8 +31,8 @@ use otto_core::event::Event;
 use otto_core::{Error, Id};
 use otto_state::{NewSession, NewTrail, SessionsRepo};
 use otto_transcript::{
-    fold_file_limited, read_subagents_limited, subagent_path, Artifact, ArtifactKind, FoldOpts,
-    Folded, HistoryEntry, ImageStore, Provider, Transcript,
+    fold_file_limited, read_subagents_limited, subagent_path, Artifact, FoldOpts, Folded,
+    HistoryEntry, Provider, Transcript,
 };
 use serde::Deserialize;
 
@@ -55,13 +55,16 @@ const HISTORY_MAX_LIMIT: usize = 1000;
 
 // ── shared helpers ─────────────────────────────────────────────────────────
 
-// Transcript resolution (home dir, provider roots, the effective provider and
-// session → transcript path) lives in `crate::transcript::resolve`
-// (architecture-3-03); re-exported here for the callers that import it from
-// this route module.
-pub(crate) use crate::transcript::resolve::{
-    e2e_enabled, effective_provider, resolve_transcript, resolve_transcript_sync, transcript_roots,
-};
+// Transcript resolution (provider roots, the effective provider and session →
+// transcript path), the fold knobs and the work-graph artifact mirror live in
+// `crate::transcript` (architecture-3-03/-3-03r); callers outside this route
+// import them from there. Two stay re-exported for sibling routes not yet
+// repointed: `routes/history_page.rs` (`transcript::resolve_transcript_sync`)
+// and `routes/slash_commands.rs` (`super::transcript::effective_provider`).
+use crate::transcript::artifacts::register_work_artifacts;
+use crate::transcript::fold::{image_store, store_key};
+use crate::transcript::resolve::{e2e_enabled, resolve_transcript, transcript_roots};
+pub(crate) use crate::transcript::resolve::{effective_provider, resolve_transcript_sync};
 
 /// Workspace Admin or root — the callers allowed to see transcripts they do
 /// not own (`on_disk` History rows, arbitrary paths under the roots).
@@ -77,6 +80,13 @@ pub(crate) async fn is_ws_admin(ctx: &ServerCtx, user: &otto_core::domain::User,
 /// History path gate: admins/root may read any confined path; everyone else
 /// only a path that is the transcript of one of THEIR OWN sessions in `wid`
 /// (same owner rule as every per-session route).
+///
+/// backend-performance-5-02: one indexed lookup answers the common case — an
+/// own session whose persisted `transcript_path` is this file, or (no path
+/// persisted yet) whose `provider_session_id` is the id in its filename. Only
+/// a miss falls back to resolving the caller's sessions one by one, skipping
+/// rows with a fresh "no transcript" mark, and a hit there persists the path
+/// so the next page takes the indexed route.
 async fn history_path_gate(
     ctx: &ServerCtx,
     user: &otto_core::domain::User,
@@ -86,71 +96,91 @@ async fn history_path_gate(
     if is_ws_admin(ctx, user, wid).await {
         return Ok(());
     }
+    let raw = path.to_path_buf();
+    #[allow(clippy::disallowed_methods)] // canonicalize on the blocking pool
+    let canon = crate::offload::blocking(move || raw.canonicalize().ok()).await;
+    let Some(canon) = canon else {
+        return Err(not_your_transcript());
+    };
+    if own_session_for_path(ctx, wid, &user.id, path, &canon)
+        .await
+        .map_err(ApiError)?
+    {
+        return Ok(());
+    }
+    // Fallback: a session whose path was never persisted (or was stored in a
+    // non-canonical form). Rows the root scan found nothing for within the
+    // mark's TTL are skipped — they would only re-scan the roots.
     let own = ctx
         .manager
         .list_by_workspace_for_user(wid, &user.id)
         .await
         .map_err(ApiError)?;
+    let ids: Vec<String> = own.iter().map(|s| s.id.clone()).collect();
+    let missing = crate::transcript::resolve::fresh_missing_marks(&ctx.pool, &ids).await;
     let persisted: HashMap<Id, Option<String>> = SessionsRepo::new(ctx.pool.clone())
         .transcript_paths_for_workspace(wid)
         .await
         .map_err(ApiError)?
         .into_iter()
         .collect();
-    let canon = path.canonicalize().ok();
     let data_dir = ctx.data_dir.clone();
-    let owned = tokio::task::spawn_blocking(move || {
-        own.iter().any(|s| {
-            let p = persisted.get(&s.id).cloned().flatten();
-            resolve_transcript_sync(&data_dir, p.as_deref(), s)
-                .ok()
-                .and_then(|(r, _)| r.path.canonicalize().ok())
-                .is_some_and(|c| Some(&c) == canon.as_ref())
-        })
+    let hit = tokio::task::spawn_blocking(move || {
+        own.iter()
+            .filter(|s| !missing.contains(&s.id))
+            .find_map(|s| {
+                let p = persisted.get(&s.id).cloned().flatten();
+                let (r, fresh) = resolve_transcript_sync(&data_dir, p.as_deref(), s).ok()?;
+                let c = r.path.canonicalize().ok()?;
+                (c == canon).then(|| (s.id.clone(), fresh.then_some(r.path)))
+            })
     })
     .await
     .map_err(|e| ApiError(Error::Internal(format!("gate task: {e}"))))?;
-    if owned {
-        Ok(())
-    } else {
-        Err(ApiError(Error::Forbidden(
-            "this transcript is not one of your sessions; workspace admin required".into(),
-        )))
+    match hit {
+        Some((id, found)) => {
+            if let Some(found) = found {
+                crate::transcript::resolve::record_found(&ctx.pool, &id, &found).await;
+            }
+            Ok(())
+        }
+        None => Err(not_your_transcript()),
     }
 }
 
-/// Where a transcript's extracted images live: `<data>/transcripts/<key>/img`.
-/// `key` is the provider session id (so a session and its History entry share
-/// one store) — validated to a plain token so it can never leave `transcripts/`.
-pub(crate) fn image_store(ctx: &ServerCtx, key: &str) -> ImageStore {
-    let safe: String = key
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
-        .collect();
-    let safe = if safe.is_empty() {
-        "unknown".to_string()
-    } else {
-        safe
-    };
-    ImageStore::new(ctx.data_dir.join("transcripts").join(safe).join("img"))
+fn not_your_transcript() -> ApiError {
+    ApiError(Error::Forbidden(
+        "this transcript is not one of your sessions; workspace admin required".into(),
+    ))
 }
 
-/// Image-store key for a transcript path: the provider session id derived from
-/// the filename (Claude `<sid>.jsonl`, Codex `rollout-…-<uuid>.jsonl`).
-fn store_key(provider: Provider, path: &Path) -> String {
-    otto_transcript::peek::session_id_from_name(provider, path).unwrap_or_else(|| "unknown".into())
-}
-
-/// The server's fold knobs for a transcript at `path`: images written to the
-/// per-transcript store, cost priced exactly like the Usage module. Owned
-/// (`'static`) so a live tail can keep it across polls.
-pub(crate) fn fold_opts(ctx: &ServerCtx, provider: Provider, path: &Path) -> FoldOpts<'static> {
-    let price: otto_transcript::PriceFn<'static> = &otto_usage::estimate_cost;
-    FoldOpts {
-        images: Some(image_store(ctx, &store_key(provider, path))),
-        price: Some(price),
-        subagents: Vec::new(),
-    }
+/// The indexed half of [`history_path_gate`]: does `user_id` own a session in
+/// `wid` whose persisted transcript is `path` / `canon`, or — with no path
+/// persisted — whose provider session id is the one in the file's name?
+async fn own_session_for_path(
+    ctx: &ServerCtx,
+    wid: &Id,
+    user_id: &Id,
+    path: &Path,
+    canon: &Path,
+) -> otto_core::Result<bool> {
+    let sid = otto_transcript::provider_for_path(canon)
+        .and_then(|p| otto_transcript::peek::session_id_from_name(p, canon));
+    let row: Option<i64> = sqlx::query_scalar(
+        "SELECT 1 FROM sessions WHERE workspace_id = ?1 AND created_by = ?2 \
+         AND (transcript_path IN (?3, ?4) \
+              OR (?5 IS NOT NULL AND provider_session_id = ?5 AND transcript_path IS NULL)) \
+         LIMIT 1",
+    )
+    .bind(wid)
+    .bind(user_id)
+    .bind(canon.to_string_lossy().as_ref())
+    .bind(path.to_string_lossy().as_ref())
+    .bind(sid)
+    .fetch_optional(&ctx.pool)
+    .await
+    .map_err(|e| Error::Internal(format!("history gate lookup: {e}")))?;
+    Ok(row.is_some())
 }
 
 /// Fold a transcript file with the server's knobs: images written to the
@@ -443,12 +473,14 @@ pub async fn touch_transcript(
 }
 
 /// `POST /workspaces/{wid}/transcript/touch` — keep the tails of EVERY live
-/// agent session in the workspace armed (the client pings this every minute
-/// for its current workspace, immediately on switching to it and on regaining
-/// focus), so chats you are not looking at right now still have their history
-/// hot when you open them, and a session you sit on never goes stale. Only
-/// sessions the caller may read (owner / workspace admin / root) are touched;
-/// the cap (`MAX_TAILS`) still applies. Returns how many tails were armed.
+/// (unarchived) agent session in the workspace armed, so chats you are not
+/// looking at right now have their history hot when you open them. The UI
+/// arms one session at a time (`POST /sessions/{id}/transcript/touch`); this
+/// bulk form is for API and e2e callers. Only the live agent rows are read
+/// (`live_agent_sessions`, backend-performance-5-06) — never the workspace's
+/// whole history — and only sessions the caller may read (owner / workspace
+/// admin / root) are touched; the cap (`MAX_TAILS`) still applies. Returns how
+/// many tails were armed.
 pub async fn touch_workspace_transcripts(
     AxPath(wid): AxPath<Id>,
     State(ctx): State<ServerCtx>,
@@ -457,11 +489,12 @@ pub async fn touch_workspace_transcripts(
     require_ws_role(&ctx, &user, &wid, WorkspaceRole::Viewer).await?;
     let sessions = ctx
         .manager
-        .list_by_workspace(&wid)
+        .live_agent_sessions(&wid)
         .await
         .map_err(ApiError)?;
     let mut armed = 0usize;
     for s in sessions {
+        // Re-checked: a session may have exited since the live snapshot.
         if s.kind != SessionKind::Agent || !ctx.manager.is_live(&s.id) {
             continue;
         }
@@ -592,93 +625,6 @@ pub async fn list_artifacts(
     let snapshot = arts.clone();
     tokio::spawn(async move { register_work_artifacts(&cx, &s, &snapshot).await });
     Ok(Json(arts))
-}
-
-/// The session's Mission Control work item, if the projector made one.
-async fn session_work_item(ctx: &ServerCtx, session: &Session) -> Option<otto_state::WorkItem> {
-    ctx.workgraph
-        .repo()
-        .find_by_source(
-            &session.workspace_id,
-            otto_state::WorkKind::Session,
-            &session.id,
-        )
-        .await
-        .ok()
-        .flatten()
-}
-
-/// The work-graph `(kind, ref)` an artifact registers under — the
-/// `work_artifacts` unique key within one item.
-fn work_artifact_key(a: &Artifact) -> (otto_state::ArtifactKind, Option<String>) {
-    let kind = match a.kind {
-        ArtifactKind::Pr => otto_state::ArtifactKind::Pr,
-        ArtifactKind::Report => otto_state::ArtifactKind::Report,
-        ArtifactKind::Url => otto_state::ArtifactKind::Link,
-        ArtifactKind::File | ArtifactKind::Image => otto_state::ArtifactKind::File,
-    };
-    (kind, a.path.clone().or_else(|| a.url.clone()))
-}
-
-async fn insert_work_artifact(
-    ctx: &ServerCtx,
-    session: &Session,
-    item_id: &Id,
-    a: &Artifact,
-    (kind, reference): (otto_state::ArtifactKind, Option<String>),
-) {
-    let _ = ctx
-        .workgraph
-        .add_artifact(otto_state::NewArtifact {
-            work_item_id: item_id.clone(),
-            workspace_id: session.workspace_id.clone(),
-            kind,
-            title: a.label.clone(),
-            reference,
-            payload: serde_json::to_value(a).unwrap_or(serde_json::Value::Null),
-        })
-        .await;
-}
-
-/// Mirror an artifact into `work_artifacts` for the session's work item (once
-/// per `(kind, ref)`). Silent on any failure — Mission Control is a projection.
-pub(crate) async fn register_work_artifact(ctx: &ServerCtx, session: &Session, a: &Artifact) {
-    let Some(item) = session_work_item(ctx, session).await else {
-        return;
-    };
-    let key = work_artifact_key(a);
-    // One indexed existence probe; on a probe error fall through to the insert
-    // (`ON CONFLICT DO NOTHING` keeps it idempotent).
-    if let Ok(true) = ctx
-        .workgraph
-        .repo()
-        .has_artifact(&item.id, key.0, key.1.as_deref())
-        .await
-    {
-        return;
-    }
-    insert_work_artifact(ctx, session, &item.id, a, key).await;
-}
-
-/// [`register_work_artifact`] for a whole list: resolves the work item once,
-/// reads the attached `(kind, ref)` set once (no payloads), and inserts only
-/// the artifacts that are missing.
-async fn register_work_artifacts(ctx: &ServerCtx, session: &Session, arts: &[Artifact]) {
-    if arts.is_empty() {
-        return;
-    }
-    let Some(item) = session_work_item(ctx, session).await else {
-        return;
-    };
-    let Ok(mut known) = ctx.workgraph.repo().artifact_keys(&item.id).await else {
-        return;
-    };
-    for a in arts {
-        let key = work_artifact_key(a);
-        if known.insert((key.0.as_str().to_string(), key.1.clone())) {
-            insert_work_artifact(ctx, session, &item.id, a, key).await;
-        }
-    }
 }
 
 /// The artifact-serving allow-list (design §4.7): the session cwd, the daemon

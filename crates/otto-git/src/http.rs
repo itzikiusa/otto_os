@@ -28,6 +28,7 @@ use otto_core::{new_id, Error, Id, Result};
 use otto_state::{GitStore, NewGitAccount, NewRepo, WorkspacesRepo};
 use serde::Deserialize;
 
+use crate::collections::collection_rel_path;
 use crate::local::{DiffTarget, LocalGit};
 use crate::providers::{detect, make_provider, GitProvider, RemoteRef, RemoteRepoSummary};
 
@@ -2089,21 +2090,14 @@ async fn repo_collections_pull<S: GitCtx>(
     let (repo, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     let token = optional_token(&s, &user, &repo).await?;
     let _ = git.pull(token).await; // best-effort; report read result regardless
-    let dir = std::path::Path::new(&repo.path).join("collections");
-    let mut files: Vec<serde_json::Value> = Vec::new();
-    if let Ok(mut entries) = tokio::fs::read_dir(&dir).await {
-        while let Ok(Some(entry)) = entries.next_entry().await {
-            let p = entry.path();
-            if p.extension().and_then(|x| x.to_str()) == Some("json") {
-                if let Ok(content) = tokio::fs::read_to_string(&p).await {
-                    files.push(serde_json::json!({
-                        "name": p.file_name().and_then(|n| n.to_str()).unwrap_or(""),
-                        "content": content,
-                    }));
-                }
-            }
-        }
-    }
+
+    // Symlinked entries are skipped (data-integrity-5-01): see `collections`.
+    let files: Vec<serde_json::Value> =
+        crate::collections::read_collection_files(std::path::Path::new(&repo.path))
+            .await
+            .into_iter()
+            .map(|(name, content)| serde_json::json!({ "name": name, "content": content }))
+            .collect();
     Ok(Json(serde_json::json!({ "files": files })))
 }
 
@@ -2138,26 +2132,17 @@ async fn repo_collections_push<S: GitCtx>(
     if let Some(branch) = req.branch.as_deref().filter(|b| !b.is_empty()) {
         git.checkout(branch, true).await?;
     }
-    let base = std::path::Path::new(&repo.path);
-    // Local disk IO failing is OUR failure (500), not an upstream outage (502)
-    // — a full disk must not raise the "git provider is down" banner.
-    tokio::fs::create_dir_all(base.join("collections"))
-        .await
-        .map_err(|e| otto_core::Error::Internal(format!("create collections dir: {e}")))?;
-    let mut staged: Vec<String> = Vec::new();
-    for f in &req.files {
-        let safe = f.name.replace(['/', '\\'], "_");
-        let safe = if safe.ends_with(".json") {
-            safe
-        } else {
-            format!("{safe}.json")
-        };
-        let rel = format!("collections/{safe}");
-        tokio::fs::write(base.join(&rel), &f.content)
-            .await
-            .map_err(|e| otto_core::Error::Internal(format!("write {rel}: {e}")))?;
-        staged.push(rel);
-    }
+    // Every target is confined + checked before any write (a committed
+    // symlink is refused, never written through: data-integrity-5-01), and
+    // local disk IO failing is OUR failure (500), not an upstream outage
+    // (502) — a full disk must not raise the "git provider is down" banner.
+    let files: Vec<(String, String)> = req
+        .files
+        .iter()
+        .map(|f| (collection_rel_path(&f.name), f.content.clone()))
+        .collect();
+    git.write_collection_files(&files).await?;
+    let staged: Vec<String> = files.into_iter().map(|(rel, _)| rel).collect();
     git.stage(&staged).await?;
     // ONLY the collection files: a plain `commit` took the whole index, so
     // the user's own staged work was committed and pushed as "collections".

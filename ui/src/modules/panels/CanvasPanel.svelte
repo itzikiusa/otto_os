@@ -95,10 +95,10 @@
       const out =
         format === 'd2'
           ? await (await import('../canvas/d2')).renderD2(renderId, source, { sketch: doc.sketch, dark })
-          : await (await import('../canvas/mermaid')).renderMermaid(renderId, source, { dark });
+          : await (await import('../../lib/render/mermaid')).renderMermaid(renderId, source, { dark });
       previews = { ...previews, [sceneId]: { key, svg: out.svg, error: out.error } };
     } catch (e) {
-      previews = { ...previews, [sceneId]: { key, error: e instanceof Error ? e.message : String(e) } };
+      previews = { ...previews, [sceneId]: { key, error: loadErrorText(e) } };
     }
   }
 
@@ -125,7 +125,7 @@
       }
       await renderFromDoc(ref.id, doc, key);
     } catch (e) {
-      previews = { ...previews, [ref.id]: { key, error: e instanceof Error ? e.message : String(e) } };
+      previews = { ...previews, [ref.id]: { key, error: loadErrorText(e) } };
     }
   }
 
@@ -316,7 +316,7 @@
                   {:else if previews[ref.id]?.loading}
                     <p class="empty-line dim">Rendering…</p>
                   {:else if previews[ref.id]?.error}
-                    <p class="empty-line dim">{previews[ref.id]?.error}</p>
+                    <p class="empty-line dim">Couldn’t render this preview. {previews[ref.id]?.error}</p>
                   {:else if previews[ref.id]?.svg}
                     <!-- eslint-disable-next-line svelte/no-at-html-tags -->
                     <div class="svg-wrap">{@html previews[ref.id]?.svg}</div>

@@ -19,6 +19,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import { copyTextOrThrow } from '../../lib/clipboard';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import Tabs from '../../lib/components/Tabs.svelte';
@@ -27,6 +28,7 @@
   import MetricsPanel from './MetricsPanel.svelte';
   import RegionPicker from './RegionPicker.svelte';
   import { prettyJson, awsErrorText } from './util';
+  import { awsLoadText } from './loadText';
   import type { AwsAccount, SqsMessage, SqsQueue } from '../../lib/api/types';
 
   interface Props {
@@ -107,7 +109,7 @@
       if (opts.awaitAttrs) await fan;
     } catch (e) {
       if (seq !== loadSeq) return;
-      error = e instanceof Error ? e.message : String(e);
+      error = awsLoadText(e);
     } finally {
       if (seq === loadSeq) loading = false;
     }
@@ -373,7 +375,7 @@
       {#if loading && !queues}
         <div class="pad"><Skeleton rows={8} label="queues" /></div>
       {:else if error}
-        <EmptyState actionKind={loginNeeded ? 'primary' : 'secondary'} icon="warning" title="Couldn’t list queues" body={awsErrorText(error)} actionLabel={loginNeeded ? 'Sign in' : 'Retry'} onaction={loginNeeded ? onsignin : () => void load()} />
+        <LoadState what="queues" error={awsErrorText(error)} empty onretry={() => void load()}>{#snippet errorActions()}{#if loginNeeded}<button class="btn primary" onclick={onsignin}><Icon name="key" size={12} /> Sign in</button>{/if}{/snippet}</LoadState>
       {:else if shown.length === 0}
         <EmptyState icon="send" title={filter ? 'No matching queues' : 'No queues'} />
       {:else}

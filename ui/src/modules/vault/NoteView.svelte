@@ -177,7 +177,7 @@
   let readEl = $state<HTMLElement | undefined>();
 
   function onReadClick(e: MouseEvent): void {
-    const t = (e.target as HTMLElement).closest('a.internal-link, span.tag, div.note-embed');
+    const t = (e.target as HTMLElement).closest('a.internal-link, a.embed-title, span.tag, div.note-embed');
     if (!t) return;
     if (t.classList.contains('tag')) {
       const tag = t.getAttribute('data-tag');
@@ -302,7 +302,7 @@
   });
 
   // -- diagram blocks: render mermaid / D2 fences to inline SVG -----------------
-  // mdRender emits <div class="diagram-block" data-diagram=…><pre>src</pre></div>;
+  // lib/render/markdown emits <div class="diagram-block" data-diagram=…><pre>src</pre></div>;
   // swap each for the rendered SVG (lazy-loaded libs). On error keep the source
   // visible with the parse message — never a blank hole in the note.
   let diagramSeq = 0;
@@ -471,7 +471,7 @@
         />
       </div>
     {:else}
-      <!-- Rendered markdown is sanitized in mdRender (allowlist). -->
+      <!-- Rendered markdown is sanitized in lib/render/markdown (allowlist). -->
       <!-- svelte-ignore a11y_no_static_element_interactions, a11y_mouse_events_have_key_events -->
       <div
         class="read md-body"
@@ -684,6 +684,10 @@
     font-weight: 600;
     font-size: var(--fs-s);
     color: var(--text-dim);
+    text-decoration: none;
+  }
+  .read :global(div.note-embed .embed-title:hover) {
+    text-decoration: underline;
   }
   .read :global(div.note-embed.embed-error) {
     opacity: 0.5;

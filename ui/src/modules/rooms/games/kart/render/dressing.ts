@@ -66,11 +66,6 @@ export function skidAlpha(path: Path): Float32Array {
   }
   return out;
 }
-/** Which side a corner's tyre marks lean to: toward the inside of the bend (+1 left, -1 right; 0 on straights). */
-export function skidSide(path: Path, i: number): number {
-  const c = path.curve[i];
-  return Math.abs(c) < 0.004 ? 0 : Math.sign(c);
-}
 
 // ── Barrier banners ────────────────────────────────────────────────────────
 /** A sponsor banner hung on the inner face of a barrier wall where `mask` is 1. */

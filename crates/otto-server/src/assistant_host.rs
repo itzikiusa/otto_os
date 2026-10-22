@@ -68,7 +68,7 @@ impl AssistantCtx for ServerCtx {
     }
 
     fn submit_prompt<'a>(&'a self, sid: &'a Id, prompt: &'a str) -> BoxFut<'a, bool> {
-        Box::pin(crate::review_session::submit_prompt(
+        Box::pin(otto_sessions::submit::submit_prompt(
             &self.manager,
             sid,
             prompt,
@@ -87,7 +87,7 @@ impl AssistantCtx for ServerCtx {
         session: &'a Session,
     ) -> BoxFut<'a, Option<(otto_transcript::Provider, PathBuf)>> {
         Box::pin(async move {
-            let resolved = crate::routes::transcript::resolve_transcript(self, session)
+            let resolved = crate::transcript::resolve::resolve_transcript(self, session)
                 .await
                 .ok()?;
             Some((resolved.provider, resolved.path))

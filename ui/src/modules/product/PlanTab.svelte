@@ -7,6 +7,7 @@
   import { plural } from '../../lib/plural';
   import type { Poller } from '../../lib/poll';
   import { liveQuery } from '../../lib/live';
+  import { onStoryChange } from './storyReset.svelte';
   import { swarm } from '../../lib/stores/swarm.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { router } from '../../lib/router.svelte';
@@ -205,16 +206,15 @@
   }
 
   // ── Initial load + reset on story change ─────────────────────────────────────
-  $effect(() => {
-    product.selectedId;
+  // Depends on the story id only (storyReset.svelte.ts).
+  onStoryChange(() => product.selectedId, (sid) => {
     planVersion = null;
     body = '';
     showRaw = false;
     planSessionIds = [];
     clearPoll();
-    if (product.selectedId) void initialLoad();
-    return () => { clearPoll(); };
-  });
+    if (sid) void initialLoad();
+  }, clearPoll);
 
   // Subscribe to `product_changed { section: 'plan' }` WS events for faster feedback.
   $effect(() => {
@@ -441,6 +441,11 @@
   }
 </script>
 
+<!-- One ALWAYS-mounted live region for progress-check failures: a region
+     inserted together with its text is silent in VoiceOver/WebKit
+     (accessibility-responsive-5-02). The visible notes below are not regions. -->
+<span class="sr-only" role="status">{pollTimer !== null && pollFailures >= POLL_FAIL_SHOWN && lastPollError ? `Couldn’t check progress: ${lastPollError}` : ''}</span>
+
 {#if !story}
   <div class="muted">No story selected.</div>
 {:else}
@@ -522,7 +527,7 @@
               </button>
               <span class="polling-indicator">checking every 3s…</span>
               {#if pollFailures >= POLL_FAIL_SHOWN && lastPollError}
-                <span class="poll-error" role="status">Couldn’t check progress: {lastPollError}</span>
+                <span class="poll-error">Couldn’t check progress: {lastPollError}</span>
                 <button class="btn small" onclick={() => pollTimer?.now()}>Check again</button>
               {/if}
             {/if}
@@ -603,7 +608,7 @@
                   <Icon name="x" size={12} /> Stop waiting
                 </button>
                 {#if pollFailures >= POLL_FAIL_SHOWN && lastPollError}
-                  <span class="poll-error" role="status">Couldn’t check progress: {lastPollError}</span>
+                  <span class="poll-error">Couldn’t check progress: {lastPollError}</span>
                   <button class="btn small" onclick={() => pollTimer?.now()}>Check again</button>
                 {/if}
               {/if}

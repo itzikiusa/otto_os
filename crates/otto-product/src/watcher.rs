@@ -246,16 +246,25 @@ async fn poll_story(
 ) -> otto_core::Result<()> {
     let story_id = story.id.clone();
 
-    // Step 1: refresh the source content (captures any description edits).
-    if let Err(e) = product.refresh_story(&story_id, &story.created_by).await {
-        warn!("story watcher: refresh_story {story_id}: {e}");
-    }
-
-    // Step 2: fetch comments since the current cursor.
-    let comments = match product
-        .list_new_comments(&story_id, story.watch_cursor.as_deref())
-        .await
-    {
+    // The account is read once and shared by the refresh and the comment read
+    // (neither re-reads the story the scan already handed us).
+    let comments = match product.issues.get_account(&story.account_id).await {
+        Ok(account) => {
+            // Step 1: refresh the source content (captures any description edits).
+            if let Err(e) = product
+                .refresh_source(&story, &account, &story.created_by)
+                .await
+            {
+                warn!("story watcher: refresh_source {story_id}: {e}");
+            }
+            // Step 2: fetch comments since the current cursor.
+            product
+                .list_new_comments(&story, &account, story.watch_cursor.as_deref())
+                .await
+        }
+        Err(e) => Err(e),
+    };
+    let comments = match comments {
         Ok(comments) => comments,
         Err(error) => {
             let _ = events.send(Event::Notice {

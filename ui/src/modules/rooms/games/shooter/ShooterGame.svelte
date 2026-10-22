@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick, untrack } from 'svelte';
   import LoadState from '../../../../lib/components/LoadState.svelte';
   import {
     aliveCount, createMatch, DOWN_HP, heldItem, idleShooterInput, nearestClosedChest, nearestDowned, nearestDrop, nearestWeaponLoot, PICKAXE_KEY, PICKAXE_SLOT, REVIVE_RANGE, REVIVE_TIME,
@@ -15,6 +15,7 @@
   import { isRoyale, POINT_NAMES, respawns, WAVE_BOARD, WAVE_HELI, WAVE_ON, WAVE_PRE } from './modes/index';
   import { buyWallsFor, nearestWall } from './zombies';
   import { InputState } from '../common/input';
+  import { lossBudget } from '../../../../lib/three/stage';
   import { GameAudio } from '../common/audio';
   import { clamp, lerp, ordinal, wrapAngle } from '../common/math';
   import type { LocalBuild, ShooterRenderer } from './render';
@@ -316,6 +317,8 @@
     const view = { yaw: 0, pitch: 0, aiming: false, zoom: 70 };
     const bootAt = performance.now();
     let pending: ShooterEvent[] = [];
+    /** Context-loss remounts left (lib/three/stage.ts: twice a minute, then Retry). */
+    const losses = lossBudget();
     loading = true; error = ''; menu = false; feed = []; spectate = -1; building = false; showMap = false; recap = null;
     dealt.clear(); taken.clear(); lastHeadFrom = -1;
     const fail = (e: unknown) => { if (!disposed) { loading = false; error = e instanceof Error ? e.message : 'The match could not start.'; } };
@@ -331,7 +334,19 @@
       input = new InputState(created.view.canvas, { pointerLock: true, onLockChange: v => { locked = v; } });
       created.view.canvas.addEventListener('focus', () => { focused = true; });
       created.view.canvas.addEventListener('blur', () => { focused = false; });
+      // Esc first releases the pointer lock (the browser's own); the next Esc opens the menu.
+      created.view.canvas.addEventListener('keydown', e => { if (e.key === 'Escape' && document.pointerLockElement !== created.view.canvas && !menu && !finished) { e.preventDefault(); menu = true; } });
       created.view.canvas.focus();
+      // A reclaimed GPU context remounts the renderer on the live match state
+      // instead of leaving a black canvas; a third loss within a minute asks for Retry.
+      created.view.onContextLost(() => {
+        if (disposed || renderer !== created) return;
+        input?.dispose(); input = undefined;
+        renderer = undefined; created.dispose();
+        if (!losses.allow()) { fail(new Error('The match lost its graphics context (too many 3D views open at once).')); return; }
+        loading = true;
+        setTimeout(() => { const s = state; if (!disposed && s) boot(s).catch(fail); }, 600);
+      });
       (stage as HTMLDivElement & { __ottoGame?: unknown }).__ottoGame = {
         snapshot: () => structuredClone(state ?? view), stats: () => created.stats(),
         look: (yaw: number, pitch: number) => { cam.yaw = yaw; cam.pitch = pitch; },
@@ -452,6 +467,9 @@
     return () => { document.removeEventListener('fullscreenchange', change); stop?.(); audio.dispose(); };
   });
   $effect(() => { if (paused || menu) input?.release(); });
+  // The Paused overlay covers the Menu button: move focus onto its Resume button.
+  $effect(() => { const b = resumeButton; if (b) void tick().then(() => b.focus()); });
+  function resume() { menu = false; renderer?.view.canvas.focus(); }
   async function toggleFullscreen() { try { if (document.fullscreenElement) await document.exitFullscreen(); else await root.requestFullscreen(); } catch { /* embedding may block fullscreen */ } }
   function wake() { void audio.start().catch(() => {}); }
   function touchKey(e: PointerEvent, code: string, down: boolean) { e.preventDefault(); if (down) { (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId); wake(); } input?.touch(code, down); }
@@ -489,12 +507,36 @@
   const results = $derived(hud && hud.phase === 'done' ? shooterResults(hud) : []);
   const mm = (s: number) => `${Math.floor(Math.max(0, s) / 60)}:${String(Math.floor(Math.max(0, s) % 60)).padStart(2, '0')}`;
   const watched = $derived(hud && spectate >= 0 ? hud.players[spectate] : null);
+  /** The one always-mounted screen-reader status: edges only (round start, helicopter,
+   *  respawning, the result headline). Ticking timers stay visual. */
+  let srStatus = $state('');
+  let resumeButton = $state<HTMLButtonElement>();
+  const objectiveEdge = $derived(obj ? `${obj.wave}:${obj.round}` : '');
+  $effect(() => {
+    if (!objectiveEdge) return;
+    untrack(() => {
+      if (!obj) return;
+      const say = obj.wave === WAVE_PRE ? `Round ${obj.round + 1} starts in ${Math.ceil(obj.timer)} seconds` : obj.wave === WAVE_HELI ? 'Helicopter inbound' : obj.wave === WAVE_BOARD ? 'Board the helicopter' : obj.wave === WAVE_ON && obj.round >= obj.lastRound ? 'Final round' : '';
+      if (say) srStatus = say;
+    });
+  });
+  const respawning = $derived(!!(arena && me && me.mode === 'dead' && hud?.phase !== 'done'));
+  $effect(() => { if (respawning) srStatus = 'Respawning. Pick a class with 6 to 9.'; });
+  $effect(() => { if (paused && hud && hud.phase !== 'done') srStatus = 'Match paused while someone reconnects.'; });
+  const headline = $derived.by(() => {
+    if (!hud || hud.phase !== 'done' || !me) return '';
+    if (arena && obj) return hud.winTeam < 0 ? 'Draw' : hud.winTeam === me.team ? 'Victory!' : 'Defeat';
+    if (mode === 'zombies' && obj) return obj.aboard > 0 ? (me.place === 1 ? 'Extracted!' : 'Left behind') : `Overrun on round ${obj.round}`;
+    return me.place === 1 ? 'Victory Royale!' : squad > 1 ? `Your team placed ${ordinal(me.place)}` : `You placed ${ordinal(me.place)}`;
+  });
+  $effect(() => { if (headline) srStatus = headline; });
   const buildHint = $derived(!me ? '' : me.mats[material] < BUILD_COST ? `Need ${BUILD_COST} ${MATERIAL_NAMES[material].toLowerCase()} — harvest with the pickaxe (F)` : ghostOk ? 'Click to place' : 'Nothing to build on here');
 </script>
 
 <div class="br-play game-play" bind:this={root} data-game="shooter" data-map={setup?.map ?? hud?.map} data-phase={hud?.phase ?? 'loading'} data-building={building ? 'on' : 'off'} onpointerdown={wake} role="presentation">
   <div class="br-stage" bind:this={stage}></div>
   <canvas class="br-overlay" bind:this={overlay} aria-hidden="true"></canvas>
+  <p class="sr-only" role="status">{srStatus}</p>
   {#if loading && !error}<div class="br-cover" role="status"><h2>{isGuest && !hud ? 'Waiting for the host…' : 'Preparing the island…'}</h2><p>Loading survivors, weapons and scenery</p></div>{/if}
   {#if error}<div class="br-cover"><LoadState what="match" {error} empty onretry={start} /><button class="btn" onclick={onexit}>Back to games</button></div>{/if}
   {#if hud && me && !loading && !error}
@@ -539,7 +581,7 @@
         {/each}
       </ol>
     {:else if obj && mode === 'zombies' && hud.phase === 'play'}
-      <p class="br-objective-note" role="status">{obj.wave === WAVE_PRE ? `Round ${obj.round + 1} in ${Math.ceil(obj.timer)}s — barricade (Q) and repair with the pickaxe (F)` : obj.wave === WAVE_HELI ? `Helicopter inbound ${mm(obj.timer)} — hold out, then get to the landing zone (M)` : obj.wave === WAVE_BOARD ? `Board the helicopter! ${mm(obj.timer)}` : obj.wave === WAVE_ON && obj.round >= obj.lastRound ? 'Final round — the helicopter comes after this one' : ''}</p>
+      <p class="br-objective-note" aria-hidden="true">{obj.wave === WAVE_PRE ? `Round ${obj.round + 1} in ${Math.ceil(obj.timer)}s — barricade (Q) and repair with the pickaxe (F)` : obj.wave === WAVE_HELI ? `Helicopter inbound ${mm(obj.timer)} — hold out, then get to the landing zone (M)` : obj.wave === WAVE_BOARD ? `Board the helicopter! ${mm(obj.timer)}` : obj.wave === WAVE_ON && obj.round >= obj.lastRound ? 'Final round — the helicopter comes after this one' : ''}</p>
     {/if}
     <div class="br-mapbox"><canvas class="br-minimap" bind:this={minimap} width="200" height="200" aria-label="Island map"></canvas>
       <ol class="br-feed" aria-live="polite">{#each feed as f (f.id)}<li class:mine={f.mine}>{f.text}</li>{/each}</ol>
@@ -600,8 +642,8 @@
         </section>
       {/if}
       {#if arena}
-        <div class="br-respawn" role="status">
-          <p>{me.respawn > 0 ? `Respawning in ${Math.ceil(me.respawn)}…` : 'Respawning…'} <small>Pick a class (6–9)</small></p>
+        <div class="br-respawn">
+          <p><span aria-hidden="true">{me.respawn > 0 ? `Respawning in ${Math.ceil(me.respawn)}…` : 'Respawning…'}</span> <small>Pick a class (6–9)</small></p>
           <div class="br-classes" role="group" aria-label="Class">
             {#each CLASSES as c, k (c.id)}<button class="btn small" aria-pressed={chosenClass === k} title={c.blurb} onclick={() => { chosenClass = k; renderer?.view.canvas.focus(); }}><small>{k + 6}</small>{c.name}</button>{/each}
           </div>
@@ -616,16 +658,16 @@
     {#if !focused && !locked && hud.phase !== 'done' && !menu && !paused}<div class="br-hint">Click the game to aim · WASD move · Mouse aim · Click fire / use · Right-click aim down sights · 1–5 hotbar · F pickaxe · Q build (1 wall, 2 floor, 3 ramp, R material, G edit) · G grenade · T smoke / flash · X killstreak · C crouch (slide while sprinting) · Shift sprint (double-tap: tactical) · Space jump / mantle · E pick up / open / revive{mode === 'zombies' ? ' / buy' : ''} · R reload · M map</div>{/if}
     {#if paused && hud.phase !== 'done'}<div class="br-cover" role="status"><h2>Waiting for players</h2><p>The match is paused while someone reconnects.</p><button class="btn" onclick={onexit}>Leave match</button></div>
     {:else if hud.phase === 'done'}
-      <div class="br-cover br-results" aria-live="polite">
+      <div class="br-cover br-results">
         <p class="br-kicker">{mapLabel} · {modeTitle(mode)}{isRoyale(mode) && squad > 1 ? ` · ${modeName}` : ''} · Match results · {mm(hud.clock)}</p>
         {#if arena && obj}
-          <h2 class:victory={hud.winTeam === me.team}>{hud.winTeam < 0 ? 'Draw' : hud.winTeam === me.team ? 'Victory!' : 'Defeat'}</h2>
+          <h2 class:victory={hud.winTeam === me.team}>{headline}</h2>
           <p>Your team {ours} · enemy {theirs} · {me.kills} eliminations · {me.deaths} deaths · {Math.round(me.damage)} damage</p>
         {:else if mode === 'zombies' && obj}
-          <h2 class:victory={me.place === 1}>{obj.aboard > 0 ? (me.place === 1 ? 'Extracted!' : 'Left behind') : `Overrun on round ${obj.round}`}</h2>
+          <h2 class:victory={me.place === 1}>{headline}</h2>
           <p>{obj.aboard > 0 ? `${obj.aboard} made the helicopter after ${obj.round} rounds` : `The crew survived ${Math.max(0, obj.round - 1)} of ${obj.lastRound} rounds`} · {me.kills} infected killed · {me.points.toLocaleString()} points</p>
         {:else}
-          <h2 class:victory={me.place === 1}>{me.place === 1 ? 'Victory Royale!' : squad > 1 ? `Your team placed ${ordinal(me.place)}` : `You placed ${ordinal(me.place)}`}</h2>
+          <h2 class:victory={me.place === 1}>{headline}</h2>
           <p>{me.kills} eliminations · {Math.round(me.damage)} damage · survived {mm(me.aliveTime)}</p>
         {/if}
         <table>
@@ -637,7 +679,7 @@
     {:else if menu}
       <div class="br-cover"><h2>Paused</h2><p>{link ? 'The match continues for everyone else while this menu is open.' : 'The island waits for you.'}</p>
         <p class="br-keys">WASD move · Mouse aim · Left click fire (hold to use heals, shields and launch pads) · Right click / Z aim down sights (zooms; attachments: scope, grip, extended mag, suppressor) · pull the mouse down against the recoil · 1–5 or wheel switch hotbar slots · F pickaxe (harvest materials; Zombies: repair barricades) · Q build mode: 1 wall, 2 floor, 3 ramp, R material, G edit your piece (door / window, flip ramp), click to place · G frag / molotov · T smoke / flash · X call in a killstreak (UAV, airstrike at the crosshair, attack drone) · C crouch, or slide out of a sprint · Shift sprint, double-tap for a tactical sprint · Space jump, or mantle a ledge ahead · E pick up / hold to open chests and supply drops / hold next to a knocked teammate to revive / buy from a wall (Zombies) · R reload (fire to cancel) · 6–9 respawn class (TDM, Domination) · M full map · Esc release the mouse</p>
-        <button class="btn primary" onclick={() => { menu = false; renderer?.view.canvas.focus(); }}>Resume</button><button class="btn" onclick={onexit}>Leave match</button></div>
+        <button class="btn primary" bind:this={resumeButton} onclick={resume}>Resume</button><button class="btn" onclick={onexit}>Leave match</button></div>
     {/if}
     <div class="br-touch" aria-label="Touch controls">
       <div class="br-touch-move">{#each [['Up', '▲'], ['Left', '◀'], ['Down', '▼'], ['Right', '▶']] as [k, label] (k)}<button aria-label={`Move ${k.toLowerCase()}`} onpointerdown={e => touchKey(e, k, true)} onpointerup={e => touchKey(e, k, false)} onpointercancel={e => touchKey(e, k, false)}>{label}</button>{/each}</div>
@@ -654,7 +696,7 @@
   .br-stage :global(canvas) { display: block; width: 100%; height: 100%; }
   .br-stage :global(canvas:focus-visible) { outline: 2px solid var(--accent-line-strong); outline-offset: -2px; }
   .br-overlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
-  .br-cover { position: absolute; inset: 0; z-index: 6; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 24px; text-align: center; background: color-mix(in srgb, var(--surface) 90%, transparent); }
+  .br-cover { position: absolute; inset: 0; z-index: 6; display: flex; flex-direction: column; align-items: center; justify-content: safe center; overflow-y: auto; gap: 12px; padding: 24px; text-align: center; background: color-mix(in srgb, var(--surface) 90%, transparent); }
   .br-cover h2 { margin: 0; font-size: var(--fs-2xl); }
   .br-cover h2.victory { color: var(--warning); font-size: clamp(28px, 5vw, 52px); letter-spacing: -0.01em; }
   .br-cover p { margin: 0; max-width: 600px; color: var(--text-dim); line-height: 1.6; }
@@ -775,6 +817,8 @@
   .br-classes :global(.btn[aria-pressed='true']) { box-shadow: inset 0 0 0 2px var(--warning); }
   .br-class-note { font-size: var(--fs-s) !important; opacity: .85; }
   .br-touch { display: none; }
+  /* Compact results so Play again / Back to games stay reachable on a short phone screen. */
+  @media (max-width: 640px) { .br-cover { padding: 16px; gap: 8px; } .br-results table { min-width: 0; width: 100%; font-size: var(--fs-s); } .br-results th, .br-results td { padding: 2px 6px; } .br-results td img { width: 22px; height: 22px; } }
   @media (max-width: 640px) { .br-objective-note { inset-inline: 12px; inset-block-start: 150px; } .br-objective { inset-block-start: 100px; } .br-mapbox { width: 130px; } .br-minimap { width: 130px; height: 130px; } .br-tools { margin-inline-end: 144px; flex-wrap: wrap; } .br-inventory { grid-template-columns: repeat(6, 50px); } .br-slot { height: 54px; } .br-slot img { width: 40px; } .br-stats { flex-wrap: wrap; gap: 8px; } .br-buildbar { inset-block-end: 210px; } }
   @media (pointer: coarse) {
     .br-touch { position: absolute; inset-inline: 10px; inset-block-end: 130px; display: flex; justify-content: space-between; align-items: flex-end; gap: 8px; }

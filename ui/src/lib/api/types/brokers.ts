@@ -348,16 +348,9 @@ export interface SchemaSubject {
 }
 
 /** Broker schema history returns identifiers only, oldest first. */
-/** Lifecycle of a stored replay record (PC-5, migration 0193): `running` while
- *  it publishes, then `done` / `failed`; `interrupted` when the daemon stopped
- *  mid-run. Rows from before the column read `done`. */
-export type BrokerReplayStatus = 'running' | 'done' | 'failed' | 'interrupted';
-
 /** A replay can stop after acknowledged writes. Inspect error before claiming success. */
 export interface BrokerReplayResp {
   replay_id: string;
-  /** The stored record's status (PC-5). */
-  status?: BrokerReplayStatus;
   source_topic: string;
   target_topic: string;
   count: number;

@@ -413,9 +413,9 @@ test('CanvasPanel lazily imports canvas store inside openInCanvas, sets pendingO
 
   // Static top-level import of canvas.svelte must be gone so workspace shell stays under budget.
   assert.doesNotMatch(panelSource, /^\s*import\s+\{\s*canvas\s*\}\s+from\s+['"]\.\.\/\.\.\/lib\/stores\/canvas\.svelte['"]/m);
-  assert.doesNotMatch(panelSource, /^\s*import\s+\{\s*renderMermaid\s*\}\s+from\s+['"]\.\.\/canvas\/mermaid['"]/m);
+  assert.doesNotMatch(panelSource, /^\s*import\s+\{\s*renderMermaid\s*\}\s+from\s+['"][./]+(?:canvas|lib\/render)\/mermaid['"]/m);
   assert.doesNotMatch(panelSource, /^\s*import\s+\{\s*renderD2\s*\}\s+from\s+['"]\.\.\/canvas\/d2['"]/m);
-  assert.match(panelSource, /import\('\.\.\/canvas\/mermaid'\)/);
+  assert.match(panelSource, /import\('\.\.\/\.\.\/lib\/render\/mermaid'\)/);
   assert.match(panelSource, /import\('\.\.\/canvas\/d2'\)/);
   const compiled = compile(panelSource, { filename: panelUrl.pathname, generate: 'client' });
   assert.ok(compiled.js.code.length > 0);

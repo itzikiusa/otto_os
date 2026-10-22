@@ -162,7 +162,7 @@ fn iso_from_unix(secs: i64) -> Option<String> {
 /// The scan proper. Returns `(files seen, files (re)indexed)`.
 async fn scan(ctx: &ServerCtx, workspace_id: Option<&Id>) -> otto_core::Result<(u64, u64)> {
     let repo = TranscriptIndexRepo::new(ctx.pool.clone());
-    let (claude_root, codex_root) = crate::routes::transcript::transcript_roots(&ctx.data_dir);
+    let (claude_root, codex_root) = crate::transcript::resolve::transcript_roots(&ctx.data_dir);
     let (files, list_errors) =
         tokio::task::spawn_blocking(move || list_transcripts(&claude_root, &codex_root))
             .await

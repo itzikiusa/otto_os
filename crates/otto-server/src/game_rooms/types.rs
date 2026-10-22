@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::{collections::HashMap, sync::OnceLock};
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -7,21 +8,60 @@ pub enum GameKind {
     Shooter,
     Kart,
 }
+/// The one game catalog, shared with the UI chooser (`games/catalog.ts` reads
+/// the same file). Adding a map or changing a capacity is one JSON edit.
+const CATALOG_JSON: &str = include_str!("../../../../ui/src/modules/rooms/games/catalog.json");
+#[derive(Deserialize)]
+struct Catalog {
+    games: HashMap<String, CatalogEntry>,
+}
+#[derive(Deserialize)]
+struct CatalogEntry {
+    capacity: usize,
+    maps: Vec<String>,
+}
+fn catalog() -> &'static Catalog {
+    static CATALOG: OnceLock<Catalog> = OnceLock::new();
+    // Compiled in and parsed by `catalog_lists_every_game_kind`; a malformed
+    // file fails that test, never a request.
+    CATALOG.get_or_init(|| serde_json::from_str(CATALOG_JSON).expect("game catalog parses"))
+}
 impl GameKind {
-    pub fn maps(self) -> &'static [&'static str] {
+    /// The catalog key: the same snake_case name the wire uses.
+    fn key(self) -> &'static str {
         match self {
-            GameKind::Shooter => &["isle", "mesa", "deadcity"],
-            GameKind::Kart => &[
-                "meadow", "downtown", "canyon", "frost", "lagoon", "volcano", "skyway",
-            ],
+            GameKind::Shooter => "shooter",
+            GameKind::Kart => "kart",
         }
+    }
+    fn entry(self) -> &'static CatalogEntry {
+        &catalog().games[self.key()]
+    }
+    pub fn maps(self) -> &'static [String] {
+        &self.entry().maps
     }
     /// Active members, host included (the host fills the rest with bots/CPUs).
     pub fn capacity(self) -> usize {
-        match self {
-            GameKind::Shooter => 4,
-            GameKind::Kart => 8,
+        self.entry().capacity
+    }
+}
+#[cfg(test)]
+mod catalog_tests {
+    use super::*;
+    #[test]
+    fn catalog_lists_every_game_kind() {
+        let parsed: Catalog = serde_json::from_str(CATALOG_JSON).unwrap();
+        assert_eq!(parsed.games.len(), 2, "catalog has a kind the enum lacks");
+        for kind in [GameKind::Shooter, GameKind::Kart] {
+            // The key is the wire name, so the UI's `config.game` indexes it too.
+            assert_eq!(serde_json::to_value(kind).unwrap(), kind.key());
+            assert!(!kind.maps().is_empty());
+            assert!(kind.capacity() >= 2);
         }
+        assert_eq!(GameKind::Shooter.capacity(), 4);
+        assert_eq!(GameKind::Kart.capacity(), 8);
+        assert!(GameKind::Kart.maps().iter().any(|m| m == "meadow"));
+        assert!(GameKind::Shooter.maps().iter().any(|m| m == "deadcity"));
     }
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]

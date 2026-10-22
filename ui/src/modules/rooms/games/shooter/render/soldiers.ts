@@ -188,13 +188,3 @@ export const SOLDIER_SKINS: Skin[] = [
   { skin: 0xb98058, hair: 0x2c1a10, top: 0x6c6a40, legs: 0x5a5836, vest: 0x4c4a2e, helmet: 0x5e5c38, boots: 0x2c2818, pack: 0x5c5a3a, gloves: 0x2a2818 },
   { skin: 0xe6b28e, hair: 0x101418, top: 0x2a2a2e, legs: 0x1e1e22, vest: 0x141416, helmet: -1, boots: 0x101010, pack: 0x26262a, gloves: 0x0e0e0e },
 ];
-/** Infected: grey-green skin, torn civilian clothes, no kit. */
-export const INFECTED_SKINS: Skin[] = [
-  { skin: 0x8f9a7a, hair: 0x2a2620, top: 0x6a5a4a, legs: 0x3a3e48, vest: 0x5a4c3e, helmet: -1, boots: 0x2a2420, pack: 0x4a3e34, gloves: 0x7f8a6c },
-  { skin: 0x7e8c72, hair: 0x14120e, top: 0x8a8a86, legs: 0x4a4a46, vest: 0x6e6c66, helmet: -1, boots: 0x1e1c1a, pack: 0x5a5852, gloves: 0x76846a },
-  { skin: 0x9aa088, hair: 0x5a4430, top: 0x7a3a34, legs: 0x2e3440, vest: 0x5e2e2a, helmet: -1, boots: 0x262220, pack: 0x4a2a26, gloves: 0x8a9478 },
-  { skin: 0x86947e, hair: 0x6a6a66, top: 0xa8a39a, legs: 0x5a5a62, vest: 0x8a857c, helmet: -1, boots: 0x2e2c2a, pack: 0x6a665e, gloves: 0x7c8a72 },
-  { skin: 0x7a866a, hair: 0x241c14, top: 0x3e5a6a, legs: 0x3a3a3a, vest: 0x2e4652, helmet: -1, boots: 0x1a1a1a, pack: 0x32424a, gloves: 0x72806a },
-  // Brutes and soldiers that turned: a helmet still on.
-  { skin: 0x84907a, hair: 0x1a1a1a, top: 0x4e5640, legs: 0x3e4432, vest: 0x34392a, helmet: 0x434a36, boots: 0x1e1c18, pack: 0x404432, gloves: 0x2a2a2a },
-];

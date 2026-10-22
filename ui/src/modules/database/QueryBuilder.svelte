@@ -1,4 +1,5 @@
 <script lang="ts" module>
+  import { tick } from 'svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   // Builder state survives unmount (tab switch, "Open in editor") and
   // connection flips: each connection gets its own snapshot here, restored
@@ -486,6 +487,28 @@
   function removeAt(g: CondGroup, i: number): void {
     g.items.splice(i, 1);
   }
+  /** Removing a row destroys its focused Remove button (keyed lists), so focus
+   *  would fall to <body> mid-builder (WCAG 2.4.3). After the removal, focus
+   *  the Remove on the row now at that index, else the previous row's, else
+   *  the list's Add button. Buttons of one list share `data-qb-remove={key}`;
+   *  its Add button carries `data-qb-add={key}`. */
+  async function removeRow(e: MouseEvent, remove: () => void): Promise<void> {
+    const btn = e.currentTarget as HTMLElement;
+    const key = CSS.escape(btn.dataset.qbRemove ?? '');
+    const root: ParentNode = btn.closest('.builder') ?? document;
+    const removers = () => [...root.querySelectorAll<HTMLElement>(`[data-qb-remove="${key}"]`)];
+    const idx = removers().indexOf(btn);
+    remove();
+    await tick();
+    const rows = removers();
+    const next = rows[Math.min(Math.max(idx, 0), rows.length - 1)] ?? root.querySelector<HTMLElement>(`[data-qb-add="${key}"]`);
+    next?.focus();
+  }
+  /** Row name for a condition's Remove button ("Remove condition on users.id"). */
+  function condName(c: Condition): string {
+    const col = c.target.ref.column === '*' ? 'rows' : refKey(c.target.ref);
+    return c.target.fn ? `${c.target.fn}(${col})` : col;
+  }
   function condKind(c: Condition): ReturnType<typeof valueKind> {
     if (c.target.fn && c.target.fn !== 'MIN' && c.target.fn !== 'MAX') return 'number';
     return kindOf(c.target.ref);
@@ -794,7 +817,7 @@
       await copyTextOrThrow(sql);
       toasts.success('Copied', 'Generated SQL copied');
     } catch {
-      toasts.error('Couldn’t copy');
+      toasts.error('Couldn’t copy', 'Select the text and copy it manually.');
     }
   }
 
@@ -1104,7 +1127,7 @@
               <span class="sec-count">{clauses.select.length || 'all (*)'}</span>
               <label class="distinct"><input type="checkbox" bind:checked={clauses.distinct} /> Distinct</label>
               <span class="grow"></span>
-              <button class="btn small ghost" onclick={addColumnItem} disabled={!colOptions.length}><Icon name="plus" size={12} />Column</button>
+              <button class="btn small ghost" data-qb-add="select" onclick={addColumnItem} disabled={!colOptions.length}><Icon name="plus" size={12} />Column</button>
               <button class="btn small ghost" onclick={addAggregate} disabled={!colOptions.length}><Icon name="sigma" size={12} />Aggregate</button>
               <button class="btn small ghost" onclick={addExpression} disabled={!colOptions.length}><Icon name="function" size={12} />Expression</button>
             </header>
@@ -1133,7 +1156,7 @@
                 <input dir="ltr" class="input mono alias" bind:value={it.as} placeholder={it.kind === 'column' ? it.ref.column : 'alias'} aria-label="Output name" spellcheck="false" />
                 <button class="icon-btn" onclick={() => moveSelect(i, -1)} disabled={i === 0} aria-label="Move up" title="Move up"><Icon name="chevronUp" size={12} /></button>
                 <button class="icon-btn" onclick={() => moveSelect(i, 1)} disabled={i === clauses.select.length - 1} aria-label="Move down" title="Move down"><Icon name="chevronDown" size={12} /></button>
-                <button class="icon-btn" onclick={() => removeSelect(it.id)} aria-label="Remove column" title="Remove"><Icon name="x" size={12} /></button>
+                <button class="icon-btn" data-qb-remove="select" onclick={(e) => void removeRow(e, () => removeSelect(it.id))} aria-label="Remove column {i + 1}: {selectLabel(it)}" title="Remove"><Icon name="x" size={12} /></button>
               </div>
             {/each}
           </section>
@@ -1144,7 +1167,7 @@
               <h3 id="qb-where" class="section-title">Filters</h3>
               <span class="sec-count">{countConds(clauses.where) || ''}</span>
               <span class="grow"></span>
-              <button class="btn small ghost" onclick={() => addCond(clauses.where, false)} disabled={!colOptions.length}><Icon name="plus" size={12} />Condition</button>
+              <button class="btn small ghost" data-qb-add="cond-{clauses.where.id}" onclick={() => addCond(clauses.where, false)} disabled={!colOptions.length}><Icon name="plus" size={12} />Condition</button>
               <button class="btn small ghost" onclick={() => addGroup(clauses.where, false)} disabled={!colOptions.length}><Icon name="plus" size={12} />Group</button>
             </header>
             {#if clauses.where.items.length === 0}
@@ -1190,7 +1213,7 @@
               <h3 id="qb-having" class="section-title">Having</h3>
               <span class="sec-count">{countConds(clauses.having) || ''}</span>
               <span class="grow"></span>
-              <button class="btn small ghost" onclick={() => addCond(clauses.having, true)} disabled={!colOptions.length}><Icon name="plus" size={12} />Condition</button>
+              <button class="btn small ghost" data-qb-add="cond-{clauses.having.id}" onclick={() => addCond(clauses.having, true)} disabled={!colOptions.length}><Icon name="plus" size={12} />Condition</button>
             </header>
             {#if clauses.having.items.length === 0}
               <p class="sec-hint">Filter the groups, e.g. COUNT(*) &gt; 10.</p>
@@ -1204,7 +1227,7 @@
             <header class="sec-head">
               <h3 id="qb-order" class="section-title">Sort</h3>
               <span class="grow"></span>
-              <button class="btn small ghost" onclick={addOrder} disabled={!colOptions.length}><Icon name="plus" size={12} />Sort</button>
+              <button class="btn small ghost" data-qb-add="sort" onclick={addOrder} disabled={!colOptions.length}><Icon name="plus" size={12} />Sort</button>
             </header>
             {#if clauses.orderBy.length === 0}
               <p class="sec-hint">Unsorted — the engine picks the order.</p>
@@ -1233,7 +1256,7 @@
                 </select>
                 <button class="icon-btn" onclick={() => moveOrder(i, -1)} disabled={i === 0} aria-label="Move up" title="Move up"><Icon name="chevronUp" size={12} /></button>
                 <button class="icon-btn" onclick={() => moveOrder(i, 1)} disabled={i === clauses.orderBy.length - 1} aria-label="Move down" title="Move down"><Icon name="chevronDown" size={12} /></button>
-                <button class="icon-btn" onclick={() => (clauses.orderBy = clauses.orderBy.filter((x) => x.id !== o.id))} aria-label="Remove sort" title="Remove"><Icon name="x" size={12} /></button>
+                <button class="icon-btn" data-qb-remove="sort" onclick={(e) => void removeRow(e, () => (clauses.orderBy = clauses.orderBy.filter((x) => x.id !== o.id)))} aria-label="Remove sort {i + 1}" title="Remove"><Icon name="x" size={12} /></button>
               </div>
             {/each}
           </section>
@@ -1364,7 +1387,7 @@
         <span class="cg-hint">{g.conj === 'AND' ? 'all of' : 'any of'}</span>
         {#if depth > 0}
           <span class="grow"></span>
-          <button class="btn small ghost" onclick={() => addCond(g, having)}><Icon name="plus" size={12} />Condition</button>
+          <button class="btn small ghost" data-qb-add="cond-{g.id}" onclick={() => addCond(g, having)}><Icon name="plus" size={12} />Condition</button>
         {/if}
       </div>
     {/if}
@@ -1372,7 +1395,7 @@
       {#if it.kind === 'group'}
         <div class="cg-item">
           {@render groupEditor(it, depth + 1, having)}
-          <button class="icon-btn cg-x" onclick={() => removeAt(g, i)} aria-label="Remove group" title="Remove group"><Icon name="x" size={12} /></button>
+          <button class="icon-btn cg-x" data-qb-remove="cond-{g.id}" onclick={(e) => void removeRow(e, () => removeAt(g, i))} aria-label="Remove condition group {i + 1}" title="Remove group"><Icon name="x" size={12} /></button>
         </div>
       {:else}
         {@const k = condKind(it)}
@@ -1409,7 +1432,7 @@
           {:else}
             <span class="val none"></span>
           {/if}
-          <button class="icon-btn" onclick={() => removeAt(g, i)} aria-label="Remove condition" title="Remove condition"><Icon name="x" size={12} /></button>
+          <button class="icon-btn" data-qb-remove="cond-{g.id}" onclick={(e) => void removeRow(e, () => removeAt(g, i))} aria-label="Remove condition on {condName(it)}" title="Remove condition"><Icon name="x" size={12} /></button>
         </div>
       {/if}
     {/each}

@@ -8,6 +8,7 @@
 // stop all change it without a page reload, and a cache warmed by the previous
 // identity must never be offered to the next (ui-correctness-4-03).
 
+import { untrack } from 'svelte';
 import { listIssueAccounts } from '../api/issues';
 import type { IssueAccount } from '../api/types';
 import { loadErrorText } from '../loadError';
@@ -38,6 +39,13 @@ class IssueAccountsStore {
    *  Rejects on failure (and records `error`), so a caller can show its own
    *  message. */
   load(force = false): Promise<IssueAccount[]> {
+    // The gates are read untracked: a component calling this from an
+    // `$effect` must not re-run (and re-pick its account) when the cache
+    // fills (ui-correctness-5-02).
+    return untrack(() => this.loadUntracked(force));
+  }
+
+  private loadUntracked(force: boolean): Promise<IssueAccount[]> {
     const who = auth.me?.id ?? null;
     if (who !== this.owner) {
       this.reset();

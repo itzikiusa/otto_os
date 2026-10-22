@@ -477,7 +477,7 @@ impl otto_product::ProductStudioHost for ServerCtx {
         }
     }
     async fn usage_budget(&self, workspace_id: &str, provider: &str) -> otto_product::BudgetGate {
-        let v = crate::routes::usage::check_budget(self, workspace_id, provider).await;
+        let v = crate::budget::check_budget(self, workspace_id, provider).await;
         otto_product::BudgetGate {
             blocked: v.blocked,
             reason: v.reason,

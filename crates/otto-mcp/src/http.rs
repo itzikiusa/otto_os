@@ -358,6 +358,9 @@ async fn create_server<S: McpCtx>(
     if transport == "http" && req.url.as_deref().unwrap_or("").trim().is_empty() {
         return Err(ApiErr(Error::Invalid("http server requires a url".into())));
     }
+    if let Some(msg) = crate::service::env_key_error(req.env.keys().chain(req.secret_env.keys())) {
+        return Err(ApiErr(Error::Invalid(msg)));
+    }
     let secret_env_keys: Vec<String> = req.secret_env.keys().cloned().collect();
     let secret_header_keys: Vec<String> = req.secret_headers.keys().cloned().collect();
     let server = ctx
@@ -484,9 +487,22 @@ async fn update_server<S: McpCtx>(
             "only the owner can change MCP credentials or commands".into(),
         )));
     }
+    // Only the maps this save supplies are checked: a stored key is never a
+    // reason to refuse an unrelated edit.
+    let supplied_env = req.env.iter().chain(req.secret_env.iter());
+    if let Some(msg) = crate::service::env_key_error(supplied_env.flat_map(|m| m.keys())) {
+        return Err(ApiErr(Error::Invalid(msg)));
+    }
     // Each supplied map replaces that map; omitted maps retain their secrets.
     // Replacing both maps is also the recovery path for a missing/corrupt blob.
+    // The per-server secret lock spans the read of the stored blob through
+    // `set_secret_meta`: the workspace MCP-servers route writes the `env` half
+    // of the same blob under it (CA-5-03).
     if req.secret_env.is_some() || req.secret_headers.is_some() {
+        let _secrets_guard = ctx.mcp().lock_secrets(&id).await;
+        // Re-read the row under the lock: `resolve_secrets` follows its
+        // secret ref, which a concurrent writer may just have set.
+        let server = ctx.mcp().registry().get(&id).await.map_err(ApiErr)?;
         let (old_env, old_headers) = if req.secret_env.is_none() || req.secret_headers.is_none() {
             ctx.mcp().resolve_secrets(&server).await?
         } else {

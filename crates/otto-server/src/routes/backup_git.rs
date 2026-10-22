@@ -14,7 +14,6 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     path::{Component, Path, PathBuf},
-    sync::{Arc, Mutex, OnceLock, Weak},
 };
 
 mod files;
@@ -613,25 +612,12 @@ async fn sync_repo(
     status(repo).await
 }
 
-// Weak entries bound the lock registry to active repositories. Guards are owned by
+// Keyed locks bound the registry to active repositories. Guards are owned by
 // detached mutation tasks, so disconnecting an HTTP client cannot release a lock early.
 async fn repo_lock(repo: &Path) -> tokio::sync::OwnedMutexGuard<()> {
-    static LOCKS: OnceLock<Mutex<BTreeMap<PathBuf, Weak<tokio::sync::Mutex<()>>>>> =
-        OnceLock::new();
-    let lock = {
-        let mut map = LOCKS
-            .get_or_init(Default::default)
-            .lock()
-            .expect("repository locks");
-        map.retain(|_, v| v.strong_count() > 0);
-        let lock = map
-            .get(repo)
-            .and_then(Weak::upgrade)
-            .unwrap_or_else(|| Arc::new(tokio::sync::Mutex::new(())));
-        map.insert(repo.to_owned(), Arc::downgrade(&lock));
-        lock
-    };
-    lock.lock_owned().await
+    static LOCKS: otto_core::keyed_lock::KeyedLocks<PathBuf> =
+        otto_core::keyed_lock::KeyedLocks::new();
+    LOCKS.lock(repo).await
 }
 
 #[derive(Deserialize)]

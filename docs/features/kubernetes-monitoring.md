@@ -15,8 +15,7 @@ collects from two sources:
 On top of that every cycle diffs the pod list against the previous one and
 **classifies restarts**, so an OOM kill never hides behind a rollout.
 
-Contract: `docs/contracts/api.md` → "Monitoring". Design spec:
-`docs/superpowers/specs/2026-09-05-k8s-monitoring-dashboard-design.md`.
+Contract: `docs/contracts/api.md` → "Monitoring".
 
 ## Setup
 
@@ -381,6 +380,9 @@ routes `GET /k8s/monitor/fleet/{filters,table,series,events,requests}`, WS
   nothing, an interval above 1 h can miss the `Unhealthy`/`Killing` pair.
 - Port-forward transport keeps one `kubectl port-forward` process per scraped
   pod open; on very large namespaces prefer granting `pods/proxy`.
+- A probe body is capped at 8 MiB on every transport, read through the cap (a
+  `/actuator/heapdump` is never buffered whole) and decoded lossily; a binary
+  body becomes replacement characters, cut on a character boundary.
 
 ## Troubleshooting
 

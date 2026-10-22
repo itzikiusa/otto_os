@@ -13,8 +13,10 @@ function pureModule(name: string, dir = '../src/modules/database/'): Record<stri
   const context = { exports: {} as Record<string, any>, require: (path: string) =>
     JSON_TREE.test(path)
       ? pureModule(JSON_TREE.exec(path)![1], '../src/lib/jsonTree/')
-      : ['./edit-sql','./sql-dialect.ts'].includes(path)
-      ? pureModule(path.replace('./','').replace(/\.ts$/, ''), dir)
+      : path === './edit-sql'
+      ? pureModule('edit-sql', dir)
+      : path === '../../lib/database/sql-dialect.ts'
+      ? pureModule('sql-dialect', '../src/lib/database/')
       : ({cellStr:String, isComplex:(v: unknown)=>v!==null && typeof v==='object', compactJson:JSON.stringify}) };
   runInNewContext(ts.transpileModule(readFileSync(new URL(`${dir}${name}.ts`, import.meta.url), 'utf8'),
     { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, context);

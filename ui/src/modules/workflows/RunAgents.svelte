@@ -21,6 +21,7 @@
   import StatusDot from '../../lib/components/StatusDot.svelte';
   import { events } from '../../lib/events.svelte';
   import { reviewIds, reviewSessions, reviewAgentStatus } from './reviewAgents';
+  import { summaryFallback, summaryFallbackTitle } from '../git/reviewFallback';
   import { plural } from '../../lib/plural';
 
   interface Props {
@@ -236,7 +237,9 @@
       case 'cancelled':
         return { ...base, key: 'ended', label: 'Canceled', tone: 'neutral', hint: 'The review was canceled' };
       case 'fallback':
-        return { ...base, key: 'failed', label: 'Fallback', tone: 'warning', hint: 'The configured summarizer was unavailable — a deterministic fallback ran' };
+        // Names the summarizer that actually ran and why its output wasn't
+        // used (error-handling-5-05), not a hard-coded "claude unavailable".
+        return { ...base, key: 'failed', label: 'Fallback', tone: 'warning', hint: summaryFallbackTitle(summaryFallback(row.review.agents), 'the findings') };
       case 'error':
         return { ...base, key: 'failed', label: 'Failed', tone: 'danger', hint: 'The agent failed' };
       default:
@@ -281,7 +284,10 @@
               <code class="s-id" title={sid}>{shortId(sid)}</code>
             </button>
             {#if reviewAgent(sid)?.agent.fallback}
-              <div class="fallback" data-testid="summarizer-fallback">Deterministic fallback — {reviewAgent(sid)?.agent.note}</div>
+              {@const fb = summaryFallback(reviewAgent(sid)?.review.agents)}
+              <div class="fallback" data-testid="summarizer-fallback" title={summaryFallbackTitle(fb, 'the findings')}>
+                Deterministic fallback — the {fb.provider} summarizer’s output wasn’t used{fb.cause ? ` (${fb.cause})` : ''}.
+              </div>
             {/if}
             {#if expanded[sid]}
               <div class="term">
@@ -295,7 +301,7 @@
         {#each g.reviews as review (review.id)}
           {@const summarizer = review.agents.at(-1)}
           {#if summarizer && !summarizer.session_id}
-            <div class="sub" data-testid="summarizer-without-session">Summarizer · {summarizer.provider || 'claude'} — {sentenceCase(reviewAgentStatus(review, summarizer))}{summarizer.fallback ? ' · Deterministic fallback' : ''}</div>
+            <div class="sub" data-testid="summarizer-without-session">Summarizer · {summarizer.provider || 'claude'} — {sentenceCase(reviewAgentStatus(review, summarizer))}{summarizer.fallback ? ` · Deterministic fallback${summaryFallback(review.agents).cause ? ` (${summaryFallback(review.agents).cause})` : ''}` : ''}</div>
           {/if}
         {/each}
         <!-- Sub-agents / background tasks the step launched. Display only —

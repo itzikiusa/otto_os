@@ -461,10 +461,6 @@ pub async fn install(
 // `crate::budget` (architecture-3-03); these are its two HTTP faces.
 // ---------------------------------------------------------------------------
 
-/// Re-exported for the gate callers that still import it from here
-/// (goal loops, reviews, swarm, product, the workflow budget node).
-pub use crate::budget::{check_budget, BudgetVerdict};
-
 /// `GET /usage/budgets` — the budget config plus live status rows (spend vs cap)
 /// over the configured window (root). Status is computed even when enforcement is
 /// off, so the UI can preview caps before turning them on.
@@ -474,7 +470,9 @@ pub async fn budgets(
 ) -> ApiResult<Json<UsageBudgetStatus>> {
     require_root(&user)?;
     let gate = BudgetGate::new(&ctx);
-    let cfg = gate.config().await;
+    // An unreadable stored config is an error (the page shows it with Retry),
+    // never an empty, editable "no budgets" form (error-handling-5-07).
+    let cfg = gate.try_config().await.map_err(ApiError)?;
     Ok(Json(gate.status(cfg).await))
 }
 

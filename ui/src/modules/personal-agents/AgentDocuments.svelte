@@ -8,6 +8,7 @@
   import { loadErrorText } from '../../lib/loadError';
   import { guardUnsaved } from '../../lib/leaveGuard';
   import { router } from '../../lib/router.svelte';
+  import { focusFirstField, refocusEditTrigger } from '../../lib/inlineEdit';
 
   interface Props {
     agentId: string;
@@ -61,6 +62,7 @@
       document = result;
       draft = result.content;
       editing = false;
+      void refocusEditTrigger(`doc-${kind}`);
     } catch (e) {
       if (seq === generation) error = `Couldn’t save the ${kind}. ${loadErrorText(e)}`;
     } finally { if (seq === generation) saving = false; }
@@ -87,7 +89,7 @@
     {#if error}<div class="error" role="alert">{error}</div>{/if}
     {#if document}
       {#if editing}
-        <textarea dir="auto" aria-label={`${label} Markdown`} bind:value={draft} disabled={saving} spellcheck="false"></textarea>
+        <textarea dir="auto" aria-label={`${label} Markdown`} bind:value={draft} disabled={saving} spellcheck="false" use:focusFirstField></textarea>
         {#if kind === 'context'}
           <div class="actions">
             <button type="button" class="btn" disabled={saving} onclick={() => (picker = '')}>Add file reference…</button>
@@ -103,13 +105,13 @@
         {/if}
         <div class="actions">
           <button type="button" class="btn primary" disabled={saving} onclick={save}>{saving ? 'Saving…' : 'Save'}</button>
-          <button type="button" class="btn" disabled={saving} onclick={() => { draft = document?.content ?? ''; editing = false; error = ''; }}>Cancel</button>
+          <button type="button" class="btn" disabled={saving} onclick={() => { draft = document?.content ?? ''; editing = false; error = ''; void refocusEditTrigger(`doc-${kind}`); }}>Cancel</button>
           {#if error}<button type="button" class="btn" disabled={saving} onclick={load}>Load saved version</button>{/if}
         </div>
       {:else}
         {#if document.content}<Markdown md={document.content} />{:else}<p class="hint">No {label.toLowerCase()} yet.</p>{/if}
         <div class="actions">
-          {#if editable}<button type="button" class="btn" onclick={() => (editing = true)}>Edit {label.toLowerCase()}</button>{/if}
+          {#if editable}<button type="button" class="btn" data-edit-for={`doc-${kind}`} aria-label={`Edit ${label.toLowerCase()}`} onclick={() => (editing = true)}>Edit {label.toLowerCase()}</button>{/if}
           <button type="button" class="btn" onclick={load}>Refresh</button>
         </div>
       {/if}

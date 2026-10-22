@@ -640,6 +640,39 @@ async fn shutdown_retires_every_session_within_its_budget_despite_held_locks() {
     assert_eq!(manager.live_count(), 0);
 }
 
+/// concurrency-async-5-04: a create that reaches the manager after the
+/// daemon's shutdown began is refused — no PTY spawned, no live entry, and no
+/// row left `running` for boot recovery to find.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn create_refuses_while_the_daemon_shuts_down() {
+    let (manager, repo, workspace, user) = test_manager().await;
+    let _ = manager.shutdown_for_restart().await;
+    let err = manager
+        .create(
+            &workspace,
+            &user,
+            CreateSessionReq {
+                kind: SessionKind::Agent,
+                provider: Some("shell".into()),
+                title: Some("Late create".into()),
+                cwd: Some("/tmp".into()),
+                connection_id: None,
+                model: None,
+                meta: None,
+            },
+            None,
+        )
+        .await
+        .expect_err("shutting down");
+    assert!(matches!(err, Error::Conflict(_)), "{err:?}");
+    assert_eq!(manager.live_count(), 0);
+    assert!(repo
+        .list_by_workspace(&workspace.id)
+        .await
+        .unwrap()
+        .is_empty());
+}
+
 #[path = "agent_cwd.rs"]
 mod agent_cwd;
 #[path = "archive.rs"]

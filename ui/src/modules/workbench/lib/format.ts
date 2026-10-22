@@ -8,7 +8,7 @@
 // newline) that can never change meaning. A formatter never loses content,
 // and formatting its own output again is a no-op (unit-tested).
 
-import { maskQueryPlaceholders, unmaskQueryPlaceholders } from '../../database/sql-util.ts';
+import { maskQueryPlaceholders, unmaskQueryPlaceholders } from '../../../lib/database/sql-util.ts';
 import { parseCsv, stringifyCsv } from './csv.ts';
 import { formatMarkup, MarkupError, validateMarkup } from './xml.ts';
 

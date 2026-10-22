@@ -6,7 +6,7 @@
   import Skeleton from '../../../lib/components/Skeleton.svelte';
   import type { EditableField } from '../types';
   import type { JiraIssueEditor } from './issueEditorState.svelte';
-  import { focusFirstField } from '../inlineEdit';
+  import { focusFirstField } from '../../../lib/inlineEdit';
 
   let { editor, ef, issueKey }: { editor: JiraIssueEditor; ef: EditableField; issueKey: string } = $props();
 

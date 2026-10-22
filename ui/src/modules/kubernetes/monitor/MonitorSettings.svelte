@@ -10,7 +10,7 @@
   import { toastError } from '../../../lib/toastError';
   import { kindLabel } from '../../../lib/labels';
   import { plural } from '../../../lib/plural';
-  import { untrack } from 'svelte';
+  import { untrack, tick } from 'svelte';
   import { toasts } from '../../../lib/toast.svelte';
   import { ctxMenu } from '../../../lib/contextmenu.svelte';
   import { k8sApi } from '../../../lib/api/k8s';
@@ -52,6 +52,14 @@
   let loadGeneration = 0;
   let running = $state(false);
   let errors = $state<Record<string, string>>({});
+  let settingsEl = $state<HTMLDivElement | null>(null);
+  /** UX-5-09: the id of a field's inline error (its `aria-describedby`). */
+  const errId = (key: string): string => `mon-${key.replace(/\./g, '-')}-err`;
+  /** `aria-invalid` + `aria-describedby` for the field validated under `key`. */
+  function invalid(key: string): { 'aria-invalid'?: 'true'; 'aria-describedby'?: string } {
+    return errors[key] ? { 'aria-invalid': 'true', 'aria-describedby': errId(key) } : {};
+  }
+  const errorCount = $derived(Object.keys(errors).length);
   let nsText = $state('');
   let testOpen = $state(false);
   let testBusy = $state(false);
@@ -159,7 +167,11 @@
     syncNamespaces();
     errors = validate(cfg);
     if (Object.keys(errors).length) {
-      toasts.error('Check the form', Object.values(errors)[0]);
+      // Inline only (no toast): move to the first invalid field.
+      await tick();
+      const first = settingsEl?.querySelector<HTMLElement>('[aria-invalid="true"]');
+      first?.scrollIntoView({ block: 'center' });
+      first?.focus();
       return;
     }
     const id = cluster.id;
@@ -298,7 +310,7 @@
   }
 </script>
 
-<div class="settings" data-testid="k8s-monitor-settings">
+<div class="settings" data-testid="k8s-monitor-settings" bind:this={settingsEl}>
   {#if !cfg}
     <LoadState what="monitoring settings" {loading} error={loadError} empty onretry={() => void load()} rows={6} />
   {:else}
@@ -320,6 +332,7 @@
       </div>
       <div class="dim status">{collectorLine(status, cfg.enabled, rel)}</div>
       <div class="dim">The switch saves immediately. Use Save for changes to the settings below.</div>
+      {#if errorCount}<p class="err field-error" role="alert">{errors.probes ?? `Fix the ${plural(errorCount, 'highlighted field')} to save.`}</p>{/if}
       {#if toggleError}<p class="error" role="alert">Couldn’t update monitoring: {toggleError} Try the switch again.</p>{/if}
       {#if rbacMessage(status?.metrics_server)}
         <div class="rbac"><strong>metrics-server denied.</strong> Ask your cluster admin for: <code>{rbacMessage(status?.metrics_server)}</code></div>
@@ -327,30 +340,30 @@
       <div class="grid3">
         <label class="field">
           <span>Interval (s)</span>
-          <input class="input" type="number" min="15" max="3600" bind:value={cfg.interval_secs} disabled={!canEdit} data-testid="k8s-monitor-interval" />
-          {#if errors.interval_secs}<em class="err">{errors.interval_secs}</em>{/if}
+          <input class="input" type="number" min="15" max="3600" bind:value={cfg.interval_secs} {...invalid('interval_secs')} disabled={!canEdit} data-testid="k8s-monitor-interval" />
+          {#if errors.interval_secs}<p class="err field-error" id={errId('interval_secs')}>{errors.interval_secs}</p>{/if}
         </label>
         <label class="field">
           <span>Concurrency</span>
-          <input class="input" type="number" min="1" max="32" bind:value={cfg.concurrency} disabled={!canEdit} />
-          {#if errors.concurrency}<em class="err">{errors.concurrency}</em>{/if}
+          <input class="input" type="number" min="1" max="32" bind:value={cfg.concurrency} {...invalid('concurrency')} disabled={!canEdit} />
+          {#if errors.concurrency}<p class="err field-error" id={errId('concurrency')}>{errors.concurrency}</p>{/if}
         </label>
         <label class="field">
           <span>Retention (days) <span class="dim">(hourly history; minute detail 2 d)</span></span>
-          <input class="input" type="number" min="1" max="90" bind:value={cfg.retention_days} disabled={!canEdit} />
-          {#if errors.retention_days}<em class="err">{errors.retention_days}</em>{/if}
+          <input class="input" type="number" min="1" max="90" bind:value={cfg.retention_days} {...invalid('retention_days')} disabled={!canEdit} />
+          {#if errors.retention_days}<p class="err field-error" id={errId('retention_days')}>{errors.retention_days}</p>{/if}
         </label>
         <label class="field">
           <span>Series cap / pod <span class="dim">(prometheus; buckets dropped first)</span></span>
-          <input class="input" type="number" min="100" max="10000" step="100" bind:value={cfg.series_cap} disabled={!canEdit} data-testid="k8s-monitor-series-cap" />
-          {#if errors.series_cap}<em class="err">{errors.series_cap}</em>{/if}
+          <input class="input" type="number" min="100" max="10000" step="100" bind:value={cfg.series_cap} {...invalid('series_cap')} disabled={!canEdit} data-testid="k8s-monitor-series-cap" />
+          {#if errors.series_cap}<p class="err field-error" id={errId('series_cap')}>{errors.series_cap}</p>{/if}
         </label>
       </div>
       <div class="grid2">
         <label class="field">
           <span>Namespaces {#if !NEEDS_NS}<span class="dim">(blank = {cluster.default_namespace})</span>{/if}</span>
-          <input dir="auto" class="input" placeholder={NEEDS_NS ? 'required: e.g. groove, groove-jobs' : cluster.default_namespace ?? ''} bind:value={nsText} onblur={syncNamespaces} disabled={!canEdit} data-testid="k8s-monitor-namespaces" />
-          {#if errors.namespaces}<em class="err">{errors.namespaces}</em>{/if}
+          <input dir="auto" class="input" placeholder={NEEDS_NS ? 'required: e.g. groove, groove-jobs' : cluster.default_namespace ?? ''} bind:value={nsText} {...invalid('namespaces')} onblur={syncNamespaces} disabled={!canEdit} data-testid="k8s-monitor-namespaces" />
+          {#if errors.namespaces}<p class="err field-error" id={errId('namespaces')}>{errors.namespaces}</p>{/if}
         </label>
         <div class="field">
           <span>Transport</span>
@@ -384,9 +397,9 @@
       {#each cfg.probes as p, i (i)}
         <div class="probe" data-testid="k8s-monitor-probe">
           <div class="grid-probe">
-            <label class="field"><span>Name</span><input dir="auto" class="input" bind:value={p.name} disabled={!canEdit} />{#if errors[`probe.${i}.name`]}<em class="err">{errors[`probe.${i}.name`]}</em>{/if}</label>
-            <label class="field"><span>Port</span><input class="input" type="number" placeholder="first" bind:value={p.port} disabled={!canEdit} />{#if errors[`probe.${i}.port`]}<em class="err">{errors[`probe.${i}.port`]}</em>{/if}</label>
-            <label class="field wide"><span>Path</span><input dir="ltr" class="input mono" bind:value={p.path} disabled={!canEdit} />{#if errors[`probe.${i}.path`]}<em class="err">{errors[`probe.${i}.path`]}</em>{/if}</label>
+            <label class="field"><span>Name</span><input dir="auto" class="input" bind:value={p.name} {...invalid(`probe.${i}.name`)} disabled={!canEdit} />{#if errors[`probe.${i}.name`]}<p class="err field-error" id={errId(`probe.${i}.name`)}>{errors[`probe.${i}.name`]}</p>{/if}</label>
+            <label class="field"><span>Port</span><input class="input" type="number" placeholder="first" bind:value={p.port} {...invalid(`probe.${i}.port`)} disabled={!canEdit} />{#if errors[`probe.${i}.port`]}<p class="err field-error" id={errId(`probe.${i}.port`)}>{errors[`probe.${i}.port`]}</p>{/if}</label>
+            <label class="field wide"><span>Path</span><input dir="ltr" class="input mono" bind:value={p.path} {...invalid(`probe.${i}.path`)} disabled={!canEdit} />{#if errors[`probe.${i}.path`]}<p class="err field-error" id={errId(`probe.${i}.path`)}>{errors[`probe.${i}.path`]}</p>{/if}</label>
             <div class="field"><span>Format</span><button class="input picker" onclick={(e) => formatMenu(e, p)} disabled={!canEdit}>{p.format}</button></div>
             <label class="field"><span>Timeout (ms)</span><input class="input" type="number" min="100" max="30000" bind:value={p.timeout_ms} disabled={!canEdit} /></label>
             {#if canEdit}<button class="icon-btn del" onclick={() => removeProbe(i)} title="Remove probe" aria-label="Remove probe"><Icon name="trash" size={13} /></button>{/if}
@@ -396,12 +409,12 @@
               <div class="row between"><span class="dim small">Field mappings</span>{#if canEdit}<button class="btn small ghost" onclick={() => addMapping(p)}><Icon name="plus" size={12} /> Mapping</button>{/if}</div>
               {#each p.mappings ?? [] as m, j (j)}
                 <div class="map">
-                  <input dir="ltr" class="input mono" placeholder="memory_stats.sys" bind:value={m.field} disabled={!canEdit} title="Dotted path; numbers index arrays" />
+                  <input dir="ltr" class="input mono" placeholder="memory_stats.sys" bind:value={m.field} {...invalid(`probe.${i}.map.${j}`)} disabled={!canEdit} title="Dotted path; numbers index arrays" />
                   <input dir="ltr" aria-label="Metric name" class="input mono" placeholder="metric name" bind:value={m.metric} disabled={!canEdit} />
                   <input dir="ltr" aria-label="Metric label" class="input mono" placeholder="or label" bind:value={m.label} disabled={!canEdit} />
                   <button class="input picker" onclick={(e) => unitMenu(e, m)} disabled={!canEdit}>{m.unit ?? 'number'}</button>
                   {#if canEdit}<button class="icon-btn" onclick={() => removeMapping(p, j)} aria-label="Remove mapping" title="Remove mapping"><Icon name="x" size={12} /></button>{/if}
-                  {#if errors[`probe.${i}.map.${j}`]}<em class="err span">{errors[`probe.${i}.map.${j}`]}</em>{/if}
+                  {#if errors[`probe.${i}.map.${j}`]}<p class="err field-error span" id={errId(`probe.${i}.map.${j}`)}>{errors[`probe.${i}.map.${j}`]}</p>{/if}
                 </div>
               {/each}
             </div>
@@ -425,12 +438,12 @@
         <div class="ex">
           <span class="chip">{kindLabel(x.kind)}</span>
           {#if x.kind === 'label'}
-            <input dir="ltr" aria-label="Label selector" class="input mono" placeholder="app=frb,tier!=web" bind:value={x.selector} disabled={!canEdit} />
+            <input dir="ltr" aria-label="Label selector" class="input mono" placeholder="app=frb,tier!=web" bind:value={x.selector} {...invalid(`ex.${i}`)} disabled={!canEdit} />
           {:else}
-            <input dir="ltr" aria-label="Name pattern" class="input mono" placeholder={x.kind === 'workload' ? 'cronjob:*' : '*-confsrv-*'} bind:value={x.match} disabled={!canEdit} />
+            <input dir="ltr" aria-label="Name pattern" class="input mono" placeholder={x.kind === 'workload' ? 'cronjob:*' : '*-confsrv-*'} bind:value={x.match} {...invalid(`ex.${i}`)} disabled={!canEdit} />
           {/if}
           {#if canEdit}<button class="icon-btn" onclick={() => removeExclusion(i)} aria-label="Remove exclusion" title="Remove exclusion"><Icon name="x" size={12} /></button>{/if}
-          {#if errors[`ex.${i}`]}<em class="err span">{errors[`ex.${i}`]}</em>{/if}
+          {#if errors[`ex.${i}`]}<p class="err field-error span" id={errId(`ex.${i}`)}>{errors[`ex.${i}`]}</p>{/if}
         </div>
       {/each}
     </section>
@@ -568,6 +581,7 @@
     align-items: center;
   }
   .err {
+    margin: 0;
     color: var(--danger);
     font-style: normal;
     font-size: var(--fs-xs);

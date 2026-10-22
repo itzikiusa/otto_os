@@ -145,6 +145,8 @@ function missionDetail() {
       switchTo(next){id=next;return load();},
       read(){return {detail,editing,editGoal,editResult,editRisk,dirty:isDirty(),loading,busy,err};}};
   `, { initial, toasts: toast, toastError: (title: string) => (toast.error as (t: string) => void)(title), onChange() {}, ApiError: Error,
+    // The inline-edit focus contract (lib/inlineEdit.ts) has no DOM here.
+    refocusEditTrigger: async () => {}, EDIT_KEY: 'work-item-goal',
     missionControlApi: {
       item(_ws: string, id: string) { const result = deferred<any>(); reads.push({id,result}); return result.promise; },
       patch(_ws: string, _id: string, body: any) { const result = deferred<any>(); writes.push({body,result}); return result.promise; },

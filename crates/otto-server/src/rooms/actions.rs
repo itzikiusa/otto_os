@@ -1,6 +1,6 @@
 //! Membership, driver and chat transitions. PTY authority effects are applied
 //! by the socket owner before publishing the resulting state.
-use super::registry::{forbidden, invalid, Room};
+use super::registry::{forbidden, invalid, Room, RATE_LIMITED};
 use otto_core::{api::*, Result};
 use std::time::Instant;
 #[derive(Debug, PartialEq, Eq)]
@@ -24,7 +24,7 @@ impl Room {
             .get_mut(actor)
             .unwrap()
             .action_rate
-            .take(48.0, 80.0)?;
+            .take(48.0, 80.0, RATE_LIMITED)?;
         match action {
             RoomAction::RecapConsent { .. }
             | RoomAction::RecapStart { .. }
@@ -109,7 +109,7 @@ impl Room {
                     return Ok(Effect::None);
                 }
                 let m = self.members.get_mut(actor).unwrap();
-                m.chat_rate.take(5.0, 10.0)?;
+                m.chat_rate.take(5.0, 10.0, RATE_LIMITED)?;
                 self.next_message += 1;
                 self.messages.push_back(RoomMessage {
                     seq: self.next_message,
@@ -207,11 +207,11 @@ impl Room {
             | RoomAction::UndoAnnotation { .. }
             | RoomAction::AnnotationsEnabled { .. } => self.annotation_action(actor, action)?,
             RoomAction::RequestIce => {
-                self.members
-                    .get_mut(actor)
-                    .unwrap()
-                    .ice_rate
-                    .take(1.0 / 30.0, 2.0)?;
+                self.members.get_mut(actor).unwrap().ice_rate.take(
+                    1.0 / 30.0,
+                    2.0,
+                    RATE_LIMITED,
+                )?;
             }
             RoomAction::Heartbeat | RoomAction::Leave => unreachable!(),
         }

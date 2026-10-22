@@ -401,8 +401,8 @@ async fn chat_retention_nonce_window_and_annotation_clear_are_bounded() {
     let mut room = shared.lock().await;
     for n in 0..205 {
         let m = room.members.get_mut(&guest.member_id).unwrap();
-        m.chat_rate.tokens = 10.0;
-        m.action_rate.tokens = 80.0;
+        m.chat_rate.refill(10.0);
+        m.action_rate.refill(80.0);
         room.apply(
             &guest.member_id,
             RoomAction::Chat {

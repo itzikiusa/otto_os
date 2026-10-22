@@ -79,9 +79,11 @@ use serde_json::{json, Value};
 use tokio::sync::{broadcast, oneshot};
 
 mod ctx;
-pub mod excalidraw;
 use ctx::{require_ws_role, ApiError, ApiResult, CurrentUser};
 pub use ctx::{AgentTurn, DesignAssistCtx};
+/// Moved to `otto-design::format` (architecture-4-02 interim); kept here so
+/// existing `otto_design_assist::excalidraw` paths stay stable.
+pub use otto_design::format::excalidraw;
 
 /// Live-preview file poll cadence while the agent edits.
 const POLL: Duration = Duration::from_millis(900);

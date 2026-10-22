@@ -57,7 +57,7 @@ impl std::error::Error for ExprError {}
 /// Validate syntax without evaluating dynamic references against invented data.
 pub fn validate(src: &str) -> Result<(), ExprError> {
     let toks = lex(src)?;
-    let mut parser = Parser { toks, pos: 0 };
+    let mut parser = Parser::new(toks);
     parser.parse_expr()?;
     parser.expect_eof()
 }
@@ -65,7 +65,7 @@ pub fn validate(src: &str) -> Result<(), ExprError> {
 /// Parse and evaluate `src` against `ctx`, returning the resulting JSON value.
 pub fn eval(src: &str, ctx: &Value) -> Result<Value, ExprError> {
     let toks = lex(src)?;
-    let mut p = Parser { toks, pos: 0 };
+    let mut p = Parser::new(toks);
     let ast = p.parse_expr()?;
     p.expect_eof()?;
     eval_ast(&ast, ctx)
@@ -378,12 +378,64 @@ enum BinOp {
     Rem,
 }
 
+/// Deepest prefix-operator / `(` / call-argument / index nesting the parser
+/// accepts. The parser, the evaluator and the boxed `Ast`'s drop all recurse
+/// once per level, so an unbounded `!!!…true` or `((((…` (stored by any
+/// workflow editor, validated on every save) overflowed the 2 MiB tokio stack
+/// and aborted the daemon. Real conditions nest a handful of levels.
+const MAX_DEPTH: usize = 64;
+/// Most binary operators one expression may chain. A left-associative chain
+/// (`a+a+a…`) builds an `Ast` as deep as it is long, which the evaluator and
+/// the drop then recurse through — the same overflow by another shape.
+const MAX_BINARY_OPS: usize = 1024;
+
 struct Parser {
     toks: Vec<Tok>,
     pos: usize,
+    /// Current nesting depth (see [`MAX_DEPTH`]).
+    depth: usize,
+    /// Binary operators parsed so far (see [`MAX_BINARY_OPS`]).
+    ops: usize,
 }
 
 impl Parser {
+    fn new(toks: Vec<Tok>) -> Self {
+        Parser {
+            toks,
+            pos: 0,
+            depth: 0,
+            ops: 0,
+        }
+    }
+    /// Enter one nesting level; pair with [`Parser::leave`].
+    fn enter(&mut self) -> Result<(), ExprError> {
+        self.depth += 1;
+        if self.depth > MAX_DEPTH {
+            return Err(ExprError::Parse("expression nests too deeply".into()));
+        }
+        Ok(())
+    }
+    fn leave(&mut self) {
+        self.depth -= 1;
+    }
+    /// Run `f` one nesting level deeper.
+    fn nested<T>(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> Result<T, ExprError>,
+    ) -> Result<T, ExprError> {
+        self.enter()?;
+        let out = f(self);
+        self.leave();
+        out
+    }
+    /// Count one binary operator against [`MAX_BINARY_OPS`].
+    fn count_op(&mut self) -> Result<(), ExprError> {
+        self.ops += 1;
+        if self.ops > MAX_BINARY_OPS {
+            return Err(ExprError::Parse("expression is too long".into()));
+        }
+        Ok(())
+    }
     fn peek(&self) -> Option<&Tok> {
         self.toks.get(self.pos)
     }
@@ -420,6 +472,7 @@ impl Parser {
     fn parse_or(&mut self) -> Result<Ast, ExprError> {
         let mut left = self.parse_and()?;
         while self.eat(&Tok::OrOr) {
+            self.count_op()?;
             let right = self.parse_and()?;
             left = Ast::Bin(BinOp::Or, Box::new(left), Box::new(right));
         }
@@ -428,6 +481,7 @@ impl Parser {
     fn parse_and(&mut self) -> Result<Ast, ExprError> {
         let mut left = self.parse_cmp()?;
         while self.eat(&Tok::AndAnd) {
+            self.count_op()?;
             let right = self.parse_cmp()?;
             left = Ast::Bin(BinOp::And, Box::new(left), Box::new(right));
         }
@@ -442,6 +496,7 @@ impl Parser {
                 _ => break,
             };
             self.pos += 1;
+            self.count_op()?;
             let right = self.parse_rel()?;
             left = Ast::Bin(op, Box::new(left), Box::new(right));
         }
@@ -458,6 +513,7 @@ impl Parser {
                 _ => break,
             };
             self.pos += 1;
+            self.count_op()?;
             let right = self.parse_member()?;
             left = Ast::Bin(op, Box::new(left), Box::new(right));
         }
@@ -472,6 +528,7 @@ impl Parser {
                 _ => break,
             };
             self.pos += 1;
+            self.count_op()?;
             let right = self.parse_add()?;
             left = Ast::Bin(op, Box::new(left), Box::new(right));
         }
@@ -486,6 +543,7 @@ impl Parser {
                 _ => break,
             };
             self.pos += 1;
+            self.count_op()?;
             let right = self.parse_mul()?;
             left = Ast::Bin(op, Box::new(left), Box::new(right));
         }
@@ -501,6 +559,7 @@ impl Parser {
                 _ => break,
             };
             self.pos += 1;
+            self.count_op()?;
             let right = self.parse_unary()?;
             left = Ast::Bin(op, Box::new(left), Box::new(right));
         }
@@ -510,11 +569,13 @@ impl Parser {
         match self.peek() {
             Some(Tok::Bang) => {
                 self.pos += 1;
-                Ok(Ast::Unary('!', Box::new(self.parse_unary()?)))
+                let inner = self.nested(Self::parse_unary)?;
+                Ok(Ast::Unary('!', Box::new(inner)))
             }
             Some(Tok::Minus) => {
                 self.pos += 1;
-                Ok(Ast::Unary('-', Box::new(self.parse_unary()?)))
+                let inner = self.nested(Self::parse_unary)?;
+                Ok(Ast::Unary('-', Box::new(inner)))
             }
             _ => self.parse_primary(),
         }
@@ -527,7 +588,7 @@ impl Parser {
             Some(Tok::False) => Ok(Ast::Lit(Value::Bool(false))),
             Some(Tok::Null) => Ok(Ast::Lit(Value::Null)),
             Some(Tok::LParen) => {
-                let inner = self.parse_expr()?;
+                let inner = self.nested(Self::parse_expr)?;
                 if !self.eat(&Tok::RParen) {
                     return Err(ExprError::Parse("expected ')'".into()));
                 }
@@ -539,7 +600,7 @@ impl Parser {
                     let mut args = Vec::new();
                     if self.peek() != Some(&Tok::RParen) {
                         loop {
-                            args.push(self.parse_expr()?);
+                            args.push(self.nested(Self::parse_expr)?);
                             if self.eat(&Tok::Comma) {
                                 continue;
                             }
@@ -571,7 +632,7 @@ impl Parser {
                     _ => return Err(ExprError::Parse("expected key after '.'".into())),
                 }
             } else if self.eat(&Tok::LBracket) {
-                let idx = self.parse_expr()?;
+                let idx = self.nested(Self::parse_expr)?;
                 if !self.eat(&Tok::RBracket) {
                     return Err(ExprError::Parse("expected ']'".into()));
                 }
@@ -968,5 +1029,33 @@ mod tests {
         assert!(eval_bool("output.passed == false", &review_fail));
         assert!(!eval_bool("output.blocking == 0", &review_fail));
         assert!(eval_bool("output.blocking > 0", &review_fail));
+    }
+
+    #[test]
+    fn deep_nesting_is_refused_not_overflowed() {
+        // 10k prefix operators / open parens used to recurse once per
+        // character and abort the daemon on a workflow save.
+        let bangs = format!("{}true", "!".repeat(10_000));
+        let parens = format!("{}1{}", "(".repeat(10_000), ")".repeat(10_000));
+        let minus = format!("{}1", "-".repeat(10_000));
+        let calls = format!("{}1{}", "len(".repeat(10_000), ")".repeat(10_000));
+        let index = format!("{}0{}", "a[".repeat(10_000), "]".repeat(10_000));
+        for src in [&bangs, &parens, &minus, &calls, &index] {
+            match validate(src) {
+                Err(ExprError::Parse(m)) => {
+                    assert_eq!(m, "expression nests too deeply", "{}", &src[..12])
+                }
+                other => panic!("expected a depth error for {}…, got {other:?}", &src[..12]),
+            }
+            assert!(eval(src, &json!({})).is_err());
+        }
+        // a long binary chain is bounded too
+        let chain = format!("1{}", "+1".repeat(10_000));
+        assert!(
+            matches!(validate(&chain), Err(ExprError::Parse(m)) if m == "expression is too long")
+        );
+        // modest nesting still works
+        assert!(eval_bool(&format!("{}true", "!".repeat(64)), &json!({})));
+        assert_eq!(eval("((((1 + 2))))", &json!({})).unwrap(), json!(3));
     }
 }

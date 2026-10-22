@@ -136,7 +136,6 @@ export type AttachId = 'scope' | 'grip' | 'extmag' | 'suppressor';
 export const ATTACHMENTS: { id: AttachId; name: string; bit: number }[] = [
   { id: 'scope', name: 'Scope', bit: 1 }, { id: 'grip', name: 'Grip', bit: 2 }, { id: 'extmag', name: 'Extended Mag', bit: 4 }, { id: 'suppressor', name: 'Suppressor', bit: 8 },
 ];
-export const ATTACH_ALL = 15;
 /** Which attachments a weapon takes (the launcher takes none, the shotgun no suppressor). */
 export function attachFits(w: WeaponId, bit: number): boolean {
   if (w === 'rocket') return false;

@@ -29,6 +29,7 @@
   import PageHeader from '../../../lib/components/PageHeader.svelte';
   import PageBody from '../../../lib/components/PageBody.svelte';
   import EmptyState from '../../../lib/components/EmptyState.svelte';
+  import LoadState from '../../../lib/components/LoadState.svelte';
   import Skeleton from '../../../lib/components/Skeleton.svelte';
   import MetricChart from '../../../lib/components/MetricChart.svelte';
   import { formatBytes } from '../k8s-util';
@@ -120,7 +121,6 @@
       /* ignore */
     }
   });
-
   /** The query fragment every fleet call shares. */
   const sel = $derived({ window, cluster: clusters.join(',') || undefined, ns: ns || undefined, workload: workload || undefined, pod: pod || undefined });
   const hasFilter = $derived(clusters.length > 0 || !!ns || !!workload || !!pod);
@@ -619,7 +619,7 @@
     {#if tableLoading && !rows.length}
       <Skeleton rows={2} height={60} />
     {:else if tableError}
-      <EmptyState actionKind="secondary" actionIcon="refresh" icon="warning" title="Couldn’t load the fleet" body={tableError} actionLabel="Retry" onaction={refresh} />
+      <LoadState what="the fleet" error={tableError} empty onretry={refresh} />
     {:else}
       <div class="kpis" data-testid="k8s-fleet-kpis">
         <div class="kpi"><span class="k">Unplanned restarts</span><span class="v mono" class:bad={kpi.restarts > 0}>{kpi.restarts}</span><span class="d">OOM {kpi.oom} · crash {kpi.crash}</span></div>
@@ -640,7 +640,7 @@
     {#if chartsLoading && !Object.keys(charts).length}
       <Skeleton rows={3} height={160} />
     {:else if chartsError}
-      <EmptyState actionKind="secondary" icon="warning" title="Couldn’t load the charts" body={chartsError} actionLabel="Retry" onaction={() => void loadSeries()} />
+      <LoadState what="the charts" error={chartsError} empty onretry={() => void loadSeries()} />
     {:else}
       <div class="charts" data-testid="k8s-fleet-charts">
         {#each METRICS as m (m.id)}
@@ -664,7 +664,7 @@
     {#if tableLoading && !rows.length}
       <Skeleton rows={8} height={30} />
     {:else if tableError}
-      <EmptyState actionKind="secondary" icon="warning" title="Couldn’t load the table" body={tableError} actionLabel="Retry" onaction={() => void loadTable()} />
+      <LoadState what="the table" error={tableError} empty onretry={() => void loadTable()} />
     {:else if !rows.length}
       <EmptyState icon="clock" title="No data in this window" body="Nothing was collected for this selection. Widen the window, clear a filter, or enable monitoring on a cluster. Data comes straight from ClickHouse; filters, grouping and ordering are remembered." />
     {:else}
@@ -744,7 +744,7 @@
     {#if evLoading && !events.length}
       <Skeleton rows={8} height={28} />
     {:else if evError}
-      <EmptyState actionKind="secondary" icon="warning" title="Couldn’t load events" body={evError} actionLabel="Retry" onaction={() => void loadEvents()} />
+      <LoadState what="events" error={evError} empty onretry={() => void loadEvents()} />
     {:else if !events.length}
       <EmptyState icon="check" title="Nothing in this window" body="No restarts or pod replacements were recorded for this selection." />
     {:else}
@@ -787,7 +787,7 @@
     {#if reqLoading && !reqs}
       <Skeleton rows={6} height={28} />
     {:else if reqError}
-      <EmptyState actionKind="secondary" icon="warning" title="Couldn’t load requests" body={reqError} actionLabel="Retry" onaction={() => void loadRequests()} />
+      <LoadState what="requests" error={reqError} empty onretry={() => void loadRequests()} />
     {:else if reqs}
       {#if reqs.enabled_on.length === 0}
         <div class="note card" data-testid="k8s-fleet-requests-off">

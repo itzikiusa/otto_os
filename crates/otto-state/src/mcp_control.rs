@@ -2178,6 +2178,15 @@ mod tests {
         log.insert(row(None, Some("srv"), "other", "managed"))
             .await
             .unwrap();
+        // test-quality-5-09: rows in a workspace the caller isn't scoped to —
+        // even the caller's own otto call there — stay out of both the list
+        // and the stats (a `workspace_id IS NOT NULL` rewrite would leak them).
+        log.insert(row(Some("other-ws"), None, "me", "otto.elsewhere"))
+            .await
+            .unwrap();
+        log.insert(row(Some("other-ws"), Some("srv2"), "other", "elsewhere"))
+            .await
+            .unwrap();
         let q = CallLogQuery {
             workspace_ids: Some(vec![ws.clone()]),
             caller_user_id: Some("me".into()),
@@ -2204,8 +2213,8 @@ mod tests {
             .collect();
         stats.sort();
         assert_eq!(stats, ["managed", "otto.mine", "otto.shared"]);
-        // Root (no restriction) sees everything.
-        assert_eq!(log.stats(None, None).await.unwrap().len(), 4);
+        // Root (no restriction) sees everything, the other workspace included.
+        assert_eq!(log.stats(None, None).await.unwrap().len(), 6);
     }
 
     #[tokio::test]

@@ -19,24 +19,9 @@ use serde_json::{json, Map, Value};
 /// Serialize the two-store request credential mutation across Save, secure-all,
 /// delete and OAuth completion. Weak entries do not retain deleted request ids.
 pub async fn request_guard(id: &str) -> tokio::sync::OwnedMutexGuard<()> {
-    use std::sync::{Arc, Mutex, OnceLock, Weak};
-    static LOCKS: OnceLock<Mutex<std::collections::HashMap<String, Weak<tokio::sync::Mutex<()>>>>> =
-        OnceLock::new();
-    let lock = {
-        let mut locks = LOCKS
-            .get_or_init(|| Mutex::new(std::collections::HashMap::new()))
-            .lock()
-            .unwrap();
-        locks.retain(|_, lock| lock.strong_count() > 0);
-        if let Some(lock) = locks.get(id).and_then(Weak::upgrade) {
-            lock
-        } else {
-            let lock = Arc::new(tokio::sync::Mutex::new(()));
-            locks.insert(id.into(), Arc::downgrade(&lock));
-            lock
-        }
-    };
-    lock.lock_owned().await
+    static LOCKS: otto_core::keyed_lock::KeyedLocks<String> =
+        otto_core::keyed_lock::KeyedLocks::new();
+    LOCKS.lock(id).await
 }
 
 /// Marker field name inside a `{"$secret": "<ref>"}` object.

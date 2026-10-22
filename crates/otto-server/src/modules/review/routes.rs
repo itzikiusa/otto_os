@@ -364,7 +364,7 @@ pub(crate) async fn get_pr_readiness(
 /// the workspace-level cap (the provider isn't known yet). A blocked budget is
 /// `Invalid` (400) like every other budget gate in the daemon.
 pub(crate) async fn review_budget_gate(ctx: &ServerCtx, workspace_id: &str) -> Result<()> {
-    let verdict = crate::routes::usage::check_budget(ctx, workspace_id, "").await;
+    let verdict = crate::budget::check_budget(ctx, workspace_id, "").await;
     if verdict.blocked {
         return Err(Error::Invalid(format!(
             "Budget exceeded — review blocked: {}",

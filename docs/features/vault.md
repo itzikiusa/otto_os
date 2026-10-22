@@ -52,7 +52,7 @@ contract is `docs/contracts/api.md` → *Vault v3 — the docs home*.
 | MCP (session) | `crates/ottod/src/mcp_tools.rs` | `otto_vault_list/dir/read/search/backlinks/tags/graph/okf_validate` + `write/write_file/rename/delete`; reviewer sessions receive the read-only subset |
 | MCP (outward) | `crates/otto-mcp/src/outward/` | `otto.vault_*` — reads default-enabled, writes approval-gated |
 | Global search | `crates/otto-server/src/routes/search.rs` | ⌘F fans out to `vault_fts` (`kind: "vault_note"`) |
-| UI | `ui/src/modules/vault/` | `VaultPage` + `FileTree`, `NoteView`, `mdRender`, `RightPanel`, `SearchPanel`, `TagsPanel`, `Switcher`, `NewNoteDialog`, `GraphView` + `graph.worker.ts`, store `vault.svelte.ts` |
+| UI | `ui/src/modules/vault/` | `VaultPage` + `FileTree`, `NoteView` (markdown via `lib/render/markdown.ts`), `RightPanel`, `SearchPanel`, `TagsPanel`, `Switcher`, `NewNoteDialog`, `GraphView` + `graph.worker.ts`, store `vault.svelte.ts` |
 | Contracts (authoritative) | `docs/contracts/api.md` → *Vault v3 — the docs home* | The REST surface; DTOs mirrored in `ui/src/lib/api/types.ts` |
 | Bundled skills | `okf-authoring`, `vault-repo-docs`, `vault-{docs,api,data,runtime,evidence}-review` | Complete author/reviewer packages with focused references, scripts, examples, and evals |
 

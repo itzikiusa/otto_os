@@ -495,12 +495,57 @@ async fn service_loaded_async(target: &str) -> bool {
 
 /// The final detail when a loaded daemon never answered: this path only
 /// kickstarts WITHOUT `-k` (never kills a live instance), so a live but
-/// wedged process needs the user's explicit Restart.
+/// wedged process needs the user's explicit Restart — the "Restart daemon"
+/// button on Otto's offline screen and in the menu-bar popover, or the
+/// menu-bar item's right-click menu (error-handling-5-01).
 fn not_answering_detail(waited: Duration) -> String {
     format!(
-        "daemon loaded but not answering after {} s — use Restart daemon to replace a wedged process; see ~/Library/Logs/Otto/ottod.log",
+        "daemon loaded but not answering after {} s — click Restart daemon (Otto's offline screen or the menu-bar item) to replace a wedged process; see ~/Library/Logs/Otto/ottod.log",
         waited.as_secs()
     )
+}
+
+/// The last report the supervisor published, so a window that opens after the
+/// boot-time `otto://daemon-state` event still gets the diagnosis
+/// (`daemon_status` carries its detail while the daemon is down).
+static LAST_REPORT: std::sync::Mutex<Option<DaemonReport>> = std::sync::Mutex::new(None);
+/// One `ensure_daemon` at a time: the boot path and a window's `daemon_start`
+/// must not install/bootstrap concurrently.
+static ENSURING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Emit `report` as `otto://daemon-state` to every window and remember it.
+pub fn publish(app: &tauri::AppHandle, report: &DaemonReport) {
+    use tauri::Emitter;
+    if let Ok(mut last) = LAST_REPORT.lock() {
+        *last = Some(report.clone());
+    }
+    let _ = app.emit("otto://daemon-state", report);
+}
+
+/// The detail of the last published report that was NOT healthy ("" when none).
+fn last_unhealthy_detail() -> String {
+    LAST_REPORT
+        .lock()
+        .ok()
+        .and_then(|last| {
+            last.as_ref()
+                .filter(|r| !r.healthy)
+                .map(|r| r.detail.clone())
+        })
+        .unwrap_or_default()
+}
+
+/// [`ensure_daemon`] with every interim and final report published. While
+/// another call is already ensuring, answers the current status instead of
+/// starting a second install.
+pub async fn ensure_and_publish(app: &tauri::AppHandle) -> DaemonReport {
+    if ENSURING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return daemon_status().await;
+    }
+    let report = ensure_daemon(|interim| publish(app, interim)).await;
+    ENSURING.store(false, std::sync::atomic::Ordering::SeqCst);
+    publish(app, &report);
+    report
 }
 
 /// Health-check; install + start when the daemon is down. Called at app start
@@ -601,26 +646,27 @@ pub async fn ensure_daemon(progress: impl Fn(&DaemonReport)) -> DaemonReport {
     }
 }
 
+/// Health now; while the daemon is down, `detail` is the last published
+/// diagnosis (a window opened after the boot event still shows it).
 #[tauri::command]
 pub async fn daemon_status() -> DaemonReport {
+    let healthy = health().await;
     DaemonReport {
-        healthy: health().await,
+        healthy,
         installed: installed_bin().exists(),
         daemon_version: daemon_version().await,
         app_version: env!("CARGO_PKG_VERSION").to_string(),
-        detail: String::new(),
+        detail: if healthy {
+            String::new()
+        } else {
+            last_unhealthy_detail()
+        },
     }
 }
 
 #[tauri::command]
 pub async fn daemon_start(app: tauri::AppHandle) -> Result<DaemonReport, String> {
-    use tauri::Emitter;
-    let report = ensure_daemon(|interim| {
-        let _ = app.emit("otto://daemon-state", interim);
-    })
-    .await;
-    let _ = app.emit("otto://daemon-state", &report);
-    Ok(report)
+    Ok(ensure_and_publish(&app).await)
 }
 
 #[tauri::command]

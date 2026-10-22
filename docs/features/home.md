@@ -150,7 +150,11 @@ non-viewer role in that workspace; the daemon re-checks):
   failed delete walks it back and toasts the reason.
 - **Detention** archives the session (resumable; the usual toast with Undo);
   the kid walks to the detention bench. The bench seats the room's three most
-  recently archived sessions — **Release from detention** unarchives one.
+  recently archived sessions — **Release from detention** unarchives one. In the
+  list, clicking a detention row selects the kid, or shows its menu in List view.
+  It never unarchives. Unarchiving is the row's own **Release** button, which is
+  disabled, with the reason, for people who can't manage the session. Closing the
+  card, or a detention or kick from it, returns focus to the 3D stage.
 
 **List view and accessibility.** The 3D / List switch (stored per widget)
 shows the same classrooms as real buttons; in 3D the list stays in the page
@@ -171,7 +175,12 @@ while the box is on screen and active — it pauses when the widget is
 scrolled out of view, its space is inactive or the document is hidden — and
 the corridor renders on demand. A software renderer drops shadows and half
 the lamps. A lost WebGL context remounts the school on its own (at most twice
-a minute, keeping the room) before falling back to the list with Retry.
+a minute, keeping the room) before falling back to the list with Retry. Live screens poll
+on the open room's id, so a session status event does not restart the poller.
+A status change can refresh the screens early, at most once every 2 s. The
+session list loads through `freshness()` like the other boxes, so scrolling
+back, sliding back or leaving zoom does not refetch it. While the box is zoomed,
+the grid copy releases its 3D school, so only one WebGL context is live.
 
 **Data.** `GET /sessions?archived=false&limit=1000` plus
 `GET /sessions?archived=true&limit=60` for the benches (#17b, every workspace

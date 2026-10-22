@@ -9,9 +9,11 @@ name: DB & Kafka driver suites
 # because the seeds are mounted from the checkout, which `services:` start
 # before.
 #
-# resource_access.rs's native-credential cases are NOT run: they need a
-# separately provisioned disposable fixture (otto_reader user, `shop` and
-# `hidden` schemas) that no seed in the repo creates yet.
+# resource_access.rs's native-credential cases run against their own
+# disposable MySQL + PostgreSQL fixture, seeded below (root/postgres and an
+# `otto_reader` login, all with the fixture-only password; a readable `shop`
+# with `orders(1, 42)` and an unreadable `hidden.secrets`). It is separate from
+# dev/dbviewer so those seeds never grow fixture-only users or schemas.
 #
 # On PRs only when the drivers (or their seeds) change; nightly + on demand
 # otherwise.
@@ -79,6 +81,47 @@ jobs:
           docker compose -f dev/dbviewer/docker-compose.yml up -d
           docker compose -f dev/brokers/docker-compose.yml up -d
 
+      # The resource_access.rs fixture (see the header). Loopback-only ports,
+      # fixture-only password; the init scripts run before the TCP listener
+      # opens, so a reader query over TCP succeeding means the seed is done.
+      - name: Start the resource-access fixture (MySQL + PostgreSQL)
+        run: |
+          fixture="$RUNNER_TEMP/resource-fixture"
+          mkdir -p "$fixture/mysql" "$fixture/pg"
+          cat > "$fixture/mysql/seed.sql" <<'SQL'
+          CREATE DATABASE shop;
+          CREATE TABLE shop.orders (id INT PRIMARY KEY, total INT NOT NULL);
+          INSERT INTO shop.orders VALUES (1, 42);
+          CREATE DATABASE hidden;
+          CREATE TABLE hidden.secrets (id INT PRIMARY KEY, secret VARCHAR(64));
+          INSERT INTO hidden.secrets VALUES (1, 'fixture-only');
+          CREATE USER 'otto_reader'@'%' IDENTIFIED BY 'otto_fixture_only';
+          -- SHOW VIEW: native_access refuses a query credential that can't
+          -- inspect definer-view privileges.
+          GRANT SELECT, SHOW VIEW ON shop.* TO 'otto_reader'@'%';
+          SQL
+          cat > "$fixture/pg/seed.sql" <<'SQL'
+          CREATE SCHEMA shop;
+          CREATE TABLE shop.orders (id INT PRIMARY KEY, total INT NOT NULL);
+          INSERT INTO shop.orders VALUES (1, 42);
+          CREATE SCHEMA hidden;
+          CREATE TABLE hidden.secrets (id INT PRIMARY KEY, secret TEXT);
+          INSERT INTO hidden.secrets VALUES (1, 'fixture-only');
+          CREATE ROLE otto_reader LOGIN PASSWORD 'otto_fixture_only';
+          REVOKE ALL ON SCHEMA public FROM PUBLIC;
+          -- PUBLIC holds TEMP on every new database by default, and the
+          -- postgres driver refuses a native role with TEMP or CREATE authority.
+          REVOKE CREATE, TEMPORARY ON DATABASE resourcefixture FROM PUBLIC;
+          GRANT USAGE ON SCHEMA shop TO otto_reader;
+          GRANT SELECT ON shop.orders TO otto_reader;
+          SQL
+          docker run -d --name rafix-mysql -p 127.0.0.1:23306:3306 \
+            -e MYSQL_ROOT_PASSWORD=otto_fixture_only \
+            -v "$fixture/mysql:/docker-entrypoint-initdb.d:ro" mysql:9.7
+          docker run -d --name rafix-pg -p 127.0.0.1:25432:5432 \
+            -e POSTGRES_PASSWORD=otto_fixture_only -e POSTGRES_DB=resourcefixture \
+            -v "$fixture/pg:/docker-entrypoint-initdb.d:ro" postgres:17
+
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -135,6 +178,20 @@ jobs:
             sleep 5
           done
           docker ps --format '{{.Names}}  {{.Status}}'
+          for _ in $(seq 1 60); do
+            docker exec rafix-mysql mysql -h127.0.0.1 -uotto_reader -potto_fixture_only \
+              -e 'SELECT total FROM shop.orders' >/dev/null 2>&1 \
+            && docker exec -e PGPASSWORD=otto_fixture_only rafix-pg psql -h 127.0.0.1 \
+              -U otto_reader -d resourcefixture -c 'SELECT total FROM shop.orders' >/dev/null 2>&1 \
+            && { fixture_ready=1; break; }
+            sleep 5
+          done
+          if [ "${fixture_ready:-0}" != "1" ]; then
+            echo "::error::resource-access fixture never became ready"
+            docker logs --tail 80 rafix-mysql
+            docker logs --tail 80 rafix-pg
+            exit 1
+          fi
           if [ "$unhealthy" != "0" ]; then
             echo "::error::DB/Kafka stack never became healthy"
             docker compose -f dev/dbviewer/docker-compose.yml logs --tail 80
@@ -151,13 +208,16 @@ jobs:
           OTTO_REDIS_PARITY_PORT: '16379'
           OTTO_REDIS_PARITY_PASSWORD: 'ottoredis'
           OTTO_BROKERS_E2E: '1'
+          OTTO_RESOURCE_MYSQL_PORT: '23306'
+          OTTO_RESOURCE_PG_PORT: '25432'
         run: >-
           cargo nextest run -p otto-dbviewer -p otto-brokers --profile ci
           --run-ignored only --no-fail-fast
-          -E 'not binary(resource_access)'
 
       - name: Server logs
         if: failure()
         run: |
           docker compose -f dev/dbviewer/docker-compose.yml logs --tail 200
           docker compose -f dev/brokers/docker-compose.yml logs --tail 200
+          docker logs --tail 200 rafix-mysql || true
+          docker logs --tail 200 rafix-pg || true

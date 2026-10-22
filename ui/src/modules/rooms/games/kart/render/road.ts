@@ -15,7 +15,7 @@ import { F_BRIDGE, F_DRAW, F_GAP, F_PIPE, F_TUNNEL, pointAt, rampOn, sampleAt, t
 import { barriers, edgeClear } from '../layout';
 import { branchFade, skidAlpha, wallBanners } from './dressing';
 import { patchWorld, type SharedUniforms } from './atmosphere';
-import { asphaltSurface, bannerTexture, dashTexture, grooveTexture, paintTexture, rumbleTexture, skidTexture, surfaceTexture, type SurfaceKind } from './surfaces';
+import { asphaltSurface, bannerTexture, dashTexture, grooveTexture, paintTexture, rumbleTexture, skidTexture, terrainSurfaceTexture, type TerrainSurfaceKind } from './surfaces';
 import type { KartTheme } from './themes';
 
 /** One cross-section point of a swept profile: lateral offset, height above the road, texture u. */
@@ -95,7 +95,7 @@ export class RoadKit {
   private neon: THREE.MeshBasicMaterial | null;
   private panel: THREE.MeshBasicMaterial;
   private frame: THREE.MeshLambertMaterial;
-  private deckKind: SurfaceKind | null;
+  private deckKind: TerrainSurfaceKind | null;
 
   constructor(private lib: AssetLibrary, private track: Track, private theme: KartTheme, private shared: SharedUniforms, private scene: THREE.Scene) {
     const own = <T extends { dispose(): void }>(r: T): T => lib.own(r);
@@ -107,7 +107,7 @@ export class RoadKit {
     this.deckKind = t === 'lagoon' ? 'planks' : t === 'dusk' ? 'metal' : null;
     if (this.deckKind) {
       const metal = this.deckKind === 'metal';
-      this.deck = own(new THREE.MeshStandardMaterial({ color: metal ? 0x9aa4b4 : 0xffffff, map: own(surfaceTexture(this.deckKind)), roughness: metal ? 0.45 : 0.85, metalness: metal ? 0.6 : 0 }));
+      this.deck = own(new THREE.MeshStandardMaterial({ color: metal ? 0x9aa4b4 : 0xffffff, map: own(terrainSurfaceTexture(this.deckKind)), roughness: metal ? 0.45 : 0.85, metalness: metal ? 0.6 : 0 }));
     }
     const overlay = (map: THREE.Texture, order = 0) => own(new THREE.MeshLambertMaterial({ map, transparent: true, depthWrite: false, vertexColors: true, polygonOffset: true, polygonOffsetFactor: -1 - order, polygonOffsetUnits: -2 - order }));
     this.groove = overlay(own(grooveTexture()));
@@ -115,8 +115,8 @@ export class RoadKit {
     this.paint = overlay(own(paintTexture()), 2);
     this.curb = own(new THREE.MeshLambertMaterial({ map: own(rumbleTexture(...theme.curb)) }));
     this.bankCurb = own(new THREE.MeshLambertMaterial({ map: own(rumbleTexture(...theme.bankCurb)) }));
-    this.offroad = overlay(own(surfaceTexture(theme.offroad)), 1);
-    this.ice = own(new THREE.MeshStandardMaterial({ map: own(surfaceTexture('ice')), transparent: true, roughness: 0.12, metalness: 0.05, vertexColors: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -3 }));
+    this.offroad = overlay(own(terrainSurfaceTexture(theme.offroad)), 1);
+    this.ice = own(new THREE.MeshStandardMaterial({ map: own(terrainSurfaceTexture('ice')), transparent: true, roughness: 0.12, metalness: 0.05, vertexColors: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -3 }));
     this.banner = own(new THREE.MeshLambertMaterial({ map: own(bannerTexture(...theme.banner)), side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -2 }));
     this.neon = theme.neon !== null ? own(new THREE.MeshBasicMaterial({ color: theme.neon, toneMapped: false })) : null;
     this.dash = own(dashTexture());

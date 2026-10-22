@@ -21,8 +21,9 @@
 //    is on repainted at 2× so its live terminal stays crisp up close.
 //  • Reduced motion: camera moves cut instead of flying; life.ts keeps
 //    everybody seated; pins and rings hold still.
-//  • `pixelRatio` ≤ 2; `dispose()` + `forceContextLoss()` on destroy; a lost
-//    context is reported so the host can offer Retry.
+//  • The WebGL lifecycle is the shared lib/three/stage.ts: `pixelRatio` ≤ 2,
+//    `releaseRenderer` on destroy, and a lost context is reported so the host
+//    remounts (or offers Retry).
 
 //  • The pieces live in scene/: the public surface (api.ts), the stage —
 //    renderer, lights, theme (stage.ts) —, kit instancing (kit.ts), the
@@ -45,6 +46,7 @@ import { paintBoardTitle, paintPlate, paintSign } from './scene/paint.ts';
 import { createPicker } from './scene/pick.ts';
 import { EYE, FPS_MS, ease, type Character, type Door, type Obj, type Painted, type Three } from './scene/shared.ts';
 import { aimRoomLights, applyTheme, createStage } from './scene/stage.ts';
+import { onContextLost, releaseRenderer } from '../../../lib/three/stage.ts';
 
 export * from './scene/api.ts';
 
@@ -608,8 +610,7 @@ function build(
     kick();
   });
   ro.observe(host);
-  canvas.addEventListener('webglcontextlost', (e) => {
-    e.preventDefault();
+  onContextLost(canvas, () => {
     for (const f of lostFns) f();
   });
 
@@ -784,9 +785,7 @@ function build(
       envRT.dispose();
       pmrem.dispose();
       assets.dispose();
-      renderer.dispose();
-      renderer.forceContextLoss();
-      canvas.remove();
+      releaseRenderer(renderer);
     },
   };
 }

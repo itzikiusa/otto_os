@@ -1,7 +1,8 @@
 use super::{
     actions::Effect,
     auth::socket_token,
-    registry::{Notice, Rate, Room, SharedRoom, GRACE},
+    capability::TokenBucket,
+    registry::{Notice, Room, SharedRoom, GRACE, RATE_LIMITED},
 };
 use crate::{ApiResult, ServerCtx};
 use axum::{
@@ -136,12 +137,12 @@ async fn run(ctx: ServerCtx, shared: SharedRoom, member: String, mut socket: Web
         disconnect(&ctx, &shared, &member, generation).await;
         return;
     }
-    let mut wire_rate = Rate::new(120.0);
+    let mut wire_rate = TokenBucket::new(120.0);
     let mut tick = tokio::time::interval(Duration::from_secs(5));
     loop {
         tokio::select! {
             incoming=socket.recv()=>{
-                if wire_rate.take(64.0,120.0).is_err(){break;}
+                if wire_rate.take(64.0,120.0,RATE_LIMITED).is_err(){break;}
                 let action=match incoming {
                     Some(Ok(Message::Text(text)))=>match serde_json::from_str::<RoomAction>(&text){Ok(action) if !matches!(action,RoomAction::Annotation{..}) || text.len()<=8192=>action,Ok(_)=>{let _=send(&mut socket,&RoomEvent::Error{code:"invalid".into(),message:"Annotation exceeds 8 KiB".into()}).await;continue;},Err(_)=>{if send(&mut socket,&RoomEvent::Error{code:"invalid".into(),message:"Unknown or malformed room action".into()}).await.is_err(){break;}continue;}},
                     Some(Ok(Message::Pong(_)))=>RoomAction::Heartbeat,

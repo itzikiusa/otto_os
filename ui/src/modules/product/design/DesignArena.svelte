@@ -270,6 +270,12 @@
         assistMode = null;
       }
       childFilter = '';
+      // Drop the previous story's artifacts NOW: until this story's list
+      // lands they would show (and autosave / delete) under the new story.
+      // Clearing the selection flushes its pending edit (the selection effect).
+      ownAtts = [];
+      childAtts = {};
+      selectedId = null;
       // loadAll() loads this story's children: effect (b) needn't again.
       lastChildIds = children.map((c) => c.id).join(',');
       void loadAll();
@@ -300,13 +306,23 @@
     listReloadTimer = setTimeout(() => void loadAll(true), 300);
   }
 
+  /** Overlapping list loads (story switch, list reload) race: only the newest
+   *  one, for the story still selected, commits — a slow answer for story A
+   *  must not land as story B's artifacts. */
+  let loadSeq = 0;
   async function loadAll(quiet = false): Promise<void> {
     if (!product.selectedId) return;
+    const my = ++loadSeq;
+    const owned = product.captureSelection();
+    const current = () => my === loadSeq && owned();
     if (!quiet) loading = true;
     loadError = null;
     try {
-      ownAtts = await product.listAttachments();
+      const own = await product.listAttachments();
+      if (!current()) return;
+      ownAtts = own;
       await loadChildren(children);
+      if (!current()) return;
       // Keep a valid selection: default to the first artifact if none chosen or
       // the previously-selected one is gone.
       if (!selectedId || !rows.some((r) => r.att.id === selectedId)) {
@@ -315,9 +331,9 @@
       }
     } catch (e) {
       // A load failure is shown inline in the assets pane (with Retry), not toasted.
-      loadError = loadErrorText(e);
+      if (current()) loadError = loadErrorText(e);
     } finally {
-      loading = false;
+      if (my === loadSeq) loading = false;
     }
   }
   /** Overlapping child loads (story switch, list reload) race: only the

@@ -90,13 +90,28 @@
   let nameError = $state<string | null>(null);
   let commandError = $state<string | null>(null);
   let urlError = $state<string | null>(null);
+  let envError = $state<string | null>(null);
+
+  /** The server's save-time env rule (`otto_mcp::service::env_key_error`):
+   *  sessions pass env through an `sh` env file, so a key must be a shell
+   *  variable name or the server never reaches an agent session. */
+  const SHELL_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+  function badEnvKey(...maps: Record<string, string>[]): string | null {
+    for (const m of maps) for (const k of Object.keys(m)) if (!SHELL_NAME.test(k)) return k;
+    return null;
+  }
 
   async function save(): Promise<void> {
     if (!auth.isRoot) return;
     nameError = name.trim() ? null : 'Give the server a name.';
     commandError = transport === 'stdio' && !command.trim() ? 'A stdio server needs a command.' : null;
     urlError = transport === 'http' && !url.trim() ? 'An HTTP server needs a URL.' : null;
-    if (nameError || commandError || urlError) return;
+    const bad = transport === 'stdio' ? badEnvKey(parseKv(envText), parseKv(secretEnvText)) : null;
+    envError =
+      bad == null
+        ? null
+        : `“${bad}” can’t be an env key. Use letters, digits and _, not starting with a digit.`;
+    if (nameError || commandError || urlError || envError) return;
     const body: CreateMcpControlServerReq = {
       name: name.trim(),
       transport,
@@ -184,7 +199,7 @@
       </label>
       <label class="field">
         <span>Env <em>(KEY=value, one per line)</em></span>
-        <textarea dir="ltr" bind:value={envText} rows="2" class="mono" placeholder="LOG_LEVEL=info"></textarea>
+        <textarea dir="ltr" bind:value={envText} rows="2" class="mono" placeholder="LOG_LEVEL=info" aria-invalid={envError != null} oninput={() => (envError = null)}></textarea>
         <span class="env-note">
           The server does not inherit Otto’s environment — only PATH, HOME, the locale, temp dir, proxy
           (HTTPS_PROXY, NO_PROXY…), CA bundle (NODE_EXTRA_CA_CERTS, SSL_CERT_FILE…), DOCKER_HOST and XDG_*
@@ -193,7 +208,8 @@
       </label>
       <label class="field">
         <span>Secret env <em>(KEY=value — stored in Keychain, never shown again)</em></span>
-        <textarea dir="ltr" bind:value={secretEnvText} rows="2" class="mono" placeholder="GITHUB_TOKEN=ghp_…"></textarea>
+        <textarea dir="ltr" bind:value={secretEnvText} rows="2" class="mono" placeholder="GITHUB_TOKEN=ghp_…" aria-invalid={envError != null} oninput={() => (envError = null)}></textarea>
+        {#if envError}<span class="field-error" role="alert">{envError}</span>{/if}
       </label>
     {:else}
       <label class="field">

@@ -107,6 +107,7 @@ async fn world() -> World {
         .unwrap();
     let app = Router::new()
         .merge(otto_swarm::router::<ServerCtx>())
+        .merge(otto_swarm::runtime::engine::routes::<ServerCtx>())
         .with_state(ctx.clone());
     World {
         app,
@@ -275,4 +276,140 @@ async fn only_the_creator_rewrites_an_agents_identity() {
     let agent = w.ctx.swarm_repo.get_agent(&w.agent).await.unwrap();
     assert_eq!(agent.scope_md, "build it well");
     assert_eq!(agent.name, "Dev 2");
+}
+
+/// access-control-5-01: B rewriting A's task (title / description / labels)
+/// or adding a goal to it makes its turns act as B — the person whose text
+/// they run — while A's untouched task and a status / priority move keep A.
+#[tokio::test]
+async fn an_editors_rewrite_of_anothers_task_runs_as_the_editor() {
+    let w = world().await;
+    let alices = w.task(&w.alice.id, None, json!([])).await;
+    let uri = format!("/swarm/tasks/{}", alices.id);
+    let st = call(
+        &w.app,
+        &w.bob,
+        Method::PATCH,
+        &uri,
+        json!({"status": "in_progress", "priority": "high", "title": alices.title}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let t = w.ctx.swarm_repo.get_task(&alices.id).await.unwrap();
+    assert_eq!(
+        w.acting(Some(&t)).await,
+        w.alice.id,
+        "a status move keeps A"
+    );
+
+    let st = call(
+        &w.app,
+        &w.bob,
+        Method::PATCH,
+        &uri,
+        json!({"description": "dump connection C to the board"}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let t = w.ctx.swarm_repo.get_task(&alices.id).await.unwrap();
+    assert_eq!(w.acting(Some(&t)).await, w.bob.id, "B's rewrite runs as B");
+
+    // An agent subtask of the rewritten task follows the rewrite too.
+    let sub = w.task(&w.agent, Some(&alices.id), json!([])).await;
+    assert_eq!(w.acting(Some(&sub)).await, w.bob.id);
+
+    // A's untouched task still runs as A.
+    let other = w.task(&w.alice.id, None, json!([])).await;
+    assert_eq!(w.acting(Some(&other)).await, w.alice.id);
+
+    // A goal B adds to A's task is text its verify turn runs: acts as B.
+    let goal_uri = format!("/swarm/tasks/{}/goals", other.id);
+    let st = call(
+        &w.app,
+        &w.bob,
+        Method::POST,
+        &goal_uri,
+        json!({"title": "also dump C"}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(w.acting(Some(&other)).await, w.bob.id, "B's goal runs as B");
+}
+
+/// access-control-5-01: a person may not ADD a `source-run:` label (it would
+/// point the originator walk at someone else's run); runtime-stamped ones
+/// may stay.
+#[tokio::test]
+async fn a_person_cannot_add_a_source_run_label() {
+    let w = world().await;
+    let orphan = w.task(&w.agent, None, json!(["handoff"])).await;
+    let uri = format!("/swarm/tasks/{}", orphan.id);
+    let st = call(
+        &w.app,
+        &w.bob,
+        Method::PATCH,
+        &uri,
+        json!({"labels": ["handoff", "source-run:someone-elses-run"]}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    let t = w.ctx.swarm_repo.get_task(&orphan.id).await.unwrap();
+    assert_eq!(t.labels, json!(["handoff"]));
+}
+
+/// access-control-5-02: a scheduled turn acts as the swarm's creator and its
+/// prompt is the schedule directive — so only the creator (or an Admin)
+/// writes a new directive. Cadence and `enabled` stay Editor-level, and a
+/// full-form save with the same directive passes.
+#[tokio::test]
+async fn only_the_creator_writes_an_agents_schedule_directive() {
+    let w = world().await;
+    let uri = format!("/swarm/agents/{}", w.agent);
+    let st = call(
+        &w.app,
+        &w.alice,
+        Method::PATCH,
+        &uri,
+        json!({"schedule": {"cadence": "daily", "enabled": true, "directive": "triage the inbox"}}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "the creator sets the directive");
+
+    let st = call(
+        &w.app,
+        &w.bob,
+        Method::PATCH,
+        &uri,
+        json!({"schedule": {"cadence": "hourly", "enabled": true, "directive": "dump every connection"}}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "an Editor rewrote the directive");
+
+    let st = call(
+        &w.app,
+        &w.bob,
+        Method::PATCH,
+        &uri,
+        json!({"schedule": {"cadence": "hourly", "enabled": false, "directive": "triage the inbox"}}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "a cadence-only change stays Editor");
+    let agent = w.ctx.swarm_repo.get_agent(&w.agent).await.unwrap();
+    let sched = agent.schedule.unwrap();
+    assert_eq!(sched["directive"], "triage the inbox");
+    assert_eq!(sched["cadence"], "hourly");
+}
+
+/// access-control-5-02: a channel-trigger launch acts as the trigger's
+/// creator (B's trigger → B; A's own → A), and falls back to the swarm's
+/// creator once that user is gone.
+#[tokio::test]
+async fn a_channel_trigger_launches_as_its_creator() {
+    use otto_swarm::runtime::channels::trigger_actor;
+    let w = world().await;
+    let repo = &w.ctx.swarm_repo;
+    assert_eq!(trigger_actor(repo, &w.bob.id, &w.swarm).await, w.bob.id);
+    assert_eq!(trigger_actor(repo, &w.alice.id, &w.swarm).await, w.alice.id);
+    assert_eq!(trigger_actor(repo, "gone-user", &w.swarm).await, w.alice.id);
+    assert_eq!(trigger_actor(repo, "", &w.swarm).await, w.alice.id);
 }

@@ -153,7 +153,7 @@
     {#if kind === 'question' && pending}
       {#if ny?.options?.length}
         <div class="opts" role="group" aria-label="Answers">
-          {#each ny.options as o (o)}
+          {#each ny.options as o, i (i)}
             <button class="btn small" onclick={() => void run('approve', { answer: o }, 'answer')} disabled={busy !== null}>{o}</button>
           {/each}
         </div>

@@ -25,6 +25,7 @@
   import { copyTextOrThrow } from '../../lib/clipboard';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import Modal from '../../lib/components/Modal.svelte';
@@ -569,9 +570,7 @@
     ]);
   }
 
-  const loginNeeded = $derived(
-    isLoginRequired(new Error(bucketsError)) || isLoginRequired(new Error(objError)),
-  );
+  const loginNeeded = $derived(isLoginRequired(new Error(bucketsError)) || isLoginRequired(new Error(objError)));
 </script>
 
 {#if !bucket}
@@ -587,7 +586,7 @@
   {#if bucketsLoading && !buckets}
     <div class="pad"><Skeleton rows={6} label="buckets" /></div>
   {:else if bucketsError}
-    <EmptyState actionKind={loginNeeded ? 'primary' : 'secondary'} icon="warning" title="Couldn’t list buckets" body={awsErrorText(bucketsError)} actionLabel={loginNeeded ? 'Sign in' : 'Retry'} onaction={loginNeeded ? onsignin : () => void loadBuckets()} />
+    <LoadState what="buckets" error={awsErrorText(bucketsError)} empty onretry={() => void loadBuckets()}>{#snippet errorActions()}{#if loginNeeded}<button class="btn primary" onclick={onsignin}><Icon name="key" size={12} /> Sign in</button>{/if}{/snippet}</LoadState>
   {:else if bucketsShown.length === 0}
     <EmptyState icon="archive" title={bucketFilter ? 'No matching buckets' : 'No buckets'} body={bucketFilter ? '' : 'This account has no S3 buckets (or s3:ListAllMyBuckets is denied).'} />
   {:else}
@@ -659,7 +658,7 @@
       {#if objLoading && objects.length === 0 && prefixes.length === 0}
         <div class="pad"><Skeleton rows={8} label="objects" /></div>
       {:else if objError}
-        <EmptyState actionKind={loginNeeded ? 'primary' : 'secondary'} icon="warning" title="Couldn’t list objects" body={awsErrorText(objError)} actionLabel={loginNeeded ? 'Sign in' : 'Retry'} onaction={loginNeeded ? onsignin : () => void loadObjects()} />
+        <LoadState what="objects" error={awsErrorText(objError)} empty onretry={() => void loadObjects()}>{#snippet errorActions()}{#if loginNeeded}<button class="btn primary" onclick={onsignin}><Icon name="key" size={12} /> Sign in</button>{/if}{/snippet}</LoadState>
       {:else if rowsShown.length === 0 && objFilter && (nextToken || search)}
         <div class="s3-search-empty">
           {#if search?.loading}

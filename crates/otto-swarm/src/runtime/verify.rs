@@ -1732,6 +1732,7 @@ mod tests {
             .update_task(
                 &task.id,
                 serde_json::from_value(json!({"status":"cancelled"})).unwrap(),
+                "editor",
             )
             .await
             .unwrap();

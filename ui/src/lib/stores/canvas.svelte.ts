@@ -23,7 +23,7 @@ import type {
   CanvasSceneSummary,
   CanvasSceneVersion,
   Scene,
-} from '../../modules/canvas/types';
+} from '../canvas/types';
 
 /** One inline conversation turn with the canvas agent (client-side). */
 export interface CanvasTurn {

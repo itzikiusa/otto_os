@@ -696,27 +696,47 @@ fn is_shell_name(s: &str) -> bool {
 /// as `/bin/sh -c ENV_EXEC_SCRIPT <file> <command> <args…>`, the same
 /// "secrets live in a private file" rule as the `otto` creds file.
 ///
-/// Servers that can't be delivered — a name that isn't a bare TOML key, an env
-/// key that isn't a shell name, an env file that couldn't be written — are
-/// skipped with a warning rather than failing the spawn, and are left out of
-/// [`CodexUserServers::delivered`].
+/// A server whose name isn't a bare TOML key ("Linear MCP", "a.b") is attached
+/// under a codex-safe key with each other character replaced by `_`
+/// ([`codex_server_key`]): codex splits `-c` override paths on every `.` and
+/// accepts only `[A-Za-z0-9_-]` server names, so quoting the segment would not
+/// deliver it. Servers that still can't be delivered — a key that collides
+/// with another server's, an env key that isn't a shell name, an env file that
+/// couldn't be written — are skipped with a warning rather than failing the
+/// spawn, and are left out of [`CodexUserServers::delivered`] (which keeps
+/// the Otto server names, not the codex keys).
 pub fn codex_user_server_args(
     servers: &[UserMcpServer],
     mut env_file: impl FnMut(&UserMcpServer) -> Result<PathBuf, String>,
 ) -> CodexUserServers {
     let mut out = CodexUserServers::default();
+    // Bare names claim their key first, so a sanitized name never takes a
+    // key that a server literally named that way would need.
+    let mut used: std::collections::HashSet<String> = servers
+        .iter()
+        .filter(|s| is_bare_toml_key(&s.name))
+        .map(|s| s.name.clone())
+        .chain([SERVER_KEY.to_string(), OTTO_TOOLS_KEY.to_string()])
+        .collect();
     for s in servers {
         if s.name == SERVER_KEY || s.name == OTTO_TOOLS_KEY {
             continue; // reserved for Otto's managed entries
         }
-        if !is_bare_toml_key(&s.name) {
-            tracing::warn!(
-                server = %s.name,
-                "codex MCP: server name is not a bare TOML key (letters, digits, '_' and '-' only); \
-                 not attached to this codex session"
-            );
-            continue;
-        }
+        let key = if is_bare_toml_key(&s.name) {
+            s.name.clone()
+        } else {
+            match codex_server_key(&s.name).filter(|k| used.insert(k.clone())) {
+                Some(k) => k,
+                None => {
+                    tracing::warn!(
+                        server = %s.name,
+                        "codex MCP: server name has no free codex-safe key (letters, digits, \
+                         '_' and '-'); not attached to this codex session"
+                    );
+                    continue;
+                }
+            }
+        };
         let (command, args) = if s.env.is_empty() {
             (s.command.clone(), s.args.clone())
         } else {
@@ -745,23 +765,40 @@ pub fn codex_user_server_args(
             ("/bin/sh".to_string(), args)
         };
         out.args.push("-c".to_string());
-        out.args.push(format!(
-            "mcp_servers.{}.command={}",
-            s.name,
-            toml_str(&command)
-        ));
+        out.args
+            .push(format!("mcp_servers.{key}.command={}", toml_str(&command)));
         out.args.push("-c".to_string());
         let args: Vec<String> = args.iter().map(|a| toml_str(a)).collect();
         out.args
-            .push(format!("mcp_servers.{}.args=[{}]", s.name, args.join(",")));
+            .push(format!("mcp_servers.{key}.args=[{}]", args.join(",")));
         // A user server states no timeout of its own: a generous default
         // instead of codex's 60 s (a slow downstream search must not be cut).
         out.args.push("-c".to_string());
         out.args
-            .push(codex_tool_timeout(&s.name, USER_SERVER_TOOL_TIMEOUT_SECS));
+            .push(codex_tool_timeout(&key, USER_SERVER_TOOL_TIMEOUT_SECS));
         out.delivered.push(s.name.clone());
     }
     out
+}
+
+/// The codex `mcp_servers.<key>` segment for a server name that isn't a bare
+/// TOML key: every character outside `[A-Za-z0-9_-]` becomes `_` ("Linear
+/// MCP" → `Linear_MCP`). `None` when nothing but separators would remain.
+fn codex_server_key(name: &str) -> Option<String> {
+    let key: String = name
+        .trim()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    key.chars()
+        .any(|c| c.is_ascii_alphanumeric())
+        .then_some(key)
 }
 
 /// Single-quote `v` for a POSIX shell assignment (`'` becomes `'\''`).
@@ -1531,6 +1568,87 @@ mod tests {
         let _ = std::fs::remove_file(env_file);
     }
 
+    /// C3: agy's `.agents/mcp_config.json` stays out of `git status` in a real
+    /// repo AND in a linked worktree (whose `info/exclude` is the common dir's,
+    /// i.e. `git rev-parse --git-path info/exclude`): appended once however
+    /// many spawns reconcile, the user's own exclude rules kept byte-for-byte,
+    /// and `.gitignore` never created or touched.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // sync test: runs git to completion
+    fn agy_launcher_is_git_excluded_once_in_repos_and_worktrees() {
+        let git = |cwd: &Path, args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(cwd)
+                .args([
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@t",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+            String::from_utf8(out.stdout).unwrap()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q"]);
+        std::fs::write(repo.join("README"), "x").unwrap();
+        git(&repo, &["add", "README"]);
+        git(&repo, &["commit", "-qm", "init"]);
+        let wt = dir.path().join("wt");
+        git(&repo, &["worktree", "add", "-q", wt.to_str().unwrap()]);
+        let exclude = PathBuf::from(
+            git(
+                &wt,
+                &[
+                    "rev-parse",
+                    "--path-format=absolute",
+                    "--git-path",
+                    "info/exclude",
+                ],
+            )
+            .trim(),
+        );
+        let user_rules = "# my rules\n*.log\n";
+        std::fs::write(&exclude, user_rules).unwrap();
+
+        let cfg = ManagedMcpConfig {
+            user_servers: Some(vec![user("jira")]),
+            ..Default::default()
+        };
+        for root in [&repo, &wt] {
+            for _ in 0..3 {
+                reconcile_managed_servers_agy(root.to_str().unwrap(), &cfg).unwrap();
+            }
+            assert!(agy_mcp_path(root.to_str().unwrap()).exists());
+            let status = git(root, &["status", "--porcelain", "--untracked-files=all"]);
+            assert!(
+                !status.contains(".agents"),
+                "untracked launcher in {}: {status}",
+                root.display()
+            );
+            assert!(
+                !root.join(".gitignore").exists(),
+                ".gitignore must never be touched"
+            );
+        }
+        let body = std::fs::read_to_string(&exclude).unwrap();
+        assert!(body.starts_with(user_rules), "{body}");
+        assert_eq!(
+            body.lines()
+                .filter(|l| *l == "/.agents/mcp_config.json")
+                .count(),
+            1,
+            "{body}"
+        );
+    }
+
     /// grok user-server reconcile: enabled servers land as tables tracked by
     /// the `otto_managed_servers` marker; a disable removes them while the
     /// user's own tables and the managed `otto` table survive.
@@ -1597,28 +1715,45 @@ mod tests {
         assert!(args[3].contains(r#"/p\\a"#), "got {}", args[3]);
     }
 
-    /// codex user overrides mirror the .mcp.json entries; reserved and
-    /// non-bare-key names are skipped rather than failing the spawn, and only
-    /// the servers actually emitted are reported as delivered.
+    /// codex user overrides mirror the .mcp.json entries; reserved names are
+    /// skipped, a non-bare name ("Linear MCP", "a.b") is attached under its
+    /// codex-safe key instead of being silently dropped, a key no server can
+    /// claim is skipped rather than failing the spawn, and only the servers
+    /// actually emitted are reported as delivered (by their Otto names).
     #[test]
     fn codex_user_server_args_builds_and_skips() {
         let mut weird = user("has space");
         weird.command = "x".into();
-        let out = codex_user_server_args(&[user("jira"), weird, user("otto")], |_| {
+        let out = codex_user_server_args(
+            &[
+                user("jira"),
+                weird,
+                user("otto"),
+                user("has_space"), // bare, so it keeps its key
+                user(" . "),       // nothing codex-safe left
+            ],
+            |_| panic!("no env, no env file"),
+        );
+        let jira = [
+            "-c",
+            "mcp_servers.jira.command=\"node\"",
+            "-c",
+            "mcp_servers.jira.args=[\"x.js\"]",
+            "-c",
+            "mcp_servers.jira.tool_timeout_sec=600",
+        ];
+        assert_eq!(out.args[..6], jira.map(String::from));
+        // "has space" collides with the bare "has_space": the bare one wins.
+        assert_eq!(out.delivered, vec!["jira", "has_space"]);
+        assert_eq!(out.args.len(), 12, "{:?}", out.args);
+
+        let out = codex_user_server_args(&[user("Linear MCP"), user("a.b")], |_| {
             panic!("no env, no env file")
         });
-        assert_eq!(
-            out.args,
-            vec![
-                "-c".to_string(),
-                "mcp_servers.jira.command=\"node\"".to_string(),
-                "-c".to_string(),
-                "mcp_servers.jira.args=[\"x.js\"]".to_string(),
-                "-c".to_string(),
-                "mcp_servers.jira.tool_timeout_sec=600".to_string(),
-            ]
-        );
-        assert_eq!(out.delivered, vec!["jira"]);
+        assert_eq!(out.delivered, vec!["Linear MCP", "a.b"]);
+        assert_eq!(out.args[1], "mcp_servers.Linear_MCP.command=\"node\"");
+        assert_eq!(out.args[7], "mcp_servers.a_b.command=\"node\"");
+        assert!(out.args.iter().all(|a| !a.contains("Linear MCP")));
     }
 
     /// A user server's env (Keychain secrets included) never reaches codex's

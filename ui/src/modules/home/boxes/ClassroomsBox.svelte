@@ -24,7 +24,7 @@
   // The scene pauses whenever the widget is scrolled off screen, its space is
   // inactive or the document is hidden; a lost WebGL context remounts itself
   // (twice) before it asks for Retry.
-  import { onDestroy, untrack } from 'svelte';
+  import { onDestroy, tick as settle, untrack } from 'svelte';
   import { isNativePane } from '../../../lib/desktop';
   import { observeNativePane } from '../../../lib/nativePane';
   import Icon from '../../../lib/components/Icon.svelte';
@@ -43,10 +43,10 @@
   import { SCRATCH_ID } from '../../../lib/stores/sessionBuckets';
   import type { Session, SessionScreen } from '../../../lib/api/types';
   import { home, type HomeBox } from '../home.svelte';
-  import { livePoll, type Poller } from './poll';
+  import { freshness, livePoll, type Poller } from './poll';
   import { attentionQueue, buildSchool, busiestRoom, type Kid } from '../school/model';
   import { kickOut, release, sendToDetention } from '../school/actions';
-  import { pollScreens, visibleLines, type ScreenFeed } from '../school/screens';
+  import { POLL_MS, pollScreens, roomScreensKey, throttledNow, visibleLines, type ScreenFeed } from '../school/screens';
   import { mountSchool, webglAvailable, type SchoolHandle, type SchoolPick, type SchoolView } from '../school/scene';
   import HoverTag from './classrooms/HoverTag.svelte';
   import KidCard from './classrooms/KidCard.svelte';
@@ -61,8 +61,11 @@
     zoomed: boolean;
     tick: number;
     active?: boolean;
+    /** This is the grid copy and the box is zoomed: release the 3D scene (the
+     *  zoomed copy mounts its own) so two WebGL schools never coexist. */
+    zoomedAway?: boolean;
   }
-  let { box, viewId, zoomed, tick, active: spaceActive = true }: Props = $props();
+  let { box, viewId, zoomed, tick, active: spaceActive = true, zoomedAway = false }: Props = $props();
   // A hidden native child can still report document.hidden=false. Its owner
   // publishes visibility explicitly; pause both rendering and live screen IO.
   let nativeVisible = $state(true);
@@ -76,9 +79,11 @@
   $effect(() => {
     const el = rootEl;
     if (!el || typeof IntersectionObserver === 'undefined') return;
+    // A margin so a box hovering at the viewport edge doesn't flap `onScreen`
+    // (and with it the poller, the scene's rAF and the screen reads).
     const io = new IntersectionObserver((entries) => {
       for (const e of entries) inView = e.isIntersecting;
-    });
+    }, { rootMargin: '120px 0px' });
     io.observe(el);
     return () => io.disconnect();
   });
@@ -117,9 +122,12 @@
   }
 
   let poller: Poller | null = null;
+  // Every Home space stays mounted: a slide back, a scroll back into view or an
+  // un-zoom must not refetch ~1,000 sessions when the last load is still fresh.
+  const fresh = freshness(load);
   $effect(() => {
     if (!onScreen) return;
-    const p = livePoll(load, 30_000, ['session_created', 'session_removed', 'session_archive_changed', 'session_renamed'], { immediate: true });
+    const p = livePoll(fresh.run, 30_000, ['session_created', 'session_removed', 'session_archive_changed', 'session_renamed'], { immediate: fresh.start('', 30_000) });
     poller = p;
     return () => p.stop();
   });
@@ -179,7 +187,7 @@
   $effect(() => {
     const el = host;
     void sceneAttempt;
-    if (!el || mode !== '3d') return;
+    if (!el || mode !== '3d' || zoomedAway) return;
     let dead = false;
     let h: SchoolHandle | null = null;
     sceneError = '';
@@ -269,10 +277,12 @@
     if (stage) (stage as unknown as { __ottoSchool?: SchoolHandle | null }).__ottoSchool = handle;
   });
 
-  const openRoomModel = $derived.by(() => {
-    const v = view;
-    return v.kind === 'corridor' ? null : (school.rooms.find((r) => r.id === v.roomId) ?? null);
-  });
+  /** The open room's identity. The live-screen poller keys on this, never on the
+   *  room object: `buildSchool` re-allocates rooms on every status event. */
+  const openRoomId = $derived(view.kind === 'corridor' ? null : view.roomId);
+  const openRoomModel = $derived(openRoomId === null ? null : (school.rooms.find((r) => r.id === openRoomId) ?? null));
+  /** Changes only when a monitor's title / provider / character / pose does. */
+  const openRoomScreens = $derived(roomScreensKey(openRoomModel));
 
   // ── Live screens ─────────────────────────────────────────────────────────
   const feeds = new Map<string, ScreenFeed>();
@@ -281,14 +291,19 @@
   function pushScreen(k: Kid): void {
     handle?.setScreen(k.id, { title: k.title, provider: k.provider, character: k.character, pose: k.pose, feed: feeds.get(k.id) ?? null });
   }
+  /** Status-driven early refresh of the screens, at most once per POLL_MS. */
+  let nudgeScreens: (() => void) | null = null;
   $effect(() => {
-    const r = openRoomModel;
-    if (!handle || !r) return;
-    for (const k of r.kids) pushScreen(k);
+    void openRoomScreens;
+    if (!handle || !openRoomId) return;
+    untrack(() => {
+      for (const k of openRoomModel?.kids ?? []) pushScreen(k);
+      nudgeScreens?.();
+    });
   });
   $effect(() => {
     const h = handle;
-    if (!h || !openRoomModel || !onScreen) return;
+    if (!h || !openRoomId || !onScreen) return;
     const p = pollScreens({
       wanted: () =>
         h
@@ -308,7 +323,11 @@
         if (k) pushScreen(k);
       },
     });
-    return () => p.stop();
+    nudgeScreens = throttledNow(p, POLL_MS);
+    return () => {
+      nudgeScreens = null;
+      p.stop();
+    };
   });
 
   // ── Overlay (HTML: crisp text, ≥ 11 px) ──────────────────────────────────
@@ -501,8 +520,10 @@
   // ── Actions ──────────────────────────────────────────────────────────────
   async function open(k: Kid | null | undefined): Promise<void> {
     if (!k) return;
+    // An archived session only opens by un-archiving it: never do that as a side
+    // effect of "open". Select it instead; its card carries the explicit Release.
     if (k.detention) {
-      await free(k);
+      selected = k.id;
       return;
     }
     if (k.workspaceId === SCRATCH_ID || k.workspaceId === ws.currentId) ws.navigateToSession(k.id);
@@ -572,6 +593,21 @@
     )
       await poller?.now();
   }
+
+  /** Closing the card (or an action that takes the kid away) unmounts the focused
+   *  button: land focus back on the stage, the 3D view's key surface. */
+  async function refocusStage(): Promise<void> {
+    await settle();
+    if (!cardEl) stage?.focus();
+  }
+  function closeCard(): void {
+    selected = null;
+    void refocusStage();
+  }
+  const fromCard = (action: (k: Kid) => Promise<void>) => async (k: Kid): Promise<void> => {
+    await action(k);
+    await refocusStage();
+  };
 
   function checkOn(k: Kid): void {
     handle?.inspect(k.id);
@@ -660,7 +696,7 @@
           <NeedsYouQueue {queue} {queueLabel} bind:queueOpen {view} {busiest} {handle} {open} {goTo} />
           <p class="hint">{hint}</p>
           {#if selKid && view.kind !== 'corridor'}
-            <KidCard {selKid} {view} {handle} bind:el={cardEl} onclose={() => (selected = null)} {open} {free} {checkOn} {detention} {kick} />
+            <KidCard {selKid} {view} {handle} bind:el={cardEl} onclose={closeCard} {open} {free} {checkOn} detention={fromCard(detention)} kick={fromCard(kick)} />
           {/if}
         {:else if sceneError}
           <div class="scene-state">
@@ -682,7 +718,7 @@
     <!-- The accessible companion: every classroom and kid as real buttons.
          Visible in List view; in 3D it stays keyboard / screen-reader
          reachable, and activating a row walks into that room onto the kid. -->
-    <SchoolList {mode} {empty} {school} {queue} {handle} bind:memberPages {open} {goTo} {kidMenu} {showIn3d} />
+    <SchoolList {mode} {empty} {school} {queue} {handle} bind:memberPages {open} {free} {goTo} {kidMenu} {showIn3d} />
   {/if}
 </div>
 

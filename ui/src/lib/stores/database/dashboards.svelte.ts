@@ -48,6 +48,19 @@ export class DbDashboardsStore {
     this.dashboards.find((d) => d.id === this.selectedDashboardId) ?? null,
   );
 
+  /** Column names of each widget's last successful run (WidgetCard records
+   *  them). The edit sheet offers THESE for the axes — never the Query tab's
+   *  result, which holds some other statement. Per session, not persisted. */
+  widgetColumns: Record<Id, string[]> = $state({});
+
+  /** Record a widget's last-run column names (distinct, in result order). */
+  noteWidgetColumns(id: Id, names: readonly string[]): void {
+    const next = [...new Set(names)];
+    const prev = this.widgetColumns[id];
+    if (prev && prev.length === next.length && prev.every((n, i) => n === next[i])) return;
+    this.widgetColumns = { ...this.widgetColumns, [id]: next };
+  }
+
   // ── Dashboards ────────────────────────────────────────────────────────────
 
   /** In-flight dashboards(+widgets) load per workspace + access epoch, shared

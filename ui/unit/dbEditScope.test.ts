@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
-import * as dialect from '../src/modules/database/sql-dialect.ts';
+import * as dialect from '../src/lib/database/sql-dialect.ts';
 
 // Grid edits, "Copy as INSERT" and the post-apply refresh resolve the database
 // a result RAN in from the tab's `ran_node` through this helper. It must mirror

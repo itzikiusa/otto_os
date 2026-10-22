@@ -443,7 +443,9 @@ offset per the mode, and writes them back.
   while the group has no live members. A reset of a group whose state is not
   `Empty` or `Dead` (for example `Stable` or `PreparingRebalance`) is refused
   with **`409`** `consumer group <g> is <state>; stop its consumers first`.
-  The dry-run still returns the plan, plus `warning` with the same text.
+  The dry-run still returns the plan, plus `warning` with the same text; the
+  Groups tab shows that warning above the preview and keeps **Reset** off
+  while it holds.
 - **Audit:** every committed reset writes a `reset_group_offsets` audit row,
   whether it succeeded or failed, with `outcome` (`ok` | `failed`), the error
   and `partition_errors` (`{topic, partition, error}`). A failed commit is not
@@ -525,7 +527,11 @@ Replays additionally persist per-message evidence (`broker_replays`, migration
 2. The acknowledged evidence is checkpointed every 100 messages.
 3. The row ends `done`, or `failed` when a send stopped the run; the final
    `replay` audit row follows.
-4. A row still `running` when the daemon starts again (quit, crash or deploy
+4. The replay runs in its own task: closing the window or dropping the
+   request no longer stops it mid-way — it finishes, records its final status
+   and writes the `replay` audit row. Should the loop still be cut short in
+   process, the row is marked `interrupted` with every acknowledged message.
+5. A row still `running` when the daemon starts again (quit, crash or deploy
    mid-replay) is marked `interrupted` (migration `0193`). Its evidence shows
    how far the replay got, up to the last checkpoint; messages after it may
    also have been sent. Rows from before migration `0193` read as `done`.

@@ -410,7 +410,7 @@ const INTERVAL_ALLOW = new Set([
   'src/modules/browser/live/RemoteLiveView.svelte', // fps meter
   'src/modules/database/ResultsGrid.svelte', // running-query elapsed clock
   'src/modules/rooms/RoomAnnotations.svelte', // local expiry clock; effect cleanup clears it
-  'src/modules/rooms/room-client.ts', // WebSocket heartbeat; detach/close clears it
+  'src/lib/relaySocket.ts', // relay WebSocket heartbeat (rooms + games); detach/close clears it
   'src/modules/rooms/room-media.ts', // audio acknowledgement + capture geometry; leave/stop/dispose clear timers
   'src/modules/rooms/recap-capture.ts', // consent-epoch media clock; bounded sample/upload queues, reset/finish stop it
 ]);

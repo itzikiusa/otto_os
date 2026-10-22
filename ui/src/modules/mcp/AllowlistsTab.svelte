@@ -3,6 +3,7 @@
   // A `deny` always wins; a tool-less entry covers the whole server; with no
   // match the server's `default_tool_access` applies. Edited as a grid, saved in
   // one bulk PUT (the server replaces the whole workspace allowlist).
+  import { tick } from 'svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { toastError } from '../../lib/toastError';
   import LoadState from '../../lib/components/LoadState.svelte';
@@ -55,8 +56,24 @@
   function addRow(): void {
     rows = [...rows, { server_id: servers[0]?.id ?? '', tool_name: '', mode: 'allow' }];
   }
-  function removeRow(i: number): void {
+  let grid = $state<HTMLElement | null>(null);
+  let addBtn = $state<HTMLButtonElement | null>(null);
+  /** "github → create_issue" / "github (whole server)": names a row's controls,
+   *  so a screen-reader user knows which entry a Remove button removes. */
+  function rowName(r: Row): string {
+    const server = servers.find((s) => s.id === r.server_id)?.name ?? 'no server';
+    return r.tool_name.trim() ? `${server} → ${r.tool_name.trim()}` : `${server} (whole server)`;
+  }
+  /** Remove a row, then keep focus in the grid: the row now at that index, the
+   *  previous one, or "Add entry" once the list is empty (WCAG 2.4.3 — the
+   *  focused button was just destroyed). */
+  async function removeRow(i: number): Promise<void> {
     rows = rows.filter((_, idx) => idx !== i);
+    await tick();
+    const next = Math.min(i, rows.length - 1);
+    const target =
+      next >= 0 ? grid?.querySelector<HTMLButtonElement>(`[data-remove-row="${next}"]`) : null;
+    (target ?? addBtn)?.focus();
   }
 
   async function save(): Promise<void> {
@@ -87,7 +104,7 @@
       match falls back to the server’s default tool access.
     </span>
     <span class="grow"></span>
-    <button class="btn small" onclick={addRow} disabled={servers.length === 0}>
+    <button class="btn small" bind:this={addBtn} onclick={addRow} disabled={servers.length === 0}>
       <Icon name="plus" size={13} /> Add entry
     </button>
     <button class="btn primary small" onclick={() => void save()} disabled={saving}>
@@ -102,7 +119,7 @@
       {#snippet emptyView()}
         <EmptyState icon="eye" title="No allowlist entries yet" body="Without any, each server’s default tool access applies." actionLabel="Add an entry" actionIcon="plus" actionKind="secondary" onaction={addRow} />
       {/snippet}
-    <div class="grid">
+    <div class="grid" bind:this={grid}>
       <div class="thead">
         <span>Server</span>
         <span>Tool <em>(blank = whole server)</em></span>
@@ -121,7 +138,7 @@
             <option value="allow">Allow</option>
             <option value="deny">Deny</option>
           </select>
-          <button class="icon danger" onclick={() => removeRow(i)} title="Remove entry" aria-label="Remove entry">
+          <button class="icon danger" data-remove-row={i} onclick={() => void removeRow(i)} title="Remove entry" aria-label="Remove entry {rowName(r)}">
             <Icon name="trash" size={14} />
           </button>
         </div>

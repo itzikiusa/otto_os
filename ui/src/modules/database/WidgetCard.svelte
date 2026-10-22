@@ -4,6 +4,8 @@
   // interval set per-dashboard) and renders the result via Chart per its viz.
   import Icon from '../../lib/components/Icon.svelte';
   import Chart from './Chart.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import { database } from '../../lib/stores/database.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
@@ -60,13 +62,16 @@
       if (r) {
         result = r; // only a SUCCESS replaces the data
         error = null;
+        // The edit sheet maps axes from THIS widget's columns.
+        database.dash.noteWidgetColumns(widget.id, r.columns.map((c) => c.name));
         return 'ok';
       }
-      error = 'Query failed';
+      // runWidget already toasted the cause; the card keeps a short inline one.
+      error = 'The query failed.';
       return 'failed';
     } catch (e) {
       if (isAbortError(e) || signal?.aborted) return 'aborted';
-      error = e instanceof Error ? e.message : String(e);
+      error = loadErrorText(e);
       return 'failed';
     } finally {
       if (token === runToken) loading = false;
@@ -165,18 +170,12 @@
     {/if}
   </div>
   <div class="wc-body">
-    {#if error && !result}
-      <div class="wc-error">{error}</div>
-    {:else if loading && !result}
-      <div class="wc-loading"><Icon name="refresh" size={14} /></div>
-    {:else}
-      {#if error}
-        <div class="wc-stale" title={error}>
-          <Icon name="zap" size={12} />refresh failed — showing last data
-        </div>
-      {/if}
+    <!-- LoadState owns every state: the first-load skeleton, a failed first
+         run (headline + Retry), and a failed refresh over the last good chart
+         (its slim "Couldn’t refresh" bar — the chart is never wiped). -->
+    <LoadState what={widget.title} variant="compact" loading={loading && !result} {error} empty={!result} onretry={() => void run(true)}>
       <Chart {result} viz={widget.viz} mapping={widget.mapping} />
-    {/if}
+    </LoadState>
   </div>
 </div>
 
@@ -221,35 +220,6 @@
     padding: 8px 10px 10px;
     display: flex;
     flex-direction: column;
-  }
-  .wc-error {
-    display: grid;
-    place-items: center;
-    height: 100%;
-    color: var(--danger);
-    font-size: var(--fs-s);
-  }
-  .wc-stale {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    align-self: flex-start;
-    margin-bottom: 4px;
-    padding: 1px 6px;
-    font-size: var(--fs-xs);
-    color: var(--warning);
-    background: var(--status-warn-soft);
-    border-radius: 999px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    max-width: 100%;
-  }
-  .wc-loading {
-    display: grid;
-    place-items: center;
-    height: 100%;
-    color: var(--text-dim);
   }
   
   .ellipsis {

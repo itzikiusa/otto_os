@@ -28,13 +28,17 @@
     onopen: (row: K8sRow) => void;
     onmenu: (e: MouseEvent | KeyboardEvent, row: K8sRow) => void;
     onretry: () => void;
+    /** The text filter hiding rows, named in the filtered-empty state. */
+    filter?: string;
+    /** Filtered-empty "Clear filter" action (UX-5-16). */
+    onclearfilter?: () => void;
     /** K-1: the view these rows belong to — the remembered scroll offset is
      *  restored once per key when its rows first render. */
     scrollKey?: string;
     initialScroll?: (key: string) => number;
     onscrolled?: (key: string, top: number) => void;
   }
-  let { kind, rows, total, hasMetrics, allNamespaces, loading, error, selected, onselect, onopen, onmenu, onretry, scrollKey = '', initialScroll, onscrolled }: Props = $props();
+  let { kind, rows, total, hasMetrics, allNamespaces, loading, error, selected, onselect, onopen, onmenu, onretry, filter = '', onclearfilter, scrollKey = '', initialScroll, onscrolled }: Props = $props();
 
   let bodyEl = $state<HTMLDivElement | null>(null);
   let restoredFor: string | null = null;
@@ -111,7 +115,7 @@
     <div class="rt-state"><Skeleton rows={8} height={26} /></div>
   {:else if !rows.length}
     <div class="rt-state">
-      <EmptyState icon="box" title={total ? 'No rows match the filter' : `No ${kindDef(kind).label.toLowerCase()} here`} body={total ? `${total} hidden by the filter.` : 'Try another namespace, or "All namespaces".'} />
+      <EmptyState icon="box" title={total ? (filter ? `No ${kindDef(kind).label.toLowerCase()} match “${filter}”` : 'No rows match the filter') : `No ${kindDef(kind).label.toLowerCase()} here`} body={total ? `${total} hidden by the filter.` : 'Try another namespace, or "All namespaces".'} actionLabel={total && onclearfilter ? 'Clear filter' : undefined} actionKind="secondary" onaction={total ? onclearfilter : undefined} />
     </div>
   {:else}
     <div class="rt-body" bind:this={bodyEl} onscrollcapture={onBodyScroll} role="listbox" aria-label="{kindDef(kind).label} rows" aria-multiselectable="false">

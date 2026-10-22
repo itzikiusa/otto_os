@@ -13,3 +13,29 @@ export const automationRoutes: EventRoutes = {
   // Run with Otto page refreshes the affected run + the workspace list.
   otto_run_updated: (parsed) => runWithOttoStore.peek()?.applyEvent(parsed),
 };
+
+/** Reconnect / daemon-restart resync (data-integrity-5-02). Both pages are
+ *  fed only by run events, so a run the boot reaper marked interrupted while
+ *  no client was connected stayed "running" until the next event. Only a
+ *  store someone already loaded (`peek()`) refetches, for the current
+ *  workspace: Scheduled Tasks reloads the list and the runs of every task
+ *  whose history is loaded (expanded); Run with Otto reloads the list, then
+ *  the open run and its stage timeline. `loadList` closes an open run of
+ *  another workspace first, so `openId` is read after it. */
+export function resyncAutomation(workspaceId: string | null): void {
+  if (!workspaceId) return;
+  const tasks = scheduledTasksStore.peek();
+  if (tasks) {
+    void tasks.loadList(workspaceId);
+    for (const taskId of Object.keys(tasks.runsByTask)) void tasks.loadRuns(taskId);
+  }
+  const runs = runWithOttoStore.peek();
+  if (runs) {
+    void runs.loadList(workspaceId);
+    const open = runs.openId;
+    if (open) {
+      void runs.refreshRun(open);
+      void runs.loadEvents(open);
+    }
+  }
+}

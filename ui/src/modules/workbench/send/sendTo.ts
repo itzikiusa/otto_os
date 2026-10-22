@@ -54,13 +54,18 @@ export async function sendToDatabase(ctx: SendCtx): Promise<void> {
     toasts.error('Nothing to run', 'This file is empty.');
     return;
   }
-  try {
-    if (!database.connections.length && !database.connectionsLoading) await database.loadConnections();
-  } catch (e) {
-    toasts.error('Couldn’t load connections', errText(e));
+  // An in-flight load is joined (loadConnections shares it), so a send made
+  // while the list is still loading never reads as "no connections".
+  if (!database.connections.length) await database.loadConnections();
+  const conns = database.connections;
+  // `loadConnections` records a failure in `connectionsError` rather than
+  // throwing: a failed load must not read as "you have no connections".
+  if (conns.length === 0 && database.connectionsError) {
+    toasts.push('error', 'Couldn’t load your database connections', database.connectionsError, 8000, {
+      action: { label: 'Try again', run: () => void sendToDatabase(ctx) },
+    });
     return;
   }
-  const conns = database.connections;
   if (conns.length === 0) {
     toasts.push('error', 'No database connections', 'Add one in Connections, then send the script again.', 6000, {
       action: { label: 'Open Connections', run: () => router.go('connections') },
@@ -280,5 +285,5 @@ export async function sendToVault(ctx: SendCtx): Promise<void> {
 
 export async function copyFilled(ctx: SendCtx): Promise<void> {
   if (await copyText(filled(ctx))) toasts.success('Copied', 'Placeholders with a value were filled in.');
-  else toasts.error('Couldn’t copy to the clipboard', 'The clipboard is not available here.');
+  else toasts.error('Couldn’t copy to the clipboard', 'Select the text and copy it manually.');
 }

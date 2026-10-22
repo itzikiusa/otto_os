@@ -474,12 +474,15 @@ with `status: "running"` so open panels refresh the agent rows.) The UI matches
 - **`Review`** — `id, repo_id, pr_number, status, error?, comments[],
   agents[] (live ReviewAgentState), created_at, verdict?, blocker_count?,
   summary_md?, summary_fallback?` (`summary_fallback` = the final comments came
-  from the deterministic fallback, not the claude summarizer).
+  from the deterministic fallback, not the configured summarizer).
 - **`ReviewComment`** — `severity: info|warn|bug`, `state: draft|approved|
   declined`, `posted`, `path?`, `line?`.
 - **`ReviewAgentState`** — `name, provider, model, status, note, comment_count,
   session_id?, findings[], fallback?` (`fallback` marks the summarizer row when
-  the deterministic fallback produced the summary).
+  the deterministic fallback produced the summary; that row's `note` then reads
+  `deterministic fallback (summarizer: <cause>) — N final comments`, the cause
+  being the clipped summarizer error or "returned no comments for N findings",
+  and the UI names the row's own `provider` in the badge tooltip).
 - **`ReviewFindingRow`** — `fingerprint, path?, line?, severity, category?, body,
   state, fix_session_id?, updated_at`.
 - **`StartReviewReq`** — `issue_account_id?, issue_key?, context?` (all optional;

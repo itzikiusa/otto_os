@@ -210,3 +210,8 @@ The Rooms toolbar also opens [Room games](./room-games.md): a standalone 3D
 battle-royale shooter and an eight-racer kart game, against room guests and
 computer players. These do not require
 a coding session and use separate game-only guest capabilities.
+Both relays share one set of capability primitives
+(`crates/otto-server/src/rooms/capability.rs`): token issue, a constant-time
+digest compare, the `Sec-WebSocket-Protocol` token parser (which also requires a
+43-character token) and the per-member token bucket. In the browser, both
+clients wrap one `RelaySocket` (`ui/src/lib/relaySocket.ts`).

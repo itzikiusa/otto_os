@@ -106,7 +106,7 @@ pub type GoalLoopRegistry = Arc<LoopRegistry>;
 #[derive(Default)]
 pub struct LoopRegistry {
     handles: Mutex<HashMap<String, LoopHandle>>,
-    operations: Mutex<HashMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>>,
+    operations: otto_core::keyed_lock::KeyedLocks<String>,
 }
 impl LoopRegistry {
     pub fn lock(
@@ -116,14 +116,7 @@ impl LoopRegistry {
     }
     /// Serialize API decisions and mutations, including approval versus retry.
     pub fn operation(&self, id: &str) -> Arc<tokio::sync::Mutex<()>> {
-        let mut operations = self.operations.lock().unwrap();
-        operations.retain(|_, lock| lock.strong_count() > 0);
-        if let Some(lock) = operations.get(id).and_then(std::sync::Weak::upgrade) {
-            return lock;
-        }
-        let lock = Arc::new(tokio::sync::Mutex::new(()));
-        operations.insert(id.into(), Arc::downgrade(&lock));
-        lock
+        self.operations.handle(id)
     }
     pub fn require_idle(&self, id: &str) -> Result<()> {
         if self.handles.lock().unwrap().contains_key(id) {

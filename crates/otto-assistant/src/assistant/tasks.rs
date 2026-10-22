@@ -35,21 +35,13 @@ use otto_core::cancel_signal::CancelSignal;
 
 const TICK: Duration = Duration::from_secs(30);
 
+/// The per-task mutex serialising a task's state transitions (decide, tick
+/// report, cancel). Entries prune once the last holder drops
+/// ([`otto_core::keyed_lock::KeyedLocks`], maintainability-5-02).
 fn task_lock(id: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
-    use std::sync::{Arc, Mutex, OnceLock, Weak};
-    static LOCKS: OnceLock<Mutex<std::collections::HashMap<String, Weak<tokio::sync::Mutex<()>>>>> =
-        OnceLock::new();
-    let mut locks = LOCKS
-        .get_or_init(Default::default)
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    locks.retain(|_, v| v.strong_count() > 0);
-    if let Some(lock) = locks.get(id).and_then(Weak::upgrade) {
-        return lock;
-    }
-    let lock = Arc::new(tokio::sync::Mutex::new(()));
-    locks.insert(id.into(), Arc::downgrade(&lock));
-    lock
+    static LOCKS: otto_core::keyed_lock::KeyedLocks<String> =
+        otto_core::keyed_lock::KeyedLocks::new();
+    LOCKS.handle(id)
 }
 /// Incognito threads are deleted this long after their last turn.
 const INCOGNITO_TTL_HOURS: i64 = 24;
@@ -338,9 +330,40 @@ pub(super) async fn apply_agent_update(
 // Delegation
 // ---------------------------------------------------------------------------
 
+/// How a person relates to a Personal Agent — which runs as its OWNER (its
+/// session carries the owner's MCP token, provider account and git / Jira
+/// identity). The one predicate behind "who may put instructions into it":
+/// the personal-agent routes' `require_agent_owner` (directives, goals, rules,
+/// memory) and assistant delegation ([`resolve_agent`]) both read it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentOwnership {
+    /// `created_by` is this person.
+    Owner,
+    /// No owner recorded (a preset / pre-ownership row): any Editor may
+    /// direct it; the personal-agent routes adopt it on first write.
+    Ownerless,
+    /// Someone else's agent: only a ws Admin of its workspace (or root) may
+    /// direct it.
+    Other,
+}
+
+pub fn agent_ownership(agent: &PersonalAgent, user_id: &str) -> AgentOwnership {
+    match agent.created_by.as_deref().filter(|o| !o.is_empty()) {
+        None => AgentOwnership::Ownerless,
+        Some(o) if o == user_id => AgentOwnership::Owner,
+        Some(_) => AgentOwnership::Other,
+    }
+}
+
 /// Resolve `agent` (a Personal Agent id, or its exact name) to one the user
 /// may run: Editor on its workspace + `scheduled_tasks:Edit` (the feature the
-/// Personal Agents routes ride).
+/// Personal Agents routes ride) — AND one the user may DIRECT
+/// (access-control-5-03): a delegation is a write-capable directed run of
+/// the caller's text executed as the agent's owner, so it needs the owner, an
+/// ownerless agent, a ws Admin of the agent's workspace or root — the same
+/// rule as the agent's own directive / goals ([`agent_ownership`]). Only other
+/// people's agents matching → 403; nothing matching → 404; a same-name tie
+/// prefers the caller's own agent.
 pub async fn resolve_agent<C: AssistantCtx>(
     ctx: &C,
     user: &User,
@@ -367,18 +390,54 @@ pub async fn resolve_agent<C: AssistantCtx>(
             "delegating needs scheduled_tasks:edit".into(),
         ));
     }
+    let mut visible = 0usize;
     let mut allowed = Vec::new();
     for a in candidates {
         if ctx
             .roles()
             .check(user, &a.workspace_id, WorkspaceRole::Editor)
             .await
-            .is_ok()
+            .is_err()
         {
+            continue;
+        }
+        visible += 1;
+        let directs = match agent_ownership(&a, &user.id) {
+            AgentOwnership::Owner | AgentOwnership::Ownerless => true,
+            AgentOwnership::Other => ctx
+                .roles()
+                .check(user, &a.workspace_id, WorkspaceRole::Admin)
+                .await
+                .is_ok(),
+        };
+        if directs {
             allowed.push(a);
         }
     }
+    pick_directable(agent, &user.id, visible, allowed)
+}
+
+/// The decision half of [`resolve_agent`] (pure): `visible` agents matched
+/// and the caller is Editor on, of which `allowed` they may direct.
+fn pick_directable(
+    agent: &str,
+    user_id: &str,
+    visible: usize,
+    mut allowed: Vec<PersonalAgent>,
+) -> Result<PersonalAgent> {
+    if allowed.len() > 1 {
+        let own: Vec<usize> = (0..allowed.len())
+            .filter(|&i| agent_ownership(&allowed[i], user_id) == AgentOwnership::Owner)
+            .collect();
+        if let [i] = own[..] {
+            return Ok(allowed.swap_remove(i));
+        }
+    }
     match allowed.len() {
+        0 if visible > 0 => Err(Error::Forbidden(
+            "This agent runs as its owner; only the owner or a workspace admin can give it a directive."
+                .into(),
+        )),
         0 => Err(Error::NotFound(format!("personal agent '{agent}'"))),
         1 => Ok(allowed.remove(0)),
         _ => Err(Error::Conflict(format!(
@@ -1800,5 +1859,74 @@ mod tests {
         assert!(next_state("task", "running", None, "explode")
             .unwrap_err()
             .contains("unknown action"));
+    }
+
+    fn pa(id: &str, owner: Option<&str>) -> PersonalAgent {
+        PersonalAgent {
+            admission_generation: 0,
+            id: id.into(),
+            workspace_id: "w".into(),
+            name: "Recap".into(),
+            avatar: String::new(),
+            soul_md: String::new(),
+            provider: "claude".into(),
+            model: String::new(),
+            cwd: String::new(),
+            browser: false,
+            delivery: json!({}),
+            enabled: true,
+            chat_session_id: None,
+            created_by: owner.map(str::to_string),
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    /// access-control-5-03: owner / ownerless / someone else's agent.
+    #[test]
+    fn agent_ownership_classifies_owner_ownerless_and_other() {
+        assert_eq!(
+            agent_ownership(&pa("a", Some("alice")), "alice"),
+            AgentOwnership::Owner
+        );
+        assert_eq!(
+            agent_ownership(&pa("a", None), "bob"),
+            AgentOwnership::Ownerless
+        );
+        assert_eq!(
+            agent_ownership(&pa("a", Some("")), "bob"),
+            AgentOwnership::Ownerless
+        );
+        assert_eq!(
+            agent_ownership(&pa("a", Some("alice")), "bob"),
+            AgentOwnership::Other
+        );
+    }
+
+    /// access-control-5-03: only other people's agents matched → 403 (not
+    /// 404, not a run); nothing matched → 404; a same-name tie a ws Admin
+    /// can direct both of resolves to the caller's own agent.
+    #[test]
+    fn delegation_picks_only_an_agent_the_caller_may_direct() {
+        let forbidden = pick_directable("Recap", "bob", 1, vec![]).unwrap_err();
+        assert!(matches!(forbidden, Error::Forbidden(m) if m.contains("runs as its owner")));
+        assert!(matches!(
+            pick_directable("Recap", "bob", 0, vec![]).unwrap_err(),
+            Error::NotFound(_)
+        ));
+        let own = pick_directable(
+            "Recap",
+            "bob",
+            2,
+            vec![pa("alices", Some("alice")), pa("bobs", Some("bob"))],
+        )
+        .unwrap();
+        assert_eq!(own.id, "bobs");
+        assert!(matches!(
+            pick_directable("Recap", "carol", 2, vec![pa("x", None), pa("y", None)]).unwrap_err(),
+            Error::Conflict(_)
+        ));
+        let one = pick_directable("Recap", "alice", 2, vec![pa("alices", Some("alice"))]).unwrap();
+        assert_eq!(one.id, "alices");
     }
 }

@@ -35,7 +35,8 @@ use serde::Deserialize;
 use crate::auth::CurrentUser;
 use crate::error::{ApiError, ApiResult};
 use crate::routes::fs::{
-    lang_from_path, read_at_most, FsBrowse, FsEntry, FsRead, BINARY_PROBE_BYTES, MAX_READ_BYTES,
+    browse_canceled, filesystem_work, lang_from_path, read_at_most, FsBrowse, FsEntry, FsRead,
+    BINARY_PROBE_BYTES, MAX_READ_BYTES,
 };
 use crate::state::ServerCtx;
 
@@ -49,6 +50,8 @@ pub struct RelPathParams {
 /// What a non-root read/browse may not reach even inside its own cwd.
 #[derive(Clone)]
 struct Restrict {
+    /// The canonical data dir (the raw one when it can't be resolved).
+    base: PathBuf,
     /// Canonical `<data_dir>/<sub>` for every agent work area.
     work_areas: Vec<PathBuf>,
 }
@@ -64,6 +67,7 @@ impl Restrict {
                 .iter()
                 .map(|s| base.join(s))
                 .collect(),
+            base,
         }
     }
 
@@ -163,12 +167,18 @@ fn rel_of(root: &FsPath, canonical: &FsPath) -> String {
         .unwrap_or_default()
 }
 
-async fn blocking<T: Send + 'static>(
-    work: impl FnOnce() -> ApiResult<T> + Send + 'static,
-) -> ApiResult<T> {
-    tokio::task::spawn_blocking(work)
-        .await
-        .map_err(|e| ApiError(Error::Internal(format!("session files task failed: {e}"))))?
+/// Host-filesystem work for these routes goes through the same guard as
+/// `/fs/*` (BP-5-05): at most [`IN_FLIGHT`] blocking tasks per route (busy →
+/// 409), a 10 s deadline (→ 504) and a cancel flag checked per entry, so a
+/// stalled mount or a huge tree can't pile up the shared blocking pool.
+const IN_FLIGHT: usize = 4;
+const DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
+
+fn admission(
+    cell: &'static std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>>,
+) -> std::sync::Arc<tokio::sync::Semaphore> {
+    cell.get_or_init(|| std::sync::Arc::new(tokio::sync::Semaphore::new(IN_FLIGHT)))
+        .clone()
 }
 
 /// `GET /api/v1/sessions/{id}/files/browse?path=<rel>`
@@ -182,16 +192,24 @@ pub async fn browse(
     let rel = params.path.unwrap_or_default();
     let data_dir = ctx.data_dir.clone();
     let restricted = !user.is_root;
-    blocking(move || {
+    static ADMISSION: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> =
+        std::sync::OnceLock::new();
+    filesystem_work(admission(&ADMISSION), DEADLINE, move |cancel| {
         let restrict = restricted.then(|| Restrict::for_data_dir(&data_dir));
-        browse_sync(&root, &rel, restrict.as_ref())
+        browse_sync(&root, &rel, restrict.as_ref(), &cancel)
     })
     .await
     .map(Json)
 }
 
 #[allow(clippy::disallowed_methods)] // sync helper: runs on the blocking pool
-fn browse_sync(root: &FsPath, rel: &str, restrict: Option<&Restrict>) -> ApiResult<FsBrowse> {
+fn browse_sync(
+    root: &FsPath,
+    rel: &str,
+    restrict: Option<&Restrict>,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> ApiResult<FsBrowse> {
+    browse_canceled(cancel)?;
     let (root, dir) = resolve(root, rel)?;
     if let Some(r) = restrict {
         r.check(&root, &dir, rel)?;
@@ -204,6 +222,7 @@ fn browse_sync(root: &FsPath, rel: &str, restrict: Option<&Restrict>) -> ApiResu
     let mut dirs: Vec<FsEntry> = Vec::new();
     let mut files: Vec<FsEntry> = Vec::new();
     for entry in read_dir.flatten() {
+        browse_canceled(cancel)?;
         // Follow links like the OS does on open, but only to targets that stay
         // inside the cwd; broken or escaping links are not listed.
         let Ok(target) = entry.path().canonicalize() else {
@@ -259,9 +278,14 @@ pub async fn read(
     }
     let data_dir = ctx.data_dir.clone();
     let restricted = !user.is_root;
-    blocking(move || {
+    static ADMISSION: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> =
+        std::sync::OnceLock::new();
+    filesystem_work(admission(&ADMISSION), DEADLINE, move |cancel| {
+        browse_canceled(&cancel)?;
         let restrict = restricted.then(|| Restrict::for_data_dir(&data_dir));
-        read_sync(&root, &rel, restrict.as_ref())
+        let result = read_sync(&root, &rel, restrict.as_ref());
+        browse_canceled(&cancel)?;
+        result
     })
     .await
     .map(Json)
@@ -324,19 +348,38 @@ pub(crate) async fn lsp_root_in_own_session(
         Ok(Some(r)) => r,
         _ => return false,
     };
-    // Candidate sessions: those whose cwd is under the data dir at all (the
-    // stored cwd may be non-canonical, so canonicalize before comparing).
-    let rows: Vec<(String, String)> =
-        match sqlx::query_as("SELECT id, cwd FROM sessions WHERE cwd <> ''")
-            .fetch_all(&ctx.pool)
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!("lsp session-root lookup failed: {e}");
-                return false;
-            }
-        };
+    // Candidate sessions, narrowed in SQL before any `realpath` (BP-5-01):
+    // unarchived, the caller's own (`idx_sessions_created_by`) or in a
+    // workspace they administer, with a cwd under the data dir as stored —
+    // raw or canonical, since a stored cwd may be either. Only those rows are
+    // canonicalized and re-checked below; the owner-or-admin gate still runs
+    // per match.
+    let data_prefix = |p: &FsPath| format!("{}/", p.to_string_lossy().trim_end_matches('/'));
+    let raw_prefix = data_prefix(&ctx.data_dir);
+    let canonical_prefix = data_prefix(&restrict.base);
+    let rows: Vec<(String, String)> = match sqlx::query_as(
+        "SELECT id, cwd FROM sessions \
+         WHERE archived = 0 AND cwd <> '' \
+           AND (created_by = ?1 OR workspace_id IN \
+                (SELECT workspace_id FROM workspace_members \
+                 WHERE user_id = ?1 AND role = 'admin')) \
+           AND (substr(cwd, 1, length(?2)) = ?2 OR substr(cwd, 1, length(?3)) = ?3)",
+    )
+    .bind(&user.id)
+    .bind(&raw_prefix)
+    .bind(&canonical_prefix)
+    .fetch_all(&ctx.pool)
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("lsp session-root lookup failed: {e}");
+            return false;
+        }
+    };
+    if rows.is_empty() {
+        return false;
+    }
     let root_buf = root.to_path_buf();
     #[allow(clippy::disallowed_methods)] // canonicalize on the blocking pool
     let matches: Vec<String> = tokio::task::spawn_blocking(move || {
@@ -434,13 +477,14 @@ mod tests {
         std::fs::write(root.join("README.md"), "x").unwrap();
         std::fs::write(root.join("src/a/lib.rs"), "y").unwrap();
 
-        let top = browse_sync(&root, "", None).unwrap();
+        let live = std::sync::atomic::AtomicBool::new(false);
+        let top = browse_sync(&root, "", None, &live).unwrap();
         assert_eq!(top.path, "");
         assert_eq!(top.parent, None);
         let names: Vec<_> = top.entries.iter().map(|e| e.path.as_str()).collect();
         assert_eq!(names, vec!["src", "README.md"]);
 
-        let nested = browse_sync(&root, "src/a", None).unwrap();
+        let nested = browse_sync(&root, "src/a", None, &live).unwrap();
         assert_eq!(nested.parent.as_deref(), Some("src"));
         assert_eq!(nested.entries[0].path, "src/a/lib.rs");
 
@@ -448,5 +492,16 @@ mod tests {
         assert_eq!(read.path, "README.md");
         assert_eq!(read.content, "x");
         assert_eq!(read.language, "markdown");
+    }
+
+    #[test]
+    fn a_canceled_browse_stops_before_listing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("cwd");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("a.txt"), "x").unwrap();
+        let canceled = std::sync::atomic::AtomicBool::new(true);
+        let e = browse_sync(&root, "", None, &canceled).unwrap_err();
+        assert!(matches!(e.0, Error::Conflict(_)), "{e:?}");
     }
 }

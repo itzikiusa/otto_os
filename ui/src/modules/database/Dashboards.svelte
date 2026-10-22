@@ -89,14 +89,23 @@
 
   const VIZ: DbViz[] = ['table', 'number', 'line', 'bar', 'area', 'pie'];
   const needsAxes = $derived(wViz === 'line' || wViz === 'bar' || wViz === 'area');
-  const resultCols = $derived(database.tab.result?.columns ?? []);
-  // A widget maps axes by column NAME, so the option set is the distinct names —
-  // a join result (`SELECT * … JOIN …`) repeats `id`, and a duplicate would
-  // also be a duplicate `{#each}` key, which throws and blanks the sheet.
-  const resultColNames = $derived([...new Set(resultCols.map((c) => c.name))]);
+  // Axis options: Add seeds from the active Query tab (its result IS the seeded
+  // statement); Edit offers the widget's OWN last-run columns — the Query tab
+  // may hold an unrelated result. A widget maps axes by column NAME, so the
+  // option set is the distinct names — a join result (`SELECT * … JOIN …`)
+  // repeats `id`, and a duplicate would also be a duplicate `{#each}` key,
+  // which throws and blanks the sheet.
+  const resultColNames = $derived.by(() => {
+    const w = editing;
+    if (w) return database.dash.widgetColumns[w.id] ?? [];
+    return [...new Set((database.tab.result?.columns ?? []).map((c) => c.name))];
+  });
+  // The connection a NEW widget binds to — the focused Explorer connection.
+  const addConnName = $derived(database.selectedConn?.name ?? null);
+  const addBlocked = $derived(!editing && !database.selectedConnId);
 
   async function saveWidget(): Promise<void> {
-    if (!dashboard || !wTitle.trim() || !wStatement.trim()) return;
+    if (!dashboard || addBlocked || !wTitle.trim() || !wStatement.trim()) return;
     saving = true;
     const mapping = {
       x: wX || undefined,
@@ -231,6 +240,12 @@
       <p class="conn-note" title={editing.connection_id}>
         Runs on connection <strong>{editingConnName}</strong> (set at creation).
       </p>
+    {:else if addConnName}
+      <p class="conn-note" title={database.selectedConnId ?? ''}>
+        Runs on <strong>{addConnName}</strong> — the connection focused in Database Explorer. It can’t be changed later.
+      </p>
+    {:else}
+      <p class="conn-note">No connection selected. Open one in Database Explorer first; the widget runs on it.</p>
     {/if}
     <div class="field">
       <label for="w-stmt">Statement</label>
@@ -265,13 +280,24 @@
           </select>
         </div>
       </div>
-      {#if resultCols.length === 0}
-        <p class="axes-hint">Run the query once in the Query tab to map specific columns; otherwise columns are auto-detected.</p>
+      {#if resultColNames.length === 0}
+        <p class="axes-hint">
+          {editing
+            ? 'Columns come from this widget’s last run. Refresh it once to map specific columns; otherwise columns are auto-detected.'
+            : 'Run the query once in the Query tab to map specific columns; otherwise columns are auto-detected.'}
+        </p>
+      {:else if editing}
+        <p class="axes-hint">Columns come from this widget’s last run.</p>
       {/if}
     {/if}
     {#snippet footer()}
       <button class="btn" onclick={() => (adding = false)}>Cancel</button>
-      <button class="btn primary" disabled={saving || !wTitle.trim() || !wStatement.trim()} onclick={saveWidget}>
+      <button
+        class="btn primary"
+        disabled={saving || addBlocked || !wTitle.trim() || !wStatement.trim()}
+        title={addBlocked ? 'Select a connection in Database Explorer first' : undefined}
+        onclick={saveWidget}
+      >
         {saving ? 'Saving…' : editing ? 'Save' : 'Add widget'}
       </button>
     {/snippet}

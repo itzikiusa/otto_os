@@ -1,5 +1,5 @@
 <script lang="ts">
-  import LoadState from '../../../lib/components/LoadState.svelte';
+  import { tick } from 'svelte';
   import PageHeader from '../../../lib/components/PageHeader.svelte';
   import PageBody from '../../../lib/components/PageBody.svelte';
   import { router } from '../../../lib/router.svelte';
@@ -45,10 +45,16 @@
       } else {
         credential = await api.post<GameRoomCredential>('/game-rooms', { name: name.trim() || 'Player', config: { game: kind, map } });
       }
-    } catch (e) { error = e instanceof Error ? e.message : 'Could not create a game room. Try again.'; }
+    } catch (e) { error = e instanceof Error ? e.message : 'Try again.'; }
     finally { busy = false; }
   }
-  function exit() { kartSetup = null; shooterSetup = null; credential = null; round++; }
+  let titles = $state<HTMLElement>();
+  /** Leaving a game unmounts every control that had focus; land it on the selected game's title. */
+  async function exit() {
+    kartSetup = null; shooterSetup = null; credential = null; round++;
+    await tick();
+    titles?.querySelector<HTMLButtonElement>('button[aria-pressed="true"]')?.focus();
+  }
   function again() {
     const seed = (Date.now() ^ Math.floor(Math.random() * 1e9)) >>> 0;
     if (kartSetup) kartSetup = { ...kartSetup, seed };
@@ -61,7 +67,7 @@
   <PageHeader title={playing ? game.title : 'Games'} subtitle={playing ? 'Rooms' : 'Play together between builds'}>
     {#snippet actions()}
       {#if playing}<button class="btn small" onclick={exit}>Back to games</button>{/if}
-      <button class="btn small" onclick={() => { exit(); router.go('rooms'); }}>Rooms</button>
+      <button class="btn small" onclick={() => { void exit(); router.go('rooms'); }}>Rooms</button>
     {/snippet}
   </PageHeader>
   {#if kartSetup}
@@ -73,7 +79,7 @@
   {:else}
     <PageBody>
       <div class="games-chooser">
-        <div class="games-titles" role="group" aria-label="Choose a game">
+        <div class="games-titles" role="group" aria-label="Choose a game" bind:this={titles}>
           {#each GAMES as g (g.kind)}
             <button class:selected={kind === g.kind} aria-pressed={kind === g.kind} onclick={() => choose(g.kind)}>
               <img src={g.cover} alt={g.coverAlt} />
@@ -131,7 +137,7 @@
             </fieldset>
             <div class="games-start">
               <button class="btn primary" disabled={busy} onclick={start}>{busy ? 'Creating room…' : mode === 'solo' ? (kind === 'kart' ? 'Start race' : 'Drop in') : 'Create game room'}</button>
-              {#if error}<LoadState what="game room" {error} empty onretry={start} variant="compact" />{/if}
+              {#if error}<p class="field-error" role="alert">{mode === 'room' ? 'Couldn’t create the game room.' : 'Couldn’t start the game.'} {error}</p>{/if}
             </div>
           </section>
           <section class="games-environments" aria-labelledby="games-map-title">
@@ -179,6 +185,7 @@
   .games-roster strong { font-size: var(--fs-s); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
   .games-roster small { font-size: var(--fs-xs); color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
   .games-start :global(.btn.primary) { width: 100%; }
+  .field-error { margin: 8px 0 0; color: var(--danger); font-size: var(--fs-s); line-height: 1.5; }
   .games-note { font-size: var(--fs-s); line-height: 1.6; color: var(--text-dim); margin: 0; }
   .games-environments > button { width: 100%; display: flex; align-items: center; gap: 14px; text-align: start; color: var(--text); border: 1px solid var(--border); background: var(--surface); border-radius: var(--radius-m); padding: 10px; margin-block-end: 10px; cursor: pointer; }
   .games-environments > button.selected { border-color: var(--accent-solid); background: var(--accent-soft); }

@@ -1,4 +1,6 @@
 <script lang="ts">
+  import LazyMount from '../lib/components/LazyMount.svelte';
+  import { ShareModalChunk } from './overlays.svelte';
   import { rowMenu } from '../lib/rowMenu';
   // Session tabs: click activates, middle-click closes, ⌘W closes active,
   // ⌃Tab cycles (handled in keys.ts → workspace store).
@@ -700,5 +702,5 @@
 {#if shareSessionId}
   <!-- Loaded on first use: it bundles the QR encoder (not shell code). -->
   {@const id = shareSessionId}
-  {#await import('../modules/agents/ShareModal.svelte') then m}<m.default sessionId={id} onclose={() => (shareSessionId = null)} />{/await}
+  <LazyMount lazy={ShareModalChunk} what="the share dialog" quiet onerror={() => (shareSessionId = null)} props={{ sessionId: id, onclose: () => (shareSessionId = null) }} />
 {/if}

@@ -365,7 +365,7 @@ fn refold(ctx: &ServerCtx, provider: Provider, path: &Path) -> std::io::Result<T
     refold_with(
         provider,
         path,
-        crate::routes::transcript::fold_opts(ctx, provider, path),
+        crate::transcript::fold::fold_opts(ctx, provider, path),
     )
 }
 
@@ -768,7 +768,7 @@ async fn run(ctx: ServerCtx, session: Session, live: Arc<Live>) {
                 known.clear();
             }
             let out = if let Some(st) = guard.as_mut() {
-                let opts = || crate::routes::transcript::fold_opts(&cx, lv.provider, &lv.path);
+                let opts = || crate::transcript::fold::fold_opts(&cx, lv.provider, &lv.path);
                 let out = step(&opts, &id, &lv, st, &mut known);
                 if st.retired {
                     *guard = None;
@@ -822,7 +822,7 @@ async fn run(ctx: ServerCtx, session: Session, live: Arc<Live>) {
             }) {
                 break;
             }
-            crate::routes::transcript::register_work_artifact(&ctx, &session, a).await;
+            crate::transcript::artifacts::register_work_artifact(&ctx, &session, a).await;
         }
     }
 }

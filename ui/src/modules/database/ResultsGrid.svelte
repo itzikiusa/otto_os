@@ -13,7 +13,7 @@
   // primary key, cells become double-click editable (issues an UPDATE via the
   // connection's query API after a review).
   import { onDestroy, untrack } from 'svelte';
-  import { stashGridState, takeGridState, type GridTabState } from './grid-tab-state';
+  import { stashGridState, takeGridState, type GridTabState } from '../../lib/database/grid-tab-state';
   import Icon from '../../lib/components/Icon.svelte';
   import { onTabKey } from '../../lib/tabKeys';
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -31,9 +31,9 @@
   import { auth } from '../../lib/stores/auth.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
-  import { obviousWriteVerb } from './sql-dialect';
+  import { obviousWriteVerb } from '../../lib/database/sql-dialect';
   import { buildFilteredQuery, type FilterMode } from './query-filter';
-  import { filterValMatches, type FilterVal } from './filter-chips';
+  import { filterValMatches, type FilterVal } from '../../lib/database/filter-chips';
   import { databaseAccessChild } from '../../lib/access-options';
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   import type { QueryResult, DbForeignKey } from '../../lib/api/types';
@@ -75,7 +75,7 @@
     if (ctxMenu.open && ctxMenu.seq === menuSeq) ctxMenu.close();
   });
 
-  // ── Send-to-agent dialog (B2a: replaces raw injectInput for DB results) ──────
+  // ── Send-to-agent dialog (B2a) ────────────────────────────────────────────────
   let sendToAgentOpen = $state(false);
   let sendToAgentPayload = $state<unknown>(null);
   // ── WP4: aggregate pipeline builder + compare-two-records ───────────────────
@@ -1156,7 +1156,7 @@
       await withProgress('TSV', () => copyBuilt(tsvParts));
       toasts.success('Copied', `Result copied as TSV${exportScope}`);
     } catch {
-      toasts.error('Couldn’t copy');
+      toasts.error('Couldn’t copy', 'Select the text and copy it manually.');
     }
   }
   function download(parts: string[], name: string, mime: string): void {
@@ -1185,7 +1185,7 @@
       const what = kind === 'columns' ? 'Column names copied' : `Result copied as ${kind.toUpperCase()}${exportScope}`;
       toasts.success('Copied', what);
     } catch {
-      toasts.error('Couldn’t copy');
+      toasts.error('Couldn’t copy', 'Select the text and copy it manually.');
     }
   }
 

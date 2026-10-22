@@ -18,6 +18,7 @@
   import { copyTextOrThrow } from '../../lib/clipboard';
   import CodeEditor from '../../lib/components/CodeEditor.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import ResultsGrid from '../database/ResultsGrid.svelte';
@@ -436,7 +437,6 @@
     catalogGeneration++;
     stopPoll();
   });
-
   const loginNeeded = $derived(isLoginRequired(new Error(catError)));
   let treeOpen = $state(!viewport.isMobile);
 </script>
@@ -457,7 +457,7 @@
       {#if catLoading && !catalog}
         <div class="pad"><Skeleton rows={6} label="the data catalog" /></div>
       {:else if catError && !catalog}
-        <EmptyState actionKind={loginNeeded ? 'primary' : 'secondary'} icon="warning" title="Couldn’t load the catalog" body={awsErrorText(catError)} actionLabel={loginNeeded ? 'Sign in' : 'Retry'} onaction={loginNeeded ? onsignin : () => void loadCatalog()} />
+        <LoadState what="the catalog" error={awsErrorText(catError)} empty onretry={() => void loadCatalog()}>{#snippet errorActions()}{#if loginNeeded}<button class="btn primary" onclick={onsignin}><Icon name="key" size={12} /> Sign in</button>{/if}{/snippet}</LoadState>
       {:else}
         <ul class="dbs">
           {#each treeDbs as db (db)}
@@ -605,7 +605,7 @@
       {:else if historyLoading && history.length === 0}
         <div class="pad"><Skeleton rows={6} label="query history" /></div>
       {:else if historyError}
-        <EmptyState actionKind="secondary" icon="warning" title="Couldn’t load query history" body={awsErrorText(historyError)} actionLabel="Retry" onaction={() => void loadHistory()} />
+        <LoadState what="query history" error={awsErrorText(historyError)} empty onretry={() => void loadHistory()} />
       {:else if history.length === 0}
         <EmptyState icon="clock" title="No recent executions" body={`Nothing has run in workgroup ${workgroup || '—'} lately.`} />
       {:else}

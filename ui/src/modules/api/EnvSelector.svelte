@@ -2,6 +2,7 @@
   // Environment picker: dropdown of environments with an active indicator,
   // create/activate/delete, and an inline variable editor (key/value rows).
   import Icon from '../../lib/components/Icon.svelte';
+  import { focusAfterRowRemoval, rowListOf } from './rowFocus';
   import { apiClient } from '../../lib/stores/apiClient.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
@@ -42,8 +43,10 @@
   function updateRow(i: number, patch: Partial<VarRow>): void {
     rows = rows.map((r, idx) => (idx === i ? { ...r, ...patch, ...(patch.value !== undefined ? { touched: true } : {}) } : r));
   }
-  function removeRow(i: number): void {
+  function removeRow(i: number, e?: Event): void {
+    const list = e ? rowListOf(e, '.var-editor') : null;
     rows = rows.filter((_, idx) => idx !== i);
+    void focusAfterRowRemoval(list, i, '.var-actions .btn');
   }
   /** Toggle the lock: marking secret hides the value from the row on save;
    * unmarking turns it back into a plain variable (value must be re-typed
@@ -174,7 +177,7 @@
                     oninput={(e) => updateRow(i, { value: (e.currentTarget as HTMLInputElement).value })}
                   />
                   <button class="icon-btn" class:lock-on={row.secret} title="Keep the value in the Keychain" aria-label="Keep the value in the Keychain" aria-pressed={row.secret} onclick={() => void toggleSecret(i)}><Icon name={row.secret ? 'lock' : 'unlock'} size={12} /></button>
-                  <button class="icon-btn" title="Remove variable" aria-label="Remove variable" onclick={() => removeRow(i)}><Icon name="x" size={12} /></button>
+                  <button class="icon-btn" data-remove-row title="Remove variable {row.key || i + 1}" aria-label="Remove variable {row.key || i + 1}" onclick={(e) => removeRow(i, e)}><Icon name="x" size={12} /></button>
                 </div>
               {/each}
               <div class="var-actions">

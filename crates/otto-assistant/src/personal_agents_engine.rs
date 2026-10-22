@@ -959,12 +959,18 @@ async fn complete_agent_run<C: AssistantCtx>(
             let now = Utc::now();
             let rel = report_rel(&agent.id, now);
             let abs = ctx.data_dir().join("personal").join(&rel);
-            let (report_path, report_rel_opt) = match C::write_report(&abs, &out.report).await {
-                Ok(()) => (Some(abs.to_string_lossy().to_string()), Some(rel.clone())),
-                Err(e) => {
-                    warn!(agent = %agent.id, "personal agent: write report failed: {e}");
-                    (None, None)
-                }
+            let (report_path, report_rel_opt, report_error) =
+                saved_report(C::write_report(&abs, &out.report).await, &abs, rel);
+            if let Some(e) = &report_error {
+                warn!(agent = %agent.id, "personal agent: {e}");
+            }
+            // error-handling-5-06: a report that couldn't be written fails the
+            // run (reason on its row, failure notice raised) instead of a green
+            // `ok` row with no report, no reason, and a cleared failure streak.
+            let status = if report_error.is_some() {
+                "error"
+            } else {
+                "ok"
             };
 
             // Notify only on meaningful change (always on for personal agents —
@@ -1000,17 +1006,17 @@ async fn complete_agent_run<C: AssistantCtx>(
                 &repo,
                 &run_id,
                 FinishAgentRun {
-                    status: "ok".into(),
+                    status: status.into(),
                     summary: out.summary.clone(),
                     report_path,
                     report_rel: report_rel_opt,
+                    error: report_error.clone(),
                     delivered,
                     delivery_error: derr.clone(),
                     session_id: out.session_id.clone(),
                     report_hash: Some(hash),
                     attempts: out.attempts,
                     skipped_delivery: skipped,
-                    ..Default::default()
                 },
             )
             .await;
@@ -1018,8 +1024,8 @@ async fn complete_agent_run<C: AssistantCtx>(
             // (S4-25c), so the schedule doesn't re-fire every tick.
             advance_cursor(ctx, schedule, trigger, now).await;
             prune(ctx, &agent.id).await;
-            emit(ctx, agent, &run_id, "ok");
-            agent_notice(ctx, agent, None, derr.as_deref()).await;
+            emit(ctx, agent, &run_id, status);
+            agent_notice(ctx, agent, report_error.as_deref(), derr.as_deref()).await;
             Ok(run_id)
         }
         Err(e) => {
@@ -1122,15 +1128,23 @@ async fn advance_cursor<C: AssistantCtx>(
     }
     let Some(s) = schedule else { return };
     let next = C::cadence_next_run(&s.schedule, now, &s.timezone).map(|d| d.to_rfc3339());
-    let stamp = now.to_rfc3339();
+    settle_cursor_with_retry(&repo(ctx), s, &now.to_rfc3339(), next.as_deref()).await;
+}
+
+/// [`advance_cursor`]'s write: settle the captured occurrence, retrying a
+/// failed write and then holding the in-flight claim for one scan
+/// ([`SETTLE_HOLD`]) before a last attempt.
+async fn settle_cursor_with_retry(
+    repo: &PersonalAgentsRepo,
+    s: &PersonalAgentSchedule,
+    stamp: &str,
+    next: Option<&str>,
+) {
     // `Ok(false)` is a generation change: this occurrence is no longer the
     // one to advance. `Err` is a failed write. Retry it before the in-flight
     // guard drops, or the next tick launches the same occurrence again.
     for attempt in 0..5u64 {
-        match repo(ctx)
-            .settle_captured_schedule(s, &stamp, next.as_deref())
-            .await
-        {
+        match repo.settle_captured_schedule(s, stamp, next).await {
             Ok(_) => return,
             Err(e) => {
                 warn!(
@@ -1146,12 +1160,34 @@ async fn advance_cursor<C: AssistantCtx>(
         schedule = %s.id,
         "personal agent: schedule cursor did not settle; holding the in-flight claim across one scan"
     );
-    tokio::time::sleep(Duration::from_secs(60)).await;
-    if let Err(e) = repo(ctx)
-        .settle_captured_schedule(s, &stamp, next.as_deref())
-        .await
-    {
+    tokio::time::sleep(SETTLE_HOLD).await;
+    if let Err(e) = repo.settle_captured_schedule(s, stamp, next).await {
         warn!(schedule = %s.id, "personal agent: schedule cursor still unset: {e}");
+    }
+}
+
+/// One scheduler scan: how long a persistently failing cursor write keeps the
+/// in-flight claim. Shortened under test so the post-hold attempt is reachable
+/// in real time (as `scheduled_tasks_engine`'s `SETTLE_HOLD` is).
+#[cfg(not(test))]
+const SETTLE_HOLD: Duration = Duration::from_secs(60);
+#[cfg(test)]
+const SETTLE_HOLD: Duration = Duration::from_secs(2);
+
+/// Where a finished run's report landed — `(path, rel, error)`, with the
+/// error reading "The report couldn’t be saved: …" (error-handling-5-06).
+fn saved_report(
+    write: Result<()>,
+    abs: &std::path::Path,
+    rel: String,
+) -> (Option<String>, Option<String>, Option<String>) {
+    match write {
+        Ok(()) => (Some(abs.to_string_lossy().to_string()), Some(rel), None),
+        Err(e) => (
+            None,
+            None,
+            Some(format!("The report couldn’t be saved: {e}")),
+        ),
     }
 }
 
@@ -1323,6 +1359,135 @@ mod tests {
             .error
             .as_deref()
             .is_some_and(|e| e.contains("couldn’t be saved")));
+    }
+
+    /// A schedule whose cursor write fails until the `settle_fault` trigger
+    /// is dropped — the settle fault, with no seam in otto-state.
+    async fn failing_settle_fixture(
+        ws: &str,
+    ) -> (
+        PersonalAgentsRepo,
+        otto_state::DbPool,
+        PersonalAgentSchedule,
+    ) {
+        let pool = otto_state::db::test_pool().await;
+        sqlx::query(
+            "INSERT INTO workspaces (id, name, root_path, created_at) \
+             VALUES (?, 'ws', '/tmp/ws', '2026-10-16T00:00:00Z')",
+        )
+        .bind(ws)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let repo = PersonalAgentsRepo::new(pool.clone());
+        let agent = repo
+            .create(otto_state::NewPersonalAgent::defaults(
+                ws.into(),
+                "Agent".into(),
+            ))
+            .await
+            .unwrap();
+        let schedule = repo
+            .create_schedule(otto_state::NewAgentSchedule {
+                agent_id: agent.id.clone(),
+                schedule: serde_json::json!({"cadence": "interval", "every_min": 60}),
+                timezone: "UTC".into(),
+                directive: "recap".into(),
+                enabled: true,
+            })
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TRIGGER settle_fault BEFORE UPDATE OF last_run_at ON personal_agent_schedules \
+             BEGIN SELECT RAISE(ABORT, 'database is locked'); END",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        (repo, pool, schedule)
+    }
+
+    async fn cursor(repo: &PersonalAgentsRepo, id: &str) -> Option<String> {
+        repo.get_schedule(id).await.unwrap().last_run_at
+    }
+
+    /// test-quality-5-03: a cursor-write fault that clears during the backoff
+    /// is settled by the retry loop (attempts at 0, 0.2, 0.6, 1.2, 2.0 s),
+    /// long before the post-hold attempt — without it the next tick relaunches
+    /// the same occurrence.
+    #[tokio::test]
+    async fn settle_retry_recovers_from_a_transient_cursor_write_failure() {
+        let (repo, pool, schedule) = failing_settle_fixture("pa-settle-1").await;
+        let stamp = "2099-10-05T10:02:00+00:00";
+        let (r, s) = (repo.clone(), schedule.clone());
+        let handle =
+            tokio::spawn(async move { settle_cursor_with_retry(&r, &s, stamp, None).await });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            cursor(&repo, &schedule.id).await,
+            None,
+            "the fault holds the cursor"
+        );
+        sqlx::query("DROP TRIGGER settle_fault")
+            .execute(&pool)
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(1_000)).await;
+        assert_eq!(
+            cursor(&repo, &schedule.id).await.as_deref(),
+            Some(stamp),
+            "a retry inside the backoff loop advances the cursor"
+        );
+        handle.await.unwrap();
+    }
+
+    /// test-quality-5-03: a fault that outlasts all five attempts is still
+    /// settled by the final attempt after `SETTLE_HOLD`.
+    #[tokio::test]
+    async fn settle_retry_makes_a_final_attempt_after_the_hold() {
+        let (repo, pool, schedule) = failing_settle_fixture("pa-settle-2").await;
+        let stamp = "2099-10-05T10:02:00+00:00";
+        let (r, s) = (repo.clone(), schedule.clone());
+        let handle =
+            tokio::spawn(async move { settle_cursor_with_retry(&r, &s, stamp, None).await });
+        // Past the fifth attempt (2.0 s), inside the hold (2.0–4.0 s).
+        tokio::time::sleep(Duration::from_millis(3_000)).await;
+        assert_eq!(
+            cursor(&repo, &schedule.id).await,
+            None,
+            "all five attempts failed"
+        );
+        assert!(!handle.is_finished(), "the in-flight claim is held");
+        sqlx::query("DROP TRIGGER settle_fault")
+            .execute(&pool)
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), handle)
+            .await
+            .expect("settle finishes after the hold")
+            .unwrap();
+        assert_eq!(cursor(&repo, &schedule.id).await.as_deref(), Some(stamp));
+    }
+
+    /// error-handling-5-06: a failed report write becomes the run's error (and
+    /// so its `error` status and failure notice), with no report link.
+    #[test]
+    fn an_unwritable_report_is_recorded_as_the_runs_error() {
+        let abs = std::path::Path::new("/data/personal/a1/reports/x.md");
+        let (path, rel, error) = saved_report(
+            Err(Error::Internal("write report: disk full".into())),
+            abs,
+            "a1/reports/x.md".into(),
+        );
+        assert_eq!((path, rel), (None, None));
+        assert_eq!(
+            error.as_deref(),
+            Some("The report couldn’t be saved: internal: write report: disk full")
+        );
+        let (path, rel, error) = saved_report(Ok(()), abs, "a1/reports/x.md".into());
+        assert_eq!(path.as_deref(), Some("/data/personal/a1/reports/x.md"));
+        assert_eq!(rel.as_deref(), Some("a1/reports/x.md"));
+        assert_eq!(error, None);
     }
 
     #[test]

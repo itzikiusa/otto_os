@@ -16,6 +16,7 @@ use serde_json::{json, Map, Value};
 
 use super::{path_seg, JiraClient};
 use crate::adf_check::{adf_outline, adf_plain_text};
+use crate::atlassian::{rate_limit_wait, status_error};
 use crate::issue_create::{
     check, local_problems, non_empty, outline_check, problems_error, text_check, CreateIssueReq,
     CreateIssueResp, IssueVerification, VerificationCheck,
@@ -89,17 +90,24 @@ fn jira_error_text(body: &Value) -> String {
 }
 
 impl JiraClient {
+    /// A GET through the Atlassian transport (one retry on a short
+    /// rate-limit wait). An expired / revoked token (401) and a rate limit
+    /// the retry didn't absorb are the transport's classified errors
+    /// (`Forbidden` with a token hint, "rate limited — retry in Ns"); every
+    /// other status comes back raw for the caller's own branches.
     async fn get_json(&self, url: &str, what: &str) -> Result<(reqwest::StatusCode, Value)> {
-        let resp = self
+        let what = format!("jira {what}");
+        let req = self
             .t
             .http()?
             .get(url)
             .header("Authorization", &self.t.auth_header)
-            .header("Accept", "application/json")
-            .send()
-            .await
-            .map_err(|e| Error::Upstream(format!("jira {what} request: {e}")))?;
+            .header("Accept", "application/json");
+        let resp = self.t.send_raw(req, &what).await?;
         let status = resp.status();
+        if status.as_u16() == 401 || rate_limit_wait(status.as_u16(), resp.headers()).is_some() {
+            return Err(self.t.fail(resp, &what).await);
+        }
         let text = resp.text().await.unwrap_or_default();
         let body = serde_json::from_str(&text).unwrap_or(Value::String(text));
         Ok((status, body))
@@ -122,7 +130,18 @@ impl JiraClient {
             let (status, body) = self.get_json(&url, "createmeta").await?;
             match status.as_u16() {
                 200..=299 => {}
-                400 | 403 | 404 => {
+                // A refused token or an account without access: the
+                // transport's `Forbidden` + token hint, not "does not exist".
+                403 => {
+                    return Err(status_error(
+                        "jira",
+                        "jira createmeta",
+                        status,
+                        &reqwest::header::HeaderMap::new(),
+                        &jira_error_text(&body),
+                    ))
+                }
+                400 | 404 => {
                     return Err(Error::Invalid(format!(
                         "project '{project}' does not exist or this Jira account cannot create \
                          issues in it ({status}: {})",
@@ -370,17 +389,20 @@ impl JiraClient {
             return Err(problems_error(project, &it.name, &problems));
         }
 
-        let resp = self
+        let post = self
             .t
             .http()?
             .post(format!("{}/rest/api/3/issue", self.t.base))
             .header("Authorization", &self.t.auth_header)
             .header("Accept", "application/json")
-            .json(&json!({ "fields": fields }))
-            .send()
-            .await
-            .map_err(|e| Error::Upstream(format!("jira create_issue request: {e}")))?;
+            .json(&json!({ "fields": fields }));
+        // `send_raw` never re-sends a write; a 401/403/429 is classified by
+        // the transport, a 400 keeps Jira's own field errors.
+        let resp = self.t.send_raw(post, "jira create_issue").await?;
         let status = resp.status();
+        if !status.is_success() && status.as_u16() != 400 {
+            return Err(self.t.fail(resp, "jira create_issue").await);
+        }
         let text = resp.text().await.unwrap_or_default();
         let body: Value = serde_json::from_str(&text).unwrap_or(Value::String(text));
         if !status.is_success() {
@@ -638,5 +660,93 @@ mod tests {
         let body = json!({"errorMessages": ["bad"], "errors": {"customfield_1": "is required"}});
         assert_eq!(jira_error_text(&body), "bad; customfield_1: is required");
         assert_eq!(jira_error_text(&json!("plain")), "plain");
+    }
+
+    /// A loopback server answering `replies` in order (the last one repeats),
+    /// counting the requests it served.
+    async fn scripted(
+        replies: Vec<&'static str>,
+    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = std::sync::Arc::new(AtomicUsize::new(0));
+        let served = hits.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                let n = served.fetch_add(1, Ordering::SeqCst);
+                let mut buf = [0u8; 8192];
+                let _ = sock.read(&mut buf).await;
+                let reply = replies[n.min(replies.len() - 1)];
+                let _ = sock.write_all(reply.as_bytes()).await;
+            }
+        });
+        (format!("http://{addr}"), hits)
+    }
+
+    fn req() -> CreateIssueReq {
+        CreateIssueReq {
+            project_key: "PRJ".into(),
+            issue_type: "Task".into(),
+            summary: "Fix it".into(),
+            ..Default::default()
+        }
+    }
+
+    const UNAUTHORIZED: &str =
+        "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+
+    /// An expired token on createmeta is `Forbidden` with the token hint — not
+    /// a 502, and not "project does not exist".
+    #[tokio::test]
+    async fn a_refused_token_on_createmeta_is_forbidden() {
+        let (base, hits) = scripted(vec![UNAUTHORIZED]).await;
+        let c = JiraClient::new(&base, "e", "t");
+        let err = c.create_issue_checked(&req()).await.unwrap_err();
+        assert!(
+            matches!(&err, Error::Forbidden(m) if m.contains("update the token")),
+            "{err:?}"
+        );
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// A 403 is the same refusal, no longer "does not exist".
+    #[tokio::test]
+    async fn a_403_on_createmeta_is_forbidden_not_missing() {
+        let (base, _) = scripted(vec![
+            "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        ])
+        .await;
+        let err = JiraClient::new(&base, "e", "t")
+            .create_issue_checked(&req())
+            .await
+            .unwrap_err();
+        assert!(matches!(&err, Error::Forbidden(_)), "{err:?}");
+        assert!(!err.to_string().contains("does not exist"), "{err}");
+    }
+
+    /// A createmeta read answered 429 with a zero wait is re-sent once by the
+    /// transport (here the retry meets the 401).
+    #[tokio::test]
+    async fn a_rate_limited_createmeta_read_is_retried() {
+        let (base, hits) = scripted(vec![
+            "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 0\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            UNAUTHORIZED,
+        ])
+        .await;
+        let err = JiraClient::new(&base, "e", "t")
+            .create_issue_checked(&req())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "429 + one retry"
+        );
+        assert!(matches!(&err, Error::Forbidden(_)), "{err:?}");
     }
 }

@@ -4,6 +4,7 @@
 
 #[cfg(test)]
 mod argv_guard_tests;
+pub mod collections;
 #[cfg(test)]
 mod config_hardening_tests;
 mod diff_cache;

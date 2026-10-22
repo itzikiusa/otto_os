@@ -123,6 +123,7 @@
   // Keyed per file path. SvelteMap values are NOT deep-proxied — a Body's
   // hunks stay plain objects.
   const bodies = new SvelteMap<string, Body>();
+  const filesLoading = $derived([...bodies.values()].some((b) => b.kind === 'loading')); // one status for every per-file load (a11y 5-04)
   const openOverride = new SvelteMap<string, boolean>();
   const rowLimit = new SvelteMap<string, number>();
 
@@ -444,14 +445,13 @@
 </script>
 
 <div class="detail-diff">
+  <span class="sr-only" role="status">{filesLoading ? 'Loading file changes' : ''}</span>
   {#if held}
     <div class="dd-held">
       <button class="btn small" onclick={() => onresume?.()}>Show this commit’s changes</button>
     </div>
   {:else if !sha || loading || (!summary && !error)}
-    <div class="detail-diff-loading">
-      <Skeleton rows={8} height={20} />
-    </div>
+    <div class="detail-diff-loading"><Skeleton rows={8} height={20} /></div>
   {:else if error}
     <LoadState what="this commit’s changes" {error} empty onretry={() => reloadTick++} />
   {:else if summary}
@@ -543,8 +543,8 @@
                   <button class="btn small" onclick={() => retryFile(file)}>Retry</button>
                 </div>
               {:else}
-                <div class="df-pending" style:min-height="{placeholderPx(file)}px" aria-busy="true">
-                  <Skeleton rows={2} height={16} />
+                <div class="df-pending" style:min-height="{placeholderPx(file)}px">
+                  <Skeleton rows={2} height={16} announce={false} />
                 </div>
               {/if}
             {/if}

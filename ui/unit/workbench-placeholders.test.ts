@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { detectPlaceholders, fillPlaceholders } from '../src/modules/workbench/lib/placeholders.ts';
-import { extractVars } from '../src/modules/database/sql-util.ts';
+import { extractVars } from '../src/lib/database/sql-util.ts';
 
 test('sql: all three syntaxes, counts and first index', () => {
   const sql = 'SELECT * FROM t WHERE brand = :brand AND env = {env} AND x = {{x}} OR brand2 = :brand';

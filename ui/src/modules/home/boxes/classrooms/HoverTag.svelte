@@ -22,7 +22,7 @@
 <div class="hover-tag" class:wide={!!peek} bind:this={el}>
   {#if hoverKid}
     <b>{hoverKid.title}</b>
-    <small>{providerLabel(hoverKid.provider)} · {kidActivity(hoverKid, now() ? relTime(hoverKid.lastActiveAt) : '', isAsleep(hoverKid, now()))}</small>
+    <small>{providerLabel(hoverKid.provider)} · {kidActivity(hoverKid, relTime(hoverKid.lastActiveAt), isAsleep(hoverKid, now()))}</small>
     {#if peek}
       <pre class="peek">{peek.length ? peek.join('\n') : 'No output yet'}</pre>
     {/if}

@@ -77,185 +77,7 @@ pub(in crate::workflow_engine) async fn execute(
         .get("require_pass")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    // Which repo(s)/worktree(s)/base(s) to review — (repo_id, worktree,
-    // want_base, label), in priority order:
-    //
-    // 1. NODE params name a target → the classic single-repo path.
-    // 2. The input carries a published `repos[]` array (a multi-repo
-    //    review/loop handing its full set forward) → one target each,
-    //    so a chained review re-reviews EVERY repo, not just the
-    //    first-mirrored one.
-    // 3. The input carries a published single `worktree` reference →
-    //    single target (an upstream step handing off the exact place
-    //    it worked).
-    // 4. The run's repos registry (the declared branches/worktrees,
-    //    source+destination) → one target per valid entry.
-    // 5. One implicit target from the run context (design §B
-    //    resilience: working_directory/run_cwd → registered repo).
-    //
-    // A bare `input.repo_id`/`working_directory` never counts as a
-    // target by itself — run-start seeding puts those into the input
-    // of every declared run, and counting them would permanently mask
-    // the multi-entry paths.
-    let params_explicit = p
-        .get("repo_id")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .is_some()
-        || p.get("worktree_path")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .is_some();
-    // Notes emitted while resolving targets, before the per-target log
-    // buffer below exists; folded into it verbatim.
-    let mut logs_pre: Vec<String> = Vec::new();
-    let input_repo_targets: Vec<(String, String, Option<String>, String)> = input
-        .get("repos")
-        .and_then(Value::as_array)
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|t| {
-                    let rid = t
-                        .get("repo_id")
-                        .and_then(Value::as_str)
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())?;
-                    let wt = t
-                        .get("worktree")
-                        .and_then(Value::as_str)
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())?;
-                    let base = t
-                        .get("base")
-                        .and_then(Value::as_str)
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .map(str::to_string);
-                    Some((rid.to_string(), expand_tilde(wt), base, String::new()))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    let input_worktree_ref = input
-        .get("worktree")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .is_some()
-        || input
-            .get("worktree_path")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .is_some();
-    let mut targets: Vec<(String, String, Option<String>, String)> = Vec::new();
-    if !params_explicit && !input_repo_targets.is_empty() {
-        // `repos[]` is threaded VERBATIM from node to node (every
-        // agent_prompt copies it into its output), so it is a snapshot of
-        // what the run started with. `repos.json` is the live registry —
-        // run-brief.md calls it "the authoritative list", and a checkout
-        // step that discovers the PR's real destination branch corrects it
-        // there. Let the registry win on `base` for an entry it also
-        // declares, or that correction is silently discarded and the
-        // review diffs against the stale branch anyway.
-        let declared = env.files.repos();
-        targets = input_repo_targets
-            .into_iter()
-            .map(|(rid, wt, base, label)| {
-                let live = declared
-                    .iter()
-                    .find(|e| e.repo_id.as_deref() == Some(rid.as_str()))
-                    .or_else(|| {
-                        declared
-                            .iter()
-                            .find(|e| e.worktree.as_deref() == Some(wt.as_str()))
-                    })
-                    .and_then(|e| e.base.clone())
-                    .filter(|b| !b.trim().is_empty());
-                match live {
-                    Some(b) if Some(&b) != base.as_ref() => {
-                        logs_pre.push(format!(
-                            "review_run: base for {rid} taken from repos.json ({b}), \
-                                     not the value threaded through the run input ({})",
-                            base.as_deref().unwrap_or("unset")
-                        ));
-                        (rid, wt, Some(b), label)
-                    }
-                    _ => (rid, wt, base, label),
-                }
-            })
-            .collect();
-    } else if !params_explicit && !input_worktree_ref {
-        // Declarations: EVERY entry failed to resolve → fail with the
-        // reasons. Falling through to the run-cwd path would review
-        // whatever happens to be checked out — and an empty diff there
-        // reads as a false-green "score 100" on a run whose declared
-        // target never resolved.
-        let declared = env.files.repos();
-        if let Some(msg) = crate::workflow_context::all_declared_errored(&declared) {
-            return Err(otto_core::Error::Invalid(format!(
-                "review_run: no declared repos[] entry resolved — {msg}"
-            )));
-        }
-        for e in declared
-            .iter()
-            .filter(|e| e.error.is_none() && e.repo_id.is_some() && e.worktree.is_some())
-        {
-            targets.push((
-                e.repo_id.clone().unwrap_or_default(),
-                e.worktree.clone().unwrap_or_default(),
-                // Declared source, else per-repo default-branch
-                // detection inside run_review_for_branch.
-                e.base.clone(),
-                e.repo.clone(),
-            ));
-        }
-    }
-    if targets.is_empty() {
-        // Resilient repo resolution (design §B): explicit repo_id wins,
-        // else derive it from the step's worktree_path / the run's
-        // working_directory / run_cwd against the workspace's registered
-        // repos. Never a bare "missing repo_id" for a workflow that was
-        // given a working directory.
-        let repo_id = resolve_step_repo_id(ctx, ws, p, &input, run_cwd)
-            .await?
-            .ok_or_else(|| {
-                otto_core::Error::Invalid(
-                    "review_run: no repo_id; pass repo_id or a working_directory/worktree_path \
-                             under a registered repo, or declare repos on the run"
-                        .into(),
-                )
-            })?;
-        // The directory the implementer worked in (the run's
-        // working_directory) IS what we review — fall back to it
-        // (run_cwd), not the bare repo checkout, so the reviewer sees the
-        // same place the agent changed. A prior step's published
-        // `worktree` (e.g. another review) wins first.
-        let worktree = p
-            .get("worktree_path")
-            .and_then(Value::as_str)
-            .or_else(|| input.get("worktree").and_then(Value::as_str))
-            .or_else(|| input.get("worktree_path").and_then(Value::as_str))
-            .or_else(|| input.get("working_directory").and_then(Value::as_str))
-            .filter(|s| !s.trim().is_empty())
-            .map(expand_tilde)
-            .unwrap_or_else(|| run_cwd.to_string());
-        // The DESIRED base: node params → input → the run's ambient base.
-        // `None` ⇒ run_review_for_branch resolves the repo's default
-        // branch; a named branch that doesn't exist falls back the same
-        // way instead of exiting 128.
-        let want_base = p
-            .get("base")
-            .and_then(Value::as_str)
-            .or_else(|| input.get("base").and_then(Value::as_str))
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-            .or_else(|| env.run_base.clone());
-        targets.push((repo_id, worktree, want_base, String::new()));
-    }
+    let (targets, mut logs_pre) = resolve_targets(ctx, ws, p, &input, env, run_cwd).await?;
     let multi = targets.len() > 1;
     // Iteration label so a fix→review loop streams "Review #1, #2, …".
     let iter_label = input
@@ -533,96 +355,17 @@ pub(in crate::workflow_engine) async fn execute(
                          declares the PR's own source branch as the base diffs it against itself."
             ));
         }
-        let mut status = "running".to_string();
-        // Surface each reviewer's live session so the run view shows ALL of
-        // them running (per-lens reviewers + the checks reviewer), not just
-        // an opaque "review started". Ids flow through `session_tx` →
-        // `states[idx].sessions`; a set dedups repeated poll harvests. The
-        // summarizer publishes its managed session while it is running too.
-        let mut seen_sessions: std::collections::HashSet<String> = std::collections::HashSet::new();
-        if await_done {
-            let deadline = Instant::now() + Duration::from_secs(timeout_s);
-            // Event-driven: subscribe BEFORE the first read, then
-            // re-read only the status + agent rows (never the
-            // comments) when this review's `ReviewChanged` or a run
-            // cancel arrives, or every [`REVIEW_WAIT_SAFETY_RECHECK`].
-            // It used to load the full review and decode every
-            // comment every 2 s for the review's whole lifetime.
-            let mut review_events = ctx.events.subscribe();
-            let mut run_cancels = otto_state::workflows::subscribe_cancels();
-            let runs = WorkflowsRepo::new(ctx.pool.clone());
-            loop {
-                if let Ok((review_status, agents)) =
-                    ctx.reviews_store.review_agents(&review_id).await
-                {
-                    use otto_core::domain::ReviewStatus as RS;
-                    for a in &agents {
-                        if let Some(sid) = &a.session_id {
-                            if seen_sessions.insert(sid.clone()) {
-                                let _ = session_tx.send(AgentAssociation::Session(sid.clone()));
-                            }
-                        }
-                    }
-                    match review_status {
-                        RS::Done => {
-                            status = "done".into();
-                            break;
-                        }
-                        RS::Error => {
-                            status = "error".into();
-                            break;
-                        }
-                        RS::Cancelled => {
-                            status = "cancelled".into();
-                            break;
-                        }
-                        RS::Running => {}
-                    }
-                }
-                if runs.is_canceled(run_id).await {
-                    // Stop HERE: breaking out went on to the goals
-                    // agent / the next target's review before the
-                    // engine's cancel poll dropped this future, and a
-                    // review started in that gap was never cancelled.
-                    return Err(otto_core::Error::Internal("run canceled".into()));
-                }
-                if Instant::now() >= deadline {
-                    status = "timeout".into();
-                    logs.push(format!("review_run{tag}: timed out waiting for review"));
-                    // Don't abandon it running: inside a fix/review loop
-                    // the next iteration would start a second fleet on the
-                    // same worktree next to it.
-                    if let Ok(review) = ctx.reviews_store.get_review(&review_id).await {
-                        crate::modules::cancel_running_review(ctx, &review, &ws.id).await;
-                    }
-                    break;
-                }
-                let wake_at = tokio::time::Instant::now() + REVIEW_WAIT_SAFETY_RECHECK;
-                let wake_at = wake_at.min(tokio::time::Instant::from_std(deadline));
-                tokio::select! {
-                    () = wake_on_event(
-                        &mut review_events,
-                        |ev| matches!(ev, Event::ReviewChanged { review_id: rid, .. } if *rid == review_id),
-                        wake_at,
-                    ) => {}
-                    // Any run's cancel (rare): the status read above
-                    // decides whether it was this run's.
-                    _ = run_cancels.recv() => {}
-                }
-            }
-        } else {
-            // Fire-and-forget review: still surface any reviewer sessions that
-            // have already spawned so they're attributable under this step.
-            if let Ok((_, agents)) = ctx.reviews_store.review_agents(&review_id).await {
-                for a in &agents {
-                    if let Some(sid) = &a.session_id {
-                        if seen_sessions.insert(sid.clone()) {
-                            let _ = session_tx.send(AgentAssociation::Session(sid.clone()));
-                        }
-                    }
-                }
-            }
-        }
+        let status = await_review(
+            ctx,
+            ws,
+            run_id,
+            &review_id,
+            await_done.then_some(timeout_s),
+            session_tx,
+            &tag,
+            &mut logs,
+        )
+        .await?;
         let (total, open, blocker) = crate::modules::review_findings_counts(ctx, &review_id).await;
         let blocking = blocker as i64;
         let advisory = (open.saturating_sub(blocker)) as i64;
@@ -875,4 +618,308 @@ pub(in crate::workflow_engine) async fn execute(
         );
     }
     Ok((Value::Object(out), logs))
+}
+
+/// One review target: `(repo_id, worktree, want_base, label)`.
+type ReviewTarget = (String, String, Option<String>, String);
+
+/// Which repo(s)/worktree(s)/base(s) to review — (repo_id, worktree,
+/// want_base, label), in priority order:
+///
+/// 1. NODE params name a target → the classic single-repo path.
+/// 2. The input carries a published `repos[]` array (a multi-repo
+///    review/loop handing its full set forward) → one target each,
+///    so a chained review re-reviews EVERY repo, not just the
+///    first-mirrored one.
+/// 3. The input carries a published single `worktree` reference →
+///    single target (an upstream step handing off the exact place
+///    it worked).
+/// 4. The run's repos registry (the declared branches/worktrees,
+///    source+destination) → one target per valid entry.
+/// 5. One implicit target from the run context (design §B
+///    resilience: working_directory/run_cwd → registered repo).
+///
+/// A bare `input.repo_id`/`working_directory` never counts as a
+/// target by itself — run-start seeding puts those into the input
+/// of every declared run, and counting them would permanently mask
+/// the multi-entry paths.
+///
+/// Returns the targets plus the notes emitted while resolving them, which
+/// the step folds into its logs.
+async fn resolve_targets(
+    ctx: &ServerCtx,
+    ws: &Workspace,
+    p: &Value,
+    input: &Value,
+    env: &RunEnv,
+    run_cwd: &str,
+) -> Result<(Vec<ReviewTarget>, Vec<String>)> {
+    let params_explicit = p
+        .get("repo_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .is_some()
+        || p.get("worktree_path")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .is_some();
+    // Notes emitted while resolving targets, before the per-target log
+    // buffer below exists; folded into it verbatim.
+    let mut logs_pre: Vec<String> = Vec::new();
+    let input_repo_targets: Vec<(String, String, Option<String>, String)> = input
+        .get("repos")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|t| {
+                    let rid = t
+                        .get("repo_id")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())?;
+                    let wt = t
+                        .get("worktree")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())?;
+                    let base = t
+                        .get("base")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string);
+                    Some((rid.to_string(), expand_tilde(wt), base, String::new()))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let input_worktree_ref = input
+        .get("worktree")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .is_some()
+        || input
+            .get("worktree_path")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .is_some();
+    let mut targets: Vec<(String, String, Option<String>, String)> = Vec::new();
+    if !params_explicit && !input_repo_targets.is_empty() {
+        // `repos[]` is threaded VERBATIM from node to node (every
+        // agent_prompt copies it into its output), so it is a snapshot of
+        // what the run started with. `repos.json` is the live registry —
+        // run-brief.md calls it "the authoritative list", and a checkout
+        // step that discovers the PR's real destination branch corrects it
+        // there. Let the registry win on `base` for an entry it also
+        // declares, or that correction is silently discarded and the
+        // review diffs against the stale branch anyway.
+        let declared = env.files.repos();
+        targets = input_repo_targets
+            .into_iter()
+            .map(|(rid, wt, base, label)| {
+                let live = declared
+                    .iter()
+                    .find(|e| e.repo_id.as_deref() == Some(rid.as_str()))
+                    .or_else(|| {
+                        declared
+                            .iter()
+                            .find(|e| e.worktree.as_deref() == Some(wt.as_str()))
+                    })
+                    .and_then(|e| e.base.clone())
+                    .filter(|b| !b.trim().is_empty());
+                match live {
+                    Some(b) if Some(&b) != base.as_ref() => {
+                        logs_pre.push(format!(
+                            "review_run: base for {rid} taken from repos.json ({b}), \
+                                     not the value threaded through the run input ({})",
+                            base.as_deref().unwrap_or("unset")
+                        ));
+                        (rid, wt, Some(b), label)
+                    }
+                    _ => (rid, wt, base, label),
+                }
+            })
+            .collect();
+    } else if !params_explicit && !input_worktree_ref {
+        // Declarations: EVERY entry failed to resolve → fail with the
+        // reasons. Falling through to the run-cwd path would review
+        // whatever happens to be checked out — and an empty diff there
+        // reads as a false-green "score 100" on a run whose declared
+        // target never resolved.
+        let declared = env.files.repos();
+        if let Some(msg) = crate::workflow_context::all_declared_errored(&declared) {
+            return Err(otto_core::Error::Invalid(format!(
+                "review_run: no declared repos[] entry resolved — {msg}"
+            )));
+        }
+        for e in declared
+            .iter()
+            .filter(|e| e.error.is_none() && e.repo_id.is_some() && e.worktree.is_some())
+        {
+            targets.push((
+                e.repo_id.clone().unwrap_or_default(),
+                e.worktree.clone().unwrap_or_default(),
+                // Declared source, else per-repo default-branch
+                // detection inside run_review_for_branch.
+                e.base.clone(),
+                e.repo.clone(),
+            ));
+        }
+    }
+    if targets.is_empty() {
+        // Resilient repo resolution (design §B): explicit repo_id wins,
+        // else derive it from the step's worktree_path / the run's
+        // working_directory / run_cwd against the workspace's registered
+        // repos. Never a bare "missing repo_id" for a workflow that was
+        // given a working directory.
+        let repo_id = resolve_step_repo_id(ctx, ws, p, input, run_cwd)
+            .await?
+            .ok_or_else(|| {
+                otto_core::Error::Invalid(
+                    "review_run: no repo_id; pass repo_id or a working_directory/worktree_path \
+                             under a registered repo, or declare repos on the run"
+                        .into(),
+                )
+            })?;
+        // The directory the implementer worked in (the run's
+        // working_directory) IS what we review — fall back to it
+        // (run_cwd), not the bare repo checkout, so the reviewer sees the
+        // same place the agent changed. A prior step's published
+        // `worktree` (e.g. another review) wins first.
+        let worktree = p
+            .get("worktree_path")
+            .and_then(Value::as_str)
+            .or_else(|| input.get("worktree").and_then(Value::as_str))
+            .or_else(|| input.get("worktree_path").and_then(Value::as_str))
+            .or_else(|| input.get("working_directory").and_then(Value::as_str))
+            .filter(|s| !s.trim().is_empty())
+            .map(expand_tilde)
+            .unwrap_or_else(|| run_cwd.to_string());
+        // The DESIRED base: node params → input → the run's ambient base.
+        // `None` ⇒ run_review_for_branch resolves the repo's default
+        // branch; a named branch that doesn't exist falls back the same
+        // way instead of exiting 128.
+        let want_base = p
+            .get("base")
+            .and_then(Value::as_str)
+            .or_else(|| input.get("base").and_then(Value::as_str))
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .or_else(|| env.run_base.clone());
+        targets.push((repo_id, worktree, want_base, String::new()));
+    }
+    Ok((targets, logs_pre))
+}
+
+/// Wait for a launched review to settle — event-driven, re-reading only its
+/// status and agent rows — and surface every reviewer session under this
+/// step as it appears. `timeout_s: None` is a fire-and-forget review: only
+/// the sessions already spawned are surfaced. Returns the review's settled
+/// status (`done` / `error` / `cancelled` / `timeout`, or `running` when not
+/// awaited); a run cancel stops the wait with an error.
+#[allow(clippy::too_many_arguments)]
+async fn await_review(
+    ctx: &ServerCtx,
+    ws: &Workspace,
+    run_id: &Id,
+    review_id: &Id,
+    timeout_s: Option<u64>,
+    session_tx: &tokio::sync::mpsc::UnboundedSender<AgentAssociation>,
+    tag: &str,
+    logs: &mut Vec<String>,
+) -> Result<String> {
+    let mut status = "running".to_string();
+    // Surface each reviewer's live session so the run view shows ALL of
+    // them running (per-lens reviewers + the checks reviewer), not just
+    // an opaque "review started". Ids flow through `session_tx` →
+    // `states[idx].sessions`; a set dedups repeated poll harvests. The
+    // summarizer publishes its managed session while it is running too.
+    let mut seen_sessions: std::collections::HashSet<String> = std::collections::HashSet::new();
+    if let Some(timeout_s) = timeout_s {
+        let deadline = Instant::now() + Duration::from_secs(timeout_s);
+        // Event-driven: subscribe BEFORE the first read, then
+        // re-read only the status + agent rows (never the
+        // comments) when this review's `ReviewChanged` or a run
+        // cancel arrives, or every [`REVIEW_WAIT_SAFETY_RECHECK`].
+        // It used to load the full review and decode every
+        // comment every 2 s for the review's whole lifetime.
+        let mut review_events = ctx.events.subscribe();
+        let mut run_cancels = otto_state::workflows::subscribe_cancels();
+        let runs = WorkflowsRepo::new(ctx.pool.clone());
+        loop {
+            if let Ok((review_status, agents)) = ctx.reviews_store.review_agents(review_id).await {
+                use otto_core::domain::ReviewStatus as RS;
+                for a in &agents {
+                    if let Some(sid) = &a.session_id {
+                        if seen_sessions.insert(sid.clone()) {
+                            let _ = session_tx.send(AgentAssociation::Session(sid.clone()));
+                        }
+                    }
+                }
+                match review_status {
+                    RS::Done => {
+                        status = "done".into();
+                        break;
+                    }
+                    RS::Error => {
+                        status = "error".into();
+                        break;
+                    }
+                    RS::Cancelled => {
+                        status = "cancelled".into();
+                        break;
+                    }
+                    RS::Running => {}
+                }
+            }
+            if runs.is_canceled(run_id).await {
+                // Stop HERE: breaking out went on to the goals
+                // agent / the next target's review before the
+                // engine's cancel poll dropped this future, and a
+                // review started in that gap was never cancelled.
+                return Err(otto_core::Error::Internal("run canceled".into()));
+            }
+            if Instant::now() >= deadline {
+                status = "timeout".into();
+                logs.push(format!("review_run{tag}: timed out waiting for review"));
+                // Don't abandon it running: inside a fix/review loop
+                // the next iteration would start a second fleet on the
+                // same worktree next to it.
+                if let Ok(review) = ctx.reviews_store.get_review(review_id).await {
+                    crate::modules::cancel_running_review(ctx, &review, &ws.id).await;
+                }
+                break;
+            }
+            let wake_at = tokio::time::Instant::now() + REVIEW_WAIT_SAFETY_RECHECK;
+            let wake_at = wake_at.min(tokio::time::Instant::from_std(deadline));
+            tokio::select! {
+                () = wake_on_event(
+                    &mut review_events,
+                    |ev| matches!(ev, Event::ReviewChanged { review_id: rid, .. } if rid == review_id),
+                    wake_at,
+                ) => {}
+                // Any run's cancel (rare): the status read above
+                // decides whether it was this run's.
+                _ = run_cancels.recv() => {}
+            }
+        }
+    } else {
+        // Fire-and-forget review: still surface any reviewer sessions that
+        // have already spawned so they're attributable under this step.
+        if let Ok((_, agents)) = ctx.reviews_store.review_agents(review_id).await {
+            for a in &agents {
+                if let Some(sid) = &a.session_id {
+                    if seen_sessions.insert(sid.clone()) {
+                        let _ = session_tx.send(AgentAssociation::Session(sid.clone()));
+                    }
+                }
+            }
+        }
+    }
+    Ok(status)
 }

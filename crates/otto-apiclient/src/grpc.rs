@@ -734,20 +734,42 @@ async fn grpc_endpoint(url: &str, allow_local: bool) -> Result<Endpoint, Error> 
             .map_err(|e| invalid(format!("bad url: {e}")))?;
         let mut endpoint = Channel::builder(pinned).origin(origin);
         if is_tls {
-            let tls = ClientTlsConfig::new().with_webpki_roots().domain_name(host);
-            endpoint = endpoint
-                .tls_config(tls)
-                .map_err(|e| upstream(format!("tls config: {e}")))?;
+            endpoint = with_client_tls(endpoint, Some(host.as_str()))?;
         }
         return Ok(endpoint);
     };
     if is_tls {
-        let tls = ClientTlsConfig::new().with_webpki_roots();
-        endpoint = endpoint
-            .tls_config(tls)
-            .map_err(|e| upstream(format!("tls config: {e}")))?;
+        endpoint = with_client_tls(endpoint, None)?;
     }
     Ok(endpoint)
+}
+
+/// The TLS trust config every gRPC dial uses: the OS trust store (so an
+/// internal / corporate CA the user installed verifies, exactly as the REST
+/// client's platform verifier does) plus the bundled Mozilla roots. `native`
+/// off is the bundled-roots-only fallback for a host with no readable OS store.
+fn client_tls_config(domain: Option<&str>, native: bool) -> ClientTlsConfig {
+    let mut tls = ClientTlsConfig::new();
+    if native {
+        tls = tls.with_native_roots();
+    }
+    tls = tls.with_webpki_roots();
+    match domain {
+        Some(d) => tls.domain_name(d),
+        None => tls,
+    }
+}
+
+/// Layer [`client_tls_config`] on `endpoint`. tonic refuses a native-roots
+/// config when the OS store yields no certificate (a bare Linux container), so
+/// that one case retries with the bundled roots alone instead of failing.
+fn with_client_tls(endpoint: Endpoint, domain: Option<&str>) -> Result<Endpoint, Error> {
+    match endpoint.clone().tls_config(client_tls_config(domain, true)) {
+        Ok(ep) => Ok(ep),
+        Err(_) => endpoint
+            .tls_config(client_tls_config(domain, false))
+            .map_err(|e| upstream(format!("tls config: {e}"))),
+    }
 }
 
 async fn connect_channel(url: &str, allow_local: bool) -> Result<Channel, Error> {
@@ -1243,6 +1265,19 @@ mod tests {
         let ep = grpc_endpoint("grpcs://8.8.8.8", false).await.unwrap();
         assert_eq!(ep.uri().scheme_str(), Some("https"));
         assert_eq!(ep.uri().port_u16(), Some(443));
+    }
+
+    #[test]
+    fn tls_config_trusts_the_os_store_and_the_bundled_roots() {
+        // Int-5-03: webpki-only rejected every internal-CA gRPC server with
+        // `UnknownIssuer` while REST to the same host verified via the keychain.
+        let dbg = format!("{:?}", client_tls_config(Some("payments.internal"), true));
+        assert!(dbg.contains("with_native_roots: true"), "{dbg}");
+        assert!(dbg.contains("with_webpki_roots: true"), "{dbg}");
+        assert!(dbg.contains("payments.internal"), "{dbg}");
+        let fallback = format!("{:?}", client_tls_config(None, false));
+        assert!(fallback.contains("with_native_roots: false"), "{fallback}");
+        assert!(fallback.contains("with_webpki_roots: true"), "{fallback}");
     }
 
     #[test]

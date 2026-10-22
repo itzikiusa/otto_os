@@ -81,6 +81,16 @@ fn main() {
                         let _ =
                             popout::open_in_otto(app.clone(), Some("settings/appearance".into()));
                     }
+                    // A live but wedged daemon survives every relaunch (the
+                    // boot path never kills one): `kickstart -k` it, or
+                    // reinstall when the job isn't loaded (error-handling-5-01).
+                    tray::MENU_RESTART_DAEMON => {
+                        tauri::async_runtime::spawn(async {
+                            if let Err(e) = supervisor::daemon_restart().await {
+                                eprintln!("restart daemon failed: {e}");
+                            }
+                        });
+                    }
                     _ => {
                         // The bar / tray panels never take menu events (their
                         // pages have no menu bridge) — only app windows do.
@@ -198,11 +208,7 @@ fn main() {
             // and surfaces state, so failures here are non-fatal.
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                let report = supervisor::ensure_daemon(|interim| {
-                    let _ = handle.emit("otto://daemon-state", interim);
-                })
-                .await;
-                let _ = handle.emit("otto://daemon-state", &report);
+                supervisor::ensure_and_publish(&handle).await;
             });
 
             Ok(())

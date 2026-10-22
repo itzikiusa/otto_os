@@ -1,12 +1,8 @@
 //! The registry stores hashes only. A per-room mutex serializes admission,
 //! revocation and terminal writes; no database operation runs on keystrokes.
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use super::capability::{well_formed, Capability, Digest, TokenBucket};
 use chrono::{DateTime, Utc};
 use otto_core::{api::*, Error, Result};
-use rand::rand_core::UnwrapErr;
-use rand::rngs::SysRng;
-use rand::Rng;
-use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, VecDeque},
     sync::Arc,
@@ -32,45 +28,24 @@ pub(super) enum Notice {
         event: RoomEvent,
     },
 }
-pub(super) struct Rate {
-    pub tokens: f64,
-    pub at: Instant,
-}
-impl Rate {
-    pub fn new(burst: f64) -> Self {
-        Self {
-            tokens: burst,
-            at: Instant::now(),
-        }
-    }
-    pub fn take(&mut self, per_second: f64, burst: f64) -> Result<()> {
-        let now = Instant::now();
-        self.tokens =
-            (self.tokens + now.duration_since(self.at).as_secs_f64() * per_second).min(burst);
-        self.at = now;
-        if self.tokens < 1.0 {
-            return Err(Error::Conflict("Too many events; retry shortly".into()));
-        }
-        self.tokens -= 1.0;
-        Ok(())
-    }
-}
+/// The rooms relay's throttle message (the shared bucket takes it per call).
+pub(super) const RATE_LIMITED: &str = "Too many events; retry shortly";
 pub(super) struct Member {
     pub view: RoomMember,
-    pub hash: [u8; 32],
+    pub hash: Digest,
     pub joined: Instant,
     pub disconnected: Option<Instant>,
     pub heartbeat: Instant,
     pub present_until: Option<Instant>,
-    pub chat_rate: Rate,
-    pub action_rate: Rate,
-    pub annotation_rate: Rate,
+    pub chat_rate: TokenBucket,
+    pub action_rate: TokenBucket,
+    pub annotation_rate: TokenBucket,
     pub pointer_at: Option<Instant>,
     pub terminal_active: bool,
-    pub ice_rate: Rate,
+    pub ice_rate: TokenBucket,
 }
 impl Member {
-    fn new(name: String, role: RoomRole, hash: [u8; 32], admission: RoomAdmission) -> Self {
+    fn new(name: String, role: RoomRole, hash: Digest, admission: RoomAdmission) -> Self {
         Self {
             view: RoomMember {
                 id: uuid::Uuid::new_v4().to_string(),
@@ -91,12 +66,12 @@ impl Member {
             disconnected: Some(Instant::now()),
             heartbeat: Instant::now(),
             present_until: None,
-            chat_rate: Rate::new(10.0),
-            action_rate: Rate::new(80.0),
-            annotation_rate: Rate::new(48.0),
+            chat_rate: TokenBucket::new(10.0),
+            action_rate: TokenBucket::new(80.0),
+            annotation_rate: TokenBucket::new(48.0),
             pointer_at: None,
             terminal_active: false,
-            ice_rate: Rate::new(2.0),
+            ice_rate: TokenBucket::new(2.0),
         }
     }
     pub fn valid(&self) -> bool {
@@ -125,7 +100,7 @@ pub(super) struct Room {
     pub created: Instant,
     pub expires: DateTime<Utc>,
     pub members: HashMap<String, Member>,
-    invites: HashMap<[u8; 32], Invite>,
+    invites: HashMap<Digest, Invite>,
     pub messages: VecDeque<RoomMessage>,
     pub next_message: u64,
     pub presentations: Vec<RoomPresentation>,
@@ -143,16 +118,6 @@ pub(super) fn invalid(s: &str) -> Error {
 }
 pub(super) fn forbidden(s: &str) -> Error {
     Error::Forbidden(s.into())
-}
-pub(super) fn secret() -> (String, [u8; 32]) {
-    let mut bytes = [0u8; 32];
-    UnwrapErr(SysRng).fill_bytes(&mut bytes);
-    let token = URL_SAFE_NO_PAD.encode(bytes);
-    let digest = hash(&token);
-    (token, digest)
-}
-fn hash(token: &str) -> [u8; 32] {
-    Sha256::digest(token.as_bytes()).into()
 }
 fn name(s: &str) -> Result<String> {
     let s = s.trim();
@@ -189,7 +154,7 @@ impl RoomRegistry {
             }
         }
         let id = uuid::Uuid::new_v4().to_string();
-        let (token, hash) = secret();
+        let (token, hash) = Capability::issue();
         let host = Member::new(display_name, RoomRole::Host, hash, RoomAdmission::Admitted);
         let member_id = host.view.id.clone();
         let room = Room {
@@ -254,7 +219,7 @@ impl RoomRegistry {
         if room.invites.len() >= 8 {
             return Err(Error::Conflict("Too many outstanding invitations".into()));
         }
-        let (token, hash) = secret();
+        let (token, hash) = Capability::issue();
         room.invites.insert(
             hash,
             Invite {
@@ -266,6 +231,11 @@ impl RoomRegistry {
     }
     pub async fn join(&self, id: &str, token: &str, display_name: &str) -> Result<RoomCredential> {
         let display_name = name(display_name)?;
+        // Every invite is a 43-char capability; refuse anything else before
+        // taking the room lock (the game relay always did).
+        if !well_formed(token) {
+            return Err(Error::Unauthorized);
+        }
         let room = self.get(id).await?;
         let mut room = room.lock().await;
         room.live()?;
@@ -282,7 +252,7 @@ impl RoomRegistry {
         {
             return Err(Error::Conflict("Too many pending joins".into()));
         }
-        let digest = hash(token);
+        let digest = Digest::of(token);
         let invite = room
             .invites
             .get(&digest)
@@ -290,7 +260,7 @@ impl RoomRegistry {
             .ok_or(Error::Unauthorized)?;
         let role = invite.role;
         room.invites.remove(&digest);
-        let (token, hash) = secret();
+        let (token, hash) = Capability::issue();
         let member = Member::new(display_name, role, hash, RoomAdmission::Pending);
         let member_id = member.view.id.clone();
         room.members.insert(member_id.clone(), member);
@@ -302,20 +272,16 @@ impl RoomRegistry {
         })
     }
     pub async fn authenticate(&self, id: &str, token: &str) -> Result<String> {
-        if token.len() != 43 {
+        if !well_formed(token) {
             return Err(Error::Unauthorized);
         }
         let room = self.get(id).await?;
         let room = room.lock().await;
         room.live()?;
-        let digest = hash(token);
-        // All random hashes have equal length. Accumulating XOR prevents an
-        // early-byte comparison from making a useful token prefix oracle.
+        // `Digest::matches` is the shared constant-time compare.
         room.members
             .values()
-            .find(|m| {
-                m.valid() && m.hash.iter().zip(digest).fold(0u8, |a, (x, y)| a | (x ^ y)) == 0
-            })
+            .find(|m| m.valid() && m.hash.matches(token))
             .map(|m| m.view.id.clone())
             .ok_or(Error::Unauthorized)
     }

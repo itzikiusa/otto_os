@@ -1,0 +1,13 @@
+{
+  "$comment": "The ONE room-game catalog: game kinds, active-member capacity and map ids. The daemon include_str!s this file (crates/otto-server/src/game_rooms/types.rs) to validate POST /game-rooms, and games/catalog.ts reads it for the chooser. unit/roomGamesCatalog.test.ts checks the kart tracks and shooter maps implement exactly these ids.",
+  "games": {
+    "kart": {
+      "capacity": 8,
+      "maps": ["meadow", "downtown", "canyon", "frost", "lagoon", "volcano", "skyway"]
+    },
+    "shooter": {
+      "capacity": 4,
+      "maps": ["isle", "mesa", "deadcity"]
+    }
+  }
+}

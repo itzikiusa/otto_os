@@ -46,6 +46,10 @@ export interface DryRunResp {
   partitions: DryRunPartition[];
   total_lag_before: number;
   total_lag_after: number;
+  /** Set when the real reset would be refused (e.g. the group still has live
+   *  consumers: "consumer group g is Stable; stop its consumers first") —
+   *  the same text as the 409. Absent when the reset can go ahead. */
+  warning?: string;
 }
 
 // ---- Lag alerts --------------------------------------------------------------

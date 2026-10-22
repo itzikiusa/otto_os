@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { untrack } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   // Boot flow: GET /meta → onboarding wizard | login | main shell.
   import Toasts from './lib/components/Toasts.svelte';
   import BarHost from './modules/desktop/BarHost.svelte';
@@ -8,7 +8,14 @@
   import { appLive } from './lib/live';
   import { router } from './lib/router.svelte';
   import { ui } from './lib/stores/ui.svelte';
-  import { isEmbedded } from './lib/desktop';
+  import { isEmbedded, isTauri } from './lib/desktop';
+  import {
+    daemonSupervisor,
+    installFailed,
+    offlineDetail,
+    supervisorErrorText,
+    type DaemonReport,
+  } from './modules/desktop/daemonState';
   import { preloadRoute } from './shell/pages.svelte';
 
   ui.applyTheme();
@@ -88,6 +95,60 @@
     if (up) auth.noteConnected();
   }));
 
+  // The desktop supervisor's diagnosis (error-handling-5-01): the shell
+  // publishes `otto://daemon-state` while it installs/starts ottod. Keep the
+  // last report so the offline screen says WHY (a wedged daemon, a refused
+  // bootstrap) and offers the recovery the shell can do. A window opened
+  // after the boot event asks for the status (which carries the last
+  // diagnosis); on a first run with nothing installed it starts the daemon
+  // (single-flight in the shell).
+  let daemonReport = $state<DaemonReport | null>(null);
+  const daemonDetail = $derived(offlineDetail(daemonReport));
+  onMount(() => {
+    if (!isTauri || ['bar', 'tray', 's', 'room', 'game-room'].includes(untrack(() => router.module))) return;
+    let disposed = false;
+    let stop: () => void = () => {};
+    void daemonSupervisor
+      .onState((report) => (daemonReport = report))
+      .then((fn) => (disposed ? fn() : (stop = fn)))
+      .catch(() => {});
+    void daemonSupervisor
+      .status()
+      .then(async (report) => {
+        if (!report || disposed) return;
+        daemonReport ??= report;
+        if (!report.healthy && !report.installed) await daemonSupervisor.start();
+      })
+      .catch(() => {});
+    return () => {
+      disposed = true;
+      stop();
+    };
+  });
+
+  // Restart replaces a live but wedged daemon (`launchctl kickstart -k`; a
+  // reinstall when the job isn't loaded) — the case quitting and reopening
+  // Otto never fixes. Reinstall is offered after a failed install. Either one
+  // then re-probes at once; the 2 s poll keeps running while offline.
+  let daemonAction = $state<'restart' | 'reinstall' | null>(null);
+  let daemonActionError = $state('');
+  async function runDaemonAction(kind: 'restart' | 'reinstall'): Promise<void> {
+    if (daemonAction) return;
+    daemonAction = kind;
+    daemonActionError = '';
+    try {
+      if (kind === 'restart') await daemonSupervisor.restart();
+      else await daemonSupervisor.reinstall();
+      // The old diagnosis no longer applies; a new one arrives as an event.
+      daemonReport = null;
+      await auth.boot(true);
+    } catch (e) {
+      daemonActionError = `${kind === 'restart' ? 'Restart' : 'Reinstall'} failed: ${supervisorErrorText(e)}`;
+    } finally {
+      daemonAction = null;
+    }
+  }
+
   // "Retry now" is inert while its own attempt is in flight (the 2 s poll
   // already dedupes inside auth.boot, but the button gave no feedback).
   let retrying = $state(false);
@@ -141,7 +202,25 @@
         Starting the Otto daemon — first launch can take a few seconds…
       </div>
     {/if}
-    <button class="btn primary" onclick={retryNow} disabled={retrying}>{retrying ? 'Retrying…' : 'Retry now'}</button>
+    {#if daemonDetail}
+      <div class="boot-hint mono">{daemonDetail}</div>
+    {/if}
+    {#if daemonActionError}
+      <div class="boot-hint boot-error" role="alert">{daemonActionError}</div>
+    {/if}
+    <div class="boot-actions">
+      <button class="btn primary" onclick={retryNow} disabled={retrying}>{retrying ? 'Retrying…' : 'Retry now'}</button>
+      {#if isTauri}
+        <button class="btn" onclick={() => void runDaemonAction('restart')} disabled={daemonAction !== null}>
+          {daemonAction === 'restart' ? 'Restarting…' : 'Restart daemon'}
+        </button>
+        {#if installFailed(daemonReport)}
+          <button class="btn" onclick={() => void runDaemonAction('reinstall')} disabled={daemonAction !== null}>
+            {daemonAction === 'reinstall' ? 'Reinstalling…' : 'Reinstall daemon'}
+          </button>
+        {/if}
+      {/if}
+    </div>
   </div>
 {:else if auth.phase === 'onboarding'}
   {#await onboarding()}{@render chunkWait()}{:then m}<m.default />{:catch}{@render chunkError()}{/await}
@@ -201,5 +280,14 @@
     font-size: var(--fs-s);
     color: var(--text-dim);
     overflow-wrap: anywhere;
+  }
+  .boot-error {
+    color: var(--danger);
+  }
+  .boot-actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 8px;
   }
 </style>

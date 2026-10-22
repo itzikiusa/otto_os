@@ -6,6 +6,7 @@
   // overwritten — see apiClient.placeDraft). Row actions live in one ⋯ /
   // right-click menu per row instead of four always-visible icons.
   import Icon from '../../lib/components/Icon.svelte';
+  import { plural } from '../../lib/plural';
   import { toastError } from '../../lib/toastError';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
@@ -353,8 +354,9 @@
         {/if}
       {/snippet}
     </VirtualList>
-    {#if tokens.length > 0}<span class="sr-only" role="status">{reqCount} matching requests</span>{/if}
   {/if}
+  <!-- Always mounted (A11y-5-15): a live region inserted WITH its text is silent. -->
+  <span class="sr-only" role="status">{tokens.length > 0 ? plural(reqCount, 'matching request') : ''}</span>
 </div>
 
 {#snippet collectionNode(node: TreeNode, depth: number, isOpen: boolean)}

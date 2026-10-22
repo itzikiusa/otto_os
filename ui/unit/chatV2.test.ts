@@ -28,7 +28,7 @@ import { htmlDoc, parseDelimited, prettyJson, previewKind, previewKindForLang, r
 import { ensureHljs, highlightLines, splitHighlighted } from '../src/lib/hl.ts';
 import type { Block, ToolKind, ToolResult, Turn, TurnUsage } from '../src/lib/api/types.ts';
 
-// chatMarkdown / mdRender import siblings without an extension (Vite
+// chatMarkdown / lib/render/markdown import siblings without an extension (Vite
 // resolution); node needs `.ts` appended.
 const hook =
   'export async function resolve(s, c, n) {' +
@@ -37,7 +37,7 @@ const hook =
   '}';
 register('data:text/javascript,' + encodeURIComponent(hook));
 const chat = await import('../src/modules/agents/conversation/chatMarkdown.ts');
-const md = await import('../src/modules/vault/mdRender.ts');
+const md = await import('../src/lib/render/markdown.ts');
 
 const ok = (extra: Partial<ToolResult> = {}): ToolResult => ({
   ok: true, text: 'ok', truncated: false, bytes: 2, image_ids: [], patch: null, file_path: null, ...extra,

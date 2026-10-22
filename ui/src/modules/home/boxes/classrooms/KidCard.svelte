@@ -4,7 +4,6 @@
   // screen, send the headmaster over, detention, kick out, release.
   import Icon from '../../../../lib/components/Icon.svelte';
   import ProviderIcon from '../../../../lib/components/ProviderIcon.svelte';
-  import { now } from '../../../../lib/stores/now.svelte';
   import { relTime } from '../../../mission-control/lib';
   import { kidLines, type Kid } from '../../school/model';
   import type { SchoolHandle, SchoolView } from '../../school/scene';
@@ -31,7 +30,7 @@
     <b class="ellipsis">{selKid.title}</b>
     <button class="icon-btn" onclick={onclose} aria-label="Close details" title="Close details"><Icon name="x" size={12} /></button>
   </div>
-  {#each kidLines(selKid, now() ? relTime(selKid.lastActiveAt) : '') as line, i (i)}
+  {#each kidLines(selKid, relTime(selKid.lastActiveAt)) as line, i (i)}
     <div class="card-line" class:needs={i === 0 && selKid.pose === 'needs-you'}>{line}</div>
   {/each}
   <div class="card-actions">

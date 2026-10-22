@@ -82,7 +82,7 @@ pub fn sanitize_prompt_text(s: &str) -> String {
 pub fn nudgeable(session: &Session) -> bool {
     session.kind == SessionKind::Agent
         && matches!(
-            crate::routes::transcript::effective_provider(session).as_str(),
+            crate::transcript::resolve::effective_provider(session).as_str(),
             "claude" | "codex"
         )
 }

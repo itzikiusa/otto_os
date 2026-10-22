@@ -46,21 +46,32 @@
     capture?.cancelCapture();
     send({type: 'recap_consent', epoch: room.recap!.epoch, allow: false});
   }
+  /** One always-mounted consent button: the server echo swaps its label and action
+   *  instead of unmounting the focused control. */
+  function consentButton() { if (consented) void withdraw(); else send({type: 'recap_consent', epoch: room.recap!.epoch, allow: true}); }
+  /** One always-mounted capture toggle (Start ↔ Pause), for the same reason. */
+  const capturing = $derived(room.recap?.state === 'capturing');
+  function captureToggle() { if (capturing) void stop(false); else start(); }
+  /** The one status for capture edges (the visible lines are inserted with their text). */
+  const recapAnnouncement = $derived(!room.recap ? '' : room.recap.state === 'finalizing' ? 'Recap finishing. No new content is being captured.' : room.recap.state === 'paused' ? 'Capture paused.' : `Recap ${recapStateLabel(room.recap.state).toLowerCase()}.`);
   async function stop(final: boolean) { busy = true; try { if (final) await capture?.finish(); else capture?.cancelCapture(); send({type: final ? 'recap_stop' : 'recap_pause'}); } finally { busy = false; } }
 </script>
 <section class="recap-banner" aria-label="Room recap">
   {#if room.recap}
-    <div class="status"><strong role="status">Recap {recapStateLabel(room.recap.state).toLowerCase()}</strong><span>Saved locally by the host · speech, room activity and sampled screens</span></div>
-    {#if room.recap.state === 'finalizing'}<p role="status">Finishing {plural(room.recap.pending_jobs, 'accepted media job')}. No new content is being captured.</p><p class="hint">This can take up to three minutes. Withdrawing consent cancels unfinished work immediately.</p>{/if}
+    <!-- Mounted for the recap's whole life, so the finishing / paused edges are announced. -->
+    <p class="sr-only" role="status">{recapAnnouncement}</p>
+    <div class="status"><strong>Recap {recapStateLabel(room.recap.state).toLowerCase()}</strong><span>Saved locally by the host · speech, room activity and sampled screens</span></div>
+    {#if room.recap.state === 'finalizing'}<p>Finishing {plural(room.recap.pending_jobs, 'accepted media job')}. No new content is being captured.</p><p class="hint">This can take up to three minutes. Withdrawing consent cancels unfinished work immediately.</p>{/if}
     {#if room.recap.reason}<p>{room.recap.reason}</p>{/if}
     {#if room.recap.state !== 'stopped'}
       <p>The host keeps a local transcript and images of shared screens. Sampling may miss changes between frames. You can withdraw consent to pause capture for everyone.</p>
       <div class="actions">
-        {#if consented}<span>You consented</span><button class="btn small" disabled={!connected || busy} onclick={() => void withdraw()}>Withdraw consent</button>
-        {:else}<button class="btn small" disabled={!connected || busy} onclick={() => send({type: 'recap_consent', epoch: room.recap!.epoch, allow: true})}>I consent to capture</button><button class="btn small" disabled={!connected || busy} onclick={() => void withdraw()}>Do not consent</button>{/if}
+        {#if consented}<span>You consented</span>{/if}
+        <button class="btn small" disabled={!connected || busy} onclick={consentButton}>{consented ? 'Withdraw consent' : 'I consent to capture'}</button>
+        {#if !consented}<button class="btn small" disabled={!connected || busy} onclick={() => void withdraw()}>Do not consent</button>{/if}
         {#if host && room.recap.state !== 'finalizing'}
-          {#if room.recap.state === 'capturing'}<button class="btn small" disabled={busy} title="Pause immediately; unfinished speech is discarded" onclick={() => stop(false)}>Pause capture</button><button class="btn small" disabled={busy} onclick={() => stop(true)}>Finish recap</button>
-          {:else}<button class="btn small" disabled={!connected || busy || room.recap.state !== 'ready'} onclick={start}>Start capture</button><button class="btn small" disabled={!connected || busy} onclick={() => stop(true)}>Finish recap</button>{/if}
+          <button class="btn small" disabled={busy || (!capturing && (!connected || room.recap.state !== 'ready'))} title={capturing ? 'Pause immediately; unfinished speech is discarded' : undefined} onclick={captureToggle}>{capturing ? 'Pause capture' : 'Start capture'}</button>
+          <button class="btn small" disabled={busy || (!capturing && !connected)} onclick={() => stop(true)}>Finish recap</button>
         {/if}
       </div>
       <p class="hint">Consented: {room.members?.filter(m => room.recap?.consented_member_ids.includes(m.id)).map(m => m.name).join(', ') || 'Waiting for everyone'}</p>

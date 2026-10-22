@@ -304,7 +304,9 @@
       {/if}
       {#if result?.image_ids.length}
         <div class="imgs">
-          {#each result.image_ids as id (id)}
+          <!-- Keyed by position: ids are content hashes, so a result carrying the
+               same image twice repeats one (a duplicate key throws). -->
+          {#each result.image_ids as id, i (i)}
             <ImageBlock {id} alt="Tool result image" small />
           {/each}
         </div>

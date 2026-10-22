@@ -6,6 +6,7 @@
   import { toastError } from '../../lib/toastError';
   import type { Poller } from '../../lib/poll';
   import { liveQuery } from '../../lib/live';
+  import { onStoryChange } from './storyReset.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { renderMarkdown } from '../../lib/md';
@@ -110,19 +111,18 @@
     pollTimer = liveQuery({ run: () => pollVersions(), on: [], fallbackMs: POLL_INTERVAL_MS, safetyMs: 15_000, jitter: 0 });
   }
 
-  // Clear on unmount or story change.
-  $effect(() => {
-    product.selectedId;
+  // Clear on unmount or story change — depends on the story id only
+  // (storyReset.svelte.ts).
+  onStoryChange(() => product.selectedId, (sid) => {
     // Reset local state when story changes.
     sourceVersion = null;
     suggestedVersion = null;
     clearPoll();
     // Kick off initial load if we have a story.
-    if (product.selectedId) {
+    if (sid) {
       void initialLoad();
     }
-    return () => { clearPoll(); };
-  });
+  }, clearPoll);
 
   // Subscribe to `product_changed { section: 'rewrite' }` WS events.
   $effect(() => {

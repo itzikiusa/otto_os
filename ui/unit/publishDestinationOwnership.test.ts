@@ -22,6 +22,7 @@ function fixture(get: (path: string) => Promise<unknown>, mode: 'story' | 'rfc')
       projectsSequence: 0, spacesSequence: 0, issueTypesSequence: 0,
       projectsError: '', spacesError: '', formError: '',
       projectsTruncated: false, spacesTruncated: false, unwrapListing,
+      providerErrorText: (e: unknown) => e instanceof Error ? e.message : String(e),
     });
 }
 

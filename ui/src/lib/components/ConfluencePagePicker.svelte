@@ -7,7 +7,7 @@
   in height and scrollable, so long result sets never leave the viewport.
 -->
 <script lang="ts">
-  import { untrack } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import { searchConfluence } from '../api/issues';
   import type { ConfluencePageSummary } from '../api/types/product';
   import { loadErrorText } from '../loadError';
@@ -77,15 +77,37 @@
     return cancel;
   });
 
-  function pick(h: ConfluencePageSummary): void {
+  // Picking unmounts the focused input and Clear unmounts itself: hand focus
+  // to the control that replaces each, or it falls to <body> (outside the
+  // Modal's flow).
+  let inputEl = $state<HTMLInputElement | null>(null);
+  let clearEl = $state<HTMLButtonElement | null>(null);
+
+  async function pick(h: ConfluencePageSummary): Promise<void> {
     onchange(h.id, h.title);
     q = ''; hits = []; open = false; active = -1;
+    await tick();
+    clearEl?.focus();
+  }
+
+  async function clear(): Promise<void> {
+    onchange(null, null);
+    await tick();
+    inputEl?.focus();
+  }
+
+  /** Move the highlighted option and keep it inside the capped list. */
+  async function moveActive(next: number): Promise<void> {
+    open = true;
+    active = next;
+    await tick();
+    document.getElementById(`${listId}-${active}`)?.scrollIntoView({ block: 'nearest' });
   }
 
   function onkey(e: KeyboardEvent): void {
-    if (e.key === 'ArrowDown' && hits.length) { e.preventDefault(); open = true; active = (active + 1) % hits.length; }
-    else if (e.key === 'ArrowUp' && hits.length) { e.preventDefault(); open = true; active = (active - 1 + hits.length) % hits.length; }
-    else if (e.key === 'Enter' && open && active >= 0 && hits[active]) { e.preventDefault(); pick(hits[active]); }
+    if (e.key === 'ArrowDown' && hits.length) { e.preventDefault(); void moveActive((active + 1) % hits.length); }
+    else if (e.key === 'ArrowUp' && hits.length) { e.preventDefault(); void moveActive((active - 1 + hits.length) % hits.length); }
+    else if (e.key === 'Enter' && open && active >= 0 && hits[active]) { e.preventDefault(); void pick(hits[active]); }
     else if (e.key === 'Escape' && open) { e.preventDefault(); e.stopPropagation(); open = false; }
   }
 </script>
@@ -101,7 +123,8 @@
         {disabled}
         aria-label="Clear {label.toLowerCase()}"
         title="Clear {label.toLowerCase()}"
-        onclick={() => onchange(null, null)}
+        bind:this={clearEl}
+        onclick={() => void clear()}
       >Clear</button>
     </div>
   {:else}
@@ -120,6 +143,7 @@
       placeholder={spaceKey ? `Search pages in ${spaceKey}…` : 'Pick a space first'}
       disabled={disabled || !spaceKey}
       bind:value={q}
+      bind:this={inputEl}
       oninput={() => { open = true; schedule(); }}
       onkeydown={onkey}
     />
@@ -132,7 +156,7 @@
             tabindex="-1"
             aria-selected={i === active}
             class:active={i === active}
-            onmousedown={(e) => { e.preventDefault(); pick(h); }}
+            onmousedown={(e) => { e.preventDefault(); void pick(h); }}
           >{h.title}</li>
         {/each}
       </ul>

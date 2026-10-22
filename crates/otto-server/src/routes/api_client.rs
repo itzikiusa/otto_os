@@ -77,15 +77,10 @@ const EXECUTE_TIMEOUT: Duration = Duration::from_secs(60);
 // SSRF guard (audit S1)
 // ===========================================================================
 
-/// SSRF defense for every outbound user-URL fetch in the API-client / streaming
-/// / gRPC / browser-proxy paths. The implementation now lives in the leaf
-/// `otto-netguard` crate so the exact same classifier guards the Message-Brokers
-/// metrics / schema-registry fetches too — one definition, no drifting copy
-/// (audit S1). Re-exported here under the original `net_guard` path so existing
-/// call sites stay byte-for-byte unchanged.
-pub(crate) mod net_guard {
-    pub(crate) use otto_netguard::{check_url, guarded_client_builder, guarded_redirect_policy};
-}
+// SSRF defense for every outbound user-URL fetch in the API-client / streaming
+// / gRPC / browser-proxy paths lives in the leaf `otto-netguard` crate (the
+// same classifier guards the Message-Brokers fetches too — one definition, no
+// drifting copy, audit S1). Every caller uses `otto_netguard::` directly.
 
 fn repo(ctx: &ServerCtx) -> ApiClientRepo {
     ApiClientRepo::new(ctx.pool.clone())
@@ -163,7 +158,7 @@ fn http_client(wid: &Id, allow_local: bool) -> reqwest::Client {
                 // CONNECT time (a DNS-rebinding answer can't swap in 127.0.0.1
                 // after the pre-flight check), and each redirect hop is capped
                 // + re-validated.
-                net_guard::guarded_client_builder()
+                otto_netguard::guarded_client_builder()
             };
             let client = builder
                 .user_agent("Otto-ApiClient/1.0")
@@ -264,7 +259,7 @@ fn build_settings_client_uncached(
     // in to private targets. Everything else keeps the connect-time guard.
     let guarded = proxy.is_none() && !allow_local;
     let base = if guarded {
-        net_guard::guarded_client_builder()
+        otto_netguard::guarded_client_builder()
     } else {
         reqwest::Client::builder()
     };
@@ -277,7 +272,7 @@ fn build_settings_client_uncached(
         builder.redirect(reqwest::redirect::Policy::limited(10))
     } else {
         // Redirects still follow the SSRF-guarded policy.
-        builder.redirect(net_guard::guarded_redirect_policy())
+        builder.redirect(otto_netguard::guarded_redirect_policy())
     };
     if no_verify {
         builder = builder.danger_accept_invalid_certs(true);
@@ -1009,7 +1004,7 @@ pub async fn oauth2_token(
     // requests the token is for (a dev Keycloak on localhost is the usual case).
     let allow_local = workspace_allows_local(&ctx, &wid).await;
     if !allow_local {
-        net_guard::check_url(&req.token_url)
+        otto_netguard::check_url(&req.token_url)
             .await
             .map_err(|m| ApiError(Error::Invalid(m)))?;
     }
@@ -1020,7 +1015,7 @@ pub async fn oauth2_token(
     let client = if allow_local {
         reqwest::Client::builder()
     } else {
-        net_guard::guarded_client_builder()
+        otto_netguard::guarded_client_builder()
     }
     .user_agent("Otto-ApiClient/1.0")
     .redirect(reqwest::redirect::Policy::none())
@@ -2508,7 +2503,7 @@ async fn prepare_request(
     // explicitly opted in to local/private targets (dev servers on localhost
     // are the #1 thing an API client is pointed at).
     if proxy.is_none() && !allow_local {
-        net_guard::check_url(&url).await?;
+        otto_netguard::check_url(&url).await?;
     }
     let method = reqwest::Method::from_bytes(req.method.to_uppercase().as_bytes())
         .map_err(|_| format!("invalid HTTP method '{}'", req.method))?;

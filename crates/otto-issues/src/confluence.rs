@@ -1541,10 +1541,6 @@ fn collapse_excess_newlines(s: &str) -> String {
     out
 }
 
-/// Markdown → storage XHTML lives in [`crate::md_storage`] (one parser shared
-/// with the Jira ADF emitter); re-exported here for existing callers.
-pub use crate::md_storage::markdown_to_storage;
-
 // ──────────────────────────────────────────────────────────────────────────────
 // Tests
 // ──────────────────────────────────────────────────────────────────────────────
@@ -1552,6 +1548,7 @@ pub use crate::md_storage::markdown_to_storage;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::md_storage::markdown_to_storage;
 
     // ── storage_to_markdown ──────────────────────────────────────────────────
 

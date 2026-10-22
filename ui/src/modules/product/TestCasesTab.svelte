@@ -10,6 +10,7 @@
   import { product } from '../../lib/stores/product.svelte';
   import type { Poller } from '../../lib/poll';
   import { liveQuery } from '../../lib/live';
+  import { onStoryChange } from './storyReset.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { runStateLabel } from '../../lib/labels';
   import { plural } from '../../lib/plural';
@@ -254,18 +255,16 @@
     }
   }
 
-  // Reset on story change.
-  $effect(() => {
-    product.selectedId;
+  // Reset on story change — depends on the story id only (storyReset.svelte.ts).
+  onStoryChange(() => product.selectedId, (sid) => {
     activeRunId = null;
     caseActions = {};
     showPublishForm = false;
     selected = new Set();
     orderedIds = [];
     clearPoll();
-    if (product.selectedId) void loadRuns();
-    return () => { clearPoll(); };
-  });
+    if (sid) void loadRuns();
+  }, clearPoll);
 
   // Subscribe to `product_changed { section: 'testcases' }` WS events.
   $effect(() => {

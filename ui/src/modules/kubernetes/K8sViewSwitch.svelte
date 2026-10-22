@@ -6,7 +6,7 @@
   import { onTabKey } from '../../lib/tabKeys';
   import { router } from '../../lib/router.svelte';
   import { k8s } from '../../lib/stores/k8s.svelte';
-  import { monitorPath, resourcesPath } from './viewState';
+  import { monitorPath, resourcesPath } from '../../lib/k8s/viewState';
 
   interface Props {
     clusterId: string;

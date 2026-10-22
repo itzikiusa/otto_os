@@ -102,7 +102,7 @@ export const k8sApi = {
     ),
   /** perf K8s: {@link resources} as a conditional GET. `ifNoneMatch` is the
    *  validator of the rows the caller holds (`resourcesValidator`,
-   *  modules/kubernetes/resourcePoll.ts);
+   *  lib/k8s/resourcePoll.ts);
    *  an unchanged list resolves `{ notModified: true }` (304, nothing parsed).
    *  Same path ⇒ same lane / connection pool as `resources`. */
   resourcesIfChanged: (

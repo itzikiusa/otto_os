@@ -292,6 +292,9 @@ pub fn valid_studio(studio: &str) -> bool {
     crate::types::STUDIOS.contains(&studio)
 }
 
+/// The Excalidraw split/merge adapter shared by the assist engines.
+pub mod excalidraw;
+
 #[cfg(test)]
 mod tests {
     use super::*;
