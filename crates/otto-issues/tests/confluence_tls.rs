@@ -7,7 +7,7 @@
 //! "confluence base url" asserted here.
 
 use otto_core::Error;
-use otto_issues::ConfluenceClient;
+use otto_issues::{ConfluenceClient, PageExpect};
 
 fn refused<T: std::fmt::Debug>(what: &str, r: otto_core::Result<T>) {
     match r {
@@ -37,6 +37,26 @@ async fn every_call_refuses_a_cleartext_non_loopback_site() {
             "list_comments_since",
             c.list_comments_since("1", "2026-01-01T00:00:00.000Z").await,
         );
+        // The read-back verification reports the refusal as a failed check
+        // instead of sending the credentials.
+        let exp = PageExpect {
+            title: "T",
+            space_key: Some("S"),
+            parent_id: None,
+            version: 1,
+            storage: "<p/>",
+        };
+        for (what, v) in [
+            ("verify_page", c.verify_page("1", &exp).await),
+            ("verify_comment", c.verify_comment("2", "1", "<p/>").await),
+        ] {
+            assert!(!v.ok, "{what}: {v:?}");
+            let rb = v.checks.iter().find(|k| k.name == "read_back");
+            assert!(
+                rb.is_some_and(|k| k.detail.contains("confluence base url")),
+                "{what}: expected the TLS refusal, got {v:?}"
+            );
+        }
     }
 }
 

@@ -335,12 +335,24 @@ impl GitStore {
         self.get_repo(&expected.id).await
     }
 
+    /// Unregister a repo and, in the same transaction, its PR reviews
+    /// (data-integrity-5-05): `pr_reviews.repo_id` has no FK, so they were
+    /// left behind — unlisted (workspace lists join `repos`), never pruned,
+    /// and not re-attached by a re-registration (a new repo id). Their
+    /// comments and findings cascade through their own FKs.
     pub async fn delete_repo(&self, id: &Id) -> Result<()> {
+        let mut tx = self.pool.begin().await.map_err(dberr("delete repo"))?;
+        sqlx::query("DELETE FROM pr_reviews WHERE repo_id = ?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(dberr("delete repo reviews"))?;
         sqlx::query("DELETE FROM repos WHERE id = ?")
             .bind(id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(dberr("delete repo"))?;
+        tx.commit().await.map_err(dberr("delete repo"))?;
         Ok(())
     }
 
@@ -624,5 +636,69 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(n, 1, "exactly one row for the checkout");
+    }
+
+    /// data-integrity-5-05: unregistering a repo removes its PR reviews and
+    /// (by cascade) their comments; another repo's reviews stay.
+    #[tokio::test]
+    async fn delete_repo_removes_its_pr_reviews_and_their_comments() {
+        let pool = mem_pool().await;
+        let store = GitStore::new(pool.clone());
+        let now = fmt(Utc::now());
+        sqlx::query(
+            "INSERT INTO workspaces (id, name, root_path, created_at) VALUES ('w', 'w', '/', ?)",
+        )
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut ids = Vec::new();
+        for name in ["a", "b"] {
+            let dir = tempfile::tempdir().unwrap();
+            let repo = store
+                .create_repo(NewRepo {
+                    workspace_id: "w".into(),
+                    name: name.into(),
+                    path: dir.path().to_string_lossy().into_owned(),
+                    remote_url: None,
+                    provider: None,
+                    git_account_id: None,
+                })
+                .await
+                .unwrap();
+            let review = format!("rev-{name}");
+            sqlx::query(
+                "INSERT INTO pr_reviews (id, repo_id, pr_number, status, created_at)
+                 VALUES (?, ?, 1, 'done', ?)",
+            )
+            .bind(&review)
+            .bind(&repo.id)
+            .bind(&now)
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO pr_review_comments (id, review_id, body, created_at)
+                 VALUES (?, ?, 'x', ?)",
+            )
+            .bind(format!("c-{name}"))
+            .bind(&review)
+            .bind(&now)
+            .execute(&pool)
+            .await
+            .unwrap();
+            ids.push(repo.id);
+        }
+        store.delete_repo(&ids[0]).await.unwrap();
+        let reviews: Vec<String> = sqlx::query_scalar("SELECT id FROM pr_reviews")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(reviews, vec!["rev-b".to_string()]);
+        let comments: Vec<String> = sqlx::query_scalar("SELECT id FROM pr_review_comments")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(comments, vec!["c-b".to_string()]);
     }
 }

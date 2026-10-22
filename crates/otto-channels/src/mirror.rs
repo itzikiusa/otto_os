@@ -1080,15 +1080,48 @@ async fn upload_file_path(
     }
     // Upload the raw bytes verbatim — a UTF-8 round-trip would corrupt
     // binary attachments (images, PDFs, …).
-    match adapter.upload(chat, thread, &filename, &bytes).await {
-        Ok(()) => info!(
+    if upload_or_note(adapter, chat, thread, &filename, &bytes).await {
+        info!(
             file = filename.as_str(),
             resolved = %canon.display(),
             bytes = bytes.len(),
             "mirror: uploaded agent file attachment"
-        ),
-        Err(e) => warn!("mirror: file upload {}: {e}", canon.display()),
+        );
     }
+}
+
+/// Longest rate-limit hint an attachment upload waits out before its one
+/// retry; a longer one goes straight to the thread note.
+const UPLOAD_RETRY_MAX: Duration = Duration::from_secs(60);
+
+/// Upload `bytes`, retrying ONCE after the adapter's rate-limit hint; on a
+/// final failure say so in the thread like the refusal path does. A failed
+/// upload used to be only a daemon log line, so the chat saw a reply that
+/// referred to a file that never came (integrations-5-05). True on success.
+async fn upload_or_note(
+    adapter: &Arc<dyn Adapter>,
+    chat: &str,
+    thread: Option<&str>,
+    filename: &str,
+    bytes: &[u8],
+) -> bool {
+    let mut result = adapter.upload(chat, thread, filename, bytes).await;
+    if let Some(wait) = result.as_ref().err().and_then(retry_after_hint) {
+        if wait <= UPLOAD_RETRY_MAX {
+            tokio::time::sleep(wait).await;
+            result = adapter.upload(chat, thread, filename, bytes).await;
+        }
+    }
+    let Err(e) = result else {
+        return true;
+    };
+    warn!(file = filename, "mirror: file upload failed: {e}");
+    let why = otto_core::text::clip_chars(&e.to_string(), 200);
+    let note = format!("⚠️ Otto could not attach `{filename}`: {why}");
+    if let Err(e) = adapter.send(chat, thread, &note).await {
+        warn!("mirror: attachment-failure note: {e}");
+    }
+    false
 }
 
 /// Attempts for one final-reply post (the first try + retries).
@@ -1320,6 +1353,77 @@ mod tests {
             "one accepted upload total"
         );
         assert_eq!(a.messages.lock().unwrap().len(), 1);
+    }
+
+    /// Fails `upload` with each queued error, then succeeds; records notes.
+    #[derive(Default)]
+    struct AttachAdapter {
+        errors: StdMutex<Vec<String>>,
+        uploads: std::sync::atomic::AtomicU32,
+        notes: StdMutex<Vec<String>>,
+    }
+    #[async_trait::async_trait]
+    impl Adapter for AttachAdapter {
+        async fn send(&self, _: &str, _: Option<&str>, text: &str) -> anyhow::Result<String> {
+            self.notes.lock().unwrap().push(text.into());
+            Ok("n".into())
+        }
+        async fn edit(&self, _: &str, _: &str, _: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn channel(&self) -> Channel {
+            Channel::Slack
+        }
+        async fn upload(&self, _: &str, _: Option<&str>, _: &str, _: &[u8]) -> anyhow::Result<()> {
+            self.uploads.fetch_add(1, Ordering::Relaxed);
+            let mut errs = self.errors.lock().unwrap();
+            if errs.is_empty() {
+                Ok(())
+            } else {
+                Err(anyhow::anyhow!(errs.remove(0)))
+            }
+        }
+    }
+
+    fn attach(errors: &[&str]) -> (Arc<AttachAdapter>, Arc<dyn Adapter>) {
+        let a = Arc::new(AttachAdapter {
+            errors: StdMutex::new(errors.iter().map(|s| s.to_string()).collect()),
+            ..Default::default()
+        });
+        let d: Arc<dyn Adapter> = a.clone();
+        (a, d)
+    }
+
+    /// integrations-5-05: a rate-limited upload is retried once after its
+    /// hint and lands with no note.
+    #[tokio::test]
+    async fn rate_limited_upload_is_retried_once() {
+        let (a, d) = attach(&["slack upload PUT: ratelimited (retry after 0s)"]);
+        assert!(upload_or_note(&d, "C1", Some("1.2"), "r.pdf", b"x").await);
+        assert_eq!(a.uploads.load(Ordering::Relaxed), 2);
+        assert!(a.notes.lock().unwrap().is_empty());
+    }
+
+    /// integrations-5-05: an upload that keeps failing (or fails with no
+    /// rate-limit hint) posts a thread note naming the file and the cause.
+    #[tokio::test]
+    async fn failed_upload_posts_a_thread_note() {
+        let (a, d) = attach(&["ratelimited (retry after 0s)"; 2]);
+        assert!(!upload_or_note(&d, "C1", None, "r.pdf", b"x").await);
+        assert_eq!(a.uploads.load(Ordering::Relaxed), 2, "one retry only");
+        let notes = a.notes.lock().unwrap().clone();
+        assert_eq!(notes.len(), 1);
+        assert!(
+            notes[0].contains("could not attach `r.pdf`"),
+            "{}",
+            notes[0]
+        );
+        assert!(notes[0].contains("ratelimited"), "{}", notes[0]);
+
+        let (a, d) = attach(&["slack upload PUT: operation timed out"]);
+        assert!(!upload_or_note(&d, "C1", None, "big.zip", b"x").await);
+        assert_eq!(a.uploads.load(Ordering::Relaxed), 1, "no hint, no retry");
+        assert_eq!(a.notes.lock().unwrap().len(), 1);
     }
 
     /// Fails `send_formatted` with each queued error, then succeeds.

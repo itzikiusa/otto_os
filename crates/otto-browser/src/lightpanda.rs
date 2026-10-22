@@ -25,6 +25,8 @@ pub struct Lightpanda {
     child: Arc<AsyncMutex<Option<Child>>>,
     shutting_down: Arc<AtomicBool>,
     supervisor: StdMutex<Option<JoinHandle<()>>>,
+    /// Periodic copy-truncate of `lightpanda.log` (see [`spawn_log_rotator`]).
+    log_rotator: StdMutex<Option<JoinHandle<()>>>,
 }
 
 impl Lightpanda {
@@ -87,6 +89,7 @@ impl Lightpanda {
         }
 
         let shutting_down = Arc::new(AtomicBool::new(false));
+        let log_rotator = spawn_log_rotator(data_dir.join("lightpanda.log"), LOG_CAP_BYTES);
         let supervisor =
             spawn_supervisor(bin, data_dir, port, child.clone(), shutting_down.clone());
 
@@ -96,6 +99,7 @@ impl Lightpanda {
             child,
             shutting_down,
             supervisor: StdMutex::new(Some(supervisor)),
+            log_rotator: StdMutex::new(Some(log_rotator)),
         })
     }
 
@@ -108,9 +112,11 @@ impl Lightpanda {
     /// fallback.
     pub async fn shutdown(&self) {
         self.shutting_down.store(true, Ordering::SeqCst);
-        if let Ok(mut g) = self.supervisor.lock() {
-            if let Some(h) = g.take() {
-                h.abort();
+        for task in [&self.supervisor, &self.log_rotator] {
+            if let Ok(mut g) = task.lock() {
+                if let Some(h) = g.take() {
+                    h.abort();
+                }
             }
         }
         let mut guard = self.child.lock().await;
@@ -140,9 +146,11 @@ impl Drop for Lightpanda {
         // already arms SIGKILL on the child; this makes it explicit and stops
         // the supervisor from trying to respawn a sidecar nobody wants anymore.
         self.shutting_down.store(true, Ordering::SeqCst);
-        if let Ok(mut g) = self.supervisor.lock() {
-            if let Some(h) = g.take() {
-                h.abort();
+        for task in [&self.supervisor, &self.log_rotator] {
+            if let Ok(mut g) = task.lock() {
+                if let Some(h) = g.take() {
+                    h.abort();
+                }
             }
         }
         if let Ok(mut g) = self.child.try_lock() {
@@ -154,8 +162,55 @@ impl Drop for Lightpanda {
 }
 
 /// `lightpanda.log` past this size is rotated to `lightpanda.log.1` on the
-/// next (re)spawn, so appending across restarts stays bounded.
+/// next (re)spawn, so appending across restarts stays bounded — and, while the
+/// sidecar runs, by a copy-truncate every [`LOG_CHECK_EVERY`].
 const LOG_CAP_BYTES: u64 = 4 * 1024 * 1024;
+/// How often a running sidecar's log is checked against [`LOG_CAP_BYTES`]. It
+/// lives as long as the daemon (days) and logs per connection and request, so
+/// a check only at spawn left that growth unbounded.
+const LOG_CHECK_EVERY: Duration = Duration::from_secs(600);
+
+/// Copy-truncate `log_path` once it passes `cap`: its contents replace
+/// `lightpanda.log.1` and the live file is cut to zero IN PLACE. The child
+/// holds `O_APPEND` fds, so its next write lands at the new end (a rename
+/// would leave it writing to the unlinked old file forever). Lines written
+/// between the copy and the truncate can be lost — a bounded log is worth
+/// that. Returns whether it rotated.
+fn copy_truncate_if_over(log_path: &Path, cap: u64) -> std::io::Result<bool> {
+    let len = match std::fs::metadata(log_path) {
+        Ok(m) => m.len(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    if len <= cap {
+        return Ok(false);
+    }
+    std::fs::copy(log_path, log_path.with_extension("log.1"))?;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(log_path)?
+        .set_len(0)?;
+    Ok(true)
+}
+
+/// Check `log_path` every [`LOG_CHECK_EVERY`] and copy-truncate it past `cap`.
+/// Survives respawns (the path is stable); aborted by `shutdown`/`Drop`.
+fn spawn_log_rotator(log_path: PathBuf, cap: u64) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(LOG_CHECK_EVERY);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        tick.tick().await; // immediate: open_log just checked at spawn
+        loop {
+            tick.tick().await;
+            let path = log_path.clone();
+            match tokio::task::spawn_blocking(move || copy_truncate_if_over(&path, cap)).await {
+                Ok(Ok(true)) => tracing::debug!("browser: rotated lightpanda.log past {cap} bytes"),
+                Ok(Err(e)) => tracing::debug!("browser: lightpanda log check failed: {e}"),
+                _ => {}
+            }
+        }
+    })
+}
 
 /// Open the sidecar log for APPEND: a respawn after a crash must not truncate
 /// the dead instance's output — the only record of why it died. One previous
@@ -321,6 +376,35 @@ mod tests {
         drop(open_log(&log).unwrap());
         assert!(dir.path().join("lightpanda.log.1").exists());
         assert!(std::fs::metadata(&log).unwrap().len() < 1024);
+    }
+
+    #[test]
+    fn a_running_sidecars_log_is_copy_truncated_in_place() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("lightpanda.log");
+        // The child's fd: appending, never reopened.
+        let mut child_fd = open_log(&log).unwrap();
+        assert!(
+            !copy_truncate_if_over(&log, 1024).unwrap(),
+            "under the cap: untouched"
+        );
+        child_fd.write_all(&[b'x'; 2048]).unwrap();
+        assert!(copy_truncate_if_over(&log, 1024).unwrap());
+        assert!(
+            std::fs::metadata(dir.path().join("lightpanda.log.1"))
+                .unwrap()
+                .len()
+                > 2048
+        );
+        assert_eq!(std::fs::metadata(&log).unwrap().len(), 0);
+        child_fd.write_all(b"after\n").unwrap();
+        assert_eq!(
+            std::fs::read(&log).unwrap(),
+            b"after\n",
+            "O_APPEND lands at the new end"
+        );
+        assert!(!copy_truncate_if_over(&dir.path().join("missing.log"), 1).unwrap());
     }
 
     #[test]

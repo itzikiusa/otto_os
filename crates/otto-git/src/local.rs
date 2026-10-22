@@ -4862,11 +4862,11 @@ impl LocalGit {
     ///
     /// Checked on the real filesystem, symlinks followed: the nearest existing
     /// ancestor of `rel` is canonicalized and must stay under the canonical
-    /// work-tree root and out of the canonical `$GIT_DIR`; with `create_dirs`
+    /// work-tree root and out of the canonical `$GIT_DIR`; with `mkdirs`
     /// the missing directories below it (plain names — they did not exist)
     /// are then created. A final component that is a symlink is refused, as
     /// a write or read would follow it wherever it points.
-    async fn confined_worktree_file(&self, rel: &str, create_dirs: bool) -> Result<PathBuf> {
+    pub(crate) async fn confined_worktree_file(&self, rel: &str, mkdirs: bool) -> Result<PathBuf> {
         let abs = self.safe_join(rel)?;
         let refuse = |why: &str| Error::Invalid(format!("refusing path {rel}: {why}"));
         if Path::new(rel)
@@ -4910,7 +4910,7 @@ impl LocalGit {
                 return Err(refuse("it resolves into the git directory"));
             }
         }
-        if create_dirs && existing.as_path() != parent {
+        if mkdirs && existing.as_path() != parent {
             tokio::fs::create_dir_all(parent)
                 .await
                 .map_err(|e| Error::Internal(format!("mkdir for {rel}: {e}")))?;

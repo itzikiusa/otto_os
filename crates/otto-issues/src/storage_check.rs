@@ -102,6 +102,13 @@ fn text_node(text: String) -> Node {
     }
 }
 
+/// Deepest element nesting `parse` accepts. The tree it builds is as deep as
+/// the input, and its drop glue plus every later walk (`rules`, `outline`,
+/// `collect_text`) recurse per level, so an unbounded body (100k nested
+/// `<b>`, well under the body limit) would overflow the stack and abort the
+/// daemon. Real Confluence storage nests a few dozen levels at most.
+const MAX_DEPTH: usize = 256;
+
 /// Parse a storage fragment into a synthetic `#root` element.
 pub(crate) fn parse(xhtml: &str) -> Result<Node, String> {
     let mut stack: Vec<Node> = vec![Node {
@@ -148,13 +155,15 @@ pub(crate) fn parse(xhtml: &str) -> Result<Node, String> {
         i += close + 1;
         if let Some(name) = tag.strip_prefix('/') {
             let name = name.trim_end();
+            // Only the synthetic `#root` frame is left: this close tag closes
+            // nothing. Checked before popping, so `</#root>` can't pop the
+            // root and leave the stack empty.
+            if stack.len() == 1 {
+                return Err(format!("`</{name}>` closes nothing"));
+            }
             let open = stack.pop().ok_or("unbalanced close tag")?;
             if open.name != name {
-                return Err(if open.name == "#root" {
-                    format!("`</{name}>` closes nothing")
-                } else {
-                    format!("`</{name}>` closes `<{}>`", open.name)
-                });
+                return Err(format!("`</{name}>` closes `<{}>`", open.name));
             }
             stack.last_mut().unwrap().children.push(open);
             continue;
@@ -181,6 +190,12 @@ pub(crate) fn parse(xhtml: &str) -> Result<Node, String> {
         if self_closing {
             stack.last_mut().unwrap().children.push(node);
         } else {
+            // `stack[0]` is `#root`, so `stack.len()` is the open depth.
+            if stack.len() > MAX_DEPTH {
+                return Err(format!(
+                    "the body nests too deeply (more than {MAX_DEPTH} levels)"
+                ));
+            }
             stack.push(node);
         }
     }
@@ -508,6 +523,9 @@ mod tests {
             ("<p <b>", "unterminated tag"),
             ("<!DOCTYPE html>", "DOCTYPE"),
             ("<1p/>", "bad tag name"),
+            // Used to pop the synthetic root and panic on the empty stack.
+            ("</#root>", "closes nothing"),
+            ("<p>x</p></#root>", "closes nothing"),
         ] {
             let err = check_well_formed(bad).expect_err(bad);
             assert!(err.contains(needle), "{bad}: want {needle:?}, got {err:?}");
@@ -521,6 +539,26 @@ mod tests {
             check_well_formed("<ac:structured-macro ac:name=\"toc\" ac:schema-version=\"1\" />"),
             Ok(())
         );
+    }
+
+    #[test]
+    fn deep_nesting_is_refused_not_a_stack_overflow() {
+        // 10k levels: the old parser built a 10k-deep tree whose drop glue and
+        // `outline` / `collect_text` walks recursed once per level.
+        let deep = format!("{}x{}", "<b>".repeat(10_000), "</b>".repeat(10_000));
+        let err = check_well_formed(&deep).expect_err("deep");
+        assert!(err.contains("nests too deeply"), "{err}");
+        assert_eq!(storage_outline(&deep), vec!["unparseable".to_string()]);
+        assert_eq!(storage_plain_text(&deep), "");
+        // At the bound is still fine.
+        let ok = format!("{}x{}", "<b>".repeat(MAX_DEPTH), "</b>".repeat(MAX_DEPTH));
+        assert_eq!(check_well_formed(&ok), Ok(()));
+        let over = format!(
+            "{}x{}",
+            "<b>".repeat(MAX_DEPTH + 1),
+            "</b>".repeat(MAX_DEPTH + 1)
+        );
+        assert!(check_well_formed(&over).is_err());
     }
 
     #[test]

@@ -451,11 +451,18 @@ fn spawn_file_poll(
     let path = work_file.to_path_buf();
     let mut last = base.to_string();
     tokio::spawn(async move {
+        // Stat-gated like the canvas and Design Hall previews: an unchanged
+        // (len, mtime) skips the read entirely, and a runaway agent file over
+        // MAX_RAW_BYTES is skipped, never loaded into memory or broadcast.
+        let mut gate = otto_agent_run::live_file::StatGate::default();
         loop {
             tokio::time::sleep(POLL).await;
-            // Capped read (a runaway agent file over MAX_RAW_BYTES is skipped,
-            // never loaded into memory or broadcast).
-            let Some(content) = read_text_capped(&path).await else {
+            let otto_agent_run::live_file::Poll::Changed(bytes) =
+                gate.poll(&path, otto_product::media::MAX_RAW_BYTES).await
+            else {
+                continue;
+            };
+            let Ok(content) = String::from_utf8(bytes) else {
                 continue;
             };
             if content == last || content.trim().is_empty() {

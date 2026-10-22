@@ -4,7 +4,9 @@
 //! every top-level key but `elements`), and merge the agent's result back so
 //! nothing it couldn't see is lost. Moved from `otto-canvas`'s assist (the
 //! Canvas module uses it today); the Design Hall engine adopts it with the
-//! phase-2 `AssistTarget` merge. Pure; unit-tested by its callers.
+//! phase-2 `AssistTarget` merge. Pure; unit-tested by its callers. Lives in
+//! `otto-design::format` (no agent/session deps) so any engine can use it
+//! cheaply; `otto_design_assist::excalidraw` re-exports it.
 
 use serde_json::Value;
 

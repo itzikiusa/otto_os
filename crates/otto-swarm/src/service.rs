@@ -367,10 +367,29 @@ impl SwarmService {
             .await
     }
 
-    pub async fn update_task(&self, id: &Id, req: UpdateTaskReq) -> Result<SwarmTask> {
+    /// PATCH a task as `editor`. A change to what a turn executes — the
+    /// title, description or labels — records `editor` as the task's prompt
+    /// editor, so its next turns act as that person (access-control-5-01). A
+    /// person may not ADD a `source-run:` label: only runtime-stamped ones may
+    /// steer the originator walk (labels already on the task stay).
+    pub async fn update_task(
+        &self,
+        id: &Id,
+        req: UpdateTaskReq,
+        editor: &str,
+    ) -> Result<SwarmTask> {
         let task = self.repo.get_task(id).await?;
         let _operation = crate::runtime::engine::operation_guard(&task.swarm_id).await;
         let task = self.repo.get_task(id).await?;
+        if let Some(labels) = &req.labels {
+            refuse_added_source_run(&task.labels, labels)?;
+        }
+        let prompt_changed = req.title.as_ref().is_some_and(|t| t != &task.title)
+            || req
+                .description
+                .as_ref()
+                .is_some_and(|d| d != &task.description)
+            || req.labels.as_ref().is_some_and(|l| l != &task.labels);
         let invalidates = req.status.as_deref().is_some_and(|s| s != "verifying")
             || req
                 .assignee_agent_id
@@ -398,6 +417,9 @@ impl SwarmService {
                 },
             )
             .await?;
+        if prompt_changed {
+            self.repo.set_task_prompt_editor(id, editor).await?;
+        }
         if invalidates {
             crate::runtime::verify::invalidate_task(id);
             self.repo.stop_verification_runs(id).await?;
@@ -524,9 +546,47 @@ impl SwarmService {
     }
 }
 
+/// The `source-run:` labels on a task (runtime-stamped handoff provenance).
+fn source_run_labels(labels: &Value) -> Vec<&str> {
+    labels
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|l| l.starts_with("source-run:"))
+        .collect()
+}
+
+/// Refuse a PATCH that ADDS a `source-run:` label (access-control-5-01): the
+/// label points `acting_user`'s originator walk at another task's run, so a
+/// person-added one would let an Editor borrow that task's identity. Labels
+/// already on the task (stamped by the runtime) may stay or be removed.
+fn refuse_added_source_run(cur: &Value, next: &Value) -> Result<()> {
+    let have = source_run_labels(cur);
+    match source_run_labels(next)
+        .into_iter()
+        .find(|l| !have.contains(l))
+    {
+        Some(l) => Err(Error::Invalid(format!(
+            "label `{l}` is set by the swarm runtime; it can't be added by hand"
+        ))),
+        None => Ok(()),
+    }
+}
+
 #[cfg(test)]
 mod activation_tests {
-    use super::activation_refused;
+    use super::{activation_refused, refuse_added_source_run};
+    use serde_json::json;
+
+    #[test]
+    fn a_person_may_keep_or_drop_but_not_add_a_source_run_label() {
+        let cur = json!(["handoff", "source-run:r1"]);
+        assert!(refuse_added_source_run(&cur, &json!(["handoff", "source-run:r1", "x"])).is_ok());
+        assert!(refuse_added_source_run(&cur, &json!(["handoff"])).is_ok());
+        assert!(refuse_added_source_run(&cur, &json!(["source-run:r2"])).is_err());
+        assert!(refuse_added_source_run(&json!([]), &json!(["source-run:r1"])).is_err());
+    }
 
     #[test]
     fn activation_stays_closed_for_a_pause_reason_or_spent_budget() {

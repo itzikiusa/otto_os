@@ -1,4 +1,4 @@
-use super::registry::{forbidden, invalid, Room};
+use super::registry::{forbidden, invalid, Room, RATE_LIMITED};
 use chrono::Utc;
 use otto_core::{api::*, Result};
 use std::time::{Duration, Instant};
@@ -163,7 +163,7 @@ impl Room {
                     return Err(invalid("Highlight requires two corners"));
                 }
                 let m = self.members.get_mut(actor).unwrap();
-                m.annotation_rate.take(32.0, 48.0)?;
+                m.annotation_rate.take(32.0, 48.0, RATE_LIMITED)?;
                 if tool == RoomAnnotationTool::Pointer {
                     if m.pointer_at
                         .is_some_and(|t| t.elapsed() < Duration::from_millis(50))

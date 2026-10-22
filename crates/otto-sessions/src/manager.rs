@@ -2693,6 +2693,11 @@ impl SessionManager {
         req: CreateSessionReq,
         spec_override: Option<CommandSpec>,
     ) -> Result<Session> {
+        // Shutdown has begun (concurrency-async-5-04): a session created now
+        // would be published after the teardown iterated `live` — a CLI
+        // nobody kills, its MCP token never revoked, its row `running` until
+        // boot recovery. Refused here, and re-checked once the spawn returns.
+        self.refuse_while_shutting_down()?;
         let _mcp_activation = crate::mcp::activation_gate().read().await;
         let mut req = req;
         // Agent UI control's grant is server-owned and never outlives the
@@ -2955,7 +2960,7 @@ impl SessionManager {
         // workers (blocked workers with idle CPU are exactly the intermittent
         // everything-is-slow shape).
         let handle = match self
-            .spawn_session_pty(&session, spec.clone(), grid_cols, grid_rows)
+            .spawn_unless_shutting_down(&session, spec.clone(), grid_cols, grid_rows)
             .await
         {
             Ok(h) => Arc::new(h),
@@ -5278,25 +5283,6 @@ impl SessionManager {
         pruned
     }
 
-    /// Kill every live PTY and mark the sessions exited. Used when the app
-    /// closes (no orphaned agent processes left running) and on daemon
-    /// shutdown. Returns the number of sessions terminated.
-    ///
-    /// The app closing is NOT the daemon exiting (under launchd it keeps
-    /// running for the next window): spawns are refused only while the kill
-    /// sweep runs, so a resume racing it can't fork a fresh CLI, and the flag
-    /// is cleared again afterwards — left set, every later resume/restart
-    /// answered "the daemon is shutting down" until a daemon restart.
-    pub async fn shutdown_all(&self) -> usize {
-        self.shutting_down
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-        let ids: Vec<Id> = self.live.iter().map(|e| e.key().clone()).collect();
-        let killed = self.shutdown_ids(ids).await;
-        self.shutting_down
-            .store(false, std::sync::atomic::Ordering::SeqCst);
-        killed
-    }
-
     /// Kill `ids`' live PTYs and mark them exited (see [`Self::shutdown_all`]).
     ///
     /// Each session is retired under its resume lock, like every other
@@ -6637,6 +6623,8 @@ mod mcp_sync;
 mod otto_tools_env;
 #[path = "manager/session_files.rs"]
 mod session_files;
+#[path = "manager/shutdown_guard.rs"]
+mod shutdown_guard;
 use otto_tools_env::{otto_tools_env, session_mcp_profiles, write_codex_creds};
 
 #[cfg(test)]

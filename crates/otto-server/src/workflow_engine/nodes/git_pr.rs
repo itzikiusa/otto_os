@@ -343,19 +343,7 @@ pub(in crate::workflow_engine) async fn execute(
     // surface the reason (e.g. "repo has no git account") as a real failure
     // instead of a misleading "success" with opened:false. A dry run
     // (open:false) legitimately opens nothing, so it's exempt.
-    if open && opened_n == 0 {
-        let errs: Vec<String> = prs
-            .iter()
-            .filter_map(|pr| pr.get("error").and_then(Value::as_str))
-            .map(str::to_string)
-            .collect();
-        if !errs.is_empty() {
-            return Err(otto_core::Error::Upstream(format!(
-                "git_pr: asked to open a PR but none opened — {}",
-                errs.join("; ")
-            )));
-        }
-    }
+    require_opened(open, opened_n, &prs)?;
     // Back-compat: mirror the primary (first) PR's fields at the top level,
     // alongside the full `prs[]` and an `opened` flag/count.
     let mut outm = prs[0].as_object().cloned().unwrap_or_default();
@@ -374,3 +362,31 @@ pub(in crate::workflow_engine) async fn execute(
     }
     Ok((Value::Object(outm), logs))
 }
+
+/// R13: a step asked to OPEN a PR (`open: true`) that opened none, with an
+/// open error on any repo, fails with those errors instead of reporting
+/// success with `opened: false`. A dry run (`open: false`) is exempt.
+pub(in crate::workflow_engine) fn require_opened(
+    open: bool,
+    opened_n: u64,
+    prs: &[Value],
+) -> Result<()> {
+    if open && opened_n == 0 {
+        let errs: Vec<String> = prs
+            .iter()
+            .filter_map(|pr| pr.get("error").and_then(Value::as_str))
+            .map(str::to_string)
+            .collect();
+        if !errs.is_empty() {
+            return Err(otto_core::Error::Upstream(format!(
+                "git_pr: asked to open a PR but none opened — {}",
+                errs.join("; ")
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[path = "git_pr_tests.rs"]
+mod tests;

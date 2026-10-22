@@ -587,18 +587,13 @@ async fn get_probes(
         let r = match res {
             Ok(resp) => {
                 let status = resp.status().as_u16();
-                match resp.text().await {
-                    Ok(mut body) => {
-                        if body.len() > MAX_BODY {
-                            body.truncate(MAX_BODY);
-                        }
-                        Ok(ProbeResult {
-                            probe: p.name.clone(),
-                            status,
-                            body,
-                            ms: started.elapsed().as_millis() as u64,
-                        })
-                    }
+                match read_body_capped(resp, MAX_BODY).await {
+                    Ok(body) => Ok(ProbeResult {
+                        probe: p.name.clone(),
+                        status,
+                        body,
+                        ms: started.elapsed().as_millis() as u64,
+                    }),
                     Err(e) => Err(Error::Upstream(format!("{}: read body: {e}", p.name))),
                 }
             }
@@ -623,6 +618,40 @@ async fn get_probes(
     (out, broken)
 }
 
+/// Truncate `body` to at most `max` bytes without splitting a character.
+/// Lossy UTF-8 turns every invalid byte into a 3-byte U+FFFD, so a plain
+/// `String::truncate(max)` on a binary body (a heapdump, a non-UTF-8
+/// `/metrics`) very likely lands mid-character and panics.
+fn cut_at_char_boundary(body: &mut String, max: usize) {
+    if body.len() > max {
+        let mut cut = max;
+        while !body.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        body.truncate(cut);
+    }
+}
+
+/// Read a port-forward probe response through a capped chunk stream: at most
+/// `cap + 1` bytes are buffered (the S6-09 bound `fetch_proxy` already has),
+/// decoded lossily, then cut on a char boundary.
+async fn read_body_capped(mut resp: reqwest::Response, cap: usize) -> reqwest::Result<String> {
+    let mut buf: Vec<u8> = Vec::new();
+    while buf.len() <= cap {
+        match resp.chunk().await? {
+            Some(chunk) => {
+                let room = cap + 1 - buf.len();
+                buf.extend_from_slice(&chunk[..chunk.len().min(room)]);
+            }
+            None => break,
+        }
+    }
+    buf.truncate(cap);
+    let mut body = String::from_utf8_lossy(&buf).into_owned();
+    cut_at_char_boundary(&mut body, cap);
+    Ok(body)
+}
+
 async fn fetch_proxy(k: &Kubectl, target: &ScrapeTarget, p: &Probe) -> Result<ProbeResult> {
     let started = Instant::now();
     let path = proxy_path(target, &p.path);
@@ -636,14 +665,7 @@ async fn fetch_proxy(k: &Kubectl, target: &ScrapeTarget, p: &Probe) -> Result<Pr
         )
         .await?;
     let mut body = out.stdout;
-    if body.len() > MAX_BODY {
-        // Lossy UTF-8 can grow a cut multi-byte tail; keep a char boundary.
-        let mut cut = MAX_BODY;
-        while !body.is_char_boundary(cut) {
-            cut -= 1;
-        }
-        body.truncate(cut);
-    }
+    cut_at_char_boundary(&mut body, MAX_BODY);
     Ok(ProbeResult {
         probe: p.name.clone(),
         status: 200,
@@ -815,6 +837,55 @@ pub fn group_by_port(
 mod tests {
     use super::*;
     use crate::monitor::probes::ProbeFormat;
+
+    /// Int-5-02: a port-forward probe on a 9 MiB binary body is read through
+    /// the cap (no whole-body buffering) and cut on a char boundary — the old
+    /// `resp.text()` + `truncate(MAX_BODY)` panicked inside a lossy U+FFFD and
+    /// killed the collector loop.
+    #[tokio::test]
+    async fn forward_probe_body_is_capped_without_a_char_boundary_panic() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        const SIZE: usize = 9 * 1024 * 1024;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 2048];
+                let _ = sock.read(&mut buf).await;
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {SIZE}\r\nConnection: close\r\n\r\n"
+                );
+                let _ = sock.write_all(head.as_bytes()).await;
+                let _ = sock.write_all(&vec![0xFFu8; SIZE]).await;
+            }
+        });
+        let probes: Vec<Probe> = vec![serde_json::from_value(serde_json::json!({
+            "name": "heap", "path": "/actuator/heapdump", "format": "json", "timeout_ms": 10000
+        }))
+        .unwrap()];
+        let client = reqwest::Client::new();
+        let (out, broken) = get_probes(&client, port, &probes).await;
+        assert!(!broken);
+        let r = out[0].as_ref().expect("probe read");
+        assert_eq!(r.status, 200);
+        assert!(r.body.len() <= MAX_BODY, "{} > {MAX_BODY}", r.body.len());
+        assert!(
+            r.body.len() > MAX_BODY - 3,
+            "cut too early: {}",
+            r.body.len()
+        );
+        assert!(r.body.chars().all(|c| c == char::REPLACEMENT_CHARACTER));
+    }
+
+    #[test]
+    fn char_boundary_cut_never_splits_a_character() {
+        let mut s = "\u{FFFD}".repeat(10); // 30 bytes, boundaries every 3
+        cut_at_char_boundary(&mut s, 10);
+        assert_eq!(s.len(), 9);
+        let mut short = String::from("ok");
+        cut_at_char_boundary(&mut short, 10);
+        assert_eq!(short, "ok");
+    }
 
     /// perf R2: a port-forward cycle over more targets than the cap keeps at
     /// most `cap` children alive, holds a STABLE resident set (later cycles

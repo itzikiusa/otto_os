@@ -93,6 +93,34 @@ pub struct McpService {
     /// the pool entry (reaped after 5 min idle); decides which stdio servers
     /// the sweep still probes (stdio and HTTP alike).
     last_use: Arc<Mutex<HashMap<String, Instant>>>,
+    /// Per-server lock over the Keychain secret blob `mcp-{id}`. Two surfaces
+    /// read-modify-write halves of the same blob (this crate's `update_server`
+    /// owns `headers`, the workspace MCP-servers route owns `env`): each holds
+    /// [`Self::lock_secrets`] from its read through `set_secret_meta`, so one
+    /// save can't silently revert the other's map (CA-5-03).
+    secret_locks: Arc<otto_core::keyed_lock::KeyedLocks<String>>,
+}
+
+/// The save-time rule for an MCP server's env keys (plain and secret): a POSIX
+/// shell variable name (`[A-Za-z_][A-Za-z0-9_]*`). Agent sessions deliver a
+/// server's env through an `sh`-sourced env file (`otto-sessions::mcp`), so a
+/// key like `LINEAR-API-KEY` can never reach the server there — the session
+/// launcher would leave the whole server out with only a daemon log line.
+/// Refusing it at save (400 with the rule) keeps an "On" server deliverable.
+/// `None` = every key is fine; else the message naming the first bad key.
+pub fn env_key_error<'a>(keys: impl IntoIterator<Item = &'a String>) -> Option<String> {
+    let is_shell_name = |k: &str| {
+        let mut c = k.chars();
+        c.next()
+            .is_some_and(|f| f.is_ascii_alphabetic() || f == '_')
+            && c.all(|x| x.is_ascii_alphanumeric() || x == '_')
+    };
+    keys.into_iter().find(|k| !is_shell_name(k)).map(|k| {
+        format!(
+            "env key {k:?} must be a shell variable name: letters, digits and '_', \
+             not starting with a digit"
+        )
+    })
 }
 
 /// What the background sweep does for one enabled server.
@@ -128,7 +156,15 @@ impl McpService {
             secrets,
             clients: Arc::new(Mutex::new(HashMap::new())),
             last_use: Arc::new(Mutex::new(HashMap::new())),
+            secret_locks: Arc::new(otto_core::keyed_lock::KeyedLocks::new()),
         }
+    }
+
+    /// Hold `id`'s secret-blob lock: every writer of `mcp-{id}` takes it before
+    /// reading the stored blob and keeps it until the row's secret metadata is
+    /// written (see the `secret_locks` field).
+    pub async fn lock_secrets(&self, id: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        self.secret_locks.lock(id).await
     }
 
     /// Number of pooled clients (diagnostics / tests).
@@ -1339,6 +1375,48 @@ mod tests {
         assert_eq!(canonical_hash(&a), canonical_hash(&b));
         let c = json!({"a":1,"b":[1,2,{"x":1,"y":3}]});
         assert_ne!(canonical_hash(&a), canonical_hash(&c));
+    }
+
+    #[test]
+    fn env_keys_must_be_shell_names_to_reach_sessions() {
+        let k = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(env_key_error(&k(&["API_KEY", "_x", "LOG2"])), None);
+        let err = env_key_error(&k(&["OK", "LINEAR-API-KEY"])).unwrap();
+        assert!(err.contains("\"LINEAR-API-KEY\""), "{err}");
+        assert!(env_key_error(&k(&["2FA"])).is_some());
+        assert!(env_key_error(&k(&[""])).is_some());
+    }
+
+    /// The two secret-blob writers serialize on one per-server lock; other
+    /// servers' saves don't wait on it.
+    #[tokio::test]
+    async fn secret_writers_share_one_lock_per_server() {
+        struct NoSecrets;
+        impl SecretStore for NoSecrets {
+            fn put(&self, _: &str, _: &str) -> otto_core::Result<()> {
+                Ok(())
+            }
+            fn get(&self, _: &str) -> otto_core::Result<Option<String>> {
+                Ok(None)
+            }
+            fn delete(&self, _: &str) -> otto_core::Result<()> {
+                Ok(())
+            }
+        }
+        let pool: DbPool = sqlx::sqlite::SqlitePoolOptions::new()
+            .connect_lazy("sqlite::memory:")
+            .unwrap()
+            .into();
+        let svc = McpService::new(pool, Arc::new(NoSecrets));
+        let other_surface = svc.clone();
+        let held = svc.lock_secrets("s1").await;
+        assert!(
+            other_surface.secret_locks.try_lock("s1").is_none(),
+            "a clone (the other route's handle) must see the same lock"
+        );
+        assert!(other_surface.secret_locks.try_lock("s2").is_some());
+        drop(held);
+        assert!(other_surface.secret_locks.try_lock("s1").is_some());
     }
 }
 

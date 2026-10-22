@@ -114,7 +114,7 @@ pub fn browser_proxy_router() -> Router {
     // SSRF guard: the guarded resolver vets the address actually dialled (no
     // DNS rebinding after the pre-flight check) and each redirect hop is capped
     // + re-validated so an upstream 30x can't bounce the proxy inward.
-    let http = crate::routes::api_client::net_guard::guarded_client_builder()
+    let http = otto_netguard::guarded_client_builder()
         .user_agent("Mozilla/5.0 (compatible; OttoProxy/1.0)")
         .timeout(std::time::Duration::from_secs(15))
         .build()
@@ -226,7 +226,7 @@ pub(crate) async fn browser_proxy(
     }
 
     // --- SSRF guard: resolve + classify before fetching ---
-    if let Err(msg) = crate::routes::api_client::net_guard::check_url(&url).await {
+    if let Err(msg) = otto_netguard::check_url(&url).await {
         return (
             StatusCode::BAD_REQUEST,
             axum::Json(otto_core::api::Problem {

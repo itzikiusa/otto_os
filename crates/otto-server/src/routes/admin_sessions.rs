@@ -16,7 +16,8 @@
 //! Admin)`) for that — the handlers add **no** extra `require_root`, by design.
 //!
 //! ## Live-state enrichment
-//! `SessionsRepo::list_all()` gives the persisted rows across every workspace;
+//! [`overview_rows`] reads the persisted rows across every workspace — only
+//! the columns the overview shows, never `meta_json` (backend-performance-5-04);
 //! each is enriched with the in-memory truth from the `SessionManager`
 //! (`is_live`, `attached_count`) and the owner's username (resolved once via a
 //! single batched user load, not per-row).
@@ -92,7 +93,7 @@ pub async fn list_sessions<C: AdminSessionsCtx>(
     State(ctx): State<C>,
     CurrentUser(_user): CurrentUser,
 ) -> ApiResult<Json<AdminSessionsResp>> {
-    let sessions = ctx.sessions_repo().list_all().await?;
+    let sessions = overview_rows(&ctx.sessions_repo().pool()).await?;
     let manager = ctx.manager();
 
     // Batch-load every user once and index by id → username (so we never do a
@@ -120,15 +121,43 @@ pub async fn list_sessions<C: AdminSessionsCtx>(
                 owner_id: s.created_by,
                 owner_username,
                 workspace_id: s.workspace_id,
-                kind: s.kind.as_str().to_string(),
+                kind: s.kind,
                 provider: s.provider,
                 title: s.title,
-                status: s.status.as_str().to_string(),
+                status: s.status,
             }
         })
         .collect();
 
     Ok(Json(AdminSessionsResp { sessions: rows }))
+}
+
+/// The persisted part of one overview row.
+#[derive(sqlx::FromRow)]
+struct OverviewRow {
+    id: String,
+    workspace_id: String,
+    created_by: String,
+    kind: String,
+    provider: String,
+    title: String,
+    status: String,
+}
+
+/// Every session, newest first (the order `SessionsRepo::list_all` had),
+/// projected to the overview's columns: no `meta_json` decode per row.
+async fn overview_rows(pool: &otto_state::DbPool) -> ApiResult<Vec<OverviewRow>> {
+    sqlx::query_as::<_, OverviewRow>(
+        "SELECT id, workspace_id, created_by, kind, provider, title, status \
+         FROM sessions ORDER BY created_at DESC",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| {
+        crate::error::ApiError(otto_core::Error::Internal(format!(
+            "admin sessions overview: {e}"
+        )))
+    })
 }
 
 /// `POST /api/v1/admin/sessions/{id}/terminate`

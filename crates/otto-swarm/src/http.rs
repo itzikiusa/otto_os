@@ -307,6 +307,24 @@ fn identity_changes(agent: &SwarmAgent, req: &UpdateAgentReq) -> Vec<&'static st
     if differs(req.cwd_mode.as_ref(), agent.cwd_mode.as_deref()) {
         out.push("cwd");
     }
+    // access-control-5-02: a scheduled turn has no task, so it acts as the
+    // swarm's creator — and its prompt IS the schedule's directive. Writing a
+    // new directive is the creator's (or an Admin's) call, the same rule as a
+    // personal agent's schedule (S3-05). Cadence, `at` and `enabled` stay
+    // Editor-level; clearing the schedule or the directive adds no prompt.
+    let directive = |s: Option<&serde_json::Value>| {
+        s.and_then(|v| v.get("directive"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|d| !d.is_empty())
+            .map(str::to_string)
+    };
+    if let Some(next) = &req.schedule {
+        let new = directive(next.as_ref());
+        if new.is_some() && new != directive(agent.schedule.as_ref()) {
+            out.push("schedule directive");
+        }
+    }
     out
 }
 
@@ -402,7 +420,7 @@ async fn update_task<S: SwarmCtx>(
 ) -> ApiResult<Json<SwarmTask>> {
     let task = s.swarm().get_task(&tid).await?;
     check(&s, &user, &task.workspace_id, WorkspaceRole::Editor).await?;
-    let task = s.swarm().update_task(&tid, req).await?;
+    let task = s.swarm().update_task(&tid, req, &user.0.id).await?;
     emit_task(&s, &task);
     Ok(Json(task))
 }

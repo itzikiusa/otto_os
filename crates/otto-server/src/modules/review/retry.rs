@@ -243,6 +243,15 @@ pub(crate) async fn retry_review_agent(
             }
         }
     }
+    // From here to the spawn, a failure OR a dropped request (the client went
+    // away during the archive / diff / skill staging awaits) puts the settled
+    // row back: `pending` blocks retry, stop and summarize until a reboot.
+    let claim = ClaimGuard {
+        reviews: ctx.reviews_store.clone(),
+        review_id: review_id.clone(),
+        index,
+        settled: Some(review.agents[index].clone()),
+    };
     // Kill the old (likely stuck) session so it doesn't linger.
     if let Some(sid) = review.agents[index].session_id.clone() {
         let _ = ctx.manager.archive(&sid).await;
@@ -292,13 +301,8 @@ pub(crate) async fn retry_review_agent(
         match restored {
             Ok(len) => diff_len = len,
             Err(e) => {
-                // The claim above already flipped the row to `pending`. Put the
-                // settled row back, or nothing could retry, stop or summarize
-                // this agent again (`pending` blocks all three).
-                let _ = ctx
-                    .reviews_store
-                    .set_agent_at(&review_id, index, &review.agents[index])
-                    .await;
+                // The claim above already flipped the row to `pending`.
+                claim.restore().await;
                 return Err(crate::error::ApiError(e));
             }
         }
@@ -317,6 +321,7 @@ pub(crate) async fn retry_review_agent(
     let agent_cancels_reg = ctx.review_agent_cancels.clone();
     let slots = reviewer_slots();
     let ctx_bg = ctx.clone();
+    claim.disarm(); // the spawned task owns the row now
     tokio::spawn(async move {
         let _slot = slots.acquire_owned().await.ok(); // SI-11 reviewer cap
                                                       // A PR reviewer must verify against the PR head, not the user's
@@ -690,6 +695,47 @@ pub(crate) async fn stop_review_agent(
     ))
 }
 
+/// Puts a claimed (`pending`) agent row back to its settled state unless
+/// disarmed: on an early error ([`Self::restore`]) and when the retry handler's
+/// future is dropped before its spawn (concurrency-async-5-02). The drop path
+/// can't await, so it writes from a spawned task.
+struct ClaimGuard {
+    reviews: otto_state::ReviewsRepo,
+    review_id: Id,
+    index: usize,
+    settled: Option<ReviewAgentState>,
+}
+
+impl ClaimGuard {
+    fn disarm(mut self) {
+        self.settled = None;
+    }
+
+    async fn restore(mut self) {
+        if let Some(row) = self.settled.take() {
+            let _ = self
+                .reviews
+                .set_agent_at(&self.review_id, self.index, &row)
+                .await;
+        }
+    }
+}
+
+impl Drop for ClaimGuard {
+    fn drop(&mut self) {
+        let Some(row) = self.settled.take() else {
+            return;
+        };
+        let Ok(rt) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let (reviews, id, index) = (self.reviews.clone(), self.review_id.clone(), self.index);
+        rt.spawn(async move {
+            let _ = reviews.set_agent_at(&id, index, &row).await;
+        });
+    }
+}
+
 #[cfg(test)]
 mod review_retry_tests {
     use super::{agent_retry_block, agent_stop_block, same_dir, sweep_review_temp_files_if_idle};
@@ -800,5 +846,66 @@ mod review_retry_tests {
             super::no_pr_changes_message("feat", "main", false),
             "no changes between 'feat' and 'main'"
         );
+    }
+
+    /// concurrency-async-5-02: a retry claim dropped before its spawn (the
+    /// request future cancelled mid-await) restores the settled row; a
+    /// disarmed one (spawned) leaves the claim in place.
+    #[tokio::test]
+    async fn dropped_retry_claim_restores_the_settled_row() {
+        let pool = otto_state::db::test_pool().await;
+        let reviews = otto_state::ReviewsRepo::new(pool);
+        let review = reviews.create_review(&"repo".to_string(), 1).await.unwrap();
+        let row = |status: &str| -> ReviewAgentState {
+            serde_json::from_value(serde_json::json!({
+                "name": "a", "provider": "claude", "model": "",
+                "status": status, "note": "", "comment_count": 0,
+            }))
+            .unwrap()
+        };
+        reviews
+            .set_agents(&review.id, &[row("error"), row("done")])
+            .await
+            .unwrap();
+        reviews
+            .set_status(&review.id, ReviewStatus::Done, None)
+            .await
+            .unwrap();
+        let status = || async {
+            reviews.get_review(&review.id).await.unwrap().agents[0]
+                .status
+                .clone()
+        };
+        let guard = |settled| super::ClaimGuard {
+            reviews: reviews.clone(),
+            review_id: review.id.clone(),
+            index: 0,
+            settled: Some(settled),
+        };
+        assert!(reviews
+            .claim_agent_retry(&review.id, 0, &row("pending"))
+            .await
+            .unwrap());
+        // The handler future, cancelled while awaiting after the claim.
+        let fut = async {
+            let _claim = guard(row("error"));
+            std::future::pending::<()>().await;
+        };
+        drop(tokio::time::timeout(std::time::Duration::from_millis(5), fut).await);
+        for _ in 0..100 {
+            if status().await == "error" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(status().await, "error", "a dropped claim restores the row");
+
+        assert!(reviews
+            .claim_agent_retry(&review.id, 0, &row("pending"))
+            .await
+            .unwrap());
+        guard(row("error")).disarm();
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        assert_eq!(status().await, "pending", "a disarmed claim is kept");
     }
 }

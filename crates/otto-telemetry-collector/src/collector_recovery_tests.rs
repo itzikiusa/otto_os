@@ -338,6 +338,7 @@ async fn collector_resource_identity_covers_stop_exit_cancel_and_pid_reuse() {
             child,
             sampled: Some(sampled),
             _owner_lock: None,
+            _log_rotator: None,
             endpoint: String::new(),
             health: String::new(),
             metrics: String::new(),
@@ -380,4 +381,37 @@ async fn collector_resource_identity_covers_stop_exit_cancel_and_pid_reuse() {
             .iter()
             .any(|p| p.process == "collector"));
     }
+}
+
+/// BP-5-07: a long-lived collector's log is cut back in place once it passes
+/// the cap — an appender holding the file keeps writing to the SAME file (no
+/// rename orphaning its fd), and the old contents survive one generation.
+#[test]
+fn copy_truncate_keeps_the_appender_writing_to_the_live_file() {
+    use std::io::Write;
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("collector.log");
+    let mut appender = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log)
+        .unwrap();
+    appender.write_all(b"small\n").unwrap();
+    assert!(
+        !super::copy_truncate_if_over(&log, 64).unwrap(),
+        "under the cap: untouched"
+    );
+    assert!(!dir.path().join("collector.log.1").exists());
+    appender.write_all(&[b'x'; 100]).unwrap();
+    assert!(super::copy_truncate_if_over(&log, 64).unwrap());
+    let kept = std::fs::read(dir.path().join("collector.log.1")).unwrap();
+    assert!(kept.starts_with(b"small\n") && kept.len() == 106);
+    assert_eq!(std::fs::metadata(&log).unwrap().len(), 0);
+    appender.write_all(b"after\n").unwrap();
+    assert_eq!(
+        std::fs::read(&log).unwrap(),
+        b"after\n",
+        "O_APPEND lands at the new end"
+    );
+    assert!(!super::copy_truncate_if_over(&dir.path().join("missing.log"), 64).unwrap());
 }

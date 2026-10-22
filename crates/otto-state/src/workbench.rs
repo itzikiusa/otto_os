@@ -199,9 +199,6 @@ pub fn content_digest_hex(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
-/// The previous name, kept for existing importers (`mcp_audit`).
-pub use self::content_digest_hex as sha256_hex;
-
 fn invalid(msg: impl Into<String>) -> Error {
     Error::Invalid(msg.into())
 }

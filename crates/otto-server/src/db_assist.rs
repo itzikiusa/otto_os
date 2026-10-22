@@ -48,6 +48,7 @@ use std::time::Duration;
 use axum::extract::{Path, State};
 use axum::http::HeaderMap;
 use axum::Json;
+use otto_agent_run::fence::extract_fenced;
 use otto_core::domain::WorkspaceRole;
 use otto_core::event::Event;
 use otto_core::{Error, Id};
@@ -803,21 +804,6 @@ fn q_script_body(port: u16, assist_id: &Id, key: &str) -> String {
         aid = assist_id,
         key = key,
     )
-}
-
-/// Extract the contents of the first ```<lang> ... ``` fenced block.
-fn extract_fenced(raw: &str, lang: &str) -> Option<String> {
-    let open = format!("```{lang}");
-    let start = raw.find(&open)?;
-    let after = &raw[start + open.len()..];
-    let after = after.strip_prefix('\n').unwrap_or(after);
-    let end = after.find("```")?;
-    let body = after[..end].trim();
-    if body.is_empty() {
-        None
-    } else {
-        Some(body.to_string())
-    }
 }
 
 /// The first non-empty line of the reply, as a note fallback.

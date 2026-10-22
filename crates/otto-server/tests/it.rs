@@ -42,6 +42,8 @@ mod k8s_backfill_budget;
 mod k8s_monitor_clickhouse;
 #[path = "mcp_auto_approve.rs"]
 mod mcp_auto_approve;
+#[path = "mcp_profiles_edges.rs"]
+mod mcp_profiles_edges;
 #[path = "personal_agent_policy.rs"]
 mod personal_agent_policy;
 #[path = "personal_agents_owner.rs"]

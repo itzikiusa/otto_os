@@ -17,6 +17,8 @@ use otto_core::event::Event;
 use otto_core::secrets::SecretStore;
 use otto_core::Id;
 use otto_orchestrator::Orchestrator;
+use otto_review::session as review_engine;
+use otto_sessions::submit;
 use otto_sessions::SessionManager;
 use otto_state::{IntegrationsRepo, SwarmProject, SwarmRepo, WorkspacesRepo};
 use otto_swarm::runtime::engine::CoordinatorRegistry;
@@ -26,7 +28,6 @@ use otto_swarm::runtime::{SwarmHost, SwarmRt};
 use tokio::sync::broadcast;
 
 use crate::agent_run;
-use crate::review_session;
 use crate::state::ServerCtx;
 
 impl ServerCtx {
@@ -102,7 +103,7 @@ impl SwarmHost for ServerCtx {
         ServerCtx::resolve_provider_or_fallback(self, ws, requested, site).await
     }
     async fn budget_blocked(&self, workspace_id: &str) -> Option<Option<String>> {
-        let verdict = crate::routes::usage::check_budget(self, workspace_id, "").await;
+        let verdict = crate::budget::check_budget(self, workspace_id, "").await;
         verdict.blocked.then_some(verdict.reason)
     }
     async fn session_usage_totals(
@@ -123,25 +124,25 @@ impl SwarmHost for ServerCtx {
 
     fn pty_timings(&self) -> PtyTimings {
         PtyTimings {
-            paste_to_enter: review_session::PASTE_TO_ENTER,
-            prompt_land_wait: review_session::PROMPT_LAND_WAIT,
-            waiting_idle: review_session::WAITING_IDLE,
+            paste_to_enter: submit::PASTE_TO_ENTER,
+            prompt_land_wait: review_engine::PROMPT_LAND_WAIT,
+            waiting_idle: review_engine::WAITING_IDLE,
         }
     }
     fn bracketed_paste(&self, text: &str) -> Vec<u8> {
-        review_session::bracketed_paste(text)
+        submit::bracketed_paste(text)
     }
     async fn wait_for_tui(&self, sid: &Id) -> bool {
-        review_session::wait_for_tui(&self.manager, sid).await
+        submit::wait_for_tui(&self.manager, sid).await
     }
     async fn dispatched(&self, sid: &Id, before: Option<Instant>) -> bool {
-        review_session::dispatched(&self.manager, sid, before).await
+        submit::dispatched(&self.manager, sid, before).await
     }
     fn transcript_len(&self, cwd: &str, psid: &str) -> u64 {
-        review_session::transcript_len(cwd, psid)
+        review_engine::transcript_len(cwd, psid)
     }
     async fn claude_prompt_landed(&self, sid: &Id, cwd: &str, offset: u64, wait: Duration) -> bool {
-        review_session::claude_prompt_landed(&self.manager, sid, cwd, offset, wait).await
+        review_engine::claude_prompt_landed(&self.manager, sid, cwd, offset, wait).await
     }
     fn claude_turn_tail(&self, path: PathBuf, offset: u64) -> Box<dyn TurnTail> {
         Box::new(ClaudeTurnTail(crate::turn_oracle::ClaudeTail::from_offset(

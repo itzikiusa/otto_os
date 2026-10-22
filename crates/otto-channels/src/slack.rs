@@ -96,6 +96,11 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Overall deadline for file-download requests, which can carry large payloads
 /// and so are given a more generous budget than ordinary API calls.
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
+/// Overall deadline for the step-2 byte POST of an outbound attachment (up to
+/// `attach_guard::MAX_ATTACHMENT_BYTES`): on the 30 s API budget a 20 MiB file
+/// needed ~5.6 Mbit/s of uplink and timed out on a VPN (integrations-5-04).
+/// Matches Telegram's `sendDocument` budget.
+const UPLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 /// Largest inbound Slack attachment Otto downloads for the agent (bytes).
 const MAX_DOWNLOAD_BYTES: u64 = 50 * 1024 * 1024;
 /// Deadline for one Socket Mode frame write (ping, pong, envelope ack). Like
@@ -144,6 +149,21 @@ fn build_download_client() -> reqwest::Client {
             reqwest::Client::builder()
                 .connect_timeout(CONNECT_TIMEOUT)
                 .timeout(DOWNLOAD_TIMEOUT)
+                .build()
+                .unwrap_or_default()
+        })
+        .clone()
+}
+
+/// The process-wide HTTP client for attachment uploads ([`UPLOAD_TIMEOUT`]);
+/// shared like [`build_http_client`].
+fn build_upload_client() -> reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .connect_timeout(CONNECT_TIMEOUT)
+                .timeout(UPLOAD_TIMEOUT)
                 .build()
                 .unwrap_or_default()
         })
@@ -566,8 +586,7 @@ impl SlackAdapter {
     ///
     /// The bytes are sent verbatim so binary files are not corrupted.
     async fn put_bytes_to_upload_url(&self, upload_url: &str, bytes: &[u8]) -> anyhow::Result<()> {
-        let response = self
-            .http
+        let response = build_upload_client()
             .post(upload_url)
             .body(bytes.to_vec())
             .send()
@@ -874,7 +893,15 @@ pub async fn run(
                         continue 'inner; // not acknowledged until its notice succeeds
                     }
                     let duplicate = seen.lock().await.set.contains(&dedup_key);
-                    let admission = if duplicate {
+                    // Nothing to forward (bot feed edits, deletions, joins,
+                    // unfurls): ACK and remember it, with no admission permit
+                    // or ingress ticket (backend-correctness-5-04).
+                    let skipped = if duplicate { None } else { drop_reason(event) };
+                    if let Some(why) = skipped {
+                        debug!("slack: {why}; acknowledged without admission");
+                        seen.lock().await.insert(dedup_key.clone(), DEDUP_CAP);
+                    }
+                    let admission = if duplicate || skipped.is_some() {
                         None
                     } else {
                         Some(bridge.admission.admit_chat(
@@ -895,14 +922,9 @@ pub async fn run(
                                 .as_str()
                                 .or_else(|| event["user"].as_str())
                                 .unwrap_or("");
-                            let notify = crate::bridge::integration_admits(&integ, user)
-                                && !chat.is_empty()
-                                && !event["bot_id"].is_string()
-                                && !event["message"]["bot_id"].is_string()
-                                && matches!(
-                                    event["type"].as_str(),
-                                    Some("message" | "app_mention")
-                                );
+                            // `drop_reason` already let only user messages in.
+                            let notify =
+                                crate::bridge::integration_admits(&integ, user) && !chat.is_empty();
                             let chat = chat.to_owned();
                             let thread = thread.map(str::to_owned);
                             let adapter = SlackAdapter::new(bot_token.clone());
@@ -1062,6 +1084,51 @@ async fn open_socket_mode_connection(
         .ok_or_else(|| transient("Slack returned no Socket Mode URL".into()))
 }
 
+/// Why an `events_api` event carries nothing to forward, or `None` for a user
+/// message. ONE predicate for the listener's admission gate and
+/// [`handle_event`] (backend-correctness-5-04): the listener used to admit
+/// first, so the mirror's own feed edits each took a conversation permit and
+/// an ingress ticket, queued behind a running turn, and after a handful the
+/// person's next message was refused as "busy".
+fn drop_reason(event: &serde_json::Value) -> Option<&'static str> {
+    // Only message + app_mention events.
+    if !matches!(event["type"].as_str(), Some("message" | "app_mention")) {
+        return Some("non-message event");
+    }
+    // Loop prevention. Never forward the bot's own messages, including the
+    // nested message of an edit (`message_changed`): the mirror edits its
+    // "working…" feed every couple of seconds, and each edit emits a
+    // message_changed event authored by the bot. Without this the relay would
+    // feed its own output back to the agent in a tight loop.
+    if event["bot_id"].is_string() || event["message"]["bot_id"].is_string() {
+        return Some("bot message (loop prevention)");
+    }
+    // Policy: accept ALL user messages. We never drop a message for having an
+    // unknown subtype — when in doubt, forward it and let the agent read/act.
+    // The exceptions carry no new user content: a deletion is a tombstone, an
+    // edit (`message_changed`) carries its content under `message`, and
+    // membership notices ("X has joined") are system announcements — a batch
+    // invite emits dozens at once, each of which would spawn an agent session,
+    // and Slack rejects threading onto them (`cannot_reply_to_message`).
+    let subtype = event["subtype"].as_str();
+    if subtype == Some("message_deleted") {
+        return Some("deletion (nothing to forward)");
+    }
+    if is_membership_subtype(subtype) {
+        return Some("membership notice (no user content)");
+    }
+    // A `message_changed` with no `edited` stamp is Slack rewriting the message
+    // itself, not the user changing it — overwhelmingly a link UNFURL landing a
+    // few seconds after the post. The text is identical, so a message that
+    // happened to contain a URL got processed twice: two agent sessions, or two
+    // runs of the same workflow, from one human message. Only a human edit
+    // carries `message.edited`.
+    if subtype == Some("message_changed") && !is_human_edit(event) {
+        return Some("message rewrite (unfurl/attachment, no user edit)");
+    }
+    None
+}
+
 /// Inspect a single `events_api` payload event and, if it is a user message,
 /// build an `Inbound` and forward it to the bridge.
 async fn handle_event(
@@ -1072,56 +1139,14 @@ async fn handle_event(
     permit: crate::admission::WorkPermit,
 ) {
     let event_type = event["type"].as_str().unwrap_or("");
-
-    // Only handle message + app_mention events.
-    if event_type != "message" && event_type != "app_mention" {
-        debug!(event_type, "slack: ignored non-message event");
+    // The listener already skipped these before admission; kept here so a
+    // direct caller can never forward one.
+    if let Some(why) = drop_reason(event) {
+        debug!(event_type, "slack: skipped: {why}");
         return;
     }
     debug!(event_type, "slack: message-like event received");
-
-    // Loop prevention — the ONLY thing we ever drop. Never forward the bot's
-    // own messages, including the nested message of an edit (`message_changed`):
-    // the mirror edits its "working…" feed every couple of seconds, and each
-    // edit emits a message_changed event authored by the bot. Without this the
-    // relay would feed its own output back to the agent in a tight loop.
-    if event["bot_id"].is_string() || event["message"]["bot_id"].is_string() {
-        debug!(event_type, "slack: bot message skipped (loop prevention)");
-        return;
-    }
-
-    // Policy: accept ALL user messages. We never drop a message for having an
-    // unknown subtype — when in doubt, forward it and let the agent read/act.
-    // The exceptions carry no new user content: a deletion is a tombstone, an
-    // edit (`message_changed`) carries its content under `message`, and
-    // membership notices ("X has joined") are system announcements — a batch
-    // invite emits dozens at once, each of which would spawn an agent session,
-    // and Slack rejects threading onto them (`cannot_reply_to_message`).
     let subtype = event["subtype"].as_str();
-    if subtype == Some("message_deleted") {
-        info!(event_type, "slack: deletion skipped (nothing to forward)");
-        return;
-    }
-    if is_membership_subtype(subtype) {
-        info!(
-            event_type,
-            subtype, "slack: membership notice skipped (no user content)"
-        );
-        return;
-    }
-    // A `message_changed` with no `edited` stamp is Slack rewriting the message
-    // itself, not the user changing it — overwhelmingly a link UNFURL landing a
-    // few seconds after the post. The text is identical, so a message that
-    // happened to contain a URL got processed twice: two agent sessions, or two
-    // runs of the same workflow, from one human message. Only a human edit
-    // carries `message.edited`.
-    if subtype == Some("message_changed") && !is_human_edit(event) {
-        info!(
-            event_type,
-            "slack: message rewrite skipped (unfurl/attachment, no user edit)"
-        );
-        return;
-    }
     let content = if subtype == Some("message_changed") {
         &event["message"]
     } else {
@@ -1590,6 +1615,38 @@ mod tests {
             "me_message",
         ] {
             assert!(!is_membership_subtype(Some(s)), "{s} must be forwarded");
+        }
+    }
+
+    /// backend-correctness-5-04: the listener's pre-admission predicate drops
+    /// everything `handle_event` would (bot posts and feed edits, deletions,
+    /// joins, unfurl rewrites, non-message events) and keeps user messages,
+    /// human edits and unknown subtypes.
+    #[test]
+    fn drop_reason_skips_non_user_events_before_admission() {
+        use serde_json::json;
+        let dropped = [
+            json!({"type": "reaction_added", "user": "U1"}),
+            json!({"type": "message", "bot_id": "B1", "text": "working…"}),
+            json!({"type": "message", "subtype": "message_changed",
+                   "message": {"bot_id": "B1", "text": "working…", "edited": {"ts": "1"}}}),
+            json!({"type": "message", "subtype": "message_deleted"}),
+            json!({"type": "message", "subtype": "channel_join", "user": "U1"}),
+            json!({"type": "message", "subtype": "message_changed",
+                   "message": {"user": "U1", "text": "see https://x"}}),
+        ];
+        for e in &dropped {
+            assert!(drop_reason(e).is_some(), "{e} must be dropped");
+        }
+        let kept = [
+            json!({"type": "message", "user": "U1", "text": "hi"}),
+            json!({"type": "app_mention", "user": "U1", "text": "<@UBOT> hi"}),
+            json!({"type": "message", "subtype": "file_share", "user": "U1"}),
+            json!({"type": "message", "subtype": "message_changed",
+                   "message": {"user": "U1", "text": "fixed", "edited": {"ts": "2", "user": "U1"}}}),
+        ];
+        for e in &kept {
+            assert_eq!(drop_reason(e), None, "{e} must be forwarded");
         }
     }
 }

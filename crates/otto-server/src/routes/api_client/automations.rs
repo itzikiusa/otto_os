@@ -669,3 +669,134 @@ pub(super) fn unresolved_placeholders(
     scan_value(&exec.auth, vars, &mut out);
     out.into_iter().collect()
 }
+
+#[cfg(test)]
+mod binding_tests {
+    //! TQ-5-05: the agent-run secret↔host binding exercised through
+    //! `run_step` itself, not just its helper — the block must sit AFTER the
+    //! pre-request script (which can retarget the URL) and must fire only for
+    //! the binding `api_automation_runs::start` builds for an agent caller.
+    use super::*;
+    use crate::routes::browser::tests::{mem_pool, root_user, seed_workspace, test_ctx};
+    use wiremock::matchers::{header, method};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// A human-saved request on `http://127.0.0.1:{A}` with a bearer token
+    /// (moved to the Keychain as a `$secret` marker on save) and a pre-request
+    /// script that points the send at `http://localhost:{B}` — a different
+    /// HOST, which is what the binding compares.
+    async fn saved_retargeting_request(
+        ctx: &ServerCtx,
+        wid: &Id,
+        a: &MockServer,
+        b: &MockServer,
+    ) -> ApiRequest {
+        let b_url = format!("http://localhost:{}/steal", b.address().port());
+        let req: UpsertApiRequestReq = serde_json::from_value(json!({
+            "name": "owner",
+            "method": "GET",
+            "url": format!("{}/me", a.uri()),
+            "auth": {"type": "bearer", "token": "tk-secret"},
+            "extras": {"v": 1, "scripts": {"pre": format!("pm.request.url = '{b_url}';")}},
+        }))
+        .expect("upsert dto");
+        let Json(saved) = create_request(
+            Path(wid.clone()),
+            State(ctx.clone()),
+            CurrentUser(root_user()),
+            HeaderMap::new(),
+            Json(req),
+        )
+        .await
+        .expect("save request");
+        assert!(
+            api_secrets::marker_ref(&saved.auth["token"]).is_some(),
+            "the bearer must be stored as a $secret marker: {}",
+            saved.auth
+        );
+        saved
+    }
+
+    #[tokio::test]
+    async fn agent_run_step_refuses_a_script_retargeted_secret_and_a_person_run_sends_it() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let pool = mem_pool().await;
+        let wid: Id = "ws-step-binding".into();
+        seed_workspace(&pool, &wid).await;
+        // Both mocks are on loopback: let the API client reach them.
+        sqlx::query("UPDATE workspaces SET settings_json = ? WHERE id = ?")
+            .bind(json!({"api_client": {"allow_local": true}}).to_string())
+            .bind(wid.as_str())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let ctx = test_ctx(&pool, tmp.path().to_path_buf()).await;
+        let user = root_user();
+        let repo = repo(&ctx);
+        let a = MockServer::start().await;
+        let b = MockServer::start().await;
+        let saved = saved_retargeting_request(&ctx, &wid, &a, &b).await;
+
+        // Agent run: the binding exactly as `start` builds it.
+        {
+            let _guard = Mock::given(method("GET"))
+                .respond_with(ResponseTemplate::new(200))
+                .expect(0)
+                .mount_as_scoped(&b)
+                .await;
+            let (env_vars, environment, env_blob) =
+                resolve_environment(&ctx, &repo, &wid, None).await.unwrap();
+            let binding = StepSecretBinding {
+                bound_hosts: bound_env_secret_hosts(&repo, &wid, &env_vars)
+                    .await
+                    .unwrap(),
+                env_vars: env_vars.clone(),
+                env_blob,
+                secret_keys: environment
+                    .as_ref()
+                    .map(|env| env.secret_keys.clone())
+                    .unwrap_or_default(),
+            };
+            let mut vars = env_vars;
+            let step = run_step(
+                &ctx,
+                &repo,
+                &wid,
+                &json!({"request_id": saved.id}),
+                &mut vars,
+                Some(saved.clone()),
+                &user.id,
+                Some(&binding),
+            )
+            .await;
+            assert!(!step.ok, "an agent run must not send the secret to B");
+            let error = step.error.unwrap_or_default();
+            assert!(
+                error.contains("'localhost'"),
+                "error names B's host: {error}"
+            );
+            assert!(error.contains("needs_confirm=new_host"), "{error}");
+        } // `.expect(0)` on B is verified here.
+
+        // A person's run (`binding: None`) is theirs to aim: it is sent, with
+        // the resolved bearer.
+        let _guard = Mock::given(method("GET"))
+            .and(header("authorization", "Bearer tk-secret"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("ok"))
+            .expect(1)
+            .mount_as_scoped(&b)
+            .await;
+        let step = run_step(
+            &ctx,
+            &repo,
+            &wid,
+            &json!({"request_id": saved.id}),
+            &mut serde_json::Map::new(),
+            Some(saved),
+            &user.id,
+            None,
+        )
+        .await;
+        assert_eq!(step.status, Some(200), "{:?}", step.error);
+    }
+}

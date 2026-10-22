@@ -142,7 +142,9 @@ impl axum::response::IntoResponse for UpdateError {
 /// sentinel — stored values are never echoed back, so the client can't resend
 /// them). An empty combined blob deletes the Keychain entry and clears the
 /// row's ref. The caller reads `blob` first ([`read_secret_blob`]) so a failed
-/// read refuses the request before anything is written.
+/// read refuses the request before anything is written, and holds
+/// `McpService::lock_secrets` from that read until this returns, so the blob
+/// can't change in between.
 async fn write_secret_env(
     secrets: &std::sync::Arc<dyn SecretStore>,
     repo: &McpServersRepo,
@@ -235,6 +237,12 @@ pub async fn create(
     if req.command.trim().is_empty() {
         return Err(Error::Invalid("mcp server command must not be empty".into()).into());
     }
+    // An env key a session's `sh` env file can't assign would leave the
+    // server silently out of every session: refuse it here, with the rule.
+    if let Some(msg) = otto_mcp::service::env_key_error(req.env.keys().chain(req.secret_env.keys()))
+    {
+        return Err(Error::Invalid(msg).into());
+    }
     // A key can't be both plaintext and secret: the secret wins, the row copy
     // is dropped.
     let mut env = req.env;
@@ -311,6 +319,11 @@ pub async fn update(
         }
         other => other,
     };
+    // Only the maps this save supplies: a stored key never blocks another edit.
+    let supplied_env = req.env.iter().chain(req.secret_env.iter());
+    if let Some(msg) = otto_mcp::service::env_key_error(supplied_env.flat_map(|m| m.keys())) {
+        return Err(Error::Invalid(msg).into());
+    }
     // Same plaintext/secret exclusivity as create, against the effective
     // secret-key set (the incoming replacement, else the stored one).
     let effective_secret_keys: Vec<String> = match &req.secret_env {
@@ -323,6 +336,14 @@ pub async fn update(
         }
         m
     });
+    // The per-server secret lock, held from this read through
+    // `set_secret_meta` in `write_secret_env`: the MCP Control Plane writes the
+    // `headers` half of the same blob under it, so neither save can revert
+    // the other's map (CA-5-03).
+    let _secrets_guard = match &req.secret_env {
+        Some(_) => Some(ctx.mcp.lock_secrets(&id).await),
+        None => None,
+    };
     // Read the stored secrets BEFORE any write: a failed read is a 503 that
     // leaves the row and the Keychain exactly as they were.
     let stored_blob = match &req.secret_env {

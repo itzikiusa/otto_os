@@ -39,6 +39,7 @@ const REOPEN_GUARD_MS: u64 = 300;
 pub const MENU_OPEN: &str = "tray-open";
 pub const MENU_ASK: &str = "tray-ask";
 pub const MENU_SETTINGS: &str = "tray-settings";
+pub const MENU_RESTART_DAEMON: &str = "tray-restart-daemon";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Glyph {
@@ -160,6 +161,13 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
             &MenuItem::with_id(app, MENU_ASK, "Ask Otto…", true, None::<&str>)?,
             &PredefinedMenuItem::separator(app)?,
             &MenuItem::with_id(app, MENU_SETTINGS, "Settings…", true, None::<&str>)?,
+            &MenuItem::with_id(
+                app,
+                MENU_RESTART_DAEMON,
+                "Restart Daemon",
+                true,
+                None::<&str>,
+            )?,
             &PredefinedMenuItem::separator(app)?,
             // Same id as the app menu's Quit: main.rs runs the snapshot-then-
             // exit path for it.

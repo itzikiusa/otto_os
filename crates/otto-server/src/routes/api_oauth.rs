@@ -117,7 +117,7 @@ pub async fn start(
     }
     // Token exchange retains the same SSRF default as other API client traffic.
     if !super::api_client::workspace_allows_local(&ctx, &wid).await {
-        super::api_client::net_guard::check_url(token_url)
+        otto_netguard::check_url(token_url)
             .await
             .map_err(|e| invalid(&e))?;
     }
@@ -283,7 +283,7 @@ async fn exchange(ctx: &ServerCtx, flow: &Flow, code: &str) -> Result<(), String
     let token_url = auth["token_url"].as_str().unwrap_or("");
     let allow_local = super::api_client::workspace_allows_local(ctx, &flow.wid).await;
     if !allow_local {
-        super::api_client::net_guard::check_url(token_url).await?;
+        otto_netguard::check_url(token_url).await?;
     }
     let mut form = vec![
         ("grant_type", "authorization_code"),

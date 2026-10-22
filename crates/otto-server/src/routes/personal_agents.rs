@@ -24,6 +24,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
+use otto_assistant::assistant::tasks::AgentOwnership;
 use otto_core::api::CreateSessionReq;
 use otto_core::domain::{SessionKind, User, WorkspaceRole};
 use otto_core::event::Event;
@@ -314,7 +315,9 @@ async fn require_agent_owner(
     agent: &PersonalAgent,
     changed: &[&str],
 ) -> Result<(), ApiError> {
-    if changed.is_empty() || agent.created_by.as_deref() == Some(user.id.as_str()) {
+    // One predicate with assistant delegation (access-control-5-03).
+    let ownership = otto_assistant::assistant::tasks::agent_ownership(agent, &user.id);
+    if changed.is_empty() || ownership == AgentOwnership::Owner {
         return Ok(());
     }
     if require_ws_role(ctx, user, &agent.workspace_id, WorkspaceRole::Admin)
@@ -323,12 +326,7 @@ async fn require_agent_owner(
     {
         return Ok(());
     }
-    let ownerless = agent
-        .created_by
-        .as_deref()
-        .filter(|o| !o.is_empty())
-        .is_none();
-    if ownerless && adopt(ctx, &agent.id, &user.id).await {
+    if ownership == AgentOwnership::Ownerless && adopt(ctx, &agent.id, &user.id).await {
         return Ok(());
     }
     Err(ApiError(Error::Forbidden(format!(
@@ -968,8 +966,8 @@ async fn chat_session(
             &user_context,
         );
         let _hold = ctx.manager.hold_for_turn(&session.id);
-        if !crate::review_session::submit_prompt(&ctx.manager, &session.id, &initial).await {
-            crate::review_session::stop_review_sessions(
+        if !otto_sessions::submit::submit_prompt(&ctx.manager, &session.id, &initial).await {
+            otto_review::session::stop_review_sessions(
                 &ctx.manager,
                 std::slice::from_ref(&session.id),
             )

@@ -7,8 +7,8 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use sqlx::{Row, SqliteConnection};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock, Weak};
-use tokio::sync::{Mutex as AsyncMutex, Semaphore};
+use std::sync::{Arc, Mutex, OnceLock};
+use tokio::sync::Semaphore;
 
 fn json_error(error: impl std::fmt::Display) -> Error {
     Error::Internal(format!("workflow projection: {error}"))
@@ -249,24 +249,12 @@ pub async fn publish_checkpoint(
     Ok(())
 }
 
-// Weak keyed gates prevent duplicate repair without retaining a history of runs.
-fn repair_gate(id: &str) -> Arc<AsyncMutex<()>> {
-    static GATES: OnceLock<Mutex<HashMap<String, Weak<AsyncMutex<()>>>>> = OnceLock::new();
-    let mut gates = GATES
-        .get_or_init(Default::default)
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    gates.retain(|_, gate| gate.strong_count() > 0);
-    if let Some(gate) = gates.get(id).and_then(Weak::upgrade) {
-        return gate;
-    }
-    let gate = Arc::new(AsyncMutex::new(()));
-    gates.insert(id.into(), Arc::downgrade(&gate));
-    gate
-}
+// Keyed gates prevent duplicate repair without retaining a history of runs.
+static REPAIR_GATES: otto_core::keyed_lock::KeyedLocks<String> =
+    otto_core::keyed_lock::KeyedLocks::new();
 async fn repair(pool: &DbPool, id: &str) -> Result<()> {
     static WORKERS: OnceLock<Arc<Semaphore>> = OnceLock::new();
-    let gate = repair_gate(id).try_lock_owned().map_err(|_| busy())?;
+    let gate = REPAIR_GATES.try_lock(id).ok_or_else(busy)?;
     let permit = WORKERS
         .get_or_init(|| Arc::new(Semaphore::new(2)))
         .clone()

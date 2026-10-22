@@ -331,15 +331,29 @@ impl ProductService {
         self.record_import(workspace_id, req, user_id, src).await
     }
 
-    /// Refresh a story from its issue-tracker source.
-    ///
-    /// Re-fetches the source document. If the body changed (or there is no prior
-    /// source version), adds a new `'source'` version and a `'refreshed'` event.
+    /// Refresh a story from its issue-tracker source and return its detail
+    /// (the `POST …/refresh` route). See [`Self::refresh_source`].
     pub async fn refresh_story(&self, story_id: &Id, user_id: &Id) -> Result<ProductStoryDetail> {
         let story = self.repo.get_story(story_id).await?;
         let account = self.issues.get_account(&story.account_id).await?;
+        self.refresh_source(&story, &account, user_id).await?;
+        self.story_detail(story_id).await
+    }
+
+    /// Re-fetch the story's source document. If the body changed (or there is
+    /// no prior source version), adds a new `'source'` version and a
+    /// `'refreshed'` event; returns whether it did. The watcher calls this
+    /// with the story and account it already holds, so a poll builds no story
+    /// detail (every analysis / question / note row) only to discard it.
+    pub async fn refresh_source(
+        &self,
+        story: &otto_state::ProductStory,
+        account: &IssueAccount,
+        user_id: &Id,
+    ) -> Result<bool> {
+        let story_id = &story.id;
         let src = self
-            .fetch_source(&account, &story.source_kind, &story.source_key)
+            .fetch_source(account, &story.source_kind, &story.source_key)
             .await?;
 
         let latest = self.repo.latest_source_version(story_id).await?;
@@ -379,8 +393,7 @@ impl ProductService {
                 })
                 .await?;
         }
-
-        self.story_detail(story_id).await
+        Ok(changed)
     }
 
     // ---------------------------------------------------------------------------
@@ -391,14 +404,16 @@ impl ProductService {
     /// that were created **after** `since` (RFC3339 lexicographic comparison).
     /// If `since` is `None`, all comments are returned. Results are sorted
     /// ascending by `created`.
+    ///
+    /// Takes the story and its account as the caller (the watcher) already
+    /// loaded them for [`Self::refresh_source`].
     pub async fn list_new_comments(
         &self,
-        story_id: &Id,
+        story: &otto_state::ProductStory,
+        account: &IssueAccount,
         since: Option<&str>,
     ) -> Result<Vec<CommentInfo>> {
-        let story = self.repo.get_story(story_id).await?;
-        let account = self.issues.get_account(&story.account_id).await?;
-        let token = self.account_token(&account).await?;
+        let token = self.account_token(account).await?;
 
         // SE-13: with a cursor, read only what is at/after its timestamp (Jira
         // walks newest-first and stops there); the exact tie/seen-id filter
@@ -406,7 +421,7 @@ impl ProductService {
         let since_ts = since.map(|c| parse_watch_cursor(c).0);
         let mut comments: Vec<CommentInfo> = match story.source_kind.as_str() {
             "jira" => {
-                let client = Tracker::for_account(&account, &token);
+                let client = Tracker::for_account(account, &token);
                 match since_ts {
                     Some(ts) => client.list_comments_since(&story.source_key, ts).await?,
                     None => client.list_comments(&story.source_key).await?,
@@ -416,7 +431,7 @@ impl ProductService {
                 .collect()
             }
             "confluence" => {
-                let client = ConfluenceClient::for_account(&account, &token)?;
+                let client = ConfluenceClient::for_account(account, &token)?;
                 match since_ts {
                     Some(ts) => client.list_comments_since(&story.source_key, ts).await?,
                     None => client.list_comments(&story.source_key).await?,

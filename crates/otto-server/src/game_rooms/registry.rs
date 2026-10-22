@@ -1,9 +1,7 @@
 //! Bounded memory-only relay. All membership and packet decisions share a room lock.
 use super::types::*;
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use crate::rooms::capability::{well_formed, Capability, Digest, TokenBucket};
 use otto_core::{Error, Result};
-use rand::{rand_core::UnwrapErr, rngs::SysRng, Rng};
-use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     sync::Arc,
@@ -42,19 +40,19 @@ pub(super) struct Notice {
 }
 pub(super) struct Member {
     pub view: MemberView,
-    hash: [u8; 32],
+    hash: Digest,
     connection: u64,
     disconnected: Option<Instant>,
     seq: u64,
-    stream_rate: Rate,
-    control_rate: Rate,
+    stream_rate: TokenBucket,
+    control_rate: TokenBucket,
 }
 pub(super) struct Room {
     pub id: String,
     owner: String,
     pub config: Config,
     created: Instant,
-    invite: Option<[u8; 32]>,
+    invite: Option<Digest>,
     pub members: Vec<Member>,
     pub round: u64,
     pub generation: u64,
@@ -62,36 +60,8 @@ pub(super) struct Room {
     pub tx: broadcast::Sender<Notice>,
     result: Option<serde_json::Value>,
 }
-struct Rate {
-    tokens: f64,
-    at: Instant,
-}
-impl Rate {
-    fn new(tokens: f64) -> Self {
-        Self {
-            tokens,
-            at: Instant::now(),
-        }
-    }
-    fn take(&mut self, rate: f64, burst: f64) -> Result<()> {
-        let now = Instant::now();
-        self.tokens = (self.tokens + now.duration_since(self.at).as_secs_f64() * rate).min(burst);
-        self.at = now;
-        if self.tokens < 1.0 {
-            return Err(Error::Conflict("Too many game messages".into()));
-        }
-        self.tokens -= 1.0;
-        Ok(())
-    }
-}
-fn hash(token: &str) -> [u8; 32] {
-    Sha256::digest(token.as_bytes()).into()
-}
-fn token() -> String {
-    let mut bytes = [0u8; 32];
-    UnwrapErr(SysRng).fill_bytes(&mut bytes);
-    URL_SAFE_NO_PAD.encode(bytes)
-}
+/// The game relay's throttle message; `socket.rs` closes the socket on it.
+pub(super) const RATE_LIMITED: &str = "Too many game messages";
 fn name(value: &str) -> Result<String> {
     let value = value.trim();
     if value.is_empty() || value.chars().count() > 40 || value.chars().any(char::is_control) {
@@ -103,7 +73,7 @@ fn conflict(message: &str) -> Error {
     Error::Conflict(message.into())
 }
 impl Member {
-    fn new(name: String, role: Role, slot: usize, token: &str) -> Self {
+    fn new(name: String, role: Role, slot: usize, hash: Digest) -> Self {
         Self {
             view: MemberView {
                 id: uuid::Uuid::new_v4().to_string(),
@@ -115,12 +85,12 @@ impl Member {
                 left: false,
                 rematch: false,
             },
-            hash: hash(token),
+            hash,
             connection: 0,
             disconnected: Some(Instant::now()),
             seq: 0,
-            stream_rate: Rate::new(90.0),
-            control_rate: Rate::new(15.0),
+            stream_rate: TokenBucket::new(90.0),
+            control_rate: TokenBucket::new(15.0),
         }
     }
     fn active(&self) -> bool {
@@ -135,7 +105,7 @@ impl Registry {
         config: Config,
     ) -> Result<Credential> {
         let name = name(display)?;
-        if !config.game.maps().contains(&config.map.as_str()) {
+        if !config.game.maps().contains(&config.map) {
             return Err(Error::Invalid("Choose a map for this game".into()));
         }
         let mut rooms = self.rooms.lock().await;
@@ -157,10 +127,10 @@ impl Registry {
         if rooms.len() >= 32 || active >= 2 {
             return Err(conflict("Game room limit reached; close an existing game"));
         }
-        let credential = token();
-        let invite = token();
+        let (credential, credential_hash) = Capability::issue();
+        let (invite, invite_hash) = Capability::issue();
         let id = uuid::Uuid::new_v4().to_string();
-        let host = Member::new(name, Role::Host, 0, &credential);
+        let host = Member::new(name, Role::Host, 0, credential_hash);
         let response = Credential {
             room_id: id.clone(),
             member_id: host.view.id.clone(),
@@ -177,7 +147,7 @@ impl Registry {
                 owner: owner.into(),
                 config,
                 created: Instant::now(),
-                invite: Some(hash(&invite)),
+                invite: Some(invite_hash),
                 members: vec![host],
                 round: 1,
                 generation: 0,
@@ -202,13 +172,16 @@ impl Registry {
     /// The invite admits guests until the room is full or the match starts.
     pub(super) async fn join(&self, id: &str, invite: &str, display: &str) -> Result<Credential> {
         let name = name(display)?;
-        if invite.len() != 43 {
+        if !well_formed(invite) {
             return Err(Error::Unauthorized);
         }
         let shared = self.get(id).await?;
         let mut room = shared.lock().await;
         room.live()?;
-        if room.invite != Some(hash(invite)) || room.created.elapsed() > Duration::from_secs(600) {
+        // `Digest::matches` is the shared constant-time compare (this was a
+        // short-circuiting `==` on the array before the relays shared it).
+        let invited = room.invite.is_some_and(|digest| digest.matches(invite));
+        if !invited || room.created.elapsed() > Duration::from_secs(600) {
             return Err(Error::Unauthorized);
         }
         let active = room.members.iter().filter(|m| m.active()).count();
@@ -218,8 +191,8 @@ impl Registry {
         {
             return Err(conflict("Game room is full"));
         }
-        let credential = token();
-        let guest = Member::new(name, Role::Guest, room.members.len(), &credential);
+        let (credential, credential_hash) = Capability::issue();
+        let guest = Member::new(name, Role::Guest, room.members.len(), credential_hash);
         let response = Credential {
             room_id: id.into(),
             member_id: guest.view.id.clone(),
@@ -234,7 +207,7 @@ impl Registry {
         Ok(response)
     }
     pub(super) async fn authenticate(&self, id: &str, credential: &str) -> Result<usize> {
-        if credential.len() != 43 {
+        if !well_formed(credential) {
             return Err(Error::Unauthorized);
         }
         let shared = self.get(id).await?;
@@ -242,7 +215,7 @@ impl Registry {
         room.live()?;
         room.members
             .iter()
-            .position(|member| member.active() && member.hash == hash(credential))
+            .position(|member| member.active() && member.hash.matches(credential))
             .ok_or(Error::Unauthorized)
     }
 }
@@ -400,9 +373,9 @@ impl Room {
             return Err(Error::Unauthorized);
         }
         if matches!(command, Command::Snapshot { .. } | Command::Input { .. }) {
-            member.stream_rate.take(60.0, 90.0)?;
+            member.stream_rate.take(60.0, 90.0, RATE_LIMITED)?;
         } else {
-            member.control_rate.take(5.0, 15.0)?;
+            member.control_rate.take(5.0, 15.0, RATE_LIMITED)?;
         }
         match command {
             Command::Ping => self.emit(Target::One(index), Event::Pong),

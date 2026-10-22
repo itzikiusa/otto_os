@@ -27,24 +27,9 @@ use crate::state::ServerCtx;
 /// evaluation. The lock is never held while agents run. Weak entries are pruned
 /// so the registry retains only active publishers/waiters.
 pub(crate) async fn update_guard(id: &str) -> tokio::sync::OwnedMutexGuard<()> {
-    use std::sync::{Arc, Mutex, OnceLock, Weak};
-    static LOCKS: OnceLock<Mutex<std::collections::HashMap<String, Weak<tokio::sync::Mutex<()>>>>> =
-        OnceLock::new();
-    let lock = {
-        let mut locks = LOCKS
-            .get_or_init(|| Mutex::new(std::collections::HashMap::new()))
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        locks.retain(|_, lock| lock.strong_count() > 0);
-        if let Some(lock) = locks.get(id).and_then(Weak::upgrade) {
-            lock
-        } else {
-            let lock = Arc::new(tokio::sync::Mutex::new(()));
-            locks.insert(id.into(), Arc::downgrade(&lock));
-            lock
-        }
-    };
-    lock.lock_owned().await
+    static LOCKS: otto_core::keyed_lock::KeyedLocks<String> =
+        otto_core::keyed_lock::KeyedLocks::new();
+    LOCKS.lock(id).await
 }
 
 /// Publish a retried validator score under the same lock as human ratings. The

@@ -66,7 +66,7 @@ async fn loop_for(
     Ok(loop_)
 }
 
-fn budget_gate(verdict: crate::routes::usage::BudgetVerdict) -> ApiResult<()> {
+fn budget_gate(verdict: crate::budget::BudgetVerdict) -> ApiResult<()> {
     if verdict.blocked {
         return Err(ApiError(Error::Invalid(format!(
             "Budget exceeded: {}",
@@ -85,7 +85,7 @@ async fn define(
     Json(req): Json<DefineGoalReq>,
 ) -> ApiResult<Json<GoalLoopDraft>> {
     check(&ctx, &user, &ws, WorkspaceRole::Editor).await?;
-    budget_gate(crate::routes::usage::check_budget(&ctx, &ws, "").await)?;
+    budget_gate(crate::budget::check_budget(&ctx, &ws, "").await)?;
 
     let mut cfg = GoalLoopConfig::default();
     cfg.definer.provider = req.provider.clone().unwrap_or_default();
@@ -234,7 +234,7 @@ async fn create(
         .map_err(ApiError)?;
 
     if req.autostart {
-        budget_gate(crate::routes::usage::check_budget(&ctx, &ws, "").await)?;
+        budget_gate(crate::budget::check_budget(&ctx, &ws, "").await)?;
         goal_loop::start_loop(&ctx, &loop_.id)
             .await
             .map_err(ApiError)?;
@@ -421,7 +421,7 @@ async fn start(
             "answer the pending loop questions before resuming".into(),
         )));
     }
-    budget_gate(crate::routes::usage::check_budget(&ctx, &loop_.workspace_id, "").await)?;
+    budget_gate(crate::budget::check_budget(&ctx, &loop_.workspace_id, "").await)?;
     goal_loop::start_loop(&ctx, &id).await.map_err(ApiError)?;
     Ok(Json(ctx.goal_loops_repo.get(&id).await.map_err(ApiError)?))
 }
@@ -478,7 +478,7 @@ async fn resume(
             "answer the pending loop questions before resuming".into(),
         )));
     }
-    budget_gate(crate::routes::usage::check_budget(&ctx, &loop_.workspace_id, "").await)?;
+    budget_gate(crate::budget::check_budget(&ctx, &loop_.workspace_id, "").await)?;
     goal_loop::start_loop(&ctx, &id).await.map_err(ApiError)?;
     Ok(Json(ctx.goal_loops_repo.get(&id).await.map_err(ApiError)?))
 }

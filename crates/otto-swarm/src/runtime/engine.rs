@@ -2075,6 +2075,9 @@ async fn create_task_goal(
         ))
         .await
         .map_err(ApiError)?;
+    // A goal added to someone else's task is text its verification turn runs:
+    // the task now acts as the person who added it (access-control-5-01).
+    note_goal_editor(&ctx, &goal, &user.0.id).await?;
     emit_goal(&ctx, &goal).await;
     Ok(Json(goal))
 }
@@ -2139,6 +2142,18 @@ async fn update_goal_h(
 ) -> ApiResult<Json<SwarmGoal>> {
     let cur = ctx.swarm_repo().get_goal(&gid).await.map_err(ApiError)?;
     check(&ctx, &user, &cur.workspace_id, WorkspaceRole::Editor).await?;
+    // access-control-5-01: the goal text and verify command are what the
+    // verification turn executes — record who changed them, and on a task
+    // goal make that person the task's prompt editor (its turns act as them).
+    let rewrites = req.title.as_ref().is_some_and(|t| t != &cur.title)
+        || req
+            .description
+            .as_ref()
+            .is_some_and(|d| d != &cur.description)
+        || req
+            .verify_cmd
+            .as_ref()
+            .is_some_and(|c| c != &cur.verify_cmd);
     let goal = ctx
         .swarm_repo()
         .update_goal(
@@ -2159,8 +2174,26 @@ async fn update_goal_h(
         )
         .await
         .map_err(ApiError)?;
+    if rewrites {
+        note_goal_editor(&ctx, &goal, &user.0.id).await?;
+    }
     emit_goal(&ctx, &goal).await;
     Ok(Json(goal))
+}
+
+/// Record `user` as `goal`'s last editor and, for a task goal, as the task's
+/// prompt editor (access-control-5-01).
+async fn note_goal_editor(ctx: &SwarmRt, goal: &SwarmGoal, user: &str) -> ApiResult<()> {
+    let repo = ctx.swarm_repo();
+    repo.set_goal_editor(&goal.id, user)
+        .await
+        .map_err(ApiError)?;
+    if let Some(tid) = &goal.task_id {
+        repo.set_task_prompt_editor(tid, user)
+            .await
+            .map_err(ApiError)?;
+    }
+    Ok(())
 }
 
 async fn delete_goal_h(

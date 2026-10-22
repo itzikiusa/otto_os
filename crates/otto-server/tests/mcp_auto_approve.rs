@@ -598,6 +598,19 @@ async fn an_mcp_admin_of_another_workspace_cannot_decide_its_approvals() {
     assert_eq!(env["decision"], "pending_approval", "{env}");
     let id = env["approval_id"].as_str().unwrap().to_string();
     let bob = mcp_admin_elsewhere(&d, "bob", "ws-bob").await;
+    // test-quality-5-09: not only a 200 — ws1's card is absent from bob's
+    // list and from his badge count (a `workspace_id IS NOT NULL` rewrite of
+    // the scope, or a handler passing `None` for him, would show it).
+    let (st, list) = d
+        .send("GET", &bob, "/mcp/approvals?status=pending", None)
+        .await;
+    assert_eq!(st, 200, "{list}");
+    assert_eq!(list, json!([]), "bob sees another workspace's approvals");
+    let (st, count) = d
+        .send("GET", &bob, "/mcp/approvals/count?status=pending", None)
+        .await;
+    assert_eq!(st, 200, "{count}");
+    assert_eq!(count["count"], 0, "bob's badge counts ws1's card: {count}");
     for approved in [true, false] {
         let (st, body) = d
             .send(
@@ -617,6 +630,118 @@ async fn an_mcp_admin_of_another_workspace_cannot_decide_its_approvals() {
         pending.iter().any(|a| a["id"] == json!(id)),
         "still pending: {pending:?}"
     );
+}
+
+/// test-quality-5-01: a SERVER-bound card is decided under the server's
+/// resource authority (`require_resource(…, "approve", tool, Editor)`), not
+/// just the workspace role. Under an Enforced policy that lets ws1 Editor dan
+/// (an Mcp Admin) discover the server but not approve on it, his decide is a
+/// 403 and the card stays pending; an `approve` rule then lets it through.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_server_bound_approval_needs_approve_access_on_the_server() {
+    use otto_core::access::{AccessActor, AccessMode, AccessPolicy, AccessRule};
+    use otto_core::access::{ResourceKind, RuleEffect, SubjectKind};
+    let d = boot().await;
+    let dan = mcp_admin_elsewhere(&d, "dan", "ws-dan").await;
+    sqlx::query(
+        "INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ('ws1', 'dan', 'editor')",
+    )
+    .execute(&d.pool)
+    .await
+    .unwrap();
+    let server = otto_state::McpRegistryRepo::new(d.pool.clone())
+        .create(otto_state::NewServerRow {
+            workspace_id: "ws1".into(),
+            name: "linear".into(),
+            transport: "stdio".into(),
+            command: "true".into(),
+            args: vec![],
+            env: Default::default(),
+            url: None,
+            description: None,
+            headers: Default::default(),
+            secret_ref: None,
+            secret_env_keys: vec![],
+            secret_header_keys: vec![],
+            injection_risk: "low".into(),
+            default_tool_access: "allow".into(),
+            enabled: true,
+            created_by: "alice".into(),
+        })
+        .await
+        .unwrap();
+    let card = otto_state::McpApprovalRepo::new(d.pool.clone())
+        .create(otto_state::NewApproval {
+            workspace_id: Some("ws1".into()),
+            kind: "tool_call".into(),
+            server_id: Some(server.id.clone()),
+            server_name: Some("linear".into()),
+            tool: Some("t".into()),
+            title: "Call t".into(),
+            detail: None,
+            args_redacted_json: "{}".into(),
+            args_hash: None,
+            risk_label: None,
+            requested_by: Some("alice".into()),
+            requested_by_kind: Some("user".into()),
+            requested_by_session_id: None,
+            expires_at: None,
+        })
+        .await
+        .unwrap();
+    let access = otto_state::ResourceAccessRepo::new(d.pool.clone());
+    let set_ops = |ops: &'static [&'static str]| {
+        let access = access.clone();
+        let id = server.id.clone();
+        async move {
+            let current = access
+                .get_policy(ResourceKind::McpServer, &id)
+                .await
+                .unwrap();
+            access
+                .put_policy(
+                    &AccessPolicy {
+                        kind: ResourceKind::McpServer,
+                        resource_id: id.clone(),
+                        mode: AccessMode::Enforced,
+                        revision: current.revision,
+                        rules: vec![AccessRule {
+                            id: otto_core::new_id(),
+                            subject_kind: SubjectKind::User,
+                            subject_id: "dan".into(),
+                            effect: RuleEffect::Allow,
+                            operations: ops.iter().map(|o| o.to_string()).collect(),
+                            children: None,
+                            grantable_operations: vec![],
+                            credential_connection_id: None,
+                        }],
+                    },
+                    current.revision,
+                    &AccessActor {
+                        real_user_id: "alice".into(),
+                        effective_user_id: None,
+                    },
+                )
+                .await
+                .unwrap();
+        }
+    };
+    let path = format!("/mcp/approvals/{}/decide", card.id);
+    let decide = || d.send("POST", &dan, &path, Some(json!({"approved": true})));
+
+    set_ops(&["discover"]).await;
+    let (st, body) = decide().await;
+    assert_eq!(st, 403, "discover-only decided a server-bound card: {body}");
+    let still = otto_state::McpApprovalRepo::new(d.pool.clone())
+        .get(&card.id)
+        .await
+        .unwrap();
+    assert_eq!(still.status, "pending", "a refused decide changed the card");
+
+    set_ops(&["discover", "approve"]).await;
+    let (st, body) = decide().await;
+    assert_eq!(st, 200, "approve access decides: {body}");
+    assert_eq!(body["status"], "approved");
 }
 
 /// test-quality-4-01 (3): impersonation can't launder a self-approval. A card

@@ -1651,3 +1651,33 @@ async fn task_delete_and_board_clear_remove_task_goals() {
         "a project-level goal belongs to the project, not the board"
     );
 }
+
+/// access-control-5-01 (migration 0195): a task nobody rewrote has no prompt
+/// editor; the recorded one reads back and a later editor replaces it. An
+/// ordinary `update_task` (status move) does not touch it.
+#[tokio::test]
+async fn task_prompt_editor_round_trips_and_survives_a_status_move() {
+    let repo = SwarmRepo::new(mem_pool().await);
+    let swarm = new_id();
+    let t = repo.create_task(new_task(&swarm, "todo")).await.unwrap();
+    assert_eq!(repo.task_prompt_editor(&t.id).await.unwrap(), None);
+    repo.set_task_prompt_editor(&t.id, "bob").await.unwrap();
+    repo.update_task(
+        &t.id,
+        TaskPatch {
+            status: Some("in_progress".into()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        repo.task_prompt_editor(&t.id).await.unwrap().as_deref(),
+        Some("bob")
+    );
+    repo.set_task_prompt_editor(&t.id, "carol").await.unwrap();
+    assert_eq!(
+        repo.task_prompt_editor(&t.id).await.unwrap().as_deref(),
+        Some("carol")
+    );
+}

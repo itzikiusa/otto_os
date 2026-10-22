@@ -46,6 +46,9 @@ pub struct CommentWriteResp {
 impl ConfluenceClient {
     /// `GET /content/{id}?expand=…` as raw JSON (errors as text for a check).
     async fn read_back(&self, id: &str, expand: &str) -> Result<Value, String> {
+        // Refuse a cleartext site before the Authorization header is attached
+        // (`http()` checks too; this keeps the gate visible at the header).
+        self.ensure_tls().map_err(|e| e.to_string())?;
         let resp = self
             .t
             .http()

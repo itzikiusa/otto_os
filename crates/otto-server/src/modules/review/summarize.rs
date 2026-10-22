@@ -130,7 +130,8 @@ pub(crate) async fn summarize_and_persist(
         "running summarizer agent ({total_findings} findings in, {}s budget)",
         summarizer_timeout.as_secs()
     );
-    let mut summary_fallback = false;
+    // Why the summary came from the deterministic fallback, if it did.
+    let mut fallback_cause: Option<String> = None;
     // Every provider uses a managed session. A fresh attempt owns its output
     // directory, so retries cannot observe an earlier attempt's completion.
     let run_text = async {
@@ -230,7 +231,7 @@ pub(crate) async fn summarize_and_persist(
             // per-agent batches Rust-side instead of the old raw concatenation,
             // and badge the run so the UI can say so.
             tracing::warn!(review = %review_id, "summarizer failed: {e}; deterministic fallback");
-            summary_fallback = true;
+            fallback_cause = Some(otto_core::text::clip_chars(e.trim(), 200));
             crate::review_fallback::deterministic_summary(agent_findings)
         }
     };
@@ -241,12 +242,10 @@ pub(crate) async fn summarize_and_persist(
     // Guard: reviewers found things but the summary came back empty — that is
     // a summarizer failure, NOT "no issues". Use the deterministic summary so
     // the run's work is never silently discarded.
-    if parsed.is_empty() && total_findings > 0 && !summary_fallback {
-        tracing::warn!(
-            review = %review_id,
-            "summarizer returned 0 comments for {total_findings} findings; deterministic fallback"
-        );
-        summary_fallback = true;
+    if parsed.is_empty() && total_findings > 0 && fallback_cause.is_none() {
+        let why = format!("returned no comments for {total_findings} findings");
+        tracing::warn!(review = %review_id, "summarizer {why}; deterministic fallback");
+        fallback_cause = Some(why);
         let fb = crate::review_fallback::deterministic_summary(agent_findings);
         parsed = parse_draft_comments(review_id, &fb);
     }
@@ -254,17 +253,11 @@ pub(crate) async fn summarize_and_persist(
     let sum_count = parsed.len();
     agent_states[summarizer_idx].status = "done".to_string();
     agent_states[summarizer_idx].comment_count = sum_count as u32;
+    let summary_fallback = fallback_cause.is_some();
     agent_states[summarizer_idx].fallback = summary_fallback;
-    agent_states[summarizer_idx].note = format!(
-        "{}{} final comment{}",
-        if summary_fallback {
-            "deterministic fallback — "
-        } else {
-            ""
-        },
-        sum_count,
-        if sum_count == 1 { "" } else { "s" }
-    );
+    // The cause rides in the note (error-handling-5-05): the badge tooltip and
+    // the note line show WHY, not a blanket "claude unavailable".
+    agent_states[summarizer_idx].note = fallback_note(fallback_cause.as_deref(), sum_count);
     ctx.reviews_store
         .set_agent_at(review_id, summarizer_idx, &agent_states[summarizer_idx])
         .await?;
@@ -285,17 +278,13 @@ pub(crate) async fn summarize_and_persist(
     let mut seen_fingerprints: Vec<String> = Vec::new();
     // Comments the user already decided on (or that are on the PR) — a re-run
     // must not re-draft them. Empty on a first run.
-    let kept_comments: Vec<ReviewComment> = ctx
-        .reviews_store
-        .get_review(review_id)
-        .await
-        .map(|r| {
-            r.comments
-                .into_iter()
-                .filter(|k| k.state != CommentState::Draft || k.posted)
-                .collect()
-        })
-        .unwrap_or_default();
+    // A failed read fails the run (retryable), never "nothing kept": that
+    // re-drafted every approved / posted comment (error-handling-5-10).
+    let kept_comments: Vec<ReviewComment> = (ctx.reviews_store.get_review(review_id).await?)
+        .comments
+        .into_iter()
+        .filter(|k| k.state != CommentState::Draft || k.posted)
+        .collect();
     // File contents read for fingerprint anchoring, one read per path.
     let mut anchor_files: std::collections::HashMap<String, Option<Vec<String>>> =
         std::collections::HashMap::new();
@@ -499,4 +488,26 @@ pub(crate) async fn summarize_and_persist(
     assemble_review_proof(ctx, review_id, &workspace.id).await;
 
     Ok(())
+}
+
+/// The summarizer row's note: "N final comments", or with the fallback cause
+/// ("deterministic fallback (summarizer: <cause>) — N final comments").
+fn fallback_note(cause: Option<&str>, n: usize) -> String {
+    let s = if n == 1 { "" } else { "s" };
+    match cause {
+        Some(why) => format!("deterministic fallback (summarizer: {why}) — {n} final comment{s}"),
+        None => format!("{n} final comment{s}"),
+    }
+}
+
+#[cfg(test)]
+mod note_tests {
+    /// error-handling-5-05: the cause reaches the stored note.
+    #[test]
+    fn fallback_note_carries_the_cause() {
+        assert_eq!(super::fallback_note(None, 1), "1 final comment");
+        let n = super::fallback_note(Some("returned no comments for 4 findings"), 4);
+        assert!(n.starts_with("deterministic fallback (summarizer: returned no comments"));
+        assert!(n.ends_with("— 4 final comments"), "{n}");
+    }
 }

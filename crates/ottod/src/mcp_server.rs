@@ -246,14 +246,10 @@ pub async fn run() -> Result<(), String> {
         .timeout(CALL_TIMEOUT)
         .build()
         .map_err(|e| format!("build http client: {e}"))?;
-    let profiles = profile_arg(&std::env::args().collect::<Vec<_>>())
-        .or_else(|| std::env::var("OTTO_MCP_PROFILE").ok())
-        .map(|p| p.trim().to_string())
-        .filter(|p| {
-            !p.is_empty()
-                && p.chars()
-                    .all(|c| c.is_ascii_alphanumeric() || "-_,".contains(c))
-        });
+    let profiles = connection_profiles(
+        profile_arg(&std::env::args().collect::<Vec<_>>())
+            .or_else(|| std::env::var("OTTO_MCP_PROFILE").ok()),
+    )?;
     let ctx = Ctx {
         http,
         base,
@@ -294,6 +290,28 @@ pub async fn run() -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// The connection's profile ids from a raw `--profile` / `OTTO_MCP_PROFILE`
+/// value, parsed like the HTTP path (`otto_mcp::profiles::parse_ids`: each id
+/// trimmed, blanks dropped), so `"database, issues"` names both profiles.
+/// Fails CLOSED: an id with any character outside `[A-Za-z0-9_-]` is an error
+/// naming it — the connection must never silently fall back to "no profile"
+/// (every enabled tool) when the person asked for a narrowed one. An absent or
+/// all-blank value means no profile.
+fn connection_profiles(raw: Option<String>) -> Result<Option<String>, String> {
+    let Some(raw) = raw else { return Ok(None) };
+    let ids = otto_mcp::profiles::parse_ids(&raw);
+    if let Some(bad) = ids.iter().find(|id| {
+        !id.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_".contains(c))
+    }) {
+        return Err(format!(
+            "invalid MCP profile id {bad:?} in --profile / OTTO_MCP_PROFILE \
+             (ids are letters, digits, '-' and '_', comma-separated)"
+        ));
+    }
+    Ok((!ids.is_empty()).then(|| ids.join(",")))
 }
 
 /// `--profile <ids>` / `--profile=<ids>` in `args`.
@@ -371,6 +389,22 @@ mod tests {
         let f = c.filter_in(&answer).unwrap();
         assert!(f.allows("otto.query_db_readonly") && !f.allows("otto.create_pr"));
         assert!(f.denial("otto.create_pr").contains("\"Database\""));
+    }
+
+    #[test]
+    fn a_profile_value_is_trimmed_per_id_and_a_bad_id_fails_closed() {
+        let p = |v: &str| connection_profiles(Some(v.into()));
+        assert_eq!(
+            p("database, issues").unwrap().as_deref(),
+            Some("database,issues")
+        );
+        assert_eq!(p(" git ,, cloud\n").unwrap().as_deref(), Some("git,cloud"));
+        assert_eq!(p("  ").unwrap(), None, "blank ⇒ no profile asked");
+        assert_eq!(connection_profiles(None).unwrap(), None);
+        // A stray character must never widen the connection to every tool.
+        let err = p("database, is.sues").unwrap_err();
+        assert!(err.contains("\"is.sues\""), "{err}");
+        assert!(p("data base").is_err());
     }
 
     #[test]

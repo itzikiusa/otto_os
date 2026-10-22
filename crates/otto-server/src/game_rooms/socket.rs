@@ -1,4 +1,8 @@
-use super::{registry::SharedRoom, types::*};
+use super::{
+    registry::{SharedRoom, RATE_LIMITED},
+    types::*,
+};
+use crate::rooms::capability::socket_token;
 use crate::{ApiResult, ServerCtx};
 use axum::{
     extract::{
@@ -21,7 +25,7 @@ pub(super) async fn upgrade(
     if uri.query().is_some() {
         return Err(Error::Unauthorized.into());
     }
-    let token = socket_token(&headers)?;
+    let token = socket_token(&headers, "otto-game")?;
     let member = ctx.game_rooms.authenticate(&id, &token).await?;
     let shared = ctx.game_rooms.get(&id).await?;
     Ok(ws
@@ -29,21 +33,6 @@ pub(super) async fn upgrade(
         .max_message_size(20480)
         .max_frame_size(20480)
         .on_upgrade(move |socket| run(shared, member, socket)))
-}
-fn socket_token(headers: &HeaderMap) -> Result<String> {
-    let mut values = headers.get_all("sec-websocket-protocol").iter();
-    let value = values
-        .next()
-        .and_then(|v| v.to_str().ok())
-        .ok_or(Error::Unauthorized)?;
-    if values.next().is_some() {
-        return Err(Error::Unauthorized);
-    }
-    let parts: Vec<_> = value.split(',').map(str::trim).collect();
-    if parts.len() != 2 || parts[0] != "otto-game" || parts[1].len() != 43 {
-        return Err(Error::Unauthorized);
-    }
-    Ok(parts[1].into())
 }
 async fn send(socket: &mut WebSocket, event: &Event) -> Result<()> {
     let text = serde_json::to_string(event).map_err(|e| Error::Internal(e.to_string()))?;
@@ -95,7 +84,7 @@ async fn run(shared: SharedRoom, index: usize, mut socket: WebSocket) {
                         Err(_)=>Err(Error::Invalid("Invalid game command".into())),
                     };
                     if let Err(error)=result {
-                        let fatal=matches!(&error,Error::Unauthorized) || error.to_string().contains("Too many game messages");
+                        let fatal=matches!(&error,Error::Unauthorized) || error.to_string().contains(RATE_LIMITED);
                         let _=send(&mut socket,&Event::Error{message:error.to_string()}).await;
                         // Invalid protocol/rate traffic cannot occupy a live socket indefinitely.
                         if fatal || serde_json::from_str::<Command>(&text).is_err() {break;}
@@ -117,13 +106,13 @@ mod tests {
     fn socket_requires_exact_capability_protocol_not_owner_bearer() {
         let mut headers = HeaderMap::new();
         headers.insert("authorization", "Bearer owner".parse().unwrap());
-        assert!(socket_token(&headers).is_err());
+        assert!(socket_token(&headers, "otto-game").is_err());
         headers.insert(
             "sec-websocket-protocol",
             format!("otto-game, {}", "a".repeat(43)).parse().unwrap(),
         );
-        assert_eq!(socket_token(&headers).unwrap(), "a".repeat(43));
+        assert_eq!(socket_token(&headers, "otto-game").unwrap(), "a".repeat(43));
         headers.append("sec-websocket-protocol", "other".parse().unwrap());
-        assert!(socket_token(&headers).is_err());
+        assert!(socket_token(&headers, "otto-game").is_err());
     }
 }

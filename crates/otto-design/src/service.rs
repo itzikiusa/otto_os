@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use otto_core::event::Event;
@@ -72,31 +72,22 @@ const MAX_TITLE_CHARS: usize = 300;
 const MAX_TAGS: usize = 32;
 const MAX_TAG_CHARS: usize = 64;
 
-type CommitLocks = HashMap<(PathBuf, String), Weak<tokio::sync::Mutex<()>>>;
-
 /// Services are request-scoped. Share the complete publication boundary across
-/// instances, including aliases of the same filesystem root. Weak entries avoid
-/// retaining a mutex for every artifact ever edited.
+/// instances, including aliases of the same filesystem root (the key is the
+/// canonical root plus the artifact id). [`KeyedLocks`] prunes dead entries, so
+/// no mutex is retained for every artifact ever edited.
+///
+/// [`KeyedLocks`]: otto_core::keyed_lock::KeyedLocks
 pub(crate) async fn commit_lock(root: PathBuf, id: &str) -> Result<Arc<tokio::sync::Mutex<()>>> {
+    static LOCKS: otto_core::keyed_lock::KeyedLocks<(PathBuf, String)> =
+        otto_core::keyed_lock::KeyedLocks::new();
     tokio::fs::create_dir_all(&root)
         .await
         .map_err(|e| Error::Internal(format!("design root: {e}")))?;
     let root = tokio::fs::canonicalize(root)
         .await
         .map_err(|e| Error::Internal(format!("design root identity: {e}")))?;
-    static LOCKS: OnceLock<Mutex<CommitLocks>> = OnceLock::new();
-    let mut locks = LOCKS
-        .get_or_init(|| Mutex::new(HashMap::new()))
-        .lock()
-        .unwrap();
-    locks.retain(|_, value| value.strong_count() > 0);
-    let key = (root, id.to_owned());
-    if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
-        return Ok(lock);
-    }
-    let lock = Arc::new(tokio::sync::Mutex::new(()));
-    locks.insert(key, Arc::downgrade(&lock));
-    Ok(lock)
+    Ok(LOCKS.handle(&(root, id.to_owned())))
 }
 
 /// Who a write is attributed to.

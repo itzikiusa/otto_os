@@ -2,7 +2,8 @@
 //! a replacement process. All input/resize crosses SessionManager authority.
 use super::{
     auth::socket_token,
-    registry::{Rate, SharedRoom},
+    capability::TokenBucket,
+    registry::{SharedRoom, RATE_LIMITED},
     socket::{send, send_frame},
 };
 use crate::{ApiResult, ServerCtx};
@@ -270,9 +271,9 @@ async fn serve(
     {
         return;
     }
-    let mut frame_rate = Rate::new(120.0);
-    let mut ack_rate = Rate::new(ACK_BURST);
-    let mut history_rate = Rate::new(2.0);
+    let mut frame_rate = TokenBucket::new(120.0);
+    let mut ack_rate = TokenBucket::new(ACK_BURST);
+    let mut history_rate = TokenBucket::new(2.0);
     let mut flow = FlowGate::default();
     let mut recovery = ResyncQueue::default();
     let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
@@ -309,14 +310,14 @@ async fn serve(
                 let parsed=match &incoming {Some(Ok(Message::Text(text)))=>Some(serde_json::from_str::<Frame>(text)),_=>None};
                 // Acks: own budget, no room lock (see ACK_RATE).
                 if let Some(Ok(Frame::Ack{bytes}))=parsed {
-                    if ack_rate.take(ACK_RATE,ACK_BURST).is_err(){break;}
+                    if ack_rate.take(ACK_RATE,ACK_BURST,RATE_LIMITED).is_err(){break;}
                     if let Some(c)=credit.as_mut(){
                         let step=c.ack(bytes,tokio::time::Instant::now());
                         if apply_credit(step,&mut socket,&handle,&mut output,&mut credit).await.is_err(){break;}
                     }
                     continue;
                 }
-                if frame_rate.take(60.0,120.0).is_err(){break;}
+                if frame_rate.take(60.0,120.0,RATE_LIMITED).is_err(){break;}
                 if !valid(&shared,&member,generation).await{break;}
                 let action=match (parsed,incoming) {
                     (Some(Ok(frame)),_)=>frame,
@@ -335,8 +336,8 @@ async fn serve(
                         ctx.manager.room_input(&session,&room_id,&member,grant_epoch,&data).await
                     },Err(error)=>Err(error)},
                     Frame::Resize{cols,rows,grant_epoch}=>ctx.manager.room_resize(&session,&room_id,&member,grant_epoch,cols,rows).await,
-                    Frame::Scrollback{lines}=>match history_rate.take(1.0,2.0){Ok(())=>snapshot(&mut socket,&handle,lines.unwrap_or(10_000),&mut output,&mut credit).await,Err(e)=>Err(e)},
-                    Frame::Snapshot=>match history_rate.take(1.0,2.0){Ok(())=>snapshot(&mut socket,&handle,0,&mut output,&mut credit).await,Err(e)=>Err(e)},
+                    Frame::Scrollback{lines}=>match history_rate.take(1.0,2.0,RATE_LIMITED){Ok(())=>snapshot(&mut socket,&handle,lines.unwrap_or(10_000),&mut output,&mut credit).await,Err(e)=>Err(e)},
+                    Frame::Snapshot=>match history_rate.take(1.0,2.0,RATE_LIMITED){Ok(())=>snapshot(&mut socket,&handle,0,&mut output,&mut credit).await,Err(e)=>Err(e)},
                     Frame::Resync{lines}=>{
                         flow.paused_until=None;
                         let now=tokio::time::Instant::now();

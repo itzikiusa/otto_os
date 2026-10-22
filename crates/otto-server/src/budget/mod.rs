@@ -5,8 +5,7 @@
 //! `routes/usage.rs` handler file behind `*_pub` shims, so the Mission Control
 //! card and the budget sampler in `monitor.rs` imported a route module to
 //! reach it. The HTTP faces (`GET`/`PUT /usage/budgets`) stay in
-//! `routes/usage.rs`; `routes::usage::{check_budget, BudgetVerdict}` remain as
-//! re-exports for existing callers.
+//! `routes/usage.rs`; every gate caller imports `crate::budget` directly.
 
 use otto_core::api::{BudgetStatusRow, UsageBudgetConfig, UsageBudgetStatus};
 use otto_state::SettingsRepo;
@@ -26,20 +25,41 @@ impl<'a> BudgetGate<'a> {
         Self { ctx }
     }
 
-    /// The persisted config, `None` when none was ever saved (or it no longer
-    /// parses).
-    pub async fn stored_config(&self) -> Option<UsageBudgetConfig> {
-        SettingsRepo::new(self.ctx.pool.clone())
+    /// The persisted config, `None` when none was ever saved. A settings read
+    /// error or a stored value that no longer parses is an ERROR, never "no
+    /// budgets" (error-handling-5-07): the page would show an empty editable
+    /// form whose save overwrites the real caps, and admission would fail open.
+    pub async fn read_config(&self) -> otto_core::Result<Option<UsageBudgetConfig>> {
+        let raw = SettingsRepo::new(self.ctx.pool.clone())
             .get(BUDGETS_KEY)
-            .await
-            .ok()
-            .flatten()
-            .and_then(|v| serde_json::from_value(v).ok())
+            .await?;
+        raw.map(serde_json::from_value).transpose().map_err(|e| {
+            otto_core::Error::Internal(format!("stored usage budgets don't parse: {e}"))
+        })
     }
 
-    /// The persisted config (defaults: enforcement off).
+    /// Best-effort [`Self::read_config`] for read-only summaries (Mission
+    /// Control's budget card): an unreadable config shows no rows (logged).
+    pub async fn stored_config(&self) -> Option<UsageBudgetConfig> {
+        self.read_config().await.unwrap_or_else(|error| {
+            tracing::warn!(%error, "usage budgets unreadable");
+            None
+        })
+    }
+
+    /// The persisted config (defaults: enforcement off), or the read error.
+    pub async fn try_config(&self) -> otto_core::Result<UsageBudgetConfig> {
+        Ok(self.read_config().await?.unwrap_or_default())
+    }
+
+    /// Best-effort [`Self::try_config`] for the BACKGROUND budget sampler
+    /// (`monitor.rs`): an unreadable config samples nothing (logged). The
+    /// budgets route and admission use `try_config` and surface the error.
     pub async fn config(&self) -> UsageBudgetConfig {
-        self.stored_config().await.unwrap_or_default()
+        self.try_config().await.unwrap_or_else(|error| {
+            tracing::warn!(%error, "usage budgets unreadable; sampler skips this tick");
+            UsageBudgetConfig::default()
+        })
     }
 
     /// Replace the persisted config.
@@ -99,17 +119,21 @@ pub(crate) fn budget_window(cfg: &UsageBudgetConfig) -> u32 {
 /// 80% of a cap is the "warning" line.
 const BUDGET_WARN_FRACTION: f64 = 0.8;
 
-/// Compute spend vs. cap for every configured budget over the window. Best-effort
-/// — on any engine error spend reads as `0` (so the UI still renders the caps).
+/// Compute spend vs. cap for every configured budget over the window. On an
+/// engine error the caps still render, with `spend_unavailable` set so the UI
+/// says "Spend unavailable" rather than a measured $0 (error-handling-5-07).
 async fn budget_status(ctx: &ServerCtx, mut cfg: UsageBudgetConfig) -> UsageBudgetStatus {
     let window_days = budget_window(&cfg);
     cfg.window_days = window_days;
-    let totals = ctx
-        .usage
-        .session_totals(window_days, true)
-        .await
-        .unwrap_or_default();
-    fold_budget_status(ctx, cfg, &totals).await
+    match ctx.usage.session_totals(window_days, true).await {
+        Ok(totals) => fold_budget_status(ctx, cfg, &totals).await,
+        Err(error) => {
+            tracing::warn!(%error, "budget status: spend unavailable");
+            let mut status = fold_budget_status(ctx, cfg, &[]).await;
+            status.spend_unavailable = true;
+            status
+        }
+    }
 }
 
 /// Fold per-session totals into spend-vs-cap rows (`cfg.window_days` already
@@ -166,6 +190,7 @@ async fn fold_budget_status(
         config: cfg,
         window_days,
         rows,
+        spend_unavailable: false,
     }
 }
 
@@ -212,7 +237,16 @@ pub async fn check_budget(ctx: &ServerCtx, workspace_id: &str, provider: &str) -
 }
 
 async fn check_with(ctx: &ServerCtx, workspace_id: &str, provider: &str) -> BudgetVerdict {
-    let cfg = BudgetGate::new(ctx).config().await;
+    // An unreadable config is NOT "no budgets" (error-handling-5-07): the
+    // enforce / block flags are unknown, so admission fails closed exactly
+    // like unavailable spend, with a reason the caller shows.
+    let cfg = match BudgetGate::new(ctx).try_config().await {
+        Ok(cfg) => cfg,
+        Err(error) => {
+            tracing::warn!(%error, workspace_id, provider, "budget config unavailable");
+            return config_unavailable_verdict();
+        }
+    };
     if !cfg.enforce {
         return BudgetVerdict::default();
     }
@@ -266,6 +300,18 @@ async fn check_with(ctx: &ServerCtx, workspace_id: &str, provider: &str) -> Budg
         }
     }
     BudgetVerdict::default()
+}
+
+/// The verdict when the stored budget config can't be read or parsed.
+fn config_unavailable_verdict() -> BudgetVerdict {
+    BudgetVerdict {
+        blocked: true,
+        exceeded: false,
+        reason: Some(
+            "Budget settings unavailable; fix or re-save them under Usage → Budgets and retry"
+                .into(),
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -341,5 +387,31 @@ mod budget_admission_tests {
             .unwrap();
         assert!(check_budget(&ctx, "other-ws", "codex").await.blocked);
         assert!(!check_budget(&ctx, "other-ws", "grok").await.blocked);
+    }
+
+    /// error-handling-5-07: a stored config that no longer parses is an
+    /// error for the budgets route (`try_config`) and a fail-closed verdict
+    /// for admission — never "no budgets" (enforcement off, admit).
+    #[tokio::test]
+    async fn an_unparsable_config_is_an_error_and_admission_fails_closed() {
+        use crate::routes::browser::tests::{mem_pool, seed_workspace, test_ctx};
+        let tmp = tempfile::TempDir::new().unwrap();
+        let pool = mem_pool().await;
+        seed_workspace(&pool, "budget-ws").await;
+        let ctx = test_ctx(&pool, tmp.path().to_path_buf()).await;
+        let gate = BudgetGate::new(&ctx);
+        assert!(gate.read_config().await.unwrap().is_none(), "never saved");
+        assert!(!check_budget(&ctx, "budget-ws", "codex").await.blocked);
+        SettingsRepo::new(pool)
+            .put(BUDGETS_KEY, &serde_json::json!({"enforce": "yes please"}))
+            .await
+            .unwrap();
+        assert!(gate.try_config().await.is_err());
+        let verdict = check_budget(&ctx, "budget-ws", "codex").await;
+        assert!(verdict.blocked && !verdict.exceeded);
+        assert!(verdict
+            .reason
+            .unwrap()
+            .contains("Budget settings unavailable"));
     }
 }

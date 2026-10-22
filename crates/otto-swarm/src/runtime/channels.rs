@@ -308,7 +308,7 @@ impl SwarmTrigger for SwarmTriggerImpl {
                     None
                 },
                 start: t.auto_start,
-                created_by: swarm.created_by.clone(),
+                created_by: trigger_actor(self.ctx.swarm_repo(), &t.created_by, &swarm).await,
             };
             match launch(&self.ctx, &swarm, opts).await {
                 Ok(_pid) => {
@@ -339,6 +339,24 @@ use otto_core::text::clip_chars as clip;
 /// at a char boundary of the message: slicing the original at `kw.len()`
 /// after a lowercase match panicked (and dropped the message) whenever
 /// lowercasing changed a byte length — a Kelvin sign `K` matching `k`.
+/// Who a channel-trigger launch acts as (access-control-5-02): the person who
+/// set the trigger up, while that user still exists — the message text is the
+/// goal THEY wired to run — else the swarm's creator. A trigger the creator
+/// made keeps acting as the creator.
+pub async fn trigger_actor(
+    repo: &otto_state::SwarmRepo,
+    trigger_creator: &str,
+    swarm: &Swarm,
+) -> otto_core::Id {
+    let exists =
+        !trigger_creator.is_empty() && repo.user_exists(trigger_creator).await.unwrap_or(false);
+    if exists {
+        trigger_creator.to_string()
+    } else {
+        swarm.created_by.clone()
+    }
+}
+
 fn strip_keyword<'a>(text: &'a str, kw: &str) -> Option<&'a str> {
     let text = text.trim_start();
     let mut want = kw.chars().flat_map(char::to_lowercase).peekable();

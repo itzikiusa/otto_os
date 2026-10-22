@@ -73,6 +73,11 @@ pub struct UsageBudgetStatus {
     /// Window actually used to compute spend (after clamping/defaults).
     pub window_days: u32,
     pub rows: Vec<BudgetStatusRow>,
+    /// True when the usage engine couldn't report spend for the window: every
+    /// row's `spent_usd` is then 0 by default, not a measurement — clients show
+    /// "Spend unavailable" instead of "$0.00" (error-handling-5-07).
+    #[serde(default)]
+    pub spend_unavailable: bool,
 }
 
 /// `PATCH /api/v1/mcp-servers/{id}` — partial update; absent fields are kept.
