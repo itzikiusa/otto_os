@@ -35,6 +35,7 @@ pub mod maintenance;
 pub mod mcp_audit;
 pub mod mcp_auto_approve;
 pub mod mcp_control;
+pub mod mcp_profiles;
 pub mod mcp_servers;
 pub mod memory;
 pub mod name_themes;
@@ -144,6 +145,7 @@ pub use mcp_control::{
     McpPolicyRepo, McpRegistryRepo, McpServerDetail, McpTool, McpToolStats, McpToolsRepo,
     NewAllowlistEntry, NewApproval, NewCallLog, NewPolicy, NewServerRow,
 };
+pub use mcp_profiles::{McpProfile, McpProfileFields, McpProfileRepo, FULL_PROFILE_ID};
 pub use mcp_servers::{McpServersRepo, NewMcpServer};
 pub use memory::{GovernedImport, MemoriesRepo};
 pub use notifications::{NewNotice, NoticeAccess, NotificationsRepo};

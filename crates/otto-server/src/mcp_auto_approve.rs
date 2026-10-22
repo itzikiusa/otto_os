@@ -28,8 +28,8 @@ use otto_core::auth::AuthContext;
 use otto_core::domain::User;
 use otto_core::Error;
 use otto_mcp::auto_approve::{
-    self as aa, AutoApproveCall, SCOPE_GLOBAL, SCOPE_SESSION, SCOPE_WORKSPACE, TARGET_CATEGORY,
-    TARGET_TOOL,
+    self as aa, default_name, validate_target, AutoApproveCall, SCOPE_GLOBAL, SCOPE_SESSION,
+    SCOPE_WORKSPACE, TARGET_CATEGORY, TARGET_TOOL,
 };
 use otto_state::{
     AutoApproveRulePatch, McpAutoApproveRepo, McpAutoApproveRule, NewAutoApproveRule,
@@ -277,60 +277,6 @@ pub struct UpdateAutoApproveReq {
     pub note: Option<String>,
 }
 
-/// Validate a rule's target + guardrail. Returns the normalized
-/// `(target, allow_irreversible)`. Pure (catalog lookups only).
-fn validate_target(
-    kind: &str,
-    target: &str,
-    allow_irreversible: bool,
-) -> Result<(String, bool), Error> {
-    let target = target.trim();
-    match kind {
-        TARGET_TOOL => {
-            let bare = target.strip_prefix("otto.").unwrap_or(target).to_string();
-            if !tool_is_dangerous(&bare) {
-                return Err(Error::Invalid(if tool_category(&bare).is_some() {
-                    format!(
-                        "'{target}' is not a mutating tool — only mutating tools ask for approval"
-                    )
-                } else {
-                    format!("unknown otto tool '{target}'")
-                }));
-            }
-            if tool_is_irreversible(&bare) {
-                if !allow_irreversible {
-                    return Err(Error::Invalid(format!(
-                        "otto.{bare} is irreversible — auto-approving it needs the second explicit \
-                         toggle (allow_irreversible: true)"
-                    )));
-                }
-                Ok((bare, true))
-            } else {
-                // The flag means nothing for a reversible tool: store it off.
-                Ok((bare, false))
-            }
-        }
-        TARGET_CATEGORY => {
-            if allow_irreversible {
-                return Err(Error::Invalid(
-                    "a category rule never covers irreversible tools — add a per-tool rule for one \
-                     (allow_irreversible is only valid with target_kind 'tool')"
-                        .into(),
-                ));
-            }
-            if !mutating_categories().iter().any(|(c, _)| c == target) {
-                return Err(Error::Invalid(format!(
-                    "unknown category '{target}' (or it has no mutating tools)"
-                )));
-            }
-            Ok((target.to_string(), false))
-        }
-        other => Err(Error::Invalid(format!(
-            "target_kind must be 'tool' or 'category', not '{other}'"
-        ))),
-    }
-}
-
 /// A workspace rule must be able to match something: refuse one whose tool
 /// (or every tool of whose category) addresses no single workspace — global
 /// rows, unverifiable targets, the vault library — instead of storing a rule
@@ -353,20 +299,6 @@ fn workspace_rule_can_apply(kind: &str, target: &str) -> Result<(), Error> {
         )));
     }
     Ok(())
-}
-
-fn default_name(kind: &str, target: &str, scope: &str) -> String {
-    let what = if kind == TARGET_CATEGORY {
-        format!("{target} writes")
-    } else {
-        format!("otto.{target}")
-    };
-    let wher = match scope {
-        SCOPE_WORKSPACE => "this workspace",
-        SCOPE_SESSION => "one session",
-        _ => "everywhere",
-    };
-    format!("{what} — {wher}")
 }
 
 /// A rule plus display labels (workspace name / session title) for the UI.

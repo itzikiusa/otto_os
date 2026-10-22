@@ -103,6 +103,7 @@ pub use otto_agent_run::turn_oracle;
 pub mod ui_bridge;
 // Moved to `otto_mcp::outward`; re-exported so `crate::ui_commands` keeps working.
 pub use otto_mcp::outward::ui_commands;
+pub use otto_mcp::profiles as mcp_profiles;
 pub mod vault_docs_agent;
 pub mod workflow_engine;
 mod workflow_node_driver;
