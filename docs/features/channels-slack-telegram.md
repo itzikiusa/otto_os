@@ -34,7 +34,10 @@ task per integration:
   about a minute and Slack redelivers anything queued, instead of messages
   sitting invisible until the connection happens to die on its own. Events are
   handled on spawned tasks, so a slow one (attachment download, session spawn)
-  never delays reading/acking the next frame.
+  never delays reading/acking the next frame. Events with nothing to forward
+  (bot posts and Otto's own feed edits, deletions, joins, unfurl rewrites,
+  non-message events) are acked and deduped **before** admission, so they never
+  take a conversation slot or make a person's next message "busy".
 - **Telegram** → `crates/otto-channels/src/telegram.rs::run` — long-polls
   `getUpdates` and forwards text messages.
 
@@ -172,7 +175,10 @@ What actually crosses the bridge — derived directly from `bridge.rs` and
    - **Long reply** (> ~1800 chars) → a short head is posted and the full text is
      attached as `investigation.md`.
    - **Explicit file attachments** the agent wrote on disk are uploaded if it
-     wraps the absolute path in `⟦otto-file⟧/abs/path⟦/otto-file⟧`.
+     wraps the absolute path in `⟦otto-file⟧/abs/path⟦/otto-file⟧`. A
+     rate-limited upload is retried once after the channel's `retry after`
+     hint (up to 60 s); a failed one posts "⚠️ Otto could not attach `file`:
+     cause" in the thread. Slack's byte upload has a 120 s budget (20 MiB cap).
 9. **Self-improvement on the interaction.** When self-improvement is enabled for
    the workspace (`self_improvement.enabled`, and the daemon-level
    `OTTO_SELF_IMPROVE` gate is on), Otto runs a single-interaction improvement

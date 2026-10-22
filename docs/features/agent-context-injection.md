@@ -125,9 +125,10 @@ Add the provider to the three small helpers:
 - Set `hooks` only if the CLI consumes activity hooks (currently claude-only via
   `plan_claude_hooks`).
 
-### 4. Emit the launch flags in `injection_for`
+### 4. Emit the launch flags in `injection_for_home`
 
-Add a match arm to **`injection_for(provider, dir)`** returning the
+Add a match arm to **`injection_for_home(provider, dir, provider_home)`**
+(`crates/otto-context/src/materialize.rs`) returning the
 `SpawnInjection` your step-1 probe proved works — e.g. `--add-dir=<dir>` plus
 whatever loads the context (`--append-system-prompt-file=…`, `-c key=value`, or an
 env var in `SpawnInjection.env`). Guard file-pointing flags with `is_file()` so a

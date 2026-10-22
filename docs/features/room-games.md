@@ -421,7 +421,9 @@ By mode, they play the objective:
 
 ### Network
 
-Snapshots are version 4, still under the 16 KiB relay cap. They carry:
+Snapshots are version 4 (`SNAPSHOT_VERSION` in `shooter/net.ts`, and
+`KART_SNAPSHOT_VERSION` in `kart/net.ts`; the encoder and decoder both use it),
+still under the 16 KiB relay cap. They carry:
 
 - the mode
 - the mode state (scores, limit, clock, Zombies round / phase / timer /
@@ -545,3 +547,32 @@ runs the simulation; the daemon relays bounded inputs and snapshots (see the
 [game-room contract](../contracts/game-rooms.md)). Guests pick their character
 in the lobby. Browser verification and screenshots live in
 [`docs/testing/room-games`](../testing/room-games/).
+
+**One catalog.** The game kinds, their capacity and the map ids live in
+`ui/src/modules/rooms/games/catalog.json`. The daemon compiles the same file in
+(`game_rooms/types.rs`) to validate `POST /game-rooms`, and the chooser reads it,
+so a map cannot be offered that the relay refuses. `unit/roomGamesCatalog.test.ts`
+checks that the kart tracks and shooter maps implement exactly these ids.
+
+**Capabilities.** Game rooms and session rooms share one set of capability
+primitives (`otto-server/src/rooms/capability.rs`): 43-character tokens stored
+only as SHA-256 digests and compared in constant time, the
+`Sec-WebSocket-Protocol: otto-game, <token>` pair, and per-member token
+buckets. The browser side is one `RelaySocket` (`ui/src/lib/relaySocket.ts`).
+
+**Reconnecting.** A dropped connection retries five times (1, 2, 4, 5 and 5 s).
+After that the lobby and the match say "Couldn’t reconnect to the game room."
+with a **Reconnect** button. Coming back online, or returning to the tab, also
+starts a fresh set of retries.
+
+**Accessibility.** Each game has one screen-reader status for its edges: the
+countdown start and GO, call-outs, round start, helicopter inbound, respawning,
+paused, and the result headline. Countdown digits and timers stay visual only.
+Esc on the game opens the menu, and focus moves to **Resume**. In the shooter,
+the first Esc releases the mouse. Leaving a game puts focus back on the selected
+game's title. Result and pause screens scroll on short screens; at 640 px and
+below the result table is compact.
+
+**Graphics context.** If the browser reclaims the game's WebGL context, the
+renderer remounts on the live race or match state, at most twice a minute.
+After that the game shows Retry. This uses the shared `ui/src/lib/three/stage.ts`.

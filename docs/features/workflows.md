@@ -161,6 +161,11 @@ default, has, int, float, str, bool, not`. Missing path segments resolve to `nul
 (never an error). For edge conditions the context is
 `{ output, input, node:{id,kind,name}, run:{input} }`; a condition that fails to
 parse or evaluate is treated as **not taken** (and logged), never a crash.
+Nesting is bounded: more than 64 levels of `!`/`-`, parentheses, call arguments or
+`[ ]` indexes is a parse error (*"expression nests too deeply"*), and so is a chain
+of more than 1,024 binary operators (*"expression is too long"*) — the parser and
+evaluator recurse per level, so an unbounded `!!!…` condition used to overflow the
+stack and abort the daemon on save.
 
 ### Retry/backoff (`WorkflowNode.retry`)
 `{ max_attempts (extra attempts after the first, clamped ≤5), backoff_ms (initial
@@ -1254,7 +1259,7 @@ build on.
 | `POST /workspaces/{wid}/workflows/generate` | ws editor | AI-generate from `{description, name?}` (`instructions` always `""`) |
 | `GET /workflows/{id}` | ws viewer | one workflow |
 | `PATCH /workflows/{id}` | ws editor | update (e.g. `{graph}` and/or `{instructions}` — either bumps `version`) |
-| `DELETE /workflows/{id}` | ws editor | 204 |
+| `DELETE /workflows/{id}` | ws editor | 204; 409 while a run is pending/running. Pauses the scheduled tasks that run this workflow and records *"workflow deleted – task paused"* on each (see scheduled-tasks.md) |
 | `POST /workflows/{id}/run` | ws editor | `RunWorkflowReq?` `{input?, start_node?, only_node?, review_mode?}` → `WorkflowRun`. `review_mode` (`fan_out`/`orchestrator`) is seeded into `input.review_mode` and overrides every `review_run` node of the run (§4 *Execution mode*); any other value, or a non-object `input` alongside it, is a **400** |
 | `GET /workflows/{id}/runs` | ws viewer | `WorkflowRun[]` |
 | `GET /workflow-runs/{id}` | ws viewer | one run (poll/refresh target) |

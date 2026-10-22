@@ -247,7 +247,7 @@ All routes are under `/api/v1`. RBAC: `Agents` **View** for every GET,
 | `POST /workspaces/{wid}/history/import` | `{ provider, transcript_path }` | `Session` | Creates a `reconnectable` row with `provider_session_id` + `transcript_path` |
 | `POST /workspaces/{wid}/history/rescan` | — | `202` | Background index refresh |
 | `GET /sessions/{id}/slash-commands` | — | `SlashCommand[]` | Composer completion after `/`: provider built-ins + `~/.claude/{commands,skills}` + `<cwd>/.claude/{commands,skills}` (Codex: skills dirs) |
-| `POST /workspaces/{wid}/transcript/touch` | — | `{armed}` | Workspace-wide keep-alive (every 60 s while visible + on switch/focus): every live session you may read in the current workspace stays tailed; other workspaces lapse after 2 min and are re-armed when you return |
+| `POST /workspaces/{wid}/transcript/touch` | — | `{armed}` | Workspace-wide keep-alive for API and e2e callers (the UI does not call it; an open chat arms its own session with the per-session touch below): every live session you may read in the workspace stays tailed; other workspaces lapse after 2 min and are re-armed when you return |
 | `POST /sessions/{id}/transcript/touch` | — | `204` / `409` | Keep-alive from an open chat (every 60 s); the tail stops 2 min after the last touch, so only open conversations are tailed. On a suspended (`reconnectable`) resumable session the ping first resumes it — the same `ensure_live` a terminal attach makes — and the chat sends it on mount, so leaving a chat for a few minutes and coming back behaves like a terminal tab; on remount the view also re-reads the newest page (a re-armed tail starts at the file's end). The same ping holds the session against the idle-suspend sweep for 3 min (`VIEW_HOLD`) — a chat mounts no terminal, so this is its attachment; the workspace-wide touch does NOT hold (it only warms tails). `409` = live session without a transcript yet (the view retries the GET every 5 s) |
 | `GET /workspaces/{wid}/activity/summary` | — | `SessionActivitySummary[]` | Existing; `done/total` count ALL task rows |
 
@@ -336,7 +336,7 @@ corpus numbers and any route-level deviations are recorded in
   roots. Artifacts are served by opaque id with the `routes/fs.rs` discipline:
   canonicalize → allow-list (session cwd, daemon data dir, the per-user temp
   dir — not `/tmp`) + deny-list (`.git`, `.env*`, keys) → 25 MB cap → `nosniff`.
-- Rendering: Markdown and tool text only through the sanitizing `mdRender`;
+- Rendering: Markdown and tool text only through the sanitizing renderer (`ui/src/lib/render/markdown.ts`);
   HTML only inside `sandbox=""` iframes (opaque origin — cannot reach the daemon
   or cookies); images `nosniff`.
 - Input: the composer submits exactly what you typed (plus an explicit

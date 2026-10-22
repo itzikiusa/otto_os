@@ -364,13 +364,22 @@ Opening it gives you the same terminal you'd get for any agent session — see
 human **originator**, so it carries that person's MCP token, provider account and
 git/Jira identity, and that person can open it:
 
-- a task a person added (board, API, channel trigger, Product) runs as that person
-  (`task.created_by`);
+- a task someone **rewrote** — changed its title, description or labels, or added
+  or edited one of its goals — runs as the **latest person who did** (recorded as
+  `swarm_tasks.prompt_updated_by`); an Editor who edits Alice's task and runs it
+  acts as themselves, never as Alice. A status, priority, assignee or order move
+  changes nothing;
+- otherwise a task a person added (board, API, Product) runs as that person
+  (`task.created_by`), and a channel-trigger launch as the person who set the
+  trigger up (the swarm's creator once that user is gone);
 - a task seeded by **Plan** runs as whoever ran the plan;
 - an agent-created subtask or review walks up `parent_task_id`, and an agent
   handoff/proposal follows its `source-run:<run id>` label to the task that
-  produced it, until a person turns up;
-- a turn with no task (planning, schedules) runs as the project's creator;
+  produced it, until a person turns up (only runtime-stamped `source-run:`
+  labels count: adding one by hand is a 400);
+- a turn with no task (planning, schedules) runs as the project's creator, and an
+  agent's scheduled turn as the swarm's creator — which is why only they (or an
+  Admin) may write its schedule **directive**;
 - the **swarm creator** only when no person originated the work.
 
 Verification (verify/fix) turns of a task act as the same originator. Sessions are
@@ -743,11 +752,15 @@ post + notice rather than re-run forever.
 - **An agent's identity is the creator's.** Changing a role agent's prompt
   (`scope_md` / `specialization`), soul, provider, model or `cwd_mode` needs the
   swarm's creator, a workspace **Admin** or root (403 otherwise); a full-form save
-  that leaves those fields as they are passes. Name, title, skills, schedule,
+  that leaves those fields as they are passes. The same holds for a new schedule
+  **directive**: a scheduled turn has no task, runs as the swarm's creator and
+  executes the directive as its prompt (the personal-agent schedule rule). Name,
+  title, skills, the schedule's cadence / time / enabled flag (and clearing it),
   status, order and the reporting line stay Editor.
-- **Turns act as their originator, not the creator.** A task an Editor adds runs
-  with that Editor's identity and credentials (§5.3), so adding a task to someone
-  else's swarm never borrows their MCP token, connections or accounts.
+- **Turns act as their originator, not the creator.** A task an Editor adds — or
+  rewrites, or gives a goal — runs with that Editor's identity and credentials
+  (§5.3), as does a channel trigger they set up, so adding or editing work on
+  someone else's swarm never borrows their MCP token, connections or accounts.
 - **Workspace isolation.** Swarms, agents, projects, tasks, runs, and board
   messages all carry `workspace_id`; the listing and graph queries scope to it.
   WS `swarm_*` events are only delivered to members with viewer+ on that

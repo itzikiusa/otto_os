@@ -450,6 +450,18 @@ matching tick instead of polling.
   outcome; when the workflow is still busy with an earlier run, the occurrence is
   recorded **Skipped** (no failure notice). The task's status badge reflects the
   latest run, manual ones included.
+- **A report that can't be saved fails the run.** When writing the report file
+  fails (disk full, permissions, a removed data dir) the run is recorded as
+  failed with *"The report couldn’t be saved: …"* as its error, and the failure
+  notice fires — it no longer shows as a clean success with no report. A failed
+  run whose report couldn't be saved keeps its summary and appends that reason
+  to its error. Personal-agent runs behave the same way.
+- **Deleting a workflow pauses the tasks that run it.** `DELETE /workflows/{id}`
+  disables every scheduled task whose `workflow_id` is that workflow, in the same
+  transaction, and records an error run reading *"workflow deleted – task
+  paused"* on each. An occurrence that still finds its workflow gone (admitted
+  just before the delete) fails once with the same reason and pauses the task —
+  it no longer fails again on every tick.
 - **Convert to workflow** asks first and, by default, pauses the original task — the
   new workflow's schedule trigger has the same cadence, so keeping both doubles every
   run and delivery.

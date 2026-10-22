@@ -113,6 +113,8 @@ query history, and persists saved queries / dashboards / widgets in SQLite.
 | Auto-Vertical per-engine preference (+ legacy migration) | `ui/src/lib/db-view-prefs.ts` (stored by `ui.dbAutoVertical`) |
 | Edit flow (pending changes, review modal, doc editor, cell viewer) + per-engine statement builders | `EditFlow.svelte.ts`, `edit-{sql,mongo,redis}.ts` |
 | View-mode precedence, tab/pin persistence, connection view memory | `ui/src/lib/stores/database.svelte.ts` (`effectiveViewMode`) |
+| Store parts behind the `database` façade: model/statement helpers, dashboards, DB Assistant, saved queries, history | `ui/src/lib/stores/database/{model,statement}.ts`, `{dashboards,assist,savedQueries,history}.svelte.ts` |
+| Shared SQL/filter/error helpers (dialect, `{{vars}}`, filter chips, error normalization, Mongo formatting, grid tab state) | `ui/src/lib/database/*.ts` |
 | API client types (mirror the contract) | `ui/src/lib/api/types.ts` |
 
 ### Per-engine support matrix
@@ -1499,7 +1501,7 @@ without loss. The UI renders them as `ObjectId("…")`, `ISODate("…")`,
 
 A query failure is still a `502` Problem JSON whose `message` is
 `upstream: <text>`. The text is the cleaned engine message followed by optional
-**tagged trailer lines**, one per line, which `ui/src/modules/database/error-normalize.ts`
+**tagged trailer lines**, one per line, which `ui/src/lib/database/error-normalize.ts`
 parses (and which read fine as plain text in history rows and MCP results):
 
 | Tag | Engine | Meaning |

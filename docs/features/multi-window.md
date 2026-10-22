@@ -135,3 +135,11 @@ ui/src/shell/SplitDivider.svelte        the resizable, keyboard-operable divider
   Tauri capability must grant to `w*` labels (`capabilities/default.json`,
   pinned by a regression test in `windows.rs`). Capabilities are baked at build
   time — rebuild the app (`deploy.sh`), a daemon-only rebuild is not enough.
+- **Every window says it can't reach the daemon** — the offline screen shows
+  the desktop supervisor's own diagnosis (`otto://daemon-state`; a window
+  opened later reads it through `daemon_status`). "Loaded but not answering"
+  is a live but wedged `ottod` that relaunching Otto never replaces: click
+  **Restart daemon** there, in the menu-bar popover, or in the menu-bar item's
+  right-click menu (`launchctl kickstart -k`, or a reinstall when the job isn't
+  loaded). After "install failed: …" the screen also offers **Reinstall
+  daemon**. The daemon log is `~/Library/Logs/Otto/ottod.log`.

@@ -291,6 +291,12 @@ an allowed value (with the allowed ones), a parent that does not exist, an
 "epic" that is not an Epic, a `fields` key that is not on the create screen, or
 labels / priority / parent the create screen does not have.
 
+The createmeta reads, the parent lookup, the create `POST` and the read-back go
+through the shared Atlassian transport: a rejected or expired token (401, or a
+403 on createmeta) is a `403 Forbidden` that says to update the token — not
+"project does not exist" — and a short rate-limit wait on a read is retried
+once (a write is never re-sent); a longer one reads "rate limited — retry in Ns".
+
 **After creating**, Otto reads the issue back and returns
 `verification: {ok, checks: [{name, ok, detail}]}` next to `{key, url}`. It
 compares the key, project, type, summary, labels, priority and parent with the
@@ -350,7 +356,9 @@ parsed by the same parser as the Jira ADF converter and written by
 | images | links (no attachment upload) |
 
 `body_html` (raw storage, for macros Markdown cannot express) is passed through
-unchanged but must be well-formed XHTML.
+unchanged but must be well-formed XHTML, nested at most 256 elements deep (a
+deeper body is refused with "the body nests too deeply"; a stray close tag such
+as `</#root>` is refused as "closes nothing").
 
 **After every write** the page / comment is read back (`expand=body.storage,…`)
 and the response carries `verification: {ok, checks}`: for pages `title`,

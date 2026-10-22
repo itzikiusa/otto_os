@@ -128,6 +128,17 @@ Open `#/mcp/servers` (**External servers**) → **Add server**. Choose a transpo
 Secret env values / auth headers go in the **`secret_env` / `secret_headers`** fields
 — these are written to the macOS Keychain (`mcp-{id}`) and **never** stored in the DB
 or returned by the API (responses list only `secret_env_keys` / mask them). The
+Control Plane and the workspace MCP-servers page each own one half of that blob
+(`headers` / `env`); both saves hold one per-server lock from reading it through
+writing the row's secret key list, so neither reverts the other.
+
+Env keys (plain and secret) must be shell variable names (`[A-Za-z_][A-Za-z0-9_]*`):
+agent sessions hand a server its env through an `sh`-sourced file, so any other key
+could never reach it. Both save routes refuse one with a 400 naming the key, and the
+form flags it inline. A server name may be any text: Codex sessions attach a name
+that isn't a bare key ("Linear MCP") under a codex-safe key (`Linear_MCP`), and skip
+it (with a daemon warning) only when that key collides with another server's.
+
 Expand a server row to inspect its discovered tools and use the tester. Per-server
 actions include **Discover**, **Health**, and **Delete**. Open **Rules** for the
 allowlists and policy-as-code controls.

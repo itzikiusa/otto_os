@@ -860,7 +860,7 @@ scripts it did not intend to change.
 | `blocked address … (SSRF guard)` | The URL (or a DNS result, or a redirect target) is an internal/loopback/private/link-local/CGNAT address. You can't reach localhost or internal hosts from the workbench — by design. |
 | `blocked url scheme: …` / `url has no host` | Only `http(s)/ws(s)/grpc(s)` with a host are allowed. No `file:`/`data:`. |
 | `request timed out after 60s` | Default timeout. Raise it in **Settings → Request timeout** (ms). |
-| TLS / certificate errors | Turn off **Settings → Verify TLS certificate** for that request to accept self-signed/invalid certs. |
+| TLS / certificate errors | Turn off **Settings → Verify TLS certificate** for that request to accept self-signed/invalid certs. gRPC has no such toggle; it trusts the macOS trust store (an internal / corporate CA you installed) plus the bundled Mozilla roots, like REST. |
 | "Read-only" toast on Save/edit | You have **Viewer** access to this workspace; you need **Editor** to save, mutate, or execute. |
 | Nothing loads / empty lists | No workspace is selected — the API client is workspace-scoped. |
 | My Scripts / Docs / Settings vanished after loading a saved request | They persist now (in `extras`) — requests saved before this feature landed have none stored; re-save the request once to attach them. |

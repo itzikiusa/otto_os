@@ -6,7 +6,6 @@ delivery, chat-anytime, and fully user-visible inter-agent rooms.
 
 > Contracts: the "Personal Agents", "Agent rooms" and "Model catalog" sections
 > of [`docs/contracts/api.md`](../contracts/api.md) are authoritative.
-> Design spec: `docs/superpowers/specs/2026-09-01-personal-agents-design.md`.
 
 ## 1. Overview
 
@@ -316,6 +315,14 @@ the agent's Runs tab. A clean run ends the streak.
   change its avatar, enable or pause it, change cadence, Run now (a goal's
   "Work on it now" too — the run acts as the owner), toggle a goal's
   `enabled`, proactive on/budget and `primary`, cancel a run and manage rooms.
+- **403 "This agent runs as its owner; only the owner or a workspace admin can
+  give it a directive."** from Assistant delegation (`POST
+  /assistant/threads/{id}/delegate`, the `assistant_delegate` tool) — a
+  delegation starts a Directed run of your text as the agent's owner, so it
+  needs the owner, an ownerless agent, a workspace Admin or root (the same
+  rule as the agent's directives, goals and rules). No run is created. When
+  two agents share the name, delegation picks your own; a name that matches
+  nothing is a 404.
 - **"this agent session is read-only" in a run** — the run is Proactive or its
   schedule's permission set is Read-only. Change the schedule to Directed, or
   use Run now (Directed), to let it act.
