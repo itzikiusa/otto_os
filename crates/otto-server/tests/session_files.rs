@@ -63,10 +63,17 @@ async fn boot() -> Daemon {
     for (u, r) in [("root", true), ("carol", false), ("dave", false)] {
         seed_user(&pool, u, r).await;
     }
+    // The workspace root must NOT contain the temp data dir: on Linux the
+    // tempdir sits under `/tmp`, so a `/tmp` root would let any ws member's
+    // LSP pass as "inside a workspace" (the global data-dir deny never sees
+    // this test's data dir) — macOS hid it with `/var/folders`.
+    let ws_root = tmp.path().join("ws-root");
+    std::fs::create_dir_all(&ws_root).unwrap();
     sqlx::query(
         "INSERT INTO workspaces (id, name, root_path, settings_json, archived, created_at)
-         VALUES ('ws1', 'ws1', '/tmp', '{}', 0, ?)",
+         VALUES ('ws1', 'ws1', ?, '{}', 0, ?)",
     )
+    .bind(ws_root.to_string_lossy().into_owned())
     .bind(Utc::now().to_rfc3339())
     .execute(&pool)
     .await
