@@ -217,7 +217,7 @@ fi
 # The allowlist is the files not migrated yet: shrink it, never grow it.
 if [ -n "$RUST_CHANGED" ]; then
   step "keyed-lock registry guard"
-  KEYED_LOCK_ALLOW='^crates/(otto-core/src/keyed_lock\.rs|otto-assistant/src/assistant/tasks\.rs|otto-automation/src/goal_loop\.rs|otto-aws/src/(accounts|regions)\.rs|otto-brokers/src/service\.rs|otto-browser/src/lib\.rs|otto-channels/src/telegram\.rs|otto-dbviewer/src/(complete/mod|service)\.rs|otto-design/src/service\.rs|otto-k8s/src/(eks_token|monitor/cache)\.rs|otto-server/src/(agent_session_lifecycle|api_secrets|eval_score|proof|routes/backup_git|routes/mission|routes/personal_agents)\.rs|otto-sessions/src/(manager|mcp)\.rs|otto-state/src/workflow_progress\.rs|otto-vault/src/engine\.rs)$'
+  KEYED_LOCK_ALLOW='^crates/(otto-core/src/keyed_lock\.rs|otto-aws/src/(accounts|regions)\.rs|otto-brokers/src/service\.rs|otto-browser/src/lib\.rs|otto-channels/src/telegram\.rs|otto-dbviewer/src/(complete/mod|service)\.rs|otto-k8s/src/(eks_token|monitor/cache)\.rs|otto-server/src/(agent_session_lifecycle|proof|routes/mission|routes/personal_agents)\.rs|otto-sessions/src/(manager|mcp)\.rs|otto-vault/src/engine\.rs)$'
   KEYED_LOCK_HITS=$(grep -rlE --include='*.rs' '(HashMap|BTreeMap|DashMap)<[^;]*(Arc|Weak)<(tokio::sync::)?(Mutex|AsyncMutex)<\(\)>>' crates | sort | grep -vE "$KEYED_LOCK_ALLOW" || true)
   if [ -n "$KEYED_LOCK_HITS" ]; then
     echo "new hand-rolled per-key lock registry — use otto_core::keyed_lock::KeyedLocks:" >&2
@@ -242,6 +242,27 @@ if [ -n "$RUST_CHANGED" ]; then
     echo "hand-rolled paste/Enter outside otto-sessions — use SessionManager::submit_prompt:" >&2
     printf '  %s\n' $SUBMIT_HITS >&2
     [ "$DRY" = 1 ] || exit 1
+  fi
+fi
+
+# Module re-export shims over ui/src/lib (`export * from '../../lib/…'`, "so
+# module importers keep working") hide where code lives and never get removed
+# once added (maintainability-4-03, 5-01). Repoint importers to lib/ and delete
+# the shim instead. The count can only go down: lower UI_LIB_SHIM_MAX when you
+# remove one, never raise it.
+if [ "$UI_CHANGED" = 1 ]; then
+  step "ui: module → lib re-export shim ratchet"
+  UI_LIB_SHIM_MAX=3
+  UI_LIB_SHIMS=$(grep -rnE --include='*.ts' --include='*.js' --include='*.svelte' \
+    "export \* from '(\.\./)+lib/" ui/src/modules || true)
+  UI_LIB_SHIM_COUNT=$(printf '%s' "$UI_LIB_SHIMS" | grep -c . || true)
+  echo "$UI_LIB_SHIM_COUNT shim(s), max $UI_LIB_SHIM_MAX"
+  if [ "$UI_LIB_SHIM_COUNT" -gt "$UI_LIB_SHIM_MAX" ]; then
+    echo "new module → lib re-export shim — import from ui/src/lib directly:" >&2
+    printf '  %s\n' "$UI_LIB_SHIMS" >&2
+    [ "$DRY" = 1 ] || exit 1
+  elif [ "$UI_LIB_SHIM_COUNT" -lt "$UI_LIB_SHIM_MAX" ]; then
+    echo "(shims went down — lower UI_LIB_SHIM_MAX in scripts/check.sh to $UI_LIB_SHIM_COUNT)"
   fi
 fi
 
