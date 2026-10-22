@@ -51,7 +51,13 @@ export function collideRacers(state: KartState): void {
   }
 }
 
-/** Rolling boulders and crushers (poses are a pure function of race time). */
+/**
+ * Rolling boulders and crushers (poses are a pure function of race time). A
+ * racer one knocks down is untouchable for that obstacle's whole cycle, time
+ * to sit out the spin and pull clear from a standstill. Without it a roller
+ * sweeping back across a kart still stopped in its lane (or a crusher slamming
+ * on one not yet out from under) knocked it down again on every pass, for good.
+ */
 export function collideObstacles(state: KartState, track: Track): void {
   for (const o of track.obstacles) {
     obstacleAt(track, o, state.raceTime, _ob);
@@ -63,12 +69,12 @@ export function collideObstacles(state: KartState, track: Track): void {
         const d = Math.hypot(dx, dz) || 1;
         r.x = _ob[0] + dx / d * (ROLLER_RADIUS + 1.15); r.z = _ob[2] + dz / d * (ROLLER_RADIUS + 1.15);
         r.speed *= 0.5;
-        if (spinOut(state, r, 0.9)) emit(state, 'bump', r);
+        if (spinOut(state, r, 0.9)) { emit(state, 'bump', r); r.ghost = Math.max(r.ghost, o.period); }
       } else {
         // A crusher only hurts while it is (nearly) down.
         if (_ob[3] > 1.6 || dx * dx + dz * dz > (CRUSHER_HALF + 0.9) ** 2 || Math.abs(r.y - _ob[1]) > 3) continue;
         r.speed = Math.min(r.speed, 4);
-        if (spinOut(state, r, 1.4)) emit(state, 'crush', r);
+        if (spinOut(state, r, 1.4)) { emit(state, 'crush', r); r.ghost = Math.max(r.ghost, o.period); }
       }
     }
   }

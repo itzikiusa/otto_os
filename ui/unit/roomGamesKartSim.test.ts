@@ -2,11 +2,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { clamp, Rng, wrapAngle } from '../src/modules/rooms/games/common/math.ts';
 import {
-  advance, circ, CRUSHER_HALF, drawLift, F_RAILS, F_UNDER, inLaunchZone, nearest, newNear, obstacleAt, pointAt, progressOf, ROLLER_RADIUS, RUN_UP, sampleAt, TRACK_IDS, trackFor, type TrackId,
+  advance, circ, CRUSHER_HALF, drawLift, F_RAILS, FORK_ZONE, F_UNDER, inLaunchZone, nearest, newNear, obstacleAt, pointAt, progressOf, ROLLER_RADIUS, RUN_UP, sampleAt, TRACK_IDS, trackFor, type TrackId,
 } from '../src/modules/rooms/games/kart/tracks.ts';
 import {
   BURNOUT_SECONDS, COIN_LOSS, COIN_RESPAWN, COUNTDOWN_SECONDS, createRace, DRIFT_LEVELS, GHOST_SECONDS, idleInput, INTRO_SECONDS, itemBoxes, LAPS, MAX_COINS, MAX_RACERS, pickRoute, rank, RESPAWN_BOOST,
-  sanitize, spinOut, standings, STEP, stepRace, tick, TURBO_POWER, TURBO_SECONDS, type Difficulty, type KartEventType, type KartInput, type KartSeat, type KartState, type Racer,
+  sanitize, spinOut, standings, STEP, stepRace, STUCK_SECONDS, tick, TURBO_POWER, TURBO_SECONDS, type Difficulty, type KartEventType, type KartInput, type KartSeat, type KartState, type Racer,
 } from '../src/modules/rooms/games/kart/sim.ts';
 import { cpuInput } from '../src/modules/rooms/games/kart/cpu.ts';
 import { kartSeats } from '../src/modules/rooms/games/setup.ts';
@@ -751,6 +751,95 @@ test('obstacles: rollers and crushers spin racers out; a star shrugs them off', 
   tick(s3, [idleInput()]);
   assert.equal(events(s3, 'crush').length, 0);
   assert.ok(Math.abs(s3.racers[0].x - pointAt(t, crusher.s, lat)[0]) < CRUSHER_HALF + 2);
+});
+
+test('obstacles never pin a kart: knocked down once, it is untouchable for that obstacle\'s cycle and drives clear', () => {
+  // A kart stopped dead in the Reef Tunnel, right in front of a sea mine's track (it once sat there for good).
+  const s = humansRace(1, 'lagoon');
+  const t = trackFor('lagoon');
+  const r = s.racers[0];
+  const mine = t.obstacles.find(o => o.kind === 'roller' && t.paths[o.seg].name === 'Reef Tunnel')!;
+  const from = s.eventSeq;
+  for (const u of [0, 0.25, 0.5, 0.75]) {
+    s.raceTime = (u - mine.phase) * mine.period + 20 * mine.period;
+    putOn(s, r, mine.seg, mine.s - 2, 0);
+    r.ghost = 0;
+    const route = 1 << (mine.seg - 1), hits = events(s, 'spin', from).length;
+    let n = 0;
+    while (n++ < 60 * 6 && !(r.seg === mine.seg && r.segS > mine.s + 6)) tick(s, [pilot(s, r, route)]);
+    assert.ok(r.seg === mine.seg && r.segS > mine.s + 6, `@${u}: drove clear of the mine (stuck at ${r.segS.toFixed(1)} m)`);
+    assert.ok(events(s, 'spin', from).length - hits <= 1, `@${u}: knocked down at most once`);
+  }
+  // Every hit came with the grace.
+  const s2 = humansRace(1, 'lagoon');
+  const r2 = s2.racers[0];
+  s2.raceTime = (0 - mine.phase) * mine.period + 10 * mine.period - STEP;
+  const pose = obstacleAt(t, mine, s2.raceTime + STEP, [0, 0, 0, 0]);
+  putOn(s2, r2, mine.seg, mine.s - 1, 0, 8);
+  r2.x = pose[0] - Math.sin(r2.yaw) * (ROLLER_RADIUS + 0.6); r2.z = pose[2] - Math.cos(r2.yaw) * (ROLLER_RADIUS + 0.6);
+  tick(s2, [press({ throttle: 1 })]);
+  assert.ok(r2.spin > 0 && Math.abs(r2.ghost - mine.period) < 1e-9, `ghost ${r2.ghost} for a ${mine.period} s cycle`);
+});
+
+test('glider: a boost carried into the launch bleeds off, so the glide still lands short of the next fork', () => {
+  // Magma Peak's summit glider at a mushroom's 46 m/s once sailed past the Obsidian Ridge fork and off its deck.
+  const s = humansRace(1, 'volcano');
+  const t = trackFor('volcano');
+  const r = s.racers[0];
+  const launch = t.def.launches!.find(l => l.glide)!, ridge = t.paths.find(p => p.name === 'Obsidian Ridge')!;
+  put(s, r, launch.at * t.length - 40, 0, 44);
+  r.boost = 1.5; r.boostPower = 1.55;
+  let landed = -1, top = 0;
+  const run = drive(s, r, 0, 20, x => {
+    if (x.glide) top = Math.max(top, x.speed);
+    if (landed < 0 && top > 0 && x.grounded) landed = x.lastS;
+    return landed >= 0;
+  });
+  assert.equal(run.events('glide').length, 1);
+  assert.equal(run.events('splash').length + run.events('respawn').length, 0);
+  assert.ok(landed > 0 && landed < ridge.from - FORK_ZONE, `landed at ${landed.toFixed(0)} m, the ridge forks at ${ridge.from.toFixed(0)} m`);
+});
+
+test('CPU watchdog: a CPU held in place calls the rescue after a few seconds; a human never gets one', () => {
+  const s = createRace('meadow', [human(0), { racer: 'kai', human: false, slot: -1, name: 'CPU' }], 'hard', 5);
+  toRace(s);
+  const h = s.racers.find(r => r.human)!, cpu = s.racers.find(r => !r.human)!;
+  put(s, h, 300, -4); put(s, cpu, 300, 4);
+  const hx = h.x, hz = h.z, cx = cpu.x, cz = cpu.z, from = s.eventSeq;
+  const inputs: Inputs = [];
+  inputs[h.id] = press({ throttle: 1 });
+  let n = 0;
+  // Both pinned (as by a wall corner or an obstacle): put back every tick.
+  while (n++ < 60 * (STUCK_SECONDS + 1) && cpu.respawn <= 0) {
+    tick(s, inputs);
+    h.x = hx; h.z = hz; h.speed = 0;
+    if (cpu.respawn <= 0) { cpu.x = cx; cpu.z = cz; cpu.speed = 0; }
+  }
+  const rescue = events(s, 'respawn', from);
+  assert.equal(rescue.length, 1);
+  assert.deepEqual([rescue[0].racer, rescue[0].value], [cpu.id, 2]);
+  assert.ok(Math.abs(n * STEP - STUCK_SECONDS) < 0.1, `called after ${(n * STEP).toFixed(2)} s`);
+  run(s, 1.2, [idleInput()]);
+  assert.ok(cpu.respawn <= 0 && cpu.ghost > 0 && cpu.cpuStuck < 1, 'back on the road, the watch restarted');
+});
+
+test('CPU routes: a CPU that missed a branch\'s mouth and sits on the main road\'s wall past the fork gives up the branch', () => {
+  const s = createRace('skyway', [{ racer: 'kai', human: false, slot: -1, name: 'CPU' }], 'hard', 3);
+  toRace(s);
+  const t = trackFor('skyway'), alley = t.paths.find(p => p.name === 'Back Alley')!, bit = 1 << (alley.index - 1);
+  const cpu = s.racers[0];
+  // 20 m past the fork, still counted on the main road and up against its wall.
+  put(s, cpu, alley.from + 20, 0, 12);
+  cpu.cpuRoute = bit; cpu.lateral = t.halfWidth + 1.3;
+  cpuInput(s, t, cpu, new Rng(1), false);
+  assert.equal(cpu.cpuRoute & bit, 0, 'dropped the branch');
+  // Inside the road (still able to turn in), or against the wall short of the fork: keeps it.
+  for (const [at, lateral] of [[alley.from + 20, 3], [alley.from - 20, t.halfWidth + 1.3]]) {
+    put(s, cpu, at, 0, 12);
+    cpu.cpuRoute = bit; cpu.lateral = lateral;
+    cpuInput(s, t, cpu, new Rng(1), false);
+    assert.equal(cpu.cpuRoute & bit, bit, `kept the branch at ${at - alley.from} m, ${lateral} m`);
+  }
 });
 
 test('CPU routes: per-difficulty odds, re-rolled each lap, and CPUs really take the shortcut', () => {

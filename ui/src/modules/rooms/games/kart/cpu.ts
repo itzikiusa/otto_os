@@ -10,7 +10,7 @@
  * Easy CPUs wobble, never drift and do not read hazards.
  */
 import { clamp, type Rng, wrapAngle } from '../common/math.ts';
-import { advance, circ, F_PIPE, F_RAILS, obstacleAt, pointAt, sampleAt, type Spot, type Track } from './tracks.ts';
+import { advance, circ, F_PIPE, F_RAILS, FORK_ZONE, obstacleAt, pointAt, sampleAt, type Spot, type Track } from './tracks.ts';
 import type { KartInput, KartState, Racer } from './sim.ts';
 
 const _pt = [0, 0, 0, 0];
@@ -49,11 +49,17 @@ function boostForkAhead(track: Track, r: Racer, d: number): number {
 export function cpuInput(state: KartState, track: Track, r: Racer, rng: Rng, cruise: boolean): KartInput {
   const input: KartInput = { throttle: 1, steer: 0, drift: false, item: false, respawn: false };
   const speed = Math.max(0, r.speed);
-  // A boost-only shortcut without a boost in hand: stay on the main road this lap.
+  // Missed a branch's mouth (shoved wide, say) and pinned on the main road's
+  // wall past the fork: the branch is behind that wall now, so stay on the
+  // main road this lap rather than steer into the wall for good.
+  const pinned = r.seg === 0 && Math.abs(r.lateral) > track.halfWidth + 1.2 && (track.edge === 'wall' || (track.flags[Math.max(0, r.hint)] & F_RAILS) !== 0);
   if (r.seg === 0) for (let b = 1; b < track.paths.length; b++) {
     const p = track.paths[b];
-    if (!p.boost || !(r.cpuRoute & (1 << (b - 1)))) continue;
+    if (!(r.cpuRoute & (1 << (b - 1)))) continue;
     const g = circ(p.from - r.segS, track.length);
+    if (pinned && g < 0 && g > -FORK_ZONE) { r.cpuRoute &= ~(1 << (b - 1)); continue; }
+    // A boost-only shortcut without a boost in hand: stay on the main road this lap.
+    if (!p.boost) continue;
     // Decided at the last moment (an item may still be rolling from the boxes before the fork).
     if (g > 0 && (g < 6 || (g < 24 && r.roll <= 0)) && !hasBoost(r) && r.boost <= 0) r.cpuRoute &= ~(1 << (b - 1));
   }

@@ -112,7 +112,11 @@ turns red while its leaves are up. Branches rejoin the main road, and lap
 progress, positions, wrong-way warnings and rescues all work on them. CPUs
 choose a route each lap, and harder CPUs take shortcuts more often. A CPU takes
 a boost-only cut only when it holds a mushroom or a star, and fires it in the
-mud.
+mud. A CPU shoved wide past a branch's mouth, up against the main road's wall,
+gives that branch up for the lap. A CPU that gains under 8 m in 4 s (pinned
+somewhere) calls the rescue itself (`respawn` event value 2). The play-tests
+assert that this never happens, on the base grid and six nudged ones per track
+(`ui/unit/roomGamesPlaytest.test.ts`).
 
 **Half-pipes**: the road edges curve up into riding walls. Ride high on a wall
 off the end lip and you get a trick jump; trick in the air for a boost when you
@@ -123,9 +127,12 @@ the view tints blue and bubbles trail behind. Falling into water off a bridge,
 the boardwalk, thin ice or an open drawbridge, falling into lava, or dropping
 into a chasm rescues you a little way back. A rescue always lands before a
 jump's or a drawbridge's run-up, and you get no progress credit for the fall.
-Launch ramps throw you over their gap at racing speed. Everything that moves
-(rollers, crushers and drawbridge leaves) follows the race clock, so every
-player sees the same thing with no extra network traffic. Snapshots (version 4)
+Launch ramps throw you over their gap at racing speed. The glider bleeds off a
+boost you carry into it, so a boosted launch still lands where an unboosted one
+does. A roller or crusher that knocks you down leaves you untouchable for one of
+its cycles, long enough to get clear before it comes round again. Everything
+that moves (rollers, crushers and drawbridge leaves) follows the race clock, so
+every player sees the same thing with no extra network traffic. Snapshots (version 4)
 carry each racer's coins, golden-mushroom window, rescue invulnerability,
 slipstream charge and burnout. They also carry each shell's kind and the list
 of collected coins. New events: `zap` (an opponent struck by lightning),

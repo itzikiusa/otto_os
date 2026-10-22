@@ -8,7 +8,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { clamp, wrapAngle } from '../src/modules/rooms/games/common/math.ts';
+import { clamp, Rng, wrapAngle } from '../src/modules/rooms/games/common/math.ts';
 import { advance, circ, FORK_ZONE, nearest, newNear, pointAt, progressOf, sampleAt, TRACK_IDS, trackFor } from '../src/modules/rooms/games/kart/tracks.ts';
 import { createRace, idleInput, LAPS, tick, type KartInput, type KartState, type Racer } from '../src/modules/rooms/games/kart/sim.ts';
 import * as kartNet from '../src/modules/rooms/games/kart/net.ts';
@@ -23,19 +23,38 @@ const RELAY_CAP = 16 * 1024;
 
 // ── Kart: a full Grand Prix race on every track ───────────────────────────────
 
-/** Whole race with 8 CPUs; a guest decodes a snapshot every third tick (20 Hz). */
-function kartRace(track: (typeof TRACK_IDS)[number], seed: number) {
+/**
+ * Whole race with 8 CPUs; a guest decodes a snapshot every third tick (20 Hz)
+ * unless `decode` is off. `jitter` nudges every kart on the grid (position and
+ * heading, seeded) so the race takes another course: the same kind of drift a
+ * last-ulp Math difference between platforms causes, so a stuck spot shows up
+ * here rather than only on one CI runner.
+ */
+function kartRace(track: (typeof TRACK_IDS)[number], seed: number, { decode = true, jitter = 0 } = {}) {
   const s: KartState = createRace(track, kartSeats([], true), 'hard', seed);
   const t = trackFor(track);
+  if (jitter) {
+    const rng = new Rng(seed * 7919 + 17);
+    for (const r of s.racers) { r.x += rng.range(-jitter, jitter); r.z += rng.range(-jitter, jitter); r.yaw += rng.range(-0.03, 0.03); }
+  }
   // A route counts as driven once someone is well inside it (past the fork zone, short of the merge).
   const segs = new Set<number>();
   // Stuck detector: lap distance gained per 10 s window while racing and unfinished.
   const windowStart = s.racers.map(r => r.travel);
   let windowAt = 0, worstWindow = Infinity, decoded = 0, maxBytes = 0, rescues = 0, last = 0;
+  // Every time a CPU had to call the rescue because it sat stuck (the watchdog's `respawn` value 2).
+  const unstuck: string[] = [];
   let n = 0;
   while (s.phase !== 'done' && n++ < 60 * 600) {
     tick(s, []);
-    for (const e of s.events) if (e.id > last && (e.type === 'respawn' || e.type === 'splash') && e.value !== 1) rescues++;
+    for (const e of s.events) {
+      if (e.id <= last) continue;
+      if ((e.type === 'respawn' || e.type === 'splash') && e.value !== 1) rescues++;
+      if (e.type === 'respawn' && e.value === 2) {
+        const r = s.racers[e.racer];
+        unstuck.push(`racer ${r.id} at ${e.x.toFixed(0)}, ${e.y.toFixed(0)}, ${e.z.toFixed(0)} (${t.paths[r.seg].name ?? 'main'} ${r.segS.toFixed(0)} m, ${s.raceTime.toFixed(1)} s)`);
+      }
+    }
     last = s.eventSeq;
     for (const r of s.racers) if (r.seg === 0 || (r.segS > FORK_ZONE && r.segS < t.paths[r.seg].length - FORK_ZONE)) segs.add(r.seg);
     if (s.phase === 'race' && s.raceTime - windowAt >= 10) {
@@ -45,7 +64,7 @@ function kartRace(track: (typeof TRACK_IDS)[number], seed: number) {
       });
       windowAt = s.raceTime;
     }
-    if (n % 3 === 0) {
+    if (decode && n % 3 === 0) {
       const json = wire(kartNet.encodeSnapshot(s, s.events));
       maxBytes = Math.max(maxBytes, json.length);
       const back = kartNet.decodeSnapshot(JSON.parse(json), () => 'Guest');
@@ -59,13 +78,14 @@ function kartRace(track: (typeof TRACK_IDS)[number], seed: number) {
       decoded++;
     }
   }
-  return { s, t, segs, worstWindow, decoded, maxBytes, rescues };
+  return { s, t, segs, worstWindow, decoded, maxBytes, rescues, unstuck };
 }
 
 for (const track of TRACK_IDS) {
   test(`kart play-test: 8 CPUs race 3 laps of ${track}, nobody stuck, every route taken, guests decode every snapshot`, () => {
-    const { s, t, segs, worstWindow, decoded, maxBytes, rescues } = kartRace(track, 7);
+    const { s, t, segs, worstWindow, decoded, maxBytes, rescues, unstuck } = kartRace(track, 7);
     assert.equal(s.phase, 'done', `${track}: race ended (race time ${s.raceTime.toFixed(0)} s)`);
+    assert.deepEqual(unstuck, [], `${track}: no CPU had to be rescued from a stuck spot`);
     for (const r of s.racers) {
       assert.ok(r.finish !== null, `${track}: racer ${r.id} finished`);
       assert.equal(r.lap, LAPS, `${track}: racer ${r.id} drove every lap`);
@@ -80,6 +100,23 @@ for (const track of TRACK_IDS) {
     assert.ok(decoded > 1000 && maxBytes < RELAY_CAP, `${track}: ${decoded} snapshots, largest ${maxBytes} bytes`);
     // Coins changed hands.
     assert.ok(s.racers.some(r => r.coins > 0), `${track}: someone holds coins at the flag`);
+  });
+}
+
+// More grids per track, each nudged: a stuck spot (a wall corner a CPU steers
+// into, an obstacle that pins a kart) usually needs a particular course to
+// reach, and one seed alone can pass on one machine and fail on another.
+const SWEEP_SEEDS = [11, 12, 13, 14, 15, 16];
+for (const track of TRACK_IDS) {
+  test(`kart play-test: ${SWEEP_SEEDS.length} nudged grids race ${track}, every CPU finishes and none ever sits stuck`, () => {
+    for (const seed of SWEEP_SEEDS) {
+      const { s, worstWindow, unstuck } = kartRace(track, seed, { decode: false, jitter: 1.5 });
+      assert.equal(s.phase, 'done', `${track} #${seed}: race ended`);
+      for (const r of s.racers) assert.equal(r.lap, LAPS, `${track} #${seed}: racer ${r.id} drove every lap`);
+      assert.deepEqual(unstuck, [], `${track} #${seed}: no CPU had to be rescued from a stuck spot`);
+      // Falls after a spin-out at a jump lip cost a rescue, so the floor here is looser than above.
+      assert.ok(worstWindow > 30, `${track} #${seed}: slowest 10 s window ${worstWindow.toFixed(1)} m`);
+    }
   });
 }
 

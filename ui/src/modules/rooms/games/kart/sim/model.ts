@@ -40,6 +40,8 @@ export const DRAFT_BOOST = 1.0, DRAFT_POWER = 1.32;
 /** After a rescue: a moment of invulnerability and a rolling restart. */
 export const GHOST_SECONDS = 2;
 export const RESCUE_SECONDS = 1.0;
+/** A CPU that gains under STUCK_METRES of lap distance in STUCK_SECONDS calls the rescue (never sits stuck). */
+export const STUCK_SECONDS = 4, STUCK_METRES = 8;
 /** Gas down as a rescued kart lands: a short boost away. */
 export const RESPAWN_BOOST = 0.7;
 /** Shells and bombs: lifetime, speed, the owner's grace and the blast radius. */
@@ -89,7 +91,8 @@ export interface Racer {
   safeSeg: number; safeS: number;
   lap: number; lapStart: number; lapTimes: number[]; finish: number | null; place: number;
   respawn: number; wrong: number; startCharge: number; bumpCd: number;
-  cpuLane: number; cpuThink: number; cpuItemDelay: number; cpuMistake: number;
+  /** CPU brain; the stuck watchdog counts `cpuStuck` seconds since `travel` last got STUCK_METRES past `cpuMark`. */
+  cpuLane: number; cpuStuck: number; cpuMark: number; cpuItemDelay: number; cpuMistake: number;
   /** CPU route: bit k-1 set = take branch k this lap. */
   cpuRoute: number;
   coins: number;
@@ -102,6 +105,7 @@ export interface Hazard { id: number; x: number; y: number; z: number; owner: nu
 /** A shell or bomb in flight: `vy` for a bomb's arc, `speed` its current ground speed (host only). */
 export interface Shell { id: number; kind: ShellKind; x: number; y: number; z: number; yaw: number; target: number; owner: number; life: number; hint: number; seg: number; vy: number; speed: number }
 /**
+ * `respawn` value: 2 when a stuck CPU called the rescue (falls and requests carry none);
  * `boost` value: 0 ramp / pad, 1 mushroom, 2 perfect start, 3 golden; `turbo`
  * value: mini-turbo tier; `bolt`: the user's strike (value = racers hit), then
  * a `zap` per opponent struck; `draft`: slipstream boost; `burnout`: floored

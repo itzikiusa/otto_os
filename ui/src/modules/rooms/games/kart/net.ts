@@ -95,7 +95,7 @@ export function decodeSnapshot(data: unknown, names: (slot: number, racer: Racer
       item: item < 0 ? null : (ITEM_KINDS[item] as ItemKind), itemCount, roll, prevItem: false, prevDrift: false,
       travel, lastS: 0, hint: Math.round(hint), lateral, surface: SURFACES[surface], lap, lapStart: 0, lapTimes: lt as number[], finish: finish < 0 ? null : finish,
       seg, segS: 0, glide: (f & 8) === 8, under: (f & 16) === 16, safeSeg: seg, safeS: 0,
-      place, respawn, wrong, startCharge: -1, bumpCd: 0, cpuLane: 0, cpuThink: 0, cpuItemDelay: 0, cpuMistake: 0, cpuRoute: 0, coins: coinCount,
+      place, respawn, wrong, startCharge: -1, bumpCd: 0, cpuLane: 0, cpuStuck: 0, cpuMark: travel, cpuItemDelay: 0, cpuMistake: 0, cpuRoute: 0, coins: coinCount,
     });
   }
   const events: KartEvent[] = [];

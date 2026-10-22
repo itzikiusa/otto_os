@@ -22,7 +22,7 @@ import { circ, coinSpots, DRAW_ANGLE, drawLift, F_ICE, F_OFFROAD, F_RAILS, F_UND
 import type { RacerId } from './roster.ts';
 import { rollItem } from './items.ts';
 import { cpuInput } from './cpu.ts';
-import { STEP, LAPS, MAX_RACERS, INTRO_SECONDS, COUNTDOWN_SECONDS, DRIFT_LEVELS, TURBO_SECONDS, TURBO_POWER, PAD_SECONDS, PAD_POWER, TRICK_SECONDS, TRICK_POWER, START_PERFECT, START_GOOD, START_BURNOUT, BURNOUT_SECONDS, GHOST_SECONDS, RESCUE_SECONDS, RESPAWN_BOOST, GRAVITY, GLIDE_GRAVITY, GLIDE_SINK, WATER_GRAVITY, FALL_DEPTH, MAX_COINS, COIN_SPEED, COIN_LOSS, idleInput, type Difficulty, type KartInput, type Racer, type ItemBox, type Coin, type KartSeat, type KartState } from './sim/model.ts';
+import { STEP, LAPS, MAX_RACERS, INTRO_SECONDS, COUNTDOWN_SECONDS, DRIFT_LEVELS, TURBO_SECONDS, TURBO_POWER, PAD_SECONDS, PAD_POWER, TRICK_SECONDS, TRICK_POWER, START_PERFECT, START_GOOD, START_BURNOUT, BURNOUT_SECONDS, GHOST_SECONDS, RESCUE_SECONDS, STUCK_SECONDS, STUCK_METRES, RESPAWN_BOOST, GRAVITY, GLIDE_GRAVITY, GLIDE_SINK, WATER_GRAVITY, FALL_DEPTH, MAX_COINS, COIN_SPEED, COIN_LOSS, idleInput, type Difficulty, type KartInput, type Racer, type ItemBox, type Coin, type KartSeat, type KartState } from './sim/model.ts';
 import { _near, _pt, emit, stats, giveBoost } from './sim/core.ts';
 import { useItem, updateHazards, updateShells } from './sim/items.ts';
 import { updateDrafts, collideRacers, collideObstacles, updateBoxes, updateCoins } from './sim/contact.ts';
@@ -60,7 +60,7 @@ export function createRace(trackId: TrackId, seats: KartSeat[], difficulty: Diff
       travel: s, lastS: lap, hint: -1, lateral: 0, surface: 'road',
       seg: 0, segS: lap, glide: false, under: false, safeSeg: 0, safeS: lap,
       lap: 0, lapStart: 0, lapTimes: [], finish: null, place: i + 1, respawn: 0, wrong: 0, startCharge: -1, bumpCd: 0,
-      cpuLane: rng.range(-0.45, 0.45), cpuThink: 0, cpuItemDelay: rng.range(0.5, 2.5), cpuMistake: 0,
+      cpuLane: rng.range(-0.45, 0.45), cpuStuck: 0, cpuMark: s, cpuItemDelay: rng.range(0.5, 2.5), cpuMistake: 0,
       cpuRoute: seat.human ? 0 : pickRoute(track, difficulty, rng), coins: 0,
     };
   });
@@ -187,6 +187,17 @@ function driveRacer(state: KartState, track: Track, r: Racer, input: KartInput, 
     if (r.respawn <= 0) rescue(state, track, r, input.throttle > 0.5);
     return;
   }
+  // A CPU never sits stuck (pinned in a corner, bowled over and over): too
+  // little lap distance for too long and it calls the rescue, like a player would.
+  if (!r.human && r.finish === null) {
+    r.cpuStuck += STEP;
+    if (r.travel - r.cpuMark > STUCK_METRES) { r.cpuStuck = 0; r.cpuMark = r.travel; }
+    else if (r.cpuStuck > STUCK_SECONDS) {
+      r.respawn = RESCUE_SECONDS; r.speed = 0; r.vx = r.vz = r.vy = 0; r.drift = 0; r.driftCharge = 0; r.driftLevel = 0; r.glide = false;
+      emit(state, 'respawn', r, 2);
+      return;
+    }
+  }
   if (r.roll > 0) {
     r.roll -= STEP;
     if (r.roll <= 0) {
@@ -247,7 +258,10 @@ function driveRacer(state: KartState, track: Track, r: Racer, input: KartInput, 
 
   // A burnout spins the wheels in place for a moment.
   const throttle = spinning || r.stall > 0 ? 0 : input.throttle;
-  if (r.glide) r.speed = Math.max(r.speed, st.top * 0.95);
+  // The glider cruises, bleeding off any boost carried into it: a boosted
+  // launch would otherwise sail on past the landing (Magma Peak's summit glider
+  // came down beyond the Obsidian Ridge fork, off its rail-less deck).
+  if (r.glide) r.speed = Math.max(st.top * 0.95, r.speed - Math.max(0, r.speed - st.top) * 1.8 * STEP);
   else if (r.boost > 0) r.speed = approach(r.speed, top, 6, STEP);
   // Past top speed (a boost just ended) the extra bleeds off gently: boosts carry.
   else if (throttle > 0.05) r.speed += (r.speed < top ? st.accel * throttle * (r.under ? 0.8 : 1) * (1 - Math.max(0, r.speed) / (top * 1.25)) : -(r.speed - top) * 1.8) * STEP;
@@ -470,6 +484,7 @@ function rescue(state: KartState, track: Track, r: Racer, revving: boolean): voi
   const prog = progressOf(track, seg, s);
   r.travel += circ(prog - r.lastS, track.length);
   r.lastS = prog;
+  r.cpuStuck = 0; r.cpuMark = r.travel;
   emit(state, 'land', r);
   if (revving) { giveBoost(r, RESPAWN_BOOST, 1.3, 0.5); emit(state, 'boost', r); }
 }
