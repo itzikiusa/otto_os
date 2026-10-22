@@ -155,7 +155,9 @@ protox = "0.9.1"
 prost = "0.14.4"
 prost-reflect = { version = "0.16.5", features = ["serde"] }
 prost-types = "0.14.4"
-tonic = { version = "0.14.6", features = ["tls-ring", "tls-webpki-roots"] }
+# `tls-native-roots`: gRPC trusts the OS store (corporate / internal CAs) like
+# reqwest's platform verifier does for REST, with the bundled Mozilla roots on top.
+tonic = { version = "0.14.6", features = ["tls-ring", "tls-native-roots", "tls-webpki-roots"] }
 reqwest_cookie_store = "0.10.0"
 # Message Brokers (Kafka) — librdkafka statically built (cmake) with vendored
 # OpenSSL so SASL_SSL works on machines without a system librdkafka/OpenSSL.
