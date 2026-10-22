@@ -2051,13 +2051,14 @@ mod tests {
             assert_eq!(sent["fields"]["summary"], "Reviewed title");
             assert_eq!(
                 sent["fields"]["description"],
-                otto_issues::adf::text_to_adf(&format!("> RFC: {reference}\n\n{original_body}"))
+                otto_issues::markdown_to_adf(&format!("> RFC: {reference}\n\n{original_body}"))
+                    .unwrap()
             );
         } else {
             assert_eq!(sent["title"], "Reviewed title");
             assert_eq!(
                 sent["body"]["storage"]["value"],
-                otto_issues::confluence::markdown_to_storage(original_body)
+                otto_issues::confluence::markdown_to_storage(original_body).unwrap()
             );
             assert_eq!(sent["ancestors"][0]["id"], "42");
         }

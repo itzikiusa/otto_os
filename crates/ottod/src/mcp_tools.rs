@@ -7376,14 +7376,14 @@ mod tests {
     }
 
     /// See [`tools_list_catalog_stays_within_its_byte_budget`]. 79_748 at
-    /// perf2/10-mcp R2 (shorter repeated reference texts; granted 131_940);
-    /// 83_418 at perf/10-mcp (granted: 135_610). 83_318 after
-    /// architecture-1-05 aligned the native twins with the outward catalog
-    /// (vault_id advertised as id-or-name, the PR `number` alias, room refs):
-    /// that text was missing, not padding — agents were told integer-only.
-    const TOOLS_LIST_BYTE_BUDGET: usize = 84_000;
-    /// A review-type session (R2 per-source scoping): 56_830 measured.
-    const NARROW_TOOLS_LIST_BYTE_BUDGET: usize = 59_000;
+    /// perf2/10-mcp R2 (shorter reference texts; granted 131_940); 83_418 at
+    /// perf/10-mcp (granted 135_610); 83_318 after architecture-1-05 aligned
+    /// the native twins (id-or-name vault_id, PR `number` alias, room refs —
+    /// missing text, not padding); 85_412 with otto_create_issue and its
+    /// discovery reads (list_issue_projects / _types).
+    const TOOLS_LIST_BYTE_BUDGET: usize = 86_000;
+    /// A review-type session (R2 per-source scoping): 56_830; 60_266 with those.
+    const NARROW_TOOLS_LIST_BYTE_BUDGET: usize = 61_000;
 
     /// A Ctx pointing at an unreachable base; used by the no-upstream tests above
     /// (which never actually call out). Audit disabled.

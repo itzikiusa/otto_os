@@ -38,6 +38,9 @@ pub const REF_ARGS: &[(&str, &str, &str)] = &[
     ("search_issues", "account_id", "issue_account"),
     ("get_issue", "account_id", "issue_account"),
     ("list_issue_transitions", "account_id", "issue_account"),
+    ("list_issue_projects", "account_id", "issue_account"),
+    ("list_issue_types", "account_id", "issue_account"),
+    ("create_issue", "account_id", "issue_account"),
     ("comment_issue", "account_id", "issue_account"),
     ("transition_issue", "account_id", "issue_account"),
     ("search_confluence", "account_id", "issue_account"),
@@ -191,6 +194,9 @@ pub fn pin_global(tool: &str) -> bool {
             "search_issues"
                 | "get_issue"
                 | "list_issue_transitions"
+                | "list_issue_projects"
+                | "list_issue_types"
+                | "create_issue"
                 | "comment_issue"
                 | "transition_issue"
                 | "search_confluence"
