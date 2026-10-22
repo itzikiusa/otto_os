@@ -27,11 +27,9 @@
   import { onDestroy, untrack } from 'svelte';
   import { isNativePane } from '../../../lib/desktop';
   import { observeNativePane } from '../../../lib/nativePane';
-  import { rowMenu } from '../../../lib/rowMenu';
   import Icon from '../../../lib/components/Icon.svelte';
   import EmptyState from '../../../lib/components/EmptyState.svelte';
   import LoadState from '../../../lib/components/LoadState.svelte';
-  import ProviderIcon from '../../../lib/components/ProviderIcon.svelte';
   import { ws, visibleOnThisDevice } from '../../../lib/stores/workspace.svelte';
   import { auth } from '../../../lib/stores/auth.svelte';
   import { ui } from '../../../lib/stores/ui.svelte';
@@ -42,17 +40,20 @@
   import { toasts } from '../../../lib/toast.svelte';
   import { toastError } from '../../../lib/toastError';
   import { loadErrorText } from '../../../lib/loadError';
-  import { now } from '../../../lib/stores/now.svelte';
-  import { plural } from '../../../lib/plural';
-  import { relTime } from '../../mission-control/lib';
   import { SCRATCH_ID } from '../../../lib/stores/sessionBuckets';
   import type { Session, SessionScreen } from '../../../lib/api/types';
   import { home, type HomeBox } from '../home.svelte';
   import { livePoll, type Poller } from './poll';
-  import { attentionQueue, buildSchool, busiestRoom, isAsleep, kidActivity, kidAriaLabel, kidLines, providerLabel, roomSummary, type Kid } from '../school/model';
+  import { attentionQueue, buildSchool, busiestRoom, type Kid } from '../school/model';
   import { kickOut, release, sendToDetention } from '../school/actions';
   import { pollScreens, visibleLines, type ScreenFeed } from '../school/screens';
   import { mountSchool, webglAvailable, type SchoolHandle, type SchoolPick, type SchoolView } from '../school/scene';
+  import HoverTag from './classrooms/HoverTag.svelte';
+  import KidCard from './classrooms/KidCard.svelte';
+  import NeedsYouQueue from './classrooms/NeedsYouQueue.svelte';
+  import SchoolBar from './classrooms/SchoolBar.svelte';
+  import SchoolList from './classrooms/SchoolList.svelte';
+  import { hintFor, keySurface, kidMenuItems, place, queueLabelFor } from './classrooms/helpers';
 
   interface Props {
     box: HomeBox;
@@ -153,8 +154,7 @@
     }),
   );
   const byId = $derived(new Map(school.kids.map((k) => [k.id, k] as const)));
-  // Keep complete membership without mounting every session row at once.
-  const LIST_PAGE_SIZE = 100;
+  // Current list page per classroom (SchoolList pages its members).
   let memberPages = $state<Record<string, number>>({});
 
   // ── View mode ────────────────────────────────────────────────────────────
@@ -335,13 +335,8 @@
   const needDoors = $derived(view.kind === 'corridor' ? school.rooms.filter((r) => r.counts.needsYou > 0 || r.counts.error > 0) : []);
   const queue = $derived(attentionQueue(school));
   const busiest = $derived(busiestRoom(school));
-  const queueLabel = $derived.by(() => {
-    const need = queue.filter((k) => k.pose === 'needs-you').length;
-    const failed = queue.length - need;
-    return [need ? `${need} ${need === 1 ? 'needs' : 'need'} you` : '', failed ? `${failed} failed` : ''].filter(Boolean).join(' · ');
-  });
+  const queueLabel = $derived(queueLabelFor(queue));
   let queueOpen = $state(true);
-  const QUEUE_SHOWN = 5;
   const peek = $derived.by(() => {
     void feedTick;
     if (!hoverKid || view.kind === 'corridor') return null;
@@ -349,21 +344,6 @@
     return f ? visibleLines(f.lines, 8, 64) : null;
   });
 
-  function place(el: HTMLElement | null | undefined, p: { x: number; y: number; visible: boolean } | null, origin: DOMRect, below = false): void {
-    if (!el) return;
-    if (!p || !p.visible) {
-      el.style.visibility = 'hidden';
-      return;
-    }
-    el.style.visibility = 'visible';
-    // Centred over the point, then CLAMPED inside the stage (a tall peek
-    // over a back-row kid must never leave the top edge).
-    const w = el.offsetWidth;
-    const h = el.offsetHeight;
-    const x = Math.min(Math.max(4, p.x - origin.left - w / 2), Math.max(4, origin.width - w - 4));
-    const y = Math.min(Math.max(4, p.y - origin.top - (below ? 0 : h)), Math.max(4, origin.height - h - 4));
-    el.style.transform = `translate(${Math.round(x)}px, ${Math.round(y)}px)`;
-  }
   function placeOverlay(): void {
     const h = handle;
     if (!h || !stage) return;
@@ -507,30 +487,7 @@
   }
   /** Make the stage a keyboard surface (focusable; keys move the camera). */
   function stageKeys(node: HTMLElement) {
-    node.tabIndex = 0;
-    const pressed = new Set<string>();
-    const kd = (e: KeyboardEvent) => {
-      if (e.target === node && !e.defaultPrevented) pressed.add(e.key);
-      onStageKey(e, true);
-    };
-    const ku = (e: KeyboardEvent) => {
-      pressed.delete(e.key);
-      onStageKey(e, false);
-    };
-    const bl = () => {
-      for (const key of pressed) handle?.key(new KeyboardEvent('keyup', { key }), false);
-      pressed.clear();
-    };
-    node.addEventListener('keydown', kd);
-    node.addEventListener('keyup', ku);
-    node.addEventListener('blur', bl);
-    return {
-      destroy() {
-        node.removeEventListener('keydown', kd);
-        node.removeEventListener('keyup', ku);
-        node.removeEventListener('blur', bl);
-      },
-    };
+    return keySurface(node, onStageKey, (key) => handle?.key(new KeyboardEvent('keyup', { key }), false));
   }
 
   function back(): void {
@@ -623,24 +580,7 @@
   function kidMenu(e: MouseEvent | KeyboardEvent, k: Kid): void {
     const inRoom = view.kind !== 'corridor' && openRoomModel?.id === k.workspaceId
       && [...openRoomModel.kids, ...openRoomModel.bench].some((kid) => kid.id === k.id);
-    if (k.detention) {
-      ctxMenu.show(e, [
-        { label: 'Release from detention', icon: 'undo', disabled: !k.canManage, action: () => void free(k) },
-      ]);
-      return;
-    }
-    ctxMenu.show(e, [
-      { label: 'Open session', icon: 'external', action: () => void open(k) },
-      ...(inRoom ? [{ label: 'Look at the screen', icon: 'eye' as const, action: () => void handle?.lookAtScreen(k.id) }] : []),
-      ...(inRoom ? [{ label: 'Headmaster: check on them', icon: 'search' as const, action: () => checkOn(k) }] : []),
-      ...(k.canManage
-        ? [
-            { separator: true as const },
-            { label: 'Send to detention (archive)', icon: 'archive' as const, action: () => void detention(k) },
-            { label: 'Kick out…', icon: 'trash' as const, danger: true, action: () => void kick(k) },
-          ]
-        : []),
-    ]);
+    ctxMenu.show(e, kidMenuItems(k, inRoom, { open, free, checkOn, detention, kick, lookAtScreen: (id) => void handle?.lookAtScreen(id) }));
   }
 
   /** List-view row → into the 3D room and onto that kid. */
@@ -679,44 +619,11 @@
     if (view.kind === 'screen') out.push({ label: `${byId.get(view.kidId)?.title ?? 'Screen'}` });
     return out;
   });
-  const hint = $derived(
-    view.kind === 'corridor'
-      ? 'Click a door to walk in · drag to look · W A S D to walk'
-      : view.kind === 'room'
-        ? 'Hover a kid to peek · click for its card · double-click opens it · Esc for the corridor'
-        : 'Enter opens the session · Esc goes back',
-  );
+  const hint = $derived(hintFor(view));
 </script>
 
 <div class="school" bind:this={rootEl}>
-  <div class="bar">
-    {#if mode === '3d'}
-      <nav class="crumbs" aria-label="Where you are in the school">
-        {#each crumbs as c, i (i)}
-          {#if i > 0}<Icon name="chevronRight" size={12} />{/if}
-          {#if c.go}
-            <button class="crumb link" onclick={c.go}>{c.label}</button>
-          {:else}
-            <span class="crumb ellipsis" aria-current="location">{c.label}</span>
-          {/if}
-        {/each}
-      </nav>
-    {:else}
-      <span class="sum">{plural(school.rooms.length, 'classroom')} · {plural(school.total, 'kid')}</span>
-    {/if}
-    {#if gl}
-      <div class="segmented" role="group" aria-label="School view">
-        <button class="seg" class:active={mode === '3d'} aria-pressed={mode === '3d'} onclick={() => setMode('3d')}>3D</button>
-        <button class="seg" class:active={mode === 'list'} aria-pressed={mode === 'list'} onclick={() => setMode('list')}>List</button>
-      </div>
-    {/if}
-    {#if mode === '3d'}
-      <button class="icon-btn" onclick={() => handle?.resetView()} disabled={!handle} title="Reset the school view" aria-label="Reset the school view"><Icon name="refresh" size={12} /></button>
-      <button class="icon-btn" onclick={() => home.toggleZoom(box.id)} title={zoomed ? 'Exit full page' : 'Fill the page'} aria-label={zoomed ? 'Exit full page' : 'Fill the page'}>
-        <Icon name={zoomed ? 'minimize' : 'maximize'} size={12} />
-      </button>
-    {/if}
-  </div>
+  <SchoolBar boxId={box.id} {mode} {gl} {zoomed} {school} {handle} {crumbs} {setMode} />
 
   {#if !loaded && fetched.length === 0 && ws.sessions.length === 0}
     <LoadState what="the school" empty={true} loading={true} variant="compact" rows={3} />
@@ -748,81 +655,12 @@
                 {r.counts.needsYou > 0 ? `✋ ${r.counts.needsYou}` : `❗ ${r.counts.error}`}
               </div>
             {/each}
-            <div class="hover-tag" class:wide={!!peek} bind:this={tagEl}>
-              {#if hoverKid}
-                <b>{hoverKid.title}</b>
-                <small>{providerLabel(hoverKid.provider)} · {kidActivity(hoverKid, now() ? relTime(hoverKid.lastActiveAt) : '', isAsleep(hoverKid, now()))}</small>
-                {#if peek}
-                  <pre class="peek">{peek.length ? peek.join('\n') : 'No output yet'}</pre>
-                {/if}
-              {:else if hoverRoom}
-                <b>{hoverRoom.name}</b><small>{roomSummary(hoverRoom)} · click to walk in</small>
-              {:else if hover?.kind === 'head'}
-                <b>Otto</b><small>the headmaster</small>
-              {:else if hover?.kind === 'door'}
-                <b>Back to the corridor</b>
-              {/if}
-            </div>
+            <HoverTag {hover} {hoverKid} {hoverRoom} {peek} bind:el={tagEl} />
           </div>
-          {#if queue.length > 0}
-            <!-- Corridor: top-end (doors start at the near left); room: top-start
-                 (the kid card owns top-end). -->
-            <section class="queue" class:end={view.kind === 'corridor'} aria-label="Sessions that need you">
-              <button class="queue-head" aria-expanded={queueOpen} onclick={() => (queueOpen = !queueOpen)}>
-                <Icon name="hand" size={12} />
-                <span>{queueLabel}</span>
-                <Icon name={queueOpen ? 'chevronUp' : 'chevronDown'} size={12} />
-              </button>
-              {#if queueOpen}
-                <ul>
-                  {#each queue.slice(0, QUEUE_SHOWN) as k (k.id)}
-                    <li class="qrow" class:err={k.pose === 'error'}>
-                      <button class="qmain" onclick={() => void goTo(k)} title="Go to {k.title} in {k.workspaceName}">
-                        <ProviderIcon provider={k.provider} size={12} />
-                        <span class="ellipsis qt">{k.title}</span>
-                        <small class="ellipsis">{k.workspaceName}</small>
-                      </button>
-                      <button class="icon-btn" onclick={() => void open(k)} aria-label="Open {k.title}" title="Open {k.title}"><Icon name="external" size={12} /></button>
-                    </li>
-                  {/each}
-                </ul>
-                {#if queue.length > QUEUE_SHOWN}<p class="qmore">+{queue.length - QUEUE_SHOWN} more in the list</p>{/if}
-              {/if}
-            </section>
-          {:else if view.kind === 'corridor' && busiest}
-            <button class="jump" onclick={() => busiest && void handle?.enterRoom(busiest.id)} title="Walk into the busiest classroom">
-              <span class="ellipsis">{busiest.name}</span><small>{roomSummary(busiest)}</small><Icon name="chevronRight" size={12} />
-            </button>
-          {/if}
+          <NeedsYouQueue {queue} {queueLabel} bind:queueOpen {view} {busiest} {handle} {open} {goTo} />
           <p class="hint">{hint}</p>
           {#if selKid && view.kind !== 'corridor'}
-            <div class="kid-card" role="group" aria-label="{selKid.title} — details" bind:this={cardEl}>
-              <div class="card-head">
-                <ProviderIcon provider={selKid.provider} size={16} />
-                <b class="ellipsis">{selKid.title}</b>
-                <button class="icon-btn" onclick={() => (selected = null)} aria-label="Close details" title="Close details"><Icon name="x" size={12} /></button>
-              </div>
-              {#each kidLines(selKid, now() ? relTime(selKid.lastActiveAt) : '') as line, i (i)}
-                <div class="card-line" class:needs={i === 0 && selKid.pose === 'needs-you'}>{line}</div>
-              {/each}
-              <div class="card-actions">
-                {#if selKid.detention}
-                  <button class="btn small primary" disabled={!selKid.canManage} onclick={() => selKid && void free(selKid)}>Release from detention</button>
-                {:else}
-                  <button class="btn small primary" onclick={() => void open(selKid)}>Open session</button>
-                  {#if view.kind === 'screen'}
-                    <button class="btn small" onclick={() => void handle?.backToRoom()}>Back to the room</button>
-                  {:else}
-                    <button class="btn small" onclick={() => selKid && void handle?.lookAtScreen(selKid.id)}>Look at screen</button>
-                  {/if}
-                  <button class="btn small" onclick={() => selKid && checkOn(selKid)} title="Send the headmaster over">Check on</button>
-                  {#if selKid.canManage}
-                    <button class="btn small" onclick={() => selKid && void detention(selKid)} title="Archive — resumable, with Undo">Detention</button>
-                    <button class="btn small danger" onclick={() => selKid && void kick(selKid)} title="Delete this session and its history">Kick out…</button>
-                  {/if}
-                {/if}
-              </div>
-            </div>
+            <KidCard {selKid} {view} {handle} bind:el={cardEl} onclose={() => (selected = null)} {open} {free} {checkOn} {detention} {kick} />
           {/if}
         {:else if sceneError}
           <div class="scene-state">
@@ -844,78 +682,7 @@
     <!-- The accessible companion: every classroom and kid as real buttons.
          Visible in List view; in 3D it stays keyboard / screen-reader
          reachable, and activating a row walks into that room onto the kid. -->
-    <div class="list" class:sr-only={mode === '3d'} role="region" aria-label="School list">
-      {#if mode === 'list' && empty}
-        <EmptyState icon="people" title="School’s out" body="Start a session and a kid takes a seat in its workspace’s classroom.">
-          <button class="btn small" onclick={() => (ui.newSessionOpen = true)}><Icon name="plus" size={12} />New session</button>
-        </EmptyState>
-      {/if}
-      {#if queue.length > 0}
-        <section class="lroom lattn" aria-label="Needs you">
-          <h4 class="lroom-head"><span class="ellipsis">Needs you</span><small>{plural(queue.length, 'session')}</small></h4>
-          <ul>
-            {#each queue as k (k.id)}
-              <li class="lrow" data-attn-id={k.id}>
-                <button class="lmain" aria-label="Go to {kidAriaLabel(k, now() ? relTime(k.lastActiveAt) : '')} in {k.workspaceName}" onclick={() => void goTo(k)}>
-                  <i class="dot" data-pose={k.pose}></i>
-                  <ProviderIcon provider={k.provider} size={12} />
-                  <span class="ellipsis t">{k.title}</span>
-                  <span class="st">{k.workspaceName} · {k.stateLabel}</span>
-                </button>
-              </li>
-            {/each}
-          </ul>
-        </section>
-      {/if}
-      {#each school.rooms as r (r.id)}
-        {@const lastPage = Math.max(0, Math.ceil(r.members.length / LIST_PAGE_SIZE) - 1)}
-        {@const page = Math.min(memberPages[r.id] ?? 0, lastPage)}
-        {#if r.members.length > 0 || mode === 'list'}
-          <section class="lroom" aria-label="Classroom {r.name}">
-            <h4 class="lroom-head">
-              <span class="ellipsis">{r.name}</span>
-              {#if r.current}<span class="cur">current</span>{/if}
-              <small>{roomSummary(r)}</small>
-              {#if mode === '3d'}
-                <button class="btn small" onclick={() => void handle?.enterRoom(r.id)} disabled={!handle}>Walk in</button>
-              {/if}
-            </h4>
-            {#if r.members.length > 0}
-              <ul>
-                {#each r.members.slice(page * LIST_PAGE_SIZE, (page + 1) * LIST_PAGE_SIZE) as k (k.id)}
-                  <li use:rowMenu class="lrow" data-kid-id={k.id} oncontextmenu={(e) => kidMenu(e, k)}>
-                    <button
-                      class="lmain"
-                      aria-label="{k.detention ? 'Release' : 'Open'} {kidAriaLabel(k, now() ? relTime(k.lastActiveAt) : '')}"
-                      onclick={() => void open(k)}
-                      onfocus={() => void showIn3d(k)}
-                    >
-                      <i class="dot" data-pose={k.detention ? 'bench' : k.pose}></i>
-                      <ProviderIcon provider={k.provider} size={12} />
-                      <span class="ellipsis t">{k.title}</span>
-                      {#if k.background}<span class="bg-tag">back row</span>{/if}
-                      {#if k.detention}<span class="bg-tag">detention</span>{/if}
-                      <span class="st">{k.stateLabel}</span>
-                    </button>
-                    <button class="icon-btn" aria-label="More actions for {k.title}" title="More actions for {k.title}" aria-haspopup="menu" onclick={(e) => kidMenu(e, k)}>
-                      <Icon name="more" size={12} />
-                    </button>
-                  </li>
-                {/each}
-              </ul>
-            {/if}
-            {#if lastPage > 0}
-              <nav class="member-pages" aria-label="Sessions in classroom {r.name}">
-                <button class="btn small" aria-label="Previous sessions in {r.name}" disabled={page === 0} onclick={() => (memberPages[r.id] = page - 1)}>Previous</button>
-                <span aria-live="polite">{page * LIST_PAGE_SIZE + 1}–{Math.min((page + 1) * LIST_PAGE_SIZE, r.members.length)} of {r.members.length}</span>
-                <button class="btn small" aria-label="Next sessions in {r.name}" disabled={page === lastPage} onclick={() => (memberPages[r.id] = page + 1)}>Next</button>
-              </nav>
-            {/if}
-            {#if r.overflow > 0}<p class="more">{r.overflow} not seated in 3D</p>{/if}
-          </section>
-        {/if}
-      {/each}
-    </div>
+    <SchoolList {mode} {empty} {school} {queue} {handle} bind:memberPages {open} {goTo} {kidMenu} {showIn3d} />
   {/if}
 </div>
 
@@ -926,51 +693,6 @@
     gap: 6px;
     height: 100%;
     min-height: 0;
-  }
-  .bar {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex: none;
-    min-width: 0;
-  }
-  .crumbs {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    flex: 1;
-    min-width: 0;
-    color: var(--text-dim);
-    font-size: var(--fs-s);
-  }
-  .crumb {
-    min-width: 0;
-    max-width: 220px;
-  }
-  .crumb.link {
-    background: none;
-    border: 0;
-    padding: 2px 4px;
-    border-radius: var(--radius-s);
-    color: var(--accent-text);
-    cursor: pointer;
-    font: inherit;
-  }
-  .crumb.link:hover {
-    background: var(--surface-2);
-  }
-  span.crumb {
-    color: var(--text);
-    font-weight: 600;
-  }
-  .sum {
-    flex: 1;
-    min-width: 0;
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
   .note {
     display: flex;
@@ -1003,8 +725,7 @@
     pointer-events: none;
     overflow: hidden;
   }
-  .bubble,
-  .hover-tag {
+  .bubble {
     position: absolute;
     top: 0;
     left: 0; /* ui-guards: allow — origin of projected screen coordinates, not layout */
@@ -1036,171 +757,6 @@
       animation: none;
     }
   }
-  .hover-tag {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    padding: 4px 8px;
-    border-radius: var(--radius-s);
-    background: var(--surface);
-    border: 1px solid var(--border);
-    box-shadow: var(--shadow-xs);
-    max-width: 260px;
-  }
-  .hover-tag:empty {
-    display: none;
-  }
-  .hover-tag b {
-    font-size: var(--fs-s);
-    font-weight: 600;
-    color: var(--text);
-    max-width: 240px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  .hover-tag small {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-  }
-  .hover-tag.wide {
-    max-width: min(460px, 90%);
-    align-items: stretch;
-  }
-  .hover-tag.wide b {
-    max-width: none;
-  }
-  /* The zoom lens on a kid's monitor: its last terminal rows as real text. */
-  .peek {
-    margin: 4px 0 0;
-    padding: 6px 8px;
-    border-radius: var(--radius-s);
-    background: var(--term-bg);
-    border: 1px solid var(--border);
-    color: var(--text);
-    font-family: var(--font-mono);
-    font-size: var(--fs-xs);
-    line-height: 1.35;
-    white-space: pre;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  .queue {
-    position: absolute;
-    inset-inline-start: 8px;
-    top: 8px;
-    width: min(280px, calc(100% - 16px));
-    max-height: calc(100% - 56px);
-    overflow-y: auto;
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    padding: 4px;
-    border-radius: var(--radius-m);
-    background: var(--surface);
-    border: 1px solid var(--warning);
-    box-shadow: var(--shadow-card);
-  }
-  .queue.end {
-    inset-inline-start: auto;
-    inset-inline-end: 8px;
-  }
-  .queue ul {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-  }
-  .queue-head {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 4px 6px;
-    border: 0;
-    border-radius: var(--radius-s);
-    background: var(--warning-soft);
-    color: var(--text);
-    font: inherit;
-    font-size: var(--fs-s);
-    font-weight: 600;
-    cursor: pointer;
-  }
-  .queue-head span {
-    flex: 1;
-    text-align: start;
-  }
-  .qrow {
-    display: flex;
-    align-items: center;
-    gap: 2px;
-  }
-  .qmain {
-    flex: 1;
-    min-width: 0;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 4px 6px;
-    border: 0;
-    border-radius: var(--radius-s);
-    background: none;
-    color: var(--text);
-    font: inherit;
-    font-size: var(--fs-s);
-    text-align: start;
-    cursor: pointer;
-  }
-  .qmain:hover,
-  .jump:hover {
-    background: var(--surface-2);
-  }
-  .qmain small {
-    flex: none;
-    max-width: 40%;
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-  }
-  .qrow.err .qt {
-    color: var(--danger);
-  }
-  .qt {
-    flex: 1;
-    min-width: 0;
-  }
-  .qmore {
-    margin: 2px 6px 4px;
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-  }
-  .jump {
-    position: absolute;
-    inset-inline-start: 8px;
-    top: 8px;
-    max-width: min(320px, calc(100% - 16px));
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 6px 10px;
-    border-radius: var(--radius-m);
-    background: var(--surface);
-    border: 1px solid var(--border);
-    box-shadow: var(--shadow-card);
-    color: var(--text);
-    font: inherit;
-    font-size: var(--fs-s);
-    font-weight: 600;
-    cursor: pointer;
-  }
-  .jump small {
-    font-weight: 400;
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    white-space: nowrap;
-  }
-  .queue-head:focus-visible,
-  .qmain:focus-visible,
-  .jump:focus-visible {
-    outline: 2px solid var(--accent-text);
-    outline-offset: -2px;
-  }
   .hint {
     position: absolute;
     inset-inline-start: 8px;
@@ -1217,47 +773,6 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-  .kid-card {
-    position: absolute;
-    inset-inline-end: 8px;
-    top: 8px;
-    width: min(320px, calc(100% - 16px));
-    max-height: calc(100% - 16px);
-    overflow-y: auto;
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    padding: 10px;
-    border-radius: var(--radius-m);
-    background: var(--surface);
-    border: 1px solid var(--border);
-    box-shadow: var(--shadow-card);
-  }
-  .card-head {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    min-width: 0;
-  }
-  .card-head b {
-    flex: 1;
-    min-width: 0;
-    font-size: var(--fs-m);
-  }
-  .card-line {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-  }
-  .card-line.needs {
-    color: var(--warning);
-    font-weight: 600;
-  }
-  .card-actions {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-    margin-top: 4px;
   }
   .scene-state {
     position: absolute;
@@ -1277,128 +792,5 @@
   }
   .empty-over :global(*) {
     pointer-events: auto;
-  }
-  .list {
-    padding-inline: 4px;
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    overflow-y: auto;
-    min-height: 0;
-  }
-  /* Keep the plain action path available to screen readers, and reveal its
-     context as soon as any keyboard control receives focus. */
-  .list.sr-only:focus-within {
-    position: static;
-    width: auto;
-    height: auto;
-    flex: 0 1 45%;
-    min-block-size: 100px;
-    max-block-size: 45%;
-    margin: 0;
-    padding: 6px;
-    overflow: auto;
-    clip: auto;
-    clip-path: none;
-    white-space: normal;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    background: var(--surface);
-  }
-  .member-pages {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 8px;
-    padding-block: 6px;
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-  }
-  .lroom-head {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    margin: 0 0 4px;
-    font-size: var(--fs-s);
-  }
-  .lroom-head small {
-    flex: 1;
-    color: var(--text-dim);
-    font-weight: 400;
-    font-size: var(--fs-xs);
-  }
-  .cur {
-    font-size: var(--fs-xs);
-    color: var(--accent-text);
-  }
-  .lroom ul {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-  }
-  .lrow {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-  }
-  .lmain {
-    flex: 1;
-    min-width: 0;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 4px 6px;
-    border: 0;
-    background: none;
-    border-radius: var(--radius-s);
-    color: var(--text);
-    font: inherit;
-    font-size: var(--fs-s);
-    text-align: start;
-    cursor: pointer;
-  }
-  .lmain:hover {
-    background: var(--surface-2);
-  }
-  .t {
-    flex: 1;
-    min-width: 0;
-  }
-  .st,
-  .bg-tag,
-  .more {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-  }
-  .more {
-    margin: 2px 6px;
-  }
-  .dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    flex: none;
-    background: var(--text-dim);
-  }
-  .dot[data-pose='working'] {
-    background: var(--success);
-  }
-  .dot[data-pose='needs-you'] {
-    background: var(--warning);
-  }
-  .dot[data-pose='error'] {
-    background: var(--danger);
-  }
-  .dot[data-pose='done'] {
-    background: var(--info);
-  }
-  .dot[data-pose='away'],
-  .dot[data-pose='bench'] {
-    background: var(--border-strong);
-  }
-  .ellipsis {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
 </style>

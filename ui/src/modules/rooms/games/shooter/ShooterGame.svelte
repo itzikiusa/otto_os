@@ -3,21 +3,24 @@
   import LoadState from '../../../../lib/components/LoadState.svelte';
   import {
     aliveCount, createMatch, DOWN_HP, heldItem, idleShooterInput, nearestClosedChest, nearestDowned, nearestDrop, nearestWeaponLoot, PICKAXE_KEY, PICKAXE_SLOT, REVIVE_RANGE, REVIVE_TIME,
-    shooterResults, SLOTS, stepMatch, STORM, TAC_TIME, teamsAlive,
+    shooterResults, SLOTS, stepMatch, STORM, teamsAlive,
     type Fighter, type Held, type ShooterEvent, type ShooterInput, type ShooterLink, type ShooterSetup, type ShooterState,
   } from './sim';
-  import { mapFor, HALF, waterLevel } from './map';
+  import { mapFor } from './map';
   import {
-    AMMO_KINDS, ATTACHMENTS, BUILD_COST, CLASSES, CONSUMABLES, canUse, isConsumable, isWeapon, itemName, MATERIAL_COLOURS, MATERIAL_NAMES, NADES, RARITY_COLOURS, RARITY_NAMES, STREAKS, weaponStats, WEAPONS,
+    AMMO_KINDS, ATTACHMENTS, BUILD_COST, CLASSES, CONSUMABLES, canUse, isConsumable, isWeapon, itemName, MATERIAL_NAMES, RARITY_COLOURS, RARITY_NAMES, STREAKS, weaponStats, WEAPONS,
   } from './weapons';
   import { BUILD_KIND_NAMES } from './builds';
   import { fighterName, modeName as modeTitle, SHOOTER_MAPS, TEAM_MODES, teamColour, type FighterId } from './catalog';
   import { isRoyale, POINT_NAMES, respawns, WAVE_BOARD, WAVE_HELI, WAVE_ON, WAVE_PRE } from './modes/index';
-  import { buyWallsFor, LZ_R, nearestWall } from './zombies';
+  import { buyWallsFor, nearestWall } from './zombies';
   import { InputState } from '../common/input';
   import { GameAudio } from '../common/audio';
   import { clamp, lerp, ordinal, wrapAngle } from '../common/math';
   import type { LocalBuild, ShooterRenderer } from './render';
+  import { drawMap, hex, type MapCache } from './hud/minimap';
+  import TeamPanel from './hud/TeamPanel.svelte';
+  import Vitals from './hud/Vitals.svelte';
 
   interface Props {
     setup: ShooterSetup | null; selfSlot: number; fighter: FighterId; link?: ShooterLink;
@@ -59,7 +62,6 @@
   let slotWanted = 0;
   const numbers: { x: number; y: number; z: number; text: string; color: string; t: number }[] = [];
   const GUN_ICON: Record<string, string> = { pistol: 'gun-pistol', smg: 'gun-smg', rifle: 'gun-rifle', shotgun: 'gun-shotgun', sniper: 'gun-sniper', rocket: 'gun-rocket' };
-  const hex = (n: number) => `#${n.toString(16).padStart(6, '0')}`;
   const KILL_HOW = ['Sidearm', 'Buzz SMG', 'Assault Blaster', 'Pump Scatter', 'Longshot Rail', 'Boom Tube', 'the storm', 'Pickaxe', 'bled out', 'Frag', 'Molotov', 'Airstrike', 'Attack Drone', 'the infected', 'Acid'];
   /** Double-tapped Shift: tactical sprint while it stays held. */
   let tacOn = false, lastShift = 0;
@@ -265,104 +267,7 @@
     }
   }
 
-  let mapImage: HTMLCanvasElement | null = null;
-  function islandImage(state: ShooterState): HTMLCanvasElement {
-    if (mapImage) return mapImage;
-    const map = mapFor(state.map);
-    const c = document.createElement('canvas');
-    c.width = c.height = map.size;
-    const g = c.getContext('2d')!;
-    const img = g.createImageData(map.size, map.size);
-    const step = (HALF * 2) / (map.size - 1);
-    for (let i = 0; i < map.size * map.size; i++) {
-      const h = map.heights[i], x = -HALF + (i % map.size) * step, z = -HALF + Math.floor(i / map.size) * step;
-      let r: number, gg: number, b: number;
-      if (h < waterLevel(map, x, z)) { r = 46; gg = 128; b = 196; }
-      else if (map.theme === 'isle') { if (h < 1.6) { r = 232; gg = 211; b = 154; } else { const k = Math.min(1, h / 18); r = 110 - k * 30; gg = 185 - k * 40; b = 80 - k * 20; } }
-      else { const k = Math.min(1, h / 32); r = 215 - k * 40; gg = 150 - k * 50; b = 92 - k * 30; }
-      img.data[i * 4] = r; img.data[i * 4 + 1] = gg; img.data[i * 4 + 2] = b; img.data[i * 4 + 3] = 255;
-    }
-    g.putImageData(img, 0, 0);
-    g.fillStyle = 'rgba(60,60,70,0.85)';
-    for (const b of map.boxes) { const s = map.size / (HALF * 2); g.fillRect((b.minX + HALF) * s, (b.minZ + HALF) * s, Math.max(1, (b.maxX - b.minX) * s), Math.max(1, (b.maxZ - b.minZ) * s)); }
-    mapImage = c;
-    return c;
-  }
-  /** Island map with the storm, flight path, POIs, structures, supply drops, launch pads and teammates; `big` is the full-screen view. */
-  function drawMap(c: HTMLCanvasElement | undefined, state: ShooterState, me: number, big: boolean) {
-    if (!c) return;
-    const g = c.getContext('2d'); if (!g) return;
-    const w = c.width, s = w / (HALF * 2);
-    // Mirror X so the map reads like the third-person view (+X is to the left facing +Z).
-    const mx = (x: number) => w - (x + HALF) * s, mz = (z: number) => (z + HALF) * s;
-    g.save();
-    g.clearRect(0, 0, w, w);
-    g.translate(w, 0); g.scale(-1, 1); g.drawImage(islandImage(state), 0, 0, w, w); g.restore();
-    g.fillStyle = 'rgba(255,170,60,0.9)';
-    for (const b of state.builds) { const a = b.aabb; g.fillRect(mx(a.maxX), mz(a.minZ), Math.max(1.5, (a.maxX - a.minX) * s), Math.max(1.5, (a.maxZ - a.minZ) * s)); }
-    const st = state.storm;
-    g.fillStyle = 'rgba(120,60,200,0.35)';
-    g.beginPath(); g.rect(0, 0, w, w); g.arc(mx(st.cx), mz(st.cz), Math.max(0, st.r) * s, 0, Math.PI * 2, true); g.fill();
-    g.strokeStyle = '#ffffff'; g.lineWidth = big ? 3 : 2; g.setLineDash([5, 4]);
-    g.beginPath(); g.arc(mx(st.toX), mz(st.toZ), Math.max(0, st.toR) * s, 0, Math.PI * 2); g.stroke(); g.setLineDash([]);
-    if (state.phase === 'bus') { g.strokeStyle = 'rgba(255,255,255,0.8)'; g.lineWidth = 3; g.beginPath(); g.moveTo(mx(state.bus.ax), mz(state.bus.az)); g.lineTo(mx(state.bus.bx), mz(state.bus.bz)); g.stroke(); }
-    g.font = big ? '700 15px system-ui, sans-serif' : '600 10px system-ui, sans-serif'; g.textAlign = 'center';
-    for (const poi of mapFor(state.map).pois) {
-      g.lineWidth = 3; g.strokeStyle = 'rgba(0,0,0,0.55)'; g.strokeText(poi.name, mx(poi.x), mz(poi.z));
-      g.fillStyle = 'rgba(255,255,255,0.95)'; g.fillText(poi.name, mx(poi.x), mz(poi.z));
-    }
-    for (const d of state.drops) {
-      g.fillStyle = '#4aa8ff'; g.strokeStyle = '#ffffff'; g.lineWidth = 1.5;
-      const r = big ? 7 : 4.5; g.fillRect(mx(d.x) - r, mz(d.z) - r, r * 2, r * 2); g.strokeRect(mx(d.x) - r, mz(d.z) - r, r * 2, r * 2);
-    }
-    g.fillStyle = 'rgba(98,224,255,0.95)';
-    for (const pad of state.pads) { g.beginPath(); g.arc(mx(pad.x), mz(pad.z), big ? 4 : 2.5, 0, Math.PI * 2); g.fill(); }
-    const self = state.players[me];
-    // Domination points (owner colour, letter), Zombies' buy-walls and landing zone.
-    state.obj.points.forEach((pt, i) => {
-      g.fillStyle = pt.own >= 0 ? hex(teamColour(pt.own)) : 'rgba(255,255,255,0.85)'; g.strokeStyle = '#000'; g.lineWidth = 1.5;
-      g.beginPath(); g.arc(mx(pt.x), mz(pt.z), big ? 11 : 7, 0, Math.PI * 2); g.fill(); g.stroke();
-      g.fillStyle = '#000'; g.fillText(POINT_NAMES[i], mx(pt.x), mz(pt.z) + (big ? 5 : 3.5));
-    });
-    if (state.mode === 'zombies') {
-      g.fillStyle = '#ffc23a';
-      for (const w of buyWallsFor(mapFor(state.map))) g.fillRect(mx(w.x) - 2.5, mz(w.z) - 2.5, 5, 5);
-      const o = state.obj;
-      if (o.wave === WAVE_HELI || o.wave === WAVE_BOARD || o.round >= o.lastRound - 1) {
-        g.strokeStyle = '#62e0ff'; g.lineWidth = big ? 3 : 2;
-        g.beginPath(); g.arc(mx(o.lzX), mz(o.lzZ), Math.max(4, LZ_R * s), 0, Math.PI * 2); g.stroke();
-        g.fillStyle = '#62e0ff'; g.fillText('LZ', mx(o.lzX), mz(o.lzZ) + 4);
-      }
-    }
-    // The infected (Zombies: every one; Apocalypse: those close by).
-    g.fillStyle = '#8fd13a';
-    for (const z of state.infected) { if (state.mode === 'apoc' && self && Math.hypot(z.x - self.x, z.z - self.z) > 70) continue; g.fillRect(mx(z.x) - 1.5, mz(z.z) - 1.5, 3, 3); }
-    // Enemies on radar: the team's UAV shows everyone; unsuppressed fire pings the shooter for a moment.
-    const uav = !!self && (state.uav[self.team] ?? 0) > 0;
-    g.fillStyle = '#ff4a3a'; g.strokeStyle = '#fff'; g.lineWidth = 1;
-    for (const q of state.players) {
-      if (q.mode === 'dead' || q.mode === 'bus' || !self || q.team === self.team || (!uav && q.spotted <= 0)) continue;
-      g.beginPath(); g.arc(mx(q.x), mz(q.z), big ? 5 : 3.2, 0, Math.PI * 2); g.fill(); g.stroke();
-    }
-    // Teammates in the team colour (team modes), other people in yellow (solo).
-    for (const p of state.players) {
-      if (p.mode === 'dead' || p.id === me) continue;
-      const mate = state.squad > 1 && p.team === self?.team;
-      if (!mate && (state.squad > 1 || !p.human)) continue;
-      g.fillStyle = mate ? hex(teamColour(p.team)) : '#ffd23f'; g.strokeStyle = p.mode === 'down' ? '#ff5a4a' : '#000'; g.lineWidth = p.mode === 'down' ? 2.5 : 1;
-      g.beginPath(); g.arc(mx(p.x), mz(p.z), big ? 6 : 4, 0, Math.PI * 2); g.fill(); g.stroke();
-    }
-    const p = self;
-    if (p && p.mode !== 'dead') {
-      const k = big ? 1.6 : 1;
-      g.save(); g.translate(mx(p.x), mz(p.z)); g.rotate(cam.yaw); g.scale(k, k);
-      g.fillStyle = '#ffffff'; g.strokeStyle = '#000'; g.lineWidth = 1.5;
-      g.beginPath(); g.moveTo(0, 7); g.lineTo(5, -5); g.lineTo(0, -2); g.lineTo(-5, -5); g.closePath(); g.fill(); g.stroke();
-      g.restore();
-      // Outside the next circle: a line to safety.
-      if (Math.hypot(p.x - st.toX, p.z - st.toZ) > st.toR) { g.strokeStyle = 'rgba(255,255,255,0.7)'; g.lineWidth = 2; g.beginPath(); g.moveTo(mx(p.x), mz(p.z)); g.lineTo(mx(st.toX), mz(st.toZ)); g.stroke(); }
-    }
-  }
+  const mapCache: MapCache = { image: null };
   function drawOverlay(now: number) {
     const c = overlay; if (!c || !renderer) return;
     const g = c.getContext('2d'); if (!g) return;
@@ -523,8 +428,8 @@
               : drop >= 0 ? (p.interact > 0 ? 'Opening supply drop…' : 'Hold E — open supply drop')
                 : w?.weapon ? `E — pick up ${RARITY_NAMES[w.rarity]} ${itemName(w.weapon)}${isConsumable(w.weapon) ? ` ×${w.amount}` : ''}` : p.swimming ? 'Swimming — head for the shore' : '';
         } else prompt = p?.mode === 'bus' ? 'Press Space to drop' : '';
-        drawMap(minimap, state, me, false);
-        if (showMap) drawMap(bigmap, state, me, true);
+        drawMap(minimap, state, me, false, cam.yaw, mapCache);
+        if (showMap) drawMap(bigmap, state, me, true, cam.yaw, mapCache);
         lastHud = now;
       }
       if (state.phase === 'done' && !finished) { finished = true; input?.release(); onfinish?.(state); }
@@ -535,7 +440,7 @@
       disposed = true; abort.abort(); cancelAnimationFrame(frame);
       input?.dispose(); input = undefined;
       renderer?.dispose(); renderer = undefined;
-      mapImage = null;
+      mapCache.image = null;
       delete (stage as HTMLDivElement & { __ottoGame?: unknown }).__ottoGame;
     };
   }
@@ -640,16 +545,7 @@
       <ol class="br-feed" aria-live="polite">{#each feed as f (f.id)}<li class:mine={f.mine}>{f.text}</li>{/each}</ol>
     </div>
     {#if mates.length}
-      <ul class="br-team" aria-label={`Your ${modeName.toLowerCase().replace(/s$/, '')} team`} style:--team={hex(teamColour(me.team))}>
-        {#each mates as m (m.id)}
-          <li class:down={m.mode === 'down'} class:out={m.mode === 'dead'}>
-            <i aria-hidden="true"></i><span>{m.name}</span>
-            {#if m.mode === 'dead'}<em>Out</em>
-            {:else if m.mode === 'down'}<em>{m.revive > 0 ? 'Reviving…' : 'Knocked'}</em><b class="bleed" role="meter" aria-label={`${m.name} bleeding out`} aria-valuemin={0} aria-valuemax={DOWN_HP} aria-valuenow={Math.round(m.hp)}><span style:width={`${(m.hp / DOWN_HP) * 100}%`}></span></b>
-            {:else}<b role="meter" aria-label={`${m.name} health and shield`} aria-valuemin={0} aria-valuemax={200} aria-valuenow={Math.round(m.hp + m.shield)}><span class="hp" style:width={`${m.hp / 2}%`}></span><span class="sh" style:width={`${m.shield / 2}%`}></span></b>{/if}
-          </li>
-        {/each}
-      </ul>
+      <TeamPanel {mates} team={me.team} {modeName} />
     {/if}
     {#if showMap && hud.phase !== 'done'}
       <div class="br-bigmap"><canvas bind:this={bigmap} width="640" height="640" aria-label="Full island map"></canvas><p>{mapFor(hud.map).pois.length} landmarks · white ring: next safe zone · orange: structures · M to close</p></div>
@@ -672,20 +568,7 @@
       </div>
     {/if}
     {#if me.mode !== 'dead'}
-      <div class="br-vitals" aria-label="Health and shield">
-        <div class="br-bar shield" role="meter" aria-label="Shield" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(me.shield)}><span style:width={`${me.shield}%`}></span><b><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2 4 5v6c0 5 3.4 9.4 8 11 4.6-1.6 8-6 8-11V5z" /></svg>Shield {Math.round(me.shield)}</b></div>
-        <div class="br-bar health" role="meter" aria-label="Health" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(me.hp)}><span style:width={`${me.hp}%`}></span><b><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 3h4v7h7v4h-7v7h-4v-7H3v-4h7z" /></svg>Health {Math.round(me.hp)}</b></div>
-        <div class="br-gear" aria-label="Grenades and killstreaks">
-          <span class:empty={me.lethalN === 0} title={`${NADES[me.lethal].name} (G)`}><kbd>G</kbd>{NADES[me.lethal].name} <b>{me.lethalN}</b></span>
-          <span class:empty={me.tacN === 0} title={`${NADES[me.tacKind].name} (T)`}><kbd>T</kbd>{NADES[me.tacKind].name} <b>{me.tacN}</b></span>
-          {#each STREAKS as st, k (st.id)}<span class="br-streak" class:ready={(me.ready & (1 << k)) > 0} title={(me.ready & (1 << k)) > 0 ? `${st.name} ready — press X` : `${st.name}: ${mode === 'zombies' ? st.kills * 4 : st.kills} eliminations in a row`}>{#if (me.ready & (1 << k)) > 0}<kbd>X</kbd>{/if}{st.name}{#if !((me.ready & (1 << k)) > 0)}<small> {Math.min(Math.floor(me.streak), st.kills)}/{st.kills}</small>{/if}</span>{/each}
-          {#if uavUp}<span class="br-streak ready" title="Your team’s UAV shows every enemy on the map">UAV up</span>{/if}
-          {#if me.tactical || me.tacT < TAC_TIME}<span class="br-tac" title="Tactical sprint (double-tap Shift)"><i style:width={`${(me.tacT / TAC_TIME) * 100}%`}></i></span>{/if}
-        </div>
-        <div class="br-mats" aria-label="Building materials">
-          {#each MATERIAL_NAMES as name, m (name)}<span class:active={building && m === material} style:--mat={hex(MATERIAL_COLOURS[m])} title={name}><i aria-hidden="true"></i>{name} <b>{me.mats[m]}</b></span>{/each}
-        </div>
-      </div>
+      <Vitals {me} {mode} {uavUp} {building} {material} />
       {#if building}
         <div class="br-buildbar" aria-label="Build mode">
           {#each BUILD_KIND_NAMES as name, k (name)}<button class="btn small" class:active={k === piece} aria-pressed={k === piece} onclick={() => { piece = k; renderer?.view.canvas.focus(); }}><small>{k + 1}</small>{name}</button>{/each}
@@ -776,7 +659,7 @@
   .br-cover h2.victory { color: var(--warning); font-size: clamp(28px, 5vw, 52px); letter-spacing: -0.01em; }
   .br-cover p { margin: 0; max-width: 600px; color: var(--text-dim); line-height: 1.6; }
   .br-top { position: absolute; inset-block-start: 14px; inset-inline: 14px; display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; pointer-events: none; }
-  .br-stats, .br-tools, .br-minimap, .br-vitals, .br-slot, .br-spectate, .br-prompt, .br-buildbar { background: var(--scrim-media); color: var(--on-scrim); border: 1px solid color-mix(in srgb, var(--on-scrim) 18%, transparent); border-radius: var(--radius-m); }
+  .br-stats, .br-tools, .br-minimap, .br-slot, .br-spectate, .br-prompt, .br-buildbar { background: var(--scrim-media); color: var(--on-scrim); border: 1px solid color-mix(in srgb, var(--on-scrim) 18%, transparent); border-radius: var(--radius-m); }
   .br-stats { display: flex; gap: 16px; padding: 8px 14px; font-size: var(--fs-s); align-items: baseline; }
   .br-stats b { font-size: var(--fs-l); font-variant-numeric: tabular-nums; }
   .br-stats small { font-size: var(--fs-xs); opacity: .8; }
@@ -805,17 +688,6 @@
   .br-reload span { display: block; height: 100%; border-radius: var(--radius-s); background: var(--on-scrim); }
   .br-reload.use span { background: var(--success); }
   .br-reload em { position: absolute; inset-block-start: 8px; inset-inline: 0; text-align: center; font-size: var(--fs-s); font-style: normal; color: var(--on-scrim); white-space: nowrap; }
-  .br-vitals { position: absolute; inset-block-end: 18px; inset-inline-start: 18px; padding: 10px; width: min(300px, 40vw); display: grid; gap: 6px; pointer-events: none; }
-  .br-bar { position: relative; height: 22px; border-radius: var(--radius-s); background: color-mix(in srgb, var(--on-scrim) 15%, transparent); overflow: hidden; }
-  .br-bar span { position: absolute; inset-block: 0; inset-inline-start: 0; }
-  .br-bar.health span { background: var(--success); }
-  .br-bar.shield span { background: var(--info); }
-  .br-bar b { position: relative; display: inline-flex; align-items: center; gap: 6px; padding-inline-start: 8px; font-size: var(--fs-m); font-weight: 600; line-height: 22px; font-variant-numeric: tabular-nums; text-shadow: 0 1px 2px var(--scrim-media); }
-  .br-bar svg { width: 14px; height: 14px; fill: var(--on-scrim); }
-  .br-mats { display: flex; flex-wrap: wrap; gap: 4px; font-size: var(--fs-s); --mat: var(--on-scrim); }
-  .br-mats span { display: inline-flex; align-items: center; gap: 4px; padding: 2px 6px; border-radius: var(--radius-s); background: color-mix(in srgb, var(--on-scrim) 10%, transparent); font-variant-numeric: tabular-nums; }
-  .br-mats span.active { box-shadow: inset 0 0 0 2px var(--mat); }
-  .br-mats i { width: 10px; height: 10px; border-radius: 2px; background: var(--mat); }
   .br-buildbar { position: absolute; inset-block-end: 132px; inset-inline-start: 50%; transform: translateX(-50%); display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 6px; padding: 8px 10px; max-width: min(680px, 92vw); pointer-events: auto; }
   .br-buildbar :global(.btn) { background: color-mix(in srgb, var(--on-scrim) 14%, transparent); color: var(--on-scrim); border-color: color-mix(in srgb, var(--on-scrim) 25%, transparent); gap: 6px; }
   .br-buildbar :global(.btn.active) { box-shadow: inset 0 0 0 2px var(--info); }
@@ -859,17 +731,6 @@
   .br-results tr.me td { background: var(--accent-soft); font-weight: 600; }
   .br-results tr.mate td:first-child { box-shadow: inset 3px 0 0 var(--accent-solid); }
   .br-swatch { width: 10px; height: 10px; border-radius: 50%; flex: none; }
-  /* Team panel: one row per teammate (health + shield, or the bleed-out bar when knocked). */
-  .br-team { position: absolute; inset-block-start: 64px; inset-inline-start: 14px; margin: 0; padding: 6px; list-style: none; display: grid; gap: 4px; width: 210px; background: var(--scrim-media); color: var(--on-scrim); border-radius: var(--radius-m); border: 1px solid color-mix(in srgb, var(--on-scrim) 18%, transparent); pointer-events: none; font-size: var(--fs-s); }
-  .br-team li { display: grid; grid-template-columns: 10px 1fr auto; grid-template-rows: auto 5px; column-gap: 6px; align-items: center; }
-  .br-team li i { width: 10px; height: 10px; border-radius: 50%; background: var(--team); }
-  .br-team li span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .br-team li em { font-style: normal; font-weight: 600; }
-  .br-team li.down em { color: var(--danger); }
-  .br-team li.out { opacity: .55; }
-  .br-team b { grid-column: 2 / -1; grid-row: 2; display: flex; height: 5px; border-radius: 999px; overflow: hidden; background: color-mix(in srgb, var(--on-scrim) 15%, transparent); }
-  .br-team b .hp { background: var(--success); } .br-team b .sh { background: var(--info); }
-  .br-team b.bleed span { background: var(--danger); }
   .br-knocked { position: absolute; inset-block-start: 30%; inset-inline: 12px; margin-inline: auto; max-width: 360px; text-align: center; color: var(--on-scrim); pointer-events: none; }
   .br-knocked h2 { margin: 0; color: var(--danger); font-size: var(--fs-2xl); text-shadow: 0 2px 8px var(--scrim-media); }
   .br-knocked p { margin: 4px 0 8px; font-size: var(--fs-m); text-shadow: 0 1px 4px var(--scrim-media); }
@@ -901,14 +762,6 @@
   .br-hitmark i { position: absolute; width: 14px; height: 2px; inset-block-start: -1px; inset-inline-start: -8px; background: var(--on-scrim); box-shadow: 0 0 2px var(--scrim-media); }
   .br-hitmark i:first-child { transform: rotate(45deg) translateX(10px); } .br-hitmark i:last-child { transform: rotate(-45deg) translateX(10px); }
   .br-hitmark.kill i { background: var(--danger); width: 18px; }
-  /* Grenades, killstreaks and tactical-sprint stamina under the vitals. */
-  .br-gear { display: flex; flex-wrap: wrap; gap: 4px; font-size: var(--fs-s); }
-  .br-gear span { display: inline-flex; align-items: center; gap: 4px; padding: 2px 6px; border-radius: var(--radius-s); background: color-mix(in srgb, var(--on-scrim) 10%, transparent); font-variant-numeric: tabular-nums; }
-  .br-gear span.empty { opacity: .5; }
-  .br-gear kbd { font: inherit; font-size: var(--fs-xs); padding: 0 4px; border-radius: var(--radius-s); background: color-mix(in srgb, var(--on-scrim) 22%, transparent); }
-  .br-gear .br-streak.ready { background: color-mix(in srgb, var(--warning) 45%, transparent); font-weight: 600; }
-  .br-gear .br-tac { width: 60px; height: 6px; padding: 0; overflow: hidden; }
-  .br-gear .br-tac i { display: block; height: 100%; background: var(--warning); }
   /* Death recap and the respawn class picker. */
   .br-recap { position: absolute; inset-block-start: 22%; inset-inline: 12px; margin-inline: auto; max-width: 420px; padding: 12px 16px; text-align: center; background: var(--scrim-media); color: var(--on-scrim); border-radius: var(--radius-m); border: 1px solid color-mix(in srgb, var(--danger) 60%, transparent); pointer-events: none; }
   .br-recap h3 { margin: 0 0 4px; font-size: var(--fs-xl); color: var(--danger); }
@@ -922,7 +775,7 @@
   .br-classes :global(.btn[aria-pressed='true']) { box-shadow: inset 0 0 0 2px var(--warning); }
   .br-class-note { font-size: var(--fs-s) !important; opacity: .85; }
   .br-touch { display: none; }
-  @media (max-width: 640px) { .br-objective-note { inset-inline: 12px; inset-block-start: 150px; } .br-objective { inset-block-start: 100px; } .br-team { width: 150px; inset-block-start: 96px; } .br-mapbox { width: 130px; } .br-minimap { width: 130px; height: 130px; } .br-tools { margin-inline-end: 144px; flex-wrap: wrap; } .br-inventory { grid-template-columns: repeat(6, 50px); } .br-slot { height: 54px; } .br-slot img { width: 40px; } .br-stats { flex-wrap: wrap; gap: 8px; } .br-buildbar { inset-block-end: 210px; } }
+  @media (max-width: 640px) { .br-objective-note { inset-inline: 12px; inset-block-start: 150px; } .br-objective { inset-block-start: 100px; } .br-mapbox { width: 130px; } .br-minimap { width: 130px; height: 130px; } .br-tools { margin-inline-end: 144px; flex-wrap: wrap; } .br-inventory { grid-template-columns: repeat(6, 50px); } .br-slot { height: 54px; } .br-slot img { width: 40px; } .br-stats { flex-wrap: wrap; gap: 8px; } .br-buildbar { inset-block-end: 210px; } }
   @media (pointer: coarse) {
     .br-touch { position: absolute; inset-inline: 10px; inset-block-end: 130px; display: flex; justify-content: space-between; align-items: flex-end; gap: 8px; }
     .br-touch-move { display: grid; grid-template-columns: repeat(3, 48px); grid-template-rows: repeat(2, 48px); gap: 4px; }
