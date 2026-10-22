@@ -29,6 +29,7 @@
 //! Route (registered in modules.rs):
 //!   POST /api/v1/product/stories/{sid}/mockups/assist  (ws editor) → ProductAttachment
 
+use otto_agent_run::fence::extract_fenced;
 use std::time::Duration;
 
 use axum::extract::{Path, State};
@@ -429,21 +430,6 @@ async fn resolve_source(
         return src;
     }
     current.to_string()
-}
-
-/// Extract the contents of the first ```<lang> ... ``` fenced block.
-fn extract_fenced(raw: &str, lang: &str) -> Option<String> {
-    let open = format!("```{lang}");
-    let start = raw.find(&open)?;
-    let after = &raw[start + open.len()..];
-    let after = after.strip_prefix('\n').unwrap_or(after);
-    let end = after.find("```")?;
-    let body = after[..end].trim();
-    if body.is_empty() {
-        None
-    } else {
-        Some(body.to_string())
-    }
 }
 
 // ---------------------------------------------------------------------------

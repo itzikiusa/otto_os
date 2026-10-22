@@ -447,12 +447,7 @@ impl ClickhouseDriver {
                 ObjKind::Table
             };
             let fields = by_table.remove(&name).unwrap_or_default();
-            objects.push(ObjectSnap {
-                name,
-                kind,
-                fields,
-                fields_ready: true,
-            });
+            objects.push(ObjectSnap { name, kind, fields });
         }
 
         Some(SchemaSnapshot {

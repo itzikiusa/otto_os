@@ -92,6 +92,18 @@ pub fn uninstall(name: &str) -> io::Result<()> {
 // Core (dir-explicit, so the home/CODEX_HOME resolution stays out of tests)
 // ---------------------------------------------------------------------------
 
+/// Serializes every manifest read-modify-write (install / uninstall) in this
+/// process, so two concurrent requests on one skills dir can't lose an
+/// entry. One process-wide lock rather than `KeyedLocks<PathBuf>`: these are
+/// sync fns called straight from async handlers, and `KeyedLocks` is a tokio
+/// mutex (`blocking_lock` would panic there). Installs and uninstalls are
+/// rare, root-only operations, so per-dir granularity buys nothing.
+static MANIFEST_EDITS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn manifest_edit_guard() -> std::sync::MutexGuard<'static, ()> {
+    MANIFEST_EDITS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Install into explicit provider roots, preserving user-owned entries.
 /// Used by callers that need one stable set of roots for a bulk operation.
 pub fn install_into_dirs(dirs: &[PathBuf], name: &str, src: &Path) -> io::Result<Vec<PathBuf>> {
@@ -99,6 +111,7 @@ pub fn install_into_dirs(dirs: &[PathBuf], name: &str, src: &Path) -> io::Result
     // single path component before it is joined under the provider dirs.
     let name = otto_core::paths::safe_component(name)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "unsafe skill name"))?;
+    let _edit = manifest_edit_guard();
     let mut user_owned = Vec::new();
     for dir in dirs {
         let dest = dir.join(name);
@@ -111,7 +124,7 @@ pub fn install_into_dirs(dirs: &[PathBuf], name: &str, src: &Path) -> io::Result
         };
         let newly_created = existed.is_none();
         if let Some(meta) = existed {
-            let owned = merge::read_manifest(dir).iter().any(|n| n == name);
+            let owned = merge::read_manifest_checked(dir)?.iter().any(|n| n == name);
             if !owned || meta.file_type().is_symlink() || !meta.is_dir() {
                 user_owned.push(dir.clone());
                 continue; // the user's own skill of this name — never clobber it
@@ -121,7 +134,7 @@ pub fn install_into_dirs(dirs: &[PathBuf], name: &str, src: &Path) -> io::Result
         let result: io::Result<()> = (|| {
             copy_tree(src, &dest)?;
             // Record ownership only after a complete copy.
-            let mut owned = merge::read_manifest(dir);
+            let mut owned = merge::read_manifest_checked(dir)?;
             if !owned.iter().any(|n| n == name) {
                 owned.push(name.to_string());
                 owned.sort();
@@ -143,8 +156,9 @@ fn uninstall_from_dirs(dirs: &[PathBuf], name: &str) -> io::Result<()> {
     // Same gate as install: the name must be a single safe path component.
     let name = otto_core::paths::safe_component(name)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "unsafe skill name"))?;
+    let _edit = manifest_edit_guard();
     for dir in dirs {
-        let mut owned = merge::read_manifest(dir);
+        let mut owned = merge::read_manifest_checked(dir)?;
         if !owned.iter().any(|n| n == name) {
             continue; // not Otto-managed here — never clobber a user-authored skill
         }
@@ -216,6 +230,31 @@ mod tests {
         );
         assert!(!broken.join("grill").exists());
         assert!(merge::read_manifest(&mine).is_empty());
+    }
+
+    /// data-integrity-4-04: a malformed manifest is an error, never "all
+    /// user-owned" (skip) and never overwritten with a one-entry list.
+    #[test]
+    fn malformed_manifest_refuses_instead_of_disowning() {
+        let root = tempfile::tempdir().unwrap();
+        let src = src_skill(root.path());
+        let d = root.path().join("claude");
+        install_into_dirs(std::slice::from_ref(&d), "grill", &src).unwrap();
+        let other = root.path().join("src").join("other");
+        fs::create_dir_all(&other).unwrap();
+        fs::write(other.join("SKILL.md"), "# other\n").unwrap();
+        fs::write(d.join(".otto-managed.json"), "{\"skills\": [\"gri").unwrap();
+        let err = install_into_dirs(std::slice::from_ref(&d), "grill", &src).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(install_into_dirs(std::slice::from_ref(&d), "other", &other).is_err());
+        assert!(!d.join("other").exists(), "new tree cleaned up");
+        assert!(uninstall_from_dirs(std::slice::from_ref(&d), "grill").is_err());
+        assert!(d.join("grill/SKILL.md").is_file(), "nothing removed");
+        assert_eq!(
+            fs::read_to_string(d.join(".otto-managed.json")).unwrap(),
+            "{\"skills\": [\"gri",
+            "a malformed manifest is never rewritten"
+        );
     }
 
     /// A minimal multi-file source skill under `<root>/src/grill`.

@@ -14,7 +14,7 @@ const CANCEL_CHECK_BATCH: usize = 25;
 
 /// Run the summarizer over the reviewers' findings and persist the result:
 /// the summarizer live-state row (last element), the draft comments, and the
-/// promoted workflow findings (+ resolve_absent + proof pack).
+/// promoted workflow findings (+ resolve_absent_scoped + proof pack).
 ///
 /// Guard rails: a summarizer error falls back to the deterministic Rust-side
 /// summary, and — CRITICALLY — so does a summarizer reply that parses to ZERO
@@ -273,7 +273,7 @@ pub(crate) async fn summarize_and_persist(
     //    (the board + Proof Pack read these). The summarized comment is the
     //    PR-posting artifact; the Finding is the canonical workflow record. We
     //    also track seen fingerprints to drive the cross-run DETECTION lifecycle
-    //    (absent findings flip `state`→resolved via resolve_absent below — the
+    //    (absent findings flip `state`→resolved via resolve_absent_scoped below — the
     //    engine owns the `state` axis; the workflow `status` is untouched).
     tracing::info!(review = %review_id, "storing {} draft comments", parsed.len());
     // PR #0 is the local-review sentinel → dedup within the review, not across PRs.
@@ -424,7 +424,7 @@ pub(crate) async fn summarize_and_persist(
             }
             Err(e) => tracing::warn!(review = %review_id, "persist finding failed: {e}"),
         }
-        // Track for the cross-run detection lifecycle (resolve_absent below).
+        // Track for the cross-run detection lifecycle (resolve_absent_scoped below).
         seen_fingerprints.push(fp);
     }
 
@@ -491,7 +491,7 @@ pub(crate) async fn summarize_and_persist(
             )
             .await
         {
-            tracing::warn!(review = %review_id, "resolve_absent failed: {e}");
+            tracing::warn!(review = %review_id, "resolve_absent_scoped failed: {e}");
         }
     }
 

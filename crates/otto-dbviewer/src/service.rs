@@ -107,6 +107,22 @@ pub const READ_ONLY_PREFIX: &str = "read_only: ";
 /// agent's context.
 pub const MCP_MAX_ROWS: usize = 200;
 
+/// Server-side time limit of an agent's read-only query (`/db/mcp-query`),
+/// below the MCP bridge's own call budget (≥ 20 s): the engine stops the
+/// statement itself (MySQL `MAX_EXECUTION_TIME`, Postgres `statement_timeout`,
+/// ClickHouse `max_execution_time`, the Redis/Mongo client deadline) instead
+/// of running on after the bridge gave up — the inline MCP path has no cancel.
+pub const MCP_QUERY_TIMEOUT_MS: u64 = 15_000;
+
+/// The timeout an MCP read-only query runs with: the caller's, clamped to
+/// [`MCP_QUERY_TIMEOUT_MS`]; absent or `0` ("no limit") is the cap itself.
+pub fn mcp_query_timeout_ms(requested: Option<u64>) -> u64 {
+    match requested {
+        Some(ms) if ms > 0 => ms.min(MCP_QUERY_TIMEOUT_MS),
+        _ => MCP_QUERY_TIMEOUT_MS,
+    }
+}
+
 /// Recursively PII-mask a result's cells in place (via `otto_core::redact`) and
 /// flag it `masked`, including every later result set in a multi-statement
 /// batch's `more_results` — so an unmasked cell never leaks just because it was
@@ -2654,7 +2670,8 @@ impl DbViewerService {
             statement: req.statement.clone(),
             max_rows,
             node: req.node.clone(),
-            timeout_ms: req.timeout_ms,
+            // Always bounded (integrations-4-02): never `None` or `0`.
+            timeout_ms: Some(mcp_query_timeout_ms(req.timeout_ms)),
             // Force the safe defaults: never confirm a write, never use the
             // explain/params side-channels, always mask PII for an agent.
             confirm_write: false,

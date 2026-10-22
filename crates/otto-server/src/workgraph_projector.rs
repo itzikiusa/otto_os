@@ -632,10 +632,13 @@ fn pr_item_status(review_status: WorkStatus) -> WorkStatus {
 }
 
 async fn upsert_review(ctx: &ServerCtx, workspace_id: &Id, review_id: &Id) {
-    let review = match ctx.reviews_store.get_review(review_id).await {
-        Ok(r) => r,
-        Err(_) => return,
-    };
+    // The head only: the projector never reads the comments (r4-04).
+    if let Ok(review) = ctx.reviews_store.review_head(review_id).await {
+        upsert_review_row(ctx, workspace_id, &review).await;
+    }
+}
+
+async fn upsert_review_row(ctx: &ServerCtx, workspace_id: &Id, review: &otto_core::domain::Review) {
     let repo_name: Option<String> = sqlx::query_scalar("SELECT name FROM repos WHERE id = ?")
         .bind(&review.repo_id)
         .fetch_optional(&ctx.pool)
@@ -877,17 +880,14 @@ async fn backfill_workspace(ctx: &ServerCtx, ws_id: &Id, all_stories: &[otto_sta
             }
         }
     }
-    // Reviews (+ derived PRs).
-    let review_ids: Vec<String> = sqlx::query_scalar(
-        "SELECT r.id FROM pr_reviews r JOIN repos gr ON gr.id = r.repo_id \
-         WHERE gr.workspace_id = ? ORDER BY r.created_at DESC LIMIT 50",
-    )
-    .bind(ws_id)
-    .fetch_all(&ctx.pool)
-    .await
-    .unwrap_or_default();
-    for rid in &review_ids {
-        upsert_review(ctx, ws_id, rid).await;
+    // Reviews (+ derived PRs): the 50 newest heads in one query, no comments.
+    let reviews = ctx
+        .reviews_store
+        .recent_heads_in_workspace(ws_id, 50)
+        .await
+        .unwrap_or_default();
+    for review in &reviews {
+        upsert_review_row(ctx, ws_id, review).await;
     }
     // Product stories belonging to this workspace.
     for story in all_stories.iter().filter(|s| &s.workspace_id == ws_id) {

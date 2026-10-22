@@ -29,29 +29,6 @@ use otto_agent_run::agent_run::{
     WatchStatus,
 };
 
-// Generous: several CLIs cold-start concurrently for one review, so claude can
-// take >30s to draw its TUI; injecting before it's ready loses the prompt.
-const TUI_STARTUP_WAIT: Duration = Duration::from_secs(90);
-const TUI_POLL: Duration = Duration::from_millis(250);
-const TUI_SETTLE: Duration = Duration::from_millis(600);
-pub const PASTE_TO_ENTER: Duration = Duration::from_millis(250);
-/// After a paste, how long to wait for the pasted text to actually echo in the
-/// TUI before pressing Enter. A late redraw (claude's "N MCP servers need
-/// authentication" banner lands well after the prompt box is drawn) can wipe
-/// the input box, so an unverified Enter submits an empty line and the agent
-/// idles for the whole timeout.
-const PASTE_ECHO_WAIT: Duration = Duration::from_secs(8);
-const PASTE_ECHO_POLL: Duration = Duration::from_millis(250);
-/// Extra time a paste that has not echoed yet gets while the TUI is still
-/// busy drawing (output advanced within [`PASTE_BUSY_QUIET`]). A 46–70 KB
-/// reviewer prompt can take longer than [`PASTE_ECHO_WAIT`] to land, and
-/// re-pasting on top of a slow-but-successful paste submitted it TWICE.
-const PASTE_LATE_WAIT: Duration = Duration::from_secs(20);
-const PASTE_BUSY_QUIET: Duration = Duration::from_millis(1500);
-// After submitting, confirm the agent actually started (output advanced); if
-// not, re-send Enter once — a freshly-spawned CLI under load can drop the first.
-const DISPATCH_WAIT: Duration = Duration::from_secs(6);
-const DISPATCH_POLL: Duration = Duration::from_millis(250);
 const FINDINGS_POLL: Duration = Duration::from_millis(1000);
 /// After this much silence with no findings yet, assume the agent may be
 /// blocked on a prompt the guard couldn't auto-accept and flag it "waiting".
@@ -701,7 +678,7 @@ pub fn merge_lens_files(
 
 /// The reviewer row's terminal note: `N findings`, or — when lenses were still
 /// running at adoption — a note starting with `partial` (which
-/// `review_run_complete` in `modules.rs` keys on) naming them.
+/// [`crate::engine::review_run_complete`] keys on) naming them.
 pub fn partial_or_count_note(count: usize, missing: &[String]) -> String {
     let plural = if count == 1 { "" } else { "s" };
     if missing.is_empty() {
@@ -880,17 +857,11 @@ pub async fn run_agent_session_with_recovery(
     }
 }
 
-pub fn bracketed_paste(text: &str) -> Vec<u8> {
-    // The prompt carries external text (Jira descriptions, user context): a
-    // raw `ESC[201~` in it would end the paste early and type the rest as
-    // keystrokes, so control characters are stripped first.
-    let text = otto_orchestrator::claude_pty::sanitize_paste(text);
-    let mut v = Vec::with_capacity(text.len() + 16);
-    v.extend_from_slice(b"\x1b[200~");
-    v.extend_from_slice(text.as_bytes());
-    v.extend_from_slice(b"\x1b[201~");
-    v
-}
+// The prompt-submit primitive lives in otto-sessions (architecture-4-01):
+// these re-exports keep the old `otto_review::session::*` paths compiling.
+pub use otto_sessions::submit::{
+    bracketed_paste, dispatched, submit_prompt, wait_for_tui, wait_for_tui_strict, PASTE_TO_ENTER,
+};
 
 /// How long an injected claude prompt gets to LAND in the transcript before the
 /// caller re-injects (first window) or fails the attempt (second window).
@@ -958,71 +929,6 @@ fn user_record_after(path: &std::path::Path, offset: u64) -> bool {
     tail.windows(NEEDLE.len()).any(|w| w == NEEDLE)
 }
 
-/// One poll of the TUI wait: `Some(true)` ready to paste into, `Some(false)`
-/// give up, `None` keep polling. The two rules differ only on the DEADLINE: a
-/// `strict` caller treats a TUI that has drawn NOTHING as NOT ready — pasting
-/// into it loses the prompt, and the caller then waits out the agent's entire
-/// grace window for a turn that was never started — while the legacy rule
-/// pastes anyway. Pure so both deadline rules are testable without a PTY.
-fn tui_ready(
-    scrollback_empty: bool,
-    settled: bool,
-    deadline_hit: bool,
-    strict: bool,
-) -> Option<bool> {
-    if !scrollback_empty && settled {
-        return Some(true);
-    }
-    if deadline_hit {
-        return Some(!(strict && scrollback_empty));
-    }
-    None
-}
-
-/// Wait for the agent's TUI to draw and settle. LEGACY rule: on the deadline it
-/// reports ready even for a blank TUI, so its callers paste and fall back to
-/// their own watch loop — [`wait_for_tui_strict`] is for callers that have a
-/// fail-fast path for "the prompt never landed".
-pub async fn wait_for_tui(manager: &Arc<SessionManager>, sid: &otto_core::Id) -> bool {
-    wait_for_tui_with(manager, sid, false).await
-}
-
-/// [`wait_for_tui`] under the R5.3 rule: a TUI that drew NOTHING by the
-/// deadline is not ready, and the caller must fail the attempt rather than
-/// watch a session the prompt never reached.
-pub async fn wait_for_tui_strict(manager: &Arc<SessionManager>, sid: &otto_core::Id) -> bool {
-    wait_for_tui_with(manager, sid, true).await
-}
-
-async fn wait_for_tui_with(
-    manager: &Arc<SessionManager>,
-    sid: &otto_core::Id,
-    strict: bool,
-) -> bool {
-    let deadline = Instant::now() + TUI_STARTUP_WAIT;
-    loop {
-        let Some(handle) = manager.live_handle(sid) else {
-            return false;
-        };
-        if handle.on_exit().borrow().is_some() {
-            return false;
-        }
-        let verdict = tui_ready(
-            handle.scrollback(1).is_empty(),
-            handle.last_output_at().elapsed() >= TUI_SETTLE,
-            Instant::now() >= deadline,
-            strict,
-        );
-        if let Some(ready) = verdict {
-            if !ready {
-                tracing::warn!("review_session: agent TUI never drew in session {sid}");
-            }
-            return ready;
-        }
-        tokio::time::sleep(TUI_POLL).await;
-    }
-}
-
 /// Which teardown a finished reviewer's session gets: `suspend` when the
 /// provider can resume the transcript later (so "Open session" on a finished
 /// review still replays it), `kill` otherwise. Pure so the mapping is testable.
@@ -1063,153 +969,6 @@ pub async fn stop_review_sessions(manager: &Arc<SessionManager>, session_ids: &[
             tracing::warn!("review teardown: could not {action} session {sid}: {e}");
         }
     }
-}
-
-/// True if the session produced fresh output after `before` within
-/// [`DISPATCH_WAIT`] — i.e. the submitted prompt was accepted and the agent
-/// started working.
-pub async fn dispatched(
-    manager: &Arc<SessionManager>,
-    sid: &otto_core::Id,
-    before: Option<std::time::Instant>,
-) -> bool {
-    let Some(before) = before else { return false };
-    let deadline = Instant::now() + DISPATCH_WAIT;
-    loop {
-        match manager.live_handle(sid) {
-            Some(h) if h.last_output_at() > before => return true,
-            None => return false,
-            _ => {}
-        }
-        if Instant::now() >= deadline {
-            return false;
-        }
-        tokio::time::sleep(DISPATCH_POLL).await;
-    }
-}
-
-/// A short, distinctive, whitespace-normalized probe from the prompt's first
-/// non-empty line — what the TUI must echo back for the paste to count.
-fn paste_probe(prompt: &str) -> String {
-    let line = prompt.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
-    let norm: String = line.split_whitespace().collect::<Vec<_>>().join(" ");
-    // TUIs wrap/truncate long lines; 40 chars is short enough to survive that
-    // and long enough not to match boilerplate.
-    norm.chars().take(40).collect()
-}
-
-/// True once the screen contains `probe` (whitespace-normalized) or a paste
-/// placeholder — i.e. the pasted prompt is really sitting in the input box.
-///
-/// Matched against ANSI-FREE text: the emulator's current screen (the vt100
-/// grid — what a user would see) plus the escape-stripped scrollback tail.
-/// Matching the RAW PTY bytes missed pastes whose echo was interleaved with
-/// colour/cursor sequences, and every miss re-pasted a prompt that had in fact
-/// landed — 23 of 201 re-pasted review transcripts held the prompt twice.
-fn paste_echoed(manager: &Arc<SessionManager>, sid: &otto_core::Id, probe: &str) -> bool {
-    if probe.is_empty() {
-        return true;
-    }
-    let Some(h) = manager.live_handle(sid) else {
-        return false;
-    };
-    let rows = h.screen_rows();
-    let tail = otto_agent_run::screen::strip_ansi(&h.scrollback(200));
-    [rows.join(" "), rows.concat(), tail]
-        .iter()
-        .any(|text| screen_shows_paste(&normalize_ws(text), probe))
-}
-
-fn normalize_ws(s: &str) -> String {
-    s.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-/// True while the TUI has drawn something within [`PASTE_BUSY_QUIET`] — a
-/// large paste still being ingested/rendered.
-fn tui_busy(manager: &Arc<SessionManager>, sid: &otto_core::Id) -> bool {
-    manager
-        .live_handle(sid)
-        .is_some_and(|h| h.last_output_at().elapsed() < PASTE_BUSY_QUIET)
-}
-
-/// The paste counts as echoed when the screen shows the probe text OR a
-/// large-paste placeholder. Codex collapses any sizeable paste into
-/// `[Pasted Content N chars]` and Claude Code into `[Pasted text #1 +N lines]`,
-/// so a worker prompt never echoes verbatim; treating that as "not echoed"
-/// re-pasted the prompt and the worker received it twice.
-fn screen_shows_paste(norm_screen: &str, probe: &str) -> bool {
-    if norm_screen.contains(probe) {
-        return true;
-    }
-    let lower = norm_screen.to_lowercase();
-    lower.contains("[pasted content ") || lower.contains("[pasted text #")
-}
-
-/// Paste `prompt` into the session and press Enter — the one submit path
-/// every engine should use. Waits for the TUI to draw, pastes, then WAITS
-/// FOR THE PASTE TO ECHO (re-pasting once if a late redraw wiped it) before
-/// Enter, and re-sends Enter once if the submit visibly didn't dispatch.
-/// Returns false when the session died before the prompt could be sent.
-pub async fn submit_prompt(
-    manager: &Arc<SessionManager>,
-    sid: &otto_core::Id,
-    prompt: &str,
-) -> bool {
-    if !wait_for_tui_strict(manager, sid).await {
-        return false;
-    }
-    // One submission at a time per session: hold the submit lock (the one
-    // `submit_text`, the human composer, the channel bridge and swarm runs
-    // take) through paste, echo wait, Enter and re-Enter. Without it a
-    // concurrent message landed between this paste and its Enter (one merged
-    // prompt plus an empty one), and the Ctrl-U re-paste clear below erased
-    // the other submitter's paste.
-    let lock = manager.submit_lock(sid);
-    let _submit = lock.lock().await;
-    let probe = paste_probe(prompt);
-    for attempt in 0..2 {
-        if attempt == 1 {
-            // Clear whatever partial line a half-landed paste left, so a
-            // re-paste never concatenates onto it.
-            let _ = manager.input(sid, b"\x15").await;
-            tokio::time::sleep(PASTE_TO_ENTER).await;
-        }
-        let _ = manager.input(sid, &bracketed_paste(prompt)).await;
-        tokio::time::sleep(PASTE_TO_ENTER).await;
-        let deadline = Instant::now() + PASTE_ECHO_WAIT;
-        // Past the base wait, keep waiting (bounded) while the TUI is still
-        // drawing: a big paste that is slow to land is not a lost paste.
-        let late_deadline = deadline + PASTE_LATE_WAIT;
-        loop {
-            if paste_echoed(manager, sid, &probe) {
-                break;
-            }
-            let now = Instant::now();
-            if now >= late_deadline || (now >= deadline && !tui_busy(manager, sid)) {
-                break;
-            }
-            tokio::time::sleep(PASTE_ECHO_POLL).await;
-        }
-        if paste_echoed(manager, sid, &probe) {
-            break;
-        }
-        if attempt == 0 {
-            // Let whatever redraw ate the paste finish, then look ONE more
-            // time before re-sending — a paste that landed during the settle
-            // must not be pasted again.
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            if paste_echoed(manager, sid, &probe) {
-                break;
-            }
-            tracing::warn!("prompt paste did not echo in session {sid}; re-pasting once");
-        }
-    }
-    let before = manager.live_handle(sid).map(|h| h.last_output_at());
-    let _ = manager.input(sid, b"\r").await;
-    if !dispatched(manager, sid, before).await {
-        let _ = manager.input(sid, b"\r").await;
-    }
-    true
 }
 
 #[cfg(test)]
@@ -1264,33 +1023,6 @@ mod tests {
     }
 
     #[test]
-    fn paste_probe_is_short_normalized_and_skips_blank_lines() {
-        let p = paste_probe("\n\n  You are   reviewing\tthe skill package at /tmp/x — do it carefully and thoroughly\nmore");
-        assert_eq!(p.chars().count(), 40);
-        assert!(p.starts_with("You are reviewing the skill package"));
-        assert_eq!(paste_probe(""), "");
-    }
-
-    #[test]
-    fn paste_counts_as_echoed_when_the_tui_collapses_it_to_a_placeholder() {
-        let probe = "You are a Codex worker on /repo (branch";
-        // Codex: any sizeable paste is shown as a placeholder, never verbatim.
-        assert!(screen_shows_paste(
-            "› [Pasted Content 2614 chars] gpt-5 high",
-            probe
-        ));
-        // Claude Code's placeholder.
-        assert!(screen_shows_paste("> [Pasted text #1 +38 lines]", probe));
-        // Verbatim echo still counts.
-        assert!(screen_shows_paste(
-            "> You are a Codex worker on /repo (branch main)",
-            probe
-        ));
-        // An empty input box does not.
-        assert!(!screen_shows_paste("› Ask Codex to do anything", probe));
-    }
-
-    #[test]
     fn late_lens_files_are_merged_and_unfinished_lenses_named() {
         let tmp = tempfile::tempdir().unwrap();
         let p = |slug: &str| tmp.path().join(format!("{slug}.json"));
@@ -1326,20 +1058,6 @@ mod tests {
     }
 
     #[test]
-    fn styled_echo_is_detected_once_escapes_are_stripped() {
-        // Raw PTY bytes interleave the echo with SGR/cursor sequences; the
-        // raw-byte match missed it and the prompt was pasted a second time.
-        let probe = "You are a Codex worker on /repo (branch";
-        let raw = b"\x1b[2m> \x1b[22mYou are a\x1b[1C Codex worker\x1b[0m on /repo (branch main)";
-        let plain = otto_agent_run::screen::strip_ansi(raw);
-        assert!(screen_shows_paste(&normalize_ws(&plain), probe));
-        let placeholder = otto_agent_run::screen::strip_ansi(
-            b"\x1b[38;5;246m[Pasted text #1 +812 lines]\x1b[39m",
-        );
-        assert!(screen_shows_paste(&normalize_ws(&placeholder), probe));
-    }
-
-    #[test]
     fn review_session_meta_is_confined_without_project_settings() {
         let fan = review_session_meta("r1", 0, false);
         assert_eq!(fan["read_only"], true);
@@ -1352,15 +1070,6 @@ mod tests {
         let sum = crate::summarizer::Attempt::new("claude", "").unwrap();
         assert_eq!(sum.meta["read_only"], true);
         assert_eq!(sum.meta["project_settings"], false);
-    }
-
-    #[test]
-    fn bracketed_paste_cannot_be_closed_early() {
-        let v = bracketed_paste("a\x1b[201~\r!rm -rf ~\r");
-        let s = String::from_utf8(v).unwrap();
-        assert_eq!(s.matches("\x1b[201~").count(), 1);
-        assert!(s.ends_with("\x1b[201~"));
-        assert!(!s.contains('\r'));
     }
 
     #[test]
@@ -1610,26 +1319,6 @@ mod tests {
         ];
         assert_eq!(lens_covered_by(&states, 0), None);
         assert_eq!(lens_covered_by(&states, 1), None);
-    }
-
-    #[test]
-    fn wait_for_tui_false_on_deadline_without_output() {
-        // Drawn and settled ⇒ ready, whenever that happens.
-        assert_eq!(tui_ready(false, true, false, true), Some(true));
-        assert_eq!(tui_ready(false, true, true, true), Some(true));
-        // Drawn but still repainting ⇒ keep polling until the deadline, then
-        // accept it (there IS a TUI to paste into).
-        assert_eq!(tui_ready(false, false, false, true), None);
-        assert_eq!(tui_ready(false, false, true, true), Some(true));
-        // NOTHING drawn by the deadline ⇒ give up. Pasting into a blank TUI
-        // loses the prompt and the reviewer then idles out its whole grace.
-        assert_eq!(tui_ready(true, false, true, true), Some(false));
-        assert_eq!(tui_ready(true, false, false, true), None);
-        // The LEGACY rule (`wait_for_tui`, seven callers outside this batch)
-        // pastes into a blank TUI on the deadline rather than giving up — they
-        // have no fail-fast path and would otherwise never send their prompt.
-        assert_eq!(tui_ready(true, false, true, false), Some(true));
-        assert_eq!(tui_ready(true, false, false, false), None);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! Background usage tailer — mines *real* token usage from the agent CLIs'
 //! on-disk transcript files and records it into the embedded ClickHouse usage
-//! store via [`otto_usage::UsageEngine`].
+//! store via [`crate::UsageEngine`].
 //!
 //! Why a tailer (rather than instrumenting the PTY): the CLIs already write
 //! exact, per-turn token counts (input/output/cache) and the model id to JSONL
@@ -18,7 +18,6 @@
 //! Only complete transcript lines are consumed. A failed journal commit stops
 //! source advancement until retry succeeds; corrupt journals stop ingestion.
 
-#[path = "usage_tailer/native.rs"]
 mod native;
 
 use std::collections::{HashMap, HashSet};
@@ -27,12 +26,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use otto_state::{DbPool, SessionsRepo};
-use otto_usage::{
+use crate::{
     estimate_cost, parse_claude_line, parse_codex_line, parse_codex_session_meta, ClaudeLine,
     CodexCounterStore, CursorStore, HeldResponse, ResponseFolder, SeenKeys, UsageEngine,
     UsageEvent, EXTERNAL_WORKSPACE,
 };
+use otto_state::{DbPool, SessionsRepo};
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
@@ -119,7 +118,7 @@ pub struct UsageTailer {
     /// Parsed `session_meta` per codex rollout. The first line is written once
     /// at rollout creation and never changes, so it is read at most once per
     /// file per daemon lifetime (and only once the file has new bytes).
-    codex_meta: HashMap<PathBuf, otto_usage::CodexMeta>,
+    codex_meta: HashMap<PathBuf, crate::CodexMeta>,
     /// Response-level dedup for claude lines (see module docs).
     seen: SeenKeys,
     /// Folds a streamed response's lines into its FINAL usage.
@@ -292,7 +291,7 @@ impl UsageTailer {
         let wake = Arc::new(Notify::new());
         let wake_task = Arc::clone(&wake);
         let task = tokio::spawn(async move {
-            use otto_usage::{TailerState, TailerStatus};
+            use crate::{TailerState, TailerStatus};
             // Only a CORRUPT checkpoint stops ingestion. An unavailable
             // journal (SQLITE_BUSY during a backup, a full disk at boot) or a
             // failed initial commit is transient: retry with a capped backoff
@@ -1132,7 +1131,7 @@ async fn read_codex_model(file: &Path, before: u64) -> Option<String> {
 struct CodexRecord {
     model: Option<String>,
     timestamp: Option<String>,
-    usage: Option<otto_usage::ParsedUsage>,
+    usage: Option<crate::ParsedUsage>,
 }
 
 fn parse_codex_record(line: &str) -> Option<CodexRecord> {
@@ -1141,14 +1140,7 @@ fn parse_codex_record(line: &str) -> Option<CodexRecord> {
     let model = if matches!(kind, "turn_context" | "session_meta") {
         value
             .pointer("/payload/model")
-            .and_then(|v| {
-                v.as_str()
-                    .or_else(|| v.get("name").and_then(|n| n.as_str()))
-                    .or_else(|| v.get("id").and_then(|n| n.as_str()))
-                    .or_else(|| v.get("slug").and_then(|n| n.as_str()))
-            })
-            .filter(|m| !m.is_empty())
-            .map(str::to_string)
+            .and_then(crate::codex_model_name)
     } else {
         None
     };
@@ -1568,10 +1560,10 @@ fn rebuild_events(
             let Some(parsed) = parse_claude_line(line) else {
                 return;
             };
-            match parsed.dedup_key.as_deref().map(otto_usage::seen_key_hash) {
+            match parsed.dedup_key.as_deref().map(crate::seen_key_hash) {
                 Some(h) if counted.contains(&h) => {} // replay of an earlier file
                 Some(h) => match open.get(&h) {
-                    Some(&i) => otto_usage::merge_max(&mut lines[i].1, &parsed),
+                    Some(&i) => crate::merge_max(&mut lines[i].1, &parsed),
                     None => {
                         open.insert(h, lines.len());
                         lines.push((parsed.dedup_key.clone(), parsed));
@@ -1590,7 +1582,7 @@ fn rebuild_events(
         out.offsets.push((file.clone(), end));
         for (key, line) in lines {
             if let Some(k) = &key {
-                let h = otto_usage::seen_key_hash(k);
+                let h = crate::seen_key_hash(k);
                 counted.insert(h);
                 out.keys.push(h);
                 out.recent.push_back((k.clone(), line.clone()));
@@ -1631,7 +1623,7 @@ fn rebuild_events(
 
 /// Read just the first line of a codex rollout file and parse its session_meta.
 /// Reads a bounded head (the meta line is small) to avoid loading large files.
-async fn read_codex_meta(file: &Path) -> Option<otto_usage::CodexMeta> {
+async fn read_codex_meta(file: &Path) -> Option<crate::CodexMeta> {
     use std::io::Read;
     let path = file.to_path_buf();
     let head = tokio::task::spawn_blocking(move || -> Option<String> {
@@ -1652,14 +1644,14 @@ async fn read_codex_meta(file: &Path) -> Option<otto_usage::CodexMeta> {
 /// cumulative token snapshot. The first 512 KiB normally contains one; the
 /// wider ceiling handles a large final tool result without loading multi-GB
 /// rollouts in full.
-async fn read_last_codex_usage(file: &Path, model: &str) -> Option<otto_usage::ParsedUsage> {
+async fn read_last_codex_usage(file: &Path, model: &str) -> Option<crate::ParsedUsage> {
     use std::io::{Read, Seek, SeekFrom};
     const CHUNK_BYTES: u64 = 512 * 1024;
     const MAX_BYTES: u64 = 16 * 1024 * 1024;
     const OVERLAP: u64 = 16 * 1024;
     let path = file.to_path_buf();
     let model = model.to_string();
-    tokio::task::spawn_blocking(move || -> Option<otto_usage::ParsedUsage> {
+    tokio::task::spawn_blocking(move || -> Option<crate::ParsedUsage> {
         let mut f = std::fs::File::open(&path).ok()?;
         let size = f.metadata().ok()?.len();
         let floor = size.saturating_sub(MAX_BYTES);
@@ -1876,7 +1868,7 @@ mod tests {
             .await
             .unwrap();
         let usage = UsageEngine::start(
-            otto_usage::UsageConfig {
+            crate::UsageConfig {
                 enabled: false,
                 ..Default::default()
             },
@@ -1958,7 +1950,7 @@ mod tests {
         };
         add_session("otto-known", "known").await;
         let usage = UsageEngine::start(
-            otto_usage::UsageConfig {
+            crate::UsageConfig {
                 enabled: false,
                 ..Default::default()
             },
@@ -2134,7 +2126,7 @@ mod accounting_tests {
         std::fs::write(&file, format!("{record}{record}")).unwrap();
         let pool = otto_state::open(&root.join("state.db")).await.unwrap();
         let usage = UsageEngine::start(
-            otto_usage::UsageConfig {
+            crate::UsageConfig {
                 enabled: true,
                 clickhouse_path: Some(
                     root.join("missing-clickhouse")
@@ -2219,7 +2211,7 @@ mod accounting_tests {
         .unwrap();
         sqlx::query("INSERT INTO sessions(id,workspace_id,kind,provider,title,status,cwd,provider_session_id,created_by,created_at,last_active_at,meta_json) VALUES('s','w','agent','claude-work','t','running','/repo','psid','u',?,?,'{}')").bind(now).bind(now).execute(&pool).await.unwrap();
         let usage = UsageEngine::start(
-            otto_usage::UsageConfig {
+            crate::UsageConfig {
                 enabled: false,
                 ..Default::default()
             },
@@ -2270,7 +2262,7 @@ mod accounting_tests {
         std::fs::write(&file, &body).unwrap();
         let pool = otto_state::open(&root.join("state.db")).await.unwrap();
         let usage = UsageEngine::start(
-            otto_usage::UsageConfig {
+            crate::UsageConfig {
                 enabled: false,
                 ..Default::default()
             },
@@ -2340,7 +2332,7 @@ mod accounting_tests {
                 .bind(id).bind(status).bind(psid).bind(now).bind(now).execute(&pool).await.unwrap();
         }
         let usage = UsageEngine::start(
-            otto_usage::UsageConfig {
+            crate::UsageConfig {
                 enabled: false,
                 ..Default::default()
             },

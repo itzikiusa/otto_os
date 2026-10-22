@@ -24,20 +24,6 @@ pub fn ui_error_envelope(code: &str, message: &str) -> Value {
            "reason":message,"content":{"error":message,"code":code}})
 }
 
-pub fn is_read_only_sql(stmt: &str) -> bool {
-    let s = stmt.trim().trim_end_matches(';').trim();
-    if s.contains(';') {
-        return false; // single statement only — no batch tricks
-    }
-    let up = s.to_uppercase();
-    up.starts_with("SELECT")
-        || up.starts_with("SHOW")
-        || up.starts_with("DESCRIBE")
-        || up.starts_with("DESC ")
-        || up.starts_with("EXPLAIN")
-        || up.starts_with("WITH")
-}
-
 /// Wall-clock budget of one governed self-call. The flat 30 s cut off calls
 /// whose route legitimately runs longer: a saved API request may itself wait
 /// up to its `timeout_ms` (≤ 60 s), an automation runs several, pod logs shell
@@ -319,18 +305,14 @@ pub fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
         "query_db_readonly" => {
             let conn = arg_str(args, "connection_id")?;
             let stmt = arg_str(args, "statement")?;
-            // F5: classify ourselves; reject writes/unknown/multi-statement
-            // REGARDLESS of the connection's write-guard flag.
-            if !is_read_only_sql(&stmt) {
-                return Err(Error::Forbidden(
-                    "otto.query_db_readonly only permits a single read-only statement (SELECT/SHOW/DESCRIBE/EXPLAIN/WITH)".into(),
-                ));
-            }
-            // Routed through `/db/mcp-query` (not `/db/query`): that path adds the
-            // engine-specific read-only classifier AND executes inside the
-            // engine's read-only mode (read-only transaction / ClickHouse
-            // `readonly`), with cell masking forced — so "read-only" holds even
-            // if a statement slips past the classifier above.
+            // Routed through `/db/mcp-query` (not `/db/query`): that route's
+            // engine-specific classifier (`otto_dbviewer::ensure_read_only`)
+            // is the ONE read-only gate — it refuses writes/DDL/multi-statement
+            // batches on every connection, whatever its write-guard flag, and
+            // then executes inside the engine's read-only mode (read-only
+            // transaction / ClickHouse `readonly`) with cell masking forced.
+            // A second, cruder prefix check here used to refuse reads the
+            // explorer accepts (a leading comment, a `;` inside a literal).
             let body = json!({
                 "statement": stmt,
                 "max_rows": args.get("max_rows").and_then(u64_lenient).unwrap_or(200),
@@ -2067,10 +2049,16 @@ pub async fn self_get_text(
         .await
         .map_err(|e| Error::Upstream(format!("self-call: {e}")))?;
     let status = resp.status();
-    let text = resp.text().await.unwrap_or_default();
     if !status.is_success() {
+        let text = resp.text().await.unwrap_or_default();
         return Err(Error::Upstream(self_call_error(status, &text)));
     }
+    // As in `parse_self`: a 2xx whose body broke off mid-read is NOT "the pod
+    // printed nothing" — an agent investigating an incident would trust it.
+    let text = resp
+        .text()
+        .await
+        .map_err(|e| Error::Upstream(format!("{status}: reading the response failed: {e}")))?;
     let n = text.chars().count();
     let (text, truncated) = if n > MAX_TEXT_CHARS {
         let start = text

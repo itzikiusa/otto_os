@@ -10,6 +10,10 @@ futures-util.workspace = true
 sqlx.workspace = true
 otto-core.workspace = true
 otto-transcript.workspace = true
+# The tailer driver (`tailer/driver.rs`, moved from ottod): session lookups
+# for attribution, and FSEvents for transcript changes.
+otto-state.workspace = true
+notify = { version = "8.2.0", default-features = false, features = ["macos_fsevent"] }
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true

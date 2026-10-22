@@ -20,23 +20,14 @@ use otto_core::domain::{User, Workspace, WorkspaceRole};
 use otto_core::event::Event;
 use otto_core::{Error, Id};
 use otto_state::WorkspacesRepo;
-use serde_json::Value;
 use tokio::sync::broadcast;
 
 use crate::http::CanvasCtx;
 
-/// One agent turn the host runs for an assist request.
-pub struct AgentTurn<'a> {
-    pub ws: &'a Workspace,
-    pub user: &'a User,
-    /// The scene's session to RESUME (`None` → spawn a fresh one).
-    pub existing: Option<&'a Id>,
-    pub title: &'a str,
-    pub cwd: &'a str,
-    pub provider: &'a str,
-    pub meta: Value,
-    pub prompt: &'a str,
-}
+/// One agent turn the host runs for an assist request: the ONE turn type the
+/// assist engines share (architecture-4-02), defined with the Design Hall
+/// engine. Canvas leaves `done_file` / `quiet_done` unset (completion on idle).
+pub use otto_design_assist::AgentTurn;
 
 /// What the canvas assist endpoints need from the host beyond [`CanvasCtx`].
 pub trait CanvasAssistCtx: CanvasCtx {

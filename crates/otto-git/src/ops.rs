@@ -212,7 +212,7 @@ impl LocalGit {
         Err(crate::local::upstream_err(&stderr, &stdout, code))
     }
 
-    /// [`LocalGit::pull_autostash`] with an explicit mode: stash → pull → pop
+    /// Pull with an explicit [`PullMode`]: stash → pull → pop
     /// around a dirty tree. A pull that stops with CONFLICTS leaves the changes
     /// stashed (popping onto a half-merged tree would bury them); a refused pull
     /// pops them straight back so the tree is exactly as it was.

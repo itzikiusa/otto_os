@@ -331,15 +331,11 @@ impl JiraClient {
     }
 
     /// Status-check and decode one project-list response.
-    async fn project_body(resp: reqwest::Response) -> Result<serde_json::Value> {
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(Error::Upstream(format!(
-                "jira project list failed ({status}): {body}"
-            )));
-        }
-        resp.json()
+    async fn project_body(&self, resp: reqwest::Response) -> Result<serde_json::Value> {
+        self.t
+            .check(resp, "jira project list")
+            .await?
+            .json()
             .await
             .map_err(|e| Error::Upstream(format!("jira project list parse: {e}")))
     }
@@ -367,7 +363,7 @@ impl JiraClient {
         for page_no in 0..PROJECT_PAGES_MAX {
             let start_s = start_at.to_string();
             let page_s = PAGE.to_string();
-            let resp = self
+            let req = self
                 .t
                 .http()?
                 .get(&search_url)
@@ -377,34 +373,28 @@ impl JiraClient {
                     ("maxResults", page_s.as_str()),
                     ("orderBy", "name"),
                     ("startAt", start_s.as_str()),
-                ])
-                .send()
-                .await
-                .map_err(|e| Error::Upstream(format!("jira project/search request: {e}")))?;
+                ]);
+            let resp = self.t.send_raw(req, "jira project/search").await?;
 
             if page_no == 0 && resp.status() == reqwest::StatusCode::NOT_FOUND {
                 // Fall back to the bare-array endpoint (Server / older
                 // Cloud), which returns every visible project at once.
                 let fallback_url = format!("{}/rest/api/3/project", self.t.base);
-                let r = self
+                let req = self
                     .t
                     .http()?
                     .get(&fallback_url)
                     .header("Authorization", &self.t.auth_header)
                     .header("Accept", "application/json")
-                    .query(&[("orderBy", "name")])
-                    .send()
-                    .await
-                    .map_err(|e| {
-                        Error::Upstream(format!("jira project list fallback request: {e}"))
-                    })?;
-                let body = Self::project_body(r).await?;
+                    .query(&[("orderBy", "name")]);
+                let r = self.t.send_raw(req, "jira project list fallback").await?;
+                let body = self.project_body(r).await?;
                 all = body.as_array().cloned().unwrap_or_default();
                 complete = true;
                 break;
             }
 
-            let body = Self::project_body(resp).await?;
+            let body = self.project_body(resp).await?;
             let page = body
                 .get("values")
                 .and_then(|v| v.as_array())
@@ -549,10 +539,7 @@ impl JiraClient {
                     if let Some(t) = &token {
                         req = req.query(&[("nextPageToken", t.as_str())]);
                     }
-                    let resp = req
-                        .send()
-                        .await
-                        .map_err(|e| Error::Upstream(format!("jira search request: {e}")))?;
+                    let resp = self.t.send_raw(req, "jira search").await?;
 
                     if !resp.status().is_success() {
                         // New endpoint UNAVAILABLE (404/405 — older Server/DC):
@@ -564,11 +551,9 @@ impl JiraClient {
                         if token.is_none() && new_search_unavailable(resp.status()) {
                             return self.search_jql_classic(jql, start_at, window, fields).await;
                         }
-                        let status = resp.status();
-                        let body = resp.text().await.unwrap_or_default();
-                        return Err(Error::Upstream(format!(
-                            "jira search failed ({status}): {body}"
-                        )));
+                        // Classified + body capped (a short 429 was already
+                        // retried once by the transport).
+                        return Err(self.t.fail(resp, "jira search").await);
                     }
 
                     let body: serde_json::Value = resp
@@ -620,16 +605,14 @@ impl JiraClient {
         let jql = "assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC";
         let fields = "summary,status,issuetype,parent,project,priority,updated";
         let new_url = format!("{}/rest/api/3/search/jql", self.t.base);
-        let resp = self
+        let req = self
             .t
             .http()?
             .get(&new_url)
             .header("Authorization", &self.t.auth_header)
             .header("Accept", "application/json")
-            .query(&[("jql", jql), ("maxResults", "100"), ("fields", fields)])
-            .send()
-            .await
-            .map_err(|e| Error::Upstream(format!("jira my-work request: {e}")))?;
+            .query(&[("jql", jql), ("maxResults", "100"), ("fields", fields)]);
+        let resp = self.t.send_raw(req, "jira my-work").await?;
 
         let body: serde_json::Value = if resp.status().is_success() {
             resp.json()
@@ -637,14 +620,10 @@ impl JiraClient {
                 .map_err(|e| Error::Upstream(format!("jira my-work parse: {e}")))?
         } else if !new_search_unavailable(resp.status()) {
             // A real failure — surface it instead of the classic endpoint's 410.
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(Error::Upstream(format!(
-                "jira my-work search failed ({status}): {body}"
-            )));
+            return Err(self.t.fail(resp, "jira my-work search").await);
         } else {
             // Classic `/rest/api/3/search` fallback (same rule as search_jql).
-            let resp = self
+            let req = self
                 .t
                 .http()?
                 .get(format!("{}/rest/api/3/search", self.t.base))
@@ -655,17 +634,8 @@ impl JiraClient {
                     ("maxResults", "100"),
                     ("startAt", "0"),
                     ("fields", fields),
-                ])
-                .send()
-                .await
-                .map_err(|e| Error::Upstream(format!("jira my-work fallback request: {e}")))?;
-            if !resp.status().is_success() {
-                let status = resp.status();
-                let body = resp.text().await.unwrap_or_default();
-                return Err(Error::Upstream(format!(
-                    "jira my-work search failed ({status}): {body}"
-                )));
-            }
+                ]);
+            let resp = self.t.send(req, "jira my-work search").await?;
             resp.json()
                 .await
                 .map_err(|e| Error::Upstream(format!("jira my-work parse: {e}")))?
@@ -722,7 +692,7 @@ impl JiraClient {
         let fallback_url = format!("{}/rest/api/3/search", self.t.base);
         let start_at_s = start_at.to_string();
         let window_s = window.to_string();
-        let resp = self
+        let req = self
             .t
             .http()?
             .get(&fallback_url)
@@ -733,18 +703,8 @@ impl JiraClient {
                 ("maxResults", window_s.as_str()),
                 ("startAt", start_at_s.as_str()),
                 ("fields", fields),
-            ])
-            .send()
-            .await
-            .map_err(|e| Error::Upstream(format!("jira search fallback request: {e}")))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(Error::Upstream(format!(
-                "jira search failed ({status}): {body}"
-            )));
-        }
+            ]);
+        let resp = self.t.send(req, "jira search").await?;
 
         let body: serde_json::Value = resp
             .json()
@@ -821,24 +781,14 @@ impl JiraClient {
     /// Fetch a single issue by key (e.g. "PROJ-123").
     pub async fn get_issue(&self, key: &str) -> Result<IssueDetail> {
         let url = format!("{}/rest/api/3/issue/{}", self.t.base, path_seg(key));
-        let resp = self
+        let req = self
             .t
             .http()?
             .get(&url)
             .header("Authorization", &self.t.auth_header)
             .header("Accept", "application/json")
-            .query(&[("fields", "summary,status,issuetype,assignee,description")])
-            .send()
-            .await
-            .map_err(|e| Error::Upstream(format!("jira issue request: {e}")))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(Error::Upstream(format!(
-                "jira issue {key} failed ({status}): {body}"
-            )));
-        }
+            .query(&[("fields", "summary,status,issuetype,assignee,description")]);
+        let resp = self.t.send(req, &format!("jira issue {key}")).await?;
 
         let body: serde_json::Value = resp
             .json()
@@ -896,25 +846,15 @@ impl JiraClient {
         let adf_body = text_to_adf(body_text);
         let payload = serde_json::json!({ "body": adf_body });
 
-        let resp = self
+        let req = self
             .t
             .http()?
             .post(&url)
             .header("Authorization", &self.t.auth_header)
             .header("Accept", "application/json")
             .header("Content-Type", "application/json")
-            .json(&payload)
-            .send()
-            .await
-            .map_err(|e| Error::Upstream(format!("jira add_comment request: {e}")))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(Error::Upstream(format!(
-                "jira add_comment {key} failed ({status}): {body}"
-            )));
-        }
+            .json(&payload);
+        let resp = self.t.send(req, &format!("jira add_comment {key}")).await?;
 
         let body: serde_json::Value = resp
             .json()
@@ -975,7 +915,7 @@ impl JiraClient {
         for _ in 0..MAX_PAGES {
             let start_s = start_at.to_string();
             let max_s = PAGE.to_string();
-            let resp = self
+            let req = self
                 .t
                 .http()?
                 .get(&url)
@@ -985,18 +925,11 @@ impl JiraClient {
                     ("orderBy", order),
                     ("startAt", start_s.as_str()),
                     ("maxResults", max_s.as_str()),
-                ])
-                .send()
-                .await
-                .map_err(|e| Error::Upstream(format!("jira list_comments request: {e}")))?;
-
-            if !resp.status().is_success() {
-                let status = resp.status();
-                let body = resp.text().await.unwrap_or_default();
-                return Err(Error::Upstream(format!(
-                    "jira list_comments {key} failed ({status}): {body}"
-                )));
-            }
+                ]);
+            let resp = self
+                .t
+                .send(req, &format!("jira list_comments {key}"))
+                .await?;
 
             let body: serde_json::Value = resp
                 .json()
@@ -1077,7 +1010,7 @@ impl JiraClient {
     /// Uses `GET /rest/api/3/issue/{key}?expand=changelog,names,renderedFields&fields=*all`
     pub async fn get_issue_full(&self, key: &str) -> Result<IssueFull> {
         let url = format!("{}/rest/api/3/issue/{}", self.t.base, path_seg(key));
-        let resp = self
+        let req = self
             .t
             .http()?
             .get(&url)
@@ -1086,18 +1019,8 @@ impl JiraClient {
             .query(&[
                 ("expand", "changelog,names,renderedFields"),
                 ("fields", "*all"),
-            ])
-            .send()
-            .await
-            .map_err(|e| Error::Upstream(format!("jira get_issue_full request: {e}")))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(Error::Upstream(format!(
-                "jira issue full {key} failed ({status}): {body}"
-            )));
-        }
+            ]);
+        let resp = self.t.send(req, &format!("jira issue full {key}")).await?;
 
         let body: serde_json::Value = resp
             .json()
@@ -1117,24 +1040,14 @@ impl JiraClient {
     /// Uses `GET /rest/api/3/issue/{key}?fields=id`.
     pub async fn get_issue_id(&self, key: &str) -> Result<String> {
         let url = format!("{}/rest/api/3/issue/{}", self.t.base, path_seg(key));
-        let resp = self
+        let req = self
             .t
             .http()?
             .get(&url)
             .header("Authorization", &self.t.auth_header)
             .header("Accept", "application/json")
-            .query(&[("fields", "id")])
-            .send()
-            .await
-            .map_err(|e| Error::Upstream(format!("jira get_issue_id request: {e}")))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(Error::Upstream(format!(
-                "jira issue id {key} failed ({status}): {body}"
-            )));
-        }
+            .query(&[("fields", "id")]);
+        let resp = self.t.send(req, &format!("jira issue id {key}")).await?;
 
         let body: serde_json::Value = resp
             .json()
@@ -1222,23 +1135,16 @@ impl JiraClient {
             self.t.base,
             path_seg(key)
         );
-        let resp = self
+        let req = self
             .t
             .http()?
             .get(&url)
             .header("Authorization", &self.t.auth_header)
-            .header("Accept", "application/json")
-            .send()
-            .await
-            .map_err(|e| Error::Upstream(format!("jira list_transitions request: {e}")))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(Error::Upstream(format!(
-                "jira list_transitions {key} failed ({status}): {body}"
-            )));
-        }
+            .header("Accept", "application/json");
+        let resp = self
+            .t
+            .send(req, &format!("jira list_transitions {key}"))
+            .await?;
 
         let body: serde_json::Value = resp
             .json()
@@ -1259,25 +1165,17 @@ impl JiraClient {
         );
         let payload = serde_json::json!({ "transition": { "id": transition_id } });
 
-        let resp = self
+        let req = self
             .t
             .http()?
             .post(&url)
             .header("Authorization", &self.t.auth_header)
             .header("Accept", "application/json")
             .header("Content-Type", "application/json")
-            .json(&payload)
-            .send()
-            .await
-            .map_err(|e| Error::Upstream(format!("jira transition_issue request: {e}")))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(Error::Upstream(format!(
-                "jira transition_issue {key} failed ({status}): {body}"
-            )));
-        }
+            .json(&payload);
+        self.t
+            .send(req, &format!("jira transition_issue {key}"))
+            .await?;
 
         Ok(())
     }
@@ -1287,24 +1185,17 @@ impl JiraClient {
     /// Uses `GET /rest/api/3/user/assignable/search?issueKey={key}`
     pub async fn list_assignable(&self, key: &str) -> Result<Vec<JiraUser>> {
         let url = format!("{}/rest/api/3/user/assignable/search", self.t.base);
-        let resp = self
+        let req = self
             .t
             .http()?
             .get(&url)
             .header("Authorization", &self.t.auth_header)
             .header("Accept", "application/json")
-            .query(&[("issueKey", key), ("maxResults", "50")])
-            .send()
-            .await
-            .map_err(|e| Error::Upstream(format!("jira list_assignable request: {e}")))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(Error::Upstream(format!(
-                "jira list_assignable {key} failed ({status}): {body}"
-            )));
-        }
+            .query(&[("issueKey", key), ("maxResults", "50")]);
+        let resp = self
+            .t
+            .send(req, &format!("jira list_assignable {key}"))
+            .await?;
 
         let body: serde_json::Value = resp
             .json()
@@ -1326,25 +1217,17 @@ impl JiraClient {
         );
         let payload = serde_json::json!({ "accountId": account_id });
 
-        let resp = self
+        let req = self
             .t
             .http()?
             .put(&url)
             .header("Authorization", &self.t.auth_header)
             .header("Accept", "application/json")
             .header("Content-Type", "application/json")
-            .json(&payload)
-            .send()
-            .await
-            .map_err(|e| Error::Upstream(format!("jira assign_issue request: {e}")))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(Error::Upstream(format!(
-                "jira assign_issue {key} failed ({status}): {body}"
-            )));
-        }
+            .json(&payload);
+        self.t
+            .send(req, &format!("jira assign_issue {key}"))
+            .await?;
 
         Ok(())
     }
@@ -1361,22 +1244,15 @@ impl JiraClient {
             self.t.base,
             path_seg(attachment_id)
         );
-        let resp = self
+        let req = self
             .t
             .http()?
             .get(&url)
-            .header("Authorization", &self.t.auth_header)
-            .send()
-            .await
-            .map_err(|e| Error::Upstream(format!("jira attachment request: {e}")))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(Error::Upstream(format!(
-                "jira attachment {attachment_id} failed ({status}): {body}"
-            )));
-        }
+            .header("Authorization", &self.t.auth_header);
+        let resp = self
+            .t
+            .send(req, &format!("jira attachment {attachment_id}"))
+            .await?;
 
         let mime = resp
             .headers()
@@ -1416,25 +1292,17 @@ impl JiraClient {
             }
         });
 
-        let resp = self
+        let req = self
             .t
             .http()?
             .put(&url)
             .header("Authorization", &self.t.auth_header)
             .header("Accept", "application/json")
             .header("Content-Type", "application/json")
-            .json(&payload)
-            .send()
-            .await
-            .map_err(|e| Error::Upstream(format!("jira update_description request: {e}")))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(Error::Upstream(format!(
-                "jira update_description {key} failed ({status}): {body}"
-            )));
-        }
+            .json(&payload);
+        self.t
+            .send(req, &format!("jira update_description {key}"))
+            .await?;
 
         Ok(())
     }
@@ -1442,23 +1310,14 @@ impl JiraClient {
     /// The issue's raw description ADF (`Value::Null` when it has none).
     async fn description_adf(&self, key: &str) -> Result<serde_json::Value> {
         let url = format!("{}/rest/api/3/issue/{}", self.t.base, path_seg(key));
-        let resp = self
+        let req = self
             .t
             .http()?
             .get(&url)
             .header("Authorization", &self.t.auth_header)
             .header("Accept", "application/json")
-            .query(&[("fields", "description")])
-            .send()
-            .await
-            .map_err(|e| Error::Upstream(format!("jira description request: {e}")))?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(Error::Upstream(format!(
-                "jira description {key} failed ({status}): {body}"
-            )));
-        }
+            .query(&[("fields", "description")]);
+        let resp = self.t.send(req, &format!("jira description {key}")).await?;
         let body: serde_json::Value = resp
             .json()
             .await
@@ -1480,23 +1339,13 @@ impl JiraClient {
             self.t.base,
             path_seg(key)
         );
-        let resp = self
+        let req = self
             .t
             .http()?
             .get(&url)
             .header("Authorization", &self.t.auth_header)
-            .header("Accept", "application/json")
-            .send()
-            .await
-            .map_err(|e| Error::Upstream(format!("jira editmeta request: {e}")))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(Error::Upstream(format!(
-                "jira editmeta {key} failed ({status}): {body}"
-            )));
-        }
+            .header("Accept", "application/json");
+        let resp = self.t.send(req, &format!("jira editmeta {key}")).await?;
 
         let body: serde_json::Value = resp
             .json()
@@ -1514,25 +1363,17 @@ impl JiraClient {
         let url = format!("{}/rest/api/3/issue/{}", self.t.base, path_seg(key));
         let payload = serde_json::json!({ "fields": fields });
 
-        let resp = self
+        let req = self
             .t
             .http()?
             .put(&url)
             .header("Authorization", &self.t.auth_header)
             .header("Accept", "application/json")
             .header("Content-Type", "application/json")
-            .json(&payload)
-            .send()
-            .await
-            .map_err(|e| Error::Upstream(format!("jira update_fields request: {e}")))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(Error::Upstream(format!(
-                "jira update_fields {key} failed ({status}): {body}"
-            )));
-        }
+            .json(&payload);
+        self.t
+            .send(req, &format!("jira update_fields {key}"))
+            .await?;
 
         Ok(())
     }
@@ -1593,23 +1434,16 @@ impl JiraClient {
             self.t.base,
             path_seg(project_key)
         );
-        let resp = self
+        let req = self
             .t
             .http()?
             .get(&url)
             .header("Authorization", &self.t.auth_header)
-            .header("Accept", "application/json")
-            .send()
-            .await
-            .map_err(|e| Error::Upstream(format!("jira list_issue_types request: {e}")))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(Error::Upstream(format!(
-                "jira list_issue_types {project_key} failed ({status}): {body}"
-            )));
-        }
+            .header("Accept", "application/json");
+        let resp = self
+            .t
+            .send(req, &format!("jira list_issue_types {project_key}"))
+            .await?;
 
         let body: serde_json::Value = resp
             .json()

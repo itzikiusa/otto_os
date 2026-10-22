@@ -1,7 +1,7 @@
 //! Accounting for provider records whose usage can be updated in place.
 //! The checkpoint commits with the owed events through the tailer's journal.
 
-use otto_usage::ParsedUsage;
+use crate::ParsedUsage;
 
 #[path = "native/agy.rs"]
 mod agy;
@@ -247,7 +247,7 @@ impl super::UsageTailer {
                         };
                         let usage = row.parsed_usage();
                         let cost = row.cost_usd().unwrap_or_else(|| {
-                            otto_usage::estimate_cost(
+                            crate::estimate_cost(
                                 &usage.model,
                                 usage.input,
                                 usage.output,
@@ -261,12 +261,12 @@ impl super::UsageTailer {
                             continue;
                         };
                         let session = self.lookup_native("grok", &row.session_id).await;
-                        self.pending_events.push(otto_usage::UsageEvent {
+                        self.pending_events.push(crate::UsageEvent {
                             ts: Some(timestamp),
                             workspace_id: session
                                 .as_ref()
                                 .map(|s| s.workspace_id.clone())
-                                .unwrap_or_else(|| otto_usage::EXTERNAL_WORKSPACE.into()),
+                                .unwrap_or_else(|| crate::EXTERNAL_WORKSPACE.into()),
                             session_id: session
                                 .map(|s| s.otto_session_id)
                                 .unwrap_or(row.session_id),
@@ -330,7 +330,7 @@ impl super::UsageTailer {
                 }
             }
             for row in snapshot.rows {
-                let cost = otto_usage::estimate_cost(
+                let cost = crate::estimate_cost(
                     &row.usage.model,
                     row.usage.input,
                     row.usage.output,
@@ -343,12 +343,12 @@ impl super::UsageTailer {
                 else {
                     continue;
                 };
-                self.pending_events.push(otto_usage::UsageEvent {
+                self.pending_events.push(crate::UsageEvent {
                     ts: Some(row.timestamp),
                     workspace_id: session
                         .as_ref()
                         .map(|s| s.workspace_id.clone())
-                        .unwrap_or_else(|| otto_usage::EXTERNAL_WORKSPACE.into()),
+                        .unwrap_or_else(|| crate::EXTERNAL_WORKSPACE.into()),
                     session_id: session
                         .as_ref()
                         .map(|s| s.otto_session_id.clone())

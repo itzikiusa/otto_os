@@ -168,13 +168,11 @@ impl FieldSnap {
 pub struct ObjectSnap {
     pub name: String,
     pub kind: ObjKind,
-    /// Columns (SQL — always populated, ordered index-first) or, for Mongo, the
-    /// sampled field paths (filled lazily; see [`ObjectSnap::fields_ready`]).
+    /// Columns (SQL — always populated, ordered index-first). Mongo snapshots
+    /// leave a collection's fields empty here: its sampled field paths live in
+    /// [`CompletionCache`]'s separate per-collection field cache, sampled only
+    /// for the collection in context (single-flight via `fields_building`).
     pub fields: Vec<FieldSnap>,
-    /// `true` once `fields` reflects a real introspection/sampling. SQL builds
-    /// fields eagerly (always `true`); Mongo samples a collection's fields only
-    /// when it's the one in context (cheap), so its objects start `false`.
-    pub fields_ready: bool,
 }
 
 /// A stored procedure / function (SQL) — powers routine-name completion after
@@ -234,7 +232,6 @@ pub fn snapshot_from_graph(graph: &crate::types::SchemaGraph) -> SchemaSnapshot 
                     _ => ObjKind::Table,
                 },
                 fields: pk,
-                fields_ready: true,
             }
         })
         .collect();
@@ -724,7 +721,6 @@ mod tests {
                 name: "users".into(),
                 kind: ObjKind::Table,
                 fields: vec![FieldSnap::new("id", Some("int".into()), Rank::Pk)],
-                fields_ready: true,
             }],
             ..Default::default()
         }

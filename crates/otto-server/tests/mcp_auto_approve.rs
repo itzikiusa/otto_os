@@ -566,6 +566,123 @@ async fn an_agent_credential_cannot_decide_approvals_but_its_owner_can() {
     assert_eq!(d.last_audit("create_pr").await["decision"], "approved");
 }
 
+/// A non-root user `id` holding the `Mcp` Admin feature grant, Admin of
+/// workspace `ws` only, with a signed-in (human) API token.
+async fn mcp_admin_elsewhere(d: &Daemon, id: &str, ws: &str) -> String {
+    use otto_core::domain::{Capability, Feature};
+    seed_user(&d.pool, id, false).await;
+    seed_workspace(&d.pool, ws, id).await;
+    otto_state::GrantsRepo::new(d.pool.clone())
+        .set_grants(id, &[(Feature::Mcp, Capability::Admin)])
+        .await
+        .unwrap();
+    let (token, _) = AuthRepo::new(d.pool.clone())
+        .issue_api_token(&id.to_string(), Some("ui"))
+        .await
+        .unwrap();
+    // The feature grant is real: the route-level `Require(Mcp, Admin)` lets
+    // them in, so a refusal below comes from the decide handler's own gates.
+    let (st, body) = d
+        .send("GET", &token, "/mcp/approvals?status=pending", None)
+        .await;
+    assert_eq!(st, 200, "{id} holds Mcp Admin: {body}");
+    token
+}
+
+/// test-quality-4-01 (1): an `Mcp` Admin grant carries no workspace. A grant
+/// holder who is Admin of ANOTHER workspace only can't decide ws1's card.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_mcp_admin_of_another_workspace_cannot_decide_its_approvals() {
+    let d = boot().await;
+    let env = d.agent_invoke("create_pr", pr_args()).await;
+    assert_eq!(env["decision"], "pending_approval", "{env}");
+    let id = env["approval_id"].as_str().unwrap().to_string();
+    let bob = mcp_admin_elsewhere(&d, "bob", "ws-bob").await;
+    for approved in [true, false] {
+        let (st, body) = d
+            .send(
+                "POST",
+                &bob,
+                &format!("/mcp/approvals/{id}/decide"),
+                Some(json!({"approved": approved})),
+            )
+            .await;
+        assert!(
+            st == 403 || st == 404,
+            "a ws-bob admin decided ws1's approval ({st}): {body}"
+        );
+    }
+    let pending = d.pending_approvals().await;
+    assert!(
+        pending.iter().any(|a| a["id"] == json!(id)),
+        "still pending: {pending:?}"
+    );
+}
+
+/// test-quality-4-01 (3): impersonation can't launder a self-approval. A card
+/// raised by alice herself (not her agent) can't be decided by alice acting
+/// as another user, and stays pending.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_requester_cannot_approve_their_own_request_through_impersonation() {
+    let d = boot().await;
+    let card = otto_state::McpApprovalRepo::new(d.pool.clone())
+        .create(otto_state::NewApproval {
+            workspace_id: Some("ws1".into()),
+            kind: "otto_tool".into(),
+            server_id: None,
+            server_name: None,
+            tool: Some("otto.create_pr".into()),
+            title: "Create a PR".into(),
+            detail: None,
+            args_redacted_json: "{}".into(),
+            args_hash: None,
+            risk_label: None,
+            requested_by: Some("alice".into()),
+            requested_by_kind: Some("user".into()),
+            requested_by_session_id: None,
+            expires_at: None,
+        })
+        .await
+        .unwrap();
+    // carol: an Mcp Admin who is ALSO an editor of ws1, so only the
+    // impersonation gate stands between alice-as-carol and the decision.
+    let _ = mcp_admin_elsewhere(&d, "carol", "ws-carol").await;
+    sqlx::query(
+        "INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ('ws1', 'carol', 'admin')",
+    )
+    .execute(&d.pool)
+    .await
+    .unwrap();
+    let as_carol = AuthRepo::new(d.pool.clone())
+        .issue_impersonation_token(
+            &"alice".to_string(),
+            &"carol".to_string(),
+            chrono::Duration::minutes(30),
+        )
+        .await
+        .unwrap();
+    let (st, body) = d
+        .send(
+            "POST",
+            &as_carol,
+            &format!("/mcp/approvals/{}/decide", card.id),
+            Some(json!({"approved": true})),
+        )
+        .await;
+    assert_eq!(st, 403, "{body}");
+    assert!(
+        body["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("requester cannot approve through impersonation")),
+        "refused by the impersonation gate: {body}"
+    );
+    let pending = d.pending_approvals().await;
+    assert!(
+        pending.iter().any(|a| a["id"] == json!(card.id)),
+        "still pending: {pending:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Performance guards (perf/10-mcp F2/F4/F5/F8/F9) — and proof the governance
 // semantics the caches sit under are unchanged.

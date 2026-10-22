@@ -188,9 +188,19 @@ pub struct WorkbenchAsset {
 // Helpers
 // ---------------------------------------------------------------------------
 
-pub fn sha256_hex(bytes: &[u8]) -> String {
+/// Hex SHA-256 of CONTENT, used as an identity/change-detection digest:
+/// the content-addressed `workbench_blobs` key, the "unchanged since the last
+/// save" check, asset de-duplication, and the correlation digest of a long
+/// tool argument in the MCP audit log. It never hashes a password, token or
+/// other secret for storage or comparison — a credential would need a keyed
+/// or password hash instead (CodeQL `rust/weak-sensitive-data-hashing` 461
+/// is a false positive here; the name makes the purpose explicit).
+pub fn content_digest_hex(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
+
+/// The previous name, kept for existing importers (`mcp_audit`).
+pub use self::content_digest_hex as sha256_hex;
 
 fn invalid(msg: impl Into<String>) -> Error {
     Error::Invalid(msg.into())
@@ -297,7 +307,7 @@ fn row_to_rev(r: &sqlx::sqlite::SqliteRow) -> Result<WorkbenchRevision> {
 type Tx = sqlx::Transaction<'static, sqlx::Sqlite>;
 
 async fn put_blob(tx: &mut Tx, content: &str) -> Result<String> {
-    let hash = sha256_hex(content.as_bytes());
+    let hash = content_digest_hex(content.as_bytes());
     sqlx::query("INSERT OR IGNORE INTO workbench_blobs (hash, content, size) VALUES (?, ?, ?)")
         .bind(&hash)
         .bind(content)
@@ -347,7 +357,7 @@ async fn record_revision(
     restored_from: Option<i64>,
     now: DateTime<Utc>,
 ) -> Result<Option<i64>> {
-    let hash = sha256_hex(content.as_bytes());
+    let hash = content_digest_hex(content.as_bytes());
     if hash == doc.content_hash && kind != "restore" {
         // ⌘S on already-autosaved content SEALS the open burst: the latest
         // `auto` revision becomes a `checkpoint` (it already holds exactly
@@ -869,7 +879,7 @@ impl WorkbenchRepo {
                 "asset must be 1..={MAX_ASSET_BYTES} bytes"
             )));
         }
-        let sha = sha256_hex(data);
+        let sha = content_digest_hex(data);
         // Same bytes from the same owner → the existing asset (idempotent paste).
         if let Some(r) = sqlx::query(
             "SELECT id, mime, size, sha256, created_at FROM workbench_assets

@@ -241,30 +241,7 @@ pub async fn seed_tasks<C: ProductStudioHost>(
             return Vec::new();
         }
     };
-    let Some(v) = otto_core::text::extract_json(&reply) else {
-        warn!("product_swarm: planner returned no parseable JSON");
-        return Vec::new();
-    };
-    let tasks_json = v
-        .get("tasks")
-        .and_then(|t| t.as_array())
-        .cloned()
-        .unwrap_or_default();
-    let parsed: Vec<ParsedTask> = tasks_json
-        .iter()
-        .filter_map(|t| {
-            let title = t.get("title").and_then(|v| v.as_str())?.trim().to_string();
-            if title.is_empty() {
-                return None;
-            }
-            let description = t
-                .get("description")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            Some(ParsedTask { title, description })
-        })
-        .collect();
+    let parsed = parse_planner_tasks(&reply, "planner");
     create_tasks(ctx, project, user_id, parsed).await
 }
 
@@ -719,11 +696,13 @@ pub(crate) async fn seed_discovery_tasks<C: ProductStudioHost>(
     create_tasks(ctx, project, user_id, parsed).await
 }
 
-/// Parse the discovery planner's `{"tasks":[{title,description}]}` reply into
-/// seedable tasks; returns empty on no/invalid JSON (caller falls back).
-fn parse_discovery_tasks(reply: &str) -> Vec<ParsedTask> {
-    let Some(v) = otto_core::text::extract_json(reply) else {
-        warn!("product_swarm: discovery planner returned no parseable JSON");
+/// Parse a planner's `{"tasks":[{title,description}]}` reply into seedable
+/// tasks; returns empty on no/invalid JSON (caller falls back). The first
+/// object with a `tasks` array wins, so a `{}` or another JSON example earlier
+/// in the reply does not yield zero tasks.
+fn parse_planner_tasks(reply: &str, which: &str) -> Vec<ParsedTask> {
+    let Some(v) = otto_swarm::recruiter::extract_plan(reply) else {
+        warn!("product_swarm: {which} returned no parseable JSON");
         return Vec::new();
     };
     v.get("tasks")
@@ -744,6 +723,11 @@ fn parse_discovery_tasks(reply: &str) -> Vec<ParsedTask> {
             Some(ParsedTask { title, description })
         })
         .collect()
+}
+
+/// The discovery planner's reply (see [`parse_planner_tasks`]).
+fn parse_discovery_tasks(reply: &str) -> Vec<ParsedTask> {
+    parse_planner_tasks(reply, "discovery planner")
 }
 
 /// `POST /api/v1/product/stories/{sid}/discover` — launch a repeatable discovery
@@ -1021,6 +1005,19 @@ mod tests {
             created_at: now,
             updated_at: now,
         }
+    }
+
+    /// backend-correctness-4-04: a `{}` (or an unrelated JSON example) before
+    /// the plan no longer yields zero tasks.
+    #[test]
+    fn planner_reply_skips_a_brace_preamble() {
+        let reply = "Checked `fn x() {}` and the config {\"a\": 1} first.\n\
+                     {\"tasks\": [{\"title\": \"Write spec\", \"description\": \"d\"}]}";
+        let tasks = parse_planner_tasks(reply, "planner");
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].title, "Write spec");
+        assert_eq!(parse_discovery_tasks(reply).len(), 1);
+        assert!(parse_planner_tasks("no json here", "planner").is_empty());
     }
 
     #[test]

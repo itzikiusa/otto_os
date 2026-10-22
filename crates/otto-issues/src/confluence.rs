@@ -155,19 +155,10 @@ impl ConfluenceClient {
                 Some(n) => self.t.http()?.get(n),
                 None => self.t.http()?.get(url).query(query),
             };
-            let resp = req
+            let req = req
                 .header("Authorization", &self.t.auth_header)
-                .header("Accept", "application/json")
-                .send()
-                .await
-                .map_err(|e| Error::Upstream(format!("confluence {what} request: {e}")))?;
-            if !resp.status().is_success() {
-                let status = resp.status();
-                let body = resp.text().await.unwrap_or_default();
-                return Err(Error::Upstream(format!(
-                    "confluence {what} failed ({status}): {body}"
-                )));
-            }
+                .header("Accept", "application/json");
+            let resp = self.t.send(req, &format!("confluence {what}")).await?;
             let body: serde_json::Value = resp
                 .json()
                 .await
@@ -203,24 +194,17 @@ impl ConfluenceClient {
     pub async fn get_page(&self, id: &str) -> Result<ConfluencePage> {
         self.ensure_tls()?;
         let url = self.api(&format!("/content/{}", crate::jira::path_seg(id)));
-        let resp = self
+        let req = self
             .t
             .http()?
             .get(&url)
             .header("Authorization", &self.t.auth_header)
             .header("Accept", "application/json")
-            .query(&[("expand", "body.storage,version,space")])
-            .send()
-            .await
-            .map_err(|e| Error::Upstream(format!("confluence get_page request: {e}")))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(Error::Upstream(format!(
-                "confluence get_page {id} failed ({status}): {body}"
-            )));
-        }
+            .query(&[("expand", "body.storage,version,space")]);
+        let resp = self
+            .t
+            .send(req, &format!("confluence get_page {id}"))
+            .await?;
 
         let body: serde_json::Value = resp
             .json()
@@ -327,33 +311,30 @@ impl ConfluenceClient {
             }
         });
 
-        let resp = self
+        let req = self
             .t
             .http()?
             .put(&url)
             .header("Authorization", &self.t.auth_header)
             .header("Accept", "application/json")
             .header("Content-Type", "application/json")
-            .json(&payload)
-            .send()
-            .await
-            .map_err(|e| Error::Upstream(format!("confluence update_page request: {e}")))?;
+            .json(&payload);
+        let resp = self.t.send_raw(req, "confluence update_page").await?;
 
-        if !resp.status().is_success() {
-            let status = resp.status();
+        if resp.status() == reqwest::StatusCode::CONFLICT {
             let body = resp.text().await.unwrap_or_default();
+            let body = otto_core::text::clip_chars(body.trim(), crate::atlassian::BODY_SNIPPET_MAX);
             // 409 = someone saved a newer version between our read and this
             // write (`version + 1` is taken). Surface it as a conflict, not an
             // upstream outage, so callers can tell the user to re-read.
-            if status == reqwest::StatusCode::CONFLICT {
-                return Err(Error::Conflict(format!(
-                    "confluence page {id} was changed by someone else — re-read it and re-apply the edit ({body})"
-                )));
-            }
-            return Err(Error::Upstream(format!(
-                "confluence update_page {id} failed ({status}): {body}"
+            return Err(Error::Conflict(format!(
+                "confluence page {id} was changed by someone else — re-read it and re-apply the edit ({body})"
             )));
         }
+        let resp = self
+            .t
+            .check(resp, &format!("confluence update_page {id}"))
+            .await?;
 
         let body: serde_json::Value = resp
             .json()
@@ -378,25 +359,18 @@ impl ConfluenceClient {
             }
         });
 
-        let resp = self
+        let req = self
             .t
             .http()?
             .post(&url)
             .header("Authorization", &self.t.auth_header)
             .header("Accept", "application/json")
             .header("Content-Type", "application/json")
-            .json(&payload)
-            .send()
-            .await
-            .map_err(|e| Error::Upstream(format!("confluence add_comment request: {e}")))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(Error::Upstream(format!(
-                "confluence add_comment page {page_id} failed ({status}): {body}"
-            )));
-        }
+            .json(&payload);
+        let resp = self
+            .t
+            .send(req, &format!("confluence add_comment page {page_id}"))
+            .await?;
 
         let body: serde_json::Value = resp
             .json()
@@ -492,7 +466,7 @@ impl ConfluenceClient {
         let limit = limit.clamp(1, 100);
         let results_vec: Vec<serde_json::Value> = if start == 0 {
             let limit_s = limit.to_string();
-            let resp = self
+            let req = self
                 .t
                 .http()?
                 .get(&url)
@@ -502,18 +476,8 @@ impl ConfluenceClient {
                     ("cql", cql),
                     ("limit", limit_s.as_str()),
                     ("expand", "space"),
-                ])
-                .send()
-                .await
-                .map_err(|e| Error::Upstream(format!("confluence search_pages request: {e}")))?;
-
-            if !resp.status().is_success() {
-                let status = resp.status();
-                let body = resp.text().await.unwrap_or_default();
-                return Err(Error::Upstream(format!(
-                    "confluence search_pages failed ({status}): {body}"
-                )));
-            }
+                ]);
+            let resp = self.t.send(req, "confluence search_pages").await?;
 
             let body: serde_json::Value = resp
                 .json()

@@ -1712,12 +1712,7 @@ impl MysqlDriver {
                 ObjKind::Table
             };
             let fields = by_table.remove(&name).unwrap_or_default();
-            objects.push(ObjectSnap {
-                name,
-                kind,
-                fields,
-                fields_ready: true,
-            });
+            objects.push(ObjectSnap { name, kind, fields });
         }
         // Any tables that appeared only in columns (shouldn't happen, but be safe).
         for name in order {
@@ -1726,7 +1721,6 @@ impl MysqlDriver {
                     name,
                     kind: ObjKind::Table,
                     fields,
-                    fields_ready: true,
                 });
             }
         }

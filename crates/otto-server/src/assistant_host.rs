@@ -20,6 +20,7 @@ use otto_core::api::CreateSessionReq;
 use otto_core::domain::{Session, SessionKind};
 use otto_core::event::Event;
 use otto_core::{Error, Id, Result};
+use otto_sessions::submit::SubmitOpts;
 use otto_state::{DbPool, PersonalAgent, WorkspacesRepo};
 use serde_json::{json, Value};
 use tokio::sync::broadcast;
@@ -29,7 +30,6 @@ use crate::agent_run::run_with_recovery;
 use crate::agent_run::watch_for_result;
 use crate::cadence;
 use crate::report_delivery::augment_report_prompt;
-use crate::review_session::{bracketed_paste, dispatched, wait_for_tui, PASTE_TO_ENTER};
 use crate::state::ServerCtx;
 
 impl AssistantCtx for ServerCtx {
@@ -366,15 +366,10 @@ async fn run_one_session(
     let sid = session.id.clone();
     *captured_sid.lock().unwrap_or_else(|e| e.into_inner()) = Some(sid.clone());
 
-    if wait_for_tui(&ctx.manager, &sid).await {
-        let _ = ctx.manager.input(&sid, &bracketed_paste(prompt)).await;
-        tokio::time::sleep(PASTE_TO_ENTER).await;
-        let before = ctx.manager.live_handle(&sid).map(|h| h.last_output_at());
-        let _ = ctx.manager.input(&sid, b"\r").await;
-        if !dispatched(&ctx.manager, &sid, before).await {
-            let _ = ctx.manager.input(&sid, b"\r").await;
-        }
-    }
+    // The one locked submit; the watch below catches a prompt that never landed.
+    ctx.manager
+        .submit_prompt(&sid, prompt, SubmitOpts::default())
+        .await;
 
     watch_for_result(
         &ctx.manager,

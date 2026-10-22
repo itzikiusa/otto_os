@@ -480,11 +480,11 @@ async fn object_detail_reads_do_not_scale_with_repeated_foreign_key_scopes() {
     );
 }
 
-#[tokio::test]
-async fn object_detail_filters_mixed_fk_scopes_without_changing_order() {
+/// A non-root reader whose enforced policy allows `discover` + `db_browse`
+/// on the `shop` database only (the scoped caller of the filter tests).
+async fn shop_only_reader(service: &DbViewerService, conn: &Id, root: Id) -> Id {
     use otto_core::access::*;
     use otto_core::domain::{Capability, Feature};
-    let (mut service, conn, root) = fixture().await;
     let pool = service.connections.pool();
     let reader = otto_state::UsersRepo::new(pool.clone())
         .create("reader", "", "Reader", false)
@@ -496,7 +496,7 @@ async fn object_detail_filters_mixed_fk_scopes_without_changing_order() {
         .unwrap();
     let repo = otto_state::resource_access::ResourceAccessRepo::new(pool.clone());
     let mut policy = repo
-        .get_policy(ResourceKind::Connection, &conn)
+        .get_policy(ResourceKind::Connection, conn)
         .await
         .unwrap();
     policy.rules = vec![AccessRule {
@@ -519,6 +519,13 @@ async fn object_detail_filters_mixed_fk_scopes_without_changing_order() {
     )
     .await
     .unwrap();
+    reader.id
+}
+
+#[tokio::test]
+async fn object_detail_filters_mixed_fk_scopes_without_changing_order() {
+    let (mut service, conn, root) = fixture().await;
+    let reader = shop_only_reader(&service, &conn, root).await;
     // Omitted references inherit the source; empty references remain global.
     let scopes = vec![
         Some("shop".into()),
@@ -537,7 +544,7 @@ async fn object_detail_filters_mixed_fk_scopes_without_changing_order() {
         }),
     );
     let detail = service
-        .object_detail(&conn, &reader.id, "db:shop/table:t", false)
+        .object_detail(&conn, &reader, "db:shop/table:t", false)
         .await
         .unwrap();
     assert_eq!(
@@ -550,4 +557,209 @@ async fn object_detail_filters_mixed_fk_scopes_without_changing_order() {
     );
     assert!(detail.ddl.is_none());
     assert_eq!(detail.extra, Value::Null);
+}
+
+// --- Scoped-reader filters (test-quality-4-04) --------------------------------
+
+/// A driver whose catalog spans `shop` and `hidden`: two roots, search hits in
+/// shop/hidden/shop (with the driver's own `scanned` = 2), and a graph with one
+/// edge into each database.
+struct TwoDbs;
+
+#[async_trait::async_trait]
+impl Driver for TwoDbs {
+    fn engine(&self) -> Engine {
+        Engine::Mysql
+    }
+    fn capabilities(&self) -> Capabilities {
+        crate::drivers::mysql::MysqlDriver::default().capabilities()
+    }
+    async fn test(&self, _: &ResolvedConfig) -> Result<TestResult> {
+        unreachable!()
+    }
+    async fn schema_root(&self, _: &ResolvedConfig) -> Result<Vec<SchemaNode>> {
+        Ok(["shop", "hidden"]
+            .into_iter()
+            .map(|d| SchemaNode::new(format!("db:{d}"), d, NodeKind::Database))
+            .collect())
+    }
+    async fn schema_children(
+        &self,
+        _: &ResolvedConfig,
+        _: &NodePath,
+        _: Option<&str>,
+    ) -> Result<Vec<SchemaNode>> {
+        unreachable!()
+    }
+    async fn search_objects(
+        &self,
+        _: &ResolvedConfig,
+        _: &crate::types::ObjectSearchReq,
+    ) -> Result<crate::types::ObjectSearchResult> {
+        let hit = |schema: &str, name: &str| crate::types::ObjectHit {
+            schema: schema.into(),
+            name: name.into(),
+            kind: NodeKind::Table,
+            path: format!("db:{schema}/table:{name}"),
+        };
+        Ok(crate::types::ObjectSearchResult {
+            hits: vec![
+                hit("shop", "orders"),
+                hit("hidden", "salaries"),
+                hit("shop", "order_items"),
+            ],
+            truncated: false,
+            scanned: 2,
+            supported: true,
+        })
+    }
+    async fn object_detail(&self, _: &ResolvedConfig, _: &NodePath) -> Result<ObjectDetail> {
+        unreachable!()
+    }
+    async fn run(&self, _: &ResolvedConfig, _: &QueryRequest) -> Result<QueryResult> {
+        unreachable!()
+    }
+    async fn completion(
+        &self,
+        _: &ResolvedConfig,
+        _: &crate::types::CompletionContext,
+    ) -> Result<CompletionResponse> {
+        unreachable!()
+    }
+    async fn schema_graph_bulk(
+        &self,
+        _: &ResolvedConfig,
+        schema: &str,
+        _: usize,
+    ) -> Result<Option<SchemaGraph>> {
+        let edge = |to: &str| crate::types::GraphEdge {
+            name: format!("fk_{to}"),
+            from_table: "orders".into(),
+            from_columns: vec!["ref".into()],
+            to_schema: to.into(),
+            to_table: "t".into(),
+            to_columns: vec!["id".into()],
+        };
+        Ok(Some(SchemaGraph {
+            schema: schema.into(),
+            tables: Vec::new(),
+            edges: vec![edge("shop"), edge("hidden")],
+            relationships: true,
+            truncated: false,
+        }))
+    }
+}
+
+/// A `shop`-only reader sees only `shop` at the tree root, in object search
+/// (both shop hits, in order, `scanned` recounted to 1 so the count does not
+/// reveal the hidden database) and in the ERD's edges.
+#[tokio::test]
+async fn scoped_reader_filters_root_search_and_graph_edges() {
+    let (mut service, conn, root) = fixture().await;
+    let reader = shop_only_reader(&service, &conn, root.clone()).await;
+    service
+        .registry
+        .set_for_test(Engine::Mysql, Arc::new(TwoDbs));
+
+    let roots = service.schema_root(&conn, &reader).await.unwrap();
+    assert_eq!(
+        roots.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(),
+        ["db:shop"]
+    );
+    // Root still sees both (the filter is the reader's, not the driver's).
+    assert_eq!(service.schema_root(&conn, &root).await.unwrap().len(), 2);
+
+    let req = crate::types::ObjectSearchReq {
+        q: "o".into(),
+        scope: "all".into(),
+        ..Default::default()
+    };
+    let found = service.search_objects(&conn, &reader, &req).await.unwrap();
+    assert_eq!(
+        found
+            .hits
+            .iter()
+            .map(|h| h.name.as_str())
+            .collect::<Vec<_>>(),
+        ["orders", "order_items"]
+    );
+    assert_eq!(found.scanned, 1);
+
+    let graph = service
+        .schema_graph(&conn, &reader, "shop", 300)
+        .await
+        .unwrap();
+    assert_eq!(
+        graph
+            .edges
+            .iter()
+            .map(|e| e.to_schema.as_str())
+            .collect::<Vec<_>>(),
+        ["shop"]
+    );
+}
+
+/// integrations-4-02: an agent's read-only query always reaches the driver
+/// with a bounded timeout — absent, `0` ("no limit") or too large all clamp to
+/// [`MCP_QUERY_TIMEOUT_MS`]; a smaller one is kept.
+#[tokio::test]
+async fn mcp_read_only_query_always_sends_a_bounded_timeout() {
+    struct Recording(std::sync::Mutex<Vec<Option<u64>>>);
+    #[async_trait::async_trait]
+    impl Driver for Recording {
+        fn engine(&self) -> Engine {
+            Engine::Mysql
+        }
+        fn capabilities(&self) -> Capabilities {
+            crate::drivers::mysql::MysqlDriver::default().capabilities()
+        }
+        async fn test(&self, _: &ResolvedConfig) -> Result<TestResult> {
+            unreachable!()
+        }
+        async fn schema_root(&self, _: &ResolvedConfig) -> Result<Vec<SchemaNode>> {
+            unreachable!()
+        }
+        async fn schema_children(
+            &self,
+            _: &ResolvedConfig,
+            _: &NodePath,
+            _: Option<&str>,
+        ) -> Result<Vec<SchemaNode>> {
+            unreachable!()
+        }
+        async fn object_detail(&self, _: &ResolvedConfig, _: &NodePath) -> Result<ObjectDetail> {
+            unreachable!()
+        }
+        async fn run(&self, _: &ResolvedConfig, req: &QueryRequest) -> Result<QueryResult> {
+            self.0.lock().unwrap().push(req.timeout_ms);
+            Ok(QueryResult::message("ok"))
+        }
+        async fn completion(
+            &self,
+            _: &ResolvedConfig,
+            _: &crate::types::CompletionContext,
+        ) -> Result<CompletionResponse> {
+            unreachable!()
+        }
+    }
+    let (mut service, conn, user) = fixture_mode(true).await;
+    let driver = Arc::new(Recording(Default::default()));
+    service.registry.set_for_test(Engine::Mysql, driver.clone());
+    for requested in [None, Some(0), Some(600_000), Some(2_000)] {
+        let req = QueryRequest {
+            statement: "SELECT 1".into(),
+            timeout_ms: requested,
+            ..Default::default()
+        };
+        service.run_read_only(&conn, &user, &req).await.unwrap();
+    }
+    assert_eq!(
+        *driver.0.lock().unwrap(),
+        [
+            Some(MCP_QUERY_TIMEOUT_MS),
+            Some(MCP_QUERY_TIMEOUT_MS),
+            Some(MCP_QUERY_TIMEOUT_MS),
+            Some(2_000)
+        ]
+    );
 }

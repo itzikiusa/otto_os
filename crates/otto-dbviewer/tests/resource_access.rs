@@ -444,6 +444,33 @@ async fn executor_gate_refuses_tampered_or_stale_claims_before_any_network() {
     let e = exec(f.root.id.clone()).await.unwrap_err();
     assert!(refused(&e), "cancellation requested: {e:?}");
     set(cancel, "0".into()).await;
+    // 4b. The connection itself changed after the claim (test-quality-4-05):
+    // same policy revision, but the target fingerprint no longer matches.
+    let params: String = sqlx::query_scalar("SELECT params_json FROM connections WHERE id=?")
+        .bind(&f.conn)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    let mut edited: serde_json::Value = serde_json::from_str(&params).unwrap();
+    edited["host"] = serde_json::json!("10.9.9.9");
+    let set_params = |value: String| {
+        let (pool, conn) = (f.pool.clone(), f.conn.clone());
+        async move {
+            sqlx::query("UPDATE connections SET params_json=? WHERE id=?")
+                .bind(value)
+                .bind(conn)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+    };
+    set_params(edited.to_string()).await;
+    let e = exec(f.root.id.clone()).await.unwrap_err();
+    assert!(
+        matches!(e, Error::Conflict(_)),
+        "connection edited after claim: {e:?}"
+    );
+    set_params(params).await;
     // 5. The access policy was edited after the claim (revision bump).
     let current = access
         .get_policy(ResourceKind::Connection, &f.conn)

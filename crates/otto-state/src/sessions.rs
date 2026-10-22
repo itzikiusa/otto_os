@@ -392,6 +392,21 @@ impl SessionsRepo {
         rows.iter().map(row_to_session).collect()
     }
 
+    /// Lower-cased titles of the workspace's non-archived agent sessions —
+    /// the name allocator's "already used" set. A narrow projection: it used
+    /// to decode every session row (and its meta) the workspace ever had on
+    /// each untitled agent create (backend-performance-4-03).
+    pub async fn open_agent_titles(&self, ws: &Id) -> Result<Vec<String>> {
+        sqlx::query_scalar(
+            "SELECT lower(title) FROM sessions \
+             WHERE workspace_id = ? AND archived = 0 AND kind = 'agent'",
+        )
+        .bind(ws)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("open agent titles"))
+    }
+
     /// Sessions of a workspace **owned by** `user_id` (the `created_by` creator).
     ///
     /// Used to owner-scope the session list for non-admin callers so user A's

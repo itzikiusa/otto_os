@@ -2,7 +2,9 @@
 //! [`crate::confluence::ConfluenceClient`]: both authenticate with the same
 //! `email:token` Basic credential from the same `IssueAccount`, so every
 //! transport rule lives here ONCE — the bounded client cache, the cleartext
-//! refusal and the status → `Error::Upstream` mapping. Jira used to keep its
+//! refusal, the one-retry rate-limit handling and the status → error mapping
+//! (429 → "rate limited — retry in Ns", 401/403 → `Forbidden` with a token
+//! hint, anything else → a bounded `Error::Upstream`). Jira used to keep its
 //! own copy without the TLS guard Confluence had, so an `http://` account sent
 //! the API token in cleartext on every Jira call (architecture-3-02).
 //!
@@ -30,7 +32,10 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// cache can't grow for the daemon's lifetime.
 const CLIENT_CACHE_MAX: usize = 32;
 /// Upstream error bodies are cut to this many chars in the error text.
-const BODY_SNIPPET_MAX: usize = 500;
+pub(crate) const BODY_SNIPPET_MAX: usize = 500;
+/// Longest rate-limit wait a READ absorbs (once) before the error names the
+/// wait instead — the same bound the git providers' client retries within.
+const RATE_LIMIT_RETRY_MAX: Duration = Duration::from_secs(10);
 
 struct CachedClient {
     client: reqwest::Client,
@@ -88,14 +93,69 @@ pub(crate) fn cached_client(key: &str) -> reqwest::Client {
 
 /// The mapped error for a non-2xx answer: `<what> failed (<status>): <body…>`.
 pub(crate) fn upstream_status(what: &str, status: reqwest::StatusCode, body: &str) -> Error {
-    let body = body.trim();
-    let snippet: String = body.chars().take(BODY_SNIPPET_MAX).collect();
-    let more = if body.chars().count() > BODY_SNIPPET_MAX {
-        "…"
-    } else {
-        ""
-    };
-    Error::Upstream(format!("{what} failed ({status}): {snippet}{more}"))
+    let snippet = otto_core::text::clip_chars(body.trim(), BODY_SNIPPET_MAX);
+    Error::Upstream(format!("{what} failed ({status}): {snippet}"))
+}
+
+/// `Some(wait)` when the answer is a rate-limit refusal: 429, or 503 with a
+/// `Retry-After`. `wait` comes from `Retry-After` (delta-seconds or an
+/// HTTP-date); missing / unparsable → 1 s.
+///
+/// The same rule as the git providers' `rate_limit_wait`
+/// (`otto-git/src/providers/client.rs`), kept local because otto-issues does
+/// not depend on otto-git — a candidate for a shared otto-core helper.
+pub(crate) fn rate_limit_wait(
+    status: u16,
+    headers: &reqwest::header::HeaderMap,
+) -> Option<Duration> {
+    let retry_after = headers
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim);
+    if status != 429 && !(status == 503 && retry_after.is_some()) {
+        return None;
+    }
+    if let Some(v) = retry_after {
+        if let Ok(secs) = v.parse::<u64>() {
+            return Some(Duration::from_secs(secs));
+        }
+        if let Ok(when) = chrono::DateTime::parse_from_rfc2822(v) {
+            let secs = (when.timestamp() - chrono::Utc::now().timestamp()).max(0);
+            return Some(Duration::from_secs(secs as u64));
+        }
+    }
+    Some(Duration::from_secs(1))
+}
+
+/// Classify a non-2xx Atlassian answer instead of collapsing everything into
+/// `Error::Upstream` (a 502 the UI reads as "the site is down"):
+/// - a rate-limit refusal names the wait (`<product> rate limited — retry in Ns`);
+/// - 401/403 is `Forbidden` with a token hint (an expired or revoked API
+///   token, or an account without access), so the UI can say "reconnect";
+/// - anything else stays `Upstream` with a bounded body snippet.
+pub(crate) fn status_error(
+    product: &str,
+    what: &str,
+    status: reqwest::StatusCode,
+    headers: &reqwest::header::HeaderMap,
+    body: &str,
+) -> Error {
+    if let Some(wait) = rate_limit_wait(status.as_u16(), headers) {
+        return Error::Upstream(format!(
+            "{product} rate limited — retry in {}s",
+            wait.as_secs().max(1)
+        ));
+    }
+    match status.as_u16() {
+        401 | 403 => {
+            let snippet = otto_core::text::clip_chars(body.trim(), BODY_SNIPPET_MAX);
+            Error::Forbidden(format!(
+                "{what} was refused ({status}): {snippet} — the {product} account's API token was \
+                 rejected or lacks access; update the token on the issue account"
+            ))
+        }
+        _ => upstream_status(what, status, body),
+    }
 }
 
 /// One Atlassian site + credential: the base URL, the Basic header, the
@@ -153,23 +213,73 @@ impl AtlassianTransport {
         Ok(&self.http)
     }
 
-    /// Send `req`, mapping a transport failure and a non-2xx status to
-    /// `Error::Upstream` (`what` names the call, e.g. "jira get transitions").
+    /// Send `req`, mapping a transport failure to `Error::Upstream` (`what`
+    /// names the call, e.g. "jira get transitions"), and return the answer
+    /// whatever its status — for callers that branch on one (a 404 endpoint
+    /// fallback, a 409 version conflict) before [`Self::check`]. A READ
+    /// (GET/HEAD) refused with a short rate-limit wait (≤ 10 s) is re-sent
+    /// once after that wait; writes are never re-sent.
+    pub(crate) async fn send_raw(
+        &self,
+        req: reqwest::RequestBuilder,
+        what: &str,
+    ) -> Result<reqwest::Response> {
+        let (client, request) = req.build_split();
+        let request = request.map_err(|e| Error::Upstream(format!("{what} request: {e}")))?;
+        let method = request.method();
+        let read = *method == reqwest::Method::GET || *method == reqwest::Method::HEAD;
+        let again = if read { request.try_clone() } else { None };
+        let resp = client
+            .execute(request)
+            .await
+            .map_err(|e| Error::Upstream(format!("{what} request: {e}")))?;
+        let wait = rate_limit_wait(resp.status().as_u16(), resp.headers());
+        match (again, wait) {
+            (Some(again), Some(wait)) if wait <= RATE_LIMIT_RETRY_MAX => {
+                tracing::debug!(
+                    what,
+                    wait_secs = wait.as_secs(),
+                    "atlassian: rate limited, retrying once"
+                );
+                tokio::time::sleep(wait).await;
+                client
+                    .execute(again)
+                    .await
+                    .map_err(|e| Error::Upstream(format!("{what} request: {e}")))
+            }
+            _ => Ok(resp),
+        }
+    }
+
+    /// `resp` when it is 2xx, else the classified error ([`status_error`]).
+    pub(crate) async fn check(
+        &self,
+        resp: reqwest::Response,
+        what: &str,
+    ) -> Result<reqwest::Response> {
+        if resp.status().is_success() {
+            return Ok(resp);
+        }
+        Err(self.fail(resp, what).await)
+    }
+
+    /// The classified error for a non-2xx `resp` ([`status_error`]).
+    pub(crate) async fn fail(&self, resp: reqwest::Response, what: &str) -> Error {
+        let status = resp.status();
+        let headers = resp.headers().clone();
+        let body = resp.text().await.unwrap_or_default();
+        status_error(self.product, what, status, &headers, &body)
+    }
+
+    /// [`Self::send_raw`] + [`Self::check`]: the one way a Jira/Confluence
+    /// call is sent when no status needs special handling.
     pub(crate) async fn send(
         &self,
         req: reqwest::RequestBuilder,
         what: &str,
     ) -> Result<reqwest::Response> {
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| Error::Upstream(format!("{what} request: {e}")))?;
-        if resp.status().is_success() {
-            return Ok(resp);
-        }
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        Err(upstream_status(what, status, &body))
+        let resp = self.send_raw(req, what).await?;
+        self.check(resp, what).await
     }
 }
 
@@ -201,6 +311,129 @@ mod tests {
         }
         let len = CLIENT_CACHE.get().unwrap().lock().unwrap().1.len();
         assert!(len <= CLIENT_CACHE_MAX, "{len}");
+    }
+
+    fn headers(pairs: &[(&'static str, &str)]) -> reqwest::header::HeaderMap {
+        let mut h = reqwest::header::HeaderMap::new();
+        for (k, v) in pairs {
+            h.insert(*k, v.parse().unwrap());
+        }
+        h
+    }
+
+    /// integrations-4-06: 429 (and 503 + Retry-After) read the wait; other
+    /// statuses are not rate limits.
+    #[test]
+    fn rate_limit_waits_come_from_retry_after() {
+        let none = headers(&[]);
+        assert_eq!(
+            rate_limit_wait(429, &headers(&[("retry-after", "7")])),
+            Some(Duration::from_secs(7))
+        );
+        assert_eq!(rate_limit_wait(429, &none), Some(Duration::from_secs(1)));
+        assert_eq!(
+            rate_limit_wait(503, &headers(&[("retry-after", "3")])),
+            Some(Duration::from_secs(3))
+        );
+        assert_eq!(rate_limit_wait(503, &none), None);
+        assert_eq!(
+            rate_limit_wait(500, &headers(&[("retry-after", "3")])),
+            None
+        );
+    }
+
+    /// 429 names the wait, 401/403 is Forbidden with a token hint, the rest
+    /// stays Upstream — every body bounded.
+    #[test]
+    fn statuses_are_classified() {
+        use reqwest::StatusCode as S;
+        let none = headers(&[]);
+        let rl = status_error(
+            "jira",
+            "jira search",
+            S::TOO_MANY_REQUESTS,
+            &headers(&[("retry-after", "42")]),
+            "",
+        );
+        assert!(
+            matches!(&rl, Error::Upstream(m) if m == "jira rate limited — retry in 42s"),
+            "{rl:?}"
+        );
+        for st in [S::UNAUTHORIZED, S::FORBIDDEN] {
+            let e = status_error(
+                "jira",
+                "jira search",
+                st,
+                &none,
+                &"x".repeat(BODY_SNIPPET_MAX * 3),
+            );
+            match &e {
+                Error::Forbidden(m) => {
+                    assert!(m.contains("update the token"), "{m}");
+                    assert!(m.len() < BODY_SNIPPET_MAX * 2, "body is capped");
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        let e = status_error(
+            "confluence",
+            "confluence get_page",
+            S::BAD_GATEWAY,
+            &none,
+            "down",
+        );
+        assert!(
+            matches!(&e, Error::Upstream(m) if m.contains("confluence get_page failed (502")),
+            "{e:?}"
+        );
+    }
+
+    /// A short rate-limit wait on a read is absorbed by one retry; a write is
+    /// never re-sent.
+    #[tokio::test]
+    async fn a_rate_limited_read_is_retried_once_and_a_write_is_not() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let served = hits.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                let n = served.fetch_add(1, Ordering::SeqCst);
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf).await;
+                // Every other answer is a 429 with a zero-second wait.
+                let reply = if n.is_multiple_of(2) {
+                    "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 0\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                } else {
+                    "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
+                };
+                let _ = sock.write_all(reply.as_bytes()).await;
+            }
+        });
+        let t = AtlassianTransport::new("jira", format!("http://{addr}"), "e", "t");
+        let url = format!("http://{addr}/x");
+        let resp = t
+            .send(t.http().unwrap().get(&url), "jira read")
+            .await
+            .unwrap();
+        assert_eq!(resp.text().await.unwrap(), "ok");
+        assert_eq!(hits.load(Ordering::SeqCst), 2, "one 429 + one retry");
+        // hits is even again → the POST meets a 429 and is not re-sent.
+        let err = t
+            .send(t.http().unwrap().post(&url), "jira write")
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("jira rate limited — retry in 1s"),
+            "{err}"
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 3);
     }
 
     #[test]

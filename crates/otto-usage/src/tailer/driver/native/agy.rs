@@ -222,7 +222,7 @@ mod tests {
     ) -> (u64, u64, u64, f64) {
         let mut owed = (0, 0, 0, 0.0);
         for row in rows {
-            let cost = otto_usage::estimate_cost(
+            let cost = crate::estimate_cost(
                 &row.usage.model,
                 row.usage.input,
                 row.usage.output,
@@ -367,8 +367,8 @@ mod tests {
         .await
         .unwrap();
         sqlx::query("INSERT INTO sessions(id,workspace_id,kind,provider,title,status,cwd,provider_session_id,created_by,created_at,last_active_at,meta_json) VALUES('s','w','agent','agy','t','running','/repo','parent','u',?,?,'{}')").bind(now).bind(now).execute(&pool).await.unwrap();
-        let engine = otto_usage::UsageEngine::start(
-            otto_usage::UsageConfig {
+        let engine = crate::UsageEngine::start(
+            crate::UsageConfig {
                 enabled: false,
                 ..Default::default()
             },

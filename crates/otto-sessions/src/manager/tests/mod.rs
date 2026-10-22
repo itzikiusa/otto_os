@@ -599,6 +599,8 @@ mod agent_cwd;
 mod archive;
 #[path = "grid.rs"]
 mod grid;
+#[path = "submit.rs"]
+mod submit;
 
 async fn test_manager() -> (Arc<SessionManager>, SessionsRepo, Workspace, Id) {
     // A migrated on-disk sqlite (in a tempdir) via otto-state's opener.
@@ -1227,7 +1229,14 @@ async fn failed_respawn_after_retiring_marks_session_reconnectable() {
     assert!(!manager.is_live(&session.id));
     let row = repo.get(&session.id).await.unwrap();
     assert_eq!(row.status, SessionStatus::Reconnectable);
-    assert!(row.meta.get("suspended").is_some_and(|v| !v.is_null()));
+    // Stamped as a failed restart with its cause — not "released to free
+    // memory" (error-handling-4-05).
+    let suspended = &row.meta["suspended"];
+    assert_eq!(suspended["reason"], SUSPEND_REASON_RESPAWN_FAILED);
+    assert!(
+        suspended["error"].as_str().is_some_and(|e| !e.is_empty()),
+        "{suspended}"
+    );
     // The retired child was waited for (bounded) before the respawn.
     assert!(old.on_exit().borrow().is_some(), "old child must be dead");
 }

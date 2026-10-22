@@ -1,6 +1,7 @@
 //! Bounded, paged History listing. The legacy array route
 //! (`transcript::history`) delegates here.
 use super::transcript;
+use crate::transcript::resolve;
 use crate::{
     auth::{require_ws_role, CurrentUser},
     error::{ApiError, ApiResult},
@@ -172,6 +173,16 @@ async fn page(
     .map_err(ApiError)?;
     let total = candidates.len();
     let data_dir = ctx.data_dir.clone();
+    // Rows with no persisted path whose last root scan found nothing (an
+    // ended session whose transcript the provider pruned) skip the scan while
+    // the mark is fresh (backend-performance-4-06).
+    let unpersisted: Vec<String> = candidates
+        .iter()
+        .take(budget)
+        .filter(|c| c.persisted_path.is_none())
+        .filter_map(|c| c.session.as_ref().map(|s| s.id.clone()))
+        .collect();
+    let skip = resolve::fresh_missing_marks(&ctx.pool, &unpersisted).await;
     // Only the selected bounded window enters filesystem resolution. Preserve
     // actual resolver provider/path rather than trusting stale metadata hints.
     // A persisted path costs one stat (a pruned file is `TranscriptMissing`,
@@ -182,31 +193,37 @@ async fn page(
             .into_iter()
             .take(budget)
             .map(|candidate| {
+                let mut missing = false;
                 let resolved = candidate.session.as_ref().and_then(|session| {
-                    transcript::resolve_transcript_sync(
-                        &data_dir,
-                        candidate.persisted_path.as_deref(),
-                        session,
-                    )
-                    .ok()
+                    if skip.contains(&session.id) {
+                        return None;
+                    }
+                    let persisted = candidate.persisted_path.as_deref();
+                    let r = transcript::resolve_transcript_sync(&data_dir, persisted, session);
+                    missing = resolve::should_mark_missing(session, persisted, &r);
+                    r.ok()
                 });
-                (candidate, resolved)
+                (candidate, resolved, missing)
             })
             .collect::<Vec<_>>()
     })
     .await
     .map_err(|e| ApiError(Error::Internal(format!("history resolve task: {e}"))))?;
-    let sessions_repo = otto_state::SessionsRepo::new(ctx.pool.clone());
-    for (candidate, resolved) in &resolved {
-        if let (Some(session), Some((r, true))) = (candidate.session.as_ref(), resolved) {
-            let _ = sessions_repo
-                .set_transcript_path(&session.id, &r.path.to_string_lossy())
-                .await;
+    let mut newly_missing = Vec::new();
+    for (candidate, resolved, missing) in &resolved {
+        let Some(session) = candidate.session.as_ref() else {
+            continue;
+        };
+        if let Some((r, true)) = resolved {
+            resolve::record_found(&ctx.pool, &session.id, &r.path).await;
+        } else if *missing {
+            newly_missing.push(session.id.clone());
         }
     }
+    resolve::mark_missing(&ctx.pool, &newly_missing).await;
     let resolved: Vec<_> = resolved
         .into_iter()
-        .map(|(candidate, r)| (candidate, r.map(|(r, _)| r)))
+        .map(|(candidate, r, _)| (candidate, r.map(|(r, _)| r)))
         .collect();
     let paths: Vec<_> = resolved
         .iter()

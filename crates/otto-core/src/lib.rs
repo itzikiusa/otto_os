@@ -21,6 +21,7 @@ pub mod hooks;
 pub mod id;
 pub mod keyed_lock;
 pub mod kubeconfig_policy;
+pub mod mcp_budgets;
 pub mod paths;
 pub mod proof;
 pub mod provider;

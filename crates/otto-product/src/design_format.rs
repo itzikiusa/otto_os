@@ -1,6 +1,12 @@
-//! The ONE design-artifact format enum shared by the mockup/design assist route
-//! (`mockup_assist.rs`), the swarm `otto-mockup` ingest (`routes/swarm_ingest.rs`)
-//! and the content PUT (`media.rs`). Mirrored in TS as `DesignFormat`.
+//! The product-mockup subset of the design formats, shared by the mockup/design
+//! assist route (`mockup_assist.rs`), the swarm `otto-mockup` ingest
+//! (`routes/swarm_ingest.rs`) and the content PUT (`media.rs`). Mirrored in TS
+//! as `DesignFormat`.
+//!
+//! The format REGISTRY is `otto_design::format` (wire name, mime, working-file
+//! name for every design format); this enum is a typed view over four of its
+//! entries — `mime` and `file_name` read [`DesignFormat::spec`] — plus the
+//! product-only facts (attachment kind, arena group, fence language, title).
 //!
 //! Every agent-editable artifact in the Design arena is one of these four text
 //! formats; uploaded binaries (`glb` / `gltf` / images) are attachments with a
@@ -48,12 +54,14 @@ impl DesignFormat {
 
     /// Served content type (must stay in `media::allowed_mime`).
     pub fn mime(self) -> &'static str {
-        match self {
-            DesignFormat::Html => "text/html",
-            DesignFormat::Mermaid => "text/vnd.mermaid",
-            DesignFormat::Excalidraw => "application/vnd.excalidraw+json",
-            DesignFormat::Scene3d => "application/vnd.otto.scene3d+json",
-        }
+        self.spec().mime
+    }
+
+    /// This format's entry in the `otto_design::format` registry (every
+    /// variant has one; a unit test pins it).
+    pub fn spec(self) -> &'static otto_design::format::FormatSpec {
+        otto_design::format::spec(self.as_str())
+            .expect("every DesignFormat is registered in otto_design::format")
     }
 
     /// Reverse of `mime` — which format an existing attachment row is, if it is
@@ -74,12 +82,7 @@ impl DesignFormat {
 
     /// The working-file name the assist agent edits in its cwd.
     pub fn file_name(self) -> &'static str {
-        match self {
-            DesignFormat::Html => "design.html",
-            DesignFormat::Mermaid => "design.mmd",
-            DesignFormat::Excalidraw => "design.excalidraw",
-            DesignFormat::Scene3d => "scene.json",
-        }
+        self.spec().file_name
     }
 
     /// Display filename for a freshly agent-minted artifact.
@@ -196,6 +199,31 @@ pub fn html_escape(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// architecture-4-02: the enum is a view over the one registry — every
+    /// variant resolves, with the mime / working-file names it always had.
+    #[test]
+    fn every_variant_is_a_registry_entry() {
+        let expected = [
+            (DesignFormat::Html, "text/html", "design.html"),
+            (DesignFormat::Mermaid, "text/vnd.mermaid", "design.mmd"),
+            (
+                DesignFormat::Excalidraw,
+                "application/vnd.excalidraw+json",
+                "design.excalidraw",
+            ),
+            (
+                DesignFormat::Scene3d,
+                "application/vnd.otto.scene3d+json",
+                "scene.json",
+            ),
+        ];
+        for (f, mime, file) in expected {
+            assert_eq!(f.spec().name, f.as_str());
+            assert_eq!((f.mime(), f.file_name()), (mime, file));
+            assert_eq!(DesignFormat::from_mime(mime), Some(f));
+        }
+    }
 
     #[test]
     fn parses_the_four_formats_case_insensitively() {

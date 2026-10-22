@@ -13,6 +13,9 @@ otto-core.workspace = true
 otto-state.workspace = true
 otto-keychain.workspace = true
 otto-server.workspace = true
+# The control-plane catalog (`otto_mcp::outward`) the native tool listing is
+# generated from, and the shared gateway budget (architecture-1-05, integrations-4-01).
+otto-mcp.workspace = true
 rust-embed = { workspace = true, optional = true, features = ["deterministic-timestamps"] }
 tokio.workspace = true
 axum.workspace = true
@@ -34,9 +37,6 @@ otto-telemetry = { path = "../otto-telemetry-collector", package = "otto-telemet
 # `ottod mcp-tools` (Task B2b): the first-party MCP tool server calls back into
 # the running daemon over loopback HTTP with a per-session read-only token.
 reqwest.workspace = true
-# Usage tailer: FSEvents watch on the transcript roots instead of a 20 s full
-# stat walk (same pin/features as otto-git).
-notify = { version = "8.2.0", default-features = false, features = ["macos_fsevent"] }
 
 # getrlimit/setrlimit: raise the soft open-file limit at startup (launchd's
 # 256 default is far too low for a PTY-heavy daemon).

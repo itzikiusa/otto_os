@@ -68,34 +68,88 @@ fn secret_ref(id: &str) -> String {
     format!("mcp-{id}")
 }
 
-/// Read a server's secret blob; absent/corrupt → empty object.
-#[allow(clippy::disallowed_methods)] // sync McpProvider path: enabled_servers is blocking by contract (already blocks on a bridge thread)
-fn load_secret_blob(secrets: &dyn SecretStore, id: &str) -> Value {
-    secrets
-        .get(&secret_ref(id))
-        .ok()
-        .flatten()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_else(|| json!({}))
+/// A stored secret blob from a Keychain lookup. ONLY a missing entry
+/// (`Ok(None)`) means "no secrets" (`{}`); a failed read (a locked or denied
+/// Keychain) or a blob that doesn't parse is an `Err` (PC-6). Folding those to
+/// `{}` launched the server without its token and, on a PATCH, rewrote the
+/// blob without the stored values (or deleted it outright). Pure — tested.
+fn parse_secret_blob(lookup: otto_core::Result<Option<String>>, id: &str) -> Result<Value, String> {
+    match lookup {
+        Ok(None) => Ok(json!({})),
+        Ok(Some(raw)) => serde_json::from_str::<Value>(&raw)
+            .ok()
+            .filter(Value::is_object)
+            .ok_or_else(|| format!("the stored secrets of mcp server {id} don't parse")),
+        Err(e) => Err(format!("Keychain read for mcp server {id} failed: {e}")),
+    }
 }
 
-/// Replace the blob's `env` part (preserving `headers`, which the Control
-/// Plane owns) and persist secret metadata onto the row. An EMPTY value for a
-/// key keeps the currently stored value (the UI's "KEY= keeps it" sentinel —
-/// stored values are never echoed back, so the client can't resend them). An
-/// empty combined blob deletes the Keychain entry and clears the row's ref.
+/// Read a server's secret blob (see [`parse_secret_blob`]).
+#[allow(clippy::disallowed_methods)] // sync McpProvider path: enabled_servers is blocking by contract (already blocks on a bridge thread)
+fn load_secret_blob(secrets: &dyn SecretStore, id: &str) -> Result<Value, String> {
+    parse_secret_blob(secrets.get(&secret_ref(id)), id)
+}
+
+/// [`load_secret_blob`] off the runtime thread, for the routes.
+async fn read_secret_blob(secrets: &Arc<dyn SecretStore>, id: &str) -> Result<Value, String> {
+    parse_secret_blob(
+        otto_core::secrets::get_async(secrets, &secret_ref(id)).await,
+        id,
+    )
+}
+
+/// `PATCH /mcp-servers/{id}` error: an ordinary [`ApiError`], or the Keychain
+/// refusing to read the server's stored secrets — 503 "Keychain unavailable"
+/// with NOTHING written (PC-6), since the "KEY= keeps it" sentinels can't be
+/// resolved without the stored values.
+#[derive(Debug)]
+pub enum UpdateError {
+    Api(crate::error::ApiError),
+    KeychainUnavailable,
+}
+
+impl From<crate::error::ApiError> for UpdateError {
+    fn from(e: crate::error::ApiError) -> Self {
+        UpdateError::Api(e)
+    }
+}
+
+impl From<Error> for UpdateError {
+    fn from(e: Error) -> Self {
+        UpdateError::Api(e.into())
+    }
+}
+
+impl axum::response::IntoResponse for UpdateError {
+    fn into_response(self) -> axum::response::Response {
+        match self {
+            UpdateError::Api(e) => e.into_response(),
+            UpdateError::KeychainUnavailable => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(otto_core::api::Problem {
+                    code: "keychain_unavailable".to_string(),
+                    message: "Keychain unavailable".to_string(),
+                }),
+            )
+                .into_response(),
+        }
+    }
+}
+
+/// Replace the stored `blob`'s `env` part (preserving `headers`, which the
+/// Control Plane owns) and persist secret metadata onto the row. An EMPTY
+/// value for a key keeps the currently stored value (the UI's "KEY= keeps it"
+/// sentinel — stored values are never echoed back, so the client can't resend
+/// them). An empty combined blob deletes the Keychain entry and clears the
+/// row's ref. The caller reads `blob` first ([`read_secret_blob`]) so a failed
+/// read refuses the request before anything is written.
 async fn write_secret_env(
     secrets: &std::sync::Arc<dyn SecretStore>,
     repo: &McpServersRepo,
     id: &str,
+    mut blob: Value,
     secret_env: &BTreeMap<String, String>,
 ) -> ApiResult<McpServer> {
-    let mut blob = otto_core::secrets::get_async(secrets, &secret_ref(id))
-        .await
-        .ok()
-        .flatten()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_else(|| json!({}));
     let previous = blob
         .get("env")
         .and_then(Value::as_object)
@@ -200,7 +254,9 @@ pub async fn create(
         })
         .await?;
     if !req.secret_env.is_empty() {
-        server = write_secret_env(&ctx.secrets, &repo, &server.id, &req.secret_env).await?;
+        // A brand-new id has no stored blob to merge with.
+        server =
+            write_secret_env(&ctx.secrets, &repo, &server.id, json!({}), &req.secret_env).await?;
     }
     let operations: Vec<String> =
         otto_core::access::operations_for(otto_core::access::ResourceKind::McpServer)
@@ -229,7 +285,7 @@ pub async fn update(
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
     Json(req): Json<UpdateMcpServerReq>,
-) -> ApiResult<Json<McpServer>> {
+) -> Result<Json<McpServer>, UpdateError> {
     let repo = repo(&ctx);
     let existing = repo.get(&id).await?;
     resource_check(&ctx, &user, &id, "configure").await?;
@@ -267,6 +323,18 @@ pub async fn update(
         }
         m
     });
+    // Read the stored secrets BEFORE any write: a failed read is a 503 that
+    // leaves the row and the Keychain exactly as they were.
+    let stored_blob = match &req.secret_env {
+        Some(_) => match read_secret_blob(&ctx.secrets, &id).await {
+            Ok(blob) => Some(blob),
+            Err(e) => {
+                tracing::warn!(server = %id, "mcp server PATCH refused: {e}");
+                return Err(UpdateError::KeychainUnavailable);
+            }
+        },
+        None => None,
+    };
     let mut server = repo
         .update(
             &id,
@@ -277,8 +345,8 @@ pub async fn update(
             req.enabled,
         )
         .await?;
-    if let Some(secret_env) = &req.secret_env {
-        server = write_secret_env(&ctx.secrets, &repo, &id, secret_env).await?;
+    if let (Some(secret_env), Some(blob)) = (&req.secret_env, stored_blob) {
+        server = write_secret_env(&ctx.secrets, &repo, &id, blob, secret_env).await?;
     }
     // Disabled or renamed: the old name's launcher env files (which hold the
     // resolved secrets) no longer back any entry; drop them in every cwd now
@@ -362,24 +430,29 @@ impl McpServerSource for DbMcpServerProvider {
         });
         // "no servers enabled" (Ok, possibly empty) vs "lookup failed" (Err):
         // only the latter is a fault, and it must reach the logs AND the caller.
-        match servers {
-            Ok(rows) => Ok(rows
-                .into_iter()
+        // A Keychain read that fails is a lookup failure too: launching the
+        // server without its token would surface as confusing downstream auth
+        // errors, so reconcile keeps the entries it has instead (PC-6).
+        let specs = servers.and_then(|rows| {
+            rows.into_iter()
                 .map(|r| {
                     let env = if r.secret_env_keys.is_empty() {
                         r.env
                     } else {
-                        let blob = load_secret_blob(self.secrets.as_ref(), &r.id);
+                        let blob = load_secret_blob(self.secrets.as_ref(), &r.id)?;
                         merge_secret_env(r.env, &r.secret_env_keys, &blob)
                     };
-                    McpServerSpec {
+                    Ok(McpServerSpec {
                         name: r.name,
                         command: r.command,
                         args: r.args,
                         env,
-                    }
+                    })
                 })
-                .collect()),
+                .collect::<Result<Vec<_>, String>>()
+        });
+        match specs {
+            Ok(specs) => Ok(specs),
             Err(e) => {
                 tracing::warn!(workspace = %workspace_id, "mcp servers unavailable for spawn: {e}");
                 Err(e)
@@ -488,6 +561,7 @@ mod tests {
             &store,
             &repo,
             &server.id,
+            load_secret_blob(store.as_ref(), &server.id).unwrap(),
             &BTreeMap::from([("API_TOKEN".to_string(), "tk-9".to_string())]),
         )
         .await
@@ -506,6 +580,7 @@ mod tests {
             &store,
             &repo,
             &server.id,
+            load_secret_blob(store.as_ref(), &server.id).unwrap(),
             &BTreeMap::from([("API_TOKEN".to_string(), String::new())]),
         )
         .await
@@ -518,7 +593,8 @@ mod tests {
             .contains("tk-9"));
 
         // Clearing the set deletes the Keychain entry and the row's ref.
-        let s = write_secret_env(&store, &repo, &server.id, &BTreeMap::new())
+        let blob = load_secret_blob(store.as_ref(), &server.id).unwrap();
+        let s = write_secret_env(&store, &repo, &server.id, blob, &BTreeMap::new())
             .await
             .unwrap();
         assert!(s.secret_env_keys.is_empty());
@@ -548,6 +624,7 @@ mod tests {
             &store,
             &repo,
             &server.id,
+            json!({}),
             &BTreeMap::from([("TOKEN".to_string(), "s3cr3t".to_string())]),
         )
         .await
@@ -582,9 +659,96 @@ mod tests {
         assert_eq!(rows[0].secret_env_keys, vec!["TOKEN".to_string()]);
 
         // …and the merge (what the provider renders into .mcp.json) does.
-        let blob = load_secret_blob(store.as_ref(), &server.id);
+        let blob = load_secret_blob(store.as_ref(), &server.id).unwrap();
         let env = merge_secret_env(rows[0].env.clone(), &rows[0].secret_env_keys, &blob);
         assert_eq!(env.get("BASE").map(String::as_str), Some("https://x"));
         assert_eq!(env.get("TOKEN").map(String::as_str), Some("s3cr3t"));
+    }
+
+    /// A Keychain that refuses every read (locked after sleep, access denied).
+    struct DeniedStore;
+    impl SecretStore for DeniedStore {
+        fn put(&self, _: &str, _: &str) -> otto_core::Result<()> {
+            panic!("nothing may be written after a failed read")
+        }
+        fn get(&self, _: &str) -> otto_core::Result<Option<String>> {
+            Err(Error::Internal("errSecInteractionNotAllowed".into()))
+        }
+        fn delete(&self, _: &str) -> otto_core::Result<()> {
+            panic!("nothing may be deleted after a failed read")
+        }
+    }
+
+    #[test]
+    fn only_a_missing_entry_means_no_secrets() {
+        assert_eq!(parse_secret_blob(Ok(None), "s").unwrap(), json!({}));
+        assert_eq!(
+            parse_secret_blob(Ok(Some(r#"{"env":{"T":"v"}}"#.into())), "s").unwrap()["env"]["T"],
+            "v"
+        );
+        assert!(parse_secret_blob(Ok(Some("not json".into())), "s").is_err());
+        assert!(parse_secret_blob(Ok(Some("[1]".into())), "s").is_err());
+        assert!(parse_secret_blob(Err(Error::Internal("locked".into())), "s").is_err());
+    }
+
+    #[tokio::test]
+    async fn keychain_read_failure_is_a_lookup_failure_not_no_secrets() {
+        let (pool, repo, ws, user) = mk_repo().await;
+        let server = repo
+            .create(NewMcpServer {
+                workspace_id: ws.clone(),
+                name: "jira".into(),
+                command: "npx".into(),
+                args: vec![],
+                env: BTreeMap::new(),
+                enabled: true,
+                created_by: user.clone(),
+            })
+            .await
+            .unwrap();
+        repo.set_secret_meta(
+            &server.id,
+            Some(&secret_ref(&server.id)),
+            &["TOKEN".to_string()],
+        )
+        .await
+        .unwrap();
+        // A legacy (ungoverned) row reaches the merge, as in the test above.
+        let access = otto_state::ResourceAccessRepo::new(pool.clone());
+        let old = access
+            .get_policy(otto_core::access::ResourceKind::McpServer, &server.id)
+            .await
+            .unwrap();
+        let mut legacy = old.clone();
+        legacy.mode = otto_core::access::AccessMode::Legacy;
+        access
+            .put_policy(
+                &legacy,
+                old.revision,
+                &otto_core::access::AccessActor {
+                    real_user_id: user,
+                    effective_user_id: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(repo.list_enabled(&ws).await.unwrap().len(), 1);
+        let denied: Arc<dyn SecretStore> = Arc::new(DeniedStore);
+        // The route's read refuses (→ 503, before any write)…
+        assert!(read_secret_blob(&denied, &server.id).await.is_err());
+        // …and the spawn-time provider reports a lookup failure instead of
+        // launching the server without its token, so reconcile keeps entries.
+        let provider = DbMcpServerProvider::new(pool, denied);
+        let res = tokio::task::spawn_blocking(move || provider.enabled_servers(&ws))
+            .await
+            .unwrap();
+        assert!(res.is_err(), "launched without its token: {res:?}");
+    }
+
+    #[test]
+    fn keychain_unavailable_is_a_503() {
+        use axum::response::IntoResponse;
+        let resp = UpdateError::KeychainUnavailable.into_response();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 }

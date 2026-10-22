@@ -718,13 +718,11 @@ mod tests {
                     name: "users".into(),
                     kind: ObjKind::Table,
                     fields: vec![FieldSnap::new("name", None, Rank::Plain)],
-                    fields_ready: true,
                 },
                 ObjectSnap {
                     name: "pets".into(),
                     kind: ObjKind::Table,
                     fields: vec![FieldSnap::new("nm", None, Rank::Plain)],
-                    fields_ready: true,
                 },
             ],
             routines: vec![],

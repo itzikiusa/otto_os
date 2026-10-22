@@ -1445,7 +1445,6 @@ impl MongoDriver {
                         name,
                         kind: crate::complete::ObjKind::Collection,
                         fields: Vec::new(),
-                        fields_ready: false,
                     })
                     .collect();
                 Some(crate::complete::SchemaSnapshot {

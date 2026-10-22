@@ -109,13 +109,16 @@ use crate::config::Config;
 // `mcp_tools/budgets.rs`.
 mod budgets;
 use budgets::{wait_session_budget, ReadCall, SUMMARIZE_CALL_TIMEOUT};
+// Twin schemas generated from the control-plane catalog: `mcp_tools/listing.rs`.
+mod listing;
 
 /// Protocol version we advertise in `initialize`. Mirrors the spec revision the
 /// bundled CLIs negotiate; clients echo their own and tolerate a match.
 const PROTOCOL_VERSION: &str = "2024-11-05";
 
-/// Per-call wall-clock timeout for an upstream daemon request.
-const CALL_TIMEOUT: Duration = Duration::from_secs(20);
+/// Per-call wall-clock timeout for an upstream daemon request (shared with the
+/// spawner's client-side cap: `otto_core::mcp_budgets`).
+const CALL_TIMEOUT: Duration = otto_core::mcp_budgets::CALL_TIMEOUT;
 /// Hard cap on an upstream response body we will buffer + parse (1 MiB). Larger
 /// bodies are rejected rather than streamed into an agent's context.
 const MAX_BODY_BYTES: usize = 1024 * 1024;
@@ -133,7 +136,7 @@ const MAX_TEXT_CHARS: usize = 256 * 1024;
 const MAX_TEXT_BODY_BYTES: usize = 6 * 1024 * 1024;
 /// Wall-clock timeout for a text (log) fetch: the non-follow logs route itself
 /// runs kubectl with a 60 s timeout, so a 20 s cap would time out first.
-const TEXT_CALL_TIMEOUT: Duration = Duration::from_secs(65);
+const TEXT_CALL_TIMEOUT: Duration = otto_core::mcp_budgets::TEXT_CALL_TIMEOUT;
 
 /// Runtime context shared by all tool handlers.
 struct Ctx {
@@ -807,17 +810,21 @@ fn tool_catalog() -> Value {
 /// Built once per process: the catalogs are static JSON, and `tools/list`
 /// used to rebuild them once per governed spec (O(N²), ~24 ms warm and
 /// ~0.7 s on the first call).
+/// A twin's (`otto_x` ⇄ `otto.x`) schema is generated from the control-plane
+/// catalog, which is the source of truth (architecture-1-05; see `listing`).
 static TOOL_CATALOG: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| {
     let mut catalog = base_tool_catalog();
     if let Some(tools) = catalog["tools"].as_array_mut() {
         tools.extend(assistant_tool_specs());
+        listing::generate_twin_schemas(tools, &GOVERNED_SPECS, governed_stdio_name);
     }
     catalog
 });
 
-/// `otto_server::mcp_outward::otto_tool_specs()`, built once per process.
+/// The control-plane catalog (`otto_mcp::outward::otto_tool_specs()`), built
+/// once per process.
 static GOVERNED_SPECS: std::sync::LazyLock<Vec<Value>> =
-    std::sync::LazyLock::new(otto_server::mcp_outward::otto_tool_specs);
+    std::sync::LazyLock::new(otto_mcp::outward::otto_tool_specs);
 
 /// Native tool names, built once per process.
 static NATIVE_TOOL_NAMES: std::sync::LazyLock<Vec<String>> = std::sync::LazyLock::new(|| {
@@ -947,10 +954,11 @@ fn base_tool_catalog() -> Value {
             {
                 "name": "otto_list_connections",
                 "description": "Read-only: the database connections across EVERY workspace you can read — `{connections}` with id, name, kind, environment, read_only, workspace_id + workspace_name (this session's workspace first). A connection may live in another workspace, so look here before concluding it is missing. The DB tools take a connection's id OR name. Only queryable DB kinds are listed (mysql, postgres, redis, mongodb, clickhouse).",
+                // Generated from `otto.list_connections` (listing.rs); only
+                // the session-scoped argument is this surface's own.
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "kind": { "type": "string", "description": "Optional filter to one kind: mysql | postgres | redis | mongodb | clickhouse." },
                         "workspace_id": { "type": "string", "description": WS_DIR_DESC }
                     }
                 }
@@ -1459,72 +1467,34 @@ fn base_tool_catalog() -> Value {
             {
                 "name": "otto_api_list",
                 "description": "READ-ONLY: discover the workspace's API client — collections, saved requests (id/name/method/url template/auth type), environments (names + non-secret variables; secret values never returned) and automations. Call this FIRST to get ids; `q` filters by substring, `kind` narrows the set.",
-                "inputSchema": { "type": "object", "properties": {
-                    "q": { "type": "string", "description": "Optional substring filter." },
-                    "collection_id": { "type": "string", "description": "Optional collection id filter." },
-                    "kind": { "type": "string", "enum": ["all", "requests", "environments", "automations"], "description": "Result kind (default all)." }
-                } }
+                // The schemas of the otto_api_* twins are generated from the
+                // `otto.api_*` catalog entries (listing.rs).
+                "inputSchema": { "type": "object", "properties": {} }
             },
             {
                 "name": "otto_api_get_request",
-                "description": "READ-ONLY: one saved request in full (headers/query/body/docs/scripts) with every secret masked. Pass `request_id` or a unique `name`. A body over 64 KiB is capped and ends with `…[truncated]`.",
-                "inputSchema": { "type": "object", "properties": {
-                    "request_id": { "type": "string", "description": "Saved request id." },
-                    "name": { "type": "string", "description": "Unique saved request name (used when request_id is omitted)." }
-                } }
+                "description": "READ-ONLY: one saved request in full (headers/query/body/docs/scripts) with every secret masked. Pass `request_id` (the id or a unique name). A body over 64 KiB is capped and ends with `…[truncated]`.",
+                "inputSchema": { "type": "object", "properties": {} }
             },
             {
                 "name": "otto_api_history",
                 "description": "READ-ONLY: past executions (method/url/status/duration/source agent|human). Pass `id` for one entry with its response; else filter with q/status/request_id/source, limit ≤ 100.",
-                "inputSchema": { "type": "object", "properties": {
-                    "id": { "type": "string", "description": "History entry id; when present returns one entry." },
-                    "q": { "type": "string", "description": "Optional method or URL substring." },
-                    "status": { "type": "integer", "description": "Optional HTTP status." },
-                    "request_id": { "type": "string", "description": "Optional saved request id." },
-                    "source": { "type": "string", "enum": ["agent", "human"], "description": "Optional execution source." },
-                    "limit": { "type": "integer", "minimum": 1, "maximum": 100, "description": "Maximum rows (default 25, cap 100)." }
-                } }
+                "inputSchema": { "type": "object", "properties": {} }
             },
             {
                 "name": "otto_api_execute",
-                "description": "SENDS A REAL HTTP REQUEST: execute a SAVED request (by `request_id` or unique `name`) against an environment (`environment` = id or name, default the active one). Non-GET/HEAD/OPTIONS methods require `confirm:true`; an agent-authored request targeting a host no human request/run used requires `confirm_new_host:true` (the error says which); a send that would carry a stored secret to a host it isn't bound to is refused outright (a person must send it from the Otto UI). Secrets are resolved server-side and scrubbed from the result; JWTs come back as decoded claims (`jwt_claims`), never the token. `vars` override variables (values must not contain '{{').",
-                "inputSchema": { "type": "object", "properties": {
-                    "request_id": { "type": "string", "description": "Saved request id." },
-                    "name": { "type": "string", "description": "Unique saved request name (used when request_id is omitted)." },
-                    "environment": { "type": "string", "description": "Environment id or unique name; omit for active." },
-                    "vars": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Per-run variable overrides; values cannot contain '{{'." },
-                    "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 60000 },
-                    "confirm": { "type": "boolean", "description": "Confirm a non-safe HTTP method." },
-                    "confirm_new_host": { "type": "boolean", "description": "Confirm an unknown host for an agent-authored request." },
-                    "decode_jwt": { "type": "boolean", "description": "Return safe JWT claims (default true), never tokens." }
-                } }
+                "description": "SENDS A REAL HTTP REQUEST: execute a SAVED request (`request_id` = its id or unique name) against an environment (`environment_id` = id or name, default the active one). Non-GET/HEAD/OPTIONS methods require `confirm:true`; an agent-authored request targeting a host no human request/run used requires `confirm_new_host:true` (the error says which); a send that would carry a stored secret to a host it isn't bound to is refused outright (a person must send it from the Otto UI). Secrets are resolved server-side and scrubbed from the result; JWTs come back as decoded claims (`jwt_claims`), never the token. `vars` override variables (values must not contain '{{').",
+                "inputSchema": { "type": "object", "properties": {} }
             },
             {
                 "name": "otto_api_upsert_request",
-                "description": "PERSISTS: create (no `request_id`; `name` required) or update a saved request. Accepts fields or a `curl` line (parsed server-side; explicit fields win). `collection_name` finds-or-creates a collection. On update every field you omit keeps its stored value (`docs_md` merges into the stored extras). Returns the saved request with secrets masked.",
-                "inputSchema": { "type": "object", "properties": {
-                    "request_id": { "type": "string", "description": "Saved request id to update; omit to create." },
-                    "name": { "type": "string", "description": "Saved request name." },
-                    "method": { "type": "string", "description": "HTTP method (default GET)." },
-                    "url": { "type": "string", "description": "URL template." },
-                    "headers": { "type": "array", "items": { "type": "object", "properties": { "key": { "type": "string" }, "value": { "type": "string" }, "enabled": { "type": "boolean" } }, "required": ["key", "value"] } },
-                    "query": { "type": "array", "items": { "type": "object", "properties": { "key": { "type": "string" }, "value": { "type": "string" }, "enabled": { "type": "boolean" } }, "required": ["key", "value"] } },
-                    "body_mode": { "type": "string", "enum": ["none", "json", "raw", "form", "multipart", "graphql"] },
-                    "body": { "type": "string" },
-                    "auth": { "type": "object", "description": "Request auth; plaintext secret members are moved to Keychain by the daemon." },
-                    "collection_id": { "type": "string" },
-                    "collection_name": { "type": "string", "description": "Unique collection name to find or create." },
-                    "docs_md": { "type": "string", "description": "Markdown request documentation." },
-                    "curl": { "type": "string", "description": "curl command parsed server-side; explicit fields win." }
-                } }
+                "description": "PERSISTS: create (no `request_id`) or update (`request_id` = its id or unique name) a saved request. On update every field you omit keeps its stored value; `extras` replaces the stored extras. Returns the saved request with secrets masked.",
+                "inputSchema": { "type": "object", "properties": {} }
             },
             {
                 "name": "otto_api_run_automation",
-                "description": "SENDS REAL HTTP REQUESTS: run a human-authored automation (`automation_id` or unique `name`) — its steps, assertions and extractions; returns the per-step report.",
-                "inputSchema": { "type": "object", "properties": {
-                    "automation_id": { "type": "string", "description": "Automation id." },
-                    "name": { "type": "string", "description": "Unique automation name (used when automation_id is omitted)." }
-                } }
+                "description": "SENDS REAL HTTP REQUESTS: run a human-authored automation (`automation_id` = its id or unique name) — its steps, assertions and extractions; returns the per-step report.",
+                "inputSchema": { "type": "object", "properties": {} }
             },
             // ---- AWS console (docs/design/aws-k8s-consoles.md §6). Every tool
             // shells `aws` CLI v2 through the daemon with the ACCOUNT's own
@@ -1834,7 +1804,7 @@ const GOVERNED_ALIASED_BY_NATIVE: &[(&str, &str)] = &[
 /// How long a governed call waits for a human decision before returning
 /// `pending_approval`. Below [`CALL_TIMEOUT`] so the daemon answers before this
 /// bridge gives up; a later identical call reuses the approval once granted.
-const GOVERNED_WAIT_SECS: u64 = 15;
+const GOVERNED_WAIT_SECS: u64 = otto_core::mcp_budgets::GOVERNED_WAIT_SECS;
 
 /// The stdio-facing name of a governed catalog entry: `otto.create_pr` →
 /// `otto_create_pr`. Claude/Codex mangle a dotted tool name, and the native
@@ -2355,6 +2325,71 @@ fn api_base(ctx: &Ctx) -> Result<String, String> {
 
 /// Select one case-insensitive exact name match, reporting candidate ids when
 /// duplicate names make the request ambiguous.
+/// Which saved API-client object an [`api_object_id`] reference names: the
+/// reference argument, the `overview?kind=` set, its array, and the label.
+struct ApiRef {
+    arg: &'static str,
+    kind: &'static str,
+    label: &'static str,
+}
+
+impl ApiRef {
+    const REQUEST: ApiRef = ApiRef {
+        arg: "request_id",
+        kind: "requests",
+        label: "request",
+    };
+    const AUTOMATION: ApiRef = ApiRef {
+        arg: "automation_id",
+        kind: "automations",
+        label: "automation",
+    };
+}
+
+/// A saved API-client object's id from the catalog's id-OR-name reference
+/// (`request_id` / `automation_id`, architecture-1-05) or, when `legacy_name`,
+/// the old native-only `name`. A name is matched in THIS session's workspace
+/// (`{base}/overview?kind=…&q=`), as the native tools always did; a reference
+/// that looks like an id, or that names nothing, is used as the id verbatim
+/// (the route then answers 404 for an unknown one).
+async fn api_object_id(
+    ctx: &Ctx,
+    base: &str,
+    args: &Value,
+    r: ApiRef,
+    legacy_name: bool,
+) -> Result<String, String> {
+    let missing = || format!("pass `{}` (its id or unique name)", r.arg);
+    let reference = match arg_optional_string(args, r.arg)?.filter(|s| !s.trim().is_empty()) {
+        Some(id) if otto_server::agent_refs::looks_like_id(&id) => return Ok(id),
+        Some(reference) => reference,
+        None if legacy_name => arg_optional_string(args, "name")?
+            .filter(|n| !n.is_empty())
+            .ok_or_else(missing)?,
+        None => return Err(missing()),
+    };
+    let overview = ctx
+        .get_json(&format!(
+            "{base}/overview?kind={}&q={}",
+            r.kind,
+            seg(&reference)
+        ))
+        .await?;
+    let items = overview
+        .get(r.kind)
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("daemon response missing {} array", r.kind))?;
+    match pick_by_name(items, &reference, r.label) {
+        Ok(item) => item
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| format!("matched {} has no id", r.label)),
+        Err(e) if e == format!("no {} named '{reference}'", r.label) => Ok(reference),
+        Err(e) => Err(e),
+    }
+}
+
 fn pick_by_name<'a>(items: &'a [Value], name: &str, what: &str) -> Result<&'a Value, String> {
     let matches: Vec<&Value> = items
         .iter()
@@ -2464,9 +2499,15 @@ fn merge_upsert(args: &Value, parsed_curl: Option<&Value>, stored: Option<&Value
     merged
         .entry("body_mode".to_string())
         .or_insert_with(|| json!("none"));
+    // The catalog's `extras` replaces the stored extras (as the governed
+    // executor does); the legacy native `docs_md` merges into them.
+    let passed_extras = args.get("extras").filter(|e| e.is_object());
+    if let Some(extras) = passed_extras {
+        merged.insert("extras".to_string(), extras.clone());
+    }
     if let Some(docs_md) = args.get("docs_md") {
-        let mut extras = stored
-            .and_then(|s| s.get("extras"))
+        let mut extras = passed_extras
+            .or_else(|| stored.and_then(|s| s.get("extras")))
             .and_then(Value::as_object)
             .cloned()
             .unwrap_or_default();
@@ -3068,30 +3109,7 @@ async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<
         }
         "otto_api_get_request" => {
             let base = api_base(ctx)?;
-            let request_id = if let Some(id) =
-                arg_optional_string(args, "request_id")?.filter(|id| !id.is_empty())
-            {
-                id
-            } else {
-                let request_name = arg_optional_string(args, "name")?
-                    .filter(|name| !name.is_empty())
-                    .ok_or("pass `request_id` or a unique `name`")?;
-                let overview = ctx
-                    .get_json(&format!(
-                        "{base}/overview?kind=requests&q={}",
-                        seg(&request_name)
-                    ))
-                    .await?;
-                let requests = overview
-                    .get("requests")
-                    .and_then(Value::as_array)
-                    .ok_or("daemon response missing requests array")?;
-                pick_by_name(requests, &request_name, "request")?
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .ok_or("matched request has no id")?
-                    .to_string()
-            };
+            let request_id = api_object_id(ctx, &base, args, ApiRef::REQUEST, true).await?;
             let raw = ctx
                 .get_json(&format!("{base}/requests/{}?shape=agent", seg(&request_id)))
                 .await?;
@@ -3114,6 +3132,17 @@ async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<
             // source) — the list never needs bodies; `id` returns one whole
             // entry (perf F9: up to 100 × 64 KB responses into the context).
             let mut path = format!("{base}/history/summaries?limit={limit}");
+            // The `request_id` filter takes an id or a unique name too.
+            let resolved;
+            let args = if arg_optional_string(args, "request_id")?.is_some_and(|r| !r.is_empty()) {
+                let mut a = args.clone();
+                a["request_id"] =
+                    json!(api_object_id(ctx, &base, args, ApiRef::REQUEST, false).await?);
+                resolved = a;
+                &resolved
+            } else {
+                args
+            };
             path.push_str(&opt_query(
                 args,
                 &[
@@ -3130,38 +3159,21 @@ async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<
             if let Some(vars) = args.get("vars") {
                 check_override_vars(vars)?;
             }
-            let request_id = if let Some(id) =
-                arg_optional_string(args, "request_id")?.filter(|id| !id.is_empty())
-            {
-                id
-            } else {
-                let request_name = arg_optional_string(args, "name")?
-                    .filter(|name| !name.is_empty())
-                    .ok_or("pass `request_id` or a unique `name`")?;
-                let overview = ctx
-                    .get_json(&format!(
-                        "{base}/overview?kind=requests&q={}",
-                        seg(&request_name)
-                    ))
-                    .await?;
-                let requests = overview
-                    .get("requests")
-                    .and_then(Value::as_array)
-                    .ok_or("daemon response missing requests array")?;
-                pick_by_name(requests, &request_name, "request")?
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .ok_or("matched request has no id")?
-                    .to_string()
-            };
+            let request_id = api_object_id(ctx, &base, args, ApiRef::REQUEST, true).await?;
 
             let mut body = json!({
                 "workspace_id": ctx.workspace_id.clone(),
                 "request_id": request_id,
             });
-            if let Some(environment) = arg_optional_string(args, "environment")?
+            // `environment_id` (the catalog's name; id or name) — the legacy
+            // native `environment` still works.
+            let environment = match arg_optional_string(args, "environment_id")?
                 .filter(|environment| !environment.is_empty())
             {
+                Some(e) => Some(e),
+                None => arg_optional_string(args, "environment")?,
+            };
+            if let Some(environment) = environment.filter(|environment| !environment.is_empty()) {
                 let environments = ctx.get_json(&format!("{base}/environments")).await?;
                 let environments = environments
                     .as_array()
@@ -3224,7 +3236,13 @@ async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<
         }
         "otto_api_upsert_request" => {
             let base = api_base(ctx)?;
-            let update_id = arg_optional_string(args, "request_id")?.filter(|id| !id.is_empty());
+            // `request_id` is the id or unique name to update; `name` is the
+            // request's (new) name, never a lookup key here.
+            let update_id =
+                match arg_optional_string(args, "request_id")?.filter(|id| !id.is_empty()) {
+                    Some(_) => Some(api_object_id(ctx, &base, args, ApiRef::REQUEST, false).await?),
+                    None => None,
+                };
             // Update: the stored row (raw, as the owner — only ever sent back
             // in the PATCH, never to the agent) supplies every omitted field.
             let stored = match &update_id {
@@ -3306,30 +3324,7 @@ async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<
         }
         "otto_api_run_automation" => {
             let base = api_base(ctx)?;
-            let automation_id = if let Some(id) =
-                arg_optional_string(args, "automation_id")?.filter(|id| !id.is_empty())
-            {
-                id
-            } else {
-                let automation_name = arg_optional_string(args, "name")?
-                    .filter(|name| !name.is_empty())
-                    .ok_or("pass `automation_id` or a unique `name`")?;
-                let overview = ctx
-                    .get_json(&format!(
-                        "{base}/overview?kind=automations&q={}",
-                        seg(&automation_name)
-                    ))
-                    .await?;
-                let automations = overview
-                    .get("automations")
-                    .and_then(Value::as_array)
-                    .ok_or("daemon response missing automations array")?;
-                pick_by_name(automations, &automation_name, "automation")?
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .ok_or("matched automation has no id")?
-                    .to_string()
-            };
+            let automation_id = api_object_id(ctx, &base, args, ApiRef::AUTOMATION, true).await?;
             Ok(finalize(
                 governed_native_write(
                     ctx,
@@ -4298,7 +4293,16 @@ async fn gateway_call(ctx: &Ctx, namespaced: &str, args: &Value) -> Result<(Valu
         "workspace_id": ws,
         "session_id": ctx.session_id,
     });
-    let v = ctx.post_json("/mcp/gateway/invoke", &body).await?;
+    // The daemon may queue, cold-open (spawn + initialize) and then run the
+    // downstream call, each up to otto-mcp's `OP_TIMEOUT`: the default 20 s
+    // gave up first, dropping the handler mid-call (integrations-4-01).
+    let v = ctx
+        .post_json_within(
+            "/mcp/gateway/invoke",
+            &body,
+            otto_mcp::client::GATEWAY_CALL_TIMEOUT,
+        )
+        .await?;
     let is_error = matches!(
         v.get("decision").and_then(Value::as_str),
         Some("denied") | Some("error")
@@ -4340,7 +4344,7 @@ async fn governed_call(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, bo
         .post_json_within(
             "/mcp/otto-tools/invoke",
             &body,
-            Duration::from_secs(GOVERNED_WAIT_SECS + 190),
+            Duration::from_secs(GOVERNED_WAIT_SECS) + otto_core::mcp_budgets::GOVERNED_RUN_BUDGET,
         )
         .await?;
     let is_error = matches!(

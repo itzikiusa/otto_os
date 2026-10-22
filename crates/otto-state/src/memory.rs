@@ -805,15 +805,6 @@ impl MemoriesRepo {
         Ok(rows.iter().map(row_to_link).collect())
     }
 
-    /// Graph nodes for a workspace (optionally a single collection): (id,title,kind,collection).
-    pub async fn graph_nodes(
-        &self,
-        ws: &str,
-        collection: Option<&str>,
-    ) -> Result<Vec<(String, String, String, String)>> {
-        self.graph_nodes_visible(ws, collection, None).await
-    }
-
     /// Filter visibility before the node cap so private rows cannot hide shared rows.
     pub async fn graph_nodes_visible(
         &self,
@@ -821,8 +812,9 @@ impl MemoriesRepo {
         collection: Option<&str>,
         viewer: Option<&str>,
     ) -> Result<Vec<(String, String, String, String)>> {
-        let mut sql =
-            String::from("SELECT id, title, kind, collection FROM memories WHERE workspace_id = ? AND active = 1");
+        let mut sql = String::from(
+            "SELECT id, title, kind, collection FROM memories WHERE workspace_id = ? AND active = 1",
+        );
         if viewer.is_some() {
             sql.push_str(" AND (visibility = 'shared' OR created_by = ?)");
         }
@@ -852,43 +844,6 @@ impl MemoriesRepo {
                 )
             })
             .collect())
-    }
-
-    /// Map `source_ref → memory id` for a given `source_kind` (used to resolve
-    /// imported graph edges to the memory rows their nodes became).
-    pub async fn ids_by_source_ref(
-        &self,
-        ws: &str,
-        source_kind: &str,
-    ) -> Result<std::collections::HashMap<String, String>> {
-        let rows = sqlx::query(
-            "SELECT id, source_ref FROM memories WHERE workspace_id = ? AND source_kind = ? \
-             AND source_ref IS NOT NULL AND active = 1",
-        )
-        .bind(ws)
-        .bind(source_kind)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(dberr("memory.ids_by_source_ref"))?;
-        Ok(rows
-            .iter()
-            .filter_map(|r| {
-                let sr: Option<String> = r.get("source_ref");
-                sr.map(|s| (s, r.get::<String, _>("id")))
-            })
-            .collect())
-    }
-
-    pub async fn all_links(&self, ws: &str) -> Result<Vec<MemoryLink>> {
-        let rows = sqlx::query(
-            "SELECT l.src_id, l.dst_id, l.rel, l.weight, l.certainty FROM memory_links l \
-             JOIN memories m ON m.id = l.src_id WHERE m.workspace_id = ?",
-        )
-        .bind(ws)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(dberr("memory.all_links"))?;
-        Ok(rows.iter().map(row_to_link).collect())
     }
 
     /// Edges are visible only when both endpoints belong to the workspace and
@@ -944,10 +899,11 @@ impl MemoriesRepo {
     }
 
     /// Soft-delete a memory: set `active=0`, `forgotten_at`, and mint an opaque
-    /// `undo_token`. The state it had is kept in `prev_state` (0190) for the
-    /// undo — only on the FIRST forget, so re-forgetting a forgotten row never
-    /// records its interim `stale`. Returns the token so the caller can hand it
-    /// to the client.
+    /// `undo_token`. The state and `active` flag it had are kept in
+    /// `prev_state` (0190) and `prev_active` (0192) for the undo — only on the
+    /// FIRST forget, so re-forgetting a forgotten row never records its interim
+    /// `stale`/inactive. Returns the token so the caller can hand it to the
+    /// client.
     pub async fn soft_forget(&self, ws: &str, id: &str) -> Result<String> {
         // Verify the row exists in this workspace first (returns NotFound if absent).
         let _ = self.get(ws, id).await?;
@@ -957,6 +913,7 @@ impl MemoriesRepo {
         sqlx::query(
             "UPDATE memories SET active=0, \
              prev_state = CASE WHEN forgotten_at IS NULL THEN state ELSE prev_state END, \
+             prev_active = CASE WHEN forgotten_at IS NULL THEN active ELSE prev_active END, \
              forgotten_at=?, undo_token=?, state='stale', updated_at=? \
              WHERE id=? AND workspace_id=?",
         )
@@ -990,13 +947,26 @@ impl MemoriesRepo {
         id: Option<&str>,
         undo_token: &str,
     ) -> Result<Memory> {
-        // Locate the row by its undo token, scoped to the workspace.
+        // One guarded write: the token, the forget and the window are checked
+        // IN the UPDATE, so a second (double-click / chip + toast) undo with
+        // the same token matches nothing instead of re-running the restore on
+        // a row whose `prev_state` the first undo already consumed (that read
+        // as `accepted` and promoted a pending memory past review), and an
+        // undo racing a re-forget never clears the new forget's token.
         // Tokens expire with the undo window (measured from `forgotten_at`).
+        // `active` comes back as it was (`prev_active`, 0192); rows forgotten
+        // by an older build derive it from the restored state.
         let oldest = Utc::now().timestamp() - UNDO_FORGET_WINDOW_SECS;
+        let now = fmt(Utc::now());
         let row = sqlx::query(
-            "SELECT id FROM memories WHERE undo_token=? AND workspace_id=? \
-             AND forgotten_at IS NOT NULL AND forgotten_at >= ? AND (? IS NULL OR id = ?)",
+            "UPDATE memories SET \
+             active = COALESCE(prev_active, COALESCE(prev_state, 'accepted') <> 'contradicted'), \
+             state = COALESCE(prev_state, 'accepted'), prev_state = NULL, prev_active = NULL, \
+             forgotten_at=NULL, undo_token=NULL, updated_at=? \
+             WHERE undo_token=? AND workspace_id=? AND forgotten_at IS NOT NULL \
+             AND forgotten_at >= ? AND (? IS NULL OR id = ?) RETURNING id",
         )
+        .bind(&now)
         .bind(undo_token)
         .bind(ws)
         .bind(oldest)
@@ -1004,22 +974,9 @@ impl MemoriesRepo {
         .bind(id)
         .fetch_optional(&self.pool)
         .await
-        .map_err(dberr("memory.undo_forget.find"))?
+        .map_err(dberr("memory.undo_forget"))?
         .ok_or_else(|| Error::NotFound("undo token not found, expired or already used".into()))?;
         let id: String = row.get("id");
-        let now = fmt(Utc::now());
-        sqlx::query(
-            "UPDATE memories SET \
-             active = (COALESCE(prev_state, 'accepted') <> 'contradicted'), \
-             state = COALESCE(prev_state, 'accepted'), prev_state = NULL, \
-             forgotten_at=NULL, undo_token=NULL, updated_at=? WHERE id=? AND workspace_id=?",
-        )
-        .bind(&now)
-        .bind(&id)
-        .bind(ws)
-        .execute(&self.pool)
-        .await
-        .map_err(dberr("memory.undo_forget"))?;
         self.get(ws, &id).await
     }
 
@@ -1695,6 +1652,9 @@ mod forget_undo_tests {
             ("pending", "suggested", true),
             ("merged", "contradicted", false),
             ("plain", "accepted", true),
+            // backend-correctness-4-01: deactivated (DELETE / PATCH active=false)
+            // but still accepted — undo must not put it back into recall.
+            ("off", "accepted", false),
         ] {
             seed(&r, id, state, active).await;
             let token = r.soft_forget("ws", id).await.unwrap();
@@ -1709,5 +1669,26 @@ mod forget_undo_tests {
             let back = r.undo_forget("ws", &token).await.unwrap();
             assert_eq!((back.state.as_str(), back.active), (state, active), "{id}");
         }
+    }
+
+    /// data-integrity-4-01: the token is re-checked in the write, so a second
+    /// undo with the same token fails and cannot turn the restored pending
+    /// memory into an `accepted` one.
+    #[tokio::test]
+    async fn a_second_undo_with_the_same_token_fails_and_keeps_the_state() {
+        let r = MemoriesRepo::new(crate::db::test_pool().await);
+        seed(&r, "pending", "suggested", true).await;
+        let token = r.soft_forget("ws", "pending").await.unwrap();
+        let back = r.undo_forget("ws", &token).await.unwrap();
+        assert_eq!((back.state.as_str(), back.active), ("suggested", true));
+        let again = r.undo_forget("ws", &token).await;
+        assert!(matches!(again, Err(Error::NotFound(_))), "{again:?}");
+        let m = r.get("ws", "pending").await.unwrap();
+        assert_eq!((m.state.as_str(), m.active), ("suggested", true));
+        // A scoped undo naming another memory never restores this one.
+        let token = r.soft_forget("ws", "pending").await.unwrap();
+        let wrong = r.undo_forget_scoped("ws", Some("other"), &token).await;
+        assert!(matches!(wrong, Err(Error::NotFound(_))), "{wrong:?}");
+        assert_eq!(r.get("ws", "pending").await.unwrap().state, "stale");
     }
 }

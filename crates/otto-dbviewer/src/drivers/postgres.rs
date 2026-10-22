@@ -1485,12 +1485,7 @@ impl PostgresDriver {
                 ObjKind::Table
             };
             let fields = by_table.remove(&name).unwrap_or_default();
-            objects.push(ObjectSnap {
-                name,
-                kind,
-                fields,
-                fields_ready: true,
-            });
+            objects.push(ObjectSnap { name, kind, fields });
         }
         for name in order {
             if let Some(fields) = by_table.remove(&name) {
@@ -1498,7 +1493,6 @@ impl PostgresDriver {
                     name,
                     kind: ObjKind::Table,
                     fields,
-                    fields_ready: true,
                 });
             }
         }

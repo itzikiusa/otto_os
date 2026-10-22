@@ -1232,15 +1232,6 @@ impl LiveSession {
         }
     }
 
-    /// Agent input — only while the agent holds control.
-    pub async fn agent_input(self: &Arc<Self>, msg: ClientMsg) -> Result<(), LiveError> {
-        if !self.agent_drives() {
-            return Err(LiveError::AgentPaused);
-        }
-        self.touch();
-        self.dispatch_input(msg).await
-    }
-
     pub fn controller(&self) -> ControllerKind {
         self.inner
             .lock()

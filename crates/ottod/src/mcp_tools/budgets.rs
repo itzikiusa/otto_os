@@ -23,7 +23,8 @@ pub(super) const WAIT_SESSION_MARGIN: Duration = Duration::from_secs(5);
 /// that agent. The route's own idle backstop is the 10 h `STUCK_IDLE`, which
 /// is no useful bound for one tool call; a page summary is a single short
 /// turn, so 15 min covers a cold spawn and a slow model with wide margin.
-pub(super) const SUMMARIZE_CALL_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+/// Shared with the spawner's client-side cap (`otto_core::mcp_budgets`).
+pub(super) const SUMMARIZE_CALL_TIMEOUT: Duration = otto_core::mcp_budgets::SUMMARIZE_CALL_TIMEOUT;
 
 /// The bridge budget for one `otto_wait_session` call: the wait the daemon
 /// will actually do (`timeout_secs` clamped to 1..=25, default 20) plus

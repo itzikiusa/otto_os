@@ -55,9 +55,19 @@ fn active(c: &Capture, epoch: u64, offset: u64) -> Result<()> {
     }
     Ok(())
 }
-fn sequence(c: &mut Capture, key: String, seq: u64, offset: u64, screen: bool) -> Result<()> {
+/// Replay guard for one capture source: refuses sequence 0, a repeated or
+/// lower sequence, an offset that moves backwards, and screen frames closer
+/// than 15 s apart. Takes the per-source map (not the whole `Capture`) so the
+/// rule is unit-testable on its own.
+fn sequence(
+    sequences: &mut std::collections::HashMap<String, (u64, u64)>,
+    key: String,
+    seq: u64,
+    offset: u64,
+    screen: bool,
+) -> Result<()> {
     if seq == 0
-        || c.sequences.get(&key).is_some_and(|(last, at)| {
+        || sequences.get(&key).is_some_and(|(last, at)| {
             seq <= *last || offset < *at || (screen && offset.saturating_sub(*at) < 15000)
         })
     {
@@ -65,7 +75,7 @@ fn sequence(c: &mut Capture, key: String, seq: u64, offset: u64, screen: bool) -
             "Duplicate, reordered or too frequent capture chunk".into(),
         ));
     }
-    c.sequences.insert(key, (seq, offset));
+    sequences.insert(key, (seq, offset));
     Ok(())
 }
 fn invalid(s: &str) -> Error {
@@ -139,7 +149,7 @@ pub async fn audio(
             .into());
         }
         sequence(
-            c,
+            &mut c.sequences,
             format!("audio:{}", req.member_id),
             req.sequence,
             req.offset_ms,
@@ -253,7 +263,7 @@ pub async fn screen(
         }
         active(c, req.capture_epoch, req.offset_ms)?;
         sequence(
-            c,
+            &mut c.sequences,
             format!("screen:{}:{}", req.source_id, req.source_generation),
             req.sequence,
             req.offset_ms,
@@ -465,6 +475,32 @@ mod tests {
         assert!(!audio_interval(&windows, 1000, 7000));
         assert!(!audio_interval(&windows, 0, 6000));
         assert!(!audio_interval(&[], 1000, 6000));
+    }
+    #[test]
+    fn sequence_refuses_replayed_reordered_and_too_frequent_chunks() {
+        let mut seqs = std::collections::HashMap::new();
+        let key = || "audio:m1".to_string();
+        assert!(sequence(&mut seqs, key(), 0, 0, false).is_err(), "zero");
+        assert!(sequence(&mut seqs, key(), 1, 1000, false).is_ok());
+        assert!(sequence(&mut seqs, key(), 1, 2000, false).is_err(), "equal");
+        assert!(
+            sequence(&mut seqs, key(), 2, 500, false).is_err(),
+            "offset backwards"
+        );
+        assert!(sequence(&mut seqs, key(), 2, 2000, false).is_ok(), "next");
+        assert!(sequence(&mut seqs, key(), 1, 3000, false).is_err(), "lower");
+        // A refusal never advances the guard.
+        assert_eq!(seqs.get("audio:m1"), Some(&(2, 2000)));
+        // Sources are independent.
+        assert!(sequence(&mut seqs, "audio:m2".into(), 1, 0, false).is_ok());
+
+        let screen = || "screen:m1".to_string();
+        assert!(sequence(&mut seqs, screen(), 1, 0, true).is_ok());
+        assert!(
+            sequence(&mut seqs, screen(), 2, 14_999, true).is_err(),
+            "under 15 s"
+        );
+        assert!(sequence(&mut seqs, screen(), 2, 15_000, true).is_ok());
     }
     #[test]
     fn rejects_non_wav_and_oversized_images() {

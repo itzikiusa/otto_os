@@ -2,7 +2,7 @@
 //! review-config defaults and budgets, the fan-out / orchestrator agent-run
 //! expansion, reviewer prompts, draft-comment parsing, severity ranking and
 //! the run-completeness rules. No I/O against the server — the ctx-bound
-//! orchestration in otto-server (`modules.rs`) drives these.
+//! orchestration in otto-server (`modules/review/`) drives these.
 
 use std::sync::Arc;
 use std::time::Duration;

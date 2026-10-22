@@ -494,15 +494,12 @@ async fn reset_group_offsets<S: BrokersCtx>(
     }
 
     guard(&row, req.confirm)?;
-    let detail = ctx.brokers().reset_group_offsets(&id, &group, &req).await?;
-    ctx.brokers()
-        .audit_write(
-            &id,
-            &user.id,
-            "reset_group_offsets",
-            serde_json::json!({ "group": group }),
-        )
-        .await;
+    // The service audits every committed attempt (success or failure) and
+    // refuses (409) a group that still has live members.
+    let detail = ctx
+        .brokers()
+        .reset_group_offsets(&id, &group, &req, &user.id)
+        .await?;
     Ok(Json(detail).into_response())
 }
 
@@ -566,7 +563,7 @@ async fn replay<S: BrokersCtx>(
 ) -> ApiResult<Response> {
     let row = authorize(&ctx, &user, &id, WorkspaceRole::Editor).await?;
     guard(&row, req.confirm)?;
-    let resp = ctx.brokers().replay(&id, &req).await?;
+    let resp = ctx.brokers().replay(&id, &req, &user.id).await?;
     ctx.brokers()
         .audit_write(
             &id,

@@ -251,12 +251,41 @@ impl ConnectionsRepo {
         Ok(connection)
     }
 
+    /// Delete the profile and, in the same transaction, the DB Explorer rows
+    /// keyed by it (none has an FK): its dashboard widgets and query history
+    /// go, its saved queries are kept as connection-less (`connection_id`
+    /// NULL — the routes skip the connection gate for those). Before this a
+    /// deleted connection's widgets and saved queries answered 404 to Edit
+    /// and Delete for everyone, and its history was never pruned.
     pub async fn delete(&self, id: &Id) -> Result<()> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(dberr("delete connection begin"))?;
+        sqlx::query("DELETE FROM db_widgets WHERE connection_id = ?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(dberr("delete connection widgets"))?;
+        sqlx::query("DELETE FROM db_query_history WHERE connection_id = ?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(dberr("delete connection history"))?;
+        sqlx::query("UPDATE db_saved_queries SET connection_id = NULL WHERE connection_id = ?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(dberr("detach connection saved queries"))?;
         sqlx::query("DELETE FROM connections WHERE id = ?")
             .bind(id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(dberr("delete connection"))?;
+        tx.commit()
+            .await
+            .map_err(dberr("delete connection commit"))?;
         Ok(())
     }
 
@@ -580,5 +609,96 @@ mod tests {
             2,
             "list_visible (default path) must return all connections"
         );
+    }
+
+    /// data-integrity-4-02: deleting a connection takes its widgets and query
+    /// history with it and detaches its saved queries, in one transaction;
+    /// another connection's rows are untouched.
+    #[tokio::test]
+    async fn delete_cascades_db_explorer_rows() {
+        let pool = mem_pool().await;
+        let user = seed_user(&pool).await;
+        let repo = ConnectionsRepo::new(pool.clone());
+        let gone = repo
+            .create(new_conn(&user, Environment::Dev, false))
+            .await
+            .unwrap();
+        let kept = repo
+            .create(new_conn(&user, Environment::Dev, false))
+            .await
+            .unwrap();
+        let now = fmt(Utc::now());
+        for c in [&gone.id, &kept.id] {
+            sqlx::query(
+                "INSERT INTO db_saved_queries (id, workspace_id, connection_id, name, statement,
+                                               created_by, created_at)
+                 VALUES (?, 'w', ?, 'q', 'SELECT 1', ?, ?)",
+            )
+            .bind(new_id())
+            .bind(c)
+            .bind(&user)
+            .bind(&now)
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO db_query_history (id, connection_id, user_id, statement, ok,
+                                               duration_ms, row_count, error, created_at)
+                 VALUES (?, ?, ?, 'SELECT 1', 1, 0, 0, NULL, ?)",
+            )
+            .bind(new_id())
+            .bind(c)
+            .bind(&user)
+            .bind(&now)
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO db_widgets (id, workspace_id, dashboard_id, connection_id, title,
+                                         statement, created_by, created_at, updated_at)
+                 VALUES (?, 'w', NULL, ?, 't', 'SELECT 1', ?, ?, ?)",
+            )
+            .bind(new_id())
+            .bind(c)
+            .bind(&user)
+            .bind(&now)
+            .bind(&now)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        repo.delete(&gone.id).await.unwrap();
+        let count = |sql: &'static str, c: Id| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query_scalar::<_, i64>(sql)
+                    .bind(c)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap()
+            }
+        };
+        for (table, c, want) in [
+            ("w", gone.id.clone(), 0),
+            ("w", kept.id.clone(), 1),
+            ("h", gone.id.clone(), 0),
+            ("h", kept.id.clone(), 1),
+            ("s", gone.id.clone(), 0),
+            ("s", kept.id.clone(), 1),
+        ] {
+            let sql = match table {
+                "w" => "SELECT COUNT(*) FROM db_widgets WHERE connection_id = ?",
+                "h" => "SELECT COUNT(*) FROM db_query_history WHERE connection_id = ?",
+                _ => "SELECT COUNT(*) FROM db_saved_queries WHERE connection_id = ?",
+            };
+            assert_eq!(count(sql, c).await, want, "{sql}");
+        }
+        let detached: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM db_saved_queries WHERE connection_id IS NULL")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(detached, 1, "the saved query survives, connection-less");
+        assert!(repo.get(&gone.id).await.is_err());
     }
 }

@@ -83,7 +83,6 @@ impl DbViewerService {
                         name: object.name.clone(),
                         kind: object.kind,
                         fields: (*fields).clone(),
-                        fields_ready: true,
                     }],
                     routines: Vec::new(),
                 })

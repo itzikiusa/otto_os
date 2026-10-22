@@ -100,13 +100,18 @@ pub fn parse(conn: &Connection, secret: Option<String>) -> Result<ParsedProfile>
         password: secret,
         database,
         tls,
-        // Internal authorization flags never come from stored/user JSON.
-        params: {
-            let mut params = conn.params.clone();
-            if let Some(map) = params.as_object_mut() {
-                map.retain(|key, _| !key.starts_with("__"));
-            }
-            params
+        // Internal authorization flags never come from stored/user JSON. A
+        // non-object `params` (an array or string saved through the API) is
+        // `{}`: drivers index it by key (`params["__ch_session"] = …`), which
+        // panics on anything but an object or null.
+        params: match conn.params.as_object() {
+            Some(map) => Value::Object(
+                map.iter()
+                    .filter(|(key, _)| !key.starts_with("__"))
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+            ),
+            None => Value::Object(serde_json::Map::new()),
         },
     };
 
@@ -153,6 +158,23 @@ mod tests {
         assert_eq!(parsed.config.database.as_deref(), Some("shopdb"));
         assert!(!parsed.config.tls.enabled());
         assert!(parsed.ssh.is_none());
+    }
+
+    /// backend-correctness-4-03: an array/string/null `params` resolves to an
+    /// empty object, so a driver's keyed write cannot panic.
+    #[test]
+    fn non_object_params_become_an_empty_object() {
+        for params in [json!([]), json!("x"), json!(null), json!(3)] {
+            let c = conn(ConnectionKind::Clickhouse, params.clone());
+            let mut parsed = parse(&c, None).unwrap();
+            assert_eq!(parsed.config.params, json!({}), "params {params}");
+            parsed.config.params["__ch_session"] = json!("s"); // must not panic
+        }
+        let c = conn(
+            ConnectionKind::Clickhouse,
+            json!({"host": "h", "__ro": true}),
+        );
+        assert_eq!(parse(&c, None).unwrap().config.params, json!({"host": "h"}));
     }
 
     #[test]

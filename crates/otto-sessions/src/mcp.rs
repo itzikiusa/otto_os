@@ -25,6 +25,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
+use otto_core::mcp_budgets::{CLIENT_TOOL_TIMEOUT_SECS, USER_SERVER_TOOL_TIMEOUT_SECS};
 use serde_json::{json, Map, Value};
 
 /// Session launches hold a read guard from native configuration lookup through
@@ -616,6 +617,11 @@ fn is_bare_toml_key(s: &str) -> bool {
 /// we pass per-spawn overrides that run `<ottod> mcp-tools --config <creds_path>`.
 /// The per-session token lives in the (0600) creds file at `creds_path` — never on
 /// argv. Returns the args to append to the Codex launch command; non-destructive.
+///
+/// It also sets `tool_timeout_sec`: codex cuts every MCP call off at 60 s by
+/// default, below the bridge's own budgets (a `browser_summarize` turn, a
+/// governed run after its approval wait, a pod-log fetch), so the agent saw a
+/// timeout while the daemon kept working (integrations-4-03).
 pub fn codex_mcp_inject_args(ottod: &str, creds_path: &str) -> Vec<String> {
     vec![
         "-c".to_string(),
@@ -627,7 +633,16 @@ pub fn codex_mcp_inject_args(ottod: &str, creds_path: &str) -> Vec<String> {
             toml_str("--config"),
             toml_str(creds_path)
         ),
+        "-c".to_string(),
+        codex_tool_timeout(OTTO_TOOLS_KEY, CLIENT_TOOL_TIMEOUT_SECS),
     ]
+}
+
+/// `mcp_servers.<key>.tool_timeout_sec=<secs>` — codex's per-tool-call cap for
+/// one server. Otto's own servers get the shared client cap (above every
+/// bridge budget); a user server gets [`USER_SERVER_TOOL_TIMEOUT_SECS`].
+fn codex_tool_timeout(key: &str, secs: u64) -> String {
+    format!("mcp_servers.{key}.tool_timeout_sec={secs}")
 }
 
 /// The Codex `-c` overrides that attach Otto's browser MCP server — the codex
@@ -641,6 +656,8 @@ pub fn codex_browser_args() -> Vec<String> {
         format!("mcp_servers.{SERVER_KEY}.command={}", toml_str(&command)),
         "-c".to_string(),
         format!("mcp_servers.{SERVER_KEY}.args=[{}]", args.join(",")),
+        "-c".to_string(),
+        codex_tool_timeout(SERVER_KEY, CLIENT_TOOL_TIMEOUT_SECS),
     ]
 }
 
@@ -737,6 +754,11 @@ pub fn codex_user_server_args(
         let args: Vec<String> = args.iter().map(|a| toml_str(a)).collect();
         out.args
             .push(format!("mcp_servers.{}.args=[{}]", s.name, args.join(",")));
+        // A user server states no timeout of its own: a generous default
+        // instead of codex's 60 s (a slow downstream search must not be cut).
+        out.args.push("-c".to_string());
+        out.args
+            .push(codex_tool_timeout(&s.name, USER_SERVER_TOOL_TIMEOUT_SECS));
         out.delivered.push(s.name.clone());
     }
     out
@@ -1555,7 +1577,14 @@ mod tests {
                 "-c".to_string(),
                 "mcp_servers.otto.args=[\"mcp-tools\",\"--config\",\"/tmp/otto-mcp/s-1.json\"]"
                     .to_string(),
+                "-c".to_string(),
+                "mcp_servers.otto.tool_timeout_sec=960".to_string(),
             ]
+        );
+        // Above every bridge budget (the 15 min summarize turn is the longest).
+        assert!(
+            std::time::Duration::from_secs(CLIENT_TOOL_TIMEOUT_SECS)
+                > otto_core::mcp_budgets::SUMMARIZE_CALL_TIMEOUT
         );
     }
 
@@ -1585,6 +1614,8 @@ mod tests {
                 "mcp_servers.jira.command=\"node\"".to_string(),
                 "-c".to_string(),
                 "mcp_servers.jira.args=[\"x.js\"]".to_string(),
+                "-c".to_string(),
+                "mcp_servers.jira.tool_timeout_sec=600".to_string(),
             ]
         );
         assert_eq!(out.delivered, vec!["jira"]);
@@ -1644,7 +1675,11 @@ mod tests {
     #[test]
     fn codex_browser_args_attach_otto_browser() {
         let args = codex_browser_args();
-        assert_eq!(args.len(), 4);
+        assert_eq!(args.len(), 6);
+        assert_eq!(
+            args[5],
+            format!("mcp_servers.otto-browser.tool_timeout_sec={CLIENT_TOOL_TIMEOUT_SECS}")
+        );
         assert_eq!(args[0], "-c");
         assert!(
             args[1].starts_with("mcp_servers.otto-browser.command=\""),

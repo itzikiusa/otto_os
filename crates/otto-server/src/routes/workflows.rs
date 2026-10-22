@@ -1606,105 +1606,11 @@ pub async fn update_trigger(
 }
 
 /// Validate a trigger spec at WRITE time so misconfigurations fail loudly
-/// instead of silently never firing:
-/// - `schedule`: cadence/at/weekday/cron validated by the shared cadence
-///   engine (an unknown cadence like "monthly" previously saved fine and then
-///   `is_due` returned false forever, with no error anywhere).
-/// - `event`: `event_kind` must be a kind the listener actually fires, and
-///   never `workflow_run_updated` (the engine emits it per node transition —
-///   triggering on it is a recursive run explosion).
+/// instead of silently never firing. The rules (and the one list of fireable
+/// event kinds) live in [`otto_workflows::triggers::validate_spec`], next to
+/// the listener that fires them.
 fn validate_trigger_spec(kind: &str, spec: &Value) -> Result<(), ApiError> {
-    if !matches!(kind, "schedule" | "event" | "webhook" | "chat") {
-        return Err(ApiError(Error::Invalid("unsupported trigger kind".into())));
-    }
-    if let Some(timezone) = spec.get("timezone").and_then(Value::as_str) {
-        if timezone.parse::<chrono_tz::Tz>().is_err() {
-            return Err(ApiError(Error::Invalid(format!(
-                "Unknown IANA timezone '{timezone}'"
-            ))));
-        }
-    }
-    if let Some(channel) = spec
-        .get("result_channel")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-    {
-        if !matches!(channel, "slack" | "telegram")
-            || spec
-                .get("result_chat")
-                .and_then(Value::as_str)
-                .is_none_or(|s| s.trim().is_empty())
-        {
-            return Err(ApiError(Error::Invalid(
-                "Result delivery needs slack|telegram and a chat/channel ID".into(),
-            )));
-        }
-    }
-    if let Some(url) = spec
-        .get("result_webhook")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-    {
-        if reqwest::Url::parse(url)
-            .ok()
-            .is_none_or(|url| !matches!(url.scheme(), "http" | "https") || url.host_str().is_none())
-        {
-            return Err(ApiError(Error::Invalid(
-                "Result webhook must be an HTTP(S) URL".into(),
-            )));
-        }
-    }
-    match kind {
-        "schedule" => crate::cadence::validate(spec).map_err(ApiError),
-        "event" => {
-            const FIREABLE: &[&str] = &[
-                "review_changed",
-                "budget_exceeded",
-                "product_changed",
-                "swarm_status",
-                "improvement_run_finished",
-                "insight_ready",
-            ];
-            let ek = spec.get("event_kind").and_then(Value::as_str).unwrap_or("");
-            if ek == "workflow_run_updated" {
-                return Err(ApiError(Error::Invalid(
-                    "event_kind 'workflow_run_updated' is not allowed: the engine emits it on \
-                     every node transition, so triggering on it would recursively spawn runs"
-                        .into(),
-                )));
-            }
-            if !FIREABLE.contains(&ek) {
-                return Err(ApiError(Error::Invalid(format!(
-                    "event_kind must be one of {} (got '{ek}')",
-                    FIREABLE.join("|")
-                ))));
-            }
-            if let Some(f) = spec.get("filter_json") {
-                if !f.is_object() && !f.is_null() {
-                    return Err(ApiError(Error::Invalid(
-                        "filter_json must be a flat object of field: expected-value pairs".into(),
-                    )));
-                }
-            }
-            Ok(())
-        }
-        "chat" => {
-            if !matches!(
-                spec.get("channel").and_then(Value::as_str),
-                Some("slack" | "telegram")
-            ) || spec
-                .get("chat")
-                .and_then(Value::as_str)
-                .is_none_or(|s| s.trim().is_empty())
-            {
-                return Err(ApiError(Error::Invalid(
-                    "Chat binding needs slack|telegram and a chat/channel ID".into(),
-                )));
-            }
-            Ok(())
-        }
-        _ => Ok(()),
-    }
+    otto_workflows::triggers::validate_spec(kind, spec).map_err(ApiError)
 }
 
 /// `DELETE /workflow-triggers/{id}`

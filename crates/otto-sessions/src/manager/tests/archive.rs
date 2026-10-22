@@ -169,3 +169,42 @@ async fn auto_archive_with_an_out_of_range_day_count_archives_nothing() {
             .archived
     );
 }
+
+/// data-integrity-4-03: `remove` deletes `<data>/sessions/<id>/` (pasted
+/// images) after the row, and the orphan sweep removes folders whose row is
+/// gone while keeping a live session's folder.
+#[tokio::test]
+async fn session_files_die_with_the_session_and_orphans_are_swept() {
+    // test_manager seeds the user + workspace rows; a second manager over the
+    // same repo carries the data dir.
+    let (_, repo, ws, user) = test_manager().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (events, _rx) = broadcast::channel(16);
+    let data = dir.path().join("data");
+    let mgr =
+        SessionManager::new(repo.clone(), events, ProviderRegistry::new(None)).with_data_dir(&data);
+    let gone = seed_session(&repo, &ws, &user, None).await;
+    let kept = seed_session(&repo, &ws, &user, None).await;
+    let inbox = |id: &str| data.join("sessions").join(id).join("inbox");
+    for id in [&gone, &kept, &"orphan".to_string()] {
+        std::fs::create_dir_all(inbox(id)).unwrap();
+        std::fs::write(inbox(id).join("a.png"), b"png").unwrap();
+    }
+    mgr.remove(&gone).await.unwrap();
+    assert!(
+        !data.join("sessions").join(&gone).exists(),
+        "removed with the row"
+    );
+    // Inside the grace window nothing is swept.
+    assert_eq!(
+        mgr.sweep_orphan_session_files(Duration::from_secs(3600))
+            .await,
+        0
+    );
+    assert_eq!(mgr.sweep_orphan_session_files(Duration::ZERO).await, 1);
+    assert!(!data.join("sessions/orphan").exists());
+    assert!(
+        inbox(&kept).join("a.png").exists(),
+        "a live session's files stay"
+    );
+}

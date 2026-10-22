@@ -50,6 +50,7 @@
 //!   GET  /api/v1/design/learned?workspace_id=                     (ws viewer) → DesignLearnedResp
 //!   POST /api/v1/design/learned/extract                           (ws editor) → DesignLearnExtractResp
 
+use otto_agent_run::fence::extract_fenced;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -78,6 +79,7 @@ use serde_json::{json, Value};
 use tokio::sync::{broadcast, oneshot};
 
 mod ctx;
+pub mod excalidraw;
 use ctx::{require_ws_role, ApiError, ApiResult, CurrentUser};
 pub use ctx::{AgentTurn, DesignAssistCtx};
 
@@ -577,17 +579,6 @@ fn validate_doc(
     deep(format, bytes)
 }
 
-/// The contents of the first ```<lang> fenced block.
-fn extract_fenced(raw: &str, lang: &str) -> Option<String> {
-    let open = format!("```{lang}");
-    let start = raw.find(&open)?;
-    let after = &raw[start + open.len()..];
-    let after = after.strip_prefix('\n').unwrap_or(after);
-    let end = after.find("```")?;
-    let body = after[..end].trim();
-    (!body.is_empty()).then(|| body.to_string())
-}
-
 /// The agent's one-line summary: the first non-empty, non-fence line (≤ 300).
 fn summary_line(reply: &str) -> Option<String> {
     reply
@@ -597,14 +588,9 @@ fn summary_line(reply: &str) -> Option<String> {
         .map(|l| l.chars().take(300).collect())
 }
 
+/// At most `max` chars, then `…` (the shared [`otto_core::text::clip_chars`]).
 fn cap_chars(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        let mut out: String = s.chars().take(max).collect();
-        out.push('…');
-        out
-    }
+    otto_core::text::clip_chars(s, max)
 }
 
 /// Cut `s` to at most `max` BYTES on a char boundary, with a marker.
@@ -1697,10 +1683,21 @@ fn spawn_live_poll<C: DesignAssistCtx>(job: &TurnJob<C>) -> tokio::task::JoinHan
     let mut last = job.base_source.clone().into_bytes();
     let host = job.ctx.clone();
     tokio::spawn(async move {
+        // Stat-gated: an unchanged (len, mtime) skips the read entirely.
+        let mut gate = otto_agent_run::live_file::StatGate::default();
         loop {
             tokio::time::sleep(POLL).await;
-            let Some(bytes) = read_capped(&path, dformat::MAX_CONTENT_BYTES).await else {
-                continue;
+            let bytes = match gate.poll(&path, dformat::MAX_CONTENT_BYTES).await {
+                otto_agent_run::live_file::Poll::Changed(bytes) => bytes,
+                otto_agent_run::live_file::Poll::TooLarge(len) => {
+                    tracing::warn!(
+                        "design assist: {} is {len} bytes, over {}; ignored",
+                        path.display(),
+                        dformat::MAX_CONTENT_BYTES
+                    );
+                    continue;
+                }
+                _ => continue,
             };
             if bytes == last || bytes.iter().all(u8::is_ascii_whitespace) {
                 continue;

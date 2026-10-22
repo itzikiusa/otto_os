@@ -21,6 +21,10 @@ otto-issues = { workspace = true }
 otto-channels = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
+# Trigger-spec validation (`triggers::validate_spec`): IANA timezones and the
+# result-webhook URL check (both already in the workspace graph).
+chrono-tz = "0.10.4"
+reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }

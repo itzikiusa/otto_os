@@ -3,8 +3,8 @@
 //! The daemon's `otto_usage::UsageEngine` records *real* token usage by tailing
 //! the transcript files the agent CLIs write to disk. This module holds the
 //! provider-specific line parsers and the on-disk byte-offset cursor store. It
-//! is deliberately free of any I/O orchestration (that lives in the daemon, in
-//! `ottod/src/usage_tailer.rs`) so the parsing logic can be unit-tested against
+//! is deliberately free of any I/O orchestration (that lives in the tailer driver,
+//! `otto-usage/src/tailer/driver.rs`) so the parsing logic can be unit-tested against
 //! the exact JSON shapes the CLIs emit.
 //!
 //! Extracted from `otto-usage` (which re-exports every item under its old
@@ -504,16 +504,7 @@ pub fn parse_codex_session_meta(line: &str) -> Option<CodexMeta> {
     let model = scope
         .get("model")
         .or_else(|| v.get("model"))
-        .and_then(|m| match m {
-            Value::String(s) => Some(s.clone()),
-            Value::Object(_) => m
-                .get("name")
-                .or_else(|| m.get("id"))
-                .or_else(|| m.get("slug"))
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            _ => None,
-        });
+        .and_then(crate::codex::model_name);
     Some(CodexMeta {
         session_id,
         cwd,

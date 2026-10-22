@@ -87,6 +87,7 @@ pub async fn spawn_background(ctx: &ServerCtx, root_user_id: Option<String>) -> 
     spawn_db_explorer_reaper(ctx);
     spawn_channel_session_archiver(ctx);
     spawn_archived_channel_session_purge(ctx);
+    spawn_orphan_session_files_sweep(ctx);
     spawn_idle_session_suspender(ctx);
     spawn_nested_agent_capture(ctx);
     spawn_stale_session_archiver(ctx);
@@ -229,6 +230,25 @@ fn spawn_archived_channel_session_purge(ctx: &ServerCtx) {
             let n = manager.purge_old_archived_channel_sessions(max_age).await;
             if n > 0 {
                 tracing::info!("purged {n} archived channel session(s) older than 30 days");
+            }
+            tokio::time::sleep(interval).await;
+        }
+    });
+}
+
+/// At boot and then daily: remove `<data>/sessions/<id>/` folders (pasted
+/// images) whose session row is gone — leaked before `remove` deleted them,
+/// or by a removal whose folder delete failed (data-integrity-4-03). The
+/// grace keeps a folder whose row is mid-create out of reach.
+fn spawn_orphan_session_files_sweep(ctx: &ServerCtx) {
+    let manager = Arc::clone(&ctx.manager);
+    let interval = Duration::from_secs(24 * 60 * 60); // daily
+    let grace = Duration::from_secs(60 * 60);
+    tokio::spawn(async move {
+        loop {
+            let n = manager.sweep_orphan_session_files(grace).await;
+            if n > 0 {
+                tracing::info!("removed {n} orphaned session file folder(s)");
             }
             tokio::time::sleep(interval).await;
         }

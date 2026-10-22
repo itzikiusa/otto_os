@@ -786,10 +786,22 @@ pub struct DryRunPartition {
 /// would change without committing anything.
 #[derive(Debug, Clone, Serialize)]
 pub struct DryRunResp {
+    /// Set when a committed reset would be refused (the group still has
+    /// live members): `consumer group <g> is <state>; stop its consumers first`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
     pub group: String,
     pub partitions: Vec<DryRunPartition>,
     pub total_lag_before: i64,
     pub total_lag_after: i64,
+}
+
+/// One partition a failed offset-reset commit did not apply (audit detail).
+#[derive(Debug, Clone, Serialize)]
+pub struct PartitionError {
+    pub topic: String,
+    pub partition: i32,
+    pub error: String,
 }
 
 // ---------------------------------------------------------------------------

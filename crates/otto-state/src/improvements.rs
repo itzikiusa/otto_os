@@ -367,38 +367,13 @@ impl ImprovementsRepo {
         rows.iter().map(row_to_edit).collect()
     }
 
-    /// Set status (+ stamp applied_at/actor when transitioning to applied).
+    /// Move an edit `from` → `to` as a compare-and-set (stamping
+    /// applied_at when `to` is Applied, and the actor). `None` when the edit
+    /// had already left `from` — two decisions on one edit (a double click,
+    /// an agent's approve racing a person's reject) used to both "win" under
+    /// the old unconditional setter, leaving a file applied under a Rejected
+    /// edit that could then never be rolled back.
     pub async fn set_edit_status(
-        &self,
-        id: &Id,
-        status: ImprovementEditStatus,
-        actor: Option<&str>,
-    ) -> Result<ImprovementEdit> {
-        let applied_at = if status == ImprovementEditStatus::Applied {
-            Some(fmt(Utc::now()))
-        } else {
-            None
-        };
-        sqlx::query(
-            "UPDATE improvement_edits SET status = ?, actor = COALESCE(?, actor), \
-             applied_at = COALESCE(?, applied_at) WHERE id = ?",
-        )
-        .bind(status.as_str())
-        .bind(actor)
-        .bind(&applied_at)
-        .bind(id)
-        .execute(&self.pool)
-        .await
-        .map_err(dberr("set edit status"))?;
-        self.get_edit(id).await
-    }
-
-    /// [`Self::set_edit_status`] as a compare-and-set: only from `from`.
-    /// `None` when the edit had already left that status — two decisions on
-    /// one edit (a double click, an agent's approve racing a person's reject)
-    /// used to both "win", leaving a file applied under a Rejected edit that
-    /// could then never be rolled back.
-    pub async fn set_edit_status_if(
         &self,
         id: &Id,
         from: ImprovementEditStatus,

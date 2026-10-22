@@ -200,18 +200,67 @@ pub fn check_kubeconfig_yaml(yaml: &str, context: Option<&str>) -> Result<()> {
     otto_core::kubeconfig_policy::check_kubeconfig(&cfg, context).map_err(Error::Invalid)
 }
 
-/// [`check_kubeconfig_yaml`] over a kubeconfig file on disk.
-pub fn check_kubeconfig_file(path: &Path, context: Option<&str>) -> Result<()> {
-    let len = std::fs::metadata(path)
-        .map_err(|e| Error::Invalid(format!("kubeconfig {}: {e}", path.display())))?
-        .len();
-    if len > (4 * IMPORT_MAX_BYTES) as u64 {
+/// Largest kubeconfig file Otto reads (a real one is a few KiB; imported
+/// YAML is capped at [`IMPORT_MAX_BYTES`]).
+const KUBECONFIG_MAX_BYTES: u64 = 4 * IMPORT_MAX_BYTES as u64;
+
+/// The canonical form of a kubeconfig file Otto is about to read: it must
+/// exist, resolve (symlinks included) to a REGULAR file — never a dir, FIFO
+/// or device, which `read_to_string` would block on or misread — and fit
+/// [`KUBECONFIG_MAX_BYTES`].
+fn readable_kubeconfig(path: &Path) -> Result<PathBuf> {
+    let canonical = std::fs::canonicalize(path).map_err(|e| {
+        Error::Invalid(format!(
+            "kubeconfig file not found: {} ({e})",
+            path.display()
+        ))
+    })?;
+    let meta = std::fs::metadata(&canonical)
+        .map_err(|e| Error::Invalid(format!("kubeconfig {}: {e}", path.display())))?;
+    if !meta.is_file() {
+        return Err(Error::Invalid(format!(
+            "kubeconfig {} is not a regular file",
+            path.display()
+        )));
+    }
+    if meta.len() > KUBECONFIG_MAX_BYTES {
         return Err(Error::Invalid(format!(
             "kubeconfig {} is too large to check",
             path.display()
         )));
     }
-    let text = std::fs::read_to_string(path)
+    Ok(canonical)
+}
+
+/// A kubeconfig path a person typed (cluster add / re-point), validated
+/// before anything reads it. Only root authority reaches the two callers
+/// (`add` needs `require_setup_authority`; `update` refuses a path change
+/// from anyone else), so the path is chosen on purpose — kubeconfigs live
+/// anywhere, not only in `~/.kube`. What it rules out is a path that is not
+/// a kubeconfig at all: `~` is expanded, the target must be a readable
+/// regular file under the size cap ([`readable_kubeconfig`]), and it must
+/// not resolve into Otto's own data dir (`otto.db`, Keychain-backed
+/// overlays, imported kubeconfigs Otto manages itself).
+///
+/// Returns the EXPANDED (not canonical) path: that is what is stored, so a
+/// non-root resubmitting the same form value still compares equal.
+pub fn validated_kubeconfig_path(raw: &str, data_dir: &Path) -> Result<PathBuf> {
+    let expanded = expand_tilde(raw.trim());
+    let canonical = readable_kubeconfig(&expanded)?;
+    let data = std::fs::canonicalize(data_dir).unwrap_or_else(|_| data_dir.to_path_buf());
+    if canonical.starts_with(&data) {
+        return Err(Error::Invalid(format!(
+            "kubeconfig {raw} is inside Otto's data directory; use /k8s/clusters/import for a pasted kubeconfig"
+        )));
+    }
+    Ok(expanded)
+}
+
+/// [`check_kubeconfig_yaml`] over a kubeconfig file on disk (a validated
+/// user path, or a stored one Otto wrote itself).
+pub fn check_kubeconfig_file(path: &Path, context: Option<&str>) -> Result<()> {
+    let canonical = readable_kubeconfig(path)?;
+    let text = std::fs::read_to_string(&canonical)
         .map_err(|e| Error::Invalid(format!("kubeconfig {}: {e}", path.display())))?;
     check_kubeconfig_yaml(&text, context)
 }
@@ -365,10 +414,7 @@ impl<S: K8sCtx> Clusters<S> {
         }
         let kubeconfig_path = match clean(req.kubeconfig_path) {
             Some(p) => {
-                let abs = expand_tilde(&p);
-                if !abs.is_file() {
-                    return Err(Error::Invalid(format!("kubeconfig file not found: {p}")));
-                }
+                let abs = validated_kubeconfig_path(&p, self.ctx.data_dir())?;
                 // S11-303: refuse a context whose credential plugin is not
                 // allow-listed before the row exists.
                 check_kubeconfig_file(&abs, Some(&context_name))?;
@@ -581,10 +627,7 @@ impl<S: K8sCtx> Clusters<S> {
                 }
                 match clean(Some(p)) {
                     Some(p) => {
-                        let abs = expand_tilde(&p);
-                        if !abs.is_file() {
-                            return Err(Error::Invalid(format!("kubeconfig file not found: {p}")));
-                        }
+                        let abs = validated_kubeconfig_path(&p, self.ctx.data_dir())?;
                         Some(Some(abs.to_string_lossy().to_string()))
                     }
                     None => Some(None),
@@ -1023,6 +1066,41 @@ mod tests {
             None,
         );
         assert!(env.contains(&("AWS_ENDPOINT_URL".into(), "http://localhost:4566".into())));
+    }
+
+    /// CodeQL 457-460: the one gate for a typed kubeconfig path.
+    #[test]
+    fn validated_kubeconfig_path_rules() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path().join("otto-data");
+        std::fs::create_dir_all(data.join("kube")).unwrap();
+        let elsewhere = tmp.path().join("work").join("prod.yaml");
+        std::fs::create_dir_all(elsewhere.parent().unwrap()).unwrap();
+        std::fs::write(&elsewhere, "apiVersion: v1\n").unwrap();
+        // Anywhere outside the data dir is fine, and the stored form is the
+        // expanded (not canonical) path.
+        assert_eq!(
+            validated_kubeconfig_path(&format!(" {} ", elsewhere.display()), &data).unwrap(),
+            elsewhere
+        );
+        // Missing, a directory, oversize.
+        assert!(validated_kubeconfig_path("/definitely/not/here.yaml", &data).is_err());
+        assert!(validated_kubeconfig_path(tmp.path().to_str().unwrap(), &data).is_err());
+        let big = tmp.path().join("big.yaml");
+        std::fs::File::create(&big)
+            .unwrap()
+            .set_len(KUBECONFIG_MAX_BYTES + 1)
+            .unwrap();
+        assert!(validated_kubeconfig_path(big.to_str().unwrap(), &data).is_err());
+        // Inside Otto's data dir, directly or through a symlink.
+        let inner = data.join("kube").join("imported.yaml");
+        std::fs::write(&inner, "apiVersion: v1\n").unwrap();
+        assert!(validated_kubeconfig_path(inner.to_str().unwrap(), &data).is_err());
+        let link = tmp.path().join("work").join("link.yaml");
+        std::os::unix::fs::symlink(&inner, &link).unwrap();
+        assert!(validated_kubeconfig_path(link.to_str().unwrap(), &data).is_err());
+        // A stored Otto-owned path is still checkable (no data-dir rule there).
+        assert!(readable_kubeconfig(&inner).is_ok());
     }
 
     #[test]

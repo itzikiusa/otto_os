@@ -171,10 +171,19 @@ pub fn otto_data_dirs() -> Vec<PathBuf> {
 /// (firmlink, case variant on case-insensitive APFS, a mount alias) share it.
 pub type FileId = (u64, u64);
 
+/// The guards' only filesystem touch on a candidate path: a `stat`
+/// (following symlinks, like `Path::exists`). The candidate is untrusted by
+/// design — deciding whether it is protected is this module's job — so it is
+/// only ever stat'ed for identity / existence, never opened, read, written or
+/// listed (CodeQL `rust/path-injection` 397 / 404 are false positives).
+fn guard_stat(p: &Path) -> Option<std::fs::Metadata> {
+    std::fs::metadata(p).ok()
+}
+
 #[cfg(unix)]
 fn file_id(p: &Path) -> Option<FileId> {
     use std::os::unix::fs::MetadataExt;
-    std::fs::metadata(p).ok().map(|m| (m.dev(), m.ino()))
+    guard_stat(p).map(|m| (m.dev(), m.ino()))
 }
 
 #[cfg(not(unix))]
@@ -488,7 +497,7 @@ pub fn canonicalize_prospective(path: &Path) -> Option<PathBuf> {
     let mut existing = path;
     let mut tail: Vec<&std::ffi::OsStr> = Vec::new();
     loop {
-        if existing.exists() {
+        if guard_stat(existing).is_some() {
             break;
         }
         tail.push(existing.file_name()?);

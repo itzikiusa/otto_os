@@ -1199,22 +1199,26 @@ fn route_for_rejects_missing_args_and_unknown_tool() {
 }
 
 #[test]
-fn query_db_readonly_sql_guard_lives_in_route_for() {
-    assert!(route_for(
-        "query_db_readonly",
-        &json!({"connection_id":"c1","statement":"SELECT 1"})
-    )
-    .is_ok());
-    assert!(route_for(
-        "query_db_readonly",
-        &json!({"connection_id":"c1","statement":"DELETE FROM t"})
-    )
-    .is_err());
-    assert!(route_for(
-        "query_db_readonly",
-        &json!({"connection_id":"c1","statement":"SELECT 1; DROP TABLE t"})
-    )
-    .is_err());
+fn query_db_readonly_leaves_the_read_only_verdict_to_the_route() {
+    // The route's engine classifier (`otto_dbviewer::ensure_read_only`, tested
+    // there with writes, DDL and `SELECT 1; DROP TABLE t`) is the only gate:
+    // route_for forwards the statement verbatim to `/db/mcp-query`, never to
+    // the unguarded `/db/query`, so a write is refused by that route.
+    for stmt in [
+        "SELECT 1",
+        "-- note\nSELECT 1",
+        "SELECT ';'",
+        "DELETE FROM t",
+    ] {
+        let call = route_for(
+            "query_db_readonly",
+            &json!({"connection_id":"c1","statement":stmt}),
+        )
+        .unwrap_or_else(|e| panic!("{stmt:?}: {e}"));
+        assert_eq!(call.path, "/api/v1/connections/c1/db/mcp-query");
+        assert_eq!(call.body.as_ref().unwrap()["statement"], json!(stmt));
+    }
+    assert!(route_for("query_db_readonly", &json!({"connection_id":"c1"})).is_err());
 }
 
 #[test]

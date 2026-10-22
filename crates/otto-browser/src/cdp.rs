@@ -233,24 +233,6 @@ impl CdpClient {
         Ok(())
     }
 
-    /// Drain events until `Page.loadEventFired` arrives, or `timeout` elapses.
-    pub async fn wait_for_load_event(&self, timeout: Duration) -> Result<(), CdpError> {
-        let deadline = tokio::time::Instant::now() + timeout;
-        let mut events = self.events.lock().await;
-        loop {
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            if remaining.is_zero() {
-                return Err(CdpError::Timeout("Page.loadEventFired".into()));
-            }
-            match tokio::time::timeout(remaining, events.recv()).await {
-                Ok(Some((method, _))) if method == "Page.loadEventFired" => return Ok(()),
-                Ok(Some(_)) => continue,
-                Ok(None) => return Err(CdpError::Closed),
-                Err(_) => return Err(CdpError::Timeout("Page.loadEventFired".into())),
-            }
-        }
-    }
-
     /// Turn on CDP request interception (`Fetch.enable`, request stage, every
     /// URL) for `session_id`: from here on every network request the page
     /// makes — the navigation, each redirect hop, subresources, XHR/fetch —
@@ -266,8 +248,8 @@ impl CdpClient {
         Ok(())
     }
 
-    /// Like [`Self::wait_for_load_event`], but also answers every
-    /// `Fetch.requestPaused` event while waiting: when `guard` is set the
+    /// Drain events until `Page.loadEventFired` arrives, or `timeout` elapses,
+    /// answering every `Fetch.requestPaused` event while waiting: when `guard` is set the
     /// request's URL is vetted through `otto-netguard` (see
     /// [`request_allowed`]) and continued or failed (`BlockedByClient`); a
     /// refused *document* request (the navigation itself or a redirect hop)
@@ -1115,7 +1097,9 @@ mod tests {
                                 let value = if expr == "location.href" {
                                     json!("https://8.8.8.8/")
                                 } else {
-                                    json!("<html><head><title>ok</title></head><body>hi</body></html>")
+                                    json!(
+                                        "<html><head><title>ok</title></head><body>hi</body></html>"
+                                    )
                                 };
                                 json!({"id": id, "result": {"result": {"value": value}}})
                             }

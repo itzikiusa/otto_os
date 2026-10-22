@@ -49,6 +49,15 @@ const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2024-11-05", "2025-03-26", "2025
 /// Bytes of a stdio server's stderr kept for diagnostics ([`StderrTail`]).
 const STDERR_TAIL_BYTES: usize = 4096;
 const OP_TIMEOUT: Duration = Duration::from_secs(20);
+/// The whole-call budget a CALLER of the gateway (`POST /mcp/gateway/invoke`,
+/// the stdio bridge) must allow one downstream `tools/call`: up to
+/// [`OP_TIMEOUT`] in the session-slot queue, another for a cold `open` (spawn +
+/// `initialize`, common after the 5-minute idle TTL), another for the call
+/// itself, plus a margin. Kept next to `OP_TIMEOUT` so the two cannot drift: a
+/// caller that gave up first dropped the handler mid-call, marked the audit row
+/// failed while a mutating downstream tool could still run, and the agent
+/// retried the write (integrations-4-01).
+pub const GATEWAY_CALL_TIMEOUT: Duration = Duration::from_secs(3 * OP_TIMEOUT.as_secs() + 5);
 const MAX_BODY_BYTES: usize = 1024 * 1024;
 /// Parked (reusable) sessions per client: a second one serves sustained
 /// two-way parallelism without a spawn per call; more would only keep idle
@@ -1147,6 +1156,11 @@ async fn read_until_id<R: AsyncBufReadExt + Unpin, W: AsyncWriteExt + Unpin>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gateway_call_budget_covers_queue_open_and_call() {
+        assert!(GATEWAY_CALL_TIMEOUT >= OP_TIMEOUT * 3 + Duration::from_secs(5));
+    }
 
     #[tokio::test]
     async fn newline_free_response_stops_at_cap() {

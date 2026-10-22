@@ -43,3 +43,44 @@ async fn default_wait_session_returns_a_body_that_arrives_after_21s() {
     let (body, _) = out.expect("the late daemon answer is returned, not a timeout");
     assert_eq!(body["reached"], json!(false));
 }
+
+/// integrations-4-01: a downstream gateway call (`mcp__<server>__<tool>`) the
+/// daemon answers after 21 s — a cold open plus a slow tool — reaches the
+/// agent as the executed envelope, not "upstream timeout after 20s".
+#[tokio::test]
+async fn gateway_call_returns_an_envelope_that_arrives_after_21s() {
+    assert!(otto_mcp::client::GATEWAY_CALL_TIMEOUT > Duration::from_secs(21));
+    let app = axum::Router::new().fallback(
+        |axum::extract::OriginalUri(uri): axum::extract::OriginalUri| async move {
+            if uri.path().ends_with("/mcp/gateway/tools") {
+                return axum::Json(json!({"tools": [
+                    {"name": "mcp__jira__create", "server_id": "srv", "tool": "create"}
+                ]}));
+            }
+            tokio::time::sleep(Duration::from_secs(21)).await;
+            axum::Json(json!({"decision": "allowed", "executed": true,
+                              "content": {"key": "OT-1"}}))
+        },
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let mut ctx = test_ctx();
+    ctx.base = format!("http://{addr}");
+    let out = gateway_call(&ctx, "mcp__jira__create", &json!({"summary": "x"})).await;
+    server.abort();
+    let (envelope, is_error) = out.expect("the late daemon answer is returned, not a timeout");
+    assert!(!is_error);
+    assert_eq!(envelope["executed"], json!(true));
+    assert_eq!(envelope["content"]["key"], json!("OT-1"));
+}
+
+/// integrations-4-03: the client-side cap the spawner hands codex covers the
+/// gateway budget too (it lives in otto-mcp, which otto-core can't see).
+#[test]
+fn the_client_tool_timeout_covers_the_gateway_budget() {
+    assert!(
+        Duration::from_secs(otto_core::mcp_budgets::CLIENT_TOOL_TIMEOUT_SECS)
+            > otto_mcp::client::GATEWAY_CALL_TIMEOUT
+    );
+}

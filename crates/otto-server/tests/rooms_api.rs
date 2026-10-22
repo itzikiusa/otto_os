@@ -701,8 +701,34 @@ done
     wav.extend(b"data");
     wav.extend(3200u32.to_le_bytes());
     wav.resize(3244, 0);
-    let response=client.post(format!("{detail_url}/audio")).bearer_auth(&owner_token).json(&json!({"capture_epoch":2,"member_id":host.member_id,"member_generation":generation,"sequence":1,"offset_ms":0,"duration_ms":100,"wav_base64":STANDARD.encode(wav)})).send().await.unwrap();
+    let wav_b64 = STANDARD.encode(wav);
+    let post_audio = |epoch: u64, generation: Value, sequence: u64| {
+        client
+            .post(format!("{detail_url}/audio"))
+            .bearer_auth(&owner_token)
+            .json(&json!({"capture_epoch":epoch,"member_id":host.member_id,"member_generation":generation,"sequence":sequence,"offset_ms":0,"duration_ms":100,"wav_base64":wav_b64}))
+            .send()
+    };
+    let response = post_audio(2, generation.clone(), 1).await.unwrap();
     assert_eq!(response.status(), 200);
+    // The refusals (test-quality-4-09): a replayed chunk is 409, a stale tab's
+    // member generation and an expired capture epoch are 403. None of them
+    // advances the replay guard or queues work.
+    let replay = post_audio(2, generation.clone(), 1).await.unwrap();
+    assert_eq!(replay.status(), 409);
+    assert!(
+        replay.text().await.unwrap().contains("Duplicate"),
+        "the 409 must come from the replay guard, not a busy queue"
+    );
+    let stale_generation = json!(generation.as_u64().unwrap() + 1);
+    assert_eq!(
+        post_audio(2, stale_generation, 2).await.unwrap().status(),
+        403
+    );
+    assert_eq!(
+        post_audio(1, generation.clone(), 2).await.unwrap().status(),
+        403
+    );
     send(&mut host_ws, json!({"type":"recap_stop"})).await;
     let finalizing = until(&mut host_ws, |v| {
         v["type"] == "snapshot" && v["room"]["recap"]["state"] == "finalizing"

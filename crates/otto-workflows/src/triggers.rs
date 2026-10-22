@@ -1,8 +1,10 @@
-//! Workflow trigger plumbing that needs no server internals: the event-trigger
-//! listener (event bus -> matching `event` triggers -> admitted runs) and the
-//! run-input helper shared with the schedule scheduler. Moved out of
-//! otto-server's `workflow_trigger_scheduler`; the cadence-driven schedule tick
-//! stays there (it shares `cadence` with Scheduled Tasks).
+//! Workflow trigger plumbing that needs no server internals: write-time spec
+//! validation ([`validate_spec`], with the one [`FIREABLE_EVENT_KINDS`] list),
+//! the event-trigger listener (event bus -> matching `event` triggers ->
+//! admitted runs), the cadence-driven schedule tick ([`schedule`]) and the
+//! run-input helpers they share. otto-server keeps only the supervisor loop
+//! (`workflow_trigger_scheduler`) and the webhook route, both driving these
+//! through its [`WorkflowCtx`] impl.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -13,6 +15,120 @@ use serde_json::{json, Value};
 use tracing::{info, warn};
 
 use crate::WorkflowCtx;
+
+pub mod schedule;
+
+/// Every `event_kind` a trigger may be configured with: exactly the kinds
+/// [`event_to_kind`] maps (a test pins the two together, and another pins the
+/// UI's `EVENT_KINDS` in `ui/src/modules/workflows/triggerForm.ts` to this
+/// list). A kind the listener maps but validation rejects can't be configured;
+/// one validation accepts but the listener drops never fires.
+pub const FIREABLE_EVENT_KINDS: &[&str] = &[
+    "review_changed",
+    "budget_exceeded",
+    "product_changed",
+    "swarm_status",
+    "improvement_run_finished",
+    "insight_ready",
+];
+
+/// Validate a trigger spec at WRITE time so misconfigurations fail loudly
+/// instead of silently never firing:
+/// - `schedule`: cadence/at/weekday/cron validated by the shared cadence
+///   engine (an unknown cadence like "monthly" previously saved fine and then
+///   `is_due` returned false forever, with no error anywhere).
+/// - `event`: `event_kind` must be one of [`FIREABLE_EVENT_KINDS`], and
+///   never `workflow_run_updated` (the engine emits it per node transition —
+///   triggering on it is a recursive run explosion).
+/// - `chat`: a slack|telegram channel and a chat id.
+/// - every kind: a valid IANA `timezone`, a complete `result_channel` +
+///   `result_chat` pair, and an HTTP(S) `result_webhook`.
+pub fn validate_spec(kind: &str, spec: &Value) -> otto_core::Result<()> {
+    use otto_core::Error;
+    if !matches!(kind, "schedule" | "event" | "webhook" | "chat") {
+        return Err(Error::Invalid("unsupported trigger kind".into()));
+    }
+    if let Some(timezone) = spec.get("timezone").and_then(Value::as_str) {
+        if timezone.parse::<chrono_tz::Tz>().is_err() {
+            return Err(Error::Invalid(format!(
+                "Unknown IANA timezone '{timezone}'"
+            )));
+        }
+    }
+    if let Some(channel) = spec
+        .get("result_channel")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
+        if !matches!(channel, "slack" | "telegram")
+            || spec
+                .get("result_chat")
+                .and_then(Value::as_str)
+                .is_none_or(|s| s.trim().is_empty())
+        {
+            return Err(Error::Invalid(
+                "Result delivery needs slack|telegram and a chat/channel ID".into(),
+            ));
+        }
+    }
+    if let Some(url) = spec
+        .get("result_webhook")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
+        if reqwest::Url::parse(url)
+            .ok()
+            .is_none_or(|url| !matches!(url.scheme(), "http" | "https") || url.host_str().is_none())
+        {
+            return Err(Error::Invalid(
+                "Result webhook must be an HTTP(S) URL".into(),
+            ));
+        }
+    }
+    match kind {
+        "schedule" => otto_core::cadence::validate(spec),
+        "event" => {
+            let ek = spec.get("event_kind").and_then(Value::as_str).unwrap_or("");
+            if ek == "workflow_run_updated" {
+                return Err(Error::Invalid(
+                    "event_kind 'workflow_run_updated' is not allowed: the engine emits it on \
+                     every node transition, so triggering on it would recursively spawn runs"
+                        .into(),
+                ));
+            }
+            if !FIREABLE_EVENT_KINDS.contains(&ek) {
+                return Err(Error::Invalid(format!(
+                    "event_kind must be one of {} (got '{ek}')",
+                    FIREABLE_EVENT_KINDS.join("|")
+                )));
+            }
+            if let Some(f) = spec.get("filter_json") {
+                if !f.is_object() && !f.is_null() {
+                    return Err(Error::Invalid(
+                        "filter_json must be a flat object of field: expected-value pairs".into(),
+                    ));
+                }
+            }
+            Ok(())
+        }
+        "chat" => {
+            if !matches!(
+                spec.get("channel").and_then(Value::as_str),
+                Some("slack" | "telegram")
+            ) || spec
+                .get("chat")
+                .and_then(Value::as_str)
+                .is_none_or(|s| s.trim().is_empty())
+            {
+                return Err(Error::Invalid(
+                    "Chat binding needs slack|telegram and a chat/channel ID".into(),
+                ));
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
 
 /// Copy a trigger spec's result-delivery destinations into a run input map.
 /// `deliver_run_result` reads these exact keys from the input; without them a
@@ -469,5 +585,140 @@ mod tests {
         assert!(input.get("pr_branch").is_none());
         assert_eq!(input.get("repos"), Some(&json!([{"repo": "r"}])));
         assert!(input.get("x").is_none());
+    }
+
+    /// One `Event` of every variant `event_to_kind` maps. Adding a mapping
+    /// without adding its kind to FIREABLE_EVENT_KINDS fails the test below
+    /// once its sample is listed here (the `match` in `event_to_kind` is the
+    /// place to look).
+    fn mapped_events() -> Vec<Event> {
+        let ws = || "w1".to_string();
+        vec![
+            Event::ReviewChanged {
+                workspace_id: ws(),
+                session_id: None,
+                review_id: "r".into(),
+                status: "done".into(),
+            },
+            Event::BudgetExceeded {
+                workspace_id: ws(),
+                provider: "claude".into(),
+                spend_usd: 2.0,
+                cap_usd: 1.0,
+                direction: "over".into(),
+            },
+            Event::ProductChanged {
+                workspace_id: ws(),
+                story_id: "s".into(),
+                section: "analysis".into(),
+                status: "done".into(),
+            },
+            Event::SwarmStatus {
+                workspace_id: ws(),
+                swarm_id: "sw".into(),
+                status: "running".into(),
+            },
+            Event::ImprovementRunFinished {
+                workspace_id: ws(),
+                run_id: "ir".into(),
+                status: "done".into(),
+                applied: 0,
+                pending: 0,
+            },
+            Event::InsightReady {
+                period: "week".into(),
+                session_id: None,
+            },
+        ]
+    }
+
+    #[test]
+    fn fireable_event_kinds_are_exactly_what_the_listener_maps() {
+        // Every kind the listener maps is configurable…
+        for ev in mapped_events() {
+            let kind = event_to_kind(&ev).expect("mapped");
+            assert!(
+                FIREABLE_EVENT_KINDS.contains(&kind),
+                "{kind} fires but validation would reject it"
+            );
+        }
+        // …and every configurable kind is accepted by validation; the list has
+        // no duplicates and never carries the recursive run event.
+        let mut seen = std::collections::HashSet::new();
+        for kind in FIREABLE_EVENT_KINDS {
+            assert!(seen.insert(kind), "duplicate {kind}");
+            assert!(validate_spec("event", &json!({ "event_kind": kind })).is_ok());
+        }
+        assert!(!FIREABLE_EVENT_KINDS.contains(&"workflow_run_updated"));
+        assert!(validate_spec("event", &json!({"event_kind": "workflow_run_updated"})).is_err());
+    }
+
+    #[test]
+    fn the_ui_event_kinds_match_the_fireable_list() {
+        // PC-11: `triggerForm.ts` keeps `EVENT_KINDS` (it carries the labels);
+        // its ids must be exactly FIREABLE_EVENT_KINDS, in any order.
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../ui/src/modules/workflows/triggerForm.ts"
+        );
+        let src = std::fs::read_to_string(path).expect("read triggerForm.ts");
+        // The declaration, not a comment that mentions it.
+        let start = src
+            .find("export const EVENT_KINDS")
+            .expect("EVENT_KINDS in triggerForm.ts");
+        let rest = &src[start..];
+        let end = rest.find("as const").expect("end of EVENT_KINDS");
+        // Each entry is an `['id', 'Label']` tuple: take the first string.
+        let mut ui: Vec<String> = Vec::new();
+        let mut cursor = &rest[..end];
+        while let Some(i) = cursor.find(['[']) {
+            let after = &cursor[i + 1..];
+            match after.chars().next() {
+                Some(q @ ('\'' | '"')) => {
+                    let body = &after[1..];
+                    let close = body.find(q).expect("closing quote");
+                    ui.push(body[..close].to_string());
+                    cursor = &body[close..];
+                }
+                _ => cursor = after,
+            }
+        }
+        ui.sort();
+        let mut want: Vec<String> = FIREABLE_EVENT_KINDS.iter().map(|s| s.to_string()).collect();
+        want.sort();
+        assert_eq!(
+            ui, want,
+            "triggerForm.ts EVENT_KINDS drifted from FIREABLE_EVENT_KINDS"
+        );
+    }
+
+    #[test]
+    fn trigger_validation_accepts_canonical_events_and_rejects_bad_destinations() {
+        assert!(validate_spec(
+            "event",
+            &json!({"event_kind":"review_changed","filter_json":{"status":"done"}})
+        )
+        .is_ok());
+        assert!(validate_spec("event", &json!({"event_kind":"ReviewChanged"})).is_err());
+        assert!(validate_spec(
+            "event",
+            &json!({"event_kind":"review_changed","filter_json":[1]})
+        )
+        .is_err());
+        assert!(validate_spec("schedule", &json!({"cadence":"cron","expr":"0 9 * * 1-5","timezone":"Asia/Jerusalem","result_channel":"slack","result_chat":"C123"})).is_ok());
+        assert!(validate_spec("schedule", &json!({"cadence":"monthly"})).is_err());
+        assert!(validate_spec("chat", &json!({"channel":"slack","chat":"C1"})).is_ok());
+        assert!(validate_spec("chat", &json!({"channel":"email","chat":"C1"})).is_err());
+        assert!(validate_spec("nope", &json!({})).is_err());
+        for spec in [
+            json!({"timezone":"Invalid/Zone"}),
+            json!({"result_channel":"slack"}),
+            json!({"result_webhook":"file:///tmp/result"}),
+        ] {
+            assert!(
+                validate_spec("webhook", &spec).is_err(),
+                "invalid destination accepted: {spec}"
+            );
+        }
     }
 }
