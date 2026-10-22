@@ -528,7 +528,7 @@ impl ProductService {
             "confluence" => {
                 let client = ConfluenceClient::for_account(&account, &token)?;
                 client
-                    .add_comment(&story.source_key, &markdown_to_storage(&body_md))
+                    .add_comment(&story.source_key, &markdown_to_storage(&body_md)?)
                     .await?
             }
             other => {
@@ -645,7 +645,7 @@ impl ProductService {
                     .update_page(
                         &story.source_key,
                         &page.title,
-                        &markdown_to_storage(&version.body_md),
+                        &markdown_to_storage(&version.body_md)?,
                         page.version,
                     )
                     .await?;
@@ -834,7 +834,7 @@ impl ProductService {
 
         // 3. Render content.
         let md = Self::render_testcases_markdown(&story.title, &approved);
-        let storage = markdown_to_storage(&md);
+        let storage = markdown_to_storage(&md)?;
         let page_title = format!("Test Cases — {}", story.title);
 
         // 4. Determine Confluence space key.
@@ -1611,7 +1611,7 @@ impl ProductService {
             .create_page(
                 space_key,
                 page_title,
-                &markdown_to_storage(&content_md),
+                &markdown_to_storage(&content_md)?,
                 parent_id,
             )
             .await?;
@@ -1811,11 +1811,10 @@ impl ProductService {
                 // Linear account has no Confluence to comment on.
                 let comment_md = format!("Linked Jira story: {issue_url}");
                 let commented = match ConfluenceClient::for_account(&account, &token) {
-                    Ok(conf_client) => {
-                        conf_client
-                            .add_comment(&story.source_key, &markdown_to_storage(&comment_md))
-                            .await
-                    }
+                    Ok(conf_client) => match markdown_to_storage(&comment_md) {
+                        Ok(storage) => conf_client.add_comment(&story.source_key, &storage).await,
+                        Err(e) => Err(e),
+                    },
                     Err(e) => Err(e),
                 };
                 if let Err(e) = commented {

@@ -611,17 +611,17 @@ pub fn otto_tool_specs() -> Vec<Value> {
             "inputSchema":{"type":"object","required":["page_id"],"properties":{
                 "account_id":{"type":"string","description":ISSUE_ACCOUNT_REF_DESC},"page_id":{"type":"string","description":PAGE_REF_DESC}}}}),
         json!({"name":"otto.create_confluence_page","mutating":true,"category":"Issues",
-            "description":"Create a Confluence page. Supply `body_md` (MARKDOWN, converted server-side) OR `body_html` (Confluence storage XHTML, passed through — use it for panel/expand/status macros, layouts and anything Markdown cannot express). Optional `parent_id` nests it under an existing page. DANGEROUS: outward-facing — approval-gated.",
+            "description":"Create a Confluence page. Supply `body_md` (MARKDOWN → validated storage: tables with a header row, code macros with language, task lists, `> [!NOTE]` panels) OR `body_html` (storage XHTML, must be well-formed; passed through — for macros/layouts Markdown cannot express). Optional `parent_id` nests it under an existing page. The page is read back: `verification:{ok, checks}` compares title, space, parent, version and body structure. DANGEROUS: outward-facing — approval-gated.",
             "inputSchema":{"type":"object","required":["space_key","title"],"properties":{
                 "account_id":{"type":"string","description":ISSUE_ACCOUNT_REF_DESC},"space_key":{"type":"string"},"title":{"type":"string"},
                 "body_md":{"type":"string"},"body_html":{"type":"string"},"parent_id":{"type":"string","description":"Parent page id or URL."}}}}),
         json!({"name":"otto.update_confluence_page","mutating":true,"category":"Issues",
-            "description":"Replace a Confluence page's body with `body_md` (MARKDOWN) or `body_html` (Confluence storage XHTML, passed through). Pass `base_version` (the page version you read with otto.get_confluence_page) so a newer human edit is never overwritten — the call then fails with a conflict instead; without it the latest version is overwritten. Omit `title` to keep the existing one. DANGEROUS: outward-facing — approval-gated.",
+            "description":"Replace a Confluence page's body with `body_md` (MARKDOWN, converted as in otto.create_confluence_page) or `body_html` (well-formed storage XHTML, passed through). Pass `base_version` (the page version you read with otto.get_confluence_page) so a newer human edit is never overwritten — the call then fails with a conflict instead; without it the latest version is overwritten. Omit `title` to keep the existing one. Returns `verification` (version must be +1, body structure must match). DANGEROUS: outward-facing — approval-gated.",
             "inputSchema":{"type":"object","required":["page_id"],"properties":{
                 "account_id":{"type":"string","description":ISSUE_ACCOUNT_REF_DESC},"page_id":{"type":"string","description":PAGE_REF_DESC},"body_md":{"type":"string"},
                 "body_html":{"type":"string"},"title":{"type":"string"},"base_version":{"type":"integer"}}}}),
         json!({"name":"otto.comment_confluence_page","mutating":true,"category":"Issues",
-            "description":"Add a footer comment to a Confluence page. Supply `body_md` (MARKDOWN) or `body_html` (storage XHTML). DANGEROUS: outward-facing — approval-gated.",
+            "description":"Add a footer comment to a Confluence page. Supply `body_md` (MARKDOWN) or `body_html` (well-formed storage XHTML). Returns `verification` from reading the comment back. DANGEROUS: outward-facing — approval-gated.",
             "inputSchema":{"type":"object","required":["page_id"],"properties":{
                 "account_id":{"type":"string","description":ISSUE_ACCOUNT_REF_DESC},"page_id":{"type":"string","description":PAGE_REF_DESC},"body_md":{"type":"string"},
                 "body_html":{"type":"string"}}}}),

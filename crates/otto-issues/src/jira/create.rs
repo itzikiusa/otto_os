@@ -17,8 +17,8 @@ use serde_json::{json, Map, Value};
 use super::{path_seg, JiraClient};
 use crate::adf_check::{adf_outline, adf_plain_text};
 use crate::issue_create::{
-    local_problems, non_empty, problems_error, CreateIssueReq, CreateIssueResp, IssueVerification,
-    VerificationCheck,
+    check, local_problems, non_empty, outline_check, problems_error, text_check, CreateIssueReq,
+    CreateIssueResp, IssueVerification, VerificationCheck,
 };
 use crate::md_adf::markdown_to_adf;
 
@@ -85,14 +85,6 @@ fn jira_error_text(body: &Value) -> String {
         }
     } else {
         parts.join("; ")
-    }
-}
-
-fn check(name: &str, ok: bool, detail: impl Into<String>) -> VerificationCheck {
-    VerificationCheck {
-        name: name.to_string(),
-        ok,
-        detail: detail.into(),
     }
 }
 
@@ -525,63 +517,19 @@ fn compare(key: &str, exp: &Expected, body: &Value) -> Vec<VerificationCheck> {
                 "a description was sent but the issue has none",
             ));
         } else {
-            checks.push(structure_check(sent, stored));
-            let (a, b) = (adf_plain_text(sent), adf_plain_text(stored));
-            checks.push(check(
+            checks.push(outline_check(
+                "description_structure",
+                &adf_outline(sent),
+                &adf_outline(stored),
+            ));
+            checks.push(text_check(
                 "description_text",
-                a == b,
-                if a == b {
-                    format!("{} characters match", a.chars().count())
-                } else {
-                    format!("text differs from character {}", first_diff(&a, &b))
-                },
+                &adf_plain_text(sent),
+                &adf_plain_text(stored),
             ));
         }
     }
     checks
-}
-
-/// Compare the block outlines; on a mismatch name the first differing block
-/// and, for tables, both shapes.
-fn structure_check(sent: &Value, stored: &Value) -> VerificationCheck {
-    let (a, b) = (adf_outline(sent), adf_outline(stored));
-    let tables = |o: &[String]| -> String {
-        let t: Vec<&str> = o
-            .iter()
-            .filter(|e| e.starts_with("table["))
-            .map(String::as_str)
-            .collect();
-        if t.is_empty() {
-            "no tables".into()
-        } else {
-            t.join(", ")
-        }
-    };
-    if a == b {
-        return check(
-            "description_structure",
-            true,
-            format!("{} blocks match ({})", a.len(), tables(&a)),
-        );
-    }
-    let n = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
-    check(
-        "description_structure",
-        false,
-        format!(
-            "block {n} differs: sent {}, stored {} (sent {} blocks with {}; stored {} blocks with {})",
-            a.get(n).map_or("(end)", String::as_str),
-            b.get(n).map_or("(end)", String::as_str),
-            a.len(),
-            tables(&a),
-            b.len(),
-            tables(&b)
-        ),
-    )
-}
-
-fn first_diff(a: &str, b: &str) -> usize {
-    a.chars().zip(b.chars()).take_while(|(x, y)| x == y).count()
 }
 
 #[cfg(test)]

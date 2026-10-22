@@ -246,9 +246,11 @@ The integration can **write comments**:
   Your **Markdown** is converted to **ADF** before posting (see *Markdown → ADF*
   below). Returns a `CommentRef` (`id` + optional `url`).
   Calls `POST /rest/api/3/issue/{key}/comment`.
-- **Confluence** (engine-level): footer comments are posted by converting Markdown
-  to storage XHTML and `POST`ing a `comment`-type content to
-  `/wiki/rest/api/content`.
+- **Confluence:** `POST /api/v1/issue/confluence/pages/{page_id}/comments?account_id=`
+  with `{"body_md": "…"}` (or well-formed storage `body_html`). The Markdown is
+  converted to validated storage XHTML (see *Markdown → Confluence storage*
+  below) and `POST`ed as `comment`-type content to `/wiki/rest/api/content`;
+  the comment is then read back and returned with a `verification`.
 
 Typical uses for write-back are posting **open questions** or **generated test
 cases** onto the artifact for the team to see — these are driven by the product
@@ -323,6 +325,40 @@ with an error, never posted:
 
 Where ADF forbids a construct (a table inside a list item, a code block inside
 a panel) it is degraded to the closest valid form instead of failing.
+
+### Markdown → Confluence storage
+
+Every Confluence write — page create / update, footer comments, and the
+Product publish / comment paths — sends **storage XHTML**
+(`representation: storage`); there is no ADF or wiki-markup path. Markdown is
+parsed by the same parser as the Jira ADF converter and written by
+`otto_issues::markdown_to_storage`, then checked by `validate_storage`
+(well-formed XML, known elements only, correct nesting) — an invalid body is a
+`400`, never sent:
+
+| Markdown | Storage |
+|---|---|
+| headings, paragraphs, line breaks | `<h1>`–`<h6>`, `<p>`, `<br />` |
+| bold, italic, strike, inline code, links | `<strong>`, `<em>`, `<s>`, `<code>`, `<a href>` |
+| bullet / ordered / nested lists | `<ul>` / `<ol start>`, the item's first paragraph inline in its `<li>` |
+| `- [ ]` / `- [x]` | `<ac:task-list>` / `<ac:task>` (`incomplete` / `complete`), nested lists inside the task body |
+| `>` | `<blockquote>` |
+| `> [!NOTE]` / `[!TIP]` / `[!IMPORTANT]` / `[!WARNING]` / `[!CAUTION]` | `info` / `tip` / `note` / `warning` / `warning` panel macros |
+| ```` ```lang ```` | the `code` macro with a `language` parameter and a CDATA body (a `]]>` in the code is split across CDATA sections) |
+| `---` | `<hr />` |
+| GFM tables | `<table><tbody>`, a `<th>` header row, cells as `<p>` (empty `<p />`), rows padded to the widest row, `\|` a literal pipe |
+| images | links (no attachment upload) |
+
+`body_html` (raw storage, for macros Markdown cannot express) is passed through
+unchanged but must be well-formed XHTML.
+
+**After every write** the page / comment is read back (`expand=body.storage,…`)
+and the response carries `verification: {ok, checks}`: for pages `title`,
+`space`, `parent` (when given), `version` (1 on create, previous + 1 on update);
+for comments `container`; for both `body_structure` (headings, list sizes, task
+lists, table rows × columns and header row, code macros with their language,
+panels) and `body_text`. A failed check is reported; nothing is deleted. The
+Product publish paths use the same converter but do not read back.
 
 Description updates exist at the engine level (`PUT /rest/api/3/issue/{key}`)
 and are driven by the product workflow rather than this settings surface.

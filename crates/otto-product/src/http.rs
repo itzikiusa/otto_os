@@ -2058,7 +2058,7 @@ mod tests {
             assert_eq!(sent["title"], "Reviewed title");
             assert_eq!(
                 sent["body"]["storage"]["value"],
-                otto_issues::confluence::markdown_to_storage(original_body)
+                otto_issues::confluence::markdown_to_storage(original_body).unwrap()
             );
             assert_eq!(sent["ancestors"][0]["id"], "42");
         }

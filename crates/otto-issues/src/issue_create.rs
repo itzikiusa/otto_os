@@ -72,6 +72,83 @@ pub struct CreateIssueResp {
     pub verification: Option<IssueVerification>,
 }
 
+pub(crate) fn check(name: &str, ok: bool, detail: impl Into<String>) -> VerificationCheck {
+    VerificationCheck {
+        name: name.to_string(),
+        ok,
+        detail: detail.into(),
+    }
+}
+
+/// Compare two block outlines (`adf_outline` / `storage_outline`); a mismatch
+/// names the first differing block and, for tables, both shapes.
+pub(crate) fn outline_check(name: &str, sent: &[String], stored: &[String]) -> VerificationCheck {
+    let tables = |o: &[String]| -> String {
+        let t: Vec<&str> = o
+            .iter()
+            .filter(|e| e.starts_with("table["))
+            .map(String::as_str)
+            .collect();
+        if t.is_empty() {
+            "no tables".into()
+        } else {
+            t.join(", ")
+        }
+    };
+    if sent == stored {
+        return check(
+            name,
+            true,
+            format!("{} blocks match ({})", sent.len(), tables(sent)),
+        );
+    }
+    let n = sent.iter().zip(stored).take_while(|(x, y)| x == y).count();
+    check(
+        name,
+        false,
+        format!(
+            "block {n} differs: sent {}, stored {} (sent {} blocks with {}; stored {} blocks with {})",
+            sent.get(n).map_or("(end)", String::as_str),
+            stored.get(n).map_or("(end)", String::as_str),
+            sent.len(),
+            tables(sent),
+            stored.len(),
+            tables(stored)
+        ),
+    )
+}
+
+/// Compare two whitespace-collapsed texts.
+pub(crate) fn text_check(name: &str, sent: &str, stored: &str) -> VerificationCheck {
+    if sent == stored {
+        return check(
+            name,
+            true,
+            format!("{} characters match", sent.chars().count()),
+        );
+    }
+    let n = sent
+        .chars()
+        .zip(stored.chars())
+        .take_while(|(x, y)| x == y)
+        .count();
+    let around = |s: &str| {
+        s.chars()
+            .skip(n.saturating_sub(10))
+            .take(30)
+            .collect::<String>()
+    };
+    check(
+        name,
+        false,
+        format!(
+            "text differs from character {n}: sent \"…{}…\", stored \"…{}…\"",
+            around(sent),
+            around(stored)
+        ),
+    )
+}
+
 pub(crate) fn non_empty(s: &Option<String>) -> Option<&str> {
     s.as_deref().map(str::trim).filter(|s| !s.is_empty())
 }

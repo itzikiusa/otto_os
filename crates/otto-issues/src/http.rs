@@ -20,8 +20,10 @@ use otto_core::secrets::SecretStore;
 use otto_core::{new_id, Error, Id};
 use otto_state::{IssuesRepo, NewIssueAccount};
 
-use crate::confluence::ConfluenceClient;
-use crate::confluence::{markdown_to_storage, ConfluencePageSummary, PageComment};
+use crate::confluence::{
+    markdown_to_storage, CommentWriteResp, ConfluenceClient, ConfluencePageSummary, PageComment,
+    PageExpect, PageWriteResp,
+};
 use crate::issue_create::{local_problems, problems_error, CreateIssueReq, CreateIssueResp};
 use crate::jira::{CommentRef, DevStatus, EditableField, IssueFull, JiraTransition, JiraUser};
 use crate::tracker::{RawQuery, Tracker};
@@ -539,17 +541,22 @@ async fn confluence_client_for<S: IssuesCtx>(
 
 /// Resolve a request body that may arrive as Markdown or as Confluence storage
 /// XHTML. `body_html` wins: it is the escape hatch for macros/layouts Markdown
-/// cannot express, so a caller that sends both means the richer one.
+/// cannot express, so a caller that sends both means the richer one. Either
+/// way nothing malformed is sent: Markdown converts to validated storage, and
+/// `body_html` must at least be well-formed XHTML.
 fn resolve_body(
     body_md: Option<&str>,
     body_html: Option<&str>,
     field: &str,
 ) -> Result<String, Error> {
     if let Some(h) = body_html.map(str::trim).filter(|s| !s.is_empty()) {
+        crate::storage_check::check_well_formed(h).map_err(|e| {
+            Error::Invalid(format!("{field}: body_html is not well-formed XHTML ({e})"))
+        })?;
         return Ok(h.to_string());
     }
     match body_md.map(str::trim).filter(|s| !s.is_empty()) {
-        Some(m) => Ok(markdown_to_storage(m)),
+        Some(m) => markdown_to_storage(m),
         None => Err(Error::Invalid(format!(
             "{field}: supply body_md (Markdown) or body_html (Confluence storage XHTML)"
         ))),
@@ -580,13 +587,14 @@ async fn get_page_cf<S: IssuesCtx>(
     Ok(Json(page_resp(client.get_page(&page_id).await?).await))
 }
 
-/// `POST /issue/confluence/pages?account_id=`
+/// `POST /issue/confluence/pages?account_id=` — the created page plus its
+/// read-back `verification`.
 async fn create_page_cf<S: IssuesCtx>(
     State(s): State<S>,
     Extension(user): Extension<AuthUser>,
     Query(params): Query<HashMap<String, String>>,
     Json(req): Json<CreateConfluencePageReq>,
-) -> ApiResult<Json<ConfluencePageResp>> {
+) -> ApiResult<Json<PageWriteResp>> {
     if req.space_key.trim().is_empty() {
         return Err(Error::Invalid("space_key must not be empty".into()).into());
     }
@@ -599,15 +607,30 @@ async fn create_page_cf<S: IssuesCtx>(
         req.body_html.as_deref(),
         "create page",
     )?;
+    let parent_id = req
+        .parent_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty());
     let page = client
-        .create_page(
-            req.space_key.trim(),
-            req.title.trim(),
-            &storage,
-            req.parent_id.as_deref().filter(|p| !p.trim().is_empty()),
-        )
+        .create_page(req.space_key.trim(), req.title.trim(), &storage, parent_id)
         .await?;
-    Ok(Json(page_resp(page).await))
+    let verification = client
+        .verify_page(
+            &page.id,
+            &PageExpect {
+                title: req.title.trim(),
+                space_key: Some(req.space_key.trim()),
+                parent_id,
+                version: 1,
+                storage: &storage,
+            },
+        )
+        .await;
+    Ok(Json(PageWriteResp {
+        page: page_resp(page).await,
+        verification,
+    }))
 }
 
 /// `PUT /issue/confluence/pages/{page_id}?account_id=`
@@ -624,7 +647,7 @@ async fn update_page_cf<S: IssuesCtx>(
     Path(page_id): Path<String>,
     Query(params): Query<HashMap<String, String>>,
     Json(req): Json<UpdateConfluencePageReq>,
-) -> ApiResult<Json<ConfluencePageResp>> {
+) -> ApiResult<Json<PageWriteResp>> {
     let client = confluence_client_for(&s, &params, &user).await?;
     let current = client.get_page(&page_id).await?;
     if let Some(base) = req.base_version {
@@ -651,7 +674,24 @@ async fn update_page_cf<S: IssuesCtx>(
     let page = client
         .update_page(&page_id, title, &storage, current.version)
         .await?;
-    Ok(Json(page_resp(page).await))
+    let verification = client
+        .verify_page(
+            &page_id,
+            &PageExpect {
+                title,
+                space_key: Some(&current.space_key)
+                    .filter(|k| !k.is_empty())
+                    .map(String::as_str),
+                parent_id: None,
+                version: current.version + 1,
+                storage: &storage,
+            },
+        )
+        .await;
+    Ok(Json(PageWriteResp {
+        page: page_resp(page).await,
+        verification,
+    }))
 }
 
 /// `GET /issue/confluence/pages/{page_id}/comments?account_id=`
@@ -665,17 +705,23 @@ async fn list_page_comments_cf<S: IssuesCtx>(
     Ok(Json(client.list_comments(&page_id).await?))
 }
 
-/// `POST /issue/confluence/pages/{page_id}/comments?account_id=`
+/// `POST /issue/confluence/pages/{page_id}/comments?account_id=` — the new
+/// comment plus its read-back `verification`.
 async fn add_page_comment_cf<S: IssuesCtx>(
     State(s): State<S>,
     Extension(user): Extension<AuthUser>,
     Path(page_id): Path<String>,
     Query(params): Query<HashMap<String, String>>,
     Json(req): Json<AddConfluenceCommentReq>,
-) -> ApiResult<Json<CommentRef>> {
+) -> ApiResult<Json<CommentWriteResp>> {
     let storage = resolve_body(req.body_md.as_deref(), req.body_html.as_deref(), "comment")?;
     let client = confluence_client_for(&s, &params, &user).await?;
-    Ok(Json(client.add_comment(&page_id, &storage).await?))
+    let comment = client.add_comment(&page_id, &storage).await?;
+    let verification = client.verify_comment(&comment.id, &page_id, &storage).await;
+    Ok(Json(CommentWriteResp {
+        comment,
+        verification,
+    }))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

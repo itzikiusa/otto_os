@@ -2901,6 +2901,22 @@ export interface ConfluencePageResp {
   body_md: string;
 }
 
+/**
+ * Response of the Confluence page writes (create / update): the page plus the
+ * read-back comparison (title, space, parent, version, body structure + text).
+ */
+export interface ConfluencePageWriteResp extends ConfluencePageResp {
+  verification: IssueVerification;
+}
+
+/** Response of POST /issue/confluence/pages/{page_id}/comments. */
+export interface ConfluenceCommentWriteResp {
+  id: string;
+  url?: string | null;
+  /** The comment read back: container + body structure + text. */
+  verification: IssueVerification;
+}
+
 /** POST /issue/confluence/pages?account_id= */
 export interface CreateConfluencePageReq {
   space_key: string;

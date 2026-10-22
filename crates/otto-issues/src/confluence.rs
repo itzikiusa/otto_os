@@ -10,6 +10,9 @@ use otto_core::{Error, Result};
 
 use crate::jira::CommentRef;
 
+mod verify;
+pub use verify::{CommentWriteResp, PageExpect, PageWriteResp};
+
 /// How long to wait for the TCP/TLS connection to a Confluence endpoint.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Overall per-request deadline so a hung endpoint can't block the caller.
@@ -1630,478 +1633,9 @@ fn collapse_excess_newlines(s: &str) -> String {
     out
 }
 
-/// Convert Markdown to Confluence storage-format XHTML.
-///
-/// Handles: ATX headings (`#`–`###`), paragraphs, unordered lists (`- ` / `* `),
-/// ordered lists (`1. `), fenced code blocks (` ``` `), inline code (`` ` ``),
-/// `**bold**`, `*italic*`, `[text](url)`.  Escapes `&`, `<`, `>` in plain text.
-pub fn markdown_to_storage(md: &str) -> String {
-    let mut out = String::new();
-    // Control characters (an ANSI escape pasted from a terminal, a stray NUL)
-    // are invalid in XML 1.0 and make Confluence reject the whole page (400).
-    let md: String = md
-        .chars()
-        .filter(|c| !c.is_control() || matches!(c, '\n' | '\r' | '\t'))
-        .collect();
-    let lines: Vec<&str> = md.lines().collect();
-    let mut i = 0;
-
-    // State for lists.
-    let mut in_ul = false;
-    let mut in_ol = false;
-    let mut in_fence = false;
-
-    fn escape_xml(s: &str) -> String {
-        s.replace('&', "&amp;")
-            .replace('<', "&lt;")
-            .replace('>', "&gt;")
-    }
-
-    /// Convert inline Markdown spans (bold, italic, inline code, links) to storage XHTML.
-    fn inline_to_storage(text: &str) -> String {
-        let mut out = String::new();
-        let chars: Vec<char> = text.chars().collect();
-        let n = chars.len();
-        let mut j = 0;
-
-        fn escape_xml_char_str(s: &str) -> String {
-            s.replace('&', "&amp;")
-                .replace('<', "&lt;")
-                .replace('>', "&gt;")
-        }
-
-        // `j` indexes CHARS, so every search and slice below must also be in
-        // char space. Searching the &str instead (`text[j..].find(..)`) mixes a
-        // char index with byte offsets: they agree only for pure ASCII, and one
-        // multi-byte char ('—', '→', '×', an emoji) before an inline span makes
-        // the slice land mid-character and PANIC — a 500 on the publish endpoint
-        // for any document with a dash next to a bold span.
-        let find_ch = |from: usize, needle: char| -> Option<usize> {
-            chars.get(from..)?.iter().position(|&c| c == needle)
-        };
-        let find_pair = |from: usize, a: char, b: char| -> Option<usize> {
-            let s = chars.get(from..)?;
-            if s.len() < 2 {
-                return None;
-            }
-            s.windows(2).position(|w| w[0] == a && w[1] == b)
-        };
-        let span = |from: usize, to: usize| -> String { chars[from..to].iter().collect() };
-
-        while j < n {
-            // Inline code: `...`
-            if chars[j] == '`' {
-                if let Some(end) = find_ch(j + 1, '`') {
-                    let code_text = span(j + 1, j + 1 + end);
-                    out.push_str(&format!("<code>{}</code>", escape_xml_char_str(&code_text)));
-                    j += end + 2;
-                    continue;
-                }
-            }
-            // Bold: **...**
-            if j + 1 < n && chars[j] == '*' && chars[j + 1] == '*' {
-                if let Some(end) = find_pair(j + 2, '*', '*') {
-                    let bold_text = span(j + 2, j + 2 + end);
-                    out.push_str(&format!(
-                        "<strong>{}</strong>",
-                        escape_xml_char_str(&bold_text)
-                    ));
-                    j += end + 4;
-                    continue;
-                }
-            }
-            // Italic: *...*  (single asterisk)
-            if chars[j] == '*' && (j + 1 >= n || chars[j + 1] != '*') {
-                if let Some(end) = find_ch(j + 1, '*') {
-                    let italic_text = span(j + 1, j + 1 + end);
-                    out.push_str(&format!("<em>{}</em>", escape_xml_char_str(&italic_text)));
-                    j += end + 2;
-                    continue;
-                }
-            }
-            // Link: [text](url)
-            if chars[j] == '[' {
-                if let Some(close_bracket) = find_pair(j, ']', '(') {
-                    let text_part = span(j + 1, j + close_bracket);
-                    let after_start = j + close_bracket + 2;
-                    if let Some(close_paren) = find_ch(after_start, ')') {
-                        let url_part = span(after_start, after_start + close_paren);
-                        // `"` must be escaped inside the attribute — a raw one
-                        // ended it early and Confluence rejected the page (400).
-                        out.push_str(&format!(
-                            "<a href=\"{}\">{}</a>",
-                            escape_xml_char_str(&url_part).replace('"', "&quot;"),
-                            escape_xml_char_str(&text_part)
-                        ));
-                        j += close_bracket + 2 + close_paren + 1;
-                        continue;
-                    }
-                }
-            }
-            // Plain character — escape XML-significant chars.
-            let ch = chars[j];
-            match ch {
-                '&' => out.push_str("&amp;"),
-                '<' => out.push_str("&lt;"),
-                '>' => out.push_str("&gt;"),
-                _ => out.push(ch),
-            }
-            j += 1;
-        }
-        out
-    }
-
-    while i < lines.len() {
-        let line = lines[i];
-
-        // Fenced code block.
-        if line.trim_start().starts_with("```") {
-            // Close any open lists first.
-            if in_ul {
-                out.push_str("</ul>");
-                in_ul = false;
-            }
-            if in_ol {
-                out.push_str("</ol>");
-                in_ol = false;
-            }
-            if in_fence {
-                out.push_str("\n</pre>");
-                in_fence = false;
-            } else {
-                out.push_str("<pre>");
-                in_fence = true;
-            }
-            i += 1;
-            continue;
-        }
-
-        if in_fence {
-            out.push('\n');
-            out.push_str(&escape_xml(line));
-            i += 1;
-            continue;
-        }
-
-        // Horizontal rule: `---`, `***`, `___` alone on a line. Must be tested
-        // BEFORE the heading/paragraph branches, and after the table branch (a
-        // `|---|` delimiter belongs to its table).
-        {
-            let t = line.trim();
-            if t.len() >= 3
-                && (t.chars().all(|c| c == '-')
-                    || t.chars().all(|c| c == '*')
-                    || t.chars().all(|c| c == '_'))
-            {
-                close_lists(&mut out, &mut in_ul, &mut in_ol);
-                out.push_str("<hr />");
-                i += 1;
-                continue;
-            }
-        }
-
-        // Blockquote: consecutive `> ` lines become ONE <blockquote>. Callouts
-        // (the NOT-READY banner) are written this way, and without this each
-        // line reached the wiki with a literal leading '>'.
-        if line.trim_start().starts_with('>') {
-            close_lists(&mut out, &mut in_ul, &mut in_ol);
-            // GitHub-style alert (`> [!WARNING]`) becomes a real Confluence
-            // panel macro rather than a grey quote — a NOT-READY banner has to
-            // be impossible to skim past.
-            let alert = lines
-                .get(i)
-                .and_then(|l| alert_kind(l.trim_start().trim_start_matches('>').trim()));
-            let (open_tag, close_tag) = match alert.as_deref() {
-                Some(k) => {
-                    i += 1; // consume the `[!KIND]` marker line
-                    (
-                        format!("<ac:structured-macro ac:name=\"{k}\"><ac:rich-text-body>"),
-                        "</ac:rich-text-body></ac:structured-macro>".to_string(),
-                    )
-                }
-                None => ("<blockquote>".to_string(), "</blockquote>".to_string()),
-            };
-            out.push_str(&open_tag);
-            let mut para = String::new();
-            while i < lines.len() {
-                let l = lines[i].trim_start();
-                let Some(rest) = l.strip_prefix('>') else {
-                    break;
-                };
-                let rest = rest.strip_prefix(' ').unwrap_or(rest);
-                if rest.trim().is_empty() {
-                    // Blank quoted line separates paragraphs inside the quote.
-                    if !para.trim().is_empty() {
-                        out.push_str(&format!("<p>{}</p>", inline_to_storage(para.trim())));
-                        para.clear();
-                    }
-                } else {
-                    if !para.is_empty() {
-                        para.push(' ');
-                    }
-                    para.push_str(rest);
-                }
-                i += 1;
-            }
-            if !para.trim().is_empty() {
-                out.push_str(&format!("<p>{}</p>", inline_to_storage(para.trim())));
-            }
-            out.push_str(&close_tag);
-            continue;
-        }
-
-        // ATX headings. h4-h6 matter: test cases are written as `#### TC-x`,
-        // and an unhandled level reaches the wiki as literal '####'.
-        let mut deep_heading = false;
-        for (marker, tag) in [("###### ", "h6"), ("##### ", "h5"), ("#### ", "h4")] {
-            if let Some(rest) = line.strip_prefix(marker) {
-                close_lists(&mut out, &mut in_ul, &mut in_ol);
-                out.push_str(&format!("<{tag}>{}</{tag}>", inline_to_storage(rest)));
-                i += 1;
-                deep_heading = true;
-                break;
-            }
-        }
-        if deep_heading {
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix("### ") {
-            close_lists(&mut out, &mut in_ul, &mut in_ol);
-            out.push_str(&format!("<h3>{}</h3>", inline_to_storage(rest)));
-            i += 1;
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix("## ") {
-            close_lists(&mut out, &mut in_ul, &mut in_ol);
-            out.push_str(&format!("<h2>{}</h2>", inline_to_storage(rest)));
-            i += 1;
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix("# ") {
-            close_lists(&mut out, &mut in_ul, &mut in_ol);
-            out.push_str(&format!("<h1>{}</h1>", inline_to_storage(rest)));
-            i += 1;
-            continue;
-        }
-
-        // GFM pipe table: a `| a | b |` header, a `|:---|---:|` delimiter row,
-        // then body rows. Without this every table falls through to the
-        // paragraph branch below and renders on the wiki as literal pipe text —
-        // which is how a document built around summary/coverage matrices ends up
-        // looking like a dump instead of a page.
-        if line.trim_start().starts_with('|')
-            && lines
-                .get(i + 1)
-                .map(|l| is_table_delimiter(l))
-                .unwrap_or(false)
-        {
-            close_lists(&mut out, &mut in_ul, &mut in_ol);
-            let header = split_table_row(line);
-            out.push_str("<table><tbody><tr>");
-            for cell in &header {
-                out.push_str(&format!("<th>{}</th>", inline_to_storage(cell)));
-            }
-            out.push_str("</tr>");
-            i += 2; // header + delimiter
-            while i < lines.len() {
-                let row = lines[i];
-                if !row.trim_start().starts_with('|') {
-                    break;
-                }
-                out.push_str("<tr>");
-                let cells = split_table_row(row);
-                // Pad/truncate to the header width so a malformed row can't
-                // shear the rest of the table.
-                for k in 0..header.len() {
-                    let cell = cells.get(k).map(String::as_str).unwrap_or("");
-                    out.push_str(&format!("<td>{}</td>", inline_to_storage(cell)));
-                }
-                out.push_str("</tr>");
-                i += 1;
-            }
-            out.push_str("</tbody></table>");
-            continue;
-        }
-
-        // Task list: `- [ ] ` / `- [x] ` become a NATIVE Confluence task list —
-        // real tickable checkboxes, not a bullet with literal "[ ]" in it. This
-        // is what makes a test case's prerequisites and steps usable as a
-        // checklist on the page.
-        if is_task_item(line).is_some() {
-            close_lists(&mut out, &mut in_ul, &mut in_ol);
-            out.push_str("<ac:task-list>");
-            while i < lines.len() {
-                let Some((done, body)) = is_task_item(lines[i]) else {
-                    break;
-                };
-                out.push_str(&format!(
-                    "<ac:task><ac:task-status>{}</ac:task-status><ac:task-body>{}</ac:task-body></ac:task>",
-                    if done { "complete" } else { "incomplete" },
-                    inline_to_storage(body)
-                ));
-                i += 1;
-            }
-            out.push_str("</ac:task-list>");
-            continue;
-        }
-
-        // Unordered list items: `- ` or `* `.
-        if let Some(rest) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
-            if in_ol {
-                out.push_str("</ol>");
-                in_ol = false;
-            }
-            if !in_ul {
-                out.push_str("<ul>");
-                in_ul = true;
-            }
-            out.push_str(&format!("<li>{}</li>", inline_to_storage(rest)));
-            i += 1;
-            continue;
-        }
-
-        // Ordered list items: `N. `.
-        if let Some(rest) = strip_ordered_item(line) {
-            if in_ul {
-                out.push_str("</ul>");
-                in_ul = false;
-            }
-            if !in_ol {
-                out.push_str("<ol>");
-                in_ol = true;
-            }
-            out.push_str(&format!("<li>{}</li>", inline_to_storage(rest)));
-            i += 1;
-            continue;
-        }
-
-        // Blank line — close any open list.
-        if line.trim().is_empty() {
-            if in_ul {
-                out.push_str("</ul>");
-                in_ul = false;
-            }
-            if in_ol {
-                out.push_str("</ol>");
-                in_ol = false;
-            }
-            i += 1;
-            continue;
-        }
-
-        // Regular paragraph text — wrap with <p>.
-        close_lists(&mut out, &mut in_ul, &mut in_ol);
-        out.push_str(&format!("<p>{}</p>", inline_to_storage(line)));
-        i += 1;
-    }
-
-    // Close any open blocks.
-    if in_ul {
-        out.push_str("</ul>");
-    }
-    if in_ol {
-        out.push_str("</ol>");
-    }
-    if in_fence {
-        out.push_str("\n</pre>");
-    }
-
-    out
-}
-
-/// True for a GFM table delimiter row: `|---|---|`, `|:---|---:|`, `| :-: |`.
-fn is_table_delimiter(line: &str) -> bool {
-    let t = line.trim();
-    if !t.starts_with('|') {
-        return false;
-    }
-    let cells: Vec<&str> = t.trim_matches('|').split('|').collect();
-    !cells.is_empty()
-        && cells.iter().all(|c| {
-            let c = c.trim();
-            !c.is_empty() && c.chars().all(|ch| ch == '-' || ch == ':') && c.contains('-')
-        })
-}
-
-/// Split a `| a | b |` row into trimmed cell texts. A `\|` escapes a literal pipe.
-fn split_table_row(line: &str) -> Vec<String> {
-    let t = line.trim();
-    let t = t.strip_prefix('|').unwrap_or(t);
-    let t = t.strip_suffix('|').unwrap_or(t);
-    let mut cells = Vec::new();
-    let mut cur = String::new();
-    let mut esc = false;
-    for ch in t.chars() {
-        if esc {
-            cur.push(ch);
-            esc = false;
-        } else if ch == '\\' {
-            esc = true;
-        } else if ch == '|' {
-            cells.push(cur.trim().to_string());
-            cur = String::new();
-        } else {
-            cur.push(ch);
-        }
-    }
-    cells.push(cur.trim().to_string());
-    cells
-}
-
-/// `- [ ] body` / `- [x] body` → (checked, body). Also accepts `* `.
-fn is_task_item(line: &str) -> Option<(bool, &str)> {
-    let t = line.trim_start();
-    let rest = t.strip_prefix("- ").or_else(|| t.strip_prefix("* "))?;
-    if let Some(b) = rest.strip_prefix("[ ] ") {
-        return Some((false, b));
-    }
-    if let Some(b) = rest
-        .strip_prefix("[x] ")
-        .or_else(|| rest.strip_prefix("[X] "))
-    {
-        return Some((true, b));
-    }
-    None
-}
-
-/// A GitHub-style alert marker (`[!WARNING]`) mapped to the Confluence panel
-/// macro name. Returns None for an ordinary quote.
-fn alert_kind(s: &str) -> Option<String> {
-    let t = s.trim();
-    let inner = t.strip_prefix("[!")?.strip_suffix(']')?;
-    Some(
-        match inner.to_ascii_uppercase().as_str() {
-            "WARNING" | "CAUTION" => "warning",
-            "NOTE" | "INFO" | "IMPORTANT" => "info",
-            "TIP" => "tip",
-            _ => return None,
-        }
-        .to_string(),
-    )
-}
-
-/// Close open list tags, updating the flags in place.
-fn close_lists(out: &mut String, in_ul: &mut bool, in_ol: &mut bool) {
-    if *in_ul {
-        out.push_str("</ul>");
-        *in_ul = false;
-    }
-    if *in_ol {
-        out.push_str("</ol>");
-        *in_ol = false;
-    }
-}
-
-/// If `line` starts with an ordered-list marker like `1. ` or `12. `, return the rest.
-fn strip_ordered_item(line: &str) -> Option<&str> {
-    let dot_pos = line.find(". ")?;
-    let prefix = &line[..dot_pos];
-    if !prefix.is_empty() && prefix.chars().all(|c| c.is_ascii_digit()) {
-        Some(&line[dot_pos + 2..])
-    } else {
-        None
-    }
-}
+/// Markdown → storage XHTML lives in [`crate::md_storage`] (one parser shared
+/// with the Jira ADF emitter); re-exported here for existing callers.
+pub use crate::md_storage::markdown_to_storage;
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Tests
@@ -2160,7 +1694,7 @@ mod tests {
     #[test]
     fn test_markdown_to_storage_basic() {
         let md = "## H\npara\n- one";
-        let storage = markdown_to_storage(md);
+        let storage = markdown_to_storage(md).unwrap();
 
         assert!(storage.contains("<h2>"), "h2 tag; got: {storage:?}");
         assert!(storage.contains("</h2>"), "h2 close; got: {storage:?}");
@@ -2171,7 +1705,7 @@ mod tests {
 
     #[test]
     fn test_markdown_to_storage_headings() {
-        let storage = markdown_to_storage("# A\n## B\n### C");
+        let storage = markdown_to_storage("# A\n## B\n### C").unwrap();
         assert!(storage.contains("<h1>A</h1>"), "h1; got: {storage:?}");
         assert!(storage.contains("<h2>B</h2>"), "h2; got: {storage:?}");
         assert!(storage.contains("<h3>C</h3>"), "h3; got: {storage:?}");
@@ -2179,7 +1713,7 @@ mod tests {
 
     #[test]
     fn test_markdown_to_storage_list() {
-        let storage = markdown_to_storage("- one\n- two\n- three");
+        let storage = markdown_to_storage("- one\n- two\n- three").unwrap();
         assert!(storage.contains("<ul>"), "ul open; got: {storage:?}");
         assert!(storage.contains("</ul>"), "ul close; got: {storage:?}");
         assert!(
@@ -2194,7 +1728,7 @@ mod tests {
 
     #[test]
     fn test_markdown_to_storage_ordered_list() {
-        let storage = markdown_to_storage("1. first\n2. second");
+        let storage = markdown_to_storage("1. first\n2. second").unwrap();
         assert!(storage.contains("<ol>"), "ol open; got: {storage:?}");
         assert!(storage.contains("</ol>"), "ol close; got: {storage:?}");
         assert!(
@@ -2205,8 +1739,15 @@ mod tests {
 
     #[test]
     fn test_markdown_to_storage_fenced_code() {
-        let storage = markdown_to_storage("```\nlet x = 1;\n```");
-        assert!(storage.contains("<pre>"), "pre tag; got: {storage:?}");
+        let storage = markdown_to_storage("```\nlet x = 1;\n```").unwrap();
+        assert!(
+            storage.contains("<ac:structured-macro ac:name=\"code\">"),
+            "code macro; got: {storage:?}"
+        );
+        assert!(
+            storage.contains("<![CDATA[let x = 1;]]>"),
+            "CDATA body; got: {storage:?}"
+        );
         assert!(
             storage.contains("let x = 1;"),
             "code content; got: {storage:?}"
@@ -2215,7 +1756,7 @@ mod tests {
 
     #[test]
     fn test_markdown_to_storage_link() {
-        let storage = markdown_to_storage("[click here](https://example.com)");
+        let storage = markdown_to_storage("[click here](https://example.com)").unwrap();
         assert!(
             storage.contains("<a href=\"https://example.com\">click here</a>"),
             "link; got: {storage:?}"
@@ -2224,7 +1765,7 @@ mod tests {
 
     #[test]
     fn test_markdown_to_storage_escapes_xml() {
-        let storage = markdown_to_storage("A & B < C > D");
+        let storage = markdown_to_storage("A & B < C > D").unwrap();
         assert!(storage.contains("&amp;"), "amp escape; got: {storage:?}");
         assert!(storage.contains("&lt;"), "lt escape; got: {storage:?}");
         assert!(storage.contains("&gt;"), "gt escape; got: {storage:?}");
@@ -2436,12 +1977,12 @@ mod tests {
 
     #[test]
     fn markdown_to_storage_escapes_href_quotes_and_drops_control_chars() {
-        let s = markdown_to_storage("see [x](https://e.x/?q=\"a\")");
+        let s = markdown_to_storage("see [x](https://e.x/?q=\"a\")").unwrap();
         assert!(
             s.contains("href=\"https://e.x/?q=&quot;a&quot;\""),
             "got: {s:?}"
         );
-        let s = markdown_to_storage("red \u{1b}[31mtext\u{0}");
+        let s = markdown_to_storage("red \u{1b}[31mtext\u{0}").unwrap();
         assert!(!s.contains('\u{1b}') && !s.contains('\u{0}'), "got: {s:?}");
         assert!(s.contains("red [31mtext"), "got: {s:?}");
     }
@@ -2604,16 +2145,16 @@ mod tests {
             "[\u{2192} link](https://example.com/a\u{2014}b) \u{2014} **after**",
             "\u{2265} 5 \u{2248} `x` \u{2264} **y**",
         ] {
-            let out = markdown_to_storage(md); // must not panic
+            let out = markdown_to_storage(md).unwrap(); // must not panic
             assert!(!out.is_empty(), "empty output for {md:?}");
         }
 
         // The span content must still be correct, not merely non-panicking.
-        let out = markdown_to_storage("a \u{2014} **bold** tail");
+        let out = markdown_to_storage("a \u{2014} **bold** tail").unwrap();
         assert!(out.contains("<strong>bold</strong>"), "got: {out}");
-        let out = markdown_to_storage("\u{2192} `code` \u{2192}");
+        let out = markdown_to_storage("\u{2192} `code` \u{2192}").unwrap();
         assert!(out.contains("<code>code</code>"), "got: {out}");
-        let out = markdown_to_storage("[\u{2192}t](http://u/\u{2014}) x");
+        let out = markdown_to_storage("[\u{2192}t](http://u/\u{2014}) x").unwrap();
         assert!(
             out.contains("<a href=\"http://u/\u{2014}\">\u{2192}t</a>"),
             "got: {out}"
@@ -2626,15 +2167,18 @@ mod tests {
     #[test]
     fn markdown_to_storage_renders_pipe_tables() {
         let md = "| TC ID | Expected | Verdict |\n|:---|:---|---:|\n| TC-1 | `qual_expired` | ok |\n| TC-2 | **bold** | no |\n\nafter";
-        let out = markdown_to_storage(md);
+        let out = markdown_to_storage(md).unwrap();
         assert!(out.contains("<table><tbody>"), "no table: {out}");
-        assert!(out.contains("<th>TC ID</th>"), "no header cell: {out}");
         assert!(
-            out.contains("<td><code>qual_expired</code></td>"),
+            out.contains("<th><p>TC ID</p></th>"),
+            "no header cell: {out}"
+        );
+        assert!(
+            out.contains("<td><p><code>qual_expired</code></p></td>"),
             "inline in cell: {out}"
         );
         assert!(
-            out.contains("<td><strong>bold</strong></td>"),
+            out.contains("<td><p><strong>bold</strong></p></td>"),
             "bold in cell: {out}"
         );
         assert!(out.contains("</tbody></table>"), "unclosed: {out}");
@@ -2642,14 +2186,14 @@ mod tests {
         assert!(!out.contains("<p>| TC-1"), "row leaked as paragraph: {out}");
 
         // A short row must not shear the table.
-        let ragged = markdown_to_storage("| a | b |\n|---|---|\n| only |");
+        let ragged = markdown_to_storage("| a | b |\n|---|---|\n| only |").unwrap();
         assert!(
-            ragged.contains("<td>only</td><td></td>"),
+            ragged.contains("<td><p>only</p></td><td><p /></td>"),
             "padding: {ragged}"
         );
 
         // A lone pipe line with no delimiter row stays a paragraph.
-        let not_table = markdown_to_storage("| not a table");
+        let not_table = markdown_to_storage("| not a table").unwrap();
         assert!(!not_table.contains("<table"), "false positive: {not_table}");
     }
 
@@ -2658,20 +2202,22 @@ mod tests {
     /// literal `---`, `>` and `####` text.
     #[test]
     fn markdown_to_storage_renders_rules_quotes_and_deep_headings() {
-        let out = markdown_to_storage("a\n\n---\n\nb");
+        let out = markdown_to_storage("a\n\n---\n\nb").unwrap();
         assert!(out.contains("<hr />"), "hr: {out}");
         assert!(!out.contains("<p>---</p>"), "literal rule: {out}");
 
-        let out = markdown_to_storage("#### TC-AU03 - title\n##### deeper\n###### deepest");
+        let out =
+            markdown_to_storage("#### TC-AU03 - title\n##### deeper\n###### deepest").unwrap();
         assert!(out.contains("<h4>TC-AU03 - title</h4>"), "h4: {out}");
         assert!(out.contains("<h5>deeper</h5>"), "h5: {out}");
         assert!(out.contains("<h6>deepest</h6>"), "h6: {out}");
         assert!(!out.contains("####"), "literal hashes: {out}");
 
-        // Consecutive quoted lines collapse into ONE blockquote paragraph.
-        let out = markdown_to_storage("> **NOT READY.** line one\n> line two\n\nafter");
+        // Consecutive quoted lines become ONE blockquote paragraph; each line
+        // break is kept as a hard break (as in Jira).
+        let out = markdown_to_storage("> **NOT READY.** line one\n> line two\n\nafter").unwrap();
         assert!(out.contains("<blockquote>"), "blockquote: {out}");
-        assert!(out.contains("line one line two"), "joined: {out}");
+        assert!(out.contains("line one<br />line two"), "joined: {out}");
         assert!(
             out.contains("<strong>NOT READY.</strong>"),
             "inline in quote: {out}"
@@ -2681,9 +2227,9 @@ mod tests {
         assert!(!out.contains("&gt; line two"), "literal marker: {out}");
 
         // A table delimiter must still belong to its table, not become an <hr>.
-        let out = markdown_to_storage("| a |\n|---|\n| v |");
+        let out = markdown_to_storage("| a |\n|---|\n| v |").unwrap();
         assert!(
-            out.contains("<th>a</th>") && !out.contains("<hr />"),
+            out.contains("<th><p>a</p></th>") && !out.contains("<hr />"),
             "delimiter: {out}"
         );
     }
@@ -2692,7 +2238,7 @@ mod tests {
     /// prerequisites/steps, and a real panel for the NOT-READY banner.
     #[test]
     fn markdown_to_storage_emits_task_lists_and_alert_panels() {
-        let out = markdown_to_storage("- [ ] seed player `42`\n- [x] done step\n\nafter");
+        let out = markdown_to_storage("- [ ] seed player `42`\n- [x] done step\n\nafter").unwrap();
         assert!(out.contains("<ac:task-list>"), "task list: {out}");
         assert!(
             out.contains("<ac:task-status>incomplete</ac:task-status>"),
@@ -2706,7 +2252,7 @@ mod tests {
         assert!(!out.contains("[ ]"), "literal checkbox: {out}");
         assert!(out.contains("<p>after</p>"), "text after: {out}");
 
-        let out = markdown_to_storage("> [!WARNING]\n> **NOT READY** - 3 items\n\nx");
+        let out = markdown_to_storage("> [!WARNING]\n> **NOT READY** - 3 items\n\nx").unwrap();
         assert!(out.contains("ac:name=\"warning\""), "warning panel: {out}");
         assert!(
             out.contains("<strong>NOT READY</strong>"),
@@ -2715,14 +2261,14 @@ mod tests {
         assert!(!out.contains("[!WARNING]"), "marker leaked: {out}");
 
         // A plain quote stays a blockquote.
-        let out = markdown_to_storage("> just a quote");
+        let out = markdown_to_storage("> just a quote").unwrap();
         assert!(
             out.contains("<blockquote>") && !out.contains("ac:structured-macro"),
             "{out}"
         );
 
         // A normal bullet is still a bullet, not a task.
-        let out = markdown_to_storage("- plain bullet");
+        let out = markdown_to_storage("- plain bullet").unwrap();
         assert!(
             out.contains("<ul><li>") && !out.contains("ac:task"),
             "{out}"

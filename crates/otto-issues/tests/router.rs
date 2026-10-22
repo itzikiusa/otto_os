@@ -1043,3 +1043,275 @@ async fn create_issue_surfaces_an_unreachable_jira_as_502() {
         r.body
     );
 }
+
+/// A stand-in Confluence site: page create / update / read (with ancestors)
+/// and footer comments, storing the storage body exactly as sent. `tamper`
+/// makes reads return a body missing its last table row and a retitled page.
+#[derive(Default)]
+struct FakeWiki {
+    content: HashMap<String, Value>,
+    writes: usize,
+    tamper: bool,
+}
+
+async fn fake_confluence() -> (String, Arc<Mutex<FakeWiki>>) {
+    use axum::extract::{Path as P, State as St};
+    use axum::routing::{get, post};
+    type S = Arc<Mutex<FakeWiki>>;
+    let state: S = Arc::default();
+    let app = Router::new()
+        .route(
+            "/wiki/rest/api/content",
+            post(|St(st): St<S>, axum::Json(b): axum::Json<Value>| async move {
+                let mut st = st.lock().unwrap();
+                st.writes += 1;
+                let id = format!("{}", 100 + st.content.len());
+                let stored = if b["type"] == "comment" {
+                    json!({"id": id, "type": "comment", "container": {"id": b["container"]["id"]},
+                           "body": b["body"], "_links": {"self": format!("/rest/api/content/{id}")}})
+                } else {
+                    json!({"id": id, "type": "page", "title": b["title"], "space": {"key": b["space"]["key"]},
+                           "version": {"number": 1}, "ancestors": b.get("ancestors").cloned().unwrap_or(json!([])),
+                           "body": b["body"], "_links": {"webui": format!("/spaces/X/pages/{id}")}})
+                };
+                st.content.insert(id, stored.clone());
+                axum::Json(stored)
+            }),
+        )
+        .route(
+            "/wiki/rest/api/content/{id}/property",
+            post(|| async { axum::Json(json!({})) }),
+        )
+        .route(
+            "/wiki/rest/api/content/{id}",
+            get(|St(st): St<S>, P(id): P<String>| async move {
+                let st = st.lock().unwrap();
+                let mut c = st.content.get(&id).cloned().unwrap_or(Value::Null);
+                if st.tamper {
+                    if let Some(v) = c["body"]["storage"]["value"].as_str() {
+                        let cut = v.rfind("<tr>").map_or(v.to_string(), |n| {
+                            let end = v[n..].find("</tr>").unwrap() + n + 5;
+                            format!("{}{}", &v[..n], &v[end..])
+                        });
+                        c["body"]["storage"]["value"] = json!(cut);
+                    }
+                    if c["type"] == "page" {
+                        c["title"] = json!("Someone else's title");
+                    }
+                }
+                axum::Json(c)
+            })
+            .put(|St(st): St<S>, P(id): P<String>, axum::Json(b): axum::Json<Value>| async move {
+                let mut st = st.lock().unwrap();
+                st.writes += 1;
+                let page = st.content.get_mut(&id).unwrap();
+                page["title"] = b["title"].clone();
+                page["body"] = b["body"].clone();
+                page["version"] = b["version"].clone();
+                axum::Json(page.clone())
+            }),
+        )
+        .with_state(Arc::clone(&state));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let site = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (site, state)
+}
+
+const PAGE_MD: &str = "## Matrix\n\n| TC | Result |\n|---|---|\n| 1 | **ok** |\n| 2 | `fail` |\n\n```sql\nselect ']]>' from t\n```\n\n- [ ] rerun";
+
+fn check_names(v: &Value) -> Vec<String> {
+    v["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["name"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[tokio::test]
+async fn confluence_page_and_comment_writes_are_verified() {
+    let (site, wiki) = fake_confluence().await;
+    let a = app().await;
+    let id = jira_at(&a, &site).await;
+    let q = format!("account_id={id}");
+
+    let r = a
+        .call(
+            &a.alice,
+            "POST",
+            &format!("/issue/confluence/pages?{q}"),
+            Some(
+                json!({"space_key": "ENG", "title": "Plan", "parent_id": "42", "body_md": PAGE_MD}),
+            ),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let page_id = r.body["id"].as_str().unwrap().to_string();
+    assert_eq!(r.body["title"], "Plan");
+    let v = &r.body["verification"];
+    assert_eq!(v["ok"], true, "{v}");
+    assert_eq!(
+        check_names(v),
+        [
+            "title",
+            "space",
+            "parent",
+            "version",
+            "body_structure",
+            "body_text"
+        ]
+    );
+    let structure = v["checks"][4]["detail"].as_str().unwrap();
+    assert!(structure.contains("table[3x2,header]"), "{structure}");
+    // What Confluence received: storage XHTML with a th header row, the code
+    // macro with its language and the `]]>` split across CDATA sections.
+    let sent = wiki.lock().unwrap().content[&page_id]["body"]["storage"]["value"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        sent.contains("<tr><th><p>TC</p></th><th><p>Result</p></th></tr>"),
+        "{sent}"
+    );
+    assert!(
+        sent.contains("<ac:parameter ac:name=\"language\">sql</ac:parameter>"),
+        "{sent}"
+    );
+    assert!(sent.contains("select ']]]]><![CDATA[>' from t"), "{sent}");
+    assert!(sent.contains("<ac:task-list>"), "{sent}");
+
+    let r = a
+        .call(
+            &a.alice,
+            "PUT",
+            &format!("/issue/confluence/pages/{page_id}?{q}"),
+            Some(json!({"body_md": "# Updated\n\n| a |\n|---|\n| b |", "base_version": 1})),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let v = &r.body["verification"];
+    assert_eq!(v["ok"], true, "{v}");
+    assert_eq!(
+        check_names(v),
+        ["title", "space", "version", "body_structure", "body_text"]
+    );
+    assert_eq!(v["checks"][2]["detail"], "expected 2, got 2");
+
+    let r = a
+        .call(
+            &a.alice,
+            "POST",
+            &format!("/issue/confluence/pages/{page_id}/comments?{q}"),
+            Some(json!({"body_md": "Looks good:\n\n| k | v |\n|---|---|\n| a | 1 |"})),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert!(r.body["id"].is_string(), "{}", r.body);
+    let v = &r.body["verification"];
+    assert_eq!(v["ok"], true, "{v}");
+    assert_eq!(check_names(v), ["container", "body_structure", "body_text"]);
+}
+
+#[tokio::test]
+async fn confluence_write_mismatches_are_reported_not_undone() {
+    let (site, wiki) = fake_confluence().await;
+    wiki.lock().unwrap().tamper = true;
+    let a = app().await;
+    let id = jira_at(&a, &site).await;
+    let r = a
+        .call(
+            &a.alice,
+            "POST",
+            &format!("/issue/confluence/pages?account_id={id}"),
+            Some(json!({"space_key": "ENG", "title": "Plan", "body_md": PAGE_MD})),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let v = &r.body["verification"];
+    assert_eq!(v["ok"], false, "{v}");
+    let failed: Vec<(String, String)> = v["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["ok"] == false)
+        .map(|c| {
+            (
+                c["name"].as_str().unwrap().into(),
+                c["detail"].as_str().unwrap().into(),
+            )
+        })
+        .collect();
+    let names: Vec<&str> = failed.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(names, ["title", "body_structure", "body_text"], "{v}");
+    assert!(
+        failed[1]
+            .1
+            .contains("sent table[3x2,header], stored table[2x2,header]"),
+        "{}",
+        failed[1].1
+    );
+    assert_eq!(wiki.lock().unwrap().content.len(), 1, "the page is kept");
+
+    let page_id = r.body["id"].as_str().unwrap();
+    let r = a
+        .call(
+            &a.alice,
+            "POST",
+            &format!("/issue/confluence/pages/{page_id}/comments?account_id={id}"),
+            Some(json!({"body_md": "| k |\n|---|\n| a |"})),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(r.body["verification"]["ok"], false, "{}", r.body);
+}
+
+#[tokio::test]
+async fn malformed_body_html_is_refused_before_anything_is_sent() {
+    let (site, wiki) = fake_confluence().await;
+    let a = app().await;
+    let id = jira_at(&a, &site).await;
+    for (method, path, body) in [
+        (
+            "POST",
+            format!("/issue/confluence/pages?account_id={id}"),
+            json!({"space_key": "ENG", "title": "T", "body_html": "<p>a<br>b</p>"}),
+        ),
+        (
+            "POST",
+            format!("/issue/confluence/pages/1/comments?account_id={id}"),
+            json!({"body_html": "<p>R&D</p>"}),
+        ),
+    ] {
+        let r = a.call(&a.alice, method, &path, Some(body)).await;
+        assert_eq!(r.status, 400, "{path}: {}", r.body);
+        assert!(
+            r.body["message"]
+                .as_str()
+                .unwrap()
+                .contains("not well-formed XHTML"),
+            "{}",
+            r.body
+        );
+    }
+    // Well-formed caller storage with any macro still passes through as-is.
+    let html = "<ac:structured-macro ac:name=\"toc\" /><p>R&amp;D</p>";
+    let r = a
+        .call(
+            &a.alice,
+            "POST",
+            &format!("/issue/confluence/pages?account_id={id}"),
+            Some(json!({"space_key": "ENG", "title": "T", "body_html": html})),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(r.body["verification"]["ok"], true, "{}", r.body);
+    let w = wiki.lock().unwrap();
+    assert_eq!(w.writes, 1, "only the valid body was sent");
+    assert_eq!(
+        w.content.values().next().unwrap()["body"]["storage"]["value"],
+        html
+    );
+}
