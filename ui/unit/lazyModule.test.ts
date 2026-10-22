@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { lazyModule } from '../src/lib/lazyModule.ts';
+import { readFileSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
 
 test('lazyModule: loads once, queues calls in order, then runs synchronously', async () => {
   let loads = 0;
@@ -54,13 +56,20 @@ test('lazyModule: peek() sees a module that announced itself under the key, and 
   assert.equal(loads, 0, 'peek never imports');
 });
 
+/** The dispatcher and its per-feature route tables, as one text. */
+function eventsSources(): string {
+  const lib = join(import.meta.dirname, '..', 'src', 'lib');
+  const routes = join(lib, 'events', 'routes');
+  return [join(lib, 'events.svelte.ts'), ...readdirSync(routes).filter((f) => f.endsWith('.ts')).sort().map((f) => join(routes, f))]
+    .map((f) => readFileSync(f, 'utf8'))
+    .join('\n');
+}
+
 // Events that only matter to a store someone already uses route through
 // peek() (perf G2): `use()` there imported the page store into every document.
 test('events: reconnect / restart / periodic events peek page stores instead of loading them', async () => {
-  const { readFileSync } = await import('node:fs');
-  const { join } = await import('node:path');
   const src = join(import.meta.dirname, '..', 'src');
-  const ev = readFileSync(join(src, 'lib/events.svelte.ts'), 'utf8');
+  const ev = eventsSources();
   for (const call of [
     'swarmStore.peek()?.resync()',
     'databaseStore.peek()?.onDaemonRestart()',
@@ -109,16 +118,17 @@ test('events: reconnect / restart / periodic events peek page stores instead of 
 // that; every other handler peeks. A new `.use(` fails here until it is
 // justified and added to the list.
 test('events: only allow-listed events load a page store (`.use`)', async () => {
-  const { readFileSync } = await import('node:fs');
-  const { join } = await import('node:path');
-  const ev = readFileSync(join(import.meta.dirname, '..', 'src', 'lib/events.svelte.ts'), 'utf8');
+  const ev = eventsSources();
   const sites: string[] = [];
   for (const m of ev.matchAll(/(\w+)Store\.use\(/g)) {
-    // The branch condition the call sits in: from its `if (` to the call.
-    const head = ev.slice(ev.lastIndexOf('if (', m.index), m.index);
-    const types = [...head.matchAll(/parsed\.type === '(\w+)'/g)].map((t) => t[1]);
-    assert.ok(types.length > 0, `.use( at offset ${m.index} is not inside an event branch`);
-    for (const t of types) sites.push(`${t} → ${m[1]}`);
+    // The route the call sits in: the nearest `<event_type>: (parsed) =>` key
+    // of a route table (lib/events/routes/*.ts, architecture-2-04).
+    const head = ev.slice(0, m.index);
+    const keys = [...head.matchAll(/^\s+(\w+): \(parsed\) =>/gm)];
+    const key = keys.at(-1);
+    assert.ok(key, `.use( at offset ${m.index} is not inside an event route`);
+    assert.ok(!head.slice(key.index).includes('\n};'), `.use( at offset ${m.index} is outside a route table`);
+    sites.push(`${key[1]} → ${m[1]}`);
   }
   assert.deepEqual(sites.sort(), [
     'canvas_session_started → canvas',

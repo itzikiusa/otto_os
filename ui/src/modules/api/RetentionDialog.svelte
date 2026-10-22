@@ -24,8 +24,13 @@
     const n = Number(v.trim());
     return v.trim() !== '' && Number.isInteger(n) && n >= 0 ? n : null;
   };
+  /** 100 years: the daemon rejects/clamps anything larger (a huge age once
+   *  overflowed the prune cutoff and panicked every prune — backend-correctness-2-01). */
+  const MAX_DAYS = 36_500;
   const r = $derived(parse(rows));
-  const d = $derived(parse(days));
+  const daysRaw = $derived(parse(days));
+  const daysTooBig = $derived(daysRaw !== null && daysRaw > MAX_DAYS);
+  const d = $derived(daysTooBig ? null : daysRaw);
   const k = $derived(parse(runs));
   $effect(() => { void apiClient.loadStorage(); });
   const gauge = $derived(apiClient.storage);
@@ -61,8 +66,9 @@
   </div>
   <div class="field">
     <label for="ret-days">Delete requests older than (days)</label>
-    <input dir="auto" id="ret-days" class="input" inputmode="numeric" bind:value={days} />
-    <span class="hint" class:bad={d === null}>{d === null ? 'Enter a whole number (0 = never).' : d === 0 ? 'Never delete by age.' : `Delete after ${d} days.`}</span>
+    <input dir="auto" id="ret-days" class="input" inputmode="numeric" bind:value={days}
+      aria-invalid={d === null ? 'true' : undefined} aria-describedby="ret-days-hint" />
+    <span class="hint" id="ret-days-hint" class:bad={d === null}>{daysTooBig ? `Enter ${MAX_DAYS.toLocaleString()} days (100 years) or fewer.` : d === null ? 'Enter a whole number (0 = never).' : d === 0 ? 'Never delete by age.' : `Delete after ${d} days.`}</span>
   </div>
   <div class="field">
     <label for="ret-runs">Automation runs to keep (per automation)</label>

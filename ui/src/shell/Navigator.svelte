@@ -1386,7 +1386,7 @@
 
     {#if q ? fTelegram.length > 0 : ws.telegramSessions.length > 0}
       <div class="nav-item-row">
-        <button class="nav-item" onclick={() => (telegramOpen = !telegramOpen)}>
+        <button class="nav-item" onclick={() => (telegramOpen = !telegramOpen)} aria-expanded={telegramOpen}>
           <Icon name="send" size={14} />
           <span class="grow">Telegram</span>
           <span class="count-chip">{ws.telegramSessions.length}</span>
@@ -1419,7 +1419,7 @@
 
     {#if q ? fSlack.length > 0 : ws.slackSessions.length > 0}
       <div class="nav-item-row">
-        <button class="nav-item" onclick={() => (slackOpen = !slackOpen)}>
+        <button class="nav-item" onclick={() => (slackOpen = !slackOpen)} aria-expanded={slackOpen}>
           <Icon name="slack" size={14} />
           <span class="grow">Slack</span>
           <span class="count-chip">{ws.slackSessions.length}</span>
@@ -1571,6 +1571,7 @@
       <button use:rowMenu
         class="nav-item nested-item"
         class:active={!otherWs && router.module === 'agents' && ws.activeSessionId === s.id}
+        aria-current={!otherWs && router.module === 'agents' && ws.activeSessionId === s.id ? 'true' : undefined}
         class:resumable
         onclick={() => (otherWs ? void ws.openInWorkspace(otherWs, s.id) : openSession(s.id))}
         ondblclick={() => startRename(s.id, s.title)}

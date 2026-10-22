@@ -225,43 +225,55 @@
        aria-required-children), and it is the only part that scrolls: the
        auto-fetch toggle and + stay pinned after it, fully visible however
        many repos are open. -->
-  <div class="git-tablist" role="tablist" bind:this={listEl}>
+  <div class="git-tablist" role="tablist" aria-label="Open repositories" bind:this={listEl}>
   {#each openRepos as r (r.id)}
     {@const branch = branchOf(r.id)}
     {@const label = repoTabLabel(r.name, branch)}
+    {@const dirty = isDirty(r.id)}
+    <!-- A tab's children are presentational, so the close button can't live
+         inside role="tab" (axe nested-interactive): a presentation wrapper
+         holds the tab button and the close button as siblings. The wrapper
+         carries the drag-to-reorder handlers. -->
     <div
       class="git-tab"
       class:active={selectedId === r.id}
       class:drag-over={dragOverId === r.id}
-      role="tab"
-      tabindex={git.activeRepoId === r.id || (!git.activeRepoId && r.id === openRepos[0]?.id) ? 0 : -1}
-      aria-selected={selectedId === r.id}
-      aria-label={label}
-      data-repo-id={r.id}
+      role="presentation"
       draggable="true"
-      title={`${label}\n${r.path}`}
-      onclick={() => onopen(r.id)}
-      onkeydown={(e) => onRepoTabKey(e, r.id)}
       ondragstart={(e) => onDragStart(e, r.id)}
       ondragover={(e) => onDragOver(e, r.id)}
       ondragleave={() => onDragLeave(r.id)}
       ondrop={(e) => onDrop(e, r.id)}
       ondragend={onDragEnd}
-      onauxclick={(e) => {
-        if (e.button === 1) {
-          e.preventDefault();
-          git.closeRepoTab(r.id);
-        }
-      }}
     >
-      <span class="git-tab-dot" class:dirty={isDirty(r.id)} aria-hidden="true"></span>
-      <span class="git-tab-name">{r.name}</span>
-      {#if branch}
-        <span class="git-tab-branch mono" aria-hidden="true">
-          <Icon name="branch" size={12} /><span class="git-tab-branch-name">{branch}</span>
-        </span>
-      {/if}
       <button
+        type="button"
+        class="git-tab-main"
+        role="tab"
+        tabindex={git.activeRepoId === r.id || (!git.activeRepoId && r.id === openRepos[0]?.id) ? 0 : -1}
+        aria-selected={selectedId === r.id}
+        aria-label={dirty ? `${label}, uncommitted changes` : label}
+        data-repo-id={r.id}
+        title={`${label}${dirty ? ' · uncommitted changes' : ''}\n${r.path}`}
+        onclick={() => onopen(r.id)}
+        onkeydown={(e) => onRepoTabKey(e, r.id)}
+        onauxclick={(e) => {
+          if (e.button === 1) {
+            e.preventDefault();
+            git.closeRepoTab(r.id);
+          }
+        }}
+      >
+        <span class="git-tab-dot" class:dirty aria-hidden="true"></span>
+        <span class="git-tab-name">{r.name}</span>
+        {#if branch}
+          <span class="git-tab-branch mono" aria-hidden="true">
+            <Icon name="branch" size={12} /><span class="git-tab-branch-name">{branch}</span>
+          </span>
+        {/if}
+      </button>
+      <button
+        type="button"
         class="git-tab-close"
         tabindex="-1"
         title="Close {r.name}"
@@ -337,6 +349,26 @@
   }
   .git-tab:hover {
     background: var(--hover);
+  }
+  /* The role="tab" button: the wrapper keeps the tab chrome; this only lays
+     out the dot, name and branch and takes the focus ring. */
+  .git-tab-main {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    padding: 0;
+    border: none;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .git-tab-main:focus-visible {
+    outline: 2px solid var(--accent-text);
+    outline-offset: 2px;
+    border-radius: var(--radius-s);
   }
   .git-tab.active {
     background: var(--surface-2);

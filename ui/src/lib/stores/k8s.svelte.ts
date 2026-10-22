@@ -12,6 +12,7 @@ import { auth } from './auth.svelte';
 import { pollWhileVisible, type Poller } from '../poll';
 import { resourceAccess, type ResourceAccessChange } from './resource-access.svelte';
 import { ApiError } from '../api/client';
+import { providerErrorText } from '../loadError';
 import { formatBytes, formatMillicores } from '../../modules/kubernetes/k8s-util';
 import { k8sApi } from '../api/k8s';
 import { resourcesPollMs, resourcesValidator } from '../../modules/kubernetes/resourcePoll';
@@ -260,9 +261,6 @@ class K8sStore {
         ) ?? null)
       : null,
   );
-  readonly installRunning = $derived(
-    this.status?.install.kubectl.state === 'running' || this.status?.install.k9s.state === 'running',
-  );
 
   // --- status / install ------------------------------------------------------------
 
@@ -274,7 +272,7 @@ class K8sStore {
       this.unavailable = false;
     } catch (e) {
       if (e instanceof ApiError && e.status === 404) this.unavailable = true;
-      else this.statusError = e instanceof Error ? e.message : String(e);
+      else this.statusError = providerErrorText(e);
     } finally {
       this.statusLoading = false;
     }
@@ -301,7 +299,7 @@ class K8sStore {
       for (const c of list) if (c.capabilities && !seeded[c.id]) seeded[c.id] = c.capabilities;
       this.capabilities = seeded;
     } catch (e) {
-      this.clustersError = e instanceof Error ? e.message : String(e);
+      this.clustersError = providerErrorText(e);
     } finally {
       this.clustersLoading = false;
       this.clustersLoaded = true;
@@ -542,7 +540,7 @@ class K8sStore {
       // RBAC-limited user: fall back to the namespaces we know work here so
       // the picker still has real entries to switch between.
       this.namespaces = this.mergeKnown(id, []);
-      this.namespacesError = e instanceof Error ? e.message : String(e);
+      this.namespacesError = providerErrorText(e);
     }
   }
 
@@ -636,7 +634,7 @@ class K8sStore {
       if (ns) this.rememberKnownNamespace(ns);
     } catch (e) {
       if (ac.signal.aborted || this.currentKey !== key) return;
-      const msg = e instanceof Error ? e.message : String(e);
+      const msg = providerErrorText(e);
       this.rowsError = !ns && /at the cluster scope/i.test(msg) ? `${CLUSTER_SCOPE_HINT}\n\n${msg}` : msg;
       if (this.rowsKey !== key) {
         this.rows = [];

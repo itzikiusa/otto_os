@@ -208,7 +208,7 @@
   const emptyResultLabel = $derived(
     result?.message ??
       (result?.rows_affected != null
-        ? `${result.rows_affected} row(s) affected`
+        ? `${result.rows_affected.toLocaleString()} ${pluralNoun(result.rows_affected, 'row')} affected`
         : result
           ? 'No rows returned'
           : 'Statement OK'),
@@ -1382,7 +1382,7 @@
         onclick={() => (resultIdx = i)}
       >
         {#if rs.errored}<span class="rg-seg-dot" aria-hidden="true"></span>{/if}
-        Result {i + 1}
+        Result {i + 1}{#if rs.errored}<span class="sr-only">, failed</span>{/if}
       </button>
     {/each}
   </div>

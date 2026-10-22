@@ -65,8 +65,8 @@
   import type { FitAddon as XFit } from '@xterm/addon-fit';
   import type { SearchAddon as XSearch } from '@xterm/addon-search';
   import type { SessionStatus as ParkedStatus } from '../api/types';
-  import { base64ToBytes as parkedB64 } from '../b64';
-  import { withInOrderReset as parkedRis, type TermFlow as FlowT, type WriteQueue as QueueT } from './termFlow';
+  import { type TermFlow as FlowT, type WriteQueue as QueueT } from './termFlow';
+  import { applySnapshot, decodeTermFrame, type SnapshotTarget } from './termProtocol';
   import { PARK_CELL_BYTES, PARK_SCROLLBACK, TermPark } from './termPark';
   import { CompactQueue } from './termCompactQueue';
 
@@ -138,11 +138,6 @@
     }
   }
 
-  /** Binary snapshot headers (perf 01 N3) waiting for their payload — the
-   *  NEXT binary frame on that socket. Keyed by socket, not by component: a
-   *  park/adopt can swap the handler between the header and its payload. */
-  const binarySnapHeaders = new WeakMap<WebSocket, { epoch?: number }>();
-
   const termPark = new TermPark<ParkedEngine>(disposeParked, undefined, undefined, undefined, undefined, parkedBytes);
 
   /** While parked the engine keeps up with its session on its own: bytes
@@ -159,65 +154,44 @@
     e.sock.onopen = null;
     e.sock.onerror = null;
     e.sock.onclose = () => termPark.evict(key, e);
-    const applyParkedSnapshot = (epoch: number | null, snap: Uint8Array | null): void => {
-      // A snapshot replaces output retired by the daemon. Even a compact
-      // requested before parking must apply; skipping it loses those bytes.
-      e.compactPending = false;
-      e.snapshotEpoch = epoch;
-      if (!snap?.length) return;
-      e.writes.dropQueued();
-      e.resyncPending = false;
-      if (e.writes.inflight === 0) {
-        e.term.reset();
-        e.writes.push(snap);
-      } else {
-        e.writes.push(parkedRis(snap));
-      }
+    // A snapshot replaces output retired by the daemon. Even a compact
+    // requested before parking must apply; skipping it loses those bytes.
+    const snapTarget: SnapshotTarget = {
+      begin: (epoch) => {
+        e.compactPending = false;
+        e.snapshotEpoch = epoch;
+      },
+      writes: e.writes,
+      clearResync: () => (e.resyncPending = false),
+      reset: () => e.term.reset(),
+      paint: (bytes) => e.writes.push(bytes),
     };
     e.sock.onmessage = (ev: MessageEvent) => {
-      if (ev.data instanceof ArrayBuffer) {
-        // A binary snapshot's payload (N3): not live output, never credited.
-        const hdr = binarySnapHeaders.get(e.sock);
-        if (hdr) {
-          binarySnapHeaders.delete(e.sock);
-          applyParkedSnapshot(hdr.epoch ?? null, new Uint8Array(ev.data));
-          return;
-        }
-        e.writes.push(new Uint8Array(ev.data), undefined, e.flow.credit);
-        return;
-      }
-      if (typeof ev.data !== 'string') return;
-      let msg: { type?: string; window?: unknown; epoch?: number; data?: string; binary?: boolean; status?: ParkedStatus; code?: number; message?: string; cols?: number; rows?: number; owner?: GridFeed['owner'] };
-      try {
-        msg = JSON.parse(ev.data);
-      } catch {
-        return;
-      }
-      switch (msg.type) {
+      const f = decodeTermFrame(ev, e.sock);
+      if (!f) return;
+      switch (f.type) {
+        case 'output':
+          e.writes.push(f.bytes, undefined, e.flow.credit);
+          break;
+        case 'snapshot':
+          applySnapshot(snapTarget, f.epoch, f.bytes);
+          break;
         case 'credit':
-          e.flow.granted(typeof msg.window === 'number' ? msg.window : undefined);
+          e.flow.granted(f.window);
           break;
-        case 'scrollback': {
-          if (msg.binary) {
-            binarySnapHeaders.set(e.sock, { epoch: msg.epoch });
-            break;
-          }
-          applyParkedSnapshot(msg.epoch ?? null, msg.data ? parkedB64(msg.data) : null);
-          break;
-        }
         case 'status':
-          if (!msg.status) break;
-          e.status = msg.status;
-          if (msg.status !== 'exited' && msg.status !== 'reconnectable') e.exitCode = null;
+          if (!f.status) break;
+          e.status = f.status;
+          if (f.status !== 'exited' && f.status !== 'reconnectable') e.exitCode = null;
           break;
         case 'exit':
-          e.exitCode = msg.code ?? 0;
+          e.exitCode = f.code;
           break;
         case 'error':
-          e.term.write(`\r\n\x1b[31m[otto] ${msg.code}: ${msg.message ?? ''}\x1b[0m\r\n`);
+          e.term.write(`\r\n\x1b[31m[otto] ${f.code}: ${f.message}\x1b[0m\r\n`);
           break;
         case 'grid': {
-          const g: GridFeed = { cols: msg.cols ?? 0, rows: msg.rows ?? 0, owner: msg.owner ?? 'none' };
+          const g: GridFeed = { cols: f.cols ?? 0, rows: f.rows ?? 0, owner: f.owner ?? 'none' };
           e.grid = g;
           // Another viewer sized the PTY while we were parked: what we parse
           // from now on is laid out for its grid, not ours.
@@ -244,13 +218,14 @@
   import { WebglAddon } from '@xterm/addon-webgl';
   import '@xterm/xterm/css/xterm.css';
   import { wsConnect, wsUrl, WS_BEARER_SUBPROTOCOL } from '../api/client';
-  import type { SessionStatus, TermSearchMatch, WsSearchResultFrame, WsTermClaimFrame, WsTermFlowFrame, WsTermGridFrame, WsTermProbeAckFrame, WsTermProbeFrame, WsTermResyncFrame, WsTermScrollbackRequestFrame } from '../api/types';
+  import type { SessionStatus, TermSearchMatch, WsSearchResultFrame, WsTermClaimFrame, WsTermFlowFrame, WsTermGridFrame, WsTermProbeFrame, WsTermResyncFrame, WsTermScrollbackRequestFrame } from '../api/types';
   import type { CompactClient } from './termCompactQueue';
   import { gridStep } from './termGrid';
-  import { EMBED_SCROLLBACK, QuietRepaint, TermFlow, WriteQueue, hasCursorOrErase, resizeDecision, withInOrderReset } from './termFlow';
+  import { EMBED_SCROLLBACK, QuietRepaint, TermFlow, WriteQueue, hasCursorOrErase, resizeDecision } from './termFlow';
   import { reconnectDelay } from './guestReconnect';
   import { KeyLatency, ProbeClock, fmtMs, fmtPair, loopMonitor, termLatencyEnabled, type EchoStats } from './termLatency';
-  import { textToBase64, base64ToBytes, bytesToBase64 } from '../b64';
+  import { textToBase64, bytesToBase64 } from '../b64';
+  import type { TermFrame } from './termProtocol';
   import { terminalTheme } from '../termtheme';
   import { ui } from '../stores/ui.svelte';
   import { viewport } from '../stores/viewport.svelte';
@@ -894,46 +869,117 @@
   }
 
   /** Apply a `scrollback` snapshot (JSON or binary form, perf 01 N3). */
-  function applySnapshot(epoch: number | null, snap: Uint8Array | null): void {
-    compactQueue.done(compactClient);
-    // A snapshot captured at OUR grid replaces whatever another grid painted;
-    // one captured at a foreign grid leaves the pane still owing a rebuild.
-    snapshotAsked = false;
-    gridRebuild = false;
-    // Captured at another viewer's grid (we could not resize): this pane
-    // owes a rebuild; an un-owned one skipped its auto-claim — take it now.
-    if (gridDiffers() && gridOwner !== 'self') settleGrid(true);
-    // Every snapshot replaces the daemon's old output subscription. Never
-    // discard a reply: output between request and capture exists ONLY in it.
-    // Selection/scroll guards belong before requesting an optional compact.
-    compactPending = false;
-    snapshotEpoch = epoch;
-    // A snapshot fully reconstructs terminal state: history rows +
-    // coherent current-screen frame + input modes (bracketed paste,
-    // keypad). ALWAYS reset and rebuild from it — appending under the
-    // locally-kept scrollback stacked a duplicate copy of the whole
-    // transcript on every reconnect (the "scroll up and see the
-    // conversation N times" bug), and preserved history could belong
-    // to a dead process painted at a stale width. Deterministic
-    // rebuild keeps the buffer identical to what a fresh attach sees.
-    if (snap?.length) {
-      // Everything received before this frame is already in it: the
-      // queued part never needs to parse (A3).
-      writes.dropQueued();
-      resyncPending = false;
-      if (writes.inflight === 0) {
-        term?.reset();
-        // Snapshot is a full-screen paint already; still force a clean
-        // redraw so nothing from the previous process lingers.
-        paintPtyBytes(snap, /* alwaysRedraw */ true);
-      } else {
-        // Output is still queued inside xterm (a flow-control resume
-        // or lag resync mid-flood). term.reset() is synchronous but
-        // the queue is not cleared, so those stale bytes would parse
-        // AFTER the reset, above the rebuilt history. Reset in-order
-        // instead: RIS (ESC c) makes xterm call the same reset() when
-        // the parser reaches it, i.e. after the backlog.
-        paintPtyBytes(withInOrderReset(snap), /* alwaysRedraw */ true);
+  /** The live engine's snapshot target for the shared rule (termProtocol). */
+  const snapTarget: SnapshotTarget = {
+    begin: (epoch) => {
+      compactQueue.done(compactClient);
+      // A snapshot captured at OUR grid replaces whatever another grid
+      // painted; one captured at a foreign grid leaves the pane still owing a
+      // rebuild.
+      snapshotAsked = false;
+      gridRebuild = false;
+      // Captured at another viewer's grid (we could not resize): this pane
+      // owes a rebuild; an un-owned one skipped its auto-claim — take it now.
+      if (gridDiffers() && gridOwner !== 'self') settleGrid(true);
+      // Every snapshot replaces the daemon's old output subscription. Never
+      // discard a reply: output between request and capture exists ONLY in
+      // it. Selection/scroll guards belong before requesting an optional
+      // compact.
+      compactPending = false;
+      snapshotEpoch = epoch;
+    },
+    // Read through: `writes` is reassigned on adopt.
+    writes: {
+      dropQueued: () => writes.dropQueued(),
+      get inflight() {
+        return writes.inflight;
+      },
+    },
+    clearResync: () => (resyncPending = false),
+    reset: () => term?.reset(),
+    // Snapshot is a full-screen paint already; still force a clean redraw so
+    // nothing from the previous process lingers.
+    paint: (bytes) => paintPtyBytes(bytes, /* alwaysRedraw */ true),
+  };
+  /** Rebuild from a snapshot (the rule lives in termProtocol.applySnapshot:
+   *  always reset + rebuild, in-order RIS while output is still queued). */
+  function onSnapshot(epoch: number | null, snap: Uint8Array | null): void {
+    applySnapshot(snapTarget, epoch, snap);
+  }
+
+  /** The live engine's switch over one decoded `/ws/term` frame. */
+  function onTermFrame(f: TermFrame): void {
+    switch (f.type) {
+      case 'output':
+        // write() only updates the buffer + marks dirty cells; the renderer
+        // then paints *those* cells. Agent TUIs rewrite status/prompt rows in
+        // place — if a cell is no longer dirty, the previous frame stays
+        // (cursor ghosts, stacked "-- INSERT --" lines). Agent panes get ONE
+        // trailing full viewport repaint per output burst; shells only after
+        // cursor/erase frames (paintPtyBytes).
+        paintPtyBytes(f.bytes, false, flow.credit, keyLat?.frame(performance.now(), () => performance.now()));
+        break;
+      case 'snapshot':
+        // Not live output — never credited, never painted as a PTY burst.
+        onSnapshot(f.epoch, f.bytes);
+        break;
+      case 'credit':
+        flow.granted(f.window);
+        break;
+      case 'status':
+        // A live status after an `exit` means the server moved this socket
+        // onto a respawned process (chat send, channel follow-up, restart from
+        // elsewhere, a daemon restart that re-adopted it) — drop the exited
+        // overlay; the accompanying snapshot rebuilds the screen.
+        if (f.status !== 'exited' && f.status !== 'reconnectable') {
+          exitCode = null;
+          dormantView = false;
+        } else if (
+          (f.status === 'reconnectable' || resumable) &&
+          viewAttach &&
+          (exitCode === null || probingAfterExit) &&
+          !socketFactory
+        ) {
+          // View-only attach to a suspended session: nothing was spawned, so
+          // show the exited overlay (Resume) — typing wakes it too.
+          exitCode = 0;
+          dormantView = true;
+        }
+        probingAfterExit = false;
+        exitProbes = 0;
+        onstatus?.(f.status as SessionStatus);
+        break;
+      case 'exit':
+        exitCode = f.code;
+        break;
+      case 'error':
+        term?.write(`\r\n\x1b[31m[otto] ${f.code}: ${f.message}\x1b[0m\r\n`);
+        break;
+      case 'grid':
+        onGridFrame(f);
+        break;
+      case 'probe_ack':
+        probes?.ack(typeof f.id === 'number' ? f.id : -1, performance.now());
+        echoStats = f.echo ?? null;
+        break;
+      case 'search_result': {
+        // Server-side ring-buffer search result. Populate the find-bar's
+        // match list (next/prev navigation) and forward to any parent listener.
+        serverSearchPending = false;
+        // Only apply if the result matches the current query (avoid a stale
+        // response overwriting results from a newer, faster one).
+        if (f.query === findQuery) {
+          serverMatches = f.matches;
+          serverMatchIdx = -1;
+          // Jump only when the client buffer has no hit of its own (the
+          // newest ring-buffer match): auto-jumping to match 0 — the OLDEST
+          // line of history — yanked the viewport off the local hit a beat
+          // after every keystroke. A local pass still pending makes that call
+          // itself when it lands (scheduleLocalFind).
+          if (f.matches.length > 0 && localMiss && localFindTimer === null) goToServerMatch(f.matches.length - 1);
+        }
+        onsearchresult?.(f);
+        break;
       }
     }
   }
@@ -987,102 +1033,17 @@
     };
 
     s.onmessage = (ev: MessageEvent) => {
-      if (ev.data instanceof ArrayBuffer) {
-        const bytes = new Uint8Array(ev.data);
-        // The payload of a binary snapshot header (perf 01 N3): a snapshot,
-        // not live output — never credited, never painted as a PTY burst.
-        const hdr = binarySnapHeaders.get(s);
-        if (hdr) {
-          binarySnapHeaders.delete(s);
-          applySnapshot(hdr.epoch ?? null, bytes);
-          return;
+      const f = decodeTermFrame(ev, s);
+      if (!f) return;
+      // Binary frames apply outside the guard (as they always did); a
+      // throwing control-frame handler is swallowed like a malformed frame.
+      if (ev.data instanceof ArrayBuffer) onTermFrame(f);
+      else {
+        try {
+          onTermFrame(f);
+        } catch {
+          /* ignore malformed control frame */
         }
-        // write() only updates the buffer + marks dirty cells; the renderer then
-        // paints *those* cells. Agent TUIs rewrite status/prompt rows in place —
-        // if a cell is no longer dirty, the previous frame stays (cursor ghosts,
-        // stacked "-- INSERT --" lines). Agent panes get ONE trailing full
-        // viewport repaint per output burst; shells only after cursor/erase
-        // frames (paintPtyBytes).
-        paintPtyBytes(bytes, false, flow.credit, keyLat?.frame(performance.now(), () => performance.now()));
-        return;
-      }
-      if (typeof ev.data !== 'string') return;
-      try {
-        const msg = JSON.parse(ev.data);
-        switch (msg.type) {
-          case 'credit':
-            flow.granted(typeof msg.window === 'number' ? msg.window : undefined);
-            break;
-          case 'scrollback':
-            if (msg.binary) {
-              // Header only; the bytes are the next (binary) frame.
-              binarySnapHeaders.set(s, { epoch: msg.epoch });
-              break;
-            }
-            applySnapshot(msg.epoch ?? null, msg.data ? base64ToBytes(msg.data) : null);
-            break;
-          case 'status':
-            // A live status after an `exit` means the server moved this
-            // socket onto a respawned process (chat send, channel follow-up,
-            // restart from elsewhere, a daemon restart that re-adopted it) —
-            // drop the exited overlay; the accompanying snapshot rebuilds the
-            // screen.
-            if (msg.status !== 'exited' && msg.status !== 'reconnectable') {
-              exitCode = null;
-              dormantView = false;
-            } else if (
-              (msg.status === 'reconnectable' || resumable) &&
-              viewAttach &&
-              (exitCode === null || probingAfterExit) &&
-              !socketFactory
-            ) {
-              // View-only attach to a suspended session: nothing was spawned,
-              // so show the exited overlay (Resume) — typing wakes it too.
-              exitCode = 0;
-              dormantView = true;
-            }
-            probingAfterExit = false;
-            exitProbes = 0;
-            onstatus?.(msg.status as SessionStatus);
-            break;
-          case 'exit':
-            exitCode = msg.code ?? 0;
-            break;
-          case 'error':
-            term?.write(`\r\n\x1b[31m[otto] ${msg.code}: ${msg.message ?? ''}\x1b[0m\r\n`);
-            break;
-          case 'grid':
-            onGridFrame(msg as WsTermGridFrame);
-            break;
-          case 'probe_ack': {
-            const ack = msg as WsTermProbeAckFrame;
-            probes?.ack(typeof ack.id === 'number' ? ack.id : -1, performance.now());
-            echoStats = ack.echo ?? null;
-            break;
-          }
-          case 'search_result': {
-            // Server-side ring-buffer search result. Populate the find-bar's
-            // match list (next/prev navigation) and forward to any parent listener.
-            const frame = msg as WsSearchResultFrame;
-            serverSearchPending = false;
-            // Only apply if the result matches the current query (avoid a
-            // stale response overwriting results from a newer, faster one).
-            if (frame.query === findQuery) {
-              serverMatches = frame.matches;
-              serverMatchIdx = -1;
-              // Jump only when the client buffer has no hit of its own (the
-              // newest ring-buffer match): auto-jumping to match 0 — the
-              // OLDEST line of history — yanked the viewport off the local
-              // hit a beat after every keystroke. A local pass still pending
-              // makes that call itself when it lands (scheduleLocalFind).
-              if (frame.matches.length > 0 && localMiss && localFindTimer === null) goToServerMatch(frame.matches.length - 1);
-            }
-            onsearchresult?.(frame);
-            break;
-          }
-        }
-      } catch {
-        /* ignore malformed control frame */
       }
     };
 
@@ -1799,6 +1760,15 @@
   }
   /** The last local pass found nothing in the client's buffer. */
   let localMiss = $state(false);
+  /** The find bar's local status text ("3/12", "12+", "No results" or ''),
+   *  rendered into ONE always-mounted live region. */
+  const findLocalStatus = $derived(
+    findQuery && localCount > 0
+      ? localIdx >= 0 ? `${localIdx + 1}/${localCount}` : `${localCount}+`
+      : findQuery && localMiss && !serverSearchPending && serverMatches.length === 0
+        ? 'No results'
+        : '',
+  );
 
   /** Drop the find bar's state (and the buffer highlights). */
   function resetFind(): void {
@@ -3072,13 +3042,16 @@
         />
         <!-- Local match position (client buffer), then the scrollback count
              (spinner while the ring-buffer search is in flight). -->
-        {#if findQuery && localCount > 0}
-          <span class="find-status" aria-live="polite" title="{localCount}{localIdx < 0 ? '+' : ''} {localCount === 1 ? 'match' : 'matches'} on screen and in the loaded scrollback">
-            {localIdx >= 0 ? `${localIdx + 1}/${localCount}` : `${localCount}+`}
-          </span>
-        {:else if findQuery && localMiss && !serverSearchPending && serverMatches.length === 0}
-          <span class="find-status" aria-live="polite">No results</span>
-        {/if}
+        <!-- ONE always-mounted polite region while the bar is open: a live
+             region inserted together with its text ("No results" was always a
+             fresh node) is not reliably announced; a text change in place is. -->
+        <span
+          class="find-status"
+          class:empty={!findLocalStatus}
+          aria-live="polite"
+          aria-atomic="true"
+          title={findQuery && localCount > 0 ? `${localCount}${localIdx < 0 ? '+' : ''} ${localCount === 1 ? 'match' : 'matches'} on screen and in the loaded scrollback` : undefined}
+        >{findLocalStatus}</span>
         {#if serverSearchPending}
           <span class="find-status" title="Searching scrollback…">…</span>
         {:else if serverMatches.length > 0}
@@ -3393,6 +3366,9 @@
     white-space: nowrap;
     user-select: none;
     padding: 0 2px;
+  }
+  .find-status.empty {
+    padding: 0;
   }
   .find-status.server {
     display: inline-flex;

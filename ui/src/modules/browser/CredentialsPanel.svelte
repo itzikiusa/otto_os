@@ -84,12 +84,21 @@
   function closeForm(): void {
     formOpen = false;
     fPassword = '';
+    fieldErrors = {};
   }
 
+  /** Field errors shown inline under each field (components.md: never a
+   *  toast for a field error); a field's entry clears when it is edited. */
+  let fieldErrors = $state<Partial<Record<'domain' | 'username' | 'password', string>>>({});
+
   async function save(): Promise<void> {
-    if (!editing && (!fDomain.trim() || !fUsername.trim() || !fPassword)) {
-      toasts.error('Missing fields', 'Domain, username, and password are required.');
-      return;
+    if (!editing) {
+      const errs: typeof fieldErrors = {};
+      if (!fDomain.trim()) errs.domain = 'Enter the site’s domain, like example.com.';
+      if (!fUsername.trim()) errs.username = 'Enter the username to fill in.';
+      if (!fPassword) errs.password = 'Enter the password to store in the Keychain.';
+      fieldErrors = errs;
+      if (Object.keys(errs).length) return;
     }
     saving = true;
     try {
@@ -234,7 +243,10 @@
         {#if !editing}
           <label>
             <span>Domain</span>
-            <input dir="auto" type="text" bind:value={fDomain} placeholder="example.com" spellcheck="false" />
+            <input dir="auto" type="text" bind:value={fDomain} placeholder="example.com" spellcheck="false"
+              aria-invalid={fieldErrors.domain ? 'true' : undefined} aria-describedby={fieldErrors.domain ? 'cred-domain-err' : undefined}
+              oninput={() => (fieldErrors = { ...fieldErrors, domain: undefined })} />
+            {#if fieldErrors.domain}<span class="field-error" id="cred-domain-err">{fieldErrors.domain}</span>{/if}
           </label>
         {:else}
           <label>
@@ -244,11 +256,17 @@
         {/if}
         <label>
           <span>Username</span>
-          <input dir="auto" type="text" bind:value={fUsername} spellcheck="false" />
+          <input dir="auto" type="text" bind:value={fUsername} spellcheck="false"
+            aria-invalid={fieldErrors.username ? 'true' : undefined} aria-describedby={fieldErrors.username ? 'cred-user-err' : undefined}
+            oninput={() => (fieldErrors = { ...fieldErrors, username: undefined })} />
+          {#if fieldErrors.username}<span class="field-error" id="cred-user-err">{fieldErrors.username}</span>{/if}
         </label>
         <label>
           <span>{editing ? 'New password (leave blank to keep current)' : 'Password'}</span>
-          <input type="password" bind:value={fPassword} autocomplete="new-password" />
+          <input type="password" bind:value={fPassword} autocomplete="new-password"
+            aria-invalid={fieldErrors.password ? 'true' : undefined} aria-describedby={fieldErrors.password ? 'cred-pass-err' : undefined}
+            oninput={() => (fieldErrors = { ...fieldErrors, password: undefined })} />
+          {#if fieldErrors.password}<span class="field-error" id="cred-pass-err">{fieldErrors.password}</span>{/if}
         </label>
         <label>
           <span>Notes</span>
@@ -277,6 +295,12 @@
 {/if}
 
 <style>
+  .field-error {
+    display: block;
+    margin: 2px 0 0;
+    font-size: var(--fs-s);
+    color: var(--danger);
+  }
   .panel {
     display: flex;
     flex-direction: column;

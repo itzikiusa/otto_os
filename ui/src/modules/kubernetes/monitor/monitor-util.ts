@@ -84,16 +84,6 @@ export function fmtMs(v: number | null | undefined): string {
   return `${Math.round(v)}ms`;
 }
 
-export function fmtAgo(iso: string | null | undefined): string {
-  if (!iso) return 'never';
-  const t = Date.parse(iso);
-  if (Number.isNaN(t)) return iso;
-  const s = Math.max(0, Math.round((Date.now() - t) / 1000));
-  if (s < 60) return `${s}s ago`;
-  if (s < 3600) return `${Math.round(s / 60)}m ago`;
-  if (s < 86400) return `${Math.round(s / 3600)}h ago`;
-  return `${Math.round(s / 86400)}d ago`;
-}
 
 /** `forbidden: cluster RBAC: Error from server (Forbidden): …` → the kubectl line. */
 export function rbacMessage(ms: string | undefined): string | null {
@@ -101,12 +91,18 @@ export function rbacMessage(ms: string | undefined): string | null {
   return ms.slice('forbidden:'.length).replace(/^\s*cluster RBAC:\s*/, '').trim();
 }
 
-/** One-line collector status for cards + headers. */
-export function collectorLine(status: K8sMonitorStatus | null | undefined, enabled: boolean): string {
+/** One-line collector status for cards + headers. `ago` is the shared
+ *  reactive `rel` (lib/stores/now.svelte), passed in so this module stays pure
+ *  for the node unit tests — and the label keeps ticking where it renders. */
+export function collectorLine(
+  status: K8sMonitorStatus | null | undefined,
+  enabled: boolean,
+  ago: (iso: string) => string,
+): string {
   if (!enabled) return 'Monitoring is off';
   if (!status) return 'Waiting for the first cycle…';
   if (!status.last_ok_at && status.last_error) return `Error: ${status.last_error}`;
-  const parts = [`last cycle ${fmtAgo(status.last_cycle_at)}`];
+  const parts = [`last cycle ${status.last_cycle_at ? ago(status.last_cycle_at) || 'never' : 'never'}`];
   if (status.pods_seen) parts.push(`${status.pods_scraped}/${status.pods_seen} pods scraped`);
   if (status.cycle_ms) parts.push(`${(status.cycle_ms / 1000).toFixed(1)}s`);
   if (status.transport_used) parts.push(status.transport_used === 'proxy' ? 'via proxy' : 'via port-forward');

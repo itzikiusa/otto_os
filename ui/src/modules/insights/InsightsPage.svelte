@@ -43,6 +43,7 @@
   import type { ViewMode } from './ReportDetail.svelte';
   import { capabilitiesApi } from './capabilities';
   import type { SupportBundle } from './capabilities';
+  import { escapeHtml } from '../../lib/html';
   import {
     METRIC_KEYS,
     delta,
@@ -404,7 +405,7 @@
       if (isTauri && (await openPopout(route, `Insights · ${periodShort(r)}`))) return;
       if (!r.html_path) return;
       const html = await insightsApi.readText(r.html_path);
-      const attr = html.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+      const attr = escapeHtml(html);
       const wrapper =
         '<!doctype html><meta charset="utf-8"><title>Insight report</title>' +
         '<style>html,body{margin:0;height:100%}iframe{border:0;width:100%;height:100%}</style>' +

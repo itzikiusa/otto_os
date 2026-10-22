@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rel } from '../../../lib/stores/now.svelte';
   import { rowMenu as rowMenuKeys } from '../../../lib/rowMenu';
   import { plural } from '../../../lib/plural';
   import { loadErrorText } from '../../../lib/loadError';
@@ -424,7 +425,7 @@
     { label: 'Kubernetes', onclick: () => router.go('kubernetes') },
     { label: 'All clusters (Monitor)', onclick: () => router.go('kubernetes/monitor') },
   ]}
-  subtitle={collectorLine(status, enabled)}
+  subtitle={collectorLine(status, enabled, rel)}
   tabsPlacement="below"
 >
   {#snippet titleContent()}

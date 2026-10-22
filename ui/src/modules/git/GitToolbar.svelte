@@ -243,8 +243,10 @@
 >
   <Icon name="branch" size={12} />
   <span class="mono branch-name">{status.branch}</span>
-  {#if status.ahead > 0}<span class="ab up" aria-label="{status.ahead} ahead">↑{status.ahead}</span>{/if}
-  {#if status.behind > 0}<span class="ab down" aria-label="{status.behind} behind">↓{status.behind}</span>{/if}
+  <!-- aria-label on a role-less span is not read: the glyph is hidden and an
+       sr-only twin carries the words. -->
+  {#if status.ahead > 0}<span class="ab up"><span aria-hidden="true">↑{status.ahead}</span><span class="sr-only">{status.ahead} ahead</span></span>{/if}
+  {#if status.behind > 0}<span class="ab down"><span aria-hidden="true">↓{status.behind}</span><span class="sr-only">{status.behind} behind</span></span>{/if}
 </span>
 
 {#if !inHeader}<span class="divider"></span>{/if}

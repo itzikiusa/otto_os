@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { plural } from '../../../../lib/plural';
+  import { plural } from '../../plural';
   // Scene inspector — the game-studio right panel. With nothing selected it shows
   // the SCENE (background, grid) and CAMERA panels; an object gets Transform +
   // Material (+ Text / Model) + Notes; a light gets its light panel; a group gets
@@ -12,7 +12,7 @@
   // and — when a non-default STATE is showing — transform edits go to that
   // state's overrides (`editState`), exactly like the viewport gizmo.
   import NumberDrag from './NumberDrag.svelte';
-  import Icon from '../../../../lib/components/Icon.svelte';
+  import Icon from '../../components/Icon.svelte';
   import { LIGHT_TYPES, type Scene3dDoc, type Scene3dMaterial, type Vec3 } from './types';
   import {
     findNode,

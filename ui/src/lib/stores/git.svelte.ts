@@ -396,7 +396,7 @@ class GitStore {
       // Not sticky: the next loadRepos for this workspace retries — the
       // panel's Retry, or App's retry on window focus (S13-305).
       this.loadedFor = null;
-      this.reposError = e instanceof Error ? e.message : String(e);
+      this.reposError = loadErrorText(e);
     } finally {
       if (t.current) this.loading = false;
     }
@@ -437,7 +437,7 @@ class GitStore {
       this.prs = [];
       // Surface the upstream reason (e.g. a 401 bad token) instead of a
       // misleading "no pull requests".
-      this.prError = e instanceof Error ? e.message : String(e);
+      this.prError = loadErrorText(e);
     } finally {
       if (t.current) this.prsLoading = false;
     }

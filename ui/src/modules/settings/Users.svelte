@@ -256,8 +256,9 @@
   }
 
   // Auto-select first non-root user for the grant matrix when the list loads.
+  // Root only: a Users:Admin sees the section, but the grants routes stay root.
   $effect(() => {
-    if (grantUserId === '' && nonRootUsers.length > 0) {
+    if (auth.isRoot && grantUserId === '' && nonRootUsers.length > 0) {
       grantUserId = nonRootUsers[0].id;
     }
   });
@@ -443,7 +444,9 @@
       if (u.id !== auth.realUser?.id && !u.disabled) {
         items.push({ separator: true }, { label: 'Impersonate…', icon: 'user', disabled: !!impersonatingId, action: () => void doImpersonate(u) });
       }
-      items.push({ separator: true }, {
+      // Account changes (`PATCH /users/{id}`) are root-only on the daemon; a
+      // Users:Admin keeps the list, impersonation and the Sessions section.
+      if (auth.isRoot) items.push({ separator: true }, {
         label: u.disabled ? 'Enable account' : 'Disable account',
         icon: u.disabled ? 'unlock' : 'lock',
         danger: !u.disabled,
@@ -455,9 +458,11 @@
 </script>
 
 <div class="settings-section">
-  <PageHeader title={sectionLabel('users')} subtitle="Root manages accounts and per-workspace roles">
+  <PageHeader title={sectionLabel('users')} subtitle={auth.isRoot ? 'Root manages accounts and per-workspace roles' : 'Accounts and per-workspace roles; only root creates, disables or grants'}>
     {#snippet actions()}
-      <button class="btn small primary" data-icon="plus" onclick={openCreate}><Icon name="plus" size={12} /> New user</button>
+      {#if auth.isRoot}
+        <button class="btn small primary" data-icon="plus" onclick={openCreate}><Icon name="plus" size={12} /> New user</button>
+      {/if}
     {/snippet}
   </PageHeader>
   <PageBody width="readable">
@@ -489,7 +494,7 @@
             </div>
             <div class="u-sub">@{u.username}</div>
           </div>
-          {#if !u.is_root && u.disabled}
+          {#if auth.isRoot && !u.is_root && u.disabled}
             <button class="btn small" onclick={() => void toggleDisabled(u)}>Enable</button>
           {/if}
           <button
@@ -648,7 +653,8 @@
       </div>
     {/if}
 
-    <!-- Feature grant matrix -->
+    <!-- Feature grant matrix (root only: GET/PUT /users/{id}/grants are root) -->
+    {#if auth.isRoot}
     <div class="title-row">
       <h2 class="section-title">Feature grants</h2>
       {#if savedIn === 'grants'}<span class="saved" role="status"><Icon name="check" size={12} /> Saved</span>{/if}
@@ -692,6 +698,7 @@
           </div>
         {/each}
       </div>
+    {/if}
     {/if}
     {/if}
   </LoadState>

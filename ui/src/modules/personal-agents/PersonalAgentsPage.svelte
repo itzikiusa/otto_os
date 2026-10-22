@@ -9,6 +9,7 @@
   import { onTabKey } from '../../lib/tabKeys';
   import { personalAgents } from '../../lib/stores/personalAgents.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
+  import { confirmRunAndDeliver } from '../../lib/confirmOutward';
   import { toasts } from '../../lib/toast.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { ws } from '../../lib/stores/workspace.svelte';
@@ -101,6 +102,8 @@
   }
 
   async function runNow(a: PersonalAgent): Promise<void> {
+    // Outward-facing: the run delivers its report the moment it finishes.
+    if (!(await confirmRunAndDeliver(a.name, a.delivery))) return;
     busyId = a.id;
     try {
       await personalAgents.runNow(a.id);

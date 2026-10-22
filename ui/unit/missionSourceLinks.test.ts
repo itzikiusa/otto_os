@@ -53,7 +53,7 @@ test('every Rust WorkKind has a module, a label, an icon and a filter entry', as
   assert.ok(kinds.includes('otto_run') && kinds.length >= 9, `parsed ${kinds}`);
   const { SOURCE_MODULE } = links();
   const lib = readFileSync(new URL('../src/modules/mission-control/lib.ts', import.meta.url), 'utf8');
-  const types = readFileSync(new URL('../src/lib/api/types.ts', import.meta.url), 'utf8');
+  const types = readFileSync(new URL('../src/lib/api/types/mission-control.ts', import.meta.url), 'utf8');
   const workKindType = types.slice(types.indexOf('export type WorkKind'), types.indexOf(';', types.indexOf('export type WorkKind')));
   for (const k of kinds) {
     assert.ok(SOURCE_MODULE[k], `kind ${k} has no owning module`);

@@ -35,6 +35,7 @@
   import AttachmentsPanel from './AttachmentsPanel.svelte';
   import LinkedCanvases from './LinkedCanvases.svelte';
   import ChildrenBoard from './ChildrenBoard.svelte';
+  import { escapeHtml } from '../../lib/html';
 
   // Version picker state — null means "show current (source) version".
   let viewingVersion = $state<ProductStoryVersion | null>(null);
@@ -415,9 +416,7 @@
     );
   }
 
-  function escapeHtmlAttr(s: string): string {
-    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-  }
+  const escapeHtmlAttr = escapeHtml;
 
   async function resolveAttachmentTokens(html: string, seq: number): Promise<void> {
     // Match literal markdown image syntax `![alt](attachment:<id>)` in the HTML
@@ -1339,7 +1338,7 @@
 {#if product.loadingDetail && (!detail || detail.story.id !== product.selectedId)}
   <!-- First open (or a switch to another story): a skeleton. A refresh of the
        story already on screen keeps it visible instead of blanking the tab. -->
-  <div class="loading" aria-label="Loading story"><Skeleton rows={5} height={36} /></div>
+  <div class="loading" role="status" aria-busy="true" aria-label="Loading story"><Skeleton rows={5} height={36} /></div>
 {:else if !detail || !story}
   <div class="muted">No story selected.</div>
 {:else}

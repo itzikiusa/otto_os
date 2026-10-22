@@ -14,6 +14,7 @@
 import { sectionDef } from './catalog';
 import { ARROW_PATH, SITE_ICONS } from './icons';
 import { resolveBackground, themeDeclarations, type Theme } from './theme';
+import { escapeHtml } from '../../../../lib/html.ts';
 import type { SiteBlock, SiteDoc, SiteLink, SitePage, SiteProps, SiteSection } from './types';
 
 export interface EmbedInfo {
@@ -44,14 +45,7 @@ export interface RenderCtx {
 
 // ── Primitives ───────────────────────────────────────────────────────────────
 
-export function esc(s: string): string {
-  return s
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
+export const esc = escapeHtml;
 
 /** Escaped text with line breaks kept (`\n` → `<br>`). */
 export function escLines(s: string): string {

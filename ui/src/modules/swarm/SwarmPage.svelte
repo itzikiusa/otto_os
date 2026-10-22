@@ -628,7 +628,7 @@
       {#if openError}
         <LoadState what="this swarm" variant="page" error={openError} empty={true} onretry={() => openErrorId && void openSwarm(openErrorId)} />
       {:else if swarm.loading || (listLoading && swarm.swarms.length === 0) || (swarm.swarms.length > 0 && !viewport.isPhone && autoPickedFor !== ws.currentId)}
-        <div class="main-loading" aria-label="Loading swarm"><Skeleton rows={6} height={30} /></div>
+        <div class="main-loading" role="status" aria-busy="true" aria-label="Loading swarm"><Skeleton rows={6} height={30} /></div>
       {:else if swarm.swarmsError && swarm.swarms.length === 0}
         <LoadState what="swarms" variant="page" error={swarm.swarmsError} empty={true} onretry={() => ws.currentId && void loadList(ws.currentId)} />
       {:else if swarm.swarms.length > 0}

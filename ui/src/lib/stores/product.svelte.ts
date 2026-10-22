@@ -889,9 +889,6 @@ class ProductStore {
     if (updatedAt) this.contentBase.set(aid, updatedAt);
     else this.contentBase.delete(aid);
   }
-  contentBaseOf(aid: string): string | null {
-    return this.contentBase.get(aid) ?? null;
-  }
 
   /** Schedule a debounced `PUT …/content`. Resolves with the row once THIS
    *  payload (or a later one that superseded it) is persisted; `null` when a

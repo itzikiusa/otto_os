@@ -16,7 +16,7 @@
     setDefaultState,
     setStateTiming,
     type Scene3dDoc,
-  } from '../../product/design/scene3d';
+  } from '../../../lib/design/scene3d';
 
   interface Props {
     doc: Scene3dDoc;

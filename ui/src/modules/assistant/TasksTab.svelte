@@ -88,7 +88,7 @@
     </div>
   {/if}
   {#if tasks.state === 'loading' && !tasks.data.length && !needs.length}
-    <div aria-busy="true" aria-label="Loading tasks"><Skeleton rows={4} height={52} /></div>
+    <div role="status" aria-busy="true" aria-label="Loading tasks"><Skeleton rows={4} height={52} /></div>
   {:else if tasks.state === 'unsupported'}
     <EmptyState icon="check" title="Tasks aren’t available yet" body="This daemon doesn’t have the assistant’s task board. Update Otto to track reminders and long jobs here." />
   {:else if tasks.state === 'error' && !tasks.data.length}

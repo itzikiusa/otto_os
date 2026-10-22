@@ -44,8 +44,9 @@
     try {
       if (database.connections.length === 0) await database.loadConnections();
       await database.loadDashboards();
-      // The store reports its own failures as toasts and keeps the old list —
+      // The store keeps its failures in state (loadDashboards never throws) —
       // surface a failed connection load here so it can't read as "none yet".
+      // A failed dashboards load is read live from the store (`error` below).
       if (database.connectionsError) loadError = loadErrorText(database.connectionsError);
     } catch (e) {
       loadError = loadErrorText(e);
@@ -69,6 +70,10 @@
     untrack(() => void ensureLoaded(true));
   });
 
+  // A failed dashboards load (a daemon error, a timeout) must not fall through
+  // to "No DB dashboards yet" with a create CTA and no way to retry.
+  const error = $derived(loadError || (database.dashboardsError ?? ''));
+
   const dashboardId = $derived(typeof box.config.dashboardId === 'string' ? box.config.dashboardId : '');
   const dashboard = $derived(database.dashboards.find((d) => d.id === dashboardId) ?? null);
   const widgets = $derived(dashboardId ? database.widgets.filter((w) => w.dashboard_id === dashboardId) : []);
@@ -79,8 +84,8 @@
 </script>
 
 <div class="dbd" class:zoomed>
-  {#if (loading || loadError) && database.dashboards.length === 0}
-    <LoadState what="DB dashboards" variant="compact" {loading} error={loadError} empty={true} onretry={() => void ensureLoaded(true)} />
+  {#if (loading || error) && database.dashboards.length === 0}
+    <LoadState what="DB dashboards" variant="compact" {loading} {error} empty={true} onretry={() => void ensureLoaded(true)} />
   {:else if database.dashboards.length === 0}
     <!-- Secondary CTAs inside widgets: the page's one primary is "Add widget". -->
     <EmptyState icon="db" title="No DB dashboards yet" body="Create one in Connections → a database → Dashboards, then pick it here.">

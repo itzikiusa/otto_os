@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { plural } from '../../../../lib/plural';
+  import { plural } from '../../plural';
   // The game-studio viewport: three.js (lazy-loaded — ~650 kB, only when a scene3d
   // artifact opens), orbit camera, grid + axes, PBR lighting from the doc, shadows,
   // click-to-select and a TransformControls gizmo (W/E/R, F frame, Del, ⌘D, Esc).

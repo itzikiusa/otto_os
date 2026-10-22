@@ -1,10 +1,9 @@
-// Workflows API client — thin typed wrappers over the generic `api` helper for
-// the version-history surface. (The core workflow CRUD/run calls are issued
-// inline from WorkflowsPage via `api.*`; these mirror the versioning routes in
-// crates/otto-server/src/routes/workflows.rs.)
+// Workflows API client — thin typed wrappers over the generic `api` helper:
+// the typed partial update, the version-history surface and run progress.
+// They mirror crates/otto-server/src/routes/workflows.rs.
 
 import { api } from './client';
-import type { ActiveWorkflowRun, UpdateWorkflowReq, Workflow, WorkflowRun, WorkflowVersion, WorkflowVersionSummary } from './types';
+import type { ActiveWorkflowRun, UpdateWorkflowReq, Workflow, WorkflowRun, WorkflowVersionSummary } from './types';
 
 /** Partial update (`PATCH /workflows/{id}`): only the fields present change; an unknown
  *  `on_restart` value answers 400. Returns the saved workflow. */
@@ -42,11 +41,6 @@ export function listWorkflowVersions(id: string, options: {limit?: number; befor
   const query = new URLSearchParams({summary: 'true', limit: String(limit)});
   if (options.beforeVersion !== undefined) query.set('before_version', String(options.beforeVersion));
   return api.get<WorkflowVersionSummary[]>(`/workflows/${encodeURIComponent(id)}/versions?${query}`);
-}
-
-/** A single version snapshot. */
-export function getWorkflowVersion(id: string, v: number): Promise<WorkflowVersion> {
-  return api.get<WorkflowVersion>(`/workflows/${id}/versions/${v}`);
 }
 
 /** Restore a version's graph as a new version; returns the updated workflow. */

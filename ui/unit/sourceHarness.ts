@@ -44,6 +44,12 @@ export function loadSource(path: URL, imports: Record<string, unknown>, globals:
           './api/lane': { inLane() { throw new Error('Unexpected lane call'); }, tagSignal() {} },
         }, globals);
       }
+      // Pure, dependency-free shared helpers (load-error copy, the HTML
+      // escaper, the byte formatter) run for real unless a test overrides them.
+      const pure = /(?:^|\/)(loadError|html|metric-format)(?:\.ts)?$/.exec(name);
+      if (!(name in imports) && pure) {
+        return loadSource(new URL(`../src/lib/${pure[1]}.ts`, import.meta.url), {}, globals);
+      }
       if (!(name in imports)) throw new Error(`Missing fixture import: ${name}`);
       return imports[name];
     },

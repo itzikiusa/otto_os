@@ -10,7 +10,7 @@
   import { SvelteMap, SvelteSet } from 'svelte/reactivity';
   import Icon from '../../lib/components/Icon.svelte';
   import { registerFindProvider } from '../../lib/findProviders';
-  import JsonTree from './JsonTree.svelte';
+  import JsonTree from '../../lib/components/JsonTree.svelte';
   import type { QueryResult, DbEngine } from '../../lib/api/types';
   import type { EditFlow } from './EditFlow.svelte';
   import { toasts } from '../../lib/toast.svelte';

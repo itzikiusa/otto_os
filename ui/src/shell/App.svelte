@@ -20,6 +20,7 @@
   import LoadState from '../lib/components/LoadState.svelte';
   import { loadErrorText } from '../lib/loadError';
   import StatusBar from './StatusBar.svelte';
+  import CapsBanner from './CapsBanner.svelte';
   import Palette from './Palette.svelte';
   import FloatingBar from '../lib/components/FloatingBar.svelte';
   import { barStore } from '../lib/stores/bar.svelte';
@@ -1263,6 +1264,8 @@
         onclick={() => (ui.navDrawerOpen = !ui.navDrawerOpen)}
         title="Open navigator"
         aria-label="Open navigator"
+        aria-haspopup="dialog"
+        aria-expanded={ui.navDrawerOpen}
       >
         <Icon name="sidebar" size={20} />
       </button>
@@ -1378,6 +1381,7 @@
     </div>
   </div>
 
+  <CapsBanner />
   {#if compactShell && viewport.isPhone}
     <BottomNav />
   {/if}

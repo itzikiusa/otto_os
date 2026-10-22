@@ -17,39 +17,18 @@ import { notifications } from './stores/notifications.svelte';
 import { activity } from './stores/activity.svelte';
 import { proof } from './stores/proof.svelte';
 import { transcript } from './stores/transcript.svelte';
-import { git } from './stores/git.svelte';
 import { assistant } from './stores/assistant.svelte';
-import { uiControl } from './stores/uiControl.svelte';
-import { lazyModule } from './lazyModule';
 
-// Page-owned stores load on their FIRST event (perf F2): statically importing
-// all of them made every document — main window, pop-out, side pane — parse
-// and evaluate the database / apiClient / product / k8s / … stores before the
-// shell could paint. The shell-owned stores above stay static (the sidebar,
-// status bar and session view read them from the first frame).
-//
-// Most handlers `peek()` (perf G2/H1): a page imports its store statically
-// and loads its own data on mount, so a document that never opened the page
-// has nothing to patch — `use()` there imported the store into every window
-// and, for API history / Run with Otto / AWS, fetched per event. `use()` is
-// kept only where the event's payload must survive until the page mounts
-// (an agent session or proposal to attach); `unit/lazyModule.test.ts` holds
-// that allow-list.
-const swarmStore = lazyModule(() => import('./stores/swarm.svelte').then((m) => m.swarm), 'swarm');
-const loopsStore = lazyModule(() => import('./stores/loops.svelte').then((m) => m.loops), 'loops');
-const usageStore = lazyModule(() => import('./api/usage.svelte').then((m) => m.usage), 'usage');
-const productStore = lazyModule(() => import('./stores/product.svelte').then((m) => m.product), 'product');
-const canvasStore = lazyModule(() => import('./stores/canvas.svelte').then((m) => m.canvas));
-const mockupAssistStore = lazyModule(() => import('./stores/mockup-assist.svelte').then((m) => m.mockupAssist));
-const databaseStore = lazyModule(() => import('./stores/database.svelte').then((m) => m.database), 'database');
-const scheduledTasksStore = lazyModule(() => import('./stores/scheduledTasks.svelte').then((m) => m.scheduledTasks), 'scheduledTasks');
-const runWithOttoStore = lazyModule(() => import('./stores/runWithOtto.svelte').then((m) => m.runWithOtto), 'runWithOtto');
-const browserStore = lazyModule(() => import('./stores/browser.svelte').then((m) => m.browser), 'browser');
-const browserLiveStore = lazyModule(() => import('./stores/browserLive.svelte').then((m) => m.browserLive), 'browserLive');
-const personalAgentsStore = lazyModule(() => import('./stores/personalAgents.svelte').then((m) => m.personalAgents), 'personalAgents');
-const k8sStore = lazyModule(() => import('./stores/k8s.svelte').then((m) => m.k8s), 'k8s');
-const awsStore = lazyModule(() => import('./stores/aws.svelte').then((m) => m.aws), 'aws');
-const apiClientStore = lazyModule(() => import('./stores/apiClient.svelte').then((m) => m.apiClient), 'apiClient');
+// Store routes live per feature in `events/routes/` (architecture-2-04), each
+// with its own lazy loader; the four loaders the reconnect / restart paths
+// below also need are re-exported from there.
+import {
+  featureRoutes,
+  swarmStore,
+  databaseStore,
+  personalAgentsStore,
+  type EventRoutes,
+} from './events/routes';
 import {
   handleUiFrame,
   helloFrame,
@@ -390,6 +369,76 @@ export class DesignAssistBus {
 
 export const designAssistBus = new DesignAssistBus();
 
+// ---------------------------------------------------------------------------
+// The route table: one typed handler per event type (architecture-2-04). The
+// feature tables (events/routes/) own the store routes; the buses above route
+// here. A type no table lists falls through to `ws.applyEvent` (a no-op for
+// the liveEvents-only types) — `unit/eventRoutes.test.ts` holds that list.
+// ---------------------------------------------------------------------------
+
+const busRoutes: EventRoutes = {
+  // Let the Self-Improvement pane refresh without waiting for its poll.
+  improvement_updated: (parsed) => improvementBus.apply(parsed.kind, parsed.id),
+  workflow_run_updated: (parsed) => {
+    // Workflow execution progress: node-start / node-finish / approval
+    // pause/resume / run complete. The Workflows page subscribes to
+    // workflowRunBus and applies the change to the viewed run (in place when
+    // the event carries the changed node, else a rev-guarded GET).
+    workflowRunBus.apply(parsed);
+    // Keep the "Running" sidebar list + nav count live — in place from the
+    // event's progress fields; a full refetch only for runs the list doesn't
+    // know yet (or events from an older daemon).
+    ws.applyWorkflowRunEvent(parsed);
+  },
+  // Skill-Eval terminal notification (done/error/cancelled).
+  skill_eval_updated: (parsed) => skillEvalBus.apply(parsed.workspace_id, parsed.run_id, parsed.status),
+  // Skills Lab review advanced — refresh the matching review.
+  skill_review_updated: (parsed) => skillReviewBus.apply(parsed.workspace_id, parsed.review_id, parsed.status),
+  // Review panel: refresh the matching review + findings + merge-readiness on
+  // the event instead of waiting for its visibility-gated poll.
+  review_changed: (parsed) => reviewBus.apply(parsed.workspace_id, parsed.review_id, parsed.status),
+  // Findings board: refetch the matching review's findings on every triage
+  // action / transition (status changed).
+  finding_updated: (parsed) =>
+    findingBus.apply(parsed.workspace_id, parsed.review_id, parsed.finding_id, parsed.status, '', null),
+  // An agent-backed action (fix/verify/regression-test) spawned a live
+  // session — let the board reflect the in-flight action.
+  finding_action_started: (parsed) =>
+    findingBus.apply(parsed.workspace_id, parsed.review_id, parsed.finding_id, '', parsed.action, parsed.session_id),
+  // A Proof Pack snapshot was exported; the board can refresh if open. We
+  // route it through the finding bus tick so subscribers re-render.
+  proof_pack_exported: (parsed) =>
+    findingBus.apply(parsed.workspace_id, parsed.review_id, '', '', 'proof_pack_exported', null),
+  // Surface a budget cap crossing/recovery to any subscribed banner.
+  budget_exceeded: (parsed) => budgetBus.apply(parsed.provider, parsed.spend_usd, parsed.cap_usd, parsed.direction),
+  // Mission Control: a work item was created or changed status. The page
+  // re-fetches the matching workspace's summary/list on the event.
+  work_graph_updated: (parsed) => missionControlBus.apply(parsed.workspace_id, parsed.item_id, parsed.status),
+  // Live canvas edits: the open Canvas editor re-renders the matching scene.
+  canvas_updated: (parsed) => canvasDocBus.apply(parsed.scene_id, parsed.doc),
+  // A scene was attached/detached to a session — the session's Canvas panel
+  // refetches when its session id matches.
+  canvas_refs_changed: (parsed) => canvasRefsBus.apply(parsed.session_id),
+  // Design Hall graph: the lobby, the open artifact, its Links panel and the
+  // learning log each re-fetch what the event touches.
+  design_artifact_updated: (parsed) => designBus.apply(parsed),
+  design_link_updated: (parsed) => designBus.apply(parsed),
+  design_learning_update: (parsed) => designBus.apply(parsed),
+  // Design assist: the Otto panel's turn states + the variants tray.
+  design_assist_updated: (parsed) => designAssistBus.apply(parsed),
+  design_variants_ready: (parsed) => designAssistBus.apply(parsed),
+};
+
+/** Every routed event type → its handler. */
+export const eventRoutes: EventRoutes = { ...featureRoutes, ...busRoutes };
+
+/** Route one event to its store / bus (after the generic `liveEvents`). */
+function dispatchEvent(ev: OttoEvent): void {
+  const route = eventRoutes[ev.type] as ((e: OttoEvent) => void) | undefined;
+  if (route) route(ev);
+  else ws.applyEvent(ev);
+}
+
 export type EventsState = 'connecting' | 'connected' | 'offline';
 
 /** Generic subscription registry over this window's `/ws/events` stream
@@ -725,235 +774,9 @@ class EventsClient {
         // ui_command_cancel) never reach the event stores.
         if (handleUiFrame(data)) return;
         const parsed = data as OttoEvent;
-        // Generic subscribers first (liveQuery views); the store dispatch
-        // below is unchanged.
+        // Generic subscribers first (liveQuery views), then the store route.
         liveEvents.dispatch(parsed as unknown as LiveEvent);
-        if (parsed.type === 'notification') {
-          notifications.ingest(parsed.notice);
-          // A "waiting"/blocked notice (Claude's Notification hook) means a
-          // session is blocked on the operator — raise the sticky "needs you"
-          // flag, distinct from plain idle. Keyed off the stable source_key.
-          const n = parsed.notice;
-          if (
-            n.source_key?.endsWith(':waiting') &&
-            n.action?.type === 'open_session'
-          ) {
-            const at = Date.parse(n.created_at);
-            ws.markNeedsYou(n.action.session_id, { noticeAt: Number.isFinite(at) ? at : undefined });
-          }
-        } else if (parsed.type === 'trail_appended' || parsed.type === 'tasks_updated') {
-          activity.applyEvent(parsed);
-        } else if (parsed.type === 'api_history_appended') {
-          // API Client history is shared across human sends and agent MCP runs.
-          // Refresh once after a burst so the current workspace stays live.
-          // Automation runs emit one per step / row: only a loaded store
-          // with a loaded history list refetches.
-          apiClientStore.peek()?.noteHistoryAppended(parsed.workspace_id, parsed.entry_id);
-        } else if (parsed.type === 'api_run_progress') {
-          // A running automation finished a step: fetch its delta now
-          // instead of waiting for the fallback poll.
-          apiClientStore.peek()?.noteRunProgress(parsed.run_id, parsed.status);
-        } else if (parsed.type === 'api_client_changed') {
-          // Requests / collections / envs / automations changed (maybe by an
-          // agent): keep the API store's 60 s reuse window honest. A store
-          // that never loaded has nothing stale — don't load the chunk for it.
-          apiClientStore.peek()?.noteClientChanged(parsed);
-        } else if (
-          parsed.type === 'swarm_run_updated' ||
-          parsed.type === 'swarm_task_updated' ||
-          parsed.type === 'swarm_project_cleared' ||
-          parsed.type === 'swarm_message_posted' ||
-          parsed.type === 'swarm_goal_updated' ||
-          parsed.type === 'swarm_status'
-        ) {
-          // The Swarm page loads its swarms on mount: a document without the
-          // store has nothing to patch.
-          swarmStore.peek()?.applyEvent(parsed);
-        } else if (parsed.type === 'usage_metrics_tick') {
-          // Drive a near-real-time metrics sparkline refresh without polling.
-          // Broadcast on every sampler tick; only an open metrics view wants it.
-          usageStore.peek()?.applyMetricsTick();
-        } else if (parsed.type === 'product_changed') {
-          // Let product section tabs know a run completed (kills a poll cycle).
-          productStore.peek()?.applyEvent(parsed);
-        } else if (parsed.type === 'plan_run') {
-          // Multi-agent plan kickoff: the Plan tab tiles the live sessions.
-          productStore.peek()?.applyPlanRun(parsed);
-        } else if (parsed.type === 'improvement_updated') {
-          // Let the Self-Improvement pane refresh without waiting for its poll.
-          improvementBus.apply(parsed.kind, parsed.id);
-        } else if (parsed.type === 'workflow_run_updated') {
-          // Workflow execution progress: node-start / node-finish / approval
-          // pause/resume / run complete. The Workflows page subscribes to
-          // workflowRunBus and applies the change to the viewed run (in place
-          // when the event carries the changed node, else a rev-guarded GET).
-          workflowRunBus.apply(parsed);
-          // Keep the "Running" sidebar list + nav count live — in place from
-          // the event's progress fields; a full refetch only for runs the list
-          // doesn't know yet (or events from an older daemon).
-          ws.applyWorkflowRunEvent(parsed);
-        } else if (parsed.type === 'skill_eval_updated') {
-          // Skill-Eval terminal notification (done/error/cancelled).
-          skillEvalBus.apply(parsed.workspace_id, parsed.run_id, parsed.status);
-        } else if (parsed.type === 'skill_review_updated') {
-          // Skills Lab review advanced — refresh the matching review.
-          skillReviewBus.apply(parsed.workspace_id, parsed.review_id, parsed.status);
-        } else if (parsed.type === 'review_changed') {
-          // Review panel: refresh the matching review + findings + merge-readiness
-          // on the event instead of waiting for its visibility-gated poll.
-          reviewBus.apply(parsed.workspace_id, parsed.review_id, parsed.status);
-        } else if (parsed.type === 'finding_updated') {
-          // Findings board: refetch the matching review's findings on every triage
-          // action / transition (status changed).
-          findingBus.apply(
-            parsed.workspace_id,
-            parsed.review_id,
-            parsed.finding_id,
-            parsed.status,
-            '',
-            null,
-          );
-        } else if (parsed.type === 'finding_action_started') {
-          // An agent-backed action (fix/verify/regression-test) spawned a live
-          // session — let the board reflect the in-flight action.
-          findingBus.apply(
-            parsed.workspace_id,
-            parsed.review_id,
-            parsed.finding_id,
-            '',
-            parsed.action,
-            parsed.session_id,
-          );
-        } else if (parsed.type === 'proof_pack_exported') {
-          // A Proof Pack snapshot was exported; the board can refresh if open. We
-          // route it through the finding bus tick so subscribers re-render.
-          findingBus.apply(parsed.workspace_id, parsed.review_id, '', '', 'proof_pack_exported', null);
-        } else if (parsed.type === 'budget_exceeded') {
-          // Surface a budget cap crossing/recovery to any subscribed banner.
-          budgetBus.apply(parsed.provider, parsed.spend_usd, parsed.cap_usd, parsed.direction);
-        } else if (parsed.type === 'work_graph_updated') {
-          // Mission Control: a work item was created or changed status. The page
-          // re-fetches the matching workspace's summary/list on the event.
-          missionControlBus.apply(parsed.workspace_id, parsed.item_id, parsed.status);
-        } else if (parsed.type === 'goal_loop_updated') {
-          // Goal Loops: update the list row + bump the open detail's re-fetch tick.
-          loopsStore.peek()?.applyEvent(parsed);
-        } else if (parsed.type === 'canvas_updated') {
-          // Live canvas edits: the open Canvas editor re-renders the matching scene.
-          canvasDocBus.apply(parsed.scene_id, parsed.doc);
-        } else if (parsed.type === 'canvas_session_started') {
-          // The agent session is live (turn start) → attach its shell immediately
-          // by setting the open scene's session id.
-          canvasStore.use((canvas) => {
-            if (parsed.scene_id === canvas.currentId) canvas.sessionId = parsed.session_id;
-          });
-        } else if (parsed.type === 'canvas_refs_changed') {
-          // A scene was attached/detached to a session — the session's Canvas
-          // panel refetches when its session id matches.
-          canvasRefsBus.apply(parsed.session_id);
-        } else if (parsed.type === 'repo_status_changed') {
-          // A watched repo changed on disk: the Git page re-reads its status.
-          git.applyRepoChanged(parsed.repo_id, parsed.paths);
-        } else if (parsed.type === 'mockup_updated') {
-          // Live design edits: the arena's Assistant preview + the open artifact
-          // reload. `content` is an explicit null for binary / oversized payloads
-          // (a glb, a Blender render) — the store then re-fetches the bytes rather
-          // than treating "null" as an empty document.
-          mockupAssistStore.use((mockupAssist) =>
-            mockupAssist.ingestLive(parsed.attachment_id, parsed.story_id, parsed.format, parsed.content ?? null),
-          );
-        } else if (
-          parsed.type === 'design_artifact_updated' ||
-          parsed.type === 'design_link_updated' ||
-          parsed.type === 'design_learning_update'
-        ) {
-          // Design Hall graph: the lobby, the open artifact, its Links panel and
-          // the learning log each re-fetch what the event touches.
-          designBus.apply(parsed);
-        } else if (parsed.type === 'design_assist_updated' || parsed.type === 'design_variants_ready') {
-          // Design assist: the Otto panel's turn states + the variants tray.
-          designAssistBus.apply(parsed);
-        } else if (parsed.type === 'mockup_session_started') {
-          // The mockup agent session is live (turn start) → attach its shell.
-          mockupAssistStore.use((mockupAssist) =>
-            mockupAssist.setSession(parsed.attachment_id, parsed.story_id, parsed.session_id),
-          );
-        } else if (parsed.type === 'db_assist_session_started') {
-          // The DB Assistant agent session is live (turn start) → attach its shell
-          // in the embedded DB Assistant panel (beside the query editor).
-          databaseStore.use((database) =>
-            database.setAssistSession(parsed.assist_id, parsed.connection_id, parsed.session_id),
-          );
-        } else if (parsed.type === 'db_assist_updated') {
-          // Live proposed SQL/note from the DB Assistant agent → the panel's
-          // read-only SQL block (Insert into editor / Run).
-          databaseStore.use((database) =>
-            database.applyAssistUpdate(parsed.assist_id, parsed.connection_id, parsed.sql, parsed.note),
-          );
-        } else if (parsed.type === 'proof_pack_updated') {
-          // Proof page list/detail + sidebar proof chips refresh on the event.
-          proof.applyEvent(parsed);
-        } else if (parsed.type === 'scheduled_task_run_updated') {
-          // Scheduled Tasks page refreshes the affected task's runs + list status.
-          scheduledTasksStore.peek()?.applyEvent(parsed);
-        } else if (parsed.type === 'otto_run_updated') {
-          // Run with Otto page refreshes the affected run + the workspace list.
-          runWithOttoStore.peek()?.applyEvent(parsed);
-        } else if (
-          parsed.type === 'browser_tab_updated' ||
-          parsed.type === 'browser_annotation_added'
-        ) {
-          // Browser page: tab strip / annotation list refresh in place.
-          browserStore.peek()?.applyEvent(parsed);
-        } else if (parsed.type === 'browser_engine_install_updated') {
-          // Browser page / Settings → Browser: Chromium download progress.
-          browserLiveStore.peek()?.applyEvent(parsed);
-        } else if (
-          parsed.type === 'assistant_turn' ||
-          parsed.type === 'assistant_task_update' ||
-          parsed.type === 'assistant_needs_you' ||
-          parsed.type === 'assistant_limit'
-        ) {
-          // Assistant: thread turns/cards, task board, needs-you badge, limits.
-          assistant.applyEvent(parsed);
-        } else if (parsed.type === 'personal_agent_run_updated') {
-          // Personal Agents page refreshes the agent's runs + schedule cursors.
-          personalAgentsStore.peek()?.applyRunEvent(parsed);
-        } else if (parsed.type === 'agent_room_message') {
-          // Agent-room feeds append the event's message (open Rooms view only).
-          personalAgentsStore.peek()?.applyRoomEvent(parsed);
-        } else if (
-          parsed.type === 'k8s_cluster_updated' ||
-          parsed.type === 'k8s_install_updated' ||
-          parsed.type === 'k8s_monitor_cycle'
-        ) {
-          // Kubernetes console: cluster list refetch / installer state tick.
-          // The console and the Home box load both on mount: a document
-          // without the store has nothing to refresh.
-          k8sStore.peek()?.applyEvent(parsed);
-        } else if (parsed.type === 'aws_account_updated' || parsed.type === 'aws_install_updated') {
-          // AWS console: account rows changed / the CLI installer advanced.
-          awsStore.peek()?.applyEvent(parsed);
-        } else if (
-          parsed.type === 'transcript_appended' ||
-          parsed.type === 'transcript_live' ||
-          parsed.type === 'artifact_added' ||
-          parsed.type === 'history_index_progress'
-        ) {
-          // Conversation view: live tail deltas (+ artifact chips) for the open
-          // session's chat; History page index progress. The activity store
-          // also takes the artifact / index events (Outputs panel + rescan bar).
-          transcript.applyEvent(parsed);
-          if (parsed.type !== 'transcript_appended' && parsed.type !== 'transcript_live') activity.applyEvent(parsed);
-        } else if (parsed.type === 'ui_control_requested') {
-          // An agent asked to drive the UI: the session's pane shows the prompt.
-          uiControl.applyEvent(parsed);
-        } else {
-          if (parsed.type === 'session_removed') activity.forget(parsed.session_id);
-          // The grant lives in session meta; a removed session drops its prompt.
-          if (parsed.type === 'session_meta_updated' || parsed.type === 'session_removed') uiControl.applyEvent(parsed);
-          ws.applyEvent(parsed);
-        }
+        dispatchEvent(parsed);
       } catch (e) {
         // A store handler threw (S13-06): this used to vanish with the
         // "malformed frame" catch, hiding contract drift (a field the TS

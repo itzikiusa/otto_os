@@ -81,7 +81,9 @@
     if (n == null) return '—';
     return `$${n < 0.01 && n > 0 ? n.toFixed(4) : n.toFixed(2)}`;
   }
-  function rel(ts?: string | null): string {
+  /** Absolute local date-time ("21/10/2026, 14:03") — NOT the shared
+   *  relative `rel()`; named apart so the two are never confused. */
+  function fmtWhen(ts?: string | null): string {
     if (!ts) return '—';
     return new Date(ts).toLocaleString();
   }
@@ -145,9 +147,9 @@
       {/if}
     </div>
     <div class="meta">
-      <span class="dim">Enqueued {rel(run.enqueued_at)}</span>
-      {#if run.started_at}<span class="dim">· Started {rel(run.started_at)}</span>{/if}
-      {#if run.finished_at}<span class="dim">· Finished {rel(run.finished_at)}</span>{/if}
+      <span class="dim">Enqueued {fmtWhen(run.enqueued_at)}</span>
+      {#if run.started_at}<span class="dim">· Started {fmtWhen(run.started_at)}</span>{/if}
+      {#if run.finished_at}<span class="dim">· Finished {fmtWhen(run.finished_at)}</span>{/if}
     </div>
 
     {#if run.error}
@@ -261,7 +263,7 @@
                 <Badge variant="outline" label={sentenceCase(m.kind)} />
                 <span class="who">{author(m)}</span>
                 <span class="grow"></span>
-                <span class="dim time">{rel(m.created_at)}</span>
+                <span class="dim time">{fmtWhen(m.created_at)}</span>
               </div>
               <div class="post-body">{m.body}</div>
             </div>

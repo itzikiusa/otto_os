@@ -4,16 +4,17 @@
 // artifacts implement. Loads are sequence-guarded (a slow response never
 // overwrites a newer one) and live events trigger a debounced refresh.
 
-import { api } from '../../lib/api/client';
+import { api, ApiError } from '../../lib/api/client';
+import { loadErrorText } from '../../lib/loadError';
 import * as design from '../../lib/api/design';
 import type { DesignArtifact, DesignProject, DesignSearchHit } from '../../lib/api/types';
-import type { DesignBusEvent } from '../../lib/events.svelte';
+import { designBus, type DesignBusEvent } from '../../lib/events.svelte';
 import { ws } from '../../lib/stores/workspace.svelte';
 import { auth } from '../../lib/stores/auth.svelte';
 import type { StoryRef } from './model';
 
 function errText(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
+  return loadErrorText(e);
 }
 
 /** More distinct artifacts than this in one burst → one full reload instead. */
@@ -74,8 +75,17 @@ class DesignLibrary {
 
   private seq = 0;
   private timer: ReturnType<typeof setTimeout> | null = null;
-  /** Story ids we already tried to resolve individually (never retried in a loop). */
+  /** Story ids we already tried to resolve individually (never retried in a
+   *  loop). Only a definite answer is remembered — a 403/404 — so a transient
+   *  failure (daemon restart mid-load) retries on the next load, and an events
+   *  resync (lost events, reconnect) forgets everything. */
   private tried = new Set<string>();
+  #triedResync = -1;
+
+  /** Forget a memo key unless the failure was a definite "no access / gone". */
+  #forgetUnlessDefinite(key: string, e: unknown): void {
+    if (!(e instanceof ApiError && (e.status === 403 || e.status === 404))) this.tried.delete(key);
+  }
 
   get artifacts(): DesignArtifact[] {
     return this.#artifacts;
@@ -210,6 +220,10 @@ class DesignLibrary {
     for (const h of this.hits) for (const s of h.story_ids) wanted.add(s);
     for (const p of this.projects) if (p.epic_story_id) wanted.add(p.epic_story_id);
     if (!wanted.size || !auth.can('product', 'view')) return;
+    if (designBus.resyncTick !== this.#triedResync) {
+      this.#triedResync = designBus.resyncTick;
+      this.tried.clear();
+    }
     const next: Record<string, StoryRef> = { ...this.stories };
     const wsId = ws.currentId;
     if (wsId && !this.tried.has(`ws:${wsId}`)) {
@@ -217,8 +231,9 @@ class DesignLibrary {
       try {
         const list = await api.get<StoryRef[]>(`/workspaces/${wsId}/product/stories`);
         for (const s of list) next[s.id] = s;
-      } catch {
-        /* no product access in this workspace */
+      } catch (e) {
+        /* no product access in this workspace — or a transient failure */
+        this.#forgetUnlessDefinite(`ws:${wsId}`, e);
       }
     }
     const missing = [...wanted].filter((id) => !next[id] && !this.tried.has(id)).slice(0, 20);
@@ -228,8 +243,9 @@ class DesignLibrary {
         try {
           const d = await api.get<{ story: StoryRef }>(`/product/stories/${encodeURIComponent(id)}`);
           if (d.story) next[id] = d.story;
-        } catch {
-          /* gone or not visible */
+        } catch (e) {
+          /* gone or not visible — or a transient failure */
+          this.#forgetUnlessDefinite(id, e);
         }
       }),
     );
@@ -244,8 +260,9 @@ class DesignLibrary {
         try {
           const d = await api.get<{ story: StoryRef }>(`/product/stories/${encodeURIComponent(id)}`);
           if (d.story) next[id] = d.story;
-        } catch {
-          /* not visible */
+        } catch (e) {
+          /* not visible — or a transient failure */
+          this.#forgetUnlessDefinite(id, e);
         }
       }),
     );

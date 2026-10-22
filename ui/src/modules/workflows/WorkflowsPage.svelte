@@ -8,7 +8,7 @@
   // Workflows: build automations by *describing* them (agent mode) or by hand
   // on the canvas. Left = generate + list + running; center = node-graph editor + run.
   import { tick, untrack } from 'svelte';
-  import { marked } from 'marked';
+  import { renderMarkdownGfm } from '../../lib/md';
   import ApprovalActions from '../../lib/components/ApprovalActions.svelte';
   import ApprovalOutcome from '../../lib/components/ApprovalOutcome.svelte';
   import Icon, { asIcon } from '../../lib/components/Icon.svelte';
@@ -42,7 +42,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { api } from '../../lib/api/client';
-  import { workflowProgress, workflowNodeDetail, listWorkflowVersions, restoreWorkflowVersion } from '../../lib/api/workflows';
+  import { patchWorkflow, workflowProgress, workflowNodeDetail, listWorkflowVersions, restoreWorkflowVersion } from '../../lib/api/workflows';
   import { applyLiveNode, mergeRunProgress, fmtStepMs, sharedNodeBodies } from './runProgress';
   import RelTime from '../../lib/components/RelTime.svelte';
   import { workflowRunBus } from '../../lib/events.svelte';
@@ -356,10 +356,9 @@
 
   // ── final-output panel ──────────────────────────────────────────────────
   // On a successful run, `<context_dir>/final-output.md` holds the run's
-  // deliverable (see workflow_context.rs's write_final_output). Rendered the
-  // same way FileTree previews markdown: `marked` → a sandboxed iframe
-  // (srcdoc, no scripts run) — that's the only "sanitizer" FileTree applies,
-  // so mirror it exactly rather than injecting raw HTML into the page.
+  // deliverable (see workflow_context.rs's write_final_output). Rendered
+  // into a sandboxed iframe (srcdoc, no scripts run), never raw HTML in the
+  // page; the shared renderer also sanitizes it.
   // The srcdoc is themed from the app's tokens (resolved values copied in,
   // like PluginFrame's `otto:init` theme) so it reads in light AND dark; it
   // re-renders when the theme/scheme/accent changes (`finalOutputSrcdoc`).
@@ -374,12 +373,11 @@
   `;
   const FINAL_OUTPUT_TOKENS = ['--text', '--text-dim', '--border', '--border-strong', '--surface-2', '--accent-text', '--font-ui', '--font-mono'];
   /** Markdown → HTML body (stored); the themed document is `finalOutputSrcdoc`. */
+  /** Through the shared GFM renderer (lib/md): sanitized on top of the
+   *  sandbox, and it never throws (a parse failure falls back to the escaped
+   *  tiny renderer). */
   function renderFinalOutputSrcdoc(md: string): string {
-    try {
-      return marked.parse(md, { async: false, gfm: true, breaks: true }) as string;
-    } catch {
-      return `<pre>${md.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c] ?? c))}</pre>`;
-    }
+    return renderMarkdownGfm(md);
   }
   function themedFinalOutput(body: string, scheme: 'light' | 'dark'): string {
     const cs = getComputedStyle(document.documentElement);
@@ -775,7 +773,7 @@
     const submitted = JSON.stringify($state.snapshot(graph));
     savingGraph = true;
     try {
-      const wf = await api.patch<Workflow>(`/workflows/${workflowId}`, { graph: JSON.parse(submitted) });
+      const wf = await patchWorkflow(workflowId, { graph: JSON.parse(submitted) as WorkflowGraph });
       applySavedWorkflow(wf);
       // Editing stays available during Save; only the submitted graph is saved.
       if (current?.id === workflowId && JSON.stringify($state.snapshot(graph)) === submitted) dirty = false;
@@ -795,7 +793,7 @@
     if (!current) return;
     savingInstructions = true;
     try {
-      const wf = await api.patch<Workflow>(`/workflows/${current.id}`, { instructions: wfInstructions });
+      const wf = await patchWorkflow(current.id, { instructions: wfInstructions });
       applySavedWorkflow(wf);
       toasts.success('Instructions saved');
     } catch (e) {
@@ -810,7 +808,7 @@
   async function saveOnRestart(resume: boolean): Promise<void> {
     if (!current) return;
     try {
-      const wf = await api.patch<Workflow>(`/workflows/${current.id}`, {
+      const wf = await patchWorkflow(current.id, {
         on_restart: resume ? 'resume' : 'fail',
       });
       applySavedWorkflow(wf);
@@ -943,7 +941,7 @@
       return;
     }
     try {
-      const updated = await api.patch<Workflow>(`/workflows/${wf.id}`, { name });
+      const updated = await patchWorkflow(wf.id, { name });
       workflows = workflows.map((w) => (w.id === wf.id ? { ...w, name: updated.name } : w));
       if (current?.id === wf.id) current = { ...current, name: updated.name };
       toasts.success(`Renamed to “${updated.name}”`);

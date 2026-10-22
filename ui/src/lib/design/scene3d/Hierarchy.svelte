@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { rowMenu as rowMenuKeys } from '../../../../lib/rowMenu';
+  import { rowMenu as rowMenuKeys } from '../../rowMenu';
   // Scene hierarchy — the game-studio left panel while a scene3d artifact is open
   // (the arena toggles it in place of the asset list). Groups collapse, rows
   // select, double-click / F2 renames inline, the eye hides, the ⋯ / right-click
@@ -7,9 +7,9 @@
   // primitives, lights, a group and "Import GLB…" (the upload itself is the
   // arena's — `onimportGlb`). Every edit is an `ops.ts` call → `onchange(newDoc)`.
   import { tick } from 'svelte';
-  import { ctxMenu, type MenuItem } from '../../../../lib/contextmenu.svelte';
-  import { focusOnMount } from '../../../../lib/focusOnMount';
-  import Icon, { type IconName } from '../../../../lib/components/Icon.svelte';
+  import { ctxMenu, type MenuItem } from '../../contextmenu.svelte';
+  import { focusOnMount } from '../../focusOnMount';
+  import Icon, { type IconName } from '../../components/Icon.svelte';
   import { LIGHT_TYPES, PRIMITIVE_TYPES, type LightType, type PrimitiveType, type Scene3dDoc } from './types';
   import {
     addGroup,

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { plural } from '../../lib/plural';
+  import { rel } from '../../lib/stores/now.svelte';
   // Focus view (GitKraken-style): everything "mine" across the whole install in
   // one place — MY PULL REQUESTS (open PRs aggregated across every registered
   // repo, grouped by forge) and MY WORK (Jira issues assigned to me, rebuilt
@@ -266,16 +267,9 @@
   }
 
   // ── Formatting ──────────────────────────────────────────────────────────────
+  /** Dense "3m" / "2h" label via the shared clock (`rel`, compact style). */
   function ago(iso: string | null): string {
-    if (!iso) return '';
-    const t = Date.parse(iso);
-    if (Number.isNaN(t)) return '';
-    const mins = Math.max(0, Math.round((Date.now() - t) / 60_000));
-    if (mins < 60) return `${mins}m`;
-    const hours = Math.round(mins / 60);
-    if (hours < 24) return `${hours}h`;
-    const days = Math.round(hours / 24);
-    return `${days}d`;
+    return iso ? rel(iso, { compact: true }) : '';
   }
 
   const CI_LABEL: Record<string, string> = {

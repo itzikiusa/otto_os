@@ -12,8 +12,9 @@
 import type { MarkedExtension, Tokens } from 'marked';
 import { renderNote, type RenderCtx } from '../../vault/mdRender';
 import { decorateCodeBlocks } from './codeBlocks';
+import { escapeHtml } from '../../../lib/html.ts';
 
-const esc = (s: string): string => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+const esc = escapeHtml;
 
 /** Extensions a bare file name (no directory) must have to count as a file
  *  reference inside a code span — `retry.rs` yes, `v0.4.1` / `self.x` no. */

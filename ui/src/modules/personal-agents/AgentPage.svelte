@@ -4,9 +4,10 @@
   import { latestOnly } from '../../lib/latest';
   import RelTime from '../../lib/components/RelTime.svelte';
   import { tabKeys } from '../../lib/tabKeys';
-  import { tick } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import { personalAgents } from '../../lib/stores/personalAgents.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
+  import { confirmRunAndDeliver } from '../../lib/confirmOutward';
   import { personalAgentsApi } from '../../lib/api/personalAgents';
   import { authedText } from '../../lib/api/client';
   import { ws } from '../../lib/stores/workspace.svelte';
@@ -90,8 +91,17 @@
   const runs = $derived(personalAgents.runsByAgent[agentId] ?? []);
 
   // The agent may not be cached yet (deep link) — the list load fills it in.
+  // Once per (workspace, agent): the lookup is untracked, so a list that comes
+  // back WITHOUT the id ("Agent not found") doesn't re-run this and refetch
+  // in a loop (ui-performance-2-02).
+  let lookedUp = '';
   $effect(() => {
-    if (!personalAgents.agent(agentId) && ws.currentId) void personalAgents.loadAgents(ws.currentId);
+    const wsId = ws.currentId;
+    const key = `${wsId}|${agentId}`;
+    if (!wsId || key === lookedUp) return;
+    if (untrack(() => personalAgents.agent(agentId))) return;
+    lookedUp = key;
+    void personalAgents.loadAgents(wsId);
   });
 
   $effect(() => {
@@ -260,6 +270,8 @@
   }
 
   async function runNow(scheduleId?: string): Promise<void> {
+    // Outward-facing: the run delivers its report the moment it finishes.
+    if (agent && !(await confirmRunAndDeliver(agent.name, agent.delivery))) return;
     busy = true;
     try {
       await personalAgents.runNow(agentId, scheduleId);
@@ -423,7 +435,7 @@
 <div class="agent-body" class:chat-fill={tab === 'chat'}>
   {#if !agent}
     {#if personalAgents.loadingAgents}
-      <div aria-busy="true" aria-label="Loading the agent"><Skeleton rows={3} height={64} /></div>
+      <div role="status" aria-busy="true" aria-label="Loading the agent"><Skeleton rows={3} height={64} /></div>
     {:else}
       <EmptyState
         variant="page"
@@ -686,7 +698,7 @@
     <!-- the shared sheet: Esc works from anywhere, focus is trapped + restored -->
     <Modal title="Report" width={760} onclose={() => (reportRun = null)}>
       {#if reportLoading}
-        <div aria-busy="true" aria-label="Loading the report"><Skeleton rows={6} height={18} /></div>
+        <div role="status" aria-busy="true" aria-label="Loading the report"><Skeleton rows={6} height={18} /></div>
       {:else if reportError}
         <LoadState what="the report" error={reportError} empty onretry={() => reportRun && viewReport(reportRun)} />
       {:else}

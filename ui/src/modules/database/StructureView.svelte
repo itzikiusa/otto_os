@@ -1,5 +1,6 @@
 <script lang="ts">
   import { formatBytes } from '../../lib/metric-format';
+  import { pluralNoun } from '../../lib/plural';
   import Badge from '../../lib/components/Badge.svelte';
   // Object structure: a columns table (name/type/nullable/default/key), primary
   // key, indexes, foreign keys, and a collapsible DDL block. For Redis keys /
@@ -9,7 +10,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import TableDesigner from './TableDesigner.svelte';
-  import JsonTree from './JsonTree.svelte';
+  import JsonTree from '../../lib/components/JsonTree.svelte';
   import { database } from '../../lib/stores/database.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import type { DbForeignKey, DbIndexDef, SchemaNode } from '../../lib/api/types';
@@ -670,7 +671,7 @@
         <h2 class="mono">{detail.name}</h2>
         <span class="kind-chip">{detail.kind}</span>
         {#if detail.row_count != null}
-          <span class="rowcount">{detail.row_count.toLocaleString()} rows</span>
+          <span class="rowcount">{detail.row_count.toLocaleString()} {pluralNoun(detail.row_count, 'row')}</span>
         {/if}
       </div>
       <div class="st-head-actions">
@@ -796,6 +797,7 @@
                     class:expandable={defText != null}
                     disabled={defText == null}
                     title={defText != null ? 'View full definition' : undefined}
+                    aria-expanded={defText != null ? openIdxDef === i : undefined}
                     onclick={() => (openIdxDef = openIdxDef === i ? null : i)}
                   >
                     <Icon name="key" size={12} />
@@ -1086,7 +1088,7 @@
     {#if detail.ddl}
       <div class="block">
         <div class="ddl-head">
-          <button class="block-title toggle" onclick={() => (ddlOpen = !ddlOpen)}>
+          <button class="block-title toggle" aria-expanded={ddlOpen} onclick={() => (ddlOpen = !ddlOpen)}>
             <Icon name={ddlOpen ? 'chevronDown' : 'chevronRight'} size={12} />
             DDL
           </button>

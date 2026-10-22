@@ -18,12 +18,11 @@ function history() {
   return {paths,wrapper,addVersion:()=>latest++};
 }
 
-test('workflow version wrapper requests bounded summaries and an exclusive cursor, leaving full detail separate',async()=>{
+test('workflow version wrapper requests bounded summaries and an exclusive cursor',async()=>{
   const h=history();await h.wrapper.listWorkflowVersions('wf',{limit:50,beforeVersion:100});
   const url=new URL(h.paths[0],'http://fixture');
   assert.equal(url.searchParams.get('summary'),'true');assert.equal(url.searchParams.get('limit'),'50');assert.equal(url.searchParams.get('before_version'),'100');
-  const detail=await h.wrapper.getWorkflowVersion('wf',1);assert.equal(detail.instructions,'full instructions');assert.equal(detail.graph.nodes[0].params.prompt,'full body');
-  assert.equal(h.paths.at(-1),'/workflows/wf/versions/1');
+  assert.equal(h.wrapper.getWorkflowVersion,undefined,'the unused single-version getter is gone; restore reads the version server-side');
 });
 
 test('workflow version drawer keeps one bounded window and can page to the oldest version across a new save',async()=>{

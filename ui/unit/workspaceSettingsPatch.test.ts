@@ -11,7 +11,7 @@ function fixture() {
     '../api/client': { getToken: () => 'token', api: { patch: async (path: string, body: unknown) => {
       writes.push({ path, body }); return { id: 'w', settings: {} };
     } } },
-    '../api/workflows': { listActiveWorkflowRuns: async () => [] },
+    './workflowRuns.svelte': { workflowRuns: { list: [], refresh: async () => {}, apply() {}, clear() {} } },
     '../api/workspaces': { fetchWorkspace: async () => ({ settings: { notes: 'old' } }) },
     '../router.svelte': { router: {} }, '../toast.svelte': { toasts: {} }, '../toastError': { toastError() {} },
     '../plural': { plural() {} }, '../confirm.svelte': { confirmer: {} },

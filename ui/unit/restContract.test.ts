@@ -11,7 +11,7 @@
 // — the test fails loudly rather than guess.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 
 const root = new URL('../../', import.meta.url);
 const stripRs = (s: string) => s.split('\n').map((l) => l.replace(/\/\/.*$/, '')).join('\n');
@@ -20,7 +20,10 @@ const rust = stripRs(
     .map((p) => readFileSync(new URL(p, root), 'utf8'))
     .join('\n'),
 );
-const ts = readFileSync(new URL('ui/src/lib/api/types.ts', root), 'utf8')
+// lib/api/types.ts is an export-* barrel over lib/api/types/<area>.ts; read them all.
+const ts = ['types.ts', ...readdirSync(new URL('ui/src/lib/api/types/', root)).sort().map((f) => `types/${f}`)]
+  .map((p) => readFileSync(new URL(`ui/src/lib/api/${p}`, root), 'utf8'))
+  .join('\n')
   .replace(/\/\*[\s\S]*?\*\//g, '')
   .replace(/(^|\s)\/\/.*$/gm, '$1');
 

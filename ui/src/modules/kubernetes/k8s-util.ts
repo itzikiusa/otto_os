@@ -3,6 +3,7 @@
 // shared <EnvBadge>).
 
 import { now } from '../../lib/stores/now.svelte';
+import { formatBytes as sharedFormatBytes } from '../../lib/metric-format';
 import type { BadgeTone } from '../../lib/status';
 import type {
   K8sCapabilities,
@@ -79,17 +80,10 @@ export function formatAge(seconds: number | null | undefined): string {
   return `${Math.floor(d / 365)}y`;
 }
 
+/** kubectl-style sizes ("128Mi"), blank when unknown — the shared
+ *  formatter's IEC style (lib/metric-format), not a local copy. */
 export function formatBytes(n: number | null | undefined): string {
-  if (n == null || !Number.isFinite(n)) return '';
-  if (n < 1024) return `${n} B`;
-  const units = ['Ki', 'Mi', 'Gi', 'Ti'];
-  let v = n / 1024;
-  let i = 0;
-  while (v >= 1024 && i < units.length - 1) {
-    v /= 1024;
-    i++;
-  }
-  return `${v >= 100 ? v.toFixed(0) : v.toFixed(1)}${units[i]}`;
+  return sharedFormatBytes(n, { iec: true, empty: '' });
 }
 
 export function formatMillicores(m: number | null | undefined): string {

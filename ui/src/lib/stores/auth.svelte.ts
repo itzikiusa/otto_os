@@ -110,6 +110,15 @@ class AuthStore {
    *  the user's real access. The shell shows "Couldn’t load your permissions
    *  — Retry" while it is set; retries run with backoff and on reconnect. */
   capabilitiesError = $state(false);
+  /** The person dismissed the "Couldn’t load your permissions" strip. It holds
+   *  until the NEXT failed read (the backoff retry, a reconnect, Retry), so a
+   *  daemon that keeps failing re-raises it instead of hiding it for good. */
+  capabilitiesNoticeDismissed = $state(false);
+
+  /** Hide the permissions-failure strip until the next failed read. */
+  dismissCapabilitiesNotice(): void {
+    this.capabilitiesNoticeDismissed = true;
+  }
   private capsRetryTimer: ReturnType<typeof setTimeout> | null = null;
   private capsAttempt = 0;
 
@@ -164,6 +173,7 @@ class AuthStore {
     this.capsRetryTimer = null;
     this.capsAttempt = 0;
     this.capabilitiesError = false;
+    this.capabilitiesNoticeDismissed = false;
   }
 
   private capabilitiesLoaded(caps: Record<string, string>): void {
@@ -176,6 +186,7 @@ class AuthStore {
   private capabilitiesFailed(token: string | null): void {
     if (token !== getToken()) return;
     this.capabilitiesError = true;
+    this.capabilitiesNoticeDismissed = false;
     if (this.capsRetryTimer) clearTimeout(this.capsRetryTimer);
     const delay = CAPABILITIES_RETRY_MS[Math.min(this.capsAttempt, CAPABILITIES_RETRY_MS.length - 1)];
     this.capsAttempt += 1;

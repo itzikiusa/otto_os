@@ -81,7 +81,7 @@ test('storage is bounded and tolerant; forget drops a session', () => {
 // ── the workspace store ───────────────────────────────────────────────────
 function store(storage: Map<string, string>, module = 'agents') {
   const { ws } = loadSource(new URL('../src/lib/stores/workspace.svelte.ts', import.meta.url), {
-    '../api/client': { api: {}, getToken: () => 'tok' }, '../api/workflows': { listActiveWorkflowRuns: async () => [] }, '../api/workspaces': { fetchWorkspace: async () => ({}) },
+    '../api/client': { api: {}, getToken: () => 'tok' }, './workflowRuns.svelte': { workflowRuns: { list: [], refresh: async () => {}, apply() {}, clear() {} } }, '../api/workspaces': { fetchWorkspace: async () => ({}) },
     '../router.svelte': { router: { module, parts: [module], go() {} } }, '../toast.svelte': { toasts: { info() {}, success() {}, error() {}, push() { return 1; } } }, '../toastError': { toastError: () => {} }, '../plural': { plural: (n: number, w: string) => `${n} ${w}` }, '../confirm.svelte': { confirmer: {} },
     './ui.svelte': { ui: { sessionIsolation: false, closeTabPref: '', setCloseTabPref() {} }, clientId: () => 'test' },
     '../win': { winKey: (key: string) => key }, './splitLayout.svelte': { layout: { panes: [], focusedIndex: 0, bindKey() {}, restore() {}, retain() {}, replaceSession() {}, persist() {}, removeSession() {}, closeSession() {} } }, './splitLayout': { MAX_PANES: 15, LS_PANES: 'otto_panes_' },

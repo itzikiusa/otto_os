@@ -396,7 +396,7 @@
       for (const id of created.slice(0, -1)) ws.openSession(id);
       if (created.length > 0) ws.navigateToSession(created[created.length - 1]);
       if (failed.length > 0) {
-        toasts.error(batchSuccesses.length ? 'Some sessions did not start' : 'Could not create session', failures.join('\n'));
+        toasts.error(batchSuccesses.length ? 'Some sessions didn’t start' : 'Couldn’t create session', failures.join('\n'));
         return;
       }
       onclose();

@@ -1363,8 +1363,10 @@ function mergeLevel(prev: TreeNode[], entries: VaultDirEntry[], depth: number): 
   });
 }
 
+/** Every vault failure (tree, save, rescan, OKF) is described the one way:
+ *  `loadErrorText` — a human cause, never WebKit's bare "Load failed". */
 function msg(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
+  return loadErrorText(e);
 }
 
 export const vault = new VaultStore();

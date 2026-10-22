@@ -60,7 +60,11 @@
       error = '';
       return true;
     } catch (e) {
-      if (mine !== seq || signal?.aborted) return true;
+      // An aborted read (the space went off screen mid-request) loaded
+      // nothing: `false` keeps `freshness` from stamping it fresh, so coming
+      // back fetches at once instead of showing empty rows for a minute.
+      if (signal?.aborted) return false;
+      if (mine !== seq) return true;
       error = loadErrorText(e);
       return false;
     } finally {

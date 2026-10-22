@@ -13,7 +13,7 @@
   import CodeEditor from '../../lib/components/CodeEditor.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import type { DesignArtifact } from '../../lib/api/types';
-  import DeviceFrame, { type DeviceKind } from '../product/design/DeviceFrame.svelte';
+  import DeviceFrame, { type DeviceKind } from '../../lib/design/DeviceFrame.svelte';
   import DesignBoard from '../product/design/DesignBoard.svelte';
   import {
     Scene3DViewport,
@@ -22,7 +22,7 @@
     serializeScene,
     type Scene3dDoc,
     type Scene3dObject,
-  } from '../product/design/scene3d';
+  } from '../../lib/design/scene3d';
   import { renderMermaid } from '../canvas/mermaid';
   import { renderD2 } from '../canvas/d2';
   import { brandColors, contrastRatio, renderKind } from './model';

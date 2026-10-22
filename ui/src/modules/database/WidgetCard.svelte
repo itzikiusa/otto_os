@@ -37,7 +37,15 @@
   // Failure message rendered IN the card — a banner over the last good chart
   // when one exists (the chart is never wiped by a failed refresh).
   let error = $state<string | null>(null);
-  async function run(manual = false, signal?: AbortSignal): Promise<boolean> {
+  /** Bumped by every run: an aborted run clears `loading` only while it is
+   *  still the newest one (a refresh click may already own the spinner). */
+  let runToken = 0;
+  /** `'aborted'` is neither a success nor a failure: it must not stamp
+   *  freshness (the card would then never re-run on return — ui-correctness
+   *  2-01) and must not leave the spinner up. */
+  type RunOutcome = 'ok' | 'failed' | 'aborted';
+  async function run(manual = false, signal?: AbortSignal): Promise<RunOutcome> {
+    const token = ++runToken;
     loading = true;
     try {
       // The store's runWidget toasts on failure — right for an explicit click,
@@ -52,16 +60,16 @@
       if (r) {
         result = r; // only a SUCCESS replaces the data
         error = null;
-        return true;
+        return 'ok';
       }
       error = 'Query failed';
-      return false;
+      return 'failed';
     } catch (e) {
-      if (isAbortError(e) || signal?.aborted) return true;
+      if (isAbortError(e) || signal?.aborted) return 'aborted';
       error = e instanceof Error ? e.message : String(e);
-      return false;
+      return 'failed';
     } finally {
-      if (!signal?.aborted) loading = false;
+      if (token === runToken) loading = false;
     }
   }
 
@@ -79,8 +87,8 @@
     if (secs <= 0) {
       if (fresh) return; // manual only: shown again ≠ asked again
       const ctl = new AbortController();
-      void run(false, ctl.signal).then((ok) => {
-        if (ok) {
+      void run(false, ctl.signal).then((outcome) => {
+        if (outcome === 'ok') {
           ranKey = key;
           okAt = Date.now();
         }
@@ -89,12 +97,14 @@
     }
     const poller = pollWhileVisible(
       async (signal) => {
-        const ok = await run(false, signal);
-        if (ok) {
+        const outcome = await run(false, signal);
+        if (outcome === 'ok') {
           ranKey = key;
           okAt = Date.now();
         }
-        return ok;
+        // An abort (the card went off screen) is no failure to back off from,
+        // and no success to stamp: only 'failed' counts against the cadence.
+        return outcome !== 'failed';
       },
       {
         ms: secs * 1000,

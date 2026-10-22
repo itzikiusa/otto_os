@@ -48,7 +48,7 @@ function store(module: string, pref: '' | 'archive' | 'delete', confirmAnswer = 
   };
   const layout = { panes: [], focusedIndex: 0, bindKey() {}, restore() {}, retain() {}, replaceSession() {}, persist() {}, removeSession() {}, closeSession() {} };
   const { ws } = loadSource(new URL('../src/lib/stores/workspace.svelte.ts', import.meta.url), {
-    '../api/client': { api, getToken: () => 'tok' }, '../api/workflows': { listActiveWorkflowRuns: async () => [] }, '../api/workspaces': { fetchWorkspace: async () => ({}) },
+    '../api/client': { api, getToken: () => 'tok' }, './workflowRuns.svelte': { workflowRuns: { list: [], refresh: async () => {}, apply() {}, clear() {} } }, '../api/workspaces': { fetchWorkspace: async () => ({}) },
     '../router.svelte': { router: { module, parts: [module], go() {} } }, '../toast.svelte': { toasts }, '../toastError': { toastError: () => {} }, '../plural': { plural: (n: number, w: string) => `${n} ${w}` }, '../confirm.svelte': { confirmer },
     './ui.svelte': { ui: { sessionIsolation: false, closeTabPref: pref, setCloseTabPref() {} }, clientId: () => 'test' },
     '../win': { winKey: (key: string) => key }, './splitLayout.svelte': { layout }, './splitLayout': { MAX_PANES: 15, LS_PANES: 'otto_panes_' },

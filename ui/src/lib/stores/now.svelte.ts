@@ -56,12 +56,20 @@ function toMs(ts: number | string | Date): number {
   return Number.isNaN(n) ? 0 : n;
 }
 
+export interface RelOptions {
+  /** Dense rows (agent lists, chips): drop the "ago" suffix — "3m", not
+   *  "3m ago". Future deltas keep "in …" (a bare "3m" would read as past). */
+  compact?: boolean;
+}
+
 /**
  * Compact relative-time label vs the shared clock: "now", "5s", "3m", "2h",
  * "4d", or an absolute date beyond ~30 days. Past deltas get "ago"; future
- * deltas get "in …". Reactive — re-evaluates as the clock ticks.
+ * deltas get "in …". Reactive — re-evaluates as the clock ticks. This is the
+ * ONE relative-time formatter (content.md §7): pass `{ compact: true }` instead
+ * of writing a local "3m" ladder.
  */
-export function rel(ts: number | string | Date): string {
+export function rel(ts: number | string | Date, opts: RelOptions = {}): string {
   const t = toMs(ts);
   if (!t) return '';
   // Subscribe only as finely as the label can change. Under an hour it flips
@@ -87,5 +95,6 @@ export function rel(ts: number | string | Date): string {
   else if (s < 86400) body = `${Math.floor(s / 3600)}h`;
   else if (s < 2592000) body = `${Math.floor(s / 86400)}d`;
   else return new Date(t).toLocaleDateString();
-  return future ? `in ${body}` : `${body} ago`;
+  if (future) return `in ${body}`;
+  return opts.compact ? body : `${body} ago`;
 }

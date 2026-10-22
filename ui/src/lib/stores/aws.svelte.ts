@@ -11,6 +11,7 @@ import type { IconName } from '../components/Icon.svelte';
 import { resourceAccess, type ResourceAccessChange } from './resource-access.svelte';
 import { awsApi } from '../api/aws';
 import { ApiError } from '../api/client';
+import { providerErrorText } from '../loadError';
 import type {
   AthenaTable,
   AthenaWorkgroup,
@@ -157,9 +158,7 @@ class AwsStore {
       this.statusError =
         e instanceof ApiError && e.status === 404
           ? 'The running daemon has no AWS console routes (update Otto).'
-          : e instanceof Error
-            ? e.message
-            : String(e);
+          : providerErrorText(e);
     } finally {
       this.statusLoaded = true;
     }
@@ -205,7 +204,7 @@ class AwsStore {
       for (const a of this.accounts) if (a.permissions && !next[a.id]) next[a.id] = a.permissions;
       this.permissions = next;
     } catch (e) {
-      this.accountsError = e instanceof Error ? e.message : String(e);
+      this.accountsError = providerErrorText(e);
     } finally {
       this.accountsLoading = false;
       this.accountsLoaded = true;

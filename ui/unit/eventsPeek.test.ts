@@ -6,19 +6,34 @@
 // transpiled into a vm) against stub stores and count what it loads.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
 import { latestOnly } from '../src/lib/latest.ts';
 
 const SRC = new URL('../src/lib/', import.meta.url);
 
+/** Transpile `file` (relative to src/lib) into a vm. Its relative imports
+ *  reach `context.require` as src/lib-relative paths (`./stores/x.svelte`),
+ *  and the feature route tables under `./events/` load for real, so the
+ *  REAL dispatcher runs whichever file a route lives in. */
 function cjs(file: string, context: Record<string, unknown>): Record<string, any> {
-  const out = ts.transpileModule(readFileSync(new URL(file, SRC), 'utf8'), {
+  const url = new URL(file, SRC);
+  const out = ts.transpileModule(readFileSync(url, 'utf8'), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
   }).outputText;
   const exports: Record<string, any> = {};
-  runInNewContext(out, { ...context, exports });
+  const outer = context.require as ((p: string) => unknown) | undefined;
+  const require = (p: string): unknown => {
+    if (!p.startsWith('.')) return outer?.(p);
+    const lib = './' + new URL(p, url).pathname.slice(SRC.pathname.length);
+    if (lib.startsWith('./events/')) {
+      const rel = lib.slice(2);
+      return cjs(existsSync(new URL(`${rel}.ts`, SRC)) ? `${rel}.ts` : `${rel}/index.ts`, context);
+    }
+    return outer?.(lib);
+  };
+  runInNewContext(out, { ...context, require, exports });
   return exports;
 }
 

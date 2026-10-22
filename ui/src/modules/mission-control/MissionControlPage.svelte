@@ -144,6 +144,11 @@
    *  stale and flipping to the Graph view loads it then. */
   let graphStale = true;
 
+  /** Commit only the newest request FOR THE SHOWN WORKSPACE: a backfill of A
+   *  that resolves after a switch to B takes the newest ticket, so the seq
+   *  alone would land A's items under B. */
+  const stale = (seq: number, id: string): boolean => seq !== reqSeq || id !== ws.currentId;
+
   async function reload(id: string): Promise<void> {
     const seq = ++reqSeq;
     loading = true;
@@ -163,7 +168,7 @@
         missionControlApi.items(id, f),
         withGraph ? missionControlApi.graph(id, f) : Promise.resolve(null),
       ]);
-      if (seq !== reqSeq) return;
+      if (stale(seq, id)) return;
       summary = s;
       items = its;
       if (g) {
@@ -172,7 +177,7 @@
         needsApprovalIds = approvalSet(g);
       } else if (s.needs_approval > 0) {
         const ag = await missionControlApi.graph(id, f);
-        if (seq !== reqSeq) return;
+        if (stale(seq, id)) return;
         graph = ag;
         graphStale = false;
         needsApprovalIds = approvalSet(ag);
@@ -180,7 +185,7 @@
         needsApprovalIds = new Set();
       }
     } catch (e) {
-      if (seq !== reqSeq) return;
+      if (stale(seq, id)) return;
       err = e instanceof ApiError ? e.message : 'Otto couldn’t reach the daemon.';
     } finally {
       if (seq === reqSeq) loading = false;
@@ -232,9 +237,9 @@
     err = '';
     try {
       await missionControlApi.backfill(id);
-      await reload(id);
+      if (id === ws.currentId) await reload(id);
     } catch (e) {
-      err = e instanceof ApiError ? e.message : 'Backfill failed';
+      if (id === ws.currentId) err = e instanceof ApiError ? e.message : 'Backfill failed';
     } finally {
       backfilling = false;
     }

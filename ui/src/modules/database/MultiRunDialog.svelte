@@ -14,7 +14,7 @@
   // The run executes in the daemon (`POST /db/multi-runs`), so closing the
   // sheet does not stop it; "Recent" reopens a run. Each run is also recorded
   // in its connection's ordinary History.
-  import { onDestroy, untrack } from 'svelte';
+  import { onDestroy, tick, untrack } from 'svelte';
   import { toastError } from '../../lib/toastError';
   import { plural } from '../../lib/plural';
   import Modal from '../../lib/components/Modal.svelte';
@@ -357,6 +357,22 @@
 
   onDestroy(() => poller?.stop());
 
+  // Every stage change unmounts the footer button that caused it, so focus
+  // would fall to <body> (WCAG 2.4.3). Move it to the new stage's first
+  // meaningful control — the typed phrase on confirm, the stage's lead
+  // (tabindex=-1) elsewhere. Not on mount: the Modal places focus then.
+  let mrEl = $state<HTMLDivElement | undefined>();
+  let focusedStage: Stage = untrack(() => stage);
+  $effect(() => {
+    const s = stage;
+    if (s === focusedStage) return;
+    focusedStage = s;
+    void tick().then(() => {
+      if (stage !== s) return;
+      mrEl?.querySelector<HTMLElement>('[data-stage-focus]')?.focus();
+    });
+  });
+
   const title = $derived(
     stage === 'results' ? 'Multi-run' : stage === 'confirm' ? 'Confirm production writes' : 'Run on multiple targets',
   );
@@ -364,7 +380,7 @@
 </script>
 
 <Modal {title} width={920} onclose={close}>
-  <div class="mr" data-testid="multi-run">
+  <div class="mr" data-testid="multi-run" bind:this={mrEl}>
     {#if notice && stage !== 'results'}<p class="mr-notice" role="status">{notice}</p>{/if}
     {#if planError && stage === 'preview'}
       <div class="mr-error" role="alert"><Icon name="warning" size={13} /><span>{planError}</span></div>
@@ -388,7 +404,7 @@
       {/if}
 
       <section class="mr-sec" aria-label="Script">
-        <h3 class="mr-h">Script <span class="mr-dim">· {plural(scriptLines, 'line')}</span></h3>
+        <h3 class="mr-h" tabindex="-1" data-stage-focus>Script <span class="mr-dim">· {plural(scriptLines, 'line')}</span></h3>
         <pre class="mr-code mono" use:scrollRegion={'Statement'}>{statement}</pre>
       </section>
 
@@ -520,14 +536,15 @@
         </div>
       {/if}
     {:else if stage === 'preview' && plan}
-      <p class="mr-lead">
+      <p class="mr-lead" tabindex="-1" data-stage-focus>
         <strong>{plural(plan.runs.length, 'run')}</strong> on
         <strong>{plural(plan.targets.length, 'target')}</strong>
         {#if plan.write_count > 0}· <span class="mr-warn-text">{plural(plan.write_count, 'write')}/DDL</span>{/if}
         · {concurrency === 1 ? 'one at a time' : `${concurrency} in parallel`}
         · {stopOnError ? 'stops at the first failure' : 'continues past failures'}
       </p>
-      {#each plan.warnings as w (w)}
+      <!-- Keyed by index: two same-named targets yield identical warnings. -->
+      {#each plan.warnings as w, i (i)}
         <p class="mr-warning"><Icon name="warning" size={12} /> {w}</p>
       {/each}
 
@@ -636,6 +653,7 @@
         <span>Type <strong class="mono">{phrase}</strong> to confirm</span>
         <input dir="ltr"
           class="input mono"
+          data-stage-focus
           bind:value={typed}
           placeholder={phrase}
           spellcheck="false"
@@ -647,7 +665,7 @@
       </label>
       {#if startError}<div class="mr-error" role="alert"><Icon name="warning" size={13} /><span>{startError}</span></div>{/if}
     {:else if stage === 'results' && job}
-      <div class="mr-status">
+      <div class="mr-status" tabindex="-1" data-stage-focus>
         <StatusBadge status={runStatus(job.status === 'done' ? (job.summary.failed > 0 ? 'failed' : 'done') : job.status)} />
         <span class="mr-lead">{summaryText(job.summary)}</span>
         <span class="mr-dim">of {job.summary.total}</span>

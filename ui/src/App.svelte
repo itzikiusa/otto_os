@@ -2,7 +2,6 @@
   import { untrack } from 'svelte';
   // Boot flow: GET /meta → onboarding wizard | login | main shell.
   import Toasts from './lib/components/Toasts.svelte';
-  import LoadState from './lib/components/LoadState.svelte';
   import BarHost from './modules/desktop/BarHost.svelte';
   import TrayPage from './modules/desktop/TrayPage.svelte';
   import { auth } from './lib/stores/auth.svelte';
@@ -88,16 +87,6 @@
   $effect(() => appLive.onConnection((up) => {
     if (up) auth.noteConnected();
   }));
-  let capsRetrying = $state(false);
-  async function retryCapabilities(): Promise<void> {
-    if (capsRetrying) return;
-    capsRetrying = true;
-    try {
-      await auth.retryCapabilities();
-    } finally {
-      capsRetrying = false;
-    }
-  }
 
   // "Retry now" is inert while its own attempt is in flight (the 2 s poll
   // already dedupes inside auth.boot, but the button gave no feedback).
@@ -163,14 +152,9 @@
        of the workspace shell. Remote guests still use the unprivileged route. -->
   {#await hostRoom()}{@render chunkWait()}{:then m}{#key router.parts[1]}<m.default roomId={router.parts[1] ?? ''} />{/key}{:catch}{@render chunkError()}{/await}
 {:else}
+  <!-- The permissions-failure strip lives in the shell (shell/CapsBanner),
+       in flow above the status bar — never over the toolbar. -->
   {#await shell()}{@render chunkWait()}{:then m}<m.default />{:catch}{@render chunkError()}{/await}
-  {#if auth.capabilitiesError && !auth.isRoot}
-    <!-- Root never depends on the map; anyone else would otherwise see a
-         silently all-deny shell. -->
-    <div class="caps-banner">
-      <LoadState what="your permissions" variant="compact" empty error="Some pages may be hidden." loading={capsRetrying} onretry={retryCapabilities} />
-    </div>
-  {/if}
 {/if}
 
 {#snippet chunkWait()}
@@ -209,29 +193,6 @@
   .boot-sub {
     font-size: var(--fs-m);
     color: var(--text-dim);
-  }
-  .caps-banner {
-    position: fixed;
-    inset-block-start: 8px;
-    inset-inline: 16px;
-    margin-inline: auto;
-    max-width: 560px;
-    z-index: var(--z-toast);
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    padding: 8px 12px;
-    border: 1px solid var(--warning);
-    border-radius: var(--radius-m);
-    background: var(--warning-soft);
-    color: var(--text);
-    font-size: var(--fs-s);
-    box-shadow: var(--shadow-card);
-  }
-  .caps-banner > :global(*) {
-    flex: 1;
-    min-width: 0;
-    overflow-wrap: anywhere;
   }
   .boot-hint {
     max-width: 420px;

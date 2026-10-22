@@ -10,6 +10,7 @@
 // re-rendered on click, the cache stays a string memo.
 
 import { copyTextOrThrow } from '../../../lib/clipboard.ts';
+import { escapeHtml } from '../../../lib/html.ts';
 
 // Header labels for fence tags and hljs ids (static: no hljs needed, so the
 // label is right before the lazy highlighter lands and in node unit tests).
@@ -43,9 +44,9 @@ export const CODE_CAP_LINES = 18;
 const PRE = /(?<!<\/div>)<pre><code class="hljs(?: language-([\w+#.-]+))?"(?: title="([^"]*)")?>([\s\S]*?)<\/code><\/pre>/g;
 const LINE_SPAN = /<span class="cl">/g;
 
-const esc = (s: string): string => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+const esc = escapeHtml;
 /** `title` arrives entity-escaped from the sanitizer's serializer. */
-const unesc = (s: string): string => s.replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+const unesc = (s: string): string => s.replace(/&#39;/g, "'").replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
 
 const base = (p: string): string => p.split('/').pop() || p;
 

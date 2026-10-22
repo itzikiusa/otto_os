@@ -283,7 +283,7 @@
       {:else}
         {#if warnings.length > 0}
           <div class="prev-warn">
-            {#each warnings as w (w)}
+            {#each warnings as w, i (i)}
               <div class="prev-warn-line"><Icon name="info" size={12} /> {w}</div>
             {/each}
           </div>

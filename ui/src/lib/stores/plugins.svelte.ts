@@ -11,6 +11,9 @@ export interface PluginNav {
   /** Normalized on load: a manifest icon we don't ship falls back to 'box'. */
   icon: IconName;
   has_ui: boolean;
+  /** Its service (sidecar) is up. The page is served even when it is not, so
+   *  the frame checks this to show "service stopped" instead of a dead page. */
+  running: boolean;
 }
 
 /** Full installed-plugin record (GET /plugin-admin, root only). */
@@ -26,6 +29,10 @@ export interface PluginRecord {
   health: string;
   enabled: boolean;
   installed_at: string;
+  /** The service is up right now (admin list only). */
+  running: boolean;
+  /** Why an enabled plugin is not running (spawn error or how it exited). */
+  last_error: string | null;
 }
 
 class PluginsStore {

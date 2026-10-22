@@ -157,6 +157,8 @@
   interface CaseAction {
     mode: 'idle' | 'approve' | 'changes' | 'edit';
     reviewNote: string;
+    /** Inline error under the review note (never a toast for a field error). */
+    noteError?: string;
     editTitle: string;
     editCategory: string;
     editPriority: string;
@@ -175,6 +177,12 @@
   const POLL_MAX_MS = 120_000;
   let pollStartedAt = 0;
   let runsCountAtStart = 0;
+  // Consecutive failed reads while waiting (same as PlanTab): after
+  // POLL_FAIL_SHOWN the waiting state says why (with Check again), and a
+  // timeout after failed reads blames the read, not the agent.
+  const POLL_FAIL_SHOWN = 2;
+  let pollFailures = $state(0);
+  let lastPollError = $state<string | null>(null);
 
   function clearPoll(): void {
     if (pollTimer !== null) {
@@ -183,14 +191,23 @@
     }
   }
 
-  async function pollTestcases(): Promise<void> {
-    if (Date.now() - pollStartedAt > POLL_MAX_MS) {
+  /** One poll read. Resolves `false` on a failed read so the poller backs
+   *  off (lib/poll.ts) instead of hammering a daemon that is down. */
+  async function pollTestcases(): Promise<boolean> {
+    // A `product_changed` nudge also lands here with no poll running: no
+    // timeout and no failure count then.
+    const polling = pollTimer !== null;
+    if (polling && Date.now() - pollStartedAt > POLL_MAX_MS) {
+      const cause = pollFailures > 0 ? lastPollError : null;
       clearPoll();
-      toasts.warn('Generate timed out', 'No new test run appeared within 2 minutes.');
-      return;
+      if (cause) toasts.warn('Couldn’t check for the test cases', cause);
+      else toasts.warn('Generate timed out', 'No new test run appeared within 2 minutes.');
+      return true;
     }
     try {
       await product.loadTestcases();
+      pollFailures = 0;
+      lastPollError = null;
       if (product.testcaseRuns.length > runsCountAtStart) {
         clearPoll();
         // Auto-select the newest run.
@@ -198,8 +215,12 @@
           activeRunId = product.testcaseRuns[0].run.id;
         }
       }
+      return true;
     } catch (e) {
-      console.error('[TestCasesTab] poll error', e);
+      if (!polling) return true;
+      pollFailures++;
+      lastPollError = loadErrorText(e);
+      return false;
     }
   }
 
@@ -207,6 +228,8 @@
     clearPoll();
     runsCountAtStart = product.testcaseRuns.length;
     pollStartedAt = Date.now();
+    pollFailures = 0;
+    lastPollError = null;
     // Immediate first poll, then every POLL_INTERVAL_MS after each settles.
     // `product_changed` (onSectionChange, below) settles it; this chain is
     // a 15 s safety net while events flow, POLL_INTERVAL_MS while they cannot.
@@ -431,9 +454,10 @@
   async function submitChanges(tc: ProductTestcase): Promise<void> {
     const action = getAction(tc.id);
     if (!action.reviewNote.trim()) {
-      toasts.warn('Note required', 'Please add a review note before requesting changes.');
+      setAction(tc.id, { noteError: 'Add a review note that says what needs to change.' });
       return;
     }
+    setAction(tc.id, { noteError: undefined });
     setAction(tc.id, { busy: true });
     try {
       await product.updateTestcase(tc.id, {
@@ -619,6 +643,10 @@
 
         {#if pollTimer !== null}
           <span class="polling-indicator">checking every 3s…</span>
+          {#if pollFailures >= POLL_FAIL_SHOWN && lastPollError}
+            <span class="poll-error" role="status">Couldn’t check progress: {lastPollError}</span>
+            <button class="btn small" onclick={() => pollTimer?.now()}>Check again</button>
+          {/if}
         {/if}
       </div>
     </section>
@@ -911,7 +939,11 @@
                         placeholder="Describe what needs to change…"
                         bind:value={caseActions[tc.id].reviewNote}
                         disabled={action.busy}
+                        aria-invalid={action.noteError ? 'true' : undefined}
+                        aria-describedby={action.noteError ? `rc-note-err-${tc.id}` : undefined}
+                        oninput={() => { if (action.noteError) setAction(tc.id, { noteError: undefined }); }}
                       ></textarea>
+                      {#if action.noteError}<p class="field-error" id="rc-note-err-{tc.id}">{action.noteError}</p>{/if}
                       <div class="if-actions">
                         <button
                           class="btn small primary"
@@ -1103,6 +1135,8 @@
     max-width: 100%;
     font-size: var(--fs-s);
   }
+  .field-error { margin: 2px 0 0; font-size: var(--fs-s); color: var(--danger); }
+  .poll-error { font-size: var(--fs-xs); color: var(--warning); overflow-wrap: anywhere; }
   .polling-indicator {
     font-size: var(--fs-xs);
     color: var(--text-dim);

@@ -123,11 +123,6 @@ class ClipHistoryStore {
     this.scheduleSave();
   }
 
-  togglePin(text: string): void {
-    this.entries = this.entries.map((e) => (e.text === text ? { ...e, pinned: !e.pinned } : e));
-    this.scheduleSave();
-  }
-
   remove(text: string): void {
     this.entries = this.entries.filter((e) => e.text !== text);
     this.scheduleSave();

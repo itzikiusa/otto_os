@@ -14,7 +14,7 @@
   // inline "Couldn’t load" + Retry instead of an empty/raw daemon page in the
   // frame; a skeleton covers the frame until it fires `load`.
   import { untrack } from 'svelte';
-  import { baseUrl, getToken } from '../../lib/api/client';
+  import { api, baseUrl, getToken } from '../../lib/api/client';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { agentProviders } from '../../lib/providers';
@@ -41,7 +41,10 @@
   // 'missing' = the daemon has no UI for this slug (disabled, uninstalled or
   // UI-less) — not a failure to retry, so it gets an empty state with a way
   // to the plugin settings instead of "Couldn’t load" + Retry.
-  let probe = $state<'loading' | 'ok' | 'error' | 'missing'>('loading');
+  // 'stopped' = the page is served but its service (sidecar) is down, so
+  // every call it makes would 502: say so, with Start again for an admin.
+  let probe = $state<'loading' | 'ok' | 'error' | 'missing' | 'stopped'>('loading');
+  let starting = $state(false);
   let probeError = $state<string | null>(null);
   let frameLoaded = $state(false);
   let probeSeq = 0;
@@ -64,8 +67,11 @@
       if (r.status === 405 || r.status === 501) r = await fetch(url, { cache: 'no-store' });
       if (seq !== probeSeq) return;
       if (r.ok) {
+        // Fresh nav state: the page is static, the service may have died.
+        await plugins.load();
+        if (seq !== probeSeq) return;
         probeError = null;
-        probe = 'ok';
+        probe = plugins.get(slug)?.running === false ? 'stopped' : 'ok';
         return;
       }
       if (r.status === 404) {
@@ -86,6 +92,20 @@
     void src;
     untrack(() => void check());
   });
+
+  /** Admin: start the stopped service again (re-runs enable), then re-probe. */
+  async function startAgain(): Promise<void> {
+    if (starting) return;
+    starting = true;
+    try {
+      await api.post(`/plugin-admin/${encodeURIComponent(slug)}/enable`);
+      await check();
+    } catch (e) {
+      probeError = loadErrorText(e);
+    } finally {
+      starting = false;
+    }
+  }
 
   function themeVars(): Record<string, string> {
     const cs = getComputedStyle(document.documentElement);
@@ -190,6 +210,25 @@
         <div class="pf-loading"><LoadState what={name} variant="page" loading empty /></div>
       {/if}
     </div>
+  {:else if probe === 'stopped'}
+    {#if auth.isRoot}
+      <EmptyState
+        variant="page"
+        icon="box"
+        title="{name}’s service stopped"
+        body={probeError ?? 'Its page is here, but the service behind it isn’t running, so nothing in it would work. Start it again, or see why in Settings → Plugins.'}
+        actionLabel={starting ? 'Starting…' : 'Start again'}
+        actionIcon="refresh"
+        onaction={() => void startAgain()}
+      />
+    {:else}
+      <EmptyState
+        variant="page"
+        icon="box"
+        title="{name}’s service stopped"
+        body="Its page is here, but the service behind it isn’t running. Ask an Otto admin to start it again in Settings → Plugins."
+      />
+    {/if}
   {:else if probe === 'missing'}
     {#if auth.isRoot}
       <EmptyState

@@ -74,11 +74,9 @@ const LS = {
   termScreenReader: 'otto_term_screen_reader',
   closeTabPref: 'otto_close_tab_pref',
   termToolbar: 'otto_term_toolbar',
-  dbDock: 'otto_db_dock',
   browserPanelVersion: 'otto_browser_panel_version',
   browserAgentOpen: 'otto_browser_agent_open',
   browserAgentH: 'otto_browser_agent_h',
-  dbDockWidth: 'otto_db_dock_width',
   /** Legacy single threshold — migrated once into `dbAutoVertical`, then removed. */
   dbAutoVerticalCols: 'otto_db_auto_vertical_cols',
   dbAutoVertical: 'otto_db_auto_vertical_by_engine',
@@ -96,10 +94,8 @@ const LS = {
   sidebarCollapsedGroups: 'otto_sidebar_groups_collapsed',
   sidebarFavorites: 'otto_sidebar_favorites',
   sidebarGroupOrder: 'otto_sidebar_group_order',
-  gitSideWidth: 'otto_git_side_width',
   gitGraphListWidth: 'otto_git_graph_list_width',
   gitGraphSideWidth: 'otto_git_graph_side_width',
-  apiSideWidth: 'otto_api_side_width',
   apiBuilderH: 'otto_api_builder_h',
   vaultGraphPanelWidth: 'otto_vault_graph_panel_width',
 };
@@ -199,10 +195,6 @@ function clampRunDetail(px: number): number {
   const max = Math.max(RUN_DETAIL_MIN, Math.round(vh * 0.85));
   return Math.max(RUN_DETAIL_MIN, Math.min(max, Math.round(px)));
 }
-/** Git Changes/History file-or-commit list pane. */
-function clampGitSide(px: number): number {
-  return Math.max(220, Math.min(600, Math.round(px)));
-}
 /** Git graph list pane when a commit detail is open. */
 function clampGitGraphList(px: number): number {
   return Math.max(300, Math.min(720, Math.round(px)));
@@ -218,10 +210,6 @@ function clampGitGraphSide(px: number): number {
 function clampVaultGraphPanel(px: number): number {
   return Math.max(200, Math.min(560, Math.round(px)));
 }
-/** API client Collections/History sidebar. */
-function clampApiSide(px: number): number {
-  return Math.max(220, Math.min(520, Math.round(px)));
-}
 /** API client builder pane height (above the response pane). */
 function clampApiBuilder(px: number): number {
   const vh = typeof window !== 'undefined' ? window.innerHeight : 900;
@@ -234,8 +222,6 @@ class UiStore {
   rightTab: RightPanelTab = $state((lsGet(LS.rightTab) as RightPanelTab) ?? 'git');
   rightWidth = $state(clampRight(Number(lsGet(LS.rightWidth)) || 300));
   railWidth = $state(clampRail(Number(lsGet(LS.railWidth)) || 240));
-  // DB dock: the DB Explorer docked beside the agent panes (side-by-side).
-  dbDockOpen = $state(lsGet(LS.dbDock) === '1');
   /** Agent-mode right panel: which Browser implementation to show (Settings →
    *  Browser). The Browser module (v2) by default; a device that explicitly
    *  chose the classic per-session panel (a stored 'v1') keeps it. */
@@ -246,7 +232,6 @@ class UiStore {
   browserAgentOpen = $state(lsGet(LS.browserAgentOpen) !== '0'); // default open
   /** Browser page: the agent dock's height in px (drag-resizable). */
   browserAgentH = $state(Math.min(900, Math.max(160, Number(lsGet(LS.browserAgentH)) || 280)));
-  dbDockWidth = $state(Math.min(900, Math.max(320, Number(lsGet(LS.dbDockWidth)) || 480)));
   // Workflow run "Context files" sidebar: defaults open, resizable, desktop-only.
   wfCtxOpen = $state(lsGet(LS.wfCtx) !== '0');
   wfCtxWidth = $state(clampWfCtx(Number(lsGet(LS.wfCtxWidth)) || 340));
@@ -259,8 +244,7 @@ class UiStore {
   // bottom strip (the 'seamless', wider view), + that column's width.
   wfDockSide = $state(lsGet(LS.wfDockSide) === '1');
   wfInspSideWidth = $state(clampWfInspSide(Number(lsGet(LS.wfInspSideW)) || 400));
-  // Git page pane widths (Changes/History list; Graph list in detail mode).
-  gitSideWidth = $state(clampGitSide(Number(lsGet(LS.gitSideWidth)) || 300));
+  // Git graph list pane width in detail mode.
   gitGraphListWidth = $state(clampGitGraphList(Number(lsGet(LS.gitGraphListWidth)) || 420));
   // Git graph LEFT refs sidebar width (drag-resizable; default matches the CSS 220px).
   gitGraphSideWidth = $state(clampGitGraphSide(Number(lsGet(LS.gitGraphSideWidth)) || 220));
@@ -268,8 +252,7 @@ class UiStore {
   vaultGraphPanelWidth = $state(
     clampVaultGraphPanel(Number(lsGet(LS.vaultGraphPanelWidth)) || 210),
   );
-  // API client sidebar width + builder pane height (0 = unset → CSS default).
-  apiSideWidth = $state(clampApiSide(Number(lsGet(LS.apiSideWidth)) || 280));
+  // API client builder pane height (0 = unset → CSS default).
   apiBuilderHeight = $state(
     Number(lsGet(LS.apiBuilderH)) > 0 ? clampApiBuilder(Number(lsGet(LS.apiBuilderH))) : 0,
   );
@@ -467,16 +450,6 @@ class UiStore {
     lsSet(LS.sidebarOrder, JSON.stringify(ids));
   }
 
-  /** Move `id` by `delta` (±1) within `ids` (the current full resolved order). */
-  moveSidebar(ids: string[], id: string, delta: number): void {
-    const next = [...ids];
-    const i = next.indexOf(id);
-    const j = i + delta;
-    if (i < 0 || j < 0 || j >= next.length) return;
-    [next[i], next[j]] = [next[j], next[i]];
-    this.setSidebarOrder(next);
-  }
-
   /** Reorder: pull `fromId` out and reinsert it at `toId`'s position. */
   reorderSidebar(ids: string[], fromId: string, toId: string): void {
     if (fromId === toId) return;
@@ -495,10 +468,6 @@ class UiStore {
       ? this.sidebarHidden.filter((x) => x !== id)
       : [...this.sidebarHidden, id];
     lsSet(LS.sidebarHidden, JSON.stringify(this.sidebarHidden));
-  }
-
-  isSidebarFavorite(id: string): boolean {
-    return this.sidebarFavorites.includes(id);
   }
 
   /** Replace the full favorites list (the saved ids, incl. ones not rendered). */
@@ -648,10 +617,6 @@ class UiStore {
     this.wfCtxTab = tab;
     lsSet(LS.wfCtxTab, tab);
   }
-  setWfSideWidth(px: number): void {
-    this.wfSideWidth = clampWfSide(px);
-    lsSet(LS.wfSideWidth, String(this.wfSideWidth));
-  }
   setWfCtxWidth(px: number): void {
     this.wfCtxWidth = clampWfCtx(px);
     lsSet(LS.wfCtxWidth, String(this.wfCtxWidth));
@@ -677,10 +642,6 @@ class UiStore {
     if (persist) lsSet(LS.railWidth, String(this.railWidth));
   }
 
-  setGitSideWidth(px: number): void {
-    this.gitSideWidth = clampGitSide(px);
-    lsSet(LS.gitSideWidth, String(this.gitSideWidth));
-  }
   /** `persist=false` while dragging (one localStorage write on release). */
   setGitGraphListWidth(px: number, persist = true): void {
     this.gitGraphListWidth = clampGitGraphList(px);
@@ -696,11 +657,6 @@ class UiStore {
     this.vaultGraphPanelWidth = clampVaultGraphPanel(px);
     if (persist) lsSet(LS.vaultGraphPanelWidth, String(this.vaultGraphPanelWidth));
   }
-  /** `persist=false` while dragging (one localStorage write on release). */
-  setApiSideWidth(px: number, persist = true): void {
-    this.apiSideWidth = clampApiSide(px);
-    if (persist) lsSet(LS.apiSideWidth, String(this.apiSideWidth));
-  }
   setApiBuilderHeight(px: number, persist = true): void {
     this.apiBuilderHeight = clampApiBuilder(px);
     if (persist) lsSet(LS.apiBuilderH, String(this.apiBuilderHeight));
@@ -709,10 +665,6 @@ class UiStore {
   resetApiBuilderHeight(): void {
     this.apiBuilderHeight = 0;
     lsSet(LS.apiBuilderH, '0');
-  }
-  toggleDbDock(): void {
-    this.dbDockOpen = !this.dbDockOpen;
-    lsSet(LS.dbDock, this.dbDockOpen ? '1' : '0');
   }
   setBrowserPanelVersion(v: BrowserPanelVersion): void {
     this.browserPanelVersion = v;
@@ -725,10 +677,6 @@ class UiStore {
   setBrowserAgentH(px: number): void {
     this.browserAgentH = Math.min(900, Math.max(160, Math.round(px)));
     lsSet(LS.browserAgentH, String(this.browserAgentH));
-  }
-  setDbDockWidth(px: number): void {
-    this.dbDockWidth = Math.min(900, Math.max(320, Math.round(px)));
-    lsSet(LS.dbDockWidth, String(this.dbDockWidth));
   }
 
   setTheme(theme: ThemeName): void {

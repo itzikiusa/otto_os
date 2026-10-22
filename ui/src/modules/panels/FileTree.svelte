@@ -20,7 +20,7 @@
   import { emptyHistory, folderCrumbs, historyTarget, parentFolder, resolveJump, settleFolder } from '../../lib/components/folderNavigation';
   import { lsGet, lsSet } from '../../lib/storage';
   import { ListWindow } from '../git/list-window.svelte';
-  import { marked } from 'marked';
+  import { renderMarkdownGfm } from '../../lib/md';
   import type { FsBrowse, FsEntry, FsRead } from '../../lib/api/types';
 
   interface Props {
@@ -329,13 +329,8 @@
     const inner = isMarkdown ? renderMarkdown(viewerFile.content) : viewerFile.content;
     return `<!doctype html><html><head><meta charset="utf-8"><style>${PREVIEW_CSS}</style></head><body>${inner}</body></html>`;
   });
-  function renderMarkdown(src: string): string {
-    try {
-      return marked.parse(src, { async: false, gfm: true, breaks: true }) as string;
-    } catch {
-      return `<pre>${src.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c] ?? c))}</pre>`;
-    }
-  }
+  // Through lib/md (sanitized, never throws) — not a direct `marked` call.
+  const renderMarkdown = (src: string): string => renderMarkdownGfm(src, { breaks: true });
   // The srcdoc is an isolated, script-less document: it can't see the app's
   // tokens, so it gets a palette per resolved scheme (it used to be dark-only
   // — light grey text on a hard-coded near-black box in the light theme).

@@ -1500,8 +1500,8 @@
         {/if}
       </div>
     {:else if r.kind === 'pending'}
-      <div class="drow inf dfile-pending" role="status" aria-label="Loading this file’s diff" data-rk={r.key} use:measure={[r.key, i]}>
-        <Skeleton rows={1} height={14} announce={false} grace={false} />
+      <div class="drow inf dfile-pending" data-rk={r.key} use:measure={[r.key, i]}>
+        <Skeleton rows={1} height={14} label="this file’s diff" grace={false} />
       </div>
     {:else if r.kind === 'error'}
       <div class="drow inf dfile-error" role="alert" data-rk={r.key} use:measure={[r.key, i]}>

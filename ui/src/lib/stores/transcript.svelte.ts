@@ -7,6 +7,7 @@
 // and the per-session Terminal · Chat view (winKey-namespaced, like the rest of
 // the pane layout state).
 import { api } from '../api/client';
+import { loadErrorText } from '../loadError';
 import { winKey } from '../win';
 import { TranscriptLifecycle } from './transcriptLifecycle';
 import { parseSessionView, type SessionViewMode } from '../paneHeader';
@@ -282,7 +283,7 @@ export class Conversation {
       this.tailTick++;
       return true;
     } catch (e) {
-      if (!ac.signal.aborted && this.isActive()) this.error = e instanceof Error ? e.message : String(e);
+      if (!ac.signal.aborted && this.isActive()) this.error = loadErrorText(e);
       return false;
     } finally {
       signal?.removeEventListener('abort', abort);
@@ -307,7 +308,7 @@ export class Conversation {
       if (page.turns.length) this.headBounds.set(page.turns[0].id, page.cursor);
       this.holdCap = true;
     } catch (e) {
-      if (epoch === this.readEpoch && this.isActive()) this.error = e instanceof Error ? e.message : String(e);
+      if (epoch === this.readEpoch && this.isActive()) this.error = loadErrorText(e);
     } finally {
       if (epoch === this.readEpoch) this.loadingEarlier = false;
     }

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { loadSource } from './sourceHarness.ts';
 
-const { loadErrorText } = loadSource(new URL('../src/lib/loadError.ts', import.meta.url), {}, { TypeError, Error, String });
+const { loadErrorText, providerErrorText } = loadSource(new URL('../src/lib/loadError.ts', import.meta.url), {}, { TypeError, Error, String });
 
 class FakeApiError extends Error {
   status: number;
@@ -35,4 +35,12 @@ test('plain errors and junk never render empty', () => {
   assert.equal(loadErrorText(undefined), 'Something went wrong.');
   assert.equal(loadErrorText(null), 'Something went wrong.');
   assert.equal(loadErrorText('nope'), 'nope');
+});
+
+test('providerErrorText keeps a cloud CLI refusal on 403, otherwise reads as loadErrorText', () => {
+  const rbac = 'cluster RBAC: pods is forbidden: User "u" cannot list resource "pods" at the cluster scope';
+  assert.equal(providerErrorText(new FakeApiError(403, rbac)), rbac);
+  assert.match(providerErrorText(new FakeApiError(401, 'unauthorized')), /session expired/i);
+  assert.equal(providerErrorText(new TypeError('Load failed')), loadErrorText(new TypeError('Load failed')));
+  assert.doesNotMatch(providerErrorText(new TypeError('Load failed')), /Load failed/);
 });
