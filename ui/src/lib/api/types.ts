@@ -2930,6 +2930,53 @@ export interface UpdateConfluencePageReq {
   base_version?: number | null;
 }
 
+/**
+ * POST /issue/{account_id}/issues. Jira checks it against createmeta first
+ * (one 400 lists every problem and the valid values).
+ */
+export interface CreateIssueReq {
+  /** Jira project key; Linear team key (GET /issue/projects). */
+  project_key: string;
+  /** A name or id from GET /issue/{account_id}/{project_key}/issue-types. */
+  issue_type: string;
+  /** Single line, at most 255 characters. */
+  summary: string;
+  /** Markdown — converted to validated ADF for Jira (tables, lists, code, callouts…). */
+  description?: string | null;
+  /** Jira only; no spaces. */
+  labels?: string[];
+  /** Jira only: a priority name or id. */
+  priority?: string | null;
+  /** Jira only: the parent issue key. */
+  parent?: string | null;
+  /** Jira only: an Epic's key (becomes the parent). */
+  epic?: string | null;
+  /** Jira only: other fields by id, in Jira's native value shape. */
+  fields?: Record<string, unknown>;
+}
+
+/** One read-back comparison of a created issue. */
+export interface VerificationCheck {
+  name: string;
+  ok: boolean;
+  detail: string;
+}
+
+/** `ok` is false when any check failed — the issue still exists. */
+export interface IssueVerification {
+  ok: boolean;
+  checks: VerificationCheck[];
+}
+
+/** Response of POST /issue/{account_id}/issues. */
+export interface CreateIssueResp {
+  key: string;
+  /** Browse URL of the new issue. */
+  url: string;
+  /** Jira only: the issue read back and compared with the request. */
+  verification?: IssueVerification;
+}
+
 /** POST /issue/confluence/pages/{page_id}/comments?account_id= */
 export interface AddConfluenceCommentReq {
   /** Comment body in Markdown. Supply this or body_html. */

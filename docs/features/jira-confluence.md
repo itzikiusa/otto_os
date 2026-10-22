@@ -41,8 +41,9 @@ storage-format XHTML are both converted by Otto's built-in converters, including
 tables, code blocks, info/note/warning panels, links, lists, and images.
 
 The integration is also a **two-way bridge**: Otto can **write comments** back to a
-Jira issue or a Confluence page (and the product workflow can additionally create
-issues, transition them, assign them, and update descriptions/pages — see §7–§8).
+Jira issue or a Confluence page and **create issues** (§5, also as an MCP tool);
+the product workflow can additionally create issues from stories, transition
+them, assign them, and update descriptions/pages — see §7–§8.
 
 ---
 
@@ -242,8 +243,8 @@ bytes from Jira (`/rest/api/3/attachment/content/{id}`) and forwards the upstrea
 The integration can **write comments**:
 
 - **Jira:** `POST /api/v1/issue/{account_id}/{key}/comment` with `{"body": "…"}`.
-  Your text is converted to **ADF** before posting (plain text → paragraphs;
-  `- ` lines → bullet lists). Returns a `CommentRef` (`id` + optional `url`).
+  Your **Markdown** is converted to **ADF** before posting (see *Markdown → ADF*
+  below). Returns a `CommentRef` (`id` + optional `url`).
   Calls `POST /rest/api/3/issue/{key}/comment`.
 - **Confluence** (engine-level): footer comments are posted by converting Markdown
   to storage XHTML and `POST`ing a `comment`-type content to
@@ -265,10 +266,66 @@ issue-type discovery (used by the product workflow):
 | List assignable users | `GET /issue/{account_id}/{key}/assignable` | `GET /rest/api/3/user/assignable/search?issueKey=…` |
 | Assign / unassign | `PUT /issue/{account_id}/{key}/assignee` `{"account_id":"…"}` (`"-1"` unassigns) | `PUT /rest/api/3/issue/{key}/assignee` `{"accountId":…}` |
 | Project issue types | `GET /issue/{account_id}/{project_key}/issue-types` | `GET /rest/api/3/project/{key}` (reads non-subtask `issueTypes[].name`) |
+| Create issue | `POST /issue/{account_id}/issues` (see *Creating an issue*) | `GET …/issue/createmeta/{project}/issuetypes[/{id}]`, `POST /rest/api/3/issue`, `GET /rest/api/3/issue/{key}?fields=…` |
 
-Issue creation and description updates exist at the engine level
-(`POST /rest/api/3/issue`, `PUT /rest/api/3/issue/{key}`) and are driven by the
-product workflow rather than this settings surface.
+### Creating an issue
+
+`POST /issue/{account_id}/issues` (and the MCP tool `otto.create_issue`, agent
+sessions: `otto_create_issue`) takes `project_key`, `issue_type` (name or id,
+case-insensitive), `summary` and an optional Markdown `description`; on Jira
+also `labels`, `priority`, `parent` or `epic` (an issue key — in Jira Cloud the
+epic is the `parent`) and `fields` (any other field by id, in Jira's native
+value shape — use it for a required custom field). Discover the values with
+`GET /issue/projects` and `GET /issue/{account_id}/{project_key}/issue-types`
+(MCP: `otto.list_issue_projects`, `otto.list_issue_types`).
+
+**Before creating**, Otto reads Jira's create metadata
+(`/rest/api/3/issue/createmeta/{project}/issuetypes[/{id}]`) and refuses with
+one `400` that lists every problem: an unknown or inaccessible project, an issue
+type not valid for the project (with the valid types), a required field without
+a default that was not supplied (by name and id), a summary that is empty,
+multi-line or over 255 characters, labels with spaces, a priority that is not
+an allowed value (with the allowed ones), a parent that does not exist, an
+"epic" that is not an Epic, a `fields` key that is not on the create screen, or
+labels / priority / parent the create screen does not have.
+
+**After creating**, Otto reads the issue back and returns
+`verification: {ok, checks: [{name, ok, detail}]}` next to `{key, url}`. It
+compares the key, project, type, summary, labels, priority and parent with the
+request, and the stored description with what was sent — the block outline
+(heading levels, list sizes, code-block languages, panels, and each table's
+rows × columns and header row) and the text. A failed check is reported with
+both sides; the issue is **not** deleted. Linear accounts take only project
+(team key), type, summary and description, and return no `verification`.
+
+### Markdown → ADF
+
+Jira Cloud stores rich text as Atlassian Document Format. Issue descriptions,
+comments and description edits go through one converter
+(`otto_issues::markdown_to_adf`), and the result is checked against the ADF
+structural rules before it is sent — a body that would break them is refused
+with an error, never posted:
+
+| Markdown | ADF |
+|---|---|
+| `#` … `######`, setext `===` / `---` | `heading` 1–6 |
+| paragraphs; a newline, two trailing spaces, a trailing `\` or `<br>` | `paragraph`, `hardBreak` |
+| `**b**` `__b__`, `*i*` `_i_`, `~~s~~`, `` `c` ``, `[t](url)`, `<url>`, bare URLs | `strong`, `em`, `strike`, `code` (combined only with a link), `link` |
+| `-` / `*` / `+`, `1.` / `1)`, nested by indentation | `bulletList`, `orderedList` (start number kept), nested lists |
+| `- [ ]` / `- [x]` | `taskList` / `taskItem` at the top level; `☐` / `☑` prefixes inside other blocks |
+| `>` | `blockquote` (headings inside become bold lines) |
+| `> [!NOTE]` / `[!TIP]` / `[!IMPORTANT]` / `[!WARNING]` / `[!CAUTION]` | `panel` info / success / note / warning / error |
+| ```` ```lang ```` / `~~~` | `codeBlock` with `language` |
+| `---`, `***` | `rule` |
+| GFM tables | `table`: first row `tableHeader` cells, the rest `tableCell`; inline marks and links inside cells; empty cells kept; rows padded to the widest row; alignment ignored; `\|` is a literal pipe |
+| images `![alt](url)` | a link (no attachment upload) |
+| emoji | passed through as text (`:shortcodes:` and `@mentions` stay literal) |
+
+Where ADF forbids a construct (a table inside a list item, a code block inside
+a panel) it is degraded to the closest valid form instead of failing.
+
+Description updates exist at the engine level (`PUT /rest/api/3/issue/{key}`)
+and are driven by the product workflow rather than this settings surface.
 
 ---
 
@@ -322,6 +379,7 @@ section **## Issue trackers (Jira / Confluence)**.
 | `GET /issue/{account_id}/{key}/attachment/{attachment_id}` | member | — | attachment bytes (forwarded `Content-Type`) |
 | `POST /issue/{account_id}/{key}/comment` | member | `{"body":"…"}` | `CommentRef` |
 | `GET /issue/{account_id}/{project_key}/issue-types` | member | — | `string[]` (non-subtask type names) |
+| `POST /issue/{account_id}/issues` | member (owner) | `CreateIssueReq` `{project_key, issue_type, summary, description?, labels?, priority?, parent?, epic?, fields?}` | `CreateIssueResp {key, url, verification?}` |
 
 **Request bodies (`otto-core`):**
 
@@ -381,6 +439,10 @@ is 30s.
   (Markdown → storage XHTML).
 - List/apply Jira **status transitions**, list **assignable users**, and
   **assign/unassign** an issue; discover a project's issue types.
+- **Create an issue** (project, type, summary, Markdown description, labels,
+  priority, parent / epic, other fields) with pre-checks against Jira's create
+  metadata and a read-back verification — from the API or, approval-gated,
+  from an agent via `otto.create_issue`.
 
 **You cannot:**
 
@@ -391,7 +453,12 @@ is 30s.
 - Connect a **separate Confluence-only** credential — Confluence rides on the same
   site's account.
 - Edit arbitrary Jira fields from the import surface (only comment, transition,
-  assign here; create/update-description live in the product workflow).
+  assign and a basic create here; update-description lives in the product
+  workflow).
+- Set an assignee or upload attachments when creating an issue (other fields go
+  through `fields` in Jira's native value shape).
+- Use Jira Server / Data Center (REST v2, wiki markup): Otto speaks Jira Cloud
+  REST v3 and ADF only.
 - Have Otto **discover your site** for you — you must supply the base URL.
 - Rely on **token-expiry enforcement** — the expiry field is a reminder only.
 - See another user's accounts (owner-scoped; root excepted).

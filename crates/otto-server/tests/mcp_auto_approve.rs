@@ -1762,3 +1762,107 @@ async fn an_agent_improvement_edit_decision_always_needs_a_person() {
         "approved"
     );
 }
+
+/// A minimal Jira Cloud stand-in for `otto.create_issue`: createmeta for
+/// project PRJ (one type, Task), the create call, and a read-back of PRJ-7
+/// that echoes what was posted.
+async fn fake_jira_site() -> String {
+    use axum::routing::{get, post};
+    let posted: Arc<std::sync::Mutex<Value>> = Arc::default();
+    let sink = Arc::clone(&posted);
+    let app = axum::Router::new()
+        .route(
+            "/rest/api/3/issue/createmeta/PRJ/issuetypes",
+            get(|| async {
+                axum::Json(json!({"issueTypes": [{"id": "10001", "name": "Task"}], "total": 1}))
+            }),
+        )
+        .route(
+            "/rest/api/3/issue/createmeta/PRJ/issuetypes/10001",
+            get(|| async {
+                let f = |id: &str, required: bool| {
+                    json!({"fieldId": id, "name": id, "required": required, "hasDefaultValue": false})
+                };
+                axum::Json(json!({"fields": [f("summary", true), f("issuetype", true),
+                    f("project", true), f("description", false)], "total": 4}))
+            }),
+        )
+        .route(
+            "/rest/api/3/issue",
+            post(move |axum::Json(body): axum::Json<Value>| {
+                let sink = Arc::clone(&sink);
+                async move {
+                    *sink.lock().unwrap() = body;
+                    axum::Json(json!({"id": "10050", "key": "PRJ-7"}))
+                }
+            }),
+        )
+        .route(
+            "/rest/api/3/issue/PRJ-7",
+            get(move || {
+                let sent = posted.lock().unwrap()["fields"].clone();
+                async move {
+                    axum::Json(json!({"key": "PRJ-7", "fields": {
+                        "project": sent["project"], "issuetype": {"id": sent["issuetype"]["id"], "name": "Task"},
+                        "summary": sent["summary"], "description": sent["description"]}}))
+                }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let site = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    site
+}
+
+/// `otto_create_issue` from an agent session, auto-approved: the governed
+/// envelope's `content` carries the created key AND the post-create
+/// verification, so the agent sees whether Jira stored what it asked for.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_auto_approved_create_issue_returns_the_jira_verification() {
+    let d = boot().await;
+    let site = fake_jira_site().await;
+    let (st, acct) = d
+        .send(
+            "POST",
+            &d.human.clone(),
+            "/issue/accounts",
+            Some(
+                json!({"provider": "jira", "label": "work", "email": "a@example.com",
+                        "base_url": site, "token": "jira-token"}),
+            ),
+        )
+        .await;
+    assert_eq!(st, 200, "{acct}");
+    enable_tools(&d, &["create_issue"]).await;
+    // Same tier as comment_issue: gated until a person approves or a rule covers it.
+    let args = json!({"project_key": "PRJ", "issue_type": "Task", "summary": "From an agent",
+                      "description": "## Impact\n\n| Env | Status |\n|---|---|\n| prod | down |"});
+    let env = d.agent_invoke("create_issue", args.clone()).await;
+    assert_eq!(env["decision"], "pending_approval", "{env}");
+    let (st, rule) = d
+        .rule(json!({"scope": "global", "target_kind": "tool", "target": "create_issue"}))
+        .await;
+    assert_eq!(st, 201, "{rule}");
+
+    let env = d.agent_invoke("create_issue", args).await;
+    assert_eq!(env["executed"], true, "{env}");
+    let out = &env["content"];
+    assert_eq!(out["key"], "PRJ-7", "{env}");
+    assert_eq!(out["url"], format!("{site}/browse/PRJ-7"));
+    assert_eq!(out["verification"]["ok"], true, "{env}");
+    let structure = out["verification"]["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "description_structure")
+        .expect("the description structure was verified");
+    assert!(
+        structure["detail"]
+            .as_str()
+            .unwrap()
+            .contains("table[2x2,header]"),
+        "{structure}"
+    );
+}

@@ -800,6 +800,22 @@ pub fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
                 seg(&key)
             ))
         }
+        "list_issue_projects" => {
+            let acc = arg_str(args, "account_id")?;
+            SelfCall::get(format!(
+                "/api/v1/issue/projects?account_id={}&meta=1",
+                seg(&acc)
+            ))
+        }
+        "list_issue_types" => {
+            let acc = arg_str(args, "account_id")?;
+            let project = arg_str(args, "project_key")?;
+            SelfCall::get(format!(
+                "/api/v1/issue/{}/{}/issue-types",
+                seg(&acc),
+                seg(&project)
+            ))
+        }
         "get_issue" => {
             let acc = arg_str(args, "account_id")?;
             let key = arg_str(args, "key")?;
@@ -946,6 +962,38 @@ pub fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
                 format!("/api/v1/issue/{}/{}/comment", seg(&acc), seg(&key)),
                 body,
             )
+        }
+        "create_issue" => {
+            let acc = arg_str(args, "account_id")?;
+            let mut body = json!({
+                "project_key": arg_str(args, "project_key")?,
+                "issue_type": arg_str(args, "issue_type")?,
+                "summary": arg_str(args, "summary")?,
+            });
+            for k in ["description", "priority", "parent", "epic"] {
+                if let Some(v) = args
+                    .get(k)
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.trim().is_empty())
+                {
+                    body[k] = json!(v);
+                }
+            }
+            if let Some(labels) = args
+                .get("labels")
+                .and_then(Value::as_array)
+                .filter(|a| !a.is_empty())
+            {
+                body["labels"] = json!(labels);
+            }
+            if let Some(fields) = args
+                .get("fields")
+                .and_then(Value::as_object)
+                .filter(|o| !o.is_empty())
+            {
+                body["fields"] = json!(fields);
+            }
+            SelfCall::post(format!("/api/v1/issue/{}/issues", seg(&acc)), body)
         }
         "transition_issue" => {
             let acc = arg_str(args, "account_id")?;

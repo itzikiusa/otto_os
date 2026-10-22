@@ -30,6 +30,8 @@ pub const DEFAULT_ENABLED: &[&str] = &[
     "list_goal_loops",
     "list_issue_accounts",
     "list_issue_transitions",
+    "list_issue_projects",
+    "list_issue_types",
     "get_scheduled_task",
     // ---- Feature reads (metadata/list/get) — safe to expose by default once the
     // outward server itself is turned on. Content-heavy reads (consume/search)
@@ -147,6 +149,7 @@ pub const DANGEROUS: &[&str] = &[
     "start_pr_review",
     // Merging is outward-facing and irreversible.
     "merge_pr",
+    "create_issue",
     "comment_issue",
     "transition_issue",
     // API client writers send real HTTP requests and/or persist saved requests.
@@ -622,8 +625,14 @@ pub fn otto_tool_specs() -> Vec<Value> {
             "inputSchema":{"type":"object","required":["page_id"],"properties":{
                 "account_id":{"type":"string","description":ISSUE_ACCOUNT_REF_DESC},"page_id":{"type":"string","description":PAGE_REF_DESC},"body_md":{"type":"string"},
                 "body_html":{"type":"string"}}}}),
+        json!({"name":"otto.create_issue","mutating":true,"category":"Issues",
+            "description":"Create an issue. `project_key` from otto.list_issue_projects (Linear: team key); `issue_type` a name or id from otto.list_issue_types. `description` is Markdown — headings, lists, task lists, tables, code, `> [!NOTE]` callouts become Jira ADF. Jira-only: `labels` (no spaces), `priority`, `parent` or `epic` (issue key), `fields` (other fields by id, Jira-native values — e.g. a required custom field). Checked against Jira's create metadata first (one error lists every problem and the valid values); returns `{key, url, verification:{ok, checks:[{name, ok, detail}]}}` comparing the stored issue with the request. DANGEROUS: outward-facing — approval-gated.",
+            "inputSchema":{"type":"object","required":["project_key","issue_type","summary"],"properties":{
+                "account_id":{"type":"string","description":ISSUE_ACCOUNT_REF_DESC},"project_key":{"type":"string"},"issue_type":{"type":"string"},
+                "summary":{"type":"string"},"description":{"type":"string"},"labels":{"type":"array","items":{"type":"string"}},
+                "priority":{"type":"string"},"parent":{"type":"string"},"epic":{"type":"string"},"fields":{"type":"object"}}}}),
         json!({"name":"otto.comment_issue","mutating":true,"category":"Issues",
-            "description":"Add a comment to an issue. DANGEROUS: outward-facing — approval-gated.",
+            "description":"Add a comment to an issue. `body` is Markdown (Jira: converted to ADF — headings, lists, tables, code). DANGEROUS: outward-facing — approval-gated.",
             "inputSchema":{"type":"object","required":["key","body"],"properties":{
                 "account_id":{"type":"string","description":ISSUE_ACCOUNT_REF_DESC},"key":{"type":"string"},"body":{"type":"string"}}}}),
         json!({"name":"otto.transition_issue","mutating":true,"category":"Issues",
@@ -637,6 +646,13 @@ pub fn otto_tool_specs() -> Vec<Value> {
             "description":"List an issue's available status transitions `[{id, name, to_status}]` — the ids (or names) otto.transition_issue accepts. Read-only.",
             "inputSchema":{"type":"object","required":["key"],"properties":{
                 "account_id":{"type":"string","description":ISSUE_ACCOUNT_REF_DESC},"key":{"type":"string"}}}}),
+        json!({"name":"otto.list_issue_projects","mutating":false,"category":"Issues",
+            "description":"List the projects (Linear: teams) an issue account can see — `{items:[{key, name}], truncated}`; `key` is the `project_key` otto.create_issue takes. Read-only.",
+            "inputSchema":{"type":"object","properties":{"account_id":{"type":"string","description":ISSUE_ACCOUNT_REF_DESC}}}}),
+        json!({"name":"otto.list_issue_types","mutating":false,"category":"Issues",
+            "description":"List a project's issue type names (non-subtask; Linear: `Issue` plus the team's labels) — the `issue_type` values otto.create_issue accepts. Read-only.",
+            "inputSchema":{"type":"object","required":["project_key"],"properties":{
+                "account_id":{"type":"string","description":ISSUE_ACCOUNT_REF_DESC},"project_key":{"type":"string"}}}}),
         // ================= Swarm =================
         json!({"name":"otto.list_swarms","mutating":false,"category":"Swarm",
             "description":"List agent swarms across EVERY workspace you can read — `{items, …}` with id, name, status, workspace_id + workspace_name. Pass a swarm's id OR name as `swarm_id`. Read-only.",
@@ -1243,6 +1259,12 @@ pub fn dangerous_detail(tool: &str, args: &Value) -> String {
             "Start a multi-agent review of PR #{} on repo '{}'",
             args.get("pr_number").and_then(i64_lenient).unwrap_or(0),
             args.get("repo_id").and_then(Value::as_str).unwrap_or("?")
+        ),
+        "create_issue" => format!(
+            "Create a {} in project '{}': \"{}\"",
+            args.get("issue_type").and_then(Value::as_str).unwrap_or("?"),
+            args.get("project_key").and_then(Value::as_str).unwrap_or("?"),
+            args.get("summary").and_then(Value::as_str).unwrap_or("?")
         ),
         "comment_issue" => format!(
             "Comment on issue '{}'",

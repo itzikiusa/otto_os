@@ -11,7 +11,10 @@ use base64::Engine;
 use otto_core::domain::{IssueDetail, IssueProject, IssueSummary, MyWorkIssue};
 use otto_core::{Error, Result};
 
-use crate::adf::{adf_to_markdown, text_to_adf};
+use crate::adf::adf_to_markdown;
+use crate::md_adf::markdown_to_adf;
+
+mod create;
 
 /// How long to wait for the TCP/TLS connection to a Jira endpoint to establish.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -919,7 +922,8 @@ impl JiraClient {
         })
     }
 
-    /// Post a comment on an issue. The `body_text` is converted to ADF before sending.
+    /// Post a comment on an issue. The Markdown `body_text` is converted to
+    /// validated ADF ([`markdown_to_adf`]) before sending.
     ///
     /// Returns a [`CommentRef`] with the new comment's `id` and optional `self` URL.
     pub async fn add_comment(&self, key: &str, body_text: &str) -> Result<CommentRef> {
@@ -928,7 +932,7 @@ impl JiraClient {
             self.base_url,
             path_seg(key)
         );
-        let adf_body = text_to_adf(body_text);
+        let adf_body = markdown_to_adf(body_text)?;
         let payload = serde_json::json!({ "body": adf_body });
 
         let resp = self
@@ -1422,13 +1426,13 @@ impl JiraClient {
         Ok((mime, bytes.to_vec()))
     }
 
-    /// Update the description of an issue. The `body_md` text is converted to ADF.
+    /// Update the description of an issue. The `body_md` Markdown is converted to ADF.
     pub async fn update_description(&self, key: &str, body_md: &str) -> Result<()> {
         let url = format!("{}/rest/api/3/issue/{}", self.base_url, path_seg(key));
         // The Markdown the editor saved came from `adf_to_markdown`, which drops
         // screenshots, mentions, smart links, dates, status lozenges and
-        // emoji; writing it back (via the plain-text `text_to_adf`) silently
-        // DELETED them from the issue. Refuse instead of destroying content.
+        // emoji; writing it back (via `markdown_to_adf`, which has no syntax
+        // for them) silently DELETED them from the issue. Refuse instead.
         let current = self.description_adf(key).await?;
         let lossy = crate::adf::adf_lossy_nodes(&current);
         if !lossy.is_empty() {
@@ -1438,7 +1442,7 @@ impl JiraClient {
                 lossy.join(", ")
             )));
         }
-        let adf_body = text_to_adf(body_md);
+        let adf_body = markdown_to_adf(body_md)?;
         let payload = serde_json::json!({
             "fields": {
                 "description": adf_body
@@ -1575,7 +1579,7 @@ impl JiraClient {
         description_md: &str,
     ) -> Result<CreatedIssue> {
         let url = format!("{}/rest/api/3/issue", self.base_url);
-        let adf = text_to_adf(description_md);
+        let adf = markdown_to_adf(description_md)?;
         let payload = build_create_issue_body(project_key, issue_type, summary, adf);
 
         let resp = self

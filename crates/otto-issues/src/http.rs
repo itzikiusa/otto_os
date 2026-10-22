@@ -22,6 +22,7 @@ use otto_state::{IssuesRepo, NewIssueAccount};
 
 use crate::confluence::ConfluenceClient;
 use crate::confluence::{markdown_to_storage, ConfluencePageSummary, PageComment};
+use crate::issue_create::{local_problems, problems_error, CreateIssueReq, CreateIssueResp};
 use crate::jira::{CommentRef, DevStatus, EditableField, IssueFull, JiraTransition, JiraUser};
 use crate::tracker::{RawQuery, Tracker};
 
@@ -132,6 +133,8 @@ pub fn router<S: IssuesCtx>() -> Router<S> {
             get(list_page_comments_cf::<S>).post(add_page_comment_cf::<S>),
         )
         .route("/issue/{account_id}/{key}", get(get_issue::<S>))
+        // Static `issues` outranks `{key}` (no tracker key is a bare word).
+        .route("/issue/{account_id}/issues", post(create_issue::<S>))
         // Extended issue view + write operations
         .route("/issue/{account_id}/{key}/full", get(get_issue_full::<S>))
         .route(
@@ -856,6 +859,32 @@ async fn list_issue_types_handler<S: IssuesCtx>(
     let client = Tracker::for_account(&account, &token);
     let types = client.list_issue_types(&project_key).await?;
     Ok(Json(types))
+}
+
+/// `POST /issue/{account_id}/issues`
+///
+/// Body: [`CreateIssueReq`]. Jira: pre-checked against createmeta (one `400`
+/// listing every problem and the valid values), created with the Markdown
+/// description as validated ADF, then read back — the response's
+/// `verification` reports each comparison. Linear: the four core fields only.
+async fn create_issue<S: IssuesCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(account_id): Path<Id>,
+    Json(req): Json<CreateIssueReq>,
+) -> ApiResult<Json<CreateIssueResp>> {
+    let problems = local_problems(&req);
+    if !problems.is_empty() {
+        return Err(
+            problems_error(req.project_key.trim(), req.issue_type.trim(), &problems).into(),
+        );
+    }
+    let account = load_authorized_account(&s, &account_id, &user).await?;
+    let token = otto_core::secrets::get_async(s.secrets(), &account.token_ref)
+        .await?
+        .ok_or_else(|| Error::Invalid(format!("token missing for issue account {}", account.id)))?;
+    let client = Tracker::for_account(&account, &token);
+    Ok(Json(client.create_issue_checked(&req).await?))
 }
 
 /// `POST /issue/{account_id}/{key}/comment`

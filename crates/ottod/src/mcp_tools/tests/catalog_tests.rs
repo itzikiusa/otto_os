@@ -195,3 +195,49 @@ fn narrow_sources_drop_the_infra_consoles_from_the_listing() {
         .iter()
         .any(|n| n.starts_with("aws_")));
 }
+
+/// Control-plane parity for the issue-create family: enabling
+/// `otto.create_issue` (approval-gated) and its discovery reads under MCP →
+/// Otto server makes them visible to a session under the stdio names, with
+/// the outward catalog's schema, and their calls route to the governed path.
+#[test]
+fn issue_create_tools_reach_sessions_through_the_governed_bridge() {
+    let enabled: Vec<String> = [
+        "otto.create_issue",
+        "otto.list_issue_projects",
+        "otto.list_issue_types",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    let tools = governed_tools_for(&enabled);
+    let mut names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        vec![
+            "otto_create_issue",
+            "otto_list_issue_projects",
+            "otto_list_issue_types"
+        ]
+    );
+    let create = tools
+        .iter()
+        .find(|t| t["name"] == "otto_create_issue")
+        .unwrap();
+    assert_eq!(
+        create["inputSchema"]["required"],
+        json!(["project_key", "issue_type", "summary"])
+    );
+    for stdio in [
+        "otto_create_issue",
+        "otto_list_issue_projects",
+        "otto_list_issue_types",
+    ] {
+        assert_eq!(
+            governed_tool_for_stdio_name(stdio).as_deref(),
+            Some(stdio.replacen("otto_", "otto.", 1).as_str()),
+            "{stdio} must proxy to its governed twin"
+        );
+    }
+}

@@ -5,8 +5,9 @@
 //! Linear key never reaches Confluence).
 //!
 //! Requests that pass every gate would go upstream, so the Jira accounts
-//! here point at a closed loopback port and the Linear-gated cases are only
-//! ones the router refuses locally — nothing in this file touches the network.
+//! here point at a closed loopback port (or, for the create-issue round trip,
+//! a loopback stand-in Jira) and the Linear-gated cases are only ones the
+//! router refuses locally — nothing in this file leaves the machine.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -228,6 +229,11 @@ fn account_routes(id: &str) -> Vec<(&'static str, String, Option<Value>)> {
         ),
         ("GET", format!("/issue/{id}/K-1/attachment/9"), None),
         ("GET", format!("/issue/{id}/PRJ/issue-types"), None),
+        (
+            "POST",
+            format!("/issue/{id}/issues"),
+            Some(json!({"project_key": "PRJ", "issue_type": "Task", "summary": "s"})),
+        ),
         (
             "POST",
             format!("/issue/{id}/K-1/comment"),
@@ -607,6 +613,18 @@ async fn write_bodies_are_validated_before_the_account_is_used() {
             "body",
         ),
         (
+            "POST",
+            format!("/issue/{id}/issues"),
+            json!({"project_key": "PRJ", "issue_type": "Task", "summary": " "}),
+            "summary",
+        ),
+        (
+            "POST",
+            format!("/issue/{id}/issues"),
+            json!({"project_key": "", "issue_type": "Task", "summary": "s"}),
+            "project_key",
+        ),
+        (
             "PUT",
             format!("/issue/{id}/K-1/fields"),
             json!({"fields": [1]}),
@@ -643,4 +661,385 @@ async fn write_bodies_are_validated_before_the_account_is_used() {
     // Listing endpoints need the account named.
     let r = a.call(&a.alice, "GET", "/issue/search?q=x", None).await;
     assert_eq!(r.status, 400);
+}
+
+/// What the stand-in Jira saw and how it should misbehave.
+#[derive(Default)]
+struct FakeJira {
+    posted: Option<Value>,
+    /// Store something other than what was sent (verification must notice).
+    tamper: bool,
+}
+
+/// A stand-in Jira Cloud site: createmeta for project PRJ (Task / Bug /
+/// Epic; Bug needs a `Team` custom field), parent lookups (PRJ-1 is an
+/// Epic, PRJ-2 a Story), the create call, and the read-back of PRJ-7 echoing
+/// what was posted.
+async fn fake_jira() -> (String, Arc<Mutex<FakeJira>>) {
+    use axum::extract::{Path as P, State as St};
+    use axum::http::StatusCode;
+    use axum::routing::{get, post};
+    type S = Arc<Mutex<FakeJira>>;
+    let state: S = Arc::default();
+    let field = |id: &str, name: &str, required: bool| json!({"fieldId": id, "key": id, "name": name, "required": required, "hasDefaultValue": false});
+    let mut fields = vec![
+        field("summary", "Summary", true),
+        field("issuetype", "Issue Type", true),
+        field("project", "Project", true),
+        field("description", "Description", false),
+        field("labels", "Labels", false),
+        field("parent", "Parent", false),
+        json!({"fieldId": "reporter", "name": "Reporter", "required": true, "hasDefaultValue": true}),
+        json!({"fieldId": "priority", "name": "Priority", "required": false, "hasDefaultValue": true,
+               "allowedValues": [{"id": "2", "name": "High"}, {"id": "3", "name": "Low"}]}),
+    ];
+    let task_fields = json!({"fields": fields.clone(), "total": fields.len()});
+    fields.push(field("customfield_100", "Team", true));
+    let bug_fields = json!({"fields": fields.clone(), "total": fields.len()});
+    let app = Router::new()
+        .route(
+            "/rest/api/3/issue/createmeta/{project}/issuetypes",
+            get(|P(project): P<String>| async move {
+                if project != "PRJ" {
+                    return (StatusCode::NOT_FOUND, axum::Json(json!({"errorMessages": ["No project could be found"]})));
+                }
+                (StatusCode::OK, axum::Json(json!({"issueTypes": [
+                    {"id": "10001", "name": "Task", "subtask": false},
+                    {"id": "10002", "name": "Bug", "subtask": false},
+                    {"id": "10003", "name": "Epic", "subtask": false}
+                ], "total": 3})))
+            }),
+        )
+        .route(
+            "/rest/api/3/issue/createmeta/{project}/issuetypes/{id}",
+            get(move |P((_, id)): P<(String, String)>| {
+                let body = if id == "10002" { bug_fields.clone() } else { task_fields.clone() };
+                async move { axum::Json(body) }
+            }),
+        )
+        .route(
+            "/rest/api/3/issue",
+            post(|St(st): St<S>, axum::Json(body): axum::Json<Value>| async move {
+                st.lock().unwrap().posted = Some(body);
+                (StatusCode::CREATED, axum::Json(json!({"id": "10050", "key": "PRJ-7"})))
+            }),
+        )
+        .route(
+            "/rest/api/3/issue/{key}",
+            get(|St(st): St<S>, P(key): P<String>| async move {
+                let typed = |name: &str, level: i64| {
+                    (StatusCode::OK, axum::Json(json!({"key": key, "fields": {"issuetype": {"name": name, "hierarchyLevel": level}}})))
+                };
+                match key.as_str() {
+                    "PRJ-1" => return typed("Epic", 1),
+                    "PRJ-2" => return typed("Story", 0),
+                    "PRJ-7" => {}
+                    _ => return (StatusCode::NOT_FOUND, axum::Json(json!({"errorMessages": ["Issue does not exist"]}))),
+                }
+                let st = st.lock().unwrap();
+                let sent = st.posted.clone().unwrap_or_default()["fields"].clone();
+                let mut f = json!({
+                    "project": {"key": sent["project"]["key"]},
+                    "issuetype": {"id": sent["issuetype"]["id"], "name": "Task"},
+                    "summary": sent["summary"],
+                    "labels": sent.get("labels").cloned().unwrap_or(json!([])),
+                    "priority": {"id": sent["priority"]["id"], "name": "High"},
+                    "parent": {"key": sent["parent"]["key"]},
+                    "description": sent["description"],
+                });
+                if st.tamper {
+                    f["summary"] = json!("someone else's summary");
+                    // Jira "lost" the last table row.
+                    if let Some(table) = f["description"]["content"]
+                        .as_array_mut()
+                        .and_then(|c| c.iter_mut().find(|n| n["type"] == "table"))
+                    {
+                        table["content"].as_array_mut().unwrap().pop();
+                    }
+                }
+                (StatusCode::OK, axum::Json(json!({"key": "PRJ-7", "fields": f})))
+            }),
+        )
+        .with_state(Arc::clone(&state));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let site = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (site, state)
+}
+
+async fn jira_at(a: &App, site: &str) -> String {
+    let acct = a
+        .create(
+            &a.alice,
+            json!({"provider": "jira", "label": "work", "email": "a@example.com",
+                   "base_url": site, "token": "jira-secret-token"}),
+        )
+        .await;
+    acct["id"].as_str().unwrap().to_string()
+}
+
+const TABLE_MD: &str = "## Steps\n\n1. open\n2. click\n\n| Env | Status |\n|---|---|\n| prod | **down** |\n| stg | ok |\n\n```sh\ncurl x\n```";
+
+#[tokio::test]
+async fn create_issue_validates_creates_and_verifies_against_jira() {
+    let (site, jira) = fake_jira().await;
+    let a = app().await;
+    let id = jira_at(&a, &site).await;
+    let r = a
+        .call(
+            &a.alice,
+            "POST",
+            &format!("/issue/{id}/issues"),
+            Some(
+                json!({"project_key": " PRJ ", "issue_type": "task", "summary": " Login fails ",
+                        "description": TABLE_MD, "labels": ["sso", "p1"], "priority": "high",
+                        "epic": "PRJ-1"}),
+            ),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(r.body["key"], "PRJ-7");
+    assert_eq!(r.body["url"], format!("{site}/browse/PRJ-7"));
+    let v = &r.body["verification"];
+    assert_eq!(v["ok"], true, "{v}");
+    let names: Vec<&str> = v["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "key",
+            "project",
+            "issue_type",
+            "summary",
+            "labels",
+            "priority",
+            "parent",
+            "description_structure",
+            "description_text"
+        ]
+    );
+    assert!(
+        v["checks"][7]["detail"]
+            .as_str()
+            .unwrap()
+            .contains("table[3x2,header]"),
+        "{v}"
+    );
+
+    // What Jira received: ids resolved from createmeta, the epic as parent,
+    // the description as a real ADF table (header row + body rows).
+    let sent = jira
+        .lock()
+        .unwrap()
+        .posted
+        .clone()
+        .expect("Jira saw the create");
+    let f = &sent["fields"];
+    assert_eq!(f["project"], json!({"key": "PRJ"}));
+    assert_eq!(f["issuetype"], json!({"id": "10001"}));
+    assert_eq!(f["summary"], "Login fails");
+    assert_eq!(f["labels"], json!(["sso", "p1"]));
+    assert_eq!(f["priority"], json!({"id": "2"}));
+    assert_eq!(f["parent"], json!({"key": "PRJ-1"}));
+    let kinds: Vec<&str> = f["description"]["content"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n["type"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, ["heading", "orderedList", "table", "codeBlock"]);
+    let table = &f["description"]["content"][2];
+    assert_eq!(table["content"][0]["content"][0]["type"], "tableHeader");
+    assert_eq!(
+        table["content"][1]["content"][1]["content"][0]["content"][0]["marks"][0]["type"],
+        "strong"
+    );
+    assert_eq!(f.as_object().unwrap().len(), 7, "{f}");
+}
+
+#[tokio::test]
+async fn create_issue_reports_every_createmeta_problem_before_creating() {
+    let (site, jira) = fake_jira().await;
+    let a = app().await;
+    let id = jira_at(&a, &site).await;
+    let path = format!("/issue/{id}/issues");
+    let msg = |r: &Resp| r.body["message"].as_str().unwrap_or_default().to_string();
+
+    let r = a
+        .call(
+            &a.alice,
+            "POST",
+            &path,
+            Some(json!({"project_key": "NOPE", "issue_type": "Task", "summary": "s"})),
+        )
+        .await;
+    assert_eq!(r.status, 400, "{}", r.body);
+    assert!(
+        msg(&r).contains("project 'NOPE' does not exist"),
+        "{}",
+        msg(&r)
+    );
+
+    let r = a
+        .call(
+            &a.alice,
+            "POST",
+            &path,
+            Some(json!({"project_key": "PRJ", "issue_type": "Story", "summary": "s"})),
+        )
+        .await;
+    assert_eq!(r.status, 400);
+    assert!(
+        msg(&r).contains("valid types: Task, Bug, Epic"),
+        "{}",
+        msg(&r)
+    );
+
+    // Several problems → ONE 400 naming each, with the valid values.
+    let r = a
+        .call(
+            &a.alice,
+            "POST",
+            &path,
+            Some(
+                json!({"project_key": "PRJ", "issue_type": "10002", "summary": "s",
+                        "priority": "Urgent", "epic": "PRJ-2",
+                        "fields": {"bogus": 1, "summary": "x"}}),
+            ),
+        )
+        .await;
+    assert_eq!(r.status, 400);
+    let m = msg(&r);
+    for needle in [
+        "as 'Bug'",
+        "priority 'Urgent' is not valid; valid priorities: High, Low",
+        "epic 'PRJ-2' is a Story, not an Epic",
+        "fields.bogus: no such field",
+        "fields.summary: set it with its own argument",
+        "required fields missing: Team (`customfield_100`)",
+    ] {
+        assert!(m.contains(needle), "missing {needle:?} in:\n{m}");
+    }
+    assert!(
+        !m.contains("Reporter"),
+        "a field with a default is not 'missing': {m}"
+    );
+
+    let r = a
+        .call(
+            &a.alice,
+            "POST",
+            &path,
+            Some(json!({"project_key": "PRJ", "issue_type": "Task", "summary": "s", "parent": "PRJ-404"})),
+        )
+        .await;
+    assert_eq!(r.status, 400);
+    assert!(
+        msg(&r).contains("parent 'PRJ-404' does not exist"),
+        "{}",
+        msg(&r)
+    );
+
+    // Local checks fail before any upstream call.
+    let r = a
+        .call(
+            &a.alice,
+            "POST",
+            &path,
+            Some(
+                json!({"project_key": "PRJ", "issue_type": "Task", "summary": "x".repeat(256),
+                        "labels": ["two words"]}),
+            ),
+        )
+        .await;
+    assert_eq!(r.status, 400);
+    assert!(
+        msg(&r).contains("256 characters; the limit is 255"),
+        "{}",
+        msg(&r)
+    );
+    assert!(msg(&r).contains("\"two words\""), "{}", msg(&r));
+
+    assert!(jira.lock().unwrap().posted.is_none(), "nothing was created");
+}
+
+#[tokio::test]
+async fn create_issue_reports_a_verification_mismatch_without_deleting() {
+    let (site, jira) = fake_jira().await;
+    jira.lock().unwrap().tamper = true;
+    let a = app().await;
+    let id = jira_at(&a, &site).await;
+    let r = a
+        .call(
+            &a.alice,
+            "POST",
+            &format!("/issue/{id}/issues"),
+            Some(
+                json!({"project_key": "PRJ", "issue_type": "Task", "summary": "Login fails",
+                        "description": TABLE_MD}),
+            ),
+        )
+        .await;
+    // The issue exists: 200 with its key, and a verification that says what's off.
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(r.body["key"], "PRJ-7");
+    let v = &r.body["verification"];
+    assert_eq!(v["ok"], false, "{v}");
+    let failed: Vec<(&str, &str)> = v["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["ok"] == false)
+        .map(|c| (c["name"].as_str().unwrap(), c["detail"].as_str().unwrap()))
+        .collect();
+    let names: Vec<&str> = failed.iter().map(|(n, _)| *n).collect();
+    assert_eq!(
+        names,
+        ["summary", "description_structure", "description_text"],
+        "{v}"
+    );
+    assert!(
+        failed[0].1.contains("someone else's summary"),
+        "{}",
+        failed[0].1
+    );
+    assert!(
+        failed[1]
+            .1
+            .contains("sent table[3x2,header], stored table[2x2,header]"),
+        "{}",
+        failed[1].1
+    );
+}
+
+#[tokio::test]
+async fn create_issue_surfaces_an_unreachable_jira_as_502() {
+    let a = app().await;
+    let acct = a.jira(&a.alice).await;
+    let id = acct["id"].as_str().unwrap();
+    // The account points at a closed port: the gate and the local checks
+    // pass, the first upstream call fails, and the caller sees a 502.
+    let r = a
+        .call(
+            &a.alice,
+            "POST",
+            &format!("/issue/{id}/issues"),
+            Some(json!({"project_key": "PRJ", "issue_type": "Task", "summary": "s"})),
+        )
+        .await;
+    assert_eq!(r.status, 502, "{}", r.body);
+    assert!(
+        r.body["message"]
+            .as_str()
+            .unwrap()
+            .contains("jira createmeta"),
+        "{}",
+        r.body
+    );
 }
