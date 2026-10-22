@@ -1566,11 +1566,23 @@ mod tests {
 
     #[tokio::test]
     async fn http_sse_response_after_notification_end_to_end() {
-        use tokio::io::AsyncWriteExt;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
+            // Drain the request first: closing a socket with unread bytes
+            // sends an RST, which can reset the client mid-body (a flaky
+            // "error decoding response body").
+            let mut request = Vec::new();
+            let mut buf = [0u8; 1024];
+            while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                let n = socket.read(&mut buf).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buf[..n]);
+            }
             let body = "data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\"}\n\n\
                         data: {\"jsonrpc\":\"2.0\",\"id\":5,\"result\":{\"tools\":[]}}\n\n";
             let head = format!(
@@ -1579,6 +1591,7 @@ mod tests {
             );
             socket.write_all(head.as_bytes()).await.unwrap();
             socket.write_all(body.as_bytes()).await.unwrap();
+            socket.shutdown().await.unwrap();
         });
         let response = reqwest::Client::builder()
             .no_proxy()
