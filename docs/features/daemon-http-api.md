@@ -196,7 +196,8 @@ resolve their owning workspace from the row and role-check against it.
 | Method & path | Auth | Purpose |
 |---|---|---|
 | `GET /meta` · `GET /auth/me` | public · member | Daemon/build metadata · current identity |
-| `GET /users` · `POST /users` · `PATCH/DELETE /users/{id}` | root | User CRUD (root cannot be disabled) |
+| `GET /users` | Users:Admin or root | Account list |
+| `POST /users` · `PATCH/DELETE /users/{id}` | root | User CRUD (root cannot be disabled) |
 | `GET /workspaces` · `POST /workspaces` | member | List workspaces (root sees all) · create one |
 | `GET/PUT /workspaces/{id}/members` | ws admin | Read / set workspace membership + roles |
 | `GET/PUT /settings` | root | Read / write the settings map (`network_listener`, `providers`, `cli_auto_update`, …) |
@@ -275,10 +276,11 @@ resolve their owning workspace from the row and role-check against it.
 | Method & path | Auth | Purpose |
 |---|---|---|
 | `GET/POST /workspaces/{id}/connections` | viewer / editor | List (incl. global; secret never present) · upsert |
-| `PATCH/DELETE /connections/{id}` | editor (global: root) | Edit (PATCH preserves guard) · delete (drops Keychain secret) |
+| `PATCH/DELETE /connections/{id}` | editor (global: `Connections:Admin`) | Edit (PATCH preserves guard) · delete (drops Keychain secret) |
 | `POST /connections/{id}/open`·`/test` | editor | Open a connection PTY · connectivity probe |
 | `GET /connections/{id}/sftp/list`·`/read` | viewer | Browse / read over the SSH connection's auth |
-| `POST /connections/{id}/sftp/download`·`/upload`·`/mkdir`·`/remove`·`/rename` | editor | SFTP transfers/mutations (require `kind==ssh`) |
+| `POST /connections/{id}/sftp/download`·`/upload` | editor + root | SFTP transfers to/from a daemon-host path (require `kind==ssh`; non-root → 403) |
+| `POST /connections/{id}/sftp/mkdir`·`/remove`·`/rename` | editor | SFTP mutations on the remote side (require `kind==ssh`) |
 
 ### Database Explorer (engine access + saved artifacts)
 

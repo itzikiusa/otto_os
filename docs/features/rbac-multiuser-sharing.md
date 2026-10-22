@@ -174,8 +174,8 @@ root account always sees the full nav and every API returns 200-class.
 
 ### 4.2 Creating a user (Settings → Users)
 
-1. As **root** (or a `Users:Admin`), open **Settings → Users** and click **New
-   User**.
+1. As **root**, open **Settings → Users** and click **New User** (a non-root
+   `Users:Admin` sees the list but not this button).
 2. Provide **username**, optional **display name**, and a **password** (≥ 6 chars)
    → `POST /users` (409 on duplicate username).
 3. New users start with **no grants** (default-deny). Assign capabilities in the
@@ -195,15 +195,14 @@ queries.
 **Disable / enable** toggles `disabled` via `PATCH /users/{id}`; a disabled user
 cannot log in (login returns 401) and their tokens stop authenticating.
 
-> **Contract divergence to note.** The frozen core rows #7–#10 (`GET/POST/PATCH/
-> DELETE /users`) are documented as **root**-gated, while the **grant** endpoints
-> (`GET/PUT /users/{id}/grants`), the active-sessions overview, and impersonation
-> are **`Users:Admin` *or* root**. The UI surfaces the whole **Settings → Users**
-> page (and the **Sessions** tab) behind `auth.can('users','admin')`, so a
-> non-root `Users:Admin` sees the page — but creating/patching the *user rows*
-> themselves still flows through the root-gated `/users` CRUD. In practice,
-> delegate day-to-day user administration to `Users:Admin` for grants/sessions/
-> impersonation; keep account creation/deletion with root.
+> **Who can do what on Settings → Users.** The page (and the **Sessions** tab)
+> shows behind `auth.can('users','admin')`. A non-root `Users:Admin` gets the
+> account list (`GET /users`), the per-user **Impersonate…** menu, the
+> active-sessions overview and terminate. Creating, disabling or enabling an
+> account (`POST/PATCH/DELETE /users…`) and reading or changing **feature grants**
+> (`GET/PUT /users/{id}/grants`) stay **root**-only — a non-root admin that could
+> grant would escalate itself — so the page hides **New user**, **Disable/Enable**
+> and the **Feature grants** matrix unless you are root.
 
 ---
 
@@ -441,12 +440,13 @@ or root`; `root`. Authoritative source: [`../contracts/api.md`](../contracts/api
 | `POST /auth/login` · `POST /auth/logout` | public / member | 401 on bad creds / disabled |
 | `GET /auth/me` | member | `MeResp {user (effective), real_user, impersonating}` |
 | `GET /auth/capabilities` | member (Exempt) | `{capabilities: {feature-or-slug → capability}}`; root ⇒ `admin` for all |
-| `GET /users` · `POST /users` · `PATCH /users/{id}` · `DELETE /users/{id}` | root | CRUD; delete is soft-disable; root can't be disabled |
+| `GET /users` | Users:Admin or root | the account list (no secrets) |
+| `POST /users` · `PATCH /users/{id}` · `DELETE /users/{id}` | root | CRUD; delete is soft-disable; root can't be disabled |
 
 ### Grants & workspace membership
 | Method & path | Auth | Notes |
 |---|---|---|
-| `GET /users/{id}/grants` · `PUT /users/{id}/grants` | Users:Admin or root | PUT **atomically replaces** all grants; audited `grant.changed` |
+| `GET /users/{id}/grants` · `PUT /users/{id}/grants` | root | PUT **atomically replaces** all grants; audited `grant.changed` |
 | `GET /users/{id}/plugin-grants` · `PUT /users/{id}/plugin-grants` | root | string-keyed plugin axis (`feature` = slug) |
 | `GET /workspaces/{id}/members` · `PUT /workspaces/{id}/members` | ws admin | the workspace-role matrix. **PUT replaces the whole member list** for that workspace — send every member, not just the one you're changing. Membership is per workspace, so a user reaches several workspaces only by appearing in each one's list; **Settings → Users → Workspace roles → By user** does that in one screen (one PUT per workspace, plus a "set all" shortcut). |
 

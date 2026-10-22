@@ -544,10 +544,9 @@ viewer, mutations = ws editor, globals = root):
 | POST `…/subjects/{subject}/compatibility` | viewer | `CompatCheckReq` | `CompatCheckResp` |
 | GET / POST `/brokers/clusters/{id}/lag-alerts` | viewer / editor | `NewLagAlertReq` | `LagAlert[]` / `LagAlert` (201) |
 | DELETE `/brokers/clusters/{id}/lag-alerts/{alert_id}` | editor | — | 204 |
-| GET / POST `/workspaces/{wid}/brokers/cluster-sections` | viewer / editor | `UpsertSectionReq` | `BrokerClusterSection[]` / one (201) |
-| PATCH `/brokers/cluster-sections/{id}` | editor | `UpsertSectionReq` (rename) | `BrokerClusterSection` |
-| DELETE `/brokers/cluster-sections/{id}` | editor | — | 204 (descendants cascade; clusters → ungrouped) |
-| POST `/brokers/cluster-sections/{id}/move` | editor | `MoveSectionReq` | `BrokerClusterSection` |
+| GET / POST `/workspaces/{id}/connection-sections` | viewer / editor | `UpsertSectionReq` | `ConnectionSection[]` / `ConnectionSection` — the **shared** section tree (migration 0095 merged the old `/brokers/cluster-sections*` routes into it) |
+| PATCH / DELETE `/connection-sections/{id}` | editor | `UpsertSectionReq` (rename) / — | `ConnectionSection` / 204 (sub-sections removed; clusters → ungrouped) |
+| POST `/connection-sections/{id}/move` | editor | `MoveSectionReq` | `ConnectionSection` (see [Connections → sections](connections-ssh-sftp.md)) |
 
 `UpsertClusterReq` (key fields): `name`, `bootstrap_servers`, `security_protocol`,
 `sasl_mechanism`, `sasl_username`, `sasl_password` (write-only), `tls_skip_verify`,

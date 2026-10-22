@@ -1,7 +1,8 @@
 # Otto API Contract — /api/v1 (FROZEN)
 
 All DTO names refer to types in `crates/otto-core/src/api.rs` (Rust) mirrored in
-`ui/src/lib/api/types.ts` (TS). JSON: snake_case fields, RFC3339 timestamps, ULID ids.
+`ui/src/lib/api/types.ts` (TS; an export-* barrel over `ui/src/lib/api/types/<area>.ts` —
+import from the barrel, edit the area file). JSON: snake_case fields, RFC3339 timestamps, ULID ids.
 Auth: `Authorization: Bearer <token>` unless marked public. Errors: HTTP status per
 `otto_core::Error` variant + body `Problem{code,message}`.
 
@@ -67,7 +68,7 @@ connection library unusable for every non-root account.)
 | 4 | POST /api/v1/auth/login | public | LoginReq | LoginResp (401 on bad creds/disabled; 429 + `Retry-After` when the client (`ip\|user`, or `ip:<ip or IPv6 /64>` across all usernames — 20 failures) or the username is locked, or when the throttle map is saturated and the attempt can't be tracked (fail closed; never the desktop); 503 `busy` + `Retry-After: 1` when the bounded argon2 verifier (4 concurrent, off the async workers) stays saturated for 2 s) |
 | 5 | POST /api/v1/auth/logout | member | — | 204 |
 | 6 | GET /api/v1/auth/me | member | — | `MeResp {user, real_user, impersonating}` — `user` = effective (auth target); `real_user` = token owner (= `user` for normal sessions); `impersonating: bool` |
-| 7 | GET /api/v1/users | root | — | `User[]` |
+| 7 | GET /api/v1/users | Users:Admin or root (feature guard) | — | `User[]` (no secrets; the same ids/usernames `/admin/sessions` shows that role) |
 | 8 | POST /api/v1/users | root | CreateUserReq | User (409 dup username) |
 | 9 | PATCH /api/v1/users/{id} | root | UpdateUserReq `{display_name?, password?, disabled?, current_password?}` | User. Changing your OWN password requires `current_password` (400 when missing, 403 when wrong — counted on the login throttle's username key; never 401). Root resetting another user's password does not. |
 | 10 | DELETE /api/v1/users/{id} | root | — | 204 (soft: sets disabled; root user cannot be disabled → 400) |
@@ -233,6 +234,14 @@ Notes:
 - PR routes resolve the provider + account from the repo row (`provider`, `git_account_id`);
   if the repo has no provider/account → 400 `invalid`.
 - `/orchestrate` never executes; it only returns a plan. Execution is the separate call #24.
+- Workspace settings (`Workspace.settings`, TS `WorkspaceSettings` in
+  `ui/src/lib/api/types/core.ts`) are a free JSON object on the Rust side, written with
+  `PATCH /workspaces/{id}` `settings_patch` (#13). Keys the UI reads and writes: `notes`
+  (string), `default_provider` (string; `''`/absent = the global default) and `api_client`
+  `{allow_local?: bool, history_max_rows?: u32, history_max_days?: u32,
+  automation_runs_keep?: u32}` (0/absent = no limit; `allow_local` off by default). Unknown
+  keys round-trip untouched; `context` and its fields change only through the workspace
+  context API.
 - Settings keys used in v1: `network_listener` `{enabled:bool, port:u16}`, `providers`
   (provider registry overrides), `default_provider` (string), `cli_auto_update`
   `{enabled:bool, time_of_day:"HH:MM", use_utc:bool, reload_sessions:bool}` (daily
@@ -721,10 +730,10 @@ bearer token. `TrailAppended` / `TasksUpdated` events mirror writes over `/ws/ev
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
-| GET /workspaces/{wid}/sessions/{sid}/trail | ws viewer | — | `TrailEvent[]` (session activity trail) |
-| POST /workspaces/{wid}/sessions/{sid}/trail | ws editor | TrailEvent | 204 (append one trail entry) |
-| GET /workspaces/{wid}/sessions/{sid}/tasks | ws viewer | — | `AgentTask[]` (current task list) |
-| PUT /workspaces/{wid}/sessions/{sid}/tasks | ws editor | `AgentTask[]` | 204 (replace the task list) |
+| GET /workspaces/{wid}/sessions/{sid}/trail | ws viewer + session owner/admin (root) | — | `TrailEvent[]` (session activity trail) |
+| POST /workspaces/{wid}/sessions/{sid}/trail | ws editor + session owner/admin (root) | `AppendTrailReq {source?, kind?, level?, summary, detail?}` | `TrailEvent` (the appended row) |
+| GET /workspaces/{wid}/sessions/{sid}/tasks | ws viewer + session owner/admin (root) | — | `AgentTask[]` (current task list) |
+| PUT /workspaces/{wid}/sessions/{sid}/tasks | ws editor + session owner/admin (root) | `PutTasksReq {tasks: TaskInput[]}` (an object, not a bare array → 422) | `AgentTask[]` (the replaced list) |
 | GET /workspaces/{wid}/activity/summary | ws viewer | — | per-session activity summary for the workspace — task roll-ups for every session with tasks; `last_ts` (newest trail row) only for the sessions the sidebar shows (live, foreground + channel rows); sessions with neither are absent |
 
 A `TrailEvent.detail` is capped by the writer (hook ingest, Codex notify and the POST
@@ -761,7 +770,7 @@ Codex `~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<sid>.jsonl`) by the shared
 `otto-transcript` crate (also the usage tailer's parser). Wire types
 (`Transcript`, `Turn`, `Block`, `ToolResult`, `TaskItem`, `SystemNote`,
 `Artifact`, `HistoryEntry`, `SubagentMeta`) are `crates/otto-transcript/src/model.rs`,
-mirrored in `ui/src/lib/api/types.ts` under `// ── Transcript`. RBAC: `Agents`
+mirrored in `ui/src/lib/api/types/transcript.ts`. RBAC: `Agents`
 View for every GET, `Agents` Edit for every POST (explicit `policy.rs` arms above
 the `/sessions/{id}/*` catch-all); every session route additionally applies the
 owner-or-admin gate; history routes require workspace `viewer` (GET) / `editor`
@@ -844,10 +853,10 @@ its list holds only user-added tasks.
 |---|---|---|---|
 | GET /workspaces/{id}/connection-sections | ws viewer | — | `ConnectionSection[]` |
 | POST /workspaces/{id}/connection-sections | ws editor | `UpsertSectionReq {name, parent_id?, scope?}` | ConnectionSection |
-| POST /workspaces/{id}/connection-sections/reorder | ws editor | `{order:[id,…]}` | 204 |
+| POST /workspaces/{id}/connection-sections/reorder | ws editor | `{ids:[id,…]}` | 204 |
 | PATCH /connection-sections/{id} | ws editor | `UpsertSectionReq` (only `name` is read; blank → 400) | ConnectionSection |
 | DELETE /connection-sections/{id} | ws editor | — | 204 |
-| POST /connection-sections/{id}/move | ws editor | MoveSectionReq | 204 |
+| POST /connection-sections/{id}/move | ws editor | MoveSectionReq | ConnectionSection (the moved section) |
 
 ## Import connections from other DB tools (`/connections/import/*`)
 
@@ -1665,18 +1674,18 @@ values) and `folder`, alongside the existing `cwd/stage/watch_enabled/watch_cade
 | POST /product/testcase-runs/{rid}/approve | ws editor | — | approve a run (triggers skill self-improvement) |
 | POST /product/testcase-runs/{rid}/publish | ws editor | — | publish approved test cases |
 | POST /product/testcase-runs/{rid}/testcases/bulk-approve | ws editor | `{ids: string[]}` | `{approved: number}` — bulk-approve selected draft cases |
-| POST /product/testcase-runs/{rid}/testcases/reorder | ws editor | `{ordered_ids: string[]}` | `Testcase[]` — persist new display order |
-| GET /product/stories/{sid}/transcripts | ws viewer | optional `summary=true&limit=50&cursor=` | Legacy `Transcript[]` with full bodies; summary mode returns `ProductTranscriptPage` without bodies |
+| POST /product/testcase-runs/{rid}/testcases/reorder | ws editor | `{ordered_ids: string[]}` | `ProductTestcase[]` — persist new display order |
+| GET /product/stories/{sid}/transcripts | ws viewer | optional `summary=true&limit=50&cursor=` | Legacy `ProductTranscript[]` with full bodies; summary mode returns `ProductTranscriptPage` without bodies |
 | GET /product/stories/{sid}/transcripts/search | ws viewer | `q`, optional `limit=100&max_matches=5000&cursor=` | Bounded scan page `{items:(ProductTranscriptSummary & {match_count:number})[],next_cursor:string|null}` |
-| GET /product/transcripts/{trid} | owning story ws viewer | — | Full `Transcript` (authorization precedes body read) |
-| POST /product/stories/{sid}/transcripts | ws editor | `NewTranscriptReq {body, title?}` | Transcript |
+| GET /product/transcripts/{trid} | owning story ws viewer | — | Full `ProductTranscript` (authorization precedes body read) |
+| POST /product/stories/{sid}/transcripts | ws editor | `NewTranscriptReq {body, title?}` | ProductTranscript |
 | DELETE /product/transcripts/{trid} | ws editor | — | 204 |
-| PATCH /product/stories/{sid}/draft | ws editor | — | create/update the working RFC draft |
+| PATCH /product/stories/{sid}/draft | ws editor | `UpdateDraftReq {title, body_md}` (both required; partial → 422) | `ProductStoryDetail` — creates/updates the working RFC draft |
 | POST /product/stories/{sid}/publish-as-rfc | ws editor + account owner/root | `PublishAsRfcReq` | Published story detail; 409 if reviewed identity is missing/stale, no outbound call |
 | POST /product/stories/{sid}/publish-as-story | ws editor + account owner/root | `PublishAsStoryReq` | Published story detail; 409 if reviewed identity is missing/stale, no outbound call |
-| GET /workspaces/{ws}/product/learnings | ws viewer | — | `Learning[]` |
-| POST /workspaces/{ws}/product/learnings | ws editor | `NewLearningReq {kind, title, body, tags?, refs?, source_story_id?}` | Learning |
-| PATCH /product/learnings/{lid} | ws editor | UpdateLearningReq | Learning |
+| GET /workspaces/{ws}/product/learnings | ws viewer | — | `ProductLearning[]` |
+| POST /workspaces/{ws}/product/learnings | ws editor | `NewLearningReq {kind, title, body, tags?, refs?, source_story_id?}` | ProductLearning |
+| PATCH /product/learnings/{lid} | ws editor | UpdateLearningReq | ProductLearning |
 | DELETE /product/learnings/{lid} | ws editor | — | 204 |
 | POST /product/learnings/{lid}/accept | ws editor | — | accept a proposed learning |
 | POST /workspaces/{ws}/product/drafts | ws editor | `NewDraftReq {title?}` | the new standalone draft's detail (a draft story not yet tied to an epic) |
@@ -2006,7 +2015,7 @@ config/mutations = `ws editor` (config write = `ws admin`).
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
 | GET /workspaces/{id}/self-improvement | ws viewer | — | self-improvement config |
-| PUT /workspaces/{id}/self-improvement | ws admin | ImproveConfig | config |
+| PUT /workspaces/{id}/self-improvement | ws admin | UpdateSelfImprovementReq | SelfImprovementConfig |
 | POST /workspaces/{id}/self-improvement/run | ws editor | — | trigger a run now |
 | GET /workspaces/{id}/improvement/runs | ws viewer | — | `ImprovementRun[]` |
 | GET /improvement/runs/{run_id} | ws viewer | — | ImprovementRun |
@@ -2046,7 +2055,7 @@ and a `human_rating`.
 | POST /skill-evaluations/{id}/iterations/{iter_id}/rate | ws editor | RateIterationReq | SkillEval (re-scored; no command re-run) |
 | POST /skill-evaluations/{id}/iterations/{iter_id}/regression | ws editor | RegressionReq | GoldenTask (origin=regression; deduped by source iter) |
 | POST /skill-evaluations/{id}/iterations/{iter_id}/agents/{index}/retry | ws editor | — | re-run one validation agent |
-| GET /settings/skill-eval | root | — | skill-eval config (+ weights, promote_min_score, require_proof_pass, default cmds) |
+| GET /settings/skill-eval | member (SkillEval View) | — | skill-eval config (+ weights, promote_min_score, require_proof_pass, default cmds) |
 | PUT /settings/skill-eval | root | SkillEvalConfig | config |
 
 Admission accepts only `generate` (default) or `score_only`, at most 10 iterations
@@ -2150,28 +2159,28 @@ are root; per-workspace context selection is workspace-scoped.
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
-| GET /library/skills | root | — | `SkillEntry[]` |
+| GET /library/skills | member (Skills View) | — | `LibrarySkill[]` |
 | POST /library/skills | root | CreateLibrarySkillReq (`name`, `category?`, `description?`, `body?`) | LibrarySkill (new; 409 if it exists) |
 | POST /library/skills/import | root | raw `.zip` body, `?name=` override | LibrarySkill (imported; zip-slip + size guarded) |
-| GET /library/skills/{name} | root | — | skill body |
-| PUT /library/skills/{name} | root | skill body | 204 |
+| GET /library/skills/{name} | member (Skills View) | — | `LibrarySkill` |
+| PUT /library/skills/{name} | root (also Skills Admin) | `UpsertLibraryEntryReq {body}` | `LibrarySkill` |
 | DELETE /library/skills/{name} | root | — | 204 (also removes Otto-managed user-level provider copies — see Bundled skills) |
-| GET /library/skills/{name}/files | root | — | `SkillFileEntry[]` (multi-file tree) |
-| GET /library/skills/{name}/file | root | `?path=<rel>` | SkillFileContentResp (one file's text) |
+| GET /library/skills/{name}/files | member (Skills View) | — | `SkillFileEntry[]` (multi-file tree) |
+| GET /library/skills/{name}/file | member (Skills View) | `?path=<rel>` | SkillFileContentResp (one file's text) |
 | PUT /library/skills/{name}/file | root | WriteSkillFileReq (`path`, `content`, `create_only?` — default false; true → **409** when `path` already exists instead of overwriting, used by "New file") | `SkillFileEntry[]` (refreshed tree; evicts cache) |
 | DELETE /library/skills/{name}/file | root | `?path=<rel>` | 204 (SKILL.md cannot be deleted) |
 | GET /library/provider-skills | any member | — | `ProviderSkillInfo[]` (on-disk `~/.claude|.codex|.agy/skills`, read-only) |
 | GET /library/provider-skills/{provider}/{name} | any member | — | ProviderSkillContent (body + file list) |
 | GET /library/provider-skills/{provider}/{name}/file | any member | `?path=<rel>` | SkillFileContentResp |
-| GET /library/souls | root | — | `SoulEntry[]` |
-| GET /library/souls/{name} | root | — | soul body |
-| PUT /library/souls/{name} | root | soul body | 204 |
+| GET /library/souls | member (Skills View) | — | `LibrarySoul[]` |
+| GET /library/souls/{name} | member (Skills View) | — | `LibrarySoul` |
+| PUT /library/souls/{name} | root (also Skills Admin) | `UpsertLibraryEntryReq {body}` | `LibrarySoul` |
 | DELETE /library/souls/{name} | root | — | 204 |
-| GET /library/context | root | — | `ContextEntry[]` |
-| GET /library/context/{name} | root | — | context body |
-| PUT /library/context/{name} | root | context body | 204 |
+| GET /library/context | member (Skills View) | — | `LibraryContext[]` |
+| GET /library/context/{name} | member (Skills View) | — | `LibraryContext` |
+| PUT /library/context/{name} | root (also Skills Admin) | `UpsertLibraryEntryReq {body}` | `LibraryContext` |
 | DELETE /library/context/{name} | root | — | 204 |
-| GET /library/default-soul | root | — | the default soul name |
+| GET /library/default-soul | member (Skills View) | — | the default soul name |
 | PUT /library/default-soul | root | `{name}` | set the default soul |
 | GET /workspaces/{id}/context | ws viewer | — | the workspace's active context selection |
 | PUT /workspaces/{id}/context | ws admin | `UpdateWorkspaceContextReq` | `WorkspaceContextConfig` |
@@ -2286,8 +2295,8 @@ choices. The UI surfaces this distinction in the preview.
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
-| GET /library/bundled | root | — | bundled skill catalog |
-| GET /library/bundled/{name} | root | — | BundledSkillContent (SKILL.md body + file list; view without installing) |
+| GET /library/bundled | member (Skills View) | — | bundled skill catalog |
+| GET /library/bundled/{name} | member (Skills View) | — | BundledSkillContent (SKILL.md body + file list; view without installing) |
 | POST /library/bundled/{name}/install | root | — | install/update one bundled skill → `{name, installed, backed_up, backup_path, user_owned?}`. Also mirrors it into `~/.claude/skills`, `$CODEX_HOME/skills`, `~/.gemini/skills`, but never replaces an entry Otto's `.otto-managed.json` does not own (or any symlink) — those paths come back in `user_owned` |
 | POST /library/bundled/install-all | root | `?category=&backup=&force=` | install all bundled skills (optionally one category) → `{installed, backed_up, skipped, failed: [{name, error}], user_owned}` (`user_owned`: provider skill paths left untouched because a user-owned skill of that name lives there). Skips rewriting Library copies already up to date, but still reconciles their managed provider copies so failed mirrors can be retried. Copies ahead of the bundled version are left alone unless `force=true`; a failing install or mirror is reported in `failed` and the rest still install. User-owned provider copies remain untouched. Runs off the async workers; keeps the newest 3 `skills-backup/<name>-<secs>` per skill |
 
@@ -2626,15 +2635,15 @@ reads = `ws viewer`, mutations/execution = `ws editor`.
 |---|---|---|---|
 | GET /workspaces/{wid}/api-client/overview?q=&collection_id=&kind=all\|requests\|environments\|automations | ws viewer | — | `ApiOverview` — compact collections, saved requests, masked environments, and automation step counts |
 | GET /workspaces/{wid}/api-client/collections | ws viewer | — | `Collection[]` |
-| POST /workspaces/{wid}/api-client/collections | ws editor | `UpsertApiCollectionReq` | `ApiCollection` |
-| PATCH /workspaces/{wid}/api-client/collections/{id} | ws editor | `UpsertApiCollectionReq` | `ApiCollection` |
+| POST /workspaces/{wid}/api-client/collections | ws editor | `UpsertApiCollectionReq` | `ApiCollection`. 400 when `parent_id` is not a collection of this workspace |
+| PATCH /workspaces/{wid}/api-client/collections/{id} | ws editor | `UpsertApiCollectionReq` | `ApiCollection`. When `parent_id` changes: 400 if it is not a collection of this workspace, is the collection itself, or is one of its descendants (a cycle); an unchanged `parent_id` is not re-checked |
 | DELETE /workspaces/{wid}/api-client/collections/{id} | ws editor | — | 204 |
 | GET /workspaces/{wid}/api-client/collections/{id}/openapi | ws viewer | — | export the collection as OpenAPI |
 | GET /workspaces/{wid}/api-client/requests | ws viewer | — | `Request[]` |
 | GET /workspaces/{wid}/api-client/requests/summaries?collection_id= | ws viewer | — | `ApiOverviewRequest[]` (`{id, name, method, url, collection_id, auth_type, has_ssh, agent_authored, updated_at, position}`), same order as `/requests`; `position` is the row's sort position in its collection, so the UI tree builds from this projection alone and fetches `GET …/requests/{id}` only when a request is opened — a scalar projection: never the body, headers, query, auth values, scripts, docs or multipart files. `/overview` reads it too |
-| POST /workspaces/{wid}/api-client/requests | ws editor | `UpsertApiRequestReq` | `ApiRequest` |
+| POST /workspaces/{wid}/api-client/requests | ws editor | `UpsertApiRequestReq` | `ApiRequest`. 400 when `collection_id` is not a collection of this workspace |
 | GET /workspaces/{wid}/api-client/requests/{id}?shape=full\|agent | ws viewer | — | Request. `full` is the unchanged default; `agent` masks auth/header/query secrets and caps the body at 64 KiB |
-| PATCH /workspaces/{wid}/api-client/requests/{id} | ws editor | `UpsertApiRequestReq` | `ApiRequest`. Create/Update carry the persisted extras: `pre_request_script?`, `post_response_script?`, `settings?` (`{timeout_ms?, follow_redirects?, tls_verify?}`), `docs?`, `graphql_variables?` |
+| PATCH /workspaces/{wid}/api-client/requests/{id} | ws editor | `UpsertApiRequestReq` | `ApiRequest`. A changed `collection_id` that is not a collection of this workspace is 400. Create/Update carry the persisted extras: `pre_request_script?`, `post_response_script?`, `settings?` (`{timeout_ms?, follow_redirects?, tls_verify?}`), `docs?`, `graphql_variables?` |
 | POST /workspaces/{wid}/api-client/requests/{id}/execute | ws editor | `RunSavedRequestReq` | `RunSavedRequestResp`. GraphQL variables must be blank/absent or a JSON object; malformed/non-object JSON returns 400 before scripts or sending. 400: `vars override '<k>' must not contain '{{' (no nested substitution)`. 409: `needs_confirm=method: <METHOD> '<name>' → <url> is not a safe method; re-send with confirm:true` or `needs_confirm=new_host: host '<host>' is not used by any human-authored request or run in this workspace; re-send with confirm_new_host:true`, or the **Secret host binding** 409 (`needs_confirm=new_host: a stored secret would be sent to host '<host>' …`) when — after `vars` overrides and the pre-request script — a stored secret would leave its bound host (agents can never confirm that one). Network/send failure is 502 and still writes history |
 | DELETE /workspaces/{wid}/api-client/requests/{id} | ws editor | — | 204 |
 | GET /workspaces/{wid}/api-client/environments | ws viewer | — | `Environment[]` |
@@ -2808,8 +2817,8 @@ user may call it.
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
-| GET /users/{id}/grants | Users:Admin or root | — | `UserGrantsResp {grants: GrantEntry[]}` |
-| PUT /users/{id}/grants | Users:Admin or root | `UserGrantsReq {grants: GrantEntry[]}` | `UserGrantsResp` (atomically replaces all grants; audited) |
+| GET /users/{id}/grants | root (the feature guard admits Users:Admin to `/users/*`; the handler narrows to root, 403 otherwise) | — | `UserGrantsResp {grants: GrantEntry[]}` |
+| PUT /users/{id}/grants | root (403 for a non-root Users:Admin: granting would let it escalate itself) | `UserGrantsReq {grants: GrantEntry[]}` | `UserGrantsResp` (atomically replaces all grants; audited) |
 | GET /users/{id}/plugin-grants | root | — | `UserGrantsResp` (plugin grants; `GrantEntry.feature` = plugin slug) |
 | PUT /users/{id}/plugin-grants | root | `UserGrantsReq` (`feature` = plugin slug) | `UserGrantsResp` (atomically replaces all plugin grants; audited) |
 | GET /auth/capabilities | member (any authed user) | — | `CapabilitiesResp {capabilities: {feature-or-slug: capability}}` |
@@ -2830,10 +2839,10 @@ Plugins are external sidecar processes installed at runtime under `~/otto-plugin
 
 | Method & path | Auth | Notes |
 |---|---|---|
-| GET `/plugins` | member | Enabled plugins `[{slug,name,icon,has_ui}]` for the sidebar; UI filters by grant. Exempt in policy. |
+| GET `/plugins` | member | Enabled plugins `[{slug,name,icon,has_ui,running}]` for the sidebar (`running: bool` = the sidecar is up); UI filters by grant. Exempt in policy. |
 | ANY `/plugins/{slug}` · ANY `/plugins/{slug}/{*rest}` | plugin `<slug>` grant (GET=view, else=edit); root bypass | Reverse-proxied to the sidecar. Responses are buffered with a 64 MiB limit (502 on overflow), preserving upstream status/content type within the existing deadline. Gated by the dedicated plugin branch in the feature guard. |
 | GET `/plugins/{slug}/ui` · GET `/plugins/{slug}/ui/` · GET `/plugins/{slug}/ui/{*path}` | public static | Iframe assets served from the plugin's `ui` dir (root-mounted). |
-| GET `/plugin-admin` | root | Installed-plugin list (full records, no token). |
+| GET `/plugin-admin` | root | Installed-plugin list (full records, no token), each with `running: bool` (the sidecar is up) and `last_error: string \| null` (the spawn error or exit status that stopped it). `enabled && !running` = enabled but not running; enable again to restart it. |
 | POST `/plugin-admin/install` | root | `{source}` = local path or git URL → installs into the plugins home (disabled). Reinstall is serialized with enable/disable/remove: disables old credentials and stops the sidecar before replacing local files, then installs the new executable metadata/token disabled. A failed replacement remains disabled. Explicitly enable to start the replacement. |
 | POST `/plugin-admin/{slug}/enable` · POST `/plugin-admin/{slug}/disable` | root | Spawn / stop the sidecar. |
 | DELETE `/plugin-admin/{slug}` | root | Stop + unregister (plugin files are kept). |
@@ -3561,7 +3570,7 @@ policy prefixes (`/usage/`→Usage, `/brokers/cluster`→Database, `/product/`�
 | POST /brokers/clusters/{id}/replay | ws editor | `ReplayReq {source_topic, target_topic, selector, transform?}` | `ReplayResp {replay_id, source_topic, target_topic, count, evidence, error?, evidence_saved}` |
 | GET /brokers/clusters/{id}/schema-registry/subjects/{subject}/versions | ws viewer | — | `SchemaVersion[]` (`{version:number}` only; oldest first) |
 | GET /brokers/clusters/{id}/schema-registry/subjects/{subject}/versions/{version} | ws viewer | — | `SchemaVersionDetail` |
-| POST /brokers/clusters/{id}/schema-registry/subjects/{subject}/compatibility | ws editor | `{schema}` | `CompatibilityResult {compatible, messages}` |
+| POST /brokers/clusters/{id}/schema-registry/subjects/{subject}/compatibility | ws viewer (Database:Edit feature gate) | `CompatCheckReq {schema, schema_type?}` | `CompatCheckResp {compatible, messages}` |
 | GET /brokers/clusters/{id}/lag-alerts | ws viewer | — | `LagAlert[]` |
 | POST /brokers/clusters/{id}/lag-alerts | ws editor | `NewLagAlertReq {topic, group_name, threshold}` | `LagAlert` |
 | DELETE /brokers/clusters/{id}/lag-alerts/{alert_id} | ws editor | — | 204 |
@@ -3737,7 +3746,7 @@ UpdateGoalLoopReq}` and domain types `otto_core::domain::{GoalLoop, GoalLoopDeta
 | 93 | POST /api/v1/workspaces/{id}/goal-loops | ws editor | CreateGoalLoopReq | GoalLoop (validates non-empty `verify`; limits must be positive and `per_phase_timeout_secs` at most 86400, else 400; starts when `autostart`) |
 | 94 | GET /api/v1/goal-loops/{id}?summary= | ws viewer | — | GoalLoopDetail (`{loop, iterations}`). `summary=true` (additive): `plan`, `context_in` and `context_out` are `""` on every iteration except the newest — read one via row 94a |
 | 94a | GET /api/v1/goal-loops/{id}/iterations/{idx} | ws viewer | — | GoalLoopIteration — one iteration in full (`idx` is 1-based) |
-| 95 | PATCH /api/v1/goal-loops/{id} | ws editor | UpdateGoalLoopReq | GoalLoop (`name` non-terminal; `limits` not while Running; `config` Draft-only with at least one executor). All fields are validated before a single atomic update; rejection preserves every prior field. |
+| 95 | PATCH /api/v1/goal-loops/{id} | ws editor; a `config` change needs the loop's creator, a ws admin or root (else 403) | UpdateGoalLoopReq | GoalLoop (`name` non-terminal; `limits` not while Running; `config` Draft-only with at least one executor). All fields are validated before a single atomic update; rejection preserves every prior field. |
 | 96 | POST /api/v1/goal-loops/{id}/start | ws editor | — | GoalLoop |
 | 97 | POST /api/v1/goal-loops/{id}/pause | ws editor | — | GoalLoop |
 | 98 | POST /api/v1/goal-loops/{id}/resume | ws editor | — | GoalLoop |
@@ -4613,11 +4622,11 @@ writes) + the workspace-role axis on the agent's workspace.
 | GET /api/v1/workspaces/{id}/personal-agents | scheduled_tasks view + ws viewer | — | `PersonalAgent[]` (first list seeds 4 disabled example agents) |
 | POST /api/v1/workspaces/{id}/personal-agents | scheduled_tasks edit + ws editor | `{name, avatar?, soul_md?, provider?, model?, cwd?, browser?, delivery?, enabled?}` — `cwd` (also on PATCH) must be empty (default dir under data_dir) or an absolute path / `~/…` with no `..` segments, else 400; re-checked at run time | PersonalAgent |
 | GET /api/v1/personal-agents/{id} | scheduled_tasks view + ws viewer | — | PersonalAgent |
-| PATCH /api/v1/personal-agents/{id} | scheduled_tasks edit + ws editor | any subset of the create body | PersonalAgent |
+| PATCH /api/v1/personal-agents/{id} | scheduled_tasks edit + ws editor; owner-only fields: the owner (`created_by`), a ws admin or root | any subset of the create body | PersonalAgent. The agent runs as its owner, so `soul_md`, `provider`, `model`, `cwd`, `browser`, `delivery`, `save_memory` and `save_context` are owner-only: another Editor changing any of them → 403 ("This agent runs as its owner; only the owner or a workspace admin can change …"). Name, avatar, enable/pause stay open to Editors |
 | DELETE /api/v1/personal-agents/{id} | scheduled_tasks edit + ws editor | — | `{ok:true}`. A run in flight is stopped first and the delete waits for it to settle; `409` while a run is finishing |
 | GET /api/v1/personal-agents/{id}/schedules | scheduled_tasks view + ws viewer | — | `PersonalAgentSchedule[]` |
 | POST /api/v1/personal-agents/{id}/schedules | scheduled_tasks edit + ws editor | `{schedule, timezone?, directive?, enabled?, permission?, idempotency_key?}` — optional 1–128 ASCII `idempotency_key` deduplicates create retries within an agent, including a lost response after commit; the same key with different schedule/timezone/directive/permission returns 409. Permission is persisted atomically at creation. `permission` = `read_only` \| `directed` (default): the schedule's own permission set (see "Personal agent autonomy") (cadence format identical to scheduled tasks, plus the one-shot `{cadence:"once", run_at}` — see "Otto Assistant" — which disables the schedule after its run) | PersonalAgentSchedule |
-| PATCH /api/v1/personal-agents/schedules/{schedule_id} | scheduled_tasks edit + ws editor | `{schedule?, timezone?, directive?, enabled?, permission?}` | PersonalAgentSchedule — resuming it, or a really different `schedule`/`timezone`, re-arms it (`armed_at`; missed occurrences are not caught up) and refreshes `next_run_at`; a `once` whose `run_at` changes forgets that it fired. Resuming the AGENT (`PATCH /personal-agents/{id}` `enabled` false→true) re-arms all its schedules |
+| PATCH /api/v1/personal-agents/schedules/{schedule_id} | scheduled_tasks edit + ws editor; `directive`/`permission` need the agent's owner, a ws admin or root (else 403) | `{schedule?, timezone?, directive?, enabled?, permission?}` | PersonalAgentSchedule — resuming it, or a really different `schedule`/`timezone`, re-arms it (`armed_at`; missed occurrences are not caught up) and refreshes `next_run_at`; a `once` whose `run_at` changes forgets that it fired. Resuming the AGENT (`PATCH /personal-agents/{id}` `enabled` false→true) re-arms all its schedules |
 | DELETE /api/v1/personal-agents/schedules/{schedule_id} | scheduled_tasks edit + ws editor | — | `{ok:true}` |
 | POST /api/v1/personal-agents/{id}/run | scheduled_tasks edit + ws editor | `{schedule_id?}` (that schedule's directive and permission, even when the schedule is paused; without one, a generic check-in directive) | PersonalAgentRun — manual fire, returned at once in `running` (executes in the background; poll runs). 409 while a run of the agent — manual, delegated or scheduled — is already in progress (one run per agent at a time: its runs share a folder and memory; a due schedule waits, cursor untouched) |
 | POST /api/v1/personal-agents/runs/{run_id}/cancel | scheduled_tasks edit + ws editor | — | `{ok:true}` — stop a `running` run (its session is killed, no retry); it settles `canceled`. `409` when the run isn't running |

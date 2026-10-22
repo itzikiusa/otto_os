@@ -13,7 +13,7 @@ Status: **design, reviewed** (2026-09-05; rev 3 after two code-grounded review p
 Everything below builds on what already exists: `product_attachments` for the
 artifacts, `mockup_assist.rs` for the in-place file-backed agent turn, the
 `otto-*` helpers materialized into swarm agent cwds, and the skill seeding in
-`crates/otto-product/src/skills.rs`.
+`crates/otto-skills/src/product.rs`.
 
 ---
 

@@ -646,7 +646,6 @@ and resolve the workspace from the owning row.
 | `PATCH /product/stories/{sid}/draft` | editor | update the working RFC draft body |
 | `POST /product/stories/{sid}/publish-as-rfc` · `/publish-as-story` | editor | publish a draft |
 | `GET/POST /workspaces/{ws}/product/learnings` · `PATCH/DELETE /product/learnings/{lid}` · `POST …/accept` | viewer/editor | learnings (global) |
-| `GET /workspaces/{ws}/product/drafts` | viewer | list drafts |
 | `GET /product/stories/{sid}/inject` | viewer | the consolidated inject bundle |
 | `GET /product/stories/{sid}/swarm` | viewer | the linked-swarm closure (tasks/runs/PRs/cost) |
 | `POST /product/stories/{sid}/children` | editor | `{ title, tree_kind, folder }` → `ProductStoryDetail` — add a child to an epic (one level only; a parent that itself has a parent is rejected) |

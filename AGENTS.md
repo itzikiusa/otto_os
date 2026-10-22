@@ -51,6 +51,7 @@ Otto.app (Tauri / otto-desktop)
 | `otto-browser` | In-app browser — reader/live tabs, DOM annotations, Lightpanda-sidecar-or-plain-fetch fetch engine |
 | `otto-orchestrator` | Claude-PTY agent runner + ⌘K plan parsing (summaries, PR/commit drafts) |
 | `otto-git` | Repos, diffs, commits, PRs |
+| `otto-git-cmd` | Leaf crate: the hardened `git` command builder (`hardened_command`, `HARDENED_GIT_CONFIG`) shared by `otto-git` and `otto-sessions` |
 | `otto-issues` | Jira / Confluence integration |
 | `otto-channels` | Slack / Telegram bridges |
 | `otto-improve` | Self-improvement engine |
@@ -66,6 +67,8 @@ Otto.app (Tauri / otto-desktop)
 | `otto-workflows` | Workflow engine pieces with no server dependency — node catalog, graph validation, retry policy, loop checkpoints, run context files, `prepare_context` helpers, chat + event triggers — behind the `WorkflowCtx` trait (the executor itself is still `otto-server/src/workflow_engine.rs`) |
 | `otto-workgraph` | Mission Control work-graph service (persist + audit + broadcast; projection lives in `otto-server`) |
 | `otto-usage` | Embedded ClickHouse usage/metrics |
+| `otto-telemetry` | Instrumentation leaf: span context, `measure`/`scope` and the `SpanSink` trait (no collector, no otto-usage) |
+| `otto-telemetry-collector` | The daemon's `TelemetryService` (implements `SpanSink`), collector, schema and analysis; otto-server/ottod link it under the dependency name `otto-telemetry` |
 | `otto-skills` | Bundled, versioned skill library |
 | `otto-product` | Product Story Analysis — Jira/Confluence story workflows, the analysis/rewrite/test/plan runners, story watcher, discovery chat, refinement, attachments/annotations, design formats, Product↔Swarm (host hooks via `ProductCtx` / `ProductRunHost` / `ProductStudioHost`) |
 | `otto-swarm` | Agent Swarm — role agents, org tree, CRUD router, and the orchestration runtime (Coordinator, turn runner, scheduler, verifier, channel triggers) behind the `SwarmHost` trait otto-server implements |

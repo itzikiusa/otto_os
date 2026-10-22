@@ -401,9 +401,9 @@ grant is what decides access.
 |---|---|---|
 | `GET /workspaces/{id}/connections` | ws viewer | — → `Connection[]` (incl. globals; secret never present) |
 | `POST /workspaces/{id}/connections` | ws editor | `UpsertConnectionReq` → `Connection` (created workspace-independent / global) |
-| `PATCH /connections/{id}` | ws editor (global: root) | `UpsertConnectionReq` (PATCH semantics) → `Connection` |
-| `PATCH /connections/{id}/pin` | ws editor (global: root) | `{pinned}` → `Connection` |
-| `DELETE /connections/{id}` | ws editor (global: root) | — → 204 (deletes Keychain secret) |
+| `PATCH /connections/{id}` | ws editor (global: `Connections:Admin`) | `UpsertConnectionReq` (PATCH semantics) → `Connection` |
+| `PATCH /connections/{id}/pin` | ws editor (global: `Connections:Edit`) | `{pinned}` → `Connection` |
+| `DELETE /connections/{id}` | ws editor (global: `Connections:Admin`) | — → 204 (deletes Keychain secret) |
 | `POST /connections/{id}/open` | ws editor | `{title?, workspace_id?}` → `Session` |
 | `POST /connections/{id}/test` | ws editor | — → `TestConnectionResp{ok, latency_ms, message, warn_argv}` |
 
@@ -416,8 +416,8 @@ and may mutate only connections they created.
 |---|---|---|
 | `GET …/sftp/list?path=` | ws viewer | — → `SftpListResp{path, entries: SftpEntry[]}` (empty path ⇒ `pwd` then list) |
 | `GET …/sftp/read?path=` | ws viewer | — → `SftpReadResp{text, truncated}` (≤ 1 MiB UTF-8) |
-| `POST …/sftp/download` | ws editor | `{remote_path, local_path}` → `SftpDownloadResp{local_path, bytes}` |
-| `POST …/sftp/upload` | ws editor | `{local_path, remote_path}` → 200 |
+| `POST …/sftp/download` | ws editor + root (writes a daemon-host path; non-root → 403 `HOST_PATH_ROOT_ONLY`) | `{remote_path, local_path}` → `SftpDownloadResp{local_path, bytes}` |
+| `POST …/sftp/upload` | ws editor + root (reads a daemon-host path; non-root → 403 `HOST_PATH_ROOT_ONLY`) | `{local_path, remote_path}` → 200 |
 | `POST …/sftp/mkdir` | ws editor | `{path}` → 200 |
 | `POST …/sftp/remove` | ws editor | `{path, dir?}` → 200 (`dir:true` ⇒ `rmdir`, else `rm`) |
 | `POST …/sftp/rename` | ws editor | `{from, to}` → 200 |
