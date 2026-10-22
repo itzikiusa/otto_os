@@ -6,6 +6,7 @@
   import Skeleton from '../../../lib/components/Skeleton.svelte';
   import type { EditableField } from '../types';
   import type { JiraIssueEditor } from './issueEditorState.svelte';
+  import { focusFirstField } from '../inlineEdit';
 
   let { editor, ef, issueKey }: { editor: JiraIssueEditor; ef: EditableField; issueKey: string } = $props();
 
@@ -14,7 +15,7 @@
   );
 </script>
 
-<div class="field-editor">
+<div class="field-editor" use:focusFirstField>
   {#if ef.schema_type === 'number'}
     <input aria-label={ef.name} class="field-input" type="number" step="any" bind:value={editor.fieldDraft} />
   {:else if ef.schema_type === 'date'}

@@ -4,8 +4,8 @@
   // Mermaid / D2 fences render to SVG through the same lazy bridges the vault
   // uses; `![alt](asset:<id>)` images resolve to workbench assets.
   import { onDestroy, untrack } from 'svelte';
-  import { renderNote } from '../../vault/mdRender';
-  import { renderMermaid } from '../../canvas/mermaid';
+  import { renderNote } from '../../../lib/render/markdown';
+  import { renderMermaid } from '../../../lib/render/mermaid';
   import { renderD2 } from '../../canvas/d2';
   import { workbenchAssetUrl } from '../../../lib/api/workbench';
   import { ui } from '../../../lib/stores/ui.svelte';

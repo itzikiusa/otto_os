@@ -44,6 +44,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import { splitter } from '../../lib/paneResizer';
   import Skeleton from '../../lib/components/Skeleton.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import {
     layout,
     MIN_PANE_PX,
@@ -57,6 +58,10 @@
     depth?: number;
   }
   let { node, depth = 0 }: Props = $props();
+
+  /** Bumped by the Database pane's Retry: re-keys the `{#await}` so a fresh
+   *  `loadPage('database')` runs (a failed load is forgotten there). */
+  let dbLoad = $state(0);
 
   // ── split: gutter drag + keyboard resize ─────────────────────────────────
   let el = $state<HTMLDivElement | null>(null);
@@ -209,13 +214,22 @@
           {@const DatabasePage = loadedPage('database')!}
           <DatabasePage />
         {:else}
-          {#await loadPage('database')}
-            <div class="db-pane-loading" role="status" aria-label="Loading Database"><Skeleton rows={3} /></div>
-          {:catch err}
-            <div class="db-pane-loading" role="alert">
-              <span>Couldn’t load the Database pane: {err instanceof Error ? err.message : String(err)}</span>
-            </div>
-          {/await}
+          <!-- A failed chunk is usually a background update (a stale import()
+               promise): Retry asks `loadPage` again (it forgets the failure),
+               Reload Otto picks up the new build — the UsagePage pattern. -->
+          {#key dbLoad}
+            {#await loadPage('database')}
+              <div class="db-pane-loading"><Skeleton rows={3} label="the Database pane" /></div>
+            {:catch}
+              <div class="db-pane-loading">
+                <LoadState what="the Database pane" variant="panel" empty
+                  error="Otto may have been updated in the background. Retry, or reload Otto to pick up the new version."
+                  onretry={() => dbLoad++}>
+                  {#snippet errorActions()}<button class="btn" onclick={() => location.reload()}>Reload Otto</button>{/snippet}
+                </LoadState>
+              </div>
+            {/await}
+          {/key}
         {/if}
       </div>
     {:else}

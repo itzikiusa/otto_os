@@ -15,9 +15,9 @@ import { ApiError } from '../api/client';
 import { providerErrorText } from '../loadError';
 import { formatBytes, formatMillicores } from '../../modules/kubernetes/k8s-util';
 import { k8sApi } from '../api/k8s';
-import { resourcesPollMs, resourcesValidator } from '../../modules/kubernetes/resourcePoll';
-import { TickCoalescer, browserTickEnv } from '../../modules/kubernetes/monitor/tickCoalescer';
-import { parseClusterUi, type K8sClusterUi, type K8sDrawerTab, type K8sMonitorUi } from '../../modules/kubernetes/viewState';
+import { resourcesPollMs, resourcesValidator } from '../k8s/resourcePoll';
+import { TickCoalescer, browserTickEnv } from '../k8s/monitor/tickCoalescer';
+import { parseClusterUi, type K8sClusterUi, type K8sDrawerTab, type K8sMonitorUi } from '../k8s/viewState';
 import type {
   ImportK8sClusterReq,
   K8sCapabilities,
@@ -34,7 +34,7 @@ import type {
 } from '../api/types';
 import { announceModule } from '../lazyModule';
 
-export type { K8sDrawerTab, K8sMonitorUi, K8sClusterUi } from '../../modules/kubernetes/viewState';
+export type { K8sDrawerTab, K8sMonitorUi, K8sClusterUi } from '../k8s/viewState';
 /** How many (cluster, kind, namespace) row sets stay cached so switching back
  *  (another kind, the Monitor, another module) paints at once (K-2). */
 const ROWS_CACHE_MAX = 4;

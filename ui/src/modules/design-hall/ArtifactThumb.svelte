@@ -118,7 +118,7 @@
   import { untrack } from 'svelte';
   import type { DesignArtifact } from '../../lib/api/types';
   import { fetchContent, getArtifact, thumbnailUrl } from '../../lib/api/design';
-  import { renderMermaid } from '../canvas/mermaid';
+  import { renderMermaid } from '../../lib/render/mermaid';
   import { renderD2 } from '../canvas/d2';
   import StudioBadge from './StudioBadge.svelte';
   import { formatLabel, isImageFormat, renderKind } from './model';

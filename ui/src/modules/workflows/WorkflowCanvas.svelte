@@ -13,7 +13,7 @@
   import { runStatus } from '../../lib/status';
   import { tick } from 'svelte';
   import { neighbourAfterDelete } from './canvasFocus';
-  import { NODE_W, nodeHeight, loopSteps, loopUntil, loopMax, edgePath, edgeMid, condLabel } from './canvasGeometry';
+  import { NODE_W, nodeHeight, loopStepLabels, loopUntil, loopMax, edgePath, edgeMid, condLabel } from './canvasGeometry';
   import type { WorkflowGraph, WorkflowNode, NodeTypeSpec, NodeRunState } from '../../lib/api/types';
 
   interface Props {
@@ -396,7 +396,7 @@
           {#if n.kind === 'loop'}
             <!-- The exact loop, expanded: its inner steps + stop condition. -->
             <span class="steps">
-              {#each loopSteps(n) as s, i}
+              {#each loopStepLabels(n) as s, i}
                 <span class="step">
                   <span class="si">{i + 1}</span>
                   <span class="sn" title={s.name}>{s.name}</span>

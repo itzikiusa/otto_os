@@ -123,7 +123,7 @@
     } catch (e) {
       if (destroyed) return;
       missing = e instanceof ApiError && e.status === 404;
-      loadError = missing ? '' : e instanceof Error ? e.message : 'Could not load the image. Try again.';
+      loadError = missing ? '' : e instanceof Error ? e.message : 'Couldn’t load the image. Try again.';
       loading = false;
     }
   }

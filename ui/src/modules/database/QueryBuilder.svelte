@@ -36,6 +36,8 @@
   import { paneResizer } from '../../lib/paneResizer';
   import VirtualList from '../../lib/components/VirtualList.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import Modal from '../../lib/components/Modal.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -120,6 +122,8 @@
   let paletteTables = $state<{ label: string; path: string; kind: string }[]>([]);
   let paletteSearch = $state('');
   let paletteLoading = $state(false);
+  /** Why the palette's table list failed to load (inline, with Retry). */
+  let paletteError = $state<string | null>(null);
 
   // ── Split between the canvas and the clause designer (persisted) ─────────
   const CANVAS_H_KEY = 'db.qbCanvasH';
@@ -288,8 +292,12 @@
   }
   async function loadPaletteTables(): Promise<void> {
     paletteLoading = true;
+    paletteError = null;
     try {
       paletteTables = await database.listBuilderTables(selectedDb);
+    } catch (e) {
+      paletteTables = [];
+      paletteError = loadErrorText(e);
     } finally {
       paletteLoading = false;
     }
@@ -815,7 +823,14 @@
       for (const [i, s] of srcs.entries()) {
         const want = s.schema ?? database.activeDb ?? dbName(selectedDb);
         const dbPath = databases.find((d) => d.name === want)?.path ?? selectedDb;
-        const list = await database.listBuilderTables(dbPath);
+        let list: { label: string; path: string; kind: string }[];
+        try {
+          list = await database.listBuilderTables(dbPath);
+        } catch (e) {
+          // A failed listing is not "the table doesn't exist".
+          importError = `Couldn’t load the tables of ${want || 'this database'}. ${loadErrorText(e)}`;
+          return;
+        }
         const hit = list.find((t) => t.label === s.table);
         if (!hit) {
           importError = `Table “${s.table}” was not found in ${want || 'this database'}.`;
@@ -894,6 +909,8 @@
       <div class="pal-list">
         {#if paletteLoading}
           <div class="pal-hint"><Skeleton rows={6} height={22} label="tables" /></div>
+        {:else if paletteError}
+          <div class="pal-hint"><LoadState what="tables" variant="compact" error={paletteError} empty onretry={() => void loadPaletteTables()} /></div>
         {:else if paletteTables.length === 0}
           <div class="pal-hint">No tables in {dbName(selectedDb) || 'this database'}.</div>
         {:else if filteredPalette.length === 0}

@@ -8,6 +8,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import CreatePr from './CreatePr.svelte';
   import { rel } from '../../lib/stores/now.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import type { IconName } from '../../lib/components/Icon.svelte';
   import { invalidatePr, prListCache, prListKey } from './pr-cache';
 
@@ -32,6 +33,7 @@
    *  `error`, which swapped the WHOLE list for the error state and wiped the
    *  rows already on screen (the opposite of what loadMore promises). */
   let moreError = $state('');
+  const moreErrId = $props.id();
   /** Headline for the error state — distinguishes "your token is bad" from
    *  "the provider is down" instead of labelling every failure "unreachable". */
   let errorTitle = $state('Provider unreachable');
@@ -119,7 +121,7 @@
       page = next;
     } catch (e) {
       if (revision !== loadRevision) return;
-      moreError = e instanceof Error ? e.message : 'failed to load more PRs';
+      moreError = loadErrorText(e);
     } finally {
       if (revision === loadRevision) loadingMore = false;
     }
@@ -235,10 +237,13 @@
     </div>
     {#if hasMore}
       <div class="pr-more">
-        <button class="btn small" disabled={loadingMore} onclick={loadMore}>
+        <button class="btn small" disabled={loadingMore} onclick={loadMore}
+          aria-describedby={moreError ? moreErrId : undefined}>
           {loadingMore ? 'Loading more pull requests…' : moreError ? 'Retry' : 'Load more'}
         </button>
-        {#if moreError}<span class="pr-more-err" role="status">Couldn’t load more: {moreError}</span>{/if}
+        <!-- Always mounted and empty until a failure: a status region inserted
+             together with its text is usually silent (Skeleton.svelte). -->
+        <span id={moreErrId} class="pr-more-err" role="status">{moreError ? `Couldn’t load more: ${moreError}` : ''}</span>
       </div>
     {/if}
   {/if}

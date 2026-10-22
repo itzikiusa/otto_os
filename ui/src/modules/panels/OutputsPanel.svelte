@@ -4,7 +4,7 @@
   // Rendering discipline (docs/design/conversation-view.md §5.6/§6):
   //   • HTML  → <iframe sandbox=""> via srcdoc (MockupViewer's approach: no
   //     scripts, forms, popups or same-origin — the frame can't reach the daemon)
-  //   • Markdown → vault/mdRender (marked + allowlist sanitizer), never lib/md
+  //   • Markdown → lib/render/markdown (marked + allowlist sanitizer), never lib/md
   //   • images → <img> from an authed blob URL; PDF → sandboxed <iframe>
   //   • anything else → an authed download link
   // Bytes come ONLY from `GET /sessions/{id}/artifacts/{artifact_id}` (opaque id;
@@ -19,7 +19,7 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import { activity } from '../../lib/stores/activity.svelte';
   import { authedBlobUrl, authedText } from '../../lib/api/client';
-  import { renderNote } from '../vault/mdRender';
+  import { renderNote } from '../../lib/render/markdown';
   import { toasts } from '../../lib/toast.svelte';
   import { rel } from '../../lib/stores/now.svelte';
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';

@@ -166,7 +166,7 @@
       class="btn small"
       onclick={loadRuns}
       disabled={loading}
-      title="Reload discovery runs"
+      title="Refresh discovery runs"
     >
       <Icon name="refresh" size={12} /> {loading ? 'Refreshing…' : 'Refresh'}
     </button>

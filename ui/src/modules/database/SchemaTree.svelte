@@ -333,6 +333,9 @@
     return null;
   }
   function onTreeKey(e: KeyboardEvent): void {
+    // Keys typed in the Redis key filter, or pressed on a failed row's Retry,
+    // belong to that control: ↑/↓ must move the caret, not jump to the top.
+    if ((e.target as HTMLElement | null)?.closest('input, textarea, select, button:not(.node-label)')) return;
     const items = visibleItems();
     if (items.length === 0) return;
     // Focus usually sits on a row's inner label button (a click, or a
@@ -652,7 +655,7 @@
         {#if row.t === 'node'}
           {@render nodeRow(row.node, row.depth, row.pos, row.size)}
         {:else if row.t === 'failed'}
-          <div class="node-failed" class:fixed-h={windowed} style="padding-inline-start: {(row.depth + 1) * 13 + 18}px">
+          <div class="node-failed" role="group" aria-label="{row.node.label}: failed to load" class:fixed-h={windowed} style="padding-inline-start: {(row.depth + 1) * 13 + 18}px">
             <Icon name="x" size={12} />
             <span>failed to load</span>
             <button class="node-failed-retry" onclick={() => expandNode(row.node)}>retry</button>
@@ -660,11 +663,11 @@
         {:else if row.t === 'redis'}
           <RedisKeyFilter node={row.node} depth={row.depth} />
         {:else if row.t === 'empty'}
-          <div class="node-empty" class:fixed-h={windowed} style="padding-inline-start: {(row.depth + 1) * 13 + 18}px">
+          <div class="node-empty" role="group" class:fixed-h={windowed} style="padding-inline-start: {(row.depth + 1) * 13 + 18}px">
             {row.text}
           </div>
         {:else if row.t === 'more'}
-          <div class="node-more" class:fixed-h={windowed} style="padding-inline-start: {(row.depth + 1) * 13 + 18}px">
+          <div class="node-more" role="group" class:fixed-h={windowed} style="padding-inline-start: {(row.depth + 1) * 13 + 18}px">
             showing {CHILD_CAP.toLocaleString()} of {row.shown.toLocaleString()} — refine filter
           </div>
         {/if}

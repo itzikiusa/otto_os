@@ -43,7 +43,7 @@ export async function createD2Frame(source: string, wasm: ArrayBuffer): Promise<
   };
   try {
     const realm = frame.contentWindow as (Window & { Function: FunctionConstructor }) | null;
-    if (!realm) throw new Error('Could not create the diagram renderer.');
+    if (!realm) throw new Error('Couldn’t create the diagram renderer.');
     // The package already uses Function for ELK. This requires only the same
     // unsafe-eval policy; no inline/blob scripts or broader frame permissions.
     const scoped = source.replace('export let BrotliDecode', 'let BrotliDecode')

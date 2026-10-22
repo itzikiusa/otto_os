@@ -32,6 +32,7 @@
   import ResultsGrid from '../database/ResultsGrid.svelte';
   import ViewToolbar from './ViewToolbar.svelte';
   import { awsErrorText, fmtBytes, logsRoute } from './util';
+  import { awsLoadText } from './loadText';
   import type {
     AwsAccount,
     AwsLogEvent,
@@ -102,7 +103,7 @@
       }
     } catch (e) {
       if (seq !== groupSeq) return;
-      groupsError = e instanceof Error ? e.message : String(e);
+      groupsError = awsLoadText(e);
       if (!more) groups = null;
     } finally {
       if (seq === groupSeq) groupsLoading = false;
@@ -239,7 +240,7 @@
       eventsError = '';
     } catch (e) {
       if (ctl.signal.aborted) return;
-      eventsError = e instanceof Error ? e.message : String(e);
+      eventsError = awsLoadText(e);
     } finally {
       if (eventsAbort === ctl) eventsLoading = false;
     }
@@ -424,7 +425,7 @@
       }
     } catch (e) {
       if (disposed || qid !== id) return;
-      iError = e instanceof Error ? e.message : String(e);
+      iError = awsLoadText(e);
       iRunning = false;
       return;
     }
@@ -455,7 +456,7 @@
       void pollResults(r.query_id);
     } catch (e) {
       iRunning = false;
-      iError = e instanceof Error ? e.message : String(e);
+      iError = awsLoadText(e);
     }
   }
 

@@ -19,7 +19,7 @@
   import { canvas } from '../../lib/stores/canvas.svelte';
   import { canvasDocBus } from '../../lib/events.svelte';
   import { toasts } from '../../lib/toast.svelte';
-  import { renderMermaid } from './mermaid';
+  import { renderMermaid } from '../../lib/render/mermaid';
   import { svgToPngDownload } from './export';
   import { copyText } from '../../lib/clipboard';
   import { ui } from '../../lib/stores/ui.svelte';
@@ -133,7 +133,7 @@
     const out = await renderMermaid(`cv-${sceneId ?? 'x'}-${token}`, text, { dark, isStale: () => token !== renderToken });
     if (token !== renderToken) return; // superseded
     if (out.error || !out.svg) {
-      renderError = out.error || 'Could not render the diagram';
+      renderError = out.error || 'Couldn’t render the diagram';
       return; // keep the last good SVG on screen
     }
     renderError = '';
@@ -184,7 +184,7 @@
   async function copySource(): Promise<void> {
     const ok = await copyText(canvas.source ?? '');
     if (ok) toasts.success('Copied', 'Mermaid source copied to clipboard.');
-    else toasts.error('Couldn’t copy', 'Could not copy to the clipboard.');
+    else toasts.error('Couldn’t copy', 'Select the text and copy it manually.');
   }
 
   /** Ask the agent to edit this scene's .mermaid source. */

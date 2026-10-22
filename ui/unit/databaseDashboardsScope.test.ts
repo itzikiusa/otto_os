@@ -29,26 +29,15 @@ function setup() {
     patch: async () => { throw new ApiError('boom'); },
   };
   const ws = { currentId: 'A' as string | null };
-  let source = readFileSync(new URL('../src/lib/stores/database.svelte.ts', import.meta.url), 'utf8');
-  // Evaluate each production $derived when read (the identity rune shim can't track).
-  const ast = ts.createSourceFile('store.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
-  const edits: { start: number; end: number; text: string }[] = [];
-  function visit(node: ts.Node) {
-    if (ts.isPropertyDeclaration(node) && node.initializer && ts.isCallExpression(node.initializer) && node.initializer.expression.getText(ast) === '$derived') {
-      edits.push({ start: node.getStart(ast), end: node.end, text: `get ${node.name.getText(ast)}() { return ${node.initializer.arguments[0].getText(ast)}; }` });
-    }
-    ts.forEachChild(node, visit);
-  }
-  visit(ast);
-  for (const edit of edits.sort((a, b) => b.start - a.start)) source = source.slice(0, edit.start) + edit.text + source.slice(edit.end);
   const storage = new Map<string, string>();
   const context = {
-    exports: {} as Record<string, any>, Error, DOMException, AbortController, crypto: { randomUUID },
+    Error, DOMException, AbortController, crypto: { randomUUID },
     setTimeout, clearTimeout, console,
     localStorage: { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) },
     $state: Object.assign((v: unknown) => v, { raw: (v: unknown) => v, snapshot: (v: unknown) => v }),
     $derived: Object.assign((v: unknown) => v, { by: (fn: () => unknown) => fn() }),
     require: (path: string) => {
+      if (path.startsWith('./database/')) return load(new URL(`../src/lib/stores/${path.slice(2)}.ts`, import.meta.url));
       if (path.endsWith('/client')) return { api, ApiError, withDeadline: (p: unknown) => p, READ_DEADLINE_MS: 1, isAbortError: (e: Error) => e.name === 'AbortError' };
       if (path.endsWith('/workspace.svelte')) return { ws };
       if (path.endsWith('/auth.svelte')) return { auth: { user: { id: 'user' } } };
@@ -71,8 +60,31 @@ function setup() {
         '/clipboard', '/poll', '/editor-history', '/confirm.svelte'].map((p) => [p, unused(p)] as const))(path);
     },
   };
-  runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, context);
-  const db = context.exports.database;
+  // The store is a façade over lib/stores/database/* (model, statement,
+  // dashboards): every part is compiled the same way and shares one require.
+  const loaded = new Map<string, Record<string, any>>();
+  const load = (url: URL): Record<string, any> => {
+    const hit = loaded.get(url.href);
+    if (hit) return hit;
+    let source = readFileSync(url, 'utf8');
+    // Evaluate each production $derived when read (the identity rune shim can't track).
+    const ast = ts.createSourceFile('store.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+    const edits: { start: number; end: number; text: string }[] = [];
+    function visit(node: ts.Node) {
+      if (ts.isPropertyDeclaration(node) && node.initializer && ts.isCallExpression(node.initializer) && node.initializer.expression.getText(ast) === '$derived') {
+        edits.push({ start: node.getStart(ast), end: node.end, text: `get ${node.name.getText(ast)}() { return ${node.initializer.arguments[0].getText(ast)}; }` });
+      }
+      ts.forEachChild(node, visit);
+    }
+    visit(ast);
+    for (const edit of edits.sort((a, b) => b.start - a.start)) source = source.slice(0, edit.start) + edit.text + source.slice(edit.end);
+    const exports: Record<string, any> = {};
+    loaded.set(url.href, exports);
+    runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, { ...context, exports });
+    return exports;
+  };
+  const store = load(new URL('../src/lib/stores/database.svelte.ts', import.meta.url));
+  const db = store.database;
   /** Resolve the oldest pending GET for `url`. */
   const answer = async (url: string, value: unknown) => {
     const q = pending.get(url) ?? [];

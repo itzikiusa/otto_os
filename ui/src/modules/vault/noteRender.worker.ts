@@ -8,7 +8,7 @@
 
 import type { VaultOutgoingLink } from '../../lib/api/types';
 import { ensureHljs } from '../../lib/hl';
-import { renderNoteUnsanitized, resolverFrom, stripFrontmatter } from './mdRender';
+import { renderNoteUnsanitized, resolverFrom, stripFrontmatter } from '../../lib/render/markdown';
 
 export type NoteRenderIn = { id: number; raw: string; outgoing: VaultOutgoingLink[] };
 export type NoteRenderOut = { id: number; html: string } | { id: number; error: string };

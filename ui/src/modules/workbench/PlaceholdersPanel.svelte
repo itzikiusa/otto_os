@@ -4,6 +4,7 @@
   // Values live with the file (the parent persists them) and feed Send to…:
   // "Copy with placeholders filled", the API client / session / vault targets,
   // and the DB Run on… sheet, where a list (`1,2,3,4`) becomes one run each.
+  import { untrack } from 'svelte';
   import { detectPlaceholders, isSqlLike } from './lib/placeholders';
 
   interface Props {
@@ -14,7 +15,24 @@
   }
   let { content, lang, values, onchange }: Props = $props();
 
-  const found = $derived(detectPlaceholders(content, lang));
+  // The scan is a whole-buffer pass (for SQL a quote/comment-aware parse), so
+  // it reads a 200 ms debounced copy of the buffer — the list is display only.
+  // A language change applies at once.
+  let scanned = $state(untrack(() => content));
+  let scannedLang = untrack(() => lang);
+  $effect(() => {
+    const next = content;
+    const l = lang;
+    if (l !== scannedLang) {
+      scannedLang = l;
+      scanned = next;
+      return;
+    }
+    if (next === untrack(() => scanned)) return;
+    const t = setTimeout(() => (scanned = next), 200);
+    return () => clearTimeout(t);
+  });
+  const found = $derived(detectPlaceholders(scanned, lang));
   const sql = $derived(isSqlLike(lang));
 
   /** The Run on… sheet's list rule: newline-separated if multi-line, else

@@ -1015,7 +1015,7 @@
           'The hunk no longer applies — the file changed since the diff was shown; refresh and retry.',
         );
       } else {
-        toasts.error('Couldn’t stage', msg);
+        toasts.error('Couldn’t stage', loadErrorText(e));
       }
     } finally {
       applying = false;

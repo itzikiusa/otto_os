@@ -4,6 +4,8 @@
   // reorder (persists order_idx), approve a run (triggers skill learning), and
   // publish to Confluence.
   import { rel } from '../../lib/stores/now.svelte';
+  import ConfluenceSpaceSelect from '../../lib/components/ConfluenceSpaceSelect.svelte';
+  import ConfluencePagePicker from '../../lib/components/ConfluencePagePicker.svelte';
   import { toastError } from '../../lib/toastError';
   import { product } from '../../lib/stores/product.svelte';
   import type { Poller } from '../../lib/poll';
@@ -59,7 +61,9 @@
   let publishingRun = $state(false);
   let showPublishForm = $state(false);
   let publishSpaceKey = $state('');
-  let publishParentId = $state('');
+  // Parent page: picked by TITLE (PC-9), stored by id.
+  let publishParentId = $state<string | null>(null);
+  let publishParentTitle = $state<string | null>(null);
 
   // ── Bulk-select state ────────────────────────────────────────────────────────
   // Set of testcase ids that are currently checked.
@@ -292,7 +296,7 @@
     approvedCount === 0
       ? 'Accept at least one case — only accepted cases are published'
       : storyIsJira && !publishSpaceKey.trim()
-        ? 'Enter a space key — a Jira story has no Confluence space to publish into'
+        ? 'Pick a space — a Jira story has no Confluence space to publish into'
         : '',
   );
 
@@ -548,7 +552,7 @@
       // publishTests reloads the runs itself (for confluence_url) — no second fetch.
       await product.publishTests(run.id, {
         space_key: publishSpaceKey.trim() || null,
-        parent_id: publishParentId.trim() || null,
+        parent_id: publishParentId,
       });
       showPublishForm = false;
       const updatedRun = product.testcaseRuns.find((r) => r.run.id === run.id);
@@ -602,6 +606,11 @@
   }
 </script>
 
+<!-- One ALWAYS-mounted live region for progress-check failures: a region
+     inserted together with its text is silent in VoiceOver/WebKit
+     (accessibility-responsive-4-09). The visible note below is not a region. -->
+<span class="sr-only" role="status">{pollTimer !== null && pollFailures >= POLL_FAIL_SHOWN && lastPollError ? `Couldn’t check progress: ${lastPollError}` : ''}</span>
+
 {#if !story}
   <div class="muted">No story selected.</div>
 {:else}
@@ -644,7 +653,7 @@
         {#if pollTimer !== null}
           <span class="polling-indicator">checking every 3s…</span>
           {#if pollFailures >= POLL_FAIL_SHOWN && lastPollError}
-            <span class="poll-error" role="status">Couldn’t check progress: {lastPollError}</span>
+            <span class="poll-error">Couldn’t check progress: {lastPollError}</span>
             <button class="btn small" onclick={() => pollTimer?.now()}>Check again</button>
           {/if}
         {/if}
@@ -724,30 +733,34 @@
         {#if showPublishForm}
           <div class="publish-form">
             <div class="pf-row">
-              <label class="field-label" for="pf-space">Space key</label>
-              <input dir="auto"
-                id="pf-space"
-                class="text-input"
-                type="text"
-                placeholder={storyIsJira ? 'e.g. TEAM (required)' : 'e.g. TEAM (default: the source page’s space)'}
-                bind:value={publishSpaceKey}
-                disabled={publishingRun}
-              />
+              <label class="field-label" for="pf-space">Space</label>
+              {#if story}
+                <ConfluenceSpaceSelect
+                  id="pf-space"
+                  accountId={story.account_id}
+                  value={publishSpaceKey}
+                  disabled={publishingRun}
+                  emptyOption={storyIsJira ? undefined : 'The source page’s space'}
+                  onchange={(k) => { publishSpaceKey = k; }}
+                />
+              {/if}
             </div>
             <div class="pf-row">
-              <label class="field-label" for="pf-parent">Parent page ID</label>
-              <input dir="auto"
-                id="pf-parent"
-                class="text-input"
-                type="text"
-                placeholder="Confluence page ID (optional)"
-                bind:value={publishParentId}
-                disabled={publishingRun}
-              />
+              {#if story}
+                <ConfluencePagePicker
+                  id="pf-parent"
+                  accountId={story.account_id}
+                  spaceKey={publishSpaceKey}
+                  value={publishParentId}
+                  title={publishParentTitle}
+                  disabled={publishingRun}
+                  onchange={(id, t) => { publishParentId = id; publishParentTitle = t; }}
+                />
+              {/if}
             </div>
             <p class="pf-summary" data-testid="tc-publish-summary">
               Publishes {plural(approvedCount, 'accepted case')} as the page
-              “Test Cases — {story?.title ?? ''}”{storyIsJira ? `, and comments its link on ${story?.source_key ?? 'the issue'}` : ''}.
+              “Test Cases — {story?.title ?? ''}”{publishParentId ? ` under “${publishParentTitle ?? `page ${publishParentId}`}”` : ''}{storyIsJira ? `, and comments its link on ${story?.source_key ?? 'the issue'}` : ''}.
               Everyone with access to the space can see it.
             </p>
             <div class="pf-actions">

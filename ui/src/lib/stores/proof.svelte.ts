@@ -217,10 +217,16 @@ class ProofStore {
   /** Monotonic open() token: only the newest open may land (a slow pack A
    *  must never overwrite pack B opened after it). */
   private openSeq = 0;
+  /** The pack the person last asked for. While its open is in flight
+   *  `detail` still holds the previous pack, so a live refresh must target
+   *  this id — refreshing `detail` would supersede the click and leave the
+   *  old pack on screen. */
+  private wantedId: string | null = null;
 
   /** Open one pack's detail into the right pane. */
   async open(id: string): Promise<void> {
     const seq = ++this.openSeq;
+    this.wantedId = id;
     this.detailLoading = true;
     try {
       const d = await getProofPack(id);
@@ -246,7 +252,7 @@ class ProofStore {
     this.viewers += 1;
     if (this.stale) {
       this.stale = false;
-      if (this.detail) void this.refreshDetail();
+      if (this.wantedId || this.detail) void this.refreshDetail();
     }
     let released = false;
     return () => {
@@ -278,7 +284,7 @@ class ProofStore {
       }
       this.needSummary = false;
       this.needList = false;
-      const openId = this.detail?.pack.id;
+      const openId = this.wantedId ?? this.detail?.pack.id;
       if (openId && this.pendingDetail.has(openId)) {
         if (this.viewers > 0) void this.refreshDetail();
         else this.stale = true;
@@ -289,7 +295,8 @@ class ProofStore {
 
   /** Refresh the open pack's detail (after a mutation). */
   async refreshDetail(): Promise<void> {
-    if (this.detail) await this.open(this.detail.pack.id);
+    const id = this.wantedId ?? this.detail?.pack.id;
+    if (id) await this.open(id);
   }
 
   /** The signed-in identity changed (S13-02): nothing read with the previous
@@ -317,6 +324,7 @@ class ProofStore {
 
   closeDetail(): void {
     ++this.openSeq;
+    this.wantedId = null;
     this.detailLoading = false;
     this.detail = null;
     this.detailError = null;
@@ -332,7 +340,7 @@ class ProofStore {
     // badges, and — while the page is mounted — reload the list preserving the
     // page's active filter and keep the open detail live.
     const ours = !!this.wsId && ev.workspace_id === this.wsId;
-    const open = this.detail?.pack.id === ev.proof_pack_id;
+    const open = (this.wantedId ?? this.detail?.pack.id) === ev.proof_pack_id;
     if (open) this.pendingDetail.add(ev.proof_pack_id);
     if (ours) {
       // The event carries status/risk/done/badges: patch in place. Only an

@@ -75,13 +75,47 @@ const EXT: Record<string, string> = {
 const MERMAID_START =
   /^(graph\s+(TD|TB|BT|RL|LR)\b|flowchart\b|sequenceDiagram\b|classDiagram\b|stateDiagram(-v2)?\b|erDiagram\b|gantt\b|pie\b|journey\b|gitGraph\b|mindmap\b|timeline\b|quadrantChart\b|requirementDiagram\b|C4Context\b|sankey-beta\b|xychart-beta\b|block-beta\b)/;
 
-/** First non-blank, non-comment line (Mermaid `%%` comments skipped). */
+/** First non-blank, non-comment line (Mermaid `%%` comments skipped). An
+ *  indexOf walk: no split of the whole document to find one line. */
 function firstLine(content: string): string {
-  for (const raw of content.split('\n')) {
-    const l = raw.trim();
+  let i = 0;
+  while (i < content.length) {
+    let j = content.indexOf('\n', i);
+    if (j < 0) j = content.length;
+    const l = content.slice(i, j).trim();
     if (l && !l.startsWith('%%')) return l;
+    i = j + 1;
   }
   return '';
+}
+
+/** The content sniff reads at most this many chars (cut back to a whole
+ *  line), so a pasted 250 KB log costs what its first screenful does. */
+export const SNIFF_PREFIX = 16 * 1024;
+/** …and at most this many lines of that prefix. */
+const SNIFF_LINES = 200;
+
+function sniffPrefix(text: string): string {
+  if (text.length <= SNIFF_PREFIX) return text;
+  const cut = text.lastIndexOf('\n', SNIFF_PREFIX);
+  return text.slice(0, cut > 0 ? cut : SNIFF_PREFIX);
+}
+
+/** Whole-buffer JSON check without a trimmed copy: the first/last non-blank
+ *  chars must bracket it before the (one) JSON.parse confirmation runs. */
+function looksLikeJson(content: string, from: number): boolean {
+  let a = from;
+  while (a < content.length && /\s/.test(content[a])) a++;
+  let b = content.length - 1;
+  while (b > a && /\s/.test(content[b])) b--;
+  const open = content[a], close = content[b];
+  if (!((open === '{' && close === '}') || (open === '[' && close === ']'))) return false;
+  try {
+    JSON.parse(from ? content.slice(from) : content);
+    return true;
+  } catch {
+    return false; /* not JSON — keep sniffing */
+  }
 }
 
 function looksLikeCsv(lines: string[], sep: string): boolean {
@@ -118,7 +152,11 @@ export function detectLanguage(name: string, content: string): string {
     const byExt = EXT[m[1].toLowerCase()];
     if (byExt) return byExt;
   }
-  const text = content.replace(/^﻿/, '');
+  // Every content check below reads a bounded prefix; only the JSON
+  // confirmation looks at the whole buffer (callers sniff a debounced
+  // snapshot, never per keystroke — see WorkbenchPage `sniffText`).
+  const bom = content.charCodeAt(0) === 0xfeff ? 1 : 0;
+  const text = sniffPrefix(bom ? content.slice(1, SNIFF_PREFIX + 2) : content);
   const t = text.trim();
   if (!t) return 'txt';
   const first = firstLine(text);
@@ -129,14 +167,7 @@ export function detectLanguage(name: string, content: string): string {
     return 'sh';
   }
   if (/^curl\s/i.test(t) || /^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+(https?:\/\/|\/)\S*/.test(t)) return 'http';
-  if ((t.startsWith('{') && t.endsWith('}')) || (t.startsWith('[') && t.endsWith(']'))) {
-    try {
-      JSON.parse(t);
-      return 'json';
-    } catch {
-      /* not JSON — keep sniffing */
-    }
-  }
+  if ((t.startsWith('{') || t.startsWith('[')) && looksLikeJson(content, bom)) return 'json';
   if (t.startsWith('<')) {
     if (/^<svg[\s>]/i.test(skipXmlPrologue(t))) return 'svg';
     if (/^<!doctype\s+html/i.test(t) || /<(html|head|body|div|p|span|table|ul|h[1-6]|a|script|style)[\s>]/i.test(t)) {
@@ -149,7 +180,7 @@ export function detectLanguage(name: string, content: string): string {
   if (/^(SELECT|INSERT|UPDATE|DELETE|WITH|CREATE|ALTER|DROP|TRUNCATE|EXPLAIN|SHOW|DESCRIBE|REPLACE|MERGE|GRANT|USE)\b/i.test(first)) {
     return 'sql';
   }
-  const lines = text.split('\n');
+  const lines = text.split('\n', SNIFF_LINES);
   // D2: `a -> b` edges / `x: { … }` / `shape:` with no Mermaid header.
   const d2Edges = lines.filter((l) => /^\s*[\w"'.\- ]+\s*(<->|->|<-|--)\s*[\w"'.\- ]+(:.*)?$/.test(l)).length;
   if (d2Edges >= 1 && (/\bshape\s*:/.test(t) || /:\s*\{\s*$/m.test(t) || d2Edges >= 2) && !/[;=]\s*$/m.test(t)) {
@@ -168,10 +199,14 @@ export function detectLanguage(name: string, content: string): string {
   return 'txt';
 }
 
+/** The explicit override, or null for `auto` / '' / unknown (= detect). */
+export function explicitLanguage(language: string): string | null {
+  return !language || language === 'auto' || !BY_ID.has(language) ? null : language;
+}
+
 /** `auto` / '' / unknown → detected; anything else is the explicit override. */
 export function effectiveLanguage(language: string, name: string, content: string): string {
-  if (!language || language === 'auto' || !BY_ID.has(language)) return detectLanguage(name, content);
-  return language;
+  return explicitLanguage(language) ?? detectLanguage(name, content);
 }
 
 /** CodeEditor (cm-langs) key for a language id; '' = plain text. */

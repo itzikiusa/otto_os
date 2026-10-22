@@ -349,7 +349,7 @@
     {:else}
       <p class="muted small">Select a workspace to manage session attachment.</p>
     {/if}
-    {#if attachError}<p class="warn">Could not load session attachment: {attachError}</p>{/if}
+    {#if attachError}<p class="warn">Couldn’t load session attachment: {attachError}</p>{/if}
 
     <label class="switchrow">
       <input
@@ -512,7 +512,7 @@
     {#if !wsId}
       <p class="muted small">Select a workspace to inspect its gateway tools.</p>
     {:else if gatewayError}
-      <p class="muted small">Could not load gateway tools: {gatewayError}</p>
+      <p class="muted small">Couldn’t load gateway tools: {gatewayError}</p>
     {:else}
       <p class="small">Gateway tools from governed external servers: {gatewayNames.length}</p>
       {#if shownGatewayNames.length}

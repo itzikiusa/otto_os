@@ -17,7 +17,7 @@ export async function joinRoom(origin: string, roomId: string, invite: string, n
   }
   if (!response.ok) {
     const problem = await response.json().catch(() => ({})) as {message?: string};
-    throw new Error(problem.message ?? 'Could not join this room. Ask the host for a fresh invitation.');
+    throw new Error(problem.message ?? 'Couldn’t join this room. Ask the host for a fresh invitation.');
   }
   return await response.json() as RoomCredential;
 }

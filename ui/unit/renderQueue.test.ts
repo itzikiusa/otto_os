@@ -3,7 +3,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createRenderQueue, isStaleResult, STALE } from '../src/modules/canvas/renderQueue.ts';
+import { createRenderQueue, isStaleResult, STALE } from '../src/lib/render/renderQueue.ts';
 
 function deferred<T>() {
   let resolve!: (v: T) => void;

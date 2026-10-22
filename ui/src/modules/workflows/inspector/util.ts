@@ -3,6 +3,8 @@
 // Split out of WorkflowsPage.svelte with the forms (inspector/<kind>.svelte).
 import type { BrokerCluster, Connection, IssueAccount, TopicSummary, WorkflowNode } from '../../../lib/api/types';
 import type { ProductStory } from '../../../lib/api/types/product';
+import { AUTO_VERTICAL_ENGINES } from '../../../lib/db-view-prefs.ts';
+import { envTone } from '../../../lib/status.ts';
 
 type Params = Record<string, unknown>;
 
@@ -213,9 +215,14 @@ export function selfImproveProviders(node: WorkflowNode | null | undefined): str
 }
 
 // --- picker options: what each id picker shows instead of the raw id -------
-/** DB-Explorer connections as "name · engine · env". */
+/** DB-Explorer connections as "name · engine · environment", in words
+ *  ("orders · MySQL · Production"), never the wire enums. */
 export function connectionOptions(rows: readonly Connection[] | null): IdOption[] | null {
-  return rows?.map((c) => ({ id: c.id, label: `${c.name} · ${c.kind} · ${c.environment ?? 'dev'}` })) ?? null;
+  return rows?.map((c) => {
+    const engine = AUTO_VERTICAL_ENGINES.find((e) => e.id === c.kind)?.label ?? c.kind;
+    const env = envTone(c.environment);
+    return { id: c.id, label: `${c.name} · ${engine} · ${env.hint ?? env.label}` };
+  }) ?? null;
 }
 
 export function clusterOptions(rows: readonly BrokerCluster[] | null): IdOption[] | null {

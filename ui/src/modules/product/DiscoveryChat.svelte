@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   // DiscoveryChat — the chat pane for one Discovery Chat. A conversational agent
   // that works from an EMPTY/Untitled draft to help with early discovery &
   // research, and proposes Apply-able action cards.
@@ -85,7 +85,10 @@
     const currentCid = cid;
     backgroundTurn = false;
     stopNotice = null;
-    void loadChat(currentCid);
+    // Untracked: the loader's synchronous prefix reads/writes the composer
+    // (`inputText`, `sending`, `stopping`); tracked, the first keystroke after a
+    // switch re-ran this effect and reloaded the thread mid-typing.
+    untrack(() => void loadChat(currentCid));
   });
 
   async function loadChat(chatId: string, opts?: { preserveMessages?: DiscoveryChatMessage[] }): Promise<void> {

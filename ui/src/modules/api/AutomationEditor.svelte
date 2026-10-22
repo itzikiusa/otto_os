@@ -10,6 +10,7 @@
   import { editableSteps } from './automationInput';
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import MethodTag from './MethodTag.svelte';
   import StatusChip from './StatusChip.svelte';
   import { apiClient } from '../../lib/stores/apiClient.svelte';
@@ -259,6 +260,9 @@
   const runDetails = $derived(historyRun ?? apiClient.currentRun);
   const showRun = $derived(lastRun && lastRun.automation_id === automationId ? lastRun : null);
   const runs = $derived(apiClient.automationRuns.filter((r) => r.automation_id === automationId));
+  /** The live run's polls kept failing: it may still be running server-side,
+   *  so its partial report is not a verdict ("Last run failed" was wrong). */
+  const lost = $derived(!historyRun && !apiClient.running && !!showRun && apiClient.runLost != null && apiClient.currentRun?.id === apiClient.runLost);
 </script>
 
 {#if !automation}
@@ -273,8 +277,8 @@
       </div>
       <div class="vh-actions">
         {#if showRun}
-          <button class="chip result" class:ok={!apiClient.running && showRun.passed} class:bad={!apiClient.running && !showRun.passed} onclick={showReport} title="Show the last run’s results">
-            {apiClient.running ? 'Running…' : showRun.passed ? 'Last run passed' : 'Last run failed'} · {showRun.steps.filter((s) => s.ok).length}/{showRun.steps.length}
+          <button class="chip result" class:ok={!apiClient.running && !lost && showRun.passed} class:bad={!apiClient.running && !lost && !showRun.passed} onclick={showReport} title={lost ? 'Lost track of this run — refresh run history to see how it ended' : 'Show the last run’s results'}>
+            {apiClient.running ? 'Running…' : lost ? 'Lost track of this run' : showRun.passed ? 'Last run passed' : 'Last run failed'} · {showRun.steps.filter((s) => s.ok).length}/{showRun.steps.length}
           </button>
         {/if}
         <button class="icon-btn" onclick={menu} aria-label="Automation options" title="Automation options"><Icon name="more" size={14} /></button>
@@ -393,9 +397,9 @@
 
     {#if showRun}
       <section class="report" aria-label="Last run" bind:this={reportEl}>
-        <div class="report-banner" class:ok={showRun.passed} class:fail={!showRun.passed}>
-          <Icon name={showRun.passed ? 'check' : 'warning'} size={14} />
-          {apiClient.running ? 'Running…' : showRun.passed ? 'All steps passed' : 'Run failed'}
+        <div class="report-banner" class:ok={!lost && showRun.passed} class:fail={!lost && !showRun.passed}>
+          <Icon name={!lost && showRun.passed ? 'check' : 'warning'} size={14} />
+          {apiClient.running ? 'Running…' : lost ? 'Lost track of this run — refresh run history to see how it ended' : showRun.passed ? 'All steps passed' : 'Run failed'}
           <span class="rb-meta">{showRun.steps.filter((s) => s.ok).length} of {showRun.steps.length} steps passed</span>
         </div>
         {#if runDetails && runDetails.automation_id === automationId}
@@ -435,13 +439,21 @@
     <details class="disclosure">
       <summary>Run history ({runs.length})</summary>
       <div class="runs">
-        {#each runs as savedRun (savedRun.id)}
-          <button class="run-row" class:sel={historyRun?.id === savedRun.id} onclick={() => void openHistoryRun(savedRun.id)} title={new Date(savedRun.created_at).toLocaleString()}>
-            {RUN_STATUS[savedRun.status]} · {savedRun.steps_total ?? savedRun.report.steps.length} steps · {rel(savedRun.created_at)}
-          </button>
-        {:else}
-          <p class="sub-empty">No runs yet.</p>
-        {/each}
+        <LoadState
+          what="run history"
+          variant="compact"
+          loading={apiClient.runsLoading}
+          error={apiClient.runsError}
+          empty={runs.length === 0}
+          onretry={() => void apiClient.loadAutomationRuns(automationId)}
+        >
+          {#snippet emptyView()}<p class="sub-empty">No runs yet.</p>{/snippet}
+          {#each runs as savedRun (savedRun.id)}
+            <button class="run-row" class:sel={historyRun?.id === savedRun.id} onclick={() => void openHistoryRun(savedRun.id)} title={new Date(savedRun.created_at).toLocaleString()}>
+              {RUN_STATUS[savedRun.status]} · {savedRun.steps_total ?? savedRun.report.steps.length} steps · {rel(savedRun.created_at)}
+            </button>
+          {/each}
+        </LoadState>
         <div class="runs-actions">
           <button class="btn ghost small" onclick={async () => { await apiClient.loadAutomationRuns(automationId); if (historyRun) await openHistoryRun(historyRun.id); }}>
             <Icon name="refresh" size={12} />Refresh

@@ -75,6 +75,10 @@
     filtered = !!(applied.server || applied.tool || applied.decision);
     loading = true;
     moreError = null;
+    // A page still loading for the old filters is dropped by the generation
+    // guard, which also skips its `loadingMore = false` — clear it here or
+    // Load more stays disabled until the tab remounts.
+    loadingMore = false;
     try {
       const page = await mcpCpApi.cpAudit(query(0));
       if (gen !== generation) return;

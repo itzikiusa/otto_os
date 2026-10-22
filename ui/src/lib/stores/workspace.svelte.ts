@@ -81,6 +81,17 @@ export function visibleOnThisDevice(s: Session): boolean {
   return (s.meta as { client_id?: string } | null)?.client_id === clientId();
 }
 
+/** One bulk action's failures, named for its error toast: the first session
+ *  and its cause plus "and N more", or — when every failure has the same cause
+ *  (the daemon is down, a shared 403) — that cause once. */
+export function bulkFailureText(failures: { title: string; cause: string }[]): string {
+  const [first] = failures;
+  if (!first) return '';
+  if (failures.length === 1) return `${first.title}: ${first.cause}`;
+  if (failures.every((f) => f.cause === first.cause)) return `${plural(failures.length, 'session')}: ${first.cause}`;
+  return `${first.title}: ${first.cause.replace(/\.$/, '')} — and ${failures.length - 1} more.`;
+}
+
 /** Sentinel tab/pane id for the docked DB Explorer (not a real session). Lets
  *  the DB Explorer live as a pane in the Agents split, beside an agent. */
 export const DB_PANE_ID = '__db_explorer__';
@@ -1678,29 +1689,40 @@ class WorkspaceStore {
   /** Bulk archive (sidebar multi-select): one toast for the batch instead of
    *  N, and one error report — never stops at the first failure. */
   async archiveSessions(ids: Id[]): Promise<number> {
-    let failed = 0;
+    const failures: { title: string; cause: string }[] = [];
     for (const id of ids) {
       try {
         const s = await api.post<Session>(`/sessions/${id}/archive`);
         this.applyArchiveState(s);
-      } catch {
-        failed++;
+      } catch (e) {
+        failures.push({ title: this.bulkTitle(id), cause: loadErrorText(e) });
       }
     }
-    const ok = ids.length - failed;
+    const ok = ids.length - failures.length;
     if (ok > 0) toasts.info(`${plural(ok, 'session')} archived`);
-    if (failed > 0) toasts.error('Couldn’t archive', `${plural(failed, 'session')} couldn’t be archived.`);
-    return failed;
+    if (failures.length > 0) toasts.error('Couldn’t archive', bulkFailureText(failures));
+    return failures.length;
+  }
+
+  /** A session's title for a bulk-failure toast (its id when unknown). */
+  private bulkTitle(id: Id): string {
+    const s = this.sessions.find((x) => x.id === id) ?? this.archivedSessions.find((x) => x.id === id);
+    return s?.title || id;
   }
 
   /** Bulk delete (sidebar multi-select): caller confirms first. */
   async killSessions(ids: Id[]): Promise<number> {
-    let failed = 0;
+    const failures: { title: string; cause: string }[] = [];
     for (const id of ids) {
-      try { await this.killSession(id); } catch { failed++; }
+      const title = this.bulkTitle(id);
+      try {
+        await this.killSession(id);
+      } catch (e) {
+        failures.push({ title, cause: loadErrorText(e) });
+      }
     }
-    if (failed > 0) toasts.error('Couldn’t delete', `${plural(failed, 'session')} couldn’t be deleted.`);
-    return failed;
+    if (failures.length > 0) toasts.error('Couldn’t delete', bulkFailureText(failures));
+    return failures.length;
   }
 
   /** Archive: kill the PTY but keep the row + history in the Archived section. */

@@ -5,28 +5,32 @@
   let { room, send, disabled = false }: {room: RoomSnapshot; send: (action: RoomAction) => boolean; disabled?: boolean} = $props();
   const host = $derived(room.member_id === room.host_member_id);
   async function grant(member: RoomMember) {
-    if (await confirmer.ask(`${member.name} will be able to run commands with this session’s permissions. You can take back control at any time.`, {title: `Give ${member.name} control?`, confirmLabel: 'Give control'})) send({type: 'grant_control', member_id: member.id});
+    if (await confirmer.ask(`${member.name} will be able to run commands with this session’s permissions. You can take back control at any time.`, {title: `Give ${member.name} control?`, confirmLabel: 'Give control'})) decide(member, {type: 'grant_control', member_id: member.id}, (m) => !m?.control_requested);
   }
   async function remove(member: RoomMember) {
-    if (await confirmer.ask(`${member.name} will lose access to the terminal, chat and media immediately.`, {title: 'Remove participant?', confirmLabel: 'Remove', danger: true})) send({type: 'remove', member_id: member.id});
+    if (await confirmer.ask(`${member.name} will lose access to the terminal, chat and media immediately.`, {title: 'Remove participant?', confirmLabel: 'Remove', danger: true})) decide(member, {type: 'remove', member_id: member.id}, (m) => !m);
   }
-  // Admit / Decline replace (or remove) the very button that was pressed once
-  // the server echoes the admission. Remember whose it was, then put focus on
-  // that member's new first control — or the People heading when they're gone.
+  // Admit / Decline, Give control, the presentation toggles and Remove each
+  // replace (or remove) the very button that was pressed once the server
+  // echoes the action. Remember whose it was and when the echo has landed,
+  // then put focus on that member's new first control — or the People heading
+  // when they're gone (WCAG 2.4.3: focus never falls to <body> mid-call).
+  type Settled = (member: RoomMember | undefined) => boolean;
+  const admissionSettled: Settled = (m) => m?.admission !== 'pending';
   let listEl = $state<HTMLUListElement | null>(null);
   let headingEl = $state<HTMLHeadingElement | null>(null);
-  let refocusMember = $state<string | null>(null);
-  function decide(member: RoomMember, action: RoomAction): void {
-    if (send(action)) refocusMember = member.id;
+  let refocus = $state.raw<{id: string; settled: Settled} | null>(null);
+  function decide(member: RoomMember, action: RoomAction, settled: Settled = admissionSettled): void {
+    if (send(action)) refocus = {id: member.id, settled};
   }
   $effect(() => {
-    const id = refocusMember;
-    if (!id) return;
-    const member = room.members?.find((m) => m.id === id);
-    if (member?.admission === 'pending') return; // the echo hasn't landed yet
-    refocusMember = null;
+    const pending = refocus;
+    if (!pending) return;
+    const member = room.members?.find((m) => m.id === pending.id);
+    if (!pending.settled(member)) return; // the echo hasn't landed yet
+    refocus = null;
     void tick().then(() => {
-      const row = member ? listEl?.querySelector<HTMLElement>(`[data-member="${CSS.escape(id)}"]`) : null;
+      const row = member ? listEl?.querySelector<HTMLElement>(`[data-member="${CSS.escape(pending.id)}"]`) : null;
       const next = row?.querySelector<HTMLElement>('.actions select, .actions button');
       (next ?? headingEl)?.focus();
     });
@@ -62,8 +66,8 @@
           <label>Access <select {disabled} value={member.role} onchange={(event) => void changeRole(member, event.currentTarget.value === 'editor' ? 'editor' : 'viewer', event.currentTarget)}><option value="viewer">View only</option><option value="editor">May be granted control</option></select></label>
           {#if member.control_requested}<button class="btn small" {disabled} onclick={() => grant(member)}>Give control…</button>{/if}
           {#if member.audio_joined}<button class="btn small" {disabled} onclick={() => send({type: 'mute', member_id: member.id, muted: !member.room_muted})}>{member.room_muted ? 'Allow microphone' : 'Mute in room'}</button>{/if}
-          {#if member.presenter_requested}<button class="btn small" {disabled} onclick={() => send({type: 'grant_present', member_id: member.id, allowed: true})}>Allow presentation</button>{/if}
-          {#if member.presenter_allowed}<button class="btn small" {disabled} onclick={() => send({type: 'grant_present', member_id: member.id, allowed: false})}>Stop presenting access</button>{/if}
+          {#if member.presenter_requested}<button class="btn small" {disabled} onclick={() => decide(member, {type: 'grant_present', member_id: member.id, allowed: true}, (m) => !m?.presenter_requested)}>Allow presentation</button>{/if}
+          {#if member.presenter_allowed}<button class="btn small" {disabled} onclick={() => decide(member, {type: 'grant_present', member_id: member.id, allowed: false}, (m) => !m?.presenter_allowed)}>Stop presenting access</button>{/if}
           <button class="btn small danger" {disabled} onclick={() => remove(member)}>Remove…</button>
         {/if}
       </div>{/if}

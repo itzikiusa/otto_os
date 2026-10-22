@@ -12,6 +12,8 @@
 import * as issues from '../../../lib/api/issues';
 import { confirmOutward } from '../../../lib/confirmOutward';
 import { ctxMenu, type MenuItem, type MenuOptions } from '../../../lib/contextmenu.svelte';
+import { loadErrorText } from '../../../lib/loadError';
+import { refocusEditTrigger } from '../inlineEdit';
 import { toastError } from '../../../lib/toastError';
 import { toasts } from '../../../lib/toast.svelte';
 import type { EditableField, IssueFull, JiraTransition, JiraUser } from '../types';
@@ -108,6 +110,9 @@ export class JiraIssueEditor {
   // editmeta is lazily fetched once per issue; null = not loaded yet.
   editmeta = $state<EditableField[] | null>(null);
   editmetaLoading = $state(false);
+  /** Last failed editmeta load (human text) — shown inline with Retry; the
+   *  on-open effect gates on it so a failure never retry-loops. */
+  editmetaError = $state<string | null>(null);
   editingField = $state<string | null>(null); // field key currently in edit mode
   fieldDraft = $state<unknown>(null); // working value for the field being edited
   fieldSaving = $state(false);
@@ -135,6 +140,7 @@ export class JiraIssueEditor {
     this.assignablesLoading = false;
     this.editmeta = null;
     this.editmetaLoading = false;
+    this.editmetaError = null;
     this.editingField = null;
     this.fieldDraft = null;
     this.fieldSaving = false;
@@ -269,23 +275,30 @@ export class JiraIssueEditor {
 
   // ── Editable fields ───────────────────────────────────────────────────────
 
-  /** Lazily fetch editmeta once and cache it. On error mark it loaded-but-empty
-   *  so everything stays read-only and we don't retry-loop. */
+  /** Lazily fetch editmeta once and cache it. A failure leaves `editmeta`
+   *  null and records `editmetaError` (rendered inline with Retry — never a
+   *  toast that vanishes while every field silently stays read-only). */
   async ensureEditmeta(): Promise<void> {
     const s = this.host.issue();
     if (this.editmeta !== null || this.editmetaLoading || !s) return;
     this.editmetaLoading = true;
+    this.editmetaError = null;
     try {
       const meta = await issues.editMeta(s.account_id, s.source_key);
       if (!this.host.isCurrent(s)) return;
       this.editmeta = meta;
     } catch (e) {
       if (!this.host.isCurrent(s)) return;
-      toastError('Couldn’t load editable fields', e);
-      this.editmeta = []; // loaded-but-empty: every field stays read-only
+      this.editmetaError = loadErrorText(e);
     } finally {
       if (this.host.isCurrent(s)) this.editmetaLoading = false;
     }
+  }
+
+  /** Retry a failed editmeta load (the inline LoadState's Retry). */
+  retryEditmeta(): void {
+    this.editmetaError = null;
+    void this.ensureEditmeta();
   }
 
   /** The EditableField metadata for a given key, or undefined if not editable. */
@@ -338,8 +351,10 @@ export class JiraIssueEditor {
 
   /** Cancel the in-progress field edit. */
   cancelEdit(): void {
+    const key = this.editingField;
     this.editingField = null;
     this.fieldDraft = null;
+    if (key) void refocusEditTrigger(key);
   }
 
   /** Toggle membership of an option id in the multi-select array draft. */
@@ -388,6 +403,7 @@ export class JiraIssueEditor {
       this.host.setFull(full);
       this.editingField = null;
       this.fieldDraft = null;
+      void refocusEditTrigger(ef.key);
       toasts.info('Field updated');
     } catch (e) {
       toastError('Couldn’t update field', e);

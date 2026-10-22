@@ -27,7 +27,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import type { CanvasDoc } from './types';
   import { docFromAssist } from './assistDoc';
-  import { buildExcalidrawElements, isSimplified } from './excalidraw-build';
+  import { buildExcalidrawElements, isSimplified } from '../../lib/excalidraw/excalidraw-build';
   import { filesForSave, releaseFiles, resolveFiles, sha256Hex } from './canvasFiles';
   import type { ExFile } from './canvasFileRefs';
 

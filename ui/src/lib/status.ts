@@ -328,7 +328,14 @@ export function badgeTone(tone: Tone): BadgeTone {
 export interface SuspendedMeta {
   reason?: string;
   at?: string;
+  /** The cause, for `reason: "respawn_failed"` (manager.rs `respawn_failed`). */
+  error?: string;
 }
+
+/** `meta.suspended.reason` when an explicit restart killed the old process and
+ *  could not start the new one: the note leads with the cause instead of
+ *  blaming a memory-saving suspend. */
+export const SUSPEND_REASON_RESPAWN_FAILED = 'respawn_failed';
 
 const SUSPEND_REASONS: Record<string, string> = {
   idle: 'idle too long',
@@ -367,9 +374,14 @@ export function suspendedNote(
   if (!raw || typeof raw !== 'object') return null;
   const s = raw as SuspendedMeta;
   const at = typeof s.at === 'string' ? Date.parse(s.at) : NaN;
+  const agoText = Number.isNaN(at) ? '' : ago ? ago(at) : agoLabel(at, nowMs);
+  if (s.reason === SUSPEND_REASON_RESPAWN_FAILED) {
+    const cause = typeof s.error === 'string' ? s.error.trim() : '';
+    return `Couldn’t restart${cause ? `: ${cause}` : ''}${agoText ? ` · ${agoText}` : ''}`;
+  }
   const why = typeof s.reason === 'string' ? (SUSPEND_REASONS[s.reason] ?? null) : null;
   if (Number.isNaN(at) && !why) return null;
-  const when = Number.isNaN(at) ? '' : ` ${ago ? ago(at) : agoLabel(at, nowMs)}`;
+  const when = agoText ? ` ${agoText}` : '';
   return `Suspended${when}${why ? ` · ${why}` : ''}`;
 }
 

@@ -15,6 +15,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import type { IssueAccount, IssueProject } from '../../lib/api/types';
   import { truncatedNote } from '../../lib/listingPage';
+  import ConfluencePagePicker from '../../lib/components/ConfluencePagePicker.svelte';
   import type { ConfluenceSpace, ProductStoryVersion, ProductStoryDetail, ReviewedContent } from './types';
 
   interface Props {
@@ -52,7 +53,9 @@
   let spaceKey = $state('');
   let spacesError = $state('');
   let spacesSequence = 0;
-  let parentId = $state('');
+  // Parent page: picked by TITLE (PC-9), stored by id — the confirm copy names it.
+  let parentId = $state<string | null>(null);
+  let parentTitle = $state<string | null>(null);
   let rfcTitle = $state('');
 
   // ── Submit ────────────────────────────────────────────────────────────────
@@ -134,7 +137,7 @@
     }
     const sp = spaces.find((x) => x.key === spaceKey);
     return sp
-      ? `Creates a page in the ${sp.name} (${sp.key}) space${parentId.trim() ? `, under page ${parentId.trim()}` : ''}, visible to everyone who can view that space.`
+      ? `Creates a page in the ${sp.name} (${sp.key}) space${parentId ? `, under “${parentTitle ?? `page ${parentId}`}”` : ''}, visible to everyone who can view that space.`
       : '';
   });
 
@@ -267,7 +270,7 @@
           reviewed_content: reviewedContent,
           account_id: accountId,
           space_key: spaceKey,
-          parent_id: parentId.trim() || null,
+          parent_id: parentId,
           title: rfcTitle.trim() || null,
         });
         toasts.success('Published as Confluence RFC', detail.story.title);
@@ -278,7 +281,7 @@
       setError(mode === 'story' ? `Couldn’t publish to ${tracker}` : "Couldn’t publish to Confluence", e);
       if (e instanceof ApiError && e.status === 409) {
         reviewedContent = null;
-        previewError = 'The content changed. Reload the preview and review it before publishing again.';
+        previewError = 'The content changed. Select Retry preview and review it again before publishing.';
       }
     } finally {
       submitting = false;
@@ -403,16 +406,16 @@
           {/if}
         </div>
 
-        <!-- Optional parent page id -->
+        <!-- Optional parent page, picked by title -->
         <div class="field">
-          <label class="label" for="pd-parent">Parent page ID <span class="dim">(optional)</span></label>
-          <input dir="auto"
+          <ConfluencePagePicker
             id="pd-parent"
-            class="input"
-            bind:value={parentId}
-            placeholder="e.g. 123456789"
-            spellcheck="false"
+            {accountId}
+            {spaceKey}
+            value={parentId}
+            title={parentTitle}
             disabled={submitting}
+            onchange={(id, t) => { parentId = id; parentTitle = t; }}
           />
         </div>
 

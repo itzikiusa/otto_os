@@ -311,7 +311,7 @@
         <div class="form-actions">
           <button class="btn small ghost" onclick={() => { triggerForm = null; triggerEditId = null; }}>Cancel</button>
           <button class="btn small primary" onclick={saveTrigger} disabled={savingTrigger || !!swarm.triggersError}
-            title={swarm.triggersError ? 'Reload the triggers first' : undefined}>
+            title={swarm.triggersError ? 'Refresh the triggers first' : undefined}>
             {triggerEditId ? 'Save trigger' : 'Add trigger'}
           </button>
         </div>

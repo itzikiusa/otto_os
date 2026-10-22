@@ -20,9 +20,6 @@ import {
   type ProductMockupAssistReq,
 } from '../../modules/product/types';
 
-/** Back-compat alias — the old two-value union is now the full design enum. */
-export type MockupFormat = DesignFormat;
-
 /** One live `mockup_updated` as seen by the arena. `content === null` means the
  *  payload was binary/oversized and the bytes must be re-fetched. */
 export interface LiveUpdate {

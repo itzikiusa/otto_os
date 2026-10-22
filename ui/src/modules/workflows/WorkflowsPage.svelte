@@ -1460,7 +1460,7 @@
     } catch (e) {
       if (reviewedVersion && run?.id === runId && run.approval_node_id === nodeId && (e as {status?: number})?.status === 409) {
         approvalPreviewReady = false; approvalPreviewVersion = null;
-        approvalPreviewError = 'The publication preview changed. Reload and review it before deciding.';
+        approvalPreviewError = 'The publication preview changed. Select Retry preview and review it again before deciding.';
         void refetchRun(runId);
       }
       toastError('Couldn’t record the approval', e);
@@ -1469,6 +1469,13 @@
     }
   }
 
+  /** "“Title”" for a parent page picked by name in the publish node (PC-9 keeps
+   *  its title beside the id), else "page {id}". */
+  function parentPageLabel(parentId: string): string {
+    const n = graph.nodes.find((x) => x.kind === 'product_publish' && (x.params as { parent_id?: unknown } | null)?.parent_id === parentId);
+    const t = (n?.params as { parent_title?: unknown } | null)?.parent_title;
+    return typeof t === 'string' && t ? `“${t}”` : `page ${parentId}`;
+  }
   function nodeName(id: string): string {
     const n = graph.nodes.find((x) => x.id === id);
     return n?.name || n?.kind || id;
@@ -1996,7 +2003,7 @@
               <h3>{approvalPreview.kind === 'rfc' ? (approvalPreview.request.title ?? approvalPreview.request.reviewed_content.title) : approvalPreview.request.reviewed_content.title}</h3>
               <p>Publish via {approvalPreview.account_label} ({approvalPreview.account_url}).
                 {#if approvalPreview.kind === 'jira'}Create {approvalPreview.request.issue_type} in project {approvalPreview.request.project_key}; visible to people with access to that project.
-                {:else}Create a page in space {approvalPreview.request.space_key}{approvalPreview.request.parent_id ? ` under page ${approvalPreview.request.parent_id}` : ''}; visible to people with access to that space.{/if}
+                {:else}Create a page in space {approvalPreview.request.space_key}{approvalPreview.request.parent_id ? ` under ${parentPageLabel(approvalPreview.request.parent_id)}` : ''}; visible to people with access to that space.{/if}
               </p>
               <textarea dir="auto" class="np-prompt" aria-label="Full publication content" rows="12" readonly value={approvalBody}></textarea>
             {/if}

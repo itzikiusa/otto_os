@@ -1,7 +1,7 @@
 <script lang="ts">
   // Reader-mode page render. The fetched page's markdown is rendered through
   // the SAME sanitizing renderer Vault's reading view uses (`renderNote` from
-  // `modules/vault/mdRender.ts`) — never `{@html}` on raw page content. No
+  // `lib/render/markdown.ts`) — never `{@html}` on raw page content. No
   // wikilink/attachment resolution applies here (this isn't a vault note), so
   // `resolve`/`assetUrl` are no-ops.
   //
@@ -21,7 +21,7 @@
 
   import { tick } from 'svelte';
   import { toastError } from '../../lib/toastError';
-  import { renderNote } from '../vault/mdRender';
+  import { renderNote } from '../../lib/render/markdown';
   import { browser } from '../../lib/stores/browser.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';

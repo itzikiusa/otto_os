@@ -281,6 +281,17 @@
     return Math.max(0, Math.ceil((IMP_DURATION_MS - elapsed) / 1000));
   });
 
+  /** What the polite sr-only region says: thresholds only (5 min, 1 min,
+   *  expired), so the ticking countdown is never spoken every second. The
+   *  string changes only at an edge, and an unchanged string isn't re-read. */
+  const impAnnounce = $derived.by(() => {
+    if (!auth.isImpersonating) return '';
+    if (impSecsLeft <= 0) return 'Impersonation session may have expired';
+    if (impSecsLeft <= 60) return '1 minute of impersonation left';
+    if (impSecsLeft <= 300) return '5 minutes of impersonation left';
+    return '';
+  });
+
   function fmtImpCountdown(s: number): string {
     if (s <= 0) return '0:00';
     const m = Math.floor(s / 60);
@@ -926,8 +937,11 @@
 <!-- One content mount across desktop/tablet/phone. Changing the surrounding
      chrome must preserve each page's unsaved draft, selection and focus. -->
 {#snippet centerContent()}
+  <!-- Always mounted (a region inserted with its text is often silent); the
+       banner below is a plain region, its countdown visible but not live. -->
+  <div class="sr-only" role="status">{impAnnounce}</div>
   {#if auth.isImpersonating}
-    <div class="provider-banner impersonation-banner" role="alert">
+    <div class="provider-banner impersonation-banner" role="region" aria-label="Impersonation">
       <span>
         Acting as <strong>{auth.me?.username ?? '…'}</strong>
         <span class="imp-real"> (you are <strong>{auth.realUser?.username ?? '…'}</strong>)</span>
@@ -1133,7 +1147,7 @@
             <Drawer bind:open={ui.rightOpen} inline={!compactShell} side="right" label={SIDE_PANEL} width="min(92vw, 360px)">
               <!-- Its chunk starts with the Agents page, or on first show (pages.svelte.ts). -->
               {@const RightPanel = loadedRightPanel()}
-              {#if RightPanel}<RightPanel forceOpen={compactShell} />{:else}<div class="rp-loading" class:rail={!compactShell} role="status" aria-label="Loading the {SIDE_PANEL}">{#if compactShell}<Skeleton rows={4} height={28} />{/if}</div>{/if}
+              {#if RightPanel}<RightPanel forceOpen={compactShell} />{:else}<div class="rp-loading" class:rail={!compactShell}>{#if compactShell}<Skeleton rows={4} height={28} label="the {SIDE_PANEL}" />{/if}</div>{/if}
             </Drawer>
           {/if}
         </div>

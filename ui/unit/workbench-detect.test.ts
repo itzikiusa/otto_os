@@ -6,6 +6,7 @@ import {
   effectiveLanguage,
   extensionFor,
   WB_LANGUAGES,
+  SNIFF_PREFIX,
 } from '../src/modules/workbench/lib/detect.ts';
 
 test('the file extension wins over the content', () => {
@@ -80,4 +81,18 @@ test('svg behind an xml prologue and comments is still svg, in linear time', () 
   const started = performance.now();
   assert.equal(detectLanguage('untitled', '<!--' + '--><!--'.repeat(50_000)), 'xml');
   assert.ok(performance.now() - started < 500);
+});
+
+test('the content sniff is bounded to a prefix; JSON is still confirmed on the whole buffer', () => {
+  // A heading far past the sniffed prefix does not make a plain log Markdown.
+  const log = 'plain log line\n'.repeat(Math.ceil((SNIFF_PREFIX * 2) / 15));
+  assert.equal(detectLanguage('Untitled', log + '# Heading\n'), 'txt');
+  // A big JSON document (its prefix alone is not valid JSON) is JSON.
+  const big = '[' + Array.from({ length: 5000 }, (_, i) => `{"n": ${i}}`).join(',\n') + ']';
+  assert.ok(big.length > SNIFF_PREFIX);
+  assert.equal(detectLanguage('Untitled', big), 'json');
+  assert.notEqual(detectLanguage('Untitled', big.slice(0, -1) + '}'), 'json');
+  // Leading blank lines and a BOM are skipped without a whole-document split.
+  assert.equal(detectLanguage('Untitled', '﻿\n\n\nSELECT 1'), 'sql');
+  assert.equal(detectLanguage('Untitled', '﻿{"a": 1}'), 'json');
 });

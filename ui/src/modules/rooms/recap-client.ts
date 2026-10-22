@@ -18,6 +18,6 @@ export async function recapRequest<T>(path: string, body?: unknown, signal?: Abo
 export async function recapBlob(path: string): Promise<Blob> {
   const token = getToken(); if (!token) throw new Error('Sign in as the room owner to access recaps.');
   const response = await laneFetch('long', path, {headers: {Authorization: `Bearer ${token}`}});
-  if (!response.ok) throw new Error('Could not load the recap file. Try again.');
+  if (!response.ok) throw new Error('Couldn’t load the recap file. Try again.');
   return response.blob();
 }

@@ -35,6 +35,9 @@
   let { active = true }: { active?: boolean } = $props();
 
   const session = $derived(ws.activeSession);
+  /** The agent session "Send to agent" posts to — named on the button, and the
+   *  button is disabled (with the reason) when there is none. */
+  const sendTarget = $derived(session?.kind === 'agent' ? session : null);
   const attachedIssue = $derived(
     (session?.meta?.issue as AttachedIssue | undefined) ?? null,
   );
@@ -662,8 +665,13 @@
     {#if annotations.length > 0}
       <div class="annot-badge">
         <span class="annot-count">{annotations.length} marked</span>
-        <button class="btn primary small" onclick={sendToAgent}>
-          Send {annotations.length} to agent
+        <button
+          class="btn primary small send-target"
+          onclick={sendToAgent}
+          disabled={!sendTarget}
+          title={sendTarget ? `Send the marks to ${sendTarget.title || 'the active agent'} and start its next turn` : 'Open an agent session to send marks'}
+        >
+          Send {annotations.length} to {sendTarget?.title || 'agent'}
         </button>
         <button
           class="btn small"
@@ -1013,6 +1021,13 @@
   }
 
   /* ── Annotation badge ──────────────────────────────────────────────────── */
+  /* A long session title truncates instead of widening the badge row. */
+  .send-target {
+    max-inline-size: 28ch;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
   .annot-badge {
     position: absolute;
     bottom: 34px; /* just above frame-foot */

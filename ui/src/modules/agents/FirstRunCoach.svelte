@@ -261,7 +261,7 @@
               <Icon name="refresh" size={12} /> {checkingProviders ? 'Checking…' : 'Re-check'}
             </button>
             {#if providerCheckFailed}
-              <p role="status">Could not check agent CLIs. Try again.</p>
+              <p role="status">Couldn’t check agent CLIs. Try again.</p>
             {/if}
           </div>
         {/if}

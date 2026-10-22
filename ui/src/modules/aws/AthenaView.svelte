@@ -23,6 +23,7 @@
   import ResultsGrid from '../database/ResultsGrid.svelte';
   import RegionPicker from './RegionPicker.svelte';
   import { athenaCostUsd, fmtAgo, fmtBytes, fmtMs, awsErrorText } from './util';
+  import { awsLoadText } from './loadText';
   import Tabs from '../../lib/components/Tabs.svelte';
   import { statusPollMs } from '../../lib/pollBackoff';
   import { confirmProd, isProdEnv } from '../../lib/confirmProd';
@@ -124,7 +125,7 @@
       if (!database && c.databases.length) database = c.databases[0];
     } catch (e) {
       if (seq !== catalogGeneration || requestedRegion !== rq) return;
-      catError = e instanceof Error ? e.message : String(e);
+      catError = awsLoadText(e);
     } finally {
       if (seq === catalogGeneration && requestedRegion === rq) catLoading = false;
     }
@@ -287,7 +288,7 @@
     } catch (e) {
       if (seq !== executionGeneration) return;
       qstate = 'FAILED';
-      resultError = e instanceof Error ? e.message : String(e);
+      resultError = awsLoadText(e);
     } finally {
       if (seq === executionGeneration) submitting = false;
     }
@@ -340,7 +341,7 @@
     } catch (e) {
       if (qid !== id || seq !== executionGeneration) return;
       pollFails++;
-      statusUnknown = e instanceof Error ? e.message : String(e);
+      statusUnknown = awsLoadText(e);
       if (pollFails < MAX_POLL_FAILS) schedulePoll(Math.min(30_000, 2_000 * 2 ** (pollFails - 1)));
     }
   }
@@ -374,7 +375,7 @@
       historyError = '';
     } catch (e) {
       if (seq !== historyGeneration || requestedRegion !== rq || requestedWorkgroup !== workgroup) return;
-      historyError = e instanceof Error ? e.message : String(e);
+      historyError = awsLoadText(e);
     } finally {
       if (seq === historyGeneration) historyLoading = false;
     }
@@ -566,7 +567,11 @@
       />
     </div>
 
-    <div class="status" role="status">
+    <!-- Not a live region: execMs/scanned rewrite on every poll and the bar
+         holds the Copy-id button and the output tabs. Only the query STATE
+         is announced, once per change. -->
+    <span class="sr-only" role="status">{qstate ? `Query ${qstate.toLowerCase()}` : ''}</span>
+    <div class="status">
       {#if qstate}
         <span class="st {qstate.toLowerCase()}">{qstate}</span>
         <span class="dim">scanned <strong>{fmtBytes(scanned)}</strong></span>

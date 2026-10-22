@@ -29,7 +29,7 @@
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { registry } from '../../lib/commands.svelte';
   import { popoutItems } from '../../lib/popoutMenu';
-  import { now, nowMinute } from '../../lib/stores/now.svelte';
+  import { now, nowMinute, rel } from '../../lib/stores/now.svelte';
   import { sessionUsage } from '../../lib/stores/sessionUsage.svelte';
   import { pollWhileVisible } from '../../lib/poll';
   import { sessionUsageLabel } from '../../lib/sessionUsage';
@@ -552,7 +552,7 @@
    *  idle too long"; only while it IS suspended (a resume clears the stamp,
    *  but a stale meta copy must never relabel a live pane). Minute clock. */
   const suspendNote = $derived(
-    paneState.key === 'suspended' ? suspendedNote(session?.meta, nowMinute()) : null,
+    paneState.key === 'suspended' ? suspendedNote(session?.meta, nowMinute(), (ms) => rel(ms)) : null,
   );
 
   /** What the header no longer shows inline — the details chip's tooltip and

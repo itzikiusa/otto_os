@@ -10,7 +10,7 @@
 // JSON array of `{range, errmsg}` objects, not a plain "Error: …" string — parsed
 // below into one readable line. Dark themes start at 200 ("Dark Mauve").
 
-import { createRenderQueue, isStaleResult, type Stale } from './renderQueue';
+import { createRenderQueue, isStaleResult, type Stale } from '../../lib/render/renderQueue';
 import { sanitizeD2Svg } from './svgSanitize';
 
 type D2CompileOptions = { sketch?: boolean; themeID?: number };

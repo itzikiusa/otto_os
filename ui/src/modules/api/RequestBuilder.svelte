@@ -9,6 +9,7 @@
   import { onTabKey } from '../../lib/tabKeys';
   import { baseUrl } from '../../lib/api/client';
   import Icon from '../../lib/components/Icon.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import CodeEditor from '../../lib/components/CodeEditor.svelte';
   import MethodTag from './MethodTag.svelte';
@@ -1230,9 +1231,15 @@
 {#if cookiesOpen}
   <Modal title="Cookie jar" width={620} onclose={() => (cookiesOpen = false)}>
     <p class="tab-help">Cookies that responses in this workspace set. Otto sends them back on later requests to the same site, like a browser. They’re kept in memory until the daemon restarts.</p>
-    {#if apiClient.cookies.length === 0}
-      <p class="dim-text">No cookies yet.</p>
-    {:else}
+    <LoadState
+      what="cookies"
+      variant="compact"
+      loading={apiClient.cookiesLoading}
+      error={apiClient.cookiesError}
+      empty={apiClient.cookies.length === 0}
+      onretry={() => void apiClient.loadCookies()}
+    >
+      {#snippet emptyView()}<p class="dim-text">No cookies yet.</p>{/snippet}
       <table class="cookie-table">
         <thead><tr><th>Site</th><th>Name</th><th>Value</th></tr></thead>
         <tbody>
@@ -1241,7 +1248,7 @@
           {/each}
         </tbody>
       </table>
-    {/if}
+    </LoadState>
     {#snippet footer()}
       <button class="btn danger" onclick={clearCookies} disabled={apiClient.cookies.length === 0}>Clear cookies…</button>
       <span class="grow"></span>

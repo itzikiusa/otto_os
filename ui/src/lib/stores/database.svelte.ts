@@ -1,8 +1,11 @@
 // Database Explorer store — workspace-scoped DB connections + schema browsing,
 // query tabs, saved queries, history, and Superset-style dashboards/widgets.
 // Reads `ws.currentId` only (never mutates it), mirroring apiClient.svelte.ts.
+// A façade over per-concern parts in ./database/: `model` (types, tab factory,
+// view modes), `statement` (SQL text helpers) and `dashboards.svelte`
+// (dashboards + widgets, delegated through `dash`); it re-exports all of them,
+// so importers keep using `lib/stores/database.svelte`.
 
-import type { IconName } from '../components/Icon.svelte';
 import {
   api,
   ApiError,
@@ -25,16 +28,13 @@ import type {
   DbCompletionResponse,
   DbDashboard,
   DbExportFormat,
-  DbEngine,
   DbHistoryEntry,
   DbQueryPlan,
   DbSavedQuery,
   DbSchemaGraph,
   DbTestResult,
   DbQueryStatus,
-  DbViz,
   DbWidget,
-  DbWidgetMapping,
   Id,
   ObjectDetail,
   ObjectHit,
@@ -48,23 +48,23 @@ import { ws } from './workspace.svelte';
 import { toasts } from '../toast.svelte';
 import { router } from '../router.svelte';
 import { downloadText } from '../components/exporters';
-import { formatMongo } from '../../modules/database/mongo-format';
+import { formatMongo } from '../database/mongo-format';
 import {
   defaultVarSpec,
   stripJavaStringConcat,
   maskQueryPlaceholders,
   unmaskQueryPlaceholders,
   type VarSpec,
-} from '../../modules/database/sql-util';
-import { condToSql, parseFilterValText, toFilterVal, type FilterCond } from '../../modules/database/filter-chips';
-import { obviousWriteVerb, tableRefFromNodeId } from '../../modules/database/sql-dialect';
-export { condLabel, condToSql, filterValMatches, parseFilterValText, toFilterVal } from '../../modules/database/filter-chips';
-export type { FilterCond, FilterVal } from '../../modules/database/filter-chips';
-import { normalizeDbError } from '../../modules/database/error-normalize';
+} from '../database/sql-util';
+import { condToSql, parseFilterValText, toFilterVal, type FilterCond } from '../database/filter-chips';
+import { tableRefFromNodeId } from '../database/sql-dialect';
+export { condLabel, condToSql, filterValMatches, parseFilterValText, toFilterVal } from '../database/filter-chips';
+export type { FilterCond, FilterVal } from '../database/filter-chips';
+import { normalizeDbError } from '../database/error-normalize';
 import { copyTextOrThrow } from '../clipboard';
 import { mapLimit, pollWhileVisible, type Poller } from '../poll';
-import { forgetEditorState, forgetEditorStates, hydrateEditorHistory } from '../editor-history';
-import { dropGridState, parkedEditCount, releaseGridResult } from '../../modules/database/grid-tab-state';
+import { forgetEditorStates, hydrateEditorHistory } from '../editor-history';
+import { parkedEditCount, releaseGridResult } from '../database/grid-tab-state';
 import { estimateResultBytes, isReleased, releasedStub, resultBudget } from './db-result-budget';
 import { clipHistory } from './clipHistory.svelte';
 import { loadErrorText } from '../loadError';
@@ -72,634 +72,55 @@ import { announceModule } from '../lazyModule';
 import { toastError } from '../toastError';
 import { dbPrefs, loadFlag, saveFlag, type WarmMode } from './dbPrefs.svelte';
 
-/** Connection kinds the explorer can browse (the DB engines). */
-export const DB_KINDS = ['mysql', 'postgres', 'redis', 'mongodb', 'clickhouse'] as const;
-export type DbKind = (typeof DB_KINDS)[number];
-
-function isDbKind(k: string): k is DbKind {
-  return (DB_KINDS as readonly string[]).includes(k);
-}
-
-/**
- * The production / read-only write-gate rejection. The server tags the message
- * with `write_blocked: ` (a stable marker, see otto-dbviewer) so the UI can
- * recognise it and offer a typed confirmation rather than string-matching prose.
- */
-function isWriteBlocked(e: unknown): boolean {
-  return e instanceof ApiError && e.message.startsWith('write_blocked:');
-}
-
-/**
- * The refusal of a `read_only` run (`QueryRequest.read_only`, what an agent's
- * UI-control run always sends): the statement classifies as a write/DDL. Tagged
- * `read_only: ` by otto-dbviewer — distinct from `write_blocked:` (a guarded
- * connection) and `mcp_read_only:` (no human in that loop).
- */
-export function isReadOnlyRefusal(e: unknown): boolean {
-  return e instanceof ApiError && e.message.startsWith('read_only:');
-}
-
-/** Persisted default row cap applied when a statement has no explicit LIMIT. */
-const ROW_LIMIT_KEY = 'otto_db_row_limit';
-const DEFAULT_ROW_LIMIT = 1000;
-/** Sentinel "no cap" value sent as max_rows for the "All" option. */
-export const ROW_LIMIT_ALL = 1_000_000;
-
-function loadRowLimit(): number {
-  if (typeof localStorage === 'undefined') return DEFAULT_ROW_LIMIT;
-  const v = Number(localStorage.getItem(ROW_LIMIT_KEY));
-  return Number.isFinite(v) && v > 0 ? v : DEFAULT_ROW_LIMIT;
-}
-
-/** Restored tabs warmed at once (matches the bg lane's 3 app-wide sockets). */
-const WARM_CONCURRENCY = 3;
-/** Keep-alive period: under the daemon's 5-minute pool idle timeout. */
-const KEEP_ALIVE_MS = 4 * 60_000;
-
-
-/**
- * A fresh per-run id sent with a query so the server can register it and a later
- * `db/cancel` (same id) can issue engine-native cancellation. Uses
- * `crypto.randomUUID` where available, with a non-cryptographic fallback (the id
- * only needs to be unique among this client's in-flight queries).
- */
-function newQueryId(): string {
-  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-    return crypto.randomUUID();
-  }
-  return `q-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
-}
-
-// Drop line (`-- …`) and block (`/* … */`) comments, string-aware, so the
-// trailing-LIMIT probe below only ever sees real SQL — a `LIMIT` inside a
-// trailing comment must neither satisfy nor hide the match.
-function stripSqlComments(sql: string): string {
-  let out = '';
-  const n = sql.length;
-  let i = 0;
-  while (i < n) {
-    const ch = sql[i];
-    if (ch === "'" || ch === '"' || ch === '`') {
-      const q = ch;
-      out += sql[i++];
-      while (i < n) {
-        out += sql[i];
-        if (sql[i] === q) {
-          if (sql[i + 1] === q) { out += sql[i + 1]; i += 2; continue; }
-          i++;
-          break;
-        }
-        i++;
-      }
-      continue;
-    }
-    if (ch === '-' && sql[i + 1] === '-') { while (i < n && sql[i] !== '\n') i++; continue; }
-    if (ch === '/' && sql[i + 1] === '*') { i += 2; while (i < n && !(sql[i] === '*' && sql[i + 1] === '/')) i++; i += 2; continue; }
-    out += sql[i++];
-  }
-  return out;
-}
-
-/**
- * Extract a trailing explicit `LIMIT` from a SQL statement so we honor what the
- * user wrote instead of clipping it. Handles `LIMIT n`, `LIMIT offset, count`,
- * and `LIMIT n OFFSET m`. Comments are stripped first (a `-- LIMIT 10` remark
- * is not a LIMIT). Returns the row count, or null when there's no trailing LIMIT.
- */
-export function parseExplicitLimit(sql: string): number | null {
-  const m = stripSqlComments(sql).match(
-    /\blimit\s+(\d+)(?:\s*,\s*(\d+))?(?:\s+offset\s+\d+)?\s*;?\s*$/i,
-  );
-  if (!m) return null;
-  return m[2] !== undefined ? Number(m[2]) : Number(m[1]);
-}
-
-// ── Quick-filter helpers (module-level) ──────────────────────────────────────
-
-// `toFilterVal` / `parseFilterValText` / `condToSql` / `condLabel` (and the
-// `FilterVal` / `FilterCond` types) live in `modules/database/filter-chips.ts`
-// — dialect-aware via `sql-dialect.ts` — and are re-exported at the top.
-
-// Top-level clause keywords that terminate a WHERE / mark where one is inserted.
-const BOUNDARY_KW = [
-  'group by', 'order by', 'having', 'limit', 'window', 'qualify',
-  'union all', 'union', 'into', 'settings', 'format',
-];
-const SCAN_KW = ['from', 'where', 'prewhere', ...BOUNDARY_KW];
-
-/** Find top-level (depth-0, not in string/comment) clause-keyword hits. */
-function scanTopLevel(sql: string): { kw: string; idx: number; end: number }[] {
-  const hits: { kw: string; idx: number; end: number }[] = [];
-  const lower = sql.toLowerCase();
-  const n = sql.length;
-  let depth = 0;
-  let i = 0;
-  while (i < n) {
-    const ch = sql[i];
-    if (ch === "'" || ch === '"' || ch === '`') {
-      const q = ch;
-      i++;
-      while (i < n) {
-        if (sql[i] === q) {
-          if (sql[i + 1] === q) { i += 2; continue; }
-          i++;
-          break;
-        }
-        i++;
-      }
-      continue;
-    }
-    if (ch === '-' && sql[i + 1] === '-') { while (i < n && sql[i] !== '\n') i++; continue; }
-    if (ch === '/' && sql[i + 1] === '*') { i += 2; while (i < n && !(sql[i] === '*' && sql[i + 1] === '/')) i++; i += 2; continue; }
-    if (ch === '(') { depth++; i++; continue; }
-    if (ch === ')') { depth = Math.max(0, depth - 1); i++; continue; }
-    if (depth === 0 && (i === 0 || /\s/.test(sql[i - 1]))) {
-      const matched = SCAN_KW.find((kw) => {
-        if (!lower.startsWith(kw, i)) return false;
-        const after = sql[i + kw.length];
-        return after === undefined || /\s/.test(after) || after === '(';
-      });
-      if (matched) { hits.push({ kw: matched, idx: i, end: i + matched.length }); i += matched.length; continue; }
-    }
-    i++;
-  }
-  return hits;
-}
-
-/** Split a single SELECT into head / WHERE-body / tail. Returns null when it
- * can't safely parse (no top-level FROM, a PREWHERE, or multiple statements).
- * Exported so the cell "Query by value" / "Add to query" actions reuse the exact
- * same top-level parser as the quick-filter chips (no second, drifting splicer). */
-export function splitStatement(
-  sql: string,
-): { head: string; whereBody: string; tail: string } | null {
-  if (/;\s*\S/.test(sql)) return null; // a second statement after a semicolon
-  const hits = scanTopLevel(sql);
-  if (!hits.some((h) => h.kw === 'from')) return null;
-  if (hits.some((h) => h.kw === 'prewhere')) return null;
-  const from = hits.find((h) => h.kw === 'from')!;
-  const whereHit = hits.find((h) => h.kw === 'where');
-  const isBoundary = (kw: string) => BOUNDARY_KW.includes(kw);
-  if (whereHit) {
-    const tailHit = hits.find((h) => isBoundary(h.kw) && h.idx > whereHit.idx);
-    return {
-      head: sql.slice(0, whereHit.idx),
-      whereBody: sql.slice(whereHit.end, tailHit ? tailHit.idx : undefined).trim(),
-      tail: (tailHit ? sql.slice(tailHit.idx) : '').trim(),
-    };
-  }
-  const tailHit = hits.find((h) => isBoundary(h.kw) && h.idx > from.idx);
-  return {
-    head: tailHit ? sql.slice(0, tailHit.idx) : sql,
-    whereBody: '',
-    tail: (tailHit ? sql.slice(tailHit.idx) : '').trim(),
-  };
-}
-
-/** Replace the statement's WHERE with `newWhereBody` (removing WHERE when empty).
- * Returns the original unchanged when it can't safely parse. Exported for the
- * cell filter actions (see `splitStatement`). */
-export function rewriteWhere(sql: string, newWhereBody: string): string {
-  const trimmed = sql.trimEnd();
-  const hadSemi = trimmed.endsWith(';');
-  const core = hadSemi ? trimmed.slice(0, -1).trimEnd() : trimmed;
-  const parts = splitStatement(core);
-  if (!parts) return sql;
-  let out = parts.head.trimEnd();
-  if (newWhereBody.trim()) out += `\nWHERE ${newWhereBody.trim()}`;
-  if (parts.tail) out += `\n${parts.tail}`;
-  return hadSemi ? `${out};` : out;
-}
-
-/** Extract a statement's existing WHERE body (to preserve it as a raw chip). */
-function extractWhereBody(sql: string): string | null {
-  const core = sql.trim().replace(/;\s*$/, '');
-  const parts = splitStatement(core);
-  return parts && parts.whereBody ? parts.whereBody : null;
-}
-
-/** Glyph (Icon name) for a connection engine. */
-export function engineGlyph(kind: string): IconName {
-  switch (kind) {
-    case 'redis':
-      return 'key';
-    case 'mongodb':
-      return 'box';
-    case 'clickhouse':
-      return 'grid';
-    case 'postgres':
-      return 'layers';
-    case 'ssh':
-      return 'terminal';
-    case 'custom':
-      return 'gear';
-    case 'kafka': // broker clusters in the unified tree
-      return 'split';
-    default:
-      return 'db';
-  }
-}
-
-/** Dashboard widgets re-run unattended on every refresh, so they must be
- *  read-only queries. An obvious write is refused at save time with the
- *  reason; the daemon runs every widget read-only regardless (the gate). */
-function widgetStatementOk(statement: string): boolean {
-  const verb = obviousWriteVerb(statement);
-  if (!verb) return true;
-  toasts.error('Widgets must be read-only queries', `${verb} changes data — a widget re-runs it on every refresh.`);
-  return false;
-}
-
-// ── Result view mode ──────────────────────────────────────────────────────────
-// How a tab's result renders: a columnar grid, one record per block (Postgres
-// `\x` / ClickHouse FORMAT Vertical) or one JSON object per row. Where the mode
-// comes from is layered — see `effectiveViewMode` — so an explicit pick never
-// fights the automatic defaults, and nothing here resets on a tab switch.
-export type ViewMode = 'grid' | 'vertical' | 'json';
-const VIEW_MODES: readonly ViewMode[] = ['grid', 'vertical', 'json'];
-function isViewMode(v: unknown): v is ViewMode {
-  return typeof v === 'string' && (VIEW_MODES as readonly string[]).includes(v);
-}
-/** The view a result opens in when nothing else decided. Mongo documents are
- *  nested and ragged, so they read best one record at a time; the SQL engines
- *  (and Redis) keep the columnar grid. */
-export const ENGINE_DEFAULT_VIEW: Record<DbEngine, ViewMode> = {
-  mongodb: 'vertical',
-  mysql: 'grid',
-  postgres: 'grid',
-  clickhouse: 'grid',
-  redis: 'grid',
-};
-/** Everything `effectiveViewMode` / `viewModeReason` weigh. `autoVerticalCols`
- *  is the user's "switch to Vertical past N columns" setting FOR THIS ENGINE
- *  (`ui.dbAutoVerticalFor` — MongoDB 10, SQL engines 0 = never, by default). */
-export interface ViewModeInputs {
-  tabPick: ViewMode | null;
-  connPick: ViewMode | null;
-  columnCount: number;
-  autoVerticalCols: number;
-  engine: DbEngine | null;
-}
-function wideResult(a: ViewModeInputs): boolean {
-  return a.autoVerticalCols > 0 && a.columnCount > a.autoVerticalCols;
-}
-/**
- * The view a result renders in. Precedence, first match wins:
- *   1. an explicit pick on THIS tab (the segmented control / ⇧⌘V);
- *   2. the wide-result threshold — more columns than the user's limit → Vertical;
- *   3. the pick remembered for the connection (the last explicit pick on it);
- *   4. the engine default (`ENGINE_DEFAULT_VIEW`), Grid when the engine is unknown.
- * So the threshold never overrides a choice made on the tab, and a choice made
- * on another tab of the same connection only fills in when nothing else did.
- */
-export function effectiveViewMode(a: ViewModeInputs): ViewMode {
-  if (a.tabPick) return a.tabPick;
-  if (wideResult(a)) return 'vertical';
-  if (a.connPick) return a.connPick;
-  return (a.engine ? ENGINE_DEFAULT_VIEW[a.engine] : undefined) ?? 'grid';
-}
-/** Why `effectiveViewMode` chose what it chose — the view switch's tooltip. */
-export function viewModeReason(a: ViewModeInputs): string {
-  if (a.tabPick) return 'your pick for this tab';
-  if (wideResult(a)) return `auto: ${a.columnCount} columns > ${a.autoVerticalCols}`;
-  if (a.connPick) return 'remembered for this connection';
-  return 'engine default';
-}
-
-// A prototype Svelte's `proxy()` does not recognise as plain: an object with it
-// is stored in `$state` AS IS (proxy() only wraps Object/Array prototypes).
-const RAW_RESULT_PROTO: object = Object.create(Object.prototype);
-
-/**
- * Keep a query result OUT of the deep `tabs` proxy tree. Results are immutable
- * snapshots (edits re-query, nothing patches rows in place), but assigned into
- * a deep `$state` they became lazy proxies: a 100k-row result then cost 43–52 ms
- * to land, 0.7–0.9 s for the first grid-search key (82 ms each after) and
- * 38–54 ms to stringify complex cells — vs ~1 ms raw. Swapping the prototype
- * (still an ordinary object for JSON, spread and property access) makes Svelte
- * store it by reference; replacing `tab.result` wholesale stays reactive.
- */
-export function rawResult<T extends object>(r: T): T {
-  if (Object.getPrototypeOf(r) === Object.prototype) Object.setPrototypeOf(r, RAW_RESULT_PROTO);
-  return r;
-}
-
-/** An open query tab: an editable statement + its last result + quick filters. */
-export interface QueryTab {
-  id: number;
-  name: string;
-  statement: string;
-  result: QueryResult | null;
-  /**
-   * The statement that PRODUCED `result` — not what is currently in the editor.
-   * The grid's editability probe, "Copy as INSERT" target, filter-chip splices
-   * and "Export all rows…" all describe the rows ON SCREEN, so they must key off
-   * this and not the live buffer: keying them off the editor text made the whole
-   * result toolbar re-derive (and visibly flicker) on EVERY keystroke, and would
-   * have exported / spliced a query the user was still typing. Transient — a
-   * reload has no result to describe.
-   */
-  ran_statement: string | null;
-  /**
-   * The scope node the run that produced `result` was issued with (an explicit
-   * node, else the active DB at run time). The footer pager re-runs the RAN
-   * statement, so it must reuse the RAN scope too — the user may have switched
-   * the active database since. Transient, like `ran_statement`.
-   */
-  ran_node: string | null;
-  running: boolean;
-  error: string | null;
-  /**
-   * The statement whose run produced `error` — what ErrorPanel's line/caret
-   * excerpt and "Ask AI to fix" describe. Runs are transient (the statement at
-   * the cursor, variable-substituted), so an engine's "at line N" is relative to
-   * THIS text, not to the editor buffer. Transient, like `ran_statement`.
-   */
-  err_statement: string | null;
-  /** Quick-filter chips that own the statement's WHERE clause. */
-  filters: FilterCond[];
-  /**
-   * Optional per-tab statement timeout in milliseconds. When set, passed to the
-   * server which forwards it to the driver (MySQL: MAX_EXECUTION_TIME hint).
-   * 0 or null = no limit.
-   */
-  timeout_ms: number | null;
-  /**
-   * When true, the server redacts PII/secrets from result cells before returning
-   * them. The response `masked` flag confirms it was applied. Persisted per-tab
-   * so the toggle survives statement changes.
-   */
-  mask: boolean;
-  /**
-   * Query-level variables (`:name` / `{name}`) the editor substitutes into the
-   * statement before running. Each holds a value + type (`string` default →
-   * quoted, `number` → raw, `raw` → verbatim) + an escape flag. Per-tab (not
-   * global); persisted so values survive reloads.
-   */
-  vars: Record<string, VarSpec>;
-  /**
-   * The saved-query id this tab was opened from, if any. When set, "Save" on the
-   * tab updates that saved query in place (PATCH); "Save as new" always creates a
-   * fresh one. Cleared when the tab's origin no longer applies.
-   */
-  savedQueryId?: Id;
-  /**
-   * Zero-based row offset for the footer pager. Only meaningful when the last
-   * result was auto-limited (a single paginatable SELECT / Mongo find). Reset to
-   * 0 whenever the statement changes; advanced by `runPage`. Transient (not
-   * persisted).
-   */
-  offset: number;
-  /**
-   * The in-flight (or orphaned) run this tab is attached to. Set for the whole
-   * life of a run; when the HTTP wait is lost without a user Stop (page
-   * navigation / reload / network blip), the server keeps executing detached
-   * and this is what `reattach` polls (`db/query-status`) to recover the
-   * result. Persisted so a full reload can still re-attach; cleared when the
-   * result lands, the user stops the query, or the server no longer knows the id.
-   */
-  pending?: PendingRun | null;
-  /**
-   * The user's explicit result view for this tab (segmented control / ⇧⌘V);
-   * `null`/absent = automatic (threshold → connection memory → engine default,
-   * see `effectiveViewMode`). Persisted with the tab so it survives a reload and
-   * is NOT reset by switching tabs.
-   */
-  viewMode?: ViewMode | null;
-  /**
-   * A pinned tab survives "Close others" / "Close all" and can't be closed by
-   * × / ⌥⌘W until unpinned. Pinned tabs sit first in the strip. Persisted.
-   */
-  pinned: boolean;
-  /**
-   * Set when an agent session opened this tab over UI control
-   * (`otto.ui_db_new_tab` / `ui_db_run_query`, lib/uiCommands/database.ts): the
-   * strip shows an attributed chip so the person always sees whose tab it is.
-   * Persisted with the tab; absent = a tab the person opened.
-   */
-  agent?: QueryTabAgent | null;
-  /**
-   * Stable identity of this tab across reloads (`id` is renumbered on every
-   * restore). Keys the editor's per-tab undo history (lib/editor-history.ts)
-   * so ⌘Z survives a remount and a reload. Persisted with the tab.
-   */
-  uid: string;
-}
-
-/**
- * A run a tab is attached to (see {@link QueryTab.pending}). `sql` / `node` are
- * the statement and scope it was issued with, so a re-attached result (or
- * error) describes — and pages — what actually ran, never the editor buffer.
- * Absent on markers persisted by older builds or when the statement was too
- * large to persist; the re-attached result then has no pager.
- */
-export interface PendingRun {
-  queryId: string;
-  connId: Id;
-  sql?: string;
-  node?: string | null;
-  /**
-   * When the run started (epoch ms). Drives the running timer, so it keeps
-   * counting across tab / connection / view switches and reloads instead of
-   * restarting at 0s. Absent on older markers until the daemon's
-   * `query-status` reports `elapsed_ms` (reattach backfills it).
-   */
-  startedAt?: number;
-}
-
-/** Hard cap on each side of a completion request's cursor context. */
-const COMPLETION_CTX_MAX = 16_384;
-/** Quiet period after a failed completion request (per connection). */
-const COMPLETION_BACKOFF_MS = 5_000;
-
-/** Longest statement persisted inside a pending-run marker (localStorage). */
-const PENDING_SQL_MAX = 32_768;
-
-/** Who drove a query tab (see {@link QueryTab.agent}). */
-export interface QueryTabAgent {
-  session_id: string;
-  /** Short attribution shown in the chip ("Claude · fix-orders"). */
-  label: string;
-}
-
-/**
- * What a {@link DatabaseStore.runQuery} call ended as — filled in by the store
- * when the caller passes `opts.outcome`. `runQuery` itself returns `null` for
- * every non-result ending (Stop, a declined write, an engine error, a lost wait),
- * which is right for the buttons but not for an agent command that has to report
- * WHICH one happened.
- */
-/** How the typed guarded-write gate ({@link DatabaseStore.confirmGuardedWrite})
- *  was answered: a mistyped name (`'mismatch'`) is already explained to the
- *  person, a plain cancel (`'declined'`) is not. */
-export type GuardedWriteAnswer = 'confirmed' | 'declined' | 'mismatch';
-
-/** Why {@link DatabaseStore.runManagedStatement} ran nothing: the typed confirm
- *  was dismissed (`'declined'`), the name was mistyped (`'mismatch'` — already
- *  toasted by the gate, so callers add no second toast), or access / the
- *  connection changed while it waited (`'stale'`). */
-export interface ManagedWriteCanceled {
-  canceled: 'declined' | 'mismatch' | 'stale';
-}
-
-export interface RunOutcome {
-  status?: 'ok' | 'cancelled' | 'aborted' | 'failed' | 'detached' | 'invalid';
-  error?: string;
-}
-
-/** Normalize a persisted vars blob — legacy `Record<string,string>` (bare value)
- *  or the new `Record<string,VarSpec>` — into VarSpecs. */
-function normalizeVars(raw: unknown): Record<string, VarSpec> {
-  const out: Record<string, VarSpec> = {};
-  if (!raw || typeof raw !== 'object') return out;
-  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
-    if (typeof v === 'string') {
-      out[k] = defaultVarSpec(v);
-    } else if (v && typeof v === 'object') {
-      const o = v as Record<string, unknown>;
-      out[k] = {
-        value: typeof o.value === 'string' ? o.value : '',
-        type: o.type === 'number' || o.type === 'raw' ? o.type : 'string',
-        escape: typeof o.escape === 'boolean' ? o.escape : true,
-      };
-    }
-  }
-  return out;
-}
-
-/** Key prefix of a query tab's undo history in lib/editor-history.ts. */
-export const TAB_HISTORY_PREFIX = 'dbtab:';
-/** Drop a closed tab's undo history and parked grid state. */
-function forgetTabHistory(t: QueryTab): void {
-  forgetEditorState(TAB_HISTORY_PREFIX + t.uid);
-  dropGridState(t.uid);
-  resultBudget.forget(t.uid);
-}
-
-let nextTabId = 1;
-/** A fresh stable tab uid (see {@link QueryTab.uid}). */
-export function newTabUid(): string {
-  try {
-    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-      return crypto.randomUUID();
-    }
-  } catch {
-    /* insecure context — fall through */
-  }
-  // getRandomValues works in insecure contexts too (randomUUID doesn't).
-  const bytes = crypto.getRandomValues(new Uint8Array(8));
-  return `t${Date.now().toString(36)}${Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')}`;
-}
-function blankTab(statement = ''): QueryTab {
-  return {
-    id: nextTabId++,
-    uid: newTabUid(),
-    name: 'Query',
-    statement,
-    result: null,
-    ran_statement: null,
-    ran_node: null,
-    running: false,
-    error: null,
-    err_statement: null,
-    filters: [],
-    timeout_ms: null,
-    mask: false,
-    vars: {},
-    offset: 0,
-    pending: null,
-    viewMode: null,
-    pinned: false,
-    agent: null,
-  };
-}
-
-/**
- * Pinned tabs first (stable within each group), the way the strip shows them —
- * shared by pin/unpin and the reload restore so the order never changes across a
- * reload. Returns the reordered list plus where `activeIdx` moved to.
- */
-function orderPinnedFirst(
-  tabs: QueryTab[],
-  activeIdx: number,
-): { tabs: QueryTab[]; activeTab: number } {
-  const active = tabs[activeIdx];
-  const ordered = [...tabs.filter((t) => t.pinned), ...tabs.filter((t) => !t.pinned)];
-  const activeTab = active ? Math.max(0, ordered.indexOf(active)) : 0;
-  return { tabs: ordered, activeTab };
-}
-
-/** Main-pane tabs of the DB page. */
-export type DbMainTab = 'query' | 'builder' | 'structure' | 'diagram' | 'dashboards';
-/** Sidebar tab switch. `connections` is the global connection picker; the
- *  others are per-connection views of the active connection. */
-export type DbSideTab = 'connections' | 'schema' | 'saved' | 'history';
-
-/** An ssh/custom profile opened as a workbench tab, bound to a live PTY session
- *  so the tab can render a terminal in place (see {@link DatabaseStore.sshTabs}). */
-export interface SshTab {
-  connId: Id;
-  sessionId: Id;
-  name: string;
-  /** Profile kind ('ssh' | 'custom' | a DB kind opened as a CLI client) — drives the tab glyph. */
-  kind: string;
-}
-
-/**
- * Point-in-time copy of a connection's active-session working set, kept so we
- * can switch between open connection tabs without re-fetching. Each field holds
- * a reference to the array/Map/Set that was current when captured; those
- * collections are replaced wholesale on mutation elsewhere, so a reference
- * snapshot is a correct point-in-time view.
- *
- * Workspace/global fields (`connections`, `dashboards`, `widgets`,
- * `selectedDashboardId`, `rowLimit`) are intentionally NOT snapshotted — they
- * are shared across all open connections.
- */
-interface ConnSnapshot {
-  capabilities: DbCapabilities | null;
-  testResult: DbTestResult | null;
-  activeDb: string | null;
-  schemaRoot: SchemaNode[];
-  childrenCache: Map<string, SchemaNode[]>;
-  expanded: Set<string>;
-  loadingNodes: Set<string>;
-  schemaLoading: boolean;
-  selectedObjectPath: string | null;
-  objectDetail: ObjectDetail | null;
-  objectError: string | null;
-  // Server-side object search is per connection — without snapshotting it,
-  // conn A's hits (and query) would render over conn B's tree after a switch.
-  objectSearchQuery: string;
-  objectSearchHits: ObjectHit[] | null;
-  objectSearchTruncated: boolean;
-  objectSearchScanned: number;
-  builderTablesCache: Map<string, { label: string; path: string; kind: string }[]>;
-  tabs: QueryTab[];
-  activeTab: number;
-  savedQueries: DbSavedQuery[];
-  history: DbHistoryEntry[];
-  mainTab: DbMainTab;
-  sideTab: DbSideTab;
-  connView: ViewMode | null;
-}
-
-/**
- * `idle` = restored as a tab but not connected yet (background warm-up pending,
- * or "connect on click only"); `stale` is folded into `idle` after a daemon
- * restart (the old pool/tunnel is gone; it re-warms).
- */
-export type ConnPhase = 'idle' | 'connecting' | 'ready' | 'error';
-export interface ConnStatus {
-  phase: ConnPhase;
-  /** Failure reason (set only when phase === 'error'). */
-  error?: string;
-  /** Server version string (from the `db/test` probe), shown in the health chip. */
-  serverVersion?: string;
-  /** Connect/probe latency in ms (schema-load timing or the `db/test` ping),
-   *  shown in the health chip tooltip. */
-  latencyMs?: number;
-}
+// The module-level model (types, constants, pure tab/view helpers) and the
+// statement text helpers live in ./database/; re-exported so every importer of
+// this store keeps its import path.
+import {
+  COMPLETION_BACKOFF_MS,
+  COMPLETION_CTX_MAX,
+  DEFAULT_ROW_LIMIT,
+  KEEP_ALIVE_MS,
+  PENDING_SQL_MAX,
+  ROW_LIMIT_KEY,
+  TAB_HISTORY_PREFIX,
+  WARM_CONCURRENCY,
+  blankTab,
+  effectiveViewMode,
+  forgetTabHistory,
+  isDbKind,
+  isReadOnlyRefusal,
+  isViewMode,
+  isWriteBlocked,
+  loadRowLimit,
+  newQueryId,
+  normalizeVars,
+  orderPinnedFirst,
+  rawResult,
+} from './database/model';
+import type {
+  ConnPhase,
+  ConnSnapshot,
+  ConnStatus,
+  DbMainTab,
+  DbSideTab,
+  GuardedWriteAnswer,
+  ManagedWriteCanceled,
+  PendingRun,
+  QueryTab,
+  QueryTabAgent,
+  RunOutcome,
+  SshTab,
+  ViewMode,
+} from './database/model';
+import {
+  extractWhereBody,
+  parseExplicitLimit,
+  rewriteWhere,
+} from './database/statement';
+export * from './database/model';
+export * from './database/statement';
+import { DbDashboardsStore } from './database/dashboards.svelte';
+export { DbDashboardsStore, type DashboardsHost } from './database/dashboards.svelte';
 
 class DatabaseStore {
   // ── Connections ────────────────────────────────────────────────────────────
@@ -918,18 +339,22 @@ class DatabaseStore {
   /** True while a "Load more" fetch is in flight (disables the button). */
   historyLoadingMore = $state(false);
 
-  // ── Dashboards / widgets ──────────────────────────────────────────────────
-  dashboards: DbDashboard[] = $state([]);
-  widgets: DbWidget[] = $state([]);
-  /** First/any dashboards load in flight, and the cause of the last failure
-   *  (inline in Dashboards.svelte with Retry — the previous list is kept). */
-  dashboardsLoading = $state(false);
-  dashboardsError: string | null = $state(null);
-  selectedDashboardId: Id | null = $state(null);
-
-  selectedDashboard: DbDashboard | null = $derived(
-    this.dashboards.find((d) => d.id === this.selectedDashboardId) ?? null,
-  );
+  // ── Dashboards / widgets (./database/dashboards.svelte.ts) ─────────────────
+  readonly dash = new DbDashboardsStore({
+    wsBase: () => this.wsBase(),
+    accessEpoch: () => this.accessEpoch,
+    selectedConnId: () => this.selectedConnId,
+  });
+  get dashboards(): DbDashboard[] { return this.dash.dashboards; }
+  set dashboards(v: DbDashboard[]) { this.dash.dashboards = v; }
+  get widgets(): DbWidget[] { return this.dash.widgets; }
+  set widgets(v: DbWidget[]) { this.dash.widgets = v; }
+  get dashboardsLoading(): boolean { return this.dash.dashboardsLoading; }
+  get dashboardsError(): string | null { return this.dash.dashboardsError; }
+  set dashboardsError(v: string | null) { this.dash.dashboardsError = v; }
+  get selectedDashboardId(): Id | null { return this.dash.selectedDashboardId; }
+  set selectedDashboardId(v: Id | null) { this.dash.selectedDashboardId = v; }
+  get selectedDashboard(): DbDashboard | null { return this.dash.selectedDashboard; }
 
   // ── Query plan (Explain) ──────────────────────────────────────────────────
   // A normalized query plan from the engine's native EXPLAIN, shown in a
@@ -2982,42 +2407,40 @@ class DatabaseStore {
    * Folder nodes (MySQL returns `folder:tables`/`folder:views`; ClickHouse
    * returns tables directly). Cached per db path.
    */
+  /** The tables/views of `dbPath`, cached per path. THROWS on a failed load:
+   *  the palette renders it inline with Retry and the import path names the
+   *  database — an empty list must only ever mean "this database has none". */
   async listBuilderTables(dbPath: string): Promise<{ label: string; path: string; kind: string }[]> {
     const id = this.selectedConnId;
     if (!id) return [];
     const cached = this.builderTablesCache.get(dbPath);
     if (cached) return cached;
-    try {
-      const out: { label: string; path: string; kind: string }[] = [];
-      const seen = new Set<string>();
-      // For an empty implicit-db path, query the schema root's children path.
-      const first = await api.post<SchemaNode[]>(`${this.connBase(id)}/schema/children`, {
-        path: dbPath,
-      });
-      for (const node of first) {
-        if (node.kind === 'folder') {
-          const kids = await api.post<SchemaNode[]>(`${this.connBase(id)}/schema/children`, {
-            path: node.id,
-          });
-          for (const k of kids) {
-            if ((k.kind === 'table' || k.kind === 'view') && !seen.has(k.id)) {
-              seen.add(k.id);
-              out.push({ label: k.label, path: k.id, kind: k.kind });
-            }
+    const out: { label: string; path: string; kind: string }[] = [];
+    const seen = new Set<string>();
+    // For an empty implicit-db path, query the schema root's children path.
+    const first = await api.post<SchemaNode[]>(`${this.connBase(id)}/schema/children`, {
+      path: dbPath,
+    });
+    for (const node of first) {
+      if (node.kind === 'folder') {
+        const kids = await api.post<SchemaNode[]>(`${this.connBase(id)}/schema/children`, {
+          path: node.id,
+        });
+        for (const k of kids) {
+          if ((k.kind === 'table' || k.kind === 'view') && !seen.has(k.id)) {
+            seen.add(k.id);
+            out.push({ label: k.label, path: k.id, kind: k.kind });
           }
-        } else if ((node.kind === 'table' || node.kind === 'view') && !seen.has(node.id)) {
-          seen.add(node.id);
-          out.push({ label: node.label, path: node.id, kind: node.kind });
         }
+      } else if ((node.kind === 'table' || node.kind === 'view') && !seen.has(node.id)) {
+        seen.add(node.id);
+        out.push({ label: node.label, path: node.id, kind: node.kind });
       }
-      out.sort((a, b) => a.label.localeCompare(b.label));
-      this.builderTablesCache.set(dbPath, out);
-      this.builderTablesCache = new Map(this.builderTablesCache);
-      return out;
-    } catch (e) {
-      toastError('Couldn’t load tables', e);
-      return [];
     }
+    out.sort((a, b) => a.label.localeCompare(b.label));
+    this.builderTablesCache.set(dbPath, out);
+    this.builderTablesCache = new Map(this.builderTablesCache);
+    return out;
   }
 
   // ── Query ─────────────────────────────────────────────────────────────────
@@ -4174,204 +3597,19 @@ class DatabaseStore {
     }
   }
 
-  // ── Dashboards ────────────────────────────────────────────────────────────
-
-  /** In-flight dashboards(+widgets) load per workspace + access epoch, shared
-   *  like connections (an epoch bump must start a fresh load, not join one
-   *  whose result will be dropped). */
-  private dashboardsInFlight: { key: string; p: Promise<void> } | null = null;
-  /** The workspace the dashboards/widgets lists belong to, and the latest
-   *  load tickets — same guard as `loadSavedQueries`: a late response from a
-   *  workspace (or access epoch) the user has left must not land, since rename
-   *  / delete / add-widget act on these ids by id alone. */
-  private dashboardsScope: string | null = null;
-  private dashboardsRequest = 0;
-  private widgetsRequest = 0;
-  loadDashboards(): Promise<void> {
-    const key = `${this.wsBase() ?? ''}:${this.accessEpoch}`;
-    if (this.dashboardsInFlight?.key === key) return this.dashboardsInFlight.p;
-    const p = this.fetchDashboards().finally(() => {
-      if (this.dashboardsInFlight?.p === p) this.dashboardsInFlight = null;
-    });
-    this.dashboardsInFlight = { key, p };
-    return p;
-  }
-
-  /** Entering another workspace drops the previous one's dashboards, widgets,
-   *  selection and error — never show (or act on) A's dashboards under B. */
-  private enterDashboardsScope(base: string | null): void {
-    if (this.dashboardsScope === base) return;
-    this.dashboards = [];
-    this.widgets = [];
-    // The very first load keeps a selection made before it (a Live-context
-    // "open dashboard" link); fetchDashboards validates it against the list.
-    if (this.dashboardsScope !== null) this.selectedDashboardId = null;
-    this.dashboardsError = null;
-    this.dashboardsScope = base;
-  }
-
-  private async fetchDashboards(): Promise<void> {
-    const accessEpoch = this.accessEpoch;
-    const base = this.wsBase();
-    const request = ++this.dashboardsRequest;
-    this.enterDashboardsScope(base);
-    if (!base) { this.dashboardsLoading = false; return; }
-    const current = () => request === this.dashboardsRequest && base === this.wsBase() && accessEpoch === this.accessEpoch;
-    this.dashboardsLoading = true;
-    try {
-      const dashboards = await api.get<DbDashboard[]>(`${base}/dashboards`);
-      if (!current()) return;
-      this.dashboards = dashboards;
-      if (dashboards.length > 0 && !dashboards.some((d) => d.id === this.selectedDashboardId)) {
-        this.selectedDashboardId = dashboards[0].id;
-      }
-      this.dashboardsError = null;
-      await this.loadWidgets();
-    } catch (e) {
-      if (current()) this.dashboardsError = loadErrorText(e);
-    } finally {
-      // A superseded load must not clear the spinner of the load that replaced it.
-      if (current()) this.dashboardsLoading = false;
-    }
-  }
-
-  async loadWidgets(): Promise<void> {
-    const accessEpoch = this.accessEpoch;
-    const base = this.wsBase();
-    const request = ++this.widgetsRequest;
-    this.enterDashboardsScope(base);
-    if (!base) return;
-    const current = () => request === this.widgetsRequest && base === this.wsBase() && accessEpoch === this.accessEpoch;
-    try {
-      const widgets = await api.get<DbWidget[]>(`${base}/widgets`);
-      if (current()) this.widgets = widgets;
-    } catch (e) {
-      // Widgets belong to the dashboards view: surface it there, keep the old widgets.
-      if (current()) this.dashboardsError = loadErrorText(e);
-    }
-  }
-
-  async createDashboard(name: string): Promise<DbDashboard | null> {
-    const base = this.wsBase();
-    if (!base) return null;
-    try {
-      const d = await api.post<DbDashboard>(`${base}/dashboards`, { name });
-      if (base !== this.wsBase()) return d; // switched workspace meanwhile
-      this.dashboards = [...this.dashboards, d];
-      this.selectedDashboardId = d.id;
-      return d;
-    } catch (e) {
-      toastError('Couldn’t create dashboard', e);
-      return null;
-    }
-  }
-
-  async renameDashboard(id: Id, name: string): Promise<void> {
-    try {
-      const d = await api.patch<DbDashboard>(`/db/dashboards/${id}`, { name });
-      this.dashboards = this.dashboards.map((x) => (x.id === id ? d : x));
-    } catch (e) {
-      toastError('Couldn’t rename dashboard', e);
-    }
-  }
-
-  async setDashboardRefresh(id: Id, refresh_secs: number | null): Promise<void> {
-    try {
-      const d = await api.patch<DbDashboard>(`/db/dashboards/${id}`, { refresh_secs });
-      this.dashboards = this.dashboards.map((x) => (x.id === id ? d : x));
-    } catch (e) {
-      toastError('Couldn’t update the dashboard', e);
-    }
-  }
-
-  async deleteDashboard(id: Id): Promise<void> {
-    try {
-      await api.del(`/db/dashboards/${id}`);
-      this.dashboards = this.dashboards.filter((d) => d.id !== id);
-      this.widgets = this.widgets.filter((w) => w.dashboard_id !== id);
-      if (this.selectedDashboardId === id) {
-        this.selectedDashboardId = this.dashboards[0]?.id ?? null;
-      }
-    } catch (e) {
-      toastError('Couldn’t delete dashboard', e);
-    }
-  }
-
-  // ── Widgets ────────────────────────────────────────────────────────────────
-
-  async createWidget(input: {
-    title: string;
-    statement: string;
-    viz: DbViz;
-    mapping?: DbWidgetMapping;
-    options?: Record<string, unknown>;
-    dashboard_id?: Id | null;
-    connection_id?: Id | null;
-  }): Promise<DbWidget | null> {
-    const base = this.wsBase();
-    const connId = input.connection_id ?? this.selectedConnId;
-    if (!base || !connId) {
-      toasts.error('No connection selected');
-      return null;
-    }
-    if (!widgetStatementOk(input.statement)) return null;
-    try {
-      const w = await api.post<DbWidget>(`${base}/widgets`, {
-        connection_id: connId,
-        title: input.title,
-        statement: input.statement,
-        viz: input.viz,
-        dashboard_id: input.dashboard_id ?? this.selectedDashboardId,
-        mapping: input.mapping ?? {},
-        options: input.options ?? {},
-      });
-      if (base === this.wsBase()) this.widgets = [...this.widgets, w];
-      toasts.success('Widget added', w.title);
-      return w;
-    } catch (e) {
-      toastError('Couldn’t create widget', e);
-      return null;
-    }
-  }
-
-  /** The updated widget, or null when the statement was rejected (write verb)
-   *  or the save failed — both already toasted; the caller keeps its form open. */
-  async updateWidget(id: Id, patch: Partial<Pick<DbWidget, 'title' | 'statement' | 'viz' | 'mapping' | 'options' | 'dashboard_id'>>): Promise<DbWidget | null> {
-    if (patch.statement !== undefined && !widgetStatementOk(patch.statement)) return null;
-    try {
-      const w = await api.patch<DbWidget>(`/db/widgets/${id}`, patch);
-      this.widgets = this.widgets.map((x) => (x.id === id ? w : x));
-      return w;
-    } catch (e) {
-      toastError('Couldn’t update the widget', e);
-      return null;
-    }
-  }
-
-  async deleteWidget(id: Id): Promise<void> {
-    try {
-      await api.del(`/db/widgets/${id}`);
-      this.widgets = this.widgets.filter((w) => w.id !== id);
-    } catch (e) {
-      toastError('Couldn’t delete widget', e);
-    }
-  }
-
-  async runWidget(id: Id): Promise<QueryResult | null> {
-    try {
-      return await api.post<QueryResult>(`/db/widgets/${id}/run`, {});
-    } catch (e) {
-      toastError('Couldn’t run the widget query', e);
-      return null;
-    }
-  }
-
+  // ── Dashboards / widgets: delegated to `dash` ──────────────────────────────
+  loadDashboards(): Promise<void> { return this.dash.loadDashboards(); }
+  loadWidgets(): Promise<void> { return this.dash.loadWidgets(); }
+  createDashboard(name: string): Promise<DbDashboard | null> { return this.dash.createDashboard(name); }
+  renameDashboard(id: Id, name: string): Promise<void> { return this.dash.renameDashboard(id, name); }
+  setDashboardRefresh(id: Id, refresh_secs: number | null): Promise<void> { return this.dash.setDashboardRefresh(id, refresh_secs); }
+  deleteDashboard(id: Id): Promise<void> { return this.dash.deleteDashboard(id); }
+  createWidget(input: Parameters<DbDashboardsStore['createWidget']>[0]): Promise<DbWidget | null> { return this.dash.createWidget(input); }
+  updateWidget(id: Id, patch: Parameters<DbDashboardsStore['updateWidget']>[1]): Promise<DbWidget | null> { return this.dash.updateWidget(id, patch); }
+  deleteWidget(id: Id): Promise<void> { return this.dash.deleteWidget(id); }
+  runWidget(id: Id): Promise<QueryResult | null> { return this.dash.runWidget(id); }
   /** Widgets belonging to the selected dashboard. */
-  widgetsForSelectedDashboard(): DbWidget[] {
-    const did = this.selectedDashboardId;
-    if (!did) return [];
-    return this.widgets.filter((w) => w.dashboard_id === did);
-  }
+  widgetsForSelectedDashboard(): DbWidget[] { return this.dash.widgetsForSelectedDashboard(); }
 
   // ── Agent integration ─────────────────────────────────────────────────────
 

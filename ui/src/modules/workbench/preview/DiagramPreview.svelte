@@ -1,10 +1,10 @@
 <script lang="ts">
   // Mermaid / D2 source → SVG through the app's lazy bridges (the same ones
-  // the vault and Canvas use: canvas/mermaid.ts — securityLevel 'strict' — and
+  // the vault and Canvas use: lib/render/mermaid.ts — securityLevel 'strict' — and
   // canvas/d2.ts — the WASM worker). Latest-wins: a render superseded by a
   // newer edit is skipped/discarded by sequence token.
   import { untrack } from 'svelte';
-  import { renderMermaid } from '../../canvas/mermaid';
+  import { renderMermaid } from '../../../lib/render/mermaid';
   import { renderD2 } from '../../canvas/d2';
   import { ui } from '../../../lib/stores/ui.svelte';
   import PreviewError from './PreviewError.svelte';

@@ -104,9 +104,18 @@
     if (data.type === 'resize') return {type: 'resize', cols: data.cols, rows: data.rows, grant_epoch: room.grant_epoch};
     return null;
   }
+  function controlButton() {
+    if (canType) send({type: 'release_control'});
+    else if (!self?.control_requested) send({type: 'request_control'});
+  }
   async function leave() {
     const label = host ? 'End room' : 'Leave room';
-    if (!await confirmer.ask(host ? 'Everyone will lose access to this room. Your session and agent will keep running.' : 'Your terminal, chat and media access will close.', {title: `${label}?`, confirmLabel: label, danger: host})) return;
+    // A guest still waiting for admission has no access to lose: the confirm
+    // repeats the action they clicked ("Cancel request") instead.
+    const ok = room?.admission === 'pending' && !host
+      ? await confirmer.ask('The host won’t see your request any more.', {title: 'Cancel your request to join?', confirmLabel: 'Cancel request'})
+      : await confirmer.ask(host ? 'Everyone will lose access to this room. Your session and agent will keep running.' : 'Your terminal, chat and media access will close.', {title: `${label}?`, confirmLabel: label, danger: host});
+    if (!ok) return;
     if (host) {
       finishing = true;
       await recapPanel?.finishCapture();
@@ -158,9 +167,10 @@
       {:else if !connected}<div class="error" role="status">Connection interrupted. Terminal access is paused.<button class="btn small" onclick={() => client?.connect()}>Retry</button></div>{/if}
       <div class="room-status" role="status"><span>{self?.role === 'host' ? 'Host' : self?.role === 'editor' ? 'May be granted control' : 'View only'} · {driver?.name ?? 'Host'} controls the terminal</span>
         {#if host && requests.total}<span class="requests"><strong>{requests.summary}</strong><button class="btn small" onclick={reviewRequests}>Review</button></span>{/if}
-        {#if host && !canType}<button class="btn small" onclick={() => send({type: 'grant_control', member_id: room!.member_id})}>Take back control</button>
-        {:else if !host && canType}<button class="btn small" onclick={() => send({type: 'release_control'})}>Release control</button>
-        {:else if self?.role === 'editor'}<button class="btn small" disabled={self.control_requested} onclick={() => send({type: 'request_control'})}>{self.control_requested ? 'Control requested' : 'Request control'}</button>{/if}
+        {#if host && !canType}<button class="btn small" onclick={() => send({type: 'grant_control', member_id: room!.member_id})}>Take back control</button>{/if}
+        <!-- One always-mounted Release ↔ Request button: the echo of either action
+             swaps its label and action instead of unmounting the focused control. -->
+        {#if !host && (canType || self?.role === 'editor')}<button class="btn small" aria-disabled={!canType && self?.control_requested} onclick={controlButton}>{canType ? 'Release control' : self?.control_requested ? 'Control requested' : 'Request control'}</button>{/if}
       </div>
       {#if error}<div class="error" role="alert">{error}<button class="btn small" onclick={() => error = ''}>Dismiss</button></div>{/if}
       <RoomRecap bind:this={recapPanel} {room} {connected} {send} audioSources={() => mediaPanel?.getRecapAudioSources() ?? new Map()} screenStreams={() => mediaPanel?.getPresentationStreams() ?? new Map()} />

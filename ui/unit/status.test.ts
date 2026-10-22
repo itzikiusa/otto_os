@@ -121,6 +121,12 @@ test('suspendedNote says why and when a session went dormant (A4)', () => {
   assert.equal(suspendedNote({ suspended: {} }, now), null);
   assert.equal(suspendedNote({ suspended: 'idle' }, now), null);
   assert.equal(suspendedNote({}, now), null);
+  // A failed restart names its cause, never "released to free memory" (error-handling-4-05).
+  assert.equal(
+    suspendedNote({ suspended: { reason: 'respawn_failed', error: 'spawn failed: no such file', at: '2026-10-03T11:30:00Z' } }, now),
+    'Couldn’t restart: spawn failed: no such file · 30m ago',
+  );
+  assert.equal(suspendedNote({ suspended: { reason: 'respawn_failed' } }, now), 'Couldn’t restart');
   assert.equal(suspendedNote(null, now), null);
 });
 

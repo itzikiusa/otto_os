@@ -3,10 +3,21 @@
   // or — live — the publish of exactly what the approved preview showed.
   import type { WorkflowNode } from '../../../lib/api/types';
   import IdPicker from './IdPicker.svelte';
+  import ConfluenceSpaceSelect from '../../../lib/components/ConfluenceSpaceSelect.svelte';
+  import ConfluencePagePicker from '../../../lib/components/ConfluencePagePicker.svelte';
   import type { InspectorOptions } from './options.svelte';
   import { jiraAccountOptions, paramBool, paramStr, storyOptions, type SetParam } from './util';
 
   let { node, set, wsId, pickers }: { node: WorkflowNode; set: SetParam; wsId: string; pickers: InspectorOptions } = $props();
+
+  const accountId = $derived(paramStr(node, 'account_id'));
+  /** A parent page belongs to its space: a space change clears it. */
+  function setSpace(key: string): void {
+    if (key === paramStr(node, 'space_key')) return;
+    set('space_key', key);
+    set('parent_id', '');
+    set('parent_title', '');
+  }
 </script>
 
 <label class="np-chk">
@@ -19,7 +30,8 @@
 {#if paramBool(node, 'dry_run', true)}
 <label for="np-story">Product story</label>
 <IdPicker id="np-story" value={paramStr(node, 'story_id')} cache={pickers.stories} key={wsId} toOptions={storyOptions}
-  noun="story" placeholder="product story id" what="product stories" onchange={(v) => set('story_id', v)} />
+  noun="story" placeholder="product story id" what="product stories"
+  emptyHint="No product stories in this workspace yet — import one on the Product page." onchange={(v) => set('story_id', v)} />
 <label for="np-pubkind">Publish as</label>
 <select
   id="np-pubkind"
@@ -33,6 +45,7 @@
   <label for="np-account">Account</label>
   <IdPicker id="np-account" value={paramStr(node, 'account_id')} cache={pickers.accounts} key="me" toOptions={jiraAccountOptions}
     noun="Jira account" emptyLabel="Choose a Jira / Confluence account…" placeholder="Jira/Confluence account id" what="Jira accounts"
+    emptyHint="No Jira / Confluence account yet — connect one in Settings → Integrations."
     onchange={(v) => set('account_id', v)} />
   {#if (paramStr(node, 'kind') || 'rfc') === 'jira'}
     <label for="np-project">Project key</label>
@@ -52,22 +65,38 @@
       oninput={(e) => set('issue_type', e.currentTarget.value)}
     />
   {:else}
-    <label for="np-space">Space key</label>
-    <input dir="auto"
-      id="np-space"
-      type="text"
-      placeholder="Confluence space key"
-      value={paramStr(node, 'space_key')}
-      oninput={(e) => set('space_key', e.currentTarget.value)}
-    />
-    <label for="np-parent">Parent page id (optional)</label>
-    <input dir="auto"
-      id="np-parent"
-      type="text"
-      placeholder="parent page id"
-      value={paramStr(node, 'parent_id')}
-      oninput={(e) => set('parent_id', e.currentTarget.value)}
-    />
+    {#if accountId}
+      <!-- PC-9: pick the space and the parent page by NAME; the node keeps the
+           key / id (and the page title, for display only). -->
+      <label for="np-space">Space</label>
+      <ConfluenceSpaceSelect id="np-space" {accountId} value={paramStr(node, 'space_key')} onchange={setSpace} />
+      <ConfluencePagePicker
+        id="np-parent"
+        label="Parent page"
+        {accountId}
+        spaceKey={paramStr(node, 'space_key')}
+        value={paramStr(node, 'parent_id') || null}
+        title={paramStr(node, 'parent_title') || null}
+        onchange={(id, title) => { set('parent_id', id ?? ''); set('parent_title', title ?? ''); }}
+      />
+    {:else}
+      <label for="np-space">Space key</label>
+      <input dir="auto"
+        id="np-space"
+        type="text"
+        placeholder="Choose an account first, or type a space key"
+        value={paramStr(node, 'space_key')}
+        oninput={(e) => set('space_key', e.currentTarget.value)}
+      />
+      <label for="np-parent">Parent page id (optional)</label>
+      <input dir="auto"
+        id="np-parent"
+        type="text"
+        placeholder="parent page id"
+        value={paramStr(node, 'parent_id')}
+        oninput={(e) => { set('parent_id', e.currentTarget.value); set('parent_title', ''); }}
+      />
+    {/if}
     <label for="np-pubtitle">Title (optional)</label>
     <input dir="auto"
       id="np-pubtitle"

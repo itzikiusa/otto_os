@@ -10,9 +10,11 @@
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import Skeleton from '../../lib/components/Skeleton.svelte';
   import EnvBadge from '../../lib/components/EnvBadge.svelte';
   import { pollWhileVisible } from '../../lib/poll';
-  import { logsRoute } from './util';
+  import { awsErrorText, logsRoute } from './util';
   import type { AwsAccount, AwsService, Feature } from '../../lib/api/types';
 
   interface Props {
@@ -149,7 +151,14 @@
       {/if}
     </div>
   {:else}
-    <EmptyState icon="cloud" title="No AWS accounts yet" />
+    {#if !aws.accountsLoaded}
+      <Skeleton rows={4} height={28} label="AWS accounts" />
+    {:else if aws.accountsError}
+      <!-- The content pane owns the full error + Retry; never "none yet" here. -->
+      <LoadState variant="compact" what="AWS accounts" error={awsErrorText(aws.accountsError)} empty onretry={() => void aws.loadAccounts()} />
+    {:else}
+      <EmptyState icon="cloud" title="No AWS accounts yet" />
+    {/if}
   {/each}
 </nav>
 

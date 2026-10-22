@@ -354,9 +354,13 @@
   }
 
   /** A removed ref, or a moved ref outside the prefix checked by the splice,
-   *  can orphan commits in the retained tail. Re-read that history in full. */
+   *  can orphan commits in the retained tail. Re-read that history in full.
+   *  A NEW ref (a fetched branch, a fork remote) can make commits reachable
+   *  that are older than the fresh page and absent from the held tail: its
+   *  tip must land in the fresh prefix, or the history is re-read too. */
   let refRemoved = false;
   const movedRefTips = new Set<string>();
+  const newRefTips = new Set<string>();
   function lostRef(prev: RefsResp, next: RefsResp): boolean {
     const entries = (r: RefsResp): [string, string | undefined][] => [
       ...r.local.map((b): [string, string | undefined] => [`l:${b.name}`, b.sha]),
@@ -367,6 +371,8 @@
     for (const [key, sha] of entries(prev)) {
       if (sha && have.has(key) && have.get(key) !== sha) movedRefTips.add(sha);
     }
+    const had = new Set(entries(prev).map(([key]) => key));
+    for (const [key, sha] of have) if (sha && !had.has(key)) newRefTips.add(sha);
     const checked = new Set(commits.slice(0, FIRST_PAGE).map((c) => c.sha));
     return entries(prev).some(([key, sha]) => !have.has(key) ||
       (have.get(key) !== sha && (!sha || !checked.has(sha))));
@@ -1033,14 +1039,18 @@
   function applyGraph(g: GraphFetch): void {
     if (g.gen !== loadGen) return; // a newer reload / repo switch owns the state
     const freshPrefix = new Set(g.commits?.slice(0, FIRST_PAGE).map((c) => c.sha));
-    if (g.more !== null && (refRemoved || [...movedRefTips].some((sha) => !freshPrefix.has(sha)))) {
+    const outside = (tips: Set<string>): boolean => [...tips].some((sha) => !freshPrefix.has(sha));
+    if (g.more !== null && (refRemoved || outside(movedRefTips) || outside(newRefTips))) {
       // Spliced, but a ref vanished meanwhile (refs land beside the log in
       // refreshAfter): the held tail may hold commits nothing reaches now.
+      // Or a new ref's tip is below the fresh page: its commits are in
+      // neither the page nor the held tail.
       void reloadGraph(true);
       return;
     }
     if (g.commits) {
       movedRefTips.clear();
+      newRefTips.clear();
       setCommits(g.commits);
       commitsError = null;
       skipCursor = g.commits.length;

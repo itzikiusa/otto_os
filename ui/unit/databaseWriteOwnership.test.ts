@@ -44,28 +44,15 @@ function setup(options: { holdCancel?: boolean; holdReplacement?: boolean } = {}
       return queries.length === 1 ? refused.promise : options.holdReplacement ? replacement.promise : result;
     },
   };
-  let source = readFileSync(new URL('../src/lib/stores/database.svelte.ts', import.meta.url), 'utf8');
-  // Evaluate each production derived expression when read, since the identity
-  // rune shim cannot track selection changes. All methods/initializers remain
-  // production source, including abortQuery and the access-revocation handler.
-  const ast = ts.createSourceFile('store.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
-  const edits: { start: number; end: number; text: string }[] = [];
-  function visit(node: ts.Node) {
-    if (ts.isPropertyDeclaration(node) && node.initializer && ts.isCallExpression(node.initializer) && node.initializer.expression.getText(ast) === '$derived') {
-      edits.push({ start: node.getStart(ast), end: node.end, text: `get ${node.name.getText(ast)}() { return ${node.initializer.arguments[0].getText(ast)}; }` });
-    }
-    ts.forEachChild(node, visit);
-  }
-  visit(ast);
-  for (const edit of edits.sort((a, b) => b.start - a.start)) source = source.slice(0, edit.start) + edit.text + source.slice(edit.end);
   const storage = new Map<string, string>();
   const context = {
-    exports: {} as Record<string, any>, Error, DOMException, AbortController, crypto: { randomUUID },
+    Error, DOMException, AbortController, crypto: { randomUUID },
     setTimeout, clearTimeout, console,
     localStorage: { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) },
     $state: Object.assign((v: unknown) => v, { raw: (v: unknown) => v, snapshot: (v: unknown) => v }),
     $derived: Object.assign((v: unknown) => v, { by: (fn: () => unknown) => fn() }),
     require: (path: string) => {
+      if (path.startsWith('./database/')) return load(new URL(`../src/lib/stores/${path.slice(2)}.ts`, import.meta.url));
       if (path.endsWith('/client')) return { api, ApiError, withDeadline: transport.withDeadline, READ_DEADLINE_MS: transport.READ_DEADLINE_MS, isAbortError: (e: Error) => e.name === 'AbortError' };
       if (path.endsWith('/workspace.svelte')) return { ws: { currentId: 'workspace' } };
       if (path.endsWith('/auth.svelte')) return { auth: { user: { id: 'user' } } };
@@ -87,8 +74,33 @@ function setup(options: { holdCancel?: boolean; holdReplacement?: boolean } = {}
         '/clipboard', '/poll', '/editor-history', '/loadError', '/toastError'].map((p) => [p, unused(p)] as const))(path);
     },
   };
-  runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, context);
-  const v = context.exports.database;
+  // The store is a façade over lib/stores/database/* (model, statement,
+  // dashboards): every part is compiled the same way and shares one require.
+  const loaded = new Map<string, Record<string, any>>();
+  const load = (url: URL): Record<string, any> => {
+    const hit = loaded.get(url.href);
+    if (hit) return hit;
+    let source = readFileSync(url, 'utf8');
+    // Evaluate each production derived expression when read, since the identity
+    // rune shim cannot track selection changes. All methods/initializers remain
+    // production source, including abortQuery and the access-revocation handler.
+    const ast = ts.createSourceFile('store.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+    const edits: { start: number; end: number; text: string }[] = [];
+    function visit(node: ts.Node) {
+      if (ts.isPropertyDeclaration(node) && node.initializer && ts.isCallExpression(node.initializer) && node.initializer.expression.getText(ast) === '$derived') {
+        edits.push({ start: node.getStart(ast), end: node.end, text: `get ${node.name.getText(ast)}() { return ${node.initializer.arguments[0].getText(ast)}; }` });
+      }
+      ts.forEachChild(node, visit);
+    }
+    visit(ast);
+    for (const edit of edits.sort((a, b) => b.start - a.start)) source = source.slice(0, edit.start) + edit.text + source.slice(edit.end);
+    const exports: Record<string, any> = {};
+    loaded.set(url.href, exports);
+    runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, { ...context, exports });
+    return exports;
+  };
+  const store = load(new URL('../src/lib/stores/database.svelte.ts', import.meta.url));
+  const v = store.database;
   v.connections = [{ id: 'A', name: 'Production A', environment: 'prod', kind: 'postgres' }, { id: 'B', name: 'Development B', environment: 'dev', kind: 'postgres' }];
   v.selectedConnId = 'A'; v.openConnIds = ['A', 'B']; v.activeDb = 'db:app';
   v.capabilities = { engine: 'postgres' };

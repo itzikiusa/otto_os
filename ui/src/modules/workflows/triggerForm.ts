@@ -1,5 +1,11 @@
 import type { TriggerKind, WorkflowTrigger } from '../../lib/api/types';
 
+/** The event kinds a workflow trigger can fire on, with their UI labels. The
+ *  ids must equal the daemon's fireable list in
+ *  `crates/otto-workflows/src/triggers.rs`; its test
+ *  `the_ui_event_kinds_match_the_fireable_list` parses the list below and
+ *  fails when the two drift — change both together. (Keep the list's name out
+ *  of this comment: the test finds the list by its first mention.) */
 export const EVENT_KINDS = [
   ['review_changed', 'Review changed'], ['budget_exceeded', 'Budget exceeded'],
   ['product_changed', 'Product changed'], ['swarm_status', 'Swarm status'],

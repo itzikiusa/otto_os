@@ -13,6 +13,7 @@
   import { ui } from '../../lib/stores/ui.svelte';
   import { openFile as openFileSignal } from '../../lib/stores/openfile.svelte';
   import { api } from '../../lib/api/client';
+  import { ctxMenu } from '../../lib/contextmenu.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import CodeEditor from '../../lib/components/CodeEditor.svelte';
@@ -259,6 +260,8 @@
     } else if (e.key === 'ArrowLeft' && node.entry.is_dir && node.open) {
       e.preventDefault();
       void toggleDir(node);
+    } else if (e.key === 'ContextMenu' || (e.key === 'F10' && e.shiftKey)) {
+      rowMenu(e, node);
     } else if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && list) {
       e.preventDefault();
       const rows = Array.from(list.querySelectorAll<HTMLButtonElement>('button.tree-row'));
@@ -366,6 +369,41 @@
   }
 
   const visibleNodes = $derived(flatten(rootNodes, showHidden || !navigation));
+
+  /** Each visible row's place among its siblings (`aria-posinset` /
+   *  `aria-setsize`, accessibility-responsive-4-08). `nodes` is depth-first,
+   *  so a parent's children are contiguous at depth+1 between its own
+   *  siblings; a group closes when the walk climbs above its depth. */
+  function treePositions(nodes: TreeNode[]): Map<string, { pos: number; size: number }> {
+    const out = new Map<string, { pos: number; size: number }>();
+    const groups: string[][] = [];
+    const close = (depth: number): void => {
+      while (groups.length > depth) {
+        const g = groups.pop() ?? [];
+        g.forEach((path, i) => out.set(path, { pos: i + 1, size: g.length }));
+      }
+    };
+    for (const n of nodes) {
+      close(n.depth + 1);
+      (groups[n.depth] ??= []).push(n.entry.path);
+    }
+    close(0);
+    return out;
+  }
+  const positions = $derived(treePositions(visibleNodes));
+  // Roving tabindex: the tree is ONE Tab stop; ↑/↓ move within it.
+  let activeRow = $state<string | null>(null);
+  const tabRow = $derived(
+    activeRow && visibleNodes.some((n) => n.entry.path === activeRow) ? activeRow : (visibleNodes[0]?.entry.path ?? null),
+  );
+
+  /** Row menu: "Open folder" (navigation mode) — a per-row button used to
+   *  add a second Tab stop to every folder. Also on Shift+F10 / ContextMenu. */
+  function rowMenu(e: MouseEvent | KeyboardEvent, node: TreeNode): void {
+    if (!navigation || !node.entry.is_dir) return;
+    e.preventDefault();
+    ctxMenu.show(e, [{ label: `Open folder ${node.entry.name}`, icon: 'arrow', action: () => navigate(node.entry.path) }]);
+  }
   // Windowed past 300 rows (ListWindow): opening node_modules or a build
   // output folder listed every entry as a button + icons — thousands of rows
   // mounted (and re-diffed on every expand) in a pane that shows ~40.
@@ -523,12 +561,21 @@
       {/if}
       <!-- Tree pane -->
       <div class="tree-pane" class:has-viewer={!!viewerFile}>
-        <div class="tree-list" {@attach treeWin.attach}>
+        <div class="tree-list" role="tree" aria-label="Files in {basename(effectiveRoot)}" {@attach treeWin.attach}>
           {#if treeRange.top > 0}<div style="height:{treeRange.top}px" aria-hidden="true"></div>{/if}
           {#each visibleNodes.slice(treeRange.start, treeRange.end) as node (node.entry.path)}
-            <div class="tree-item">
+            {@const place = positions.get(node.entry.path)}
+            <div class="tree-item" role="none">
             <button
               class="tree-row"
+              role="treeitem"
+              aria-level={node.depth + 1}
+              aria-setsize={place?.size}
+              aria-posinset={place?.pos}
+              aria-selected={viewerFile?.path === node.entry.path}
+              tabindex={node.entry.path === tabRow ? 0 : -1}
+              onfocus={() => (activeRow = node.entry.path)}
+              oncontextmenu={(e) => rowMenu(e, node)}
               class:is-dir={node.entry.is_dir}
               class:is-open={node.open}
               class:is-file={!node.entry.is_dir}
@@ -558,7 +605,10 @@
               {/if}
             </button>
             {#if navigation && node.entry.is_dir}
-              <button class="icon-btn enter-btn" title="Open folder {node.entry.name}" aria-label="Open folder {node.entry.name}" onclick={() => navigate(node.entry.path)}>
+              <!-- Pointer / touch shortcut only: keyboard users reach "Open
+                   folder" from the row menu (Shift+F10), so the tree stays one
+                   Tab stop (accessibility-responsive-4-08). -->
+              <button class="icon-btn enter-btn" tabindex="-1" title="Open folder {node.entry.name}" aria-label="Open folder {node.entry.name}" onclick={() => navigate(node.entry.path)}>
                 <Icon name="arrow" size={12} />
               </button>
             {/if}
@@ -771,7 +821,7 @@
     opacity: 0;
   }
   .tree-item:hover .enter-btn,
-  .enter-btn:focus-visible {
+  .tree-item:focus-within .enter-btn {
     opacity: 1;
   }
   @media (hover: none) {

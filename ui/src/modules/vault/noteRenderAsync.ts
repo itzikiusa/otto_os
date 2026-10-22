@@ -5,7 +5,7 @@
 
 import type { VaultOutgoingLink } from '../../lib/api/types';
 import { sanitizeHtml } from '../../lib/sanitize';
-import { postProcessVaultHtml, renderNote, resolverFrom, stripFrontmatter } from './mdRender';
+import { postProcessVaultHtml, renderNote, resolverFrom, stripFrontmatter } from '../../lib/render/markdown';
 import { plainPreview, renderFailurePlan, type RenderFailure } from './noteRenderPlan';
 import type { NoteRenderIn, NoteRenderOut } from './noteRender.worker';
 

@@ -7,7 +7,6 @@ export type Id = string;
 // Domain
 // ---------------------------------------------------------------------------
 
-export type GlobalRole = 'root' | 'member';
 export type WorkspaceRole = 'viewer' | 'editor' | 'admin';
 
 export interface User {

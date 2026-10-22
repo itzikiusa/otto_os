@@ -203,7 +203,7 @@
 </PageHeader>
 {#each Object.entries(canvas.docSaveErrors) as [id, error] (id)}
   <div class="save-error" role="alert">
-    <span>Could not save {canvas.scenes.find(scene => scene.id === id)?.title ?? 'scene'}. Your draft is kept in this app. {error}</span>
+    <span>Couldn’t save {canvas.scenes.find(scene => scene.id === id)?.title ?? 'scene'}. Your draft is kept in this app. {error}</span>
     <button class="btn small" onclick={() => void canvas.open(id).catch(() => {})}>Open draft</button>
     <button class="btn small" onclick={() => void canvas.retryDoc(id).catch(() => {})}>Retry save</button>
   </div>
