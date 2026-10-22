@@ -84,6 +84,8 @@ mod swarm_scope_api;
 mod ui_control;
 #[path = "workbench_api.rs"]
 mod workbench_api;
+#[path = "workflow_run_files.rs"]
+mod workflow_run_files;
 
 /// Guard: every `tests/*.rs` file is either a module above or a standalone
 /// `[[test]]` target (`snips.rs`), so no suite silently stops running.

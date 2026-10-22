@@ -1192,6 +1192,41 @@ impl WorkflowsRepo {
         Ok(row.and_then(|(c,)| c))
     }
 
+    /// Whom a run with NO starter (trigger / schedule / webhook / chat) acts
+    /// as — PC-3, access-control-3-02: the LATEST changer of what it runs,
+    /// i.e. whichever is newer of the author of the run's pinned graph version
+    /// (`workflow_versions.created_by`) and the last spec editor of any of the
+    /// workflow's triggers (`workflow_triggers.updated_by`, 0189). A workspace
+    /// Editor who rewrites someone else's graph or trigger is therefore who the
+    /// run's agents and DB nodes act as — never the workflow's creator on their
+    /// behalf. `None` when neither is recorded (the caller falls back to the
+    /// creator, as before). The run's firing trigger isn't stored, so every
+    /// trigger of the workflow counts — a superset that can only pick a more
+    /// recent changer, never an older one.
+    pub async fn run_acting_user(&self, run_id: &Id) -> Result<Option<Id>> {
+        sqlx::query_scalar(
+            "SELECT who FROM (
+                 SELECT v.created_by AS who, v.created_at AS at
+                   FROM workflow_runs r
+                   JOIN workflow_versions v
+                     ON v.workflow_id = r.workflow_id AND v.version = r.workflow_version
+                  WHERE r.id = ?
+                 UNION ALL
+                 SELECT t.updated_by AS who, t.updated_by_at AS at
+                   FROM workflow_runs r
+                   JOIN workflow_triggers t ON t.workflow_id = r.workflow_id
+                  WHERE r.id = ? AND t.updated_by_at IS NOT NULL
+             )
+             WHERE who IS NOT NULL AND TRIM(who) <> ''
+             ORDER BY at DESC LIMIT 1",
+        )
+        .bind(run_id)
+        .bind(run_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(dberr("run acting user"))
+    }
+
     pub async fn run_status(&self, id: &Id) -> Result<Option<(RunStatus, bool)>> {
         let row: Option<(String, i64)> = sqlx::query_as(
             "SELECT status, COALESCE(waiting_approval, 0) FROM workflow_runs WHERE id = ?",
@@ -1478,6 +1513,104 @@ mod tests {
             .unwrap();
         sqlx::migrate!().run(&pool).await.unwrap();
         pool.into()
+    }
+
+    /// PC-3 (access-control-3-02): a run with no starter acts as the LATEST
+    /// changer — the pinned version's author or a trigger's spec editor —
+    /// and an owner-only workflow keeps acting as its owner.
+    #[tokio::test]
+    async fn unattended_run_acts_as_the_latest_changer() {
+        let pool = mem_pool().await;
+        let repo = WorkflowsRepo::new(pool.clone());
+        let triggers = crate::TriggersRepo::new(pool);
+        let owner: Id = "owner".into();
+        let wf = repo
+            .create(
+                &"ws".into(),
+                "WF",
+                "",
+                "",
+                &WorkflowGraph::default(),
+                &owner,
+            )
+            .await
+            .unwrap();
+        let new_run = || async {
+            repo.create_run(&wf.id, &"ws".into(), &serde_json::json!({}), None)
+                .await
+                .unwrap()
+                .id
+        };
+        // Owner-only: the owner's own trigger keeps the owner.
+        let t = triggers
+            .create_as(
+                crate::NewWorkflowTrigger {
+                    workflow_id: wf.id.clone(),
+                    kind: "webhook".into(),
+                    spec: serde_json::json!({"token": "t"}),
+                    enabled: true,
+                },
+                Some(&owner),
+            )
+            .await
+            .unwrap();
+        let owner_run = new_run().await;
+        assert_eq!(
+            repo.run_acting_user(&owner_run).await.unwrap(),
+            Some(owner.clone())
+        );
+
+        // An Editor rewrites the graph: the next unattended run acts as them.
+        let editor: Id = "editor".into();
+        repo.publish(
+            &wf.id,
+            None,
+            None,
+            Some("do X"),
+            None,
+            None,
+            "edit",
+            Some(&editor),
+            None,
+        )
+        .await
+        .unwrap();
+        let editor_run = new_run().await;
+        assert_eq!(
+            repo.run_acting_user(&editor_run).await.unwrap(),
+            Some(editor.clone())
+        );
+        // A run pinned to the owner's version keeps acting as the owner.
+        assert_eq!(
+            repo.run_acting_user(&owner_run).await.unwrap(),
+            Some(owner.clone())
+        );
+
+        // An Admin then edits the trigger spec: later still, so they win; a
+        // pause/resume alone by someone else changes nothing.
+        let admin: Id = "admin".into();
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        triggers
+            .update_as(
+                &t.id,
+                Some(serde_json::json!({"token": "t", "prompt": "p"})),
+                None,
+                Some(&admin),
+            )
+            .await
+            .unwrap();
+        triggers
+            .update_as(&t.id, None, Some(false), Some(&"pauser".to_string()))
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.run_acting_user(&editor_run).await.unwrap(),
+            Some(admin)
+        );
+        assert_eq!(
+            repo.run_acting_user(&"missing".to_string()).await.unwrap(),
+            None
+        );
     }
 
     /// The orphan sweep sees EVERY live run, not just the newest 200.

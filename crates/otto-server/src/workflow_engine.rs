@@ -1948,16 +1948,13 @@ async fn run_workflow_with_budget(
         })
         .collect();
     // Resolve the user this run acts as (for spawning visible agent sessions):
-    // the user who STARTED the run when known, else the workflow's creator
-    // (trigger / schedule / chat runs). Acting as the starter is what lets a
-    // non-root editor attach to the sessions their own run spawns — those are
-    // gated owner-or-admin, and the workflow's creator is usually someone else.
-    let run_starter = WorkflowsRepo::new(ctx.pool.clone())
-        .run_created_by(&run_id)
-        .await
-        .ok()
-        .flatten();
-    let user = resolve_run_user(&ctx, &acting_user_id(run_starter, &workflow.created_by)).await;
+    // the user who STARTED the run when known, else the latest changer of what
+    // it runs (trigger / schedule / webhook / chat runs, PC-3). Acting as the
+    // starter is what lets a non-root editor attach to the sessions their own
+    // run spawns — those are gated owner-or-admin, and the workflow's creator
+    // is usually someone else.
+    let acting = run_identity(&ctx, &run_id, &workflow.created_by).await;
+    let user = resolve_run_user(&ctx, &acting).await;
     // Seed the run input from the entry manual_trigger node's configured fields
     // (its inspector — prompt/working_directory/repo_id/goals/…), letting the
     // actual /run body or chat-trigger input override per key. This is what makes
@@ -4275,18 +4272,6 @@ pub(crate) fn resolve_review_mode_source(
         .map(|m| (m, "node"))
 }
 
-/// Whose behalf a run executes on: the user who started it when recorded
-/// (`workflow_runs.created_by`), else the workflow's creator (trigger /
-/// schedule / chat / webhook runs). The agent sessions a run spawns are
-/// created as this user, and session access is owner-or-admin — so a run
-/// MUST act as its starter or a non-admin editor can never attach to the
-/// sessions of a workflow someone else authored.
-fn acting_user_id(run_started_by: Option<Id>, workflow_created_by: &Id) -> Id {
-    run_started_by
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| workflow_created_by.clone())
-}
-
 /// Resolve the user a run acts as. Falls back to a synthetic user for system /
 /// trigger-initiated runs whose `created_by` isn't a real account.
 async fn resolve_run_user(ctx: &ServerCtx, created_by: &Id) -> User {
@@ -5947,3 +5932,6 @@ mod api_request;
 mod nodes;
 
 mod run;
+#[cfg(test)]
+use run::identity::acting_user_id;
+use run::identity::run_identity;

@@ -1549,13 +1549,18 @@ pub async fn create_trigger(
         }
     }
     validate_trigger_spec(&req.kind, &spec)?;
+    // The creator of a trigger is its spec author: the runs it fires act as
+    // the latest changer of what they run (PC-3), not the workflow's creator.
     let t = triggers(&ctx)
-        .create(NewWorkflowTrigger {
-            workflow_id: id.clone(),
-            kind: req.kind,
-            spec,
-            enabled: req.enabled,
-        })
+        .create_as(
+            NewWorkflowTrigger {
+                workflow_id: id.clone(),
+                kind: req.kind,
+                spec,
+                enabled: req.enabled,
+            },
+            Some(&user.id),
+        )
         .await
         .map_err(ApiError)?;
     Ok(Json(t))
@@ -1591,8 +1596,10 @@ pub async fn update_trigger(
     if let Some(spec) = &req.spec {
         validate_trigger_spec(&t.kind, spec)?;
     }
+    // A spec change (prompt, destinations, schedule) makes the caller the
+    // trigger's author for run identity (PC-3); enable/pause alone does not.
     let updated = triggers(&ctx)
-        .update(&id, req.spec, req.enabled)
+        .update_as(&id, req.spec, req.enabled, Some(&user.id))
         .await
         .map_err(ApiError)?;
     Ok(Json(updated))

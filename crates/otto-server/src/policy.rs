@@ -910,6 +910,9 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p == "/workflows/templates" {
         return Require(Workflows, View);
     }
+    // `/workflow-runs/{id}/context/{browse,read}` (PC-1) ride this rule: a run's
+    // context files are a View read here, gated per run at ws Viewer in the
+    // handler — unlike `/fs/*` (Agents:Edit), which refuses the data dir anyway.
     if p.starts_with("/workflows/")
         || p == "/workflows"
         || p.starts_with("/workflow-runs/")
@@ -3267,6 +3270,15 @@ mod tests {
             pol(Method::GET, "/api/v1/workflows/templates"),
             Require(Workflows, View)
         );
+        // Run-scoped context files (PC-1) are reads at Workflows:View, NOT the
+        // `/fs/*` Agents:Edit tier — a workspace Viewer opens their runs' files.
+        for p in [
+            "/api/v1/workflow-runs/{id}/context/browse",
+            "/api/v1/workflow-runs/{id}/context/read",
+        ] {
+            assert_eq!(pol(Method::GET, p), Require(Workflows, View), "{p}");
+            assert_eq!(route_class(&Method::GET, p), None, "{p}");
+        }
         assert_eq!(
             pol(Method::GET, "/api/v1/workspaces/{id}/integrations"),
             Require(Channels, View)
