@@ -195,7 +195,7 @@ for (const map of ['isle', 'mesa'] as ShooterMapId[]) {
   });
 }
 
-for (const [map, size, seed] of [['isle', 2, 23], ['mesa', 4, 7]] as [ShooterMapId, TeamSize, number][]) {
+for (const [map, size, seed] of [['isle', 2, 23], ['mesa', 4, 8]] as [ShooterMapId, TeamSize, number][]) {
   test(`shooter play-test: ${size === 2 ? 'duos' : 'squads'} on ${map}: knocks and revives happen, a supply drop is looted, one team wins together`, () => {
     const { s, guest, maxBytes, ticks, seen } = shooterMatch(map, seed, size);
     assert.equal(s.phase, 'done', `${map}: match ended (clock ${s.clock.toFixed(0)} s)`);

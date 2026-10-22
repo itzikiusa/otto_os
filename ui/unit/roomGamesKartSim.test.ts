@@ -5,8 +5,8 @@ import {
   advance, circ, CRUSHER_HALF, drawLift, F_RAILS, F_UNDER, inLaunchZone, nearest, newNear, obstacleAt, pointAt, progressOf, ROLLER_RADIUS, RUN_UP, sampleAt, TRACK_IDS, trackFor, type TrackId,
 } from '../src/modules/rooms/games/kart/tracks.ts';
 import {
-  COIN_LOSS, COIN_RESPAWN, COUNTDOWN_SECONDS, createRace, DRIFT_LEVELS, idleInput, INTRO_SECONDS, itemBoxes, LAPS, MAX_COINS, MAX_RACERS, pickRoute, rank, sanitize, spinOut, standings, STEP, stepRace, tick,
-  TURBO_SECONDS, type Difficulty, type KartEventType, type KartInput, type KartSeat, type KartState, type Racer,
+  BURNOUT_SECONDS, COIN_LOSS, COIN_RESPAWN, COUNTDOWN_SECONDS, createRace, DRIFT_LEVELS, GHOST_SECONDS, idleInput, INTRO_SECONDS, itemBoxes, LAPS, MAX_COINS, MAX_RACERS, pickRoute, rank, RESPAWN_BOOST,
+  sanitize, spinOut, standings, STEP, stepRace, tick, TURBO_POWER, TURBO_SECONDS, type Difficulty, type KartEventType, type KartInput, type KartSeat, type KartState, type Racer,
 } from '../src/modules/rooms/games/kart/sim.ts';
 import { cpuInput } from '../src/modules/rooms/games/kart/cpu.ts';
 import { kartSeats } from '../src/modules/rooms/games/setup.ts';
@@ -116,27 +116,41 @@ test('stepRace uses fixed steps and ignores bad dt', () => {
   assert.ok(s.clock <= 9 * STEP + 1e-9);
 });
 
-test('rocket start: throttle held from around "1" boosts at GO; early, late or no throttle does not', () => {
-  const s = createRace('meadow', [human(0), human(1), human(2), human(3)], 'normal', 4);
+test('rocket start: gas as "2" fades is a perfect start, later a good one; floored from "3" is a burnout; at GO nothing', () => {
+  const s = createRace('meadow', [human(0), human(1), human(2), human(3), human(4)], 'normal', 4);
   while (s.phase === 'intro') tick(s, []);
   while (s.phase === 'countdown') {
     const cd = s.countdown;
-    tick(s, [press({ throttle: 1 }), press({ throttle: cd <= 1.0 ? 1 : 0 }), press({ throttle: cd <= 0.15 ? 1 : 0 }), idleInput()]);
+    tick(s, [press({ throttle: 1 }), press({ throttle: cd <= 1.2 ? 1 : 0 }), press({ throttle: cd <= 0.5 ? 1 : 0 }), press({ throttle: cd <= 0.1 ? 1 : 0 }), press({ throttle: cd <= 1.7 ? 1 : 0 })]);
   }
-  const [early, timed, late, idle] = s.racers;
-  assert.equal(timed.boost, 1.1);
-  assert.equal(timed.boostPower, 1.35);
-  for (const r of [early, late, idle]) assert.equal(r.boost, 0, `racer ${r.id}`);
-  assert.deepEqual(events(s, 'boost').map(e => e.racer), [timed.id]);
-  // The boost carries the timed racer ahead.
-  run(s, 1.5, [press({ throttle: 1 }), press({ throttle: 1 }), press({ throttle: 1 }), press({ throttle: 1 })]);
-  assert.ok(timed.speed > early.speed && timed.speed > late.speed);
+  const [early, perfect, good, late, between] = s.racers;
+  const at = s.racers.map(r => r.travel);
+  assert.equal(perfect.boost, 1.4); assert.equal(perfect.boostPower, 1.5);
+  assert.equal(good.boost, 0.8); assert.equal(good.boostPower, 1.38);
+  // The perfect start is felt at once: a shove before the first driving tick.
+  assert.ok(perfect.speed > good.speed && good.speed > 0, `kick ${perfect.speed.toFixed(1)} vs ${good.speed.toFixed(1)}`);
+  for (const r of [early, late, between]) assert.equal(r.boost, 0, `racer ${r.id}`);
+  assert.equal(early.stall, BURNOUT_SECONDS);
+  assert.equal(between.stall, 0); assert.equal(late.stall, 0);
+  assert.deepEqual(events(s, 'boost').map(e => [e.racer, e.value ?? 0]), [[perfect.id, 2], [good.id, 0]]);
+  assert.deepEqual(events(s, 'burnout').map(e => e.racer), [early.id]);
+  // The burnout spins its wheels in place while everyone else gets going...
+  run(s, BURNOUT_SECONDS - STEP, Array(5).fill(press({ throttle: 1 })));
+  assert.ok(early.speed < 1 && late.speed > 5, `burnout ${early.speed.toFixed(1)} vs ${late.speed.toFixed(1)}`);
+  // ...and a second in: perfect ahead of good ahead of a plain start.
+  run(s, 0.2, Array(5).fill(press({ throttle: 1 })));
+  const gained = s.racers.map((r, i) => r.travel - at[i]);
+  assert.ok(gained[1] > gained[2] && gained[2] > gained[3], gained.map(g => g.toFixed(1)).join(' '));
+  assert.ok(early.stall <= 0 && early.speed > 0, 'the burnout wears off');
 });
 
-test('rocket start: CPUs time the throttle and get the GO boost', () => {
-  const s = createRace('meadow', kartSeats([], true), 'hard', 7);
-  toRace(s);
-  assert.ok(s.racers.some(r => r.boost > 0), 'at least one CPU rocket-starts');
+test('rocket start: hard CPUs nail it, normal ones get the good start, easy ones none', () => {
+  for (const [difficulty, power] of [['hard', 1.5], ['normal', 1.38], ['easy', 0]] as [Difficulty, number][]) {
+    const s = createRace('meadow', kartSeats([], true), difficulty, 7);
+    toRace(s);
+    for (const r of s.racers) assert.equal(r.boost > 0 ? r.boostPower : 0, power, `${difficulty} CPU ${r.id}`);
+    assert.equal(events(s, 'burnout').length, 0);
+  }
 });
 
 test('travel tracks progress forward and backward; wrong-way is detected', () => {
@@ -257,23 +271,25 @@ test('banana: dropped behind, spins out whoever drives into it', () => {
   assert.equal(a.spin, 0);
 });
 
-test('bomb: a homing shell chases the racer ahead and explodes', () => {
-  const s = humansRace(3);
-  const [shooter, target, bystander] = s.racers;
-  put(s, shooter, 100, 0); put(s, target, 125, 3); put(s, bystander, 400, 0);
-  tick(s, []);
-  assert.equal(target.place, shooter.place - 1);
-  shooter.item = 'bomb'; shooter.itemCount = 1;
-  tick(s, [press({ item: true })]);
-  assert.equal(s.shells.length, 1);
-  assert.equal(s.shells[0].target, target.id);
-  assert.equal(events(s, 'throw').length, 1);
-  for (let i = 0; i < 120 && s.shells.length; i++) tick(s, []);
-  assert.equal(s.shells.length, 0, 'shell exploded');
-  assert.ok(events(s, 'explode').length === 1);
-  assert.ok(target.spin > 0, 'target spun');
-  assert.equal(shooter.spin, 0);
-  assert.equal(bystander.spin, 0);
+test('red shell: homes in on the racer ahead and hits only them (never its owner, even point blank)', () => {
+  for (const gap of [25, 3]) {
+    const s = humansRace(3);
+    const [shooter, target, bystander] = s.racers;
+    put(s, shooter, 100, 0); put(s, target, 100 + gap, 1.5); put(s, bystander, 400, 0);
+    tick(s, []);
+    assert.equal(target.place, shooter.place - 1);
+    shooter.item = 'red'; shooter.itemCount = 1;
+    tick(s, [press({ item: true })]);
+    // (Point blank it may already have struck in the throwing tick.)
+    if (gap > 5) { assert.equal(s.shells.length, 1); assert.equal(s.shells[0].kind, 'red'); assert.equal(s.shells[0].target, target.id); }
+    assert.deepEqual(events(s, 'throw').map(e => e.value), [1]);
+    for (let i = 0; i < 120 && s.shells.length; i++) tick(s, []);
+    assert.equal(s.shells.length, 0, 'shell exploded');
+    assert.equal(events(s, 'explode').length, 1);
+    assert.ok(target.spin > 0, 'target spun');
+    assert.equal(shooter.spin, 0, `gap ${gap}: the shooter is spared`);
+    assert.equal(bystander.spin, 0);
+  }
 });
 
 test('star: blocks spin-outs and spins others on contact', () => {
@@ -288,7 +304,7 @@ test('star: blocks spin-outs and spins others on contact', () => {
   assert.equal(spinOut(s, a), false);
   assert.equal(a.spin, 0);
   // A banana under the star racer is swept away harmlessly.
-  s.hazards.push({ id: 999, x: a.x, y: a.y, z: a.z, owner: b.id });
+  s.hazards.push({ id: 999, x: a.x, y: a.y, z: a.z, owner: b.id, age: 9 });
   tick(s, []);
   assert.equal(a.spin, 0);
   assert.equal(s.hazards.length, 0);
@@ -302,18 +318,34 @@ test('star: blocks spin-outs and spins others on contact', () => {
   assert.equal(a.star, 0);
 });
 
-test('bolt: hits only racers ahead of the user', () => {
-  const s = humansRace(3);
-  const [front, user, back] = s.racers;
-  put(s, front, 300, 0); put(s, user, 200, 0); put(s, back, 100, 0);
-  tick(s, []);
-  assert.deepEqual([front.place, user.place, back.place], [1, 2, 3]);
-  user.item = 'bolt'; user.itemCount = 1;
-  tick(s, [undefined, press({ item: true })]);
-  assert.ok(front.spin > 0 && Math.abs(front.slow - 3) < 1e-9);
-  assert.equal(back.spin, 0); assert.equal(back.slow, 0);
-  assert.equal(user.spin, 0); assert.equal(user.slow, 0);
-  assert.equal(events(s, 'bolt').length, 1);
+test('lightning: strikes every opponent (longest for the leaders, items lost), never the user, who keeps full speed', () => {
+  for (const userPlace of [1, 2, 4]) {
+    const s = humansRace(4);
+    const user = s.racers[0], others = s.racers.slice(1);
+    const spots = [400, 300, 200, 100];
+    put(s, user, spots[userPlace - 1], 0, 24);
+    others.forEach((o, k) => put(s, o, spots.filter((_, i) => i !== userPlace - 1)[k], 0, 24));
+    tick(s, []);
+    assert.equal(user.place, userPlace);
+    others[0].item = 'banana'; others[0].itemCount = 1;
+    others[1].star = 5; // a star shrugs it off
+    user.item = 'bolt'; user.itemCount = 1;
+    const speed = user.speed, seq = s.eventSeq;
+    tick(s, [press({ throttle: 1, item: true })]);
+    assert.equal(user.spin, 0); assert.equal(user.slow, 0);
+    assert.ok(user.speed >= speed - 0.5, `user speed ${user.speed.toFixed(1)} vs ${speed.toFixed(1)}`);
+    assert.equal(user.item, null);
+    const hit = others.filter(o => o.star <= 0);
+    for (const o of hit) assert.ok(o.spin > 0 && o.slow > 1.9, `racer ${o.id} struck`);
+    assert.equal(others[1].spin, 0, 'the star racer is untouched');
+    assert.equal(others[0].item, null, 'the struck racer lost its item');
+    // The further ahead, the longer the shrink.
+    const byPlace = [...hit].sort((a, b) => a.place - b.place);
+    for (let k = 1; k < byPlace.length; k++) assert.ok(byPlace[k - 1].slow >= byPlace[k].slow);
+    assert.deepEqual(events(s, 'bolt', seq).map(e => [e.racer, e.value]), [[user.id, hit.length]]);
+    assert.deepEqual(events(s, 'zap', seq).map(e => e.racer).sort(), hit.map(o => o.id).sort());
+    assert.ok(!events(s, 'zap', seq).some(e => e.racer === user.id) && !events(s, 'spin', seq).some(e => e.racer === user.id));
+  }
 });
 
 test('triple mushroom gives three boosts, one per press', () => {
@@ -324,7 +356,7 @@ test('triple mushroom gives three boosts, one per press', () => {
   for (let k = 3; k > 0; k--) {
     tick(s, [press({ throttle: 1, item: true })]);
     assert.equal(r.itemCount, k - 1);
-    assert.ok(r.boost > 1.1);
+    assert.ok(r.boost > 1.4);
     tick(s, [press({ throttle: 1 })]);
   }
   assert.equal(r.item, null);
@@ -366,7 +398,7 @@ for (const level of [1, 2, 3]) {
     assert.equal(r.driftLevel, 0);
     assert.equal(r.driftCharge, 0);
     assert.equal(r.boost, TURBO_SECONDS[level - 1]);
-    assert.ok(Math.abs(r.boostPower - (1.28 + level * 0.04)) < 1e-9);
+    assert.equal(r.boostPower, TURBO_POWER[level - 1]);
     assert.deepEqual(events(s, 'turbo', seq).map(e => e.value), [level]);
   });
 }
@@ -418,12 +450,17 @@ test('out of bounds on grass tracks: the racer is rescued back onto the road', (
     assert.equal(r.speed, 0);
     assert.ok(Math.abs(r.lateral) - t.halfWidth > t.def.outOfBounds - 3, `left the road by ${Math.abs(r.lateral) - t.halfWidth}`);
     assert.equal(events(s, 'respawn').length, 1);
-    // Throttle is ignored while waiting.
-    run(s, 1.5, [press({ throttle: 1 })]);
-    assert.equal(r.respawn <= 0, true);
+    // Throttle is ignored while waiting (about a second); held as the kart lands, it fires a respawn boost.
+    let wait = 0;
+    while (r.respawn > 0 && wait++ < 200) tick(s, [press({ throttle: 1 })]);
+    assert.ok(wait * STEP < 1.1, `${track}: rescued in ${(wait * STEP).toFixed(2)} s`);
     const near = nearest(t, r.x, r.z);
     assert.ok(Math.abs(near.lateral) < 1, `${track}: back on the centre line (${near.lateral})`);
     assert.ok(events(s, 'land').length >= 1);
+    assert.equal(r.ghost, GHOST_SECONDS);
+    assert.equal(r.boost, RESPAWN_BOOST);
+    // Untouchable for a moment: no spin-outs.
+    assert.equal(spinOut(s, r), false);
   }
 });
 
@@ -664,7 +701,7 @@ test('underwater: the seabed road is drivable, slower and floaty; diving in spla
 });
 
 test('rails keep racers on bridge decks and in tunnels', () => {
-  for (const [id, from] of [['lagoon', 0.65], ['volcano', 0.5]] as [TrackId, number][]) {
+  for (const [id, from] of [['lagoon', 0.65], ['volcano', 0.455]] as [TrackId, number][]) {
     const s = humansRace(1, id);
     const t = trackFor(id);
     const at = from * t.length;

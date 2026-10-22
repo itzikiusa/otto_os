@@ -115,7 +115,7 @@ for (const track of [{ id: 'meadow', name: 'Sunny Meadow' }, { id: 'downtown', n
   });
 }
 
-for (const map of [{ id: 'isle', name: 'Palm Isle' }, { id: 'mesa', name: 'Red Mesa' }]) {
+for (const map of [{ id: 'isle', name: 'Palm Isle' }, { id: 'mesa', name: 'Red Mesa' }, { id: 'deadcity', name: 'Dead City' }]) {
   test(`shooter ${map.id}: drop, glide, land, loot and fight`, async ({ page }, info) => {
     test.setTimeout(150_000);
     const errors = observe(page);
@@ -365,7 +365,7 @@ test('menu art from live frames', async ({ page }) => {
     await page.keyboard.up('w');
     if (id === 'meadow') await page.locator('.kart-stage').screenshot({ path: resolve(art, 'cover-kart.png') });
   }
-  for (const [id, name] of [['isle', 'Palm Isle'], ['mesa', 'Red Mesa']]) {
+  for (const [id, name] of [['isle', 'Palm Isle'], ['mesa', 'Red Mesa'], ['deadcity', 'Dead City']]) {
     await boot(page);
     await page.getByRole('button', { name: /Storm Royale/ }).click();
     await page.getByRole('button', { name: new RegExp(name) }).click();

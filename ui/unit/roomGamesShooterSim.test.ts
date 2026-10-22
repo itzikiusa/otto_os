@@ -157,7 +157,7 @@ test('weapon pickup fills a free slot, never a full inventory or a worse duplica
   const p = s.players[0];
   loot(s, { kind: 'weapon', weapon: 'smg', rarity: 1, amount: 30, x: p.x, y: p.y, z: p.z });
   tickMatch(s, []);
-  assert.deepEqual(p.weapons, [{ w: 'smg', rarity: 1, mag: 30 }, null, null, null, null]);
+  assert.deepEqual(p.weapons, [{ w: 'smg', rarity: 1, mag: 30, att: 0 }, null, null, null, null]);
   assert.equal(p.current, 0, 'drawn from the pickaxe');
   // Same weapon, same or lower rarity: skipped.
   const dup = loot(s, { kind: 'weapon', weapon: 'smg', rarity: 0, amount: 30, x: p.x, y: p.y, z: p.z });
@@ -191,7 +191,7 @@ test('firing consumes the magazine; semi-auto needs a fresh press; reload refill
   const s = groundMatch(2);
   const p = s.players[0];
   p.yaw = 0;
-  p.weapons[0] = { w: 'rifle', rarity: 0, mag: 30 };
+  p.weapons[0] = { w: 'rifle', rarity: 0, mag: 30, att: 0 };
   p.current = 0;
   p.ammo.medium = 60;
   // Fire straight up (nothing to hit) for one second.
@@ -202,16 +202,17 @@ test('firing consumes the magazine; semi-auto needs a fresh press; reload refill
   assert.ok(shots >= 6 && shots <= 8, `${shots} rifle shots in 1 s at ${WEAPONS.rifle.rate}/s`);
   // Reload: takes `reload` seconds and moves rounds from the reserve.
   run(s, 0.2, [press({ pitch: 1.4 })]);
-  tickMatch(s, [press({ reload: true })]);
+  tickMatch(s, [press({ reload: true, fire: true, pitch: 1.4 })]);
   assert.ok(p.reload > 0);
   assert.equal(events(s, 'reload').length, 1);
-  run(s, WEAPONS.rifle.reload - 0.1, [press({ fire: true, pitch: 1.4 })]);
+  // Holding the trigger does not cancel it (only a fresh press with rounds left does); a tactical reload is quicker.
+  run(s, WEAPONS.rifle.reload * 0.85 - 0.1, [press({ fire: true, pitch: 1.4 })]);
   assert.equal(p.weapons[0]!.mag, 30 - shots, 'no firing while reloading');
   run(s, 0.2, []);
   assert.equal(p.weapons[0]!.mag, 30);
   assert.equal(p.ammo.medium, 60 - shots);
   // Semi-auto pistol: holding fires once.
-  p.weapons[1] = { w: 'pistol', rarity: 0, mag: 16 };
+  p.weapons[1] = { w: 'pistol', rarity: 0, mag: 16, att: 0 };
   run(s, 0.5, [press({ slot: 2 })]);
   run(s, 1, [press({ slot: 2, fire: true, pitch: 1.4 })]);
   assert.equal(p.weapons[1]!.mag, 15);
@@ -224,13 +225,16 @@ test('firing consumes the magazine; semi-auto needs a fresh press; reload refill
   assert.equal(p.sprinting, true);
   tickMatch(s, [press({ slot: 2, pitch: 1.4, sprint: true, mz: 1, fire: true })]);
   assert.equal(p.sprinting, false);
+  // The weapon comes up out of the sprint first (a moment), and the click is kept until then.
+  assert.equal(p.weapons[1]!.mag, 14);
+  run(s, 0.15, [press({ slot: 2, pitch: 1.4, fire: true })]);
   assert.equal(p.weapons[1]!.mag, 13);
 });
 
 test('empty magazine: fire starts a reload from reserve; with no reserve nothing happens', () => {
   const s = groundMatch(2);
   const p = s.players[0];
-  p.weapons[0] = { w: 'shotgun', rarity: 0, mag: 0 };
+  p.weapons[0] = { w: 'shotgun', rarity: 0, mag: 0, att: 0 };
   p.current = 0;
   p.ammo.shells = 3;
   tickMatch(s, [press({ fire: true, pitch: 1.4 })]);
@@ -250,9 +254,10 @@ test('hitscan damage goes to the shield first', () => {
   const [a, b] = s.players;
   put(s, b, a.x, a.z + 10);
   b.shield = 50;
-  a.weapons[0] = { w: 'rifle', rarity: 0, mag: 30 };
+  a.weapons[0] = { w: 'rifle', rarity: 0, mag: 30, att: 0 };
   a.current = 0;
   const aim = aimAt(a, b);
+  a.ads = 1; // sights already up (they take the rifle's ADS time to raise)
   tickMatch(s, [press({ ...aim, aim: true, fire: true })]);
   const expected = damageAt(WEAPONS.rifle, 0, 10, false);
   assert.equal(b.shield, 50 - expected);
@@ -275,7 +280,7 @@ test('rocket splash: direct hit hurts most, falls off with distance, shields abs
   put(s, c, b.x + 3, b.z);
   put(s, d, b.x + 10, b.z);
   c.shield = 100;
-  a.weapons[0] = { w: 'rocket', rarity: 0, mag: 1 };
+  a.weapons[0] = { w: 'rocket', rarity: 0, mag: 1, att: 0 };
   a.current = 0;
   tickMatch(s, [press({ ...aimAt(a, b, 1), aim: true, fire: true })]);
   assert.equal(s.rockets.length, 1);
@@ -295,11 +300,11 @@ test('elimination drops the inventory, credits the killer, and the last fighter 
   const [a, b, c] = s.players;
   put(s, b, a.x, a.z + 10);
   b.hp = 10;
-  b.weapons = [{ w: 'smg', rarity: 1, mag: 20 }, { w: 'medkit', rarity: 1, mag: 2 }, null, null, null];
+  b.weapons = [{ w: 'smg', rarity: 1, mag: 20, att: 0 }, { w: 'medkit', rarity: 1, mag: 2, att: 0 }, null, null, null];
   b.ammo.light = 50;
   b.mats = [40, 0, 12];
-  a.weapons[0] = { w: 'rifle', rarity: 0, mag: 30 };
-  a.current = 0;
+  a.weapons[0] = { w: 'rifle', rarity: 0, mag: 30, att: 0 };
+  a.current = 0; a.ads = 1;
   tickMatch(s, [press({ ...aimAt(a, b), aim: true, fire: true })]);
   assert.equal(b.mode, 'dead');
   assert.equal(b.place, 3);
@@ -324,6 +329,7 @@ test('elimination drops the inventory, credits the killer, and the last fighter 
   s.loot = [];
   put(s, c, b.x, b.z);
   c.hp = 5;
+  a.ads = 1; a.kick = 0; a.kickYaw = 0;
   tickMatch(s, [press({ ...aimAt(a, c), aim: true, fire: true })]);
   assert.equal(c.mode, 'dead');
   assert.equal(c.place, 2);
@@ -345,10 +351,10 @@ test('elimination of a shielded victim also drops a heal', () => {
   const [a, b] = s.players;
   put(s, b, a.x, a.z + 10);
   b.hp = 5; b.shield = 1;
-  b.weapons = [{ w: 'smg', rarity: 1, mag: 20 }, null, null, null, null];
+  b.weapons = [{ w: 'smg', rarity: 1, mag: 20, att: 0 }, null, null, null, null];
   b.ammo.light = 50;
-  a.weapons[0] = { w: 'sniper', rarity: 4, mag: 4 };
-  a.current = 0;
+  a.weapons[0] = { w: 'sniper', rarity: 4, mag: 4, att: 0 };
+  a.current = 0; a.ads = 1;
   tickMatch(s, [press({ ...aimAt(a, b), aim: true, fire: true })]);
   assert.equal(b.mode, 'dead');
   assert.ok(s.loot.some(l => l.kind === 'heal' && Math.hypot(l.x - b.x, l.z - b.z) < 2));
@@ -447,7 +453,7 @@ test('stepMatch uses fixed steps and ignores bad dt', () => {
 
 test('weaponFor picks shotgun close, rifle mid, sniper far; skips empty weapons', () => {
   const p = createMatch({ map: 'isle', difficulty: 'easy', seed: 2, seats: shooterSeats([], 1) }).players[0];
-  p.weapons = [{ w: 'shotgun', rarity: 0, mag: 5 }, { w: 'sniper', rarity: 0, mag: 4 }, { w: 'rifle', rarity: 0, mag: 30 }];
+  p.weapons = [{ w: 'shotgun', rarity: 0, mag: 5, att: 0 }, { w: 'sniper', rarity: 0, mag: 4, att: 0 }, { w: 'rifle', rarity: 0, mag: 30, att: 0 }];
   assert.equal(weaponFor(p, 5), 0);
   assert.equal(weaponFor(p, 40), 2);
   assert.equal(weaponFor(p, 120), 1);
@@ -458,7 +464,7 @@ test('weaponFor picks shotgun close, rifle mid, sniper far; skips empty weapons'
   assert.equal(weaponFor(p, 120), 1);
   p.weapons = [null, null, null];
   assert.equal(weaponFor(p, 10), -1);
-  const pick = (ws: WeaponId[], d: number) => { p.weapons = ws.map(w => ({ w, rarity: 0 as const, mag: WEAPONS[w].mag })); return ws[weaponFor(p, d)]; };
+  const pick = (ws: WeaponId[], d: number) => { p.weapons = ws.map(w => ({ w, rarity: 0 as const, mag: WEAPONS[w].mag, att: 0 })); return ws[weaponFor(p, d)]; };
   assert.equal(pick(['pistol', 'smg'], 10), 'smg');
   assert.equal(pick(['pistol', 'rocket'], 30), 'rocket');
   assert.equal(pick(['pistol', 'rocket'], 5), 'pistol');

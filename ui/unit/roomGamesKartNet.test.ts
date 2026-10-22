@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { decodeInput, decodeSnapshot, encodeInput, encodeSnapshot, RACER_FIELDS, type KartSnapshot } from '../src/modules/rooms/games/kart/net.ts';
+import { decodeInput, decodeSnapshot, encodeInput, encodeSnapshot, RACER_FIELDS, SHELL_FIELDS, type KartSnapshot } from '../src/modules/rooms/games/kart/net.ts';
+import { ITEM_KINDS } from '../src/modules/rooms/games/kart/items.ts';
 import { createRace, MAX_COINS, MAX_HAZARDS, MAX_SHELLS, tick, type KartState } from '../src/modules/rooms/games/kart/sim.ts';
 import { RACER_IDS, type RacerId } from '../src/modules/rooms/games/kart/roster.ts';
 import { trackFor } from '../src/modules/rooms/games/kart/tracks.ts';
@@ -16,11 +17,15 @@ function midRace(): KartState {
   const s = createRace('canyon', kartSeats([{ slot: 2, name: 'Ann', pick: 'kai' }, { slot: 4, name: 'Bo', pick: 'dex' }], true), 'hard', 77);
   for (let i = 0; i < 60 * 50; i++) tick(s, [undefined, undefined, undefined, undefined, undefined, undefined, { throttle: 1, steer: 0.1, drift: false, item: false, respawn: false }]);
   s.racers[0].item = 'triple'; s.racers[0].itemCount = 2;
+  s.racers[3].item = 'golden'; s.racers[3].itemCount = 1; s.racers[3].golden = 4.257;
+  s.racers[4].ghost = 1.5; s.racers[5].draft = 0.61; s.racers[6].stall = 0.4;
   s.racers[2].coins = 7;
   s.coins[3].timer = 4.2; s.coins[5].timer = 0.01;
   s.racers[1].finish = 123.4567; s.racers[1].lapTimes = [40.1234, 41.5, 41.8333];
-  s.hazards.push({ id: 900, x: 1.234, y: 2, z: 3.456, owner: 3 });
-  s.shells.push({ id: 901, x: 4, y: 5, z: 6, yaw: 0.12345, target: 2, owner: 5, life: 3, hint: 10, seg: 0 });
+  s.hazards.push({ id: 900, x: 1.234, y: 2, z: 3.456, owner: 3, age: 0.5 });
+  s.shells.push({ id: 901, kind: 'red', x: 4, y: 5, z: 6, yaw: 0.12345, target: 2, owner: 5, life: 3, hint: 10, seg: 0, vy: 0, speed: 50 });
+  s.shells.push({ id: 902, kind: 'blue', x: 7, y: 9, z: 6, yaw: -1, target: 0, owner: 6, life: 9, hint: 10, seg: 0, vy: 0, speed: 68 });
+  s.shells.push({ id: 903, kind: 'bomb', x: 7, y: 9, z: 6, yaw: -1, target: -1, owner: 1, life: 1, hint: 10, seg: 0, vy: 3, speed: 12 });
   cached = s;
   return s;
 }
@@ -43,7 +48,7 @@ test('encodeSnapshot/decodeSnapshot round-trip', () => {
     assert.equal(b.human, r.human);
     assert.equal(b.slot, r.slot);
     assert.equal(b.name, `${r.racer}#${r.slot}`);
-    for (const k of ['x', 'y', 'z', 'speed', 'travel', 'lateral', 'boost', 'spin', 'star'] as const) assert.ok(Math.abs(b[k] - r[k]) <= 0.005 + 1e-9, `racer ${i} ${k}`);
+    for (const k of ['x', 'y', 'z', 'speed', 'travel', 'lateral', 'boost', 'spin', 'star', 'golden', 'ghost', 'draft', 'stall'] as const) assert.ok(Math.abs(b[k] - r[k]) <= 0.005 + 1e-9, `racer ${i} ${k}`);
     assert.ok(Math.abs(b.yaw - r.yaw) <= 0.0005 + 1e-9);
     assert.equal(b.item, r.item);
     assert.equal(b.itemCount, r.itemCount);
@@ -66,7 +71,9 @@ test('encodeSnapshot/decodeSnapshot round-trip', () => {
   assert.ok(back.coins.every((c, i) => c.x === s.coins[i].x && c.z === s.coins[i].z));
   assert.ok(snap.cn.includes(3) && snap.cn.includes(5));
   assert.deepEqual(back.hazards.map(h => h.id), s.hazards.map(h => h.id));
-  assert.deepEqual(back.shells.map(h => [h.id, h.target, h.owner]), s.shells.map(h => [h.id, h.target, h.owner]));
+  assert.deepEqual(back.shells.map(h => [h.id, h.kind, h.target, h.owner]), s.shells.map(h => [h.id, h.kind, h.target, h.owner]));
+  assert.deepEqual(back.shells.slice(-3).map(h => h.kind), ['red', 'blue', 'bomb']);
+  assert.equal(back.racers[3].item, 'golden');
   const sent = s.events.slice(-24);
   assert.deepEqual(back.events.map(e => [e.id, e.type, e.racer]), sent.map(e => [e.id, e.type, e.racer]));
   assert.equal(back.eventSeq, sent.at(-1)?.id ?? 0);
@@ -78,7 +85,8 @@ test('decodeSnapshot rejects malformed payloads', () => {
   const bad: [string, (s: KartSnapshot) => unknown][] = [
     ['old version', s => ({ ...s, v: 1 })],
     ['round-1 version', s => ({ ...s, v: 2 })],
-    ['future version', s => ({ ...s, v: 4 })],
+    ['round-2 version', s => ({ ...s, v: 3 })],
+    ['future version', s => ({ ...s, v: 5 })],
     ['track', s => ({ ...s, tr: 'moon' })],
     ['phase', s => ({ ...s, p: 9 })],
     ['difficulty', s => ({ ...s, d: -1 })],
@@ -93,7 +101,7 @@ test('decodeSnapshot rejects malformed payloads', () => {
     ['Infinity in racer row', s => ({ ...s, r: [[Infinity, ...s.r[0].slice(1)], ...s.r.slice(1)] })],
     ['null in racer row (JSON NaN)', s => wire({ ...s, r: [[NaN, ...s.r[0].slice(1)], ...s.r.slice(1)] })],
     ['bad racer id', s => ({ ...s, q: [[99, 0, -1], ...s.q.slice(1)] })],
-    ['item out of range', s => { const r = s.r.map(x => [...x]); r[0][17] = 6; return { ...s, r }; }],
+    ['item out of range', s => { const r = s.r.map(x => [...x]); r[0][17] = ITEM_KINDS.length; return { ...s, r }; }],
     ['place zero', s => { const r = s.r.map(x => [...x]); r[0][22] = 0; return { ...s, r }; }],
     ['surface out of range', s => { const r = s.r.map(x => [...x]); r[0][27] = 3; return { ...s, r }; }],
     ['hint out of range', s => { const r = s.r.map(x => [...x]); r[0][28] = trackFor('canyon').count; return { ...s, r }; }],
@@ -114,8 +122,11 @@ test('decodeSnapshot rejects malformed payloads', () => {
     ['NaN box timer', s => ({ ...s, b: [NaN, ...s.b.slice(1)] })],
     ['too many hazards', s => ({ ...s, h: Array.from({ length: MAX_HAZARDS + 1 }, (_, i) => [i, 0, 0, 0, 0]) })],
     ['short hazard', s => ({ ...s, h: [[1, 2, 3]] })],
-    ['too many shells', s => ({ ...s, s: Array.from({ length: MAX_SHELLS + 1 }, (_, i) => [i, 0, 0, 0, 0, 0, 0]) })],
-    ['short shell', s => ({ ...s, s: [[1, 2, 3, 4, 5, 6]] })],
+    ['too many shells', s => ({ ...s, s: Array.from({ length: MAX_SHELLS + 1 }, (_, i) => [i, 0, 0, 0, 0, 0, 0, 0]) })],
+    ['short shell (round-2 row)', s => ({ ...s, s: [[1, 2, 3, 4, 5, 6, 7]] })],
+    ['shell kind out of range', s => ({ ...s, s: [[1, 2, 3, 4, 5, 6, 7, 4]] })],
+    ['negative shell kind', s => ({ ...s, s: [[1, 2, 3, 4, 5, 6, 7, -1]] })],
+    ['round-2 racer row', s => ({ ...s, r: s.r.map(x => x.slice(0, 32)) })],
     ['too many events', s => ({ ...s, e: Array.from({ length: 49 }, (_, i) => [i, 0, 0, 0, 0, 0, 0]) })],
     ['event racer out of range', s => ({ ...s, e: [[1, 0, 8, 0, 0, 0, 0]] })],
     ['event type out of range', s => ({ ...s, e: [[1, 99, 0, 0, 0, 0, 0]] })],
@@ -130,8 +141,9 @@ test('snapshot of 8 racers + 24 events + max hazards/shells stays under 16 KiB',
   const s = midRace();
   const big: KartState = {
     ...s,
-    hazards: Array.from({ length: MAX_HAZARDS }, (_, i) => ({ id: 1000 + i, x: -123.456, y: 12.345, z: 234.567, owner: 7 })),
-    shells: Array.from({ length: MAX_SHELLS }, (_, i) => ({ id: 2000 + i, x: -123.456, y: 12.345, z: 234.567, yaw: -3.14159, target: 7, owner: 6, life: 5, hint: 400, seg: 0 })),
+    hazards: Array.from({ length: MAX_HAZARDS }, (_, i) => ({ id: 1000 + i, x: -123.456, y: 12.345, z: 234.567, owner: 7, age: 0 })),
+    shells: Array.from({ length: MAX_SHELLS }, (_, i) => ({ id: 2000 + i, kind: 'blue' as const, x: -123.456, y: 12.345, z: 234.567, yaw: -3.14159, target: 7, owner: 6, life: 5, hint: 400, seg: 0, vy: 0, speed: 0 })),
+    racers: s.racers.map(r => ({ ...r, golden: 7.123, ghost: 1.987, draft: 1.099, stall: 0.799, boostPower: 1.555, travel: 12345.678 })),
   };
   const evs = Array.from({ length: 48 }, (_, i) => ({ id: 100000 + i, type: 'explode' as const, racer: 7, x: -123.456, y: 12.345, z: 234.567, value: 123.456 }));
   const json = JSON.stringify(encodeSnapshot(big, evs));
@@ -173,8 +185,9 @@ test('branching tracks: path, glider and underwater state survive the wire; hint
   c.under = true;
   s.events.push({ id: ++s.eventSeq, type: 'splash', racer: 2, x: 1, y: 2, z: 3, value: 2 }, { id: ++s.eventSeq, type: 'glide', racer: 1, x: 1, y: 2, z: 3 }, { id: ++s.eventSeq, type: 'crush', racer: 0, x: 1, y: 2, z: 3 });
   const snap = wire(encodeSnapshot(s, s.events)) as KartSnapshot;
-  assert.equal(snap.v, 3);
+  assert.equal(snap.v, 4);
   assert.ok(snap.r.every(row => row.length === RACER_FIELDS));
+  assert.ok(snap.s.every(row => row.length === SHELL_FIELDS));
   assert.equal(snap.b.length, s.boxes.length, 'boxes on every route');
   const back = decodeSnapshot(snap, names);
   assert.ok(back);
