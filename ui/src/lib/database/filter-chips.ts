@@ -83,12 +83,6 @@ export function condToSql(c: FilterCond, engine: EngineLike = null): string {
   }
 }
 
-/** Human label for a filter chip (e.g. `currency = 'EUR'`, `id IN (1, 2)`). */
-export function condLabel(c: FilterCond): string {
-  if (c.kind === 'raw') return c.text;
-  return condToSql(c) || `${c.column} …`;
-}
-
 /** Whether a result cell matches a chip value client-side (the grid narrows
  *  the loaded rows before the rewritten query is re-run). `text` is the
  *  grid's display stringifier (`cellStr`). A boolean value matches by VALUE —

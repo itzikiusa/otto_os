@@ -430,7 +430,7 @@
     if (x !== popover.x || y !== popover.y) popover = { ...popover, x, y };
   });
 
-  // Closing the popover with Esc hands focus back to the take-over toggle (the
+  // Closing the popover (Esc, Cancel, or after Add) hands focus back to the take-over toggle (the
   // control that opened this mode) instead of dropping it on <body>.
   function closePopover(): void {
     popover = { ...popover, open: false };
@@ -460,8 +460,10 @@
       ...annotations,
       { desc: popover.desc, comment: popoverComment, url: popover.url },
     ];
-    popover = { ...popover, open: false };
     popoverComment = '';
+    // Same close as Esc/Cancel: the focused Add button or textarea unmounts,
+    // so focus goes back to the take-over toggle, not <body>.
+    closePopover();
   }
 
   function popoverKeydown(e: KeyboardEvent): void {

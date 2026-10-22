@@ -38,6 +38,39 @@ export interface GridSyncHost {
   foreign(): Grid | null;
 }
 
+/** Agent TUI panes measure while their box settles and resize xterm only
+ *  once the grid is stability-confirmed (Terminal's `confirmResizeStep`): the
+ *  passing sizes of a tab switch, a split animation or a window restore never
+ *  touch the buffer. Shells (their scrollback reflows natively) and phones
+ *  (the soft keyboard must not wait) resize immediately. */
+export function shouldDeferLocalResize(s: { preferDom: boolean; connected: boolean; phone: boolean }): boolean {
+  return s.preferDom && s.connected && !s.phone;
+}
+
+/** What one `sendResize` call does (architecture-2-01, the resize half):
+ *  - `confirm-now`: a forced sync (connect, focus re-claim) skips the settle
+ *    wait but still runs the stability confirmation at once — an attach can
+ *    race a window-restore animation just like a drag can;
+ *  - `skip`: no confirmation pending, the grid is what this socket last sent
+ *    and xterm did not reflow on its own — nothing to tell the PTY;
+ *  - `schedule`: (re)start the settle timer, then confirm. */
+export type ResizeSendStep = 'confirm-now' | 'skip' | 'schedule';
+
+export function resizeSendStep(s: {
+  force: boolean;
+  /** A settle / confirmation timer is already running. */
+  timerPending: boolean;
+  /** The grid to compare: the measured one for a deferring TUI pane, else xterm's. */
+  grid: Grid;
+  /** What this socket last sent (`lastCols` / `lastRows`). */
+  last: Grid;
+  localReflowed: boolean;
+}): ResizeSendStep {
+  if (s.force) return 'confirm-now';
+  if (!s.timerPending && s.grid.cols === s.last.cols && s.grid.rows === s.last.rows && !s.localReflowed) return 'skip';
+  return 'schedule';
+}
+
 export class TermGridSync {
   /** The PTY's real grid from the latest `grid` frame (null: none yet). */
   pty: Grid | null = null;

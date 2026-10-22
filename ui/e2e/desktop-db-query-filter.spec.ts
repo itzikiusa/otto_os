@@ -45,7 +45,7 @@ interface SU {
   substituteVars(sql: string, values: Record<string, string>, mode?: 'sql' | 'line'): string;
   maskQueryPlaceholders(sql: string): { masked: string; tokens: string[] };
 }
-const SQL_UTIL = '/src/modules/database/sql-util.ts';
+const SQL_UTIL = '/src/lib/database/sql-util.ts';
 // The record-diff helpers exported from RecordDiff.svelte's `<script module>`
 // (Vite compiles the component; the module exports come back as named exports).
 interface DiffRow {

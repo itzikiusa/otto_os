@@ -1240,7 +1240,7 @@
     items.push(...gitFlowItems(c.sha));
     items.push(
       { separator: true },
-      { label: 'Revert commit…', icon: 'refresh', danger: true, action: () => void revertCommit(c) },
+      { label: 'Revert commit…', icon: 'refresh', action: () => void revertCommit(c) },
       { separator: true },
       { label: 'Copy commit SHA', icon: 'note', action: () => void clip(c.sha, c.sha) },
       { label: 'Copy short SHA', icon: 'note', action: () => void clip(c.short_sha, c.short_sha) },
@@ -1627,10 +1627,10 @@
   }
 
   async function deleteTag(name: string, remote: boolean): Promise<void> {
-    const ok = await confirmer.ask(
-      remote ? `Delete tag “${name}” on origin?` : `Delete local tag “${name}”?`,
-      { title: 'Delete tag', confirmLabel: 'Delete', danger: true },
-    );
+    const ok = remote // outward-facing like its push sibling: where + who (ux-design-5-15)
+      ? await confirmOutward({ verb: 'Delete tag', where: `origin · tag ${name}`, danger: true,
+          who: 'Everyone with access to the remote loses the tag; CI or release jobs may react.' })
+      : await confirmer.ask(`Delete local tag “${name}”?`, { title: 'Delete tag', confirmLabel: 'Delete', danger: true });
     if (!ok) return;
     await mutate('/tag/delete', { name, remote }, remote ? 'Tag deleted on origin' : 'Tag deleted', name);
   }

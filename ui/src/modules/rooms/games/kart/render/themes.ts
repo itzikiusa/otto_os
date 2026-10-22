@@ -5,7 +5,7 @@
  * neon skyway) the glow along the barrier tops.
  */
 import type { Theme } from '../../common/view';
-import type { SurfaceKind } from './surfaces';
+import type { TerrainSurfaceKind } from './surfaces';
 import type { ThemeId } from '../tracks';
 
 export interface KartTheme extends Theme {
@@ -20,7 +20,7 @@ export interface KartTheme extends Theme {
   /** Shallow-water tint (the deep tint is `liquid`). */
   shallow: number;
   /** What off-road patches are made of. */
-  offroad: SurfaceKind;
+  offroad: TerrainSurfaceKind;
   /** Rumble curbs: plain and on banked bends. */
   curb: [string, string]; bankCurb: [string, string];
   /** Barrier banners: background, lettering, accent panel. */

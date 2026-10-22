@@ -14,6 +14,7 @@
   import { TableWindow } from '../../lib/tableWindow.svelte';
   import type { BrokerCluster, GroupDetail, GroupOffset, GroupSummary } from '../../lib/api/types';
   import type { DryRunResp } from './types';
+  import ResetWarning, { resetWarning } from './ResetWarning.svelte';
 
   interface Props {
     cluster: BrokerCluster;
@@ -49,6 +50,7 @@
   // Dry-run preview state.
   let dryRunLoading = $state(false);
   let dryRunResult = $state<DryRunResp | null>(null);
+  const blockedBy = $derived(resetWarning(dryRunResult, selected)); // the preview's refusal warning
 
   // Resizable group list (PaneDivider): the width survives reloads. On phones /
   // a narrow container the list stacks full-width and the divider is hidden.
@@ -484,11 +486,9 @@
         >
           {dryRunLoading ? 'Previewing…' : 'Preview'}
         </button>
-        <button
-          class="btn small danger"
-          onclick={applyReset}
-          disabled={resetting || dryRunLoading || !!resetError}
-          title={guarded ? 'Cluster is guarded — requires confirmation' : 'Reset committed offsets'}
+        <button class="btn small danger" onclick={applyReset}
+          disabled={resetting || dryRunLoading || !!resetError || !!blockedBy}
+          title={blockedBy ? `Can’t reset yet: ${blockedBy}` : guarded ? 'Cluster is guarded — requires confirmation' : 'Reset committed offsets'}
         >
           {resetting ? 'Resetting…' : 'Reset'}
         </button>
@@ -496,8 +496,8 @@
 
       {#if resetError}<p class="muted small" role="status">{resetError}</p>{/if}
 
-      <!-- Dry-run preview table -->
-      {#if dryRunResult}
+      {#if dryRunResult}<!-- Dry-run preview table -->
+        <ResetWarning preview={dryRunResult} group={selected} />
         <div class="dryrun-preview">
           <div class="dryrun-summary">
             <span>Preview: lag <strong>{dryRunResult.total_lag_before.toLocaleString()}</strong>
@@ -531,7 +531,7 @@
               {/each}
             </tbody>
           </table>
-          <p class="muted small">Click <strong>Reset</strong> above to apply after reviewing.</p>
+          {#if !blockedBy}<p class="muted small">Click <strong>Reset</strong> above to apply after reviewing.</p>{/if}
         </div>
       {/if}
     {:else}

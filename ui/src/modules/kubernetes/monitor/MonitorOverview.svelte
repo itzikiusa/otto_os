@@ -15,6 +15,7 @@
   import { k8sApi } from '../../../lib/api/k8s';
   import type { K8sMonitorOverviewRow } from '../../../lib/api/types';
   import EmptyState from '../../../lib/components/EmptyState.svelte';
+  import LoadState from '../../../lib/components/LoadState.svelte';
   import PageHeader from '../../../lib/components/PageHeader.svelte';
   import PageBody from '../../../lib/components/PageBody.svelte';
   import Skeleton from '../../../lib/components/Skeleton.svelte';
@@ -114,7 +115,7 @@
   {#if loading && !rows.length}
     <div class="grid"><Skeleton rows={3} height={140} /></div>
   {:else if error && !rows.length}
-    <EmptyState actionKind="secondary" icon="warning" title="Couldn’t load the overview" body={error} actionLabel="Retry" onaction={() => void load()} />
+    <LoadState what="the overview" {error} empty onretry={() => void load()} />
   {:else if !rows.length}
     <EmptyState icon="helm" title="No clusters yet" body="Add a cluster in the Kubernetes console first, then enable monitoring on it here. Pod-level metrics come from your services’ own endpoints." actionLabel="Open clusters" onaction={() => router.go('kubernetes')} />
   {:else}

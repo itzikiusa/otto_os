@@ -33,11 +33,20 @@
   import RefineTab from './RefineTab.svelte';
   import ChatTab from './ChatTab.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
+  import LazyMount from '../../lib/components/LazyMount.svelte';
+  import { lazyComponent } from '../../lib/lazy-component.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import type { ProductStory, TreeKind } from './types';
   import { LIST_PANE, loadPaneWidth } from '../../lib/paneResizer';
   import PaneDivider from '../../lib/components/PaneDivider.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
+
+  // Split-out tabs and the import dialog: one promise each, with a designed
+  // loading / failed-chunk state (LazyMount) instead of a bare `{#await}`.
+  const LearningsLazy = lazyComponent(() => import('./LearningsView.svelte'));
+  const HistoryLazy = lazyComponent(() => import('./HistoryTab.svelte'));
+  const InjectLazy = lazyComponent(() => import('./InjectTab.svelte'));
+  const ImportLazy = lazyComponent(() => import('./ImportDialog.svelte'));
 
   let importOpen = $state(false);
   let draftCreating = $state(false);
@@ -849,9 +858,7 @@
     <!-- Content -->
     <div class="product-body">
       {#if product.view === 'learnings'}
-        {#await import('./LearningsView.svelte') then m}
-          <m.default />
-        {/await}
+        <LazyMount lazy={LearningsLazy} what="the learnings" variant="panel" />
       {:else if storiesError && product.stories.length === 0}
         <LoadState what="stories" variant="page" loading={product.loadingStories} error={storiesError} empty onretry={() => void loadStories()} />
       {:else if noStories}
@@ -917,13 +924,9 @@
       {:else if product.tab === 'plan'}
         <PlanTab />
       {:else if product.tab === 'history'}
-        {#await import('./HistoryTab.svelte') then m}
-          <m.default />
-        {/await}
+        <LazyMount lazy={HistoryLazy} what="the story history" variant="panel" />
       {:else if product.tab === 'inject'}
-        {#await import('./InjectTab.svelte') then m}
-          <m.default />
-        {/await}
+        <LazyMount lazy={InjectLazy} what="the inject tab" variant="panel" />
       {:else if product.tab === 'discovery'}
         <DiscoveryTab />
       {:else if product.tab === 'refine'}
@@ -938,12 +941,13 @@
 </div>
 
 {#if importOpen}
-  {#await import('./ImportDialog.svelte') then m}
-    <m.default
-      onclose={() => (importOpen = false)}
-      onimported={() => (mobileSection = 'content')}
-    />
-  {/await}
+  <LazyMount
+    lazy={ImportLazy}
+    what="the import dialog"
+    quiet
+    onerror={() => (importOpen = false)}
+    props={{ onclose: () => (importOpen = false), onimported: () => (mobileSection = 'content') }}
+  />
 {/if}
 
 <style>

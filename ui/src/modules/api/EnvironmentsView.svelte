@@ -4,6 +4,7 @@
   // what {{variables}} resolve against when you send — and the selected
   // environment's variables as a full-width table on the right.
   import Icon from '../../lib/components/Icon.svelte';
+  import { focusAfterRowRemoval, rowListOf } from './rowFocus';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import PaneDivider from '../../lib/components/PaneDivider.svelte';
@@ -99,10 +100,12 @@
     const last = rows[rows.length - 1];
     if (canEdit && last && (last.key !== '' || last.value !== '')) rows = [...rows, blankRow()];
   }
-  function removeRow(i: number): void {
+  function removeRow(i: number, e?: Event): void {
+    const list = e ? rowListOf(e, '.var-table') : null;
     rows = rows.filter((_, idx) => idx !== i);
     dirty = true;
     if (canEdit && !rows.some((r) => r.key === '' && r.value === '')) rows = [...rows, blankRow()];
+    void focusAfterRowRemoval(list, i, '.var-key');
   }
   /** Marking secret moves the value to the Keychain on save; making a STORED
    *  secret plain deletes its Keychain value unless it is typed again — ask. */
@@ -314,7 +317,7 @@
                 </span>
                 <span>
                   {#if canEdit && !(i === rows.length - 1 && row.key === '' && row.value === '')}
-                    <button class="icon-btn" title="Remove variable" aria-label="Remove variable" onclick={() => removeRow(i)}><Icon name="x" size={12} /></button>
+                    <button class="icon-btn" data-remove-row title="Remove variable {row.key || i + 1}" aria-label="Remove variable {row.key || i + 1}" onclick={(e) => removeRow(i, e)}><Icon name="x" size={12} /></button>
                   {/if}
                 </span>
               </div>

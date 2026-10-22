@@ -16,6 +16,7 @@
   // in its connection's ordinary History.
   import { onDestroy, tick, untrack } from 'svelte';
   import { toastError } from '../../lib/toastError';
+  import { loadErrorText } from '../../lib/loadError';
   import { plural } from '../../lib/plural';
   import Modal from '../../lib/components/Modal.svelte';
   import Icon from '../../lib/components/Icon.svelte';
@@ -40,8 +41,8 @@
     DbStartMultiRunReq,
     SchemaNode,
   } from '../../lib/api/types';
-  import { extractVars, type SplitMode } from './sql-util';
-  import { splitModeFor } from './sql-dialect';
+  import { extractVars, type SplitMode } from '../../lib/database/sql-util';
+  import { splitModeFor } from '../../lib/database/sql-dialect';
   import {
     buildTargets,
     clusterLine,
@@ -95,7 +96,7 @@
       const root = await api.get<SchemaNode[]>(`/connections/${encodeURIComponent(id)}/db/schema`);
       scopes = { ...scopes, [id]: scopeOptions(root) };
     } catch (e) {
-      scopes = { ...scopes, [id]: { error: e instanceof Error ? e.message : String(e) } };
+      scopes = { ...scopes, [id]: { error: loadErrorText(e) } };
     }
   }
 
@@ -195,7 +196,7 @@
       planStale = false;
       stage = 'preview';
     } catch (e) {
-      planError = e instanceof Error ? e.message : String(e);
+      planError = loadErrorText(e);
     } finally {
       planning = false;
     }
@@ -315,7 +316,7 @@
         `/db/multi-runs/${encodeURIComponent(job.id)}/items/${index}`,
       );
     } catch (e) {
-      detailError = e instanceof Error ? e.message : String(e);
+      detailError = loadErrorText(e);
     }
   }
 

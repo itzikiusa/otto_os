@@ -10,6 +10,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
+  import { focusFirstField, refocusEditTrigger } from '../../lib/inlineEdit';
   import type { ProductNote, NewNoteReq } from './types';
 
   // ── Load notes when story is selected / changes ────────────────────────────
@@ -53,8 +54,12 @@
     editingId = n.id;
     editBody = n.body;
   }
+  // Inline-edit focus contract (lib/inlineEdit.ts): the editor takes focus on
+  // open; Cancel and a successful save hand it back to the note's Edit button.
   function cancelEdit(): void {
+    const id = editingId;
     editingId = null;
+    if (id) void refocusEditTrigger(`note-${id}`);
   }
 
   // ── Busy flags ─────────────────────────────────────────────────────────────
@@ -89,6 +94,7 @@
     try {
       await product.updateNote(nid, { body });
       editingId = null;
+      void refocusEditTrigger(`note-${nid}`);
     } catch (e) {
       toastError('Couldn’t save note', e);
     } finally {
@@ -151,6 +157,8 @@
                       class="btn small ghost"
                       onclick={() => startEdit(n)}
                       disabled={savingId === n.id || deletingId === n.id}
+                      data-edit-for={`note-${n.id}`}
+                      aria-label={`Edit note${n.section ? ` ${n.section}` : ''} from ${fmtDate(n.created_at)}`}
                       title="Edit"
                     >Edit</button>
                     <button
@@ -167,7 +175,7 @@
 
               <!-- Body or inline edit -->
               {#if editingId === n.id}
-                <div class="edit-wrap">
+                <div class="edit-wrap" use:focusFirstField>
                   <textarea dir="auto"
                     class="edit-text"
                     bind:value={editBody}

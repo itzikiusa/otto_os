@@ -1,5 +1,6 @@
 <script lang="ts">
   import { plural } from '../../lib/plural';
+  import { providerErrorText } from '../../lib/loadError';
   import { rel } from '../../lib/stores/now.svelte';
   // Focus view (GitKraken-style): everything "mine" across the whole install in
   // one place — MY PULL REQUESTS (open PRs aggregated across every registered
@@ -11,15 +12,7 @@
   import { api } from '../../lib/api/client';
   import { getIssue, listIssueAccounts, myWork } from '../../lib/api/issues';
   import { mapLimit } from '../../lib/poll';
-  import type {
-    GitAccount,
-    IssueAccount,
-    IssueDetail,
-    MyWorkIssue,
-    PrListResp,
-    PrSummary,
-    Repo,
-  } from '../../lib/api/types';
+  import type { GitAccount, IssueAccount, IssueDetail, MyWorkIssue, PrListResp, PrSummary, Repo } from '../../lib/api/types';
   import { ui } from '../../lib/stores/ui.svelte';
   import { git } from '../../lib/stores/git.svelte';
   import { router } from '../../lib/router.svelte';
@@ -115,7 +108,7 @@
       issueAccounts = await listIssueAccounts();
       if (!issueAccountId && issueAccounts[0]) issueAccountId = issueAccounts[0].id;
     } catch (e) {
-      accountsError = (e instanceof Error ? e.message : String(e)) || 'The account service did not answer.';
+      accountsError = providerErrorText(e) || 'The account service did not answer.';
     } finally {
       if (issueAccounts.length === 0) workLoading = false;
     }
@@ -133,7 +126,7 @@
     } catch (e) {
       if (revision !== workRevision || accountId !== issueAccountId) return;
       work = [];
-      workError = e instanceof Error ? e.message : String(e);
+      workError = providerErrorText(e);
     } finally {
       if (revision === workRevision && accountId === issueAccountId) workLoading = false;
     }
@@ -249,7 +242,7 @@
     } catch (e) {
       if (revision === quickRevision) {
         quickIssue = null;
-        quickError = e instanceof Error ? e.message : String(e);
+        quickError = providerErrorText(e);
       }
     } finally {
       if (revision === quickRevision) quickLoading = false;

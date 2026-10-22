@@ -12,6 +12,7 @@
   import Modal from '../../../lib/components/Modal.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import { toasts } from '../../../lib/toast.svelte';
+  import { loadErrorText } from '../../../lib/loadError';
   import { rel } from '../../../lib/stores/now.svelte';
   import * as design from '../../../lib/api/design';
   import type { DesignArtifact, DesignPublish, DesignSiteLocalResp } from '../../../lib/api/types';
@@ -52,7 +53,8 @@
   const dirty = $derived(unsaved ?? fetchedDirty);
   let history = $state<DesignPublish[]>([]);
   let busy = $state(false);
-  let error = $state<string | null>(null);
+  /** What failed (the headline, never the raw exception) + the dim cause. */
+  let error = $state<{ what: string; detail: string } | null>(null);
   let local = $state<DesignSiteLocalResp | null>(null);
 
   $effect(() => {
@@ -86,7 +88,7 @@
       toasts.success(`Saved ${r.filename}`, `v${r.seq ?? seq} · every linked artifact pinned in the publish record.`);
       onclose();
     } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
+      error = { what: 'Couldn’t export the site.', detail: loadErrorText(e) };
     } finally {
       busy = false;
     }
@@ -99,7 +101,7 @@
       local = await publishLocal(artifact.id);
       history = [local.publish, ...history].slice(0, 5);
     } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
+      error = { what: 'Couldn’t publish the preview.', detail: loadErrorText(e) };
     } finally {
       busy = false;
     }
@@ -108,6 +110,7 @@
   async function openLocal(): Promise<void> {
     if (!local) return;
     busy = true;
+    error = null;
     try {
       const served: Record<string, string> = {};
       for (const [i, p] of local.pages.entries()) {
@@ -115,7 +118,7 @@
       }
       onpreview(served, local.url);
     } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
+      error = { what: 'Couldn’t open the preview.', detail: loadErrorText(e) };
     } finally {
       busy = false;
     }
@@ -170,7 +173,12 @@
     {#if errors.length}
       <p class="banner" role="status"><Icon name="info" size={12} /> {plural(errors.length, 'accessibility issue')} on this site — see Checks in the Design panel. Publishing still works.</p>
     {/if}
-    {#if error}<p class="banner bad" role="alert"><Icon name="warning" size={12} /> {error}</p>{/if}
+    {#if error}
+      <p class="banner bad" role="alert">
+        <Icon name="warning" size={12} />
+        <span class="err-text"><strong>{error.what}</strong>{#if error.detail}<span class="dim err-detail">{error.detail}</span>{/if}</span>
+      </p>
+    {/if}
 
     {#if history.length}
       <div class="history">
@@ -295,5 +303,15 @@
   }
   .dim {
     color: var(--text-dim);
+  }
+  .err-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  .err-detail {
+    font-size: var(--fs-xs);
   }
 </style>

@@ -13,7 +13,7 @@
   }
 </script>
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import LoadState from '../../../../lib/components/LoadState.svelte';
   import { createRace, GOLDEN_SECONDS, idleInput, MAX_COINS, standings, stepRace, type KartEvent } from './sim';
   import { drawLift, F_GAP, pointAt, trackFor, type Path, type Track } from './tracks';
@@ -21,6 +21,7 @@
   import { ITEMS, type ItemKind } from './items';
   import { itemArt, noticeFor, placeTier, ROULETTE } from './hud';
   import { InputState } from '../common/input';
+  import { lossBudget } from '../../../../lib/three/stage';
   import { GameAudio } from '../common/audio';
   import { clamp, ordinal, raceClock, lerp, wrapAngle } from '../common/math';
   import type { KartRenderer } from './render';
@@ -40,6 +41,10 @@
   let loading = $state(true), error = $state(''), menu = $state(false), muted = $state(false), fullscreen = $state(false), active = $state(false);
   let hud = $state.raw<KartState | null>(null);
   let notice = $state(''), noticeKind = $state('');
+  /** The one always-mounted screen-reader status: edges only (round start, go, call-outs,
+   *  waiting, the result headline). Countdown digits and the visual notice stay aria-hidden. */
+  let srStatus = $state('');
+  let resumeButton = $state<HTMLButtonElement>();
   let rouletteIcon = $state(0);
   /** Screen flash for lightning: bumped per flash so the overlay restarts its fade. */
   let flash = $state(0), flashKind = $state<'bolt' | 'zap'>('bolt');
@@ -68,6 +73,10 @@
 
   function announce(text: string, kind = '', ms = 1400): void {
     notice = text; noticeKind = kind;
+    // Digits would be re-read every second; the countdown's first beat and GO are the edges.
+    if (kind !== 'count') srStatus = text;
+    else if (text === '3') srStatus = 'Race starts in 3 seconds';
+    else if (text === 'GO!') srStatus = 'Go!';
     const shown = text;
     setTimeout(() => { if (notice === shown) notice = ''; }, ms);
   }
@@ -240,6 +249,8 @@
     let state: KartState | null = setup ? createRace(setup.track, setup.seats, setup.difficulty, setup.seed) : null;
     let pending: KartEvent[] = [];
     let finished = false;
+    /** Context-loss remounts left (lib/three/stage.ts: twice a minute, then Retry). */
+    const losses = lossBudget();
     loading = true; error = ''; menu = false;
     const touch = window.matchMedia?.('(pointer: coarse)').matches ?? false;
     const boot = async (first: KartState) => {
@@ -252,7 +263,19 @@
       input = new InputState(created.view.canvas, { pointerLock: false });
       created.view.canvas.addEventListener('focus', () => { active = true; });
       created.view.canvas.addEventListener('blur', () => { active = false; });
+      // Escape on the race opens the menu (its Resume button takes focus).
+      created.view.canvas.addEventListener('keydown', e => { if (e.key === 'Escape' && !menu && !finished) { e.preventDefault(); menu = true; } });
       created.view.canvas.focus();
+      // A reclaimed GPU context remounts the renderer on the live race state
+      // instead of leaving a black canvas; a third loss within a minute asks for Retry.
+      created.view.onContextLost(() => {
+        if (disposed || renderer !== created) return;
+        input?.dispose(); input = undefined;
+        renderer = undefined; created.dispose();
+        if (!losses.allow()) { fail(new Error('The race lost its graphics context (too many 3D views open at once).')); return; }
+        loading = true;
+        setTimeout(() => { const s = state; if (!disposed && s) boot(s).catch(fail); }, 600);
+      });
       // Diagnostics for the E2E suite: state, render stats, and a camera pin for fixed-view captures.
       (stage as HTMLDivElement & { __ottoGame?: unknown }).__ottoGame = { snapshot: () => structuredClone(state ?? view), stats: () => created.stats(), pin: (pose: number[] | null) => { created.pin = pose; } };
       loading = false;
@@ -334,6 +357,12 @@
     return () => { document.removeEventListener('fullscreenchange', change); stop?.(); audio.dispose(); };
   });
   $effect(() => { if (paused || menu) input?.release(); });
+  // The Paused overlay covers the Menu button: move focus onto its Resume button.
+  $effect(() => { const b = resumeButton; if (b) void tick().then(() => b.focus()); });
+  function resume() { menu = false; renderer?.view.canvas.focus(); }
+  const headline = $derived(hud?.phase === 'done' && self ? (self.place === 1 ? 'You win!' : `You finished ${ordinal(self.place)}`) : '');
+  $effect(() => { if (headline) srStatus = headline; });
+  $effect(() => { if (paused && hud && hud.phase !== 'done') srStatus = 'Race paused while someone reconnects.'; });
 
   async function toggleFullscreen() { try { if (document.fullscreenElement) await document.exitFullscreen(); else await root.requestFullscreen(); } catch { /* embedding may block fullscreen */ } }
   function wake() { void audio.start().catch(() => {}); }
@@ -349,6 +378,7 @@
 
 <div class="kart-play game-play" bind:this={root} data-game="kart" data-track={setup?.track ?? hud?.track} data-phase={hud?.phase ?? 'loading'} onpointerdown={wake} role="presentation">
   <div class="kart-stage" bind:this={stage}></div>
+  <p class="sr-only" role="status">{srStatus}</p>
   {#if underwater}<div class="kart-underwater" aria-hidden="true"></div>{/if}
   {#if loading && !error}<div class="kart-overlay" role="status"><h2>{isGuest && !hud ? 'Waiting for the host…' : 'Building the circuit…'}</h2><p>Loading karts, racers and scenery</p></div>{/if}
   {#if error}<div class="kart-overlay"><LoadState what="race" {error} empty onretry={start} /><button class="btn" onclick={onexit}>Back to games</button></div>{/if}
@@ -400,15 +430,15 @@
     <div class="kart-place" data-tier={placeTier(self.place)} aria-live="polite">{#key self.place}<strong>{self.place}</strong>{/key}<span>{ordinal(self.place).replace(/^\d+/, '')}</span></div>
     <canvas class="kart-minimap" bind:this={minimap} width={220 * MAP_DPR} height={220 * MAP_DPR} aria-label="Track map"></canvas>
     {#if self.drift !== 0}<div class="kart-drift" data-level={self.driftLevel} aria-hidden="true"><i></i><i></i><i></i></div>{/if}
-    {#if notice}<div class="kart-notice" data-kind={noticeKind} aria-live="polite">{notice}</div>{/if}
+    {#if notice}<div class="kart-notice" data-kind={noticeKind} aria-hidden="true">{notice}</div>{/if}
     {#if self.wrong > 1 && hud.phase === 'race'}<div class="kart-wrong" role="alert">Wrong way!</div>{/if}
     {#if hud.phase === 'intro'}<div class="kart-intro"><h2>{trackFor(hud.track).def.name}</h2><p>{waitingFor.length ? `Waiting for ${waitingFor.join(', ')}…` : `${hud.racers.length} racers · ${hud.laps} laps · ${hud.difficulty} CPUs`}</p></div>{/if}
     {#if !active && hud.phase !== 'done' && !menu && !paused}<div class="kart-hint">Click the race to drive · W/S gas &amp; brake · A/D steer · Space drift / trick · E item · Q look back · R rescue</div>{/if}
     {#if paused && hud.phase !== 'done'}<div class="kart-overlay" role="status"><h2>Waiting for players</h2><p>The race is paused while someone reconnects.</p><button class="btn" onclick={onexit}>Leave race</button></div>
     {:else if hud.phase === 'done'}
-      <div class="kart-overlay kart-results" aria-live="polite">
+      <div class="kart-overlay kart-results">
         <p class="kart-results-kicker">{trackFor(hud.track).def.name} · Results</p>
-        <h2>{self.place === 1 ? 'You win!' : `You finished ${ordinal(self.place)}`}</h2>
+        <h2>{headline}</h2>
         <table>
           <thead><tr><th scope="col">Pos</th><th scope="col">Racer</th><th scope="col">Time</th><th scope="col">Best lap</th></tr></thead>
           <tbody>{#each results as row (row.id)}<tr class:me={row.id === selfIndex}><td>{ordinal(row.place)}</td><td><img src={`/room-games/portraits/racer-${row.racer}.webp`} alt="" /><span>{row.name}{row.human ? '' : ' (CPU)'}</span></td><td>{raceClock(row.time)}</td><td>{row.best ? raceClock(row.best) : '—'}</td></tr>{/each}</tbody>
@@ -418,7 +448,7 @@
     {:else if menu}
       <div class="kart-overlay"><h2>Paused</h2><p>{link ? 'The race continues for everyone else while this menu is open.' : 'Take a breather.'}</p>
         <p class="kart-keys">W / S — gas &amp; brake · A / D — steer · Space — hop, drift (release for a mini-turbo), trick in the air · E — use item · Q — look back · R — rescue when stuck</p>
-        <button class="btn primary" onclick={() => { menu = false; renderer?.view.canvas.focus(); }}>Resume</button><button class="btn" onclick={onexit}>Leave race</button></div>
+        <button class="btn primary" bind:this={resumeButton} onclick={resume}>Resume</button><button class="btn" onclick={onexit}>Leave race</button></div>
     {/if}
     <div class="kart-touch" aria-label="Touch controls">
       <div><button aria-label="Steer left" onpointerdown={e => touchKey(e, 'ArrowLeft', true)} onpointerup={e => touchKey(e, 'ArrowLeft', false)} onpointercancel={e => touchKey(e, 'ArrowLeft', false)}>◀</button><button aria-label="Steer right" onpointerdown={e => touchKey(e, 'ArrowRight', true)} onpointerup={e => touchKey(e, 'ArrowRight', false)} onpointercancel={e => touchKey(e, 'ArrowRight', false)}>▶</button></div>
@@ -434,7 +464,7 @@
   .kart-stage :global(canvas) { display: block; width: 100%; height: 100%; }
   .kart-stage :global(canvas:focus-visible) { outline: 2px solid var(--accent-line-strong); outline-offset: -2px; }
   .kart-underwater { position: absolute; inset: 0; pointer-events: none; background: radial-gradient(ellipse at center, color-mix(in srgb, var(--info) 8%, transparent), color-mix(in srgb, var(--info) 30%, transparent)); }
-  .kart-overlay { position: absolute; inset: 0; z-index: 6; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 24px; text-align: center; background: color-mix(in srgb, var(--surface) 90%, transparent); }
+  .kart-overlay { position: absolute; inset: 0; z-index: 6; display: flex; flex-direction: column; align-items: center; justify-content: safe center; overflow-y: auto; gap: 12px; padding: 24px; text-align: center; background: color-mix(in srgb, var(--surface) 90%, transparent); }
   .kart-overlay h2 { margin: 0; font-size: var(--fs-2xl); }
   .kart-overlay p { margin: 0; max-width: 560px; color: var(--text-dim); line-height: 1.6; }
   /* HUD frame: the item box top-left, tools top-right, lap / coins / time above the minimap. */
@@ -539,6 +569,12 @@
   @media (max-width: 640px) {
     .kart-ranking { display: none; } .kart-minimap { width: 130px; height: 130px; } .kart-lap { min-width: 0; inset-block-end: 144px; } .kart-tools { flex-wrap: wrap; justify-content: flex-end; max-width: 60%; }
     .kart-item { width: 84px; height: 84px; } .kart-reel { width: 58px; height: 58px; } .kart-place strong { font-size: calc(var(--fs-hero) * 2); }
+    /* Compact results so Race again / Back to games stay reachable on a short phone screen. */
+    .kart-overlay { padding: 16px; gap: 8px; }
+    .kart-results table { min-width: 0; width: 100%; font-size: var(--fs-s); }
+    .kart-results th, .kart-results td { padding: 2px 6px; }
+    .kart-results td img { width: 22px; height: 22px; }
+    .kart-results th:nth-child(4), .kart-results td:nth-child(4) { display: none; }
   }
   @media (pointer: coarse) {
     .kart-touch { position: absolute; inset-inline: 12px; inset-block-end: 150px; display: flex; justify-content: space-between; gap: 8px; }

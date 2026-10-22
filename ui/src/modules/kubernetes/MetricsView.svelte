@@ -9,11 +9,11 @@
   import { router } from '../../lib/router.svelte';
   import { k8s } from '../../lib/stores/k8s.svelte';
   import Sparkline from './monitor/Sparkline.svelte';
-  import { monitorPath } from './viewState';
+  import { monitorPath } from '../../lib/k8s/viewState';
   import { pollWhileVisible } from '../../lib/poll';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
-  import { loadErrorText } from '../../lib/loadError';
+  import { loadErrorText, providerErrorText } from '../../lib/loadError';
   import { k8sApi } from '../../lib/api/k8s';
   import type { K8sMonitorSeries, K8sPodMetrics } from '../../lib/api/types';
   import { formatBytes, formatMillicores } from './k8s-util';
@@ -46,7 +46,7 @@
       historyError = '';
     } catch (e) {
       if (seq !== historySeq) return;
-      historyError = e instanceof Error ? e.message : String(e);
+      historyError = providerErrorText(e);
     } finally {
       if (seq === historySeq) historyLoading = false;
     }

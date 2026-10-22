@@ -54,6 +54,11 @@ function setup() {
       return { ws: { currentId: 'w', activeSessionId: null, otherWsSessions: [], statusMap: {},
         refreshSessions: async () => {}, refreshActiveWorkflowRuns: async () => {}, refreshOtherSessions: async () => {} } };
     }
+    if (p === './events/routes') {
+      return new Proxy({ resyncAutomation: (id: string | null) => log.push(`automation-resync ${id}`) }, {
+        get: (t: any, k) => (k in t ? t[k] : inert),
+      });
+    }
     if (p === './live') return { appLive: { setConnected() {}, dispatch() {}, resync: () => log.push('resync') } };
     if (p === './uiCommands') {
       return new Proxy({ handleUiFrame: () => false, helloFrame: () => ({}), presenceFrame: () => ({}) }, {
@@ -93,7 +98,7 @@ test('a token change reconnects /ws/events as a first connect for the new identi
   // caches and refetches (the bell, needs-you, activity, proof).
   assert.deepEqual(
     h.log.filter((x) => x !== 'resync'),
-    ['notifications-reset', 'activity-reset', 'proof-reset', 'activity-resync', 'notifications-load', 'assistant-resync'],
+    ['notifications-reset', 'activity-reset', 'proof-reset', 'activity-resync', 'notifications-load', 'assistant-resync', 'automation-resync w'],
   );
   assert.ok(h.log.includes('resync'), 'live views refetch too');
 });

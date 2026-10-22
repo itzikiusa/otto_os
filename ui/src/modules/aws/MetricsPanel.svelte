@@ -2,6 +2,7 @@
   import { radioKey } from '../../lib/radioKey';
   import { pollWhileVisible } from '../../lib/poll';
   import { awsErrorText } from './util';
+  import { awsLoadText } from './loadText';
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   // CloudWatch metrics for ONE resource (an SQS queue, EC2 instance or RDS
   // instance): range picker (1h … 30d), refresh + auto-refresh every 60 s
@@ -72,7 +73,7 @@
     } catch (e) {
       if (ac.signal.aborted || isAbortError(e)) return;
       denied = e instanceof ApiError && e.status === 403;
-      error = e instanceof Error ? e.message : String(e);
+      error = awsLoadText(e);
     } finally {
       if (!ac.signal.aborted) loading = false;
     }

@@ -8,8 +8,8 @@
   onMount(()=>{invite=consumeGameInvite(roomId)??'';if(!invite)error='This invitation is missing. Open a fresh game invitation from the host.';});
   async function join(){
     busy=true;error='';
-    try{const r=await fetch(new URL('/api/v1/game-room-join',location.origin),{method:'POST',credentials:'omit',referrerPolicy:'no-referrer',headers:{'Content-Type':'application/json'},body:JSON.stringify({room_id:roomId,invite,name:name.trim()})});if(!r.ok){const problem=await r.json().catch(()=>({}));throw new Error(problem.message??'Could not join this match. Ask the host for a fresh invitation.');}credential=await r.json() as GameRoomCredential;invite='';}
-    catch(e){error=e instanceof Error?e.message:'Could not join the game.';}finally{busy=false;}
+    try{const r=await fetch(new URL('/api/v1/game-room-join',location.origin),{method:'POST',credentials:'omit',referrerPolicy:'no-referrer',headers:{'Content-Type':'application/json'},body:JSON.stringify({room_id:roomId,invite,name:name.trim()})});if(!r.ok){const problem=await r.json().catch(()=>({}));throw new Error(problem.message??'Couldn’t join this match. Ask the host for a fresh invitation.');}credential=await r.json() as GameRoomCredential;invite='';}
+    catch(e){error=e instanceof Error?e.message:'Couldn’t join the game.';}finally{busy=false;}
   }
 </script>
 <div class="game-guest">

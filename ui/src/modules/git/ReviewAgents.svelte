@@ -15,6 +15,7 @@
   import { runStatus, type BadgeTone } from '../../lib/status';
   import { severityLabel } from '../../lib/labels';
   import Badge from '../../lib/components/Badge.svelte';
+  import { summaryFallback, summaryFallbackTitle } from './reviewFallback';
 
   interface Props {
     review: Review;
@@ -151,7 +152,7 @@
         {#if agent.fallback}
           <span
             class="chip rp-fallback-chip"
-            title="The claude summarizer was unavailable; this summary came from the deterministic Rust-side dedupe/rank fallback."
+            title={summaryFallbackTitle(summaryFallback(review.agents), 'this summary’s findings')}
           >
             fallback
           </span>

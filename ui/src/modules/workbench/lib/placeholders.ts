@@ -2,7 +2,7 @@
 // variables / "Run on…" multi-run (`:name`, `{name}`, `{{name}}`).
 //
 // SQL docs reuse the DB editor's parser (`substituteVars` / `extractVars` in
-// modules/database/sql-util.ts): quote- and comment-aware, skips `::casts`,
+// lib/database/sql-util.ts): quote- and comment-aware, skips `::casts`,
 // `user:123`-style keys, and anything inside a string literal or comment —
 // so a script sent to "Run on…" sees exactly the variables shown here.
 //
@@ -10,7 +10,7 @@
 // everywhere (inside JSON strings too, which is where they usually live):
 // `:name` is far too noisy outside SQL (YAML keys, URLs, times, CSS…).
 
-import { substituteVars } from '../../database/sql-util.ts';
+import { substituteVars } from '../../../lib/database/sql-util.ts';
 
 export type WbPlaceholderSyntax = ':name' | '{name}' | '{{name}}';
 

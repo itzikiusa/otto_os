@@ -3,7 +3,7 @@
 // literal/identifier helpers are exported on their own because ResultsGrid's
 // FK navigation and the "WHERE pk IN (…)" copy build predicates with them too.
 import type { DbEngine } from '../../lib/api/types';
-import { backslashEscapes, boolLiteral, escapeSqlText, quoteIdent } from './sql-dialect.ts';
+import { backslashEscapes, boolLiteral, escapeSqlText, quoteIdent } from '../../lib/database/sql-dialect.ts';
 import { cellStr, compactJson, isComplex, SET_EMPTY, SET_NULL } from './results-format';
 import type { DiffLine, EditAdapter, EditCtx, TypedValue } from './edit-types';
 import { plural } from '../../lib/plural';

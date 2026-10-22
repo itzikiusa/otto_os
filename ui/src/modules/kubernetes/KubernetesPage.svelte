@@ -15,6 +15,7 @@
   import { router } from '../../lib/router.svelte';
   import { k8s } from '../../lib/stores/k8s.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import InstallPanel from './InstallPanel.svelte';
@@ -23,7 +24,7 @@
   import LazyMount from '../../lib/components/LazyMount.svelte';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
   import { isKind } from './k8s-util';
-  import { monitorPath, parseK8sRoute } from './viewState';
+  import { monitorPath, parseK8sRoute } from '../../lib/k8s/viewState';
   import { registry } from '../../lib/commands.svelte';
 
   // perf K8s R5: the Monitor views (and MonitorInsights → `marked`) load on
@@ -129,7 +130,7 @@
     />
   {:else if !k8s.status && k8s.statusError}
     <PageHeader title="Kubernetes" />
-    <EmptyState actionKind="secondary" variant="page" icon="warning" title="Couldn’t reach the daemon" body={k8s.statusError} actionLabel="Retry" onaction={() => void k8s.loadStatus()} />
+    <LoadState variant="page" what="Kubernetes" error={k8s.statusError} empty onretry={() => void k8s.loadStatus()} />
   {:else if !k8s.status}
     <PageHeader title="Kubernetes" />
     <div class="k8s-boot"><Skeleton rows={4} height={48} /></div>

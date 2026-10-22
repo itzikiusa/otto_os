@@ -12,7 +12,7 @@
   // The render box is exposed to a sibling MockupAnnotations overlay so pins sit
   // exactly over the mockup.
   import { onMount } from 'svelte';
-  import { renderMermaid } from '../canvas/mermaid';
+  import { renderMermaid } from '../../lib/render/mermaid';
   import { authedBlobUrl, authedText } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
   import Icon from '../../lib/components/Icon.svelte';
@@ -32,7 +32,7 @@
   }
   let { attachment, source = null, hideToolbar = false, allowScripts = $bindable(false) }: Props = $props();
 
-  // Mermaid loads on the first diagram (canvas/mermaid.ts: lazy, strict
+  // Mermaid loads on the first diagram (lib/render/mermaid.ts: lazy, strict
   // security, auto-rendering off) — never with the Product page's chunk.
 
   // ── Derived type classification ─────────────────────────────────────────────

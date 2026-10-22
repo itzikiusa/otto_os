@@ -9,7 +9,7 @@
   import { database } from '../../lib/stores/database.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { copyText } from '../../lib/clipboard';
-  import { applySuggestion, normalizeDbError } from './error-normalize';
+  import { applySuggestion, normalizeDbError } from '../../lib/database/error-normalize';
 
   interface Props {
     error: string;
@@ -80,7 +80,7 @@
 
   async function copyRaw() {
     if (await copyText(error)) toasts.success('Error copied');
-    else toasts.error('Couldn’t copy');
+    else toasts.error('Couldn’t copy', 'Select the text and copy it manually.');
   }
 </script>
 

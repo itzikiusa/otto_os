@@ -15,6 +15,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import { git } from '../../lib/stores/git.svelte';
   import { confirmOutward } from '../../lib/confirmOutward';
+  import { focusFirstField, refocusEditTrigger } from '../../lib/inlineEdit';
   import { renderMarkdown } from '../../lib/md';
   import { openExternal } from '../../lib/external';
   import DiffViewer from './DiffViewer.svelte';
@@ -247,13 +248,14 @@
   const prRepo = $derived(git.allRepos.find((r) => r.id === repoId) ?? git.repos.find((r) => r.id === repoId) ?? null);
   const providerName = $derived(prRepo?.provider ? (PROVIDER_LABEL[prRepo.provider] ?? prRepo.provider) : 'the provider');
 
-
   function startEdit(): void {
     if (!pr) return;
     editTitle = pr.title;
     editDesc = pr.description_md;
     editMode = true;
   }
+  /** Close the editor (Cancel or a save); focus returns to its Edit button. */
+  function endEdit(): void { editMode = false; void refocusEditTrigger('pr-description'); }
 
   async function saveEdit(): Promise<void> {
     if (busy !== '') return;
@@ -270,7 +272,7 @@
       invalidatePr(repoId, number);
       await api.patch(`/repos/${repoId}/prs/${number}`, { title: editTitle, description: editDesc });
       if (disposed) return;
-      editMode = false;
+      endEdit();
       await load(repoId, number);
       toasts.success('Pull request updated');
     } catch (e) {
@@ -500,7 +502,7 @@
 
     <div class="prd-title-block">
       {#if editMode}
-        <input dir="auto" class="input prd-title-input" aria-label="Pull request title" bind:value={editTitle} disabled={busy === 'edit'} />
+        <input dir="auto" class="input prd-title-input" aria-label="Pull request title" bind:value={editTitle} disabled={busy === 'edit'} use:focusFirstField />
       {/if}
       <div class="prd-meta">
         <span class="dim">{pr.author}</span>
@@ -523,7 +525,7 @@
           <textarea dir="auto" class="input" rows="8" bind:value={editDesc} aria-label="Pull request description" disabled={busy === 'edit'}></textarea>
           <div class="row prd-compose-foot">
             <span class="hint dim">Updates PR #{number} on {repoLabel} ({providerName}) · visible to the author and reviewers</span>
-            <button class="btn small" disabled={busy === 'edit'} onclick={() => (editMode = false)}>Cancel</button>
+            <button class="btn small" disabled={busy === 'edit'} onclick={endEdit}>Cancel</button>
             <button class="btn small primary" disabled={busy === 'edit' || editTitle.trim() === ''} onclick={saveEdit}>
               {busy === 'edit' ? 'Saving…' : 'Save to ' + providerName}
             </button>
@@ -533,9 +535,7 @@
             <!-- renderMarkdown escapes input before transforming -->
             {@html renderMarkdown(pr.description_md || '_No description._')}
           </div>
-          <button class="btn small ghost edit-btn" onclick={startEdit} title="Edit the title and description on {providerName}">
-            <Icon name="edit" size={12} /> Edit
-          </button>
+          <button class="btn small ghost edit-btn" data-edit-for="pr-description" aria-label="Edit the title and description" onclick={startEdit} title="Edit the title and description on {providerName}"><Icon name="edit" size={12} /> Edit</button>
         {/if}
       </section>
 

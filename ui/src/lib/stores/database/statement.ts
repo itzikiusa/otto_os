@@ -49,9 +49,10 @@ export function parseExplicitLimit(sql: string): number | null {
 
 // ── Quick-filter helpers (module-level) ──────────────────────────────────────
 
-// `toFilterVal` / `parseFilterValText` / `condToSql` / `condLabel` (and the
-// `FilterVal` / `FilterCond` types) live in `lib/database/filter-chips.ts`
-// — dialect-aware via `sql-dialect.ts` — and are re-exported at the top.
+// `toFilterVal` / `parseFilterValText` / `condToSql` / `filterValMatches` (and
+// the `FilterVal` / `FilterCond` types) live in `lib/database/filter-chips.ts`
+// — dialect-aware via `sql-dialect.ts`. Import them from there; this store
+// does not re-export them.
 
 // Top-level clause keywords that terminate a WHERE / mark where one is inserted.
 export const BOUNDARY_KW = [

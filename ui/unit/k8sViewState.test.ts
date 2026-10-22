@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { DEFAULT_MONITOR_UI, monitorPath, parseClusterUi, parseK8sRoute, resourcesPath } from '../src/modules/kubernetes/viewState.ts';
+import { DEFAULT_MONITOR_UI, monitorPath, parseClusterUi, parseK8sRoute, resourcesPath } from '../src/lib/k8s/viewState.ts';
 
 test('per-cluster view state round-trips and repairs malformed fields', () => {
   const ui = parseClusterUi(

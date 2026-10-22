@@ -8,7 +8,6 @@
   import EmptyState from '../../../../lib/components/EmptyState.svelte';
   import ProviderIcon from '../../../../lib/components/ProviderIcon.svelte';
   import { ui } from '../../../../lib/stores/ui.svelte';
-  import { now } from '../../../../lib/stores/now.svelte';
   import { plural } from '../../../../lib/plural';
   import { relTime } from '../../../mission-control/lib';
   import { kidAriaLabel, roomSummary, type Kid, type School } from '../../school/model';
@@ -23,11 +22,20 @@
     /** Current page per classroom (kept by the box across re-mounts). */
     memberPages: Record<string, number>;
     open: (k: Kid) => Promise<void>;
+    /** Release from detention (un-archive): an explicit action, never a row click. */
+    free: (k: Kid) => Promise<void>;
     goTo: (k: Kid) => Promise<void>;
     kidMenu: (e: MouseEvent | KeyboardEvent, k: Kid) => void;
     showIn3d: (k: Kid) => Promise<void>;
   }
-  let { mode, empty, school, queue, handle, memberPages = $bindable(), open, goTo, kidMenu, showIn3d }: Props = $props();
+  let { mode, empty, school, queue, handle, memberPages = $bindable(), open, free, goTo, kidMenu, showIn3d }: Props = $props();
+  /** A detention row's main click shows the kid (its card in 3D, its actions in
+   *  List view); it never un-archives the session. */
+  function rowClick(e: MouseEvent, k: Kid): void {
+    if (!k.detention) void open(k);
+    else if (mode === '3d' && handle) void showIn3d(k);
+    else kidMenu(e, k);
+  }
 
   // Keep complete membership without mounting every session row at once.
   const LIST_PAGE_SIZE = 100;
@@ -45,7 +53,7 @@
       <ul>
         {#each queue as k (k.id)}
           <li class="lrow" data-attn-id={k.id}>
-            <button class="lmain" aria-label="Go to {kidAriaLabel(k, now() ? relTime(k.lastActiveAt) : '')} in {k.workspaceName}" onclick={() => void goTo(k)}>
+            <button class="lmain" aria-label="Go to {kidAriaLabel(k, relTime(k.lastActiveAt))} in {k.workspaceName}" onclick={() => void goTo(k)}>
               <i class="dot" data-pose={k.pose}></i>
               <ProviderIcon provider={k.provider} size={12} />
               <span class="ellipsis t">{k.title}</span>
@@ -75,8 +83,8 @@
               <li use:rowMenu class="lrow" data-kid-id={k.id} oncontextmenu={(e) => kidMenu(e, k)}>
                 <button
                   class="lmain"
-                  aria-label="{k.detention ? 'Release' : 'Open'} {kidAriaLabel(k, now() ? relTime(k.lastActiveAt) : '')}"
-                  onclick={() => void open(k)}
+                  aria-label="{k.detention ? 'Show' : 'Open'} {kidAriaLabel(k, relTime(k.lastActiveAt))}{k.detention ? ', in detention' : ''}"
+                  onclick={(e) => rowClick(e, k)}
                   onfocus={() => void showIn3d(k)}
                 >
                   <i class="dot" data-pose={k.detention ? 'bench' : k.pose}></i>
@@ -86,6 +94,17 @@
                   {#if k.detention}<span class="bg-tag">detention</span>{/if}
                   <span class="st">{k.stateLabel}</span>
                 </button>
+                {#if k.detention}
+                  <button
+                    class="btn small"
+                    disabled={!k.canManage}
+                    title={k.canManage ? 'Bring this session back from the archive' : 'You can’t manage this session, so you can’t release it'}
+                    aria-label="Release {k.title} from detention"
+                    onclick={() => void free(k)}
+                  >
+                    Release
+                  </button>
+                {/if}
                 <button class="icon-btn" aria-label="More actions for {k.title}" title="More actions for {k.title}" aria-haspopup="menu" onclick={(e) => kidMenu(e, k)}>
                   <Icon name="more" size={12} />
                 </button>

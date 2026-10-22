@@ -138,7 +138,9 @@ function makeMarked(ctx: RenderCtx): Marked {
           const dst = ctx.resolve(target.trim());
           if (dst && IMG_EXT.test(dst)) return assetImg(ctx, dst, target.trim(), target.trim());
           if (dst) {
-            return `<div class="note-embed" data-embed-path="${esc(dst)}"><span class="embed-title">${esc(target.trim())}</span></div>`;
+            // The title is a real link to the source note, so the embed opens
+            // from the keyboard too (the div itself is not focusable).
+            return `<div class="note-embed" data-embed-path="${esc(dst)}"><a class="embed-title" href="#" data-path="${esc(dst)}">${esc(target.trim())}</a></div>`;
           }
           return `<a class="internal-link unresolved" href="#" data-raw="${esc(target.trim())}" data-unresolved="1" title="Missing note">${esc(inner)}</a>`;
         },

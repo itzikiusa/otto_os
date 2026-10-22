@@ -7,6 +7,7 @@
   import StatusDot from '../../../lib/components/StatusDot.svelte';
   import ProviderIcon from '../../../lib/components/ProviderIcon.svelte';
   import EmptyState from '../../../lib/components/EmptyState.svelte';
+  import LoadState from '../../../lib/components/LoadState.svelte';
   import { ws } from '../../../lib/stores/workspace.svelte';
   import { ui } from '../../../lib/stores/ui.svelte';
   import { router } from '../../../lib/router.svelte';
@@ -40,21 +41,35 @@
   const idle = $derived(sessions.filter((s) => (ws.statusMap[s.id] ?? s.status) === 'idle').length);
   const working = $derived(ws.workingCount);
   const needsYou = $derived(ws.needsYouCount);
+  // Nothing listed yet: the first session load is still running (or has not
+  // settled), or it failed. Neither may read as "No open agent sessions" with
+  // 0 / 0 / 0 / 0 stats — the box shows the load state and "—" counts.
+  const loadingList = $derived(ws.sessions.length === 0 && (ws.sessionsLoading || !ws.listSettled));
+  const unknown = $derived(ws.sessions.length === 0 && (loadingList || !!ws.sessionsError));
+  const count = (n: number): string => (unknown ? '—' : String(n));
 </script>
 
 <div class="sessions">
   <div class="stats">
-    <div class="stat"><span class="n" class:working={working > 0}>{working}</span><span class="l">working</span></div>
-    <div class="stat"><span class="n" class:needs={needsYou > 0}>{needsYou}</span><span class="l">need you</span></div>
-    <div class="stat"><span class="n">{idle}</span><span class="l">idle</span></div>
-    <div class="stat"><span class="n">{sessions.length}</span><span class="l">open</span></div>
+    <div class="stat"><span class="n" class:working={!unknown && working > 0}>{count(working)}</span><span class="l">working</span></div>
+    <div class="stat"><span class="n" class:needs={!unknown && needsYou > 0}>{count(needsYou)}</span><span class="l">need you</span></div>
+    <div class="stat"><span class="n">{count(idle)}</span><span class="l">idle</span></div>
+    <div class="stat"><span class="n">{count(sessions.length)}</span><span class="l">open</span></div>
   </div>
-  {#if sessions.length === 0}
-    <!-- A quiet secondary CTA: the page's one primary is "Add widget". -->
-    <EmptyState icon="terminal" title="No open agent sessions" body="Start Claude, Codex or a shell in this workspace.">
-      <button class="btn small" onclick={() => (ui.newSessionOpen = true)}><Icon name="plus" size={12} />New session</button>
-    </EmptyState>
-  {:else}
+  <LoadState
+    what="sessions"
+    variant="compact"
+    loading={loadingList}
+    error={ws.sessionsError}
+    empty={sessions.length === 0}
+    onretry={() => void ws.refreshSessions().catch(() => {})}
+  >
+    {#snippet emptyView()}
+      <!-- A quiet secondary CTA: the page's one primary is "Add widget". -->
+      <EmptyState icon="terminal" title="No open agent sessions" body="Start Claude, Codex or a shell in this workspace.">
+        <button class="btn small" onclick={() => (ui.newSessionOpen = true)}><Icon name="plus" size={12} />New session</button>
+      </EmptyState>
+    {/snippet}
     <ul class="rows">
       {#each sessions as s (s.id)}
         <li>
@@ -74,7 +89,7 @@
     <button class="foot" onclick={() => router.go('agents')}>
       Open Agents<Icon name="chevronRight" size={12} />
     </button>
-  {/if}
+  </LoadState>
 </div>
 
 <style>

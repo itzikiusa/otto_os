@@ -9,7 +9,7 @@ import {
   normalizeDbError,
   offsetToPosition,
   parseTrailers,
-} from '../src/modules/database/error-normalize.ts';
+} from '../src/lib/database/error-normalize.ts';
 
 test('trailer lines split from the message', () => {
   const { message, tags } = parseTrailers('column "nme" does not exist\nHINT: try x\nSQLSTATE: 42703\nPOSITION: 8');

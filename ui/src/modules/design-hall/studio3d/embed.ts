@@ -25,6 +25,7 @@
 // Exported (static) sites will ship their own resolver via `resolve`.
 import type * as THREE_NS from 'three';
 import { fetchContent, getArtifact } from '../../../lib/api/design';
+import { cappedPixelRatio, releaseRenderer } from '../../../lib/three/stage';
 import { parseOttoUri } from '../model';
 import {
   applyTransform,
@@ -259,7 +260,7 @@ export async function mountScene3dEmbed(el: HTMLElement, opts: Scene3dEmbedOptio
     const T = THREE;
 
     renderer = new T.WebGLRenderer({ antialias: true, alpha: opts.background === 'transparent' });
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    renderer.setPixelRatio(cappedPixelRatio(2));
     renderer.outputColorSpace = T.SRGBColorSpace;
     renderer.toneMapping = T.ACESFilmicToneMapping;
     renderer.shadowMap.enabled = true;
@@ -445,11 +446,7 @@ export async function mountScene3dEmbed(el: HTMLElement, opts: Scene3dEmbedOptio
     controls?.dispose();
     env?.dispose();
     if (content) disposeTree(content);
-    if (renderer) {
-      renderer.dispose();
-      renderer.forceContextLoss();
-      renderer.domElement.remove();
-    }
+    if (renderer) releaseRenderer(renderer);
     poster?.remove();
     renderer = null;
   }

@@ -32,8 +32,6 @@ export const isRoyale = (m: ShooterMode): boolean => m === 'royale' || m === 'ap
 /** Arena modes: fighters respawn with a class loadout. */
 export const respawns = (m: ShooterMode): boolean => m === 'tdm' || m === 'dom';
 export const hasInfected = (m: ShooterMode): boolean => m === 'zombies' || m === 'apoc';
-/** Teammates exist (duos, squads, the arena teams, the Zombies crew). */
-export const teamPlay = (state: Pick<ShooterState, 'squad'>): boolean => state.squad > 1;
 
 /** A Domination point: owner team (-1 neutral), capture progress 0..1 and the team it is going to. */
 export interface CapturePoint { x: number; y: number; z: number; r: number; own: number; cap: number; by: number }
@@ -255,7 +253,5 @@ export function finish(state: ShooterState, team: number): void {
 }
 
 export { zombieBase };
-/** Inside the arena / Zombies boundary? */
-export const insideArena = (obj: ModeState, x: number, z: number): boolean => Math.hypot(x - obj.ax, z - obj.az) <= obj.ar;
 /** The match's collision world (cached per map in collide.ts). */
 const worldOf = (state: ShooterState): World => worldFor(mapFor(state.map));

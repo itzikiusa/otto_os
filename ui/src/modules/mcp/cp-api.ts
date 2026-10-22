@@ -5,6 +5,7 @@ import type {
   McpAutoApproveList,
   McpAutoApproveRule,
   McpSessionAttach,
+  MemberEntry,
   RotateMcpTokenResp,
   UpdateMcpAutoApproveReq,
   UpdateMcpSessionAttachReq,
@@ -19,6 +20,8 @@ export interface McpGatewayToolRow {
 }
 
 export const mcpCpExtraApi = {
+  /** A workspace's members — names for the approval "requested/decided by" labels. */
+  members: (wsId: Id) => api.get<MemberEntry[]>(`/workspaces/${encodeURIComponent(wsId)}/members`),
   rotateToken: (id: Id) => api.post<RotateMcpTokenResp>(`/mcp/tokens/${id}/rotate`),
   sessionAttach: (wsId: Id) =>
     api.get<McpSessionAttach>(`/workspaces/${wsId}/mcp/session-attach`),

@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { loadSource } from './sourceHarness.ts';
-import { dropGridState, parkedEditCount, stashGridState, takeGridState } from '../src/modules/database/grid-tab-state.ts';
+import { dropGridState, parkedEditCount, stashGridState, takeGridState } from '../src/lib/database/grid-tab-state.ts';
 
 type ClipEntry = { text: string; source: string; at: number; pinned: boolean };
 const { pushClip } = loadSource(new URL('../src/lib/stores/clipHistory.svelte.ts', import.meta.url), {}) as {

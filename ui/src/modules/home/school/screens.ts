@@ -13,7 +13,7 @@
 //  • `paintScreen(…, scale)` paints the same layout at 2× for the ONE monitor
 //    the camera is on (selected / screen view), so it stays crisp up close.
 
-import type { CharacterKey, Pose } from './model.ts';
+import type { CharacterKey, Pose, Room } from './model.ts';
 
 export const SCREEN_W = 512;
 export const SCREEN_H = 320;
@@ -274,5 +274,32 @@ export function pollScreens(deps: ScreenPollDeps, every = POLL_MS): { stop(): vo
       cancelTimer();
       void tick();
     },
+  };
+}
+
+// ── Keying the classroom's live screens ──────────────────────────────────
+//
+// `buildSchool` allocates fresh rooms and kids on every rebuild, and every
+// session status event rebuilds the school. Anything keyed on the room OBJECT
+// therefore re-ran per event: the poller was stopped (aborting its batch) and
+// recreated (firing up to MAX_LIVE reads at once). The box keys the poller on
+// the open room's id and re-pushes screens only when this key changes.
+
+/** What the open room's monitors show besides their feed (title, provider,
+ *  character, pose per kid). Equal strings for rebuilds that changed none of it. */
+export function roomScreensKey(room: Room | null | undefined): string {
+  if (!room) return '';
+  return room.kids.map((k) => `${k.id}\u0001${k.title}\u0001${k.provider}\u0001${k.character}\u0001${k.pose}`).join('\u0002');
+}
+
+/** `now()` at most once per `every` ms (a status change may refresh the
+ *  screens sooner than the next tick, but never faster than the poll cadence). */
+export function throttledNow(poller: { now(): void }, every = POLL_MS, clock: () => number = Date.now): () => void {
+  let last = -Infinity;
+  return () => {
+    const t = clock();
+    if (t - last < every) return;
+    last = t;
+    poller.now();
   };
 }

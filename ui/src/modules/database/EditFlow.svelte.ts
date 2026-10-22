@@ -488,7 +488,9 @@ export class EditFlow {
         /* a scalar draft — fall through to the live value */
       }
     }
-    return this.liveRows[rowIdx]?.[colIdx];
+    // applyPatchAtPath structuredClones this base, which throws on a `$state`
+    // proxy — snapshot first so a reactive row value can never reach it.
+    return $state.snapshot(this.liveRows[rowIdx]?.[colIdx]);
   }
   /** Park a whole-column draft for a SQL JSON edit through commitEdit (so the
    *  no-change check un-parks a value edited back to what is stored). */

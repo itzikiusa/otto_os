@@ -12,15 +12,13 @@ export function wrapAngle(a: number): number {
 /** Frame-rate independent exponential approach (rate per second). */
 export const approach = (current: number, target: number, rate: number, dt: number): number =>
   target + (current - target) * Math.exp(-rate * dt);
-/** Moves `current` toward `target` by at most `step`. */
-export function towards(current: number, target: number, step: number): number {
-  return current < target ? Math.min(target, current + step) : Math.max(target, current - step);
-}
 export const smoothstep = (e0: number, e1: number, x: number): number => {
   const t = clamp((x - e0) / (e1 - e0), 0, 1);
   return t * t * (3 - 2 * t);
 };
 export const finite = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
+/** A snapshot row: exactly `n` finite numbers (the net decoders' shape check). */
+export const nums = (row: unknown, n: number): row is number[] => Array.isArray(row) && row.length === n && row.every(finite);
 /** Rounds for compact JSON snapshots. */
 export const r2 = (v: number): number => Math.round(v * 100) / 100;
 export const r3 = (v: number): number => Math.round(v * 1000) / 1000;

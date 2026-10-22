@@ -5,8 +5,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { deferred, loadSource } from './sourceHarness.ts';
 import * as resultBudgetMod from '../src/lib/stores/db-result-budget.ts';
-import * as filterChips from '../src/modules/database/filter-chips.ts';
-import * as sqlDialect from '../src/modules/database/sql-dialect.ts';
+import * as filterChips from '../src/lib/database/filter-chips.ts';
+import * as sqlDialect from '../src/lib/database/sql-dialect.ts';
 
 /** The store is a façade over lib/stores/database/* (model, statement,
  *  dashboards), loaded for real through the harness's `relative` mode. Its

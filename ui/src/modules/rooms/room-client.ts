@@ -1,5 +1,6 @@
 import type { RoomAction, RoomCredential, RoomEvent } from '../../lib/api/room-types';
 import { roomSocketAddress } from './room-state.ts';
+import { RelaySocket } from '../../lib/relaySocket.ts';
 export type RoomConnection = 'connecting' | 'connected' | 'disconnected' | 'ended';
 export const JOIN_UNREACHABLE = 'Couldn’t reach the host. Check the link or ask the host to keep Otto open, then try again.';
 /** Intentionally independent of api/client: a remote guest must never read owner auth. */
@@ -21,70 +22,28 @@ export async function joinRoom(origin: string, roomId: string, invite: string, n
   }
   return await response.json() as RoomCredential;
 }
+/** The session-room transport: a `RelaySocket` on the `otto-room` subprotocol. */
 export class RoomClient {
-  private socket: WebSocket | null = null;
-  private heartbeat: ReturnType<typeof setInterval> | undefined;
-  private reconnect: ReturnType<typeof setTimeout> | undefined;
-  private disposed = false;
-  private attempts = 0;
-  private silence: ReturnType<typeof setTimeout> | undefined;
+  private relay: RelaySocket<RoomEvent>;
   readonly origin: string;
   readonly credential: RoomCredential;
-  private event: (event: RoomEvent) => void;
-  private status: (status: RoomConnection) => void;
   constructor(origin: string, credential: RoomCredential, event: (event: RoomEvent) => void, status: (status: RoomConnection) => void) {
-    this.origin = origin; this.credential = credential; this.event = event; this.status = status;
-  }
-  connect(): void {
-    if (this.disposed) return;
-    clearTimeout(this.reconnect);
-    this.detach();
-    this.status('connecting');
-    const socket = new WebSocket(roomSocketAddress(this.origin, this.credential.room_id), ['otto-room', this.credential.token]);
-    this.socket = socket;
-    // A failed upgrade may never reach onopen; bound that wait as well.
-    this.armSilence(socket);
-    socket.onopen = () => {
-      this.armSilence(socket);
-      this.heartbeat = setInterval(() => this.send({type: 'heartbeat'}), 5000);
-    };
-    socket.onmessage = (message) => {
-      if (typeof message.data !== 'string' || message.data.length > 1024 * 1024) return;
-      this.armSilence(socket);
-      let event: RoomEvent;
-      try { event = JSON.parse(message.data) as RoomEvent; } catch { return; }
-      if (event.type === 'snapshot') { this.attempts = 0; this.status('connected'); }
-      if (event.type === 'ended') { this.disposed = true; this.detach(); this.status('ended'); }
-      this.event(event);
-    };
-    socket.onerror = () => this.status('disconnected');
-    socket.onclose = () => {
-      clearInterval(this.heartbeat);
-      clearTimeout(this.silence);
-      if (this.disposed) return;
-      this.status('disconnected');
+    this.origin = origin; this.credential = credential;
+    this.relay = new RelaySocket<RoomEvent>({
+      url: roomSocketAddress(origin, credential.room_id), protocol: 'otto-room', token: credential.token,
+      maxBytes: 1024 * 1024, silenceMs: 10000, heartbeatMs: 5000, heartbeat: JSON.stringify({type: 'heartbeat'} satisfies RoomAction),
       // Explicit retry remains available; automatic retries are bounded by server credential expiry.
-      if (this.attempts < 6) this.reconnect = setTimeout(() => this.connect(), Math.min(30000, 1000 * 2 ** this.attempts++));
-    };
+      maxAttempts: 6, backoff: attempt => Math.min(30000, 1000 * 2 ** attempt),
+      parse: data => { try { return JSON.parse(data) as RoomEvent; } catch { return null; } },
+      connectedBy: event => event.type === 'snapshot',
+      endedBy: event => event.type === 'ended',
+      onEvent: event,
+      // The room page keeps its own explicit retry, so running out of attempts reads as disconnected.
+      onStatus: s => status(s === 'gave-up' ? 'disconnected' : s),
+    });
   }
-  send(action: RoomAction): boolean {
-    if (this.socket?.readyState !== WebSocket.OPEN || this.disposed) return false;
-    this.socket.send(JSON.stringify(action));
-    return true;
-  }
+  connect(): void { this.relay.connect(); }
+  send(action: RoomAction): boolean { return this.relay.send(JSON.stringify(action)); }
   terminal(): WebSocket { return new WebSocket(roomSocketAddress(this.origin, this.credential.room_id, true), ['otto-room', this.credential.token]); }
-  private armSilence(socket: WebSocket): void {
-    clearTimeout(this.silence);
-    this.silence = setTimeout(() => {
-      if (socket !== this.socket || this.disposed) return;
-      this.status('disconnected');
-      socket.close();
-    }, 10000);
-  }
-  private detach(): void {
-    clearInterval(this.heartbeat);
-    clearTimeout(this.silence);
-    if (this.socket) { this.socket.onclose = null; this.socket.onmessage = null; this.socket.onerror = null; this.socket.onopen = null; this.socket.close(); this.socket = null; }
-  }
-  dispose(): void { this.disposed = true; clearTimeout(this.reconnect); this.detach(); }
+  dispose(): void { this.relay.dispose(); }
 }

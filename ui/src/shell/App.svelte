@@ -19,6 +19,16 @@
   import MobileActionBar from './MobileActionBar.svelte';
   import Icon from '../lib/components/Icon.svelte';
   import LoadState from '../lib/components/LoadState.svelte';
+  import LazyMount from '../lib/components/LazyMount.svelte';
+  import {
+    SharePageChunk,
+    HandoverChunk,
+    AttachIssueChunk,
+    AttachProductStoryChunk,
+    BroadcastModalChunk,
+    NewSessionChunk,
+    NewWorkspaceChunk,
+  } from './overlays.svelte';
   import { loadErrorText } from '../lib/loadError';
   import StatusBar from './StatusBar.svelte';
   import CapsBanner from './CapsBanner.svelte';
@@ -101,6 +111,19 @@
   $effect(() => {transcriptStore.setIdentity(JSON.stringify([baseUrl(),auth.me?.id ?? '']));});
 
   const moduleName = $derived(router.module === '' ? 'agents' : router.module);
+
+  // Overlay close handlers, shared by each dialog's `onclose` and its
+  // LazyMount `onerror` (a failed chunk resets the flag so the next open retries).
+  function closeSessionAction(): void {
+    sessionAction = null;
+  }
+  function closeNewSession(): void {
+    ui.newSessionOpen = false;
+    ui.newSessionScratch = false;
+  }
+  function closeNewWorkspace(): void {
+    ui.newWorkspaceOpen = false;
+  }
 
   // ---- module pages: one lazy chunk each (shell/pages.svelte.ts) ----
   // The router holds the current route until the next page's chunk is in
@@ -918,7 +941,7 @@
 {#if router.module === 's'}
   <!-- Guest share view: full-screen terminal, no shell chrome. (The root App
        normally renders it before the shell ever loads.) -->
-  {#await import('../modules/share/SharePage.svelte') then m}<m.default sessionId={router.parts[1] ?? ''} />{/await}
+  <LazyMount lazy={SharePageChunk} what="the shared session" props={{ sessionId: router.parts[1] ?? '' }} />
 {:else if router.module === 'snip'}
   <!-- Snip annotation editor: full-screen canvas, no shell chrome (it gets its
        own Tauri window; in a browser it takes over the current one). Stays
@@ -1189,33 +1212,25 @@
      Agents page, which the main window has already warmed by then). -->
 {#if sessionAction?.kind === 'handover'}
   {@const id = sessionAction.sessionId}
-  {#await import('../modules/agents/Handover.svelte') then m}<m.default sessionId={id} onclose={() => (sessionAction = null)} />{/await}
+  <LazyMount lazy={HandoverChunk} what="the handover dialog" quiet onerror={closeSessionAction} props={{ sessionId: id, onclose: closeSessionAction }} />
 {:else if sessionAction?.kind === 'attach-issue'}
   {@const id = sessionAction.sessionId}
-  {#await import('../modules/agents/AttachIssue.svelte') then m}<m.default sessionId={id} onclose={() => (sessionAction = null)} />{/await}
+  <LazyMount lazy={AttachIssueChunk} what="the attach-issue dialog" quiet onerror={closeSessionAction} props={{ sessionId: id, onclose: closeSessionAction }} />
 {:else if sessionAction?.kind === 'attach-product'}
   {@const id = sessionAction.sessionId}
-  {#await import('../modules/agents/AttachProductStory.svelte') then m}<m.default sessionId={id} onclose={() => (sessionAction = null)} />{/await}
+  <LazyMount lazy={AttachProductStoryChunk} what="the attach-story dialog" quiet onerror={closeSessionAction} props={{ sessionId: id, onclose: closeSessionAction }} />
 {/if}
 
 {#if ui.broadcastOpen}
-  {#await import('../lib/components/BroadcastModal.svelte') then m}<m.default />{/await}
+  <LazyMount lazy={BroadcastModalChunk} what="the broadcast dialog" quiet onerror={() => (ui.broadcastOpen = false)} />
 {/if}
 
 {#if ui.newSessionOpen}
-  {#await import('../modules/agents/NewSession.svelte') then m}
-    <m.default
-      initialScratch={ui.newSessionScratch}
-      onclose={() => {
-        ui.newSessionOpen = false;
-        ui.newSessionScratch = false;
-      }}
-    />
-  {/await}
+  <LazyMount lazy={NewSessionChunk} what="the new-session sheet" quiet onerror={closeNewSession} props={{ initialScratch: ui.newSessionScratch, onclose: closeNewSession }} />
 {/if}
 
 {#if ui.newWorkspaceOpen}
-  {#await import('../modules/settings/NewWorkspace.svelte') then m}<m.default onclose={() => (ui.newWorkspaceOpen = false)} />{/await}
+  <LazyMount lazy={NewWorkspaceChunk} what="the new-workspace dialog" quiet onerror={closeNewWorkspace} props={{ onclose: closeNewWorkspace }} />
 {/if}
 
 <ConfirmDialog />

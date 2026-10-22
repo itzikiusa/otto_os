@@ -37,7 +37,7 @@
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { clipHistory } from '../../lib/stores/clipHistory.svelte';
   import { unpersistEditorState } from '../../lib/editor-history';
-  import { parkedEditCount } from './grid-tab-state';
+  import { parkedEditCount } from '../../lib/database/grid-tab-state';
   import { confirmer } from '../../lib/confirm.svelte';
   import type { DbCompletionKind } from '../../lib/api/types';
   import {
@@ -50,8 +50,8 @@
     looksLikeMongoshScript,
     type SplitMode,
     type VarSpec,
-  } from './sql-util';
-  import { splitModeFor } from './sql-dialect';
+  } from '../../lib/database/sql-util';
+  import { splitModeFor } from '../../lib/database/sql-dialect';
   import { loadErrorText } from '../../lib/loadError';
   import { api } from '../../lib/api/client';
   import type { MongoshInfo } from '../../lib/api/types';

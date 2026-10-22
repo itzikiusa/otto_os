@@ -2,6 +2,7 @@
   // Import Story dialog — choose a Jira/Linear/Confluence account, pick source kind,
   // search for and pick a source, optionally set cwd + watch. Calls product.importStory()
   // then selects the new story and closes.
+  import { untrack } from 'svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
@@ -51,8 +52,10 @@
 
 
   // ── load accounts on mount ────────────────────────────────────────────────
+  // Untracked: the loader reads the account cache gate synchronously, and a
+  // tracked read would re-run it once a cold cache fills.
   $effect(() => {
-    void loadAccounts();
+    untrack(() => void loadAccounts());
   });
 
   async function loadAccounts(): Promise<void> {

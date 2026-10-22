@@ -17,8 +17,6 @@ import {
   rampOn, RAMP_LENGTH, sampleAt, type Near, type Path, type Track, type TrackId,
 } from './tracks.ts';
 
-/** A kart's body: half its width (metres beside its centre) and its height above the road. */
-export const KART_HALF = 1.1;
 export const KART_HEIGHT = 2.2;
 /** Barrier walls / rails stand this far out from the road edge (inner face), this thick. */
 export const BARRIER_OFFSET = 1.4;

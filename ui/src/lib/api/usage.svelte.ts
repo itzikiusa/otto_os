@@ -280,6 +280,9 @@ export interface UsageBudgetStatus {
   config: UsageBudgetConfig;
   window_days: number;
   rows: BudgetStatusRow[];
+  /** The usage engine couldn't report spend (error-handling-5-07): rows are
+   *  not a zero-spend reading. Absent/false on a normal answer. */
+  spend_unavailable?: boolean;
 }
 
 /** Maximum time between background metrics refreshes driven by `applyMetricsTick`

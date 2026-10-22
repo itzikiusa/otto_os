@@ -236,19 +236,6 @@ export function placeGhost(o: THREE.Object3D, kind: number, gx: number, gz: numb
   else { o.position.set(x0 + TILE / 2, y + LEVEL / 2, z0 + TILE / 2); o.rotation.set(-Math.atan2(LEVEL, TILE), [0, Math.PI / 2, Math.PI, -Math.PI / 2][dir] ?? 0, 0, 'YXZ'); }
 }
 
-/** A simple pickaxe: wooden handle and a steel head; forward is +z like the blasters. */
-export function pickaxeMesh(handle: THREE.Material, head: THREE.Material, geos: THREE.BufferGeometry[]): THREE.Group {
-  const g = new THREE.Group();
-  const stick = new THREE.Mesh(geos[0], handle);
-  stick.rotation.x = Math.PI / 2;
-  const blade = new THREE.Mesh(geos[1], head);
-  blade.position.z = 0.32;
-  g.add(stick, blade);
-  g.traverse(o => { o.castShadow = true; });
-  return g;
-}
-export const pickaxeGeometries = (): THREE.BufferGeometry[] => [new THREE.CylinderGeometry(0.025, 0.03, 0.7, 6), new THREE.BoxGeometry(0.5, 0.07, 0.07)];
-
 /** Launch pad: a squat metal drum (base) and a glowing spring disc (top), both unit-sized and centred on the floor. */
 export const padGeometries = (): THREE.BufferGeometry[] => [
   new THREE.CylinderGeometry(1.15, 1.25, 0.28, 20).translate(0, 0.14, 0),

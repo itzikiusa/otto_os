@@ -128,7 +128,7 @@
       const result = await accessApi.members(group.id);
       if (generation === membershipGeneration) members = result;
     } catch (e) {
-      if (generation === membershipGeneration) error = `Couldn’t load the members of ${group.name}. ${e instanceof Error ? e.message : String(e)}`;
+      if (generation === membershipGeneration) error = `Couldn’t load the members of ${group.name}. ${loadErrorText(e)}`;
     }
   }
   function newGroup() {

@@ -18,6 +18,8 @@ function setup(listFor: (who: string | null) => Promise<unknown[]>) {
       ['../api/issues', { listIssueAccounts: () => { calls++; return listFor(auth.me?.id ?? null); } }],
       ['../loadError', { loadErrorText: (e: unknown) => String(e) }],
       ['./auth.svelte', { auth }],
+      // Last: suffix matching would otherwise send './auth.svelte' here.
+      ['svelte', { untrack: <T>(fn: () => T): T => fn() }],
     ]),
   };
   runInNewContext(

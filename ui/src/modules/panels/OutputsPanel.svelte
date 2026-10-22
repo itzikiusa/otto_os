@@ -360,7 +360,7 @@
         {:else if preview?.kind === 'pdf'}
           <iframe class="frame" title={selected.label} sandbox="" src={preview.url}></iframe>
         {:else if preview?.kind === 'md'}
-          <!-- eslint-disable-next-line svelte/no-at-html-tags — sanitized by mdRender -->
+          <!-- eslint-disable-next-line svelte/no-at-html-tags — sanitized by lib/render/markdown -->
           <div class="pbody md">{@html preview.html}</div>
         {:else if preview?.kind === 'text'}
           <pre class="pbody mono text">{preview.text}</pre>

@@ -15,7 +15,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import type { DbForeignKey, DbIndexDef, SchemaNode } from '../../lib/api/types';
   import { copyTextOrThrow } from '../../lib/clipboard';
-  import { quoteIdent, stringLiteral } from './sql-dialect';
+  import { quoteIdent, stringLiteral } from '../../lib/database/sql-dialect';
 
   const scope = $derived(databaseAccessChild(database.selectedObjectPath ?? database.activeDb));
   const canSchema = $derived(!!database.selectedConnId && resourceAccess.can('connection',database.selectedConnId,'db_schema','database','edit',scope));
@@ -81,7 +81,7 @@
       await copyTextOrThrow(detail.ddl);
       toasts.success('Copied DDL');
     } catch {
-      toasts.error('Couldn’t copy');
+      toasts.error('Couldn’t copy', 'Select the text and copy it manually.');
     }
   }
 
@@ -160,7 +160,7 @@
       await copyTextOrThrow(text);
       toasts.success(`Copied ${label}`);
     } catch {
-      toasts.error('Couldn’t copy');
+      toasts.error('Couldn’t copy', 'Select the text and copy it manually.');
     }
   }
 

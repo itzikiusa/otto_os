@@ -3,7 +3,7 @@
  * for 8 racers) at 20 Hz; guests send inputs (~60 B) at 30 Hz. Everything is
  * validated before it reaches the renderer or the simulation.
  */
-import { finite, r2, r3 } from '../common/math.ts';
+import { finite, nums, r2, r3 } from '../common/math.ts';
 import { ITEM_KINDS, type ItemKind } from './items.ts';
 import { RACER_IDS, type RacerId } from './roster.ts';
 import { TRACK_IDS, trackFor } from './tracks.ts';
@@ -21,8 +21,11 @@ const DIFFICULTIES = ['easy', 'normal', 'hard'] as const;
  * currently collected (indices into the track's coin spots). Drawbridges,
  * rollers and crushers need nothing: guests pose them from the race clock `t`.
  */
+/** Bump when the snapshot layout changes: mixed builds then refuse each other's
+ *  snapshots instead of mis-decoding them. */
+export const KART_SNAPSHOT_VERSION = 4;
 export interface KartSnapshot {
-  v: 4; tr: string; d: number; p: number; c: number; cd: number; t: number;
+  v: typeof KART_SNAPSHOT_VERSION; tr: string; d: number; p: number; c: number; cd: number; t: number;
   /** Per racer: see RACER_FIELDS. */
   r: number[][];
   /** Static per racer: [racer index, human, slot]. */
@@ -37,7 +40,7 @@ export const SHELL_FIELDS = 8;
 
 export function encodeSnapshot(state: KartState, events: KartEvent[]): KartSnapshot {
   return {
-    v: 4, tr: state.track, d: DIFFICULTIES.indexOf(state.difficulty), p: PHASES.indexOf(state.phase),
+    v: KART_SNAPSHOT_VERSION, tr: state.track, d: DIFFICULTIES.indexOf(state.difficulty), p: PHASES.indexOf(state.phase),
     c: r2(state.clock), cd: r2(state.countdown), t: r3(state.raceTime),
     r: state.racers.map(r => [
       r2(r.x), r2(r.y), r2(r.z), r3(r.yaw), r2(r.vx), r2(r.vz), r2(r.vy), r2(r.speed), r2(r.steer), flags(r),
@@ -63,13 +66,12 @@ function takenCoins(state: KartState): number[] {
   return out;
 }
 
-const nums = (row: unknown, n: number): row is number[] => Array.isArray(row) && row.length === n && row.every(finite);
 
 /** Rebuilds a render/HUD state from a snapshot; null when anything is malformed. */
 export function decodeSnapshot(data: unknown, names: (slot: number, racer: RacerId) => string): KartState | null {
   if (!data || typeof data !== 'object') return null;
   const s = data as Partial<KartSnapshot>;
-  if (s.v !== 4 || !TRACK_IDS.includes(s.tr as never) || !finite(s.p) || !PHASES[s.p] || !finite(s.d) || !DIFFICULTIES[s.d]) return null;
+  if (s.v !== KART_SNAPSHOT_VERSION || !TRACK_IDS.includes(s.tr as never) || !finite(s.p) || !PHASES[s.p] || !finite(s.d) || !DIFFICULTIES[s.d]) return null;
   if (![s.c, s.cd, s.t].every(finite)) return null;
   if (!Array.isArray(s.r) || !Array.isArray(s.q) || !Array.isArray(s.lt) || s.r.length !== s.q.length || s.r.length === 0 || s.r.length > MAX_RACERS || s.lt.length !== s.r.length) return null;
   if (!Array.isArray(s.b) || !s.b.every(finite) || !Array.isArray(s.h) || s.h.length > MAX_HAZARDS || !Array.isArray(s.s) || s.s.length > MAX_SHELLS || !Array.isArray(s.e) || s.e.length > 48) return null;

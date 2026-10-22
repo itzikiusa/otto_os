@@ -94,6 +94,7 @@ test('failed publishing preview remains unavailable until a successful retry', a
   let fail = true;
   const s = functions('../src/modules/product/PublishDialog.svelte', ['loadPreview','submit'], {
     previewSequence: 0, previewStoryId: null, previewError: '', previewBody: null, reviewedContent: null, submitting: false, crypto: webcrypto, TextEncoder,
+    providerErrorText: (e: unknown) => e instanceof Error ? e.message : String(e),
     product: { selectedId: 'A' }, api: { get: async (path: string) => { if (fail) throw new Error('offline'); return path.endsWith('/versions') ? [] : {story:{title:'Draft',source_kind:'draft',url:''}}; } },
   });
   await s.loadPreview('A'); assert.match(s.previewError, /offline/); assert.equal(s.previewBody, null);

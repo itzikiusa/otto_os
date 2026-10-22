@@ -13,7 +13,7 @@ import * as issues from '../../../lib/api/issues';
 import { confirmOutward } from '../../../lib/confirmOutward';
 import { ctxMenu, type MenuItem, type MenuOptions } from '../../../lib/contextmenu.svelte';
 import { loadErrorText } from '../../../lib/loadError';
-import { refocusEditTrigger } from '../inlineEdit';
+import { refocusEditTrigger } from '../../../lib/inlineEdit';
 import { toastError } from '../../../lib/toastError';
 import { toasts } from '../../../lib/toast.svelte';
 import type { EditableField, IssueFull, JiraTransition, JiraUser } from '../types';

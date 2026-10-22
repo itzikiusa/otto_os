@@ -41,7 +41,7 @@
   import EnvBadge from '../../lib/components/EnvBadge.svelte';
   import K8sViewSwitch from './K8sViewSwitch.svelte';
   import { paneResizer, pxWide, RESIZE_TITLE } from '../../lib/paneResizer';
-  import { monitorPath } from './viewState';
+  import { monitorPath } from '../../lib/k8s/viewState';
   import { SINGLE_KEYS, SINGLE_KEYS_PREF, inWorkspace } from './workspaceKeys';
   import { lsGet, lsSet } from '../../lib/storage';
   import SettingToggle from '../settings/SettingToggle.svelte';
@@ -501,7 +501,7 @@
           onselect={(r) => k8s.select({ ns: r.namespace, name: r.name })}
           onopen={(r) => openRow(r)}
           onmenu={rowMenu}
-          onretry={() => void k8s.loadResources()}
+          onretry={() => void k8s.loadResources()} filter={k8s.filter} onclearfilter={() => { k8s.filter = ''; filterEl?.focus(); }}
           scrollKey={k8s.currentKey}
           initialScroll={(key) => k8s.scrollFor(key)}
           onscrolled={(key, top) => k8s.saveScroll(key, top)}

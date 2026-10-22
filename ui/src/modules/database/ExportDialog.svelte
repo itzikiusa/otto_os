@@ -17,7 +17,7 @@
   import Modal from '../../lib/components/Modal.svelte';
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
   import { fmtBytes } from './results-format';
-  import { obviousWriteVerb } from './sql-dialect';
+  import { obviousWriteVerb } from '../../lib/database/sql-dialect';
   import { lsGet, lsSet } from '../../lib/storage';
 
   interface Props {

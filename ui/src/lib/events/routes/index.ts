@@ -16,6 +16,7 @@ import { cloudRoutes } from './cloud';
 
 export type { EventOf, EventRoutes, EventType } from './types';
 export { swarmStore, usageStore, databaseStore, personalAgentsStore } from './stores';
+export { resyncAutomation } from './automation';
 
 export const featureRoutes: EventRoutes = {
   ...shellRoutes,

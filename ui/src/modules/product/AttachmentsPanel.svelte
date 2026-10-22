@@ -12,7 +12,7 @@
   import { toastError } from '../../lib/toastError';
   import { toasts } from '../../lib/toast.svelte';
   import { kindLabel } from '../../lib/labels';
-  import { authedBlobUrl } from '../../lib/api/client';
+  import { AttachmentUrls } from './attachmentUrls.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
@@ -35,14 +35,9 @@
   let localAtts = $state<ProductAttachment[]>([]);
   let localAttLoading = $state(false);
 
-  // Object URL cache for previews: id → blob URL string (authed).
-  let localAttUrls = $state<Record<string, string>>({});
-  // Per-id loading flags for blob URL fetch.
-  let localAttUrlLoading = $state<Record<string, boolean>>({});
-  // Per-id error messages when a preview/blob URL fetch fails.
-  let localAttUrlError = $state<Record<string, string>>({});
-  // All created object URLs — revoked on unmount.
-  let createdLocalUrls: string[] = [];
+  // Authed object-URL cache for previews (attachmentUrls.svelte.ts, shared
+  // with OverviewTab's body preview): urls / loading / errors by id.
+  const atts = new AttachmentUrls();
 
   // Upload-in-progress count (for optimistic thumbnails).
   let uploading = $state(false);
@@ -59,23 +54,16 @@
   $effect(() => {
     // Re-load when selectedId changes (product.selectedId as a reactive read).
     product.selectedId;
-    // Snapshot before clearing so the unmount cleanup always sees an empty list
-    // and we never double-revoke, regardless of effect teardown ordering.
-    const stale = createdLocalUrls.splice(0);
-    for (const url of stale) URL.revokeObjectURL(url);
-    localAttUrls = {};
-    localAttUrlLoading = {};
-    localAttUrlError = {};
+    // Revoke + forget the previous story's URLs (a fetch still in flight for
+    // it frees its blob when it settles).
+    atts.reset();
     localAtts = [];
     void loadAttachments();
   });
 
   $effect(() => {
     // Cleanup on unmount: revoke any URLs accumulated since the last story change.
-    return () => {
-      const remaining = createdLocalUrls.splice(0);
-      for (const url of remaining) URL.revokeObjectURL(url);
-    };
+    return () => atts.dispose();
   });
 
   // ── Helpers ───────────────────────────────────────────────────────────────
@@ -116,19 +104,7 @@
 
   /** Fetch an authed blob URL for one attachment (cached, idempotent). */
   async function loadAttUrl(id: string): Promise<void> {
-    if (localAttUrls[id] || localAttUrlLoading[id]) return;
-    localAttUrlLoading = { ...localAttUrlLoading, [id]: true };
-    const { [id]: _cleared, ...restErr } = localAttUrlError;
-    localAttUrlError = restErr;
-    try {
-      const url = await authedBlobUrl(`/product/attachments/${id}`);
-      createdLocalUrls.push(url);
-      localAttUrls = { ...localAttUrls, [id]: url };
-    } catch (e) {
-      localAttUrlError = { ...localAttUrlError, [id]: loadErrorText(e) };
-    } finally {
-      localAttUrlLoading = { ...localAttUrlLoading, [id]: false };
-    }
+    await atts.load(id);
   }
 
   /**
@@ -244,10 +220,7 @@
       await product.deleteAttachment(att.id);
       localAtts = localAtts.filter((a) => a.id !== att.id);
       // Revoke cached blob URL if any.
-      const url = localAttUrls[att.id];
-      if (url) URL.revokeObjectURL(url);
-      const { [att.id]: _removed, ...rest } = localAttUrls;
-      localAttUrls = rest;
+      atts.forget(att.id);
       toasts.info('Attachment deleted');
     } catch (e) {
       toasts.error('Couldn’t delete', loadErrorText(e));
@@ -318,18 +291,18 @@
           <!-- Preview area -->
           {#if att.mime.startsWith('image/')}
             <div class="att-preview">
-              {#if localAttUrls[att.id]}
+              {#if atts.urls[att.id]}
                 <img
                   class="att-img"
-                  src={localAttUrls[att.id]}
+                  src={atts.urls[att.id]}
                   alt={att.filename}
                 />
-              {:else if localAttUrlLoading[att.id]}
+              {:else if atts.loading[att.id]}
                 <Skeleton rows={1} height={64} label="the preview" />
-              {:else if localAttUrlError[att.id]}
+              {:else if atts.errors[att.id]}
                 <LoadState
                   what={att.filename}
-                  error={localAttUrlError[att.id]}
+                  error={atts.errors[att.id]}
                   empty
                   onretry={() => loadAttUrl(att.id)}
                 />
@@ -344,17 +317,17 @@
             </div>
           {:else if att.mime === 'application/pdf'}
             <div class="att-preview att-pdf-wrap">
-              {#if localAttUrls[att.id]}
+              {#if atts.urls[att.id]}
                 <iframe
                   class="att-pdf"
-                  src={localAttUrls[att.id]}
+                  src={atts.urls[att.id]}
                   title={att.filename}
                   sandbox="allow-scripts allow-same-origin"
                 ></iframe>
-              {:else if localAttUrlError[att.id]}
+              {:else if atts.errors[att.id]}
                 <LoadState
                   what={att.filename}
-                  error={localAttUrlError[att.id]}
+                  error={atts.errors[att.id]}
                   empty
                   onretry={() => loadAttUrl(att.id)}
                 />
@@ -362,9 +335,9 @@
                 <button
                   class="att-load-btn"
                   onclick={() => loadAttUrl(att.id)}
-                  disabled={localAttUrlLoading[att.id]}
+                  disabled={atts.loading[att.id]}
                 >
-                  {localAttUrlLoading[att.id] ? 'Loading preview…' : 'Preview PDF'}
+                  {atts.loading[att.id] ? 'Loading preview…' : 'Preview PDF'}
                 </button>
               {/if}
             </div>
@@ -373,26 +346,26 @@
             <div class="att-file-chip">
               <span class="att-chip-icon" aria-hidden="true"><Icon name="file" size={14} /></span>
               <span class="att-chip-name">{att.filename}</span>
-              {#if localAttUrls[att.id]}
+              {#if atts.urls[att.id]}
                 <a
                   class="att-dl-link"
-                  href={localAttUrls[att.id]}
+                  href={atts.urls[att.id]}
                   download={att.filename}
                 >Download</a>
-              {:else if !localAttUrlError[att.id]}
+              {:else if !atts.errors[att.id]}
                 <button
                   class="att-load-btn"
                   onclick={() => loadAttUrl(att.id)}
-                  disabled={localAttUrlLoading[att.id]}
+                  disabled={atts.loading[att.id]}
                 >
-                  {localAttUrlLoading[att.id] ? 'Preparing…' : 'Download'}
+                  {atts.loading[att.id] ? 'Preparing…' : 'Download'}
                 </button>
               {/if}
             </div>
-            {#if localAttUrlError[att.id]}
+            {#if atts.errors[att.id]}
               <LoadState
                 what={att.filename}
-                error={localAttUrlError[att.id]}
+                error={atts.errors[att.id]}
                 empty
                 onretry={() => loadAttUrl(att.id)}
               />

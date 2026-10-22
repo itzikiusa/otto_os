@@ -112,7 +112,7 @@
       await copyTextOrThrow(text);
       toasts.success(`Copied ${label}`);
     } catch {
-      toasts.error("Couldn’t copy to the clipboard");
+      toasts.error('Couldn’t copy to the clipboard', 'Select the text and copy it manually.');
     }
   }
 

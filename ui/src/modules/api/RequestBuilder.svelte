@@ -9,6 +9,7 @@
   import { onTabKey } from '../../lib/tabKeys';
   import { baseUrl } from '../../lib/api/client';
   import Icon from '../../lib/components/Icon.svelte';
+  import { focusAfterRowRemoval, rowListOf } from './rowFocus';
   import LoadState from '../../lib/components/LoadState.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import CodeEditor from '../../lib/components/CodeEditor.svelte';
@@ -63,9 +64,7 @@
     { id: 'multipart', label: 'Multipart form (files)', help: 'Fields and file uploads (multipart/form-data).' },
     { id: 'graphql', label: 'GraphQL', help: 'A query plus JSON variables, sent as {"query","variables"}.' },
   ];
-  const bodyChoice = $derived<BodyChoice>(
-    draft.body_mode === 'raw' ? 'text' : (draft.body_mode as BodyChoice),
-  );
+  const bodyChoice = $derived<BodyChoice>(draft.body_mode === 'raw' ? 'text' : (draft.body_mode as BodyChoice));
   const rawActive = $derived(draft.body_mode === 'raw' || draft.body_mode === 'json');
   const formActive = $derived(draft.body_mode === 'form' || draft.body_mode === 'multipart');
 
@@ -211,8 +210,10 @@
     const rows = draft[which].map((r, idx) => (idx === i ? { ...r, ...patch } : r));
     apiClient.draft = { ...draft, [which]: rows };
   }
-  function removeRow(which: 'headers' | 'query', i: number): void {
+  function removeRow(which: 'headers' | 'query', i: number, e?: Event): void {
+    const list = e ? rowListOf(e, '.kv-list') : null;
     apiClient.draft = { ...draft, [which]: draft[which].filter((_, idx) => idx !== i) };
+    void focusAfterRowRemoval(list, i, '.add-row');
   }
 
   // ── form-body rows ─────────────────────────────────────────────────────────
@@ -1190,12 +1191,10 @@
         {#if which === 'headers' && headerValues(row.key).length > 0}
           <datalist id={`hdr-vals-${i}`}>{#each headerValues(row.key) as v}<option value={v}></option>{/each}</datalist>
         {/if}
-        <button class="icon-btn" title="Remove row" aria-label="Remove row" onclick={() => removeRow(which, i)}><Icon name="x" size={12} /></button>
+        <button class="icon-btn" data-remove-row title="Remove {which === 'query' ? 'parameter' : 'header'} {row.key || i + 1}" aria-label="Remove {which === 'query' ? 'parameter' : 'header'} {row.key || i + 1}" onclick={(e) => removeRow(which, i, e)}><Icon name="x" size={12} /></button>
       </div>
     {/each}
-    <button class="btn small ghost add-row" onclick={() => addRow(which)}>
-      <Icon name="plus" size={12} />Add {which === 'query' ? 'param' : 'header'}
-    </button>
+    <button class="btn small ghost add-row" onclick={() => addRow(which)}><Icon name="plus" size={12} />Add {which === 'query' ? 'param' : 'header'}</button>
   </div>
 {/snippet}
 

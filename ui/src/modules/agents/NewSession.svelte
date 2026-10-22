@@ -495,7 +495,7 @@
       onkeydown={onProviderKeydown}
     >
       {#each providers as p, i (p)}
-        <div class="provider-card" class:selected={countOf(p) > 0} class:primary={provider === p}>
+        <div class="provider-card" role="none" class:selected={countOf(p) > 0} class:primary={provider === p}>
           <button
             bind:this={cardEls[i]}
             class="card-main"
@@ -515,7 +515,7 @@
               {p === 'claude' ? 'Claude Code CLI' : p === 'codex' ? 'Codex CLI' : p === 'shell' ? 'Plain shell' : 'Custom provider'}
             </span>
           </button>
-          <div class="count-ctl">
+          <div class="count-ctl" role="group" id={`ns-steppers-${i}`} aria-label={`${p} sessions`}>
             <button
               type="button"
               class="cbtn"
@@ -537,6 +537,11 @@
         </div>
       {/each}
     </div>
+    <!-- The radiogroup must own radios only (VoiceOver listed the ± buttons
+         among the choices: "radio group, 12 items"). Each card's stepper stays
+         in the card visually but is reparented here in the accessibility tree,
+         a sibling group outside the radiogroup. -->
+    <div role="group" aria-label="Sessions per provider" aria-owns={providers.map((_, i) => `ns-steppers-${i}`).join(' ')}></div>
     {#if total > 1}
       <span class="hint batch">Starting {total} sessions — {batchSummary}</span>
     {/if}

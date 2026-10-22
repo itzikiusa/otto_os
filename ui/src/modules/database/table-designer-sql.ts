@@ -8,7 +8,7 @@
 // Pure (quoting comes from the ONE dialect module) so node:test runs it
 // directly — unit/dbTableDesigner.test.ts.
 import type { DbColumnDef } from '../../lib/api/types';
-import { quoteIdent, stringLiteral, type EngineLike } from './sql-dialect.ts';
+import { quoteIdent, stringLiteral, type EngineLike } from '../../lib/database/sql-dialect.ts';
 
 export interface DesignerRow {
   orig: string | null; // existing column name, or null for a new column

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { tick } from 'svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import { api } from '../../lib/api/client';
   import type { Connection, NetworkEndpoint, NetworkProfile, NetworkProfileInput } from '../../lib/api/types';
   let { workspaceId, profiles, onsaved }: { workspaceId: string; profiles: NetworkProfile[]; onsaved: (profile: NetworkProfile) => void } = $props();
@@ -40,7 +41,7 @@
     connectionsError = null;
     void api.get<Connection[]>(`/workspaces/${scope}/connections`).then((rows) => {
       if (current) connections = rows.filter((c) => c.kind === 'ssh');
-    }).catch((e) => { if (current) connectionsError = e instanceof Error ? e.message : String(e); })
+    }).catch((e) => { if (current) connectionsError = loadErrorText(e); })
       .finally(() => { if (current) connectionsLoading = false; });
     return () => { current = false; };
   });
@@ -53,7 +54,7 @@
     if (!editing) return;
     busy = true; error = '';
     try { const profile = await api.get<NetworkProfile>(`/network-profiles/${editing.id}`); if (alive) edit(profile); }
-    catch (e) { if (alive) error = e instanceof Error ? e.message : String(e); }
+    catch (e) { if (alive) error = `Couldn’t reload the saved profile. ${loadErrorText(e)}`; }
     finally { busy = false; }
   }
   const invalidEndpoints = $derived(endpoints.some((e) => !e.name.trim() || !e.remote_host.trim() || !Number.isInteger(e.remote_port) || e.remote_port < 1 || e.remote_port > 65535));

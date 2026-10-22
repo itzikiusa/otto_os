@@ -7,7 +7,7 @@
   //   • excalidraw → the read-only DesignBoard island.
   //   • scene3d → the read-only Scene3DViewport (validated JSON only; a doc that
   //     doesn't parse shows the raw source so you can see what the agent wrote).
-  import { renderMermaid } from '../canvas/mermaid';
+  import { renderMermaid } from '../../lib/render/mermaid';
   import type { DesignFormat } from './types';
   import { svgDoc } from '../../lib/design/format';
   import DesignBoard from '../../lib/design/DesignBoard.svelte';
@@ -40,7 +40,7 @@
       return;
     }
     const token = ++seq;
-    // Lazy + serialized (canvas/mermaid.ts); a superseded render is skipped.
+    // Lazy + serialized (lib/render/mermaid.ts); a superseded render is skipped.
     void renderMermaid(`otto-mockup-live-${Date.now()}-${token}`, text, { isStale: () => token !== seq }).then(
       ({ svg, error, stale }) => {
         if (stale || token !== seq) return;

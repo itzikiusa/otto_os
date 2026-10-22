@@ -10,7 +10,7 @@
   import Modal from '../../lib/components/Modal.svelte';
   import { database } from '../../lib/stores/database.svelte';
   import type { DbColumnDef } from '../../lib/api/types';
-  import { qualifiedName } from './sql-dialect';
+  import { qualifiedName } from '../../lib/database/sql-dialect';
   import {
     designerSql,
     newRow,

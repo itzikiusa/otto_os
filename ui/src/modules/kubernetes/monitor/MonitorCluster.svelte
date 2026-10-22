@@ -28,6 +28,7 @@
   import PageHeader from '../../../lib/components/PageHeader.svelte';
   import PageBody from '../../../lib/components/PageBody.svelte';
   import EmptyState from '../../../lib/components/EmptyState.svelte';
+  import LoadState from '../../../lib/components/LoadState.svelte';
   import Skeleton from '../../../lib/components/Skeleton.svelte';
   import { formatAge, formatBytes } from '../k8s-util';
   import EnvBadge from '../../../lib/components/EnvBadge.svelte';
@@ -38,7 +39,7 @@
   import { lazyComponent } from '../../../lib/lazy-component.svelte';
   import { tableWindow, WINDOW_MIN_ROWS } from './tableWindow';
   import K8sViewSwitch from '../K8sViewSwitch.svelte';
-  import { monitorPath, resourcesPath } from '../viewState';
+  import { monitorPath, resourcesPath } from '../../../lib/k8s/viewState';
   import type { K8sDrawerTab } from '../../../lib/stores/k8s.svelte';
   import { WINDOWS, classColor, classLabel, collectorLine, fmtMs, fmtPct, fmtRate, isWindow, rbacMessage } from './monitor-util';
 
@@ -348,9 +349,7 @@
   let rowH = $state(52);
   let detailH = $state(0);
   const expandedIdx = $derived(expanded ? visible.findIndex((r) => `${r.namespace}/${r.workload}` === expanded) : -1);
-  const win = $derived(
-    visible.length > WINDOW_MIN_ROWS ? tableWindow({ count: visible.length, rowH, viewTop, viewH, expanded: expandedIdx, detailH }) : null,
-  );
+  const win = $derived(visible.length > WINDOW_MIN_ROWS ? tableWindow({ count: visible.length, rowH, viewTop, viewH, expanded: expandedIdx, detailH }) : null);
   const shown = $derived(win ? visible.slice(win.start, win.end) : visible);
   function measure(): void {
     const host = scrollHost();
@@ -478,7 +477,7 @@
     {#if eventsLoading && !events.length}
       <Skeleton rows={6} height={28} />
     {:else if eventsError}
-      <EmptyState actionKind="secondary" icon="warning" title="Couldn’t load events" body={eventsError} actionLabel="Retry" onaction={() => void loadEvents()} />
+      <LoadState what="events" error={eventsError} empty onretry={() => void loadEvents()} />
     {:else if !events.length}
       <EmptyState icon="check" title="Nothing in this window" body={enabled ? 'No restarts or pod replacements were recorded. Widen the window or check the raw cluster events.' : 'Monitoring is off for this cluster.'} />
     {:else}
@@ -518,7 +517,7 @@
     {:else if loading && !rows.length}
       <Skeleton rows={8} height={30} />
     {:else if error}
-      <EmptyState actionKind="secondary" icon="warning" title="Couldn’t load workloads" body={error} actionLabel="Retry" onaction={() => void loadWorkloads()} />
+      <LoadState what="workloads" {error} empty onretry={() => void loadWorkloads()} />
     {:else if !rows.length}
       <EmptyState icon="clock" title="No data yet" body="The first cycle runs within the configured interval. Use “Run once” in Settings to collect immediately." />
     {:else}

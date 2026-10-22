@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { TickCoalescer, type TickCoalescerEnv } from '../src/modules/kubernetes/monitor/tickCoalescer.ts';
+import { TickCoalescer, type TickCoalescerEnv } from '../src/lib/k8s/monitor/tickCoalescer.ts';
 
 /** Manual clock + timer queue + visibility. */
 function fakeEnv() {

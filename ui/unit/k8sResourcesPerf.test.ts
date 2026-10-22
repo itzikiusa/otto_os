@@ -2,7 +2,7 @@
 // validator, and the Fleet's stable row / event identities.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { resourcesPollMs, resourcesValidator } from '../src/modules/kubernetes/resourcePoll.ts';
+import { resourcesPollMs, resourcesValidator } from '../src/lib/k8s/resourcePoll.ts';
 import { fleetEventKey, fleetRowKey, reuseByKey, uniqueKeys } from '../src/modules/kubernetes/monitor/monitor-util.ts';
 import { loadSource } from './sourceHarness.ts';
 

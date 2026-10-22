@@ -21,7 +21,7 @@ import type { K8sAction, K8sCluster, K8sResourceKind, K8sRow } from '../api/type
 import type { K8sDrawerTab } from '../stores/k8s.svelte';
 import { ACTIONS, typedConfirm } from '../../modules/kubernetes/actions';
 import { clusterLabel, isKind, kindDef } from '../../modules/kubernetes/k8s-util';
-import { parseK8sRoute } from '../../modules/kubernetes/viewState';
+import { parseK8sRoute } from '../k8s/viewState';
 import {
   agentLabel,
   asUiError,

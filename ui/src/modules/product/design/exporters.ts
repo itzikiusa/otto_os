@@ -2,7 +2,7 @@
 // SVG (mermaid / excalidraw), the raw source file, and the server-generated
 // Blender script. GLB export of a scene3d lives with the 3D viewport (Track C's
 // `scene3d/exportGlb.ts`); the arena wires it when that module lands.
-import { renderMermaid } from '../../canvas/mermaid';
+import { renderMermaid } from '../../../lib/render/mermaid';
 import { downloadText } from '../../../lib/components/exporters';
 import { svgToPngDownload } from '../../canvas/export';
 import type { ProductAttachment } from '../types';
@@ -37,7 +37,7 @@ export function withExt(att: ProductAttachment, ext: string): string {
 
 /** Mermaid → standalone SVG file. */
 export async function mermaidToSvg(source: string): Promise<string> {
-  // Through the shared lazy loader (canvas/mermaid.ts): mermaid stays out of
+  // Through the shared lazy loader (lib/render/mermaid.ts): mermaid stays out of
   // the Product page's chunk, and renders are serialized with every other one.
   const { svg, error } = await renderMermaid(`otto-design-export-${Date.now()}`, source);
   if (svg === undefined) throw new Error(error ?? 'Diagram error');

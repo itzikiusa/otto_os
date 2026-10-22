@@ -10,7 +10,7 @@
   import Modal from '../../lib/components/Modal.svelte';
   import { database } from '../../lib/stores/database.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
-  import { formatMongo } from './mongo-format';
+  import { formatMongo } from '../../lib/database/mongo-format';
   import { isBalancedObject } from './query-filter';
 
   type StageOp =

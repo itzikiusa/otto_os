@@ -236,6 +236,9 @@
     }
   });
 
+  // Spend couldn't be read (error-handling-5-07): rows carry 0, not a reading.
+  const spendUnavailable = $derived(usage.budgets?.spend_unavailable === true);
+
   function addWsBudget(): void {
     budgetsDirty = true;
     budgetCfg.workspaces = [...budgetCfg.workspaces, { workspace_id: '', monthly_usd: 0 }];
@@ -993,7 +996,7 @@
         <section class="panel card" aria-labelledby="usage-budget-title">
           <div class="panel-head">
             <h3 id="usage-budget-title">Budgets</h3>
-            {#if admin}
+            {#if admin && usage.budgets}<!-- no editor over an unreadable config -->
             <button
               class="btn small"
               aria-expanded={budgetsOpen}
@@ -1011,6 +1014,7 @@
 
           <!-- Status: budget vs spend -->
           {#if usage.budgets && usage.budgets.rows.length > 0}
+            {#if spendUnavailable}<div class="budget-alert" role="status"><Icon name="warning" size={14} />Spend unavailable: the usage engine couldn’t report spend for this window.</div>{/if}
             <div class="budget-rows">
               {#each usage.budgets.rows as r (r.scope + ':' + r.key)}
                 {@const name = r.scope === 'workspace' ? wsName(r.key) : (r.label ?? r.key)}
@@ -1034,8 +1038,8 @@
                     ></div>
                   </div>
                   <span class="budget-val">
-                    {formatUsd(r.spent_usd)} / {formatUsd(r.limit_usd)}
-                    {#if r.exceeded}<span class="over-tag">Over</span>
+                    {spendUnavailable ? 'Spend unavailable' : formatUsd(r.spent_usd)} / {formatUsd(r.limit_usd)}
+                    {#if spendUnavailable}{:else if r.exceeded}<span class="over-tag">Over</span>
                     {:else if r.warning}<span class="warn-tag">{(r.used_fraction * 100).toFixed(0)}%</span>{/if}
                   </span>
                 </div>
@@ -1061,13 +1065,7 @@
               {/each}
             {/if}
           {:else if usage.budgetsError}
-            <LoadState
-              what="budgets"
-              variant="compact"
-              error={usage.budgetsError}
-              empty
-              onretry={() => void usage.loadBudgets()}
-            />
+            <LoadState what="budgets" variant="compact" error={usage.budgetsError} empty onretry={() => void usage.loadBudgets()} />
           {:else if !usage.budgets}
             <LoadState what="budgets" variant="compact" loading empty />
           {:else if !budgetsOpen}
@@ -1075,7 +1073,7 @@
           {/if}
 
           <!-- Editor -->
-          {#if budgetsOpen && admin}
+          {#if budgetsOpen && admin && usage.budgets}
             <div class="budget-editor" id="usage-budget-editor">
               <label class="checkbox-row">
                 <input type="checkbox" bind:checked={budgetCfg.enforce} onchange={() => (budgetsDirty = true)} />

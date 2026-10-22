@@ -20,8 +20,8 @@
 // itself — that is its whole point).
 
 import { splitStatement, rewriteWhere } from '../../lib/stores/database.svelte';
-import { condToSql, toFilterVal } from './filter-chips';
-import { looksLikeMongoshScript } from './sql-util';
+import { condToSql, toFilterVal } from '../../lib/database/filter-chips';
+import { looksLikeMongoshScript } from '../../lib/database/sql-util';
 
 export type FilterMode = 'set' | 'and';
 

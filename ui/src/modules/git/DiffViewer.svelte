@@ -21,15 +21,8 @@
   //    once it is expanded and near the viewport, abortable;
   //  • syntax highlighting is deferred to rAF slices for mounted rows only.
   import { tick, untrack } from 'svelte';
-  import type {
-    DiffResp,
-    FileDiff,
-    DiffLine,
-    Hunk,
-    HunkOp,
-    PrComment,
-    StageHunkResp,
-  } from '../../lib/api/types';
+  import type { DiffResp, FileDiff, DiffLine, Hunk, HunkOp, PrComment, StageHunkResp } from '../../lib/api/types';
+  import { refocusRow } from './diffRowFocus';
   import { langFromPath, ensureHljs } from '../../lib/hl';
   import { api, ApiError, isAbortError } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
@@ -1365,7 +1358,7 @@
         data-find-skip
         aria-label={`Expand line (${kb(content.length)})`}
         title={`Show the full line (${kb(content.length)})`}
-        onclick={() => expandedLines.add(key)}>… expand line ({kb(content.length)})</button
+        onclick={(e) => { expandedLines.add(key); void refocusRow(e.currentTarget, rootEl); }}>… expand line ({kb(content.length)})</button
       >{:else}{@html hl.html(content, lang)}{/if}{/snippet}
 
   {#snippet rowView(r: Row, i: number)}

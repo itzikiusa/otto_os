@@ -1,12 +1,14 @@
 <script lang="ts">
   // Shared issue picker block (Jira or Linear, per account) — used by both ReviewPanel and AttachIssue.
   // Handles account selection, project selection, and debounced search.
+  import { untrack } from 'svelte';
   import { listIssueProjects, searchIssues } from '../../lib/api/issues';
   import { issueAccounts } from '../../lib/stores/issueAccounts.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import LoadState from '../../lib/components/LoadState.svelte';
   import type { IssueAccount, IssueProject, IssueProviderKind, IssueSummary } from '../../lib/api/types';
   import { truncatedNote } from '../../lib/listingPage';
+  import { plural } from '../../lib/plural';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { router } from '../../lib/router.svelte';
@@ -47,11 +49,21 @@
   // Why the last search failed — shown in the results area with Retry (a toast
   // plus "No issues found." read as a real empty result).
   let searchError = $state<string | null>(null);
+  /** What the results status announces: the outcome of a finished search only. */
+  const resultsStatus = $derived(
+    searching || searchError || query.trim() === ''
+      ? ''
+      : results.length === 0
+        ? 'No issues found'
+        : plural(results.length, 'issue'),
+  );
   let searchSeq = 0;
 
   // --- account loading ---
+  // Once on mount: the loader's reads (the cache flags, the selection) must
+  // not re-run it and reset the picked account (ui-correctness-5-02).
   $effect(() => {
-    void loadAccounts();
+    untrack(() => void loadAccounts());
   });
 
   async function loadAccounts(): Promise<void> {
@@ -235,7 +247,10 @@
     />
   </div>
 
-  <!-- Results -->
+  <!-- Results. One always-mounted polite status speaks each search outcome
+       (a region inserted together with its text is silent); the Skeleton
+       already says "Loading" and a failure is its own alert. -->
+  <p class="sr-only" role="status" aria-live="polite">{resultsStatus}</p>
   <div class="picker-results">
     {#if searching}
       <Skeleton rows={3} height={44} />

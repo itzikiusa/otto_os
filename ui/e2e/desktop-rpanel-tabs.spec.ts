@@ -199,7 +199,7 @@ test('API tab (narrow): full URL preview, params rows keep × on the row, light 
   for (let i = 0; i < (await rows.count()); i++) {
     const row = rows.nth(i);
     const key = (await row.getByRole('textbox', { name: 'Parameter name' }).boundingBox())!;
-    const x = (await row.getByRole('button', { name: 'Remove row' }).boundingBox())!;
+    const x = (await row.getByRole('button', { name: /^Remove parameter / }).boundingBox())!;
     expect(Math.abs(x.y + x.height / 2 - (key.y + key.height / 2))).toBeLessThan(4);
   }
   await expectNoHorizontalOverflow(page);

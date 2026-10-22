@@ -526,11 +526,6 @@ class Router {
     ssSet(winKey(SS_LAST_BY_MODULE), JSON.stringify(Object.fromEntries(this.lastByModule)));
   }
 
-  /** The remembered route for a sidebar module (`#/…`), or null. */
-  lastRouteFor(id: string): string | null {
-    return this.lastByModule.get(id) ?? null;
-  }
-
   /**
    * Open a sidebar module the way the macOS sidebar convention does: from
    * another module it resumes the module's last route (its view comes back

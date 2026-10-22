@@ -22,7 +22,7 @@
   import { router } from '../../lib/router.svelte';
   import { api } from '../../lib/api/client';
   import DiffView from '../../lib/components/DiffView.svelte';
-  import { renderMermaid } from '../canvas/mermaid';
+  import { renderMermaid } from '../../lib/render/mermaid';
   import { ui } from '../../lib/stores/ui.svelte';
   import { canvas } from '../../lib/stores/canvas.svelte';
   import type { DiscoveryAction, UpdateDraftReq } from './types';

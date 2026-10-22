@@ -128,6 +128,18 @@
   async function copyInvite() { try { await navigator.clipboard.writeText(credential.invite_url ?? ''); copied = true; } catch { error = 'Copy the invitation from the field below.'; } }
   const statusOf = (m: GameRoomMember) => (m.left ? 'Left' : !m.connected ? 'Connecting…' : m.ready ? 'Ready' : 'Not ready');
   const rematchRequests = $derived(room?.members.filter(m => m.rematch && !m.left).length ?? 0);
+  const lobbyLine = $derived(
+    connection === 'connected' ? `${game.maps.find(m => m.id === credential.config.map)?.name ?? ''} · up to ${game.maxPlayers} people`
+    : connection === 'connecting' ? 'Connecting to game room…'
+    : connection === 'gave-up' ? 'Couldn’t reconnect to the game room.'
+    : 'Connection lost. Reconnecting…');
+  // One always-mounted polite status for the lobby: connection edges and readiness
+  // changes reach screen readers (the visible line and roster are plain text).
+  const readyCount = $derived(active.filter(m => m.ready).length);
+  const lobbyAnnouncement = $derived(
+    connection !== 'connected' ? lobbyLine
+    : `${active.length} ${active.length === 1 ? 'player' : 'players'}, ${readyCount} ready.${everyoneReady ? (isHost ? ' Everyone is ready; you can start the match.' : ' Everyone is ready.') : ''}`);
+  function reconnect() { error = ''; client.reconnect(); }
 </script>
 
 <div class="match">
@@ -148,7 +160,8 @@
   {:else}
     <div class="match-wait">
       <h2>{game.title}</h2>
-      <p>{connection === 'connected' ? `${game.maps.find(m => m.id === credential.config.map)?.name ?? ''} · up to ${game.maxPlayers} people` : connection === 'connecting' ? 'Connecting to game room…' : 'Connection lost. Reconnecting…'}</p>
+      <p>{lobbyLine}</p>
+      {#if connection === 'gave-up'}<button class="btn primary" onclick={reconnect}>Reconnect</button>{/if}
       {#if credential.invite_url}
         <div class="match-invite">
           <label for="game-invite">Invite players</label>
@@ -185,6 +198,10 @@
       </div>
     </div>
   {/if}
+  {#if connection === 'gave-up' && room && !closed && (room.phase === 'playing' || room.phase === 'finished')}
+    <div class="match-lost" role="alert"><span>Couldn’t reconnect to the game room.</span><button class="btn primary" onclick={reconnect}>Reconnect</button></div>
+  {/if}
+  {#if !closed && !(room && (room.phase === 'playing' || room.phase === 'finished'))}<p class="sr-only" role="status" aria-live="polite">{lobbyAnnouncement}</p>{/if}
   {#if error}<p class="match-error" role="alert">{error}</p>{/if}
 </div>
 
@@ -212,5 +229,6 @@
   .match-members span { color: var(--text-dim); font-size: var(--fs-s); }
   .match-empty { color: var(--text-dim); justify-content: center !important; }
   .match-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
+  .match-lost { position: absolute; inset: 16px 20px auto; z-index: 9; display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 12px; background: var(--surface); color: var(--text); border: 1px solid var(--danger); padding: 10px 12px; border-radius: var(--radius-m); }
   .match-error { position: absolute; inset: 72px 20px auto; z-index: 8; background: var(--danger-soft); color: var(--danger); padding: 12px; border-radius: var(--radius-m); margin: 0; }
 </style>

@@ -8,7 +8,7 @@ import {
   stmtPreview,
   statementAtCursor,
   type SplitMode,
-} from '../src/modules/database/sql-util.ts';
+} from '../src/lib/database/sql-util.ts';
 
 test('MySQL delimiter scripts run intact from inside a routine', () => {
   const sql = "DELIMITER $$\nCREATE PROCEDURE p() BEGIN SELECT :x; SELECT 2; END$$\nDELIMITER ;\nCALL p();";

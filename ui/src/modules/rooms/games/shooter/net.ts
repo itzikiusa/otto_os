@@ -13,7 +13,7 @@
  * Apocalypse Royale's horde (Zombies caps its floor loot instead). Inputs are a ten-number array. Everything is validated
  * before use.
  */
-import { finite, r2, r3 } from '../common/math.ts';
+import { finite, nums, r2, r3 } from '../common/math.ts';
 import { FIGHTER_IDS, SHOOTER_MAP_IDS, SHOOTER_MODE_IDS, type FighterId, type ShooterMapId, type ShooterMode } from './catalog.ts';
 import { AMMO_KINDS, ATTACHMENTS, CLASSES, isConsumable, isWeapon, ITEM_IDS, ITEM_SLOTS, MATERIALS, MAX_MATS, NADE_KINDS, STREAKS, type Material, type NadeKind, type Rarity } from './weapons.ts';
 import { buildGeometry, MAX_BUILDS, packBuild, unpackBuild, type Build } from './builds.ts';
@@ -25,6 +25,7 @@ import { emptyMode, type CapturePoint, type ModeState } from './modes/index.ts';
 import { MAX_AREAS, MAX_DRONES, MAX_FLYING } from './modes/gear.ts';
 import { APOC_CAP, MAX_INFECTED, ZOMBIE_KINDS, ZOMBIE_LOOT_CAP, type Zombie, type ZombieKind } from './zombies.ts';
 import { mapFor } from './map.ts';
+import { TEAM_SIZES } from './sim/model.ts';
 
 export const SNAPSHOT_VERSION = 4;
 const PHASES = ['bus', 'play', 'done'] as const;
@@ -38,7 +39,6 @@ const EVENTS: ShooterEventType[] = [
 ];
 /** Events whose second point (x2, y2, z2) rides along: tracers. */
 const WITH_END = new Set<ShooterEventType>(['shot']);
-const SQUADS: TeamSize[] = [1, 2, 4];
 const DIFFS = ['easy', 'normal', 'hard'] as const;
 const r1 = (v: number) => Math.round(v * 10) / 10;
 /** Decimetres / centiradians as integers (no decimal point on the wire) for the long lists. */
@@ -54,7 +54,7 @@ export const FIGHTER_FIELDS = GEAR_AT + 15;
 const LOOT_N = 6, ZB_N = 7, ND_N = 5, AR_N = 7, DN_N = 5, CP_N = 7, MS_N = 17;
 
 export interface ShooterSnapshot {
-  v: 4; m: string; d: number; p: number; c: number; et: number; w: number; bus: number[];
+  v: typeof SNAPSHOT_VERSION; m: string; d: number; p: number; c: number; et: number; w: number; bus: number[];
   /** Team size, winning team, game mode. */
   sq: number; wt: number; mo: number;
   /** Fighter rows; per-fighter fighter id, human flag, member slot and team. */
@@ -89,7 +89,7 @@ export function encodeSnapshot(state: ShooterState, events: ShooterEvent[], with
   let prevEvent = 0;
   const obj = state.obj;
   const snap: ShooterSnapshot = {
-    v: 4, m: state.map, d: DIFFS.indexOf(state.difficulty), p: PHASES.indexOf(state.phase), c: r2(state.clock), et: r2(state.endTimer), w: state.winner,
+    v: SNAPSHOT_VERSION, m: state.map, d: DIFFS.indexOf(state.difficulty), p: PHASES.indexOf(state.phase), c: r2(state.clock), et: r2(state.endTimer), w: state.winner,
     sq: state.squad, wt: state.winTeam, mo: SHOOTER_MODE_IDS.indexOf(state.mode),
     bus: [r1(state.bus.ax), r1(state.bus.az), r1(state.bus.bx), r1(state.bus.bz), r2(state.bus.t), r2(state.bus.duration)],
     f: state.players.map(p => [
@@ -131,7 +131,6 @@ export function encodeSnapshot(state: ShooterState, events: ShooterEvent[], with
   return snap;
 }
 
-const nums = (row: unknown, n: number): row is number[] => Array.isArray(row) && row.length === n && row.every(finite);
 const flat = (list: unknown, n: number, max: number): list is number[] => Array.isArray(list) && list.length % n === 0 && list.length <= max * n && list.every(finite);
 const int = (v: number, lo: number, hi: number) => Number.isInteger(v) && v >= lo && v <= hi;
 
@@ -200,8 +199,8 @@ function decodeInfected(list: unknown): Zombie[] | null {
 export function decodeSnapshot(data: unknown, names: (slot: number) => string, prevLoot: Loot[] | null = null, prevBuilds: Build[] | null = null): ShooterState | null {
   if (!data || typeof data !== 'object') return null;
   const s = data as Partial<ShooterSnapshot>;
-  if (s.v !== 4 || !SHOOTER_MAP_IDS.includes(s.m as ShooterMapId) || !finite(s.p) || !PHASES[s.p] || !finite(s.d) || !DIFFS[s.d] || ![s.c, s.et, s.w, s.lr, s.br, s.wt].every(finite)) return null;
-  if (!SQUADS.includes(s.sq as TeamSize) || !finite(s.mo) || !SHOOTER_MODE_IDS[s.mo]) return null;
+  if (s.v !== SNAPSHOT_VERSION || !SHOOTER_MAP_IDS.includes(s.m as ShooterMapId) || !finite(s.p) || !PHASES[s.p] || !finite(s.d) || !DIFFS[s.d] || ![s.c, s.et, s.w, s.lr, s.br, s.wt].every(finite)) return null;
+  if (!TEAM_SIZES.includes(s.sq as TeamSize) || !finite(s.mo) || !SHOOTER_MODE_IDS[s.mo]) return null;
   if (!nums(s.bus, 6) || !nums(s.st, 10) || typeof s.ch !== 'string' || !/^[01]*$/.test(s.ch)) return null;
   if (!Array.isArray(s.n) || s.n.length !== s.f?.length || !s.n.every(n => typeof n === 'string' && n.length <= 40)) return null;
   if (!Array.isArray(s.f) || !Array.isArray(s.q) || s.f.length !== s.q.length || s.f.length === 0 || s.f.length > MAX_FIGHTERS) return null;

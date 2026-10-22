@@ -28,6 +28,7 @@
   import { appLive } from '../../lib/live';
   import { routeReviewId } from './deepLink';
   import { runWithOtto } from '../../lib/stores/runWithOtto.svelte';
+  import { summaryFallback, summaryFallbackSentence, summaryFallbackTitle } from './reviewFallback';
 
   interface Props {
     repoId: string;
@@ -461,7 +462,7 @@
         <p class="lrp-pinned-meta dim">
           <StatusBadge status={runStatus(pinned.status)} />
           <span>{timeAgo(pinned.created_at)}</span>
-          {#if pinned.summary_fallback}<span>· findings ranked mechanically (summarizer unavailable)</span>{/if}
+          {#if pinned.summary_fallback}<span title={summaryFallbackTitle(summaryFallback(pinned.agents), 'these findings')}>· findings ranked mechanically ({summaryFallback(pinned.agents).provider} summary not used)</span>{/if}
         </p>
         {#if pinned.status === 'running'}
           <p class="dim">This review is still running — findings appear here when it finishes.</p>
@@ -560,9 +561,8 @@
   {:else}
     <!-- done -->
     {#if review.summary_fallback}
-      <p class="lrp-fallback-note dim" title="The claude summarizer was unavailable; these findings were deduped and ranked by the deterministic Rust-side fallback.">
-        <Icon name="warning" size={12} /> The summarizer was unavailable, so findings were deduplicated and ranked mechanically.
-      </p>
+      <p class="lrp-fallback-note dim" title={summaryFallbackTitle(summaryFallback(review.agents), 'these findings')}>
+        <Icon name="warning" size={12} /> {summaryFallbackSentence(summaryFallback(review.agents))}</p>
     {/if}
     <!-- Findings workflow board: persisted Finding rows with the 6-state status,
          the 7 triage actions, and the Proof Pack. -->

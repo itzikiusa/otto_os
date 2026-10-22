@@ -278,7 +278,7 @@
                     <span>·</span>
                     <button class="link" onclick={() => onopenthread(m.source.thread_id!)} title="Open the conversation it came from">from {threadTitle(m.source.thread_id)}</button>
                   {/if}
-                  {#each m.tags as t (t)}<Badge variant="outline" label={t} title={t} />{/each}
+                  {#each m.tags as t, i (i)}<Badge variant="outline" label={t} title={t} />{/each}
                 </div>
               </div>
               <button class="icon-btn forget" onclick={() => void forgetOne(m)} aria-label={`Forget “${m.text}”`} title="Forget">

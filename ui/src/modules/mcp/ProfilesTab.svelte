@@ -5,6 +5,7 @@
   // every tool, the connection as it always was — can't be edited or deleted.
   // Each profile also gets its own connection config, so an outside Claude
   // Code or Codex can attach "Otto · Database" only.
+  import { untrack } from 'svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import Badge from '../../lib/components/Badge.svelte';
   import Tabs from '../../lib/components/Tabs.svelte';
@@ -42,8 +43,10 @@
   ] as const;
   let configTab = $state<'stdio' | 'http' | 'codex'>('stdio');
 
+  // Untracked: `load` reads the store's `loaded`, so a tracked call re-ran
+  // this effect when the first response flipped it and fetched twice.
   $effect(() => {
-    void mcpProfiles.load(true);
+    untrack(() => void mcpProfiles.load(true));
   });
 
   const profiles = $derived(mcpProfiles.profiles);
@@ -106,14 +109,19 @@
     }
   }
 
+  /** Why a profile action is greyed out for a non-admin (a disabled control is never unexplained). */
+  const NEEDS_ADMIN = 'Needs MCP admin';
+
   function menu(e: MouseEvent | KeyboardEvent, p: McpProfile): void {
+    // The locked-profile reason wins: it holds even for an admin.
     const locked = p.locked ? 'Built in — duplicate it to make your own' : undefined;
+    const admin = isAdmin ? undefined : NEEDS_ADMIN;
     const items: MenuItem[] = [
-      { label: 'Edit…', icon: 'edit', disabled: !isAdmin || p.locked, title: locked, action: () => (editor = { editing: p, initial: draftOf(p) }) },
-      { label: 'Duplicate…', icon: 'copy', disabled: !isAdmin, action: () => duplicate(p) },
-      { label: 'Make default', icon: 'star', disabled: !isAdmin || p.is_default, action: () => void makeDefault(p) },
+      { label: 'Edit…', icon: 'edit', disabled: !isAdmin || p.locked, title: locked ?? admin, action: () => (editor = { editing: p, initial: draftOf(p) }) },
+      { label: 'Duplicate…', icon: 'copy', disabled: !isAdmin, title: admin, action: () => duplicate(p) },
+      { label: 'Make default', icon: 'star', disabled: !isAdmin || p.is_default, title: admin, action: () => void makeDefault(p) },
       { separator: true },
-      { label: 'Delete…', icon: 'trash', danger: true, disabled: !isAdmin || p.locked, title: p.locked ? 'Full can’t be deleted' : undefined, action: () => void remove(p) },
+      { label: 'Delete…', icon: 'trash', danger: true, disabled: !isAdmin || p.locked, title: (p.locked ? 'Full can’t be deleted' : undefined) ?? admin, action: () => void remove(p) },
     ];
     ctxMenu.show(e, items);
   }
@@ -135,7 +143,7 @@
       default is preselected) and see only those tools; outside agents can attach a single profile.
       Profiles only narrow — permissions, the Otto server checklist and approvals still apply.
     </p>
-    <button class="btn small" data-testid="mcp-profile-new" disabled={!isAdmin || !mcpProfiles.loaded} title={isAdmin ? undefined : 'Needs MCP admin'} onclick={newProfile}>
+    <button class="btn small" data-testid="mcp-profile-new" disabled={!isAdmin || !mcpProfiles.loaded} title={isAdmin ? undefined : NEEDS_ADMIN} onclick={newProfile}>
       <Icon name="plus" size={12} /> New profile
     </button>
   </div>
@@ -177,7 +185,7 @@
             </div>
             <div class="d-actions">
               {#if !selected.is_default}
-                <button class="btn small" disabled={!isAdmin || busy} onclick={() => void makeDefault(selected)} data-testid="mcp-profile-make-default">Make default</button>
+                <button class="btn small" disabled={!isAdmin || busy} title={isAdmin ? undefined : NEEDS_ADMIN} onclick={() => void makeDefault(selected)} data-testid="mcp-profile-make-default">Make default</button>
               {/if}
               <button class="icon-btn" aria-label="More actions for {selected.name}" title="More…" aria-haspopup="menu" onclick={(e) => menu(e, selected)}><Icon name="more" size={14} /></button>
             </div>

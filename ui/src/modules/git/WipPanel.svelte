@@ -9,14 +9,7 @@
   import { toastError } from '../../lib/toastError';
   import { api, isAbortError } from '../../lib/api/client';
   import type {
-    CommitConfig,
-    CommitInfo,
-    DiffResp,
-    DiscardReq,
-    DraftCommitMessageResp,
-    FileChange,
-    HeadRemotesResp,
-    RepoStatusResp,
+    CommitConfig, CommitInfo, DiffResp, DiscardReq, DraftCommitMessageResp, FileChange, HeadRemotesResp, RepoStatusResp,
   } from '../../lib/api/types';
   import { amendPublishedAt } from './refTracking';
   import { toasts } from '../../lib/toast.svelte';
@@ -31,6 +24,8 @@
   import { ListWindow } from './list-window.svelte';
   import LazyTerminal from '../../lib/components/LazyTerminal.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import {
     draftInFlight,
@@ -178,6 +173,8 @@
   /** Non-null when the diff LOAD failed — rendered as an error, not as the
    *  "no textual diff" empty state (an error masquerading as emptiness). */
   let diffError = $state<string | null>(null);
+  /** Bumped by the diff error's Retry; the select effect reads it. */
+  let diffRetry = $state(0);
 
   /** Which side to show when a path is staged AND unstaged (default unstaged). */
   let stagedView = $state(false);
@@ -204,6 +201,7 @@
   $effect(() => {
     const path = selectedPath;
     const target = selTarget;
+    void diffRetry;
     if (path === null) {
       diff = null;
       diffError = null;
@@ -228,7 +226,7 @@
       .catch((e) => {
         if (stale() || isAbortError(e)) return;
         diff = { files: [] };
-        diffError = e instanceof Error ? e.message : String(e);
+        diffError = loadErrorText(e);
       })
       .finally(() => {
         if (!stale()) diffLoading = false;
@@ -1056,7 +1054,7 @@
                 }}
           />
         {:else if diffError}
-          <div class="dim wp-empty">Couldn’t load the diff: {diffError}</div>
+          <LoadState variant="compact" what="this file’s diff" error={diffError} empty onretry={() => diffRetry++} />
         {:else}
           <div class="dim wp-empty">No textual diff for this file.</div>
         {/if}
