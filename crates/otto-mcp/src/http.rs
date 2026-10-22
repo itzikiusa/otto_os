@@ -286,6 +286,7 @@ pub fn api_router<S: McpCtx>() -> Router<S> {
         // audit + stats
         .route("/mcp/audit", get(list_audit::<S>))
         .route("/mcp/stats", get(stats::<S>))
+        .merge(crate::profiles::routes::router::<S>())
 }
 
 // ===========================================================================

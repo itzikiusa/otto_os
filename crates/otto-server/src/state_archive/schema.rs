@@ -75,6 +75,7 @@ pub fn excluded_table(name: &str, portable: bool) -> bool {
             | "plugin_feature_grants"
             | "mcp_allowlist"
             | "mcp_policies"
+            | "mcp_profiles"
             | "auth_sessions"
             | "transcript_index"
             | "provider_models"

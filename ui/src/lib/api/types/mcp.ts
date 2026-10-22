@@ -456,6 +456,71 @@ export interface McpOttoServerEnabled {
   outward_enabled: boolean;
   /** False for a credential not bound to an Otto session. */
   ui_granted: boolean;
+  /** The resolved MCP profile filter when `?profiles=` was sent, else null. */
+  profile?: McpToolFilter | null;
+}
+
+// --- MCP profiles (`/mcp/profiles`, CP44–CP48) ------------------------------
+// Named variants of the Otto MCP connection, each exposing only a subset of
+// the tools. Mirrors `otto_state::McpProfile` / `otto_mcp::profiles`.
+
+export interface McpProfile {
+  id: Id;
+  name: string;
+  description: string;
+  /** Every tool minus `exclude_tools` (the Full profile). */
+  all_tools: boolean;
+  /** Tool-group ids (`McpToolGroup.id`). */
+  groups: string[];
+  /** Canonical tool names added on top of the groups (`create_pr`). */
+  include_tools: string[];
+  /** Canonical tool names removed from the groups. */
+  exclude_tools: string[];
+  /** A seeded preset (Full, Database, Issues, Git & PRs, Cloud). */
+  builtin: boolean;
+  /** Read-only and undeletable (Full). */
+  locked: boolean;
+  /** Exactly one profile is the default. */
+  is_default: boolean;
+  created_by?: Id | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** One tool group a profile is built from. */
+export interface McpToolGroup {
+  id: string;
+  label: string;
+  description: string;
+  /** Tool families the group also covers (`aws_` → every `aws_*` tool). */
+  prefixes: string[];
+  /** Canonical member names (exact names + every catalog tool in it). */
+  tools: string[];
+}
+
+/** `GET /mcp/profiles`. */
+export interface McpProfileList {
+  profiles: McpProfile[];
+  groups: McpToolGroup[];
+  default_id: Id;
+}
+
+/** `POST /mcp/profiles`; `PATCH /mcp/profiles/{id}` (every field optional). */
+export interface McpProfileReq {
+  name?: string;
+  description?: string;
+  all_tools?: boolean;
+  groups?: string[];
+  include_tools?: string[];
+  exclude_tools?: string[];
+}
+
+/** The resolved UNION of a session's / connection's profiles (CP24a). */
+export interface McpToolFilter {
+  ids: Id[];
+  /** Names joined with " + ". */
+  label: string;
+  profiles: Pick<McpProfile, 'id' | 'name' | 'all_tools' | 'groups' | 'include_tools' | 'exclude_tools'>[];
 }
 
 // --- MCP auto-approve rules (`/mcp/auto-approve`) ---------------------------

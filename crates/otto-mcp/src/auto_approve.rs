@@ -18,7 +18,10 @@
 //! category rule, and a per-tool rule covers it only when the rule carries the
 //! second explicit toggle `allow_irreversible`.
 
+use otto_core::Error;
 use otto_state::McpAutoApproveRule;
+
+use crate::outward::{mutating_categories, tool_category, tool_is_dangerous, tool_is_irreversible};
 
 pub const SCOPE_GLOBAL: &str = "global";
 pub const SCOPE_WORKSPACE: &str = "workspace";
@@ -119,6 +122,78 @@ pub fn audit_reason(rule: &McpAutoApproveRule) -> String {
         },
         rule.id
     )
+}
+
+// ---- rule validation (pure; the HTTP handlers live in otto-server) --------
+
+/// Validate a rule's target + guardrail. Returns the normalized
+/// `(target, allow_irreversible)`. Pure (catalog lookups only; moved from
+/// `otto_server::mcp_auto_approve`).
+pub fn validate_target(
+    kind: &str,
+    target: &str,
+    allow_irreversible: bool,
+) -> Result<(String, bool), Error> {
+    let target = target.trim();
+    match kind {
+        TARGET_TOOL => {
+            let bare = target.strip_prefix("otto.").unwrap_or(target).to_string();
+            if !tool_is_dangerous(&bare) {
+                return Err(Error::Invalid(if tool_category(&bare).is_some() {
+                    format!(
+                        "'{target}' is not a mutating tool — only mutating tools ask for approval"
+                    )
+                } else {
+                    format!("unknown otto tool '{target}'")
+                }));
+            }
+            if tool_is_irreversible(&bare) {
+                if !allow_irreversible {
+                    return Err(Error::Invalid(format!(
+                        "otto.{bare} is irreversible — auto-approving it needs the second explicit \
+                         toggle (allow_irreversible: true)"
+                    )));
+                }
+                Ok((bare, true))
+            } else {
+                // The flag means nothing for a reversible tool: store it off.
+                Ok((bare, false))
+            }
+        }
+        TARGET_CATEGORY => {
+            if allow_irreversible {
+                return Err(Error::Invalid(
+                    "a category rule never covers irreversible tools — add a per-tool rule for one \
+                     (allow_irreversible is only valid with target_kind 'tool')"
+                        .into(),
+                ));
+            }
+            if !mutating_categories().iter().any(|(c, _)| c == target) {
+                return Err(Error::Invalid(format!(
+                    "unknown category '{target}' (or it has no mutating tools)"
+                )));
+            }
+            Ok((target.to_string(), false))
+        }
+        other => Err(Error::Invalid(format!(
+            "target_kind must be 'tool' or 'category', not '{other}'"
+        ))),
+    }
+}
+
+/// The name a rule gets when none is given: `"<target> — <scope>"`.
+pub fn default_name(kind: &str, target: &str, scope: &str) -> String {
+    let what = if kind == TARGET_CATEGORY {
+        format!("{target} writes")
+    } else {
+        format!("otto.{target}")
+    };
+    let wher = match scope {
+        SCOPE_WORKSPACE => "this workspace",
+        SCOPE_SESSION => "one session",
+        _ => "everywhere",
+    };
+    format!("{what} — {wher}")
 }
 
 #[cfg(test)]

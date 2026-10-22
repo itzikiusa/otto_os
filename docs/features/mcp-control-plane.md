@@ -451,6 +451,76 @@ human-approval-gated as DANGEROUS tools. An inward session still holds its owner
 API token and could use raw curl, so daemon-side response scrubbing protects that
 path too.
 
+### 3.5 MCP profiles — named tool sets per session and per connection
+
+The full Otto tool block is large; most sessions need a slice of it. An **MCP
+profile** is a named subset of the tools, and every session and external
+connection can run under one (or several).
+
+**What a profile is.** A set of **tool groups** plus per-tool overrides:
+
+- Groups are derived from the catalog and keyed by tool name
+  (`otto_mcp::profiles::GROUPS`): Database, Issues (Jira), Confluence, Git &
+  PRs, Code review, Sessions & agents, Workspace & context, AWS, Kubernetes,
+  Browser, Vault & docs, Workflows & automation, Swarm & work items, Design &
+  canvas, Message brokers, API client, Product stories, Assistant, Channels,
+  App UI control and External MCP servers (`mcp__server__tool`). Every tool of
+  the outward catalog and of the session server's native catalog belongs to
+  exactly ONE group — a test in `otto-mcp` and one in `ottod` fail when a tool
+  is added without one.
+- A tool its groups leave out can be **added**; one they include can be
+  **removed**. **All tools** is the Full shape (every tool, minus removals).
+- Names are canonical: `otto.create_pr` (outward), `otto_create_pr` (session)
+  and `create_pr` are the same tool.
+
+**Built-in profiles** (seeded by migration 0194): **Full** — every tool, the
+connection exactly as before; it can't be edited or deleted and is the initial
+default — **Database**, **Issues** (Jira + Confluence), **Git & PRs** (Git +
+code review) and **Cloud** (AWS + Kubernetes). Create, edit, duplicate and
+delete your own under **MCP → Profiles** (MCP Admin, a person's own
+credential). Exactly one profile is the **default**; ⋯ → *Make default*
+changes it. Deleting the default hands it back to Full.
+
+**Per session.**
+
+1. The new-session sheet has an **MCP tools** picker with the default
+   preselected. Pick several and the session gets the UNION of their tools.
+   Picking exactly the default stores nothing, so the session follows a later
+   default change — the same as every session created before profiles existed.
+2. The ids are stored on the session (`meta.mcp_profiles`). When the agent
+   starts, Otto passes them to its `otto` MCP server for every provider
+   (`OTTO_MCP_PROFILES` in the environment Claude, agy/Gemini and grok hand to
+   the server; the `profiles` field of Codex's per-session creds file).
+3. The session's `ottod mcp-tools` resolves them through
+   `GET /mcp/otto-server/enabled?profiles=…` (the enable-list read it already
+   makes, cached with it) and **lists only the allowed tools** — native,
+   governed `otto_*`, gateway `mcp__*` and UI tools alike. A call to anything
+   else gets a tool error naming the profile, recorded as a failed call.
+4. Change it from the session's ⋯ menu → **MCP tools…** (the row shows the
+   active profile). The profile is captured when the agent starts, so the
+   change **applies when the agent restarts** — the dialog offers *Save &
+   restart*. The agent itself can't change its own profile (`403`).
+
+**External connections.** Each profile has its own connection config on its
+MCP → Profiles page (copy as `.mcp.json`, a `claude mcp add --transport http`
+command, or a Codex TOML block):
+
+- stdio: `ottod mcp-server --profile database` (or `OTTO_MCP_PROFILE=database`);
+- HTTP: `POST /api/v1/mcp/http?profile=database`.
+
+So an outside Claude Code or Codex can attach "Otto · Database" only. The
+plain `ottod mcp-server` / `/mcp/http` connection (no profile) keeps working
+unchanged and is shown as the Full profile's config.
+
+**Governance — profiles only narrow.** A profile decides what a caller SEES
+and may dispatch; it never grants. Every call it lets through runs exactly the
+path it ran before: the per-token scope, the control-plane enable list (what
+is enabled under *Otto server* is what sessions see, filtered by their
+profile), RBAC, personal-agent policy, approvals and auto-approve rules. No
+new restriction applies to a connection without a profile. A profile is a
+tool-list narrowing, not a security boundary: the session's credential can
+still reach the daemon routes its owner may.
+
 ---
 
 ## 4. The governance pipeline (`McpService::invoke`)
@@ -858,11 +928,15 @@ the workspace role.
 | Method & path | Purpose | RBAC |
 |---|---|---|
 | `GET /mcp/otto-server` | Outward status + tool catalog + token prefix | View (or `mcp` token) |
-| `GET /mcp/otto-server/enabled` | **CP24a** — the light read the stdio bridges poll: enabled `otto.*` names, master switch, the calling session's `ui_granted` | View (or `mcp` token) |
+| `GET /mcp/otto-server/enabled` (`?profiles=`) | **CP24a** — the light read the stdio bridges poll: enabled `otto.*` names, master switch, the calling session's `ui_granted`, and the resolved MCP profile filter when `?profiles=` is sent | View (or `mcp` token) |
 | `PATCH /mcp/otto-server` | Enable/disable and per-tool allow; legacy-token rotation affects only `otto-mcp-server`-labelled tokens (prefer CP37) | **Admin** |
 | `GET /mcp/auto-approve` | **CP40** — auto-approve rules + the categories / irreversible tools a rule can name | View |
 | `POST /mcp/auto-approve` | **CP41** — create a rule (`{scope, workspace_id?, session_id?, target_kind, target, allow_irreversible?, name?}`) | **Admin** (human credential) |
 | `PATCH /mcp/auto-approve/{id}` · `DELETE …` | **CP42/CP43** — rename / enable / flip `allow_irreversible`; delete | **Admin** (human credential) |
+| `GET /mcp/profiles` | **CP44** — MCP profiles + the tool groups they are built from + `default_id` | View |
+| `POST /mcp/profiles` | **CP45** — create (`{name, description?, all_tools?, groups?, include_tools?, exclude_tools?}`) | **Admin** (human credential) |
+| `PATCH /mcp/profiles/{id}` · `DELETE …` | **CP46/CP47** — edit / delete (the locked Full profile: `400`) | **Admin** (human credential) |
+| `POST /mcp/profiles/{id}/default` | **CP48** — make it the one default | **Admin** (human credential) |
 | `POST /mcp/otto-tools/invoke` | The governed choke point for the `otto.*` tools | Edit (or `mcp` token) |
 | `POST /mcp/tool-calls` | **CP26a** — the stdio bridge's audit append, stamped with the calling session | session credential only |
 | `GET /mcp/gateway/tools` (`?workspace_id=`) | Namespaced governed downstream tools | View |
@@ -945,6 +1019,14 @@ applies.
 require-approval). Approve it in **Activity → Approvals** (MCP Admin, and not the
 same user who requested it), then re-invoke — the approval is **single-use** and
 bound to the exact arguments, so changing the args invalidates it.
+
+**An agent says a tool "is not in the MCP profile …".** The session runs under
+an MCP profile that leaves that tool out — the error names the profile. Open the
+session's ⋯ → **MCP tools…**, add a profile that includes it (or pick Full) and
+*Save & restart*: the profile is captured when the agent starts. For an outside
+connection, attach one with a wider `--profile` / `?profile=`, or drop it for
+every enabled tool. A profile never hides a tool from a session that has no
+stored profile while the default is Full.
 
 **`otto_create_pr` still asks for approval although I enabled it.** Enabling a
 mutating `otto.*` tool only makes it callable; the per-call approval is a separate,

@@ -864,7 +864,10 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         }
         // Auto-approve rules loosen the approval posture: reading them is View,
         // every change is Admin (like policy writes).
-        if p == "/mcp/auto-approve" || p == "/mcp/auto-approve/{id}" {
+        if p == "/mcp/auto-approve"
+            || p == "/mcp/auto-approve/{id}"
+            || p.starts_with("/mcp/profiles")
+        {
             return Require(Mcp, if get { View } else { Admin });
         }
         // Posture-changing routes → Admin: outward-server config, policy
@@ -2675,6 +2678,16 @@ mod tests {
             pol(Method::DELETE, "/api/v1/mcp/auto-approve/{id}"),
             Require(Mcp, Admin)
         );
+        // MCP profiles: View to read, Admin to change (like auto-approve).
+        assert_eq!(pol(Method::GET, "/api/v1/mcp/profiles"), Require(Mcp, View));
+        for (m, p) in [
+            (Method::POST, "/api/v1/mcp/profiles"),
+            (Method::PATCH, "/api/v1/mcp/profiles/{id}"),
+            (Method::DELETE, "/api/v1/mcp/profiles/{id}"),
+            (Method::POST, "/api/v1/mcp/profiles/{id}/default"),
+        ] {
+            assert_eq!(pol(m, p), Require(Mcp, Admin), "{p}");
+        }
         assert_eq!(
             pol(Method::POST, "/api/v1/mcp/approvals/{id}/decide"),
             Require(Mcp, Admin)

@@ -108,6 +108,13 @@ use crate::config::Config;
 // Per-route upstream budgets and the pure read-call descriptor:
 // `mcp_tools/budgets.rs`.
 mod budgets;
+// Session credentials (env / Codex creds file): `mcp_tools/creds.rs`.
+mod creds;
+use creds::load_creds;
+#[cfg(test)]
+use creds::{config_path_in, parse_creds};
+// MCP profiles — the list/dispatch filter hook: `mcp_tools/profile.rs`.
+mod profile;
 use budgets::{wait_session_budget, ReadCall, SUMMARIZE_CALL_TIMEOUT};
 // Twin schemas generated from the control-plane catalog: `mcp_tools/listing.rs`.
 mod listing;
@@ -155,6 +162,9 @@ struct Ctx {
     /// Session metadata source. Review sessions use this to receive a
     /// read-only Vault catalog and a dispatcher-level mutation deny.
     source: Option<String>,
+    /// The session's MCP profile ids (`OTTO_MCP_PROFILES`); `None` ⇒ no
+    /// profile filter (see `mcp_tools/profile.rs`).
+    profiles: Option<String>,
     /// Whether tool calls are audited (`POST /mcp/tool-calls`; off in tests
     /// that never reach a daemon).
     audit: bool,
@@ -186,6 +196,8 @@ struct EnabledInfo {
     names: Vec<String>,
     /// The calling session holds the per-session "Allow UI control" grant.
     ui_granted: bool,
+    /// The session's resolved MCP profile filter (`None`: no profile asked).
+    filter: Option<otto_server::mcp_profiles::ToolFilter>,
 }
 
 /// Wall-clock cap on one audit append (`POST /mcp/tool-calls`).
@@ -571,7 +583,10 @@ impl Ctx {
     }
 
     async fn fetch_enabled_info(&self) -> Result<EnabledInfo, String> {
-        match self.get_json("/mcp/otto-server/enabled").await {
+        match self
+            .get_json(&profile::enabled_path(self.profiles.as_deref()))
+            .await
+        {
             Ok(v) => Ok(EnabledInfo {
                 names: v["enabled"]
                     .as_array()
@@ -582,6 +597,7 @@ impl Ctx {
                     })
                     .unwrap_or_default(),
                 ui_granted: v["ui_granted"].as_bool().unwrap_or(false),
+                filter: profile::parse(&v),
             }),
             // A daemon older than this bridge has no light route: fall back to
             // the full status (no grant field there — UI tools stay hidden
@@ -600,6 +616,7 @@ impl Ctx {
                         })
                         .unwrap_or_default(),
                     ui_granted: false,
+                    filter: None,
                 })
             }
             Err(e) => Err(e),
@@ -4514,7 +4531,7 @@ async fn handle(ctx: &Ctx, msg: Value) -> Option<Value> {
             let reviewer = is_vault_docs_reviewer(ctx.source.as_deref());
             // The gateway list and the enable list are independent daemon
             // reads: fetch them concurrently (each is cached briefly).
-            let (gw, enabled) = if reviewer {
+            let (gw, enabled): (_, Option<EnabledInfo>) = if reviewer {
                 (Vec::new(), None)
             } else {
                 tokio::join!(ctx.gateway_tools(false), ctx.enabled_info(false))
@@ -4522,6 +4539,7 @@ async fn handle(ctx: &Ctx, msg: Value) -> Option<Value> {
             // …plus the control-plane-enabled otto.* tools this surface doesn't
             // serve natively (what the operator ticked under MCP → Otto server),
             // UI-control tools only once this session holds the UI grant.
+            let filter = enabled.as_ref().and_then(|i| i.filter.clone());
             let governed = match enabled {
                 Some(info) => {
                     ctx.advertised_ui
@@ -4540,6 +4558,9 @@ async fn handle(ctx: &Ctx, msg: Value) -> Option<Value> {
                     }));
                 }
                 scope_listing_for_source(arr, ctx.source.as_deref());
+                if let Some(f) = &filter {
+                    f.retain_listed(arr);
+                }
             }
             Some(rpc_ok(id.unwrap_or(Value::Null), cat))
         }
@@ -4552,6 +4573,9 @@ async fn handle(ctx: &Ctx, msg: Value) -> Option<Value> {
                 .unwrap_or("")
                 .to_string();
             let args = params.get("arguments").cloned().unwrap_or(json!({}));
+            if let Some(refused) = profile::refuse(ctx, &name, &args).await {
+                return Some(rpc_ok(id, refused));
+            }
             if is_vault_docs_reviewer(ctx.source.as_deref())
                 && (VAULT_MUTATION_TOOLS.contains(&name.as_str())
                     || API_MUTATION_TOOLS.contains(&name.as_str()))
@@ -4628,84 +4652,6 @@ async fn handle(ctx: &Ctx, msg: Value) -> Option<Value> {
     }
 }
 
-/// Resolved credentials + routing for the tools — from env (the Claude path) or a
-/// per-session creds file (the Codex path).
-struct Creds {
-    token: String,
-    base: Option<String>,
-    session_id: Option<String>,
-    workspace_id: Option<String>,
-    source: Option<String>,
-}
-
-/// Find the creds-file path: `--config <path>` / `--config=<path>` in `args`, else
-/// the `OTTO_MCP_CONFIG` env. Pure over `args` for testability.
-fn config_path_in(args: &[String]) -> Option<String> {
-    let mut it = args.iter();
-    while let Some(a) = it.next() {
-        if a == "--config" {
-            return it.next().cloned();
-        }
-        if let Some(p) = a.strip_prefix("--config=") {
-            return Some(p.to_string());
-        }
-    }
-    std::env::var("OTTO_MCP_CONFIG")
-        .ok()
-        .filter(|s| !s.is_empty())
-}
-
-/// Parse a per-session creds JSON document (`{token, base?, session_id?,
-/// workspace_id?}`). Pure for testability; errors if the `token` is missing.
-fn parse_creds(body: &str) -> Result<Creds, String> {
-    let v: Value = serde_json::from_str(body).map_err(|e| format!("parse creds: {e}"))?;
-    let token = v
-        .get("token")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
-    if token.is_empty() {
-        return Err("creds file has no `token`".into());
-    }
-    let s = |k: &str| {
-        v.get(k)
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-    };
-    Ok(Creds {
-        token,
-        base: s("base"),
-        session_id: s("session_id"),
-        workspace_id: s("workspace_id"),
-        source: s("source"),
-    })
-}
-
-/// Resolve credentials: env first (Claude — `OTTO_MCP_TOKEN` & friends), then a
-/// per-session creds file (Codex — `--config <path>` / `OTTO_MCP_CONFIG`).
-fn load_creds(args: &[String]) -> Result<Creds, String> {
-    if let Ok(token) = std::env::var("OTTO_MCP_TOKEN") {
-        if !token.is_empty() {
-            let s = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
-            return Ok(Creds {
-                token,
-                base: s("OTTO_MCP_BASE"),
-                session_id: s("OTTO_SESSION_ID"),
-                workspace_id: s("OTTO_WORKSPACE_ID"),
-                source: s("OTTO_SESSION_SOURCE"),
-            });
-        }
-    }
-    let path = config_path_in(args).ok_or_else(|| {
-        "no OTTO_MCP_TOKEN and no --config/OTTO_MCP_CONFIG creds file (the first-party \
-         tools require a per-session token)"
-            .to_string()
-    })?;
-    let body = std::fs::read_to_string(&path).map_err(|e| format!("read creds {path}: {e}"))?;
-    parse_creds(&body)
-}
-
 /// Entry point for `ottod mcp-tools`. Reads JSON-RPC lines on stdin, writes
 /// responses on stdout, until EOF.
 pub async fn run() -> Result<(), String> {
@@ -4724,6 +4670,7 @@ pub async fn run() -> Result<(), String> {
     let session_id = creds.session_id;
     let workspace_id = creds.workspace_id;
     let source = creds.source;
+    let profiles = creds.profiles;
 
     // Audit rows go through the daemon (`POST /mcp/tool-calls`): the bridge
     // opens no database connection at all (R7; before, every agent session's
@@ -4737,15 +4684,9 @@ pub async fn run() -> Result<(), String> {
         .build()
         .map_err(|e| format!("build http client: {e}"))?;
 
-    let ctx = Arc::new(Ctx::new(
-        http,
-        base,
-        token,
-        session_id,
-        workspace_id,
-        source,
-        audit,
-    ));
+    let mut ctx = Ctx::new(http, base, token, session_id, workspace_id, source, audit);
+    ctx.profiles = profiles;
+    let ctx = Arc::new(ctx);
     serve(ctx, BufReader::new(tokio::io::stdin()), tokio::io::stdout()).await
 }
 
@@ -4766,6 +4707,7 @@ impl Ctx {
             session_id,
             workspace_id,
             source,
+            profiles: None,
             audit,
             audit_tasks: Default::default(),
             enabled_cache: Default::default(),
@@ -4960,6 +4902,8 @@ mod tests {
     mod catalog_tests;
     // Per-route upstream budgets (the wait_session long-poll): `tests/budget_tests.rs`.
     mod budget_tests;
+    // MCP profiles: group coverage + list/dispatch filtering: `tests/profile_tests.rs`.
+    mod profile_tests;
 
     /// S5-20: an over-long line is dropped (to its newline) and the next one
     /// still reads; memory never holds more than the cap.
