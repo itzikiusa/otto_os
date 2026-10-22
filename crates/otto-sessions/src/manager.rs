@@ -6633,10 +6633,10 @@ fn missing_cwd_refusal_in(session: &Session, otto_data: &std::path::Path) -> Opt
 
 #[path = "manager/mcp_sync.rs"]
 mod mcp_sync;
-#[path = "manager/session_files.rs"]
-mod session_files;
 #[path = "manager/otto_tools_env.rs"]
 mod otto_tools_env;
+#[path = "manager/session_files.rs"]
+mod session_files;
 use otto_tools_env::{otto_tools_env, session_mcp_profiles, write_codex_creds};
 
 #[cfg(test)]
