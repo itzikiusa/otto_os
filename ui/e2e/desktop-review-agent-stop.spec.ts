@@ -143,6 +143,9 @@ test('legacy pre-0100 retry: temp prompt file only (no DB row) still works', asy
     ],
   });
   writeFileSync(join(tmpdir(), `otto-review-${legacy.id}-0.prompt`), 'legacy prompt text');
+  // Pre-0100 reviews kept their diff in the temp file too (no stored diff row);
+  // a retry with neither refuses with 409 rather than reviewing an empty diff.
+  writeFileSync(join(tmpdir(), `otto-review-${legacy.id}.diff`), 'diff --git a/x b/x\n');
 
   const retry = await ctx.post(api(`/reviews/${legacy.id}/agents/0/retry`));
   expect(retry.ok()).toBeTruthy();

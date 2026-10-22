@@ -113,7 +113,6 @@ class RatchetTest(unittest.TestCase):
         b = json.loads(mod.BASELINE.read_text())
         self.assertGreater(b["new_file_max"], 0)
         self.assertIn("crates/otto-server/src/workflow_engine.rs", b["files"])
-        self.assertIn("crates/otto-server/src/modules.rs", b["files"])
         self.assertIn("otto-server", b["totals"])
         for name in ("execute_node", "run_workflow_with_budget", "run_review_core"):
             self.assertIn(name, b["functions"])

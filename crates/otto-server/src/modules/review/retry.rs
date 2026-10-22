@@ -257,8 +257,8 @@ pub(crate) async fn retry_review_agent(
     let model = review.agents[index].model.clone();
     let pr_number = review.pr_number;
     // The prompt references the diff via an absolute temp path — re-materialize
-    // it from the durable row if a reboot/temp-sweep removed it (best-effort;
-    // pre-0100 reviews have no stored diff and keep the old behavior). The
+    // it from the durable row if a reboot/temp-sweep removed it (pre-0100
+    // reviews have no stored diff and need their legacy temp file). The
     // restored length also feeds the grace-period heuristic, which previously
     // collapsed to the 10-minute floor whenever the temp file was gone.
     // Register a FRESH per-agent cancel flag (replacing any tripped one from a
