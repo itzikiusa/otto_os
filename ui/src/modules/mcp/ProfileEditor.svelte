@@ -30,8 +30,9 @@
   }
   let { editing, initial, profiles, groups, onclose, onsaved }: Props = $props();
 
+  // `initial` arrives as a $state proxy, which structuredClone refuses (DataCloneError).
   // svelte-ignore state_referenced_locally
-  let draft = $state<ProfileDraft>(structuredClone(initial));
+  let draft = $state<ProfileDraft>($state.snapshot(initial) as ProfileDraft);
   let busy = $state(false);
   let touched = $state(false);
   let open = $state<Record<string, boolean>>({});
