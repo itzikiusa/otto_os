@@ -14,6 +14,9 @@
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import SessionNetworkStatus from '../connections/SessionNetworkStatus.svelte';
+  import SessionMcpProfiles from './SessionMcpProfiles.svelte';
+  import { mcpProfiles } from '../../lib/stores/mcp-profiles.svelte';
+  import { sessionProfileIds } from '../../lib/mcpProfiles';
   import ProviderIcon, { hasProviderIcon } from '../../lib/components/ProviderIcon.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import AttachIssue from './AttachIssue.svelte';
@@ -352,6 +355,9 @@
     return () => window.removeEventListener('keydown', onKey);
   });
   let dirsOpen = $state(false);
+  let mcpOpen = $state(false); // ⋯ → MCP tools (the session's MCP profiles)
+  const mcpToolsShown = $derived(isAgent && auth.can('mcp', 'view'));
+  $effect(() => { if (mcpToolsShown) void mcpProfiles.load(); });
   let dirsBusy = $state(false);
   let extraDirs = $state<string[]>([]);
   let dirDraft = $state('');
@@ -701,6 +707,7 @@
         : [
             { label: 'Rename', icon: 'edit', action: startRename } as MenuItem,
             ...(isAgent ? [{ label: 'Additional directories…', icon: 'folder', action: openDirs } as MenuItem] : []),
+            ...(mcpToolsShown ? [{ label: 'MCP tools…', icon: 'plug', hint: mcpProfiles.labelFor(sessionProfileIds(session?.meta)), title: 'Which Otto MCP tools this agent sees — applies when it restarts', action: () => (mcpOpen = true) } as MenuItem] : []),
             ...(isAgent ? [{ label: 'Hand over to…', icon: 'send', action: openHandover } as MenuItem] : []),
             // Parity with the tab's right-click menu — a tiled/split pane has no
             // tab to right-click, so Share was unreachable from here.
@@ -721,18 +728,7 @@
             ...(isAgent
               ? [
                   { separator: true } as MenuItem,
-                  ...(uiToggleShown
-                    ? [
-                        {
-                          label: 'Allow UI control',
-                          icon: 'cursor',
-                          checked: uiGranted,
-                          disabled: uiBusy,
-                          title: uiToggleTitle,
-                          action: toggleUiControl,
-                        } as MenuItem,
-                      ]
-                    : []),
+                  ...(uiToggleShown ? [{ label: 'Allow UI control', icon: 'cursor', checked: uiGranted, disabled: uiBusy, title: uiToggleTitle, action: toggleUiControl } as MenuItem] : []),
                   {
                     label: keepAlive ? 'Unpin (allow auto-suspend)' : 'Pin (keep alive)',
                     icon: 'pin',
@@ -1030,6 +1026,7 @@
   <ShareModal {sessionId} onclose={() => (shareOpen = false)} />
 {/if}
 
+{#if mcpOpen && session}<SessionMcpProfiles {sessionId} meta={session.meta} onclose={() => (mcpOpen = false)} />{/if}
 {#if dirsOpen}
   <Modal title="Additional directories" onclose={() => (dirsOpen = false)}>
     <div class="field">

@@ -10,6 +10,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import ProviderIcon from '../../lib/components/ProviderIcon.svelte';
   import ContextPreview from './ContextPreview.svelte';
+  import McpProfilePicker from './McpProfilePicker.svelte';
   import { router } from '../../lib/router.svelte';
   import { api } from '../../lib/api/client';
   import { checkFolder } from '../../lib/folderCheck';
@@ -90,6 +91,7 @@
   let cwdError = $state('');
   let checkingCwd = false;
   let browser = $state(false);
+  let mcpProfileIds = $state<string[]>([]); // [] = the default MCP profile
   let busy = $state(false);
   interface PendingSpawn {
     provider: string;
@@ -189,11 +191,7 @@
 
   function addDir(): void {
     const path = dirDraft.trim();
-    if (path === '' || extraDirs.includes(path)) {
-      dirDraft = '';
-      return;
-    }
-    extraDirs = [...extraDirs, path];
+    if (path !== '' && !extraDirs.includes(path)) extraDirs = [...extraDirs, path];
     dirDraft = '';
   }
 
@@ -202,10 +200,7 @@
   }
 
   function onDirKeydown(e: KeyboardEvent): void {
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      addDir();
-    }
+    if (e.key === 'Enter') { e.preventDefault(); addDir(); }
   }
 
   // Provider picker keyboard nav: the cards are an ARIA radiogroup with a roving
@@ -358,6 +353,7 @@
       if (networkProfileId) meta.network_profile_id = networkProfileId;
       if (browser && BROWSER_PROVIDERS.includes(p)) meta.browser = true;
       if (dirs.length > 0) meta.extra_dirs = [...dirs];
+      if (mcpProfileIds.length && p !== 'shell') meta.mcp_profiles = [...mcpProfileIds];
       const sessionTitle = base === '' ? null : spawns.length > 1 ? `${base} ${i + 1}` : base;
       const request = {provider: p, title: sessionTitle, cwd: dir === '' ? null : dir, model: sessionModel};
       return {provider: p, title: sessionTitle ?? p, cwd: dir, run: async () => {
@@ -642,6 +638,8 @@
       </span>
     </label>
   {/if}
+
+  {#if chosen.some((p) => p !== 'shell') && auth.can('mcp', 'view')}<McpProfilePicker value={mcpProfileIds} onchange={(ids) => (mcpProfileIds = ids)} />{/if}
 
   <!-- The context preview is workspace-scoped (skills/soul/context of a
        workspace), so a workspace-less session has nothing to preview. -->
