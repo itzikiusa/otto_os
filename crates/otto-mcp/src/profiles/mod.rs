@@ -62,15 +62,18 @@ pub const GROUPS: &[ToolGroup] = &[
     ToolGroup {
         id: "issues",
         label: "Issues (Jira)",
-        description: "Search, read, comment on and transition Jira issues.",
+        description: "Search, read, create, comment on and transition Jira issues.",
         prefixes: &[],
         exact: &[
             "search_issues",
             "get_issue",
+            "create_issue",
             "comment_issue",
             "transition_issue",
             "list_issue_transitions",
             "list_issue_accounts",
+            "list_issue_projects",
+            "list_issue_types",
         ],
     },
     ToolGroup {
