@@ -434,7 +434,11 @@ export const eventRoutes: EventRoutes = { ...featureRoutes, ...busRoutes };
 
 /** Route one event to its store / bus (after the generic `liveEvents`). */
 function dispatchEvent(ev: OttoEvent): void {
-  const route = eventRoutes[ev.type] as ((e: OttoEvent) => void) | undefined;
+  // Own keys only: an unknown type must never resolve to an Object.prototype
+  // member (`toString`, `constructor`…) and get called as a handler.
+  const route = Object.hasOwn(eventRoutes, ev.type)
+    ? (eventRoutes[ev.type] as (e: OttoEvent) => void)
+    : undefined;
   if (route) route(ev);
   else ws.applyEvent(ev);
 }
