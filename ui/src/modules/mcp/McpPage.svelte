@@ -20,7 +20,11 @@
   import ApprovalsTab from './ApprovalsTab.svelte';
   import AuditTab from './AuditTab.svelte';
   import OttoServerHome from './OttoServerHome.svelte';
-  import ProfilesTab from './ProfilesTab.svelte';
+  import LazyMount from '../../lib/components/LazyMount.svelte';
+  import { lazyComponent } from '../../lib/lazy-component.svelte';
+  // Profiles is its own section, behind a dynamic import so the editor and
+  // tool-group tables don't ride on every MCP page open (bundle budget).
+  const ProfilesTab = lazyComponent(() => import('./ProfilesTab.svelte'));
 
   type Section = 'otto' | 'profiles' | 'servers' | 'activity';
   const section = $derived<Section>(
@@ -169,7 +173,7 @@
       {#if section === 'otto'}
         <OttoServerHome {wsId} />
       {:else if section === 'profiles'}
-        <ProfilesTab />
+        <LazyMount lazy={ProfilesTab} what="MCP profiles" />
       {:else if section === 'servers'}
         {#if !wsId}
           <EmptyState

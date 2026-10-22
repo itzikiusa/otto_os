@@ -13,7 +13,6 @@
   import Loop from './Loop.svelte';
   import ManualTrigger from './ManualTrigger.svelte';
   import PrepareContext from './PrepareContext.svelte';
-  import ProductPublish from './ProductPublish.svelte';
   import ProductStep from './ProductStep.svelte';
   import ProviderModel from './ProviderModel.svelte';
   import RawParams from './RawParams.svelte';
@@ -22,6 +21,11 @@
   import SwarmTask from './SwarmTask.svelte';
   import Utility from './Utility.svelte';
   import type { InspectorOptions } from './options.svelte';
+  import LazyMount from '../../../lib/components/LazyMount.svelte';
+  import { lazyComponent } from '../../../lib/lazy-component.svelte';
+  // Only a product_publish node needs the Confluence space/page pickers: keep
+  // them (and their issues API) off the Workflows page's first load.
+  const ProductPublish = lazyComponent(() => import('./ProductPublish.svelte'));
   import { KINDS_WITH_OWN_PROVIDER, type SetParam } from './util';
 
   interface Props {
@@ -66,7 +70,7 @@
   {:else if PRODUCT_STEP_KINDS.includes(node.kind)}
     <ProductStep {node} {set} {wsId} {pickers} />
   {:else if node.kind === 'product_publish'}
-    <ProductPublish {node} {set} {wsId} {pickers} />
+    <LazyMount lazy={ProductPublish} what="the publish settings" variant="compact" props={{ node, set, wsId, pickers }} />
   {:else if node.kind === 'canvas'}
     <Canvas {node} {set} />
   {:else if node.kind === 'git_pr'}
