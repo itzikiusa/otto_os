@@ -211,7 +211,12 @@ test('kick out: confirm, the kid walks out of the door, the session is deleted',
   await card(page).getByRole('button', { name: 'Kick out…' }).click();
   await page.getByRole('dialog').getByRole('button', { name: 'Kick out', exact: true }).click();
   await expect.poll(async () => (await debug(page))?.kids.find((k) => k.id === ids.kick)?.mode ?? 'gone', { timeout: 5_000 }).toMatch(/standing|leaving|gone/);
-  await expect(page.locator('.toast').filter({ hasText: 'Kicked out Kick Me Kid' })).toBeVisible({ timeout: 20_000 });
+  // The toast waits for the walk-out (school/actions.ts kickOut), which the
+  // scene resolves when the kid reaches the door or at walk time + 2.5 s
+  // (scene.ts kickOut). That walk is path-dependent: ~14 s seated on a fast
+  // Mac, longer for a kid that had got up and wandered (it retraces first)
+  // and on a software-WebGL CI runner — 20 s was not a bound on it.
+  await expect(page.locator('.toast').filter({ hasText: 'Kicked out Kick Me Kid' })).toBeVisible({ timeout: 45_000 });
   await expect
     .poll(async () => {
       const r = await ctx.get(`${base}/api/v1/sessions?ids=${ids.kick}`);

@@ -44,7 +44,9 @@ test('a big history offers retention presets; nothing is pruned until confirmed'
   const banner = page.locator('.size-banner');
   await expect(banner).toContainText('History is using');
   await expect(banner).toContainText('12,345 requests');
-  await expect(page.locator('.ret')).toContainText('80.0 MB');
+  // Sizes read through the one shared formatter (lib/metric-format), which
+  // trims a trailing ".0": 80 MB, not 80.0 MB.
+  await expect(page.locator('.ret')).toContainText('80 MB');
 
   // Cancel the confirmation: no setting written, nothing pruned.
   await banner.getByRole('button', { name: 'Keep 1,000' }).click();
@@ -57,7 +59,7 @@ test('a big history offers retention presets; nothing is pruned until confirmed'
   await expect.poll(() => prunes).toBe(1);
   await expect(banner).toHaveCount(0);
   await expect(page.locator('.ret')).toContainText('Keeping the newest 1000');
-  await expect(page.locator('.ret')).toContainText('6.0 MB');
+  await expect(page.locator('.ret')).toContainText('6 MB');
 });
 
 test('dismissing the storage notice keeps it hidden for the workspace', async ({ page }) => {
@@ -76,6 +78,6 @@ test('dismissing the storage notice keeps it hidden for the workspace', async ({
   await page.getByRole('button', { name: 'Dismiss storage notice' }).click();
   await expect(page.locator('.size-banner')).toHaveCount(0);
   await page.reload();
-  await expect(page.locator('.ret')).toContainText('80.0 MB');
+  await expect(page.locator('.ret')).toContainText('80 MB');
   await expect(page.locator('.size-banner')).toHaveCount(0);
 });
