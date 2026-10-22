@@ -149,7 +149,7 @@ into `review_findings`:
 - **Regression** — a finding that reappears after it was `resolved`/`declined` is
   flipped to `state = regressed` by the engine; the UI shows a `regressed` chip and
   tints the card.
-- **Resolution leg** — `resolve_absent(...)` marks `open`/`fixing` findings that
+- **Resolution leg** — `resolve_absent_scoped(...)` marks `open`/`fixing` findings that
   are **not** seen in the new run as `resolved` (if it's gone, it was fixed).
   This is the verification leg: re-running the review is what verifies a fix.
   Only a **complete** run resolves anything (every reviewer `done`/`skipped`, no
@@ -377,7 +377,7 @@ Tables created/changed:
 **Limitations / honest caveats:**
 
 - **The verification leg is a re-review.** `fixed → verified` is confirmed by the
-  finding being *absent* from a subsequent run (`resolve_absent`) or by the verify
+  finding being *absent* from a subsequent run (`resolve_absent_scoped`) or by the verify
   agent passing — there is no single fully-automatic close from a code change to
   `verified`.
 - **No `Feature::ReviewFindings`.** Permissions piggyback on `Git` (findings) and

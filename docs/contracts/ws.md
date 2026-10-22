@@ -508,6 +508,12 @@ Server → that ONE connection:
   with the previous daemon (now `reconnectable`, stamped
   `meta.suspended = {reason:"restart", at}`). The UI shows "Otto restarted —
   N kept running · M suspended" once per boot id when either is non-zero.
+  `meta.suspended.reason` is one of `idle` (idle too long), `cap` (live-session
+  limit), `restart` (Otto restarted), `released` (released to free memory) or
+  `respawn_failed` (PC-4): an explicit restart killed the old process and the
+  new one failed to start — `{reason:"respawn_failed", error:"<cause, ≤300 chars>", at:"<RFC 3339>"}`,
+  shown as "Couldn’t restart: <cause>". The `status` event for it is emitted
+  only after the status write succeeds.
 - `ui_command` — `command` is the bare catalog name (no `ui_` prefix); `args`
   are validated against the entry's schema, with `connection_id` already
   resolved to the canonical id; `deadline_ms` is the DURATION (ms) the daemon

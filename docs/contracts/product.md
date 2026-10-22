@@ -26,35 +26,35 @@ all other routes are served by the `otto-product` crate router.
 | # | Method & path | Auth | Request | Response |
 |---|---|---|---|---|
 | P1 | GET /api/v1/workspaces/{id}/product/stories | ws viewer | — | `ProductStory[]` |
-| P2 | POST /api/v1/workspaces/{id}/product/stories | ws editor | ImportStoryReq | ProductStoryDetail (fetches Jira/Confluence, creates story + v1 source version) |
+| P2 | POST /api/v1/workspaces/{id}/product/stories | ws editor + account owner/root (the `account_id` in the body) | ImportStoryReq | ProductStoryDetail (fetches Jira/Confluence, creates story + v1 source version) |
 | P3 | GET /api/v1/product/stories/{sid} | ws viewer | — | ProductStoryDetail (story + latest source version + counts) |
 | P4 | PATCH /api/v1/product/stories/{sid} | ws editor | UpdateStoryReq | ProductStory |
 | P5 | DELETE /api/v1/product/stories/{sid} | ws editor | — | 204 (cascades children) |
-| P6 | POST /api/v1/product/stories/{sid}/refresh | ws editor | — | ProductStoryDetail (new source version iff content changed) |
+| P6 | POST /api/v1/product/stories/{sid}/refresh | ws editor + account owner/root (the story's bound account; none bound = no check) | — | ProductStoryDetail (new source version iff content changed) |
 | P7 | GET /api/v1/product/stories/{sid}/versions | ws viewer | — | `ProductStoryVersion[]` (no body) |
 | P8 | GET /api/v1/product/versions/{vid} | ws viewer | — | ProductStoryVersion (with body) |
-| P9 | POST /api/v1/product/versions/{vid}/publish | ws editor | — | `{url,ref}` (pushes a suggested version → Jira description / Confluence page; records a `published` version) |
-| P10 | POST /api/v1/workspaces/{id}/product/stories/{sid}/analyze | ws editor | AnalyzeReq | ProductAnalysis (async fan-out; default agents if `agents` empty) |
+| P9 | POST /api/v1/product/versions/{vid}/publish | ws editor + account owner/root (the story's bound account) | — | `{url,ref}` (pushes a suggested version → Jira description / Confluence page; records a `published` version) |
+| P10 | POST /api/v1/workspaces/{id}/product/stories/{sid}/analyze | ws editor | AnalyzeReq | ProductAnalysis (async fan-out; default agents if `agents` empty). `{id}` must be the story's creating workspace (`ProductStory.workspace_id`), else 404 "story not found in workspace" |
 | P11 | GET /api/v1/product/stories/{sid}/analyses | ws viewer | — | `ProductAnalysis[]` |
 | P12 | GET /api/v1/product/analyses/{aid} | ws viewer | — | ProductAnalysisDetail (run + per-agent states; poll for progress) |
 | P13 | GET /api/v1/product/stories/{sid}/questions | ws viewer | — | `ProductQuestion[]` |
 | P14 | POST /api/v1/product/stories/{sid}/questions | ws editor | NewQuestionReq | ProductQuestion |
 | P15 | PATCH /api/v1/product/questions/{qid} | ws editor | UpdateQuestionReq | ProductQuestion |
 | P16 | DELETE /api/v1/product/questions/{qid} | ws editor | — | 204 |
-| P17 | POST /api/v1/product/stories/{sid}/questions/post | ws editor | PostQuestionsReq | `{posted:[{id,ref,url}]}` (posts selected questions as one Jira/Confluence comment; marks `posted`) |
+| P17 | POST /api/v1/product/stories/{sid}/questions/post | ws editor + account owner/root (the story's bound account) | PostQuestionsReq | `{posted:[{id,ref,url}]}` (posts selected questions as one Jira/Confluence comment; marks `posted`) |
 | P18 | GET /api/v1/product/stories/{sid}/notes | ws viewer | — | `ProductNote[]` |
 | P19 | POST /api/v1/product/stories/{sid}/notes | ws editor | NewNoteReq | ProductNote |
 | P20 | PATCH /api/v1/product/notes/{nid} | ws editor | UpdateNoteReq | ProductNote |
 | P21 | DELETE /api/v1/product/notes/{nid} | ws editor | — | 204 |
 | P22 | GET /api/v1/product/stories/{sid}/events?section=… | ws viewer | — | `ProductEvent[]` (sectioned history; optional `section` filter) |
-| P23 | POST /api/v1/workspaces/{id}/product/stories/{sid}/rewrite | ws editor | RewriteReq | 202 (async; creates a `suggested` version; auto-selects jira-story-writer vs rfc-writer by source kind) |
-| P24 | POST /api/v1/workspaces/{id}/product/stories/{sid}/testcases/generate | ws editor | GenerateTestsReq | 202 (async; creates a draft testcase run + cases) |
+| P23 | POST /api/v1/workspaces/{id}/product/stories/{sid}/rewrite | ws editor | RewriteReq | 202 (async; creates a `suggested` version; auto-selects jira-story-writer vs rfc-writer by source kind). `{id}` must be the story's creating workspace (`ProductStory.workspace_id`), else 404 "story not found in workspace" |
+| P24 | POST /api/v1/workspaces/{id}/product/stories/{sid}/testcases/generate | ws editor | GenerateTestsReq | 202 (async; creates a draft testcase run + cases). `{id}` must be the story's creating workspace (`ProductStory.workspace_id`), else 404 "story not found in workspace" |
 | P25 | GET /api/v1/product/stories/{sid}/testcases | ws viewer | — | `ProductTestcaseRunDetail[]` (each = run + cases[]) |
 | P26 | PATCH /api/v1/product/testcases/{tid} | ws editor | UpdateTestcaseReq | ProductTestcase (PO approve / request-changes / edit) |
 | P27 | POST /api/v1/product/testcase-runs/{rid}/approve | ws editor | — | ProductTestcaseRun (marks run approved; triggers `story-test-cases` skill self-improvement) |
-| P28 | POST /api/v1/product/testcase-runs/{rid}/publish | ws editor | PublishTestsReq | `{url}` (creates/updates a linked Confluence page; comments the URL on a Jira story) |
+| P28 | POST /api/v1/product/testcase-runs/{rid}/publish | ws editor + account owner/root (the story's bound account) | PublishTestsReq | `{url}` (creates/updates a linked Confluence page; comments the URL on a Jira story) |
 | P29 | GET /api/v1/product/stories/{sid}/inject | ws viewer | — | InjectBundle (consolidated refined-story context: story + analysis + answers + approved tests + learnings) |
-| P30 | POST /api/v1/workspaces/{id}/product/stories/{sid}/inject-session | ws editor | InjectSessionReq | Session (spawns an agent session preloaded with the bundle) |
+| P30 | POST /api/v1/workspaces/{id}/product/stories/{sid}/inject-session | ws editor | InjectSessionReq | Session (spawns an agent session preloaded with the bundle). `{id}` must be the story's creating workspace (`ProductStory.workspace_id`), else 404 "story not found in workspace" |
 | P31 | GET /api/v1/workspaces/{id}/product/learnings?active= | ws viewer | — | `ProductLearning[]` |
 | P32 | POST /api/v1/workspaces/{id}/product/learnings | ws editor | NewLearningReq | ProductLearning |
 | P33 | PATCH /api/v1/product/learnings/{lid} | ws editor | UpdateLearningReq | ProductLearning |

@@ -58,7 +58,7 @@ session** — attached to that session's right-panel **Canvas** tab so the agent
 | RBAC policy | `crates/otto-server/src/policy.rs` (`/canvas/` + `/workspaces/{ws}/canvas/` ⇒ `Require(Canvas, …)`) |
 | Live events | `crates/otto-core/src/event.rs` (`CanvasUpdated`, `CanvasSessionStarted`) |
 | UI page + components | `ui/src/modules/canvas/{CanvasPage,SceneList,ExcalidrawCanvas,MermaidCanvas,D2Canvas,ConversationPanel}.svelte` |
-| Mermaid render bridge | `ui/src/modules/canvas/mermaid.ts` · D2 render bridge (WASM): `d2.ts` · Excalidraw element builder: `excalidraw-build.ts` · shared SVG export helpers: `export.ts` |
+| Mermaid render bridge | `ui/src/lib/render/mermaid.ts` (render queue: `lib/render/renderQueue.ts`) · D2 render bridge (WASM): `ui/src/modules/canvas/d2.ts` · Excalidraw element builder: `ui/src/lib/excalidraw/excalidraw-build.ts` · shared SVG export helpers: `ui/src/modules/canvas/export.ts` |
 | Session-reference routes + UI | `crates/otto-server/src/canvas_refs.rs` · `ui/src/modules/panels/CanvasPanel.svelte` (§7a) |
 | Store + live-event bus | `ui/src/lib/stores/canvas.svelte.ts` · `ui/src/lib/events.svelte.ts` (`canvasDocBus`, `canvasRefsBus`) |
 | API client types | `ui/src/modules/canvas/types.ts` (`CanvasScene`, `CanvasDoc`, `CanvasFormat`, `AssistResult`, …) |
@@ -255,7 +255,7 @@ the deterministic E2E stub) and tailors the instructions to the format:
 - **Excalidraw** — "edit `canvas.json`"; write the **complete** diagram each time
   using a **simplified element form** (shapes/arrows/text with no Excalidraw
   internals; arrows reference node ids and are routed by the app). The UI
-  (`excalidraw-build.ts`) expands that simplified form into a real Excalidraw scene
+  (`lib/excalidraw/excalidraw-build.ts`) expands that simplified form into a real Excalidraw scene
   — binding labels and routing arrows — so the agent never hand-computes geometry.
 - **D2** — "edit the D2 file `canvas.d2`"; the prompt teaches the key D2 shapes
   (`shape: diamond`/`sql_table`, `style.fill`, `direction`, connections with

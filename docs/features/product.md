@@ -347,10 +347,16 @@ Delete.
 > *"feat(product): make Stories + Learnings a global library (not
 > workspace-scoped)"*, `ProductRepo::list_learnings(active_only)` and
 > `list_stories()` take **no** workspace argument and run **no** `WHERE
-> workspace_id = ?` filter. The `workspace_id` column is retained purely as the
-> *creating* workspace for provenance. The same is true of imported **stories** —
-> the story list shows every story from every workspace. No migration was needed;
-> existing rows became visible everywhere immediately.
+> workspace_id = ?` filter. The same is true of imported **stories** — the story
+> list shows every story from every workspace. No migration was needed; existing
+> rows became visible everywhere immediately. The `workspace_id` column is the
+> story's *creating* workspace, and it is **not** only provenance: the story agent
+> routes (`/workspaces/{id}/product/stories/{sid}/analyze`, `rewrite`,
+> `testcases/generate`, `plan/generate`, `plan`, `inject-session`) and
+> `POST /sessions/{id}/attach-product` answer 404 "story not found in workspace"
+> unless `{id}` (or the session's workspace) is that workspace. The UI builds
+> those paths from the story's `workspace_id`, and the session's "Attach product
+> story" picker lists only stories of the session's workspace.
 
 ### 4.9 History — sectioned event timeline + versions + tags
 
@@ -663,7 +669,7 @@ level and removes the story's attachments + annotations.
 
 | Method & path | Auth | Purpose |
 |---|---|---|
-| `GET /product/stories/{sid}/attachments` · `POST …/attachments` (multipart) | viewer / editor | list / upload. Allowed mimes now include `application/vnd.excalidraw+json`, `application/vnd.otto.scene3d+json`, `model/gltf-binary`, `model/gltf+json` (sniffed: glTF magic / JSON); their default `kind` is `design` |
+| `GET /product/stories/{sid}/attachments` · `POST …/attachments` (`UploadReq {filename, mime, kind?, data_b64}`, JSON, base64) | viewer / editor | list / upload. Allowed mimes now include `application/vnd.excalidraw+json`, `application/vnd.otto.scene3d+json`, `model/gltf-binary`, `model/gltf+json` (sniffed: glTF magic / JSON); their default `kind` is `design` |
 | `GET /product/attachments/{aid}` | viewer | the bytes (the viewer's `authedBlobUrl` — also how `gltf` objects load) |
 | `PUT /product/attachments/{aid}/content` | editor | `{ "data_b64": "<base64>" }` → `ProductAttachment`. Saves an edited artifact (inspector / board / code view). Same guards as upload (`allowed_mime`, `sniff_ok`, size cap, confined path, 40 MB body limit); the row's `mime`/`filename` never change; bumps `size_bytes` + `updated_at`; broadcasts `mockup_updated` |
 | `POST /product/stories/{sid}/mockups/assist` | editor | start / resume the in-place assistant — `format ∈ html \| mermaid \| excalidraw \| scene3d`, anything else **400** |

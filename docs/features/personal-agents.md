@@ -302,13 +302,20 @@ the agent's Runs tab. A clean run ends the streak.
 - **403 "This agent runs as its owner; only the owner or a workspace admin can
   change …"** — the agent runs with its creator's identity, so its owner-only
   fields (`soul_md`, provider, model, cwd, browser, delivery, its memory and
-  context (`PUT …/memory`, `PUT …/context`), and a schedule's directive and
-  permission) can be changed only by the owner, a workspace Admin or root
-  (`PATCH /personal-agents/{id}`, `PUT /personal-agents/{id}/memory`,
-  `PUT /personal-agents/{id}/context`, `PATCH /personal-agents/schedules/{id}`).
+  context (`PUT …/memory`, `PUT …/context`), its memory items (edit / forget,
+  `POST …/memories/edit`), its standing-goal texts and rules (`PUT …/autonomy`
+  when the goals added/removed/edited or the rule set changes), and a
+  schedule's directive and permission) can be changed only by the owner, a
+  workspace Admin or root (`PATCH /personal-agents/{id}`,
+  `PUT /personal-agents/{id}/memory`, `PUT /personal-agents/{id}/context`,
+  `POST /personal-agents/{id}/memories/edit`, `PUT /personal-agents/{id}/autonomy`,
+  `PATCH /personal-agents/schedules/{id}`). The page hides those editors from
+  other Editors and says "Runs as its owner; only the owner or a workspace
+  admin can change this."
   An ownerless preset is adopted by the first caller who writes it. Any Editor can still rename it,
-  change its avatar, enable or pause it, change cadence, Run now, cancel a run
-  and manage rooms.
+  change its avatar, enable or pause it, change cadence, Run now (a goal's
+  "Work on it now" too — the run acts as the owner), toggle a goal's
+  `enabled`, proactive on/budget and `primary`, cancel a run and manage rooms.
 - **"this agent session is read-only" in a run** — the run is Proactive or its
   schedule's permission set is Read-only. Change the schedule to Directed, or
   use Run now (Directed), to let it act.

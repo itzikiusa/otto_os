@@ -91,7 +91,14 @@ user's terms.
 - **Body:** the cause and the next step. Raw detail (status codes, stderr) goes
   last, dim, or behind a "Details" disclosure.
 - **Don't blame the user**, and don't apologise at length. "Couldn't" is
-  enough.
+  enough. Write "Couldn’t …", never "Could not …", in titles, bodies and
+  toasts alike.
+- **Name the real control.** A recovery hint names the button that is on
+  screen ("Select **Retry preview** and review it again"), never a control
+  the page doesn't have ("Reload and review"). A button's tooltip matches its
+  label: a "Refresh" button is not titled "Reload …".
+- **Clipboard failures** say what to do next ("Select the text and copy it
+  manually."), not the title again.
 - Map known `ApiError` codes to human text at the call site (403 → access, 404
   → gone, 409 → conflict, network → "Otto can't reach the daemon").
 - Where the error is shown: an inline error for failed loads and invalid

@@ -215,7 +215,7 @@ Selecting one previews it:
 | Type | Rendering |
 |---|---|
 | HTML | `<iframe sandbox="">` via `srcdoc` — no scripts, forms, popups or same-origin (the MockupViewer approach) |
-| Markdown | `vault/mdRender.ts` (marked + allowlist sanitizer) |
+| Markdown | `lib/render/markdown.ts` (marked + allowlist sanitizer) |
 | Images | `<img>` from an authenticated blob URL |
 | PDF | sandboxed `<iframe>` |
 | Text / CSV / JSON | `<pre>`, capped at 200 KB in the DOM |

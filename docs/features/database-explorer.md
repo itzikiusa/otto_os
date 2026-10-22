@@ -1427,7 +1427,7 @@ execution/cancel/export = `ws editor` (global connections: `Database:Edit`):
 | `POST …/db/query` | run a statement (`RunQueryReq` incl. `max_rows`, `node`, `query_id`, `timeout_ms`, `mask`, `confirm_write`) |
 | `POST …/db/cancel` | engine-native cancel of an in-flight `query_id` (204) |
 | `POST …/db/close` | tear down the connection's server-side state — cancel in-flight queries, close the cached driver pool, drop the SSH tunnel; idempotent (`ws viewer`; fired on tab close) |
-| `POST …/db/mcp-query` | read-only query surface for agents over MCP — writes/DDL refused before any driver call, rows capped at 200, masking forced on (`ws viewer`) |
+| `POST …/db/mcp-query` | read-only query surface for agents over MCP — writes/DDL refused before any driver call, rows capped at 200, masking forced on, and always a server-side time limit of 15 s (`MCP_QUERY_TIMEOUT_MS`; the engine stops the statement itself, below the MCP bridge's own call budget, so an agent's timed-out query does not keep running on the database) (`ws viewer`) |
 | `POST …/db/completion` | context-aware, index-first completion (`{prefix, suffix?, database?, node?}` → `{items:[…]}` with per-item `score`) |
 | `POST …/db/completion/refresh` | drop the cached completion snapshot for the connection (204) — wired to the schema **Refresh** button |
 | `GET …/db/history` | recent query history (per-user for non-root); statements are 16 KiB previews (`statement_len` = full length when clipped) |
@@ -1452,6 +1452,14 @@ root): `…/db/saved-queries`, `…/db/dashboards`, `…/db/widgets`,
 `PATCH|DELETE /db/saved-queries/{qid}` (PATCH = rename / update-in-place),
 `GET|PATCH|DELETE /db/dashboards/{id}`, `PATCH|DELETE /db/widgets/{id}`, and
 `POST /db/widgets/{id}/run`.
+
+**Deleting a connection** removes, in the same transaction as the profile, its
+dashboard widgets and its query history, and keeps its saved queries as
+connection-less (`connection_id` set to NULL). The saved-query and widget
+DELETE routes treat a connection that no longer exists as no connection gate
+(the workspace role and owner / ws-Admin / root checks still apply), so a row
+left behind by an older build can still be removed; edit and run keep the
+connection check.
 
 `RunQueryReq` notes: `query_id` (client-generated cancellation lookup key;
 MongoDB uses a separate server-owned execution tag for `killOp` matching);

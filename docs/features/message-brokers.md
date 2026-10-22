@@ -438,7 +438,17 @@ offset per the mode, and writes them back.
   `current_offset` → `target_offset` and a `lag_delta`, plus
   `total_lag_before` / `total_lag_after`, **without committing anything**. A
   dry-run is accepted with `confirm=false` (nothing is written), while the real
-  reset on a guarded cluster needs `confirm=true`. Resets write an audit row.
+  reset on a guarded cluster needs `confirm=true`.
+- **Group state:** Kafka accepts an offset commit from outside the group only
+  while the group has no live members. A reset of a group whose state is not
+  `Empty` or `Dead` (for example `Stable` or `PreparingRebalance`) is refused
+  with **`409`** `consumer group <g> is <state>; stop its consumers first`.
+  The dry-run still returns the plan, plus `warning` with the same text.
+- **Audit:** every committed reset writes a `reset_group_offsets` audit row,
+  whether it succeeded or failed, with `outcome` (`ok` | `failed`), the error
+  and `partition_errors` (`{topic, partition, error}`). A failed commit is not
+  rolled back: partitions Kafka accepted keep their new offsets, and the error
+  names the ones it refused.
 
 ### Lag alerts (operator workflow)
 
@@ -503,8 +513,22 @@ write-gate. Reads are never guarded.
 
 Every successful write on any cluster (guarded or not) is recorded to the
 `broker_write_audit` table (migration `0052`) with the cluster id, the
-authenticated user id, the operation, and a small JSON detail. Replays
-additionally persist per-message evidence rows (migration `0055`).
+authenticated user id, the operation, and a small JSON detail. Offset resets
+are audited on failure too (see *Offset reset*).
+
+Replays additionally persist per-message evidence (`broker_replays`, migration
+`0055`), and the record exists before anything is sent:
+
+1. The evidence row is inserted with `status: running` and a `replay.start`
+   audit row is written (replay id, source and target topic, message count).
+   If the row can't be created, nothing is published.
+2. The acknowledged evidence is checkpointed every 100 messages.
+3. The row ends `done`, or `failed` when a send stopped the run; the final
+   `replay` audit row follows.
+4. A row still `running` when the daemon starts again (quit, crash or deploy
+   mid-replay) is marked `interrupted` (migration `0193`). Its evidence shows
+   how far the replay got, up to the last checkpoint; messages after it may
+   also have been sent. Rows from before migration `0193` read as `done`.
 
 ---
 
