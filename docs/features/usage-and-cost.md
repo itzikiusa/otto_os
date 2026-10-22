@@ -547,7 +547,7 @@ gate or warn on work; it is a no-op when enforcement is off.
 
 ## 9. API / contract reference
 
-All `/usage/*` routes are **root**-only; paths are under `/api/v1`. Authoritative
+`status`, `summary`, `report` and `by-kind` are Usage:View (non-root: redacted / own sessions); every other `/usage/*` route — `attribution` and `forecast` included — is root-only (a non-root Usage:View caller passes the guard, then gets 403). Paths are under `/api/v1`. Authoritative
 contract: `docs/contracts/api.md` (§ "Usage tracking & system metrics") and
 `docs/contracts/ws.md` (Usage metrics tick A9 + `budget_exceeded`).
 
@@ -680,6 +680,14 @@ will fall once merges run.
 **`budget_exceeded` never fires.** Enforcement must be on — set `enforce: true` (and
 configure a non-zero cap). With enforcement off the sampler is a no-op. The event is
 de-duped per crossing, so it fires once on the way over and once on recovery.
+
+**Usage stopped updating; `GET /usage/status` shows `tailer.state: "stopped"`.**
+The transcript tailer could not restore its checkpoint (`usage_tailer.json` is
+corrupt), so it halted rather than re-reading history and double-counting; `cause`
+says why. Move the file aside and restart the daemon: the next start re-seeds
+existing files at their current size. `retrying` means a transient failure the
+tailer is backing off from — it resumes by itself. (`tailer` is absent on a daemon
+that does not report it.)
 
 **Numbers look doubled after a crash.** Shouldn't happen — the byte-offset cursor
 (`usage_tailer.json`) is the guard and is written atomically. If the cursor file is

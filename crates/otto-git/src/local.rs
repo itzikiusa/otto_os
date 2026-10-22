@@ -221,7 +221,7 @@ fn commit_graph_enabled() -> bool {
 /// program-valued keys (`core.sshCommand`, `credential.helper`, filters) are
 /// legitimately user-set, so the Seatbelt profile keeps agents from writing
 /// `.git/config` instead.
-pub(crate) const HARDENED_GIT_CONFIG: &str = "'core.fsmonitor=false' 'core.hooksPath=/dev/null'";
+pub(crate) use otto_git_cmd::HARDENED_GIT_CONFIG;
 /// [`HARDENED_GIT_CONFIG`] for a [`HOOK_VERBS`] spawn: the repo's hooks run.
 pub(crate) const HOOKED_GIT_CONFIG: &str = "'core.fsmonitor=false'";
 
@@ -251,46 +251,29 @@ pub(crate) fn hardened_config_for(verb: &str) -> &'static str {
     }
 }
 
-/// A `git` command for code OUTSIDE [`LocalGit`] (rev-parse probes, goal-loop
-/// evidence, skill-eval scratch repos, plugin clones…) with the same
-/// hardening every daemon git gets: repo config can't pick a program for it
-/// to run ([`HARDENED_GIT_CONFIG`]: fsmonitor off, hooks off), no pager, no
-/// credential prompt, stdin closed, killed when dropped. Prefer `LocalGit`
-/// (output cap + timeouts) where it fits; spawning a bare
-/// `Command::new("git")` outside otto-git is refused by a guard test
-/// (`otto-server` `no_bare_git_spawns`).
+/// The hardened `git` builders live in the leaf `otto-git-cmd` crate (so a
+/// crate that only RUNS git needs no otto-git dependency); otto-git re-exports
+/// them, adding [`test_hermetic`] so this crate's own fixture tests stay
+/// independent of the developer's git config.
 pub fn hardened_command() -> Command {
-    let mut cmd = Command::new("git");
-    harden(cmd.as_std_mut());
-    cmd.kill_on_drop(true);
+    let mut cmd = otto_git_cmd::hardened_command();
+    test_hermetic(cmd.as_std_mut());
     cmd
 }
 
 /// [`hardened_command`] for synchronous callers.
 pub fn hardened_std_command() -> std::process::Command {
-    let mut cmd = std::process::Command::new("git");
-    harden(&mut cmd);
+    let mut cmd = otto_git_cmd::hardened_std_command();
+    test_hermetic(&mut cmd);
     cmd
 }
 
-fn harden(cmd: &mut std::process::Command) {
-    cmd.env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_CONFIG_PARAMETERS", HARDENED_GIT_CONFIG)
-        .env("GIT_PAGER", "cat")
-        .stdin(Stdio::null());
-    test_hermetic(cmd);
-}
-
 /// This crate's unit tests run git against throwaway fixtures: the developer's
-/// own `~/.gitconfig` / system config (a `url.*.insteadOf` rewrite, a signing
-/// key, a default branch) must not leak in — CI has none, so a laptop with,
-/// say, a Bitbucket `insteadOf` failed tests CI passes. Production spawns keep
-/// the user's config.
+/// own `~/.gitconfig` / system config must not leak in (see
+/// [`otto_git_cmd::test_hermetic`]). Production spawns keep the user's config.
 #[cfg(test)]
 fn test_hermetic(cmd: &mut std::process::Command) {
-    let null = if cfg!(windows) { "NUL" } else { "/dev/null" };
-    cmd.env("GIT_CONFIG_GLOBAL", null)
-        .env("GIT_CONFIG_NOSYSTEM", "1");
+    otto_git_cmd::test_hermetic(cmd);
 }
 
 #[cfg(not(test))]
@@ -2150,11 +2133,18 @@ impl LocalGit {
         Ok(true)
     }
 
-    /// Remove a linked worktree at `path` (force-removes dirty/locked trees).
-    /// Best-effort: a missing worktree is not an error.
+    /// Remove a linked worktree at `path`, dirty or locked (`--force` twice: an
+    /// in-flight `git worktree add` holds a lock one `--force` won't break).
+    /// Best-effort: a missing worktree is fine, any other failure is logged.
     pub async fn worktree_remove(&self, path: &str) -> Result<()> {
         Self::guard_ref(path)?;
-        let _ = self.run(&["worktree", "remove", "--force", path]).await;
+        let args = ["worktree", "remove", "--force", "--force", "--", path];
+        match self.run(&args).await {
+            Err(e) if !e.to_string().contains("is not a working tree") => {
+                tracing::warn!(path, error = %e, "git worktree remove failed")
+            }
+            _ => {}
+        }
         Ok(())
     }
 
@@ -5137,38 +5127,14 @@ impl LocalGit {
     }
 }
 
-/// `.git` as a path component, compared the way the default case-insensitive
-/// APFS/HFS+ volume resolves it: `.GIT/config` IS `.git/config` there.
+pub(crate) use crate::output_noise::{is_noise_line, strip_noise};
 pub use crate::remote_url::{strip_url_userinfo, validate_remote_url};
 
+/// `.git` as a path component, compared the way the default case-insensitive
+/// APFS/HFS+ volume resolves it: `.GIT/config` IS `.git/config` there.
 fn is_git_dir_name(name: &std::ffi::OsStr) -> bool {
     name.to_str()
         .is_some_and(|s| s.eq_ignore_ascii_case(".git"))
-}
-
-/// stderr lines that SSH/git emit as benign chatter — never the reason a command
-/// failed. We skip these when choosing the message to surface so the real git
-/// error (rejected push, auth failure, …) isn't masked. Newer OpenSSH (9.x/10.x)
-/// prints the post-quantum warning to stderr on every non-PQ connection and it
-/// does NOT affect the exit status — yet it sorts first, so the old "first
-/// non-empty line" logic reported it as the failure.
-fn is_noise_line(l: &str) -> bool {
-    let t = l.trim();
-    t.is_empty()
-        || t.contains("post-quantum key exchange")
-        || t.starts_with("Warning: Permanently added")
-}
-
-/// Drop benign SSH/git noise lines from combined command output (used for the
-/// success path so a successful push/pull doesn't surface the post-quantum
-/// warning).
-pub(crate) fn strip_noise(s: &str) -> String {
-    s.lines()
-        .filter(|l| !is_noise_line(l))
-        .collect::<Vec<_>>()
-        .join("\n")
-        .trim_end()
-        .to_string()
 }
 
 /// Combine a push's stdout+stderr into one denoised block (git writes its
@@ -5576,13 +5542,10 @@ pub async fn clone_repo(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Tests — real throwaway repos under the system temp dir
-// ---------------------------------------------------------------------------
-
 /// Cap on [`LocalGit::head_remote_refs`] — the UI only names a few.
 pub const HEAD_REMOTES_CAP: usize = 20;
 
+// Tests — real throwaway repos under the system temp dir.
 #[cfg(test)]
 #[path = "local/tests.rs"]
 mod tests;

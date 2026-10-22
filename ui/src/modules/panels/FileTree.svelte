@@ -20,7 +20,7 @@
   import { emptyHistory, folderCrumbs, historyTarget, parentFolder, resolveJump, settleFolder } from '../../lib/components/folderNavigation';
   import { lsGet, lsSet } from '../../lib/storage';
   import { ListWindow } from '../git/list-window.svelte';
-  import { marked } from 'marked';
+  import { renderMarkdownGfm } from '../../lib/md';
   import type { FsBrowse, FsEntry, FsRead } from '../../lib/api/types';
 
   interface Props {
@@ -34,8 +34,14 @@
     primary?: boolean;
     /** Folder navigation bar (history, breadcrumbs, go-to path, hidden). */
     navigation?: boolean;
+    /** Where listings / file reads come from — default `/fs/browse` / `/fs/read`; a workflow run's
+     *  Context panel passes its run-scoped, RBAC-checked routes instead. */
+    lister?: (path: string, signal?: AbortSignal) => Promise<FsBrowse>;
+    reader?: (path: string, signal?: AbortSignal) => Promise<FsRead>;
   }
-  let { root = undefined, onClose = undefined, primary = false, navigation = false }: Props = $props();
+  const fsList = (p: string, signal?: AbortSignal) => api.get<FsBrowse>(`/fs/browse?path=${encodeURIComponent(p)}&files=true`, signal);
+  const fsRead = (p: string, signal?: AbortSignal) => api.get<FsRead>(`/fs/read?path=${encodeURIComponent(p)}`, signal);
+  let { root = undefined, onClose = undefined, primary = false, navigation = false, lister = fsList, reader = fsRead }: Props = $props();
 
   // ── tree state ────────────────────────────────────────────────────────────
 
@@ -197,7 +203,7 @@
     const index = walkIndex;
     walkIndex = undefined;
     try {
-      const data = await api.get<FsBrowse>(`/fs/browse?path=${encodeURIComponent(r)}&files=true`, controller.signal);
+      const data = await lister(r, controller.signal);
       if (generation !== rootGeneration) return;
       rootNodes = data.entries.map((e) => makeNode(e, 0));
       listedPath = data.path;
@@ -225,9 +231,7 @@
       if (!node.loaded) {
         node.loading = true;
         try {
-          const data = await api.get<FsBrowse>(
-            `/fs/browse?path=${encodeURIComponent(node.entry.path)}&files=true`,
-          );
+          const data = await lister(node.entry.path);
           if (generation !== rootGeneration) return;
           node.children = data.entries.map((e) => makeNode(e, node.depth + 1));
           node.loaded = true;
@@ -290,7 +294,7 @@
     viewerError = '';
     previewMode = preview;
     try {
-      const data = await api.get<FsRead>(`/fs/read?path=${encodeURIComponent(path)}`, controller.signal);
+      const data = await reader(path, controller.signal);
       if (generation !== fileGeneration) return;
       viewerFile = data;
       if (revealParent) overriddenRoot = folderOf(data.path);
@@ -303,14 +307,9 @@
   }
 
   function closeViewer(): void {
-    fileGeneration++;
-    fileRequest?.abort();
-    viewerFile = null;
-    viewerError = '';
-    viewerLoading = false;
-    viewerName = '';
-    viewerGotoLine = null;
-    viewerGotoCol = null;
+    fileGeneration++; fileRequest?.abort();
+    viewerFile = null; viewerError = ''; viewerLoading = false;
+    viewerName = ''; viewerGotoLine = null; viewerGotoCol = null;
   }
 
   onDestroy(() => {
@@ -329,13 +328,8 @@
     const inner = isMarkdown ? renderMarkdown(viewerFile.content) : viewerFile.content;
     return `<!doctype html><html><head><meta charset="utf-8"><style>${PREVIEW_CSS}</style></head><body>${inner}</body></html>`;
   });
-  function renderMarkdown(src: string): string {
-    try {
-      return marked.parse(src, { async: false, gfm: true, breaks: true }) as string;
-    } catch {
-      return `<pre>${src.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c] ?? c))}</pre>`;
-    }
-  }
+  // Through lib/md (sanitized, never throws) — not a direct `marked` call.
+  const renderMarkdown = (src: string): string => renderMarkdownGfm(src, { breaks: true });
   // The srcdoc is an isolated, script-less document: it can't see the app's
   // tokens, so it gets a palette per resolved scheme (it used to be dark-only
   // — light grey text on a hard-coded near-black box in the light theme).

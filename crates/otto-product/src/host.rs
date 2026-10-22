@@ -138,8 +138,13 @@ pub trait ProductStudioHost: ProductRunHost {
         workspace_id: &str,
         provider: &str,
     ) -> impl Future<Output = BudgetGate> + Send;
-    /// Start (or restart) the swarm's coordinator loop.
-    fn start_swarm_coordinator(&self, swarm_id: Id);
-    /// Broadcast a swarm status change.
-    fn emit_swarm_status(&self, workspace_id: &Id, swarm_id: &str, status: &str);
+    /// Make the swarm active exactly as its start route does (the swarm's
+    /// operation guard, the workspace budget gate, status, coordinator,
+    /// broadcast — `otto_swarm::runtime::lifecycle::activate`). A blocked
+    /// start is `Error::Invalid`.
+    fn activate_swarm(
+        &self,
+        workspace_id: &Id,
+        swarm_id: &Id,
+    ) -> impl Future<Output = otto_core::Result<()>> + Send;
 }

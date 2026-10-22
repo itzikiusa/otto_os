@@ -359,7 +359,7 @@
       {#if status}
         <GitToolbar repoId={repo.id} {status} onstatus={setStatus} onrefresh={() => gitBridge.refreshGraph(repo.id)} />
       {:else if !statusError}
-        <div class="toolbar-skeleton" aria-label="Loading repository status"></div>
+        <div class="toolbar-skeleton"><Skeleton rows={1} height={26} label="repository status" /></div>
       {/if}
       <button
         class="icon-btn rv-more"
@@ -684,10 +684,6 @@
   }
   .toolbar-skeleton {
     width: 300px;
-    height: 26px;
-    background: var(--surface-2);
-    border-radius: var(--radius-s);
-    animation: otto-pulse 1.4s ease-in-out infinite;
   }
 
   /* ── Mobile + tablet (≤1024px): keep the header + toolbar + tabs usable on a

@@ -10,6 +10,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import { onTabKey } from '../../lib/tabKeys';
+  import { radioKey } from '../../lib/radioKey';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import { router } from '../../lib/router.svelte';
   import { k8s } from '../../lib/stores/k8s.svelte';
@@ -281,6 +282,8 @@
               class:prod={e === 'prod'}
               role="radio"
               aria-checked={env === e}
+              tabindex={env === e ? 0 : -1}
+              onkeydown={radioKey}
               disabled={!auth.isRoot} onclick={() => (env = e)}
             >{e}</button>
           {/each}

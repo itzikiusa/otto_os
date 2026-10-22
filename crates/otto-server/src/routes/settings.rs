@@ -51,9 +51,9 @@ pub async fn put_all(
         }
         None => None,
     };
-    for (key, value) in &body {
-        repo.put(key, value).await?;
-    }
+    // Every key commits together or not at all; the in-memory reloads below
+    // run only once the whole request is durable.
+    repo.put_many(&body).await?;
     if let Some(names) = extra_plugins {
         otto_core::kubeconfig_policy::set_extra_plugins(&names);
     }

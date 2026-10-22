@@ -12,6 +12,7 @@
   import AgentByline from '../../lib/components/AgentByline.svelte';
   import LiveWorkingDot from '../../lib/components/LiveWorkingDot.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
+  import { radioKey } from '../../lib/radioKey';
   import { database } from '../../lib/stores/database.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
@@ -159,12 +160,14 @@
         <EmptyState icon="db" title={info.title} body={info.hint} />
         {#if providers.length > 1}
           <div class="da-providers" role="radiogroup" aria-label="Agent">
-            {#each providers as p (p)}
+            {#each providers as p, pi (p)}
               <button
                 class="da-prov"
                 class:on={database.assistProvider === p}
                 role="radio"
                 aria-checked={database.assistProvider === p}
+                tabindex={database.assistProvider === p || (pi === 0 && !providers.includes(database.assistProvider)) ? 0 : -1}
+                onkeydown={radioKey}
                 onclick={() => database.setAssistProvider(p)}
               >{p}</button>
             {/each}

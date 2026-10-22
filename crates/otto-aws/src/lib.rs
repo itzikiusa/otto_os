@@ -6,7 +6,8 @@
 //! (`otto_state::AwsAccountsRepo`) + Keychain secrets (`accounts.rs`); the CLI
 //! is located / installed on demand (`install.rs`); each AWS service has its
 //! own module with pure normalizers over the CLI's JSON. Server-side wiring
-//! (ctx trait impl + router merge) lives in `crates/otto-server/src/modules.rs`.
+//! lives in otto-server: the ctx trait impl in `modules/ctx_impls.rs`, the router
+//! merge in `modules.rs::module_routers`.
 pub mod access;
 pub mod accounts;
 pub mod athena;

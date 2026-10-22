@@ -6,22 +6,11 @@ use std::time::Duration;
 
 use futures_util::future::join_all;
 
-use base64::engine::general_purpose::STANDARD as B64;
-use base64::Engine;
 use otto_core::domain::{IssueDetail, IssueProject, IssueSummary, MyWorkIssue};
 use otto_core::{Error, Result};
 
 use crate::adf::{adf_to_markdown, text_to_adf};
-
-/// How long to wait for the TCP/TLS connection to a Jira endpoint to establish.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-/// Overall per-request deadline. A hung Jira endpoint must not block the caller
-/// (and stack up in the watcher) indefinitely — bound every call.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// Process-wide cache: auth_header (already encodes base_url+email+token) → shared client.
-/// `reqwest::Client` is `Clone` and internally reference-counted — cheap to clone out.
-static CLIENT_CACHE: OnceLock<Mutex<HashMap<String, reqwest::Client>>> = OnceLock::new();
+use crate::atlassian::AtlassianTransport;
 
 /// Issues requested per `/search/jql` call (the endpoint's max is 100).
 const JQL_PAGE: u32 = 100;
@@ -115,30 +104,6 @@ fn jql_walks<R>(f: impl FnOnce(&mut HashMap<u64, JqlWalk>) -> R) -> R {
         }
         Err(_) => f(&mut HashMap::new()),
     }
-}
-
-/// Return a cached `reqwest::Client` for the given auth_header, building one on first use.
-/// Falls back to a freshly-built client if the cache lock is poisoned (keeps callers infallible).
-fn get_or_build_client(auth_header: &str) -> reqwest::Client {
-    let cache = CLIENT_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Ok(mut map) = cache.lock() {
-        if let Some(c) = map.get(auth_header) {
-            return c.clone();
-        }
-        let client = reqwest::Client::builder()
-            .connect_timeout(CONNECT_TIMEOUT)
-            .timeout(REQUEST_TIMEOUT)
-            .build()
-            .unwrap_or_default();
-        map.insert(auth_header.to_string(), client.clone());
-        return client;
-    }
-    // Poisoned lock — fall back to a fresh client rather than panicking.
-    reqwest::Client::builder()
-        .connect_timeout(CONNECT_TIMEOUT)
-        .timeout(REQUEST_TIMEOUT)
-        .build()
-        .unwrap_or_default()
 }
 
 /// A lightweight reference to a comment that was just created.
@@ -344,27 +309,24 @@ pub fn build_create_issue_body(
     })
 }
 
-/// A thin Jira REST client scoped to one account.
+/// A thin Jira REST client scoped to one account. The HTTP layer (client
+/// cache, cleartext refusal, status mapping) is the shared
+/// [`AtlassianTransport`]; this keeps the Jira paths and parsers.
 pub struct JiraClient {
-    base_url: String,
-    auth_header: String,
-    http: reqwest::Client,
+    t: AtlassianTransport,
 }
 
 /// Page cap for [`JiraClient::list_projects`] (100 projects per page).
 const PROJECT_PAGES_MAX: usize = 20;
 
 impl JiraClient {
+    /// A client for one site + credential. Every request goes through
+    /// [`AtlassianTransport::http`], so an `http://` (non-loopback) site is
+    /// refused before the Basic header could leave in cleartext.
     pub fn new(base_url: &str, email: &str, token: &str) -> Self {
-        let base_url = base_url.trim_end_matches('/').to_string();
-        let credentials = format!("{email}:{token}");
-        let auth_header = format!("Basic {}", B64.encode(credentials.as_bytes()));
-        // Reuse a cached client keyed by site and credentials.
-        let http = get_or_build_client(&format!("{base_url}\x00{auth_header}"));
+        let base = base_url.trim_end_matches('/').to_string();
         Self {
-            base_url,
-            auth_header,
-            http,
+            t: AtlassianTransport::new("jira", base, email, token),
         }
     }
 
@@ -398,7 +360,7 @@ impl JiraClient {
     /// shown — the picker says so).
     pub async fn list_projects_paged(&self) -> Result<(Vec<IssueProject>, bool)> {
         const PAGE: usize = 100;
-        let search_url = format!("{}/rest/api/3/project/search", self.base_url);
+        let search_url = format!("{}/rest/api/3/project/search", self.t.base);
         let mut all: Vec<serde_json::Value> = Vec::new();
         let mut start_at: usize = 0;
         let mut complete = false;
@@ -406,9 +368,10 @@ impl JiraClient {
             let start_s = start_at.to_string();
             let page_s = PAGE.to_string();
             let resp = self
-                .http
+                .t
+                .http()?
                 .get(&search_url)
-                .header("Authorization", &self.auth_header)
+                .header("Authorization", &self.t.auth_header)
                 .header("Accept", "application/json")
                 .query(&[
                     ("maxResults", page_s.as_str()),
@@ -422,11 +385,12 @@ impl JiraClient {
             if page_no == 0 && resp.status() == reqwest::StatusCode::NOT_FOUND {
                 // Fall back to the bare-array endpoint (Server / older
                 // Cloud), which returns every visible project at once.
-                let fallback_url = format!("{}/rest/api/3/project", self.base_url);
+                let fallback_url = format!("{}/rest/api/3/project", self.t.base);
                 let r = self
-                    .http
+                    .t
+                    .http()?
                     .get(&fallback_url)
-                    .header("Authorization", &self.auth_header)
+                    .header("Authorization", &self.t.auth_header)
                     .header("Accept", "application/json")
                     .query(&[("orderBy", "name")])
                     .send()
@@ -543,8 +507,8 @@ impl JiraClient {
         // "load more" can't turn into an unbounded crawl.
         const MAX_PAGES: u32 = 10;
         let fields = SUMMARY_FIELDS;
-        let new_url = format!("{}/rest/api/3/search/jql", self.base_url);
-        let key = jql_walk_key(&self.base_url, &self.auth_header, jql);
+        let new_url = format!("{}/rest/api/3/search/jql", self.t.base);
+        let key = jql_walk_key(&self.t.base, &self.t.auth_header, jql);
         let page_size = JQL_PAGE.to_string();
 
         // Resume from the memoised token nearest to `start_at` — "Load more"
@@ -572,9 +536,10 @@ impl JiraClient {
                 Some(hit) => hit,
                 None => {
                     let mut req = self
-                        .http
+                        .t
+                        .http()?
                         .get(&new_url)
-                        .header("Authorization", &self.auth_header)
+                        .header("Authorization", &self.t.auth_header)
                         .header("Accept", "application/json")
                         .query(&[
                             ("jql", jql),
@@ -654,11 +619,12 @@ impl JiraClient {
     pub async fn my_work(&self) -> Result<Vec<MyWorkIssue>> {
         let jql = "assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC";
         let fields = "summary,status,issuetype,parent,project,priority,updated";
-        let new_url = format!("{}/rest/api/3/search/jql", self.base_url);
+        let new_url = format!("{}/rest/api/3/search/jql", self.t.base);
         let resp = self
-            .http
+            .t
+            .http()?
             .get(&new_url)
-            .header("Authorization", &self.auth_header)
+            .header("Authorization", &self.t.auth_header)
             .header("Accept", "application/json")
             .query(&[("jql", jql), ("maxResults", "100"), ("fields", fields)])
             .send()
@@ -679,9 +645,10 @@ impl JiraClient {
         } else {
             // Classic `/rest/api/3/search` fallback (same rule as search_jql).
             let resp = self
-                .http
-                .get(format!("{}/rest/api/3/search", self.base_url))
-                .header("Authorization", &self.auth_header)
+                .t
+                .http()?
+                .get(format!("{}/rest/api/3/search", self.t.base))
+                .header("Authorization", &self.t.auth_header)
                 .header("Accept", "application/json")
                 .query(&[
                     ("jql", jql),
@@ -731,7 +698,7 @@ impl JiraClient {
                 summary: s(&f, &["summary"]).unwrap_or_default(),
                 status: s(&f, &["status", "name"]).unwrap_or_default(),
                 issue_type: s(&f, &["issuetype", "name"]).unwrap_or_default(),
-                url: format!("{}/browse/{}", self.base_url, key),
+                url: format!("{}/browse/{}", self.t.base, key),
                 project_key: s(&f, &["project", "key"]).unwrap_or_default(),
                 project_name: s(&f, &["project", "name"]).unwrap_or_default(),
                 parent_key: s(&f, &["parent", "key"]),
@@ -752,13 +719,14 @@ impl JiraClient {
         window: u32,
         fields: &str,
     ) -> Result<Vec<IssueSummary>> {
-        let fallback_url = format!("{}/rest/api/3/search", self.base_url);
+        let fallback_url = format!("{}/rest/api/3/search", self.t.base);
         let start_at_s = start_at.to_string();
         let window_s = window.to_string();
         let resp = self
-            .http
+            .t
+            .http()?
             .get(&fallback_url)
-            .header("Authorization", &self.auth_header)
+            .header("Authorization", &self.t.auth_header)
             .header("Accept", "application/json")
             .query(&[
                 ("jql", jql),
@@ -817,7 +785,7 @@ impl JiraClient {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            let url = format!("{}/browse/{}", self.base_url, key);
+            let url = format!("{}/browse/{}", self.t.base, key);
             let text_at = |path: &[&str]| -> Option<String> {
                 let mut cur = &fields;
                 for p in path {
@@ -852,11 +820,12 @@ impl JiraClient {
 
     /// Fetch a single issue by key (e.g. "PROJ-123").
     pub async fn get_issue(&self, key: &str) -> Result<IssueDetail> {
-        let url = format!("{}/rest/api/3/issue/{}", self.base_url, path_seg(key));
+        let url = format!("{}/rest/api/3/issue/{}", self.t.base, path_seg(key));
         let resp = self
-            .http
+            .t
+            .http()?
             .get(&url)
-            .header("Authorization", &self.auth_header)
+            .header("Authorization", &self.t.auth_header)
             .header("Accept", "application/json")
             .query(&[("fields", "summary,status,issuetype,assignee,description")])
             .send()
@@ -906,7 +875,7 @@ impl JiraClient {
             Some(desc) if !desc.is_null() => adf_to_markdown(desc),
             _ => String::new(),
         };
-        let url = format!("{}/browse/{}", self.base_url, key);
+        let url = format!("{}/browse/{}", self.t.base, key);
 
         Ok(IssueDetail {
             key: key.to_string(),
@@ -923,18 +892,15 @@ impl JiraClient {
     ///
     /// Returns a [`CommentRef`] with the new comment's `id` and optional `self` URL.
     pub async fn add_comment(&self, key: &str, body_text: &str) -> Result<CommentRef> {
-        let url = format!(
-            "{}/rest/api/3/issue/{}/comment",
-            self.base_url,
-            path_seg(key)
-        );
+        let url = format!("{}/rest/api/3/issue/{}/comment", self.t.base, path_seg(key));
         let adf_body = text_to_adf(body_text);
         let payload = serde_json::json!({ "body": adf_body });
 
         let resp = self
-            .http
+            .t
+            .http()?
             .post(&url)
-            .header("Authorization", &self.auth_header)
+            .header("Authorization", &self.t.auth_header)
             .header("Accept", "application/json")
             .header("Content-Type", "application/json")
             .json(&payload)
@@ -990,11 +956,7 @@ impl JiraClient {
     }
 
     async fn walk_comments(&self, key: &str, since: Option<&str>) -> Result<Vec<IssueComment>> {
-        let url = format!(
-            "{}/rest/api/3/issue/{}/comment",
-            self.base_url,
-            path_seg(key)
-        );
+        let url = format!("{}/rest/api/3/issue/{}/comment", self.t.base, path_seg(key));
 
         // Paginate to the LAST page: the endpoint returns one default-sized
         // page ordered oldest-first, so on a busy issue the NEWEST comments —
@@ -1014,9 +976,10 @@ impl JiraClient {
             let start_s = start_at.to_string();
             let max_s = PAGE.to_string();
             let resp = self
-                .http
+                .t
+                .http()?
                 .get(&url)
-                .header("Authorization", &self.auth_header)
+                .header("Authorization", &self.t.auth_header)
                 .header("Accept", "application/json")
                 .query(&[
                     ("orderBy", order),
@@ -1113,11 +1076,12 @@ impl JiraClient {
     ///
     /// Uses `GET /rest/api/3/issue/{key}?expand=changelog,names,renderedFields&fields=*all`
     pub async fn get_issue_full(&self, key: &str) -> Result<IssueFull> {
-        let url = format!("{}/rest/api/3/issue/{}", self.base_url, path_seg(key));
+        let url = format!("{}/rest/api/3/issue/{}", self.t.base, path_seg(key));
         let resp = self
-            .http
+            .t
+            .http()?
             .get(&url)
-            .header("Authorization", &self.auth_header)
+            .header("Authorization", &self.t.auth_header)
             .header("Accept", "application/json")
             .query(&[
                 ("expand", "changelog,names,renderedFields"),
@@ -1141,7 +1105,7 @@ impl JiraClient {
             .map_err(|e| Error::Upstream(format!("jira get_issue_full parse: {e}")))?;
 
         let names = body.get("names").cloned().unwrap_or_default();
-        Ok(parse_issue_full(&body, &names, &self.base_url))
+        Ok(parse_issue_full(&body, &names, &self.t.base))
     }
 
     /// Resolve an issue key to its numeric Jira id with a lightweight fetch.
@@ -1152,11 +1116,12 @@ impl JiraClient {
     ///
     /// Uses `GET /rest/api/3/issue/{key}?fields=id`.
     pub async fn get_issue_id(&self, key: &str) -> Result<String> {
-        let url = format!("{}/rest/api/3/issue/{}", self.base_url, path_seg(key));
+        let url = format!("{}/rest/api/3/issue/{}", self.t.base, path_seg(key));
         let resp = self
-            .http
+            .t
+            .http()?
             .get(&url)
-            .header("Authorization", &self.auth_header)
+            .header("Authorization", &self.t.auth_header)
             .header("Accept", "application/json")
             .query(&[("fields", "id")])
             .send()
@@ -1195,7 +1160,7 @@ impl JiraClient {
         const APP_TYPES: [&str; 4] = ["github", "bitbucket", "gitlab", "stash"];
         const DATA_TYPES: [&str; 3] = ["pullrequest", "branch", "repository"];
 
-        let url = format!("{}/rest/dev-status/latest/issue/detail", self.base_url);
+        let url = format!("{}/rest/dev-status/latest/issue/detail", self.t.base);
 
         // Fire all 12 (app_type × data_type) requests concurrently rather than
         // sequentially. Per-combo errors (transport or non-2xx) are swallowed so a
@@ -1205,10 +1170,11 @@ impl JiraClient {
             .flat_map(|&a| DATA_TYPES.iter().map(move |&d| (a, d)))
             .collect();
 
+        let client = self.t.http()?;
         let futures = combos.iter().map(|(app_type, data_type)| {
             let url = url.clone();
-            let auth = self.auth_header.clone();
-            let http = self.http.clone();
+            let auth = self.t.auth_header.clone();
+            let http = client.clone();
             let issue_id = issue_id.to_string();
             let app_type = *app_type;
             let data_type = *data_type;
@@ -1253,13 +1219,14 @@ impl JiraClient {
     pub async fn list_transitions(&self, key: &str) -> Result<Vec<JiraTransition>> {
         let url = format!(
             "{}/rest/api/3/issue/{}/transitions",
-            self.base_url,
+            self.t.base,
             path_seg(key)
         );
         let resp = self
-            .http
+            .t
+            .http()?
             .get(&url)
-            .header("Authorization", &self.auth_header)
+            .header("Authorization", &self.t.auth_header)
             .header("Accept", "application/json")
             .send()
             .await
@@ -1287,15 +1254,16 @@ impl JiraClient {
     pub async fn transition_issue(&self, key: &str, transition_id: &str) -> Result<()> {
         let url = format!(
             "{}/rest/api/3/issue/{}/transitions",
-            self.base_url,
+            self.t.base,
             path_seg(key)
         );
         let payload = serde_json::json!({ "transition": { "id": transition_id } });
 
         let resp = self
-            .http
+            .t
+            .http()?
             .post(&url)
-            .header("Authorization", &self.auth_header)
+            .header("Authorization", &self.t.auth_header)
             .header("Accept", "application/json")
             .header("Content-Type", "application/json")
             .json(&payload)
@@ -1318,11 +1286,12 @@ impl JiraClient {
     ///
     /// Uses `GET /rest/api/3/user/assignable/search?issueKey={key}`
     pub async fn list_assignable(&self, key: &str) -> Result<Vec<JiraUser>> {
-        let url = format!("{}/rest/api/3/user/assignable/search", self.base_url);
+        let url = format!("{}/rest/api/3/user/assignable/search", self.t.base);
         let resp = self
-            .http
+            .t
+            .http()?
             .get(&url)
-            .header("Authorization", &self.auth_header)
+            .header("Authorization", &self.t.auth_header)
             .header("Accept", "application/json")
             .query(&[("issueKey", key), ("maxResults", "50")])
             .send()
@@ -1352,15 +1321,16 @@ impl JiraClient {
     pub async fn assign_issue(&self, key: &str, account_id: &str) -> Result<()> {
         let url = format!(
             "{}/rest/api/3/issue/{}/assignee",
-            self.base_url,
+            self.t.base,
             path_seg(key)
         );
         let payload = serde_json::json!({ "accountId": account_id });
 
         let resp = self
-            .http
+            .t
+            .http()?
             .put(&url)
-            .header("Authorization", &self.auth_header)
+            .header("Authorization", &self.t.auth_header)
             .header("Accept", "application/json")
             .header("Content-Type", "application/json")
             .json(&payload)
@@ -1388,13 +1358,14 @@ impl JiraClient {
     pub async fn attachment_bytes(&self, attachment_id: &str) -> Result<(String, Vec<u8>)> {
         let url = format!(
             "{}/rest/api/3/attachment/content/{}",
-            self.base_url,
+            self.t.base,
             path_seg(attachment_id)
         );
         let resp = self
-            .http
+            .t
+            .http()?
             .get(&url)
-            .header("Authorization", &self.auth_header)
+            .header("Authorization", &self.t.auth_header)
             .send()
             .await
             .map_err(|e| Error::Upstream(format!("jira attachment request: {e}")))?;
@@ -1424,7 +1395,7 @@ impl JiraClient {
 
     /// Update the description of an issue. The `body_md` text is converted to ADF.
     pub async fn update_description(&self, key: &str, body_md: &str) -> Result<()> {
-        let url = format!("{}/rest/api/3/issue/{}", self.base_url, path_seg(key));
+        let url = format!("{}/rest/api/3/issue/{}", self.t.base, path_seg(key));
         // The Markdown the editor saved came from `adf_to_markdown`, which drops
         // screenshots, mentions, smart links, dates, status lozenges and
         // emoji; writing it back (via the plain-text `text_to_adf`) silently
@@ -1446,9 +1417,10 @@ impl JiraClient {
         });
 
         let resp = self
-            .http
+            .t
+            .http()?
             .put(&url)
-            .header("Authorization", &self.auth_header)
+            .header("Authorization", &self.t.auth_header)
             .header("Accept", "application/json")
             .header("Content-Type", "application/json")
             .json(&payload)
@@ -1469,11 +1441,12 @@ impl JiraClient {
 
     /// The issue's raw description ADF (`Value::Null` when it has none).
     async fn description_adf(&self, key: &str) -> Result<serde_json::Value> {
-        let url = format!("{}/rest/api/3/issue/{}", self.base_url, path_seg(key));
+        let url = format!("{}/rest/api/3/issue/{}", self.t.base, path_seg(key));
         let resp = self
-            .http
+            .t
+            .http()?
             .get(&url)
-            .header("Authorization", &self.auth_header)
+            .header("Authorization", &self.t.auth_header)
             .header("Accept", "application/json")
             .query(&[("fields", "description")])
             .send()
@@ -1504,13 +1477,14 @@ impl JiraClient {
     pub async fn editmeta(&self, key: &str) -> Result<Vec<EditableField>> {
         let url = format!(
             "{}/rest/api/3/issue/{}/editmeta",
-            self.base_url,
+            self.t.base,
             path_seg(key)
         );
         let resp = self
-            .http
+            .t
+            .http()?
             .get(&url)
-            .header("Authorization", &self.auth_header)
+            .header("Authorization", &self.t.auth_header)
             .header("Accept", "application/json")
             .send()
             .await
@@ -1537,13 +1511,14 @@ impl JiraClient {
     ///
     /// Uses `PUT /rest/api/3/issue/{key}` with `{"fields": fields}`.
     pub async fn update_fields(&self, key: &str, fields: serde_json::Value) -> Result<()> {
-        let url = format!("{}/rest/api/3/issue/{}", self.base_url, path_seg(key));
+        let url = format!("{}/rest/api/3/issue/{}", self.t.base, path_seg(key));
         let payload = serde_json::json!({ "fields": fields });
 
         let resp = self
-            .http
+            .t
+            .http()?
             .put(&url)
-            .header("Authorization", &self.auth_header)
+            .header("Authorization", &self.t.auth_header)
             .header("Accept", "application/json")
             .header("Content-Type", "application/json")
             .json(&payload)
@@ -1574,28 +1549,19 @@ impl JiraClient {
         summary: &str,
         description_md: &str,
     ) -> Result<CreatedIssue> {
-        let url = format!("{}/rest/api/3/issue", self.base_url);
+        let url = format!("{}/rest/api/3/issue", self.t.base);
         let adf = text_to_adf(description_md);
         let payload = build_create_issue_body(project_key, issue_type, summary, adf);
 
-        let resp = self
-            .http
+        let req = self
+            .t
+            .http()?
             .post(&url)
-            .header("Authorization", &self.auth_header)
+            .header("Authorization", &self.t.auth_header)
             .header("Accept", "application/json")
             .header("Content-Type", "application/json")
-            .json(&payload)
-            .send()
-            .await
-            .map_err(|e| Error::Upstream(format!("jira create_issue request: {e}")))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(Error::Upstream(format!(
-                "jira create_issue failed ({status}): {body}"
-            )));
-        }
+            .json(&payload);
+        let resp = self.t.send(req, "jira create_issue").await?;
 
         let body: serde_json::Value = resp
             .json()
@@ -1607,7 +1573,7 @@ impl JiraClient {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        let issue_url = format!("{}/browse/{}", self.base_url, key);
+        let issue_url = format!("{}/browse/{}", self.t.base, key);
 
         Ok(CreatedIssue {
             key,
@@ -1624,13 +1590,14 @@ impl JiraClient {
     pub async fn list_issue_types(&self, project_key: &str) -> Result<Vec<String>> {
         let url = format!(
             "{}/rest/api/3/project/{}",
-            self.base_url,
+            self.t.base,
             path_seg(project_key)
         );
         let resp = self
-            .http
+            .t
+            .http()?
             .get(&url)
-            .header("Authorization", &self.auth_header)
+            .header("Authorization", &self.t.auth_header)
             .header("Accept", "application/json")
             .send()
             .await
@@ -2749,6 +2716,19 @@ mod tests {
                 ..Default::default()
             })
             .collect()
+    }
+
+    /// architecture-3-02: Jira refuses a cleartext site exactly like
+    /// Confluence — the Basic `email:token` header must never leave over
+    /// plain http (loopback dev servers stay allowed).
+    #[tokio::test]
+    async fn refuses_a_cleartext_site_before_sending_the_credential() {
+        let c = JiraClient::new("http://example.com", "me@x", "token");
+        let err = c.list_projects().await.expect_err("http:// is refused");
+        assert!(matches!(err, Error::Invalid(_)), "{err:?}");
+        assert!(err.to_string().contains("jira base url"), "{err}");
+        let err = c.list_transitions("K-1").await.expect_err("every call");
+        assert!(matches!(err, Error::Invalid(_)), "{err:?}");
     }
 
     #[test]

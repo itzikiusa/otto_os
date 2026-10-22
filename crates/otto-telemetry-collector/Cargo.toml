@@ -1,0 +1,23 @@
+[package]
+name = "otto-telemetry-collector"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The ClickHouse-backed telemetry service (managed OTLP collector, schema,
+# analysis). Depended on ONLY by otto-server and ottod; everything else
+# instruments through the leaf `otto-telemetry`.
+[dependencies]
+otto-telemetry.workspace = true
+otto-usage.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+anyhow.workspace = true
+reqwest.workspace = true
+sha2.workspace = true
+hex.workspace = true
+uuid.workspace = true
+sysinfo = "0.39.6"
+tempfile.workspace = true

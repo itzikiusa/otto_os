@@ -184,21 +184,25 @@ async fn start_review_for_branch(
         // workflow's live channel sees the durable child association.
         let store = otto_state::WorkflowsRepo::new(ctx.pool.clone());
         if let Err(error) = store.save_checkpoint(run_id, &checkpoint).await {
-            let _ = ctx
-                .reviews_store
-                .set_status(
-                    &review_id,
-                    ReviewStatus::Error,
-                    Some("workflow association could not be saved"),
-                )
-                .await;
+            let _ = transition(
+                ctx,
+                &workspace.id,
+                &review_id,
+                ReviewStatus::Error,
+                Some("workflow association could not be saved"),
+            )
+            .await;
             return Err(error);
         }
         if store.is_canceled(run_id).await {
-            let _ = ctx
-                .reviews_store
-                .set_status(&review_id, ReviewStatus::Cancelled, None)
-                .await;
+            let _ = transition(
+                ctx,
+                &workspace.id,
+                &review_id,
+                ReviewStatus::Cancelled,
+                None,
+            )
+            .await;
             return Err(Error::Conflict(
                 "workflow canceled before review launch".into(),
             ));
@@ -213,22 +217,9 @@ async fn start_review_for_branch(
             review = %review_id, worktree = %worktree_path, base = %resolved.diff_ref,
             "review: EMPTY diff vs base — no reviewers ran, no findings are possible"
         );
-        ctx.reviews_store
-            .set_status(&review_id, ReviewStatus::Done, None)
-            .await?;
-        let _ = ctx.events.send(Event::ReviewChanged {
-            workspace_id: workspace.id.clone(),
-            session_id: None,
-            review_id: review_id.clone(),
-            status: ReviewStatus::Done.as_str().to_string(),
-        });
+        transition(ctx, &workspace.id, &review_id, ReviewStatus::Done, None).await?;
     } else {
-        let _ = ctx.events.send(Event::ReviewChanged {
-            workspace_id: workspace.id.clone(),
-            session_id: None,
-            review_id: review_id.clone(),
-            status: ReviewStatus::Running.as_str().to_string(),
-        });
+        announce(ctx, &workspace.id, &review_id, ReviewStatus::Running);
         let ctx_bg = ctx.clone();
         let rid = review_id.clone();
         let wt = worktree_path.to_string();

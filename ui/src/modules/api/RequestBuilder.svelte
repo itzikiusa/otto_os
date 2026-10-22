@@ -19,8 +19,7 @@
   import { api, newHostConfirmHost } from '../../lib/api/client';
   import { generateCode, CODE_LANGS, type CodeLang } from '../../lib/api/codegen';
   import { collectionPaths, fullRequestUrl, requestVarNames, resolveVar, splitVars, varNames } from '../../lib/api/apiVars';
-  import { marked } from 'marked';
-  import { sanitizeHtml } from '../../lib/sanitize';
+  import { renderMarkdownGfm } from '../../lib/md';
   import type { ApiAuth, ApiBodyMode, ApiKeyVal, ApiSecretable, GrpcReflectReq } from '../../lib/api/types';
   import { isSecretRef } from '../../lib/api/types';
   import { ws } from '../../lib/stores/workspace.svelte';
@@ -339,12 +338,9 @@
     apiClient.draft = { ...draft, [k]: v };
   }
   // Request docs arrive from Postman imports, git-pulled collections and agent
-  // upserts — untrusted markdown. marked passes raw HTML through, so the output
-  // MUST go through the allowlist sanitizer before the `{@html}` sink.
-  const docsHtml = $derived.by(() => {
-    try { return sanitizeHtml(marked.parse(draft.docs ?? '', { async: false, gfm: true, breaks: true }) as string); }
-    catch { return ''; }
-  });
+  // upserts — untrusted markdown. lib/md's GFM renderer runs the allowlist
+  // sanitizer before the `{@html}` sink (and never throws).
+  const docsHtml = $derived(renderMarkdownGfm(draft.docs ?? '', { breaks: true }));
   const settings = $derived(draft.settings ?? defaultSettings());
   const settingsChanged = $derived(settings.timeout_ms != null || !settings.follow_redirects || !settings.verify_ssl || !!draft.ssh_connection_id);
   function setSetting<K extends keyof ApiSettings>(k: K, v: ApiSettings[K]): void {
@@ -383,13 +379,16 @@
     return isSecretRef(v) ? '•••••• stored in Keychain — type to replace' : fallback;
   }
   let fetchingToken = $state(false);
+  /** Inline field error under Token URL (never a toast for a field error). */
+  let tokenUrlError = $state('');
   async function fetchOAuthToken(): Promise<void> {
     if (draft.auth.type !== 'oauth2') return;
     const wid = ws.currentId;
     if (!wid) return;
     const a = draft.auth;
     const tabId = draft.tabId;
-    if (!a.token_url.trim()) { toasts.error('Add a token URL first', 'The OAuth token endpoint is required.'); return; }
+    if (!a.token_url.trim()) { tokenUrlError = 'Enter the OAuth token endpoint first.'; return; }
+    tokenUrlError = '';
     fetchingToken = true;
     try {
       if (a.grant === 'authorization_code') {
@@ -661,7 +660,7 @@
       return;
     }
     try {
-      await ws.setApiAllowLocal(on);
+      await apiClient.setAllowLocal(on);
     } catch (e) {
       input.checked = !on;
       toasts.error('Couldn’t change the setting', e instanceof Error && e.message ? e.message : 'Only a workspace admin can change it.');
@@ -1039,8 +1038,11 @@
           {/if}
           <div class="field-row">
             <label for="auth-turl">Token URL</label>
-            <input dir="ltr" id="auth-turl" class="input mono grow" value={draft.auth.token_url} oninput={(e) => setAuth({ token_url: (e.currentTarget as HTMLInputElement).value })} placeholder="https://auth.example.com/oauth/token" />
+            <input dir="ltr" id="auth-turl" class="input mono grow" value={draft.auth.token_url}
+              aria-invalid={tokenUrlError ? 'true' : undefined} aria-describedby={tokenUrlError ? 'auth-turl-err' : undefined}
+              oninput={(e) => { tokenUrlError = ''; setAuth({ token_url: (e.currentTarget as HTMLInputElement).value }); }} placeholder="https://auth.example.com/oauth/token" />
           </div>
+          {#if tokenUrlError}<p class="field-error" id="auth-turl-err">{tokenUrlError}</p>{/if}
           <div class="field-row">
             <label for="auth-cid">Client ID</label>
             <input dir="ltr" id="auth-cid" class="input mono grow" value={draft.auth.client_id} oninput={(e) => setAuth({ client_id: (e.currentTarget as HTMLInputElement).value })} />
@@ -1156,7 +1158,7 @@
         <div class="ws-setting">
           <div class="section-title">Workspace</div>
           <label class="set-row toggle">
-            <input type="checkbox" checked={ws.apiAllowLocal} onchange={(e) => void setAllowLocal(e.currentTarget)} />
+            <input type="checkbox" checked={apiClient.allowLocal} onchange={(e) => void setAllowLocal(e.currentTarget)} />
             <span class="set-label">Allow private addresses</span>
             <span class="set-unit">Lets API requests reach localhost and private networks (10.x, 192.168.x…). Off by default; admins only; applies to everyone in this workspace.</span>
           </label>
@@ -1694,6 +1696,12 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
+  }
+  .field-error {
+    display: block;
+    margin: 2px 0 0;
+    font-size: var(--fs-s);
+    color: var(--danger);
   }
   .field-row {
     display: flex;

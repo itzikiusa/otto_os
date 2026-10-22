@@ -256,7 +256,10 @@ test('credit: binary snapshots are offered only on request (perf 01 N3: never to
   // binary payload after a header is applied as the snapshot, never credited.
   const src = readFileSync(new URL('../src/lib/components/Terminal.svelte', import.meta.url), 'utf8');
   assert.match(src, /flow\.offer\(!socketFactory\)/);
-  assert.match(src, /const hdr = binarySnapHeaders\.get\(s\);\s*if \(hdr\) \{\s*binarySnapHeaders\.delete\(s\);\s*applySnapshot\(/);
+  // The header → payload pairing lives in termProtocol.decodeTermFrame
+  // (behaviour: unit/termProtocol.test.ts); its snapshot frame is applied,
+  // never credited.
+  assert.match(src, /case 'snapshot':\s*\/\/ Not live output — never credited, never painted as a PTY burst\.\s*onSnapshot\(f\.epoch, f\.bytes\);/);
 });
 
 test('resize-with-grid compact (perf 01 N6): a widened visible agent pane sends ONE grid-carrying scrollback', () => {

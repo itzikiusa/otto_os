@@ -349,12 +349,20 @@ pub async fn cancel(ctx: &ServerCtx, run_id: &Id) -> Result<OttoRun> {
     // Re-read AFTER the stage stopped: a review started in the last moments of
     // the stage is recorded on the run before its reviewers spawn, and only a
     // read taken now is guaranteed to see it (S2-302).
+    // A dropped provisioning stage leaves its `git worktree add` running
+    // detached; wait for it so the removal below does not lose to git's
+    // "initializing" lock and leak the finished checkout.
+    if !crate::run_workspace::await_provisioning(run_id, std::time::Duration::from_secs(60)).await {
+        tracing::warn!(run = %run_id, "worktree provisioning still running 60s after cancel");
+    }
     let fresh = ctx.runs.get(run_id).await.unwrap_or_else(|_| run.clone());
     stop_owned_work(ctx, &fresh).await;
     run_engine::emit(ctx, &fresh);
     run_engine::project(ctx, &fresh).await;
     crate::run_callback::deliver(&ctx.runs, &fresh).await;
-    crate::run_workspace::remove_worktree(ctx, &run).await;
+    // `fresh`, not `run`: a cancel whose first read landed before provisioning
+    // recorded `worktree_path` removed nothing.
+    crate::run_workspace::remove_worktree(ctx, &fresh).await;
     ctx.runs.get(run_id).await
 }
 

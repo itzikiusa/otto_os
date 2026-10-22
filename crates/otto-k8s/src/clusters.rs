@@ -228,8 +228,9 @@ fn with_kubeconfig(cluster: &K8sCluster, path: &Path) -> K8sCluster {
 /// three `AWS_*` credential vars read from the Keychain (`aws-<id>`); the
 /// account's custom `endpoint_url` too. Built by the same
 /// [`otto_core::aws_env::build_aws_env`] otto-aws uses. Empty for every other
-/// source or when the linked account is gone (FK set NULL). Spawns applying it
-/// must `env_remove` [`otto_core::aws_env::AWS_ENV_REMOVE`] first.
+/// source or when the linked account is gone (FK set NULL). Spawns apply it
+/// through [`otto_core::aws_env::apply_aws_env`], which first removes
+/// [`otto_core::aws_env::AWS_ENV_REMOVE`] from the inherited environment.
 pub async fn aws_env_for<S: K8sCtx>(
     ctx: &S,
     cluster: &K8sCluster,
@@ -260,7 +261,7 @@ pub async fn aws_env_for<S: K8sCtx>(
         Some(r) => otto_core::secrets::get_async(ctx.secrets(), r).await?,
         None => None,
     };
-    Ok(build_aws_env(
+    Ok(aws_env_from_row(
         &auth_mode,
         profile.as_deref(),
         &region,
@@ -272,7 +273,7 @@ pub async fn aws_env_for<S: K8sCtx>(
 /// Pure half of [`aws_env_for`] — `params` / `secret_json` are the ACCOUNT's
 /// `params_json` and Keychain payload. Access keys are passed only when both
 /// halves are present (a partial pair can only fail the CLI's auth anyway).
-pub fn build_aws_env(
+pub fn aws_env_from_row(
     auth_mode: &str,
     profile: Option<&str>,
     region: &str,
@@ -992,14 +993,14 @@ mod tests {
 
     #[test]
     fn aws_env_rules() {
-        let env = build_aws_env("profile", Some("dev-sso"), "eu-west-1", &json!({}), None);
+        let env = aws_env_from_row("profile", Some("dev-sso"), "eu-west-1", &json!({}), None);
         assert!(env.contains(&("AWS_PROFILE".into(), "dev-sso".into())));
         assert!(env.contains(&("AWS_REGION".into(), "eu-west-1".into())));
         assert!(env.contains(&("AWS_PAGER".into(), String::new())));
         assert!(env.contains(&("AWS_CLI_AUTO_PROMPT".into(), "off".into())));
         assert!(!env.iter().any(|(k, _)| k == "AWS_ACCESS_KEY_ID"));
 
-        let env = build_aws_env(
+        let env = aws_env_from_row(
             "access_keys",
             None,
             "us-east-1",
@@ -1014,7 +1015,7 @@ mod tests {
         assert!(!env.iter().any(|(k, _)| k == "AWS_PROFILE"));
 
         // The account's custom endpoint reaches the credential plugin too.
-        let env = build_aws_env(
+        let env = aws_env_from_row(
             "profile",
             Some("dev"),
             "us-east-1",

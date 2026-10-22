@@ -7,12 +7,34 @@
   let pending = $state<{text: string; nonce: string} | null>(null);
   const delivered = $derived(pending && messages.some(m => m.nonce === pending?.nonce));
   const bytes = $derived(new TextEncoder().encode(draft).length);
+  let formEl = $state<HTMLFormElement | null>(null);
+  let inputEl = $state<HTMLTextAreaElement | null>(null);
+  // Sent from the composer (button or ⌘↵) → focus returns to the textarea once
+  // the echo lands, so the next message is typed without Tabbing back in.
+  let refocus = false;
   function submit() {
-    if (!draft.trim() || bytes > 4096 || !connected) return;
+    if (!connected) return;
+    refocus = !!formEl?.contains(document.activeElement);
+    // ONE submit button: while the last message is unconfirmed it re-sends that
+    // message (same nonce, so the room dedupes), otherwise it sends the draft.
+    if (pending) { send({type: 'chat', ...pending}); return; }
+    if (!draft.trim() || bytes > 4096) return;
     pending = {text: draft, nonce: crypto.randomUUID()};
     send({type: 'chat', ...pending});
   }
-  $effect(() => { if (delivered && pending) { if (draft === pending.text) draft = ''; pending = null; } });
+  function onDraftKey(event: KeyboardEvent): void {
+    if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && !event.isComposing) {
+      event.preventDefault();
+      submit();
+    }
+  }
+  $effect(() => {
+    if (delivered && pending) {
+      if (draft === pending.text) draft = '';
+      pending = null;
+      if (refocus) { refocus = false; void tick().then(() => inputEl?.focus()); }
+    }
+  });
 
   let listEl = $state<HTMLDivElement | null>(null);
   let atBottom = $state(true);
@@ -45,12 +67,13 @@
       <button class="btn small jump" type="button" onclick={toBottom}><Icon name="arrowDown" size={12} /> Jump to latest</button>
     {/if}
   </div>
-  <form onsubmit={(event) => { event.preventDefault(); submit(); }}>
+  <form bind:this={formEl} onsubmit={(event) => { event.preventDefault(); submit(); }}>
     <label for="room-message">Message everyone</label>
-    <textarea dir="auto" id="room-message" bind:value={draft} rows="3" placeholder={connected ? 'Write a message…' : 'Reconnecting — your draft is saved here'}></textarea>
+    <textarea dir="auto" id="room-message" bind:this={inputEl} bind:value={draft} onkeydown={onDraftKey} aria-keyshortcuts="Meta+Enter Control+Enter" rows="3" placeholder={connected ? 'Write a message…' : 'Reconnecting — your draft is saved here'}></textarea>
     <div class="send-row"><span class:too-long={bytes > 4096}>{bytes > 4096 ? 'Message exceeds 4 KiB' : ''}</span>
-      {#if pending}<button class="btn" type="button" disabled={!connected} onclick={() => pending && send({type: 'chat', ...pending})}>Retry message</button>
-      {:else}<button class="btn" disabled={!connected || !draft.trim() || bytes > 4096}>Send</button>{/if}
+      <!-- Always mounted: swapping Send ↔ Retry for two buttons destroyed the
+           focused one, dropping keyboard focus to <body> on every message. -->
+      <button class="btn" type="submit" title="Send (⌘↵)" disabled={pending ? !connected : !connected || !draft.trim() || bytes > 4096}>{pending ? 'Retry message' : 'Send'}</button>
     </div>
   </form>
 </section>

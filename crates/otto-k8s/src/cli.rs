@@ -67,16 +67,18 @@ pub async fn run_raw(
 ) -> Result<CliOutput> {
     let started = Instant::now();
     let mut cmd = Command::new(program);
-    cmd.args(args)
-        .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
-        .stdin(if stdin.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
+    otto_core::aws_env::apply_aws_env(
+        cmd.args(args),
+        env.iter().map(|(k, v)| (k.as_str(), v.as_str())),
+    )
+    .stdin(if stdin.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    })
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .kill_on_drop(true);
     let mut child = cmd.spawn().map_err(|e| spawn_error(program, &e))?;
     if let Some(bytes) = stdin {
         if let Some(mut pipe) = child.stdin.take() {
@@ -127,12 +129,14 @@ pub async fn run_raw_capped(
     use tokio::io::AsyncReadExt;
     let started = Instant::now();
     let mut cmd = Command::new(program);
-    cmd.args(args)
-        .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
+    otto_core::aws_env::apply_aws_env(
+        cmd.args(args),
+        env.iter().map(|(k, v)| (k.as_str(), v.as_str())),
+    )
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .kill_on_drop(true);
     let mut child = cmd.spawn().map_err(|e| spawn_error(program, &e))?;
     let (Some(mut out), Some(mut err)) = (child.stdout.take(), child.stderr.take()) else {
         return Err(Error::Internal(format!("{program}: no stdio pipes")));

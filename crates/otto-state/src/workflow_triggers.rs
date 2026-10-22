@@ -9,7 +9,7 @@ use otto_core::{new_id, Error, Id, Result};
 use serde_json::Value;
 use sqlx::Row;
 
-use crate::convert::{dberr, ts};
+use crate::convert::{dberr, fmt, ts};
 
 /// A persisted workflow trigger row.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -162,14 +162,26 @@ impl TriggersRepo {
 
     /// Create a new trigger. Returns the created row.
     pub async fn create(&self, new: NewWorkflowTrigger) -> Result<WorkflowTrigger> {
+        self.create_as(new, None).await
+    }
+
+    /// [`Self::create`] recording `actor` as the trigger's spec author
+    /// (`updated_by`, 0189): a run this trigger starts acts as the latest
+    /// changer of what it runs (PC-3), never silently as the workflow creator.
+    pub async fn create_as(
+        &self,
+        new: NewWorkflowTrigger,
+        actor: Option<&Id>,
+    ) -> Result<WorkflowTrigger> {
         let id = new_id();
         let spec_json = serde_json::to_string(&new.spec)
             .map_err(|e| Error::Internal(format!("spec serialize: {e}")))?;
         let now = Utc::now().to_rfc3339();
         sqlx::query(
             "INSERT INTO workflow_triggers
-                 (id, workflow_id, kind, spec_json, enabled, created_at, armed_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
+                 (id, workflow_id, kind, spec_json, enabled, created_at, armed_at,
+                  updated_by, updated_by_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? IS NULL THEN NULL ELSE ? END)",
         )
         .bind(&id)
         .bind(&new.workflow_id)
@@ -178,6 +190,9 @@ impl TriggersRepo {
         .bind(new.enabled as i64)
         .bind(&now)
         .bind(&now)
+        .bind(actor)
+        .bind(actor)
+        .bind(fmt(Utc::now()))
         .execute(&self.pool)
         .await
         .map_err(dberr("create trigger"))?;
@@ -192,6 +207,20 @@ impl TriggersRepo {
         spec: Option<Value>,
         enabled: Option<bool>,
     ) -> Result<WorkflowTrigger> {
+        self.update_as(id, spec, enabled, None).await
+    }
+
+    /// [`Self::update`] recording `actor` as the spec author when the SPEC
+    /// changes (prompt, destinations, schedule — what a fired run does);
+    /// enabling or pausing alone keeps the recorded author (PC-3).
+    pub async fn update_as(
+        &self,
+        id: &Id,
+        spec: Option<Value>,
+        enabled: Option<bool>,
+        actor: Option<&Id>,
+    ) -> Result<WorkflowTrigger> {
+        let author = actor.filter(|_| spec.is_some());
         let mut tx = self
             .pool
             .begin_with("BEGIN IMMEDIATE")
@@ -225,8 +254,9 @@ impl TriggersRepo {
             }
         }
         let eligibility_changed = changed || current.enabled != new_enabled;
-        let row=sqlx::query("UPDATE workflow_triggers SET spec_json=?,enabled=?,armed_at=COALESCE(?,armed_at),admission_generation=admission_generation+? WHERE id=? RETURNING *")
-            .bind(new_spec.to_string()).bind(new_enabled as i64).bind(armed_at).bind(i64::from(eligibility_changed)).bind(id)
+        let row=sqlx::query("UPDATE workflow_triggers SET spec_json=?,enabled=?,armed_at=COALESCE(?,armed_at),admission_generation=admission_generation+?,updated_by=COALESCE(?,updated_by),updated_by_at=CASE WHEN ? IS NULL THEN updated_by_at ELSE ? END WHERE id=? RETURNING *")
+            .bind(new_spec.to_string()).bind(new_enabled as i64).bind(armed_at).bind(i64::from(eligibility_changed))
+            .bind(author).bind(author).bind(fmt(Utc::now())).bind(id)
             .fetch_one(&mut *tx).await.map_err(dberr("update trigger"))?;
         let updated = row_to_trigger(&row)?;
         tx.commit().await.map_err(dberr("commit trigger edit"))?;

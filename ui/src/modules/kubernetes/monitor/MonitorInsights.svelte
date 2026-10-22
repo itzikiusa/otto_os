@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rel } from '../../../lib/stores/now.svelte';
   import { NO_WORKSPACE } from '../../../lib/labels';
   // Insights tab: the latest report of the workspace's "Kubernetes watchdog"
   // personal agent (found by the template marker in its persona), rendered
@@ -8,13 +9,12 @@
   import { loadErrorText } from '../../../lib/loadError';
   import { toastError } from '../../../lib/toastError';
   import { onDestroy, untrack } from 'svelte';
-  import { marked } from 'marked';
+  import { renderMarkdownGfm } from '../../../lib/md';
   import { router } from '../../../lib/router.svelte';
   import { ws } from '../../../lib/stores/workspace.svelte';
   import { toasts } from '../../../lib/toast.svelte';
   import { authedText } from '../../../lib/api/client';
   import { personalAgentsApi } from '../../../lib/api/personalAgents';
-  import { sanitizeHtml } from '../../../lib/sanitize';
   import type { PersonalAgent, PersonalAgentRun } from '../../../lib/api/types';
   import Icon from '../../../lib/components/Icon.svelte';
   import EmptyState from '../../../lib/components/EmptyState.svelte';
@@ -22,7 +22,7 @@
   import LoadState from '../../../lib/components/LoadState.svelte';
   import AgentEditSheet from '../../personal-agents/AgentEditSheet.svelte';
   import { K8S_WATCHDOG_MARK } from '../../personal-agents/templates';
-  import { fmtAgo, verdictOf } from './monitor-util';
+  import { verdictOf } from './monitor-util';
 
   let agent = $state<PersonalAgent | null>(null);
   let runs = $state<PersonalAgentRun[]>([]);
@@ -38,14 +38,8 @@
   let reportVersion = 0;
   let refreshTimer: ReturnType<typeof setTimeout> | null = null;
 
-  const html = $derived.by(() => {
-    if (!report) return '';
-    try {
-      return sanitizeHtml(marked.parse(report, { async: false, gfm: true, breaks: true }) as string);
-    } catch {
-      return '';
-    }
-  });
+  // lib/md: GFM + the allowlist sanitizer, never throws.
+  const html = $derived(report ? renderMarkdownGfm(report, { breaks: true }) : '');
   const verdict = $derived(verdictOf(report));
 
   async function load(): Promise<void> {
@@ -176,7 +170,7 @@
         {#each runs as r (r.id)}
           <button class="run" class:on={selected?.id === r.id} aria-pressed={selected?.id === r.id} title={r.summary || r.error || r.status} onclick={() => void openRun(r)}>
             <span class="st {r.status}"></span>
-            <span class="when">{fmtAgo(r.started_at)}</span>
+            <span class="when">{r.started_at ? rel(r.started_at) : 'never'}</span>
             <span class="sum dim">{r.summary || r.error || r.status}</span>
           </button>
         {/each}

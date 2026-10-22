@@ -704,10 +704,6 @@ impl ActivityRepo {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 /// SQL predicate (on alias `s`) for the sessions the sidebar shows: not
 /// archived, and a connection, a foreground agent, or a Slack/Telegram channel
 /// row — the `foreground=true&with_sources=channel` list rule. The summary's
@@ -746,6 +742,10 @@ pub(crate) fn summary_trail_sql(owner_scoped: bool) -> String {
         shown_sessions_sql()
     )
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

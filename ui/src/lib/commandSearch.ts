@@ -3,7 +3,7 @@
 // recently a command was run). Pure except for the guarded localStorage
 // read/write helpers, so the ranking is unit-tested (unit/floatingBar.test.ts).
 
-// The fuzzy matcher lives here (lib/fuzzy.ts re-exports it) so this module has
+// The fuzzy matcher lives here so this module has
 // no imports and runs under Node's type stripping in unit tests.
 
 export interface FuzzyResult {

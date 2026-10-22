@@ -322,7 +322,7 @@ fn next_is(chars: &[(usize, char)], i: usize, want: char) -> bool {
 /// If a dollar-quote opener starts at `i` (`chars[i] == '$'`), return its tag
 /// and the position just past the opening `$tag$`. Tags follow identifier rules
 /// (letters/underscore first) so a positional parameter like `$1` is rejected.
-fn try_open_dollar(chars: &[(usize, char)], i: usize) -> Option<(String, usize)> {
+pub(crate) fn try_open_dollar(chars: &[(usize, char)], i: usize) -> Option<(String, usize)> {
     let mut j = i + 1;
     let mut tag = String::new();
     while let Some(&(_, c)) = chars.get(j) {
@@ -341,7 +341,7 @@ fn try_open_dollar(chars: &[(usize, char)], i: usize) -> Option<(String, usize)>
 
 /// If the closing `$tag$` for `tag` starts at `i`, return the position just past
 /// it; otherwise `None` (the `$` is ordinary content inside the dollar body).
-fn try_close_dollar(chars: &[(usize, char)], i: usize, tag: &str) -> Option<usize> {
+pub(crate) fn try_close_dollar(chars: &[(usize, char)], i: usize, tag: &str) -> Option<usize> {
     let mut j = i + 1;
     for tc in tag.chars() {
         match chars.get(j) {

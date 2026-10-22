@@ -12,7 +12,6 @@
   // finding_updated WS event also drives a refetch).
   import { toastError } from '../../lib/toastError';
   import {
-    api,
     acceptFinding,
     waiveFinding,
     falsePositiveFinding,
@@ -25,6 +24,7 @@
     regressionTestFinding,
   } from '../../lib/api/client';
   import type { Finding, IssueAccount } from '../../lib/api/types';
+  import { listIssueAccounts } from '../../lib/api/issues';
   import { confirmer } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
@@ -224,7 +224,7 @@
     // Several tracker accounts connected: the server won't guess which one — ask.
     let account: IssueAccount | undefined;
     try {
-      const accounts = await api.get<IssueAccount[]>('/issue/accounts');
+      const accounts = await listIssueAccounts();
       if (accounts.length > 1) {
         const picked = await confirmer.choose(`Which account should ${key} be created in?`, {
           title: 'Choose an issue-tracker account',

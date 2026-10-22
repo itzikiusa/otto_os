@@ -49,6 +49,7 @@
   import { router } from '../../lib/router.svelte';
   import { registry } from '../../lib/commands.svelte';
   import { lsGet, lsSet } from '../../lib/storage';
+  import { rel } from '../../lib/stores/now.svelte';
   import type {
     BrokerCluster,
     Connection,
@@ -936,15 +937,6 @@
     }
   }
 
-  function fmtAgo(iso: string): string {
-    const ms = Date.now() - new Date(iso).getTime();
-    const s = Math.floor(ms / 1000);
-    if (s < 60) return `${s}s`;
-    if (s < 3600) return `${Math.floor(s / 60)}m`;
-    if (s < 86400) return `${Math.floor(s / 3600)}h`;
-    return `${Math.floor(s / 86400)}d`;
-  }
-
   // ── Environment guardrail (danger styling) ─────────────────────────────────
   // Prod connections are dangerous; read-only are locked. Both get a badge, and
   // the selected one draws a red rail down the main area as a constant reminder.
@@ -1140,7 +1132,7 @@
         {#each openConns as c (c.id)}
           {@const st = database.connStatus.get(c.id)}
           {@const on = database.activePane === null && database.selectedConnId === c.id}
-          {@const stText = st?.phase === 'connecting' ? 'Connecting…' : st?.phase === 'error' ? `Connection failed: ${st.error ?? 'unknown error'}` : st?.phase === 'idle' ? 'Not connected yet' : ''}
+          {@const stText = st?.phase === 'connecting' ? 'Connecting…' : st?.phase === 'error' ? (st.error ? `Couldn’t connect: ${st.error}` : 'Couldn’t connect — the server gave no reason') : st?.phase === 'idle' ? 'Not connected yet' : ''}
           <div use:rowMenu class="conn-tab" class:active={on} class:prod={isProdConn(c)} class:guarded={isGuardedConn(c) && !isProdConn(c)} role="presentation" oncontextmenu={(e) => { e.preventDefault(); connMenu(e, c); }}>
             <!-- The status glyphs below are decorative; the tab carries their state as its description. -->
             <button class="conn-tab-main" role="tab" aria-selected={on} aria-describedby={stText ? `conn-st-${c.id}` : undefined} tabindex={connTabStop(on, `db:${c.id}`)} onclick={() => database.openConnection(c.id)} title="{c.name} — right-click to open beside agents">
@@ -1675,7 +1667,7 @@
         <button class="hist-row" class:bad={!h.ok} onclick={() => void database.openHistory(h)} title={h.error ? stmtPreview(h.error, 1000) : stmtPreview(h.statement, 1000)}>
           <span class="hist-dot" class:ok={h.ok}></span>
           <span class="hist-stmt ellipsis mono">{stmtPreview(h.statement)}</span>
-          <span class="hist-meta">{h.ok ? `${h.row_count}r` : 'err'} · {fmtAgo(h.created_at)}</span>
+          <span class="hist-meta">{h.ok ? `${h.row_count}r` : 'err'} · {rel(h.created_at, { compact: true })}</span>
         </button>
       {/each}
       {#if database.canLoadMoreHistory}

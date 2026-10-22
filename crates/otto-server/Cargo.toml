@@ -68,7 +68,11 @@ otto-insights.workspace = true
 otto-context.workspace = true
 otto-skills.workspace = true
 otto-usage.workspace = true
-otto-telemetry.workspace = true
+# The ClickHouse-backed telemetry service. Linked under the `otto_telemetry`
+# name so existing `otto_telemetry::TelemetryService` / `::context` paths keep
+# resolving (the collector re-exports the leaf `otto-telemetry`); only the
+# composition root (otto-server, ottod) may depend on the collector.
+otto-telemetry = { path = "../otto-telemetry-collector", package = "otto-telemetry-collector" }
 otto-agent-run.workspace = true
 otto-review.workspace = true
 # Conversation view: the shared transcript parser (design docs/design/conversation-view.md).

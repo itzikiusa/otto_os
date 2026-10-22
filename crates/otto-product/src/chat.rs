@@ -766,21 +766,17 @@ fn truncate(text: &str, max: usize) -> String {
     otto_core::text::clip_chars_with(text, max, "\n…[truncated]")
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 /// Stop exactly the caller's turn and wait for managed-session cleanup.
 pub async fn stop_turn<C: ProductStudioHost>(
     Path(id): Path<Id>,
     State(ctx): State<C>,
     CurrentUser(user): CurrentUser,
-    Json(req): Json<crate::chat::StopTurnReq>,
-) -> ApiResult<Json<crate::chat::StopTurnResp>> {
+    Json(req): Json<StopTurnReq>,
+) -> ApiResult<Json<StopTurnResp>> {
     let conversation = chat_with_role(&ctx, &user, &id, WorkspaceRole::Editor).await?;
     let stopped =
         crate::studio_turn::stop("discovery", &conversation.workspace_id, &id, &req.turn_id).await;
-    Ok(Json(crate::chat::StopTurnResp { stopped }))
+    Ok(Json(StopTurnResp { stopped }))
 }
 
 #[derive(Debug, Deserialize)]
@@ -791,6 +787,10 @@ pub struct StopTurnReq {
 pub struct StopTurnResp {
     pub stopped: bool,
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

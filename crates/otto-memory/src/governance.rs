@@ -19,8 +19,16 @@ pub const STATE_ACCEPTED: &str = "accepted";
 pub const STATE_STALE: &str = "stale";
 pub const STATE_CONTRADICTED: &str = "contradicted";
 
+/// Every valid state, so the validator cannot drift from the constants.
+const STATES: [&str; 4] = [
+    STATE_SUGGESTED,
+    STATE_ACCEPTED,
+    STATE_STALE,
+    STATE_CONTRADICTED,
+];
+
 fn is_valid_state(s: &str) -> bool {
-    matches!(s, "suggested" | "accepted" | "stale" | "contradicted")
+    STATES.contains(&s)
 }
 
 // ---------------------------------------------------------------------------

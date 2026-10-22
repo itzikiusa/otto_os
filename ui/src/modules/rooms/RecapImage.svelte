@@ -5,7 +5,7 @@
   let url = $state(''), busy = $state(false), error = $state('');
   let live = true;
   onDestroy(() => { live = false; if (url) URL.revokeObjectURL(url); });
-  async function load() { busy = true; error = ''; try { const blob = await recapBlob(`/room-recaps/${encodeURIComponent(recapId)}/images/${encodeURIComponent(imageId)}`); if (live) url = URL.createObjectURL(blob); } catch { if (live) error = 'Could not load this screen sample. Try again.'; } finally { busy = false; } }
+  async function load() { busy = true; error = ''; try { const blob = await recapBlob(`/room-recaps/${encodeURIComponent(recapId)}/images/${encodeURIComponent(imageId)}`); if (live) url = URL.createObjectURL(blob); } catch { if (live) error = 'Couldn’t load this screen sample. Try again.'; } finally { busy = false; } }
 </script>
 {#if url}<img src={url} alt={`Recorded sample: ${title}`} />{:else}<button class="btn small" disabled={busy} onclick={load}>{busy ? 'Loading sample…' : error ? 'Retry screen sample' : 'Show screen sample'}</button>{/if}
 {#if error}<p role="alert">{error}</p>{/if}

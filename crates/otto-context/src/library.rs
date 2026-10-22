@@ -17,16 +17,28 @@
 //! category, version) on every call. With many skills or frequent spawns this
 //! adds up. We keep an in-process `Arc<Mutex<HashMap<name, LibrarySkill>>>` that
 //! is populated on first parse and invalidated (evicted) when a skill is written
-//! or deleted. Reads hold the lock only for the map lookup; the actual
-//! `fs::read_to_string` + parse happen outside the lock, followed by a brief
-//! re-acquire to insert.  The cache is entirely best-effort: a poisoned mutex
-//! falls back to the direct-disk path.
+//! or deleted. Each entry also keeps the `SKILL.md` stamp (mtime, len) it was
+//! read at, and `get_skill` re-stats the file: writers that bypass `Library`
+//! (the improve engine, bundled `install_into`, a hand edit) are picked up on
+//! the next read instead of serving the pre-edit body until a restart. Reads
+//! hold the lock only for the map lookup; the actual `fs::read_to_string` +
+//! parse happen outside the lock, followed by a brief re-acquire to insert.
+//! The cache is entirely best-effort: a poisoned mutex falls back to the
+//! direct-disk path.
+//!
+//! ## Writes
+//!
+//! The library is the source of truth (provider bundles are regenerated from
+//! it), so every overwrite goes through [`write_atomic`]: a crash or a full
+//! disk mid-write leaves the old file, never a truncated one.
 
 use std::collections::HashMap;
 use std::fs;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 
 use otto_core::api::{LibraryContext, LibrarySkill, LibrarySoul, SkillFileEntry};
 use otto_core::paths::confine_join;
@@ -37,9 +49,61 @@ const MAX_SKILL_FILE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_SKILL_IMPORT_BYTES: u64 = 16 * 1024 * 1024;
 
 /// In-process skill cache: keyed by skill name, holds the last-read
-/// `LibrarySkill`. Wrapped in `Arc<Mutex<…>>` so `Library::clone` shares the
-/// same cache across all handle copies (e.g., the Axum state clone).
-type SkillCache = Arc<Mutex<HashMap<String, LibrarySkill>>>;
+/// `LibrarySkill` and the `SKILL.md` stamp it was read at. Wrapped in
+/// `Arc<Mutex<…>>` so `Library::clone` shares the same cache across all handle
+/// copies (e.g., the Axum state clone).
+type SkillCache = Arc<Mutex<HashMap<String, (FileStamp, LibrarySkill)>>>;
+
+/// What `get_skill` compares to decide a cached entry is still the file on
+/// disk: modification time + length.
+type FileStamp = (Option<SystemTime>, u64);
+
+fn stamp_of(path: &Path) -> Option<FileStamp> {
+    let meta = fs::metadata(path).ok()?;
+    Some((meta.modified().ok(), meta.len()))
+}
+
+/// Replace `path` with `bytes` without ever leaving it truncated: write a temp
+/// sibling, `sync_all`, rename it over the target, then fsync the directory.
+/// A symlinked target keeps its link (the link's target is replaced), and an
+/// existing file keeps its permissions (an executable `*.sh` stays executable).
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let target = match fs::symlink_metadata(path) {
+        Ok(m) if m.file_type().is_symlink() => fs::canonicalize(path)?,
+        _ => path.to_path_buf(),
+    };
+    let dir = target
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no parent dir"))?;
+    let file_name = target
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no file name"))?
+        .to_string_lossy();
+    let tmp = dir.join(format!(
+        ".{file_name}.otto-tmp-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    let written = (|| {
+        let mut f = fs::File::create(&tmp)?;
+        io::Write::write_all(&mut f, bytes)?;
+        if let Ok(meta) = fs::metadata(&target) {
+            let _ = f.set_permissions(meta.permissions());
+        }
+        f.sync_all()?;
+        fs::rename(&tmp, &target)
+    })();
+    if let Err(e) = written {
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
+    }
+    // Persist the rename itself (best-effort: not every FS allows it).
+    if let Ok(d) = fs::File::open(dir) {
+        let _ = d.sync_all();
+    }
+    Ok(())
+}
 
 /// Handle to the on-disk library rooted at `root`.
 #[derive(Clone)]
@@ -247,14 +311,24 @@ impl Library {
     pub fn get_skill(&self, name: &str) -> Option<LibrarySkill> {
         let path = self.skill_path(name)?;
 
-        // Cache hit: return without touching disk.
+        // Cache hit only while the file still has the stamp it was read at:
+        // one `stat`, no read/parse.
+        let Some(stamp) = stamp_of(&path) else {
+            self.evict(name);
+            return None;
+        };
         if let Ok(cache) = self.skill_cache.lock() {
-            if let Some(cached) = cache.get(name) {
-                return Some(cached.clone());
+            if let Some((cached_at, cached)) = cache.get(name) {
+                if *cached_at == stamp {
+                    return Some(cached.clone());
+                }
             }
         }
 
-        // Cache miss: read and parse outside the lock.
+        // Miss or stale: read and parse outside the lock. The entry is stored
+        // under the stamp taken BEFORE the read, so a write that lands after
+        // it (even one whose evict ran before our insert) changes the stamp
+        // and the next call re-reads instead of pinning this body.
         let body = fs::read_to_string(&path).ok()?;
         let description = parse_description(&body);
         let category = parse_category(&body);
@@ -269,7 +343,7 @@ impl Library {
 
         // Insert into cache (best-effort — a poisoned mutex is ignored).
         if let Ok(mut cache) = self.skill_cache.lock() {
-            cache.insert(name.to_string(), skill.clone());
+            cache.insert(name.to_string(), (stamp, skill.clone()));
         }
         Some(skill)
     }
@@ -281,7 +355,7 @@ impl Library {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(path, body)?;
+        write_atomic(&path, body.as_bytes())?;
         // Evict the stale cached entry so the next read picks up the new content.
         if let Ok(mut cache) = self.skill_cache.lock() {
             cache.remove(name);
@@ -361,7 +435,7 @@ impl Library {
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(target, content)?;
+        write_atomic(&target, content.as_bytes())?;
         self.evict(name);
         Ok(())
     }
@@ -621,7 +695,7 @@ impl Library {
 
     pub fn set_default_soul(&self, name: &str) -> io::Result<()> {
         fs::create_dir_all(&self.root)?;
-        fs::write(self.default_soul_path(), name.trim())
+        write_atomic(&self.default_soul_path(), name.trim().as_bytes())
     }
 }
 
@@ -663,7 +737,7 @@ fn write_md_entry(dir: &std::path::Path, name: &str, body: &str) -> io::Result<(
     let path = md_entry_path(dir, name)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "unsafe entry name"))?;
     fs::create_dir_all(dir)?;
-    fs::write(path, body)
+    write_atomic(&path, body.as_bytes())
 }
 
 fn delete_md_entry(dir: &std::path::Path, name: &str) -> io::Result<()> {
@@ -785,6 +859,54 @@ mod tests {
         assert!(safe_rel("a//b").is_none());
         assert!(safe_rel("a\\b").is_none());
         assert!(safe_rel("references/..").is_none());
+    }
+
+    /// A writer that bypasses `Library` (improve engine, bundled install, a
+    /// hand edit) is visible to the next `get_skill` — the cache re-stats.
+    #[test]
+    fn external_skill_md_write_is_seen_by_the_next_get_skill() {
+        let (_d, lib) = lib();
+        lib.put_skill("ext", "---\ndescription: Old\n---\nold body")
+            .unwrap();
+        assert_eq!(lib.get_skill("ext").unwrap().description, "Old");
+        // Cached now; rewrite the file behind the Library's back.
+        std::fs::write(
+            lib.skill_path("ext").unwrap(),
+            "---\ndescription: Applied improvement\n---\nnew, longer body",
+        )
+        .unwrap();
+        let got = lib.get_skill("ext").unwrap();
+        assert_eq!(got.description, "Applied improvement");
+        assert!(got.body.ends_with("new, longer body"));
+        // And an external delete is not served from the cache either.
+        std::fs::remove_file(lib.skill_path("ext").unwrap()).unwrap();
+        assert!(lib.get_skill("ext").is_none());
+    }
+
+    #[test]
+    fn write_atomic_replaces_whole_file_and_leaves_no_temp() {
+        let d = TempDir::new().unwrap();
+        let p = d.path().join("SKILL.md");
+        std::fs::write(&p, "a much longer original body").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        write_atomic(&p, b"short").unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "short");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o755, "permissions survive the replace");
+        }
+        let names: Vec<_> = std::fs::read_dir(d.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["SKILL.md".to_string()]);
     }
 
     #[test]

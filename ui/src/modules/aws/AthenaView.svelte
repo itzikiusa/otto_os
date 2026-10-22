@@ -91,7 +91,6 @@
   let qRegion = '';
   let executionGeneration = 0;
   let qstate = $state<AthenaQueryState | null>(null);
-  let qreason = $state('');
   let scanned = $state(0);
   let execMs = $state(0);
   let result = $state<QueryResult | null>(null);
@@ -265,7 +264,6 @@
     submitting = true;
     resultError = null;
     result = null;
-    qreason = '';
     scanned = 0;
     execMs = 0;
     ranSql = text;
@@ -336,7 +334,6 @@
       if (s.state === 'SUCCEEDED') {
         result = s.result ?? { columns: [], rows: [], stats: { duration_ms: execMs, row_count: 0 }, truncated: false };
       } else {
-        qreason = s.reason ?? '';
         resultError = `${s.state}${s.reason ? `: ${s.reason}` : ''}`;
       }
       void loadHistory();

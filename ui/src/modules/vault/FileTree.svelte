@@ -127,7 +127,9 @@
   // One row is in the Tab order: the last focused row, else the open note/file,
   // else the first row. ↑/↓/Home/End move it, → opens a folder or steps into
   // it, ← closes it or steps out to the parent folder (mirrored under RTL),
-  // Enter/Space opens, ContextMenu / ⇧F10 opens the row menu. The list is
+  // Enter/Space opens, ⌘/Ctrl+Space toggles the note's selection for group
+  // agent actions (the per-row checkbox stays out of the Tab order), F2
+  // renames, ContextMenu / ⇧F10 opens the row menu. The list is
   // virtualized, so the focused row is pinned (kept mounted) and scrolled to.
   let treeEl = $state<HTMLElement | null>(null);
   let focusPath = $state<string | null>(null);
@@ -168,6 +170,9 @@
       const cut = n.entry.path.lastIndexOf('/');
       const parent = cut > 0 ? flat.findIndex((x) => x.entry.path === n.entry.path.slice(0, cut)) : -1;
       if (parent >= 0) focusRow(parent);
+    } else if (e.key === ' ' && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      if (!isDir) toggleSelect(n.entry.path);
     } else if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault();
       rowClick(n, e);
@@ -283,7 +288,7 @@
   }
 </script>
 
-<div class="tree" role="tree" aria-label="Vault files" bind:this={treeEl}>
+<div class="tree" role="tree" aria-label="Vault files" aria-multiselectable="true" bind:this={treeEl}>
   {#if (vault.treeLoading || vault.treeError) && flat.length === 0}
     <LoadState
       what="files"
@@ -332,7 +337,8 @@
           role="treeitem"
           data-path={n.entry.path}
           class:checked={selected.has(n.entry.path)}
-          aria-selected={isActive(n)}
+          aria-selected={n.entry.kind === 'dir' ? undefined : selected.has(n.entry.path)}
+          aria-current={isActive(n) ? 'page' : undefined}
           aria-level={n.depth + 1}
           aria-expanded={n.entry.kind === 'dir' ? n.open : undefined}
           tabindex={n.entry.path === tabStop ? 0 : -1}
@@ -361,7 +367,9 @@
               class="sel reveal-on-hover"
               class:vis={selected.size > 0}
               checked={selected.has(n.entry.path)}
-              aria-label="Select for group agent actions"
+              tabindex="-1"
+              aria-label="Select {n.entry.kind === 'note' ? n.entry.name.replace(/\.md$/i, '') : n.entry.name}"
+              title="Select for group agent actions (⌘/Ctrl+Space)"
               onclick={(e) => {
                 e.stopPropagation();
                 toggleSelect(n.entry.path);

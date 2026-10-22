@@ -182,12 +182,24 @@ impl BrokerClustersRepo {
     }
 
     pub async fn update(&self, id: &Id, u: UpdateBrokerCluster) -> Result<BrokerClusterRow> {
+        // One statement (data-integrity-2-03): the safety flags
+        // (`environment`, `read_only`) and the credential refs commit with the
+        // connection fields, so no reader ever sees a cluster that already
+        // points at new (possibly production) brokers under the old
+        // `read_only = 0`. The three-state fields (None = keep, Some(None) =
+        // clear) use a CASE on a "present" flag; the rest COALESCE.
         sqlx::query(
             "UPDATE broker_clusters SET
                 name = ?, bootstrap_servers = ?, security_protocol = ?,
                 sasl_mechanism = ?, sasl_username = ?, tls_skip_verify = ?,
                 schema_registry_url = ?, schema_registry_username = ?,
-                metrics_url = ?, color = ?
+                metrics_url = ?, color = ?,
+                ssh_config = CASE WHEN ? THEN ? ELSE ssh_config END,
+                section_id = CASE WHEN ? THEN ? ELSE section_id END,
+                secret_ref = CASE WHEN ? THEN ? ELSE secret_ref END,
+                sr_secret_ref = CASE WHEN ? THEN ? ELSE sr_secret_ref END,
+                environment = COALESCE(?, environment),
+                read_only = COALESCE(?, read_only)
              WHERE id = ?",
         )
         .bind(&u.name)
@@ -200,59 +212,20 @@ impl BrokerClustersRepo {
         .bind(&u.schema_registry_username)
         .bind(&u.metrics_url)
         .bind(&u.color)
+        .bind(u.ssh_config.is_some())
+        .bind(u.ssh_config.flatten())
+        .bind(u.section_id.is_some())
+        .bind(u.section_id.flatten())
+        .bind(u.secret_ref.is_some())
+        .bind(u.secret_ref.flatten())
+        .bind(u.sr_secret_ref.is_some())
+        .bind(u.sr_secret_ref.flatten())
+        .bind(u.environment)
+        .bind(u.read_only.map(i64::from))
         .bind(id)
         .execute(&self.pool)
         .await
         .map_err(dberr("update broker cluster"))?;
-
-        if let Some(ssh_config) = u.ssh_config {
-            sqlx::query("UPDATE broker_clusters SET ssh_config = ? WHERE id = ?")
-                .bind(ssh_config)
-                .bind(id)
-                .execute(&self.pool)
-                .await
-                .map_err(dberr("update broker cluster"))?;
-        }
-        if let Some(section_id) = u.section_id {
-            sqlx::query("UPDATE broker_clusters SET section_id = ? WHERE id = ?")
-                .bind(section_id)
-                .bind(id)
-                .execute(&self.pool)
-                .await
-                .map_err(dberr("update broker cluster"))?;
-        }
-        if let Some(secret_ref) = u.secret_ref {
-            sqlx::query("UPDATE broker_clusters SET secret_ref = ? WHERE id = ?")
-                .bind(secret_ref)
-                .bind(id)
-                .execute(&self.pool)
-                .await
-                .map_err(dberr("update broker cluster"))?;
-        }
-        if let Some(sr) = u.sr_secret_ref {
-            sqlx::query("UPDATE broker_clusters SET sr_secret_ref = ? WHERE id = ?")
-                .bind(sr)
-                .bind(id)
-                .execute(&self.pool)
-                .await
-                .map_err(dberr("update broker cluster"))?;
-        }
-        if let Some(env) = u.environment {
-            sqlx::query("UPDATE broker_clusters SET environment = ? WHERE id = ?")
-                .bind(env)
-                .bind(id)
-                .execute(&self.pool)
-                .await
-                .map_err(dberr("update broker cluster"))?;
-        }
-        if let Some(ro) = u.read_only {
-            sqlx::query("UPDATE broker_clusters SET read_only = ? WHERE id = ?")
-                .bind(i64::from(ro))
-                .bind(id)
-                .execute(&self.pool)
-                .await
-                .map_err(dberr("update broker cluster"))?;
-        }
         self.get(id).await
     }
 
@@ -400,6 +373,7 @@ mod tests {
         assert!(cleared.secret_ref.is_none());
         assert!(cleared.ssh_config.is_none());
         assert_eq!(cleared.environment, "prod"); // preserved (None)
+        assert!(cleared.read_only); // preserved (None)
 
         repo.delete(&created.id).await.unwrap();
         assert!(repo.get(&created.id).await.is_err());

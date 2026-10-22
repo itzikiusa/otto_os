@@ -1261,23 +1261,66 @@ async fn lifecycle_mutations_wait_for_in_flight_restart() {
     }
 }
 
+/// The plaintext credential files a Codex spawn leaves on disk for `id`: the
+/// MCP bearer-token file plus two user-server env files (Keychain secrets
+/// included). Also writes ONE env file for a neighbour session whose id
+/// extends `id` (`{id}0`), so a matcher that loses its `.` separator would
+/// delete it too. Returns (`id`'s three files, the neighbour's file).
+fn seed_credential_files(id: &Id) -> (Vec<std::path::PathBuf>, std::path::PathBuf) {
+    let env = std::collections::BTreeMap::from([("API_KEY".to_string(), "s3cret".to_string())]);
+    let creds = write_codex_creds(id, "tok", "http://127.0.0.1:7700", "ws", None).unwrap();
+    let mut own = vec![creds];
+    for server in ["a", "b"] {
+        let path = codex_server_env_path(id, server);
+        crate::mcp::write_env_file(&path, &env).unwrap();
+        own.push(path);
+    }
+    let neighbour = codex_server_env_path(&format!("{id}0"), "a");
+    crate::mcp::write_env_file(&neighbour, &env).unwrap();
+    for f in own.iter().chain([&neighbour]) {
+        assert!(f.exists(), "fixture {} written", f.display());
+    }
+    (own, neighbour)
+}
+
+/// `id`'s credential files are gone; the neighbour session's file survives
+/// (then is cleaned up — it lives in the shared temp dir).
+fn assert_credential_files_removed(
+    op: &str,
+    own: &[std::path::PathBuf],
+    neighbour: &std::path::Path,
+) {
+    for f in own {
+        assert!(!f.exists(), "{op} left {} on disk", f.display());
+    }
+    assert!(
+        neighbour.exists(),
+        "{op} deleted another session's env file {}",
+        neighbour.display()
+    );
+    let _ = std::fs::remove_file(neighbour);
+}
+
 #[tokio::test]
 async fn removing_session_revokes_persisted_tokens_without_in_memory_mapping() {
     let (mgr, repo, ws, user) = test_manager().await;
     let id = seed_session(&repo, &ws, &user, None).await;
     let auth = mgr.auth.as_ref().unwrap();
     let (token, _) = auth.issue_session_api_token(&user, &id).await.unwrap();
+    let (own, neighbour) = seed_credential_files(&id);
     assert!(mgr.mcp_tokens.is_empty()); // As after a daemon restart.
     assert!(auth.authenticate(&token).await.is_ok());
     mgr.remove(&id).await.unwrap();
     assert!(auth.authenticate(&token).await.is_err());
     assert!(auth.list_api_tokens(&user).await.unwrap().is_empty());
+    assert_credential_files_removed("remove", &own, &neighbour);
 }
 
 /// A retired process's MCP credential dies with it (it used to stay valid,
 /// with the owner's full permissions, for its 10-year TTL while the row
-/// lingered): archive / suspend / kill revoke it, the session row stays,
-/// and a resume mints a fresh one.
+/// lingered): archive / suspend / kill revoke it — and delete its plaintext
+/// creds / env files, sparing other sessions' — the session row stays, and
+/// a resume mints a fresh one.
 #[tokio::test]
 async fn retiring_a_session_revokes_its_managed_credentials() {
     for operation in ["archive", "suspend", "kill"] {
@@ -1285,6 +1328,7 @@ async fn retiring_a_session_revokes_its_managed_credentials() {
         let id = seed_session(&repo, &ws, &user, Some("sid-cred")).await;
         let auth = mgr.auth.as_ref().unwrap();
         let (token, _) = auth.issue_session_api_token(&user, &id).await.unwrap();
+        let (own, neighbour) = seed_credential_files(&id);
         assert!(auth.authenticate(&token).await.is_ok());
         let outcome = match operation {
             "archive" => mgr.archive(&id).await.map(|_| ()),
@@ -1300,6 +1344,7 @@ async fn retiring_a_session_revokes_its_managed_credentials() {
             repo.get(&id).await.is_ok(),
             "{operation} must keep the session row"
         );
+        assert_credential_files_removed(operation, &own, &neighbour);
     }
 }
 

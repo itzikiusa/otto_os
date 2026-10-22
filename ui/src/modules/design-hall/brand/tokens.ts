@@ -12,6 +12,7 @@
 // canonical values), `contrast.rs` (WCAG) and `impact.rs` (references). Keep the
 // two in step. Unit-tested: ui/unit/brandTokens.test.ts.
 
+import { isValidTokenName } from '../../../lib/design/tokenGrammar.ts';
 import type {
   BrandDoc,
   BrandFontRole,
@@ -43,10 +44,9 @@ function str(v: unknown): string | null {
 
 // ── Names and values ─────────────────────────────────────────────────────────
 
-/** `[A-Za-z0-9][A-Za-z0-9_-]{0,63}`. */
-export function isValidTokenName(s: string): boolean {
-  return /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(s);
-}
+/** `[A-Za-z0-9][A-Za-z0-9_-]{0,63}` — the shared grammar (lib/design/tokenGrammar),
+ *  also enforced by the 3D scene validator. */
+export { isValidTokenName };
 
 /** `#abc` → `#AABBCC`; `#aabbcc` / `#aabbccdd` upper-cased; else null. */
 export function normalizeHex(s: string): string | null {

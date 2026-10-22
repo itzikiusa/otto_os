@@ -852,7 +852,7 @@
                 {/key}
               </div>
             {/if}
-            <p class="error-msg">{agent.error ?? 'Unknown error'}</p>
+            <p class="error-msg">{agent.error ?? 'This agent stopped without reporting a reason.'}</p>
           </section>
         {/if}
       {/each}

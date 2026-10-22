@@ -12,7 +12,7 @@
   import LazyTerminal from '../../lib/components/LazyTerminal.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import type { WorkflowRun, Review, Session } from '../../lib/api/types';
-  import { api } from '../../lib/api/client';
+  import { api, ApiError } from '../../lib/api/client';
   import { mapLimit } from '../../lib/poll';
   import { liveQuery, type LiveEvent } from '../../lib/live';
   import { untrack } from 'svelte';
@@ -120,7 +120,13 @@
       try {
         const session = await api.get<Session>(`/sessions/${id}`);
         if (mounted) sessionDetails[id] = session;
-      } catch { /* An old deleted session still retains its review label. */ }
+      } catch (e) {
+        // Only a 404 (a deleted session — its review label still shows) is
+        // remembered. A timeout or a restarting daemon is forgotten, so the
+        // next id-set change looks it up again instead of leaving the row
+        // without title, provider or clock for the rest of the mount.
+        if (!(e instanceof ApiError && e.status === 404)) attemptedSessions.delete(id);
+      }
     }));
   });
   const runActive = $derived(run.status === 'running' || run.status === 'pending');

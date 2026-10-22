@@ -318,7 +318,11 @@ fn images(v: &Value) -> Option<Vec<String>> {
         .chain(arr(v, "/spec/jobTemplate/spec/template/spec/containers"))
         .filter_map(|c| s(c, "/image").map(str::to_string))
         .collect();
-    out.dedup();
+    // Order-preserving de-dupe: `Vec::dedup` only drops CONSECUTIVE repeats, so
+    // `[app, envoy, app]` (one image running two commands around a sidecar) kept
+    // `app` twice and the drawer's keyed image list threw.
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|im| seen.insert(im.clone()));
     (!out.is_empty()).then_some(out)
 }
 
@@ -1834,6 +1838,20 @@ mod tests {
         DateTime::parse_from_rfc3339("2026-09-01T12:00:00Z")
             .unwrap()
             .with_timezone(&Utc)
+    }
+
+    #[test]
+    fn images_dedupe_non_adjacent_repeats_in_order() {
+        let pod = json!({"spec": {"containers": [
+            {"name": "web", "image": "app:1.4"},
+            {"name": "proxy", "image": "envoy:1.30"},
+            {"name": "worker", "image": "app:1.4"},
+        ]}});
+        assert_eq!(
+            images(&pod).unwrap(),
+            vec!["app:1.4".to_string(), "envoy:1.30".to_string()]
+        );
+        assert_eq!(images(&json!({"spec": {"containers": []}})), None);
     }
 
     #[test]

@@ -14,6 +14,7 @@
   import { aws } from '../../lib/stores/aws.svelte';
   import { awsApi } from '../../lib/api/aws';
   import { toasts } from '../../lib/toast.svelte';
+  import { radioKey } from '../../lib/radioKey';
   import EnvBadge from '../../lib/components/EnvBadge.svelte';
   import type {
     AwsAccount,
@@ -290,6 +291,8 @@
               <button
                 role="radio"
                 aria-checked={environment === e}
+                tabindex={environment === e ? 0 : -1}
+                onkeydown={radioKey}
                 class="env-chip"
                 class:selected={environment === e}
                 class:prod={e === 'prod'}
@@ -304,10 +307,12 @@
         <div class="field">
           <span>Color</span>
           <div class="colors" role="radiogroup" aria-label="Color">
-            {#each COLORS as c (c.value)}
+            {#each COLORS as c, ci (c.value)}
               <button
                 role="radio"
                 aria-checked={color === c.value}
+                tabindex={color === c.value || (ci === 0 && !COLORS.some((x) => x.value === color)) ? 0 : -1}
+                onkeydown={radioKey}
                 class="sw"
                 class:on={color === c.value}
                 style="background:{c.value}"

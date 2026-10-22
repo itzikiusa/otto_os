@@ -205,6 +205,8 @@ export interface UpdateSceneReq {
   thumbnail?: string;
   provider?: string;
   section?: string | null;
+  /** Link/relink this scene to a product story. */
+  story_id?: string | null;
 }
 
 export type AssistMode = 'auto' | 'sequence' | 'flow' | 'uml' | 'nodes';

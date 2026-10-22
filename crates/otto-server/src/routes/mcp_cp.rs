@@ -31,17 +31,29 @@ async fn require_mcp_admin(ctx: &ServerCtx, user: &User) -> ApiResult<()> {
 
 /// `POST /api/v1/mcp/tokens/{id}/rotate` — replace one MCP token, preserving
 /// its owner, label, and scope while leaving every other token untouched.
+///
+/// Owner-bound: the new plaintext token authenticates AS the row's owner, so
+/// only that owner or root may rotate it — the same rule as minting one for
+/// another user (`create_mcp_token`). Otherwise a non-root `mcp:admin` could
+/// rotate root's token and walk away with a working root credential. Revoking
+/// (`DELETE /mcp/tokens/{id}`) stays open to `mcp:admin`: it only removes access.
 pub async fn rotate_mcp_token(
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
     require_mcp_admin(&ctx, &user).await?;
-    let Some((token, info)) = AuthRepo::with_cache(ctx.pool.clone(), ctx.auth_cache.clone())
-        .rotate_mcp_token(&id)
-        .await
-        .map_err(ApiError)?
-    else {
+    let repo = AuthRepo::with_cache(ctx.pool.clone(), ctx.auth_cache.clone());
+    let Some(owner) = repo.mcp_token_owner(&id).await.map_err(ApiError)? else {
+        return Err(Error::NotFound("mcp token not found".into()).into());
+    };
+    if owner != user.id && !user.is_root {
+        return Err(Error::Forbidden(
+            "only root may rotate an MCP token owned by another user".into(),
+        )
+        .into());
+    }
+    let Some((token, info)) = repo.rotate_mcp_token(&id).await.map_err(ApiError)? else {
         return Err(Error::NotFound("mcp token not found".into()).into());
     };
     ctx.audit(NewAuditEntry {

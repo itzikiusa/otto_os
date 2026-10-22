@@ -52,7 +52,7 @@ const PASTE_BUSY_QUIET: Duration = Duration::from_millis(1500);
 // not, re-send Enter once — a freshly-spawned CLI under load can drop the first.
 const DISPATCH_WAIT: Duration = Duration::from_secs(6);
 const DISPATCH_POLL: Duration = Duration::from_millis(250);
-pub const FINDINGS_POLL: Duration = Duration::from_millis(1000);
+const FINDINGS_POLL: Duration = Duration::from_millis(1000);
 /// After this much silence with no findings yet, assume the agent may be
 /// blocked on a prompt the guard couldn't auto-accept and flag it "waiting".
 pub const WAITING_IDLE: Duration = Duration::from_secs(120);
@@ -935,7 +935,7 @@ pub async fn claude_prompt_landed(
         if Instant::now() >= deadline {
             return false;
         }
-        tokio::time::sleep(Duration::from_millis(1000)).await;
+        tokio::time::sleep(FINDINGS_POLL).await;
     }
 }
 
@@ -1158,6 +1158,14 @@ pub async fn submit_prompt(
     if !wait_for_tui_strict(manager, sid).await {
         return false;
     }
+    // One submission at a time per session: hold the submit lock (the one
+    // `submit_text`, the human composer, the channel bridge and swarm runs
+    // take) through paste, echo wait, Enter and re-Enter. Without it a
+    // concurrent message landed between this paste and its Enter (one merged
+    // prompt plus an empty one), and the Ctrl-U re-paste clear below erased
+    // the other submitter's paste.
+    let lock = manager.submit_lock(sid);
+    let _submit = lock.lock().await;
     let probe = paste_probe(prompt);
     for attempt in 0..2 {
         if attempt == 1 {

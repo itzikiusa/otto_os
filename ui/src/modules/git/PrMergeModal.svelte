@@ -206,7 +206,7 @@
             <span class="dim">No checks reported</span>
           {:else}
             <span class="checks">
-              {#each checks.checks as c (c.name)}
+              {#each checks.checks as c, i (i)}
                 {@const ic = checkIcon(c.state)}
                 {#if c.url}
                   <button

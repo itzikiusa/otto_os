@@ -20,6 +20,7 @@
 import * as liveApi from '../api/browserLive';
 import { appLive } from '../live';
 import { ApiError } from '../api/client';
+import { loadErrorText } from '../loadError';
 import type {
   BrowserChromeBuild,
   BrowserEngineBuildStatus,
@@ -121,7 +122,7 @@ class BrowserLiveStore {
         this.supported = false;
         this.loadError = '';
       } else {
-        this.loadError = e instanceof Error ? e.message : String(e);
+        this.loadError = loadErrorText(e);
       }
     } finally {
       this.loading = false;

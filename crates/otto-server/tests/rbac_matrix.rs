@@ -131,7 +131,8 @@ fn app(pool: DbPool, user: User) -> Router {
         // over the generic `/connections/{id}/db/` Database prefix.
         .route("/connections/{id}/db/assist", post(ok))
         // Connections feature
-        .route("/connections", post(ok))
+        .route("/workspaces/{id}/connections", get(ok).post(ok))
+        .route("/connections/{id}", axum::routing::delete(ok))
         .route("/connections/{id}/open", post(ok))
         // Agents feature
         .route("/workspaces/{id}/sessions", get(ok))
@@ -266,7 +267,12 @@ async fn db_assist_route_is_connections_edit_not_database() {
 async fn db_view_user_cannot_manage_conns() {
     let app = app_for(&[(Feature::Database, Capability::View)], false).await;
     assert_eq!(
-        status(&app, Method::POST, "/api/v1/connections").await,
+        status(&app, Method::POST, "/api/v1/workspaces/w1/connections").await,
+        StatusCode::FORBIDDEN,
+        "creating a connection is Connections:Edit"
+    );
+    assert_eq!(
+        status(&app, Method::DELETE, "/api/v1/connections/c1").await,
         StatusCode::FORBIDDEN,
         "connection management is Connections:Admin"
     );
@@ -316,11 +322,17 @@ async fn connections_edit_user_can_open_but_not_manage_globals() {
         StatusCode::OK,
         "Connections:Edit must allow opening a connection"
     );
-    // Create a global connection = Connections:Admin → denied.
+    // Create a connection in a workspace = Connections:Edit → allowed.
     assert_eq!(
-        status(&app, Method::POST, "/api/v1/connections").await,
+        status(&app, Method::POST, "/api/v1/workspaces/w1/connections").await,
+        StatusCode::OK,
+        "Connections:Edit must allow creating a workspace connection"
+    );
+    // Delete a connection profile = Connections:Admin → denied.
+    assert_eq!(
+        status(&app, Method::DELETE, "/api/v1/connections/c1").await,
         StatusCode::FORBIDDEN,
-        "global connection management requires Connections:Admin"
+        "connection management requires Connections:Admin"
     );
 }
 
@@ -330,7 +342,8 @@ async fn root_passes_everything() {
     for (m, p) in [
         (Method::GET, "/api/v1/connections/c1/db/tables"),
         (Method::POST, "/api/v1/connections/c1/db/query"),
-        (Method::POST, "/api/v1/connections"),
+        (Method::POST, "/api/v1/workspaces/w1/connections"),
+        (Method::DELETE, "/api/v1/connections/c1"),
         (Method::POST, "/api/v1/connections/c1/open"),
         (Method::GET, "/api/v1/workspaces/w1/sessions"),
         (Method::GET, "/api/v1/workspaces/w1/swarm/swarms"),

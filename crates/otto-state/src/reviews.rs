@@ -150,6 +150,42 @@ impl ReviewsRepo {
         Ok(res.rows_affected())
     }
 
+    /// Settle every agent row a dead process left live. Called on daemon
+    /// startup after [`Self::fail_running`]: a per-agent Retry runs on a
+    /// SETTLED review, so its `pending` / `running` / `waiting` row is not
+    /// covered by the review-level sweep, and while it stays live Retry, Stop
+    /// and the summarizer re-run all refuse. Each such row becomes `error`
+    /// with `note`, in reviews that are not `running`. Returns the number of
+    /// agent rows rewritten.
+    pub async fn fail_orphaned_agents(&self, note: &str) -> Result<u64> {
+        let rows = sqlx::query(
+            "SELECT id, agents_json FROM pr_reviews WHERE status != 'running' \
+             AND EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(agents_json) THEN agents_json ELSE '[]' END) \
+               WHERE json_extract(value, '$.status') IN ('pending', 'running', 'waiting'))",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("orphaned review agents"))?;
+        let mut settled = 0u64;
+        for row in rows {
+            let id: Id = row.get("id");
+            let raw: String = row.try_get("agents_json").unwrap_or_default();
+            let Ok(mut agents) = serde_json::from_str::<Vec<ReviewAgentState>>(&raw) else {
+                continue;
+            };
+            for (index, agent) in agents.iter_mut().enumerate() {
+                if matches!(agent.status.as_str(), "pending" | "running" | "waiting") {
+                    agent.status = "error".into();
+                    agent.note = note.to_string();
+                    // Per element, so a malformed sibling never blocks the rest.
+                    self.set_agent_at(&id, index, agent).await?;
+                    settled += 1;
+                }
+            }
+        }
+        Ok(settled)
+    }
+
     /// Overwrite the agents_json column for a review row.
     pub async fn set_agents(&self, id: &Id, agents: &[ReviewAgentState]) -> Result<()> {
         let json = serde_json::to_string(agents)
@@ -667,6 +703,53 @@ mod tests {
             repo.get_review(&id).await.unwrap().agents[0].status,
             "pending"
         );
+    }
+
+    /// backend-correctness-3-01: the boot sweep settles live agent rows of
+    /// settled reviews (an interrupted per-agent retry) and leaves a running
+    /// review's rows and already-settled rows alone.
+    #[tokio::test]
+    async fn boot_sweep_settles_orphaned_agents_of_settled_reviews() {
+        let pool = mem_pool().await;
+        let repo = ReviewsRepo::new(pool.clone());
+        let settled = new_id();
+        let running = new_id();
+        for (id, status) in [(&settled, "done"), (&running, "running")] {
+            sqlx::query(
+                "INSERT INTO pr_reviews (id, repo_id, pr_number, status, created_at)
+                 VALUES (?, 'r', 1, ?, '2026-01-01T00:00:00Z')",
+            )
+            .bind(id)
+            .bind(status)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        repo.set_agents(
+            &settled,
+            &[
+                agent("a", "pending"),
+                agent("b", "done"),
+                agent("c", "waiting"),
+                agent("summary", "done"),
+            ],
+        )
+        .await
+        .unwrap();
+        repo.set_agents(&running, &[agent("a", "pending"), agent("s", "pending")])
+            .await
+            .unwrap();
+        let note = "Interrupted by a daemon restart";
+        assert_eq!(repo.fail_orphaned_agents(note).await.unwrap(), 2);
+        let after = repo.get_review(&settled).await.unwrap().agents;
+        assert_eq!(after[0].status, "error");
+        assert_eq!(after[0].note, note);
+        assert_eq!(after[1].status, "done", "settled rows untouched");
+        assert_eq!(after[2].status, "error");
+        let live = repo.get_review(&running).await.unwrap().agents;
+        assert_eq!(live[0].status, "pending", "a running review is not swept");
+        // Idempotent: nothing left to settle.
+        assert_eq!(repo.fail_orphaned_agents(note).await.unwrap(), 0);
     }
 
     /// Regression for the "agents look capped/stuck at PENDING" bug: each agent

@@ -58,7 +58,7 @@ the session manager + improvement engine), and a Svelte UI module.
 | Media | `crates/otto-product/src/media.rs`, `crates/otto-server/src/mockup_assist.rs` | Attachment upload / content PUT (mime allow-list, sniffing, size caps), the in-place file-backed assist agent |
 | UI | `ui/src/modules/product/` | `ProductPage.svelte` + per-tab components; `types.ts` mirrors the DTOs |
 | · Design Arena | `ui/src/modules/product/design/` | `DesignArena.svelte` (assets / viewport / inspector / assistant shell), `DesignBoard.svelte` (Excalidraw island), `DeviceFrame.svelte`, templates, exporters |
-| · 3D | `ui/src/modules/product/design/scene3d/` | `Scene3DViewport.svelte` (lazy three.js), `Hierarchy.svelte`, `Inspector.svelte`, `types.ts` / `validate.ts` / `ops.ts` (pure doc mutations) / `exportGlb.ts` |
+| · 3D | `ui/src/lib/design/scene3d/` | `Scene3DViewport.svelte` (lazy three.js), `Hierarchy.svelte`, `Inspector.svelte`, `types.ts` / `validate.ts` / `ops.ts` (pure doc mutations) / `exportGlb.ts` |
 | Skills | `crates/otto-skills/assets/skills/development/otto-{mockup,design-2d,design-3d}/` | What the assistant / swarm agents know about the four formats and their authoring rules |
 | Contracts (authoritative) | `docs/contracts/product.md`, `api.md` (§ Product), `ws.md` (Product events) | The source-of-truth API spec |
 
@@ -646,7 +646,6 @@ and resolve the workspace from the owning row.
 | `PATCH /product/stories/{sid}/draft` | editor | update the working RFC draft body |
 | `POST /product/stories/{sid}/publish-as-rfc` · `/publish-as-story` | editor | publish a draft |
 | `GET/POST /workspaces/{ws}/product/learnings` · `PATCH/DELETE /product/learnings/{lid}` · `POST …/accept` | viewer/editor | learnings (global) |
-| `GET /workspaces/{ws}/product/drafts` | viewer | list drafts |
 | `GET /product/stories/{sid}/inject` | viewer | the consolidated inject bundle |
 | `GET /product/stories/{sid}/swarm` | viewer | the linked-swarm closure (tasks/runs/PRs/cost) |
 | `POST /product/stories/{sid}/children` | editor | `{ title, tree_kind, folder }` → `ProductStoryDetail` — add a child to an epic (one level only; a parent that itself has a parent is rejected) |
@@ -676,7 +675,7 @@ level and removes the story's attachments + annotations.
 
 The `scene3d` document schema (v1) is in §4.14 and, in full, in the
 `otto-design-3d` skill; the TS mirror lives in
-`ui/src/modules/product/design/scene3d/types.ts` + `validate.ts`, the Rust
+`ui/src/lib/design/scene3d/types.ts` + `validate.ts`, the Rust
 validator in `crates/otto-server/src/design_scene3d.rs`.
 
 ### AI orchestration (served by `otto-server`)

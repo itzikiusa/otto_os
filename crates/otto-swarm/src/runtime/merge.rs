@@ -5,8 +5,7 @@
 //! Conflicts are never auto-resolved — they're returned for the leader to turn
 //! into a fix task.
 
-use std::collections::HashMap;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use otto_core::api::LocalMergeStrategy;
 use otto_state::{Swarm, SwarmProject};
@@ -35,15 +34,10 @@ impl MergeOutcome {
 
 /// Per-(repo::branch) async lock so two task merges into the same integration
 /// branch never run concurrently.
-static LOCKS: OnceLock<std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
-    OnceLock::new();
+static LOCKS: otto_core::keyed_lock::KeyedLocks<String> = otto_core::keyed_lock::KeyedLocks::new();
 
 fn branch_lock(key: &str) -> Arc<tokio::sync::Mutex<()>> {
-    let map = LOCKS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
-    let mut g = map.lock().unwrap();
-    g.entry(key.to_string())
-        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-        .clone()
+    LOCKS.handle(key)
 }
 
 /// Merge `agent_branch` into the project's integration branch, in the integration

@@ -13,8 +13,7 @@
   import { events } from '../../../lib/events.svelte';
   import { sessionState, type SessionStateInfo } from '../../../lib/status';
   import type { Session } from '../../../lib/api/types';
-  import { now } from '../../../lib/stores/now.svelte';
-  import { relTime } from '../../mission-control/lib';
+  import { rel } from '../../../lib/stores/now.svelte';
   import type { HomeBox } from '../home.svelte';
 
   interface Props {
@@ -64,7 +63,7 @@
             <ProviderIcon provider={s.provider} size={12} />
             <span class="title ellipsis">{s.title}</span>
             {#if ws.needsYou[s.id]}<Badge tone="warn" label="Needs you" />{/if}
-            <span class="ago" title={new Date(s.last_active_at).toLocaleString()}>{now() && relTime(s.last_active_at)}</span>
+            <span class="ago" title={new Date(s.last_active_at).toLocaleString()}>{rel(s.last_active_at, { compact: true })}</span>
             <span class="go" aria-hidden="true"><Icon name="chevronRight" size={12} /></span>
           </button>
         </li>

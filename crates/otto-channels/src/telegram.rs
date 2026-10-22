@@ -321,10 +321,13 @@ impl Adapter for TelegramAdapter {
         Ok(msg_id)
     }
 
-    /// Send with Telegram Markdown parse mode enabled. Uses V1 legacy Markdown
-    /// (less strict than MarkdownV2) so `*bold*`, `_italic_`, `` `code` ``,
-    /// and `[text](url)` links render without requiring extensive escaping.
-    /// Falls back to plain `send` if the formatted send fails (e.g. parse error).
+    /// Send with Telegram's `HTML` parse mode. Agents answer in GitHub-flavoured
+    /// Markdown, which legacy `Markdown` mode rejects (`snake_case`, `**`), so
+    /// the text is converted to escaped, balanced HTML first
+    /// ([`crate::gfm::to_telegram_html`]): bold, italics, `code`, `<pre>`
+    /// blocks/tables and `[text](url)` links render.
+    /// Falls back to plain `send` of the original text if the formatted send
+    /// fails on a parse error or on the length the markup added.
     async fn send_formatted(
         &self,
         chat: &str,
@@ -333,8 +336,8 @@ impl Adapter for TelegramAdapter {
     ) -> anyhow::Result<String> {
         let mut body = serde_json::json!({
             "chat_id": chat,
-            "text": text,
-            "parse_mode": "Markdown",
+            "text": crate::gfm::to_telegram_html(text),
+            "parse_mode": "HTML",
         });
         if let Some(t) = thread {
             body["reply_to_message_id"] = serde_json::json!(t.parse::<i64>().unwrap_or(0));
@@ -345,9 +348,13 @@ impl Adapter for TelegramAdapter {
         }
         let tg: TgResponse<TgMessage> = self.post_json("sendMessage", &body).await?;
         if !tg.ok {
-            // Parse error from Markdown mode → fall back to plain text.
+            // Parse error from HTML mode (or the markup pushed the message
+            // past the length limit) → fall back to plain text.
             let desc = tg.description.unwrap_or_default();
-            if desc.contains("can't parse") || desc.contains("parse entities") {
+            if desc.contains("can't parse")
+                || desc.contains("parse entities")
+                || desc.contains("too long")
+            {
                 return self.send(chat, thread, text).await;
             }
             return Err(anyhow::anyhow!(

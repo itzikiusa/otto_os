@@ -12,7 +12,7 @@ This document is the authoritative end-user + operator reference for the
 feature. Where it describes wire-level behaviour, the source of truth is the
 contract files in `docs/contracts/` (`api.md`, `ws.md`); the Rust handlers in
 the `otto-review` crate (`crates/otto-review/`) + the ctx-bound orchestration
-and routes in `crates/otto-server/src/modules.rs`, and the Svelte UI in `ui/src/modules/git/` implement it.
+and routes in `crates/otto-server/src/modules/review/`, and the Svelte UI in `ui/src/modules/git/` implement it.
 
 ---
 
@@ -59,7 +59,7 @@ Key properties (all implemented):
 | **Local (working-tree) review** UI | Git → repo → **Review** tab (`ui/src/modules/git/RepoView.svelte` → `LocalReviewPanel.svelte`) | Per-repo; opens to a clean slate (§6.5) |
 | Shared per-agent cards | `ui/src/modules/git/ReviewAgents.svelte` | Open / Retry / per-agent findings; used by both panels |
 | Configure-agents modal | inside `ReviewPanel.svelte` ("⚙ Configure") | Edits the persisted `ReviewConfig` |
-| Orchestration engine | `crates/otto-server/src/modules.rs` (`run_review_core`, route handlers) | Fan-out, summarizer, draft-comment storage |
+| Orchestration engine | `crates/otto-server/src/modules/review/` (`run_review_core` in `run.rs`, route handlers in `routes.rs`, retry in `retry.rs`) | Fan-out, summarizer, draft-comment storage |
 | Engine pure core | `crates/otto-review/src/engine.rs` | Diff rendering + caps, config defaults + budgets, fan-out / orchestrator expansion, reviewer prompts, draft-comment parsing |
 | Summarizer lifecycle + deterministic fallback | `crates/otto-review/src/summarizer.rs`, `crates/otto-review/src/fallback.rs` | Managed summarizer attempt; the dedupe/rank floor when it cannot run |
 | Per-agent session lifecycle | `crates/otto-review/src/session.rs` | Spawn, prompt injection, watch, recovery/retry |
@@ -151,7 +151,7 @@ What happens:
 
 ## 4. How agents are spawned (the fan-out)
 
-Implemented in `run_review_core` (`modules.rs`) + `run_agent_session*`
+Implemented in `run_review_core` (`otto-server` `modules/review/`) + `run_agent_session*`
 (`otto-review/src/session.rs`):
 
 1. **Load `ReviewConfig`** (§7) — the stored config or the built-in default.

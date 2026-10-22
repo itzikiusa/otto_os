@@ -129,23 +129,23 @@ else 409), `POST /auth/login`, the share-gate pair `POST /share/verify` and
 `POST /share/extend` (the share token in the body is the auth), and the four
 `/ingest/*` routes (session-token gated, §2.5).
 
-### 2.4 Root-level `?token=` routers (WebSockets & proxies)
+### 2.4 Root-level WebSocket and proxy routers
 
 The WebSocket and proxy endpoints live at the **server root** (not under
-`/api/v1`) and self-authenticate via a query parameter or the
-`Sec-WebSocket-Protocol` header rather than the bearer middleware:
+`/api/v1`) and self-authenticate via the `Sec-WebSocket-Protocol` header (the
+proxy: a single-use ticket) rather than the bearer middleware:
 
 | Method & path | Auth | Purpose |
 |---|---|---|
-| `GET /ws/term/{session_id}` | `Sec-WebSocket-Protocol: otto-bearer, <token>` (preferred) or `?token=` | Terminal stream (§5) |
-| `GET /ws/events` | `Sec-WebSocket-Protocol: otto-bearer, <token>` (preferred) or `?token=` | Daemon event stream (§5) |
-| `GET /ws/lsp?lang=&root=&token=` | `?token=`; ws editor | LSP WebSocket bridge |
-| `GET /ws/api-client/stream?token=` | `?token=`; ws editor | API-client streaming-response bridge |
+| `GET /ws/term/{session_id}` | `Sec-WebSocket-Protocol: otto-bearer, <token>` only (`?token=` → 401) | Terminal stream (§5) |
+| `GET /ws/events` | `Sec-WebSocket-Protocol: otto-bearer, <token>` only (`?token=` → 401) | Daemon event stream (§5) |
+| `GET /ws/lsp?lang=&root=` | `Sec-WebSocket-Protocol: otto-bearer, <token>` only (`?token=` → 401); root, or a member (any role) of a workspace whose root — or a repo registered in it — contains `root`; share / MCP / agent-session tokens 403; a `root` in Otto's data dir or a credential dir 403 | LSP WebSocket bridge. 400 for a missing/unknown `lang` or `root`; 503 `server_unavailable` when no language-server binary is found |
+| `GET /ws/api-client/stream?workspace_id=` | `Sec-WebSocket-Protocol: otto-bearer, <token>` only (`?token=` → 401); ws editor + API Client Edit | API-client streaming-response bridge |
 | `GET /browser/proxy?url=&ticket=` | single-use `?ticket=` from `POST /api/v1/browser/proxy-ticket` | In-app browser take-over proxy (sandboxed: `CSP: sandbox allow-scripts`) |
 
-> Prefer the `Sec-WebSocket-Protocol: otto-bearer, <token>` form for the two
-> WebSockets — it keeps the token out of the URL (which proxies and servers log).
-> `?token=` remains a backward-compatible fallback. Any token kind works.
+> Every daemon WebSocket takes its token ONLY from `Sec-WebSocket-Protocol:
+> otto-bearer, <token>` (echoed back): it keeps the token out of the URL, which
+> proxies and servers log. A `?token=` query is refused with 401 (S11-312).
 
 ### 2.5 The per-session ingest token
 
@@ -196,7 +196,8 @@ resolve their owning workspace from the row and role-check against it.
 | Method & path | Auth | Purpose |
 |---|---|---|
 | `GET /meta` · `GET /auth/me` | public · member | Daemon/build metadata · current identity |
-| `GET /users` · `POST /users` · `PATCH/DELETE /users/{id}` | root | User CRUD (root cannot be disabled) |
+| `GET /users` | Users:Admin or root | Account list |
+| `POST /users` · `PATCH/DELETE /users/{id}` | root | User CRUD (root cannot be disabled) |
 | `GET /workspaces` · `POST /workspaces` | member | List workspaces (root sees all) · create one |
 | `GET/PUT /workspaces/{id}/members` | ws admin | Read / set workspace membership + roles |
 | `GET/PUT /settings` | root | Read / write the settings map (`network_listener`, `providers`, `cli_auto_update`, …) |
@@ -275,10 +276,11 @@ resolve their owning workspace from the row and role-check against it.
 | Method & path | Auth | Purpose |
 |---|---|---|
 | `GET/POST /workspaces/{id}/connections` | viewer / editor | List (incl. global; secret never present) · upsert |
-| `PATCH/DELETE /connections/{id}` | editor (global: root) | Edit (PATCH preserves guard) · delete (drops Keychain secret) |
+| `PATCH/DELETE /connections/{id}` | editor (global: `Connections:Admin`) | Edit (PATCH preserves guard) · delete (drops Keychain secret) |
 | `POST /connections/{id}/open`·`/test` | editor | Open a connection PTY · connectivity probe |
 | `GET /connections/{id}/sftp/list`·`/read` | viewer | Browse / read over the SSH connection's auth |
-| `POST /connections/{id}/sftp/download`·`/upload`·`/mkdir`·`/remove`·`/rename` | editor | SFTP transfers/mutations (require `kind==ssh`) |
+| `POST /connections/{id}/sftp/download`·`/upload` | editor + root | SFTP transfers to/from a daemon-host path (require `kind==ssh`; non-root → 403) |
+| `POST /connections/{id}/sftp/mkdir`·`/remove`·`/rename` | editor | SFTP mutations on the remote side (require `kind==ssh`) |
 
 ### Database Explorer (engine access + saved artifacts)
 
@@ -359,7 +361,7 @@ The filesystem endpoints use the permissions of the macOS account running `ottod
 Two long-lived WebSockets carry live data. Both validate the token **before** the
 upgrade completes (invalid → HTTP 401, no upgrade); an IP that fails too often is
 locked out (429). Both live at the server root (not `/api/v1`) and accept the
-token via `Sec-WebSocket-Protocol: otto-bearer, <token>` (preferred) or `?token=`.
+token only via `Sec-WebSocket-Protocol: otto-bearer, <token>` (`?token=` → 401).
 Spec: [`docs/contracts/ws.md`](../contracts/ws.md).
 
 ### 4.1 Terminal stream — `WS /ws/term/{session_id}`
@@ -388,9 +390,8 @@ reach every `viewer`+ member of the workspace; **broadcast** events reach all
 authenticated clients. Root receives all. Client→server frames are ignored.
 
 ```bash
-# wscat with the token kept out of the URL via the subprotocol:
+# wscat with the token in the subprotocol (the only accepted form):
 wscat -s "otto-bearer, $OTTO_API_TOKEN" -c "ws://127.0.0.1:7700/ws/events"
-# (or the fallback) wscat -c "ws://127.0.0.1:7700/ws/events?token=$OTTO_API_TOKEN"
 ```
 
 ### 4.3 Event catalog (what you can subscribe to)

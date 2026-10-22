@@ -1,35 +1,18 @@
 // Small formatting helpers shared by the AWS console views.
 
 import type { AwsIdentity, S3ListObjectsResp, S3Object } from '../../lib/api/types';
+import { formatBytes } from '../../lib/metric-format';
+import { rel } from '../../lib/stores/now.svelte';
 
-/** 1234567 → "1.2 MB" (binary-ish, 1 decimal above KB). */
-export function fmtBytes(n: number | null | undefined): string {
-  if (n == null || !Number.isFinite(n)) return '—';
-  if (n < 1024) return `${n} B`;
-  const units = ['KB', 'MB', 'GB', 'TB', 'PB'];
-  let v = n / 1024;
-  let i = 0;
-  while (v >= 1024 && i < units.length - 1) {
-    v /= 1024;
-    i++;
-  }
-  return `${v.toFixed(v >= 100 ? 0 : 1)} ${units[i]}`;
-}
+/** 1234567 → "1.2 MB" — the shared formatter (lib/metric-format). */
+export const fmtBytes = (n: number | null | undefined): string => formatBytes(n);
 
-/** ISO timestamp → "3m ago" / "2d ago" (falls back to the date for old items). */
+/** ISO timestamp → "3m ago" / "2d ago" — the shared reactive `rel()` (falls
+ *  back to the date for old items); "—" when unknown, the raw text when
+ *  unparseable. */
 export function fmtAgo(iso: string | null | undefined): string {
   if (!iso) return '—';
-  const t = Date.parse(iso);
-  if (Number.isNaN(t)) return iso;
-  const s = Math.max(0, Math.round((Date.now() - t) / 1000));
-  if (s < 60) return `${s}s ago`;
-  const m = Math.round(s / 60);
-  if (m < 60) return `${m}m ago`;
-  const h = Math.round(m / 60);
-  if (h < 48) return `${h}h ago`;
-  const d = Math.round(h / 24);
-  if (d < 30) return `${d}d ago`;
-  return new Date(t).toLocaleDateString();
+  return Number.isNaN(Date.parse(iso)) ? iso : rel(iso);
 }
 
 /** ISO → local "YYYY-MM-DD HH:MM". */

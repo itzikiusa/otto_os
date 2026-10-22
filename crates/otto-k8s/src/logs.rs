@@ -207,12 +207,14 @@ pub async fn fetch_target(
     q.follow = Some(false);
     let argv = k.argv(target_args(ns, target, &q));
     let mut cmd = Command::new(&k.program);
-    cmd.args(&argv)
-        .envs(k.env.iter().map(|(a, b)| (a.as_str(), b.as_str())))
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
+    otto_core::aws_env::apply_aws_env(
+        cmd.args(&argv),
+        k.env.iter().map(|(a, b)| (a.as_str(), b.as_str())),
+    )
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .kill_on_drop(true);
     let child = cmd.spawn().map_err(|e| cli::spawn_error(&k.program, &e))?;
     let (status, text, stderr) = read_capped(child, LOGS_CAP, LOGS_TIMEOUT)
         .await
@@ -309,12 +311,14 @@ pub fn follow_target(k: &Kubectl, ns: &str, target: LogTarget<'_>, q: &LogsQuery
     q.follow = Some(true);
     let argv = k.argv_stream(target_args(ns, target, &q));
     let mut cmd = Command::new(&k.program);
-    cmd.args(&argv)
-        .envs(k.env.iter().map(|(a, b)| (a.as_str(), b.as_str())))
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
+    otto_core::aws_env::apply_aws_env(
+        cmd.args(&argv),
+        k.env.iter().map(|(a, b)| (a.as_str(), b.as_str())),
+    )
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .kill_on_drop(true);
     let mut child = cmd.spawn().map_err(|e| cli::spawn_error(&k.program, &e))?;
     let stdout = child
         .stdout

@@ -11,6 +11,9 @@
   import Icon, { asIcon } from '../../lib/components/Icon.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { runStatus } from '../../lib/status';
+  import { tick } from 'svelte';
+  import { neighbourAfterDelete } from './canvasFocus';
+  import { NODE_W, nodeHeight, loopSteps, loopUntil, loopMax, edgePath, edgeMid, condLabel } from './canvasGeometry';
   import type { WorkflowGraph, WorkflowNode, NodeTypeSpec, NodeRunState } from '../../lib/api/types';
 
   interface Props {
@@ -39,36 +42,6 @@
     onselect,
     onedgeselect,
   }: Props = $props();
-
-  const NODE_W = 210;
-  const NODE_H = 62;
-  const HEAD_H = 60; // header row height (icon + title) inside any node
-  const STEP_H = 22; // one inner loop step row
-  const LOOP_FOOT = 24; // the "until … · max …" footer row
-
-  interface LoopStep {
-    name: string;
-    kind: string;
-  }
-  function loopSteps(n: WorkflowNode): LoopStep[] {
-    const p = n.params as { steps?: { name?: string; kind?: string }[] } | null;
-    const steps = Array.isArray(p?.steps) ? p!.steps : [];
-    return steps.map((s, i) => ({ name: s?.name || `step ${i + 1}`, kind: s?.kind || '?' }));
-  }
-  function loopUntil(n: WorkflowNode): string {
-    return (n.params as { until?: string } | null)?.until ?? '';
-  }
-  function loopMax(n: WorkflowNode): number | undefined {
-    return (n.params as { max_iterations?: number } | null)?.max_iterations;
-  }
-  /** The actual card height — loop nodes grow to show their inner steps. */
-  function nodeHeight(n: WorkflowNode): number {
-    if (n.kind === 'loop') {
-      const c = loopSteps(n).length;
-      return HEAD_H + c * STEP_H + (loopUntil(n) ? LOOP_FOOT : 0) + 8;
-    }
-    return NODE_H;
-  }
 
   let scale = $state(1);
   let tx = $state(40);
@@ -183,16 +156,32 @@
     ctxMenu.show(e, items);
   }
 
+  // After a keyboard Delete: focus a neighbouring step (or the canvas) once
+  // the keyed {#each} has dropped the removed one, and say what went.
+  let announcement = $state('');
+  async function afterDelete(focusNodeId: string | null, label: string): Promise<void> {
+    announcement = '';
+    await tick();
+    const btn = focusNodeId
+      ? surface?.querySelector<HTMLElement>(`[data-node-id="${CSS.escape(focusNodeId)}"] .node-main`)
+      : null;
+    (btn ?? surface)?.focus();
+    announcement = `Deleted ${label}`;
+  }
+
   const NUDGE = 8;
   /** Keys on a focused node: arrows nudge it (⇧ = 10×), Delete removes it. */
   function onNodeKey(e: KeyboardEvent, n: WorkflowNode): void {
     if (!editable || e.metaKey || e.ctrlKey || e.altKey) return;
     if (e.key === 'Delete' || e.key === 'Backspace') {
       e.preventDefault();
+      const focusNext = neighbourAfterDelete(graph.nodes, n.id);
+      const label = nodeLabel(n);
       graph.nodes = graph.nodes.filter((x) => x.id !== n.id);
       graph.edges = graph.edges.filter((x) => x.source !== n.id && x.target !== n.id);
       onselect?.(null);
       onchange?.(graph);
+      void afterDelete(focusNext, label);
       return;
     }
     const step = e.shiftKey ? NUDGE * 10 : NUDGE;
@@ -222,9 +211,14 @@
       selectEdge(id);
     } else if (editable && (e.key === 'Delete' || e.key === 'Backspace')) {
       e.preventDefault();
+      const edge = graph.edges.find((x) => x.id === id);
+      const s = edge ? nodeOf(edge.source) : undefined;
+      const t = edge ? nodeOf(edge.target) : undefined;
       graph.edges = graph.edges.filter((x) => x.id !== id);
       onedgeselect?.(null);
       onchange?.(graph);
+      // A connection's natural neighbour is its source step.
+      void afterDelete(s?.id ?? null, s && t ? `connection from ${nodeLabel(s)} to ${nodeLabel(t)}` : 'connection');
     }
   }
   const hintId = $props.id();
@@ -283,27 +277,6 @@
     onedgeselect?.(id);
   }
 
-  // Bezier path between an output port and an input port (graph coords).
-  function edgePath(s: WorkflowNode, t: WorkflowNode): string {
-    const x1 = s.x + NODE_W;
-    const y1 = s.y + nodeHeight(s) / 2;
-    const x2 = t.x;
-    const y2 = t.y + nodeHeight(t) / 2;
-    const dx = Math.max(40, Math.abs(x2 - x1) * 0.5);
-    return `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`;
-  }
-
-  /** Midpoint of an edge (for the condition badge). */
-  function edgeMid(s: WorkflowNode, t: WorkflowNode): { x: number; y: number } {
-    return {
-      x: (s.x + NODE_W + t.x) / 2,
-      y: (s.y + nodeHeight(s) / 2 + t.y + nodeHeight(t) / 2) / 2,
-    };
-  }
-  function condLabel(c: string): string {
-    return c.length > 18 ? `${c.slice(0, 17)}…` : c;
-  }
-
   function tempPath(): string {
     if (drag?.mode !== 'connect') return '';
     const d = drag;
@@ -336,6 +309,7 @@
   class="canvas"
   role="application"
   aria-label="Workflow canvas"
+  tabindex="-1"
   bind:this={surface}
   onpointerdown={startPan}
   onpointermove={onMove}
@@ -394,6 +368,7 @@
         class:selected={selectedId === n.id}
         class:loop={n.kind === 'loop'}
         data-status={st}
+        data-node-id={n.id}
         style="left:{n.x}px; top:{n.y}px; width:{NODE_W}px; height:{nodeHeight(n)}px; --kind-mark:{kindMark(n.kind)};"
       >
         <!-- The press that selects / starts a move belongs to the node's own
@@ -465,6 +440,7 @@
   </div>
   <span class="sr-only" id="{hintId}-node">Arrow keys move the step, Shift moves it further, Delete removes it.</span>
   <span class="sr-only" id="{hintId}-edge">Enter selects the connection, Delete removes it.</span>
+  <span class="sr-only" role="status" aria-live="polite">{announcement}</span>
 </div>
 
 <style>

@@ -16,6 +16,7 @@ use chrono::Utc;
 use otto_core::auth::AuthUser;
 use otto_core::domain::WorkspaceRole;
 use otto_core::event::Event;
+use otto_core::keyed_lock::KeyedLocks;
 use otto_core::{Error, Id};
 use otto_state::swarm::NewTask;
 use otto_state::{
@@ -27,28 +28,15 @@ use serde_json::json;
 
 use crate::http::{ApiErr as ApiError, ApiResult};
 use crate::runtime::host::SwarmRt;
+use crate::runtime::lifecycle;
 use crate::runtime::run::{self, SwarmTurnResult};
 use otto_core::cancel_signal::CancelSignal;
 
-/// Lifecycle and session-dispatch share this boundary. Weak entries avoid
-/// retaining every swarm ever visited after its last operation finishes.
-pub(crate) async fn operation_guard(swarm_id: &str) -> tokio::sync::OwnedMutexGuard<()> {
-    type Gates = HashMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>;
-    static GATES: OnceLock<Mutex<Gates>> = OnceLock::new();
-    let gate = {
-        let mut gates = GATES
-            .get_or_init(|| Mutex::new(HashMap::new()))
-            .lock()
-            .unwrap();
-        gates.retain(|_, gate| gate.strong_count() > 0);
-        let gate = gates
-            .get(swarm_id)
-            .and_then(std::sync::Weak::upgrade)
-            .unwrap_or_else(|| Arc::new(tokio::sync::Mutex::new(())));
-        gates.insert(swarm_id.to_string(), Arc::downgrade(&gate));
-        gate
-    };
-    gate.lock_owned().await
+/// Lifecycle and session-dispatch share this boundary. Entries are pruned once
+/// the last operation on a swarm finishes ([`KeyedLocks`]).
+pub async fn operation_guard(swarm_id: &str) -> tokio::sync::OwnedMutexGuard<()> {
+    static GATES: KeyedLocks<String> = KeyedLocks::new();
+    GATES.lock(swarm_id).await
 }
 
 pub(crate) async fn run_is_active(repo: &otto_state::SwarmRepo, run_id: &str) -> bool {
@@ -101,6 +89,39 @@ pub(crate) async fn send_run_input(
             .is_ok()
     })
     .await
+}
+
+/// Paste `paste` into a run's session, wait the paste-to-Enter window and press
+/// Enter — and, with `confirm_dispatch`, press it once more when the TUI shows
+/// no dispatch — all under the session's submit lock
+/// (`SessionManager::submit_lock`). A workspace broadcast or an agent→agent
+/// `/message` (`submit_text`) on the same session therefore can't land its
+/// paste or Enter inside our window and merge two prompts into one. Each write
+/// still goes through [`send_run_input`] (the swarm operation guard + the
+/// run-still-active check). `false` when the run stopped or a write failed.
+#[doc(hidden)]
+pub async fn submit_run_prompt(
+    ctx: &SwarmRt,
+    swarm_id: &str,
+    run_id: &str,
+    session_id: &str,
+    paste: &[u8],
+    confirm_dispatch: bool,
+) -> bool {
+    let sid: Id = session_id.to_string();
+    let lock = ctx.manager().submit_lock(&sid);
+    let _submit = lock.lock().await;
+    if !send_run_input(ctx, swarm_id, run_id, session_id, paste).await {
+        return false;
+    }
+    tokio::time::sleep(ctx.pty_timings().paste_to_enter).await;
+    let before = ctx.manager().live_handle(&sid).map(|h| h.last_output_at());
+    if !send_run_input(ctx, swarm_id, run_id, session_id, b"\r").await {
+        return false;
+    }
+    !confirm_dispatch
+        || ctx.dispatched(&sid, before).await
+        || send_run_input(ctx, swarm_id, run_id, session_id, b"\r").await
 }
 
 #[cfg(test)]
@@ -351,16 +372,11 @@ pub fn set_paused(ctx: &SwarmRt, swarm_id: &str, paused: bool) {
 /// and two overlapping ticks could read the same `todo` task / free agent and
 /// dispatch it twice.
 fn tick_lock(swarm_id: &str) -> Arc<tokio::sync::Mutex<()>> {
-    static LOCKS: OnceLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> = OnceLock::new();
-    let mut map = LOCKS
-        .get_or_init(Default::default)
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    // Prune locks no loop holds (strong count 1 = only this map) so deleted
-    // swarms don't leave an entry behind forever. A tick in progress keeps its
-    // clone, so the overlap guard is unaffected.
-    map.retain(|id, l| id == swarm_id || Arc::strong_count(l) > 1);
-    map.entry(swarm_id.to_string()).or_default().clone()
+    // Pruned once no loop holds it, so deleted swarms don't leave an entry
+    // behind forever. A tick in progress keeps its handle, so the overlap
+    // guard is unaffected.
+    static LOCKS: KeyedLocks<String> = KeyedLocks::new();
+    LOCKS.handle(swarm_id)
 }
 
 async fn coordinator_loop(ctx: SwarmRt, swarm_id: Id, handle: CoordinatorHandle) {
@@ -570,7 +586,7 @@ async fn tick_inner(
     }
     // The roster once per tick — `pick_agent`/`has_reports` used to re-list
     // every agent per ready task (backlog B6 / SE-10).
-    let agents = repo.list_agents(&swarm.id).await.unwrap_or_default();
+    let agents = repo.list_agents(&swarm.id).await?;
     // Busy agents once per tick (perf §15 F3), kept current as this tick
     // dispatches — not a COUNT query per ready task.
     let mut busy = repo.busy_agents(&swarm.id).await.unwrap_or_default();
@@ -806,7 +822,7 @@ pub(crate) const PAUSED_RUN_REASON: &str = "paused";
 /// `SessionGone`, the retry loop killed the (resumable) session, spawned a
 /// fresh one and re-sent the whole brief — spending on while the swarm showed
 /// "paused" (the budget auto-pause included), and burning an attempt each time.
-async fn stop_runs_for_pause(ctx: &SwarmRt, swarm_id: &str) {
+pub(crate) async fn stop_runs_for_pause(ctx: &SwarmRt, swarm_id: &str) {
     match ctx
         .swarm_repo()
         .stop_active_runs_with_reason(&swarm_id.to_string(), PAUSED_RUN_REASON)
@@ -1006,7 +1022,10 @@ async fn route_result(
     }
 }
 
-async fn route_result_inner(
+/// Exposed (hidden) for otto-server's `swarm_router` suite, which drives it
+/// with hand-built results.
+#[doc(hidden)]
+pub async fn route_result_inner(
     ctx: &SwarmRt,
     run: &otto_state::SwarmRun,
     task: &SwarmTask,
@@ -1874,7 +1893,7 @@ pub(crate) use otto_core::text::clip_chars as clip;
 
 // --- Session teardown for pause/abort --------------------------------------
 
-async fn swarm_session_ids(ctx: &SwarmRt, ws: &Id, swarm_id: &str) -> Vec<Id> {
+pub(crate) async fn swarm_session_ids(ctx: &SwarmRt, ws: &Id, swarm_id: &str) -> Vec<Id> {
     // Only live sessions matter here (callers suspend/stop them); filtered in
     // SQL rather than decoding the workspace's whole history (perf §15 F7).
     ctx.manager()
@@ -2495,34 +2514,19 @@ async fn swarm_meta_provider(ctx: &SwarmRt, ws: &otto_core::domain::Workspace) -
         .await
 }
 
+// The lifecycle routes are thin callers of `runtime::lifecycle`, which owns the
+// operation guard, the gates and the status/coordinator/broadcast sequence.
+
 async fn start(
     State(ctx): State<SwarmRt>,
     Extension(user): Extension<AuthUser>,
     Path((ws, sid)): Path<(Id, Id)>,
 ) -> ApiResult<Json<Swarm>> {
     swarm_in_ws(&ctx, &user, &ws, &sid, WorkspaceRole::Editor).await?;
-    let _operation = operation_guard(&sid).await;
-
-    // Point-of-action budget gate (A2): check workspace-level cap before the
-    // Coordinator starts scheduling runs. Mirrors the review start_review gate.
-    {
-        if let Some(reason) = ctx.budget_blocked(&ws).await {
-            return Err(ApiError(Error::Invalid(format!(
-                "Budget exceeded — swarm blocked: {}",
-                reason.unwrap_or_else(|| "cap reached".to_string())
-            ))));
-        }
-    }
-
-    ctx.swarm_repo()
-        .set_swarm_status(&sid, "active")
+    let swarm = lifecycle::activate(&ctx, &ws, &sid, lifecycle::ActivatePolicy::UserStart)
         .await
         .map_err(ApiError)?;
-    start_coordinator(ctx.clone(), sid.clone());
-    emit_status(&ctx, &ws, &sid, "active");
-    Ok(Json(
-        ctx.swarm_repo().get_swarm(&sid).await.map_err(ApiError)?,
-    ))
+    Ok(Json(swarm))
 }
 
 async fn pause(
@@ -2531,23 +2535,8 @@ async fn pause(
     Path((ws, sid)): Path<(Id, Id)>,
 ) -> ApiResult<Json<Swarm>> {
     swarm_in_ws(&ctx, &user, &ws, &sid, WorkspaceRole::Editor).await?;
-    let _operation = operation_guard(&sid).await;
-    ctx.swarm_repo()
-        .set_swarm_status(&sid, "paused")
-        .await
-        .map_err(ApiError)?;
-    set_paused(&ctx, &sid, true);
-    crate::runtime::verify::stop_swarm(&ctx, &sid).await;
-    // In-flight turns end first (their tasks re-queue for the resume) so the
-    // retry loop can't respawn them; then suspend the sessions to free RAM
-    // (resume-friendly).
-    stop_runs_for_pause(&ctx, &sid).await;
-    for s in swarm_session_ids(&ctx, &ws, &sid).await {
-        let _ = ctx.manager().suspend(&s).await;
-    }
-    emit_status(&ctx, &ws, &sid, "paused");
     Ok(Json(
-        ctx.swarm_repo().get_swarm(&sid).await.map_err(ApiError)?,
+        lifecycle::pause(&ctx, &ws, &sid).await.map_err(ApiError)?,
     ))
 }
 
@@ -2557,31 +2546,8 @@ async fn abort(
     Path((ws, sid)): Path<(Id, Id)>,
 ) -> ApiResult<Json<Swarm>> {
     swarm_in_ws(&ctx, &user, &ws, &sid, WorkspaceRole::Editor).await?;
-    let _operation = operation_guard(&sid).await;
-    ctx.swarm_repo()
-        .set_swarm_status(&sid, "aborted")
-        .await
-        .map_err(ApiError)?;
-    stop_coordinator(&ctx, &sid);
-    // Stop any in-flight verification controllers (own cancel + kill verify/fix
-    // sessions, short-circuiting run_swarm_agent retries; review B3).
-    crate::runtime::verify::stop_swarm(&ctx, &sid).await;
-    // Cancel in-flight runs and mark them stopped.
-    let stopped = ctx
-        .swarm_repo()
-        .stop_active_runs(&sid)
-        .await
-        .map_err(ApiError)?;
-    for rid in &stopped {
-        run::signal_cancel(ctx.swarm_run_cancels(), rid);
-    }
-    // Kill swarm sessions.
-    for s in swarm_session_ids(&ctx, &ws, &sid).await {
-        let _ = ctx.manager().kill_session(&s).await;
-    }
-    emit_status(&ctx, &ws, &sid, "aborted");
     Ok(Json(
-        ctx.swarm_repo().get_swarm(&sid).await.map_err(ApiError)?,
+        lifecycle::abort(&ctx, &ws, &sid).await.map_err(ApiError)?,
     ))
 }
 
@@ -2591,29 +2557,10 @@ async fn resume(
     Path((ws, sid)): Path<(Id, Id)>,
 ) -> ApiResult<Json<Swarm>> {
     swarm_in_ws(&ctx, &user, &ws, &sid, WorkspaceRole::Editor).await?;
-    let _operation = operation_guard(&sid).await;
-
-    // Point-of-action budget gate (A2): also checked on resume (a pause may have
-    // been triggered by a BudgetExceeded event; block the resume when still over cap).
-    {
-        if let Some(reason) = ctx.budget_blocked(&ws).await {
-            return Err(ApiError(Error::Invalid(format!(
-                "Budget exceeded — swarm resume blocked: {}",
-                reason.unwrap_or_else(|| "cap reached".to_string())
-            ))));
-        }
-    }
-
-    ctx.swarm_repo()
-        .set_swarm_status(&sid, "active")
+    let swarm = lifecycle::activate(&ctx, &ws, &sid, lifecycle::ActivatePolicy::Resume)
         .await
         .map_err(ApiError)?;
-    set_paused(&ctx, &sid, false);
-    start_coordinator(ctx.clone(), sid.clone());
-    emit_status(&ctx, &ws, &sid, "active");
-    Ok(Json(
-        ctx.swarm_repo().get_swarm(&sid).await.map_err(ApiError)?,
-    ))
+    Ok(Json(swarm))
 }
 
 pub fn emit_status(ctx: &SwarmRt, ws: &Id, sid: &str, status: &str) {

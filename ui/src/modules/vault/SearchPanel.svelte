@@ -2,6 +2,7 @@
   // Full-text search panel (left sidebar mode). FTS5 with `tag:` / `path:` /
   // `type:` operators; snippets come highlighted with ‹› markers from bm25.
   import { vault } from './vault.svelte';
+  import { escapeHtml } from '../../lib/html';
   import LoadState from '../../lib/components/LoadState.svelte';
 
   let input = $state<HTMLInputElement | undefined>();
@@ -14,11 +15,7 @@
     // Server marks matches with ‹ › — escape everything else. Only a
     // balanced ‹…› pair (no nested ‹) becomes a <mark>: a stray literal ‹ or
     // › in the note stays text instead of opening/closing tags (S18-26).
-    const esc = s
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;');
-    return esc.replace(/‹([^‹›]*)›/g, '<mark>$1</mark>');
+    return escapeHtml(s).replace(/‹([^‹›]*)›/g, '<mark>$1</mark>');
   }
 </script>
 

@@ -1,10 +1,9 @@
-// Workflows API client — thin typed wrappers over the generic `api` helper for
-// the version-history surface. (The core workflow CRUD/run calls are issued
-// inline from WorkflowsPage via `api.*`; these mirror the versioning routes in
-// crates/otto-server/src/routes/workflows.rs.)
+// Workflows API client — thin typed wrappers over the generic `api` helper:
+// the typed partial update, the version-history surface and run progress.
+// They mirror crates/otto-server/src/routes/workflows.rs.
 
 import { api } from './client';
-import type { ActiveWorkflowRun, UpdateWorkflowReq, Workflow, WorkflowRun, WorkflowVersion, WorkflowVersionSummary } from './types';
+import type { ActiveWorkflowRun, FsBrowse, FsRead, UpdateWorkflowReq, Workflow, WorkflowRun, WorkflowVersionSummary } from './types';
 
 /** Partial update (`PATCH /workflows/{id}`): only the fields present change; an unknown
  *  `on_restart` value answers 400. Returns the saved workflow. */
@@ -44,11 +43,6 @@ export function listWorkflowVersions(id: string, options: {limit?: number; befor
   return api.get<WorkflowVersionSummary[]>(`/workflows/${encodeURIComponent(id)}/versions?${query}`);
 }
 
-/** A single version snapshot. */
-export function getWorkflowVersion(id: string, v: number): Promise<WorkflowVersion> {
-  return api.get<WorkflowVersion>(`/workflows/${id}/versions/${v}`);
-}
-
 /** Restore a version's graph as a new version; returns the updated workflow. */
 export function restoreWorkflowVersion(id: string, v: number, note?: string): Promise<Workflow> {
   return api.post<Workflow>(`/workflows/${id}/versions/${v}/restore`, note ? { note } : {});
@@ -66,4 +60,26 @@ export function workflowNodeDetail(runId: string, nodeId: string, signal?: Abort
 }
 export function workflowCheckpointDetail(runId: string, nodeId: string): Promise<import('./types').WorkflowDetail<import('./types').WorkflowCheckpoint>> {
   return api.get(`/workflow-runs/${encodeURIComponent(runId)}/checkpoints/${encodeURIComponent(nodeId)}`);
+}
+
+/** List one directory of a run's context dir (`GET /workflow-runs/{id}/context/browse`).
+ *  `path` is relative to the run's context dir ('' = its root); entry paths come back relative
+ *  too, so pass them straight back. Same `FsBrowse` shape as `/fs/browse?files=true`, but gated
+ *  at workspace Viewer on the run, so non-root members can open their runs' context files.
+ *  400 for an absolute path, `..` or a symlink escaping the dir; 404 for an unknown run/path. */
+export function browseRunContext(runId: string, path: string, signal?: AbortSignal): Promise<FsBrowse> {
+  return api.get<FsBrowse>(
+    `/workflow-runs/${encodeURIComponent(runId)}/context/browse?path=${encodeURIComponent(path)}`,
+    signal,
+  );
+}
+
+/** Read one file of a run's context dir (`GET /workflow-runs/{id}/context/read`), with the
+ *  same `FsRead` shape and 400 KiB bound as `/fs/read`. The run's deliverable is
+ *  `readRunContext(id, 'final-output.md')`. */
+export function readRunContext(runId: string, path: string, signal?: AbortSignal): Promise<FsRead> {
+  return api.get<FsRead>(
+    `/workflow-runs/${encodeURIComponent(runId)}/context/read?path=${encodeURIComponent(path)}`,
+    signal,
+  );
 }

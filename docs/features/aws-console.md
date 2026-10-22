@@ -38,7 +38,7 @@ profile *names* from them), and never puts a credential on a command line.
 | REST router (`/aws/*`) + audit | `crates/otto-aws/src/http.rs` |
 | Account rows (`aws_accounts`, migration `0113`) | `crates/otto-state/src/aws_accounts.rs` |
 | RBAC policy branches ("AWS console") | `crates/otto-server/src/policy.rs` |
-| Server wiring (`AwsCtx` impl, router merge) | `crates/otto-server/src/modules.rs` |
+| Server wiring (`AwsCtx` impl, router merge) | `crates/otto-server/src/modules/ctx_impls.rs` (`AwsCtx` impl); `crates/otto-server/src/modules.rs` (`module_routers`) |
 | WS events (`aws_account_updated`, `aws_install_updated`) | `crates/otto-core/src/event.rs`, `docs/contracts/ws.md` |
 | UI module | `ui/src/modules/aws/`, store `ui/src/lib/stores/aws.svelte.ts`, API `ui/src/lib/api/aws.ts` |
 | Build contract (all halves) | `docs/design/aws-k8s-consoles.md` |

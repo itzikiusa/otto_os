@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { radioKey } from '../../lib/radioKey';
   // Right panel → Links: what this design USES (outgoing) and where it is USED
   // IN (incoming), each row with its relation, version policy and Open. Links a
   // document makes itself (otto://design URIs) are "extracted" and change only
@@ -272,7 +273,7 @@
         <span class="lbl" id="dh-link-target">Target</span>
         <div class="seg-row" role="radiogroup" aria-labelledby="dh-link-target">
           {#each [['artifact', 'A design'], ['story', 'A story'], ['url', 'A web page']] as [k, l] (k)}
-            <button type="button" role="radio" aria-checked={target === k} class="pill-toggle" class:on={target === k}
+            <button type="button" role="radio" aria-checked={target === k} tabindex={target === k ? 0 : -1} onkeydown={radioKey} class="pill-toggle" class:on={target === k}
               onclick={() => (target = k as typeof target)}>{l}</button>
           {/each}
         </div>

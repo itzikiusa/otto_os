@@ -102,3 +102,18 @@ test('signing out drops the flag and a pending retry does nothing', async () => 
   await flush();
   assert.equal(h.calls(), calls, 'no capabilities read without a signed-in user');
 });
+
+// ux-design-2-07: the strip can be dismissed, and a dismiss holds only until
+// the NEXT failed read — a daemon that keeps failing re-raises it.
+test('a dismissed permissions notice comes back on the next failed retry', async () => {
+  const h = boot(3);
+  await h.auth.boot();
+  assert.equal(h.auth.capabilitiesNoticeDismissed, false);
+  h.auth.dismissCapabilitiesNotice();
+  assert.equal(h.auth.capabilitiesNoticeDismissed, true);
+  assert.equal(h.auth.capabilitiesError, true, 'dismissing hides the strip, not the failure');
+  backoff(h).at(-1)!.fn();
+  await flush();
+  assert.equal(h.auth.capabilitiesError, true);
+  assert.equal(h.auth.capabilitiesNoticeDismissed, false, 'the next failure re-raises it');
+});

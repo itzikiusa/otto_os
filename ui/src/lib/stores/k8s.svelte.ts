@@ -12,6 +12,7 @@ import { auth } from './auth.svelte';
 import { pollWhileVisible, type Poller } from '../poll';
 import { resourceAccess, type ResourceAccessChange } from './resource-access.svelte';
 import { ApiError } from '../api/client';
+import { providerErrorText } from '../loadError';
 import { formatBytes, formatMillicores } from '../../modules/kubernetes/k8s-util';
 import { k8sApi } from '../api/k8s';
 import { resourcesPollMs, resourcesValidator } from '../../modules/kubernetes/resourcePoll';
@@ -177,12 +178,10 @@ class K8sStore {
     }
     this.clusterId = null;
     this.clustersLoaded = false;
-    this.clustersLoading = false;
   }
 
   // --- tool status -------------------------------------------------------------
   status: K8sStatus | null = $state(null);
-  statusLoading = $state(false);
   /** Non-empty when `/k8s/status` failed for a reason other than "backend
    *  route missing" (which sets `unavailable`). */
   statusError = $state('');
@@ -191,7 +190,6 @@ class K8sStore {
 
   // --- clusters ------------------------------------------------------------------
   clusters: K8sCluster[] = $state([]);
-  clustersLoading = $state(false);
   clustersLoaded = $state(false);
   clustersError = $state('');
   /** cluster id → last probe (seeded from the row's cached `capabilities`). */
@@ -260,23 +258,17 @@ class K8sStore {
         ) ?? null)
       : null,
   );
-  readonly installRunning = $derived(
-    this.status?.install.kubectl.state === 'running' || this.status?.install.k9s.state === 'running',
-  );
 
   // --- status / install ------------------------------------------------------------
 
   async loadStatus(): Promise<void> {
-    this.statusLoading = true;
     try {
       this.status = await k8sApi.status();
       this.statusError = '';
       this.unavailable = false;
     } catch (e) {
       if (e instanceof ApiError && e.status === 404) this.unavailable = true;
-      else this.statusError = e instanceof Error ? e.message : String(e);
-    } finally {
-      this.statusLoading = false;
+      else this.statusError = providerErrorText(e);
     }
   }
 
@@ -290,7 +282,6 @@ class K8sStore {
 
   async loadClusters(): Promise<void> {
     const revision=this.accessRevision;
-    this.clustersLoading = true;
     try {
       const list = await k8sApi.listClusters();
       if(revision!==this.accessRevision)return;
@@ -301,9 +292,8 @@ class K8sStore {
       for (const c of list) if (c.capabilities && !seeded[c.id]) seeded[c.id] = c.capabilities;
       this.capabilities = seeded;
     } catch (e) {
-      this.clustersError = e instanceof Error ? e.message : String(e);
+      this.clustersError = providerErrorText(e);
     } finally {
-      this.clustersLoading = false;
       this.clustersLoaded = true;
     }
   }
@@ -542,7 +532,7 @@ class K8sStore {
       // RBAC-limited user: fall back to the namespaces we know work here so
       // the picker still has real entries to switch between.
       this.namespaces = this.mergeKnown(id, []);
-      this.namespacesError = e instanceof Error ? e.message : String(e);
+      this.namespacesError = providerErrorText(e);
     }
   }
 
@@ -636,7 +626,7 @@ class K8sStore {
       if (ns) this.rememberKnownNamespace(ns);
     } catch (e) {
       if (ac.signal.aborted || this.currentKey !== key) return;
-      const msg = e instanceof Error ? e.message : String(e);
+      const msg = providerErrorText(e);
       this.rowsError = !ns && /at the cluster scope/i.test(msg) ? `${CLUSTER_SCOPE_HINT}\n\n${msg}` : msg;
       if (this.rowsKey !== key) {
         this.rows = [];
@@ -698,15 +688,12 @@ class K8sStore {
    *  however many clusters cycle, and none while the document is hidden —
    *  one fires when it is visible again. */
   monitorTick = $state(0);
-  /** The last cluster that cycled before the latest tick. */
-  monitorTickCluster: string | null = $state(null);
   /** Every cluster that cycled since the previous tick. */
   monitorTickClusters = $state.raw<ReadonlySet<string>>(new Set());
   private readonly cycles = new TickCoalescer(
     MONITOR_TICK_MIN_MS,
     (clusters) => {
       this.monitorTickClusters = new Set(clusters);
-      this.monitorTickCluster = clusters[clusters.length - 1] ?? null;
       this.monitorTick += 1;
     },
     browserTickEnv,

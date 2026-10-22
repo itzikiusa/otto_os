@@ -117,7 +117,6 @@
   let readinessRequest = 0;
   // Persistent findings (keyed by fingerprint) from the findings endpoint.
   let findings: ReviewFindingRow[] = $state([]);
-  let findingsLoading = $state(false);
 
   function pollDelay(count: number): number {
     // While the event socket is up, `review_changed` (reviewBus, below)
@@ -317,7 +316,6 @@
     // swap it in silently when the new data arrives.
     const firstLoad = mergeReadiness === null;
     if (firstLoad) {
-      findingsLoading = true;
       mergeReadinessLoading = true;
     }
     try {
@@ -333,7 +331,6 @@
       if (current()) readinessError = loadErrorText(e);
     } finally {
       if (current()) {
-        findingsLoading = false;
         mergeReadinessLoading = false;
       }
     }

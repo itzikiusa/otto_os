@@ -22,8 +22,11 @@
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
 
+  // A failed load stays failed until Retry (LoadState below): without the
+  // `loadError` term the effect re-fired on every settle and hammered the
+  // daemon in a tight loop (a 403, a 5xx, a restarting daemon).
   $effect(() => {
-    if (!browserLive.status && !browserLive.loading && browserLive.supported !== false) void browserLive.load();
+    if (!browserLive.status && !browserLive.loading && !browserLive.loadError && browserLive.supported !== false) void browserLive.load();
   });
 
   const st = $derived(browserLive.status);
@@ -213,7 +216,7 @@
               </span>
             </div>
           {:else if job?.state === 'failed'}
-            <p class="error" role="alert">The last download failed: {job.error || 'unknown error'}</p>
+            <p class="error" role="alert">The last download failed: {job.error || 'the download ended without a reason. Try again, or check Settings › Logs.'}</p>
           {/if}
           {#if installError}<p class="error" role="alert">Couldn’t start the download: {installError}</p>{/if}
         {/if}

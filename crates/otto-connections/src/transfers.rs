@@ -16,7 +16,6 @@ use otto_core::{
 };
 use std::{
     collections::HashMap,
-    path::PathBuf,
     sync::Mutex,
     time::{Duration, Instant},
 };
@@ -194,7 +193,7 @@ pub(crate) async fn start<S: ConnectionsCtx>(
     let operation = if upload { "sftp_write" } else { "sftp_read" };
     let (connection, sftp) =
         open_sftp_with_connection(&ctx, &user, &id, WorkspaceRole::Editor, operation).await?;
-    let mut local = PathBuf::from(expand_home(&req.local_path));
+    let mut local = expand_home(&req.local_path)?;
     if !upload && local.is_dir() {
         let name = std::path::Path::new(&req.remote_path)
             .file_name()
@@ -419,6 +418,7 @@ mod transport_tests {
         Result,
     };
     use otto_state::{ConnectionSectionsRepo, ConnectionsRepo, DbPool};
+    use std::path::PathBuf;
     use std::sync::Arc;
     struct Secrets;
     impl otto_core::secrets::SecretStore for Secrets {

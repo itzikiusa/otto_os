@@ -12,13 +12,16 @@
 //     (`?:`) in TS — the classic "required in TS, absent on the wire" drift.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 
 const root = new URL('../../', import.meta.url);
 const rust = readFileSync(new URL('crates/otto-core/src/event.rs', root), 'utf8');
 // Comments removed up front: their prose (parentheses, `;`, `|`) would
 // otherwise unbalance the scanners below.
-const tsSrc = readFileSync(new URL('ui/src/lib/api/types.ts', root), 'utf8')
+// lib/api/types.ts is an export-* barrel over lib/api/types/<area>.ts; read them all.
+const tsSrc = ['types.ts', ...readdirSync(new URL('ui/src/lib/api/types/', root)).sort().map((f) => `types/${f}`)]
+  .map((p) => readFileSync(new URL(`ui/src/lib/api/${p}`, root), 'utf8'))
+  .join('\n')
   .replace(/\/\*[\s\S]*?\*\//g, '')
   .replace(/(^|\s)\/\/.*$/gm, '$1');
 const wsMd = readFileSync(new URL('docs/contracts/ws.md', root), 'utf8');

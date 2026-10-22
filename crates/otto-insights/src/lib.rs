@@ -150,8 +150,14 @@ fn config_path(dir: &Path) -> PathBuf {
 /// Read the config from `<insights>/config.json`, defaulting (all-off) when the
 /// file is absent or malformed.
 pub fn read_config(dir: &Path) -> InsightsConfig {
-    match std::fs::read_to_string(config_path(dir)) {
-        Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
+    let path = config_path(dir);
+    match std::fs::read_to_string(&path) {
+        Ok(s) => serde_json::from_str(&s).unwrap_or_else(|e| {
+            // All-off is the safe fallback, but it silently disables a
+            // user's scheduled insights — say why.
+            tracing::warn!(path = %path.display(), "insights: config unreadable, using defaults: {e}");
+            InsightsConfig::default()
+        }),
         Err(_) => InsightsConfig::default(),
     }
 }
@@ -160,7 +166,12 @@ pub fn read_config(dir: &Path) -> InsightsConfig {
 pub fn write_config(dir: &Path, cfg: &InsightsConfig) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     let json = serde_json::to_string_pretty(cfg).unwrap_or_else(|_| "{}".to_string());
-    std::fs::write(config_path(dir), json)
+    // Temp + rename (as `mark_stopped` does): a crash mid-write leaves the
+    // old config, never a torn file that reads back as all-off.
+    let path = config_path(dir);
+    let temp = path.with_extension("json.tmp");
+    std::fs::write(&temp, json)?;
+    std::fs::rename(temp, path)
 }
 
 // ---------------------------------------------------------------------------

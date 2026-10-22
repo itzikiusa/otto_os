@@ -59,12 +59,17 @@ pub async fn build_ctx(
     ensure_scratch_workspace(cfg, &workspaces).await?;
     // Message Brokers (Kafka) viewer: cluster profiles (secrets in the Keychain)
     // + an rdkafka client pool for overview/topics/peek/produce/groups/metrics.
-    let brokers = Arc::new(otto_brokers::BrokersService::new(
-        otto_state::BrokerClustersRepo::new(pool.clone()),
-        secrets.clone(),
-        // Persist an audit row for every broker write (produce/delete/config/offset-reset).
-        Some(otto_state::BrokerAuditRepo::new(pool.clone())),
-    ));
+    let brokers = Arc::new(
+        otto_brokers::BrokersService::new(
+            otto_state::BrokerClustersRepo::new(pool.clone()),
+            secrets.clone(),
+            // Persist an audit row for every broker write (produce/delete/config/offset-reset).
+            Some(otto_state::BrokerAuditRepo::new(pool.clone())),
+        )
+        // Lag alerts + replay evidence: without this every lag-alert route is a
+        // 500 ("ops repo not initialised") and replays never save evidence.
+        .with_ops(otto_state::BrokerOpsRepo::new(pool.clone())),
+    );
     let spawner = Arc::new(crate::modules::PtySpawner {
         pool: pool.clone(),
         manager: Arc::clone(&manager),

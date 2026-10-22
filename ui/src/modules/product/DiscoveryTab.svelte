@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rel } from '../../lib/stores/now.svelte';
   // Discovery tab — lists discovery swarm runs for the current story, lets the
   // user expand a run to read the report + per-task summaries + board messages,
   // and provides a "Run Discovery" button (with team picker) for repeat runs.
@@ -136,22 +137,6 @@
     }
   }
 
-  function relDate(iso: string): string {
-    try {
-      const diff = Date.now() - new Date(iso).getTime();
-      const s = Math.floor(diff / 1000);
-      if (s < 60) return 'just now';
-      const m = Math.floor(s / 60);
-      if (m < 60) return `${m}m ago`;
-      const h = Math.floor(m / 60);
-      if (h < 24) return `${h}h ago`;
-      const d = Math.floor(h / 24);
-      if (d < 30) return `${d}d ago`;
-      return new Date(iso).toLocaleDateString();
-    } catch {
-      return iso;
-    }
-  }
 </script>
 
 <div class="discovery-tab">
@@ -211,7 +196,7 @@
             <button class="run-header" aria-expanded={isOpen} onclick={() => toggleRun(summary.run.id)}>
               <span class="coll-arrow" aria-hidden="true"><Icon name={isOpen ? 'chevronDown' : 'chevronRight'} size={12} /></span>
               <span class="status-badge"><StatusBadge status={runStatus(summary.derived_status)} /></span>
-              <span class="run-date">{relDate(summary.run.created_at)}</span>
+              <span class="run-date" title={new Date(summary.run.created_at).toLocaleString()}>{rel(summary.run.created_at)}</span>
               <span class="run-progress">
                 {summary.done_count}/{summary.task_count} tasks
               </span>

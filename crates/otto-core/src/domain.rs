@@ -6,14 +6,6 @@ use serde_json::Value;
 
 use crate::Id;
 
-/// Global (instance-level) role of a user.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GlobalRole {
-    Root,
-    Member,
-}
-
 /// Role of a user inside one workspace. Ordering: Viewer < Editor < Admin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

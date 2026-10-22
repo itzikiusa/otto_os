@@ -26,8 +26,12 @@ use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgRow, PgSslMode};
 use sqlx::{Column as _, Connection as _, Executor as _, Row, TypeInfo};
 
 use crate::driver::Driver;
+use crate::drivers::sql_common::{
+    acquire_error, assemble_bulk_graph, float_to_json, BulkCol, BulkFk, BulkRel,
+};
 use crate::export::{ExportCounts, ExportFormat, ExportSink};
 use crate::split::{split_statements, SqlDialect, StatementSpan};
+use crate::sql_class::ReadClass;
 use crate::tls::TlsFiles;
 use crate::types::{
     self, CancelToken, Capabilities, Column, ColumnDef, CompletionContext, CompletionResponse,
@@ -1595,148 +1599,12 @@ async fn build_pool(cfg: &ResolvedConfig) -> Result<sqlx::PgPool> {
         .map_err(types::upstream)
 }
 
-// --- Bulk schema graph (shared by the SQL drivers) ---------------------------
-
-/// One diagrammable relation from a bulk catalog read, in tree order.
-pub(crate) struct BulkRel {
-    /// The lazy tree's node id for this object (`db:<s>/table:<t>` …).
-    pub id: String,
-    pub name: String,
-    pub kind: NodeKind,
-}
-
-/// One column row from a bulk catalog read (`primary_key` may be pre-set by
-/// engines that report it per column, e.g. MySQL's `column_key = 'PRI'`).
-pub(crate) struct BulkCol {
-    pub table: String,
-    pub name: String,
-    pub data_type: String,
-    pub nullable: bool,
-    pub primary_key: bool,
-}
-
-/// One FK column pair from a bulk catalog read, rows ordered by
-/// (table, constraint, key position).
-pub(crate) struct BulkFk {
-    pub table: String,
-    pub name: String,
-    pub column: String,
-    pub ref_schema: Option<String>,
-    pub ref_table: String,
-    pub ref_column: String,
-}
-
-/// Assemble a [`types::SchemaGraph`] from set-based catalog rows — the same
-/// shape the per-object walk builds: the first `max_tables` relations (in the
-/// given order) with PK/FK column flags, the FK edges out of them (a missing
-/// ref schema defaults to this schema), `truncated` when relations were cut.
-pub(crate) fn assemble_bulk_graph(
-    schema: &str,
-    rels: Vec<BulkRel>,
-    cols: Vec<BulkCol>,
-    pks: &[(String, String)],
-    fks: Vec<BulkFk>,
-    max_tables: usize,
-) -> types::SchemaGraph {
-    use std::collections::HashSet;
-    let truncated = rels.len() > max_tables;
-    let kept: Vec<BulkRel> = rels.into_iter().take(max_tables).collect();
-    let kept_names: HashSet<&str> = kept.iter().map(|r| r.name.as_str()).collect();
-    let pk: HashSet<(&str, &str)> = pks.iter().map(|(t, c)| (t.as_str(), c.as_str())).collect();
-    let fk_cols: HashSet<(&str, &str)> = fks
-        .iter()
-        .map(|f| (f.table.as_str(), f.column.as_str()))
-        .collect();
-    let mut by_table: HashMap<&str, Vec<types::GraphColumn>> = HashMap::new();
-    for c in &cols {
-        if !kept_names.contains(c.table.as_str()) {
-            continue;
-        }
-        by_table
-            .entry(c.table.as_str())
-            .or_default()
-            .push(types::GraphColumn {
-                name: c.name.clone(),
-                data_type: c.data_type.clone(),
-                nullable: c.nullable,
-                primary_key: c.primary_key || pk.contains(&(c.table.as_str(), c.name.as_str())),
-                foreign_key: fk_cols.contains(&(c.table.as_str(), c.name.as_str())),
-            });
-    }
-    // Group FK rows into edges (rows arrive ordered by table, constraint, pos).
-    let mut edges: Vec<types::GraphEdge> = Vec::new();
-    for f in &fks {
-        if !kept_names.contains(f.table.as_str()) {
-            continue;
-        }
-        match edges.last_mut() {
-            Some(e) if e.from_table == f.table && e.name == f.name => {
-                e.from_columns.push(f.column.clone());
-                e.to_columns.push(f.ref_column.clone());
-            }
-            _ => edges.push(types::GraphEdge {
-                name: f.name.clone(),
-                from_table: f.table.clone(),
-                from_columns: vec![f.column.clone()],
-                to_schema: f.ref_schema.clone().unwrap_or_else(|| schema.to_string()),
-                to_table: f.ref_table.clone(),
-                to_columns: vec![f.ref_column.clone()],
-            }),
-        }
-    }
-    let tables = kept
-        .into_iter()
-        .map(|r| types::GraphTable {
-            columns: by_table.remove(r.name.as_str()).unwrap_or_default(),
-            id: r.id,
-            schema: schema.to_string(),
-            name: r.name,
-            kind: r.kind,
-        })
-        .collect();
-    types::SchemaGraph {
-        schema: schema.to_string(),
-        tables,
-        edges,
-        relationships: true,
-        truncated,
-    }
-}
-
 // --- Query execution --------------------------------------------------------
 
-/// First-keyword detection of row-returning statements.
+/// First-keyword detection of row-returning statements — the Postgres row of
+/// the shared table in `sql_class`.
 fn is_read_statement(statement: &str) -> bool {
-    matches!(
-        first_keyword(statement).as_str(),
-        "SELECT" | "WITH" | "SHOW" | "EXPLAIN" | "TABLE" | "VALUES"
-    )
-}
-
-/// First SQL keyword (uppercased), skipping whitespace and `--` / `/* */` comments.
-fn first_keyword(statement: &str) -> String {
-    let mut s = statement.trim_start();
-    loop {
-        if let Some(rest) = s.strip_prefix("--") {
-            s = rest
-                .split_once('\n')
-                .map(|x| x.1)
-                .unwrap_or("")
-                .trim_start();
-        } else if let Some(rest) = s.strip_prefix("/*") {
-            s = rest
-                .split_once("*/")
-                .map(|x| x.1)
-                .unwrap_or("")
-                .trim_start();
-        } else {
-            break;
-        }
-    }
-    s.chars()
-        .take_while(|c| c.is_ascii_alphabetic())
-        .collect::<String>()
-        .to_ascii_uppercase()
+    ReadClass::of(Engine::Postgres, statement).returns_rows()
 }
 
 /// Double-quote a Postgres identifier (doubling embedded quotes). Only used for
@@ -1765,20 +1633,9 @@ async fn capture_backend_pid(conn: &mut sqlx::PgConnection, token: &CancelToken)
 
 /// Acquire a pooled session, mapping sqlx's pool timeout to a clear message.
 async fn acquire(pool: &sqlx::PgPool) -> Result<sqlx::pool::PoolConnection<sqlx::Postgres>> {
-    pool.acquire().await.map_err(acquire_error)
-}
-
-/// `PoolTimedOut` means every pooled session stayed busy for
-/// [`POOL_ACQUIRE_TIMEOUT`]: say so instead of sqlx's generic text.
-fn acquire_error(e: sqlx::Error) -> otto_core::Error {
-    match e {
-        sqlx::Error::PoolTimedOut => types::upstream(format!(
-            "connection busy: all {POOL_MAX_CONNECTIONS} sessions to this server are in use \
-             (waited {}s); stop a running query or retry",
-            POOL_ACQUIRE_TIMEOUT.as_secs()
-        )),
-        other => types::upstream(other),
-    }
+    pool.acquire()
+        .await
+        .map_err(|e| acquire_error(e, POOL_MAX_CONNECTIONS, POOL_ACQUIRE_TIMEOUT))
 }
 
 /// The `search_path` statement for a request: the selected schema, else the
@@ -2434,16 +2291,6 @@ fn money_to_string(cents: i64) -> String {
     let sign = if cents < 0 { "-" } else { "" };
     let abs = cents.unsigned_abs();
     format!("{sign}{}.{:02}", abs / 100, abs % 100)
-}
-
-/// Pure shaping of an optional f64 (Null if absent or non-finite).
-fn float_to_json(v: Option<f64>) -> Value {
-    match v {
-        Some(n) => serde_json::Number::from_f64(n)
-            .map(Value::Number)
-            .unwrap_or(Value::Null),
-        None => Value::Null,
-    }
 }
 
 // --- Introspection row structs ----------------------------------------------

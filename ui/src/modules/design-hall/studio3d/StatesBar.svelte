@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { radioKey } from '../../../lib/radioKey';
   // The viewport's STATES bar (Spline-style): Idle · Hover · Flipped… Picking
   // one tweens the scene to it; while a non-default state shows, gizmo and
   // inspector transform edits are recorded as that state's overrides. ⋯ holds
@@ -16,7 +17,7 @@
     setDefaultState,
     setStateTiming,
     type Scene3dDoc,
-  } from '../../product/design/scene3d';
+  } from '../../../lib/design/scene3d';
 
   interface Props {
     doc: Scene3dDoc;
@@ -126,6 +127,8 @@
         <button
           role="radio"
           aria-checked={current?.id === s.id}
+          tabindex={current?.id === s.id ? 0 : -1}
+          onkeydown={radioKey}
           class:on={current?.id === s.id}
           title={s.id === start ? `${s.name ?? s.id} (start state)` : `${s.name ?? s.id} · ${s.duration_ms ?? 400} ms`}
           onclick={() => onpick(s.id)}

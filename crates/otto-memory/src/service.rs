@@ -55,11 +55,6 @@ impl MemoryService {
         }
     }
 
-    /// Keyword-only service (there is no other kind anymore).
-    pub fn new_keyword_only(pool: DbPool) -> Self {
-        Self::build(pool, None)
-    }
-
     /// Default production service: local SQLite, FTS5 keyword recall.
     pub fn with_defaults(pool: DbPool) -> Self {
         Self::build(pool, None)

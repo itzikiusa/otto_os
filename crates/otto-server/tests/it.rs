@@ -76,12 +76,16 @@ mod share_api;
 mod share_otp;
 #[path = "share_scope_guard.rs"]
 mod share_scope_guard;
+#[path = "swarm_router.rs"]
+mod swarm_router;
 #[path = "swarm_scope_api.rs"]
 mod swarm_scope_api;
 #[path = "ui_control.rs"]
 mod ui_control;
 #[path = "workbench_api.rs"]
 mod workbench_api;
+#[path = "workflow_run_files.rs"]
+mod workflow_run_files;
 
 /// Guard: every `tests/*.rs` file is either a module above or a standalone
 /// `[[test]]` target (`snips.rs`), so no suite silently stops running.

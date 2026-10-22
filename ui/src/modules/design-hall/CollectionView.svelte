@@ -26,6 +26,7 @@
   import StudioBadge from './StudioBadge.svelte';
   import { STUDIOS, studioInfo } from './model';
   import { library } from './library.svelte';
+  import { storyKeysFor } from './model';
   import { openStoryInProduct } from './nav';
   import LoadState from '../../lib/components/LoadState.svelte';
 
@@ -190,8 +191,7 @@
       .filter((h) => scope.kind !== 'project' || h.artifact.project_id === scope.id);
   }
   const hitById = $derived(new Map(hits.map((h) => [h.artifact.id, h])));
-  const storyKeysOf = (id: string): string[] =>
-    (hitById.get(id)?.story_ids ?? []).map((sid) => library.stories[sid]?.source_key).filter((k): k is string => !!k);
+  const storyKeysOf = (id: string): string[] => storyKeysFor(hitById.get(id)?.story_ids ?? [], library.stories);
 
   const items = $derived.by((): DesignArtifact[] =>
     hits

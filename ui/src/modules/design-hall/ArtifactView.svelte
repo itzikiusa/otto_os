@@ -48,7 +48,7 @@
     DesignStatus,
     DesignVersion,
   } from '../../lib/api/types';
-  import { DEVICES, type DeviceKind } from '../product/design/DeviceFrame.svelte';
+  import { DEVICES, type DeviceKind } from '../../lib/design/DeviceFrame.svelte';
   import Studio3D from './studio3d/Studio3D.svelte';
   import ArtifactStage from './ArtifactStage.svelte';
   import VersionStrip from './VersionStrip.svelte';

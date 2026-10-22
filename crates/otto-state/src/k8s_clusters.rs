@@ -249,42 +249,52 @@ impl K8sClustersRepo {
             .collect()
     }
 
+    /// One UPDATE against the row as it is at write time: omitted columns
+    /// `COALESCE` to themselves, the double-optional ones are a `CASE`, and
+    /// `color` / `known_namespaces` are folded into `params_json` with an RFC 7396
+    /// `json_patch` — so two PATCHes touching different fields (a rename racing
+    /// a namespace add) never undo each other.
     pub async fn update(&self, id: &Id, p: K8sClusterPatch) -> Result<K8sCluster> {
-        let cur = self.get(id).await?;
-        let name = p.name.map(|n| n.trim().to_string()).unwrap_or(cur.name);
-        let kubeconfig_path = p.kubeconfig_path.unwrap_or(cur.kubeconfig_path);
-        let context_name = p.context_name.unwrap_or(cur.context_name);
-        let default_namespace = p.default_namespace.unwrap_or(cur.default_namespace);
-        let environment = p.environment.unwrap_or(cur.environment);
-        let color = match p.color {
-            Some(c) => c,
-            None => cur.color,
-        };
-        let mut params = params_with_color(cur.params, color.as_deref());
+        let name = p.name.map(|n| n.trim().to_string());
+        let mut merge = serde_json::Map::new();
+        if let Some(color) = &p.color {
+            // `null` removes the key (a cleared or blank colour).
+            let c = color.as_deref().map(str::trim).filter(|c| !c.is_empty());
+            merge.insert(
+                "color".into(),
+                c.map_or(Value::Null, |c| Value::String(c.to_string())),
+            );
+        }
         if let Some(list) = p.known_namespaces {
-            if let Some(obj) = params.as_object_mut() {
-                obj.insert(
-                    "known_namespaces".into(),
-                    Value::Array(list.into_iter().map(Value::String).collect()),
-                );
-            }
+            merge.insert(
+                "known_namespaces".into(),
+                Value::Array(list.into_iter().map(Value::String).collect()),
+            );
         }
         sqlx::query(
-            "UPDATE k8s_clusters SET name = ?, kubeconfig_path = ?, context_name = ?,
-                    default_namespace = ?, environment = ?, params_json = ?, updated_at = ?
+            "UPDATE k8s_clusters SET name = COALESCE(?, name),
+                    kubeconfig_path = CASE WHEN ? THEN ? ELSE kubeconfig_path END,
+                    context_name = COALESCE(?, context_name),
+                    default_namespace = CASE WHEN ? THEN ? ELSE default_namespace END,
+                    environment = COALESCE(?, environment),
+                    params_json = json_patch(CASE WHEN json_valid(params_json) THEN params_json ELSE '{}' END, ?),
+                    updated_at = ?
              WHERE id = ?",
         )
         .bind(&name)
-        .bind(&kubeconfig_path)
-        .bind(&context_name)
-        .bind(&default_namespace)
-        .bind(environment.as_str())
-        .bind(params.to_string())
+        .bind(p.kubeconfig_path.is_some())
+        .bind(p.kubeconfig_path.flatten())
+        .bind(&p.context_name)
+        .bind(p.default_namespace.is_some())
+        .bind(p.default_namespace.flatten())
+        .bind(p.environment.map(|e| e.as_str()))
+        .bind(Value::Object(merge).to_string())
         .bind(fmt(Utc::now()))
         .bind(id)
         .execute(&self.pool)
         .await
         .map_err(dberr("update k8s cluster"))?;
+        // An unknown id surfaces as the read's NotFound.
         self.get(id).await
     }
 
@@ -391,6 +401,37 @@ mod tests {
         assert_eq!(up.params["eks_region"], "eu-west-1");
         assert_eq!(up.default_namespace, None);
         assert_eq!(up.context_name, "ctx");
+        // A namespace-only patch keeps the other params and the new name; a
+        // colour patch then keeps the namespaces (no stale whole-row write).
+        repo.update(
+            &c.id,
+            K8sClusterPatch {
+                known_namespaces: Some(vec!["ns-a".into()]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let up = repo
+            .update(
+                &c.id,
+                K8sClusterPatch {
+                    color: Some(Some(" #0f0 ".into())),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(up.name, "renamed");
+        assert_eq!(up.color.as_deref(), Some("#0f0"));
+        assert_eq!(up.known_namespaces, vec!["ns-a".to_string()]);
+        assert_eq!(up.params["eks_region"], "eu-west-1");
+        assert_eq!(up.environment, Environment::Staging);
+        assert!(matches!(
+            repo.update(&"missing".to_string(), K8sClusterPatch::default())
+                .await,
+            Err(Error::NotFound(_))
+        ));
 
         repo.set_capabilities(&c.id, &serde_json::json!({"metrics_server": true}))
             .await

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { toastError } from '../../lib/toastError';
+  import { loadErrorText } from '../../lib/loadError';
   // Git module page. Workspace-INDEPENDENT: shows GitKraken-style top-level repo
   // tabs (one per open repo) above the active repo's RepoView. With no tab open
   // it shows a full-width landing — the repo browser/list + "Add Repository"
@@ -216,8 +217,7 @@
       remoteResultsAccount = accountId;
     } catch (e) {
       if (revision !== remoteRevision) return;
-      remoteError = e instanceof Error ? e.message : String(e);
-      if (remoteError === '') remoteError = 'The account’s host did not answer.';
+      remoteError = loadErrorText(e);
       remoteRepos = [];
     } finally {
       if (revision === remoteRevision) remoteLoading = false;

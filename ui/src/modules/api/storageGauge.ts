@@ -2,6 +2,7 @@
 // retention limit, and how sizes read. Retention stays opt-in — this only
 // decides whether to OFFER presets; nothing is deleted without a click.
 import type { ApiClientStorage } from '../../lib/api/types';
+import { formatBytes } from '../../lib/metric-format.ts';
 
 /** Offer presets past any of these (history rows / bytes, runs of one automation). */
 export const SUGGEST_HISTORY_ROWS = 5_000;
@@ -34,9 +35,6 @@ export function suggestRetention(
   return (historyBig && !limits.rows && !limits.days) || (runsBig && !limits.runsKeep);
 }
 
-export function formatBytes(n: number): string {
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
-  if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
-  return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
-}
+/** The one byte formatter (lib/metric-format), re-exported for the
+ *  History / Retention views that import it from here. */
+export { formatBytes };

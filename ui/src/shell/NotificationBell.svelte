@@ -25,7 +25,7 @@
   import { copyText } from '../lib/clipboard';
   import { toasts } from '../lib/toast.svelte';
   import type { Notice } from '../lib/api/types';
-  import { nowMinute } from '../lib/stores/now.svelte';
+  import { rel } from '../lib/stores/now.svelte';
 
   let { placement = 'side' }: { placement?: 'side' | 'below' } = $props();
 
@@ -172,12 +172,6 @@
     return { destroy: () => node.remove() };
   }
 
-  // Relative timestamps follow the shared minute clock (it skips writes while
-  // the window is hidden — no interval of our own); `openedAt` makes a label
-  // exact the moment the panel opens, not up to a minute behind.
-  let openedAt = $state(Date.now());
-  const now = $derived(Math.max(nowMinute(), openedAt));
-
   // Load notices once on mount.
   $effect(() => {
     void notifications.ensureLoaded();
@@ -186,7 +180,6 @@
   function toggle(): void {
     if (open) close();
     else {
-      openedAt = Date.now();
       expanded = new Set();
       open = true;
     }
@@ -281,20 +274,6 @@
       { title: 'Clear all notifications', confirmLabel: 'Clear all', danger: true },
     );
     if (ok) await notifications.clear();
-  }
-
-  function relative(iso: string): string {
-    const then = new Date(iso).getTime();
-    if (Number.isNaN(then)) return '';
-    const secs = Math.max(0, Math.round((now - then) / 1000));
-    if (secs < 45) return 'now';
-    const mins = Math.round(secs / 60);
-    if (mins < 60) return `${mins}m`;
-    const hrs = Math.round(mins / 60);
-    if (hrs < 24) return `${hrs}h`;
-    const days = Math.round(hrs / 24);
-    if (days < 7) return `${days}d`;
-    return new Date(then).toLocaleDateString([], { month: 'short', day: 'numeric' });
   }
 
   const SECTION: Record<NoticeRow['bucket'], string> = { 0: 'Needs you', 1: 'Alerts', 2: 'Recent' };
@@ -445,7 +424,7 @@
                           {#if row.notices.length > 1}
                             <span class="nb-count">×{row.notices.length}</span>
                           {/if}
-                          <time class="nb-time" datetime={n.created_at} title={new Date(n.created_at).toLocaleString()}>{relative(n.created_at)}</time>
+                          <time class="nb-time" datetime={n.created_at} title={new Date(n.created_at).toLocaleString()}>{rel(n.created_at, { compact: true })}</time>
                         </span>
                         {#if row.text}
                           <span class="nb-text" class:one={row.sessionId !== null} title={row.sessionId ? row.text : undefined}>

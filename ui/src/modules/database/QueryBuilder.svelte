@@ -53,6 +53,7 @@
     parseSelect,
     splitList,
     suggestGroupBy,
+    mergeGroupBy,
     validate,
     valueKind,
     type AggFn,
@@ -1159,7 +1160,7 @@
               <p class="sec-hint">No grouping. Adding an aggregate groups by the other selected columns.</p>
             {:else}
               <div class="chips">
-                {#each clauses.groupBy as r, i (refKey(r))}
+                {#each clauses.groupBy as r, i (i)}
                   <span class="chip mono">{refKey(r)}<button class="chip-x" onclick={() => removeGroupBy(i)} aria-label="Remove {refKey(r)} from GROUP BY" title="Remove"><Icon name="x" size={12} /></button></span>
                 {/each}
               </div>
@@ -1255,13 +1256,13 @@
           </header>
           {#if issues.length}
             <ul class="issues">
-              {#each issues as is (is.message)}
+              {#each issues as is, ii (ii)}
                 <li class:err={is.level === 'error'}>
                   <Icon name="warning" size={12} />
                   <span>{is.message}</span>
                   {#if is.fix?.kind === 'group-by'}
                     {@const refs = is.fix.refs}
-                    <button class="btn small ghost" onclick={() => (clauses.groupBy = [...clauses.groupBy, ...refs])}>Group by {refs.length === 1 ? 'it' : 'them'}</button>
+                    <button class="btn small ghost" onclick={() => (clauses.groupBy = mergeGroupBy(clauses.groupBy, refs))}>Group by {refs.length === 1 ? 'it' : 'them'}</button>
                   {/if}
                 </li>
               {/each}

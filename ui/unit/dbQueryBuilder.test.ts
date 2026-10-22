@@ -6,6 +6,7 @@ import {
   emptyQuery,
   escapeLike,
   literal,
+  mergeGroupBy,
   opsFor,
   parseSelect,
   quoteIdent,
@@ -266,6 +267,24 @@ test('validate: loose columns under GROUP BY, with a one-click fix', () => {
   assert.match(err!.message, /status is selected but neither grouped nor aggregated/);
   assert.deepEqual(err!.fix?.refs, [col('status')]);
   assert.deepEqual(suggestGroupBy(q), [col('status')]);
+});
+
+test('a column selected twice is grouped once (the GROUP BY chips are keyed by alias.column)', () => {
+  const q = ordersQuery('mysql');
+  // Tick a column, then "+ Column" (which appends the same first column), then
+  // "+ Aggregate": autoGroup → suggestGroupBy, and the "Group by them" fix.
+  q.select = [
+    { kind: 'column', id: 'a', ref: col('region') },
+    { kind: 'column', id: 'b', ref: col('region') },
+    { kind: 'aggregate', id: 'c', fn: 'COUNT', ref: null },
+  ];
+  q.groupBy = [];
+  assert.deepEqual(suggestGroupBy(q), [col('region')]);
+  const err = validate(q).find((i) => i.fix?.kind === 'group-by');
+  assert.deepEqual(err?.fix?.refs, [col('region')]);
+  assert.match(err!.message, /^region is selected/);
+  // The fix never re-adds a ref the GROUP BY already holds.
+  assert.deepEqual(mergeGroupBy([col('region')], [col('region'), col('status'), col('status')]), [col('region'), col('status')]);
 });
 
 test('validate: duplicate output names, SUM of text, OFFSET without ORDER BY', () => {

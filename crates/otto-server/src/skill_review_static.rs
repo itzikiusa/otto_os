@@ -254,15 +254,13 @@ fn cited_abs_paths(prose: &str) -> Vec<String> {
     out
 }
 
-/// Resolve a `~/…` prefix against the real home directory. Pure string work.
+/// Resolve a `~/…` prefix against the real home directory (the shared
+/// [`otto_core::paths::expand_home_strict`]); `None` for a relative or
+/// `~user/…` path. Pure string work.
 fn expand_home(p: &str) -> Option<PathBuf> {
-    if let Some(rest) = p.strip_prefix("~/") {
-        dirs::home_dir().map(|h| h.join(rest))
-    } else if p.starts_with('/') {
-        Some(PathBuf::from(p))
-    } else {
-        None
-    }
+    otto_core::paths::expand_home_strict(p)
+        .ok()
+        .filter(|full| full.is_absolute())
 }
 
 /// Words that direct by prohibition, and words that supply a reason. The ratio

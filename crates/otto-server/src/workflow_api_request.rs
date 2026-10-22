@@ -1,8 +1,6 @@
 //! Workflow adapter for the existing API-client execution path.
 use super::*;
-use axum::extract::{Path, State};
 use axum::http::{HeaderMap, HeaderValue};
-use axum::Json;
 use otto_core::api::ExecuteApiReq;
 
 /// Preserve workflow's original object headers and JSON body while accepting
@@ -44,28 +42,14 @@ pub(super) async fn execute(
     let req = request(params)?;
     // This is an automated execution on behalf of the run user. Preserve that
     // attribution in history and the existing stored-secret host binding rules.
+    const KIND: &str = "workflow";
     let mut headers = HeaderMap::new();
-    headers.insert("x-otto-agent", HeaderValue::from_static("workflow"));
-    let auth = otto_core::auth::AuthContext {
-        real_user: user.clone(),
-        effective_user: user.clone(),
-        scope: None,
-        mcp_only: false,
-        mcp_scope: None,
-        mcp_internal: false,
-        mcp_session_id: None,
-        managed_session_id: None,
-    };
-    let Json(response) = crate::routes::api_client::execute(
-        Path(ws.id.clone()),
-        State(ctx.clone()),
-        crate::auth::CurrentUser(user.clone()),
-        crate::auth::CurrentAuthContext(auth),
-        headers,
-        Json(req),
-    )
-    .await
-    .map_err(|error| error.0)?;
+    headers.insert("x-otto-agent", HeaderValue::from_static(KIND));
+    let auth = otto_core::auth::AuthContext::automation(user, KIND);
+    let response =
+        crate::routes::api_client::execute_service(ctx, &ws.id, user, &auth, &headers, req)
+            .await
+            .map_err(|error| error.0)?;
     let body: Value = serde_json::from_str(&response.body).unwrap_or(Value::String(response.body));
     let mut logs = vec![format!("api_run: HTTP {}", response.status)];
     if response.truncated || response.too_large {

@@ -1,0 +1,11 @@
+[package]
+name = "otto-git-cmd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Leaf crate: the hardened `git` command builder every daemon git spawn uses.
+# Split out of otto-git so a crate that only needs to RUN git (otto-sessions'
+# rev-parse probe) does not pull in the whole git/PR/provider stack.
+[dependencies]
+tokio = { workspace = true, features = ["process"] }

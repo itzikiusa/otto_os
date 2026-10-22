@@ -2413,23 +2413,10 @@ fn output_format_sql(sql: &str, format: &str) -> String {
     format!("{sql}\nFORMAT {format}")
 }
 
-/// Does this statement return a rowset? (first keyword decides).
+/// Does this statement return a rowset? (first token decides — the ClickHouse
+/// row of the shared table in `sql_class`).
 fn returns_rows(sql: &str) -> bool {
-    use sqlparser::{
-        dialect::ClickHouseDialect,
-        tokenizer::{Token, Tokenizer},
-    };
-    let Ok(tokens) = Tokenizer::new(&ClickHouseDialect {}, sql).tokenize() else {
-        return false;
-    };
-    let first = tokens
-        .iter()
-        .find(|t| !matches!(t, Token::Whitespace(_) | Token::LParen));
-    matches!(first, Some(Token::Word(w)) if w.quote_style.is_none() && matches!(
-        w.value.to_ascii_uppercase().as_str(),
-        "SELECT" | "SHOW" | "DESC" | "DESCRIBE" | "EXPLAIN" | "WITH" |
-        "EXISTS" | "CHECK" | "KILL" | "BACKUP" | "RESTORE"
-    ))
+    crate::sql_class::ReadClass::of(Engine::Clickhouse, sql).returns_rows()
 }
 
 /// System databases that exist on every server; keep them but sort last.

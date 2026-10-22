@@ -4,7 +4,6 @@
   import { plural } from '../../lib/plural';
   import { toastError } from '../../lib/toastError';
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
-  import { mapLimit } from '../../lib/poll';
   // SQS: queue list with approximate counts → queue detail tabs: Messages
   // (Peek N, JSON-pretty body viewer, delete-message per row [Edit]), Send
   // (body + attributes, FIFO fields only for `.fifo`) [Edit], Attributes,
@@ -23,7 +22,7 @@
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import Tabs from '../../lib/components/Tabs.svelte';
-  import JsonTree from '../database/JsonTree.svelte';
+  import JsonTree from '../../lib/components/JsonTree.svelte';
   import ViewToolbar from './ViewToolbar.svelte';
   import MetricsPanel from './MetricsPanel.svelte';
   import RegionPicker from './RegionPicker.svelte';
@@ -83,7 +82,12 @@
   // after a switch to B must not overwrite B's error, end B's spinner, select
   // an A queue, or fan A's queue URLs out against B's region.
   let loadSeq = 0;
-  async function load(): Promise<void> {
+  /** `awaitAttrs` (auto-refresh): resolve only once the attribute fan-out has
+   *  settled, so the toolbar's "next tick N s after the previous refresh
+   *  SETTLES" gap starts after the last `aws` call — otherwise each tick
+   *  restarted the fan-out from queue 0, the CLI never idled and queues past
+   *  ~15-20 were never refreshed. */
+  async function load(opts: { awaitAttrs?: boolean } = {}): Promise<void> {
     const seq = ++loadSeq;
     const rg = rq;
     loading = true;
@@ -98,9 +102,9 @@
       // call carries the region captured above and stops once superseded.
       loading = false;
       autoSelect(list);
-      void mapLimit(list.slice(0, 40), 2, (q) =>
-        seq === loadSeq ? aws.loadSqsAttrs(account.id, q.url, rg).catch(() => undefined) : Promise.resolve(undefined),
-      );
+      const urls = list.slice(0, 40).map((q) => q.url);
+      const fan = aws.fanOutSqsAttrs(account.id, urls, rg, () => seq === loadSeq);
+      if (opts.awaitAttrs) await fan;
     } catch (e) {
       if (seq !== loadSeq) return;
       error = e instanceof Error ? e.message : String(e);
@@ -358,7 +362,7 @@
   {loading}
   bind:auto
   {region}
-  onrefresh={load}
+  onrefresh={() => load({ awaitAttrs: true })}
 >
   <RegionPicker {account} service="sqs" bind:region />
 </ViewToolbar>

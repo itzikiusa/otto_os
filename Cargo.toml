@@ -16,6 +16,7 @@ members = [
     "crates/otto-apiclient",
     "crates/otto-orchestrator",
     "crates/otto-git",
+    "crates/otto-git-cmd",
     "crates/otto-issues",
     "crates/otto-channels",
     "crates/otto-improve",
@@ -23,6 +24,7 @@ members = [
     "crates/otto-context",
     "crates/otto-usage",
     "crates/otto-telemetry",
+    "crates/otto-telemetry-collector",
     "crates/otto-server",
     "crates/ottod",
     "crates/otto-product",
@@ -69,6 +71,7 @@ otto-dbviewer = { path = "crates/otto-dbviewer" }
 otto-apiclient = { path = "crates/otto-apiclient" }
 otto-orchestrator = { path = "crates/otto-orchestrator" }
 otto-git = { path = "crates/otto-git" }
+otto-git-cmd = { path = "crates/otto-git-cmd" }
 otto-issues = { path = "crates/otto-issues" }
 otto-channels = { path = "crates/otto-channels" }
 otto-improve = { path = "crates/otto-improve" }
@@ -77,6 +80,7 @@ otto-context = { path = "crates/otto-context" }
 otto-skills = { path = "crates/otto-skills" }
 otto-usage = { path = "crates/otto-usage" }
 otto-telemetry = { path = "crates/otto-telemetry" }
+otto-telemetry-collector = { path = "crates/otto-telemetry-collector" }
 otto-agent-run = { path = "crates/otto-agent-run" }
 otto-review = { path = "crates/otto-review" }
 otto-server = { path = "crates/otto-server" }

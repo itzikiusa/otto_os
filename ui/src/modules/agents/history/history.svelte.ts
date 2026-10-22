@@ -9,6 +9,7 @@
 
 import { api } from '../../../lib/api/client';
 import { activity } from '../../../lib/stores/activity.svelte';
+import { loadErrorText } from '../../../lib/loadError';
 import type {
   HistoryEntry,
   HistoryPage,
@@ -161,7 +162,7 @@ class HistoryStore {
       }
     } catch (e) {
       if (my !== this.seq) return;
-      this.error = e instanceof Error ? e.message : String(e);
+      this.error = loadErrorText(e);
     } finally {
       if (my === this.seq) this.loading = false;
     }
@@ -188,7 +189,7 @@ class HistoryStore {
       this.hasMore = this.nextCursor != null;
     } catch (e) {
       if (!current()) return;
-      this.error = e instanceof Error ? e.message : String(e);
+      this.error = loadErrorText(e);
     } finally {
       if (my === this.seq) this.loadingMore = false;
     }

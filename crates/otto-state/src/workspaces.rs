@@ -201,41 +201,32 @@ impl WorkspacesRepo {
         settings: Option<&serde_json::Value>,
         archived: Option<bool>,
     ) -> Result<Workspace> {
-        if let Some(v) = name {
-            sqlx::query("UPDATE workspaces SET name = ? WHERE id = ?")
-                .bind(v)
-                .bind(id)
-                .execute(&self.pool)
-                .await
-                .map_err(dberr("update workspace"))?;
-        }
-        if let Some(v) = root_path {
-            sqlx::query("UPDATE workspaces SET root_path = ? WHERE id = ?")
-                .bind(v)
-                .bind(id)
-                .execute(&self.pool)
-                .await
-                .map_err(dberr("update workspace"))?;
-        }
-        if let Some(v) = settings {
-            // Context has its own versioned API. A stale settings snapshot from
-            // another feature must never erase shared knowledge or repo rules.
-            sqlx::query("UPDATE workspaces SET settings_json = CASE WHEN json_type(settings_json, '$.context') IS NULL THEN json_remove(?, '$.context') ELSE json_set(?, '$.context', json_extract(settings_json, '$.context')) END WHERE id = ?")
-                .bind(v.to_string())
-                .bind(v.to_string())
-                .bind(id)
-                .execute(&self.pool)
-                .await
-                .map_err(dberr("update workspace"))?;
-        }
-        if let Some(v) = archived {
-            sqlx::query("UPDATE workspaces SET archived = ? WHERE id = ?")
-                .bind(v as i64)
-                .bind(id)
-                .execute(&self.pool)
-                .await
-                .map_err(dberr("update workspace"))?;
-        }
+        // One statement (data-integrity-2-03): a multi-field PATCH applies
+        // together or not at all; omitted fields keep their value.
+        // Context has its own versioned API. A stale settings snapshot from
+        // another feature must never erase shared knowledge or repo rules, so
+        // the stored `$.context` is carried over into a new settings value.
+        let settings = settings.map(|v| v.to_string());
+        sqlx::query(
+            "UPDATE workspaces SET
+                name = COALESCE(?, name),
+                root_path = COALESCE(?, root_path),
+                settings_json = CASE WHEN ? IS NULL THEN settings_json
+                    WHEN json_type(settings_json, '$.context') IS NULL THEN json_remove(?, '$.context')
+                    ELSE json_set(?, '$.context', json_extract(settings_json, '$.context')) END,
+                archived = COALESCE(?, archived)
+             WHERE id = ?",
+        )
+        .bind(name)
+        .bind(root_path)
+        .bind(&settings)
+        .bind(&settings)
+        .bind(&settings)
+        .bind(archived.map(|v| v as i64))
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("update workspace"))?;
         self.get(id).await
     }
 

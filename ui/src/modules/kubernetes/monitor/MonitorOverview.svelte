@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rel } from '../../../lib/stores/now.svelte';
   import { plural } from '../../../lib/plural';
   // Monitor overview: one card per registered cluster (health badge, pods,
   // restarts by class, memory vs limits, rps / error %, version drift, and the
@@ -193,7 +194,7 @@
               </div>
             {/if}
 
-            <div class="status dim" title={r.status?.last_error || ''}>{collectorLine(r.status, r.enabled)}</div>
+            <div class="status dim" title={r.status?.last_error || ''}>{collectorLine(r.status, r.enabled, rel)}</div>
             {#if rbac}
               <div class="rbac">
                 <span>metrics-server blocked by RBAC — ask your cluster admin to grant it:</span>

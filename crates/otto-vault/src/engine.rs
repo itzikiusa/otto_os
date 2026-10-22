@@ -251,7 +251,7 @@ impl VaultEngine {
     /// Otto's data dir / a credential dir, or CONTAIN one (S7-01). The path
     /// may not exist yet — it is vetted before anything is created.
     pub fn vet_shared_root(raw: &str) -> Result<PathBuf> {
-        let expanded = PathBuf::from(shellexpand_home(raw.trim()));
+        let expanded = PathBuf::from(otto_core::paths::expand_tilde(raw.trim()));
         let canon =
             otto_core::secret_paths::canonicalize_prospective(&expanded).ok_or_else(|| {
                 Error::Invalid(format!(
@@ -286,7 +286,7 @@ impl VaultEngine {
                 if !unrestricted {
                     Self::vet_shared_root(&r)?;
                 }
-                let p = PathBuf::from(shellexpand_home(r.trim()));
+                let p = PathBuf::from(otto_core::paths::expand_tilde(r.trim()));
                 if p.is_file() {
                     return Err(Error::Invalid(format!("not a directory: {}", p.display())));
                 }
@@ -2738,20 +2738,6 @@ fn slug(s: &str) -> String {
         out = out.replace("--", "-");
     }
     out.trim_matches('-').to_string()
-}
-
-fn shellexpand_home(p: &str) -> String {
-    if p == "~" {
-        if let Some(h) = dirs::home_dir() {
-            return h.to_string_lossy().to_string();
-        }
-    }
-    if let Some(rest) = p.strip_prefix("~/") {
-        if let Some(h) = dirs::home_dir() {
-            return h.join(rest).to_string_lossy().to_string();
-        }
-    }
-    p.to_string()
 }
 
 #[cfg(test)]

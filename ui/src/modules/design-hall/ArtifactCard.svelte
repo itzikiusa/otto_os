@@ -56,7 +56,7 @@
         {#if referenceCount}
           <span class="chip"><Icon name="link" size={12} /> used in {referenceCount}</span>
         {/if}
-        {#each stories.slice(0, 2) as key (key)}
+        {#each stories.slice(0, 2) as key, i (i)}
           <span class="chip mono-chip"><Icon name="ticket" size={12} /> {key}</span>
         {/each}
       </div>

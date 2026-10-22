@@ -1155,11 +1155,6 @@ async fn advance_cursor<C: AssistantCtx>(
     }
 }
 
-/// True for a `{cadence:"once"}` schedule (fires one run, then disables).
-pub fn is_one_shot(schedule: &serde_json::Value) -> bool {
-    schedule.get("cadence").and_then(serde_json::Value::as_str) == Some("once")
-}
-
 /// What one execution produced.
 struct ExecOutcome {
     report: String,

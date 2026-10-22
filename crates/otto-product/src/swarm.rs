@@ -854,25 +854,13 @@ pub async fn discover_story<C: ProductStudioHost>(
 
     // 9. Auto-start the swarm so the discovery agents actually run. Unlike
     //    `to-swarm` (which leaves the swarm paused), discovery is fire-and-go.
-    //    Replicates the `start` handler in otto_swarm::runtime::engine: point-of-action
-    //    budget gate first (same guard as `start`), then set status active,
-    //    start the coordinator, emit the status event. (Starting the swarm runs
-    //    ALL ready tasks, which now includes the discovery tasks — intended.)
-    {
-        let verdict = ctx.usage_budget(&story.workspace_id, "").await;
-        if verdict.blocked {
-            return Err(ApiError(Error::Invalid(format!(
-                "Budget exceeded — swarm blocked: {}",
-                verdict.reason.unwrap_or_else(|| "cap reached".to_string())
-            ))));
-        }
-    }
-    ctx.swarms()
-        .set_swarm_status(&swarm.id, "active")
+    //    The host runs the swarm's own start transition — under the swarm's
+    //    operation guard, so it cannot interleave with an abort — including
+    //    its budget gate. (Starting the swarm runs ALL ready tasks, which now
+    //    includes the discovery tasks — intended.)
+    ctx.activate_swarm(&story.workspace_id, &swarm.id)
         .await
         .map_err(ApiError)?;
-    ctx.start_swarm_coordinator(swarm.id.clone());
-    ctx.emit_swarm_status(&story.workspace_id, &swarm.id, "active");
 
     // 10. Return the run + swarm + project + seeded tasks.
     let swarm = ctx.swarms().get_swarm(&swarm.id).await.map_err(ApiError)?;

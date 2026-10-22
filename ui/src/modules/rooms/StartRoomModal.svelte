@@ -21,7 +21,7 @@
       }
       await openHostedRoom(created.room_id);
       onclose();
-    } catch (e) { error = e instanceof TypeError ? loadErrorText(e) : e instanceof Error ? e.message : 'Could not start this room. Try again.'; }
+    } catch (e) { error = e instanceof TypeError ? loadErrorText(e) : e instanceof Error ? e.message : 'Couldn’t start this room. Try again.'; }
     finally { busy = false; }
   }
 </script>

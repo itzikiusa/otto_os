@@ -133,6 +133,33 @@
     page?.onshow?.(false);
   }
 
+  // Closing the panel unmounts (or hides) whatever had focus inside it — the
+  // Collapse button, the notes textarea on ⌘J. Hand focus to the rail button
+  // of the tab that was showing (DockedDrawer's "refocus the opener" rule), but
+  // only when focus was in the panel or fell to <body>: a ⌘J from elsewhere
+  // leaves focus where it is.
+  let asideEl = $state<HTMLElement | null>(null);
+  let wasOpen = false;
+  let lastShown: string | null = null;
+  $effect.pre(() => {
+    const isOpen = open;
+    const tab = shown;
+    if (wasOpen && !isOpen && !forceOpen) {
+      const active = document.activeElement;
+      const inPanel = !active || active === document.body || !!asideEl?.contains(active);
+      const id = lastShown;
+      if (inPanel) {
+        queueMicrotask(() => {
+          const btn = railEl?.querySelector<HTMLButtonElement>(`.strip-btn[data-tab="${CSS.escape(id ?? '')}"]`)
+            ?? railEl?.querySelector<HTMLButtonElement>('.strip-btn');
+          btn?.focus();
+        });
+      }
+    }
+    wasOpen = isOpen;
+    if (isOpen) lastShown = tab;
+  });
+
   // Rail keys: ↑/↓ (Home/End) move focus between the icons; Enter/Space click.
   let railEl = $state<HTMLElement | null>(null);
   function onRailKey(e: KeyboardEvent): void {
@@ -333,6 +360,7 @@
 <div class="rside" class:embedded={forceOpen}>
   {#if open || browserKept}
     <aside
+      bind:this={asideEl}
       class="rpanel"
       id="side-panel-content"
       class:resizing
@@ -432,14 +460,20 @@
               placeholder="Workspace notes (markdown)…"
               spellcheck="false"
             ></textarea>
-            <div class="notes-foot" aria-live="polite">
-              {#if saveState === 'error'}
-                <div class="notes-error" role="alert"><span>Notes not saved. {notesError}</span>
-                  <button class="btn small" onclick={() => void flushNotes()}>Retry</button>
-                </div>
-              {:else if saveState === 'saving'}<span class="dim">Saving…</span>
+            <!-- Not a live region: "Saving…" / "Saved" swap on every typing
+                 pause and would talk over the user. Only a failure is
+                 announced, through the always-mounted alert region below. -->
+            <div class="notes-foot">
+              <div class="notes-alert" role="alert">
+                {#if saveState === 'error'}
+                  <div class="notes-error"><span>Notes not saved. {notesError}</span>
+                    <button class="btn small" onclick={() => void flushNotes()}>Retry</button>
+                  </div>
+                {/if}
+              </div>
+              {#if saveState === 'saving'}<span class="dim">Saving…</span>
               {:else if saveState === 'saved'}<span class="dim">Saved</span>
-              {:else}<span class="dim">Saved to this workspace as you type</span>{/if}
+              {:else if saveState !== 'error'}<span class="dim">Saved to this workspace as you type</span>{/if}
             </div>
           </div>
         {/if}
@@ -454,6 +488,7 @@
       {#if i > 0 && tabs[i - 1].page && !t.page}<span class="strip-sep" aria-hidden="true"></span>{/if}
       <button
         class="icon-btn strip-btn"
+        data-tab={t.id}
         class:active={open && shown === t.id}
         onclick={() => onRail(t.id)}
         title={open && shown === t.id && !forceOpen ? `${t.label} · click to collapse` : t.label}

@@ -419,3 +419,114 @@ async fn put_grants_writes_audit_entry() {
     assert!(detail.get("old").is_some(), "detail.old present");
     assert!(detail.get("new").is_some(), "detail.new present");
 }
+
+// ---------------------------------------------------------------------------
+// access-control-2-02: Settings → Users is visible to `Users:Admin`, so the
+// user LIST must answer for that role; creating users and reading/writing
+// grants stay root-only (a non-root admin granting would escalate itself).
+// Real `users::*` and grants handlers over a real `ServerCtx`.
+// ---------------------------------------------------------------------------
+
+fn users_app(ctx: otto_server::state::ServerCtx, actor: User) -> Router {
+    use otto_server::routes::{grants, users};
+    use otto_server::state::ServerCtx;
+    let protected = Router::new()
+        .route("/users", get(users::list).post(users::create))
+        .route(
+            "/users/{id}/grants",
+            get(grants::get_grants::<ServerCtx>).put(grants::put_grants::<ServerCtx>),
+        )
+        .route_layer(from_fn_with_state(ctx.clone(), feature_guard::<ServerCtx>));
+    let injected = Arc::new(actor);
+    let protected = protected.layer(from_fn(move |mut req: Request, next: Next| {
+        let u = injected.clone();
+        async move {
+            req.extensions_mut().insert(AuthUser((*u).clone()));
+            req.extensions_mut().insert(otto_core::auth::AuthContext {
+                real_user: (*u).clone(),
+                effective_user: (*u).clone(),
+                scope: None,
+                mcp_only: false,
+                mcp_scope: None,
+                mcp_internal: false,
+                mcp_session_id: None,
+                managed_session_id: None,
+            });
+            next.run(req).await
+        }
+    }));
+    Router::new().nest("/api/v1", protected).with_state(ctx)
+}
+
+#[tokio::test]
+async fn users_admin_lists_users_but_cannot_create_or_touch_grants() {
+    let pool = mk_pool().await;
+    let carol = seed_user(&pool, "carol", false).await;
+    let target = seed_user(&pool, "target", false).await;
+    GrantsRepo::new(pool.clone())
+        .set_grants(&carol.id, &[(Feature::Users, Capability::Admin)])
+        .await
+        .unwrap();
+    let dir = std::env::temp_dir().join(format!("otto-test-users-admin-{}", otto_core::new_id()));
+    let ctx = otto_server::state::ServerCtx::for_tests(&pool, dir).await;
+    let app = users_app(ctx, carol);
+
+    let (st, body) = do_req(&app, Method::GET, "/api/v1/users", None).await;
+    assert_eq!(
+        st,
+        StatusCode::OK,
+        "Users:Admin must list users; got: {body}"
+    );
+    let names: Vec<&str> = body
+        .as_array()
+        .expect("User[]")
+        .iter()
+        .filter_map(|u| u["username"].as_str())
+        .collect();
+    assert!(
+        names.contains(&"carol") && names.contains(&"target"),
+        "{names:?}"
+    );
+
+    let create = serde_json::json!({"username": "mallory", "password": "correct-horse-battery-1"});
+    let (st, body) = do_req(&app, Method::POST, "/api/v1/users", Some(create)).await;
+    assert_eq!(
+        st,
+        StatusCode::FORBIDDEN,
+        "create stays root-only; got: {body}"
+    );
+
+    let grants = format!("/api/v1/users/{}/grants", target.id);
+    let (st, body) = do_req(&app, Method::GET, &grants, None).await;
+    assert_eq!(
+        st,
+        StatusCode::FORBIDDEN,
+        "reading grants stays root-only; got: {body}"
+    );
+    let put = serde_json::json!({"grants": [{"feature": "users", "capability": "admin"}]});
+    let (st, body) = do_req(&app, Method::PUT, &grants, Some(put)).await;
+    assert_eq!(
+        st,
+        StatusCode::FORBIDDEN,
+        "writing grants stays root-only; got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn user_list_still_needs_users_admin() {
+    let pool = mk_pool().await;
+    let dave = seed_user(&pool, "dave", false).await;
+    GrantsRepo::new(pool.clone())
+        .set_grants(&dave.id, &[(Feature::Users, Capability::View)])
+        .await
+        .unwrap();
+    let dir = std::env::temp_dir().join(format!("otto-test-users-view-{}", otto_core::new_id()));
+    let ctx = otto_server::state::ServerCtx::for_tests(&pool, dir).await;
+    let app = users_app(ctx, dave);
+    let (st, body) = do_req(&app, Method::GET, "/api/v1/users", None).await;
+    assert_eq!(
+        st,
+        StatusCode::FORBIDDEN,
+        "below Users:Admin the guard denies the list; got: {body}"
+    );
+}

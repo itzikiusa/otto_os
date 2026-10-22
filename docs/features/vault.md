@@ -48,7 +48,7 @@ contract is `docs/contracts/api.md` → *Vault v3 — the docs home*.
 | · scanning | `crates/otto-vault/src/scan.rs`, `engine.rs` | Incremental (size+mtime) walk; freshness kicks |
 | · OKF | `crates/otto-vault/src/okf.rs` | E1–E3 / W1–W5 conformance + `index.md` generation |
 | · HTTP | `crates/otto-vault/src/http.rs` | The `/workspaces/{ws}/vault/*` router |
-| Persistence | `crates/otto-state/migrations/0103_vault_docs.sql` | `vaults`, `vault_notes`, `vault_links`, `vault_tags`, `vault_files` (+ runtime FTS5 `vault_fts`); the same migration **dropped** the v2 vector/backends/code tables |
+| Persistence | `crates/otto-state/migrations/0105_vault_docs.sql` | `vaults`, `vault_notes`, `vault_links`, `vault_tags`, `vault_files` (+ runtime FTS5 `vault_fts`); the same migration **dropped** the v2 vector/backends/code tables |
 | MCP (session) | `crates/ottod/src/mcp_tools.rs` | `otto_vault_list/dir/read/search/backlinks/tags/graph/okf_validate` + `write/write_file/rename/delete`; reviewer sessions receive the read-only subset |
 | MCP (outward) | `crates/otto-mcp/src/outward/` | `otto.vault_*` — reads default-enabled, writes approval-gated |
 | Global search | `crates/otto-server/src/routes/search.rs` | ⌘F fans out to `vault_fts` (`kind: "vault_note"`) |

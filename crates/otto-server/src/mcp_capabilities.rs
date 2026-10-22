@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use axum::extract::{Path as AxPath, Query, State};
 use axum::Json;
-use otto_core::domain::WorkspaceRole;
+use otto_core::domain::{User, WorkspaceRole};
 use otto_core::redact::redact_text;
 use otto_core::{Error, Id};
 use serde::Deserialize;
@@ -61,19 +61,35 @@ pub async fn code_search(
     CurrentUser(user): CurrentUser,
     Query(q): Query<CodeSearchQuery>,
 ) -> ApiResult<Json<Value>> {
-    require_ws_role(&ctx, &user, &wid, WorkspaceRole::Viewer).await?;
-    let needle = q.q.trim().to_string();
+    Ok(Json(
+        code_search_service(&ctx, &wid, &user, &q.q, q.path.as_deref(), q.max).await?,
+    ))
+}
+
+/// The code search itself, shared by the `code-search` handler and the
+/// context-packet assembly (internal callers call this, never the axum
+/// handler with fabricated extractors). Checks Viewer on `wid`.
+pub async fn code_search_service(
+    ctx: &ServerCtx,
+    wid: &Id,
+    user: &User,
+    q: &str,
+    path: Option<&str>,
+    max: Option<usize>,
+) -> Result<Value, Error> {
+    ctx.roles.check(user, wid, WorkspaceRole::Viewer).await?;
+    let needle = q.trim().to_string();
     if needle.is_empty() {
-        return Err(ApiError(Error::Invalid("q must not be empty".into())));
+        return Err(Error::Invalid("q must not be empty".into()));
     }
-    let ws = ctx.workspaces.get(&wid).await?;
-    let max = q.max.unwrap_or(100).min(MAX_RESULTS_CAP);
+    let ws = ctx.workspaces.get(wid).await?;
+    let max = max.unwrap_or(100).min(MAX_RESULTS_CAP);
     let cancel = Arc::new(AtomicBool::new(false));
     // Dropped with the request future (and on normal return, when the walk is
     // already done): the walk checks the flag between files.
     let _cancel_on_drop = CancelOnDrop(Arc::clone(&cancel));
     let root_path = ws.root_path.clone();
-    let rel = q.path.clone();
+    let rel = path.map(str::to_owned);
     let needle_lower = needle.to_lowercase();
     let outcome = crate::offload::blocking(move || -> Result<SearchOutcome, Error> {
         let (root, search_root) = confine(&root_path, rel.as_deref())?;
@@ -91,16 +107,15 @@ pub async fn code_search(
             &cancel,
         ))
     })
-    .await
-    .map_err(ApiError)?;
+    .await?;
     let truncated = outcome.matches.len() >= max || outcome.stopped.is_some();
-    Ok(Json(json!({
+    Ok(json!({
         "query": needle,
         "root": ws.root_path,
         "matches": outcome.matches,
         "truncated": truncated,
         "stopped": outcome.stopped,
-    })))
+    }))
 }
 
 /// Total file bytes one search may read before it stops.
@@ -289,18 +304,16 @@ pub async fn context_packet(
     let ws = ctx.workspaces.get(&wid).await?;
     let mut excerpts: Vec<Value> = Vec::new();
     if let Some(query) = req.query.as_deref().filter(|q| !q.trim().is_empty()) {
-        let inner = code_search(
-            AxPath(wid.clone()),
-            State(ctx.clone()),
-            CurrentUser(user.clone()),
-            Query(CodeSearchQuery {
-                q: query.to_string(),
-                path: None,
-                max: Some(req.max_excerpts.unwrap_or(20).min(50)),
-            }),
+        let inner = code_search_service(
+            &ctx,
+            &wid,
+            &user,
+            query,
+            None,
+            Some(req.max_excerpts.unwrap_or(20).min(50)),
         )
         .await?;
-        if let Some(m) = inner.0.get("matches").and_then(Value::as_array) {
+        if let Some(m) = inner.get("matches").and_then(Value::as_array) {
             excerpts = m.clone();
         }
     }

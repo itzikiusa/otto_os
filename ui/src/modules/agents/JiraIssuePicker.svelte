@@ -1,11 +1,12 @@
 <script lang="ts">
   // Shared issue picker block (Jira or Linear, per account) — used by both ReviewPanel and AttachIssue.
   // Handles account selection, project selection, and debounced search.
-  import { api } from '../../lib/api/client';
+  import { listIssueProjects, searchIssues } from '../../lib/api/issues';
+  import { issueAccounts } from '../../lib/stores/issueAccounts.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import LoadState from '../../lib/components/LoadState.svelte';
-  import type { IssueAccount, IssueProject, IssueProviderKind, IssueSummary, ListingPage } from '../../lib/api/types';
-  import { truncatedNote, unwrapListing } from '../../lib/listingPage';
+  import type { IssueAccount, IssueProject, IssueProviderKind, IssueSummary } from '../../lib/api/types';
+  import { truncatedNote } from '../../lib/listingPage';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { router } from '../../lib/router.svelte';
@@ -57,7 +58,7 @@
     accountsLoading = true;
     accountsError = null;
     try {
-      accounts = await api.get<IssueAccount[]>('/issue/accounts');
+      accounts = await issueAccounts.load();
       if (accounts.length > 0) selectedAccountId = accounts[0].id;
     } catch (e) {
       accountsError = loadErrorText(e);
@@ -85,11 +86,7 @@
     selectedProjectKey = '';
     resetSearch();
     try {
-      const page = unwrapListing(
-        await api.get<ListingPage<IssueProject>>(
-          `/issue/projects?account_id=${encodeURIComponent(accountId)}&meta=1`,
-        ),
-      );
+      const page = await listIssueProjects(accountId, { meta: true });
       if (!current()) return;
       projects = page.items;
       projectsTruncated = page.truncated;
@@ -138,12 +135,11 @@
     searching = true;
     searchError = null;
     try {
-      const projectParam = selectedProjectKey
-        ? `&project=${encodeURIComponent(selectedProjectKey)}`
-        : '';
-      const found = await api.get<IssueSummary[]>(
-        `/issue/search?account_id=${encodeURIComponent(selectedAccountId)}&q=${encodeURIComponent(q)}${projectParam}`,
-      );
+      const found = await searchIssues({
+        accountId: selectedAccountId,
+        q,
+        project: selectedProjectKey || undefined,
+      });
       // A slower, older search must not overwrite the newer one's results.
       if (seq === searchSeq) results = found;
     } catch (e) {

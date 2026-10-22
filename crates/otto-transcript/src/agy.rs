@@ -28,8 +28,7 @@
 //! [`default_agy_conversation_dirs`]) consumed by the SQLx read-only snapshot
 //! reader in `ottod`.
 
-use std::collections::{HashMap, HashSet};
-use std::fs;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -121,40 +120,6 @@ pub fn default_agy_conversation_dirs(home: &Path) -> Vec<PathBuf> {
         .iter()
         .map(|rel| home.join(rel))
         .collect()
-}
-
-/// Discover all existing, non-empty `<session-uuid>.db` files across the
-/// standard Antigravity roots under `home`. If the same `<session-uuid>.db`
-/// appears in multiple roots (for example `antigravity-cli` and `antigravity-backup`),
-/// the first root in discovery order wins.
-pub fn discover_agy_conversation_dbs(home: &Path) -> Vec<PathBuf> {
-    let mut seen_stems = HashSet::new();
-    let mut out = Vec::new();
-    for dir in default_agy_conversation_dirs(home) {
-        let Ok(rd) = fs::read_dir(&dir) else {
-            continue;
-        };
-        let mut entries: Vec<PathBuf> = rd
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("db"))
-            .collect();
-        entries.sort();
-        for path in entries {
-            let Ok(meta) = fs::metadata(&path) else {
-                continue;
-            };
-            if !meta.is_file() || meta.len() < 100 {
-                continue;
-            }
-            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-                continue;
-            };
-            if seen_stems.insert(stem.to_string()) {
-                out.push(path);
-            }
-        }
-    }
-    out
 }
 
 /// Decode [`AgyTrajectoryLineage`] across one or more `trajectory_metadata_blob` rows.

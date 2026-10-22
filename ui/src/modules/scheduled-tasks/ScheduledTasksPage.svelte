@@ -15,7 +15,8 @@
   import LoadState from '../../lib/components/LoadState.svelte';
   import RelTime from '../../lib/components/RelTime.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
-  import { confirmOutward } from '../../lib/confirmOutward';
+  import { confirmOutward, confirmRunAndDeliver, destWho } from '../../lib/confirmOutward';
+  import { cadenceLabel, runAtLocal } from '../../lib/cadence';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
   import { scheduledTasks } from '../../lib/stores/scheduledTasks.svelte';
@@ -389,31 +390,13 @@
 
   /** A `once` schedule's `run_at` as a `datetime-local` value in `tz`: a local
    *  wall time passes through; an RFC3339 instant is shown in the timezone. */
-  function runAtInput(raw: string, tz: string): string {
-    const local = raw.trim().replace(' ', 'T');
-    if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?$/.test(local)) return local.slice(0, 16);
-    const d = new Date(raw);
-    if (Number.isNaN(d.getTime())) return '';
-    try {
-      const parts = Object.fromEntries(
-        new Intl.DateTimeFormat('en-CA', {
-          timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit',
-          hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
-        }).formatToParts(d).map((p) => [p.type, p.value]),
-      );
-      return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}`;
-    } catch {
-      return d.toISOString().slice(0, 16);
-    }
-  }
-
   /** Populate the cadence form vars from a schedule object (preset or task). */
   function loadSchedule(s: Record<string, unknown>, tz?: string): void {
     const cad = (s.cadence as string) ?? 'interval';
     // `once` (the Assistant and MCP create them) used to load as an interval
     // and silently became "every 60 min" on the next save.
     fCadence = ['daily', 'weekly', 'cron', 'once'].includes(cad) ? (cad as typeof fCadence) : 'interval';
-    fRunAt = typeof s.run_at === 'string' ? runAtInput(s.run_at, tz ?? fTimezone) : '';
+    fRunAt = typeof s.run_at === 'string' ? runAtLocal(s.run_at, tz ?? fTimezone) : '';
     fEveryMin = (s.every_min as number) ?? 60;
     fAt = (s.at as string) ?? '03:00';
     fWeekday = (s.weekday as number) ?? 0;
@@ -679,54 +662,10 @@
     }
   }
 
-  /** Who can read a delivered report, by destination type. */
-  function destWho(type: string): string {
-    switch (type) {
-      case 'slack':
-        return 'Everyone in that Slack channel.';
-      case 'telegram':
-        return 'Everyone in that Telegram chat.';
-      case 'email':
-        return 'The recipients of that email, and anyone they forward it to.';
-      case 'webhook':
-        return 'Whatever service receives that URL.';
-      default:
-        return 'Anyone who can read it there.';
-    }
-  }
-
-  /** Where a task's saved destination points, in the words destWhere() uses. */
-  function savedDestWhere(t: ScheduledTask): string {
-    const d = (t.destination ?? {}) as Record<string, unknown>;
-    const chat = typeof d.chat_id === 'string' ? d.chat_id.trim() : '';
-    switch (d.type as string) {
-      case 'slack':
-        return chat ? `the Slack channel ${chat}` : 'the Slack integration’s default channel';
-      case 'telegram':
-        return chat ? `the Telegram chat ${chat}` : 'the Telegram integration’s default chat';
-      case 'email':
-        return typeof d.to === 'string' && d.to ? d.to : 'an email address';
-      case 'webhook':
-        return typeof d.url === 'string' && d.url ? d.url : 'a webhook';
-      default:
-        return '';
-    }
-  }
-
   async function runNow(t: ScheduledTask): Promise<void> {
     // Outward-facing: a run with a delivery destination posts its report
     // right now — say where before it goes.
-    const where = savedDestWhere(t);
-    if (where) {
-      const ok = await confirmOutward({
-        verb: 'Run and deliver',
-        title: 'Run and deliver now?',
-        where,
-        what: `The report of “${t.name}”, produced by a run that starts now.`,
-        who: destWho((t.destination as { type?: string } | null)?.type ?? ''),
-      });
-      if (!ok) return;
-    }
+    if (!await confirmRunAndDeliver(t.name, t.destination)) return;
     runningIds = { ...runningIds, [t.id]: true };
     try {
       await scheduledTasks.runNow(t.id);
@@ -883,29 +822,6 @@
     } finally {
       if (t.current) reportLoading = false;
     }
-  }
-
-  function everyLabel(min: number): string {
-    if (min % 1440 === 0) return min === 1440 ? 'Every day' : `Every ${min / 1440} days`;
-    if (min % 60 === 0) return min === 60 ? 'Every hour' : `Every ${min / 60} hours`;
-    return `Every ${min} min`;
-  }
-
-  /** Human cadence for a row ("Daily at 03:00 · Europe/London"). Cron keeps
-   *  its expression, which the row renders in mono. */
-  function cadenceLabel(t: ScheduledTask): string {
-    const s = t.schedule ?? {};
-    const c = (s.cadence as string) ?? 'interval';
-    const tz = t.timezone || 'UTC';
-    if (c === 'interval') return everyLabel((s.every_min as number) ?? 60);
-    if (c === 'cron') return 'Cron';
-    if (c === 'once') {
-      const at = typeof s.run_at === 'string' ? runAtInput(s.run_at, tz).replace('T', ' ') : '';
-      return at ? `Once at ${at} · ${tz}` : 'Once';
-    }
-    if (c === 'daily') return `Daily at ${(s.at as string) ?? '09:00'} · ${tz}`;
-    const wd = ['Mondays', 'Tuesdays', 'Wednesdays', 'Thursdays', 'Fridays', 'Saturdays', 'Sundays'][(s.weekday as number) ?? 0];
-    return `${wd} at ${(s.at as string) ?? '09:00'} · ${tz}`;
   }
 
   /** Where the report goes, in words. */
@@ -1347,7 +1263,7 @@
                   {/if}
                 </div>
                 <div class="meta">
-                  <span>{cadenceLabel(t)}</span>
+                  <span>{cadenceLabel(t.schedule, t.timezone, { cronExpr: false })}</span>
                   {#if (t.schedule?.cadence as string) === 'cron'}<code class="cron">{t.schedule?.expr as string}</code><span>{t.timezone || 'UTC'}</span>{/if}
                   <span aria-hidden="true">·</span>
                   <span class="dest" title={destTitle(t)}>{destLabel(t)}</span>

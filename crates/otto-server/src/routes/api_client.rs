@@ -24,7 +24,7 @@ use otto_core::api::{
 use otto_core::auth::AuthContext;
 use otto_core::domain::{
     ApiAutomation, ApiCollection, ApiEnvironment, ApiHistoryEntry, ApiHistorySummary, ApiRequest,
-    Connection, ConnectionKind, WorkspaceRole,
+    Connection, ConnectionKind, User, WorkspaceRole,
 };
 use otto_core::event::Event;
 use otto_core::{Error, Id};
@@ -46,6 +46,19 @@ use crate::api_secrets;
 use crate::auth::{require_ws_role, CurrentAuthContext, CurrentUser};
 use crate::error::{ApiError, ApiResult};
 use crate::state::ServerCtx;
+
+// Handler groups live in `routes/api_client/*`; re-exported so
+// `routes/mod.rs` (and every other importer) keeps the old paths.
+mod automations;
+mod collections;
+mod environments;
+mod history;
+mod requests;
+pub use automations::*;
+pub use collections::*;
+pub use environments::*;
+pub use history::*;
+pub use requests::*;
 
 /// Hard cap for a request's `extras` extension object (serialized).
 const EXTRAS_MAX_BYTES: usize = 256 * 1024;
@@ -544,562 +557,6 @@ pub(crate) fn build_overview(
             Vec::new()
         },
     }
-}
-
-// ===========================================================================
-// Collections
-// ===========================================================================
-
-/// `GET /workspaces/{wid}/api-client/collections`
-pub async fn list_collections(
-    Path(wid): Path<Id>,
-    State(ctx): State<ServerCtx>,
-    CurrentUser(user): CurrentUser,
-) -> ApiResult<Json<Vec<ApiCollection>>> {
-    require_ws_role(&ctx, &user, &wid, WorkspaceRole::Viewer).await?;
-    Ok(Json(repo(&ctx).list_collections(&wid).await?))
-}
-
-/// Tell the workspace's open API clients a saved object changed (perf N4) —
-/// a person's edit, an agent's `api_upsert_request` (it goes through these
-/// same routes) or an import. Ids only; the UI drops its 60 s list cache.
-pub(crate) fn notify_changed(
-    ctx: &ServerCtx,
-    wid: &Id,
-    kind: &str,
-    id: Option<&Id>,
-    deleted: bool,
-) {
-    let _ = ctx.events.send(Event::ApiClientChanged {
-        workspace_id: wid.clone(),
-        kind: kind.to_string(),
-        id: id.cloned(),
-        deleted,
-    });
-}
-
-/// `POST /workspaces/{wid}/api-client/collections`
-pub async fn create_collection(
-    Path(wid): Path<Id>,
-    State(ctx): State<ServerCtx>,
-    CurrentUser(user): CurrentUser,
-    Json(req): Json<UpsertApiCollectionReq>,
-) -> ApiResult<Json<ApiCollection>> {
-    require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
-    if req.name.trim().is_empty() {
-        return Err(Error::Invalid("collection name must not be empty".into()).into());
-    }
-    let position = repo(&ctx).count_collections(&wid).await?;
-    let col = repo(&ctx)
-        .create_collection(NewApiCollection {
-            workspace_id: wid,
-            name: req.name.trim().to_string(),
-            parent_id: req.parent_id,
-            position,
-        })
-        .await?;
-    notify_changed(&ctx, &col.workspace_id, "collection", Some(&col.id), false);
-    Ok(Json(col))
-}
-
-/// `PATCH /workspaces/{wid}/api-client/collections/{id}`
-pub async fn update_collection(
-    Path((wid, id)): Path<(Id, Id)>,
-    State(ctx): State<ServerCtx>,
-    CurrentUser(user): CurrentUser,
-    Json(req): Json<UpsertApiCollectionReq>,
-) -> ApiResult<Json<ApiCollection>> {
-    require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
-    let repo = repo(&ctx);
-    ensure_in_workspace(&repo.get_collection(&id).await?.workspace_id, &wid)?;
-    let col = repo
-        .update_collection(&id, Some(req.name.trim()), Some(req.parent_id.as_deref()))
-        .await?;
-    notify_changed(&ctx, &wid, "collection", Some(&id), false);
-    Ok(Json(col))
-}
-
-/// `DELETE /workspaces/{wid}/api-client/collections/{id}`
-pub async fn delete_collection(
-    Path((wid, id)): Path<(Id, Id)>,
-    State(ctx): State<ServerCtx>,
-    CurrentUser(user): CurrentUser,
-) -> ApiResult<StatusCode> {
-    require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
-    let repo = repo(&ctx);
-    ensure_in_workspace(&repo.get_collection(&id).await?.workspace_id, &wid)?;
-    repo.delete_collection(&id).await?;
-    notify_changed(&ctx, &wid, "collection", Some(&id), true);
-    Ok(StatusCode::NO_CONTENT)
-}
-
-// ===========================================================================
-// Requests
-// ===========================================================================
-
-#[derive(Debug, Deserialize)]
-pub struct RequestsFilter {
-    pub collection_id: Option<Id>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct RequestShape {
-    pub shape: Option<String>,
-}
-
-/// `GET /workspaces/{wid}/api-client/requests` (?collection_id)
-pub async fn list_requests(
-    Path(wid): Path<Id>,
-    Query(filter): Query<RequestsFilter>,
-    State(ctx): State<ServerCtx>,
-    CurrentUser(user): CurrentUser,
-) -> ApiResult<Json<Vec<ApiRequest>>> {
-    require_ws_role(&ctx, &user, &wid, WorkspaceRole::Viewer).await?;
-    Ok(Json(
-        repo(&ctx)
-            .list_requests(&wid, filter.collection_id.as_ref())
-            .await?,
-    ))
-}
-
-/// `GET /workspaces/{wid}/api-client/requests/summaries` (?collection_id) —
-/// the scalar projection of `/requests` ([`ApiOverviewRequest`] rows: no
-/// body, headers, auth values, scripts or docs).
-pub async fn list_request_summaries(
-    Path(wid): Path<Id>,
-    Query(filter): Query<RequestsFilter>,
-    State(ctx): State<ServerCtx>,
-    CurrentUser(user): CurrentUser,
-) -> ApiResult<Json<Vec<ApiOverviewRequest>>> {
-    require_ws_role(&ctx, &user, &wid, WorkspaceRole::Viewer).await?;
-    Ok(Json(
-        repo(&ctx)
-            .list_request_summaries(&wid, filter.collection_id.as_ref())
-            .await?,
-    ))
-}
-
-/// `GET /workspaces/{wid}/api-client/requests/{id}`
-pub async fn get_request(
-    Path((wid, id)): Path<(Id, Id)>,
-    Query(shape): Query<RequestShape>,
-    State(ctx): State<ServerCtx>,
-    CurrentUser(user): CurrentUser,
-) -> ApiResult<Json<ApiRequest>> {
-    require_ws_role(&ctx, &user, &wid, WorkspaceRole::Viewer).await?;
-    let req = repo(&ctx).get_request(&id).await?;
-    ensure_in_workspace(&req.workspace_id, &wid)?;
-    Ok(Json(if shape.shape.as_deref() == Some("agent") {
-        shape_request_agent(req)
-    } else {
-        req
-    }))
-}
-
-/// Apply the bounded, credential-masked request shape used by agents.
-/// `ApiRequest` has no `truncated` flag, so a capped body says so in-band —
-/// otherwise the model reads a silently clipped payload as the whole thing.
-pub(crate) fn shape_request_agent(mut request: ApiRequest) -> ApiRequest {
-    request.auth = api_secrets::redact_auth(&request.auth);
-    request.headers = api_secrets::mask_kv_rows(&request.headers);
-    request.query = api_secrets::mask_kv_rows(&request.query);
-    if request.body.len() > AGENT_BODY_MAX {
-        truncate_string(&mut request.body, AGENT_BODY_MAX);
-        request.body.push_str(AGENT_BODY_TRUNCATED);
-    }
-    request
-}
-
-/// `POST /workspaces/{wid}/api-client/requests`
-pub async fn create_request(
-    Path(wid): Path<Id>,
-    State(ctx): State<ServerCtx>,
-    CurrentUser(user): CurrentUser,
-    headers: HeaderMap,
-    Json(req): Json<UpsertApiRequestReq>,
-) -> ApiResult<Json<ApiRequest>> {
-    require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
-    if req.name.trim().is_empty() {
-        return Err(Error::Invalid("request name must not be empty".into()).into());
-    }
-    let mut extras = validate_extras(req.extras.clone())?;
-    let (source, session_id) = caller_source(&headers);
-    if source["kind"] == "agent" {
-        extras = Some(stamp_agent(extras, session_id.as_deref()));
-    }
-    let position = repo(&ctx)
-        .count_requests(&wid, req.collection_id.as_ref())
-        .await?;
-
-    // Pre-generate the id so secret members can move to the Keychain BEFORE the
-    // row exists (lazy migration on save; plaintext never touches SQLite).
-    let id = otto_core::new_id();
-    let own_ref = api_secrets::request_ref(&id);
-    let (auth_row, blob) = api_secrets::split_auth_secrets(
-        &normalize_json_object(req.auth.clone()),
-        &own_ref,
-        &BTreeMap::new(),
-    )
-    .map_err(|m| ApiError(Error::Invalid(m)))?;
-    // A brand-new id has no Keychain item: an empty blob would only issue a
-    // synchronous Keychain delete per created request (3k on an import).
-    if !blob.is_empty() {
-        api_secrets::store_blob_async(&ctx.secrets, &own_ref, &blob).await?;
-    }
-
-    let mut new = req_to_new(&wid, req, position, extras);
-    new.id = Some(id);
-    new.auth = auth_row;
-    let created = repo(&ctx).create_request(new).await?;
-    notify_changed(&ctx, &wid, "request", Some(&created.id), false);
-    Ok(Json(created))
-}
-
-/// `PATCH /workspaces/{wid}/api-client/requests/{id}`
-pub async fn update_request(
-    Path((wid, id)): Path<(Id, Id)>,
-    State(ctx): State<ServerCtx>,
-    CurrentUser(user): CurrentUser,
-    headers: HeaderMap,
-    Json(mut req): Json<UpsertApiRequestReq>,
-) -> ApiResult<Json<ApiRequest>> {
-    require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
-    let _credential_guard = api_secrets::request_guard(&id).await;
-    let repo = repo(&ctx);
-    let existing = repo.get_request(&id).await?;
-    ensure_in_workspace(&existing.workspace_id, &wid)?;
-    let incoming_extras = validate_extras(req.extras.clone())?;
-    let mut extras = if req.extras.is_none() {
-        existing.extras.clone()
-    } else {
-        incoming_extras
-    };
-    let (source, session_id) = caller_source(&headers);
-    if source["kind"] == "agent" {
-        extras = Some(stamp_agent(extras, session_id.as_deref()));
-    }
-
-    // Lazy secret migration: plaintext secret members move to the Keychain;
-    // markers sent back unchanged keep their stored values.
-    let previous_blob =
-        api_secrets::load_blob_checked_async(&ctx.secrets, &api_secrets::request_ref(&id)).await?;
-    let auth_row = if let Some(incoming) = merged_auth_for_update(&req.auth) {
-        let own_ref = api_secrets::request_ref(&id);
-        let existing_blob = api_secrets::load_blob_checked_async(&ctx.secrets, &own_ref).await?;
-        let (auth_row, blob) = api_secrets::split_auth_secrets(
-            &normalize_json_object(incoming),
-            &own_ref,
-            &existing_blob,
-        )
-        .map_err(|m| ApiError(Error::Invalid(m)))?;
-        api_secrets::store_blob_async(&ctx.secrets, &own_ref, &blob).await?;
-        auth_row
-    } else {
-        existing.auth.clone()
-    };
-
-    req.auth = auth_row.clone();
-    let mut new = req_to_new(&wid, req, existing.position, extras);
-    new.auth = auth_row;
-    let updated = match repo.update_request(&id, new).await {
-        Ok(updated) => updated,
-        Err(error) => {
-            api_secrets::store_blob_async(
-                &ctx.secrets,
-                &api_secrets::request_ref(&id),
-                &previous_blob,
-            )
-            .await?;
-            return Err(error.into());
-        }
-    };
-    notify_changed(&ctx, &wid, "request", Some(&id), false);
-    Ok(Json(updated))
-}
-
-/// `None` means an absent/null PATCH auth keeps the stored row and Keychain blob.
-pub(crate) fn merged_auth_for_update(incoming: &Value) -> Option<Value> {
-    (!incoming.is_null()).then(|| incoming.clone())
-}
-
-/// `DELETE /workspaces/{wid}/api-client/requests/{id}`
-pub async fn delete_request(
-    Path((wid, id)): Path<(Id, Id)>,
-    State(ctx): State<ServerCtx>,
-    CurrentUser(user): CurrentUser,
-) -> ApiResult<StatusCode> {
-    require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
-    let _credential_guard = api_secrets::request_guard(&id).await;
-    let repo = repo(&ctx);
-    ensure_in_workspace(&repo.get_request(&id).await?.workspace_id, &wid)?;
-    repo.delete_request(&id).await?;
-    // Best-effort: drop the request's Keychain blob with it.
-    let _ = otto_core::secrets::delete_async(&ctx.secrets, &api_secrets::request_ref(&id)).await;
-    notify_changed(&ctx, &wid, "request", Some(&id), true);
-    Ok(StatusCode::NO_CONTENT)
-}
-
-/// Enforce the `extras` contract: JSON object, ≤ 256 KiB serialized. The UI
-/// owns the inner shape (like `auth`).
-fn validate_extras(extras: Option<Value>) -> Result<Option<Value>, ApiError> {
-    match extras {
-        None | Some(Value::Null) => Ok(None),
-        Some(v) if !v.is_object() => Err(ApiError(Error::Invalid(
-            "extras must be a JSON object".into(),
-        ))),
-        Some(v) => {
-            if v.to_string().len() > EXTRAS_MAX_BYTES {
-                return Err(ApiError(Error::Invalid(format!(
-                    "extras exceeds the {} KiB cap",
-                    EXTRAS_MAX_BYTES / 1024
-                ))));
-            }
-            Ok(Some(v))
-        }
-    }
-}
-
-fn req_to_new(
-    wid: &Id,
-    req: UpsertApiRequestReq,
-    position: i64,
-    extras: Option<Value>,
-) -> NewApiRequest {
-    NewApiRequest {
-        id: None,
-        workspace_id: wid.clone(),
-        collection_id: req.collection_id,
-        name: req.name.trim().to_string(),
-        method: req.method.to_uppercase(),
-        url: req.url,
-        headers: normalize_json_array(req.headers),
-        query: normalize_json_array(req.query),
-        body_mode: req.body_mode,
-        body: req.body,
-        auth: normalize_json_object(req.auth),
-        ssh_connection_id: req.ssh_connection_id,
-        extras,
-        position,
-    }
-}
-
-// ===========================================================================
-// Environments
-// ===========================================================================
-
-/// `GET /workspaces/{wid}/api-client/environments`
-pub async fn list_environments(
-    Path(wid): Path<Id>,
-    State(ctx): State<ServerCtx>,
-    CurrentUser(user): CurrentUser,
-) -> ApiResult<Json<Vec<ApiEnvironment>>> {
-    require_ws_role(&ctx, &user, &wid, WorkspaceRole::Viewer).await?;
-    Ok(Json(repo(&ctx).list_environments(&wid).await?))
-}
-
-/// `POST /workspaces/{wid}/api-client/environments`
-pub async fn create_environment(
-    Path(wid): Path<Id>,
-    State(ctx): State<ServerCtx>,
-    CurrentUser(user): CurrentUser,
-    Json(req): Json<UpsertApiEnvironmentReq>,
-) -> ApiResult<Json<ApiEnvironment>> {
-    require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
-    if req.name.trim().is_empty() {
-        return Err(Error::Invalid("environment name must not be empty".into()).into());
-    }
-    // The row never holds a value for a key marked secret; those arrive only
-    // via the write-only `secret_values` and go straight to the Keychain.
-    let secret_keys = req.secret_keys.clone().unwrap_or_default();
-    let variables =
-        api_secrets::strip_secret_variables(&normalize_json_object(req.variables), &secret_keys);
-    let env = repo(&ctx)
-        .create_environment(NewApiEnvironment {
-            workspace_id: wid,
-            name: req.name.trim().to_string(),
-            variables,
-            secret_keys: secret_keys.clone(),
-        })
-        .await?;
-    let blob: BTreeMap<String, String> = req
-        .secret_values
-        .into_iter()
-        .filter(|(k, _)| secret_keys.contains(k))
-        .collect();
-    api_secrets::store_blob_async(&ctx.secrets, &api_secrets::env_ref(&env.id), &blob).await?;
-    notify_changed(&ctx, &env.workspace_id, "environment", Some(&env.id), false);
-    Ok(Json(env))
-}
-
-/// `PATCH /workspaces/{wid}/api-client/environments/{id}`
-pub async fn update_environment(
-    Path((wid, id)): Path<(Id, Id)>,
-    State(ctx): State<ServerCtx>,
-    CurrentUser(user): CurrentUser,
-    Json(req): Json<UpsertApiEnvironmentReq>,
-) -> ApiResult<Json<ApiEnvironment>> {
-    require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
-    let repo = repo(&ctx);
-    let existing = repo.get_environment(&id).await?;
-    ensure_in_workspace(&existing.workspace_id, &wid)?;
-    // Omitted `secret_keys` keeps the stored set (a PATCH that leaves it out
-    // must not silently delete every Keychain secret).
-    let secret_keys: Vec<String> = req
-        .secret_keys
-        .clone()
-        .unwrap_or_else(|| existing.secret_keys.clone());
-    let vars =
-        api_secrets::strip_secret_variables(&normalize_json_object(req.variables), &secret_keys);
-    let sref = api_secrets::env_ref(&id);
-    let mut blob = api_secrets::load_blob_async(&ctx.secrets, &sref).await;
-    apply_secret_changes(
-        &mut blob,
-        &secret_keys,
-        &req.secret_renames,
-        req.secret_values,
-    );
-    api_secrets::store_blob_async(&ctx.secrets, &sref, &blob).await?;
-    let env = repo
-        .update_environment(&id, Some(req.name.trim()), Some(&vars), Some(&secret_keys))
-        .await?;
-    notify_changed(&ctx, &wid, "environment", Some(&id), false);
-    Ok(Json(env))
-}
-
-/// Update an environment's Keychain blob in place: renamed secrets carry
-/// their stored value to the new name first (`renames` = old → new, only onto
-/// a key that is still secret), then values for keys no longer marked secret
-/// are dropped, then the write-only new/changed values are overlaid.
-pub(crate) fn apply_secret_changes(
-    blob: &mut BTreeMap<String, String>,
-    secret_keys: &[String],
-    renames: &BTreeMap<String, String>,
-    new_values: BTreeMap<String, String>,
-) {
-    for (old, new) in renames {
-        if old == new || !secret_keys.contains(new) {
-            continue;
-        }
-        if let Some(value) = blob.remove(old) {
-            blob.entry(new.clone()).or_insert(value);
-        }
-    }
-    blob.retain(|k, _| secret_keys.contains(k));
-    for (k, v) in new_values {
-        if secret_keys.contains(&k) {
-            blob.insert(k, v);
-        }
-    }
-}
-
-/// `DELETE /workspaces/{wid}/api-client/environments/{id}`
-pub async fn delete_environment(
-    Path((wid, id)): Path<(Id, Id)>,
-    State(ctx): State<ServerCtx>,
-    CurrentUser(user): CurrentUser,
-) -> ApiResult<StatusCode> {
-    require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
-    let repo = repo(&ctx);
-    ensure_in_workspace(&repo.get_environment(&id).await?.workspace_id, &wid)?;
-    repo.delete_environment(&id).await?;
-    // Best-effort: drop the environment's Keychain blob with it.
-    let _ = otto_core::secrets::delete_async(&ctx.secrets, &api_secrets::env_ref(&id)).await;
-    notify_changed(&ctx, &wid, "environment", Some(&id), true);
-    Ok(StatusCode::NO_CONTENT)
-}
-
-/// `POST /workspaces/{wid}/api-client/environments/{id}/activate`
-pub async fn activate_environment(
-    Path((wid, id)): Path<(Id, Id)>,
-    State(ctx): State<ServerCtx>,
-    CurrentUser(user): CurrentUser,
-) -> ApiResult<Json<ApiEnvironment>> {
-    require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
-    let repo = repo(&ctx);
-    ensure_in_workspace(&repo.get_environment(&id).await?.workspace_id, &wid)?;
-    let env = repo.set_active(&wid, &id).await?;
-    notify_changed(&ctx, &wid, "environment", Some(&id), false);
-    Ok(Json(env))
-}
-
-// ===========================================================================
-// History
-// ===========================================================================
-
-#[derive(Debug, Deserialize)]
-pub struct HistoryFilter {
-    pub limit: Option<i64>,
-    pub q: Option<String>,
-    pub status: Option<i64>,
-    pub request_id: Option<String>,
-    pub source: Option<String>,
-}
-
-fn history_query(filter: HistoryFilter) -> ApiHistoryQuery {
-    ApiHistoryQuery {
-        limit: filter
-            .limit
-            .unwrap_or(HISTORY_DEFAULT)
-            .clamp(1, HISTORY_MAX),
-        q: filter.q,
-        status: filter.status,
-        request_id: filter.request_id,
-        source: filter.source,
-    }
-}
-
-/// Additive metadata projection; retained replay bodies remain in detail/full history.
-pub async fn list_history_summaries(
-    Path(wid): Path<Id>,
-    Query(filter): Query<HistoryFilter>,
-    State(ctx): State<ServerCtx>,
-    CurrentUser(user): CurrentUser,
-) -> ApiResult<Json<Vec<ApiHistorySummary>>> {
-    require_ws_role(&ctx, &user, &wid, WorkspaceRole::Viewer).await?;
-    Ok(Json(
-        repo(&ctx)
-            .list_history_summaries(&wid, &history_query(filter))
-            .await?,
-    ))
-}
-
-/// `GET /workspaces/{wid}/api-client/history` (optional filters)
-pub async fn list_history(
-    Path(wid): Path<Id>,
-    Query(filter): Query<HistoryFilter>,
-    State(ctx): State<ServerCtx>,
-    CurrentUser(user): CurrentUser,
-) -> ApiResult<Json<Vec<ApiHistoryEntry>>> {
-    require_ws_role(&ctx, &user, &wid, WorkspaceRole::Viewer).await?;
-    Ok(Json(
-        repo(&ctx)
-            .list_history_filtered(&wid, &history_query(filter))
-            .await?,
-    ))
-}
-
-/// `GET /workspaces/{wid}/api-client/history/{id}`
-pub async fn get_history(
-    Path((wid, id)): Path<(Id, Id)>,
-    State(ctx): State<ServerCtx>,
-    CurrentUser(user): CurrentUser,
-) -> ApiResult<Json<ApiHistoryEntry>> {
-    require_ws_role(&ctx, &user, &wid, WorkspaceRole::Viewer).await?;
-    let entry = repo(&ctx).get_history(&id).await?;
-    ensure_in_workspace(&entry.workspace_id, &wid)?;
-    Ok(Json(entry))
-}
-
-/// `DELETE /workspaces/{wid}/api-client/history`
-pub async fn clear_history(
-    Path(wid): Path<Id>,
-    State(ctx): State<ServerCtx>,
-    CurrentUser(user): CurrentUser,
-) -> ApiResult<StatusCode> {
-    require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
-    repo(&ctx).clear_history(&wid).await?;
-    invalidate_storage_gauge(&wid);
-    Ok(StatusCode::NO_CONTENT)
 }
 
 // ===========================================================================
@@ -1835,10 +1292,26 @@ const HISTORY_BODY_MAX: usize = 64 * 1024;
 /// integers; `0` disables that limit), defaulting to
 /// [`HISTORY_KEEP_ROWS_DEFAULT`] / [`HISTORY_KEEP_DAYS_DEFAULT`].
 pub(crate) async fn history_retention(ctx: &ServerCtx, wid: &Id) -> (i64, i64) {
-    let settings = ctx.workspaces.get(wid).await.ok().map(|ws| ws.settings);
+    retention_from_settings(
+        ctx.workspaces
+            .get(wid)
+            .await
+            .ok()
+            .map(|ws| ws.settings)
+            .as_ref(),
+    )
+}
+
+/// Longest honoured "keep N days" (~100 years). A larger value (someone typing
+/// `99999999` to mean "forever") is clamped here; `prune_history` additionally
+/// treats an unrepresentable cutoff as "no age limit" (backend-correctness-2-01:
+/// `now - days(n)` used to panic every prune).
+pub(crate) const HISTORY_KEEP_DAYS_MAX: i64 = 36_500;
+
+/// [`history_retention`] over an already-loaded settings object.
+pub(crate) fn retention_from_settings(settings: Option<&Value>) -> (i64, i64) {
     let limit = |key: &str, default: i64| -> i64 {
         settings
-            .as_ref()
             .and_then(|s| s.get("api_client"))
             .and_then(|a| a.get(key))
             .and_then(Value::as_i64)
@@ -1847,7 +1320,7 @@ pub(crate) async fn history_retention(ctx: &ServerCtx, wid: &Id) -> (i64, i64) {
     };
     (
         limit("history_max_rows", HISTORY_KEEP_ROWS_DEFAULT),
-        limit("history_max_days", HISTORY_KEEP_DAYS_DEFAULT),
+        limit("history_max_days", HISTORY_KEEP_DAYS_DEFAULT).min(HISTORY_KEEP_DAYS_MAX),
     )
 }
 
@@ -2340,13 +1813,31 @@ pub async fn execute(
     headers: HeaderMap,
     Json(req): Json<ExecuteApiReq>,
 ) -> ApiResult<Json<ApiResponse>> {
-    require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
-    let repo = repo(&ctx);
+    execute_service(&ctx, &wid, &user, &auth, &headers, req)
+        .await
+        .map(Json)
+}
+
+/// The execute path itself, for internal callers (a workflow `api_run` step):
+/// they call this, never the axum handler with fabricated extractors.
+/// `headers` carries the caller attribution (`x-otto-agent`, session id) that
+/// history and the agent secret-scrubbing rules read; `auth` is the request's
+/// credential (an automation passes [`AuthContext::automation`]).
+pub(crate) async fn execute_service(
+    ctx: &ServerCtx,
+    wid: &Id,
+    user: &User,
+    auth: &AuthContext,
+    headers: &HeaderMap,
+    req: ExecuteApiReq,
+) -> ApiResult<ApiResponse> {
+    require_ws_role(ctx, user, wid, WorkspaceRole::Editor).await?;
+    let repo = repo(ctx);
 
     // Resolve the environment variable map (Keychain-backed secrets included),
     // then layer runtime overrides (from post-response scripts / chaining).
     let (mut vars, environment, env_blob) =
-        resolve_environment(&ctx, &repo, &wid, req.environment_id.as_ref()).await?;
+        resolve_environment(ctx, &repo, wid, req.environment_id.as_ref()).await?;
     let env_vars = vars.clone();
     if let Some(Value::Object(overrides)) = &req.vars {
         for (k, v) in overrides {
@@ -2360,7 +1851,7 @@ pub async fn execute(
     // before anything is resolved or sent.
     if let Some(host) = unbound_secret_host(
         &repo,
-        &wid,
+        wid,
         &req,
         &vars,
         &env_vars,
@@ -2372,7 +1863,7 @@ pub async fn execute(
     )
     .await?
     {
-        let agent = is_agent_caller(&headers, &auth);
+        let agent = is_agent_caller(headers, auth);
         if agent || !req.confirm_new_host {
             return Err(new_host_conflict(&host, agent));
         }
@@ -2380,7 +1871,7 @@ pub async fn execute(
 
     // Snapshot of the request as executed. Secret auth members are REDACTED —
     // history must never become the plaintext copy that defeats the Keychain.
-    let (source, session_id) = caller_source(&headers);
+    let (source, session_id) = caller_source(headers);
     let request_snapshot = json!({
         "method": req.method,
         "url": req.url,
@@ -2395,12 +1886,12 @@ pub async fn execute(
 
     // Resolve `$secret` auth markers in-memory, immediately before send. The
     // referenced request must live in this workspace.
-    let exec_req = match resolve_exec_auth(&repo, &ctx.secrets, &wid, &req).await {
+    let exec_req = match resolve_exec_auth(&repo, &ctx.secrets, wid, &req).await {
         Ok(r) => Some(r),
         Err(msg) => {
             let secret_values: Vec<String> = env_blob.values().cloned().collect();
             record_history(
-                &ctx,
+                ctx,
                 &repo,
                 NewApiHistory {
                     workspace_id: wid.clone(),
@@ -2423,12 +1914,11 @@ pub async fn execute(
 
     // Resolve the optional SSH tunnel first; a resolution failure flows through
     // the same error/history path as a network failure below.
-    let send = match resolve_socks_proxy(&ctx, &wid, req.ssh_connection_id.as_ref(), &user.id).await
-    {
+    let send = match resolve_socks_proxy(ctx, wid, req.ssh_connection_id.as_ref(), &user.id).await {
         Ok(proxy) => {
-            let allow_local = workspace_allows_local(&ctx, &wid).await;
+            let allow_local = workspace_allows_local(ctx, wid).await;
             build_and_send(
-                &jar_scope(&wid, &user.id),
+                &jar_scope(wid, &user.id),
                 &exec_req,
                 &vars,
                 proxy.as_deref(),
@@ -2458,7 +1948,7 @@ pub async fn execute(
             api_secrets::scrub_response_json(&mut stored_resp, &secret_values);
             // Record success in history (best-effort; do not fail the request).
             record_history(
-                &ctx,
+                ctx,
                 &repo,
                 NewApiHistory {
                     workspace_id: wid.clone(),
@@ -2474,7 +1964,7 @@ pub async fn execute(
                 None,
             )
             .await;
-            if is_agent_caller(&headers, &auth) {
+            if is_agent_caller(headers, auth) {
                 // An agent reads the response too: a bound host that echoes
                 // the request (a `/debug/headers` endpoint) must not hand it
                 // the Keychain value. No raw bytes either — neither inline
@@ -2482,9 +1972,9 @@ pub async fn execute(
                 api_secrets::scrub_secrets(&mut resp, &secret_values);
                 resp.body_base64.clear();
             } else {
-                attach_body(&mut resp, raw, Some((&wid, &user.id)));
+                attach_body(&mut resp, raw, Some((wid, &user.id)));
             }
-            Ok(Json(resp))
+            Ok(resp)
         }
         Err(err) => {
             let (_, secret_values) = collect_secrets(
@@ -2498,7 +1988,7 @@ pub async fn execute(
             let err = api_secrets::scrub_str(&err, &secret_values);
             // Record the failure too, then surface as a 502.
             record_history(
-                &ctx,
+                ctx,
                 &repo,
                 NewApiHistory {
                     workspace_id: wid.clone(),
@@ -3472,674 +2962,6 @@ fn describe_reqwest_error(e: &reqwest::Error, timeout: Duration) -> String {
     } else {
         format!("request failed: {e}")
     }
-}
-
-// ===========================================================================
-// Automations (collection runner)
-// ===========================================================================
-
-/// `GET /workspaces/{wid}/api-client/automations`
-pub async fn list_automations(
-    Path(wid): Path<Id>,
-    State(ctx): State<ServerCtx>,
-    CurrentUser(user): CurrentUser,
-) -> ApiResult<Json<Vec<ApiAutomation>>> {
-    require_ws_role(&ctx, &user, &wid, WorkspaceRole::Viewer).await?;
-    Ok(Json(repo(&ctx).list_automations(&wid).await?))
-}
-
-/// `POST /workspaces/{wid}/api-client/automations`
-pub async fn create_automation(
-    Path(wid): Path<Id>,
-    State(ctx): State<ServerCtx>,
-    CurrentUser(user): CurrentUser,
-    Json(req): Json<UpsertApiAutomationReq>,
-) -> ApiResult<Json<ApiAutomation>> {
-    require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
-    if req.name.trim().is_empty() {
-        return Err(Error::Invalid("automation name must not be empty".into()).into());
-    }
-    let auto = repo(&ctx)
-        .create_automation(NewApiAutomation {
-            workspace_id: wid,
-            name: req.name.trim().to_string(),
-            steps: normalize_json_array(req.steps),
-        })
-        .await?;
-    notify_changed(
-        &ctx,
-        &auto.workspace_id,
-        "automation",
-        Some(&auto.id),
-        false,
-    );
-    Ok(Json(auto))
-}
-
-/// `PATCH /workspaces/{wid}/api-client/automations/{id}`
-pub async fn update_automation(
-    Path((wid, id)): Path<(Id, Id)>,
-    State(ctx): State<ServerCtx>,
-    CurrentUser(user): CurrentUser,
-    Json(req): Json<UpsertApiAutomationReq>,
-) -> ApiResult<Json<ApiAutomation>> {
-    require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
-    let repo = repo(&ctx);
-    ensure_in_workspace(&repo.get_automation(&id).await?.workspace_id, &wid)?;
-    let steps = normalize_json_array(req.steps);
-    let auto = repo
-        .update_automation(&id, Some(req.name.trim()), Some(&steps))
-        .await?;
-    notify_changed(&ctx, &wid, "automation", Some(&id), false);
-    Ok(Json(auto))
-}
-
-/// `DELETE /workspaces/{wid}/api-client/automations/{id}`
-pub async fn delete_automation(
-    Path((wid, id)): Path<(Id, Id)>,
-    State(ctx): State<ServerCtx>,
-    CurrentUser(user): CurrentUser,
-) -> ApiResult<StatusCode> {
-    require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
-    let repo = repo(&ctx);
-    ensure_in_workspace(&repo.get_automation(&id).await?.workspace_id, &wid)?;
-    repo.delete_automation(&id).await?;
-    notify_changed(&ctx, &wid, "automation", Some(&id), true);
-    Ok(StatusCode::NO_CONTENT)
-}
-
-/// `POST /workspaces/{wid}/api-client/automations/{id}/run`
-///
-/// Runs each step in order against its saved request. The effective variable
-/// map starts from the workspace's active environment and is overlaid with
-/// variables extracted from prior steps (chaining). Every step is attempted —
-/// a failing step is recorded but never aborts the run, and a failure to load a
-/// request, send it, or evaluate assertions never panics.
-pub async fn run_automation(
-    Path((wid, id)): Path<(Id, Id)>,
-    State(ctx): State<ServerCtx>,
-    CurrentUser(user): CurrentUser,
-    CurrentAuthContext(auth): CurrentAuthContext,
-    headers: HeaderMap,
-    options: Option<Json<otto_core::api::StartApiAutomationRunReq>>,
-) -> ApiResult<Json<ApiRunResult>> {
-    let Json(run) = super::api_automation_runs::start(
-        Path((wid.clone(), id)),
-        State(ctx.clone()),
-        CurrentUser(user),
-        CurrentAuthContext(auth),
-        headers,
-        Json(options.map(|o| o.0).unwrap_or_default()),
-    )
-    .await?;
-    // Wait on the run's progress channel (closed once the final record is
-    // saved) instead of decoding the run from the DB every 100 ms (perf F2).
-    if let Some(mut progress) = super::api_automation_runs::subscribe(&run.id) {
-        while progress.changed().await.is_ok() {}
-    }
-    let reports = otto_state::api_runs::ApiRunsRepo(ctx.pool);
-    loop {
-        let report = reports
-            .get(&wid, &run.id)
-            .await
-            .map_err(|e| ApiError(Error::Internal(e.to_string())))?;
-        if report.status != "running" {
-            return Ok(Json(report.report));
-        }
-        // Only reachable if the channel closed without a final status (a
-        // failed finalize write) — a slow safety net, not the wait path.
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    }
-}
-
-/// Secret ↔ host binding inputs for an automation run an AGENT started (see
-/// [`unbound_secret_host`]): the environment's own variables (no dataset rows,
-/// no chained extractions) and its Keychain blob. A person's run carries none —
-/// they chose the automation, its dataset and its targets themselves.
-pub(crate) struct StepSecretBinding {
-    pub env_vars: serde_json::Map<String, Value>,
-    pub env_blob: BTreeMap<String, String>,
-    pub secret_keys: Vec<String>,
-    /// [`bound_env_secret_hosts`] for `env_vars`, computed once per run
-    /// rather than once per step (perf F3).
-    pub bound_hosts: BTreeSet<String>,
-}
-
-/// Run one automation step against its saved request, evaluating assertions and
-/// applying extractions into `vars` for later steps. Resilient: any error is
-/// captured into the returned [`ApiRunStepResult`] rather than propagated.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn run_step(
-    ctx: &ServerCtx,
-    repo: &ApiClientRepo,
-    wid: &Id,
-    step: &Value,
-    vars: &mut serde_json::Map<String, Value>,
-    pinned: Option<ApiRequest>,
-    actor: &Id,
-    binding: Option<&StepSecretBinding>,
-) -> ApiRunStepResult {
-    let request_id = step
-        .get("request_id")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
-
-    // Load the saved request (must belong to this workspace).
-    let request = match match pinned {
-        Some(request) => Ok(request),
-        None => load_step_request(repo, wid, &request_id).await,
-    } {
-        Ok(r) => r,
-        Err(msg) => {
-            return ApiRunStepResult {
-                request_id,
-                name: String::new(),
-                status: None,
-                duration_ms: 0,
-                ok: false,
-                assertions: Value::Array(Vec::new()),
-                error: Some(msg),
-            };
-        }
-    };
-
-    // Honour the saved request's SSH tunnel choice, if any.
-    let proxy = match resolve_socks_proxy(ctx, wid, request.ssh_connection_id.as_ref(), actor).await
-    {
-        Ok(p) => p,
-        Err(msg) => {
-            return ApiRunStepResult {
-                request_id,
-                name: request.name,
-                status: None,
-                duration_ms: 0,
-                ok: false,
-                assertions: Value::Array(Vec::new()),
-                error: Some(msg),
-            };
-        }
-    };
-
-    // The persisted `extras` unlock scripts / settings / GraphQL variables for
-    // stored-request replay (this is what automations previously lost).
-    let extras = request.extras.clone().unwrap_or(Value::Null);
-    let transport = extras
-        .get("transport")
-        .and_then(Value::as_str)
-        .unwrap_or("http");
-    if transport != "http" {
-        return ApiRunStepResult {
-            request_id,
-            name: request.name,
-            status: None,
-            duration_ms: 0,
-            ok: false,
-            assertions: Value::Array(Vec::new()),
-            error: Some(format!(
-                "'{transport}' requests are not runnable in automations (HTTP only)"
-            )),
-        };
-    }
-
-    let mut exec = request_to_execute(&request);
-    apply_extras_settings(&extras, &mut exec);
-    let graphql_vars = if exec.body_mode == "graphql" {
-        match parse_graphql_variables(&extras) {
-            Ok(vars) => Some(vars),
-            Err(error) => {
-                return ApiRunStepResult {
-                    request_id,
-                    name: request.name,
-                    status: None,
-                    duration_ms: 0,
-                    ok: false,
-                    assertions: Value::Array(Vec::new()),
-                    error: Some(error),
-                };
-            }
-        }
-    } else {
-        None
-    };
-    let mut script_asserts: Vec<Value> = Vec::new();
-    let mut scripts_ok = true;
-
-    // Pre-request script: may mutate method/url/headers/body and set vars.
-    let pre_code = extras
-        .pointer("/scripts/pre")
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    if !pre_code.trim().is_empty() {
-        let script_req = ScriptRequest {
-            method: exec.method.clone(),
-            url: exec.url.clone(),
-            headers: exec.headers.clone(),
-            body: exec.body.clone(),
-        };
-        let mut svars = string_vars(vars);
-        let out = api_scripts::run_pre_request_isolated(pre_code, &script_req, &svars).await;
-        if let Some(err) = out.error {
-            return ApiRunStepResult {
-                request_id,
-                name: request.name,
-                status: None,
-                duration_ms: 0,
-                ok: false,
-                assertions: Value::Array(Vec::new()),
-                error: Some(format!("pre-request script failed: {err}")),
-            };
-        }
-        if let Some(mutated) = out.request {
-            exec.method = mutated.method;
-            exec.url = mutated.url;
-            exec.headers = mutated.headers;
-            exec.body = mutated.body;
-        }
-        svars = out.vars;
-        merge_string_vars(vars, &svars);
-    }
-
-    // GraphQL: combine the query body + stored variables into the standard
-    // JSON payload, exactly like the interactive runner.
-    if let Some(gql_vars) = graphql_vars {
-        exec.body = json!({ "query": exec.body, "variables": gql_vars }).to_string();
-    }
-
-    // Agent-started run: a stored secret must not leave its bound host (a
-    // rewritten request, a dataset row or a chained value can retarget the
-    // URL). The step fails instead of sending; a person can run it from the UI.
-    if let Some(binding) = binding {
-        let unbound = unbound_secret_host_with(
-            repo,
-            wid,
-            &exec,
-            vars,
-            &binding.env_vars,
-            &binding.env_blob,
-            &binding.secret_keys,
-            Some(&binding.bound_hosts),
-        )
-        .await;
-        let error = match unbound {
-            Ok(None) => None,
-            Ok(Some(host)) => Some(new_host_conflict(&host, true).0.to_string()),
-            Err(error) => Some(error.0.to_string()),
-        };
-        if let Some(error) = error {
-            return ApiRunStepResult {
-                request_id,
-                name: request.name,
-                status: None,
-                duration_ms: 0,
-                ok: false,
-                assertions: Value::Array(Vec::new()),
-                error: Some(error),
-            };
-        }
-    }
-
-    // A `{{var}}` nothing defines (an earlier extraction missed, a dataset
-    // column is absent) fails the step — never send the literal placeholder.
-    let unresolved = unresolved_placeholders(&exec, vars);
-    if !unresolved.is_empty() {
-        let names: Vec<String> = unresolved.iter().map(|n| format!("{{{{{n}}}}}")).collect();
-        return ApiRunStepResult {
-            request_id,
-            name: request.name,
-            status: None,
-            duration_ms: 0,
-            ok: false,
-            assertions: Value::Array(Vec::new()),
-            error: Some(format!(
-                "Not sent: no value for {} (set it in the environment, the dataset or an earlier step's extraction)",
-                names.join(", ")
-            )),
-        };
-    }
-
-    // Resolve `$secret` auth markers (this stored request's own ref only).
-    if let Err(msg) = api_secrets::resolve_auth_markers_async(
-        &ctx.secrets,
-        &mut exec.auth,
-        std::slice::from_ref(&request.id),
-    )
-    .await
-    {
-        return ApiRunStepResult {
-            request_id,
-            name: request.name,
-            status: None,
-            duration_ms: 0,
-            ok: false,
-            assertions: Value::Array(Vec::new()),
-            error: Some(msg),
-        };
-    }
-
-    // Send via the shared single-request path (same reqwest logic as /execute).
-    let allow_local = workspace_allows_local(ctx, wid).await;
-    match build_and_send(
-        &jar_scope(wid, actor),
-        &exec,
-        vars,
-        proxy.as_deref(),
-        allow_local,
-    )
-    .await
-    {
-        // Steps only read status/body/timing — the raw bytes are dropped here.
-        Ok((resp, _raw)) => {
-            // Parse the body as JSON once for json_path assertions/extraction;
-            // a non-JSON body yields Null (assertions/extracts simply miss).
-            let body_json = serde_json::from_str::<Value>(&resp.body).unwrap_or(Value::Null);
-
-            // Evaluate assertions.
-            let outcome = StepOutcome {
-                status: Some(resp.status),
-                duration_ms: resp.duration_ms,
-                body: &body_json,
-                body_text: &resp.body,
-                headers: &resp.headers,
-            };
-            let (assertions_value, mut all_passed) = eval_step_assertions(step, &outcome);
-
-            // Apply extractions into the chained variable map. A miss is a
-            // failed line in the report and fails the step — otherwise the
-            // next step would silently send a literal `{{token}}`.
-            let misses = apply_extractions(step, &outcome, vars);
-            if !misses.is_empty() {
-                all_passed = false;
-            }
-            script_asserts.extend(
-                misses
-                    .into_iter()
-                    .map(|desc| json!({ "desc": desc, "passed": false, "actual": Value::Null })),
-            );
-
-            // Post-response script: chaining (set vars) + pm.test results,
-            // reported alongside the step's declarative assertions.
-            let post_code = extras
-                .pointer("/scripts/post")
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            if !post_code.trim().is_empty() {
-                let mut headers_map = BTreeMap::new();
-                if let Some(arr) = resp.headers.as_array() {
-                    for h in arr {
-                        let k = h.get("key").and_then(Value::as_str).unwrap_or("");
-                        let v = h.get("value").and_then(Value::as_str).unwrap_or("");
-                        if !k.is_empty() {
-                            headers_map.insert(k.to_ascii_lowercase(), v.to_string());
-                        }
-                    }
-                }
-                let script_resp = ScriptResponse {
-                    code: resp.status,
-                    status: resp.status_text.clone(),
-                    response_time: resp.duration_ms,
-                    headers: headers_map,
-                    body_text: resp.body.clone(),
-                };
-                let svars = string_vars(vars);
-                let out =
-                    api_scripts::run_post_response_isolated(post_code, &script_resp, &svars).await;
-                if out.error.is_none() {
-                    merge_string_vars(vars, &out.vars);
-                }
-                for t in &out.tests {
-                    if !t.passed {
-                        scripts_ok = false;
-                    }
-                    script_asserts.push(json!({
-                        "desc": format!("script: {}", t.name),
-                        "passed": t.passed,
-                    }));
-                }
-                if let Some(err) = out.error {
-                    scripts_ok = false;
-                    script_asserts.push(json!({
-                        "desc": format!("post-response script error: {err}"),
-                        "passed": false,
-                    }));
-                }
-            }
-
-            let mut all_asserts = assertions_value.as_array().cloned().unwrap_or_default();
-            all_asserts.extend(script_asserts);
-
-            ApiRunStepResult {
-                request_id,
-                name: request.name,
-                status: Some(resp.status),
-                duration_ms: resp.duration_ms,
-                // request succeeded; ok iff every assertion AND script test held
-                ok: all_passed && scripts_ok,
-                assertions: Value::Array(all_asserts),
-                error: None,
-            }
-        }
-        Err(err) => {
-            // Request failed: still evaluate assertions (against a null body and
-            // unknown status) so the report is complete, but ok is false.
-            let (assertions_value, _) = eval_step_assertions(
-                step,
-                &StepOutcome {
-                    status: None,
-                    duration_ms: 0,
-                    body: &Value::Null,
-                    body_text: "",
-                    headers: &Value::Null,
-                },
-            );
-            ApiRunStepResult {
-                request_id,
-                name: request.name,
-                status: None,
-                duration_ms: 0,
-                ok: false,
-                assertions: assertions_value,
-                error: Some(err),
-            }
-        }
-    }
-}
-
-/// Map `extras.settings` onto the per-request execution settings.
-fn apply_extras_settings(extras: &Value, exec: &mut ExecuteApiReq) {
-    let Some(settings) = extras.get("settings") else {
-        return;
-    };
-    if let Some(ms) = settings.get("timeout_ms").and_then(Value::as_u64) {
-        exec.timeout_ms = Some(ms);
-    }
-    if let Some(b) = settings.get("follow_redirects").and_then(Value::as_bool) {
-        exec.follow_redirects = Some(b);
-    }
-    if let Some(b) = settings.get("tls_verify").and_then(Value::as_bool) {
-        exec.verify_ssl = Some(b);
-    }
-}
-
-/// String view of the chained variable map for the script engine.
-fn string_vars(vars: &serde_json::Map<String, Value>) -> BTreeMap<String, String> {
-    vars.iter()
-        .map(|(k, v)| (k.clone(), value_to_string(v)))
-        .collect()
-}
-
-/// The script engine returns a complete snapshot, including deletions.
-fn merge_string_vars(vars: &mut serde_json::Map<String, Value>, svars: &BTreeMap<String, String>) {
-    vars.retain(|key, _| svars.contains_key(key));
-    for (k, v) in svars {
-        vars.insert(k.clone(), Value::String(v.clone()));
-    }
-}
-
-/// Match interactive execution: missing/blank variables mean {}, but malformed
-/// JSON and non-object values must fail before scripts or outbound execution.
-fn parse_graphql_variables(extras: &Value) -> Result<Value, String> {
-    let text = extras
-        .get("graphql_variables")
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    if text.trim().is_empty() {
-        return Ok(json!({}));
-    }
-    let value: Value = serde_json::from_str(text)
-        .map_err(|error| format!("GraphQL variables must be a valid JSON object: {error}"))?;
-    if !value.is_object() {
-        return Err("GraphQL variables must be a JSON object".into());
-    }
-    Ok(value)
-}
-
-/// Load a step's saved request, validating presence and workspace ownership.
-/// Returns a descriptive error string on any miss.
-async fn load_step_request(
-    repo: &ApiClientRepo,
-    wid: &Id,
-    request_id: &str,
-) -> Result<ApiRequest, String> {
-    if request_id.is_empty() {
-        return Err("step is missing request_id".to_string());
-    }
-    let request = repo
-        .get_request(&request_id.to_string())
-        .await
-        .map_err(|_| format!("request '{request_id}' not found"))?;
-    if &request.workspace_id != wid {
-        return Err(format!("request '{request_id}' not in this workspace"));
-    }
-    Ok(request)
-}
-
-/// Build an [`ExecuteApiReq`] from a saved request so the runner can reuse the
-/// single-request execute path verbatim.
-fn request_to_execute(request: &ApiRequest) -> ExecuteApiReq {
-    ExecuteApiReq {
-        method: request.method.clone(),
-        url: request.url.clone(),
-        headers: request.headers.clone(),
-        query: request.query.clone(),
-        body_mode: request.body_mode.clone(),
-        body: request.body.clone(),
-        auth: request.auth.clone(),
-        // Variables are supplied by the runner's chained map, not an env id.
-        environment_id: None,
-        timeout_ms: None,
-        follow_redirects: None,
-        verify_ssl: None,
-        vars: None,
-        ssh_connection_id: request.ssh_connection_id.clone(),
-        confirm_new_host: false,
-    }
-}
-
-/// Evaluate a step's `assertions` array, returning the
-/// `[{desc,passed,actual}]` JSON and whether every assertion passed
-/// (vacuously true when none).
-fn eval_step_assertions(step: &Value, outcome: &StepOutcome<'_>) -> (Value, bool) {
-    let mut out: Vec<Value> = Vec::new();
-    let mut all = true;
-    if let Some(arr) = step.get("assertions").and_then(Value::as_array) {
-        for assertion in arr {
-            let r = eval_assertion_with(assertion, outcome);
-            if !r.passed {
-                all = false;
-            }
-            out.push(json!({ "desc": r.desc, "passed": r.passed, "actual": r.actual }));
-        }
-    }
-    (Value::Array(out), all)
-}
-
-/// Apply a step's `extract` list into the chained variable map. `path` is a
-/// JSON path into the body, `header:<name>` for a response header, or
-/// `status` for the status code. Returns one worded line per MISS ("Save
-/// {{token}} from $.data.token: not found") — the caller fails the step.
-fn apply_extractions(
-    step: &Value,
-    outcome: &StepOutcome<'_>,
-    vars: &mut serde_json::Map<String, Value>,
-) -> Vec<String> {
-    let mut misses = Vec::new();
-    if let Some(arr) = step.get("extract").and_then(Value::as_array) {
-        for entry in arr {
-            let var = entry.get("var").and_then(Value::as_str).unwrap_or("");
-            let path = entry.get("path").and_then(Value::as_str).unwrap_or("");
-            if var.is_empty() {
-                continue;
-            }
-            let found = if path.trim() == "status" {
-                outcome.status.map(Value::from)
-            } else if let Some(name) = path.trim().strip_prefix("header:") {
-                header_value(outcome.headers, name).map(Value::String)
-            } else {
-                json_path(outcome.body, path).cloned()
-            };
-            match found {
-                Some(v) => {
-                    vars.insert(var.to_string(), v);
-                }
-                None => misses.push(format!("Save {{{{{var}}}}} from {path}: not found")),
-            }
-        }
-    }
-    misses
-}
-
-/// `{{name}}` placeholders still unresolved in what an automation step is
-/// about to send (URL, enabled query/headers, body, auth strings) — no value in
-/// `vars` and not a built-in dynamic (`$guid` & co). Sorted, deduplicated.
-fn unresolved_placeholders(
-    exec: &ExecuteApiReq,
-    vars: &serde_json::Map<String, Value>,
-) -> Vec<String> {
-    fn scan(text: &str, vars: &serde_json::Map<String, Value>, out: &mut BTreeSet<String>) {
-        let resolved = substitute(text, vars);
-        let mut rest = resolved.as_str();
-        while let Some(i) = rest.find("{{") {
-            let after = &rest[i + 2..];
-            let Some(end) = after.find("}}") else { break };
-            let name = after[..end].trim();
-            // Only identifier-shaped names — `{{ }}` or prose isn't a variable.
-            let ident = !name.is_empty()
-                && name
-                    .chars()
-                    .all(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '.' | '$'));
-            if ident {
-                out.insert(name.to_string());
-            }
-            rest = &after[end + 2..];
-        }
-    }
-    fn scan_value(v: &Value, vars: &serde_json::Map<String, Value>, out: &mut BTreeSet<String>) {
-        match v {
-            Value::String(s) => scan(s, vars, out),
-            Value::Array(a) => a.iter().for_each(|x| scan_value(x, vars, out)),
-            Value::Object(m) => m.values().for_each(|x| scan_value(x, vars, out)),
-            _ => {}
-        }
-    }
-    let mut out = BTreeSet::new();
-    scan(&exec.url, vars, &mut out);
-    for (k, v) in enabled_kv(&exec.query)
-        .iter()
-        .chain(enabled_kv(&exec.headers).iter())
-    {
-        scan(k, vars, &mut out);
-        scan(v, vars, &mut out);
-    }
-    if !matches!(exec.body_mode.as_str(), "none" | "") {
-        if exec.body_mode == "form" {
-            scan(&percent_decode(&exec.body), vars, &mut out);
-        } else {
-            scan(&exec.body, vars, &mut out);
-        }
-    }
-    scan_value(&exec.auth, vars, &mut out);
-    out.into_iter().collect()
 }
 
 // ===========================================================================

@@ -18,7 +18,7 @@
   import { mockupAssist } from '../../lib/stores/mockup-assist.svelte';
   import type { DesignFormat, ProductAttachment } from './types';
   import { DESIGN_FORMATS } from './types';
-  import { FORMATS } from './design/format';
+  import { FORMATS } from '../../lib/design/format';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
 
   interface Props {

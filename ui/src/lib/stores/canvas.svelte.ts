@@ -255,9 +255,14 @@ class CanvasStore {
   /** Re-read the open scene's `session_id` (set server-side on the first agent
    *  generation) so the conversation panel can open it. */
   async refreshSession(): Promise<void> {
-    if (!this.currentId) return;
+    const id = this.currentId;
+    if (!id) return;
+    // Opening another scene while the GET is in flight must not attach THIS
+    // scene's agent session to it (same guard `open()` uses).
+    const seq = this.#openSequence;
     try {
-      const row = await api.get<CanvasScene>(`/canvas/scenes/${this.currentId}?files=ref`);
+      const row = await api.get<CanvasScene>(`/canvas/scenes/${id}?files=ref`);
+      if (id !== this.currentId || seq !== this.#openSequence) return;
       this.sessionId = row.session_id;
     } catch {
       /* best-effort */

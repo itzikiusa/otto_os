@@ -997,21 +997,6 @@ impl Store {
             .collect())
     }
 
-    /// `(path, aliases_json)` for notes that have aliases.
-    pub async fn all_aliases(&self, vault: i64) -> Result<Vec<(String, String)>> {
-        let rows = sqlx::query(
-            "SELECT path, aliases_json FROM vault_notes WHERE vault_id = ? AND aliases_json != '[]'",
-        )
-        .bind(vault)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(dberr("vault.aliases"))?;
-        Ok(rows
-            .iter()
-            .map(|r| (r.get("path"), r.get("aliases_json")))
-            .collect())
-    }
-
     pub async fn all_file_paths(&self, vault: i64) -> Result<Vec<String>> {
         #[cfg(test)]
         self.all_reads
@@ -1216,7 +1201,7 @@ impl Store {
         match mode {
             SearchMode::Fts(expr) => q = q.bind(vault).bind(expr.to_string()),
             SearchMode::Like(needle) => {
-                let pat = format!("%{}%", needle.replace('%', "\\%").replace('_', "\\_"));
+                let pat = format!("%{}%", like_escape(needle));
                 q = q.bind(pat.clone()).bind(pat.clone()).bind(pat);
             }
             SearchMode::FilterOnly => {}
@@ -1385,7 +1370,7 @@ impl Store {
         needle: &str,
         limit: i64,
     ) -> Result<Vec<(String, String, f32)>> {
-        let pat = format!("%{}%", needle.replace('%', "\\%").replace('_', "\\_"));
+        let pat = format!("%{}%", like_escape(needle));
         let rows = sqlx::query(
             "SELECT path, title FROM vault_notes WHERE vault_id = ? AND \
              (title LIKE ? ESCAPE '\\' OR path LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\') \
@@ -1470,11 +1455,9 @@ pub struct OkfNoteRow {
     pub parse_error: bool,
 }
 
-pub fn like_escape(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('%', "\\%")
-        .replace('_', "\\_")
-}
+/// Escape a LIKE pattern for `ESCAPE '\\'` — the one shared helper (backslash
+/// first, then `%` and `_`), re-exported so callers here keep their path.
+pub use otto_state::workgraph::like_escape;
 
 /// Replace one note's FTS row through the rowid map (see
 /// [`Store::ensure_fts`]): an UPDATE by rowid when the note is indexed,

@@ -160,59 +160,36 @@ impl AwsAccountsRepo {
         // Existence check first so a no-op patch on a missing id is still a 404.
         self.get(id).await?;
         let now = fmt(Utc::now());
-        if let Some(v) = p.name {
-            self.set_col(id, "name", v).await?;
-        }
-        if let Some(v) = p.auth_mode {
-            self.set_col(id, "auth_mode", v).await?;
-        }
-        if let Some(v) = p.profile {
-            sqlx::query("UPDATE aws_accounts SET profile = ? WHERE id = ?")
-                .bind(v)
-                .bind(id)
-                .execute(&self.pool)
-                .await
-                .map_err(dberr("update aws account"))?;
-        }
-        if let Some(v) = p.region {
-            self.set_col(id, "region", v).await?;
-        }
-        if let Some(v) = p.params {
-            self.set_col(id, "params_json", v.to_string()).await?;
-        }
-        if let Some(v) = p.secret_ref {
-            sqlx::query("UPDATE aws_accounts SET secret_ref = ? WHERE id = ?")
-                .bind(v)
-                .bind(id)
-                .execute(&self.pool)
-                .await
-                .map_err(dberr("update aws account"))?;
-        }
-        if let Some(v) = p.environment {
-            self.set_col(id, "environment", v.as_str().to_string())
-                .await?;
-        }
-        sqlx::query("UPDATE aws_accounts SET updated_at = ? WHERE id = ?")
-            .bind(&now)
-            .bind(id)
-            .execute(&self.pool)
-            .await
-            .map_err(dberr("update aws account"))?;
-        self.get(id).await
-    }
-
-    /// Column-name whitelist lives in the callers above; never pass user input
-    /// as `col`.
-    async fn set_col(&self, id: &Id, col: &str, v: String) -> Result<()> {
-        sqlx::query(sqlx::AssertSqlSafe(format!(
-            "UPDATE aws_accounts SET {col} = ? WHERE id = ?"
-        )))
-        .bind(v)
+        // One statement (data-integrity-2-03): a profile/secret swap and its
+        // `environment` label land together. `profile` / `secret_ref` are
+        // tri-state (absent / null / value), hence the CASE on a flag.
+        sqlx::query(
+            "UPDATE aws_accounts SET
+                name = COALESCE(?, name),
+                auth_mode = COALESCE(?, auth_mode),
+                profile = CASE WHEN ? THEN ? ELSE profile END,
+                region = COALESCE(?, region),
+                params_json = COALESCE(?, params_json),
+                secret_ref = CASE WHEN ? THEN ? ELSE secret_ref END,
+                environment = COALESCE(?, environment),
+                updated_at = ?
+             WHERE id = ?",
+        )
+        .bind(p.name)
+        .bind(p.auth_mode)
+        .bind(p.profile.is_some())
+        .bind(p.profile.flatten())
+        .bind(p.region)
+        .bind(p.params.map(|v| v.to_string()))
+        .bind(p.secret_ref.is_some())
+        .bind(p.secret_ref.flatten())
+        .bind(p.environment.map(|v| v.as_str().to_string()))
+        .bind(&now)
         .bind(id)
         .execute(&self.pool)
         .await
         .map_err(dberr("update aws account"))?;
-        Ok(())
+        self.get(id).await
     }
 
     pub async fn delete(&self, id: &Id) -> Result<()> {

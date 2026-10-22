@@ -709,21 +709,6 @@ impl PtyHandle {
         }
     }
 
-    /// Wait (blocking, at most `timeout`) until the output stream has ended.
-    /// True once it has.
-    pub fn wait_output_closed_blocking(&self, timeout: Duration) -> bool {
-        let deadline = Instant::now() + timeout;
-        loop {
-            if *self.reader_done.borrow() {
-                return true;
-            }
-            if Instant::now() >= deadline {
-                return false;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-    }
-
     /// Watch the end of the output stream (see the `reader_done` field).
     pub fn output_closed(&self) -> watch::Receiver<bool> {
         self.reader_done.clone()

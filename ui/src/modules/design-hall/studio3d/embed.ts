@@ -35,14 +35,14 @@ import {
   loadThree,
   type ColorResolver,
   type Three,
-} from '../../product/design/scene3d/build';
-import { buildEnvironment, type BuiltEnvironment } from '../../product/design/scene3d/environment';
-import { parseScene } from '../../product/design/scene3d/validate';
-import { emptyScene, type Easing, type Scene3dDoc } from '../../product/design/scene3d/types';
-import { resolveColor } from '../../product/design/scene3d/tokens';
+} from '../../../lib/design/scene3d/build';
+import { buildEnvironment, type BuiltEnvironment } from '../../../lib/design/scene3d/environment';
+import { parseScene } from '../../../lib/design/scene3d/validate';
+import { emptyScene, type Easing, type Scene3dDoc } from '../../../lib/design/scene3d/types';
+import { resolveColor } from '../../../lib/design/scene3d/tokens';
 import { resolveToken } from '../brand/tokens';
-import { resolveMaterial, type ResolvedMaterial } from '../../product/design/scene3d/presets';
-import { findState, initialState, lerpPoses, stateTiming, statePoses, transitionProgress, type Pose } from '../../product/design/scene3d/states';
+import { resolveMaterial, type ResolvedMaterial } from '../../../lib/design/scene3d/presets';
+import { findState, initialState, lerpPoses, stateTiming, statePoses, transitionProgress, type Pose } from '../../../lib/design/scene3d/states';
 import { loadBrandKit, resolveModelRef, versionFor } from './sources';
 
 export interface Scene3dEmbedOptions {

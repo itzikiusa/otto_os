@@ -36,7 +36,7 @@ import {
 } from './edit-types';
 import { parseSimpleSelect, qid, scopeDatabase, typedCellDraft, valueLiteral, whereByPk } from './edit-sql';
 import { mongoCollectionForEdit, mongoIdFilterFor } from './edit-mongo';
-import { applyPatchAtPath, flattenPaths, valueKind } from './expansion-plan';
+import { applyPatchAtPath, flattenPaths, valueKind } from '../../lib/jsonTree/expansion-plan';
 import { toastError } from '../../lib/toastError';
 import { plural } from '../../lib/plural';
 
@@ -661,7 +661,7 @@ export class EditFlow {
       .sort((a, b) => a[0] - b[0])
       .map(([rowIdx, patch]) => ({ rowIdx, patch }));
     const built = adapterFor(this.engine).buildUpdate(rows, ctx);
-    if (built) this.openReview(built.title, built.sql, built.diff);
+    if (built) this.openReview(built.title, built.sql, built.diff, this.pending);
   }
 
   /** Build an INSERT / insertOne cloning a row (identity omitted so it
@@ -688,9 +688,14 @@ export class EditFlow {
   // The textarea is the source of truth for what runs.
   reviewSql: { title: string; sql: string; diff?: DiffLine[] } | null = $state(null);
   runningReview: boolean = $state(false);
+  /** The pending drafts the open review was built from (`reviewPending` only;
+   *  null for delete / duplicate / doc reviews). Patches are copy-on-write, so
+   *  identity says a row wasn't re-edited after the review opened. */
+  private reviewCovers: ReadonlyMap<number, RowPatch> | null = null;
 
-  openReview(title: string, sql: string, diff?: DiffLine[]): void {
+  openReview(title: string, sql: string, diff?: DiffLine[], covers: ReadonlyMap<number, RowPatch> | null = null): void {
     this.reviewSql = { title, sql, diff };
+    this.reviewCovers = covers;
   }
   /** The modal's textarea is controlled — it writes back through here. */
   setReviewSql(sql: string): void {
@@ -700,6 +705,16 @@ export class EditFlow {
     if (this.runningReview) return;
     this.reviewSql = null;
   }
+  /** Drop the drafts a successful edit review wrote (see {@link reviewCovers}). */
+  private clearCoveredDrafts(): void {
+    const covers = this.reviewCovers;
+    this.reviewCovers = null;
+    if (!covers?.size) return;
+    const next = new Map(this.pending);
+    for (const [row, patch] of covers) if (next.get(row) === patch) next.delete(row);
+    if (next.size !== this.pending.size) this.pending = next;
+  }
+
   async runReview(): Promise<void> {
     if (!this.reviewSql || !this.connectionId) return;
     const sql = this.reviewSql.sql.trim();
@@ -718,12 +733,21 @@ export class EditFlow {
       // connection prompts for a typed confirmation first.
       const scope = this.scopeNode();
       const res = await database.runManagedStatement(sql, scope);
-      if (res === null) {
-        // Write was cancelled at the confirmation prompt — keep the modal open.
-        toasts.info('Write canceled');
+      if ('canceled' in res) {
+        // Nothing ran — keep the modal open. Only a plain dismissal needs the
+        // toast: a mistyped name was already explained by the gate (one toast,
+        // not two), and a stale run (access / connection changed) is silent,
+        // like the direct query paths.
+        if (res.canceled === 'declined') toasts.info('Write canceled');
         return;
       }
       toasts.success('Applied', 'Statement ran successfully');
+      // The drafts this review applied are written now: clear them BEFORE the
+      // refresh, which may be skipped (tab switched) or fail — the grid's
+      // per-tab stash would otherwise restore them as "pending" and a second
+      // Review & apply would run the same UPDATE again. Delete / duplicate
+      // reviews don't cover the drafts, so they leave them alone.
+      this.clearCoveredDrafts();
       this.reviewSql = null;
       // Refresh what's ON SCREEN: re-run the statement that produced this grid
       // (`statement` is the tab's ran_statement, not the live editor buffer —
