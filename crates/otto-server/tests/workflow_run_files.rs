@@ -6,7 +6,10 @@
 //!   lists its context dir (through `/fs/*` only root could: the context dir
 //!   lives inside Otto's data dir, which `/fs/*` refuses non-root callers);
 //! - a member of ANOTHER workspace is refused (403/404), an unknown run is 404;
-//! - `../x`, an absolute path and a symlink escaping the context dir are 400.
+//! - `../x`, an absolute path and a symlink escaping the context dir are 400;
+//! - a key-like name (`id_rsa`) is root-only (Viewer 403), and the `/fs/read`
+//!   caps hold: a 500 KiB log comes back truncated to ≤ 400 KiB, a file with a
+//!   NUL byte comes back empty and truncated.
 
 use chrono::Utc;
 use otto_core::domain::{Capability, Feature};
@@ -117,6 +120,15 @@ async fn boot() -> Daemon {
     std::fs::create_dir_all(ctx_dir.join("nodes")).unwrap();
     std::fs::write(ctx_dir.join("final-output.md"), "# Deliverable\n").unwrap();
     std::fs::write(ctx_dir.join("nodes/plan.md"), "plan").unwrap();
+    // A workflow agent writes this dir, so it can drop a credential, a huge
+    // log or a binary into it.
+    std::fs::write(
+        ctx_dir.join("id_rsa"),
+        "-----BEGIN OPENSSH PRIVATE KEY-----\n",
+    )
+    .unwrap();
+    std::fs::write(ctx_dir.join("big.log"), "x".repeat(500 * 1024)).unwrap();
+    std::fs::write(ctx_dir.join("blob.bin"), b"PK\x03\x04\0\0binary").unwrap();
     std::fs::write(tmp.path().join("workflow-context/secret.txt"), "s3cret").unwrap();
     #[cfg(unix)]
     std::os::unix::fs::symlink(
@@ -197,7 +209,11 @@ async fn a_non_root_viewer_reads_and_lists_their_runs_context_files() {
         .map(|e| e["path"].as_str().unwrap())
         .collect();
     // Relative paths, dirs first; the escaping symlink is not listed.
-    assert_eq!(paths, vec!["nodes", "final-output.md"], "{body}");
+    assert_eq!(
+        paths,
+        vec!["nodes", "big.log", "blob.bin", "final-output.md", "id_rsa"],
+        "{body}"
+    );
 
     let (st, body) = d.get(&d.viewer, &d.run, "browse", "nodes").await;
     assert_eq!(st, 200, "{body}");
@@ -248,4 +264,30 @@ async fn escaping_paths_are_400() {
         assert_eq!(st, 400, "symlink escape: {body}");
         assert!(!body.to_string().contains("s3cret"), "{body}");
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_credential_file_is_root_only() {
+    let d = boot().await;
+    let (st, body) = d.get(&d.viewer, &d.run, "read", "id_rsa").await;
+    assert_eq!(st, 403, "{body}");
+    assert!(!body.to_string().contains("PRIVATE KEY"), "{body}");
+    let (st, body) = d.get(&d.root, &d.run, "read", "id_rsa").await;
+    assert_eq!(st, 200, "{body}");
+    assert!(body["content"].as_str().unwrap().contains("PRIVATE KEY"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn large_and_binary_files_keep_the_fs_read_caps() {
+    let d = boot().await;
+    let (st, body) = d.get(&d.viewer, &d.run, "read", "big.log").await;
+    assert_eq!(st, 200, "{body}");
+    assert_eq!(body["truncated"], true);
+    let len = body["content"].as_str().unwrap().len();
+    assert!(len > 0 && len <= 400 * 1024, "content len {len}");
+
+    let (st, body) = d.get(&d.viewer, &d.run, "read", "blob.bin").await;
+    assert_eq!(st, 200, "{body}");
+    assert_eq!(body["content"], "");
+    assert_eq!(body["truncated"], true);
 }

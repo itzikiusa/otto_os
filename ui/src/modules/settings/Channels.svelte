@@ -563,7 +563,9 @@
             <div class="ch-status" title={statusLine(intg, channel)}>{statusLine(intg, channel)}</div>
             {#if h?.detail}
               <div class="ch-health-detail tone-{h.tone}" role="status">
-                {h.detail}{#if h.since} <span class="dim">· since <RelTime iso={h.since} /></span>{/if}
+                <!-- The relative "since" ticks: hidden from the live text so only a
+                     changed health detail is spoken, not every second. -->
+                {h.detail}{#if h.since} <span class="dim" aria-hidden="true">· since <RelTime iso={h.since} /></span>{/if}
               </div>
             {:else if h?.lastEvent && h.tone === 'success'}
               <div class="ch-status">Last message <RelTime iso={h.lastEvent} /></div>
@@ -798,7 +800,7 @@
           <span class="field-label" id="ch-users-label">Allowed users</span>
           {#if editChannel === 'slack' && slackDir}
             <button type="button" class="btn ghost small" disabled={slackDirLoading} onclick={() => wsId && void loadSlackDir(wsId, true)}
-              title="Reload names from Slack">{slackDirLoading ? 'Refreshing…' : 'Refresh names'}</button>
+              title="Refresh names from Slack">{slackDirLoading ? 'Refreshing…' : 'Refresh names'}</button>
           {/if}
         </div>
         <AllowedIdsEditor

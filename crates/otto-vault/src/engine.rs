@@ -31,6 +31,9 @@ const STALE_AFTER_SECS: i64 = 30;
 /// body bytes held at once (a few 4 MiB notes close a batch early).
 const SCAN_BATCH_NOTES: usize = 200;
 const SCAN_BATCH_BYTES: usize = 16 * 1024 * 1024;
+/// Non-note files (and removals) verified and published per publication-lock
+/// hold and per transaction during a scan.
+const SCAN_BATCH_FILES: usize = 500;
 /// `mode=full` graph default edge budget (override via `edge_budget`).
 const DEFAULT_EDGE_BUDGET: usize = 2_000_000;
 
@@ -839,32 +842,43 @@ impl VaultEngine {
             .iter()
             .map(|e| (e.rel.as_str(), (e.size, e.mtime_ns)))
             .collect();
-        for rel in changed_files {
+        // Changed non-note files go out in batches of SCAN_BATCH_FILES: one
+        // publication-lock hold re-checks each path (`changed_since` + a stat
+        // against the walk's signature), then the verified rows commit in one
+        // transaction, instead of a lock, stat round trip and autocommit per
+        // file (a vault rooted at a repo can list 50k of them).
+        for chunk in changed_files.chunks(SCAN_BATCH_FILES) {
             let _publication = state.publication.lock().await;
             state.check_active()?;
-            if state.changed_since(&rel, epoch) {
-                continue;
-            }
-            let Some(&(size, mtime)) = file_sizes.get(rel.as_str()) else {
-                continue;
-            };
-            let current = match tokio::fs::symlink_metadata(root.join(&rel)).await {
-                Ok(meta) => meta,
-                Err(_) => {
+            let mut verified: Vec<(String, i64, i64)> = Vec::with_capacity(chunk.len());
+            for rel in chunk {
+                if state.changed_since(rel, epoch) {
+                    continue;
+                }
+                let Some(&(size, mtime)) = file_sizes.get(rel.as_str()) else {
+                    continue;
+                };
+                let current = match tokio::fs::symlink_metadata(root.join(rel)).await {
+                    Ok(meta) => meta,
+                    Err(_) => {
+                        incomplete = true;
+                        continue;
+                    }
+                };
+                if current.len() as i64 != size || crate::prepare::mtime(&current) != mtime {
                     incomplete = true;
                     continue;
                 }
-            };
-            if current.len() as i64 != size || crate::prepare::mtime(&current) != mtime {
-                incomplete = true;
+                verified.push((rel.clone(), size, mtime));
+            }
+            if verified.is_empty() {
                 continue;
             }
-            let added = state
-                .cache
-                .read()
-                .unwrap()
-                .as_ref()
-                .is_some_and(|cache| !cache.records.contains_key(&rel));
+            let added = state.cache.read().unwrap().as_ref().is_some_and(|cache| {
+                verified
+                    .iter()
+                    .any(|(rel, ..)| !cache.records.contains_key(rel))
+            });
             if added {
                 state.links_dirty.store(true, Ordering::Relaxed);
             }
@@ -874,14 +888,18 @@ impl VaultEngine {
                 graph: self.graph_generation(id),
                 complete: false,
             };
-            self.store.upsert_file(id, &rel, size, mtime).await?;
+            self.store.upsert_files_batch(id, &verified).await?;
             #[cfg(test)]
             Self::pause_publication(&state).await;
-            let mut cached = state.cache.write().unwrap();
-            if let Some(cache) = cached.as_mut() {
-                cache.upsert(crate::index::IndexRecord::file(rel));
-            } else {
-                incomplete = true;
+            {
+                let mut cached = state.cache.write().unwrap();
+                if let Some(cache) = cached.as_mut() {
+                    for (rel, ..) in verified {
+                        cache.upsert(crate::index::IndexRecord::file(rel));
+                    }
+                } else {
+                    incomplete = true;
+                }
             }
             self.generation(id).fetch_add(1, Ordering::Relaxed);
             repair.complete = true;
@@ -894,41 +912,56 @@ impl VaultEngine {
             // than read it as the indexed file reappearing.
             let protected = otto_core::secret_paths::protected_set();
             let filter_protected = !protected.in_protected_dir(root);
-            for (rel, note) in removed_notes
+            let removed: Vec<(String, bool)> = removed_notes
                 .into_iter()
                 .map(|p| (p, true))
                 .chain(removed_files.into_iter().map(|p| (p, false)))
-            {
+                .collect();
+            // Same batching as above: one lock hold verifies a batch, then one
+            // transaction deletes its notes and one statement its files.
+            for chunk in removed.chunks(SCAN_BATCH_FILES) {
                 let _publication = state.publication.lock().await;
                 state.check_active()?;
-                if state.changed_since(&rel, epoch) {
-                    continue;
-                }
-                let excluded = filter_protected && {
-                    let p = root.join(&rel);
-                    otto_core::secret_paths::is_denied_file(&p) || protected.in_protected_dir(&p)
-                };
-                match tokio::fs::symlink_metadata(root.join(&rel)).await {
-                    _ if excluded => {}
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    // Something answers at this path: only a byte-exact
-                    // regular file is the indexed entry reappearing. A case
-                    // variant (APFS case-only rename) or a symlink is not.
-                    Ok(_) => {
-                        let (root_owned, rel_owned) = (root.to_path_buf(), rel.clone());
-                        let exact = tokio::task::spawn_blocking(move || {
-                            scan::exact_regular_file(&root_owned, &rel_owned)
-                        })
-                        .await;
-                        if !matches!(exact, Ok(Ok(false))) {
+                let (mut notes, mut files) = (Vec::new(), Vec::new());
+                for (rel, note) in chunk {
+                    if state.changed_since(rel, epoch) {
+                        continue;
+                    }
+                    let excluded = filter_protected && {
+                        let p = root.join(rel);
+                        otto_core::secret_paths::is_denied_file(&p)
+                            || protected.in_protected_dir(&p)
+                    };
+                    match tokio::fs::symlink_metadata(root.join(rel)).await {
+                        _ if excluded => {}
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                        // Something answers at this path: only a byte-exact
+                        // regular file is the indexed entry reappearing. A case
+                        // variant (APFS case-only rename) or a symlink is not.
+                        Ok(_) => {
+                            let (root_owned, rel_owned) = (root.to_path_buf(), rel.clone());
+                            let exact = tokio::task::spawn_blocking(move || {
+                                scan::exact_regular_file(&root_owned, &rel_owned)
+                            })
+                            .await;
+                            if !matches!(exact, Ok(Ok(false))) {
+                                incomplete = true;
+                                continue;
+                            }
+                        }
+                        Err(_) => {
                             incomplete = true;
                             continue;
                         }
                     }
-                    Err(_) => {
-                        incomplete = true;
-                        continue;
+                    if *note {
+                        notes.push(rel.clone());
+                    } else {
+                        files.push(rel.clone());
                     }
+                }
+                if notes.is_empty() && files.is_empty() {
+                    continue;
                 }
                 state.links_dirty.store(true, Ordering::Relaxed);
                 let mut repair = IndexRepair {
@@ -937,18 +970,17 @@ impl VaultEngine {
                     graph: self.graph_generation(id),
                     complete: false,
                 };
-                if note {
-                    self.store.remove_note(id, &rel).await?;
-                } else {
-                    self.store.remove_file(id, &rel).await?;
-                }
+                self.store.remove_notes_batch(id, &notes).await?;
+                self.store.remove_files_batch(id, &files).await?;
                 #[cfg(test)]
                 Self::pause_publication(&state).await;
                 if let Some(cache) = state.cache.write().unwrap().as_mut() {
-                    cache.remove(&rel);
+                    for rel in notes.iter().chain(files.iter()) {
+                        cache.remove(rel);
+                    }
                 }
                 self.generation(id).fetch_add(1, Ordering::Relaxed);
-                if note {
+                if !notes.is_empty() {
                     self.graph_generation(id).fetch_add(1, Ordering::Relaxed);
                 }
                 repair.complete = true;

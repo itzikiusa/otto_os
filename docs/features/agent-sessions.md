@@ -209,7 +209,9 @@ full provider list in `providers`.
    `otto_mcp_enabled`). An `ottoManagedServers` marker tracks what Otto wrote:
    disabled/deleted servers are removed on the next spawn or restart, while
    hand-added entries are never touched. Codex gets the user servers as
-   per-spawn `-c` overrides; grok as `.grok/config.toml` tables. The resolved
+   per-spawn `-c` overrides; grok as `.grok/config.toml` tables; agy gets the
+   same managed set (with the `ottoManagedServers` marker) in
+   `<cwd>/.agents/mcp_config.json`, because it ignores `.mcp.json`. The resolved
    name list is snapshotted into `meta.mcp_servers`. All opt-in, best-effort,
    never blocks the spawn.
 6. Runs the context pre-spawn hook (materializes skills/soul/context) — skipped
@@ -1118,7 +1120,7 @@ resolve the owning workspace from the row and role-check against it.
 | `POST /sessions/{id}/kill` | owner-or-admin | stop the PTY, keep the row un-archived → `Session` |
 | `POST /sessions/bulk` | per-id owner-or-admin | `{action: archive\|delete\|kill, ids}` → per-id results |
 | `POST /sessions/{id}/handover` / `…/handover/brief` | ws editor + owner-or-admin | start a handover / generate its brief (see §10) |
-| `POST /sessions/{session_id}/attach-product` | ws editor | `{story_id}` — attach a product story |
+| `POST /sessions/{session_id}/attach-product` | ws editor + session owner-or-admin | `{story_id}` → `Session` with `meta.product_story {id, title}`; 404 when the story was created in another workspace than the session's |
 | `POST /workspaces/{id}/broadcast` | ws editor | `BroadcastReq{text, session_ids?}` → `BroadcastResp{session_ids}` |
 | `POST /app/kill-sessions` | root only | terminate every live PTY |
 | `GET/POST /workspaces/{wid}/sessions/{sid}/trail` | viewer / editor (+owner) | activity trail (§6) |

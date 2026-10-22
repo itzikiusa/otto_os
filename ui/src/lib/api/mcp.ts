@@ -33,6 +33,9 @@ import type {
   McpTokenInfo,
   McpPolicy,
   McpPolicyExport,
+  McpProfile,
+  McpProfileList,
+  McpProfileReq,
   McpServer,
   McpServerDetail,
   McpServerWithTools,
@@ -142,6 +145,15 @@ export const mcpCpApi = {
   cpOttoServer: () => api.get<McpOttoServerStatus>(`/mcp/otto-server`),
   cpUpdateOttoServer: (body: UpdateMcpOttoServerReq) =>
     api.patch<McpOttoServerStatus>(`/mcp/otto-server`, body),
+
+  // --- MCP profiles (named tool sets per session / connection) ---
+  cpProfiles: () => api.get<McpProfileList>(`/mcp/profiles`),
+  cpCreateProfile: (body: McpProfileReq) => api.post<McpProfile>(`/mcp/profiles`, body),
+  cpUpdateProfile: (id: Id, body: McpProfileReq) =>
+    api.patch<McpProfile>(`/mcp/profiles/${encodeURIComponent(id)}`, body),
+  cpDeleteProfile: (id: Id) => api.del<void>(`/mcp/profiles/${encodeURIComponent(id)}`),
+  cpSetDefaultProfile: (id: Id) =>
+    api.post<McpProfile>(`/mcp/profiles/${encodeURIComponent(id)}/default`),
 };
 
 /**

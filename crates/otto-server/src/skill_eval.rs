@@ -2774,12 +2774,20 @@ async fn promote_skill(
 
     // Promotion overwrites the only copy of an existing library skill: keep a
     // backup first (same `skills-backup/<name>-<secs>-<id>/` layout as a
-    // bundled re-install with backup), then write it atomically.
-    backup_library_skill(&ctx.context_library, name)
-        .map_err(|e| ApiError(Error::Internal(format!("back up skill: {e}"))))?;
-    ctx.context_library
-        .put_skill(name, &body)
-        .map_err(|e| ApiError(Error::Internal(format!("write skill: {e}"))))?;
+    // bundled re-install with backup), then write it atomically. Both are
+    // blocking fs work (a copy plus `write_atomic`'s F_FULLFSYNC), so they run
+    // off the Tokio workers like every other library writer.
+    let (library, skill, text) = (ctx.context_library.clone(), name.to_string(), body.clone());
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        backup_library_skill(&library, &skill)
+            .map_err(|e| Error::Internal(format!("back up skill: {e}")))?;
+        library
+            .put_skill(&skill, &text)
+            .map_err(|e| Error::Internal(format!("write skill: {e}")))
+    })
+    .await
+    .map_err(|e| ApiError(Error::Internal(format!("skill write task: {e}"))))?
+    .map_err(ApiError)?;
     // The library file and evaluation row are separate persistence boundaries.
     // Do not roll back the file: another library writer may already have edited
     // it. Report the partial result so retrying the same promotion can finish.

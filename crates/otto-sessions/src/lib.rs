@@ -16,6 +16,7 @@ pub mod providers;
 pub mod room_authority;
 pub mod screen;
 pub mod share_throttle;
+pub mod submit;
 pub mod tail_scan;
 mod titles;
 pub mod trust;

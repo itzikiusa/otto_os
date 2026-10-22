@@ -2716,7 +2716,11 @@ async fn wait_dead(pids: &[libc::pid_t], within: std::time::Duration) {
 #[tokio::test]
 async fn worktree_probe_timeout_keeps_cleanup_after_response() {
     let (tmp, dir) = fixture_on_branch("main");
-    let bin = shim(tmp.path(), "slow-status", "if [ \"$1\" != status ]; then exec git \"$@\"; fi\ntrap '' TERM\nsleep 30 &\necho $! > shim-pids\necho $$ >> shim-pids\nwait");
+    let bin = shim(
+        tmp.path(),
+        "slow-status",
+        "if [ \"$1\" != status ]; then exec git \"$@\"; fi\ntrap '' TERM\nsleep 30 &\necho $! > shim-pids\necho $$ >> shim-pids\nwait",
+    );
     let rows = LocalGit::new(&dir)
         .with_git_bin(bin)
         .worktree_list_with_budgets(SHIM_BUDGET, SHIM_BUDGET + std::time::Duration::from_secs(1))

@@ -71,7 +71,8 @@
 />
 <label for="mt-story">Product story (for product steps)</label>
 <IdPicker id="mt-story" value={paramStr(node, 'story_id')} cache={pickers.stories} key={wsId} toOptions={storyOptions}
-  noun="story" placeholder="product story id" what="product stories" onchange={(v) => set('story_id', v)} />
+  noun="story" placeholder="product story id" what="product stories"
+  emptyHint="No product stories in this workspace yet — import one on the Product page." onchange={(v) => set('story_id', v)} />
 <label for="mt-jira">Jira ticket</label>
 <input dir="auto"
   id="mt-jira"

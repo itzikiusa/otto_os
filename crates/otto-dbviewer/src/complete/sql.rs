@@ -631,7 +631,6 @@ mod tests {
                         FieldSnap::new("email", Some("varchar".into()), Rank::Unique),
                         FieldSnap::new("note", Some("text".into()), Rank::Plain),
                     ],
-                    fields_ready: true,
                 },
                 ObjectSnap {
                     name: "customers".into(),
@@ -640,7 +639,6 @@ mod tests {
                         FieldSnap::new("id", Some("int".into()), Rank::Pk),
                         FieldSnap::new("city", Some("varchar".into()), Rank::Plain),
                     ],
-                    fields_ready: true,
                 },
             ],
             routines: vec![

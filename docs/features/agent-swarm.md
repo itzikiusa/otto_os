@@ -360,6 +360,24 @@ live from the Org tree (session rows), the **Runs** list (**Open**), the
 Opening it gives you the same terminal you'd get for any agent session — see
 `./agent-sessions.md`.
 
+**Whose identity a turn runs as.** Each turn's session is created as the task's
+human **originator**, so it carries that person's MCP token, provider account and
+git/Jira identity, and that person can open it:
+
+- a task a person added (board, API, channel trigger, Product) runs as that person
+  (`task.created_by`);
+- a task seeded by **Plan** runs as whoever ran the plan;
+- an agent-created subtask or review walks up `parent_task_id`, and an agent
+  handoff/proposal follows its `source-run:<run id>` label to the task that
+  produced it, until a person turns up;
+- a turn with no task (planning, schedules) runs as the project's creator;
+- the **swarm creator** only when no person originated the work.
+
+Verification (verify/fix) turns of a task act as the same originator. Sessions are
+reused per **(agent, acting user)**: Bob's turn never resumes the session an agent
+opened for Alice. Session access is unchanged (owner, workspace Admin or root), so
+the originator — not only the swarm creator — can open their turns.
+
 ### 5.4 Graph (`AgentGraph.svelte`)
 
 An agent-centric view: the **team members** are the nodes (not tasks), laid out
@@ -531,7 +549,7 @@ authoritative spec is `docs/contracts/api.md` (#59–#86 + "Swarm lifecycle") an
 | 64 | `GET /swarm/presets` | member | → `SwarmPreset[]` |
 | 65 | `GET /swarm/swarms/{sid}/agents` | viewer | → `SwarmAgent[]` |
 | 66 | `POST /swarm/swarms/{sid}/agents` | editor | `CreateAgentReq` → `SwarmAgent` |
-| 67 | `PATCH /swarm/agents/{aid}` | editor | `UpdateAgentReq` → `SwarmAgent` |
+| 67 | `PATCH /swarm/agents/{aid}` | editor; creator / ws admin / root to change prompt (`scope_md`, `specialization`), soul, provider, model or `cwd_mode` (403 otherwise) | `UpdateAgentReq` → `SwarmAgent` |
 | 68 | `DELETE /swarm/agents/{aid}` | editor | → 204 |
 | 70 | `GET /swarm/swarms/{sid}/projects` | viewer | → `SwarmProject[]` |
 | 71 | `POST /swarm/swarms/{sid}/projects` | editor | `CreateProjectReq` → `SwarmProject` |
@@ -722,6 +740,14 @@ post + notice rather than re-run forever.
   action requires workspace **Editor** (checked per request against the row's
   `workspace_id`). Item routes resolve the workspace from the row before checking.
   See `docs/MULTI-USER-RBAC.md`.
+- **An agent's identity is the creator's.** Changing a role agent's prompt
+  (`scope_md` / `specialization`), soul, provider, model or `cwd_mode` needs the
+  swarm's creator, a workspace **Admin** or root (403 otherwise); a full-form save
+  that leaves those fields as they are passes. Name, title, skills, schedule,
+  status, order and the reporting line stay Editor.
+- **Turns act as their originator, not the creator.** A task an Editor adds runs
+  with that Editor's identity and credentials (§5.3), so adding a task to someone
+  else's swarm never borrows their MCP token, connections or accounts.
 - **Workspace isolation.** Swarms, agents, projects, tasks, runs, and board
   messages all carry `workspace_id`; the listing and graph queries scope to it.
   WS `swarm_*` events are only delivered to members with viewer+ on that

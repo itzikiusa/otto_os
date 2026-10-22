@@ -32,7 +32,7 @@ use otto_core::{Error, Id};
 use otto_state::{NewSession, NewTrail, SessionsRepo};
 use otto_transcript::{
     fold_file_limited, read_subagents_limited, subagent_path, Artifact, ArtifactKind, FoldOpts,
-    Folded, HistoryEntry, ImageStore, Provider, Transcript, UnavailableReason,
+    Folded, HistoryEntry, ImageStore, Provider, Transcript,
 };
 use serde::Deserialize;
 
@@ -55,156 +55,13 @@ const HISTORY_MAX_LIMIT: usize = 1000;
 
 // ── shared helpers ─────────────────────────────────────────────────────────
 
-/// `$HOME` (the root of `~/.claude`), falling back to the OS home dir.
-pub(crate) fn home_dir() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .filter(|p| !p.as_os_str().is_empty())
-        .or_else(dirs::home_dir)
-        .unwrap_or_else(|| PathBuf::from("/"))
-}
-
-/// The two provider roots the daemon reads transcripts from
-/// (`<claude projects>`, `<codex sessions>`). Precedence:
-/// `OTTO_TRANSCRIPT_ROOTS=<claude>:<codex>` (two absolute paths) → under
-/// `OTTO_E2E=1` the empty per-daemon dirs `<data_dir>/e2e-transcripts/{claude,codex}`
-/// (the throwaway e2e daemon must never read the real trees) → the defaults
-/// `~/.claude/projects` and `$CODEX_HOME/sessions` (else `~/.codex/sessions`).
-pub(crate) fn transcript_roots(data_dir: &Path) -> (PathBuf, PathBuf) {
-    if let Some(raw) = std::env::var_os("OTTO_TRANSCRIPT_ROOTS") {
-        let raw = raw.to_string_lossy();
-        let mut parts = raw.split(':').map(str::trim).filter(|p| !p.is_empty());
-        if let (Some(c), Some(x)) = (parts.next(), parts.next()) {
-            return (PathBuf::from(c), PathBuf::from(x));
-        }
-        tracing::warn!("OTTO_TRANSCRIPT_ROOTS must be `<claude root>:<codex root>`; ignoring");
-    }
-    if e2e_enabled() {
-        let base = data_dir.join("e2e-transcripts");
-        let _ = std::fs::create_dir_all(base.join("claude"));
-        let _ = std::fs::create_dir_all(base.join("codex"));
-        return (base.join("claude"), base.join("codex"));
-    }
-    (
-        home_dir().join(".claude").join("projects"),
-        otto_sessions::codex_sessions_root(),
-    )
-}
-
-/// The provider whose transcript this session has: its own for agent sessions,
-/// the captured nested one for a plain terminal the user ran `claude`/`codex` in.
-pub(crate) fn effective_provider(session: &Session) -> String {
-    if matches!(session.provider.as_str(), "claude" | "codex" | "agy") {
-        return session.provider.clone();
-    }
-    session
-        .meta
-        .get("nested_provider")
-        .and_then(|v| v.as_str())
-        .unwrap_or(&session.provider)
-        .to_string()
-}
-
-/// A session's resolved transcript.
-#[derive(Debug, Clone)]
-pub(crate) struct Resolved {
-    pub provider: Provider,
-    pub path: PathBuf,
-}
-
-/// Pure (filesystem-only) resolution of the transcript behind `session`
-/// (§4.2): the E2E fixture hook, then the persisted row (`persisted`), then
-/// the provider roots. `fresh` is true when the roots had to be searched —
-/// the caller may persist the result.
-pub(crate) fn resolve_transcript_sync(
-    data_dir: &Path,
-    persisted: Option<&str>,
-    session: &Session,
-) -> Result<(Resolved, bool), UnavailableReason> {
-    let provider_name = effective_provider(session);
-    let provider = match provider_name.as_str() {
-        "claude" => Provider::Claude,
-        "codex" => Provider::Codex,
-        _ => return Err(UnavailableReason::ProviderUnsupported),
-    };
-    // E2E hook (design §8, B → A): under `OTTO_E2E=1` a seeded session may point
-    // at a fixture transcript via `meta.e2e_transcript_path`; the provider comes
-    // from the filename (`rollout-*` = codex, else claude). Inert in production.
-    if e2e_enabled() {
-        if let Some(p) = session
-            .meta
-            .get("e2e_transcript_path")
-            .and_then(|v| v.as_str())
-        {
-            let p = PathBuf::from(p);
-            if let Some(provider) = otto_transcript::provider_for_path(&p).filter(|_| p.is_file()) {
-                return Ok((Resolved { provider, path: p }, false));
-            }
-            return Err(UnavailableReason::TranscriptMissing);
-        }
-    }
-    // O(1) path: the persisted row (set by the capture scan or a prior read).
-    // A persisted path whose file is gone was pruned by the provider (Claude
-    // drops transcripts after ~30 days): the root scan would re-find nothing,
-    // at one stat per project dir (Codex: a whole rollout-tree walk), on every
-    // History page and search keystroke — so stop here.
-    if let Some(p) = persisted {
-        let p = PathBuf::from(p);
-        if p.is_file() {
-            return Ok((Resolved { provider, path: p }, false));
-        }
-        return Err(UnavailableReason::TranscriptMissing);
-    }
-    let cwd = session
-        .meta
-        .get("nested_cwd")
-        .and_then(|v| v.as_str())
-        .unwrap_or(&session.cwd);
-    let (claude_root, codex_root) =
-        if let Some(id) = session.meta.get("account_id").and_then(|v| v.as_str()) {
-            let home = otto_sessions::accounts::account_home(
-                &data_dir.join("provider-accounts"),
-                &id.to_owned(),
-            )
-            .map_err(|_| UnavailableReason::TranscriptMissing)?;
-            (home.join("projects"), home.join("sessions"))
-        } else {
-            transcript_roots(data_dir)
-        };
-    let path = otto_sessions::transcript_path_in_roots(
-        &claude_root,
-        &codex_root,
-        &provider_name,
-        cwd,
-        session.provider_session_id.as_deref(),
-    )?;
-    if !path.is_file() {
-        return Err(UnavailableReason::TranscriptMissing);
-    }
-    Ok((Resolved { provider, path }, true))
-}
-
-/// Resolve the transcript behind `session`, persisting a freshly found path
-/// (one cheap UPDATE, once per session) so later lookups skip the root scan.
-pub(crate) async fn resolve_transcript(
-    ctx: &ServerCtx,
-    session: &Session,
-) -> Result<Resolved, UnavailableReason> {
-    let repo = SessionsRepo::new(ctx.pool.clone());
-    let persisted = repo.transcript_path(&session.id).await.ok().flatten();
-    let data_dir = ctx.data_dir.clone();
-    let owned_session = session.clone();
-    let (resolved, fresh) = crate::offload::blocking(move || {
-        resolve_transcript_sync(&data_dir, persisted.as_deref(), &owned_session)
-    })
-    .await?;
-    if fresh {
-        let _ = repo
-            .set_transcript_path(&session.id, &resolved.path.to_string_lossy())
-            .await;
-    }
-    Ok(resolved)
-}
+// Transcript resolution (home dir, provider roots, the effective provider and
+// session → transcript path) lives in `crate::transcript::resolve`
+// (architecture-3-03); re-exported here for the callers that import it from
+// this route module.
+pub(crate) use crate::transcript::resolve::{
+    e2e_enabled, effective_provider, resolve_transcript, resolve_transcript_sync, transcript_roots,
+};
 
 /// Workspace Admin or root — the callers allowed to see transcripts they do
 /// not own (`on_disk` History rows, arbitrary paths under the roots).
@@ -1087,12 +944,6 @@ pub struct HistoryQuery {
     pub before: Option<String>,
     #[serde(default)]
     pub limit: Option<usize>,
-}
-
-/// `OTTO_E2E=1|true` — the Playwright harness's throwaway daemon (see
-/// `routes/findings.rs`); unlocks the fixture-transcript hooks only.
-fn e2e_enabled() -> bool {
-    matches!(std::env::var("OTTO_E2E").as_deref(), Ok("1") | Ok("true"))
 }
 
 /// Confine a client-supplied transcript path to the two provider roots

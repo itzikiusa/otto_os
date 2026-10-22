@@ -332,6 +332,9 @@ struct TestCtx {
     secrets: Arc<dyn SecretStore>,
     events: broadcast::Sender<Event>,
     data_dir: Arc<tempfile::TempDir>,
+    /// Where the "user's own" kubeconfig files live: outside Otto's data dir,
+    /// which `validated_kubeconfig_path` refuses for a typed path.
+    user_dir: Arc<tempfile::TempDir>,
     spawner: Arc<dyn Spawner>,
     recorder: Arc<RecordingSpawner>,
     sink: Arc<FakeSink>,
@@ -354,6 +357,7 @@ impl TestCtx {
                 secrets: Arc::new(NullSecrets),
                 events,
                 data_dir: Arc::new(tempfile::tempdir().unwrap()),
+                user_dir: Arc::new(tempfile::tempdir().unwrap()),
                 spawner: recorder.clone(),
                 recorder,
                 sink: Arc::new(FakeSink {
@@ -421,7 +425,7 @@ fn kubeconfig_file(ctx: &TestCtx) -> String {
 }
 
 fn kubeconfig_named(ctx: &TestCtx, name: &str) -> String {
-    let p = ctx.data_dir.path().join(name);
+    let p = ctx.user_dir.path().join(name);
     std::fs::write(&p, "apiVersion: v1\nkind: Config\n").unwrap();
     p.to_string_lossy().to_string()
 }
@@ -531,7 +535,7 @@ async fn cluster_crud_roundtrip() {
     let (st, _, _) = call(&ctx, &user, "GET", &format!("/k8s/clusters/{id}"), None).await;
     assert_eq!(st, StatusCode::NOT_FOUND);
     // The user's own kubeconfig file is never touched by a delete.
-    assert!(ctx.data_dir.path().join("user-kube.yaml").is_file());
+    assert!(ctx.user_dir.path().join("user-kube.yaml").is_file());
 }
 
 #[tokio::test]
@@ -2675,7 +2679,7 @@ users:\n- name: u\n  user:\n    auth-provider:\n      name: gcp\n      config: {
     assert!(t.contains("auth-provider 'gcp'"), "{t}");
 
     // Registering a path: the chosen context's user is checked.
-    let bad = ctx.data_dir.path().join("evil-kube.yaml");
+    let bad = ctx.user_dir.path().join("evil-kube.yaml");
     std::fs::write(&bad, evil).unwrap();
     let (st, _, t) = call(
         &ctx,
@@ -2690,7 +2694,7 @@ users:\n- name: u\n  user:\n    auth-provider:\n      name: gcp\n      config: {
     assert!(t.contains("/bin/sh"), "{t}");
 
     // An allow-listed plugin registers; re-pointing it at the evil file fails.
-    let good = ctx.data_dir.path().join("good-kube.yaml");
+    let good = ctx.user_dir.path().join("good-kube.yaml");
     std::fs::write(&good, evil.replace("command: /bin/sh", "command: aws")).unwrap();
     let c = create_cluster_at(&ctx, &user, good.to_string_lossy().to_string()).await;
     let id = c["id"].as_str().unwrap();

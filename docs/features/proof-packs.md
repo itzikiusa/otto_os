@@ -297,7 +297,7 @@ provider's aggregate state → artifact status:
 - `none`/unknown → **info** (neutral)
 
 CI is **auto-captured on PR creation** (`after_pr_created` in
-`crates/otto-server/src/modules.rs`, which also stamps `repo_id`/`pr_number`), and
+`crates/otto-server/src/modules/` — the `after_pr_created` hook impl, which also stamps `repo_id`/`pr_number`), and
 re-fetchable on demand via **`POST /ci-refresh`** (#135) — which resolves the git
 provider for the linked repo/PR, fetches live CI, persists the link, and records
 the artifact. The CI badges (`ci_passed`/`ci_failed`/`ci_pending`) and the

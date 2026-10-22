@@ -1,0 +1,2453 @@
+//! Background usage tailer — mines *real* token usage from the agent CLIs'
+//! on-disk transcript files and records it into the embedded ClickHouse usage
+//! store via [`crate::UsageEngine`].
+//!
+//! Why a tailer (rather than instrumenting the PTY): the CLIs already write
+//! exact, per-turn token counts (input/output/cache) and the model id to JSONL
+//! transcripts. Tailing those files is the single source of truth and survives
+//! resumes, channel sessions, and restarts.
+//!
+//! Claude transcripts are attributed by provider session ID (subagents use
+//! their parent's ID); Codex uses the exact session_meta ID, never cwd.
+//! Both providers retain event timestamps and Codex turn_context model changes.
+//!
+//! Source offsets, dedup state, held responses, cumulative baselines and owed
+//! events commit atomically to usage-ingestion.sqlite3 before ClickHouse delivery.
+//! Replay uses the original event IDs. Legacy cursor files are imported once;
+//! legacy ClickHouse rows are neither purged nor rebuilt during adoption.
+//! Only complete transcript lines are consumed. A failed journal commit stops
+//! source advancement until retry succeeds; corrupt journals stop ingestion.
+
+mod native;
+
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use crate::{
+    estimate_cost, parse_claude_line, parse_codex_line, parse_codex_session_meta, ClaudeLine,
+    CodexCounterStore, CursorStore, HeldResponse, ResponseFolder, SeenKeys, UsageEngine,
+    UsageEvent, EXTERNAL_WORKSPACE,
+};
+use otto_state::{DbPool, SessionsRepo};
+use tokio::sync::Notify;
+use tokio::task::JoinHandle;
+
+/// Poll interval without a watcher, and the wake-up cadence while a streamed
+/// response is held (its release needs a quiet period).
+const SCAN_INTERVAL: Duration = Duration::from_secs(20);
+
+/// Full listing cadence while the FSEvents watcher runs — the safety net for
+/// anything the event stream missed (and where dead cursors are evicted).
+const RECONCILE_INTERVAL: Duration = Duration::from_secs(600);
+
+/// Coalesce a burst of FSEvents (an agent writing many lines) into one pass.
+const FS_DEBOUNCE: Duration = Duration::from_secs(2);
+
+/// How long the attribution index is reused across passes before it is
+/// re-read from `sessions` (a lookup miss after a sessions write rebuilds
+/// sooner — see [`UsageTailer::refresh_after_miss`]).
+const ATTRIBUTION_TTL: Duration = Duration::from_secs(60);
+
+/// A held response whose file stayed quiet this long is counted as final.
+const HOLD_IDLE: Duration = Duration::from_secs(15);
+
+/// Max bytes read (and held) per tail step; a big catch-up streams in windows.
+const READ_WINDOW: u64 = 8 * 1024 * 1024;
+
+/// Cap on the persisted claude response-key seen-set. Real transcripts produce
+/// ~1.5k responses/day, so 100k keys ≈ two months of history — far beyond how
+/// far back a resume replays — while keeping the JSON file a few MB.
+const SEEN_KEYS_CAP: usize = 100_000;
+
+/// Codex sessions are far less numerous than response ids; this covers years
+/// of normal use while bounding the persisted cumulative-counter map.
+const CODEX_COUNTERS_CAP: usize = 20_000;
+
+/// Default model label for Codex turns when the rollout file carries no model.
+/// `estimate_cost` prices this at the gpt tier (substring match on "codex").
+const CODEX_FALLBACK_MODEL: &str = "codex";
+
+/// Released claude responses remembered for late-line corrections (see
+/// [`ResponseFolder`]). A response only straddles an idle release while it is
+/// still streaming, so a few thousand recent keys is plenty.
+const RECENT_RESPONSES_CAP: usize = 4_096;
+
+// ---------------------------------------------------------------------------
+// Public handle
+// ---------------------------------------------------------------------------
+
+/// Handle returned by [`UsageTailer::start`]. Keep it alive for the process
+/// lifetime; dropping it sets the cancel flag and stops the loop.
+pub struct UsageTailerHandle {
+    cancel: Arc<AtomicBool>,
+    wake: Arc<Notify>,
+    _task: JoinHandle<()>,
+}
+
+impl Drop for UsageTailerHandle {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
+        // `notify_one` stores a permit if the loop isn't parked yet, so the
+        // next sleep returns immediately either way.
+        self.wake.notify_one();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tailer
+// ---------------------------------------------------------------------------
+
+pub struct UsageTailer {
+    usage: Arc<UsageEngine>,
+    pool: DbPool,
+    /// Home directory — the root of `~/.claude` and `~/.codex`.
+    home: PathBuf,
+    account_root: PathBuf,
+    grok_root: PathBuf,
+    agy_extra_dir: Option<PathBuf>,
+    claude_roots: Vec<(PathBuf, String)>,
+    cursors: CursorStore,
+    /// Size of each transcript when it was last tailed (memory only). Change
+    /// detection compares against THIS, not the cursor: the cursor stops at
+    /// the last `\n`, so a file ending in a partial line would otherwise look
+    /// "grown" — and re-trigger the attribution query + a read — every scan.
+    last_size: HashMap<PathBuf, u64>,
+    /// Parsed `session_meta` per codex rollout. The first line is written once
+    /// at rollout creation and never changes, so it is read at most once per
+    /// file per daemon lifetime (and only once the file has new bytes).
+    codex_meta: HashMap<PathBuf, crate::CodexMeta>,
+    /// Response-level dedup for claude lines (see module docs).
+    seen: SeenKeys,
+    /// Folds a streamed response's lines into its FINAL usage.
+    folder: ResponseFolder,
+    /// The response currently held back per claude file (still streaming).
+    held: HashMap<PathBuf, HeldResponse>,
+    /// Attribution of each held response's file: (workspace_id, session_id).
+    held_attr: HashMap<PathBuf, (String, String)>,
+    // Additive checkpoint field: old held responses default to Claude.
+    held_providers: HashMap<PathBuf, String>,
+    /// When each held response's file last grew; released after HOLD_IDLE.
+    held_grew: HashMap<PathBuf, Instant>,
+    /// Session-wide cumulative-token baselines for Codex rollout snapshots.
+    codex_counters: CodexCounterStore,
+    codex_counters_dirty: bool,
+    /// Attribution index, built on the first tail that actually has bytes
+    /// (an idle pass never queries `sessions`) and REUSED across passes for
+    /// ATTRIBUTION_TTL — event-driven passes run every ~2 s while an agent
+    /// streams, and re-reading the whole table each time was the hot cost.
+    attr: Option<Attribution>,
+    /// When `attr` was built.
+    attr_built: Option<Instant>,
+    /// [`otto_state::sessions::attribution_generation`] read just BEFORE the
+    /// build's query (a write racing the query re-arms the next miss).
+    attr_gen: u64,
+    /// `attr` was (re)built during the current pass — a miss never rebuilds
+    /// twice in one pass.
+    attr_fresh_this_pass: bool,
+    /// Source of the sessions write generation (a test seam: the real one is
+    /// process-global and parallel tests would bump it).
+    generation: fn() -> u64,
+    /// Work counters (perf guards in tests; cheap enough to keep always).
+    stats: TailerStats,
+    /// Events and source state are committed together before delivery.
+    pending_events: Vec<UsageEvent>,
+    native: native::NativeState,
+    commit_failed: bool,
+    checkpoint_initialized: bool,
+}
+
+/// How much work the tailer did — the unchanged-tree guard asserts these stay
+/// flat across idle passes.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct TailerStats {
+    attribution_builds: u64,
+    range_reads: u64,
+    full_scans: u64,
+}
+
+/// Paths the FSEvents watcher saw change since the last pass.
+#[derive(Default)]
+struct DirtySet {
+    paths: HashSet<PathBuf>,
+    /// Kernel/user events were dropped (or the watcher errored): only a full
+    /// listing can tell what changed.
+    rescan: bool,
+}
+
+/// One Otto session, projected for attribution.
+#[derive(Clone)]
+struct SessionRef {
+    otto_session_id: String,
+    workspace_id: String,
+    provider: String,
+}
+
+/// Attribution indexes, rebuilt from the `sessions` table on demand.
+#[derive(Default)]
+struct Attribution {
+    /// claude: `provider_session_id` (= transcript filename stem) → session.
+    by_provider_session: HashMap<String, SessionRef>,
+    by_provider_identity: HashMap<(String, String), SessionRef>,
+}
+
+/// First and last delay of the tailer's startup retry (error-handling-3-05).
+const STARTUP_RETRY_MIN: Duration = Duration::from_secs(5);
+const STARTUP_RETRY_MAX: Duration = Duration::from_secs(300);
+
+impl UsageTailer {
+    /// Build the tailer. `data_dir` holds the persisted cursor file; `home` is
+    /// the root for the `~/.claude` and `~/.codex` transcript trees.
+    pub fn new(usage: Arc<UsageEngine>, pool: DbPool, data_dir: PathBuf, home: PathBuf) -> Self {
+        let cursors = CursorStore::load(data_dir.join("usage_tailer.json"));
+        let seen = SeenKeys::load(data_dir.join("usage_tailer_seen.json"), SEEN_KEYS_CAP);
+        let codex_counters = CodexCounterStore::load(
+            data_dir.join("usage_tailer_codex_totals.json"),
+            CODEX_COUNTERS_CAP,
+        );
+        Self {
+            usage,
+            pool,
+            claude_roots: vec![(home.join(".claude/projects"), "claude".into())],
+            account_root: data_dir.join("provider-accounts"),
+            grok_root: home.join(".grok"),
+            agy_extra_dir: None,
+            home,
+            cursors,
+            last_size: HashMap::new(),
+            codex_meta: HashMap::new(),
+            seen,
+            folder: ResponseFolder::new(RECENT_RESPONSES_CAP),
+            held: HashMap::new(),
+            held_attr: HashMap::new(),
+            held_providers: HashMap::new(),
+            held_grew: HashMap::new(),
+            codex_counters,
+            codex_counters_dirty: false,
+            attr: None,
+            attr_built: None,
+            attr_gen: 0,
+            attr_fresh_this_pass: false,
+            generation: otto_state::sessions::attribution_generation,
+            stats: TailerStats::default(),
+            pending_events: Vec::new(),
+            native: native::NativeState::default(),
+            commit_failed: false,
+            checkpoint_initialized: false,
+        }
+    }
+
+    /// Provider-specific roots are supplied by the daemon, never discovered
+    /// from process environment in isolated tests or fixture daemons.
+    pub fn with_native_roots(
+        mut self,
+        grok_home: Option<PathBuf>,
+        agy_data: Option<PathBuf>,
+    ) -> Self {
+        if let Some(root) = grok_home {
+            self.grok_root = root;
+        }
+        self.agy_extra_dir = agy_data.map(|root| root.join("conversations"));
+        self
+    }
+
+    fn claude_root(&self) -> PathBuf {
+        self.home.join(".claude").join("projects")
+    }
+
+    fn codex_root(&self) -> PathBuf {
+        self.home.join(".codex").join("sessions")
+    }
+
+    /// Where Grok writes `updates.jsonl` (watched like the transcript roots).
+    fn grok_sessions_root(&self) -> PathBuf {
+        self.grok_root.join("sessions")
+    }
+
+    /// Every directory Antigravity conversation DBs are discovered in.
+    fn agy_roots(&self) -> Vec<PathBuf> {
+        self.agy_extra_dir
+            .iter()
+            .cloned()
+            .chain(otto_transcript::agy::default_agy_conversation_dirs(
+                &self.home,
+            ))
+            .collect()
+    }
+
+    /// Spawn the background loop. Returns immediately.
+    ///
+    /// Event-driven: an FSEvents watcher (notify) on the two transcript roots
+    /// collects changed `*.jsonl` paths; the loop wakes on them (debounced),
+    /// stats and tails only those. A full listing runs at boot, every
+    /// RECONCILE_INTERVAL, and whenever the watcher reports dropped events.
+    /// The 20 s timer is armed only while a streamed response is held (its
+    /// release needs a quiet period). No watcher → the old 20 s full scan.
+    pub fn start(mut self) -> UsageTailerHandle {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_task = Arc::clone(&cancel);
+        let wake = Arc::new(Notify::new());
+        let wake_task = Arc::clone(&wake);
+        let task = tokio::spawn(async move {
+            use crate::{TailerState, TailerStatus};
+            // Only a CORRUPT checkpoint stops ingestion. An unavailable
+            // journal (SQLITE_BUSY during a backup, a full disk at boot) or a
+            // failed initial commit is transient: retry with a capped backoff
+            // (5 s doubling to 5 min) and report `retrying` meanwhile, so the
+            // Usage page says why its totals are stale.
+            let mut backoff = STARTUP_RETRY_MIN;
+            loop {
+                if cancel_task.load(Ordering::Relaxed) {
+                    return;
+                }
+                // Adopt legacy source checkpoints without rewriting historical rows.
+                let failure = match self.usage.ingestion_checkpoint().await {
+                    Ok(Some(state)) => {
+                        if let Err(e) = self.restore_checkpoint(state) {
+                            tracing::error!(
+                                "usage tailer: invalid journal checkpoint; ingestion stopped: {e}"
+                            );
+                            self.usage.set_tailer_status(TailerStatus {
+                                state: TailerState::Stopped,
+                                cause: Some(format!(
+                                    "the usage journal checkpoint is corrupt: {e}"
+                                )),
+                            });
+                            return;
+                        }
+                        None
+                    }
+                    Ok(None) => None,
+                    Err(e) => Some(format!("the usage journal is unavailable: {e}")),
+                };
+                let failure = match failure {
+                    Some(f) => Some(f),
+                    None => {
+                        // Skip remaining pre-existing history (codex, and any
+                        // claude file the rebuild couldn't touch) so old turns
+                        // aren't replayed with a now() timestamp.
+                        self.seed_existing_files().await;
+                        self.persist()
+                            .await
+                            .err()
+                            .map(|e| format!("could not commit the initial checkpoint: {e}"))
+                    }
+                };
+                let Some(cause) = failure else { break };
+                tracing::warn!("usage tailer: {cause}; retrying in {}s", backoff.as_secs());
+                self.usage.set_tailer_status(TailerStatus {
+                    state: TailerState::Retrying,
+                    cause: Some(cause),
+                });
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(STARTUP_RETRY_MAX);
+            }
+            self.usage.set_tailer_status(TailerStatus {
+                state: TailerState::Running,
+                cause: None,
+            });
+
+            let fs_wake = Arc::new(Notify::new());
+            let dirty: Arc<std::sync::Mutex<DirtySet>> = Arc::default();
+            let mut watch = TranscriptWatch::new(Arc::clone(&dirty), Arc::clone(&fs_wake));
+            let mut last_full: Option<Instant> = None;
+            loop {
+                if cancel_task.load(Ordering::Relaxed) {
+                    return;
+                }
+                if let Some(w) = watch.as_mut() {
+                    let mut roots: Vec<_> =
+                        self.claude_roots.iter().map(|(p, _)| p.clone()).collect();
+                    roots.push(self.codex_root());
+                    // Native providers too: an event-driven pass only scans
+                    // them when one of their files changed (see scan_paths).
+                    roots.push(self.grok_sessions_root());
+                    roots.extend(self.agy_roots());
+                    w.ensure_roots(&roots);
+                }
+                let (paths, rescan) = {
+                    let mut d = dirty.lock().unwrap_or_else(|e| e.into_inner());
+                    (std::mem::take(&mut d.paths), std::mem::take(&mut d.rescan))
+                };
+                let full = watch.is_none()
+                    || rescan
+                    || last_full.is_none_or(|t| t.elapsed() >= RECONCILE_INTERVAL);
+                let res = if full {
+                    last_full = Some(Instant::now());
+                    self.scan_once().await
+                } else {
+                    self.scan_paths(paths).await
+                };
+                if let Err(e) = res {
+                    tracing::warn!("usage tailer: scan failed: {e}");
+                }
+                let timeout = if watch.is_none() || !self.held.is_empty() {
+                    SCAN_INTERVAL
+                } else {
+                    RECONCILE_INTERVAL
+                        .saturating_sub(last_full.map(|t| t.elapsed()).unwrap_or_default())
+                };
+                // One timer per pass; dropping the handle wakes us at once.
+                tokio::select! {
+                    _ = tokio::time::sleep(timeout.min(SCAN_INTERVAL)) => {}
+                    _ = fs_wake.notified() => {
+                        // Debounce: an agent writes a burst of lines; take
+                        // them in one pass.
+                        tokio::select! {
+                            _ = tokio::time::sleep(FS_DEBOUNCE) => {}
+                            _ = wake_task.notified() => {
+                                self.release_held(|_| true);
+                                if let Err(e) = self.persist().await { tracing::error!("usage tailer shutdown checkpoint: {e}"); }
+                                return;
+                            }
+                        }
+                    }
+                    _ = wake_task.notified() => {
+                        // Count what is still held; its key is persisted only
+                        // if a later persist runs, so a lost flush is re-read.
+                        self.release_held(|_| true);
+                        if let Err(e) = self.persist().await { tracing::error!("usage tailer shutdown checkpoint: {e}"); }
+                        return;
+                    }
+                }
+            }
+        });
+        UsageTailerHandle {
+            cancel,
+            wake,
+            _task: task,
+        }
+    }
+
+    /// Seed the cursor for every transcript file that isn't already tracked,
+    /// setting it to the file's current size so existing history is skipped.
+    /// Codex also records each session's latest cumulative snapshot: otherwise
+    /// the first append after upgrading would look like an all-history delta.
+    async fn seed_existing_files(&mut self) {
+        let mut seeded = 0usize;
+        let (claude, codex) = self.list_files().await;
+        for (f, size) in claude {
+            if self.cursors.contains(&f) {
+                continue;
+            }
+            // Preserve legacy default-root history; newly supported account
+            // roots were never ingested and can safely backfill at true time.
+            let offset = if f.starts_with(self.claude_root()) {
+                size
+            } else {
+                0
+            };
+            self.cursors.set(&f, offset);
+            seeded += 1;
+        }
+
+        let mut codex_baselines = 0usize;
+        let mut catchup_files = 0usize;
+        let mut new_baseline_sessions = std::collections::HashSet::new();
+        for (f, size) in codex {
+            // Tracked rollout of a session with a baseline: nothing to seed,
+            // so skip the 64 KiB head read (it ran for every rollout ever
+            // written, every boot). The meta is read lazily once it grows.
+            if self.cursors.contains(&f) && self.codex_counters.contains(&codex_thread_uuid(&f)) {
+                continue;
+            }
+            let mut meta = read_codex_meta(&f).await;
+            if let Some(m) = &mut meta {
+                if let Some(model) =
+                    read_codex_model(&f, self.cursors.get(&f).unwrap_or(size)).await
+                {
+                    m.model = Some(model);
+                }
+            }
+            let session_id = meta
+                .as_ref()
+                .and_then(|m| m.session_id.clone())
+                .unwrap_or_else(|| codex_thread_uuid(&f));
+            let needs_baseline = new_baseline_sessions.contains(&session_id)
+                || !self.codex_counters.contains(&session_id);
+            if !self.cursors.contains(&f) {
+                if !needs_baseline {
+                    // A resume can create a new rollout while ottod is down.
+                    // Read it from byte 0 against the persisted session total.
+                    self.cursors.set(&f, 0);
+                    catchup_files += 1;
+                } else {
+                    // Preserve the existing no-historical-backfill policy for
+                    // sessions Otto has never observed.
+                    self.cursors.set(&f, size);
+                    seeded += 1;
+                }
+            }
+            if needs_baseline {
+                new_baseline_sessions.insert(session_id.clone());
+            }
+            if let Some(m) = &meta {
+                self.codex_meta.insert(f.clone(), m.clone());
+            }
+            let model = meta
+                .and_then(|m| m.model)
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| CODEX_FALLBACK_MODEL.to_string());
+            if new_baseline_sessions.contains(&session_id) {
+                if let Some(total) = read_last_codex_usage(&f, &model).await {
+                    self.codex_counters.seed(&session_id, &total);
+                    codex_baselines += 1;
+                }
+            }
+        }
+        // Persist all seeded state in the initial journal transaction. Legacy
+        // checkpoint files remain unchanged and are never advanced first.
+        tracing::info!(
+            "usage tailer: seeded {seeded} pre-existing transcript file(s), \
+             {codex_baselines} Codex cumulative baseline(s), \
+             {catchup_files} resumed rollout(s) queued for catch-up"
+        );
+    }
+
+    /// One full pass: list both trees (stat-first), tail what changed, evict
+    /// cursors of deleted transcripts, persist.
+    async fn scan_once(&mut self) -> Result<(), String> {
+        if self.commit_failed {
+            self.persist().await?;
+        }
+        self.stats.full_scans += 1;
+        let (claude, codex) = self.list_files().await;
+        self.tail_listed(&claude, &codex).await;
+        self.evict_dead_cursors(&claude, &codex);
+        self.scan_native().await?;
+        self.persist().await
+    }
+
+    /// An event-driven pass over just the paths the watcher reported.
+    async fn scan_paths(&mut self, paths: HashSet<PathBuf>) -> Result<(), String> {
+        if self.commit_failed {
+            self.persist().await?;
+        }
+        // Grok / Antigravity are polled only when the watcher saw one of
+        // their files change; the reconcile pass (scan_once) covers the rest.
+        // An idle event-driven pass used to walk both trees every ≤20 s.
+        let grok_root = self.grok_sessions_root();
+        let agy_roots = self.agy_roots();
+        let grok_dirty = paths.iter().any(|p| p.starts_with(&grok_root));
+        let agy_dirty = paths
+            .iter()
+            .any(|p| agy_roots.iter().any(|root| p.starts_with(root)));
+        let claude_roots = self.claude_roots.clone();
+        let codex_root = self.codex_root();
+        let (claude, codex) = tokio::task::spawn_blocking(move || {
+            let mut claude = Vec::new();
+            let mut codex = Vec::new();
+            for p in paths {
+                let is_claude = claude_roots
+                    .iter()
+                    .any(|(root, _)| is_claude_transcript(root, &p));
+                if !is_claude && !is_codex_rollout(&codex_root, &p) {
+                    continue;
+                }
+                // Gone (deleted/renamed) → the reconcile pass evicts it.
+                let Ok(md) = std::fs::metadata(&p) else {
+                    continue;
+                };
+                if is_claude {
+                    claude.push((p, md.len()));
+                } else {
+                    codex.push((p, md.len()));
+                }
+            }
+            (claude, codex)
+        })
+        .await
+        .unwrap_or_default();
+        self.tail_listed(&claude, &codex).await;
+        self.scan_native_parts(grok_dirty, agy_dirty).await?;
+        self.persist().await
+    }
+
+    /// Tail every listed file whose size moved since it was last tailed, then
+    /// release held responses that have been quiet for HOLD_IDLE.
+    async fn tail_listed(&mut self, claude: &[(PathBuf, u64)], codex: &[(PathBuf, u64)]) {
+        self.attr_fresh_this_pass = false;
+        for (file, size) in claude {
+            if self.commit_failed {
+                return;
+            }
+            if self.last_size.get(file) == Some(size) {
+                continue;
+            }
+            match self.tail_claude_file(file, *size).await {
+                Ok(true) => {
+                    if self.held.contains_key(file) {
+                        self.held_grew.insert(file.clone(), Instant::now());
+                    }
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    // Not recorded in `last_size`: a transient read error is
+                    // retried on the next pass that lists the file.
+                    tracing::debug!("usage tailer: claude file {} skipped: {e}", file.display());
+                    continue;
+                }
+            }
+            self.last_size.insert(file.clone(), *size);
+        }
+        // A held response whose file wrote nothing for HOLD_IDLE is as final
+        // as it will get — count it (a later line becomes a correction).
+        let grew = std::mem::take(&mut self.held_grew);
+        self.release_held(|f| grew.get(f).is_none_or(|t| t.elapsed() >= HOLD_IDLE));
+        self.held_grew = grew;
+        self.held_grew.retain(|f, _| self.held.contains_key(f));
+        for (file, size) in codex {
+            if self.commit_failed {
+                return;
+            }
+            if self.last_size.get(file) == Some(size) {
+                continue;
+            }
+            if let Err(e) = self.tail_codex_file(file, *size).await {
+                tracing::debug!("usage tailer: codex file {} skipped: {e}", file.display());
+                continue;
+            }
+            self.last_size.insert(file.clone(), *size);
+        }
+    }
+
+    /// The journal is authoritative after migration. The snapshot includes held
+    /// responses and correction baselines, so cursors can safely point past a
+    /// held response and late corrections remain exact after restart.
+    fn checkpoint(&self) -> serde_json::Value {
+        serde_json::json!({
+            "native": self.native,
+            "version": 1, "cursors": self.cursors.checkpoint(),
+            "seen": self.seen.checkpoint(), "codex": self.codex_counters.checkpoint(),
+            "folder": self.folder, "held": self.held, "held_attr": self.held_attr,
+            "codex_meta": self.codex_meta, "held_providers": self.held_providers,
+        })
+    }
+
+    fn restore_checkpoint(&mut self, mut state: serde_json::Value) -> Result<(), String> {
+        if state["version"] != 1 {
+            return Err("unsupported usage checkpoint version".into());
+        }
+        self.cursors
+            .restore_checkpoint(state["cursors"].take())
+            .map_err(|e| e.to_string())?;
+        self.seen
+            .restore_checkpoint(state["seen"].take())
+            .map_err(|e| e.to_string())?;
+        self.codex_counters
+            .restore_checkpoint(state["codex"].take())
+            .map_err(|e| e.to_string())?;
+        self.folder = serde_json::from_value(state["folder"].take()).map_err(|e| e.to_string())?;
+        self.held = serde_json::from_value(state["held"].take()).map_err(|e| e.to_string())?;
+        self.held_attr =
+            serde_json::from_value(state["held_attr"].take()).map_err(|e| e.to_string())?;
+        self.codex_meta =
+            serde_json::from_value(state["codex_meta"].take()).map_err(|e| e.to_string())?;
+        self.held_providers = match state.get_mut("held_providers") {
+            Some(value) => serde_json::from_value(value.take()).map_err(|e| e.to_string())?,
+            None => HashMap::new(),
+        };
+        self.native = match state.get_mut("native") {
+            Some(value) => serde_json::from_value(value.take()).map_err(|e| e.to_string())?,
+            None => native::NativeState::default(),
+        };
+        self.checkpoint_initialized = true;
+        self.held_grew = self
+            .held
+            .keys()
+            .map(|p| (p.clone(), Instant::now()))
+            .collect();
+        Ok(())
+    }
+
+    async fn persist(&mut self) -> Result<(), String> {
+        if self.checkpoint_initialized
+            && !self.commit_failed
+            && !self.cursors.is_dirty()
+            && !self.seen.has_pending()
+            && !self.codex_counters_dirty
+            && !self.native.dirty
+            && self.pending_events.is_empty()
+        {
+            return Ok(());
+        }
+        // Serialization of the bounded state runs off the runtime worker too.
+        let checkpoint = blocking_io(|| self.checkpoint());
+        self.commit_failed = true;
+        self.usage
+            .commit_ingestion(&checkpoint, &self.pending_events)
+            .await
+            .map_err(|e| e.to_string())?;
+        self.pending_events.clear();
+        self.cursors.checkpoint_committed();
+        self.seen.checkpoint_committed();
+        self.codex_counters_dirty = false;
+        self.native.dirty = false;
+        self.commit_failed = false;
+        self.checkpoint_initialized = true;
+        Ok(())
+    }
+
+    /// Drop cursors (and cached codex metas / sizes) for transcripts that no
+    /// longer exist — Claude prunes transcripts after ~30 days, which left over
+    /// half the cursor map pointing at deleted files. A key missing from this
+    /// scan's listing is only dropped after an explicit existence check, so a
+    /// transient `read_dir` failure can never reset a live file's cursor.
+    fn evict_dead_cursors(&mut self, claude: &[(PathBuf, u64)], codex: &[(PathBuf, u64)]) {
+        let listed: HashSet<String> = claude
+            .iter()
+            .chain(codex.iter())
+            .map(|(f, _)| f.to_string_lossy().into_owned())
+            .collect();
+        let candidates: Vec<String> = self
+            .cursors
+            .keys()
+            .filter(|k| !listed.contains(*k))
+            .map(str::to_string)
+            .collect();
+        if !candidates.is_empty() {
+            let dead: HashSet<String> = blocking_io(|| {
+                candidates
+                    .into_iter()
+                    .filter(|k| !Path::new(k).exists())
+                    .collect()
+            });
+            if !dead.is_empty() {
+                let removed = self.cursors.retain(|k| !dead.contains(k));
+                tracing::debug!("usage tailer: evicted {removed} cursor(s) of deleted transcripts");
+                // A deleted Grok `updates.jsonl` takes its per-turn
+                // baselines with it (other providers' keys never match).
+                self.native.forget_grok_files(&dead);
+            }
+        }
+        if self.codex_meta.len() > codex.len() {
+            let live: HashSet<&PathBuf> = codex.iter().map(|(f, _)| f).collect();
+            self.codex_meta.retain(|f, _| live.contains(f));
+        }
+        if self.last_size.len() > claude.len() + codex.len() {
+            let live: HashSet<&PathBuf> =
+                claude.iter().chain(codex.iter()).map(|(f, _)| f).collect();
+            self.last_size.retain(|f, _| live.contains(f));
+        }
+    }
+
+    /// List both transcript trees (with sizes) in ONE blocking task.
+    async fn list_files(&mut self) -> (Vec<(PathBuf, u64)>, Vec<(PathBuf, u64)>) {
+        let home = self.home.clone();
+        let accounts = self.account_root.clone();
+        match tokio::task::spawn_blocking(move || {
+            let roots = claude_source_roots(&home, &accounts);
+            let mut files = Vec::new();
+            let mut seen = HashSet::new();
+            for (root, _) in &roots {
+                for (path, size) in list_claude_files_under(root) {
+                    let identity = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+                    if seen.insert(identity) {
+                        files.push((path, size));
+                    }
+                }
+            }
+            (roots, files, list_codex_files(&home))
+        })
+        .await
+        {
+            Ok((roots, claude, codex)) => {
+                self.claude_roots = roots;
+                (claude, codex)
+            }
+            Err(error) => {
+                tracing::warn!("usage tailer: source discovery failed: {error}");
+                (Vec::new(), Vec::new())
+            }
+        }
+    }
+
+    fn claude_provider(&self, file: &Path) -> String {
+        self.claude_roots
+            .iter()
+            .find(|(root, _)| file.starts_with(root))
+            .map(|(_, provider)| provider.clone())
+            .unwrap_or_else(|| "claude".into())
+    }
+
+    fn set_cursor(&mut self, file: &Path, offset: u64) {
+        self.cursors.set_if_changed(file, offset);
+    }
+
+    /// The cached attribution, (re)querying `sessions` only when there is
+    /// none yet or it is older than ATTRIBUTION_TTL.
+    async fn attribution(&mut self) -> &Attribution {
+        let stale = self
+            .attr_built
+            .is_none_or(|t| t.elapsed() >= ATTRIBUTION_TTL);
+        if self.attr.is_none() || stale {
+            self.rebuild_attribution().await;
+        }
+        self.attr.get_or_insert_with(Attribution::default)
+    }
+
+    async fn rebuild_attribution(&mut self) {
+        // Read the generation first: a session written while the query runs
+        // leaves the generation ahead of `attr_gen`, so its first miss
+        // rebuilds again instead of being cached as "external".
+        let generation = (self.generation)();
+        let a = self.build_attribution().await;
+        self.attr = Some(a);
+        self.attr_built = Some(Instant::now());
+        self.attr_gen = generation;
+        self.attr_fresh_this_pass = true;
+    }
+
+    /// A lookup missed the cached index. Rebuild (once per pass) only if a
+    /// sessions write happened since the index was built — a brand-new
+    /// session, or a provider-session id stamped after spawn. A transcript
+    /// that is simply not Otto's (external) misses forever without ever
+    /// re-querying. Returns whether the index was rebuilt.
+    async fn refresh_after_miss(&mut self) -> bool {
+        if self.attr_fresh_this_pass || (self.generation)() == self.attr_gen {
+            return false;
+        }
+        self.rebuild_attribution().await;
+        true
+    }
+
+    /// Claude attribution: transcript stem → Otto session (miss-refreshing).
+    async fn lookup_claude(&mut self, stem: &str) -> Option<SessionRef> {
+        if let Some(s) = self.attribution().await.by_provider_session.get(stem) {
+            return Some(s.clone());
+        }
+        if !self.refresh_after_miss().await {
+            return None;
+        }
+        self.attr.as_ref()?.by_provider_session.get(stem).cloned()
+    }
+
+    /// Exact provider session identity is authoritative. A shared cwd does
+    /// not establish ownership, even when only one Otto session happens to exist.
+    async fn lookup_codex(&mut self, session_id: &str) -> Option<SessionRef> {
+        if let Some(s) = self
+            .attribution()
+            .await
+            .by_provider_session
+            .get(session_id)
+            .filter(|s| s.provider == "codex")
+        {
+            return Some(s.clone());
+        }
+        if !self.refresh_after_miss().await {
+            return None;
+        }
+        self.attr
+            .as_ref()?
+            .by_provider_session
+            .get(session_id)
+            .filter(|s| s.provider == "codex")
+            .cloned()
+    }
+
+    /// Rebuild exact provider-session attribution from the current session rows.
+    async fn build_attribution(&mut self) -> Attribution {
+        self.stats.attribution_builds += 1;
+        let repo = SessionsRepo::new(self.pool.clone());
+        let rows = match repo.list_usage_attribution().await {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::warn!("usage tailer: attribution query failed: {e}");
+                return Attribution::default();
+            }
+        };
+        let mut attr = Attribution::default();
+        for r in rows {
+            let sref = SessionRef {
+                otto_session_id: r.id,
+                workspace_id: r.workspace_id,
+                provider: r.provider,
+            };
+            if let Some(psid) = r.provider_session_id {
+                if !psid.is_empty() {
+                    attr.by_provider_identity
+                        .insert((sref.provider.clone(), psid.clone()), sref.clone());
+                    attr.by_provider_session.insert(psid, sref.clone());
+                }
+            }
+        }
+        attr
+    }
+
+    // ── Claude ────────────────────────────────────────────────────────────────
+
+    /// Tail one claude transcript. Returns `Ok(true)` when it had new lines.
+    /// Parsing runs on the blocking pool with the read; reads are capped at
+    /// READ_WINDOW per call, so a large catch-up streams in windows.
+    async fn tail_claude_file(&mut self, file: &Path, size: u64) -> Result<bool, String> {
+        let mut any = false;
+        loop {
+            let Some((lines, new_offset, more)) =
+                self.read_new_lines(file, size, parse_claude_line).await?
+            else {
+                return Ok(any);
+            };
+            any = true;
+
+            // Filename stem is the CLI's session uuid (= provider_session_id);
+            // a subagent transcript bills to its parent session.
+            let stem = claude_session_stem(file);
+            let (ids, provider) = match self.lookup_claude(&stem).await {
+                Some(s) => ((s.workspace_id, s.otto_session_id), s.provider),
+                None => (
+                    (EXTERNAL_WORKSPACE.to_string(), stem.clone()),
+                    self.claude_provider(file),
+                ),
+            };
+
+            // One API response = many lines (content blocks, streamed
+            // partials, resume replays), billed once — the folder counts each
+            // response once with its FINAL usage (see `ResponseFolder`).
+            let mut held = self.held.remove(file);
+            let mut out: Vec<ClaudeLine> = Vec::new();
+            for (line_start, parsed) in lines {
+                self.folder
+                    .push(&mut held, parsed, line_start, &mut self.seen, &mut out);
+            }
+            if let Some(h) = held {
+                self.held.insert(file.to_path_buf(), h);
+                self.held_attr.insert(file.to_path_buf(), ids.clone());
+                self.held_providers
+                    .insert(file.to_path_buf(), provider.clone());
+            } else {
+                self.held_attr.remove(file);
+                self.held_providers.remove(file);
+            }
+            for line in out {
+                self.record_claude(line, &ids, &provider);
+            }
+            self.set_cursor(file, new_offset);
+            if !more {
+                return Ok(true);
+            }
+            self.persist().await?;
+        }
+    }
+
+    /// Count every held response whose file passes `which`.
+    fn release_held(&mut self, which: impl Fn(&Path) -> bool) {
+        let files: Vec<PathBuf> = self.held.keys().filter(|f| which(f)).cloned().collect();
+        for f in files {
+            let mut held = self.held.remove(&f);
+            let ids = self
+                .held_attr
+                .remove(&f)
+                .unwrap_or_else(|| (EXTERNAL_WORKSPACE.to_string(), claude_session_stem(&f)));
+            let provider = self
+                .held_providers
+                .remove(&f)
+                .unwrap_or_else(|| self.claude_provider(&f));
+            let mut out = Vec::new();
+            self.folder.release(&mut held, &mut self.seen, &mut out);
+            // The persisted cursor floor moves on with the next save.
+            self.cursors.mark_dirty(&f);
+            for line in out {
+                self.record_claude(line, &ids, &provider);
+            }
+        }
+    }
+
+    fn record_claude(&mut self, line: ClaudeLine, ids: &(String, String), provider: &str) {
+        let usage = line.usage;
+        let cost = estimate_cost(
+            &usage.model,
+            usage.input,
+            usage.output,
+            usage.cache_read,
+            usage.cache_write,
+        );
+        self.pending_events.push(UsageEvent {
+            ts: line.timestamp,
+            workspace_id: ids.0.clone(),
+            session_id: ids.1.clone(),
+            provider: provider.to_string(),
+            model: usage.model,
+            kind: "completion".to_string(),
+            input_tokens: usage.input,
+            output_tokens: usage.output,
+            cache_read_tokens: usage.cache_read,
+            cache_write_tokens: usage.cache_write,
+            cost_usd: cost,
+            duration_ms: 0,
+            ..Default::default()
+        });
+    }
+
+    // ── Codex ─────────────────────────────────────────────────────────────────
+
+    async fn tail_codex_file(&mut self, file: &Path, size: u64) -> Result<(), String> {
+        // Growth check FIRST: an unchanged rollout costs nothing — no head read,
+        // no 18 KB session_meta parse.
+        let cursor = self.cursors.get(file).unwrap_or(0);
+        if cursor == size {
+            return Ok(());
+        }
+        // The session_meta (id + cwd + model) lives on the first line and never
+        // changes; read it once per file (just the head) and cache it.
+        let meta = match self.codex_meta.get(file) {
+            Some(m) => Some(m.clone()),
+            None => {
+                let mut m = read_codex_meta(file).await;
+                if let Some(meta) = &mut m {
+                    if let Some(model) = read_codex_model(file, cursor).await {
+                        meta.model = Some(model);
+                    }
+                }
+                if let Some(m) = &m {
+                    self.codex_meta.insert(file.to_path_buf(), m.clone());
+                }
+                m
+            }
+        };
+        let thread_uuid = codex_thread_uuid(file);
+        let codex_session_id = meta
+            .as_ref()
+            .and_then(|m| m.session_id.clone())
+            .unwrap_or_else(|| thread_uuid.clone());
+        let mut model = meta
+            .as_ref()
+            .and_then(|m| m.model.clone())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| CODEX_FALLBACK_MODEL.to_string());
+
+        loop {
+            let Some((totals, new_offset, more)) =
+                self.read_new_lines(file, size, parse_codex_record).await?
+            else {
+                return Ok(());
+            };
+            let sref = self.lookup_codex(&codex_session_id).await;
+            for (_, record) in totals {
+                if let Some(m) = record.model {
+                    model = m;
+                }
+                let Some(mut total) = record.usage else {
+                    continue;
+                };
+                total.model = model.clone();
+                self.codex_counters_dirty = true;
+                let Some(parsed) = self.codex_counters.apply(&codex_session_id, &total) else {
+                    continue;
+                };
+                let (workspace_id, session_id) = match &sref {
+                    Some(s) => (s.workspace_id.clone(), s.otto_session_id.clone()),
+                    None => (EXTERNAL_WORKSPACE.to_string(), thread_uuid.clone()),
+                };
+                let cost = estimate_cost(
+                    &parsed.model,
+                    parsed.input,
+                    parsed.output,
+                    parsed.cache_read,
+                    parsed.cache_write,
+                );
+                self.pending_events.push(UsageEvent {
+                    ts: record.timestamp,
+                    workspace_id,
+                    session_id,
+                    provider: "codex".to_string(),
+                    model: parsed.model,
+                    kind: "completion".to_string(),
+                    input_tokens: parsed.input,
+                    output_tokens: parsed.output,
+                    cache_read_tokens: parsed.cache_read,
+                    cache_write_tokens: parsed.cache_write,
+                    cost_usd: cost,
+                    duration_ms: 0,
+                    ..Default::default()
+                });
+            }
+            self.codex_meta.entry(file.to_path_buf()).or_default().model = Some(model.clone());
+            self.set_cursor(file, new_offset);
+            if !more {
+                return Ok(());
+            }
+            self.persist().await?;
+        }
+    }
+
+    // ── Shared I/O ──────────────────────────────────────────────────────────
+
+    /// Read (and `parse`, on the blocking pool) the complete lines of `file`
+    /// from its cursor, at most READ_WINDOW bytes per call. Returns each
+    /// parsed line with its start offset, the offset just past the last
+    /// consumed newline, and whether more bytes remain past the window.
+    /// `Ok(None)` when there's nothing new (or only a partial trailing line).
+    /// Handles truncation/rotation by restarting from 0. `size` comes from the
+    /// pass's stat.
+    async fn read_new_lines<T: Send + 'static>(
+        &mut self,
+        file: &Path,
+        size: u64,
+        parse: impl Fn(&str) -> Option<T> + Send + 'static,
+    ) -> Result<Option<(Vec<(u64, T)>, u64, bool)>, String> {
+        let mut cursor = self.cursors.get(file).unwrap_or(0);
+        if cursor > size {
+            // Truncated / rotated under us — restart from the top.
+            cursor = 0;
+        }
+        if size <= cursor {
+            return Ok(None);
+        }
+        self.stats.range_reads += 1;
+        let path = file.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            read_lines_window(&path, cursor, size, READ_WINDOW, parse)
+        })
+        .await
+        .map_err(|e| format!("join: {e}"))?
+    }
+}
+
+/// Reconstruct only when importing an old cursor or seeing a rollout for the
+/// first time. Streaming keeps memory bounded even for a large transcript.
+async fn read_codex_model(file: &Path, before: u64) -> Option<String> {
+    let path = file.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        use std::io::{BufRead, BufReader, Read};
+        let file = std::fs::File::open(path).ok()?;
+        let mut model = None;
+        for line in BufReader::new(file.take(before)).lines() {
+            let Ok(line) = line else { break };
+            if let Some(record) = parse_codex_record(&line) {
+                if record.model.is_some() {
+                    model = record.model;
+                }
+            }
+        }
+        model
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+struct CodexRecord {
+    model: Option<String>,
+    timestamp: Option<String>,
+    usage: Option<crate::ParsedUsage>,
+}
+
+fn parse_codex_record(line: &str) -> Option<CodexRecord> {
+    let value: serde_json::Value = serde_json::from_str(line).ok()?;
+    let kind = value.get("type")?.as_str()?;
+    let model = if matches!(kind, "turn_context" | "session_meta") {
+        value
+            .pointer("/payload/model")
+            .and_then(crate::codex_model_name)
+    } else {
+        None
+    };
+    let usage = parse_codex_line(line, "codex");
+    if model.is_none() && usage.is_none() {
+        return None;
+    }
+    Some(CodexRecord {
+        model,
+        usage,
+        timestamp: value
+            .get("timestamp")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+    })
+}
+
+/// FSEvents (notify) watcher over the transcript roots, feeding a dirty set.
+struct TranscriptWatch {
+    watcher: notify::RecommendedWatcher,
+    watched: HashSet<PathBuf>,
+}
+
+impl TranscriptWatch {
+    /// `None` when the platform watcher can't be created (→ 20 s polling).
+    fn new(dirty: Arc<std::sync::Mutex<DirtySet>>, wake: Arc<Notify>) -> Option<Self> {
+        let watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+            let mut d = dirty.lock().unwrap_or_else(|e| e.into_inner());
+            match res {
+                Ok(ev) => {
+                    if matches!(ev.kind, notify::EventKind::Access(_)) {
+                        return;
+                    }
+                    if ev.need_rescan() {
+                        d.rescan = true;
+                    }
+                    let mut hit = ev.need_rescan();
+                    for p in ev.paths {
+                        // Transcripts / Grok updates, and Antigravity's
+                        // SQLite DB + WAL.
+                        if p.extension()
+                            .is_some_and(|x| x == "jsonl" || x == "db" || x == "db-wal")
+                        {
+                            d.paths.insert(p);
+                            hit = true;
+                        }
+                    }
+                    if !hit {
+                        return;
+                    }
+                }
+                Err(_) => d.rescan = true,
+            }
+            drop(d);
+            wake.notify_one();
+        })
+        .map_err(|e| tracing::warn!("usage tailer: no FSEvents watcher ({e}); polling every 20 s"))
+        .ok()?;
+        Some(Self {
+            watcher,
+            watched: HashSet::new(),
+        })
+    }
+
+    /// Watch every root that exists and isn't watched yet (a missing
+    /// `~/.codex/sessions` is picked up once the CLI creates it).
+    fn ensure_roots(&mut self, roots: &[PathBuf]) {
+        use notify::Watcher;
+        for root in roots {
+            if self.watched.contains(root) || !root.is_dir() {
+                continue;
+            }
+            match self.watcher.watch(root, notify::RecursiveMode::Recursive) {
+                Ok(()) => {
+                    self.watched.insert(root.clone());
+                }
+                Err(e) => tracing::warn!("usage tailer: cannot watch {}: {e}", root.display()),
+            }
+        }
+    }
+}
+
+/// `<claude_root>/<project>/<sid>.jsonl` or
+/// `<claude_root>/<project>/<sid>/subagents/<agent>.jsonl`.
+fn is_claude_transcript(root: &Path, p: &Path) -> bool {
+    let Ok(rel) = p.strip_prefix(root) else {
+        return false;
+    };
+    if rel.extension().is_none_or(|x| x != "jsonl") {
+        return false;
+    }
+    let parts: Vec<_> = rel.components().collect();
+    match parts.len() {
+        2 => true,
+        4 => parts[2].as_os_str() == "subagents",
+        _ => false,
+    }
+}
+
+/// `<codex_root>/YYYY/MM/DD/rollout-*.jsonl`.
+fn is_codex_rollout(root: &Path, p: &Path) -> bool {
+    let Ok(rel) = p.strip_prefix(root) else {
+        return false;
+    };
+    rel.components().count() == 4
+        && rel.extension().is_some_and(|x| x == "jsonl")
+        && rel
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with("rollout-"))
+}
+
+/// One bounded window of `file[cursor..size]`: complete lines only, parsed.
+/// A single line longer than the window widens the read to the next newline
+/// (or EOF), so a giant tool result can't wedge the cursor. Blocking.
+#[allow(clippy::type_complexity)]
+fn read_lines_window<T>(
+    path: &Path,
+    cursor: u64,
+    size: u64,
+    mut window: u64,
+    parse: impl Fn(&str) -> Option<T>,
+) -> Result<Option<(Vec<(u64, T)>, u64, bool)>, String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    f.seek(SeekFrom::Start(cursor)).map_err(|e| e.to_string())?;
+    let mut buf: Vec<u8> = Vec::new();
+    let (last_nl, end) = loop {
+        let end = size.min(cursor.saturating_add(window));
+        let want = (end - cursor) as usize;
+        let have = buf.len();
+        buf.resize(want, 0);
+        f.read_exact(&mut buf[have..]).map_err(|e| e.to_string())?;
+        if let Some(pos) = buf.iter().rposition(|&b| b == b'\n') {
+            break (pos, end);
+        }
+        if end >= size {
+            return Ok(None); // no complete line yet
+        }
+        window = window.saturating_mul(2);
+    };
+    buf.truncate(last_nl + 1);
+    let consumed = cursor + buf.len() as u64;
+    // More only when the window — not a trailing partial line — stopped us.
+    let more = end < size;
+    // One copy at most: valid UTF-8 (the norm) is reused in place.
+    let text = match String::from_utf8(buf) {
+        Ok(t) => t,
+        Err(e) => String::from_utf8_lossy(e.as_bytes()).into_owned(),
+    };
+    let mut out = Vec::new();
+    let mut offset = cursor;
+    for line in text.split_inclusive('\n') {
+        let start = offset;
+        offset += line.len() as u64;
+        if let Some(v) = parse(line) {
+            out.push((start, v));
+        }
+    }
+    Ok(Some((out, consumed, more)))
+}
+
+// ---------------------------------------------------------------------------
+// Free helpers (filesystem, run on blocking threads to keep the loop snappy)
+// ---------------------------------------------------------------------------
+
+/// Run short synchronous file I/O (state-file saves, existence checks) without
+/// parking a runtime worker: `block_in_place` hands the worker's other tasks
+/// off on the multi-thread runtime; on a current-thread runtime (unit tests)
+/// it just runs inline.
+fn blocking_io<R>(f: impl FnOnce() -> R) -> R {
+    match tokio::runtime::Handle::try_current() {
+        Ok(h) if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(f)
+        }
+        _ => f(),
+    }
+}
+
+/// All claude transcript files with their sizes:
+/// `<home>/.claude/projects/*/*.jsonl` plus subagent transcripts
+/// `<home>/.claude/projects/*/*/subagents/*.jsonl`. Blocking — call off the
+/// runtime.
+#[cfg(test)]
+fn list_claude_files(home: &Path) -> Vec<(PathBuf, u64)> {
+    list_claude_files_under(&home.join(".claude/projects"))
+}
+
+fn claude_source_roots(home: &Path, accounts: &Path) -> Vec<(PathBuf, String)> {
+    let mut roots = vec![(home.join(".claude/projects"), "claude".into())];
+    for dir in read_subdirs(home) {
+        let Some(name) = dir.file_name().and_then(|v| v.to_str()) else {
+            continue;
+        };
+        if name.starts_with(".claude-") && dir.join("projects").is_dir() {
+            roots.push((
+                dir.join("projects"),
+                name.trim_start_matches('.').to_string(),
+            ));
+        }
+    }
+    roots.push((home.join(".config/claude/projects"), "claude".into()));
+    for dir in read_subdirs(accounts) {
+        if dir.join("projects").is_dir() {
+            roots.push((dir.join("projects"), "claude".into()));
+        }
+    }
+    roots
+}
+
+fn list_claude_files_under(root: &Path) -> Vec<(PathBuf, u64)> {
+    let mut out = Vec::new();
+    for project in read_subdirs(root) {
+        out.extend(read_files_with_ext(&project, "jsonl", |_| true));
+        for session in read_subdirs(&project) {
+            out.extend(read_files_with_ext(
+                &session.join("subagents"),
+                "jsonl",
+                |_| true,
+            ));
+        }
+    }
+    out
+}
+
+/// The claude session a transcript bills to: the file stem for a top-level
+/// `<sid>.jsonl`, the parent `<sid>` for `<sid>/subagents/<agent>.jsonl`.
+fn claude_session_stem(file: &Path) -> String {
+    let parent = file.parent();
+    if parent.and_then(|p| p.file_name()).and_then(|n| n.to_str()) == Some("subagents") {
+        if let Some(sid) = parent.and_then(|p| p.parent()).and_then(|p| p.file_name()) {
+            return sid.to_string_lossy().into_owned();
+        }
+    }
+    file.file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// All codex rollout files with their sizes:
+/// `<home>/.codex/sessions/*/*/*/rollout-*.jsonl`. Blocking — call off the
+/// runtime.
+fn list_codex_files(home: &Path) -> Vec<(PathBuf, u64)> {
+    let root = home.join(".codex").join("sessions");
+    let mut out = Vec::new();
+    for y in read_subdirs(&root) {
+        for m in read_subdirs(&y) {
+            for d in read_subdirs(&m) {
+                out.extend(read_files_with_ext(&d, "jsonl", |n| {
+                    n.starts_with("rollout-")
+                }));
+            }
+        }
+    }
+    out
+}
+
+/// Immediate subdirectories of `dir` (empty on any error).
+#[allow(clippy::disallowed_methods)] // sync helper: list_claude_files/list_codex_files only run inside spawn_blocking
+fn read_subdirs(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .map(|e| e.path())
+        .collect()
+}
+
+/// Files in `dir` with the given extension whose name passes `name_ok`, with
+/// their sizes (non-recursive; empty on any error; unstat-able files skipped).
+#[allow(clippy::disallowed_methods)] // sync helper: list_claude_files/list_codex_files only run inside spawn_blocking
+fn read_files_with_ext(
+    dir: &Path,
+    ext: &str,
+    name_ok: impl Fn(&str) -> bool,
+) -> Vec<(PathBuf, u64)> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|e| {
+            let p = e.path();
+            if p.extension().and_then(|x| x.to_str()) != Some(ext) {
+                return None;
+            }
+            if !p
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(&name_ok)
+                .unwrap_or(false)
+            {
+                return None;
+            }
+            // `metadata` follows symlinks like the old `tokio::fs::metadata`.
+            let len = std::fs::metadata(&p).ok()?.len();
+            Some((p, len))
+        })
+        .collect()
+}
+
+/// Events handed from the rebuild scan to the inserter per batch.
+#[cfg(test)]
+const REBUILD_BATCH: usize = 5_000;
+
+/// Stream `file`'s complete lines (up to its last `\n`) through `f(offset,
+/// line)` with a bounded buffer. Returns the offset just past the last
+/// newline (0 if none). Blocking.
+#[cfg(test)]
+fn for_each_complete_line(file: &Path, mut f: impl FnMut(u64, &str)) -> std::io::Result<u64> {
+    for_each_complete_line_until(file, |off, line| {
+        f(off, line);
+        true
+    })
+}
+
+/// [`for_each_complete_line`] that stops as soon as `f` returns `false`.
+#[cfg(test)]
+fn for_each_complete_line_until(
+    file: &Path,
+    mut f: impl FnMut(u64, &str) -> bool,
+) -> std::io::Result<u64> {
+    use std::io::BufRead;
+    let file = std::fs::File::open(file)?;
+    let mut r = std::io::BufReader::with_capacity(256 * 1024, file);
+    let mut buf: Vec<u8> = Vec::with_capacity(64 * 1024);
+    let mut offset = 0u64;
+    loop {
+        buf.clear();
+        let n = r.read_until(b'\n', &mut buf)?;
+        if n == 0 || buf.last() != Some(&b'\n') {
+            // EOF, or a trailing partial line still being written.
+            return Ok(offset);
+        }
+        let line = String::from_utf8_lossy(&buf);
+        let more = f(offset, &line);
+        offset += n as u64;
+        if !more {
+            return Ok(offset);
+        }
+        if buf.capacity() > 8 * 1024 * 1024 {
+            buf = Vec::with_capacity(64 * 1024); // drop a one-off giant line
+        }
+    }
+}
+
+/// Rebuild pass 1: how many files hold usage lines, and the oldest event
+/// date. Transcripts are append-only and chronological (a resumed session's
+/// replayed history comes first), so each file is read only up to its FIRST
+/// timestamped usage line — pass 1 is O(files × head) instead of a second
+/// full parse of every transcript (R7).
+#[cfg(test)]
+fn rebuild_min_date(files: &[PathBuf]) -> (usize, Option<String>) {
+    let mut n = 0usize;
+    let mut min_date: Option<String> = None;
+    for file in files {
+        let mut has_usage = false;
+        let _ = for_each_complete_line_until(file, |_, line| {
+            let Some(parsed) = parse_claude_line(line) else {
+                return true;
+            };
+            has_usage = true;
+            let Some(date) = parsed.timestamp.as_deref().and_then(|t| t.get(..10)) else {
+                return true; // keep looking for a dated line
+            };
+            if min_date.as_deref().is_none_or(|m| date < m) {
+                min_date = Some(date.to_string());
+            }
+            false
+        });
+        n += usize::from(has_usage);
+    }
+    (n, min_date)
+}
+
+/// What rebuild pass 2 hands back to the tailer once every batch was sent.
+#[derive(Default)]
+#[cfg(test)]
+struct RebuildOut {
+    /// False when the inserter hung up (an insert failed) mid-scan.
+    completed: bool,
+    offsets: Vec<(PathBuf, u64)>,
+    /// Every counted response key's hash, oldest first (for the seen set).
+    keys: Vec<u128>,
+    /// The newest counted responses (for late-line corrections).
+    recent: std::collections::VecDeque<(String, ClaudeLine)>,
+}
+
+/// Rebuild pass 2: parse every file, fold each response's lines into its
+/// FINAL (field-wise max) usage, count each response once across files, and
+/// send the events in batches. Blocking.
+///
+/// A response's lines live in one file (replays into a resumed session carry
+/// the same final usage), so open responses are folded per file and only a
+/// 16-byte hash per counted key is kept across files.
+#[cfg(test)]
+fn rebuild_events(
+    files: &[PathBuf],
+    attr: &HashMap<String, (String, String)>,
+    tx: tokio::sync::mpsc::Sender<Vec<UsageEvent>>,
+) -> RebuildOut {
+    let mut out = RebuildOut::default();
+    let mut counted: HashSet<u128> = HashSet::new();
+    let mut batch: Vec<UsageEvent> = Vec::with_capacity(REBUILD_BATCH);
+    for file in files {
+        let stem = claude_session_stem(file);
+        let (workspace_id, session_id) = attr
+            .get(&stem)
+            .cloned()
+            .unwrap_or_else(|| (EXTERNAL_WORKSPACE.to_string(), stem.clone()));
+        // This file's responses in first-seen order; key hash → index.
+        let mut lines: Vec<(Option<String>, ClaudeLine)> = Vec::new();
+        let mut open: HashMap<u128, usize> = HashMap::new();
+        let res = for_each_complete_line(file, |_, line| {
+            let Some(parsed) = parse_claude_line(line) else {
+                return;
+            };
+            match parsed.dedup_key.as_deref().map(crate::seen_key_hash) {
+                Some(h) if counted.contains(&h) => {} // replay of an earlier file
+                Some(h) => match open.get(&h) {
+                    Some(&i) => crate::merge_max(&mut lines[i].1, &parsed),
+                    None => {
+                        open.insert(h, lines.len());
+                        lines.push((parsed.dedup_key.clone(), parsed));
+                    }
+                },
+                None => lines.push((None, parsed)),
+            }
+        });
+        let end = match res {
+            Ok(end) => end,
+            Err(e) => {
+                tracing::debug!("usage tailer: rebuild skipped {}: {e}", file.display());
+                continue;
+            }
+        };
+        out.offsets.push((file.clone(), end));
+        for (key, line) in lines {
+            if let Some(k) = &key {
+                let h = crate::seen_key_hash(k);
+                counted.insert(h);
+                out.keys.push(h);
+                out.recent.push_back((k.clone(), line.clone()));
+                if out.recent.len() > RECENT_RESPONSES_CAP {
+                    out.recent.pop_front();
+                }
+            }
+            let u = &line.usage;
+            batch.push(UsageEvent {
+                ts: line.timestamp.clone(),
+                workspace_id: workspace_id.clone(),
+                session_id: session_id.clone(),
+                provider: "claude".to_string(),
+                model: u.model.clone(),
+                kind: "completion".to_string(),
+                input_tokens: u.input,
+                output_tokens: u.output,
+                cache_read_tokens: u.cache_read,
+                cache_write_tokens: u.cache_write,
+                cost_usd: estimate_cost(&u.model, u.input, u.output, u.cache_read, u.cache_write),
+                duration_ms: 0,
+                ..Default::default()
+            });
+            if batch.len() >= REBUILD_BATCH {
+                let full = std::mem::replace(&mut batch, Vec::with_capacity(REBUILD_BATCH));
+                if tx.blocking_send(full).is_err() {
+                    return out; // inserter failed: completed stays false
+                }
+            }
+        }
+    }
+    if !batch.is_empty() && tx.blocking_send(batch).is_err() {
+        return out;
+    }
+    out.completed = true;
+    out
+}
+
+/// Read just the first line of a codex rollout file and parse its session_meta.
+/// Reads a bounded head (the meta line is small) to avoid loading large files.
+async fn read_codex_meta(file: &Path) -> Option<crate::CodexMeta> {
+    use std::io::Read;
+    let path = file.to_path_buf();
+    let head = tokio::task::spawn_blocking(move || -> Option<String> {
+        let mut f = std::fs::File::open(&path).ok()?;
+        // Session meta is the first line; 64 KiB is far more than enough.
+        let mut buf = vec![0u8; 64 * 1024];
+        let n = f.read(&mut buf).ok()?;
+        buf.truncate(n);
+        Some(String::from_utf8_lossy(&buf).into_owned())
+    })
+    .await
+    .ok()??;
+    let first = head.lines().next()?;
+    parse_codex_session_meta(first)
+}
+
+/// Search backward through a bounded tail of a rollout for its newest
+/// cumulative token snapshot. The first 512 KiB normally contains one; the
+/// wider ceiling handles a large final tool result without loading multi-GB
+/// rollouts in full.
+async fn read_last_codex_usage(file: &Path, model: &str) -> Option<crate::ParsedUsage> {
+    use std::io::{Read, Seek, SeekFrom};
+    const CHUNK_BYTES: u64 = 512 * 1024;
+    const MAX_BYTES: u64 = 16 * 1024 * 1024;
+    const OVERLAP: u64 = 16 * 1024;
+    let path = file.to_path_buf();
+    let model = model.to_string();
+    tokio::task::spawn_blocking(move || -> Option<crate::ParsedUsage> {
+        let mut f = std::fs::File::open(&path).ok()?;
+        let size = f.metadata().ok()?.len();
+        let floor = size.saturating_sub(MAX_BYTES);
+        let mut end = size;
+        while end > floor {
+            let start = end.saturating_sub(CHUNK_BYTES).max(floor);
+            f.seek(SeekFrom::Start(start)).ok()?;
+            let mut buf = vec![0u8; (end - start) as usize];
+            f.read_exact(&mut buf).ok()?;
+            let text = String::from_utf8_lossy(&buf);
+            if let Some(total) = text
+                .lines()
+                .rev()
+                .find_map(|line| parse_codex_line(line, &model))
+            {
+                return Some(total);
+            }
+            if start == floor {
+                break;
+            }
+            end = start.saturating_add(OVERLAP);
+        }
+        None
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// Extract the thread uuid from a codex rollout filename:
+/// `rollout-<ISO-ts>-<uuid>.jsonl`. The uuid is the tail after the timestamp;
+/// since the ts itself contains `-`, we take the canonical 5-group uuid (last
+/// 5 dash-separated segments of the stem). Falls back to the whole stem.
+fn codex_thread_uuid(file: &Path) -> String {
+    let stem = file
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let parts: Vec<&str> = stem.split('-').collect();
+    if parts.len() >= 5 {
+        // Last 5 segments form the uuid (8-4-4-4-12).
+        parts[parts.len() - 5..].join("-")
+    } else {
+        stem
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::disallowed_methods)] // tests: plain sync fs is fine
+mod tests {
+    use super::*;
+
+    #[test]
+    fn codex_thread_uuid_from_rollout_filename() {
+        let f =
+            Path::new("/x/rollout-2026-06-18T08-53-25-019ed94a-994a-7010-b01f-9b840c5b7068.jsonl");
+        assert_eq!(codex_thread_uuid(f), "019ed94a-994a-7010-b01f-9b840c5b7068");
+    }
+
+    #[test]
+    fn listings_carry_sizes_and_filter_names() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("otto-usage-list-test-{nonce}"));
+        let home = root.as_path();
+        let day = home.join(".codex/sessions/2026/09/27");
+        std::fs::create_dir_all(&day).unwrap();
+        std::fs::write(day.join("rollout-a.jsonl"), b"12345").unwrap();
+        std::fs::write(day.join("other.jsonl"), b"x").unwrap();
+        std::fs::write(day.join("rollout-b.txt"), b"x").unwrap();
+        let proj = home.join(".claude/projects/-p");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(proj.join("s.jsonl"), b"abc").unwrap();
+        std::fs::write(proj.join("s.meta.json"), b"{}").unwrap();
+        // r3-08-14: subagent transcripts live one level down; tool-results
+        // and other session subdirs are not transcripts.
+        let subs = proj.join("s/subagents");
+        std::fs::create_dir_all(&subs).unwrap();
+        std::fs::write(subs.join("agent-x.jsonl"), b"abcd").unwrap();
+        std::fs::write(subs.join("agent-x.meta.json"), b"{}").unwrap();
+        std::fs::create_dir_all(proj.join("s/tool-results")).unwrap();
+        std::fs::write(proj.join("s/tool-results/t.jsonl"), b"z").unwrap();
+
+        let codex = list_codex_files(home);
+        assert_eq!(codex, vec![(day.join("rollout-a.jsonl"), 5)]);
+        let mut claude = list_claude_files(home);
+        claude.sort();
+        assert_eq!(
+            claude,
+            // (Path order compares components: `s` sorts before `s.jsonl`.)
+            vec![(subs.join("agent-x.jsonl"), 4), (proj.join("s.jsonl"), 3)]
+        );
+        // Missing trees are empty, not errors.
+        assert!(list_codex_files(&home.join("nope")).is_empty());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn subagent_transcripts_bill_to_their_parent_session() {
+        assert_eq!(
+            claude_session_stem(Path::new("/h/.claude/projects/-p/abc-123.jsonl")),
+            "abc-123"
+        );
+        assert_eq!(
+            claude_session_stem(Path::new(
+                "/h/.claude/projects/-p/abc-123/subagents/agent-a1b2.jsonl"
+            )),
+            "abc-123"
+        );
+    }
+
+    fn tmp_root(tag: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("otto-usage-{tag}-{nonce}"));
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn read_lines_window_streams_and_widens_for_a_giant_line() {
+        let root = tmp_root("window");
+        let f = root.join("t.jsonl");
+        let giant = "x".repeat(50);
+        std::fs::write(&f, format!("a\nbb\n{giant}\npartial")).unwrap();
+        let size = std::fs::metadata(&f).unwrap().len();
+        let parse = |l: &str| Some(l.trim_end().len());
+        // Window 4: "a\nbb" → only "a\n" is complete; more remains.
+        let (lines, off, more) = read_lines_window(&f, 0, size, 4, parse).unwrap().unwrap();
+        assert_eq!((lines, off, more), (vec![(0, 1)], 2, true));
+        // From 2 the window holds "bb\n" then the giant line forces widening.
+        let (lines, off, more) = read_lines_window(&f, off, size, 4, parse).unwrap().unwrap();
+        assert_eq!(lines, vec![(2, 2)]);
+        let (lines, off2, _) = read_lines_window(&f, off, size, 4, parse).unwrap().unwrap();
+        assert_eq!(lines, vec![(5, 50)]);
+        assert_eq!(off2, 56);
+        assert!(more);
+        // Only a partial trailing line left → nothing to consume.
+        assert!(read_lines_window(&f, off2, size, 4, parse)
+            .unwrap()
+            .is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn watcher_paths_are_classified() {
+        let c = Path::new("/h/.claude/projects");
+        assert!(is_claude_transcript(
+            c,
+            Path::new("/h/.claude/projects/-p/s.jsonl")
+        ));
+        assert!(is_claude_transcript(
+            c,
+            Path::new("/h/.claude/projects/-p/s/subagents/a.jsonl")
+        ));
+        assert!(!is_claude_transcript(
+            c,
+            Path::new("/h/.claude/projects/-p/s/tool-results/t.jsonl")
+        ));
+        assert!(!is_claude_transcript(
+            c,
+            Path::new("/h/.claude/projects/-p/s.meta.json")
+        ));
+        assert!(!is_claude_transcript(c, Path::new("/elsewhere/-p/s.jsonl")));
+        let x = Path::new("/h/.codex/sessions");
+        assert!(is_codex_rollout(
+            x,
+            Path::new("/h/.codex/sessions/2026/10/03/rollout-a.jsonl")
+        ));
+        assert!(!is_codex_rollout(
+            x,
+            Path::new("/h/.codex/sessions/2026/10/03/other.jsonl")
+        ));
+        assert!(!is_codex_rollout(
+            x,
+            Path::new("/h/.codex/sessions/2026/10/rollout-a.jsonl")
+        ));
+    }
+
+    fn assistant_line(id: &str, out: u64) -> String {
+        format!(
+            r#"{{"type":"assistant","timestamp":"2026-10-03T10:00:00Z","requestId":"r","message":{{"id":"{id}","model":"claude-opus-4-1","stop_reason":"end_turn","usage":{{"input_tokens":1,"output_tokens":{out}}}}}}}"#
+        )
+    }
+
+    /// Perf guard (U2/U10): on a realistic tree (2k claude + 1.4k codex
+    /// files, 10 ending in a partial line), an unchanged-tree pass must not
+    /// query `sessions` or read any file — the old `has_new` compared sizes
+    /// against the newline-bounded cursor, so the partial-line files rebuilt
+    /// attribution and re-read every 20 s forever.
+    #[tokio::test]
+    async fn unchanged_tree_pass_does_no_attribution_or_reads() {
+        let root = tmp_root("idle");
+        let home = root.join("home");
+        for p in 0..100 {
+            let proj = home.join(format!(".claude/projects/-p{p}"));
+            std::fs::create_dir_all(&proj).unwrap();
+            for f in 0..20 {
+                std::fs::write(proj.join(format!("s{f}.jsonl")), "{}\n").unwrap();
+            }
+        }
+        let day = home.join(".codex/sessions/2026/10/03");
+        std::fs::create_dir_all(&day).unwrap();
+        for f in 0..1400 {
+            std::fs::write(day.join(format!("rollout-{f}.jsonl")), "{}\n").unwrap();
+        }
+        let pool = otto_state::open(&root.join("t.db")).await.unwrap();
+        sqlx::query("UPDATE sessions SET archived=1 WHERE id='b'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let usage = UsageEngine::start(
+            crate::UsageConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            root.join("usage"),
+        )
+        .await;
+        let mut t = UsageTailer::new(usage, pool, root.join("data"), home.clone());
+        t.seed_existing_files().await;
+        // 10 transcripts grow a partial (newline-less) line after the seed.
+        for p in 0..10 {
+            let f = home.join(format!(".claude/projects/-p{p}/s0.jsonl"));
+            std::fs::write(&f, "{}\n{\"type\":\"assist").unwrap();
+        }
+        t.scan_once().await.unwrap();
+        let after_first = t.stats;
+        assert_eq!(
+            after_first.attribution_builds, 0,
+            "no complete line → no query"
+        );
+        assert_eq!(after_first.range_reads, 10);
+
+        // Unchanged tree: zero reads, zero attribution — full or event pass.
+        t.scan_once().await.unwrap();
+        t.scan_paths(HashSet::new()).await.unwrap();
+        assert_eq!(t.stats.range_reads, after_first.range_reads);
+        assert_eq!(t.stats.attribution_builds, 0);
+
+        // A real usage line → exactly one read and one attribution query.
+        let f = home.join(".claude/projects/-p50/s3.jsonl");
+        std::fs::write(&f, format!("{{}}\n{}\n", assistant_line("m1", 7))).unwrap();
+        t.scan_paths(HashSet::from([f.clone()])).await.unwrap();
+        assert_eq!(t.stats.range_reads, after_first.range_reads + 1);
+        assert_eq!(t.stats.attribution_builds, 1);
+        assert_eq!(
+            t.cursors.get(&f),
+            std::fs::metadata(&f).ok().map(|m| m.len())
+        );
+        assert!(t.seen.contains("m1:r"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    static TEST_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    /// Perf guard (R2): while agents stream, event-driven passes run every
+    /// ~2 s. The attribution index must be built ONCE and reused — not
+    /// re-read from `sessions` per pass — while an external transcript's
+    /// misses never re-query, a sessions write makes the next miss rebuild
+    /// exactly once, and the TTL bounds staleness.
+    #[tokio::test]
+    async fn streaming_passes_reuse_attribution() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let root = tmp_root("attr");
+        let home = root.join("home");
+        let proj = home.join(".claude/projects/-p");
+        std::fs::create_dir_all(&proj).unwrap();
+        let pool = otto_state::open(&root.join("t.db")).await.unwrap();
+        let now = "2026-10-03T00:00:00Z".to_string();
+        sqlx::query("INSERT INTO users (id, username, password_hash, display_name, is_root, created_at) VALUES ('u','u','x','U',0,?)")
+            .bind(&now).execute(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO workspaces (id, name, root_path, created_at) VALUES ('w','w','/tmp',?)",
+        )
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let add_session = |id: &'static str, psid: &'static str| {
+            let pool = pool.clone();
+            let now = now.clone();
+            async move {
+                sqlx::query(
+                    "INSERT INTO sessions (id, workspace_id, kind, provider, title, status, cwd, \
+                     provider_session_id, created_by, created_at, last_active_at, meta_json) \
+                     VALUES (?, 'w', 'agent', 'claude', 't', 'running', '/tmp', ?, 'u', ?, ?, '{}')",
+                )
+                .bind(id).bind(psid).bind(&now).bind(&now)
+                .execute(&pool).await.unwrap();
+            }
+        };
+        add_session("otto-known", "known").await;
+        let usage = UsageEngine::start(
+            crate::UsageConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            root.join("usage"),
+        )
+        .await;
+        let mut t = UsageTailer::new(usage, pool.clone(), root.join("data"), home.clone());
+        t.generation = || TEST_GEN.load(SeqCst);
+        t.seed_existing_files().await;
+
+        let mut n = 0;
+        let mut append = |stem: &str| {
+            n += 1;
+            let f = proj.join(format!("{stem}.jsonl"));
+            let mut body = std::fs::read_to_string(&f).unwrap_or_default();
+            body.push_str(&assistant_line(&format!("m{n}"), 1));
+            body.push('\n');
+            std::fs::write(&f, body).unwrap();
+            f
+        };
+        // Ten streaming passes on a known session + an external one.
+        for _ in 0..10 {
+            let a = append("known");
+            let b = append("external");
+            t.scan_paths(HashSet::from([a, b])).await.unwrap();
+        }
+        assert_eq!(t.stats.attribution_builds, 1, "one build for 10 passes");
+        assert_eq!(
+            t.lookup_claude("known").await.map(|s| s.otto_session_id),
+            Some("otto-known".to_string())
+        );
+
+        // A new session lands (generation moves): its first miss rebuilds
+        // once and attributes it; the external stem still never re-queries.
+        add_session("otto-late", "late").await;
+        TEST_GEN.fetch_add(1, SeqCst);
+        let a = append("late");
+        let b = append("external");
+        t.scan_paths(HashSet::from([a, b])).await.unwrap();
+        assert_eq!(t.stats.attribution_builds, 2);
+        assert_eq!(
+            t.lookup_claude("late").await.map(|s| s.otto_session_id),
+            Some("otto-late".to_string())
+        );
+        let b = append("external");
+        t.scan_paths(HashSet::from([b])).await.unwrap();
+        assert_eq!(
+            t.stats.attribution_builds, 2,
+            "external misses never re-query"
+        );
+
+        // The TTL bounds staleness for writes that bypass the repo.
+        t.attr_built = Instant::now().checked_sub(ATTRIBUTION_TTL);
+        let a = append("known");
+        t.scan_paths(HashSet::from([a])).await.unwrap();
+        assert_eq!(t.stats.attribution_builds, 3);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn rebuild_streams_dedups_and_keeps_final_usage() {
+        let root = tmp_root("rebuild");
+        let a = root.join("a.jsonl");
+        let b = root.join("b.jsonl");
+        // a: a streamed response (partial then final) + a key-less line.
+        let partial =
+            assistant_line("m1", 3).replace(r#""stop_reason":"end_turn""#, r#""stop_reason":null"#);
+        std::fs::write(
+            &a,
+            format!(
+                "{partial}\n{{\"type\":\"user\"}}\n{}\n",
+                assistant_line("m1", 9)
+            ),
+        )
+        .unwrap();
+        // b: replays m1 (resume) and adds m2, then a partial trailing line.
+        std::fs::write(
+            &b,
+            format!(
+                "{}\n{}\n{{\"x",
+                assistant_line("m1", 9),
+                assistant_line("m2", 4)
+            ),
+        )
+        .unwrap();
+        let files = vec![a.clone(), b.clone()];
+        // Two files with usage; each read only to its first dated usage line.
+        assert_eq!(rebuild_min_date(&files), (2, Some("2026-10-03".into())));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+        let attr = HashMap::new();
+        let out = tokio::task::spawn_blocking(move || rebuild_events(&files, &attr, tx))
+            .await
+            .unwrap();
+        let mut events = Vec::new();
+        while let Some(batch) = rx.recv().await {
+            events.extend(batch);
+        }
+        assert!(out.completed);
+        let outs: Vec<u64> = events.iter().map(|e| e.output_tokens).collect();
+        assert_eq!(outs, vec![9, 4], "m1 once with its FINAL usage, m2 once");
+        assert_eq!(out.keys.len(), 2);
+        let b_len = std::fs::metadata(&b).unwrap().len();
+        assert_eq!(
+            out.offsets[1],
+            (b.clone(), b_len - 3),
+            "stops before the partial line"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn fsevents_watcher_reports_new_transcripts() {
+        let root = tmp_root("watch");
+        let root = std::fs::canonicalize(&root).unwrap();
+        let dirty: Arc<std::sync::Mutex<DirtySet>> = Arc::default();
+        let wake = Arc::new(Notify::new());
+        let Some(mut w) = TranscriptWatch::new(Arc::clone(&dirty), wake) else {
+            return; // no platform watcher: the 20 s fallback covers it
+        };
+        w.ensure_roots(std::slice::from_ref(&root));
+        std::thread::sleep(Duration::from_millis(300));
+        let f = root.join("s.jsonl");
+        std::fs::write(&f, "{}\n").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            {
+                let d = dirty.lock().unwrap();
+                if d.paths.contains(&f) || d.rescan {
+                    break;
+                }
+            }
+            assert!(Instant::now() < deadline, "no FSEvent for {}", f.display());
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn read_last_codex_usage_finds_the_newest_cumulative_snapshot() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("otto-codex-tail-test-{nonce}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file =
+            dir.join("rollout-2026-07-12T20-00-00-019ed94a-994a-7010-b01f-9b840c5b7068.jsonl");
+        let old = r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":80,"output_tokens":5}}}}"#;
+        let new = r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":160,"cached_input_tokens":120,"output_tokens":9,"reasoning_output_tokens":4}}}}"#;
+        let padding = "tool output\n".repeat(60_000);
+        std::fs::write(&file, format!("{old}\n{padding}{new}\n")).unwrap();
+
+        let got = read_last_codex_usage(&file, "gpt-5-codex").await.unwrap();
+        assert_eq!(got.input, 40);
+        assert_eq!(got.cache_read, 120);
+        assert_eq!(got.output, 9, "reasoning is already included in output");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod accounting_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn grok_history_backfills_once_with_disjoint_cache_and_original_time() {
+        let root = std::env::temp_dir().join(format!("otto-grok-usage-{}", otto_core::new_id()));
+        let home = root.join("home");
+        let dir = home.join(".grok/sessions/project/provider-grok");
+        std::fs::create_dir_all(&dir).unwrap();
+        let record = serde_json::json!({"timestamp":1785585600, "params":{"sessionId":"provider-grok", "_meta":{"eventId":"event-1", "agentTimestampMs":1785585600000_i64}, "update":{"sessionUpdate":"turn_completed", "usage":{"modelUsage":{"grok-model":{"inputTokens":100,"outputTokens":20,"cachedReadTokens":80,"reasoningTokens":5,"costUsdTicks":1000000000_u64}}}}}}).to_string() + "\n";
+        let file = dir.join("updates.jsonl");
+        std::fs::write(&file, format!("{record}{record}")).unwrap();
+        let pool = otto_state::open(&root.join("state.db")).await.unwrap();
+        let usage = UsageEngine::start(
+            crate::UsageConfig {
+                enabled: true,
+                clickhouse_path: Some(
+                    root.join("missing-clickhouse")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                ..Default::default()
+            },
+            root.join("usage"),
+        )
+        .await;
+        let mut tailer =
+            UsageTailer::new(usage.clone(), pool.clone(), root.join("data"), home.clone());
+        tailer.seed_existing_files().await;
+        // Read the owed durable events rather than relying on pending memory.
+        tailer.scan_once().await.unwrap();
+        let journal = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                sqlx::sqlite::SqliteConnectOptions::new()
+                    .filename(root.join("usage/usage-ingestion.sqlite3"))
+                    .read_only(true),
+            )
+            .await
+            .unwrap();
+        let rows: Vec<String> = sqlx::query_scalar("SELECT payload FROM outbox")
+            .fetch_all(&journal)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1, "a repeated Grok turn must be counted once");
+        let event: UsageEvent = serde_json::from_str(&rows[0]).unwrap();
+        assert_eq!(event.provider, "grok");
+        assert_eq!(
+            (
+                event.input_tokens,
+                event.cache_read_tokens,
+                event.output_tokens
+            ),
+            (20, 80, 20)
+        );
+        assert_eq!(event.ts.as_deref(), Some("2026-08-01T12:00:00.000Z"));
+        assert!((event.cost_usd - 0.1).abs() < 1e-9);
+        let checkpoint = usage.ingestion_checkpoint().await.unwrap().unwrap();
+        assert!(
+            checkpoint.get("native").is_some(),
+            "Grok must participate in the durable ingestion checkpoint"
+        );
+        let mut recovered = UsageTailer::new(usage.clone(), pool.clone(), root.join("data"), home);
+        recovered.restore_checkpoint(checkpoint).unwrap();
+        recovered.seed_existing_files().await;
+        assert_eq!(
+            recovered.cursors.get(&file),
+            Some((record.len() * 2) as u64)
+        );
+        recovered.scan_once().await.unwrap();
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM outbox")
+            .fetch_one(&journal)
+            .await
+            .unwrap();
+        assert_eq!(
+            count, 1,
+            "restart must not append the historical turn again"
+        );
+        journal.close().await;
+        pool.close().await;
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn custom_session_provider_survives_a_held_response_restart() {
+        let root = std::env::temp_dir().join(format!("otto-held-provider-{}", otto_core::new_id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let pool = otto_state::open(&root.join("state.db")).await.unwrap();
+        let now = "2026-10-19T00:00:00Z";
+        sqlx::query("INSERT INTO users(id,username,password_hash,display_name,is_root,created_at) VALUES('u','u','x','U',0,?)").bind(now).execute(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO workspaces(id,name,root_path,created_at) VALUES('w','w','/repo',?)",
+        )
+        .bind(now)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO sessions(id,workspace_id,kind,provider,title,status,cwd,provider_session_id,created_by,created_at,last_active_at,meta_json) VALUES('s','w','agent','claude-work','t','running','/repo','psid','u',?,?,'{}')").bind(now).bind(now).execute(&pool).await.unwrap();
+        let usage = UsageEngine::start(
+            crate::UsageConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            root.join("usage"),
+        )
+        .await;
+        let mut tailer = UsageTailer::new(
+            usage.clone(),
+            pool.clone(),
+            root.join("data"),
+            root.join("home"),
+        );
+        let path = root.join("psid.jsonl");
+        let body = serde_json::json!({"type":"assistant", "timestamp":now, "message":{"id":"held", "model":"claude-sonnet-4", "stop_reason":null, "usage":{"input_tokens":100,"output_tokens":5}}}).to_string() + "\n";
+        std::fs::write(&path, &body).unwrap();
+        tailer
+            .tail_claude_file(&path, body.len() as u64)
+            .await
+            .unwrap();
+        assert!(tailer.pending_events.is_empty());
+        tailer.persist().await.unwrap();
+        let mut restarted = UsageTailer::new(
+            usage.clone(),
+            pool.clone(),
+            root.join("data"),
+            root.join("home"),
+        );
+        restarted
+            .restore_checkpoint(usage.ingestion_checkpoint().await.unwrap().unwrap())
+            .unwrap();
+        restarted.release_held(|_| true);
+        assert_eq!(restarted.pending_events.len(), 1);
+        assert_eq!(restarted.pending_events[0].provider, "claude-work");
+        assert_eq!(restarted.pending_events[0].workspace_id, "w");
+        assert_eq!(restarted.pending_events[0].session_id, "s");
+        pool.close().await;
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn custom_claude_history_is_discovered_and_keeps_provider_identity() {
+        let root = std::env::temp_dir().join(format!("otto-custom-usage-{}", otto_core::new_id()));
+        let home = root.join("home");
+        let projects = home.join(".claude-work/projects/repo");
+        std::fs::create_dir_all(&projects).unwrap();
+        let file = projects.join("work-session.jsonl");
+        let body = serde_json::json!({"type":"assistant", "timestamp":"2026-08-01T12:00:00Z", "message":{"id":"response-work", "model":"claude-sonnet-4", "stop_reason":"end_turn", "usage":{"input_tokens":100,"output_tokens":20}}}).to_string() + "\n";
+        std::fs::write(&file, &body).unwrap();
+        let pool = otto_state::open(&root.join("state.db")).await.unwrap();
+        let usage = UsageEngine::start(
+            crate::UsageConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            root.join("usage"),
+        )
+        .await;
+        let legacy = home.join(".claude/projects/repo/legacy.jsonl");
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::fs::write(
+            &legacy,
+            body.replace("response-work", "legacy-already-counted"),
+        )
+        .unwrap();
+        let mut tailer =
+            UsageTailer::new(usage.clone(), pool.clone(), root.join("data"), home.clone());
+        let (files, _) = tailer.list_files().await;
+        assert!(
+            files.iter().any(|(p, _)| p == &file),
+            "custom Claude account history must be discovered"
+        );
+        tailer.seed_existing_files().await;
+        tailer.tail_listed(&files, &[]).await;
+        assert_eq!(
+            tailer.pending_events.len(),
+            1,
+            "newly supported history must not be seeded to EOF"
+        );
+        assert_eq!(tailer.pending_events[0].provider, "claude-work");
+        assert_eq!(tailer.pending_events[0].input_tokens, 100);
+        assert_eq!(
+            tailer.pending_events[0].ts.as_deref(),
+            Some("2026-08-01T12:00:00Z")
+        );
+        tailer.persist().await.unwrap();
+        let mut restarted = UsageTailer::new(usage.clone(), pool.clone(), root.join("data"), home);
+        restarted
+            .restore_checkpoint(usage.ingestion_checkpoint().await.unwrap().unwrap())
+            .unwrap();
+        restarted.seed_existing_files().await;
+        let (files, _) = restarted.list_files().await;
+        restarted.tail_listed(&files, &[]).await;
+        assert!(restarted.pending_events.is_empty(), "restart must neither replay the backfill nor import legacy default-Claude history twice");
+        pool.close().await;
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn codex_exact_identity_timestamp_model_and_restart_delta() {
+        let root = std::env::temp_dir().join(format!("otto-accounting-{}", otto_core::new_id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let pool = otto_state::open(&root.join("state.db")).await.unwrap();
+        let now = "2026-10-18T00:00:00Z";
+        sqlx::query("INSERT INTO users(id,username,password_hash,display_name,is_root,created_at) VALUES('u','u','x','U',0,?)")
+            .bind(now).execute(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO workspaces(id,name,root_path,created_at) VALUES('w','w','/shared',?)",
+        )
+        .bind(now)
+        .execute(&pool)
+        .await
+        .unwrap();
+        for (id, psid, status) in [
+            ("a", "provider-a", "running"),
+            ("b", "provider-b", "exited"),
+        ] {
+            sqlx::query("INSERT INTO sessions(id,workspace_id,kind,provider,title,status,cwd,provider_session_id,created_by,created_at,last_active_at,meta_json) VALUES(?,'w','agent','codex','t',?,'/shared',?,'u',?,?,'{}')")
+                .bind(id).bind(status).bind(psid).bind(now).bind(now).execute(&pool).await.unwrap();
+        }
+        let usage = UsageEngine::start(
+            crate::UsageConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            root.join("usage"),
+        )
+        .await;
+        let mut tailer = UsageTailer::new(
+            usage.clone(),
+            pool.clone(),
+            root.join("legacy"),
+            root.join("home"),
+        );
+        assert_eq!(
+            tailer
+                .lookup_codex("provider-a")
+                .await
+                .unwrap()
+                .otto_session_id,
+            "a"
+        );
+        assert_eq!(
+            tailer
+                .lookup_codex("provider-b")
+                .await
+                .unwrap()
+                .otto_session_id,
+            "b"
+        );
+        assert!(tailer.lookup_codex("external-shared-cwd").await.is_none());
+        let file = root.join("rollout-provider-a.jsonl");
+        let token = |input, cached, output| {
+            serde_json::json!({"type":"event_msg", "timestamp":"2026-10-17T23:59:59Z", "payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":input,"cached_input_tokens":cached,"output_tokens":output}}}}).to_string()
+        };
+        let mut body = format!(
+            "{}\n{}\n{}\n{}\n{}\n",
+            serde_json::json!({"type":"session_meta","payload":{"id":"provider-a","cwd":"/shared"}}),
+            serde_json::json!({"type":"turn_context","payload":{"model":"model-one"}}),
+            token(100, 80, 10),
+            serde_json::json!({"type":"turn_context","payload":{"model":"model-two"}}),
+            token(160, 120, 20)
+        );
+        std::fs::write(&file, &body).unwrap();
+        tailer
+            .tail_codex_file(&file, body.len() as u64)
+            .await
+            .unwrap();
+        assert_eq!(tailer.pending_events.len(), 2);
+        assert_eq!(tailer.pending_events[0].session_id, "a");
+        assert_eq!(tailer.pending_events[0].model, "model-one");
+        assert_eq!(tailer.pending_events[1].model, "model-two");
+        assert_eq!(tailer.pending_events[1].input_tokens, 20);
+        assert_eq!(
+            tailer.pending_events[1].ts.as_deref(),
+            Some("2026-10-17T23:59:59Z")
+        );
+        tailer.persist().await.unwrap();
+        let mut recovered = UsageTailer::new(
+            usage.clone(),
+            pool.clone(),
+            root.join("legacy"),
+            root.join("home"),
+        );
+        recovered
+            .restore_checkpoint(usage.ingestion_checkpoint().await.unwrap().unwrap())
+            .unwrap();
+        recovered
+            .tail_codex_file(&file, body.len() as u64)
+            .await
+            .unwrap();
+        assert!(
+            recovered.pending_events.is_empty(),
+            "committed source is never emitted twice"
+        );
+        body.push_str(&format!("{}\n", token(200, 160, 30)));
+        std::fs::write(&file, &body).unwrap();
+        recovered
+            .tail_codex_file(&file, body.len() as u64)
+            .await
+            .unwrap();
+        assert_eq!(recovered.pending_events.len(), 1);
+        assert_eq!(recovered.pending_events[0].model, "model-two");
+        assert_eq!(recovered.pending_events[0].input_tokens, 0);
+        assert_eq!(recovered.pending_events[0].output_tokens, 10);
+        assert_eq!(recovered.pending_events[0].cache_read_tokens, 40);
+        usage.shutdown().await;
+        pool.close().await;
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[test]
+    fn checkpoint_preserves_seen_fifo_and_late_claude_correction() {
+        let path = std::env::temp_dir().join(format!("otto-not-written-{}", otto_core::new_id()));
+        let mut seen = SeenKeys::load(&path, 2);
+        seen.insert("old");
+        seen.insert("response:r");
+        seen.insert("other");
+        let state = seen.checkpoint();
+        let mut restored = SeenKeys::load(&path, 2);
+        restored.restore_checkpoint(state.clone()).unwrap();
+        assert_eq!(state, restored.checkpoint());
+        assert!(!restored.contains("old"));
+        assert!(restored.contains("response:r"));
+        let mut folder = ResponseFolder::new(4);
+        let line = |n| {
+            parse_claude_line(&format!(r#"{{"type":"assistant","timestamp":"2026-10-18T00:00:00Z","requestId":"r","message":{{"id":"response","usage":{{"output_tokens":{n}}},"stop_reason":"end_turn"}}}}"#)).unwrap()
+        };
+        folder.remember("response:r", &line(100));
+        let mut folder: ResponseFolder =
+            serde_json::from_value(serde_json::to_value(folder).unwrap()).unwrap();
+        let mut out = Vec::new();
+        folder.push(&mut None, line(150), 100, &mut restored, &mut out);
+        assert_eq!(out.len(), 1);
+        assert_eq!(
+            out[0].usage.output, 50,
+            "restart must retain correction baseline"
+        );
+    }
+}

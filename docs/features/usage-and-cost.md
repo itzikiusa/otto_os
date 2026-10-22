@@ -10,8 +10,9 @@ exposes per-provider / per-day / per-session / per-feature rollups, and feeds
 **opt-in spend budgets** with a live `budget_exceeded` WebSocket alert.
 
 This is the definitive end-user + operator guide. It documents what the code in
-`crates/otto-usage/`, `crates/ottod/src/usage_tailer.rs`, `crates/otto-server/src/routes/usage.rs`,
-`crates/otto-server/src/monitor.rs`, and `ui/src/modules/usage/` actually does —
+`crates/otto-usage/`, `crates/otto-usage/src/tailer/driver.rs`, `crates/otto-server/src/routes/usage.rs`,
+`crates/otto-server/src/budget/`, `crates/otto-server/src/monitor.rs`, and `ui/src/modules/usage/`
+actually does —
 exact endpoints, columns, setting keys, on-disk paths, and UI labels.
 
 > Related docs: **[Insights](./insights.md)** (scheduled HTML usage reports built
@@ -57,13 +58,13 @@ Two storage layers cooperate:
 
 | Layer | Crate / file | Responsibility |
 |---|---|---|
-| **Capture** | `crates/ottod/src/usage_tailer.rs` | Tails Claude/Codex transcripts as they change (FSEvents; 10-min reconcile), parses per-turn tokens, attributes them to an Otto session (or `external`), and records a [`UsageEvent`]. |
+| **Capture** | `crates/otto-usage/src/tailer/driver.rs` | Tails Claude/Codex transcripts as they change (FSEvents; 10-min reconcile), parses per-turn tokens, attributes them to an Otto session (or `external`), and records a [`UsageEvent`]. |
 | **Engine façade** | `crates/otto-usage/src/engine.rs` (`UsageEngine`) | Owns the ClickHouse handle + a batched event writer; runs all the rollup queries; manages install / retention / status. |
 | **ClickHouse wrapper** | `crates/otto-usage/src/clickhouse.rs` | A thin async wrapper that shells out to `clickhouse local --path <dir>`. |
 | **Schema / DDL** | `crates/otto-usage/src/schema.rs` | `CREATE TABLE` for `usage_events` + `system_metrics`, TTL, and additive column migrations. |
 | **Pricing** | `crates/otto-usage/src/pricing.rs` | Per-model USD rate table → `estimate_cost(...)`. |
 | **Metrics sampler** | `crates/otto-usage/src/metrics.rs` + `crates/otto-server/src/monitor.rs` | Host/process telemetry via `sysinfo`, sampled on a loop. |
-| **Budgets** | `crates/otto-server/src/routes/usage.rs` + `crates/otto-usage/src/budget_dedup.rs` | Spend caps, status rows, and de-duplicated crossing events. |
+| **Budgets** | `crates/otto-server/src/budget/` (`BudgetGate`) + `crates/otto-usage/src/budget_dedup.rs` | Spend caps, status rows, the admission check, and de-duplicated crossing events. The `/usage/budgets` routes in `routes/usage.rs` are its HTTP faces. |
 | **HTTP routes** | `crates/otto-server/src/routes/usage.rs` | All `/usage/*` endpoints + `/ingest/usage`. |
 | **UI** | `ui/src/modules/usage/` (`UsagePage.svelte`, `AttributionDrilldown.svelte`, `CostForecastChip.svelte`) | The dashboard, attribution drilldown, and forecast chip. |
 
@@ -540,8 +541,9 @@ Each non-`NoChange` signal broadcasts a `budget_exceeded` WS event:
 
 In the UI a dismissible banner appears at the top of the Usage page; a `recovered`
 event auto-clears it. The daemon-consultable `check_budget(ctx, workspace, provider)`
-returns a `BudgetVerdict` (`blocked` / `exceeded` / `reason`) that callers can use to
-gate or warn on work; it is a no-op when enforcement is off.
+(`crate::budget`, also `BudgetGate::check`) returns a `BudgetVerdict` (`blocked` /
+`exceeded` / `reason`) that callers can use to gate or warn on work; it is a no-op when
+enforcement is off.
 
 ---
 
@@ -706,8 +708,9 @@ history), so you lose forward attribution for those files, not duplicate it.
 - **Contracts (authoritative):** `docs/contracts/api.md` (§ Usage tracking & system
   metrics, § Insights) and `docs/contracts/ws.md` (Usage metrics tick A9,
   `budget_exceeded`).
-- **Source:** `crates/otto-usage/`, `crates/ottod/src/usage_tailer.rs`,
-  `crates/otto-server/src/routes/usage.rs`, `crates/otto-server/src/monitor.rs`,
+- **Source:** `crates/otto-usage/`, `crates/otto-usage/src/tailer/driver.rs`,
+  `crates/otto-server/src/routes/usage.rs`, `crates/otto-server/src/budget/`,
+  `crates/otto-server/src/monitor.rs`,
   `ui/src/modules/usage/`.
 
 ## Per-session tokens on the Agents page

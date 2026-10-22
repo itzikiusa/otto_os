@@ -40,10 +40,23 @@ pub struct Verdict {
     pub findings: Vec<Value>,
 }
 
+/// Schema predicate of a verdict reply: it names `target_met`.
+fn is_verdict(v: &Value) -> bool {
+    v.get("target_met").is_some()
+}
+
+/// `transcript_ok` acceptor of a verify turn: the reply holds a verdict.
+fn verdict_ok(text: &str) -> bool {
+    otto_core::text::extract_json_where(text, is_verdict).is_some()
+}
+
 impl Verdict {
-    /// Parse a verdict from a leader reply (expects one JSON object).
+    /// Parse a verdict from a leader reply (expects one JSON object). The
+    /// first object carrying `target_met` wins (a `{}` or other JSON earlier
+    /// in the reply is skipped). Fail-closed defaults for a merge gate: a
+    /// missing or non-bool `target_met` is a miss, a missing `blocker` blocks.
     pub fn parse(reply: &str) -> Option<Verdict> {
-        let v = crate::recruiter::extract_json(reply)?;
+        let v = otto_core::text::extract_json_where(reply, is_verdict)?;
         Some(Verdict {
             target_met: v
                 .get("target_met")
@@ -606,7 +619,7 @@ impl VerifyOps for SwarmVerifyOps {
             &title,
             &self.cwd,
             &prompt,
-            |t| crate::recruiter::extract_json(t).is_some(),
+            verdict_ok,
             &self.cancel,
         )
         .await;
@@ -990,8 +1003,11 @@ async fn run_controller(
     };
 
     let goals = assemble_task_goals(ctx, task).await;
+    // Verification turns act as the task's human originator too (PC-2) — the
+    // same identity its work turns ran as, never the swarm creator by default.
+    let acting = crate::runtime::run::acting_user(repo, &swarm, Some(&project), Some(task)).await;
     let user = User {
-        id: swarm.created_by.clone(),
+        id: acting,
         username: "swarm".into(),
         display_name: "Swarm".into(),
         is_root: false,
@@ -1787,6 +1803,51 @@ mod tests {
         assert!(is_verifying(&id));
         drop(RegistryGuard(id.clone(), replacement));
         assert!(!is_verifying(&id));
+    }
+
+    /// test-quality-4-03 / backend-correctness-4-04: the parser that builds
+    /// the merge gate's verdict from the leader's reply, incl. its fail-closed
+    /// defaults and which object wins.
+    #[test]
+    fn verdict_parse_reads_fields_and_fails_closed() {
+        // 1. A fenced, complete verdict: every field is read.
+        let full = "Done.\n```json\n{\"target_met\": true, \"blocker\": false, \
+                    \"severity\": \"low\", \"measured\": \"92%\", \"summary\": \"ok\", \
+                    \"findings\": [{\"f\": 1}]}\n```";
+        let v = Verdict::parse(full).expect("fenced verdict");
+        assert!(v.target_met);
+        assert!(!v.blocker);
+        assert_eq!(v.severity, "low");
+        assert_eq!(v.measured.as_deref(), Some("92%"));
+        assert_eq!(v.summary, "ok");
+        assert_eq!(v.findings.len(), 1);
+
+        // 2. No `blocker`: it blocks, and at the retry ceiling the goal is Unmet.
+        let v = Verdict::parse("{\"target_met\": false}").unwrap();
+        assert!(!v.target_met);
+        assert!(v.blocker, "a missing blocker must fail closed");
+        assert_eq!(classify(&goal("g", true, 2), &v, 2), Decision::Unmet);
+
+        // 3. A non-bool target_met is a miss.
+        assert!(
+            !Verdict::parse("{\"target_met\": \"true\"}")
+                .unwrap()
+                .target_met
+        );
+
+        // 4. Prose only: no verdict.
+        assert!(Verdict::parse("I looked at it and it seems fine.").is_none());
+        assert!(!verdict_ok("I looked at it and it seems fine."));
+
+        // 5. A fenceless reply with a `{}` before the verdict: the verdict wins.
+        let pre = "Checked `fn x() {}` first. {\"target_met\": true, \"blocker\": false}";
+        let v = Verdict::parse(pre).expect("verdict after a {} preamble");
+        assert!(v.target_met);
+        assert!(!v.blocker);
+        assert!(verdict_ok(pre));
+        // An earlier unrelated JSON example is skipped too.
+        let example = "Config was {\"a\": 1}. Verdict: {\"target_met\": true}";
+        assert!(Verdict::parse(example).unwrap().target_met);
     }
 
     #[test]

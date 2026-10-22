@@ -21,6 +21,7 @@
   import ProviderIcon from './ProviderIcon.svelte';
   import ModelPicker from './ModelPicker.svelte';
   import { api, isAbortError } from '../api/client';
+  import { loadErrorText } from '../loadError';
   import type { Action, Repo, SearchHit, Session, WorkspaceWithRole } from '../api/types';
   import { registry, type Command } from '../commands.svelte';
   import { loadFrecency, rankCommands, recordUsage } from '../commandSearch';
@@ -312,7 +313,7 @@
     try {
       await cmd.run();
     } catch (e) {
-      addTurn('', { tone: 'error', text: `Couldn’t run “${cmd.title}”.`, detail: e instanceof Error ? e.message : String(e), source: 'Otto' });
+      addTurn('', { tone: 'error', text: `Couldn’t run “${cmd.title}”.`, detail: loadErrorText(e), source: 'Otto' });
     }
   }
 

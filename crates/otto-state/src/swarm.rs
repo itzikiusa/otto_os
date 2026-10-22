@@ -1245,18 +1245,35 @@ impl SwarmRepo {
     /// message, keeping the project itself (and the runs — spend history).
     /// Returns (tasks_deleted, messages_deleted).
     pub async fn clear_project_board(&self, project_id: &Id) -> Result<(u64, u64)> {
+        // Task goals go with their tasks (no FK cascades on `swarm_goals.task_id`,
+        // so they were orphaned for good); project-level goals stay with the
+        // project. One transaction, mirroring `delete_project`.
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(dberr("clear project begin"))?;
+        sqlx::query(
+            "DELETE FROM swarm_goals
+              WHERE task_id IN (SELECT id FROM swarm_tasks WHERE project_id = ?)",
+        )
+        .bind(project_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(dberr("clear project task goals"))?;
         let tasks = sqlx::query("DELETE FROM swarm_tasks WHERE project_id = ?")
             .bind(project_id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(dberr("clear project tasks"))?
             .rows_affected();
         let msgs = sqlx::query("DELETE FROM swarm_messages WHERE project_id = ?")
             .bind(project_id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(dberr("clear project messages"))?
             .rows_affected();
+        tx.commit().await.map_err(dberr("clear project commit"))?;
         Ok((tasks, msgs))
     }
 
@@ -1466,12 +1483,37 @@ impl SwarmRepo {
     }
 
     pub async fn delete_task(&self, id: &Id) -> Result<()> {
+        // The task's goals (and their verdicts) go with it: `swarm_goals.task_id`
+        // has no FK, and nothing lists or prunes a goal of a deleted task.
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(dberr("delete task begin"))?;
+        sqlx::query("DELETE FROM swarm_goals WHERE task_id = ?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(dberr("delete task goals"))?;
         sqlx::query("DELETE FROM swarm_tasks WHERE id = ?")
             .bind(id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(dberr("delete task"))?;
+        tx.commit().await.map_err(dberr("delete task commit"))?;
         Ok(())
+    }
+
+    /// True when `id` names a person (a `users` row) — how the runtime tells a
+    /// human task originator from an agent id in `swarm_tasks.created_by`
+    /// (agent-created handoffs/reviews stamp the agent's id there).
+    pub async fn user_exists(&self, id: &str) -> Result<bool> {
+        let hit: Option<i64> = sqlx::query_scalar("SELECT 1 FROM users WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(dberr("user exists"))?;
+        Ok(hit.is_some())
     }
 
     /// Increment a task's attempt counter and return the new value. Called when

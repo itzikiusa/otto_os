@@ -363,9 +363,11 @@ pub fn agent_session_of(ctx: &AuthContext) -> Option<&otto_core::Id> {
         .or(ctx.mcp_session_id.as_ref())
 }
 
-/// The daemon-side host filesystem routes (`/api/v1/fs/*`).
+/// The daemon-side host filesystem routes (`/api/v1/fs/*`) and the
+/// session-scoped working-folder files (`/api/v1/sessions/{id}/files/*`, PC-1):
+/// both read the disk unconfined as the daemon's OS account.
 fn is_host_files_route(template: &str) -> bool {
-    template.starts_with("/api/v1/fs/")
+    template.starts_with("/api/v1/fs/") || template.starts_with("/api/v1/sessions/{id}/files/")
 }
 
 // ---------------------------------------------------------------------------
@@ -938,6 +940,9 @@ mod root_route_tests {
         assert!(is_host_files_route("/api/v1/fs/read"));
         assert!(is_host_files_route("/api/v1/fs/browse"));
         assert!(is_host_files_route("/api/v1/fs/stat"));
+        assert!(is_host_files_route("/api/v1/sessions/{id}/files/browse"));
+        assert!(is_host_files_route("/api/v1/sessions/{id}/files/read"));
+        assert!(!is_host_files_route("/api/v1/sessions/{id}/transcript"));
         assert!(!is_host_files_route("/api/v1/fsx"));
         assert!(!is_host_files_route("/api/v1/workspaces/{id}/files"));
     }

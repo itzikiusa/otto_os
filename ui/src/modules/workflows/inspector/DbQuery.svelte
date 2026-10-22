@@ -11,7 +11,8 @@
 
 <label for="np-conn">Connection</label>
 <IdPicker id="np-conn" value={paramStr(node, 'connection_id')} cache={pickers.dbConnections} key={wsId} toOptions={connectionOptions}
-  noun="connection" placeholder="DB-Explorer connection id" what="database connections" onchange={(v) => set('connection_id', v)} />
+  noun="connection" placeholder="DB-Explorer connection id" what="database connections"
+  emptyHint="No database connections in this workspace yet — add one in Database Explorer." onchange={(v) => set('connection_id', v)} />
 <label for="np-stmt">SQL / query statement</label>
 <textarea dir="ltr"
   id="np-stmt"

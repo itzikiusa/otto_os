@@ -979,7 +979,8 @@ pub fn spawn_budget_sampler(ctx: ServerCtx) {
 /// One budget-check pass: load config + current spend, then compare each row
 /// against the de-duplication state and emit `BudgetExceeded` as needed.
 async fn check_budgets(ctx: &ServerCtx, dedup: &mut otto_usage::BudgetDedup) {
-    let cfg = crate::routes::usage::load_budgets_pub(ctx).await;
+    let gate = crate::budget::BudgetGate::new(ctx);
+    let cfg = gate.config().await;
     if !cfg.enforce {
         // Enforcement is off — clear any stale crossing state so that the next
         // time enforcement is turned back on we start fresh.
@@ -1000,7 +1001,7 @@ async fn check_budgets(ctx: &ServerCtx, dedup: &mut otto_usage::BudgetDedup) {
     // flush bumps the generation, so a stamping scan here kept an always-on
     // agent's server up forever) and never wakes a parked one — no spend to
     // judge yet means "check again next tick", so the stamp is not marked.
-    let Some(status) = crate::routes::usage::budget_status_background(ctx, cfg).await else {
+    let Some(status) = gate.status_background(cfg).await else {
         return;
     };
     dedup.mark_checked(stamp);

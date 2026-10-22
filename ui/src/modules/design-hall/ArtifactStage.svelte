@@ -23,7 +23,7 @@
     type Scene3dDoc,
     type Scene3dObject,
   } from '../../lib/design/scene3d';
-  import { renderMermaid } from '../canvas/mermaid';
+  import { renderMermaid } from '../../lib/render/mermaid';
   import { renderD2 } from '../canvas/d2';
   import { brandColors, contrastRatio, renderKind } from './model';
   import SiteStudio from './site/SiteStudio.svelte';

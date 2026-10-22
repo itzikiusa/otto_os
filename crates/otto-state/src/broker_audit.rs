@@ -4,7 +4,6 @@
 use crate::DbPool;
 use chrono::Utc;
 use otto_core::{new_id, Id, Result};
-use sqlx::Row;
 
 use crate::convert::{dberr, fmt};
 
@@ -16,17 +15,6 @@ pub struct BrokerAuditRow {
     pub operation: String,
     pub detail: String,
     pub performed_at: String,
-}
-
-fn row_to_audit(r: &sqlx::sqlite::SqliteRow) -> BrokerAuditRow {
-    BrokerAuditRow {
-        id: r.get("id"),
-        cluster_id: r.get("cluster_id"),
-        user_id: r.get("user_id"),
-        operation: r.get("operation"),
-        detail: r.get("detail"),
-        performed_at: r.get("performed_at"),
-    }
 }
 
 pub struct BrokerAuditRepo {
@@ -63,22 +51,5 @@ impl BrokerAuditRepo {
         .await
         .map_err(dberr("broker audit insert"))?;
         Ok(())
-    }
-
-    /// Recent audit rows for a cluster (newest first, capped at `limit`).
-    pub async fn recent(&self, cluster_id: &Id, limit: i64) -> Result<Vec<BrokerAuditRow>> {
-        let rows = sqlx::query(
-            "SELECT id, cluster_id, user_id, operation, detail, performed_at \
-             FROM broker_write_audit \
-             WHERE cluster_id = ? \
-             ORDER BY performed_at DESC \
-             LIMIT ?",
-        )
-        .bind(cluster_id)
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(dberr("broker audit query"))?;
-        Ok(rows.iter().map(row_to_audit).collect())
     }
 }

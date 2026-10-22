@@ -99,6 +99,13 @@ impl VaultEngine {
                 Ok(v) => e.start_watch(id, PathBuf::from(v.root_path)),
                 Err(_) => false,
             };
+            // `unregister` deletes the row BEFORE its `stop_watch`, so a vault
+            // unregistered inside the window above (its `stop_watch` found
+            // nothing yet) reads as NotFound here: drop the watcher we just
+            // inserted instead of leaking an FSEvents stream for a dead id.
+            if started && e.retired_while_starting(id).await {
+                e.stop_watch(id);
+            }
             e.watch_starting.lock().unwrap().remove(&id);
             if !started {
                 tracing::debug!(vault = id, "vault watcher unavailable; polling freshness");
@@ -305,11 +312,43 @@ impl VaultEngine {
     pub(crate) fn stop_watch(&self, id: i64) {
         self.watches.lock().unwrap().remove(&id);
     }
+
+    /// Whether vault `id` is gone (only a definite NotFound counts: a
+    /// transient DB error keeps the watcher).
+    async fn retired_while_starting(&self, id: i64) -> bool {
+        matches!(
+            self.store().get_vault(id).await,
+            Err(otto_core::Error::NotFound(_))
+        )
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// concurrency-async-4-02: a watcher inserted after `unregister`'s
+    /// `stop_watch` already ran is recognised (row gone) and dropped, while a
+    /// live vault keeps its watcher.
+    #[tokio::test]
+    async fn watcher_started_for_an_unregistered_vault_is_dropped() {
+        let e = Arc::new(VaultEngine::new(otto_state::db::test_pool().await));
+        let dir = tempfile::tempdir().unwrap();
+        let id = e
+            .store()
+            .create_vault("ws", "Race", dir.path().to_str().unwrap(), false)
+            .await
+            .unwrap();
+        assert!(e.start_watch(id, dir.path().to_path_buf()));
+        assert!(!e.retired_while_starting(id).await, "live vault keeps it");
+        // unregister's delete + stop_watch landed inside the start window.
+        e.store().delete_vault(id).await.unwrap();
+        e.stop_watch(id);
+        assert!(e.start_watch(id, dir.path().to_path_buf()));
+        assert!(e.retired_while_starting(id).await);
+        e.stop_watch(id);
+        assert!(!e.watches.lock().unwrap().contains_key(&id));
+    }
 
     #[tokio::test]
     async fn empty_directory_events_are_detected_and_publish_generation() {

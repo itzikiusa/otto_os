@@ -26,7 +26,7 @@ crate extracted from `otto-usage`**, so cost, usage and the chat agree.
 | Mission Control surfaces (needs_you / working / …) | `routes/mission.rs`, `agents/WorkQueue.svelte` | the board that gets sub-tasks |
 | Work graph (`work_items`, `work_artifacts`) | `otto-workgraph`, migration 0083 | artifact registration |
 | Right panel tabs (Git/Files/Activity/Canvas/Info/Browser) | `ui/src/shell/RightPanel.svelte` | new **Tasks** and **Outputs** tabs |
-| Markdown: `marked` + `sanitizeHtml` combined in `ui/src/modules/vault/mdRender.ts` (NOT `lib/md.ts`, which is unsanitized) · sandboxed iframe: `product/MockupViewer.svelte` · diffs: `git/DiffViewer.svelte` (takes `DiffResp`) · windowing: `lib/components/VirtualList.svelte` · per-session persisted keys: `workspace.svelte.ts::winKey` · resizable pane: `shell/RightPanel.svelte:27-44` splitter | rendering |
+| Markdown: `marked` + `sanitizeHtml` combined in `ui/src/lib/render/markdown.ts` (NOT `lib/md.ts`, which is unsanitized) · sandboxed iframe: `product/MockupViewer.svelte` · diffs: `git/DiffViewer.svelte` (takes `DiffResp`) · windowing: `lib/components/VirtualList.svelte` · per-session persisted keys: `workspace.svelte.ts::winKey` · resizable pane: `shell/RightPanel.svelte:27-44` splitter | rendering |
 | Existing transcript readers | `otto-usage` (`parse_claude_line`, `parse_codex_line`, `CursorStore`, `SeenKeys`), `otto-orchestrator/claude_pty.rs` (250 ms JSONL poll), `otto-channels/transcript.rs`, `otto-improve/digest.rs`, `routes/handover.rs`, `review_session.rs` | the new crate is extracted from `otto-usage`'s parsers so cost/usage stay consistent |
 
 ## 2. Transcript corpus facts (full local corpus: 1,816 Claude files / 311,757 records; 889 Codex rollouts)
@@ -404,8 +404,8 @@ one, or a Write's content as a new file. The card has:
 The header's **All changes** (also in ⋯) does the same for every file the
 loaded conversation touched.
 
-**Code** (`codeBlocks.ts`, `chatMarkdown.ts`, `vault/mdRender.ts` `codeLines`,
-`lib/hl.ts`). With `codeLines`, mdRender highlights a fence as ONE block
+**Code** (`codeBlocks.ts`, `chatMarkdown.ts`, `lib/render/markdown.ts` `codeLines`,
+`lib/hl.ts`). With `codeLines`, the markdown renderer highlights a fence as ONE block
 (`highlightLines`: hljs over the whole text, split at newlines with open spans
 closed and re-opened, cached). It emits one block `<span class="cl">` per
 line. An untagged fence is auto-detected. A fence title (```` ```rust

@@ -542,7 +542,9 @@
       {#if pr.reviewers.length > 0}
         <section class="prd-reviewers card">
           <div class="prd-reviewers-title">Reviewers</div>
-          {#each pr.reviewers as reviewer (reviewer.name)}
+          <!-- Keyed by index: display names aren't unique (Bitbucket's "Former user",
+               two colleagues with one full name) and a duplicate key throws. -->
+          {#each pr.reviewers as reviewer, i (i)}
             <div class="reviewer-row">
               {#if reviewer.avatar_url}
                 <img class="reviewer-img" src={reviewer.avatar_url} alt={reviewer.name} />
@@ -563,7 +565,7 @@
       {:else if pr.approved_by.length > 0}
         <section class="prd-reviewers card">
           <div class="prd-reviewers-title">Approvals</div>
-          {#each pr.approved_by as name (name)}
+          {#each pr.approved_by as name, i (i)}
             <div class="reviewer-row">
               <span class="reviewer-avatar">{name.charAt(0).toUpperCase()}</span>
               <span class="reviewer-name">{name}</span>

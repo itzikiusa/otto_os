@@ -147,7 +147,14 @@ async fn convert_to_workflow(
             obj.insert("timezone".into(), json!(task.timezone));
         }
     }
-    let trigger = TriggersRepo::new(ctx.pool.clone())
+    // A converted task must never end up paused with an unscheduled workflow
+    // (its recurring job would silently stop), nor "paused" while it keeps
+    // running (every run delivered twice). So: create the trigger first and
+    // fail loudly; pause only once the trigger exists; on any failure delete
+    // the just-created workflow (its trigger cascades) and leave the task as
+    // it was.
+    let workflows = WorkflowsRepo::new(ctx.pool.clone());
+    let trigger = match TriggersRepo::new(ctx.pool.clone())
         .create(NewWorkflowTrigger {
             workflow_id: wf.id.clone(),
             kind: "schedule".into(),
@@ -155,10 +162,16 @@ async fn convert_to_workflow(
             enabled: task.enabled,
         })
         .await
-        .ok();
+    {
+        Ok(t) => t,
+        Err(e) => {
+            discard_converted_workflow(&workflows, &wf.id).await;
+            return Err(ApiError(e));
+        }
+    };
 
     if req.disable_task {
-        let _ = ctx
+        if let Err(e) = ctx
             .scheduled_tasks
             .update(
                 &task.id,
@@ -167,13 +180,25 @@ async fn convert_to_workflow(
                     ..Default::default()
                 },
             )
-            .await;
+            .await
+        {
+            discard_converted_workflow(&workflows, &wf.id).await;
+            return Err(ApiError(e));
+        }
     }
 
     Ok(Json(ConvertTaskResp {
         workflow_id: wf.id,
-        trigger_id: trigger.map(|t| t.id),
+        trigger_id: Some(trigger.id),
     }))
+}
+
+/// Roll back a half-finished conversion. Best effort: the original error is
+/// what the caller sees; a failed cleanup is only logged.
+async fn discard_converted_workflow(workflows: &WorkflowsRepo, workflow_id: &Id) {
+    if let Err(e) = workflows.delete(workflow_id).await {
+        tracing::warn!(workflow = %workflow_id, "convert to workflow: rollback failed: {e}");
+    }
 }
 
 // --- Request bodies --------------------------------------------------------

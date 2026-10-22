@@ -38,6 +38,7 @@
   import { loadErrorText } from '../../lib/loadError';
   import type { EmailSenderResp, Integration, Workflow } from '../../lib/api/types';
   import { copyText } from '../../lib/clipboard';
+  import { convertOutcome } from './convertOutcome';
 
   let creating = $state(false);
   let editId = $state<string | null>(null);
@@ -703,10 +704,11 @@
       convertedWfId = res.workflow_id;
       wfLoaded = false; // the picker re-fetches and sees the new workflow
       if (disableTask && ws.currentId) void scheduledTasks.loadList(ws.currentId);
-      toasts.success(
-        'Converted to workflow',
-        disableTask ? `Created a workflow from “${t.name}” and paused the task.` : `Created a workflow from “${t.name}”.`,
-      );
+      // A missing trigger_id means the workflow has no schedule: say so
+      // instead of claiming the conversion (and the pause) succeeded.
+      const out = convertOutcome(res, t.name, disableTask);
+      if (out.ok) toasts.success(out.title, out.body);
+      else toasts.error(out.title, out.body);
     } catch (e) {
       toastError(`Couldn’t convert “${t.name}” to a workflow`, e);
     } finally {

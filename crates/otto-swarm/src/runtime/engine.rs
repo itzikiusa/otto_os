@@ -3185,12 +3185,12 @@ async fn plan(
                     &title,
                     &cwd,
                     &prompt,
-                    |t| crate::recruiter::extract_json(t).is_some(),
+                    crate::recruiter::plan_ok,
                     cancel,
                 )
                 .await;
                 if let Some(raw) = raw {
-                    if crate::recruiter::extract_json(&raw).is_some() {
+                    if crate::recruiter::plan_ok(&raw) {
                         candidates.push(raw);
                     }
                 }
@@ -3216,16 +3216,16 @@ async fn plan(
                     &format!("Plan summary: {}", project.name),
                     &cwd,
                     &sum_prompt,
-                    |t| crate::recruiter::extract_json(t).is_some(),
+                    crate::recruiter::plan_ok,
                     cancel,
                 )
                 .await;
-                raw.and_then(|r| crate::recruiter::extract_json(&r))
-                    .or_else(|| crate::recruiter::extract_json(&candidates[0]))
+                raw.and_then(|r| crate::recruiter::extract_plan(&r))
+                    .or_else(|| crate::recruiter::extract_plan(&candidates[0]))
             } else {
                 candidates
                     .first()
-                    .and_then(|c| crate::recruiter::extract_json(c))
+                    .and_then(|c| crate::recruiter::extract_plan(c))
             };
             final_json
         })

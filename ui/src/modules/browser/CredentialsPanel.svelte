@@ -175,7 +175,7 @@
       await copyTextOrThrow(revealed.password);
       toasts.success('Copied', 'Password copied to clipboard.');
     } catch {
-      toasts.error('Couldn’t copy', 'Could not write to clipboard.');
+      toasts.error('Couldn’t copy', 'Select the password and copy it manually.');
     }
   }
 </script>

@@ -479,7 +479,7 @@
       void loadVersions();
       toasts.success(`Restored v${seq} as v${res.version.seq}`);
     } catch (e) {
-      if (e instanceof ApiError && e.status === 409) toasts.error('Couldn’t restore', 'The design changed meanwhile. Reload and try again.');
+      if (e instanceof ApiError && e.status === 409) toasts.error('Couldn’t restore', 'The design changed meanwhile. Refresh and try again.');
       else toastError('Couldn’t restore', e);
     }
   }

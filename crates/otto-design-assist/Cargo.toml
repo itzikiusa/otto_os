@@ -10,6 +10,7 @@ license.workspace = true
 otto-core = { workspace = true }
 otto-state = { workspace = true }
 otto-design = { workspace = true }
+otto-agent-run = { workspace = true }
 otto-improve = { workspace = true }
 otto-memory = { workspace = true }
 otto-sessions = { workspace = true }

@@ -357,7 +357,7 @@
       bodies.set(f.path, body);
     } catch (e) {
       if (my !== gen || isAbortError(e)) return;
-      bodies.set(f.path, { kind: 'error', message: e instanceof Error ? e.message : String(e) });
+      bodies.set(f.path, { kind: 'error', message: loadErrorText(e) });
     }
   }
 

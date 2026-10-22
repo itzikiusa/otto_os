@@ -17,16 +17,15 @@ use otto_core::Id;
 use otto_product::run::{
     extract_json_block, CancelRegistry, LensRunResult, SessionAppearance, MAX_AGENT_ATTEMPTS,
 };
+use otto_sessions::submit::SubmitOpts;
 use tracing::warn;
 
 use crate::agent_run::{run_with_recovery, watch_for_result, FailReason, RunOutcome, WatchStatus};
-use crate::review_session::{bracketed_paste, dispatched, wait_for_tui, PASTE_TO_ENTER};
 use crate::state::ServerCtx;
 
-// Extra settle time for codex (model-loading burst can last >1s after TUI ready).
+// Extra settle time for codex (model-loading burst can last >1s after TUI
+// ready); `SubmitOpts::extra_settle` caps the wait at 5 s.
 const CODEX_EXTRA_SETTLE: Duration = Duration::from_millis(1_500);
-const CODEX_EXTRA_SETTLE_CAP: Duration = Duration::from_secs(5);
-const CODEX_EXTRA_SETTLE_POLL: Duration = Duration::from_millis(100);
 // Verify-and-repaste: how long to wait for any new output after the first paste.
 const REPASTE_IDLE_THRESHOLD: Duration = Duration::from_secs(7);
 // How long to poll waiting for the out file to appear (fast path before repaste).
@@ -152,47 +151,23 @@ async fn run_lens_session(
         cb(&sid);
     }
 
-    // Inject the prompt once the TUI has drawn + settled.
-    if wait_for_tui(&ctx.manager, &sid).await {
-        // For codex, wait an extra settle period so the model-loading burst
-        // finishes before we type. This avoids the "model: loading" dropped-paste
-        // race. Claude's fast path is unchanged (elapsed already >= TUI_SETTLE).
-        if provider == "codex" {
-            let settle_deadline = Instant::now() + CODEX_EXTRA_SETTLE_CAP;
-            loop {
-                let elapsed = ctx
-                    .manager
-                    .live_handle(&sid)
-                    .map(|h| h.last_output_at().elapsed())
-                    .unwrap_or(CODEX_EXTRA_SETTLE);
-                if elapsed >= CODEX_EXTRA_SETTLE {
-                    break;
-                }
-                if Instant::now() >= settle_deadline {
-                    break;
-                }
-                tokio::time::sleep(CODEX_EXTRA_SETTLE_POLL).await;
-            }
-        }
-
-        // Record baseline BEFORE the first paste so we can detect a dropped paste.
-        let pre_paste_time = ctx.manager.live_handle(&sid).map(|h| h.last_output_at());
-
-        // First paste attempt.
-        let _ = ctx.manager.input(&sid, &bracketed_paste(prompt)).await;
-        tokio::time::sleep(PASTE_TO_ENTER).await;
-        let before = ctx.manager.live_handle(&sid).map(|h| h.last_output_at());
-        let _ = ctx.manager.input(&sid, b"\r").await;
-        if !dispatched(&ctx.manager, &sid, before).await {
-            // Initial dispatch confirmation failed — try once more.
-            let _ = ctx.manager.input(&sid, b"\r").await;
-        }
-
+    // Inject the prompt once the TUI has drawn + settled, through the one
+    // locked submit. For codex, also wait an extra settle period so the
+    // model-loading burst finishes before we type — this avoids the "model:
+    // loading" dropped-paste race. Claude's fast path is unchanged.
+    let opts = SubmitOpts {
+        echo_wait: false,
+        extra_settle: (provider == "codex").then_some(CODEX_EXTRA_SETTLE),
+    };
+    // `pre_paste_time` is the baseline taken right before the first paste, so
+    // a dropped paste (no output since) is detectable below.
+    if let Some(pre_paste_time) = ctx.manager.submit_prompt_at(&sid, prompt, opts).await {
         // Verify-and-repaste: poll for up to REPASTE_PHASE_BUDGET. If the out
         // file already appeared we short-circuit; if the session never produced
         // meaningful output since pre_paste_time we re-paste (up to
         // REPASTE_MAX_ATTEMPTS). This is the primary fix for the codex
-        // dropped-paste-while-loading race.
+        // dropped-paste-while-loading race. Each re-paste takes the submit
+        // lock for its own paste → Enter group only, never across this poll.
         let repaste_deadline = Instant::now() + REPASTE_PHASE_BUDGET;
         let mut repaste_attempts: u32 = 0;
         let mut baseline = pre_paste_time;
@@ -238,13 +213,7 @@ async fn run_lens_session(
                     "product_run: session ({provider}) appears to have dropped the prompt \
                      (attempt {repaste_attempts}/{REPASTE_MAX_ATTEMPTS}); re-pasting"
                 );
-                let _ = ctx.manager.input(&sid, &bracketed_paste(prompt)).await;
-                tokio::time::sleep(PASTE_TO_ENTER).await;
-                let before2 = ctx.manager.live_handle(&sid).map(|h| h.last_output_at());
-                let _ = ctx.manager.input(&sid, b"\r").await;
-                if !dispatched(&ctx.manager, &sid, before2).await {
-                    let _ = ctx.manager.input(&sid, b"\r").await;
-                }
+                ctx.manager.resubmit_prompt(&sid, prompt).await;
                 // Update baseline to reflect the repaste moment so subsequent
                 // idle checks measure from here.
                 baseline = ctx.manager.live_handle(&sid).map(|h| h.last_output_at());

@@ -117,8 +117,10 @@
         </button>
       </div>
       {#if sidePane.status === 'loading'}
-        <div class="sp-skeleton" role="status" aria-busy="true" aria-label={`Loading ${label}`}>
-          <Skeleton rows={6} height={28} />
+        <!-- Skeleton is the named status region itself: a busy wrapper would
+             defer its delayed "Loading" text until it unmounts (never spoken). -->
+        <div class="sp-skeleton">
+          <Skeleton rows={6} height={28} {label} />
         </div>
       {:else}
         <div class="sp-error" role="alert">

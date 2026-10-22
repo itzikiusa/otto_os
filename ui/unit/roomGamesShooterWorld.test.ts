@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { applyDamage, damageAt, rollRarity, rollWeapon, WEAPON_IDS, WEAPONS, type Rarity, type WeaponId } from '../src/modules/rooms/games/shooter/weapons.ts';
-import { dryLand, GRID, HALF, harvestOf, mapFor, SEA_SURFACE, terrainHeight, waterLevel, type Box, type Cylinder, type ShooterMap } from '../src/modules/rooms/games/shooter/map.ts';
+import { dryLand, GRID, HALF, harvestOf, inClimb, mapFor, navNext, SEA_SURFACE, terrainHeight, waterLevel, type Box, type Cylinder, type ShooterMap } from '../src/modules/rooms/games/shooter/map.ts';
 import { groundAt, RADIUS, raycast, resolve, STEP, syncFelled, visible, worldFor, type Body } from '../src/modules/rooms/games/shooter/collide.ts';
 import type { ShooterMapId } from '../src/modules/rooms/games/shooter/catalog.ts';
 
@@ -78,18 +78,21 @@ test('rollWeapon: covers the table proportionally', () => {
 
 // ---------------------------------------------------------------- map
 
-test('mapFor: cached, falls back to isle, both maps distinct', () => {
+test('mapFor: cached, falls back to isle, every map distinct', () => {
   assert.equal(mapFor('isle'), mapFor('isle'));
   assert.equal(mapFor('volcano').id, 'isle');
   assert.equal(mapFor('mesa').id, 'mesa');
+  assert.equal(mapFor('deadcity').id, 'deadcity');
+  assert.equal(mapFor('deadcity').theme, 'city');
   assert.notDeepEqual(mapFor('isle').heights.slice(0, 500), mapFor('mesa').heights.slice(0, 500));
+  assert.notDeepEqual(mapFor('deadcity').heights.slice(20000, 20500), mapFor('mesa').heights.slice(20000, 20500));
 });
 
 test('mapFor is deterministic: a fresh module instance generates the identical world', async () => {
   // A query string forces a separate module instance with an empty cache.
   const spec = new URL('../src/modules/rooms/games/shooter/map.ts?fresh=1', import.meta.url).href;
   const other = (await import(spec)) as typeof import('../src/modules/rooms/games/shooter/map.ts');
-  for (const id of ['isle', 'mesa']) {
+  for (const id of ['isle', 'mesa', 'deadcity']) {
     const a = mapFor(id), b = other.mapFor(id);
     assert.notEqual(a, b);
     assert.deepEqual(b.heights, a.heights);
@@ -98,6 +101,9 @@ test('mapFor is deterministic: a fresh module instance generates the identical w
     assert.deepEqual(b.cylinders, a.cylinders);
     assert.deepEqual(b.lootSpots, a.lootSpots);
     assert.deepEqual(b.chests, a.chests);
+    assert.deepEqual(b.openings, a.openings);
+    assert.deepEqual(b.fires, a.fires);
+    assert.deepEqual(b.anchors, a.anchors);
   }
 });
 
@@ -193,7 +199,10 @@ function flatMap(id: string, boxes: Box[], cylinders: Cylinder[], height: (x: nu
   const size = HALF * 2 / GRID + 1;
   const heights = new Float32Array(size * size);
   for (let iz = 0; iz < size; iz++) for (let ix = 0; ix < size; ix++) heights[iz * size + ix] = height(-HALF + ix * GRID, -HALF + iz * GRID);
-  return { id: id as ShooterMapId, theme: 'mesa', heights, size, props: [], boxes, cylinders, pois: [], boxMats: boxes.map(() => 0), trunkProps: cylinders.map(() => -1), blocks: [], waters: [], river: [], lootSpots: [], chests: [], climbs: [], pads: [] };
+  return {
+    id: id as ShooterMapId, theme: 'mesa', heights, size, props: [], boxes, cylinders, pois: [], boxMats: boxes.map(() => 0), trunkProps: cylinders.map(() => -1), blocks: [], waters: [], river: [], lootSpots: [], chests: [], climbs: [], pads: [],
+    openings: [], fires: [], roads: [], anchors: { spawns: [], teamSpawns: [[], []], flags: [], zombies: { cx: 0, cz: 0, r: 0, start: [], spawns: [], barricades: [], buyWalls: [], extraction: { x: 0, y: 0, z: 0, r: 0 } }, nav: { nodes: [], links: [] } },
+  };
 }
 const crate: Box = { minX: 10, minY: -1, minZ: -1, maxX: 12, maxY: 3, maxZ: 1 };
 const trunk: Cylinder = { x: 0, z: 20, r: 1, y0: -1, y1: 7 };
@@ -295,4 +304,180 @@ test('syncFelled: a felled trunk stops blocking rays and bodies until the list b
   // Out-of-range indices are ignored.
   syncFelled(flat, [5, -1]);
   assert.equal(ray().kind, 'prop');
+});
+
+// ---------------------------------------------------------------- Dead City and mode anchors
+
+const MAPS = ['isle', 'mesa', 'deadcity'] as const;
+/** Is a body of radius `r` standing at (x, z) on the terrain inside something it cannot step onto? */
+const blocked = (m: ShooterMap, x: number, z: number, r: number): boolean => {
+  const feet = terrainHeight(m, x, z);
+  return m.boxes.some(b => b.maxY > feet + STEP && b.minY < feet + 1.8 && x > b.minX - r && x < b.maxX + r && z > b.minZ - r && z < b.maxZ + r)
+    || m.cylinders.some(c => Math.hypot(x - c.x, z - c.z) < c.r + r);
+};
+
+test('Dead City: a ruined downtown with every landmark, streets, fires, wrecks and walk-in ruins', () => {
+  const m = mapFor('deadcity');
+  for (const kind of ['tower', 'hospital', 'mall', 'subway', 'checkpoint', 'park', 'town', 'factory'] as const) assert.ok(m.pois.some(p => p.kind === kind), `has a ${kind}`);
+  assert.equal(m.pois.filter(p => p.kind === 'tower').length, 2, 'two collapsed skyscrapers');
+  assert.equal(new Set(m.pois.map(p => p.name)).size, m.pois.length, 'unique names');
+  assert.ok(m.roads.length >= 12 && m.roads.every(r => r.w > 8), `${m.roads.length} streets`);
+  assert.ok(m.blocks.length > 2000, `blocks ${m.blocks.length}`);
+  assert.ok(m.climbs.length >= 15, `walk-ins ${m.climbs.length}`);
+  assert.ok(m.climbs.some(c => c.floors >= 5), 'a tall ruin');
+  assert.ok(m.lootSpots.length >= 120 && m.chests.length >= 15, `loot ${m.lootSpots.length}, chests ${m.chests.length}`);
+  assert.ok(m.fires.length >= 20 && m.fires.every(f => [f.x, f.y, f.z, f.s].every(Number.isFinite) && f.s > 0), `fires ${m.fires.length}`);
+  assert.ok(m.props.filter(p => p.burnt).length >= 20 && m.props.filter(p => p.burnt).every(p => /^car-/.test(p.key)), 'burnt wrecks are cars');
+  assert.ok(m.props.some(p => /tree/.test(p.key)) && m.props.some(p => /grass|bush/.test(p.key)), 'overgrowth');
+  assert.ok(m.pads.length >= 3, 'launch pads');
+  // Every material in the palette shows up somewhere: rubble, charred, sandbags, glass, hazard…
+  for (const mat of [9, 10, 11, 12, 13, 14, 15, 16]) assert.ok(m.blocks.some(b => b.mat === mat), `material ${mat} used`);
+  for (const b of m.blocks) assert.ok(m.boxes.includes(b), 'every block collides');
+  assert.equal(m.boxMats.length, m.boxes.length);
+  for (const p of m.props) assert.ok(Math.abs(p.x) <= HALF && Math.abs(p.z) <= HALF && p.scale > 0);
+  for (const c of m.chests) assert.ok(m.boxes.some(b => c.x > b.minX && c.x < b.maxX && c.z > b.minZ && c.z < b.maxZ), 'chest collider');
+  // Dry streets; the only water is the park fountain.
+  const park = m.pois.find(p => p.kind === 'park')!;
+  assert.equal(m.waters.length, 1);
+  assert.ok(Math.hypot(m.waters[0].x - park.x, m.waters[0].z - park.z) < 1);
+  assert.equal(waterLevel(m, 30, 100), -Infinity);
+  assert.equal(dryLand(m, 30, 100), true);
+  // A rubble berm rings the city.
+  assert.ok(terrainHeight(m, HALF - 6, 0) > 10 && terrainHeight(m, 0, -HALF + 6) > 10, 'berm');
+  assert.ok(Math.abs(terrainHeight(m, 30, 60)) < 1, 'street level');
+});
+
+test('Dead City: the subway is cut below the street with stairs down, and the Spire ramp climbs into storey three', () => {
+  const m = mapFor('deadcity'), world = worldFor(m);
+  const sub = m.pois.find(p => p.kind === 'subway')!;
+  assert.ok(terrainHeight(m, -6, 140) < -4, 'platform level');
+  // Walk the stairs: the floor under the feet never steps more than a step-up.
+  let feet = groundAt(world, -6, 117, 0.2);
+  for (let z = 117; z <= 140; z += 0.3) {
+    const next = groundAt(world, -6, z, feet + 0.05);
+    assert.ok(Math.abs(next - feet) < STEP, `stairs at z ${z.toFixed(1)}: ${feet.toFixed(2)} -> ${next.toFixed(2)}`);
+    feet = next;
+  }
+  assert.ok(feet < -4, `down on the platform (${feet.toFixed(2)})`);
+  assert.ok(m.lootSpots.some(l => l.y !== undefined && l.y < -3) && m.chests.some(c => c.y !== undefined && c.y < -3), 'loot and a chest underground');
+  assert.ok(Math.hypot(sub.x + 6, sub.z - 133) < 1);
+  // The Spire: the stepped ramp's top meets a breach in the stump at storey three.
+  const spire = m.pois.find(p => p.name === 'The Spire')!;
+  const stump = m.climbs.find(c => Math.abs(c.cx - spire.x) < 1 && Math.abs(c.cz - spire.z) < 1)!;
+  assert.ok(stump && stump.floors === 5);
+  const floor3 = stump.base + 3 * 3.6, edge = stump.box.maxX;
+  let y = groundAt(world, 46, stump.cz - 4, 0.3);
+  for (let x = 46; x > edge + 0.3; x -= 0.4) {
+    const next = groundAt(world, x, stump.cz - 4, y + 0.05);
+    assert.ok(next - y < STEP + 1e-6, `ramp at x ${x.toFixed(1)}: ${y.toFixed(2)} -> ${next.toFixed(2)}`);
+    y = next;
+  }
+  assert.ok(Math.abs(y - floor3) < 0.5, `ramp top ${y.toFixed(2)} vs storey three ${floor3.toFixed(2)}`);
+  // ...and the wall there is open from the floor up.
+  assert.equal(raycast(world, edge + 1, floor3 + 1.2, stump.cz - 4, -1, 0, 0, 3).kind, 'none', 'breach');
+});
+
+test('anchors: spread free-for-all spawns, two facing team bases, three flags between them, on open dry ground', () => {
+  for (const id of MAPS) {
+    const m = mapFor(id), a = m.anchors;
+    assert.ok(a.spawns.length >= 16, `${id} spawns ${a.spawns.length}`);
+    for (const s of [...a.spawns, ...a.teamSpawns[0], ...a.teamSpawns[1]]) {
+      assert.ok(!blocked(m, s.x, s.z, 0.8), `${id} spawn at ${s.x.toFixed(1)},${s.z.toFixed(1)} is clear`);
+      assert.ok(dryLand(m, s.x, s.z), `${id} spawn on dry land`);
+      assert.ok(Math.abs(s.y - terrainHeight(m, s.x, s.z)) < 1e-6 && Number.isFinite(s.yaw));
+    }
+    let closest = Infinity;
+    for (let i = 0; i < a.spawns.length; i++) for (let j = i + 1; j < a.spawns.length; j++) closest = Math.min(closest, Math.hypot(a.spawns[i].x - a.spawns[j].x, a.spawns[i].z - a.spawns[j].z));
+    assert.ok(closest > 30, `${id} spawns spread (${closest.toFixed(0)} m)`);
+    assert.equal(a.teamSpawns[0].length, 8); assert.equal(a.teamSpawns[1].length, 8);
+    const ca = centre(a.teamSpawns[0]), cb = centre(a.teamSpawns[1]);
+    assert.ok(Math.hypot(ca.x - cb.x, ca.z - cb.z) > 150, `${id} bases apart`);
+    // Each team faces the other base.
+    for (const s of a.teamSpawns[0]) assert.ok(Math.sin(s.yaw) * (cb.x - s.x) + Math.cos(s.yaw) * (cb.z - s.z) > 0, `${id} team A faces B`);
+    assert.deepEqual(a.flags.map(f => f.name), ['A', 'B', 'C']);
+    for (const f of a.flags) assert.ok(!blocked(m, f.x, f.z, 2) && f.r > 3 && f.label.length > 0, `${id} flag ${f.name} clear`);
+    for (let i = 0; i < 3; i++) for (let j = i + 1; j < 3; j++) assert.ok(Math.hypot(a.flags[i].x - a.flags[j].x, a.flags[i].z - a.flags[j].z) > 40, `${id} flags apart`);
+    // A is nearer the first base than C is.
+    assert.ok(Math.hypot(a.flags[0].x - ca.x, a.flags[0].z - ca.z) < Math.hypot(a.flags[2].x - ca.x, a.flags[2].z - ca.z), `${id} A sits on team A's side`);
+  }
+});
+const centre = (l: { x: number; z: number }[]) => ({ x: l.reduce((s, p) => s + p.x, 0) / l.length, z: l.reduce((s, p) => s + p.z, 0) / l.length });
+
+test('anchors: zombies get boardable windows and doors, wall-buys on outer walls, an extraction pad and a spawn ring', () => {
+  for (const id of MAPS) {
+    const m = mapFor(id), z = m.anchors.zombies, world = worldFor(m);
+    assert.ok(z.r > 30 && Number.isFinite(z.cx + z.cz), `${id} arena`);
+    assert.ok(z.barricades.length >= 8, `${id} barricades ${z.barricades.length}`);
+    for (const b of z.barricades) {
+      assert.ok(Math.hypot(b.x - z.cx, b.z - z.cz) < z.r && b.w > 1 && b.h > 1, `${id} barricade in the arena`);
+      // The hole is open: a ray through its middle along its facing passes, but just beside it there is wall.
+      const fx = Math.sin(b.yaw), fz = Math.cos(b.yaw), y = b.y + b.h / 2;
+      assert.equal(raycast(world, b.x + fx * 0.8, y, b.z + fz * 0.8, -fx, 0, -fz, 1.4).kind, 'none', `${id} opening at ${b.x.toFixed(1)},${b.z.toFixed(1)} is open`);
+      const sx = b.x + fz * (b.w / 2 + 0.4), sz = b.z - fx * (b.w / 2 + 0.4);
+      assert.notEqual(raycast(world, sx + fx * 0.8, y, sz + fz * 0.8, -fx, 0, -fz, 1.4).kind, 'none', `${id} wall beside the opening`);
+    }
+    assert.ok(z.buyWalls.length >= 4, `${id} wall-buys ${z.buyWalls.length}`);
+    assert.equal(new Set(z.buyWalls.map(w => w.weapon)).size, z.buyWalls.length, 'different guns');
+    for (const w of z.buyWalls) {
+      assert.ok(w.weapon in WEAPONS && w.cost >= 500, `${id} ${w.weapon}`);
+      // The chalk outline is on a wall: facing outward, the wall is right behind it.
+      const fx = Math.sin(w.yaw), fz = Math.cos(w.yaw);
+      const hit = raycast(world, w.x + fx * 0.5, w.y, w.z + fz * 0.5, -fx, 0, -fz, 1);
+      assert.ok(hit.kind === 'prop' && hit.t < 0.7, `${id} wall-buy ${w.weapon} on a wall`);
+    }
+    const e = z.extraction;
+    assert.ok(e.r >= 3 && !blocked(m, e.x, e.z, e.r - 1), `${id} extraction pad clear`);
+    assert.equal(z.spawns.length, 16);
+    assert.equal(z.start.length, 4);
+    for (const s of [...z.spawns, ...z.start]) assert.ok(!blocked(m, s.x, s.z, 0.6), `${id} zombie / survivor spawn clear`);
+  }
+});
+
+test('anchors: the street nav graph is connected, its links walkable, and navNext leads across the map', () => {
+  for (const id of MAPS) {
+    const m = mapFor(id), { nodes, links } = m.anchors.nav;
+    assert.ok(nodes.length > 300, `${id} nodes ${nodes.length}`);
+    links.forEach((l, i) => { for (const j of l) assert.ok(links[j].includes(i), 'links both ways'); });
+    // One big connected component.
+    const seen = new Uint8Array(nodes.length), queue = [0];
+    seen[0] = 1;
+    while (queue.length) { const i = queue.pop()!; for (const j of links[i]) if (!seen[j]) { seen[j] = 1; queue.push(j); } }
+    const reach = seen.reduce((s, v) => s + v, 0) / nodes.length;
+    assert.ok(reach > 0.85, `${id}: ${(reach * 100).toFixed(0)}% of nodes connected`);
+    // Every link is walkable (sampled): nothing tall in the way, no water.
+    for (let i = 0; i < nodes.length; i += 3) for (const j of links[i]) {
+      if (j < i) continue;
+      for (let k = 1; k < 8; k++) {
+        const x = nodes[i].x + (nodes[j].x - nodes[i].x) * (k / 8), z = nodes[i].z + (nodes[j].z - nodes[i].z) * (k / 8);
+        assert.ok(!blocked(m, x, z, 0.3) && dryLand(m, x, z), `${id} link ${i}-${j} clear at ${x.toFixed(1)},${z.toFixed(1)}`);
+      }
+    }
+    // Follow navNext from team base A to team base B.
+    const from = centre(m.anchors.teamSpawns[0]), to = centre(m.anchors.teamSpawns[1]);
+    let x = from.x, z = from.z, steps = 0;
+    while (Math.hypot(to.x - x, to.z - z) > 24 && steps < 200) {
+      const next = navNext(m, x, z, to.x, to.z);
+      if (!next) break;
+      assert.ok(Number.isFinite(next[0] + next[1]));
+      [x, z] = [next[0], next[1]];
+      steps++;
+    }
+    assert.ok(Math.hypot(to.x - x, to.z - z) <= 30, `${id}: reached the far base in ${steps} hops (${Math.hypot(to.x - x, to.z - z).toFixed(0)} m short)`);
+    assert.equal(navNext(m, to.x, to.z, to.x, to.z), null, 'no hop needed at the goal');
+    assert.equal(navNext({ ...m, anchors: { ...m.anchors, nav: { nodes: [], links: [] } } }, 0, 0, 100, 100), null, 'no graph, no route');
+  }
+});
+
+test('openings: every ground-floor door and window of a walk-in is recorded, facing out of its building', () => {
+  for (const id of MAPS) {
+    const m = mapFor(id);
+    assert.ok(m.openings.length >= m.climbs.length * 6, `${id} openings ${m.openings.length}`);
+    assert.ok(m.openings.some(o => o.door) && m.openings.some(o => !o.door));
+    for (const o of m.openings) {
+      const c = m.climbs.find(k => inClimb(k, o.x, o.z, 0.6));
+      if (!c) continue; // factory halls are not climbs
+      // One step outward leaves the footprint.
+      assert.ok(!inClimb(c, o.x + Math.sin(o.yaw) * 1.2, o.z + Math.cos(o.yaw) * 1.2), `${id} opening at ${o.x.toFixed(1)},${o.z.toFixed(1)} faces out`);
+    }
+  }
 });

@@ -591,23 +591,11 @@ impl otto_insights::InsightsCtx for ServerCtx {
         ServerCtx::resolve_provider(self, ws, requested).await
     }
     async fn submit_prompt(&self, sid: &otto_core::Id, prompt: &str) -> bool {
-        if !crate::review_session::wait_for_tui(&self.manager, sid).await {
-            return false;
-        }
-        let _ = self
-            .manager
-            .input(sid, &crate::review_session::bracketed_paste(prompt))
-            .await;
-        tokio::time::sleep(crate::review_session::PASTE_TO_ENTER).await;
-        // Same swallowed-Enter guard as the assistant path (S4-19c): a TUI
-        // still digesting the paste can eat the first Enter, leaving the run
-        // idle behind a "generating" banner for the whole timeout.
-        let before = self.manager.live_handle(sid).map(|h| h.last_output_at());
-        let _ = self.manager.input(sid, b"\r").await;
-        if !crate::review_session::dispatched(&self.manager, sid, before).await {
-            let _ = self.manager.input(sid, b"\r").await;
-        }
-        true
+        // The one locked submit (paste → Enter → re-Enter under the session's
+        // submit lock, re-Enter covering a TUI that ate the first Enter).
+        self.manager
+            .submit_prompt(sid, prompt, otto_sessions::submit::SubmitOpts::default())
+            .await
     }
 }
 

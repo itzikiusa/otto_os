@@ -15,7 +15,6 @@ mod mcp_tools;
 mod profile_lock;
 #[cfg(feature = "embed-ui")]
 mod ui_assets;
-mod usage_tailer;
 
 use std::future::IntoFuture;
 use std::process::ExitCode;
@@ -519,7 +518,7 @@ fn post_listen_housekeeping(data_dir: std::path::PathBuf) {
 /// Import local CLI usage through the durable source checkpoint/outbox.
 /// Claude (including custom account roots), Codex, Grok, and Antigravity keep
 /// their source timestamps; newly supported roots backfill historical usage.
-fn start_usage_tailer(cfg: &Config, ctx: &ServerCtx) -> usage_tailer::UsageTailerHandle {
+fn start_usage_tailer(cfg: &Config, ctx: &ServerCtx) -> otto_usage::tailer::UsageTailerHandle {
     // An isolated E2E daemon must not import the developer's real provider
     // history. Besides privacy, that startup scan distorts load baselines.
     let transcript_home = if std::env::var("OTTO_E2E").as_deref() == Ok("1") {
@@ -527,7 +526,7 @@ fn start_usage_tailer(cfg: &Config, ctx: &ServerCtx) -> usage_tailer::UsageTaile
     } else {
         dirs::home_dir().unwrap_or_else(|| cfg.data_dir.clone())
     };
-    let tailer = usage_tailer::UsageTailer::new(
+    let tailer = otto_usage::tailer::UsageTailer::new(
         Arc::clone(&ctx.usage),
         ctx.pool.clone(),
         cfg.data_dir.clone(),

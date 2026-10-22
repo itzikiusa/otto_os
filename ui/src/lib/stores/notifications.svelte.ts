@@ -20,6 +20,7 @@ import { router } from '../router.svelte';
 import { parseNoticeRoute } from '../noticeRoute';
 import { isEmbedded } from '../desktop';
 import { toastError } from '../toastError';
+import { loadErrorText } from '../loadError';
 import { confirmer } from '../confirm.svelte';
 
 /** Most ids one bulk read / dismiss call may carry (daemon `BULK_MAX`). */
@@ -329,7 +330,7 @@ class NotificationStore {
       if (e !== STALE && epoch === this.identityEpoch) {
         // Backend may not be ready yet (the events WS reloads on connect) — keep
         // whatever we had and surface the failure so the bell can offer Retry.
-        this.error = (e instanceof Error ? e.message : String(e)) || 'Request failed';
+        this.error = loadErrorText(e);
         this.settled = true;
       }
     } finally {

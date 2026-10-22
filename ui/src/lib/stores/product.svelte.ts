@@ -100,6 +100,22 @@ export function toBase64(data: string | Uint8Array): string {
   return btoa(bin);
 }
 
+/** The workspace a story's agent routes live under (api-contracts-4-01): the
+ *  story's own creating `workspace_id`, NOT the current workspace. The list is
+ *  a global library, but `analyze` / `rewrite` / `testcases/generate` /
+ *  `plan/generate` / `plan` / `inject-session` 404 "story not found in
+ *  workspace" for any other `{ws}`. Falls back to `fallback` (the current
+ *  workspace) only when the story is not loaded. Pure — unit-tested. */
+export function storyWorkspaceId(
+  id: string,
+  stories: readonly Pick<ProductStory, 'id' | 'workspace_id'>[],
+  detail: Pick<ProductStory, 'id' | 'workspace_id'> | null | undefined,
+  fallback: string,
+): string {
+  if (detail && detail.id === id && detail.workspace_id) return detail.workspace_id;
+  return stories.find((s) => s.id === id)?.workspace_id || fallback;
+}
+
 /** Group a FLAT story list into the epic tree (design §3.2): children by
  *  `parent_id` → `folder`. Top-level rows keep list order; a child whose parent
  *  is missing from `stories` (tag-filtered out / not loaded) is shown at top
@@ -211,6 +227,13 @@ class ProductStore {
     const id = ws.currentId;
     if (!id) throw new Error(NO_WORKSPACE);
     return id;
+  }
+
+  /** The selected story's id and the workspace its agent routes live under
+   *  (`storyWorkspaceId`). Throws when no story is selected. */
+  private storyScope(): { wsId: string; id: string } {
+    const id = this.storyId();
+    return { id, wsId: storyWorkspaceId(id, this.stories, this.detail?.story, this.wsId()) };
   }
 
   /** Return the currently selected story id, or throw if none is selected. */
@@ -654,8 +677,7 @@ class ProductStore {
 
   async analyze(req: AnalyzeReq): Promise<ProductAnalysis> {
     const current = this.owner();
-    const wsId = this.wsId();
-    const id = this.storyId();
+    const { wsId, id } = this.storyScope();
     const analysis = await api.post<ProductAnalysis>(
       `/workspaces/${wsId}/product/stories/${id}/analyze`,
       req,
@@ -783,31 +805,26 @@ class ProductStore {
 
   // ── Rewrite ────────────────────────────────────────────────────────────────
 
-  async rewrite(req: RewriteReq): Promise<ProductStoryVersion> {
+  /** Start a rewrite. The route answers 202 with no body (the new version
+   *  appears in the detail once the run finishes), so this resolves `void`. */
+  async rewrite(req: RewriteReq): Promise<void> {
     const current = this.owner();
-    const wsId = this.wsId();
-    const id = this.storyId();
-    const version = await api.post<ProductStoryVersion>(
-      `/workspaces/${wsId}/product/stories/${id}/rewrite`,
-      req,
-    );
+    const { wsId, id } = this.storyScope();
+    await api.post(`/workspaces/${wsId}/product/stories/${id}/rewrite`, req);
     if (current()) await this.loadDetail();
-    return version;
   }
 
   // ── Plan / Tasks ─────────────────────────────────────────────────────────────
 
   /** Trigger plan generation (202; PlanTab polls loadVersions for the new plan). */
   async generatePlan(req: GeneratePlanReq): Promise<void> {
-    const wsId = this.wsId();
-    const id = this.storyId();
+    const { wsId, id } = this.storyScope();
     await api.post(`/workspaces/${wsId}/product/stories/${id}/plan/generate`, req);
   }
 
   /** Persist PO checkbox toggles in place (no new version). */
   async savePlan(body_md: string): Promise<void> {
-    const wsId = this.wsId();
-    const id = this.storyId();
+    const { wsId, id } = this.storyScope();
     await api.post(`/workspaces/${wsId}/product/stories/${id}/plan`, { body_md });
   }
 
@@ -1195,8 +1212,7 @@ class ProductStore {
 
   async generateTests(req: GenerateTestsReq): Promise<void> {
     const current = this.owner();
-    const wsId = this.wsId();
-    const id = this.storyId();
+    const { wsId, id } = this.storyScope();
     await api.post(`/workspaces/${wsId}/product/stories/${id}/testcases/generate`, req);
     if (current()) await this.loadTestcases();
   }
@@ -1259,8 +1275,7 @@ class ProductStore {
   }
 
   async injectSession(req: InjectSessionReq): Promise<Session> {
-    const wsId = this.wsId();
-    const id = this.storyId();
+    const { wsId, id } = this.storyScope();
     return api.post<Session>(`/workspaces/${wsId}/product/stories/${id}/inject-session`, req);
   }
 

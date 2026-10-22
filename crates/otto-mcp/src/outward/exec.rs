@@ -24,20 +24,6 @@ pub fn ui_error_envelope(code: &str, message: &str) -> Value {
            "reason":message,"content":{"error":message,"code":code}})
 }
 
-pub fn is_read_only_sql(stmt: &str) -> bool {
-    let s = stmt.trim().trim_end_matches(';').trim();
-    if s.contains(';') {
-        return false; // single statement only — no batch tricks
-    }
-    let up = s.to_uppercase();
-    up.starts_with("SELECT")
-        || up.starts_with("SHOW")
-        || up.starts_with("DESCRIBE")
-        || up.starts_with("DESC ")
-        || up.starts_with("EXPLAIN")
-        || up.starts_with("WITH")
-}
-
 /// Wall-clock budget of one governed self-call. The flat 30 s cut off calls
 /// whose route legitimately runs longer: a saved API request may itself wait
 /// up to its `timeout_ms` (≤ 60 s), an automation runs several, pod logs shell
@@ -275,6 +261,131 @@ impl SelfCall {
     }
 }
 
+/// The Jira / Linear issue tools of [`route_for`] (split out to keep it under
+/// the function-size ratchet).
+fn issue_route(tool: &str, args: &Value) -> Result<SelfCall, Error> {
+    Ok(match tool {
+        "search_issues" => {
+            let acc = arg_str(args, "account_id")?;
+            let mut path = format!("/api/v1/issue/search?account_id={}", seg(&acc));
+            if let Some(q) = args.get("query").and_then(Value::as_str) {
+                path.push_str(&format!("&q={}", seg(q)));
+            }
+            if let Some(p) = args
+                .get("project")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
+                path.push_str(&format!("&project={}", seg(p)));
+            }
+            if let Some(j) = args
+                .get("jql")
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+            {
+                path.push_str(&format!("&jql={}", seg(j)));
+            }
+            // Linear IssueFilter: an object, or the same JSON already as text.
+            let filter = match args.get("filter") {
+                Some(Value::Object(_)) => args.get("filter").map(Value::to_string),
+                Some(Value::String(f)) if !f.trim().is_empty() => Some(f.clone()),
+                _ => None,
+            };
+            if let Some(f) = filter {
+                path.push_str(&format!("&filter={}", seg(&f)));
+            }
+            if let Some(n) = args.get("start_at").and_then(u64_lenient) {
+                path.push_str(&format!("&start_at={n}"));
+            }
+            if let Some(n) = args.get("limit").and_then(u64_lenient) {
+                path.push_str(&format!("&limit={n}"));
+            }
+            SelfCall::get(path)
+        }
+        "list_issue_transitions" => {
+            let acc = arg_str(args, "account_id")?;
+            let key = arg_str(args, "key")?;
+            SelfCall::get(format!(
+                "/api/v1/issue/{}/{}/transitions",
+                seg(&acc),
+                seg(&key)
+            ))
+        }
+        "list_issue_projects" => {
+            let acc = arg_str(args, "account_id")?;
+            SelfCall::get(format!(
+                "/api/v1/issue/projects?account_id={}&meta=1",
+                seg(&acc)
+            ))
+        }
+        "list_issue_types" => {
+            let acc = arg_str(args, "account_id")?;
+            let project = arg_str(args, "project_key")?;
+            SelfCall::get(format!(
+                "/api/v1/issue/{}/{}/issue-types",
+                seg(&acc),
+                seg(&project)
+            ))
+        }
+        "get_issue" => {
+            let acc = arg_str(args, "account_id")?;
+            let key = arg_str(args, "key")?;
+            SelfCall::get(format!("/api/v1/issue/{}/{}/full", seg(&acc), seg(&key)))
+        }
+        "comment_issue" => {
+            let acc = arg_str(args, "account_id")?;
+            let key = arg_str(args, "key")?;
+            let body = json!({ "body": arg_str(args, "body")? });
+            SelfCall::post(
+                format!("/api/v1/issue/{}/{}/comment", seg(&acc), seg(&key)),
+                body,
+            )
+        }
+        "create_issue" => {
+            let acc = arg_str(args, "account_id")?;
+            let mut body = json!({
+                "project_key": arg_str(args, "project_key")?,
+                "issue_type": arg_str(args, "issue_type")?,
+                "summary": arg_str(args, "summary")?,
+            });
+            for k in ["description", "priority", "parent", "epic"] {
+                if let Some(v) = args
+                    .get(k)
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.trim().is_empty())
+                {
+                    body[k] = json!(v);
+                }
+            }
+            if let Some(labels) = args
+                .get("labels")
+                .and_then(Value::as_array)
+                .filter(|a| !a.is_empty())
+            {
+                body["labels"] = json!(labels);
+            }
+            if let Some(fields) = args
+                .get("fields")
+                .and_then(Value::as_object)
+                .filter(|o| !o.is_empty())
+            {
+                body["fields"] = json!(fields);
+            }
+            SelfCall::post(format!("/api/v1/issue/{}/issues", seg(&acc)), body)
+        }
+        "transition_issue" => {
+            let acc = arg_str(args, "account_id")?;
+            let key = arg_str(args, "key")?;
+            let body = json!({ "transition_id": arg_str(args, "transition_id")? });
+            SelfCall::post(
+                format!("/api/v1/issue/{}/{}/transitions", seg(&acc), seg(&key)),
+                body,
+            )
+        }
+        other => return Err(Error::Invalid(format!("unknown otto tool '{other}'"))),
+    })
+}
+
 /// Map an outward tool + its (validated) arguments to the exact self-call against
 /// the daemon's own REST API. Pure: no I/O, no token — every tool reuses its
 /// endpoint's native RBAC when the call is later executed as the user. `ask_human_approval`
@@ -319,18 +430,14 @@ pub fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
         "query_db_readonly" => {
             let conn = arg_str(args, "connection_id")?;
             let stmt = arg_str(args, "statement")?;
-            // F5: classify ourselves; reject writes/unknown/multi-statement
-            // REGARDLESS of the connection's write-guard flag.
-            if !is_read_only_sql(&stmt) {
-                return Err(Error::Forbidden(
-                    "otto.query_db_readonly only permits a single read-only statement (SELECT/SHOW/DESCRIBE/EXPLAIN/WITH)".into(),
-                ));
-            }
-            // Routed through `/db/mcp-query` (not `/db/query`): that path adds the
-            // engine-specific read-only classifier AND executes inside the
-            // engine's read-only mode (read-only transaction / ClickHouse
-            // `readonly`), with cell masking forced — so "read-only" holds even
-            // if a statement slips past the classifier above.
+            // Routed through `/db/mcp-query` (not `/db/query`): that route's
+            // engine-specific classifier (`otto_dbviewer::ensure_read_only`)
+            // is the ONE read-only gate — it refuses writes/DDL/multi-statement
+            // batches on every connection, whatever its write-guard flag, and
+            // then executes inside the engine's read-only mode (read-only
+            // transaction / ClickHouse `readonly`) with cell masking forced.
+            // A second, cruder prefix check here used to refuse reads the
+            // explorer accepts (a leading comment, a `;` inside a literal).
             let body = json!({
                 "statement": stmt,
                 "max_rows": args.get("max_rows").and_then(u64_lenient).unwrap_or(200),
@@ -754,57 +861,14 @@ pub fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
             )
         }
         // ---- Issues (Jira / Confluence) ----
-        "search_issues" => {
-            let acc = arg_str(args, "account_id")?;
-            let mut path = format!("/api/v1/issue/search?account_id={}", seg(&acc));
-            if let Some(q) = args.get("query").and_then(Value::as_str) {
-                path.push_str(&format!("&q={}", seg(q)));
-            }
-            if let Some(p) = args
-                .get("project")
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty())
-            {
-                path.push_str(&format!("&project={}", seg(p)));
-            }
-            if let Some(j) = args
-                .get("jql")
-                .and_then(Value::as_str)
-                .filter(|s| !s.trim().is_empty())
-            {
-                path.push_str(&format!("&jql={}", seg(j)));
-            }
-            // Linear IssueFilter: an object, or the same JSON already as text.
-            let filter = match args.get("filter") {
-                Some(Value::Object(_)) => args.get("filter").map(Value::to_string),
-                Some(Value::String(f)) if !f.trim().is_empty() => Some(f.clone()),
-                _ => None,
-            };
-            if let Some(f) = filter {
-                path.push_str(&format!("&filter={}", seg(&f)));
-            }
-            if let Some(n) = args.get("start_at").and_then(u64_lenient) {
-                path.push_str(&format!("&start_at={n}"));
-            }
-            if let Some(n) = args.get("limit").and_then(u64_lenient) {
-                path.push_str(&format!("&limit={n}"));
-            }
-            SelfCall::get(path)
-        }
-        "list_issue_transitions" => {
-            let acc = arg_str(args, "account_id")?;
-            let key = arg_str(args, "key")?;
-            SelfCall::get(format!(
-                "/api/v1/issue/{}/{}/transitions",
-                seg(&acc),
-                seg(&key)
-            ))
-        }
-        "get_issue" => {
-            let acc = arg_str(args, "account_id")?;
-            let key = arg_str(args, "key")?;
-            SelfCall::get(format!("/api/v1/issue/{}/{}/full", seg(&acc), seg(&key)))
-        }
+        "search_issues"
+        | "list_issue_transitions"
+        | "list_issue_projects"
+        | "list_issue_types"
+        | "get_issue"
+        | "comment_issue"
+        | "create_issue"
+        | "transition_issue" => issue_route(tool, args)?,
         "search_confluence" => {
             let acc = arg_str(args, "account_id")?;
             let mut path = format!("/api/v1/issue/confluence/search?account_id={}", seg(&acc));
@@ -935,24 +999,6 @@ pub fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
                     seg(&pid),
                     seg(&acc)
                 ),
-                body,
-            )
-        }
-        "comment_issue" => {
-            let acc = arg_str(args, "account_id")?;
-            let key = arg_str(args, "key")?;
-            let body = json!({ "body": arg_str(args, "body")? });
-            SelfCall::post(
-                format!("/api/v1/issue/{}/{}/comment", seg(&acc), seg(&key)),
-                body,
-            )
-        }
-        "transition_issue" => {
-            let acc = arg_str(args, "account_id")?;
-            let key = arg_str(args, "key")?;
-            let body = json!({ "transition_id": arg_str(args, "transition_id")? });
-            SelfCall::post(
-                format!("/api/v1/issue/{}/{}/transitions", seg(&acc), seg(&key)),
                 body,
             )
         }
@@ -2067,10 +2113,16 @@ pub async fn self_get_text(
         .await
         .map_err(|e| Error::Upstream(format!("self-call: {e}")))?;
     let status = resp.status();
-    let text = resp.text().await.unwrap_or_default();
     if !status.is_success() {
+        let text = resp.text().await.unwrap_or_default();
         return Err(Error::Upstream(self_call_error(status, &text)));
     }
+    // As in `parse_self`: a 2xx whose body broke off mid-read is NOT "the pod
+    // printed nothing" — an agent investigating an incident would trust it.
+    let text = resp
+        .text()
+        .await
+        .map_err(|e| Error::Upstream(format!("{status}: reading the response failed: {e}")))?;
     let n = text.chars().count();
     let (text, truncated) = if n > MAX_TEXT_CHARS {
         let start = text

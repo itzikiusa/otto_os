@@ -298,10 +298,12 @@
     };
   }
   // Parses a standard connection URI (mysql://, redis://, mongodb://, etc.) and
-  // fills the form fields in-place. Unrecognized schemes are ignored with a toast.
-  function parseDsn(raw: string): void {
+  // fills the form fields in-place. Returns the inline field error for a URI it
+  // can't read (unparseable, unknown scheme) — the caller keeps the pasted
+  // value next to it — or null once the fields are filled.
+  function parseDsn(raw: string): string | null {
     const s = raw.trim();
-    if (!s) return;
+    if (!s) return null;
 
     let url: URL;
     try {
@@ -309,13 +311,9 @@
     } catch {
       // The usual cause with credentials: an unencoded `/ ? # @` in the
       // password cuts the authority short (`app:pa/ss@h` → port `pa`).
-      toasts.error(
-        'Invalid URI',
-        s.includes('@')
-          ? 'Could not parse as a connection URL — percent-encode / ? # @ in the password (e.g. %2F for /).'
-          : 'Could not parse as a connection URL',
-      );
-      return;
+      return s.includes('@')
+        ? 'Couldn’t read this connection URL. Percent-encode / ? # @ in the password (for example %2F for /).'
+        : 'Couldn’t read this connection URL. Start it with a scheme, for example mysql://host:3306/db.';
     }
 
     const scheme = url.protocol.replace(':', '').toLowerCase();
@@ -336,8 +334,7 @@
     };
     const mapped = kindMap[scheme];
     if (!mapped) {
-      toasts.error('Unknown scheme', `Unrecognized URI scheme: ${scheme}`);
-      return;
+      return `Couldn’t read this connection URL: “${scheme}://” isn’t a scheme Otto knows. Use mysql, postgres, redis, mongodb, clickhouse or ssh.`;
     }
 
     setKind(mapped);
@@ -375,15 +372,26 @@
     }
 
     toasts.success('URI parsed', `${kindLabels[mapped]} — fields populated`);
+    return null;
   }
 
   let showDsnInput = $state(false);
   let dsnValue = $state('');
+  /** Inline error for the pasted URI (validation is inline, never a toast). */
+  let dsnError: string | null = $state(null);
 
+  /** Clear and close only on success; on an error the field stays open with
+   *  the pasted value beside the reason, so it can be fixed in place. */
   function commitDsn(): void {
-    parseDsn(dsnValue);
+    dsnError = parseDsn(dsnValue);
+    if (dsnError) return;
     dsnValue = '';
     showDsnInput = false;
+  }
+  function cancelDsn(): void {
+    showDsnInput = false;
+    dsnValue = '';
+    dsnError = null;
   }
 
   // ── Test-before-save ────────────────────────────────────────────────────
@@ -495,14 +503,18 @@
           bind:value={dsnValue}
           placeholder="mysql://user:pass@host:3306/db"
           spellcheck="false"
+          aria-invalid={dsnError ? 'true' : undefined}
+          aria-describedby={dsnError ? 'dsn-err' : undefined}
+          oninput={() => (dsnError = null)}
           onkeydown={(e) => {
             if (e.key === 'Enter') commitDsn();
-            else if (e.key === 'Escape') { showDsnInput = false; dsnValue = ''; }
+            else if (e.key === 'Escape') cancelDsn();
           }}
         />
         <button class="btn small primary" onclick={commitDsn}>Import</button>
-        <button class="btn small" onclick={() => { showDsnInput = false; dsnValue = ''; }}>Cancel</button>
+        <button class="btn small" onclick={cancelDsn}>Cancel</button>
       </div>
+      {#if dsnError}<p class="field-error" id="dsn-err" role="alert">{dsnError}</p>{/if}
     {:else}
       <div class="dsn-hint">
         <button class="btn small ghost dsn-btn" onclick={() => (showDsnInput = true)}>
@@ -1087,6 +1099,11 @@
     min-width: 0;
   }
   /* DSN / URI paste import */
+  .field-error {
+    margin: -4px 0 8px;
+    font-size: var(--fs-xs);
+    color: var(--danger);
+  }
   .dsn-hint {
     margin-bottom: 6px;
   }

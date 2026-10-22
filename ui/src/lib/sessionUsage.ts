@@ -1,7 +1,7 @@
 // Per-session tokens + cost (review A5) — the PURE half (no runes) so
 // node:test can cover the formatting. Tokens lead, cost follows: the token
 // count is what the user controls; cost is a list-price estimate.
-import { formatUsd } from './metric-format.ts';
+import { formatCount, formatUsd } from './metric-format.ts';
 
 /** Mirrors `SessionTotals` (types.ts / otto-usage). */
 export interface SessionTotalsLike {
@@ -9,22 +9,11 @@ export interface SessionTotalsLike {
   cost_usd: number;
 }
 
-/** 950 → "950", 12_300 → "12.3K", 2_100_000 → "2.1M". */
+/** 950 → "950", 12_300 → "12.3k", 2_100_000 → "2.1M" — the shared
+ *  `formatCount`, so the sidebar chip and the conversation view read the same
+ *  token count the same way; only the "no usage" floor is local. */
 export function formatTokens(n: number): string {
-  if (!Number.isFinite(n) || n < 0) return '0';
-  if (n < 1000) return String(Math.round(n));
-  const units: [number, string][] = [
-    [1e9, 'B'],
-    [1e6, 'M'],
-    [1e3, 'K'],
-  ];
-  for (const [v, u] of units) {
-    if (n >= v) {
-      const x = n / v;
-      return `${x >= 100 ? Math.round(x) : x.toFixed(1).replace(/\.0$/, '')}${u}`;
-    }
-  }
-  return String(n);
+  return !Number.isFinite(n) || n < 0 ? '0' : formatCount(n);
 }
 
 /** $0.004 → "<$0.01", 1.239 → "$1.24", 1234 → "$1,234". */

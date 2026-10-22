@@ -9,7 +9,7 @@ use std::future::Future;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use otto_automation::agent::{self as au, RoleTurn};
 use otto_automation::goal_loop::GoalLoopRegistry;
@@ -128,22 +128,6 @@ impl AutomationCtx for ServerCtx {
             |_| async {},
         )
         .await
-    }
-
-    async fn wait_for_tui(&self, sid: &Id) -> bool {
-        crate::review_session::wait_for_tui(&self.manager, sid).await
-    }
-
-    async fn dispatched(&self, sid: &Id, before: Option<Instant>) -> bool {
-        crate::review_session::dispatched(&self.manager, sid, before).await
-    }
-
-    fn bracketed_paste(&self, text: &str) -> Vec<u8> {
-        crate::review_session::bracketed_paste(text)
-    }
-
-    fn paste_to_enter(&self) -> Duration {
-        crate::review_session::PASTE_TO_ENTER
     }
 
     async fn run_role_turn<C, P, PF>(
@@ -291,6 +275,94 @@ mod handoff_tests {
     use otto_core::workflows::{RunStatus, WorkflowGraph};
     use otto_state::{NewScheduledTask, WorkflowsRepo};
     use serde_json::json;
+
+    /// test-quality-4-06: the goal loop's final status write retries through
+    /// a transient failure (a `BEFORE UPDATE OF status` trigger raising ABORT,
+    /// dropped after 300 ms) and lands; a persistent failure returns `Err`
+    /// and raises exactly one error Notice, leaving the stored status alone.
+    #[tokio::test]
+    async fn goal_loop_settle_status_retries_then_reports_a_persistent_failure() {
+        use otto_core::domain::GoalLoopStatus;
+        use otto_core::event::Event;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let pool = mem_pool().await;
+        seed_workspace(&pool, "gl-ws").await;
+        sqlx::query("INSERT INTO users(id,username,password_hash,display_name,is_root,created_at) VALUES('u','u','x','U',0,?)")
+            .bind(chrono::Utc::now().to_rfc3339())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let ctx = test_ctx(&pool, tmp.path().to_path_buf()).await;
+        let repo = ctx.goal_loops_repo();
+        let lp = repo
+            .create(otto_state::NewGoalLoop {
+                workspace_id: "gl-ws".into(),
+                name: "L".into(),
+                repo_path: tmp.path().to_string_lossy().into_owned(),
+                definition: serde_json::from_value(
+                    json!({"title": "t", "acceptance_criteria": []}),
+                )
+                .unwrap(),
+                limits: Default::default(),
+                config: Default::default(),
+                created_by: "u".into(),
+            })
+            .await
+            .unwrap();
+        const BUSY: &str = "CREATE TRIGGER gl_busy BEFORE UPDATE OF status ON goal_loops \
+                            BEGIN SELECT RAISE(ABORT, 'busy'); END";
+        sqlx::query(BUSY).execute(&pool).await.unwrap();
+        let release = tokio::spawn({
+            let pool = pool.clone();
+            async move {
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                sqlx::query("DROP TRIGGER gl_busy")
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            }
+        });
+        otto_automation::goal_loop::settle_status(
+            &ctx,
+            &lp.id,
+            GoalLoopStatus::Succeeded,
+            Some("done"),
+            None,
+        )
+        .await
+        .expect("a transient failure is retried");
+        release.await.unwrap();
+        assert_eq!(
+            repo.get(&lp.id).await.unwrap().status,
+            GoalLoopStatus::Succeeded
+        );
+
+        // Persistent: every attempt fails.
+        sqlx::query(BUSY).execute(&pool).await.unwrap();
+        let mut events = ctx.events().subscribe();
+        let res = otto_automation::goal_loop::settle_status(
+            &ctx,
+            &lp.id,
+            GoalLoopStatus::Failed,
+            None,
+            Some("boom"),
+        )
+        .await;
+        assert!(res.is_err());
+        let mut notices = 0;
+        while let Ok(ev) = events.try_recv() {
+            if let Event::Notice { level, title, .. } = ev {
+                if level == "error" && title.contains("goal loop") {
+                    notices += 1;
+                }
+            }
+        }
+        assert_eq!(notices, 1, "one error Notice for the lost result");
+        assert_eq!(
+            repo.get(&lp.id).await.unwrap().status,
+            GoalLoopStatus::Succeeded
+        );
+    }
 
     /// S3-303: a daemon restart while a workflow-kind scheduled run waits on
     /// its workflow must not record a false "interrupted" failure — boot

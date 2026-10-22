@@ -2,11 +2,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { clamp, Rng, wrapAngle } from '../src/modules/rooms/games/common/math.ts';
 import {
-  advance, circ, CRUSHER_HALF, drawLift, F_RAILS, F_UNDER, inLaunchZone, nearest, newNear, obstacleAt, pointAt, progressOf, ROLLER_RADIUS, RUN_UP, sampleAt, TRACK_IDS, trackFor, type TrackId,
+  advance, circ, CRUSHER_HALF, drawLift, F_RAILS, FORK_ZONE, F_UNDER, inLaunchZone, nearest, newNear, obstacleAt, pointAt, progressOf, ROLLER_RADIUS, RUN_UP, sampleAt, TRACK_IDS, trackFor, type TrackId,
 } from '../src/modules/rooms/games/kart/tracks.ts';
 import {
-  COIN_LOSS, COIN_RESPAWN, COUNTDOWN_SECONDS, createRace, DRIFT_LEVELS, idleInput, INTRO_SECONDS, itemBoxes, LAPS, MAX_COINS, MAX_RACERS, pickRoute, rank, sanitize, spinOut, standings, STEP, stepRace, tick,
-  TURBO_SECONDS, type Difficulty, type KartEventType, type KartInput, type KartSeat, type KartState, type Racer,
+  BURNOUT_SECONDS, COIN_LOSS, COIN_RESPAWN, COUNTDOWN_SECONDS, createRace, DRIFT_LEVELS, GHOST_SECONDS, idleInput, INTRO_SECONDS, itemBoxes, LAPS, MAX_COINS, MAX_RACERS, pickRoute, rank, RESPAWN_BOOST,
+  sanitize, spinOut, standings, STEP, stepRace, STUCK_SECONDS, tick, TURBO_POWER, TURBO_SECONDS, type Difficulty, type KartEventType, type KartInput, type KartSeat, type KartState, type Racer,
 } from '../src/modules/rooms/games/kart/sim.ts';
 import { cpuInput } from '../src/modules/rooms/games/kart/cpu.ts';
 import { kartSeats } from '../src/modules/rooms/games/setup.ts';
@@ -116,27 +116,41 @@ test('stepRace uses fixed steps and ignores bad dt', () => {
   assert.ok(s.clock <= 9 * STEP + 1e-9);
 });
 
-test('rocket start: throttle held from around "1" boosts at GO; early, late or no throttle does not', () => {
-  const s = createRace('meadow', [human(0), human(1), human(2), human(3)], 'normal', 4);
+test('rocket start: gas as "2" fades is a perfect start, later a good one; floored from "3" is a burnout; at GO nothing', () => {
+  const s = createRace('meadow', [human(0), human(1), human(2), human(3), human(4)], 'normal', 4);
   while (s.phase === 'intro') tick(s, []);
   while (s.phase === 'countdown') {
     const cd = s.countdown;
-    tick(s, [press({ throttle: 1 }), press({ throttle: cd <= 1.0 ? 1 : 0 }), press({ throttle: cd <= 0.15 ? 1 : 0 }), idleInput()]);
+    tick(s, [press({ throttle: 1 }), press({ throttle: cd <= 1.2 ? 1 : 0 }), press({ throttle: cd <= 0.5 ? 1 : 0 }), press({ throttle: cd <= 0.1 ? 1 : 0 }), press({ throttle: cd <= 1.7 ? 1 : 0 })]);
   }
-  const [early, timed, late, idle] = s.racers;
-  assert.equal(timed.boost, 1.1);
-  assert.equal(timed.boostPower, 1.35);
-  for (const r of [early, late, idle]) assert.equal(r.boost, 0, `racer ${r.id}`);
-  assert.deepEqual(events(s, 'boost').map(e => e.racer), [timed.id]);
-  // The boost carries the timed racer ahead.
-  run(s, 1.5, [press({ throttle: 1 }), press({ throttle: 1 }), press({ throttle: 1 }), press({ throttle: 1 })]);
-  assert.ok(timed.speed > early.speed && timed.speed > late.speed);
+  const [early, perfect, good, late, between] = s.racers;
+  const at = s.racers.map(r => r.travel);
+  assert.equal(perfect.boost, 1.4); assert.equal(perfect.boostPower, 1.5);
+  assert.equal(good.boost, 0.8); assert.equal(good.boostPower, 1.38);
+  // The perfect start is felt at once: a shove before the first driving tick.
+  assert.ok(perfect.speed > good.speed && good.speed > 0, `kick ${perfect.speed.toFixed(1)} vs ${good.speed.toFixed(1)}`);
+  for (const r of [early, late, between]) assert.equal(r.boost, 0, `racer ${r.id}`);
+  assert.equal(early.stall, BURNOUT_SECONDS);
+  assert.equal(between.stall, 0); assert.equal(late.stall, 0);
+  assert.deepEqual(events(s, 'boost').map(e => [e.racer, e.value ?? 0]), [[perfect.id, 2], [good.id, 0]]);
+  assert.deepEqual(events(s, 'burnout').map(e => e.racer), [early.id]);
+  // The burnout spins its wheels in place while everyone else gets going...
+  run(s, BURNOUT_SECONDS - STEP, Array(5).fill(press({ throttle: 1 })));
+  assert.ok(early.speed < 1 && late.speed > 5, `burnout ${early.speed.toFixed(1)} vs ${late.speed.toFixed(1)}`);
+  // ...and a second in: perfect ahead of good ahead of a plain start.
+  run(s, 0.2, Array(5).fill(press({ throttle: 1 })));
+  const gained = s.racers.map((r, i) => r.travel - at[i]);
+  assert.ok(gained[1] > gained[2] && gained[2] > gained[3], gained.map(g => g.toFixed(1)).join(' '));
+  assert.ok(early.stall <= 0 && early.speed > 0, 'the burnout wears off');
 });
 
-test('rocket start: CPUs time the throttle and get the GO boost', () => {
-  const s = createRace('meadow', kartSeats([], true), 'hard', 7);
-  toRace(s);
-  assert.ok(s.racers.some(r => r.boost > 0), 'at least one CPU rocket-starts');
+test('rocket start: hard CPUs nail it, normal ones get the good start, easy ones none', () => {
+  for (const [difficulty, power] of [['hard', 1.5], ['normal', 1.38], ['easy', 0]] as [Difficulty, number][]) {
+    const s = createRace('meadow', kartSeats([], true), difficulty, 7);
+    toRace(s);
+    for (const r of s.racers) assert.equal(r.boost > 0 ? r.boostPower : 0, power, `${difficulty} CPU ${r.id}`);
+    assert.equal(events(s, 'burnout').length, 0);
+  }
 });
 
 test('travel tracks progress forward and backward; wrong-way is detected', () => {
@@ -257,23 +271,25 @@ test('banana: dropped behind, spins out whoever drives into it', () => {
   assert.equal(a.spin, 0);
 });
 
-test('bomb: a homing shell chases the racer ahead and explodes', () => {
-  const s = humansRace(3);
-  const [shooter, target, bystander] = s.racers;
-  put(s, shooter, 100, 0); put(s, target, 125, 3); put(s, bystander, 400, 0);
-  tick(s, []);
-  assert.equal(target.place, shooter.place - 1);
-  shooter.item = 'bomb'; shooter.itemCount = 1;
-  tick(s, [press({ item: true })]);
-  assert.equal(s.shells.length, 1);
-  assert.equal(s.shells[0].target, target.id);
-  assert.equal(events(s, 'throw').length, 1);
-  for (let i = 0; i < 120 && s.shells.length; i++) tick(s, []);
-  assert.equal(s.shells.length, 0, 'shell exploded');
-  assert.ok(events(s, 'explode').length === 1);
-  assert.ok(target.spin > 0, 'target spun');
-  assert.equal(shooter.spin, 0);
-  assert.equal(bystander.spin, 0);
+test('red shell: homes in on the racer ahead and hits only them (never its owner, even point blank)', () => {
+  for (const gap of [25, 3]) {
+    const s = humansRace(3);
+    const [shooter, target, bystander] = s.racers;
+    put(s, shooter, 100, 0); put(s, target, 100 + gap, 1.5); put(s, bystander, 400, 0);
+    tick(s, []);
+    assert.equal(target.place, shooter.place - 1);
+    shooter.item = 'red'; shooter.itemCount = 1;
+    tick(s, [press({ item: true })]);
+    // (Point blank it may already have struck in the throwing tick.)
+    if (gap > 5) { assert.equal(s.shells.length, 1); assert.equal(s.shells[0].kind, 'red'); assert.equal(s.shells[0].target, target.id); }
+    assert.deepEqual(events(s, 'throw').map(e => e.value), [1]);
+    for (let i = 0; i < 120 && s.shells.length; i++) tick(s, []);
+    assert.equal(s.shells.length, 0, 'shell exploded');
+    assert.equal(events(s, 'explode').length, 1);
+    assert.ok(target.spin > 0, 'target spun');
+    assert.equal(shooter.spin, 0, `gap ${gap}: the shooter is spared`);
+    assert.equal(bystander.spin, 0);
+  }
 });
 
 test('star: blocks spin-outs and spins others on contact', () => {
@@ -288,7 +304,7 @@ test('star: blocks spin-outs and spins others on contact', () => {
   assert.equal(spinOut(s, a), false);
   assert.equal(a.spin, 0);
   // A banana under the star racer is swept away harmlessly.
-  s.hazards.push({ id: 999, x: a.x, y: a.y, z: a.z, owner: b.id });
+  s.hazards.push({ id: 999, x: a.x, y: a.y, z: a.z, owner: b.id, age: 9 });
   tick(s, []);
   assert.equal(a.spin, 0);
   assert.equal(s.hazards.length, 0);
@@ -302,18 +318,34 @@ test('star: blocks spin-outs and spins others on contact', () => {
   assert.equal(a.star, 0);
 });
 
-test('bolt: hits only racers ahead of the user', () => {
-  const s = humansRace(3);
-  const [front, user, back] = s.racers;
-  put(s, front, 300, 0); put(s, user, 200, 0); put(s, back, 100, 0);
-  tick(s, []);
-  assert.deepEqual([front.place, user.place, back.place], [1, 2, 3]);
-  user.item = 'bolt'; user.itemCount = 1;
-  tick(s, [undefined, press({ item: true })]);
-  assert.ok(front.spin > 0 && Math.abs(front.slow - 3) < 1e-9);
-  assert.equal(back.spin, 0); assert.equal(back.slow, 0);
-  assert.equal(user.spin, 0); assert.equal(user.slow, 0);
-  assert.equal(events(s, 'bolt').length, 1);
+test('lightning: strikes every opponent (longest for the leaders, items lost), never the user, who keeps full speed', () => {
+  for (const userPlace of [1, 2, 4]) {
+    const s = humansRace(4);
+    const user = s.racers[0], others = s.racers.slice(1);
+    const spots = [400, 300, 200, 100];
+    put(s, user, spots[userPlace - 1], 0, 24);
+    others.forEach((o, k) => put(s, o, spots.filter((_, i) => i !== userPlace - 1)[k], 0, 24));
+    tick(s, []);
+    assert.equal(user.place, userPlace);
+    others[0].item = 'banana'; others[0].itemCount = 1;
+    others[1].star = 5; // a star shrugs it off
+    user.item = 'bolt'; user.itemCount = 1;
+    const speed = user.speed, seq = s.eventSeq;
+    tick(s, [press({ throttle: 1, item: true })]);
+    assert.equal(user.spin, 0); assert.equal(user.slow, 0);
+    assert.ok(user.speed >= speed - 0.5, `user speed ${user.speed.toFixed(1)} vs ${speed.toFixed(1)}`);
+    assert.equal(user.item, null);
+    const hit = others.filter(o => o.star <= 0);
+    for (const o of hit) assert.ok(o.spin > 0 && o.slow > 1.9, `racer ${o.id} struck`);
+    assert.equal(others[1].spin, 0, 'the star racer is untouched');
+    assert.equal(others[0].item, null, 'the struck racer lost its item');
+    // The further ahead, the longer the shrink.
+    const byPlace = [...hit].sort((a, b) => a.place - b.place);
+    for (let k = 1; k < byPlace.length; k++) assert.ok(byPlace[k - 1].slow >= byPlace[k].slow);
+    assert.deepEqual(events(s, 'bolt', seq).map(e => [e.racer, e.value]), [[user.id, hit.length]]);
+    assert.deepEqual(events(s, 'zap', seq).map(e => e.racer).sort(), hit.map(o => o.id).sort());
+    assert.ok(!events(s, 'zap', seq).some(e => e.racer === user.id) && !events(s, 'spin', seq).some(e => e.racer === user.id));
+  }
 });
 
 test('triple mushroom gives three boosts, one per press', () => {
@@ -324,7 +356,7 @@ test('triple mushroom gives three boosts, one per press', () => {
   for (let k = 3; k > 0; k--) {
     tick(s, [press({ throttle: 1, item: true })]);
     assert.equal(r.itemCount, k - 1);
-    assert.ok(r.boost > 1.1);
+    assert.ok(r.boost > 1.4);
     tick(s, [press({ throttle: 1 })]);
   }
   assert.equal(r.item, null);
@@ -366,7 +398,7 @@ for (const level of [1, 2, 3]) {
     assert.equal(r.driftLevel, 0);
     assert.equal(r.driftCharge, 0);
     assert.equal(r.boost, TURBO_SECONDS[level - 1]);
-    assert.ok(Math.abs(r.boostPower - (1.28 + level * 0.04)) < 1e-9);
+    assert.equal(r.boostPower, TURBO_POWER[level - 1]);
     assert.deepEqual(events(s, 'turbo', seq).map(e => e.value), [level]);
   });
 }
@@ -418,12 +450,17 @@ test('out of bounds on grass tracks: the racer is rescued back onto the road', (
     assert.equal(r.speed, 0);
     assert.ok(Math.abs(r.lateral) - t.halfWidth > t.def.outOfBounds - 3, `left the road by ${Math.abs(r.lateral) - t.halfWidth}`);
     assert.equal(events(s, 'respawn').length, 1);
-    // Throttle is ignored while waiting.
-    run(s, 1.5, [press({ throttle: 1 })]);
-    assert.equal(r.respawn <= 0, true);
+    // Throttle is ignored while waiting (about a second); held as the kart lands, it fires a respawn boost.
+    let wait = 0;
+    while (r.respawn > 0 && wait++ < 200) tick(s, [press({ throttle: 1 })]);
+    assert.ok(wait * STEP < 1.1, `${track}: rescued in ${(wait * STEP).toFixed(2)} s`);
     const near = nearest(t, r.x, r.z);
     assert.ok(Math.abs(near.lateral) < 1, `${track}: back on the centre line (${near.lateral})`);
     assert.ok(events(s, 'land').length >= 1);
+    assert.equal(r.ghost, GHOST_SECONDS);
+    assert.equal(r.boost, RESPAWN_BOOST);
+    // Untouchable for a moment: no spin-outs.
+    assert.equal(spinOut(s, r), false);
   }
 });
 
@@ -664,7 +701,7 @@ test('underwater: the seabed road is drivable, slower and floaty; diving in spla
 });
 
 test('rails keep racers on bridge decks and in tunnels', () => {
-  for (const [id, from] of [['lagoon', 0.65], ['volcano', 0.5]] as [TrackId, number][]) {
+  for (const [id, from] of [['lagoon', 0.65], ['volcano', 0.455]] as [TrackId, number][]) {
     const s = humansRace(1, id);
     const t = trackFor(id);
     const at = from * t.length;
@@ -714,6 +751,95 @@ test('obstacles: rollers and crushers spin racers out; a star shrugs them off', 
   tick(s3, [idleInput()]);
   assert.equal(events(s3, 'crush').length, 0);
   assert.ok(Math.abs(s3.racers[0].x - pointAt(t, crusher.s, lat)[0]) < CRUSHER_HALF + 2);
+});
+
+test('obstacles never pin a kart: knocked down once, it is untouchable for that obstacle\'s cycle and drives clear', () => {
+  // A kart stopped dead in the Reef Tunnel, right in front of a sea mine's track (it once sat there for good).
+  const s = humansRace(1, 'lagoon');
+  const t = trackFor('lagoon');
+  const r = s.racers[0];
+  const mine = t.obstacles.find(o => o.kind === 'roller' && t.paths[o.seg].name === 'Reef Tunnel')!;
+  const from = s.eventSeq;
+  for (const u of [0, 0.25, 0.5, 0.75]) {
+    s.raceTime = (u - mine.phase) * mine.period + 20 * mine.period;
+    putOn(s, r, mine.seg, mine.s - 2, 0);
+    r.ghost = 0;
+    const route = 1 << (mine.seg - 1), hits = events(s, 'spin', from).length;
+    let n = 0;
+    while (n++ < 60 * 6 && !(r.seg === mine.seg && r.segS > mine.s + 6)) tick(s, [pilot(s, r, route)]);
+    assert.ok(r.seg === mine.seg && r.segS > mine.s + 6, `@${u}: drove clear of the mine (stuck at ${r.segS.toFixed(1)} m)`);
+    assert.ok(events(s, 'spin', from).length - hits <= 1, `@${u}: knocked down at most once`);
+  }
+  // Every hit came with the grace.
+  const s2 = humansRace(1, 'lagoon');
+  const r2 = s2.racers[0];
+  s2.raceTime = (0 - mine.phase) * mine.period + 10 * mine.period - STEP;
+  const pose = obstacleAt(t, mine, s2.raceTime + STEP, [0, 0, 0, 0]);
+  putOn(s2, r2, mine.seg, mine.s - 1, 0, 8);
+  r2.x = pose[0] - Math.sin(r2.yaw) * (ROLLER_RADIUS + 0.6); r2.z = pose[2] - Math.cos(r2.yaw) * (ROLLER_RADIUS + 0.6);
+  tick(s2, [press({ throttle: 1 })]);
+  assert.ok(r2.spin > 0 && Math.abs(r2.ghost - mine.period) < 1e-9, `ghost ${r2.ghost} for a ${mine.period} s cycle`);
+});
+
+test('glider: a boost carried into the launch bleeds off, so the glide still lands short of the next fork', () => {
+  // Magma Peak's summit glider at a mushroom's 46 m/s once sailed past the Obsidian Ridge fork and off its deck.
+  const s = humansRace(1, 'volcano');
+  const t = trackFor('volcano');
+  const r = s.racers[0];
+  const launch = t.def.launches!.find(l => l.glide)!, ridge = t.paths.find(p => p.name === 'Obsidian Ridge')!;
+  put(s, r, launch.at * t.length - 40, 0, 44);
+  r.boost = 1.5; r.boostPower = 1.55;
+  let landed = -1, top = 0;
+  const run = drive(s, r, 0, 20, x => {
+    if (x.glide) top = Math.max(top, x.speed);
+    if (landed < 0 && top > 0 && x.grounded) landed = x.lastS;
+    return landed >= 0;
+  });
+  assert.equal(run.events('glide').length, 1);
+  assert.equal(run.events('splash').length + run.events('respawn').length, 0);
+  assert.ok(landed > 0 && landed < ridge.from - FORK_ZONE, `landed at ${landed.toFixed(0)} m, the ridge forks at ${ridge.from.toFixed(0)} m`);
+});
+
+test('CPU watchdog: a CPU held in place calls the rescue after a few seconds; a human never gets one', () => {
+  const s = createRace('meadow', [human(0), { racer: 'kai', human: false, slot: -1, name: 'CPU' }], 'hard', 5);
+  toRace(s);
+  const h = s.racers.find(r => r.human)!, cpu = s.racers.find(r => !r.human)!;
+  put(s, h, 300, -4); put(s, cpu, 300, 4);
+  const hx = h.x, hz = h.z, cx = cpu.x, cz = cpu.z, from = s.eventSeq;
+  const inputs: Inputs = [];
+  inputs[h.id] = press({ throttle: 1 });
+  let n = 0;
+  // Both pinned (as by a wall corner or an obstacle): put back every tick.
+  while (n++ < 60 * (STUCK_SECONDS + 1) && cpu.respawn <= 0) {
+    tick(s, inputs);
+    h.x = hx; h.z = hz; h.speed = 0;
+    if (cpu.respawn <= 0) { cpu.x = cx; cpu.z = cz; cpu.speed = 0; }
+  }
+  const rescue = events(s, 'respawn', from);
+  assert.equal(rescue.length, 1);
+  assert.deepEqual([rescue[0].racer, rescue[0].value], [cpu.id, 2]);
+  assert.ok(Math.abs(n * STEP - STUCK_SECONDS) < 0.1, `called after ${(n * STEP).toFixed(2)} s`);
+  run(s, 1.2, [idleInput()]);
+  assert.ok(cpu.respawn <= 0 && cpu.ghost > 0 && cpu.cpuStuck < 1, 'back on the road, the watch restarted');
+});
+
+test('CPU routes: a CPU that missed a branch\'s mouth and sits on the main road\'s wall past the fork gives up the branch', () => {
+  const s = createRace('skyway', [{ racer: 'kai', human: false, slot: -1, name: 'CPU' }], 'hard', 3);
+  toRace(s);
+  const t = trackFor('skyway'), alley = t.paths.find(p => p.name === 'Back Alley')!, bit = 1 << (alley.index - 1);
+  const cpu = s.racers[0];
+  // 20 m past the fork, still counted on the main road and up against its wall.
+  put(s, cpu, alley.from + 20, 0, 12);
+  cpu.cpuRoute = bit; cpu.lateral = t.halfWidth + 1.3;
+  cpuInput(s, t, cpu, new Rng(1), false);
+  assert.equal(cpu.cpuRoute & bit, 0, 'dropped the branch');
+  // Inside the road (still able to turn in), or against the wall short of the fork: keeps it.
+  for (const [at, lateral] of [[alley.from + 20, 3], [alley.from - 20, t.halfWidth + 1.3]]) {
+    put(s, cpu, at, 0, 12);
+    cpu.cpuRoute = bit; cpu.lateral = lateral;
+    cpuInput(s, t, cpu, new Rng(1), false);
+    assert.equal(cpu.cpuRoute & bit, bit, `kept the branch at ${at - alley.from} m, ${lateral} m`);
+  }
 });
 
 test('CPU routes: per-difficulty odds, re-rolled each lap, and CPUs really take the shortcut', () => {

@@ -51,6 +51,12 @@ use Capability::{Admin, Edit, View};
 use Feature::*;
 use PolicyDecision::{Deny, Exempt, Require};
 
+/// `/mcp/auto-approve[/{id}]` and `/mcp/profiles…`: View to read, Admin to
+/// change (see [`policy_for`]).
+fn is_mcp_rules_path(p: &str) -> bool {
+    p == "/mcp/auto-approve" || p == "/mcp/auto-approve/{id}" || p.starts_with("/mcp/profiles")
+}
+
 /// Map an `(method, matched_path)` pair to its feature-axis [`PolicyDecision`].
 ///
 /// `matched_path` is the Axum route **template** with `{id}`-style placeholders,
@@ -616,6 +622,13 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         // Composer completions / live screen: the transcript's read gate.
         return Require(Agents, View);
     }
+    if p == "/sessions/{id}/files/browse" || p == "/sessions/{id}/files/read" {
+        // Session-scoped working-folder files (PC-1): a read of the session's
+        // cwd, gated per session in the handler (owner-or-admin + ws Viewer).
+        // Agent-session credentials are refused by the feature guard as on
+        // `/fs/*`; share and MCP-only tokens never reach it. Non-GET: Edit.
+        return Require(Agents, if get { View } else { Edit });
+    }
     if p == "/sessions/{id}/transcript/touch" {
         // Keep-alive for an open chat: whoever may read the transcript may
         // keep its tail warm.
@@ -855,9 +868,9 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         if p == "/mcp/policies" || p.starts_with("/mcp/policies/") {
             return Require(Mcp, Admin);
         }
-        // Auto-approve rules loosen the approval posture: reading them is View,
-        // every change is Admin (like policy writes).
-        if p == "/mcp/auto-approve" || p == "/mcp/auto-approve/{id}" {
+        // Auto-approve rules and MCP profiles: reading them is View, every
+        // change is Admin (like policy writes).
+        if is_mcp_rules_path(p) {
             return Require(Mcp, if get { View } else { Admin });
         }
         // Posture-changing routes → Admin: outward-server config, policy
@@ -2668,6 +2681,16 @@ mod tests {
             pol(Method::DELETE, "/api/v1/mcp/auto-approve/{id}"),
             Require(Mcp, Admin)
         );
+        // MCP profiles: View to read, Admin to change (like auto-approve).
+        assert_eq!(pol(Method::GET, "/api/v1/mcp/profiles"), Require(Mcp, View));
+        for (m, p) in [
+            (Method::POST, "/api/v1/mcp/profiles"),
+            (Method::PATCH, "/api/v1/mcp/profiles/{id}"),
+            (Method::DELETE, "/api/v1/mcp/profiles/{id}"),
+            (Method::POST, "/api/v1/mcp/profiles/{id}/default"),
+        ] {
+            assert_eq!(pol(m, p), Require(Mcp, Admin), "{p}");
+        }
         assert_eq!(
             pol(Method::POST, "/api/v1/mcp/approvals/{id}/decide"),
             Require(Mcp, Admin)
@@ -3277,6 +3300,15 @@ mod tests {
             "/api/v1/workflow-runs/{id}/context/read",
         ] {
             assert_eq!(pol(Method::GET, p), Require(Workflows, View), "{p}");
+            assert_eq!(route_class(&Method::GET, p), None, "{p}");
+        }
+        // Session-scoped working-folder files (PC-1, access-control-4-03):
+        // Agents:View reads, gated per session in the handler.
+        for p in [
+            "/api/v1/sessions/{id}/files/browse",
+            "/api/v1/sessions/{id}/files/read",
+        ] {
+            assert_eq!(pol(Method::GET, p), Require(Agents, View), "{p}");
             assert_eq!(route_class(&Method::GET, p), None, "{p}");
         }
         assert_eq!(

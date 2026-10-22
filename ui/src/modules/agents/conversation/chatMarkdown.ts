@@ -1,5 +1,5 @@
 // The chat's markdown: the vault renderer (marked GFM + allowlist sanitizer,
-// vault/mdRender.ts) with chat-only extensions, then the code-block chrome.
+// lib/render/markdown.ts) with chat-only extensions, then the code-block chrome.
 //   • file references — `crates/x/src/retry.rs:88` in prose or in a code span
 //     (and a bare `retry.rs` code span with a known extension) — become
 //     `a.file-ref[data-path][data-anchor=line]`, opened in the side panel;
@@ -10,7 +10,7 @@
 // Everything here is a STRING transform, so the md cache keeps one string per
 // block and the rendering stays unit-testable in node (no DOM).
 import type { MarkedExtension, Tokens } from 'marked';
-import { renderNote, type RenderCtx } from '../../vault/mdRender';
+import { renderNote, type RenderCtx } from '../../../lib/render/markdown.ts';
 import { decorateCodeBlocks } from './codeBlocks';
 import { escapeHtml } from '../../../lib/html.ts';
 

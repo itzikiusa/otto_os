@@ -3,8 +3,9 @@
   // cluster or topic, a product story, an issue account) as a picker over the
   // workspace's objects — the person never types an id the UI doesn't show.
   // A saved value that isn't in the list stays selectable ("Unknown … (id)") so
-  // opening the node never silently rewrites it, and while the list is loading
-  // or after it failed the field falls back to free text (with Retry).
+  // opening the node never silently rewrites it. While the list loads the
+  // select is disabled ("Loading …"); only a FAILED load falls back to free
+  // text (with Retry), and an empty list says where to create one.
   import { untrack } from 'svelte';
   import LoadState from '../../../lib/components/LoadState.svelte';
   import type { OptionCache } from './options.svelte';
@@ -23,12 +24,14 @@
     placeholder: string;
     /** First option's label; defaults to "Choose a {noun}…". */
     emptyLabel?: string;
-    /** What the list is, for "Couldn’t load {what}". */
+    /** What the list is, for "Couldn’t load {what}" / "Loading {what}…". */
     what: string;
+    /** Shown under the select when the loaded list is empty: where to create one. */
+    emptyHint?: string;
     onchange: (value: string) => void;
     dir?: 'ltr' | 'auto';
   }
-  let { id, value, cache, key, toOptions, noun, placeholder, emptyLabel, what, onchange, dir = 'auto' }: Props = $props();
+  let { id, value, cache, key, toOptions, noun, placeholder, emptyLabel, what, emptyHint, onchange, dir = 'auto' }: Props = $props();
   $effect(() => {
     const k = key;
     untrack(() => cache.ensure(k));
@@ -42,6 +45,12 @@
     <option value="">{emptyLabel ?? `Choose a ${noun}…`}</option>
     {#each options as o (o.id)}<option value={o.id} title={o.title}>{o.label}</option>{/each}
     {#if value && !options.some((o) => o.id === value)}<option {value}>Unknown {noun} ({value})</option>{/if}
+  </select>
+  {#if options.length === 0 && emptyHint}<p class="node-hint">{emptyHint}</p>{/if}
+{:else if !error}
+  <!-- Loading: a disabled select, never a raw-id text box that swaps away. -->
+  <select {id} disabled aria-busy="true">
+    <option value="">Loading {what}…</option>
   </select>
 {:else}
   <input {dir} {id} type="text" {placeholder} {value} oninput={(e) => onchange(e.currentTarget.value)} />

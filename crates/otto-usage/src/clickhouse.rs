@@ -118,22 +118,8 @@ impl Drop for ClickHouseLease {
 }
 
 impl ClickHouse {
-    /// Keep the current engine awake while an external local exporter uses it.
-    /// Reacquire on engine replacement; the port is intentionally not permanent.
-    pub async fn keep_awake(self: &std::sync::Arc<Self>) -> Result<ClickHouseLease> {
-        self.proc.lock().unwrap().inflight += 1;
-        let mut lease = ClickHouseLease {
-            ch: self.clone(),
-            endpoint: String::new(),
-            stamp: true,
-        };
-        let (_busy, endpoint) = self.begin().await?;
-        lease.endpoint = endpoint;
-        Ok(lease)
-    }
-
     /// Background WAKE: restarts a parked server for one bounded export but,
-    /// unlike [`Self::keep_awake`], never resets the idle clock — once the lease
+    /// unlike a foreground lease, never resets the idle clock — once the lease
     /// drops, the next idle check may park the server again right away.
     pub async fn wake_background(self: &std::sync::Arc<Self>) -> Result<ClickHouseLease> {
         let parked = {

@@ -355,6 +355,22 @@ async fn check_conn_role<S: DbViewerCtx>(
 /// workspace Viewer/Editor role checked above. Allowed: root, the owner, or a
 /// workspace **Admin** of the resource's workspace (the documented "sees all"
 /// tier — mirrors `session_owner_or_admin`).
+/// The connection gate of a DELETE (saved query, widget): a connection that
+/// no longer exists imposes none — otherwise a row left behind by a deleted
+/// connection answers 404 to everyone, root included. The workspace role and
+/// ownership checks the caller runs next still apply. Edit and run keep the
+/// strict gate (they would use the connection).
+async fn authorize_delete_conn<S: DbViewerCtx>(ctx: &S, user: &User, conn: &Id) -> ApiResult<()> {
+    match ctx.db().get_connection(conn).await {
+        Err(Error::NotFound(_)) => Ok(()),
+        Err(e) => Err(e.into()),
+        Ok(_) => {
+            ctx.db().authorize(conn, &user.id, None, "db_query").await?;
+            Ok(())
+        }
+    }
+}
+
 async fn require_owner_or_ws_admin<S: DbViewerCtx>(
     ctx: &S,
     user: &User,
@@ -1327,7 +1343,7 @@ async fn delete_saved<S: DbViewerCtx>(
     // ownership (owner / ws-Admin / root) — saved queries are owner-private.
     let saved = ctx.db().get_saved(&qid).await?;
     if let Some(conn) = &saved.connection_id {
-        ctx.db().authorize(conn, &user.id, None, "db_query").await?;
+        authorize_delete_conn(&ctx, &user, conn).await?;
     }
     ctx.roles()
         .check(&user, &saved.workspace_id, WorkspaceRole::Editor)
@@ -1498,9 +1514,7 @@ async fn delete_widget<S: DbViewerCtx>(
     Path(id): Path<Id>,
 ) -> ApiResult<StatusCode> {
     let widget = ctx.db().get_widget(&id).await?;
-    ctx.db()
-        .authorize(&widget.connection_id, &user.id, None, "db_query")
-        .await?;
+    authorize_delete_conn(&ctx, &user, &widget.connection_id).await?;
     ctx.roles()
         .check(&user, &widget.workspace_id, WorkspaceRole::Editor)
         .await?;

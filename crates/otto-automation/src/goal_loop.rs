@@ -25,6 +25,7 @@ use otto_core::domain::{
 };
 use otto_core::event::Event;
 use otto_core::{Error, Id, Result};
+use otto_sessions::submit::SubmitOpts;
 
 use crate::agent::{FailReason, RunOutcome, WatchStatus};
 use crate::goal_loop_parse::{parse_evaluation, parse_executor_result};
@@ -1161,7 +1162,8 @@ async fn finalize(
 /// `settle_with_retry` (a busy or briefly failing SQLite must not leave the
 /// row `running` with no controller until a daemon restart). On a persistent
 /// failure a Notice tells the user and the last error is returned.
-async fn settle_status(
+#[doc(hidden)] // pub for otto-server's trigger-based settle tests
+pub async fn settle_status(
     ctx: &impl AutomationCtx,
     loop_id: &Id,
     status: GoalLoopStatus,
@@ -1289,13 +1291,22 @@ pub async fn cleanup_executor_sessions(ctx: &impl AutomationCtx, ws_id: &Id, loo
 }
 
 async fn cleanup_executor_sessions_inner(ctx: &impl AutomationCtx, ws_id: &Id, loop_id: &Id) {
-    let sessions = match ctx.manager().list_by_workspace(ws_id).await {
+    // `meta.source` narrows in SQL (indexed); only the loop id is checked here
+    // — the workspace's whole session history is never decoded.
+    let scope = otto_state::SessionScope {
+        workspace_id: ws_id.clone(),
+        owner: None,
+    };
+    let filter = otto_state::SessionListFilter {
+        source: Some("goal_loop".into()),
+        ..Default::default()
+    };
+    let sessions = match ctx.manager().list_filtered(&[scope], &filter).await {
         Ok(s) => s,
         Err(_) => return,
     };
     for s in sessions {
-        let is_ours = s.meta.get("source").and_then(|v| v.as_str()) == Some("goal_loop")
-            && s.meta.get("loop_id").and_then(|v| v.as_str()) == Some(loop_id.as_str());
+        let is_ours = s.meta.get("loop_id").and_then(|v| v.as_str()) == Some(loop_id.as_str());
         if is_ours {
             let _ = ctx.manager().kill_session(&s.id).await;
         }
@@ -2076,21 +2087,14 @@ async fn run_executor_attempt_inner(
         return RunOutcome::failed(Some(sid.clone()), FailReason::Stopped);
     }
     let work = async {
-        if ctx.wait_for_tui(&sid).await {
-            if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
-                let _ = ctx.manager().kill_session(&sid).await;
-                return RunOutcome::failed(Some(sid.clone()), FailReason::Stopped);
-            }
-            let _ = ctx
-                .manager()
-                .input(&sid, &ctx.bracketed_paste(prompt))
-                .await;
-            tokio::time::sleep(ctx.paste_to_enter()).await;
-            let before = ctx.manager().live_handle(&sid).map(|h| h.last_output_at());
-            let _ = ctx.manager().input(&sid, b"\r").await;
-            if !ctx.dispatched(&sid, before).await {
-                let _ = ctx.manager().input(&sid, b"\r").await;
-            }
+        // The one locked submit (paste → Enter → re-Enter under the session's
+        // submit lock). A Stop during the TUI wait is honoured right after it.
+        ctx.manager()
+            .submit_prompt(&sid, prompt, SubmitOpts::default())
+            .await;
+        if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+            let _ = ctx.manager().kill_session(&sid).await;
+            return RunOutcome::failed(Some(sid.clone()), FailReason::Stopped);
         }
 
         ctx.watch_for_result(

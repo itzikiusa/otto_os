@@ -6,7 +6,11 @@
 //
 // The rules, so the room stays TRUTHFUL while it feels alive:
 //  • A kid's seat is its session. Working kids type, needs-you kids raise a
-//    hand, stale kids look around, away (suspended / ended) seats are empty.
+//    hand, failed kids slump, done kids sit back, kids idle for ASLEEP_MS doze
+//    (head down), suspended seats are empty.
+//  • A kid whose session just STOPPED working (its turn finished, it ended,
+//    it now waits for you) stands up, cheers (Wave) and sits back down — a
+//    real state change, never a random one; the headmaster gives a thumbs-up.
 //  • Only FREE kids wander — idle ones, and ones whose "needs you" has gone
 //    unanswered for BORED_MS (an agent that finished its turn waits at its
 //    prompt; after a while it gets up, the ✋ still over its head). At most
@@ -15,12 +19,13 @@
 //    moment their session starts working (or asks anew) they hurry back.
 //  • A kid whose desk moved (someone joined / left) walks to the new desk.
 //  • The headmaster patrols the lanes: needs-you kids first (walks over,
-//    reads the screen, nods), then working kids he hasn't checked lately, and
-//    between rounds points at the board.
+//    reads the screen, turns to you and waves — "this one wants you"), then
+//    failed kids, then working kids he hasn't checked lately, and between
+//    rounds points at the board.
 //  • Kick-out: the kid stands up and walks out of the door (the headmaster
 //    scolds); detention: the kid walks to the bench at the back and slumps.
-//  • Reduced motion: nobody wanders, the headmaster stays at the board, and a
-//    kick / detention completes at once.
+//  • Reduced motion: nobody wanders or cheers, the headmaster stays at the
+//    board, and a kick / detention completes at once.
 
 import {
   DESK_OFFSET,
@@ -31,131 +36,40 @@ import {
   doorInside,
   doorOutside,
   frontLaneZ,
+  isAsleep,
   laneZ,
   lanePath,
   pathLength,
   type Kid,
   type P2,
-  type Pose,
   type Room,
 } from './model.ts';
 import { bookshelfAt, lecternAt } from './furnish.ts';
+import {
+  CALL_MS,
+  CHEER_MS,
+  FACE_BOARD,
+  FACE_CLASS,
+  HEAD_SPEED,
+  HURRY_SPEED,
+  INSPECT_MS,
+  KID_SPEED,
+  NOD_MS,
+  POINT_MS,
+  SCOLD_MS,
+  SIT_MS,
+  STAND_MS,
+  THUMBS_MS,
+  BORED_MS,
+  cheerClip,
+  rng,
+  seatedClip,
+  type ActorView,
+  type KidClip,
+} from './life/clips.ts';
+import type { Goal, HeadActor, KidActor } from './life/actors.ts';
 
-export type KidClip = 'Sit_Type' | 'Sit_Idle' | 'Sit_RaiseHand' | 'Sit_Slump' | 'Stand_Up' | 'Sit_Down' | 'Walk' | 'Idle_Stand' | 'Talk' | 'Look_Around' | 'Wave';
-export type HeadClip = 'Idle' | 'Walk' | 'Nod' | 'Scold' | 'Wave' | 'ThumbsUp' | 'Inspect_Screen' | 'Point_Board';
-
-export const KID_CLIPS: readonly KidClip[] = ['Sit_Type', 'Sit_Idle', 'Sit_RaiseHand', 'Sit_Slump', 'Stand_Up', 'Sit_Down', 'Walk', 'Idle_Stand', 'Talk', 'Look_Around', 'Wave'];
-export const HEAD_CLIPS: readonly HeadClip[] = ['Idle', 'Walk', 'Nod', 'Scold', 'Wave', 'ThumbsUp', 'Inspect_Screen', 'Point_Board'];
-/** Clips that play once (the scene clamps them on their last frame). */
-export const ONCE_CLIPS: ReadonlySet<string> = new Set(['Stand_Up', 'Sit_Down', 'Nod', 'Scold']);
-
-/** Timings (ms) and speeds (m/s). Exported so the scene can fit one-shot
- *  clips to their phase and tests can reason about durations. */
-export const STAND_MS = 900;
-export const SIT_MS = 900;
-export const KID_SPEED = 0.95;
-export const HURRY_SPEED = 1.5;
-export const HEAD_SPEED = 1.1;
-export const INSPECT_MS = 3600;
-export const NOD_MS = 1300;
-export const SCOLD_MS = 1600;
-export const POINT_MS = 3200;
-/** An unanswered "needs you" this old (ms since the session was last
- *  active) frees the kid to wander. */
-export const BORED_MS = 45_000;
-/** Facing the board (kids at desks). */
-export const FACE_BOARD = Math.PI;
-/** Facing the class (kids on the detention bench). */
-export const FACE_CLASS = 0;
-
-export type KidMode =
-  | 'seated'
-  | 'standing' // Stand_Up at the seat, then `after`
-  | 'walking' // out to a spot (or a new seat / the door / the bench)
-  | 'visiting' // dwelling at a spot
-  | 'returning'
-  | 'sitting' // Sit_Down at the seat
-  | 'leaving'
-  | 'gone'
-  | 'bench';
-
-export type HeadMode = 'lectern' | 'pointing' | 'walking' | 'inspecting' | 'nodding' | 'scolding';
-
-export interface ActorView {
-  id: string;
-  x: number; // room-local
-  z: number;
-  heading: number;
-  clip: KidClip | HeadClip;
-  /** Mode name, for the e2e hook and the overlay ("wandering", …). */
-  mode: KidMode | HeadMode;
-  /** Draw it (false = empty chair / walked out). */
-  visible: boolean;
-  /** At the desk (the scene keeps the chair tucked in). */
-  seated: boolean;
-}
-
-type Goal = 'spot' | 'seat' | 'leave' | 'bench';
-
-interface KidActor {
-  kid: Kid;
-  mode: KidMode;
-  pos: P2;
-  heading: number;
-  clip: KidClip;
-  path: P2[];
-  dist: number;
-  speed: number;
-  timer: number;
-  /** ms until the next "should I get up?" roll (seated + idle). */
-  next: number;
-  goal: Goal;
-  /** Dwell at the spot: facing + clip + ms. */
-  spot: { face: number; clip: KidClip; ms: number } | null;
-  /** Where the kid sits (its desk, or its bench slot). */
-  home: P2;
-  /** Lane z of `home`'s row (the walkway the kid leaves its desk by). */
-  homeLane: number;
-}
-
-interface HeadActor {
-  mode: HeadMode;
-  pos: P2;
-  lane: number;
-  heading: number;
-  clip: HeadClip;
-  path: P2[];
-  dist: number;
-  timer: number;
-  target: string | null;
-  /** The mode to resume after a scold. */
-  resume: { mode: HeadMode; clip: HeadClip; timer: number } | null;
-}
-
-/** mulberry32 — small, fast, deterministic. */
-export function rng(seed: number): () => number {
-  let a = seed >>> 0;
-  return () => {
-    a = (a + 0x6d2b79f5) >>> 0;
-    let t = a;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
-export function seatedClip(pose: Pose): KidClip {
-  switch (pose) {
-    case 'working':
-      return 'Sit_Type';
-    case 'needs-you':
-      return 'Sit_RaiseHand';
-    case 'stale':
-      return 'Sit_Idle';
-    default:
-      return 'Sit_Idle';
-  }
-}
+export * from './life/clips.ts';
 
 const headingTo = (from: P2, to: P2): number => Math.atan2(to.x - from.x, to.z - from.z);
 
@@ -225,6 +139,7 @@ export class Life {
         continue;
       }
       const wasBench = a.kid.detention;
+      const was = a.kid.pose;
       a.kid = k;
       if (a.mode === 'leaving' || a.mode === 'gone') continue;
       if (a.goal === 'bench' && !wasBench) {
@@ -245,11 +160,16 @@ export class Life {
           // Mid-walk kids just route to the new desk on their way back.
           if (this.reduced) this.snapHome(a);
           else if (a.mode === 'visiting' || a.mode === 'walking') this.returnHome(a, HURRY_SPEED);
+          else if (a.mode === 'celebrating') this.getUp(a, 'seat');
         } else this.getUp(a, 'seat');
         continue;
       }
       if (a.mode === 'seated') {
-        a.clip = k.detention ? 'Sit_Slump' : seatedClip(k.pose);
+        if (was === 'working' && (k.pose === 'needs-you' || k.pose === 'idle' || k.pose === 'done') && !k.detention && !this.reduced) this.cheer(a);
+        else a.clip = k.detention ? 'Sit_Slump' : this.restClip(k);
+      } else if (a.mode === 'celebrating' && k.pose === 'working') {
+        // Back to work mid-cheer: straight to the sit-down.
+        a.timer = Math.min(a.timer, SIT_MS);
       } else if (!this.free(k) && (a.mode === 'walking' || a.mode === 'visiting') && a.goal === 'spot') {
         // Their agent woke up — hurry back to the desk.
         this.returnHome(a, HURRY_SPEED);
@@ -401,7 +321,7 @@ export class Life {
       mode: k.detention ? 'bench' : 'seated',
       pos: { ...k.seat },
       heading: k.detention ? FACE_CLASS : FACE_BOARD,
-      clip: k.detention ? 'Sit_Slump' : seatedClip(k.pose),
+      clip: k.detention ? 'Sit_Slump' : this.restClip(k),
       path: [],
       dist: 0,
       speed: KID_SPEED,
@@ -415,11 +335,32 @@ export class Life {
     };
   }
 
+  /** The seated clip for a kid's real state (dozing after ASLEEP_MS idle). */
+  private restClip(k: Kid): KidClip {
+    return seatedClip(k.pose, isAsleep(k, this.now()));
+  }
+
+  /** Stand, cheer, sit — at the desk (the chair slides back meanwhile). */
+  private cheer(a: KidActor): void {
+    a.mode = 'celebrating';
+    a.timer = STAND_MS + CHEER_MS + SIT_MS;
+    a.clip = 'Stand_Up';
+    a.pos = { ...a.home };
+    a.heading = FACE_BOARD;
+    const h = this.head;
+    if (h && (h.mode === 'lectern' || h.mode === 'pointing')) {
+      h.mode = 'cheering';
+      h.clip = 'ThumbsUp';
+      h.timer = THUMBS_MS;
+      h.heading = headingTo(h.pos, a.home);
+    }
+  }
+
   private snapHome(a: KidActor): void {
     a.mode = a.kid.detention || a.goal === 'bench' ? 'bench' : 'seated';
     a.pos = { ...a.home };
     a.heading = a.mode === 'bench' ? FACE_CLASS : FACE_BOARD;
-    a.clip = a.mode === 'bench' ? 'Sit_Slump' : seatedClip(a.kid.pose);
+    a.clip = a.mode === 'bench' ? 'Sit_Slump' : this.restClip(a.kid);
     a.path = [];
     a.dist = 0;
     a.goal = a.mode === 'bench' ? 'bench' : 'spot';
@@ -516,9 +457,10 @@ export class Life {
   private stepKid(a: KidActor, dt: number, mayGetUp: boolean): boolean {
     switch (a.mode) {
       case 'seated': {
-        a.pos = { ...a.home };
+        a.pos.x = a.home.x;
+        a.pos.z = a.home.z;
         a.heading = FACE_BOARD;
-        a.clip = seatedClip(a.kid.pose);
+        a.clip = this.restClip(a.kid);
         if (this.reduced || !this.free(a.kid)) return false;
         a.next -= dt;
         if (a.next > 0) return false;
@@ -578,11 +520,22 @@ export class Life {
         if (a.timer <= 0) this.returnHome(a, KID_SPEED);
         return false;
       }
+      case 'celebrating': {
+        a.timer -= dt;
+        if (a.timer > 0) {
+          a.clip = cheerClip(a.timer);
+          return false;
+        }
+        a.mode = 'seated';
+        a.clip = this.restClip(a.kid);
+        a.next = 6000 + this.rand() * 10000;
+        return false;
+      }
       case 'sitting': {
         a.timer -= dt;
         if (a.timer > 0) return false;
         a.mode = a.goal === 'bench' || a.kid.detention ? 'bench' : 'seated';
-        a.clip = a.mode === 'bench' ? 'Sit_Slump' : seatedClip(a.kid.pose);
+        a.clip = a.mode === 'bench' ? 'Sit_Slump' : this.restClip(a.kid);
         a.next = 9000 + this.rand() * 14000;
         a.path = [];
         a.spot = null;
@@ -634,6 +587,8 @@ export class Life {
     const due = (id: string, every: number) => now - (this.visited.get(id) ?? -Infinity) > every;
     const needs = seated.filter(([id, a]) => a.kid.pose === 'needs-you' && due(id, 15000));
     if (needs.length) return needs[0][0];
+    const failed = seated.filter(([id, a]) => a.kid.pose === 'error' && due(id, 30000));
+    if (failed.length) return failed[0][0];
     const working = seated.filter(([id, a]) => a.kid.pose === 'working' && due(id, 40000));
     if (working.length && this.rand() < 0.75) return working[Math.floor(this.rand() * working.length)][0];
     const any = seated.filter(([id]) => due(id, 60000));
@@ -684,6 +639,14 @@ export class Life {
         h.timer -= dt;
         if (h.timer > 0) return;
         if (h.target) this.visited.set(h.target, this.clock);
+        if (h.target && this.kids.get(h.target)?.kid.pose === 'needs-you') {
+          // Turn to the room (the camera's side) and wave: "this one wants you".
+          h.mode = 'calling';
+          h.clip = 'Wave';
+          h.heading = 0;
+          h.timer = CALL_MS;
+          return;
+        }
         h.mode = 'nodding';
         h.clip = 'Nod';
         h.timer = NOD_MS;
@@ -705,6 +668,8 @@ export class Life {
         return;
       }
       case 'nodding':
+      case 'calling':
+      case 'cheering':
       case 'lectern':
       case 'pointing': {
         h.timer -= dt;

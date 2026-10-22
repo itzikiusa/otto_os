@@ -534,6 +534,35 @@ pub const SERVER_OWNED_META: &[&str] = &[
     "account_id",
 ];
 
+/// `session.meta` key holding the MCP profile ids a session runs under (the
+/// union of those profiles' tools; see `otto_mcp::profiles`). Absent/empty ⇒
+/// the default profile. A person may change it (applies on the next agent
+/// restart); the session's own agent credential may not.
+pub const MCP_PROFILES_META: &str = "mcp_profiles";
+
+/// Validate a PATCH of [`MCP_PROFILES_META`]: `null` (back to the default) or
+/// up to 16 non-empty profile ids, never set by the session's own agent.
+fn check_mcp_profiles_patch(agent: bool, v: &serde_json::Value) -> Result<(), Error> {
+    if agent {
+        return Err(Error::Forbidden(
+            "an agent session cannot change its own MCP profile — a person picks it in Otto".into(),
+        ));
+    }
+    let id_ok = |x: &serde_json::Value| {
+        x.as_str()
+            .is_some_and(|s| !s.trim().is_empty() && !s.contains(','))
+    };
+    if v.is_null()
+        || v.as_array()
+            .is_some_and(|a| a.len() <= 16 && a.iter().all(id_ok))
+    {
+        return Ok(());
+    }
+    Err(Error::Invalid(
+        "mcp_profiles must be null or a list of up to 16 profile ids".into(),
+    ))
+}
+
 /// Meta key naming the agent session that opened this one as a worker
 /// (`POST /workspaces/{id}/sessions/open`). The server stamps it from the
 /// caller's credential; it decides whether that agent's own token may
@@ -645,6 +674,13 @@ async fn patch_session<S: SessionsCtx>(
             return Err(ApiErr(Error::Forbidden(
                 "resource session bindings cannot be edited".into(),
             )));
+        }
+        if let Some(v) = meta
+            .get(MCP_PROFILES_META)
+            .filter(|v| Some(*v) != session.meta.get(MCP_PROFILES_META))
+        {
+            let agent = auth.as_ref().and_then(|a| agent_session_of(&a.0)).is_some();
+            check_mcp_profiles_patch(agent, v).map_err(ApiErr)?;
         }
         // Agent UI control: the grant is server-owned (only `POST
         // /sessions/{id}/ui-control`, human credentials, writes it) and the
@@ -894,5 +930,32 @@ mod list_query_tests {
             ..Default::default()
         };
         assert!(matches!(q.into_filter(), Err(Error::Invalid(_))));
+    }
+
+    #[test]
+    fn mcp_profiles_patch_is_a_person_s_call_and_well_formed() {
+        use serde_json::json as j;
+        assert!(check_mcp_profiles_patch(false, &j!(["database", "issues"])).is_ok());
+        assert!(check_mcp_profiles_patch(false, &j!(null)).is_ok());
+        // The session's own agent can't re-shape (or widen) its tool set.
+        assert!(matches!(
+            check_mcp_profiles_patch(true, &j!(["full"])),
+            Err(Error::Forbidden(_))
+        ));
+        for bad in [
+            j!("database"),
+            j!([""]),
+            j!(["a,b"]),
+            j!([1]),
+            j!(vec!["x"; 17]),
+        ] {
+            assert!(
+                matches!(
+                    check_mcp_profiles_patch(false, &bad),
+                    Err(Error::Invalid(_))
+                ),
+                "{bad}"
+            );
+        }
     }
 }

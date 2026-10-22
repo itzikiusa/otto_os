@@ -143,7 +143,7 @@
     const out = await renderD2(`cv-${sceneId ?? 'x'}-${token}`, text, { sketch, dark, isStale: () => token !== renderToken });
     if (token !== renderToken) return; // superseded
     if (out.error || !out.svg) {
-      renderError = out.error || 'Could not render the diagram';
+      renderError = out.error || 'Couldn’t render the diagram';
       return; // keep the last good SVG on screen
     }
     renderError = '';
@@ -181,7 +181,7 @@
   async function copySource(): Promise<void> {
     const ok = await copyText(canvas.source ?? '');
     if (ok) toasts.success('Copied', 'D2 source copied to clipboard.');
-    else toasts.error('Couldn’t copy', 'Could not copy to the clipboard.');
+    else toasts.error('Couldn’t copy', 'Select the text and copy it manually.');
   }
 
   /** Ask the agent to edit this scene's .d2 source. */

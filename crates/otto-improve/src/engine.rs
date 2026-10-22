@@ -75,7 +75,7 @@ impl ImprovementEngine {
 
     /// Execute an already-created run row. The HTTP "run now" handler creates
     /// the row (so it can return the id immediately) and spawns this in the
-    /// background, mirroring the PR-review run pattern in `modules.rs`.
+    /// background, mirroring the PR-review run pattern in otto-server `modules/review/`.
     pub async fn execute_run(
         &self,
         run_id: &Id,
@@ -86,24 +86,12 @@ impl ImprovementEngine {
             .await
     }
 
-    /// Like [`Self::execute_run`] but forces a specific [`Autonomy`] for THIS run,
-    /// ignoring the workspace's configured autonomy. The workflow `self_improve`
-    /// node uses `Autonomy::Propose` so improvements are only *offered* (queued
-    /// for approval), never auto-applied.
-    pub async fn execute_run_with_autonomy(
-        &self,
-        run_id: &Id,
-        ws_id: &Id,
-        trigger: ImprovementTrigger,
-        autonomy: otto_core::domain::Autonomy,
-    ) -> Result<()> {
-        self.execute_run_inner(run_id, ws_id, trigger, Some(autonomy), None)
-            .await
-    }
-
-    /// Like [`Self::execute_run_with_autonomy`] but also OVERRIDES which agent
-    /// providers run the analysis (ignoring the workspace's configured set) when
-    /// `providers` is non-empty. The workflow `self_improve` node uses this so the
+    /// Like [`Self::execute_run`] but forces a specific [`Autonomy`] for THIS
+    /// run (ignoring the workspace's configured autonomy) and, when
+    /// `providers` is non-empty, OVERRIDES which agent providers run the
+    /// analysis (ignoring the workspace's configured set). The workflow
+    /// `self_improve` node uses this with `Autonomy::Propose`, so improvements
+    /// are only *offered* (queued for approval), never auto-applied, and the
     /// node's own Provider picker chooses the reflecting agent(s).
     pub async fn execute_run_with_autonomy_providers(
         &self,
@@ -735,7 +723,7 @@ impl ImprovementEngine {
         if let Err(e) = written {
             let _ = self
                 .improvements
-                .set_edit_status_if(
+                .set_edit_status(
                     edit_id,
                     ImprovementEditStatus::Applied,
                     ImprovementEditStatus::Pending,
@@ -757,7 +745,7 @@ impl ImprovementEngine {
         actor: &str,
     ) -> Result<ImprovementEdit> {
         self.improvements
-            .set_edit_status_if(edit_id, from, to, Some(actor))
+            .set_edit_status(edit_id, from, to, Some(actor))
             .await?
             .ok_or_else(|| Error::Invalid(format!("edit is no longer {}", from.as_str())))
     }
@@ -804,7 +792,7 @@ impl ImprovementEngine {
             // Only our own claim is turned into the conflict.
             Ok(false) => self
                 .improvements
-                .set_edit_status_if(
+                .set_edit_status(
                     edit_id,
                     ImprovementEditStatus::RolledBack,
                     ImprovementEditStatus::Conflict,
@@ -816,7 +804,7 @@ impl ImprovementEngine {
             Err(e) => {
                 let _ = self
                     .improvements
-                    .set_edit_status_if(
+                    .set_edit_status(
                         edit_id,
                         ImprovementEditStatus::RolledBack,
                         ImprovementEditStatus::Applied,

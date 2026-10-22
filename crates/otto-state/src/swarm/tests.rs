@@ -1583,3 +1583,71 @@ async fn fail_running_does_not_refund_uncharged_verify_turns() {
     repo.fail_running("restart").await.unwrap();
     assert_eq!(repo.get_task(&task.id).await.unwrap().attempts, 1);
 }
+
+/// data-integrity-4-06: deleting a task, or clearing its project's board,
+/// takes the task's goals with it (no FK cascades on `swarm_goals.task_id`),
+/// while a project-level goal survives a board clear.
+#[tokio::test]
+async fn task_delete_and_board_clear_remove_task_goals() {
+    let pool = mem_pool().await;
+    let repo = SwarmRepo::new(pool);
+    let sid = new_id();
+    let goal = |project: Option<Id>, task: Option<Id>| NewGoal {
+        swarm_id: sid.clone(),
+        workspace_id: "w".into(),
+        project_id: project,
+        task_id: task,
+        kind: "explicit".into(),
+        title: "g".into(),
+        description: String::new(),
+        metric: None,
+        comparator: None,
+        target_value: None,
+        block_value: None,
+        verify_cmd: None,
+        max_retries: 2,
+        blocking: true,
+        order_idx: 0,
+        created_by: "u".into(),
+    };
+    // delete_task
+    let lone = repo.create_task(new_task(&sid, "todo")).await.unwrap();
+    let lone_goal = repo
+        .create_goal(goal(Some(lone.project_id.clone()), Some(lone.id.clone())))
+        .await
+        .unwrap();
+    repo.delete_task(&lone.id).await.unwrap();
+    assert!(
+        repo.get_goal(&lone_goal.id).await.is_err(),
+        "task goal kept"
+    );
+
+    // clear_project_board
+    let nt = new_task(&sid, "todo");
+    let pid = nt.project_id.clone();
+    let t = repo.create_task(nt).await.unwrap();
+    let mut nt2 = new_task(&sid, "todo");
+    nt2.project_id = pid.clone();
+    nt2.title = "second".into();
+    let t2 = repo.create_task(nt2).await.unwrap();
+    let g1 = repo
+        .create_goal(goal(Some(pid.clone()), Some(t.id.clone())))
+        .await
+        .unwrap();
+    let g2 = repo
+        .create_goal(goal(Some(pid.clone()), Some(t2.id.clone())))
+        .await
+        .unwrap();
+    let project_goal = repo
+        .create_goal(goal(Some(pid.clone()), None))
+        .await
+        .unwrap();
+    let (tasks, _) = repo.clear_project_board(&pid).await.unwrap();
+    assert_eq!(tasks, 2);
+    assert!(repo.get_goal(&g1.id).await.is_err());
+    assert!(repo.get_goal(&g2.id).await.is_err());
+    assert!(
+        repo.get_goal(&project_goal.id).await.is_ok(),
+        "a project-level goal belongs to the project, not the board"
+    );
+}

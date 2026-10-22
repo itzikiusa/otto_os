@@ -44,6 +44,8 @@ mod k8s_monitor_clickhouse;
 mod mcp_auto_approve;
 #[path = "personal_agent_policy.rs"]
 mod personal_agent_policy;
+#[path = "personal_agents_owner.rs"]
+mod personal_agents_owner;
 #[path = "policy_coverage.rs"]
 mod policy_coverage;
 #[path = "proof_assemble_scope.rs"]
@@ -58,6 +60,8 @@ mod resume_missing_cwd;
 mod review_agent_retry;
 #[path = "review_comment_states.rs"]
 mod review_comment_states;
+#[path = "review_forge_post.rs"]
+mod review_forge_post;
 #[path = "rooms_api.rs"]
 mod rooms_api;
 #[path = "route_inventory.rs"]
@@ -68,6 +72,8 @@ mod router_mount;
 mod run_repo_scope;
 #[path = "runtime_lag.rs"]
 mod runtime_lag;
+#[path = "session_files.rs"]
+mod session_files;
 #[path = "session_screen.rs"]
 mod session_screen;
 #[path = "share_api.rs"]
@@ -76,6 +82,8 @@ mod share_api;
 mod share_otp;
 #[path = "share_scope_guard.rs"]
 mod share_scope_guard;
+#[path = "swarm_identity.rs"]
+mod swarm_identity;
 #[path = "swarm_router.rs"]
 mod swarm_router;
 #[path = "swarm_scope_api.rs"]

@@ -71,7 +71,7 @@
         <div class="sub-note"><Skeleton rows={2} height={18} label="the subagent transcript" /></div>
       {:else}
         {#if body?.error}
-          <div class="sub-note err">Could not load: {body.error}</div>
+          <div class="sub-note err">Couldn’t load: {body.error}</div>
           {#if body.retryable}<button class="btn small ghost" onclick={() => ctx.conv.loadSubagent(agentId)}>Retry</button>{/if}
         {/if}
         {#if !items.length && !body?.error}

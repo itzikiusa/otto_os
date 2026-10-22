@@ -38,7 +38,7 @@
   import EksView from './EksView.svelte';
   import RdsView from './RdsView.svelte';
   import LogsView from './LogsView.svelte';
-  import { logsRoute } from './util';
+  import { awsErrorText, logsRoute } from './util';
   import EnvBadge from '../../lib/components/EnvBadge.svelte';
   import Badge from '../../lib/components/Badge.svelte';
   import type { AwsAccount, AwsService, Feature } from '../../lib/api/types';
@@ -241,6 +241,16 @@
           {#if !viewport.isMobile || noAccounts}
             <AccountsOverview onadd={openCreate} onedit={openEdit} ondelete={(a) => void deleteAccount(a)} onsignin={(a) => void signIn(a)} />
           {/if}
+        {:else if aws.accountsError && !aws.accounts.length}
+          <!-- A failed account list is not a stale link: say so, with Retry. -->
+          <LoadState
+            variant="page"
+            what="AWS accounts"
+            loading={aws.accountsLoading}
+            error={awsErrorText(aws.accountsError)}
+            empty
+            onretry={() => void aws.loadAccounts()}
+          />
         {:else if !aws.accountsLoaded}
           <div class="pad"><Skeleton rows={5} label="accounts" /></div>
         {:else if !account}

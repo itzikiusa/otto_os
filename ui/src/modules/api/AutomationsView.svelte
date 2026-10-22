@@ -4,6 +4,7 @@
   // main area (AutomationEditor) — the sidebar only lists and creates.
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import { apiClient } from '../../lib/stores/apiClient.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
@@ -26,7 +27,15 @@
 </script>
 
 <div class="auto-list-wrap">
-  {#if apiClient.automations.length === 0}
+  <!-- A failed / in-flight load is not "No automations yet". -->
+  <LoadState
+    what="automations"
+    loading={apiClient.automationsLoading}
+    error={apiClient.automationsError}
+    empty={apiClient.automations.length === 0}
+    onretry={() => void apiClient.loadAutomations({ force: true })}
+  >
+    {#snippet emptyView()}
     <EmptyState
       icon="zap"
       title="No automations yet"
@@ -37,7 +46,7 @@
     >
       {#if apiClient.requests.length === 0}<p class="hint">Save a request first: automations run saved requests.</p>{/if}
     </EmptyState>
-  {:else}
+    {/snippet}
     <div class="head">
       <span class="lead">Saved request sequences with checks.</span>
       {#if canEdit}
@@ -55,7 +64,7 @@
         </li>
       {/each}
     </ul>
-  {/if}
+  </LoadState>
 </div>
 
 <style>

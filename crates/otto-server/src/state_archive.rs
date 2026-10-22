@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 use sqlx::{Row, SqliteConnection};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 pub const MAX_ARCHIVE_BYTES: usize = 256 * 1024 * 1024;
@@ -675,19 +675,31 @@ pub async fn restore_snapshot(
 ) -> ApiResult<RestoreResult> {
     // Own the transaction/publication even if the initiating HTTP client disconnects.
     let ctx = ctx.clone();
-    let archive = archive.clone();
-    tokio::spawn(async move { restore_owned(&ctx, &archive, options).await })
+    let archive = std::sync::Arc::new(archive.clone());
+    tokio::spawn(async move { restore_owned(&ctx, archive, options).await })
         .await
         .map_err(|e| invalid(&format!("Restore worker: {e}")))?
 }
 async fn restore_owned(
     ctx: &ServerCtx,
-    archive: &StateArchive,
+    shared: std::sync::Arc<StateArchive>,
     options: RestoreOptions,
 ) -> ApiResult<RestoreResult> {
     if !options.confirm || options.preview_token.is_empty() {
         return Err(invalid("Review a preview and confirm before restoring"));
     }
+    let archive: &StateArchive = &shared;
+    // Decode, write and fsync every archive file into a private stage dir
+    // BEFORE the write lock, on the blocking pool (backend-performance-4-01):
+    // this is the bulk of a restore's I/O, and under `BEGIN IMMEDIATE` it held
+    // every other daemon writer (status transitions, trails, usage) past
+    // `busy_timeout`. Files that turn out to be skipped are staged for nothing
+    // and dropped with the dir.
+    let stage = {
+        let data_dir = ctx.data_dir.clone();
+        let archive = shared.clone();
+        crate::offload::blocking(move || stage_files(&data_dir, &archive)).await?
+    };
     // IMMEDIATE for the same reason as the preview: take the write lock (with
     // busy_timeout) before the first read, never upgrade mid-transaction.
     let mut tx = ctx
@@ -698,13 +710,14 @@ async fn restore_owned(
     let tables = validate_archive(&mut tx, archive).await?;
     let id = restore_id(archive)?;
     let rows = apply_rows(&mut tx, &ctx.data_dir, archive, &tables, &id).await?;
-    let (pending, file_conflicts, file_signature) = plan_files(
-        ctx,
-        archive,
-        &id,
-        &rows.skipped_vaults,
-        &rows.skipped_owners,
-    )?;
+    // The existence probes (one openat chain per file) run on the blocking
+    // pool, not on the runtime worker that holds the lock.
+    let (pending, file_conflicts, file_signature) = {
+        let (cx, archive, restore_id) = (ctx.clone(), shared.clone(), id.clone());
+        let (vaults, owners) = (rows.skipped_vaults.clone(), rows.skipped_owners.clone());
+        crate::offload::blocking(move || plan_files(&cx, &archive, &restore_id, &vaults, &owners))
+            .await?
+    };
     if preview_token(
         archive,
         options.conflicts,
@@ -723,43 +736,24 @@ async fn restore_owned(
             "Restore has conflicts; choose skip existing or use another profile".into(),
         )));
     }
-    // Decode and stage every file before any canonical asset is published.
-    let stage = tempfile::Builder::new()
-        .prefix("otto-restore-")
-        .tempdir_in(&ctx.data_dir)
-        .map_err(|e| invalid(&e.to_string()))?;
-    for (_, index) in &pending {
-        let bytes = STANDARD
-            .decode(&archive.files[*index].content_base64)
-            .map_err(|_| invalid("Invalid asset encoding"))?;
-        std::fs::write(stage.path().join(index.to_string()), bytes)
-            .map_err(|e| invalid(&e.to_string()))?;
-    }
-    let mut published: Vec<(String, String)> = vec![];
-    let mut skipped = file_conflicts.len();
-    for (relative, index) in &pending {
-        let bytes = match std::fs::read(stage.path().join(index.to_string())) {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                rollback_files(ctx, &published);
-                return Err(invalid(&error.to_string()));
-            }
-        };
-        match files::publish(&ctx.data_dir, relative, &bytes) {
-            Ok(true) => published.push((relative.clone(), archive.files[*index].sha256.clone())),
-            Ok(false) if options.conflicts == ConflictPolicy::SkipExisting => skipped += 1,
-            Ok(false) => {
-                rollback_files(ctx, &published);
-                return Err(ApiError(Error::Conflict(
-                    "A destination appeared during restore; preview again".into(),
-                )));
-            }
-            Err(error) => {
-                rollback_files(ctx, &published);
-                return Err(error);
-            }
+    // Publish from the stage on the blocking pool: a no-replace rename per
+    // file (the bytes are already durable), so the lock is held for metadata
+    // operations only — no second write, read-back or per-file fsync.
+    let published = {
+        let (data_dir, archive, policy) = (ctx.data_dir.clone(), shared.clone(), options.conflicts);
+        let stage_dir = stage.path().to_path_buf();
+        crate::offload::blocking(move || {
+            publish_staged(&data_dir, &stage_dir, &archive, &pending, policy)
+        })
+        .await
+    };
+    let (published, skipped) = match published {
+        Ok((published, skipped)) => (published, skipped + file_conflicts.len()),
+        Err((error, published)) => {
+            rollback_files(ctx, &published);
+            return Err(error);
         }
-    }
+    };
     if let Err(error) = tx.commit().await {
         rollback_files(ctx, &published);
         return Err(db_error(error));
@@ -789,6 +783,129 @@ async fn restore_owned(
         reconnect: archive.reconnect.clone(),
     })
 }
+/// Decode, write and fsync every archive file into a fresh stage dir under
+/// `data_dir` (named by its archive index). Runs before the write lock.
+fn stage_files(data_dir: &Path, archive: &StateArchive) -> ApiResult<tempfile::TempDir> {
+    let stage = tempfile::Builder::new()
+        .prefix("otto-restore-")
+        .tempdir_in(data_dir)
+        .map_err(|e| invalid(&e.to_string()))?;
+    for (index, file) in archive.files.iter().enumerate() {
+        let bytes = STANDARD
+            .decode(&file.content_base64)
+            .map_err(|_| invalid("Invalid asset encoding"))?;
+        // 0600 like an exclusive publish: the staged file IS what gets
+        // renamed into place.
+        let mut out = {
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(stage.path().join(index.to_string()))
+        }
+        .map_err(|e| invalid(&e.to_string()))?;
+        std::io::Write::write_all(&mut out, &bytes)
+            .and_then(|_| out.sync_all())
+            .map_err(|e| invalid(&e.to_string()))?;
+    }
+    Ok(stage)
+}
+
+/// `(relative path, sha256)` of every file a restore has put in place.
+type Published = Vec<(String, String)>;
+
+/// Publish every pending staged file into place with a no-replace rename
+/// (`renameatx_np(RENAME_EXCL)` / `renameat2(RENAME_NOREPLACE)`): the bytes
+/// were written and fsynced before the lock, so this is metadata only. A
+/// filesystem without the no-replace rename falls back to an exclusive-create
+/// copy ([`files::publish`]). Returns the published `(relative, sha256)` pairs
+/// and how many existing destinations were skipped; on failure, the error plus
+/// what was already published (the caller rolls those back).
+fn publish_staged(
+    data_dir: &Path,
+    stage: &Path,
+    archive: &StateArchive,
+    pending: &[(String, usize)],
+    policy: ConflictPolicy,
+) -> Result<(Published, usize), (ApiError, Published)> {
+    let mut published: Published = vec![];
+    let mut skipped = 0;
+    let stage_fd = match rustix::fs::open(stage, dir_flags(), rustix::fs::Mode::empty()) {
+        Ok(fd) => fd,
+        Err(error) => return Err((invalid(&error.to_string()), published)),
+    };
+    for (relative, index) in pending {
+        let name = index.to_string();
+        let wrote = match publish_renamed(data_dir, &stage_fd, &name, relative) {
+            Ok(Some(done)) => Ok(done),
+            Ok(None) => std::fs::read(stage.join(&name))
+                .map_err(|e| invalid(&e.to_string()))
+                .and_then(|bytes| files::publish(data_dir, relative, &bytes)),
+            Err(error) => Err(error),
+        };
+        match wrote {
+            Ok(true) => published.push((relative.clone(), archive.files[*index].sha256.clone())),
+            Ok(false) if policy == ConflictPolicy::SkipExisting => skipped += 1,
+            Ok(false) => {
+                return Err((
+                    ApiError(Error::Conflict(
+                        "A destination appeared during restore; preview again".into(),
+                    )),
+                    published,
+                ))
+            }
+            Err(error) => return Err((error, published)),
+        }
+    }
+    Ok((published, skipped))
+}
+
+fn dir_flags() -> rustix::fs::OFlags {
+    use rustix::fs::OFlags;
+    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC
+}
+
+/// Rename staged `name` to `relative` under `data_dir` without replacing:
+/// `Some(true)` published, `Some(false)` the destination exists, `None` the
+/// filesystem has no no-replace rename (the caller copies instead). Parents
+/// are walked (and created 0700) with no-follow opens, so no symlink in the
+/// destination path can redirect the publish — the same discipline as
+/// [`files::publish`].
+fn publish_renamed(
+    data_dir: &Path,
+    stage_fd: &rustix::fd::OwnedFd,
+    name: &str,
+    relative: &str,
+) -> ApiResult<Option<bool>> {
+    use rustix::fs::{self as rfs, Mode, RenameFlags};
+    use rustix::io::Errno;
+    let fail = |e: Errno| invalid(&e.to_string());
+    let parts = files::relative(relative)?;
+    let mut fd = rfs::open(data_dir, dir_flags(), Mode::empty()).map_err(fail)?;
+    for part in &parts[..parts.len() - 1] {
+        let child = match rfs::openat(&fd, *part, dir_flags(), Mode::empty()) {
+            Ok(child) => child,
+            Err(Errno::NOENT) => {
+                match rfs::mkdirat(&fd, *part, Mode::from_raw_mode(0o700)) {
+                    Ok(()) | Err(Errno::EXIST) => {}
+                    Err(e) => return Err(fail(e)),
+                }
+                rfs::openat(&fd, *part, dir_flags(), Mode::empty()).map_err(fail)?
+            }
+            Err(e) => return Err(fail(e)),
+        };
+        fd = child;
+    }
+    let leaf = parts[parts.len() - 1];
+    match rfs::renameat_with(stage_fd, name, &fd, leaf, RenameFlags::NOREPLACE) {
+        Ok(()) => Ok(Some(true)),
+        Err(Errno::EXIST) => Ok(Some(false)),
+        Err(Errno::INVAL | Errno::NOTSUP | Errno::NOSYS | Errno::XDEV) => Ok(None),
+        Err(e) => Err(fail(e)),
+    }
+}
+
 /// Remove only unchanged bytes this restore created; never remove modified or
 /// replaced user files during rollback. Empty created directories may remain.
 fn rollback_files(ctx: &ServerCtx, files: &[(String, String)]) {
@@ -799,3 +916,39 @@ fn rollback_files(ctx: &ServerCtx, files: &[(String, String)]) {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod restore_publish_tests {
+    use super::*;
+
+    /// backend-performance-4-01: a staged file is moved into place without
+    /// replacing an existing one, and a symlinked parent is refused.
+    #[test]
+    fn staged_files_are_renamed_into_place_without_replacing() {
+        let data = tempfile::TempDir::new().unwrap();
+        let stage = data.path().join("stage");
+        std::fs::create_dir(&stage).unwrap();
+        std::fs::write(stage.join("0"), b"new").unwrap();
+        std::fs::write(stage.join("1"), b"other").unwrap();
+        let stage_fd = rustix::fs::open(&stage, dir_flags(), rustix::fs::Mode::empty()).unwrap();
+        assert_eq!(
+            publish_renamed(data.path(), &stage_fd, "0", "a/b/f.txt").unwrap(),
+            Some(true)
+        );
+        assert_eq!(
+            std::fs::read(data.path().join("a/b/f.txt")).unwrap(),
+            b"new"
+        );
+        assert!(!stage.join("0").exists(), "moved, not copied");
+        assert_eq!(
+            publish_renamed(data.path(), &stage_fd, "1", "a/b/f.txt").unwrap(),
+            Some(false)
+        );
+        assert_eq!(
+            std::fs::read(data.path().join("a/b/f.txt")).unwrap(),
+            b"new"
+        );
+        std::os::unix::fs::symlink(data.path().join("a"), data.path().join("link")).unwrap();
+        assert!(publish_renamed(data.path(), &stage_fd, "1", "link/f.txt").is_err());
+    }
+}

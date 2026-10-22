@@ -74,10 +74,20 @@ test('Mongo URI: an unencoded `/` in the password never stays visible (S16-307)'
   const q = form(); q.parseDsn('mongodb://h1:27017/db?appName=a@b');
   assert.equal(q.secret, '');
   assert.equal(q.fConnString, 'mongodb://h1:27017/db?appName=a@b');
-  // An unparsable URI with credentials says how to fix it.
-  let msg = '';
-  const r = form({ toasts: { error: (_t: string, m: string) => (msg = m), success: () => {} } });
-  r.parseDsn('mongodb://app:pa/ss@h/db');
-  assert.match(msg, /percent-encode/);
+  // An unparsable URI with credentials says how to fix it (inline, ux-design-4-06).
+  const r = form();
+  assert.match(r.parseDsn('mongodb://app:pa/ss@h/db'), /Percent-encode/);
   assert.equal(r.fConnString, '');
+});
+// ux-design-4-06: a URI that can't be read is an inline field error (the
+// caller keeps the pasted value open beside it), never a toast-then-clear.
+test('an unreadable or unknown-scheme URI returns an inline error and toasts nothing', () => {
+  const toasted: string[] = [];
+  const c = form({ toasts: { error: (t: string) => toasted.push(t), success: () => {} } });
+  assert.match(c.parseDsn('mysql://app:pa/ss@db:3306/x'), /^Couldn’t read this connection URL\. Percent-encode/);
+  assert.match(c.parseDsn('just some text'), /^Couldn’t read this connection URL\./);
+  assert.match(c.parseDsn('ftp://host/x'), /“ftp:\/\/” isn’t a scheme Otto knows/);
+  assert.deepEqual(toasted, []);
+  assert.equal(c.parseDsn('mysql://app@db:3306/x'), null);
+  assert.equal(c.parseDsn('   '), null);
 });

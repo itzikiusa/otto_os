@@ -22,7 +22,7 @@
 </script>
 
 {#if !view.ok}
-  <PreviewError title="Could not parse table" message={view.error} />
+  <PreviewError title="Couldn’t parse the table" message={view.error} />
 {:else if view.v.header.length === 0}
   <div class="state">Empty table — nothing to show yet.</div>
 {:else}

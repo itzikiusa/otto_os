@@ -1069,11 +1069,20 @@ impl CodexState<'_> {
 
 /// `payload.model` as a string, or `model.name|id|slug` for the object form.
 fn model_of(v: &Value) -> Option<String> {
-    match v.get("model")? {
+    model_name(v.get("model")?)
+}
+
+/// The ONE Codex model-id reader (architecture-1-16): a `model` value is
+/// either the id itself or an object carrying it as `name`, `id` or `slug`
+/// (first non-empty string wins); an empty id is no id. Shared by the
+/// conversation fold, the usage parser's `session_meta` reader and the usage
+/// tailer, which each used to keep their own copy.
+pub fn model_name(m: &Value) -> Option<String> {
+    match m {
         Value::String(s) if !s.is_empty() => Some(s.clone()),
         Value::Object(_) => ["name", "id", "slug"]
             .iter()
-            .find_map(|k| string_of(v.get("model")?, k)),
+            .find_map(|k| str_of(m, k).filter(|s| !s.is_empty()).map(str::to_string)),
         _ => None,
     }
 }
@@ -1539,5 +1548,28 @@ mod tests {
             command_line(Some(&serde_json::json!(["/bin/zsh", "-lc", "ls -la"]))),
             "ls -la"
         );
+    }
+}
+
+#[cfg(test)]
+mod model_name_tests {
+    use super::model_name;
+    use serde_json::json;
+
+    /// architecture-1-16: the one reader every Codex consumer shares.
+    #[test]
+    fn model_ids_come_from_the_string_or_the_first_non_empty_key() {
+        assert_eq!(model_name(&json!("gpt-5")), Some("gpt-5".into()));
+        assert_eq!(model_name(&json!("")), None);
+        assert_eq!(
+            model_name(&json!({"name": "a", "id": "b"})),
+            Some("a".into())
+        );
+        assert_eq!(
+            model_name(&json!({"name": "", "slug": "c"})),
+            Some("c".into())
+        );
+        assert_eq!(model_name(&json!({"other": "x"})), None);
+        assert_eq!(model_name(&json!(42)), None);
     }
 }

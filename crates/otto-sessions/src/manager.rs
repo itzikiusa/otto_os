@@ -200,63 +200,6 @@ async fn remove_codex_server_env_files(session_id: &Id) {
     }
 }
 
-/// Write the per-session Codex creds file (0600) carrying the token + routing the
-/// `ottod mcp-tools --config <path>` process reads. Returns the path on success.
-fn write_codex_creds(
-    session_id: &Id,
-    token: &str,
-    base: &str,
-    workspace_id: &str,
-    source: Option<&str>,
-) -> std::io::Result<std::path::PathBuf> {
-    let path = codex_creds_path(session_id);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let body = serde_json::json!({
-        "token": token,
-        "base": base,
-        "session_id": session_id.to_string(),
-        "workspace_id": workspace_id,
-        "source": source,
-    })
-    .to_string();
-    std::fs::write(&path, body)?;
-    // Lock down to owner-only — it holds a bearer token.
-    use std::os::unix::fs::PermissionsExt;
-    let mut perms = std::fs::metadata(&path)?.permissions();
-    perms.set_mode(0o600);
-    std::fs::set_permissions(&path, perms)?;
-    Ok(path)
-}
-
-/// Build the environment consumed by the first-party MCP subprocess for
-/// Claude/agy/grok sessions. Keep the session source in this pure builder: the
-/// docs-review read-only policy depends on it, and every env-based provider
-/// must receive the same policy context.
-fn otto_tools_env(
-    session: &Session,
-    token: &str,
-    base: &str,
-) -> std::collections::BTreeMap<String, String> {
-    let mut env = std::collections::BTreeMap::new();
-    env.insert("OTTO_MCP_TOKEN".to_string(), token.to_string());
-    env.insert("OTTO_MCP_BASE".to_string(), base.to_string());
-    env.insert("OTTO_SESSION_ID".to_string(), session.id.to_string());
-    env.insert(
-        "OTTO_WORKSPACE_ID".to_string(),
-        session.workspace_id.to_string(),
-    );
-    if let Some(source) = session
-        .meta
-        .get("source")
-        .and_then(serde_json::Value::as_str)
-    {
-        env.insert("OTTO_SESSION_SOURCE".to_string(), source.to_string());
-    }
-    env
-}
-
 #[derive(Default)]
 struct OttoToolsInjection {
     args: Vec<String>,
@@ -1147,6 +1090,11 @@ pub const SUSPEND_REASON_CAP: &str = "cap";
 pub const SUSPEND_REASON_RESTART: &str = "restart";
 /// An explicit [`SessionManager::suspend`] call (engines, API).
 pub const SUSPEND_REASON_RELEASED: &str = "released";
+/// An explicit restart killed the old process and then could not start the
+/// new one (account apply, spawn, shutdown, provider-id write). The cause is
+/// in `meta.suspended.error` (error-handling-4-05: this used to be stamped
+/// `released`, so the pane blamed a memory-saving suspend).
+pub const SUSPEND_REASON_RESPAWN_FAILED: &str = "respawn_failed";
 
 /// The agent-trail lifecycle line for a suspend with `reason`.
 fn suspend_lifecycle_line(reason: &str) -> &'static str {
@@ -1154,6 +1102,7 @@ fn suspend_lifecycle_line(reason: &str) -> &'static str {
         SUSPEND_REASON_IDLE => "Suspended (idle — freed memory, still resumable)",
         SUSPEND_REASON_CAP => "Suspended (live-session cap — freed memory, still resumable)",
         SUSPEND_REASON_RESTART => "Suspended (daemon restart — still resumable)",
+        SUSPEND_REASON_RESPAWN_FAILED => "Restart failed (stopped, still resumable)",
         _ => "Suspended (freed memory, still resumable)",
     }
 }
@@ -1616,21 +1565,6 @@ const DEFAULT_INGEST_BASE: &str = "http://127.0.0.1:7700";
 /// Single source of truth lives in [`crate::names::DEFAULT_THEME`].
 const DEFAULT_NAME_THEME: &str = crate::names::DEFAULT_THEME;
 
-/// Owns live sessions: PTY handles keyed by session id plus persistence.
-/// Outcome of a name-addressed [`SessionManager::relay`].
-#[derive(Debug, Clone)]
-pub struct RelayOutcome {
-    /// Sessions the message was delivered to (empty when unaddressed).
-    pub session_ids: Vec<Id>,
-    /// True when the address was an explicit broadcast keyword ("all"/"everyone").
-    pub broadcast: bool,
-    /// True when `text` contained no recognizable session address — the caller
-    /// should fall back to its normal handling.
-    pub unaddressed: bool,
-    /// The message actually sent (address prefix stripped).
-    pub text: String,
-}
-
 /// Per-session bookkeeping for the provider-title auto-namer. Keeps the sweep
 /// cheap: once a session is `resolved` (a provider title was adopted, or the
 /// user claimed the name) it is never read again; otherwise `mtime` skips a
@@ -1647,6 +1581,7 @@ struct TitleProbe {
     gave_up: bool,
 }
 
+/// Owns live sessions: PTY handles keyed by session id plus persistence.
 pub struct SessionManager {
     /// Holders [`Self::adopt_holders`] could not decide on (a transient DB
     /// error on the session lookup), by session id → socket. Left running,
@@ -2217,15 +2152,10 @@ impl SessionManager {
         // One submission at a time per session (see `submit_locks`).
         let lock = self.submit_lock(id);
         let _submit = lock.lock().await;
-        // Defensive: a control byte inside the pasted text (an `ESC [ 2 0 1 ~`
-        // in a task title, say) would END the bracketed paste and turn the rest
-        // into keystrokes. Newlines/tabs are legitimate paste content.
-        let text: String = text
-            .chars()
-            .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
-            .collect();
-        let paste = format!("\x1b[200~{text}\x1b[201~");
-        self.input(id, paste.as_bytes()).await?;
+        // `bracketed_paste` strips control bytes: an `ESC [ 2 0 1 ~` in a task
+        // title would otherwise END the paste and type the rest as keystrokes.
+        self.input(id, &crate::submit::bracketed_paste(text))
+            .await?;
         tokio::time::sleep(Duration::from_millis(200)).await;
         self.input(id, b"\r").await
     }
@@ -2247,7 +2177,7 @@ impl SessionManager {
         text: &str,
         targets: Option<&[Id]>,
     ) -> Result<Vec<Id>> {
-        let sessions = self.list_by_workspace(ws).await?;
+        let sessions = self.live_agent_sessions(ws).await?;
         let mut hit = Vec::new();
         for s in sessions {
             let live = matches!(
@@ -2265,77 +2195,6 @@ impl SessionManager {
             }
         }
         Ok(hit)
-    }
-
-    /// Resolve a leading **name address** in `text` against this workspace's
-    /// live agent sessions and deliver the (address-stripped) message to the
-    /// matched session(s) — or broadcast it when addressed to "all".
-    ///
-    /// Examples: `"ronaldo: do X"` → the session named Ronaldo;
-    /// `"ronaldo, messi: ship it"` → both; `"all: stand down"` → broadcast.
-    /// When `text` carries no recognizable session address, returns
-    /// `unaddressed = true` and delivers nothing, so the caller can fall back to
-    /// its normal handling (e.g. AI orchestration). Only LIVE sessions are
-    /// addressable (a suspended one has no PTY to receive input).
-    pub async fn relay(&self, ws: &Id, text: &str) -> Result<RelayOutcome> {
-        let sessions = self.list_by_workspace(ws).await?;
-        let addressable: Vec<crate::names::Addressable> = sessions
-            .iter()
-            .filter(|s| {
-                s.kind == SessionKind::Agent
-                    && matches!(
-                        s.status,
-                        SessionStatus::Running | SessionStatus::Working | SessionStatus::Idle
-                    )
-            })
-            .map(|s| {
-                let handle = s
-                    .meta
-                    .get("name_handle")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(&s.title)
-                    .to_string();
-                let full = s
-                    .meta
-                    .get("name_full")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(&s.title)
-                    .to_string();
-                crate::names::Addressable {
-                    id: s.id.clone(),
-                    handle,
-                    title: s.title.clone(),
-                    full,
-                }
-            })
-            .collect();
-
-        let resolved = crate::names::resolve_address(text, &addressable);
-        if resolved.targets.is_empty() {
-            return Ok(RelayOutcome {
-                session_ids: vec![],
-                broadcast: false,
-                unaddressed: true,
-                text: text.to_string(),
-            });
-        }
-
-        let msg = resolved.text.trim();
-        let mut delivered = Vec::new();
-        for id in &resolved.targets {
-            if let Err(e) = self.submit_text(id, msg).await {
-                tracing::warn!(session = %id, "relay failed: {e}");
-                continue;
-            }
-            self.record_user_message(id, msg).await;
-            delivered.push(id.clone());
-        }
-        Ok(RelayOutcome {
-            session_ids: delivered,
-            broadcast: resolved.broadcast,
-            unaddressed: false,
-            text: msg.to_string(),
-        })
     }
 
     /// Prune the activity trail to the newest `keep_per_session` rows per
@@ -2663,6 +2522,7 @@ impl SessionManager {
                     .meta
                     .get("source")
                     .and_then(serde_json::Value::as_str),
+                &session_mcp_profiles(&session.meta),
             ) {
                 Ok(path) => {
                     return OttoToolsInjection {
@@ -3361,12 +3221,10 @@ impl SessionManager {
         }
         let used: std::collections::HashSet<String> = self
             .repo
-            .list_by_workspace(ws_id)
+            .open_agent_titles(ws_id)
             .await
             .ok()?
             .into_iter()
-            .filter(|s| !s.archived && s.kind == SessionKind::Agent)
-            .map(|s| s.title.to_lowercase())
             .collect();
         if crate::names::is_builtin(&active) {
             crate::names::allocate_builtin(&active, &used)
@@ -3394,6 +3252,29 @@ impl SessionManager {
     /// used to list only the caller's own sessions for non-admins (#L1).
     pub async fn list_by_workspace_for_user(&self, ws: &Id, user_id: &Id) -> Result<Vec<Session>> {
         self.repo.list_by_workspace_for_user(ws, user_id).await
+    }
+
+    /// The workspace's agent sessions that have a live PTY in this daemon,
+    /// fetched by id from the in-memory live map — a live-only caller never
+    /// decodes the workspace's whole session history
+    /// (backend-performance-4-03). Rows keep their stored status; callers
+    /// apply their own status rule.
+    pub async fn live_agent_sessions(&self, ws: &Id) -> Result<Vec<Session>> {
+        let ids: Vec<Id> = self.live.iter().map(|e| e.key().clone()).collect();
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let scope = otto_state::SessionScope {
+            workspace_id: ws.clone(),
+            owner: None,
+        };
+        let filter = otto_state::SessionListFilter {
+            archived: Some(false),
+            kind: Some("agent".into()),
+            ids: Some(ids),
+            ..Default::default()
+        };
+        self.repo.list_filtered(&[scope], &filter).await
     }
 
     /// Sessions across one or many workspace scopes with every narrowing
@@ -5608,6 +5489,8 @@ impl SessionManager {
             let _ = handle.kill();
         }
         self.repo.delete(id).await?;
+        // Its on-disk files (pasted images) go with the row.
+        self.remove_session_files(id).await;
         self.room_authority.prune_idle(id);
         self.ingest_tokens.remove(id);
         self.title_probe.remove(id);
@@ -5826,7 +5709,7 @@ impl SessionManager {
                     .revoke_mcp_token(&session.created_by, &session.id)
                     .await;
                 if had_live {
-                    self.respawn_failed(&session).await;
+                    self.respawn_failed(&session, &error).await;
                 }
                 return Err(error);
             }
@@ -5862,7 +5745,7 @@ impl SessionManager {
                     .revoke_mcp_token(&session.created_by, &session.id)
                     .await;
                 if had_live {
-                    self.respawn_failed(&session).await;
+                    self.respawn_failed(&session, &e).await;
                 }
                 return Err(e);
             }
@@ -5870,7 +5753,7 @@ impl SessionManager {
         if let Some(sid) = assigned_provider_id {
             if let Err(error) = self.repo.set_provider_session(id, &sid).await {
                 let _ = handle.kill();
-                self.respawn_failed(&session).await;
+                self.respawn_failed(&session, &error).await;
                 return Err(error);
             }
             session.provider_session_id = Some(sid);
@@ -6280,7 +6163,7 @@ impl SessionManager {
     /// `running`. Agent sessions become `Reconnectable` (stamped like a
     /// release, so the pane offers Resume); connection sessions — reopened
     /// only via their connection — become `Exited`.
-    async fn respawn_failed(&self, session: &Session) {
+    async fn respawn_failed(&self, session: &Session, cause: &Error) {
         let id = &session.id;
         self.forget_sweep_state(id);
         let status = if session.kind == SessionKind::Agent {
@@ -6288,8 +6171,11 @@ impl SessionManager {
         } else {
             SessionStatus::Exited
         };
+        // Emit only what was stored: a status event for a write that failed
+        // would show the pane a state the row (and the next reload) doesn't.
         if let Err(e) = self.repo.update_status(id, status).await {
-            tracing::warn!(session = %id, "respawn failed; status write failed too: {e}");
+            tracing::warn!(session = %id, "respawn failed ({cause}); status write failed too: {e}");
+            return;
         }
         let _ = self.events.send(Event::SessionStatus {
             session_id: id.clone(),
@@ -6297,8 +6183,12 @@ impl SessionManager {
             status,
         });
         if status == SessionStatus::Reconnectable {
-            self.stamp_suspended(session, Some(SUSPEND_REASON_RELEASED))
-                .await;
+            self.stamp_suspended_with(
+                session,
+                Some(SUSPEND_REASON_RESPAWN_FAILED),
+                Some(&cause.to_string()),
+            )
+            .await;
         }
     }
 
@@ -6306,11 +6196,28 @@ impl SessionManager {
     /// and broadcast the new meta. Best-effort: a failed write only loses the
     /// pane's explanation, never the suspend itself.
     async fn stamp_suspended(&self, session: &Session, reason: Option<&'static str>) {
+        self.stamp_suspended_with(session, reason, None).await;
+    }
+
+    /// [`Self::stamp_suspended`] that also records `error` (the cause of a
+    /// failed restart, clipped) as `meta.suspended.error`.
+    async fn stamp_suspended_with(
+        &self,
+        session: &Session,
+        reason: Option<&'static str>,
+        error: Option<&str>,
+    ) {
         let value = match reason {
-            Some(reason) => serde_json::json!({
-                "reason": reason,
-                "at": chrono::Utc::now().to_rfc3339(),
-            }),
+            Some(reason) => {
+                let mut v = serde_json::json!({
+                    "reason": reason,
+                    "at": chrono::Utc::now().to_rfc3339(),
+                });
+                if let Some(error) = error {
+                    v["error"] = otto_core::text::clip_chars(error, 300).into();
+                }
+                v
+            }
             None => serde_json::Value::Null,
         };
         let patch = serde_json::json!({ "suspended": value });
@@ -6726,6 +6633,11 @@ fn missing_cwd_refusal_in(session: &Session, otto_data: &std::path::Path) -> Opt
 
 #[path = "manager/mcp_sync.rs"]
 mod mcp_sync;
+#[path = "manager/otto_tools_env.rs"]
+mod otto_tools_env;
+#[path = "manager/session_files.rs"]
+mod session_files;
+use otto_tools_env::{otto_tools_env, session_mcp_profiles, write_codex_creds};
 
 #[cfg(test)]
 #[path = "manager/tests/mod.rs"]

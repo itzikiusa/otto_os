@@ -49,26 +49,60 @@ pub fn merge_otto_region(existing: &str, new_block: &str) -> String {
 }
 
 /// Read the managed-skill manifest from `<skills_dir>/.otto-managed.json`.
-/// Missing or malformed manifests yield an empty list.
+/// Missing or malformed manifests yield an empty list (a lenient view for
+/// display); ownership decisions use [`read_manifest_checked`].
 pub fn read_manifest(skills_dir: &Path) -> Vec<String> {
-    let raw = match fs::read_to_string(skills_dir.join(MANIFEST_FILE)) {
+    read_manifest_checked(skills_dir).unwrap_or_default()
+}
+
+/// The manifest for an ownership decision: a MISSING file is "Otto owns
+/// nothing here" (`Ok(empty)`), but an unreadable or malformed one is an
+/// error. Degrading it to empty would make every Otto-installed skill in the
+/// dir "user-owned" for good, and the next write would replace the list with
+/// a single entry.
+pub fn read_manifest_checked(skills_dir: &Path) -> io::Result<Vec<String>> {
+    let path = skills_dir.join(MANIFEST_FILE);
+    let raw = match fs::read_to_string(&path) {
         Ok(r) => r,
-        Err(_) => return Vec::new(),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
     };
     serde_json::from_str::<Manifest>(&raw)
         .map(|m| m.skills)
-        .unwrap_or_default()
+        .map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "malformed {} ({e}); fix or delete it to let Otto manage skills there",
+                    path.display()
+                ),
+            )
+        })
 }
 
-/// Write the managed-skill manifest to `<skills_dir>/.otto-managed.json`.
+/// Write the managed-skill manifest to `<skills_dir>/.otto-managed.json`
+/// atomically: a temp file in the same dir, `sync_all`, then a rename, so a
+/// crash or full disk mid-write leaves the previous manifest intact instead
+/// of a truncated one.
 pub fn write_manifest(skills_dir: &Path, names: &[String]) -> io::Result<()> {
+    use std::io::Write;
     fs::create_dir_all(skills_dir)?;
     let manifest = Manifest {
         skills: names.to_vec(),
     };
     let json = serde_json::to_string_pretty(&manifest)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    fs::write(skills_dir.join(MANIFEST_FILE), json)
+    let tmp = skills_dir.join(format!("{MANIFEST_FILE}.{}.tmp", std::process::id()));
+    let written = (|| {
+        let mut f = fs::File::create(&tmp)?;
+        f.write_all(json.as_bytes())?;
+        f.sync_all()?;
+        fs::rename(&tmp, skills_dir.join(MANIFEST_FILE))
+    })();
+    if written.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    written
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -80,6 +114,27 @@ struct Manifest {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    /// data-integrity-4-04: missing ≠ malformed, and the write is atomic
+    /// (no temp file left behind, content replaced whole).
+    #[test]
+    fn manifest_missing_vs_malformed_and_atomic_write() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        assert!(read_manifest_checked(dir).unwrap().is_empty());
+        write_manifest(dir, &["a".into(), "b".into()]).unwrap();
+        assert_eq!(read_manifest_checked(dir).unwrap(), ["a", "b"]);
+        let leftovers: Vec<_> = fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty());
+        fs::write(dir.join(MANIFEST_FILE), "{\"skills\": [\"a\"").unwrap();
+        let err = read_manifest_checked(dir).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(read_manifest(dir).is_empty(), "lenient view stays lenient");
+    }
 
     #[test]
     fn create_from_empty() {

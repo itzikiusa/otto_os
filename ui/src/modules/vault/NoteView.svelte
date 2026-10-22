@@ -43,9 +43,9 @@
   import { vaultNote } from '../../lib/api/vault';
   import { ui } from '../../lib/stores/ui.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
-  import { renderMermaid } from '../canvas/mermaid';
+  import { renderMermaid } from '../../lib/render/mermaid';
   import { renderD2 } from '../canvas/d2';
-  import { renderNote, resolverFrom, slugifyHeading, stripFrontmatter } from './mdRender';
+  import { renderNote, resolverFrom, slugifyHeading, stripFrontmatter } from '../../lib/render/markdown';
   import { plainPreview, rendersOffThread } from './noteRenderPlan';
   import { renderNoteOffThread } from './noteRenderAsync';
   import RefineDrawer from './RefineDrawer.svelte';

@@ -25,6 +25,11 @@
   let query = $state('');
   let attaching = $state(false);
 
+  // The story list is a global library, but `attach-product` only accepts a
+  // story created in the SESSION's workspace (404 otherwise —
+  // api-contracts-4-01), so the picker lists just those.
+  const sessionWsId = $derived(ws.getSession(sessionId)?.workspace_id ?? ws.currentId);
+
   // A failed load used to fall through to "No product stories in this
   // workspace." — say it failed, with Retry.
   let loadError = $state<string | null>(null);
@@ -33,7 +38,7 @@
     loadError = null;
     void api
       .get<ProductStory[]>(`/workspaces/${wsId}/product/stories`)
-      .then((s) => { stories = s; loading = false; })
+      .then((s) => { stories = s.filter((x) => x.workspace_id === wsId); loading = false; })
       .catch((e) => {
         loadError = loadErrorText(e);
         loading = false;
@@ -41,7 +46,7 @@
   }
 
   $effect(() => {
-    const wsId = ws.currentId;
+    const wsId = sessionWsId;
     if (!wsId) { loading = false; return; }
     load(wsId);
   });
@@ -89,7 +94,7 @@
     {loading}
     error={loadError}
     empty={filtered.length === 0}
-    onretry={() => ws.currentId && load(ws.currentId)}
+    onretry={() => sessionWsId && load(sessionWsId)}
     rows={3}
   >
     {#snippet emptyView()}

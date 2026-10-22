@@ -433,31 +433,10 @@ impl ReviewFindingsRepo {
         }
     }
 
-    /// Mark all `open` findings for (workspace, repo, pr) that are NOT in
-    /// `seen_fingerprints` as `resolved` (they disappeared from this run).
-    /// Findings already in a terminal or manually-set state are left untouched.
-    pub async fn resolve_absent(
-        &self,
-        workspace_id: &str,
-        repo_id: &str,
-        pr_number: u64,
-        seen_fingerprints: &[&str],
-        run_id: &str,
-    ) -> Result<u64> {
-        self.resolve_absent_scoped(
-            workspace_id,
-            repo_id,
-            pr_number,
-            seen_fingerprints,
-            run_id,
-            None,
-            None,
-        )
-        .await
-    }
-
-    /// [`resolve_absent`](Self::resolve_absent) limited to the files the run
-    /// actually re-evaluated. With `Some(paths)` only findings whose `path` is
+    /// Mark the `open` / `fixing` findings for (workspace, repo, pr) that are
+    /// NOT in `seen_fingerprints` as `resolved` (they disappeared from this
+    /// run), limited to the files the run actually re-evaluated. Findings
+    /// already in a terminal or manually-set state are left untouched. With `Some(paths)` only findings whose `path` is
     /// in `paths` can resolve (path-less findings never do); an empty slice
     /// resolves nothing. `None` = the whole (repo, pr) scope — right for a PR,
     /// whose every run reviews the same change, and WRONG for local reviews:

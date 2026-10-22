@@ -2,8 +2,10 @@
 //!
 //! `broker_lag_alerts` — per-cluster topic/group alert thresholds; the metrics
 //! sweep in `otto-brokers::metrics` checks these and surfaces breaches in the
-//! GET response. `broker_replays` — append-only evidence rows written after each
-//! DLQ/replay run.
+//! GET response. `broker_replays` — one evidence row per DLQ/replay run,
+//! inserted as `running` before the first send, updated as messages are
+//! acknowledged, and finished `done` / `failed` (`interrupted` when the
+//! daemon stopped mid-run).
 
 use crate::DbPool;
 use chrono::Utc;
@@ -65,6 +67,8 @@ pub struct ReplayRow {
     pub count: i64,
     /// JSON array: each element is `{partition, offset, key?, outcome}`.
     pub evidence_json: String,
+    /// `running` | `done` | `failed` | `interrupted` (migration 0193).
+    pub status: String,
     pub created_at: DateTime<Utc>,
 }
 
@@ -76,6 +80,7 @@ fn row_to_replay(r: &sqlx::sqlite::SqliteRow) -> Result<ReplayRow> {
         target_topic: r.get("target_topic"),
         count: r.get::<i64, _>("count"),
         evidence_json: r.get("evidence_json"),
+        status: r.get("status"),
         created_at: ts(&r.get::<String, _>("created_at"))?,
     })
 }
@@ -193,9 +198,75 @@ impl BrokerOpsRepo {
         self.get_replay(&id).await
     }
 
+    /// Insert a `running` replay row with no evidence yet — the persisted
+    /// intent, written before the first message is sent.
+    pub async fn start_replay(
+        &self,
+        cluster_id: &Id,
+        source_topic: &str,
+        target_topic: &str,
+    ) -> Result<ReplayRow> {
+        let id = new_id();
+        sqlx::query(
+            "INSERT INTO broker_replays \
+             (id, cluster_id, source_topic, target_topic, count, evidence_json, status, created_at) \
+             VALUES (?, ?, ?, ?, 0, '[]', 'running', ?)",
+        )
+        .bind(&id)
+        .bind(cluster_id)
+        .bind(source_topic)
+        .bind(target_topic)
+        .bind(fmt(Utc::now()))
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("start replay"))?;
+        self.get_replay(&id).await
+    }
+
+    /// Store a replay's acknowledged evidence so far and its status (`running`
+    /// for a progress checkpoint, `done` / `failed` at the end).
+    pub async fn update_replay(
+        &self,
+        id: &Id,
+        count: i64,
+        evidence: serde_json::Value,
+        status: &str,
+    ) -> Result<()> {
+        let n = sqlx::query(
+            "UPDATE broker_replays SET count = ?, evidence_json = ?, status = ? WHERE id = ?",
+        )
+        .bind(count)
+        .bind(evidence.to_string())
+        .bind(status)
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("update replay"))?
+        .rows_affected();
+        if n == 0 {
+            return Err(otto_core::Error::NotFound(format!("replay {id}")));
+        }
+        Ok(())
+    }
+
+    /// Mark replays still `running` that started before `before` (this
+    /// daemon's start) as `interrupted`: their process is gone, and the row
+    /// keeps the evidence acknowledged up to the last checkpoint.
+    pub async fn mark_interrupted_replays(&self, before: DateTime<Utc>) -> Result<u64> {
+        Ok(sqlx::query(
+            "UPDATE broker_replays SET status = 'interrupted' \
+             WHERE status = 'running' AND created_at < ?",
+        )
+        .bind(fmt(before))
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("mark interrupted replays"))?
+        .rows_affected())
+    }
+
     pub async fn get_replay(&self, id: &Id) -> Result<ReplayRow> {
         let r = sqlx::query(
-            "SELECT id, cluster_id, source_topic, target_topic, count, evidence_json, created_at \
+            "SELECT id, cluster_id, source_topic, target_topic, count, evidence_json, status, created_at \
              FROM broker_replays WHERE id = ?",
         )
         .bind(id)
@@ -208,7 +279,7 @@ impl BrokerOpsRepo {
     /// Recent replay rows for a cluster (newest first, capped at `limit`).
     pub async fn recent_replays(&self, cluster_id: &Id, limit: i64) -> Result<Vec<ReplayRow>> {
         let rows = sqlx::query(
-            "SELECT id, cluster_id, source_topic, target_topic, count, evidence_json, created_at \
+            "SELECT id, cluster_id, source_topic, target_topic, count, evidence_json, status, created_at \
              FROM broker_replays WHERE cluster_id = ? \
              ORDER BY created_at DESC LIMIT ?",
         )
@@ -295,5 +366,47 @@ mod tests {
         let recent = repo.recent_replays(&cluster_id, 10).await.unwrap();
         assert_eq!(recent.len(), 1);
         assert_eq!(recent[0].id, r.id);
+        assert_eq!(r.status, "done", "the column default (migration 0193)");
+    }
+
+    /// data-integrity-4-05: running → checkpoint → interrupted at the next
+    /// start; a finished row is never re-marked.
+    #[tokio::test]
+    async fn replay_lifecycle_and_interrupted_sweep() {
+        let repo = BrokerOpsRepo::new(mem_pool().await);
+        let cluster_id = new_id();
+        let run = repo
+            .start_replay(&cluster_id, "dlq", "orders")
+            .await
+            .unwrap();
+        assert_eq!((run.status.as_str(), run.count), ("running", 0));
+        repo.update_replay(
+            &run.id,
+            2,
+            serde_json::json!([{"offset": 1}, {"offset": 2}]),
+            "running",
+        )
+        .await
+        .unwrap();
+        let done = repo
+            .start_replay(&cluster_id, "dlq", "orders")
+            .await
+            .unwrap();
+        repo.update_replay(&done.id, 0, serde_json::json!([]), "done")
+            .await
+            .unwrap();
+        // A replay started after the boot instant is not touched.
+        let boot = Utc::now() - chrono::Duration::seconds(60);
+        assert_eq!(repo.mark_interrupted_replays(boot).await.unwrap(), 0);
+        let later = Utc::now() + chrono::Duration::seconds(1);
+        assert_eq!(repo.mark_interrupted_replays(later).await.unwrap(), 1);
+        let r = repo.get_replay(&run.id).await.unwrap();
+        assert_eq!((r.status.as_str(), r.count), ("interrupted", 2));
+        assert_eq!(repo.get_replay(&done.id).await.unwrap().status, "done");
+        assert!(matches!(
+            repo.update_replay(&new_id(), 0, serde_json::json!([]), "done")
+                .await,
+            Err(otto_core::Error::NotFound(_))
+        ));
     }
 }

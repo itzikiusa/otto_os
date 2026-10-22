@@ -6,7 +6,7 @@
   import { vault } from './vault.svelte';
   import PropertiesEditor from './PropertiesEditor.svelte';
   import KnowledgeMetadata from './KnowledgeMetadata.svelte';
-  import { slugifyHeading } from './mdRender';
+  import { slugifyHeading } from '../../lib/render/markdown';
   import Icon from '../../lib/components/Icon.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { plural } from '../../lib/plural';

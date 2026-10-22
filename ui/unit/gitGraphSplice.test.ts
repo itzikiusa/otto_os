@@ -33,7 +33,7 @@ test('nothing to splice when the page covers everything held',()=>{
 test('rewinding a same-name ref outside the fresh prefix invalidates the retained tail', () => {
   const graph = componentFunctions(new URL('../src/modules/git/GraphView.svelte', import.meta.url), ['lostRef'], {
     commits: list('recent-1', 'recent-2', 'old-tip', 'base'), FIRST_PAGE: 2,
-    movedRefTips: new Set<string>(),
+    movedRefTips: new Set<string>(), newRefTips: new Set<string>(),
   });
   const refs = (sha: string) => ({ local: [{ name: 'old-branch', sha }], remote: [], tags: [] });
   assert.equal(graph.lostRef(refs('old-tip'), refs('base')), true);
@@ -49,7 +49,7 @@ test('a moved tip displaced from the fresh page also invalidates a spliced tail'
   const graph = componentFunctions(new URL('../src/modules/git/GraphView.svelte', import.meta.url), ['setRefs', 'lostRef', 'applyGraph'], {
     refs: { local: [{ name: 'side', sha: 'old-tip' }], remote: [], tags: [] }, refsKey: '',
     commits: list('recent', 'old-tip', 'base'), FIRST_PAGE: 2,
-    refRemoved: false, movedRefTips: new Set<string>(), loadGen: 1,
+    refRemoved: false, movedRefTips: new Set<string>(), newRefTips: new Set<string>(), loadGen: 1,
     reloadGraph: (full: boolean) => { reloads.push(full); },
     setCommits() {}, setHasMore() {}, setStashes() {}, setWorktrees() {},
     graphCache: { set() {} },
@@ -59,4 +59,42 @@ test('a moved tip displaced from the fresh page also invalidates a spliced tail'
   // New unrelated main commits displaced the old tip below the fresh boundary.
   graph.applyGraph({ gen: 1, more: false, commits: list('new', 'recent', 'old-tip', 'base'), want: 2 });
   assert.deepEqual(reloads, [true]);
+});
+
+test('a NEW ref whose tip is older than the fresh page re-reads the history in full', () => {
+  const reloads: boolean[] = [];
+  const newRefTips = new Set<string>();
+  const scope = {
+    refs: { local: [{ name: 'main', sha: 'recent' }], remote: [], tags: [] }, refsKey: '',
+    commits: list('recent', 'mid', 'base'), FIRST_PAGE: 2,
+    refRemoved: false, movedRefTips: new Set<string>(), newRefTips, loadGen: 1,
+    reloadGraph: (full: boolean) => { reloads.push(full); },
+    setCommits() {}, setHasMore() {}, setStashes() {}, setWorktrees() {},
+    graphCache: { set() {} },
+    commitsError: null, skipCursor: 3, hasMore: false, refreshFailures: 0, refreshError: null,
+  };
+  const graph = componentFunctions(new URL('../src/modules/git/GraphView.svelte', import.meta.url), ['setRefs', 'lostRef', 'applyGraph'], scope);
+  // A fetched branch whose (weeks-old) commits sit below the 2-commit page.
+  graph.setRefs({ local: [{ name: 'main', sha: 'recent' }], remote: [{ name: 'origin/old-feature', sha: 'old-feat' }], tags: [] });
+  assert.ok(newRefTips.has('old-feat'));
+  graph.applyGraph({ gen: 1, more: false, commits: list('recent', 'mid', 'base'), want: 2 });
+  assert.deepEqual(reloads, [true]);
+});
+
+test('a NEW ref whose tip is inside the fresh page keeps the splice path', () => {
+  const reloads: boolean[] = [];
+  const newRefTips = new Set<string>();
+  const graph = componentFunctions(new URL('../src/modules/git/GraphView.svelte', import.meta.url), ['setRefs', 'lostRef', 'applyGraph'], {
+    refs: { local: [{ name: 'main', sha: 'recent' }], remote: [], tags: [] }, refsKey: '',
+    commits: list('recent', 'mid', 'base'), FIRST_PAGE: 2,
+    refRemoved: false, movedRefTips: new Set<string>(), newRefTips, loadGen: 1,
+    reloadGraph: (full: boolean) => { reloads.push(full); },
+    setCommits() {}, setHasMore() {}, setStashes() {}, setWorktrees() {},
+    graphCache: { set() {} },
+    commitsError: null, skipCursor: 3, hasMore: false, refreshFailures: 0, refreshError: null,
+  });
+  graph.setRefs({ local: [{ name: 'main', sha: 'recent' }, { name: 'topic', sha: 'fresh' }], remote: [], tags: [] });
+  graph.applyGraph({ gen: 1, more: false, commits: list('fresh', 'recent', 'mid', 'base'), want: 2 });
+  assert.deepEqual(reloads, []);
+  assert.equal(newRefTips.size, 0);
 });

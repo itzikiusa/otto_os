@@ -147,7 +147,26 @@ impl BrokersService {
     /// Attach the operator-workflow repo (lag alerts + replay evidence). The
     /// daemon wiring (`otto-server` `boot/build.rs`) and its test fixture chain
     /// this; without it every lag-alert call fails "ops repo not initialised".
+    ///
+    /// Attaching it at boot also marks replays left `running` by a previous
+    /// daemon as `interrupted` (data-integrity-4-05): only rows created
+    /// before this instant, so a replay started right after boot is safe.
+    /// (`new` has no ops repo, so the sweep lives here; both run once at boot.)
     pub fn with_ops(mut self, ops: BrokerOpsRepo) -> Self {
+        if let Ok(rt) = tokio::runtime::Handle::try_current() {
+            let (sweep, boot) = (ops.clone(), chrono::Utc::now());
+            rt.spawn(async move {
+                match sweep.mark_interrupted_replays(boot).await {
+                    Ok(0) => {}
+                    Ok(n) => {
+                        tracing::warn!(count = n, "broker replays interrupted by a daemon stop")
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "marking interrupted broker replays failed")
+                    }
+                }
+            });
+        }
         self.ops = Some(ops);
         self
     }
@@ -843,11 +862,18 @@ impl BrokersService {
     /// then each offset is resolved per the requested mode and written back via
     /// `commit_offsets`. Guarded (prod/read-only) clusters require `confirm=true`;
     /// the HTTP handler enforces that before calling here.
+    ///
+    /// Refused with 409 unless the group is `Empty` or `Dead`: Kafka rejects a
+    /// member-less commit for an active or rebalancing group (integrations-4-04).
+    /// Every attempted commit — success or failure — writes a
+    /// `reset_group_offsets` audit entry with the outcome and per-partition
+    /// errors, since a failed commit can still have applied other partitions.
     pub async fn reset_group_offsets(
         &self,
         id: &Id,
         group: &str,
         req: &crate::types::GroupResetReq,
+        user_id: &Id,
     ) -> Result<GroupDetail> {
         if self.group_denied.contains_key(id) {
             return Err(Error::Forbidden(crate::kafka::GROUP_ACL_DENIED.to_string()));
@@ -866,6 +892,9 @@ impl BrokersService {
                 .await
                 .map_err(join)??
         };
+        if let Some(msg) = reset_blocked_reason(group, &detail.state) {
+            return Err(Error::Conflict(msg));
+        }
 
         // Build (topic, partition) → target offset map.
         let positions: std::collections::HashMap<(String, i32), i64> = {
@@ -889,14 +918,38 @@ impl BrokersService {
             .map_err(join)??
         };
 
-        // Write the offsets.
-        {
+        // Write the offsets, then audit the attempt whatever its outcome.
+        let partitions = positions.len();
+        let outcome = {
             let client = client.clone();
             let g3 = g.clone();
             tokio::task::spawn_blocking(move || client.reset_offsets(&g3, positions))
                 .await
-                .map_err(join)??;
-        }
+                .map_err(join)?
+        };
+        let (status, error, partition_errors) = match &outcome {
+            Ok(()) => ("ok", None, Vec::new()),
+            Err(f) => (
+                "failed",
+                Some(f.error.to_string()),
+                f.partition_errors.clone(),
+            ),
+        };
+        self.audit_write(
+            id,
+            user_id,
+            "reset_group_offsets",
+            serde_json::json!({
+                "group": group,
+                "topic": req.topic,
+                "partitions": partitions,
+                "outcome": status,
+                "error": error,
+                "partition_errors": partition_errors,
+            }),
+        )
+        .await;
+        outcome.map_err(|f| f.into_error())?;
 
         // Return updated detail.
         let client2 = client.clone();
@@ -1037,6 +1090,7 @@ impl BrokersService {
             (total_lag_before - partitions.iter().map(|p| p.lag_delta).sum::<i64>()).max(0);
 
         Ok(DryRunResp {
+            warning: reset_blocked_reason(group, &detail.state),
             group: group.to_string(),
             partitions,
             total_lag_before,
@@ -1048,7 +1102,15 @@ impl BrokersService {
 
     /// Read messages from `source_topic`, apply an optional transform, and produce
     /// each one to `target_topic`, recording an evidence row.
-    pub async fn replay(&self, cluster_id: &Id, req: &ReplayReq) -> Result<ReplayResp> {
+    ///
+    /// `user_id` attributes the `replay.start` audit entry, written once the
+    /// evidence row exists and before the first message is produced.
+    pub async fn replay(
+        &self,
+        cluster_id: &Id,
+        req: &ReplayReq,
+        user_id: &Id,
+    ) -> Result<ReplayResp> {
         // Reject unsupported selections before opening a broker connection.
         let consume_req = selector_to_consume_req(&req.selector)?;
         let (client, _registry) = self.client_for(cluster_id).await?;
@@ -1066,8 +1128,25 @@ impl BrokersService {
             return Err(Error::Invalid("Replay selection exceeded the 16 MiB read budget or could not be read completely before its deadline. Narrow the selection and retry; no messages were published.".into()));
         }
         let messages = replay_selection(&req.selector, raw.messages);
-        Ok(
-            crate::replay::publish(self.ops.as_ref(), cluster_id, req, messages, |m| {
+        let message_count = messages.len();
+        Ok(crate::replay::publish(
+            self.ops.as_ref(),
+            cluster_id,
+            req,
+            messages,
+            |replay_id| {
+                let detail = serde_json::json!({
+                    "replay_id": replay_id,
+                    "source_topic": req.source_topic,
+                    "target_topic": req.target_topic,
+                    "messages": message_count,
+                });
+                async move {
+                    self.audit_write(cluster_id, user_id, "replay.start", detail)
+                        .await
+                }
+            },
+            |m| {
                 let client = client.clone();
                 let topic = req.target_topic.clone();
                 async move {
@@ -1081,9 +1160,9 @@ impl BrokersService {
                         )
                         .await
                 }
-            })
-            .await,
+            },
         )
+        .await)
     }
 
     // ---- lag alerts ---------------------------------------------------------
@@ -1590,6 +1669,24 @@ fn lag_alert_from_row(
     }
 }
 
+/// PC-5 / integrations-4-04: Kafka accepts a member-less offset commit only
+/// for a group with no live members. `Some(message)` when a reset of a group
+/// in `state` would fail (or race its consumers).
+pub(crate) fn reset_blocked_reason(group: &str, state: &str) -> Option<String> {
+    let state = state.trim();
+    if state.eq_ignore_ascii_case("empty") || state.eq_ignore_ascii_case("dead") {
+        return None;
+    }
+    let state = if state.is_empty() {
+        "in an unknown state"
+    } else {
+        state
+    };
+    Some(format!(
+        "consumer group {group} is {state}; stop its consumers first"
+    ))
+}
+
 #[cfg(test)]
 mod consume_bounds_tests {
     use super::*;
@@ -1871,6 +1968,7 @@ mod replay_integrity_tests {
                         transform: None,
                         confirm: true,
                     },
+                    &"tester".into(),
                 )
                 .await;
             assert!(
@@ -1987,6 +2085,7 @@ mod replay_integrity_tests {
                     transform,
                     confirm: true,
                 },
+                &"tester".into(),
             )
             .await
             .unwrap();
@@ -2197,5 +2296,42 @@ mod replay_integrity_tests {
             Some(vec![]),
             "base64 can represent a present zero-byte payload"
         );
+    }
+}
+
+#[cfg(test)]
+mod reset_guard_tests {
+    use super::*;
+
+    /// integrations-4-04: only a member-less group can take a reset; the
+    /// message names the group and its state (and is the dry-run warning).
+    #[test]
+    fn reset_is_refused_for_groups_with_live_members() {
+        assert_eq!(reset_blocked_reason("g", "Empty"), None);
+        assert_eq!(reset_blocked_reason("g", "dead"), None);
+        assert_eq!(
+            reset_blocked_reason("orders", "Stable").as_deref(),
+            Some("consumer group orders is Stable; stop its consumers first")
+        );
+        assert!(reset_blocked_reason("g", "PreparingRebalance").is_some());
+        assert_eq!(
+            reset_blocked_reason("g", " ").as_deref(),
+            Some("consumer group g is in an unknown state; stop its consumers first")
+        );
+    }
+
+    #[test]
+    fn reset_failure_names_the_partitions_it_did_not_apply() {
+        let f = crate::kafka::ResetFailure {
+            error: Error::Upstream("Broker: Topic authorization failed".into()),
+            partition_errors: vec![crate::types::PartitionError {
+                topic: "payments".into(),
+                partition: 2,
+                error: "Broker: Topic authorization failed".into(),
+            }],
+        };
+        let msg = f.into_error().to_string();
+        assert!(msg.contains("payments[2]"), "{msg}");
+        assert!(msg.contains("the others were committed"), "{msg}");
     }
 }

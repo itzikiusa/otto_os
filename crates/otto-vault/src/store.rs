@@ -452,15 +452,6 @@ impl Store {
             .collect())
     }
 
-    pub async fn upsert_note(&self, vault: i64, n: &NoteRow) -> Result<()> {
-        let mut conn = self
-            .pool
-            .acquire()
-            .await
-            .map_err(dberr("vault.note.acquire"))?;
-        Self::upsert_note_conn(&mut conn, vault, n).await
-    }
-
     async fn upsert_note_conn(
         conn: &mut sqlx::SqliteConnection,
         vault: i64,
@@ -627,20 +618,26 @@ impl Store {
         Ok(())
     }
 
-    pub async fn remove_note(&self, vault: i64, path: &str) -> Result<()> {
+    /// Delete `paths`' notes with their links, tags and FTS rows in ONE
+    /// transaction (a scan's pruned notes, batched).
+    pub async fn remove_notes_batch(&self, vault: i64, paths: &[String]) -> Result<()> {
+        if paths.is_empty() {
+            return Ok(());
+        }
+        let json = serde_json::to_string(paths).map_err(|e| Error::Internal(e.to_string()))?;
         let mut tx = self
             .pool
             .begin()
             .await
             .map_err(dberr("vault.remove.begin"))?;
         for sql in [
-            "DELETE FROM vault_notes WHERE vault_id = ? AND path = ?",
-            "DELETE FROM vault_links WHERE vault_id = ? AND src_path = ?",
-            "DELETE FROM vault_tags WHERE vault_id = ? AND path = ?",
+            "DELETE FROM vault_notes WHERE vault_id = ? AND path IN (SELECT value FROM json_each(?))",
+            "DELETE FROM vault_links WHERE vault_id = ? AND src_path IN (SELECT value FROM json_each(?))",
+            "DELETE FROM vault_tags WHERE vault_id = ? AND path IN (SELECT value FROM json_each(?))",
         ] {
             sqlx::query(sql)
                 .bind(vault)
-                .bind(path)
+                .bind(&json)
                 .execute(&mut *tx)
                 .await
                 .map_err(dberr("vault.remove_note"))?;
@@ -653,17 +650,21 @@ impl Store {
         .await
         .map_err(dberr("vault.remove.fts_check"))?;
         if fts && map {
-            fts_del_conn(&mut tx, vault, path)
-                .await
-                .map_err(dberr("vault.remove.fts"))?;
+            for path in paths {
+                fts_del_conn(&mut tx, vault, path)
+                    .await
+                    .map_err(dberr("vault.remove.fts"))?;
+            }
         } else if fts {
             // Map not built yet (FTS never ensured by this daemon): the old scan.
-            sqlx::query("DELETE FROM vault_fts WHERE vault_id=? AND path=?")
-                .bind(vault)
-                .bind(path)
-                .execute(&mut *tx)
-                .await
-                .map_err(dberr("vault.remove.fts"))?;
+            sqlx::query(
+                "DELETE FROM vault_fts WHERE vault_id=? AND path IN (SELECT value FROM json_each(?))",
+            )
+            .bind(vault)
+            .bind(&json)
+            .execute(&mut *tx)
+            .await
+            .map_err(dberr("vault.remove.fts"))?;
         }
         tx.commit().await.map_err(dberr("vault.remove.commit"))?;
         Ok(())
@@ -690,13 +691,50 @@ impl Store {
         Ok(())
     }
 
-    pub async fn remove_file(&self, vault: i64, path: &str) -> Result<()> {
-        sqlx::query("DELETE FROM vault_files WHERE vault_id = ? AND path = ?")
+    /// Upsert many `(path, size, mtime_ns)` file rows in ONE transaction (a
+    /// scan's changed non-note files, batched instead of an autocommit each).
+    pub async fn upsert_files_batch(&self, vault: i64, files: &[(String, i64, i64)]) -> Result<()> {
+        if files.is_empty() {
+            return Ok(());
+        }
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(dberr("vault.upsert_files.begin"))?;
+        for (path, size, mtime_ns) in files {
+            sqlx::query(
+                "INSERT INTO vault_files (vault_id, path, size, mtime_ns) VALUES (?,?,?,?) \
+                 ON CONFLICT(vault_id, path) DO UPDATE SET size=excluded.size, mtime_ns=excluded.mtime_ns",
+            )
             .bind(vault)
             .bind(path)
-            .execute(&self.pool)
+            .bind(size)
+            .bind(mtime_ns)
+            .execute(&mut *tx)
             .await
-            .map_err(dberr("vault.remove_file"))?;
+            .map_err(dberr("vault.upsert_file"))?;
+        }
+        tx.commit()
+            .await
+            .map_err(dberr("vault.upsert_files.commit"))?;
+        Ok(())
+    }
+
+    /// Delete `paths`' file rows with one statement.
+    pub async fn remove_files_batch(&self, vault: i64, paths: &[String]) -> Result<()> {
+        if paths.is_empty() {
+            return Ok(());
+        }
+        let json = serde_json::to_string(paths).map_err(|e| Error::Internal(e.to_string()))?;
+        sqlx::query(
+            "DELETE FROM vault_files WHERE vault_id = ? AND path IN (SELECT value FROM json_each(?))",
+        )
+        .bind(vault)
+        .bind(&json)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("vault.remove_file"))?;
         Ok(())
     }
 
@@ -739,52 +777,6 @@ impl Store {
     }
 
     // -- links / tags ---------------------------------------------------------
-
-    pub async fn replace_links(&self, vault: i64, src: &str, links: &[OutgoingLink]) -> Result<()> {
-        sqlx::query("DELETE FROM vault_links WHERE vault_id = ? AND src_path = ?")
-            .bind(vault)
-            .bind(src)
-            .execute(&self.pool)
-            .await
-            .map_err(dberr("vault.replace_links"))?;
-        for (i, l) in links.iter().enumerate() {
-            sqlx::query(
-                "INSERT INTO vault_links (vault_id, src_path, raw_target, dst_path, kind, anchor, alias, pos) \
-                 VALUES (?,?,?,?,?,?,?,?)",
-            )
-            .bind(vault)
-            .bind(src)
-            .bind(&l.raw_target)
-            .bind(&l.dst_path)
-            .bind(&l.kind)
-            .bind(&l.anchor)
-            .bind(&l.alias)
-            .bind(i as i64)
-            .execute(&self.pool)
-            .await
-            .map_err(dberr("vault.replace_links"))?;
-        }
-        Ok(())
-    }
-
-    pub async fn replace_tags(&self, vault: i64, path: &str, tags: &[String]) -> Result<()> {
-        sqlx::query("DELETE FROM vault_tags WHERE vault_id = ? AND path = ?")
-            .bind(vault)
-            .bind(path)
-            .execute(&self.pool)
-            .await
-            .map_err(dberr("vault.replace_tags"))?;
-        for t in tags {
-            sqlx::query("INSERT INTO vault_tags (vault_id, tag, path) VALUES (?,?,?)")
-                .bind(vault)
-                .bind(t)
-                .bind(path)
-                .execute(&self.pool)
-                .await
-                .map_err(dberr("vault.replace_tags"))?;
-        }
-        Ok(())
-    }
 
     pub async fn outgoing(&self, vault: i64, src: &str) -> Result<Vec<OutgoingLink>> {
         let rows = sqlx::query(
@@ -869,19 +861,6 @@ impl Store {
         Ok(rows.iter().map(|r| r.get("src_path")).collect())
     }
 
-    /// Paths of notes with at least one UNRESOLVED link (rename may have made
-    /// a previously-broken target valid, or vice versa).
-    pub async fn unresolved_sources(&self, vault: i64) -> Result<Vec<String>> {
-        let rows = sqlx::query(
-            "SELECT DISTINCT src_path FROM vault_links WHERE vault_id = ? AND dst_path IS NULL",
-        )
-        .bind(vault)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(dberr("vault.unresolved_sources"))?;
-        Ok(rows.iter().map(|r| r.get("src_path")).collect())
-    }
-
     /// Link rows whose lower-cased raw target contains `needle` (ASCII,
     /// lower-case) — the candidate set a newly created note can capture (F9).
     pub async fn links_mentioning(
@@ -937,16 +916,6 @@ impl Store {
                 )
             })
             .collect())
-    }
-
-    pub async fn update_link_dst(&self, rowid: i64, dst: Option<&str>) -> Result<()> {
-        sqlx::query("UPDATE vault_links SET dst_path = ? WHERE rowid = ?")
-            .bind(dst)
-            .bind(rowid)
-            .execute(&self.pool)
-            .await
-            .map_err(dberr("vault.update_link_dst"))?;
-        Ok(())
     }
 
     pub async fn tag_counts(&self, vault: i64) -> Result<Vec<TagCount>> {
@@ -1335,61 +1304,6 @@ impl Store {
         }
     }
 
-    /// bm25-ranked FTS search → `(path, snippet, score)`. `match_expr` must be a
-    /// sanitized FTS5 MATCH expression.
-    pub async fn fts_search(
-        &self,
-        vault: i64,
-        match_expr: &str,
-        limit: i64,
-    ) -> Result<Vec<(String, String, f32)>> {
-        let rows = sqlx::query(
-            "SELECT path, snippet(vault_fts, 3, '\u{2039}', '\u{203a}', '…', 14) AS snip, \
-             bm25(vault_fts) AS rank FROM vault_fts \
-             WHERE vault_id = ? AND vault_fts MATCH ? ORDER BY rank LIMIT ?",
-        )
-        .bind(vault)
-        .bind(match_expr)
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(dberr("vault.fts_search"))?;
-        Ok(rows
-            .iter()
-            .map(|r| {
-                let rank: f64 = r.get("rank");
-                (r.get("path"), r.get("snip"), -rank as f32)
-            })
-            .collect())
-    }
-
-    /// LIKE fallback when FTS5 is unavailable or the query has no FTS tokens.
-    pub async fn like_search(
-        &self,
-        vault: i64,
-        needle: &str,
-        limit: i64,
-    ) -> Result<Vec<(String, String, f32)>> {
-        let pat = format!("%{}%", like_escape(needle));
-        let rows = sqlx::query(
-            "SELECT path, title FROM vault_notes WHERE vault_id = ? AND \
-             (title LIKE ? ESCAPE '\\' OR path LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\') \
-             ORDER BY path LIMIT ?",
-        )
-        .bind(vault)
-        .bind(&pat)
-        .bind(&pat)
-        .bind(&pat)
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(dberr("vault.like_search"))?;
-        Ok(rows
-            .iter()
-            .map(|r| (r.get("path"), r.get::<String, _>("title"), 0.1f32))
-            .collect())
-    }
-
     /// Notes for OKF validation: everything the DB knows, one pass.
     pub async fn okf_rows(&self, vault: i64) -> Result<Vec<OkfNoteRow>> {
         let rows = sqlx::query(
@@ -1570,6 +1484,69 @@ pub(crate) struct SearchFilters<'a> {
 mod fts_map_tests {
     use super::*;
 
+    /// backend-performance-4-02: the batch writers touch exactly the listed
+    /// paths of exactly one vault (json_each binds, no per-row autocommit).
+    #[tokio::test]
+    async fn batched_file_upserts_and_removals() {
+        let s = Store::new(otto_state::db::test_pool().await);
+        let files: Vec<(String, i64, i64)> =
+            (0..3).map(|i| (format!("f{i}.bin"), i, i * 10)).collect();
+        s.upsert_files_batch(1, &files).await.unwrap();
+        s.upsert_files_batch(2, &files[..1]).await.unwrap();
+        s.upsert_files_batch(1, &[("f0.bin".into(), 7, 70)])
+            .await
+            .unwrap();
+        let mut sigs = s.file_sigs(1).await.unwrap();
+        sigs.sort();
+        assert_eq!(
+            sigs[0],
+            ("f0.bin".to_string(), 7, 70),
+            "conflict updates in place"
+        );
+        assert_eq!(sigs.len(), 3);
+        s.remove_files_batch(1, &["f0.bin".into(), "f2.bin".into(), "it's\"odd".into()])
+            .await
+            .unwrap();
+        assert_eq!(
+            s.file_sigs(1).await.unwrap(),
+            vec![("f1.bin".to_string(), 1, 10)]
+        );
+        assert_eq!(
+            s.file_sigs(2).await.unwrap().len(),
+            1,
+            "other vault untouched"
+        );
+        s.remove_notes_batch(1, &[]).await.unwrap();
+    }
+
+    /// Test-only: bm25-ranked FTS search → `(path, snippet, score)`. `match_expr` must be a
+    /// sanitized FTS5 MATCH expression.
+    async fn fts_search(
+        s: &Store,
+        vault: i64,
+        match_expr: &str,
+        limit: i64,
+    ) -> Result<Vec<(String, String, f32)>> {
+        let rows = sqlx::query(
+            "SELECT path, snippet(vault_fts, 3, '\u{2039}', '\u{203a}', '…', 14) AS snip, \
+             bm25(vault_fts) AS rank FROM vault_fts \
+             WHERE vault_id = ? AND vault_fts MATCH ? ORDER BY rank LIMIT ?",
+        )
+        .bind(vault)
+        .bind(match_expr)
+        .bind(limit)
+        .fetch_all(s.pool())
+        .await
+        .map_err(dberr("vault.fts_search"))?;
+        Ok(rows
+            .iter()
+            .map(|r| {
+                let rank: f64 = r.get("rank");
+                (r.get("path"), r.get("snip"), -rank as f32)
+            })
+            .collect())
+    }
+
     async fn fts_rows(s: &Store, vault: i64) -> Vec<(String, String)> {
         sqlx::query_as("SELECT path, body FROM vault_fts WHERE vault_id = ? ORDER BY path")
             .bind(vault)
@@ -1595,7 +1572,7 @@ mod fts_map_tests {
                 ("b.md".to_string(), "beta".to_string())
             ]
         );
-        let hits = s.fts_search(1, "\"first\"", 10).await.unwrap();
+        let hits = fts_search(&s, 1, "\"first\"", 10).await.unwrap();
         assert!(hits.is_empty(), "the old body is gone from the index");
         s.fts_remove(1, "a.md").await;
         assert_eq!(fts_rows(&s, 1).await.len(), 1);

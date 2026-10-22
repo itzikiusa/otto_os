@@ -175,6 +175,3 @@ export function addComment(accountId: string, key: string, body: string): Promis
 export function attachmentBlobUrl(accountId: string, key: string, attachmentId: string): Promise<string> {
   return authedBlobUrl(issuePath(accountId, key, `/attachment/${enc(attachmentId)}`));
 }
-
-/** Exposed for the unit test: the path every per-issue call builds. */
-export const __issuePathForTest = issuePath;

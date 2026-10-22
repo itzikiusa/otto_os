@@ -34,7 +34,7 @@
   import SendToButton from './send/SendToButton.svelte';
   import Preview from './preview/Preview.svelte';
   import { canPreview } from './preview/kinds';
-  import { WB_LANGUAGES, cmExtFor, detectLanguage, effectiveLanguage, extensionFor } from './lib/detect';
+  import { WB_LANGUAGES, cmExtFor, detectLanguage, explicitLanguage, extensionFor } from './lib/detect';
   import { canFormat, formatContent, validateContent, type ValidationIssue } from './lib/format';
 
   let quickOpen = $state(false);
@@ -54,12 +54,38 @@
   const wsId = $derived(ws.currentId);
   const active = $derived(workbench.activeDoc);
   const doc = $derived(active?.doc ?? null);
-  const lang = $derived(doc ? effectiveLanguage(doc.language, doc.name, active?.buffer ?? '') : 'txt');
-  const detected = $derived(doc ? detectLanguage(doc.name, active?.buffer ?? '') : 'txt');
+  // ── Language: detected from a STICKY snapshot of the buffer ────────────────
+  // Sniffing the live buffer flipped the language on every transient state
+  // while typing (`{` → `{}` is JSON, `{""}` is not, `# H` is Markdown), and
+  // each flip rebuilt the editor. The snapshot is taken on open, when the doc
+  // finishes loading, on paste, and after 400 ms of idle; one sniff serves
+  // both `lang` and the "Auto (…)" label.
+  let sniffText = $state('');
+  let sniffKey = '';
+  /** Set by a paste: the next buffer change re-sniffs at once. Plain field. */
+  let sniffNow = false;
+  $effect(() => {
+    const text = active?.buffer ?? '';
+    const key = `${doc?.id ?? ''}:${active?.loading ? 1 : 0}`;
+    if (key !== sniffKey || sniffNow) {
+      sniffKey = key;
+      sniffNow = false;
+      sniffText = text;
+      return;
+    }
+    if (text === untrack(() => sniffText)) return;
+    const t = setTimeout(() => (sniffText = text), 400);
+    return () => clearTimeout(t);
+  });
+  const detected = $derived(doc ? detectLanguage(doc.name, sniffText) : 'txt');
+  const lang = $derived(doc ? (explicitLanguage(doc.language) ?? detected) : 'txt');
   const detectedLabel = $derived(WB_LANGUAGES.find((l) => l.id === detected)?.label ?? detected);
   const isImage = $derived(lang === 'image');
   const showPreview = $derived(!!doc && (isImage || (!!workbench.previewOn[doc.id] && canPreview(lang))));
-  const editorPath = $derived(doc ? `workbench/${doc.id}.${cmExtFor(lang) || 'txt'}` : '');
+  /** Stable per doc: the language goes in through `language`, so a detection
+   *  change reconfigures the live view instead of swapping its EditorState
+   *  (which reset the caret to 0 and dropped the undo history). */
+  const editorPath = $derived(doc ? `workbench/${doc.id}` : '');
   const values = $derived(doc ? (workbench.values[doc.id] ?? {}) : {});
   const isPhone = $derived(viewport.isPhone);
 
@@ -426,7 +452,10 @@
 
   function onPaste(e: ClipboardEvent): void {
     const files = imageFiles(e.clipboardData?.items);
-    if (files.length === 0) return;
+    if (files.length === 0) {
+      sniffNow = true;
+      return;
+    }
     e.preventDefault();
     void addImages(files, lang === 'md');
   }
@@ -663,6 +692,7 @@
                   <div class="wb-editor" data-testid="wb-editor">
                     <CodeEditor
                       path={editorPath}
+                      language={cmExtFor(lang)}
                       root="workbench"
                       content={active.buffer}
                       readOnly={false}

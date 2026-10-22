@@ -92,7 +92,7 @@
     } catch (e) {
       if (seq === requestSeq) error = timedOut
         ? 'Folder listing timed out. Retry or choose another folder.'
-        : (e instanceof Error ? e.message : String(e)) || 'Could not open folder.';
+        : (e instanceof Error ? e.message : String(e)) || 'Couldn’t open folder.';
     } finally {
       clearTimeout(timeout);
       if (seq === requestSeq) {
@@ -236,7 +236,7 @@
       <div class="pad"><Skeleton rows={4} height={28} label="folders" /></div>
     {:else if error}
       <div class="err pad" role="alert">
-        <div>Could not open <code data-testid="attempted-folder">{lastAttempt.path || '~'}</code></div>
+        <div>Couldn’t open <code data-testid="attempted-folder">{lastAttempt.path || '~'}</code></div>
         <div>{error}</div>
       </div>
       {#if view}<button class="btn retry" onclick={() => view && load(view.path)}>Return to last opened folder</button>{/if}

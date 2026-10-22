@@ -16,7 +16,7 @@ use std::future::Future;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use otto_core::domain::Workspace;
 use otto_core::event::Event;
@@ -106,18 +106,6 @@ pub trait AutomationCtx: Clone + Send + Sync + 'static {
     where
         F: FnMut(WatchStatus) -> Fut + Send,
         Fut: Future<Output = ()> + Send;
-
-    /// Wait (bounded) until the session's TUI has drawn its input box.
-    fn wait_for_tui(&self, sid: &Id) -> impl Future<Output = bool> + Send;
-
-    /// Whether a submitted prompt visibly dispatched since `before`.
-    fn dispatched(&self, sid: &Id, before: Option<Instant>) -> impl Future<Output = bool> + Send;
-
-    /// `text` wrapped in bracketed-paste markers.
-    fn bracketed_paste(&self, text: &str) -> Vec<u8>;
-
-    /// Settle time between a paste and the Enter that submits it.
-    fn paste_to_enter(&self) -> Duration;
 
     /// One managed role turn (goal-loop planner / evaluator / digester /
     /// definer): spawn the session, publish its id through `publish` as soon as

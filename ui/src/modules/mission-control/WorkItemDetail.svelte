@@ -358,7 +358,7 @@
   </header>
 
   {#if loading && !detail}
-    <div class="d-body" aria-busy="true"><Skeleton rows={6} /></div>
+    <div class="d-body"><Skeleton rows={6} label="the work item" /></div>
   {:else if err && !detail}
     <div class="d-body">
       <div class="d-err" role="alert">

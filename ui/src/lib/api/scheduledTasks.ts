@@ -42,7 +42,7 @@ export const scheduledTasksApi = {
     api.post<ScheduledTaskPreview>(`/scheduled-tasks/preview`, { schedule, timezone }),
   /** Materialize a scheduled task as a multi-step workflow (+ schedule trigger). */
   convertToWorkflow: (id: string, disable_task?: boolean) =>
-    api.post<{ workflow_id: string; trigger_id?: string }>(
+    api.post<{ workflow_id: string; trigger_id: string }>(
       `/scheduled-tasks/${id}/convert-to-workflow`,
       disable_task ? { disable_task } : {},
     ),

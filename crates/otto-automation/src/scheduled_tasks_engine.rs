@@ -33,6 +33,7 @@ use otto_core::api::CreateSessionReq;
 use otto_core::domain::{ScheduledTask, ScheduledTaskRun, SessionKind};
 use otto_core::event::Event;
 use otto_core::{Error, Result};
+use otto_sessions::submit::SubmitOpts;
 use otto_state::FinishRun;
 #[cfg(test)]
 use otto_state::NewScheduledRun;
@@ -1054,18 +1055,11 @@ async fn run_one_agent_session(
     // Persist the session id immediately so the UI can Open the run live.
     let _ = ctx.scheduled_tasks().set_run_session(run_id, &sid).await;
 
-    if ctx.wait_for_tui(&sid).await {
-        let _ = ctx
-            .manager()
-            .input(&sid, &ctx.bracketed_paste(prompt))
-            .await;
-        tokio::time::sleep(ctx.paste_to_enter()).await;
-        let before = ctx.manager().live_handle(&sid).map(|h| h.last_output_at());
-        let _ = ctx.manager().input(&sid, b"\r").await;
-        if !ctx.dispatched(&sid, before).await {
-            let _ = ctx.manager().input(&sid, b"\r").await;
-        }
-    }
+    // The one locked submit (paste → Enter → re-Enter under the session's
+    // submit lock); the watch below catches a prompt that never landed.
+    ctx.manager()
+        .submit_prompt(&sid, prompt, SubmitOpts::default())
+        .await;
 
     ctx.watch_for_result(
         &sid,

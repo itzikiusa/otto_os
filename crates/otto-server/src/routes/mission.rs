@@ -440,36 +440,30 @@ async fn build_view(ctx: &ServerCtx, ws_id: &Id) -> MissionView {
 
     // ------------------------------------------------------------------
     // 5. Budget warnings
-    //    Source: usage::budget_status_pub — same helper the budgets route uses.
+    //    Source: crate::budget — the same service the budgets route uses.
+    //    No saved config → no caps → nothing to read.
     // ------------------------------------------------------------------
     {
-        use crate::routes::usage::budget_status_pub;
-        use otto_state::SettingsRepo;
-
-        if let Ok(Some(raw)) = SettingsRepo::new(ctx.pool.clone())
-            .get("usage_budgets")
-            .await
-        {
-            if let Ok(cfg) = serde_json::from_value::<otto_core::api::UsageBudgetConfig>(raw) {
-                let status = budget_status_pub(ctx, cfg).await;
-                for row in &status.rows {
-                    if row.warning || row.exceeded {
-                        view.budget_warn.push(MissionItem {
-                            kind: "budget".into(),
-                            id: row.key.clone(),
-                            title: format!(
-                                "{} budget: ${:.2} / ${:.2}",
-                                row.label.as_deref().unwrap_or(&row.key),
-                                row.spent_usd,
-                                row.limit_usd,
-                            ),
-                            status: if row.exceeded { "exceeded" } else { "warning" }.into(),
-                            session_id: None,
-                            repo: None,
-                            cost_usd: Some(row.spent_usd),
-                            age_secs: 0,
-                        });
-                    }
+        let gate = crate::budget::BudgetGate::new(ctx);
+        if let Some(cfg) = gate.stored_config().await {
+            let status = gate.status(cfg).await;
+            for row in &status.rows {
+                if row.warning || row.exceeded {
+                    view.budget_warn.push(MissionItem {
+                        kind: "budget".into(),
+                        id: row.key.clone(),
+                        title: format!(
+                            "{} budget: ${:.2} / ${:.2}",
+                            row.label.as_deref().unwrap_or(&row.key),
+                            row.spent_usd,
+                            row.limit_usd,
+                        ),
+                        status: if row.exceeded { "exceeded" } else { "warning" }.into(),
+                        session_id: None,
+                        repo: None,
+                        cost_usd: Some(row.spent_usd),
+                        age_secs: 0,
+                    });
                 }
             }
         }

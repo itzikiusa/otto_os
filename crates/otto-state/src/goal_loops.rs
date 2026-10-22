@@ -379,19 +379,6 @@ impl GoalLoopsRepo {
         Ok(())
     }
 
-    pub async fn add_elapsed(&self, id: &Id, secs: u64) -> Result<()> {
-        sqlx::query(
-            "UPDATE goal_loops SET elapsed_secs = elapsed_secs + ?, updated_at = ? WHERE id = ?",
-        )
-        .bind(secs as i64)
-        .bind(self.touch())
-        .bind(id)
-        .execute(&self.pool)
-        .await
-        .map_err(dberr("add elapsed"))?;
-        Ok(())
-    }
-
     /// Persist one validated settings patch atomically, including on a storage
     /// error. Missing fields retain their current values.
     pub async fn update_settings(
@@ -428,23 +415,9 @@ impl GoalLoopsRepo {
         Ok(())
     }
 
-    pub async fn set_config(&self, id: &Id, config: &GoalLoopConfig) -> Result<()> {
-        let json = serde_json::to_string(config)
-            .map_err(|e| Error::Internal(format!("serialize config: {e}")))?;
-        sqlx::query("UPDATE goal_loops SET config_json = ?, updated_at = ? WHERE id = ?")
-            .bind(&json)
-            .bind(self.touch())
-            .bind(id)
-            .execute(&self.pool)
-            .await
-            .map_err(dberr("set goal-loop config"))?;
-        Ok(())
-    }
-
-    /// Move a loop to a terminal/blocked state with a final summary/error.
-    /// Clears the wall-clock anchor and sets `finished_at`. The controller adds
-    /// the final active window via [`add_elapsed`] before calling this.
-    /// Mark the loop terminal (or Blocked), banking the open active window in
+    /// Move a loop to a terminal/blocked state with a final summary/error,
+    /// clearing the wall-clock anchor and setting `finished_at`. The open
+    /// active window is banked in
     /// the same statement: `elapsed_secs += now - run_started_at` only while an
     /// anchor is still set. A Pause that landed first already banked the window
     /// and cleared the anchor, so the time is never counted twice.

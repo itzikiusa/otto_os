@@ -8,7 +8,7 @@
   import { GAMES, gameFor, RACERS, FIGHTERS, type Difficulty } from './catalog';
   import { kartSeats, shooterSeats } from './setup';
   import type { RacerId } from './kart/roster';
-  import { TEAM_MODES, type FighterId } from './shooter/catalog';
+  import { SHOOTER_MODES, TEAM_MODES, type FighterId, type ShooterMode } from './shooter/catalog';
   import type { KartSetup } from './kart/KartGame.svelte';
   import type { ShooterSetup, TeamSize } from './shooter/sim';
   import KartGame from './kart/KartGame.svelte';
@@ -22,8 +22,10 @@
   let racer = $state<RacerId>('oobi');
   let fighter = $state<FighterId>('male-a');
   let bots = $state(11);
-  /** Storm Royale: solo, duos or squads. */
+  /** Storm Royale: solo, duos or squads; the game mode (royale, TDM, Domination, Zombies, Apocalypse). */
   let teamSize = $state<TeamSize>(1);
+  let shooterMode = $state<ShooterMode>('royale');
+  const modeInfo = $derived(SHOOTER_MODES.find(m => m.id === shooterMode) ?? SHOOTER_MODES[0]);
   let name = $state('Player');
   let kartSetup = $state<KartSetup | null>(null);
   let shooterSetup = $state<ShooterSetup | null>(null);
@@ -39,7 +41,7 @@
       const seed = (Date.now() ^ Math.floor(Math.random() * 1e9)) >>> 0;
       if (mode === 'solo') {
         if (kind === 'kart') kartSetup = { track: map as KartSetup['track'], difficulty, seed, seats: kartSeats([{ slot: 0, name: 'You', pick: racer }], true) };
-        else shooterSetup = { map: map as ShooterSetup['map'], difficulty, seed, seats: shooterSeats([{ slot: 0, name: 'You', pick: fighter }], bots), teamSize };
+        else shooterSetup = { map: map as ShooterSetup['map'], difficulty, seed, seats: shooterSeats([{ slot: 0, name: 'You', pick: fighter }], bots), teamSize, mode: shooterMode };
       } else {
         credential = await api.post<GameRoomCredential>('/game-rooms', { name: name.trim() || 'Player', config: { game: kind, map } });
       }
@@ -67,7 +69,7 @@
   {:else if shooterSetup}
     <PageBody fill padded={false}>{#key round}<ShooterGame setup={shooterSetup} selfSlot={0} {fighter} onexit={exit} onrematch={again} />{/key}</PageBody>
   {:else if credential}
-    <PageBody fill padded={false}><GameMatch {credential} origin={baseUrl()} pick={kind === 'kart' ? racer : fighter} {difficulty} {bots} {teamSize} onexit={exit} /></PageBody>
+    <PageBody fill padded={false}><GameMatch {credential} origin={baseUrl()} pick={kind === 'kart' ? racer : fighter} {difficulty} {bots} {teamSize} {shooterMode} onexit={exit} /></PageBody>
   {:else}
     <PageBody>
       <div class="games-chooser">
@@ -92,12 +94,20 @@
               <select bind:value={difficulty}><option value="easy">Easy</option><option value="normal">Normal</option><option value="hard">Hard</option></select>
             </label>
             {#if kind === 'shooter'}
+              <fieldset><legend>Mode</legend>
+                <div class="games-segments">
+                  {#each SHOOTER_MODES as m (m.id)}<button aria-pressed={shooterMode === m.id} title={m.blurb} onclick={() => { shooterMode = m.id; bots = m.bots; }}>{m.short}</button>{/each}
+                </div>
+              </fieldset>
+              <p class="games-note">{modeInfo.blurb}</p>
+              {#if modeInfo.teams}
               <fieldset><legend>Teams</legend>
                 <div class="games-segments">
                   {#each TEAM_MODES as t (t.size)}<button aria-pressed={teamSize === t.size} onclick={() => (teamSize = t.size)}>{t.name}</button>{/each}
                 </div>
               </fieldset>
-              {#if teamSize > 1}<p class="games-note">{mode === 'solo' ? `Bots fill your ${teamSize === 2 ? 'duo' : 'squad'} and the other teams.` : 'People who join play on the same team first; bots fill the rest.'} Knocked teammates can be revived.</p>{/if}
+              {/if}
+              {#if modeInfo.teams && teamSize > 1}<p class="games-note">{mode === 'solo' ? `Bots fill your ${teamSize === 2 ? 'duo' : 'squad'} and the other teams.` : 'People who join play on the same team first; bots fill the rest.'} Knocked teammates can be revived.</p>{/if}
               <label>Bots on the island: {bots}
                 <input type="range" min={mode === 'solo' ? 1 : 0} max="15" bind:value={bots} />
               </label>
@@ -132,7 +142,7 @@
                 <span><strong>{item.name}</strong><small>{item.blurb}</small></span>
               </button>
             {/each}
-            <p class="games-note">{kind === 'kart' ? 'W/S gas & brake · A/D steer · Space drift & trick · E item · Q look back' : 'WASD move · Mouse aim · Click fire · Right-click aim · 1–3 weapons · E interact · R reload · Space jump'}</p>
+            <p class="games-note">{kind === 'kart' ? 'W/S gas & brake · A/D steer · Space drift & trick · E item · Q look back' : 'WASD move · Mouse aim · Click fire · Right-click aim down sights · 1–5 hotbar · G grenade · T smoke / flash · X killstreak · C crouch / slide · E interact · R reload · Space jump / mantle'}</p>
           </section>
         </div>
       </div>

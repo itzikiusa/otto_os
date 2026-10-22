@@ -1,6 +1,6 @@
 <script lang="ts">
   import { rowMenu as rowMenuKeys } from '../../lib/rowMenu';
-  import { loadErrorText } from '../../lib/loadError';
+  import { loadErrorText, providerErrorText } from '../../lib/loadError';
   import { plural } from '../../lib/plural';
   import { toastError } from '../../lib/toastError';
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
@@ -32,6 +32,7 @@
   import { TableWindow } from '../../lib/tableWindow.svelte';
   import ViewToolbar from './ViewToolbar.svelte';
   import { fmtAgo, fmtBytes, fmtDate, splitBucketSegment, awsErrorText, mergeS3Head } from './util';
+  import { awsLoadText } from './loadText';
   import type { AwsAccount, S3Object, S3PreviewResp } from '../../lib/api/types';
 
   interface Props {
@@ -77,7 +78,7 @@
       await aws.loadS3Buckets(account.id);
       bucketsError = '';
     } catch (e) {
-      bucketsError = e instanceof Error ? e.message : String(e);
+      bucketsError = awsLoadText(e);
     } finally {
       bucketsLoading = false;
     }
@@ -148,7 +149,7 @@
       };
     } catch (e) {
       if (ctrl.signal.aborted || (e instanceof DOMException && e.name === 'AbortError')) return;
-      search = { q, prefixes: prev?.prefixes ?? [], objects: prev?.objects ?? [], next: prev?.next ?? null, loading: false, error: e instanceof Error ? e.message : String(e) };
+      search = { q, prefixes: prev?.prefixes ?? [], objects: prev?.objects ?? [], next: prev?.next ?? null, loading: false, error: awsLoadText(e) };
     }
   }
 
@@ -214,7 +215,7 @@
       objError = '';
     } catch (e) {
       if (request !== objectRequest) return;
-      objError = e instanceof Error ? e.message : String(e);
+      objError = awsLoadText(e);
     } finally {
       if (request === objectRequest) objLoading = false;
     }
@@ -242,7 +243,7 @@
       objError = '';
     } catch (e) {
       if (request !== objectRequest) return;
-      objError = e instanceof Error ? e.message : String(e);
+      objError = awsLoadText(e);
     } finally {
       if (request === objectRequest) objLoading = false;
     }
@@ -281,7 +282,7 @@
       if (preview?.obj.key === o.key) preview = { obj: o, data: d, loading: false, error: '' };
     } catch (e) {
       if (preview?.obj.key === o.key)
-        preview = { obj: o, data: null, loading: false, error: e instanceof Error ? e.message : String(e) };
+        preview = { obj: o, data: null, loading: false, error: awsLoadText(e) };
     }
   }
 
@@ -397,7 +398,7 @@
 
   // ── writes + presign (A-4) ──
   function writeError(e: unknown, what: 'upload' | 'delete'): string {
-    const msg = e instanceof Error ? e.message : String(e);
+    const msg = providerErrorText(e);
     if (e instanceof ApiError && e.status === 403) {
       const reason = `You don’t have ${what === 'upload' ? 'upload (s3_write)' : 'delete (s3_delete)'} access to ${bucket} — ask an admin for aws_s3:Edit on this account. (${msg})`;
       if (what === 'upload') writeDenied = reason;

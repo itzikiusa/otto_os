@@ -217,11 +217,30 @@ fi
 # The allowlist is the files not migrated yet: shrink it, never grow it.
 if [ -n "$RUST_CHANGED" ]; then
   step "keyed-lock registry guard"
-  KEYED_LOCK_ALLOW='^crates/(otto-core/src/keyed_lock\.rs|otto-assistant/src/assistant/tasks\.rs|otto-automation/src/goal_loop\.rs|otto-aws/src/(accounts|regions)\.rs|otto-brokers/src/service\.rs|otto-browser/src/lib\.rs|otto-channels/src/(bridge|telegram)\.rs|otto-dbviewer/src/(complete/mod|service)\.rs|otto-design/src/service\.rs|otto-k8s/src/(eks_token|monitor/cache)\.rs|otto-server/src/(agent_session_lifecycle|api_secrets|eval_score|proof|routes/backup_git|routes/mission|routes/personal_agents)\.rs|otto-sessions/src/(manager|mcp)\.rs|otto-state/src/workflow_progress\.rs|otto-vault/src/engine\.rs)$'
+  KEYED_LOCK_ALLOW='^crates/(otto-core/src/keyed_lock\.rs|otto-assistant/src/assistant/tasks\.rs|otto-automation/src/goal_loop\.rs|otto-aws/src/(accounts|regions)\.rs|otto-brokers/src/service\.rs|otto-browser/src/lib\.rs|otto-channels/src/telegram\.rs|otto-dbviewer/src/(complete/mod|service)\.rs|otto-design/src/service\.rs|otto-k8s/src/(eks_token|monitor/cache)\.rs|otto-server/src/(agent_session_lifecycle|api_secrets|eval_score|proof|routes/backup_git|routes/mission|routes/personal_agents)\.rs|otto-sessions/src/(manager|mcp)\.rs|otto-state/src/workflow_progress\.rs|otto-vault/src/engine\.rs)$'
   KEYED_LOCK_HITS=$(grep -rlE --include='*.rs' '(HashMap|BTreeMap|DashMap)<[^;]*(Arc|Weak)<(tokio::sync::)?(Mutex|AsyncMutex)<\(\)>>' crates | sort | grep -vE "$KEYED_LOCK_ALLOW" || true)
   if [ -n "$KEYED_LOCK_HITS" ]; then
     echo "new hand-rolled per-key lock registry — use otto_core::keyed_lock::KeyedLocks:" >&2
     printf '  %s\n' $KEYED_LOCK_HITS >&2
+    [ "$DRY" = 1 ] || exit 1
+  fi
+fi
+
+# Prompts reach an agent TUI through ONE locked submit:
+# `SessionManager::submit_prompt` / `otto_sessions::submit` (paste → Enter →
+# re-Enter under the per-session submit lock). Hand-assembled copies outside
+# otto-sessions skipped the lock and interleaved with broadcasts and human
+# input (architecture-4-01, concurrency-async 1-02/2-02/3-01/4-01). Integration
+# tests may assert the raw bytes. The allowlist is the files not migrated yet:
+# shrink it, never grow it (prompt_guard.rs lives in otto-sessions; the swarm
+# runtime is converted separately).
+if [ -n "$RUST_CHANGED" ]; then
+  step "prompt-submit guard"
+  SUBMIT_ALLOW='^crates/(otto-sessions/|[^/]+/tests/|otto-orchestrator/src/claude_pty\.rs|otto-swarm/src/runtime/|otto-server/src/swarm_host\.rs)'
+  SUBMIT_HITS=$(grep -rlE --include='*.rs' 'bracketed_paste\(|b"\\r"|\\x1b\[200~' crates | sort | grep -vE "$SUBMIT_ALLOW" || true)
+  if [ -n "$SUBMIT_HITS" ]; then
+    echo "hand-rolled paste/Enter outside otto-sessions — use SessionManager::submit_prompt:" >&2
+    printf '  %s\n' $SUBMIT_HITS >&2
     [ "$DRY" = 1 ] || exit 1
   fi
 fi

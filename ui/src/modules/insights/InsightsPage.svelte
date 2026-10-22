@@ -735,6 +735,9 @@
     </PageBody>
   {:else}
     <PageBody fill padded={false}>
+      <!-- Always mounted, so the edge is spoken (a region inserted with its
+           text is usually silent); never holds the ticking elapsed clock. -->
+      <div class="sr-only" role="status">{pollRunId ? 'Generating the report' : ''}</div>
       {#if runFailReason || pollRunId}
         <div class="banners">
           {#if runFailReason}
@@ -753,10 +756,13 @@
             </div>
           {/if}
           {#if pollRunId}
-            <div class="banner" role="status">
+            <!-- Not a live region: the elapsed clock ticks every second and the
+                 buttons' names would be re-read with it. The sr-only status
+                 above the banners says "Generating the report" once. -->
+            <div class="banner">
               <Icon name="refresh" size={14} />
               <span class="banner-text">Generating the report — an agent is reading your transcripts. This can take a few minutes; it appears in the list when it’s done.</span>
-              <span class="dim">{Math.floor(pollElapsed / 60)}:{String(pollElapsed % 60).padStart(2, '0')} elapsed</span>
+              <span class="dim" aria-hidden="true">{Math.floor(pollElapsed / 60)}:{String(pollElapsed % 60).padStart(2, '0')} elapsed</span>
               <button class="btn small" onclick={() => pollRunId && ws.navigateToSession(pollRunId)}><Icon name="terminal" size={12} /> View live session</button>
               {#if canRun}<button class="btn small" disabled={stoppingRun} aria-busy={stoppingRun} onclick={() => void stopRun()}><Icon name="stop" size={12} /> {stoppingRun ? 'Stopping…' : 'Stop'}</button>{/if}
             </div>
@@ -769,8 +775,9 @@
       {/if}
       {#if loading && reports.length === 0}
         <div class="split">
-          <aside class="list-pane" aria-busy="true"><Skeleton rows={6} height={84} /></aside>
-          <section class="detail-pane" class:hide-phone={viewport.isPhone}><Skeleton rows={4} height={36} label="insight reports" /></section>
+          <!-- One announcing skeleton (the list); the detail's is silent. -->
+          <aside class="list-pane"><Skeleton rows={6} height={84} label="insight reports" /></aside>
+          <section class="detail-pane" class:hide-phone={viewport.isPhone}><Skeleton rows={4} height={36} announce={false} /></section>
         </div>
       {:else if loadError && reports.length === 0}
         <!-- Same inline error + Retry as every other module's failed load. -->

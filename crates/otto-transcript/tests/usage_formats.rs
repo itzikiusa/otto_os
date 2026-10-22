@@ -1,6 +1,6 @@
 //! Frozen on-disk formats for the usage tailer's stores (design §4.1).
 //!
-//! `ottod/src/usage_tailer.rs` persists three JSON files under the daemon data
+//! `otto-usage/src/tailer/driver.rs` persists three JSON files under the daemon data
 //! dir; this crate now owns their (de)serializers. Each fixture is a redacted
 //! copy of a REAL file as written by the pre-extraction code — if a shape
 //! changes, the daemon would silently restart from offset 0 (re-counting every

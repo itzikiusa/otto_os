@@ -31,8 +31,9 @@ test('param readers and writers keep the forms’ empty-means-unset contract', (
 
 test('pickers name what a person recognises, never only the id', () => {
   const conns = connectionOptions([{ id: 'c1', name: 'orders', kind: 'mysql', environment: 'prod' }] as never);
-  assert.deepEqual(conns, [{ id: 'c1', label: 'orders · mysql · prod' }]);
-  assert.equal(connectionOptions(null), null, 'not loaded → the text fallback');
+  assert.deepEqual(conns, [{ id: 'c1', label: 'orders · MySQL · Production' }], 'engine and environment in words, not wire enums');
+  assert.equal(connectionOptions([{ id: 'c2', name: 'x', kind: 'mongodb', environment: null }] as never)?.[0].label, 'x · MongoDB · Development');
+  assert.equal(connectionOptions(null), null, 'not loaded → null (the picker shows Loading…)');
   assert.equal(storyOptions([{ id: 's1', source_key: 'PROJ-7', title: 'Checkout', url: 'u' }] as never)?.[0].label, 'PROJ-7 — Checkout');
   const accounts = jiraAccountOptions([
     { id: 'a1', provider: 'jira', label: 'Work', email: 'me@x', base_url: 'https://x.atlassian.net' },

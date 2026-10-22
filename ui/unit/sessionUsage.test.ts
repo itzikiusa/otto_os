@@ -1,15 +1,19 @@
 // Per-session tokens + cost labels (lib/sessionUsage.ts, review A5).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { formatCount } from '../src/lib/metric-format.ts';
 import { formatCost, formatTokens, sessionUsageLabel } from '../src/lib/sessionUsage.ts';
 
-test('token counts read compactly', () => {
+test('token counts read compactly, through the shared formatCount', () => {
   assert.equal(formatTokens(950), '950');
-  assert.equal(formatTokens(12_300), '12.3K');
+  assert.equal(formatTokens(12_300), '12.3k');
   assert.equal(formatTokens(2_000_000), '2M');
   assert.equal(formatTokens(2_140_000), '2.1M');
   assert.equal(formatTokens(345_000_000), '345M');
   assert.equal(formatTokens(-1), '0');
+  assert.equal(formatTokens(Number.NaN), '0');
+  // Same string the conversation view (fmtTokens → formatCount) renders.
+  assert.equal(formatTokens(12_300), formatCount(12_300));
 });
 
 test('cost is an estimate with sensible floors', () => {

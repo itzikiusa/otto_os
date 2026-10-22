@@ -10,6 +10,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import ProviderIcon from '../../lib/components/ProviderIcon.svelte';
   import ContextPreview from './ContextPreview.svelte';
+  import McpProfilePicker from './McpProfilePicker.svelte';
   import { router } from '../../lib/router.svelte';
   import { api } from '../../lib/api/client';
   import { checkFolder } from '../../lib/folderCheck';
@@ -90,6 +91,7 @@
   let cwdError = $state('');
   let checkingCwd = false;
   let browser = $state(false);
+  let mcpProfileIds = $state<string[]>([]); // [] = the default MCP profile
   let busy = $state(false);
   interface PendingSpawn {
     provider: string;
@@ -139,10 +141,19 @@
   const chosen = $derived(providers.filter((p) => countOf(p) > 0));
   /** "3 claude, 2 codex, 1 shell" — the batch, spelled out. */
   const batchSummary = $derived(chosen.map((p) => `${counts[p]} ${p}`).join(', '));
+  /** Spoken only once the user steps a count (± on a card), so opening the
+   *  sheet or picking a provider doesn't announce "1 claude session". */
+  let countsTouched = $state(false);
+  const countAnnounce = $derived(
+    countsTouched
+      ? chosen.map((p) => `${counts[p]} ${p} ${counts[p] === 1 ? 'session' : 'sessions'}`).join(', ') || 'No sessions selected'
+      : '',
+  );
 
   /** Set the count for one provider, keeping `provider` on something selected. */
   function bump(p: string, delta: number): void {
     if (delta > 0 && !providerReadiness(p).available) return;
+    countsTouched = true;
     const n = Math.min(MAX_PER_PROVIDER, Math.max(0, countOf(p) + delta));
     const next = { ...counts };
     if (n === 0) delete next[p];
@@ -189,11 +200,7 @@
 
   function addDir(): void {
     const path = dirDraft.trim();
-    if (path === '' || extraDirs.includes(path)) {
-      dirDraft = '';
-      return;
-    }
-    extraDirs = [...extraDirs, path];
+    if (path !== '' && !extraDirs.includes(path)) extraDirs = [...extraDirs, path];
     dirDraft = '';
   }
 
@@ -202,10 +209,7 @@
   }
 
   function onDirKeydown(e: KeyboardEvent): void {
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      addDir();
-    }
+    if (e.key === 'Enter') { e.preventDefault(); addDir(); }
   }
 
   // Provider picker keyboard nav: the cards are an ARIA radiogroup with a roving
@@ -235,7 +239,7 @@
     }
     const t = e.target as HTMLElement | null;
     if (t && (t.closest('input, textarea, select, [contenteditable="true"]') || gridEl?.contains(t))) return;
-    onProviderKeydown(e);
+    providerKeys(e, provider);
   }
 
   /** Click / arrow selection: exclusive, exactly as before the batch stepper
@@ -250,11 +254,23 @@
     }
   }
 
+  /** The radiogroup's own keys: only on a focused provider CARD (a radio). Keys
+   *  on a card's ± buttons bubble here too, and arrows there used to re-select
+   *  (wiping the batch) while +/- bumped the primary instead of that card. */
   function onProviderKeydown(e: KeyboardEvent): void {
+    const card = (e.target as HTMLElement | null)?.closest('[role="radio"]');
+    if (!card) return;
+    const p = providers[cardEls.indexOf(card as HTMLButtonElement)];
+    if (p) providerKeys(e, p);
+  }
+
+  /** Arrow / Home / End move the exclusive choice from `from`; +/- step the
+   *  batch count of `from` (the focused card, or the primary sheet-wide). */
+  function providerKeys(e: KeyboardEvent, from: string): void {
     const avail = providers.filter((p) => providerReadiness(p).available);
-    const idx = providers.indexOf(provider);
+    const idx = providers.indexOf(from);
     if (idx < 0 || avail.length === 0) return;
-    const availIdx = Math.max(0, avail.indexOf(provider));
+    const availIdx = Math.max(0, avail.indexOf(from));
     let nextProvider = avail[availIdx];
     switch (e.key) {
       case 'ArrowRight':
@@ -358,6 +374,7 @@
       if (networkProfileId) meta.network_profile_id = networkProfileId;
       if (browser && BROWSER_PROVIDERS.includes(p)) meta.browser = true;
       if (dirs.length > 0) meta.extra_dirs = [...dirs];
+      if (mcpProfileIds.length && p !== 'shell') meta.mcp_profiles = [...mcpProfileIds];
       const sessionTitle = base === '' ? null : spawns.length > 1 ? `${base} ${i + 1}` : base;
       const request = {provider: p, title: sessionTitle, cwd: dir === '' ? null : dir, model: sessionModel};
       return {provider: p, title: sessionTitle ?? p, cwd: dir, run: async () => {
@@ -507,9 +524,7 @@
               title={`One less ${p} session`}
               onclick={() => bump(p, -1)}
             ><Icon name="minus" size={12} /></button>
-            <span class="count" class:zero={countOf(p) === 0} aria-live="polite">
-              {countOf(p)}
-            </span>
+            <span class="count" class:zero={countOf(p) === 0} aria-hidden="true">{countOf(p)}</span>
             <button
               type="button"
               class="cbtn"
@@ -525,6 +540,9 @@
     {#if total > 1}
       <span class="hint batch">Starting {total} sessions — {batchSummary}</span>
     {/if}
+    <!-- One always-mounted announcement for the whole batch ("2 codex sessions,
+         1 claude session") instead of a bare number per card. -->
+    <span class="sr-only" role="status">{countAnnounce}</span>
   </div>
 
   <!-- Hidden entirely when the provider's spec has no model-flag template, and
@@ -642,6 +660,8 @@
       </span>
     </label>
   {/if}
+
+  {#if chosen.some((p) => p !== 'shell') && auth.can('mcp', 'view')}<McpProfilePicker value={mcpProfileIds} onchange={(ids) => (mcpProfileIds = ids)} />{/if}
 
   <!-- The context preview is workspace-scoped (skills/soul/context of a
        workspace), so a workspace-less session has nothing to preview. -->

@@ -382,6 +382,15 @@ fn base_args(cfg: &SshTunnelConfig) -> Vec<String> {
         // proof the forwarded port is ssh's own listener (see `launch`).
         "-o".into(),
         "LogLevel=DEBUG1".into(),
+        // Opt out of the user's `~/.ssh/config` multiplexing. As a mux client
+        // of an existing ControlMaster this child never prints its own
+        // readiness line (the master binds the forward), so `launch` timed
+        // out; and as a ControlPersist master it would outlive `kill_on_drop`
+        // and keep owning the port. Otto's tunnel always owns its connection.
+        "-o".into(),
+        "ControlMaster=no".into(),
+        "-o".into(),
+        "ControlPath=none".into(),
         "-p".into(),
         cfg.port.to_string(),
     ];
@@ -469,6 +478,7 @@ mod tests {
         assert!(args.iter().any(|a| a == "StrictHostKeyChecking=accept-new"));
         assert!(args.iter().any(|a| a == "ExitOnForwardFailure=yes"));
         assert!(args.iter().any(|a| a == "ServerAliveCountMax=2"));
+        assert_no_multiplexing(&args);
         assert_eq!(
             args[args.iter().position(|a| a == "-p").unwrap() + 1],
             "2222"
@@ -556,6 +566,21 @@ mod tests {
         assert_eq!(args[args.len() - 2], "--");
         assert_eq!(args.last().unwrap(), "itziklavon@bastion.example.com");
         assert!(!args.iter().any(|a| a == "-L"));
+        assert_no_multiplexing(&args);
+    }
+
+    /// Both options must be present, each as the value of its own `-o`, and
+    /// before the `--` that ends ssh's option parsing.
+    fn assert_no_multiplexing(args: &[String]) {
+        let end = args.iter().position(|a| a == "--").unwrap();
+        for opt in ["ControlMaster=no", "ControlPath=none"] {
+            let i = args
+                .iter()
+                .position(|a| a == opt)
+                .unwrap_or_else(|| panic!("{opt} missing"));
+            assert!(i < end, "{opt} after --");
+            assert_eq!(args[i - 1], "-o", "{opt} not an -o value");
+        }
     }
 
     #[test]

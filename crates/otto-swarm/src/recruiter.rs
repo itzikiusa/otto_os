@@ -109,6 +109,23 @@ For suggested_schedule, use null OR
 /// Re-exported from [`otto_core::text::extract_json`], the one shared copy.
 pub use otto_core::text::extract_json;
 
+/// Schema predicate of a planner / plan-summary reply: a `tasks` array. Used
+/// with [`otto_core::text::extract_json_where`] so a `{}` or an unrelated
+/// JSON example earlier in the reply does not shadow the plan.
+pub fn is_plan(v: &serde_json::Value) -> bool {
+    v.get("tasks").is_some_and(serde_json::Value::is_array)
+}
+
+/// The first plan-shaped object of a planner reply (see [`is_plan`]).
+pub fn extract_plan(text: &str) -> Option<serde_json::Value> {
+    otto_core::text::extract_json_where(text, is_plan)
+}
+
+/// `transcript_ok` acceptor of a planner turn: the reply holds a plan.
+pub fn plan_ok(text: &str) -> bool {
+    extract_plan(text).is_some()
+}
+
 pub fn parse_recruited(text: &str) -> Option<RecruitedAgent> {
     let v = extract_json(text)?;
     serde_json::from_value(v).ok()
@@ -278,6 +295,21 @@ Respond with EXACTLY ONE ```json block, no prose:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// backend-correctness-4-04: the planner extractor skips a `{}` or a
+    /// non-plan JSON example and takes the first object with a `tasks` array.
+    #[test]
+    fn plan_extraction_skips_brace_preambles() {
+        let reply = "See `fn x() {}` and the sample {\"tasks\": \"n/a\"}.\n\
+                     {\"tasks\": [{\"title\": \"A\"}]}";
+        let v = extract_plan(reply).expect("plan");
+        assert_eq!(v["tasks"][0]["title"], "A");
+        assert!(plan_ok(reply));
+        assert!(!plan_ok("{} and nothing else"));
+        // A fenced non-plan block is skipped for a later plan.
+        let fenced = "```json\n{\"a\": 1}\n```\n{\"tasks\": []}";
+        assert!(extract_plan(fenced).unwrap()["tasks"].is_array());
+    }
 
     #[test]
     fn extract_fenced_json() {

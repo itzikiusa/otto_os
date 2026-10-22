@@ -76,7 +76,9 @@
       {:else if d.running > 0}
         <span class="adb-dot live" aria-hidden="true"></span>{d.current ?? 'Working'}…
       {:else if last}
-        <span class="adb-last">Last: {last.label}{last.ok === false ? ' (failed)' : ''} · {rel(last.at)}</span>
+        <!-- The relative time ticks every second for a minute: kept out of the
+             live region's spoken text, so only a new action is announced. -->
+        <span class="adb-last">Last: {last.label}{last.ok === false ? ' (failed)' : ''}<span aria-hidden="true"> · {rel(last.at)}</span></span>
       {/if}
     </span>
     <span class="adb-grow"></span>

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   // RefineChat — displays a single refinement thread transcript and handles
   // sending new messages to the agent.  Props: { tid } (the thread id).
@@ -65,7 +65,10 @@
     const currentTid = tid;
     backgroundTurn = false;
     stopNotice = null;
-    void loadThread(currentTid);
+    // Untracked: the loader's synchronous prefix reads/writes the composer
+    // (`inputText`, `sending`, `stopping`); tracked, the first keystroke after a
+    // switch re-ran this effect and reloaded the thread mid-typing.
+    untrack(() => void loadThread(currentTid));
   });
 
   async function loadThread(threadId: string, opts?: { preserveMessages?: RefinementMessage[] }): Promise<void> {

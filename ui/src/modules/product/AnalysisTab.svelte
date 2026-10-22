@@ -414,6 +414,11 @@
   const analysisStatus = $derived(currentAnalysis?.status ?? '');
 </script>
 
+<!-- One ALWAYS-mounted live region for progress-check failures: a region
+     inserted together with its text is silent in VoiceOver/WebKit
+     (accessibility-responsive-4-09). The visible note below is not a region. -->
+<span class="sr-only" role="status">{pollStopped && pollStopped.id === activeId ? pollStopped.text : polling && pollFailures >= POLL_FAIL_SHOWN && lastPollError ? `Couldn’t check progress: ${lastPollError}` : ''}</span>
+
 {#if !story}
   <div class="muted">No story selected.</div>
 {:else}
@@ -531,12 +536,12 @@
 
     <!-- ── Poll health: a failing or abandoned check says why, with a way back. -->
     {#if pollStopped && pollStopped.id === activeId}
-      <div class="poll-note" role="status">
+      <div class="poll-note">
         <Icon name="warning" size={12} /> {pollStopped.text}
         <button class="btn small" onclick={() => { if (activeId) startPolling(activeId); }}>Check again</button>
       </div>
     {:else if polling && pollFailures >= POLL_FAIL_SHOWN && lastPollError}
-      <div class="poll-note" role="status">
+      <div class="poll-note">
         <Icon name="warning" size={12} /> Couldn’t check progress: {lastPollError}
         <button class="btn small" onclick={() => pollTimer?.now()}>Check again</button>
       </div>

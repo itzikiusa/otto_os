@@ -20,10 +20,15 @@
   import ApprovalsTab from './ApprovalsTab.svelte';
   import AuditTab from './AuditTab.svelte';
   import OttoServerHome from './OttoServerHome.svelte';
+  import LazyMount from '../../lib/components/LazyMount.svelte';
+  import { lazyComponent } from '../../lib/lazy-component.svelte';
+  // Profiles is its own section, behind a dynamic import so the editor and
+  // tool-group tables don't ride on every MCP page open (bundle budget).
+  const ProfilesTab = lazyComponent(() => import('./ProfilesTab.svelte'));
 
-  type Section = 'otto' | 'servers' | 'activity';
+  type Section = 'otto' | 'profiles' | 'servers' | 'activity';
   const section = $derived<Section>(
-    (['otto', 'servers', 'activity'] as const).includes(router.parts[1] as Section)
+    (['otto', 'profiles', 'servers', 'activity'] as const).includes(router.parts[1] as Section)
       ? (router.parts[1] as Section)
       : 'otto',
   );
@@ -117,6 +122,7 @@
 
   const SECTIONS: { id: Section; label: string }[] = [
     { id: 'otto', label: 'Otto server' },
+    { id: 'profiles', label: 'Profiles' },
     { id: 'servers', label: 'External servers' },
     { id: 'activity', label: 'Activity' },
   ];
@@ -125,6 +131,7 @@
   $effect(() =>
     registry.register('mcp', [
       { id: 'mcp.otto', title: 'Show the Otto MCP server', group: 'MCP', keywords: 'built-in gateway tools expose attach sessions token', run: () => go('otto') },
+      { id: 'mcp.profiles', title: 'Show MCP profiles', group: 'MCP', keywords: 'profile tool set subset database issues default session connection', run: () => go('profiles') },
       { id: 'mcp.servers', title: 'Show external MCP servers', group: 'MCP', keywords: 'governed servers tools discover allowlist policy', run: () => go('servers') },
       { id: 'mcp.activity', title: 'Show MCP approvals and audit', group: 'MCP', keywords: 'activity pending approve deny audit log', run: () => go('activity') },
       { id: 'mcp.refresh', title: 'Refresh MCP servers', group: 'MCP', keywords: 'reload list', disabled: !wsId, run: () => void loadServers() },
@@ -161,10 +168,12 @@
   <!-- The Otto-server panel is a readable page and takes the shared body
        gutter; the server and activity sections are full-bleed lists whose own
        toolbars span the pane, so they manage their edges themselves. -->
-  <PageBody padded={section === 'otto'}>
+  <PageBody padded={section === 'otto' || section === 'profiles'}>
     {#key accessRevision}
       {#if section === 'otto'}
         <OttoServerHome {wsId} />
+      {:else if section === 'profiles'}
+        <LazyMount lazy={ProfilesTab} what="MCP profiles" />
       {:else if section === 'servers'}
         {#if !wsId}
           <EmptyState

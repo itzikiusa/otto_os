@@ -512,7 +512,9 @@ async fn reload_agent_sessions(ctx: &ServerCtx, providers: &HashSet<String>) -> 
         }
     };
     for ws in workspaces {
-        let sessions = match ctx.manager.list_by_workspace(&ws.id).await {
+        // Live agents only, fetched by id from the live map (never the
+        // workspace's whole history).
+        let sessions = match ctx.manager.live_agent_sessions(&ws.id).await {
             Ok(s) => s,
             Err(_) => continue,
         };

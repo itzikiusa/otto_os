@@ -231,6 +231,12 @@ const RELOAD_FRESH_MS = 60_000;
  *  emits `api_run_progress` per step; the view refetches at most 4×/s
  *  (a terminal status skips the wait — perf2 N3). */
 const RUN_DELTA_MIN_MS = 250;
+/** A failed delta poll is retried after this (doubling per consecutive
+ *  failure); after RUN_POLL_MAX_FAILURES in a row the view gives up on the
+ *  run — it is still running server-side, so that is "lost track", never a
+ *  failed run. */
+const RUN_POLL_RETRY_MS = 500;
+const RUN_POLL_MAX_FAILURES = 5;
 /** Full saved requests kept after open (tabs' rows are always kept). */
 const FULL_REQUESTS_MAX = 64;
 
@@ -331,6 +337,10 @@ class ApiClientStore {
   historyLoadError: string | null = $state(null);
   historyAgentOnly = $state(false);
   automations: ApiAutomation[] = $state([]);
+  /** The automations list is loading / failed to (shown inline with Retry —
+   *  a failed load must never read as "No automations yet"). */
+  automationsLoading = $state(false);
+  automationsError: string | null = $state(null);
   /** Workspace `ssh`-kind connections, for the Settings-tab "SSH tunnel" picker. */
   sshConnections: Connection[] = $state([]);
 
@@ -341,7 +351,13 @@ class ApiClientStore {
   /** In-flight automation run. */
   running = $state(false);
   automationRuns: ApiAutomationRun[] = $state.raw([]);
+  /** Run history is loading / failed to (inline, with Retry). */
+  runsLoading = $state(false);
+  runsError: string | null = $state(null);
   currentRun: ApiAutomationRun | null = $state.raw(null);
+  /** The run whose progress polls kept failing: the view stopped following
+   *  it (it may still be running) — not a failed run. */
+  runLost: Id | null = $state(null);
 
   /** Bumped to ask ApiPage to show the request editor (it may be showing the
    *  environments or an automation) — used by agent UI control
@@ -501,6 +517,7 @@ class ApiClientStore {
     this.flushTabsWrite();
     this.resetResponses();
     this.running = false; this.lastRun = null; this.currentRun = null; this.automationRuns = [];
+    this.runLost = null; this.runsError = null; this.automationsError = null;
     this.storage = null; this.storageAt = null;
     this.tabsWid = wid;
     let next: ApiDraft[] = [];
@@ -964,13 +981,19 @@ class ApiClientStore {
 
   // ── Cookie jar (daemon-global) ────────────────────────────────────────────
   cookies: ApiCookie[] = $state([]);
+  cookiesLoading = $state(false);
+  cookiesError: string | null = $state(null);
   async loadCookies(): Promise<void> {
     const base = this.base();
     if (!base) return;
+    this.cookiesLoading = true;
     try {
       this.cookies = await api.get<ApiCookie[]>(`${base}/cookies`);
+      this.cookiesError = null;
     } catch (e) {
-      toasts.error('Couldn’t load cookies', loadErrorText(e));
+      this.cookiesError = loadErrorText(e);
+    } finally {
+      this.cookiesLoading = false;
     }
   }
   async clearCookies(): Promise<void> {
@@ -1790,14 +1813,18 @@ class ApiClientStore {
     if (!base) return;
     const last = this.automationsLoadedAt;
     if (!opts.force && last?.base === base && Date.now() - last.at < RELOAD_FRESH_MS) return;
+    this.automationsLoading = true;
     try {
       const rows = await api.get<ApiAutomation[]>(`${base}/automations`);
       if (!current()) return;
       this.automations = rows;
+      this.automationsError = null;
       this.automationsLoadedAt = { base, at: Date.now() };
     } catch (e) {
       if (!current()) return;
-      toasts.error('Couldn’t load automations', loadErrorText(e));
+      this.automationsError = loadErrorText(e);
+    } finally {
+      if (current()) this.automationsLoading = false;
     }
   }
 
@@ -1900,10 +1927,22 @@ class ApiClientStore {
     const query = new URLSearchParams();
     if (automationId) query.set('automation_id',automationId);
     if (before) query.set('before',before);
+    // "Load older runs" over a loaded list keeps it: only a first page shows
+    // the inline loading / error state.
+    if (!before) this.runsLoading = true;
     try {
       const runs = await api.get<ApiAutomationRun[]>(`${base}/automation-runs?${query}`);
-      if (base === this.base()) this.automationRuns = before ? [...this.automationRuns,...runs] : runs;
-    } catch (e) {toasts.error('Couldn’t load run history',loadErrorText(e));}
+      if (base === this.base()) {
+        this.automationRuns = before ? [...this.automationRuns,...runs] : runs;
+        if (!before) this.runsError = null;
+      }
+    } catch (e) {
+      if (base !== this.base()) return;
+      if (before) toasts.error('Couldn’t load older runs',loadErrorText(e));
+      else this.runsError = loadErrorText(e);
+    } finally {
+      if (!before && base === this.base()) this.runsLoading = false;
+    }
   }
   async cancelAutomationRun(id: Id): Promise<void> {
     const base = this.base(); if (!base) return;
@@ -1917,12 +1956,14 @@ class ApiClientStore {
     const current = () => ownsWorkspace() && this.runGeneration === generation;
     this.runWake?.wake(true);
     this.running = true;
+    this.runLost = null;
     try {
       let run = await api.post<ApiAutomationRun>(`${base}/automations/${id}/runs`,options);
       if (!current()) return null;
       this.currentRun = run; this.lastRun = run.report;
       this.runPending = null;
       let lastFetch = 0;
+      let pollFailures = 0;
       while (current()) {
         if (run.status !== 'running') {void this.loadAutomationRuns(id); return run.report;}
         await this.waitRunProgress(run.id, lastFetch);
@@ -1931,7 +1972,24 @@ class ApiClientStore {
         // snapshot is not re-sent. Nothing new → no reassignment, no re-render.
         const have = run.report.steps.length;
         lastFetch = performance.now();
-        const delta = await api.get<ApiAutomationRun>(`${base}/automation-runs/${run.id}?after=${have}`);
+        let delta: ApiAutomationRun;
+        try {
+          delta = await api.get<ApiAutomationRun>(`${base}/automation-runs/${run.id}?after=${have}`);
+          pollFailures = 0;
+        } catch (e) {
+          // One failed poll (a daemon blip, a timeout, a 5xx) is not a failed
+          // run: keep following it with backoff, and only after repeated
+          // failures say we lost track — never "Last run failed".
+          if (!current()) return null;
+          if (++pollFailures >= RUN_POLL_MAX_FAILURES) {
+            this.runLost = run.id;
+            toasts.error('Lost track of this run', `It may still be running. Refresh run history to see how it ended. (${loadErrorText(e)})`);
+            void this.loadAutomationRuns(id);
+            return null;
+          }
+          await new Promise<void>((resolve) => setTimeout(resolve, RUN_POLL_RETRY_MS * 2 ** (pollFailures - 1)));
+          continue;
+        }
         if (!current()) return null;
         if (delta.report.steps.length === 0 && delta.status === run.status && delta.error === run.error) continue;
         // Append in place: the arrays are this loop's own (raw state, so the

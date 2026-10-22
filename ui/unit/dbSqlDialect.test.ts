@@ -136,12 +136,15 @@ test('ClickHouse identifiers escape backslashes like the daemon (S16-305)', () =
 });
 
 // Guard: identifier / literal quoting has ONE home. A local quoter anywhere
-// else under modules/database (or in the database store) is how Postgres
+// else under modules/database, lib/database (or in the database store and its
+// lib/stores/database/ parts) is how Postgres
 // drifted in S16-05 and S16-301 — import from `sql-dialect.ts` instead.
 test('no local identifier/literal quoters outside sql-dialect.ts (S16-305)', () => {
   const root = fileURLToPath(new URL('../src/', import.meta.url));
   const files = [
     join(root, 'lib/stores/database.svelte.ts'),
+    ...walk(join(root, 'lib/stores/database')),
+    ...walk(join(root, 'lib/database')),
     ...walk(join(root, 'modules/database')),
   ].filter((f) => !f.endsWith('sql-dialect.ts'));
   const QUOTERS = [

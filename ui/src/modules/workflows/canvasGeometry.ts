@@ -8,11 +8,13 @@ const HEAD_H = 60; // header row height (icon + title) inside any node
 const STEP_H = 22; // one inner loop step row
 const LOOP_FOOT = 24; // the "until … · max …" footer row
 
-export interface LoopStep {
+/** A loop's inner step as the CARD shows it (defaults filled in) — not the
+ *  raw param object, which is `inspector/util.ts` `LoopStep` / `loopSteps`. */
+export interface LoopStepLabel {
   name: string;
   kind: string;
 }
-export function loopSteps(n: WorkflowNode): LoopStep[] {
+export function loopStepLabels(n: WorkflowNode): LoopStepLabel[] {
   const p = n.params as { steps?: { name?: string; kind?: string }[] } | null;
   const steps = Array.isArray(p?.steps) ? p!.steps : [];
   return steps.map((s, i) => ({ name: s?.name || `step ${i + 1}`, kind: s?.kind || '?' }));
@@ -26,7 +28,7 @@ export function loopMax(n: WorkflowNode): number | undefined {
 /** The actual card height — loop nodes grow to show their inner steps. */
 export function nodeHeight(n: WorkflowNode): number {
   if (n.kind === 'loop') {
-    const c = loopSteps(n).length;
+    const c = loopStepLabels(n).length;
     return HEAD_H + c * STEP_H + (loopUntil(n) ? LOOP_FOOT : 0) + 8;
   }
   return NODE_H;

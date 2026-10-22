@@ -11,6 +11,9 @@ use otto_core::domain::{
 };
 use otto_core::{Error, Result};
 
+use crate::issue_create::{
+    linear_problems, local_problems, problems_error, CreateIssueReq, CreateIssueResp,
+};
 use crate::jira::{
     CommentRef, CreatedIssue, DevStatus, EditableField, IssueComment, IssueFull, JiraClient,
     JiraTransition, JiraUser,
@@ -215,6 +218,39 @@ impl Tracker {
             Self::Linear(c) => {
                 c.create_issue(project_key, issue_type, summary, description_md)
                     .await
+            }
+        }
+    }
+
+    /// Create an issue with the full request: Jira runs the createmeta
+    /// pre-checks and reads the issue back (`verification`); Linear refuses
+    /// the Jira-only arguments and has no read-back.
+    pub async fn create_issue_checked(&self, req: &CreateIssueReq) -> Result<CreateIssueResp> {
+        match self {
+            Self::Jira(c) => c.create_issue_checked(req).await,
+            Self::Linear(c) => {
+                let mut problems = local_problems(req);
+                problems.extend(linear_problems(req));
+                if !problems.is_empty() {
+                    return Err(problems_error(
+                        req.project_key.trim(),
+                        req.issue_type.trim(),
+                        &problems,
+                    ));
+                }
+                let created = c
+                    .create_issue(
+                        req.project_key.trim(),
+                        req.issue_type.trim(),
+                        req.summary.trim(),
+                        req.description.as_deref().unwrap_or(""),
+                    )
+                    .await?;
+                Ok(CreateIssueResp {
+                    key: created.key,
+                    url: created.url,
+                    verification: None,
+                })
             }
         }
     }

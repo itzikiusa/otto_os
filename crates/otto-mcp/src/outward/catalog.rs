@@ -30,6 +30,8 @@ pub const DEFAULT_ENABLED: &[&str] = &[
     "list_goal_loops",
     "list_issue_accounts",
     "list_issue_transitions",
+    "list_issue_projects",
+    "list_issue_types",
     "get_scheduled_task",
     // ---- Feature reads (metadata/list/get) — safe to expose by default once the
     // outward server itself is turned on. Content-heavy reads (consume/search)
@@ -147,6 +149,7 @@ pub const DANGEROUS: &[&str] = &[
     "start_pr_review",
     // Merging is outward-facing and irreversible.
     "merge_pr",
+    "create_issue",
     "comment_issue",
     "transition_issue",
     // API client writers send real HTTP requests and/or persist saved requests.
@@ -583,60 +586,9 @@ pub fn otto_tool_specs() -> Vec<Value> {
                 "repo_id":{"type":"string","description":REPO_REF_DESC},"number":{"type":"integer","description":PR_NUMBER_DESC},
                 "pr_number":{"type":"integer","description":"Alias of `number`."},
                 "strategy":{"type":"string","enum":["merge","squash","rebase"]},"delete_source_branch":{"type":"boolean"}}}}),
-        // ================= Issues (Jira / Confluence) =================
-        json!({"name":"otto.search_issues","mutating":false,"category":"Issues",
-            "description":"Issue search: `jql` (Jira), `filter` (Linear) or `query` (text/key; opt. `project`); none → yours. Hits: key, summary, status, issue_type, url, parent_key, assignee, fix_versions, updated. `limit` ≤100, page with `start_at`. Read-only.",
-            "inputSchema":{"type":"object","properties":{
-                "account_id":{"type":"string","description":ISSUE_ACCOUNT_REF_DESC},"query":{"type":"string"},"project":{"type":"string"},
-                "jql":{"type":"string"},"filter":{"type":"object"},
-                "start_at":{"type":"integer"},"limit":{"type":"integer"}}}}),
-        json!({"name":"otto.get_issue","mutating":false,"category":"Issues",
-            "description":"Get one issue's full detail (description, comments, changelog, links) by key. Available status changes come from otto.list_issue_transitions. Read-only.",
-            "inputSchema":{"type":"object","required":["key"],"properties":{
-                "account_id":{"type":"string","description":ISSUE_ACCOUNT_REF_DESC},"key":{"type":"string"}}}}),
-        json!({"name":"otto.search_confluence","mutating":false,"category":"Issues",
-            "description":"Search Confluence: `cql` (raw CQL) or `query` (title or page id; `full_text` adds body), optional `space`. Hits: id, title, space_key, url. `limit` ≤100, page with `start`. Read-only.",
-            "inputSchema":{"type":"object","properties":{
-                "account_id":{"type":"string","description":ISSUE_ACCOUNT_REF_DESC},"query":{"type":"string"},"space":{"type":"string"},
-                "cql":{"type":"string"},"full_text":{"type":"boolean"},"start":{"type":"integer"},"limit":{"type":"integer"}}}}),
-        json!({"name":"otto.get_confluence_page","mutating":false,"category":"Issues",
-            "description":"Read one Confluence page. Returns id, title, space_key, url, version and the body as MARKDOWN (`body_md`) — never storage XHTML. Read-only.",
-            "inputSchema":{"type":"object","required":["page_id"],"properties":{
-                "account_id":{"type":"string","description":ISSUE_ACCOUNT_REF_DESC},"page_id":{"type":"string","description":PAGE_REF_DESC}}}}),
-        json!({"name":"otto.list_confluence_page_comments","mutating":false,"category":"Issues",
-            "description":"List the footer comments on a Confluence page (author, body as markdown, created). Use it to collect answers people left on a page. Read-only.",
-            "inputSchema":{"type":"object","required":["page_id"],"properties":{
-                "account_id":{"type":"string","description":ISSUE_ACCOUNT_REF_DESC},"page_id":{"type":"string","description":PAGE_REF_DESC}}}}),
-        json!({"name":"otto.create_confluence_page","mutating":true,"category":"Issues",
-            "description":"Create a Confluence page. Supply `body_md` (MARKDOWN, converted server-side) OR `body_html` (Confluence storage XHTML, passed through — use it for panel/expand/status macros, layouts and anything Markdown cannot express). Optional `parent_id` nests it under an existing page. DANGEROUS: outward-facing — approval-gated.",
-            "inputSchema":{"type":"object","required":["space_key","title"],"properties":{
-                "account_id":{"type":"string","description":ISSUE_ACCOUNT_REF_DESC},"space_key":{"type":"string"},"title":{"type":"string"},
-                "body_md":{"type":"string"},"body_html":{"type":"string"},"parent_id":{"type":"string","description":"Parent page id or URL."}}}}),
-        json!({"name":"otto.update_confluence_page","mutating":true,"category":"Issues",
-            "description":"Replace a Confluence page's body with `body_md` (MARKDOWN) or `body_html` (Confluence storage XHTML, passed through). Pass `base_version` (the page version you read with otto.get_confluence_page) so a newer human edit is never overwritten — the call then fails with a conflict instead; without it the latest version is overwritten. Omit `title` to keep the existing one. DANGEROUS: outward-facing — approval-gated.",
-            "inputSchema":{"type":"object","required":["page_id"],"properties":{
-                "account_id":{"type":"string","description":ISSUE_ACCOUNT_REF_DESC},"page_id":{"type":"string","description":PAGE_REF_DESC},"body_md":{"type":"string"},
-                "body_html":{"type":"string"},"title":{"type":"string"},"base_version":{"type":"integer"}}}}),
-        json!({"name":"otto.comment_confluence_page","mutating":true,"category":"Issues",
-            "description":"Add a footer comment to a Confluence page. Supply `body_md` (MARKDOWN) or `body_html` (storage XHTML). DANGEROUS: outward-facing — approval-gated.",
-            "inputSchema":{"type":"object","required":["page_id"],"properties":{
-                "account_id":{"type":"string","description":ISSUE_ACCOUNT_REF_DESC},"page_id":{"type":"string","description":PAGE_REF_DESC},"body_md":{"type":"string"},
-                "body_html":{"type":"string"}}}}),
-        json!({"name":"otto.comment_issue","mutating":true,"category":"Issues",
-            "description":"Add a comment to an issue. DANGEROUS: outward-facing — approval-gated.",
-            "inputSchema":{"type":"object","required":["key","body"],"properties":{
-                "account_id":{"type":"string","description":ISSUE_ACCOUNT_REF_DESC},"key":{"type":"string"},"body":{"type":"string"}}}}),
-        json!({"name":"otto.transition_issue","mutating":true,"category":"Issues",
-            "description":"Transition an issue to a new status. `transition_id` is a transition id from otto.list_issue_transitions, or its name / target status name (e.g. \"In Progress\") — resolved against the issue's available transitions. DANGEROUS — approval-gated.",
-            "inputSchema":{"type":"object","required":["key","transition_id"],"properties":{
-                "account_id":{"type":"string","description":ISSUE_ACCOUNT_REF_DESC},"key":{"type":"string"},"transition_id":{"type":"string","description":"Transition id, name, or target status name."}}}}),
-        json!({"name":"otto.list_issue_accounts","mutating":false,"category":"Issues",
-            "description":"List YOUR Jira/Linear accounts — `{items}`: id, label, email, base_url, provider (no token). Every Issues tool takes `account_id` = one of these ids OR its label / email / base URL, and may omit it when you have exactly one account. Read-only.",
-            "inputSchema":{"type":"object","properties":{}}}),
-        json!({"name":"otto.list_issue_transitions","mutating":false,"category":"Issues",
-            "description":"List an issue's available status transitions `[{id, name, to_status}]` — the ids (or names) otto.transition_issue accepts. Read-only.",
-            "inputSchema":{"type":"object","required":["key"],"properties":{
-                "account_id":{"type":"string","description":ISSUE_ACCOUNT_REF_DESC},"key":{"type":"string"}}}}),
+    ];
+    specs.extend(issue_tool_specs());
+    specs.extend([
         // ================= Swarm =================
         json!({"name":"otto.list_swarms","mutating":false,"category":"Swarm",
             "description":"List agent swarms across EVERY workspace you can read — `{items, …}` with id, name, status, workspace_id + workspace_name. Pass a swarm's id OR name as `swarm_id`. Read-only.",
@@ -1058,11 +1010,84 @@ pub fn otto_tool_specs() -> Vec<Value> {
                 "port":{"type":"integer"},"method":{"type":"string","description":"GET|POST|PUT|PATCH|DELETE"},
                 "path":{"type":"string"},"headers":{"type":"object"},"body":{"type":"string"},
                 "timeout_ms":{"type":"integer"},"max_concurrency":{"type":"integer"},"confirm_name":{"type":"string"}}}}),
-    ];
+    ]);
     // Agent UI control: one governed tool per `docs/contracts/ui-commands.json`
     // entry (`otto.ui_*`, category "UI control") — see `crate::ui_commands`.
     specs.extend(ui_commands::specs());
     specs
+}
+
+/// The Issues (Jira / Confluence) slice of [`otto_tool_specs`], in catalog
+/// order (split out to keep that function under the size ratchet).
+fn issue_tool_specs() -> Vec<Value> {
+    vec![
+        json!({"name":"otto.search_issues","mutating":false,"category":"Issues",
+            "description":"Issue search: `jql` (Jira), `filter` (Linear) or `query` (text/key; opt. `project`); none → yours. Hits: key, summary, status, issue_type, url, parent_key, assignee, fix_versions, updated. `limit` ≤100, page with `start_at`. Read-only.",
+            "inputSchema":{"type":"object","properties":{
+                "account_id":{"type":"string","description":ISSUE_ACCOUNT_REF_DESC},"query":{"type":"string"},"project":{"type":"string"},
+                "jql":{"type":"string"},"filter":{"type":"object"},
+                "start_at":{"type":"integer"},"limit":{"type":"integer"}}}}),
+        json!({"name":"otto.get_issue","mutating":false,"category":"Issues",
+            "description":"Get one issue's full detail (description, comments, changelog, links) by key. Available status changes come from otto.list_issue_transitions. Read-only.",
+            "inputSchema":{"type":"object","required":["key"],"properties":{
+                "account_id":{"type":"string","description":ISSUE_ACCOUNT_REF_DESC},"key":{"type":"string"}}}}),
+        json!({"name":"otto.search_confluence","mutating":false,"category":"Issues",
+            "description":"Search Confluence: `cql` (raw CQL) or `query` (title or page id; `full_text` adds body), optional `space`. Hits: id, title, space_key, url. `limit` ≤100, page with `start`. Read-only.",
+            "inputSchema":{"type":"object","properties":{
+                "account_id":{"type":"string","description":ISSUE_ACCOUNT_REF_DESC},"query":{"type":"string"},"space":{"type":"string"},
+                "cql":{"type":"string"},"full_text":{"type":"boolean"},"start":{"type":"integer"},"limit":{"type":"integer"}}}}),
+        json!({"name":"otto.get_confluence_page","mutating":false,"category":"Issues",
+            "description":"Read one Confluence page. Returns id, title, space_key, url, version and the body as MARKDOWN (`body_md`) — never storage XHTML. Read-only.",
+            "inputSchema":{"type":"object","required":["page_id"],"properties":{
+                "account_id":{"type":"string","description":ISSUE_ACCOUNT_REF_DESC},"page_id":{"type":"string","description":PAGE_REF_DESC}}}}),
+        json!({"name":"otto.list_confluence_page_comments","mutating":false,"category":"Issues",
+            "description":"List the footer comments on a Confluence page (author, body as markdown, created). Use it to collect answers people left on a page. Read-only.",
+            "inputSchema":{"type":"object","required":["page_id"],"properties":{
+                "account_id":{"type":"string","description":ISSUE_ACCOUNT_REF_DESC},"page_id":{"type":"string","description":PAGE_REF_DESC}}}}),
+        json!({"name":"otto.create_confluence_page","mutating":true,"category":"Issues",
+            "description":"Create a Confluence page. Supply `body_md` (MARKDOWN → validated storage: tables with a header row, code macros with language, task lists, `> [!NOTE]` panels) OR `body_html` (storage XHTML, must be well-formed; passed through — for macros/layouts Markdown cannot express). Optional `parent_id` nests it under an existing page. The page is read back: `verification:{ok, checks}` compares title, space, parent, version and body structure. DANGEROUS: outward-facing — approval-gated.",
+            "inputSchema":{"type":"object","required":["space_key","title"],"properties":{
+                "account_id":{"type":"string","description":ISSUE_ACCOUNT_REF_DESC},"space_key":{"type":"string"},"title":{"type":"string"},
+                "body_md":{"type":"string"},"body_html":{"type":"string"},"parent_id":{"type":"string","description":"Parent page id or URL."}}}}),
+        json!({"name":"otto.update_confluence_page","mutating":true,"category":"Issues",
+            "description":"Replace a Confluence page's body with `body_md` (MARKDOWN, converted as in otto.create_confluence_page) or `body_html` (well-formed storage XHTML, passed through). Pass `base_version` (the page version you read with otto.get_confluence_page) so a newer human edit is never overwritten — the call then fails with a conflict instead; without it the latest version is overwritten. Omit `title` to keep the existing one. Returns `verification` (version must be +1, body structure must match). DANGEROUS: outward-facing — approval-gated.",
+            "inputSchema":{"type":"object","required":["page_id"],"properties":{
+                "account_id":{"type":"string","description":ISSUE_ACCOUNT_REF_DESC},"page_id":{"type":"string","description":PAGE_REF_DESC},"body_md":{"type":"string"},
+                "body_html":{"type":"string"},"title":{"type":"string"},"base_version":{"type":"integer"}}}}),
+        json!({"name":"otto.comment_confluence_page","mutating":true,"category":"Issues",
+            "description":"Add a footer comment to a Confluence page. Supply `body_md` (MARKDOWN) or `body_html` (well-formed storage XHTML). Returns `verification` from reading the comment back. DANGEROUS: outward-facing — approval-gated.",
+            "inputSchema":{"type":"object","required":["page_id"],"properties":{
+                "account_id":{"type":"string","description":ISSUE_ACCOUNT_REF_DESC},"page_id":{"type":"string","description":PAGE_REF_DESC},"body_md":{"type":"string"},
+                "body_html":{"type":"string"}}}}),
+        json!({"name":"otto.create_issue","mutating":true,"category":"Issues",
+            "description":"Create an issue. `project_key` from otto.list_issue_projects (Linear: team key); `issue_type` a name or id from otto.list_issue_types. `description` is Markdown — headings, lists, task lists, tables, code, `> [!NOTE]` callouts become Jira ADF. Jira-only: `labels` (no spaces), `priority`, `parent` or `epic` (issue key), `fields` (other fields by id, Jira-native values — e.g. a required custom field). Checked against Jira's create metadata first (one error lists every problem and the valid values); returns `{key, url, verification:{ok, checks:[{name, ok, detail}]}}` comparing the stored issue with the request. DANGEROUS: outward-facing — approval-gated.",
+            "inputSchema":{"type":"object","required":["project_key","issue_type","summary"],"properties":{
+                "account_id":{"type":"string","description":ISSUE_ACCOUNT_REF_DESC},"project_key":{"type":"string"},"issue_type":{"type":"string"},
+                "summary":{"type":"string"},"description":{"type":"string"},"labels":{"type":"array","items":{"type":"string"}},
+                "priority":{"type":"string"},"parent":{"type":"string"},"epic":{"type":"string"},"fields":{"type":"object"}}}}),
+        json!({"name":"otto.comment_issue","mutating":true,"category":"Issues",
+            "description":"Add a comment to an issue. `body` is Markdown (Jira: converted to ADF — headings, lists, tables, code). DANGEROUS: outward-facing — approval-gated.",
+            "inputSchema":{"type":"object","required":["key","body"],"properties":{
+                "account_id":{"type":"string","description":ISSUE_ACCOUNT_REF_DESC},"key":{"type":"string"},"body":{"type":"string"}}}}),
+        json!({"name":"otto.transition_issue","mutating":true,"category":"Issues",
+            "description":"Transition an issue to a new status. `transition_id` is a transition id from otto.list_issue_transitions, or its name / target status name (e.g. \"In Progress\") — resolved against the issue's available transitions. DANGEROUS — approval-gated.",
+            "inputSchema":{"type":"object","required":["key","transition_id"],"properties":{
+                "account_id":{"type":"string","description":ISSUE_ACCOUNT_REF_DESC},"key":{"type":"string"},"transition_id":{"type":"string","description":"Transition id, name, or target status name."}}}}),
+        json!({"name":"otto.list_issue_accounts","mutating":false,"category":"Issues",
+            "description":"List YOUR Jira/Linear accounts — `{items}`: id, label, email, base_url, provider (no token). Every Issues tool takes `account_id` = one of these ids OR its label / email / base URL, and may omit it when you have exactly one account. Read-only.",
+            "inputSchema":{"type":"object","properties":{}}}),
+        json!({"name":"otto.list_issue_transitions","mutating":false,"category":"Issues",
+            "description":"List an issue's available status transitions `[{id, name, to_status}]` — the ids (or names) otto.transition_issue accepts. Read-only.",
+            "inputSchema":{"type":"object","required":["key"],"properties":{
+                "account_id":{"type":"string","description":ISSUE_ACCOUNT_REF_DESC},"key":{"type":"string"}}}}),
+        json!({"name":"otto.list_issue_projects","mutating":false,"category":"Issues",
+            "description":"List the projects (Linear: teams) an issue account can see — `{items:[{key, name}], truncated}`; `key` is the `project_key` otto.create_issue takes. Read-only.",
+            "inputSchema":{"type":"object","properties":{"account_id":{"type":"string","description":ISSUE_ACCOUNT_REF_DESC}}}}),
+        json!({"name":"otto.list_issue_types","mutating":false,"category":"Issues",
+            "description":"List a project's issue type names (non-subtask; Linear: `Issue` plus the team's labels) — the `issue_type` values otto.create_issue accepts. Read-only.",
+            "inputSchema":{"type":"object","required":["project_key"],"properties":{
+                "account_id":{"type":"string","description":ISSUE_ACCOUNT_REF_DESC},"project_key":{"type":"string"}}}}),
+    ]
 }
 
 /// The effective enabled set. Never saved → [`DEFAULT_ENABLED`] + every UI
@@ -1243,6 +1268,12 @@ pub fn dangerous_detail(tool: &str, args: &Value) -> String {
             "Start a multi-agent review of PR #{} on repo '{}'",
             args.get("pr_number").and_then(i64_lenient).unwrap_or(0),
             args.get("repo_id").and_then(Value::as_str).unwrap_or("?")
+        ),
+        "create_issue" => format!(
+            "Create a {} in project '{}': \"{}\"",
+            args.get("issue_type").and_then(Value::as_str).unwrap_or("?"),
+            args.get("project_key").and_then(Value::as_str).unwrap_or("?"),
+            args.get("summary").and_then(Value::as_str).unwrap_or("?")
         ),
         "comment_issue" => format!(
             "Comment on issue '{}'",

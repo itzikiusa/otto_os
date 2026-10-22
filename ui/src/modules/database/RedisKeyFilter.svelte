@@ -26,7 +26,8 @@
   }
 </script>
 
-<div class="kf" style="padding-inline-start: {(depth + 1) * 13 + 4}px">
+<!-- role=group: a non-treeitem row the schema tree owns (aria-required-children). -->
+<div class="kf" role="group" aria-label="Key filter" style="padding-inline-start: {(depth + 1) * 13 + 4}px">
   <Icon name="search" size={12} />
   <input dir="auto" aria-label="Filter keys by prefix"
     class="kf-input"

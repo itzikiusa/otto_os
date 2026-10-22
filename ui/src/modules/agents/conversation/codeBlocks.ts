@@ -1,6 +1,6 @@
 // Code blocks in chat prose, IDE-style: a header (language · file name when
 // the fence names one · line count · Wrap · Open · Copy), line numbers, syntax
-// colours from a whole-block highlight (vault/mdRender.ts `codeLines`: one
+// colours from a whole-block highlight (lib/render/markdown.ts `codeLines`: one
 // `<span class="cl">` per line), and a fold for long blocks ("Show all N
 // lines"). The markdown is rendered to an HTML STRING once and cached
 // (mdCache.ts), so the chrome is added to that string here (after the
@@ -10,7 +10,7 @@
 // re-rendered on click, the cache stays a string memo.
 
 import { copyTextOrThrow } from '../../../lib/clipboard.ts';
-import { escapeHtml } from '../../../lib/html.ts';
+import { escapeHtml, unescapeHtml } from '../../../lib/html.ts';
 
 // Header labels for fence tags and hljs ids (static: no hljs needed, so the
 // label is right before the lazy highlighter lands and in node unit tests).
@@ -37,16 +37,13 @@ export function langLabel(tag: string | null | undefined): string {
 /** Blocks longer than this start folded to about this many lines. */
 export const CODE_CAP_LINES = 18;
 
-// vault/mdRender.ts emits `<pre><code class="hljs[ language-x]"[ title="file"]>…</code></pre>`
+// lib/render/markdown.ts emits `<pre><code class="hljs[ language-x]"[ title="file"]>…</code></pre>`
 // for every fenced block (diagram fences render as `.diagram-block` instead).
 // A block already wrapped (its `<pre>` directly follows our `.code-head`) is
 // skipped, so decorating twice never nests toolbars.
 const PRE = /(?<!<\/div>)<pre><code class="hljs(?: language-([\w+#.-]+))?"(?: title="([^"]*)")?>([\s\S]*?)<\/code><\/pre>/g;
 const LINE_SPAN = /<span class="cl">/g;
 
-const esc = escapeHtml;
-/** `title` arrives entity-escaped from the sanitizer's serializer. */
-const unesc = (s: string): string => s.replace(/&#39;/g, "'").replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
 
 const base = (p: string): string => p.split('/').pop() || p;
 
@@ -59,15 +56,16 @@ export function decorateCodeBlocks(html: string): string {
     const lines = spans || body.replace(/\n$/, '').split('\n').length;
     const long = lines > CODE_CAP_LINES;
     const numbered = spans > 1;
-    const label = lang ? esc(langLabel(lang)) : 'Text';
-    const cls = lang ? `hljs language-${esc(lang)}` : 'hljs';
-    const file = title ? unesc(title) : '';
+    const label = lang ? escapeHtml(langLabel(lang)) : 'Text';
+    const cls = lang ? `hljs language-${escapeHtml(lang)}` : 'hljs';
+    // `title` arrives entity-escaped from the sanitizer's serializer.
+    const file = title ? unescapeHtml(title) : '';
     const gut = String(lines).length + 1;
     return (
-      `<div class="code-block${long ? ' capped' : ''}${numbered ? ' numbered' : ''}" data-lines="${lines}"${lang ? ` data-lang="${esc(lang)}"` : ''} style="--gut:${gut}ch">` +
+      `<div class="code-block${long ? ' capped' : ''}${numbered ? ' numbered' : ''}" data-lines="${lines}"${lang ? ` data-lang="${escapeHtml(lang)}"` : ''} style="--gut:${gut}ch">` +
       `<div class="code-head"><span class="code-lang">${label}</span>` +
       (file
-        ? `<button type="button" class="code-file" data-code-act="file" data-file="${esc(file)}" title="Preview ${esc(file)}">${esc(base(file))}</button>`
+        ? `<button type="button" class="code-file" data-code-act="file" data-file="${escapeHtml(file)}" title="Preview ${escapeHtml(file)}">${escapeHtml(base(file))}</button>`
         : '') +
       `<span class="code-sp"></span>` +
       (lines > 1 ? `<span class="code-n">${lines} lines</span>` : '') +

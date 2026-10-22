@@ -8,6 +8,19 @@ import * as resultBudgetMod from '../src/lib/stores/db-result-budget.ts';
 import * as filterChips from '../src/modules/database/filter-chips.ts';
 import * as sqlDialect from '../src/modules/database/sql-dialect.ts';
 
+/** The store is a façade over lib/stores/database/* (model, statement,
+ *  dashboards), loaded for real through the harness's `relative` mode. Its
+ *  parts import the same modules by other relative paths, so every stub is
+ *  also given under its src-relative key (`../api/client` → `lib/api/client`). */
+function withSrcKeys(m: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...m };
+  for (const [k, v] of Object.entries(m)) {
+    if (k.startsWith('../')) out[`lib/${k.slice(3)}`] = v;
+    else if (k.startsWith('./')) out[`lib/stores/${k.slice(2)}`] = v;
+  }
+  return out;
+}
+
 type Call = { method: string; path: string; lane: 'int' | 'bg' };
 
 function setup(ids: string[], selected: string, opts: { onClick?: boolean } = {}) {
@@ -56,7 +69,7 @@ function setup(ids: string[], selected: string, opts: { onClick?: boolean } = {}
   };
   const mod = loadSource(
     new URL('../src/lib/stores/database.svelte.ts', import.meta.url),
-    {
+    withSrcKeys({
       '../api/client': {
         api,
         ApiError,
@@ -73,16 +86,16 @@ function setup(ids: string[], selected: string, opts: { onClick?: boolean } = {}
       '../toast.svelte': { toasts: { error: noop, info: noop, warn: noop, success: noop } }, '../toastError': { toastError: () => {} },
       '../router.svelte': { router: { module: 'database' } },
       '../components/exporters': { downloadText: noop },
-      '../../modules/database/mongo-format': { formatMongo: (s: string) => s },
-      '../../modules/database/sql-util': {
+      '../database/mongo-format': { formatMongo: (s: string) => s },
+      '../database/sql-util': {
         defaultVarSpec: (v: string) => ({ value: v, type: 'string', escape: true }),
         stripJavaStringConcat: (s: string) => s,
         maskQueryPlaceholders: (s: string) => s,
         unmaskQueryPlaceholders: (s: string) => s,
       },
-      '../../modules/database/bson': { bsonScalar: (v: unknown) => v },
-      '../../modules/database/filter-chips': filterChips,
-      '../../modules/database/sql-dialect': sqlDialect,
+      '../jsonTree/bson': { bsonScalar: (v: unknown) => v },
+      '../database/filter-chips': filterChips,
+      '../database/sql-dialect': sqlDialect,
       '../clipboard': { copyTextOrThrow: async () => {} },
       '../poll': poll,
       '../editor-history': {
@@ -90,9 +103,9 @@ function setup(ids: string[], selected: string, opts: { onClick?: boolean } = {}
         forgetEditorStates: noop,
         hydrateEditorHistory: async () => {},
       },
-      '../../modules/database/grid-tab-state': { dropGridState: noop, parkedEditCount: () => 0, releaseGridResult: noop },
+      '../database/grid-tab-state': { dropGridState: noop, parkedEditCount: () => 0, releaseGridResult: noop },
       './db-result-budget': resultBudgetMod,
-      '../../modules/database/error-normalize': { normalizeDbError: (_e: unknown, msg: string) => ({ title: msg }) },
+      '../database/error-normalize': { normalizeDbError: (_e: unknown, msg: string) => ({ title: msg }) },
       './clipHistory.svelte': { clipHistory: { setGuard: noop } },
       './dbPrefs.svelte': (() => {
         const prefs = {
@@ -110,8 +123,9 @@ function setup(ids: string[], selected: string, opts: { onClick?: boolean } = {}
       })(),
       '../lazyModule': { announceModule: noop },
       '../loadError': { loadErrorText: (e: unknown) => (e instanceof Error ? e.message : String(e)) },
-    },
+    }),
     { localStorage, crypto: globalThis.crypto, performance: globalThis.performance, sessionStorage: { getItem: () => null, setItem: noop, removeItem: noop } },
+    { relative: true },
   );
   const db = mod.database;
   if (opts.onClick) db.setWarmRestored('on-click');

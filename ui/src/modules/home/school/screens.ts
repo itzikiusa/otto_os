@@ -7,8 +7,11 @@
 //  • Polling: only kids in the classroom you're in, only the ones the camera
 //    can see, at most MAX_LIVE of them, every POLL_MS — and none at all while
 //    the widget is off screen. A row that didn't change isn't repainted.
-//  • Empty desks show a sleeping screen; a suspended / ended session a dimmed
-//    "asleep" screen; a kid that needs you gets an amber banner.
+//  • Empty desks show a sleeping screen; a suspended session a dimmed
+//    "asleep" screen; a kid that needs you gets an amber banner, a failed one
+//    a red one, a finished one a green "done" footer over its last output.
+//  • `paintScreen(…, scale)` paints the same layout at 2× for the ONE monitor
+//    the camera is on (selected / screen view), so it stays crisp up close.
 
 import type { CharacterKey, Pose } from './model.ts';
 
@@ -17,7 +20,11 @@ export const SCREEN_H = 320;
 export const MAX_LIVE = 12;
 export const POLL_MS = 2000;
 /** Visible text rows on a monitor. */
-export const ROWS = 17;
+export const ROWS = 16;
+/** Columns before a row is clipped (15 px monospace on a 512 px screen). */
+export const COLS = 54;
+const FONT_PX = 15;
+const LINE_H = 17.4;
 
 export interface ScreenFeed {
   live: boolean;
@@ -63,7 +70,7 @@ export function lineColor(line: string): string {
 }
 
 /** The last `rows` non-blank-tail lines, each clipped to `cols` chars. */
-export function visibleLines(lines: readonly string[], rows = ROWS, cols = 58): string[] {
+export function visibleLines(lines: readonly string[], rows = ROWS, cols = COLS): string[] {
   let end = lines.length;
   while (end > 0 && !lines[end - 1].trim()) end--;
   return lines.slice(Math.max(0, end - rows), end).map((l) => {
@@ -84,11 +91,30 @@ function clip(ctx: CanvasRenderingContext2D, text: string, max: number): string 
   return `${t}…`;
 }
 
-/** Paint one monitor. `ctx` is a SCREEN_W × SCREEN_H canvas. */
-export function paintScreen(ctx: CanvasRenderingContext2D, s: ScreenInfo): void {
+/** The title-bar status chip. */
+export function statusText(pose: ScreenInfo['pose']): string {
+  switch (pose) {
+    case 'working':
+      return '● working';
+    case 'needs-you':
+      return '✋ needs you';
+    case 'stale':
+      return 'reconnecting';
+    case 'done':
+      return '✓ done';
+    case 'error':
+      return '✕ failed';
+    default:
+      return 'idle';
+  }
+}
+
+/** Paint one monitor. `ctx` is a (SCREEN_W × SCREEN_H) × `scale` canvas. */
+export function paintScreen(ctx: CanvasRenderingContext2D, s: ScreenInfo, scale = 1): void {
   const W = SCREEN_W;
   const H = SCREEN_H;
   ctx.save();
+  ctx.setTransform(scale, 0, 0, scale, 0, 0);
   ctx.fillStyle = BG;
   ctx.fillRect(0, 0, W, H);
 
@@ -125,35 +151,46 @@ export function paintScreen(ctx: CanvasRenderingContext2D, s: ScreenInfo): void 
   ctx.textAlign = 'right';
   ctx.font = '13px -apple-system, system-ui, sans-serif';
   ctx.fillStyle = 'rgba(255,255,255,0.85)';
-  ctx.fillText(s.pose === 'working' ? '● working' : s.pose === 'needs-you' ? '✋ needs you' : s.pose === 'stale' ? 'reconnecting' : 'idle', W - 12, 17);
+  ctx.fillText(statusText(s.pose), W - 12, 17);
 
-  let top = 46;
-  if (s.pose === 'needs-you') {
-    ctx.fillStyle = AMBER;
-    ctx.fillRect(0, 34, W, 26);
-    ctx.fillStyle = '#1a1300';
+  let top = 44;
+  let bottom = H - 6;
+  const banner = (bg: string, fg: string, text: string, y: number) => {
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, y, W, 28);
+    ctx.fillStyle = fg;
     ctx.textAlign = 'center';
-    ctx.font = '600 15px -apple-system, system-ui, sans-serif';
-    ctx.fillText('Waiting for you — click to answer', W / 2, 47);
+    ctx.textBaseline = 'middle';
+    ctx.font = '600 16px -apple-system, system-ui, sans-serif';
+    ctx.fillText(text, W / 2, y + 14);
+  };
+  if (s.pose === 'needs-you') {
+    banner(AMBER, '#1a1300', 'Waiting for you — click to answer', 34);
     top = 70;
+  } else if (s.pose === 'error') {
+    banner(RED, '#ffffff', 'Exited with an error', 34);
+    top = 70;
+  } else if (s.pose === 'done') {
+    banner(GREEN, '#03140a', '✓ Finished', H - 28);
+    bottom = H - 32;
   }
 
   ctx.textAlign = 'left';
   ctx.textBaseline = 'top';
-  ctx.font = '14px ui-monospace, SFMono-Regular, Menlo, monospace';
-  const lines = s.feed ? visibleLines(s.feed.lines, Math.floor((H - top - 8) / 16.2)) : [];
+  ctx.font = `${FONT_PX}px ui-monospace, SFMono-Regular, Menlo, monospace`;
+  const lines = s.feed ? visibleLines(s.feed.lines, Math.floor((bottom - top) / LINE_H)) : [];
   if (lines.length === 0) {
     ctx.fillStyle = DIM;
     ctx.fillText(s.feed && !s.feed.live ? 'session is not running' : 'connecting…', 12, top);
   }
   lines.forEach((l, i) => {
     ctx.fillStyle = lineColor(l);
-    ctx.fillText(l, 12, top + i * 16.2);
+    ctx.fillText(l, 12, top + i * LINE_H);
   });
   if (s.pose === 'working') {
-    // A blinking-ish cursor block after the last line.
+    // A cursor block after the last line.
     ctx.fillStyle = GREEN;
-    ctx.fillRect(12, top + lines.length * 16.2 + 2, 8, 13);
+    ctx.fillRect(12, top + lines.length * LINE_H + 2, 9, 14);
   }
   if (s.selected) {
     ctx.strokeStyle = BLUE;

@@ -292,7 +292,54 @@ async fn lsp_ws(
         );
     }
 
-    // 4. Resolve the language server.
+    // One pooled server per (user, lang, canonical root): `/a/../a` and `/a`
+    // share; two users never do (r3-10-08).
+    let root = std::fs::canonicalize(root_path)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or(root);
+    // 4. The caller must be able to see a workspace — or a repo registered in
+    //    one — containing `root` (the server indexes, and answers queries
+    //    about, everything under it). Root users own the host, like the Files
+    //    routes. A non-root root may never sit in Otto's data dir or a
+    //    credential dir, whatever workspace contains it (the `/fs/*` deny).
+    //    The one data-dir exception (PC-1): an agent work area that is — or
+    //    is under — the cwd of a session the caller may open (owner or ws
+    //    Admin) whose cwd is itself one work dir inside an area, so a non-root owner's workflow / persona / goal-loop session
+    //    gets its editor's language server.
+    if !user.is_root {
+        let root_ref = std::path::Path::new(&root);
+        let visible = if crate::routes::session_files::lsp_root_in_own_session(
+            &st.ctx, &user, root_ref,
+        )
+        .await
+        {
+            Ok(true)
+        } else if let Some(why) = secret_root_denial(root_ref) {
+            return ws_problem(StatusCode::FORBIDDEN, "forbidden", &why);
+        } else {
+            root_visible_to(&st.ctx, &user, root_ref).await
+        };
+        match visible {
+            Ok(true) => {}
+            Ok(false) => {
+                return ws_problem(
+                    StatusCode::FORBIDDEN,
+                    "forbidden",
+                    "root is not inside a workspace you can access",
+                );
+            }
+            Err(e) => {
+                tracing::warn!("lsp: workspace lookup failed: {e}");
+                return ws_problem(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal",
+                    "workspace lookup failed",
+                );
+            }
+        }
+    }
+    // 5. Resolve the language server (after the access check, so a refused
+    //    root answers 403 whether or not the server is installed).
     let resolved = match servers::resolve_lang(&lang) {
         Some(r) => r,
         None => {
@@ -314,39 +361,6 @@ async fn lsp_ws(
         );
     }
 
-    // One pooled server per (user, lang, canonical root): `/a/../a` and `/a`
-    // share; two users never do (r3-10-08).
-    let root = std::fs::canonicalize(root_path)
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or(root);
-    // 5. The caller must be able to see a workspace — or a repo registered in
-    //    one — containing `root` (the server indexes, and answers queries
-    //    about, everything under it). Root users own the host, like the Files
-    //    routes. A non-root root may never sit in Otto's data dir or a
-    //    credential dir, whatever workspace contains it (the `/fs/*` deny).
-    if !user.is_root {
-        if let Some(why) = secret_root_denial(std::path::Path::new(&root)) {
-            return ws_problem(StatusCode::FORBIDDEN, "forbidden", &why);
-        }
-        match root_visible_to(&st.ctx, &user, std::path::Path::new(&root)).await {
-            Ok(true) => {}
-            Ok(false) => {
-                return ws_problem(
-                    StatusCode::FORBIDDEN,
-                    "forbidden",
-                    "root is not inside a workspace you can access",
-                );
-            }
-            Err(e) => {
-                tracing::warn!("lsp: workspace lookup failed: {e}");
-                return ws_problem(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "internal",
-                    "workspace lookup failed",
-                );
-            }
-        }
-    }
     let key = pool::PoolKey {
         owner: user.id.to_string(),
         lang,

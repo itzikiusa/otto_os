@@ -1199,22 +1199,26 @@ fn route_for_rejects_missing_args_and_unknown_tool() {
 }
 
 #[test]
-fn query_db_readonly_sql_guard_lives_in_route_for() {
-    assert!(route_for(
-        "query_db_readonly",
-        &json!({"connection_id":"c1","statement":"SELECT 1"})
-    )
-    .is_ok());
-    assert!(route_for(
-        "query_db_readonly",
-        &json!({"connection_id":"c1","statement":"DELETE FROM t"})
-    )
-    .is_err());
-    assert!(route_for(
-        "query_db_readonly",
-        &json!({"connection_id":"c1","statement":"SELECT 1; DROP TABLE t"})
-    )
-    .is_err());
+fn query_db_readonly_leaves_the_read_only_verdict_to_the_route() {
+    // The route's engine classifier (`otto_dbviewer::ensure_read_only`, tested
+    // there with writes, DDL and `SELECT 1; DROP TABLE t`) is the only gate:
+    // route_for forwards the statement verbatim to `/db/mcp-query`, never to
+    // the unguarded `/db/query`, so a write is refused by that route.
+    for stmt in [
+        "SELECT 1",
+        "-- note\nSELECT 1",
+        "SELECT ';'",
+        "DELETE FROM t",
+    ] {
+        let call = route_for(
+            "query_db_readonly",
+            &json!({"connection_id":"c1","statement":stmt}),
+        )
+        .unwrap_or_else(|e| panic!("{stmt:?}: {e}"));
+        assert_eq!(call.path, "/api/v1/connections/c1/db/mcp-query");
+        assert_eq!(call.body.as_ref().unwrap()["statement"], json!(stmt));
+    }
+    assert!(route_for("query_db_readonly", &json!({"connection_id":"c1"})).is_err());
 }
 
 #[test]
@@ -1612,6 +1616,112 @@ fn new_discovery_and_git_tools_route_and_classify() {
     )
     .unwrap();
     assert_eq!(c.body.unwrap()["max"], json!(3));
+}
+
+#[test]
+fn create_issue_and_its_discovery_reads_route_and_are_tiered() {
+    // Creating an issue publishes to a real tracker: same tier as commenting
+    // (DANGEROUS, off by default, reversible). The discovery reads that feed
+    // it are default-on like otto.list_issue_transitions.
+    let names = spec_names();
+    for n in [
+        "otto.create_issue",
+        "otto.list_issue_projects",
+        "otto.list_issue_types",
+    ] {
+        assert!(names.contains(&n.to_string()), "missing spec {n}");
+    }
+    assert!(DANGEROUS.contains(&"create_issue"));
+    assert!(!DEFAULT_ENABLED.contains(&"create_issue"));
+    assert!(tool_is_mutating("create_issue"));
+    assert!(!tool_is_irreversible("create_issue"));
+    assert_eq!(
+        tool_category("create_issue"),
+        tool_category("comment_issue"),
+        "same governance category as otto.comment_issue"
+    );
+    for r in ["list_issue_projects", "list_issue_types"] {
+        assert!(
+            DEFAULT_ENABLED.contains(&r),
+            "{r} should be a default-on read"
+        );
+        assert!(!tool_is_mutating(r), "{r}");
+        assert!(pin_global(r), "{r}");
+    }
+    assert!(pin_global("create_issue"));
+    for t in ["create_issue", "list_issue_projects", "list_issue_types"] {
+        assert!(
+            REF_ARGS.iter().any(|(tool, arg, kind)| *tool == t
+                && *arg == "account_id"
+                && *kind == "issue_account"),
+            "{t} must resolve an issue-account reference"
+        );
+    }
+
+    let c = route_for(
+        "create_issue",
+        &json!({"account_id":"a 1","project_key":"PRJ","issue_type":"Bug",
+                "summary":"Login fails","description":"steps"}),
+    )
+    .unwrap();
+    assert_eq!(
+        (c.method, c.path.as_str()),
+        (Method::Post, "/api/v1/issue/a%201/issues")
+    );
+    assert_eq!(
+        c.body.unwrap(),
+        json!({"project_key":"PRJ","issue_type":"Bug","summary":"Login fails","description":"steps"})
+    );
+    // The Jira-only arguments are forwarded as given.
+    let c = route_for(
+        "create_issue",
+        &json!({"account_id":"a1","project_key":"PRJ","issue_type":"Task","summary":"s",
+                "labels":["a","b"],"priority":"High","parent":"PRJ-1","epic":" ",
+                "fields":{"customfield_1":{"id":"7"}}}),
+    )
+    .unwrap();
+    assert_eq!(
+        c.body.unwrap(),
+        json!({"project_key":"PRJ","issue_type":"Task","summary":"s","labels":["a","b"],
+               "priority":"High","parent":"PRJ-1","fields":{"customfield_1":{"id":"7"}}})
+    );
+    // An empty / absent description is not forwarded.
+    let c = route_for(
+        "create_issue",
+        &json!({"account_id":"a1","project_key":"PRJ","issue_type":"Task","summary":"s","description":""}),
+    )
+    .unwrap();
+    assert_eq!(
+        c.body.unwrap(),
+        json!({"project_key":"PRJ","issue_type":"Task","summary":"s"})
+    );
+    for missing in ["project_key", "issue_type", "summary"] {
+        let mut args = json!({"account_id":"a1","project_key":"P","issue_type":"T","summary":"s"});
+        args.as_object_mut().unwrap().remove(missing);
+        assert!(route_for("create_issue", &args).is_err(), "{missing}");
+    }
+
+    let c = route_for("list_issue_projects", &json!({"account_id":"a1"})).unwrap();
+    assert_eq!(
+        (c.method, c.path.as_str()),
+        (Method::Get, "/api/v1/issue/projects?account_id=a1&meta=1")
+    );
+    let c = route_for(
+        "list_issue_types",
+        &json!({"account_id":"a1","project_key":"PRJ"}),
+    )
+    .unwrap();
+    assert_eq!(c.path, "/api/v1/issue/a1/PRJ/issue-types");
+    assert!(route_for("list_issue_types", &json!({"account_id":"a1"})).is_err());
+
+    let d = dangerous_detail(
+        "otto.create_issue",
+        &json!({"project_key":"PRJ","issue_type":"Bug","summary":"Login fails"}),
+    );
+    assert!(
+        d.contains("Bug") && d.contains("PRJ") && d.contains("Login fails"),
+        "{d}"
+    );
 }
 
 // ----- Vault: optional workspace_id ------------------------------------

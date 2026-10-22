@@ -1411,20 +1411,43 @@ impl KafkaClient {
     /// This is a destructive write: a consumer group that is actively consuming will
     /// have its committed offset overwritten. The caller is responsible for requiring
     /// `guard()` + a typed UI confirm before invoking this.
-    pub fn reset_offsets(&self, group: &str, positions: HashMap<(String, i32), i64>) -> Result<()> {
+    pub fn reset_offsets(
+        &self,
+        group: &str,
+        positions: HashMap<(String, i32), i64>,
+    ) -> std::result::Result<(), ResetFailure> {
         if positions.is_empty() {
             return Ok(());
         }
         let mut tpl = TopicPartitionList::new();
         for ((topic, partition), offset) in &positions {
             tpl.add_partition_offset(topic, *partition, Offset::Offset(*offset))
-                .map_err(kerr)?;
+                .map_err(|e| ResetFailure {
+                    error: kerr(e),
+                    partition_errors: Vec::new(),
+                })?;
         }
         // The same pooled group client the describe/dry-run just used (a
         // manual commit never subscribes, so it never joins the group).
         self.with_group_consumer(group, |c| {
             c.commit(&tpl, rdkafka::consumer::CommitMode::Sync)
                 .map_err(kerr)
+        })
+        .map_err(|error| ResetFailure {
+            error,
+            // librdkafka writes each partition's commit result back into the
+            // list; a failed commit is not rolled back, so the others applied.
+            partition_errors: tpl
+                .elements()
+                .iter()
+                .filter_map(|e| {
+                    e.error().err().map(|err| crate::types::PartitionError {
+                        topic: e.topic().to_string(),
+                        partition: e.partition(),
+                        error: err.to_string(),
+                    })
+                })
+                .collect(),
         })
     }
 
@@ -1761,6 +1784,33 @@ impl<'a> ByteReader<'a> {
         }
         let bytes = self.take(len as usize)?;
         Some(String::from_utf8_lossy(bytes).into_owned())
+    }
+}
+
+/// A failed offset-reset commit: the folded error plus each partition's own
+/// error (Kafka applies the partitions it accepted — a commit is not atomic).
+#[derive(Debug)]
+pub struct ResetFailure {
+    pub error: Error,
+    pub partition_errors: Vec<crate::types::PartitionError>,
+}
+
+impl ResetFailure {
+    /// The error the caller returns, naming the failed partitions.
+    pub fn into_error(self) -> Error {
+        if self.partition_errors.is_empty() {
+            return self.error;
+        }
+        let parts: Vec<String> = self
+            .partition_errors
+            .iter()
+            .map(|p| format!("{}[{}]: {}", p.topic, p.partition, p.error))
+            .collect();
+        Error::Upstream(format!(
+            "{} (partitions not reset: {}; the others were committed)",
+            self.error,
+            parts.join(", ")
+        ))
     }
 }
 

@@ -16,6 +16,7 @@ pub mod auth;
 mod automation_ctx;
 pub mod boot;
 pub mod browser_login_throttle;
+pub mod budget;
 pub use otto_automation::cadence;
 pub use otto_automation::cancel_signal;
 pub mod canvas_refs;
@@ -96,6 +97,7 @@ pub mod swarm_host;
 pub mod telemetry;
 #[cfg(any(test, feature = "test-util"))]
 pub mod test_support;
+pub mod transcript;
 pub mod transcript_cache;
 pub mod transcript_tail;
 pub mod transport;
@@ -103,6 +105,7 @@ pub use otto_agent_run::turn_oracle;
 pub mod ui_bridge;
 // Moved to `otto_mcp::outward`; re-exported so `crate::ui_commands` keeps working.
 pub use otto_mcp::outward::ui_commands;
+pub use otto_mcp::profiles as mcp_profiles;
 pub mod vault_docs_agent;
 pub mod workflow_engine;
 mod workflow_node_driver;

@@ -146,7 +146,11 @@ use `rgba(0,0,0,…)`), but each one needs a reason.
       that ask for more input.
 - [ ] Errors say what happened, why and what to do.
 - [ ] No route ids, enum values or ULIDs as primary text. Cadences and dates
-      are human.
+      are human. A field that stores an id (a Confluence parent page, a
+      workflow) is picked by its label (`ConfluencePagePicker`,
+      `ConfluenceSpaceSelect`), and outward confirm / approval copy names it
+      ("under “{title}”"), falling back to the id only when the title can't
+      be resolved.
 - [ ] Numbers and dates use `rel()`, `formatBytes`, `formatCount` and
       `formatSeconds`. No new local formatters.
 

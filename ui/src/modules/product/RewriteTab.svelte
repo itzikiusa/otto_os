@@ -267,6 +267,11 @@
   );
 </script>
 
+<!-- One ALWAYS-mounted live region for progress-check failures: a region
+     inserted together with its text is silent in VoiceOver/WebKit
+     (accessibility-responsive-4-09). The visible note below is not a region. -->
+<span class="sr-only" role="status">{pollTimer !== null && pollFailures >= POLL_FAIL_SHOWN && lastPollError ? `Couldn’t check progress: ${lastPollError}` : ''}</span>
+
 {#if !story}
   <div class="muted">No story selected.</div>
 {:else}
@@ -309,7 +314,7 @@
           </button>
           <span class="polling-indicator">checking every 3s…</span>
           {#if pollFailures >= POLL_FAIL_SHOWN && lastPollError}
-            <span class="poll-error" role="status">Couldn’t check progress: {lastPollError}</span>
+            <span class="poll-error">Couldn’t check progress: {lastPollError}</span>
             <button class="btn small" onclick={() => pollTimer?.now()}>Check again</button>
           {/if}
         {/if}

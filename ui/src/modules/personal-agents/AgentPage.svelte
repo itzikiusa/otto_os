@@ -370,6 +370,17 @@
 
   const canEditDocuments = $derived(auth.can('scheduled_tasks', 'edit') &&
     (auth.isRoot || ['editor', 'admin'].includes(ws.workspaces.find((w) => w.id === agent?.workspace_id)?.my_role ?? 'viewer')));
+  /** The agent runs AS its owner, so what it runs — memory and context
+   *  documents, memory items, standing-goal texts and rules — is the owner's
+   *  (or a ws admin's / root's) call; the server refuses everyone else 403
+   *  (PC-3, access-control-4-04). An ownerless preset is adopted on the first
+   *  write. Toggles, budget, primary and "Run now" stay `canEditDocuments`. */
+  const myRole = $derived(ws.workspaces.find((w) => w.id === agent?.workspace_id)?.my_role ?? 'viewer');
+  const canEditOwnerFields = $derived(canEditDocuments && (auth.isRoot || myRole === 'admin' ||
+    !agent?.created_by || agent.created_by === auth.me?.id));
+  const ownerNote = $derived(canEditDocuments && !canEditOwnerFields
+    ? 'Runs as its owner; only the owner or a workspace admin can change this.'
+    : '');
 </script>
 
 <div class="agent-page">
@@ -489,7 +500,7 @@
   {:else if tab === 'activity'}
     {#key agentId}<AgentActivity {agentId} />{/key}
   {:else if tab === 'autonomy'}
-    {#key agentId}<AgentAutonomy {agentId} editable={canEditDocuments} onsaved={(a) => (autonomy = a)} />{/key}
+    {#key agentId}<AgentAutonomy {agentId} editable={canEditDocuments} ownerEditable={canEditOwnerFields} {ownerNote} onsaved={(a) => (autonomy = a)} />{/key}
   {:else if tab === 'schedules'}
     {#if schedules.length > 0 || schedFormOpen}
       <div class="section-head">
@@ -674,7 +685,7 @@
       {#if AgentMemoryInspectorLazy.error}
         <LoadState what="this agent’s memory" error={AgentMemoryInspectorLazy.error} onretry={() => AgentMemoryInspectorLazy.retry()} />
       {:else if AgentMemoryInspectorLazy.component}
-        <AgentMemoryInspectorLazy.component {agentId} editable={canEditDocuments} reloadKey={memoryReload} />
+        <AgentMemoryInspectorLazy.component {agentId} editable={canEditOwnerFields} reloadKey={memoryReload} />
       {:else}
         <LoadState what="this agent’s memory" loading />
       {/if}
@@ -683,7 +694,7 @@
       {#if AgentDocumentsLazy.error}
         <LoadState what={tab === 'memory' ? 'this agent’s document' : 'this agent’s context'} error={AgentDocumentsLazy.error} onretry={() => AgentDocumentsLazy.retry()} />
       {:else if AgentDocumentsLazy.component}
-        <AgentDocumentsLazy.component {agentId} workspaceId={agent.workspace_id} kind={tab === 'context' ? 'context' : 'memory'} editable={canEditDocuments} sharedWorkspace={!!agent.cwd.trim()} />
+        <AgentDocumentsLazy.component {agentId} workspaceId={agent.workspace_id} kind={tab === 'context' ? 'context' : 'memory'} editable={canEditOwnerFields} sharedWorkspace={!!agent.cwd.trim()} />
       {:else}
         <LoadState what={tab === 'memory' ? 'this agent’s document' : 'this agent’s context'} loading />
       {/if}

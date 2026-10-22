@@ -5,23 +5,17 @@
 
 use super::*;
 
-/// Twins whose native schema is still deliberately different and not yet
-/// reconciled — the deferred remainder of architecture-1-05 (generate the
-/// native listing from `otto_mcp::outward::catalog`). Each needs executor
-/// work, not a schema edit: `otto_list_connections` has a native-only
-/// `kind` filter, and the API-client tools resolve saved requests /
-/// automations / environments by a native-only `name` where the governed
-/// executor takes an id-or-name `request_id`/`environment_id`. This list
-/// may only SHRINK: the test fails when a listed twin stops drifting.
-const DEFERRED_SCHEMA_DRIFT: &[&str] = &[
-    "otto_list_connections",
-    "otto_api_list",
-    "otto_api_get_request",
-    "otto_api_history",
-    "otto_api_execute",
-    "otto_api_upsert_request",
-    "otto_api_run_automation",
-];
+/// Twins whose native schema may still differ from the catalog. EMPTY since
+/// the twin schemas are generated from `otto_mcp::outward` (listing.rs,
+/// architecture-1-05); the native dispatch takes the catalog's arguments
+/// (`request_id` / `automation_id` / `environment_id` as id-or-name). This
+/// list may only stay empty: the test fails when a listed twin stops drifting.
+const DEFERRED_SCHEMA_DRIFT: &[&str] = &[];
+
+/// Catalog entries deliberately NOT visible on this surface — neither served
+/// natively (as a twin or under an aliased name) nor proxied. Empty: the user
+/// rule is that whatever the control plane enables reaches sessions.
+const INTENTIONALLY_ABSENT: &[&str] = &[];
 
 /// The schema a twin is compared by. Two differences are the native
 /// surface's design, not drift: `workspace_id` / `session_id` are
@@ -65,13 +59,11 @@ fn comparable_schema(schema: &Value) -> Value {
     s
 }
 
-/// architecture-1-05 (interim, until the native listing is generated
-/// from the outward catalog): a capability served natively as `otto_x`
-/// AND governed as `otto.x` must advertise the SAME `inputSchema` (modulo
+/// architecture-1-05: a capability served natively as `otto_x` AND governed
+/// as `otto.x` advertises the SAME `inputSchema` (modulo
 /// [`comparable_schema`]), so a session and the Control Plane describe one
-/// tool one way. Native wins by name in `tools/list`, so a drifted native
-/// schema is what agents see while the Control Plane shows (and
-/// validates) the governed one.
+/// tool one way. The listing is generated from the catalog; this guards the
+/// generator (native wins by name in `tools/list`).
 #[test]
 fn native_and_governed_twins_share_one_input_schema() {
     let governed: std::collections::HashMap<String, &Value> = GOVERNED_SPECS
@@ -139,6 +131,7 @@ fn tools_list_catalog_stays_within_its_byte_budget() {
     let info = EnabledInfo {
         names: all_governed_names(),
         ui_granted: false,
+        filter: None,
     };
     let listing = |source: Option<&str>, info: &EnabledInfo| -> usize {
         let mut cat = tool_catalog_for_source(source);
@@ -194,4 +187,154 @@ fn narrow_sources_drop_the_infra_consoles_from_the_listing() {
     assert!(names(Some("workflow"))
         .iter()
         .any(|n| n.starts_with("aws_")));
+}
+
+/// Every control-plane catalog entry reaches a session: generated as a native
+/// twin, served natively under an aliased name, proxied under its stdio name,
+/// or listed in [`INTENTIONALLY_ABSENT`] — never silently dropped.
+#[test]
+fn every_catalog_entry_is_generated_or_intentionally_absent() {
+    let native: std::collections::HashSet<String> = native_tool_names().into_iter().collect();
+    let mut missing = Vec::new();
+    for spec in GOVERNED_SPECS.iter() {
+        let full = spec["name"].as_str().unwrap();
+        let stdio = governed_stdio_name(full);
+        let short = stdio.strip_prefix("otto_").unwrap();
+        let twin = native.contains(&stdio);
+        let aliased = GOVERNED_ALIASED_BY_NATIVE
+            .iter()
+            .any(|(g, n)| *g == short && native.contains(*n));
+        let proxied = governed_tool_for_stdio_name(&stdio).as_deref() == Some(full);
+        if !(twin || aliased || proxied || INTENTIONALLY_ABSENT.contains(&full)) {
+            missing.push(full.to_string());
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "catalog entries no session can see: {missing:?}"
+    );
+    // A stale INTENTIONALLY_ABSENT row names a real catalog entry.
+    for full in INTENTIONALLY_ABSENT {
+        assert!(GOVERNED_SPECS.iter().any(|s| s["name"] == *full), "{full}");
+    }
+}
+
+/// The former drift pairs now advertise the catalog's arguments, with the
+/// session-scoped `workspace_id` never required natively.
+#[test]
+fn former_drift_twins_advertise_the_catalog_arguments() {
+    let cat = tool_catalog();
+    let tool = |n: &str| -> Value {
+        cat["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == n)
+            .unwrap_or_else(|| panic!("{n} not listed"))["inputSchema"]
+            .clone()
+    };
+    let exec = tool("otto_api_execute");
+    assert!(exec["properties"]["environment_id"].is_object(), "{exec}");
+    assert!(exec["properties"].get("name").is_none(), "{exec}");
+    assert_eq!(exec["required"], json!(["request_id"]));
+    assert_eq!(
+        tool("otto_api_run_automation")["required"],
+        json!(["automation_id"])
+    );
+    // Description references use this surface's spelling.
+    assert!(
+        tool("otto_api_run_automation")["properties"]["automation_id"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("otto_api_list")
+    );
+    let conns = tool("otto_list_connections");
+    assert!(conns["properties"].get("kind").is_none(), "{conns}");
+    assert_eq!(
+        conns["properties"]["workspace_id"]["description"],
+        json!(WS_DIR_DESC),
+        "the native, session-aware scoped description is kept"
+    );
+    let upsert = tool("otto_api_upsert_request");
+    assert!(upsert["properties"]["extras"].is_object(), "{upsert}");
+    assert!(upsert.get("required").is_some_and(|r| !r
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|x| x == "workspace_id")));
+}
+
+/// The pure generator: catalog schema wins, scoped arguments come from the
+/// hand-written native schema and are never required.
+#[test]
+fn native_twin_schema_keeps_only_the_native_scoped_arguments() {
+    let catalog = json!({"type":"object","required":["workspace_id","request_id"],"properties":{
+        "workspace_id":{"type":"string"},"session_id":{"type":"string"},
+        "request_id":{"type":"string","description":"see otto.api_list"}}});
+    let native = json!({"type":"object","properties":{
+        "workspace_id":{"type":"string","description":"defaults to this session's"},
+        "stale":{"type":"string"}}});
+    let out = listing::native_twin_schema(&catalog, &native);
+    assert_eq!(out["required"], json!(["request_id"]));
+    assert_eq!(
+        out["properties"]["workspace_id"]["description"],
+        "defaults to this session's"
+    );
+    assert!(out["properties"].get("session_id").is_none());
+    assert!(out["properties"].get("stale").is_none());
+    assert_eq!(
+        out["properties"]["request_id"]["description"],
+        "see otto_api_list"
+    );
+    // Nothing left required → no `required` key at all.
+    let only_scoped = json!({"type":"object","required":["workspace_id"],"properties":{"workspace_id":{"type":"string"}}});
+    assert!(listing::native_twin_schema(&only_scoped, &json!({}))
+        .get("required")
+        .is_none());
+}
+
+/// Control-plane parity for the issue-create family: enabling
+/// `otto.create_issue` (approval-gated) and its discovery reads under MCP →
+/// Otto server makes them visible to a session under the stdio names, with
+/// the outward catalog's schema, and their calls route to the governed path.
+#[test]
+fn issue_create_tools_reach_sessions_through_the_governed_bridge() {
+    let enabled: Vec<String> = [
+        "otto.create_issue",
+        "otto.list_issue_projects",
+        "otto.list_issue_types",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    let tools = governed_tools_for(&enabled);
+    let mut names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        vec![
+            "otto_create_issue",
+            "otto_list_issue_projects",
+            "otto_list_issue_types"
+        ]
+    );
+    let create = tools
+        .iter()
+        .find(|t| t["name"] == "otto_create_issue")
+        .unwrap();
+    assert_eq!(
+        create["inputSchema"]["required"],
+        json!(["project_key", "issue_type", "summary"])
+    );
+    for stdio in [
+        "otto_create_issue",
+        "otto_list_issue_projects",
+        "otto_list_issue_types",
+    ] {
+        assert_eq!(
+            governed_tool_for_stdio_name(stdio).as_deref(),
+            Some(stdio.replacen("otto_", "otto.", 1).as_str()),
+            "{stdio} must proxy to its governed twin"
+        );
+    }
 }

@@ -15,14 +15,21 @@
   // The canvas is never the only path: the same kids are a list of real
   // buttons (List view, no-WebGL, and screen readers / keyboard in 3D view),
   // and the selected kid's card carries every action as a button.
+  //
+  // At a glance: a "needs you" queue (school-wide, real buttons — the list
+  // carries the same section), status pins over kids (scene.ts), ✋ / ❗
+  // badges over doors, a jump
+  // into the busiest room from the corridor, and a hover tooltip with the
+  // session's state, last activity and a crisp peek at its live terminal.
+  // The scene pauses whenever the widget is scrolled off screen, its space is
+  // inactive or the document is hidden; a lost WebGL context remounts itself
+  // (twice) before it asks for Retry.
   import { onDestroy, untrack } from 'svelte';
   import { isNativePane } from '../../../lib/desktop';
   import { observeNativePane } from '../../../lib/nativePane';
-  import { rowMenu } from '../../../lib/rowMenu';
   import Icon from '../../../lib/components/Icon.svelte';
   import EmptyState from '../../../lib/components/EmptyState.svelte';
   import LoadState from '../../../lib/components/LoadState.svelte';
-  import ProviderIcon from '../../../lib/components/ProviderIcon.svelte';
   import { ws, visibleOnThisDevice } from '../../../lib/stores/workspace.svelte';
   import { auth } from '../../../lib/stores/auth.svelte';
   import { ui } from '../../../lib/stores/ui.svelte';
@@ -33,17 +40,20 @@
   import { toasts } from '../../../lib/toast.svelte';
   import { toastError } from '../../../lib/toastError';
   import { loadErrorText } from '../../../lib/loadError';
-  import { now } from '../../../lib/stores/now.svelte';
-  import { plural } from '../../../lib/plural';
-  import { relTime } from '../../mission-control/lib';
   import { SCRATCH_ID } from '../../../lib/stores/sessionBuckets';
   import type { Session, SessionScreen } from '../../../lib/api/types';
   import { home, type HomeBox } from '../home.svelte';
   import { livePoll, type Poller } from './poll';
-  import { buildSchool, kidAriaLabel, kidLines, providerLabel, roomSummary, type Kid } from '../school/model';
+  import { attentionQueue, buildSchool, busiestRoom, type Kid } from '../school/model';
   import { kickOut, release, sendToDetention } from '../school/actions';
-  import { pollScreens, type ScreenFeed } from '../school/screens';
+  import { pollScreens, visibleLines, type ScreenFeed } from '../school/screens';
   import { mountSchool, webglAvailable, type SchoolHandle, type SchoolPick, type SchoolView } from '../school/scene';
+  import HoverTag from './classrooms/HoverTag.svelte';
+  import KidCard from './classrooms/KidCard.svelte';
+  import NeedsYouQueue from './classrooms/NeedsYouQueue.svelte';
+  import SchoolBar from './classrooms/SchoolBar.svelte';
+  import SchoolList from './classrooms/SchoolList.svelte';
+  import { hintFor, keySurface, kidMenuItems, place, queueLabelFor } from './classrooms/helpers';
 
   interface Props {
     box: HomeBox;
@@ -60,7 +70,19 @@
     if (!isNativePane) return;
     return observeNativePane((state) => { nativeVisible = state?.visible !== false; });
   });
-  const onScreen = $derived(spaceActive && nativeVisible);
+  // Scrolled out of view (a tall Home page): pause rendering + screen reads.
+  let inView = $state(true);
+  let rootEl = $state<HTMLElement | null>(null);
+  $effect(() => {
+    const el = rootEl;
+    if (!el || typeof IntersectionObserver === 'undefined') return;
+    const io = new IntersectionObserver((entries) => {
+      for (const e of entries) inView = e.isIntersecting;
+    });
+    io.observe(el);
+    return () => io.disconnect();
+  });
+  const onScreen = $derived(spaceActive && nativeVisible && inView);
 
   const reducedMotion = (): boolean =>
     typeof window !== 'undefined' && !!window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -132,8 +154,7 @@
     }),
   );
   const byId = $derived(new Map(school.kids.map((k) => [k.id, k] as const)));
-  // Keep complete membership without mounting every session row at once.
-  const LIST_PAGE_SIZE = 100;
+  // Current list page per classroom (SchoolList pages its members).
   let memberPages = $state<Record<string, number>>({});
 
   // ── View mode ────────────────────────────────────────────────────────────
@@ -187,6 +208,16 @@
           h = null;
           handle = null;
           x.destroy();
+          // The browser reclaims GPU contexts under pressure: remount on our
+          // own (twice a minute at most), keeping the room, before we ask.
+          const t = Date.now();
+          lostAt = lostAt.filter((at) => t - at < 60_000).concat(t);
+          if (lostAt.length <= 2) {
+            setTimeout(() => {
+              if (!dead) sceneAttempt += 1;
+            }, 1200);
+            return;
+          }
           sceneError = 'The 3D school lost its graphics context (too many 3D views open at once).';
         });
         x.setActive(untrack(() => onScreen));
@@ -204,6 +235,8 @@
     };
   });
   let pendingRoom: string | null = null;
+  /** Recent context losses (auto-remount budget). */
+  let lostAt: number[] = [];
   $effect(() => {
     const h = handle;
     const s = school;
@@ -243,6 +276,8 @@
 
   // ── Live screens ─────────────────────────────────────────────────────────
   const feeds = new Map<string, ScreenFeed>();
+  /** Bumped on every feed so the hover peek re-reads `feeds`. */
+  let feedTick = $state(0);
   function pushScreen(k: Kid): void {
     handle?.setScreen(k.id, { title: k.title, provider: k.provider, character: k.character, pose: k.pose, feed: feeds.get(k.id) ?? null });
   }
@@ -268,6 +303,7 @@
       },
       onFeed: (id, f) => {
         feeds.set(id, f);
+        if (hover?.kind === 'kid' && hover.id === id) feedTick++;
         const k = byId.get(id);
         if (k) pushScreen(k);
       },
@@ -279,30 +315,41 @@
   const bubbleEls = new Map<string, HTMLElement>();
   let tagEl = $state<HTMLElement | null>(null);
   let cardEl = $state<HTMLElement | null>(null);
+  // The tag grows when its terminal peek arrives (or wraps a longer title)
+  // between rendered frames — re-clamp it inside the stage right away.
+  $effect(() => {
+    const el = tagEl;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(() => placeOverlay());
+    ro.observe(el);
+    return () => ro.disconnect();
+  });
   function bubble(node: HTMLElement, id: string) {
     bubbleEls.set(id, node);
     queueMicrotask(placeOverlay);
     return { destroy: () => bubbleEls.delete(id) };
   }
-  const needsKids = $derived(openRoomModel ? openRoomModel.kids.filter((k) => k.pose === 'needs-you') : []);
   const hoverKid = $derived(hover?.kind === 'kid' && hover.id !== selected ? (byId.get(hover.id) ?? null) : null);
   const hoverRoom = $derived(hover?.kind === 'door' && view.kind === 'corridor' ? (school.rooms.find((r) => r.id === hover!.id) ?? null) : null);
   const selKid = $derived(selected ? (byId.get(selected) ?? null) : null);
+  const needDoors = $derived(view.kind === 'corridor' ? school.rooms.filter((r) => r.counts.needsYou > 0 || r.counts.error > 0) : []);
+  const queue = $derived(attentionQueue(school));
+  const busiest = $derived(busiestRoom(school));
+  const queueLabel = $derived(queueLabelFor(queue));
+  let queueOpen = $state(true);
+  const peek = $derived.by(() => {
+    void feedTick;
+    if (!hoverKid || view.kind === 'corridor') return null;
+    const f = feeds.get(hoverKid.id);
+    return f ? visibleLines(f.lines, 8, 64) : null;
+  });
 
-  function place(el: HTMLElement | null | undefined, p: { x: number; y: number; visible: boolean } | null, origin: DOMRect, below = false): void {
-    if (!el) return;
-    if (!p || !p.visible) {
-      el.style.visibility = 'hidden';
-      return;
-    }
-    el.style.visibility = 'visible';
-    el.style.transform = `translate(${Math.round(p.x - origin.left)}px, ${Math.round(p.y - origin.top)}px) translate(-50%, ${below ? '0' : '-100%'})`;
-  }
   function placeOverlay(): void {
     const h = handle;
     if (!h || !stage) return;
     const origin = stage.getBoundingClientRect();
-    for (const [id, el] of bubbleEls) place(el, h.project({ kind: 'kid', id }), origin);
+    for (const [id, el] of bubbleEls)
+      place(el, id.startsWith('door:') ? h.project({ kind: 'door', id: id.slice(5) }) : h.project({ kind: 'kid', id }), origin);
     if (hover) place(tagEl, h.project(hover), origin);
     else if (tagEl) tagEl.style.visibility = 'hidden';
   }
@@ -440,30 +487,7 @@
   }
   /** Make the stage a keyboard surface (focusable; keys move the camera). */
   function stageKeys(node: HTMLElement) {
-    node.tabIndex = 0;
-    const pressed = new Set<string>();
-    const kd = (e: KeyboardEvent) => {
-      if (e.target === node && !e.defaultPrevented) pressed.add(e.key);
-      onStageKey(e, true);
-    };
-    const ku = (e: KeyboardEvent) => {
-      pressed.delete(e.key);
-      onStageKey(e, false);
-    };
-    const bl = () => {
-      for (const key of pressed) handle?.key(new KeyboardEvent('keyup', { key }), false);
-      pressed.clear();
-    };
-    node.addEventListener('keydown', kd);
-    node.addEventListener('keyup', ku);
-    node.addEventListener('blur', bl);
-    return {
-      destroy() {
-        node.removeEventListener('keydown', kd);
-        node.removeEventListener('keyup', ku);
-        node.removeEventListener('blur', bl);
-      },
-    };
+    return keySurface(node, onStageKey, (key) => handle?.key(new KeyboardEvent('keyup', { key }), false));
   }
 
   function back(): void {
@@ -556,24 +580,7 @@
   function kidMenu(e: MouseEvent | KeyboardEvent, k: Kid): void {
     const inRoom = view.kind !== 'corridor' && openRoomModel?.id === k.workspaceId
       && [...openRoomModel.kids, ...openRoomModel.bench].some((kid) => kid.id === k.id);
-    if (k.detention) {
-      ctxMenu.show(e, [
-        { label: 'Release from detention', icon: 'undo', disabled: !k.canManage, action: () => void free(k) },
-      ]);
-      return;
-    }
-    ctxMenu.show(e, [
-      { label: 'Open session', icon: 'external', action: () => void open(k) },
-      ...(inRoom ? [{ label: 'Look at the screen', icon: 'eye' as const, action: () => void handle?.lookAtScreen(k.id) }] : []),
-      ...(inRoom ? [{ label: 'Headmaster: check on them', icon: 'search' as const, action: () => checkOn(k) }] : []),
-      ...(k.canManage
-        ? [
-            { separator: true as const },
-            { label: 'Send to detention (archive)', icon: 'archive' as const, action: () => void detention(k) },
-            { label: 'Kick out…', icon: 'trash' as const, danger: true, action: () => void kick(k) },
-          ]
-        : []),
-    ]);
+    ctxMenu.show(e, kidMenuItems(k, inRoom, { open, free, checkOn, detention, kick, lookAtScreen: (id) => void handle?.lookAtScreen(id) }));
   }
 
   /** List-view row → into the 3D room and onto that kid. */
@@ -581,6 +588,22 @@
     if (mode !== '3d' || !handle) return;
     const room = school.rooms.find((r) => r.id === k.workspaceId);
     if (!room || ![...room.kids, ...room.bench].some((kid) => kid.id === k.id)) return;
+    if (view.kind === 'corridor' || openRoomModel?.id !== k.workspaceId) await handle.enterRoom(k.workspaceId);
+    selected = k.id;
+  }
+
+  /** Queue row → into its room, onto the kid (List mode: open it). */
+  async function goTo(k: Kid): Promise<void> {
+    if (mode !== '3d' || !handle) {
+      await open(k);
+      return;
+    }
+    const room = school.rooms.find((r) => r.id === k.workspaceId);
+    const seated = !!room && [...room.kids, ...room.bench].some((kid) => kid.id === k.id);
+    if (!seated) {
+      await open(k);
+      return;
+    }
     if (view.kind === 'corridor' || openRoomModel?.id !== k.workspaceId) await handle.enterRoom(k.workspaceId);
     selected = k.id;
   }
@@ -596,44 +619,11 @@
     if (view.kind === 'screen') out.push({ label: `${byId.get(view.kidId)?.title ?? 'Screen'}` });
     return out;
   });
-  const hint = $derived(
-    view.kind === 'corridor'
-      ? 'Click a door to walk in · drag to look · W A S D to walk'
-      : view.kind === 'room'
-        ? 'Click a kid · double-click opens the session · drag to look around · Esc for the corridor'
-        : 'Enter opens the session · Esc goes back',
-  );
+  const hint = $derived(hintFor(view));
 </script>
 
-<div class="school">
-  <div class="bar">
-    {#if mode === '3d'}
-      <nav class="crumbs" aria-label="Where you are in the school">
-        {#each crumbs as c, i (i)}
-          {#if i > 0}<Icon name="chevronRight" size={12} />{/if}
-          {#if c.go}
-            <button class="crumb link" onclick={c.go}>{c.label}</button>
-          {:else}
-            <span class="crumb ellipsis" aria-current="location">{c.label}</span>
-          {/if}
-        {/each}
-      </nav>
-    {:else}
-      <span class="sum">{plural(school.rooms.length, 'classroom')} · {plural(school.total, 'kid')}</span>
-    {/if}
-    {#if gl}
-      <div class="segmented" role="group" aria-label="School view">
-        <button class="seg" class:active={mode === '3d'} aria-pressed={mode === '3d'} onclick={() => setMode('3d')}>3D</button>
-        <button class="seg" class:active={mode === 'list'} aria-pressed={mode === 'list'} onclick={() => setMode('list')}>List</button>
-      </div>
-    {/if}
-    {#if mode === '3d'}
-      <button class="icon-btn" onclick={() => handle?.resetView()} disabled={!handle} title="Reset the school view" aria-label="Reset the school view"><Icon name="refresh" size={12} /></button>
-      <button class="icon-btn" onclick={() => home.toggleZoom(box.id)} title={zoomed ? 'Exit full page' : 'Fill the page'} aria-label={zoomed ? 'Exit full page' : 'Fill the page'}>
-        <Icon name={zoomed ? 'minimize' : 'maximize'} size={12} />
-      </button>
-    {/if}
-  </div>
+<div class="school" bind:this={rootEl}>
+  <SchoolBar boxId={box.id} {mode} {gl} {zoomed} {school} {handle} {crumbs} {setMode} />
 
   {#if !loaded && fetched.length === 0 && ws.sessions.length === 0}
     <LoadState what="the school" empty={true} loading={true} variant="compact" rows={3} />
@@ -660,50 +650,17 @@
         <div class="canvas" bind:this={host}></div>
         {#if handle}
           <div class="overlay" aria-hidden="true">
-            {#each needsKids as k (k.id)}
-              <div class="bubble" use:bubble={k.id}>✋</div>
+            {#each needDoors as r (r.id)}
+              <div class="bubble door" class:err={r.counts.needsYou === 0} use:bubble={`door:${r.id}`}>
+                {r.counts.needsYou > 0 ? `✋ ${r.counts.needsYou}` : `❗ ${r.counts.error}`}
+              </div>
             {/each}
-            <div class="hover-tag" bind:this={tagEl}>
-              {#if hoverKid}
-                <b>{hoverKid.title}</b><small>{providerLabel(hoverKid.provider)} · {hoverKid.stateLabel}</small>
-              {:else if hoverRoom}
-                <b>{hoverRoom.name}</b><small>{roomSummary(hoverRoom)} · click to walk in</small>
-              {:else if hover?.kind === 'head'}
-                <b>Otto</b><small>the headmaster</small>
-              {:else if hover?.kind === 'door'}
-                <b>Back to the corridor</b>
-              {/if}
-            </div>
+            <HoverTag {hover} {hoverKid} {hoverRoom} {peek} bind:el={tagEl} />
           </div>
+          <NeedsYouQueue {queue} {queueLabel} bind:queueOpen {view} {busiest} {handle} {open} {goTo} />
           <p class="hint">{hint}</p>
           {#if selKid && view.kind !== 'corridor'}
-            <div class="kid-card" role="group" aria-label="{selKid.title} — details" bind:this={cardEl}>
-              <div class="card-head">
-                <ProviderIcon provider={selKid.provider} size={16} />
-                <b class="ellipsis">{selKid.title}</b>
-                <button class="icon-btn" onclick={() => (selected = null)} aria-label="Close details" title="Close details"><Icon name="x" size={12} /></button>
-              </div>
-              {#each kidLines(selKid, now() ? relTime(selKid.lastActiveAt) : '') as line, i (i)}
-                <div class="card-line" class:needs={i === 0 && selKid.pose === 'needs-you'}>{line}</div>
-              {/each}
-              <div class="card-actions">
-                {#if selKid.detention}
-                  <button class="btn small primary" disabled={!selKid.canManage} onclick={() => selKid && void free(selKid)}>Release from detention</button>
-                {:else}
-                  <button class="btn small primary" onclick={() => void open(selKid)}>Open session</button>
-                  {#if view.kind === 'screen'}
-                    <button class="btn small" onclick={() => void handle?.backToRoom()}>Back to the room</button>
-                  {:else}
-                    <button class="btn small" onclick={() => selKid && void handle?.lookAtScreen(selKid.id)}>Look at screen</button>
-                  {/if}
-                  <button class="btn small" onclick={() => selKid && checkOn(selKid)} title="Send the headmaster over">Check on</button>
-                  {#if selKid.canManage}
-                    <button class="btn small" onclick={() => selKid && void detention(selKid)} title="Archive — resumable, with Undo">Detention</button>
-                    <button class="btn small danger" onclick={() => selKid && void kick(selKid)} title="Delete this session and its history">Kick out…</button>
-                  {/if}
-                {/if}
-              </div>
-            </div>
+            <KidCard {selKid} {view} {handle} bind:el={cardEl} onclose={() => (selected = null)} {open} {free} {checkOn} {detention} {kick} />
           {/if}
         {:else if sceneError}
           <div class="scene-state">
@@ -725,61 +682,7 @@
     <!-- The accessible companion: every classroom and kid as real buttons.
          Visible in List view; in 3D it stays keyboard / screen-reader
          reachable, and activating a row walks into that room onto the kid. -->
-    <div class="list" class:sr-only={mode === '3d'} role="region" aria-label="School list">
-      {#if mode === 'list' && empty}
-        <EmptyState icon="people" title="School’s out" body="Start a session and a kid takes a seat in its workspace’s classroom.">
-          <button class="btn small" onclick={() => (ui.newSessionOpen = true)}><Icon name="plus" size={12} />New session</button>
-        </EmptyState>
-      {/if}
-      {#each school.rooms as r (r.id)}
-        {@const lastPage = Math.max(0, Math.ceil(r.members.length / LIST_PAGE_SIZE) - 1)}
-        {@const page = Math.min(memberPages[r.id] ?? 0, lastPage)}
-        {#if r.members.length > 0 || mode === 'list'}
-          <section class="lroom" aria-label="Classroom {r.name}">
-            <h4 class="lroom-head">
-              <span class="ellipsis">{r.name}</span>
-              {#if r.current}<span class="cur">current</span>{/if}
-              <small>{roomSummary(r)}</small>
-              {#if mode === '3d'}
-                <button class="btn small" onclick={() => void handle?.enterRoom(r.id)} disabled={!handle}>Walk in</button>
-              {/if}
-            </h4>
-            {#if r.members.length > 0}
-              <ul>
-                {#each r.members.slice(page * LIST_PAGE_SIZE, (page + 1) * LIST_PAGE_SIZE) as k (k.id)}
-                  <li use:rowMenu class="lrow" data-kid-id={k.id} oncontextmenu={(e) => kidMenu(e, k)}>
-                    <button
-                      class="lmain"
-                      aria-label="{k.detention ? 'Release' : 'Open'} {kidAriaLabel(k, now() ? relTime(k.lastActiveAt) : '')}"
-                      onclick={() => void open(k)}
-                      onfocus={() => void showIn3d(k)}
-                    >
-                      <i class="dot" data-pose={k.detention ? 'bench' : k.pose}></i>
-                      <ProviderIcon provider={k.provider} size={12} />
-                      <span class="ellipsis t">{k.title}</span>
-                      {#if k.background}<span class="bg-tag">back row</span>{/if}
-                      {#if k.detention}<span class="bg-tag">detention</span>{/if}
-                      <span class="st">{k.stateLabel}</span>
-                    </button>
-                    <button class="icon-btn" aria-label="More actions for {k.title}" title="More actions for {k.title}" aria-haspopup="menu" onclick={(e) => kidMenu(e, k)}>
-                      <Icon name="more" size={12} />
-                    </button>
-                  </li>
-                {/each}
-              </ul>
-            {/if}
-            {#if lastPage > 0}
-              <nav class="member-pages" aria-label="Sessions in classroom {r.name}">
-                <button class="btn small" aria-label="Previous sessions in {r.name}" disabled={page === 0} onclick={() => (memberPages[r.id] = page - 1)}>Previous</button>
-                <span aria-live="polite">{page * LIST_PAGE_SIZE + 1}–{Math.min((page + 1) * LIST_PAGE_SIZE, r.members.length)} of {r.members.length}</span>
-                <button class="btn small" aria-label="Next sessions in {r.name}" disabled={page === lastPage} onclick={() => (memberPages[r.id] = page + 1)}>Next</button>
-              </nav>
-            {/if}
-            {#if r.overflow > 0}<p class="more">{r.overflow} not seated in 3D</p>{/if}
-          </section>
-        {/if}
-      {/each}
-    </div>
+    <SchoolList {mode} {empty} {school} {queue} {handle} bind:memberPages {open} {goTo} {kidMenu} {showIn3d} />
   {/if}
 </div>
 
@@ -790,51 +693,6 @@
     gap: 6px;
     height: 100%;
     min-height: 0;
-  }
-  .bar {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex: none;
-    min-width: 0;
-  }
-  .crumbs {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    flex: 1;
-    min-width: 0;
-    color: var(--text-dim);
-    font-size: var(--fs-s);
-  }
-  .crumb {
-    min-width: 0;
-    max-width: 220px;
-  }
-  .crumb.link {
-    background: none;
-    border: 0;
-    padding: 2px 4px;
-    border-radius: var(--radius-s);
-    color: var(--accent-text);
-    cursor: pointer;
-    font: inherit;
-  }
-  .crumb.link:hover {
-    background: var(--surface-2);
-  }
-  span.crumb {
-    color: var(--text);
-    font-weight: 600;
-  }
-  .sum {
-    flex: 1;
-    min-width: 0;
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
   .note {
     display: flex;
@@ -867,8 +725,7 @@
     pointer-events: none;
     overflow: hidden;
   }
-  .bubble,
-  .hover-tag {
+  .bubble {
     position: absolute;
     top: 0;
     left: 0; /* ui-guards: allow — origin of projected screen coordinates, not layout */
@@ -884,36 +741,21 @@
     border: 1px solid var(--warning);
     animation: otto-pulse 1.4s ease-in-out infinite;
   }
+  .bubble.err {
+    background: var(--danger-soft);
+    border-color: var(--danger);
+  }
+  .bubble.door {
+    font-size: var(--fs-m);
+    font-weight: 600;
+    color: var(--text);
+    background: var(--surface);
+    box-shadow: var(--shadow-xs);
+  }
   @media (prefers-reduced-motion: reduce) {
     .bubble {
       animation: none;
     }
-  }
-  .hover-tag {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    padding: 4px 8px;
-    border-radius: var(--radius-s);
-    background: var(--surface);
-    border: 1px solid var(--border);
-    box-shadow: var(--shadow-xs);
-    max-width: 260px;
-  }
-  .hover-tag:empty {
-    display: none;
-  }
-  .hover-tag b {
-    font-size: var(--fs-s);
-    font-weight: 600;
-    color: var(--text);
-    max-width: 240px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  .hover-tag small {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
   }
   .hint {
     position: absolute;
@@ -931,47 +773,6 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-  .kid-card {
-    position: absolute;
-    inset-inline-end: 8px;
-    top: 8px;
-    width: min(320px, calc(100% - 16px));
-    max-height: calc(100% - 16px);
-    overflow-y: auto;
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    padding: 10px;
-    border-radius: var(--radius-m);
-    background: var(--surface);
-    border: 1px solid var(--border);
-    box-shadow: var(--shadow-card);
-  }
-  .card-head {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    min-width: 0;
-  }
-  .card-head b {
-    flex: 1;
-    min-width: 0;
-    font-size: var(--fs-m);
-  }
-  .card-line {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-  }
-  .card-line.needs {
-    color: var(--warning);
-    font-weight: 600;
-  }
-  .card-actions {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-    margin-top: 4px;
   }
   .scene-state {
     position: absolute;
@@ -991,122 +792,5 @@
   }
   .empty-over :global(*) {
     pointer-events: auto;
-  }
-  .list {
-    padding-inline: 4px;
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    overflow-y: auto;
-    min-height: 0;
-  }
-  /* Keep the plain action path available to screen readers, and reveal its
-     context as soon as any keyboard control receives focus. */
-  .list.sr-only:focus-within {
-    position: static;
-    width: auto;
-    height: auto;
-    flex: 0 1 45%;
-    min-block-size: 100px;
-    max-block-size: 45%;
-    margin: 0;
-    padding: 6px;
-    overflow: auto;
-    clip: auto;
-    clip-path: none;
-    white-space: normal;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    background: var(--surface);
-  }
-  .member-pages {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 8px;
-    padding-block: 6px;
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-  }
-  .lroom-head {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    margin: 0 0 4px;
-    font-size: var(--fs-s);
-  }
-  .lroom-head small {
-    flex: 1;
-    color: var(--text-dim);
-    font-weight: 400;
-    font-size: var(--fs-xs);
-  }
-  .cur {
-    font-size: var(--fs-xs);
-    color: var(--accent-text);
-  }
-  .lroom ul {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-  }
-  .lrow {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-  }
-  .lmain {
-    flex: 1;
-    min-width: 0;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 4px 6px;
-    border: 0;
-    background: none;
-    border-radius: var(--radius-s);
-    color: var(--text);
-    font: inherit;
-    font-size: var(--fs-s);
-    text-align: start;
-    cursor: pointer;
-  }
-  .lmain:hover {
-    background: var(--surface-2);
-  }
-  .t {
-    flex: 1;
-    min-width: 0;
-  }
-  .st,
-  .bg-tag,
-  .more {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-  }
-  .more {
-    margin: 2px 6px;
-  }
-  .dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    flex: none;
-    background: var(--text-dim);
-  }
-  .dot[data-pose='working'] {
-    background: var(--success);
-  }
-  .dot[data-pose='needs-you'] {
-    background: var(--warning);
-  }
-  .dot[data-pose='away'],
-  .dot[data-pose='bench'] {
-    background: var(--border-strong);
-  }
-  .ellipsis {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
 </style>

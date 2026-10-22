@@ -13,6 +13,8 @@
   import { kindLabel } from '../../lib/labels';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
+  import { focusOnMount } from '../../lib/focusOnMount';
+  import { refocusEditTrigger } from './inlineEdit';
   import { loadErrorText } from '../../lib/loadError';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import { storyStage, STORY_STAGES } from '../../lib/status';
@@ -297,7 +299,7 @@
   // always-on Story Points / Estimate add-row) can render. Reads issueFull only;
   // the mutation of `editmeta` happens inside ensureEditmeta(), never in a $derived.
   $effect(() => {
-    if (isJira && issueFull && jira.editmeta === null && !jira.editmetaLoading) {
+    if (isJira && issueFull && jira.editmeta === null && !jira.editmetaLoading && !jira.editmetaError) {
       void jira.ensureEditmeta();
     }
   });
@@ -486,7 +488,7 @@
       // Mark loaded even on error: the on-open $effect gates on `devLoaded`, so
       // leaving it false after a failed fetch would re-trigger this every time
       // the request settles → an infinite retry loop. (Same guard rationale as
-      // ensureEditmeta's `editmeta = []` on error.) The explicit refresh path
+      // ensureEditmeta's `editmetaError` gate.) The explicit refresh path
       // resets `devLoaded = false` to force a fresh fetch.
       if (onStory(s)) {
         devLoaded = true;
@@ -508,6 +510,7 @@
   function cancelEditTitle(): void {
     editingTitle = false;
     titleDraft = '';
+    void refocusEditTrigger('title');
   }
   /** Save the story summary via the generic fields endpoint (native string). */
   async function saveTitle(): Promise<void> {
@@ -537,8 +540,7 @@
       toasts.info('Title updated', s.source_key);
       if (!onStory(s)) return;
       issueFull = full;
-      editingTitle = false;
-      titleDraft = '';
+      cancelEditTitle();
     } catch (e) {
       toastError('Couldn’t update title', e);
     } finally {
@@ -554,6 +556,7 @@
   function cancelEditDesc(): void {
     editingDesc = false;
     descDraft = '';
+    void refocusEditTrigger('description');
   }
   /** Save the description via the dedicated (ADF-aware) description endpoint. */
   async function saveDesc(): Promise<void> {
@@ -867,8 +870,9 @@
   {#if jira.editableFor(key)}
     <button
       class="field-edit-btn"
-      title="Edit"
-      aria-label="Edit field"
+      data-edit-for={key}
+      title="Edit {jira.editableFor(key)!.name}"
+      aria-label="Edit {jira.editableFor(key)!.name}"
       onclick={() => jira.beginEdit(jira.editableFor(key)!, current)}
     >
       <Icon name="edit" size={12} />
@@ -918,6 +922,7 @@
         <div class="title-edit">
           <input dir="auto"
             class="title-input"
+            use:focusOnMount
             bind:value={titleDraft}
             spellcheck="false"
             aria-label="Story title"
@@ -942,6 +947,7 @@
           {#if isJira}
             <button
               class="title-edit-btn"
+              data-edit-for="title"
               title="Edit title"
               aria-label="Edit title"
               onclick={beginEditTitle}
@@ -1233,7 +1239,7 @@
             <div class="desc-header">
               <span class="desc-label">Description</span>
               {#if !editingDesc && !viewingVersion}
-                <button class="desc-edit-btn" onclick={beginEditDesc}>
+                <button class="desc-edit-btn" data-edit-for="description" aria-label="Edit description" onclick={beginEditDesc}>
                   <Icon name="edit" size={12} /> Edit
                 </button>
               {/if}
@@ -1243,6 +1249,7 @@
               <div class="desc-editor">
                 <textarea dir="auto"
                   class="desc-textarea"
+                  use:focusOnMount
                   bind:value={descDraft}
                   rows={16}
                   placeholder="e.g. ## Goal — let players cap their weekly deposits"
@@ -1617,6 +1624,14 @@
 
                     <!-- Empty-field add rows: editmeta fields with no current value,
                          not already rendered by a dedicated row above. -->
+                    {#if jira.editmetaError}
+                      <LoadState
+                        what="editable fields"
+                        variant="compact"
+                        error={jira.editmetaError}
+                        onretry={() => jira.retryEditmeta()}
+                      />
+                    {/if}
                     {#if jira.editmeta}
                       {#each jira.editmeta.filter((ef) => {
                         // Skip fields rendered by dedicated controls above.

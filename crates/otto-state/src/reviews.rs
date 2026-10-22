@@ -346,6 +346,35 @@ impl ReviewsRepo {
         row_to_review(&row, comments)
     }
 
+    /// [`Self::get_review`] without the comments (`comments` is empty): for
+    /// readers that use only the review row — the Mission Control projector
+    /// runs this on every review event, and a re-run review keeps hundreds of
+    /// decided comments it would decode for nothing.
+    pub async fn review_head(&self, id: &Id) -> Result<Review> {
+        let row = sqlx::query("SELECT * FROM pr_reviews WHERE id = ?")
+            .bind(id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(dberr("review"))?;
+        row_to_review(&row, Vec::new())
+    }
+
+    /// The `limit` newest reviews of a workspace's repos, newest first, as
+    /// heads ([`Self::review_head`], no comments) — one query for the
+    /// projector's backfill instead of one `get_review` per review.
+    pub async fn recent_heads_in_workspace(&self, ws: &Id, limit: i64) -> Result<Vec<Review>> {
+        let rows = sqlx::query(
+            "SELECT r.* FROM pr_reviews r JOIN repos gr ON gr.id = r.repo_id \
+             WHERE gr.workspace_id = ? ORDER BY r.created_at DESC LIMIT ?",
+        )
+        .bind(ws)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("recent reviews"))?;
+        rows.iter().map(|r| row_to_review(r, Vec::new())).collect()
+    }
+
     /// Fetch the most-recent review for a (repo, pr_number) pair, with its comments.
     pub async fn latest_for_pr(&self, repo_id: &Id, pr_number: u64) -> Result<Option<Review>> {
         let row = sqlx::query(
@@ -666,6 +695,56 @@ mod tests {
         ctx.head_sha = Some("abc1234".into());
         repo.set_run_context(&id, &ctx).await.unwrap();
         assert_eq!(repo.get_run_context(&id).await.unwrap(), Some(ctx));
+    }
+
+    /// backend-performance-4-04: the projector's head reads carry no comments,
+    /// and the workspace backfill is the newest heads of that workspace only.
+    #[tokio::test]
+    async fn review_heads_skip_comments_and_scope_to_the_workspace() {
+        let pool = mem_pool().await;
+        let repo = ReviewsRepo::new(pool.clone());
+        for (id, ws) in [("ra", "w1"), ("rb", "w2")] {
+            sqlx::query(
+                "INSERT INTO repos(id,workspace_id,name,path,created_at) \
+                 VALUES(?,?,?,?, '2026-01-01T00:00:00Z')",
+            )
+            .bind(id)
+            .bind(ws)
+            .bind(id)
+            .bind(format!("/tmp/{id}"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        for (id, repo_id, at) in [
+            ("old", "ra", "2026-01-01T00:00:00Z"),
+            ("new", "ra", "2026-01-02T00:00:00Z"),
+            ("other", "rb", "2026-01-03T00:00:00Z"),
+        ] {
+            sqlx::query(
+                "INSERT INTO pr_reviews (id, repo_id, pr_number, status, created_at)
+                 VALUES (?, ?, 1, 'done', ?)",
+            )
+            .bind(id)
+            .bind(repo_id)
+            .bind(at)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let head = repo.review_head(&"new".to_string()).await.unwrap();
+        assert_eq!((head.id.as_str(), head.comments.len()), ("new", 0));
+        let ids = |v: Vec<Review>| v.into_iter().map(|r| r.id).collect::<Vec<_>>();
+        let w1 = repo
+            .recent_heads_in_workspace(&"w1".to_string(), 50)
+            .await
+            .unwrap();
+        assert_eq!(ids(w1), vec!["new", "old"]);
+        let one = repo
+            .recent_heads_in_workspace(&"w1".to_string(), 1)
+            .await
+            .unwrap();
+        assert_eq!(ids(one), vec!["new"]);
     }
 
     /// Two retries of one settled agent: only the first claims it; a live

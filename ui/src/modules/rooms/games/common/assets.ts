@@ -139,12 +139,15 @@ export class PropBatch {
     this.placements.set(key, list);
   }
   count(): number { let n = 0; for (const l of this.placements.values()) n += l.length; return n; }
-  /** Small decoration (grass, flowers…) never casts shadows: it is cheap fill, not shape. */
-  build(group: THREE.Group, shadows: boolean, decor: RegExp = /grass|flower|bush|plant_|stones|mushroom/): void {
+  /**
+   * Small decoration (grass, flowers…) never casts shadows: it is cheap fill,
+   * not shape. `material` may swap a part's material (e.g. a charred copy).
+   */
+  build(group: THREE.Group, shadows: boolean, decor: RegExp = /grass|flower|bush|plant_|stones|mushroom/, material?: (m: THREE.Material) => THREE.Material): void {
     for (const [key, list] of this.placements) {
       const model = this.lib.model(key);
       for (const part of model.parts) {
-        const mesh = new THREE.InstancedMesh(part.geometry, part.material, list.length);
+        const mesh = new THREE.InstancedMesh(part.geometry, material ? material(part.material) : part.material, list.length);
         list.forEach((m, i) => mesh.setMatrixAt(i, _m.multiplyMatrices(m, part.matrix)));
         mesh.instanceMatrix.needsUpdate = true;
         mesh.computeBoundingSphere();

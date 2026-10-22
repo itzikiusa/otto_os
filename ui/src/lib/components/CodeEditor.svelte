@@ -316,6 +316,8 @@
   /** False while the live doc's language pack is still loading (the view
    *  shows plain text until `ensureLang` reconfigures it). Plain field. */
   let appliedLangReady = true;
+  /** The `language` hint the live view's language was built with. */
+  let appliedLanguage: string | undefined = undefined;
 
   // LSP language IDs (maps file extension → LSP lang id)
   const EXT_TO_LSP_LANG: Record<string, string> = {
@@ -340,8 +342,12 @@
     java: 'java',
   };
 
+  /** The last path segment's extension ('' when it has none — a dot-less
+   *  path such as `workbench/<doc id>` falls back to the `language` hint). */
   function extOf(p: string): string {
-    return p.split('.').pop()?.toLowerCase() ?? '';
+    const base = p.slice(p.lastIndexOf('/') + 1);
+    const dot = base.lastIndexOf('.');
+    return dot < 0 ? '' : base.slice(dot + 1).toLowerCase();
   }
 
   // ── Selection state ───────────────────────────────────────────────────────
@@ -436,8 +442,7 @@
       return;
     }
 
-    const ext = extOf(path);
-    const langHint = ext || '';
+    const langHint = langExtOf(path, language);
     const snippet = `Re: ${path}:${sel.startLine}-${sel.endLine}\n\n\`\`\`${langHint}\n${text}\n\`\`\`\n\n`;
 
     try {
@@ -730,6 +735,7 @@
     const limit = highlightLineLimit;
     const doc = limit > 0 ? Text.of(fileContent.split(/\r\n?|\n/)) : null;
     appliedPlain = !!doc && hasLongLine(doc, limit);
+    appliedLanguage = language;
     const langExt = cmLangFor(filePath, language);
     appliedLangReady = langExt != null || !cmLangPending(langExtOf(filePath, language));
     const baseExtensions: Extension[] = [
@@ -936,7 +942,13 @@
   /** Parked EditorStates by path, oldest first (Map order = LRU order). */
   const keptStates = new Map<
     string,
-    { state: EditorState; scroll: StateEffect<unknown>; dialect: SqlDialectName; langReady: boolean }
+    {
+      state: EditorState;
+      scroll: StateEffect<unknown>;
+      dialect: SqlDialectName;
+      langReady: boolean;
+      language: string | undefined;
+    }
   >();
   const MAX_KEPT_STATES = 24;
 
@@ -957,6 +969,7 @@
       scroll: view.scrollSnapshot(),
       dialect: appliedDialect,
       langReady: appliedLangReady,
+      language: appliedLanguage,
     });
     while (keptStates.size > MAX_KEPT_STATES) {
       const oldest = keptStates.keys().next().value;
@@ -991,11 +1004,14 @@
       // switch) — a plain tab switch keeps the parked tree.
       appliedDialect = kept.dialect;
       appliedLangReady = kept.langReady;
-      if (sqlDialect !== kept.dialect || !kept.langReady) {
+      appliedLanguage = kept.language;
+      if (sqlDialect !== kept.dialect || !kept.langReady || language !== kept.language) {
         appliedDialect = sqlDialect;
+        appliedLanguage = language;
         const langExt = cmLangFor(toPath, language);
-        // Parked before its pack loaded: apply it now if it has since.
-        if (langExt) appliedLangReady = true;
+        // Parked before its pack loaded (or with another language hint):
+        // apply it now if it has loaded, else let ensureLang fetch it.
+        appliedLangReady = langExt != null || !cmLangPending(langExtOf(toPath, language));
         effects.push(langCompartment.reconfigure(langExt ?? []));
       }
       const doc = view.state.doc;
@@ -1119,6 +1135,23 @@
     appliedDialect = d;
     const langExt = untrack(() => cmLangFor(path, language));
     if (langExt) view.dispatch({ effects: langCompartment.reconfigure(langExt) });
+  });
+
+  // Switch the language live (no remount, no setState) when the `language`
+  // hint changes for the SAME doc — the Workbench re-detects an untitled
+  // buffer's language as you type. A compartment reconfigure keeps the
+  // selection and undo history; a path change still goes through swapState.
+  $effect(() => {
+    const l = language;
+    if (!view || l === appliedLanguage) return;
+    untrack(() => {
+      if (!view) return;
+      appliedLanguage = l;
+      const langExt = cmLangFor(livePath, l);
+      appliedLangReady = langExt != null || !cmLangPending(langExtOf(livePath, l));
+      view.dispatch({ effects: langCompartment.reconfigure(langExt ?? []) });
+      ensureLang(livePath);
+    });
   });
 
   // Swap the empty-doc hint live (no remount) when the caller changes it.

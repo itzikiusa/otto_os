@@ -60,11 +60,15 @@ export const MAX_FRONT = 36;
 export const MAX_BACK = 6;
 /** Detention bench slots (most recently archived first). */
 export const BENCH_SLOTS = 3;
+/** An idle kid this long since its session's last activity dozes at its desk. */
+export const ASLEEP_MS = 15 * 60_000;
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
-/** How a kid behaves at the desk. */
-export type Pose = 'working' | 'needs-you' | 'idle' | 'away' | 'stale';
+/** How a kid behaves at the desk. `done` = the session ended cleanly (the
+ *  kid stays, relaxed, a ✓ over it); `error` = it exited non-zero (slumped,
+ *  a ❗); `away` = suspended — an empty chair until it resumes. */
+export type Pose = 'working' | 'needs-you' | 'idle' | 'away' | 'stale' | 'done' | 'error';
 /** Character file key (`kid-<key>.glb`). */
 export type CharacterKey = 'claude' | 'codex' | 'grok' | 'agy' | 'shell' | 'custom';
 
@@ -121,7 +125,7 @@ export interface Room {
   cz: number;
   /** World x of this room's corridor door. */
   doorX: number;
-  counts: { working: number; needsYou: number; idle: number; away: number; total: number; detention: number };
+  counts: { working: number; needsYou: number; idle: number; away: number; done: number; error: number; total: number; detention: number };
 }
 
 export interface School {
@@ -148,6 +152,8 @@ export interface SchoolInput {
   needsYou?: (id: string) => boolean;
   stale?: boolean;
   canEditAgents?: boolean;
+  /** Exit code of an exited session when known (non-zero → `error`). */
+  exitCodeOf?: (id: string) => number | null | undefined;
 }
 
 // ── Provider identity ──────────────────────────────────────────────────────
@@ -178,9 +184,26 @@ export function poseFor(key: SessionStateKey): Pose {
       return 'idle';
     case 'stale':
       return 'stale';
+    case 'ended':
+      return 'done';
+    case 'failed':
+      return 'error';
     default:
       return 'away';
   }
+}
+
+/** A live process sits at the desk (engines keep their back-row seat only
+ *  while live). */
+export function isLivePose(p: Pose): boolean {
+  return p !== 'away' && p !== 'done' && p !== 'error';
+}
+
+/** Idle for ASLEEP_MS: the kid dozes (head down) — still free to get up. */
+export function isAsleep(k: Pick<Kid, 'pose' | 'lastActiveAt' | 'detention'>, nowMs: number): boolean {
+  if (k.detention || k.pose !== 'idle') return false;
+  const at = Date.parse(k.lastActiveAt);
+  return Number.isFinite(at) && nowMs - at >= ASLEEP_MS;
 }
 
 // ── Layout math ────────────────────────────────────────────────────────────
@@ -298,6 +321,11 @@ function metaString(s: Session, key: string): string | null {
   return typeof v === 'string' && v.trim() ? v : null;
 }
 
+function metaNumber(s: Session, key: string): number | null {
+  const v = (s.meta as Record<string, unknown> | null)?.[key];
+  return typeof v === 'number' && Number.isFinite(v) ? v : null;
+}
+
 function canManageIn(w: WorkspaceLike | undefined, workspaceId: string, canEditAgents: boolean): boolean {
   if (!canEditAgents) return false;
   if (workspaceId === SCRATCH_ID) return true;
@@ -327,7 +355,8 @@ export function buildSchool(input: SchoolInput): School {
     const w = wsById.get(s.workspace_id);
     if (!w && !isScratch) return null;
     const live = detention ? s.status : (statusOf(s.id) ?? s.status);
-    const st = sessionState(s, live, !detention && needsYou(s.id), { stale: input.stale });
+    const exitCode = input.exitCodeOf?.(s.id) ?? metaNumber(s, 'exit_code');
+    const st = sessionState(s, live, !detention && needsYou(s.id), { stale: input.stale, exitCode });
     const pose = detention ? 'away' : poseFor(st.key);
     return {
       id: s.id,
@@ -362,7 +391,7 @@ export function buildSchool(input: SchoolInput): School {
     const d = draft(s, false);
     if (!d) continue;
     if (d.background) {
-      if (d.pose !== 'away') push(back, d);
+      if (isLivePose(d.pose)) push(back, d);
     } else push(front, d);
   }
   for (const s of input.archived ?? []) {
@@ -440,6 +469,8 @@ export function buildSchool(input: SchoolInput): School {
         needsYou: all.filter((d) => d.pose === 'needs-you').length,
         idle: all.filter((d) => d.pose === 'idle' || d.pose === 'stale').length,
         away: all.filter((d) => d.pose === 'away').length,
+        done: all.filter((d) => d.pose === 'done').length,
+        error: all.filter((d) => d.pose === 'error').length,
         total: all.length,
         detention: benchKids.length,
       },
@@ -463,10 +494,43 @@ export function roomSummary(r: Pick<Room, 'counts'>): string {
   if (c.total === 0) return 'Empty classroom';
   const parts: string[] = [];
   if (c.needsYou) parts.push(c.needsYou === 1 ? '1 needs you' : `${c.needsYou} need you`);
+  if (c.error) parts.push(`${c.error} failed`);
   if (c.working) parts.push(`${c.working} working`);
   if (c.idle) parts.push(`${c.idle} idle`);
+  if (c.done) parts.push(`${c.done} done`);
   if (c.away) parts.push(`${c.away} away`);
   return parts.join(' · ');
+}
+
+// ── Attention ──────────────────────────────────────────────────────────────
+
+/** Who wants you, school-wide: every "needs you" kid (longest waiting
+ *  first), then every failed one. The widget's queue and the list's top
+ *  section read this, so the keyboard path and the 3D path agree. */
+export function attentionQueue(s: Pick<School, 'kids'>): Kid[] {
+  const at = (k: Kid) => Date.parse(k.lastActiveAt) || 0;
+  const by = (a: Kid, b: Kid) => at(a) - at(b) || a.title.localeCompare(b.title) || a.id.localeCompare(b.id);
+  const live = s.kids.filter((k) => !k.detention);
+  return [...live.filter((k) => k.pose === 'needs-you').sort(by), ...live.filter((k) => k.pose === 'error').sort(by)];
+}
+
+/** The room to jump into first: most "needs you", then failures, then
+ *  working kids. Null when nobody is in any room. */
+export function busiestRoom(s: Pick<School, 'rooms'>): Room | null {
+  let best: Room | null = null;
+  const score = (r: Room) => [r.counts.needsYou, r.counts.error, r.counts.working, r.counts.total];
+  for (const r of s.rooms) {
+    if (r.counts.total === 0) continue;
+    if (!best) {
+      best = r;
+      continue;
+    }
+    const a = score(r);
+    const b = score(best);
+    const i = a.findIndex((v, j) => v !== b[j]);
+    if (i >= 0 && a[i] > b[i]) best = r;
+  }
+  return best;
 }
 
 export function shortPath(cwd: string, keep = 2): string {
@@ -487,6 +551,13 @@ export function kidLines(k: Kid, ago: string): string[] {
   const where = [k.cwd ? shortPath(k.cwd) : '', k.branch ? `⎇ ${k.branch}` : ''].filter(Boolean).join(' · ');
   if (where) lines.push(where);
   return lines;
+}
+
+/** The hover tooltip's activity line: "Working · active 2m ago · ⎇ main"
+ *  (`ago` is relTime's compact form; "—" = unknown). */
+export function kidActivity(k: Pick<Kid, 'stateLabel' | 'branch'>, ago: string, asleep = false): string {
+  const when = ago && ago !== '—' ? `active ${ago} ago` : '';
+  return [asleep ? `${k.stateLabel} — dozing` : k.stateLabel, when, k.branch ? `⎇ ${k.branch}` : ''].filter(Boolean).join(' · ');
 }
 
 export function kidAriaLabel(k: Kid, ago: string): string {

@@ -16,6 +16,7 @@ pub mod client;
 pub mod http;
 pub mod outward;
 pub mod policy;
+pub mod profiles;
 pub mod risk;
 pub mod service;
 pub mod types;

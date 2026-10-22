@@ -17,11 +17,12 @@
 
 <label for="np-cid">Cluster</label>
 <IdPicker id="np-cid" dir="ltr" value={cid} cache={pickers.brokerClusters} key={wsId} toOptions={clusterOptions}
-  noun="cluster" placeholder="Broker cluster id" what="broker clusters" onchange={(v) => set('cluster_id', v)} />
+  noun="cluster" placeholder="Broker cluster id" what="broker clusters"
+  emptyHint="No broker clusters in this workspace yet — add one in Message Brokers." onchange={(v) => set('cluster_id', v)} />
 <label for="np-topic">Topic</label>
 {#if cid && clusterKnown}
   <IdPicker id="np-topic" dir="ltr" value={paramStr(node, 'topic')} cache={pickers.brokerTopics} key={cid} toOptions={topicOptions}
-    noun="topic" placeholder="my-topic" what="topics" onchange={(v) => set('topic', v)} />
+    noun="topic" placeholder="my-topic" what="topics" emptyHint="This cluster has no topics yet." onchange={(v) => set('topic', v)} />
 {:else}
   <input dir="ltr" id="np-topic" type="text" placeholder={cid ? 'my-topic' : 'Choose a cluster first'}
     value={paramStr(node, 'topic')} oninput={(e) => set('topic', e.currentTarget.value)} />

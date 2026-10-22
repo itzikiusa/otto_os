@@ -1,7 +1,7 @@
 //! otto-transcript — the ONE parser for the agent CLIs' on-disk transcripts.
 //!
 //! Two consumers share it so they can never disagree:
-//!   * the usage store (`otto-usage`, `ottod/src/usage_tailer.rs`) — the
+//!   * the usage store (`otto-usage`, `otto-usage/src/tailer/driver.rs`) — the
 //!     per-line token parsers + cursor/seen stores in [`usage`], extracted from
 //!     `otto-usage` verbatim (frozen on-disk formats);
 //!   * the conversation view — [`fold`] turns a whole file into the normalized

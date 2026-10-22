@@ -3093,13 +3093,6 @@ impl LocalGit {
         Ok(out)
     }
 
-    /// Raw unified diff of the staged changes (`git diff --cached`). Empty when
-    /// nothing is staged.
-    pub async fn staged_diff_text(&self) -> Result<String> {
-        self.exec_text(&GitCmd::diff("diff").args(["-M", "--cached"]))
-            .await
-    }
-
     /// Raw unified diff of all unstaged tracked changes (`git diff`). Used as a
     /// fallback when nothing is staged.
     pub async fn working_diff_text(&self) -> Result<String> {
@@ -3123,8 +3116,8 @@ impl LocalGit {
         Ok((String::from_utf8_lossy(&out).into_owned(), cut))
     }
 
-    /// [`Self::staged_diff_text`] held to its first `max` bytes (git is killed
-    /// there): a commit-message draft keeps 40 KB of the patch, so buffering
+    /// Raw unified diff of the staged changes (`git diff --cached`, empty when
+    /// nothing is staged) held to its first `max` bytes (git is killed there): a commit-message draft keeps 40 KB of the patch, so buffering
     /// a 100 MB staged vendor drop just to clip it is waste. `bool` = cut.
     pub async fn staged_diff_text_capped(&self, max: usize) -> Result<(String, bool)> {
         let cmd = GitCmd::diff("diff").args(["-M", "--cached"]);
@@ -3662,50 +3655,6 @@ impl LocalGit {
         Ok(out.output)
     }
 
-    /// Pull with an automatic stash → pull → pop around a dirty tree (the
-    /// opt-in `auto_stash` pull the UI offers when a plain pull is refused with
-    /// "commit or stash first"). Returns the pull outcome plus a human note
-    /// about what happened to the stashed changes.
-    ///
-    /// Contract mirrors [`Self::merge_branch`]'s auto-stash: a pull that merges
-    /// with CONFLICTS leaves the changes STASHED (popping onto a half-merged
-    /// tree would bury them) and says so; a failed pull pops the stash back so
-    /// the tree is exactly as it was.
-    pub async fn pull_autostash(
-        &self,
-        token: Option<TransportCredential>,
-    ) -> Result<(PullOutcome, Option<String>)> {
-        let dirty = !self
-            .run(&["status", "--porcelain", STATUS_IGNORE_SUBMODULES])
-            .await?
-            .trim()
-            .is_empty();
-        if !dirty {
-            return Ok((self.pull_outcome(token).await?, None));
-        }
-        let sha = self.stash_save_sha().await?;
-        match self.pull_outcome(token).await {
-            Ok(out) if out.conflicted_files.is_empty() => {
-                let note = self.pop_after_merge(&sha).await;
-                Ok((out, note))
-            }
-            Ok(out) => Ok((
-                out,
-                Some(
-                    "The pull merged with conflicts. Your uncommitted changes stay stashed — \
-                     resolve the conflicts and commit, then restore them from `git stash list`."
-                        .into(),
-                ),
-            )),
-            Err(e) => {
-                // The refused pull never touched the tree — restore it (by
-                // SHA), or say where the changes are if that fails.
-                let origin = self.head_label().await.unwrap_or_default();
-                Err(self.restore_autostash(e, &sha, &origin).await)
-            }
-        }
-    }
-
     pub async fn fetch(&self, token: Option<TransportCredential>) -> Result<String> {
         let out = self.run_remote(&["fetch", "--prune"], token).await?;
         self.seed_commit_graph();
@@ -4192,7 +4141,7 @@ impl LocalGit {
                     .await
                     .is_err() =>
             {
-                return Ok(Vec::new())
+                return Ok(Vec::new());
             }
             Err(e) => return Err(e),
         };
@@ -4844,7 +4793,7 @@ impl LocalGit {
             other => {
                 return Err(Error::Invalid(format!(
                     "bad side: {other} (ours|theirs|keep|delete)"
-                )))
+                )));
             }
         };
         if delete {

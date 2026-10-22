@@ -17,10 +17,16 @@
   interface Props {
     agentId: string;
     editable: boolean;
+    /** May change the OWNER fields — goal texts and rules (PC-3). Defaults to
+     *  `editable`; toggles, budget, primary and "Work on it now" stay `editable`. */
+    ownerEditable?: boolean;
+    /** Shown to an Editor who isn't the owner, under the owner-only sections. */
+    ownerNote?: string;
     /** Told after a successful save (the page header shows mode badges). */
     onsaved?: (a: PersonalAgentAutonomy) => void;
   }
-  let { agentId, editable, onsaved }: Props = $props();
+  let { agentId, editable, ownerEditable = undefined, ownerNote = '', onsaved }: Props = $props();
+  const ownerEdit = $derived(editable && (ownerEditable ?? true));
   /** Prefix for the label↔control ids. */
   const uid = $props.id();
 
@@ -213,12 +219,13 @@
     <section class="pa-panel" aria-labelledby="goals-h">
       <div class="card-head">
         <h2 id="goals-h">Standing goals</h2>
-        {#if editable}
+        {#if ownerEdit}
           <button class="btn small" disabled={saving} bind:this={addGoalBtn} onclick={() => void addRow('goal')}>
             <Icon name="plus" size={12} /> Add goal
           </button>
         {/if}
       </div>
+      {#if ownerNote}<p class="hint" role="note">{ownerNote}</p>{/if}
       <p class="hint">Proactive runs pick the goal worked least recently, within the daily budget above. Findings go to Runs — never delivered.</p>
       {#if goals.length === 0}
         <p class="muted">No standing goals. Add one, e.g. “Watch the release branch CI and flag new failures”.</p>
@@ -227,12 +234,12 @@
           {#each goals as g, i (g.id ?? `new-${i}`)}
             <li class="item">
               <input type="checkbox" bind:checked={g.enabled} disabled={!editable || saving} aria-label={g.text.trim() ? `Goal enabled: ${g.text.trim()}` : 'Goal enabled'} title="Enabled" />
-              <input dir="auto" class="input grow" bind:value={g.text} disabled={!editable || saving} placeholder="What should it keep an eye on?" aria-label={g.text.trim() ? `Goal: ${g.text.trim()}` : 'Goal'} />
+              <input dir="auto" class="input grow" bind:value={g.text} disabled={!ownerEdit || saving} placeholder="What should it keep an eye on?" aria-label={g.text.trim() ? `Goal: ${g.text.trim()}` : 'Goal'} />
               <span class="meta">Worked <RelTime iso={g.last_run_at} fallback="never" /></span>
               {#if editable && g.id}
                 <button class="btn small" disabled={workingGoal !== null || dirty || saving} aria-label={g.text.trim() ? `Work on it now: ${g.text.trim()}` : 'Work on it now'} title={dirty ? 'Save first' : 'Start a read-only run on this goal now'} onclick={() => g.id && workNow(g.id)}>Work on it now</button>
               {/if}
-              {#if editable}
+              {#if ownerEdit}
                 <button class="icon-btn rm-row" disabled={saving} aria-label={g.text.trim() ? `Remove goal: ${g.text.trim()}` : `Remove goal ${i + 1}`} title="Remove goal" onclick={() => void removeRow('goal', i)}>
                   <Icon name="trash" size={14} />
                 </button>
@@ -246,12 +253,13 @@
     <section class="pa-panel" aria-labelledby="rules-h">
       <div class="card-head">
         <h2 id="rules-h">Rules</h2>
-        {#if editable}
+        {#if ownerEdit}
           <button class="btn small" disabled={saving} bind:this={addRuleBtn} onclick={() => void addRow('rule')}>
             <Icon name="plus" size={12} /> Add rule
           </button>
         {/if}
       </div>
+      {#if ownerNote}<p class="hint" role="note">{ownerNote}</p>{/if}
       <p class="hint">Plain language, added to the agent’s instructions. “Ask before…” or “Never…” plus a target (prod, a “quoted name”, a #channel) is also enforced on its actions.</p>
       {#if rules.length === 0}
         <p class="muted">No rules. Try “Ask before touching prod”.</p>
@@ -259,7 +267,7 @@
         <ul class="list" bind:this={rulesList}>
           {#each rules as r, i (r.id ?? `new-${i}`)}
             <li class="item rule">
-              <input dir="auto" class="input grow" bind:value={r.text} disabled={!editable || saving} placeholder="e.g. Never post in #general" aria-label={rules.length > 1 ? `Rule ${i + 1}` : 'Rule'} />
+              <input dir="auto" class="input grow" bind:value={r.text} disabled={!ownerEdit || saving} placeholder="e.g. Never post in #general" aria-label={rules.length > 1 ? `Rule ${i + 1}` : 'Rule'} />
               {#if r.id && saved?.rules.some((x) => x.id === r.id && x.text === r.text.trim())}
                 <span class="chip" class:pa-enf={!!r.enforce} title="Derived by Otto from the rule’s wording">
                   {#if r.enforce}<Icon name="lock" size={12} />{/if}{enforceLabel(r)}
@@ -267,7 +275,7 @@
               {:else}
                 <span class="meta">Save to see what Otto enforces</span>
               {/if}
-              {#if editable}
+              {#if ownerEdit}
                 <button class="icon-btn rm-row" disabled={saving} aria-label={r.text.trim() ? `Remove rule: ${r.text.trim()}` : `Remove rule ${i + 1}`} title="Remove rule" onclick={() => void removeRow('rule', i)}>
                   <Icon name="trash" size={14} />
                 </button>

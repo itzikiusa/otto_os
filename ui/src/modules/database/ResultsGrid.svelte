@@ -177,9 +177,10 @@
   const hosted = $derived(!!connectionId);
   /** The DB Assistant spawns an agent — the editor's Ask AI buttons need this too. */
   const canAssist = $derived(auth.can('agents', 'edit'));
-  const cancelQuery = $derived<(() => void) | null>(
-    oncancel ?? (hosted ? () => void database.abortQuery() : null),
-  );
+  const cancelQuery = $derived.by<(() => void) | null>(() => {
+    const cancel = oncancel ?? (hosted ? () => void database.abortQuery() : null);
+    return cancel ? () => { cancelAsked = true; cancel(); } : null;
+  });
 
   // ── Multi-result switcher (multi-statement batches) ──────────────────────────
   // The server returns the first statement's result at top level and the rest in
@@ -237,6 +238,30 @@
       clearTimeout(align);
       if (iv !== undefined) clearInterval(iv);
     };
+  });
+
+  // ── Run announcements (screen readers) ───────────────────────────────────────
+  // The ticking "Running… Ns" text is visual only: a live region holding it was
+  // re-read every second for the whole run. One always-mounted status says the
+  // EDGES instead — "Running query" once, then finished / failed / canceled.
+  let runAnnounce = $state('');
+  let wasRunning = false;
+  let cancelAsked = false;
+  $effect(() => {
+    const now = running;
+    untrack(() => {
+      if (now && !wasRunning) {
+        cancelAsked = false;
+        runAnnounce = 'Running query';
+      } else if (!now && wasRunning) {
+        runAnnounce = cancelAsked
+          ? 'Query canceled'
+          : error
+            ? 'Query failed'
+            : elapsed >= 1 ? `Query finished in ${elapsed} s` : 'Query finished';
+      }
+      wasRunning = now;
+    });
   });
 
   // ── Footer pager (single auto-limited result only) ───────────────────────────
@@ -1324,7 +1349,7 @@
 
 {#snippet runningCard()}
   <!-- Inline running card (mini grids only — the main grid keeps its frame). -->
-  <div class="rg-overlay rg-inline" role="status" aria-live="polite">
+  <div class="rg-overlay rg-inline">
     <div class="rg-overlay-card">
       <span class="spinner" style="--spinner-size: 16px" aria-hidden="true"></span>
       <span class="rg-overlay-text">Running… {elapsed}s</span>
@@ -1364,6 +1389,7 @@
   </div>
 {/snippet}
 
+<span class="sr-only" role="status">{runAnnounce}</span>
 {#if !mini && resultSets.length > 1}
   <!-- Multi-statement batch: a segmented switcher over the result sets. Errored
        statements (execution stopped there) get a red dot; the tooltip previews
@@ -1749,7 +1775,7 @@
     {#if running && !mini}
       <!-- Running overlay: dims the stale grid while the active tab's query is in
            flight, with an elapsed counter + inline Cancel (client + engine stop). -->
-      <div class="rg-overlay" role="status" aria-live="polite">
+      <div class="rg-overlay">
         <div class="rg-overlay-card">
           <span class="spinner" style="--spinner-size: 16px" aria-hidden="true"></span>
           <span class="rg-overlay-text">Running… {elapsed}s</span>

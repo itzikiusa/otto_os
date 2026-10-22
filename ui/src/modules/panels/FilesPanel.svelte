@@ -4,6 +4,8 @@
   // folder navigation; it starts at the Side panel's folder (the session's
   // cwd, or the workspace folder picked in the panel).
   import { rightPanel } from '../../lib/stores/rightPanel.svelte';
+  import { ws } from '../../lib/stores/workspace.svelte';
+  import { sessionFs } from '../../lib/api/fs';
   import FileTree from './FileTree.svelte';
   import Icon from '../../lib/components/Icon.svelte';
 
@@ -20,6 +22,16 @@
   let sections: Section[] = $state([{ id: nextId++, root: undefined }]);
 
   const MAX = 4;
+
+  // Inside an agent session the tree is the session's cwd. Engine-made cwds
+  // (workflow worktrees, persona folders, goal-loop / scheduled / swarm work
+  // dirs) live in Otto's data dir, which `/fs/*` refuses non-root callers, so
+  // the session-scoped routes back it up (PC-1, access-control-4-03). One
+  // adapter per session, so the tree doesn't reload on every render.
+  const sessionSource = $derived.by(() => {
+    const s = ws.activeSession;
+    return rightPanel.session && s?.cwd ? sessionFs(s.id, s.cwd) : null;
+  });
 
   function addSection(): void {
     if (sections.length >= MAX) return;
@@ -59,6 +71,8 @@
           root={section.root ?? (rightPanel.folder || undefined)}
           primary={i === 0}
           navigation
+          lister={sessionSource?.lister}
+          reader={sessionSource?.reader}
           onClose={sections.length > 1 ? () => removeSection(section.id) : undefined}
         />
       </div>

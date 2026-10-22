@@ -157,7 +157,7 @@ impl LinearClient {
         if !status.is_success() {
             return Err(Error::Upstream(format!(
                 "linear {what} failed ({status}): {}",
-                truncate(&text, 400)
+                otto_core::text::clip_chars(&text, 400)
             )));
         }
         body.get("data")
@@ -659,13 +659,6 @@ pub const GENERIC_TYPE: &str = "Issue";
 
 fn s(v: &Value, k: &str) -> String {
     v.get(k).and_then(Value::as_str).unwrap_or("").to_string()
-}
-
-fn truncate(t: &str, n: usize) -> String {
-    match t.char_indices().nth(n) {
-        Some((i, _)) => format!("{}…", &t[..i]),
-        None => t.to_string(),
-    }
 }
 
 /// The first GraphQL error message, if the response carries any.

@@ -532,7 +532,7 @@ async fn review4_product_publish_real_api_rejects_stale_same_run_gate_after_retr
             assert_eq!(payload["space"]["key"], "RFC");
             assert_eq!(
                 payload["body"]["storage"]["value"],
-                otto_issues::markdown_to_storage("Reviewed P2 body")
+                otto_issues::markdown_to_storage("Reviewed P2 body").unwrap()
             );
         }
     }
