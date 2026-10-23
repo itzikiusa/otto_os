@@ -1,0 +1,1340 @@
+//! Run ONE agent turn against a managed Otto **session**, creating it on first
+//! use and RESUMING it across turns. This is the session-backed replacement for
+//! the throwaway `orchestrator.run_agent` PTY: the agent runs as a real,
+//! visible-in-Agents, resumable session that auto-gets the workspace's MCP tools.
+//!
+//! Moved here from otto-server's `agent_session` (architecture-5-02): it needs
+//! only the [`SessionManager`], so leaf engines can drive turns without the
+//! server. otto-server keeps thin `&ServerCtx` wrappers at the old path.
+//!
+//! Used by Discovery Chat (one session per chat thread) and Canvas "Ask AI" (one
+//! session per scene). It mirrors `otto_swarm::runtime::agent_run` but RESUMES the same session
+//! across turns and detects the NEW turn via a transcript baseline — a resumed
+//! transcript already holds the prior turns, so we must wait for the completed
+//! turn count to GROW rather than accepting any `end_turn` (which would echo the
+//! previous reply instantly). It also fails FAST on a claude API error (wrong
+//! model / auth / rate-limit) with the real message instead of a "stuck" timeout.
+
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use otto_core::api::CreateSessionReq;
+use otto_core::domain::{SessionKind, User, Workspace};
+use otto_core::{Error, Id};
+use otto_sessions::SessionManager;
+use serde_json::Value;
+
+mod lifecycle;
+mod reply;
+pub use lifecycle::SESSION_LEASES;
+use reply::options as reply_turn_options;
+
+/// Absolute cap on one turn (cold claude spawn + a long reply). Deliberately very
+/// generous (10h): a workflow agent step (e.g. "write tests", a long refactor) can
+/// legitimately run for hours, and the operator stops a run manually rather than
+/// having it killed out from under them. A genuine claude API error still fails
+/// FAST (see below) — this cap only bounds *legitimate* long work.
+const TURN_TIMEOUT: Duration = Duration::from_secs(10 * 60 * 60);
+/// Default no-output idle backstop (10h) — the session's max lifespan floor. This
+/// is the value non-workflow callers pass for `stuck_after`, so a step that's
+/// quietly working — compiling, running a long test suite — is never mistaken for
+/// a hung session. Workflow steps pass a much shorter `stuck_after` (see
+/// `run_session_turn`) as an EARLIER, additional trip; this 10h backstop and
+/// `TURN_TIMEOUT` are never reduced.
+pub const STUCK_IDLE: Duration = Duration::from_secs(10 * 60 * 60);
+/// Watch poll cadence.
+const POLL: Duration = Duration::from_millis(1000);
+/// How long we keep trying to land the prompt on the CLI's real input box before
+/// giving up with a visible error. A cold claude spawn + a promo/onboarding screen
+/// can delay the input box; we re-submit within this window rather than silently
+/// polling a no-op turn for 10h.
+const SUBMIT_CONFIRM: Duration = Duration::from_secs(45);
+/// Re-send the prompt this often, within `SUBMIT_CONFIRM`, until claude records it
+/// as a user turn (a banner can swallow the first paste/Enter).
+const RESUBMIT_EVERY: Duration = Duration::from_secs(8);
+/// Cap on paste attempts (first + re-sends) so a genuinely broken session can't
+/// spin forever inside the confirm window.
+const MAX_SUBMIT_ATTEMPTS: u32 = 4;
+/// How many times to nudge an agent that echoed the CLI's injected reminder
+/// (see [`is_injected_reminder_echo`]) instead of doing the work, before giving
+/// up and returning whatever it produced.
+const MAX_REMINDER_NUDGES: u32 = 2;
+/// Sent when an agent no-ops by parroting the injected skill/agentic-loop
+/// reminder — tells it to actually perform the task and write its handoff.
+const REMINDER_NUDGE: &str = "You have not done the task — you only restated the instructions. \
+Read the referenced context files, DO the actual work now, and write your handoff summary to the \
+required file. Do not repeat or restate these instructions.";
+/// Sent once, `NUDGE_AFTER` into the handoff-missing grace: the agent ended its
+/// turn natively but never wrote the file the engine treats as its done signal.
+const HANDOFF_NUDGE: &str = "Write your handoff file now — the step cannot finish until it exists.";
+
+/// The prompt-landing confirm window, stretched by how busy the daemon is: a
+/// cold claude spawn competes with every other live PTY for CPU, so a flat 45 s
+/// fails spuriously on a machine already running a review fleet. `+5s` per 10
+/// live sessions, hard-capped at 3 minutes (past that the session is broken,
+/// not slow). See design R5.3.
+pub fn submit_confirm_for(live: usize) -> Duration {
+    (SUBMIT_CONFIRM + Duration::from_secs(5) * (live / 10) as u32).min(Duration::from_secs(180))
+}
+
+/// Completion and ownership policy for a managed agent turn. Validated final
+/// files work across providers; native Claude/Codex artifacts provide progress
+/// and child-task evidence. Silence alone never proves successful completion.
+#[derive(Default)]
+pub struct TurnOpts {
+    /// Owner cancellation: covers creation, prompt dispatch and the entire turn.
+    pub cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// Completion marker: the turn is complete the moment this file exists
+    /// with non-empty content — the (trimmed) content IS the turn text. The
+    /// caller appends a "FINALLY write your one-line summary to <path>"
+    /// instruction to the prompt. Checked for every provider (a compliant
+    /// claude just completes via whichever channel fires first).
+    pub done_file: Option<std::path::PathBuf>,
+    /// Require a validated file result, including for Claude. Partial or invalid
+    /// files cannot end a turn; transcript completion alone is insufficient
+    /// unless `transcript_fallback` is set.
+    pub done_file_validator: Option<fn(&str) -> bool>,
+    /// With a validated `done_file`, still accept the provider's native final
+    /// text (claude transcript / codex rollout) once the turn ended with
+    /// nothing pending and the handoff grace expired. Plain chat turns
+    /// ([`run_session_turn`]) set this: an answer given only in chat is still
+    /// the answer. Engine result protocols (workflows, reviews, vault docs)
+    /// leave it off. Providers with no native signal (agy) still need the file.
+    pub transcript_fallback: bool,
+    /// Legacy caller hint, retained for compatibility. Silence never proves
+    /// completion; use a validated final file or native turn completion.
+    pub quiet_done: Option<Duration>,
+    /// Kill the session when the stall trip fires — and on any failed turn.
+    /// Workflow steps set this: their retry spawns a FRESH session, and the
+    /// stuck one would otherwise linger alive forever (its spinner defeats the
+    /// idle-suspend sweep too). Only ever applies to a session the turn
+    /// CREATED: a resumed `existing` session belongs to its thread and is
+    /// released alive (an owner's `cancel` suspends it instead).
+    pub kill_on_stall: bool,
+    /// Use the turn oracle (sub-agent/handoff-aware completion) instead of
+    /// the legacy "first end_turn" detection. Workflow steps set this;
+    /// validated result protocols always use it, including single-turn chats.
+    pub oracle: bool,
+    /// Receives every phase change while the oracle watches the turn.
+    pub phase_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::turn_oracle::Phase>>,
+    /// Receives HOW the turn completed, once, on the oracle's success path —
+    /// the engine turns it into the step's `✓`/`⚠` line. Dropped without a send
+    /// on every failure path (and on the E2E short-circuit), so a caller that
+    /// awaits it must treat `RecvError` as "nothing to report".
+    pub outcome_tx: Option<tokio::sync::oneshot::Sender<crate::turn_oracle::CompleteVia>>,
+}
+
+/// One agent turn an assist engine (Canvas, Design Hall, mockups) asks its
+/// host to run. The ONE turn type those engines share (architecture-4-02);
+/// it lives with the runner so an engine crate needs only otto-agent-run.
+/// Canvas leaves `done_file` / `quiet_done` unset (plain chat protocol).
+pub struct AgentTurn<'a> {
+    pub ws: &'a Workspace,
+    pub user: &'a User,
+    /// The artifact's session to RESUME (`None` → spawn a fresh one).
+    pub existing: Option<&'a Id>,
+    pub title: &'a str,
+    pub cwd: &'a str,
+    pub provider: &'a str,
+    pub meta: Value,
+    pub prompt: &'a str,
+    /// No-output idle trip.
+    pub stuck_after: Duration,
+    /// Completion marker file: the turn is done once it holds non-empty text.
+    pub done_file: Option<std::path::PathBuf>,
+    /// Legacy compatibility field; silence is never accepted as completion.
+    pub quiet_done: Option<Duration>,
+}
+
+/// Run one turn. Returns `(reply_text, session_id)`. Persist the returned
+/// `session_id` so the next turn resumes the SAME session.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_session_turn(
+    manager: &Arc<SessionManager>,
+    ws: &Workspace,
+    user: &User,
+    existing: Option<&Id>,
+    title: &str,
+    cwd: &str,
+    provider: &str,
+    meta: Value,
+    prompt: &str,
+    stuck_after: Duration,
+    on_ready: impl FnOnce(&Id),
+) -> otto_core::Result<(String, Id)> {
+    run_session_turn_cancellable(
+        manager,
+        ws,
+        user,
+        existing,
+        title,
+        cwd,
+        provider,
+        meta,
+        prompt,
+        stuck_after,
+        None,
+        on_ready,
+    )
+    .await
+}
+
+/// The plain-chat reply protocol with caller-owned cancellation. Existing callers
+/// retain the uncancelled wrapper; Product uses this for story deletion.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_session_turn_cancellable(
+    manager: &Arc<SessionManager>,
+    ws: &Workspace,
+    user: &User,
+    existing: Option<&Id>,
+    title: &str,
+    cwd: &str,
+    provider: &str,
+    meta: Value,
+    prompt: &str,
+    stuck_after: Duration,
+    cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+    on_ready: impl FnOnce(&Id),
+) -> otto_core::Result<(String, Id)> {
+    let reply =
+        reply::Reply::new().map_err(|e| Error::Internal(format!("prepare final reply: {e}")))?;
+    // With permission prompts on, writing the reply file outside the cwd asks
+    // for approval and the turn would sit until the idle backstop; claude and
+    // codex end their turns natively, so they answer in chat alone instead.
+    let (complete_prompt, mut opts) =
+        if reply::wants_file(provider, manager.providers().skip_permissions()) {
+            (reply.prompt(prompt), reply_turn_options(&reply.path()))
+        } else {
+            (prompt.to_string(), reply::chat_options())
+        };
+    opts.cancel = cancel;
+    let (text, sid) = run_session_turn_with(
+        manager,
+        ws,
+        user,
+        existing,
+        title,
+        cwd,
+        provider,
+        meta,
+        &complete_prompt,
+        stuck_after,
+        opts,
+        on_ready,
+    )
+    .await?;
+    // The offline daemon deliberately returns canned content without a provider.
+    if otto_core::e2e::isolated() {
+        return Ok((text, sid));
+    }
+    let text = reply::final_text(&text)
+        .ok_or_else(|| Error::Upstream("agent completed without a final reply".into()))?;
+    Ok((text, sid))
+}
+
+/// [`run_session_turn`] with extra completion channels (see [`TurnOpts`]).
+#[allow(clippy::too_many_arguments)]
+pub async fn run_session_turn_with(
+    manager: &Arc<SessionManager>,
+    ws: &Workspace,
+    user: &User,
+    existing: Option<&Id>,
+    title: &str,
+    cwd: &str,
+    provider: &str,
+    meta: Value,
+    prompt: &str,
+    // No-output idle trip. Workflow steps pass a short value (e.g. 3 min) as an
+    // early "stuck" signal; interactive callers pass STUCK_IDLE (10h) to keep the
+    // long backstop. Never lengthens past TURN_TIMEOUT.
+    stuck_after: Duration,
+    opts: TurnOpts,
+    on_ready: impl FnOnce(&Id),
+) -> otto_core::Result<(String, Id)> {
+    let should_stop = opts.kill_on_stall || opts.cancel.is_some();
+    let cancel = opts.cancel.clone();
+    let stop_flag = cancel.clone();
+    let mut guard = lifecycle::SessionGuard::new(Arc::clone(manager), should_stop);
+    let slot = Arc::clone(&guard.slot);
+    let startup = lifecycle::Startup::default();
+    let turn = run_session_turn_inner(
+        manager,
+        ws,
+        user,
+        existing,
+        title,
+        cwd,
+        provider,
+        meta,
+        prompt,
+        stuck_after,
+        opts,
+        slot,
+        &startup,
+        on_ready,
+    );
+    let result = tokio::select! {
+        biased;
+        () = lifecycle::cancelled(cancel) => Err(Error::Conflict("agent turn stopped".into())),
+        () = tokio::time::sleep(TURN_TIMEOUT) => Err(Error::Upstream(
+            "agent turn absolute deadline exceeded (including session startup)".into(),
+        )),
+        result = turn => result,
+    };
+    if result.is_err() && should_stop {
+        let cancelled = stop_flag.is_some_and(|c| c.load(std::sync::atomic::Ordering::Acquire));
+        // Only explicit cancellation drains startup. The old absolute timeout
+        // and uncancelled callers keep their existing deadline behavior.
+        if cancelled {
+            startup.drain().await;
+        }
+        guard.stop(cancelled).await;
+    }
+    guard.disarm();
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_session_turn_inner(
+    manager: &Arc<SessionManager>,
+    ws: &Workspace,
+    user: &User,
+    existing: Option<&Id>,
+    title: &str,
+    cwd: &str,
+    provider: &str,
+    meta: Value,
+    prompt: &str,
+    // No-output idle trip. Workflow steps pass a short value (e.g. 3 min) as an
+    // early "stuck" signal; interactive callers pass STUCK_IDLE (10h) to keep the
+    // long backstop. Never lengthens past TURN_TIMEOUT.
+    stuck_after: Duration,
+    mut opts: TurnOpts,
+    owner: lifecycle::OwnershipSlot,
+    startup: &lifecycle::Startup,
+    on_ready: impl FnOnce(&Id),
+) -> otto_core::Result<(String, Id)> {
+    // 1. E2E short-circuit: the offline test daemon points CLAUDE_BIN at a
+    //    nonexistent path, so a real session can't spawn. Return the deterministic
+    //    canned reply (routed by an OTTO_TASK: sentinel in the prompt).
+    if otto_core::e2e::isolated() {
+        otto_orchestrator::e2e_stub::write_vault_artifacts(prompt, opts.done_file.as_deref())
+            .map_err(|e| Error::Internal(format!("offline agent artifacts: {e}")))?;
+        let reply = otto_orchestrator::e2e_stub::canned_reply(prompt);
+        let sid = existing.cloned().unwrap_or_else(otto_core::new_id);
+        on_ready(&sid);
+        return Ok((reply, sid));
+    }
+
+    // 2. Canonicalize cwd — claude symlink-resolves it for the transcript dir, so
+    //    the spawn cwd and the JSONL path we poll MUST be the same resolved path.
+    let cwd_canon = std::fs::canonicalize(cwd)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| cwd.to_string());
+
+    // 3. Resolve the session: resume an existing one (ensure_live restarts it with
+    //    --resume when suspended/dead, guarding supports_resume), else create.
+    let (sid, psid, mut created_guard, created_here) = match existing {
+        Some(id) if manager.get(id).await.is_ok() => {
+            let (session, guard) = if let Some(cancel) = opts.cancel.clone() {
+                (
+                    lifecycle::resume_tracked(
+                        Arc::clone(manager),
+                        id.clone(),
+                        startup,
+                        owner.clone(),
+                        cancel,
+                    )
+                    .await?,
+                    None,
+                )
+            } else {
+                let (session, guard) = lifecycle::resume(Arc::clone(manager), id.clone()).await?;
+                (session, Some(guard))
+            };
+            (
+                id.clone(),
+                session.provider_session_id.clone(),
+                guard,
+                false,
+            )
+        }
+        _ => {
+            let req = CreateSessionReq {
+                kind: SessionKind::Agent,
+                provider: Some(provider.to_string()),
+                title: Some(title.to_string()),
+                cwd: Some(cwd_canon.clone()),
+                connection_id: None,
+                model: None,
+                meta: Some(meta),
+            };
+            let (session, guard) = if let Some(cancel) = opts.cancel.clone() {
+                (
+                    lifecycle::create_tracked(
+                        Arc::clone(manager),
+                        ws.clone(),
+                        user.id.clone(),
+                        req,
+                        startup,
+                        owner.clone(),
+                        cancel,
+                    )
+                    .await?,
+                    None,
+                )
+            } else {
+                let (session, guard) =
+                    lifecycle::create(Arc::clone(manager), ws.clone(), user.id.clone(), req)
+                        .await?;
+                (session, Some(guard))
+            };
+            (
+                session.id.clone(),
+                session.provider_session_id.clone(),
+                guard,
+                true,
+            )
+        }
+    };
+    // A resumed session belongs to its thread: a stall never kills it.
+    opts.kill_on_stall &= created_here;
+
+    // This driver is the session's consumer for the rest of the turn: hold it
+    // against the idle-suspend sweep until we return (the guard drops on
+    // every path, error ones included). The oracle's bounded holds — handoff
+    // linger, background-task linger — keep a quiet, unattached session open
+    // for up to 15 min, three times the sweep's grace; without the hold the
+    // sweep SIGHUP'd a workflow step mid-linger and the engine re-ran the
+    // whole step in a fresh session (2026-09-14).
+    let _turn_hold = manager.hold_for_turn(&sid);
+
+    // Session exists now — let the caller surface its id (e.g. attach the live
+    // shell in the Canvas panel) BEFORE the long turn runs.
+    if opts
+        .cancel
+        .as_ref()
+        .is_some_and(|c| c.load(std::sync::atomic::Ordering::Acquire))
+    {
+        return Err(Error::Conflict("agent turn stopped".into()));
+    }
+    if let Some(guard) = created_guard.as_mut() {
+        guard.transfer_to(&owner);
+    }
+    on_ready(&sid);
+    let session_info = manager.get(&sid).await?;
+    let provider = session_info.provider.as_str();
+    let provider_home = manager.provider_home(&manager.get(&sid).await?);
+
+    // 4. Submit the prompt AND confirm it actually landed on the CLI's input box.
+    //    A startup/promo/onboarding banner is quiescent output, so wait_for_tui /
+    //    dispatched can report "ready"/"sent" while the real input box isn't up
+    //    yet — swallowing the paste and leaving the step a no-op. Only claude
+    //    writes a pollable transcript, so only there can we verify; other providers
+    //    keep the best-effort single submit.
+    let can_confirm = transcript_path(
+        provider,
+        &cwd_canon,
+        psid.as_deref(),
+        provider_home.as_deref(),
+    )
+    .is_some();
+    let needle = confirm_needle(prompt);
+
+    // Capture the boundary BEFORE submitting: a fast reply may already be in
+    // the first confirmation poll. Matching text alone cannot distinguish an
+    // identical prior prompt in a resumed session.
+    let tpath = transcript_path(
+        provider,
+        &cwd_canon,
+        psid.as_deref(),
+        provider_home.as_deref(),
+    );
+    // Every transcript read below is incremental (only the bytes appended since
+    // the previous poll) and off the runtime: a resumed session's transcript
+    // can be tens of MB, and it used to be read + parsed whole every second.
+    let mut tail = tpath.clone().map(crate::turn_oracle::ClaudeTail::new);
+    let before_submit = crate::turn_oracle::poll_claude_tail(&mut tail).await;
+    let mut baseline = before_submit
+        .as_ref()
+        .map(|s| s.completed_turns)
+        .unwrap_or(0);
+    let user_baseline = before_submit.as_ref().map(|s| s.user_turns).unwrap_or(0);
+    let codex_baseline = if provider == "codex" {
+        match manager.activity_artifact(&sid).await {
+            Some(path) => codex_baseline_ordinal(path).await,
+            None => 0,
+        }
+    } else {
+        0
+    };
+
+    let phase = |p: crate::turn_oracle::Phase| {
+        if let Some(tx) = &opts.phase_tx {
+            let _ = tx.send(p);
+        }
+    };
+    phase(crate::turn_oracle::Phase::Booting);
+    // A submit that never found a real input box is a no-op turn — fail LOUD
+    // and retryable instead of polling a dead session (R5.3: `wait_for_tui`
+    // now reports a blank TUI instead of assuming it drew).
+    if opts
+        .cancel
+        .as_ref()
+        .is_some_and(|c| c.load(std::sync::atomic::Ordering::Acquire))
+    {
+        return Err(Error::Conflict("agent turn stopped".into()));
+    }
+    if !submit_once(manager, &sid, prompt).await {
+        return Err(Error::Upstream("agent TUI never drew — retrying".into()));
+    }
+    manager.record_user_message(&sid, prompt).await;
+
+    if can_confirm {
+        let confirm_deadline = Instant::now() + submit_confirm_for(manager.live_count());
+        let mut next_resubmit = Instant::now() + RESUBMIT_EVERY;
+        let mut attempts: u32 = 1;
+        let mut entered = false;
+        loop {
+            // `transcript_api_error` / `last_user_text` / `completed_turn_count`
+            // of the whole file, from the incremental scan.
+            if let Some(scan) = crate::turn_oracle::poll_claude_tail(&mut tail).await {
+                if let Some(err) = scan.api_error {
+                    return Err(Error::Upstream(format!("agent error: {err}")));
+                }
+                if scan.user_turns > user_baseline
+                    && user_text_has(scan.last_user_text.as_deref(), &needle)
+                {
+                    baseline = scan.completed_before_last_user;
+                    entered = true;
+                    break;
+                }
+            }
+            match manager.live_handle(&sid) {
+                Some(h) if h.on_exit().borrow().is_some() => {
+                    return Err(Error::Upstream(
+                        "agent session exited before accepting the prompt".into(),
+                    ));
+                }
+                None => return Err(Error::Upstream("agent session vanished".into())),
+                _ => {}
+            }
+            if Instant::now() >= confirm_deadline {
+                break;
+            }
+            if Instant::now() >= next_resubmit && attempts < MAX_SUBMIT_ATTEMPTS {
+                let _ = submit_once(manager, &sid, prompt).await;
+                attempts += 1;
+                next_resubmit = Instant::now() + RESUBMIT_EVERY;
+            }
+            tokio::time::sleep(POLL).await;
+        }
+        if !entered {
+            // The prompt never became a user turn — the step is a no-op. Fail
+            // LOUD (and retryable) instead of polling a dead turn for 10h or
+            // mistaking a stray greeting for completion.
+            return Err(Error::Upstream(
+                "agent never accepted the prompt (stuck on a startup screen?)".into(),
+            ));
+        }
+    }
+    phase(crate::turn_oracle::Phase::PromptAccepted);
+
+    // 5. Watch for the NEW completed turn (count > baseline). Fail fast on a
+    //    claude API error / no progress for `stuck_after` / exit / timeout. Leave
+    //    the session OPEN.
+    let deadline = Instant::now() + TURN_TIMEOUT;
+
+    // 5a. Workflow steps watch through the turn ORACLE instead: a claude
+    //     `end_turn` while sub-agents are still working is not completion (see
+    //     `turn_oracle`). Every other caller keeps the legacy channels below.
+    // Strict artifacts also need native-end grace: a finished agent which
+    // omitted its result must fail recoverably, not wait for the 10h backstop.
+    if opts.oracle || opts.done_file_validator.is_some() {
+        // The oracle keeps reading through the same incremental reader (it is
+        // already past everything up to the prompt).
+        let text = oracle_watch(
+            manager,
+            &sid,
+            psid.as_deref(),
+            provider,
+            &cwd_canon,
+            stuck_after,
+            &mut opts,
+            baseline,
+            codex_baseline,
+            deadline,
+            tail,
+        )
+        .await?;
+        return Ok((text, sid));
+    }
+    let mut reminder_nudges: u32 = 0;
+    // Progress clock for the stall trip. PTY-output recency alone is a LIAR
+    // for agent TUIs: a stuck agent's spinner keeps repainting, so
+    // `last_output_at` stays fresh forever (the live "codex stuck for 30min
+    // in a workflow" bug). Real progress = the provider's activity artifact
+    // (transcript/rollout) growing, or — checked lazily, right before
+    // tripping — descendant processes burning CPU (a long quiet build/test
+    // run writes neither). Providers without an artifact keep the PTY clock.
+    let mut artifact: Option<std::path::PathBuf> = None;
+    let mut artifact_lookup_at = Instant::now();
+    let mut artifact_mtime: Option<std::time::SystemTime> = None;
+    let mut last_progress = Instant::now();
+    loop {
+        // Marker channel (provider-agnostic): the agent wrote its done-file —
+        // the turn is complete regardless of transcript availability.
+        if let Some(df) = &opts.done_file {
+            if let Ok(s) = tokio::fs::read_to_string(df).await {
+                let t = s.trim();
+                if !t.is_empty() && opts.done_file_validator.is_none_or(|valid| valid(t)) {
+                    return Ok((t.to_string(), sid));
+                }
+            }
+        }
+        // `transcript_api_error` / `completed_turn_count` / `completed_turn_text`
+        // of the whole file, from the incremental scan (O(new bytes) per poll).
+        if let Some(scan) = crate::turn_oracle::poll_claude_tail(&mut tail).await {
+            if let Some(err) = scan.api_error {
+                return Err(Error::Upstream(format!("agent error: {err}")));
+            }
+            if scan.completed_turns > baseline {
+                let text = scan.last_turn_text.unwrap_or_default();
+                // Guard against a DEGENERATE turn: the agent sometimes just
+                // parrots the CLI's injected skill/agentic-loop reminder ("Now
+                // write a response to the user. Keep going… Remember to use
+                // skills…") and ends its turn without doing any work. That is
+                // never a real reply — nudge it to actually act (bounded), rather
+                // than accept the echo as the step's output and silently no-op.
+                if is_injected_reminder_echo(&text) && reminder_nudges < MAX_REMINDER_NUDGES {
+                    reminder_nudges += 1;
+                    // Advance the baseline past this echo so we wait for the
+                    // NEXT (hopefully real) turn instead of re-tripping on it.
+                    baseline = scan.completed_turns;
+                    let _ = submit_once(manager, &sid, REMINDER_NUDGE).await;
+                    tokio::time::sleep(POLL).await;
+                    continue;
+                }
+                if opts.done_file_validator.is_none() {
+                    return Ok((text, sid));
+                }
+            }
+        }
+        match manager.live_handle(&sid) {
+            Some(h) => {
+                if h.on_exit().borrow().is_some() {
+                    return Err(Error::Upstream(
+                        "agent session exited before replying".into(),
+                    ));
+                }
+                // Silence is not completion: a quiet tool/build may still be
+                // working. Only a validated marker or native turn can finish.
+                // Refresh the progress clock. Codex/agy mint their session id
+                // a few seconds post-spawn, so keep looking for the artifact
+                // (cheap, every ~5s) until found.
+                if artifact.is_none() && Instant::now() >= artifact_lookup_at {
+                    artifact = manager.activity_artifact(&sid).await;
+                    artifact_lookup_at = Instant::now() + Duration::from_secs(5);
+                }
+                let progressed = match &artifact {
+                    Some(p) => match tokio::fs::metadata(p)
+                        .await
+                        .ok()
+                        .and_then(|m| m.modified().ok())
+                    {
+                        Some(m) if artifact_mtime != Some(m) => {
+                            artifact_mtime = Some(m);
+                            true
+                        }
+                        _ => false,
+                    },
+                    // No artifact (shell/custom, or id not captured yet):
+                    // PTY output is the only signal we have.
+                    None => h.last_output_at().elapsed() < POLL * 2,
+                };
+                if progressed {
+                    last_progress = Instant::now();
+                }
+                if last_progress.elapsed() >= stuck_after {
+                    // Final guard before tripping: a child tree burning CPU
+                    // (build, test suite) is progress even when nothing is
+                    // written. Probed lazily — it costs a 750ms sample.
+                    if manager.tree_active(&sid).await {
+                        last_progress = Instant::now();
+                    } else {
+                        if opts.kill_on_stall {
+                            let _ = manager.kill_session(&sid).await;
+                        }
+                        return Err(Error::Upstream(format!(
+                            "step made no progress for {}m (agent looks stuck)",
+                            stuck_after.as_secs() / 60
+                        )));
+                    }
+                }
+            }
+            None => {
+                return Err(Error::Upstream("agent session vanished".into()));
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err(Error::Upstream("agent turn timed out".into()));
+        }
+        tokio::time::sleep(POLL).await;
+    }
+}
+
+/// One paste + Enter into the session, with a single re-`\r` when the first didn't
+/// visibly dispatch. Bracketed paste keeps a multi-line prompt atomic. `false`
+/// when the CLI's input box never drew (the paste went nowhere).
+async fn submit_once(manager: &Arc<SessionManager>, sid: &Id, prompt: &str) -> bool {
+    otto_sessions::submit::submit_prompt(manager, sid, prompt).await
+}
+
+/// Watch a workflow step's turn through the [`crate::turn_oracle`]: a claude
+/// `end_turn` is only completion once nothing it launched is pending and the
+/// handoff file is there (each hold bounded). Returns the turn text; the
+/// completion REASON rides `opts.outcome_tx` so the engine can log which rule
+/// accepted the step.
+#[allow(clippy::too_many_arguments)]
+async fn oracle_watch(
+    manager: &Arc<SessionManager>,
+    sid: &Id,
+    psid: Option<&str>,
+    provider: &str,
+    cwd_canon: &str,
+    stuck_after: Duration,
+    opts: &mut TurnOpts,
+    baseline: usize,
+    codex_baseline: u64,
+    deadline: Instant,
+    claude_tail: Option<crate::turn_oracle::ClaudeTail>,
+) -> otto_core::Result<String> {
+    use crate::turn_oracle as oracle;
+    let provider_home = manager.provider_home(&manager.get(sid).await?);
+    let tpath = transcript_path(provider, cwd_canon, psid, provider_home.as_deref());
+    // Where the harness records this session's children (flat: a depth-2
+    // grandchild sits beside its depth-1 parent) and its background-task output.
+    let subagent_dir = psid.map(|p| {
+        tpath
+            .as_ref()
+            .and_then(|path| path.parent())
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| otto_orchestrator::claude_pty::project_dir(cwd_canon))
+            .join(p)
+            .join("subagents")
+    });
+    let mut tasks_dir: Option<std::path::PathBuf> = None;
+    let mut tasks_lookup_at = Instant::now();
+
+    let mut clock = oracle::OracleClock::default();
+    let mut oopts = oracle::OracleOpts {
+        baseline_turns: baseline,
+        baseline_ordinal: codex_baseline,
+        ..Default::default()
+    };
+    // The rollout/transcript, looked up lazily: codex/agy mint their session id
+    // a few seconds post-spawn.
+    let mut artifact: Option<std::path::PathBuf> = if provider == "codex" {
+        manager.activity_artifact(sid).await
+    } else {
+        None
+    };
+    let mut artifact_lookup_at = Instant::now() + Duration::from_secs(5);
+    // The ordinal was captured before prompt submission. Never rebaseline a
+    // newly discovered rollout: it may already contain this turn's answer.
+    // Every transcript/rollout read below is incremental (only the bytes
+    // appended since the previous poll) and runs off the runtime together with
+    // the directory stats, in ONE blocking hop per tick: a 68 MB transcript
+    // used to be read (9 ms) + parsed (63 ms) whole on a worker every second.
+    let mut claude_tail = match (&tpath, claude_tail) {
+        (Some(p), Some(t)) if t.path() == p.as_path() => Some(t),
+        (Some(p), _) => Some(oracle::ClaudeTail::new(p)),
+        (None, _) => None,
+    };
+    let mut codex_tail: Option<oracle::CodexTail> = None;
+
+    let mut reminder_nudges: u32 = 0;
+    let mut last_phase: Option<(u8, usize, usize)> = None;
+    // Stall clock — the artifact's/child files' newest mtime, not PTY repaints
+    // (a stuck TUI spinner keeps painting forever).
+    let mut progress_mtime: Option<std::time::SystemTime> = None;
+    let mut last_progress = Instant::now();
+    loop {
+        // The handoff file (+ its mtime: rule 5's linger runs from when the
+        // agent wrote it, not from when we first looked).
+        let (handoff, handoff_mtime) = match &opts.done_file {
+            Some(df) => {
+                let text = tokio::fs::read_to_string(df)
+                    .await
+                    .ok()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| {
+                        !s.is_empty() && opts.done_file_validator.is_none_or(|valid| valid(s))
+                    });
+                let mtime = match &text {
+                    Some(_) => tokio::fs::metadata(df)
+                        .await
+                        .ok()
+                        .and_then(|m| m.modified().ok()),
+                    None => None,
+                };
+                (text, mtime)
+            }
+            None => (None, None),
+        };
+        oopts.handoff_mtime = handoff_mtime;
+
+        if provider != "claude" && (artifact.is_none() && Instant::now() >= artifact_lookup_at) {
+            artifact = manager.activity_artifact(sid).await;
+            artifact_lookup_at = Instant::now() + Duration::from_secs(5);
+        }
+        if tasks_dir.is_none() && Instant::now() >= tasks_lookup_at {
+            if let Some(p) = psid {
+                let (cwd, p) = (cwd_canon.to_string(), p.to_string());
+                tasks_dir = crate::offload::blocking(move || claude_tasks_dir(&cwd, &p)).await;
+            }
+            tasks_lookup_at = Instant::now() + Duration::from_secs(5);
+        }
+
+        // (Re)arm the rollout reader for the current artifact + baseline.
+        codex_tail = match (provider, &artifact) {
+            ("codex", Some(p)) => match codex_tail.take() {
+                Some(t)
+                    if t.path() == p.as_path() && t.after_ordinal() == oopts.baseline_ordinal =>
+                {
+                    Some(t)
+                }
+                _ => Some(oracle::CodexTail::new(p, oopts.baseline_ordinal)),
+            },
+            _ => None,
+        };
+        let (ct, xt, sub_dir) = (claude_tail.take(), codex_tail.take(), subagent_dir.clone());
+        let (ct, xt, claude_scan, codex_scan, subagent_moved_at) =
+            crate::offload::blocking(move || {
+                let (mut ct, mut xt) = (ct, xt);
+                let claude_scan = ct.as_mut().and_then(|t| t.poll());
+                let codex_scan = xt.as_mut().and_then(|t| t.poll());
+                let moved = sub_dir.as_deref().and_then(newest_subagent_write);
+                (ct, xt, claude_scan, codex_scan, moved)
+            })
+            .await;
+        (claude_tail, codex_tail) = (ct, xt);
+        oopts.subagent_moved_at = subagent_moved_at;
+
+        let mut v = oracle::verdict(
+            provider,
+            claude_scan.as_ref(),
+            codex_scan.as_ref(),
+            handoff.as_deref(),
+            &mut clock,
+            Instant::now(),
+            &oopts,
+        );
+        // Callers that never asked for a handoff file (goals eval, PR draft,
+        // canvas) have nothing to wait for: the turn ending with NOTHING pending
+        // — the R1 guarantee — is their completion, so rule 4's 90s grace and
+        // its nudge are skipped. The engine suppresses the ⚠ line for them too.
+        if opts.done_file.is_none() {
+            if let oracle::Verdict::Working(oracle::Phase::HandoffMissingGrace { .. }) = &v {
+                let text = claude_scan
+                    .as_ref()
+                    .and_then(|c| c.last_turn_text.clone())
+                    .or_else(|| {
+                        codex_scan
+                            .as_ref()
+                            .and_then(|x| x.last_agent_message.clone())
+                    })
+                    .unwrap_or_default();
+                v = oracle::Verdict::Complete {
+                    text,
+                    via: oracle::CompleteVia::IdleTurnNoHandoff,
+                };
+            }
+        }
+        // A strict result protocol never falls back to a transcript or silence,
+        // even after the oracle's normal missing-handoff grace expires.
+        v = gate_validated_result(v, requires_validated_result(opts), handoff.is_some());
+        match v {
+            oracle::Verdict::Complete { text, via } => {
+                // The reminder-echo guard stays in FRONT of the "no handoff,
+                // accept the final reply" rule: an agent that only parroted the
+                // injected reminder produced no work to accept.
+                if via == oracle::CompleteVia::IdleTurnNoHandoff
+                    && is_injected_reminder_echo(&text)
+                    && reminder_nudges < MAX_REMINDER_NUDGES
+                {
+                    reminder_nudges += 1;
+                    if let Some(c) = &claude_scan {
+                        oopts.baseline_turns = c.completed_turns;
+                    }
+                    clock.end_turn_since = None;
+                    let _ = submit_once(manager, sid, REMINDER_NUDGE).await;
+                    tokio::time::sleep(POLL).await;
+                    continue;
+                }
+                if let Some(tx) = opts.outcome_tx.take() {
+                    let _ = tx.send(via);
+                }
+                return Ok(text);
+            }
+            oracle::Verdict::Failed(e) => {
+                // A codex abort is its own (retryable) error string; everything
+                // else is a provider/API error surfaced verbatim.
+                return Err(Error::Upstream(if e == "codex turn aborted" {
+                    e
+                } else {
+                    format!("agent error: {e}")
+                }));
+            }
+            oracle::Verdict::Working(phase) => {
+                let key = oracle::phase_key(&phase);
+                if last_phase != Some(key) {
+                    last_phase = Some(key);
+                    if let Some(tx) = &opts.phase_tx {
+                        let _ = tx.send(phase.clone());
+                    }
+                }
+                // The turn ended but the handoff never appeared — one nudge,
+                // then rule 4's grace accepts the final reply.
+                if let oracle::Phase::HandoffMissingGrace { left } = &phase {
+                    if !clock.nudged
+                        && oracle::HANDOFF_MISSING_GRACE.saturating_sub(*left)
+                            >= oracle::NUDGE_AFTER
+                    {
+                        clock.nudged = true;
+                        let _ = submit_once(manager, sid, HANDOFF_NUDGE).await;
+                    }
+                }
+                match manager.live_handle(sid) {
+                    Some(h) => {
+                        if h.on_exit().borrow().is_some() {
+                            return Err(Error::Upstream(
+                                "agent session exited before replying".into(),
+                            ));
+                        }
+                        // Progress = the transcript/rollout OR any child file
+                        // moving; a sweep whose sub-agents are writing while the
+                        // parent waits is progress, not a stall.
+                        let stamp = match tpath.clone().or_else(|| artifact.clone()) {
+                            Some(m) => {
+                                let (sub, tasks) = (subagent_dir.clone(), tasks_dir.clone());
+                                crate::offload::blocking(move || {
+                                    oracle::progress_stamp(&m, sub.as_deref(), tasks.as_deref())
+                                })
+                                .await
+                            }
+                            None => None,
+                        };
+                        match stamp {
+                            Some(m) => {
+                                if progress_mtime != Some(m) {
+                                    progress_mtime = Some(m);
+                                    last_progress = Instant::now();
+                                }
+                            }
+                            // No artifact yet: PTY output is all we have.
+                            None => {
+                                if h.last_output_at().elapsed() < POLL * 2 {
+                                    last_progress = Instant::now();
+                                }
+                            }
+                        }
+                        let pending = claude_scan.as_ref().map(|c| c.pending.len()).unwrap_or(0);
+                        if oracle::stall_trip_fires(
+                            &phase,
+                            pending,
+                            last_progress.elapsed(),
+                            stuck_after,
+                        ) {
+                            // Last guard: a child tree burning CPU (build, test
+                            // suite) is progress even when nothing is written.
+                            if manager.tree_active(sid).await {
+                                last_progress = Instant::now();
+                            } else {
+                                if opts.kill_on_stall {
+                                    let _ = manager.kill_session(sid).await;
+                                }
+                                return Err(Error::Upstream(format!(
+                                    "step made no progress for {}m (agent looks stuck; {pending} tasks pending)",
+                                    stuck_after.as_secs() / 60
+                                )));
+                            }
+                        }
+                    }
+                    None => {
+                        return Err(Error::Upstream("agent session vanished".into()));
+                    }
+                }
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err(Error::Upstream("agent turn timed out".into()));
+        }
+        tokio::time::sleep(POLL).await;
+    }
+}
+
+/// The codex rollout's highest ordinal right after the submit — the baseline a
+/// resumed rollout's prior `task_complete` sits under. One whole-file read,
+/// off the runtime.
+async fn codex_baseline_ordinal(p: std::path::PathBuf) -> u64 {
+    crate::offload::blocking(move || {
+        std::fs::read_to_string(&p)
+            .map(|c| crate::turn_oracle::codex_last_ordinal(&c))
+            .unwrap_or(0)
+    })
+    .await
+}
+
+/// Newest `subagents/*.jsonl` mtime. A grandchild still writing resets the
+/// oracle's idle-confirm window — the only guard for nested sub-agents, whose
+/// launches are recorded in the CHILD's transcript (design §8.11).
+#[allow(clippy::disallowed_methods)] // sync helper: async callers run it via spawn_blocking / offload::blocking
+fn newest_subagent_write(dir: &std::path::Path) -> Option<std::time::SystemTime> {
+    let rd = std::fs::read_dir(dir).ok()?;
+    rd.flatten()
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".jsonl"))
+        .filter_map(|e| e.metadata().and_then(|m| m.modified()).ok())
+        .max()
+}
+
+/// The harness scratchpad for background-task output:
+/// `<scratch>/claude-<uid>/<enc(cwd)>/<psid>/tasks/`. `enc` is the same
+/// non-alphanumeric→`-` map `project_dir` uses. Both `$TMPDIR` and `/tmp` are
+/// scanned (claude honours `$TMPDIR`, but the daemon's differs from the CLI's
+/// under launchd). Purely an extra stall-clock input — a miss degrades the
+/// clock to transcript + sub-agents, never to "no progress".
+#[allow(clippy::disallowed_methods)] // sync helper: async callers run it via spawn_blocking / offload::blocking
+fn claude_tasks_dir(cwd_canon: &str, psid: &str) -> Option<std::path::PathBuf> {
+    let enc: String = cwd_canon
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let tmp = std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".into());
+    let mut roots = vec![tmp];
+    if !roots.iter().any(|r| r.trim_end_matches('/') == "/tmp") {
+        roots.push("/tmp".into());
+    }
+    for root in roots {
+        let Ok(rd) = std::fs::read_dir(&root) else {
+            continue;
+        };
+        for e in rd.flatten() {
+            if !e.file_name().to_string_lossy().starts_with("claude-") {
+                continue;
+            }
+            let p = e.path().join(&enc).join(psid).join("tasks");
+            if p.is_dir() {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
+/// Collapse every run of whitespace to a single space, so a paste reflow / newline
+/// differences don't defeat a substring match.
+fn normalize_ws(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// A normalized, distinctive slice of `prompt` to look for in claude's recorded
+/// user turn. Sampled from ~30% in to skip any shared leading boilerplate (the
+/// workflow context preamble), so it's specific to THIS prompt.
+fn confirm_needle(prompt: &str) -> String {
+    let norm = normalize_ws(prompt);
+    let chars: Vec<char> = norm.chars().collect();
+    if chars.len() <= 24 {
+        return norm;
+    }
+    let start = chars.len() * 3 / 10;
+    let end = (start + 60).min(chars.len());
+    chars[start..end].iter().collect()
+}
+
+/// Whether claude's latest USER turn in `transcript` contains our prompt slice —
+/// i.e. the prompt was actually entered, not lost to a startup/promo banner.
+#[cfg(test)]
+fn prompt_entered(transcript: &str, needle: &str) -> bool {
+    user_text_has(
+        otto_orchestrator::claude_pty::last_user_text(transcript).as_deref(),
+        needle,
+    )
+}
+
+/// [`prompt_entered`] given the transcript's `last_user_text` (the live loop
+/// takes it from the incremental scan instead of re-reading the file).
+fn user_text_has(last_user_text: Option<&str>, needle: &str) -> bool {
+    match last_user_text {
+        Some(t) => normalize_ws(t).contains(needle),
+        None => false,
+    }
+}
+
+/// True when `text` is a DEGENERATE turn that merely echoes the CLI's injected
+/// skill/agentic-loop reminder ("…write a response to the user. Keep going until
+/// the task is fully resolved… Remember to use skills…") instead of doing the
+/// work. A real agent reply never instructs ITSELF to "write a response to the
+/// user", so ≥2 of these signatures in a short reply is a reliable tell. The
+/// length cap keeps a genuine (long) reply that merely mentions "skills" from
+/// tripping it.
+fn is_injected_reminder_echo(text: &str) -> bool {
+    let t = text.trim();
+    if t.is_empty() || t.len() > 800 {
+        return false;
+    }
+    const SIGS: [&str; 4] = [
+        "write a response to the user",
+        "Keep going until the task is fully resolved",
+        "Remember to use skills",
+        "invoke it with the Skill tool",
+    ];
+    SIGS.iter().filter(|s| t.contains(*s)).count() >= 2
+}
+
+/// The claude JSONL transcript path for this session, or `None` for non-claude
+/// providers (codex/agy don't write a JSONL transcript we can poll).
+fn transcript_path(
+    provider: &str,
+    cwd: &str,
+    psid: Option<&str>,
+    provider_home: Option<&std::path::Path>,
+) -> Option<std::path::PathBuf> {
+    match (provider, psid) {
+        ("claude", Some(p)) => Some(match provider_home {
+            Some(home) => home
+                .join("projects")
+                .join(otto_sessions::lifecycle::claude_project_dir_name(cwd))
+                .join(format!("{p}.jsonl")),
+            None => otto_orchestrator::claude_pty::session_jsonl_path(cwd, p),
+        }),
+        _ => None,
+    }
+}
+
+/// Whether ONLY a validated result file may complete the turn (no native
+/// final-text fallback).
+fn requires_validated_result(opts: &TurnOpts) -> bool {
+    opts.done_file_validator.is_some() && !opts.transcript_fallback
+}
+
+/// Keep oracle completion subject to the caller's strict file protocol while
+/// retaining its ordinary failure/stall handling and bounded polling.
+fn gate_validated_result(
+    verdict: crate::turn_oracle::Verdict,
+    requires_validated_result: bool,
+    has_validated_result: bool,
+) -> crate::turn_oracle::Verdict {
+    use crate::turn_oracle::Verdict;
+    if requires_validated_result
+        && !has_validated_result
+        && matches!(verdict, Verdict::Complete { .. })
+    {
+        Verdict::Failed(
+            "agent ended its turn without a valid final result after the handoff grace period"
+                .into(),
+        )
+    } else {
+        verdict
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recovery_default_turn_requires_a_complete_provider_independent_reply() {
+        let path = std::path::Path::new("/tmp/reply.json");
+        let opts = reply_turn_options(path);
+        assert_eq!(opts.done_file.as_deref(), Some(path));
+        let valid = opts.done_file_validator.expect("strict reply protocol");
+        for bad in ["", "{", "{}", "{\"reply\":\"\"}"] {
+            assert!(!valid(bad), "must keep waiting for a complete reply: {bad}");
+        }
+        assert!(valid("{\"reply\":\"The finished answer\"}"));
+        assert!(
+            opts.quiet_done.is_none(),
+            "silence does not complete a reply"
+        );
+    }
+
+    /// S-2 (sweep 2026-10-11): plain chat turns fall back to the native final
+    /// text; engine protocols that validate a result file stay strict.
+    #[test]
+    fn chat_turns_fall_back_to_native_text_while_engine_protocols_stay_strict() {
+        let chat = reply_turn_options(std::path::Path::new("/tmp/reply.json"));
+        assert!(!requires_validated_result(&chat));
+        let engine = TurnOpts {
+            done_file: Some("/tmp/handoff.md".into()),
+            done_file_validator: Some(|t: &str| !t.trim().is_empty()),
+            ..Default::default()
+        };
+        assert!(requires_validated_result(&engine));
+        assert!(!requires_validated_result(&TurnOpts::default()));
+    }
+
+    #[test]
+    fn strict_result_protocol_fails_missing_final_result_after_native_grace() {
+        use crate::turn_oracle::{CompleteVia, Verdict};
+        for via in [CompleteVia::IdleTurnNoHandoff, CompleteVia::QuietFallback] {
+            let verdict = Verdict::Complete {
+                text: "partial reply".into(),
+                via,
+            };
+            assert!(matches!(
+                gate_validated_result(verdict, true, false),
+                Verdict::Failed(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn strict_result_protocol_accepts_validated_file_without_changing_legacy_completion() {
+        use crate::turn_oracle::{CompleteVia, Verdict};
+        for (required, present) in [(true, true), (false, false)] {
+            let verdict = Verdict::Complete {
+                text: "[]".into(),
+                via: CompleteVia::IdleTurnNoHandoff,
+            };
+            assert!(matches!(
+                gate_validated_result(verdict, required, present),
+                Verdict::Complete { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn normalize_ws_collapses_all_whitespace() {
+        assert_eq!(normalize_ws("a\n\n  b\tc  "), "a b c");
+    }
+
+    #[test]
+    fn confirm_needle_samples_a_distinctive_slice() {
+        assert_eq!(confirm_needle("do it"), "do it"); // short prompts use the whole thing
+        let long = "[workflow context] read the files. \
+             Now write the leaderboard tests for the tournament feature in module X.";
+        let needle = confirm_needle(long);
+        assert!(!needle.is_empty());
+        // The needle is a normalized slice OF the prompt…
+        assert!(normalize_ws(long).contains(&needle), "needle: {needle}");
+        // …sampled past the shared preamble, so it carries step-specific text.
+        assert!(!needle.starts_with("[workflow context]"));
+    }
+
+    #[test]
+    fn prompt_entered_matches_only_our_user_turn() {
+        let prompt =
+            "[workflow context] read files. Implement the deposit-bonus template creation flow now.";
+        let needle = confirm_needle(prompt);
+        // A transcript whose latest user turn IS our prompt → entered.
+        let mine = format!(
+            r#"{{"message":{{"role":"user","content":{}}}}}"#,
+            serde_json::to_string(prompt).unwrap()
+        );
+        assert!(prompt_entered(&mine, &needle));
+        // A DIFFERENT user turn (a prior resumed prompt / a stray empty submit) → not entered.
+        let other = r#"{"message":{"role":"user","content":"totally unrelated earlier prompt"}}"#;
+        assert!(!prompt_entered(other, &needle));
+        // Empty transcript → not entered (so we keep re-submitting, then fail loud).
+        assert!(!prompt_entered("", &needle));
+    }
+
+    #[test]
+    fn submit_confirm_scales_with_live_sessions() {
+        assert_eq!(submit_confirm_for(0), Duration::from_secs(45));
+        assert_eq!(submit_confirm_for(9), Duration::from_secs(45));
+        assert_eq!(submit_confirm_for(25), Duration::from_secs(55));
+        // Hard cap: past 3 minutes the session is broken, not busy.
+        assert_eq!(submit_confirm_for(1000), Duration::from_secs(180));
+    }
+
+    #[test]
+    fn stall_trip_does_not_fire_during_handoff_linger() {
+        use crate::turn_oracle::{stall_trip_fires, Phase};
+        let stuck = Duration::from_secs(5 * 60);
+        let idle = Duration::from_secs(6 * 60);
+        // Every BOUNDED hold carries its own cap — the 5-min trip must never
+        // pre-empt it and retry a step that already wrote its handoff.
+        assert!(!stall_trip_fires(
+            &Phase::HandoffWrittenWaiting { pending: 1 },
+            1,
+            idle,
+            stuck
+        ));
+        assert!(!stall_trip_fires(
+            &Phase::IdleConfirming {
+                left: Duration::from_secs(3)
+            },
+            0,
+            idle,
+            stuck
+        ));
+        assert!(!stall_trip_fires(
+            &Phase::HandoffMissingGrace {
+                left: Duration::from_secs(3)
+            },
+            0,
+            idle,
+            stuck
+        ));
+        assert!(!stall_trip_fires(
+            &Phase::BashLinger {
+                pending: 1,
+                left: Duration::from_secs(60)
+            },
+            1,
+            idle,
+            stuck
+        ));
+    }
+
+    #[test]
+    fn stall_trip_skipped_while_pending_children_progress() {
+        use crate::turn_oracle::{stall_trip_fires, Phase};
+        let stuck = Duration::from_secs(5 * 60);
+        // `since_progress` already counts the sub-agent jsonls / task outputs
+        // (it comes from `progress_stamp`), so a live sweep never trips…
+        assert!(!stall_trip_fires(
+            &Phase::Subagents {
+                running: 2,
+                done: 0
+            },
+            2,
+            Duration::from_secs(30),
+            stuck
+        ));
+        // …while a genuinely frozen one still does.
+        assert!(stall_trip_fires(
+            &Phase::Subagents {
+                running: 2,
+                done: 0
+            },
+            2,
+            Duration::from_secs(6 * 60),
+            stuck
+        ));
+        assert!(stall_trip_fires(
+            &Phase::Working,
+            0,
+            Duration::from_secs(6 * 60),
+            stuck
+        ));
+    }
+
+    #[test]
+    fn detects_injected_reminder_echo() {
+        // The exact degenerate echo we saw in a workflow transcript.
+        let echo = "When a skill applies to your task, invoke it with the Skill tool before you begin. \
+            When multiple skills apply, invoke them together.\n\nNow write a response to the user. \
+            Keep going until the task is fully resolved. Only end your turn when you're confident \
+            everything is working.\n\nRemember to use skills when they are relevant to the given task!";
+        assert!(is_injected_reminder_echo(echo));
+        // A real reply that merely mentions skills once is NOT an echo.
+        assert!(!is_injected_reminder_echo(
+            "I rewrote the legacy test suite onto the new framework; the relevant skills helped."
+        ));
+        // Empty / whitespace is not an echo.
+        assert!(!is_injected_reminder_echo("   "));
+    }
+}

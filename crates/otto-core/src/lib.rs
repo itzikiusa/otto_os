@@ -12,6 +12,7 @@ pub mod cancel;
 pub mod cancel_signal;
 pub mod connection_credentials;
 pub mod domain;
+pub mod e2e;
 pub mod error;
 pub mod eval_score;
 pub mod event;

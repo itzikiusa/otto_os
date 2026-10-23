@@ -2,36 +2,27 @@
 use otto_core::{
     api::CreateSessionReq,
     domain::{Session, Workspace},
+    keyed_lock::KeyedLocks,
     Error, Id,
 };
 use otto_sessions::SessionManager;
-use std::collections::HashMap;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc, Mutex, OnceLock, Weak,
+    Arc, Mutex,
 };
 use std::time::Duration;
 
 type Lease = tokio::sync::OwnedMutexGuard<()>;
 
+/// The per-session lease registry. Holding a session's lease reserves it for
+/// one turn (or its teardown); the next turn on the same session waits for it.
+/// Public so a host can observe "a turn currently owns this session" in tests.
+pub static SESSION_LEASES: KeyedLocks<Id> = KeyedLocks::new();
+
 /// Keep a session reserved through asynchronous teardown. A cancelled resume
 /// may finish after its caller returns; the successor must wait for its cleanup.
 async fn acquire_lease(sid: &str) -> Lease {
-    static LEASES: OnceLock<Mutex<HashMap<Id, Weak<tokio::sync::Mutex<()>>>>> = OnceLock::new();
-    let lock = {
-        let mut leases = LEASES
-            .get_or_init(|| Mutex::new(HashMap::new()))
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        leases.retain(|_, lock| lock.strong_count() > 0);
-        let lock = leases
-            .get(sid)
-            .and_then(Weak::upgrade)
-            .unwrap_or_else(|| Arc::new(tokio::sync::Mutex::new(())));
-        leases.insert(sid.to_owned(), Arc::downgrade(&lock));
-        lock
-    };
-    lock.lock_owned().await
+    SESSION_LEASES.lock(sid).await
 }
 
 pub(super) struct SessionOwnership {
@@ -301,8 +292,47 @@ mod tests {
             .is_ok());
     }
 
+    /// A real `SessionManager` on a migrated on-disk sqlite, plus one user
+    /// and workspace — what these tests used to borrow from `ServerCtx`.
+    struct Harness {
+        manager: Arc<SessionManager>,
+        sessions: otto_state::SessionsRepo,
+        ws: Workspace,
+        user: otto_core::domain::User,
+        dir: tempfile::TempDir,
+    }
+
+    async fn harness(name: &str) -> Harness {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = otto_state::open(&dir.path().join("state.db"))
+            .await
+            .unwrap();
+        let user = otto_state::UsersRepo::new(pool.clone())
+            .create(name, "x", "U", false)
+            .await
+            .unwrap();
+        let ws = otto_state::WorkspacesRepo::new(pool.clone())
+            .create("w", dir.path().to_str().unwrap(), &user.id)
+            .await
+            .unwrap();
+        let sessions = otto_state::SessionsRepo::new(pool);
+        let (events, _rx) = tokio::sync::broadcast::channel(16);
+        let manager = Arc::new(SessionManager::new(
+            sessions.clone(),
+            events,
+            otto_sessions::ProviderRegistry::new(None),
+        ));
+        Harness {
+            manager,
+            sessions,
+            ws,
+            user,
+            dir,
+        }
+    }
+
     async fn live_shell(
-        ctx: &crate::state::ServerCtx,
+        manager: &Arc<SessionManager>,
         ws: &Workspace,
         user: &Id,
         dir: &std::path::Path,
@@ -322,11 +352,7 @@ mod tests {
             cwd: Some(dir.to_string_lossy().into()),
             env: vec![],
         };
-        ctx.manager
-            .create(ws, user, req, Some(spec))
-            .await
-            .unwrap()
-            .id
+        manager.create(ws, user, req, Some(spec)).await.unwrap().id
     }
 
     /// S-1 (sweep 2026-10-11): a failed turn on a RESUMED session (Discovery
@@ -334,19 +360,9 @@ mod tests {
     /// turn created is its to retire.
     #[tokio::test]
     async fn failed_turn_releases_a_resumed_session_and_retires_only_its_own() {
-        let tmp = tempfile::tempdir().unwrap();
-        let pool = crate::test_support::mem_pool().await;
-        let ctx = crate::state::ServerCtx::for_tests(&pool, tmp.path().join("data")).await;
-        let user = otto_state::UsersRepo::new(pool.clone())
-            .create("u", "x", "U", false)
-            .await
-            .unwrap();
-        let ws = ctx
-            .workspaces
-            .create("w", tmp.path().to_str().unwrap(), &user.id)
-            .await
-            .unwrap();
-        let sessions = otto_state::SessionsRepo::new(pool.clone());
+        let h = harness("u").await;
+        let (manager, ws, user, tmp) = (&h.manager, &h.ws, &h.user, &h.dir);
+        let sessions = h.sessions.clone();
         let exited = |id: Id| {
             let sessions = sessions.clone();
             async move {
@@ -354,18 +370,16 @@ mod tests {
             }
         };
 
-        let thread = live_shell(&ctx, &ws, &user.id, tmp.path()).await;
+        let thread = live_shell(manager, ws, &user.id, tmp.path()).await;
         for cancelled in [false, true] {
-            ctx.manager.ensure_live(&thread).await.unwrap();
-            let (_, mut resumed) = resume(Arc::clone(&ctx.manager), thread.clone())
-                .await
-                .unwrap();
-            let mut turn = SessionGuard::new(Arc::clone(&ctx.manager), true);
+            manager.ensure_live(&thread).await.unwrap();
+            let (_, mut resumed) = resume(Arc::clone(manager), thread.clone()).await.unwrap();
+            let mut turn = SessionGuard::new(Arc::clone(manager), true);
             resumed.transfer_to(&turn.slot);
             turn.stop(cancelled).await;
             assert!(!exited(thread.clone()).await, "cancelled={cancelled}");
             if !cancelled {
-                assert!(ctx.manager.is_live(&thread), "a failed turn leaves it open");
+                assert!(manager.is_live(&thread), "a failed turn leaves it open");
             }
             // The reservation is released: the next message resumes at once.
             assert!(
@@ -375,8 +389,8 @@ mod tests {
             );
         }
 
-        let created = live_shell(&ctx, &ws, &user.id, tmp.path()).await;
-        let mut turn = SessionGuard::new(Arc::clone(&ctx.manager), true);
+        let created = live_shell(manager, ws, &user.id, tmp.path()).await;
+        let mut turn = SessionGuard::new(Arc::clone(manager), true);
         *turn.slot.lock().unwrap() = Some(SessionOwnership {
             id: created.clone(),
             _lease: acquire_lease(&created).await,
@@ -391,32 +405,22 @@ mod tests {
 
     #[tokio::test]
     async fn tracked_startup_cancellation_drains_created_and_resumed_cleanup() {
-        let tmp = tempfile::tempdir().unwrap();
-        let pool = crate::test_support::mem_pool().await;
-        let ctx = crate::state::ServerCtx::for_tests(&pool, tmp.path().join("data")).await;
-        let user = otto_state::UsersRepo::new(pool.clone())
-            .create("startup", "x", "U", false)
-            .await
-            .unwrap();
-        let ws = ctx
-            .workspaces
-            .create("w", tmp.path().to_str().unwrap(), &user.id)
-            .await
-            .unwrap();
+        let h = harness("startup").await;
+        let (manager, ws, user, tmp) = (&h.manager, &h.ws, &h.user, &h.dir);
         for retire in [true, false] {
-            let id = live_shell(&ctx, &ws, &user.id, tmp.path()).await;
-            let session = ctx.manager.get(&id).await.unwrap();
-            let manager = Arc::clone(&ctx.manager);
+            let id = live_shell(manager, ws, &user.id, tmp.path()).await;
+            let session = manager.get(&id).await.unwrap();
+            let work_manager = Arc::clone(manager);
             let lease = acquire_lease(&id).await;
             let work_id = id.clone();
             let flag = Arc::new(AtomicBool::new(false));
             let startup = Startup::default();
-            let mut owner = SessionGuard::new(Arc::clone(&ctx.manager), true);
+            let mut owner = SessionGuard::new(Arc::clone(manager), true);
             let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
             let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
             let mut admission =
                 Box::pin(startup.run(owner.slot.clone(), flag.clone(), async move {
-                    let guard = SessionGuard::new(manager, true);
+                    let guard = SessionGuard::new(work_manager, true);
                     *guard.slot.lock().unwrap() = Some(SessionOwnership {
                         id: work_id,
                         _lease: lease,
@@ -442,7 +446,7 @@ mod tests {
             drain.await;
             owner.stop(true).await;
             assert!(
-                !ctx.manager.is_live(&id),
+                !manager.is_live(&id),
                 "no live process after cancellation drain: retire={retire}"
             );
             assert!(owner.slot.lock().unwrap().is_none());
@@ -460,25 +464,15 @@ mod tests {
 
     #[tokio::test]
     async fn queued_tracked_resume_cancellation_does_not_stop_the_owner() {
-        let tmp = tempfile::tempdir().unwrap();
-        let pool = crate::test_support::mem_pool().await;
-        let ctx = crate::state::ServerCtx::for_tests(&pool, tmp.path().join("data")).await;
-        let user = otto_state::UsersRepo::new(pool.clone())
-            .create("queued", "x", "U", false)
-            .await
-            .unwrap();
-        let ws = ctx
-            .workspaces
-            .create("w", tmp.path().to_str().unwrap(), &user.id)
-            .await
-            .unwrap();
-        let id = live_shell(&ctx, &ws, &user.id, tmp.path()).await;
+        let h = harness("queued").await;
+        let (manager, ws, user, tmp) = (&h.manager, &h.ws, &h.user, &h.dir);
+        let id = live_shell(manager, ws, &user.id, tmp.path()).await;
         let predecessor = acquire_lease(&id).await;
         let startup = Startup::default();
-        let mut owner = SessionGuard::new(Arc::clone(&ctx.manager), true);
+        let mut owner = SessionGuard::new(Arc::clone(manager), true);
         let flag = Arc::new(AtomicBool::new(false));
         let queued = resume_tracked(
-            Arc::clone(&ctx.manager),
+            Arc::clone(manager),
             id.clone(),
             &startup,
             owner.slot.clone(),
@@ -490,39 +484,29 @@ mod tests {
         flag.store(true, Ordering::Release);
         startup.drain().await;
         owner.stop(true).await;
-        assert!(ctx.manager.is_live(&id));
+        assert!(manager.is_live(&id));
         assert!(
             tokio::time::timeout(Duration::from_millis(5), acquire_lease(&id))
                 .await
                 .is_err()
         );
         drop(predecessor);
-        ctx.manager.kill_session(&id).await.unwrap();
+        manager.kill_session(&id).await.unwrap();
     }
 
     #[tokio::test]
     async fn cancellable_chat_wrapper_stops_its_resumed_turn_before_returning() {
-        let tmp = tempfile::tempdir().unwrap();
-        let pool = crate::test_support::mem_pool().await;
-        let ctx = crate::state::ServerCtx::for_tests(&pool, tmp.path().join("data")).await;
-        let user = otto_state::UsersRepo::new(pool.clone())
-            .create("wrapper", "x", "U", false)
-            .await
-            .unwrap();
-        let ws = ctx
-            .workspaces
-            .create("w", tmp.path().to_str().unwrap(), &user.id)
-            .await
-            .unwrap();
-        let id = live_shell(&ctx, &ws, &user.id, tmp.path()).await;
+        let h = harness("wrapper").await;
+        let (manager, ws, user, tmp) = (&h.manager, &h.ws, &h.user, &h.dir);
+        let id = live_shell(manager, ws, &user.id, tmp.path()).await;
         let flag = Arc::new(AtomicBool::new(false));
         let stop = flag.clone();
         let result = tokio::time::timeout(
             Duration::from_secs(5),
             super::super::run_session_turn_cancellable(
-                &ctx,
-                &ws,
-                &user,
+                manager,
+                ws,
+                user,
                 Some(&id),
                 "test",
                 tmp.path().to_str().unwrap(),
@@ -537,7 +521,7 @@ mod tests {
         .await
         .unwrap();
         assert!(result.is_err());
-        assert!(!ctx.manager.is_live(&id));
+        assert!(!manager.is_live(&id));
         assert!(
             tokio::time::timeout(Duration::from_secs(1), acquire_lease(&id))
                 .await
@@ -545,84 +529,33 @@ mod tests {
         );
     }
 
+    /// maintainability-6-03: the lease is the shared `KeyedLocks` registry —
+    /// one lock per session id, independent ids never contend, and a released
+    /// id's entry is pruned rather than kept forever.
     #[tokio::test]
-    async fn product_studio_stop_and_story_delete_drain_the_owned_session() {
-        use otto_product::ProductStudioHost;
-        for delete_story in [false, true] {
-            let tmp = tempfile::tempdir().unwrap();
-            let pool = crate::test_support::mem_pool().await;
-            let ctx = crate::state::ServerCtx::for_tests(&pool, tmp.path().join("data")).await;
-            let user = otto_state::UsersRepo::new(pool.clone())
-                .create("studio-stop", "x", "U", false)
+    async fn leases_share_one_lock_per_session_and_prune_when_released() {
+        let (a, b) = (otto_core::new_id(), otto_core::new_id());
+        assert!(Arc::ptr_eq(
+            &SESSION_LEASES.handle(&a),
+            &SESSION_LEASES.handle(&a)
+        ));
+        let held = acquire_lease(&a).await;
+        assert!(
+            SESSION_LEASES.try_lock(&a).is_none(),
+            "a held lease blocks its session"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), acquire_lease(&b))
                 .await
-                .unwrap();
-            let ws = ctx
-                .workspaces
-                .create("w", tmp.path().to_str().unwrap(), &user.id)
-                .await
-                .unwrap();
-            let id = live_shell(&ctx, &ws, &user.id, tmp.path()).await;
-            let story = otto_core::new_id();
-            let ownership = otto_product::story_lifecycle::claim(&story).await.unwrap();
-            let cancel = otto_core::cancel_signal::CancelSignal::new();
-            let running_ctx = ctx.clone();
-            let running_id = id.clone();
-            let running_story = story.clone();
-            let running_cancel = cancel.clone();
-            let cwd = tmp.path().to_str().unwrap().to_owned();
-            let running = tokio::spawn(async move {
-                running_ctx
-                    .run_session_turn(
-                        &ws,
-                        &user,
-                        Some(&running_id),
-                        "studio stop",
-                        &cwd,
-                        "shell",
-                        serde_json::json!({"story_id": running_story}),
-                        "sleep 30",
-                        Duration::from_secs(30),
-                        running_cancel,
-                    )
-                    .await
-            });
-            // Observe real ownership, not a delay that assumes startup finished.
-            tokio::time::timeout(Duration::from_secs(5), async {
-                loop {
-                    match tokio::time::timeout(Duration::from_millis(10), acquire_lease(&id)).await
-                    {
-                        Err(_) => break,
-                        Ok(lease) => drop(lease),
-                    }
-                    tokio::task::yield_now().await;
-                }
-            })
-            .await
-            .unwrap();
-            let deletion = if delete_story {
-                Some(tokio::spawn(async move {
-                    otto_product::story_lifecycle::begin_delete(&story).await
-                }))
-            } else {
-                cancel.cancel();
-                None
-            };
-            assert!(tokio::time::timeout(Duration::from_secs(5), running)
-                .await
-                .unwrap()
-                .unwrap()
-                .is_err());
-            assert!(!ctx.manager.is_live(&id), "delete_story={delete_story}");
-            assert!(
-                tokio::time::timeout(Duration::from_secs(1), acquire_lease(&id))
-                    .await
-                    .is_ok()
-            );
-            drop(ownership);
-            if let Some(deletion) = deletion {
-                drop(deletion.await.unwrap());
-            }
-        }
+                .is_ok(),
+            "another session is never blocked"
+        );
+        drop(held);
+        let weak = Arc::downgrade(&SESSION_LEASES.handle(&a));
+        assert!(
+            weak.upgrade().is_none(),
+            "a released lease leaves no live entry"
+        );
     }
 
     #[tokio::test]

@@ -40,10 +40,11 @@ use tempfile::TempDir;
 
 use crate::auth::{require_ws_role, CurrentUser};
 use crate::error::{ApiError, ApiResult};
-use crate::review_session::submit_prompt;
 use crate::skill_eval::signal_cancel;
 use crate::state::ServerCtx;
+use otto_agent_run::fanout;
 use otto_core::cancel::{CancelGuard, CancelRegistryExt};
+use otto_sessions::submit::submit_prompt;
 
 // ---------------------------------------------------------------------------
 // Timeouts
@@ -741,71 +742,71 @@ async fn run_review_inner(
     }
     let reviewer = reviewer_method();
 
-    // 3. Fan-out the reviewer agents concurrently.
-    let mut set = tokio::task::JoinSet::new();
-    for (index, p) in providers.iter().enumerate() {
-        let ctx = ctx.clone();
-        let ws = ws.clone();
-        let user = user.clone();
-        let review_id = review_id.clone();
-        let provider = p.clone();
-        let dir = dir.to_path_buf();
-        let skill_name = skill_name.to_string();
-        let reviewer = reviewer.clone();
-        let instructions = instructions.to_string();
-        let cancel = Arc::clone(cancel);
-        let base = agents[index].clone();
-        set.spawn(async move {
-            run_skill_review_agent(
-                &ctx,
-                &ws,
-                &user,
-                &review_id,
-                index,
-                base,
-                &provider,
-                &dir,
-                &skill_name,
-                &reviewer,
-                &instructions,
-                &cancel,
-            )
-            .await
-        });
-    }
-    let mut agent_batches: Vec<String> = Vec::new();
-    let mut agent_findings: Vec<SkillFinding> = Vec::new();
-    while let Some(res) = set.join_next().await {
-        if let Ok(findings) = res {
-            if !findings.is_empty() {
-                agent_batches.push(serde_json::to_string(&findings).unwrap_or_default());
-                agent_findings.extend(findings);
+    // 3. Fan-out the reviewer agents concurrently, then 4. the summarizer —
+    //    the shared fan-out + summarizer runner (architecture-1-04). Each
+    //    reviewer persists its own row; the runner drives the summarizer's.
+    let reviewers: Vec<_> = providers
+        .iter()
+        .enumerate()
+        .map(|(index, p)| {
+            let ctx = ctx.clone();
+            let ws = ws.clone();
+            let user = user.clone();
+            let review_id = review_id.clone();
+            let provider = p.clone();
+            let dir = dir.to_path_buf();
+            let skill_name = skill_name.to_string();
+            let reviewer = reviewer.clone();
+            let instructions = instructions.to_string();
+            let cancel = Arc::clone(cancel);
+            let base = agents[index].clone();
+            async move {
+                Ok::<_, String>(
+                    run_skill_review_agent(
+                        &ctx,
+                        &ws,
+                        &user,
+                        &review_id,
+                        index,
+                        base,
+                        &provider,
+                        &dir,
+                        &skill_name,
+                        &reviewer,
+                        &instructions,
+                        &cancel,
+                    )
+                    .await,
+                )
             }
-        }
-    }
-
-    if is_cancelled(cancel) {
-        return Ok(());
-    }
-
-    // 4. Summarizer — visible headless turn; enrich verdict/patch plan.
+        })
+        .collect();
     let summarizer_index = providers.len();
     let mut summarizer_row = agents[summarizer_index].clone();
-    summarizer_row.status = "running".into();
-    let _ = ctx
-        .skill_reviews_store
-        .set_agent_at(review_id, summarizer_index, &summarizer_row)
-        .await;
-    emit(ctx, &ws.id, review_id, "running");
-
-    let mut summary = merge_summary(&static_report, &agent_findings);
-    let prompt = summarizer_prompt(skill_name, &static_report, &agent_batches, instructions);
-    match ctx
-        .orchestrator
-        .run_agent(&prompt, &dir.to_string_lossy(), None, SUMMARIZER_TIMEOUT)
-        .await
-    {
-        Ok(text) => {
+    // The summarizer is a visible headless turn that enriches the merged
+    // findings with a verdict + patch plan; its fallback is the plain merge.
+    let batches = |results: &[(usize, Vec<SkillFinding>)]| {
+        let findings: Vec<SkillFinding> = results
+            .iter()
+            .flat_map(|(_, f)| f.iter().cloned())
+            .collect();
+        let batches: Vec<String> = results
+            .iter()
+            .filter(|(_, f)| !f.is_empty())
+            .map(|(_, f)| serde_json::to_string(f).unwrap_or_default())
+            .collect();
+        (findings, batches)
+    };
+    let summarizer = |results: &[(usize, Vec<SkillFinding>)]| {
+        let (findings, batches) = batches(results);
+        let mut summary = merge_summary(&static_report, &findings);
+        let prompt = summarizer_prompt(skill_name, &static_report, &batches, instructions);
+        async move {
+            let text = ctx
+                .orchestrator
+                .run_agent(&prompt, &dir.to_string_lossy(), None, SUMMARIZER_TIMEOUT)
+                .await
+                .map_err(|e| e.to_string())?;
             if let Some(parsed) = parse_summary(&text) {
                 // Prefer the model's verdict + patch plan; keep the merged findings.
                 if !parsed.verdict.trim().is_empty() {
@@ -824,10 +825,46 @@ async fn run_review_inner(
                     );
                 }
             }
+            Ok::<_, String>(summary)
+        }
+    };
+    let fallback =
+        |results: &[(usize, Vec<SkillFinding>)]| merge_summary(&static_report, &batches(results).0);
+    let on_state = |slot: fanout::Slot, state: fanout::SlotState| {
+        let started = slot == fanout::Slot::Summarizer && state == fanout::SlotState::Running;
+        let row = started.then(|| {
+            let mut row = summarizer_row.clone();
+            row.status = "running".into();
+            row
+        });
+        async move {
+            if let Some(row) = row {
+                let _ = ctx
+                    .skill_reviews_store
+                    .set_agent_at(review_id, summarizer_index, &row)
+                    .await;
+                emit(ctx, &ws.id, review_id, "running");
+            }
+        }
+    };
+    let Some(outcome) = fanout::run(
+        reviewers,
+        || is_cancelled(cancel),
+        summarizer,
+        fallback,
+        on_state,
+    )
+    .await
+    else {
+        return Ok(());
+    };
+    let summary = outcome.summary.value;
+    match outcome.summary.error {
+        None => {
             summarizer_row.status = "done".into();
             summarizer_row.note = format!("{} finding(s)", summary.findings.len());
         }
-        Err(e) => {
+        Some(e) => {
             summarizer_row.status = "error".into();
             summarizer_row.note = format!("summarizer failed: {e}");
         }

@@ -136,6 +136,33 @@ pub fn transcript_path(
     )
 }
 
+/// [`transcript_path_in_roots`] over every root of `provider` in `roots`
+/// (architecture-6-01: [`otto_transcript::roots::TranscriptRoots`] is the one
+/// answer to "where does this session's CLI write"), first hit wins. Blocking.
+pub fn transcript_path_in(
+    roots: &otto_transcript::roots::TranscriptRoots,
+    provider: &str,
+    cwd: &str,
+    provider_session_id: Option<&str>,
+) -> Result<PathBuf, otto_transcript::UnavailableReason> {
+    use otto_transcript::UnavailableReason as R;
+    let dirs: Vec<&Path> = match provider {
+        "claude" => roots.claude_dirs().collect(),
+        "codex" => roots.codex_dirs().collect(),
+        _ => return Err(R::ProviderUnsupported),
+    };
+    let mut last = Err(R::TranscriptMissing);
+    for dir in dirs {
+        // Only the provider's own root is read, so `dir` fills both slots.
+        match transcript_path_in_roots(dir, dir, provider, cwd, provider_session_id) {
+            Ok(path) => return Ok(path),
+            Err(R::NoProviderSessionId) => return Err(R::NoProviderSessionId),
+            Err(e) => last = Err(e),
+        }
+    }
+    last
+}
+
 /// [`transcript_path`] against explicit provider roots (`<claude projects>`,
 /// `<codex sessions>`) — the daemon derives them from `OTTO_TRANSCRIPT_ROOTS`
 /// (or empty per-daemon dirs under `OTTO_E2E=1`) so a throwaway daemon never

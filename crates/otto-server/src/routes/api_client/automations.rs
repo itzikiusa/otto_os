@@ -130,6 +130,33 @@ pub(crate) struct StepSecretBinding {
     pub bound_hosts: BTreeSet<String>,
 }
 
+impl StepSecretBinding {
+    /// The binding `api_automation_runs::start` gives a run: `Some` for an
+    /// AGENT caller (every stored secret stays on its bound host, see
+    /// [`run_step`]), `None` for a person (their run is theirs to aim). One
+    /// constructor, so the run route and its test share the decision.
+    pub(crate) async fn for_caller(
+        agent: bool,
+        api: &ApiClientRepo,
+        wid: &Id,
+        env_vars: &serde_json::Map<String, Value>,
+        environment: Option<&ApiEnvironment>,
+        env_blob: &BTreeMap<String, String>,
+    ) -> ApiResult<Option<Self>> {
+        if !agent {
+            return Ok(None);
+        }
+        Ok(Some(Self {
+            bound_hosts: bound_env_secret_hosts(api, wid, env_vars).await?,
+            env_vars: env_vars.clone(),
+            env_blob: env_blob.clone(),
+            secret_keys: environment
+                .map(|env| env.secret_keys.clone())
+                .unwrap_or_default(),
+        }))
+    }
+}
+
 /// Run one automation step against its saved request, evaluating assertions and
 /// applying extractions into `vars` for later steps. Resilient: any error is
 /// captured into the returned [`ApiRunStepResult`] rather than propagated.
@@ -737,7 +764,9 @@ mod binding_tests {
         let b = MockServer::start().await;
         let saved = saved_retargeting_request(&ctx, &wid, &a, &b).await;
 
-        // Agent run: the binding exactly as `start` builds it.
+        // Agent run: the binding `start` builds, through the same constructor
+        // (TQ-6-06) — a person gets none, an agent binds the saved request's
+        // host (A), so the script's retarget to B is refused.
         {
             let _guard = Mock::given(method("GET"))
                 .respond_with(ResponseTemplate::new(200))
@@ -746,17 +775,34 @@ mod binding_tests {
                 .await;
             let (env_vars, environment, env_blob) =
                 resolve_environment(&ctx, &repo, &wid, None).await.unwrap();
-            let binding = StepSecretBinding {
-                bound_hosts: bound_env_secret_hosts(&repo, &wid, &env_vars)
-                    .await
-                    .unwrap(),
-                env_vars: env_vars.clone(),
-                env_blob,
-                secret_keys: environment
-                    .as_ref()
-                    .map(|env| env.secret_keys.clone())
-                    .unwrap_or_default(),
-            };
+            let person = StepSecretBinding::for_caller(
+                false,
+                &repo,
+                &wid,
+                &env_vars,
+                environment.as_ref(),
+                &env_blob,
+            )
+            .await
+            .unwrap();
+            assert!(person.is_none(), "a person's run carries no binding");
+            let binding = StepSecretBinding::for_caller(
+                true,
+                &repo,
+                &wid,
+                &env_vars,
+                environment.as_ref(),
+                &env_blob,
+            )
+            .await
+            .unwrap()
+            .expect("an agent's run is bound");
+            assert!(
+                binding.bound_hosts.contains("127.0.0.1"),
+                "the secret is bound to its saved request's host: {:?}",
+                binding.bound_hosts
+            );
+            assert!(!binding.bound_hosts.contains("localhost"));
             let mut vars = env_vars;
             let step = run_step(
                 &ctx,

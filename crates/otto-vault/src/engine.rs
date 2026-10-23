@@ -80,6 +80,14 @@ pub struct VaultEngine {
     /// Test hook: a rename's link rewrite of this source fails.
     #[cfg(test)]
     rename_fail: Mutex<Option<String>>,
+    /// Test hook: a rename signals once the file has moved, then waits.
+    #[cfg(test)]
+    rename_pause: Mutex<
+        Option<(
+            tokio::sync::oneshot::Sender<()>,
+            tokio::sync::oneshot::Receiver<()>,
+        )>,
+    >,
     #[cfg(test)]
     scan_pause: Mutex<
         Option<(
@@ -149,6 +157,8 @@ impl VaultEngine {
             graph_builds: Default::default(),
             #[cfg(test)]
             rename_fail: Default::default(),
+            #[cfg(test)]
+            rename_pause: Default::default(),
             #[cfg(test)]
             scan_pause: Default::default(),
             #[cfg(test)]
@@ -1604,7 +1614,33 @@ impl VaultEngine {
 
     // -- rename (file or folder) + link rewrite ------------------------------------
 
+    /// Move a note or folder and rewrite every link to it.
+    ///
+    /// The work runs in its own task, which owns the vault write lock and
+    /// the index publication guard; the caller only awaits it
+    /// (concurrency-async-6-01). A dropped request (a closed window, the MCP
+    /// bridge's 20 s budget) therefore never stops a rename between the move
+    /// and the last backlink rewrite + rescan — the index would keep the old
+    /// path and half the backlinks would point at nothing.
     pub async fn rename(
+        self: &Arc<Self>,
+        ws: &str,
+        id: i64,
+        from: &str,
+        to: &str,
+    ) -> Result<RenameResult> {
+        let (this, ws, from, to) = (
+            Arc::clone(self),
+            ws.to_string(),
+            from.to_string(),
+            to.to_string(),
+        );
+        tokio::spawn(async move { this.rename_to_completion(&ws, id, &from, &to).await })
+            .await
+            .map_err(|e| Error::Internal(format!("vault rename task: {e}")))?
+    }
+
+    async fn rename_to_completion(
         self: &Arc<Self>,
         ws: &str,
         id: i64,
@@ -1736,6 +1772,14 @@ impl VaultEngine {
             }
         } else {
             move_exclusive(&from_abs, &to_abs)?;
+        }
+        #[cfg(test)]
+        {
+            let pause = self.rename_pause.lock().unwrap().take();
+            if let Some((moved, resume)) = pause {
+                let _ = moved.send(());
+                let _ = resume.await;
+            }
         }
 
         let mut links_updated = 0i64;
@@ -2705,8 +2749,9 @@ fn relative_path(from_dir: &str, to: &str) -> String {
     out.join("/")
 }
 
-/// Subsequence fuzzy score (mirrors ui/src/lib/fuzzy.ts): boundary + consecutive
-/// bonuses, gap penalty. `None` when not a subsequence.
+/// Subsequence fuzzy score (mirrors `fuzzyMatch` in
+/// `ui/src/lib/commandSearch.ts`): boundary + consecutive bonuses, gap
+/// penalty. `None` when not a subsequence.
 fn fuzzy_score(query: &str, cand: &str) -> Option<f32> {
     let q: Vec<char> = query.chars().collect();
     let c: Vec<char> = cand.chars().collect();

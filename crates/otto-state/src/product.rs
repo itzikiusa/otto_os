@@ -1543,6 +1543,38 @@ impl ProductRepo {
         rows.iter().map(row_to_testcase).collect()
     }
 
+    /// The cases of every run in `runs`, grouped by run id (each group in
+    /// `order_idx, created_at` order, like [`Self::list_testcases`]). One
+    /// `WHERE run_id IN (…)` query per 500 ids instead of one query per run:
+    /// the story's test-case tab used to issue 1 + R queries, growing with
+    /// every regeneration. A run with no cases has no entry.
+    pub async fn list_testcases_for_runs(
+        &self,
+        runs: &[Id],
+    ) -> Result<std::collections::HashMap<Id, Vec<ProductTestcase>>> {
+        let mut out: std::collections::HashMap<Id, Vec<ProductTestcase>> = Default::default();
+        for chunk in runs.chunks(500) {
+            let mut qb = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+                "SELECT * FROM product_testcases WHERE run_id IN (",
+            );
+            let mut ids = qb.separated(", ");
+            for id in chunk {
+                ids.push_bind(id);
+            }
+            qb.push(") ORDER BY run_id, order_idx, created_at");
+            let rows = qb
+                .build()
+                .fetch_all(&self.pool)
+                .await
+                .map_err(dberr("list testcases for runs"))?;
+            for row in &rows {
+                let case = row_to_testcase(row)?;
+                out.entry(case.run_id.clone()).or_default().push(case);
+            }
+        }
+        Ok(out)
+    }
+
     /// `COUNT(*)` across all testcases for a story — O(1) instead of fetching
     /// every row. Used by `get_story` to fill `StoryCounts.testcases`.
     pub async fn count_testcases_for_story(&self, story: &Id) -> Result<i64> {
@@ -2243,6 +2275,58 @@ mod tests {
         assert_eq!(tc_a1_after.status, "approved");
         // run_b's case should remain draft
         assert_eq!(tc_b1_after.status, "draft");
+    }
+
+    #[tokio::test]
+    async fn list_testcases_for_runs_groups_cases_by_run_in_order() {
+        let pool = mem_pool().await;
+        let repo = ProductRepo::new(pool.clone());
+        let user = seed_user(&pool).await;
+        let ws = seed_workspace(&pool, &user).await;
+        let story = repo
+            .create_story(new_story_input(&ws, &user))
+            .await
+            .unwrap();
+        let run_a = repo.create_testcase_run(&story.id, &user).await.unwrap();
+        let run_b = repo.create_testcase_run(&story.id, &user).await.unwrap();
+        let empty = repo.create_testcase_run(&story.id, &user).await.unwrap();
+        for (run, title, idx) in [(&run_a, "A2", 1), (&run_b, "B1", 0), (&run_a, "A1", 0)] {
+            repo.add_testcase(NewTestcase {
+                run_id: run.id.clone(),
+                story_id: story.id.clone(),
+                title: title.into(),
+                category: "happy".into(),
+                priority: "medium".into(),
+                steps_json: "{}".into(),
+                order_idx: idx,
+            })
+            .await
+            .unwrap();
+        }
+
+        let ids = vec![run_a.id.clone(), run_b.id.clone(), empty.id.clone()];
+        let grouped = repo.list_testcases_for_runs(&ids).await.unwrap();
+        let titles = |id: &Id| -> Vec<String> {
+            grouped
+                .get(id)
+                .map(|cs| cs.iter().map(|c| c.title.clone()).collect())
+                .unwrap_or_default()
+        };
+        assert_eq!(titles(&run_a.id), ["A1", "A2"]);
+        assert_eq!(titles(&run_b.id), ["B1"]);
+        assert!(!grouped.contains_key(&empty.id));
+        // Same rows, same order, as the per-run query it replaces.
+        for id in &ids {
+            let single: Vec<String> = repo
+                .list_testcases(id)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|c| c.title)
+                .collect();
+            assert_eq!(titles(id), single);
+        }
+        assert!(repo.list_testcases_for_runs(&[]).await.unwrap().is_empty());
     }
 
     // -----------------------------------------------------------------------

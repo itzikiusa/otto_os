@@ -135,7 +135,16 @@ impl Room {
                 self.audio_pending_since = None;
             }
             RoomAction::Audio { joined, muted } => {
-                if joined && actor != self.host && !self.members[&self.host].view.audio_joined {
+                // A host pruned from `members` (a dropped connection reaped
+                // before the room ends) counts as not in audio: refuse
+                // instead of panicking on the index (backend-correctness-6-05).
+                if joined
+                    && actor != self.host
+                    && self
+                        .members
+                        .get(&self.host)
+                        .is_none_or(|h| !h.view.audio_joined)
+                {
                     return Err(forbidden("The host must join audio first"));
                 }
                 let m = self.members.get_mut(actor).unwrap();

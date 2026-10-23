@@ -2784,10 +2784,12 @@ impl DbViewerService {
 
     /// Streaming variant of [`Self::export_to_path`] that writes through an
     /// arbitrary `w` instead of a local file — the HTTP `/db/export` handler
-    /// passes a channel-backed writer so bytes stream straight to the browser
-    /// without the daemon ever buffering the full result (the fix for the old
-    /// `/db/export` truncation, spec §2.1). Same write-guard, resolve, and
-    /// history semantics as `export_to_path`; returns `{rows, bytes}` + duration.
+    /// passes a paced [`crate::export::ExportWriter::channel`] so bytes stream
+    /// straight to the browser at the client's pace, without the daemon ever
+    /// buffering the full result (spec §2.1, backend-performance-6-01). A plain
+    /// `Box<dyn Write + Send>` is accepted too (unpaced). Same write-guard,
+    /// resolve, and history semantics as `export_to_path`; returns
+    /// `{rows, bytes}` + duration.
     #[allow(clippy::too_many_arguments)]
     pub async fn export_to_writer(
         &self,
@@ -2797,8 +2799,9 @@ impl DbViewerService {
         node: Option<&str>,
         format: crate::export::ExportFormat,
         max_rows: Option<usize>,
-        w: Box<dyn std::io::Write + Send>,
+        w: impl Into<crate::export::ExportWriter> + Send,
     ) -> Result<(crate::export::ExportCounts, u64)> {
+        let w = w.into();
         let canonical = crate::access::canonical_node(node);
         let node = canonical.as_deref();
         self.guard_export(conn_id, user_id, statement, node).await?;

@@ -827,7 +827,7 @@ async fn governed_root_reads_cannot_call_a_mutating_builtin_overload() {
             Some(&schema),
             otto_dbviewer::export::ExportFormat::Csv,
             None,
-            Box::new(Vec::<u8>::new()),
+            otto_dbviewer::export::ExportWriter::Direct(Box::new(Vec::<u8>::new())),
         )
         .await
         .expect_err("export must refuse hidden writes")

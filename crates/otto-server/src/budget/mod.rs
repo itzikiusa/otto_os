@@ -137,19 +137,38 @@ async fn budget_status(ctx: &ServerCtx, mut cfg: UsageBudgetConfig) -> UsageBudg
 }
 
 /// Fold per-session totals into spend-vs-cap rows (`cfg.window_days` already
-/// normalised).
+/// normalised), labelling each workspace row with the workspace's name.
 async fn fold_budget_status(
     ctx: &ServerCtx,
     cfg: UsageBudgetConfig,
     totals: &[otto_usage::SessionTotals],
 ) -> UsageBudgetStatus {
     let window_days = cfg.window_days;
+    let mut rows = budget_rows(&cfg, totals);
+    for row in rows.iter_mut().filter(|r| r.scope == "workspace") {
+        row.label = ctx.workspaces.get(&row.key).await.ok().map(|w| w.name);
+    }
+    UsageBudgetStatus {
+        config: cfg,
+        window_days,
+        rows,
+        spend_unavailable: false,
+    }
+}
+
+/// Spend vs cap for every configured (non-zero) cap: workspace rows first,
+/// then provider rows, in config order. Pure — workspace rows carry no label
+/// yet ([`fold_budget_status`] adds it).
+fn budget_rows(
+    cfg: &UsageBudgetConfig,
+    totals: &[otto_usage::SessionTotals],
+) -> Vec<BudgetStatusRow> {
     // One pass over per-session totals folds spend into both buckets.
-    let mut by_ws: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
-    let mut by_provider: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+    let mut by_ws: std::collections::HashMap<&str, f64> = std::collections::HashMap::new();
+    let mut by_provider: std::collections::HashMap<&str, f64> = std::collections::HashMap::new();
     for t in totals {
-        *by_ws.entry(t.workspace_id.clone()).or_default() += t.cost_usd;
-        *by_provider.entry(t.provider.clone()).or_default() += t.cost_usd;
+        *by_ws.entry(t.workspace_id.as_str()).or_default() += t.cost_usd;
+        *by_provider.entry(t.provider.as_str()).or_default() += t.cost_usd;
     }
 
     let mut rows = Vec::new();
@@ -157,17 +176,11 @@ async fn fold_budget_status(
         if b.monthly_usd <= 0.0 {
             continue;
         }
-        let spent = by_ws.get(&b.workspace_id).copied().unwrap_or(0.0);
-        let label = ctx
-            .workspaces
-            .get(&b.workspace_id)
-            .await
-            .ok()
-            .map(|w| w.name);
+        let spent = by_ws.get(b.workspace_id.as_str()).copied().unwrap_or(0.0);
         rows.push(make_row(
             "workspace",
             &b.workspace_id,
-            label,
+            None,
             b.monthly_usd,
             spent,
         ));
@@ -176,7 +189,7 @@ async fn fold_budget_status(
         if b.monthly_usd <= 0.0 {
             continue;
         }
-        let spent = by_provider.get(&b.provider).copied().unwrap_or(0.0);
+        let spent = by_provider.get(b.provider.as_str()).copied().unwrap_or(0.0);
         rows.push(make_row(
             "provider",
             &b.provider,
@@ -185,13 +198,7 @@ async fn fold_budget_status(
             spent,
         ));
     }
-
-    UsageBudgetStatus {
-        config: cfg,
-        window_days,
-        rows,
-        spend_unavailable: false,
-    }
+    rows
 }
 
 fn make_row(
@@ -283,14 +290,31 @@ async fn check_with(ctx: &ServerCtx, workspace_id: &str, provider: &str) -> Budg
             };
         }
     };
-    let status = fold_budget_status(ctx, cfg.clone(), &totals).await;
-    for row in &status.rows {
+    verdict_from(&cfg, &totals, workspace_id, provider)
+}
+
+/// The admission verdict for a `(workspace, provider)` given the window's
+/// measured spend — pure, so every gate decision is unit-tested. Enforcement
+/// off never blocks; only a cap on THIS workspace or THIS provider counts; a
+/// cap is exceeded at 100% of it (exactly at the cap included) and blocks
+/// only with `block_on_exceed`.
+pub(crate) fn verdict_from(
+    cfg: &UsageBudgetConfig,
+    totals: &[otto_usage::SessionTotals],
+    workspace_id: &str,
+    provider: &str,
+) -> BudgetVerdict {
+    if !cfg.enforce {
+        return BudgetVerdict::default();
+    }
+    let window_days = budget_window(cfg);
+    for row in budget_rows(cfg, totals) {
         let relevant = (row.scope == "workspace" && row.key == workspace_id)
             || (row.scope == "provider" && row.key == provider);
         if relevant && row.exceeded {
             let reason = format!(
                 "{} budget exceeded: ${:.2} spent of ${:.2} cap over {}d",
-                row.scope, row.spent_usd, row.limit_usd, status.window_days
+                row.scope, row.spent_usd, row.limit_usd, window_days
             );
             return BudgetVerdict {
                 blocked: cfg.block_on_exceed,
@@ -387,6 +411,94 @@ mod budget_admission_tests {
             .unwrap();
         assert!(check_budget(&ctx, "other-ws", "codex").await.blocked);
         assert!(!check_budget(&ctx, "other-ws", "grok").await.blocked);
+    }
+
+    fn spend(ws: &str, provider: &str, usd: f64) -> otto_usage::SessionTotals {
+        serde_json::from_value(serde_json::json!({
+            "session_id": format!("{ws}-{provider}"), "workspace_id": ws, "provider": provider,
+            "events": 1, "total_tokens": 1, "cost_usd": usd,
+        }))
+        .unwrap()
+    }
+
+    fn ws_cap(ws: &str, usd: f64, block: bool) -> UsageBudgetConfig {
+        UsageBudgetConfig {
+            enforce: true,
+            block_on_exceed: block,
+            workspaces: vec![WorkspaceBudget {
+                workspace_id: ws.into(),
+                monthly_usd: usd,
+            }],
+            ..Default::default()
+        }
+    }
+
+    /// test-quality-6-03: the measured path. Spend exactly at the cap is
+    /// exceeded, and blocks iff `block_on_exceed`.
+    #[test]
+    fn spend_exactly_at_the_cap_is_exceeded_and_blocks_only_when_asked() {
+        let totals = [spend("a", "codex", 6.0), spend("a", "grok", 4.0)];
+        let v = verdict_from(&ws_cap("a", 10.0, true), &totals, "a", "codex");
+        assert!(v.exceeded && v.blocked);
+        assert_eq!(
+            v.reason.as_deref(),
+            Some("workspace budget exceeded: $10.00 spent of $10.00 cap over 30d")
+        );
+        let warn_only = verdict_from(&ws_cap("a", 10.0, false), &totals, "a", "codex");
+        assert!(warn_only.exceeded && !warn_only.blocked);
+        let under = verdict_from(&ws_cap("a", 10.01, true), &totals, "a", "codex");
+        assert!(!under.exceeded && !under.blocked);
+    }
+
+    #[test]
+    fn the_warning_line_is_eighty_percent() {
+        let cfg = ws_cap("a", 100.0, true);
+        let at = |usd: f64| budget_rows(&cfg, &[spend("a", "codex", usd)])[0].clone();
+        assert!(!at(79.0).warning);
+        assert!(at(80.0).warning && !at(80.0).exceeded);
+    }
+
+    #[test]
+    fn another_workspaces_overspend_leaves_this_one_unblocked() {
+        let mut cfg = ws_cap("a", 10.0, true);
+        cfg.workspaces.push(WorkspaceBudget {
+            workspace_id: "b".into(),
+            monthly_usd: 10.0,
+        });
+        let totals = [spend("a", "codex", 50.0), spend("b", "codex", 1.0)];
+        assert!(verdict_from(&cfg, &totals, "a", "codex").blocked);
+        let b = verdict_from(&cfg, &totals, "b", "codex");
+        assert!(!b.blocked && !b.exceeded);
+    }
+
+    #[test]
+    fn a_provider_cap_blocks_that_provider_only() {
+        let cfg = UsageBudgetConfig {
+            enforce: true,
+            block_on_exceed: true,
+            providers: vec![ProviderBudget {
+                provider: "codex".into(),
+                monthly_usd: 5.0,
+            }],
+            ..Default::default()
+        };
+        // Spend lands across workspaces: the provider cap sums all of it.
+        let totals = [spend("a", "codex", 3.0), spend("b", "codex", 2.0)];
+        let codex = verdict_from(&cfg, &totals, "a", "codex");
+        assert!(codex.blocked);
+        assert!(codex
+            .reason
+            .unwrap()
+            .starts_with("provider budget exceeded"));
+        assert!(!verdict_from(&cfg, &totals, "a", "grok").blocked);
+    }
+
+    #[test]
+    fn enforcement_off_never_blocks() {
+        let mut cfg = ws_cap("a", 1.0, true);
+        cfg.enforce = false;
+        let v = verdict_from(&cfg, &[spend("a", "codex", 999.0)], "a", "codex");
+        assert!(!v.blocked && !v.exceeded && v.reason.is_none());
     }
 
     /// error-handling-5-07: a stored config that no longer parses is an

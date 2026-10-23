@@ -24,10 +24,38 @@ pub fn ui_error_envelope(code: &str, message: &str) -> Value {
            "reason":message,"content":{"error":message,"code":code}})
 }
 
+/// The longest a provider merge route polls before it answers: GitLab's
+/// `wait_for_rebase` (60 polls × 1 s, between the rebase PUT and the merge
+/// PUT) and Bitbucket's `MERGE_POLL_BUDGET` for a 202 merge (60 s). Mirrors
+/// `otto-git/src/providers/{gitlab,bitbucket}.rs` (no dependency edge here).
+pub const MERGE_PROVIDER_POLL: Duration = Duration::from_secs(60);
+
+/// One Atlassian request's own timeout (`otto-issues/src/atlassian.rs`
+/// `REQUEST_TIMEOUT`) and the longest rate-limit wait a GET may add before it
+/// (`RATE_LIMIT_RETRY_MAX`).
+pub const ATLASSIAN_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+pub const ATLASSIAN_RATE_LIMIT_WAIT: Duration = Duration::from_secs(10);
+
+/// Mutating tools whose route makes several sequential upstream requests
+/// (writes, then a verify read). When their budget fires the write may
+/// already have landed, so the timeout error says so (see [`timeout_error`]).
+pub const MULTI_REQUEST_WRITES: &[&str] = &[
+    "merge_pr",
+    "create_pr",
+    "create_issue",
+    "create_confluence_page",
+    "update_confluence_page",
+    "comment_confluence_page",
+];
+
 /// Wall-clock budget of one governed self-call. The flat 30 s cut off calls
 /// whose route legitimately runs longer: a saved API request may itself wait
 /// up to its `timeout_ms` (≤ 60 s), an automation runs several, pod logs shell
-/// out to kubectl with a 60 s budget. Pure — unit-tested.
+/// out to kubectl with a 60 s budget. A multi-request write gets enough for
+/// every upstream request it makes (integrations-6-01): a timeout there told
+/// the agent "failed" after the issue/page/merge had landed, and its retry
+/// made a duplicate. Every value stays at or below `GOVERNED_RUN_BUDGET`.
+/// Pure — unit-tested.
 pub fn call_timeout(tool: &str, args: &Value) -> Duration {
     let secs = match tool {
         "api_execute" => {
@@ -43,9 +71,49 @@ pub fn call_timeout(tool: &str, args: &Value) -> Duration {
         // ≤30 s per pod request + a pod list + proxy start-up.
         "k8s_pod_http" => 90,
         "consume_broker_messages" | "run_workflow" | "start_pr_review" | "open_session" => 60,
+        // Merge PUT (+ GitLab rebase PUT) around a ≤ 60 s provider poll.
+        "merge_pr" => 90,
+        // createmeta types + fields (paged), parent lookup, POST, verify GET.
+        "create_issue" => 120,
+        // Write (+ full-width property POSTs / version GET), then a verify GET.
+        "create_confluence_page" | "update_confluence_page" | "comment_confluence_page" => 90,
+        // Push check + create + reviewer/proof-pack follow-ups.
+        "create_pr" => 60,
         _ => 30,
     };
     Duration::from_secs(secs)
+}
+
+/// The agent-facing error when a self-call's budget fires. For a
+/// [`MULTI_REQUEST_WRITES`] tool the write may already be done (only the
+/// verify read ran over), so the message names what was being written and
+/// tells the agent to look before retrying — a blind retry duplicates an
+/// outward-facing artifact the human approved once. Pure — unit-tested.
+pub fn timeout_error(tool: &str, args: &Value, budget: Duration) -> String {
+    let base = format!("self-call: timed out after {}s", budget.as_secs());
+    if !MULTI_REQUEST_WRITES.contains(&tool) {
+        return base;
+    }
+    let s = |k: &str| args.get(k).and_then(Value::as_str).unwrap_or("?");
+    let n = args.get("number").and_then(i64_lenient).unwrap_or_default();
+    let target = match tool {
+        "merge_pr" => format!("PR #{n} in repo {}", s("repo_id")),
+        "create_pr" => format!(
+            "a PR {} → {} in repo {}",
+            s("source_branch"),
+            s("target_branch"),
+            s("repo_id")
+        ),
+        "create_issue" => format!("issue \"{}\" in project {}", s("summary"), s("project_key")),
+        "create_confluence_page" => {
+            format!("page \"{}\" in space {}", s("title"), s("space_key"))
+        }
+        _ => format!("page {}", s("page_id")),
+    };
+    format!(
+        "{base}, but the {tool} for {target} may already have completed upstream. \
+         Check it (get/search it) before retrying — a retry can create a duplicate."
+    )
 }
 
 /// Fields of a saved API request that the PATCH route REPLACES wholesale when

@@ -64,35 +64,6 @@ pub struct SwarmTriggerReq {
     pub start: Option<bool>,
 }
 
-/// Pull the webhook key from `X-Otto-Webhook-Key`, else `Authorization: Bearer`.
-fn extract_key(headers: &HeaderMap) -> Option<String> {
-    if let Some(k) = headers
-        .get("x-otto-webhook-key")
-        .and_then(|v| v.to_str().ok())
-    {
-        if !k.is_empty() {
-            return Some(k.to_string());
-        }
-    }
-    headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .map(str::to_string)
-}
-
-/// Constant-time comparison so a bad key can't be timing-probed.
-fn ct_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
-}
-
 /// Index of the first goal that tries to set a (non-blank) `verify_cmd`.
 fn first_goal_with_verify_cmd(goals: &[WebhookGoalReq]) -> Option<usize> {
     goals.iter().position(|g| {
@@ -120,32 +91,12 @@ pub async fn trigger(
     headers: HeaderMap,
     Json(req): Json<SwarmTriggerReq>,
 ) -> Response {
-    // 0. Like `/webhooks/{ws}`: only while the workspace's webhook integration
-    //    is ENABLED — disabling it must stop the key working here too, even
-    //    when the Keychain entry is left in place.
-    if !matches!(
-        ctx.integrations_store
-            .get(&ws, otto_core::domain::Channel::Webhook)
-            .await,
-        Ok(Some(i)) if i.enabled
-    ) {
-        return StatusCode::NOT_FOUND.into_response();
-    }
-    // 1. Auth against the per-workspace webhook key.
-    // Unauthenticated route: the Keychain read must not park a runtime worker
-    // (cache hit inline, miss on the blocking pool).
-    let expected = match otto_core::secrets::get_async(
-        &ctx.secrets,
-        &format!("chan-bot-{ws}-webhook"),
-    )
-    .await
+    // 0–1. The shared per-workspace webhook gate (enabled integration → 404,
+    //      no/wrong key → 401), the same function the channel routes use.
+    if let Err(response) =
+        crate::routes::channel_webhook::webhook_key_guard(&ctx, &ws, &headers).await
     {
-        Ok(Some(k)) if !k.is_empty() => k,
-        _ => return StatusCode::UNAUTHORIZED.into_response(),
-    };
-    match extract_key(&headers) {
-        Some(k) if ct_eq(k.as_bytes(), expected.as_bytes()) => {}
-        _ => return StatusCode::UNAUTHORIZED.into_response(),
+        return *response;
     }
 
     // 2. Resolve + scope the target swarm to this workspace.

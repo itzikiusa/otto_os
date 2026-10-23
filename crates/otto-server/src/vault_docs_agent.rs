@@ -352,8 +352,8 @@ pub struct RunEntry {
     pub persist_tx: Option<PersistTx>,
 }
 
-/// `retries` index standing for the summarizer (writers use their own index).
-pub const SUM_RETRY_IDX: usize = usize::MAX;
+/// `retries` index of the summarizer: the shared fan-out runner's slot.
+pub const SUM_RETRY_IDX: usize = otto_agent_run::fanout::SUMMARIZER_RETRY_IDX;
 const REVIEW_RETRY_BASE: usize = 10_000;
 const REVISION_RETRY_BASE: usize = 20_000;
 
@@ -1551,7 +1551,7 @@ async fn refine(
     if let Some(m) = &req.model {
         meta["model"] = Value::String(m.clone());
     }
-    if let Some(dirs) = crate::review_session::review_skills_extra_dirs(
+    if let Some(dirs) = otto_review::session::review_skills_extra_dirs(
         &provider,
         staged_package_root(refine_bundle.as_ref()),
     ) {
@@ -2069,7 +2069,7 @@ async fn run_docs(
         if let Some(model) = &w.model {
             meta["model"] = Value::String(model.clone());
         }
-        if let Some(dirs) = crate::review_session::review_skills_extra_dirs(
+        if let Some(dirs) = otto_review::session::review_skills_extra_dirs(
             &w.provider,
             staged_package_root(skill_bundle.as_ref()),
         ) {
@@ -2380,7 +2380,7 @@ async fn run_docs(
     if let Some(model) = &summarizer.model {
         sum_meta["model"] = Value::String(model.clone());
     }
-    if let Some(dirs) = crate::review_session::review_skills_extra_dirs(
+    if let Some(dirs) = otto_review::session::review_skills_extra_dirs(
         &summarizer.provider,
         staged_package_root(skill_bundle.as_ref()),
     ) {
@@ -2829,7 +2829,7 @@ async fn run_reviewer_slot(runner: Arc<dyn ReviewTurnRunner>, args: ReviewerSlot
     if let Some(model) = &reviewer.model {
         meta["model"] = Value::String(model.clone());
     }
-    if let Some(dirs) = crate::review_session::review_skills_extra_dirs(
+    if let Some(dirs) = otto_review::session::review_skills_extra_dirs(
         &reviewer.provider,
         Some(package_root.as_str()),
     ) {

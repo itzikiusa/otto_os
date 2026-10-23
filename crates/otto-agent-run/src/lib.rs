@@ -4,12 +4,16 @@
 //! oracle ([`turn_oracle`]), off-runtime blocking IO ([`offload`]) and screen
 //! text helpers ([`screen`]), plus the pieces every assist engine shares: the
 //! fenced-block fallback ([`fence`]) and the stat-gated live-preview poll
-//! ([`live_file`]). Extracted from otto-server so leaf engine crates
+//! ([`live_file`]), and the resumable managed-session turn runner
+//! ([`session_turn`]) with the fan-out + summarizer shape multi-agent
+//! engines share ([`fanout`]). Extracted from otto-server so leaf engine crates
 //! (e.g. `otto-review`) can use them without depending on the server.
 
 pub mod agent_run;
+pub mod fanout;
 pub mod fence;
 pub mod live_file;
 pub mod offload;
 pub mod screen;
+pub mod session_turn;
 pub mod turn_oracle;

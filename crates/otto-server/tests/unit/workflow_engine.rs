@@ -1830,3 +1830,212 @@ fn review_run_reads_mode_from_run_env_not_node_input() {
         Some((otto_core::domain::ReviewMode::Orchestrator, "run override"))
     );
 }
+
+// --- review_run gate (test-quality-6-04): score, verdict, goals, aggregate ---
+
+mod review_gate {
+    use crate::workflow_engine::nodes::review_run::{
+        aggregate, goals_from_reply, review_score, review_verdict, ScoreWeights,
+    };
+    use serde_json::{json, Value};
+
+    fn target(score: i64, passed: bool, repo: &str) -> serde_json::Map<String, Value> {
+        json!({ "score": score, "passed": passed, "repo_id": repo, "worktree": format!("/wt/{repo}"),
+                "base": "main", "reason": if passed { "passed" } else { "below threshold" } })
+        .as_object()
+        .cloned()
+        .unwrap()
+    }
+
+    #[test]
+    fn three_bugs_score_forty_and_scoring_overrides_apply() {
+        let w = ScoreWeights::default();
+        assert_eq!(review_score(3, 0, 0, w, false), 40);
+        assert_eq!(review_score(0, 2, 1, w, false), 85);
+        assert_eq!(review_score(9, 0, 0, w, false), 0, "clamped at 0");
+        let heavy = ScoreWeights {
+            bug: 50,
+            warn: 0,
+            info: 0,
+        };
+        assert_eq!(review_score(1, 4, 4, heavy, false), 50);
+    }
+
+    #[test]
+    fn an_empty_diff_scores_zero_not_a_clean_hundred() {
+        assert_eq!(review_score(0, 0, 0, ScoreWeights::default(), true), 0);
+    }
+
+    #[test]
+    fn a_score_at_the_threshold_passes_and_one_below_fails() {
+        let at = review_verdict("done", true, false, 80, 80, "main");
+        assert!(at.passed && at.complete);
+        assert_eq!(at.reason, "passed");
+        let below = review_verdict("done", true, false, 79, 80, "main");
+        assert!(!below.passed);
+        assert_eq!(below.reason, "below threshold (79 < 80)");
+    }
+
+    #[test]
+    fn an_incomplete_review_never_reads_as_below_threshold() {
+        let err = review_verdict("error", true, false, 100, 80, "main");
+        assert!(!err.passed && !err.complete);
+        assert_eq!(err.reason, "review did not complete (status: error)");
+        let partial = review_verdict("done", false, false, 100, 80, "main");
+        assert!(!partial.passed);
+        assert!(
+            partial.reason.contains("coverage incomplete"),
+            "{}",
+            partial.reason
+        );
+        let empty = review_verdict("done", true, true, 100, 80, "develop");
+        assert!(!empty.passed);
+        assert_eq!(empty.reason, "empty diff vs develop — nothing was reviewed");
+    }
+
+    #[test]
+    fn the_worst_score_wins_and_one_failing_repo_fails_all() {
+        let (out, passed) = aggregate(
+            vec![
+                target(95, true, "a"),
+                target(60, false, "b"),
+                target(90, true, "c"),
+            ],
+            3,
+        );
+        assert!(!passed);
+        assert_eq!(out["score"], json!(60));
+        assert_eq!(out["passed"], json!(false));
+        assert_eq!(
+            out["repo_id"],
+            json!("a"),
+            "first repo stays mirrored at top level"
+        );
+        assert_eq!(out["repos"].as_array().map(Vec::len), Some(3));
+        assert_eq!(out["reviews"].as_array().map(Vec::len), Some(3));
+        let (all, all_passed) = aggregate(vec![target(95, true, "a"), target(85, true, "b")], 2);
+        assert!(all_passed);
+        assert_eq!(all["score"], json!(85));
+    }
+
+    #[test]
+    fn fewer_outputs_than_targets_fails_the_union() {
+        // A target that couldn't be reviewed (skipped in the multi-repo loop)
+        // must not let the others' passes stand for it.
+        let (out, passed) = aggregate(vec![target(100, true, "a"), target(100, true, "b")], 3);
+        assert!(!passed);
+        assert_eq!(out["passed"], json!(false));
+    }
+
+    #[test]
+    fn a_single_target_keeps_its_own_verdict() {
+        let (out, passed) = aggregate(vec![target(70, false, "a")], 1);
+        assert!(!passed);
+        assert!(out.get("reviews").is_none());
+        assert_eq!(out["score"], json!(70));
+    }
+
+    #[test]
+    fn goals_reply_skips_a_decoy_object_before_the_real_one() {
+        let reply = "package.json says {\"name\":\"svc\",\"version\":\"1.0.0\"}; result: \
+                     {\"goals\":[{\"goal\":\"g\",\"met\":false,\"score\":10}],\"score\":10}";
+        let (gs, detail) = goals_from_reply(reply, 95);
+        assert_eq!(
+            gs,
+            Some(10),
+            "the decoy must not default the goals score to the review's"
+        );
+        assert_eq!(detail[0]["goal"], json!("g"));
+    }
+
+    #[test]
+    fn goals_reply_without_a_score_is_flagged_not_silently_ignored() {
+        let (gs, detail) = goals_from_reply("no json here", 95);
+        assert_eq!(gs, Some(95));
+        assert_eq!(
+            detail,
+            json!([{ "note": "goals eval reply not parseable" }])
+        );
+        let (gs, detail) = goals_from_reply("{\"goals\":[{\"goal\":\"g\",\"met\":true}]}", 95);
+        assert_eq!(gs, Some(95));
+        let notes: Vec<&Value> = detail.as_array().unwrap().iter().collect();
+        assert_eq!(notes.len(), 2);
+        assert_eq!(
+            notes[1]["note"],
+            json!("goals eval reply had no overall score")
+        );
+        let (gs, _) = goals_from_reply("```json\n{\"goals\":[],\"score\":140}\n```", 50);
+        assert_eq!(gs, Some(100), "clamped to 0..=100");
+    }
+}
+
+/// test-quality-6-03, caller side: a `budget_gate` node over an unparsable
+/// budget config fails closed — the node and the run end in Error with the
+/// reason, and the step after it never runs. Also drives the split run
+/// driver (admission → schedule → finalize) end to end.
+#[tokio::test]
+async fn a_budget_gate_over_an_unreadable_budget_ends_the_run_in_error() {
+    use crate::routes::browser::tests::{mem_pool, seed_workspace, test_ctx};
+    let tmp = tempfile::TempDir::new().unwrap();
+    let pool = mem_pool().await;
+    seed_workspace(&pool, "gate-ws").await;
+    sqlx::query("INSERT INTO users(id,username,password_hash,display_name,is_root,created_at) VALUES('root','root','x','Root',1,?)")
+        .bind(chrono::Utc::now().to_rfc3339())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let ctx = test_ctx(&pool, tmp.path().to_path_buf()).await;
+    otto_state::SettingsRepo::new(pool.clone())
+        .put(
+            crate::budget::BUDGETS_KEY,
+            &json!({"enforce": "yes please"}),
+        )
+        .await
+        .unwrap();
+    let ws = ctx.workspaces.get(&"gate-ws".into()).await.unwrap();
+    let graph = WorkflowGraph {
+        nodes: vec![node("gate", "budget_gate"), node("after", "log")],
+        edges: vec![edge("gate", "after")],
+    };
+    let repo = WorkflowsRepo::new(pool);
+    let wf = repo
+        .create(&ws.id, "Gate", "", "", &graph, &"root".into())
+        .await
+        .unwrap();
+    let run = repo
+        .create_run(&wf.id, &ws.id, &json!({}), Some(&"root".into()))
+        .await
+        .unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        run_workflow(
+            ctx.clone(),
+            ws,
+            wf,
+            run.id.clone(),
+            json!({}),
+            RunScope::default(),
+            None,
+        ),
+    )
+    .await
+    .expect("the gate settles at once");
+    let after = repo.get_run(&run.id).await.unwrap();
+    assert_eq!(after.status, RunStatus::Error);
+    let gate = after.nodes.iter().find(|n| n.node_id == "gate").unwrap();
+    assert_eq!(gate.status, NodeStatus::Error);
+    assert!(
+        gate.error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Budget settings unavailable"),
+        "{:?}",
+        gate.error
+    );
+    let next = after.nodes.iter().find(|n| n.node_id == "after").unwrap();
+    assert_eq!(
+        next.status,
+        NodeStatus::Skipped,
+        "nothing runs past a blocked gate"
+    );
+}

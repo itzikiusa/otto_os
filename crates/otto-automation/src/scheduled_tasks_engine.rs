@@ -886,7 +886,7 @@ async fn execute_agent(
     // Deterministic offline path for tests: the orchestrator's E2E stub returns a
     // representative report; no PTY / session is spawned (the E2E daemon makes the
     // CLI fail fast on purpose).
-    if matches!(std::env::var("OTTO_E2E").as_deref(), Ok("1") | Ok("true")) {
+    if otto_core::e2e::isolated() {
         let report = ctx
             .orchestrator()
             .run_agent(&prompt, &cwd, model, RUN_NO_PROGRESS)

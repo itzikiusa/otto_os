@@ -25,9 +25,9 @@ use tokio::sync::broadcast;
 use crate::http::CanvasCtx;
 
 /// One agent turn the host runs for an assist request: the ONE turn type the
-/// assist engines share (architecture-4-02), defined with the Design Hall
-/// engine. Canvas leaves `done_file` / `quiet_done` unset (completion on idle).
-pub use otto_design_assist::AgentTurn;
+/// assist engines share (architecture-4-02), defined with the turn runner.
+/// Canvas leaves `done_file` / `quiet_done` unset (completion on idle).
+pub use otto_agent_run::session_turn::AgentTurn;
 
 /// What the canvas assist endpoints need from the host beyond [`CanvasCtx`].
 pub trait CanvasAssistCtx: CanvasCtx {

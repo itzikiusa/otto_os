@@ -3,7 +3,7 @@
 //! the new brief, watch for the result via the shared `agent_run` primitives
 //! (out-file / claude transcript; 0 model tokens to read), parse the structured
 //! output, and persist the run. Routing of the result (handoffs / reviews /
-//! subtasks) is the Coordinator's job (`swarm_runtime`).
+//! subtasks) is the Coordinator's job (`runtime::engine`).
 
 use otto_core::text::clip_chars;
 use std::collections::HashMap;
@@ -222,7 +222,7 @@ const RESULT_SCHEMA: &str = r#"{
 /// `None`. Sessions are keyed by (agent, acting user): one user's turn must
 /// never resume a session created as (and carrying the MCP token, git and
 /// issue accounts of) another user.
-async fn find_agent_session(ctx: &SwarmRt, ws: &Id, agent_id: &str, user: &str) -> Option<Id> {
+pub async fn find_agent_session(ctx: &SwarmRt, ws: &Id, agent_id: &str, user: &str) -> Option<Id> {
     // Targeted SQL lookup (perf §15 F7) — not the workspace's full history.
     let sessions = ctx
         .manager()
@@ -264,28 +264,43 @@ const MAX_ORIGIN_HOPS: usize = 16;
 /// another person's task runs as that Editor, never as the author. Only
 /// runtime-stamped `source-run:` labels drive the walk: a person may not add
 /// one (`SwarmService::update_task` refuses it).
+///
+/// access-control-6-02: the project's text (name, description, goal, project
+/// goals) and the swarm's (description, standing goals and their
+/// `verify_cmd`) reach every turn under them too, so the MOST RECENT person
+/// who rewrote any of task, project or swarm text wins; the originator only
+/// when nobody did. Untouched work still runs as its author.
 pub async fn acting_user(
     repo: &otto_state::SwarmRepo,
     swarm: &otto_state::Swarm,
     project: Option<&SwarmProject>,
     task: Option<&SwarmTask>,
 ) -> Id {
+    use otto_state::swarm::PromptScope;
     let is_person = |id: String| async move {
         let person = !id.is_empty() && repo.user_exists(&id).await.unwrap_or(false);
         person.then_some(id)
     };
+    // The task walk: the first person it meets — an editor (with when) or an
+    // originator (no time).
+    let mut walked: Option<(Id, Option<chrono::DateTime<Utc>>)> = None;
     let mut cur = task.cloned();
     for _ in 0..MAX_ORIGIN_HOPS {
         let Some(t) = cur.take() else { break };
-        let editor = repo.task_prompt_editor(&t.id).await.ok().flatten();
-        if let Some(user) = match editor {
-            Some(e) => is_person(e).await,
-            None => None,
-        } {
-            return user;
+        if let Some((editor, at)) = repo
+            .prompt_edit(PromptScope::Task, &t.id)
+            .await
+            .ok()
+            .flatten()
+        {
+            if let Some(user) = is_person(editor).await {
+                walked = Some((user, Some(at)));
+                break;
+            }
         }
         if let Some(user) = is_person(t.created_by.clone()).await {
-            return user;
+            walked = Some((user, None));
+            break;
         }
         let source_run = t
             .labels
@@ -303,6 +318,31 @@ pub async fn acting_user(
             Some(id) if id != t.id => repo.get_task(&id).await.ok(),
             _ => None,
         };
+    }
+    // The most recent person-editor across task, project and swarm.
+    let mut latest = walked
+        .as_ref()
+        .and_then(|(user, at)| at.map(|at| (at, user.clone())));
+    let scopes = [
+        project.map(|p| (PromptScope::Project, p.id.clone())),
+        Some((PromptScope::Swarm, swarm.id.clone())),
+    ];
+    for (scope, id) in scopes.into_iter().flatten() {
+        let Some((editor, at)) = repo.prompt_edit(scope, &id).await.ok().flatten() else {
+            continue;
+        };
+        if latest.as_ref().is_some_and(|(best, _)| *best >= at) {
+            continue;
+        }
+        if let Some(user) = is_person(editor).await {
+            latest = Some((at, user));
+        }
+    }
+    if let Some((_, user)) = latest {
+        return user;
+    }
+    if let Some((user, _)) = walked {
+        return user;
     }
     if let Some(user) = match project {
         Some(p) => is_person(p.created_by.clone()).await,

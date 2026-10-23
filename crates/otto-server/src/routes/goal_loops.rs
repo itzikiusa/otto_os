@@ -743,6 +743,79 @@ mod owner_tests {
 }
 
 #[cfg(test)]
+mod budget_gate_tests {
+    use super::*;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    /// test-quality-6-03, caller side: with the stored budget config
+    /// unparsable, admission fails closed — starting a draft loop is a 400
+    /// "Budget exceeded" and the loop stays a Draft (nothing launched).
+    #[tokio::test]
+    async fn a_blocked_budget_refuses_to_start_a_loop_and_leaves_it_a_draft() {
+        use crate::routes::browser::tests::{mem_pool, seed_workspace, test_ctx};
+        let tmp = tempfile::TempDir::new().unwrap();
+        let pool = mem_pool().await;
+        seed_workspace(&pool, "ws").await;
+        sqlx::query("INSERT INTO users (id, username, password_hash, display_name, is_root, created_at) VALUES ('root', 'root', 'x', 'root', 1, ?)")
+            .bind(chrono::Utc::now().to_rfc3339())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let ctx = test_ctx(&pool, tmp.path().to_path_buf()).await;
+        let loop_ = ctx
+            .goal_loops_repo
+            .create(NewGoalLoop {
+                workspace_id: "ws".into(),
+                name: "goal".into(),
+                repo_path: tmp.path().to_string_lossy().to_string(),
+                definition: serde_json::from_value(serde_json::json!({
+                    "title": "goal", "acceptance_criteria": []
+                }))
+                .unwrap(),
+                limits: GoalLoopLimits::default(),
+                config: GoalLoopConfig::default(),
+                created_by: "root".into(),
+            })
+            .await
+            .unwrap();
+        otto_state::SettingsRepo::new(pool)
+            .put(
+                crate::budget::BUDGETS_KEY,
+                &serde_json::json!({"enforce": "yes please"}),
+            )
+            .await
+            .unwrap();
+        let mut req = Request::builder()
+            .method("POST")
+            .uri(format!("/goal-loops/{}/start", loop_.id))
+            .body(axum::body::Body::empty())
+            .unwrap();
+        req.extensions_mut()
+            .insert(AuthUser(otto_core::domain::User {
+                id: "root".into(),
+                username: "root".into(),
+                display_name: "root".into(),
+                is_root: true,
+                disabled: false,
+                created_at: chrono::Utc::now(),
+            }));
+        let resp = routes().with_state(ctx.clone()).oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&body);
+        assert!(text.contains("Budget exceeded"), "{text}");
+        assert!(text.contains("Budget settings unavailable"), "{text}");
+        assert_eq!(
+            ctx.goal_loops_repo.get(&loop_.id).await.unwrap().status,
+            GoalLoopStatus::Draft
+        );
+    }
+}
+
+#[cfg(test)]
 mod human_credential_tests {
     use super::*;
     #[test]

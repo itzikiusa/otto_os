@@ -444,7 +444,11 @@ pub async fn assemble_task_goals(ctx: &SwarmRt, task: &SwarmTask) -> Vec<SwarmGo
                 max_retries: t.max_retries,
                 blocking: t.blocking,
                 order_idx: t.order_idx + 1000, // standing/project goals after explicit ones
-                created_by: task.created_by.clone(),
+                // The template's author, not the task's: whose text this is
+                // (access-control-6-02). Who the verify turn ACTS as comes
+                // from the project / swarm prompt-editor stamps the template
+                // write recorded (`run::acting_user`).
+                created_by: t.created_by.clone(),
             })
             .await
         {

@@ -104,7 +104,10 @@ impl SwarmService {
             .await
     }
 
-    pub async fn update_swarm(&self, id: &Id, req: UpdateSwarmReq) -> Result<Swarm> {
+    /// PATCH a swarm as `editor`. A changed description is prompt text every
+    /// agent of the swarm reads as its mission, so it stamps `editor` as the
+    /// swarm's prompt editor in the same UPDATE (access-control-6-02).
+    pub async fn update_swarm(&self, id: &Id, req: UpdateSwarmReq, editor: &str) -> Result<Swarm> {
         // Lifecycle status goes through `set_swarm_status`, which anchors or
         // clears the runtime clock. A generic column write used to set
         // `status = active` and leave a budget `pause_reason` in place, so the
@@ -141,6 +144,10 @@ impl SwarmService {
                 status = None;
             }
         }
+        let prompt_updated_by = match &req.description {
+            Some(d) if *d != self.repo.get_swarm(id).await?.description => Some(editor.to_string()),
+            _ => None,
+        };
         self.repo
             .update_swarm(
                 id,
@@ -153,6 +160,7 @@ impl SwarmService {
                     max_cost_usd: req.max_cost_usd,
                     max_runtime_secs: req.max_runtime_secs,
                     max_attempts: req.max_attempts,
+                    prompt_updated_by,
                 },
             )
             .await
@@ -290,7 +298,26 @@ impl SwarmService {
             .await
     }
 
-    pub async fn update_project(&self, id: &Id, req: UpdateProjectReq) -> Result<SwarmProject> {
+    /// PATCH a project as `editor`. Its name, description and goal are written
+    /// into every project turn's identity file, so changing any of them stamps
+    /// `editor` as the project's prompt editor in the same UPDATE
+    /// (access-control-6-02). Status, order, skills and repo path keep it.
+    pub async fn update_project(
+        &self,
+        id: &Id,
+        req: UpdateProjectReq,
+        editor: &str,
+    ) -> Result<SwarmProject> {
+        let cur = self.repo.get_project(id).await?;
+        let rewrites = req.name.as_ref().is_some_and(|n| n != &cur.name)
+            || req
+                .description
+                .as_ref()
+                .is_some_and(|d| d != &cur.description)
+            || req
+                .goal_md
+                .as_ref()
+                .is_some_and(|g| Some(g) != cur.goal_md.as_ref());
         self.repo
             .update_project(
                 id,
@@ -307,6 +334,7 @@ impl SwarmService {
                     skills: req.skills,
                     status: req.status,
                     order_idx: req.order_idx,
+                    prompt_updated_by: rewrites.then(|| editor.to_string()),
                     ..Default::default()
                 },
             )
@@ -414,12 +442,12 @@ impl SwarmService {
                     result_ref: None,
                     delegated: None,
                     order_idx: req.order_idx,
+                    // Same UPDATE as the text: the prompt never lands without
+                    // its editor (data-integrity-6-02, concurrency-async-6-03).
+                    prompt_updated_by: prompt_changed.then(|| editor.to_string()),
                 },
             )
             .await?;
-        if prompt_changed {
-            self.repo.set_task_prompt_editor(id, editor).await?;
-        }
         if invalidates {
             crate::runtime::verify::invalidate_task(id);
             self.repo.stop_verification_runs(id).await?;

@@ -739,8 +739,8 @@ enum ExportFormat {
 /// (never buffering the full result) and **uncapped** — the interactive query
 /// endpoint's row cap does not apply. Bytes are produced by the driver's
 /// streaming `export_to_writer` and piped straight to the response body through
-/// an unbounded channel, so an arbitrarily large export downloads with bounded
-/// daemon memory. This is the fix for spec §2.1: the old path ran the *capped*
+/// a BOUNDED channel (the driver waits for a slow client), so an arbitrarily
+/// large export downloads with bounded daemon memory. This is the fix for spec §2.1: the old path ran the *capped*
 /// interactive query (`run`) and silently truncated at the driver default (1000
 /// rows for MySQL/CH, 50 for Mongo). A guarded write is rejected up front with a
 /// clean error. Gated at `Editor` — same as `run_query`.
@@ -787,21 +787,17 @@ async fn export_query<S: DbViewerCtx>(
     let conn_id = id.clone();
     let statement = req.statement.clone();
 
-    // Unbounded so the driver's synchronous per-row writes never block the async
-    // runtime (a sync `ExportSink` can't `.await` backpressure); a 64 KiB
-    // `BufWriter` coalesces them into a few large chunks and the client's read
-    // drains the channel — worst-case buffering is the full result, i.e. no worse
-    // than the old fully-buffered path, and typically a small fraction of it.
-    let (tx, rx) =
-        tokio::sync::mpsc::unbounded_channel::<Result<axum::body::Bytes, std::io::Error>>();
-    let writer_tx = tx.clone();
+    // Bounded hand-off (backend-performance-6-01): the driver fills 64 KiB
+    // chunks in memory and awaits a free slot in an 8-chunk channel, so a slow
+    // reader makes the driver's row loop wait instead of the daemon queueing
+    // the whole uncapped result. The response body is the receiver.
+    let (w, rx) = crate::export::ExportWriter::channel();
+    // A mid-stream failure arrives after the last chunk: the writer is dropped
+    // when the driver returns (ending `rx`), then the error is sent here.
+    let (err_tx, err_rx) = tokio::sync::oneshot::channel::<String>();
     // Carry the request credential into the task: the export / import
     // re-checks `confirm_write` there (S6-304).
     tokio::spawn(otto_core::auth::carry_request_credential(async move {
-        let w: Box<dyn std::io::Write + Send> = Box::new(std::io::BufWriter::with_capacity(
-            64 * 1024,
-            ChannelWriter { tx: writer_tx },
-        ));
         if let Err(e) = db
             .export_to_writer(
                 &conn_id,
@@ -817,12 +813,20 @@ async fn export_query<S: DbViewerCtx>(
             // Surface a mid-stream failure as a stream error so the download
             // aborts (incomplete) rather than looking complete; bytes already
             // sent stay, the client sees a truncated body + connection reset.
-            let _ = tx.send(Err(std::io::Error::other(e.to_string())));
+            let _ = err_tx.send(e.to_string());
         }
     }));
 
-    let stream =
-        futures_util::stream::unfold(rx, |mut rx| async move { rx.recv().await.map(|i| (i, rx)) });
+    use futures_util::StreamExt as _;
+    let chunks = futures_util::stream::unfold(rx, |mut rx| async move {
+        rx.recv()
+            .await
+            .map(|chunk| (Ok::<_, std::io::Error>(axum::body::Bytes::from(chunk)), rx))
+    });
+    // `Ok` from the oneshot is a failure message; a dropped sender is success.
+    let failure = futures_util::stream::once(async move { err_rx.await.ok() })
+        .filter_map(|e| async move { e.map(|e| Err(std::io::Error::other(e))) });
+    let stream = chunks.chain(failure);
     Ok((
         [
             (header::CONTENT_TYPE, content_type),
@@ -832,28 +836,6 @@ async fn export_query<S: DbViewerCtx>(
         axum::body::Body::from_stream(stream),
     )
         .into_response())
-}
-
-/// A synchronous `io::Write` that hands each buffer to the `/db/export` response
-/// stream through an unbounded channel — non-blocking, so it is safe to call from
-/// the driver's sync `ExportSink` deep inside an async task. A closed receiver
-/// (client disconnected) surfaces as `BrokenPipe` so the driver stops early.
-struct ChannelWriter {
-    tx: tokio::sync::mpsc::UnboundedSender<Result<axum::body::Bytes, std::io::Error>>,
-}
-
-impl std::io::Write for ChannelWriter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.tx
-            .send(Ok(axum::body::Bytes::copy_from_slice(buf)))
-            .map_err(|_| {
-                std::io::Error::new(std::io::ErrorKind::BrokenPipe, "export stream closed")
-            })?;
-        Ok(buf.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
 }
 
 /// Request body for the **streaming** local-file export endpoint.
@@ -930,8 +912,9 @@ async fn export_to_path<S: DbViewerCtx>(
     // fetch, and the user gets a live byte counter instead of a frozen spinner.
     // The export runs on a spawned task (the service is `Arc`-shared); a ticker
     // polls the destination file's size for progress, and the final line carries
-    // the exact {rows, bytes, path}. No driver / ExportSink change — progress is
-    // observed via the on-disk file size, leaving the bounded-RAM path untouched.
+    // the exact {rows, bytes, path}. Progress is observed via the on-disk file
+    // size (the driver's blocking-pool drain writes it), leaving the bounded
+    // hand-off untouched.
     let db = ctx.db().clone();
     let node = req
         .node

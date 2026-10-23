@@ -1025,30 +1025,48 @@ fn prune_inactive_history(runs: &mut HashMap<Id, ArtifactRuns>) {
     }
 }
 
-/// Holds an artifact's single run slot; released on drop (every path).
-struct BusyGuard(Id);
+/// Holds an artifact's single run slot; released on drop (every path). The
+/// exclusivity is the shared `otto_core::cancel_signal::InFlightSet` claim
+/// (architecture-4-02); the registry's `busy` only names the run for status.
+/// `Drop` clears that label before the claim field releases the slot.
+struct BusyGuard {
+    id: Id,
+    _slot: otto_core::cancel_signal::InFlightGuard,
+}
 
 impl Drop for BusyGuard {
     fn drop(&mut self) {
         with_registry(|m| {
-            if let Some(r) = m.get_mut(&self.0) {
+            if let Some(r) = m.get_mut(&self.id) {
                 r.busy = None;
             }
         });
     }
 }
 
+fn busy_artifacts() -> &'static otto_core::cancel_signal::InFlightSet {
+    static BUSY: std::sync::OnceLock<otto_core::cancel_signal::InFlightSet> =
+        std::sync::OnceLock::new();
+    BUSY.get_or_init(Default::default)
+}
+
 fn try_busy(artifact_id: &str, what: String) -> Result<BusyGuard, Error> {
+    // Claim and label under the registry lock, so a status read never sees a
+    // claimed slot without its label.
     with_registry(|m| {
         let r = m.entry(artifact_id.to_string()).or_default();
-        if let Some(b) = &r.busy {
+        let Some(slot) = busy_artifacts().claim(artifact_id) else {
+            let b = r.busy.as_deref().unwrap_or("another run");
             return Err(Error::Conflict(format!(
                 "an agent is already working on design artifact {artifact_id} ({b}); wait for it to finish"
             )));
-        }
+        };
         r.busy = Some(what);
         r.touched = Some(std::time::Instant::now());
-        Ok(BusyGuard(artifact_id.to_string()))
+        Ok(BusyGuard {
+            id: artifact_id.to_string(),
+            _slot: slot,
+        })
     })
 }
 

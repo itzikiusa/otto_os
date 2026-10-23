@@ -8,9 +8,7 @@
 //! the same (401 when unauthenticated, 500s logged).
 
 use std::future::Future;
-use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
@@ -26,27 +24,11 @@ use otto_design::DesignCtx;
 use otto_improve::ImprovementEngine;
 use otto_memory::MemoryService;
 use otto_state::{ProductRepo, WorkspacesRepo};
-use serde_json::Value;
 use tokio::sync::broadcast;
 
-/// One agent turn the host runs for a design assist / variant.
-pub struct AgentTurn<'a> {
-    pub ws: &'a Workspace,
-    pub user: &'a User,
-    /// The artifact's session to RESUME (`None` → spawn a fresh one).
-    pub existing: Option<&'a Id>,
-    pub title: &'a str,
-    pub cwd: &'a str,
-    pub provider: &'a str,
-    pub meta: Value,
-    pub prompt: &'a str,
-    /// No-output idle trip.
-    pub stuck_after: Duration,
-    /// Completion marker file: the turn is done once it holds non-empty text.
-    pub done_file: Option<PathBuf>,
-    /// Legacy compatibility field; silence is never accepted as completion.
-    pub quiet_done: Option<Duration>,
-}
+/// One agent turn the host runs for a design assist / variant. Shared by
+/// every assist engine (architecture-4-02), so it lives with the turn runner.
+pub use otto_agent_run::session_turn::AgentTurn;
 
 /// What the design assist engine needs from the host beyond [`DesignCtx`].
 pub trait DesignAssistCtx: DesignCtx {

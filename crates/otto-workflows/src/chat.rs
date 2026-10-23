@@ -1117,9 +1117,11 @@ impl<C: WorkflowCtx> WorkflowChatTrigger for WorkflowChatTriggerImpl<C> {
                 // the run to Canceled (status only, conditional) + emit. The
                 // engine's cancel poll then stops the in-flight node and kills the
                 // run's sessions.
-                match repo.request_cancel(&run.id).await {
+                let outcome = repo.request_cancel(&run.id).await;
+                match &outcome {
                     Ok(None) => {}
                     Ok(Some(rev)) => {
+                        let rev = *rev;
                         let _ = self.ctx.events().send(Event::WorkflowRunUpdated {
                             workspace_id: run.workspace_id.clone(),
                             run_id: run.id.clone(),
@@ -1135,7 +1137,7 @@ impl<C: WorkflowCtx> WorkflowChatTrigger for WorkflowChatTriggerImpl<C> {
                     Err(e) => tracing::warn!("workflow chat abort: cancel failed: {e}"),
                 }
                 Some(WorkflowChatAck {
-                    reply: format!("🛑 Aborting run `{short}` — stopping its agents."),
+                    reply: abort_reply(&short, &outcome),
                 })
             }
             WfControl::Help => unreachable!("handled above"),
@@ -1143,9 +1145,51 @@ impl<C: WorkflowCtx> WorkflowChatTrigger for WorkflowChatTriggerImpl<C> {
     }
 }
 
+/// The chat reply to an `abort`, per cancel outcome (error-handling-6-04):
+/// the run was flipped to Canceled (`Ok(Some)`), it had already settled
+/// (`Ok(None)` — nothing was aborted), or the write failed (`Err` — the run
+/// is still going, so the user must not be told it's stopping).
+fn abort_reply<E: std::fmt::Display>(
+    short: &str,
+    outcome: &std::result::Result<Option<i64>, E>,
+) -> String {
+    match outcome {
+        Ok(Some(_)) => format!("🛑 Aborting run `{short}` — stopping its agents."),
+        Ok(None) => format!("Run `{short}` already finished — nothing to abort."),
+        Err(e) => format!("⚠️ Couldn’t abort run `{short}`: {e}. Use Cancel in Otto."),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn abort_reply_confirms_only_a_run_that_was_canceled() {
+        let ok: std::result::Result<Option<i64>, String> = Ok(Some(7));
+        assert_eq!(
+            abort_reply("ab12", &ok),
+            "🛑 Aborting run `ab12` — stopping its agents."
+        );
+    }
+
+    #[test]
+    fn abort_reply_says_a_settled_run_had_nothing_to_abort() {
+        let settled: std::result::Result<Option<i64>, String> = Ok(None);
+        assert_eq!(
+            abort_reply("ab12", &settled),
+            "Run `ab12` already finished — nothing to abort."
+        );
+    }
+
+    #[test]
+    fn abort_reply_surfaces_a_failed_cancel() {
+        let failed: std::result::Result<Option<i64>, String> = Err("database is locked".into());
+        assert_eq!(
+            abort_reply("ab12", &failed),
+            "⚠️ Couldn’t abort run `ab12`: database is locked. Use Cancel in Otto."
+        );
+    }
 
     #[test]
     fn parses_full_command() {

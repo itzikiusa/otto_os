@@ -294,6 +294,9 @@ pub fn valid_studio(studio: &str) -> bool {
 
 /// The Excalidraw split/merge adapter shared by the assist engines.
 pub mod excalidraw;
+/// The `scene3d` 3D document model, validator and Blender export (moved from
+/// otto-product, architecture-4-02: a format belongs with the formats).
+pub mod scene3d;
 
 #[cfg(test)]
 mod tests {

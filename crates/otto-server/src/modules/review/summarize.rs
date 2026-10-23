@@ -214,7 +214,7 @@ pub(crate) async fn summarize_and_persist(
                 Ok(())
             },
             |sid| async move {
-                crate::review_session::stop_review_sessions(&ctx.manager, &[sid]).await;
+                otto_review::session::stop_review_sessions(&ctx.manager, &[sid]).await;
             },
         )
         .await

@@ -7,8 +7,7 @@
 //! the artifact API share one trust boundary. [`recompute_and_emit`] is serialized
 //! per pack so concurrent mutations can't lose an update.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use otto_core::event::Event;
@@ -23,13 +22,17 @@ use serde_json::{json, Value};
 
 use crate::state::ServerCtx;
 
-/// Per-pack async locks: the outer `std::Mutex` guards the map; each value is an
-/// async mutex held across the recompute read→derive→write.
-pub type ProofLocks = Arc<Mutex<HashMap<Id, Arc<tokio::sync::Mutex<()>>>>>;
+/// Per-pack async locks, each held across the recompute read→derive→write
+/// (the shared registry prunes a pack's entry once nobody holds it).
+pub type ProofLocks = Arc<otto_core::keyed_lock::KeyedLocks<Id>>;
 
 pub fn new_locks() -> ProofLocks {
-    Arc::new(Mutex::new(HashMap::new()))
+    Arc::new(otto_core::keyed_lock::KeyedLocks::new())
 }
+
+/// What [`assemble_diff`] did (error-handling-6-02): the contract type, so
+/// the assemble route reports it instead of claiming success.
+pub use otto_core::api::DiffAssembly;
 
 /// Default bound for an assembled command (tests can be slow; keep generous but
 /// finite so a hang can't wedge a gate).
@@ -299,17 +302,19 @@ async fn proof_identity(cwd: &str) -> Option<String> {
 }
 
 /// Assemble a `diff` artifact from `cwd` (vs `base`, or the working tree vs HEAD
-/// when `base` is None). Best-effort: returns Ok(()) without an artifact if the
-/// path isn't a git repo or the diff fails. Idempotent (upsert by title).
+/// when `base` is None). Returns what it did without an artifact when the path
+/// isn't a git repo or the diff fails ([`DiffAssembly`]; the automatic
+/// completion gates ignore it, the assemble route reports it). A HEAD that
+/// moved mid-assembly is a `Conflict` ("retry"). Idempotent (upsert by title).
 pub async fn assemble_diff(
     ctx: &ServerCtx,
     pack: &ProofPack,
     cwd: &str,
     base: Option<&str>,
-) -> Result<()> {
+) -> Result<DiffAssembly> {
     let git = LocalGit::new(cwd);
     let Ok(head_commit) = git.rev_parse("HEAD").await else {
-        return Ok(());
+        return Ok(DiffAssembly::NotARepo);
     };
     let identity = proof_identity(cwd).await;
     // Counts come from ONE `--raw --numstat` summary (never the patch): this
@@ -327,16 +332,21 @@ pub async fn assemble_diff(
         summary: true,
         ..DiffOpts::default()
     };
-    let Ok(resp) = git.diff_with(&target, &summary).await else {
-        return Ok(()); // not a git repo / diff failed — skip silently
+    let failed = |cmd: &str, e: Error| DiffAssembly::DiffFailed {
+        commands: vec![format!("{cmd}: {e}")],
+    };
+    let resp = match git.diff_with(&target, &summary).await {
+        Ok(resp) => resp,
+        Err(e) => return Ok(failed("git diff --raw --numstat", e)),
     };
     if resp.files.is_empty() {
-        return Ok(());
+        return Ok(DiffAssembly::NoChanges);
     }
     // The stored text is clipped to STORE_CAP anyway; read at most twice that
     // (headroom for redaction shrinking it) and let git be killed there.
-    let Ok((text, _)) = git.diff_text_capped(base, 2 * STORE_CAP).await else {
-        return Ok(());
+    let text = match git.diff_text_capped(base, 2 * STORE_CAP).await {
+        Ok((text, _)) => text,
+        Err(e) => return Ok(failed("git diff", e)),
     };
     if git.rev_parse("HEAD").await? != head_commit {
         return Err(Error::Conflict(
@@ -371,7 +381,9 @@ pub async fn assemble_diff(
         "otto",
     )
     .await?;
-    Ok(())
+    Ok(DiffAssembly::Assembled {
+        files_changed: resp.files.len(),
+    })
 }
 
 /// Run a command, capturing it as a `command` artifact (upsert by command).
@@ -430,22 +442,6 @@ pub async fn gate(
         .await
 }
 
-fn lock_for(ctx: &ServerCtx, pack_id: &str) -> Arc<tokio::sync::Mutex<()>> {
-    lock_in(&ctx.proof_locks, pack_id)
-}
-
-/// Get-or-create `pack_id`'s lock, pruning locks nobody holds (strong count
-/// 1 = only this map) so the registry stays bounded by in-flight recomputes
-/// instead of growing by one entry per pack ever touched. Safe: a holder
-/// always owns an `Arc` clone while it waits for / holds the guard.
-fn lock_in(locks: &ProofLocks, pack_id: &str) -> Arc<tokio::sync::Mutex<()>> {
-    let mut map = locks.lock().unwrap_or_else(|e| e.into_inner());
-    map.retain(|id, l| id == pack_id || Arc::strong_count(l) > 1);
-    map.entry(pack_id.to_string())
-        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-        .clone()
-}
-
 /// Resolve the done-contract policy for a pack: the work-item-kind defaults
 /// (which reproduce the legacy status) strengthened by any repo opt-ins. Repo
 /// lookup is best-effort — an unknown/unlinked repo yields the default policy, so
@@ -466,8 +462,7 @@ pub async fn policy_for_pack(ctx: &ServerCtx, pack: &ProofPack) -> DoneContractP
 /// per pack so concurrent callers can't lose an update. Returns the refreshed
 /// pack.
 pub async fn recompute_and_emit(ctx: &ServerCtx, pack_id: &str) -> Result<ProofPack> {
-    let lock = lock_for(ctx, pack_id);
-    let _guard = lock.lock().await;
+    let _guard = ctx.proof_locks.lock(pack_id).await;
 
     let pack = ctx.proof_repo.get_pack(pack_id).await?;
     // Status/risk/done/badges never read `content_ref` — metadata only.

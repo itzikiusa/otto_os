@@ -124,9 +124,9 @@ pub fn split_auth_secrets(
 }
 
 /// Resolve every `{"$secret": …}` marker in `auth` in-memory, right before
-/// send. `expect_request_id`: when the marker is a request ref it must point
-/// at a request whose workspace was already verified by the caller — the
-/// caller passes the set of legitimate ids (usually exactly one). Values come
+/// send. `allowed_request_ids`: a request-ref marker must name one of these —
+/// requests whose workspace the caller already verified (usually exactly
+/// one); any other ref is rejected. Values come
 /// from the Keychain blob; a missing member resolves to "".
 pub fn resolve_auth_markers(
     secrets: &dyn SecretStore,

@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 
 use otto_core::domain::Session;
 use otto_state::SessionsRepo;
+use otto_transcript::roots::TranscriptRoots;
 use otto_transcript::{Provider, UnavailableReason};
 
 use crate::state::ServerCtx;
@@ -28,31 +29,12 @@ pub(crate) fn home_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/"))
 }
 
-/// The two provider roots the daemon reads transcripts from
-/// (`<claude projects>`, `<codex sessions>`). Precedence:
-/// `OTTO_TRANSCRIPT_ROOTS=<claude>:<codex>` (two absolute paths) → under
-/// `OTTO_E2E=1` the empty per-daemon dirs `<data_dir>/e2e-transcripts/{claude,codex}`
-/// (the throwaway e2e daemon must never read the real trees) → the defaults
-/// `~/.claude/projects` and `$CODEX_HOME/sessions` (else `~/.codex/sessions`).
-pub(crate) fn transcript_roots(data_dir: &Path) -> (PathBuf, PathBuf) {
-    if let Some(raw) = std::env::var_os("OTTO_TRANSCRIPT_ROOTS") {
-        let raw = raw.to_string_lossy();
-        let mut parts = raw.split(':').map(str::trim).filter(|p| !p.is_empty());
-        if let (Some(c), Some(x)) = (parts.next(), parts.next()) {
-            return (PathBuf::from(c), PathBuf::from(x));
-        }
-        tracing::warn!("OTTO_TRANSCRIPT_ROOTS must be `<claude root>:<codex root>`; ignoring");
-    }
-    if e2e_enabled() {
-        let base = data_dir.join("e2e-transcripts");
-        let _ = std::fs::create_dir_all(base.join("claude"));
-        let _ = std::fs::create_dir_all(base.join("codex"));
-        return (base.join("claude"), base.join("codex"));
-    }
-    (
-        home_dir().join(".claude").join("projects"),
-        otto_sessions::codex_sessions_root(),
-    )
+/// Every provider root the daemon reads transcripts from — the shared
+/// [`otto_transcript::roots::TranscriptRoots::discover`] (architecture-6-01):
+/// `OTTO_TRANSCRIPT_ROOTS` → the isolated e2e fixture under `data_dir` → the
+/// local defaults plus every subscription account home.
+pub(crate) fn transcript_roots(data_dir: &Path) -> TranscriptRoots {
+    TranscriptRoots::discover(&home_dir(), data_dir)
 }
 
 /// The provider whose transcript this session has: its own for agent sessions,
@@ -124,20 +106,11 @@ pub(crate) fn resolve_transcript_sync(
         .get("nested_cwd")
         .and_then(|v| v.as_str())
         .unwrap_or(&session.cwd);
-    let (claude_root, codex_root) =
-        if let Some(id) = session.meta.get("account_id").and_then(|v| v.as_str()) {
-            let home = otto_sessions::accounts::account_home(
-                &data_dir.join("provider-accounts"),
-                &id.to_owned(),
-            )
-            .map_err(|_| UnavailableReason::TranscriptMissing)?;
-            (home.join("projects"), home.join("sessions"))
-        } else {
-            transcript_roots(data_dir)
-        };
-    let path = otto_sessions::transcript_path_in_roots(
-        &claude_root,
-        &codex_root,
+    // The session's own account home, else the local defaults (never another
+    // account's tree); an invalid account id yields no roots at all.
+    let roots = TranscriptRoots::for_session(&session.meta, data_dir);
+    let path = otto_sessions::transcript_path_in(
+        &roots,
         &provider_name,
         cwd,
         session.provider_session_id.as_deref(),
@@ -168,10 +141,10 @@ pub(crate) async fn resolve_transcript(
     Ok(resolved)
 }
 
-/// `OTTO_E2E=1|true` — the Playwright harness's throwaway daemon (see
-/// `routes/findings.rs`); unlocks the fixture-transcript hooks only.
+/// The isolated e2e daemon (`otto_core::e2e::isolated`); unlocks the
+/// fixture-transcript hooks only.
 pub(crate) fn e2e_enabled() -> bool {
-    matches!(std::env::var("OTTO_E2E").as_deref(), Ok("1") | Ok("true"))
+    otto_transcript::roots::isolated()
 }
 
 // ── "no transcript" marks (backend-performance-4-06) ──────────────────────

@@ -27,8 +27,10 @@ pub mod images;
 pub mod model;
 pub mod peek;
 pub mod records;
+pub mod roots;
 pub mod subagents;
 pub mod tailer;
+pub mod turn;
 pub mod usage;
 pub mod util;
 

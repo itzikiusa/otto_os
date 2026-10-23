@@ -105,20 +105,15 @@ pub async fn start(
     let mut secret_values: Vec<String> = env_secrets.values().cloned().collect();
     // An agent-started run keeps every stored secret on its bound host (see
     // `run_step`); a person's run is theirs to aim.
-    let binding = if super::api_client::is_agent_caller(&headers, &auth) {
-        Some(super::api_client::StepSecretBinding {
-            bound_hosts: super::api_client::bound_env_secret_hosts(&api, &wid, &initial_vars)
-                .await?,
-            env_vars: initial_vars.clone(),
-            env_blob: env_secrets.clone(),
-            secret_keys: environment
-                .as_ref()
-                .map(|env| env.secret_keys.clone())
-                .unwrap_or_default(),
-        })
-    } else {
-        None
-    };
+    let binding = super::api_client::StepSecretBinding::for_caller(
+        super::api_client::is_agent_caller(&headers, &auth),
+        &api,
+        &wid,
+        &initial_vars,
+        environment.as_ref(),
+        &env_secrets,
+    )
+    .await?;
     let mut requests = Vec::new();
     let mut snapshot = Vec::new();
     for step in &steps {

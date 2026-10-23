@@ -14,9 +14,9 @@
 //! their paste and Enter (one merged prompt plus an empty one). Every copy now
 //! calls [`SessionManager::submit_prompt`] (or [`submit_prompt`], the verified
 //! path); `scripts/check.sh` refuses a new `bracketed_paste(` or raw `b"\r"`
-//! PTY write outside this crate. `otto_review::session` re-exports these items
-//! under their old names.
+//! PTY write outside this crate.
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use otto_core::Id;
@@ -77,6 +77,31 @@ impl SubmitOpts {
     };
 }
 
+/// "Is the run this submit belongs to still active?" (architecture-4-01r). A
+/// run-scoped caller (a swarm run, a stoppable engine step) passes one to
+/// [`SessionManager::submit_prompt_while`]; it is checked before the paste and
+/// before every re-inject (re-paste, re-Enter), so a run stopped mid-submit
+/// never types into a session it no longer owns. Kept off [`SubmitOpts`] so
+/// that stays a plain `Copy` value its callers build with a struct literal.
+#[derive(Clone)]
+pub struct RunGuard(Arc<dyn Fn() -> bool + Send + Sync>);
+
+impl RunGuard {
+    pub fn new(active: impl Fn() -> bool + Send + Sync + 'static) -> Self {
+        Self(Arc::new(active))
+    }
+
+    fn active(guard: Option<&Self>) -> bool {
+        guard.is_none_or(|g| (g.0)())
+    }
+}
+
+impl std::fmt::Debug for RunGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RunGuard")
+    }
+}
+
 /// `text` wrapped in bracketed-paste markers. The prompt carries external text
 /// (Jira descriptions, chat messages, user context): a raw `ESC[201~` in it
 /// would end the paste early and type the rest as keystrokes, so control
@@ -119,17 +144,11 @@ pub(crate) fn tui_ready(
 
 /// Wait for the agent's TUI to draw and settle. LEGACY rule: on the deadline it
 /// reports ready even for a blank TUI, so its callers paste and fall back to
-/// their own watch loop — [`wait_for_tui_strict`] is for callers that have a
-/// fail-fast path for "the prompt never landed".
+/// their own watch loop. Callers with a fail-fast path for "the prompt never
+/// landed" submit with [`SubmitOpts::VERIFIED`] instead, whose strict wait
+/// treats a TUI that drew NOTHING by the deadline as not ready.
 pub async fn wait_for_tui(manager: &SessionManager, sid: &Id) -> bool {
     wait_for_tui_with(manager, sid, false).await
-}
-
-/// [`wait_for_tui`] under the R5.3 rule: a TUI that drew NOTHING by the
-/// deadline is not ready, and the caller must fail the attempt rather than
-/// watch a session the prompt never reached.
-pub async fn wait_for_tui_strict(manager: &SessionManager, sid: &Id) -> bool {
-    wait_for_tui_with(manager, sid, true).await
 }
 
 async fn wait_for_tui_with(manager: &SessionManager, sid: &Id, strict: bool) -> bool {
@@ -206,6 +225,30 @@ impl SessionManager {
         prompt: &str,
         opts: SubmitOpts,
     ) -> Option<Option<Instant>> {
+        self.submit_guarded(sid, prompt, opts, None).await
+    }
+
+    /// [`Self::submit_prompt_at`] for a run-scoped caller: `run` is checked
+    /// before the paste and before every re-inject; once it reports the run
+    /// over, nothing more is typed (`None` when that happens before the
+    /// paste).
+    pub async fn submit_prompt_while(
+        &self,
+        sid: &Id,
+        prompt: &str,
+        opts: SubmitOpts,
+        run: RunGuard,
+    ) -> Option<Option<Instant>> {
+        self.submit_guarded(sid, prompt, opts, Some(&run)).await
+    }
+
+    async fn submit_guarded(
+        &self,
+        sid: &Id,
+        prompt: &str,
+        opts: SubmitOpts,
+        run: Option<&RunGuard>,
+    ) -> Option<Option<Instant>> {
         if !wait_for_tui_with(self, sid, opts.echo_wait).await {
             return None;
         }
@@ -214,11 +257,15 @@ impl SessionManager {
         }
         let lock = self.submit_lock(sid);
         let _submit = lock.lock().await;
+        if !RunGuard::active(run) {
+            tracing::info!("submit: run ended before the paste into session {sid}");
+            return None;
+        }
         let pre_paste = self.live_handle(sid).map(|h| h.last_output_at());
         // A paste that could not be written (the session died, or a room
         // driver refused automation input) is "not submitted".
         let pasted = if opts.echo_wait {
-            self.paste_until_echoed(sid, prompt).await
+            self.paste_until_echoed(sid, prompt, run).await
         } else {
             let ok = self.input(sid, &bracketed_paste(prompt)).await.is_ok();
             tokio::time::sleep(PASTE_TO_ENTER).await;
@@ -228,7 +275,11 @@ impl SessionManager {
             tracing::warn!("submit: could not paste the prompt into session {sid}");
             return None;
         }
-        self.enter_until_dispatched(sid).await;
+        if !RunGuard::active(run) {
+            tracing::info!("submit: run ended before Enter in session {sid}");
+            return None;
+        }
+        self.enter_until_dispatched(sid, run).await;
         Some(pre_paste)
     }
 
@@ -241,15 +292,15 @@ impl SessionManager {
         let _submit = lock.lock().await;
         let _ = self.input(sid, &bracketed_paste(prompt)).await;
         tokio::time::sleep(PASTE_TO_ENTER).await;
-        self.enter_until_dispatched(sid).await;
+        self.enter_until_dispatched(sid, None).await;
     }
 
-    /// Enter, then Enter once more when the submit didn't visibly dispatch.
-    /// Caller holds the submit lock.
-    async fn enter_until_dispatched(&self, sid: &Id) {
+    /// Enter, then Enter once more when the submit didn't visibly dispatch
+    /// (and `run`, if any, is still active). Caller holds the submit lock.
+    async fn enter_until_dispatched(&self, sid: &Id, run: Option<&RunGuard>) {
         let before = self.live_handle(sid).map(|h| h.last_output_at());
         let _ = self.input(sid, ENTER).await;
-        if !dispatched(self, sid, before).await {
+        if !dispatched(self, sid, before).await && RunGuard::active(run) {
             let _ = self.input(sid, ENTER).await;
         }
     }
@@ -275,10 +326,16 @@ impl SessionManager {
     /// (after a Ctrl-U clear) if a late redraw wiped it. Caller holds the
     /// submit lock — without it the Ctrl-U erased another submitter's paste.
     /// False only when the first paste could not be written at all.
-    async fn paste_until_echoed(&self, sid: &Id, prompt: &str) -> bool {
+    async fn paste_until_echoed(&self, sid: &Id, prompt: &str, run: Option<&RunGuard>) -> bool {
         let probe = paste_probe(prompt);
         for attempt in 0..2 {
             if attempt == 1 {
+                if !RunGuard::active(run) {
+                    // The run ended while the first paste was settling: leave
+                    // the half-landed text rather than re-typing for a run
+                    // that no longer owns the session.
+                    return true;
+                }
                 // Clear whatever partial line a half-landed paste left, so a
                 // re-paste never concatenates onto it.
                 let _ = self.input(sid, CLEAR_LINE).await;

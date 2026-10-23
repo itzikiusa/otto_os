@@ -8,7 +8,9 @@ license.workspace = true
 otto-core = { workspace = true }
 otto-state = { workspace = true }
 otto-agent-run = { workspace = true }
-otto-design-assist = { workspace = true }
+# Excalidraw split/merge only (`format::excalidraw`); the assist turn type comes
+# from otto-agent-run, so canvas no longer pulls in the Design Hall engine.
+otto-design = { workspace = true }
 axum = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["raw_value"] }

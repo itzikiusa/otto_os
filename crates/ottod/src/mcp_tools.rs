@@ -2535,11 +2535,38 @@ fn merge_upsert(args: &Value, parsed_curl: Option<&Value>, stored: Option<&Value
     Value::Object(merged)
 }
 
+/// Native reads that are exact twins (same arguments, same route) of an
+/// outward `otto.*` tool: `route_for` spells the route once (architecture-1-05).
+const ROUTED_TWINS: &[&str] = &[
+    "otto_get_session",
+    "otto_get_workflow_run",
+    "otto_list_findings",
+    "otto_list_prs",
+];
+
+/// A [`ROUTED_TWINS`] read via `route_for`, its `/api/v1` prefix stripped here.
+fn twin_read(name: &str, args: &Value) -> Option<Result<ReadCall, String>> {
+    use otto_server::mcp_outward::{route_for, Method};
+    let short = name
+        .strip_prefix("otto_")
+        .filter(|_| ROUTED_TWINS.contains(&name))?;
+    let call = route_for(short, args).map_err(|e| e.to_string());
+    Some(
+        call.and_then(|c| match (c.method, c.path.strip_prefix("/api/v1")) {
+            (Method::Get, Some(p)) => Ok(ReadCall::get(p.to_string())),
+            _ => Err(format!("{name}: the outward twin is not an /api/v1 read")),
+        }),
+    )
+}
+
 /// Map a feature read tool + its arguments to the upstream daemon read. Pure: no
 /// I/O. Workspace-scoped tools use the session's workspace (`ws`); others take an
 /// explicit id argument. Every path is a GET or the read-only `/memory/search`
 /// viewer POST — no tool here mutates.
 fn read_route(name: &str, args: &Value, ws: Option<&str>) -> Result<ReadCall, String> {
+    if let Some(call) = twin_read(name, args) {
+        return call;
+    }
     let ws_req = || {
         ws.filter(|s| !s.is_empty())
             .ok_or_else(|| "no workspace context (OTTO_WORKSPACE_ID unset)".to_string())
@@ -2550,9 +2577,6 @@ fn read_route(name: &str, args: &Value, ws: Option<&str>) -> Result<ReadCall, St
             seg(&arg_str(args, "workflow_id")?),
             args.get("summary").and_then(Value::as_bool).unwrap_or(true)
         )),
-        "otto_get_workflow_run" => {
-            ReadCall::get(format!("/workflow-runs/{}", seg(&arg_str(args, "run_id")?)))
-        }
         "otto_list_broker_topics" => ReadCall::get(format!(
             "/brokers/clusters/{}/topics",
             seg(&arg_str(args, "cluster_id")?)
@@ -2615,9 +2639,6 @@ fn read_route(name: &str, args: &Value, ws: Option<&str>) -> Result<ReadCall, St
             })
         }
         "otto_list_sessions" => ReadCall::get(format!("/workspaces/{}/sessions", seg(ws_req()?))),
-        "otto_get_session" => {
-            ReadCall::get(format!("/sessions/{}", seg(&arg_str(args, "session_id")?)))
-        }
         "otto_wait_session" => ReadCall::get(format!(
             "/sessions/{}/wait?{}",
             seg(&arg_str(args, "session_id")?),
@@ -2628,27 +2649,6 @@ fn read_route(name: &str, args: &Value, ws: Option<&str>) -> Result<ReadCall, St
             .trim_start_matches('&')
         ))
         .within(wait_session_budget(args)),
-        "otto_list_findings" => ReadCall::get(format!(
-            "/reviews/{}/findings",
-            seg(&arg_str(args, "review_id")?)
-        )),
-        "otto_list_prs" => {
-            let q = opt_query(
-                args,
-                &[
-                    ("state", "state"),
-                    ("page", "page"),
-                    ("per_page", "per_page"),
-                ],
-            );
-            let q = q.trim_start_matches('&');
-            let repo = seg(&arg_str(args, "repo_id")?);
-            ReadCall::get(if q.is_empty() {
-                format!("/repos/{repo}/prs")
-            } else {
-                format!("/repos/{repo}/prs?{q}")
-            })
-        }
         "otto_get_pr" => ReadCall::get(format!(
             "/repos/{}/prs/{}",
             seg(&arg_str(args, "repo_id")?),
@@ -6463,6 +6463,30 @@ mod tests {
                 .path,
             "/swarm/swarms/s1/utilization"
         );
+        // Routed twins (`route_for`, `/api/v1` stripped once): same URLs.
+        assert_eq!(
+            read_route(
+                "otto_list_prs",
+                &json!({"repo_id":"a b","state":"open","per_page":5}),
+                ws
+            )
+            .unwrap(),
+            ReadCall {
+                post: false,
+                path: "/repos/a%20b/prs?state=open&per_page=5".into(),
+                body: None,
+                budget: CALL_TIMEOUT,
+            }
+        );
+        assert_eq!(
+            read_route("otto_list_prs", &json!({"repo_id":"r1"}), ws)
+                .unwrap()
+                .path,
+            "/repos/r1/prs"
+        );
+        assert!(read_route("otto_list_prs", &json!({}), ws)
+            .unwrap_err()
+            .contains("repo_id"));
         // Delegation reads: explicit session id, no workspace needed.
         assert_eq!(
             read_route("otto_get_session", &json!({"session_id":"s9"}), ws)

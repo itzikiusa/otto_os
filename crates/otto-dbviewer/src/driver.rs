@@ -224,9 +224,14 @@ pub trait Driver: Send + Sync {
     /// `None` means a genuinely uncapped export (the `/db/export` fix: the old
     /// path substituted each driver's small default cap and silently truncated).
     ///
-    /// `w` is provided by the caller: [`Driver::export_to_path`] passes a buffered
-    /// `File`; the HTTP `/db/export` handler passes a channel-backed writer so the
-    /// bytes stream straight to the browser without ever buffering the full result.
+    /// `w` is provided by the caller: [`Driver::export_to_path`] and the HTTP
+    /// `/db/export` handler pass a paced [`ExportWriter::channel`] — the driver
+    /// writes rows into an in-memory chunk and awaits [`ExportSink::pace`] after
+    /// each one, so it never does file IO itself and never runs ahead of the
+    /// consumer (a file on the blocking pool, or the response body).
+    ///
+    /// [`ExportWriter::channel`]: crate::export::ExportWriter::channel
+    /// [`ExportSink::pace`]: crate::export::ExportSink::pace
     ///
     /// Engines that can stream (MySQL/ClickHouse/MongoDB) **override** this. The
     /// trait default is a **last-resort buffering fallback**: it runs the
@@ -242,7 +247,7 @@ pub trait Driver: Send + Sync {
         node: Option<&str>,
         format: ExportFormat,
         max_rows: Option<usize>,
-        w: Box<dyn std::io::Write + Send>,
+        mut w: crate::export::ExportWriter,
     ) -> Result<ExportCounts> {
         tracing::warn!(
             engine = self.engine().as_str(),
@@ -268,14 +273,20 @@ pub trait Driver: Send + Sync {
                  rows) — it has no streaming export path; narrow the query or add an explicit LIMIT"
             )));
         }
-        crate::export::write_buffered_result_to(w, format, &result)
-            .map_err(|e| otto_core::Error::Internal(format!("write export file: {e}")))
+        let counts = crate::export::write_buffered_result_to(&mut w, format, &result)
+            .map_err(|e| otto_core::Error::Internal(format!("write export file: {e}")))?;
+        w.close()
+            .await
+            .map_err(|e| otto_core::Error::Internal(format!("write export file: {e}")))?;
+        Ok(counts)
     }
 
-    /// Convenience wrapper: stream an export to a local file at `dest`. Opens the
-    /// file behind a 64 KiB `BufWriter` and delegates to [`Driver::export_to_writer`]
-    /// — the one place export bytes are produced. Drivers override `export_to_writer`,
-    /// never this. Backs `POST /db/export-to-path`.
+    /// Convenience wrapper: stream an export to a local file at `dest`. The
+    /// driver's [`Driver::export_to_writer`] — the one place export bytes are
+    /// produced — feeds a bounded channel, and ONE blocking-pool task owns the
+    /// `File` (`create` included) and drains it, so no disk write ever runs on a
+    /// runtime worker (backend-performance-6-01). Drivers override
+    /// `export_to_writer`, never this. Backs `POST /db/export-to-path`.
     async fn export_to_path(
         &self,
         cfg: &ResolvedConfig,
@@ -285,10 +296,15 @@ pub trait Driver: Send + Sync {
         max_rows: Option<usize>,
         dest: &std::path::Path,
     ) -> Result<ExportCounts> {
-        let w = crate::export::open_file_sink(dest)
-            .map_err(|e| otto_core::Error::Internal(format!("create export file: {e}")))?;
-        self.export_to_writer(cfg, statement, node, format, max_rows, w)
-            .await
+        let (w, rx) = crate::export::ExportWriter::channel();
+        let (exported, written) = tokio::join!(
+            self.export_to_writer(cfg, statement, node, format, max_rows, w),
+            crate::export::drain_to_file(dest.to_path_buf(), rx),
+        );
+        // A file error is the cause; the driver only saw its effect (a closed
+        // channel), so it wins.
+        written.map_err(|e| otto_core::Error::Internal(format!("write export file: {e}")))?;
+        exported
     }
 
     /// Bulk catalog read for the relationship diagram / DB Assistant schema:
@@ -574,7 +590,7 @@ mod tests {
                 None,
                 ExportFormat::CsvWithNames,
                 None,
-                sink,
+                sink.into(),
             )
             .await
             .expect_err("over-cap export must be refused");
@@ -592,7 +608,14 @@ mod tests {
         let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let w: Box<dyn std::io::Write + Send> = Box::new(SharedWriter(buf.clone()));
         let counts = d
-            .export_to_writer(&cfg(), "GET *", None, ExportFormat::CsvWithNames, None, w)
+            .export_to_writer(
+                &cfg(),
+                "GET *",
+                None,
+                ExportFormat::CsvWithNames,
+                None,
+                w.into(),
+            )
             .await
             .expect("export ok");
         assert_eq!(counts.rows, 3);

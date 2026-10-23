@@ -413,14 +413,10 @@ fn descendant_cpu_ms(root: u32, table: &[ProcRow]) -> u64 {
 }
 
 /// Root directory codex writes session rollouts to: `$CODEX_HOME/sessions`,
-/// else `~/.codex/sessions`.
+/// else `~/.codex/sessions` ([`otto_transcript::roots`] owns the rule).
 pub fn codex_sessions_root() -> std::path::PathBuf {
-    let home = std::env::var("CODEX_HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".codex")
-        });
-    home.join("sessions")
+    otto_transcript::roots::RootsEnv::from_process()
+        .default_codex_root(&otto_transcript::roots::home_dir())
 }
 
 /// Locate the rollout file for a codex conversation id: the file named
@@ -1184,11 +1180,6 @@ fn holder_meta(session: &Session, ingest_token: Option<String>) -> serde_json::V
 /// of MB on a long conversation.
 const TURN_TAIL_BYTES: u64 = 256 * 1024;
 
-/// The harness wake-up marker claude writes when a sub-agent or background
-/// task reports back. It lands AFTER the parent's `end_turn`, and the parent
-/// will resume on it — so a transcript that ends with one is mid-turn.
-const TASK_NOTIFICATION: &str = "<task-notification>";
-
 /// Last [`TURN_TAIL_BYTES`] of `path` as lossy UTF-8, with the (necessarily
 /// partial) first line of the window dropped when the file was bigger than it.
 /// Blocking I/O — call from the blocking pool.
@@ -1217,109 +1208,18 @@ fn read_tail(path: &std::path::Path, max: u64) -> std::io::Result<String> {
 /// callers must fall back to their previous decision and never read `None` as
 /// "idle".
 ///
-/// A compact local mirror of `otto_server::turn_oracle::{scan_claude,
-/// scan_codex}` — otto-sessions cannot depend on otto-server, and the sweep
-/// needs only the tail verdict, not the full pending/notified bookkeeping.
+/// The rule is the turn oracle's own fold, [`otto_transcript::turn::tail_open`]
+/// (architecture-6-02 — one parser, not a local mirror):
 ///
-/// - **claude**: the last MESSAGE-bearing line (a JSON line whose
-///   `message.role` is `user` or `assistant`) must be an assistant message
-///   with `stop_reason == "end_turn"` for the turn to be closed — and any
-///   later line carrying a [`TASK_NOTIFICATION`] re-opens it (a harness
-///   wake-up is pending, the parent is about to speak again).
+/// - **claude**: the last MESSAGE-bearing parent line must be an assistant
+///   `end_turn` for the turn to be closed — and a later delivered
+///   `<task-notification>` re-opens it (a harness wake-up is pending), except
+///   one stapled onto an `attachment` line or a `remove`d queue entry.
 /// - **codex**: the latest `event_msg` `task_started` with no matching
 ///   `task_complete` / `turn_aborted` for the same `turn_id`.
 fn agent_turn_open(provider: &str, artifact: &std::path::Path) -> Option<bool> {
     let tail = read_tail(artifact, TURN_TAIL_BYTES).ok()?;
-    match provider {
-        "claude" => claude_turn_open(&tail),
-        "codex" => codex_turn_open(&tail),
-        _ => None,
-    }
-}
-
-/// claude transcript rule — see [`agent_turn_open`]. `None` when the window
-/// holds no message line at all (a fresh or unparseable transcript says
-/// nothing about the turn).
-fn claude_turn_open(jsonl: &str) -> Option<bool> {
-    let mut saw_message = false;
-    let mut tail_end_turn = false;
-    for line in jsonl.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        // A partial line (window edge, or claude mid-append) parses as nothing
-        // and contributes nothing — same rule as the oracle's scan.
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
-        };
-        // Legacy in-file sub-agent lines are never a PARENT turn.
-        if v.get("isSidechain").and_then(|b| b.as_bool()) == Some(true) {
-            continue;
-        }
-        let msg = v.get("message");
-        let role = msg
-            .and_then(|m| m.get("role"))
-            .and_then(|r| r.as_str())
-            .unwrap_or("");
-        if matches!(role, "user" | "assistant") {
-            saw_message = true;
-            tail_end_turn = role == "assistant"
-                && msg
-                    .and_then(|m| m.get("stop_reason"))
-                    .and_then(|r| r.as_str())
-                    == Some("end_turn");
-        }
-        // Matched on the RAW line: a notification rides a queue-operation
-        // line, a plain user line or a `tool_result` block indifferently.
-        // EXCEPT an `attachment` line: claude staples a late notification onto
-        // the user's NEXT prompt rather than waking the parent, so an
-        // attachment tail is the NORMAL end state of a finished session that
-        // used sub-agents (24 of the 40 most recent transcripts on the
-        // reviewer's machine, 9 min to 19 h old) — reading it as "open" would
-        // hold every such engine session forever.
-        let kind = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
-        if kind != "attachment" && line.contains(TASK_NOTIFICATION) {
-            tail_end_turn = false;
-        }
-    }
-    saw_message.then_some(!tail_end_turn)
-}
-
-/// codex rollout rule — see [`agent_turn_open`]. `None` when the window holds
-/// no `task_started` (nothing to say about a turn).
-fn codex_turn_open(rollout: &str) -> Option<bool> {
-    let mut latest: Option<String> = None;
-    let mut open: Option<bool> = None;
-    for line in rollout.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
-        };
-        if v.get("type").and_then(|t| t.as_str()) != Some("event_msg") {
-            continue;
-        }
-        let Some(payload) = v.get("payload") else {
-            continue;
-        };
-        let turn_id = payload.get("turn_id").and_then(|t| t.as_str());
-        match payload.get("type").and_then(|t| t.as_str()).unwrap_or("") {
-            "task_started" => {
-                latest = turn_id.map(str::to_string);
-                open = Some(true);
-            }
-            // Only the LATEST turn's own completion/abort closes it; a stale
-            // one belongs to a turn that already ended.
-            "task_complete" | "turn_aborted" if turn_id == latest.as_deref() => {
-                open = Some(false);
-            }
-            _ => {}
-        }
-    }
-    open
+    otto_transcript::turn::tail_open(provider, &tail)
 }
 
 /// The idle sweep's per-session HOLD decision, as a pure function: given the
@@ -1959,9 +1859,20 @@ impl SessionManager {
         crate::accounts::account_home(&self.provider_accounts.as_ref()?.1, &id.to_owned()).ok()
     }
 
+    /// The Codex sessions root this session's CLI writes to — the shared
+    /// [`otto_transcript::roots::TranscriptRoots::for_session`] rule (its
+    /// account home, else the explicit / isolated / default root). No root
+    /// (an account id without configured accounts) → the default root.
     fn codex_root_for(&self, session: &Session) -> std::path::PathBuf {
-        self.provider_home(session)
-            .map(|home| home.join("sessions"))
+        use otto_transcript::roots::{home_dir, RootsEnv};
+        let accounts = self.provider_accounts.as_ref().map(|(_, r)| r.as_path());
+        let data = self.data_dir.as_deref();
+        RootsEnv::from_process()
+            .for_session(&session.meta, &home_dir(), accounts, data)
+            .codex
+            .into_iter()
+            .next()
+            .map(|root| root.dir)
             .unwrap_or_else(codex_sessions_root)
     }
 

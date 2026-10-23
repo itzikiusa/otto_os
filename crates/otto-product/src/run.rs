@@ -298,6 +298,31 @@ Respond with EXACTLY ONE ```json code block (no prose before or after) matching:
 /// see [`otto_core::text::extract_json`].
 pub use otto_core::text::extract_json as extract_json_block;
 
+/// The first JSON candidate in an agent reply (the ```` ```json ```` fence,
+/// then each balanced `{…}` in order) that deserializes into `T`. Taking the
+/// first span and THEN deserializing let a quoted `{}` or config snippet in a
+/// preamble shadow the real answer, so the run read as "no parseable output".
+pub fn extract_json_as<T: serde::de::DeserializeOwned>(raw: &str) -> Option<T> {
+    let mut out = None;
+    otto_core::text::extract_json_where(raw, |v| match serde_json::from_value::<T>(v.clone()) {
+        Ok(t) => {
+            out = Some(t);
+            true
+        }
+        Err(_) => false,
+    });
+    out
+}
+
+/// The summarizer's reply. Every [`SummaryFindings`] field is optional, so a
+/// `{}` decoy would deserialize: the candidate must carry an anchor key too.
+fn parse_summary_findings(raw: &str) -> Option<SummaryFindings> {
+    otto_core::text::extract_json_where(raw, |v| {
+        v.get("summary").is_some() || v.get("questions").is_some()
+    })
+    .and_then(|v| serde_json::from_value(v).ok())
+}
+
 /// Build the full analysis prompt for one agent.
 ///
 /// The story context (body + learnings + Jira details) now lives in a separate
@@ -642,8 +667,7 @@ pub async fn run_analysis<C: ProductRunHost>(
             let parsed = result
                 .raw
                 .as_deref()
-                .and_then(extract_json_block)
-                .and_then(|v| serde_json::from_value::<Findings>(v).ok());
+                .and_then(extract_json_as::<Findings>);
 
             match (result.errored, parsed) {
                 (false, Some(findings)) => {
@@ -830,11 +854,7 @@ pub async fn run_analysis<C: ProductRunHost>(
             }
         }
 
-        let parsed = result
-            .raw
-            .as_deref()
-            .and_then(extract_json_block)
-            .and_then(|v| serde_json::from_value::<SummaryFindings>(v).ok());
+        let parsed = result.raw.as_deref().and_then(parse_summary_findings);
 
         // Persist the summarizer agent row.
         if let Some(ref agent) = summarizer_agent {
@@ -1281,11 +1301,7 @@ pub(crate) async fn retry_analysis_agent_owned<C: ProductRunHost>(
     }
 
     // 11. Parse + persist outcome — mirrors the run_analysis per-agent logic.
-    let parsed = result
-        .raw
-        .as_deref()
-        .and_then(extract_json_block)
-        .and_then(|v| serde_json::from_value::<Findings>(v).ok());
+    let parsed = result.raw.as_deref().and_then(extract_json_as::<Findings>);
 
     match (result.errored, parsed) {
         (false, Some(findings)) => {
@@ -1691,8 +1707,7 @@ pub async fn run_rewrite<C: ProductRunHost>(
     let output_opt = result
         .raw
         .as_deref()
-        .and_then(extract_json_block)
-        .and_then(|v| serde_json::from_value::<RewriteFindings>(v).ok());
+        .and_then(extract_json_as::<RewriteFindings>);
 
     match output_opt {
         Some(findings) => {
@@ -2002,8 +2017,7 @@ pub async fn run_generate_tests<C: ProductRunHost>(
     let parsed_opt = result
         .raw
         .as_deref()
-        .and_then(extract_json_block)
-        .and_then(|v| serde_json::from_value::<GenTestcases>(v).ok());
+        .and_then(extract_json_as::<GenTestcases>);
 
     match parsed_opt {
         Some(parsed) => {
@@ -2537,8 +2551,7 @@ pub async fn run_generate_plan<C: ProductRunHost>(
             let plan_markdown = result
                 .raw
                 .as_deref()
-                .and_then(extract_json_block)
-                .and_then(|v| serde_json::from_value::<PlanFindings>(v).ok())
+                .and_then(extract_json_as::<PlanFindings>)
                 .map(|f| f.plan_markdown)
                 .filter(|m| !m.trim().is_empty());
             (provider, plan_markdown)
@@ -2609,8 +2622,7 @@ pub async fn run_generate_plan<C: ProductRunHost>(
             let summarized = result
                 .raw
                 .as_deref()
-                .and_then(extract_json_block)
-                .and_then(|v| serde_json::from_value::<PlanFindings>(v).ok())
+                .and_then(extract_json_as::<PlanFindings>)
                 .map(|f| f.plan_markdown)
                 .filter(|m| !m.trim().is_empty());
 
@@ -2999,6 +3011,18 @@ mod tests {
         assert_eq!(v["a"], 1);
         // Make sure the prose brace wasn't interpreted as the result.
         assert!(v.get("not").is_none());
+    }
+
+    #[test]
+    fn extract_json_as_skips_a_decoy_that_does_not_fit_the_shape() {
+        // A quoted `{}`-ish snippet precedes the plan object; taking the first
+        // span and then deserializing read the run as "no parseable output".
+        let input = r##"Config is `{"name":"svc"}`. {"plan_markdown":"# Plan"}"##;
+        let plan = extract_json_as::<PlanFindings>(input).expect("plan found past the decoy");
+        assert_eq!(plan.plan_markdown, "# Plan");
+        assert!(extract_json_block(input)
+            .and_then(|v| serde_json::from_value::<PlanFindings>(v).ok())
+            .is_none());
     }
 
     #[test]

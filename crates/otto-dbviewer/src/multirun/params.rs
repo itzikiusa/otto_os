@@ -1,7 +1,7 @@
 //! Query placeholders for multi-target / parameterised runs.
 //!
 //! The SAME placeholder syntax the query editor's Variables bar already uses
-//! (`ui/src/modules/database/sql-util.ts` — `matchVars` / `codeMask` /
+//! (`ui/src/lib/database/sql-util.ts` — `matchVars` / `codeMask` /
 //! `renderVar`), so a statement written for a single run sweeps over values
 //! unchanged:
 //!

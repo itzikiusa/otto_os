@@ -606,6 +606,15 @@ pub fn last_user_text(jsonl: &str) -> Option<String> {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
             continue;
         };
+        // Injected, not typed: a skill body / command caveat (`isMeta`) or the
+        // `/compact` summary (integrations-6-02; `otto_transcript::turn::
+        // is_meta_line` is the same filter for the oracle's fold).
+        if ["isMeta", "isCompactSummary"]
+            .iter()
+            .any(|k| v.get(*k).and_then(|b| b.as_bool()) == Some(true))
+        {
+            continue;
+        }
         let Some(msg) = v.get("message") else {
             continue;
         };
@@ -904,6 +913,15 @@ mod tests {
         let asst = r#"{"message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"hi"}]}}"#;
         assert_eq!(last_user_text(asst), None);
         assert_eq!(last_user_text(""), None);
+        // integrations-6-02: an injected skill body (`isMeta`) or compact
+        // summary after the prompt is not the user's prompt.
+        let skill = r#"{"isMeta":true,"message":{"role":"user","content":[{"type":"text","text":"Base directory for this skill"}]}}"#;
+        let compact =
+            r#"{"isCompactSummary":true,"message":{"role":"user","content":"continued"}}"#;
+        assert_eq!(
+            last_user_text(&format!("{s}\n{skill}\n{compact}")).as_deref(),
+            Some("do the thing")
+        );
     }
 
     #[test]

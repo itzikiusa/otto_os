@@ -1343,9 +1343,8 @@ pub(crate) async fn execute_otto_tool(
     };
     let result = match tokio::time::timeout(budget, call).await {
         Ok(r) => r,
-        Err(_) => Err(Error::Upstream(format!(
-            "self-call: timed out after {}s",
-            budget.as_secs()
+        Err(_) => Err(Error::Upstream(otto_mcp::outward::timeout_error(
+            tool, args, budget,
         ))),
     };
     drop(lease);

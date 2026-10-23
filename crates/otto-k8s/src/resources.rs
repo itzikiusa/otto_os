@@ -114,31 +114,9 @@ impl Kind {
         !matches!(self, Kind::Nodes | Kind::Namespaces)
     }
 
-    /// The Kubernetes `kind` string (`involvedObject.kind`, Argo `resources[].kind`).
-    pub fn k8s_kind(&self) -> &'static str {
-        match self {
-            Kind::Pods => "Pod",
-            Kind::Deployments => "Deployment",
-            Kind::Statefulsets => "StatefulSet",
-            Kind::Daemonsets => "DaemonSet",
-            Kind::Replicasets => "ReplicaSet",
-            Kind::Jobs => "Job",
-            Kind::Cronjobs => "CronJob",
-            Kind::Services => "Service",
-            Kind::Ingresses => "Ingress",
-            Kind::Configmaps => "ConfigMap",
-            Kind::Secrets => "Secret",
-            Kind::Pvcs => "PersistentVolumeClaim",
-            Kind::Hpas => "HorizontalPodAutoscaler",
-            Kind::Rollouts => "Rollout",
-            Kind::Applications => "Application",
-            Kind::Events => "Event",
-            Kind::Nodes => "Node",
-            Kind::Namespaces => "Namespace",
-        }
-    }
-
-    /// Reverse of [`Kind::k8s_kind`] (Argo `status.resources[].kind` → Kind).
+    /// Maps the Argo `status.resources[].kind` workload kinds (Deployment,
+    /// StatefulSet, DaemonSet, Rollout, Pod, CronJob) to a [`Kind`]; any other
+    /// kind is `None`.
     pub fn from_k8s_kind(s: &str) -> Option<Self> {
         match s {
             "Deployment" => Some(Kind::Deployments),

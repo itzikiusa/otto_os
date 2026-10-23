@@ -195,7 +195,7 @@ pub(crate) async fn retry_review_agent(
     // is the legacy fallback for reviews that predate migration 0100.
     let prompt = match ctx.reviews_store.get_agent_prompt(&review_id, index).await {
         Ok(Some(p)) => p,
-        _ => std::fs::read_to_string(crate::review_session::prompt_path(&review_id, index))
+        _ => std::fs::read_to_string(otto_review::session::prompt_path(&review_id, index))
             .map_err(|_| {
                 crate::error::ApiError(Error::Invalid(
                     "cannot retry: this agent's prompt is no longer available — re-run the review"
@@ -214,7 +214,7 @@ pub(crate) async fn retry_review_agent(
     // Mark the agent pending again so the UI reflects the retry immediately.
     // Write only this agent's element (atomic per-index) so we never revert the
     // other agents' live rows.
-    let states: crate::review_session::SharedStates =
+    let states: otto_review::session::SharedStates =
         Arc::new(tokio::sync::Mutex::new(review.agents.clone()));
     {
         let row = {
@@ -349,7 +349,7 @@ pub(crate) async fn retry_review_agent(
             // the user's main checkout on whatever branch it is on now.
             branch_retry_checkout(&ctx_bg, &repo, &review_id_bg, &suffix).await
         };
-        crate::review_session::run_agent_session_with_recovery(
+        otto_review::session::run_agent_session_with_recovery(
             &manager,
             &reviews,
             &states,
@@ -784,7 +784,7 @@ mod review_retry_tests {
             back["lens_slugs"],
             serde_json::json!(["correctness", "security"])
         );
-        let meta = crate::review_session::review_session_meta("r1", 0, !row.lens_slugs.is_empty());
+        let meta = otto_review::session::review_session_meta("r1", 0, !row.lens_slugs.is_empty());
         assert_eq!(meta["allow_subagents"], true);
 
         let fan_out: ReviewAgentState = serde_json::from_value(serde_json::json!({
@@ -797,7 +797,7 @@ mod review_retry_tests {
             .unwrap()
             .get("lens_slugs")
             .is_none());
-        let meta = crate::review_session::review_session_meta("r1", 0, false);
+        let meta = otto_review::session::review_session_meta("r1", 0, false);
         assert!(meta.get("allow_subagents").is_none());
     }
 

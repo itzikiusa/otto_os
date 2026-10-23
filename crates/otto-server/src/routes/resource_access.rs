@@ -157,11 +157,18 @@ impl AccessCtx for ServerCtx {
                     self.manager.kill_session(&session.id).await?;
                 }
             }
-            for root in roots {
-                otto_sessions::mcp::retire_user_server(&root, &server.name, apply)
-                    .map_err(Error::Conflict)?;
-            }
-            Ok(())
+            // Launcher-file IO under the per-cwd std mutex: on ONE blocking
+            // thread (as the spawn path's reconcile does), never a runtime
+            // worker — W historical cwds are ~3W stats + reads (BP-6-03).
+            let name = server.name.clone();
+            tokio::task::spawn_blocking(move || {
+                roots.iter().try_for_each(|root| {
+                    otto_sessions::mcp::retire_user_server(root, &name, apply)
+                        .map_err(Error::Conflict)
+                })
+            })
+            .await
+            .map_err(|e| Error::Internal(format!("retire launchers: {e}")))?
         })
     }
 }

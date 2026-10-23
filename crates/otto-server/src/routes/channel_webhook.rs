@@ -117,34 +117,44 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
-/// `POST /api/v1/webhooks/{workspace_id}` — trigger an agent session.
-pub async fn inbound(
-    Path(ws_id): Path<Id>,
-    State(ctx): State<ServerCtx>,
-    headers: HeaderMap,
-    body: axum::body::Bytes,
-) -> Response {
-    // 1. The workspace must have an enabled webhook integration.
-    let integ = match ctx.integrations_store.get(&ws_id, Channel::Webhook).await {
+/// The ONE credential gate of every per-workspace webhook route
+/// (`/webhooks/{ws}`, `/webhooks/{ws}/run`, `/webhooks/swarm/{ws}/{sid}`):
+/// these sit in `public_routes`, outside the bearer chokepoint, so this guard
+/// is all that stands between a caller and an agent running as root.
+///
+/// - the workspace's webhook integration must exist AND be enabled (404
+///   otherwise — disabling it stops the key working even when the Keychain
+///   entry is left in place);
+/// - a key must be configured (`chan-bot-{ws}-webhook`) and the presented one
+///   (`X-Otto-Webhook-Key`, else `Authorization: Bearer`) must match it in
+///   constant time (401 otherwise).
+///
+/// Returns the integration (the channel route needs its default callback).
+/// Pinned end to end by `tests/public_entry_gates.rs`.
+pub(crate) async fn webhook_key_guard(
+    ctx: &ServerCtx,
+    ws_id: &Id,
+    headers: &HeaderMap,
+) -> Result<otto_core::domain::Integration, Box<Response>> {
+    let integ = match ctx.integrations_store.get(ws_id, Channel::Webhook).await {
         Ok(Some(i)) if i.enabled => i,
         Ok(_) => {
-            return problem(
+            return Err(Box::new(problem(
                 StatusCode::NOT_FOUND,
                 "not_found",
                 "no enabled webhook for this workspace",
-            )
+            )))
         }
         Err(e) => {
-            return problem(
+            return Err(Box::new(problem(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal",
                 &e.to_string(),
-            )
+            )))
         }
     };
-
-    // 2. Validate the key against the keychain value (constant-time).
-    // Per-webhook keychain read: cached, and a miss runs off the async worker.
+    // Per-webhook keychain read: cached, and a miss runs off the async worker
+    // (an unauthenticated route must not park a runtime worker).
     let expected =
         otto_core::secrets::get_async(&ctx.secrets, &format!("chan-bot-{ws_id}-webhook"))
             .await
@@ -152,22 +162,34 @@ pub async fn inbound(
             .flatten()
             .filter(|k| !k.is_empty());
     let Some(expected) = expected else {
-        return problem(
+        return Err(Box::new(problem(
             StatusCode::UNAUTHORIZED,
             "unauthorized",
             "webhook key not configured",
-        );
+        )));
     };
-    match extract_key(&headers) {
-        Some(p) if ct_eq(p.as_bytes(), expected.as_bytes()) => {}
-        _ => {
-            return problem(
-                StatusCode::UNAUTHORIZED,
-                "unauthorized",
-                "invalid or missing webhook key",
-            )
-        }
+    match extract_key(headers) {
+        Some(p) if ct_eq(p.as_bytes(), expected.as_bytes()) => Ok(integ),
+        _ => Err(Box::new(problem(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "invalid or missing webhook key",
+        ))),
     }
+}
+
+/// `POST /api/v1/webhooks/{workspace_id}` — trigger an agent session.
+pub async fn inbound(
+    Path(ws_id): Path<Id>,
+    State(ctx): State<ServerCtx>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    // 1–2. Enabled webhook integration + a matching key (the shared guard).
+    let integ = match webhook_key_guard(&ctx, &ws_id, &headers).await {
+        Ok(i) => i,
+        Err(response) => return *response,
+    };
 
     // 3. Parse + validate the body.
     let req: InboundReq = match serde_json::from_slice(&body) {
@@ -293,47 +315,9 @@ pub async fn run_inbound(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
-    // 1. Enabled webhook integration + key (identical guard to `inbound`).
-    match ctx.integrations_store.get(&ws_id, Channel::Webhook).await {
-        Ok(Some(i)) if i.enabled => {}
-        Ok(_) => {
-            return problem(
-                StatusCode::NOT_FOUND,
-                "not_found",
-                "no enabled webhook for this workspace",
-            )
-        }
-        Err(e) => {
-            return problem(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal",
-                &e.to_string(),
-            )
-        }
-    };
-    // Per-webhook keychain read: cached, and a miss runs off the async worker.
-    let expected =
-        otto_core::secrets::get_async(&ctx.secrets, &format!("chan-bot-{ws_id}-webhook"))
-            .await
-            .ok()
-            .flatten()
-            .filter(|k| !k.is_empty());
-    let Some(expected) = expected else {
-        return problem(
-            StatusCode::UNAUTHORIZED,
-            "unauthorized",
-            "webhook key not configured",
-        );
-    };
-    match extract_key(&headers) {
-        Some(p) if ct_eq(p.as_bytes(), expected.as_bytes()) => {}
-        _ => {
-            return problem(
-                StatusCode::UNAUTHORIZED,
-                "unauthorized",
-                "invalid or missing webhook key",
-            )
-        }
+    // 1. Enabled webhook integration + key (the shared guard).
+    if let Err(response) = webhook_key_guard(&ctx, &ws_id, &headers).await {
+        return *response;
     }
 
     // 2. Parse body.

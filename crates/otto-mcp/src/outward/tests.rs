@@ -1459,6 +1459,67 @@ fn long_running_tools_get_a_longer_self_call_budget() {
 }
 
 #[test]
+fn multi_request_writes_get_a_budget_that_covers_every_upstream_request() {
+    use otto_core::mcp_budgets::GOVERNED_RUN_BUDGET;
+    use std::time::Duration;
+    let t = |tool: &str| call_timeout(tool, &json!({}));
+    // A merge: the merge (+ rebase) PUT on either side of the provider poll.
+    assert!(t("merge_pr") >= MERGE_PROVIDER_POLL + Duration::from_secs(30));
+    // create_issue: types + fields + parent lookup (rate-limited GETs), then
+    // the POST — the verify read may run over, not the write.
+    assert!(
+        t("create_issue") >= (ATLASSIAN_REQUEST_TIMEOUT + ATLASSIAN_RATE_LIMIT_WAIT) * 3,
+        "{:?}",
+        t("create_issue")
+    );
+    // Confluence: the write, then the verify GET (one rate-limit wait).
+    for tool in [
+        "create_confluence_page",
+        "update_confluence_page",
+        "comment_confluence_page",
+    ] {
+        assert!(
+            t(tool) >= ATLASSIAN_REQUEST_TIMEOUT * 2 + ATLASSIAN_RATE_LIMIT_WAIT,
+            "{tool}"
+        );
+    }
+    assert!(t("create_pr") > Duration::from_secs(30));
+    // No self-call outlives what the governed proxy grants the run.
+    for tool in MULTI_REQUEST_WRITES {
+        assert!(
+            t(tool) > Duration::from_secs(30),
+            "{tool} kept the flat 30 s"
+        );
+        assert!(t(tool) <= GOVERNED_RUN_BUDGET, "{tool}");
+    }
+    assert!(t("api_run_automation") <= GOVERNED_RUN_BUDGET);
+}
+
+#[test]
+fn a_timed_out_write_says_it_may_have_landed_and_names_the_target() {
+    use std::time::Duration;
+    let msg = timeout_error(
+        "create_issue",
+        &json!({"project_key": "OT", "summary": "Fix login"}),
+        Duration::from_secs(120),
+    );
+    assert!(msg.starts_with("self-call: timed out after 120s"), "{msg}");
+    assert!(msg.contains("\"Fix login\" in project OT"), "{msg}");
+    assert!(msg.contains("before retrying"), "{msg}");
+    let merge = timeout_error(
+        "merge_pr",
+        &json!({"repo_id": "r1", "number": 7}),
+        Duration::from_secs(90),
+    );
+    assert!(merge.contains("PR #7 in repo r1"), "{merge}");
+    // A read keeps the plain message.
+    assert_eq!(
+        timeout_error("list_prs", &json!({}), Duration::from_secs(30)),
+        "self-call: timed out after 30s"
+    );
+}
+
+#[test]
 fn new_discovery_and_git_tools_route_and_classify() {
     for r in [
         "list_workspaces",

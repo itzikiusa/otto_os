@@ -31,6 +31,7 @@ use std::time::Duration;
 
 use axum::extract::{Path, State};
 use axum::Json;
+use otto_core::cancel_signal::{InFlightGuard, InFlightSet, RunCancelGuard, RunCancels};
 use otto_core::domain::WorkspaceRole;
 use otto_core::event::Event;
 use otto_core::{Error, Id};
@@ -39,7 +40,7 @@ use serde_json::Value;
 
 use crate::assist_ctx::{AgentTurn, ApiError, ApiResult, CanvasAssistCtx, CurrentUser};
 use otto_agent_run::fence::extract_fenced;
-use otto_design_assist::excalidraw::{merge_excalidraw, split_excalidraw, ExcalidrawKeep};
+use otto_design::format::excalidraw::{merge_excalidraw, split_excalidraw, ExcalidrawKeep};
 
 /// Live-preview file poll cadence while the agent edits.
 const POLL: Duration = Duration::from_millis(900);
@@ -467,63 +468,46 @@ impl Drop for AbortOnDrop {
     }
 }
 
-/// Scenes with an assist turn in flight (S4-20) → that turn's stop flag.
-type BusyScenes = std::collections::HashMap<Id, Arc<std::sync::atomic::AtomicBool>>;
-
-fn busy_scenes() -> &'static std::sync::Mutex<BusyScenes> {
-    static BUSY: std::sync::OnceLock<std::sync::Mutex<BusyScenes>> = std::sync::OnceLock::new();
+/// Scenes with an assist turn in flight (S4-20): the exclusive slot and the
+/// turn's stop signal come from the shared run bookkeeping in
+/// `otto_core::cancel_signal` (architecture-4-02), not a hand-rolled map.
+fn busy_scenes() -> &'static InFlightSet {
+    static BUSY: std::sync::OnceLock<InFlightSet> = std::sync::OnceLock::new();
     BUSY.get_or_init(Default::default)
 }
 
-/// A claimed per-scene assist slot (with the turn's stop flag); released on drop.
+fn scene_stops() -> &'static RunCancels {
+    static STOPS: std::sync::OnceLock<RunCancels> = std::sync::OnceLock::new();
+    STOPS.get_or_init(Default::default)
+}
+
+/// A claimed per-scene assist slot (with the turn's stop signal); released on
+/// drop. Field order matters: the stop registration is removed BEFORE the
+/// slot frees, so a later turn's registration is never the one dropped.
 struct SceneBusy {
-    scene: Id,
-    stop: Arc<std::sync::atomic::AtomicBool>,
+    stop: RunCancelGuard,
+    _slot: InFlightGuard,
 }
 
 impl SceneBusy {
     fn claim(scene: &Id) -> Option<Self> {
-        let mut busy = busy_scenes().lock().unwrap();
-        if busy.contains_key(scene) {
-            return None;
-        }
-        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        busy.insert(scene.clone(), Arc::clone(&stop));
+        let slot = busy_scenes().claim(scene)?;
         Some(Self {
-            scene: scene.clone(),
-            stop,
+            stop: scene_stops().register(scene),
+            _slot: slot,
         })
     }
 
     /// True once [`request_stop`] flagged this turn.
     fn stopped(&self) -> bool {
-        self.stop.load(std::sync::atomic::Ordering::Acquire)
-    }
-}
-
-impl Drop for SceneBusy {
-    fn drop(&mut self) {
-        let mut busy = busy_scenes().lock().unwrap();
-        // Only our own entry (a later turn may hold the slot by now).
-        if busy
-            .get(&self.scene)
-            .is_some_and(|f| Arc::ptr_eq(f, &self.stop))
-        {
-            busy.remove(&self.scene);
-        }
+        self.stop.signal.is_cancelled()
     }
 }
 
 /// Flag the scene's in-flight assist turn as stopped. Returns false when no
 /// turn is running.
 fn request_stop(scene: &Id) -> bool {
-    match busy_scenes().lock().unwrap().get(scene) {
-        Some(flag) => {
-            flag.store(true, std::sync::atomic::Ordering::Release);
-            true
-        }
-        None => false,
-    }
+    scene_stops().cancel(scene)
 }
 
 /// `POST /canvas/scenes/{id}/assist/stop` — mark the scene's running Ask AI
@@ -897,13 +881,18 @@ fn parse_assist(raw: &str) -> AssistResult {
             ..Default::default()
         };
     }
-    if let Some(v) = otto_core::text::extract_json(raw) {
-        let has_elements = v
-            .get("elements")
-            .and_then(|e| e.as_array())
-            .map(|a| !a.is_empty())
-            .unwrap_or(false);
-        if has_elements {
+    // Only a non-empty `elements` or `nodes` object is a diagram: a `{}` or a
+    // quoted config snippet earlier in the reply must not shadow it
+    // (backend-correctness-6-04).
+    let non_empty = |v: &Value, key: &str| {
+        v.get(key)
+            .and_then(Value::as_array)
+            .is_some_and(|a| !a.is_empty())
+    };
+    if let Some(v) = otto_core::text::extract_json_where(raw, |v| {
+        non_empty(v, "elements") || non_empty(v, "nodes")
+    }) {
+        if non_empty(&v, "elements") {
             return AssistResult {
                 excalidraw: Some(v),
                 note: prose_before_fence(raw),
@@ -953,7 +942,7 @@ fn prose_before_fence(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use otto_design_assist::excalidraw::el_id;
+    use otto_design::format::excalidraw::el_id;
 
     /// S4-20: one assist turn per scene; the slot frees on drop.
     #[test]
@@ -1113,6 +1102,24 @@ mod tests {
         assert!(r.excalidraw.is_some());
         assert!(r.mermaid.is_none());
         assert_eq!(r.note, "Drawn.");
+    }
+
+    /// backend-correctness-6-04: a decoy object earlier in the reply (a quoted
+    /// config, an empty `{}`) used to shadow the diagram, so the assist fell
+    /// through as if nothing came back.
+    #[test]
+    fn parse_skips_decoy_objects_before_the_diagram() {
+        let raw = "Your config {\"name\":\"svc\",\"version\":\"1.0.0\"} and {} are fine.\n\n\
+                   {\"elements\":[{\"type\":\"rectangle\",\"id\":\"a\",\"x\":0,\"y\":0}]}";
+        let r = parse_assist(raw);
+        assert!(
+            r.excalidraw.is_some(),
+            "the elements object wins over the decoys"
+        );
+
+        let raw = "Decoy {\"nodes\":[]} first, then {\"nodes\":[{\"id\":\"a\"}],\"edges\":[]}";
+        let r = parse_assist(raw);
+        assert_eq!(r.nodes.len(), 1, "an empty nodes list is a decoy too");
     }
 
     #[test]

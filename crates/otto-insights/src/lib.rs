@@ -168,10 +168,96 @@ pub fn write_config(dir: &Path, cfg: &InsightsConfig) -> std::io::Result<()> {
     let json = serde_json::to_string_pretty(cfg).unwrap_or_else(|_| "{}".to_string());
     // Temp + rename (as `mark_stopped` does): a crash mid-write leaves the
     // old config, never a torn file that reads back as all-off.
-    let path = config_path(dir);
-    let temp = path.with_extension("json.tmp");
-    std::fs::write(&temp, json)?;
-    std::fs::rename(temp, path)
+    write_atomic(&config_path(dir), json.as_bytes())
+}
+
+/// `<path>.<pid>-<seq>.tmp`: a temp name no other writer in this (or another)
+/// process shares (data-integrity-6-04). With one fixed temp name two
+/// concurrent saves interleave their writes into one torn file; the second
+/// rename then fails.
+fn unique_temp(path: &Path) -> PathBuf {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".{}-{seq}.tmp", std::process::id()));
+    path.with_file_name(name)
+}
+
+/// Write `bytes` to `path` through a [`unique_temp`] + rename.
+fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let temp = unique_temp(path);
+    if let Err(e) = std::fs::write(&temp, bytes) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(e);
+    }
+    std::fs::rename(&temp, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&temp);
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Scheduled-run status (error-handling-6-03)
+// ---------------------------------------------------------------------------
+
+/// The last scheduled attempt of one cadence that did NOT produce a report.
+/// Persisted in `<insights>/schedule-state.json` (keyed by cadence word) and
+/// served inside `GET /insights/config` as `schedule_status`, so the page can
+/// say "on, but the last runs failed" instead of "off". Cleared once the
+/// cadence's report lands.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScheduleAttempt {
+    /// The due period's key (`daily:20261022_20261022`).
+    pub period: String,
+    /// Scheduled attempts at that period so far.
+    pub attempts: u32,
+    /// Why the latest attempt produced no report.
+    pub last_error: Option<String>,
+    /// The scheduler stopped retrying this period (attempt cap reached).
+    pub gave_up: bool,
+    pub at: DateTime<Utc>,
+}
+
+/// `GET /insights/config`: the stored config plus the scheduled-run status.
+#[derive(Debug, Clone, Serialize)]
+pub struct InsightsConfigView {
+    #[serde(flatten)]
+    pub config: InsightsConfig,
+    /// Cadence word (`daily` / `weekly` / `monthly`) → its last failed
+    /// scheduled attempt; absent cadences are fine.
+    pub schedule_status: std::collections::BTreeMap<String, ScheduleAttempt>,
+}
+
+fn schedule_state_path(dir: &Path) -> PathBuf {
+    dir.join("schedule-state.json")
+}
+
+/// The persisted scheduled-run status (empty when absent or unreadable).
+pub fn read_schedule_status(dir: &Path) -> std::collections::BTreeMap<String, ScheduleAttempt> {
+    std::fs::read_to_string(schedule_state_path(dir))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+/// Set (`Some`) or clear (`None`) one cadence's status. Serialized in-process
+/// so two cadences finishing together don't drop each other's entry.
+fn write_schedule_status(dir: &Path, word: &str, attempt: Option<ScheduleAttempt>) {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut all = read_schedule_status(dir);
+    let changed = match attempt {
+        Some(a) => all.insert(word.to_string(), a.clone()) != Some(a),
+        None => all.remove(word).is_some(),
+    };
+    if !changed {
+        return;
+    }
+    let json = serde_json::to_string_pretty(&all).unwrap_or_else(|_| "{}".into());
+    if let Err(e) = std::fs::create_dir_all(dir)
+        .and_then(|()| write_atomic(&schedule_state_path(dir), json.as_bytes()))
+    {
+        warn!("insights: couldn't record the scheduled-run status: {e}");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -323,9 +409,7 @@ fn mark_stopped(path: &Path, run_id: &str) -> std::io::Result<()> {
         return Ok(());
     }
     m["stopped"] = serde_json::Value::Bool(true);
-    let temp = path.with_extension("json.pending.tmp");
-    std::fs::write(&temp, m.to_string())?;
-    std::fs::rename(temp, path)
+    write_atomic(path, m.to_string().as_bytes())
 }
 
 fn completion_manifest(path: &Path) -> Option<serde_json::Value> {
@@ -1053,12 +1137,12 @@ pub async fn run_insights<C: InsightsCtx>(
         let prepared = ctx::blocking(move || -> std::io::Result<()> {
             std::fs::create_dir_all(path.parent().expect("manifest parent"))?;
             let attempt = next_attempt(completion_manifest(&path).as_ref(), manual);
-            let temp = path.with_extension("json.pending.tmp");
-            std::fs::write(
-                &temp,
-                serde_json::json!({"run_id":id,"complete":false,"attempt":attempt}).to_string(),
-            )?;
-            std::fs::rename(temp, path)
+            write_atomic(
+                &path,
+                serde_json::json!({"run_id":id,"complete":false,"attempt":attempt})
+                    .to_string()
+                    .as_bytes(),
+            )
         })
         .await;
         if let Err(error) = prepared {
@@ -1222,16 +1306,19 @@ async fn cancel_run<C: InsightsCtx>(
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
-async fn get_config<C: InsightsCtx>(State(ctx): State<C>) -> ApiResult<Json<InsightsConfig>> {
+async fn get_config<C: InsightsCtx>(State(ctx): State<C>) -> ApiResult<Json<InsightsConfigView>> {
     let dir = insights_dir(&ctx);
     // std::fs off the async workers, like every other insights file read.
-    let cfg = tokio::task::spawn_blocking(move || read_config(&dir))
-        .await
-        .map_err(|e| {
-            ApiError(otto_core::Error::Internal(format!(
-                "read insights config: {e}"
-            )))
-        })?;
+    let cfg = tokio::task::spawn_blocking(move || InsightsConfigView {
+        config: read_config(&dir),
+        schedule_status: read_schedule_status(&dir),
+    })
+    .await
+    .map_err(|e| {
+        ApiError(otto_core::Error::Internal(format!(
+            "read insights config: {e}"
+        )))
+    })?;
     Ok(Json(cfg))
 }
 
@@ -1434,6 +1521,11 @@ impl PeriodAttempts {
         true
     }
 
+    /// Attempts counted at `key` so far.
+    fn count(&self, key: &str) -> u32 {
+        self.0.get(key).copied().unwrap_or(0)
+    }
+
     /// Forget periods that are no longer due (keeps the map tiny).
     fn retain_due(&mut self, due: &[String]) {
         self.0.retain(|k, _| due.contains(k));
@@ -1550,24 +1642,38 @@ impl<C: InsightsCtx> InsightsScheduler<C> {
                 continue;
             }
             in_flight.lock().await.insert(kind.word());
+            let attempt_no = attempts.count(&key);
 
             let ctx = self.ctx.clone();
             let flight = Arc::clone(in_flight);
             let word = kind.word();
             info!(kind = word, "insights: scheduled catch-up run is due");
             tokio::spawn(async move {
-                let session_id =
-                    match run_insights(&ctx, kind, 1, now.date_naive(), RunMode::Scheduled).await {
-                        Ok(Some(id)) => Some(id),
-                        Ok(None) => {
-                            // Skill not installed / no host — already logged inside.
-                            None
-                        }
-                        Err(e) => {
-                            warn!(kind = word, "insights: scheduled run failed: {e}");
-                            None
-                        }
-                    };
+                let mut failure: Option<String> = None;
+                let session_id = match run_insights(
+                    &ctx,
+                    kind,
+                    1,
+                    now.date_naive(),
+                    RunMode::Scheduled,
+                )
+                .await
+                {
+                    Ok(Some(id)) => Some(id),
+                    Ok(None) => {
+                        // Skill not installed / no host — already logged inside.
+                        failure = Some(
+                                "the run couldn’t start: the insights skill is missing or no workspace can host it"
+                                    .into(),
+                            );
+                        None
+                    }
+                    Err(e) => {
+                        warn!(kind = word, "insights: scheduled run failed: {e}");
+                        failure = Some(format!("the run couldn’t start: {e}"));
+                        None
+                    }
+                };
                 // The session runs headlessly; release the in-flight slot after a
                 // grace window so we don't re-trigger the same period mid-run
                 // (idempotency would catch it once artifacts land, but this avoids
@@ -1582,12 +1688,29 @@ impl<C: InsightsCtx> InsightsScheduler<C> {
                 // After the grace window, check whether the period's report landed.
                 // If so, emit `InsightReady` so the channel notifier + UI can react
                 // without polling. Best-effort: a missed send is not an error.
-                if period_done(&insights_dir(&ctx), kind, start, end) {
+                let dir = insights_dir(&ctx);
+                if period_done(&dir, kind, start, end) {
+                    let _ = ctx::blocking(move || write_schedule_status(&dir, word, None)).await;
                     let period_label = format!("{} {}", word, start.format("%Y-%m-%d"));
                     let _ = ctx.events().send(Event::InsightReady {
                         period: period_label,
                         session_id,
                     });
+                } else {
+                    // error-handling-6-03: a scheduled run that produced no
+                    // report leaves a trace the Insights page reads.
+                    let status = ScheduleAttempt {
+                        period: key,
+                        attempts: attempt_no,
+                        last_error: Some(failure.unwrap_or_else(|| {
+                            "the run ended without writing a report (is the provider signed in?)"
+                                .into()
+                        })),
+                        gave_up: attempt_no >= MAX_PERIOD_ATTEMPTS,
+                        at: Utc::now(),
+                    };
+                    let _ = ctx::blocking(move || write_schedule_status(&dir, word, Some(status)))
+                        .await;
                 }
             });
         }
@@ -1601,6 +1724,88 @@ impl<C: InsightsCtx> InsightsScheduler<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// data-integrity-6-04: concurrent saves never share a temp file, so the
+    /// config always reads back as one writer's whole JSON, never a torn mix
+    /// that falls back to the all-off defaults; no temp file is left behind.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // test: synchronous dir listing
+    fn concurrent_config_saves_never_tear() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
+        let a = config_path(&dir);
+        assert_ne!(unique_temp(&a), unique_temp(&a));
+        let threads: Vec<_> = (0..8)
+            .map(|i| {
+                let dir = dir.clone();
+                std::thread::spawn(move || {
+                    let cfg = InsightsConfig {
+                        daily: true,
+                        provider: format!("p{i}-{}", "x".repeat(4096)),
+                        ..Default::default()
+                    };
+                    for _ in 0..20 {
+                        write_config(&dir, &cfg).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        let cfg = read_config(&dir);
+        assert!(cfg.daily, "a torn file reads back as all-off defaults");
+        assert!(cfg.provider.starts_with('p'));
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+    }
+
+    /// error-handling-6-03: a failed scheduled run is recorded per cadence,
+    /// served with the config, and cleared once the cadence's report lands.
+    #[test]
+    fn scheduled_failures_are_recorded_and_cleared() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        assert!(read_schedule_status(dir).is_empty());
+        let failed = ScheduleAttempt {
+            period: "daily:20261022_20261022".into(),
+            attempts: 3,
+            last_error: Some("the run ended without writing a report".into()),
+            gave_up: true,
+            at: Utc::now(),
+        };
+        write_schedule_status(dir, "daily", Some(failed.clone()));
+        write_schedule_status(
+            dir,
+            "weekly",
+            Some(ScheduleAttempt {
+                attempts: 1,
+                gave_up: false,
+                ..failed.clone()
+            }),
+        );
+        let all = read_schedule_status(dir);
+        assert_eq!(all.get("daily"), Some(&failed));
+        assert_eq!(all.len(), 2);
+        let view = serde_json::to_value(InsightsConfigView {
+            config: InsightsConfig {
+                daily: true,
+                ..Default::default()
+            },
+            schedule_status: all,
+        })
+        .unwrap();
+        assert_eq!(view["daily"], true, "config fields stay at the top level");
+        assert_eq!(view["schedule_status"]["daily"]["gave_up"], true);
+        write_schedule_status(dir, "daily", None);
+        let all = read_schedule_status(dir);
+        assert!(!all.contains_key("daily"));
+        assert!(all.contains_key("weekly"));
+    }
 
     #[test]
     fn the_catch_up_cap_survives_restarts_and_honours_stop() {

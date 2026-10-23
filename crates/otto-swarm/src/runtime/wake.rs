@@ -10,7 +10,7 @@
 //!
 //! A burst of events (a tick's own dispatches, a run's status changes) wakes
 //! the loop once; [`MIN_GAP`] keeps an event storm from ticking faster than
-//! once per gap. Kept out of `swarm_runtime.rs` to touch the coordinator loop
+//! once per gap. Kept out of `runtime/engine.rs` to touch the coordinator loop
 //! as little as possible.
 
 use std::collections::HashMap;

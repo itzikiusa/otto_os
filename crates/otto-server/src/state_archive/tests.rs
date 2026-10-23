@@ -480,3 +480,96 @@ async fn exported_rows_follow_the_primary_key() {
         .collect();
     assert_eq!(ids, vec![2, 10]);
 }
+
+/// data-integrity-6-03: a custom default MCP profile, an edited preset and a
+/// session naming the custom profile all survive a restore onto a fresh
+/// install — the seeded presets merge instead of conflicting, and the
+/// session does not widen to Full.
+#[tokio::test]
+async fn mcp_profiles_restore_onto_a_fresh_install_with_their_default() {
+    let source = otto_state::db::test_pool().await;
+    fixture(&source).await;
+    let profiles = otto_state::McpProfileRepo::new(source.clone());
+    let custom = profiles
+        .create(
+            &otto_state::McpProfileFields {
+                name: "Reviewers".into(),
+                description: "PR tools only".into(),
+                all_tools: false,
+                groups: vec!["git".into()],
+                include_tools: vec![],
+                exclude_tools: vec![],
+            },
+            Some("old-user"),
+        )
+        .await
+        .unwrap();
+    profiles.set_default(&custom.id).await.unwrap();
+    profiles
+        .update(
+            "cloud",
+            &otto_state::McpProfileFields {
+                name: "Cloud".into(),
+                description: "AWS only here".into(),
+                all_tools: false,
+                groups: vec!["aws".into()],
+                include_tools: vec![],
+                exclude_tools: vec![],
+            },
+        )
+        .await
+        .unwrap();
+    sqlx::query("UPDATE sessions SET meta_json=json_object('mcp_profiles',json_array(?)) WHERE id='session'")
+        .bind(&custom.id)
+        .execute(&source)
+        .await
+        .unwrap();
+    let archive = snapshot(&source).await;
+    assert!(archive.records.contains_key("mcp_profiles"));
+
+    let target = otto_state::db::test_pool().await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut tx = target.begin().await.unwrap();
+    let tables = validate_archive(&mut tx, &archive).await.unwrap();
+    let applied = apply_rows(&mut tx, dir.path(), &archive, &tables, "restored-test")
+        .await
+        .unwrap();
+    assert!(
+        !applied
+            .conflicts
+            .iter()
+            .any(|c| c.location.starts_with("mcp_profiles/")),
+        "seeded presets merge, never conflict: {:?}",
+        applied.conflicts
+    );
+    tx.commit().await.unwrap();
+
+    let restored = otto_state::McpProfileRepo::new(target.clone());
+    assert_eq!(restored.get(&custom.id).await.unwrap().name, "Reviewers");
+    assert_eq!(restored.default_profile().await.unwrap().id, custom.id);
+    let defaults: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM mcp_profiles WHERE is_default = 1")
+            .fetch_one(&target)
+            .await
+            .unwrap();
+    assert_eq!(defaults, 1, "exactly one default");
+    assert_eq!(
+        restored.get("cloud").await.unwrap().description,
+        "AWS only here",
+        "the edit to an untouched preset is restored"
+    );
+    let meta: String = sqlx::query_scalar("SELECT meta_json FROM sessions WHERE id='session'")
+        .fetch_one(&target)
+        .await
+        .unwrap();
+    let named: Vec<String> = serde_json::from_str::<Value>(&meta).unwrap()["mcp_profiles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    let resolved = restored.resolve(&named).await.unwrap();
+    assert_eq!(resolved.len(), 1);
+    assert_eq!(resolved[0].id, custom.id, "the session keeps its narrowing");
+    assert!(!resolved[0].all_tools);
+}

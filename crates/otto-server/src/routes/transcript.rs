@@ -658,6 +658,41 @@ fn artifact_path_allowed(
         && !crate::routes::fs::sandbox::is_denied_file(canonical)
 }
 
+/// The canonical path of an artifact file the caller may read (blocking):
+/// gone → 404, unresolvable → 400, outside [`artifact_path_allowed`] → 403.
+fn confine_artifact(
+    target: &Path,
+    session_cwd: &str,
+    data_dir: &Path,
+    owner: bool,
+) -> Result<PathBuf, Error> {
+    if !target.is_file() {
+        return Err(Error::NotFound("artifact file is gone".into()));
+    }
+    let canonical = target
+        .canonicalize()
+        .map_err(|e| Error::Invalid(format!("cannot resolve artifact: {e}")))?;
+    if !artifact_path_allowed(&canonical, session_cwd, data_dir, owner) {
+        return Err(Error::Forbidden("artifact path is not permitted".into()));
+    }
+    Ok(canonical)
+}
+
+/// Read a confined artifact through [`crate::routes::fs::read_at_most`]
+/// (`O_NOFOLLOW | O_NONBLOCK`, regular files only, `cap + 1` bytes at most), so
+/// a symlink or FIFO swapped in after [`confine_artifact`] is refused and a
+/// file grown past the cap is never loaded whole. Blocking.
+fn read_artifact_capped(canonical: &Path, cap: u64) -> Result<Vec<u8>, Error> {
+    let bytes = crate::routes::fs::read_at_most(canonical, cap as usize + 1)
+        .map_err(|e| Error::Internal(format!("read artifact: {e}")))?;
+    if bytes.len() as u64 > cap {
+        return Err(Error::PayloadTooLarge(format!(
+            "artifact is over the {cap}-byte cap"
+        )));
+    }
+    Ok(bytes)
+}
+
 /// `GET /sessions/{id}/artifacts/{artifact_id}` — the bytes behind an artifact,
 /// by opaque id only. Confinement per §4.7; 25 MB cap.
 pub async fn get_artifact(
@@ -678,31 +713,21 @@ pub async fn get_artifact(
             "artifact has no local file (a link)".into(),
         )));
     };
-    // Images the fold extracted itself live under the data dir already.
-    let target = Path::new(path);
-    if !target.is_file() {
-        return Err(ApiError(Error::NotFound("artifact file is gone".into())));
-    }
-    let canonical = target
-        .canonicalize()
-        .map_err(|e| ApiError(Error::Invalid(format!("cannot resolve artifact: {e}"))))?;
-    if !artifact_path_allowed(&canonical, &session.cwd, &ctx.data_dir, owner) {
-        return Err(ApiError(Error::Forbidden(
-            "artifact path is not permitted".into(),
-        )));
-    }
-    let meta = tokio::fs::metadata(&canonical)
-        .await
-        .map_err(|e| ApiError(Error::Internal(format!("stat artifact: {e}"))))?;
-    if meta.len() > ARTIFACT_CAP {
-        return Err(ApiError(Error::PayloadTooLarge(format!(
-            "artifact is {} bytes; cap is {ARTIFACT_CAP}",
-            meta.len()
-        ))));
-    }
-    let bytes = tokio::fs::read(&canonical)
-        .await
-        .map_err(|e| ApiError(Error::Internal(format!("read artifact: {e}"))))?;
+    // Images the fold extracted itself live under the data dir already. The
+    // path is agent-chosen under the agent's own writable cwd, so the check
+    // and the read share ONE blocking hop and the read refuses a symlink or
+    // FIFO swapped in after the check and stops at the cap (concurrency-async-6-02).
+    let (target, cwd, data_dir) = (
+        PathBuf::from(path),
+        session.cwd.clone(),
+        ctx.data_dir.clone(),
+    );
+    let bytes = crate::offload::blocking(move || {
+        let canonical = confine_artifact(&target, &cwd, &data_dir, owner)?;
+        read_artifact_capped(&canonical, ARTIFACT_CAP)
+    })
+    .await
+    .map_err(ApiError)?;
     let mime = art
         .mime
         .clone()
@@ -916,19 +941,17 @@ pub(crate) fn confine_history_path(
             }
         }
     }
-    let (claude_root, codex_root) = transcript_roots(&ctx.data_dir);
-    for (root, provider) in [
-        (claude_root, Provider::Claude),
-        (codex_root, Provider::Codex),
-    ] {
-        if let Some(canon) = otto_core::paths::resolves_under(&root, candidate) {
+    let roots = transcript_roots(&ctx.data_dir);
+    let claude = roots.claude_dirs().map(|root| (root, Provider::Claude));
+    for (root, provider) in claude.chain(roots.codex_dirs().map(|root| (root, Provider::Codex))) {
+        if let Some(canon) = otto_core::paths::resolves_under(root, candidate) {
             if canon.is_file() && canon.extension().is_some_and(|e| e == "jsonl") {
                 return Ok((canon, provider));
             }
         }
     }
     Err(ApiError(Error::Forbidden(
-        "transcript_path must be a .jsonl under ~/.claude/projects or ~/.codex/sessions".into(),
+        "transcript_path must be a .jsonl under a Claude projects or Codex sessions root".into(),
     )))
 }
 
@@ -1204,10 +1227,48 @@ mod tests {
     fn transcript_roots_honour_env_override() {
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("OTTO_TRANSCRIPT_ROOTS", "/a/claude:/b/codex");
-        let (c, x) = transcript_roots(dir.path());
+        let roots = transcript_roots(dir.path());
         std::env::remove_var("OTTO_TRANSCRIPT_ROOTS");
-        assert_eq!(c, PathBuf::from("/a/claude"));
-        assert_eq!(x, PathBuf::from("/b/codex"));
+        let dirs: Vec<_> = roots.all_dirs().map(Path::to_path_buf).collect();
+        assert_eq!(
+            dirs,
+            vec![PathBuf::from("/a/claude"), PathBuf::from("/b/codex")]
+        );
+    }
+
+    /// concurrency-async-6-02: the read refuses a symlink swapped in after
+    /// the confinement check (the canonical path's last component must stay a
+    /// regular file) and never loads more than the cap.
+    #[test]
+    fn artifact_read_refuses_a_post_check_symlink_swap_and_caps_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().canonicalize().unwrap();
+        let file = cwd.join("report.html");
+        std::fs::write(&file, b"<p>ok</p>").unwrap();
+        let canonical = confine_artifact(&file, cwd.to_str().unwrap(), &cwd, false).unwrap();
+        assert_eq!(
+            read_artifact_capped(&canonical, 1024).unwrap(),
+            b"<p>ok</p>"
+        );
+        assert!(matches!(
+            read_artifact_capped(&canonical, 4),
+            Err(Error::PayloadTooLarge(_))
+        ));
+        // Swap the checked file for a symlink to a file the check would refuse.
+        let secret = dir.path().join("secret.txt");
+        std::fs::write(&secret, b"top secret").unwrap();
+        std::fs::remove_file(&file).unwrap();
+        std::os::unix::fs::symlink(&secret, &file).unwrap();
+        let swapped = read_artifact_capped(&canonical, 1024);
+        assert!(
+            swapped.is_err(),
+            "followed a swapped-in symlink: {swapped:?}"
+        );
+        // A missing file is a 404, not a read error.
+        assert!(matches!(
+            confine_artifact(&cwd.join("gone.html"), cwd.to_str().unwrap(), &cwd, false),
+            Err(Error::NotFound(_))
+        ));
     }
 
     #[test]

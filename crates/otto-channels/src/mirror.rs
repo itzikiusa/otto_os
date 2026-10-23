@@ -1153,10 +1153,27 @@ struct PendingReply {
 
 /// Keep successful parts when a later part is rejected. Upload first: the
 /// inline message can truthfully claim an attachment only after acceptance.
+/// An upload refused for good (not a rate limit — `missing_scope`, a group
+/// that restricts media, a timeout) abandons the attachment, never the
+/// answer: the head still goes out, saying the rest is in Otto
+/// (integrations-6-03). Nothing was sent yet, so this cannot duplicate.
 struct ReplyDelivery {
     text: String,
     uploaded: bool,
+    /// Why the attachment was abandoned (short, one line), once it was.
+    attach_failed: Option<String>,
     sent: bool,
+}
+
+/// One short line of an upload error for the chat note.
+fn short_error(e: &anyhow::Error) -> String {
+    let line = e.to_string();
+    let line = line.lines().next().unwrap_or_default().trim();
+    let mut out = truncate_to_char_boundary(line, 120).to_string();
+    if out.len() < line.len() {
+        out.push('…');
+    }
+    out
 }
 
 impl ReplyDelivery {
@@ -1164,6 +1181,7 @@ impl ReplyDelivery {
         Self {
             text,
             uploaded: false,
+            attach_failed: None,
             sent: false,
         }
     }
@@ -1175,20 +1193,29 @@ impl ReplyDelivery {
         thread: Option<&str>,
     ) -> anyhow::Result<()> {
         let long = self.text.chars().count() > LONG_REPLY_THRESHOLD;
-        if long && !self.uploaded {
-            adapter
+        if long && !self.uploaded && self.attach_failed.is_none() {
+            match adapter
                 .upload(chat, thread, "investigation.md", self.text.as_bytes())
-                .await?;
-            self.uploaded = true;
+                .await
+            {
+                Ok(()) => self.uploaded = true,
+                // A rate limit is retried by the caller with every part intact.
+                Err(e) if classify_send_error(&e) == FeedSend::RateLimited => return Err(e),
+                Err(e) => {
+                    warn!("mirror: reply attachment abandoned: {e}");
+                    self.attach_failed = Some(short_error(&e));
+                }
+            }
         }
         if !self.sent {
-            let body = if long {
-                format!(
-                    "{}\n\n📎 full reply attached as investigation.md",
-                    truncate_to_char_boundary(&self.text, LONG_REPLY_HEAD_CHARS)
-                )
-            } else {
-                self.text.clone()
+            let head = truncate_to_char_boundary(&self.text, LONG_REPLY_HEAD_CHARS);
+            let body = match (long, &self.attach_failed) {
+                (false, _) => self.text.clone(),
+                (true, None) => format!("{head}\n\n📎 full reply attached as investigation.md"),
+                (true, Some(why)) => format!(
+                    "{head}\n\n⚠️ the full reply could not be attached ({why}); \
+                     open the session in Otto for the rest."
+                ),
             };
             adapter.send_formatted(chat, thread, &body).await?;
             self.sent = true;
@@ -1353,6 +1380,57 @@ mod tests {
             "one accepted upload total"
         );
         assert_eq!(a.messages.lock().unwrap().len(), 1);
+    }
+
+    /// An upload refused for good (`missing_scope`): the head still goes out,
+    /// once, with the note in place of the attachment claim.
+    #[tokio::test]
+    async fn a_permanently_refused_upload_still_posts_the_head_with_a_note() {
+        #[derive(Default)]
+        struct NoScope {
+            uploads: std::sync::atomic::AtomicU32,
+            messages: StdMutex<Vec<String>>,
+        }
+        #[async_trait::async_trait]
+        impl Adapter for NoScope {
+            async fn send(&self, _: &str, _: Option<&str>, text: &str) -> anyhow::Result<String> {
+                self.messages.lock().unwrap().push(text.into());
+                Ok("m".into())
+            }
+            async fn edit(&self, _: &str, _: &str, _: &str) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn channel(&self) -> Channel {
+                Channel::Slack
+            }
+            async fn upload(
+                &self,
+                _: &str,
+                _: Option<&str>,
+                _: &str,
+                _: &[u8],
+            ) -> anyhow::Result<()> {
+                self.uploads.fetch_add(1, Ordering::Relaxed);
+                anyhow::bail!("slack files.uploadV2: missing_scope")
+            }
+        }
+        let a = Arc::new(NoScope::default());
+        let adapter = a.clone() as Arc<dyn Adapter>;
+        let text = format!("HEAD-{}", "x".repeat(LONG_REPLY_THRESHOLD + 1));
+        let mut delivery = ReplyDelivery::new(text);
+        delivery.attempt(&adapter, "C1", None).await.unwrap();
+        // Settled: a later attempt neither re-uploads nor re-sends.
+        delivery.attempt(&adapter, "C1", None).await.unwrap();
+        assert_eq!(a.uploads.load(Ordering::Relaxed), 1);
+        let messages = a.messages.lock().unwrap();
+        assert_eq!(messages.len(), 1, "{messages:?}");
+        assert!(messages[0].starts_with("HEAD-"), "{}", messages[0]);
+        assert!(
+            messages[0].contains("the full reply could not be attached (slack files.uploadV2: missing_scope); open the session in Otto for the rest."),
+            "{}",
+            messages[0]
+        );
+        assert!(!messages[0].contains("📎"), "no false attachment claim");
     }
 
     /// Fails `upload` with each queued error, then succeeds; records notes.

@@ -26,6 +26,8 @@ mod agent_run_recovery;
 mod auth_security;
 #[path = "canvas_refs_api.rs"]
 mod canvas_refs_api;
+#[path = "database_changes_api.rs"]
+mod database_changes_api;
 #[path = "email_sender_storage.rs"]
 mod email_sender_storage;
 #[path = "foundation_integrity.rs"]
@@ -54,6 +56,8 @@ mod policy_coverage;
 mod proof_assemble_scope;
 #[path = "provider_resolve.rs"]
 mod provider_resolve;
+#[path = "public_entry_gates.rs"]
+mod public_entry_gates;
 #[path = "rbac_matrix.rs"]
 mod rbac_matrix;
 #[path = "resume_missing_cwd.rs"]

@@ -2063,21 +2063,27 @@ async fn create_task_goal(
 ) -> ApiResult<Json<SwarmGoal>> {
     let task = ctx.swarm_repo().get_task(&tid).await.map_err(ApiError)?;
     check(&ctx, &user, &task.workspace_id, WorkspaceRole::Editor).await?;
+    // Held like `update_task`: no verification turn starts between the goal
+    // write and the identity it must act as (concurrency-async-6-03).
+    let _operation = operation_guard(&task.swarm_id).await;
+    // A goal added to someone else's task is text its verification turn runs:
+    // the task now acts as the person who added it (access-control-5-01) —
+    // stamped in the goal's own transaction.
     let goal = ctx
         .swarm_repo()
-        .create_goal(new_goal_from(
-            req,
-            &task.swarm_id,
-            &task.workspace_id,
-            Some(task.project_id.clone()),
-            Some(tid),
-            &user.0.id,
-        ))
+        .create_goal_by(
+            new_goal_from(
+                req,
+                &task.swarm_id,
+                &task.workspace_id,
+                Some(task.project_id.clone()),
+                Some(tid),
+                &user.0.id,
+            ),
+            Some(&user.0.id),
+        )
         .await
         .map_err(ApiError)?;
-    // A goal added to someone else's task is text its verification turn runs:
-    // the task now acts as the person who added it (access-control-5-01).
-    note_goal_editor(&ctx, &goal, &user.0.id).await?;
     emit_goal(&ctx, &goal).await;
     Ok(Json(goal))
 }
@@ -2090,16 +2096,22 @@ async fn create_project_goal(
 ) -> ApiResult<Json<SwarmGoal>> {
     let project = ctx.swarm_repo().get_project(&pid).await.map_err(ApiError)?;
     check(&ctx, &user, &project.workspace_id, WorkspaceRole::Editor).await?;
+    let _operation = operation_guard(&project.swarm_id).await;
+    // A project goal is copied onto every task of the project at verification
+    // time: the project now acts as its author (access-control-6-02).
     let goal = ctx
         .swarm_repo()
-        .create_goal(new_goal_from(
-            req,
-            &project.swarm_id,
-            &project.workspace_id,
-            Some(pid),
-            None,
-            &user.0.id,
-        ))
+        .create_goal_by(
+            new_goal_from(
+                req,
+                &project.swarm_id,
+                &project.workspace_id,
+                Some(pid),
+                None,
+                &user.0.id,
+            ),
+            Some(&user.0.id),
+        )
         .await
         .map_err(ApiError)?;
     emit_goal(&ctx, &goal).await;
@@ -2142,9 +2154,12 @@ async fn update_goal_h(
 ) -> ApiResult<Json<SwarmGoal>> {
     let cur = ctx.swarm_repo().get_goal(&gid).await.map_err(ApiError)?;
     check(&ctx, &user, &cur.workspace_id, WorkspaceRole::Editor).await?;
-    // access-control-5-01: the goal text and verify command are what the
-    // verification turn executes — record who changed them, and on a task
-    // goal make that person the task's prompt editor (its turns act as them).
+    let _operation = operation_guard(&cur.swarm_id).await;
+    let cur = ctx.swarm_repo().get_goal(&gid).await.map_err(ApiError)?;
+    // access-control-5-01 / 6-02: the goal text and verify command are what
+    // the verification turn executes — record who changed them and make that
+    // person its owner's (task, project or swarm) prompt editor, in the goal
+    // write's own transaction.
     let rewrites = req.title.as_ref().is_some_and(|t| t != &cur.title)
         || req
             .description
@@ -2169,31 +2184,14 @@ async fn update_goal_h(
                 max_retries: req.max_retries,
                 blocking: req.blocking,
                 order_idx: req.order_idx,
+                updated_by: rewrites.then(|| user.0.id.clone()),
                 ..Default::default()
             },
         )
         .await
         .map_err(ApiError)?;
-    if rewrites {
-        note_goal_editor(&ctx, &goal, &user.0.id).await?;
-    }
     emit_goal(&ctx, &goal).await;
     Ok(Json(goal))
-}
-
-/// Record `user` as `goal`'s last editor and, for a task goal, as the task's
-/// prompt editor (access-control-5-01).
-async fn note_goal_editor(ctx: &SwarmRt, goal: &SwarmGoal, user: &str) -> ApiResult<()> {
-    let repo = ctx.swarm_repo();
-    repo.set_goal_editor(&goal.id, user)
-        .await
-        .map_err(ApiError)?;
-    if let Some(tid) = &goal.task_id {
-        repo.set_task_prompt_editor(tid, user)
-            .await
-            .map_err(ApiError)?;
-    }
-    Ok(())
 }
 
 async fn delete_goal_h(
@@ -2203,6 +2201,7 @@ async fn delete_goal_h(
 ) -> ApiResult<Json<serde_json::Value>> {
     let cur = ctx.swarm_repo().get_goal(&gid).await.map_err(ApiError)?;
     check(&ctx, &user, &cur.workspace_id, WorkspaceRole::Editor).await?;
+    let _operation = operation_guard(&cur.swarm_id).await;
     ctx.swarm_repo().delete_goal(&gid).await.map_err(ApiError)?;
     Ok(Json(json!({})))
 }
@@ -2263,10 +2262,13 @@ async fn put_standing_goals_h(
             ng
         })
         .collect();
-    // One transaction, errors propagated (S4-24).
+    // One transaction, errors propagated (S4-24); the swarm's prompt editor
+    // is stamped inside it — every task's verification turn runs these
+    // `verify_cmd`s (access-control-6-02).
+    let _operation = operation_guard(&sid).await;
     Ok(Json(
         ctx.swarm_repo()
-            .replace_standing_goals(&sid, goals)
+            .replace_standing_goals_by(&sid, goals, Some(&user.0.id))
             .await
             .map_err(ApiError)?,
     ))

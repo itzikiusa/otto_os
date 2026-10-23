@@ -30,6 +30,7 @@ use axum::routing::{delete, get};
 use axum::{Json, Router};
 use chrono::Utc;
 use otto_core::domain::{SessionKind, SessionStatus, WorkspaceRole};
+use otto_core::keyed_lock::KeyedLocks;
 use otto_core::Id;
 use otto_state::{NewSavedView, SavedView, SavedViewsRepo};
 use serde::{Deserialize, Serialize};
@@ -109,19 +110,8 @@ const CACHE_TTL: Duration = Duration::from_secs(3);
 /// Per-workspace build gates (perf §15 N3): concurrent cache misses — the
 /// sidebar badge, the page and a WS-driven refresh landing together — queue
 /// on one gate and the followers re-read the cache the leader filled instead
-/// of each running `build_view`. Idle gates are pruned on every miss.
-static BUILDING: OnceLock<std::sync::Mutex<HashMap<Id, std::sync::Arc<Mutex<()>>>>> =
-    OnceLock::new();
-
-fn build_gate(ws_id: &Id) -> std::sync::Arc<Mutex<()>> {
-    let mut map = BUILDING
-        .get_or_init(Default::default)
-        .lock()
-        .unwrap_or_else(|p| p.into_inner());
-    // Nobody else holds a pruned gate (strong count 1 = only the map).
-    map.retain(|k, g| k == ws_id || std::sync::Arc::strong_count(g) > 1);
-    map.entry(ws_id.clone()).or_default().clone()
-}
+/// of each running `build_view`. Idle gates are pruned on the next insert.
+static BUILDING: KeyedLocks<Id> = KeyedLocks::new();
 
 async fn cached(ws_id: &Id) -> Option<MissionView> {
     let guard = cache().lock().await;
@@ -140,8 +130,7 @@ where
     if let Some(v) = cached(ws_id).await {
         return v;
     }
-    let gate = build_gate(ws_id);
-    let _building = gate.lock().await;
+    let _building = BUILDING.lock(ws_id).await;
     // A leader may have filled the cache while we queued.
     if let Some(v) = cached(ws_id).await {
         return v;
@@ -602,8 +591,8 @@ mod tests {
         })
         .await;
         assert_eq!(builds.load(Ordering::SeqCst), 2);
-        // Only the last-touched gate may linger; idle ones were pruned.
-        let gates = BUILDING.get().unwrap().lock().unwrap();
-        assert!(!gates.contains_key(&ws), "idle gate pruned");
+        // No build holds a gate once it returns.
+        assert!(BUILDING.try_lock(&ws).is_some(), "the gate is free again");
+        assert!(BUILDING.try_lock(&other).is_some());
     }
 }

@@ -1112,6 +1112,50 @@ async fn rename_survives_a_failed_link_rewrite() {
     );
 }
 
+/// concurrency-async-6-01: dropping the rename request after the move (a
+/// closed window, the MCP bridge's 20 s budget) still finishes every backlink
+/// rewrite and the rescan — the work runs in its own task.
+#[tokio::test]
+async fn rename_finishes_after_its_request_is_dropped() {
+    let (e, dir, id) = fixture().await;
+    let (moved_tx, moved_rx) = tokio::sync::oneshot::channel();
+    let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
+    *e.rename_pause.lock().unwrap() = Some((moved_tx, resume_rx));
+    let request = tokio::spawn({
+        let e = Arc::clone(&e);
+        async move { e.rename("ws", id, "b.md", "sub/c.md").await }
+    });
+    moved_rx.await.unwrap();
+    assert!(dir.path().join("sub/c.md").is_file(), "the file moved");
+    request.abort();
+    assert!(request.await.unwrap_err().is_cancelled());
+    resume_tx.send(()).unwrap();
+    let rewritten = dir.path().join("a.md");
+    for _ in 0..200 {
+        if e.store.note_meta(id, "sub/c.md").await.is_ok()
+            && !std::fs::read_to_string(&rewritten)
+                .unwrap()
+                .contains("[[b]]")
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let body = std::fs::read_to_string(&rewritten).unwrap();
+    assert!(
+        !body.contains("[[b]]") && body.contains("c]]"),
+        "the backlink was rewritten after the request went away: {body:?}"
+    );
+    assert!(
+        e.store.note_meta(id, "sub/c.md").await.is_ok(),
+        "index has the new path"
+    );
+    assert!(
+        e.store.note_meta(id, "b.md").await.is_err(),
+        "and not the old one"
+    );
+}
+
 /// F1: 100 autosaves of one note inside the coalescing window make ONE
 /// revision directory and a bounded set of bodies; the revision still
 /// restores the original `before` and the latest `after`.

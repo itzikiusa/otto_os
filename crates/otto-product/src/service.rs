@@ -36,6 +36,29 @@ pub struct ProductService {
     context_cache: Mutex<HashMap<(Id, String), String>>,
 }
 
+/// Serialises every outward publish of one story (keyed by story id): a draft
+/// published from two tabs, or a retry while the first is still in flight,
+/// used to pass the read-only reviewed-snapshot check twice and create two
+/// Jira issues / Confluence pages. Under the lock the second publish re-reads
+/// the story, sees the rebind (or the recorded page id), and is refused (or
+/// updates instead of creating).
+static PUBLISH_LOCKS: otto_core::keyed_lock::KeyedLocks<String> =
+    otto_core::keyed_lock::KeyedLocks::new();
+
+/// Run a publish (remote create + its local record) as a spawned task the
+/// caller awaits: a dropped request future (a reload, a client timeout) no
+/// longer abandons the work between the remote create and the local write,
+/// which left a remote object Otto never recorded — the next publish then
+/// duplicated it or tripped Confluence's duplicate-title 400.
+async fn run_detached<T: Send + 'static>(
+    what: &'static str,
+    fut: impl std::future::Future<Output = Result<T>> + Send + 'static,
+) -> Result<T> {
+    tokio::spawn(fut)
+        .await
+        .map_err(|e| Error::Internal(format!("{what}: publish task failed: {e}")))?
+}
+
 /// A single comment fetched from the issue tracker (Jira or Confluence).
 #[derive(Clone)]
 pub struct CommentInfo {
@@ -615,7 +638,23 @@ impl ProductService {
     ///
     /// On success, records a `published` version and a `publish` event, and
     /// returns `(url, ref)` where `ref` is the story's `source_key`.
-    pub async fn publish_version(&self, version_id: &Id, by: &Id) -> Result<(String, String)> {
+    pub async fn publish_version(
+        self: &Arc<Self>,
+        version_id: &Id,
+        by: &Id,
+    ) -> Result<(String, String)> {
+        let (this, version_id, by) = (Arc::clone(self), version_id.clone(), by.clone());
+        run_detached("publish_version", async move {
+            let story_id = this.repo.get_version(&version_id).await?.story_id;
+            let _publishing = PUBLISH_LOCKS.lock(&story_id).await;
+            this.publish_version_locked(&version_id, &by).await
+        })
+        .await
+    }
+
+    /// [`Self::publish_version`] under the story's publish lock, on a task
+    /// that outlives the request.
+    async fn publish_version_locked(&self, version_id: &Id, by: &Id) -> Result<(String, String)> {
         // 1. Load version and its story.
         let version = self.repo.get_version(version_id).await?;
         let story = self.repo.get_story(&version.story_id).await?;
@@ -825,6 +864,29 @@ impl ProductService {
     /// - Emits a `tests_published` event.
     /// - Returns the page URL.
     pub async fn publish_testcases(
+        self: &Arc<Self>,
+        run_id: &Id,
+        by: &Id,
+        space_key: Option<&str>,
+        parent_id: Option<&str>,
+    ) -> Result<String> {
+        let this = Arc::clone(self);
+        let (run_id, by) = (run_id.clone(), by.clone());
+        let (space_key, parent_id) = (space_key.map(str::to_string), parent_id.map(str::to_string));
+        run_detached("publish_testcases", async move {
+            let story_id = this.repo.get_testcase_run(&run_id).await?.story_id;
+            let _publishing = PUBLISH_LOCKS.lock(&story_id).await;
+            // Re-read under the lock: a publish that just finished recorded
+            // the page id, so this one updates that page instead of creating
+            // a duplicate "Test Cases — …" page.
+            this.publish_testcases_locked(&run_id, &by, space_key.as_deref(), parent_id.as_deref())
+                .await
+        })
+        .await
+    }
+
+    /// [`Self::publish_testcases`] under the story's publish lock.
+    async fn publish_testcases_locked(
         &self,
         run_id: &Id,
         by: &Id,
@@ -1596,6 +1658,25 @@ impl ProductService {
     /// If the story's source_kind is "draft", the story is REBOUND to the new
     /// Confluence page (it becomes the RFC). Otherwise a published copy is recorded.
     pub async fn publish_as_rfc(
+        self: &Arc<Self>,
+        story_id: &Id,
+        req: &PublishAsRfcReq,
+        by: &Id,
+    ) -> Result<ProductStoryDetail> {
+        let this = Arc::clone(self);
+        let (story_id, req, by) = (story_id.clone(), req.clone(), by.clone());
+        run_detached("publish_as_rfc", async move {
+            let _publishing = PUBLISH_LOCKS.lock(&story_id).await;
+            this.publish_as_rfc_locked(&story_id, &req, &by).await
+        })
+        .await
+    }
+
+    /// [`Self::publish_as_rfc`] under the story's publish lock. The reviewed
+    /// snapshot is compared HERE, under the lock: a draft another publish
+    /// just rebound no longer matches it (its `source_kind`/`url` changed),
+    /// so a second publish is refused instead of creating a second page.
+    async fn publish_as_rfc_locked(
         &self,
         story_id: &Id,
         req: &PublishAsRfcReq,
@@ -1687,6 +1768,23 @@ impl ProductService {
     /// - Else (Confluence RFC or existing Jira): create a NEW Jira-backed story,
     ///   cross-link back to the original, and return the new story's detail.
     pub async fn publish_as_story(
+        self: &Arc<Self>,
+        story_id: &Id,
+        req: &PublishAsStoryReq,
+        by: &Id,
+    ) -> Result<ProductStoryDetail> {
+        let this = Arc::clone(self);
+        let (story_id, req, by) = (story_id.clone(), req.clone(), by.clone());
+        run_detached("publish_as_story", async move {
+            let _publishing = PUBLISH_LOCKS.lock(&story_id).await;
+            this.publish_as_story_locked(&story_id, &req, &by).await
+        })
+        .await
+    }
+
+    /// [`Self::publish_as_story`] under the story's publish lock; see
+    /// [`Self::publish_as_rfc_locked`] for why the snapshot check sits here.
+    async fn publish_as_story_locked(
         &self,
         story_id: &Id,
         req: &PublishAsStoryReq,
@@ -3380,7 +3478,7 @@ mod tests {
         let repo = ProductRepo::new(pool.clone());
         let issues = IssuesRepo::new(pool.clone());
         let secrets: Arc<dyn SecretStore> = Arc::new(FixedSecret("tok".into()));
-        let svc = ProductService::new(repo.clone(), issues, secrets);
+        let svc = Arc::new(ProductService::new(repo.clone(), issues, secrets));
 
         let detail = svc
             .create_draft(&ws_id, &user_id, Some("My Draft Feature"))
@@ -3424,6 +3522,121 @@ mod tests {
         let events = repo.list_events(&story_id, Some("publish")).await.unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, "published_story");
+    }
+
+    /// A publish request for `detail`'s draft, carrying the reviewed snapshot.
+    fn story_publish_req(detail: &ProductStoryDetail, account_id: &Id) -> PublishAsStoryReq {
+        PublishAsStoryReq {
+            reviewed_account_url: None,
+            account_id: account_id.clone(),
+            project_key: "NEW".into(),
+            issue_type: "Story".into(),
+            reviewed_content: Some(ReviewedContent {
+                version_id: detail.source.as_ref().map(|version| version.id.clone()),
+                body_sha256: otto_core::proof::content_sha256(
+                    detail
+                        .source
+                        .as_ref()
+                        .map_or("", |version| &version.body_md),
+                ),
+                title: detail.story.title.clone(),
+                source_kind: detail.story.source_kind.clone(),
+                url: detail.story.url.clone(),
+            }),
+        }
+    }
+
+    /// A draft, a Jira account on `server`, and the service over them.
+    async fn draft_publish_fixture(
+        server: &MockServer,
+    ) -> (Arc<ProductService>, ProductRepo, ProductStoryDetail, Id, Id) {
+        let pool = mem_pool().await;
+        let user_id = seed_user(&pool).await;
+        let ws_id = seed_workspace(&pool).await;
+        let account = seed_issue_account(&pool, &user_id, &server.uri()).await;
+        let repo = ProductRepo::new(pool.clone());
+        let secrets: Arc<dyn SecretStore> = Arc::new(FixedSecret("tok".into()));
+        let svc = Arc::new(ProductService::new(
+            repo.clone(),
+            IssuesRepo::new(pool),
+            secrets,
+        ));
+        let detail = svc
+            .create_draft(&ws_id, &user_id, Some("My Draft Feature"))
+            .await
+            .unwrap();
+        (svc, repo, detail, account.id, user_id)
+    }
+
+    async fn mount_slow_issue_create(server: &MockServer, delay_ms: u64) {
+        Mock::given(method("POST"))
+            .and(path("/rest/api/3/issue"))
+            .respond_with(
+                ResponseTemplate::new(201)
+                    .set_delay(std::time::Duration::from_millis(delay_ms))
+                    .set_body_json(serde_json::json!({
+                        "id": "10099",
+                        "key": "NEW-1",
+                        "self": format!("{}/rest/api/3/issue/10099", server.uri()),
+                    })),
+            )
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn publish_as_story_dropped_mid_create_still_records_the_binding() {
+        // concurrency-async-6-04: the request future is dropped while the
+        // remote create is in flight. The issue is created; the draft must
+        // still be rebound to it, or the next publish creates a duplicate.
+        let server = MockServer::start().await;
+        mount_slow_issue_create(&server, 300).await;
+        let (svc, repo, detail, account_id, user_id) = draft_publish_fixture(&server).await;
+        let story_id = detail.story.id.clone();
+        let req = story_publish_req(&detail, &account_id);
+
+        let dropped = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            svc.publish_as_story(&story_id, &req, &user_id),
+        )
+        .await;
+        assert!(
+            dropped.is_err(),
+            "the request future was dropped mid-create"
+        );
+
+        let mut story = repo.get_story(&story_id).await.unwrap();
+        for _ in 0..100 {
+            if story.source_kind == "jira" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            story = repo.get_story(&story_id).await.unwrap();
+        }
+        assert_eq!(story.source_kind, "jira", "binding recorded after the drop");
+        assert_eq!(story.source_key, "NEW-1");
+    }
+
+    #[tokio::test]
+    async fn publish_as_story_double_submit_creates_one_issue() {
+        // Two tabs publish the same reviewed draft at once: the second waits
+        // for the first, re-reads the (now rebound) story and is refused.
+        let server = MockServer::start().await;
+        mount_slow_issue_create(&server, 100).await;
+        let (svc, _repo, detail, account_id, user_id) = draft_publish_fixture(&server).await;
+        let story_id = detail.story.id.clone();
+        let req = story_publish_req(&detail, &account_id);
+
+        let (a, b) = tokio::join!(
+            svc.publish_as_story(&story_id, &req, &user_id),
+            svc.publish_as_story(&story_id, &req, &user_id),
+        );
+        let oks = [a.is_ok(), b.is_ok()].iter().filter(|ok| **ok).count();
+        assert_eq!(oks, 1, "exactly one publish succeeds: {a:?} / {b:?}");
+        let refused = if a.is_err() { a } else { b };
+        assert!(matches!(refused, Err(Error::Conflict(_))), "{refused:?}");
+        let creates = server.received_requests().await.unwrap();
+        assert_eq!(creates.len(), 1, "one remote create, not two");
     }
 
     // -----------------------------------------------------------------------

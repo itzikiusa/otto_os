@@ -39,10 +39,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
-use otto_core::api::{AdminSessionRow, AdminSessionsResp};
+use otto_core::api::{AdminSessionRow, AdminSessionsQuery, AdminSessionsResp};
 use otto_core::Id;
 use otto_sessions::SessionManager;
 use otto_state::{NewAuditEntry, SessionsRepo, UsersRepo};
@@ -92,8 +92,27 @@ impl AdminSessionsCtx for ServerCtx {
 pub async fn list_sessions<C: AdminSessionsCtx>(
     State(ctx): State<C>,
     CurrentUser(_user): CurrentUser,
+    Query(q): Query<AdminSessionsQuery>,
 ) -> ApiResult<Json<AdminSessionsResp>> {
-    let sessions = overview_rows(&ctx.sessions_repo().pool()).await?;
+    let limit = q.limit.unwrap_or(DEFAULT_PAGE).clamp(1, MAX_PAGE) as usize;
+    let after = match q.cursor.as_deref().filter(|c| !c.is_empty()) {
+        Some(c) => Some(parse_cursor(c)?),
+        None => None,
+    };
+    let mut sessions = overview_rows(
+        &ctx.sessions_repo().pool(),
+        q.include_archived,
+        after,
+        limit + 1,
+    )
+    .await?;
+    let next_cursor = (sessions.len() > limit).then(|| {
+        sessions.truncate(limit);
+        sessions
+            .last()
+            .map(|r| hex::encode(format!("{}|{}", r.created_at, r.id)))
+            .unwrap_or_default()
+    });
     let manager = ctx.manager();
 
     // Batch-load every user once and index by id → username (so we never do a
@@ -129,13 +148,39 @@ pub async fn list_sessions<C: AdminSessionsCtx>(
         })
         .collect();
 
-    Ok(Json(AdminSessionsResp { sessions: rows }))
+    Ok(Json(AdminSessionsResp {
+        sessions: rows,
+        next_cursor,
+    }))
+}
+
+/// Default and maximum overview page size.
+const DEFAULT_PAGE: u32 = 200;
+const MAX_PAGE: u32 = 1000;
+
+/// A `next_cursor` — hex of `"<created_at>|<id>"`, so it needs no URL
+/// escaping (an RFC 3339 `+00:00` would read back as a space) — → its keyset
+/// position. Anything else is a 400.
+fn parse_cursor(c: &str) -> ApiResult<(String, String)> {
+    hex::decode(c)
+        .ok()
+        .and_then(|b| String::from_utf8(b).ok())
+        .and_then(|s| {
+            let (at, id) = s.split_once('|')?;
+            (!at.is_empty() && !id.is_empty()).then(|| (at.to_string(), id.to_string()))
+        })
+        .ok_or_else(|| {
+            crate::error::ApiError(otto_core::Error::Invalid(
+                "malformed sessions cursor".into(),
+            ))
+        })
 }
 
 /// The persisted part of one overview row.
 #[derive(sqlx::FromRow)]
 struct OverviewRow {
     id: String,
+    created_at: String,
     workspace_id: String,
     created_by: String,
     kind: String,
@@ -144,13 +189,29 @@ struct OverviewRow {
     status: String,
 }
 
-/// Every session, newest first (the order `SessionsRepo::list_all` had),
-/// projected to the overview's columns: no `meta_json` decode per row.
-async fn overview_rows(pool: &otto_state::DbPool) -> ApiResult<Vec<OverviewRow>> {
+/// One page of sessions, newest first by `(created_at, id)` — keyset-paged
+/// after `after` — projected to the overview's columns: no `meta_json`
+/// decode per row. Unarchived only unless `include_archived` (the archived
+/// history is the bulk of the table — backend-performance-6-05).
+async fn overview_rows(
+    pool: &otto_state::DbPool,
+    include_archived: bool,
+    after: Option<(String, String)>,
+    limit: usize,
+) -> ApiResult<Vec<OverviewRow>> {
+    let (at, id) = after.unzip();
     sqlx::query_as::<_, OverviewRow>(
-        "SELECT id, workspace_id, created_by, kind, provider, title, status \
-         FROM sessions ORDER BY created_at DESC",
+        "SELECT id, created_at, workspace_id, created_by, kind, provider, title, status \
+         FROM sessions WHERE (? OR archived = 0) \
+         AND (? IS NULL OR created_at < ? OR (created_at = ? AND id < ?)) \
+         ORDER BY created_at DESC, id DESC LIMIT ?",
     )
+    .bind(include_archived)
+    .bind(&at)
+    .bind(&at)
+    .bind(&at)
+    .bind(&id)
+    .bind(limit as i64)
     .fetch_all(pool)
     .await
     .map_err(|e| {

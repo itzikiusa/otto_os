@@ -59,7 +59,7 @@ fn lens_result(o: RunOutcome) -> LensRunResult {
 /// Spawn `provider` as a live agent session in `cwd`, inject `prompt`, and wait
 /// until it writes its JSON to `out_path` (or `timeout` elapses / it exits).
 ///
-/// Models `review_session::run_agent_session`, but product-specific and without
+/// Models `otto_review::session::run_agent_session`, but product-specific and without
 /// the per-agent live-state persistence (the caller owns the agent DB row). The
 /// session is intentionally NOT killed so it stays openable afterward.
 ///
@@ -68,7 +68,7 @@ fn lens_result(o: RunOutcome) -> LensRunResult {
 ///
 /// When `agent_id` is `Some`, the freshly-created session id is persisted to that
 /// analysis-agent row IMMEDIATELY (before the agent does any work), mirroring
-/// `review_session::run_agent_session`. That's what lets the UI show "Open" and
+/// `otto_review::session::run_agent_session`. That's what lets the UI show "Open" and
 /// stream the live terminal *while the agent is running* — not only once it
 /// finishes — and keeps the session replayable afterward as history. Callers with
 /// no agent row (rewrite / generate-tests / generate-plan) pass `None`.

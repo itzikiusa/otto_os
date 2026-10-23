@@ -428,6 +428,8 @@ async fn apply_rows(
         .execute(&mut *conn)
         .await
         .map_err(db_error)?;
+    // The archive's default MCP profile, applied once every row is in.
+    let mut default_profile: Option<&str> = None;
     // FK constraints are deferred, so cycles and table ordering do not force a partial restore.
     for (table, rows) in &archive.records {
         let spec = &tables[table];
@@ -450,6 +452,18 @@ async fn apply_rows(
             {
                 result.skipped += 1;
                 continue;
+            }
+            if table == "mcp_profiles" {
+                if schema::truthy(original, "is_default") {
+                    default_profile = original.get("id").and_then(Value::as_str);
+                }
+                if let schema::ProfileRestore::MergedBuiltin =
+                    schema::restore_mcp_profile(conn, &mut row).await?
+                {
+                    signature.update(table.as_bytes());
+                    signature.update(row_key(&row, spec).as_bytes());
+                    continue;
+                }
             }
             let mut reconnect = BTreeSet::new();
             schema::sanitize(table, spec, &mut row, &mut reconnect);
@@ -541,6 +555,9 @@ async fn apply_rows(
                 }
             }
         }
+    }
+    if let Some(id) = default_profile {
+        schema::restore_default_profile(conn, id).await?;
     }
     let broken = sqlx::query("PRAGMA foreign_key_check")
         .fetch_all(conn)

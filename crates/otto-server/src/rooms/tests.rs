@@ -514,3 +514,22 @@ async fn geometry_updates_fence_annotations_without_lifting_host_blocks() {
             .allowed
     );
 }
+
+/// backend-correctness-6-05: a guest joining audio while the host's member
+/// row is gone (pruned) is refused, not a panic that poisons the room.
+#[tokio::test]
+async fn audio_join_without_a_host_member_is_refused() {
+    let (reg, host, guest) = admitted_room().await;
+    let room = reg.get(&host.room_id).await.unwrap();
+    let mut room = room.lock().await;
+    room.members.remove(&host.member_id);
+    let refused = room.apply(
+        &guest.member_id,
+        RoomAction::Audio {
+            joined: true,
+            muted: false,
+        },
+    );
+    assert!(refused.is_err(), "{refused:?}");
+    assert!(!room.members[&guest.member_id].view.audio_joined);
+}
