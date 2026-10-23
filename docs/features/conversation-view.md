@@ -38,7 +38,7 @@ files, PRs and images a session produced are listed with previews in an
 | Layer | Path | Responsibility |
 |---|---|---|
 | Parser crate | `crates/otto-transcript/` | `parse_claude_line` / `parse_codex_line` (moved from `otto-usage`, re-exported there), `fold(records) → Transcript`, the two-era Codex adapter, subagent tree reader, image extraction, the offset `Tailer`; fixtures under `fixtures/{claude,codex-new,codex-old}` |
-| Transcript resolution | `crates/otto-sessions/src/lifecycle.rs` | `transcript_path(session)` — Claude by provider session id, Codex via the persisted `sessions.transcript_path` (migration 0121) |
+| Transcript resolution | `crates/otto-sessions/src/lifecycle.rs` | `transcript_path_in(roots, …)` — Claude by provider session id, Codex via the persisted `sessions.transcript_path` (migration 0121). The roots and the cwd encoder are `otto_transcript::roots` (`TranscriptRoots::for_session`, `encode_cwd`, `claude_session_file`), so the persisted path honours `OTTO_TRANSCRIPT_ROOTS` and the isolated e2e fixture |
 | Routes | `crates/otto-server/src/routes/transcript.rs` | Transcript paging, images, artifacts, board tasks, inbox upload, History list/read/import/rescan (§5) |
 | Tail supervisor | `crates/otto-server/src/transcript_tail.rs` | Polls live sessions' transcripts (700 ms), folds, broadcasts `transcript_appended` / `artifact_added`; reads the PTY screen for the `transcript_live` draft. Armed by an open chat (`GET` + 60 s `touch` pings) and by the workspace keep-alive for every live session you may read, ≤ 64 at once, stops 2 min after the last ping |
 | Live draft | `ui/src/modules/agents/conversation/LiveDraft.svelte` | Sub-turn streaming: the screen text under the last folded turn, deduped against it |

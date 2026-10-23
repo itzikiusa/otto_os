@@ -113,7 +113,7 @@ query history, and persists saved queries / dashboards / widgets in SQLite.
 | Auto-Vertical per-engine preference (+ legacy migration) | `ui/src/lib/db-view-prefs.ts` (stored by `ui.dbAutoVertical`) |
 | Edit flow (pending changes, review modal, doc editor, cell viewer) + per-engine statement builders | `EditFlow.svelte.ts`, `edit-{sql,mongo,redis}.ts` |
 | View-mode precedence, tab/pin persistence, connection view memory | `ui/src/lib/stores/database.svelte.ts` (`effectiveViewMode`) |
-| Store parts behind the `database` façade: model/statement helpers, dashboards, DB Assistant, saved queries, history | `ui/src/lib/stores/database/{model,statement}.ts`, `{dashboards,assist,savedQueries,history}.svelte.ts` |
+| Store parts behind the `database` façade: model/statement helpers, connections (open/close, warm-up, keep-alive, the shared `ConnEpochs` stale-response token), schema tree + object search, object operations, query runs (run, cancel, plans, re-attach), workbench persistence, dashboards, DB Assistant, saved queries, history, quick filters | `ui/src/lib/stores/database/{model,statement}.ts`, `{connections,schemaTree,objectOps,queryRuns,workbenchPersist,dashboards,assist,savedQueries,history,filters}.svelte.ts` |
 | Shared SQL/filter/error helpers (dialect, `{{vars}}`, filter chips, error normalization, Mongo formatting, grid tab state) | `ui/src/lib/database/*.ts` |
 | API client types (mirror the contract) | `ui/src/lib/api/types.ts` |
 

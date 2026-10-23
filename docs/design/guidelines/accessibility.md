@@ -124,6 +124,16 @@ in audits.
     `role="status"` (or `aria-live`) element together with its text:
     WebKit/VoiceOver only speak changes to a region that already exists, so
     the inserted text is often silent.
+  - Two helpers for the common shapes, both in `lib/announce.svelte.ts`:
+    `announceEdge()` returns a tracker to call from an `$effect` with the
+    current message (it speaks only a new message; `null` re-arms it), and
+    `use:announceShown={text | { text, assertive }}` speaks a line when it is
+    inserted and again when its text changes, so the line itself carries no
+    role. `LoadState` speaks its stale “Couldn’t refresh {what}” bar this way.
+  - An inline field or form error inserted as `role="alert"` is the one
+    inserted region that may stay: WebKit fires the alert event when an
+    `alert` element is added, and specs find errors by that role. Keep it to
+    real errors; a notice, a result or progress is not an alert.
   - Status that changes without user action (a run finishing, a session
     needing you) should be announced politely or reachable from the bell.
   - Loading regions get `aria-busy="true"` (as `Skeleton` sets) or

@@ -49,7 +49,7 @@ Each repo tab has its own sub-tabs: **Graph**, **Changes**, **History**,
 | Git page (repo tabs + landing) | `ui/src/modules/git/GitPage.svelte`, `GitTabs.svelte` |
 | One repo (toolbar + Graph/Changes/History/PRs/Review tabs) | `ui/src/modules/git/RepoView.svelte` |
 | Stage/commit/discard panel | `ui/src/modules/git/WipPanel.svelte` |
-| Commit graph + branch chips + context menus | `ui/src/modules/git/GraphView.svelte` |
+| Commit graph + branch chips + context menus | `ui/src/modules/git/GraphView.svelte` (graph, refs tree); `ui/src/modules/git/graph/graphActions.svelte.ts` (checkout, branch / tag / stash / worktree / submodule actions, pull, rebase); `ui/src/modules/git/graph/graphMenus.ts` (the commit / branch / tag / stash / worktree / submodule menus) |
 | Diff rendering | `ui/src/modules/git/DiffViewer.svelte` |
 | Create-PR sheet | `ui/src/modules/git/CreatePr.svelte` |
 | PR list / PR detail | `ui/src/modules/git/PrList.svelte`, `PrDetail.svelte` |

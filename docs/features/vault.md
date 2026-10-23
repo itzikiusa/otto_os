@@ -635,6 +635,16 @@ routes, `POST /vault/docs-agents/runs/{run_id}/cancel`, `POST
 …/docs-agents/refine`, and `GET …/docs-agents/refine-session?path=`. Exact
 request/response shapes and route paths are in `docs/contracts/api.md`.
 
+Code map: `crates/otto-server/src/vault_docs_agent.rs` (routes, run registry,
+persistence, recovery) with its phases in `vault_docs_agent/` — `run.rs`
+(orchestration), `authors.rs` (writer/summarizer turns), `review_loop.rs`,
+`retry.rs` (retry endpoints), `refine.rs` and `prompts.rs`. The writer fan-out,
+the summarizer and every per-slot retry run on the shared runner
+`otto_agent_run::fanout` (`run_slots`, `summarize_with_retries`, `attempts`
+over the run's `RetryQueue`): a retry re-runs only that slot, a failed writer
+keeps listening for a retry while a peer is still moving, and a failed
+summarizer keeps the drafts in place.
+
 ## 7. The memories layer (what remains of v1/v2)
 
 The **workspace memory store** (`otto-memory`: `memories` / `memory_links`,

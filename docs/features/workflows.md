@@ -71,6 +71,12 @@ API-client automations are a thin, self-contained feature covered in §8.
 ui/src/modules/workflows/WorkflowsPage.svelte   — the page: generate / list / edit / run / inspect
 ui/src/modules/workflows/WorkflowCanvas.svelte  — n8n-style pan/zoom node-graph canvas (SVG + cards)
 ui/src/modules/workflows/RunSteps.svelte        — per-step run detail (status, logs, "work product")
+ui/src/modules/workflows/RunMonitor.svelte      — the inspector's run view: run bar, timeline, steps, final output
+ui/src/modules/workflows/runSync.svelte.ts      — RunMonitor state: live run sync (WS fast path + safety poll), approvals, final output
+ui/src/modules/workflows/RunApprovals.svelte    — the approval gate preview + Approve / Reject
+ui/src/modules/workflows/RunContextSidebar.svelte — the run's context files (shared <Tabs>)
+ui/src/modules/workflows/RunFinalOutput.svelte  — the run's final deliverable (one view for mobile and desktop)
+ui/src/modules/workflows/RunInputPanel.svelte   — manual-run input editor (state in runInputForm.svelte.ts)
 ui/src/modules/workflows/TriggersPanel.svelte   — list/add/edit/preview/toggle/delete schedule|webhook|event|chat triggers
 ui/src/modules/api/AutomationsView.svelte       — API-client collection runner (the *other* "automations")
 
@@ -346,7 +352,7 @@ The catalog is returned by `GET /workflows/node-types` (`node_catalog()` in
 `workflow_engine.rs`). Each descriptor (`NodeTypeSpec`) carries
 `kind, label, category, description, inputs, outputs, color, icon`. The UI's
 "+ Node" palette is built directly from this list, and per-kind parameter forms
-live in `WorkflowsPage.svelte`.
+live in `inspector/NodeParams.svelte`.
 
 **Status legend:** **Real** = executes against a live subsystem · **Real
 (scaffold)** = runs and produces real structured output but emits a canned spec

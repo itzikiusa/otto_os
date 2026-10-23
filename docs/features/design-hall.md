@@ -39,7 +39,9 @@ built on **one artifact graph**:
 
 Code: `crates/otto-design` (router, service, store, extractor, import,
 `variants`, `cite`, `learn`), `crates/otto-server/src/design_hall.rs` (glue),
-`crates/otto-design-assist/src/lib.rs` (the agent pipeline),
+`crates/otto-design-assist/src/lib.rs` (the agent pipeline: context, prompt,
+handlers) and `src/job.rs` (the turn: report, validation, commit, restore —
+an adapter of the shared assist job `otto-agent-run/src/assist/`),
 `crates/otto-improve/src/design.rs` (the `design` evidence source), migration
 `…_design_graph.sql` (no new migration for the pipeline).
 Contract: [`docs/contracts/api.md` § Design Hall](../contracts/api.md) and the
@@ -277,7 +279,11 @@ them). `selection` focuses the change on one node/section. A main turn resumes
 the artifact's assist session (`meta.assist`) when the provider matches.
 
 Costs stay bounded: one agent run per artifact at a time (409 otherwise), 20
-minutes per turn (the session is stopped past it), at most 4 variants.
+minutes per turn (the session is stopped past it), at most 4 variants. The
+claim, the turn, the live-save broadcast and the 20-minute cap are the shared
+assist job in `otto-agent-run` (`assist::run_assist_job`), the same one Canvas
+Ask AI and story mockups run; resuming `meta.assist`'s session is refused
+(403) unless the caller created it in this workspace.
 
 Under the opt-in process sandbox (`process_sandbox`, macOS Seatbelt) the
 agent may write `<data>/design/<artifact>/work/**` — per artifact, by

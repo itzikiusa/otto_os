@@ -59,7 +59,7 @@ Key properties (all implemented):
 | **Local (working-tree) review** UI | Git → repo → **Review** tab (`ui/src/modules/git/RepoView.svelte` → `LocalReviewPanel.svelte`) | Per-repo; opens to a clean slate (§6.5) |
 | Shared per-agent cards | `ui/src/modules/git/ReviewAgents.svelte` | Open / Retry / per-agent findings; used by both panels |
 | Configure-agents modal | inside `ReviewPanel.svelte` ("⚙ Configure") | Edits the persisted `ReviewConfig` |
-| Orchestration engine | `crates/otto-server/src/modules/review/` (`run_review_core` in `run.rs`, route handlers in `routes.rs`, retry in `retry.rs`) | Fan-out, summarizer, draft-comment storage |
+| Orchestration engine | `crates/otto-server/src/modules/review/` (`run_review_core` in `run.rs`, route handlers in `routes.rs`, retry in `retry.rs`, `summarize_and_persist` in `summarize.rs`) | Fan-out, summarizer, draft-comment storage. The summarizer step runs on the shared `otto_agent_run::fanout::summarize` (managed turn, else the deterministic fallback); agent rows map onto its slots with the summarizer last (`retry::row_slot`) |
 | Engine pure core | `crates/otto-review/src/engine.rs` | Diff rendering + caps, config defaults + budgets, fan-out / orchestrator expansion, reviewer prompts, draft-comment parsing |
 | Summarizer lifecycle + deterministic fallback | `crates/otto-review/src/summarizer.rs`, `crates/otto-review/src/fallback.rs` | Managed summarizer attempt; the dedupe/rank floor when it cannot run |
 | Per-agent session lifecycle | `crates/otto-review/src/session.rs` | Spawn, prompt injection, watch, recovery/retry |

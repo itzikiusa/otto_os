@@ -394,7 +394,15 @@ git/Jira identity, and that person can open it:
 Verification (verify/fix) turns of a task act as the same person (both turn
 kinds share `run::acting_user`); goals copied from project / standing templates
 keep the template's author. Sessions are reused per **(agent, acting user)**: Bob's turn never resumes the session an agent
-opened for Alice. Session access is unchanged (owner, workspace Admin or root), so
+opened for Alice. Both the reuse lookup and a new session's `created_by` come from
+one `run::TurnSession` built from `acting_user`, so they cannot disagree.
+
+A turn's brief is submitted through the one session submit path
+(`SessionManager::submit_prompt_while` with `SubmitOpts::VERIFIED`, via
+`engine::submit_turn_prompt`): strict TUI wait, then — under the session's submit
+lock — paste until echoed, Enter and re-Enter. The run's guard
+(`engine::run_guard`: the run's DB status plus its cancel flag) is checked during
+the wait and before every write, so a run stopped mid-submit types nothing more. Session access is unchanged (owner, workspace Admin or root), so
 the originator — not only the swarm creator — can open their turns. The Runs
 list and Run Inspector offer **Open session** only for a session you can open
 (your own, or as root / a workspace Admin); otherwise the button is disabled and

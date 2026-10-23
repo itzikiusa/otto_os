@@ -57,6 +57,7 @@ the session manager + improvement engine), and a Svelte UI module.
 | Design formats | `crates/otto-product/src/design_format.rs`, `design_scene3d.rs`, `crates/otto-server/src/design_blender.rs` | The single `DesignFormat` enum (html · mermaid · excalidraw · scene3d), the `scene3d` validator + deterministic Blender-script generator, Blender detection / render jobs |
 | Media | `crates/otto-product/src/media.rs`, `crates/otto-server/src/mockup_assist.rs` | Attachment upload / content PUT (mime allow-list, sniffing, size caps), the in-place file-backed assist agent |
 | UI | `ui/src/modules/product/` | `ProductPage.svelte` + per-tab components; `types.ts` mirrors the DTOs |
+| · Jira details | `ui/src/modules/product/` | `JiraIssueSection.svelte` (the Overview tab's Jira Details sidebar + IssueEditor host) over `jiraIssue.svelte.ts` (issue + dev-status load); `caseOrder.svelte.ts` (test-case reorder with a queued save) |
 | · Design Arena | `ui/src/modules/product/design/` | `DesignArena.svelte` (assets / viewport / inspector / assistant shell), `DesignBoard.svelte` (Excalidraw island), `DeviceFrame.svelte`, templates, exporters |
 | · 3D | `ui/src/lib/design/scene3d/` | `Scene3DViewport.svelte` (lazy three.js), `Hierarchy.svelte`, `Inspector.svelte`, `types.ts` / `validate.ts` / `ops.ts` (pure doc mutations) / `exportGlb.ts` |
 | Skills | `crates/otto-skills/assets/skills/development/otto-{mockup,design-2d,design-3d}/` | What the assistant / swarm agents know about the four formats and their authoring rules |
