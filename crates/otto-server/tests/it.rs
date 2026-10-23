@@ -92,6 +92,8 @@ mod share_otp;
 mod share_scope_guard;
 #[path = "swarm_identity.rs"]
 mod swarm_identity;
+#[path = "swarm_ingest_bodies.rs"]
+mod swarm_ingest_bodies;
 #[path = "swarm_router.rs"]
 mod swarm_router;
 #[path = "swarm_scope_api.rs"]

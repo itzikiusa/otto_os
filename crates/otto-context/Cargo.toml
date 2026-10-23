@@ -7,6 +7,9 @@ license.workspace = true
 [dependencies]
 otto-core = { workspace = true }
 otto-state = { workspace = true }
+# The one Claude layout + cwd encoder (`roots::{encode_cwd, default_claude_root,
+# home_dir}`): the bundle dir and the MEMORY.md read (architecture-6w2-01).
+otto-transcript = { workspace = true }
 tokio = { workspace = true }
 axum = { workspace = true }
 serde = { workspace = true }

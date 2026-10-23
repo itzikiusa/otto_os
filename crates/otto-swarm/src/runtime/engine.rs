@@ -67,7 +67,7 @@ pub(crate) async fn while_run_active<T>(
 /// [`while_run_active`] polls) and `stopped` (the run's cancel flag, which
 /// every stop path signals) is unset. Each check reads both, so a stop is
 /// seen at the next check with no poll lag.
-pub(crate) fn run_guard(
+pub fn run_guard(
     repo: &otto_state::SwarmRepo,
     run_id: &str,
     stopped: impl Fn() -> bool + Send + Sync + 'static,
@@ -81,7 +81,7 @@ pub(crate) fn run_guard(
 
 /// How a turn's prompt submit ended ([`submit_turn_prompt`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TurnSubmit {
+pub enum TurnSubmit {
     /// Pasted and submitted.
     Sent,
     /// The run stopped first; nothing more was typed.
@@ -96,8 +96,11 @@ pub(crate) enum TurnSubmit {
 /// agent→agent `/message` can't land inside the paste → Enter window — paste
 /// until echoed, Enter, re-Enter, with `guard` checked before each write.
 ///
+/// Public (with [`run_guard`]) so otto-server's `swarm_router` interleave
+/// test drives this live path, not a copy of it.
+///
 /// [`SubmitOpts::VERIFIED`]: otto_sessions::submit::SubmitOpts::VERIFIED
-pub(crate) async fn submit_turn_prompt(
+pub async fn submit_turn_prompt(
     ctx: &SwarmRt,
     guard: &otto_sessions::submit::RunGuard,
     sid: &Id,
@@ -113,72 +116,6 @@ pub(crate) async fn submit_turn_prompt(
         None if !guard.is_active().await => TurnSubmit::Stopped,
         None => TurnSubmit::NotSent,
     }
-}
-
-async fn guarded_dispatch(
-    repo: &otto_state::SwarmRepo,
-    swarm_id: &str,
-    run_id: &str,
-    send: impl std::future::Future<Output = bool>,
-) -> bool {
-    let _operation = operation_guard(swarm_id).await;
-    if !run_is_active(repo, run_id).await {
-        return false;
-    }
-    send.await
-}
-
-pub(crate) async fn send_run_input(
-    ctx: &SwarmRt,
-    swarm_id: &str,
-    run_id: &str,
-    session_id: &str,
-    input: &[u8],
-) -> bool {
-    guarded_dispatch(ctx.swarm_repo(), swarm_id, run_id, async {
-        ctx.manager()
-            .input(&session_id.to_string(), input)
-            .await
-            .is_ok()
-    })
-    .await
-}
-
-/// Paste `paste` into a run's session, wait the paste-to-Enter window and press
-/// Enter — and, with `confirm_dispatch`, press it once more when the TUI shows
-/// no dispatch — all under the session's submit lock
-/// (`SessionManager::submit_lock`). A workspace broadcast or an agent→agent
-/// `/message` (`submit_text`) on the same session therefore can't land its
-/// paste or Enter inside our window and merge two prompts into one. Each write
-/// still goes through [`send_run_input`] (the swarm operation guard + the
-/// run-still-active check). `false` when the run stopped or a write failed.
-///
-/// Turns no longer call this — they submit through [`submit_turn_prompt`].
-/// It stays only for otto-server's `swarm_router` interleave test, which
-/// drives raw bytes into a `cat` PTY that never draws a TUI.
-#[doc(hidden)]
-pub async fn submit_run_prompt(
-    ctx: &SwarmRt,
-    swarm_id: &str,
-    run_id: &str,
-    session_id: &str,
-    paste: &[u8],
-    confirm_dispatch: bool,
-) -> bool {
-    let sid: Id = session_id.to_string();
-    let lock = ctx.manager().submit_lock(&sid);
-    let _submit = lock.lock().await;
-    if !send_run_input(ctx, swarm_id, run_id, session_id, paste).await {
-        return false;
-    }
-    tokio::time::sleep(ctx.pty_timings().paste_to_enter).await;
-    let before = ctx.manager().live_handle(&sid).map(|h| h.last_output_at());
-    if !send_run_input(ctx, swarm_id, run_id, session_id, b"\r").await {
-        return false;
-    }
-    !confirm_dispatch
-        || ctx.dispatched(&sid, before).await
-        || send_run_input(ctx, swarm_id, run_id, session_id, b"\r").await
 }
 
 #[cfg(test)]
@@ -373,16 +310,11 @@ mod dispatch_tests {
             result.is_none(),
             "stop interrupts readiness without waiting for the provider"
         );
-        let sent = AtomicBool::new(false);
+        // The submit guard every turn's paste → Enter checks
+        // (`submit_turn_prompt`) reads the same status, so a prompt can't be
+        // typed after readiness completes for a stopped run.
         assert!(
-            !guarded_dispatch(&repo, &sid, &run.id, async {
-                sent.store(true, Ordering::Relaxed);
-                true
-            })
-            .await
-        );
-        assert!(
-            !sent.load(Ordering::Relaxed),
+            !run_guard(&repo, &run.id, || false).is_active().await,
             "a stopped run cannot send a prompt after readiness completes"
         );
     }

@@ -12,7 +12,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use otto_core::auth::{BoxFuture, RoleChecker};
@@ -45,8 +45,6 @@ pub trait TurnTail: Send {
 /// review-session helpers, so swarm and review inject prompts identically).
 #[derive(Debug, Clone, Copy)]
 pub struct PtyTimings {
-    /// Pause between a bracketed paste and the Enter that submits it.
-    pub paste_to_enter: Duration,
     /// How long to wait for an injected prompt to land in the transcript.
     pub prompt_land_wait: Duration,
     /// Quiet window after which a running agent is reported as waiting.
@@ -104,7 +102,6 @@ pub trait SwarmHost: Send + Sync + 'static {
     // Prompt submission itself goes through `SessionManager::submit_prompt_while`
     // (`engine::submit_turn_prompt`) — the one paste → Enter path.
     fn pty_timings(&self) -> PtyTimings;
-    async fn dispatched(&self, sid: &Id, before: Option<Instant>) -> bool;
     /// Byte length of claude's transcript for (cwd, provider session id).
     fn transcript_len(&self, cwd: &str, psid: &str) -> u64;
     async fn claude_prompt_landed(&self, sid: &Id, cwd: &str, offset: u64, wait: Duration) -> bool;

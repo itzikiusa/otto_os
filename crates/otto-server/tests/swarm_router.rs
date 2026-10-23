@@ -10,7 +10,9 @@
 //! The `*_submit_*` cases pin concurrency-async-2-02: every paste → Enter
 //! submitter (swarm turns, handover briefs, delegation answers) holds the
 //! session's submit lock, so a concurrent `submit_text` on the same live
-//! session never interleaves into one merged prompt.
+//! session never interleaves into one merged prompt. The swarm case drives the
+//! live turn path (`engine::submit_turn_prompt` → `submit_prompt_while`,
+//! architecture-4-01r) and lands the broadcast INSIDE its paste → Enter window.
 //!
 //! The `lifecycle_*` cases pin architecture-3-01: every activation (start,
 //! resume, channel, Product discovery) goes through `lifecycle::activate`,
@@ -24,7 +26,7 @@ use otto_state::swarm::NewTask;
 use otto_state::{
     NewAgent, NewProject, NewRun, NewSwarm, SwarmAgent, SwarmRun, SwarmTask, TaskPatch,
 };
-use otto_swarm::runtime::engine::{route_result_inner, submit_run_prompt};
+use otto_swarm::runtime::engine::{route_result_inner, run_guard, submit_turn_prompt, TurnSubmit};
 use otto_swarm::runtime::run::{SwarmTurnResult, TurnHandoff, TurnSubtask};
 use serde_json::{json, Value};
 
@@ -400,7 +402,9 @@ async fn duplicate_handoff_is_deduped() {
 // ---------------------------------------------------------------------------
 
 /// A live session whose PTY runs `cat > sink`, so the test sees exactly what
-/// reached the terminal; each `\r` (mapped to `\n`) ends one submission.
+/// reached the terminal; each `\r` (mapped to `\n`) ends one submission. It
+/// prints one line first so the verified submit's strict TUI wait sees a drawn
+/// screen, and the tty's echo is what that submit's paste-echo check reads.
 async fn cat_session(w: &World) -> (String, std::path::PathBuf) {
     let sink = w.tmp.path().join(format!("pty-{}", uuid::Uuid::new_v4()));
     let session = w
@@ -420,7 +424,10 @@ async fn cat_session(w: &World) -> (String, std::path::PathBuf) {
             },
             Some(otto_pty::CommandSpec {
                 program: "/bin/sh".into(),
-                args: vec!["-c".into(), format!("exec cat > '{}'", sink.display())],
+                args: vec![
+                    "-c".into(),
+                    format!("echo ready; exec cat > '{}'", sink.display()),
+                ],
                 cwd: Some(w.tmp.path().to_string_lossy().into()),
                 env: vec![],
             }),
@@ -450,6 +457,11 @@ async fn submissions(sink: &std::path::Path, want: usize) -> Vec<String> {
     lines
 }
 
+/// architecture-4-01r: the swarm's live turn submit holds the session's
+/// submit lock from its paste to its Enter. The broadcast is fired the moment
+/// the swarm's paste echoes — inside that window — so without the lock in
+/// `submit_prompt_while` its paste lands before the swarm's Enter and the two
+/// arrive as ONE merged line (the test then sees one submission, not two).
 #[tokio::test]
 async fn swarm_turn_submit_does_not_interleave_with_submit_text() {
     let w = world().await;
@@ -457,18 +469,26 @@ async fn swarm_turn_submit_does_not_interleave_with_submit_text() {
     let task = w.task("Brief", &w.ic, json!([])).await;
     let run = w.run(&task, &w.ic).await;
     let rt = w.ctx.swarm_rt();
-    let (swarm_ok, other) = tokio::join!(
-        submit_run_prompt(
-            &rt,
-            &w.swarm,
-            &run.id,
-            &sid,
-            b"\x1b[200~from-swarm\x1b[201~",
-            false
-        ),
-        w.ctx.manager.submit_text(&sid, "from-broadcast"),
+    let guard = run_guard(&w.ctx.swarm_repo, &run.id, || false);
+    let broadcast_inside_the_window = async {
+        // Poll fast: the window is the paste → Enter settle (~250 ms).
+        for _ in 0..3000 {
+            let echoed =
+                w.ctx.manager.live_handle(&sid).is_some_and(|h| {
+                    String::from_utf8_lossy(&h.scrollback(50)).contains("from-swarm")
+                });
+            if echoed {
+                return w.ctx.manager.submit_text(&sid, "from-broadcast").await;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("the swarm's paste never echoed");
+    };
+    let (swarm, other) = tokio::join!(
+        submit_turn_prompt(&rt, &guard, &sid, "from-swarm"),
+        broadcast_inside_the_window,
     );
-    assert!(swarm_ok);
+    assert_eq!(swarm, TurnSubmit::Sent);
     other.unwrap();
     assert_eq!(
         submissions(&sink, 2).await,
@@ -477,6 +497,30 @@ async fn swarm_turn_submit_does_not_interleave_with_submit_text() {
             "\x1b[200~from-swarm\x1b[201~".to_string(),
         ],
         "each submission must be its own paste + Enter"
+    );
+    let _ = w.ctx.manager.kill_session(&sid).await;
+}
+
+/// A stopped run types nothing: the live turn submit checks the run's guard
+/// before its paste, so a run stopped before the TUI is ready reports
+/// `Stopped` and the session's PTY never sees the prompt.
+#[tokio::test]
+async fn swarm_turn_submit_types_nothing_for_a_stopped_run() {
+    let w = world().await;
+    let (sid, sink) = cat_session(&w).await;
+    let task = w.task("Brief", &w.ic, json!([])).await;
+    let run = w.run(&task, &w.ic).await;
+    let rt = w.ctx.swarm_rt();
+    let guard = run_guard(&w.ctx.swarm_repo, &run.id, || true);
+    assert_eq!(
+        submit_turn_prompt(&rt, &guard, &sid, "from-swarm").await,
+        TurnSubmit::Stopped
+    );
+    // An Enter from anyone would flush a typed line; none was typed.
+    w.ctx.manager.submit_text(&sid, "after").await.unwrap();
+    assert_eq!(
+        submissions(&sink, 1).await,
+        vec!["\x1b[200~after\x1b[201~".to_string()]
     );
     let _ = w.ctx.manager.kill_session(&sid).await;
 }

@@ -509,6 +509,7 @@ async fn ingest_routes_write_only_with_the_sessions_own_token() {
             json!({"model": "claude-sonnet-4", "input_tokens": 10}),
         ),
         ("claude", json!({"hook_event_name": "SessionStart"})),
+        ("codex", json!({"type": "agent-turn-complete"})),
     ];
     let post = |route: &str, body: &serde_json::Value, token: Option<&str>| {
         let mut rb = f
@@ -549,20 +550,31 @@ async fn ingest_routes_write_only_with_the_sessions_own_token() {
         }
     }
 
-    // The session's own token: every route writes.
+    // The session's own token: every route writes. The two hook routes both
+    // write only to the trail, so each is pinned on its own: the trail grows
+    // by exactly one line per accepted post (test-quality-6w2-01). A shared
+    // `trail > 0` would be met by either route alone.
     for (route, body) in &routes {
+        let trail_before = written(&f, &swarm.id, &run.id, &own.id).await.trail;
         let status = post(route, body, Some(own_token.as_str()))
             .await
             .unwrap()
             .status();
         assert_eq!(status, 204, "{route} with the session's own token");
+        if matches!(*route, "claude" | "codex") {
+            assert_eq!(
+                written(&f, &swarm.id, &run.id, &own.id).await.trail,
+                trail_before + 1,
+                "{route} with the session's own token appends one trail line"
+            );
+        }
     }
     let after = written(&f, &swarm.id, &run.id, &own.id).await;
     assert_eq!(after.board, 1, "exactly one board row");
     assert!(after.stories > before.stories, "a product draft was filed");
     assert_eq!(after.attachments, 1, "one mockup attachment");
     assert_eq!(after.report.as_deref(), Some("forged report"));
-    assert!(after.trail > 0, "the hook landed in the activity trail");
+    assert_eq!(after.trail, 2, "one trail line per hook route");
     assert!(after.usage_recorded, "usage was recorded");
     f.server.abort();
 }

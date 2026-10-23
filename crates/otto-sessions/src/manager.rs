@@ -3704,7 +3704,6 @@ impl SessionManager {
         if live.is_empty() {
             return 0;
         }
-        let home = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default());
         // `ps -axo …` for the whole box: off the runtime (see `process_table_async`).
         let table = tokio::task::spawn_blocking(crate::nested::process_table)
             .await
@@ -3763,14 +3762,15 @@ impl SessionManager {
             // same fresh rollout in the same cwd).
             let _guard = self.codex_capture_lock.lock().await;
             let claimed_rows = self.repo.provider_session_ids().await.unwrap_or_default();
-            // Transcript / rollout directory scans: off the runtime too.
-            let (home_b, cwd_b, started) = (home.clone(), cwd.clone(), proc.started);
+            // Transcript / rollout scans (session's own roots): off the runtime.
+            let roots = self.transcript_roots_for(&session);
+            let (cwd_b, started) = (cwd.clone(), proc.started);
             let found = tokio::task::spawn_blocking(move || {
                 let claimed: std::collections::HashSet<&str> =
                     claimed_rows.iter().map(String::as_str).collect();
                 match provider {
                     "claude" => crate::nested::claude_transcript_in_window(
-                        &home_b, &cwd_b, started, &claimed,
+                        &roots, &cwd_b, started, &claimed,
                     ),
                     "codex" => match pick_codex_rollout(
                         &codex_sessions_root(),

@@ -29,8 +29,9 @@
 //! (and forking) somebody else's conversation.
 
 use std::collections::HashSet;
-use std::path::Path;
 use std::time::{Duration, SystemTime};
+
+use otto_transcript::roots::{encode_cwd, TranscriptRoots};
 
 /// Agent CLIs we recognize inside a shell session. Ordered by how specific the
 /// name is; all three mint their own resumable conversation on disk.
@@ -263,27 +264,28 @@ pub fn process_cwd(pid: u32) -> Option<String> {
 /// running in `cwd`.
 ///
 /// claude names its transcript `<session-id>.jsonl` under
-/// `~/.claude/projects/<encoded cwd>/` (see [`crate::lifecycle`]). We match on
-/// the file's BIRTH time rather than its mtime: a resumed older conversation in
-/// the same directory keeps being written to (fresh mtime) but was born long
-/// before this launch, so birth time is what actually identifies "the file this
-/// process created".
+/// `<claude root>/<encode_cwd(cwd)>/`; `roots` is the session's
+/// [`TranscriptRoots`] (`SessionManager::transcript_roots_for` — its account
+/// home, `OTTO_TRANSCRIPT_ROOTS` or the isolated fixture, else the local
+/// defaults), and every Claude root in it is scanned (architecture-6w2-01).
+/// We match on the file's BIRTH time rather than its mtime: a resumed older
+/// conversation in the same directory keeps being written to (fresh mtime)
+/// but was born long before this launch, so birth time is what actually
+/// identifies "the file this process created".
 ///
 /// `claimed` holds the provider session ids other Otto sessions already own.
 /// Returns `None` when nothing matches — and also when SEVERAL unclaimed
-/// candidates fall in the window (two agents launched in one directory within
-/// the same window): we never guess which conversation belongs to whom.
+/// candidates fall in the window, in one root or across roots (two agents
+/// launched in one directory within the same window): we never guess which
+/// conversation belongs to whom.
 #[allow(clippy::disallowed_methods)] // sync helper: blocking by contract — async callers offload it
 pub fn claude_transcript_in_window(
-    home: &Path,
+    roots: &TranscriptRoots,
     cwd: &str,
     started: SystemTime,
     claimed: &HashSet<&str>,
 ) -> Option<String> {
-    let dir = home
-        .join(".claude")
-        .join("projects")
-        .join(crate::lifecycle::claude_project_dir_name(cwd));
+    let project = encode_cwd(cwd);
     let from = started
         .checked_sub(BORN_BEFORE_SLACK)
         .unwrap_or(SystemTime::UNIX_EPOCH);
@@ -294,7 +296,11 @@ pub fn claude_transcript_in_window(
     let to = SystemTime::now() + BORN_AFTER_SLACK;
 
     let mut hits: Vec<String> = Vec::new();
-    for entry in std::fs::read_dir(&dir).ok()?.flatten() {
+    let entries = roots
+        .claude_dirs()
+        .filter_map(|root| std::fs::read_dir(root.join(&project)).ok())
+        .flat_map(|dir| dir.flatten());
+    for entry in entries {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
             continue;
@@ -316,6 +322,9 @@ pub fn claude_transcript_in_window(
             hits.push(sid.to_string());
         }
     }
+    // The same conversation seen through two roots is still one candidate.
+    hits.sort_unstable();
+    hits.dedup();
     match hits.len() {
         1 => hits.pop(),
         _ => None,
@@ -375,6 +384,8 @@ mod tests {
     }
 
     use super::*;
+    use otto_transcript::roots::{default_claude_root, RootsEnv};
+    use std::path::Path;
 
     /// S1-12: control bytes act in the PTY before quoting does; a relative
     /// launch dir is refused too.
@@ -483,59 +494,126 @@ mod tests {
         assert!(find_nested_agent(1, &[t(1, 2), t(2, 1)]).is_none());
     }
 
+    /// The session's roots as an injected `OTTO_TRANSCRIPT_ROOTS` pair
+    /// (through [`RootsEnv`], never the process env) with `home` as `$HOME`.
+    fn explicit_roots(claude: &Path, home: &Path) -> TranscriptRoots {
+        let env = RootsEnv {
+            explicit: Some(format!(
+                "{}:{}",
+                claude.display(),
+                home.join("codex").display()
+            )),
+            ..RootsEnv::default()
+        };
+        env.for_session(&serde_json::json!({}), home, None, None)
+    }
+
+    /// `<root>/<encode_cwd(cwd)>`, created.
+    fn project_dir(root: &Path, cwd: &str) -> std::path::PathBuf {
+        let dir = root.join(encode_cwd(cwd));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
     /// Birth time inside the launch window identifies the transcript; an older
     /// conversation in the same directory (even one being actively written) and
     /// an id another session already claimed are both ignored.
     #[test]
     fn claude_transcript_matched_by_birth_window() {
         let home = tempfile::tempdir().unwrap();
+        let roots =
+            RootsEnv::default().for_session(&serde_json::json!({}), home.path(), None, None);
         let cwd = "/Users/dev/project";
-        let dir = home
-            .path()
-            .join(".claude")
-            .join("projects")
-            .join(crate::lifecycle::claude_project_dir_name(cwd));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = project_dir(&default_claude_root(home.path()), cwd);
         std::fs::write(dir.join("fresh.jsonl"), b"{}").unwrap();
         std::fs::write(dir.join("not-a-transcript.txt"), b"x").unwrap();
 
         let claimed: HashSet<&str> = HashSet::new();
         // Files created just now match a launch that started just now.
         assert_eq!(
-            claude_transcript_in_window(home.path(), cwd, SystemTime::now(), &claimed),
-            Some("fresh.jsonl".trim_end_matches(".jsonl").to_string())
+            claude_transcript_in_window(&roots, cwd, SystemTime::now(), &claimed),
+            Some("fresh".to_string())
         );
         // A launch far in the future (i.e. the file predates it) matches nothing.
         let later = SystemTime::now() + Duration::from_secs(3600);
         assert_eq!(
-            claude_transcript_in_window(home.path(), cwd, later, &claimed),
+            claude_transcript_in_window(&roots, cwd, later, &claimed),
             None
         );
         // Already owned by another session → never re-claimed.
         let owned: HashSet<&str> = ["fresh"].into_iter().collect();
         assert_eq!(
-            claude_transcript_in_window(home.path(), cwd, SystemTime::now(), &owned),
+            claude_transcript_in_window(&roots, cwd, SystemTime::now(), &owned),
             None
         );
     }
 
+    /// architecture-6w2-01: the scan reads the SESSION's Claude roots. Under an
+    /// injected root (an `OTTO_TRANSCRIPT_ROOTS` pair, the isolated fixture or
+    /// an account home all arrive this way) the nested agent's transcript is
+    /// found there, and a conversation born in the same window under `$HOME`
+    /// is neither found nor counted as a second candidate.
+    #[test]
+    fn claude_transcript_is_found_under_the_sessions_injected_root_not_home() {
+        let home = tempfile::tempdir().unwrap();
+        let injected = tempfile::tempdir().unwrap();
+        let cwd = "/Users/dev/my project";
+        std::fs::write(
+            project_dir(injected.path(), cwd).join("in-root.jsonl"),
+            b"{}",
+        )
+        .unwrap();
+        std::fs::write(
+            project_dir(&default_claude_root(home.path()), cwd).join("under-home.jsonl"),
+            b"{}",
+        )
+        .unwrap();
+        let roots = explicit_roots(injected.path(), home.path());
+        assert_eq!(
+            claude_transcript_in_window(&roots, cwd, SystemTime::now(), &HashSet::new()),
+            Some("in-root".to_string())
+        );
+        // The default roots (what the old `$HOME/.claude/projects` scan read)
+        // see only the home copy: the injected root is what found it above.
+        let defaults =
+            RootsEnv::default().for_session(&serde_json::json!({}), home.path(), None, None);
+        assert_eq!(
+            claude_transcript_in_window(&defaults, cwd, SystemTime::now(), &HashSet::new()),
+            Some("under-home".to_string())
+        );
+    }
+
     /// Two agents launched in one directory inside the same window: refuse
-    /// rather than adopt (and later fork) the wrong conversation.
+    /// rather than adopt (and later fork) the wrong conversation — also when
+    /// the two candidates sit in different Claude roots of the session.
     #[test]
     fn ambiguous_window_is_refused() {
         let home = tempfile::tempdir().unwrap();
+        let roots =
+            RootsEnv::default().for_session(&serde_json::json!({}), home.path(), None, None);
         let cwd = "/Users/dev/project";
-        let dir = home
-            .path()
-            .join(".claude")
-            .join("projects")
-            .join(crate::lifecycle::claude_project_dir_name(cwd));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = project_dir(&default_claude_root(home.path()), cwd);
         std::fs::write(dir.join("a.jsonl"), b"{}").unwrap();
         std::fs::write(dir.join("b.jsonl"), b"{}").unwrap();
         assert_eq!(
-            claude_transcript_in_window(home.path(), cwd, SystemTime::now(), &HashSet::new()),
+            claude_transcript_in_window(&roots, cwd, SystemTime::now(), &HashSet::new()),
             None
+        );
+        let home2 = tempfile::tempdir().unwrap();
+        let roots2 =
+            RootsEnv::default().for_session(&serde_json::json!({}), home2.path(), None, None);
+        let config_root = home2.path().join(".config").join("claude").join("projects");
+        assert!(roots2.claude_dirs().any(|d| d == config_root), "{roots2:?}");
+        std::fs::write(
+            project_dir(&default_claude_root(home2.path()), cwd).join("a.jsonl"),
+            b"{}",
+        )
+        .unwrap();
+        std::fs::write(project_dir(&config_root, cwd).join("b.jsonl"), b"{}").unwrap();
+        assert_eq!(
+            claude_transcript_in_window(&roots2, cwd, SystemTime::now(), &HashSet::new()),
+            None,
+            "one candidate per root is still two candidates"
         );
     }
 

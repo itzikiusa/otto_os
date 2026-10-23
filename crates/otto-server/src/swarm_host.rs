@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use axum::extract::FromRef;
@@ -18,7 +18,6 @@ use otto_core::secrets::SecretStore;
 use otto_core::Id;
 use otto_orchestrator::Orchestrator;
 use otto_review::session as review_engine;
-use otto_sessions::submit;
 use otto_sessions::SessionManager;
 use otto_state::{IntegrationsRepo, SwarmProject, SwarmRepo, WorkspacesRepo};
 use otto_swarm::runtime::engine::CoordinatorRegistry;
@@ -124,13 +123,9 @@ impl SwarmHost for ServerCtx {
 
     fn pty_timings(&self) -> PtyTimings {
         PtyTimings {
-            paste_to_enter: submit::PASTE_TO_ENTER,
             prompt_land_wait: review_engine::PROMPT_LAND_WAIT,
             waiting_idle: review_engine::WAITING_IDLE,
         }
-    }
-    async fn dispatched(&self, sid: &Id, before: Option<Instant>) -> bool {
-        submit::dispatched(&self.manager, sid, before).await
     }
     fn transcript_len(&self, cwd: &str, psid: &str) -> u64 {
         review_engine::transcript_len(cwd, psid)
