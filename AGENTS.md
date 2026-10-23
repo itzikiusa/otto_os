@@ -46,7 +46,7 @@ Otto.app (Tauri / otto-desktop)
 | `otto-connections` | SSH / MySQL / Redis / MongoDB / ClickHouse sessions |
 | `otto-ssh` | Shared SSH-tunnel helper (`-L`/SOCKS5 `-D`, SFTP, Kafka-aware proxy) |
 | `otto-dbviewer` | Database Explorer engine |
-| `otto-apiclient` | HTTP API-client engines split out of `otto-server`: dynamic gRPC describe/reflect/invoke (tonic + protox + prost-reflect) and server-side `pm` request scripts (boa_engine); thin axum handlers stay in `otto-server` |
+| `otto-apiclient` | HTTP API-client engines split out of `otto-server`: dynamic gRPC describe/reflect/invoke (tonic + protox + prost-reflect), server-side `pm` request scripts (boa_engine), the REST execute engine (`engine`: env/secret resolution, secret <-> host binding, cookie jars, SSH/SOCKS tunnels, send, history, automation steps) behind `ApiClientCtx` (impl in otto-server `routes/api_client/ctx.rs`) and the Keychain request/environment secrets (`secrets`); thin axum handlers stay in `otto-server` |
 | `otto-brokers` | Message Brokers (Kafka viewer) |
 | `otto-aws` | AWS console — accounts (DB rows + Keychain secrets), the `aws` CLI v2 wrapper and per-service normalizers (S3, SQS, Athena, Logs, EC2, EKS, RDS, …) and the `/aws/*` router; host glue (`AwsCtx`) in `otto-server`'s `modules/ctx_impls.rs` |
 | `otto-k8s` | Kubernetes console — everything via `kubectl -o json` (resources, logs, actions, `exec`/k9s PTY sessions, pod HTTP, monitoring) and the `/k8s/*` router; host glue (`K8sCtx`) in `otto-server`'s `modules/ctx_impls.rs` |
@@ -78,7 +78,8 @@ Otto.app (Tauri / otto-desktop)
 | `otto-agent-run` | Agent-run primitives for PTY-driven CLI agents: result-file watcher + recovery (`agent_run`), transcript turn oracle, off-runtime blocking IO, the retrying fan-out runner (`fanout`, `fanout::retry`), the shared assist job (`assist`: `AssistTarget` / `run_assist_job`) and resume authority (`session_turn::resume`) |
 | `otto-review` | Multi-agent code-review engine — reviewer sessions, managed summarizer + deterministic fallback, and the pure core (diff render/caps, configs/budgets, lens expansion, prompts, draft parsing); routes + ctx-bound orchestration stay in `otto-server` |
 | `otto-automation` | Scheduled Tasks (cadence, 60 s supervisor, run engine, report delivery) + Goal Loops controller, behind the `AutomationCtx` trait (otto-server's impl: `src/automation_ctx.rs`) |
-| `otto-server` | Axum routes wiring the crates together; also hosts the code-review routes + orchestration, workflow engine & plugin supervisor. `boot/` is the daemon composition root (`open_state` → `build_ctx` → recovery → `spawn_background`; `ServerCtx::from_parts` is the one context literal, shared with `ServerCtx::for_tests`) |
+| `otto-rooms` | Session rooms + game rooms domain — capability registries, room actions, recap capture/archive/engines, the session-authority sync and per-room maintenance, ICE/TURN settings — behind the `RoomsCtx` trait (otto-server's impl: `src/rooms/ctx.rs`; the handlers, WS upgrades and socket run loops stay in `otto-server`) |
+| `otto-server` | Axum routes wiring the crates together; also hosts the code-review routes + orchestration, the rooms/game-rooms routes and sockets only (domain in `otto-rooms`), workflow engine & plugin supervisor. `boot/` is the daemon composition root (`open_state` → `build_ctx` → recovery → `spawn_background`; `ServerCtx::from_parts` is the one context literal, shared with `ServerCtx::for_tests`) |
 | `ottod` | The daemon binary: process setup, single-instance lock, listeners, shutdown; drives `otto_server::boot` |
 
 > The Tauri desktop shell lives in `apps/desktop/src-tauri` and is a **separate,

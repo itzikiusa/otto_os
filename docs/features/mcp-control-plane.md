@@ -834,6 +834,25 @@ disabled in the checklist is refused by name with a pointer to where to enable
 it. If the daemon can't answer `GET /mcp/otto-server/enabled`, no governed
 tool is advertised and the reason is logged to the bridge's stderr.
 
+**One tool surface (twins).** A capability served natively under the SAME
+stdio name as a control-plane tool (`otto_x` ⇄ `otto.x`, 46 of them, listed in
+`NATIVE_TWINS`, `crates/ottod/src/mcp_tools/catalog.rs`) has no hand-written
+entry: its `tools/list` name, description and `inputSchema` are generated from
+the catalog entry (`mcp_tools/listing.rs`); only the session-scoped
+`workspace_id` / `session_id` (defaulted from the calling session, never
+required) are the session server's own. 30 of them are also *dispatched*
+through the outward `route_for` (`ROUTED_TWINS`, `mcp_tools/dispatch.rs`):
+friendly references are resolved first, the session's workspace / calling
+session / PR-number alias is bound, `route_for` builds the call, and the
+native answer shape and caps are applied after. The others keep their own arm,
+each for a stated reason: the directory lists (served by `/refs/directory`,
+which the outward executor reaches in-process), `otto_list_repos` (this
+session's workspace first) and the API-client tools (name resolution and the
+upsert merge happen before the write). `ottod`'s `twin_tests` pin what each
+session source lists and what every twin sends, and `routing_tests` fail when
+a control-plane tool is missing from a session's listing or a twin's schema
+differs from its spec.
+
 **UI-control tools follow the grant.** The ~90 `otto_ui_*` tools are listed
 only while the session holds the per-session "Allow UI control" grant
 (`ui_granted` on `GET /mcp/otto-server/enabled`); without it each would answer

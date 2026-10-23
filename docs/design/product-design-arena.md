@@ -67,7 +67,7 @@ CREATE INDEX idx_product_stories_parent ON product_stories(parent_id);
   `NewStory` carries them too (so ingest creates children in one insert);
   `StoryPatch`/`UpdateStoryReq` accept them (`parent_id: Option<Option<Id>>` to
   allow clearing). The one exhaustive literal to fix is the `make_story` test
-  helper in `otto-product/src/run.rs`.
+  helper in `otto-product/src/run/tests.rs`.
 
 ### 2.2 Attachments — design artifacts (no new table)
 

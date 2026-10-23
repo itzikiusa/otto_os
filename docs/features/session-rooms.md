@@ -211,7 +211,20 @@ battle-royale shooter and an eight-racer kart game, against room guests and
 computer players. These do not require
 a coding session and use separate game-only guest capabilities.
 Both relays share one set of capability primitives
-(`crates/otto-server/src/rooms/capability.rs`): token issue, a constant-time
+(`crates/otto-rooms/src/capability.rs`): token issue, a constant-time
 digest compare, the `Sec-WebSocket-Protocol` token parser (which also requires a
 43-character token) and the per-member token bucket. In the browser, both
 clients wrap one `RelaySocket` (`ui/src/lib/relaySocket.ts`).
+
+## Where the code lives
+
+The room domain is the `otto-rooms` crate: the registries and room actions
+(`registry.rs`, `actions.rs`, `presentation.rs`, `annotations.rs`), the
+capability primitives, the session-authority sync and per-room maintenance
+worker (`authority.rs`), ICE settings and TURN credentials (`ice.rs`), the
+owner lifecycle (`lifecycle.rs`), recap capture, archive, media checks and
+engines (`recap/`, `recap_engines/`) and the game relay (`games/`). It reaches
+the daemon only through the `RoomsCtx` trait (settings, secrets, audit, the
+session manager's room authority, the data dir), which otto-server implements
+in `crates/otto-server/src/rooms/ctx.rs`. otto-server keeps the HTTP handlers,
+the WebSocket upgrades and the socket run loops (`rooms/`, `game_rooms/`).

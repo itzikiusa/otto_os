@@ -47,7 +47,7 @@ the session manager + improvement engine), and a Svelte UI module.
 | · skills | `crates/otto-skills/src/product.rs` + `crates/otto-skills/assets/product-skills/` (re-exported as `otto_product::skills`) | The bundled agent skills, version-gated seed into the library |
 | · memory | `crates/otto-product/src/memory_facade.rs`, `extract.rs` | Ingest structured artifacts into `otto-memory`; deterministic extractors |
 | Persistence | `crates/otto-state/src/product.rs` | `ProductRepo` + the `product_*` tables |
-| Orchestration | `crates/otto-product/src/run.rs` + `host.rs` | `run_analysis` / `run_rewrite` / `run_generate_tests` / `run_generate_plan`, retries, summarizers — generic over the `ProductRunHost` trait |
+| Orchestration | `crates/otto-product/src/run.rs` (root) + `run/{analysis,plan,rewrite,tests_gen,retry,reap,prompts,context,scratch,narrative}.rs` + `host.rs` | `run_analysis` / `run_rewrite` / `run_generate_tests` / `run_generate_plan`, retries, summarizers — generic over the `ProductRunHost` trait; analysis and plan fan out on the shared runner `otto_agent_run::fanout` |
 | · PTY mechanics | `crates/otto-server/src/product_host.rs` (`impl ProductRunHost for ServerCtx`) | `ProductRunHost` for `ServerCtx`: spawn a provider as a real session, inject the prompt (codex settle + repaste), watch to a result with bounded recovery |
 | Watcher | `crates/otto-product/src/watcher.rs` | The background poll/reconcile supervisor |
 | Swarm bridge | `crates/otto-product/src/swarm.rs` | `story_to_swarm` (Plan → Swarm), discovery runs |
@@ -179,10 +179,18 @@ pending suggestions).
   is pre-trusted on the `cwd` so no session stalls on a "trust this folder?" prompt.
 - Each lens runs concurrently via `run_lens_session` (a real `SessionManager`
   session, *not* the old claude-only `Orchestrator::run_agent`), with auto-retry
-  up to 3 attempts. Failures are isolated per agent.
+  up to 3 attempts. The lenses are the reviewer slots of the shared fan-out
+  runner (`otto_agent_run::fanout`, the one code review, skill review and vault
+  docs use), so failures are isolated per agent and a lens that fails or panics
+  marks the analysis `partial`.
 - The **summarizer** consolidates all per-lens `findings_json` into one result —
   merging questions/repos/risks/learnings, resolving conflicts, and recording
-  `conflict_notes`. If it fails, Otto falls back to a deterministic Rust-side merge.
+  `conflict_notes`. Its row (`Summarizer · <provider>`) opens when the runner
+  starts it; with no successful lens it is closed as an error ("no successful
+  lens outputs to consolidate") without a session. If it fails or is stopped,
+  Otto falls back to a deterministic Rust-side merge of the lens findings.
+- **Deleting the story** mid-run stops the lenses and ends the run before the
+  summarizer: no questions, learnings or final status are written.
 - **Open questions** are extracted (summarizer first, else per-lens), deduped by
   normalized text, and persisted as `ProductQuestion` rows (status `open`).
 - On completion it emits the `product_changed` event (`section: "analysis"`,
@@ -283,9 +291,12 @@ done and the progress bar updates. **⚡ Send to Swarm** hands the plan off.
   questions, the latest analysis summary, and **approved test cases**. When
   `interactive` is false (the default; `None` is treated as false) an autonomy
   directive is prepended instructing agents not to ask questions. With more than
-  one planner a **summarizer** merges the candidate plans (falling back to the
-  first plan if it fails). Each new session id is broadcast via the `plan_run` WS
-  event so the UI tiles them live.
+  one *successful* planner a **summarizer** merges the candidate plans (falling
+  back to the first plan if it fails); a single candidate is the plan, with no
+  summarizer session. The planners run on the same shared fan-out runner as
+  analysis (`fanout::run_with_quorum`, quorum 2), and deleting the story ends
+  the run without writing a plan. Each new session id is broadcast via the
+  `plan_run` WS event so the UI tiles them live.
 - The result is saved as a `kind: "plan"` version titled *"Implementation Plan,"*
   whose body uses `### Task N: <title>` headings with `- [ ]` checklist steps and
   a `**Verify:**` line; story → `stage: "planned"`; emits `product_changed`

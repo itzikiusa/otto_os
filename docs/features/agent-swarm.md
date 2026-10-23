@@ -402,7 +402,11 @@ A turn's brief is submitted through the one session submit path
 `engine::submit_turn_prompt`): strict TUI wait, then — under the session's submit
 lock — paste until echoed, Enter and re-Enter. The run's guard
 (`engine::run_guard`: the run's DB status plus its cancel flag) is checked during
-the wait and before every write, so a run stopped mid-submit types nothing more. Session access is unchanged (owner, workspace Admin or root), so
+the wait and before every write, so a run stopped mid-submit types nothing more.
+There is no other swarm paste → Enter path: the old `engine::submit_run_prompt` /
+`send_run_input` pair is gone, and `tests/swarm_router.rs` drives
+`submit_turn_prompt` itself (a broadcast fired inside its paste → Enter window still
+lands as its own submission; a stopped run types nothing). Session access is unchanged (owner, workspace Admin or root), so
 the originator — not only the swarm creator — can open their turns. The Runs
 list and Run Inspector offer **Open session** only for a session you can open
 (your own, or as root / a workspace Admin); otherwise the button is disabled and

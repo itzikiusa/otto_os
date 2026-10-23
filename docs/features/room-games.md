@@ -550,12 +550,12 @@ in the lobby. Browser verification and screenshots live in
 
 **One catalog.** The game kinds, their capacity and the map ids live in
 `ui/src/modules/rooms/games/catalog.json`. The daemon compiles the same file in
-(`game_rooms/types.rs`) to validate `POST /game-rooms`, and the chooser reads it,
+(`crates/otto-rooms/src/games/types.rs`) to validate `POST /game-rooms`, and the chooser reads it,
 so a map cannot be offered that the relay refuses. `unit/roomGamesCatalog.test.ts`
 checks that the kart tracks and shooter maps implement exactly these ids.
 
 **Capabilities.** Game rooms and session rooms share one set of capability
-primitives (`otto-server/src/rooms/capability.rs`): 43-character tokens stored
+primitives (`crates/otto-rooms/src/capability.rs`): 43-character tokens stored
 only as SHA-256 digests and compared in constant time, the
 `Sec-WebSocket-Protocol: otto-game, <token>` pair, and per-member token
 buckets. The browser side is one `RelaySocket` (`ui/src/lib/relaySocket.ts`).

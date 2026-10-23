@@ -121,9 +121,13 @@ in audits.
     state edge: where the save resolves, the copy lands or the load fails. The
     shell mounts one polite and one assertive region once (`Announcer`, beside
     `Toasts`); repeating the same text speaks it again. Never insert a
-    `role="status"` (or `aria-live`) element together with its text:
-    WebKit/VoiceOver only speak changes to a region that already exists, so
-    the inserted text is often silent.
+    `role="status"` (or `aria-live`) element together with its text, in an
+    `{#if}`, `{:else if}` or `{:else}` branch alike: WebKit/VoiceOver only
+    speak changes to a region that already exists, so the inserted text is
+    often silent. A count that updates (search hits, paging) is one
+    always-mounted `sr-only` region; the visible count stays plain text.
+    And one voice per message: no `use:announceShown` inside a mounted
+    region (the `announce-in-region` guard).
   - Two helpers for the common shapes, both in `lib/announce.svelte.ts`:
     `announceEdge()` returns a tracker to call from an `$effect` with the
     current message (it speaks only a new message; `null` re-arms it), and

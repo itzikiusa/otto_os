@@ -117,6 +117,14 @@ dir under `<data_dir>/product/discovery-chat/<id>`.
   and is reconciled with the server's real messages; a **"thinking…"** indicator
   covers the turn's latency (the turn is request/response, not token-streamed).
 - **Action cards** — any actions on an agent message render below it as cards (§5).
+- **Stop / Stop waiting** — while a turn is in flight the thinking bubble offers
+  **Stop** (cancel the turn on the server) and **Stop waiting** (let it finish in
+  the background). Either swaps the bubble for a notice ("Turn stopped." or
+  "Stopped waiting — …") with **Reload chat**. The notice is spoken once to screen
+  readers through the shell announcer (`speakStopNotice`; neither bubble is a live
+  region), focus moves to **Reload chat** when the stop control vanished under it
+  (`rescueStopFocus`), and after the reload focus returns to the composer.
+  `RefineChat.svelte` (Refine tab) behaves the same with **Reload thread**.
 - **Composer** — Enter sends, Shift+Enter inserts a newline. On send failure the
   optimistic bubble rolls back and your text is restored.
 

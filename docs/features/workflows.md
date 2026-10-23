@@ -72,7 +72,7 @@ ui/src/modules/workflows/WorkflowsPage.svelte   — the page: generate / list / 
 ui/src/modules/workflows/WorkflowCanvas.svelte  — n8n-style pan/zoom node-graph canvas (SVG + cards)
 ui/src/modules/workflows/RunSteps.svelte        — per-step run detail (status, logs, "work product")
 ui/src/modules/workflows/RunMonitor.svelte      — the inspector's run view: run bar, timeline, steps, final output
-ui/src/modules/workflows/runSync.svelte.ts      — RunMonitor state: live run sync (WS fast path + safety poll), approvals, final output
+ui/src/modules/workflows/runSync.svelte.ts      — RunSync (run state): live run sync (WS fast path + safety poll), approvals, final output
 ui/src/modules/workflows/RunApprovals.svelte    — the approval gate preview + Approve / Reject
 ui/src/modules/workflows/RunContextSidebar.svelte — the run's context files (shared <Tabs>)
 ui/src/modules/workflows/RunFinalOutput.svelte  — the run's final deliverable (one view for mobile and desktop)
