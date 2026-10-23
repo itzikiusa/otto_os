@@ -1,9 +1,10 @@
 //! Explicit consent gates capture; archive writes run away from PTY readers.
-pub(super) mod archive;
+pub mod archive;
 mod consent;
-pub(super) mod http;
-mod media;
-use super::registry::{Room, SharedRoom};
+pub mod media;
+pub mod service;
+use crate::registry::{Room, SharedRoom};
+use crate::RoomsCtx;
 use archive::{Archive, Store};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use consent::Consent;
@@ -19,7 +20,7 @@ struct ImageJob {
     source: Arc<std::sync::atomic::AtomicU64>,
     generation: u64,
 }
-pub(super) struct Capture {
+pub struct Capture {
     queued: Arc<std::sync::atomic::AtomicU64>,
     sources: HashMap<String, Arc<std::sync::atomic::AtomicU64>>,
     pub view: RecapCapture,
@@ -40,7 +41,7 @@ impl Drop for PendingWrite {
         self.0.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
     }
 }
-pub(super) struct JobGuard {
+pub(crate) struct JobGuard {
     room: Weak<Mutex<Room>>,
     id: String,
     epoch: u64,
@@ -110,9 +111,10 @@ impl Drop for Capture {
         }
     }
 }
-pub(super) async fn store(ctx: &crate::ServerCtx) -> Result<Arc<Store>> {
-    let root = ctx.data_dir.join("room-recaps");
-    ctx.rooms
+/// The recap archive store under `<data dir>/room-recaps`, opened once.
+pub async fn store<C: RoomsCtx>(ctx: &C) -> Result<Arc<Store>> {
+    let root = ctx.data_dir().join("room-recaps");
+    ctx.rooms()
         .recaps
         .get_or_try_init(|| async move {
             tokio::task::spawn_blocking(move || Store::open(root).map(Arc::new))
@@ -122,11 +124,8 @@ pub(super) async fn store(ctx: &crate::ServerCtx) -> Result<Arc<Store>> {
         .await
         .cloned()
 }
-pub(super) async fn get_archive(
-    ctx: &crate::ServerCtx,
-    id: &str,
-    owner: &str,
-) -> Result<Arc<Archive>> {
+/// The caller's own archive (`owner` must match), else not found.
+pub async fn get_archive<C: RoomsCtx>(ctx: &C, id: &str, owner: &str) -> Result<Arc<Archive>> {
     let store = store(ctx).await?;
     let id = id.to_owned();
     let owner = owner.to_owned();
@@ -558,7 +557,7 @@ mod finalization_tests {
     use super::*;
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn finish_waits_for_actual_archive_write_after_recognition_finishes() {
-        let registry = super::super::RoomRegistry::new();
+        let registry = crate::RoomRegistry::new();
         let host = registry
             .create("session", "owner", "Host", "Session", "shell")
             .await

@@ -1,20 +1,13 @@
-use super::super::{auth::owner_auth, recap_engines};
+//! Recap operations behind the owner routes. Each handler authenticates the
+//! owner (`auth::owner_auth`, plus root for settings) and passes the effective
+//! user id as `owner`; every archive lookup is scoped to that owner.
 use super::{archive, store, Capture};
-use crate::{
-    auth::{require_root, CurrentAuthContext},
-    ApiResult, ServerCtx,
-};
-use axum::{
-    extract::{Path, Query, State},
-    http::{header, StatusCode},
-    response::IntoResponse,
-    Json,
-};
-use otto_core::{api::*, Error, Id, Result};
+use crate::{recap_engines, RoomsCtx};
+use otto_core::{api::*, Error, Result};
 use serde::Deserialize;
-pub async fn settings(ctx: &ServerCtx) -> Result<RecapEngineSettings> {
-    Ok(otto_state::SettingsRepo::new(ctx.pool.clone())
-        .get("room_recap_engine")
+pub async fn settings<C: RoomsCtx>(ctx: &C) -> Result<RecapEngineSettings> {
+    Ok(ctx
+        .setting("room_recap_engine")
         .await?
         .map(serde_json::from_value)
         .transpose()
@@ -29,21 +22,10 @@ pub fn config(s: RecapEngineSettings) -> recap_engines::EngineConfig {
         threads: s.threads,
     }
 }
-pub async fn get_settings(
-    State(ctx): State<ServerCtx>,
-    CurrentAuthContext(auth): CurrentAuthContext,
-) -> ApiResult<Json<RecapEngineSettings>> {
-    owner_auth(&auth)?;
-    require_root(&auth.effective_user)?;
-    Ok(Json(settings(&ctx).await?))
-}
-pub async fn put_settings(
-    State(ctx): State<ServerCtx>,
-    CurrentAuthContext(auth): CurrentAuthContext,
-    Json(req): Json<RecapEngineSettings>,
-) -> ApiResult<Json<RecapEngineSettings>> {
-    owner_auth(&auth)?;
-    require_root(&auth.effective_user)?;
+pub async fn put_settings<C: RoomsCtx>(
+    ctx: &C,
+    req: RecapEngineSettings,
+) -> Result<RecapEngineSettings> {
     if !(1..=4).contains(&req.threads)
         || !matches!(req.language.as_str(), "auto" | "en" | "he")
         || [&req.whisper_executable, &req.whisper_model]
@@ -52,44 +34,38 @@ pub async fn put_settings(
     {
         return Err(Error::Invalid(
             "Use absolute executable/model paths, auto/en/he language and 1–4 threads".into(),
-        )
-        .into());
+        ));
     }
-    otto_state::SettingsRepo::new(ctx.pool.clone())
-        .put("room_recap_engine", &serde_json::to_value(&req).unwrap())
+    ctx.put_setting("room_recap_engine", &serde_json::to_value(&req).unwrap())
         .await?;
-    Ok(Json(req))
+    Ok(req)
 }
-pub async fn capabilities(
-    State(ctx): State<ServerCtx>,
-    CurrentAuthContext(auth): CurrentAuthContext,
-) -> ApiResult<Json<serde_json::Value>> {
-    owner_auth(&auth)?;
-    Ok(Json(
-        recap_engines::capabilities(&config(settings(&ctx).await?)).await?,
-    ))
+pub async fn capabilities<C: RoomsCtx>(ctx: &C) -> Result<serde_json::Value> {
+    recap_engines::capabilities(&config(settings(ctx).await?)).await
 }
-pub async fn create(
-    State(ctx): State<ServerCtx>,
-    CurrentAuthContext(auth): CurrentAuthContext,
-    Path(id): Path<String>,
-    Json(req): Json<CreateRecapReq>,
-) -> ApiResult<Json<RecapMetadata>> {
-    owner_auth(&auth)?;
-    let shared = ctx.rooms.get(&id).await?;
+/// Open a recap archive for the owner's live room (consent comes later).
+pub async fn create<C: RoomsCtx>(
+    ctx: &C,
+    owner: &str,
+    id: &str,
+    req: CreateRecapReq,
+) -> Result<RecapMetadata> {
+    let shared = ctx.rooms().get(id).await?;
     {
         let r = shared.lock().await;
-        if r.owner != auth.effective_user.id.as_str() {
-            return Err(Error::Forbidden("Only the room owner can create recaps".into()).into());
+        if r.owner != owner {
+            return Err(Error::Forbidden(
+                "Only the room owner can create recaps".into(),
+            ));
         }
         r.live()?;
     }
-    let capabilities = recap_engines::capabilities(&config(settings(&ctx).await?)).await?;
+    let capabilities = recap_engines::capabilities(&config(settings(ctx).await?)).await?;
     let available = capabilities["speech_ready"].as_bool().unwrap_or(false);
     if !available && !req.allow_unavailable_speech {
-        return Err(Error::Conflict("Local speech recognition is unavailable. Configure it or explicitly allow a recap with missing speech.".into()).into());
+        return Err(Error::Conflict("Local speech recognition is unavailable. Configure it or explicitly allow a recap with missing speech.".into()));
     }
-    let storage = store(&ctx).await?;
+    let storage = store(ctx).await?;
     let _creation = storage.creation.lock().await;
     let r = shared.lock().await;
     r.live()?;
@@ -97,11 +73,12 @@ pub async fn create(
         .as_ref()
         .is_some_and(|c| c.view.state != RecapState::Stopped)
     {
-        return Err(Error::Conflict("This room already has an active recap".into()).into());
+        return Err(Error::Conflict(
+            "This room already has an active recap".into(),
+        ));
     }
     let handle = ctx
-        .manager
-        .live_handle(&Id::from(r.session.clone()))
+        .live_handle(&r.session)
         .filter(|h| h.spawn_seq() == r.spawn_seq && !h.has_exited())
         .ok_or_else(|| Error::Conflict("The shared process is no longer live".into()))?;
     let now = chrono::Utc::now().to_rfc3339();
@@ -151,122 +128,78 @@ pub async fn create(
         })
         .await
         .map_err(|e| Error::Internal(e.to_string()))??;
-        return Err(Error::Conflict("Room ended during recap creation".into()).into());
+        return Err(Error::Conflict("Room ended during recap creation".into()));
     }
     let mut capture = Capture::new(archive.clone(), &shared, handle, r.recap_required());
     capture.publish(None);
     r.recap = Some(capture);
     r.changed();
     drop(r);
-    Ok(Json(archive.metadata()))
+    Ok(archive.metadata())
 }
-pub async fn list(
-    State(ctx): State<ServerCtx>,
-    CurrentAuthContext(auth): CurrentAuthContext,
-) -> ApiResult<Json<Vec<RecapMetadata>>> {
-    owner_auth(&auth)?;
-    let store = store(&ctx).await?;
-    let owner = auth.effective_user.id.to_string();
-    Ok(Json(
-        tokio::task::spawn_blocking(move || store.list(&owner))
-            .await
-            .map_err(|e| Error::Internal(e.to_string()))?,
-    ))
+pub async fn list<C: RoomsCtx>(ctx: &C, owner: &str) -> Result<Vec<RecapMetadata>> {
+    let store = store(ctx).await?;
+    let owner = owner.to_owned();
+    tokio::task::spawn_blocking(move || store.list(&owner))
+        .await
+        .map_err(|e| Error::Internal(e.to_string()))
 }
+/// `?after=&limit=` for the detail route.
 #[derive(Deserialize)]
 pub struct Page {
     #[serde(default)]
-    after: u64,
+    pub after: u64,
     #[serde(default = "limit")]
-    limit: usize,
+    pub limit: usize,
 }
 fn limit() -> usize {
     200
 }
-pub async fn revision(
-    State(ctx): State<ServerCtx>,
-    CurrentAuthContext(auth): CurrentAuthContext,
-    Path(id): Path<String>,
-) -> ApiResult<Json<RecapRevision>> {
-    owner_auth(&auth)?;
-    let store = store(&ctx).await?;
-    let owner = auth.effective_user.id.to_string();
-    Ok(Json(
-        tokio::task::spawn_blocking(move || store.revision(&id, &owner))
-            .await
-            .map_err(|e| Error::Internal(e.to_string()))??,
-    ))
-}
-pub async fn detail(
-    State(ctx): State<ServerCtx>,
-    CurrentAuthContext(auth): CurrentAuthContext,
-    Path(id): Path<String>,
-    Query(page): Query<Page>,
-) -> ApiResult<Json<RecapDetail>> {
-    owner_auth(&auth)?;
-    let a = super::get_archive(&ctx, &id, auth.effective_user.id.as_str()).await?;
-    Ok(Json(
-        tokio::task::spawn_blocking(move || a.detail(page.after, page.limit))
-            .await
-            .map_err(|e| Error::Internal(e.to_string()))??,
-    ))
-}
-pub async fn image(
-    State(ctx): State<ServerCtx>,
-    CurrentAuthContext(auth): CurrentAuthContext,
-    Path((id, image)): Path<(String, String)>,
-) -> ApiResult<impl IntoResponse> {
-    owner_auth(&auth)?;
-    let a = super::get_archive(&ctx, &id, auth.effective_user.id.as_str()).await?;
-    let bytes = tokio::task::spawn_blocking(move || a.image(&image))
+pub async fn revision<C: RoomsCtx>(ctx: &C, owner: &str, id: String) -> Result<RecapRevision> {
+    let store = store(ctx).await?;
+    let owner = owner.to_owned();
+    tokio::task::spawn_blocking(move || store.revision(&id, &owner))
         .await
-        .map_err(|e| Error::Internal(e.to_string()))??;
-    Ok((
-        [
-            (header::CONTENT_TYPE, "image/jpeg"),
-            (header::CACHE_CONTROL, "no-store"),
-        ],
-        bytes,
-    ))
+        .map_err(|e| Error::Internal(e.to_string()))?
 }
-pub async fn export(
-    State(ctx): State<ServerCtx>,
-    CurrentAuthContext(auth): CurrentAuthContext,
-    Path(id): Path<String>,
-) -> ApiResult<impl IntoResponse> {
-    owner_auth(&auth)?;
-    let archive = super::get_archive(&ctx, &id, auth.effective_user.id.as_str()).await?;
+pub async fn detail<C: RoomsCtx>(
+    ctx: &C,
+    owner: &str,
+    id: &str,
+    page: Page,
+) -> Result<RecapDetail> {
+    let a = super::get_archive(ctx, id, owner).await?;
+    tokio::task::spawn_blocking(move || a.detail(page.after, page.limit))
+        .await
+        .map_err(|e| Error::Internal(e.to_string()))?
+}
+/// One stored JPEG of the owner's archive.
+pub async fn image<C: RoomsCtx>(ctx: &C, owner: &str, id: &str, image: String) -> Result<Vec<u8>> {
+    let a = super::get_archive(ctx, id, owner).await?;
+    tokio::task::spawn_blocking(move || a.image(&image))
+        .await
+        .map_err(|e| Error::Internal(e.to_string()))?
+}
+/// The NDJSON export: the first `extent` bytes of `file` (opened before the
+/// extent is read, so they are already on disk), then `tail`.
+pub struct Export {
+    pub file: tokio::fs::File,
+    pub extent: u64,
+    pub tail: Vec<u8>,
+}
+pub async fn export<C: RoomsCtx>(ctx: &C, owner: &str, id: &str) -> Result<Export> {
+    let archive = super::get_archive(ctx, id, owner).await?;
     let file = tokio::fs::File::open(archive.events_path()?)
         .await
         .map_err(|e| Error::Internal(e.to_string()))?;
-    use futures_util::StreamExt;
-    use tokio::io::AsyncReadExt;
     let (extent, tail) = archive.export_extent()?;
-    let stream =
-        tokio_util::io::ReaderStream::new(file.take(extent)).chain(futures_util::stream::once(
-            async move { Ok::<_, std::io::Error>(axum::body::Bytes::from(tail)) },
-        ));
-    Ok((
-        [
-            (header::CONTENT_TYPE, "application/x-ndjson"),
-            (
-                header::CONTENT_DISPOSITION,
-                "attachment; filename=room-recap.jsonl",
-            ),
-            (header::CACHE_CONTROL, "no-store"),
-        ],
-        axum::body::Body::from_stream(stream),
-    ))
+    Ok(Export { file, extent, tail })
 }
-pub async fn summary(
-    State(ctx): State<ServerCtx>,
-    CurrentAuthContext(auth): CurrentAuthContext,
-    Path(id): Path<String>,
-) -> ApiResult<Json<RecapQueued>> {
-    owner_auth(&auth)?;
-    let store = store(&ctx).await?;
+/// Queue a draft summary; a newer request or a cancel supersedes it.
+pub async fn summary<C: RoomsCtx>(ctx: &C, owner: &str, id: String) -> Result<RecapQueued> {
+    let store = store(ctx).await?;
     let lookup = store.clone();
-    let owner = auth.effective_user.id.to_string();
+    let owner = owner.to_owned();
     let archive = tokio::task::spawn_blocking(move || lookup.get_summary(&id, &owner))
         .await
         .map_err(|e| Error::Internal(e.to_string()))??;
@@ -330,22 +263,15 @@ pub async fn summary(
         let _ = archive.save(&s);
     });
     archive.state.lock().unwrap().summary_task = Some(task.abort_handle());
-    Ok(Json(RecapQueued { queued: true }))
+    Ok(RecapQueued { queued: true })
 }
-pub async fn cancel_summary(
-    State(ctx): State<ServerCtx>,
-    CurrentAuthContext(auth): CurrentAuthContext,
-    Path(id): Path<String>,
-) -> ApiResult<StatusCode> {
-    owner_auth(&auth)?;
-    let a = super::get_archive(&ctx, &id, auth.effective_user.id.as_str()).await?;
+pub async fn cancel_summary<C: RoomsCtx>(ctx: &C, owner: &str, id: &str) -> Result<()> {
+    let a = super::get_archive(ctx, id, owner).await?;
     let mut s = a.state.lock().unwrap();
     s.summary_generation += 1;
     if let Some(task) = s.summary_task.take() {
         task.abort();
     }
     s.metadata.summary_status = RecapSummaryStatus::Cancelled;
-    a.save(&s)?;
-    Ok(StatusCode::NO_CONTENT)
+    a.save(&s)
 }
-pub use super::media::{audio, gap, screen};

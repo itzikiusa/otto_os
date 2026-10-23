@@ -1,10 +1,10 @@
 //! Membership, driver and chat transitions. PTY authority effects are applied
 //! by the socket owner before publishing the resulting state.
-use super::registry::{forbidden, invalid, Room, RATE_LIMITED};
+use crate::registry::{forbidden, invalid, Room, RATE_LIMITED};
 use otto_core::{api::*, Result};
 use std::time::Instant;
 #[derive(Debug, PartialEq, Eq)]
-pub(super) enum Effect {
+pub enum Effect {
     None,
     Driver(Option<String>),
     End,

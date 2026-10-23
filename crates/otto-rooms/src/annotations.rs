@@ -1,4 +1,4 @@
-use super::registry::{forbidden, invalid, Room, RATE_LIMITED};
+use crate::registry::{forbidden, invalid, Room, RATE_LIMITED};
 use chrono::Utc;
 use otto_core::{api::*, Result};
 use std::time::{Duration, Instant};

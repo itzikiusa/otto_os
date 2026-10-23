@@ -1,6 +1,6 @@
 //! The registry stores hashes only. A per-room mutex serializes admission,
 //! revocation and terminal writes; no database operation runs on keystrokes.
-use super::capability::{well_formed, Capability, Digest, TokenBucket};
+use crate::capability::{well_formed, Capability, Digest, TokenBucket};
 use chrono::{DateTime, Utc};
 use otto_core::{api::*, Error, Result};
 use std::{
@@ -10,18 +10,18 @@ use std::{
 };
 use tokio::sync::{broadcast, Mutex};
 
-pub(super) const ROOM_TTL: Duration = Duration::from_secs(8 * 3600);
-pub(super) const INVITE_TTL: Duration = Duration::from_secs(600);
-pub(super) const PENDING_TTL: Duration = Duration::from_secs(120);
-pub(super) const GRACE: Duration = Duration::from_secs(30);
-pub(super) type SharedRoom = Arc<Mutex<Room>>;
+pub const ROOM_TTL: Duration = Duration::from_secs(8 * 3600);
+pub const INVITE_TTL: Duration = Duration::from_secs(600);
+pub const PENDING_TTL: Duration = Duration::from_secs(120);
+pub const GRACE: Duration = Duration::from_secs(30);
+pub type SharedRoom = Arc<Mutex<Room>>;
 #[derive(Default)]
 pub struct RoomRegistry {
-    pub(super) recaps: tokio::sync::OnceCell<Arc<super::recap::archive::Store>>,
+    pub(crate) recaps: tokio::sync::OnceCell<Arc<crate::recap::archive::Store>>,
     rooms: Mutex<HashMap<String, SharedRoom>>,
 }
 #[derive(Clone)]
-pub(super) enum Notice {
+pub enum Notice {
     State,
     Event {
         to: Option<String>,
@@ -29,8 +29,8 @@ pub(super) enum Notice {
     },
 }
 /// The rooms relay's throttle message (the shared bucket takes it per call).
-pub(super) const RATE_LIMITED: &str = "Too many events; retry shortly";
-pub(super) struct Member {
+pub const RATE_LIMITED: &str = "Too many events; retry shortly";
+pub struct Member {
     pub view: RoomMember,
     pub hash: Digest,
     pub joined: Instant,
@@ -86,8 +86,8 @@ struct Invite {
     role: RoomRole,
     created: Instant,
 }
-pub(super) struct Room {
-    pub recap: Option<super::recap::Capture>,
+pub struct Room {
+    pub recap: Option<crate::recap::Capture>,
     pub id: String,
     pub session: String,
     pub owner: String,
@@ -113,10 +113,10 @@ pub(super) struct Room {
     pub signal: broadcast::Sender<Notice>,
     pub ended: bool,
 }
-pub(super) fn invalid(s: &str) -> Error {
+pub(crate) fn invalid(s: &str) -> Error {
     Error::Invalid(s.into())
 }
-pub(super) fn forbidden(s: &str) -> Error {
+pub(crate) fn forbidden(s: &str) -> Error {
     Error::Forbidden(s.into())
 }
 fn name(s: &str) -> Result<String> {
@@ -191,7 +191,7 @@ impl RoomRegistry {
             token,
         })
     }
-    pub(super) async fn get(&self, id: &str) -> Result<SharedRoom> {
+    pub async fn get(&self, id: &str) -> Result<SharedRoom> {
         self.rooms
             .lock()
             .await
@@ -199,10 +199,10 @@ impl RoomRegistry {
             .cloned()
             .ok_or(Error::Unauthorized)
     }
-    pub(super) async fn all(&self) -> Vec<SharedRoom> {
+    pub async fn all(&self) -> Vec<SharedRoom> {
         self.rooms.lock().await.values().cloned().collect()
     }
-    pub(super) async fn forget(&self, id: &str) {
+    pub async fn forget(&self, id: &str) {
         self.rooms.lock().await.remove(id);
     }
     pub async fn invite(&self, id: &str, owner: &str, role: RoomRole) -> Result<String> {

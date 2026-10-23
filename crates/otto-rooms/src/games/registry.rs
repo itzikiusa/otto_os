@@ -1,6 +1,6 @@
 //! Bounded memory-only relay. All membership and packet decisions share a room lock.
 use super::types::*;
-use crate::rooms::capability::{well_formed, Capability, Digest, TokenBucket};
+use crate::capability::{well_formed, Capability, Digest, TokenBucket};
 use otto_core::{Error, Result};
 use std::{
     collections::HashMap,
@@ -9,16 +9,16 @@ use std::{
 };
 use tokio::sync::{broadcast, Mutex};
 
-pub(super) const GRACE: Duration = Duration::from_secs(20);
+pub const GRACE: Duration = Duration::from_secs(20);
 /// Member entries ever admitted to one room, including guests who left.
-pub(super) const MAX_MEMBER_ENTRIES: usize = 16;
-pub(super) type SharedRoom = Arc<Mutex<Room>>;
+pub const MAX_MEMBER_ENTRIES: usize = 16;
+pub type SharedRoom = Arc<Mutex<Room>>;
 #[derive(Default)]
 pub struct Registry {
     rooms: Mutex<HashMap<String, SharedRoom>>,
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(super) enum Target {
+pub enum Target {
     All,
     One(usize),
     /// Every member except the host (snapshot fan-out).
@@ -34,11 +34,11 @@ impl Target {
     }
 }
 #[derive(Clone)]
-pub(super) struct Notice {
+pub struct Notice {
     pub to: Target,
     pub event: Event,
 }
-pub(super) struct Member {
+pub struct Member {
     pub view: MemberView,
     hash: Digest,
     connection: u64,
@@ -47,7 +47,7 @@ pub(super) struct Member {
     stream_rate: TokenBucket,
     control_rate: TokenBucket,
 }
-pub(super) struct Room {
+pub struct Room {
     pub id: String,
     owner: String,
     pub config: Config,
@@ -61,7 +61,7 @@ pub(super) struct Room {
     result: Option<serde_json::Value>,
 }
 /// The game relay's throttle message; `socket.rs` closes the socket on it.
-pub(super) const RATE_LIMITED: &str = "Too many game messages";
+pub const RATE_LIMITED: &str = "Too many game messages";
 fn name(value: &str) -> Result<String> {
     let value = value.trim();
     if value.is_empty() || value.chars().count() > 40 || value.chars().any(char::is_control) {
@@ -98,12 +98,7 @@ impl Member {
     }
 }
 impl Registry {
-    pub(super) async fn create(
-        &self,
-        owner: &str,
-        display: &str,
-        config: Config,
-    ) -> Result<Credential> {
+    pub async fn create(&self, owner: &str, display: &str, config: Config) -> Result<Credential> {
         let name = name(display)?;
         if !config.game.maps().contains(&config.map) {
             return Err(Error::Invalid("Choose a map for this game".into()));
@@ -158,7 +153,7 @@ impl Registry {
         );
         Ok(response)
     }
-    pub(super) async fn get(&self, id: &str) -> Result<SharedRoom> {
+    pub async fn get(&self, id: &str) -> Result<SharedRoom> {
         self.rooms
             .lock()
             .await
@@ -166,11 +161,11 @@ impl Registry {
             .cloned()
             .ok_or_else(|| Error::NotFound("Game room not found".into()))
     }
-    pub(super) async fn forget(&self, id: &str) {
+    pub async fn forget(&self, id: &str) {
         self.rooms.lock().await.remove(id);
     }
     /// The invite admits guests until the room is full or the match starts.
-    pub(super) async fn join(&self, id: &str, invite: &str, display: &str) -> Result<Credential> {
+    pub async fn join(&self, id: &str, invite: &str, display: &str) -> Result<Credential> {
         let name = name(display)?;
         if !well_formed(invite) {
             return Err(Error::Unauthorized);
@@ -206,7 +201,7 @@ impl Registry {
         room.changed();
         Ok(response)
     }
-    pub(super) async fn authenticate(&self, id: &str, credential: &str) -> Result<usize> {
+    pub async fn authenticate(&self, id: &str, credential: &str) -> Result<usize> {
         if !well_formed(credential) {
             return Err(Error::Unauthorized);
         }
@@ -230,13 +225,13 @@ impl Room {
     fn active(&self) -> impl Iterator<Item = &Member> {
         self.members.iter().filter(|m| m.active())
     }
-    pub(super) fn paused(&self) -> bool {
+    pub fn paused(&self) -> bool {
         self.phase == Phase::Playing && !self.all_connected()
     }
     fn all_connected(&self) -> bool {
         self.active().all(|m| m.view.connected)
     }
-    pub(super) fn view(&self) -> View {
+    pub fn view(&self) -> View {
         View {
             id: self.id.clone(),
             config: self.config.clone(),
@@ -247,7 +242,7 @@ impl Room {
             members: self.members.iter().map(|m| m.view.clone()).collect(),
         }
     }
-    pub(super) fn emit(&self, to: Target, event: Event) {
+    pub fn emit(&self, to: Target, event: Event) {
         let _ = self.tx.send(Notice { to, event });
     }
     fn changed(&self) {
@@ -259,7 +254,7 @@ impl Room {
             member.seq = 0;
         }
     }
-    pub(super) fn connect(&mut self, index: usize) -> Result<u64> {
+    pub fn connect(&mut self, index: usize) -> Result<u64> {
         self.live()?;
         let member = self.members.get_mut(index).ok_or(Error::Unauthorized)?;
         if member.view.left {
@@ -286,7 +281,7 @@ impl Room {
         }
         Ok(connection)
     }
-    pub(super) fn disconnect(&mut self, index: usize, connection: u64) {
+    pub fn disconnect(&mut self, index: usize, connection: u64) {
         let Some(member) = self.members.get_mut(index) else {
             return;
         };
@@ -310,7 +305,7 @@ impl Room {
         self.advance();
         self.changed();
     }
-    pub(super) fn maintain(&mut self, now: Instant) {
+    pub fn maintain(&mut self, now: Instant) {
         if self.phase == Phase::Closed {
             return;
         }
@@ -332,7 +327,7 @@ impl Room {
             self.depart(index);
         }
     }
-    pub(super) fn close(&mut self, reason: &str) {
+    pub fn close(&mut self, reason: &str) {
         if self.phase == Phase::Closed {
             return;
         }
@@ -366,7 +361,7 @@ impl Room {
         }
         Ok(())
     }
-    pub(super) fn apply(&mut self, index: usize, connection: u64, command: Command) -> Result<()> {
+    pub fn apply(&mut self, index: usize, connection: u64, command: Command) -> Result<()> {
         self.live()?;
         let member = self.members.get_mut(index).ok_or(Error::Unauthorized)?;
         if member.view.left || !member.view.connected || member.connection != connection {

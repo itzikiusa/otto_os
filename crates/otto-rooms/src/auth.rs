@@ -1,6 +1,6 @@
-use axum::http::HeaderMap;
+use http::HeaderMap;
 use otto_core::{auth::AuthContext, domain::Session, Result};
-pub(crate) fn owner_auth(auth: &AuthContext) -> Result<()> {
+pub fn owner_auth(auth: &AuthContext) -> Result<()> {
     if auth.scope.is_some()
         || auth.mcp_only
         || auth.mcp_scope.is_some()
@@ -14,7 +14,7 @@ pub(crate) fn owner_auth(auth: &AuthContext) -> Result<()> {
     }
     Ok(())
 }
-pub(super) fn eligible(session: &Session) -> Result<()> {
+pub fn eligible(session: &Session) -> Result<()> {
     if session.kind != otto_core::domain::SessionKind::Agent
         || session.connection_id.is_some()
         || ["k8s", "aws", "connection_id"]
@@ -30,15 +30,15 @@ pub(super) fn eligible(session: &Session) -> Result<()> {
 }
 /// The room relays' subprotocol is `otto-room, <token>`; the shared parser
 /// also requires a well-formed (43-char) token, as the game relay always did.
-pub(super) fn socket_token(headers: &HeaderMap) -> Result<String> {
-    super::capability::socket_token(headers, "otto-room")
+pub fn socket_token(headers: &HeaderMap) -> Result<String> {
+    crate::capability::socket_token(headers, "otto-room")
 }
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
     fn only_exact_room_subprotocol_pair_is_accepted() {
-        let token = "t".repeat(super::super::capability::TOKEN_LEN);
+        let token = "t".repeat(crate::capability::TOKEN_LEN);
         let mut headers = HeaderMap::new();
         assert!(socket_token(&headers).is_err());
         headers.insert("authorization", "Bearer owner-token".parse().unwrap());

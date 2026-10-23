@@ -3791,6 +3791,7 @@ dependencies = [
 name = "otto-apiclient"
 version = "0.2.0"
 dependencies = [
+ "async-trait",
  "base64 0.22.1",
  "boa_engine",
  "chrono",
@@ -3801,11 +3802,16 @@ dependencies = [
  "libc",
  "otto-core",
  "otto-netguard",
+ "otto-ssh",
+ "otto-state",
  "prost",
  "prost-reflect",
  "prost-types",
  "protox",
+ "rand 0.10.3",
  "regex",
+ "reqwest",
+ "reqwest_cookie_store",
  "rustls",
  "serde",
  "serde_json",
@@ -3813,6 +3819,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tonic",
+ "uuid",
 ]
 
 [[package]]
@@ -4030,6 +4037,7 @@ dependencies = [
  "ignore",
  "otto-core",
  "otto-state",
+ "otto-transcript",
  "serde",
  "serde_json",
  "tempfile",
@@ -4357,6 +4365,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "http-body-util",
+ "otto-agent-run",
  "otto-context",
  "otto-core",
  "otto-design",
@@ -4433,6 +4442,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "otto-rooms"
+version = "0.2.0"
+dependencies = [
+ "base64 0.22.1",
+ "bytes",
+ "chrono",
+ "hmac",
+ "http",
+ "objc2",
+ "objc2-foundation",
+ "objc2-vision",
+ "otto-core",
+ "otto-pty",
+ "rand 0.10.3",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha1 0.11.0",
+ "sha2 0.11.0",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "otto-sandbox"
 version = "0.2.0"
 dependencies = [
@@ -4451,12 +4486,8 @@ dependencies = [
  "dirs",
  "futures-util",
  "hex",
- "hmac",
  "http-body-util",
  "mime_guess",
- "objc2",
- "objc2-foundation",
- "objc2-vision",
  "otto-agent-run",
  "otto-apiclient",
  "otto-assistant",
@@ -4486,6 +4517,7 @@ dependencies = [
  "otto-pty",
  "otto-rbac",
  "otto-review",
+ "otto-rooms",
  "otto-sandbox",
  "otto-server",
  "otto-sessions",
@@ -4507,7 +4539,6 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
- "sha1 0.11.0",
  "sha2 0.11.0",
  "sqlx",
  "tempfile",

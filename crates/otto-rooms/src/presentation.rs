@@ -1,4 +1,4 @@
-use super::registry::{forbidden, invalid, Room};
+use crate::registry::{forbidden, invalid, Room};
 use otto_core::{api::*, Error, Result};
 use std::time::{Duration, Instant};
 impl Room {

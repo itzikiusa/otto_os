@@ -1,19 +1,15 @@
 //! Media accepts owner uploads only, with consent and source identity checked twice.
-use super::super::{auth::owner_auth, recap_engines, registry::SharedRoom};
+//! The owner's handlers authenticate and pass the effective user as `owner`.
 use super::{
-    http::{config, settings},
+    service::{config, settings},
     store, Capture,
 };
-use crate::{auth::CurrentAuthContext, ApiResult, ServerCtx};
-use axum::{
-    extract::{Path, State},
-    Json,
-};
+use crate::{recap_engines, registry::SharedRoom, RoomsCtx};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use otto_core::{api::*, Error, Result};
-async fn room(ctx: &ServerCtx, id: &str, owner: &str) -> Result<SharedRoom> {
+async fn room<C: RoomsCtx>(ctx: &C, id: &str, owner: &str) -> Result<SharedRoom> {
     let a = super::get_archive(ctx, id, owner).await?;
-    let shared = ctx.rooms.get(&a.metadata().room_id).await?;
+    let shared = ctx.rooms().get(&a.metadata().room_id).await?;
     {
         let r = shared.lock().await;
         r.live()?;
@@ -97,35 +93,34 @@ fn wav(bytes: &[u8], duration: u64) -> Result<()> {
 fn jpeg(bytes: &[u8]) -> Result<()> {
     recap_engines::jpeg_dimensions(bytes).map(|_| ())
 }
-pub async fn audio(
-    State(ctx): State<ServerCtx>,
-    CurrentAuthContext(auth): CurrentAuthContext,
-    Path(id): Path<String>,
-    Json(req): Json<RecapAudioReq>,
-) -> ApiResult<Json<RecapQueued>> {
-    owner_auth(&auth)?;
-    let shared = room(&ctx, &id, auth.effective_user.id.as_str()).await?;
+pub async fn audio<C: RoomsCtx>(
+    ctx: &C,
+    owner: &str,
+    id: String,
+    req: RecapAudioReq,
+) -> Result<RecapQueued> {
+    let shared = room(ctx, &id, owner).await?;
     let bytes = STANDARD
         .decode(&req.wav_base64)
         .map_err(|_| invalid("Invalid base64 WAV"))?;
     wav(&bytes, req.duration_ms)?;
-    let store = store(&ctx).await?;
+    let store = store(ctx).await?;
     let permit = store
         .queued
         .clone()
         .try_acquire_owned()
         .map_err(|_| Error::Conflict("Local processing is busy; retry shortly".into()))?;
-    let cfg = config(settings(&ctx).await?);
+    let cfg = config(settings(ctx).await?);
     let (name, control, job) = {
         let mut r = shared.lock().await;
         let m = r.admitted(&req.member_id)?;
         if !m.view.connected || m.view.generation != req.member_generation {
-            return Err(Error::Forbidden("Participant audio is not shared".into()).into());
+            return Err(Error::Forbidden("Participant audio is not shared".into()));
         }
         let name = m.view.name.clone();
         let c = r.recap.as_mut().ok_or_else(|| invalid("Recap ended"))?;
         if c.view.id != id {
-            return Err(Error::Forbidden("Recap was replaced".into()).into());
+            return Err(Error::Forbidden("Recap was replaced".into()));
         }
         active(
             c,
@@ -145,8 +140,7 @@ pub async fn audio(
         {
             return Err(Error::Forbidden(
                 "Audio chunk falls outside a shared audible interval".into(),
-            )
-            .into());
+            ));
         }
         sequence(
             &mut c.sequences,
@@ -229,21 +223,20 @@ pub async fn audio(
         };
         r.record_processed(req.capture_epoch, event);
     });
-    Ok(Json(RecapQueued { queued: true }))
+    Ok(RecapQueued { queued: true })
 }
-pub async fn screen(
-    State(ctx): State<ServerCtx>,
-    CurrentAuthContext(auth): CurrentAuthContext,
-    Path(id): Path<String>,
-    Json(req): Json<RecapScreenReq>,
-) -> ApiResult<Json<RecapQueued>> {
-    owner_auth(&auth)?;
-    let shared = room(&ctx, &id, auth.effective_user.id.as_str()).await?;
+pub async fn screen<C: RoomsCtx>(
+    ctx: &C,
+    owner: &str,
+    id: String,
+    req: RecapScreenReq,
+) -> Result<RecapQueued> {
+    let shared = room(ctx, &id, owner).await?;
     let bytes = STANDARD
         .decode(&req.jpeg_base64)
         .map_err(|_| invalid("Invalid base64 JPEG"))?;
     jpeg(&bytes)?;
-    let storage = store(&ctx).await?;
+    let storage = store(ctx).await?;
     let permit = storage
         .queued
         .clone()
@@ -259,7 +252,7 @@ pub async fn screen(
         let title = source.title.clone();
         let c = r.recap.as_mut().ok_or_else(|| invalid("Recap ended"))?;
         if c.view.id != id {
-            return Err(Error::Forbidden("Recap was replaced".into()).into());
+            return Err(Error::Forbidden("Recap was replaced".into()));
         }
         active(c, req.capture_epoch, req.offset_ms)?;
         sequence(
@@ -364,27 +357,26 @@ pub async fn screen(
             );
         }
     });
-    Ok(Json(RecapQueued { queued: true }))
+    Ok(RecapQueued { queued: true })
 }
-pub async fn gap(
-    State(ctx): State<ServerCtx>,
-    CurrentAuthContext(auth): CurrentAuthContext,
-    Path(id): Path<String>,
-    Json(req): Json<RecapGapReq>,
-) -> ApiResult<Json<RecapQueued>> {
-    owner_auth(&auth)?;
+pub async fn gap<C: RoomsCtx>(
+    ctx: &C,
+    owner: &str,
+    id: String,
+    req: RecapGapReq,
+) -> Result<RecapQueued> {
     if req.kind.is_empty()
         || req.kind.len() > 64
         || req.reason.is_empty()
         || req.reason.len() > 1024
     {
-        return Err(invalid("Gap kind/reason is empty or too long").into());
+        return Err(invalid("Gap kind/reason is empty or too long"));
     }
-    let shared = room(&ctx, &id, auth.effective_user.id.as_str()).await?;
+    let shared = room(ctx, &id, owner).await?;
     let mut r = shared.lock().await;
     let c = r.recap.as_ref().ok_or_else(|| invalid("Recap ended"))?;
     if c.view.id != id {
-        return Err(Error::Forbidden("Recap was replaced".into()).into());
+        return Err(Error::Forbidden("Recap was replaced".into()));
     }
     active(c, req.capture_epoch, 0)?;
     if let Some(member) = &req.member_id {
@@ -395,7 +387,7 @@ pub async fn gap(
         .as_ref()
         .is_some_and(|id| !r.presentations.iter().any(|p| &p.id == id))
     {
-        return Err(invalid("Source no longer exists").into());
+        return Err(invalid("Source no longer exists"));
     }
     r.record_processed(
         req.capture_epoch,
@@ -406,7 +398,7 @@ pub async fn gap(
             reason: req.reason,
         },
     );
-    Ok(Json(RecapQueued { queued: true }))
+    Ok(RecapQueued { queued: true })
 }
 #[cfg(test)]
 mod tests {

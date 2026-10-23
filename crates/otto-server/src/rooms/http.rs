@@ -1,7 +1,5 @@
-use super::{
-    auth::{eligible, owner_auth},
-    socket,
-};
+//! Room owner routes. Session ownership and the workspace role are checked
+//! here; the room lifecycle itself is `otto_rooms::lifecycle`.
 use crate::{
     auth::{require_ws_role, CurrentAuthContext},
     ApiResult, ServerCtx,
@@ -12,6 +10,7 @@ use axum::{
     Json,
 };
 use otto_core::{api::*, domain::WorkspaceRole, Error, Id};
+use otto_rooms::{auth::owner_auth, lifecycle};
 
 pub async fn create(
     State(ctx): State<ServerCtx>,
@@ -32,66 +31,19 @@ pub async fn create(
         WorkspaceRole::Editor,
     )
     .await?;
-    eligible(&session)?;
-    let handle = ctx
-        .manager
-        .live_handle(&sid)
-        .filter(|h| !h.has_exited())
-        .ok_or_else(|| Error::Conflict("Start the local session before opening a room".into()))?;
-    let credentials = ctx
-        .rooms
-        .create(
-            sid.as_str(),
-            auth.effective_user.id.as_str(),
-            &req.name,
-            &session.title,
-            &session.provider,
-        )
-        .await?;
-    if let Err(error) = ctx
-        .manager
-        .begin_room_authority(
-            &sid,
-            &credentials.room_id,
-            &auth.effective_user.id,
-            &credentials.member_id,
-        )
-        .await
-    {
-        ctx.rooms.forget(&credentials.room_id).await;
-        return Err(error.into());
-    }
-    let room = ctx.rooms.get(&credentials.room_id).await?;
-    {
-        let mut room = room.lock().await;
-        room.spawn_seq = handle.spawn_seq();
-        socket::sync_authority(&ctx, &mut room).await?;
-    }
-    super::audit(
-        &ctx,
-        &credentials.room_id,
-        Some(auth.real_user.id),
-        Some(credentials.member_id.clone()),
-        "create",
-    )
-    .await;
-    socket::maintain(ctx, room);
-    Ok(Json(credentials))
+    let actor = auth.real_user.id.as_str();
+    Ok(Json(
+        lifecycle::open(&ctx, &session, actor, &req.name).await?,
+    ))
 }
 pub async fn list(
     State(ctx): State<ServerCtx>,
     CurrentAuthContext(auth): CurrentAuthContext,
 ) -> ApiResult<Json<Vec<RoomSnapshot>>> {
     owner_auth(&auth)?;
-    let mut result = vec![];
-    for shared in ctx.rooms.all().await {
-        let mut room = shared.lock().await;
-        if room.owner == auth.effective_user.id.as_str() && room.live().is_ok() {
-            socket::sync_authority(&ctx, &mut room).await?;
-            result.push(room.snapshot(&room.host)?);
-        }
-    }
-    Ok(Json(result))
+    Ok(Json(
+        lifecycle::list(&ctx, auth.effective_user.id.as_str()).await?,
+    ))
 }
 pub async fn end(
     State(ctx): State<ServerCtx>,
@@ -99,15 +51,7 @@ pub async fn end(
     Path(id): Path<String>,
 ) -> ApiResult<StatusCode> {
     owner_auth(&auth)?;
-    let shared = ctx.rooms.get(&id).await?;
-    let mut room = shared.lock().await;
-    if room.owner != auth.effective_user.id.as_str() {
-        return Err(Error::Forbidden("Only the room owner can end sharing".into()).into());
-    }
-    socket::end_room(&ctx, &mut room, "The host ended the room").await;
-    let owner = room.owner.clone();
-    drop(room);
-    super::audit(&ctx, &id, Some(owner), None, "end").await;
+    lifecycle::end(&ctx, &id, auth.effective_user.id.as_str()).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 pub async fn invite(
@@ -117,25 +61,10 @@ pub async fn invite(
     Json(req): Json<RoomInviteReq>,
 ) -> ApiResult<Json<RoomInvite>> {
     owner_auth(&auth)?;
-    let configured = otto_state::SettingsRepo::new(ctx.pool.clone())
-        .get("room_public_origin")
-        .await?;
-    let origin = configured
-        .as_ref()
-        .and_then(|v| v.as_str())
-        .unwrap_or(&ctx.base_url);
-    let origin = super::ice::valid_origin(origin)?;
-    let invite = ctx
-        .rooms
-        .invite(&id, auth.effective_user.id.as_str(), req.role)
-        .await?;
-    let url = format!("{origin}/#/room/{id}/{invite}");
-    super::audit(&ctx, &id, Some(auth.real_user.id), None, "invite").await;
-    Ok(Json(RoomInvite {
-        invite,
-        url,
-        expires_at: (chrono::Utc::now() + chrono::Duration::minutes(10)).to_rfc3339(),
-    }))
+    let (owner, actor) = (auth.effective_user.id.as_str(), auth.real_user.id.as_str());
+    Ok(Json(
+        lifecycle::invite(&ctx, &id, owner, actor, req.role).await?,
+    ))
 }
 pub async fn join(
     State(ctx): State<ServerCtx>,

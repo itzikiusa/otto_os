@@ -5,8 +5,8 @@
 //! bucket. One copy keeps the hardening from drifting between the relays:
 //! every digest compare is constant-time by construction, every token must
 //! be exactly `TOKEN_LEN`, and the subprotocol pair is parsed one way.
-use axum::http::HeaderMap;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use http::HeaderMap;
 use otto_core::{Error, Result};
 use rand::{rand_core::UnwrapErr, rngs::SysRng, Rng};
 use sha2::{Digest as _, Sha256};
@@ -16,13 +16,13 @@ use std::{
 };
 
 /// 32 random bytes, base64url without padding.
-pub(crate) const TOKEN_LEN: usize = 43;
+pub const TOKEN_LEN: usize = 43;
 
 /// A capability's stored form. `PartialEq` is the constant-time fold, so a
 /// `==` on two digests (or a `matches`) never short-circuits on the first
 /// differing byte and cannot become a token-prefix oracle.
 #[derive(Clone, Copy, Eq)]
-pub(crate) struct Digest([u8; 32]);
+pub struct Digest([u8; 32]);
 impl Digest {
     pub fn of(token: &str) -> Self {
         Self(Sha256::digest(token.as_bytes()).into())
@@ -54,7 +54,7 @@ impl Hash for Digest {
 }
 
 /// Issues fresh capabilities.
-pub(crate) struct Capability;
+pub struct Capability;
 impl Capability {
     /// A new random token and the digest to store in its place.
     pub fn issue() -> (String, Digest) {
@@ -68,14 +68,14 @@ impl Capability {
 
 /// Every issued token has this exact length; anything else is refused before
 /// a lock or a hash.
-pub(crate) fn well_formed(token: &str) -> bool {
+pub fn well_formed(token: &str) -> bool {
     token.len() == TOKEN_LEN
 }
 
 /// A per-member token bucket. `take` refills at `per_second` up to `burst`
 /// and spends one token, or fails with `Conflict(message)`. Each relay passes
 /// its own message (the game socket treats its message as fatal).
-pub(crate) struct TokenBucket {
+pub struct TokenBucket {
     tokens: f64,
     at: Instant,
 }
@@ -111,7 +111,7 @@ impl TokenBucket {
 /// `<protocol>, <token>`. Exactly one header, exactly two entries, the named
 /// protocol first and a well-formed token second; anything else (an owner
 /// bearer, a query string token, extra entries) is `Unauthorized`.
-pub(crate) fn socket_token(headers: &HeaderMap, protocol: &str) -> Result<String> {
+pub fn socket_token(headers: &HeaderMap, protocol: &str) -> Result<String> {
     let mut values = headers.get_all("sec-websocket-protocol").iter();
     let value = values
         .next()

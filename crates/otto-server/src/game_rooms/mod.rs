@@ -1,9 +1,6 @@
 //! Multiplayer game capabilities (host + guests) are isolated from sessions and owner credentials.
-mod registry;
-#[cfg(test)]
-mod tests;
-mod types;
-pub use registry::Registry;
+//! The relay itself is `otto_rooms::games`; this is the routes and the socket.
+pub use otto_rooms::games::Registry;
 mod http;
 mod socket;
 use crate::ServerCtx;
