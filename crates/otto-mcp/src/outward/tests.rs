@@ -1222,6 +1222,83 @@ fn query_db_readonly_leaves_the_read_only_verdict_to_the_route() {
 }
 
 #[test]
+fn query_db_is_a_governed_irreversible_database_writer() {
+    let specs = otto_tool_specs();
+    let spec = |n: &str| specs.iter().find(|s| s["name"] == n).cloned().unwrap();
+    let write = spec("otto.query_db");
+    assert_eq!(write["mutating"], json!(true));
+    assert_eq!(write["category"], json!("Database"));
+    // The read-only sibling's arguments, one for one.
+    assert_eq!(
+        write["inputSchema"],
+        spec("otto.query_db_readonly")["inputSchema"]
+    );
+    assert!(tool_is_mutating("query_db"));
+    assert!(tool_is_dangerous("query_db"), "approval-gated");
+    assert!(
+        tool_is_irreversible("query_db"),
+        "a category auto-approve rule never covers it"
+    );
+    assert!(!DEFAULT_ENABLED.contains(&"query_db"), "off by default");
+    assert!(!NATIVE_SESSION_WRITERS.contains(&"query_db"));
+    assert!(REF_ARGS.contains(&("query_db", "connection_id", "connection")));
+    // Siblings in the catalog, where the read-only tool always sat.
+    let names = spec_names();
+    let at = names.iter().position(|n| n == "otto.query_db_readonly");
+    assert_eq!(
+        names[at.unwrap() + 1..at.unwrap() + 3],
+        ["otto.query_db", "otto.open_pr_draft"]
+    );
+    // The read-only tool stays a non-mutating read.
+    assert!(!tool_is_mutating("query_db_readonly"));
+    assert!(!tool_is_dangerous("query_db_readonly"));
+}
+
+#[test]
+fn query_db_routes_to_the_explorer_query_path_without_a_confirmation() {
+    // A write goes through `/db/query` — the route a person's Explorer run
+    // uses, with its read-only / production write-guard — never through the
+    // read-only `/db/mcp-query`, and never carrying `confirm_write`.
+    let call = route_for(
+        "query_db",
+        &json!({"connection_id":"c1","statement":"DELETE FROM t","node":"db:shop",
+                "confirm_write":true,"read_only":false,"max_rows":5000}),
+    )
+    .unwrap();
+    assert_eq!(call.method, Method::Post);
+    assert_eq!(call.path, "/api/v1/connections/c1/db/query");
+    assert_eq!(
+        call.body.unwrap(),
+        json!({"statement":"DELETE FROM t","node":"db:shop","max_rows":QUERY_DB_MAX_ROWS,
+               "mask":true,"timeout_ms":QUERY_DB_TIMEOUT_MS}),
+        "only the listed fields — a caller's confirm_write never reaches the route"
+    );
+    let small = route_for(
+        "query_db",
+        &json!({"connection_id":"c1","statement":"SELECT 1","max_rows":"7"}),
+    )
+    .unwrap();
+    assert_eq!(small.body.unwrap()["max_rows"], json!(7));
+    assert!(route_for("query_db", &json!({"connection_id":"c1"})).is_err());
+    assert!(route_for("query_db", &json!({"statement":"SELECT 1"})).is_err());
+    // The self-call outlives the statement's own engine deadline.
+    assert!(
+        call_timeout("query_db", &json!({})).as_millis() > u128::from(QUERY_DB_TIMEOUT_MS),
+        "the engine must stop the statement before the self-call gives up"
+    );
+}
+
+#[test]
+fn query_db_approval_card_shows_the_statement() {
+    let d = dangerous_detail(
+        "otto.query_db",
+        &json!({"connection_id":"c1","node":"db:shop","statement":"UPDATE orders SET total = 0"}),
+    );
+    assert!(d.contains("'c1'") && d.contains("db:shop"), "{d}");
+    assert!(d.ends_with("UPDATE orders SET total = 0"), "{d}");
+}
+
+#[test]
 fn assistant_memory_tools_present_classified_and_routed() {
     let names = spec_names();
     for n in [

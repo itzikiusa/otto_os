@@ -7324,7 +7324,8 @@ mod tests {
     /// perf/10-mcp (granted 135_610); 83_318 after architecture-1-05 aligned
     /// the native twins (id-or-name vault_id, PR `number` alias, room refs —
     /// missing text, not padding); 85_412 with otto_create_issue and its
-    /// discovery reads (list_issue_projects / _types).
+    /// discovery reads (list_issue_projects / _types); 84_834 with
+    /// otto_query_db (review sessions: 59_688).
     const TOOLS_LIST_BYTE_BUDGET: usize = 86_000;
     /// A review-type session (R2 per-source scoping): 56_830; 60_266 with those.
     const NARROW_TOOLS_LIST_BYTE_BUDGET: usize = 61_000;
