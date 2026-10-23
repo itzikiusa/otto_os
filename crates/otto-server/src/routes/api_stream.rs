@@ -176,10 +176,10 @@ async fn serve_sse(
 ) {
     // The request's timeout bounds the wait for the response HEAD only — the
     // event stream itself may run for as long as the user keeps it open.
-    let head_timeout = super::api_client::effective_timeout(spec.request.timeout_ms);
+    let head_timeout = otto_apiclient::engine::effective_timeout(spec.request.timeout_ms);
     let connecting = async {
         let req =
-            super::api_client::prepare_stream(ctx, wid, &spec.request, actor, confirm_allowed)
+            otto_apiclient::engine::prepare_stream(ctx, wid, &spec.request, actor, confirm_allowed)
                 .await?;
         match tokio::time::timeout(
             head_timeout,
@@ -363,7 +363,7 @@ async fn serve_websocket(
             return Err("WebSocket supports GET headers, query and auth; TLS verification must be enabled, SSH and request bodies are unavailable".to_string());
         }
         let prepared =
-            super::api_client::prepare_stream(ctx, wid, &spec.request, actor, confirm_allowed)
+            otto_apiclient::engine::prepare_stream(ctx, wid, &spec.request, actor, confirm_allowed)
                 .await?
                 .build()
                 .map_err(|e| e.without_url().to_string())?;
@@ -388,7 +388,7 @@ async fn serve_websocket(
         let target = prepared.url().clone();
         let port = target.port_or_known_default().unwrap_or(80);
         let addrs: Vec<std::net::SocketAddr> =
-            if super::api_client::workspace_allows_local(ctx, wid).await {
+            if otto_apiclient::engine::workspace_allows_local(ctx, wid).await {
                 let host = target
                     .host_str()
                     .unwrap_or("")
@@ -411,7 +411,7 @@ async fn serve_websocket(
         tokio_tungstenite::client_async_tls_with_config(request, socket, Some(config), None).await.map_err(|_| "WebSocket handshake failed; check the server URL, TLS certificate and authorization".to_string())
     };
     let result = tokio::select! {
-        result = tokio::time::timeout(super::api_client::effective_timeout(spec.request.timeout_ms), connecting) =>
+        result = tokio::time::timeout(otto_apiclient::engine::effective_timeout(spec.request.timeout_ms), connecting) =>
             result.unwrap_or_else(|_| Err("WebSocket connection timed out".into())),
         _ = socket.recv() => return,
     };

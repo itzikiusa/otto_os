@@ -46,10 +46,9 @@ pub(super) async fn execute(
     let mut headers = HeaderMap::new();
     headers.insert("x-otto-agent", HeaderValue::from_static(KIND));
     let auth = otto_core::auth::AuthContext::automation(user, KIND);
-    let response =
-        crate::routes::api_client::execute_service(ctx, &ws.id, user, &auth, &headers, req)
-            .await
-            .map_err(|error| error.0)?;
+    let response = otto_apiclient::engine::execute_service(ctx, &ws.id, user, &auth, &headers, req)
+        .await
+        .map_err(otto_core::Error::from)?;
     let body: Value = serde_json::from_str(&response.body).unwrap_or(Value::String(response.body));
     let mut logs = vec![format!("api_run: HTTP {}", response.status)];
     if response.truncated || response.too_large {

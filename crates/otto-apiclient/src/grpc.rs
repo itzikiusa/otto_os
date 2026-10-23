@@ -1,4 +1,4 @@
-//! gRPC / protobuf engine behind the API client's endpoints (the thin axum
+//! gRPC / protobuf engine behind the API client's endpoints (the thin HTTP
 //! handlers — auth + the workspace allow-local lookup — live in
 //! `otto-server`'s `routes::grpc`):
 //!   POST /workspaces/{wid}/api-client/grpc/describe  — parse a `.proto`, list

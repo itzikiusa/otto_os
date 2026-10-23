@@ -46,8 +46,8 @@ pub async fn invoke(
     // The workspace's explicit opt-in for local/private targets (grpc against a
     // dev server on localhost is a first-class API-client use case) — honoured
     // by reflection AND invoke alike.
-    let allow_local = crate::routes::api_client::workspace_allows_local(&ctx, &wid).await;
-    let agent = super::api_client::is_agent_caller(&headers, &auth);
+    let allow_local = otto_apiclient::engine::workspace_allows_local(&ctx, &wid).await;
+    let agent = otto_apiclient::engine::is_agent_caller(&headers, &auth);
     let secrets = resolve_request(
         &ctx,
         &wid,
@@ -62,7 +62,7 @@ pub async fn invoke(
         .await
         .map_err(|e| scrub_error(e, &secrets))?;
     if agent {
-        crate::api_secrets::scrub_secrets(&mut response, &secrets);
+        otto_apiclient::secrets::scrub_secrets(&mut response, &secrets);
     }
     Ok(Json(response))
 }
@@ -78,8 +78,8 @@ pub async fn reflect(
     Json(mut req): Json<WorkspaceGrpcReflect>,
 ) -> ApiResult<Json<GrpcDescribeResp>> {
     require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
-    let allow_local = crate::routes::api_client::workspace_allows_local(&ctx, &wid).await;
-    let agent = super::api_client::is_agent_caller(&headers, &auth);
+    let allow_local = otto_apiclient::engine::workspace_allows_local(&ctx, &wid).await;
+    let agent = otto_apiclient::engine::is_agent_caller(&headers, &auth);
     let secrets = resolve_request(
         &ctx,
         &wid,
@@ -131,7 +131,9 @@ fn substitute_message(
 ) -> Result<String, otto_core::Error> {
     fn visit(value: &mut serde_json::Value, vars: &serde_json::Map<String, serde_json::Value>) {
         match value {
-            serde_json::Value::String(text) => *text = super::api_client::substitute(text, vars),
+            serde_json::Value::String(text) => {
+                *text = otto_apiclient::engine::substitute(text, vars)
+            }
             serde_json::Value::Array(values) => values.iter_mut().for_each(|v| visit(v, vars)),
             serde_json::Value::Object(values) => values.values_mut().for_each(|v| visit(v, vars)),
             _ => {}
@@ -154,7 +156,7 @@ async fn resolve_request(
     options: &GrpcOptions,
     agent: bool,
 ) -> ApiResult<Vec<String>> {
-    use super::api_client::{
+    use otto_apiclient::engine::{
         new_host_conflict, resolve_environment, substitute, unbound_secret_host,
     };
     use serde_json::json;
@@ -183,7 +185,7 @@ async fn resolve_request(
         unbound_secret_host(&repo, wid, &probe, &vars, &bind_vars, &blob, keys).await?
     {
         if agent || !options.confirm_new_host {
-            return Err(new_host_conflict(&host, agent));
+            return Err(new_host_conflict(&host, agent).into());
         }
     }
     let secrets: Vec<String> = blob.values().cloned().collect();
@@ -202,9 +204,11 @@ async fn resolve_request(
 fn scrub_error(error: otto_core::Error, secrets: &[String]) -> crate::error::ApiError {
     use otto_core::Error;
     crate::error::ApiError(match error {
-        Error::Invalid(message) => Error::Invalid(crate::api_secrets::scrub_str(&message, secrets)),
+        Error::Invalid(message) => {
+            Error::Invalid(otto_apiclient::secrets::scrub_str(&message, secrets))
+        }
         Error::Upstream(message) => {
-            Error::Upstream(crate::api_secrets::scrub_str(&message, secrets))
+            Error::Upstream(otto_apiclient::secrets::scrub_str(&message, secrets))
         }
         error => error,
     })
