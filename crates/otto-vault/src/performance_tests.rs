@@ -1133,6 +1133,7 @@ async fn rename_finishes_after_its_request_is_dropped() {
     let rewritten = dir.path().join("a.md");
     for _ in 0..200 {
         if e.store.note_meta(id, "sub/c.md").await.is_ok()
+            && e.store.note_meta(id, "b.md").await.is_err()
             && !std::fs::read_to_string(&rewritten)
                 .unwrap()
                 .contains("[[b]]")
