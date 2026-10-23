@@ -9,12 +9,18 @@
 //! the handler's next check (a body/onboarding refusal), not by a 202: a
 //! fixture with a channel bridge would spawn a real agent CLI.
 //!
+//! The `/ingest/*` hook routes are driven with a real swarm agent session and
+//! its minted token, so the token check is the only thing between a forged
+//! post and a write (test-quality-6w1-02).
+//!
 //! The Telegram sender allow-list is pinned in `otto-channels`
 //! (`a_strangers_text_starts_no_session_and_is_listed_rejected`), and
 //! `verify_ingest_token` by its own unit test in `otto-sessions`.
 use otto_core::domain::{Channel, ConnectionKind, Environment};
 use otto_server::ServerCtx;
-use otto_state::{NewConnection, NewPlugin, NewSwarm, UsersRepo};
+use otto_state::{
+    NewAgent, NewConnection, NewDiscoveryRun, NewPlugin, NewProject, NewSwarm, UsersRepo,
+};
 use serde_json::json;
 
 const KEY: &str = "right-webhook-key";
@@ -302,8 +308,74 @@ async fn db_assist_query_needs_the_assist_key_and_stays_read_only() {
     f.server.abort();
 }
 
+/// What the ingest routes can write, read straight from the stores: board
+/// rows, product stories, design attachments, the discovery report, the
+/// session's activity trail and whether usage was recorded at all.
+#[derive(Debug, PartialEq)]
+struct Written {
+    board: usize,
+    stories: i64,
+    attachments: i64,
+    report: Option<String>,
+    trail: usize,
+    usage_recorded: bool,
+}
+
+async fn written(
+    f: &Fixture,
+    swarm: &otto_core::Id,
+    run: &otto_core::Id,
+    sid: &otto_core::Id,
+) -> Written {
+    // Fixed statements (sqlx 0.9 refuses an unaudited `format!` query).
+    let count = |sql: &'static str| {
+        let pool = f.ctx.pool.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>(sql)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    Written {
+        board: f
+            .ctx
+            .swarm_repo
+            .list_board(swarm, None, None, 50)
+            .await
+            .unwrap()
+            .len(),
+        stories: count("SELECT COUNT(*) FROM product_stories").await,
+        attachments: count("SELECT COUNT(*) FROM product_attachments").await,
+        report: f
+            .ctx
+            .discovery_repo
+            .get(run)
+            .await
+            .unwrap()
+            .unwrap()
+            .report_md,
+        trail: otto_state::ActivityRepo::new(f.ctx.pool.clone())
+            .list_trail(sid, 50)
+            .await
+            .unwrap()
+            .len(),
+        // Nothing else records usage in this fixture; `record` stamps the
+        // freshness clock even with the ClickHouse writer off.
+        usage_recorded: f.ctx.usage.sampler_wanted(0),
+    }
+}
+
+/// test-quality-6w1-01/-02: every `/ingest/*` route that takes a session's
+/// hook token. The session is a REAL swarm agent session (swarm, agent,
+/// project and a discovery run all exist), so once the token check passes
+/// each handler has everything it needs to write — the 204s alone prove
+/// nothing (accepted and refused posts both return 204). Each route is
+/// refused with no token, an empty token and ANOTHER live session's token,
+/// then accepted with the session's own token: the positive case is what
+/// makes the negatives count.
 #[tokio::test]
-async fn swarm_board_ingest_without_a_valid_session_token_writes_nothing() {
+async fn ingest_routes_write_only_with_the_sessions_own_token() {
     let (f, root) = fixture().await;
     let ws = f
         .ctx
@@ -328,38 +400,180 @@ async fn swarm_board_ingest_without_a_valid_session_token_writes_nothing() {
         })
         .await
         .unwrap();
-    let url = format!("{}/ingest/swarm/board", f.origin);
-    let post = json!({"body": "I am the leader now", "kind": "message"});
-    let cases: [(&str, Option<&str>, Option<&str>); 4] = [
-        ("no session, no token", None, None),
-        ("no token", Some("sess-1"), None),
-        ("empty token", Some("sess-1"), Some("")),
-        // No token was minted for this session in this daemon.
-        ("a guessed token", Some("sess-1"), Some("deadbeef")),
+    let agent = f
+        .ctx
+        .swarm_repo
+        .create_agent(NewAgent {
+            swarm_id: swarm.id.clone(),
+            workspace_id: ws.id.clone(),
+            name: "po".into(),
+            title: "Product owner".into(),
+            reports_to: None,
+            provider: "claude".into(),
+            model: None,
+            soul_name: None,
+            soul_md: None,
+            specialization: String::new(),
+            scope_md: String::new(),
+            skills: json!([]),
+            schedule: None,
+            cwd_mode: None,
+            avatar: String::new(),
+            order_idx: 0,
+            created_by: root.id.clone(),
+        })
+        .await
+        .unwrap();
+    let project = f
+        .ctx
+        .swarm_repo
+        .create_project(NewProject {
+            swarm_id: swarm.id.clone(),
+            workspace_id: ws.id.clone(),
+            name: "p".into(),
+            description: String::new(),
+            repo_path: None,
+            goal_md: None,
+            story_id: None,
+            order_idx: 0,
+            created_by: root.id.clone(),
+        })
+        .await
+        .unwrap();
+    let story = f
+        .ctx
+        .product
+        .create_draft(&ws.id, &root.id, Some("Under discovery"))
+        .await
+        .unwrap()
+        .story;
+    let run = f
+        .ctx
+        .discovery_repo
+        .create(NewDiscoveryRun {
+            story_id: story.id.clone(),
+            workspace_id: ws.id.clone(),
+            swarm_id: swarm.id.clone(),
+            project_id: project.id.clone(),
+            brief_md: String::new(),
+            created_by: root.id.clone(),
+        })
+        .await
+        .unwrap();
+    let sessions = otto_state::SessionsRepo::new(f.ctx.pool.clone());
+    let session = |title: &str, meta: serde_json::Value| otto_state::NewSession {
+        workspace_id: ws.id.clone(),
+        kind: otto_core::domain::SessionKind::Agent,
+        provider: "claude".into(),
+        title: title.into(),
+        cwd: f._tmp.path().to_string_lossy().to_string(),
+        provider_session_id: None,
+        connection_id: None,
+        created_by: root.id.clone(),
+        meta,
+    };
+    let own = sessions
+        .create(session(
+            "po",
+            json!({
+                "swarm_id": swarm.id,
+                "agent_id": agent.id,
+                "workspace_id": ws.id,
+                "project_id": project.id,
+            }),
+        ))
+        .await
+        .unwrap();
+    let other = sessions.create(session("other", json!({}))).await.unwrap();
+    // Minted the way a spawn mints them (the `OTTO_INGEST_TOKEN` env).
+    let own_token = f.ctx.manager.mint_ingest_token(&own.id);
+    let other_token = f.ctx.manager.mint_ingest_token(&other.id);
+    assert_ne!(own_token, other_token);
+
+    let routes = [
+        ("swarm/board", json!({"body": "I am the leader now"})),
+        (
+            "swarm/product",
+            json!({"title": "Plan", "body_md": "# forged"}),
+        ),
+        (
+            "swarm/mockup",
+            json!({"title": "Screen", "content": "<p>x</p>"}),
+        ),
+        (
+            "swarm/discovery-report",
+            json!({"report_md": "forged report"}),
+        ),
+        (
+            "usage",
+            json!({"model": "claude-sonnet-4", "input_tokens": 10}),
+        ),
+        ("claude", json!({"hook_event_name": "SessionStart"})),
     ];
-    for (label, sid, token) in cases {
-        let mut rb = f.client.post(&url).json(&post);
-        if let Some(s) = sid {
-            rb = rb.header("x-otto-session", s);
-        }
+    let post = |route: &str, body: &serde_json::Value, token: Option<&str>| {
+        let mut rb = f
+            .client
+            .post(format!("{}/ingest/{route}", f.origin))
+            .header("x-otto-session", own.id.as_str())
+            .json(body);
         if let Some(t) = token {
             rb = rb.header("x-otto-token", t);
         }
-        let status = rb.send().await.unwrap().status();
-        assert_eq!(status, 204, "{label}: refused silently");
+        rb.send()
+    };
+    let before = written(&f, &swarm.id, &run.id, &own.id).await;
+    assert_eq!(
+        before,
+        Written {
+            board: 0,
+            stories: 1,
+            attachments: 0,
+            report: None,
+            trail: 0,
+            usage_recorded: false,
+        }
+    );
+    for (route, body) in &routes {
+        for (label, token) in [
+            ("no token", None),
+            ("an empty token", Some("")),
+            ("another session's token", Some(other_token.as_str())),
+        ] {
+            let status = post(route, body, token).await.unwrap().status();
+            assert_eq!(status, 204, "{route} with {label}");
+            assert_eq!(
+                written(&f, &swarm.id, &run.id, &own.id).await,
+                before,
+                "{route} with {label} wrote something"
+            );
+        }
     }
-    assert!(f
-        .ctx
-        .swarm_repo
-        .list_board(&swarm.id, None, None, 50)
-        .await
-        .unwrap()
-        .is_empty());
+
+    // The session's own token: every route writes.
+    for (route, body) in &routes {
+        let status = post(route, body, Some(own_token.as_str()))
+            .await
+            .unwrap()
+            .status();
+        assert_eq!(status, 204, "{route} with the session's own token");
+    }
+    let after = written(&f, &swarm.id, &run.id, &own.id).await;
+    assert_eq!(after.board, 1, "exactly one board row");
+    assert!(after.stories > before.stories, "a product draft was filed");
+    assert_eq!(after.attachments, 1, "one mockup attachment");
+    assert_eq!(after.report.as_deref(), Some("forged report"));
+    assert!(after.trail > 0, "the hook landed in the activity trail");
+    assert!(after.usage_recorded, "usage was recorded");
     f.server.abort();
 }
 
+/// test-quality-6-01/6w1-01: all four `/plugin-host/*` routes authenticate
+/// the sidecar with `auth_plugin` before doing anything. `/agents/run` is the
+/// dangerous one (a headless agent CLI with the caller's prompt and cwd); its
+/// body points at a missing cwd, so a request that slipped past the gate would
+/// fail at the spawn (a 500), never run an agent, and still fail this test.
 #[tokio::test]
-async fn plugin_host_credentials_need_an_enabled_plugins_bearer_token() {
+async fn plugin_host_routes_need_an_enabled_plugins_bearer_token() {
     let (f, _root) = fixture().await;
     let repo = f.ctx.plugins.repo();
     repo.upsert(NewPlugin {
@@ -376,35 +590,57 @@ async fn plugin_host_credentials_need_an_enabled_plugins_bearer_token() {
     })
     .await
     .unwrap();
-    let url = format!("{}/plugin-host/jira/credentials?account=nope", f.origin);
-    let send = |auth: Option<&'static str>| {
-        let mut rb = f.client.get(&url);
+    let missing_cwd = f._tmp.path().join("no-such-dir");
+    let run_body = json!({"prompt": "x", "cwd": missing_cwd.to_string_lossy()});
+    let routes = [
+        "repos",
+        "jira/accounts",
+        "jira/credentials?account=nope",
+        "agents/run",
+    ];
+    let send = |route: &'static str, auth: Option<&'static str>| {
+        let url = format!("{}/plugin-host/{route}", f.origin);
+        let mut rb = if route == "agents/run" {
+            f.client.post(url).json(&run_body)
+        } else {
+            f.client.get(url)
+        };
         if let Some(a) = auth {
             rb = rb.header("authorization", a);
         }
         rb.send()
     };
-    assert_eq!(send(None).await.unwrap().status(), 401, "no Authorization");
-    assert_eq!(
-        send(Some("Bearer ")).await.unwrap().status(),
-        401,
-        "empty bearer"
-    );
-    assert_eq!(
-        send(Some("Bearer plugin-token")).await.unwrap().status(),
-        401,
-        "a disabled plugin's token"
-    );
-    assert_eq!(
-        send(Some("Bearer other")).await.unwrap().status(),
-        401,
-        "an unknown token"
+    for route in routes {
+        for (label, auth) in [
+            ("no Authorization", None),
+            ("an empty bearer", Some("Bearer ")),
+            ("a disabled plugin's token", Some("Bearer plugin-token")),
+            ("an unknown token", Some("Bearer other")),
+        ] {
+            let status = send(route, auth).await.unwrap().status();
+            assert_eq!(status, 401, "{route} with {label}");
+        }
+    }
+    assert!(
+        otto_state::SessionsRepo::new(f.ctx.pool.clone())
+            .list_all()
+            .await
+            .unwrap()
+            .is_empty(),
+        "no session was created"
     );
     repo.set_enabled("fixture", true).await.unwrap();
-    assert_ne!(
-        send(Some("Bearer plugin-token")).await.unwrap().status(),
-        401,
-        "the enabled plugin's token passes the gate"
-    );
+    // The enabled plugin's token passes the gate on the read routes (the
+    // agent route is not run for real).
+    for route in routes.iter().take(3).copied() {
+        assert_ne!(
+            send(route, Some("Bearer plugin-token"))
+                .await
+                .unwrap()
+                .status(),
+            401,
+            "{route}: the enabled plugin's token passes the gate"
+        );
+    }
     f.server.abort();
 }

@@ -207,6 +207,15 @@ async fn each_review_step_is_refused_to_a_user_without_its_authority() {
         )
         .await;
     assert_eq!(s, 403, "peer reject: {body}");
+    // Only the author may cancel a change that is not running.
+    let (s, body) = api
+        .post(
+            &peer_t,
+            &format!("/database-changes/{id}/cancel"),
+            json!({"revision": rev}),
+        )
+        .await;
+    assert_eq!(s, 403, "peer cancel of the author's change: {body}");
     let (s, detail) = api.get(&peer_t, &format!("/database-changes/{id}")).await;
     assert_eq!(s, 200, "{detail}");
     assert_eq!(detail["change"]["status"], "awaiting_review");
@@ -279,6 +288,74 @@ async fn each_review_step_is_refused_to_a_user_without_its_authority() {
     assert!(
         !names_hidden(&theirs),
         "peer must not read revision 1's hidden target: {theirs}"
+    );
+
+    // 5. A running change is stopped only with change_execute. The state is
+    //    set in the table (a real claim would start the driver task); the
+    //    route decides on `status` alone. The reviewer gets its Database
+    //    grant back, so a 403 below is the policy's, not the page's.
+    grants
+        .set_grants(&reviewer.id, &[(Feature::Database, Capability::View)])
+        .await
+        .unwrap();
+    let set_status = |status: &'static str| {
+        let (pool, id) = (pool.clone(), id.clone());
+        async move {
+            sqlx::query("UPDATE database_changes SET status = ? WHERE id = ?")
+                .bind(status)
+                .bind(&id)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+    };
+    set_status("running").await;
+    let (_, detail) = api.get(&root_t, &format!("/database-changes/{id}")).await;
+    let rev = detail["change"]["revision"].clone();
+    for (who, token) in [("peer", &peer_t), ("reviewer", &reviewer_t)] {
+        let (s, body) = api
+            .post(
+                token,
+                &format!("/database-changes/{id}/cancel"),
+                json!({"revision": rev}),
+            )
+            .await;
+        assert_eq!(s, 403, "{who} cancel of a running change: {body}");
+    }
+    let (_, detail) = api.get(&root_t, &format!("/database-changes/{id}")).await;
+    assert_eq!(detail["change"]["status"], "running", "{detail}");
+    assert_eq!(
+        detail["change"]["cancellation_requested"], false,
+        "{detail}"
+    );
+
+    // 6. Settling an unknown attempt needs change_execute too.
+    set_status("outcome_unknown").await;
+    sqlx::query(
+        "INSERT INTO database_change_attempts(id,change_id,connection_id,node,script,state,\
+         executor_id,content_hash,policy_revision,connection_fingerprint,ordinal) \
+         VALUES('attempt-1',?,?,'shop','ALTER TABLE shop.t ADD c INT','outcome_unknown',?,'h',1,'f',0)",
+    )
+    .bind(&id)
+    .bind(&conn)
+    .bind(&root.id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (s, body) = api
+        .post(
+            &peer_t,
+            &format!("/database-changes/{id}/reconcile"),
+            json!({"revision": rev, "attempt_id": "attempt-1", "outcome": "succeeded",
+                   "note": "checked the table by hand"}),
+        )
+        .await;
+    assert_eq!(s, 403, "peer reconcile: {body}");
+    let (_, detail) = api.get(&root_t, &format!("/database-changes/{id}")).await;
+    assert_eq!(detail["change"]["status"], "outcome_unknown", "{detail}");
+    assert_eq!(
+        detail["attempts"][0]["state"], "outcome_unknown",
+        "{detail}"
     );
     server.abort();
 }

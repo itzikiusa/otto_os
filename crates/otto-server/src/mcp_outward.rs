@@ -23,6 +23,7 @@ use otto_core::auth::{AuthContext, McpScope};
 use otto_core::domain::WorkspaceRole;
 use otto_core::event::Event;
 use otto_core::{Error, Id};
+use otto_mcp::governance::{self, Approval};
 use otto_mcp::{canonical_hash, InvokeCtx};
 use otto_rbac::AuthRepo;
 use otto_state::{NewApproval, NewCallLog, SettingsRepo};
@@ -430,200 +431,38 @@ pub(crate) async fn governed_invoke(
         None if PIN_PROBES.iter().any(|(t, ..)| *t == short) => audit.workspace_id = None,
         None => {}
     }
-    // The gate applies (before any opt-out rule) to a DANGEROUS tool without a
-    // trusted token grant, under the global `mcp_require_approval_dangerous`.
-    let gate_applies = approval_gated(dangerous, false, token_write_grant)
-        && require_approval_dangerous(ctx).await;
-    // A forced approval (sensitive action / agent rule) is never covered by
-    // an auto-approve rule.
-    let gate_applies = gate_applies && forced_approval.is_none();
-    // An operator who explicitly auto-approved this tool (or its category) for
-    // this scope — global, the call's workspace, or the calling agent session —
-    // has already made the decision: don't ask a second time. Opt-in, off by
-    // default; irreversible tools need a per-tool rule with the second toggle.
-    // A lookup failure resolves to None ⇒ the call stays gated (fail closed).
-    let auto_rule = if gate_applies {
-        crate::mcp_auto_approve::resolve_for_call(ctx, auth, &short, ws.as_deref()).await
-    } else {
-        None
+    // The decision tail — the dangerous gate (an operator's auto-approve rule
+    // may clear it, never a forced approval), the human approval, dry-run and
+    // the fail-closed audit insert — is the shared stage runner, with this
+    // entry point's stage set (`otto_mcp::governance::OTTO_TOOLS`).
+    let mut stages = OttoStages {
+        ctx,
+        auth,
+        tool,
+        short: &short,
+        arguments,
+        ws: ws.as_deref(),
+        args_hash: &args_hash,
+        audit,
+        repo_label: repo_label.as_deref(),
+        forced_approval: forced_approval.as_ref(),
+        calling_agent: calling_agent.as_ref(),
+        wait_seconds,
+        dangerous,
+        token_write_grant,
+        auto_rule: None,
     };
-    let needs_approval = (approval_gated(dangerous, auto_rule.is_some(), token_write_grant)
-        && gate_applies)
-        || forced_approval.is_some();
-    if let Some(rule) = &auto_rule {
-        // Recorded on every terminal row below (dry-run and execution alike).
-        audit.decision_reason = Some(otto_mcp::auto_approve::audit_reason(rule));
-    }
-    let auto_approved_by = auto_rule
+    let (audit_id, decision) =
+        match governance::run(governance::OTTO_TOOLS, &mut stages, dry_run).await? {
+            governance::Verdict::Done(envelope) => return Ok(envelope),
+            governance::Verdict::Execute { row, decision } => (row, decision),
+        };
+    let auto_approved_by = stages
+        .auto_rule
         .as_ref()
         .map(crate::mcp_auto_approve::envelope_ref);
-
-    if needs_approval && !dry_run {
-        match ctx
-            .mcp
-            .approvals()
-            .find_usable_in(
-                ws.as_deref(),
-                None,
-                tool,
-                &args_hash,
-                Some(&auth.effective_user.id),
-                // Bound to the requesting session: a sibling agent session
-                // of the same owner cannot spend this session's approval.
-                Some(audit.caller_session_id.as_deref()),
-            )
-            .await
-            .map_err(ApiError)?
-        {
-            Some(appr_id) => {
-                if !ctx
-                    .mcp
-                    .approvals()
-                    .consume(&appr_id)
-                    .await
-                    .map_err(ApiError)?
-                {
-                    return Ok(deny_audit(ctx, &mut audit, "approval already used").await);
-                }
-                audit.approval_id = Some(appr_id);
-            }
-            None => {
-                // A retry of a call that is still waiting reuses its card
-                // (same tool + args + workspace + requester) instead of
-                // stacking a duplicate per poll.
-                let pending = ctx
-                    .mcp
-                    .approvals()
-                    .find_pending_in(
-                        ws.as_deref(),
-                        None,
-                        tool,
-                        &args_hash,
-                        &user.id,
-                        Some(audit.caller_session_id.as_deref()),
-                    )
-                    .await
-                    .map_err(ApiError)?;
-                let appr_id = match pending {
-                    Some(id) => id,
-                    None => {
-                        ctx.mcp
-                            .approvals()
-                            .create(NewApproval {
-                                workspace_id: ws.clone(),
-                                kind: "tool_call".into(),
-                                server_id: None,
-                                server_name: Some("otto".into()),
-                                tool: Some(tool.to_string()),
-                                title: format!("otto MCP server → {tool}"),
-                                detail: Some({
-                                    let base = match &repo_label {
-                                        // The resolved repo by name, so the approver isn't
-                                        // judging an opaque id.
-                                        Some(label) => {
-                                            format!(
-                                                "{} — repo {label}",
-                                                dangerous_detail(tool, arguments)
-                                            )
-                                        }
-                                        None => dangerous_detail(tool, arguments),
-                                    };
-                                    match &forced_approval {
-                                        Some((why, _)) => format!("{why}. {base}"),
-                                        None => base,
-                                    }
-                                }),
-                                args_redacted_json: audit.args_redacted_json.clone(),
-                                args_hash: Some(args_hash.clone()),
-                                risk_label: Some(
-                                    forced_approval
-                                        .as_ref()
-                                        .map_or("dangerous", |(_, risk)| *risk)
-                                        .into(),
-                                ),
-                                requested_by: Some(user.id.clone()),
-                                requested_by_kind: Some("mcp_server".into()),
-                                requested_by_session_id: audit.caller_session_id.clone(),
-                                expires_at: Some(
-                                    (chrono::Utc::now() + chrono::Duration::minutes(120))
-                                        .to_rfc3339(),
-                                ),
-                            })
-                            .await
-                            .map_err(ApiError)?
-                            .id
-                    }
-                };
-                if let Some(a) = &calling_agent {
-                    crate::personal_agent_activity::record_approval_waiting(
-                        ctx,
-                        &a.workspace_id,
-                        &a.agent_id,
-                        Some(&a.session_id),
-                        &short,
-                        &appr_id,
-                    );
-                }
-                match wait_for_decision(ctx, &appr_id, wait_seconds).await {
-                    Some(true) => {
-                        // Single use: two calls waiting on the SAME card (a
-                        // shared pending card, parallel tool calls) both wake on
-                        // one decision — only the one that consumes it runs. An
-                        // approval that expired since the read is not used.
-                        if !ctx
-                            .mcp
-                            .approvals()
-                            .consume(&appr_id)
-                            .await
-                            .map_err(ApiError)?
-                        {
-                            audit.approval_id = Some(appr_id.clone());
-                            return Ok(deny_audit(ctx, &mut audit, "approval already used").await);
-                        }
-                        audit.approval_id = Some(appr_id.clone());
-                    }
-                    Some(false) => {
-                        audit.decision = "denied".into();
-                        audit.decision_reason = Some("human denied the request".into());
-                        let _ = ctx.mcp.call_log().insert(audit).await;
-                        return Ok(
-                            json!({"decision":"denied","executed":false,"reason":"human denied the request"}),
-                        );
-                    }
-                    None => {
-                        audit.decision = "pending_approval".into();
-                        audit.approval_id = Some(appr_id.clone());
-                        let _ = ctx.mcp.call_log().insert(audit).await;
-                        return Ok(json!({"decision":"pending_approval","executed":false,
-                            "approval_id":appr_id,"reason":"awaiting human approval — resubmit after it is approved"}));
-                    }
-                }
-            }
-        }
-    }
-
-    if dry_run {
-        audit.decision = "dry_run".into();
-        audit.dry_run = true;
-        audit.ok = true;
-        let _ = ctx.mcp.call_log().insert(audit).await;
-        return Ok(json!({"decision":"dry_run","executed":false,"dry_run":true,
-            "preview":{"tool":tool,"arguments":otto_core::redact::redact_json(arguments).value,
-                       "note":"dry-run: the tool was NOT executed"}}));
-    }
-
-    // Fail-closed audit: insert before executing.
-    audit.decision = if audit.approval_id.is_some() {
-        "approved".into()
-    } else if auto_rule.is_some() {
-        // Never silent: the row names the rule (`decision_reason`, set above).
-        "auto_approved".into()
-    } else {
-        "allowed".into()
-    };
-    // A person approved THIS call (read before the audit row is moved).
-    let person_approved = audit.approval_id.is_some();
-    let audit_id = ctx.mcp.call_log().insert(audit).await.map_err(ApiError)?;
+    // A person approved THIS call.
+    let person_approved = decision == governance::Decision::Approved;
     // Armed until a finalize below runs: a call dropped mid-flight (the
     // client cancelled or timed out on `/mcp/http`, the bridge gave up) used
     // to leave its row `allowed`, `ok=0`, with no error, forever.
@@ -759,6 +598,260 @@ pub(crate) async fn governed_invoke(
             }
             Ok(env)
         }
+    }
+}
+
+/// `governed_invoke`'s stage bodies for the shared runner
+/// ([`otto_mcp::governance`], stage set `OTTO_TOOLS`): the dangerous gate,
+/// the operator's auto-approve rules, the human approval (a bounded wait on
+/// one reusable card), dry-run and the fail-closed audit insert. Moved out of
+/// `governed_invoke` unchanged; the runner owns their order.
+struct OttoStages<'a> {
+    ctx: &'a ServerCtx,
+    auth: &'a AuthContext,
+    /// The full `otto.*` name (approval cards are keyed by it).
+    tool: &'a str,
+    short: &'a str,
+    arguments: &'a Value,
+    /// The decision workspace (auto-approve scope, approval card).
+    ws: Option<&'a str>,
+    args_hash: &'a str,
+    /// The call's audit row, inserted by exactly one terminal stage.
+    audit: NewCallLog,
+    repo_label: Option<&'a str>,
+    forced_approval: Option<&'a (String, &'static str)>,
+    calling_agent: Option<&'a crate::personal_agent_policy::CallingAgent>,
+    wait_seconds: Option<u64>,
+    dangerous: bool,
+    token_write_grant: bool,
+    /// The auto-approve rule that cleared the gate, if one did.
+    auto_rule: Option<otto_state::McpAutoApproveRule>,
+}
+
+impl OttoStages<'_> {
+    async fn stop_denied(&mut self, reason: &str) -> Approval<Value> {
+        Approval::Stop(deny_audit(self.ctx, &mut self.audit, reason).await)
+    }
+}
+
+#[async_trait::async_trait]
+impl governance::Stages for OttoStages<'_> {
+    type Outcome = Value;
+    type Row = String;
+    type Error = ApiError;
+
+    /// Not in `OTTO_TOOLS`; never called.
+    async fn policy(&mut self) -> ApiResult<governance::PolicyVerdict> {
+        Ok(governance::PolicyVerdict::Allow)
+    }
+
+    async fn deny(&mut self, reason: &str) -> ApiResult<Value> {
+        Ok(deny_audit(self.ctx, &mut self.audit, reason).await)
+    }
+
+    async fn approval_gate(&mut self, _policy_requires: bool) -> governance::ApprovalGate {
+        // The gate applies (before any opt-out rule) to a DANGEROUS tool
+        // without a trusted token grant, under the global
+        // `mcp_require_approval_dangerous`. A forced approval (sensitive
+        // action / agent rule) is never covered by an auto-approve rule.
+        let gate_applies = approval_gated(self.dangerous, false, self.token_write_grant)
+            && require_approval_dangerous(self.ctx).await
+            && self.forced_approval.is_none();
+        governance::ApprovalGate {
+            needed: gate_applies || self.forced_approval.is_some(),
+            auto_approvable: gate_applies,
+        }
+    }
+
+    /// An operator who explicitly auto-approved this tool (or its category)
+    /// for this scope — global, the call's workspace, or the calling agent
+    /// session — has already made the decision: don't ask a second time.
+    /// Opt-in, off by default; irreversible tools need a per-tool rule with
+    /// the second toggle. A lookup failure resolves to None ⇒ the call stays
+    /// gated (fail closed).
+    async fn auto_approve(&mut self) -> bool {
+        self.auto_rule =
+            crate::mcp_auto_approve::resolve_for_call(self.ctx, self.auth, self.short, self.ws)
+                .await;
+        if let Some(rule) = &self.auto_rule {
+            // Recorded on every terminal row below (dry-run and execution alike).
+            self.audit.decision_reason = Some(otto_mcp::auto_approve::audit_reason(rule));
+        }
+        self.auto_rule.is_some()
+    }
+
+    async fn approval(&mut self) -> ApiResult<Approval<Value>> {
+        let (ctx, tool) = (self.ctx, self.tool);
+        let user_id = &self.auth.effective_user.id;
+        match ctx
+            .mcp
+            .approvals()
+            .find_usable_in(
+                self.ws,
+                None,
+                tool,
+                self.args_hash,
+                Some(user_id),
+                // Bound to the requesting session: a sibling agent session
+                // of the same owner cannot spend this session's approval.
+                Some(self.audit.caller_session_id.as_deref()),
+            )
+            .await
+            .map_err(ApiError)?
+        {
+            Some(appr_id) => {
+                if !ctx
+                    .mcp
+                    .approvals()
+                    .consume(&appr_id)
+                    .await
+                    .map_err(ApiError)?
+                {
+                    return Ok(self.stop_denied("approval already used").await);
+                }
+                self.audit.approval_id = Some(appr_id);
+                Ok(Approval::Granted)
+            }
+            None => {
+                // A retry of a call that is still waiting reuses its card
+                // (same tool + args + workspace + requester) instead of
+                // stacking a duplicate per poll.
+                let pending = ctx
+                    .mcp
+                    .approvals()
+                    .find_pending_in(
+                        self.ws,
+                        None,
+                        tool,
+                        self.args_hash,
+                        user_id,
+                        Some(self.audit.caller_session_id.as_deref()),
+                    )
+                    .await
+                    .map_err(ApiError)?;
+                let appr_id = match pending {
+                    Some(id) => id,
+                    None => {
+                        ctx.mcp
+                            .approvals()
+                            .create(NewApproval {
+                                workspace_id: self.ws.map(str::to_string),
+                                kind: "tool_call".into(),
+                                server_id: None,
+                                server_name: Some("otto".into()),
+                                tool: Some(tool.to_string()),
+                                title: format!("otto MCP server → {tool}"),
+                                detail: Some({
+                                    let base = match self.repo_label {
+                                        // The resolved repo by name, so the approver isn't
+                                        // judging an opaque id.
+                                        Some(label) => {
+                                            format!(
+                                                "{} — repo {label}",
+                                                dangerous_detail(tool, self.arguments)
+                                            )
+                                        }
+                                        None => dangerous_detail(tool, self.arguments),
+                                    };
+                                    match self.forced_approval {
+                                        Some((why, _)) => format!("{why}. {base}"),
+                                        None => base,
+                                    }
+                                }),
+                                args_redacted_json: self.audit.args_redacted_json.clone(),
+                                args_hash: Some(self.args_hash.to_string()),
+                                risk_label: Some(
+                                    self.forced_approval
+                                        .map_or("dangerous", |(_, risk)| *risk)
+                                        .into(),
+                                ),
+                                requested_by: Some(user_id.clone()),
+                                requested_by_kind: Some("mcp_server".into()),
+                                requested_by_session_id: self.audit.caller_session_id.clone(),
+                                expires_at: Some(
+                                    (chrono::Utc::now() + chrono::Duration::minutes(120))
+                                        .to_rfc3339(),
+                                ),
+                            })
+                            .await
+                            .map_err(ApiError)?
+                            .id
+                    }
+                };
+                if let Some(a) = self.calling_agent {
+                    crate::personal_agent_activity::record_approval_waiting(
+                        ctx,
+                        &a.workspace_id,
+                        &a.agent_id,
+                        Some(&a.session_id),
+                        self.short,
+                        &appr_id,
+                    );
+                }
+                match wait_for_decision(ctx, &appr_id, self.wait_seconds).await {
+                    Some(true) => {
+                        // Single use: two calls waiting on the SAME card (a
+                        // shared pending card, parallel tool calls) both wake on
+                        // one decision — only the one that consumes it runs. An
+                        // approval that expired since the read is not used.
+                        let consumed = ctx
+                            .mcp
+                            .approvals()
+                            .consume(&appr_id)
+                            .await
+                            .map_err(ApiError)?;
+                        self.audit.approval_id = Some(appr_id);
+                        if !consumed {
+                            return Ok(self.stop_denied("approval already used").await);
+                        }
+                        Ok(Approval::Granted)
+                    }
+                    Some(false) => {
+                        let mut audit = std::mem::take(&mut self.audit);
+                        audit.decision = "denied".into();
+                        audit.decision_reason = Some("human denied the request".into());
+                        let _ = ctx.mcp.call_log().insert(audit).await;
+                        Ok(Approval::Stop(
+                            json!({"decision":"denied","executed":false,"reason":"human denied the request"}),
+                        ))
+                    }
+                    None => {
+                        let mut audit = std::mem::take(&mut self.audit);
+                        audit.decision = "pending_approval".into();
+                        audit.approval_id = Some(appr_id.clone());
+                        let _ = ctx.mcp.call_log().insert(audit).await;
+                        Ok(Approval::Stop(
+                            json!({"decision":"pending_approval","executed":false,
+                            "approval_id":appr_id,"reason":"awaiting human approval — resubmit after it is approved"}),
+                        ))
+                    }
+                }
+            }
+        }
+    }
+
+    async fn dry_run(&mut self) -> ApiResult<Value> {
+        let mut audit = std::mem::take(&mut self.audit);
+        audit.decision = "dry_run".into();
+        audit.dry_run = true;
+        audit.ok = true;
+        let _ = self.ctx.mcp.call_log().insert(audit).await;
+        Ok(json!({"decision":"dry_run","executed":false,"dry_run":true,
+            "preview":{"tool":self.tool,"arguments":otto_core::redact::redact_json(self.arguments).value,
+                       "note":"dry-run: the tool was NOT executed"}}))
+    }
+
+    /// Fail-closed audit: insert before executing. An auto-approved row is
+    /// never silent: it names the rule (`decision_reason`, set above).
+    async fn audit(&mut self, decision: governance::Decision) -> ApiResult<String> {
+        let mut audit = std::mem::take(&mut self.audit);
+        audit.decision = decision.as_str().into();
+        self.ctx
+            .mcp
+            .call_log()
+            .insert(audit)
+            .await
+            .map_err(ApiError)
     }
 }
 

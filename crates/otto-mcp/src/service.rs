@@ -11,7 +11,6 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use chrono::{Duration as ChronoDuration, Utc};
 use otto_core::redact::{redact_json, redact_text};
 use otto_core::secrets::SecretStore;
 use otto_core::{Error, Result};
@@ -20,13 +19,16 @@ use sha2::{Digest, Sha256};
 
 use otto_state::{
     DbPool, DiscoveredTool, McpAllowlistRepo, McpApprovalRepo, McpCallLogRepo, McpPolicyRepo,
-    McpRegistryRepo, McpServerDetail, McpTool, McpToolsRepo, NewApproval, NewCallLog, SettingsRepo,
+    McpRegistryRepo, McpServerDetail, McpTool, McpToolsRepo, NewCallLog, SettingsRepo,
 };
 
 use crate::client::{CheckedCallError, McpClient, Transport};
 
 #[path = "service_preflight.rs"]
 mod preflight;
+#[path = "service_stages.rs"]
+mod stages;
+use crate::governance;
 use crate::policy::{self, Effect, PolicyCtx};
 use crate::risk;
 
@@ -822,196 +824,37 @@ impl McpService {
                 )
                 .await;
         }
-        // 3. policy-as-code (most-restrictive-wins).
-        let rules = self
-            .policies()
-            .list_applicable(ctx.workspace_id.as_deref().unwrap_or(""))
-            .await?;
-        let pctx = PolicyCtx {
-            server_id: &server.id,
-            server_name: &server.name,
-            tool: tool_name,
+        // 3-6. policy-as-code → approval gate → approval → dry-run → the
+        //      fail-closed audit insert: the shared stage runner, with this
+        //      entry point's stage set (`governance::REGISTERED_SERVERS`).
+        let mut stages = stages::ServerStages {
+            svc: self,
+            server: &server,
+            tool_name,
+            args,
+            ctx,
             risk_label: &risk_label,
             injection_risk: &injection_risk,
             mutating,
-            direction: &ctx.direction,
-            caller_kind: &ctx.caller_kind,
-            workspace_id: ctx.workspace_id.as_deref(),
+            tool_require_approval,
+            args_hash: canonical_hash(args),
+            approval_id_used: None,
         };
-        let effect = policy::evaluate(&rules, &pctx);
-        if let Effect::Deny(reason) = &effect {
-            return self
-                .terminal_deny(
-                    &server,
-                    tool_name,
-                    args,
-                    &risk_label,
-                    &injection_risk,
-                    ctx,
-                    &format!("policy denied: {reason}"),
-                )
-                .await;
-        }
-        let policy_dry_run = matches!(effect, Effect::RequireDryRun(_));
-        let policy_approval = matches!(effect, Effect::RequireApproval(_));
-
-        // 4. risk / approval gate. dry-run requests skip the approval *creation*
-        //    (a preview executes nothing), but a policy require_dry_run still applies.
-        let dangerous_default =
-            risk_label == "dangerous" && self.require_approval_dangerous().await;
-        let needs_approval = policy_approval || tool_require_approval || dangerous_default;
-        let args_hash = canonical_hash(args);
-
-        let mut approval_id_used: Option<String> = None;
-        if needs_approval && !ctx.dry_run {
-            match self
-                .approvals()
-                .find_usable(
-                    ctx.workspace_id.as_deref(),
-                    Some(&server.id),
-                    tool_name,
-                    &args_hash,
-                    ctx.caller_user_id.as_deref(),
-                )
-                .await?
-            {
-                Some(appr_id) => {
-                    let approval = self.approvals().get(&appr_id).await?;
-                    if approval.requested_by != ctx.caller_user_id {
-                        return self
-                            .terminal_deny(
-                                &server,
-                                tool_name,
-                                args,
-                                &risk_label,
-                                &injection_risk,
-                                ctx,
-                                "approval belongs to another caller",
-                            )
-                            .await;
-                    }
-                    // Single-use: consume atomically; a lost race => already used.
-                    if !self.approvals().consume(&appr_id).await? {
-                        return self
-                            .terminal_deny(
-                                &server,
-                                tool_name,
-                                args,
-                                &risk_label,
-                                &injection_risk,
-                                ctx,
-                                "approval was already used",
-                            )
-                            .await;
-                    }
-                    approval_id_used = Some(appr_id);
-                }
-                None => {
-                    // Create a pending approval bound to the EXACT args.
-                    let redacted = redact_json(args).value.to_string();
-                    let expires =
-                        (Utc::now() + ChronoDuration::minutes(APPROVAL_TTL_MINS)).to_rfc3339();
-                    let appr = self
-                        .approvals()
-                        .create(NewApproval {
-                            workspace_id: ctx.workspace_id.clone(),
-                            kind: "tool_call".into(),
-                            server_id: Some(server.id.clone()),
-                            server_name: Some(server.name.clone()),
-                            tool: Some(tool_name.to_string()),
-                            title: format!("{} → {}", server.name, tool_name),
-                            detail: Some(format!(
-                                "Approve {risk_label} MCP tool '{tool_name}' on server '{}'.",
-                                server.name
-                            )),
-                            args_redacted_json: redacted,
-                            args_hash: Some(args_hash.clone()),
-                            risk_label: Some(risk_label.clone()),
-                            requested_by: ctx.caller_user_id.clone(),
-                            requested_by_kind: Some(ctx.caller_kind.clone()),
-                            requested_by_session_id: None,
-                            expires_at: Some(expires),
-                        })
-                        .await?;
-                    self.audit_terminal(
-                        &server,
-                        tool_name,
-                        args,
-                        &risk_label,
-                        &injection_risk,
-                        ctx,
-                        "pending_approval",
-                        Some(&format!("awaiting approval for {risk_label} tool")),
-                        Some(&appr.id),
-                    )
-                    .await?;
-                    return Ok(InvokeOutcome::Pending {
-                        approval_id: appr.id,
-                        title: format!("{} → {}", server.name, tool_name),
-                    });
-                }
-            }
-        }
-
-        // 5. dry-run = pure simulation (never calls the tool). design §14 F4.
-        if ctx.dry_run || policy_dry_run {
-            let preview = json!({
-                "executed": false,
-                "mode": "preview",
-                "would_call": { "server": server.name, "tool": tool_name, "arguments": redact_json(args).value },
-                "note": "dry-run: arguments validated and target resolved; the tool was NOT executed",
-            });
-            self.audit_terminal(
-                &server,
-                tool_name,
-                args,
-                &risk_label,
-                &injection_risk,
-                ctx,
-                "dry_run",
-                None,
-                approval_id_used.as_deref(),
-            )
-            .await?;
-            return Ok(InvokeOutcome::DryRun { preview });
-        }
-
-        // 6. execute. Fail-closed audit: insert the row BEFORE running so an
-        //    audit failure aborts the call; finalize with the outcome after.
-        let decision = if approval_id_used.is_some() {
-            "approved"
-        } else {
-            "allowed"
+        let audit_id = match governance::run(
+            governance::REGISTERED_SERVERS,
+            &mut stages,
+            ctx.dry_run,
+        )
+        .await?
+        {
+            governance::Verdict::Done(outcome) => return Ok(outcome),
+            governance::Verdict::Execute { row, .. } => row,
         };
-        let audit_id = self
-            .call_log()
-            .insert(NewCallLog {
-                workspace_id: ctx.workspace_id.clone(),
-                server_id: Some(server.id.clone()),
-                server_name: Some(server.name.clone()),
-                tool: tool_name.to_string(),
-                direction: ctx.direction.clone(),
-                caller_user_id: ctx.caller_user_id.clone(),
-                caller_kind: Some(ctx.caller_kind.clone()),
-                args_redacted_json: redact_json(args).value.to_string(),
-                decision: decision.into(),
-                decision_reason: None,
-                risk_label: Some(risk_label.clone()),
-                injection_risk: Some(injection_risk.clone()),
-                dry_run: false,
-                ok: false, // finalized below
-                error: None,
-                latency_ms: None,
-                bytes: None,
-                rows: None,
-                approval_id: approval_id_used.clone(),
-                caller_session_id: None,
-            })
-            .await?; // ← propagates: no audit row ⇒ no execution (fail-closed)
-                     // Until disarmed by an explicit finalize below, dropping this guard
-                     // (an early `?`, or the caller cancelling the future mid-call) marks
-                     // the row failed — it never stays a bare "allowed, ok=false" row with
-                     // no outcome.
+        let approval_id_used = stages.approval_id_used;
+        // Until disarmed by an explicit finalize below, dropping this guard
+        // (an early `?`, or the caller cancelling the future mid-call) marks
+        // the row failed — it never stays a bare "allowed, ok=false" row with
+        // no outcome.
         let mut pending_row = PendingAuditRow::new(self.call_log(), audit_id.clone());
 
         let client = self.client_for(&server).await?;
