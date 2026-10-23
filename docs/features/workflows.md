@@ -74,7 +74,9 @@ ui/src/modules/workflows/RunSteps.svelte        — per-step run detail (status,
 ui/src/modules/workflows/TriggersPanel.svelte   — list/add/edit/preview/toggle/delete schedule|webhook|event|chat triggers
 ui/src/modules/api/AutomationsView.svelte       — API-client collection runner (the *other* "automations")
 
-crates/otto-server/src/workflow_engine.rs              — the executor: run loop, per-node exec, branching/retry, proof
+crates/otto-server/src/workflow_engine.rs              — the executor: thin run driver, per-node exec, branching/retry, proof
+crates/otto-server/src/workflow_engine/run/           — run phases: admission.rs (graph, scope, identity, input, repo isolation, Running CAS), state.rs (RunState + NodeFlow), schedule.rs (one node per step: decision, attempts, outcome), finalize.rs
+crates/otto-server/src/workflow_engine/nodes/         — one file per large node kind (review_run.rs keeps its pure gate: review_score / review_verdict / aggregate)
 crates/otto-workflows/src/                             — server-free pieces: node catalog, validation, retry, checkpoints, run context files, event-trigger listener (`WorkflowCtx`)
 crates/otto-server/src/routes/workflows.rs             — HTTP handlers: CRUD, generate, run, versions, triggers, webhook, approve, templates
 crates/otto-server/src/workflow_trigger_scheduler.rs   — schedule scheduler + boot glue for the event-bus listener (both spawned at boot)

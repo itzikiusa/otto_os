@@ -218,6 +218,15 @@ From the Git landing page, **Add Repository** offers three modes:
   an error. Fetch never checks out or pulls a branch.
 - Every local branch displays its own ahead/behind counts in the branch tree and
   graph chips, updated after fetch without having to check it out.
+- Reorder tabs by dragging, or from the keyboard: **⌥⇧←/→** on a focused tab,
+  or **Move left / Move right** in the tab's right-click menu.
+- A push, checkout or pull from any surface — the toolbar, the graph, Create pull
+  request or an agent command — goes through the git store
+  (`ui/src/lib/stores/git.svelte.ts` over the typed client `ui/src/lib/api/git.ts`),
+  which stores the fresh status and re-syncs every open graph of that repo. A
+  rejected push from the toolbar offers **Pull** or **Force push with lease**.
+- Long lists (the WIP file trees, the side-panel file tree, the PR file nav, blame)
+  mount only the rows in view; **⌘F** still searches every row.
 
 ### The Graph view & branch chips
 

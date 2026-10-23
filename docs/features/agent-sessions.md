@@ -212,8 +212,12 @@ full provider list in `providers`.
    per-spawn `-c` overrides; grok as `.grok/config.toml` tables; agy gets the
    same managed set (with the `ottoManagedServers` marker) in
    `<cwd>/.agents/mcp_config.json`, because it ignores `.mcp.json`. The resolved
-   name list is snapshotted into `meta.mcp_servers`. All opt-in, best-effort,
-   never blocks the spawn.
+   name list is snapshotted into `meta.mcp_servers`; an enabled user server the
+   launcher could not attach (an env key that isn't a shell variable name, no
+   free Codex-safe name, a failed env-file write) is listed in
+   `meta.mcp_skipped: {server, reason}[]` (cleared on the next spawn where
+   everything attached) and shown in the session's ⋯ → MCP tools dialog. All
+   opt-in, best-effort, never blocks the spawn.
 6. Runs the context pre-spawn hook (materializes skills/soul/context) — skipped
    for review sessions.
 7. Injects the **ingest env** (`OTTO_INGEST_BASE`, `OTTO_SESSION_ID`,

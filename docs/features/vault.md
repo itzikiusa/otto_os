@@ -167,7 +167,10 @@ Row click opens a note; context menu:
   fails halfway: every index read happens before the move, and once the move
   succeeds a source whose links couldn't be rewritten is skipped (left
   untouched), listed in `links_failed`, and named in a warning toast — the
-  index is always refreshed to the new path.
+  index is always refreshed to the new path. The rename runs in its own task
+  that holds the vault's write lock, so a request that goes away mid-rename (a
+  closed window, an MCP call past the bridge's 20 s budget) still finishes
+  every link rewrite and the rescan.
 - **Delete (→ .trash)** — a **soft delete**: the note moves to
   `<vault>/.trash/…` inside the vault. Nothing is ever destroyed.
 

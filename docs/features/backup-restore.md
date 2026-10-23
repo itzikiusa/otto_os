@@ -9,7 +9,7 @@ controls remain available below them.
 
 **Download data archive** creates a format-2 JSON archive of saved Otto records
 and managed files. It includes workflow definitions/versions, scheduled tasks,
-connection profiles, API collections/requests/environments/automations, saved
+connection profiles, MCP profiles (and the default), API collections/requests/environments/automations, saved
 session/history records, and other supported persisted feature data. Managed
 Canvas/Product assets and registered Vault documents travel with it.
 

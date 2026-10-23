@@ -964,7 +964,7 @@ non-terminal so the view converges even with no WS connection.
   Clients drop events/snapshots whose rev is behind what they already show, and
   apply a node payload in place only when `rev` is exactly contiguous.
 - `node` — the changed node's SUMMARY: exactly the node shape
-  `GET /workflows/runs/{id}/progress` serves (`logs: []` + `log_count`,
+  `GET /workflow-runs/{id}/progress` serves (`logs: []` + `log_count`,
   `output: null` + `has_output`, `error` clipped to 1 KiB, `detail_version` =
   hash of the full node). It may carry a bounded `activity` (`NodeActivity`:
   phase, pending task count, ≤ 32 sub-agent rows) while a running agent-backed

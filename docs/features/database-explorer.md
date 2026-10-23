@@ -1068,6 +1068,16 @@ parked cell back to its stored value un-parks it. After a successful run the
 grid **re-runs the active query** so values reflect the database (no optimistic
 patching — and any drafts left over are invalidated by the refresh).
 
+A multi-row review on **MySQL / PostgreSQL** runs as one transaction: the
+batch is sent as `BEGIN; …; COMMIT;`, the driver stops at the first failing
+statement and the session is closed instead of committed, so **nothing** from
+the batch is written. A review you edited to manage its own transaction is sent
+as written. **Mongo and Redis** batches have no such transaction: the
+statements before the failure stay written. Either way a batch that stops on an
+error is **not** reported as applied — the review stays open with the failing
+statement and the engine's message, only the drafts whose statements completed
+are cleared, and the rest stay pending for a fix and re-run.
+
 A result is editable only when Otto can target a row unambiguously:
 
 - **SQL (MySQL/ClickHouse)** — a **single-table `SELECT`** (no JOIN / GROUP BY /
@@ -1336,8 +1346,12 @@ download the already displayed rows without re-running the statement.
 big to pull into the browser. The **Download…** dialog picks a **format**, a
 destination directory (via the shared folder picker; the last format + directory
 are remembered), and an optional row cap. The daemon **streams** the result
-row/chunk-by-chunk straight to a `BufWriter` on disk so **daemon memory stays
-bounded** regardless of result size:
+row/chunk-by-chunk so **daemon memory stays bounded** regardless of result
+size: the driver fills 64 KiB chunks in memory and hands them over a bounded
+channel (8 chunks) to one blocking-pool task that owns the file, so no disk
+write runs on a runtime worker and a slow volume makes the driver wait instead
+of buffering. The browser-download route (`/db/export`) uses the same bounded
+hand-off with the response body as the consumer:
 
 - **MySQL** — the sqlx row cursor (never `fetch_all`).
 - **MongoDB** — iterating the `find`/`aggregate` cursor (columns fixed from the
@@ -1480,9 +1494,12 @@ returned) is present only when the page was keyset-eligible **and** truncated.
 **Keyset pagination (MongoDB).** A `find` is keyset-eligible when it has no
 explicit `.limit()`, no sort (or `{_id: 1}`), and no `_id` key in its filter.
 For such a find the driver forces `sort: {_id: 1}` on *every* page and, when a
-`cursor` is sent, ANDs `{_id: {$gt: <cursor>}}` onto the filter instead of
-`skip`-ping — so **Next** in the footer pager costs the same on page 200 as on
-page 1 and never repeats or skips a document that moved. **Prev** stays
+`cursor` is sent, ANDs "every `_id` after the cursor" onto the filter instead of
+`skip`-ping — `{$or: [{_id: {$gt: <cursor>}}, {_id: {$type: [<every BSON type
+that sorts after the cursor's>]}}]}`, because `$gt` alone only compares within
+one BSON type and a collection mixing string and ObjectId ids would end its walk
+at the type change — so **Next** in the footer pager costs the same on page 200
+as on page 1 and never repeats or skips a document that moved. **Prev** stays
 offset-based (`skip`), as does any non-eligible find (a `cursor` sent with one
 is ignored and the request falls back to `offset` silently).
 

@@ -48,6 +48,11 @@ in audits.
 - Focus order follows the visual order. Don't use a positive `tabindex`.
 - Modals move focus in and give it back (`Modal` does this). Custom popovers
   and drawers must do the same.
+- A control that removes itself when activated (Dismiss, the last "show N
+  more", a Retry replaced by its result) moves focus to its natural successor
+  after `await tick()`: the next row, the control that replaced it, or the page
+  (`focusAppContent()` from `lib/announce.svelte.ts`). Focus never falls to
+  `<body>`.
 
 ## 3. Keyboard
 
@@ -111,6 +116,14 @@ in audits.
   - `role="switch"` plus `aria-checked` for switches
 - **Live regions:**
   - `Toasts` is `aria-live="polite"`.
+  - Announce status text with `announce(text)` from `lib/announce.svelte.ts`
+    (`{ assertive: true }` for an error that needs attention now), called at the
+    state edge: where the save resolves, the copy lands or the load fails. The
+    shell mounts one polite and one assertive region once (`Announcer`, beside
+    `Toasts`); repeating the same text speaks it again. Never insert a
+    `role="status"` (or `aria-live`) element together with its text:
+    WebKit/VoiceOver only speak changes to a region that already exists, so
+    the inserted text is often silent.
   - Status that changes without user action (a run finishing, a session
     needing you) should be announced politely or reachable from the bell.
   - Loading regions get `aria-busy="true"` (as `Skeleton` sets) or

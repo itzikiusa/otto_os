@@ -64,7 +64,10 @@ is focused.
 Nothing to configure. The feature works for any `claude` or `codex` session
 Otto spawned (it knows the provider session id, and persists the Codex rollout
 path the moment its capture scan finds it) and for any transcript already under
-`~/.claude/projects` or `~/.codex/sessions`.
+a Claude projects or Codex sessions root: `~/.claude/projects` (plus
+`~/.claude-*` and `~/.config/claude`), `$CODEX_HOME/sessions` (else
+`~/.codex/sessions`) and each subscription account's home — the one set
+`otto_transcript::roots` discovers for History, Usage and per-session lookup.
 
 - **Claude**: the transcript resolves from `sessions.provider_session_id`. A
   session that never got one (killed before the CLI wrote its id) shows the

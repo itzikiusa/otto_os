@@ -52,7 +52,7 @@ session** — attached to that session's right-panel **Canvas** tab so the agent
 |---|---|
 | Scene CRUD router + DTOs | `crates/otto-canvas/src/http.rs`, `types.rs` (`CanvasCtx`, `router`, `CreateSceneReq`, `UpdateSceneReq`, `empty_doc`) |
 | Agent-assist (file-backed draw) | `crates/otto-canvas/src/assist.rs` (`assist_scene`, `assist_preview`) |
-| One managed agent turn (create/resume) | `crates/otto-server/src/agent_session.rs` (`run_session_turn`) |
+| One managed agent turn (create/resume) | `crates/otto-agent-run/src/session_turn.rs` (`run_session_turn`; otto-server's `agent_session.rs` wraps it for `ServerCtx`) |
 | Persistence + repo | `crates/otto-state/src/canvas.rs` (`CanvasScene`, `CanvasSceneSummary`, `CanvasRepo`) |
 | Server wiring (router mount + assist routes) | `crates/otto-server/src/modules.rs` |
 | RBAC policy | `crates/otto-server/src/policy.rs` (`/canvas/` + `/workspaces/{ws}/canvas/` ⇒ `Require(Canvas, …)`) |

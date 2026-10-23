@@ -252,7 +252,7 @@ the lens skill is delivered two ways, and the channel that matters differs by CL
 2. **First-class `--add-dir` skills bundle (CLAUDE ONLY).** The lenses are also
    staged into a shared bundle laid out as `.claude/skills/<name>/`
    (`stage_review_skills`) and wired via `meta.extra_dirs` → `--add-dir` — but
-   **only for claude** (`review_session::review_skills_extra_dirs`), the one CLI
+   **only for claude** (`otto_review::session::review_skills_extra_dirs`), the one CLI
    that first-class-loads `.claude/skills` from an added dir, so its reflexive
    `Skill(<lens>)` resolves.
 

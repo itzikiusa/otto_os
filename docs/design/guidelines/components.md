@@ -226,7 +226,7 @@ Rules:
 
 | Need | Use |
 |---|---|
-| Long lists (hundreds of rows or more) | `VirtualList` (`items`, `estimateHeight`, a `row` snippet, optional `key`) |
+| Long lists (hundreds of rows or more) | `VirtualList` (`items`, `estimateHeight`, a `row` snippet, optional `key`), or `lib/listWindow` (`ListWindow` / `listRange`) when the rows live in an existing table or tree. A NEW list that can grow past a few hundred rows uses one of the two; never render the whole array |
 | Query results / editable grids | The Database Explorer grid (`modules/database`); don't rebuild it |
 | Diffs | `DiffView` |
 | Terminal output | `Terminal` |
