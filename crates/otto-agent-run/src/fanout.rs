@@ -2,12 +2,16 @@
 //! (architecture-1-04): N reviewer/writer turns run concurrently with
 //! per-agent error isolation, then ONE managed summarizer turn consolidates
 //! their results, and a deterministic fallback stands in when the summarizer
-//! fails. Engines (skill review, vault docs, code review) keep their prompts,
+//! fails. Engines (skill review, vault docs, code review, product analysis and
+//! plans) keep their prompts,
 //! persistence and row shapes; this module owns only the control flow and the
 //! state transitions each slot goes through.
 //!
 //! - [`run`] — the whole pass: fan out, fan in (completion order), stop if the
 //!   run was cancelled, then [`summarize`].
+//! - [`run_with_quorum`] — [`run`] for engines that consolidate only when
+//!   there is something to consolidate (product plans: one candidate plan is
+//!   the plan); below the quorum the fallback alone builds the result.
 //! - [`summarize`] — the summarizer step alone. A user's "retry the
 //!   summarizer" re-runs just this over the reviewer results already in hand.
 //! - [`SUMMARIZER_RETRY_IDX`] — the retry-queue index standing for the
@@ -95,6 +99,31 @@ pub async fn run<R, S, RF, SF, Sum, Fb, St, StF>(
     cancelled: impl Fn() -> bool,
     summarizer: Sum,
     fallback: Fb,
+    on_state: St,
+) -> Option<Outcome<R, S>>
+where
+    R: Send + 'static,
+    RF: Future<Output = Result<R, String>> + Send + 'static,
+    Sum: FnOnce(&[(usize, R)]) -> SF,
+    SF: Future<Output = Result<S, String>>,
+    Fb: FnOnce(&[(usize, R)]) -> S,
+    St: FnMut(Slot, SlotState) -> StF,
+    StF: Future<Output = ()>,
+{
+    run_with_quorum(reviewers, cancelled, 0, summarizer, fallback, on_state).await
+}
+
+/// [`run`], but the managed summarizer starts only when at least `quorum`
+/// reviewers succeeded. Below it, `fallback` builds the result from what is
+/// in hand (`error: None`: nothing failed) and the summarizer slot never
+/// changes state, so an engine shows no summarizer for, say, a single
+/// candidate it would only have copied.
+pub async fn run_with_quorum<R, S, RF, SF, Sum, Fb, St, StF>(
+    reviewers: Vec<RF>,
+    cancelled: impl Fn() -> bool,
+    quorum: usize,
+    summarizer: Sum,
+    fallback: Fb,
     mut on_state: St,
 ) -> Option<Outcome<R, S>>
 where
@@ -103,6 +132,33 @@ where
     Sum: FnOnce(&[(usize, R)]) -> SF,
     SF: Future<Output = Result<S, String>>,
     Fb: FnOnce(&[(usize, R)]) -> S,
+    St: FnMut(Slot, SlotState) -> StF,
+    StF: Future<Output = ()>,
+{
+    let done = fan_in(reviewers, &mut on_state).await;
+    if cancelled() {
+        return None;
+    }
+    let summary = if done.len() >= quorum {
+        summarize(&done, summarizer, fallback, on_state).await
+    } else {
+        Summary {
+            value: fallback(&done),
+            error: None,
+        }
+    };
+    Some(Outcome {
+        reviewers: done,
+        summary,
+    })
+}
+
+/// Spawn every reviewer and collect the successful results in completion
+/// order, reporting each slot's state as it settles.
+async fn fan_in<R, RF, St, StF>(reviewers: Vec<RF>, on_state: &mut St) -> Vec<(usize, R)>
+where
+    R: Send + 'static,
+    RF: Future<Output = Result<R, String>> + Send + 'static,
     St: FnMut(Slot, SlotState) -> StF,
     StF: Future<Output = ()>,
 {
@@ -131,14 +187,7 @@ where
             }
         }
     }
-    if cancelled() {
-        return None;
-    }
-    let summary = summarize(&done, summarizer, fallback, on_state).await;
-    Some(Outcome {
-        reviewers: done,
-        summary,
-    })
+    done
 }
 
 /// The summarizer step on its own (also the summarizer-only retry): run the
@@ -331,6 +380,54 @@ mod tests {
         .await;
         assert!(out.is_none());
         assert!(states(&log, Slot::Summarizer).is_empty());
+    }
+
+    /// One success under a quorum of two: the fallback is the result and the
+    /// summarizer never starts (product plans: one candidate is the plan).
+    #[tokio::test]
+    async fn below_the_quorum_the_fallback_stands_in_without_a_summarizer() {
+        let log = Log::default();
+        let out = run_with_quorum(
+            vec![reviewer(Ok(7), 0), reviewer(Err("timeout"), 0)],
+            || false,
+            2,
+            |_: &[(usize, u32)]| -> std::future::Ready<Result<u32, String>> {
+                panic!("the summarizer must not start below the quorum")
+            },
+            sum,
+            recorder(&log),
+        )
+        .await
+        .expect("not cancelled");
+        assert_eq!(out.summary.value, 7);
+        assert!(out.summary.error.is_none(), "nothing failed");
+        assert!(states(&log, Slot::Summarizer).is_empty());
+        assert_eq!(
+            states(&log, Slot::Reviewer(1)),
+            vec![SlotState::Running, SlotState::Failed("timeout".into())]
+        );
+    }
+
+    /// At the quorum the summarizer runs, and its failure still falls back.
+    #[tokio::test]
+    async fn at_the_quorum_the_summarizer_runs_and_its_failure_falls_back() {
+        let log = Log::default();
+        let out = run_with_quorum(
+            vec![reviewer(Ok(2), 0), reviewer(Ok(3), 0)],
+            || false,
+            2,
+            |_: &[(usize, u32)]| std::future::ready(Err::<u32, _>("exited".to_string())),
+            sum,
+            recorder(&log),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.summary.value, 5);
+        assert_eq!(out.summary.error.as_deref(), Some("exited"));
+        assert_eq!(
+            states(&log, Slot::Summarizer),
+            vec![SlotState::Running, SlotState::Failed("exited".into())]
+        );
     }
 
     #[tokio::test]

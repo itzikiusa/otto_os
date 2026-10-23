@@ -2,6 +2,7 @@
 
 use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use otto_core::domain::{User, Workspace};
 
@@ -31,6 +32,51 @@ fn fixture_ws_user() -> (Workspace, User) {
     )
 }
 
+/// The live previews the job pushed, plus a wake-up for whoever waits on
+/// one: the fake turn waits for the preview instead of sleeping and hoping
+/// the 5 ms poll won a race against it (test-quality-6w2-03).
+#[derive(Default)]
+struct Previews {
+    seen: Mutex<Vec<String>>,
+    arrived: tokio::sync::Notify,
+}
+
+impl Previews {
+    fn push(&self, text: String) {
+        self.seen.lock().unwrap().push(text);
+        self.arrived.notify_waiters();
+    }
+
+    fn get(&self) -> Vec<String> {
+        self.seen.lock().unwrap().clone()
+    }
+
+    /// Resolve once at least one preview landed. Registers interest before
+    /// checking, so a preview pushed in between still wakes it.
+    async fn first(&self) {
+        loop {
+            let arrived = self.arrived.notified();
+            tokio::pin!(arrived);
+            arrived.as_mut().enable();
+            if !self.get().is_empty() {
+                return;
+            }
+            arrived.await;
+        }
+    }
+
+    /// [`Self::first`] with a generous cap: a missing preview fails the test
+    /// with a message instead of hanging it.
+    async fn wait_first(&self) {
+        if tokio::time::timeout(Duration::from_secs(5), self.first())
+            .await
+            .is_err()
+        {
+            panic!("the live preview never arrived");
+        }
+    }
+}
+
 /// A document in a temp file; records what the job did to it.
 struct FakeDoc {
     key: String,
@@ -39,7 +85,7 @@ struct FakeDoc {
     cap: Option<Duration>,
     ws: Workspace,
     user: User,
-    live: Mutex<Vec<String>>,
+    live: Arc<Previews>,
     parsed: AtomicUsize,
     applied: AtomicUsize,
     states: Mutex<Vec<String>>,
@@ -57,7 +103,7 @@ impl FakeDoc {
             cap: None,
             ws,
             user,
-            live: Mutex::default(),
+            live: Arc::default(),
             parsed: AtomicUsize::new(0),
             applied: AtomicUsize::new(0),
             states: Mutex::default(),
@@ -66,7 +112,7 @@ impl FakeDoc {
     }
 
     fn live(&self) -> Vec<String> {
-        self.live.lock().unwrap().clone()
+        self.live.get()
     }
 
     fn states(&self) -> Vec<String> {
@@ -120,10 +166,7 @@ impl AssistTarget for FakeDoc {
         Duration::from_millis(5)
     }
     fn on_live(&self, bytes: &[u8]) {
-        self.live
-            .lock()
-            .unwrap()
-            .push(String::from_utf8_lossy(bytes).into());
+        self.live.push(String::from_utf8_lossy(bytes).into());
     }
     async fn parse(&self, reply: &str) -> Result<String> {
         self.parsed.fetch_add(1, Ordering::SeqCst);
@@ -160,6 +203,8 @@ enum Script {
 
 struct FakeRunner {
     file: PathBuf,
+    /// The document's previews: the turn waits on the first one.
+    previews: Arc<Previews>,
     script: Script,
     calls: AtomicUsize,
     killed: Mutex<Vec<Id>>,
@@ -169,6 +214,7 @@ impl FakeRunner {
     fn new(doc: &FakeDoc, script: Script) -> Self {
         Self {
             file: doc.file.clone(),
+            previews: Arc::clone(&doc.live),
             script,
             calls: AtomicUsize::new(0),
             killed: Mutex::default(),
@@ -176,6 +222,9 @@ impl FakeRunner {
     }
 }
 
+/// How long a NEGATIVE check waits for something that must not happen (an
+/// edit after the stop or after the job reaching the preview). Positive
+/// checks wait on [`Previews::wait_first`] instead.
 const SETTLE: Duration = Duration::from_millis(60);
 
 impl TurnRunner for FakeRunner {
@@ -188,7 +237,9 @@ impl TurnRunner for FakeRunner {
         let sid: Id = "sid-1".into();
         on_ready(&sid);
         tokio::fs::write(&self.file, "draft one").await.unwrap();
-        tokio::time::sleep(SETTLE).await;
+        // The turn ends only after the poll previewed the edit: a starved
+        // runtime used to let the turn's sleep win the job's `select!` first.
+        self.previews.wait_first().await;
         match &self.script {
             Script::Edit => {}
             Script::StoppedMidTurn(slots) => {
@@ -369,7 +420,11 @@ async fn a_dropped_job_stops_its_live_poll() {
     let runner = FakeRunner::new(&doc, Script::Hang);
     let claim = slots.claim("doc").unwrap();
     let job = run_assist_job(&runner, &doc, &claim);
-    assert!(tokio::time::timeout(SETTLE * 2, job).await.is_err());
+    // Drop the (hanging) job once it previewed, not after a fixed window.
+    tokio::select! {
+        outcome = job => panic!("a hanging turn settled: {outcome:?}"),
+        () = doc.live.wait_first() => {}
+    }
     assert_eq!(doc.live(), ["draft one"], "it previewed while running");
     assert_poll_stopped(&doc).await;
     assert_eq!(doc.applied.load(Ordering::SeqCst), 0);
