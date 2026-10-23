@@ -99,7 +99,7 @@
       {/if}
     </div>
   {/if}
-{:else if loading && empty}
+{:else if loading && empty}<!-- ui-guards: allow — this region mounts EMPTY; its text arrives after the grace (showSkeleton), a change it does speak -->
   <div class="ls-loading" class:page={variant === 'page'} role="status" aria-label="Loading {what}" style="min-block-size:{reserve}px">
     <!-- A live region announces its CONTENT, not its aria-label: the text is
          what tells a screen reader a load is under way (after the same grace,

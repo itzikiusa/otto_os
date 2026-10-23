@@ -3,7 +3,7 @@
   // Stop, maximize), the run-level error, the step timeline, the step list,
   // and on phone/tablet the final output and the context files (on desktop
   // those live in RunContextSidebar). Live state comes from the page's
-  // RunMonitor (runSync.svelte.ts).
+  // RunSync (runSync.svelte.ts).
   import { announceShown } from '../../lib/announce.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
@@ -13,10 +13,10 @@
   import RunFinalOutput from './RunFinalOutput.svelte';
   import RunSteps from './RunSteps.svelte';
   import { fmtStepMs } from './runProgress';
-  import { contextFs, isLive, type RunMonitor } from './runSync.svelte';
+  import { contextFs, isLive, type RunSync } from './runSync.svelte';
 
   interface Props {
-    mon: RunMonitor;
+    mon: RunSync;
     nodeName: (id: string) => string;
     /** The step selected in the timeline / on the canvas. */
     selectedId: string | null;

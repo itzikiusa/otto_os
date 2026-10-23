@@ -202,9 +202,11 @@
 
 {#if !aws.statusLoaded}
   <PageBody>
-    <div role="status">
+    <!-- The Skeleton is the one status region (it exists before its text and
+         speaks “Loading the AWS console” after its grace). -->
+    <div>
       <p class="boot-note">Checking for the aws CLI…</p>
-      <Skeleton rows={4} />
+      <Skeleton rows={4} label="the AWS console" />
     </div>
   </PageBody>
 {:else if aws.statusError}

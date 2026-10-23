@@ -628,7 +628,7 @@
         {#if agent}
           <span class="agent" use:announceShown={`Otto · ${agent.label}…`} data-testid="s3d-agent"><span class="pulse" aria-hidden="true"></span> Otto · {agent.label}…</span>
         {:else if agentDraft && head}
-          <span class="draft-banner" role="status" data-testid="s3d-draft">
+          <span class="draft-banner" data-testid="s3d-draft" use:announceShown={`Showing v${head.seq} draft by Otto, not approved`}>
             <Icon name="sparkle" size={12} /> Showing <strong>v{head.seq} draft</strong> by Otto · not approved
           </span>
         {/if}

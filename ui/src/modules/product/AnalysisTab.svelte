@@ -1,6 +1,7 @@
 <script lang="ts">
   // Analysis tab — multi-provider per-lens config, summarizer select, live polling.
   import { rel } from '../../lib/stores/now.svelte';
+  import { announceShown } from '../../lib/announce.svelte';
   import type { Poller } from '../../lib/poll';
   import { liveQuery } from '../../lib/live';
   import { untrack } from 'svelte';
@@ -549,7 +550,7 @@
       {#if loadingHistory}
         <span class="spinner" role="img" aria-label="Loading past runs" title="Loading past runs"></span>
       {:else if historyError}
-        <span class="dim-sm hist-error" role="alert" title={historyError}><Icon name="warning" size={12} /> Couldn’t load past runs</span>
+        <span class="dim-sm hist-error" title={historyError} use:announceShown={{ text: `Couldn’t load past runs. ${historyError}`, assertive: true }}><Icon name="warning" size={12} /> Couldn’t load past runs</span>
         <button class="btn small ghost" onclick={() => void loadHistory()}>Retry</button>
       {:else if historyLoaded && product.analyses.length === 0}
         <span class="dim-sm">No runs yet — configure the lenses above and run the first analysis.</span>
@@ -1167,7 +1168,6 @@
     line-height: 1.45;
     color: var(--warning);
   }
-
 
   /* ── Inline terminal — mirror PR review's .rp-term ────────────── */
   .rp-term {

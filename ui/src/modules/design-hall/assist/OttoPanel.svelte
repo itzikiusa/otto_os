@@ -603,7 +603,7 @@
         {#if sel}
           <span class="chip ctx" data-testid="design-otto-selection">
             <Icon name="target" size={12} /> <span class="ct" title={selLabel}>{selLabel}</span>
-            <button class="x" onclick={() => (useSelection = false)} aria-label="Don’t focus the selection" title="Don’t focus the selection"><Icon name="x" size={12} /></button>
+            <button class="x" onclick={(e) => { const box = (e.currentTarget as HTMLElement).closest('footer')?.querySelector<HTMLTextAreaElement>('textarea'); useSelection = false; box?.focus(); }} aria-label="Don’t focus the selection" title="Don’t focus the selection"><Icon name="x" size={12} /></button>
           </span>
         {/if}
         {#if brandKit}

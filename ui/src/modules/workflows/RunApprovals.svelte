@@ -10,10 +10,10 @@
   import RelTime from '../../lib/components/RelTime.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import type { WorkflowGraph } from '../../lib/api/types';
-  import type { RunMonitor } from './runSync.svelte';
+  import type { RunSync } from './runSync.svelte';
 
   interface Props {
-    mon: RunMonitor;
+    mon: RunSync;
     graph: WorkflowGraph;
     nodeName: (id: string) => string;
   }

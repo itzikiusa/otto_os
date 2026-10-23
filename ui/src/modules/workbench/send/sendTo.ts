@@ -20,6 +20,7 @@ import type { Session, WorkbenchDocFull } from '../../../lib/api/types';
 import { dbHandoff } from '../../database/handoff.svelte';
 import { fillPlaceholders } from '../lib/placeholders';
 import { plural } from '../../../lib/plural';
+import { loadErrorText } from '../../../lib/loadError';
 
 export interface SendCtx {
   ws: string;
@@ -37,10 +38,6 @@ export function filled(ctx: SendCtx): string {
 /** Only the non-empty values (an empty input is "not set"). */
 export function setValues(values: Record<string, string>): Record<string, string> {
   return Object.fromEntries(Object.entries(values).filter(([, v]) => v.trim() !== ''));
-}
-
-function errText(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
 }
 
 // ── (a) Database — Run on… ─────────────────────────────────────────────────
@@ -102,7 +99,7 @@ export async function sendToDatabase(ctx: SendCtx): Promise<void> {
     await database.openConnection(connId);
     database.setMainTab('query');
   } catch (e) {
-    toasts.error('Couldn’t open the connection', errText(e));
+    toasts.error('Couldn’t open the connection', loadErrorText(e));
   }
 }
 
@@ -151,7 +148,7 @@ export async function sendToApiClient(ctx: SendCtx): Promise<void> {
     apiClient.showRequestView();
     toasts.success('Opened in the API client', 'An unsaved request — set the URL and press Send when ready.');
   } catch (e) {
-    toasts.error('Couldn’t open the API client', errText(e));
+    toasts.error('Couldn’t open the API client', loadErrorText(e));
   }
 }
 
@@ -185,7 +182,7 @@ export async function pasteIntoSession(ctx: SendCtx, session: Session): Promise<
     });
     return true;
   } catch (e) {
-    toasts.error('Couldn’t paste into the session', errText(e));
+    toasts.error('Couldn’t paste into the session', loadErrorText(e));
     return false;
   }
 }
@@ -216,7 +213,7 @@ export async function sendToVault(ctx: SendCtx): Promise<void> {
   try {
     vaults = await listVaults(ctx.ws);
   } catch (e) {
-    toasts.error('Couldn’t load vaults', errText(e));
+    toasts.error('Couldn’t load vaults', loadErrorText(e));
     return;
   }
   if (vaults.length === 0) {
@@ -254,7 +251,7 @@ export async function sendToVault(ctx: SendCtx): Promise<void> {
     ifHash = existing.meta.hash;
   } catch (e) {
     if (!(e instanceof ApiError && e.status === 404)) {
-      toasts.error('Couldn’t check the note path', errText(e));
+      toasts.error('Couldn’t check the note path', loadErrorText(e));
       return;
     }
   }
@@ -277,7 +274,7 @@ export async function sendToVault(ctx: SendCtx): Promise<void> {
       },
     });
   } catch (e) {
-    toasts.error('Couldn’t save the note', errText(e));
+    toasts.error('Couldn’t save the note', loadErrorText(e));
   }
 }
 

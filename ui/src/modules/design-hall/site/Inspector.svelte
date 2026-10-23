@@ -1,6 +1,7 @@
 <script lang="ts">
   import { tick } from 'svelte';
   import { plural } from '../../../lib/plural';
+  import { announceShown } from '../../../lib/announce.svelte';
   // Site Studio "Design" inspector for the selection:
   //   nothing selected → Page + Site settings, the brand kit, and the page's
   //                      accessibility / quality findings (click one to select);
@@ -11,8 +12,7 @@
   //                      WCAG contrast;
   //   a child block    → its fields; a 3D embed gets source + version policy
   //                      (follow approved / follow latest / pin vN) + interaction.
-  // Every edit goes up as a new document through `onchange` (the studio owns
-  // undo + saving); nothing here talks to an agent.
+  // Every edit is a new document via `onchange` (the studio owns undo + saving).
   import Icon from '../../../lib/components/Icon.svelte';
   import Switch from '../../../lib/components/Switch.svelte';
   import LoadState from '../../../lib/components/LoadState.svelte';
@@ -487,7 +487,7 @@
             {#if nearest && !readonly}<button class="linkbtn" onclick={() => setBg(nearest!.value)}>Use {nearest.label}</button>{/if}
           </p>
         {:else if bg?.unknownToken}
-          <p class="warnchip" role="status"><Icon name="warning" size={12} /> The brand kit has no “{bg.unknownToken}” — showing the default.</p>
+          <p class="warnchip" use:announceShown={`The brand kit has no “${bg.unknownToken}”. Showing the default.`}><Icon name="warning" size={12} /> The brand kit has no “{bg.unknownToken}” — showing the default.</p>
         {/if}
       </div>
       <div class="field">

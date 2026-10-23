@@ -3,6 +3,7 @@
   // ("Asked Daily Recap to …"), a provider switch, a limit notice, or any
   // other system line the daemon posted. Attributed, never louder than chat.
   import Icon from '../../../lib/components/Icon.svelte';
+  import { announceShown } from '../../../lib/announce.svelte';
   import ProviderIcon from '../../../lib/components/ProviderIcon.svelte';
   import Badge from '../../../lib/components/Badge.svelte';
   import { router } from '../../../lib/router.svelte';
@@ -35,7 +36,8 @@
     <span class="what">{turn.text}</span>
   </p>
 {:else if turn?.kind === 'limit'}
-  <p class="line limit" data-testid="line-limit" role="status">
+  <!-- Inserted with the turn, so spoken by the action (a role here is silent). -->
+  <p class="line limit" data-testid="line-limit" use:announceShown={turn.text}>
     <Icon name="warning" size={12} />
     <span class="what">{turn.text}</span>
   </p>

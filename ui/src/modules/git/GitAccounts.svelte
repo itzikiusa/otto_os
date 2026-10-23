@@ -303,7 +303,9 @@
             </div>
             {#if testResults[a.id]}
               {@const r = testResults[a.id]}
-              <div class="test-result" role="status" class:ok={r !== 'busy' && r.ok} class:bad={r !== 'busy' && !r.ok}>
+              <!-- Inserted with its text: spoken by announceShown (a failure
+                   interrupts), never a role="status" mounted with its words. -->
+              <div class="test-result" use:announceShown={{ text: r === 'busy' ? 'Testing…' : testLabel(r), assertive: r !== 'busy' && !r.ok }} class:ok={r !== 'busy' && r.ok} class:bad={r !== 'busy' && !r.ok}>
                 {#if r !== 'busy'}<Icon name={r.ok ? 'check' : 'warning'} size={12} />{/if}
                 {r === 'busy' ? 'Testing…' : testLabel(r)}
               </div>
@@ -393,7 +395,7 @@
     </div>
 
     {#if formTest}
-      <div class="test-result form-test" use:announceShown={formTest === 'busy' ? 'Testing…' : testLabel(formTest)} class:ok={formTest !== 'busy' && formTest.ok} class:bad={formTest !== 'busy' && !formTest.ok}>
+      <div class="test-result form-test" use:announceShown={{ text: formTest === 'busy' ? 'Testing…' : testLabel(formTest), assertive: formTest !== 'busy' && !formTest.ok }} class:ok={formTest !== 'busy' && formTest.ok} class:bad={formTest !== 'busy' && !formTest.ok}>
         {#if formTest !== 'busy'}<Icon name={formTest.ok ? 'check' : 'warning'} size={12} />{/if}
         {formTest === 'busy' ? 'Testing…' : testLabel(formTest)}
       </div>

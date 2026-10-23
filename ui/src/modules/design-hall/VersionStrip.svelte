@@ -3,6 +3,7 @@
   // with its author (agents marked). Clicking chips selects up to two for
   // Compare; versions are the undo model, so nothing here ever deletes.
   import Icon from '../../lib/components/Icon.svelte';
+  import { announceShown } from '../../lib/announce.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import type { DesignVersion } from '../../lib/api/types';
@@ -32,6 +33,11 @@
     const el = scroller;
     if (el) queueMicrotask(() => el.querySelector('button.vchip:last-of-type')?.scrollIntoView({ inline: 'nearest', block: 'nearest' }));
   });
+
+  /** What a screen reader hears when a refresh fails over loaded versions. */
+  function refreshFailedText(err: string): string {
+    return `Couldn’t refresh the versions. ${err}`;
+  }
 
   function tip(v: DesignVersion): string {
     const when = new Date(v.created_at).toLocaleString();
@@ -85,8 +91,9 @@
         </button>
       {/each}
       {#if error}
-        <!-- Stale: keep the versions already loaded; say the refresh failed. -->
-        <span class="err" role="status" title={error}><Icon name="warning" size={12} /> Refresh failed</span>
+        <!-- Stale: keep the versions already loaded; say the refresh failed.
+             Inserted with its text, so it is spoken by the action (no role). -->
+        <span class="err" title={error} use:announceShown={{ text: refreshFailedText(error), assertive: true }}><Icon name="warning" size={12} /> Refresh failed</span>
         <button class="btn small ghost" onclick={onretry} disabled={loading}>{loading ? 'Retrying…' : 'Retry'}</button>
       {/if}
     {/if}

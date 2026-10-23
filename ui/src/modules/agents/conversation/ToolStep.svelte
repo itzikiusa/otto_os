@@ -12,6 +12,7 @@
   import { getContext, tick } from 'svelte';
   import { toastError } from '../../../lib/toastError';
   import Icon from '../../../lib/components/Icon.svelte';
+  import { announceShown } from '../../../lib/announce.svelte';
   import LoadState from '../../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../../lib/loadError';
   import VirtualList from '../../../lib/components/VirtualList.svelte';
@@ -297,7 +298,9 @@
         {#if fullState === 'error'}
           <LoadState variant="compact" what="the full output" error={fullError} empty onretry={loadFull} />
         {:else if fullState === 'loading' || !ctx.sessionId}
-          <div class="trunc-note" aria-live="polite">{ctx.sessionId ? 'Loading the full output…' : `Preview of ${formatBytes(result?.bytes ?? 0)}.`}</div>
+          <!-- Inserted with its text: the load (a click away) is spoken by the
+               action; the static preview note says nothing. -->
+          <div class="trunc-note" use:announceShown={ctx.sessionId ? 'Loading the full output…' : ''}>{ctx.sessionId ? 'Loading the full output…' : `Preview of ${formatBytes(result?.bytes ?? 0)}.`}</div>
         {/if}
       {:else if result?.truncated}
         <div class="trunc-note">Output truncated to 64 KB ({formatBytes(result.bytes)} total).</div>

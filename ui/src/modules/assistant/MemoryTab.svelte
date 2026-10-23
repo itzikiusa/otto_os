@@ -8,7 +8,7 @@
   //    search, forget one, or forget everything matching a phrase (with Undo).
   //  • Import from Hermes — a one-off, read-only scan of ~/.hermes/memories
   //    that only QUEUES entries for review. Hermes itself is never changed.
-  import { announce } from '../../lib/announce.svelte';
+  import { announce, focusAppContent } from '../../lib/announce.svelte';
   import { sentenceCase } from '../../lib/labels';
   import Badge from '../../lib/components/Badge.svelte';
   import { guardUnsaved } from '../../lib/leaveGuard';
@@ -258,7 +258,7 @@
           <Icon name="undo" size={14} />
           <span class="grow">{undoBar.label}</span>
           <button class="btn small" onclick={() => void undoForget()} disabled={undoing}>{undoing ? 'Restoring…' : 'Undo'}</button>
-          <button class="icon-btn" onclick={() => (undoBar = null)} aria-label="Dismiss" title="Dismiss"><Icon name="x" size={12} /></button>
+          <button class="icon-btn" onclick={() => { undoBar = null; void focusAppContent(); }} aria-label="Dismiss" title="Dismiss"><Icon name="x" size={12} /></button>
         </div>
       {/if}
       {#if memories.length}

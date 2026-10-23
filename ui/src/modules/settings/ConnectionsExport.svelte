@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { announce } from '../../lib/announce.svelte';
+  import { announce, focusAppContent } from '../../lib/announce.svelte';
   import { onMount, onDestroy } from 'svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
@@ -88,7 +88,7 @@
       <p class="instructions">{result.import_instructions}</p>
       {#if result.warnings.length}<ul>{#each result.warnings as warning}<li>{warning}</li>{/each}</ul>{/if}
       {#if result.skipped.length}<details><summary>Connections not included ({result.skipped.length})</summary><ul>{#each result.skipped as skipped}<li>{skipped.name} ({skipped.kind}): {skipped.reason}</li>{/each}</ul></details>{/if}
-      <button class="btn ghost" onclick={() => result = null}>Clear prepared export</button>
+      <button class="btn ghost" onclick={() => { result = null; void focusAppContent(); }}>Clear prepared export</button>
     </div>
   {/if}
   {#if error && !formats.length}

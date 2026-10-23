@@ -5,9 +5,9 @@
   import Icon from '../../lib/components/Icon.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import type { WorkflowRun } from '../../lib/api/types';
-  import type { RunMonitor } from './runSync.svelte';
+  import type { RunSync } from './runSync.svelte';
 
-  let { mon, run }: { mon: RunMonitor; run: WorkflowRun } = $props();
+  let { mon, run }: { mon: RunSync; run: WorkflowRun } = $props();
 </script>
 
 {#if mon.hasFinalOutput(run)}

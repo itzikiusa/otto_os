@@ -727,15 +727,15 @@
     {/snippet}
   </PageHeader>
 
+  <!-- Always mounted (outside the tab switch), so the edge is spoken; never
+       holds the ticking elapsed clock. -->
+  <div class="sr-only" role="status">{pollRunId ? 'Generating the report' : ''}</div>
   {#if tab === 'health'}
     <PageBody width="readable">
       <CapabilitiesPage />
     </PageBody>
   {:else}
     <PageBody fill padded={false}>
-      <!-- Always mounted, so the edge is spoken (a region inserted with its
-           text is usually silent); never holds the ticking elapsed clock. -->
-      <div class="sr-only" role="status">{pollRunId ? 'Generating the report' : ''}</div>
       {#if runFailReason || pollRunId}
         <div class="banners">
           {#if runFailReason}

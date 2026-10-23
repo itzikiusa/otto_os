@@ -56,7 +56,7 @@ function monitor(transport: Transport) {
     document: { hidden: false, addEventListener() {}, removeEventListener() {} },
     setTimeout: (fn: () => void) => { timers.push(fn); return timers.length; },
   });
-  const mon = new mod.RunMonitor();
+  const mon = new mod.RunSync();
   mon.track();
   return { mon, effects, polls, toasts, timers, posts, bus };
 }

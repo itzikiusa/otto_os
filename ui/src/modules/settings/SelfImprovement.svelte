@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { announce, announceShown } from '../../lib/announce.svelte';
+  import { announce, announceShown, focusAppContent } from '../../lib/announce.svelte';
   import { plural } from '../../lib/plural';
   import { NO_WORKSPACE } from '../../lib/labels';
   import { pollWhileVisible } from '../../lib/poll';
@@ -427,7 +427,7 @@
           class="icon-btn"
           aria-label="Dismiss evolve result"
           title="Dismiss evolve result"
-          onclick={() => (evolveResult = null)}
+          onclick={() => { evolveResult = null; void focusAppContent(); }}
         ><Icon name="x" size={12} /></button>
       </div>
     {/if}

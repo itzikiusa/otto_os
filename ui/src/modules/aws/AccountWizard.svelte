@@ -166,6 +166,9 @@
 
   async function runTest(a: AwsAccount): Promise<void> {
     testing = true;
+    // The test step is inserted with its text, so it carries no live region:
+    // its start and outcome are spoken here, at the edges.
+    announce('Testing the connection…');
     try {
       testResult = await awsApi.test(a.id);
       if (testResult.ok) void aws.loadPermissions(a.id, true);
@@ -179,6 +182,8 @@
     } finally {
       testing = false;
     }
+    if (testResult?.ok) announce(`Connected in ${testResult.latency_ms} ms`);
+    else if (testResult) announce(`Connection test failed. ${testResult.message}`, { assertive: true });
   }
 
   function finish(): void {
@@ -362,7 +367,7 @@
         {#if endpointUrl.trim()}<span class="mono dim">→ {endpointUrl.trim()}</span>{/if}
       </div>
     {:else}
-      <div class="test" aria-live="polite">
+      <div class="test">
         {#if testing}
           <p><span class="spinner" style="--spinner-size: 12px" aria-hidden="true"></span> Running <code>sts get-caller-identity</code>…</p>
         {:else if testResult?.ok}

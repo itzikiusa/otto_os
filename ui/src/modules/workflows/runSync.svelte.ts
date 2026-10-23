@@ -1,4 +1,4 @@
-// The Workflows page's run monitor (architecture-1-08): the run on screen and
+// RunSync, the Workflows page's run state (architecture-1-08): the run on screen and
 // everything that keeps it live — the WS fast path, the single-flight
 // rev-guarded refetch, the safety poll — plus the human-approval gate (its
 // publication preview and the approve/deny write) and the run's final output.
@@ -74,7 +74,7 @@ export function isLive(status: string): boolean {
 /** Which approval write a gate is busy with. */
 export type ApprovalKind = 'approve' | 'deny';
 
-export class RunMonitor {
+export class RunSync {
   /** The run on screen. The page assigns it when it opens or starts a run;
    *  live updates merge INTO it (see `applyRunSnapshot`). */
   run = $state<WorkflowRun | null>(null);

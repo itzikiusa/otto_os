@@ -312,9 +312,10 @@
 <!-- ── Loading ──────────────────────────────────────────────────────── -->
 {:else if viewState === 'loading'}
   <div class="share-error" style={`zoom:${ui.zoom}`}>
-    <div class="error-card" role="status">
+    <!-- Inserted with its text, so no role: the line is spoken by the action. -->
+    <div class="error-card">
       <div class="spinner" style:--spinner-size="28px" aria-hidden="true"></div>
-      <p class="dim">Connecting to the shared session…</p>
+      <p class="dim" use:announceShown={'Connecting to the shared session…'}>Connecting to the shared session…</p>
     </div>
   </div>
 

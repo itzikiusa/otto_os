@@ -338,7 +338,8 @@
     {:else if kind === 'json'}
       <p class="msg">This studio’s editor isn’t built yet (planned). The document is stored and versioned; view it as source.</p>
     {:else if (kind === 'image' || kind === 'model' || kind === 'pdf') && !blobUrl}
-      <p class="msg" role="status">{noVersion ? 'No preview yet — this design has no saved version.' : `Loading ${kind === 'pdf' ? 'the PDF' : kind === 'model' ? 'the 3D model' : 'the image'}…`}</p>
+      <!-- A plain line: it is replaced by the preview itself in a moment. -->
+      <p class="msg">{noVersion ? 'No preview yet — this design has no saved version.' : `Loading ${kind === 'pdf' ? 'the PDF' : kind === 'model' ? 'the 3D model' : 'the image'}…`}</p>
     {:else}
       <p class="msg">Design Hall can’t preview {artifact.format} files yet.</p>
     {/if}

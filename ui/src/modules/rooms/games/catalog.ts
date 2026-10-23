@@ -3,7 +3,7 @@ import type { GameRoomKind, GameRoomMap } from '../../../lib/api/game-room-types
 import { TRACK_DEFS, type TrackId } from './kart/tracks';
 import { RACERS } from './kart/roster';
 import { SHOOTER_MAPS, FIGHTERS } from './shooter/catalog';
-// The ONE catalog the daemon also reads (game_rooms/types.rs include_str!s it):
+// The ONE catalog the daemon also reads (otto-rooms games/types.rs include_str!s it):
 // map ids, their order and each game's capacity come from here, so the
 // chooser can never offer a map the relay refuses.
 import CATALOG from './catalog.json';

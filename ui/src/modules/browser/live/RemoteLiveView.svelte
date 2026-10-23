@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { announce } from '../../../lib/announce.svelte';
+  import { announce, focusAppContent } from '../../../lib/announce.svelte';
   // Remote live browser: a tab's daemon-owned Chromium, streamed into this
   // pane as screencast frames over `WS /ws/browser/{tab_id}/live` and driven
   // back with input frames (docs/contracts/ws.md §1b). Unlike the desktop
@@ -945,11 +945,11 @@
           class="btn small"
           onclick={() => {
             banner?.action?.run();
-            banner = null;
+            banner = null; void focusAppContent();
           }}>{banner.action.label}</button
         >
       {/if}
-      <button class="icon-btn" onclick={() => (banner = null)} aria-label="Dismiss" title="Dismiss">
+      <button class="icon-btn" onclick={() => { banner = null; void focusAppContent(); }} aria-label="Dismiss" title="Dismiss">
         <Icon name="x" size={12} />
       </button>
     </div>

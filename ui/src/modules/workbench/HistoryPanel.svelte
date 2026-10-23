@@ -223,7 +223,13 @@
   // Spoken at the state edge through the shell's always-mounted announcer: a
   // live region inserted together with its text is not read (WebKit/VoiceOver).
   $effect(() => { if (compareError) announce(`Couldn’t compare revision: ${compareError}`, { assertive: true }); });
-  $effect(() => { if (detailError) announce(`Couldn’t load revision ${untrack(() => selected)}: ${detailError}`, { assertive: true }); });
+  // A failed revision load renders through LoadState, whose error line speaks.
+  /** Re-run the detail load: the effect above refetches when `selected` changes. */
+  function retryDetail(): void {
+    const s = selected;
+    selected = null;
+    queueMicrotask(() => (selected = s));
+  }
 </script>
 
 <aside class="wb-hist" aria-label="History" data-testid="wb-history">
@@ -313,9 +319,7 @@
         <p class="wb-err">Couldn’t compare revision: {compareError}</p>
       {/if}
       {#if detailError}
-        <p class="wb-err">Couldn’t load revision {selected}: {detailError}
-          <button class="btn small" onclick={() => { const s = selected; selected = null; queueMicrotask(() => (selected = s)); }}>Retry</button>
-        </p>
+        <LoadState what="revision {selected}" variant="compact" empty error={detailError} onretry={retryDetail} />
       {:else if !detail}
         <Skeleton rows={6} height={14} label="the revision" />
       {:else if view === 'text'}

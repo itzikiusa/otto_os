@@ -25,7 +25,7 @@
   import RunMonitor from './RunMonitor.svelte';
   import RunApprovals from './RunApprovals.svelte';
   import RunContextSidebar from './RunContextSidebar.svelte';
-  import { RunMonitor as RunMonitorState } from './runSync.svelte';
+  import { RunSync } from './runSync.svelte';
   import TriggersPanel from './TriggersPanel.svelte';
   import NodeParams from './inspector/NodeParams.svelte';
   import { InspectorOptions } from './inspector/options.svelte';
@@ -86,7 +86,7 @@
   let running = $state(false);
   // The run on screen and its live sync, approvals and final output
   // (runSync.svelte.ts). The page assigns `mon.run`; reads use `run`.
-  const mon = new RunMonitorState();
+  const mon = new RunSync();
   mon.track();
   const run = $derived(mon.run);
   let runs = $state<Pick<WorkflowRun, 'id' | 'workflow_id' | 'status' | 'started_at' | 'rev'>[]>([]);

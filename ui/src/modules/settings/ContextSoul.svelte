@@ -390,7 +390,7 @@
         <SettingToggle
           label="Inject a repo map (tree-sitter)"
           hint="A map of the repo’s most-referenced symbols (tree-sitter + PageRank), so agents find their way faster."
-          checked={cfg.include_repo_map ?? false}
+          checked={!!cfg.include_repo_map}
           testid="context-repomap"
           onchange={(v) => { if (cfg) cfg.include_repo_map = v; }}
         />

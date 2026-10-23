@@ -7,6 +7,7 @@
   import LoadState from '../../lib/components/LoadState.svelte';
   import ConfirmDialog from '../../lib/components/ConfirmDialog.svelte';
   import ContextMenu from '../../lib/components/ContextMenu.svelte';
+  import { loadErrorText } from '../../lib/loadError';
 
   let { roomId }: { roomId: string } = $props();
   let ready = $state(false), error = $state(''), loading = $state(true);
@@ -21,7 +22,7 @@
       if (context.credential.room_id !== roomId) throw new Error('This window belongs to another room. Reopen it from Rooms.');
       rememberRoom(context.origin, context.credential);
       ready = true;
-    } catch (e) { if (!disposed) error = e instanceof Error ? e.message : String(e); }
+    } catch (e) { if (!disposed) error = loadErrorText(e); }
     finally { if (!disposed) loading = false; }
   }
   onMount(() => { void load(); return () => { disposed = true; forgetRoom(roomId); }; });

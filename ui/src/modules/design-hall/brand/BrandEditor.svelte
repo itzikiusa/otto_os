@@ -227,6 +227,18 @@
   });
   $effect(() => () => ctrl?.abort());
   const impactFresh = $derived(!!draftImpact && impactFor === draftText);
+  /** What the unsaved-changes banner says once it has an answer (spoken by
+   *  `announceShown`; the transient “Checking …” line stays quiet). */
+  const bannerNote = $derived.by(() => {
+    if (localChanges.length === 0) return 'Unsaved changes to logos, imagery or voice.';
+    if (impactFresh && draftImpact) {
+      const what = localChanges.length === 1 ? 'a token' : `${localChanges.length} tokens`;
+      if (draftImpact.affected_count > 0) return `Changing ${what} affects ${plural(draftImpact.affected_count, 'artifact')} in ${plural(draftImpact.affected_studio_count, 'studio')}.`;
+      if (draftImpact.artifact_count > 0) return `${localChanges.length === 1 ? 'This change doesn’t' : 'These changes don’t'} reach any of the ${draftImpact.artifact_count} designs that use this kit.`;
+      return 'No designs use this kit yet — nothing else changes.';
+    }
+    return impactError ? 'Couldn’t check which designs use these tokens.' : '';
+  });
 
   // ── Impact preview sheet ──────────────────────────────────────────────────
   let showImpact = $state(false);
@@ -548,14 +560,14 @@
         {/if}
 
         {#if dirty && issues.length > 0}
-          <div class="banner bad" data-testid="brand-issues">
+          <div class="banner bad" data-testid="brand-issues" use:announceShown={`Fix ${issues.length === 1 ? 'this' : `${issues.length} problems`} before saving: ${issues[0]}`}>
             <Icon name="warning" size={14} />
             <span>Fix {issues.length === 1 ? 'this' : `${issues.length} problems`} before saving: <span class="mono">{issues[0]}</span></span>
             <span class="grow"></span>
             <button class="btn small ghost" onclick={() => void revert()}>Revert</button>
           </div>
         {:else if dirty}
-          <div class="banner info" role="status" data-testid="brand-banner">
+          <div class="banner info" data-testid="brand-banner" use:announceShown={bannerNote}>
             <Icon name="info" size={14} />
             <span>
               {#if localChanges.length === 0}

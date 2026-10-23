@@ -46,6 +46,13 @@
   const connectionLine = $derived(ended || needsName ? '' : connection === 'connecting' ? (room ? 'Reconnecting… Terminal access is paused.' : 'Connecting to the room…') : !connected ? 'Connection interrupted. Terminal access is paused.' : '');
   // Connection loss interrupts (assertive); connecting / reconnecting is polite.
   $effect(() => { if (connectionLine) announce(connectionLine, { assertive: connection !== 'connecting' }); });
+  // Who controls the terminal: the visible row holds buttons, so it is not a live
+  // region; the line is spoken here when it changes (first admission included).
+  const roleLabel = $derived(self?.role === 'host' ? 'Host' : self?.role === 'editor' ? 'May be granted control' : 'View only');
+  const controlLine = $derived(room?.admission === 'admitted' ? `${roleLabel} · ${driver?.name ?? 'Host'} controls the terminal` : '');
+  $effect(() => { if (controlLine) announce(controlLine); });
+  /** Reconnect from the interrupted banner; it stays mounted (and focused) while connecting. */
+  function reconnect() { if (connection !== 'connecting') client?.connect(); }
   $effect(() => { peopleOpen = !narrowRoom; });
   // Host-only: knocks and requests must reach the host on every layout, not only
   // inside the (collapsed / hidden on narrow windows) People list.
@@ -171,9 +178,10 @@
       {:else}<EmptyState variant="page" icon="people" tone="error" title="Connection interrupted" body="Terminal access is paused until your room connection is restored." actionLabel="Retry" onaction={() => client?.connect()} />{/if}
     {:else if room.admission === 'pending'}<EmptyState variant="page" icon="people" title="Waiting for the host" body="Your request has been sent. Terminal content, people and messages remain private until you are admitted." actionLabel="Cancel request" onaction={leave} />
     {:else}
-      {#if connection === 'connecting'}<div class="room-status">Reconnecting… Terminal access is paused.</div>
-      {:else if !connected}<div class="error">Connection interrupted. Terminal access is paused.<button class="btn small" onclick={() => client?.connect()}>Retry</button></div>{/if}
-      <div class="room-status" role="status"><span>{self?.role === 'host' ? 'Host' : self?.role === 'editor' ? 'May be granted control' : 'View only'} · {driver?.name ?? 'Host'} controls the terminal</span>
+      <!-- One banner for the whole outage (announced by connectionLine): Reconnect
+           stays mounted while the attempt runs, so its focus is never dropped. -->
+      {#if !connected}<div class={connection === 'connecting' ? 'room-status' : 'error'}>{connection === 'connecting' ? 'Reconnecting… Terminal access is paused.' : 'Connection interrupted. Terminal access is paused.'}<button class="btn small" aria-disabled={connection === 'connecting'} onclick={reconnect}>{connection === 'connecting' ? 'Reconnecting…' : 'Reconnect'}</button></div>{/if}
+      <div class="room-status"><span>{controlLine}</span>
         {#if host && requests.total}<span class="requests"><strong>{requests.summary}</strong><button class="btn small" onclick={reviewRequests}>Review</button></span>{/if}
         {#if host && !canType}<button class="btn small" onclick={() => send({type: 'grant_control', member_id: room!.member_id})}>Take back control</button>{/if}
         <!-- One always-mounted Release ↔ Request button: the echo of either action

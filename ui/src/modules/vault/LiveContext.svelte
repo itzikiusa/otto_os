@@ -295,7 +295,8 @@
   {#if !visible && !ctx}
     <p class="dim">Live context loads when this panel is on screen.</p>
   {:else if loading && !ctx}
-    <p class="dim" role="status">Looking for matching workloads, repos and connections…</p>
+    <!-- A background load (the section is aria-busy meanwhile): plain text. -->
+    <p class="dim">Looking for matching workloads, repos and connections…</p>
   {:else if ctx}
     {#if ctx.failed.length}
       <p class="warn" role="alert">

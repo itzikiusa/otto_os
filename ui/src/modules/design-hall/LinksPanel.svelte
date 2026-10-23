@@ -185,8 +185,9 @@
     <div class="pad"><LoadState what="links" variant="compact" {loading} {error} empty={true} onretry={onreload} /></div>
   {:else}
     {#if error}
-      <!-- Stale: keep the links already loaded; say the refresh failed. -->
-      <div class="pad err" role="status" title={error}>
+      <!-- Stale: keep the links already loaded; say the refresh failed.
+           Inserted with its text, so it is spoken by the action (no role). -->
+      <div class="pad err" title={error} use:announceShown={{ text: `Couldn’t refresh the links. ${error}`, assertive: true }}>
         <Icon name="warning" size={14} /> Refresh failed — showing the last good load.
         <button class="btn small ghost" onclick={onreload} disabled={loading}>{loading ? 'Retrying…' : 'Retry'}</button>
       </div>

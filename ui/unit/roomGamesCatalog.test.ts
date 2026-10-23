@@ -1,5 +1,5 @@
 // arch-2-08: one room-game catalog. `rooms/games/catalog.json` is read by the
-// daemon (game_rooms/types.rs include_str!s it to validate POST /game-rooms)
+// daemon (otto-rooms games/types.rs include_str!s it to validate POST /game-rooms)
 // and by the chooser (games/catalog.ts). This pins that the client's real map
 // implementations cover exactly the catalog's ids, so a map added on one side
 // only fails here instead of shipping a map the relay refuses (or hides).
@@ -29,7 +29,7 @@ test('every kart track and shooter map the client implements is in the catalog, 
 
 test('the chooser and the daemon read the catalog file instead of a hand-synced copy', () => {
   assert.match(read('src/modules/rooms/games/catalog.ts'), /from '\.\/catalog\.json'/);
-  const rust = readFileSync(join(UI, '..', 'crates/otto-server/src/game_rooms/types.rs'), 'utf8');
+  const rust = readFileSync(join(UI, '..', 'crates/otto-rooms/src/games/types.rs'), 'utf8');
   assert.match(rust, /include_str!\("\.\.\/\.\.\/\.\.\/\.\.\/ui\/src\/modules\/rooms\/games\/catalog\.json"\)/);
   // No literal map list survives in the Rust enum.
   assert.doesNotMatch(rust, /"meadow",\s*"downtown"/);

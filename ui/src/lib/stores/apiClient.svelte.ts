@@ -1,310 +1,49 @@
-import { mergeVariableWrites } from '../api/scripts';
-import { plural } from '../plural';
-import type { ApiAutomationRun, StartApiAutomationRunReq } from '../api/types';
 // API client ("Postman") store — workspace-scoped collections, requests,
 // environments, history, plus a live "draft" request the builder edits and
 // executes through the daemon. Reads `ws.currentId` only (never mutates it).
+//
+// The one façade the UI imports (arch-6-03). It owns the workspace's lists,
+// their loading and the publication-ownership token, and forwards to its parts
+// in ./apiClient/: `model` (types + pure helpers, re-exported below), `tabs`
+// (open tabs, persistence, per-tab response slots), `drafts` (open/save/dirty),
+// `execute` (send, gRPC, GraphQL, runtime vars), `curl`, `cookies`,
+// `collectionsSync` (import, Postman, git) and `automations`. Each part takes a
+// narrow `Pick<ApiClientStore, …>` host; members marked "(part host)" are
+// public only for that contract.
 
-import { api, isAbortError, newHostConfirmHost } from '../api/client';
-import { confirmer } from '../confirm.svelte';
+import { api } from '../api/client';
 import type {
-  ApiAuth, ApiAutomation, ApiBodyMode, ApiClientWsSettings, ApiClientStorage, ApiCollection, ApiEnvironment,
-  ApiHistoryEntry, ApiHistorySummary, ApiKeyVal, ApiOverviewRequest, ApiRequest, ApiRequestItem,
-  ApiRequestExtras, ApiResponse, ApiRunResult, ApiSecretable, Connection, ExecuteApiReq, GrpcInvokeReq, Id,
-  ImportCurlReq, ParsedCurl, UpsertApiAutomationReq, UpsertApiCollectionReq, UpsertApiEnvironmentReq,
-  UpsertApiRequestReq
+  ApiAuth, ApiAutomation, ApiAutomationRun, ApiClientWsSettings, ApiClientStorage, ApiCollection, ApiEnvironment,
+  ApiHistoryEntry, ApiHistorySummary, ApiOverviewRequest, ApiRequest, ApiRequestItem, ApiResponse, ApiRunResult,
+  Connection, Id, StartApiAutomationRunReq, UpsertApiAutomationReq, UpsertApiCollectionReq, UpsertApiEnvironmentReq,
+  UpsertApiRequestReq,
 } from '../api/types';
-import { isSecretRef } from '../api/types';
-import { forDuplicate, stripSecretsForStorage, unmaskHistory } from '../api/apiSecretShapes';
+import type { TestResult } from '../api/scripts';
+import type { ImportedDoc, ImportedEnvironment } from '../api/importers';
 import { ws } from './workspace.svelte';
 import { announceModule } from '../lazyModule';
 import { announce } from '../announce.svelte';
 import { HistoryRefresh, HistoryDetail } from './apiHistory';
 import { toasts } from '../toast.svelte';
-import { loadErrorText, providerErrorText } from '../loadError';
-import type { PreRequestReq, TestResult } from '../api/scripts';
-import { runScript } from '../api/scriptRunner';
-import { parseGraphqlVariables } from '../api/graphqlVars';
+import { loadErrorText } from '../loadError';
 import { ApiAutomations } from './apiClient/automations.svelte';
-import {
-  detectAndParse, collectionToPostman, isImportedEnvironment, environmentUpsertFor, type ImportedDoc, type ImportedEnvironment,
-} from '../api/importers';
+import { ApiTabs } from './apiClient/tabs.svelte';
+import { ApiDrafts } from './apiClient/drafts.svelte';
+import { ApiExecute } from './apiClient/execute.svelte';
+import { ApiCookies } from './apiClient/cookies.svelte';
+import { ApiCollectionsSync } from './apiClient/collectionsSync';
+import { importCurl, toCurl } from './apiClient/curl';
+import { countOr0, RELOAD_FRESH_MS, summaryItems, type ApiCookie, type ApiDraft, type TabResponse } from './apiClient/model';
 
-/** Request transport: classic HTTP, server-sent events, WebSocket, or gRPC. */
-export type ApiRequestKind = 'http' | 'sse' | 'websocket' | 'grpc';
+export {
+  confirmNewHost, defaultSettings, draftSecrets, draftToExtras, historyResponse, HTTP_METHODS, MAX_TAB_RESPONSES,
+  requestItem,
+} from './apiClient/model';
+export type {
+  ApiCookie, ApiDraft, ApiRequestKind, ApiSettings, NewHostContext, TabResponse,
+} from './apiClient/model';
 
-/** Per-request execution settings (Settings tab). */
-export interface ApiSettings {
-  /** Request timeout in ms; null = daemon default (60s). */
-  timeout_ms: number | null;
-  follow_redirects: boolean;
-  /** Verify TLS certificates (off = accept self-signed / invalid). */
-  verify_ssl: boolean;
-}
-
-export function defaultSettings(): ApiSettings {
-  return { timeout_ms: null, follow_redirects: true, verify_ssl: true };
-}
-
-/** A cookie from the daemon-global jar. */
-export interface ApiCookie {
-  name: string;
-  value: string;
-  domain: string;
-  path: string;
-}
-
-/** The editable request the builder/panel work on (a request not yet saved). */
-export interface ApiDraft {
-  /** Stable local ownership key, independent of the saved request id. */
-  tabId?: string;
-  /** When the draft came from a saved request, its id (for "Save" = update). */
-  requestId: Id | null;
-  name: string;
-  /** Transport kind (UI-only; HTTP executes via /execute, others stream). */
-  kind: ApiRequestKind;
-  method: string;
-  url: string;
-  headers: ApiKeyVal[];
-  query: ApiKeyVal[];
-  body_mode: ApiBodyMode;
-  body: string;
-  auth: ApiAuth;
-  /** gRPC: the uploaded .proto source (parsed by the daemon on demand). */
-  proto?: string;
-  /** gRPC: selected "package.Service/Method". */
-  grpc_method?: string;
-  /** Per-request execution settings (optional; defaults applied when absent). */
-  settings?: ApiSettings;
-  /** Route the request through this `ssh`-kind connection (SOCKS5 over SSH),
-   * so it egresses from the bastion's whitelisted IP. null = send directly. */
-  ssh_connection_id?: Id | null;
-  /** Pre-request JS (runs before send; can mutate request + set variables). */
-  pre_request_script?: string;
-  /** Post-response JS (runs after; reads response, sets variables, tests). */
-  post_response_script?: string;
-  /** GraphQL variables (JSON) — combined with the query body when body_mode=graphql. */
-  graphql_variables?: string;
-  /** Free-form Markdown documentation for this request. */
-  docs?: string;
-  /** UI-only: the collection a new draft was started in ("New request here"),
-   *  preselected by the save sheet. Never sent to the daemon. */
-  collectionHint?: Id | null;
-  /** Incomplete historical input is not a runnable/savable request. */
-  historyReplay?: { reason: string; body?: string; requestId?: Id };
-}
-
-export const HTTP_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'];
-
-function blankDraft(): ApiDraft {
-  return {
-    tabId: crypto.randomUUID(),
-    requestId: null,
-    name: '',
-    kind: 'http',
-    method: 'GET',
-    url: '',
-    headers: [],
-    query: [],
-    body_mode: 'none',
-    body: '',
-    auth: { type: 'none' },
-    proto: '',
-    grpc_method: '',
-  };
-}
-
-/** What a send would carry, for the new-host confirmation. */
-export interface NewHostContext {
-  method?: string;
-  url?: string;
-  /** Plain-language names of the stored secrets involved. */
-  secrets?: string[];
-}
-
-/** Ask the person whether a stored secret may go to `host` (the daemon's
- *  `409 needs_confirm=new_host`). Only a person can confirm — agents can't.
- *  Says WHERE (host + method/URL), WHAT (which stored secret) and the risk. */
-export function confirmNewHost(host: string, ctx: NewHostContext = {}): Promise<boolean> {
-  const where = host || 'this host';
-  const lines = [
-    `${where} hasn’t received this stored secret before. Secrets are bound to the hosts of the requests they were saved with.`,
-    '',
-  ];
-  if (ctx.method || ctx.url) lines.push(`Request: ${[ctx.method, ctx.url].filter(Boolean).join(' ')}`);
-  lines.push(`Secret sent: ${ctx.secrets?.length ? ctx.secrets.join(', ') : 'a Keychain credential or a secret environment variable'}`);
-  lines.push('', `Only continue if you trust ${where}: it will be able to read and reuse the secret.`);
-  return confirmer.ask(lines.join('\n'), {
-    title: 'Send a secret to a new host?',
-    confirmLabel: 'Send anyway',
-    danger: true,
-  });
-}
-
-/** Stored secrets a draft would send: Keychain-backed auth members plus
- *  secret environment variables it references (names only, never values). */
-export function draftSecrets(d: ApiDraft, env: ApiEnvironment | null): string[] {
-  const out: string[] = [];
-  const auth = d.auth as unknown as Record<string, unknown>;
-  const LABEL: Record<string, string> = {
-    token: 'bearer token', password: 'password', value: 'API key', client_secret: 'client secret',
-    refresh_token: 'refresh token', access_token: 'access token',
-  };
-  for (const [k, v] of Object.entries(auth)) {
-    if (isSecretRef(v as ApiSecretable)) out.push(`the saved ${LABEL[k] ?? k} (Keychain)`);
-  }
-  if (env?.secret_keys.length) {
-    const text = [d.url, d.body, ...d.headers.map((h) => h.value), ...d.query.map((q) => q.value),
-      ...Object.values(auth).filter((v): v is string => typeof v === 'string')].join('\n');
-    for (const k of env.secret_keys) if (text.includes(`{{${k}}}`)) out.push(`{{${k}}} from “${env.name}”`);
-  }
-  return out;
-}
-
-/** Drop empty/disabled key-vals before sending; keep enabled (default true). */
-function liveKv(rows: ApiKeyVal[]): ApiKeyVal[] {
-  return rows.filter((r) => r.enabled !== false && r.key.trim() !== '');
-}
-
-/** Masked rendering for exports/snippets: markers become `***`. */
-function secretMasked(v: ApiSecretable | undefined | null): string {
-  if (isSecretRef(v)) return '***';
-  return typeof v === 'string' ? v : '';
-}
-
-/** Serialize the draft's once-draft-only fields into the persisted `extras`
- * object. An explicit empty v1 object clears previously saved extras. */
-export function draftToExtras(d: ApiDraft): ApiRequestExtras {
-  const extras: ApiRequestExtras = { v: 1 };
-  if (d.kind && d.kind !== 'http') { extras.transport = d.kind; }
-  if (d.graphql_variables?.trim()) { extras.graphql_variables = d.graphql_variables; }
-  if (d.docs?.trim()) { extras.docs_md = d.docs; }
-  const pre = d.pre_request_script?.trim() ? d.pre_request_script : undefined;
-  const post = d.post_response_script?.trim() ? d.post_response_script : undefined;
-  if (pre || post) { extras.scripts = { ...(pre ? { pre } : {}), ...(post ? { post } : {}) }; }
-  const s = d.settings;
-  if (s && (s.timeout_ms != null || !s.follow_redirects || !s.verify_ssl)) {
-    extras.settings = {
-      timeout_ms: s.timeout_ms,
-      follow_redirects: s.follow_redirects,
-      tls_verify: s.verify_ssl,
-    };
-  }
-  if (d.kind === 'grpc') extras.grpc = {proto: d.proto ?? '', method: d.grpc_method ?? ''};
-  return extras;
-}
-
-/** Restore persisted `extras` onto a draft loaded from a saved request. */
-function extrasToDraft(d: ApiDraft, extras: ApiRequestExtras | null | undefined): ApiDraft {
-  if (!extras) return d;
-  const kinds: ApiRequestKind[] = ['http', 'sse', 'websocket', 'grpc'];
-  const out = { ...d };
-  if (extras.transport && kinds.includes(extras.transport)) out.kind = extras.transport;
-  if (typeof extras.graphql_variables === 'string') out.graphql_variables = extras.graphql_variables;
-  if (typeof extras.docs_md === 'string') out.docs = extras.docs_md;
-  if (extras.scripts?.pre) out.pre_request_script = extras.scripts.pre;
-  if (extras.scripts?.post) out.post_response_script = extras.scripts.post;
-  if (extras.grpc) { out.proto = extras.grpc.proto; out.grpc_method = extras.grpc.method; }
-  if (extras.settings) {
-    out.settings = {
-      timeout_ms: extras.settings.timeout_ms ?? null,
-      follow_redirects: extras.settings.follow_redirects ?? true,
-      verify_ssl: extras.settings.tls_verify ?? true,
-    };
-  }
-  return out;
-}
-
-// ── Open-tab persistence ─────────────────────────────────────────────────────
-// Open request tabs survive app relaunches: the full drafts + active index are
-// written per-workspace to localStorage (same pattern as the Git page's open
-// repo tabs) and restored by loadAll(). Two windows on the same workspace are
-// last-write-wins per debounce window — acceptable for a device-local editor.
-
-function tabsKey(wid: Id): string {
-  return `otto_api_tabs_v1:${wid}`;
-}
-/** Re-entering the API page within this long of a successful load reuses it. */
-const RELOAD_FRESH_MS = 60_000;
-/** Full saved requests kept after open (tabs' rows are always kept). */
-const FULL_REQUESTS_MAX = 64;
-
-/** The tree/search row of a full saved request (see `ApiRequestItem`). */
-export function requestItem(r: ApiRequest): ApiRequestItem {
-  return {
-    id: r.id,
-    workspace_id: r.workspace_id,
-    name: r.name,
-    method: r.method,
-    url: r.url,
-    collection_id: r.collection_id ?? null,
-    auth_type: r.auth?.type ?? 'none',
-    has_ssh: !!r.ssh_connection_id,
-    agent_authored: !!(r.extras && typeof r.extras === 'object' && 'agent' in r.extras && r.extras.agent),
-    updated_at: r.updated_at,
-    position: r.position,
-  };
-}
-
-/** `requests/summaries` rows → items (`position` falls back to list order,
- *  which the daemon sorts by position, for daemons that omit it). */
-function summaryItems(rows: ApiOverviewRequest[], wid: Id): ApiRequestItem[] {
-  return rows.map((r, i) => ({ ...r, workspace_id: wid, position: r.position ?? i }));
-}
-
-/** Debounce for tab writes — the draft setter fires on every keystroke. */
-const TABS_WRITE_DELAY_MS = 250;
-/** Body ceiling for the quota-exceeded fallback rewrite (chars). */
-const TABS_FALLBACK_BODY_MAX = 200_000;
-
-interface PersistedTabs {
-  tabs: ApiDraft[];
-  active: number;
-}
-
-const DRAFT_KINDS: ApiRequestKind[] = ['http', 'sse', 'websocket', 'grpc'];
-const BODY_MODES: ApiBodyMode[] = ['none', 'json', 'raw', 'form', 'multipart', 'graphql'];
-
-/** Rebuild a draft from an untrusted persisted blob; null when hopeless.
- *  Lenient by design (schema drift across versions must not lose a tab), but
- *  every field the builder renders is coerced to a safe shape. */
-function sanitizeDraft(raw: unknown): ApiDraft | null {
-  if (typeof raw !== 'object' || raw === null) return null;
-  const d = raw as Partial<ApiDraft>;
-  const str = (v: unknown, fb: string): string => (typeof v === 'string' ? v : fb);
-  const kv = (rows: unknown): ApiKeyVal[] =>
-    Array.isArray(rows)
-      ? rows.filter(
-          (r): r is ApiKeyVal =>
-            typeof r === 'object' && r !== null &&
-            typeof (r as ApiKeyVal).key === 'string' &&
-            typeof (r as ApiKeyVal).value === 'string',
-        )
-      : [];
-  return {
-    ...blankDraft(),
-    ...d,
-    tabId: typeof d.tabId === 'string' ? d.tabId : crypto.randomUUID(),
-    requestId: typeof d.requestId === 'string' ? d.requestId : null,
-    name: str(d.name, ''),
-    kind: DRAFT_KINDS.includes(d.kind as ApiRequestKind) ? (d.kind as ApiRequestKind) : 'http',
-    method: str(d.method, 'GET') || 'GET',
-    url: str(d.url, ''),
-    headers: kv(d.headers),
-    query: kv(d.query),
-    body_mode: BODY_MODES.includes(d.body_mode as ApiBodyMode) ? (d.body_mode as ApiBodyMode) : 'none',
-    body: str(d.body, ''),
-    auth:
-      typeof d.auth === 'object' && d.auth !== null && typeof (d.auth as ApiAuth).type === 'string'
-        ? (d.auth as ApiAuth)
-        : { type: 'none' },
-  };
-}
-
-/** A non-negative integer setting, else 0 ("no limit"). */
-const countOr0 = (v: unknown): number => (typeof v === 'number' && Number.isInteger(v) && v >= 0 ? v : 0);
-
-class ApiClientStore {
+export class ApiClientStore {
   // Raw: both lists are replaced wholesale (map/filter/spread), and a deep
   // proxy made every tree filter read 3k proxied rows per keystroke.
   collections: ApiCollection[] = $state.raw([]);
@@ -314,7 +53,6 @@ class ApiClientStore {
   /** id → full saved request, for open tabs (dirty check, secret stripping,
    *  history unmask) and recently opened rows. Replaced wholesale. */
   fullRequests: Map<Id, ApiRequest> = $state.raw(new Map());
-  private fullInflight = new Map<Id, Promise<ApiRequest | null>>();
   environments: ApiEnvironment[] = $state([]);
   history: ApiHistorySummary[] = $state([]);
   historyLoadingId: string | null = $state(null);
@@ -364,234 +102,60 @@ class ApiClientStore {
    *  overwritten by the restore. */
   async ensureLoaded(): Promise<void> {
     const wid = this.wsId();
-    if (wid && this.tabsWid !== wid) await this.loadAll();
+    if (wid && this.tabSet.wid !== wid) await this.loadAll();
   }
 
+
+  // ── Open tabs + per-tab response slots: ./apiClient/tabs.svelte.ts ───────
+  /** (part host) The open tabs, their persistence and response slots. */
+  readonly tabSet: ApiTabs = new ApiTabs(this);
   /** Open request tabs; the active one is edited via `draft`. */
-  tabs: ApiDraft[] = $state([blankDraft()]);
-  activeTab = $state(0);
+  get tabs(): ApiDraft[] { return this.tabSet.tabs; }
+  set tabs(v: ApiDraft[]) { this.tabSet.tabs = v; }
+  get activeTab(): number { return this.tabSet.activeTab; }
+  set activeTab(v: number) { this.tabSet.activeTab = v; }
   /** The request currently in the builder (proxies the active tab). */
-  get draft(): ApiDraft {
-    return this.tabs[this.activeTab] ?? this.tabs[0];
-  }
-  set draft(d: ApiDraft) {
-    this.tabs[this.activeTab] = {...d, tabId: d.tabId ?? this.tabs[this.activeTab]?.tabId ?? crypto.randomUUID()};
-    this.persistTabs();
-  }
-  /** A short label for a tab. */
-  tabLabel(d: ApiDraft): string {
-    if (d.name?.trim()) return d.name;
-    try {
-      const u = new URL(d.url);
-      return `${d.method} ${u.pathname || u.host}`;
-    } catch {
-      return d.url?.trim() ? `${d.method} ${d.url}` : 'New Request';
-    }
-  }
-  openTab(d: ApiDraft = blankDraft()): void {
-    this.tabs = [...this.tabs, {...d, tabId: crypto.randomUUID()}];
-    this.activeTab = this.tabs.length - 1;
-    this.persistTabs();
-  }
-  /** Switching keeps every tab's response slot — the target tab shows its own
-   *  last response (or its in-flight send), never a blank pane. */
-  switchTab(i: number): void {
-    if (i >= 0 && i < this.tabs.length) {
-      this.activeTab = i;
-      this.persistTabs();
-    }
-  }
-  closeTab(i: number): void {
-    this.dropSlot(this.tabs[i]?.tabId);
-    if (this.tabs.length === 1) {
-      this.tabs = [blankDraft()];
-      this.activeTab = 0;
-    } else {
-      this.tabs = this.tabs.filter((_, idx) => idx !== i);
-      if (this.activeTab >= this.tabs.length) this.activeTab = this.tabs.length - 1;
-      else if (i < this.activeTab) this.activeTab -= 1;
-    }
-    this.persistTabs();
+  get draft(): ApiDraft { return this.tabSet.draft; }
+  set draft(d: ApiDraft) { this.tabSet.draft = d; }
+  /** tabId → that tab's response state. */
+  get responses(): Map<string, TabResponse> { return this.tabSet.responses; }
+  get lastResponse(): ApiResponse | null { return this.tabSet.lastResponse; }
+  set lastResponse(resp: ApiResponse | null) { this.tabSet.lastResponse = resp; }
+  get lastError(): string | null { return this.tabSet.lastError; }
+  set lastError(error: string | null) { this.tabSet.lastError = error; }
+  get sending(): boolean { return this.tabSet.sending; }
+  get scriptLogs(): string[] { return this.tabSet.scriptLogs; }
+  get testResults(): TestResult[] { return this.tabSet.testResults; }
+  get responseFromHistory(): TabResponse['history'] { return this.tabSet.responseFromHistory; }
+  tabLabel(d: ApiDraft): string { return this.tabSet.tabLabel(d); }
+  openTab(d?: ApiDraft): void { this.tabSet.openTab(d); }
+  switchTab(i: number): void { this.tabSet.switchTab(i); }
+  closeTab(i: number): void { this.tabSet.closeTab(i); }
+  tabStatus(tabId: string | null | undefined): 'sending' | 'ok' | 'fail' | null { return this.tabSet.tabStatus(tabId); }
+  cancelExecute(tabId?: string | null): void { this.tabSet.cancelExecute(tabId); }
+  applySavedAuth(wid: Id, request: ApiRequest, previousAuth: ApiAuth): void {
+    this.tabSet.applySavedAuth(wid, request, previousAuth);
   }
 
-  // ── Open-tab persistence (see module header above sanitizeDraft) ──────────
-
-  /** Workspace whose tabs are in memory; null until the first restore. Gates
-   *  persistence so a not-yet-restored blank tab can't clobber a saved set. */
-  private tabsWid: Id | null = null;
   /** Distinguish returning to a workspace from the visit that issued a request. */
   private workspaceGeneration = 0;
   private publicationWorkspace: Id | null = null;
-  private tabsWriteTimer: ReturnType<typeof setTimeout> | null = null;
 
-  constructor() {
-    // Flush a pending debounced write when the window/app goes away, so the
-    // last keystrokes before quit are not lost.
-    if (typeof window !== 'undefined') {
-      window.addEventListener('pagehide', () => this.flushTabsWrite());
-    }
-  }
-
-  /** Queue a debounced write of the open tabs to this workspace's slot. */
-  private persistTabs(): void {
-    if (this.tabsWid === null) return;
-    if (this.tabsWriteTimer !== null) clearTimeout(this.tabsWriteTimer);
-    this.tabsWriteTimer = setTimeout(() => this.flushTabsWrite(), TABS_WRITE_DELAY_MS);
-  }
-
-  /** Write immediately (debounce elapsed, workspace swap, or page hide). */
-  private flushTabsWrite(): void {
-    if (this.tabsWriteTimer !== null) {
-      clearTimeout(this.tabsWriteTimer);
-      this.tabsWriteTimer = null;
-    }
-    if (this.tabsWid === null || typeof localStorage === 'undefined') return;
-    const key = tabsKey(this.tabsWid);
-    // Never at rest outside the Keychain: plaintext credentials typed into a
-    // tab (or imported from curl / fetched via OAuth) are stripped from the
-    // persisted copy (see stripSecretsForStorage).
-    const blob: PersistedTabs = {
-      tabs: ($state.snapshot(this.tabs) as ApiDraft[]).map((t) =>
-        stripSecretsForStorage(t, t.requestId ? this.fullRequests.get(t.requestId) : undefined),
-      ),
-      active: this.activeTab,
-    };
-    try {
-      localStorage.setItem(key, JSON.stringify(blob));
-    } catch {
-      // Quota: retry once without the heavyweight fields (proto uploads, huge
-      // bodies) — a slim tab set beats losing the whole set.
-      try {
-        const slim = blob.tabs.map((t) => ({
-          ...t,
-          proto: '',
-          body: t.body.length > TABS_FALLBACK_BODY_MAX ? '' : t.body,
-        }));
-        localStorage.setItem(key, JSON.stringify({ tabs: slim, active: blob.active }));
-      } catch {
-        /* storage unavailable — non-fatal */
-      }
-    }
-  }
-
-  /** Swap in `wid`'s persisted tabs. No-op when already showing them; flushes
-   *  the previous workspace's pending write first so nothing is lost. */
+  /** Swap in `wid`'s persisted tabs and forget the previous workspace's
+   *  history, runs and storage gauge. No-op when already showing them. */
   private restoreTabs(wid: Id): void {
-    if (this.tabsWid === wid) return;
+    if (this.tabSet.wid === wid) return;
     this.workspaceOwner();
     this.historyRefresh.reset();
     this.historyDetail.cancel();
     this.history = [];
     this.historyLoaded = false;
     this.historyLoadError = null;
-    this.flushTabsWrite();
-    this.resetResponses();
     this.autos.resetRuns();
     this.storage = null; this.storageAt = null;
-    this.tabsWid = wid;
-    let next: ApiDraft[] = [];
-    let active = 0;
-    try {
-      const raw = localStorage.getItem(tabsKey(wid));
-      if (raw) {
-        const p = JSON.parse(raw) as Partial<PersistedTabs>;
-        next = (Array.isArray(p.tabs) ? p.tabs : [])
-          .map(sanitizeDraft)
-          .filter((d): d is ApiDraft => d !== null);
-        if (typeof p.active === 'number' && Number.isFinite(p.active)) active = Math.trunc(p.active);
-      }
-    } catch {
-      /* corrupt/unavailable → start fresh */
-    }
-    if (next.length === 0) next = [blankDraft()];
-    this.tabs = next;
-    this.activeTab = Math.min(Math.max(0, active), next.length - 1);
+    this.tabSet.swapTo(wid);
   }
 
-  // ── Per-tab response slots ────────────────────────────────────────────────
-  // Every request tab keeps its own response / error / test results / script
-  // logs / in-flight send, so switching tabs never blanks a response, a send
-  // in one tab never cancels another tab's, and a response that lands while
-  // its tab is in the background is kept (not discarded). In memory only —
-  // bodies are large — and capped at MAX_TAB_RESPONSES idle slots (LRU).
-
-  /** tabId → that tab's response state. Raw: slots are replaced wholesale. */
-  responses: Map<string, TabResponse> = $state.raw(new Map());
-
-  private slot(tabId: string | null | undefined): TabResponse | undefined {
-    return tabId ? this.responses.get(tabId) : undefined;
-  }
-  /** Merge `patch` into `tabId`'s slot (moving it to most-recent), evicting
-   *  the least-recently-touched idle slots beyond the cap. */
-  private patchSlot(tabId: string | null | undefined, patch: Partial<TabResponse>): void {
-    if (!tabId) return;
-    const next = new Map(this.responses);
-    const prev = next.get(tabId) ?? emptySlot();
-    next.delete(tabId);
-    next.set(tabId, { ...prev, ...patch, at: Date.now() });
-    for (const [k, v] of next) {
-      if (next.size <= MAX_TAB_RESPONSES) break;
-      if (k !== tabId && !v.sending) next.delete(k);
-    }
-    this.responses = next;
-  }
-  /** Abort `tabId`'s in-flight send (if any) and forget its slot. */
-  private dropSlot(tabId: string | null | undefined): void {
-    const s = this.slot(tabId);
-    if (!s || !tabId) return;
-    s.ctrl?.abort();
-    const next = new Map(this.responses);
-    next.delete(tabId);
-    this.responses = next;
-  }
-  /** Abort every tab's send and clear all slots (workspace swap). */
-  private resetResponses(): void {
-    for (const s of this.responses.values()) s.ctrl?.abort();
-    this.responses = new Map();
-  }
-
-  /** The active tab's last response, shown in the ResponseViewer. */
-  get lastResponse(): ApiResponse | null {
-    return this.slot(this.draft?.tabId)?.resp ?? null;
-  }
-  set lastResponse(resp: ApiResponse | null) {
-    this.patchSlot(this.draft?.tabId, { resp, history: null });
-  }
-  /** Why the active tab's last send failed (shown inline in the response
-   *  pane instead of the previous response); null after a success. */
-  get lastError(): string | null {
-    return this.slot(this.draft?.tabId)?.error ?? null;
-  }
-  set lastError(error: string | null) {
-    this.patchSlot(this.draft?.tabId, { error });
-  }
-  /** The active tab has a send in flight. */
-  get sending(): boolean {
-    return this.slot(this.draft?.tabId)?.sending ?? false;
-  }
-  /** Combined pre/post script console output for the active tab's last run. */
-  get scriptLogs(): string[] {
-    return this.slot(this.draft?.tabId)?.logs ?? [];
-  }
-  /** Post-response test results for the active tab's last run. */
-  get testResults(): TestResult[] {
-    return this.slot(this.draft?.tabId)?.tests ?? [];
-  }
-  /** The active tab's response was restored from a history entry (not sent
-   *  in this session) — the ResponseViewer's "From history" banner. */
-  get responseFromHistory(): TabResponse['history'] {
-    return this.slot(this.draft?.tabId)?.history ?? null;
-  }
-  /** Tab-chip indicator: `sending` while in flight, else the outcome of the
-   *  tab's last send (`ok` 2xx/3xx, `fail` 4xx/5xx or an error), or null. */
-  tabStatus(tabId: string | null | undefined): 'sending' | 'ok' | 'fail' | null {
-    const s = this.slot(tabId);
-    if (!s) return null;
-    if (s.sending) return 'sending';
-    if (s.error) return 'fail';
-    if (s.resp) return s.resp.status >= 400 ? 'fail' : 'ok';
-    return null;
-  }
   loading = $state(false);
   /** The workspace whose lists settled (loaded or failed) at least once. Not
    *  cleared by a refetch, so a reload never re-enters the "not loaded" state. */
@@ -612,32 +176,25 @@ class ApiClientStore {
   envLoadError: string | null = $state(null);
   /** Either list failed — gates onboarding (a failed load is not "empty"). */
   loadError: string | null = $derived(this.requestsLoadError ?? this.envLoadError);
-  /** Cancel `tabId`'s in-flight send (default: the active tab's). Other
-   *  tabs' sends are untouched. No-op when idle. */
-  cancelExecute(tabId: string | null | undefined = this.draft?.tabId): void {
-    const s = this.slot(tabId);
-    if (!s?.ctrl && !s?.sending) return;
-    s.ctrl?.abort();
-    this.patchSlot(tabId, { ctrl: null, sending: false });
-  }
-
   /** Active environment (is_active), or null. */
   activeEnv: ApiEnvironment | null = $derived(
     this.environments.find((e) => e.is_active) ?? null,
   );
 
-  private wsId(): Id | null {
+  /** (part host) The current workspace id. */
+  wsId(): Id | null {
     return ws.currentId;
   }
 
-  private base(): string | null {
+  /** (part host) `/workspaces/{wid}/api-client`, or null with no workspace. */
+  base(): string | null {
     const id = this.wsId();
     return id ? `/workspaces/${id}/api-client` : null;
   }
 
   /** Capture publication ownership; a server write may finish after this visit
    * ends, but its response/error must not change the newly displayed workspace. */
-  private workspaceOwner(): () => boolean {
+  workspaceOwner(): () => boolean {
     const wid = this.wsId();
     if (wid !== this.publicationWorkspace) {
       this.publicationWorkspace = wid;
@@ -698,7 +255,7 @@ class ApiClientStore {
         this.tabs = this.tabs.map((t) =>
           t.requestId && !live.has(t.requestId) ? { ...t, requestId: null } : t,
         );
-        this.persistTabs();
+        this.tabSet.persist();
       }
       this.loadedAt = { wid, at: Date.now() };
       // Open tabs' saved rows (dirty dots, secret stripping) — one GET each.
@@ -882,8 +439,8 @@ class ApiClientStore {
   // ── Changes made elsewhere (perf2 N4) ─────────────────────────────────────
   private changeQueue: { kinds: Set<string>; requests: Map<Id, boolean>; wid: Id } | null = null;
   private changeTimer: ReturnType<typeof setTimeout> | null = null;
-  /** Imports in flight in this window — their echoes are skipped. */
-  private bulkWrites = 0;
+  /** (part host) Imports in flight in this window — their echoes are skipped. */
+  bulkWrites = 0;
 
   /** `api_client_changed`: a request / collection / environment / automation
    *  changed (an agent's MCP tool, another user, or our own save echoing).
@@ -948,55 +505,14 @@ class ApiClientStore {
     if (this.wsId()) await this.historyDetail.select(id);
   }
 
-  // ── Cookie jar (daemon-global) ────────────────────────────────────────────
-  cookies: ApiCookie[] = $state([]);
-  cookiesLoading = $state(false);
-  cookiesError: string | null = $state(null);
-  async loadCookies(): Promise<void> {
-    const base = this.base();
-    if (!base) return;
-    this.cookiesLoading = true;
-    try {
-      this.cookies = await api.get<ApiCookie[]>(`${base}/cookies`);
-      this.cookiesError = null;
-    } catch (e) {
-      this.cookiesError = loadErrorText(e);
-    } finally {
-      this.cookiesLoading = false;
-    }
-  }
-  async clearCookies(): Promise<void> {
-    const base = this.base();
-    if (!base) return;
-    try {
-      await api.del(`${base}/cookies`);
-      this.cookies = [];
-      toasts.success('Cookies cleared');
-    } catch (e) {
-      toasts.error('Couldn’t clear cookies', loadErrorText(e));
-    }
-  }
-
-  /** One-pass sweep moving every plaintext secret (request auth members +
-   * secret-shaped environment variables) into the macOS Keychain. */
-  async secureAll(): Promise<void> {
-    const base = this.base();
-    if (!base) return;
-    try {
-      const res = await api.post<{ requests_secured: number; env_keys_secured: number }>(
-        `${base}/secure-all`, {},
-      );
-      toasts.success(
-        'Secrets secured',
-        `${res.requests_secured} request(s) · ${res.env_keys_secured} env value(s) moved to the Keychain`,
-      );
-      // Rows were rewritten (markers / stripped variables) — refresh both.
-      void this.loadRequests();
-      void this.loadEnvironments();
-    } catch (e) {
-      toasts.error('Couldn’t secure the secrets', loadErrorText(e));
-    }
-  }
+  // ── Cookie jar (daemon-global) + secure-all: ./apiClient/cookies.svelte.ts ──
+  readonly cookieJar: ApiCookies = new ApiCookies(this);
+  get cookies(): ApiCookie[] { return this.cookieJar.cookies; }
+  get cookiesLoading(): boolean { return this.cookieJar.cookiesLoading; }
+  get cookiesError(): string | null { return this.cookieJar.cookiesError; }
+  loadCookies(): Promise<void> { return this.cookieJar.loadCookies(); }
+  clearCookies(): Promise<void> { return this.cookieJar.clearCookies(); }
+  secureAll(): Promise<void> { return this.cookieJar.secureAll(); }
 
   // ── Collections ─────────────────────────────────────────────────────────
 
@@ -1021,215 +537,17 @@ class ApiClientStore {
     }
   }
 
-  /** Create a collection (+ nested folders + requests) from an imported doc.
-   *  A Postman ENVIRONMENT export routes to {@link importEnvironment} instead.
-   *  `quiet` suppresses the per-item success toast (bulk account sync). */
-  /** File reads outlive the import sheet; keep their destination workspace. */
-  async importFile(file: Pick<File, 'name' | 'text'>): Promise<void> {
-    const current = this.workspaceOwner();
-    try {
-      const text = await file.text();
-      if (current()) await this.importParsed(detectAndParse(text, file.name));
-    } catch (error) {
-      if (current()) toasts.error('Couldn’t import the file', loadErrorText(error));
-    }
+  // ── Import, Postman sync, git pull/push: ./apiClient/collectionsSync.ts ──
+  readonly sync: ApiCollectionsSync = new ApiCollectionsSync(this);
+  importFile(file: Pick<File, 'name' | 'text'>): Promise<void> { return this.sync.importFile(file); }
+  importParsed(parsed: ImportedDoc, quiet = false): Promise<{ created: boolean; failed: number }> {
+    return this.sync.importParsed(parsed, quiet);
   }
-
-  /** `created`: the root collection (or environment) now exists — false when
-   *  read-only or its save failed (already toasted). `failed`: how many of its
-   *  folders/requests couldn't be created (summarised in one toast here). */
-  async importParsed(parsed: ImportedDoc, quiet = false): Promise<{ created: boolean; failed: number }> {
-    if (ws.myRole === 'viewer') {
-      toasts.error('Read-only', 'You have viewer access to this workspace');
-      return { created: false, failed: 0 };
-    }
-    if (isImportedEnvironment(parsed)) {
-      return { created: await this.importEnvironment(parsed, quiet), failed: 0 };
-    }
-    const base = this.base();
-    const root = await this.saveCollection({ name: parsed.name, parent_id: null });
-    if (!root || !base) return { created: false, failed: 0 };
-    // Items are created in order (the daemon assigns positions by count), but
-    // in bulk: no per-item list reassignment / tree rebuild — one reload at
-    // the end — and one summary toast instead of one per failure.
-    const folderCache = new Map<string, Id>();
-    let failed = 0;
-    let firstError = '';
-    const note = (e: unknown): void => { failed++; firstError ||= loadErrorText(e); };
-    // Our own N creates echo back as N `api_client_changed` events: the one
-    // reload below covers them (see noteClientChanged).
-    this.bulkWrites++;
-    try {
-      for (const req of parsed.requests) {
-        if (this.base() !== base) break; // workspace switched mid-import
-        let parentId: Id = root.id;
-        let pathKey = '';
-        for (const folder of req.folderPath) {
-          pathKey += '/' + folder;
-          if (!folderCache.has(pathKey)) {
-            try {
-              folderCache.set(pathKey, (await api.post<ApiCollection>(`${base}/collections`, { name: folder, parent_id: parentId })).id);
-            } catch (e) { note(e); }
-          }
-          parentId = folderCache.get(pathKey) ?? parentId;
-        }
-        try {
-          await api.post<ApiRequest>(`${base}/requests`, {
-            collection_id: parentId, name: req.name, method: req.method, url: req.url,
-            headers: req.headers, query: req.query, body_mode: req.body_mode, body: req.body, auth: req.auth,
-            extras: req.extras ?? null,
-          } satisfies UpsertApiRequestReq);
-        } catch (e) { note(e); }
-      }
-    } finally {
-      await Promise.all([this.loadCollections(), this.loadRequests()]);
-      this.bulkWrites--;
-    }
-    if (failed > 0) {
-      toasts.error(`Couldn’t import ${plural(failed, 'item')} of “${parsed.name}”`, firstError);
-    }
-    if (!quiet) {
-      toasts.success('Imported', `${parsed.name} · ${parsed.requests.length} request(s) (${parsed.format})`);
-    }
-    return { created: true, failed };
-  }
-
-  /** Import a Postman environment export as a new API environment. */
-  /** True when the environment was saved (a failure is already toasted). */
-  async importEnvironment(env: ImportedEnvironment, quiet = false): Promise<boolean> {
-    // Secret variables go to the Keychain (write-only `secret_values`), never
-    // into the environment row.
-    const saved = await this.saveEnvironment(environmentUpsertFor(env));
-    if (saved && !quiet) {
-      const secrets = env.secretKeys?.length ?? 0;
-      toasts.success(
-        'Environment imported',
-        `${env.name} · ${Object.keys(env.variables).length} variable(s)${secrets ? `, ${secrets} kept in the Keychain` : ''}`,
-      );
-    }
-    return saved != null;
-  }
-
-  /** One-shot Postman ACCOUNT sync: the daemon fetches every collection +
-   *  environment via the Postman API (api.getpostman.com) and this imports
-   *  them all through the normal import pipeline — no per-collection manual
-   *  export. Returns true when the sync call itself succeeded. */
-  async postmanSync(apiKey: string, remember: boolean): Promise<boolean> {
-    const base = this.base();
-    if (!base) return false;
-    let res: {
-      collections: unknown[];
-      environments: { name?: string }[];
-      failed: { name: string; error: string }[];
-    };
-    try {
-      res = await api.post(`${base}/postman/sync`, {
-        api_key: apiKey || null,
-        remember,
-      });
-    } catch (e) {
-      toasts.error('Couldn’t sync with Postman', loadErrorText(e));
-      return false;
-    }
-    let cols = 0;
-    let envs = 0;
-    const failed = [...res.failed];
-    for (const doc of res.collections) {
-      const name =
-        (doc as { info?: { name?: string } }).info?.name ?? 'collection';
-      try {
-        // Only a created root counts; a failed save already toasted its cause.
-        if ((await this.importParsed(detectAndParse(JSON.stringify(doc), 'postman.json'), true)).created) cols++;
-        else failed.push({ name, error: 'The collection couldn’t be saved.' });
-      } catch (e) {
-        failed.push({ name, error: loadErrorText(e) });
-      }
-    }
-    for (const env of res.environments) {
-      try {
-        const { created } = await this.importParsed(
-          detectAndParse(JSON.stringify(env), 'postman_environment.json'),
-          true,
-        );
-        if (created) envs++;
-        else failed.push({ name: env.name ?? 'environment', error: 'The environment couldn’t be saved.' });
-      } catch (e) {
-        failed.push({ name: env.name ?? 'environment', error: loadErrorText(e) });
-      }
-    }
-    toasts.success(
-      'Postman sync complete',
-      `${cols} collection(s), ${envs} environment(s) imported`,
-    );
-    for (const f of failed.slice(0, 3)) {
-      toasts.error(`Skipped: ${f.name}`, f.error);
-    }
-    if (failed.length > 3) {
-      toasts.error('More items skipped', `${plural(failed.length - 3, 'further item')} failed`);
-    }
-    return true;
-  }
-
-  /** Pull Postman collection files from a connected git repo and import them. */
-  async gitPullCollections(repoId: Id): Promise<void> {
-    const res = await api.post<{ files: { name: string; content: string }[] }>(`/repos/${repoId}/api-collections/pull`, {});
-    // Three different outcomes, reported separately: a file that isn't a
-    // collection (parse error) is SKIPPED; one whose save failed (API error,
-    // read-only — importParsed already toasted the cause) FAILED; only a
-    // created root counts as imported.
-    let imported = 0;
-    let skipped = 0;
-    let failed = 0;
-    for (const f of res.files) {
-      let doc: ImportedDoc;
-      try {
-        doc = detectAndParse(f.content, f.name);
-      } catch {
-        skipped++;
-        continue;
-      }
-      try {
-        if ((await this.importParsed(doc)).created) imported++;
-        else failed++;
-      } catch {
-        failed++;
-      }
-    }
-    const skippedNote = skipped > 0 ? `${plural(skipped, 'file')} skipped (not a collection)` : '';
-    if (imported > 0) {
-      toasts.success('Pulled from git', [plural(imported, 'collection file'), skippedNote].filter(Boolean).join(' · '));
-    } else if (failed === 0) {
-      toasts.info('Nothing imported from git', skippedNote || 'The repo has no collection files.');
-    }
-    if (failed > 0) {
-      // Each file's cause was already toasted by importParsed / saveCollection.
-      toasts.error(`Couldn’t import ${plural(failed, 'collection file')} from git`, imported === 0 ? skippedNote || undefined : undefined);
-    }
-  }
-
-  /** Export all root collections to Postman files and push them to a git repo. */
-  async gitPushCollections(repoId: Id, message: string, branch: string | null): Promise<boolean> {
-    const roots = this.collections.filter((c) => (c.parent_id ?? null) === null);
-    if (roots.length === 0) {
-      toasts.error('Nothing to push', 'No collections to export.');
-      return false;
-    }
-    try {
-      // Export needs bodies/scripts: the one action that reads every full row.
-      const full = await api.get<ApiRequest[]>(`${this.base()}/requests`);
-      const files = roots.map((c) => ({
-        name: `${c.name.replace(/[^\w.-]+/g, '_')}.postman_collection.json`,
-        content: JSON.stringify(collectionToPostman(c.id, this.collections, full), null, 2),
-      }));
-      const res = await api.post<{ commit: string; files: number }>(`/repos/${repoId}/api-collections/push`, {
-        files, message: message || 'Update API collections', branch: branch || null,
-      });
-      toasts.success('Pushed to git', `${res.files} file(s) · ${res.commit.slice(0, 8)}`);
-      return true;
-    } catch (e) {
-      toasts.error('Couldn’t git push', loadErrorText(e));
-      return false;
-    }
+  importEnvironment(env: ImportedEnvironment, quiet = false): Promise<boolean> { return this.sync.importEnvironment(env, quiet); }
+  postmanSync(apiKey: string, remember: boolean): Promise<boolean> { return this.sync.postmanSync(apiKey, remember); }
+  gitPullCollections(repoId: Id): Promise<void> { return this.sync.gitPullCollections(repoId); }
+  gitPushCollections(repoId: Id, message: string, branch: string | null): Promise<boolean> {
+    return this.sync.gitPushCollections(repoId, message, branch);
   }
 
   async deleteCollection(id: Id): Promise<void> {
@@ -1279,65 +597,6 @@ class ApiClientStore {
       toasts.error('Couldn’t save the request', loadErrorText(e));
       return null;
     }
-  }
-
-  /** OAuth may finish after navigation. Update the owning workspace's tabs,
-   * keeping auth edits made after the flow started. Saved values are markers. */
-  applySavedAuth(wid: Id, request: ApiRequest, previousAuth: ApiAuth): void {
-    const before = JSON.stringify(previousAuth);
-    const update = (tab: ApiDraft): ApiDraft => tab.requestId === request.id && JSON.stringify(tab.auth) === before
-      ? {...tab,auth:{...request.auth}} : tab;
-    if (this.tabsWid === wid) {
-      this.tabs = this.tabs.map(update); this.persistTabs();
-      if (this.wsId() === wid) this.upsertRequest(request);
-    } else {
-      try {
-        const raw = localStorage.getItem(tabsKey(wid));
-        if (raw) {const saved = JSON.parse(raw) as PersistedTabs; if (Array.isArray(saved.tabs)) {
-          saved.tabs = saved.tabs.map(update);localStorage.setItem(tabsKey(wid),JSON.stringify(saved));
-        }}
-      } catch { /* The server retains the saved request if browser storage is unavailable. */ }
-    }
-  }
-
-  /** Persist the current draft into a collection. Returns the saved request. */
-  async saveDraft(name: string, collectionId: Id | null): Promise<ApiRequest | null> {
-    const d = this.draft;
-    const issue = this.replayIssue(d);
-    if (issue) { toasts.error('Incomplete history request', issue); return null; }
-    const wid = this.wsId(), tabId = d.tabId;
-    const submittedAuth = JSON.stringify(d.auth);
-    const body: UpsertApiRequestReq = {
-      collection_id: collectionId,
-      name,
-      method: d.method,
-      url: d.url,
-      headers: d.headers,
-      query: d.query,
-      body_mode: d.body_mode,
-      body: d.body,
-      auth: d.auth,
-      ssh_connection_id: d.ssh_connection_id ?? null,
-      // Scripts / docs / settings / GraphQL variables / transport persist with
-      // the request now — a reload no longer discards them.
-      extras: draftToExtras(d),
-    };
-    const saved = await this.saveRequest(body, d.requestId ?? undefined);
-    if (saved) {
-      // Re-adopt the SAVED auth: secret members the daemon just moved to the
-      // Keychain come back as `$secret` markers, and the builder shows them
-      // masked instead of holding plaintext in tab-persisted localStorage.
-      if (this.wsId() !== wid) return saved;
-      const index = this.tabs.findIndex(t => t.tabId === tabId);
-      if (index >= 0) {
-        const current = this.tabs[index];
-        this.tabs[index] = { ...current, requestId: saved.id, name: saved.name,
-          auth: JSON.stringify(current.auth) === submittedAuth ? {...saved.auth} : current.auth };
-        this.persistTabs();
-      }
-      toasts.success('Request saved', saved.name);
-    }
-    return saved;
   }
 
   async deleteRequest(id: Id): Promise<void> {
@@ -1406,355 +665,26 @@ class ApiClientStore {
     }
   }
 
-  // ── Execute ─────────────────────────────────────────────────────────────
-
+  // ── Send: ./apiClient/execute.svelte.ts ─────────────────────────────────
+  readonly exec: ApiExecute = new ApiExecute(this);
   /** Runtime/session variables (set by scripts or by hand) sent as overrides. */
-  private runtimeScopes: Record<string, Record<string, string>> = $state({});
-  get runtimeVars(): Record<string, string> { return this.runtimeScopes[this.wsId() ?? ''] ?? {}; }
-  set runtimeVars(vars: Record<string, string>) {
-    const id = this.wsId();
-    if (id) this.runtimeScopes = {...this.runtimeScopes, [id]: vars};
-  }
-  setRuntimeVar(key: string, value: string): void {
-    this.runtimeVars = { ...this.runtimeVars, [key]: value };
-  }
-  renameRuntimeVar(oldKey: string, newKey: string): void {
-    if (oldKey === newKey) return;
-    const next = { ...this.runtimeVars };
-    const v = next[oldKey] ?? '';
-    delete next[oldKey];
-    if (newKey.trim()) next[newKey] = v;
-    this.runtimeVars = next;
-  }
-  removeRuntimeVar(key: string): void {
-    const next = { ...this.runtimeVars };
-    delete next[key];
-    this.runtimeVars = next;
-  }
-  /** Explain why a history snapshot cannot be sent as a complete request. */
-  replayIssue(draft: ApiDraft = this.draft): string | null {
-    const replay = draft.historyReplay;
-    if (replay && (replay.body === undefined || replay.body === draft.body)) return replay.reason;
-    if (draft.body_mode === 'multipart') {
-      try {
-        const rows = JSON.parse(draft.body);
-        if (Array.isArray(rows) && rows.some(r => r.type === 'file' && (r.missing_content || (r.size !== undefined && !r.value)))) {
-          return 'History does not retain uploaded files. Reselect each missing file before sending or saving.';
-        }
-      } catch { /* Request validation reports malformed input. */ }
-    }
-    return null;
-  }
-
-  /** Load today's saved request explicitly, never label it as the historical send. */
-  async openHistorySavedRequest(): Promise<void> {
-    const id = this.draft.historyReplay?.requestId;
-    if (id) await this.openRequest(id);
-  }
-
-  /** gRPC shares HTTP's per-tab cancellation and replacement ownership. */
-  async executeGrpc(draft: ApiDraft = this.draft): Promise<ApiResponse | null> {
-    const base = this.base(), wid = this.wsId();
-    if (!base || !wid) return null;
-    if (!draft.grpc_method) { toasts.error('Pick a method first'); return null; }
-    const issue = this.replayIssue(draft);
-    if (issue) { this.patchSlot(draft.tabId, {error: issue}); return null; }
-    draft = $state.snapshot(draft);
-    const tabId = draft.tabId;
-    this.cancelExecute(tabId);
-    const controller = new AbortController(), signal = controller.signal;
-    this.patchSlot(tabId, {ctrl:controller, sending:true, error:null, tests:[], logs:[], history:null});
-    const current = () => this.slot(tabId)?.ctrl === controller && !signal.aborted
-      && this.wsId() === wid && this.tabs.some(t => t.tabId === tabId);
-    const env = this.activeEnv;
-    const body: GrpcInvokeReq = {url:draft.url,proto:draft.proto ?? '',method:draft.grpc_method!,body:draft.body,
-      headers:liveKv(draft.headers),environment_id:env?.id ?? null,vars:{...this.runtimeVars}};
-    try {
-      let resp: ApiResponse;
-      try { resp = await api.long.post<ApiResponse>(`${base}/grpc/invoke`, body, signal); }
-      catch (e) {
-        const host = newHostConfirmHost(e);
-        if (host === null || !current()) throw e;
-        const ok = await confirmNewHost(host, {method:'gRPC',url:body.url,secrets:draftSecrets(draft,env)});
-        if (!ok || !current()) return null;
-        resp = await api.long.post<ApiResponse>(`${base}/grpc/invoke`, {...body,confirm_new_host:true}, signal);
-      }
-      if (!current()) return null;
-      this.patchSlot(tabId, {resp,error:null});
-      return resp;
-    } catch (e) {
-      if (current() && !isAbortError(e)) this.patchSlot(tabId, {resp:null,error:providerErrorText(e)});
-      return null;
-    } finally {
-      if (this.slot(tabId)?.ctrl === controller) this.patchSlot(tabId, {sending:false,ctrl:null});
-    }
-  }
-
-  /** Send the given draft through the daemon. Sets lastResponse + refreshes history. */
-  async execute(draft: ApiDraft = this.draft): Promise<ApiResponse | null> {
-    const base = this.base();
-    if (!base) { toasts.error('No workspace selected'); return null; }
-    if (!draft.url.trim()) { toasts.error('URL is empty'); return null; }
-    const issue = this.replayIssue(draft);
-    if (issue) { this.patchSlot(draft.tabId, {error: issue}); return null; }
-
-    // Own the complete pre → HTTP → post sequence before any user code runs.
-    // Snapshot reactive fields so editing another draft cannot alter this send.
-    draft = $state.snapshot(draft);
-    const wid = this.wsId()!, tabId = draft.tabId ?? this.draft.tabId;
-    const environmentId = this.activeEnv?.id ?? null;
-    // Only this tab's previous send is replaced; other tabs keep theirs.
-    this.cancelExecute(tabId);
-    const controller = new AbortController();
-    this.patchSlot(tabId, { ctrl: controller, sending: true, tests: [], logs: [], error: null, history: null });
-    const { signal } = controller;
-    // The result belongs to the initiating tab's slot whether or not that tab
-    // is still in front — a background tab's response is kept, not dropped.
-    const ownsExecution = () => this.slot(tabId)?.ctrl === controller && !signal.aborted
-      && this.wsId() === wid && this.tabs.some(tab => tab.tabId === tabId);
-    const ownsView = ownsExecution;
-    const checkCurrent = () => { if (!ownsExecution()) throw new DOMException('Request canceled', 'AbortError'); };
-    let runtimeVars = {...this.runtimeVars};
-    // Plain environment values are readable by scripts; only explicit writes
-    // become session overrides. Keychain values remain on the daemon.
-    const plainEnv = {...this.activeEnv?.variables};
-    let scriptVars = {...plainEnv, ...runtimeVars};
-    const logs: string[] = [];
-    let reqCtx: PreRequestReq = {
-      method: draft.method, url: draft.url,
-      headers: draft.headers.map(h => ({...h})), body: draft.body,
-    };
-    try {
-      // Bad variables JSON fails the send here, inline, before any script runs.
-      const gqlVariables = draft.body_mode === 'graphql' ? parseGraphqlVariables(draft.graphql_variables) : null;
-      if (draft.pre_request_script?.trim()) {
-        const pre = await runScript({ kind:'pre', code:draft.pre_request_script, request:reqCtx, vars:scriptVars }, signal);
-        checkCurrent();
-        logs.push(...pre.run.logs.map(l => `[pre] ${l}`));
-        if (pre.run.error) throw new Error(`Pre-request script failed: ${pre.run.error}`);
-        if (!pre.request) throw new Error('Pre-request script returned no request.');
-        reqCtx = pre.request; scriptVars = pre.vars;
-        runtimeVars = mergeVariableWrites(runtimeVars, pre.run.writes ?? {});
-        this.runtimeScopes = {...this.runtimeScopes, [wid]: mergeVariableWrites(this.runtimeScopes[wid] ?? {}, pre.run.writes ?? {})};
-      }
-      checkCurrent();
-      let effectiveBody = reqCtx.body;
-      if (draft.body_mode === 'graphql') {
-        effectiveBody = JSON.stringify({query:reqCtx.body, variables: gqlVariables ?? {}});
-      }
-      const settings = draft.settings;
-      const body: ExecuteApiReq = {
-        method:reqCtx.method, url:reqCtx.url, headers:liveKv(reqCtx.headers), query:liveKv(draft.query),
-        body_mode:draft.body_mode, body:effectiveBody, auth:draft.auth,
-        environment_id:environmentId,
-        timeout_ms:settings?.timeout_ms ?? null, follow_redirects:settings?.follow_redirects ?? true,
-        verify_ssl:settings?.verify_ssl ?? true,
-        vars:Object.keys(runtimeVars).length ? runtimeVars : undefined,
-        ssh_connection_id:draft.ssh_connection_id ?? null,
-      };
-      let resp: ApiResponse;
-      try {
-        resp = await api.long.post<ApiResponse>(`${base}/execute`, body, signal);
-      } catch (e) {
-        // A stored secret would leave the host it is bound to (e.g. the URL of
-        // a saved request was edited before saving): the daemon refuses until
-        // a person confirms — ask, then re-send once with the confirmation.
-        const host = newHostConfirmHost(e);
-        if (host === null) throw e;
-        checkCurrent();
-        // Show the URL as it will be sent: plain variables filled in (secret
-        // values are never resolved client-side).
-        const env = this.environments.find((e) => e.id === environmentId) ?? null;
-        const shownUrl = reqCtx.url.replace(/\{\{\s*([^{}]+?)\s*\}\}/g, (m, n: string) => runtimeVars[n] ?? env?.variables[n] ?? m);
-        const ok = await confirmNewHost(host, { method: reqCtx.method, url: shownUrl, secrets: draftSecrets(draft, env) });
-        checkCurrent();
-        if (!ok) throw new DOMException('Request canceled', 'AbortError');
-        resp = await api.long.post<ApiResponse>(`${base}/execute`, { ...body, confirm_new_host: true }, signal);
-      }
-      checkCurrent();
-      if (ownsView()) this.patchSlot(tabId, { resp, error: null });
-      void this.loadHistory();
-      if (draft.post_response_script?.trim()) {
-        const headers: Record<string, string> = {};
-        for (const h of resp.headers) headers[h.key.toLowerCase()] = h.value;
-        const post = await runScript({kind:'post', code:draft.post_response_script,
-          response:{code:resp.status,status:resp.status_text,responseTime:resp.duration_ms,headers,bodyText:resp.body}, vars:scriptVars}, signal);
-        checkCurrent();
-        logs.push(...post.run.logs.map(l => `[test] ${l}`));
-        if (ownsView()) this.patchSlot(tabId, { tests: post.run.tests });
-        if (post.run.error) logs.push(`[test] error: ${post.run.error}`);
-        else this.runtimeScopes = {...this.runtimeScopes, [wid]: mergeVariableWrites(this.runtimeScopes[wid] ?? {}, post.run.writes ?? {})};
-      }
-      if (ownsView()) this.patchSlot(tabId, { logs });
-      return resp;
-    } catch (e) {
-      if (ownsView()) this.patchSlot(tabId, { logs: [...logs, `[error] ${providerErrorText(e)}`] });
-      if (!signal.aborted && ownsExecution() && !isAbortError(e)) {
-        // The tab's response pane shows the failure in place (with the
-        // reason); a send failing on a background tab also toasts, since
-        // nobody is looking at that pane.
-        this.patchSlot(tabId, { error: providerErrorText(e), resp: null });
-        if (this.draft.tabId !== tabId) toasts.error('Couldn’t send the request', providerErrorText(e));
-      }
-      return null;
-    } finally {
-      if (this.slot(tabId)?.ctrl === controller) this.patchSlot(tabId, { sending: false, ctrl: null });
-    }
-  }
-
+  get runtimeVars(): Record<string, string> { return this.exec.runtimeVars; }
+  set runtimeVars(vars: Record<string, string>) { this.exec.runtimeVars = vars; }
+  setRuntimeVar(key: string, value: string): void { this.exec.setRuntimeVar(key, value); }
+  renameRuntimeVar(oldKey: string, newKey: string): void { this.exec.renameRuntimeVar(oldKey, newKey); }
+  removeRuntimeVar(key: string): void { this.exec.removeRuntimeVar(key); }
+  replayIssue(draft: ApiDraft = this.draft): string | null { return this.exec.replayIssue(draft); }
+  openHistorySavedRequest(): Promise<void> { return this.exec.openHistorySavedRequest(); }
+  execute(draft: ApiDraft = this.draft): Promise<ApiResponse | null> { return this.exec.execute(draft); }
+  executeGrpc(draft: ApiDraft = this.draft): Promise<ApiResponse | null> { return this.exec.executeGrpc(draft); }
   /** Introspected GraphQL schema (types + fields), or null. */
-  private graphqlLoaded: {
-    wid: Id | null; tabId?: string; url: string; auth: ApiAuth; environmentId: Id | null;
-    types: { name: string; kind: string; fields: string[] }[];
-  } | null = $state.raw(null);
-  get graphqlSchema(): { name: string; kind: string; fields: string[] }[] | null {
-    const loaded = this.graphqlLoaded;
-    return loaded && loaded.wid === this.wsId() && loaded.tabId === this.draft.tabId
-      && loaded.url === this.draft.url && loaded.auth === this.draft.auth
-      && loaded.environmentId === (this.activeEnv?.id ?? null) ? loaded.types : null;
-  }
-  graphqlIntrospecting = $state(false);
-  private graphqlGeneration = 0;
+  get graphqlSchema(): { name: string; kind: string; fields: string[] }[] | null { return this.exec.graphqlSchema; }
+  get graphqlIntrospecting(): boolean { return this.exec.graphqlIntrospecting; }
+  graphqlIntrospect(): Promise<void> { return this.exec.graphqlIntrospect(); }
 
-  /** Run a GraphQL introspection query against the draft URL. */
-  async graphqlIntrospect(): Promise<void> {
-    const base = this.base();
-    if (!base || !this.draft.url.trim()) {
-      toasts.error('No URL', 'Enter the GraphQL endpoint URL first.');
-      return;
-    }
-    const ownsWorkspace = this.workspaceOwner();
-    const draft = this.draft;
-    const environmentId = this.activeEnv?.id ?? null;
-    const generation = ++this.graphqlGeneration;
-    const current = () => ownsWorkspace() && this.draft === draft
-      && (this.activeEnv?.id ?? null) === environmentId && this.graphqlGeneration === generation;
-    const q = `query{__schema{queryType{name}mutationType{name}types{name kind fields{name}}}}`;
-    this.graphqlIntrospecting = true;
-    try {
-      const resp = await api.long.post<ApiResponse>(`${base}/execute`, {
-        method: 'POST', url: draft.url,
-        headers: [{ key: 'Content-Type', value: 'application/json', enabled: true }],
-        query: [], body_mode: 'json', body: JSON.stringify({ query: q }),
-        auth: draft.auth, environment_id: environmentId,
-      });
-      if (!current()) return;
-      const data = JSON.parse(resp.body) as { data?: { __schema?: { types?: { name: string; kind: string; fields?: { name: string }[] }[] } } };
-      const types = (data.data?.__schema?.types ?? [])
-        .filter((t) => !t.name.startsWith('__') && (t.kind === 'OBJECT' || t.kind === 'INPUT_OBJECT' || t.kind === 'ENUM' || t.kind === 'INTERFACE'))
-        .map((t) => ({ name: t.name, kind: t.kind, fields: (t.fields ?? []).map((f) => f.name) }));
-      this.graphqlLoaded = {wid: this.wsId(), tabId: draft.tabId, url: draft.url, auth: draft.auth, environmentId, types};
-      toasts.success('Schema introspected', `${types.length} types`);
-    } catch (e) {
-      if (current()) toasts.error('Couldn’t introspect the schema', loadErrorText(e));
-    } finally {
-      if (this.graphqlGeneration === generation) this.graphqlIntrospecting = false;
-    }
-  }
-
-  // ── Curl import / export ──────────────────────────────────────────────────
-
-  /** Parse a curl command (daemon) and fill the draft with the result. */
-  async importCurl(curl: string): Promise<boolean> {
-    if (!curl.trim()) return false;
-    const current = this.workspaceOwner();
-    const req: ImportCurlReq = { curl };
-    try {
-      const p = await api.post<ParsedCurl>('/api-client/import-curl', req);
-      if (!current()) return false;
-      // Fills the current tab only while it holds nothing unsaved; otherwise
-      // the import opens in a new tab (placeDraft).
-      this.placeDraft({
-        tabId: crypto.randomUUID(),
-        requestId: null,
-        name: this.isDirty(this.draft) ? '' : this.draft.name,
-        kind: 'http',
-        method: p.method,
-        url: p.url,
-        headers: p.headers,
-        query: p.query,
-        body_mode: p.body_mode,
-        body: p.body,
-        auth: p.auth,
-        proto: '',
-        grpc_method: '',
-      });
-      toasts.success('Imported curl', `${p.method} ${p.url}`);
-      return true;
-    } catch (e) {
-      if (!current()) return false;
-      toasts.error('Couldn’t import curl', loadErrorText(e));
-      return false;
-    }
-  }
-
-  /** Build a curl command string from a draft (for "Copy as curl"). */
-  toCurl(draft: ApiDraft = this.draft): string {
-    const sh = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`;
-    const parts: string[] = ['curl'];
-    if (draft.method && draft.method.toUpperCase() !== 'GET') {
-      parts.push('-X', draft.method.toUpperCase());
-    }
-
-    // URL with enabled query params appended.
-    let url = draft.url;
-    const qs = liveKv(draft.query)
-      .map((q) => `${encodeURIComponent(q.key)}=${encodeURIComponent(q.value)}`)
-      .join('&');
-    if (qs) url += (url.includes('?') ? '&' : '?') + qs;
-    parts.push(sh(url));
-
-    // Headers.
-    for (const h of liveKv(draft.headers)) {
-      parts.push('-H', sh(`${h.key}: ${h.value}`));
-    }
-
-    // Auth. Keychain-backed members render as `***` — a copied snippet must
-    // never leak a resolved secret.
-    const a = draft.auth;
-    if (a.type === 'bearer' && (isSecretRef(a.token) || a.token)) {
-      parts.push('-H', sh(`Authorization: Bearer ${secretMasked(a.token)}`));
-    } else if (a.type === 'basic') {
-      parts.push('-u', sh(`${a.username}:${secretMasked(a.password)}`));
-    } else if (a.type === 'api_key' && a.key) {
-      if (a.in === 'header') parts.push('-H', sh(`${a.key}: ${secretMasked(a.value)}`));
-      else {
-        const sep = url.includes('?') ? '&' : '?';
-        // already appended to url above only for query rows; add the api_key here
-        parts[parts.indexOf(sh(url))] = sh(
-          url + sep + `${encodeURIComponent(a.key)}=${encodeURIComponent(secretMasked(a.value))}`,
-        );
-      }
-    }
-
-    // Body.
-    if (draft.body_mode !== 'none' && draft.body.trim()) {
-      if (draft.body_mode === 'json') {
-        if (!liveKv(draft.headers).some((h) => h.key.toLowerCase() === 'content-type')) {
-          parts.push('-H', sh('Content-Type: application/json'));
-        }
-        parts.push('--data', sh(draft.body));
-      } else if (draft.body_mode === 'multipart') {
-        // multipart/form-data → -F per field; files as -F key=@filename.
-        try {
-          const rows = JSON.parse(draft.body) as { key: string; type?: string; value: string; filename?: string }[];
-          for (const r of rows) {
-            if (!r.key) continue;
-            if (r.type === 'file') parts.push('-F', sh(`${r.key}=@${r.filename || 'file'}`));
-            else parts.push('-F', sh(`${r.key}=${r.value}`));
-          }
-        } catch {
-          parts.push('--data', sh(draft.body));
-        }
-      } else if (draft.body_mode === 'form') {
-        parts.push('--data', sh(draft.body));
-      } else {
-        parts.push('--data', sh(draft.body));
-      }
-    }
-
-    return parts.join(' ');
-  }
+  // ── Curl import / export: ./apiClient/curl.ts ───────────────────────────
+  importCurl(curl: string): Promise<boolean> { return importCurl(this, curl); }
+  toCurl(draft: ApiDraft = this.draft): string { return toCurl(draft); }
 
   // ── History ─────────────────────────────────────────────────────────────
 
@@ -1811,300 +741,21 @@ class ApiClientStore {
   cancelAutomationRun(id: Id): Promise<void> { return this.autos.cancelAutomationRun(id); }
   runAutomation(id: Id, options: StartApiAutomationRunReq = {}): Promise<ApiRunResult | null> { return this.autos.runAutomation(id, options); }
 
-  // ── Draft helpers ─────────────────────────────────────────────────────────
-
-  /** Open a fresh request in a new tab (optionally "in" a collection, which
-   *  the save sheet then preselects). */
-  newDraft(collectionHint: Id | null = null): void {
-    this.openTab({ ...blankDraft(), collectionHint });
-  }
-
-  /** Open a copy of the active request in a new, unsaved tab. Keychain-backed
-   *  credentials are not copied (they belong to the original's Keychain item). */
-  duplicateDraft(): void {
-    const src = $state.snapshot(this.draft) as ApiDraft;
-    const saved = src.requestId ? this.requests.find((r) => r.id === src.requestId) : undefined;
-    const { blanked, ...copy } = forDuplicate(src);
-    this.openTab({
-      ...copy,
-      requestId: null,
-      name: `${src.name?.trim() || this.tabLabel(src)} copy`,
-      collectionHint: saved?.collection_id ?? src.collectionHint ?? null,
-    });
-    if (blanked) toasts.info('Duplicated without stored credentials', 'Re-enter them in Auth before sending, or use an environment {{variable}}.');
-  }
-
-  /** Put a loaded draft in front WITHOUT losing anyone's edits: a tab that
-   *  already shows the same saved request is focused as-is; the active tab is
-   *  reused only while it holds nothing unsaved (a pristine blank draft or an
-   *  unmodified saved request); otherwise the draft opens in a new tab. */
-  private placeDraft(d: ApiDraft): void {
-    if (d.requestId) {
-      const open = this.tabs.findIndex((t) => t.requestId === d.requestId);
-      if (open >= 0) {
-        this.switchTab(open);
-        return;
-      }
-    }
-    // A tab with a send in flight is never repurposed — its result has a home.
-    // Nor is one whose saved row isn't loaded yet (its dirtiness is unknown).
-    const unknown = !!this.draft.requestId && !this.fullRequests.has(this.draft.requestId);
-    if (unknown || this.isDirty(this.draft) || this.slot(this.draft.tabId)?.sending) {
-      this.openTab(d);
-      return;
-    }
-    const replaced = this.draft.tabId;
-    this.draft = d;
-    if (replaced !== this.draft.tabId) this.dropSlot(replaced);
-  }
-
-  /** Load a saved request into the builder (persisted extras included). */
-  loadRequestIntoDraft(r: ApiRequest): void {
-    // The tab's saved baseline (dirty check, secret stripping).
-    if (this.fullRequests.get(r.id) !== r) this.cacheFull(r);
-    this.placeDraft(extrasToDraft(
-      {
-        tabId: crypto.randomUUID(),
-        requestId: r.id,
-        name: r.name,
-        kind: 'http',
-        method: r.method,
-        url: r.url,
-        headers: r.headers.map((h) => ({ ...h })),
-        query: r.query.map((q) => ({ ...q })),
-        body_mode: r.body_mode,
-        body: r.body,
-        auth: { ...r.auth },
-        ssh_connection_id: r.ssh_connection_id ?? null,
-        proto: '',
-        grpc_method: '',
-      },
-      r.extras,
-    ));
-  }
-
-  /** Open a saved request by id: its full row is fetched (or reused from
-   *  `fullRequests`) first; a tab already showing it is focused at once. */
-  async openRequest(id: Id): Promise<boolean> {
-    const open = this.tabs.findIndex((t) => t.requestId === id);
-    if (open >= 0) {
-      this.switchTab(open);
-      return true;
-    }
-    const wid = this.wsId();
-    const full = await this.ensureRequest(id);
-    if (!full || this.wsId() !== wid) return false;
-    this.loadRequestIntoDraft(full);
-    return true;
-  }
-
-  /** The full saved request `id` — cached, else one `GET requests/{id}`
-   *  (concurrent callers share it). Null (with a toast) when it can't load. */
-  async ensureRequest(id: Id): Promise<ApiRequest | null> {
-    const have = this.fullRequests.get(id);
-    if (have) return have;
-    const base = this.base();
-    if (!base) return null;
-    let p = this.fullInflight.get(id);
-    if (!p) {
-      p = api
-        .get<ApiRequest>(`${base}/requests/${encodeURIComponent(id)}`)
-        .then((r) => {
-          if (this.base() === base) this.cacheFull(r);
-          return r;
-        })
-        .catch((e: unknown) => {
-          toasts.error('Couldn’t open the saved request', loadErrorText(e));
-          return null;
-        })
-        .finally(() => this.fullInflight.delete(id));
-      this.fullInflight.set(id, p);
-    }
-    return p;
-  }
-
-  /** Cache a full row; beyond FULL_REQUESTS_MAX the oldest entries not open
-   *  in a tab are dropped. */
-  private cacheFull(r: ApiRequest): void {
-    const next = new Map(this.fullRequests);
-    next.delete(r.id);
-    next.set(r.id, r);
-    if (next.size > FULL_REQUESTS_MAX) {
-      const open = new Set(this.tabs.map((t) => t.requestId));
-      for (const k of next.keys()) {
-        if (next.size <= FULL_REQUESTS_MAX) break;
-        if (!open.has(k)) next.delete(k);
-      }
-    }
-    this.fullRequests = next;
-  }
-
-  /** A saved (or re-fetched) full request: cache it and patch its tree row. */
-  private upsertRequest(r: ApiRequest): void {
-    this.cacheFull(r);
-    const item = requestItem(r);
-    this.requests = this.requests.some((x) => x.id === r.id)
-      ? this.requests.map((x) => (x.id === r.id ? item : x))
-      : [...this.requests, item];
-  }
-
-  private dropRequest(id: Id): void {
-    this.requests = this.requests.filter((r) => r.id !== id);
-    if (this.fullRequests.has(id)) {
-      const next = new Map(this.fullRequests);
-      next.delete(id);
-      this.fullRequests = next;
-    }
-  }
-
-  /** True when a tab's draft differs from its saved request (or is a
-   * non-empty unsaved draft) — includes the extras fields (scripts / docs /
-   * settings / GraphQL variables / transport). Drives the tab's unsaved dot. */
-  isDirty(d: ApiDraft): boolean {
-    const saved = d.requestId ? this.fullRequests.get(d.requestId) : undefined;
-    // Saved row not fetched yet (a restored tab, loading): not dirty for the
-    // dot — `placeDraft` treats it as dirty so it never reuses the tab.
-    if (d.requestId && !saved && this.requests.some((r) => r.id === d.requestId)) return false;
-    if (!saved) {
-      // Unsaved draft: dirty once anything meaningful was entered.
-      return Boolean(
-        d.url.trim() || d.body.trim() || d.headers.length || d.query.length ||
-        d.auth.type !== 'none' || Object.keys(draftToExtras(d)).length > 1,
-      );
-    }
-    const kv = (rows: ApiKeyVal[]): string =>
-      JSON.stringify(rows.filter((r) => r.key.trim() !== '' || r.value.trim() !== ''));
-    return (
-      (d.name.trim() !== '' && d.name !== saved.name) ||
-      d.method !== saved.method ||
-      d.url !== saved.url ||
-      d.body !== saved.body ||
-      d.body_mode !== saved.body_mode ||
-      kv(d.headers) !== kv(saved.headers) ||
-      kv(d.query) !== kv(saved.query) ||
-      JSON.stringify(d.auth) !== JSON.stringify(saved.auth) ||
-      (d.ssh_connection_id ?? null) !== (saved.ssh_connection_id ?? null) ||
-      JSON.stringify(draftToExtras(d)) !== JSON.stringify(saved.extras ?? {v: 1})
-    );
-  }
-
-  /** Load a history entry's request snapshot into the builder (best-effort).
-   *  History stores credentials MASKED (`***`); those are refilled from the
-   *  saved request the entry ran (by `request_id`, else the one saved request
-   *  with the same method + URL), otherwise blanked with a re-enter hint —
-   *  the mask itself is never sent as a credential. */
-  async loadHistoryIntoDraft(h: ApiHistoryEntry): Promise<void> {
-    const snap = (h.request ?? {}) as Partial<ExecuteApiReq> & { request_id?: Id | null; source?: unknown; request_truncated?: boolean };
-    const resultOnly = snap.source === 'automation_run';
-    let multipartFieldsComplete = false;
-    if (snap.body_mode === 'multipart') {
-      try { multipartFieldsComplete = Array.isArray(JSON.parse(snap.body ?? '')); } catch { /* capped JSON is incomplete */ }
-    }
-    const method = snap.method ?? h.method;
-    const url = snap.url ?? h.url;
-    let savedId = snap.request_id && this.requests.some((r) => r.id === snap.request_id) ? snap.request_id : undefined;
-    if (!savedId && !resultOnly) {
-      const same = this.requests.filter((r) => r.method === method && r.url === url);
-      if (same.length === 1) savedId = same[0].id;
-    }
-    const wid = this.wsId();
-    const saved = savedId ? (await this.ensureRequest(savedId)) ?? undefined : undefined;
-    if (this.wsId() !== wid) return;
-    const un = unmaskHistory(
-      { auth: snap.auth ?? { type: 'none' }, headers: snap.headers ?? [], query: snap.query ?? [] },
-      saved,
-    );
-    this.placeDraft({
-      tabId: crypto.randomUUID(),
-      requestId: null,
-      name: '',
-      kind: 'http',
-      method,
-      url,
-      headers: un.headers,
-      query: un.query,
-      body_mode: snap.body_mode ?? 'none',
-      body: snap.body ?? '',
-      historyReplay: resultOnly
-        ? {reason:'This automation history entry contains results only. Open the current saved request to run it again.', ...(savedId ? {requestId:savedId} : {})}
-        : snap.request_truncated && !multipartFieldsComplete
-          ? {reason:'History retained only a body preview. Replace the body before sending or saving.',body:snap.body ?? ''}
-          : undefined,
-      auth: un.auth,
-      ssh_connection_id: snap.ssh_connection_id ?? null,
-      proto: '',
-      grpc_method: '',
-    });
-    // Show the response the entry already stored (no resend — matters for
-    // non-idempotent calls), flagged so the pane says where it came from.
-    const stored = historyResponse(h);
-    this.patchSlot(this.draft.tabId, {
-      resp: stored.resp, error: stored.error, tests: [], logs: [],
-      history: stored.resp || stored.error
-        ? { at: h.executed_at, truncated: stored.resp?.truncated ?? false }
-        : null,
-    });
-    const replayIssue = this.replayIssue();
-    if (replayIssue) toasts.info('Incomplete history request', replayIssue);
-    if (un.blanked) {
-      toasts.info('Re-enter credentials', 'History stores secrets masked — fill the blanked credential fields before sending.');
-    }
-  }
-}
-
-/** One request tab's response state (see "Per-tab response slots"). */
-export interface TabResponse {
-  resp: ApiResponse | null;
-  error: string | null;
-  tests: TestResult[];
-  logs: string[];
-  sending: boolean;
-  ctrl: AbortController | null;
-  /** When the slot last changed (LRU order). */
-  at: number;
-  /** Set when `resp`/`error` was restored from a history entry rather than
-   *  sent in this session: when it ran, and whether only a preview of the
-   *  body was stored. */
-  history: { at: string; truncated: boolean } | null;
-}
-
-/** Idle response slots kept beyond the visible one (LRU-evicted). */
-export const MAX_TAB_RESPONSES = 20;
-
-function emptySlot(): TabResponse {
-  return { resp: null, error: null, tests: [], logs: [], sending: false, ctrl: null, at: 0, history: null };
-}
-
-/** A history entry's stored response as a displayable `ApiResponse` (or the
- *  stored error). The stored body is a ≤64 KB preview; a `body_id` from the
- *  original send has long expired, so it is dropped. */
-export function historyResponse(h: Pick<ApiHistoryEntry, 'response' | 'status' | 'duration_ms'>): { resp: ApiResponse | null; error: string | null } {
-  const r = h.response;
-  if (!r || typeof r !== 'object') return { resp: null, error: null };
-  const o = r as Record<string, unknown>;
-  if (typeof o.status !== 'number') {
-    return { resp: null, error: typeof o.error === 'string' ? o.error : null };
-  }
-  const body = typeof o.body === 'string' ? o.body : '';
-  const headers = Array.isArray(o.headers) ? (o.headers as ApiKeyVal[]) : [];
-  return {
-    error: null,
-    resp: {
-      status: o.status,
-      status_text: typeof o.status_text === 'string' ? o.status_text : '',
-      headers,
-      body,
-      body_base64: typeof o.body_base64 === 'string' ? o.body_base64 : '',
-      body_id: null,
-      truncated: o.truncated === true,
-      too_large: o.too_large === true,
-      duration_ms: typeof o.duration_ms === 'number' ? o.duration_ms : (h.duration_ms ?? 0),
-      size_bytes: typeof o.size_bytes === 'number' ? o.size_bytes : body.length,
-      content_type: typeof o.content_type === 'string' ? o.content_type
-        : headers.find((x) => x.key.toLowerCase() === 'content-type')?.value ?? null,
-      trace: Array.isArray(o.trace) ? (o.trace as ApiResponse['trace']) : [],
-    },
-  };
+  // ── Draft helpers + full-row cache: ./apiClient/drafts.svelte.ts ────────
+  readonly drafts: ApiDrafts = new ApiDrafts(this);
+  saveDraft(name: string, collectionId: Id | null): Promise<ApiRequest | null> { return this.drafts.saveDraft(name, collectionId); }
+  newDraft(collectionHint: Id | null = null): void { this.drafts.newDraft(collectionHint); }
+  duplicateDraft(): void { this.drafts.duplicateDraft(); }
+  /** (part host) Put a draft in front without losing anyone's edits. */
+  placeDraft(d: ApiDraft): void { this.drafts.placeDraft(d); }
+  loadRequestIntoDraft(r: ApiRequest): void { this.drafts.loadRequestIntoDraft(r); }
+  openRequest(id: Id): Promise<boolean> { return this.drafts.openRequest(id); }
+  ensureRequest(id: Id): Promise<ApiRequest | null> { return this.drafts.ensureRequest(id); }
+  /** (part host) Cache a saved / re-fetched full row and patch its tree row. */
+  upsertRequest(r: ApiRequest): void { this.drafts.upsertRequest(r); }
+  private dropRequest(id: Id): void { this.drafts.dropRequest(id); }
+  isDirty(d: ApiDraft): boolean { return this.drafts.isDirty(d); }
+  loadHistoryIntoDraft(h: ApiHistoryEntry): Promise<void> { return this.drafts.loadHistoryIntoDraft(h); }
 }
 
 export const apiClient = new ApiClientStore();

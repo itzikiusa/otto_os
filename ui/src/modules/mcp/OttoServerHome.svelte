@@ -13,7 +13,7 @@
   import ExposePanel from './ExposePanel.svelte';
   import AutoApprovePanel from './AutoApprovePanel.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
-  import { attachView } from './sessionAttach';
+  import { attachView, builtInToolsLine, gatewayView } from './sessionAttach';
   import { loadErrorText } from '../../lib/loadError';
   import type {
     McpAutoApproveRef,
@@ -55,9 +55,9 @@
   const skippedCount = $derived(
     tools.filter((tool) => tool.enabled && tool.mutating && (tool.auto_approved_by?.length ?? 0) > 0).length,
   );
-  const attached = $derived(attach?.attached ?? true);
   const gatewayNames = $derived([...new Set(gatewayTools.map((tool) => tool.name))]);
   const shownGatewayNames = $derived(gatewayNames.slice(0, 60));
+  const gatewayState = $derived(gatewayView(wsId, gatewayLoading, gatewayError, gatewayNames.length));
 
   const filtered = $derived.by(() => {
     const query = filter.trim().toLowerCase();
@@ -251,6 +251,7 @@
   async function updateAttach(enabled: boolean, input: HTMLInputElement): Promise<void> {
     const id = wsId;
     if (!id || !attach || attachBusy) return;
+    const reported = attach.attached; // the box goes back to it if the save fails
     const generation = ++attachGeneration;
     attachBusy = true;
     attachError = null;
@@ -265,7 +266,7 @@
     } catch (e) {
       if (wsId !== id || generation !== attachGeneration) return;
       // Put the box back: the daemon still has the old value.
-      input.checked = attach?.attached ?? true;
+      input.checked = reported;
       toastError(enabled ? 'Couldn’t attach to sessions' : 'Couldn’t detach from sessions', e);
     } finally {
       if (wsId === id && generation === attachGeneration) attachBusy = false;
@@ -366,9 +367,9 @@
         </span>
       </span>
     </label>
-    <p class="counts muted small">
+    {#if status}<p class="counts muted small">
       {tools.length} tools · {enabledNames.size} exposed · {mutatingCount} mutating{#if skippedCount}{' '}· <span class="noask">{skippedCount} auto-approved</span>{/if}
-    </p>
+    </p>{/if}
   </section>
 
   <AutoApprovePanel {isMcpAdmin} revision={rulesRevision} onchange={() => void load()} />
@@ -506,13 +507,12 @@
         </div>
       {/if}
     </div>
-    <p class="small">
-      Built-in tools: {attached ? 'attached' : 'not attached'} — Otto’s read-only tool server (<code>ottod mcp-tools</code>).
-    </p>
-    {#if !wsId}
+    <p class="small" data-testid="mcp-builtin-tools">{builtInToolsLine(attachState, attach)} — Otto’s read-only tool server (<code>ottod mcp-tools</code>).</p>
+    {#if gatewayState === 'no-workspace'}
       <p class="muted small">Select a workspace to inspect its gateway tools.</p>
-    {:else if gatewayError}
+    {:else if gatewayState === 'error'}
       <LoadState what="the gateway tools" variant="compact" error={gatewayError} empty onretry={() => wsId && void loadGatewayTools(wsId)} />
+    {:else if gatewayState === 'loading'}<LoadState what="the gateway tools" variant="compact" loading empty rows={1} />
     {:else}
       <p class="small">Gateway tools from governed external servers: {gatewayNames.length}</p>
       {#if shownGatewayNames.length}

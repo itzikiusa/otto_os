@@ -318,11 +318,14 @@
     {/if}
   </div>
 
+  <!-- One always-mounted count region, so paging and filtering are spoken
+       (a region inserted with the bar would miss the first count). -->
+  <span class="sr-only" role="status">{total > 0 ? `${pageStart}–${pageEnd} of ${total} entr${total === 1 ? 'y' : 'ies'}` : ''}</span>
   <!-- The count bar only while there is something to count; an empty log says
      so once, in the body below. -->
   {#if total > 0}
   <div class="log-meta">
-    <span aria-live="polite">
+    <span>
       {pageStart}–{pageEnd} of {total} entr{total === 1 ? 'y' : 'ies'}
     </span>
     {#if total > PAGE_SIZE}

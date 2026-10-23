@@ -173,11 +173,12 @@
     {#if error}
       <div class="err" use:announceShown={{ text: 'Couldn’t search the references.', assertive: true }}><Icon name="warning" size={14} /> Couldn’t search the references. <button class="btn small ghost" onclick={() => void run()}>Retry</button></div>
     {:else if loading && !hits.length}
-      <p class="dim" role="status">Searching the library…</p>
+      <!-- Plain text while searching; the outcome is what gets spoken. -->
+      <p class="dim">Searching the library…</p>
     {:else if !hits.length}
-      <p class="dim">No designs match. Try fewer words or clear a filter.</p>
+      <p class="dim" use:announceShown={'No designs match.'}>No designs match. Try fewer words or clear a filter.</p>
     {:else}
-      <p class="count dim">{plural(hits.length, 'result')} from the team library · shipped first</p>
+      <p class="count dim" use:announceShown={plural(hits.length, 'result')}>{plural(hits.length, 'result')} from the team library · shipped first</p>
       <ul>
         {#each hits as h (h.artifact.id)}
           {@const a = h.artifact}

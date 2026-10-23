@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { announce } from '../../lib/announce.svelte';
+  import { announce, focusAppContent } from '../../lib/announce.svelte';
   import { rowMenu as rowMenuKeys } from '../../lib/rowMenu';
   import { loadErrorText, providerErrorText } from '../../lib/loadError';
   import { plural } from '../../lib/plural';
@@ -788,7 +788,7 @@
         <button class="btn small" onclick={() => preview && void copy(`s3://${bucket}/${preview.obj.key}`, 'S3 URI')}><Icon name="copy" size={12} /> URI</button>
         <button class="btn small" onclick={() => preview && void presign(preview.obj)} disabled={!canRead}><Icon name="link" size={12} /> Link</button>
         {#if !viewport.isMobile}
-          <button class="icon-btn" onclick={() => (preview = null)} aria-label="Close preview" title="Close preview"><Icon name="x" size={13} /></button>
+          <button class="icon-btn" onclick={() => { preview = null; void focusAppContent(); }} aria-label="Close preview" title="Close preview"><Icon name="x" size={13} /></button>
         {/if}
       </div>
     </div>

@@ -5,6 +5,7 @@
   // is resolved). Leaving the view (abort/complete) is reported via `onleave`.
   import type { GitOpInProgress, MergeConflictStatus } from '../../lib/api/types';
   import { toastError } from '../../lib/toastError';
+  import { announceShown } from '../../lib/announce.svelte';
   import { git } from '../../lib/stores/git.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -308,7 +309,7 @@
           <!-- Re-opening a resolved file: the daemon no longer serves it as a
                conflict (409), so a load error with a Retry that always fails
                was all this pane could show. -->
-          <div class="detail-empty dim" role="status">
+          <div class="detail-empty dim" use:announceShown={`${selected.split('/').pop()} is resolved.`}>
             <Icon name="check" size={14} />
             <span>{selected.split('/').pop()} is resolved.</span>
           </div>

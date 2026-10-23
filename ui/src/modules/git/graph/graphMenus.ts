@@ -27,6 +27,8 @@ export interface GraphMenusHost {
   setCleanupBase(name: string | null): Promise<void>;
 }
 
+export type GraphMenus = ReturnType<typeof createGraphMenus>;
+
 export function createGraphMenus(h: GraphMenusHost, a: GraphActions) {
   const { openCreatePr, chipsFor, setCleanupBase } = h;
   const {

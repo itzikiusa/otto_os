@@ -7,6 +7,7 @@
   // display and which reason is shown.
   import { untrack } from 'svelte';
   import { toastError } from '../../lib/toastError';
+  import { loadErrorText } from '../../lib/loadError';
   import { announce } from '../../lib/announce.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import { mcpCpApi } from '../../lib/api/mcp';
@@ -72,7 +73,7 @@
       try {
         match = JSON.parse(matchText);
       } catch (e) {
-        matchError = `Match must be valid JSON: ${e instanceof Error ? e.message : String(e)}`;
+        matchError = `Match must be valid JSON: ${loadErrorText(e)}`;
         return;
       }
     }

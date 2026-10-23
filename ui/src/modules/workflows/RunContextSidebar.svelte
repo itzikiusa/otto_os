@@ -10,11 +10,11 @@
   import FileTree from '../panels/FileTree.svelte';
   import RunAgents from './RunAgents.svelte';
   import RunFinalOutput from './RunFinalOutput.svelte';
-  import { contextFs, type RunMonitor } from './runSync.svelte';
+  import { contextFs, type RunSync } from './runSync.svelte';
   import type { WorkflowRun } from '../../lib/api/types';
 
   interface Props {
-    mon: RunMonitor;
+    mon: RunSync;
     /** The run on screen, and its context dir. */
     run: WorkflowRun;
     contextDir: string;

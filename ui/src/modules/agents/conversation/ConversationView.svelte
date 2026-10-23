@@ -38,6 +38,7 @@
   // width.
   import { setContext, tick, untrack } from 'svelte';
   import Icon from '../../../lib/components/Icon.svelte';
+  import { announceShown } from '../../../lib/announce.svelte';
   import { splitter } from '../../../lib/paneResizer';
   import ProviderIcon, { hasProviderIcon } from '../../../lib/components/ProviderIcon.svelte';
   import TurnItem from './TurnItem.svelte';
@@ -828,10 +829,9 @@
     <button class="icon-btn" aria-label="Conversation options" title="Conversation options" aria-haspopup="menu" data-conv-menu onclick={openHeadMenu}><Icon name="more" size={12} /></button>
   </header>
   {#if searchOpen && partialSearch}
-    <!-- Search runs over the loaded turns only; say so, and offer the page
-         that might hold the match. -->
+    <!-- Loaded turns only: say so (it describes the search box; “no matches” is spoken by the action) and offer the page that might hold the match. -->
     <div class="search-scope" data-testid="conv-search-scope">
-      <span id="conv-search-scope" aria-live="polite">{noMatches ? 'No matches in the loaded messages.' : 'Only the loaded messages are searched.'}</span>
+      <span id="conv-search-scope" use:announceShown={noMatches ? 'No matches in the loaded messages.' : ''}>{noMatches ? 'No matches in the loaded messages.' : 'Only the loaded messages are searched.'}</span>
       <button class="btn small ghost" disabled={conv.loadingEarlier} onclick={() => void loadEarlier()}>
         {conv.loadingEarlier ? 'Loading earlier messages…' : 'Load earlier messages'}
       </button>
