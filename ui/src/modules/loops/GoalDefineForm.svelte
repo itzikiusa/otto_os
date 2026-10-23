@@ -213,7 +213,8 @@
 <PageBody width="readable">
 <div class="form">
   {#if !ws.currentId}
-    <section class="block" role="status">
+    <!-- Page content (rendered with the page), not a status change: no role. -->
+    <section class="block">
       <p>Add a workspace to define and launch this goal. Your draft stays here.</p>
       <button class="btn" onclick={() => (ui.newWorkspaceOpen = true)}>Add workspace</button>
     </section>
@@ -291,7 +292,8 @@
       {/each}
       <button class="btn small" onclick={addCriterion}><Icon name="plus" size={12} /> Add criterion</button>
       {#if !canLaunch()}
-        <p class="muted small" role="status">Each criterion needs a description and how it is verified.</p>
+        <!-- A form hint, read in place; an inserted status would be silent anyway. -->
+        <p class="muted small" id="goal-criteria-hint">Each criterion needs a description and how it is verified.</p>
       {/if}
     </section>
 

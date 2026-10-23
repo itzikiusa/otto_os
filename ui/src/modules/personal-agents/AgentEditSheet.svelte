@@ -217,7 +217,7 @@
       onclose();
     } catch (e) {
       error = createdAgent
-        ? `Agent created; its schedule could not be added. Save again to finish setup for ${createdAgent.name}. ${loadErrorText(e)}`
+        ? `Agent created; its schedule couldn’t be added. Save again to finish setup for ${createdAgent.name}. ${loadErrorText(e)}`
         : `Couldn’t save the agent. ${loadErrorText(e)}`;
     } finally {
       busy = false;

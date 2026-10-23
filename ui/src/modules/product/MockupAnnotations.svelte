@@ -11,6 +11,8 @@
   import { tick } from 'svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import { toastError } from '../../lib/toastError';
+  import { loadErrorText } from '../../lib/loadError';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import { product } from '../../lib/stores/product.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import Icon from '../../lib/components/Icon.svelte';
@@ -27,6 +29,11 @@
   // ── State ─────────────────────────────────────────────────────────────────
   let notes = $state<MockupAnnotation[]>([]);
   let loading = $state(false);
+  /** Why the last annotations load failed — shown inline with Retry, never as
+   *  "No annotations yet" (which invited re-adding pins that already exist). */
+  let loadError = $state<string | null>(null);
+  /** Bumped per load: a response for a previous attachment is dropped. */
+  let loadSeq = 0;
   let mode = $state<'annotate' | 'interact'>('annotate');
 
   // Inline editor for a pending (un-saved) pin.
@@ -70,13 +77,16 @@
   });
 
   async function loadNotes(): Promise<void> {
+    const seq = ++loadSeq;
     loading = true;
+    loadError = null;
     try {
-      notes = await product.listAnnotations(attachmentId);
+      const next = await product.listAnnotations(attachmentId);
+      if (seq === loadSeq) notes = next;
     } catch (e) {
-      toastError('Couldn’t load annotations', e);
+      if (seq === loadSeq) loadError = loadErrorText(e);
     } finally {
-      loading = false;
+      if (seq === loadSeq) loading = false;
     }
   }
 
@@ -392,8 +402,13 @@
   </div>
 
   <div class="note-list">
+    {#if loadError}
+      <LoadState what="annotations" variant="compact" error={loadError} empty={notes.length === 0} onretry={() => void loadNotes()} />
+    {/if}
     {#if loading}
       <Skeleton rows={3} height={28} label="annotations" />
+    {:else if loadError && notes.length === 0}
+      <!-- The LoadState above says why; no "No annotations yet" here. -->
     {:else if notes.length === 0}
       <div class="note-empty">
         No annotations yet.{mode === 'annotate' ? ' Click the mockup to drop a pin.' : ''}

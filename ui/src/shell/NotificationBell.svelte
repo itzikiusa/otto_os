@@ -365,7 +365,7 @@
                 </button>
               </div>
             {:else if !notifications.settled}
-              <div class="panel-empty" aria-busy="true">
+              <div class="panel-empty">
                 <span class="spinner" style="--spinner-size: 18px" aria-hidden="true"></span>
                 <Skeleton rows={3} height={36} label="notifications" />
               </div>

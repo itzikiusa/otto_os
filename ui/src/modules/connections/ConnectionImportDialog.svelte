@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { loadErrorText } from '../../lib/loadError';
   import Badge from '../../lib/components/Badge.svelte';
   import { plural } from '../../lib/plural';
   // Import connections from another DB tool. No file picker, no path config: the
@@ -92,7 +93,7 @@
     try {
       sources = await importSources(wsId);
     } catch (e) {
-      sourcesError = e instanceof Error ? e.message : String(e);
+      sourcesError = loadErrorText(e);
       sources = [];
     } finally {
       loadingSources = false;

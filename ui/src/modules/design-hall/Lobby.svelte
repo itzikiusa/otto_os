@@ -33,6 +33,7 @@
   import { createDesign } from './create';
   import { generateFromBrief, referenceOf, suggestReferences } from './assist/handoff';
   import { library, LIBRARY_LIMIT } from './library.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import LoadState from '../../lib/components/LoadState.svelte';
 
   interface Props {
@@ -218,8 +219,7 @@
 
   async function runSearch(term: string): Promise<void> {
     ctl?.abort();
-    const mine = new AbortController();
-    ctl = mine;
+    const mine = (ctl = new AbortController());
     try {
       const hits = await searchApi(term, { limit: 60 }, mine.signal);
       if (ctl !== mine) return;
@@ -227,7 +227,7 @@
       searchError = null;
     } catch (e) {
       if (isAbortError(e) || ctl !== mine) return;
-      searchError = e instanceof Error ? e.message : String(e);
+      searchError = loadErrorText(e);
     } finally {
       if (ctl === mine) searching = false;
     }

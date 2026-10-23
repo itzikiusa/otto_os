@@ -7,6 +7,7 @@
   import { workbenchAssetUrl } from '../../../lib/api/workbench';
   import { svgDataUrl } from './kinds';
   import PreviewError from './PreviewError.svelte';
+  import { loadErrorText } from '../../../lib/loadError';
 
   interface Props {
     ws: string;
@@ -65,7 +66,7 @@
       (e: unknown) => {
         if (mine !== seq) return;
         loading = false;
-        error = e instanceof Error ? e.message : String(e);
+        error = loadErrorText(e);
       },
     );
   });
@@ -96,7 +97,7 @@
     <PreviewError title="Image unavailable" message={error} onretry={svg ? undefined : () => attempt++} />
   {:else if url}
     <div class="stage" class:fit>
-      <img src={url} alt={name} {onload} onerror={() => (error = 'The image could not be decoded.')} />
+      <img src={url} alt={name} {onload} onerror={() => (error = 'The image couldn’t be decoded.')} />
     </div>
   {/if}
 </div>

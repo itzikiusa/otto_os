@@ -29,6 +29,8 @@
   import { toasts } from '../../lib/toast.svelte';
   import { toastError } from '../../lib/toastError';
   import { events } from '../../lib/events.svelte';
+  import { announce, focusAppContent } from '../../lib/announce.svelte';
+  import { fireLabel, previewSpeech } from './firePreview';
   import type { ScheduledTask, ScheduledTaskRun } from '../../lib/api/types';
   import { allProviders, defaultAgentProvider } from '../../lib/providers';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
@@ -498,13 +500,7 @@
   });
   /** Only a preview for the CURRENT form is shown (never a stale one). */
   const shownPreview = $derived(firePreview && firePreview.key === previewKey ? firePreview : null);
-  function fireLabel(at: string, tz: string): string {
-    try {
-      return new Date(at).toLocaleString(undefined, { timeZone: tz, weekday: 'short', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-    } catch {
-      return new Date(at).toLocaleString();
-    }
-  }
+  $effect(() => { if (shownPreview) announce(previewSpeech(shownPreview)); }); // the inserted line is silent
 
   function buildDestination(): Record<string, unknown> {
     switch (fDestType) {
@@ -702,6 +698,7 @@
     try {
       const res = await scheduledTasksApi.convertToWorkflow(t.id, disableTask);
       convertedWfId = res.workflow_id;
+      announce('Created a workflow from this task.');
       wfLoaded = false; // the picker re-fetches and sees the new workflow
       if (disableTask && ws.currentId) void scheduledTasks.loadList(ws.currentId);
       // A missing trigger_id means the workflow has no schedule: say so
@@ -859,6 +856,8 @@
   }
 
   /** In-flight Run now, or a loaded run that has not finished. */
+  let wasStale = false; // rows show "Reconnecting…" inline (silent): say it once, at the edge
+  $effect(() => { const stale = events.state !== 'connected' && list.some(taskRunLive); if (stale && !wasStale) announce('Reconnecting — live run status may be stale.'); wasStale = stale; });
   function taskRunLive(t: ScheduledTask): boolean {
     if (runningIds[t.id]) return true;
     return loadedRuns(t.id).some((r) => runIsLive(r.status));
@@ -1085,7 +1084,7 @@
         {/if}
       </div>
       {#if shownPreview}
-        <div class="fire-preview" class:bad={!!shownPreview.error} role="status" aria-live="polite" data-testid="sched-next-fires">
+        <div class="fire-preview" class:bad={!!shownPreview.error} data-testid="sched-next-fires">
           {#if shownPreview.error}
             <Icon name="warning" size={12} /> {shownPreview.error}
           {:else if shownPreview.times.length}
@@ -1210,11 +1209,11 @@
     {@render addWorkspace(true)}
   {:else}
     {#if convertedWfId}
-      <div class="notice" role="status">
+      <div class="notice">
         <span>Created a workflow from this task.</span>
         <span class="grow"></span>
         <button class="btn small" onclick={() => { const id = convertedWfId; convertedWfId = null; router.go(id ? `workflows/${id}` : 'workflows'); }}>Open workflow</button>
-        <button class="btn small" onclick={() => (convertedWfId = null)}>Dismiss</button>
+        <button class="btn small" onclick={() => { convertedWfId = null; void focusAppContent(); }}>Dismiss</button>
       </div>
     {/if}
 
@@ -1292,7 +1291,7 @@
               </div>
             </div>
             {#if live && events.state !== 'connected'}
-              <p class="reconnect" role="status">Reconnecting — this run’s status may be stale.</p>
+              <p class="reconnect">Reconnecting — this run’s status may be stale.</p>
             {/if}
             {#if expandedId === t.id}
               <div class="runs" id="runs-{t.id}">

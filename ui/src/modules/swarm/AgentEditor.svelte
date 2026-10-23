@@ -11,6 +11,9 @@
   import { agentProvidersWith, defaultAgentProvider } from '../../lib/providers';
   import ModelPicker from '../../lib/components/ModelPicker.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import { ws } from '../../lib/stores/workspace.svelte';
+  import { auth } from '../../lib/stores/auth.svelte';
+  import { canEditSwarmIdentity, IDENTITY_OWNER_NOTE } from './access';
 
   interface Props {
     agent?: SwarmAgent | null;
@@ -53,6 +56,29 @@
   let at = $state(initSched?.at ?? '09:00');
   let weekday = $state(initSched?.weekday ?? 1);
   let directive = $state(initSched?.directive ?? '');
+
+  // PC-2 (access-control-6-01 / 6-03): prompt, soul, provider, model and the
+  // standing directive are the swarm creator's, a ws admin's or root's to
+  // write — on a hire as on an edit. Everyone else edits the rest; the
+  // identity fields render read-only with the owner note.
+  const canEditIdentity = $derived(canEditSwarmIdentity(
+    {
+      isRoot: auth.isRoot,
+      myRole: ws.workspaces.find((w) => w.id === swarm.detail?.workspace_id)?.my_role,
+      me: auth.me?.id,
+    },
+    swarm.detail?.created_by,
+  ));
+  // A non-creator's hire carries no identity (the server would refuse it):
+  // it starts on the swarm's defaults, whatever a recruiter prefill proposed.
+  if (!editing && untrack(() => !canEditIdentity)) {
+    provider = untrack(() => swarm.detail?.config.provider ?? provider);
+    model = '';
+    specialization = '';
+    soulMd = '';
+    scopeMd = '';
+    directive = '';
+  }
 
   // Live registry (built-ins + custom, e.g. grok); keep the agent's current
   // provider even if it's since been removed from the registry.
@@ -140,12 +166,19 @@
     </div>
     <div class="field">
       <label for="ag-provider">Provider</label>
-      <select id="ag-provider" class="input" bind:value={provider}>
+      <select id="ag-provider" class="input" bind:value={provider} disabled={!canEditIdentity}>
         {#each providers as p (p)}<option value={p}>{p}</option>{/each}
       </select>
     </div>
     <!-- Hides itself when the provider has no model-flag template. -->
-    <ModelPicker {provider} value={model} onchange={(m) => (model = m)} />
+    {#if canEditIdentity}
+      <ModelPicker {provider} value={model} onchange={(m) => (model = m)} />
+    {:else if model}
+      <div class="field">
+        <label for="ag-model">Model</label>
+        <input id="ag-model" class="input" dir="ltr" value={model} readonly />
+      </div>
+    {/if}
     <div class="field">
       <label for="ag-reports">Reports to</label>
       <select id="ag-reports" class="input" bind:value={reportsTo}>
@@ -161,18 +194,21 @@
     </div>
     <div class="field">
       <label for="ag-spec">Specialization</label>
-      <input dir="auto" id="ag-spec" class="input" bind:value={specialization} />
+      <input dir="auto" id="ag-spec" class="input" bind:value={specialization} readonly={!canEditIdentity} />
     </div>
   </div>
 
   <div class="field">
     <label for="ag-soul">Soul (background + traits)</label>
-    <textarea dir="auto" id="ag-soul" class="input" rows="3" bind:value={soulMd}></textarea>
+    <textarea dir="auto" id="ag-soul" class="input" rows="3" bind:value={soulMd} readonly={!canEditIdentity}></textarea>
   </div>
   <div class="field">
     <label for="ag-scope">Scope (what they own)</label>
-    <textarea dir="auto" id="ag-scope" class="input" rows="2" bind:value={scopeMd}></textarea>
+    <textarea dir="auto" id="ag-scope" class="input" rows="2" bind:value={scopeMd} readonly={!canEditIdentity}></textarea>
   </div>
+  {#if !canEditIdentity}
+    <p class="owner-note dim">{IDENTITY_OWNER_NOTE}</p>
+  {/if}
 
   <div class="field">
     <label for="ag-skill">Skills (must-use toggle)</label>
@@ -242,7 +278,7 @@
           </select>
         {/if}
       </div>
-      <textarea dir="auto" class="input" rows="2" aria-label="Standing directive" placeholder="Standing directive (what to do each run)…" bind:value={directive}></textarea>
+      <textarea dir="auto" class="input" rows="2" aria-label="Standing directive" placeholder={canEditIdentity ? 'Standing directive (what to do each run)…' : ''} bind:value={directive} readonly={!canEditIdentity} title={canEditIdentity ? undefined : IDENTITY_OWNER_NOTE}></textarea>
     {/if}
   </div>
 
@@ -255,6 +291,10 @@
 </Modal>
 
 <style>
+  .owner-note {
+    margin: 0;
+    font-size: var(--fs-s);
+  }
   /* Must-use toggle: an outline star; filled while the skill is required. */
   .must-toggle {
     display: inline-grid;

@@ -34,7 +34,7 @@
     annosHash,
     uploadNeeded,
   } from './annotations';
-  import LoadState from '../../lib/components/LoadState.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte'; import Skeleton from '../../lib/components/Skeleton.svelte';
 
   // The shell keys this editor by id; cleanup saves belong to that mounted image.
   const snipId = router.parts[1] ?? '';
@@ -281,7 +281,7 @@
         return true;
       } catch (e) {
         copyState = 'failed';
-        toastError('Couldn’t copy', e);
+        toasts.error('Couldn’t copy the snip', `${loadErrorText(e)} Try Copy (⌘C) again — the snip stays saved in Otto.`);
         return hash === null;
       }
     })();
@@ -802,7 +802,7 @@
 
   <div class="snip-body" bind:this={wrapEl}>
     {#if loading}
-      <div class="snip-empty" role="status" aria-label="Loading the snip"><span class="spinner" style:--spinner-size="24px" aria-hidden="true"></span></div>
+      <div class="snip-empty"><span class="spinner" style:--spinner-size="24px" aria-hidden="true"></span><Skeleton rows={0} label="the snip" /></div>
     {:else if loadError}
       <LoadState variant="compact" what="the snip" error={loadError} empty onretry={() => void loadImage()} />
     {:else if missing}

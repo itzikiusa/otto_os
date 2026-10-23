@@ -58,6 +58,7 @@
   } from './ref-menus';
   import { copyTextOrThrow } from '../../lib/clipboard';
   import { runPull } from './pullFlow';
+  import { listRange } from '../../lib/listWindow.svelte';
   import { gitBridge } from './gitBridge.svelte';
   import { router } from '../../lib/router.svelte';
   import { routeGraphRef } from './deepLink';
@@ -326,16 +327,15 @@
   function loadRefs(id: string): Promise<void> {
     refsLoading = true;
     refsError = null;
-    return api
-      .get<RefsResp>(`/repos/${id}/refs`)
-      .then((r) => {
+    return git
+      .refs(id)
+      .then(({ refs: r, error }) => {
         if (id !== repoId) return;
-        setRefs(withoutRemoteHeads(r));
-      })
-      .catch((e) => {
-        if (id !== repoId) return;
-        setRefs({ local: [], remote: [], tags: [] });
-        refsError = loadErrorText(e);
+        if (r) setRefs(withoutRemoteHeads(r));
+        else {
+          setRefs({ local: [], remote: [], tags: [] });
+          refsError = loadErrorText(error);
+        }
       })
       .finally(() => (refsLoading = false));
   }
@@ -717,8 +717,7 @@
 
   /** After painting a cached graph: refs first, history only if it moved. */
   async function revalidate(id: string): Promise<void> {
-    let miss: unknown | null = null;
-    const raw = await api.get<RefsResp>(`/repos/${id}/refs`).catch((e: unknown) => ((miss = e), null));
+    const { refs: raw, error: miss } = await git.refs(id);
     if (id !== repoId) return;
     noteBackgroundRead(miss);
     if (raw && applyRefs(withoutRemoteHeads(raw))) {
@@ -762,6 +761,11 @@
   // actually moved. Plain (non-$state) bookkeeping: writing tracked state here
   // would re-trigger the effect.
   let refsSyncSeen: { id: string; rev: number } | null = null;
+  /** This view just made the change the store's `refsRev` bump announces (and
+   *  re-syncs itself right after): mark the bump seen, so it isn't re-read. */
+  function adoptRefsRev(): void {
+    refsSyncSeen = { id: repoId, rev: git.refsRev[repoId] ?? 0 };
+  }
   $effect(() => {
     const id = repoId;
     const rev = git.refsRev[id] ?? 0;
@@ -860,8 +864,7 @@
     // response looks "moved" and would discard the in-flight first page.
     await initialLoad;
     if (id !== repoId) return;
-    let miss: unknown | null = null;
-    const raw = await api.get<RefsResp>(`/repos/${id}/refs`).catch((e: unknown) => ((miss = e), null));
+    const { refs: raw, error: miss } = await git.refs(id);
     if (id !== repoId) return;
     // A miss keeps what we have and tries next round; two in a row say so.
     noteBackgroundRead(miss);
@@ -938,8 +941,8 @@
     try {
       await copyTextOrThrow(text);
       toasts.success('Copied', label);
-    } catch (e) {
-      toastError('Couldn’t copy to the clipboard', e);
+    } catch {
+      toasts.error('Couldn’t copy to the clipboard', 'The clipboard isn’t available here. Select the text and copy it manually.');
     }
   }
 
@@ -950,11 +953,7 @@
   async function refreshAfter(status?: RepoStatusResp): Promise<void> {
     if (status) onstatus(status);
     const id = repoId;
-    let miss: unknown | null = null;
-    const [r, g] = await Promise.all([
-      api.get<RefsResp>(`/repos/${id}/refs`).catch((e: unknown) => ((miss = e), null)),
-      fetchGraph(id),
-    ]);
+    const [{ refs: r, error: miss }, g] = await Promise.all([git.refs(id), fetchGraph(id)]);
     if (id !== repoId) return;
     noteBackgroundRead(miss);
     if (r) setRefs(withoutRemoteHeads(r));
@@ -968,8 +967,9 @@
     onstatus(status);
     const id = repoId;
     const hadHead = headSha !== null;
-    const raw = await api.get<RefsResp>(`/repos/${id}/refs`).catch(() => null);
+    const { refs: raw } = await git.refs(id);
     if (id !== repoId) return;
+    // A miss falls back to the full refresh, which records it.
     if (!raw) {
       await refreshAfter();
       return;
@@ -1733,7 +1733,7 @@
     // A dirty tree needs --force and the confirm must say what that discards.
     // Removal always KEEPS the branch (and its commits) either way.
     const detail = !w.dirty_known
-      ? ' Its changes could not be checked; removal will proceed only if Git can do so safely.'
+      ? ' Its changes couldn’t be checked; removal will proceed only if Git can do so safely.'
       : w.dirty
       ? ' It has UNCOMMITTED changes that will be discarded.'
       : w.locked
@@ -1834,7 +1834,8 @@
   async function checkout(branch: string, create: boolean): Promise<void> {
     checkoutBusy = branch;
     try {
-      const s = await api.post<RepoStatusResp>(`/repos/${repoId}/checkout`, { branch, create });
+      const s = await git.checkout(repoId, { branch, create });
+      adoptRefsRev();
       toasts.success(create ? 'Branch created' : `Switched to ${branch}`, create ? branch : undefined);
       await refreshAfterCheckout(s, false);
     } catch (e) {
@@ -1845,11 +1846,8 @@
         );
         if (ok) {
           try {
-            const s = await api.post<RepoStatusResp>(`/repos/${repoId}/checkout`, {
-              branch,
-              create,
-              auto_stash: true,
-            });
+            const s = await git.checkout(repoId, { branch, create, auto_stash: true });
+            adoptRefsRev();
             if (s.changes.some((c) => c.kind === 'conflicted')) {
               toasts.warn(
                 `Switched to ${branch} — restoring your changes hit conflicts`,
@@ -2102,19 +2100,13 @@
   // The visible slice of `laneRows` (see "Row windowing" above for why). Only
   // these rows are rendered; `padTop`/`padBottom` reserve the rest of the height
   // so the scrollbar still measures the FULL history.
-  const rowWindow = $derived.by(() => {
-    const total = laneRows.length;
-    if (total === 0) return { start: 0, end: 0 };
-    // viewH is 0 until the first measure — fall back to a screenful so the very
-    // first paint isn't a single row.
-    const h = viewH || 900;
-    const start = Math.max(0, Math.floor(viewTop / ROW_H) - OVERSCAN);
-    const end = Math.min(total, Math.ceil((viewTop + h) / ROW_H) + OVERSCAN);
-    return { start, end };
-  });
+  // The shared window arithmetic (lib/listWindow.svelte.ts) at the graph's
+  // fixed pitch, always windowed (min 0). viewH is 0 until the first measure —
+  // fall back to a screenful so the very first paint isn't a single row.
+  const rowWindow = $derived(listRange(laneRows.length, ROW_H, viewTop, viewH || 900, OVERSCAN, 0));
   const visibleRows = $derived(laneRows.slice(rowWindow.start, rowWindow.end));
-  const padTop = $derived(rowWindow.start * ROW_H);
-  const padBottom = $derived(Math.max(0, (laneRows.length - rowWindow.end) * ROW_H));
+  const padTop = $derived(rowWindow.top);
+  const padBottom = $derived(rowWindow.bottom);
 
   // WIP row: sits on the HEAD commit's lane so the dashed stub visually hangs
   // off the checked-out branch (falls back to lane 0 while the log loads).
@@ -3485,7 +3477,7 @@
              never a cap. -->
         <div class="graph-more">
           {#if loadingMore}
-            <span class="spinner" role="status" aria-label="Loading more history" title="Loading more history"></span>
+            <span class="spinner" role="img" aria-label="Loading more history" title="Loading more history"></span>
           {:else if hasMore}
             <button class="btn small" onclick={() => void loadMore()}>
               Load older commits

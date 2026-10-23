@@ -9,7 +9,7 @@
   // Untrusted content stays isolated: HTML and rendered diagrams only ever run
   // inside `sandbox=""` iframes (no scripts, opaque origin); SVG renders as an
   // <img>; scene3d JSON is parsed + validated before it reaches the viewport.
-  import { untrack } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import CodeEditor from '../../lib/components/CodeEditor.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import type { DesignArtifact } from '../../lib/api/types';
@@ -27,7 +27,7 @@
   import { renderD2 } from '../canvas/d2';
   import { brandColors, contrastRatio, renderKind } from './model';
   import SiteStudio from './site/SiteStudio.svelte';
-  import { resolveModelRef } from './studio3d/sources';
+  import { modelScope } from './studio3d/sources';
 
   interface Props {
     artifact: DesignArtifact;
@@ -194,8 +194,11 @@
    *  legacy id (a Design Hall artifact, else a Product attachment). */
   function resolveAttachment(aid: string): Promise<string> {
     if (kind === 'model' && aid === artifact.id && blobUrl) return Promise.resolve(blobUrl);
-    return resolveModelRef(aid);
+    return models.resolve(aid);
   }
+  /** This stage's hold on the model blobs it shows (the cache may revoke them after). */
+  const models = modelScope();
+  onDestroy(() => models.release());
 
   // ── Brand kit ─────────────────────────────────────────────────────────────
   const brandDoc = $derived.by<Record<string, unknown> | null>(() => {

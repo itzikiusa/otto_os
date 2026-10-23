@@ -9,6 +9,7 @@
   import MetricChart from '../../lib/components/MetricChart.svelte';
   import { formatCount as fmt, formatBytes, formatSeconds, type MetricChartPoint } from '../../lib/metric-format';
   import { loadErrorText } from '../../lib/loadError';
+  import { announce } from '../../lib/announce.svelte';
   let { dirty = $bindable(false) }: { dirty?: boolean } = $props();
   let savedConfig = $state('');
   $effect(() => { dirty = !!config && JSON.stringify(config) !== savedConfig; });
@@ -22,6 +23,10 @@
   let error = $state('');
   let loadError = $state('');
   let message = $state('');
+  // a11y-6-01: the save result and errors are announced where they change;
+  // the visible lines are inserted with their text, so they are not live regions.
+  $effect(() => { if (message) announce(message); });
+  $effect(() => { if (error) announce(error, { assertive: true }); });
   let trace = $state<TelemetrySpan[] | null>(null);
   let traceBusy = $state(false);
   let traceError = $state('');
@@ -157,11 +162,11 @@
           <p class="hint">Profiles sample the daemon only, on supported macOS systems. They can briefly add CPU load. Browser timings and process metrics do not require native profiling.</p>
         </details>
         <button class="btn primary" type="submit" disabled={busy}>{busy ? 'Working…' : 'Save telemetry settings'}</button>
-        {#if message}<p role="status">{message}</p>{/if}
+        {#if message}<p class="saved">{message}</p>{/if}
       </form>
     {/if}
   </LoadState>
-  {#if error}<div class="notice" role="alert">{error} <button class="btn small" onclick={() => error = ''}>Dismiss error</button></div>{/if}
+  {#if error}<div class="notice">{error} <button class="btn small" onclick={() => error = ''}>Dismiss error</button></div>{/if}
   {#if status}
     <div class="status" role="status">
       <span class="chip">{!status.enabled ? 'Collection off' : status.collector_ready ? 'Collecting locally' : 'Collector starting or unavailable'}</span>

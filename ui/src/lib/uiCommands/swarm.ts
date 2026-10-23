@@ -9,7 +9,7 @@ import { router } from '../router.svelte';
 import { swarm } from '../stores/swarm.svelte';
 import { ws } from '../stores/workspace.svelte';
 import { toasts } from '../toast.svelte';
-import type { RunFilters, SwarmDetail, SwarmTask } from '../../modules/swarm/types';
+import type { RunFilters, SwarmDetail, SwarmTask } from '../api/types/swarm';
 import { agentLabel, asUiError, capList, createPagePort, highlightWhenReady, resolveByIdOrName, waitFor } from './pagePort';
 
 type SwarmView = 'tree' | 'graph' | 'kanban' | 'runs' | 'board';

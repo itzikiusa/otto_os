@@ -14,6 +14,7 @@
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { copyTextOrThrow } from '../../lib/clipboard';
+  import { announce } from '../../lib/announce.svelte';
   import { router } from '../../lib/router.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { applyRoomEvent, hostRequests } from './room-state';
@@ -38,6 +39,12 @@
   const canType = $derived(!finishing && connected && room?.admission === 'admitted' && room?.driver_member_id === room?.member_id);
   const origin = $derived(recallRoom(roomId)?.origin ?? location.origin);
   const narrowRoom = $derived(viewport.isPhone || viewport.isTablet);
+  // a11y-6-01: errors and connection edges are announced where they change;
+  // the visible lines are inserted with their text, so they are not live regions.
+  $effect(() => { if (error) announce(error, { assertive: true }); });
+  $effect(() => { if (inviteError) announce(inviteError, { assertive: true }); });
+  const connectionLine = $derived(ended || needsName ? '' : connection === 'connecting' ? (room ? 'Reconnecting… Terminal access is paused.' : 'Connecting to the room…') : !connected ? 'Connection interrupted. Terminal access is paused.' : '');
+  $effect(() => { if (connectionLine) announce(connectionLine); });
   $effect(() => { peopleOpen = !narrowRoom; });
   // Host-only: knocks and requests must reach the host on every layout, not only
   // inside the (collapsed / hidden on narrow windows) People list.
@@ -155,16 +162,16 @@
   <PageBody fill padded={false}>
     {#if needsName}<div class="join-form"><h2>Join this session</h2><p>Connecting to <strong>{origin}</strong></p><p>The host will see your display name and decide whether to admit you. Admitted participants can see your messages and shared media.</p>
       <form onsubmit={(event) => { event.preventDefault(); void join(); }}><label>Your display name <input dir="auto" bind:value={name} maxlength="80" autocomplete="nickname" /></label>
-        {#if error}<p role="alert">{error}</p>{/if}<button class="btn primary" disabled={joining || !name.trim()}>{joining ? 'Requesting entry…' : 'Request entry'}</button>
+        {#if error}<p class="alert-text">{error}</p>{/if}<button class="btn primary" disabled={joining || !name.trim()}>{joining ? 'Requesting entry…' : 'Request entry'}</button>
       </form></div>
     {:else if ended}<EmptyState variant="page" icon="people" title="Room closed" body={ended} />
-    {:else if !room}{#if error}<p class="error" role="alert">{error}</p>{/if}
-      {#if connection === 'connecting'}<div role="status"><EmptyState variant="page" icon="people" title="Connecting to the room…" body="Joining the host’s session. This usually takes a few seconds." /></div>
+    {:else if !room}{#if error}<p class="error">{error}</p>{/if}
+      {#if connection === 'connecting'}<div><EmptyState variant="page" icon="people" title="Connecting to the room…" body="Joining the host’s session. This usually takes a few seconds." /></div>
       {:else}<EmptyState variant="page" icon="people" tone="error" title="Connection interrupted" body="Terminal access is paused until your room connection is restored." actionLabel="Retry" onaction={() => client?.connect()} />{/if}
     {:else if room.admission === 'pending'}<EmptyState variant="page" icon="people" title="Waiting for the host" body="Your request has been sent. Terminal content, people and messages remain private until you are admitted." actionLabel="Cancel request" onaction={leave} />
     {:else}
-      {#if connection === 'connecting'}<div class="room-status" role="status">Reconnecting… Terminal access is paused.</div>
-      {:else if !connected}<div class="error" role="status">Connection interrupted. Terminal access is paused.<button class="btn small" onclick={() => client?.connect()}>Retry</button></div>{/if}
+      {#if connection === 'connecting'}<div class="room-status">Reconnecting… Terminal access is paused.</div>
+      {:else if !connected}<div class="error">Connection interrupted. Terminal access is paused.<button class="btn small" onclick={() => client?.connect()}>Retry</button></div>{/if}
       <div class="room-status" role="status"><span>{self?.role === 'host' ? 'Host' : self?.role === 'editor' ? 'May be granted control' : 'View only'} · {driver?.name ?? 'Host'} controls the terminal</span>
         {#if host && requests.total}<span class="requests"><strong>{requests.summary}</strong><button class="btn small" onclick={reviewRequests}>Review</button></span>{/if}
         {#if host && !canType}<button class="btn small" onclick={() => send({type: 'grant_control', member_id: room!.member_id})}>Take back control</button>{/if}
@@ -172,7 +179,7 @@
              swaps its label and action instead of unmounting the focused control. -->
         {#if !host && (canType || self?.role === 'editor')}<button class="btn small" aria-disabled={!canType && self?.control_requested} onclick={controlButton}>{canType ? 'Release control' : self?.control_requested ? 'Control requested' : 'Request control'}</button>{/if}
       </div>
-      {#if error}<div class="error" role="alert">{error}<button class="btn small" onclick={() => error = ''}>Dismiss</button></div>{/if}
+      {#if error}<div class="error">{error}<button class="btn small" onclick={() => error = ''}>Dismiss</button></div>{/if}
       <RoomRecap bind:this={recapPanel} {room} {connected} {send} audioSources={() => mediaPanel?.getRecapAudioSources() ?? new Map()} screenStreams={() => mediaPanel?.getPresentationStreams() ?? new Map()} />
       <nav class="mobile-tabs" aria-label="Room view"><button class="btn" aria-pressed={tab === 'session'} onclick={() => tab = 'session'}>Session</button><button class="btn" aria-pressed={tab === 'conversation'} aria-label={host && requests.total ? `People & chat, ${requests.total} ${requests.total === 1 ? 'request' : 'requests'}` : undefined} onclick={() => tab = 'conversation'}>People & chat{#if host && requests.total}<span class="count" aria-hidden="true">{requests.total}</span>{/if}</button></nav>
       <div class="room-workspace"><main class:mobile-hidden={tab !== 'session'}><RoomMedia bind:this={mediaPanel} {room} {send} {connected} /><div class="terminal-pane">{#if room.session_id && client && connected}<Terminal sessionId={room.session_id} socketFactory={() => client!.terminal()} transformFrame={terminalFrame} readOnly={!canType} readOnlyReason={self?.role === 'viewer' ? 'View only. The host decides who can control the terminal.' : `${driver?.name ?? 'The host'} currently controls the terminal.`} showToolbar={false} scrollback={PRIMARY_SCROLLBACK} preferDom />{/if}</div></main>
@@ -191,7 +198,7 @@
   <p>A single-use invitation expires after ten minutes. You still approve admission and terminal control.</p>
   <label>Maximum access <select bind:value={inviteRole}><option value="viewer">View only</option><option value="editor">May be granted control</option></select></label>
   {#if invitation}<label>Invitation link <input dir="ltr" readonly value={invitation.url} aria-label="Invitation link" /></label><p>Expires {new Date(invitation.expires_at).toLocaleTimeString()}.</p>{/if}
-  {#if inviteError}<p role="alert">{inviteError}<button class="btn small" type="button" onclick={() => inviteError = ''}>Dismiss</button></p>{/if}
+  {#if inviteError}<p class="alert-text">{inviteError}<button class="btn small" type="button" onclick={() => inviteError = ''}>Dismiss</button></p>{/if}
   {#snippet footer()}<button class="btn" onclick={() => inviteOpen = false}>Done</button>{#if invitation}<button class="btn primary" onclick={copyInvite}>{copied ? 'Copied' : 'Copy invitation'}</button>{:else}<button class="btn primary" disabled={inviting} onclick={makeInvite}>{inviting ? 'Creating…' : 'Create invitation'}</button>{/if}{/snippet}
 </Modal>{/if}
 <style>
@@ -201,7 +208,7 @@
   .room-status, .error { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 16px; border-bottom: 1px solid var(--border); font-size: var(--fs-s); }
   .room-status { background: var(--surface); }
   .requests { display: inline-flex; align-items: center; gap: 8px; color: var(--warning); }
-  .count { display: inline-block; margin-inline-start: 6px; min-width: 18px; padding-inline: 4px; border-radius: var(--radius-l); background: var(--warning-soft); color: var(--text); font-size: var(--fs-xs); } .error, [role='alert'] { color: var(--danger); }
+  .count { display: inline-block; margin-inline-start: 6px; min-width: 18px; padding-inline: 4px; border-radius: var(--radius-l); background: var(--warning-soft); color: var(--text); font-size: var(--fs-xs); } .error, .alert-text { color: var(--danger); }
   .room-workspace { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, 340px); }
   main { min-width: 0; min-height: 0; display: flex; flex-direction: column; } .terminal-pane { flex: 1; min-height: 160px; }
   aside { min-width: 0; min-height: 0; overflow: hidden; border-inline-start: 1px solid var(--border); display: flex; flex-direction: column; background: var(--surface); }

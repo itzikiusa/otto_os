@@ -55,7 +55,7 @@ export class RoomRecapCapture {
     const epoch = this.epoch; this.preparing = true;
     try {
       const context = this.context ?? this.preparedContext ?? new AudioContext(); this.preparedContext = null; this.context = context;
-      if (!context.audioWorklet) throw new Error('This browser cannot capture a spoken transcript.');
+      if (!context.audioWorklet) throw new Error('This browser can’t capture a spoken transcript.');
       await context.audioWorklet.addModule(new URL('/room-recap-worklet.js', location.href).href);
       await Promise.race([context.resume(), new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Choose Retry speech capture to allow local audio processing.')), 2000))]);
       if (this.epoch !== epoch) { await context.close(); return; }
@@ -127,7 +127,7 @@ export class RoomRecapCapture {
       const bytes = new Uint8Array(await blob.arrayBuffer());
       if (this.epoch !== epoch || this.screens.get(source.id) !== slot) return;
       this.upload('screen', {capture_epoch: epoch, source_id: source.id, source_generation: source.generation, sequence: this.next(`screen:${source.id}`), offset_ms: Math.max(0, slot.sampled - this.startTime()), jpeg_base64: base64(bytes)}, epoch, () => { if (this.epoch === epoch && this.screens.get(source.id) === slot) slot.fingerprint = fingerprint; });
-    } catch { if (this.epoch === epoch) this.gap('screen', 'A shared-screen sample could not be captured.', source.id); }
+    } catch { if (this.epoch === epoch) this.gap('screen', 'A shared-screen sample couldn’t be captured.', source.id); }
     finally { slot.busy = false; }
   }
   private upload(kind: 'audio' | 'screen', body: unknown, epoch: number, accepted?: () => void): void {
@@ -146,7 +146,7 @@ export class RoomRecapCapture {
     if (slot.closing) return slot.closing;
     slot.input.disconnect();
     slot.closing = new Promise<void>(resolve => {
-      const timer = setTimeout(() => { this.gap('audio', 'A final microphone chunk could not be flushed.'); this.stopAudio(id); resolve(); }, 1000);
+      const timer = setTimeout(() => { this.gap('audio', 'A final microphone chunk couldn’t be saved.'); this.stopAudio(id); resolve(); }, 1000);
       slot.flushed = () => { clearTimeout(timer); slot.flushed = undefined; if (this.audio.get(id) === slot) this.stopAudio(id); resolve(); };
       slot.processor.port.postMessage('flush');
     });

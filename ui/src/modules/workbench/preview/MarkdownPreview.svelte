@@ -48,7 +48,7 @@
             blobUrls.push(url);
             img.src = url;
           },
-          () => img.setAttribute('alt', `${img.alt || 'image'} (failed to load)`),
+          () => img.setAttribute('alt', `${img.alt || 'image'} (couldn’t load)`),
         );
       }
       for (const block of Array.from(el.querySelectorAll('div.diagram-block:not([data-rendered])'))) {

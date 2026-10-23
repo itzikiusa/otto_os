@@ -253,7 +253,7 @@
       await copyTextOrThrow(bodyView === 'raw' ? resp.body : displayBody);
       toasts.success('Response body copied');
     } catch {
-      toasts.error('Couldn’t copy', 'The clipboard isn’t available.');
+      toasts.error('Couldn’t copy', 'The clipboard isn’t available here. Select the text and copy it manually.');
     }
   }
 
@@ -389,7 +389,7 @@
       <span class="chip" title="Total time">{formatSeconds(resp.duration_ms / 1000)}</span>
       <span class="chip" title="Response size">{formatBytes(resp.size_bytes)}</span>
       {#if resp.content_type}<span class="meta mono ct" title={resp.content_type}>{resp.content_type}</span>{/if}
-      {#if apiClient.sending}<span class="meta" role="status">Sending again…</span>{/if}
+      {#if apiClient.sending}<span class="meta">Sending again…</span>{/if}
       <span class="grow"></span>
       <button class="btn small ghost" onclick={copyBody} disabled={resp.too_large || isImage} title={resp.too_large ? 'Too large to copy — download it from More response actions' : isImage ? 'Images can’t be copied as text — download it from More response actions' : 'Copy the body as shown'}>
         <Icon name="copy" size={12} />Copy

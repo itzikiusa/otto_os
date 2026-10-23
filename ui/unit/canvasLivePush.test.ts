@@ -13,7 +13,7 @@ function store() {
     './workspace.svelte': { ws: { currentId: 'w1' } }, '../labels': { NO_WORKSPACE: 'Select a workspace first' },
     '../providers': { defaultAgentProvider: () => 'claude' },
     '../loadError': { loadErrorText: (e: unknown) => String(e) },
-    '../../modules/canvas/scene': { assistToNodes: () => [], emptyScene: () => ({}), parseScene: (x: unknown) => x },
+    '../canvas/scene': { assistToNodes: () => [], emptyScene: () => ({}), parseScene: (x: unknown) => x },
   });
   const c = mod.canvas;
   c.currentId = 'scene-a';
@@ -65,7 +65,7 @@ function guardedStore() {
     './workspace.svelte': { ws: { currentId: 'w1' } }, '../labels': { NO_WORKSPACE: 'Select a workspace first' },
     '../providers': { defaultAgentProvider: () => 'claude' },
     '../loadError': { loadErrorText: (e: unknown) => String(e) },
-    '../../modules/canvas/scene': { assistToNodes: () => [], emptyScene: () => ({}), parseScene: (x: unknown) => x },
+    '../canvas/scene': { assistToNodes: () => [], emptyScene: () => ({}), parseScene: (x: unknown) => x },
   });
   const c = mod.canvas;
   c.currentId = 'scene-a';
@@ -122,7 +122,7 @@ test('a stop reloads after an in-flight save and drops the snapshot from before 
     './workspace.svelte': { ws: { currentId: 'w1' } }, '../labels': { NO_WORKSPACE: 'Select a workspace first' },
     '../providers': { defaultAgentProvider: () => 'claude' },
     '../loadError': { loadErrorText: (e: unknown) => String(e) },
-    '../../modules/canvas/scene': { assistToNodes: () => [], emptyScene: () => ({}), parseScene: (x: unknown) => x },
+    '../canvas/scene': { assistToNodes: () => [], emptyScene: () => ({}), parseScene: (x: unknown) => x },
   });
   const c = mod.canvas;
   c.currentId = 'scene-a';
@@ -183,7 +183,7 @@ test('scene A save protection during Ask Otto does not block scene B after open'
     './workspace.svelte': { ws: { currentId: 'w1' } }, '../labels': { NO_WORKSPACE: 'Select a workspace first' },
     '../providers': { defaultAgentProvider: () => 'claude' },
     '../loadError': { loadErrorText: (e: unknown) => String(e) },
-    '../../modules/canvas/scene': { assistToNodes: () => [], emptyScene: () => ({}), parseScene: (x: unknown) => x },
+    '../canvas/scene': { assistToNodes: () => [], emptyScene: () => ({}), parseScene: (x: unknown) => x },
   });
   const c = mod.canvas;
   await c.open('a');
@@ -222,7 +222,7 @@ test('late scene-A save and late scene-A finishAssistTurn do not contaminate sce
     './workspace.svelte': { ws: { currentId: 'w1' } }, '../labels': { NO_WORKSPACE: 'Select a workspace first' },
     '../providers': { defaultAgentProvider: () => 'claude' },
     '../loadError': { loadErrorText: (e: unknown) => String(e) },
-    '../../modules/canvas/scene': { assistToNodes: () => [], emptyScene: () => ({}), parseScene: (x: unknown) => x },
+    '../canvas/scene': { assistToNodes: () => [], emptyScene: () => ({}), parseScene: (x: unknown) => x },
   });
   const c = mod.canvas;
   await c.open('a');
@@ -283,7 +283,7 @@ test('root sequence: assisted save in A, finish, open B, ingest B-live', async (
     '../labels': { NO_WORKSPACE: 'workspace' },
     '../providers': { defaultAgentProvider: () => 'codex' },
     '../loadError': { loadErrorText: (e: unknown) => String(e) },
-    '../../modules/canvas/scene': { assistToNodes: () => [], emptyScene: () => ({}), parseScene: (x: unknown) => x },
+    '../canvas/scene': { assistToNodes: () => [], emptyScene: () => ({}), parseScene: (x: unknown) => x },
   });
   const c = mod.canvas;
   c.currentId = 'a';
@@ -320,7 +320,7 @@ test('late scene-A save and no-arg finish do not arm scene B, including after au
     '../labels': { NO_WORKSPACE: 'workspace' },
     '../providers': { defaultAgentProvider: () => 'codex' },
     '../loadError': { loadErrorText: (e: unknown) => String(e) },
-    '../../modules/canvas/scene': { assistToNodes: () => [], emptyScene: () => ({}), parseScene: (x: unknown) => x },
+    '../canvas/scene': { assistToNodes: () => [], emptyScene: () => ({}), parseScene: (x: unknown) => x },
   });
   const c = mod.canvas;
   await c.open('a');
@@ -385,7 +385,7 @@ test('a save queued during Ask Otto still pins when it lands after finish, and t
     '../labels': { NO_WORKSPACE: 'workspace' },
     '../providers': { defaultAgentProvider: () => 'codex' },
     '../loadError': { loadErrorText: (e: unknown) => String(e) },
-    '../../modules/canvas/scene': { assistToNodes: () => [], emptyScene: () => ({}), parseScene: (x: unknown) => x },
+    '../canvas/scene': { assistToNodes: () => [], emptyScene: () => ({}), parseScene: (x: unknown) => x },
   });
   const c = mod.canvas;
   await c.open('a');

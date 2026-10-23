@@ -53,6 +53,8 @@ function setup(options: { holdCancel?: boolean; holdReplacement?: boolean } = {}
     $derived: Object.assign((v: unknown) => v, { by: (fn: () => unknown) => fn() }),
     require: (path: string) => {
       if (path.startsWith('./database/')) return load(new URL(`../src/lib/stores/${path.slice(2)}.ts`, import.meta.url));
+      // A sub-store's own sibling import (database/filters → ./statement).
+      if (path === './statement') return load(new URL('../src/lib/stores/database/statement.ts', import.meta.url));
       if (path.endsWith('/client')) return { api, ApiError, withDeadline: transport.withDeadline, READ_DEADLINE_MS: transport.READ_DEADLINE_MS, isAbortError: (e: Error) => e.name === 'AbortError' };
       if (path.endsWith('/workspace.svelte')) return { ws: { currentId: 'workspace' } };
       if (path.endsWith('/auth.svelte')) return { auth: { user: { id: 'user' } } };

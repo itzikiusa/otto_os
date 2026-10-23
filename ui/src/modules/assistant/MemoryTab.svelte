@@ -7,6 +7,7 @@
   //    search, forget one, or forget everything matching a phrase (with Undo).
   //  • Import from Hermes — a one-off, read-only scan of ~/.hermes/memories
   //    that only QUEUES entries for review. Hermes itself is never changed.
+  import { announce } from '../../lib/announce.svelte';
   import { sentenceCase } from '../../lib/labels';
   import Badge from '../../lib/components/Badge.svelte';
   import { guardUnsaved } from '../../lib/leaveGuard';
@@ -88,6 +89,10 @@
   // The last forget, undoable inline (toasts have no actions).
   let undoBar = $state<{ label: string; tokens: string[] } | null>(null);
   let undoing = $state(false);
+  // Spoken at the edge (the bar is inserted with its text, which is silent).
+  $effect(() => {
+    if (undoBar) announce(`${undoBar.label}. Undo is available.`);
+  });
   async function undoForget(): Promise<void> {
     if (!undoBar) return;
     undoing = true;
@@ -248,7 +253,7 @@
         <button class="btn small" onclick={() => void forgetMatching()} disabled={!memories.length}>Forget…</button>
       </div>
       {#if undoBar}
-        <div class="undo-bar" role="status">
+        <div class="undo-bar">
           <Icon name="undo" size={14} />
           <span class="grow">{undoBar.label}</span>
           <button class="btn small" onclick={() => void undoForget()} disabled={undoing}>{undoing ? 'Restoring…' : 'Undo'}</button>

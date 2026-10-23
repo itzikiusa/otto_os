@@ -1,5 +1,6 @@
 <script lang="ts">
   import { api } from '../../lib/api/client';
+  import { loadErrorText } from '../../lib/loadError';
   import type { NetworkProfile } from '../../lib/api/types';
   import NetworkProfiles from './NetworkProfiles.svelte';
   let { workspaceId, value = '', onchange, editable = false, disabled = false }: {
@@ -15,7 +16,7 @@
     let alive = true;
     profiles = []; loading = true; error = ''; managing = false;
     void api.get<NetworkProfile[]>(`/workspaces/${scope}/network-profiles`).then((rows) => { if (alive) profiles = rows; })
-      .catch((e) => { if (alive) error = e instanceof Error ? e.message : String(e); }).finally(() => { if (alive) loading = false; });
+      .catch((e) => { if (alive) error = loadErrorText(e); }).finally(() => { if (alive) loading = false; });
     return () => { alive = false; };
   });
   function saved(profile: NetworkProfile) {

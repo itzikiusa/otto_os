@@ -96,7 +96,7 @@ test('first account finishes after optional workspace failure and explains recov
   await browse(page);
   await page.goto('/#/home');await page.getByRole('button',{name:'Get started'}).click();await page.getByLabel('Password',{exact:true}).fill('Fixture-password-123');await page.getByLabel('Confirm password').fill('Fixture-password-123');await page.getByRole('button',{name:'Create account',exact:true}).click();
   // The account exists from the password step on; the workspace step says so.
-  await expect(page.getByRole('status').filter({hasText:'Root account created.'})).toBeVisible();expect(roots).toBe(1);
+  await expect(page.locator('.ob-done').filter({hasText:'Root account created.'})).toBeVisible();expect(roots).toBe(1);
   await page.getByLabel('Name',{exact:true}).fill('Fixture');await page.getByLabel('Directory',{exact:true}).fill('/tmp/fixture');await page.getByRole('button',{name:'Continue',exact:true}).click();await page.getByRole('button',{name:'Continue',exact:true}).click();
   await page.getByRole('button',{name:'Finish setup'}).click();
   await expect(page.locator('.shell')).toBeVisible();

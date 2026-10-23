@@ -17,7 +17,10 @@
 //   "tilt on hover"; `tiltOnHover` also leans the model toward the pointer.
 // • Poster: shown until the first frame, and kept when WebGL / loading fails.
 // • Motion: `prefers-reduced-motion` turns off auto-rotate and tilt and makes
-//   state changes instant. Off-screen embeds stop rendering.
+//   state changes instant. Frames are requested only while something moves
+//   (studio3d/loop.ts); off-screen embeds and hidden documents schedule none.
+// • A lost WebGL context remounts the embed (twice a minute at most — the
+//   shared lib/three/stage.ts budget); past that the poster stays.
 //
 // `three` (and the loaders) are lazy-loaded on first mount — the host bundle
 // only carries this small module. Every fetch goes through the authed Design
@@ -25,7 +28,7 @@
 // Exported (static) sites will ship their own resolver via `resolve`.
 import type * as THREE_NS from 'three';
 import { fetchContent, getArtifact } from '../../../lib/api/design';
-import { cappedPixelRatio, releaseRenderer } from '../../../lib/three/stage';
+import { cappedPixelRatio, demandLoop, lossBudget, onContextLost, releaseRenderer, watchVisibility, type DemandLoop } from '../../../lib/three/stage';
 import { parseOttoUri } from '../model';
 import {
   applyTransform,
@@ -44,7 +47,8 @@ import { resolveColor } from '../../../lib/design/scene3d/tokens';
 import { resolveToken } from '../brand/tokens';
 import { resolveMaterial, type ResolvedMaterial } from '../../../lib/design/scene3d/presets';
 import { findState, initialState, lerpPoses, stateTiming, statePoses, transitionProgress, type Pose } from '../../../lib/design/scene3d/states';
-import { loadBrandKit, resolveModelRef, versionFor } from './sources';
+import { loadBrandKit, modelScope, versionFor } from './sources';
+import { embedHasWork } from './loop';
 
 export interface Scene3dEmbedOptions {
   /** `otto://design/<id>[@approved|@latest|@vN][#view:<camera>]`. */
@@ -139,10 +143,53 @@ const reducedMotion = (): boolean =>
   typeof window !== 'undefined' && !!window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
 export async function mountScene3dEmbed(el: HTMLElement, opts: Scene3dEmbedOptions): Promise<Scene3dEmbedHandle> {
+  const losses = lossBudget(2, 60_000);
+  let destroyed = false;
+  let state: { set: boolean; id: string | null } = { set: false, id: null };
+  let viewSel: { set: boolean; id: string | null } = { set: false, id: null };
+  let remount: ReturnType<typeof setTimeout> | null = null;
+  const lost = (): void => {
+    inner.destroy();
+    if (destroyed || !losses.allow()) return; // the poster stays
+    remount = setTimeout(() => {
+      remount = null;
+      if (destroyed) return;
+      inner = mountOnce(el, opts, lost);
+      // The remounted scene comes back where the caller left it.
+      void inner.ready.then(() => {
+        if (state.set) inner.setState(state.id);
+        if (viewSel.set) inner.setView(viewSel.id);
+      }, () => {});
+    }, 1200);
+  };
+  let inner = mountOnce(el, opts, lost);
+  return {
+    ready: inner.ready,
+    setState(id) {
+      state = { set: true, id };
+      inner.setState(id);
+    },
+    setView(id) {
+      viewSel = { set: true, id };
+      inner.setView(id);
+    },
+    info: () => inner.info(),
+    destroy() {
+      destroyed = true;
+      if (remount) clearTimeout(remount);
+      inner.destroy();
+    },
+  };
+}
+
+/** One mount of the embed into `el`; `lost` fires when the GPU context goes. */
+function mountOnce(el: HTMLElement, opts: Scene3dEmbedOptions, lost: () => void): Scene3dEmbedHandle {
   const reduced = reducedMotion();
   let destroyed = false;
-  let raf = 0;
+  let loop: DemandLoop | null = null;
   let visible = true;
+  /** This mount's hold on its model blobs (released on destroy). */
+  const models = modelScope();
 
   // Poster first — the page never shows an empty box.
   el.style.position ||= 'relative';
@@ -160,10 +207,9 @@ export async function mountScene3dEmbed(el: HTMLElement, opts: Scene3dEmbedOptio
   let renderer: THREE_NS.WebGLRenderer | null = null;
   let scene: THREE_NS.Scene | null = null;
   let camera: THREE_NS.PerspectiveCamera | null = null;
-  let controls: { update(): void; dispose(): void; target: THREE_NS.Vector3; enabled: boolean } | null = null;
+  let controls: { update(): boolean; dispose(): void; target: THREE_NS.Vector3; enabled: boolean } | null = null;
   let env: BuiltEnvironment | null = null;
   let content: THREE_NS.Group | null = null;
-  let io: IntersectionObserver | null = null;
   let ro: ResizeObserver | null = null;
   let doc: Scene3dDoc | null = null;
   let title = opts.label ?? '';
@@ -177,6 +223,12 @@ export async function mountScene3dEmbed(el: HTMLElement, opts: Scene3dEmbedOptio
   let last = 0;
   let needsFrame = true;
   const cleanups: (() => void)[] = [];
+  /** Something changed: draw (restarts an idle loop; a no-op before it exists). */
+  function kick(): void {
+    // Waking from idle: the first step is not "seconds since the last frame".
+    if (loop && !loop.pending) last = 0;
+    loop?.kick();
+  }
 
   function applyPoses(p: Map<string, Pose>): void {
     for (const [id, pose] of p) {
@@ -200,6 +252,7 @@ export async function mountScene3dEmbed(el: HTMLElement, opts: Scene3dEmbedOptio
       }
     }
     needsFrame = true;
+    kick();
   }
 
   function goToState(id: string | null): void {
@@ -214,7 +267,10 @@ export async function mountScene3dEmbed(el: HTMLElement, opts: Scene3dEmbedOptio
       tween = null;
       poses = to;
       applyPoses(to);
-    } else tween = { from, to, start: performance.now(), duration, easing };
+    } else {
+      tween = { from, to, start: performance.now(), duration, easing };
+      kick();
+    }
   }
 
   function viewCamera(id: string | null): { position: THREE_NS.Vector3Tuple; target: THREE_NS.Vector3Tuple; fov: number } | null {
@@ -235,6 +291,7 @@ export async function mountScene3dEmbed(el: HTMLElement, opts: Scene3dEmbedOptio
       controls.update();
     } else camera.lookAt(...v.target);
     needsFrame = true;
+    kick();
   }
 
   const hoverState = (): string | null => {
@@ -270,6 +327,7 @@ export async function mountScene3dEmbed(el: HTMLElement, opts: Scene3dEmbedOptio
     canvas.setAttribute('role', 'img');
     canvas.setAttribute('aria-label', title ? `3D view: ${title}` : '3D view');
     el.appendChild(canvas);
+    cleanups.push(onContextLost(canvas, () => queueMicrotask(lost)));
 
     scene = new T.Scene();
     content = new T.Group();
@@ -294,7 +352,7 @@ export async function mountScene3dEmbed(el: HTMLElement, opts: Scene3dEmbedOptio
     }
     const loader = new gltfMod.GLTFLoader();
     loader.setMeshoptDecoder(meshopt.MeshoptDecoder);
-    const resolveModel = opts.resolve?.model ?? resolveModelRef;
+    const resolveModel = opts.resolve?.model ?? models.resolve;
     const pending: Promise<void>[] = [];
     for (const o of doc.objects) {
       if (o.type === 'gltf') {
@@ -315,6 +373,7 @@ export async function mountScene3dEmbed(el: HTMLElement, opts: Scene3dEmbedOptio
                 });
                 holder.add(g.scene);
                 needsFrame = true;
+                kick();
               })
               .catch(() => {
                 /* a missing model leaves a gap; the rest still renders */
@@ -342,7 +401,10 @@ export async function mountScene3dEmbed(el: HTMLElement, opts: Scene3dEmbedOptio
       oc.enableZoom = false;
       oc.enablePan = false;
       oc.enableDamping = !reduced;
-      oc.addEventListener('change', () => (needsFrame = true));
+      oc.addEventListener('change', () => {
+        needsFrame = true;
+        kick();
+      });
       controls = oc;
     }
     const hash = parseOttoUri(opts.src)?.node ?? null;
@@ -359,15 +421,21 @@ export async function mountScene3dEmbed(el: HTMLElement, opts: Scene3dEmbedOptio
       camera.aspect = w / h;
       camera.updateProjectionMatrix();
       needsFrame = true;
+      kick();
     };
     ro = new ResizeObserver(resize);
     ro.observe(el);
     resize();
-    io = new IntersectionObserver((es) => {
-      visible = es.some((e) => e.isIntersecting);
-      if (visible) needsFrame = true;
-    });
-    io.observe(el);
+    cleanups.push(
+      watchVisibility(el, (v) => {
+        visible = v;
+        if (!v) loop?.stop();
+        else {
+          needsFrame = true;
+          kick();
+        }
+      }),
+    );
 
     // Hover: tween to the hover state, lean toward the pointer.
     const onEnter = () => {
@@ -377,12 +445,14 @@ export async function mountScene3dEmbed(el: HTMLElement, opts: Scene3dEmbedOptio
     const onLeave = () => {
       goToState(null);
       tilt.tx = tilt.ty = 0;
+      kick();
     };
     const onMove = (e: PointerEvent) => {
       if (!opts.tiltOnHover || reduced) return;
       const r = el.getBoundingClientRect();
       tilt.tx = ((e.clientY - r.top) / r.height - 0.5) * 0.25;
       tilt.ty = ((e.clientX - r.left) / r.width - 0.5) * 0.35;
+      kick();
     };
     if (opts.tiltOnHover || opts.hoverState) {
       el.addEventListener('pointerenter', onEnter);
@@ -397,12 +467,11 @@ export async function mountScene3dEmbed(el: HTMLElement, opts: Scene3dEmbedOptio
 
     await Promise.race([Promise.all(pending), new Promise((r) => setTimeout(r, 4000))]);
     if (destroyed) return;
-    const frame = (now: number) => {
-      if (destroyed) return;
-      raf = requestAnimationFrame(frame);
+    /** One frame; true while something still moves (the loop re-arms only then). */
+    const frame = (now: number): boolean => {
       const dt = last ? Math.min(0.1, (now - last) / 1000) : 0;
       last = now;
-      if (!visible || !renderer || !scene || !camera || !content) return;
+      if (!renderer || !scene || !camera || !content) return false;
       if (tween) {
         const t = transitionProgress(now - tween.start, tween.duration, tween.easing);
         const done = now - tween.start >= tween.duration;
@@ -414,6 +483,7 @@ export async function mountScene3dEmbed(el: HTMLElement, opts: Scene3dEmbedOptio
         content.rotation.y += (doc.turntable?.speed ?? 20) * DEG * dt;
         needsFrame = true;
       }
+      let tilting = false;
       if (opts.tiltOnHover && !reduced) {
         tilt.x += (tilt.tx - tilt.x) * Math.min(1, dt * 8);
         tilt.y += (tilt.ty - tilt.y) * Math.min(1, dt * 8);
@@ -422,26 +492,31 @@ export async function mountScene3dEmbed(el: HTMLElement, opts: Scene3dEmbedOptio
           if (!opts.autoRotate) content.rotation.y = tilt.y;
           needsFrame = true;
         }
+        tilting = Math.abs(tilt.tx - tilt.x) > 1e-4 || Math.abs(tilt.ty - tilt.y) > 1e-4;
       }
-      if (controls && !reduced) controls.update();
-      if (!needsFrame) return;
-      needsFrame = false;
-      renderer.render(scene, camera);
-      if (poster) {
-        poster.remove();
-        poster = null;
+      // Damping keeps the orbit gliding after a drag; `update` says whether it moved.
+      const damping = !!controls && !reduced && controls.update();
+      if (needsFrame) {
+        needsFrame = false;
+        renderer.render(scene, camera);
+        if (poster) {
+          poster.remove();
+          poster = null;
+        }
       }
+      return embedHasWork({ needsFrame, tween: !!tween, autoRotate: !!opts.autoRotate, reduced, tilting, damping });
     };
-    raf = requestAnimationFrame(frame);
+    loop = demandLoop(frame, { canRun: () => !destroyed && visible });
+    kick();
   })();
   // Failure keeps the poster; the caller decides whether to show an error.
   ready.catch(() => {});
 
   function destroy(): void {
+    if (destroyed) return;
     destroyed = true;
-    cancelAnimationFrame(raf);
+    loop?.stop();
     for (const c of cleanups) c();
-    io?.disconnect();
     ro?.disconnect();
     controls?.dispose();
     env?.dispose();
@@ -449,6 +524,7 @@ export async function mountScene3dEmbed(el: HTMLElement, opts: Scene3dEmbedOptio
     if (renderer) releaseRenderer(renderer);
     poster?.remove();
     renderer = null;
+    models.release();
   }
 
   return {

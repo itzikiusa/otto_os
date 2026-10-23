@@ -224,6 +224,29 @@
 //                     lib/html.ts → escapeHtml (one character set, quotes
 //                     included, so it is safe in attributes too).
 //
+// Status, lazy-load and reorder ratchets (quality iteration 6; their
+// detectors sit between the `p04-detectors` markers so ui/unit/p04-uiGuards
+// runs them on fixtures):
+//
+//   inserted-live-region  `{#if …}` whose same or next line opens an element
+//                     with role="status", aria-live, or role="alert" without
+//                     a `tone` — a live region inserted together with its text
+//                     is usually silent in VoiceOver → announce() at the state
+//                     edge (lib/announce.svelte.ts), keep the line plain text.
+//   busy-empty-status role="status" with aria-busy="true" — a busy region with
+//                     no text says nothing → LoadState / Skeleton.
+//   bare-lazy-import  `{#await import(…)}` with no `{:catch}` before its
+//                     `{/await}` — a failed chunk is a silent, sticky no-op →
+//                     LazyMount (or a {:catch} with Retry).
+//   empty-state-error <EmptyState> titled “Couldn’t …” or offering Retry,
+//                     without tone="error" → LoadState (error + onretry).
+//   could-not-copy    “Could not”, “Cannot open” or lower-case “failed to” in
+//                     code or markup (comments and console.* lines skipped) →
+//                     “Couldn’t …” (content.md §3).
+//   index-keyed-reorder an `{#each … , i (i)}` in a file that defines a move /
+//                     reorder function — focus stays on the slot, not the
+//                     moved row → key by a stable id.
+//
 // Updating the baseline: `node scripts/ui-guards.mjs --update-baseline`
 // rewrites scripts/ui-guards-baseline.json from the current tree (sorted keys,
 // deterministic). Do it when you PAY DOWN debt (so the lower count sticks) —
@@ -388,6 +411,12 @@ const RULES = {
   'lib-imports-modules': 'src/lib imports from src/modules — shared code must not depend on a feature; move the shared piece into lib/',
   'raw-error': 'raw `e instanceof Error ? e.message : String(e)` shown to a person — use loadErrorText (lib/loadError.ts)',
   'html-escape': "hand-written .replace(/&/g, '&amp;') escape chain — use escapeHtml (lib/html.ts)",
+  'inserted-live-region': 'live region inserted with its text ({#if} + role="status" / aria-live / untoned role="alert") — announce() at the state edge (lib/announce.svelte.ts)',
+  'busy-empty-status': 'role="status" with aria-busy="true" — a busy region with no text says nothing; use LoadState / Skeleton',
+  'bare-lazy-import': '{#await import(…)} without {:catch} — a failed chunk is a silent no-op; use LazyMount or add a {:catch} with Retry',
+  'empty-state-error': '<EmptyState> used as a load error (“Couldn’t …” title or Retry) without tone="error" — use LoadState (error + onretry)',
+  'could-not-copy': '“Could not” / “Cannot open” / “failed to” in user copy — write “Couldn’t …” (content.md §3)',
+  'index-keyed-reorder': '{#each … (i)} in a file with a move/reorder function — key the rows by a stable id so focus follows the moved row',
 };
 
 /** Clocks, UI animation and explicitly bounded protocol/media lifecycles, not
@@ -922,6 +951,89 @@ if (existsSync(E2E)) {
     const f = { path: p, rel: relative(UI, p), text: readFileSync(p, 'utf8') };
     for (const m of stripComments(f.text).matchAll(/\bwaitForTimeout\s*\(/g)) hit('e2e-wait-timeout', f, m.index, 'waitForTimeout(');
   }
+}
+
+// ---------- status / lazy-load / reorder ratchets ----------
+// p04-detectors:start — pure detectors: (text) → [{ index, detail }].
+// `markup` is a .svelte file with comments, <script> and <style> blanked;
+// `code` is any source with comments blanked.
+const LIVE_REGION = /role="status"|aria-live=|role="alert"/;
+function detectInsertedLiveRegion(markup) {
+  const out = [];
+  const lines = markup.split('\n');
+  let at = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i];
+    const k = l.indexOf('{#if');
+    if (k !== -1) {
+      const seg = l.slice(k) + '\n' + (lines[i + 1] ?? '');
+      const m = LIVE_REGION.exec(seg);
+      if (m && !(m[0] === 'role="alert"' && /\btone=/.test(seg))) out.push({ index: at + k, detail: `{#if …} + ${m[0]}` });
+    }
+    at += l.length + 1;
+  }
+  return out;
+}
+function detectBusyEmptyStatus(markup) {
+  const out = [];
+  for (const m of markup.matchAll(/<[A-Za-z][^<>]*>/g)) {
+    if (/role="status"/.test(m[0]) && /aria-busy=(?:"true"|\{true\})/.test(m[0])) out.push({ index: m.index, detail: 'role="status" aria-busy="true"' });
+  }
+  return out;
+}
+function detectBareLazyImport(markup) {
+  const out = [];
+  for (const m of markup.matchAll(/\{#await\s+import\(/g)) {
+    const end = markup.indexOf('{/await}', m.index);
+    const body = markup.slice(m.index, end === -1 ? undefined : end);
+    if (!body.includes('{:catch')) out.push({ index: m.index, detail: '{#await import(…)} without {:catch}' });
+  }
+  return out;
+}
+function detectEmptyStateError(markup) {
+  const out = [];
+  for (const m of markup.matchAll(/<EmptyState\b/g)) {
+    const end = tagEnd(markup, m.index + m[0].length);
+    const tag = markup.slice(m.index, end === -1 ? undefined : end + 1);
+    if (/\btone=["{']*error/.test(tag)) continue;
+    const couldnt = /\btitle=\{?\s*["'`]Couldn[’']t/.test(tag);
+    const retry = /\bactionLabel=\{?[^>]*?["'`]Retry\b/.test(tag);
+    if (couldnt || retry) out.push({ index: m.index, detail: couldnt ? '<EmptyState title="Couldn’t …">' : '<EmptyState actionLabel="Retry">' });
+  }
+  return out;
+}
+function detectCouldNotCopy(code) {
+  const out = [];
+  let at = 0;
+  for (const l of code.split('\n')) {
+    if (!/\bconsole\.\w+\(/.test(l)) {
+      for (const m of l.matchAll(/\bCould not\b|\bCannot open\b|\bfailed to\b/g)) out.push({ index: at + m.index, detail: m[0] });
+    }
+    at += l.length + 1;
+  }
+  return out;
+}
+function detectIndexKeyedReorder(code) {
+  // A row-reordering editor: a move/reorder function AND an array swap or
+  // splice (a menu's cursor `move(delta)` or a drag handler is not one).
+  if (!/\bfunction\s+(?:move|reorder)\w*\s*\(|\b(?:move|reorder)\w*\s*=\s*(?:async\s*)?\(/.test(code)) return [];
+  if (!/\[\s*\w+\[\s*\w+\s*\]\s*,\s*\w+\[\s*\w+\s*\]\s*\]\s*=|\.splice\(/.test(code)) return [];
+  const out = [];
+  for (const m of code.matchAll(/\{#each\b[^}]*?,\s*(\w+)\s*\(\s*\1\s*\)\s*\}/g)) out.push({ index: m.index, detail: m[0].slice(0, 60) });
+  return out;
+}
+// p04-detectors:end
+for (const f of files) {
+  if (!/\.(svelte|ts)$/.test(f.path)) continue;
+  const code = stripComments(f.text);
+  for (const d of detectCouldNotCopy(code)) hit('could-not-copy', f, d.index, d.detail);
+  if (!f.path.endsWith('.svelte')) continue;
+  const markup = code.replace(/<(script|style)\b[\s\S]*?<\/\1\s*>/gi, blank);
+  for (const d of detectInsertedLiveRegion(markup)) hit('inserted-live-region', f, d.index, d.detail);
+  for (const d of detectBusyEmptyStatus(markup)) hit('busy-empty-status', f, d.index, d.detail);
+  for (const d of detectBareLazyImport(markup)) hit('bare-lazy-import', f, d.index, d.detail);
+  for (const d of detectEmptyStateError(markup)) hit('empty-state-error', f, d.index, d.detail);
+  for (const d of detectIndexKeyedReorder(code)) hit('index-keyed-reorder', f, d.index, d.detail);
 }
 
 // ---------- baseline compare / update ----------

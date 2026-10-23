@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announce } from '../../lib/announce.svelte';
   import { onDestroy, untrack } from 'svelte';
   import { plural } from '../../lib/plural';
   import { api, baseUrl } from '../../lib/api/client';
@@ -122,6 +123,11 @@
       } finally { if (seq === generation) { restorePreview = null; reviewed = false; } }
     });
   }
+
+  // a11y-6-01: announce at the state edge — a status element inserted
+  // together with its text is not read by VoiceOver/WebKit.
+  $effect(() => { if (busy) announce('Working…'); });
+  $effect(() => { if (notice) announce(notice); });
 </script>
 
 <section class="git-backup" aria-label="Git backup sync">
@@ -169,8 +175,8 @@
     </div>
     {#if restorePreview}<RestorePreviewPanel preview={restorePreview} {busy} bind:reviewed onrestore={restoreSnapshot} />{/if}
   {/if}
-  {#if busy}<p class="dim" role="status">Working…</p>{/if}
-  {#if notice}<p role="status">{notice}</p>{/if}
+  {#if busy}<p class="dim">Working…</p>{/if}
+  {#if notice}<p>{notice}</p>{/if}
   {#if error}<p class="error" role="alert">{error}</p>{/if}
 </section>
 {#if browsing}<FolderPicker title="Choose backup repository" start={repoPath || '~'} gitOnly onpick={chooseRepo} onclose={() => browsing = false} />{/if}

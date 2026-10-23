@@ -6,15 +6,19 @@
 </script>
 
 <script lang="ts">
+  import { announce } from '../../lib/announce.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import type { DryRunResp } from './types';
 
   let { preview, group }: { preview: DryRunResp | null; group: string | null } = $props();
   const text = $derived(resetWarning(preview, group));
+  // Spoken at the state edge through the shell's always-mounted announcer: a
+  // live region inserted together with its text is not read (WebKit/VoiceOver).
+  $effect(() => { if (text) announce(text); });
 </script>
 
 {#if text}
-  <p class="reset-warning" role="status">
+  <p class="reset-warning">
     <Icon name="warning" size={12} />
     <span>{text}</span>
   </p>

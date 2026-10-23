@@ -30,7 +30,7 @@ test('template retry preserves the first created agent and schedule request key'
     toasts: { success() {} }, loadErrorText, onclose() {},
   });
   await c.save();
-  assert.match(c.error, /Agent created; its schedule could not be added/);
+  assert.match(c.error, /Agent created; its schedule couldn’t be added/);
   await c.save();
   assert.equal(creates, 1);
   assert.equal(attempts.length, 2);

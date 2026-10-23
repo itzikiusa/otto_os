@@ -20,6 +20,7 @@
   // recorded server-side.
   import { untrack } from 'svelte';
   import { toastError } from '../../../lib/toastError';
+  import { loadErrorText } from '../../../lib/loadError';
   import Icon, { asIcon } from '../../../lib/components/Icon.svelte';
   import ProviderIcon from '../../../lib/components/ProviderIcon.svelte';
   import AgentChip from '../../../lib/components/AgentChip.svelte';
@@ -53,6 +54,7 @@
     directionName,
     fixRequest,
     isTerminal,
+    a11yFixesOf,
     mergeTurns,
     parseBranch,
     promptRequest,
@@ -129,9 +131,10 @@
   let runsSeq = 0;
   async function loadTurns(): Promise<void> {
     const my = ++turnsSeq;
+    const known = new Set(turns.map((t) => t.turn_id)); // authoritative for these
     const fetched = await listTurns(artifact.id);
     if (my !== turnsSeq) return;
-    turns = mergeTurns(turns, fetched);
+    turns = mergeTurns(turns, fetched, known);
   }
   async function loadRuns(): Promise<void> {
     const my = ++runsSeq;
@@ -146,7 +149,7 @@
       loadError = null;
     } catch (e) {
       if (phase !== 'ready') phase = 'error';
-      loadError = e instanceof Error ? e.message : String(e);
+      loadError = loadErrorText(e);
     }
   }
   async function loadRejections(): Promise<void> {
@@ -235,11 +238,7 @@
       const t = turns.find((x) => x.turn_id === id);
       const ask = asks.get(id);
       if (!t || t.status !== 'done' || ask?.intent !== 'fix_a11y') continue;
-      const fixed = t.findings
-        .filter((f) => f.fixed !== false && typeof f.rule === 'string' && f.rule)
-        .map((f) => ({ rule: f.rule as string, message: typeof f.message === 'string' ? f.message : '' }));
-      const list = fixed.length ? fixed : (pendingFix.get(id) ?? []).filter((f) => f.rule).map((f) => ({ rule: f.rule!, message: f.message }));
-      for (const f of list.slice(0, 12)) {
+      for (const f of a11yFixesOf(t, pendingFix.get(id))) {
         captureSignal({
           artifact_id: artifact.id,
           kind: 'a11y_fix',

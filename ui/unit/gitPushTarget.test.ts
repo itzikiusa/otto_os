@@ -12,9 +12,11 @@ test('force retry carries the source and destination captured before the initial
   class ApiError extends Error { status = 409; }
   const ctx: Record<string, any> = {
     Error, ApiError, pushRefusal, runPull: async () => {},
-    api: {
-      get: async () => target,
-      post: async (_url: string, body: Record<string, unknown>) => {
+    // runPush reads the target through the typed client and pushes through
+    // the git store (which owns the status + refsRev follow-up).
+    gitApi: { pushTarget: async () => target },
+    git: {
+      push: async (_repoId: string, body: Record<string, unknown>) => {
         requests.push(JSON.parse(JSON.stringify(body)));
         if (requests.length === 1) throw new ApiError('push rejected: non-fast-forward');
         return { branch: 'feature-b', upstream: 'origin/feature-b' };

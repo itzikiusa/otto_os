@@ -45,6 +45,7 @@
   import LiveDraft from './LiveDraft.svelte';
   import LiveStatus from './LiveStatus.svelte';
   import EmptyState from '../../../lib/components/EmptyState.svelte';
+  import Skeleton from '../../../lib/components/Skeleton.svelte';
   import LoadState from '../../../lib/components/LoadState.svelte';
   import { transcript, type TranscriptSource } from '../../../lib/stores/transcript.svelte';
   import { ws } from '../../../lib/stores/workspace.svelte';
@@ -723,7 +724,7 @@
     },
     codex_rollout_unresolved: {
       title: 'Codex rollout not matched',
-      body: 'Otto could not match this session to a Codex rollout file yet. It usually resolves after the next turn; the terminal is complete meanwhile.',
+      body: 'Otto couldn’t match this session to a Codex rollout file yet. It usually resolves after the next turn; the terminal is complete meanwhile.',
     },
   };
   const unavailable = $derived(t?.unavailable_reason ? UNAVAILABLE[t.unavailable_reason] : null);
@@ -865,7 +866,10 @@
     {#if conv.error && !t}
       <LoadState what="the conversation" error={conv.error} empty onretry={() => void conv.load()} />
     {:else if conv.loading && !t}
-      <div class="skeleton" role="status" aria-busy="true" aria-label="Loading the conversation">
+      <!-- a11y-6-02: the shared Skeleton owns the (delayed) "Loading" status;
+           the chat-shaped placeholder below is decoration. -->
+      <Skeleton rows={0} label="the conversation" />
+      <div class="skeleton" aria-hidden="true">
         <div class="sk sk-user chat-bubble-end"></div>
         <div class="sk sk-agent"></div>
         <div class="sk sk-line"></div>

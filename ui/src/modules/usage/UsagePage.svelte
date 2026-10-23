@@ -1,6 +1,7 @@
 <script lang="ts">
   import { scrollBehavior } from '../../lib/motion';
   import { loadErrorText } from '../../lib/loadError';
+  import { announce } from '../../lib/announce.svelte';
   import PathField from '../../lib/components/PathField.svelte';
   // Usage dashboard: tokens first (provider/day/model/session rollups; cost is
   // the secondary figure), the ccusage-style Report tab, and — for root only —
@@ -238,6 +239,8 @@
 
   // Spend couldn't be read (error-handling-5-07): rows carry 0, not a reading.
   const spendUnavailable = $derived(usage.budgets?.spend_unavailable === true);
+  // a11y-6-01: announced at the edge — the warning line is inserted with its text.
+  $effect(() => { if (spendUnavailable) announce('Spend unavailable: the usage engine couldn’t report spend for this window.'); });
 
   function addWsBudget(): void {
     budgetsDirty = true;
@@ -1014,7 +1017,7 @@
 
           <!-- Status: budget vs spend -->
           {#if usage.budgets && usage.budgets.rows.length > 0}
-            {#if spendUnavailable}<div class="budget-alert" role="status"><Icon name="warning" size={14} />Spend unavailable: the usage engine couldn’t report spend for this window.</div>{/if}
+            {#if spendUnavailable}<div class="budget-alert"><Icon name="warning" size={14} />Spend unavailable: the usage engine couldn’t report spend for this window.</div>{/if}
             <div class="budget-rows">
               {#each usage.budgets.rows as r (r.scope + ':' + r.key)}
                 {@const name = r.scope === 'workspace' ? wsName(r.key) : (r.label ?? r.key)}

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announce } from '../../lib/announce.svelte';
   // Settings → Backup & restore → "Database storage" (root only).
   // Shows otto.db's size + reclaimable free space and runs the ONE-TIME
   // compaction (POST /admin/db/compact): auto_vacuum=INCREMENTAL + VACUUM.
@@ -148,6 +149,12 @@
       compacting = false;
     }
   }
+
+  // a11y-6-01: announce at the state edge — a status element inserted
+  // together with its text is not read by VoiceOver/WebKit.
+  $effect(() => {
+    if (last) announce(`Compacted: ${formatBytes(last.before_bytes)} → ${formatBytes(last.after_bytes)} in ${(last.duration_ms / 1000).toFixed(1)} s.`);
+  });
 </script>
 
 <section class="db-card" aria-label="Database storage">
@@ -173,7 +180,7 @@
     {:else if historyError}
       <LoadState what="the retention setting" variant="compact" error={historyError} empty={true} onretry={loadSettings} />
     {:else}
-      <span class="dim" role="status">Reading…</span>
+      <span class="dim">Reading…</span>
     {/if}
   </div>
   <p id="run-history-hint" class="dim">
@@ -210,7 +217,7 @@
       </button>
     </div>
     {#if last}
-      <p class="notice" role="status">{formatBytes(last.before_bytes)} → {formatBytes(last.after_bytes)} in {(last.duration_ms / 1000).toFixed(1)} s.</p>
+      <p class="notice">{formatBytes(last.before_bytes)} → {formatBytes(last.after_bytes)} in {(last.duration_ms / 1000).toFixed(1)} s.</p>
     {/if}
   {/if}
 </section>

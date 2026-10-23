@@ -49,7 +49,9 @@
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { registry } from '../../lib/commands.svelte';
   import { router } from '../../lib/router.svelte';
-  import type { ProofArtifactView, Repo } from '../../lib/api/types';
+  import type { AssembleResp, ProofArtifactView, Repo } from '../../lib/api/types';
+  import { announce } from '../../lib/announce.svelte';
+  import { assembleOutcome } from './assembleOutcome';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { sentenceCase } from '../../lib/status';
@@ -372,7 +374,7 @@
       { label: 'Add artifact…', icon: 'plus', action: () => { resetAdd(); addOpen = true; } },
       { label: 'Add media…', icon: 'file', action: () => { resetMedia(); mediaOpen = true; } },
       { label: 'Add evidence…', icon: 'db', action: () => { resetEvidence(); evidenceOpen = true; } },
-      { label: 'PR check…', icon: 'pr', action: () => { resetPr(); prOpen = true; void packRepoPath().then(({ path, error }) => { if (!prOpen) return; if (!prCwd) prCwd = path; prRepoError = error; }); } },
+      { label: 'PR check…', icon: 'pr', action: () => { resetPr(); prOpen = true; void packRepoPath().then(({ path, error }) => { if (!prOpen) return; if (!prCwd) prCwd = path; prRepoError = error; if (error) announce(`Couldn’t prefill the pack’s repository folder: ${error}`); }); } },
     ]);
   }
 
@@ -433,9 +435,11 @@
     if (cwd === null) return;
     assembling = true;
     try {
-      await assembleProof(packId, { cwd: cwd.trim() || undefined });
+      // The daemon answers `AssembleResp` (the pack + what it assembled).
+      const res = (await assembleProof(packId, { cwd: cwd.trim() || undefined })) as AssembleResp;
       if (detail?.pack.id === packId) await proof.refreshDetail();
-      toasts.success('Proof assembled', 'Re-assembled from the working folder.');
+      const o = assembleOutcome(res.assembled);
+      toasts[o.tone](o.title, o.body);
     } catch (e) {
       toasts.error("Couldn’t assemble proof", loadErrorText(e));
     } finally {
@@ -1260,7 +1264,7 @@
       <div class="field">
         <label for="pr-cwd">Working dir (optional)</label>
         <PathField bind:value={prCwd}><input dir="ltr" id="pr-cwd" class="input" bind:value={prCwd} placeholder="e.g. ~/code/my-repo" aria-describedby={prRepoError ? 'pr-cwd-note' : undefined} /></PathField>
-        {#if prRepoError}<p id="pr-cwd-note" class="pr-cwd-note" role="status">Couldn’t prefill the pack’s repository folder: {prRepoError}</p>{/if}
+        {#if prRepoError}<p id="pr-cwd-note" class="pr-cwd-note">Couldn’t prefill the pack’s repository folder: {prRepoError}</p>{/if}
       </div>
     </div>
     {#snippet footer()}

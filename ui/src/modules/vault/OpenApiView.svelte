@@ -6,6 +6,8 @@
   // light and matches the app's look.
 
   /* eslint-disable @typescript-eslint/no-explicit-any */
+  import EmptyState from '../../lib/components/EmptyState.svelte';
+
   let { spec }: { spec: Record<string, any> } = $props();
 
   // Operation bodies (parameter tables, request/response schema trees up to 5
@@ -203,6 +205,10 @@
     </div>
   {/if}
 
+  {#if groups.size === 0}
+    <!-- ux-design-6-09: a spec with no paths is said so, not a bare header. -->
+    <EmptyState icon="file" title="No operations in this spec" body="It declares no paths, so there is nothing to browse. Its info and servers are shown above." />
+  {/if}
   {#each [...groups.entries()] as [tag, ops] (tag)}
     <section>
       <h3>{tag}</h3>

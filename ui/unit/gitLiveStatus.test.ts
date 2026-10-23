@@ -22,7 +22,9 @@ function fixture() {
     removeEventListener: (t: string) => listeners.delete(t),
   };
   const gets: { url: string; result: ReturnType<typeof deferred<ReturnType<typeof status>>> }[] = [];
-  const { git } = loadSource(new URL('../src/lib/stores/git.svelte.ts', import.meta.url), {
+  // The store's typed client (lib/api/git.ts) runs for real over the same
+  // transport stub: `relative` loads it, `lib/api/client` is its import.
+  const imports: Record<string, unknown> = {
     '../api/client': { api: { get: (url: string) => {
       const result = deferred<ReturnType<typeof status>>();
       gets.push({ url, result });
@@ -30,7 +32,9 @@ function fixture() {
     } } },
     '../loadError': { loadErrorText: (e: unknown) => (e instanceof Error ? e.message : String(e)) },
     '../gitLivePaths': livePaths, '../latest': latest,
-  }, { document, setTimeout, clearTimeout });
+  };
+  imports['lib/api/client'] = imports['../api/client'];
+  const { git } = loadSource(new URL('../src/lib/stores/git.svelte.ts', import.meta.url), imports, { document, setTimeout, clearTimeout }, { relative: true });
   return { git, gets, document, listeners };
 }
 

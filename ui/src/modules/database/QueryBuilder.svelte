@@ -17,6 +17,7 @@
 </script>
 
 <script lang="ts">
+  import { announce } from '../../lib/announce.svelte';
   // Visual query builder for the SQL engines (MySQL · PostgreSQL · ClickHouse).
   //
   //  ┌ tables ┐┌──────────── canvas: table cards + drawn JOINs ─────────────┐
@@ -898,6 +899,10 @@
       importing = false;
     }
   }
+  // Spoken at the state edge through the shell's always-mounted announcer: a
+  // live region inserted together with its text is not read (WebKit/VoiceOver).
+  $effect(() => { if (importError) announce(importError, { assertive: true }); });
+  $effect(() => { if (joinError) announce(joinError, { assertive: true }); });
 </script>
 
 {#if !database.supportsBuilder || !dialect}
@@ -1112,7 +1117,7 @@
       <div class="designer">
         <div class="clauses" class:disabled={tables.length === 0}>
           {#if importError}
-            <div class="notice err" role="alert">
+            <div class="notice err">
               <Icon name="warning" size={12} />
               <span>{importError}</span>
               <button class="icon-btn" onclick={() => (importError = null)} aria-label="Dismiss" title="Dismiss"><Icon name="x" size={12} /></button>
@@ -1366,7 +1371,7 @@
             {#each JOIN_TYPES as t (t)}<option value={t}>{t === 'FULL' ? 'FULL OUTER' : t} JOIN</option>{/each}
           </select>
         </div>
-        {#if joinError}<p class="join-err" role="alert">{joinError}</p>{/if}
+        {#if joinError}<p class="join-err">{joinError}</p>{/if}
       </div>
       {#snippet footer()}
         <button class="btn" onclick={() => (joinOpen = false)}>Cancel</button>

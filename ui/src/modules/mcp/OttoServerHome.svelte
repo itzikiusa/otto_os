@@ -242,7 +242,7 @@
       const next = await mcpCpExtraApi.sessionAttach(id);
       if (wsId === id && generation === attachGeneration) attach = next;
     } catch (e) {
-      if (wsId === id && generation === attachGeneration) attachError = e instanceof Error ? e.message : String(e);
+      if (wsId === id && generation === attachGeneration) attachError = loadErrorText(e);
     }
   }
 
@@ -279,7 +279,7 @@
     } catch (e) {
       if (wsId === id) {
         gatewayTools = [];
-        gatewayError = e instanceof Error ? e.message : String(e);
+        gatewayError = loadErrorText(e);
       }
     } finally {
       if (wsId === id) gatewayLoading = false;
@@ -328,7 +328,10 @@
       <span>Otto’s built-in MCP server</span>
     </div>
 
-    {#if wsId}
+    {#if wsId && attachError}
+      <!-- Never a guessed "attached" box: the daemon reported nothing. -->
+      <LoadState what="the session-attach setting" variant="compact" error={attachError} empty onretry={() => wsId && void loadAttach(wsId)} />
+    {:else if wsId}
       {#key wsId}
       <label class="switchrow">
         <input
@@ -349,7 +352,6 @@
     {:else}
       <p class="muted small">Select a workspace to manage session attachment.</p>
     {/if}
-    {#if attachError}<p class="warn">Couldn’t load session attachment: {attachError}</p>{/if}
 
     <label class="switchrow">
       <input
@@ -512,7 +514,7 @@
     {#if !wsId}
       <p class="muted small">Select a workspace to inspect its gateway tools.</p>
     {:else if gatewayError}
-      <p class="muted small">Couldn’t load gateway tools: {gatewayError}</p>
+      <LoadState what="the gateway tools" variant="compact" error={gatewayError} empty onretry={() => wsId && void loadGatewayTools(wsId)} />
     {:else}
       <p class="small">Gateway tools from governed external servers: {gatewayNames.length}</p>
       {#if shownGatewayNames.length}

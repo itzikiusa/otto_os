@@ -71,7 +71,7 @@
       await copyTextOrThrow(exportedMd);
       toasts.success('Copied to clipboard');
     } catch {
-      toasts.warn('Couldn’t copy', 'Select the text and copy manually.');
+      toasts.warn('Couldn’t copy', 'The clipboard isn’t available here. Select the text and copy it manually.');
     }
   }
 

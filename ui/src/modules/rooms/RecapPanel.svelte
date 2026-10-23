@@ -10,8 +10,16 @@
   import LoadState from '../../lib/components/LoadState.svelte';
   import {loadErrorText} from '../../lib/loadError';
   import RecapImage from './RecapImage.svelte';
+  import {announce} from '../../lib/announce.svelte';
   let {recapId}: {recapId: string} = $props();
   let detail = $state<RecapDetail | null>(null), error = $state(''), actionError = $state(''), loading = $state(true), busy = $state(false), copied = $state(false), cancelling = $state(false), exporting = $state(false);
+  // a11y-6-01: status and error edges are announced; the visible lines are not live regions.
+  const summaryRunning = $derived(['queued', 'running'].includes(detail?.metadata.summary_status ?? ''));
+  const summaryError = $derived(detail?.metadata.summary_error ?? '');
+  $effect(() => { if (summaryRunning) announce('Codex is preparing a draft…'); });
+  $effect(() => { if (summaryError) announce(summaryError, {assertive: true}); });
+  $effect(() => { if (actionError) announce(actionError, {assertive: true}); });
+  $effect(() => { if (detail && error) announce(error, {assertive: true}); });
   let tab = $state<'transcript' | 'activity' | 'summary'>('transcript'), after = $state(0), previous = $state<number[]>([]);
   let live = true, request = 0, loadingBody = false;
   let revision: RecapRevision | null = null, loadedAfter: number | null = null;
@@ -80,12 +88,12 @@
       if (seq === request) { loading = false; loadingBody = false; }
     }
   }
-  async function generate() { if (!await confirmer.ask('Send captured text and representative shared-screen images to Codex using your ChatGPT subscription to create a draft. This uses your subscription allowance. Not every saved image is included; the draft reports coverage. The local archive remains available if generation fails.', {title: 'Generate recap summary?', confirmLabel: 'Generate summary'})) return; busy = true; actionError = ''; try { await recapRequest(`/room-recaps/${recapId}/summary`, {}); tab = 'summary'; await load(false); } catch (e) { actionError = e instanceof Error ? e.message : 'Summary generation could not start.'; } finally { busy = false; } }
+  async function generate() { if (!await confirmer.ask('Send captured text and representative shared-screen images to Codex using your ChatGPT subscription to create a draft. This uses your subscription allowance. Not every saved image is included; the draft reports coverage. The local archive remains available if generation fails.', {title: 'Generate recap summary?', confirmLabel: 'Generate summary'})) return; busy = true; actionError = ''; try { await recapRequest(`/room-recaps/${recapId}/summary`, {}); tab = 'summary'; await load(false); } catch (e) { actionError = e instanceof Error ? e.message : 'Summary generation couldn’t start.'; } finally { busy = false; } }
   async function cancel() { cancelling = true; try { await recapRequest(`/room-recaps/${recapId}/summary`, undefined, undefined, 'DELETE'); await load(false); } catch { actionError = 'Couldn’t cancel generation. Try again.'; } finally { cancelling = false; } }
   async function exportArchive() { exporting = true; try { const blob = await recapBlob(`/room-recaps/${recapId}/export`); const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = `room-recap-${recapId}.json`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 30000); } catch { actionError = 'Couldn’t export the recap. Try again.'; } finally { exporting = false; } }
   function draftText(draft: RecapDraft) { return ['Codex draft', draft.overview, 'Decisions', ...draft.decisions, 'Actions', ...draft.actions, 'Open questions', ...draft.open_questions, 'Coverage', ...draft.coverage].join('\n\n'); }
   async function copyDraft() { if (!detail?.draft) return; try { await copyTextOrThrow(draftText(detail.draft)); copied = true; } catch { actionError = 'Couldn’t copy the draft. Select the text and copy it manually.'; } }
-  function terminalText(data: string): string { try { return new TextDecoder().decode(Uint8Array.from(atob(data), c => c.charCodeAt(0))).replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '').replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, ''); } catch { return 'Terminal text could not be decoded.'; } }
+  function terminalText(data: string): string { try { return new TextDecoder().decode(Uint8Array.from(atob(data), c => c.charCodeAt(0))).replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '').replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, ''); } catch { return 'Terminal text couldn’t be decoded.'; } }
   function activity(payload: RecapEventData): string {
     switch (payload.type) {
       case 'capture': return `Capture ${recapStateLabel(payload.state).toLowerCase()}${payload.reason ? `: ${payload.reason}` : ''}`;
@@ -101,15 +109,15 @@
 </script>
 <div class="recap-panel">
   {#if !detail}<LoadState what="this recap" variant="compact" {loading} {error} empty={true} onretry={() => load()} />
-  {:else if error}<p class="error" role="alert">{error} <button class="btn small" onclick={() => load()}>Retry</button></p>{/if}
-  {#if actionError}<p class="error" role="alert">{actionError}</p>{/if}
+  {:else if error}<p class="error">{error} <button class="btn small" onclick={() => load()}>Retry</button></p>{/if}
+  {#if actionError}<p class="error">{actionError}</p>{/if}
   {#if detail}
     <div class="recap-heading"><div><strong>{detail.metadata.session_title}</strong><p>{recapStateLabel(detail.metadata.status)} · {formatBytes(detail.metadata.bytes_used)} of {formatBytes(detail.metadata.quota_bytes)}</p></div><button class="btn small" disabled={loading} onclick={() => load()}>Refresh</button><button class="btn small" disabled={exporting} onclick={exportArchive}>{exporting ? 'Exporting…' : 'Export full archive'}</button></div>
     {#if !detail.metadata.speech_available}<p class="coverage">Speech is unavailable: {detail.metadata.speech_error ?? 'The archive contains available room activity only.'}</p>{/if}
     <nav aria-label="Recap sections">{#each ['transcript', 'activity', 'summary'] as value}<button class="btn" aria-pressed={tab === value} onclick={() => tab = value as typeof tab}>{value === 'transcript' ? 'Transcript' : value === 'activity' ? 'Activity & screens' : 'Summary'}</button>{/each}</nav>
     {#if tab === 'summary'}
-      <div class="summary-actions">{#if ['queued', 'running'].includes(detail.metadata.summary_status)}<p role="status">Codex is preparing a draft…</p><button class="btn" disabled={cancelling} onclick={cancel}>{cancelling ? 'Canceling…' : 'Cancel generation'}</button>{:else}<button class="btn" disabled={busy} onclick={generate}>{detail.draft ? 'Regenerate summary…' : 'Generate summary…'}</button>{/if}</div>
-      {#if detail.metadata.summary_error}<p class="error" role="alert">{detail.metadata.summary_error}</p>{/if}
+      <div class="summary-actions">{#if ['queued', 'running'].includes(detail.metadata.summary_status)}<p>Codex is preparing a draft…</p><button class="btn" disabled={cancelling} onclick={cancel}>{cancelling ? 'Canceling…' : 'Cancel generation'}</button>{:else}<button class="btn" disabled={busy} onclick={generate}>{detail.draft ? 'Regenerate summary…' : 'Generate summary…'}</button>{/if}</div>
+      {#if detail.metadata.summary_error}<p class="error">{detail.metadata.summary_error}</p>{/if}
       {#if detail.draft}<article class="draft"><header><strong>Codex draft</strong><button class="btn small" onclick={copyDraft}>{copied ? 'Copied' : 'Copy draft'}</button></header><p>{detail.draft.overview}</p>
         {#each [{title: 'Decisions', items: detail.draft.decisions}, {title: 'Actions', items: detail.draft.actions}, {title: 'Open questions', items: detail.draft.open_questions}, {title: 'Coverage', items: detail.draft.coverage}] as group}<h3>{group.title}</h3>{#if group.items.length}<ul>{#each group.items as item}<li>{item}</li>{/each}</ul>{:else}<p>None recorded.</p>{/if}{/each}
         <p class="hint">Source events: {detail.draft.source_event_ids.join(', ') || 'Not supplied'}</p>

@@ -13,7 +13,7 @@ import { NO_WORKSPACE } from '../labels';
 import { ws } from './workspace.svelte';
 import { defaultAgentProvider } from '../providers';
 import { loadErrorText } from '../loadError';
-import { emptyScene, parseScene } from '../../modules/canvas/scene';
+import { emptyScene, parseScene } from '../canvas/scene';
 import type {
   AssistMode,
   AssistResult,

@@ -159,6 +159,7 @@ export const sqlAdapter: EditAdapter = {
   buildUpdate(rows, ctx) {
     if (ctx.engine === 'clickhouse') return null; // Sorting keys do not enforce row uniqueness.
     const stmts: string[] = [];
+    const stmtRows: number[] = [];
     const diff: DiffLine[] = [];
     for (const { rowIdx, patch } of rows) {
       const entries = [...patch.cells.entries()].sort((a, b) => a[0] - b[0]);
@@ -169,6 +170,7 @@ export const sqlAdapter: EditAdapter = {
         .join(', ');
       const where = whereByPk(ctx, rowIdx);
       stmts.push(`UPDATE ${tableRef(ctx)} SET ${sets} WHERE ${where};`);
+      stmtRows.push(rowIdx);
       for (const [ci, value] of entries) {
         diff.push({
           row: rowIdx,
@@ -184,6 +186,7 @@ export const sqlAdapter: EditAdapter = {
       title: 'Review UPDATE',
       sql: stmts.join('\n'),
       diff,
+      stmtRows,
     };
   },
 

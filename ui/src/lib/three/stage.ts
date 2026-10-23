@@ -68,6 +68,67 @@ export function watchVisibility(el: Element, change: (visible: boolean) => void,
   };
 }
 
+/** An on-demand render loop (see {@link demandLoop}). */
+export interface DemandLoop {
+  /** Schedule a frame unless one is pending or the loop may not run. */
+  kick(): void;
+  /** Cancel the pending frame (pause; a later `kick` resumes). */
+  stop(): void;
+  /** A frame is scheduled or running (false = the loop is idle). */
+  readonly pending: boolean;
+}
+
+/**
+ * The render-loop discipline every 3D surface shares: frames are requested
+ * only while there is work. `frame(now)` runs one frame and returns whether
+ * more work remains (an active tween, held keys, a turntable, damping…);
+ * true re-arms the next frame, false leaves the loop idle with NO rAF
+ * scheduled — an idle scene must not wake the main thread 60×/s (Otto's
+ * webviews disable WebKit's background throttling, so nothing else clamps
+ * it). Anything that changes the picture calls `kick()` to restart it.
+ * `canRun` (visible, active…) is checked on `kick` and at every frame.
+ */
+export function demandLoop(
+  frame: (now: number) => boolean,
+  opts: {
+    canRun?: () => boolean;
+    raf?: (cb: (now: number) => void) => number;
+    caf?: (id: number) => void;
+  } = {},
+): DemandLoop {
+  const raf = opts.raf ?? ((cb: (now: number) => void) => requestAnimationFrame(cb));
+  const caf = opts.caf ?? ((id: number) => cancelAnimationFrame(id));
+  const may = (): boolean => !opts.canRun || opts.canRun();
+  let id = 0;
+  let inFrame = false;
+  const run = (now: number): void => {
+    id = 0;
+    if (!may()) return;
+    inFrame = true;
+    let more = false;
+    try {
+      more = frame(now);
+    } finally {
+      inFrame = false;
+    }
+    // `frame` may itself kick (a callback that changed something): one frame.
+    if (more && !id && may()) id = raf(run);
+  };
+  return {
+    kick() {
+      if (id || !may()) return;
+      id = raf(run);
+    },
+    stop() {
+      if (id) caf(id);
+      id = 0;
+    },
+    get pending() {
+      return id !== 0 || inFrame;
+    },
+  };
+}
+
 /** Tears a renderer down for good: frees its GL resources, hands the context
  *  back at once (browsers cap live contexts) and removes the canvas. */
 export function releaseRenderer(renderer: StageRenderer): void {

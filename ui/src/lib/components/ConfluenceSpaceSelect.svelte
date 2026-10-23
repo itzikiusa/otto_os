@@ -5,6 +5,7 @@
   form is never left pointing at a space the account can't see.
 -->
 <script lang="ts">
+  import { tick } from 'svelte';
   import Skeleton from './Skeleton.svelte';
   import { listConfluenceSpaces } from '../api/issues';
   import type { ConfluenceSpace } from '../api/types/product';
@@ -54,6 +55,16 @@
   }
   let abort: () => void = () => {};
 
+  let selectEl = $state<HTMLSelectElement>();
+  let retryEl = $state<HTMLButtonElement>();
+  /** Retry swaps its own button for a Skeleton, then the select (or a fresh
+   *  Retry): put focus on whichever arrived, not on <body>. */
+  async function retry(): Promise<void> {
+    await load();
+    await tick();
+    (selectEl ?? retryEl)?.focus();
+  }
+
   $effect(() => {
     void accountId;
     void load();
@@ -65,9 +76,10 @@
   <Skeleton rows={1} height={27} label="spaces" />
 {:else if error}
   <div role="alert" class="field-error">{error}</div>
-  <button type="button" class="btn small" onclick={() => void load()}>Retry spaces</button>
+  <button type="button" class="btn small" bind:this={retryEl} onclick={() => void retry()}>Retry spaces</button>
 {:else}
   <select
+    bind:this={selectEl}
     {id}
     aria-label={ariaLabel}
     class="input"

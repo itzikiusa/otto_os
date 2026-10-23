@@ -134,7 +134,7 @@
     {#if vault.historySince}<p>Changes since {new Date(vault.historySince).toLocaleString()} <button class="btn small ghost" onclick={() => {vault.historySince = ''; vault.persistView();}}>Show all dates</button></p>{/if}
     <div class="history-layout">
       <nav aria-label="Saved revisions">
-        {#if loading}<Skeleton rows={4} height={36} label="the edit history" />{:else if visibleRevisions.length === 0}<p>No recorded edits. History begins with writes made after this feature was installed.</p>{/if}
+        {#if loading}<Skeleton rows={4} height={36} label="the edit history" />{:else if visibleRevisions.length === 0 && !error}<p>No recorded edits. History begins with writes made after this feature was installed.</p>{/if}
         {#each visibleRevisions as entry (entry.id)}
           <button class="rev" class:active={selected?.id === entry.id} aria-current={selected?.id === entry.id ? 'true' : undefined} onclick={() => void selectRevision(entry)}>
             <strong>{entry.path}</strong><small title={new Date(entry.created_at).toLocaleString()}>{rel(entry.created_at)} · {entry.reason}{entry.committed ? '' : ' · write not confirmed'}</small>

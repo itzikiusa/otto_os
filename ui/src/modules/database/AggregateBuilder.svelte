@@ -12,6 +12,8 @@
   import { auth } from '../../lib/stores/auth.svelte';
   import { formatMongo } from '../../lib/database/mongo-format';
   import { isBalancedObject } from './query-filter';
+  import { focusAfterRowRemoval } from '../api/rowFocus';
+  import { tick } from 'svelte';
 
   type StageOp =
     | '$match'
@@ -26,9 +28,14 @@
     | '$count'
     | 'raw';
   interface Stage {
+    /** Client-only identity (never persisted): the `{#each}` key, so a moved
+     *  stage keeps its DOM — and the focus — instead of the slot keeping it. */
+    id: number;
     op: StageOp;
     body: string;
   }
+  let nextStageId = 0;
+  const newStage = (op: StageOp, body: string): Stage => ({ id: nextStageId++, op, body });
 
   interface Props {
     /** The collection the pipeline targets; null → editable, pre-filled from
@@ -96,10 +103,10 @@
     } catch {
       /* corrupt draft → start empty */
     }
-    const valid = (draft.stages ?? []).filter(
-      (s): s is Stage => !!s && typeof s.body === 'string' && OPS.includes(s.op),
-    );
-    stages = valid.length > 0 ? valid : [{ op: '$match', body: TEMPLATES.$match }];
+    const valid = (draft.stages ?? [])
+      .filter((s): s is Stage => !!s && typeof s.body === 'string' && OPS.includes(s.op))
+      .map((s) => newStage(s.op, s.body));
+    stages = valid.length > 0 ? valid : [newStage('$match', TEMPLATES.$match)];
     coll = collection ?? draft.collection ?? selectedCollection();
   });
   // Persist on every change while open.
@@ -147,23 +154,34 @@
   const preview = $derived(coll.trim() ? statement() : '');
 
   function addStage(op: StageOp): void {
-    stages = [...stages, { op, body: TEMPLATES[op] }];
+    stages = [...stages, newStage(op, TEMPLATES[op])];
   }
-  function move(i: number, d: -1 | 1): void {
+  let stagesEl: HTMLOListElement | null = $state(null);
+  /** Move a stage one place; focus follows it (the same arrow, or the other
+   *  one when it reached the edge), so repeated presses keep moving it. */
+  async function move(i: number, d: -1 | 1): Promise<void> {
     const j = i + d;
     if (j < 0 || j >= stages.length) return;
+    const id = stages[i].id;
     const next = [...stages];
     [next[i], next[j]] = [next[j], next[i]];
     stages = next;
+    await tick();
+    const atEdge = j === 0 || j === stages.length - 1;
+    const dir = atEdge ? (d < 0 ? 'down' : 'up') : d < 0 ? 'up' : 'down';
+    stagesEl?.querySelector<HTMLElement>(`[data-stage="${id}"] [data-move="${dir}"]`)?.focus();
   }
   function remove(i: number): void {
     stages = stages.filter((_, k) => k !== i);
+    // The focused Remove button is gone: land on the next stage's (or the
+    // previous one's), else on "Add stage".
+    void focusAfterRowRemoval(stagesEl?.parentElement ?? null, i, '.ab-add select', '[data-remove-stage]');
   }
   /** Reseed a stage's body when its op changes (only if still the old template). */
   function setOp(i: number, op: StageOp): void {
     const s = stages[i];
     const untouched = s.body.trim() === TEMPLATES[s.op].trim();
-    stages[i] = { op, body: untouched ? TEMPLATES[op] : s.body };
+    stages[i] = { id: s.id, op, body: untouched ? TEMPLATES[op] : s.body };
   }
   function runUpTo(i: number): void {
     if (!coll.trim() || errors.slice(0, i + 1).some((e) => e !== null)) return;
@@ -181,9 +199,9 @@
         <span class="ab-hint">db.<strong class="mono">{coll.trim() || '…'}</strong>.aggregate([ … ])</span>
       </label>
 
-      <ol class="ab-stages" aria-label="Pipeline stages">
-        {#each stages as s, i (i)}
-          <li class="ab-stage" class:err={errors[i] !== null}>
+      <ol class="ab-stages" aria-label="Pipeline stages" bind:this={stagesEl}>
+        {#each stages as s, i (s.id)}
+          <li class="ab-stage" class:err={errors[i] !== null} data-stage={s.id}>
             <div class="ab-stage-head">
               <span class="ab-n mono">{i + 1}</span>
               <select class="input ab-op mono" value={s.op} onchange={(e) => setOp(i, e.currentTarget.value as StageOp)} aria-label="Stage {i + 1} operator">
@@ -192,9 +210,9 @@
               {#if errors[i]}<span class="ab-err">{errors[i]}</span>{/if}
               <span class="grow"></span>
               <button class="icon-btn" title="Run the pipeline up to this stage" aria-label="Run up to stage {i + 1}" disabled={!coll.trim() || errors.slice(0, i + 1).some((e) => e !== null)} onclick={() => runUpTo(i)}><Icon name="play" size={12} /></button>
-              <button class="icon-btn" title="Move up" aria-label="Move stage {i + 1} up" disabled={i === 0} onclick={() => move(i, -1)}><Icon name="arrowUp" size={12} /></button>
-              <button class="icon-btn" title="Move down" aria-label="Move stage {i + 1} down" disabled={i === stages.length - 1} onclick={() => move(i, 1)}><Icon name="arrowDown" size={12} /></button>
-              <button class="icon-btn" title="Remove stage" aria-label="Remove stage {i + 1}" onclick={() => remove(i)}><Icon name="trash" size={12} /></button>
+              <button class="icon-btn" title="Move up" aria-label="Move stage {i + 1} ({s.op}) up" data-move="up" disabled={i === 0} onclick={() => void move(i, -1)}><Icon name="arrowUp" size={12} /></button>
+              <button class="icon-btn" title="Move down" aria-label="Move stage {i + 1} ({s.op}) down" data-move="down" disabled={i === stages.length - 1} onclick={() => void move(i, 1)}><Icon name="arrowDown" size={12} /></button>
+              <button class="icon-btn" title="Remove stage" aria-label="Remove stage {i + 1} ({s.op})" data-remove-stage onclick={() => remove(i)}><Icon name="trash" size={12} /></button>
             </div>
             <textarea dir="ltr" class="input mono ab-body" rows={s.op === '$limit' || s.op === '$skip' || s.op === '$count' || s.op === '$unwind' ? 1 : 3} bind:value={s.body} spellcheck="false" aria-label="Stage {i + 1} body"></textarea>
           </li>

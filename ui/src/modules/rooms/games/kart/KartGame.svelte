@@ -339,7 +339,7 @@
       if (state.phase === 'done' && !finished) { finished = true; input?.release(); onfinish?.(state); audio.play(state.racers[mineIndex].place === 1 ? 'voice-win' : 'voice-over'); }
     };
     let bootStarted = false;
-    const fail = (e: unknown) => { if (!disposed) { loading = false; error = e instanceof Error ? e.message : 'The race could not start.'; } };
+    const fail = (e: unknown) => { if (!disposed) { loading = false; error = e instanceof Error ? e.message : 'The race couldn’t start.'; } };
     if (state) { bootStarted = true; boot(state).catch(fail); }
     frame = requestAnimationFrame(tick);
     stop = () => {

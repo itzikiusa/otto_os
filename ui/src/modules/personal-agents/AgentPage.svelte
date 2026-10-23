@@ -1,6 +1,7 @@
 <script lang="ts">
   // One personal agent: Overview / Activity / Autonomy / Schedules / Runs /
   // Chat / Memory / Context tabs.
+  import { announce } from '../../lib/announce.svelte';
   import { latestOnly } from '../../lib/latest';
   import RelTime from '../../lib/components/RelTime.svelte';
   import { tabKeys } from '../../lib/tabKeys';
@@ -31,21 +32,8 @@
   import AgentActivity from './AgentActivity.svelte';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
-  import {
-    browserTz,
-    buildCadence,
-    cadenceLabel,
-    defaultCadence,
-    loadCadence,
-    WEEKDAYS,
-    type CadenceForm,
-  } from './cadence';
-  import type {
-    PersonalAgentAutonomy,
-    PersonalAgentPermission,
-    PersonalAgentRun,
-    PersonalAgentSchedule,
-  } from '../../lib/api/types';
+  import { browserTz, buildCadence, cadenceLabel, defaultCadence, loadCadence, WEEKDAYS, type CadenceForm } from './cadence';
+  import type { PersonalAgentAutonomy, PersonalAgentPermission, PersonalAgentRun, PersonalAgentSchedule } from '../../lib/api/types';
 
   const AgentMemoryInspectorLazy = lazyComponent(() => import('./AgentMemoryInspector.svelte'));
   const AgentDocumentsLazy = lazyComponent(() => import('./AgentDocuments.svelte'));
@@ -101,8 +89,10 @@
     if (!wsId || key === lookedUp) return;
     if (untrack(() => personalAgents.agent(agentId))) return;
     lookedUp = key;
-    void personalAgents.loadAgents(wsId);
+    // A failed lookup is not "not found": forget it, so a later visit asks again.
+    void retryAgents(wsId).then(() => { if (personalAgents.agentsError && lookedUp === key) lookedUp = ''; });
   });
+  const retryAgents = (wsId: string | null) => (wsId ? personalAgents.loadAgents(wsId) : Promise.resolve());
 
   $effect(() => {
     if (tab === 'runs') void personalAgents.loadRuns(agentId);
@@ -181,6 +171,7 @@
     const id = agentId;
     if (chatPending) return;
     chatError = '';
+    announce(`Opening ${untrack(() => agent?.name) ?? 'the agent'}’s chat session…`);
     chatPending = personalAgentsApi
       .chatSession(id)
       .then((r) => {
@@ -447,6 +438,9 @@
   {#if !agent}
     {#if personalAgents.loadingAgents}
       <Skeleton rows={3} height={64} label="the agent" />
+    {:else if personalAgents.agentsError}
+      <!-- A failed list load must never read as "Agent not found" (it may exist). -->
+      <LoadState what="this agent" variant="page" error={personalAgents.agentsError} empty onretry={() => void retryAgents(ws.currentId)} />
     {:else}
       <EmptyState
         variant="page"
@@ -678,7 +672,7 @@
         <LazyTerminal sessionId={chatSessionId} autoFocus />
       </div>
     {:else}
-      <p class="muted" role="status">Opening {agent.name}’s chat session…</p>
+      <p class="muted">Opening {agent.name}’s chat session…</p>
     {/if}
   {:else if (tab === 'memory' || tab === 'context') && agent}
     {#if tab === 'memory'}

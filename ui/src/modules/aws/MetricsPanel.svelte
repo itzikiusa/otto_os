@@ -13,7 +13,7 @@
   import { untrack } from 'svelte';
   import { awsApi, isLoginRequired } from '../../lib/api/aws';
   import { ApiError, isAbortError } from '../../lib/api/client';
-  import EmptyState from '../../lib/components/EmptyState.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import MetricChart from '../../lib/components/MetricChart.svelte';
@@ -140,23 +140,12 @@
   </div>
 
   {#if error && !resp}
-    {#if denied}
-      <EmptyState
-        icon="lock"
-        title="CloudWatch access denied"
-        body={`This account’s IAM identity needs cloudwatch:GetMetricData. ${error}`}
-        actionLabel="Retry"
-        onaction={() => void load()}
-      />
-    {:else}
-      <EmptyState
-        icon="chart"
-        title="Couldn’t load metrics"
-        body={awsErrorText(error)}
-        actionLabel={loginNeeded && onsignin ? 'Sign in' : 'Retry'}
-        onaction={loginNeeded && onsignin ? onsignin : () => void load()}
-      />
-    {/if}
+    <LoadState
+      what="metrics"
+      error={denied ? `CloudWatch access denied: this account’s IAM identity needs cloudwatch:GetMetricData. ${error}` : awsErrorText(error)}
+      empty
+      onretry={() => void load()}
+    >{#snippet errorActions()}{#if !denied && loginNeeded && onsignin}<button class="btn primary" onclick={onsignin}><Icon name="key" size={12} /> Sign in</button>{/if}{/snippet}</LoadState>
   {:else if !resp}
     <div class="pad"><Skeleton rows={4} height={120} label="metrics" /></div>
   {:else}

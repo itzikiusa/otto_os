@@ -380,14 +380,7 @@
       {:else if items.length === 0 && err}
         <!-- A failed load is not "no work items yet": say so, with Retry. -->
         <div class="card">
-          <EmptyState
-            icon="radar"
-            title="Couldn’t load Mission Control"
-            body={err}
-            actionLabel="Retry"
-            actionIcon="refresh"
-            onaction={() => ws.currentId && void reload(ws.currentId)}
-          />
+          <LoadState what="Mission Control" error={err} empty {loading} onretry={() => ws.currentId && void reload(ws.currentId)} />
         </div>
       {:else if items.length === 0 && !loading}
         <div class="card">

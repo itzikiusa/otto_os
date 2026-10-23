@@ -28,7 +28,7 @@ import type {
   UpdateAgentReq,
   UpdateGoalReq,
   UpdateTriggerReq,
-} from '../../modules/swarm/types';
+} from '../api/types/swarm';
 import { announceModule } from '../lazyModule';
 import { latestOnly } from '../latest';
 

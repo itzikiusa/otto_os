@@ -29,6 +29,7 @@
   // leaves out (chevrons, separators, summaries, array-index labels, "more"
   // buttons) is `data-find-skip`. A find reveal (`reveal`, per record) forces
   // paths open, grows "show more" slices and unclips strings on top of the plan.
+  import { tick } from 'svelte';
   import Self from './JsonTree.svelte';
   import { bsonScalar } from '../jsonTree/bson';
   import { setOverride, stickyKey, type ExpansionState } from '../jsonTree/expansion-plan';
@@ -112,6 +113,21 @@
   const visible = $derived(open ? entries.slice(0, shown) : []);
   const hiddenCount = $derived(Math.max(0, size - shown));
 
+  let kidsEl = $state<HTMLDivElement>();
+  /** Reveal the next chunk. The button stays while more is hidden (focus
+   *  stays on it); when the last chunk unmounts it, focus would fall to
+   *  <body>, so it moves to the last revealed row — where the button was. */
+  async function showMore(): Promise<void> {
+    shownLocal = shown + CHUNK;
+    await tick();
+    if (hiddenCount > 0 || !kidsEl) return;
+    const rows = kidsEl.querySelectorAll<HTMLElement>(':scope > .node > .line, :scope > .line');
+    const last = rows[rows.length - 1];
+    if (!last) return;
+    if (last.tabIndex < 0 && !(last instanceof HTMLButtonElement)) last.tabIndex = -1;
+    last.focus();
+  }
+
   /** One-line summary for a closed container — the whole point of collapsing. */
   const summary = $derived(
     isArr
@@ -148,12 +164,12 @@
         <span class="sum" class:dimmed={open} data-find-skip>{summary}</span>
       </button>
       {#if open}
-        <div class="kids">
+        <div class="kids" bind:this={kidsEl}>
           {#each visible as [k, v] (k)}
             <Self value={v} label={k} depth={depth + 1} path={path ? `${path}.${k}` : k} {plan} {expansion} {reveal} />
           {/each}
           {#if hiddenCount > 0}
-            <button class="more" type="button" onclick={() => (shownLocal = shown + CHUNK)} data-find-skip>
+            <button class="more" type="button" onclick={showMore} data-find-skip>
               show {Math.min(CHUNK, hiddenCount)} more · {hiddenCount} hidden
             </button>
           {/if}

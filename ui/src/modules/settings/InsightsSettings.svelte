@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announce } from '../../lib/announce.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import { toastError } from '../../lib/toastError';
   import { sectionLabel } from './sections';
@@ -31,6 +32,8 @@
   let savedTimer: ReturnType<typeof setTimeout> | null = null;
   function flashSaved(where: 'schedule' | 'agent'): void {
     savedIn = where;
+    // a11y-6-01: announced at the state edge, not by the inserted tick.
+    announce('Saved');
     if (savedTimer) clearTimeout(savedTimer);
     savedTimer = setTimeout(() => (savedIn = null), 2500);
   }
@@ -185,14 +188,14 @@
         <button class="btn small" onclick={() => router.go('settings/skills')}>Open Skills</button>
       </p>
     {/if}
-    <h2 class="section-title">Schedule {#if savedIn === 'schedule'}<span class="saved" role="status">Saved</span>{/if}</h2>
+    <h2 class="section-title">Schedule {#if savedIn === 'schedule'}<span class="saved">Saved</span>{/if}</h2>
     <div class="card toggles">
       <SettingToggle label="Daily" hint="Covers the previous day (UTC), generated once it has ended." checked={cfg.daily} disabled={saving} onchange={() => toggle('daily')} />
       <SettingToggle label="Weekly" hint="Runs on Monday (UTC), covering the previous Monday–Sunday." checked={cfg.weekly} disabled={saving} onchange={() => toggle('weekly')} />
       <SettingToggle label="Monthly" hint="Runs on the 1st (UTC), covering the previous month." checked={cfg.monthly} disabled={saving} onchange={() => toggle('monthly')} />
     </div>
 
-    <h2 class="section-title">Report agent {#if savedIn === 'agent'}<span class="saved" role="status">Saved</span>{/if}</h2>
+    <h2 class="section-title">Report agent {#if savedIn === 'agent'}<span class="saved">Saved</span>{/if}</h2>
     {#if agentSaveError}
       <p role="alert">{agentSaveError} <button class="btn small" disabled={saving || !!modelSaveTimer} onclick={retryAgent}>Retry saving report agent</button><!-- ui-guards: allow — retries a failed save action, not a load --></p>
     {/if}

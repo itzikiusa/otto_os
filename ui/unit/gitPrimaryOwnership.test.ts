@@ -16,12 +16,16 @@ function fixture() {
     calls.push({ url, result });
     return result.promise;
   };
-  const { git } = loadSource(new URL('../src/lib/stores/git.svelte.ts', import.meta.url), {
+  // The store's typed client (lib/api/git.ts) runs for real over the same
+  // transport stub: `relative` loads it, `lib/api/client` is its import.
+  const imports: Record<string, unknown> = {
     '../api/client': { api: { get: call, post: call } },
     '../loadError': { loadErrorText: (e: unknown) => String(e) },
     '../gitLivePaths': livePaths,
     '../latest': latest,
-  }, { document: { hidden: false, hasFocus: () => true, addEventListener() {}, removeEventListener() {} }, setTimeout, clearTimeout });
+  };
+  imports['lib/api/client'] = imports['../api/client'];
+  const { git } = loadSource(new URL('../src/lib/stores/git.svelte.ts', import.meta.url), imports, { document: { hidden: false, hasFocus: () => true, addEventListener() {}, removeEventListener() {} }, setTimeout, clearTimeout }, { relative: true });
   const find = (url: string) => {
     const c = calls.find((x) => x.url === url);
     if (!c) throw new Error(`no call ${url}: ${calls.map((x) => x.url).join(' ')}`);

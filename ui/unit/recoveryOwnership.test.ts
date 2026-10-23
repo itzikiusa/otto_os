@@ -8,8 +8,8 @@ function analysis(getAnalysis: (id: string) => Promise<any>) {
     const id = this.selectedId; return () => this.selectedId === id;
   } };
   return componentFunctions(new URL('../src/modules/product/AnalysisTab.svelte', import.meta.url),
-    ['pollOnce', 'clearPoll', 'isTerminal', 'selectHistory', 'startPolling'], {
-      activeId: 'A', activeDetail: null, pollStartedAt: 0, pollTimer: null,
+    ['pollOnce', 'clearPoll', 'isTerminal', 'selectHistory', 'selectRun', 'startPolling'], {
+      activeId: 'A', activeDetail: null, detailLoading: false, detailError: null, pollStartedAt: 0, pollTimer: null,
       POLL_MAX_MS: 30 * 60_000, POLL_INTERVAL_MS: 3000, viewGeneration: 0, readSequence: 0,
       polling: false, pollFailures: 0, lastPollError: null, pollStopped: null, loadErrorText: String,
       product, toasts: { warn() { throw new Error('Client must not claim server timed out'); } },

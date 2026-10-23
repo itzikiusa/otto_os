@@ -4,7 +4,7 @@
   import { untrack } from 'svelte';
   import { listIssueProjects, searchIssues } from '../../lib/api/issues';
   import { issueAccounts } from '../../lib/stores/issueAccounts.svelte';
-  import { loadErrorText } from '../../lib/loadError';
+  import { loadErrorText, providerErrorText } from '../../lib/loadError';
   import LoadState from '../../lib/components/LoadState.svelte';
   import type { IssueAccount, IssueProject, IssueProviderKind, IssueSummary } from '../../lib/api/types';
   import { truncatedNote } from '../../lib/listingPage';
@@ -156,7 +156,7 @@
       if (seq === searchSeq) results = found;
     } catch (e) {
       if (seq !== searchSeq) return;
-      searchError = e instanceof Error ? e.message : String(e);
+      searchError = providerErrorText(e);
       results = [];
     } finally {
       if (seq === searchSeq) searching = false;

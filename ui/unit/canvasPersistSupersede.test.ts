@@ -21,7 +21,7 @@ test('queued, superseded scene writes are dropped; the newest doc is sent', asyn
     './workspace.svelte': { ws: { currentId: 'w1' } }, '../labels': { NO_WORKSPACE: 'Select a workspace first' },
     '../providers': { defaultAgentProvider: () => 'claude' },
     '../loadError': { loadErrorText: (e: unknown) => String(e) },
-    '../../modules/canvas/scene': { assistToNodes: () => [], emptyScene: () => ({}), parseScene: (x: unknown) => x },
+    '../canvas/scene': { assistToNodes: () => [], emptyScene: () => ({}), parseScene: (x: unknown) => x },
   });
   const c = mod.canvas;
   const d = (n: number) => ({ type: 'otto-canvas', version: 1, format: 'excalidraw', source: `s${n}` });
@@ -41,7 +41,7 @@ test('drafts staged in one tick collapse into a single PUT', async () => {
     './workspace.svelte': { ws: { currentId: 'w1' } }, '../labels': { NO_WORKSPACE: 'Select a workspace first' },
     '../providers': { defaultAgentProvider: () => 'claude' },
     '../loadError': { loadErrorText: (e: unknown) => String(e) },
-    '../../modules/canvas/scene': { assistToNodes: () => [], emptyScene: () => ({}), parseScene: (x: unknown) => x },
+    '../canvas/scene': { assistToNodes: () => [], emptyScene: () => ({}), parseScene: (x: unknown) => x },
   });
   const c = mod.canvas;
   const a = { source: 'a' };
@@ -71,7 +71,7 @@ test('a save issued during a restore queues behind it and keeps its draft', asyn
     './workspace.svelte': { ws: { currentId: 'w1' } }, '../labels': { NO_WORKSPACE: 'Select a workspace first' },
     '../providers': { defaultAgentProvider: () => 'claude' },
     '../loadError': { loadErrorText: (e: unknown) => String(e) },
-    '../../modules/canvas/scene': { assistToNodes: () => [], emptyScene: () => ({}), parseScene: (x: unknown) => x },
+    '../canvas/scene': { assistToNodes: () => [], emptyScene: () => ({}), parseScene: (x: unknown) => x },
   });
   const c = mod.canvas;
   const restoring = c.restoreVersion('scene-a', 'v1');

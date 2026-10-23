@@ -105,6 +105,34 @@ export interface ProofPackResp extends ProofPack {
   artifact_count: number;
 }
 
+/** What a diff assembly did (`POST /proof-packs/{id}/assemble`). */
+export type DiffAssembly =
+  | { status: 'assembled'; files_changed: number }
+  | { status: 'no_changes' }
+  | { status: 'not_a_repo' }
+  /** Each entry is `"<command>: <error>"`. */
+  | { status: 'diff_failed'; commands: string[] };
+
+/** One requested command of an assemble call. */
+export interface AssembledCommand {
+  cmd: string;
+  /** `passed` / `failed` when its artifact was stored; absent with `error`. */
+  status?: ProofArtifactStatus | null;
+  error?: string | null;
+}
+
+/** What the assemble call did, beside the recomputed pack. */
+export interface AssembleSummary {
+  /** Absent when the request had no `cwd`. */
+  diff?: DiffAssembly | null;
+  commands: AssembledCommand[];
+}
+
+/** `POST /proof-packs/{id}/assemble` → the pack row plus `assembled`. */
+export interface AssembleResp extends ProofPackResp {
+  assembled: AssembleSummary;
+}
+
 /** One artifact plus a capped inline preview for list/detail rendering. */
 export interface ProofArtifactView extends ProofArtifact {
   preview?: string | null;

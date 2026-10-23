@@ -105,7 +105,7 @@ export function reduce(s: ConnState, ev: ConnEvent, jitter = 0.5): ConnState {
       }
       const attempt = s.attempt + 1;
       if (attempt > BACKOFF.maxAttempts) {
-        return { ...s, status: 'ended', attempt, retryInMs: 0, reason: 'Lost the connection to Otto and could not reconnect.' };
+        return { ...s, status: 'ended', attempt, retryInMs: 0, reason: 'Lost the connection to Otto and couldn’t reconnect.' };
       }
       return {
         ...s,

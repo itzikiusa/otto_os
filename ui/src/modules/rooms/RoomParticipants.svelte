@@ -39,7 +39,7 @@
     if (next === member.role) return;
     if (next === 'editor') {
       const ok = await confirmer.ask(
-        `${member.name} may later be given control of the terminal. They cannot type until you give control.`,
+        `${member.name} may later be given control of the terminal. They can’t type until you give control.`,
         {title: `Let ${member.name} be granted control?`, confirmLabel: 'Allow'},
       );
       if (!ok) { select.value = member.role; return; }

@@ -129,13 +129,23 @@ export function applyAssistEvent(
   return { turns: out, refetch: isTerminal(ev.status) && !isTerminal(cur.status) };
 }
 
+/** A running turn the daemon no longer knows (turns live in its memory only). */
+export const LOST_TURN_ERROR = 'Otto restarted while this turn was running; the turn was lost. Ask again.';
+
 /**
  * Merge a fresh `GET …/assist` answer with what the panel already knows. The
  * server's copy wins (it has the summary + citations), except that a turn the
  * server no longer lists (it keeps ≤ 20, none after a restart) is kept, and a
  * locally-terminal turn is never overwritten by a stale running copy.
+ *
+ * `known` makes the answer authoritative for the turns the panel already had
+ * when it sent the request: one of those still starting/running that the
+ * server no longer lists was lost with a daemon restart, and becomes `failed`
+ * (else Send stays disabled behind a turn that will never finish). A turn
+ * that arrived after the request went out (the optimistic window right after
+ * a send) is not in `known` and is kept as is.
  */
-export function mergeTurns(local: DesignAssistTurn[], fetched: DesignAssistTurn[]): DesignAssistTurn[] {
+export function mergeTurns(local: DesignAssistTurn[], fetched: DesignAssistTurn[], known?: ReadonlySet<string>): DesignAssistTurn[] {
   const byId = new Map(local.map((t) => [t.turn_id, t]));
   const out: DesignAssistTurn[] = [];
   for (const f of fetched) {
@@ -143,8 +153,32 @@ export function mergeTurns(local: DesignAssistTurn[], fetched: DesignAssistTurn[
     out.push(l && isTerminal(l.status) && !isTerminal(f.status) ? l : f);
     byId.delete(f.turn_id);
   }
-  for (const l of byId.values()) out.push(l);
+  for (const l of byId.values()) {
+    out.push(known?.has(l.turn_id) && !isTerminal(l.status) ? { ...l, status: 'failed', error: LOST_TURN_ERROR } : l);
+  }
   return out.sort((a, b) => b.started_at.localeCompare(a.started_at));
+}
+
+/** What a Studio3D agent poll found for its turn: keep waiting, or the toast
+ *  that ends it. A turn missing from a successful answer was lost with a
+ *  daemon restart — never "still running" (the poll would go on for good). */
+export type TurnOutcome = { kind: 'wait' } | { kind: 'success' | 'info' | 'warn' | 'error'; title: string; body?: string };
+export function turnOutcome(t: DesignAssistTurn | undefined): TurnOutcome {
+  if (t && (t.status === 'starting' || t.status === 'running')) return { kind: 'wait' };
+  if (!t) return { kind: 'error', title: 'Otto couldn’t finish', body: LOST_TURN_ERROR };
+  if (t.status === 'done') return { kind: 'success', title: 'Otto’s version is ready', body: t.message ?? 'Review it in the version strip.' };
+  if (t.status === 'unchanged') return { kind: 'info', title: 'Otto made no changes', body: t.message ?? undefined };
+  if (t.status === 'conflict') return { kind: 'warn', title: 'Saved as a side version', body: 'The scene changed while Otto worked — compare and accept it from history.' };
+  return { kind: 'error', title: 'Otto couldn’t finish', body: t.error ?? 'The turn failed; the scene is unchanged.' };
+}
+
+/** The accessibility fixes a finished fix turn made (its findings, else the
+ *  ones that were asked for), at most 12 — the `a11y_fix` learning signals. */
+export function a11yFixesOf(t: DesignAssistTurn, asked: { rule?: string | null; message: string }[] = []): { rule: string; message: string }[] {
+  const fixed = t.findings
+    .filter((f) => f.fixed !== false && typeof f.rule === 'string' && f.rule)
+    .map((f) => ({ rule: f.rule as string, message: typeof f.message === 'string' ? f.message : '' }));
+  return (fixed.length ? fixed : asked.filter((f) => f.rule).map((f) => ({ rule: f.rule!, message: f.message }))).slice(0, 12);
 }
 
 /** Whether any turn (or variants run) still holds the artifact. */

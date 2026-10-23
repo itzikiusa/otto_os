@@ -5,7 +5,7 @@
   // every tool, the connection as it always was — can't be edited or deleted.
   // Each profile also gets its own connection config, so an outside Claude
   // Code or Codex can attach "Otto · Database" only.
-  import { untrack } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import Badge from '../../lib/components/Badge.svelte';
   import Tabs from '../../lib/components/Tabs.svelte';
@@ -74,12 +74,20 @@
     editor = { editing: null, initial: { ...draftOf(p), name: duplicateName(p.name, profiles) } };
   }
 
-  async function makeDefault(p: McpProfile): Promise<void> {
+  /** The selected profile's ⋯ button: where focus lands when the inline
+   *  "Make default" button unmounts itself (it only shows for non-defaults). */
+  let moreBtn = $state<HTMLButtonElement | null>(null);
+
+  async function makeDefault(p: McpProfile, refocus = false): Promise<void> {
     busy = true;
     try {
       await mcpCpApi.cpSetDefaultProfile(p.id);
       toasts.success(`${p.name} is the default`, 'New sessions preselect it; sessions without a profile use it on their next start.');
       await reload(p.id);
+      if (refocus) {
+        await tick();
+        moreBtn?.focus();
+      }
     } catch (e) {
       toastError('Couldn’t change the default', e);
     } finally {
@@ -185,9 +193,9 @@
             </div>
             <div class="d-actions">
               {#if !selected.is_default}
-                <button class="btn small" disabled={!isAdmin || busy} title={isAdmin ? undefined : NEEDS_ADMIN} onclick={() => void makeDefault(selected)} data-testid="mcp-profile-make-default">Make default</button>
+                <button class="btn small" disabled={!isAdmin || busy} title={isAdmin ? undefined : NEEDS_ADMIN} onclick={() => void makeDefault(selected, true)} data-testid="mcp-profile-make-default">Make default</button>
               {/if}
-              <button class="icon-btn" aria-label="More actions for {selected.name}" title="More…" aria-haspopup="menu" onclick={(e) => menu(e, selected)}><Icon name="more" size={14} /></button>
+              <button class="icon-btn" bind:this={moreBtn} aria-label="More actions for {selected.name}" title="More…" aria-haspopup="menu" onclick={(e) => menu(e, selected)}><Icon name="more" size={14} /></button>
             </div>
           </div>
           {#if selected.description}<p class="muted small">{selected.description}</p>{/if}

@@ -48,7 +48,7 @@ test('expanding a thin transcript fetches its body through the actual Overview h
   const f = fixture();
   const { body: _body, ...summary } = f.rows[0];
   f.product.transcripts = [summary];
-  const overview = componentFunctions(new URL('../src/modules/product/OverviewTab.svelte', import.meta.url), ['toggleTranscript'], {
+  const overview = componentFunctions(new URL('../src/modules/product/StoryTranscripts.svelte', import.meta.url), ['toggleTranscript'], {
     product: f.product, expandedTranscripts: {},
   });
   await overview.toggleTranscript(summary.id);
@@ -119,7 +119,7 @@ test('an oversized body stays out of the cache and remains downloadable in full'
   assert.equal(Object.keys(f.product.transcriptBodies).length, 0);
   assert.match(f.product.transcriptBodyErrors[row.id], /Download/);
   let download: Blob | undefined;
-  const overview = componentFunctions(new URL('../src/modules/product/OverviewTab.svelte', import.meta.url), ['downloadTranscript'], {
+  const overview = componentFunctions(new URL('../src/modules/product/StoryTranscripts.svelte', import.meta.url), ['downloadTranscript'], {
     product: f.product, Blob,
     URL: { createObjectURL: (blob: Blob) => { download = blob; return 'blob:transcript'; }, revokeObjectURL() {} },
     document: { createElement: () => ({ href: '', download: '', click() {} }) },

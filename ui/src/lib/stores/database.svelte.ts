@@ -54,7 +54,7 @@ import {
   unmaskQueryPlaceholders,
   type VarSpec,
 } from '../database/sql-util';
-import { condToSql, parseFilterValText, toFilterVal, type FilterCond } from '../database/filter-chips';
+import type { FilterCond } from '../database/filter-chips';
 import { tableRefFromNodeId } from '../database/sql-dialect';
 import { normalizeDbError } from '../database/error-normalize';
 import { copyTextOrThrow } from '../clipboard';
@@ -108,21 +108,19 @@ import type {
   SshTab,
   ViewMode,
 } from './database/model';
-import {
-  extractWhereBody,
-  parseExplicitLimit,
-  rewriteWhere,
-} from './database/statement';
+import { parseExplicitLimit } from './database/statement';
 export * from './database/model';
 export * from './database/statement';
 import { DbDashboardsStore } from './database/dashboards.svelte';
 import { DbAssistStore } from './database/assist.svelte';
 import { DbSavedQueriesStore } from './database/savedQueries.svelte';
 import { DbHistoryStore } from './database/history.svelte';
+import { DbFiltersStore } from './database/filters.svelte';
 export { DbDashboardsStore, type DashboardsHost } from './database/dashboards.svelte';
 export { DbAssistStore, type AssistHost } from './database/assist.svelte';
 export { DbSavedQueriesStore, type SavedQueriesHost } from './database/savedQueries.svelte';
 export { DbHistoryStore, type HistoryHost } from './database/history.svelte';
+export { DbFiltersStore, type FiltersHost } from './database/filters.svelte';
 
 class DatabaseStore {
   // ── Connections ────────────────────────────────────────────────────────────
@@ -3059,122 +3057,22 @@ class DatabaseStore {
   }
 
   // ── Quick filters (chips that own the active tab's WHERE clause) ───────────
-  // Chips accumulate without running the query — the user adds more, then runs.
-  // Repeated equals on a column collapse into IN / NOT IN; include vs exclude
-  // are separate directions. Applying rewrites the statement's WHERE in place.
-
-  /** Quick-filter chips for the active tab. */
-  get filters(): FilterCond[] {
-    return this.tab?.filters ?? [];
-  }
-
-  /** On the first chip, fold any hand-written WHERE into a removable raw chip
-   * so chips can safely own the WHERE from then on. */
-  private absorbExistingWhere(t: QueryTab): void {
-    if (t.filters.length > 0) return;
-    const existing = extractWhereBody(t.statement);
-    if (existing && existing.trim()) t.filters.push({ kind: 'raw', text: existing.trim() });
-  }
-
-  /** Add a value-based filter from a cell (include = equals, exclude = not). */
-  addQuickFilter(column: string, value: unknown, mode: 'include' | 'exclude'): void {
-    const t = this.tab;
-    if (!t || !column) return;
-    this.absorbExistingWhere(t);
-    const op = mode === 'include' ? 'in' : 'not_in';
-    const fv = toFilterVal(value);
-    let cond = t.filters.find(
-      (c): c is Extract<FilterCond, { kind: 'col' }> =>
-        c.kind === 'col' && c.column === column && c.op === op,
-    );
-    if (!cond) {
-      cond = { kind: 'col', column, op, values: [] };
-      t.filters.push(cond);
-    }
-    if (!cond.values.some((v) => v.raw === fv.raw && v.isNull === fv.isNull)) cond.values.push(fv);
-    this.applyFilters();
-  }
-
-  /** Add an empty (value-less) filter on a column, to be filled in the bar. */
-  addColumnFilter(column: string): void {
-    const t = this.tab;
-    if (!t || !column) return;
-    this.absorbExistingWhere(t);
-    if (!t.filters.some((c) => c.kind === 'col' && c.column === column)) {
-      t.filters.push({ kind: 'col', column, op: 'in', values: [] });
-    }
-    this.applyFilters();
-  }
-
-  /** Add a typed value to an existing column chip. */
-  addFilterValue(condIndex: number, text: string): void {
-    const t = this.tab;
-    const c = t?.filters[condIndex];
-    if (!t || !c || c.kind !== 'col' || !text.trim()) return;
-    const fv = parseFilterValText(text);
-    if (!c.values.some((v) => v.raw === fv.raw && v.isNull === fv.isNull)) c.values.push(fv);
-    this.applyFilters();
-  }
-
-  removeFilterValue(condIndex: number, valIndex: number): void {
-    const t = this.tab;
-    const c = t?.filters[condIndex];
-    if (!t || !c || c.kind !== 'col') return;
-    c.values.splice(valIndex, 1);
-    this.applyFilters();
-  }
-
-  removeFilterCond(condIndex: number): void {
-    const t = this.tab;
-    if (!t) return;
-    t.filters.splice(condIndex, 1);
-    this.applyFilters();
-  }
-
-  /** Flip a column chip between include (IN) and exclude (NOT IN). */
-  toggleFilterMode(condIndex: number): void {
-    const t = this.tab;
-    const c = t?.filters[condIndex];
-    if (!t || !c || c.kind !== 'col') return;
-    c.op = c.op === 'in' ? 'not_in' : 'in';
-    this.applyFilters();
-  }
-
-  clearFilters(): void {
-    const t = this.tab;
-    if (!t) return;
-    t.filters = [];
-    this.applyFilters();
-  }
-
-  /** Take over the WHERE from a cell "Query by value" / "Add to query" action:
-   * set the rewritten statement AND drop any quick-filter chips — otherwise the
-   * chip bar would desync and the next chip op (`applyFilters`) would silently
-   * rebuild the WHERE from the stale chips, discarding the spliced condition.
-   * Clears the chips WITHOUT `applyFilters` (which would strip the new WHERE).
-   * Does NOT run. */
-  setStatementFromCellFilter(statement: string): void {
-    const t = this.tab;
-    if (!t) return;
-    t.filters = [];
-    this.setStatement(statement);
-  }
-
-  /** Rewrite the active statement's WHERE from the chips (does NOT run). */
-  private applyFilters(): void {
-    const t = this.tab;
-    if (!t) return;
-    // Identifier quoting, string escaping and boolean literals follow the
-    // connection's engine (`sql-dialect.ts`) — Postgres gets `"col"`, no
-    // backslash doubling and TRUE/FALSE.
-    const engine = this.selectedConn?.kind ?? null;
-    const body = t.filters
-      .map((c) => condToSql(c, engine))
-      .filter((s) => s.trim())
-      .join(' AND ');
-    t.statement = rewriteWhere(t.statement, body);
-    this.persistTabs();
-  }
+  // Delegated to lib/stores/database/filters.svelte.ts.
+  readonly chips = new DbFiltersStore({
+    activeTab: () => this.tab ?? null,
+    engine: () => this.selectedConn?.kind ?? null,
+    setStatement: (statement) => this.setStatement(statement),
+    persistTabs: () => this.persistTabs(),
+  });
+  get filters(): FilterCond[] { return this.chips.filters; }
+  addQuickFilter(column: string, value: unknown, mode: 'include' | 'exclude'): void { this.chips.addQuickFilter(column, value, mode); }
+  addColumnFilter(column: string): void { this.chips.addColumnFilter(column); }
+  addFilterValue(condIndex: number, text: string): void { this.chips.addFilterValue(condIndex, text); }
+  removeFilterValue(condIndex: number, valIndex: number): void { this.chips.removeFilterValue(condIndex, valIndex); }
+  removeFilterCond(condIndex: number): void { this.chips.removeFilterCond(condIndex); }
+  toggleFilterMode(condIndex: number): void { this.chips.toggleFilterMode(condIndex); }
+  clearFilters(): void { this.chips.clearFilters(); }
+  setStatementFromCellFilter(statement: string): void { this.chips.setStatementFromCellFilter(statement); }
 
   /** Until when (epoch ms) completion stays quiet after a failed request, per
    *  connection — a broken connection must not be re-asked on every word. */

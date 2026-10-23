@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announce } from '../../lib/announce.svelte';
   // Settings → Assistant: how Otto Assistant picks provider + model per turn
   // (plan §2.4). It never switches silently — rules decide, an explicit pin or
   // a leading @claude / @codex always wins, and a usage limit asks first
@@ -99,6 +100,10 @@
   function limitFor(p: Provider) {
     return assistant.limits.data.find((l) => l.provider === p && l.limited) ?? null;
   }
+
+  // a11y-6-01: announce at the state edge — a status element inserted
+  // together with its text is not read by VoiceOver/WebKit.
+  $effect(() => { if (dirty && !saveError) announce('Unsaved changes — Save to apply them.'); });
 </script>
 
 <div class="settings-section">
@@ -124,7 +129,7 @@
       />
     {:else if draft}
       <div class="form" data-testid="assistant-routing">
-        {#if saveError}<p class="form-note err" role="alert">{saveError}</p>{:else if dirty}<p class="form-note unsaved" role="status">Unsaved changes — Save to apply them.</p>{/if}
+        {#if saveError}<p class="form-note err" role="alert">{saveError}</p>{:else if dirty}<p class="form-note unsaved">Unsaved changes — Save to apply them.</p>{/if}
 
         <section>
           <h2 class="section-title">Subscriptions</h2>

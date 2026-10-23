@@ -327,8 +327,8 @@
     try {
       await copyTextOrThrow(text);
       toasts.success(`Copied ${what}`);
-    } catch (e) {
-      toastError('Couldn’t copy', e);
+    } catch {
+      toasts.error('Couldn’t copy', 'The clipboard isn’t available here. Select the text and copy it manually.');
     }
   }
 

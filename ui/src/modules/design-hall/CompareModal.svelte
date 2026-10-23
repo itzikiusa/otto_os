@@ -15,6 +15,7 @@
   // first). Restore puts the left version's content back as a NEW version
   // (the view confirms and saves) — history never rewinds.
   import { untrack } from 'svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import Modal from '../../lib/components/Modal.svelte';
   import DiffView from '../../lib/components/DiffView.svelte';
   import Icon from '../../lib/components/Icon.svelte';
@@ -79,7 +80,7 @@
           set({ key, text: c.text, blobUrl: c.blobUrl, error: null });
         },
         (e) => {
-          if (!canceled) set({ key, text: null, blobUrl: null, error: e instanceof Error ? e.message : String(e) });
+          if (!canceled) set({ key, text: null, blobUrl: null, error: loadErrorText(e) });
         },
       );
       return () => {

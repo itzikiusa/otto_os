@@ -591,7 +591,7 @@
         icon: 'copy',
         action: () => {
           void copyText(cwd).then((ok) =>
-            ok ? toasts.info('Folder path copied') : toasts.error('Couldn’t copy', 'The clipboard is not available here.'),
+            ok ? toasts.info('Folder path copied') : toasts.error('Couldn’t copy the folder path', 'The clipboard isn’t available here. Select the path and copy it manually.'),
           );
         },
       });

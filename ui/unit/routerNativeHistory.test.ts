@@ -46,8 +46,7 @@ function browser(initial = '#/home') {
     './win': { winKey: (k: string) => k },
     './storage': { lsGet: () => null, lsSet: () => {} },
     './desktop': { isEmbedded: false },
-    '../modules/rooms/room-access': { captureRoomInvite },
-      '../modules/rooms/games/access': {captureGameInvite},
+    './rooms/invites': { captureGameInvite, captureRoomInvite },
     './sidebar': { activeNavId },
     './shareTokenStore': { dropShareToken: () => {}, storeShareToken: () => {}, storedShareToken: () => null },
   }, { window, history });

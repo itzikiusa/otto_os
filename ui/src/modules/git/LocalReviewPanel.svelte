@@ -9,6 +9,7 @@
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import { runStatus } from '../../lib/status';
   import { api, ApiError } from '../../lib/api/client';
+  import { git } from '../../lib/stores/git.svelte';
   import type { Review, ReviewComment, RefsResp, Session } from '../../lib/api/types';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { router } from '../../lib/router.svelte';
@@ -165,18 +166,13 @@
     refsLoading = true;
     refsError = null;
     try {
-      refs = await api.get<RefsResp>(`/repos/${rid}/refs`);
+      const read = await git.refs(rid);
+      if (read.error !== null) throw read.error;
+      refs = read.refs;
       // Pick a sensible default base.
       const remotes = refs?.remote ?? [];
       const locals = refs?.local ?? [];
-      const preferred = [
-        'origin/develop',
-        'origin/main',
-        'origin/master',
-        'develop',
-        'main',
-        'master',
-      ];
+      const preferred = ['origin/develop', 'origin/main', 'origin/master', 'develop', 'main', 'master'];
       const allNames = [...remotes.map((r) => r.name), ...locals.map((l) => l.name)];
       const hit = preferred.find((p) => allNames.includes(p));
       selectedBase = allBranches.find((b) => b.name === hit)?.value ?? allBranches[0]?.value ?? '';

@@ -89,7 +89,7 @@ class ApiStreamStore {
       const token = getToken();
       sock = token ? new WebSocket(wsUrl, [WS_BEARER_SUBPROTOCOL, token]) : new WebSocket(wsUrl);
     } catch {
-      this.fail('Could not open relay socket');
+      this.fail('Couldn’t open the relay socket');
       return;
     }
     this.ws = sock;

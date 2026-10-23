@@ -9,11 +9,12 @@ import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { randomUUID } from 'node:crypto';
 import ts from 'typescript';
+import { apiClientParts } from './apiClientParts.ts';
 import { strictRequire } from './strictRequire.ts';
 import * as loadError from '../src/lib/loadError.ts';
 import { HistoryRefresh, HistoryDetail } from '../src/lib/stores/apiHistory.ts';
 import * as scriptRuntime from '../src/lib/api/scripts.ts';
-import * as graphqlVars from '../src/modules/api/graphqlVars.ts';
+import * as graphqlVars from '../src/lib/api/graphqlVars.ts';
 import * as secretShapes from '../src/lib/api/apiSecretShapes.ts';
 
 function setup(api: Record<string, any>) {
@@ -21,12 +22,15 @@ function setup(api: Record<string, any>) {
   api.long = { post: (...a: unknown[]) => api.post(...a), get: (...a: unknown[]) => api.get(...a) };
   // Every wait (poll fallback, retry backoff) runs on the next macrotask.
   const fastTimeout = (fn: () => void) => setTimeout(fn, 0);
+  const parts = apiClientParts();
   const context = {
     exports: {} as Record<string, any>,
     $state: Object.assign((v: unknown) => v, { snapshot: (v: unknown) => v, raw: (v: unknown) => v }), $derived: (v: unknown) => v,
     crypto: { randomUUID }, URL, URLSearchParams, AbortController, DOMException, setTimeout: fastTimeout, clearTimeout, performance, encodeURIComponent,
     localStorage: { getItem() { return null; }, setItem() {} },
     require: strictRequire([
+      ...parts.entries,
+      ['/announce.svelte', { announce() {} }],
       ['/api/client', { api, isAbortError: () => false, newHostConfirmHost: () => null }],
       ['/workspace.svelte', { ws: { currentId: 'A' } }],
       ['/toast.svelte', { toasts: { error: (m: string) => { notices.push(m); }, success() {}, info() {} } }],
@@ -43,6 +47,7 @@ function setup(api: Record<string, any>) {
       ['/loadError', loadError],
     ]),
   };
+  parts.load(context);
   runInNewContext(ts.transpileModule(readFileSync(new URL('../src/lib/stores/apiClient.svelte.ts', import.meta.url), 'utf8'),
     { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, context);
   return { v: context.exports.apiClient, notices };

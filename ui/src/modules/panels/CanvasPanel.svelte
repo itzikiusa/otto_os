@@ -18,7 +18,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
-  import type { CanvasDoc, CanvasFormat, CanvasScene, CanvasSceneSummary } from '../canvas/types';
+  import type { CanvasDoc, CanvasFormat, CanvasScene, CanvasSceneSummary } from '../../lib/canvas/types';
 
   const session = $derived(ws.activeSession);
   const sessionId = $derived(session?.id ?? null);
@@ -183,7 +183,7 @@
     try {
       allScenes = await api.get<CanvasSceneSummary[]>('/canvas/scenes');
     } catch (e) {
-      attachError = e instanceof Error ? e.message : String(e);
+      attachError = loadErrorText(e);
     } finally {
       attachLoading = false;
     }

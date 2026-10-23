@@ -53,10 +53,12 @@ export async function copyText(text: string): Promise<boolean> {
 
 /** `copyText` for the many call sites shaped as `try { copy } catch { toast }`:
  *  throws when the copy could not be made, so an existing catch block keeps
- *  reporting failure to the user instead of silently claiming success. */
+ *  reporting failure to the user instead of silently claiming success. The
+ *  message is the toast body those blocks show, so it says what to do next
+ *  (ux-design-6-07), not only what broke. */
 export async function copyTextOrThrow(text: string): Promise<void> {
   if (!(await copyText(text))) {
-    throw new Error('Clipboard unavailable — the browser blocked the copy');
+    throw new Error('The clipboard isn’t available here. Select the text and copy it manually.');
   }
 }
 

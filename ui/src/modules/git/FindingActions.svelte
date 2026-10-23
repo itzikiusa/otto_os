@@ -10,6 +10,7 @@
   // FindingStatus::can_transition in crates/otto-core/src/finding.rs); on click it
   // calls the client method and reports the updated finding back to the board (the
   // finding_updated WS event also drives a refetch).
+  import { announce } from '../../lib/announce.svelte';
   import { toastError } from '../../lib/toastError';
   import {
     acceptFinding,
@@ -42,6 +43,11 @@
 
   // Which action is in flight (disables the whole bar). Empty = idle.
   let busy = $state('');
+  // The busy line is spoken through the shell's announcer (an inserted
+  // status element is silent); the two buttons that relabel themselves are not.
+  $effect(() => {
+    if (busy && busy !== 'ask agent to fix' && busy !== 'verify') announce(BUSY_TEXT[busy] ?? 'Saving…');
+  });
   // Inline "Convert to Jira" project-key input.
   let jiraOpen = $state(false);
   let jiraKey = $state('');
@@ -358,7 +364,7 @@
     {busy === 'verify' ? 'Verifying…' : 'Verify resolved'}
   </button>
   {#if busy && busy !== 'ask agent to fix' && busy !== 'verify'}
-    <span class="fa-busy dim" role="status">{BUSY_TEXT[busy] ?? 'Saving…'}</span>
+    <span class="fa-busy dim">{BUSY_TEXT[busy] ?? 'Saving…'}</span>
   {/if}
   <button
     class="icon-btn fa-overflow"

@@ -85,10 +85,18 @@ export function fmtMs(v: number | null | undefined): string {
 }
 
 
-/** `forbidden: cluster RBAC: Error from server (Forbidden): …` → the kubectl line. */
+/** `forbidden: cluster RBAC: Error from server (Forbidden): …` → the kubectl line.
+ *  A rejected gateway credential (`forbidden: credentials rejected …`, a 401)
+ *  is not RBAC: see `credentialsRejected`. */
 export function rbacMessage(ms: string | undefined): string | null {
-  if (!ms || !ms.startsWith('forbidden:')) return null;
+  if (!ms || !ms.startsWith('forbidden:') || credentialsRejected(ms)) return null;
   return ms.slice('forbidden:'.length).replace(/^\s*cluster RBAC:\s*/, '').trim();
+}
+
+/** metrics-server answered 401 through the gateway: the proxy's credential was
+ *  rejected and the collector restarts it on the next cycle. */
+export function credentialsRejected(ms: string | undefined): boolean {
+  return !!ms && /^forbidden:\s*credentials rejected/.test(ms);
 }
 
 /** One-line collector status for cards + headers. `ago` is the shared

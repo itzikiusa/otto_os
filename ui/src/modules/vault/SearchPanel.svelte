@@ -33,7 +33,7 @@
     onkeydown={(e) => e.key === 'Enter' && void vault.runSearch()}
   />
   {#if vault.searching}
-    <div class="dim" role="status">Searching…</div>
+    <div class="dim">Searching…</div>
   {:else if vault.searchError}
     <LoadState variant="compact" what="search results" error={vault.searchError} empty onretry={() => void vault.runSearch()} />
   {:else if vault.searchQuery.trim() && vault.searchQuery.trim() !== vault.searchedQuery}

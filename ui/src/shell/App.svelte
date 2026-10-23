@@ -1021,8 +1021,8 @@
       <div class="nav-pending-bar" role="progressbar" aria-label="Loading page" data-testid="nav-pending-bar"></div>
     </div>
   {/if}
-  <div class="content">
-    <!-- The page for the current route (shell/pages.svelte.ts). A component swap is
+  <div class="content" id="app-content" tabindex="-1">
+    <!-- #app-content: focusAppContent() target. The page for the current route (shell/pages.svelte.ts). A component swap is
          the only remount on navigation: connections ↔ database share one
          page and stay mounted, and so does any page across its own sub-routes.
          Rooms and plugins key their inner view by id (RoomsRoute /

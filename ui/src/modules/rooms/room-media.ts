@@ -192,7 +192,7 @@ export class RoomMediaClient {
       this.send({ type: 'audio', joined: true, muted: true });
       if (!this.ackTimer) this.ackTimer = setInterval(() => this.ackAudio(true), 2000);
       this.emit(); this.schedule();
-    } catch { this.error('Audio could not start. Select Join audio again, or check the output device.'); }
+    } catch { this.error('Audio couldn’t start. Select Join audio again, or check the output device.'); }
   }
   async unmute(deviceId?: string): Promise<void> {
     if (!this.state.audioJoined || this.self()?.room_muted || this.disposed) return;
@@ -340,7 +340,7 @@ export class RoomMediaClient {
           await pc.setLocalDescription();
           if (this.peers.get(peer.id) !== peer) return;
           if (pc.localDescription) this.signal(peer, { version: 1, kind: 'description', description: pc.localDescription.toJSON(), bindings: this.bindings(peer) });
-        } catch { if (this.peers.get(peer.id) === peer) this.error('Media negotiation could not start. Check the host connection setup.'); }
+        } catch { if (this.peers.get(peer.id) === peer) this.error('Media negotiation couldn’t start. Check the host connection setup.'); }
         finally { peer.makingOffer = false; }
       };
       pc.ontrack = e => {
@@ -358,7 +358,7 @@ export class RoomMediaClient {
         }
       };
       peer.deadline = setTimeout(() => { if (pc.connectionState !== 'connected' && this.peers.get(peer.id) === peer) {
-        this.closePeer(peer.id); this.state.connection = 'failed'; this.error('Media could not connect. Ask the host to configure STUN/TURN for this network.');
+        this.closePeer(peer.id); this.state.connection = 'failed'; this.error('Media couldn’t connect. Ask the host to configure STUN/TURN for this network.');
       } }, 20_000);
       this.updateConnection(); return peer;
     } catch { this.error('WebRTC media is unavailable in this client. Chat and terminal remain available.'); return null; }

@@ -13,7 +13,7 @@ import { tick } from 'svelte';
 import { registerUiCommands, UiCommandError, type UiCommandCtx } from '../uiCommands';
 import { router } from '../router.svelte';
 import { api } from '../api/client';
-import { brokers } from '../stores/brokers.svelte';
+import { brokers, CLUSTER_VIEW_IDS, type ClusterView } from '../stores/brokers.svelte';
 import { ws } from '../stores/workspace.svelte';
 import { confirmer } from '../confirm.svelte';
 import { toasts } from '../toast.svelte';
@@ -25,7 +25,6 @@ import type {
   ProduceReq,
   TopicSummary,
 } from '../api/types';
-import type { ClusterView } from '../../modules/brokers/types';
 import { agentLabel, asUiError, capList, dismissOnAbort, createPagePort, highlightWhenReady, resolveByIdOrName, waitFor } from './pagePort';
 
 /** BrokersPage: the cluster sub-tab strip. */
@@ -55,7 +54,7 @@ export const brokersTopicPort = createPagePort<{
   produced(): void;
 }>('the topic view');
 
-const VIEWS: ClusterView[] = ['overview', 'topics', 'groups', 'schema', 'replay', 'alerts'];
+const VIEWS: readonly ClusterView[] = CLUSTER_VIEW_IDS;
 
 async function clusterFor(key: string, ctx: UiCommandCtx): Promise<BrokerCluster> {
   if (brokers.clusters.length === 0 && ws.currentId) await brokers.load(ws.currentId);

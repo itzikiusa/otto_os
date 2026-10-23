@@ -35,9 +35,10 @@ import {
   type TypedValue,
 } from './edit-types';
 import { parseSimpleSelect, qid, scopeDatabase, typedCellDraft, valueLiteral, whereByPk } from './edit-sql';
-import { mongoCollectionForEdit, mongoIdFilterFor } from './edit-mongo';
+import { mongoCollectionForEdit } from './edit-mongo';
 import { applyPatchAtPath, flattenPaths, valueKind } from '../../lib/jsonTree/expansion-plan';
 import { toastError } from '../../lib/toastError';
+import { batchFailure, completedRows, reviewBatchSql, type BatchFailure } from './review-batch';
 import { plural } from '../../lib/plural';
 
 export type { TypedKind, TypedValue, RowPatch, DiffLine } from './edit-types';
@@ -663,7 +664,7 @@ export class EditFlow {
       .sort((a, b) => a[0] - b[0])
       .map(([rowIdx, patch]) => ({ rowIdx, patch }));
     const built = adapterFor(this.engine).buildUpdate(rows, ctx);
-    if (built) this.openReview(built.title, built.sql, built.diff, this.pending);
+    if (built) this.openReview(built.title, built.sql, built.diff, this.pending, built.stmtRows);
   }
 
   /** Build an INSERT / insertOne cloning a row (identity omitted so it
@@ -694,10 +695,24 @@ export class EditFlow {
    *  null for delete / duplicate / doc reviews). Patches are copy-on-write, so
    *  identity says a row wasn't re-edited after the review opened. */
   private reviewCovers: ReadonlyMap<number, RowPatch> | null = null;
+  /** The row each statement of the BUILT review writes (in order), and the
+   *  text it was built as: a batch that fails partway maps its completed
+   *  statements back to drafts only while the text is still that one. */
+  private reviewStmtRows: { sql: string; rows: readonly number[] } | null = null;
+  /** Why the last review run stopped partway — shown in the open modal. */
+  reviewError: string | null = $state(null);
 
-  openReview(title: string, sql: string, diff?: DiffLine[], covers: ReadonlyMap<number, RowPatch> | null = null): void {
+  openReview(
+    title: string,
+    sql: string,
+    diff?: DiffLine[],
+    covers: ReadonlyMap<number, RowPatch> | null = null,
+    stmtRows: readonly number[] | null = null,
+  ): void {
     this.reviewSql = { title, sql, diff };
     this.reviewCovers = covers;
+    this.reviewStmtRows = covers && stmtRows ? { sql, rows: stmtRows } : null;
+    this.reviewError = null;
   }
   /** The modal's textarea is controlled — it writes back through here. */
   setReviewSql(sql: string): void {
@@ -706,15 +721,46 @@ export class EditFlow {
   closeReview(): void {
     if (this.runningReview) return;
     this.reviewSql = null;
+    this.reviewError = null;
   }
-  /** Drop the drafts a successful edit review wrote (see {@link reviewCovers}). */
-  private clearCoveredDrafts(): void {
+  /** Drop the drafts a successful edit review wrote (see {@link reviewCovers});
+   *  `only` limits it to the rows a partly-failed batch did write. */
+  private clearCoveredDrafts(only?: ReadonlySet<number>): void {
     const covers = this.reviewCovers;
-    this.reviewCovers = null;
+    if (!only) {
+      this.reviewCovers = null;
+      this.reviewStmtRows = null;
+    }
     if (!covers?.size) return;
     const next = new Map(this.pending);
-    for (const [row, patch] of covers) if (next.get(row) === patch) next.delete(row);
+    for (const [row, patch] of covers) {
+      if (only && !only.has(row)) continue;
+      if (next.get(row) === patch) next.delete(row);
+    }
     if (next.size !== this.pending.size) this.pending = next;
+  }
+
+  /** A batch that stopped on an error answered 200: name the statement, say
+   *  what was (not) written, clear only the drafts whose statements completed,
+   *  and keep the modal open for a fix and retry. */
+  private reportPartialReview(failure: BatchFailure, atomic: boolean, ranSql: string): void {
+    const stmtRows = this.reviewStmtRows?.sql === ranSql ? this.reviewStmtRows.rows : null;
+    const where = failure.statement ? `\nFailed statement: ${failure.statement}` : '';
+    let written: string;
+    if (atomic) {
+      written = 'Nothing was written — the batch ran in one transaction and was rolled back.';
+    } else if (failure.completed === 0) {
+      written = 'Nothing was written — the first statement failed.';
+    } else {
+      const done = stmtRows ? completedRows(stmtRows, failure.completed) : new Set<number>();
+      if (done.size) this.clearCoveredDrafts(done);
+      written =
+        `${plural(failure.completed, 'statement')} before it ran and stayed written` +
+        (done.size ? `; their ${plural(done.size, 'draft')} cleared.` : '.') +
+        ' The remaining drafts are still pending.';
+    }
+    this.reviewError = `${failure.message}${where}\n${written}`;
+    toasts.error('The write stopped partway', written);
   }
 
   async runReview(): Promise<void> {
@@ -734,13 +780,22 @@ export class EditFlow {
       // the store so the production / read-only write-gate applies — a guarded
       // connection prompts for a typed confirmation first.
       const scope = this.scopeNode();
-      const res = await database.runManagedStatement(sql, scope);
+      // MySQL / Postgres: a multi-statement edit runs all-or-nothing.
+      const batch = reviewBatchSql(this.engine, sql);
+      this.reviewError = null;
+      const res = await database.runManagedStatement(batch.sql, scope);
       if ('canceled' in res) {
         // Nothing ran — keep the modal open. Only a plain dismissal needs the
         // toast: a mistyped name was already explained by the gate (one toast,
         // not two), and a stale run (access / connection changed) is silent,
         // like the direct query paths.
         if (res.canceled === 'declined') toasts.info('Write canceled');
+        return;
+      }
+      // A batch that stopped on an error is still a 200 — not "Applied".
+      const failure = batchFailure(res, batch.atomic);
+      if (failure) {
+        this.reportPartialReview(failure, batch.atomic, sql);
         return;
       }
       toasts.success('Applied', 'Statement ran successfully');
@@ -826,13 +881,6 @@ export class EditFlow {
   clearSelection(): void {
     this.selected = new Set();
     this.lastClickedIdx = null;
-  }
-
-  /** `{"_id": …}` filter for a row — the `_id` exactly as the result carries it
-   *  (a real ObjectId already arrives as `{"$oid": …}`). */
-  mongoIdFilter(rowIdx: number): string {
-    const idIdx = this.result!.columns.findIndex((c) => c.name === '_id');
-    return mongoIdFilterFor(this.liveRows[rowIdx][idIdx]);
   }
 
   /** Build a DELETE / deleteMany targeting the given rows (by liveRows index). */

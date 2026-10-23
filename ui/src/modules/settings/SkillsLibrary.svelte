@@ -218,7 +218,7 @@
       if (failed.length > 0) {
         // Name every failure: the rest of the batch still installed.
         toasts.error(
-          `${plural(failed.length, `${category} skill`)} failed to install`,
+          `${plural(failed.length, `${category} skill`)} didn’t install`,
           failed.map((f) => `${f.name}: ${f.error}`).join('\n') + (n > 0 ? `\nInstalled ${plural(n, 'other')}.` : ''),
         );
       } else if (n === 0) {

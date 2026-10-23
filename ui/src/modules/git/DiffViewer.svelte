@@ -52,7 +52,7 @@
   import { carryViewState, carryViewed, unchangedPaths } from './diff-viewstate';
   import { registerFindProvider } from '../../lib/findProviders';
   import { startMouseDrag } from '../../lib/dragCursor';
-  import { ListWindow } from './list-window.svelte';
+  import { ListWindow } from '../../lib/listWindow.svelte';
   import { DeferredHighlighter } from './diff-highlight.svelte';
   import { SvelteSet } from 'svelte/reactivity';
   import { paneResizer } from '../../lib/paneResizer';
@@ -339,10 +339,9 @@
     walk(navTree);
     return vis;
   });
-  // The nav tree as the flat list of VISIBLE rows (folded dirs and search
-  // misses skipped), windowed against `.nav-files` (`ListWindow`): a 1k-file
-  // PR used to mount 1k nav rows (+ a checkbox each) next to the windowed
-  // body. Dir and file rows share one fixed pitch (CSS) so the math is exact.
+  // The nav tree as the flat list of VISIBLE rows (folded dirs and search misses
+  // skipped), windowed against `.nav-files` (`ListWindow`, with ⌘F over every
+  // row): dir and file rows share one fixed pitch (CSS) so the math is exact.
   type NavRow =
     | { kind: 'dir'; d: NavDir; depth: number; key: string }
     | { kind: 'file'; f: FileDiff; depth: number; key: string };
@@ -367,6 +366,7 @@
   });
   const navWin = new ListWindow('.nav-file, .nav-dir-row', { min: 200, overscan: 15 });
   const navRange = $derived(navWin.range(navRows.length));
+  $effect(() => navWin.findRows(() => null, () => navRows, (r) => (r.kind === 'dir' ? r.d.label : (r.f.path.split('/').pop() ?? ''))));
   const filteredFiles = $derived(matchSet ? diff.files.filter((f) => matchSet.has(f.path)) : diff.files);
   const matchCount = $derived(filteredFiles.length);
 

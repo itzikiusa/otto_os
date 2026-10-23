@@ -1,4 +1,20 @@
+<script lang="ts" module>
+  import { lazyComponent } from '../../lib/lazy-component.svelte';
+  // The grid's dialogs load on first open. Module-level: ONE loader per
+  // dialog, so a later open renders in the same frame, and a failed chunk
+  // surfaces through LazyMount (toast + the open flag reset, so the next
+  // click retries) instead of a silent, sticky no-op.
+  const DocEditorLazy = lazyComponent(() => import('./DocEditor.svelte'));
+  const RawDocViewerLazy = lazyComponent(() => import('./RawDocViewer.svelte'));
+  const ExportDialogLazy = lazyComponent(() => import('./ExportDialog.svelte'));
+  const RecordDiffLazy = lazyComponent(() => import('./RecordDiff.svelte'));
+  const AggregateBuilderLazy = lazyComponent(() => import('./AggregateBuilder.svelte'));
+  const ReviewModalLazy = lazyComponent(() => import('./ReviewModal.svelte'));
+  const ContextPacketDialogLazy = lazyComponent(() => import('../../lib/components/ContextPacketDialog.svelte'));
+</script>
+
 <script lang="ts">
+  import LazyMount from '../../lib/components/LazyMount.svelte';
   import { formatBytes } from '../../lib/metric-format';
   import { pluralNoun } from '../../lib/plural';
   // Result view orchestrator: sticky-header grid (GridView), a JSON array view
@@ -43,8 +59,9 @@
   import JsonView from './JsonView.svelte';
   import CellViewer from './CellViewer.svelte';
   // Modal-only children (DocEditor / RawDocViewer reach CodeEditor, the rest
-  // are dialogs) load on first open via `{#await import()}` below, so the grid
-  // — and Home's DB widget that embeds it — doesn't carry them up front.
+  // are dialogs) load on first open through the module-level `lazyComponent`s
+  // above, so the grid — and Home's DB widget that embeds it — doesn't carry
+  // them up front.
   import MongoFilterBar from './MongoFilterBar.svelte';
   import { EditFlow, SET_EMPTY, SET_NULL, type RowPatch } from './EditFlow.svelte';
   import { qid, valueLiteral } from './edit-sql';
@@ -1795,66 +1812,89 @@
 {/if}
 
 {#if flow.docEditor}
-  {#await import('./DocEditor.svelte') then m}<m.default {flow} />{/await}
+  <LazyMount lazy={DocEditorLazy} what="the document editor" quiet props={{ flow }} onerror={() => (flow.docEditor = null)} />
 {/if}
 
 {#if flow.rawDoc}
-  {#await import('./RawDocViewer.svelte') then m}<m.default {flow} />{/await}
+  <LazyMount lazy={RawDocViewerLazy} what="the document viewer" quiet props={{ flow }} onerror={() => (flow.rawDoc = null)} />
 {/if}
 
 {#if showExportDialog && connectionId && statement}
-  {#await import('./ExportDialog.svelte') then m}<m.default {statement} {connectionId} node={ranNode} {canExport} onclose={() => (showExportDialog = false)} />{/await}
+  <LazyMount
+    lazy={ExportDialogLazy}
+    what="the export dialog"
+    quiet
+    props={{ statement, connectionId, node: ranNode, canExport, onclose: () => (showExportDialog = false) }}
+    onerror={() => (showExportDialog = false)}
+  />
 {/if}
 
 {#if compare && result}
-  {#await import('./RecordDiff.svelte') then m}
-  <m.default
-    left={objRowAt(compare[0])}
-    right={objRowAt(compare[1])}
-    leftLabel={`#${compare[0] + 1}`}
-    rightLabel={`#${compare[1] + 1}`}
-    onclose={() => (compare = null)}
+  <LazyMount
+    lazy={RecordDiffLazy}
+    what="the row comparison"
+    quiet
+    props={{
+      left: objRowAt(compare[0]),
+      right: objRowAt(compare[1]),
+      leftLabel: `#${compare[0] + 1}`,
+      rightLabel: `#${compare[1] + 1}`,
+      onclose: () => (compare = null),
+    }}
+    onerror={() => (compare = null)}
   />
-  {/await}
 {/if}
 
 {#if connectionId && pipelineMounted}
-  {#await import('./AggregateBuilder.svelte') then m}
-  <m.default
-    collection={engine === 'mongodb' ? flow.editTable : null}
-    open={pipelineOpen}
-    connId={connectionId}
-    onclose={() => (pipelineOpen = false)}
-    oninsert={(stmt) => database.setStatement(stmt)}
-    onrun={(stmt) => { database.setStatement(stmt); void database.runQuery(stmt); }}
+  <LazyMount
+    lazy={AggregateBuilderLazy}
+    what="the pipeline builder"
+    quiet
+    props={{
+      collection: engine === 'mongodb' ? flow.editTable : null,
+      open: pipelineOpen,
+      connId: connectionId,
+      onclose: () => (pipelineOpen = false),
+      oninsert: (stmt: string) => database.setStatement(stmt),
+      onrun: (stmt: string) => { database.setStatement(stmt); void database.runQuery(stmt); },
+    }}
+    onerror={() => { pipelineOpen = false; pipelineMounted = false; }}
   />
-  {/await}
 {/if}
 
 {#if flow.reviewSql}
-  {#await import('./ReviewModal.svelte') then m}
-  <m.default
-    title={flow.reviewSql.title}
-    sql={flow.reviewSql.sql}
-    diff={flow.reviewSql.diff}
-    running={flow.runningReview}
-    onsql={(s) => flow.setReviewSql(s)}
-    onrun={() => void flow.runReview()}
-    onclose={() => flow.closeReview()}
+  <LazyMount
+    lazy={ReviewModalLazy}
+    what="the write review"
+    quiet
+    props={{
+      title: flow.reviewSql.title,
+      sql: flow.reviewSql.sql,
+      diff: flow.reviewSql.diff,
+      error: flow.reviewError,
+      running: flow.runningReview,
+      onsql: (s: string) => flow.setReviewSql(s),
+      onrun: () => void flow.runReview(),
+      onclose: () => flow.closeReview(),
+    }}
+    onerror={() => flow.closeReview()}
   />
-  {/await}
 {/if}
 
 {#if sendToAgentOpen && ws.current && sendToAgentPayload !== null}
-  {#await import('../../lib/components/ContextPacketDialog.svelte') then m}
-  <m.default
-    workspaceId={ws.current.id}
-    sessionId={ws.targetAgentId}
-    kind="db"
-    payload={sendToAgentPayload}
-    onclose={() => (sendToAgentOpen = false)}
+  <LazyMount
+    lazy={ContextPacketDialogLazy}
+    what="the send-to-agent dialog"
+    quiet
+    props={{
+      workspaceId: ws.current.id,
+      sessionId: ws.targetAgentId,
+      kind: 'db',
+      payload: sendToAgentPayload,
+      onclose: () => (sendToAgentOpen = false),
+    }}
+    onerror={() => (sendToAgentOpen = false)}
   />
-  {/await}
 {/if}
 
 <style>

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announce } from '../../lib/announce.svelte';
   import { badgeTone, runStatus } from '../../lib/status';
   import Badge from '../../lib/components/Badge.svelte';
   import { onMount, untrack } from 'svelte';
@@ -131,6 +132,9 @@
     const poller=pollWhileVisible(async()=>{if(!busy&&!editing)await refresh();},{ms:5000,immediate:false,maxBackoff:8});
     return()=>{generation++;poller.stop();};
   });
+  // Spoken at the state edge through the shell's always-mounted announcer: a
+  // live region inserted together with its text is not read (WebKit/VoiceOver).
+  $effect(() => { if (error) announce(error, { assertive: true }); });
 </script>
 <div class="changes" data-testid="database-changes">
   <div class="toolbar">
@@ -141,7 +145,7 @@
     <button class="btn primary" onclick={draft} disabled={busy || !resourceAccess.can('connection',connectionId,'change_submit','database','edit',child)}>New change</button>
     <button class="btn" onclick={()=>void refresh()} disabled={busy}>Refresh</button>
   </div>
-  {#if error}<div class="error" role="alert">{error}</div>{/if}
+  {#if error}<div class="error">{error}</div>{/if}
   <div class="layout">
     <nav aria-label="Database changes">
       <LoadState what="database changes" {loading} error={loadError} empty={changes.length===0} onretry={()=>void refresh()} variant="compact">

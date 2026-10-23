@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announce } from '../../lib/announce.svelte';
   import { pluralNoun } from '../../lib/plural';
   import { toastError } from '../../lib/toastError';
   // ── Large-batch streaming export to a local file ─────────────────────────────
@@ -202,6 +203,11 @@
       exportAbort = null;
     }
   }
+  // Spoken at the state edge through the shell's always-mounted announcer: a
+  // live region inserted together with its text is not read (WebKit/VoiceOver).
+  $effect(() => {
+    if (writeVerb) announce(`This statement is a write (${writeVerb}). Export would apply it again.`, { assertive: true });
+  });
 </script>
 
 <Modal
@@ -219,7 +225,7 @@
       </p>
     {/if}
     {#if writeVerb}
-      <p class="exp-write" role="alert">
+      <p class="exp-write">
         <Icon name="warning" size={12} />This statement is a write ({writeVerb}). Export re-runs the
         statement, so it would apply the change again — run a SELECT and export that instead.
       </p>

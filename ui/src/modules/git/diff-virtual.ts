@@ -28,13 +28,6 @@ export function resum(heights: Float64Array, offsets: Float64Array, from: number
   }
 }
 
-/** Nearest ancestor that scrolls vertically; null ⇒ the window/document. */
-export function findScroller(el: HTMLElement): HTMLElement | null {
-  let p = el.parentElement;
-  while (p && p !== document.body && p !== document.documentElement) {
-    const oy = getComputedStyle(p).overflowY;
-    if (oy === 'auto' || oy === 'scroll' || oy === 'overlay') return p;
-    p = p.parentElement;
-  }
-  return null;
-}
+/** Nearest ancestor that scrolls vertically; null ⇒ the window/document.
+ *  Shared with `ListWindow` (lib/listWindow.svelte.ts). */
+export { findScroller } from '../../lib/listWindow.svelte';

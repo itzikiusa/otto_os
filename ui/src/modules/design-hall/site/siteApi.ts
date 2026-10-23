@@ -14,6 +14,7 @@ import type {
   DesignSiteLocalResp,
 } from '../../../lib/api/types';
 import { buildTheme, type Theme } from './engine/theme';
+import { loadErrorText } from '../../../lib/loadError';
 import type { EmbedInfo } from './engine/render';
 
 const enc = encodeURIComponent;
@@ -70,8 +71,17 @@ export interface BrandResolution {
   theme: Theme;
   kit: DesignArtifact | null;
   seq: number | null;
-  /** Why no kit applies (none linked / failed to load). */
+  /** Why no kit applies (none linked / not valid JSON). */
   note: string | null;
+  /** The kit could not be LOADED (a daemon / network failure, in the user's
+   *  terms): the preview falls back to the default palette, the inspector
+   *  offers Retry, and the brand-dependent checks (contrast) are skipped. */
+  error: string | null;
+}
+
+/** "Acme Brand Kit v4", or null for the default palette. */
+export function brandLabel(b: BrandResolution): string | null {
+  return b.kit ? `${b.kit.title}${b.seq != null ? ` v${b.seq}` : ''}` : null;
 }
 
 /**
@@ -99,7 +109,7 @@ export async function resolveBrand(opts: { projectKitId: string | null; docBrand
       /* no links → defaults */
     }
   }
-  if (!kitId) return { theme: buildTheme(null), kit: null, seq: null, note: 'No brand kit linked — using the default palette.' };
+  if (!kitId) return { theme: buildTheme(null), kit: null, seq: null, note: 'No brand kit linked — using the default palette.', error: null };
   try {
     const head = await design.getArtifact(kitId);
     const version = pinned != null ? `v${pinned}` : ((latest ? head.artifact.head_version_id : head.artifact.approved_version_id ?? head.artifact.head_version_id) ?? undefined);
@@ -114,9 +124,9 @@ export async function resolveBrand(opts: { projectKitId: string | null; docBrand
       parsed = null;
     }
     const seq = pinned ?? ((latest ? head.head?.seq : head.approved?.seq ?? head.head?.seq) ?? null);
-    return { theme: buildTheme(parsed, d.artifact.title), kit: d.artifact, seq, note: parsed ? null : 'The brand kit isn’t valid JSON — using the default palette.' };
+    return { theme: buildTheme(parsed, d.artifact.title), kit: d.artifact, seq, note: parsed ? null : 'The brand kit isn’t valid JSON — using the default palette.', error: null };
   } catch (e) {
-    return { theme: buildTheme(null), kit: null, seq: null, note: `Couldn’t load the brand kit (${e instanceof Error ? e.message : String(e)}).` };
+    return { theme: buildTheme(null), kit: null, seq: null, note: null, error: loadErrorText(e) };
   }
 }
 

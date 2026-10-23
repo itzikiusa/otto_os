@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announce } from '../../lib/announce.svelte';
   // First-run wizard: welcome → root password → first workspace → tools → done.
   import { tick } from 'svelte';
   import { api, setToken, ApiError } from '../../lib/api/client';
@@ -183,6 +184,10 @@
     }
     busy = false;
   }
+
+  // a11y-6-01: announce at the state edge — a status element inserted
+  // together with its text is not read by VoiceOver/WebKit.
+  $effect(() => { if (rootLogin) announce('Root account created.'); });
 </script>
 
 <div class="ob-wrap">
@@ -259,7 +264,7 @@
     {:else if step === 2}
       <div class="ob-body">
         <h1 tabindex="-1">Create your first workspace</h1>
-        {#if rootLogin || resumed}<p class="ob-done" role="status"><Icon name="check" size={12} /> Root account created.</p>{/if}
+        {#if rootLogin || resumed}<p class="ob-done"><Icon name="check" size={12} /> Root account created.</p>{/if}
         <p>A workspace maps to a project directory. Sessions and repos live inside it.</p>
         <form
           class="ob-form"

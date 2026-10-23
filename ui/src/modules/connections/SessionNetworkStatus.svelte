@@ -1,6 +1,7 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import { api } from '../../lib/api/client';
+  import { loadErrorText } from '../../lib/loadError';
   import { pollWhileVisible } from '../../lib/poll';
   import type { SessionNetwork } from '../../lib/api/types';
   import NetworkProfilePicker from './NetworkProfilePicker.svelte';
@@ -38,7 +39,7 @@
         network = next; error = '';
       } catch (e) {
         if (signal.aborted) return;
-        error = e instanceof Error ? e.message : String(e);
+        error = loadErrorText(e);
         return false;
       }
     }, { ms: 5000 });

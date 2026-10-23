@@ -93,7 +93,7 @@ function overviewProvider(product: any) {
   let scrolls = 0;
   const rowElement = { scrollIntoView() { scrolls++; } };
   const list = { isConnected: true, checkVisibility: () => true, contains: () => false, querySelector: () => rowElement };
-  const source = readFileSync(new URL('../src/modules/product/OverviewTab.svelte', import.meta.url), 'utf8').split('<script lang="ts">')[1].split('</script>')[0];
+  const source = readFileSync(new URL('../src/modules/product/StoryTranscripts.svelte', import.meta.url), 'utf8').split('<script lang="ts">')[1].split('</script>')[0];
   const file = ts.createSourceFile('Overview.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   const effect = file.statements.find(statement => ts.isExpressionStatement(statement)
     && ts.isCallExpression(statement.expression) && statement.expression.expression.getText(file) === '$effect'

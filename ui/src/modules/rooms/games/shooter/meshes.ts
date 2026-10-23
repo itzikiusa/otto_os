@@ -7,6 +7,7 @@
  */
 import * as THREE from 'three';
 import { Rng } from '../common/math';
+import { canvas } from '../common/textures';
 import { BLOCK_PALETTE, type Block, type Box } from './map';
 import { baseY, LEVEL, maxHp, TILE, tileX, type Build } from './builds';
 
@@ -184,14 +185,9 @@ function rampCornersInto(b: Build, out: Float32Array): void {
   }
 }
 
-function canvas(size: number): [HTMLCanvasElement, CanvasRenderingContext2D] {
-  const c = document.createElement('canvas');
-  c.width = c.height = size;
-  return [c, c.getContext('2d')!];
-}
 /** Generated wood planks / brick courses / riveted metal panels for structures. */
 export function materialTexture(mat: number): THREE.CanvasTexture {
-  const [c, g] = canvas(128);
+  const [c, g] = canvas(128, 128);
   const rng = new Rng(17 + mat);
   if (mat === 0) {
     g.fillStyle = '#c08a52'; g.fillRect(0, 0, 128, 128);

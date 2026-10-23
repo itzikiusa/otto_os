@@ -248,7 +248,11 @@
       // branch happens to be checked out, which may not be the PR's source.
       phase = 'pushing';
       try {
-        await api.post(`/repos/${repoId}/push`, { branch: source });
+        // Through the store: the fresh ahead/behind and a graph re-sync land
+        // with the push (a raw POST left both stale until the next poll). Not
+        // `runPush` — its rejected-push "Pull" acts on the CHECKED-OUT branch,
+        // which may not be this PR's source.
+        await git.push(repoId, { branch: source });
       } catch (e) {
         // "Everything up-to-date" surfaces as a normal push; a real failure
         // (e.g. auth) should stop us before trying to open the PR.

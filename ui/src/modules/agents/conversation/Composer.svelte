@@ -33,6 +33,7 @@
   // box is noise when you are typing paths, flags and slash commands.
   import { untrack } from 'svelte';
   import { toastError } from '../../../lib/toastError';
+  import { announce } from '../../../lib/announce.svelte';
   import { toasts } from '../../../lib/toast.svelte';
   import { activity } from '../../../lib/stores/activity.svelte';
   import type { SessionStatus, SlashCommand } from '../../../lib/api/types';
@@ -74,6 +75,9 @@
   const shortCwd = $derived(cwd.replace(/^\/Users\/[^/]+/, '~').replace(/^\/home\/[^/]+/, '~'));
   const sending = $derived(transcript.sending(ownerId));
   const uploading = $derived(pendingUploads.get(ownerId) ?? 0);
+  // a11y-6-01: the upload edge is announced; the visible "Uploading…" is not a live region.
+  const isUploading = $derived(uploading > 0);
+  $effect(() => { if (isUploading) announce('Uploading images…'); });
   let ta = $state<HTMLTextAreaElement | null>(null);
 
   // A pending send/upload must not take the caret back from search, another
@@ -446,7 +450,7 @@
           {#if busy}
             <button class="btn small stop" onclick={() => void interrupt()} disabled={stopping} title="Interrupt {agentName} — sends Esc to its terminal"><Icon name="stop" size={12} /> Stop</button>
           {/if}
-          {#if uploading > 0}<span class="uploading" role="status">Uploading…</span>{/if}
+          {#if uploading > 0}<span class="uploading">Uploading…</span>{/if}
           <button class="send" onclick={() => void send()} disabled={!canSend} title={sendTitle} aria-label={uploading > 0 ? 'Send (uploading images)' : 'Send'}><Icon name="send" size={14} /></button>
         </div>
       </div>

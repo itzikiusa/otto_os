@@ -8,6 +8,7 @@
   // moment its chunk lands and a loaded tab switches in synchronously.
   import type { Component } from 'svelte';
   import { toastError } from '../lib/toastError';
+  import { announce } from '../lib/announce.svelte';
   import { SvelteMap, SvelteSet } from 'svelte/reactivity';
   import { ui as uiStore } from '../lib/stores/ui.svelte';
   import { RIGHT_MIN, RIGHT_MAX } from '../lib/stores/ui.svelte';
@@ -191,7 +192,9 @@
     api
       .get<FsStat>(`/fs/stat?path=${encodeURIComponent(path)}`)
       .then((st) => { if (live) pickMissing = !st.is_dir; })
-      .catch((e: unknown) => { if (live) pickMissing = (e as { status?: number })?.status === 404; });
+      .catch((e: unknown) => { if (live) pickMissing = (e as { status?: number })?.status === 404; })
+      // Spoken at the edge (the inline "Not found" is inserted with its text).
+      .finally(() => { if (live && pickMissing) announce('The picked folder was not found.'); });
     return () => { live = false; };
   });
   // Picks of workspaces that no longer exist are dropped; another window's
@@ -420,7 +423,7 @@
               <Icon name="chevronDown" size={12} />
             </button>
             {#if pickMissing}
-              <span class="folder-missing" role="status">
+              <span class="folder-missing">
                 <Icon name="warning" size={12} /> Not found
                 <button class="btn small" onclick={() => rightPanel.pickFolder(null)}>Use workspace folder</button>
               </span>

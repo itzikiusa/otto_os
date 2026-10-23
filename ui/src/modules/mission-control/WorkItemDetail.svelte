@@ -314,7 +314,7 @@
   }
 
   async function copyId(v: string): Promise<void> {
-    if (await copyText(v)) toasts.success('Copied ID');
+    if (await copyText(v)) toasts.success('Copied ID'); else toasts.error('Couldn’t copy the ID', `The clipboard isn’t available here. Select the ID and copy it manually. ${v}`);
   }
 
   function isUrl(s: string | null): boolean {

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from 'svelte';
   import { plural } from '../../../lib/plural';
   // Site Studio "Design" inspector for the selection:
   //   nothing selected → Page + Site settings, the brand kit, and the page's
@@ -14,6 +15,7 @@
   // undo + saving); nothing here talks to an agent.
   import Icon from '../../../lib/components/Icon.svelte';
   import Switch from '../../../lib/components/Switch.svelte';
+  import LoadState from '../../../lib/components/LoadState.svelte';
   import { ctxMenu, type MenuItem } from '../../../lib/contextmenu.svelte';
   import { confirmer } from '../../../lib/confirm.svelte';
   import type { DesignArtifact } from '../../../lib/api/types';
@@ -24,15 +26,17 @@
   import { GRADIENTS, parseColor, resolveBackground, sectionContrast, swatches, type Theme } from './engine/theme';
   import type { AuditFinding } from './engine/audit';
   import { urlProblem } from './engine/validate';
-  import type { SiteDoc, SiteLink, SiteMotion, SiteProps, SiteSection } from './engine/types';
-  import { parseRef } from './siteApi';
+  import type { SiteDoc, SiteMotion, SiteProps, SiteSection } from './engine/types';
+  import { brandLabel, parseRef, type BrandResolution } from './siteApi';
+  import LinkListField from './LinkListField.svelte';
 
   interface Props {
     doc: SiteDoc;
     pageId: string;
     theme: Theme;
-    kitLabel: string | null;
-    brandNote: string | null;
+    /** The resolved brand kit (its label, note, or load error). */
+    brand: BrandResolution;
+    onretrybrand: () => void;
     sectionId: string | null;
     blockId: string | null;
     readonly: boolean;
@@ -49,8 +53,8 @@
     doc,
     pageId,
     theme,
-    kitLabel,
-    brandNote,
+    brand,
+    onretrybrand,
     sectionId,
     blockId,
     readonly,
@@ -70,6 +74,18 @@
   const def = $derived(section ? sectionDef(section.block) : undefined);
   const block = $derived(blkAt?.block ?? null);
   const bdef = $derived(block ? itemDef(block.block) : undefined);
+  const kitLabel = $derived(brandLabel(brand));
+
+  // ── Focus: a drill-in, back or delete swaps the whole panel and unmounts the
+  // focused control. Land on the new view's name, or (back) on the row of the
+  // block just left — never on <body>, across the canvas.
+  let rootEl = $state<HTMLElement | null>(null);
+  async function go(s: string | null, b: string | null, from: string | null = null): Promise<void> {
+    onselect(s, b);
+    await tick();
+    const row = from ? rootEl?.querySelector<HTMLElement>(`[data-item="${CSS.escape(from)}"]`) : null;
+    (row ?? rootEl?.querySelector<HTMLElement>('[data-view-head]'))?.focus();
+  }
 
   // ── Edits ──────────────────────────────────────────────────────────────────
   function setProp(key: string, value: SiteProps[string]): void {
@@ -100,13 +116,14 @@
     });
     if (ok) {
       onchange(ops.removeSection(doc, section.id));
-      onselect(null, null);
+      void go(null, null);
     }
   }
 
   // ── Style ──────────────────────────────────────────────────────────────────
-  const bg = $derived(section ? resolveBackground(section.style?.background, theme) : null);
-  const contrastNow = $derived(section ? sectionContrast(section, theme) : null);
+  // A kit that failed to load leaves only the default palette: judging colours against it would mislead.
+  const bg = $derived(section && !brand.error ? resolveBackground(section.style?.background, theme) : null);
+  const contrastNow = $derived(section && !brand.error ? sectionContrast(section, theme) : null);
   const brandSwatches = $derived(swatches(theme));
   let hexDraft = $state('');
   $effect(() => {
@@ -204,12 +221,12 @@
       void choose('3d', e, (uri) => {
         const r = ops.setMedia(doc, section!.id, 'embed/3d', { src: uri, alt: 'Interactive 3D view' });
         onchange(r.doc);
-        onselect(section!.id, r.id);
+        void go(section!.id, r.id);
       });
     } else {
       const r = ops.setMedia(doc, section.id, 'embed/image', { src: '', alt: '' });
       onchange(r.doc);
-      onselect(section.id, r.id);
+      void go(section.id, r.id);
     }
   }
 
@@ -271,20 +288,6 @@
   const warns = $derived(findings.filter((f) => f.level === 'warn').length);
 
   // ── Field helpers ──────────────────────────────────────────────────────────
-  function linkRows(key: string): SiteLink[] {
-    return links(cur(), key);
-  }
-  function setLink(key: string, i: number, part: 'label' | 'href', value: string): void {
-    const rows = linkRows(key).map((l) => ({ ...l }));
-    rows[i] = { ...rows[i], [part]: value };
-    setProp(key, rows);
-  }
-  function addLink(key: string): void {
-    setProp(key, [...linkRows(key), { label: 'New link', href: '#' }]);
-  }
-  function removeLink(key: string, i: number): void {
-    setProp(key, linkRows(key).filter((_, j) => j !== i));
-  }
   function urlWarning(f: FieldDef, v: string): string | null {
     if (f.kind === 'url') return urlProblem('href', v);
     if (f.kind === 'media' && f.key !== 'src') return urlProblem('src', v);
@@ -308,17 +311,7 @@
       <Switch checked={flag(cur(), f.key)} disabled={readonly} onchange={(next) => setProp(f.key, next)} label={f.label} />
     </div>
   {:else if f.kind === 'links'}
-    <div class="field wide">
-      <span class="lbl">{f.label}</span>
-      {#each linkRows(f.key) as l, i (i)}
-        <div class="linkrow">
-          <input dir="auto" class="input" value={l.label} aria-label="Link label" disabled={readonly} oninput={(e) => setLink(f.key, i, 'label', e.currentTarget.value)} />
-          <input dir="ltr" class="input" value={l.href} aria-label="Link URL" disabled={readonly} oninput={(e) => setLink(f.key, i, 'href', e.currentTarget.value)} />
-          <button class="icon-btn" onclick={() => removeLink(f.key, i)} disabled={readonly} aria-label="Remove link" title="Remove link"><Icon name="x" size={12} /></button>
-        </div>
-      {/each}
-      {#if !readonly}<button class="btn small ghost" onclick={() => addLink(f.key)}><Icon name="plus" size={12} /> Add link</button>{/if}
-    </div>
+    <LinkListField label={f.label} rows={links(cur(), f.key)} {readonly} onchange={(rows) => setProp(f.key, rows)} />
   {:else}
     {@const warn = urlWarning(f, v)}
     <div class="field" class:half={f.half}>
@@ -342,7 +335,7 @@
   {/if}
 {/snippet}
 
-<div class="insp" data-testid="site-inspector">
+<div class="insp" data-testid="site-inspector" bind:this={rootEl}>
   <datalist id="site-icon-names">
     {#each SITE_ICON_NAMES as n (n)}<option value={n}></option>{/each}
   </datalist>
@@ -351,16 +344,16 @@
     <!-- ── A child block ── -->
     <div class="group">
       <div class="gh"><span class="k">Block</span>
-        <button class="linkbtn" onclick={() => onselect(section.id, null)}><Icon name="chevronLeft" size={12} /> {sectionLabel(section)}</button>
+        <button class="linkbtn" onclick={() => void go(section.id, null, block!.id)}><Icon name="chevronLeft" size={12} /> {sectionLabel(section)}</button>
       </div>
       <div class="ident">
         <span class="ident-icon"><Icon name={block.block === 'embed/3d' ? 'box' : block.block === 'embed/image' ? 'image' : 'square'} size={14} /></span>
-        <div class="ident-text"><strong>{bdef.label}</strong><span class="dim">{itemTitle(block)}</span></div>
+        <div class="ident-text" tabindex="-1" data-view-head><strong>{bdef.label}</strong><span class="dim">{itemTitle(block)}</span></div>
         {#if !readonly}
           <div class="ident-actions">
             <button class="icon-btn" onclick={() => onchange(ops.moveBlock(doc, block!.id, -1))} aria-label="Move up" title="Move up"><Icon name="arrowUp" size={12} /></button>
             <button class="icon-btn" onclick={() => onchange(ops.moveBlock(doc, block!.id, 1))} aria-label="Move down" title="Move down"><Icon name="arrowDown" size={12} /></button>
-            <button class="icon-btn" onclick={() => { onchange(ops.removeBlock(doc, block!.id)); onselect(section!.id, null); }} aria-label="Remove block" title="Remove"><Icon name="trash" size={12} /></button>
+            <button class="icon-btn" onclick={() => { onchange(ops.removeBlock(doc, block!.id)); void go(section!.id, null); }} aria-label="Remove block" title="Remove"><Icon name="trash" size={12} /></button>
           </div>
         {/if}
       </div>
@@ -419,7 +412,7 @@
       <div class="gh"><span class="k">Block</span></div>
       <div class="ident">
         <span class="ident-icon"><Icon name={section.block === 'media/3d-embed' ? 'box' : 'layout'} size={14} /></span>
-        <div class="ident-text"><strong>{sectionLabel(section)}</strong><span class="dim">{def.label.split(' · ')[1] ?? def.description}</span></div>
+        <div class="ident-text" tabindex="-1" data-view-head><strong>{sectionLabel(section)}</strong><span class="dim">{def.label.split(' · ')[1] ?? def.description}</span></div>
         {#if layoutsOf(section.block).length > 1}
           <button class="btn small" onclick={swapMenu} disabled={readonly} aria-haspopup="menu" data-testid="site-swap-layout">Swap layout <Icon name="chevronDown" size={12} /></button>
         {/if}
@@ -446,11 +439,11 @@
       {@const idef = itemDef(def.item)}
       <div class="group">
         <div class="gh"><span class="k">{idef?.label ?? 'Items'}s · {items.length}</span>
-          {#if !readonly}<button class="btn small ghost" onclick={() => { const r = ops.addItem(doc, section!.id); onchange(r.doc); if (r.id) onselect(section!.id, r.id); }} data-testid="site-add-item"><Icon name="plus" size={12} /> Add</button>{/if}
+          {#if !readonly}<button class="btn small ghost" onclick={() => { const r = ops.addItem(doc, section!.id); onchange(r.doc); if (r.id) void go(section!.id, r.id); }} data-testid="site-add-item"><Icon name="plus" size={12} /> Add</button>{/if}
         </div>
         <ul class="items">
           {#each items as b (b.id)}
-            <li><button class="item" onclick={() => onselect(section!.id, b.id)}><span class="name">{itemTitle(b)}</span><Icon name="chevronRight" size={12} /></button></li>
+            <li><button class="item" data-item={b.id} onclick={() => void go(section!.id, b.id)}><span class="name">{itemTitle(b)}</span><Icon name="chevronRight" size={12} /></button></li>
           {/each}
         </ul>
       </div>
@@ -460,7 +453,7 @@
       <div class="group">
         <div class="gh"><span class="k">Media</span></div>
         {#if mediaChild}
-          <button class="item" onclick={() => onselect(section!.id, mediaChild!.id)}>
+          <button class="item" data-item={mediaChild.id} onclick={() => void go(section!.id, mediaChild!.id)}>
             <Icon name={mediaChild.block === 'embed/3d' ? 'box' : 'image'} size={12} />
             <span class="name">{mediaChild.block === 'embed/3d' ? `3D · ${embed(str(mediaChild.props, 'src'))?.title ?? (str(mediaChild.props, 'label') || 'stand-in card')}` : `Image · ${str(mediaChild.props, 'alt') || 'untitled'}`}</span>
             <Icon name="chevronRight" size={12} />
@@ -589,7 +582,7 @@
   {:else if page}
     <!-- ── Nothing selected: page + site ── -->
     <div class="group">
-      <div class="gh"><span class="k">Page</span></div>
+      <div class="gh"><span class="k" tabindex="-1" data-view-head>Page</span></div>
       <div class="field"><label for="sp-title">Title</label><input dir="auto" id="sp-title" class="input" value={page.title} disabled={readonly} oninput={(e) => setPage('title', e.currentTarget.value)} /></div>
       <div class="field">
         <label for="sp-slug">URL</label>
@@ -611,7 +604,11 @@
       <div class="gh"><span class="k">Brand</span>
         {#if !readonly}<button class="btn small ghost" onclick={(e) => void linkKit(e)} data-testid="site-link-kit"><Icon name="palette" size={12} /> {kitLabel ? 'Change…' : 'Link a brand kit…'}</button>{/if}
       </div>
-      <p class="kit"><strong>{kitLabel ?? 'Default palette'}</strong>{#if brandNote}<span class="dim"> · {brandNote}</span>{/if}</p>
+      {#if brand.error}
+        <LoadState variant="compact" what="the brand kit" empty error={`The preview uses the default palette. ${brand.error}`} onretry={onretrybrand} />
+      {:else}
+        <p class="kit"><strong>{kitLabel ?? 'Default palette'}</strong>{#if brand.note}<span class="dim"> · {brand.note}</span>{/if}</p>
+      {/if}
       <div class="kit-sw" aria-hidden="true">
         {#each [theme.primary, theme.accent, theme.ink, theme.surface, theme.surfaceAlt] as c, i (i)}<span style:background={c}></span>{/each}
       </div>
@@ -624,7 +621,7 @@
         <ul class="findings">
           {#each findings as f (f.key)}
             <li>
-              <button class="finding" data-level={f.level} onclick={() => f.sectionId && onselect(f.sectionId, f.blockId)} disabled={!f.sectionId}>
+              <button class="finding" data-level={f.level} onclick={() => f.sectionId && void go(f.sectionId, f.blockId)} disabled={!f.sectionId}>
                 <Icon name={f.level === 'error' ? 'warning' : 'info'} size={12} />
                 <span>{f.message}</span>
               </button>
@@ -736,6 +733,10 @@
   .prov :global(svg) {
     color: var(--info);
   }
+  [data-view-head]:focus-visible {
+    outline: 2px solid var(--accent-text);
+    outline-offset: 2px;
+  }
   .fields {
     display: flex;
     flex-wrap: wrap;
@@ -784,12 +785,6 @@
     gap: 8px;
     margin-block-end: 8px;
     font-size: var(--fs-s);
-  }
-  .linkrow {
-    display: grid;
-    grid-template-columns: 1fr 1.2fr auto;
-    gap: 4px;
-    margin-block-end: 4px;
   }
   .swatches {
     display: flex;

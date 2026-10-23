@@ -46,7 +46,7 @@
       catch { failed += 1; }
     }
     revoking = new Set([...revoking].filter((id) => !candidates.some((t) => t.id === id)));
-    if (failed) toasts.error('Some tokens could not be revoked', `${failed} failed; they remain listed.`);
+    if (failed) toasts.error('Some tokens couldn’t be revoked', `${failed} failed; they remain listed.`);
     else toasts.success('Tokens revoked', `${candidates.length} deleted-session tokens removed.`);
   }
 

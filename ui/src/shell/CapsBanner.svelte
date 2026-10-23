@@ -7,6 +7,7 @@
   import Icon from '../lib/components/Icon.svelte';
   import LoadState from '../lib/components/LoadState.svelte';
   import { auth } from '../lib/stores/auth.svelte';
+  import { focusAppContent } from '../lib/announce.svelte';
 
   let retrying = $state(false);
   async function retry(): Promise<void> {
@@ -18,6 +19,13 @@
       retrying = false;
     }
   }
+
+  /** Dismiss removes the whole strip, the focused button with it: hand focus
+   *  to the page content instead of letting it fall to <body>. */
+  function dismiss(): void {
+    auth.dismissCapabilitiesNotice();
+    void focusAppContent();
+  }
 </script>
 
 <!-- Root never depends on the map; anyone else would otherwise see a silently
@@ -28,9 +36,9 @@
       {#snippet errorActions()}
         <button
           class="icon-btn"
-          onclick={() => auth.dismissCapabilitiesNotice()}
+          onclick={dismiss}
           title="Dismiss until the next failed retry"
-          aria-label="Dismiss"
+          aria-label="Dismiss permissions notice"
         >
           <Icon name="x" size={12} />
         </button>

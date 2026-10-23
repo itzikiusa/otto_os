@@ -1,5 +1,6 @@
 <script lang="ts">
   import { loadErrorText } from '../../lib/loadError';
+  import { announce } from '../../lib/announce.svelte';
   // Vault v3 — the docs home. Obsidian-style three-pane layout: left sidebar
   // (Files / Search / Tags over the active vault), center (note edit⇄read or
   // the graph), and the note's details (backlinks / outgoing / outline /
@@ -55,6 +56,10 @@
   const DETAILS_TAB = 'page:vault-details' as const;
   const DETAILS_KEY = 'otto_vault_right_open';
   const rightOpen = $derived(ui.rightOpenNow && rightPanel.shown === DETAILS_TAB);
+  // a11y-6-01: a backlinks refresh failure is announced at its edge; the
+  // status-bar warning glyph is inserted with it, so it is not a live region.
+  const backlinksError = $derived(vault.note ? (vault.backlinksError ?? '') : '');
+  $effect(() => { if (backlinksError) announce(`Couldn’t refresh the backlinks. ${backlinksError}`); });
   function rememberDetails(shown: boolean): void {
     lsSet(DETAILS_KEY, shown ? '1' : '0');
   }
@@ -569,7 +574,7 @@
       </span>
       {#if vault.note}
         <span>
-          {vault.backlinks.length} backlinks{#if vault.backlinksLoading}<span class="spinner vs-inline" role="status" aria-label="Loading backlinks"></span>{:else if vault.backlinksError}<span class="vs-warn" role="status" title={vault.backlinksError}><Icon name="warning" size={12} /> couldn’t refresh</span>{/if}
+          {vault.backlinks.length} backlinks{#if vault.backlinksLoading}<span class="spinner vs-inline" role="img" aria-label="Loading backlinks"></span>{:else if vault.backlinksError}<span class="vs-warn" title={vault.backlinksError}><Icon name="warning" size={12} /> couldn’t refresh</span>{/if}
         </span>
         <span>{vault.note.meta.word_count} words</span>
         <span>{(vault.editing ? vault.draft : vault.note.raw).length} characters</span>

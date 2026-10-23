@@ -13,7 +13,7 @@ import { pollWhileVisible, type Poller } from '../poll';
 import { resourceAccess, type ResourceAccessChange } from './resource-access.svelte';
 import { ApiError } from '../api/client';
 import { providerErrorText } from '../loadError';
-import { formatBytes, formatMillicores } from '../../modules/kubernetes/k8s-util';
+import { formatBytes, formatMillicores } from '../k8s/kinds';
 import { k8sApi } from '../api/k8s';
 import { resourcesPollMs, resourcesValidator } from '../k8s/resourcePoll';
 import { TickCoalescer, browserTickEnv } from '../k8s/monitor/tickCoalescer';

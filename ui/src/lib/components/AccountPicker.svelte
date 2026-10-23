@@ -1,5 +1,6 @@
 <script lang="ts">
   import LoadState from './LoadState.svelte';
+  import { announce } from '../announce.svelte';
   import { api } from '../api/client';
   import type { Session, ProviderAccount } from '../api/types';
   import { ws } from '../stores/workspace.svelte';
@@ -46,6 +47,7 @@
       const account = await api.post<ProviderAccount>('/auth/provider-accounts', { provider, label });
       accounts = [...accounts, account]; onchange(account.id); label = ''; adding = false;
       status = 'Profile created. Sign in to connect its subscription.';
+      announce(status);
     } catch (e) { error = loadErrorText(e); }
     finally { busy = false; }
   }
@@ -62,6 +64,7 @@
     try {
       const result = await api.get<{signed_in: boolean}>(`/auth/provider-accounts/${value}/status`);
       status = result.signed_in ? 'Signed in' : 'Sign-in required';
+      announce(status);
     } catch (e) { error = loadErrorText(e); }
     finally { busy = false; }
   }
@@ -94,7 +97,8 @@
     </div>
     <p>Each profile has its own subscription login. Your default CLI account stays available.</p>
   {/if}
-  {#if status}<p role="status">{status}</p>{/if}
+  <!-- Spoken through announce() where it's set; this is the visible copy. -->
+  {#if status}<p>{status}</p>{/if}
   {#if error}<p class="error" role="alert">{error}</p>{/if}
   {#if loginSession}
     <p>Complete the provider’s sign-in below, then check sign-in.</p>

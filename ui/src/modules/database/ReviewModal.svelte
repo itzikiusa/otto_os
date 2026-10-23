@@ -19,12 +19,15 @@
     title: string;
     sql: string;
     diff?: DiffLine[];
+    /** Why the last run stopped partway (statement, engine message, what was
+     *  written) — the modal stays open so the SQL can be fixed and re-run. */
+    error?: string | null;
     running: boolean;
     onsql: (sql: string) => void;
     onrun: () => void;
     onclose: () => void;
   }
-  let { title, sql, diff, running, onsql, onrun, onclose }: Props = $props();
+  let { title, sql, diff, error = null, running, onsql, onrun, onclose }: Props = $props();
 
   const lines = $derived(diff ?? []);
   const shownLines = $derived(lines.slice(0, DIFF_MAX));
@@ -83,6 +86,14 @@
           </table>
         </div>
       {/if}
+      <!-- Always mounted: a live region inserted together with its text is
+           not announced (WebKit / VoiceOver). -->
+      <div class="review-error" class:shown={!!error} role="alert">
+        {#if error}
+          <Icon name="warning" size={12} />
+          <span class="review-error-text">{error}</span>
+        {/if}
+      </div>
       <p class="review-hint">Review and edit the statement before running. This will run against the connection.</p>
       <textarea dir="ltr" aria-label="Statement to run"
         class="review-sql mono"
@@ -116,6 +127,22 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
+  }
+  /* Empty (no box) until a failure: never display:none, which would drop the
+     region from the accessibility tree and re-insert it with its text. */
+  .review-error.shown {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    padding: 6px 8px;
+    border-radius: var(--radius-s);
+    background: var(--danger-soft);
+    color: var(--danger);
+    font-size: var(--fs-s);
+  }
+  .review-error-text {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
   }
   .review-hint {
     margin: 0;

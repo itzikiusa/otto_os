@@ -12,7 +12,7 @@
   import { api } from '../../lib/api/client';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { rel } from '../../lib/stores/now.svelte';
-  import type { CanvasSceneSummary, CanvasScene } from './types';
+  import type { CanvasSceneSummary, CanvasScene } from '../../lib/canvas/types';
 
 
   let filter = $state('');

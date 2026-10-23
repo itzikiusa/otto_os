@@ -13,7 +13,9 @@ function fixture() {
   const timers = new Map<number, { at: number; run: () => void }>();
   let timerId = 0;
   const calls: { id: string; result: ReturnType<typeof deferred<typeof status>> }[] = [];
-  const { git } = loadSource(new URL('../src/lib/stores/git.svelte.ts', import.meta.url), {
+  // The store's typed client (lib/api/git.ts) runs for real over the same
+  // transport stub: `relative` loads it, `lib/api/client` is its import.
+  const imports: Record<string, unknown> = {
     '../api/client': { api: { post: (url: string) => {
       const result = deferred<typeof status>();
       calls.push({ id: url.split('/')[2], result });
@@ -21,11 +23,13 @@ function fixture() {
     } } },
     '../loadError': { loadErrorText: (e: unknown) => (e instanceof Error ? e.message : String(e)) },
     '../gitLivePaths': livePaths, '../latest': latest,
-  }, {
+  };
+  imports['lib/api/client'] = imports['../api/client'];
+  const { git } = loadSource(new URL('../src/lib/stores/git.svelte.ts', import.meta.url), imports, {
     document, Date: { now: () => now },
     setTimeout: (fn: () => void, ms: number) => { timers.set(++timerId, { at: now + ms, run: fn }); return timerId; },
     clearTimeout: (id: number) => timers.delete(id),
-  });
+  }, { relative: true });
   return { git, calls, document, timers,
     focus: (value: boolean) => { focused = value; },
     advance: async (ms: number) => {

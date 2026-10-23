@@ -3,7 +3,6 @@
   import type { BadgeTone } from '../../lib/status';
   import { sentenceCase } from '../../lib/labels';
   import Badge from '../../lib/components/Badge.svelte';
-  import { toastError } from '../../lib/toastError';
   // RDS (read-only): DB instances table (status pill, identifier, engine,
   // class, AZ / Multi-AZ, storage, endpoint, created) with a region switcher
   // and a right-side drawer (AwsDrawer) — Overview (key fields + tags),
@@ -129,8 +128,8 @@
     try {
       await copyTextOrThrow(text);
       toasts.success(`Copied ${what}`);
-    } catch (e) {
-      toastError('Couldn’t copy', e);
+    } catch {
+      toasts.error('Couldn’t copy', 'The clipboard isn’t available here. Select the text and copy it manually.');
     }
   }
 

@@ -12,7 +12,7 @@ import { cssVarName, isValidTokenName, tokenLabel, tokenRef } from './tokens';
 
 export async function copyWithToast(text: string, what: string): Promise<void> {
   if (await copyText(text)) toasts.success(`Copied ${what}`, text.length > 80 ? undefined : text);
-  else toasts.error('Couldn’t copy', 'The clipboard isn’t available here.');
+  else toasts.error('Couldn’t copy', 'The clipboard isn’t available here. Select the text and copy it manually.');
 }
 
 /** Ask for a token name; null when cancelled, invalid (explained) or taken. */

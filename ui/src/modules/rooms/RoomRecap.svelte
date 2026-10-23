@@ -12,8 +12,13 @@
   import Modal from '../../lib/components/Modal.svelte';
   import RecapSettingsModal from './RecapSettingsModal.svelte';
   import RecapPanel from './RecapPanel.svelte';
+  import {loadErrorText} from '../../lib/loadError';
+  import {announce} from '../../lib/announce.svelte';
   let {room, connected, send, audioSources, screenStreams}: {room: RoomSnapshot; connected: boolean; send: (action: RoomAction) => boolean; audioSources: () => ReadonlyMap<string, RoomRecapAudioSource>; screenStreams: () => ReadonlyMap<string, MediaStream>} = $props();
-  let prepare = $state(false), panel = $state(false), settings = $state(false), busy = $state(false), error = $state(''), partial = $state(false);
+  let prepare = $state(false), panel = $state(false), settings = $state(false), busy = $state(false), partial = $state(false);
+  /** What failed (a sentence) + why (dim), and whether it was the engine check (the only one "Retry checks" re-runs). */
+  let error = $state<{what: string; detail: string; check: boolean} | null>(null);
+  function fail(what: string, e: unknown, check: boolean) { error = {what, detail: loadErrorText(e), check}; announce(`${what} ${error.detail}`, {assertive: true}); }
   let speechAvailable = $state(false);
   let capability = $state<RecapCapabilities | null>(null);
   let captureStatus = $state<RecapCaptureStatus>({audioSources: 0, screenSources: 0, gaps: [], speechIssue: null});
@@ -34,8 +39,16 @@
   onDestroy(() => capture?.dispose());
   export async function finishCapture() { await capture?.finish(); }
   function start() { capture?.prepareAudio(); send({type: 'recap_start', epoch: room.recap!.epoch}); }
-  async function openPrepare() { partial = false; prepare = true; busy = true; error = ''; capability = null; try { capability = await recapRequest<RecapCapabilities>('/room-recap-capabilities'); } catch (e) { error = e instanceof Error ? e.message : 'Couldn’t check local recap engines.'; } finally { busy = false; } }
-  async function create() { busy = true; error = ''; try { await recapRequest(`/rooms/${room.room_id}/recaps`, {allow_unavailable_speech: partial}); prepare = false; } catch (e) { error = e instanceof Error ? e.message : 'Couldn’t prepare the recap.'; } finally { busy = false; } }
+  async function openPrepare() {
+    partial = false; prepare = true; busy = true; error = null; capability = null;
+    try {
+      capability = await recapRequest<RecapCapabilities>('/room-recap-capabilities');
+      if (!capability.speech_ready) announce('Speech recognition is not ready. You can continue without a spoken transcript.');
+    } catch (e) { fail('Couldn’t check the local recap engines.', e, true); } finally { busy = false; }
+  }
+  async function create() { busy = true; error = null; try { await recapRequest(`/rooms/${room.room_id}/recaps`, {allow_unavailable_speech: partial}); prepare = false; } catch (e) { fail('Couldn’t prepare the recap.', e, false); } finally { busy = false; } }
+  // Speech-capture trouble is announced at its edge; the visible line is not a live region.
+  $effect(() => { const issue = captureStatus.speechIssue; if (issue) announce(`Speech capture is paused: ${issue}`); });
   async function withdraw(): Promise<void> {
     const ok = await confirmer.ask('The host stops capturing speech, chat and screens until everyone consents again.', {
       title: 'Pause capture for everyone?',
@@ -78,18 +91,18 @@
     {/if}
     {#if host}<div class="actions"><button class="btn small" onclick={() => panel = true}>Open recap</button>{#if room.recap.state === 'stopped'}<button class="btn small" onclick={openPrepare}>Prepare another recap…</button>{/if}</div>
       {#if room.recap.state === 'capturing'}<p class="hint">Capturing {captureStatus.audioSources} microphone {captureStatus.audioSources === 1 ? 'source' : 'sources'} and sampling {captureStatus.screenSources} shared {captureStatus.screenSources === 1 ? 'screen' : 'screens'}. Hidden or unavailable screens have reduced coverage.</p>
-        {#if captureStatus.speechIssue}<p class="speech-issue" role="status">Speech capture is paused: {captureStatus.speechIssue}</p><button class="btn small" onclick={() => capture?.resumeAudio()}>Retry speech capture</button>{/if}{/if}
+        {#if captureStatus.speechIssue}<p class="speech-issue">Speech capture is paused: {captureStatus.speechIssue}</p><button class="btn small" onclick={() => capture?.resumeAudio()}>Retry speech capture</button>{/if}{/if}
       {#if captureStatus.gaps.length}<details><summary>Capture coverage notes ({captureStatus.gaps.length})</summary><ul>{#each captureStatus.gaps as gap}<li>{gap}</li>{/each}</ul></details>{/if}
     {/if}
   {:else if host}<button class="btn small" onclick={openPrepare}>Prepare a full recap…</button><span class="hint">Capture starts only after everyone consents.</span>{/if}
-  {#if error}<p role="alert">{error}</p>{/if}
+  {#if error && !prepare}<p class="error"><strong>{error.what}</strong> <span>{error.detail}</span></p>{/if}
 </section>
 {#if prepare}<Modal title="Prepare a room recap" width={600} onclose={() => prepare = false}>
   <p>Ask everyone to consent to a local archive of speech, chat, terminal output, shared-source changes, sampled screen images and annotations. The host keeps the archive after the room ends.</p>
   <p>Only content shared after capture starts is included. Images are sampled up to every 15 seconds, not recorded as video. Consent withdrawal or connection loss pauses capture.</p>
-  {#if busy && !capability}<p role="status">Checking local engines…</p>{/if}
-  {#if capability && !capability.speech_ready}<p role="alert">Speech recognition is not ready: {capability.configuration_error ?? 'Configure a local whisper.cpp executable and multilingual model.'}</p><label class="check"><input type="checkbox" bind:checked={partial} /> Continue with room activity and screen samples, without a spoken transcript</label>{/if}
-  {#if error}<p role="alert">{error}</p><button class="btn" onclick={openPrepare}>Retry checks</button>{/if}
+  {#if busy && !capability}<p>Checking local engines…</p>{/if}
+  {#if capability && !capability.speech_ready}<p class="error">Speech recognition is not ready: {capability.configuration_error ?? 'Configure a local whisper.cpp executable and multilingual model.'}</p><label class="check"><input type="checkbox" bind:checked={partial} /> Continue with room activity and screen samples, without a spoken transcript</label>{/if}
+  {#if error}<p class="error"><strong>{error.what}</strong> <span>{error.detail}</span></p>{#if error.check}<button class="btn" onclick={openPrepare}>Retry checks</button>{/if}{/if}
   {#if auth.isRoot}<button class="btn" onclick={() => settings = true}>Configure local engines…</button>{/if}
   {#snippet footer()}<button class="btn" onclick={() => prepare = false}>Cancel</button><button class="btn primary" disabled={busy || !capability || (!capability.speech_ready && !partial)} onclick={create}>Ask everyone to consent</button>{/snippet}
 </Modal>{/if}
@@ -97,5 +110,5 @@
 {#if panel && room.recap}<Modal title="Room recap" width={960} onclose={() => panel = false}>{#key room.recap.id}<RecapPanel recapId={room.recap.id} />{/key}</Modal>{/if}
 <style>
   .recap-banner { padding: 8px 16px; border-bottom: 1px solid var(--border); background: var(--surface); max-height: 35%; overflow: auto; }
-  .recap-banner:empty { display: none; } .status, .actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; } .status span, .hint { font-size: var(--fs-s); color: var(--text-dim); } p, li { line-height: 1.5; overflow-wrap: anywhere; } .recap-banner p { margin-block: 8px; font-size: var(--fs-s); } [role='alert'] { color: var(--danger); } .speech-issue { color: var(--warning); } .check { display: flex; gap: 8px; align-items: start; margin-block: 16px; } details { margin-block-start: 8px; font-size: var(--fs-s); }
+  .recap-banner:empty { display: none; } .status, .actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; } .status span, .hint { font-size: var(--fs-s); color: var(--text-dim); } p, li { line-height: 1.5; overflow-wrap: anywhere; } .recap-banner p { margin-block: 8px; font-size: var(--fs-s); } .error { color: var(--danger); } .error span { color: var(--text-dim); } .speech-issue { color: var(--warning); } .check { display: flex; gap: 8px; align-items: start; margin-block: 16px; } details { margin-block-start: 8px; font-size: var(--fs-s); }
 </style>

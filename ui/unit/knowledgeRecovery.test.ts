@@ -27,7 +27,7 @@ function functions(path: string, names: string[], state: Record<string, any>) {
 const snipFile = '../src/modules/snip/SnipEditor.svelte';
 
 test('a draft without a source revision becomes dirty after typing', () => {
-  const text = readFileSync(new URL('../src/modules/product/OverviewTab.svelte', import.meta.url), 'utf8').split('<script lang="ts">')[1].split('</script>')[0];
+  const text = readFileSync(new URL('../src/modules/product/DraftEditor.svelte', import.meta.url), 'utf8').split('<script lang="ts">')[1].split('</script>')[0];
   const file = ts.createSourceFile('overview.ts', text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   const declaration = file.statements.filter(ts.isVariableStatement).flatMap(n => [...n.declarationList.declarations])
     .find(n => n.name.getText(file) === 'draftDirty');
@@ -45,6 +45,7 @@ function snip(overrides: Record<string, unknown>) {
     copyAgain: false, copyState: 'idle', snipId: 'snip', leavePending: null, allowClose: false,
     annosHash: JSON.stringify, uploadNeeded: (a: unknown, saved: string) => JSON.stringify(a) === saved ? null : JSON.stringify(a),
     flatten: async () => new Blob(), toasts: { error() {} }, toastError() {}, commitText() {},
+    loadErrorText: (e: unknown) => (e instanceof Error ? e.message : String(e)),
     confirmer: { choose: async () => ({value: null}) },
     ...overrides,
   });
@@ -55,6 +56,19 @@ test('explicit Copy retries the clipboard for an unchanged persisted image', asy
   const s = snip({ snipApi: { copy: async () => { ++copies; return { copied: true }; } } });
   await s.copyNow(true);
   assert.equal(copies, 1); assert.equal(s.copyState, 'copied');
+});
+
+test('a failed snip copy says what to do next (ux-design-6-07)', async () => {
+  const shown: [string, string][] = [];
+  const s = snip({
+    snipApi: { copy: async () => { throw new Error('osascript failed'); } },
+    toasts: { error: (title: string, body: string) => { shown.push([title, body]); } },
+  });
+  await s.copyNow(true);
+  assert.equal(s.copyState, 'failed');
+  assert.equal(shown.length, 1);
+  assert.equal(shown[0][0], 'Couldn’t copy the snip');
+  assert.match(shown[0][1], /^osascript failed Try Copy \(⌘C\) again/);
 });
 
 test('keyboard Copy explicitly recopies unchanged content', () => {

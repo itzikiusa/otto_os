@@ -7,6 +7,12 @@ import { ws } from './workspace.svelte';
 import { loadErrorText } from '../loadError';
 import { latestOnly } from '../latest';
 
+/** The per-cluster views, in tab order. Lives in lib/ (not the brokers
+ *  module) because the agent UI commands (lib/uiCommands/brokers.ts) address
+ *  these tabs too, and lib/ never imports from modules/. */
+export const CLUSTER_VIEW_IDS = ['overview', 'topics', 'groups', 'schema', 'replay', 'alerts'] as const;
+export type ClusterView = (typeof CLUSTER_VIEW_IDS)[number];
+
 class BrokersStore {
   clusters: BrokerCluster[] = $state([]);
   /** User-defined sidebar sections (folders), a nestable tree via parent_id.

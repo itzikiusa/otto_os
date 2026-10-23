@@ -2,7 +2,7 @@
 // that format only. A Mermaid editor can receive a D2 stop result when the
 // stored scene changed during the turn; the originating component must not
 // assume its own format.
-import type { AssistResult, CanvasDoc, CanvasFormat } from './types';
+import type { AssistResult, CanvasDoc, CanvasFormat } from '../../lib/canvas/types';
 
 /** Build the canvas doc the response actually committed. `fallback` is used
  *  only when an older response omits `format`. An empty source for the named

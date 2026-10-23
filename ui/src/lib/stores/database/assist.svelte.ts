@@ -32,6 +32,10 @@ export interface AssistHost {
   runReadOnly(agentLabel: string, confirmWrite: () => Promise<boolean>): Promise<void>;
 }
 
+/** How long a closed, id-less turn waits to surface before its orphan slot
+ *  lapses (a turn that never started a session must not claim a later one). */
+const ORPHAN_TTL_MS = 120_000;
+
 export class DbAssistStore {
   private readonly host: AssistHost;
   constructor(host: AssistHost) {
@@ -60,6 +64,20 @@ export class DbAssistStore {
   private assistResultContext: string | null = null;
   /** Aborts the in-flight assist POST (Stop). Non-reactive plain field. */
   private assistAbort: AbortController | null = null;
+  /** Turn generation, bumped by open and close: a turn that outlives the panel
+   *  it started in never writes the panel (id, session, SQL, busy). */
+  private gen = 0;
+  /** Stop dropped the POST before the server's id arrived: the panel still
+   *  adopts the turn's `db_assist_session_started`, so Close can discard it. */
+  private awaitingId = false;
+  /** Per connection, the deadlines of turns that were closed before their
+   *  assist id was known. The next unclaimed `db_assist_session_started` for
+   *  that connection is one of them and is discarded on sight (DELETE) — the
+   *  session is hidden from Agents, so nothing else would ever close it. */
+  private orphans = new Map<Id, number[]>();
+  /** Assist ids already discarded (an orphan's event and its late POST
+   *  response both name it; one DELETE). */
+  private discarded = new Set<string>();
 
   /**
    * Open the DB Assistant panel in `mode`. For `investigate`, pass a compact
@@ -75,6 +93,7 @@ export class DbAssistStore {
       toasts.error('No connection selected');
       return;
     }
+    this.retireTurn();
     this.assistOpen = true;
     this.assistMode = mode;
     this.assistConnId = connId;
@@ -107,6 +126,8 @@ export class DbAssistStore {
     const q = question.trim();
     if (!q || this.assistBusy) return;
     this.assistBusy = true;
+    this.awaitingId = false;
+    const gen = this.gen;
     // Abortable: the POST is long (agent turn) and can wedge — Stop drops the
     // HTTP wait and releases the input (the session, if started, stays live).
     const ac = new AbortController();
@@ -127,6 +148,12 @@ export class DbAssistStore {
         },
         ac.signal,
       );
+      // The panel was closed or reopened while the turn ran: its session is
+      // nobody's now — discard it, and leave the (new) panel untouched.
+      if (gen !== this.gen) {
+        this.discardOrphan(id, resp.assist_id);
+        return;
+      }
       this.assistId = resp.assist_id;
       // The session usually arrives first (turn START) via the event; set it from
       // the response too in case it didn't (idempotent — same id).
@@ -134,22 +161,86 @@ export class DbAssistStore {
       if (resp.sql) this.assistProposedSql = resp.sql;
       if (resp.note) this.assistNote = resp.note;
     } catch (e) {
-      if (!ac.signal.aborted) toastError('Couldn’t dB assistant', e);
+      if (gen !== this.gen) {
+        // A stale turn that failed minted nothing to discard.
+        this.takeOrphan(id);
+        return;
+      }
+      if (!ac.signal.aborted) toastError('Couldn’t run the DB assistant', e);
     } finally {
       if (this.assistAbort === ac) this.assistAbort = null;
-      this.assistBusy = false;
+      if (gen === this.gen) this.assistBusy = false;
     }
   }
 
-  /** Stop the in-flight assist turn: abort the POST and release the input. */
+  /** Stop the in-flight assist turn: abort the POST and release the input. A
+   *  turn whose id never arrived stays adoptable by its session event. */
   stopAssist(): void {
+    if (this.assistBusy && this.assistId === null) this.awaitingId = true;
     this.assistAbort?.abort();
+    this.assistAbort = null;
     this.assistBusy = false;
   }
 
-  /** `db_assist_session_started` → attach the live shell. */
+  /** End the panel's current turn (open / close): a turn still waiting for its
+   *  id becomes an orphan of its connection, discarded when it surfaces. The
+   *  POST itself is NOT aborted: its response carries the minted assist id,
+   *  the one reliable handle to DELETE it by; dropping it would leave only the
+   *  WS event to find the session with. */
+  private retireTurn(): void {
+    const conn = this.assistConnId;
+    if (conn && this.assistId === null && (this.assistBusy || this.awaitingId)) {
+      const list = this.orphans.get(conn) ?? [];
+      list.push(Date.now() + ORPHAN_TTL_MS);
+      this.orphans.set(conn, list);
+    }
+    this.gen++;
+    this.awaitingId = false;
+    this.assistBusy = false;
+    this.assistAbort = null;
+  }
+
+  /** Consume one orphan slot of `connId`; false when it has none (expired
+   *  slots — a turn that never started a session — are dropped first). */
+  private takeOrphan(connId: Id): boolean {
+    const now = Date.now();
+    const live = (this.orphans.get(connId) ?? []).filter((t) => t > now);
+    const took = live.length > 0;
+    if (took) live.shift();
+    if (live.length) this.orphans.set(connId, live);
+    else this.orphans.delete(connId);
+    return took;
+  }
+
+  /** DELETE an orphaned assist once (its event and its late POST response
+   *  both lead here), releasing its connection's orphan slot. */
+  private discardOrphan(connId: Id, assistId: string): void {
+    if (this.discarded.has(assistId)) return;
+    this.discarded.add(assistId);
+    this.takeOrphan(connId);
+    void dbAssistClose(connId, assistId).catch(() => {
+      /* best-effort discard — the session is reaped on daemon restart anyway */
+    });
+  }
+
+  /** `db_assist_session_started` → attach the live shell, or discard the
+   *  session of a turn that was closed before its id was known. */
   setAssistSession(assistId: string, connId: Id, sessionId: string): void {
+    if (this.discarded.has(assistId)) return;
+    if (assistId !== this.assistId && this.orphans.has(connId) && this.takeOrphanFor(connId, assistId)) return;
     if (this.adoptAssist(assistId, connId)) this.assistSessionId = sessionId;
+  }
+
+  /** An unclaimed session of a connection with a live orphan slot is that
+   *  orphan: DELETE it (true). */
+  private takeOrphanFor(connId: Id, assistId: string): boolean {
+    const now = Date.now();
+    if (!(this.orphans.get(connId) ?? []).some((t) => t > now)) {
+      this.takeOrphan(connId); // prune the expired slots
+      return false;
+    }
+    this.discardOrphan(connId, assistId);
+    return true;
   }
 
   /** `db_assist_updated` → live proposed SQL + note. */
@@ -165,8 +256,9 @@ export class DbAssistStore {
   private adoptAssist(assistId: string, connId: Id): boolean {
     if (!this.assistOpen) return false;
     if (assistId === this.assistId) return true;
-    if (this.assistBusy && this.assistId === null && connId === this.assistConnId) {
+    if ((this.assistBusy || this.awaitingId) && this.assistId === null && connId === this.assistConnId) {
       this.assistId = assistId;
+      this.awaitingId = false;
       return true;
     }
     return false;
@@ -214,14 +306,17 @@ export class DbAssistStore {
       return;
     }
     this.assistBusy = true;
+    const gen = this.gen;
+    const aid = this.assistId;
     try {
-      const resp = await dbAssistSummary(id, this.assistId);
-      downloadText(resp.markdown, `db-assist-${this.assistId}.md`, 'text/markdown');
+      const resp = await dbAssistSummary(id, aid);
+      downloadText(resp.markdown, `db-assist-${aid}.md`, 'text/markdown');
       toasts.success('Summary downloaded');
     } catch (e) {
       toastError('Couldn’t summarize', e);
     } finally {
-      this.assistBusy = false;
+      // A panel reopened meanwhile owns `assistBusy` now.
+      if (gen === this.gen) this.assistBusy = false;
     }
   }
 
@@ -229,6 +324,7 @@ export class DbAssistStore {
   async closeAssist(): Promise<void> {
     const id = this.assistConnId ?? this.host.selectedConnId();
     const aid = this.assistId;
+    this.retireTurn();
     this.assistOpen = false;
     this.assistSessionId = null;
     this.assistProposedSql = '';

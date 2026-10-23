@@ -5,6 +5,7 @@
   import { router } from '../../lib/router.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import CreatePr from './CreatePr.svelte';
   import { rel } from '../../lib/stores/now.svelte';
@@ -34,9 +35,9 @@
    *  rows already on screen (the opposite of what loadMore promises). */
   let moreError = $state('');
   const moreErrId = $props.id();
-  /** Headline for the error state — distinguishes "your token is bad" from
+  /** Cause line of the error state — distinguishes "your token is bad" from
    *  "the provider is down" instead of labelling every failure "unreachable". */
-  let errorTitle = $state('Provider unreachable');
+  let errorCause = $state('The provider is unreachable.');
   let createOpen = $state(false);
   // Bumped by the Retry button to re-run the load effect.
   let retryRev = $state(0);
@@ -87,13 +88,13 @@
         if (hit) return;
         prs = [];
         hasMore = false;
-        error = e instanceof Error ? e.message : 'failed to load PRs';
-        errorTitle =
+        error = e instanceof Error && e.message ? e.message : 'Couldn’t load pull requests.';
+        errorCause =
           e instanceof ApiError && (e.status === 401 || e.status === 403)
-            ? 'Provider rejected the credentials'
+            ? 'The provider rejected the credentials.'
             : e instanceof ApiError && e.status === 404
-              ? 'Repository not found on the provider'
-              : 'Provider unreachable';
+              ? 'The repository wasn’t found on the provider.'
+              : 'The provider is unreachable.';
       })
       .finally(() => { if (active) loading = false; });
     return () => {
@@ -191,14 +192,7 @@
   {#if loading}
     <Skeleton rows={4} height={48} />
   {:else if error}
-    <EmptyState
-      icon="warning"
-      title={errorTitle}
-      body={error}
-      actionLabel="Retry"
-      actionIcon="refresh"
-      onaction={() => retryRev++}
-    />
+    <LoadState what="pull requests" error={`${errorCause} ${error}`} empty onretry={() => retryRev++} />
   {:else if prs.length === 0}
     <EmptyState
       icon="pr"

@@ -2,6 +2,7 @@
   import { onMount, untrack } from 'svelte';
   // Boot flow: GET /meta → onboarding wizard | login | main shell.
   import Toasts from './lib/components/Toasts.svelte';
+  import Announcer from './lib/components/Announcer.svelte';
   import BarHost from './modules/desktop/BarHost.svelte';
   import TrayPage from './modules/desktop/TrayPage.svelte';
   import { auth } from './lib/stores/auth.svelte';
@@ -249,6 +250,7 @@
 {/snippet}
 
 <Toasts />
+<Announcer />
 
 <style>
   .boot {

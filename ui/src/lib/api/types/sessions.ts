@@ -5,6 +5,19 @@ import type {
   Id, SessionKind, SessionStatus,
 } from './core';
 
+/** One user MCP server the launcher could not attach at the last spawn
+ *  (`meta.mcp_skipped`, api.md "MCP servers"). */
+export interface McpSkippedServer {
+  server: string;
+  reason: string;
+}
+
+/** Session meta: free-form JSON, plus the few keys the UI reads typed. */
+export type SessionMeta = Record<string, unknown> & {
+  /** Set at each spawn; absent when every enabled server attached. */
+  mcp_skipped?: McpSkippedServer[];
+};
+
 export interface Session {
   id: Id;
   workspace_id: Id;
@@ -19,7 +32,7 @@ export interface Session {
   created_at: string;
   last_active_at: string;
   archived: boolean;
-  meta: Record<string, unknown>;
+  meta: SessionMeta;
   /** Transient (list/get only): a PTY is live for this session right now.
    *  Absent on payloads that return the bare domain row (archive, events). */
   live?: boolean;

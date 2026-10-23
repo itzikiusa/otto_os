@@ -8,7 +8,7 @@
   // badge, issue_type, a version dropdown (with body_md rendering), Refresh
   // button, watch toggle, and (for Jira stories) a rich section with status,
   // assignee, details, linked issues, comments, history, and attachments.
-  import { tick, untrack } from 'svelte';
+  import { untrack } from 'svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { kindLabel } from '../../lib/labels';
   import Skeleton from '../../lib/components/Skeleton.svelte';
@@ -22,7 +22,6 @@
   import { swarm } from '../../lib/stores/swarm.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { renderMarkdown } from '../../lib/md';
-  import { registerFindProvider } from '../../lib/findProviders';
   import { toasts } from '../../lib/toast.svelte';
   import { AttachmentUrls } from './attachmentUrls.svelte';
   import * as issues from '../../lib/api/issues';
@@ -35,8 +34,8 @@
   import PublishDialog from './PublishDialog.svelte';
   import { reseedDraft, type DraftSeed } from './draftSeed';
   import SwarmLinkCard from './SwarmLinkCard.svelte';
-  import type { ProductTranscriptSummary } from './types';
   import AttachmentsPanel from './AttachmentsPanel.svelte';
+  import DraftEditor from './DraftEditor.svelte';
   import LinkedCanvases from './LinkedCanvases.svelte';
   import ChildrenBoard from './ChildrenBoard.svelte';
   import { escapeHtml, unescapeHtml } from '../../lib/html';
@@ -131,30 +130,10 @@
   const isDraft = $derived(story?.source_kind === 'draft');
   const isConfluence = $derived(story?.source_kind === 'confluence');
 
-  // ── Draft edit state ─────────────────────────────────────────────────────
-  let draftTitle = $state('');
-  let draftBody = $state('');
-  /** The draft form differs from the saved draft (Save enabled; leaving asks). */
-  const draftDirty = $derived(
-    isDraft && !!story && (draftTitle !== story.title || draftBody !== (source?.body_md ?? '')),
-  );
-  async function approveDraftLeave(): Promise<boolean> {
-    if (!draftDirty) return true;
-    const allowed = await confirmer.ask('You have unsaved changes to this draft. Leaving now discards them.', {
-      title: 'Discard unsaved changes?', danger: true, confirmLabel: 'Discard', cancelLabel: 'Keep editing',
-    });
-    if (allowed) { draftTitle = story?.title ?? ''; draftBody = source?.body_md ?? ''; }
-    return allowed;
-  }
-  $effect(() => product.registerDraftLeave(approveDraftLeave));
-  $effect(() => router.guard(approveDraftLeave));
-  let draftSaving = $state(false);
 
-  // ── AttachmentsPanel ref + screenshot paste counter ───────────────────────
-  // panelRef exposes uploadBlob(blob, opts) for the textarea paste handler.
+
+  // AttachmentsPanel instance (bound for the Jira / Confluence layouts).
   let panelRef = $state<{ uploadBlob: (blob: Blob, opts?: { filename?: string; kind?: string }) => Promise<ProductAttachment> } | null>(null);
-  // Session-local counter for unique screenshot filenames.
-  let bodyScreenshotIdx = $state(0);
 
   // ── Body preview: attachment token resolution ─────────────────────────────
   // Resolved authed blob URLs for `attachment:<id>` refs found in renderedBody
@@ -171,12 +150,6 @@
   // Track the last rendered body to avoid redundant re-resolution.
   let lastResolvedInput = $state('');
 
-  // ── Transcript state ──────────────────────────────────────────────────────
-  let transcriptsLoaded = $state(false);
-  let newTranscriptTitle = $state('');
-  let newTranscriptBody = $state('');
-  let addingTranscript = $state(false);
-  let expandedTranscripts = $state<Record<string, boolean>>({});
 
   // ── Add comment state ─────────────────────────────────────────────────────
   let newCommentBody = $state('');
@@ -304,44 +277,6 @@
       }
       bodyAtts.dispose();
     };
-  });
-
-  // Seed the draft form ONCE per story, then only per UNEDITED field
-  // (r3-02-07). `product.detail` is replaced by updateStory / patchStory /
-  // loadDetail / ActionCard; re-seeding on every replacement overwrote the
-  // user's unsaved draft and collapsed the transcripts. Plain (non-reactive)
-  // bookkeeping: the story id + the values last seeded into each field.
-  let seeded: DraftSeed = { id: null, title: '', body: '' };
-  $effect(() => {
-    const s = story;
-    const src = source;
-    const draft = isDraft;
-    untrack(() => {
-      const id = s?.id ?? null;
-      if (id !== seeded.id) {
-        // A different story: reset transcript state too.
-        transcriptsLoaded = false;
-        newTranscriptTitle = '';
-        newTranscriptBody = '';
-        expandedTranscripts = {};
-      }
-      if (!draft || !s) {
-        seeded = { ...seeded, id };
-        return;
-      }
-      const next: DraftSeed = { id, title: s.title, body: src?.body_md ?? '' };
-      const form = reseedDraft(seeded, { title: draftTitle, body: draftBody }, next);
-      draftTitle = form.title;
-      draftBody = form.body;
-      seeded = next;
-    });
-  });
-
-  $effect(() => {
-    if (isDraft && story && !transcriptsLoaded) {
-      transcriptsLoaded = true;
-      void product.loadTranscripts();
-    }
   });
 
   // Load swarms lazily so the discovery team picker is populated.
@@ -647,133 +582,6 @@
     }
   }
 
-  async function saveDraft(): Promise<void> {
-    draftSaving = true;
-    try {
-      await product.updateDraft({ title: draftTitle, body_md: draftBody });
-      toasts.success('Draft saved');
-    } catch (e) {
-      toastError('Couldn’t save the draft', e);
-    } finally {
-      draftSaving = false;
-    }
-  }
-
-  /**
-   * Paste handler for the draft body `<textarea>`. When the clipboard contains
-   * an image, upload it via the AttachmentsPanel's uploadBlob action, then
-   * splice `![filename](attachment:<id>)` at the caret so the markdown body
-   * references the attachment portably (not a blob URL).
-   */
-  async function handleBodyPaste(e: ClipboardEvent): Promise<void> {
-    if (!e.clipboardData) return;
-    for (const item of Array.from(e.clipboardData.items)) {
-      if (item.kind === 'file' && item.type.startsWith('image/')) {
-        e.preventDefault();
-        const blob = item.getAsFile();
-        if (!blob || !panelRef) return;
-        const idx = ++bodyScreenshotIdx;
-        const filename = `screenshot-${idx}.png`;
-        try {
-          const textarea = e.currentTarget as HTMLTextAreaElement;
-          const caretPos = textarea.selectionStart ?? draftBody.length;
-          const att = await panelRef.uploadBlob(blob, { filename, kind: 'image' });
-          // Splice the markdown reference at the caret position.
-          const token = `![${att.filename}](attachment:${att.id})`;
-          draftBody =
-            draftBody.slice(0, caretPos) + token + draftBody.slice(caretPos);
-        } catch (ex) {
-          toastError('Couldn’t upload the screenshot', ex);
-        }
-        return; // only handle the first image item
-      }
-    }
-  }
-
-  async function doAddTranscript(): Promise<void> {
-    if (!newTranscriptBody.trim()) return;
-    addingTranscript = true;
-    try {
-      await product.addTranscript({
-        title: newTranscriptTitle.trim() || null,
-        body: newTranscriptBody.trim(),
-      });
-      newTranscriptTitle = '';
-      newTranscriptBody = '';
-      toasts.success('Transcript added');
-    } catch (e) {
-      toastError('Couldn’t add transcript', e);
-    } finally {
-      addingTranscript = false;
-    }
-  }
-
-  async function doDeleteTranscript(t: ProductTranscriptSummary): Promise<void> {
-    const ok = await confirmer.ask(
-      `Remove transcript “${t.title || 'untitled'}”?`,
-      { title: 'Remove transcript', confirmLabel: 'Remove', danger: true },
-    );
-    if (!ok) return;
-    try {
-      await product.deleteTranscript(t.id);
-      toasts.info('Transcript removed');
-    } catch (e) {
-      toastError('Couldn’t remove the transcript', e);
-    }
-  }
-
-  async function toggleTranscript(id: string): Promise<void> {
-    expandedTranscripts = { ...expandedTranscripts, [id]: !expandedTranscripts[id] };
-    if (expandedTranscripts[id]) await product.loadTranscriptBody(id);
-  }
-
-  async function downloadTranscript(t: ProductTranscriptSummary): Promise<void> {
-    try {
-      const full = await product.getTranscript(t.id);
-      const url = URL.createObjectURL(new Blob([full.body], { type: 'text/plain;charset=utf-8' }));
-      const anchor = document.createElement('a');
-      anchor.href = url; anchor.download = `${t.title || 'transcript'}.txt`; anchor.click();
-      setTimeout(() => URL.revokeObjectURL(url), 0);
-    } catch (e) { toasts.error('Couldn’t download transcript', product.errMsg(e)); }
-  }
-
-  // ⌘F reaches COLLAPSED transcripts too: their bodies aren't mounted, so the
-  // page-wide find overlay's DOM walk never saw them. This provider
-  // (lib/findProviders.ts) searches title + body of every transcript; going to
-  // a match in a collapsed one expands it. The date is `data-find-skip` in the
-  // row, so the row's text order is title → body, matching `text(i)`.
-  let transcriptListEl = $state<HTMLElement | undefined>();
-  $effect(() => {
-    if (!transcriptListEl) return;
-    const list = transcriptListEl;
-    let revealGeneration = 0;
-    return registerFindProvider({
-      root: () => list,
-      count: () => product.transcriptSearchRows.length,
-      search: (query, limit, signal) => { revealGeneration++; return product.searchTranscripts(query, limit, signal); },
-      text: (i) => {
-        const t = product.transcriptSearchRows[i];
-        return t ? `${t.title || 'Untitled transcript'}\n${product.transcriptBodies[t.id] ?? ''}` : '';
-      },
-      reveal: async (i, signal) => {
-        const t = product.transcriptSearchRows[i], owner = product.selectedId;
-        const generation = revealGeneration;
-        if (!t || signal?.aborted) return;
-        await product.revealTranscript(t);
-        if (signal?.aborted || generation !== revealGeneration || product.selectedId !== owner) return;
-        expandedTranscripts = { ...expandedTranscripts, [t.id]: true };
-        await tick();
-      },
-      // Only an expanded row has its body mounted; a collapsed one → reveal.
-      rowElement: (i) => {
-        const t = product.transcriptSearchRows[i];
-        return t && expandedTranscripts[t.id] && product.transcriptBodies[t.id] !== undefined
-          ? list.querySelector(`[data-transcript-id="${CSS.escape(t.id)}"]`) : null;
-      },
-      release: () => { revealGeneration++; product.releaseTranscriptSearch(); },
-    });
-  });
-
   async function toggleWatch(): Promise<void> {
     if (!story) return;
     watchWorking = true;
@@ -1046,150 +854,7 @@
     <!-- ── Body area ──────────────────────────────────────────────── -->
     {#if isDraft}
       <!-- ── DRAFT: two-column layout (editor left, transcripts right) ── -->
-      <div class="two-col draft-layout">
-        <!-- Left: title + body editor + save + publish bar -->
-        <div class="col-left">
-          <div class="draft-section">
-            <div class="draft-hint">
-              Refine this draft with the Analysis / Questions / Rewrite tabs, then publish when ready.
-            </div>
-
-            <div class="field">
-              <label class="label" for="draft-title">Title</label>
-              <input dir="auto"
-                id="draft-title"
-                class="input wide-input"
-                bind:value={draftTitle}
-                placeholder="e.g. Players can set a weekly deposit limit"
-                spellcheck="false"
-              />
-            </div>
-
-            <div class="field">
-              <label class="label" for="draft-body">Body (Markdown)</label>
-              <textarea dir="auto"
-                id="draft-body"
-                class="textarea"
-                bind:value={draftBody}
-                rows={14}
-                placeholder="e.g. As a player, I want to cap my weekly deposits… (or paste meeting notes)"
-                spellcheck="false"
-                onpaste={handleBodyPaste}
-              ></textarea>
-            </div>
-
-            <div class="draft-save-row">
-              <button
-                class="btn"
-                onclick={saveDraft}
-                disabled={draftSaving || !draftDirty}
-                title={draftDirty ? undefined : 'No unsaved changes'}
-              >
-                {draftSaving ? 'Saving…' : draftDirty ? 'Save draft' : 'Saved'}
-              </button>
-            </div>
-
-            <!-- ── Publish bar ─────────────────────────────────────── -->
-            <div class="publish-bar">
-              <button class="btn" onclick={() => (publishDialogMode = 'rfc')}>
-                Publish as Confluence RFC…
-              </button>
-              <button class="btn primary" onclick={() => (publishDialogMode = 'story')}>
-                Publish as Jira story…
-              </button>
-            </div>
-          </div>
-        </div>
-
-        <!-- Right: Transcripts + Attachments -->
-        <div class="col-right">
-          <div class="transcripts-section">
-            <div class="transcripts-header">
-              <span class="section-title">Transcripts</span>
-            </div>
-            <div class="muted" data-find-skip>⌘F searches all imported transcripts, including older pages. Download keeps the complete text available.</div>
-
-            {#if product.transcriptsError}
-              <div role="alert">Couldn’t load transcripts. {product.transcriptsError}</div>
-              <button class="btn small" onclick={() => void product.loadTranscripts()}>Retry</button>
-            {/if}
-            {#if product.loadingTranscripts}
-              <LoadState what="transcripts" variant="compact" loading empty />
-            {:else if product.transcripts.length === 0 && !product.transcriptsError}
-              <div class="muted">No transcripts yet. Paste a conversation below.</div>
-            {:else}
-              <div class="transcript-list" bind:this={transcriptListEl}>
-                {#each product.transcripts as t (t.id)}
-                  <div class="transcript-item" data-transcript-id={t.id}>
-                    <div class="transcript-header">
-                      <button
-                        class="transcript-toggle"
-                        onclick={() => toggleTranscript(t.id)}
-                        aria-expanded={expandedTranscripts[t.id] ?? false}
-                      >
-                        <span class="coll-arrow" aria-hidden="true"><Icon name={expandedTranscripts[t.id] ? 'chevronDown' : 'chevronRight'} size={12} /></span>
-                        <span class="transcript-title">{t.title || 'Untitled transcript'}</span>
-                        <span class="transcript-date" data-find-skip title={new Date(t.created_at).toLocaleString()}>{rel(t.created_at)}</span>
-                      </button>
-                      <button
-                        class="del-transcript-btn"
-                        onclick={() => doDeleteTranscript(t)}
-                        title="Remove transcript"
-                        aria-label="Remove transcript"
-                      ><Icon name="x" size={12} /></button>
-                      <button class="btn small" data-find-skip onclick={() => void downloadTranscript(t)}>Download</button>
-                    </div>
-                    {#if expandedTranscripts[t.id]}
-                      {#if product.transcriptBodies[t.id] !== undefined}
-                        <div class="transcript-body">{product.transcriptBodies[t.id]}</div>
-                      {:else if product.transcriptBodyLoading[t.id]}
-                        <div data-find-skip><LoadState what="this transcript" variant="compact" loading empty /></div>
-                      {:else}
-                        {#if product.transcriptBodyErrors[t.id]}<div role="alert" data-find-skip>{product.transcriptBodyErrors[t.id]}</div>{/if}
-                        <button class="btn small" data-find-skip onclick={() => void product.loadTranscriptBody(t.id)}>{product.transcriptBodyErrors[t.id] ? 'Retry' : 'Load transcript'}</button>
-                      {/if}
-                    {/if}
-                  </div>
-                {/each}
-              </div>
-            {/if}
-            {#if product.transcriptPreviousCursors.length || product.transcriptNextCursor}
-              <div data-find-skip>
-                <button class="btn small" disabled={product.loadingTranscripts || !product.transcriptPreviousCursors.length} onclick={() => void product.previousTranscriptPage()}>Previous transcripts</button>
-                <button class="btn small" disabled={product.loadingTranscripts || !product.transcriptNextCursor} onclick={() => void product.loadTranscripts(product.transcriptNextCursor)}>Next transcripts</button>
-              </div>
-            {/if}
-
-            <!-- Add transcript form -->
-            <div class="add-transcript-form">
-              <input dir="auto"
-                class="input wide-input"
-                bind:value={newTranscriptTitle}
-                placeholder="e.g. Kickoff call, 12 Oct" aria-label="Transcript title (optional)"
-                spellcheck="false"
-              />
-              <textarea dir="auto" aria-label="Transcript"
-                class="textarea"
-                bind:value={newTranscriptBody}
-                rows={5}
-                placeholder="e.g. PO: the limit resets every Monday at midnight…"
-                spellcheck="false"
-              ></textarea>
-              <button
-                class="btn small"
-                onclick={doAddTranscript}
-                disabled={addingTranscript || !newTranscriptBody.trim()}
-              >
-                {addingTranscript ? 'Adding…' : 'Add transcript'}
-              </button>
-            </div>
-          </div>
-
-          <!-- Attachments panel: paste/drag/file-picker with previews. -->
-          <!-- bind:this captures the exported uploadBlob action. -->
-          <AttachmentsPanel bind:this={panelRef} />
-        </div>
-      </div>
+      <DraftEditor {story} {source} onpublish={(mode) => (publishDialogMode = mode)} />
 
     {:else if isJira}
       <!-- ── JIRA: two-column layout (body left, metadata right) ──── -->
@@ -2797,39 +2462,7 @@
     text-decoration: underline;
   }
 
-  /* ── Draft editing ─────────────────────────────────────────── */
-  .draft-section {
-    display: flex;
-    flex-direction: column;
-    gap: 14px;
-    padding-top: 4px;
-  }
-  .draft-hint {
-    font-size: var(--fs-s);
-    color: var(--text-dim);
-    background: var(--accent-faint);
-    border: 1px solid var(--accent-soft-strong);
-    border-radius: var(--radius-s);
-    padding: 8px 12px;
-    line-height: 1.5;
-  }
-  .field {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-  }
-  .label {
-    font-size: var(--fs-xs);
-    font-weight: 500;
-    color: var(--text-dim);
-    text-transform: uppercase;
-    letter-spacing: .06em;
-  }
-  /* Shared .input (app.css); these two span their form's width. */
-  .wide-input {
-    width: 100%;
-    box-sizing: border-box;
-  }
+  /* Shared textarea look (the comment box; the draft editor has its own). */
   .textarea {
     background: var(--surface);
     border: 1px solid var(--border);
@@ -2847,116 +2480,6 @@
   .textarea:focus {
     border-color: var(--accent-text);
     box-shadow: 0 0 0 3px var(--accent-soft-strong);
-  }
-  .draft-save-row {
-    display: flex;
-    justify-content: flex-end;
-  }
-  /* Save is a quiet, neutral action; the publish bar below owns the one
-     filled button in this pane. */
-
-  /* ── Transcripts (right column in draft mode) ──────────────── */
-  .transcripts-section {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    padding-top: 4px;
-  }
-  .transcripts-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-  }
-  .section-title {
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    color: var(--text-dim);
-  }
-  .transcript-list {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-  }
-  .transcript-item {
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    overflow: hidden;
-  }
-  .transcript-header {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-  }
-  .transcript-toggle {
-    flex: 1;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    background: none;
-    border: none;
-    padding: 8px 10px;
-    cursor: pointer;
-    text-align: start;
-    color: var(--text);
-    font-size: var(--fs-s);
-    transition: background var(--dur-fast);
-  }
-  .transcript-toggle:hover {
-    background: var(--hover);
-  }
-  .transcript-title {
-    flex: 1;
-    font-weight: 500;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .transcript-date {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    white-space: nowrap;
-    flex-shrink: 0;
-  }
-  .del-transcript-btn {
-    flex-shrink: 0;
-    width: 28px;
-    height: 28px;
-    display: grid;
-    place-items: center;
-    background: none;
-    border: none;
-    cursor: pointer;
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    transition: color var(--dur-fast), background var(--dur-fast);
-    margin-inline-end: 4px;
-    border-radius: var(--radius-s);
-  }
-  .del-transcript-btn:hover {
-    color: var(--danger);
-    background: color-mix(in srgb, var(--danger) 12%, transparent);
-  }
-  .transcript-body {
-    padding: 8px 12px 10px;
-    font-size: var(--fs-s);
-    white-space: pre-wrap;
-    color: var(--text-dim);
-    line-height: 1.55;
-    border-top: 1px solid var(--border);
-    background: color-mix(in srgb, var(--text-dim) 3%, transparent);
-    font-family: var(--font-mono);
-    max-height: 320px;
-    overflow-y: auto;
-  }
-  .add-transcript-form {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    padding: 10px;
-    border: 1px dashed var(--border);
-    border-radius: var(--radius-s);
   }
 
   /* ── Publish bar ───────────────────────────────────────────── */

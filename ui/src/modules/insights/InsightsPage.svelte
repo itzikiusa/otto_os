@@ -19,7 +19,8 @@
   import { onTabKey } from '../../lib/tabKeys';
   import PaneDivider from '../../lib/components/PaneDivider.svelte';
   import { LIST_PANE, loadPaneWidth } from '../../lib/paneResizer';
-  import type { InsightKind, InsightReport, InsightRunPeriod } from '../../lib/api/types';
+  import type { InsightKind, InsightReport, InsightRunPeriod, InsightsConfig } from '../../lib/api/types';
+  import { scheduleCopy } from './scheduleStatus';
   import { toasts } from '../../lib/toast.svelte';
   import { router } from '../../lib/router.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
@@ -128,9 +129,16 @@
     };
   });
 
+  /** The schedule config (with its last failed scheduled attempts), so the
+   *  empty state says "off" only when it is (error-handling-6-03). A failed
+   *  read keeps the generic copy — the reports load is what matters here. */
+  let schedule = $state<InsightsConfig | null>(null);
+  const emptySchedule = $derived(scheduleCopy(schedule));
+
   async function load(): Promise<void> {
     loading = true;
     loadError = null;
+    void insightsApi.getConfig().then((c) => { schedule = c; }).catch(() => { schedule = null; });
     try {
       reports = await insightsApi.listReports();
       archiveOffset = reports.length;
@@ -787,12 +795,12 @@
           variant="page"
           icon="gauge"
           title="No insight reports yet"
-          body="An agent reads your recent sessions and writes an action-first report: what’s working, what’s slowing you down, and five things to change. Scheduled reports are off until you turn them on."
+          body={`An agent reads your recent sessions and writes an action-first report: what’s working, what’s slowing you down, and five things to change. ${emptySchedule.text}`.trim()}
           actionLabel={canRun ? (running ? 'Starting…' : "Run yesterday’s report") : undefined}
           actionIcon="play"
           onaction={canRun ? () => runNow('day:1') : undefined}
         >
-          <button class="btn ghost" onclick={() => router.go('settings/insights')}>Turn on scheduled reports</button>
+          <button class="btn ghost" onclick={() => router.go('settings/insights')}>{emptySchedule.offerTurnOn ? 'Turn on scheduled reports' : 'Schedule settings'}</button>
         </EmptyState>
       {:else}
         <div class="split" class:detail-only={detailOnly}>

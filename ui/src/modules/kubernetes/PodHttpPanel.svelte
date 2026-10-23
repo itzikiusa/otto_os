@@ -65,6 +65,11 @@
   // Latest-wins: switching workload / namespace / cluster while a list is in
   // flight must not show the previous target's saved actions.
   let savedSeq = 0;
+  /** ux-6-07: a refused copy says what to do next (it was silent). */
+  async function copyBody(text: string): Promise<void> {
+    if (await copyText(text)) toasts.success('Copied response body');
+    else toasts.error('Couldn’t copy', 'The clipboard isn’t available here. Select the text and copy it manually.');
+  }
   async function loadSaved(): Promise<void> {
     const seq = ++savedSeq;
     if (!workload) return;
@@ -317,7 +322,7 @@
                 {#if r.body}
                   <div class="res-tools">
                     <span class="dim small">{r.truncated ? 'Truncated at 256 KB' : ''}</span>
-                    <button class="btn small" onclick={() => void copyText(r.body)}><Icon name="copy" size={12} /> Copy</button>
+                    <button class="btn small" onclick={() => void copyBody(r.body)}><Icon name="copy" size={12} /> Copy</button>
                   </div>
                   <pre class="mono">{shownBody(r)}</pre>
                 {/if}

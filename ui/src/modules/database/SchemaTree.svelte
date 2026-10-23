@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { ListWindow } from '../../lib/listWindow.svelte';
+  import { announce } from '../../lib/announce.svelte';
   import { rowMenu } from '../../lib/rowMenu';
   // Lazy recursive schema tree (databases → tables/views → columns; keyspaces →
   // keys; collections → fields). Mirrors CollectionsTree: chevron expand, indent
@@ -276,43 +278,11 @@
   const WINDOW_MIN = 400;
   const OVERSCAN = 20;
   const windowed = $derived(flat.length > WINDOW_MIN && !flat.some((r) => r.t === 'redis'));
-  let listEl = $state<HTMLElement | null>(null);
-  let winFirst = $state(0);
-  let winCount = $state(60);
-  /** The element that actually scrolls the tree (the sidebar body). */
-  function scrollerOf(el: HTMLElement): HTMLElement {
-    for (let p = el.parentElement; p; p = p.parentElement) {
-      const oy = getComputedStyle(p).overflowY;
-      if (oy === 'auto' || oy === 'scroll') return p;
-    }
-    return (document.scrollingElement as HTMLElement | null) ?? document.documentElement;
-  }
-  $effect(() => {
-    const list = listEl;
-    if (!windowed || !list) return;
-    const scroller = scrollerOf(list);
-    const measure = (): void => {
-      const offset = list.getBoundingClientRect().top - scroller.getBoundingClientRect().top;
-      winFirst = Math.max(0, Math.floor(-offset / ROW_H));
-      winCount = Math.ceil(scroller.clientHeight / ROW_H) + 1;
-    };
-    let raf = 0;
-    const schedule = (): void => {
-      if (!raf) raf = requestAnimationFrame(() => ((raf = 0), measure()));
-    };
-    measure();
-    scroller.addEventListener('scroll', schedule, { passive: true });
-    const ro = new ResizeObserver(schedule);
-    ro.observe(scroller);
-    return () => {
-      scroller.removeEventListener('scroll', schedule);
-      ro.disconnect();
-      cancelAnimationFrame(raf);
-    };
-  });
-  const start = $derived(windowed ? Math.min(Math.max(0, winFirst - OVERSCAN), flat.length) : 0);
-  const end = $derived(windowed ? Math.min(flat.length, winFirst + winCount + OVERSCAN) : flat.length);
-  const visibleFlat = $derived(windowed ? flat.slice(start, end) : flat);
+  // The shared outer-scroller window (lib/listWindow): it follows the sidebar
+  // body's scroll and size, measures the `.node` pitch, and sizes the spacers.
+  const lw = new ListWindow('.node', { min: WINDOW_MIN, overscan: OVERSCAN, rowH: ROW_H });
+  const win = $derived(windowed ? lw.range(flat.length) : { start: 0, end: flat.length, top: 0, bottom: 0 });
+  const visibleFlat = $derived(windowed ? flat.slice(win.start, win.end) : flat);
 
   // ── Keyboard navigation (roving focus over the rendered treeitems) ─────────
   let treeEl = $state<HTMLElement | null>(null);
@@ -527,6 +497,12 @@
 
     ctxMenu.show(e, items);
   }
+  // Spoken at the state edge through the shell's always-mounted announcer: a
+  // live region inserted together with its text is not read (WebKit/VoiceOver).
+  $effect(() => {
+    const st = database.activeConnStatus;
+    if (st?.phase === 'error') announce(`Couldn’t connect. ${st.error ?? ''}`.trim(), { assertive: true });
+  });
 </script>
 
 <!-- The search / scope / counts controls and the search-hit list sit OUTSIDE
@@ -588,7 +564,7 @@
       Loading schema…
     </div>
   {:else if database.activeConnStatus?.phase === 'error'}
-    <div class="tree-error" role="status" aria-live="polite">
+    <div class="tree-error">
       <div class="tree-error-head"><Icon name="warning" size={12} />Couldn’t connect</div>
       <div class="tree-error-msg">{database.activeConnStatus.error}</div>
       <button class="btn small tree-error-retry" onclick={() => database.retryConnection()}>
@@ -647,9 +623,9 @@
   {:else if filteredRoot.length === 0}
     <div class="tree-empty">No match for "{database.objectSearchQuery}".</div>
   {:else}
-    <div class="tree-rows" role="tree" aria-label="Schema" tabindex="0" bind:this={listEl} onkeydown={onTreeKey}>
-      {#if windowed && start > 0}
-        <div class="tree-pad" style="height: {start * ROW_H}px" aria-hidden="true"></div>
+    <div class="tree-rows" role="tree" aria-label="Schema" tabindex="0" {@attach lw.attach} onkeydown={onTreeKey}>
+      {#if win.top > 0}
+        <div class="tree-pad" style="height: {win.top}px" aria-hidden="true"></div>
       {/if}
       {#each visibleFlat as row (row.key)}
         {#if row.t === 'node'}
@@ -672,8 +648,8 @@
           </div>
         {/if}
       {/each}
-      {#if windowed && end < flat.length}
-        <div class="tree-pad" style="height: {(flat.length - end) * ROW_H}px" aria-hidden="true"></div>
+      {#if win.bottom > 0}
+        <div class="tree-pad" style="height: {win.bottom}px" aria-hidden="true"></div>
       {/if}
     </div>
   {/if}

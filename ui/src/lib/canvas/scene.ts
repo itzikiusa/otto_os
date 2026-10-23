@@ -1,5 +1,7 @@
 // Pure Scene helpers — the empty scene and the tolerant `doc_json` parser the
-// canvas store loads with. No Svelte state here.
+// canvas store loads with. No Svelte state here. Lives in lib/ beside the
+// types because the canvas store (lib/) uses it, and lib/ never imports
+// from modules/ (architecture-1-13).
 
 import type { CanvasEdge, CanvasNode, Scene } from './types';
 

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announce } from '../../lib/announce.svelte';
   import { onMount, onDestroy } from 'svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
@@ -51,6 +52,12 @@
     } catch (e) { if (seq === generation) error = e instanceof Error ? e.message : String(e); }
     finally { if (seq === generation) busy = false; }
   }
+
+  // a11y-6-01: announce at the state edge — a status element inserted
+  // together with its text is not read by VoiceOver/WebKit.
+  $effect(() => {
+    if (result) announce(`${result.exported_connections} of ${result.total_connections} connections exported${result.contains_passwords ? ' with credentials' : ' without passwords'}.`);
+  });
 </script>
 
 <section class="connections-export" aria-label="Connection export">
@@ -76,7 +83,7 @@
   {/if}
   {#if result}
     <div class="result" aria-label="Prepared connection export">
-      <p role="status">{result.exported_connections} of {result.total_connections} connections exported{result.contains_passwords ? ' with credentials' : ' without passwords'}.</p>
+      <p>{result.exported_connections} of {result.total_connections} connections exported{result.contains_passwords ? ' with credentials' : ' without passwords'}.</p>
       <div class="controls">{#each result.files as file}<button class="btn" onclick={() => downloadText(file.content, file.name, file.mime)}>Download {file.name}</button>{/each}</div>
       <p class="instructions">{result.import_instructions}</p>
       {#if result.warnings.length}<ul>{#each result.warnings as warning}<li>{warning}</li>{/each}</ul>{/if}

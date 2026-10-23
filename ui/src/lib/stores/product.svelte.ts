@@ -49,6 +49,10 @@ import type {
   ToSwarmResp,
   ProductAttachment,
   UploadAttachmentReq,
+  TreeKind,
+  CreateChildReq,
+} from '../api/types/product';
+import type {
   DiscoverReq,
   DiscoverResp,
   DiscoveryRunSummary,
@@ -64,12 +68,10 @@ import type {
   DiscoveryChatTurn,
   DiscoveryAction,
   ApplyResult,
-  TreeKind,
-  CreateChildReq,
   SaveAttachmentContentReq,
   BlenderStatus,
   BlenderJob,
-} from '../../modules/product/types';
+} from '../api/types/product-studio';
 import { announceModule } from '../lazyModule';
 
 /** One epic's subtree in the derived {@link ProductStore.tree}: folders in

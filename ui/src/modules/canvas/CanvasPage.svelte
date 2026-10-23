@@ -26,7 +26,7 @@
   import MermaidCanvas from './MermaidCanvas.svelte';
   import D2Canvas from './D2Canvas.svelte';
   import ConversationPanel from './ConversationPanel.svelte';
-  import type { CanvasFormat } from './types';
+  import type { CanvasFormat } from '../../lib/canvas/types';
 
   // Three modes the user picks at creation: Excalidraw (a fully editable board,
   // the agent writes canvas.json), Mermaid (rich auto-rendered diagrams of any

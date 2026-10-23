@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseGraphqlVariables } from '../src/modules/api/graphqlVars.ts';
+import { parseGraphqlVariables } from '../src/lib/api/graphqlVars.ts';
 
 // S16-19: invalid variables JSON used to be sent as `{}` silently.
 test('GraphQL variables: blank → {}, object passes, bad JSON names the line', () => {

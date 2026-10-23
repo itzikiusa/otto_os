@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announce } from '../../lib/announce.svelte';
   import { plural } from '../../lib/plural';
   import { NO_WORKSPACE } from '../../lib/labels';
   import { pollWhileVisible } from '../../lib/poll';
@@ -354,6 +355,10 @@
     const d = new Date(s);
     return Number.isNaN(d.getTime()) ? s : d.toLocaleString();
   }
+
+  // a11y-6-01: announce at the state edge — a status element inserted
+  // together with its text is not read by VoiceOver/WebKit.
+  $effect(() => { if (dirty && !formError) announce('Unsaved changes — Save to apply them.'); });
 </script>
 
 <div class="settings-section">
@@ -404,7 +409,7 @@
     {#if formError}
       <p class="form-note error" role="alert">{formError}</p>
     {:else if dirty}
-      <p class="form-note unsaved" role="status">Unsaved changes — Save to apply them.</p>
+      <p class="form-note unsaved">Unsaved changes — Save to apply them.</p>
     {/if}
     <!-- Evolve result — shown after an Evolve now completes. -->
     {#if evolveResult !== null}

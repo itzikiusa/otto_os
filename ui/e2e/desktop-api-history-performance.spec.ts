@@ -88,18 +88,22 @@ test('sidebar uses summaries and selects one exact detail before restoring repla
   expect(f.calls.filter(path => path !== '/summaries')).toEqual([`/${f.summary.id}`]);
 });
 
+// The visible "Loading request…" line — not the app announcer's live region,
+// which speaks the same text (a11y-6-01).
+const loadingLine = (page: Page) => page.getByText('Loading request…', { exact: true }).and(page.locator(':not([aria-live])'));
+
 test('late detail cannot overwrite a newly selected tab or its originating draft', async ({ page }) => {
   const f = await historyFixture(page, true);
   const url = page.getByLabel('Request URL', { exact: true });
   await url.fill('https://original.fixture.invalid/kept');
   await f.select();
   await f.detailStarted;
-  await expect(page.getByText('Loading request…', { exact: true })).toBeVisible();
+  await expect(loadingLine(page)).toBeVisible();
   await page.getByRole('button', { name: 'New request tab', exact: true }).click();
   await url.fill('https://other-tab.fixture.invalid/kept');
   f.release();
   await expect.poll(f.delivered).toBe(1);
-  await expect(page.getByText('Loading request…', { exact: true })).toBeHidden();
+  await expect(loadingLine(page)).toBeHidden();
   await expect(url).toHaveValue('https://other-tab.fixture.invalid/kept');
   await page.locator('.req-tab').first().click();
   await expect(url).toHaveValue('https://original.fixture.invalid/kept');
@@ -113,7 +117,7 @@ test('late detail cannot replace edits made while its request is pending', async
   await page.getByLabel('HTTP method', { exact: true }).selectOption('PATCH');
   f.release();
   await expect.poll(f.delivered).toBe(1);
-  await expect(page.getByText('Loading request…', { exact: true })).toBeHidden();
+  await expect(loadingLine(page)).toBeHidden();
   await expect(page.getByLabel('Request URL', { exact: true })).toHaveValue('https://edited.fixture.invalid/kept');
   await expect(page.getByLabel('HTTP method', { exact: true })).toHaveValue('PATCH');
   expect(f.calls.filter(path => path === `/${f.summary.id}`)).toHaveLength(1);

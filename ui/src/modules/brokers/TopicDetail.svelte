@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announce } from '../../lib/announce.svelte';
   import Badge from '../../lib/components/Badge.svelte';
   import { plural } from '../../lib/plural';
   import { toastError } from '../../lib/toastError';
@@ -650,9 +651,14 @@
       });
       toasts.success('Copied to clipboard');
     } catch {
-      toasts.error('Couldn’t copy', 'The browser blocked the clipboard write.');
+      toasts.error('Couldn’t copy', 'The browser blocked the clipboard write. Select the message text and copy it manually.');
     }
   }
+  // Spoken at the state edge through the shell's always-mounted announcer: a
+  // live region inserted together with its text is not read (WebKit/VoiceOver).
+  $effect(() => { if (detailErr) announce(`Couldn’t load topic details. ${detailErr}`, { assertive: true }); });
+  $effect(() => { if (consumeError) announce(consumeError, { assertive: true }); });
+  $effect(() => { if (produceError) announce(produceError, { assertive: true }); });
 </script>
 
 <div class="td">
@@ -672,7 +678,7 @@
   </div>
 
   {#if detailErr}
-    <div class="err" role="alert">
+    <div class="err">
       <Icon name="warning" size={13} />
       <span class="err-text">Couldn’t load topic details. <span class="muted">{detailErr}</span></span>
       <button class="btn small" onclick={() => loadDetail(detail !== null)}>
@@ -745,7 +751,7 @@
       {/if}
     </div>
 
-    {#if consumeError}<p class="field-err" role="status">{consumeError}</p>{/if}
+    {#if consumeError}<p class="field-err">{consumeError}</p>{/if}
 
     <div class="msg-layout">
       <div
@@ -969,7 +975,7 @@
           </div>
         {/each}
       </div>
-      {#if produceError}<p class="field-err" role="alert">{produceError}</p>{/if}
+      {#if produceError}<p class="field-err">{produceError}</p>{/if}
       <button class="btn primary" onclick={produce} disabled={producing}>
         {producing ? 'Producing…' : pTombstone ? 'Produce tombstone' : 'Produce message'}
       </button>

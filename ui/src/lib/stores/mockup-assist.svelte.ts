@@ -12,13 +12,13 @@
 // reload — or, when the user has unsaved local edits, ask before replacing.
 
 import { api, authedText } from '../api/client';
+import type { ProductAttachment } from '../api/types/product';
 import {
   DESIGN_FORMATS,
   type DesignFormat,
   type DesignMeta,
-  type ProductAttachment,
   type ProductMockupAssistReq,
-} from '../../modules/product/types';
+} from '../api/types/product-studio';
 
 /** One live `mockup_updated` as seen by the arena. `content === null` means the
  *  payload was binary/oversized and the bytes must be re-fetched. */

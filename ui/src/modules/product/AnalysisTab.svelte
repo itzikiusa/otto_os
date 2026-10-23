@@ -19,6 +19,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import { runStateLabel } from '../../lib/labels';
   import { loadErrorText } from '../../lib/loadError';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import { toastError } from '../../lib/toastError';
   import type { ProductAnalysis, ProductAnalysisDetail, ProductAnalysisAgent } from './types';
   import type { ProductLens } from '../../lib/api/types';
@@ -90,6 +91,10 @@
   let historyLoaded = $state(false);
   let activeDetail = $state<ProductAnalysisDetail | null>(null);
   let activeId = $state<string | null>(null);
+  // Loading / failure of the picked past run's detail, shown inline in the run
+  // area (a failure used to toast and leave the "start a new run" invitation).
+  let detailLoading = $state(false);
+  let detailError = $state<string | null>(null);
   let collapsed = $state<Record<string, boolean>>({});
 
   // ── Load provider list + lens catalog on mount ────────────────────────────────
@@ -164,6 +169,7 @@
   function startPolling(id: string): void {
     clearPoll();
     activeId = id;
+    detailError = null;
     polling = true;
     pollStartedAt = Date.now();
     pollFailures = 0;
@@ -208,6 +214,8 @@
     untrack(() => {
       activeDetail = null;
       activeId = null;
+      detailLoading = false;
+      detailError = null;
       running = false;
       historyLoaded = false;
       collapsed = {};
@@ -297,22 +305,36 @@
   }
 
   async function selectHistory(a: ProductAnalysis): Promise<void> {
-    if (a.id === activeId) return;
+    await selectRun(a.id);
+  }
+
+  /** Load a past run into the run area. Re-picking the run whose load failed
+   *  (or whose detail isn't on screen) retries it; the loaded one is a no-op. */
+  async function selectRun(id: string): Promise<void> {
+    if (id === activeId && activeDetail) return;
     clearPoll();
-    activeId = a.id;
+    activeId = id;
     activeDetail = null;
+    detailError = null;
+    detailLoading = true;
     const generation = viewGeneration;
     const request = ++readSequence;
     const owned = product.captureSelection();
-    const current = () => owned() && generation === viewGeneration && activeId === a.id && request === readSequence;
+    const current = () => owned() && generation === viewGeneration && activeId === id && request === readSequence;
     try {
-      const detail = await product.getAnalysis(a.id);
+      const detail = await product.getAnalysis(id);
       if (!current()) return;
       activeDetail = detail;
-      if (!isTerminal(detail.analysis.status)) startPolling(a.id);
+      if (!isTerminal(detail.analysis.status)) startPolling(id);
     } catch (e) {
-      if (current()) toastError('Couldn’t load analysis', e);
+      if (current()) detailError = loadErrorText(e);
+    } finally {
+      if (current()) detailLoading = false;
     }
+  }
+
+  function retrySelect(): void {
+    if (activeId) void selectRun(activeId);
   }
 
   // Inline terminal state — multiple may be open at once, keyed by session id.
@@ -862,6 +884,10 @@
         {/if}
       {/each}
 
+    {:else if detailLoading || detailError}
+      <!-- A picked past run that is loading or failed to load: never the
+           "start a new run" invitation below. -->
+      <LoadState what="this analysis run" loading={detailLoading} error={detailError} empty onretry={retrySelect} />
     {:else if !running}
       <div class="muted">Configure lenses above and click Run analysis.</div>
     {:else}

@@ -125,7 +125,8 @@ export function applySqlFilter(
 // ── Mongo find-filter splicing ───────────────────────────────────────────────
 
 /** JSON for a Mongo value. `_id` + 24-hex string → `{"$oid": …}` (matches the
- *  grid's `mongoIdFilter`); everything else → strict JSON. */
+ *  edit adapter's `mongoIdFilterFor` in edit-mongo.ts); everything else →
+ *  strict JSON. */
 export function mongoValueJson(col: string, v: unknown): string {
   if (v === undefined) return 'null';
   if (typeof v === 'bigint') return String(v); // JSON.stringify throws on bigint

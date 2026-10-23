@@ -13,10 +13,17 @@ export function rowListOf(e: Event, listSelector: string): HTMLElement | null {
   return (e.currentTarget as HTMLElement | null)?.closest<HTMLElement>(listSelector) ?? null;
 }
 
-export async function focusAfterRowRemoval(list: HTMLElement | null, index: number, fallbackSelector: string): Promise<void> {
+/** `removeSelector` picks the list's own Remove buttons when rows nest other
+ *  removable rows (an automation step holds checks and saved values). */
+export async function focusAfterRowRemoval(
+  list: HTMLElement | null,
+  index: number,
+  fallbackSelector: string,
+  removeSelector = '[data-remove-row]',
+): Promise<void> {
   await tick();
   if (!list) return;
-  const removes = list.querySelectorAll<HTMLElement>('[data-remove-row]');
+  const removes = list.querySelectorAll<HTMLElement>(removeSelector);
   const next = removes[Math.min(index, removes.length - 1)];
   const fallbacks = list.querySelectorAll<HTMLElement>(fallbackSelector);
   (next ?? fallbacks[fallbacks.length - 1])?.focus();

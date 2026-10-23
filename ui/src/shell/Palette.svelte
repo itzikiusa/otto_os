@@ -17,10 +17,10 @@
   import {
     describeAction,
     executePlan as runPlan,
-    plural,
     runEnglish,
     type EnglishOutcome,
   } from '../lib/orchestrate';
+  import { plural } from '../lib/plural';
   import { ui } from '../lib/stores/ui.svelte';
   import { ws } from '../lib/stores/workspace.svelte';
   import { storeContext } from '../lib/ask';

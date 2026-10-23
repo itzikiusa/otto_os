@@ -3,7 +3,9 @@
   // per-case approve/request-changes/edit, bulk-select + bulk-approve, drag-to-
   // reorder (persists order_idx), approve a run (triggers skill learning), and
   // publish to Confluence.
+  import { tick } from 'svelte';
   import { rel } from '../../lib/stores/now.svelte';
+  import { announce } from '../../lib/announce.svelte';
   import ConfluenceSpaceSelect from '../../lib/components/ConfluenceSpaceSelect.svelte';
   import ConfluencePagePicker from '../../lib/components/ConfluencePagePicker.svelte';
   import { toastError } from '../../lib/toastError';
@@ -153,6 +155,36 @@
     } finally {
       savingOrder = false;
     }
+  }
+
+  // ── Keyboard reorder (a11y-6-04): drag is not the only way ─────────────────
+  /** Move `id` one place up (-1) or down (+1) among `group` (the cards shown
+   *  in its category), persist, and keep focus on the moved card. */
+  async function moveCase(id: string, dir: -1 | 1, group: string[]): Promise<void> {
+    const at = group.indexOf(id);
+    const neighbour = group[at + dir];
+    if (at === -1 || !neighbour) return;
+    const next = [...orderedIds];
+    const a = next.indexOf(id);
+    const b = next.indexOf(neighbour);
+    if (a === -1 || b === -1) return;
+    [next[a], next[b]] = [next[b], next[a]];
+    orderedIds = next;
+    const focusedMove = (document.activeElement as HTMLElement | null)?.dataset?.move;
+    void persistOrder();
+    await tick();
+    const card = document.querySelector<HTMLElement>(`[data-case-id="${CSS.escape(id)}"]`);
+    const keep = focusedMove ? card?.querySelector<HTMLButtonElement>(`[data-move="${focusedMove}"]`) : null;
+    // A Move button that just went disabled (top/bottom) can't hold focus.
+    (keep && !keep.disabled ? keep : card?.querySelector<HTMLElement>('.case-checkbox'))?.focus();
+    announce(`Moved to position ${group.indexOf(neighbour) + 1} of ${group.length}`);
+  }
+
+  /** ⌥↑ / ⌥↓ on a focused card control moves the case. */
+  function onCaseKey(e: KeyboardEvent, id: string, group: string[]): void {
+    if (!e.altKey || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown')) return;
+    e.preventDefault();
+    void moveCase(id, e.key === 'ArrowUp' ? -1 : 1, group);
   }
 
   // Which test-case run we're viewing (most recent by default).
@@ -838,6 +870,7 @@
                 {@const steps = parseSteps(tc.steps_json)}
 
                 <div
+                  data-case-id={tc.id}
                   class="case-card tc-card"
                   class:case-approved={tc.status === 'approved'}
                   class:case-selected={selected.has(tc.id)}
@@ -854,13 +887,14 @@
                   <div class="case-header">
                     <div class="case-title-row">
                       <!-- Drag handle + checkbox (always visible) -->
-                      <span class="drag-handle" title="Drag to reorder">&#8942;&#8942;</span>
+                      <span class="drag-handle" aria-hidden="true" title="Drag to reorder (or ⌥↑ / ⌥↓)">&#8942;&#8942;</span>
                       <input
                         type="checkbox"
                         class="case-checkbox"
                         checked={selected.has(tc.id)}
                         onchange={() => toggleSelect(tc.id)}
                         onclick={(e) => e.stopPropagation()}
+                        onkeydown={(e) => onCaseKey(e, tc.id, cases.map((c) => c.id))}
                         aria-label="Select {tc.title}"
                       />
                       <span class="case-title">{tc.title}</span>
@@ -895,6 +929,27 @@
                         >
                           Edit
                         </button>
+                        {#if cases.length > 1}
+                          {@const group = cases.map((c) => c.id)}
+                          <button
+                            class="btn small ghost"
+                            data-move="up"
+                            onclick={() => void moveCase(tc.id, -1, group)}
+                            onkeydown={(e) => onCaseKey(e, tc.id, group)}
+                            disabled={savingOrder || group[0] === tc.id}
+                            title="Move up (⌥↑)"
+                            aria-label="Move {tc.title} up"
+                          ><Icon name="chevronUp" size={12} /></button>
+                          <button
+                            class="btn small ghost"
+                            data-move="down"
+                            onclick={() => void moveCase(tc.id, 1, group)}
+                            onkeydown={(e) => onCaseKey(e, tc.id, group)}
+                            disabled={savingOrder || group[group.length - 1] === tc.id}
+                            title="Move down (⌥↓)"
+                            aria-label="Move {tc.title} down"
+                          ><Icon name="chevronDown" size={12} /></button>
+                        {/if}
                       </div>
                     {/if}
                   </div>

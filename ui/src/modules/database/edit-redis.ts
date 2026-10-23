@@ -289,6 +289,7 @@ export const redisAdapter: EditAdapter = {
     const r = resolve(ctx);
     if (!r) return null;
     const stmts: string[] = [];
+    const stmtRows: number[] = [];
     const diff: DiffLine[] = [];
     const verbs = new Set<string>();
     for (const { rowIdx, patch } of rows) {
@@ -298,17 +299,20 @@ export const redisAdapter: EditAdapter = {
         // also re-emits the row's OTHER cell (a field name, a value) straight
         // from the data — one line-broken token there and the whole cell is
         // refused (never half of a HDEL + HSET pair).
+        const safe = built.stmts.every(redisLineSafe);
         stmts.push(
-          ...(built.stmts.every(redisLineSafe)
+          ...(safe
             ? built.stmts
             : [note(rowIdx, 'a field, member or value on this row contains a line break, which a one-line Redis command cannot carry')]),
         );
+        // A `#` note is skipped by the driver — not a batch statement.
+        if (safe) for (const s of built.stmts) if (!s.trimStart().startsWith('#')) stmtRows.push(rowIdx);
         diff.push(built.diff);
       }
     }
     if (stmts.length === 0) return null;
     const title = verbs.size > 0 ? `Review ${[...verbs].join(' + ')}` : 'Review Redis update';
-    return { title, sql: stmts.join('\n'), diff };
+    return { title, sql: stmts.join('\n'), diff, stmtRows };
   },
 
   buildDelete(idxs, ctx) {

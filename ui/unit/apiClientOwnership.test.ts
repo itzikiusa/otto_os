@@ -5,11 +5,12 @@ import {runInNewContext} from 'node:vm';
 import {randomUUID} from 'node:crypto';
 import ts from 'typescript';
 import { deferred } from './sourceHarness.ts';
+import { apiClientParts } from './apiClientParts.ts';
 import { strictRequire } from './strictRequire.ts';
 import * as loadError from '../src/lib/loadError.ts';
 import { HistoryRefresh, HistoryDetail } from '../src/lib/stores/apiHistory.ts';
 import * as scriptRuntime from '../src/lib/api/scripts.ts';
-import * as graphqlVars from '../src/modules/api/graphqlVars.ts';
+import * as graphqlVars from '../src/lib/api/graphqlVars.ts';
 import * as secretShapes from '../src/lib/api/apiSecretShapes.ts';
 
 function setup(overrides: Record<string, unknown> = {}, runScript?: (...args: any[]) => Promise<any>) {
@@ -18,11 +19,14 @@ function setup(overrides: Record<string, unknown> = {}, runScript?: (...args: an
   const api: Record<string, any> = {get: async () => [], patch: async () => ({}), post: async () => ({}), ...overrides};
   // The API client's "Send" rides the long lane (`api.long.post`).
   api.long = {post: (...args: unknown[]) => api.post(...args), get: (...args: unknown[]) => api.get(...args)};
+  const parts = apiClientParts();
   const context = {exports: {} as Record<string, any>,
     $state: Object.assign((v: unknown) => v, {snapshot: (v: unknown) => v, raw: (v: unknown) => v}), $derived: (v: unknown) => v,
     crypto: {randomUUID}, URL, URLSearchParams, AbortController, DOMException, setTimeout, clearTimeout, performance, encodeURIComponent,
     localStorage: {getItem() {return null;},setItem() {}},
     require: strictRequire([
+      ...parts.entries,
+      ['/announce.svelte', { announce() {} }],
       ['/api/client', {api, isAbortError: () => false, newHostConfirmHost: () => null}],
       ['/workspace.svelte', {ws}],
       ['/toast.svelte', {toasts: {error: (message: string) => { notices.push(message); },success() {},info() {}}}],
@@ -40,6 +44,7 @@ function setup(overrides: Record<string, unknown> = {}, runScript?: (...args: an
       ['/loadError', loadError],
     ]),
   };
+  parts.load(context);
   runInNewContext(ts.transpileModule(readFileSync(new URL('../src/lib/stores/apiClient.svelte.ts',import.meta.url),'utf8'),
     {compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,context);
   return {v: context.exports.apiClient, ws, notices, extras: context.exports.draftToExtras};

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announce } from '../../lib/announce.svelte';
   import { rowMenu } from '../../lib/rowMenu';
   // Per-project Kanban: columns by task status, cards = tasks. Move status,
   // reassign, run now, delete via a card menu. Add task + Plan-from-goal.
@@ -451,6 +452,10 @@
       toastError('Couldn’t move the task', err);
     }
   }
+
+  // a11y-6-01: announce at the state edge — a status element inserted
+  // together with its text is not read by VoiceOver/WebKit.
+  $effect(() => { if (planning) announce('Planning…'); });
 </script>
 
 <div class="kanban">
@@ -470,7 +475,7 @@
     <span class="grow"></span>
     {#if pid}
       {#if planning}
-        <span class="planning" role="status"><span class="spinner" style="--spinner-size: 10px" aria-hidden="true"></span> Planning… <span class="dim">watch live in Runs</span></span>
+        <span class="planning"><span class="spinner" style="--spinner-size: 10px" aria-hidden="true"></span> Planning… <span class="dim">watch live in Runs</span></span>
         <button class="btn small danger" data-keep onclick={() => void stopPlan()} title="Stop the planner agents">
           <Icon name="stop" size={12} /> Stop…
         </button>

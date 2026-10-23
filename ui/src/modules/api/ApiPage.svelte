@@ -413,7 +413,7 @@
                       <MethodTag method={t.kind === 'http' || t.kind === 'sse' ? t.method : t.kind === 'grpc' ? 'gRPC' : 'WS'} />
                       <span class="req-tab-label">{apiClient.tabLabel(t)}</span>
                       {#if apiClient.isDirty(t)}<span class="req-tab-dirty" aria-hidden="true">Edited</span>{/if}
-                      {#if st === 'sending'}<span class="spinner" style="--spinner-size: 9px" role="status" aria-label="Sending" title="Sending…"></span>
+                      {#if st === 'sending'}<span class="spinner" style="--spinner-size: 9px" aria-hidden="true" title="Sending…"></span>
                       {:else if st}<span class="req-tab-status {st}" aria-label={st === 'ok' ? 'Last send succeeded' : 'Last send failed'} title={st === 'ok' ? 'Last send succeeded' : 'Last send failed'}><Icon name={st === 'ok' ? 'check' : 'x'} size={12} /></span>{/if}
                     </button>
                     <button class="req-tab-close icon-btn" title={`Close tab ${apiClient.tabLabel(t)}`} aria-label={`Close tab ${apiClient.tabLabel(t)}`} onclick={() => void closeRequestTab(i)}><Icon name="x" size={12} /></button>

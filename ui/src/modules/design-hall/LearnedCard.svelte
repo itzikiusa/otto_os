@@ -7,6 +7,7 @@
   // the active-rule count and how many patterns are still forming. When
   // nothing is pending it says how rules appear; no invented rules.
   import { untrack } from 'svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import Icon from '../../lib/components/Icon.svelte';
   import { router } from '../../lib/router.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
@@ -36,7 +37,7 @@
       learned = l;
       error = null;
     } catch (e) {
-      if (my === seq) error = e instanceof Error ? e.message : String(e);
+      if (my === seq) error = loadErrorText(e);
     } finally {
       if (my === seq) loading = false;
     }

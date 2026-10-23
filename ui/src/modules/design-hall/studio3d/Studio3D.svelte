@@ -63,11 +63,11 @@
   import StatesBar from './StatesBar.svelte';
   import GenerateModal from './GenerateModal.svelte';
   import { blenderRefinePrompt, blockoutPrompt, type Gen3dContext, type Gen3dKind } from './providers';
-  import { loadBrandKit, resolveModelRef, type BrandKit } from './sources';
+  import { loadBrandKit, modelScope, type BrandKit } from './sources';
   import { openArtifact } from '../nav';
   import { library } from '../library.svelte';
   import { policyLabel, type LinkRow } from '../model';
-  import type { AssistSelection } from '../assist/model';
+  import { turnOutcome, type AssistSelection } from '../assist/model';
 
   interface Props {
     artifact: DesignArtifact;
@@ -181,16 +181,11 @@
     try {
       const turns = await listTurns(artifact.id);
       if (destroyed) return;
-      const t = turns.find((x) => x.turn_id === a.turnId);
-      if (!t || t.status === 'starting' || t.status === 'running') {
-        if (agent?.turnId === a.turnId) schedulePoll();
-        return;
-      }
+      const out = turnOutcome(turns.find((x) => x.turn_id === a.turnId));
+      if (agent?.turnId !== a.turnId) return;
+      if (out.kind === 'wait') return schedulePoll();
       agent = null;
-      if (t.status === 'done') toasts.success('Otto’s version is ready', t.message ?? 'Review it in the version strip.');
-      else if (t.status === 'unchanged') toasts.info('Otto made no changes', t.message ?? undefined);
-      else if (t.status === 'conflict') toasts.warn('Saved as a side version', 'The scene changed while Otto worked — compare and accept it from history.');
-      else toasts.error('Otto couldn’t finish', t.error ?? 'The turn failed; the scene is unchanged.');
+      toasts[out.kind](out.title, out.body);
     } catch {
       if (destroyed) return;
       if (agent?.turnId === a.turnId) schedulePoll();
@@ -199,7 +194,10 @@
   $effect(() => () => {
     destroyed = true;
     if (pollTimer) clearTimeout(pollTimer);
+    models.release();
   });
+  /** This editor’s hold on its model blobs (released on unmount, above). */
+  const models = modelScope();
 
   const genCtx = $derived<Gen3dContext>({ cloudKeys: {}, canEdit: !readonly, busy: !!agent, dirty });
   let genKind = $state<Gen3dKind | null>(null);
@@ -655,7 +653,7 @@
           compact
           {statusNote}
           onchange={edit}
-          resolveAttachment={resolveModelRef}
+          resolveAttachment={models.resolve}
         />
         <div class="states-host">
           <StatesBar {doc} {stateId} {selectedId} {readonly} onpick={(id) => (stateId = id ?? initialState(doc!))} onchange={edit} />

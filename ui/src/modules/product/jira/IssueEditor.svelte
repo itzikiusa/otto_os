@@ -7,6 +7,7 @@
   import type { EditableField } from '../types';
   import type { JiraIssueEditor } from './issueEditorState.svelte';
   import { focusFirstField } from '../../../lib/inlineEdit';
+  import { focusOnMount } from '../../../lib/focusOnMount';
 
   let { editor, ef, issueKey }: { editor: JiraIssueEditor; ef: EditableField; issueKey: string } = $props();
 
@@ -26,7 +27,9 @@
     {#if editor.assignablesLoading && editor.assignables.length === 0}
       <Skeleton rows={1} height={27} label="people" />
     {:else}
-      <select aria-label={ef.name} class="field-input" bind:value={editor.fieldDraft}>
+      <!-- focusOnMount: when the people list was still loading at open, this
+           select arrives after focusFirstField ran and would get no focus. -->
+      <select aria-label={ef.name} class="field-input" bind:value={editor.fieldDraft} use:focusOnMount>
         <option value="">Unassigned</option>
         {#each editor.assignables as u (u.account_id)}
           <option value={u.account_id}>{u.display_name}</option>
@@ -43,7 +46,7 @@
       {/each}
     </select>
   {:else if ef.schema_type === 'array' && ef.items !== 'string' && ef.allowed_values.length > 0}
-    <div class="field-multiselect">
+    <div class="field-multiselect" role="group" aria-label={ef.name}>
       {#each ef.allowed_values as opt (opt.id)}
         <label class="field-check">
           <input

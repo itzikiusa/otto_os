@@ -48,7 +48,7 @@ export async function loadSchoolAssets(T: Three, Loader: typeof GLTFLoader, base
   });
   // Every provider falls back to the custom kid, then to any kid at all.
   const fallback = kids.get('custom') ?? [...kids.values()][0];
-  if (!fallback) throw new Error('The school characters failed to load.');
+  if (!fallback) throw new Error('The school characters couldn’t load.');
   for (const c of CHARACTERS) if (!kids.has(c)) kids.set(c, fallback);
 
   const kit = new Map<string, THREE_NS.Object3D>();

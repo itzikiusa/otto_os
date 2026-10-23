@@ -41,7 +41,7 @@
   import K8sViewSwitch from '../K8sViewSwitch.svelte';
   import { monitorPath, resourcesPath } from '../../../lib/k8s/viewState';
   import type { K8sDrawerTab } from '../../../lib/stores/k8s.svelte';
-  import { WINDOWS, classColor, classLabel, collectorLine, fmtMs, fmtPct, fmtRate, isWindow, rbacMessage } from './monitor-util';
+  import { WINDOWS, classColor, classLabel, collectorLine, fmtMs, fmtPct, fmtRate, isWindow, rbacMessage, credentialsRejected } from './monitor-util';
 
   // The Insights tab renders markdown (`marked`): load it on first open.
   const MonitorInsightsLazy = lazyComponent(() => import('./MonitorInsights.svelte'));
@@ -504,8 +504,8 @@
       {/if}
       {#if rbacMessage(status?.metrics_server)}
         <span class="chip" title={rbacMessage(status?.metrics_server) ?? ''}>metrics-server: RBAC denied — CPU unavailable</span>
-      {:else if status?.metrics_server === 'ok'}
-        <span class="chip ok">metrics-server ok</span>
+      {:else if credentialsRejected(status?.metrics_server)}<span class="chip" title={status?.metrics_server}>metrics-server: credentials rejected — reconnecting</span>
+      {:else if status?.metrics_server === 'ok'}<span class="chip ok">metrics-server ok</span>
       {:else if status?.metrics_server === 'disabled'}
         <span class="chip" title="Metrics-server probing is off in Settings">metrics-server off</span>
       {/if}

@@ -379,7 +379,3 @@ export function describeAction(a: Action): string {
       return `Send to session: "${a.text}"`;
   }
 }
-
-/** Plural helper for outcome copy — the shared one (lib/plural.ts),
- *  re-exported for existing importers. */
-export { plural };

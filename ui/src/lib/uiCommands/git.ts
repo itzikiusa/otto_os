@@ -16,7 +16,7 @@ import { router } from '../router.svelte';
 import { api, isDirtyGitRefusal } from '../api/client';
 import { toasts } from '../toast.svelte';
 import type { DiffResp, FileChange, PullMode, Repo, RepoStatusResp } from '../api/types';
-import { reportPull } from '../../modules/git/pullFlow';
+import { pullReport } from '../api/git';
 import { asUiError, capList, highlightWhenReady } from './pagePort';
 import { plural } from '../plural';
 
@@ -294,9 +294,11 @@ registerUiCommands('git', {
     });
     if (!ok) throw new UiCommandError('cancelled_by_user', 'The user declined the pull.');
     try {
+      // The store stores the status and bumps `refsRev` (its post-mutation
+      // contract); this only reports.
       const r = await git.pull(repo.id, false, args.mode);
-      reportPull(r, (next) => git.setStatus(repo.id, next));
-      git.refsRev[repo.id] = (git.refsRev[repo.id] ?? 0) + 1;
+      const m = pullReport(r);
+      toasts[m.tone](m.title, m.body);
       return { ...statusResult(repo, r.status), note: r.note ?? null };
     } catch (e) {
       if (isDirtyGitRefusal(e)) {

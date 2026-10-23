@@ -24,6 +24,7 @@
   import { loadErrorText } from '../../lib/loadError';
   import CodeEditor from '../../lib/components/CodeEditor.svelte';
   import { copyText } from '../../lib/clipboard';
+  import { toasts } from '../../lib/toast.svelte';
   import { isAbortError } from '../../lib/api/client';
   import { k8sApi } from '../../lib/api/k8s';
   import type { K8sDrawerTab } from '../../lib/stores/k8s.svelte';
@@ -238,7 +239,12 @@
   const yaml = $derived(detail ? manifestText(clippedManifest.value) : '');
   function copyManifest(): void {
     if (!detail) return;
-    void copyText(clippedManifest.clipped ? manifestText(detail.manifest) : yaml);
+    void copyOrSay(clippedManifest.clipped ? manifestText(detail.manifest) : yaml, 'manifest');
+  }
+  /** ux-6-07: a refused copy says what to do next (it was silent). */
+  async function copyOrSay(text: string, what: string): Promise<void> {
+    if (await copyText(text)) toasts.success(`Copied ${what}`);
+    else toasts.error('Couldn’t copy', 'The clipboard isn’t available here. Select the text and copy it manually.');
   }
 
   const actions = $derived(row ? actionsFor(kind, row).filter(a => a.id.startsWith('argocd_') ? resourceAccess.can('k8s_cluster', clusterId, actionOperation(a.id), 'kubernetes', 'edit') : canOperation(actionOperation(a.id))) : []);
@@ -363,7 +369,7 @@
       {:else}
         <div class="code-tools">
           <span class="dim mono">kubectl describe {def.singular.toLowerCase()} {name}</span>
-          <button class="btn small" onclick={() => void copyText(detail?.describe ?? '')}><Icon name="copy" size={12} /> Copy</button>
+          <button class="btn small" onclick={() => void copyOrSay(detail?.describe ?? '', 'describe output')}><Icon name="copy" size={12} /> Copy</button>
         </div>
         <pre class="describe mono">{detail?.describe ?? ''}</pre>
       {/if}

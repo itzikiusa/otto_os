@@ -9,6 +9,7 @@
   import PageBody from '../../lib/components/PageBody.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
+  import Skeleton from '../../lib/components/Skeleton.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import PaneDivider from '../../lib/components/PaneDivider.svelte';
   import { LIST_PANE, loadPaneWidth } from '../../lib/paneResizer';
@@ -569,9 +570,7 @@
             {:else if active.loadError && !doc}
               <LoadState what="this file" error={active.loadError} empty onretry={() => void workbench.retryLoad(active.id)} />
             {:else if !doc}
-              <div class="wb-skel" role="status" aria-busy="true" aria-label="Loading file">
-                <span></span><span></span><span></span>
-              </div>
+              <div class="wb-skel"><Skeleton rows={3} height={12} label="the file" /></div>
             {:else}
               <div class="wb-toolbar" role="toolbar" aria-label="File tools">
                 {#if isImage}
@@ -966,26 +965,7 @@
     border-block-start: 1px solid var(--border);
   }
   .wb-skel {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
     padding: 16px;
-  }
-  .wb-skel span {
-    height: 12px;
-    border-radius: var(--radius-s);
-    background: var(--surface-2);
-  }
-  .wb-skel span:nth-child(2) {
-    width: 70%;
-  }
-  .wb-skel span:nth-child(3) {
-    width: 45%;
-  }
-  @media (prefers-reduced-motion: no-preference) {
-    .wb-skel span {
-      animation: otto-pulse 1.4s ease-in-out infinite;
-    }
   }
   
 </style>

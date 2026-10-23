@@ -226,6 +226,7 @@ export const mongoAdapter: EditAdapter = {
    *  in a single `{$set, $unset, $rename}` (see `buildUpdateOne`). */
   buildUpdate(rows, ctx) {
     const stmts: string[] = [];
+    const stmtRows: number[] = [];
     const diff: DiffLine[] = [];
     for (const { rowIdx, patch } of rows) {
       const built = buildUpdateOne(
@@ -237,10 +238,11 @@ export const mongoAdapter: EditAdapter = {
       );
       if (!built) continue;
       stmts.push(built.sql);
+      stmtRows.push(rowIdx);
       for (const d of built.diff) diff.push({ row: rowIdx, ...d });
     }
     if (stmts.length === 0) return null;
-    return { title: 'Review updateOne', sql: stmts.join('\n'), diff };
+    return { title: 'Review updateOne', sql: stmts.join('\n'), diff, stmtRows };
   },
 
   buildDelete(idxs, ctx) {

@@ -22,7 +22,10 @@ export interface AuditFinding {
 
 const MIN_TEXT = 4.5;
 
-export function auditPage(doc: SiteDoc, page: SitePage, t: Theme): AuditFinding[] {
+/** `brand: false` (the kit failed to load, the theme is only the default
+ *  palette) skips the checks that judge colours against the kit. */
+export function auditPage(doc: SiteDoc, page: SitePage, t: Theme, opts: { brand?: boolean } = {}): AuditFinding[] {
+  const brand = opts.brand !== false;
   const out: AuditFinding[] = [];
   const add = (level: AuditLevel, rule: string, sectionId: string | null, blockId: string | null, message: string) =>
     out.push({ level, key: `${rule}:${sectionId ?? ''}${blockId ? ':' + blockId : ''}`, sectionId, blockId, message });
@@ -35,7 +38,7 @@ export function auditPage(doc: SiteDoc, page: SitePage, t: Theme): AuditFinding[
   let placeholders = 0;
   for (const s of visible) {
     const name = sectionLabel(s);
-    const c = sectionContrast(s, t);
+    const c = brand ? sectionContrast(s, t) : { text: null, button: null };
     if (c.text != null && c.text < MIN_TEXT) {
       add('error', 'contrast-text', s.id, null, `${name}: text contrast is ${c.text}:1 on this background (needs ${MIN_TEXT}:1).`);
     }
@@ -43,7 +46,7 @@ export function auditPage(doc: SiteDoc, page: SitePage, t: Theme): AuditFinding[
     if (hasButton && c.button != null && c.button < MIN_TEXT) {
       add('error', 'contrast-button', s.id, null, `${name}: button label contrast is ${c.button}:1 (needs ${MIN_TEXT}:1).`);
     }
-    const bg = resolveBackground(s.style?.background, t);
+    const bg = brand ? resolveBackground(s.style?.background, t) : { offBrand: false, unknownToken: null };
     if (bg.offBrand) add('warn', 'off-brand', s.id, null, `${name}: background ${s.style?.background} is not a brand color.`);
     if (bg.unknownToken) add('warn', 'unknown-token', s.id, null, `${name}: the brand kit has no token “${bg.unknownToken}”.`);
     if (s.block.startsWith('hero/') && !str(s.props, 'headline').trim()) add('error', 'empty-headline', s.id, null, `${name}: the headline is empty.`);

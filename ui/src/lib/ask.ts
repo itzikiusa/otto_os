@@ -11,11 +11,11 @@ import type { BarSpace, TurnTone } from './floatingBar';
 import {
   applyClose,
   executePlan,
-  plural,
   runEnglish,
   type EnglishOutcome,
   type OrchestrateCtx,
 } from './orchestrate';
+import { plural } from './plural';
 import { lsGet } from './storage';
 import { applyTileOrder } from './stores/splitLayout';
 import { workspaceCommandScope } from './stores/sessionScope';
