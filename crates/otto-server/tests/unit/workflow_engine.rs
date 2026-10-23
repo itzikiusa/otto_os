@@ -1835,7 +1835,7 @@ fn review_run_reads_mode_from_run_env_not_node_input() {
 
 mod review_gate {
     use crate::workflow_engine::nodes::review_run::{
-        aggregate, goals_from_reply, review_score, review_verdict, ScoreWeights,
+        aggregate, blended_score, goals_from_reply, review_score, review_verdict, ScoreWeights,
     };
     use serde_json::{json, Value};
 
@@ -1859,6 +1859,43 @@ mod review_gate {
             info: 0,
         };
         assert_eq!(review_score(1, 4, 4, heavy, false), 50);
+    }
+
+    #[test]
+    fn the_goals_grade_is_averaged_into_the_review_score() {
+        assert_eq!(blended_score(40, Some(100)), 70, "mean of review and goals");
+        assert_eq!(
+            blended_score(90, None),
+            90,
+            "no goals: the review score alone"
+        );
+        assert_eq!(blended_score(0, Some(0)), 0);
+        assert_eq!(blended_score(81, Some(80)), 80, "integer mean rounds down");
+    }
+
+    #[test]
+    fn scoring_params_override_the_weights_and_bad_values_keep_the_defaults() {
+        let custom =
+            ScoreWeights::from_params(&json!({"scoring": {"bug": 10, "warn": 5, "info": 1}}));
+        assert_eq!(
+            custom,
+            ScoreWeights {
+                bug: 10,
+                warn: 5,
+                info: 1
+            }
+        );
+        assert_eq!(
+            ScoreWeights::from_params(&json!({})),
+            ScoreWeights::default()
+        );
+        assert_eq!(
+            ScoreWeights::from_params(&json!({"scoring": {"bug": "x"}})),
+            ScoreWeights::default(),
+            "a non-integer weight falls back to its default"
+        );
+        let partial = ScoreWeights::from_params(&json!({"scoring": {"warn": 0}}));
+        assert_eq!((partial.bug, partial.warn, partial.info), (20, 0, 5));
     }
 
     #[test]

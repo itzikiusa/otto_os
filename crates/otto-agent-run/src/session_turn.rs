@@ -21,13 +21,17 @@ use std::time::{Duration, Instant};
 use otto_core::api::CreateSessionReq;
 use otto_core::domain::{SessionKind, User, Workspace};
 use otto_core::{Error, Id};
-use otto_sessions::SessionManager;
 use serde_json::Value;
 
 mod lifecycle;
 mod reply;
+mod resume;
 pub use lifecycle::SESSION_LEASES;
+/// Re-exported so engine crates that hold the host's manager (the assist
+/// ctx traits' `sessions()`) need no direct otto-sessions dependency.
+pub use otto_sessions::SessionManager;
 use reply::options as reply_turn_options;
+pub use resume::{require_owned_resume, ResumeAuthority};
 
 /// Absolute cap on one turn (cold claude spawn + a long reply). Deliberately very
 /// generous (10h): a workflow agent step (e.g. "write tests", a long refactor) can
@@ -144,6 +148,58 @@ pub struct AgentTurn<'a> {
     pub done_file: Option<std::path::PathBuf>,
     /// Legacy compatibility field; silence is never accepted as completion.
     pub quiet_done: Option<Duration>,
+}
+
+/// Run one assist [`AgentTurn`] — THE turn the assist engines (Canvas, Design
+/// Hall, mockups) share; it replaces the four host `run_agent_turn`
+/// forwarders (architecture-5-02). `existing` is resumed only for its owner
+/// ([`require_owned_resume`] against the manager's authoritative row: 403
+/// otherwise). Without a `done_file` this is the plain chat reply protocol;
+/// with one, the marker file (non-empty) completes the turn and a stalled or
+/// failed turn's created session is killed.
+pub async fn run_agent_turn(
+    manager: &Arc<SessionManager>,
+    t: AgentTurn<'_>,
+    on_ready: impl FnOnce(&Id),
+) -> otto_core::Result<(String, Id)> {
+    require_owned_resume(manager.as_ref(), &t.ws.id, &t.user.id, t.existing).await?;
+    let Some(done_file) = t.done_file else {
+        return run_session_turn(
+            manager,
+            t.ws,
+            t.user,
+            t.existing,
+            t.title,
+            t.cwd,
+            t.provider,
+            t.meta,
+            t.prompt,
+            t.stuck_after,
+            on_ready,
+        )
+        .await;
+    };
+    let opts = TurnOpts {
+        done_file: Some(done_file),
+        done_file_validator: Some((|text: &str| !text.trim().is_empty()) as fn(&str) -> bool),
+        kill_on_stall: true,
+        ..Default::default()
+    };
+    run_session_turn_with(
+        manager,
+        t.ws,
+        t.user,
+        t.existing,
+        t.title,
+        t.cwd,
+        t.provider,
+        t.meta,
+        t.prompt,
+        t.stuck_after,
+        opts,
+        on_ready,
+    )
+    .await
 }
 
 /// Run one turn. Returns `(reply_text, session_id)`. Persist the returned
@@ -424,7 +480,6 @@ async fn run_session_turn_inner(
     on_ready(&sid);
     let session_info = manager.get(&sid).await?;
     let provider = session_info.provider.as_str();
-    let provider_home = manager.provider_home(&manager.get(&sid).await?);
 
     // 4. Submit the prompt AND confirm it actually landed on the CLI's input box.
     //    A startup/promo/onboarding banner is quiescent output, so wait_for_tui /
@@ -432,24 +487,13 @@ async fn run_session_turn_inner(
     //    yet — swallowing the paste and leaving the step a no-op. Only claude
     //    writes a pollable transcript, so only there can we verify; other providers
     //    keep the best-effort single submit.
-    let can_confirm = transcript_path(
-        provider,
-        &cwd_canon,
-        psid.as_deref(),
-        provider_home.as_deref(),
-    )
-    .is_some();
+    let tpath = session_transcript_path(manager, &sid, &cwd_canon, psid.as_deref()).await?;
+    let can_confirm = tpath.is_some();
     let needle = confirm_needle(prompt);
 
     // Capture the boundary BEFORE submitting: a fast reply may already be in
     // the first confirmation poll. Matching text alone cannot distinguish an
     // identical prior prompt in a resumed session.
-    let tpath = transcript_path(
-        provider,
-        &cwd_canon,
-        psid.as_deref(),
-        provider_home.as_deref(),
-    );
     // Every transcript read below is incremental (only the bytes appended since
     // the previous poll) and off the runtime: a resumed session's transcript
     // can be tens of MB, and it used to be read + parsed whole every second.
@@ -710,19 +754,13 @@ async fn oracle_watch(
     claude_tail: Option<crate::turn_oracle::ClaudeTail>,
 ) -> otto_core::Result<String> {
     use crate::turn_oracle as oracle;
-    let provider_home = manager.provider_home(&manager.get(sid).await?);
-    let tpath = transcript_path(provider, cwd_canon, psid, provider_home.as_deref());
+    let tpath = session_transcript_path(manager, sid, cwd_canon, psid).await?;
     // Where the harness records this session's children (flat: a depth-2
     // grandchild sits beside its depth-1 parent) and its background-task output.
-    let subagent_dir = psid.map(|p| {
-        tpath
-            .as_ref()
-            .and_then(|path| path.parent())
-            .map(std::path::Path::to_path_buf)
-            .unwrap_or_else(|| otto_orchestrator::claude_pty::project_dir(cwd_canon))
-            .join(p)
-            .join("subagents")
-    });
+    // Beside the transcript (only claude has one), never re-derived from `$HOME`.
+    let subagent_dir = psid
+        .zip(tpath.as_deref().and_then(std::path::Path::parent))
+        .map(|(p, dir)| dir.join(p).join("subagents"));
     let mut tasks_dir: Option<std::path::PathBuf> = None;
     let mut tasks_lookup_at = Instant::now();
 
@@ -1093,23 +1131,54 @@ fn is_injected_reminder_echo(text: &str) -> bool {
 }
 
 /// The claude JSONL transcript path for this session, or `None` for non-claude
-/// providers (codex/agy don't write a JSONL transcript we can poll).
+/// providers (codex/agy don't write a JSONL transcript we can poll). The roots
+/// come from [`otto_transcript::roots`] (architecture-6w1-01), so the turn
+/// watcher honours `OTTO_TRANSCRIPT_ROOTS` and the isolated fixture exactly as
+/// the conversation view does: the session's account home when it has one
+/// (`provider_home` is `<accounts root>/<id>`), else the local defaults.
+/// Blocking (a stat per root) — async callers offload it.
 fn transcript_path(
+    env: &otto_transcript::roots::RootsEnv,
     provider: &str,
     cwd: &str,
     psid: Option<&str>,
+    meta: &Value,
     provider_home: Option<&std::path::Path>,
 ) -> Option<std::path::PathBuf> {
-    match (provider, psid) {
-        ("claude", Some(p)) => Some(match provider_home {
-            Some(home) => home
-                .join("projects")
-                .join(otto_sessions::lifecycle::claude_project_dir_name(cwd))
-                .join(format!("{p}.jsonl")),
-            None => otto_orchestrator::claude_pty::session_jsonl_path(cwd, p),
-        }),
-        _ => None,
-    }
+    let ("claude", Some(psid)) = (provider, psid) else {
+        return None;
+    };
+    env.for_session(
+        meta,
+        &otto_transcript::roots::home_dir(),
+        provider_home.and_then(std::path::Path::parent),
+        None,
+    )
+    .claude_session_file(cwd, psid)
+}
+
+/// [`transcript_path`] for live session `sid`, from the process environment
+/// and off the runtime.
+async fn session_transcript_path(
+    manager: &Arc<SessionManager>,
+    sid: &Id,
+    cwd: &str,
+    psid: Option<&str>,
+) -> otto_core::Result<Option<std::path::PathBuf>> {
+    let session = manager.get(sid).await?;
+    let home = manager.provider_home(&session);
+    let (cwd, psid) = (cwd.to_string(), psid.map(str::to_string));
+    Ok(crate::offload::blocking(move || {
+        transcript_path(
+            &otto_transcript::roots::RootsEnv::from_process(),
+            &session.provider,
+            &cwd,
+            psid.as_deref(),
+            &session.meta,
+            home.as_deref(),
+        )
+    })
+    .await)
 }
 
 /// Whether ONLY a validated result file may complete the turn (no native
@@ -1202,6 +1271,69 @@ mod tests {
                 Verdict::Complete { .. }
             ));
         }
+    }
+
+    /// architecture-6w1-01: the turn watcher's transcript comes from
+    /// `otto_transcript::roots`, so an injected `OTTO_TRANSCRIPT_ROOTS` (and
+    /// an account home) decides where it looks — it used to read `$HOME`.
+    #[test]
+    fn transcript_path_follows_the_injected_transcript_roots() {
+        use otto_transcript::roots::{encode_cwd, RootsEnv};
+        let root = tempfile::tempdir().unwrap();
+        let claude = root.path().join("claude-projects");
+        let env = RootsEnv {
+            explicit: Some(format!(
+                "{}:{}",
+                claude.display(),
+                root.path().join("codex").display()
+            )),
+            ..Default::default()
+        };
+        let cwd = "/work/my repo_1.x";
+        let expected = claude.join(encode_cwd(cwd)).join("psid-1.jsonl");
+        let meta = serde_json::Value::Null;
+        assert_eq!(
+            transcript_path(&env, "claude", cwd, Some("psid-1"), &meta, None),
+            Some(expected.clone())
+        );
+        // The explicit pair wins over an account home, as in the History view.
+        let accounts = root.path().join("provider-accounts");
+        let acct_meta = serde_json::json!({ "account_id": "acct" });
+        assert_eq!(
+            transcript_path(
+                &env,
+                "claude",
+                cwd,
+                Some("psid-1"),
+                &acct_meta,
+                Some(&accounts.join("acct"))
+            ),
+            Some(expected)
+        );
+        // Without an override, an account session reads its own home.
+        let plain = RootsEnv::default();
+        let path = transcript_path(
+            &plain,
+            "claude",
+            cwd,
+            Some("p"),
+            &acct_meta,
+            Some(&accounts.join("acct")),
+        )
+        .unwrap();
+        assert!(
+            path.starts_with(accounts.join("acct").join("projects")),
+            "{path:?}"
+        );
+        // Non-claude providers and a missing psid have no pollable transcript.
+        assert_eq!(
+            transcript_path(&env, "codex", cwd, Some("p"), &meta, None),
+            None
+        );
+        assert_eq!(
+            transcript_path(&env, "claude", cwd, None, &meta, None),
+            None
+        );
     }
 
     #[test]

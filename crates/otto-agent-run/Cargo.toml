@@ -8,8 +8,9 @@ license.workspace = true
 # PTY session (code review, workflows, swarm, goal loops, product runs…): the
 # result-file watcher + recovery loop (`agent_run`), the transcript-based turn
 # oracle (`turn_oracle`), off-runtime blocking IO (`offload`) and screen text
-# helpers (`screen`), and the resumable managed-session turn runner
-# (`session_turn`). Leaf crate: depends on no otto-server code.
+# helpers (`screen`), the resumable managed-session turn runner
+# (`session_turn`) and the shared assist job (`assist`). Leaf crate: depends
+# on no otto-server code.
 
 [dependencies]
 otto-core.workspace = true
@@ -17,6 +18,9 @@ otto-sessions.workspace = true
 otto-orchestrator.workspace = true
 otto-telemetry.workspace = true
 otto-transcript.workspace = true
+# The resume-ownership authority reads the `sessions` row
+# (`session_turn::resume`); already a dependency of otto-sessions.
+otto-state.workspace = true
 chrono.workspace = true
 serde_json.workspace = true
 # Per-turn reply directories (`session_turn::reply`).
@@ -27,5 +31,4 @@ tracing.workspace = true
 [dev-dependencies]
 # session_turn lifecycle tests drive a real SessionManager on a migrated sqlite
 # and spawn plain /bin/sh sessions.
-otto-state.workspace = true
 otto-pty.workspace = true

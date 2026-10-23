@@ -1,15 +1,19 @@
 use super::*;
 
+/// A refused second Ask AI never reaches the job's `load` (the only writer of
+/// the scene file), so it cannot overwrite the file a running turn edits.
 #[tokio::test]
 async fn rejected_turn_cannot_overwrite_active_agent_file() {
     let id = otto_core::new_id();
     let path = std::env::temp_dir().join(format!("otto-canvas-turn-{id}"));
-    let active = prepare_scene_file(&id, &path, "agent work in progress")
+    let active = claim_scene(&id).expect("first turn");
+    write_scene_source(&path, "agent work in progress")
         .await
         .unwrap();
-    assert!(prepare_scene_file(&id, &path, "stale stored source")
-        .await
-        .is_err());
+    assert!(
+        claim_scene(&id).is_none(),
+        "second turn refused before its load"
+    );
     let text = tokio::fs::read_to_string(&path).await.unwrap();
     tokio::fs::remove_file(&path).await.unwrap();
     drop(active);
@@ -17,14 +21,16 @@ async fn rejected_turn_cannot_overwrite_active_agent_file() {
 }
 
 #[tokio::test]
-async fn scratch_write_failure_does_not_admit_an_agent_turn() {
+async fn scratch_write_failure_is_reported_and_releases_ownership() {
     let id = otto_core::new_id();
     let missing = std::env::temp_dir()
         .join(format!("otto-canvas-absent-{id}"))
         .join("canvas.d2");
-    assert!(prepare_scene_file(&id, &missing, "source").await.is_err());
+    let claim = claim_scene(&id).unwrap();
+    assert!(write_scene_source(&missing, "source").await.is_err());
+    drop(claim);
     assert!(
-        SceneBusy::claim(&id).is_some(),
+        claim_scene(&id).is_some(),
         "failed preparation releases ownership"
     );
 }

@@ -1,6 +1,7 @@
 //! Per-agent Retry / Stop for a review's reviewer rows and the summarizer.
 
 use super::*;
+use otto_agent_run::fanout::Slot;
 
 /// Re-materialize the ORIGINAL PR review revision for a retry. The stored
 /// diff and findings are from that revision, even if the forge head has moved.
@@ -117,6 +118,17 @@ pub(crate) async fn branch_retry_checkout(
 
 /// Agent rows a Retry may restart: settled ones only (`pending` / `running` /
 /// `waiting` still belong to a live recovery loop).
+/// The fan-out slot an agent row stands for: the reviewers in order, then
+/// the summarizer as the LAST row (`otto_agent_run::fanout`'s shape). `None`
+/// when `index` is past the rows.
+pub(crate) fn row_slot(rows: usize, index: usize) -> Option<Slot> {
+    match rows.checked_sub(1) {
+        Some(last) if index == last => Some(Slot::Summarizer),
+        Some(last) if index < last => Some(Slot::Reviewer(index)),
+        _ => None,
+    }
+}
+
 pub(crate) fn agent_retryable(status: &str) -> bool {
     matches!(status, "done" | "error" | "skipped")
 }
@@ -176,7 +188,7 @@ pub(crate) async fn retry_review_agent(
         .await
         .map_err(crate::error::ApiError)?;
 
-    if index >= review.agents.len() {
+    if row_slot(review.agents.len(), index).is_none() {
         return Err(crate::error::ApiError(Error::Invalid(format!(
             "no review agent at index {index}"
         ))));
@@ -645,15 +657,18 @@ pub(crate) async fn stop_review_agent(
         .map_err(crate::error::ApiError)?;
     crate::auth::require_ws_role(&ctx, &user, &repo.workspace_id, WorkspaceRole::Editor).await?;
 
-    if index >= review.agents.len() {
-        return Err(crate::error::ApiError(Error::Invalid(format!(
-            "no review agent at index {index}"
-        ))));
-    }
-    if index == review.agents.len() - 1 {
-        return Err(crate::error::ApiError(Error::Conflict(
-            "the summarizer cannot be stopped".into(),
-        )));
+    match row_slot(review.agents.len(), index) {
+        None => {
+            return Err(crate::error::ApiError(Error::Invalid(format!(
+                "no review agent at index {index}"
+            ))))
+        }
+        Some(Slot::Summarizer) => {
+            return Err(crate::error::ApiError(Error::Conflict(
+                "the summarizer cannot be stopped".into(),
+            )))
+        }
+        Some(Slot::Reviewer(_)) => {}
     }
     let flag_live = ctx
         .review_agent_cancels
@@ -738,10 +753,26 @@ impl Drop for ClaimGuard {
 
 #[cfg(test)]
 mod review_retry_tests {
-    use super::{agent_retry_block, agent_stop_block, same_dir, sweep_review_temp_files_if_idle};
+    use super::{
+        agent_retry_block, agent_stop_block, row_slot, same_dir, sweep_review_temp_files_if_idle,
+    };
+    use otto_agent_run::fanout::Slot;
     use otto_core::domain::{ReviewAgentState, ReviewStatus};
 
     /// S2-303: a settled agent is retryable only once the review has settled.
+    #[test]
+    fn agent_rows_map_onto_fanout_slots_with_the_summarizer_last() {
+        assert_eq!(row_slot(3, 0), Some(Slot::Reviewer(0)));
+        assert_eq!(row_slot(3, 1), Some(Slot::Reviewer(1)));
+        assert_eq!(row_slot(3, 2), Some(Slot::Summarizer));
+        assert_eq!(row_slot(3, 3), None);
+        assert_eq!(row_slot(0, 0), None);
+        assert_eq!(
+            row_slot(3, 2).map(Slot::retry_index),
+            Some(otto_agent_run::fanout::SUMMARIZER_RETRY_IDX)
+        );
+    }
+
     #[test]
     fn agent_retry_needs_a_settled_agent_and_a_settled_review() {
         assert!(agent_retry_block(ReviewStatus::Done, 0, "done").is_none());

@@ -4340,6 +4340,7 @@ dependencies = [
  "otto-core",
  "otto-pty",
  "otto-sandbox",
+ "otto-transcript",
  "serde",
  "serde_json",
  "tokio",

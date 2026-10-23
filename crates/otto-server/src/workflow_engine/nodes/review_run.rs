@@ -3,8 +3,8 @@
 //! goals, prior run context) and reviews each target in two phases —
 //! [`launch`] (repo check, checkpointed review start) and [`score_target`]
 //! (counts → score → verdict → output). The gate itself is pure and
-//! unit-tested: [`review_score`], [`review_verdict`], [`goals_from_reply`]
-//! and [`aggregate`].
+//! unit-tested: [`review_score`], [`blended_score`], [`review_verdict`],
+//! [`goals_from_reply`], [`aggregate`] and [`ScoreWeights::from_params`].
 
 use super::super::*;
 use super::NodeCall;
@@ -30,8 +30,9 @@ impl Default for ScoreWeights {
 }
 
 impl ScoreWeights {
-    /// The node's `scoring` overrides over the defaults.
-    fn from_params(p: &Value) -> Self {
+    /// The node's `scoring` overrides over the defaults. A missing or
+    /// non-integer weight keeps its default.
+    pub(in crate::workflow_engine) fn from_params(p: &Value) -> Self {
         let d = Self::default();
         let weight = |key: &str, default: i64| -> i64 {
             p.get("scoring")
@@ -62,6 +63,15 @@ pub(in crate::workflow_engine) fn review_score(
         return 0;
     }
     (100 - bugs as i64 * w.bug - warns as i64 * w.warn - infos as i64 * w.info).clamp(0, 100)
+}
+
+/// The gate's score for one target: the review's own score, averaged with
+/// the goals grade when the node has goals (integer mean, rounding down).
+pub(in crate::workflow_engine) fn blended_score(review: i64, goals: Option<i64>) -> i64 {
+    match goals {
+        Some(gs) => (review + gs) / 2,
+        None => review,
+    }
 }
 
 /// Whether one target's review passed, and why (not).
@@ -826,10 +836,7 @@ async fn score_target(
     let (bugs, warns, infos) = crate::modules::review_open_counts_by_severity(ctx, review_id).await;
     let review_score = review_score(bugs, warns, infos, plan.weights, no_changes);
     let (goals_score, goals_detail) = grade_goals(plan, t, review_score, logs).await;
-    let score = match goals_score {
-        Some(gs) => (review_score + gs) / 2,
-        None => review_score,
-    };
+    let score = blended_score(review_score, goals_score);
     let coverage_complete = ctx
         .reviews_store
         .get_review(review_id)

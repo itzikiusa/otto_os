@@ -3,14 +3,16 @@
 //! [`otto_agent_run::session_turn`] (architecture-5-02): it needs only the
 //! [`otto_sessions::SessionManager`], so engines outside the server can drive
 //! turns too. This module keeps the `&ServerCtx` entry points every server
-//! caller uses, mapping the runner's `otto_core::Error` to [`ApiError`], plus
-//! the resume-ownership check that needs the state DB.
+//! caller uses, mapping the runner's `otto_core::Error` to [`ApiError`]. The
+//! resume-ownership check moved into the runner too
+//! ([`otto_agent_run::session_turn::require_owned_resume`]); the pool-based
+//! entry below stays for the product studio adapters.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use otto_core::domain::{User, Workspace};
-use otto_core::{Error, Id};
+use otto_core::Id;
 use serde_json::Value;
 
 use crate::error::{ApiError, ApiResult};
@@ -19,31 +21,23 @@ use crate::state::ServerCtx;
 pub use otto_agent_run::session_turn::{submit_confirm_for, TurnOpts, STUCK_IDLE};
 
 /// Shared artifact visibility does not grant authority to resume its owner's
-/// agent. SessionManager's live lookup also reads this authoritative DB row.
-/// Only R12's studio adapters opt into this check; missing old sessions retain
-/// the runner's existing fresh-session fallback.
+/// agent: `Error::Forbidden` for another user's or workspace's session. Only
+/// the studio adapters opt in; missing old sessions keep the runner's
+/// fresh-session fallback. The check (and its tests) is the runner's.
 pub(crate) async fn require_owned_resume(
     pool: &otto_state::DbPool,
     workspace: &str,
     user: &str,
     existing: Option<&Id>,
 ) -> otto_core::Result<()> {
-    let Some(id) = existing else {
-        return Ok(());
-    };
-    match otto_state::SessionsRepo::new(pool.clone()).get(id).await {
-        Ok(session) if session.workspace_id == workspace && session.created_by == user => Ok(()),
-        Ok(_) => Err(Error::Forbidden(
-            "cannot resume an assistant session owned by another user or workspace".into(),
-        )),
-        Err(Error::NotFound(_)) => Ok(()),
-        Err(error) => Err(error),
-    }
+    otto_agent_run::session_turn::require_owned_resume(
+        &otto_state::SessionsRepo::new(pool.clone()),
+        workspace,
+        user,
+        existing,
+    )
+    .await
 }
-
-#[cfg(test)]
-#[path = "../tests/unit/assist_resume_ownership.rs"]
-mod resume_ownership_tests;
 
 /// Run one turn. Returns `(reply_text, session_id)`. Persist the returned
 /// `session_id` so the next turn resumes the SAME session.

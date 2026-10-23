@@ -12,8 +12,18 @@
 //!   summarizer" re-runs just this over the reviewer results already in hand.
 //! - [`SUMMARIZER_RETRY_IDX`] — the retry-queue index standing for the
 //!   summarizer in engines that key retries by agent index.
+//! - [`retry`] — the retrying flavour for engines whose user can retry ONE
+//!   slot mid-run (vault docs): [`attempts`], [`run_slots`],
+//!   [`summarize_with_retries`] over a shared [`RetryQueue`]. Its state
+//!   callback is synchronous and runs on the slot's own task.
 
 use std::future::Future;
+
+pub mod retry;
+pub use retry::{
+    attempts, run_slots, summarize_with_retries, OnState, Retries, RetryClosed, RetryQueue,
+    SlotControl, SlotFailure, WaitForRetry,
+};
 
 /// Retry-queue index standing for the summarizer (reviewers use their own
 /// index). `usize::MAX` so it can never collide with a reviewer slot.
@@ -46,6 +56,11 @@ pub enum SlotState {
     /// reason. A failed reviewer contributes nothing; a failed summarizer is
     /// replaced by the deterministic fallback.
     Failed(String),
+    /// A failed attempt is being re-run ([`retry`] only): `None` for a user
+    /// retry, `Some(error)` for an automatic respawn after a transient error.
+    Retrying(Option<String>),
+    /// The run was cancelled under this slot ([`retry`] only).
+    Cancelled,
 }
 
 /// What the summarizer step produced.

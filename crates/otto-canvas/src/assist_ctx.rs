@@ -1,13 +1,15 @@
 //! Host context + HTTP plumbing for the agent-assist endpoints ([`crate::assist`]).
 //!
-//! The assist turn runs an agent session, which only the host daemon can do
-//! (session manager + turn runner live in otto-server), so the host hands that
-//! in through [`CanvasAssistCtx`]. The error type and the `CurrentUser`
+//! The assist turn runs an agent session on the host's session manager, which
+//! the host hands in through [`CanvasAssistCtx::sessions`]; the turn itself
+//! (resume ownership included) runs in `otto_agent_run` (architecture-5-02:
+//! no host forwarder). The error type and the `CurrentUser`
 //! extractor mirror otto-server's so the moved handlers answer byte-for-byte
 //! the same (401 when unauthenticated, 500s logged).
 
 use std::future::Future;
 use std::path::Path;
+use std::sync::Arc;
 
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
@@ -28,6 +30,7 @@ use crate::http::CanvasCtx;
 /// assist engines share (architecture-4-02), defined with the turn runner.
 /// Canvas leaves `done_file` / `quiet_done` unset (completion on idle).
 pub use otto_agent_run::session_turn::AgentTurn;
+use otto_agent_run::session_turn::SessionManager;
 
 /// What the canvas assist endpoints need from the host beyond [`CanvasCtx`].
 pub trait CanvasAssistCtx: CanvasCtx {
@@ -51,14 +54,10 @@ pub trait CanvasAssistCtx: CanvasCtx {
         let _ = root;
         self.ensure_trusted(provider, cwd);
     }
-    /// Run ONE interactive agent turn (the long idle backstop) and return
-    /// `(reply_text, session_id)`. `on_ready` fires the moment the session exists.
-    fn run_agent_turn<F: FnOnce(&Id) + Send>(
-        &self,
-        turn: AgentTurn<'_>,
-        on_ready: F,
-    ) -> impl Future<Output = otto_core::Result<(String, Id)>> + Send;
-    fn kill_session(&self, sid: &Id) -> impl Future<Output = otto_core::Result<()>> + Send;
+    /// The host's session manager: runs the assist turns
+    /// ([`otto_agent_run::assist::run_assist_job`]) and is the resume
+    /// authority (it reads the session's owner row).
+    fn sessions(&self) -> &Arc<SessionManager>;
 }
 
 /// Require a workspace role (root short-circuits inside the checker).

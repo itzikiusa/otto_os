@@ -542,31 +542,8 @@ impl otto_canvas::CanvasAssistCtx for ServerCtx {
     fn ensure_trusted_scratch(&self, provider: &str, root: &std::path::Path, cwd: &str) {
         otto_sessions::trust::ensure_trusted_scratch(provider, root, cwd);
     }
-    async fn run_agent_turn<F: FnOnce(&otto_core::Id) + Send>(
-        &self,
-        t: otto_canvas::AgentTurn<'_>,
-        on_ready: F,
-    ) -> otto_core::Result<(String, otto_core::Id)> {
-        crate::agent_session::require_owned_resume(&self.pool, &t.ws.id, &t.user.id, t.existing)
-            .await?;
-        crate::agent_session::run_session_turn(
-            self,
-            t.ws,
-            t.user,
-            t.existing,
-            t.title,
-            t.cwd,
-            t.provider,
-            t.meta,
-            t.prompt,
-            crate::agent_session::STUCK_IDLE,
-            on_ready,
-        )
-        .await
-        .map_err(|e| e.0)
-    }
-    async fn kill_session(&self, sid: &otto_core::Id) -> otto_core::Result<()> {
-        self.manager.kill_session(sid).await
+    fn sessions(&self) -> &Arc<otto_sessions::SessionManager> {
+        &self.manager
     }
 }
 
@@ -638,40 +615,8 @@ impl otto_design_assist::DesignAssistCtx for ServerCtx {
     ) -> String {
         ServerCtx::resolve_provider_or_fallback(self, ws, requested, site).await
     }
-    async fn run_agent_turn<F: FnOnce(&otto_core::Id) + Send>(
-        &self,
-        t: otto_design_assist::AgentTurn<'_>,
-        on_ready: F,
-    ) -> otto_core::Result<(String, otto_core::Id)> {
-        crate::agent_session::require_owned_resume(&self.pool, &t.ws.id, &t.user.id, t.existing)
-            .await?;
-        crate::agent_session::run_session_turn_with(
-            self,
-            t.ws,
-            t.user,
-            t.existing,
-            t.title,
-            t.cwd,
-            t.provider,
-            t.meta,
-            t.prompt,
-            t.stuck_after,
-            crate::agent_session::TurnOpts {
-                done_file_validator: t
-                    .done_file
-                    .as_ref()
-                    .map(|_| (|text: &str| !text.trim().is_empty()) as fn(&str) -> bool),
-                done_file: t.done_file,
-                kill_on_stall: true,
-                ..Default::default()
-            },
-            on_ready,
-        )
-        .await
-        .map_err(|e| e.0)
-    }
-    async fn kill_session(&self, sid: &otto_core::Id) -> otto_core::Result<()> {
-        self.manager.kill_session(sid).await
+    fn sessions(&self) -> &Arc<otto_sessions::SessionManager> {
+        &self.manager
     }
 }
 
