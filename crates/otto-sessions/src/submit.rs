@@ -79,20 +79,40 @@ impl SubmitOpts {
 
 /// "Is the run this submit belongs to still active?" (architecture-4-01r). A
 /// run-scoped caller (a swarm run, a stoppable engine step) passes one to
-/// [`SessionManager::submit_prompt_while`]; it is checked before the paste and
-/// before every re-inject (re-paste, re-Enter), so a run stopped mid-submit
-/// never types into a session it no longer owns. Kept off [`SubmitOpts`] so
+/// [`SessionManager::submit_prompt_while`]; it is checked while waiting for
+/// the TUI and, under the submit lock, before the paste and before every
+/// re-inject (re-paste, Enter, re-Enter), so a run stopped mid-submit never
+/// types into a session it no longer owns. The check is ASYNC — the swarm's
+/// is a DB status read plus its cancel flag
+/// (`otto_swarm::runtime::engine::run_guard`). Kept off [`SubmitOpts`] so
 /// that stays a plain `Copy` value its callers build with a struct literal.
 #[derive(Clone)]
-pub struct RunGuard(Arc<dyn Fn() -> bool + Send + Sync>);
+pub struct RunGuard(Arc<ActiveFn>);
+
+type ActiveFn =
+    dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>> + Send + Sync;
 
 impl RunGuard {
-    pub fn new(active: impl Fn() -> bool + Send + Sync + 'static) -> Self {
-        Self(Arc::new(active))
+    /// `active` answers "is the run still active?" each time it is called.
+    pub fn new<F, Fut>(active: F) -> Self
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = bool> + Send + 'static,
+    {
+        Self(Arc::new(move || Box::pin(active())))
     }
 
-    fn active(guard: Option<&Self>) -> bool {
-        guard.is_none_or(|g| (g.0)())
+    /// One check of the run.
+    pub async fn is_active(&self) -> bool {
+        (self.0)().await
+    }
+
+    /// No guard (an unscoped submit) is always active.
+    async fn active(guard: Option<&Self>) -> bool {
+        match guard {
+            Some(g) => g.is_active().await,
+            None => true,
+        }
     }
 }
 
@@ -148,15 +168,25 @@ pub(crate) fn tui_ready(
 /// landed" submit with [`SubmitOpts::VERIFIED`] instead, whose strict wait
 /// treats a TUI that drew NOTHING by the deadline as not ready.
 pub async fn wait_for_tui(manager: &SessionManager, sid: &Id) -> bool {
-    wait_for_tui_with(manager, sid, false).await
+    wait_for_tui_with(manager, sid, false, None).await
 }
 
-async fn wait_for_tui_with(manager: &SessionManager, sid: &Id, strict: bool) -> bool {
+/// The TUI wait; a `run` that ends while it polls stops the wait (not ready).
+async fn wait_for_tui_with(
+    manager: &SessionManager,
+    sid: &Id,
+    strict: bool,
+    run: Option<&RunGuard>,
+) -> bool {
     let deadline = Instant::now() + TUI_STARTUP_WAIT;
     loop {
         let Some(handle) = manager.live_handle(sid) else {
             return false;
         };
+        if !RunGuard::active(run).await {
+            tracing::info!("submit: run ended while waiting for session {sid}'s TUI");
+            return false;
+        }
         if handle.on_exit().borrow().is_some() {
             return false;
         }
@@ -229,9 +259,10 @@ impl SessionManager {
     }
 
     /// [`Self::submit_prompt_at`] for a run-scoped caller: `run` is checked
-    /// before the paste and before every re-inject; once it reports the run
-    /// over, nothing more is typed (`None` when that happens before the
-    /// paste).
+    /// during the TUI wait, then under the submit lock before the paste, the
+    /// re-paste, Enter and the re-Enter; once it reports the run over, nothing
+    /// more is typed (`None` when that happens before Enter — the caller then
+    /// asks `run` itself whether the run stopped or the session never drew).
     pub async fn submit_prompt_while(
         &self,
         sid: &Id,
@@ -249,7 +280,7 @@ impl SessionManager {
         opts: SubmitOpts,
         run: Option<&RunGuard>,
     ) -> Option<Option<Instant>> {
-        if !wait_for_tui_with(self, sid, opts.echo_wait).await {
+        if !wait_for_tui_with(self, sid, opts.echo_wait, run).await {
             return None;
         }
         if let Some(quiet) = opts.extra_settle {
@@ -257,7 +288,7 @@ impl SessionManager {
         }
         let lock = self.submit_lock(sid);
         let _submit = lock.lock().await;
-        if !RunGuard::active(run) {
+        if !RunGuard::active(run).await {
             tracing::info!("submit: run ended before the paste into session {sid}");
             return None;
         }
@@ -275,7 +306,7 @@ impl SessionManager {
             tracing::warn!("submit: could not paste the prompt into session {sid}");
             return None;
         }
-        if !RunGuard::active(run) {
+        if !RunGuard::active(run).await {
             tracing::info!("submit: run ended before Enter in session {sid}");
             return None;
         }
@@ -300,7 +331,7 @@ impl SessionManager {
     async fn enter_until_dispatched(&self, sid: &Id, run: Option<&RunGuard>) {
         let before = self.live_handle(sid).map(|h| h.last_output_at());
         let _ = self.input(sid, ENTER).await;
-        if !dispatched(self, sid, before).await && RunGuard::active(run) {
+        if !dispatched(self, sid, before).await && RunGuard::active(run).await {
             let _ = self.input(sid, ENTER).await;
         }
     }
@@ -330,7 +361,7 @@ impl SessionManager {
         let probe = paste_probe(prompt);
         for attempt in 0..2 {
             if attempt == 1 {
-                if !RunGuard::active(run) {
+                if !RunGuard::active(run).await {
                     // The run ended while the first paste was settling: leave
                     // the half-landed text rather than re-typing for a run
                     // that no longer owns the session.

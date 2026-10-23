@@ -37,6 +37,25 @@ pub fn isolated_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("e2e-transcripts")
 }
 
+/// Claude's per-project directory name for a session cwd — THE one encoder
+/// (architecture-6w1-01; the session manager, the PTY runner, improvement
+/// evidence and the turn runner all used to carry their own copy). Every
+/// non-ASCII-alphanumeric character becomes `-` (claude's real convention:
+/// spaces, `@`, `+`, `(` … not just `/`, `.`, `_`), so `/Users/dev/project`
+/// → `-Users-dev-project` and the leading `/` yields the leading `-`.
+pub fn encode_cwd(cwd: &str) -> String {
+    cwd.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
+}
+
+/// `<home>/.claude/projects` — the default Claude root under `home` (the
+/// first of [`TranscriptRoots::for_session`]'s local defaults). Callers that
+/// check one home (session pruning) use this instead of spelling the layout.
+pub fn default_claude_root(home: &Path) -> PathBuf {
+    home.join(".claude").join("projects")
+}
+
 /// Why a root is in the set — the usage tailer skips pre-existing history
 /// only under the roots it always read ([`RootKind::Default`]); roots added
 /// later backfill at their true timestamps.
@@ -136,7 +155,7 @@ impl RootsEnv {
     /// the scan wants them; one session's CLI wrote to the default dir.
     fn defaults(&self, home: &Path, config_dirs: bool) -> TranscriptRoots {
         let mut claude = vec![Root::new(
-            home.join(".claude").join("projects"),
+            default_claude_root(home),
             "claude",
             RootKind::Default,
         )];
@@ -287,6 +306,22 @@ impl TranscriptRoots {
         self.claude_dirs().chain(self.codex_dirs())
     }
 
+    /// Where one Claude session's transcript lives: the first existing
+    /// `<root>/<encode_cwd(cwd)>/<psid>.jsonl` across the Claude roots, else
+    /// the primary root's expected path (the CLI has not flushed yet). `None`
+    /// only when there is no Claude root at all (an isolated daemon without
+    /// a data dir, an invalid account id). Blocking (`is_file` per root).
+    #[allow(clippy::disallowed_methods)] // sync helper: blocking by contract — async callers offload it
+    pub fn claude_session_file(&self, cwd: &str, psid: &str) -> Option<PathBuf> {
+        let rel = Path::new(&encode_cwd(cwd)).join(format!("{psid}.jsonl"));
+        let mut candidates = self.claude_dirs().map(|dir| dir.join(&rel));
+        let first = candidates.next()?;
+        if first.is_file() {
+            return Some(first);
+        }
+        Some(candidates.find(|p| p.is_file()).unwrap_or(first))
+    }
+
     /// The Claude root `file` lives under, if any.
     pub fn claude_root_of(&self, file: &Path) -> Option<&Root> {
         self.claude.iter().find(|r| file.starts_with(&r.dir))
@@ -328,6 +363,47 @@ mod tests {
 
     fn holds(roots: &[Root], file: &Path) -> bool {
         roots.iter().any(|r| file.starts_with(&r.dir))
+    }
+
+    #[test]
+    fn encode_cwd_matches_claudes_project_dir_names() {
+        // `/`, `.`, `_`, spaces and other punctuation all become `-`; ASCII
+        // letters and digits survive. The literal is what the three encoders
+        // this replaced (`lifecycle::claude_project_dir_name`,
+        // `claude_pty::project_dir`, the manager's codex/claude resolver)
+        // produced for the same input.
+        assert_eq!(
+            encode_cwd("/Users/dev/my_proj.v2/a b@c+d"),
+            "-Users-dev-my-proj-v2-a-b-c-d"
+        );
+        assert_eq!(encode_cwd("/tmp/otto ws"), "-tmp-otto-ws");
+        // Non-ASCII letters are not "alphanumeric" to claude either.
+        assert_eq!(encode_cwd("/home/é"), "-home--");
+    }
+
+    #[test]
+    fn claude_session_file_prefers_an_existing_file_in_a_later_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (a, b) = (tmp.path().join("a"), tmp.path().join("b"));
+        let roots = TranscriptRoots {
+            claude: vec![
+                Root::new(a.clone(), "claude", RootKind::Default),
+                Root::new(b.clone(), "claude", RootKind::Extra),
+            ],
+            codex: vec![],
+        };
+        // Nothing on disk yet: the primary root's expected path.
+        let expected = a.join("-w-p").join("s1.jsonl");
+        assert_eq!(roots.claude_session_file("/w/p", "s1"), Some(expected));
+        // The CLI wrote under the second root: that file wins.
+        let found = b.join("-w-p").join("s1.jsonl");
+        std::fs::create_dir_all(found.parent().unwrap()).unwrap();
+        std::fs::write(&found, b"{}\n").unwrap();
+        assert_eq!(roots.claude_session_file("/w/p", "s1"), Some(found));
+        assert_eq!(
+            TranscriptRoots::default().claude_session_file("/w/p", "s1"),
+            None
+        );
     }
 
     #[test]

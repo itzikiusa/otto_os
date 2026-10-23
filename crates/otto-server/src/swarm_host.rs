@@ -129,12 +129,6 @@ impl SwarmHost for ServerCtx {
             waiting_idle: review_engine::WAITING_IDLE,
         }
     }
-    fn bracketed_paste(&self, text: &str) -> Vec<u8> {
-        submit::bracketed_paste(text)
-    }
-    async fn wait_for_tui(&self, sid: &Id) -> bool {
-        submit::wait_for_tui(&self.manager, sid).await
-    }
     async fn dispatched(&self, sid: &Id, before: Option<Instant>) -> bool {
         submit::dispatched(&self.manager, sid, before).await
     }

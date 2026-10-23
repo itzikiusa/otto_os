@@ -62,6 +62,59 @@ pub(crate) async fn while_run_active<T>(
     }
 }
 
+/// The swarm's [`RunGuard`] for one run (architecture-4-01r): active while the
+/// run's DB status is queued/running/waiting ([`run_is_active`], the check
+/// [`while_run_active`] polls) and `stopped` (the run's cancel flag, which
+/// every stop path signals) is unset. Each check reads both, so a stop is
+/// seen at the next check with no poll lag.
+pub(crate) fn run_guard(
+    repo: &otto_state::SwarmRepo,
+    run_id: &str,
+    stopped: impl Fn() -> bool + Send + Sync + 'static,
+) -> otto_sessions::submit::RunGuard {
+    let (repo, run_id, stopped) = (repo.clone(), run_id.to_string(), Arc::new(stopped));
+    otto_sessions::submit::RunGuard::new(move || {
+        let (repo, run_id, stopped) = (repo.clone(), run_id.clone(), Arc::clone(&stopped));
+        async move { !stopped() && run_is_active(&repo, &run_id).await }
+    })
+}
+
+/// How a turn's prompt submit ended ([`submit_turn_prompt`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TurnSubmit {
+    /// Pasted and submitted.
+    Sent,
+    /// The run stopped first; nothing more was typed.
+    Stopped,
+    /// The session died, or its TUI never drew, before the prompt was sent.
+    NotSent,
+}
+
+/// Submit a run's prompt through the ONE submit path
+/// (`SessionManager::submit_prompt_while`, [`SubmitOpts::VERIFIED`]): strict
+/// TUI wait, then under the session's submit lock — so a broadcast or an
+/// agent→agent `/message` can't land inside the paste → Enter window — paste
+/// until echoed, Enter, re-Enter, with `guard` checked before each write.
+///
+/// [`SubmitOpts::VERIFIED`]: otto_sessions::submit::SubmitOpts::VERIFIED
+pub(crate) async fn submit_turn_prompt(
+    ctx: &SwarmRt,
+    guard: &otto_sessions::submit::RunGuard,
+    sid: &Id,
+    prompt: &str,
+) -> TurnSubmit {
+    let opts = otto_sessions::submit::SubmitOpts::VERIFIED;
+    match ctx
+        .manager()
+        .submit_prompt_while(sid, prompt, opts, guard.clone())
+        .await
+    {
+        Some(_) => TurnSubmit::Sent,
+        None if !guard.is_active().await => TurnSubmit::Stopped,
+        None => TurnSubmit::NotSent,
+    }
+}
+
 async fn guarded_dispatch(
     repo: &otto_state::SwarmRepo,
     swarm_id: &str,
@@ -99,6 +152,10 @@ pub(crate) async fn send_run_input(
 /// paste or Enter inside our window and merge two prompts into one. Each write
 /// still goes through [`send_run_input`] (the swarm operation guard + the
 /// run-still-active check). `false` when the run stopped or a write failed.
+///
+/// Turns no longer call this — they submit through [`submit_turn_prompt`].
+/// It stays only for otto-server's `swarm_router` interleave test, which
+/// drives raw bytes into a `cat` PTY that never draws a TUI.
 #[doc(hidden)]
 pub async fn submit_run_prompt(
     ctx: &SwarmRt,
@@ -144,6 +201,54 @@ mod dispatch_tests {
             budget_reason(&swarm, &spend).is_none(),
             "admitting the last permitted run must not interrupt it"
         );
+    }
+
+    /// architecture-4-01r: the swarm's submit guard is ASYNC — each check
+    /// reads the run's DB status and its cancel flag — so a stop (status or
+    /// flag) between the TUI wait and the paste ends the guard at once.
+    #[tokio::test]
+    async fn run_guard_ends_on_a_stop_status_or_the_cancel_flag() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("../otto-state/migrations")
+            .run(&pool)
+            .await
+            .unwrap();
+        let repo = otto_state::SwarmRepo::new(pool);
+        let run = repo
+            .create_run(NewRun {
+                swarm_id: "guard-test".into(),
+                workspace_id: "ws".into(),
+                project_id: None,
+                task_id: None,
+                agent_id: "agent".into(),
+                kind: "task".into(),
+                trigger: "coordinator".into(),
+            })
+            .await
+            .unwrap();
+        let flag = Arc::new(AtomicBool::new(false));
+        let guard = run_guard(&repo, &run.id, {
+            let flag = Arc::clone(&flag);
+            move || flag.load(Ordering::Relaxed)
+        });
+        assert!(guard.is_active().await, "a queued run is active");
+        flag.store(true, Ordering::Relaxed);
+        assert!(!guard.is_active().await, "the cancel flag ends it");
+        flag.store(false, Ordering::Relaxed);
+        repo.update_run(
+            &run.id,
+            RunPatch {
+                status: Some("stopped".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(!guard.is_active().await, "a stopped run is not active");
     }
 
     #[tokio::test]

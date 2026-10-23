@@ -245,6 +245,42 @@ pub(crate) fn reusable_for(s: &otto_core::domain::Session, agent_id: &str, user:
     is_agent && mine && alive && s.created_by == user
 }
 
+/// Who one turn's agent session belongs to (test-quality-6w1-05), built once
+/// from [`acting_user`] so the reuse lookup and the create call can never
+/// disagree: a session is reused only if it was created as `reuse_user`
+/// ([`find_agent_session`]), and a new one is created as `creator` — so it
+/// carries that person's MCP token, provider account and git/issue identity,
+/// and they can open it. Both are the task's acting person, never
+/// `swarm.created_by` unless nobody else originated the work.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnSession {
+    /// [`find_agent_session`]'s `user`.
+    pub reuse_user: Id,
+    /// The `created_by` of a freshly created session.
+    pub creator: Id,
+}
+
+impl TurnSession {
+    /// Both owners are `acting_user`.
+    pub fn for_acting_user(acting_user: &str) -> Self {
+        Self {
+            reuse_user: acting_user.to_string(),
+            creator: acting_user.to_string(),
+        }
+    }
+
+    /// [`acting_user`] for this turn's swarm / project / task, as a
+    /// [`TurnSession`].
+    pub async fn resolve(
+        repo: &otto_state::SwarmRepo,
+        swarm: &otto_state::Swarm,
+        project: Option<&SwarmProject>,
+        task: Option<&SwarmTask>,
+    ) -> Self {
+        Self::for_acting_user(&acting_user(repo, swarm, project, task).await)
+    }
+}
+
 /// Bound on the originator walk (parent / source-run links); a cycle or an
 /// absurdly deep chain falls back instead of looping.
 const MAX_ORIGIN_HOPS: usize = 16;
@@ -422,7 +458,7 @@ async fn run_turn_inner(
         None => None,
     };
     let ws = swarm.workspace_id.clone();
-    let acting = acting_user(repo, &swarm, project.as_ref(), task.as_ref()).await;
+    let owner = TurnSession::resolve(repo, &swarm, project.as_ref(), task.as_ref()).await;
 
     // Prepare cwd + per-agent context (skills/soul/identity) + otto-post helper.
     let cwd_info =
@@ -571,7 +607,7 @@ async fn run_turn_inner(
     let attempt: &mut crate::runtime::host::AttemptFn<'_> = &mut |_attempt| {
         let ctx = ctx.clone();
         let ws = ws.clone();
-        let acting = acting.clone();
+        let owner = owner.clone();
         // Stamp the work-graph ref so the usage layer can attribute cost to the
         // originating swarm task. story_id is included when the project was created
         // from a Product story (Plan → Swarm link; project.story_id is Some).
@@ -620,7 +656,7 @@ async fn run_turn_inner(
                 &ctx,
                 &ws,
                 &agent_id,
-                &acting,
+                &owner,
                 &provider,
                 &cwd,
                 &title,
@@ -772,7 +808,7 @@ async fn run_attempt(
     ctx: &SwarmRt,
     ws: &Id,
     agent_id: &str,
-    acting_user: &str,
+    owner: &TurnSession,
     provider: &str,
     cwd: &str,
     title: &str,
@@ -802,7 +838,7 @@ async fn run_attempt(
     // after the session was first created (e.g. it started in a scratch dir),
     // retire the stale session and spawn fresh in the right cwd so the agent
     // actually works in the configured folder.
-    let reuse = match find_agent_session(ctx, ws, agent_id, acting_user).await {
+    let reuse = match find_agent_session(ctx, ws, agent_id, &owner.reuse_user).await {
         Some(existing) => {
             let existing_cwd = ctx.manager().get(&existing).await.ok().map(|s| s.cwd);
             if existing_cwd.as_deref() == Some(cwd) {
@@ -847,10 +883,13 @@ async fn run_attempt(
                 Err(_) => return RunOutcome::failed(None, FailReason::CreateFailed),
             };
             // The session is created AS the task's human originator (see
-            // `acting_user`), so it carries that person's MCP token, provider
+            // `TurnSession`), so it carries that person's MCP token, provider
             // account and git/issue identity, and they can open it.
-            let creator: Id = acting_user.to_string();
-            match ctx.manager().create(&ws_row, &creator, req, None).await {
+            match ctx
+                .manager()
+                .create(&ws_row, &owner.creator, req, None)
+                .await
+            {
                 Ok(s) => s.id,
                 Err(e) => {
                     tracing::warn!("swarm: create session ({provider}): {e}");
@@ -891,25 +930,23 @@ async fn run_attempt(
         Some(psid) => ctx.transcript_len(cwd, &psid),
         None => 0,
     };
-    if crate::runtime::engine::while_run_active(ctx.swarm_repo(), run_id, ctx.wait_for_tui(&sid))
-        .await
-        == Some(true)
-    {
-        if !crate::runtime::engine::submit_run_prompt(
-            ctx,
-            swarm_id,
-            run_id,
-            &sid,
-            &ctx.bracketed_paste(prompt),
-            true,
-        )
-        .await
-        {
-            return RunOutcome::failed(Some(sid), FailReason::Stopped);
+    // The one run-guarded submit path (architecture-4-01r): the guard (this
+    // run's DB status + its cancel flag) is checked during the TUI wait and,
+    // under the session's submit lock, before every write.
+    let guard = {
+        let cancel = Arc::clone(cancel);
+        crate::runtime::engine::run_guard(ctx.swarm_repo(), run_id, move || {
+            cancel.load(Ordering::Relaxed)
+        })
+    };
+    use crate::runtime::engine::{submit_turn_prompt, TurnSubmit};
+    match submit_turn_prompt(ctx, &guard, &sid, prompt).await {
+        TurnSubmit::Sent => {}
+        TurnSubmit::Stopped => return RunOutcome::failed(Some(sid), FailReason::Stopped),
+        TurnSubmit::NotSent => {
+            tracing::warn!("swarm: TUI never settled for session {sid} — brief not injected");
+            return RunOutcome::failed(Some(sid), FailReason::Exited);
         }
-    } else {
-        tracing::warn!("swarm: TUI never settled for session {sid} — brief not injected");
-        return RunOutcome::failed(Some(sid), FailReason::Exited);
     }
     // For claude, confirm the brief actually LANDED (a "user" record appended to
     // the transcript): TUI echo alone can be redraw noise around a swallowed
@@ -930,17 +967,10 @@ async fn run_attempt(
         .unwrap_or(false)
     {
         tracing::warn!("swarm: brief didn't land in session {sid} — re-injecting once");
-        if !crate::runtime::engine::submit_run_prompt(
-            ctx,
-            swarm_id,
-            run_id,
-            &sid,
-            &ctx.bracketed_paste(prompt),
-            false,
-        )
-        .await
-        {
-            return RunOutcome::failed(Some(sid), FailReason::Stopped);
+        match submit_turn_prompt(ctx, &guard, &sid, prompt).await {
+            TurnSubmit::Sent => {}
+            TurnSubmit::Stopped => return RunOutcome::failed(Some(sid), FailReason::Stopped),
+            TurnSubmit::NotSent => return RunOutcome::failed(Some(sid), FailReason::Exited),
         }
         if !crate::runtime::engine::while_run_active(
             ctx.swarm_repo(),
@@ -1314,6 +1344,15 @@ mod reuse_tests {
     /// test-quality-5-06 (PC-2): a turn reuses only a live session of the
     /// same agent created as the SAME acting user — Bob's session carries
     /// Bob's MCP token and accounts and must never run Alice's task.
+    /// test-quality-6w1-05: the reuse lookup and the create call share one
+    /// owner, the acting user (the swarm's creator is not an input here).
+    #[test]
+    fn a_turn_session_is_owned_by_the_acting_user_on_both_paths() {
+        let owner = super::TurnSession::for_acting_user("alice");
+        assert_eq!(owner.reuse_user, "alice");
+        assert_eq!(owner.creator, "alice");
+    }
+
     #[test]
     fn a_session_is_reused_only_by_its_agent_and_acting_user() {
         let s = session("dev", "bob");

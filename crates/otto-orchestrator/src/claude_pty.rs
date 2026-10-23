@@ -465,28 +465,28 @@ pub fn sanitize_paste(text: &str) -> String {
         .collect()
 }
 
-/// `~/.claude/projects/<enc(cwd)>/<sid>.jsonl` for a given session.
+/// `~/.claude/projects/<enc(cwd)>/<sid>.jsonl` for a given session — the
+/// shared [`TranscriptRoots::claude_session_file`] over the process's local
+/// roots (architecture-6w1-01), so an explicit `OTTO_TRANSCRIPT_ROOTS` pair
+/// moves the turn watchers to the same file the conversation view reads.
+/// The first existing file across the roots wins, else the primary root's
+/// expected path; no root at all (an isolated daemon) → `project_dir(cwd)`.
+///
+/// [`TranscriptRoots::claude_session_file`]: otto_transcript::roots::TranscriptRoots::claude_session_file
 pub fn session_jsonl_path(cwd: &str, sid: &str) -> PathBuf {
-    project_dir(cwd).join(format!("{sid}.jsonl"))
+    use otto_transcript::roots::{home_dir, RootsEnv};
+    RootsEnv::from_process()
+        .for_session(&serde_json::Value::Null, &home_dir(), None, None)
+        .claude_session_file(cwd, sid)
+        .unwrap_or_else(|| project_dir(cwd).join(format!("{sid}.jsonl")))
 }
 
-/// The directory where claude stores session JSONL files for `cwd`. The
-/// encoding replaces every non-alphanumeric character with '-'.
+/// The directory where claude stores per-project state for `cwd` (session
+/// JSONL, `memory/`) under the real `$HOME`: the default Claude root joined
+/// with the one cwd encoder, [`otto_transcript::roots::encode_cwd`].
 pub fn project_dir(cwd: &str) -> PathBuf {
-    let enc: String = cwd
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect();
-    let home = std::env::var("HOME").unwrap_or_else(|_| dirs_fallback().unwrap_or_default());
-    PathBuf::from(home)
-        .join(".claude")
-        .join("projects")
-        .join(enc)
-}
-
-/// Best-effort home lookup when $HOME is unset (rare on macOS/Linux).
-fn dirs_fallback() -> Option<String> {
-    std::env::var_os("USERPROFILE").map(|v| v.to_string_lossy().into_owned())
+    use otto_transcript::roots::{default_claude_root, encode_cwd, home_dir};
+    default_claude_root(&home_dir()).join(encode_cwd(cwd))
 }
 
 /// Text of the LAST assistant message in `jsonl` whose

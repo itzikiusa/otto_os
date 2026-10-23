@@ -106,9 +106,13 @@ async fn ended_run_guard_blocks_the_paste() {
     );
     mgr.live.insert(id.clone(), Arc::clone(&handle));
     let active = Arc::new(AtomicBool::new(false));
+    // The async form the swarm uses (a DB read): each check is a future.
     let guard = RunGuard::new({
         let active = Arc::clone(&active);
-        move || active.load(Ordering::SeqCst)
+        move || {
+            let active = Arc::clone(&active);
+            async move { active.load(Ordering::SeqCst) }
+        }
     });
     let out = mgr
         .submit_prompt_while(&id, "late-run", SubmitOpts::default(), guard.clone())
@@ -129,6 +133,84 @@ async fn ended_run_guard_blocks_the_paste() {
     }
     assert!(got.contains("live-run"), "{got:?}");
     assert!(!got.contains("late-run"), "the ended run typed: {got:?}");
+    let _ = handle.kill();
+    mgr.remove(&id).await.unwrap();
+}
+
+/// architecture-4-01r: a run stopped AFTER the TUI wait but before the paste
+/// types nothing. The submit is parked on the session's submit lock (another
+/// submitter holds it) with its TUI ready; the run ends; once the lock frees,
+/// the guard — checked under the lock — refuses the paste, and the async
+/// guard is what the swarm runs on (`engine::run_guard`).
+#[tokio::test]
+async fn a_run_stopped_between_the_wait_and_the_paste_pastes_nothing() {
+    use crate::submit::RunGuard;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let (mgr, repo, ws, owner) = test_manager().await;
+    let id = seed_session(&repo, &ws, &owner, None).await;
+    let tmp = tempfile::tempdir().unwrap();
+    let sink = tmp.path().join("pty-input");
+    let handle = Arc::new(
+        PtyHandle::spawn(&CommandSpec {
+            program: "/bin/sh".into(),
+            args: vec![
+                "-c".into(),
+                format!("echo ready; exec cat > '{}'", sink.display()),
+            ],
+            cwd: Some(tmp.path().to_string_lossy().into()),
+            env: vec![],
+        })
+        .unwrap(),
+    );
+    mgr.live.insert(id.clone(), Arc::clone(&handle));
+    let active = Arc::new(AtomicBool::new(true));
+    let checks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let guard = RunGuard::new({
+        let (active, checks) = (Arc::clone(&active), Arc::clone(&checks));
+        move || {
+            let (active, checks) = (Arc::clone(&active), Arc::clone(&checks));
+            async move {
+                checks.fetch_add(1, Ordering::SeqCst);
+                active.load(Ordering::SeqCst)
+            }
+        }
+    });
+    let lock = mgr.submit_lock(&id);
+    let held = lock.lock().await;
+    let submit = tokio::spawn({
+        let (mgr, id) = (Arc::clone(&mgr), id.clone());
+        async move {
+            mgr.submit_prompt_while(&id, "stopped-run", SubmitOpts::VERIFIED, guard)
+                .await
+        }
+    });
+    // The TUI wait passes (it checks the guard while polling), then the
+    // submit queues on the held lock.
+    for _ in 0..200 {
+        if checks.load(Ordering::SeqCst) > 0
+            && handle.last_output_at().elapsed() > Duration::from_secs(1)
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !submit.is_finished(),
+        "the submit should be parked on the lock"
+    );
+    active.store(false, Ordering::SeqCst);
+    drop(held);
+    assert!(
+        submit.await.unwrap().is_none(),
+        "a stopped run reports no submit"
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let got = std::fs::read_to_string(&sink).unwrap_or_default();
+    assert!(
+        !got.contains("stopped-run"),
+        "the stopped run typed: {got:?}"
+    );
     let _ = handle.kill();
     mgr.remove(&id).await.unwrap();
 }

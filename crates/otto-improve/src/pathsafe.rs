@@ -15,21 +15,28 @@ use otto_core::{Error, Result};
 /// usage tailer then re-stat'd (and, lacking a trailing newline, re-read)
 /// every scan forever.
 pub(crate) fn project_dir(root: &str) -> PathBuf {
-    let real = otto_orchestrator::claude_pty::project_dir(root);
-    #[cfg(test)]
-    {
-        static TEST_HOME: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-        let home = TEST_HOME.get_or_init(|| {
+    use otto_transcript::roots::{default_claude_root, encode_cwd};
+    default_claude_root(&claude_home()).join(encode_cwd(root))
+}
+
+/// The home `~/.claude` lives under: `$HOME` ([`otto_transcript::roots::home_dir`]).
+#[cfg(not(test))]
+fn claude_home() -> PathBuf {
+    otto_transcript::roots::home_dir()
+}
+
+/// Under unit tests: one process-wide temp home (see [`project_dir`]).
+#[cfg(test)]
+fn claude_home() -> PathBuf {
+    static TEST_HOME: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    TEST_HOME
+        .get_or_init(|| {
             let dir =
                 std::env::temp_dir().join(format!("otto-improve-test-home-{}", std::process::id()));
             let _ = std::fs::create_dir_all(&dir);
             dir
-        });
-        if let Some(name) = real.file_name() {
-            return home.join(".claude").join("projects").join(name);
-        }
-    }
-    real
+        })
+        .clone()
 }
 
 /// A skill `target_ref` must be a single safe name segment.

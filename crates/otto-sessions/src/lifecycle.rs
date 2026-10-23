@@ -32,22 +32,16 @@ pub enum Resumability {
     Unknown,
 }
 
-/// Encode a session cwd into the claude `~/.claude/projects` directory name:
-/// every non-alphanumeric character becomes `-` (claude's real convention —
-/// covers spaces, `@`, `+`, `(` … not just `/`, `.`, `_`; mirrors the encoder
-/// in otto-orchestrator's `claude_pty::project_dir`). `/Users/dev/project`
-/// → `-Users-dev-project`; a leading `/` yields the leading `-`.
-pub fn claude_project_dir_name(cwd: &str) -> String {
-    cwd.chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect()
-}
+/// Encode a session cwd into the claude `~/.claude/projects` directory name —
+/// the one encoder, [`otto_transcript::roots::encode_cwd`] (every
+/// non-alphanumeric character becomes `-`). `/Users/dev/project` →
+/// `-Users-dev-project`.
+pub use otto_transcript::roots::encode_cwd as claude_project_dir_name;
 
 /// Resolve the expected claude transcript path for a session under `home`,
 /// using the exact cwd→dir encoding.
 pub fn claude_transcript_path(home: &Path, cwd: &str, provider_session_id: &str) -> PathBuf {
-    home.join(".claude")
-        .join("projects")
+    otto_transcript::roots::default_claude_root(home)
         .join(claude_project_dir_name(cwd))
         .join(format!("{provider_session_id}.jsonl"))
 }
@@ -77,7 +71,7 @@ pub fn claude_transcript_exists(home: &Path, cwd: &str, provider_session_id: &st
         return exact;
     }
     let mut unknown = exact == Resumability::Unknown;
-    let projects = home.join(".claude").join("projects");
+    let projects = otto_transcript::roots::default_claude_root(home);
     let target = format!("{provider_session_id}.jsonl");
     match std::fs::read_dir(&projects) {
         Ok(entries) => {
@@ -127,13 +121,16 @@ pub fn transcript_path(
     cwd: &str,
     provider_session_id: Option<&str>,
 ) -> Result<PathBuf, otto_transcript::UnavailableReason> {
-    transcript_path_in_roots(
-        &home.join(".claude").join("projects"),
-        &crate::manager::codex_sessions_root(),
-        provider,
-        cwd,
-        provider_session_id,
-    )
+    // The local defaults under `home` (no account, no override; `$CODEX_HOME`
+    // still moves the Codex root): the shared `TranscriptRoots` rule, not a
+    // hand-built layout (architecture-6w1-01).
+    use otto_transcript::roots::RootsEnv;
+    let env = RootsEnv {
+        codex_home: RootsEnv::from_process().codex_home,
+        ..RootsEnv::default()
+    };
+    let roots = env.for_session(&serde_json::Value::Null, home, None, None);
+    transcript_path_in(&roots, provider, cwd, provider_session_id)
 }
 
 /// [`transcript_path_in_roots`] over every root of `provider` in `roots`

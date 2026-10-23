@@ -662,3 +662,27 @@ async fn a_turn_reuses_only_its_acting_users_session() {
     assert_eq!(find(&rt, &ws, "dev", &w.bob.id).await, Some(bobs.id));
     assert_eq!(find(&rt, &ws, "other", &w.bob.id).await, None);
 }
+
+/// test-quality-6w1-05: the turn's session owner — the reuse lookup's user
+/// AND the create call's `created_by` — is the task's acting person, not the
+/// swarm's creator. Bob's task in Alice's swarm reuses and creates as Bob;
+/// swapping either field for `swarm.created_by` fails here.
+#[tokio::test]
+async fn a_turns_session_is_reused_and_created_as_its_acting_user() {
+    let w = world().await;
+    assert_eq!(
+        w.swarm.created_by, w.alice.id,
+        "fixture: Alice owns the swarm"
+    );
+    let bobs = w.task(&w.bob.id, None, json!([])).await;
+    let owner = otto_swarm::runtime::run::TurnSession::resolve(
+        &w.ctx.swarm_repo,
+        &w.swarm,
+        Some(&w.project),
+        Some(&bobs),
+    )
+    .await;
+    assert_eq!(owner.reuse_user, w.bob.id);
+    assert_eq!(owner.creator, w.bob.id);
+    assert_ne!(owner.creator, w.swarm.created_by);
+}

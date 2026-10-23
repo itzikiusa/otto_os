@@ -465,50 +465,6 @@ pub fn codex_rollout_path_under(root: &std::path::Path, psid: &str) -> Option<st
     walk(root, &format!("-{psid}.jsonl"), 0)
 }
 
-/// Best-effort: resolve + persist `sessions.transcript_path` right after a
-/// provider id is captured (design §4.2), so the conversation view never has to
-/// scan `~/.codex/sessions` for this session again. Failures only log.
-async fn persist_transcript_path(
-    repo: &SessionsRepo,
-    id: &Id,
-    provider: &str,
-    cwd: &str,
-    psid: &str,
-    provider_home: Option<&std::path::Path>,
-) {
-    let home = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default());
-    // Transcript resolution walks `~/.codex/sessions` / `~/.claude/projects`
-    // with sync fs calls — run it on the blocking pool, not a runtime worker.
-    let (provider_s, cwd_s, psid_s) = (provider.to_string(), cwd.to_string(), psid.to_string());
-    let provider_home = provider_home.map(std::path::Path::to_path_buf);
-    let resolved = match tokio::task::spawn_blocking(move || match provider_home {
-        Some(root) => crate::lifecycle::transcript_path_in_roots(
-            &root.join("projects"),
-            &root.join("sessions"),
-            &provider_s,
-            &cwd_s,
-            Some(&psid_s),
-        ),
-        None => crate::lifecycle::transcript_path(&home, &provider_s, &cwd_s, Some(&psid_s)),
-    })
-    .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::debug!(session = %id, "transcript path resolve task failed: {e}");
-            return;
-        }
-    };
-    match resolved {
-        Ok(path) => {
-            if let Err(e) = repo.set_transcript_path(id, &path.to_string_lossy()).await {
-                tracing::debug!(session = %id, "transcript path persist failed: {e}");
-            }
-        }
-        Err(why) => tracing::debug!(session = %id, ?why, "transcript path not resolvable yet"),
-    }
-}
-
 /// Normalize raw PTY input bytes into the plain text codex will record as the
 /// session's first `user_message`: strips ESC/CSI sequences (bracketed-paste
 /// markers included), applies backspace/DEL editing, folds CR/LF into spaces,
@@ -1864,11 +1820,7 @@ impl SessionManager {
     /// account home, else the explicit / isolated / default root). No root
     /// (an account id without configured accounts) → the default root.
     fn codex_root_for(&self, session: &Session) -> std::path::PathBuf {
-        use otto_transcript::roots::{home_dir, RootsEnv};
-        let accounts = self.provider_accounts.as_ref().map(|(_, r)| r.as_path());
-        let data = self.data_dir.as_deref();
-        RootsEnv::from_process()
-            .for_session(&session.meta, &home_dir(), accounts, data)
+        self.transcript_roots_for(session)
             .codex
             .into_iter()
             .next()
@@ -2174,6 +2126,17 @@ impl SessionManager {
                 .ingest_tokens
                 .get(session_id)
                 .is_some_and(|t| t.as_str() == token)
+    }
+
+    /// Test seam: mint (or reuse) `session_id`'s ingest token without spawning
+    /// an agent CLI, so out-of-crate integration tests can drive `/ingest/*`.
+    #[doc(hidden)]
+    pub fn mint_ingest_token(&self, session_id: &Id) -> String {
+        self.ingest_env(session_id)
+            .into_iter()
+            .find(|(k, _)| k == "OTTO_INGEST_TOKEN")
+            .map(|(_, v)| v)
+            .unwrap_or_default()
     }
 
     /// Mint (or reuse) the ingest token for `session_id` and return the env vars
@@ -2956,7 +2919,7 @@ impl SessionManager {
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_else(|_| session.cwd.clone());
         let provider = session.provider.clone();
-        let provider_home = self.provider_home(session);
+        let transcript_roots = self.transcript_roots_for(session);
         let codex_root = self.codex_root_for(session);
         let probe = CaptureProbe::default();
         let generation = Arc::clone(&probe.generation);
@@ -3069,7 +3032,7 @@ impl SessionManager {
                                     &provider,
                                     &cwd,
                                     &psid,
-                                    provider_home.as_deref(),
+                                    transcript_roots.clone(),
                                 )
                                 .await;
                                 captured = Some(psid)
@@ -3841,7 +3804,7 @@ impl SessionManager {
                 provider,
                 &cwd,
                 &psid,
-                self.provider_home(&session).as_deref(),
+                self.transcript_roots_for(&session),
             )
             .await;
             let _ = self
@@ -3972,7 +3935,7 @@ impl SessionManager {
                     &session.provider,
                     &session.cwd,
                     &psid,
-                    self.provider_home(session).as_deref(),
+                    self.transcript_roots_for(session),
                 )
                 .await;
                 self.capture_probes.remove(&session.id);
@@ -4529,44 +4492,30 @@ impl SessionManager {
         }
         // Every lookup below is filesystem work (canonicalize, a rollout-tree
         // walk, stats) — resolve the inputs here, then run it off the runtime.
-        let provider_home = self.provider_home(&session);
-        let codex_root = self.codex_root_for(&session);
-        tokio::task::spawn_blocking(move || {
-            Self::locate_activity_artifact(&session, &psid, provider_home, &codex_root)
-        })
-        .await
-        .ok()
-        .flatten()
+        let roots = self.transcript_roots_for(&session);
+        tokio::task::spawn_blocking(move || Self::locate_activity_artifact(&session, &psid, &roots))
+            .await
+            .ok()
+            .flatten()
     }
 
     /// [`Self::activity_artifact`]'s filesystem half. Blocking.
     fn locate_activity_artifact(
         session: &Session,
         psid: &str,
-        provider_home: Option<std::path::PathBuf>,
-        codex_root: &std::path::Path,
+        roots: &otto_transcript::roots::TranscriptRoots,
     ) -> Option<std::path::PathBuf> {
         let path = match session.provider.as_str() {
-            // `~/.claude/projects/<enc(cwd)>/<psid>.jsonl`. claude symlink-
-            // resolves the spawn cwd for its transcript dir, so canonicalize
-            // before encoding (same rule as otto-server's transcript polling;
-            // encoding mirrors otto_orchestrator::claude_pty::project_dir).
+            // `<claude root>/<enc(cwd)>/<psid>.jsonl`
+            // ([`otto_transcript::roots::TranscriptRoots::claude_session_file`]).
+            // claude symlink-resolves the spawn cwd for its transcript dir, so
+            // canonicalize before encoding (same rule as otto-server's
+            // transcript polling).
             "claude" => {
                 let cwd = std::fs::canonicalize(&session.cwd)
                     .map(|p| p.to_string_lossy().into_owned())
                     .unwrap_or_else(|_| session.cwd.clone());
-                let enc: String = cwd
-                    .chars()
-                    .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-                    .collect();
-                provider_home
-                    .unwrap_or_else(|| {
-                        std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
-                            .join(".claude")
-                    })
-                    .join("projects")
-                    .join(enc)
-                    .join(format!("{psid}.jsonl"))
+                roots.claude_session_file(&cwd, psid)?
             }
             // `<sessions root>/YYYY/MM/DD/rollout-<ts>-<psid>.jsonl`, found by
             // filename suffix. The rollout's mtime only moves forward, so the
@@ -4576,7 +4525,14 @@ impl SessionManager {
                     .checked_sub(Duration::from_secs(2))
                     .unwrap_or(std::time::UNIX_EPOCH);
                 let suffix = format!("-{psid}.jsonl");
-                recent_codex_rollouts(codex_root, floor)
+                // No root (an account id without configured accounts) → the
+                // default root, as [`Self::codex_root_for`].
+                let codex_root = roots
+                    .codex_dirs()
+                    .next()
+                    .map(std::path::Path::to_path_buf)
+                    .unwrap_or_else(codex_sessions_root);
+                recent_codex_rollouts(&codex_root, floor)
                     .into_iter()
                     .find(|p| {
                         p.file_name()
@@ -6536,7 +6492,10 @@ mod otto_tools_env;
 mod session_files;
 #[path = "manager/shutdown_guard.rs"]
 mod shutdown_guard;
+#[path = "manager/transcript_roots.rs"]
+mod transcript_roots;
 use otto_tools_env::{otto_tools_env, session_mcp_profiles, write_codex_creds};
+use transcript_roots::persist_transcript_path;
 
 #[cfg(test)]
 #[path = "manager/tests/mod.rs"]

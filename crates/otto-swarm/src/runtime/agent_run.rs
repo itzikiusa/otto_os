@@ -349,34 +349,29 @@ pub async fn run_swarm_agent(
         // Inject the prompt once the TUI has settled, confirming dispatch. A
         // dead/exited PTY means the prompt was NEVER sent — kill and retry
         // instead of watching a promptless session until the stuck window.
-        if crate::runtime::engine::while_run_active(
-            ctx.swarm_repo(),
-            &run_id,
-            ctx.wait_for_tui(&sid),
-        )
-        .await
-            == Some(true)
-        {
-            if !crate::runtime::engine::submit_run_prompt(
-                ctx,
-                swarm_id,
-                &run_id,
-                &sid,
-                &ctx.bracketed_paste(prompt),
-                true,
-            )
-            .await
-            {
+        // The one run-guarded submit path (architecture-4-01r): the guard
+        // (this run's DB status + the swarm's plan/recruit cancel flag) is
+        // checked during the TUI wait and, under the session's submit lock,
+        // before every write.
+        let guard = {
+            let cancel = cancel.clone();
+            crate::runtime::engine::run_guard(ctx.swarm_repo(), &run_id, move || cancel.cancelled())
+        };
+        use crate::runtime::engine::{submit_turn_prompt, TurnSubmit};
+        match submit_turn_prompt(ctx, &guard, &sid, prompt).await {
+            TurnSubmit::Sent => {}
+            TurnSubmit::Stopped => {
                 last_reason = Some(FailReason::Stopped);
                 break;
             }
-        } else {
-            tracing::warn!(
-                "swarm_agent_run: TUI never settled for session {sid} — prompt not injected"
-            );
-            last_reason = Some(FailReason::Exited);
-            let _ = ctx.manager().kill_session(&sid).await;
-            continue;
+            TurnSubmit::NotSent => {
+                tracing::warn!(
+                    "swarm_agent_run: TUI never settled for session {sid} — prompt not injected"
+                );
+                last_reason = Some(FailReason::Exited);
+                let _ = ctx.manager().kill_session(&sid).await;
+                continue;
+            }
         }
         // For claude, confirm the prompt LANDED (a "user" record in the fresh
         // session's transcript) — TUI echo can be redraw noise around a
@@ -393,18 +388,17 @@ pub async fn run_swarm_agent(
             tracing::warn!(
                 "swarm_agent_run: prompt didn't land in session {sid} — re-injecting once"
             );
-            if !crate::runtime::engine::submit_run_prompt(
-                ctx,
-                swarm_id,
-                &run_id,
-                &sid,
-                &ctx.bracketed_paste(prompt),
-                false,
-            )
-            .await
-            {
-                last_reason = Some(FailReason::Stopped);
-                break;
+            match submit_turn_prompt(ctx, &guard, &sid, prompt).await {
+                TurnSubmit::Sent => {}
+                TurnSubmit::Stopped => {
+                    last_reason = Some(FailReason::Stopped);
+                    break;
+                }
+                TurnSubmit::NotSent => {
+                    last_reason = Some(FailReason::Exited);
+                    let _ = ctx.manager().kill_session(&sid).await;
+                    continue;
+                }
             }
             if !crate::runtime::engine::while_run_active(
                 ctx.swarm_repo(),

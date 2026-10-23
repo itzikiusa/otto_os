@@ -3479,6 +3479,41 @@ async fn prune_keeps_session_with_existing_transcript() {
     assert!(repo.get(&id).await.is_ok());
 }
 
+/// architecture-6w1-01: the persisted `transcript_path` comes from the shared
+/// `TranscriptRoots::for_session` rule, so an injected `OTTO_TRANSCRIPT_ROOTS`
+/// pair keeps it inside that root (the conversation view reads the same file).
+/// Before, `persist_transcript_path` read `$HOME` itself and resolved under
+/// `~/.claude/projects` whatever the override said.
+#[tokio::test]
+async fn persisted_transcript_path_stays_inside_an_injected_root() {
+    let (mgr, repo, ws, user) = test_manager().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let (claude, codex) = (tmp.path().join("claude"), tmp.path().join("codex"));
+    let psid = "injected-root-1111";
+    let id = seed_session(&repo, &ws, &user, Some(psid)).await;
+    let session = repo.get(&id).await.unwrap();
+    let file = claude
+        .join(otto_transcript::roots::encode_cwd(&session.cwd))
+        .join(format!("{psid}.jsonl"));
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, b"{}\n").unwrap();
+
+    let env = otto_transcript::roots::RootsEnv {
+        explicit: Some(format!("{}:{}", claude.display(), codex.display())),
+        ..Default::default()
+    };
+    let roots = mgr.transcript_roots_in(&env, &session);
+    persist_transcript_path(&repo, &id, "claude", &session.cwd, psid, roots).await;
+
+    let persisted = repo.transcript_path(&id).await.unwrap().expect("persisted");
+    assert!(
+        std::path::Path::new(&persisted).starts_with(&claude),
+        "{persisted} escaped the injected root {}",
+        claude.display()
+    );
+    assert_eq!(persisted, file.to_string_lossy());
+}
+
 // ── Grid-size resolution tests ───────────────────────────────────────────
 
 /// `resolve_grid` returns the clamped values when both fall in-range.

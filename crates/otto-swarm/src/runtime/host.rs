@@ -101,9 +101,9 @@ pub trait SwarmHost: Send + Sync + 'static {
     async fn seed_tasks(&self, project: &SwarmProject, creator: &Id, goal: &str);
 
     // ---- PTY drive helpers (shared with the review engine) ---------------
+    // Prompt submission itself goes through `SessionManager::submit_prompt_while`
+    // (`engine::submit_turn_prompt`) — the one paste → Enter path.
     fn pty_timings(&self) -> PtyTimings;
-    fn bracketed_paste(&self, text: &str) -> Vec<u8>;
-    async fn wait_for_tui(&self, sid: &Id) -> bool;
     async fn dispatched(&self, sid: &Id, before: Option<Instant>) -> bool;
     /// Byte length of claude's transcript for (cwd, provider session id).
     fn transcript_len(&self, cwd: &str, psid: &str) -> u64;
