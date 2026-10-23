@@ -8,7 +8,7 @@ import { readFileSync } from 'node:fs';
 const src = readFileSync(new URL('../scripts/ui-guards.mjs', import.meta.url), 'utf8');
 const block = src.slice(src.indexOf('// p04-detectors:start'), src.indexOf('// p04-detectors:end'));
 const tagEndSrc = src.slice(src.indexOf('function tagEnd('), src.indexOf('\n}\n', src.indexOf('function tagEnd(')) + 3);
-const d = new Function(`${tagEndSrc}\n${block}\nreturn { detectInsertedLiveRegion, detectBusyEmptyStatus, detectBareLazyImport, detectEmptyStateError, detectCouldNotCopy, detectIndexKeyedReorder, detectIconButtonName, detectCrossModuleImport, detectGuessedChecked, detectClipboardNoNextStep, detectUnitSourceRegex };`)() as Record<string, (...a: string[]) => any>;
+const d = new Function(`${tagEndSrc}\n${block}\nreturn { detectInsertedLiveRegion, detectBusyEmptyStatus, detectBareLazyImport, detectEmptyStateError, detectCouldNotCopy, detectIndexKeyedReorder, detectIconButtonName, detectCrossModuleImport, detectGuessedChecked, detectClipboardNoNextStep, detectUnitSourceRegex, detectAnnounceInRegion, detectGuessedDerived };`)() as Record<string, (...a: string[]) => any>;
 const n = (fn: string, text: string) => d[fn](text).length;
 
 test('inserted-live-region: a status inserted with its text, not an always-mounted one', () => {
@@ -17,7 +17,51 @@ test('inserted-live-region: a status inserted with its text, not an always-mount
   assert.equal(n('detectInsertedLiveRegion', '{#if err}<p role="alert">{err}</p>{/if}'), 1);
   assert.equal(n('detectInsertedLiveRegion', '{#if err}<EmptyState tone="error" role="alert" />{/if}'), 0, 'a toned alert is the error state');
   assert.equal(n('detectInsertedLiveRegion', '<p role="status">{msg}</p>'), 0, 'always mounted');
-  assert.equal(n('detectInsertedLiveRegion', '{#if x}\n<p>a</p>\n<p role="status">b</p>{/if}'), 0, 'only the same or next line');
+  assert.equal(n('detectInsertedLiveRegion', '{#if x}\n<p>a</p>\n<p>b</p>\n<p role="status">c</p>{/if}'), 0, 'only the opener line and the next two');
+  assert.equal(n('detectInsertedLiveRegion', '{#if x}<p>a</p>{/if}\n<p role="status">{msg}</p>'), 0, 'a region after the branch closes is not in it');
+});
+
+// Quality iteration 6, wave 3 (P8): the widened opener set and look-ahead.
+test('inserted-live-region: {:else if} / {:else} branches, comments and {@const} lines', () => {
+  assert.equal(n('detectInsertedLiveRegion', '{#if a}<p/>\n{:else if busy}\n  <p class="hint" role="status">Loading…</p>\n{/if}'), 1, '{:else if} + region on the next line');
+  assert.equal(n('detectInsertedLiveRegion', '{#if a}<p/>{:else}\n  <p aria-live="polite">{n} results</p>\n{/if}'), 1, '{:else} branch');
+  // Comments are blanked before the detector runs (so a comment line is a blank one).
+  assert.equal(n('detectInsertedLiveRegion', '{#if saved}\n  \n  <p role="status">Saved</p>\n{/if}'), 1, '{#if} + comment line + region');
+  assert.equal(n('detectInsertedLiveRegion', '{#if row}\n  {@const label = row.name}\n  <p role="status">{label}</p>\n{/if}'), 1, '{#if} + {@const} + region');
+  assert.equal(n('detectInsertedLiveRegion', '{#if a}\n  <div class="wrap">\n    <p role="status">Saved</p>\n  </div>\n{/if}'), 1, 'two lines past the opener');
+  assert.equal(d.detectInsertedLiveRegion('{#if a}<p/>{:else if b}\n<p role="status">x</p>{/if}')[0].detail, '{:else if …} + role="status"');
+  assert.equal(n('detectInsertedLiveRegion', '<p class="sr-only" role="status">{busy ? \'Loading…\' : \'\'}</p>\n{#if busy}<Spinner />{/if}'), 0, 'always mounted, text changes');
+  assert.equal(n('detectInsertedLiveRegion', '{#if err}\n  <EmptyState tone="error" title="Couldn’t load" />\n{:else}\n  <p>{rows.length} rows</p>\n{/if}'), 0, 'no region in either branch');
+});
+
+test('inserted-live-region: one hit per region, aria-live="off" and snippet bodies are not regions', () => {
+  assert.equal(n('detectInsertedLiveRegion', '{#if a}\n  {#if b}\n    <p role="status">x</p>\n  {/if}\n{/if}'), 1, 'nested openers report the region once');
+  assert.equal(n('detectInsertedLiveRegion', '{#if hud}\n  <div class="lat-hud" aria-live="off" role="group">…</div>\n{/if}'), 0, 'aria-live="off" is no live region');
+  assert.equal(n('detectInsertedLiveRegion', '{:else}\n{#snippet body()}\n  <span class="sr-only" role="status">{msg}</span>\n{/snippet}'), 0, 'a snippet body mounts where it is rendered');
+  // role="alert" is reported with its kind: the script files it under the
+  // separate `inserted-alert` ratchet (a real field error may keep it).
+  assert.equal(d.detectInsertedLiveRegion('{#if err}<p role="alert">{err}</p>{/if}')[0].kind, 'role="alert"');
+  assert.equal(d.detectInsertedLiveRegion('{#if ok}<p role="status">Saved</p>{/if}')[0].kind, 'role="status"');
+});
+
+test('announce-in-region: use:announceShown on or inside a mounted status region (6w2-02)', () => {
+  const bubble = (inner: string) => `{#if sending}\n<div class="bubble" role="status">\n  <div class="row"><Dot /></div>\n${inner}\n</div>\n{/if}`;
+  assert.equal(n('detectAnnounceInRegion', bubble('  {#if note}<p use:announceShown={note}>{note}</p>{/if}')), 1, 'inside the bubble, after a closed sibling div');
+  assert.equal(n('detectAnnounceInRegion', '<p role="status" use:announceShown={msg}>{msg}</p>'), 1, 'on the region itself');
+  assert.equal(n('detectAnnounceInRegion', '<span aria-live="polite">\n  <b use:announceShown={t}>{t}</b>\n</span>'), 1, 'aria-live counts too');
+  assert.equal(n('detectAnnounceInRegion', '<div role="status">{count}</div>\n<p use:announceShown={msg}>{msg}</p>'), 0, 'the region closed before the line');
+  assert.equal(n('detectAnnounceInRegion', '<div class="bubble">\n  <p use:announceShown={note}>{note}</p>\n</div>'), 0, 'no region at all');
+  assert.equal(n('detectAnnounceInRegion', '<div aria-live="off">\n  <p use:announceShown={note}>{note}</p>\n</div>'), 0, 'aria-live="off"');
+});
+
+test('guessed-derived: $derived(… ?? true|false) rendered as a state word', () => {
+  const code = (decl: string, markup: string) => [decl, markup] as const;
+  const hit = (decl: string, markup: string) => d.detectGuessedDerived(...code(decl, markup)).length;
+  assert.equal(hit('const attached = $derived(attach?.attached ?? true);', '<p>Built-in tools: {attached ? \'attached\' : \'not attached\'}</p>'), 1);
+  assert.equal(hit('const on = $derived(cfg?.enabled ?? false);', '<b>{!on ? `Off` : `On`}</b>'), 1, 'negated, template literal');
+  assert.equal(hit('const on = $derived(cfg?.enabled ?? false);', '<button disabled={on ? true : false} title={on ? \'Stop\' : \'Start\'}>x</button>'), 0, 'attributes are not the rendered state line');
+  assert.equal(hit('const on = $derived(cfg?.enabled);', '<b>{on ? \'On\' : \'Off\'}</b>'), 0, 'no guessed fallback');
+  assert.equal(hit('const n = $derived(rows?.length ?? 0);', '<b>{n ? \'some\' : \'none\'}</b>'), 0, 'only boolean guesses');
 });
 
 test('busy-empty-status: role=status with aria-busy=true', () => {

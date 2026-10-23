@@ -237,11 +237,20 @@
 // detectors sit between the `p04-detectors` markers so ui/unit/p04-uiGuards
 // runs them on fixtures):
 //
-//   inserted-live-region  `{#if …}` whose same or next line opens an element
-//                     with role="status", aria-live, or role="alert" without
-//                     a `tone` — a live region inserted together with its text
-//                     is usually silent in VoiceOver → announce() at the state
-//                     edge (lib/announce.svelte.ts), keep the line plain text.
+//   inserted-live-region  `{#if …}`, `{:else if …}` or `{:else}` whose own
+//                     line or next two mounting lines (blank, comment and
+//                     `{@const}` lines skipped; cut at `{/if}`, the next
+//                     `{:else…}` or a `{#snippet}`) open an element with
+//                     role="status" or aria-live (not "off") — a live region
+//                     inserted together with its text is usually silent in
+//                     VoiceOver → announce() at the state edge,
+//                     `use:announceShown`, or one always-mounted region
+//                     (lib/announce.svelte.ts); keep the line plain text.
+//   inserted-alert    the same opener with an untoned role="alert" — WebKit
+//                     does speak an inserted alert, so a real field / form
+//                     error may keep it (accessibility.md); the count only
+//                     goes down, and a notice, result or progress line is
+//                     not an alert (→ use:announceShown).
 //   busy-empty-status role="status" with aria-busy="true" — a busy region with
 //                     no text says nothing → LoadState / Skeleton.
 //   bare-lazy-import  `{#await import(…)}` with no `{:catch}` before its
@@ -259,6 +268,15 @@
 //                     still loading the box shows a guess as if it were the
 //                     setting (ux-design-6w1-04) → disable the control (or
 //                     render a skeleton) until the value is known.
+//   announce-in-region `use:announceShown` on, or inside, an element opened
+//                     with role="status" / aria-live in the 40 lines before
+//                     and not yet closed — the text is spoken twice
+//                     (accessibility-responsive-6w2-02) → keep one.
+//   guessed-derived   `const x = $derived(… ?? true)` / `?? false` whose name
+//                     the markup renders as a text ternary (`{x ? 'on' : …}`)
+//                     — a guess shown as state while loading (ux-design-6w2-01;
+//                     the `$derived` twin of guessed-checked) → show the state
+//                     only once it is known.
 //   clipboard-no-next-step  a toasts.error / toasts.warn about a copy or the
 //                     clipboard whose text has no next step (“Select … and
 //                     copy it manually”, or another route: “Use …” / “Try …”)
@@ -273,7 +291,8 @@
 //
 // Updating the baseline: `node scripts/ui-guards.mjs --update-baseline`
 // rewrites scripts/ui-guards-baseline.json from the current tree (sorted keys,
-// deterministic). Do it when you PAY DOWN debt (so the lower count sticks) —
+// deterministic); `--update-baseline --only <rule>` rewrites that one rule's
+// entry and keeps the others (for a guard widened while other work is open). Do it when you PAY DOWN debt (so the lower count sticks) —
 // never to wave through a new violation; fix that instead.
 //
 // Escape hatch for a deliberate exception (any rule): put `ui-guards: allow`
@@ -289,6 +308,13 @@ const UI = fileURLToPath(new URL('..', import.meta.url));
 const SRC = join(UI, 'src');
 const BASELINE = join(UI, 'scripts', 'ui-guards-baseline.json');
 const UPDATE = process.argv.includes('--update-baseline');
+// `--update-baseline --only <rule>` rewrites that one rule's entry and keeps
+// every other rule's recorded counts as they are (a guard widened mid-wave
+// records its new hits without waving through anyone else's).
+const ONLY = (() => {
+  const i = process.argv.indexOf('--only');
+  return i === -1 ? null : (process.argv[i + 1] ?? '');
+})();
 
 /** Custom properties set by libraries we style against, not by our code
  *  (empty since @xyflow/svelte, the `--xy-` owner, was dropped). */
@@ -435,7 +461,10 @@ const RULES = {
   'cross-module-import': 'src/modules/<a> imports from src/modules/<b> — move the shared piece into lib/ (or a lib port) instead of reaching into another feature',
   'raw-error': 'raw `e instanceof Error ? e.message : String(e)` shown to a person — use loadErrorText (lib/loadError.ts)',
   'html-escape': "hand-written .replace(/&/g, '&amp;') escape chain — use escapeHtml (lib/html.ts)",
-  'inserted-live-region': 'live region inserted with its text ({#if} + role="status" / aria-live / untoned role="alert") — announce() at the state edge (lib/announce.svelte.ts)',
+  'inserted-live-region': 'status region inserted with its text ({#if} / {:else if} / {:else} + role="status" / aria-live) — announce() at the state edge, use:announceShown, or one always-mounted region (lib/announce.svelte.ts)',
+  'announce-in-region': 'use:announceShown on or inside a mounted role="status" / aria-live region — the text is spoken twice; keep one (the region, or the action with no role)',
+  'guessed-derived': '$derived(… ?? true|false) rendered as a state word ({x ? \'on\' : \'off\'}) — a loading value shown as known; render the state once it is known',
+  'inserted-alert': 'untoned role="alert" inserted with its text — allowed for a real field / form error only (accessibility.md); a notice, result or progress line uses use:announceShown instead',
   'busy-empty-status': 'role="status" with aria-busy="true" — a busy region with no text says nothing; use LoadState / Skeleton',
   'bare-lazy-import': '{#await import(…)} without {:catch} — a failed chunk is a silent no-op; use LazyMount or add a {:catch} with Retry',
   'empty-state-error': '<EmptyState> used as a load error (“Couldn’t …” title or Retry) without tone="error" — use LoadState (error + onretry)',
@@ -975,20 +1004,57 @@ if (existsSync(E2E)) {
 // p04-detectors:start — pure detectors: (text) → [{ index, detail }].
 // `markup` is a .svelte file with comments, <script> and <style> blanked;
 // `code` is any source with comments blanked.
-const LIVE_REGION = /role="status"|aria-live=|role="alert"/;
+// `aria-live="off"` is the opposite of a live region (a diagnostics HUD).
+const LIVE_REGION = /role="status"|aria-live=(?!\{?\s*["'`]off["'`])|role="alert"/;
+// A branch opener: `{#if …}`, `{:else if …}` or `{:else}` — each mounts its
+// body (and any live region in it) together with the body's text.
+const BRANCH_OPENER = /\{#if\b|\{:else\s+if\b|\{:else\s*\}/g;
+// Lines that mount nothing: blank (comments are already blanked) or `{@const …}`.
+const INERT_LINE = /^\s*(?:\{@const\b[^\n]*\}\s*)?$/;
 function detectInsertedLiveRegion(markup) {
   const out = [];
   const lines = markup.split('\n');
-  let at = 0;
+  const starts = [];
+  for (let i = 0, at = 0; i < lines.length; i++) {
+    starts.push(at);
+    at += lines[i].length + 1;
+  }
+  const seen = new Set(); // a region nested under two openers is one hit
   for (let i = 0; i < lines.length; i++) {
-    const l = lines[i];
-    const k = l.indexOf('{#if');
-    if (k !== -1) {
-      const seg = l.slice(k) + '\n' + (lines[i + 1] ?? '');
-      const m = LIVE_REGION.exec(seg);
-      if (m && !(m[0] === 'role="alert"' && /\btone=/.test(seg))) out.push({ index: at + k, detail: `{#if …} + ${m[0]}` });
+    for (const m0 of lines[i].matchAll(BRANCH_OPENER)) {
+      const k = m0.index;
+      // The opener's own line plus the next two lines that mount something
+      // (blank / comment / {@const} lines are skipped, at most four of them),
+      // cut at the branch's end (`{/if}` or the next `{:else…}`). `pieces`
+      // keeps each part's offset in `markup` so a region is counted once.
+      const pieces = [{ text: lines[i].slice(k), at: starts[i] + k }];
+      for (let j = i + 1, taken = 0, skipped = 0; j < lines.length && taken < 2; j++) {
+        if (INERT_LINE.test(lines[j])) {
+          if (++skipped > 4) break;
+          continue;
+        }
+        pieces.push({ text: lines[j], at: starts[j] });
+        taken++;
+      }
+      // Cut at the branch's end (or a `{#snippet}`: its body mounts where it
+      // is rendered, not with this branch), then look for a region.
+      let seg = '';
+      let region = null;
+      for (let p = 0; p < pieces.length; p++) {
+        const skip = p === 0 ? 1 : 0; // the opener itself may be `{:else…}`
+        const end = pieces[p].text.slice(skip).search(/\{\/if\}|\{:else\b|\{#snippet\b/);
+        const text = end === -1 ? pieces[p].text : pieces[p].text.slice(0, end + skip);
+        const m = region ? null : LIVE_REGION.exec(text);
+        if (m) region = { kind: m[0], at: pieces[p].at + m.index };
+        seg += text + '\n';
+        if (end !== -1) break;
+      }
+      if (!region || seen.has(region.at)) continue;
+      if (region.kind === 'role="alert"' && /\btone=/.test(seg)) continue;
+      seen.add(region.at);
+      const opener = m0[0].startsWith('{#') ? '{#if …}' : m0[0].includes('if') ? '{:else if …}' : '{:else}';
+      out.push({ index: starts[i] + k, kind: region.kind, detail: `${opener} + ${region.kind}` });
     }
-    at += l.length + 1;
   }
   return out;
 }
@@ -1113,6 +1179,51 @@ function detectUnitSourceRegex(code) {
   }
   return out;
 }
+function detectAnnounceInRegion(markup) {
+  // `use:announceShown` on, or inside, an element that is itself a status
+  // region (role="status" / aria-live, opened within the 40 lines before and
+  // not yet closed): the line is spoken twice — once by the region, once by
+  // the action (accessibility-responsive-6w2-02).
+  const out = [];
+  const lineStart = (i) => markup.lastIndexOf('\n', i - 1) + 1;
+  for (const m of markup.matchAll(/\buse:announceShown\b/g)) {
+    let from = lineStart(m.index);
+    for (let n = 0; n < 40 && from > 0; n++) from = lineStart(from - 1);
+    const win = markup.slice(from, m.index);
+    for (const t of win.matchAll(/<([A-Za-z][\w-]*)\b/g)) {
+      const at = from + t.index;
+      const end = tagEnd(markup, at + t[0].length);
+      if (end === -1) continue;
+      const tag = markup.slice(at, end + 1);
+      if (!/role="status"|aria-live=(?!\{?\s*["'`]off["'`])/.test(tag)) continue;
+      let inside = m.index < end; // the action sits on the region's own tag
+      if (!inside && !tag.endsWith('/>')) {
+        const between = markup.slice(end + 1, m.index);
+        const name = t[1].replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const opens = [...between.matchAll(new RegExp(`<${name}\\b(?:[^>]*[^/])?>`, 'g'))].length;
+        const closes = [...between.matchAll(new RegExp(`</${name}\\s*>`, 'g'))].length;
+        inside = closes <= opens;
+      }
+      if (inside) {
+        out.push({ index: m.index, detail: `use:announceShown inside <${t[1]} ${/role="status"/.test(tag) ? 'role="status"' : 'aria-live'}>` });
+        break;
+      }
+    }
+  }
+  return out;
+}
+function detectGuessedDerived(code, markup) {
+  // `const x = $derived(… ?? true)` / `?? false`, then `{x ? 'word' : …}` in
+  // the markup: while the value is still loading the page states a guess as
+  // if it were known (ux-design-6w2-01) → render the state only once it is
+  // known (`x === undefined` → skeleton / “Checking…”), or drop the fallback.
+  const out = [];
+  for (const m of code.matchAll(/\b(?:const|let)\s+(\w+)\s*=\s*\$derived\(([^;\n]*?)\?\?\s*(true|false)\s*\)/g)) {
+    const word = new RegExp(`(?<![=\\w])\\{\\s*!?\\s*${m[1]}\\s*\\?\\s*['"\`]`);
+    if (word.test(markup)) out.push({ index: m.index, detail: `${m[1]} = $derived(… ?? ${m[3]}) shown as a state word` });
+  }
+  return out;
+}
 // p04-detectors:end
 for (const f of files) {
   if (!/\.(svelte|ts)$/.test(f.path)) continue;
@@ -1121,12 +1232,14 @@ for (const f of files) {
   if (f.rel !== 'src/lib/clipboard.ts') for (const d of detectClipboardNoNextStep(code)) hit('clipboard-no-next-step', f, d.index, d.detail);
   if (!f.path.endsWith('.svelte')) continue;
   const markup = code.replace(/<(script|style)\b[\s\S]*?<\/\1\s*>/gi, blank);
-  for (const d of detectInsertedLiveRegion(markup)) hit('inserted-live-region', f, d.index, d.detail);
+  for (const d of detectInsertedLiveRegion(markup)) hit(d.kind === 'role="alert"' ? 'inserted-alert' : 'inserted-live-region', f, d.index, d.detail);
   for (const d of detectBusyEmptyStatus(markup)) hit('busy-empty-status', f, d.index, d.detail);
   for (const d of detectBareLazyImport(markup)) hit('bare-lazy-import', f, d.index, d.detail);
   for (const d of detectEmptyStateError(markup)) hit('empty-state-error', f, d.index, d.detail);
   for (const d of detectIndexKeyedReorder(code)) hit('index-keyed-reorder', f, d.index, d.detail);
   for (const d of detectGuessedChecked(markup)) hit('guessed-checked', f, d.index, d.detail);
+  for (const d of detectAnnounceInRegion(markup)) hit('announce-in-region', f, d.index, d.detail);
+  for (const d of detectGuessedDerived(code, markup)) hit('guessed-derived', f, d.index, d.detail);
 }
 
 // Unit tests (ui/unit/*.test.ts, top level): source-regex reads of components.
@@ -1148,10 +1261,19 @@ for (const rule of Object.keys(RULES).sort()) {
   current[rule] = byFile;
 }
 
+if (ONLY !== null && !(ONLY in RULES)) {
+  console.error(`ui-guards: --only needs a ratchet rule name (one of: ${Object.keys(RULES).sort().join(', ')})`);
+  process.exit(2);
+}
 if (UPDATE) {
-  writeFileSync(BASELINE, JSON.stringify(current, null, 2) + '\n');
-  const total = Object.values(current).reduce((s, r) => s + Object.values(r).reduce((a, b) => a + b, 0), 0);
-  console.log(`ui-guards: baseline written (${relative(UI, BASELINE)}; ${total} recorded occurrence(s))`);
+  let written = current;
+  if (ONLY !== null) {
+    const was = existsSync(BASELINE) ? JSON.parse(readFileSync(BASELINE, 'utf8')) : {};
+    written = Object.fromEntries(Object.keys({ ...was, ...current }).sort().map((r) => [r, r === ONLY ? current[r] : (was[r] ?? {})]));
+  }
+  writeFileSync(BASELINE, JSON.stringify(written, null, 2) + '\n');
+  const total = Object.values(ONLY !== null ? { [ONLY]: current[ONLY] } : current).reduce((s, r) => s + Object.values(r).reduce((a, b) => a + b, 0), 0);
+  console.log(`ui-guards: baseline written (${relative(UI, BASELINE)}${ONLY !== null ? `, rule ${ONLY} only` : ''}; ${total} recorded occurrence(s))`);
   if (problems.length) {
     console.error(`\nui-guards: ${problems.length} HARD problem(s) (not baselinable)\n`);
     for (const p of problems) console.error('  ' + p);
