@@ -24,7 +24,15 @@
 // 3. Icon-only buttons are labelled. A <button> whose only content is
 //    <Icon …/> needs BOTH aria-label (screen readers) and title (hover
 //    tooltip) — name the action, e.g. "Delete credential", not "Delete".
-//    (Ratcheted until the tree hit zero on 2026-10-03, then promoted.)
+//    (Ratcheted until the tree hit zero on 2026-10-03, then promoted.) The
+//    detector is `detectIconButtonName` (p04 block, unit-tested); this is the
+//    `icon-button-name` check, so no separate ratchet exists for it.
+//
+// 4. lib/ never imports modules/ (`lib-imports-modules`). An import in
+//    src/lib/** that resolves into src/modules/** makes shared code depend on
+//    a feature. Move the shared piece into lib/, or bind it through a port the
+//    module registers (lib/uiCommands/homePort.ts, vaultPort.ts). (Ratcheted
+//    until the tree hit zero in quality iteration 6, then promoted.)
 //
 // RATCHETED rules — the tree predates them, so today's debt is recorded per
 // file in scripts/ui-guards-baseline.json and only an INCREASE fails (a file
@@ -213,9 +221,10 @@
 //                     lines. Its "count" is its line count: a recorded god file
 //                     may shrink, never grow, and a NEW file (or one crossing
 //                     800) fails until it is split into a sibling directory.
-//   lib-imports-modules  an import in src/lib/** that resolves into
-//                     src/modules/** — shared code must not depend on a
-//                     feature. Move the shared piece into lib/ instead.
+//   cross-module-import  an import in src/modules/<a>/** that resolves into
+//                     src/modules/<b>/** (b ≠ a) — one feature reaching into
+//                     another's internals (architecture-6w1-02). Move the
+//                     shared piece into lib/, or go through a lib port.
 //   raw-error         `e instanceof Error ? e.message : String(e)` under
 //                     src/lib/stores or src/modules — a raw exception (WebKit's
 //                     bare "Load failed") shown to a person → loadErrorText
@@ -246,6 +255,21 @@
 //   index-keyed-reorder an `{#each … , i (i)}` in a file that defines a move /
 //                     reorder function — focus stays on the slot, not the
 //                     moved row → key by a stable id.
+//   guessed-checked   `checked={… ?? true}` / `?? false` — while the value is
+//                     still loading the box shows a guess as if it were the
+//                     setting (ux-design-6w1-04) → disable the control (or
+//                     render a skeleton) until the value is known.
+//   clipboard-no-next-step  a toasts.error / toasts.warn about a copy or the
+//                     clipboard whose text has no next step (“Select … and
+//                     copy it manually”, or another route: “Use …” / “Try …”)
+//                     → copyWithToast (lib/clipboard.ts) or
+//                     COPY_FAILED_BODY (ux-design-6w1-02, content.md).
+//   unit-source-regex a ui/unit/*.test.ts reading a .svelte file's SOURCE
+//                     (`readFileSync(….svelte…)`, or a local `src('….svelte')`
+//                     helper built on readFileSync) — source regexes stand in
+//                     for behaviour (test-quality-6w1-06). Drive the component's
+//                     handlers through unit/componentFunctions.ts instead; a
+//                     structural pin may stay, but the count only goes down.
 //
 // Updating the baseline: `node scripts/ui-guards.mjs --update-baseline`
 // rewrites scripts/ui-guards-baseline.json from the current tree (sorted keys,
@@ -408,7 +432,7 @@ const RULES = {
   'body-style': 'document-level style write (body cursor/userSelect, documentElement setProperty) — use lib/dragCursor.ts or a scoped custom property',
   'clipboard-write': 'navigator.clipboard.writeText outside lib/clipboard.ts — use copyText / copyTextOrThrow (insecure-origin + unfocused-document fallback)',
   'file-loc': 'a .svelte/.ts file at or over 800 lines grew (or a new one appeared) — split it into a sibling directory with re-exports',
-  'lib-imports-modules': 'src/lib imports from src/modules — shared code must not depend on a feature; move the shared piece into lib/',
+  'cross-module-import': 'src/modules/<a> imports from src/modules/<b> — move the shared piece into lib/ (or a lib port) instead of reaching into another feature',
   'raw-error': 'raw `e instanceof Error ? e.message : String(e)` shown to a person — use loadErrorText (lib/loadError.ts)',
   'html-escape': "hand-written .replace(/&/g, '&amp;') escape chain — use escapeHtml (lib/html.ts)",
   'inserted-live-region': 'live region inserted with its text ({#if} + role="status" / aria-live / untoned role="alert") — announce() at the state edge (lib/announce.svelte.ts)',
@@ -417,6 +441,9 @@ const RULES = {
   'empty-state-error': '<EmptyState> used as a load error (“Couldn’t …” title or Retry) without tone="error" — use LoadState (error + onretry)',
   'could-not-copy': '“Could not” / “Cannot open” / “failed to” in user copy — write “Couldn’t …” (content.md §3)',
   'index-keyed-reorder': '{#each … (i)} in a file with a move/reorder function — key the rows by a stable id so focus follows the moved row',
+  'guessed-checked': 'checked={… ?? true|false} — a loading value shown as a guessed setting; disable the control until the value is known',
+  'clipboard-no-next-step': 'copy / clipboard failure toast with no next step — use copyWithToast or COPY_FAILED_BODY (“Select the text and copy it manually.”)',
+  'unit-source-regex': 'ui/unit test reading .svelte source — drive the handlers through unit/componentFunctions.ts; source pins only go down',
 };
 
 /** Clocks, UI animation and explicitly bounded protocol/media lifecycles, not
@@ -730,22 +757,9 @@ for (const f of files) {
     .replace(/<script\b[\s\S]*?<\/script[^>]*>/gi, blank)
     .replace(/<style\b[\s\S]*?<\/style[^>]*>/gi, blank)
     .replace(/<!--[\s\S]*?-->/g, blank);
-  for (const m of markup.matchAll(/<button(?=[\s>])/g)) {
-    const end = tagEnd(markup, m.index + 7);
-    if (end === -1) continue;
-    const attrs = markup.slice(m.index + 7, end);
-    if (attrs.trimEnd().endsWith('/')) continue;
-    const close = markup.indexOf('</button>', end);
-    if (close === -1) continue;
-    const body = markup.slice(end + 1, close).trim();
-    if (!body.startsWith('<Icon') || !body.endsWith('/>') || body.split('<').length !== 2) continue;
-    if (/\{\s*\.\.\./.test(attrs)) continue; // spread props may carry the labels
-    const hasAria = /(^|\s)aria-label(ledby)?\s*=|\{aria-label\}/.test(attrs);
-    const hasTitle = /(^|\s)title\s*=|\{title\}/.test(attrs);
-    if (hasAria && hasTitle) continue;
-    const missing = [!hasAria && 'aria-label', !hasTitle && 'title'].filter(Boolean).join(' + ');
-    if (allowed(f.text, m.index)) continue;
-    problems.push(`${f.rel}:${lineOf(f.text, m.index)}  icon-only <button> missing ${missing} — add both (name the action)`);
+  for (const d of detectIconButtonName(markup)) {
+    if (allowed(f.text, d.index)) continue;
+    problems.push(`${f.rel}:${lineOf(f.text, d.index)}  icon-only <button> missing ${d.detail} — add both (name the action)`);
   }
 }
 
@@ -928,10 +942,14 @@ for (const f of files) {
     found['file-loc'][f.rel] = { count: lines, hits: [`${f.rel}: ${lines} lines (new files stay under ${NEW_FILE_MAX})`] };
   }
   const code = stripComments(f.text);
-  if (f.rel.startsWith('src/lib/')) {
+  if (f.rel.startsWith('src/lib/') || f.rel.startsWith('src/modules/')) {
     for (const m of code.matchAll(IMPORT_SPEC)) {
       const target = relative(UI, join(f.path, '..', m[2]));
-      if (target.startsWith('src/modules/')) hit('lib-imports-modules', f, m.index, m[2]);
+      if (f.rel.startsWith('src/lib/')) {
+        if (target.startsWith('src/modules/') && !allowed(f.text, m.index)) {
+          problems.push(`${f.rel}:${lineOf(f.text, m.index)}  lib/ imports modules/ (${m[2]}) — move the shared piece into lib/, or bind it through a port the module registers (lib/uiCommands/vaultPort.ts)`);
+        }
+      } else if (detectCrossModuleImport(f.rel, target)) hit('cross-module-import', f, m.index, m[2]);
     }
   }
   if (f.rel.startsWith('src/lib/stores/') || f.rel.startsWith('src/modules/')) {
@@ -1022,11 +1040,85 @@ function detectIndexKeyedReorder(code) {
   for (const m of code.matchAll(/\{#each\b[^}]*?,\s*(\w+)\s*\(\s*\1\s*\)\s*\}/g)) out.push({ index: m.index, detail: m[0].slice(0, 60) });
   return out;
 }
+function detectIconButtonName(markup) {
+  // A <button> whose only content is one <Icon …/> needs BOTH aria-label
+  // (screen readers) and title (hover tooltip). Hard rule 3.
+  const out = [];
+  for (const m of markup.matchAll(/<button(?=[\s>])/g)) {
+    const end = tagEnd(markup, m.index + 7);
+    if (end === -1) continue;
+    const attrs = markup.slice(m.index + 7, end);
+    if (attrs.trimEnd().endsWith('/')) continue;
+    const close = markup.indexOf('</button>', end);
+    if (close === -1) continue;
+    const body = markup.slice(end + 1, close).trim();
+    if (!body.startsWith('<Icon') || !body.endsWith('/>') || body.split('<').length !== 2) continue;
+    if (/\{\s*\.\.\./.test(attrs)) continue; // spread props may carry the labels
+    const hasAria = /(^|\s)aria-label(ledby)?\s*=|\{aria-label\}/.test(attrs);
+    const hasTitle = /(^|\s)title\s*=|\{title\}/.test(attrs);
+    if (hasAria && hasTitle) continue;
+    out.push({ index: m.index, detail: [!hasAria && 'aria-label', !hasTitle && 'title'].filter(Boolean).join(' + ') });
+  }
+  return out;
+}
+/** `rel` (src/modules/<a>/…) importing `target` (a src/-relative path) in another module. */
+function detectCrossModuleImport(rel, target) {
+  const from = /^src\/modules\/([^/]+)\//.exec(rel);
+  const to = /^src\/modules\/([^/]+)\//.exec(target);
+  return !!from && !!to && from[1] !== to[1];
+}
+function detectGuessedChecked(markup) {
+  const out = [];
+  for (const m of markup.matchAll(/\bchecked=\{[^{}]*\?\?\s*(?:true|false)\s*\}/g)) out.push({ index: m.index, detail: m[0] });
+  return out;
+}
+/** Index just past the `)` closing the call whose `(` is at `open`, or -1. */
+function callEnd(code, open) {
+  let depth = 0;
+  let q = '';
+  for (let i = open; i < code.length; i++) {
+    const c = code[i];
+    if (q) {
+      if (c === '\\') i++;
+      else if (c === q) q = '';
+    } else if (c === '"' || c === "'" || c === '`') q = c;
+    else if (c === '(') depth++;
+    else if (c === ')' && --depth === 0) return i + 1;
+  }
+  return -1;
+}
+function detectClipboardNoNextStep(code) {
+  const out = [];
+  for (const m of code.matchAll(/\btoasts\.(?:error|warn)\s*\(/g)) {
+    const end = callEnd(code, m.index + m[0].length - 1);
+    const call = code.slice(m.index, end === -1 ? undefined : end);
+    if (!/Couldn[’']t copy|\bcopy (?:failed|blocked)|\bclipboard\b/i.test(call)) continue;
+    // A next step: copy by hand, or another route (“Use Download…”, “Try ⌘C again”).
+    if (/manually|\bSelect\b|COPY_FAILED_BODY|\b(?:Try|Use)\b/.test(call)) continue;
+    out.push({ index: m.index, detail: call.replace(/\s+/g, ' ').slice(0, 80) });
+  }
+  return out;
+}
+function detectUnitSourceRegex(code) {
+  // Direct reads of a component's source, plus calls to a local helper that
+  // wraps readFileSync (`const src = (p) => readFileSync(…${p}…)`).
+  const out = [];
+  for (const m of code.matchAll(/\breadFileSync\s*\(/g)) {
+    const end = callEnd(code, m.index + m[0].length - 1);
+    if (/\.svelte(?![.\w])/.test(code.slice(m.index, end === -1 ? undefined : end))) out.push({ index: m.index, detail: 'readFileSync(….svelte)' });
+  }
+  const helpers = [...code.matchAll(/\b(?:const|let)\s+(\w+)\s*=\s*(?:\([^()]*\)|\w+)\s*(?::[^=]*)?=>\s*readFileSync\(|\bfunction\s+(\w+)\s*\([^()]*\)[^{]*\{\s*return\s+readFileSync\(/g)].map((h) => h[1] ?? h[2]);
+  for (const name of helpers) {
+    for (const m of code.matchAll(new RegExp(`\\b${name}\\(\\s*['"\`][^'"\`]*\\.svelte['"\`]`, 'g'))) out.push({ index: m.index, detail: `${name}('….svelte')` });
+  }
+  return out;
+}
 // p04-detectors:end
 for (const f of files) {
   if (!/\.(svelte|ts)$/.test(f.path)) continue;
   const code = stripComments(f.text);
   for (const d of detectCouldNotCopy(code)) hit('could-not-copy', f, d.index, d.detail);
+  if (f.rel !== 'src/lib/clipboard.ts') for (const d of detectClipboardNoNextStep(code)) hit('clipboard-no-next-step', f, d.index, d.detail);
   if (!f.path.endsWith('.svelte')) continue;
   const markup = code.replace(/<(script|style)\b[\s\S]*?<\/\1\s*>/gi, blank);
   for (const d of detectInsertedLiveRegion(markup)) hit('inserted-live-region', f, d.index, d.detail);
@@ -1034,6 +1126,18 @@ for (const f of files) {
   for (const d of detectBareLazyImport(markup)) hit('bare-lazy-import', f, d.index, d.detail);
   for (const d of detectEmptyStateError(markup)) hit('empty-state-error', f, d.index, d.detail);
   for (const d of detectIndexKeyedReorder(code)) hit('index-keyed-reorder', f, d.index, d.detail);
+  for (const d of detectGuessedChecked(markup)) hit('guessed-checked', f, d.index, d.detail);
+}
+
+// Unit tests (ui/unit/*.test.ts, top level): source-regex reads of components.
+const UNIT = join(UI, 'unit');
+if (existsSync(UNIT)) {
+  for (const name of readdirSync(UNIT).sort()) {
+    if (!/\.test\.ts$/.test(name)) continue;
+    const p = join(UNIT, name);
+    const f = { path: p, rel: relative(UI, p), text: readFileSync(p, 'utf8') };
+    for (const d of detectUnitSourceRegex(stripComments(f.text))) hit('unit-source-regex', f, d.index, d.detail);
+  }
 }
 
 // ---------- baseline compare / update ----------
