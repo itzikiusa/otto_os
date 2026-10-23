@@ -11,7 +11,7 @@ function fixture(overrides: Record<string, any> = {}) {
   const body = file.statements.filter(ts.isFunctionDeclaration).map((n) => n.getText(file)).join('\n');
   const edits: any[][] = [];
   const active = { id: 'A', buffer: '{"a":1}' };
-  const c: Record<string, any> = { active, doc: { id: 'A' }, wsId: 'workspace-A', lang: 'json', isImage: false, formatting: false, issue: null,
+  const c: Record<string, any> = { active, doc: { id: 'A' }, wsId: 'workspace-A', lang: 'json', sniffText: '', isImage: false, formatting: false, issue: null,
     issueFromFormat: false, cursor: 0, canFormat: () => true, formatContent: async () => ({}),
     workbench: { setBuffer: (...args: any[]) => edits.push(args), reload: (...args: any[]) => edits.push(args), create: (...args: any[]) => edits.push(args) },
     confirmer: { ask: async () => true }, toasts: { info() {}, error() {} }, loadErrorText: String,

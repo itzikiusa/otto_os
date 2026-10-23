@@ -256,9 +256,6 @@ pub(in crate::workflow_engine) async fn execute(
         .get("require_pass")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    // The mode line is the step's first log line: it is sent before the
-    // target resolution that can fail the step, so an errored run still
-    // shows which mode it would have reviewed in.
     let mode = review_mode(&call).await;
     let (targets, logs_pre) = resolve_targets(
         call.ctx,
@@ -318,29 +315,20 @@ pub(in crate::workflow_engine) async fn execute(
     Ok((Value::Object(out), logs))
 }
 
-/// R2: which execution mode the reviewers run in, sent to the step's live
-/// log. The RUN's own input wins over the node's param (that is what makes
-/// the run dialog an override); a node param wins over the repo's stored
-/// config. Read from `env.run_input`, never the node input — node inputs
-/// lose run-level keys hop by hop (`assemble_input`).
+/// R2: the reviewers' mode, logged BEFORE target resolution (which can fail).
+/// Run input > node param > repo config, from `env.run_input`.
 async fn review_mode(call: &NodeCall<'_>) -> otto_core::domain::ReviewMode {
     let p = &call.node.params;
     let (mode, mode_src) = match resolve_review_mode_source(&call.env.run_input, p) {
         Some(r) => r,
         None => {
-            // `otto_core::Id` is a plain `String` alias.
-            let rid: Option<Id> = p
-                .get("repo_id")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string);
+            let rid = p.get("repo_id").and_then(Value::as_str).map(str::trim);
+            let rid: Option<Id> = rid.filter(|s| !s.is_empty()).map(str::to_string);
             crate::modules::effective_review_mode(call.ctx, rid.as_ref()).await
         }
     };
-    let _ = call
-        .log_tx
-        .send(format!("review_run: mode {} ({mode_src})", mode.as_str()));
+    let line = format!("review_run: mode {} ({mode_src})", mode.as_str());
+    let _ = call.log_tx.send(line);
     mode
 }
 
