@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announceShown } from '../../lib/announce.svelte';
   // The stage of the artifact view (and each side of Compare): renders one
   // version of a design by format with the EXISTING viewers/editors —
   // DeviceFrame + a sandboxed iframe for HTML, the Canvas Mermaid/D2 renderers,
@@ -266,7 +267,7 @@
       </div>
     {:else if shown.kind === 'mermaid' || shown.kind === 'd2'}
       {#if diagramError}
-        <div class="msg err" role="status"><Icon name="warning" size={14} /> {diagramError}</div>
+        <div class="msg err" use:announceShown={{ text: diagramError, assertive: true }}><Icon name="warning" size={14} /> {diagramError}</div>
       {/if}
       {#if diagramSvg}
         <iframe class="doc" title={artifact.title} sandbox="" srcdoc={svgDoc(diagramSvg)}></iframe>

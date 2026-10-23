@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announceShown } from '../../lib/announce.svelte';
   // One file's history, opened from a diff header's ⋯ menu (via `gitBridge`).
   // `follow=true` walks THROUGH renames — a history that stops at the rename is
   // the reason the flag exists. Clicking a commit selects it in the graph.
@@ -120,7 +121,7 @@
           <button class="btn small" disabled={moreBusy} onclick={() => void loadMore()}>
             {moreBusy ? 'Loading older commits…' : 'Load more'}
           </button>
-          {#if moreError}<span class="fh-more-err" role="alert">Couldn’t load more: {moreError}</span>{/if}
+          {#if moreError}<span class="fh-more-err" use:announceShown={{ text: `Couldn’t load more: ${moreError}`, assertive: true }}>Couldn’t load more: {moreError}</span>{/if}
         </div>
       {/if}
     {/if}

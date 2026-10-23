@@ -32,7 +32,7 @@ test('scheduled task deep link and save retry preserve newer edits and the leave
   const prompt = page.getByRole('textbox', {name: 'Prompt (the agent’s instructions)', exact: true});
   await name.fill('Submitted scheduled name'); await prompt.fill('Submitted scheduled prompt');
   await page.getByRole('button', {name: 'Save changes', exact: true}).click();
-  await expect(page.locator('.sched [role="alert"]')).toContainText('Synthetic save failure');
+  await expect(page.locator('.sched .err')).toContainText('Synthetic save failure');
   await expect(prompt).toHaveValue('Submitted scheduled prompt');
   await page.getByRole('button', {name: 'Save changes', exact: true}).click();
   await expect.poll(() => writes.length).toBe(2);

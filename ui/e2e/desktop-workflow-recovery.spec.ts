@@ -24,7 +24,7 @@ test('workflow preflight identifies a broken step and cron editing preserves dis
     // Validate + Triggers live in the editor header's ⋯ menu.
     await page.locator('[data-testid="page-header"]').getByRole('button', { name: 'More actions' }).click();
     await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Validate', exact: true }).click();
-    await expect(page.locator('.preflight[role="alert"]')).toContainText('url');
+    await expect(page.locator('.preflight')).toContainText('url');
     await page.locator('[data-testid="page-header"]').getByRole('button', { name: 'More actions' }).click();
     await page.locator('.ctx-menu').getByRole('menuitemcheckbox', { name: 'Triggers', exact: true }).click();
     await page.getByTitle('Edit trigger', { exact: true }).click();

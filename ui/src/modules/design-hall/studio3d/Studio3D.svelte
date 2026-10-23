@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announceShown } from '../../../lib/announce.svelte';
   import { rowMenu } from '../../../lib/rowMenu';
   // 3D Studio 1.5 — the Design Hall layout for a `scene3d` artifact (mockup S4):
   //
@@ -17,16 +18,15 @@
   // Keychain key; nothing is sent anywhere without an explicit click.
   import Tabs, { type TabItem } from '../../../lib/components/Tabs.svelte';
   import { toastError } from '../../../lib/toastError';
-  import type { Snippet } from 'svelte';
-  import { untrack } from 'svelte';
+  import { copyWithToast } from '../../../lib/clipboard';
+  import { untrack, type Snippet } from 'svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import Modal from '../../../lib/components/Modal.svelte';
   import { ctxMenu, type MenuItem } from '../../../lib/contextmenu.svelte';
   import { confirmer } from '../../../lib/confirm.svelte';
   import { toasts } from '../../../lib/toast.svelte';
   import { registry } from '../../../lib/commands.svelte';
-  import { api } from '../../../lib/api/client';
-  import { ApiError } from '../../../lib/api/client';
+  import { api, ApiError } from '../../../lib/api/client';
   import { downloadText } from '../../../lib/components/exporters';
   import * as dapi from '../../../lib/api/design';
   import { listTurns, startAssist as startTurn } from '../assist/api';
@@ -436,7 +436,7 @@
       {
         label: 'Copy embed reference',
         icon: 'link',
-        action: () => void navigator.clipboard?.writeText(`otto://design/${artifact.id}@approved#view:${id}`).then(() => toasts.success('Copied', `#view:${id}`)),
+        action: () => void copyWithToast(`otto://design/${artifact.id}@approved#view:${id}`, 'embed reference'),
       },
       { separator: true },
       {
@@ -530,7 +530,7 @@
 </script>
 
 {#if !doc}
-  <div class="bad" role="alert">
+  <div class="bad">
     <Icon name="warning" size={16} />
     <div>
       <strong>This isn’t a valid 3D scene document.</strong>
@@ -626,7 +626,7 @@
         </button>
         <span class="grow"></span>
         {#if agent}
-          <span class="agent" role="status" data-testid="s3d-agent"><span class="pulse" aria-hidden="true"></span> Otto · {agent.label}…</span>
+          <span class="agent" use:announceShown={`Otto · ${agent.label}…`} data-testid="s3d-agent"><span class="pulse" aria-hidden="true"></span> Otto · {agent.label}…</span>
         {:else if agentDraft && head}
           <span class="draft-banner" role="status" data-testid="s3d-draft">
             <Icon name="sparkle" size={12} /> Showing <strong>v{head.seq} draft</strong> by Otto · not approved

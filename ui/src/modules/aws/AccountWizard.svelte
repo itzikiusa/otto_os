@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announce } from '../../lib/announce.svelte';
   // Add / edit account wizard (2 steps). Step 1 picks the credential source:
   // an existing `~/.aws` profile (from `/aws/discover`, with SSO / role hints)
   // or typed access keys (+ optional session token / role ARN) and the region.
@@ -184,6 +185,9 @@
     if (saved) toasts.success(editing ? 'Account updated' : 'Account added', saved.name);
     onclose();
   }
+  // Spoken at the state edge through the shell's always-mounted announcer: a
+  // live region inserted together with its text is not read (WebKit/VoiceOver).
+  $effect(() => { if (error) announce(error, { assertive: true }); });
 </script>
 
 <Modal title={editing ? `Edit ${init?.name ?? 'account'}` : 'Add AWS account'} width={620} {onclose}>
@@ -384,7 +388,7 @@
       </div>
     {/if}
 
-    {#if error}<p class="err" role="alert">{error}</p>{/if}
+    {#if error}<p class="err">{error}</p>{/if}
   </div>
 
   {#snippet footer()}

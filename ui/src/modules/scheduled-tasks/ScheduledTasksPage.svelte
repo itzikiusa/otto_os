@@ -29,7 +29,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import { toastError } from '../../lib/toastError';
   import { events } from '../../lib/events.svelte';
-  import { announce, focusAppContent } from '../../lib/announce.svelte';
+  import { announce, focusAppContent, announceShown } from '../../lib/announce.svelte';
   import { fireLabel, previewSpeech } from './firePreview';
   import type { ScheduledTask, ScheduledTaskRun } from '../../lib/api/types';
   import { allProviders, defaultAgentProvider } from '../../lib/providers';
@@ -924,7 +924,7 @@
       {@render addWorkspace(false)}
     {/if}
     <form class="form" onsubmit={(e) => { e.preventDefault(); void save(); }}>
-      {#if error}<div class="err" role="alert"><Icon name="warning" size={12} /> {error}</div>{/if}
+      {#if error}<div class="err" use:announceShown={{ text: error, assertive: true }}><Icon name="warning" size={12} /> {error}</div>{/if}
 
       {#if !editId && presets.length}
         <label class="field">
@@ -941,7 +941,7 @@
         <input id="sched-name" dir="auto" class="input" bind:value={fName} placeholder="Nightly ticket review"
           aria-invalid={fieldError?.id === 'sched-name'}
           aria-describedby={fieldError?.id === 'sched-name' ? 'sched-name-err' : undefined} />
-        {#if fieldError?.id === 'sched-name'}<small id="sched-name-err" class="field-hint bad" role="alert">{fieldError.message}</small>{/if}
+        {#if fieldError?.id === 'sched-name'}<small id="sched-name-err" class="field-hint bad" use:announceShown={{ text: fieldError.message, assertive: true }}>{fieldError.message}</small>{/if}
       </label>
 
       <div class="frow">
@@ -976,7 +976,7 @@
                 <option value={fWorkflowId}>Unknown workflow ({fWorkflowId.slice(0, 8)}…)</option>
               {/if}
             </select>
-            {#if fieldError?.id === 'sched-workflow'}<small id="sched-workflow-err" class="field-hint bad" role="alert">{fieldError.message}</small>{/if}
+            {#if fieldError?.id === 'sched-workflow'}<small id="sched-workflow-err" class="field-hint bad" use:announceShown={{ text: fieldError.message, assertive: true }}>{fieldError.message}</small>{/if}
             {#if wfError}
               <small class="field-hint bad">Couldn’t load workflows. {wfError}
                 <button type="button" class="btn small ghost" onclick={loadWorkflowOptions}>Retry</button></small>
@@ -1034,7 +1034,7 @@
             <input id="sched-every" class="input" type="number" bind:value={fEveryMin} onblur={onIntervalBlur} oninput={onIntervalInput}
               aria-invalid={!!intervalError}
               aria-describedby={intervalError ? 'sched-every-err' : undefined} />
-            {#if intervalError}<small id="sched-every-err" class="field-hint bad" role="alert">{intervalError}</small>{/if}
+            {#if intervalError}<small id="sched-every-err" class="field-hint bad" use:announceShown={{ text: intervalError, assertive: true }}>{intervalError}</small>{/if}
           </label>
         {:else if fCadence === 'once'}
           <label class="field">
@@ -1042,7 +1042,7 @@
             <input id="sched-run-at" class="input" type="datetime-local" bind:value={fRunAt}
               aria-invalid={!fRunAt}
               aria-describedby={fieldError?.id === 'sched-run-at' ? 'sched-run-at-err' : undefined} />
-            {#if fieldError?.id === 'sched-run-at'}<small id="sched-run-at-err" class="field-hint bad" role="alert">{fieldError.message}</small>{/if}
+            {#if fieldError?.id === 'sched-run-at'}<small id="sched-run-at-err" class="field-hint bad" use:announceShown={{ text: fieldError.message, assertive: true }}>{fieldError.message}</small>{/if}
           </label>
         {:else if fCadence === 'cron'}
           <label class="field">
@@ -1134,7 +1134,7 @@
             <input id="sched-email" dir="ltr" class="input" type="email" bind:value={fEmailTo} placeholder="you@example.com"
               aria-invalid={fieldError?.id === 'sched-email'}
               aria-describedby={fieldError?.id === 'sched-email' ? 'sched-email-err' : undefined} />
-            {#if fieldError?.id === 'sched-email'}<small id="sched-email-err" class="field-hint bad" role="alert">{fieldError.message}</small>{/if}
+            {#if fieldError?.id === 'sched-email'}<small id="sched-email-err" class="field-hint bad" use:announceShown={{ text: fieldError.message, assertive: true }}>{fieldError.message}</small>{/if}
           </label>
         {:else if fDestType === 'webhook'}
           <label class="field">
@@ -1142,7 +1142,7 @@
             <input id="sched-webhook" dir="ltr" class="input" type="url" bind:value={fUrl} placeholder="https://…"
               aria-invalid={fieldError?.id === 'sched-webhook'}
               aria-describedby={fieldError?.id === 'sched-webhook' ? 'sched-webhook-err' : undefined} />
-            {#if fieldError?.id === 'sched-webhook'}<small id="sched-webhook-err" class="field-hint bad" role="alert">{fieldError.message}</small>{/if}
+            {#if fieldError?.id === 'sched-webhook'}<small id="sched-webhook-err" class="field-hint bad" use:announceShown={{ text: fieldError.message, assertive: true }}>{fieldError.message}</small>{/if}
           </label>
         {/if}
       </div>

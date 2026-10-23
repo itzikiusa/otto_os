@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announce } from '../../lib/announce.svelte';
   import { rowMenu } from '../../lib/rowMenu';
   import { sentenceCase } from '../../lib/labels';
   import Badge from '../../lib/components/Badge.svelte';
@@ -138,6 +139,10 @@
   }
 
   const loginNeeded = $derived(isLoginRequired(new Error(error)));
+  // Spoken at the state edge through the shell's always-mounted announcer: a
+  // live region inserted together with its text is not read (WebKit/VoiceOver).
+  const detailError = $derived(detail?.error ?? '');
+  $effect(() => { if (detailError) announce(`Couldn’t load the node groups. ${awsErrorText(detailError)}`, { assertive: true }); });
 </script>
 
 <ViewToolbar
@@ -203,7 +208,7 @@
       </div>
       <h3>Node groups</h3>
       {#if d.error}
-        <p class="err" role="alert">{awsErrorText(d.error)}</p>
+        <p class="err">{awsErrorText(d.error)}</p>
       {:else if !d.d}
         <Skeleton rows={3} />
       {:else if d.d.nodegroups.length === 0}

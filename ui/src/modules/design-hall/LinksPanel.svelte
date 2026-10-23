@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announceShown } from '../../lib/announce.svelte';
   import { radioKey } from '../../lib/radioKey';
   // Right panel → Links: what this design USES (outgoing) and where it is USED
   // IN (incoming), each row with its relation, version policy and Open. Links a
@@ -323,7 +324,7 @@
           <span class="hint">Stored as a reference; nothing is fetched.</span>
         </div>
       {/if}
-      {#if addError}<p class="err-msg" role="alert">{addError}</p>{/if}
+      {#if addError}<p class="err-msg" use:announceShown={{ text: addError, assertive: true }}>{addError}</p>{/if}
     </div>
     {#snippet footer()}
       <button class="btn" onclick={() => (adding = false)}>Cancel</button>

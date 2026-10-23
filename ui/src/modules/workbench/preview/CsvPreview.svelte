@@ -28,7 +28,7 @@
 {:else}
   <div class="tbl-wrap">
     {#if view.v.total > view.v.rows.length}
-      <p class="note" role="status">
+      <p class="note">
         Showing the first {CSV_ROW_CAP.toLocaleString()} of {view.v.total.toLocaleString()} rows.
       </p>
     {/if}

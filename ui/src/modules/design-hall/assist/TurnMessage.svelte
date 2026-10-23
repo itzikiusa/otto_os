@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announceShown } from '../../../lib/announce.svelte';
   // One exchange in the Otto thread: what the person asked (when this device
   // remembers it, else the committed version's prompt summary) and Otto's
   // answer — attributed (provider mark, "Otto", AGENT label, time), its live
@@ -133,7 +134,7 @@
     {/if}
 
     {#if turn.status === 'conflict' && turn.version_id}
-      <div class="conflict" role="status" data-testid="design-assist-conflict">
+      <div class="conflict" use:announceShown={'Someone saved a newer version while Otto worked, so Otto’s result was kept as a separate draft.'} data-testid="design-assist-conflict">
         <p><Icon name="warning" size={12} /> Someone saved {headSeq != null ? `v${headSeq}` : 'a newer version'} while Otto worked, so Otto’s result
           was kept as a separate draft. The current version is untouched.</p>
         {#if keptCurrent}

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announceShown } from '../../lib/announce.svelte';
   import { toastError } from '../../lib/toastError';
   import { onTabKey } from './tabKeys';
   // Design Hall lobby (Grid view): the prompt hero, all seven studios, the
@@ -301,9 +302,9 @@
             <button class="btn small ghost" onclick={() => (q = '')}>Clear search</button>
           </div>
           {#if searchError}
-            <div class="inline-err" role="alert">
+            <div class="inline-err" use:announceShown={{ text: 'Couldn’t search. Check the connection and try again.', assertive: true }}>
               <Icon name="warning" size={14} />
-              <span title={searchError}>Search failed. Check the connection and try again.</span>
+              <span title={searchError}>Couldn’t search. Check the connection and try again.</span>
               <button class="btn small" onclick={() => void runSearch(q.trim())}>Retry</button>
             </div>
           {:else if !searching && results.length === 0}
@@ -458,9 +459,7 @@
             <p class="dim">No projects match this filter. <button class="linkbtn" onclick={() => (pfilter = 'all')}>Show all</button></p>
           {:else}
             {#if library.truncated}
-              <p class="dim" role="status" data-testid="lobby-truncated">
-                Counts and filters cover the newest {LIBRARY_LIMIT} designs; older ones are still in search.
-              </p>
+              <p class="dim" data-testid="lobby-truncated">Counts and filters cover the newest {LIBRARY_LIMIT} designs; older ones are still in search.</p>
             {/if}
             <div class="projects">
               {#each projects as p, i (p.id)}

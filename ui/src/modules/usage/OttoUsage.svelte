@@ -168,7 +168,7 @@
   </LoadState>
   {#if error}<div class="notice">{error} <button class="btn small" onclick={() => error = ''}>Dismiss error</button></div>{/if}
   {#if status}
-    <div class="status" role="status">
+    <div class="status">
       <span class="chip">{!status.enabled ? 'Collection off' : status.collector_ready ? 'Collecting locally' : 'Collector starting or unavailable'}</span>
       <span>{fmt(status.exported)} collector accepted · {fmt(status.queued)} queued · {fmt(status.dropped)} discarded or unacknowledged</span>
       <button class="btn small" onclick={() => void load()} disabled={loading || busy}>Refresh</button>

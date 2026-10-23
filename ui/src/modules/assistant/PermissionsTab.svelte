@@ -6,7 +6,7 @@
   // controls that do nothing.
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import Badge from '../../lib/components/Badge.svelte';
-  import type { Tone } from './model';
+  import type { Tone } from '../../lib/assistant/model';
 
   const TODAY: { icon: IconName; resource: string; mode: string; tone: Tone; note: string }[] = [
     { icon: 'send', resource: 'Send, post, publish or submit', mode: 'Ask', tone: 'warn', note: 'An approval card shows where it goes, what is sent and who sees it' },

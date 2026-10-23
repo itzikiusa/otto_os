@@ -397,7 +397,7 @@
       {:else if view === 'list'}
         <WorkItemList {items} needsApproval={needsApprovalIds} {selectedId} onOpen={select} />
         {#if items.length >= ITEM_LIMIT}
-          <p class="mc-cap" role="status">Showing the newest {ITEM_LIMIT}{summary && summary.total > ITEM_LIMIT ? ` of ${summary.total}` : ''} items — filter to narrow the list.</p>
+          <p class="mc-cap">Showing the newest {ITEM_LIMIT}{summary && summary.total > ITEM_LIMIT ? ` of ${summary.total}` : ''} items — filter to narrow the list.</p>
         {/if}
       {:else if loading && graph.nodes.length === 0}
         <Skeleton rows={6} height={40} label="the work graph" />

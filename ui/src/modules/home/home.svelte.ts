@@ -6,9 +6,10 @@
 // through the daemon. WHICH space is active lives in the shared spaces store
 // (lib/stores/spaces.svelte.ts) so the floating bar's 01–04 and Home agree.
 
-import { HOME_KINDS, isHomeKind, kindDef, type HomeBoxKind } from './kinds';
+import { HOME_KINDS, isHomeKind, kindDef, type HomeBoxKind } from '../../lib/home/kinds';
 import type { Feature } from '../../lib/api/types';
 import { spaces } from '../../lib/stores/spaces.svelte';
+import { registerHomePort } from '../../lib/uiCommands/homePort';
 
 export const MAX_VIEWS = 4;
 export const MAX_BOXES = 8;
@@ -107,6 +108,8 @@ function loadViews(): HomeView[] {
 }
 
 class HomeStore {
+  /** Boxes one view can hold (the agent handlers read it via the port). */
+  readonly maxBoxes = MAX_BOXES;
   views: HomeView[] = $state(loadViews());
   /** The active view = the active space (shared with the floating bar),
    *  clamped to the views that exist. Writes go through the spaces store. */
@@ -305,3 +308,6 @@ class HomeStore {
 }
 
 export const home = new HomeStore();
+// The `otto.ui_home_*` handlers (lib/uiCommands/home.ts) reach the store
+// through this port — lib/ never imports modules/.
+registerHomePort(home);

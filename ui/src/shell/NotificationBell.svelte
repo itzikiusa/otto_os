@@ -22,8 +22,7 @@
   import { ui } from '../lib/stores/ui.svelte';
   import { ctxMenu } from '../lib/contextmenu.svelte';
   import { confirmer } from '../lib/confirm.svelte';
-  import { copyText } from '../lib/clipboard';
-  import { toasts } from '../lib/toast.svelte';
+  import { copyWithToast } from '../lib/clipboard';
   import type { Notice } from '../lib/api/types';
   import { rel } from '../lib/stores/now.svelte';
 
@@ -248,8 +247,7 @@
   }
 
   async function copyDetail(n: Notice): Promise<void> {
-    if (await copyText(n.body)) toasts.success('Copied to clipboard');
-    else toasts.warn('Copy failed', 'The clipboard is not available here.');
+    await copyWithToast(n.body, 'the notification');
   }
 
   function openMore(e: MouseEvent): void {

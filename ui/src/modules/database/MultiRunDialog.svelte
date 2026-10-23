@@ -379,13 +379,13 @@
     stage === 'results' ? 'Multi-run' : stage === 'confirm' ? 'Confirm production writes' : 'Run on multiple targets',
   );
   const scriptLines = $derived(statement.split('\n').length);
-  // Spoken at the state edge through the shell's always-mounted announcer: a
-  // live region inserted together with its text is not read (WebKit/VoiceOver).
   $effect(() => { if (notice) announce(notice); });
   $effect(() => { if (planStale) announce('Cluster choice changed — update the preview to see the final statements.'); });
   $effect(() => { if (planError) announce(planError, { assertive: true }); });
   $effect(() => { if (startError) announce(startError, { assertive: true }); });
   $effect(() => { if (detailError) announce(detailError, { assertive: true }); });
+  const confirming = $derived(stage === 'confirm' && !!plan);
+  $effect(() => { if (confirming && guardedRuns.length) announce(`${plural(guardedRuns.length, 'run')} will write or change the schema on production or read-only targets. Check every target and statement.`, { assertive: true }); });
 </script>
 
 <Modal {title} width={920} onclose={close}>
@@ -638,7 +638,7 @@
       </section>
       {#if startError}<div class="mr-error"><Icon name="warning" size={13} /><span>{startError}</span></div>{/if}
     {:else if stage === 'confirm' && plan}
-      <div class="mr-danger" role="alert">
+      <div class="mr-danger">
         <Icon name="warning" size={14} />
         <span>
           {plural(guardedRuns.length, 'run')} will WRITE / change the schema on production or

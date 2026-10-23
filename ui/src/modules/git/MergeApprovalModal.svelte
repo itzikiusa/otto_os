@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announceShown } from '../../lib/announce.svelte';
   import { plural } from '../../lib/plural';
   // Explicit merge approval. Opened by dropping one local branch onto another in
   // the graph's refs panel — NOTHING merges until the user clicks Merge here.
@@ -209,7 +210,7 @@
     {/if}
 
     {#if error}
-      <div class="err" role="alert">
+      <div class="err" use:announceShown={{ text: error, assertive: true }}>
         <Icon name="warning" size={14} />
         <span>
           {error}

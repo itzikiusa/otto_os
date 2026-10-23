@@ -37,6 +37,7 @@
   // (autosave + wikilink completion) or the sanitized reading view (wikilink
   // nav, note embeds hydrated one level deep, image attachments, tag chips).
   import { untrack } from 'svelte';
+  import { announceShown } from '../../lib/announce.svelte';
   import type { Completion, CompletionContext, CompletionResult } from '@codemirror/autocomplete';
   import CodeEditor from '../../lib/components/CodeEditor.svelte';
   import Icon from '../../lib/components/Icon.svelte';
@@ -410,7 +411,7 @@
         <!-- Save state sits BEFORE the tools, so it appearing/disappearing
              never shifts the buttons under the pointer. -->
         {#if vault.saving}
-          <span class="save-state" role="status">Saving…</span>
+          <span class="save-state" use:announceShown={'Saving…'}>Saving…</span>
         {:else if vault.dirty}
           <span class="save-state" title="Autosaves in a moment">Unsaved</span>
         {/if}
@@ -488,7 +489,7 @@
           <StructuredNote model={structured} note={vault.note} />
         {/if}
         {#if renderTimedOut !== null && renderTimedOut === renderKey}
-          <div class="render-timeout" role="status">
+          <div class="render-timeout" use:announceShown={'Rendering this note timed out; showing plain text.'}>
             <span>Rendering this note timed out · showing plain text.</span>
             <button type="button" class="btn sm" onclick={retryRender}>Render again</button>
           </div>

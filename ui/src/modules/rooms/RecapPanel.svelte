@@ -19,7 +19,8 @@
   $effect(() => { if (summaryRunning) announce('Codex is preparing a draft…'); });
   $effect(() => { if (summaryError) announce(summaryError, {assertive: true}); });
   $effect(() => { if (actionError) announce(actionError, {assertive: true}); });
-  $effect(() => { if (detail && error) announce(error, {assertive: true}); });
+  // A failed refresh over a loaded recap is LoadState's stale bar ("Couldn’t
+  // refresh this recap — …" + Retry), which announces itself (ux-design-6w1-01).
   let tab = $state<'transcript' | 'activity' | 'summary'>('transcript'), after = $state(0), previous = $state<number[]>([]);
   let live = true, request = 0, loadingBody = false;
   let revision: RecapRevision | null = null, loadedAfter: number | null = null;
@@ -88,7 +89,7 @@
       if (seq === request) { loading = false; loadingBody = false; }
     }
   }
-  async function generate() { if (!await confirmer.ask('Send captured text and representative shared-screen images to Codex using your ChatGPT subscription to create a draft. This uses your subscription allowance. Not every saved image is included; the draft reports coverage. The local archive remains available if generation fails.', {title: 'Generate recap summary?', confirmLabel: 'Generate summary'})) return; busy = true; actionError = ''; try { await recapRequest(`/room-recaps/${recapId}/summary`, {}); tab = 'summary'; await load(false); } catch (e) { actionError = e instanceof Error ? e.message : 'Summary generation couldn’t start.'; } finally { busy = false; } }
+  async function generate() { if (!await confirmer.ask('Send captured text and representative shared-screen images to Codex using your ChatGPT subscription to create a draft. This uses your subscription allowance. Not every saved image is included; the draft reports coverage. The local archive remains available if generation fails.', {title: 'Generate recap summary?', confirmLabel: 'Generate summary'})) return; busy = true; actionError = ''; try { await recapRequest(`/room-recaps/${recapId}/summary`, {}); tab = 'summary'; await load(false); } catch (e) { actionError = `Couldn’t start the summary. ${loadErrorText(e)}`; } finally { busy = false; } }
   async function cancel() { cancelling = true; try { await recapRequest(`/room-recaps/${recapId}/summary`, undefined, undefined, 'DELETE'); await load(false); } catch { actionError = 'Couldn’t cancel generation. Try again.'; } finally { cancelling = false; } }
   async function exportArchive() { exporting = true; try { const blob = await recapBlob(`/room-recaps/${recapId}/export`); const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = `room-recap-${recapId}.json`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 30000); } catch { actionError = 'Couldn’t export the recap. Try again.'; } finally { exporting = false; } }
   function draftText(draft: RecapDraft) { return ['Codex draft', draft.overview, 'Decisions', ...draft.decisions, 'Actions', ...draft.actions, 'Open questions', ...draft.open_questions, 'Coverage', ...draft.coverage].join('\n\n'); }
@@ -108,8 +109,7 @@
   }
 </script>
 <div class="recap-panel">
-  {#if !detail}<LoadState what="this recap" variant="compact" {loading} {error} empty={true} onretry={() => load()} />
-  {:else if error}<p class="error">{error} <button class="btn small" onclick={() => load()}>Retry</button></p>{/if}
+  <LoadState what="this recap" variant="compact" {loading} {error} empty={!detail} onretry={() => load()}>
   {#if actionError}<p class="error">{actionError}</p>{/if}
   {#if detail}
     <div class="recap-heading"><div><strong>{detail.metadata.session_title}</strong><p>{recapStateLabel(detail.metadata.status)} · {formatBytes(detail.metadata.bytes_used)} of {formatBytes(detail.metadata.quota_bytes)}</p></div><button class="btn small" disabled={loading} onclick={() => load()}>Refresh</button><button class="btn small" disabled={exporting} onclick={exportArchive}>{exporting ? 'Exporting…' : 'Export full archive'}</button></div>
@@ -140,6 +140,7 @@
       <div class="pagination"><button class="btn" disabled={!previous.length || loading} onclick={() => { after = previous.at(-1) ?? 0; previous = previous.slice(0, -1); void load(); }}>Earlier events</button><button class="btn" disabled={detail.next_cursor === null || loading} onclick={() => { previous = [...previous, after]; after = detail!.next_cursor!; void load(); }}>Next events</button></div>
     {/if}
   {/if}
+  </LoadState>
 </div>
 <style>
   .recap-panel { min-width: 0; } .recap-heading, header, nav, .pagination, .summary-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; } .recap-heading, header { justify-content: space-between; } p { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; } nav { margin-block: 12px; }

@@ -74,7 +74,7 @@ function assistantFixture() {
     '../api/assistant': { assistantApi: { turns: (id: string, _before: any, _limit: any, signal: AbortSignal) => {
       const request = deferred<any[]>(); requests.push({ id, request, signal }); return request.promise;
     }, needsYou: async () => [] } },
-    '../../modules/assistant/model': { needsYouByThread: () => ({}), reduceNeedsYou: (state: any) => state,
+    '../assistant/model': { needsYouByThread: () => ({}), reduceNeedsYou: (state: any) => state,
       upsertNewer: (list: any[], row: any) => [...list.filter((t) => t.id !== row.id), row] },
   });
   return { store: exports.assistant, requests };

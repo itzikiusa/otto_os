@@ -1,5 +1,6 @@
 <script lang="ts">
   import { rowMenu } from '../../lib/rowMenu';
+  import { announceShown } from '../../lib/announce.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import { NO_WORKSPACE } from '../../lib/labels';
   import { sectionLabel } from './sections';
@@ -9,7 +10,7 @@
   import { api, baseUrl } from '../../lib/api/client';
   import { auth } from '../../lib/stores/auth.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
-  import type { Channel, Integration, ListenerStatus, UpsertIntegrationReq } from '../../lib/api/types';
+  import type { Channel, Integration, ListenerStatus, RejectedSender, SlackDirectory, UpsertIntegrationReq } from '../../lib/api/types';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
@@ -26,7 +27,6 @@
   import { pollWhileVisible, type Poller } from '../../lib/poll';
   import { latestOnly } from '../../lib/latest';
   import type { Tone } from '../../lib/status';
-  import type { RejectedSender, SlackDirectory } from '../../lib/api/types';
   import AllowedIdsEditor from './AllowedIdsEditor.svelte';
   import { pendingRejected, senderLabel, withAllowed } from './channelAllow';
 
@@ -562,9 +562,9 @@
             </div>
             <div class="ch-status" title={statusLine(intg, channel)}>{statusLine(intg, channel)}</div>
             {#if h?.detail}
-              <div class="ch-health-detail tone-{h.tone}" role="status">
-                <!-- The relative "since" ticks: hidden from the live text so only a
-                     changed health detail is spoken, not every second. -->
+              <div class="ch-health-detail tone-{h.tone}" use:announceShown={h.detail}>
+                <!-- Only a changed health detail is spoken (announceShown), never the
+                     relative "since" that ticks every second. -->
                 {h.detail}{#if h.since} <span class="dim" aria-hidden="true">· since <RelTime iso={h.since} /></span>{/if}
               </div>
             {:else if h?.lastEvent && h.tone === 'success'}

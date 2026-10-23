@@ -363,6 +363,13 @@
   const headline = $derived(hud?.phase === 'done' && self ? (self.place === 1 ? 'You win!' : `You finished ${ordinal(self.place)}`) : '');
   $effect(() => { if (headline) srStatus = headline; });
   $effect(() => { if (paused && hud && hud.phase !== 'done') srStatus = 'Race paused while someone reconnects.'; });
+  // The overlays and the wrong-way banner are plain visuals; the always-mounted
+  // `srStatus` region speaks their edges (a region inserted with its text is
+  // silent in VoiceOver).
+  const loadingLine = $derived(loading && !error ? (isGuest && !hud ? 'Waiting for the host…' : 'Building the circuit…') : '');
+  $effect(() => { if (loadingLine) srStatus = loadingLine; });
+  const wrongWay = $derived(!!self && self.wrong > 1 && hud?.phase === 'race');
+  $effect(() => { if (wrongWay) srStatus = 'Wrong way!'; });
 
   async function toggleFullscreen() { try { if (document.fullscreenElement) await document.exitFullscreen(); else await root.requestFullscreen(); } catch { /* embedding may block fullscreen */ } }
   function wake() { void audio.start().catch(() => {}); }
@@ -380,7 +387,7 @@
   <div class="kart-stage" bind:this={stage}></div>
   <p class="sr-only" role="status">{srStatus}</p>
   {#if underwater}<div class="kart-underwater" aria-hidden="true"></div>{/if}
-  {#if loading && !error}<div class="kart-overlay" role="status"><h2>{isGuest && !hud ? 'Waiting for the host…' : 'Building the circuit…'}</h2><p>Loading karts, racers and scenery</p></div>{/if}
+  {#if loadingLine}<div class="kart-overlay"><h2>{loadingLine}</h2><p>Loading karts, racers and scenery</p></div>{/if}
   {#if error}<div class="kart-overlay"><LoadState what="race" {error} empty onretry={start} /><button class="btn" onclick={onexit}>Back to games</button></div>{/if}
   {#snippet art(kind: ItemKind, count: number)}
     {@const a = itemArt(kind)}
@@ -431,10 +438,10 @@
     <canvas class="kart-minimap" bind:this={minimap} width={220 * MAP_DPR} height={220 * MAP_DPR} aria-label="Track map"></canvas>
     {#if self.drift !== 0}<div class="kart-drift" data-level={self.driftLevel} aria-hidden="true"><i></i><i></i><i></i></div>{/if}
     {#if notice}<div class="kart-notice" data-kind={noticeKind} aria-hidden="true">{notice}</div>{/if}
-    {#if self.wrong > 1 && hud.phase === 'race'}<div class="kart-wrong" role="alert">Wrong way!</div>{/if}
+    {#if wrongWay}<div class="kart-wrong" aria-hidden="true">Wrong way!</div>{/if}
     {#if hud.phase === 'intro'}<div class="kart-intro"><h2>{trackFor(hud.track).def.name}</h2><p>{waitingFor.length ? `Waiting for ${waitingFor.join(', ')}…` : `${hud.racers.length} racers · ${hud.laps} laps · ${hud.difficulty} CPUs`}</p></div>{/if}
     {#if !active && hud.phase !== 'done' && !menu && !paused}<div class="kart-hint">Click the race to drive · W/S gas &amp; brake · A/D steer · Space drift / trick · E item · Q look back · R rescue</div>{/if}
-    {#if paused && hud.phase !== 'done'}<div class="kart-overlay" role="status"><h2>Waiting for players</h2><p>The race is paused while someone reconnects.</p><button class="btn" onclick={onexit}>Leave race</button></div>
+    {#if paused && hud.phase !== 'done'}<div class="kart-overlay"><h2>Waiting for players</h2><p>The race is paused while someone reconnects.</p><button class="btn" onclick={onexit}>Leave race</button></div>
     {:else if hud.phase === 'done'}
       <div class="kart-overlay kart-results">
         <p class="kart-results-kicker">{trackFor(hud.track).def.name} · Results</p>

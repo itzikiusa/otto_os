@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announceShown } from '../../lib/announce.svelte';
   import { announce } from '../../lib/announce.svelte';
   import { plural } from '../../lib/plural';
   import { onMount, onDestroy } from 'svelte';
@@ -135,7 +136,7 @@
       </div>
       <button class="btn" disabled={busy} onclick={() => run(refresh)}>Refresh</button>
     </nav>
-    {#if error}<p class="error" role="alert">{error}</p>{/if}
+    {#if error}<p class="error" use:announceShown={{ text: error, assertive: true }}>{error}</p>{/if}
     {#if busy}<p>Working…</p>{/if}
     {#if mode === 'history'}
       <p>Browse previous HEAD positions. Recover creates a new branch without moving your current branch.</p>

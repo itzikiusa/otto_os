@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announce } from '../../lib/announce.svelte';
   import { untrack } from 'svelte';
   import { api } from '../../lib/api/client';
   import { loadErrorText } from '../../lib/loadError';
@@ -52,6 +53,12 @@
     catch (e) { error = e instanceof Error ? e.message : String(e); }
     finally { busy = false; }
   }
+  // Spoken at the state edge through the shell's always-mounted announcer: a
+  // live region inserted together with its text is not read (WebKit/VoiceOver).
+  // A derived string, so a poll that returns the same error doesn't re-announce it.
+  const networkError = $derived(network?.error ?? '');
+  $effect(() => { if (networkError) announce(`${networkError} Restart the session to rebuild its forwards.`, { assertive: true }); });
+  $effect(() => { if (error) announce(error, { assertive: true }); });
 </script>
 <details class="network" bind:open data-testid="network-status">
   <summary aria-expanded={open}>
@@ -60,7 +67,7 @@
   </summary>
   <div class="contents">
     {#if network?.status === 'connected'}<p>SSH forwards ready. Service health is not checked.</p>{/if}
-    {#if network?.error}<p class="error" role="alert">{network.error} Restart the session to rebuild its forwards.</p>{/if}
+    {#if network?.error}<p class="error">{network.error} Restart the session to rebuild its forwards.</p>{/if}
     {#if network?.restart_required}<p>Restart required to apply the selected profile or its latest settings.</p>{/if}
     {#each network?.endpoints ?? [] as endpoint (endpoint.name)}
       <div class="endpoint"><strong>{endpoint.name}</strong><code>{endpoint.host}:{endpoint.port} → {endpoint.remote_host}:{endpoint.remote_port}</code>
@@ -69,7 +76,7 @@
         {#if endpoint.port_env}<code>{endpoint.port_env}={endpoint.port}</code>{/if}
       </div>
     {/each}
-    {#if error}<p class="error" role="alert">{error}</p>{/if}
+    {#if error}<p class="error">{error}</p>{/if}
     <button type="button" class="btn small" onclick={() => refresh++}>Refresh network status</button>
     {#if editable && onchange}
       <NetworkProfilePicker {workspaceId} value={selectedProfileId} onchange={(id) => void choose(id)} editable={manageEditable} disabled={busy} />

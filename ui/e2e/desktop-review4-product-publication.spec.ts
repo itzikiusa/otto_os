@@ -78,7 +78,7 @@ for (const mode of ['story', 'rfc'] as const) {
     const publish = dialog.getByRole('button', {name: mode === 'story' ? 'Publish story' : 'Publish RFC', exact: true});
     await publish.click();
     await expect(dialog).toBeVisible();
-    await expect(preview.getByRole('alert')).toContainText('Reload the preview');
+    await expect(preview.locator('.field-error')).toContainText('Reload the preview');
     await expect(publish).toBeDisabled();
     expect(sent[0].reviewed_content).toEqual({version_id: f.versionId, body_sha256: digest(originalBody), title: oldTitle, source_kind: 'draft', url: f.snapshot().story.url});
     // The failed modal remains editable; source reload does not reset destination.

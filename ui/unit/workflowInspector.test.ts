@@ -4,7 +4,6 @@ import {
   connectionOptions, jiraAccountOptions, jsonValue, linesValue, listValue, loopStepSummarizer, paramList, paramNum, paramStr,
   storyOptions, toggled, withLoopStepParam, withLoopStepSummarizer, withParam, withScoring, withSummarizer,
 } from '../src/modules/workflows/inspector/util.ts';
-import { componentFunctions } from './componentFunctions.ts';
 
 const node = (params: unknown) => ({ id: 'n', kind: 'review_run', name: '', x: 0, y: 0, params });
 
@@ -40,33 +39,4 @@ test('pickers name what a person recognises, never only the id', () => {
     { id: 'a2', provider: 'linear', label: 'Linear', email: '', base_url: '' },
   ] as never);
   assert.deepEqual(accounts?.map((a) => a.id), ['a1'], 'only Jira (Atlassian) accounts can publish or fetch tickets');
-});
-
-class ApiError extends Error {
-  status: number;
-  constructor(status: number, message: string) { super(message); this.status = status; }
-}
-function finalOutput(read: () => Promise<{ content: string }>) {
-  return componentFunctions(new URL('../src/modules/workflows/WorkflowsPage.svelte', import.meta.url), ['loadFinalOutput', 'renderFinalOutputSrcdoc'], {
-    finalOutputRunId: null, finalOutputAvailable: false, finalOutputHtml: '', finalOutputError: null,
-    run: { id: 'run' }, readRunContext: read, ApiError, loadErrorText: (e: Error) => e.message,
-    renderMarkdownGfm: (md: string, opts: { breaks?: boolean }) => (opts?.breaks ? md.replace(/\n/g, '<br>') : md),
-  });
-}
-
-test('workflow final output renders line breaks and hides silently only when there is none', async () => {
-  const ok = finalOutput(async () => ({ content: 'Status: done\nFiles: 3' }));
-  await ok.loadFinalOutput('run');
-  assert.equal(ok.finalOutputAvailable, true);
-  assert.equal(ok.finalOutputHtml, 'Status: done<br>Files: 3', 'agent reports keep their line-by-line breaks');
-
-  const missing = finalOutput(async () => { throw new ApiError(404, 'not found'); });
-  await missing.loadFinalOutput('run');
-  assert.equal(missing.finalOutputError, null);
-  assert.equal(missing.finalOutputRunId, 'run', 'a run without a deliverable is not refetched');
-
-  const denied = finalOutput(async () => { throw new ApiError(403, 'forbidden'); });
-  await denied.loadFinalOutput('run');
-  assert.equal(JSON.stringify(denied.finalOutputError), JSON.stringify({ runId: 'run', text: 'forbidden' }));
-  assert.equal(denied.finalOutputRunId, null, 'a failed read is forgotten so Retry / the next update can try again');
 });

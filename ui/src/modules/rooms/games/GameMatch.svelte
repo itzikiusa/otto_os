@@ -215,7 +215,9 @@
   {#if connection === 'gave-up' && room && !closed && (room.phase === 'playing' || room.phase === 'finished')}
     <div class="match-lost"><span>Couldn’t reconnect to the game room.</span><button class="btn primary" onclick={reconnect}>Reconnect</button></div>
   {/if}
-  {#if !closed && !(room && (room.phase === 'playing' || room.phase === 'finished'))}<p class="sr-only" role="status" aria-live="polite">{lobbyAnnouncement}</p>{/if}
+  <!-- Always mounted (a region inserted with its text is silent in VoiceOver):
+       only its text changes, and it empties once the match leaves the lobby. -->
+  <p class="sr-only" role="status" aria-live="polite">{!closed && !(room && (room.phase === 'playing' || room.phase === 'finished')) ? lobbyAnnouncement : ''}</p>
   {#if error}<p class="match-error">{error}</p>{/if}
 </div>
 

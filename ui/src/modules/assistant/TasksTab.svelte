@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announceShown } from '../../lib/announce.svelte';
   // The Tasks tab: everything the assistant is doing or waiting on — needs
   // you → running → queued → done. What needs you comes first, in the full
   // approval / question / limit shape, so it can be decided right here.
@@ -11,7 +12,7 @@
   import { rel } from '../../lib/stores/now.svelte';
   import NeedsYouCard from './cards/NeedsYouCard.svelte';
   import Badge from '../../lib/components/Badge.svelte';
-  import { TASK_KIND, groupTasks, taskStateLabel, taskTone } from './model';
+  import { TASK_KIND, groupTasks, taskStateLabel, taskTone } from '../../lib/assistant/model';
   import { whenLabel } from './format';
   import type { AssistantTask } from '../../lib/api/types';
   import LoadState from '../../lib/components/LoadState.svelte';
@@ -81,7 +82,7 @@
 
 <div class="tasks" data-testid="assistant-tasks">
   {#if assistant.needsState === 'error'}
-    <div class="error" role="alert">
+    <div class="error" use:announceShown={{ text: 'Couldn’t load requests waiting on you.', assertive: true }}>
       <Icon name="warning" size={14} />
       <div class="error-t"><strong>Couldn’t load requests waiting on you.</strong><span class="dim">Retry to check whether Otto needs a decision.</span></div>
       <button class="btn small" onclick={() => void assistant.loadNeedsYou()}>Retry requests</button>

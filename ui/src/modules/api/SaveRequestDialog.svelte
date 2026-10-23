@@ -2,6 +2,7 @@
   // "Save request" sheet: a name and WHERE it goes (collection / folder picked
   // from a tree-ordered list, or a new collection created on the spot).
   // Replaces the old two-prompt flow with its numbered collection list.
+  import { announceShown } from '../../lib/announce.svelte';
   import { onDestroy } from 'svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import { apiClient } from '../../lib/stores/apiClient.svelte';
@@ -83,7 +84,7 @@
       {/if}
       <span class="hint">Collections group requests by API or feature. Everyone in this workspace can see saved requests; stored credentials go to the macOS Keychain.</span>
     </div>
-    {#if error}<p class="err" role="alert">{error}</p>{/if}
+    {#if error}<p class="err" use:announceShown={{ text: error, assertive: true }}>{error}</p>{/if}
     <button type="submit" hidden aria-hidden="true" tabindex="-1"></button>
   </form>
   {#snippet footer()}

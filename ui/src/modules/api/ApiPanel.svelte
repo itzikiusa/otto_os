@@ -1,6 +1,7 @@
 <script lang="ts">
   // Compact API client for the right-side panel. Reuses RequestBuilder +
   // ResponseViewer; a slim collection/history dropdown replaces the big tree.
+  import { announceShown } from '../../lib/announce.svelte';
   import { untrack } from 'svelte';
   import { apiClient } from '../../lib/stores/apiClient.svelte';
   import RequestBuilder from './RequestBuilder.svelte';
@@ -43,7 +44,7 @@
 <div class="panel">
   {#if apiClient.historyLoadingId}<span class="note"><span class="spinner" style="--spinner-size: 11px" aria-hidden="true"></span> Loading history request…</span>{/if}
   {#if apiClient.requestsLoadError}
-    <div class="note err" role="alert">
+    <div class="note err" use:announceShown={{ text: 'Couldn’t load saved requests.', assertive: true }}>
       Couldn’t load saved requests. <button class="btn small" onclick={() => void apiClient.loadAll()}>Retry</button>
     </div>
   {/if}

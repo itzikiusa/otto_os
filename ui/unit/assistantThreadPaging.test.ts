@@ -7,7 +7,7 @@ function fixture(api: Record<string, unknown>) {
     svelte: { untrack: (fn: () => unknown) => fn() },
     '../api/client': { api: {}, ApiError: class extends Error {} },
     '../api/assistant': { assistantApi: api },
-    '../../modules/assistant/model': { needsYouByThread: () => ({}), reduceNeedsYou: (s: unknown) => s,
+    '../assistant/model': { needsYouByThread: () => ({}), reduceNeedsYou: (s: unknown) => s,
       upsertNewer: (rows: any[], row: any) => [...rows.filter((r) => r.id !== row.id), row] },
   }).assistant;
 }

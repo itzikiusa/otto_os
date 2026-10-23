@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announce } from '../../../lib/announce.svelte';
   // An agent's outward action held for a person, drawn over the live frame
   // (plan §4.6, mockup panel 1). While an agent drives, the daemon holds any
   // state-changing document request (a form submit / non-GET navigation),
@@ -51,6 +52,9 @@
   let inflight = $state<'approve' | 'deny'>('approve');
   const facts = $derived(approvalFacts(detail, profile));
   const titleId = $derived(`approval-title-${id}`);
+  // Spoken at the state edge through the shell's always-mounted announcer: a
+  // live region inserted together with its text is not read (WebKit/VoiceOver).
+  $effect(() => { if (error) announce(error, { assertive: true }); });
 </script>
 
 <div
@@ -102,7 +106,7 @@
   </p>
 
   {#if error}
-    <p class="error" role="alert">{error}</p>
+    <p class="error">{error}</p>
   {/if}
 
   <div class="actions">

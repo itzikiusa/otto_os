@@ -5,7 +5,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import { assistant } from '../../lib/stores/assistant.svelte';
   import { rel } from '../../lib/stores/now.svelte';
-  import { groupThreads, spaceLabel, SPACE_SLOTS } from './model';
+  import { groupThreads, spaceLabel, SPACE_SLOTS } from '../../lib/assistant/model';
   import type { AssistantThread } from '../../lib/api/types';
 
   interface Props {

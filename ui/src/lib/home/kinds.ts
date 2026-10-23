@@ -3,8 +3,8 @@
 // A kind is offered in the "Add box" picker only when the user can VIEW the
 // feature behind it — the same RBAC gate the module itself sits behind.
 
-import type { IconName } from '../../lib/components/Icon.svelte';
-import type { Feature } from '../../lib/api/types';
+import type { IconName } from '../components/Icon.svelte';
+import type { Feature } from '../api/types';
 
 export type HomeBoxKind =
   | 'sessions'

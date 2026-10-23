@@ -11,7 +11,7 @@
   import { browser } from '../../../lib/stores/browser.svelte';
   import { router } from '../../../lib/router.svelte';
   import { toasts } from '../../../lib/toast.svelte';
-  import { taskStateLabel, taskTone, type BrowserProgress } from '../model';
+  import { taskStateLabel, taskTone, type BrowserProgress } from '../../../lib/assistant/model';
   import type { AssistantTask } from '../../../lib/api/types';
 
   interface Props {

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { announce } from '../../lib/announce.svelte';
+  import { announce, announceShown } from '../../lib/announce.svelte';
   import { plural } from '../../lib/plural';
   import { NO_WORKSPACE } from '../../lib/labels';
   import { pollWhileVisible } from '../../lib/poll';
@@ -413,7 +413,7 @@
     {/if}
     <!-- Evolve result — shown after an Evolve now completes. -->
     {#if evolveResult !== null}
-      <div class="evolve-badge" class:no-change={evolveResult.length === 0} role="status">
+      <div class="evolve-badge" class:no-change={evolveResult.length === 0} use:announceShown={evolveResult.length === 0 ? 'Evolve finished — no skill changes this session.' : `Evolve finished — ${plural(evolveResult.length, 'skill')} updated.`}>
         <Icon name={evolveResult.length === 0 ? 'info' : 'check'} size={14} />
         <span class="grow">
           {#if evolveResult.length === 0}

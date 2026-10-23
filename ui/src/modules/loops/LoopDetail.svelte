@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announceShown } from '../../lib/announce.svelte';
   import { scrollBehavior } from '../../lib/motion';
   import { loops } from '../../lib/stores/loops.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -355,9 +356,7 @@
       </dl>
 
       {#if loop.summary}<p class="summary">{loop.summary}</p>{/if}
-      {#if loop.error}
-        <p class="errline" role="alert"><Icon name="warning" size={13} /> <span>{loop.error}</span></p>
-      {/if}
+      {#if loop.error}<p class="errline" use:announceShown={{ text: loop.error, assertive: true }}><Icon name="warning" size={13} /> <span>{loop.error}</span></p>{/if}
       {#if loop.ledger?.next_action}<p class="summary"><strong>Next:</strong> {loop.ledger.next_action}</p>{/if}
       {#if loop.worktree_path}
         <p class="retained">Retained work <code title={loop.worktree_path}>{loop.worktree_path}</code></p>
@@ -481,7 +480,7 @@
       <input id="gl-ext-iters" class="input" type="number" min={loop.iterations_started + 1} step="1" bind:value={extIters} />
       <label class="extend-lbl" for="gl-ext-mins">Max runtime (minutes)</label>
       <input id="gl-ext-mins" class="input" type="number" min="1" step="1" bind:value={extMinutes} />
-      {#if extError}<p class="errline" role="alert"><Icon name="warning" size={13} /> <span>{extError}</span></p>{/if}
+      {#if extError}<p class="errline" use:announceShown={{ text: extError, assertive: true }}><Icon name="warning" size={13} /> <span>{extError}</span></p>{/if}
     </form>
     {#snippet footer()}
       <button class="btn" disabled={acting} onclick={() => (extendOpen = false)}>Cancel</button>

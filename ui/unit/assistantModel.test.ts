@@ -24,7 +24,7 @@ import {
   threadCards,
   upsertNewer,
   type NeedsYouState,
-} from '../src/modules/assistant/model.ts';
+} from '../src/lib/assistant/model.ts';
 import { mergeWithTranscript, messageAuthor, inferProvider } from '../src/modules/assistant/chat.ts';
 import { deliverLabel, whenLabel } from '../src/modules/assistant/format.ts';
 import type { AssistantTask, AssistantTurn } from '../src/lib/api/types.ts';

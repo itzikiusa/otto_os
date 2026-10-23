@@ -30,7 +30,7 @@
   import { closeConfirm } from './closeConfirm';
   import Icon, { type IconName } from '../lib/components/Icon.svelte';
   import { lsGet, lsSet } from '../lib/storage';
-  import { copyText } from '../lib/clipboard';
+  import { COPY_FAILED_BODY, copyText } from '../lib/clipboard';
   import { router } from '../lib/router.svelte';
   import { hitActions, hitContext, hitRoute, type HitAction } from '../lib/floatingBar';
 
@@ -147,7 +147,7 @@
     } else if (await copyText(hitContext(hit))) {
       toasts.success('Copied', hit.title);
     } else {
-      toasts.error('Couldn’t copy to the clipboard', 'The clipboard is not available here.');
+      toasts.error('Couldn’t copy', COPY_FAILED_BODY);
     }
   }
 

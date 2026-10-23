@@ -3,6 +3,7 @@
   // stage timeline, proof + findings, the approval gate, and the PR draft. Reads
   // the open run + its events straight from the store.
   import { runWithOtto } from '../../lib/stores/runWithOtto.svelte';
+  import { announceShown } from '../../lib/announce.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { confirmer } from '../../lib/confirm.svelte';
   import ProofStatusChip from '../../lib/components/ProofStatusChip.svelte';
@@ -145,7 +146,7 @@
 
   {#if error}<div class="err" role="alert">{error}</div>{/if}
   {#if run.status === 'failed' && run.error}
-    <div class="err" role="status"><strong>Run failed:</strong> {run.error}</div>
+    <div class="err" use:announceShown={{ text: `Run failed: ${run.error}`, assertive: true }}><strong>Run failed:</strong> {run.error}</div>
   {/if}
 
   <!-- where the run is on the pipeline right now -->

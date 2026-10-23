@@ -1,5 +1,6 @@
 <script lang="ts">
   import Modal from '../../lib/components/Modal.svelte';
+  import { announceShown } from '../../lib/announce.svelte';
   import { api, baseUrl } from '../../lib/api/client';
   import { loadErrorText } from '../../lib/loadError';
   import type { RoomCredential } from '../../lib/api/room-types';
@@ -21,7 +22,11 @@
       }
       await openHostedRoom(created.room_id);
       onclose();
-    } catch (e) { error = e instanceof TypeError ? loadErrorText(e) : e instanceof Error ? e.message : 'Couldn’t start this room. Try again.'; }
+    } catch (e) {
+      // Lead with what failed (content.md §4): the room may exist already and
+      // only its native window failed, which Retry reopens.
+      error = `${created ? 'Couldn’t open the room window.' : 'Couldn’t start this room.'} ${loadErrorText(e)}`;
+    }
     finally { busy = false; }
   }
 </script>
@@ -29,7 +34,7 @@
   <p>Invite up to three people to this terminal and its available history. You decide who enters and who can type.</p>
   <p>Anyone you give control can run commands with this session’s permissions. Chat stays separate from the agent.</p>
   <label>Your display name <input dir="auto" maxlength="80" bind:value={name} autocomplete="nickname" disabled={!!created} /></label>
-  {#if error}<p role="alert">{error}</p>{/if}
+  {#if error}<p class="form-error" use:announceShown={{ text: error, assertive: true }}>{error}</p>{/if}
   {#snippet footer()}
     <button class="btn" onclick={onclose} disabled={busy}>Cancel</button>
     <button class="btn primary" disabled={busy || !name.trim()} onclick={start}>{busy ? 'Opening…' : created ? 'Open room' : 'Start room'}</button>
@@ -39,5 +44,5 @@
   p { line-height: 1.5; margin-block: 0 16px; }
   label { display: grid; gap: 8px; }
   input { width: 100%; }
-  [role='alert'] { color: var(--danger); margin-block-start: 12px; }
+  .form-error { color: var(--danger); margin-block-start: 12px; }
 </style>

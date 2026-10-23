@@ -208,6 +208,7 @@
   $effect(() => {
     if (writeVerb) announce(`This statement is a write (${writeVerb}). Export would apply it again.`, { assertive: true });
   });
+  $effect(() => { if (exportingPath) announce('Exporting all rows…'); });
 </script>
 
 <Modal
@@ -286,7 +287,7 @@
     </div>
 
     {#if exportingPath}
-      <div class="exp-progress" role="status" aria-live="polite">
+      <div class="exp-progress">
         <div class="indeterminate" role="progressbar" aria-label="Exporting"></div>
         <div class="exp-prog-text mono">
           {exportProgress ? fmtBytes(exportProgress.bytes) : '0 B'} written…

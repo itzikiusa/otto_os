@@ -13,6 +13,7 @@
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { copyAsJson } from '../../lib/components/exporters';
+  import { COPY_FAILED_BODY } from '../../lib/clipboard';
   import LoadState from '../../lib/components/LoadState.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import { router } from '../../lib/router.svelte';
@@ -187,7 +188,7 @@
         if (copyingId === e.id) copyingId = null;
       }, 1200);
     } catch {
-      toasts.error('Couldn’t copy the entry', 'The clipboard write was blocked.');
+      toasts.error('Couldn’t copy the entry', COPY_FAILED_BODY);
     }
   }
 

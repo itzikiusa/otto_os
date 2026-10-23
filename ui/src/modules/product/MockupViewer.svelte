@@ -11,6 +11,7 @@
   //     DOM, since mermaid input is agent/user-controlled).
   // The render box is exposed to a sibling MockupAnnotations overlay so pins sit
   // exactly over the mockup.
+  import { announceShown } from '../../lib/announce.svelte';
   import { onMount } from 'svelte';
   import { renderMermaid } from '../../lib/render/mermaid';
   import { authedBlobUrl, authedText } from '../../lib/api/client';
@@ -95,17 +96,22 @@
 
   // ── Render pipeline — re-runs whenever the attachment OR the source changes ──
   $effect(() => {
-    // Read the attachment id + source so this effect re-runs on change.
-    const a = attachment;
-    const src = source;
-    // Live edit of a diagram already on screen (the code view's keystrokes):
-    // debounce, and renderFor keeps the last good SVG meanwhile.
+    // Read the attachment id + source so this effect re-runs on change; the
+    // returned cleanup cancels a pending debounced render.
+    return scheduleRender(attachment, source);
+  });
+
+  /** Live edit of a diagram already on screen (the code view's keystrokes):
+   *  debounce, and renderFor keeps the last good SVG meanwhile. Anything else
+   *  renders now. Returns the cleanup that drops a still-pending render. */
+  function scheduleRender(a: ProductAttachment, src: string | null): (() => void) | undefined {
     if (src !== null && renderedFor === a.id) {
       const t = setTimeout(() => void renderFor(a, src), LIVE_DEBOUNCE_MS);
       return () => clearTimeout(t);
     }
     void renderFor(a, src);
-  });
+    return undefined;
+  }
 
   $effect(() => {
     // Revoke object URLs on unmount.
@@ -241,7 +247,7 @@
     <!-- Pinned-annotation overlay + side note list. Mounted once the render box
          exists so the overlay can anchor to it. -->
     {#if liveError}
-      <div class="live-err" role="status">{liveError}</div>
+      <div class="live-err" use:announceShown={liveError}>{liveError}</div>
     {/if}
     {#if !rendering && !renderError && renderBox}
       <MockupAnnotations attachmentId={attachment.id} box={renderBox} />

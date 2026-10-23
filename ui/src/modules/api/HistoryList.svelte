@@ -178,7 +178,7 @@
     <span class="ret" title="History retention (workspace setting)">{retentionText}{#if gauge} · {formatBytes(gauge.history_bytes)}{/if}</span>
   </div>
   {#if showBanner && gauge}
-    <div class="size-banner" role="status">
+    <div class="size-banner">
       <div class="sb-text">
         History is using <strong>{formatBytes(gauge.history_bytes + gauge.run_bytes)}</strong>
         ({gauge.history_rows.toLocaleString()} requests, {gauge.run_rows.toLocaleString()} automation runs). Everything is kept until you set a limit.

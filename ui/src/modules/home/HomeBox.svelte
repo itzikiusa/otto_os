@@ -50,7 +50,7 @@
   import { router } from '../../lib/router.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { home, COLS, GAP_PX, MIN_H, MAX_H, MIN_W, ROW_PX, type HomeBox } from './home.svelte';
-  import { kindDef } from './kinds';
+  import { kindDef } from '../../lib/home/kinds';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';

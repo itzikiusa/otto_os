@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announceShown } from '../../../lib/announce.svelte';
   import { rel } from '../../../lib/stores/now.svelte';
   import { rowMenu as rowMenuKeys } from '../../../lib/rowMenu';
   import { plural } from '../../../lib/plural';
@@ -46,10 +47,7 @@
   // The Insights tab renders markdown (`marked`): load it on first open.
   const MonitorInsightsLazy = lazyComponent(() => import('./MonitorInsights.svelte'));
 
-  interface Props {
-    cluster: K8sCluster;
-    tab: string;
-  }
+  interface Props { cluster: K8sCluster; tab: string }
   let { cluster, tab }: Props = $props();
 
   const TABS = [
@@ -612,7 +610,7 @@
                     {#if seriesLoading}
                       <Skeleton rows={2} height={60} />
                     {:else if seriesError}
-                      <div class="trend-error" role="alert"><strong>Couldn’t load trends</strong><p>{seriesError}</p><button class="btn small" onclick={() => void loadTrends(r)}>Retry trends</button></div>
+                      <div class="trend-error" use:announceShown={{ text: `Couldn’t load trends. ${seriesError}`, assertive: true }}><strong>Couldn’t load trends</strong><p>{seriesError}</p><button class="btn small" onclick={() => void loadTrends(r)}>Retry trends</button></div>
                     {:else}
                       <div class="charts">
                         <div class="chart">

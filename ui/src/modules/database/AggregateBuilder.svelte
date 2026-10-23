@@ -12,7 +12,7 @@
   import { auth } from '../../lib/stores/auth.svelte';
   import { formatMongo } from '../../lib/database/mongo-format';
   import { isBalancedObject } from './query-filter';
-  import { focusAfterRowRemoval } from '../api/rowFocus';
+  import { focusAfterRowRemoval } from '../../lib/rowFocus';
   import { tick } from 'svelte';
 
   type StageOp =

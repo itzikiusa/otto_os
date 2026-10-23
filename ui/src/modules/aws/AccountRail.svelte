@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announce } from '../../lib/announce.svelte';
   import { rowMenu } from '../../lib/rowMenu';
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   // Left rail inside the AWS module: accounts → services. A service is greyed
@@ -83,6 +84,12 @@
         : []),
     ]);
   }
+  // Spoken at the state edge through the shell's always-mounted announcer: a
+  // live region inserted together with its text is not read (WebKit/VoiceOver).
+  // Keyed by account and expiry state (not the ticking minutes), so the
+  // countdown doesn't re-announce every minute.
+  const sessionNotes = $derived(aws.accounts.map((a) => { const n = sessionNote(a); return n ? `${a.name}: ${n.expired ? 'sign-in expired' : 'sign-in ends soon'}` : ''; }).filter(Boolean).join('. '));
+  $effect(() => { if (sessionNotes) announce(`${sessionNotes}.`, { assertive: sessionNotes.includes('expired') }); });
 </script>
 
 <nav class="rail" aria-label="AWS accounts">
@@ -113,7 +120,7 @@
         ><Icon name="more" size={14} /></button>
       </div>
       {#if note}
-        <div class="sess" class:expired={note.expired} role="status">
+        <div class="sess" class:expired={note.expired}>
           <Icon name="warning" size={12} />
           <span>{note.text}</span>
           {#if onsignin && a.auth_mode === 'profile'}

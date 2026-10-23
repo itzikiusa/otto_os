@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announceShown } from '../../lib/announce.svelte';
   import { plural } from '../../lib/plural';
   // Right panel → References: search the team library (shipped work first) and
   // borrow from it — Add as reference (an explicit, pinned `references` link),
@@ -170,7 +171,7 @@
 
   <div class="results">
     {#if error}
-      <div class="err" role="alert"><Icon name="warning" size={14} /> Search failed. <button class="btn small ghost" onclick={() => void run()}>Retry</button></div>
+      <div class="err" use:announceShown={{ text: 'Couldn’t search the references.', assertive: true }}><Icon name="warning" size={14} /> Couldn’t search the references. <button class="btn small ghost" onclick={() => void run()}>Retry</button></div>
     {:else if loading && !hits.length}
       <p class="dim" role="status">Searching the library…</p>
     {:else if !hits.length}

@@ -995,7 +995,7 @@
   {@attach (el) => (el.addEventListener('keydown', onKey), () => el.removeEventListener('keydown', onKey))}
 >
   {#if loading}
-    <div class="s3d-overlay center"><span class="spinner" role="status" aria-label="Loading the 3D engine" title="Loading the 3D engine"></span></div>
+    <div class="s3d-overlay center"><span class="spinner" role="img" aria-label="Loading the 3D engine" title="Loading the 3D engine"></span></div>
   {:else if loadError}
     <div class="s3d-overlay center">
       <div class="s3d-error">
@@ -1034,7 +1034,7 @@
       {#if !compact}<span>{status}</span>{/if}
       {#if Object.keys(gltfErrors).length}
         <span class="s3d-warn" title={Object.values(gltfErrors).join('\n')}>
-          {plural(Object.keys(gltfErrors).length, 'model')} failed to load
+          Couldn’t load {plural(Object.keys(gltfErrors).length, 'model')}
         </span>
       {/if}
       {#if canEdit && !compact}

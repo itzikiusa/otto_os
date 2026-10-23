@@ -42,16 +42,44 @@ export interface ListRange {
   bottom: number;
 }
 
+/** An extra band of `h` px laid out right after row `after` (an expanded
+ *  row's detail row): every later row sits `h` px lower. */
+export interface ListExtra {
+  after: number;
+  h: number;
+}
+
 /** Pure window arithmetic (unit-tested): rows `[start, end)` of `n` rows of
  *  pitch `rowH` that intersect a viewport `[rel, rel + viewH)` measured from
- *  the list's own top, widened by `overscan` rows each way. */
-export function listRange(n: number, rowH: number, rel: number, viewH: number, overscan: number, min: number): ListRange {
+ *  the list's own top, widened by `overscan` rows each way. `extra` (optional)
+ *  inserts one taller band after a row; a viewport edge inside that band maps
+ *  to the row that owns it, so the expanded row stays mounted while its
+ *  detail is on screen. */
+export function listRange(
+  n: number,
+  rowH: number,
+  rel: number,
+  viewH: number,
+  overscan: number,
+  min: number,
+  extra?: ListExtra,
+): ListRange {
   if (n <= min || rowH <= 0) return { start: 0, end: n, top: 0, bottom: 0 };
-  const first = Math.floor(Math.max(0, rel) / rowH);
-  const last = Math.ceil(Math.max(0, rel + Math.max(viewH, 1)) / rowH);
+  const after = extra && extra.after >= 0 && extra.after < n ? extra.after : -1;
+  const band = after >= 0 ? Math.max(0, extra!.h) : 0;
+  const bandTop = (after + 1) * rowH;
+  // y → fractional row position, with the band collapsed onto its owner row.
+  const pos = (y: number): number => {
+    if (band <= 0 || y < bandTop) return y / rowH;
+    if (y < bandTop + band) return after + 0.5;
+    return (y - band) / rowH;
+  };
+  const top = (i: number): number => i * rowH + (band > 0 && i > after ? band : 0);
+  const first = Math.floor(pos(Math.max(0, rel)));
+  const last = Math.ceil(pos(Math.max(0, rel + Math.max(viewH, 1))));
   const start = Math.max(0, Math.min(n, first - overscan));
   const end = Math.max(start, Math.min(n, last + overscan));
-  return { start, end, top: start * rowH, bottom: (n - end) * rowH };
+  return { start, end, top: top(start), bottom: top(n) - top(end) };
 }
 
 /** The measured pitch to adopt for a rendered row of height `h`, or null to

@@ -18,7 +18,7 @@
   import { assistant, describeError } from '../../../lib/stores/assistant.svelte';
   import { rel } from '../../../lib/stores/now.svelte';
   import { toasts } from '../../../lib/toast.svelte';
-  import { limitNotice, providerLabel, providerName, TASK_KIND } from '../model';
+  import { limitNotice, providerLabel, providerName, TASK_KIND } from '../../../lib/assistant/model';
   import { clock } from '../format';
   import type { AssistantApprovalCard, AssistantDecisionReq, AssistantNeedsYou, AssistantTask, AssistantTaskAction } from '../../../lib/api/types';
 

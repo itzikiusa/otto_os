@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announceShown } from '../../lib/announce.svelte';
   // Remote CRUD for one repo (`GET|POST /repos/{id}/remotes`). URLs arrive with
   // any `user:password@` userinfo already stripped by the daemon, so nothing
   // credentialed is ever rendered here. Push/checkout still use `origin`
@@ -139,7 +140,7 @@
     {/if}
 
     {#if error && !loadFailed}
-      <p class="rp-err" role="alert"><Icon name="warning" size={12} /> {error}</p>
+      <p class="rp-err" use:announceShown={{ text: error, assertive: true }}><Icon name="warning" size={12} /> {error}</p>
     {/if}
   </div>
 

@@ -3,6 +3,7 @@
 </script>
 
 <script lang="ts">
+  import { announce } from '../../lib/announce.svelte';
   // Skills Lab → Skills: the detail pane for one skill (grouped by name).
   //
   //   header   — name, description, category, the copies it has (Library ·
@@ -290,6 +291,9 @@
         return 'Checking…';
     }
   }
+  // Spoken at the state edge through the shell's always-mounted announcer: a
+  // live region inserted together with its text is not read (WebKit/VoiceOver).
+  $effect(() => { if (compareError) announce(compareError, { assertive: true }); });
 </script>
 
 <div class="detail" data-testid="skill-detail">
@@ -360,7 +364,7 @@
           <button class="icon-btn" onclick={() => (comparing = null)} aria-label="Close diff" title="Close diff"><Icon name="x" size={14} /></button>
         </div>
         {#if compareError}
-          <p class="compare-err" role="alert">{compareError}</p>
+          <p class="compare-err">{compareError}</p>
         {:else if compareBefore == null || compareAfter == null}
           <LoadState what="both copies" loading empty />
         {:else}

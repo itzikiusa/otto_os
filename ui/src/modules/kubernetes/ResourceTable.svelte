@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announce } from '../../lib/announce.svelte';
   import { rowMenu } from '../../lib/rowMenu';
   // k9s-style resource table: sticky header row + `VirtualList` body sharing
   // one CSS grid template, health-colored status pill, keyboard-navigable rows
@@ -90,6 +91,11 @@
         ?.focus();
     }
   }
+  // Spoken at the state edge through the shell's always-mounted announcer: a
+  // live region inserted together with its text is not read (WebKit/VoiceOver).
+  // Only the stale-banner case (rows still shown); the empty-table error is LoadState's.
+  const staleError = $derived(rows.length && error ? error : '');
+  $effect(() => { if (staleError) announce(`Couldn’t refresh — showing the last good load. ${staleError}`, { assertive: true }); });
 </script>
 
 <div class="rt" data-testid="k8s-resource-table">
@@ -151,7 +157,7 @@
       </VirtualList>
     </div>
     {#if error}
-      <div class="rt-stale" role="status"><Icon name="info" size={12} /> Showing the last good load — refresh failed: {error}</div>
+      <div class="rt-stale"><Icon name="info" size={12} /> Couldn’t refresh — showing the last good load. {error}</div>
     {/if}
   {/if}
 </div>

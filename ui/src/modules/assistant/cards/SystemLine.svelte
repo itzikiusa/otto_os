@@ -6,7 +6,7 @@
   import ProviderIcon from '../../../lib/components/ProviderIcon.svelte';
   import Badge from '../../../lib/components/Badge.svelte';
   import { router } from '../../../lib/router.svelte';
-  import { taskStateLabel, taskTone } from '../model';
+  import { taskStateLabel, taskTone } from '../../../lib/assistant/model';
   import type { AssistantTask, AssistantTurn } from '../../../lib/api/types';
 
   interface Props {

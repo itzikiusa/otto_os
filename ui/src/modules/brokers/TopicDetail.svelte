@@ -18,18 +18,8 @@
   import { adaptiveCadence } from '../../lib/pollBackoff';
   import { TableWindow } from '../../lib/tableWindow.svelte';
   import { copyAsJson, downloadJson, exportCsv } from '../../lib/components/exporters';
-  import type {
-    BrokerCluster,
-    ConsumeReq,
-    ConsumeResp,
-    KafkaMessage,
-    MessageHeader,
-    PartitionRange,
-    ProduceReq,
-    StartPosition,
-    TopicDetail,
-    ValueFormat,
-  } from '../../lib/api/types';
+  import type { BrokerCluster, ConsumeReq, ConsumeResp, KafkaMessage, MessageHeader,
+    PartitionRange, ProduceReq, StartPosition, TopicDetail, ValueFormat } from '../../lib/api/types';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { brokersTopicPort } from '../../lib/uiCommands/brokers';
@@ -654,11 +644,14 @@
       toasts.error('Couldn’t copy', 'The browser blocked the clipboard write. Select the message text and copy it manually.');
     }
   }
-  // Spoken at the state edge through the shell's always-mounted announcer: a
-  // live region inserted together with its text is not read (WebKit/VoiceOver).
   $effect(() => { if (detailErr) announce(`Couldn’t load topic details. ${detailErr}`, { assertive: true }); });
   $effect(() => { if (consumeError) announce(consumeError, { assertive: true }); });
   $effect(() => { if (produceError) announce(produceError, { assertive: true }); });
+  $effect(() => { if (autoPoll && tailError) announce(`Live tail interrupted — retrying. ${tailError}`, { assertive: true }); });
+  // A derived flag, so a tail tick (a new offsets map) doesn't re-announce.
+  const tailActive = $derived(autoPoll && tailOffsets.size > 0 && !tailError);
+  $effect(() => { if (tailActive) announce('Live tail active — appending new messages.'); });
+  $effect(() => { if (selected?.value?.truncated && fullErr) announce(`${fullErr} Showing the first 2 KiB.`, { assertive: true }); });
 </script>
 
 <div class="td">
@@ -801,7 +794,7 @@
           <p class="masked-note pad small">PII masked — sensitive values were redacted server-side.</p>
         {/if}
         {#if autoPoll && (tailOffsets.size > 0 || tailError)}
-          <p class="muted pad small tail-note" role="status">
+          <p class="muted pad small tail-note">
             {#if tailError}
               Live tail interrupted — retrying. {tailError}{tailLastSuccess ? ` Last received successfully at ${fmtTs(tailLastSuccess)}.` : ''}
               <button class="btn small" disabled={consuming} onclick={() => consumeWithTail(true)}>Retry now</button>
@@ -849,7 +842,7 @@
           {/if}
           <h5>Value</h5>
           {#if selected.value?.truncated}
-            <p class="muted small" role="status">
+            <p class="muted small">
               {#if fullLoading}Loading the full value… (showing the first 2 KiB){:else if fullErr}{fullErr} Showing the first 2 KiB.
                 <button class="btn small" onclick={() => selected && selectMessage(selected)}>Retry</button>{:else}Showing the first 2 KiB.{/if}
             </p>

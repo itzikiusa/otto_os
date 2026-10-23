@@ -1,7 +1,7 @@
 // Swarm run stats in ONE pass over the runs (backlog B6 / SE-04): per-agent
 // live/active/done plus swarm totals. The Org tree, Graph and page header used
 // to filter the whole run list per agent per helper per render.
-import type { SwarmRun } from './types';
+import type { SwarmRun } from '../api/types/swarm';
 
 /** One pass over the runs: per-agent live/active/done plus swarm totals. */
 export interface AgentRunStats {

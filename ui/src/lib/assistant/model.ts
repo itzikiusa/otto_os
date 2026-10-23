@@ -3,7 +3,7 @@
 // provider/model labels, the thread → Spaces/Recent grouping, the card mapping
 // (thread turns + tasks → chat cards) and the chat timeline, the needs-you
 // reducer with its stale-frame guard, task grouping, and the routing rows.
-import type { BadgeTone } from '../../lib/status';
+import type { BadgeTone } from '../status';
 import type {
   AssistantMemoryChip,
   AssistantRouteKind,
@@ -11,7 +11,7 @@ import type {
   AssistantTaskState,
   AssistantThread,
   AssistantTurn,
-} from '../../lib/api/types';
+} from '../api/types';
 
 export type Provider = 'claude' | 'codex';
 

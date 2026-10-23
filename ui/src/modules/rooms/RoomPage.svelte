@@ -44,7 +44,8 @@
   $effect(() => { if (error) announce(error, { assertive: true }); });
   $effect(() => { if (inviteError) announce(inviteError, { assertive: true }); });
   const connectionLine = $derived(ended || needsName ? '' : connection === 'connecting' ? (room ? 'Reconnecting… Terminal access is paused.' : 'Connecting to the room…') : !connected ? 'Connection interrupted. Terminal access is paused.' : '');
-  $effect(() => { if (connectionLine) announce(connectionLine); });
+  // Connection loss interrupts (assertive); connecting / reconnecting is polite.
+  $effect(() => { if (connectionLine) announce(connectionLine, { assertive: connection !== 'connecting' }); });
   $effect(() => { peopleOpen = !narrowRoom; });
   // Host-only: knocks and requests must reach the host on every layout, not only
   // inside the (collapsed / hidden on narrow windows) People list.

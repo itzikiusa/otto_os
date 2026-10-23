@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announceShown } from '../../../lib/announce.svelte';
   import { viewport } from '../../../lib/stores/viewport.svelte';
   import { plural } from '../../../lib/plural';
   import { loadErrorText } from '../../../lib/loadError';
@@ -52,7 +53,7 @@
   import UsedIn from './UsedIn.svelte';
   import ImpactModal from './ImpactModal.svelte';
   import { brandExport, brandImpact, getLearned } from './api';
-  import { copyWithToast } from './edit';
+  import { copyWithToast } from '../../../lib/clipboard';
   import { diffTokens, normalizeBrandDoc, parseBrandDoc, rulesForKit, serializeBrandDoc, validateBrandDoc } from './tokens';
   import { guardUnsaved } from '../../../lib/leaveGuard';
   import LoadState from '../../../lib/components/LoadState.svelte';
@@ -538,7 +539,7 @@
         {/if}
 
         {#if newerHead}
-          <div class="banner warn" role="status">
+          <div class="banner warn" use:announceShown={'A newer version of this kit was saved while you were editing.'}>
             <Icon name="warning" size={14} />
             <span>A newer version of this kit was saved while you were editing.</span>
             <span class="grow"></span>
@@ -547,7 +548,7 @@
         {/if}
 
         {#if dirty && issues.length > 0}
-          <div class="banner bad" role="alert" data-testid="brand-issues">
+          <div class="banner bad" data-testid="brand-issues">
             <Icon name="warning" size={14} />
             <span>Fix {issues.length === 1 ? 'this' : `${issues.length} problems`} before saving: <span class="mono">{issues[0]}</span></span>
             <span class="grow"></span>

@@ -7,6 +7,7 @@
   // are never returned — responses only carry their key names + has_secret.
   import { auth } from '../../lib/stores/auth.svelte';
   import { toastError } from '../../lib/toastError';
+  import { announce } from '../../lib/announce.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { mcpCpApi } from '../../lib/api/mcp';
@@ -111,7 +112,13 @@
       bad == null
         ? null
         : `“${bad}” can’t be an env key. Use letters, digits and _, not starting with a digit.`;
-    if (nameError || commandError || urlError || envError) return;
+    const invalid = nameError ?? commandError ?? urlError ?? envError;
+    if (invalid) {
+      // Spoken once at the edge; the inline lines are plain text tied to
+      // their fields (an inserted role="alert" is silent in VoiceOver).
+      announce(invalid, { assertive: true });
+      return;
+    }
     const body: CreateMcpControlServerReq = {
       name: name.trim(),
       transport,
@@ -171,8 +178,8 @@
 
     <label class="field">
       <span>Name</span>
-      <input dir="auto" bind:value={name} placeholder="github" aria-invalid={nameError != null} oninput={() => (nameError = null)} />
-      {#if nameError}<span class="field-error" role="alert">{nameError}</span>{/if}
+      <input dir="auto" bind:value={name} placeholder="github" aria-invalid={nameError != null} aria-describedby={nameError ? 'mcp-server-name-err' : undefined} oninput={() => (nameError = null)} />
+      {#if nameError}<span id="mcp-server-name-err" class="field-error">{nameError}</span>{/if}
     </label>
 
     <label class="field">
@@ -190,8 +197,8 @@
       </p>
       <label class="field">
         <span>Command</span>
-        <input dir="ltr" bind:value={command} placeholder="npx" class="mono" aria-invalid={commandError != null} oninput={() => (commandError = null)} />
-        {#if commandError}<span class="field-error" role="alert">{commandError}</span>{/if}
+        <input dir="ltr" bind:value={command} placeholder="npx" class="mono" aria-invalid={commandError != null} aria-describedby={commandError ? 'mcp-server-command-err' : undefined} oninput={() => (commandError = null)} />
+        {#if commandError}<span id="mcp-server-command-err" class="field-error">{commandError}</span>{/if}
       </label>
       <label class="field">
         <span>Arguments <em>(one per line)</em></span>
@@ -199,7 +206,7 @@
       </label>
       <label class="field">
         <span>Env <em>(KEY=value, one per line)</em></span>
-        <textarea dir="ltr" bind:value={envText} rows="2" class="mono" placeholder="LOG_LEVEL=info" aria-invalid={envError != null} oninput={() => (envError = null)}></textarea>
+        <textarea dir="ltr" bind:value={envText} rows="2" class="mono" placeholder="LOG_LEVEL=info" aria-invalid={envError != null} aria-describedby={envError ? 'mcp-server-env-err' : undefined} oninput={() => (envError = null)}></textarea>
         <span class="env-note">
           The server does not inherit Otto’s environment — only PATH, HOME, the locale, temp dir, proxy
           (HTTPS_PROXY, NO_PROXY…), CA bundle (NODE_EXTRA_CA_CERTS, SSL_CERT_FILE…), DOCKER_HOST and XDG_*
@@ -208,14 +215,14 @@
       </label>
       <label class="field">
         <span>Secret env <em>(KEY=value — stored in Keychain, never shown again)</em></span>
-        <textarea dir="ltr" bind:value={secretEnvText} rows="2" class="mono" placeholder="GITHUB_TOKEN=ghp_…" aria-invalid={envError != null} oninput={() => (envError = null)}></textarea>
-        {#if envError}<span class="field-error" role="alert">{envError}</span>{/if}
+        <textarea dir="ltr" bind:value={secretEnvText} rows="2" class="mono" placeholder="GITHUB_TOKEN=ghp_…" aria-invalid={envError != null} aria-describedby={envError ? 'mcp-server-env-err' : undefined} oninput={() => (envError = null)}></textarea>
+        {#if envError}<span id="mcp-server-env-err" class="field-error">{envError}</span>{/if}
       </label>
     {:else}
       <label class="field">
         <span>URL</span>
-        <input dir="ltr" bind:value={url} placeholder="https://mcp.example.com/rpc" class="mono" aria-invalid={urlError != null} oninput={() => (urlError = null)} />
-        {#if urlError}<span class="field-error" role="alert">{urlError}</span>{/if}
+        <input dir="ltr" bind:value={url} placeholder="https://mcp.example.com/rpc" class="mono" aria-invalid={urlError != null} aria-describedby={urlError ? 'mcp-server-url-err' : undefined} oninput={() => (urlError = null)} />
+        {#if urlError}<span id="mcp-server-url-err" class="field-error">{urlError}</span>{/if}
       </label>
       <label class="field">
         <span>Headers <em>(Name=value, one per line)</em></span>

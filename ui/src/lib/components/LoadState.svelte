@@ -22,6 +22,7 @@
   import type { Snippet } from 'svelte';
   import Icon from './Icon.svelte';
   import Skeleton from './Skeleton.svelte';
+  import { announceEdge } from '../announce.svelte';
 
   interface Props {
     /** Noun for the headline: "Couldn’t load {what}". */
@@ -58,6 +59,19 @@
   const skelHeight = $derived(variant === 'compact' ? 24 : 36);
   // rows * (row + 8 px gap) + the list's 4 px block padding.
   const reserve = $derived(skelRows * (skelHeight + 8) + 4);
+
+  // The stale bar is inserted together with its text, and WebKit/VoiceOver
+  // don't read a status region that way — so a refresh failure over stale data
+  // is spoken through the shell's announcer instead, once per distinct error
+  // (a re-render with the same error stays quiet; a recovery re-arms it).
+  const sayStale = announceEdge();
+  $effect(() => {
+    sayStale(staleAnnouncement(what, error, empty), { assertive: true });
+  });
+  /** What the stale bar says to a screen reader; null while it isn't shown. */
+  function staleAnnouncement(noun: string, err: string | null, nothing: boolean): string | null {
+    return err && !nothing ? `Couldn’t refresh ${noun}. ${err}` : null;
+  }
 </script>
 
 {#if error && empty}
@@ -96,7 +110,7 @@
   {#if emptyView}{@render emptyView()}{/if}
 {:else}
   {#if error}
-    <div class="ls-stale" role="status" data-testid="load-stale">
+    <div class="ls-stale" data-testid="load-stale">
       <Icon name="warning" size={12} />
       <span class="ls-stale-text" title={error}>Couldn’t refresh {what} — showing the last good load. {error}</span>
       {#if onretry}<button class="btn small ghost" onclick={onretry} disabled={loading}>Retry</button>{/if}

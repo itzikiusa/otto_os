@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announceShown } from '../../lib/announce.svelte';
   import { onDestroy, untrack } from 'svelte';
   // DiscoveryChat — the chat pane for one Discovery Chat. A conversational agent
   // that works from an EMPTY/Untitled draft to help with early discovery &
@@ -386,7 +387,7 @@
               </div>
             </div>
             {#if stopNotice}
-              <p class="stop-notice" role="status">{stopNotice}</p>
+              <p class="stop-notice" use:announceShown={stopNotice}>{stopNotice}</p>
             {/if}
           </div>
         </div>

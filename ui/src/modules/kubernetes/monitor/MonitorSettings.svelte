@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announce } from '../../../lib/announce.svelte';
   // Per-cluster monitoring settings: enable, cadence, namespaces, probes
   // (preset-fillable; JSON probes carry field mappings, prometheus probes
   // carry include/exclude globs), exclusions, transport / concurrency /
@@ -294,6 +295,11 @@
       { label: 'port_forward — kubectl port-forward per pod', action: () => (c.transport = 'port_forward') },
     ]);
   }
+  // Spoken at the state edge through the shell's always-mounted announcer: a
+  // live region inserted together with its text is not read (WebKit/VoiceOver).
+  const errorSummary = $derived(errorCount ? (errors.probes ?? `Fix the ${plural(errorCount, 'highlighted field')} to save.`) : '');
+  $effect(() => { if (errorSummary) announce(errorSummary, { assertive: true }); });
+  $effect(() => { if (toggleError) announce(`Couldn’t update monitoring: ${toggleError} Try the switch again.`, { assertive: true }); });
 </script>
 
 <div class="settings" data-testid="k8s-monitor-settings" bind:this={settingsEl}>
@@ -318,8 +324,8 @@
       </div>
       <div class="dim status">{collectorLine(status, cfg.enabled, rel)}</div>
       <div class="dim">The switch saves immediately. Use Save for changes to the settings below.</div>
-      {#if errorCount}<p class="err field-error" role="alert">{errors.probes ?? `Fix the ${plural(errorCount, 'highlighted field')} to save.`}</p>{/if}
-      {#if toggleError}<p class="error" role="alert">Couldn’t update monitoring: {toggleError} Try the switch again.</p>{/if}
+      {#if errorCount}<p class="err field-error">{errors.probes ?? `Fix the ${plural(errorCount, 'highlighted field')} to save.`}</p>{/if}
+      {#if toggleError}<p class="error">Couldn’t update monitoring: {toggleError} Try the switch again.</p>{/if}
       {#if rbacMessage(status?.metrics_server)}
         <div class="rbac"><strong>metrics-server denied.</strong> Ask your cluster admin for: <code>{rbacMessage(status?.metrics_server)}</code></div>
       {/if}

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announceShown } from '../../lib/announce.svelte';
   import { radioKey } from '../../lib/radioKey';
   // "New design" sheet: title, studio (+ format where a studio has several),
   // an optional starter template, the project to file it in and the story it
@@ -157,7 +158,7 @@
         </select>
       </div>
     </div>
-    {#if error}<p class="err" role="alert">{error}</p>{/if}
+    {#if error}<p class="err" use:announceShown={{ text: error, assertive: true }}>{error}</p>{/if}
   </form>
   {#snippet footer()}
     <button class="btn" onclick={onclose}>Cancel</button>

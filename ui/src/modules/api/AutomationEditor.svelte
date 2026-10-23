@@ -9,8 +9,8 @@
   import { router } from '../../lib/router.svelte';
   import { editableAssertion, editableExtract, editableSteps, movedArrow, rowKey, savedSteps, type EditableStep } from './automationInput';
   import { KIND_LABEL, NO_VALUE_OPS, OP_LABEL, RUN_STATUS } from './automationLabels';
-  import { focusAfterRowRemoval, rowListOf } from './rowFocus';
-  import { announce } from '../../lib/announce.svelte';
+  import { focusAfterRowRemoval, rowListOf } from '../../lib/rowFocus';
+  import { announce, announceShown } from '../../lib/announce.svelte';
   import { tick } from 'svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -303,7 +303,7 @@
       <summary>Run once per data row (advanced)</summary>
       <p class="hint">A JSON array of objects. Each object runs every step once, with its keys available as <code>{'{{variables}}'}</code> on top of the environment. Values stay in memory. Up to 1 MiB and 1,000 requests per run.</p>
       <textarea dir="ltr" class="input mono" aria-label="Dataset rows" rows="4" bind:value={datasetText} placeholder={'[{"customer_id":"cus_1"},{"customer_id":"cus_2"}]'} disabled={apiClient.running}></textarea>
-      {#if datasetError}<p class="err" role="alert">{datasetError}</p>{/if}
+      {#if datasetError}<p class="err" use:announceShown={{ text: datasetError, assertive: true }}>{datasetError}</p>{/if}
     </details>
 
     <ol class="steps" bind:this={stepsEl}>

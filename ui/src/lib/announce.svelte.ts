@@ -58,3 +58,36 @@ export function announce(text: string, opts?: { assertive?: boolean }): void {
     announcer[channel] = text;
   });
 }
+
+/** An edge detector over `announce`: call it with the CURRENT message on every
+ *  render (from an `$effect`) and it speaks only when the message is new —
+ *  a re-render with the same text stays quiet. Null / '' means "the state is
+ *  gone" and re-arms it, so the same failure after a recovery speaks again. */
+export function announceEdge(): (text: string | null | undefined, opts?: { assertive?: boolean }) => void {
+  let last = '';
+  return (text, opts) => {
+    if (!text) {
+      last = '';
+      return;
+    }
+    if (text === last) return;
+    last = text;
+    announce(text, opts);
+  };
+}
+
+/** Action for a status line that is inserted with its state
+ *  (`{#if failed}<p use:announceShown={{ text: 'Run failed', assertive: true }}>`):
+ *  it announces when the line appears and again when its text changes, so the
+ *  line itself needs no role. Pass the words a listener needs — usually the
+ *  line's own text. */
+export function announceShown(
+  _node: Element,
+  param: string | { text: string; assertive?: boolean },
+): { update: (p: string | { text: string; assertive?: boolean }) => void } {
+  const say = announceEdge();
+  const run = (p: string | { text: string; assertive?: boolean }) =>
+    typeof p === 'string' ? say(p) : say(p.text, { assertive: p.assertive });
+  run(param);
+  return { update: run };
+}

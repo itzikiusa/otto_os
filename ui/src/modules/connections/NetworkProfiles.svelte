@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announce } from '../../lib/announce.svelte';
   import { tick } from 'svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
@@ -71,6 +72,9 @@
     } catch (e) { error = e instanceof Error ? e.message : String(e); }
     finally { busy = false; }
   }
+  // Spoken at the state edge through the shell's always-mounted announcer: a
+  // live region inserted together with its text is not read (WebKit/VoiceOver).
+  $effect(() => { if (error) announce(error, { assertive: true }); });
 </script>
 <div class="manager">
   <p>Forward explicit TCP endpoints through an existing SSH connection. Programs must use the localhost addresses or mapped environment variables.</p>
@@ -100,7 +104,7 @@
   <button class="btn small" type="button" disabled={busy || endpoints.length >= 8} title={endpoints.length >= 8 ? 'Up to 8 endpoints per profile' : undefined} onclick={() => void addEndpoint()}>Add endpoint</button>
   <p>Otto also sets OTTO_TUNNEL_&lt;NAME&gt;_HOST and _PORT. TLS server names and topology discovery may need application configuration.</p>
   {#if editing}<label class="archive"><input type="checkbox" bind:checked={archived} disabled={busy} />Archived (unavailable for new launches)</label>{/if}
-  {#if error}<p class="error" role="alert">{error}</p>{/if}
+  {#if error}<p class="error">{error}</p>{/if}
   <div class="profiles"><button class="btn small" type="button" disabled={busy || connectionsLoading || !!connectionsError || !name.trim() || !sshId || invalidEndpoints} onclick={save}>{busy ? 'Saving…' : 'Save network profile'}</button>
   {#if editing}<button class="btn small" type="button" disabled={busy} onclick={reloadSaved}>Refresh saved profile</button>{/if}
   <button class="btn small" type="button" disabled={busy} onclick={() => edit(null)}>Cancel edits</button></div>

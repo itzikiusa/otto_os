@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announce } from '../../lib/announce.svelte';
   import { loadErrorText } from '../../lib/loadError';
   // "New skill" sheet with a small template picker:
   //   • Blank           — a SKILL.md scaffold (frontmatter + When to use / Method)
@@ -126,6 +127,9 @@
     template = TEMPLATES[n].id;
     queueMicrotask(() => (tplEl?.querySelectorAll('[role="radio"]')[n] as HTMLElement | undefined)?.focus());
   }
+  // Spoken at the state edge through the shell's always-mounted announcer: a
+  // live region inserted together with its text is not read (WebKit/VoiceOver).
+  $effect(() => { if (error) announce(`Couldn’t create the skill. ${error}`, { assertive: true }); });
 </script>
 
 <Modal title="New skill" width={560} {onclose}>
@@ -194,7 +198,7 @@
       <span class="hint">Agents read this to decide when to use the skill — say what it does and when.</span>
     </div>
   {/if}
-  {#if error}<p class="err" role="alert">Couldn’t create the skill. {error}</p>{/if}
+  {#if error}<p class="err">Couldn’t create the skill. {error}</p>{/if}
 
   {#snippet footer()}
     <button class="btn" onclick={onclose}>Cancel</button>

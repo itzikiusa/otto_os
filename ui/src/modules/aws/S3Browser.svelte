@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announce } from '../../lib/announce.svelte';
   import { rowMenu as rowMenuKeys } from '../../lib/rowMenu';
   import { loadErrorText, providerErrorText } from '../../lib/loadError';
   import { plural } from '../../lib/plural';
@@ -19,6 +20,7 @@
   import { confirmer } from '../../lib/confirm.svelte';
   import { confirmProd } from '../../lib/confirmProd';
   import S3Preview from './S3Preview.svelte';
+  import S3TransferBars from './S3TransferBars.svelte';
   import { router } from '../../lib/router.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -571,6 +573,11 @@
   }
 
   const loginNeeded = $derived(isLoginRequired(new Error(bucketsError)) || isLoginRequired(new Error(objError)));
+  // Announced at the edge (lib/announce): the search lines below are plain text.
+  const searchLoading = $derived(!!search?.loading);
+  const searchError = $derived(search?.error ?? '');
+  $effect(() => { if (searchLoading) announce('Searching the bucket…'); });
+  $effect(() => { if (searchError) announce(`Couldn’t search the bucket. ${awsErrorText(searchError)}`, { assertive: true }); });
 </script>
 
 {#if !bucket}
@@ -662,9 +669,9 @@
       {:else if rowsShown.length === 0 && objFilter && (nextToken || search)}
         <div class="s3-search-empty">
           {#if search?.loading}
-            <p class="load-note" role="status">Searching the bucket for keys starting with “{prefix}{objFilter.trim()}”…</p>
+            <p class="load-note">Searching the bucket for keys starting with “{prefix}{objFilter.trim()}”…</p>
           {:else if search?.error}
-            <p class="err" role="alert">{awsErrorText(search.error)} <button class="btn small" onclick={() => void runSearch(objFilter.trim())}>Retry search</button></p>
+            <p class="err">{awsErrorText(search.error)} <button class="btn small" onclick={() => void runSearch(objFilter.trim())}>Retry search</button></p>
           {:else}
             <p class="dim">
               {#if searchedThis}
@@ -685,9 +692,9 @@
         {#if objFilter.trim() && (nextToken || search)}
           <div class="s3-search-row">
             {#if search?.loading && searchedThis}
-              <span class="dim" role="status">Searching the bucket for keys starting with “{prefix}{objFilter.trim()}”…</span>
+              <span class="dim">Searching the bucket for keys starting with “{prefix}{objFilter.trim()}”…</span>
             {:else if search?.error && searchedThis}
-              <span class="err" role="alert">{awsErrorText(search.error)}</span>
+              <span class="err">{awsErrorText(search.error)}</span>
               <button class="btn small" onclick={() => void runSearch(objFilter.trim())}>Retry search</button>
             {:else if searchedThis}
               <span class="dim">Includes bucket matches for keys starting with “{prefix}{objFilter.trim()}” (case-sensitive).</span>
@@ -760,22 +767,7 @@
   {/if}
 {/if}
 
-{#if uploading}
-  <div class="dl-bar" role="status">
-    <span class="mono">Uploading {uploading.name}</span>
-    <progress max={uploading.total} value={uploading.done}></progress>
-    <span class="dim">{uploading.done + 1} / {uploading.total}</span>
-  </div>
-{/if}
-
-{#if dl}
-  <div class="dl-bar" role="status">
-    <span class="mono">{leaf(dl.key)}</span>
-    <progress max={dl.total ?? undefined} value={dl.total ? dl.received : undefined}></progress>
-    <span class="dim">{fmtBytes(dl.received)}{dl.total ? ` / ${fmtBytes(dl.total)}` : ''}</span>
-    <button class="btn small" onclick={() => dl?.ctrl.abort()}>Cancel</button>
-  </div>
-{/if}
+<S3TransferBars {uploading} download={dl} oncanceldownload={() => dl?.ctrl.abort()} />
 
 {#if pickDirFor}
   <FolderPicker
@@ -1006,21 +998,6 @@
     display: flex;
     justify-content: center;
     padding: 10px;
-  }
-  .dl-bar {
-    position: sticky;
-    bottom: 0;
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 6px 12px;
-    border-top: 1px solid var(--border);
-    background: var(--surface);
-    font-size: var(--fs-s);
-  }
-  .dl-bar progress {
-    flex: 1;
-    height: 6px;
   }
   @media (max-width: 640px) {
     .hide-sm {

@@ -6,7 +6,7 @@ import { loadSource } from './sourceHarness.ts';
 // `try { copy } catch { toastError(…) }` site shows — it must say what to do.
 test('a failed copy tells the user to copy manually', async () => {
   // No navigator and no document: neither the async API nor the legacy path can copy.
-  const { copyTextOrThrow } = loadSource(new URL('../src/lib/clipboard.ts', import.meta.url), {}, {
+  const { copyTextOrThrow } = loadSource(new URL('../src/lib/clipboard.ts', import.meta.url), { './toast.svelte': { toasts: {} } }, {
     navigator: undefined,
     document: undefined,
     window: { isSecureContext: false },

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announceShown } from '../../lib/announce.svelte';
   // The Memory tab: everything Otto knows about you, visible and editable.
   //  • Profile — `profile.md`, facts you own (Otto only proposes additions).
   //  • Waiting for review — memories Otto suggested (memory approval on) or
@@ -212,7 +213,7 @@
         placeholder={'- Prefers aisle seats and quiet hotel rooms\n- Usually free after 17:00 on weekdays'}
         dir="auto"
       ></textarea>
-      {#if profileError}<p class="err" role="alert">{profileError}</p>{/if}
+      {#if profileError}<p class="err" use:announceShown={{ text: profileError, assertive: true }}>{profileError}</p>{/if}
     </section>
 
     {#if pendingMem.length}

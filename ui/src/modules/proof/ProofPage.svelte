@@ -19,26 +19,8 @@
   import DoneContractMeter from '../../lib/components/DoneContractMeter.svelte';
   import ProofSnapshotList from '../../lib/components/ProofSnapshotList.svelte';
   import { proof } from '../../lib/stores/proof.svelte';
-  import {
-    addArtifact,
-    archiveStaleSessionPacks,
-    artifactBlobUrl,
-    artifactContent,
-    assembleProof,
-    attachApiEvidence,
-    attachDbEvidence,
-    attachKafkaEvidence,
-    attachMediaRaw,
-    ciRefresh,
-    createProofPack,
-    deleteArtifact,
-    deleteProofPack,
-    getRepoProofConfig,
-    proofReport,
-    runPrCheck,
-    setRepoProofConfig,
-    waiveProof,
-  } from '../../lib/api/proof';
+  import { addArtifact, archiveStaleSessionPacks, artifactBlobUrl, artifactContent, assembleProof, attachApiEvidence, attachDbEvidence, attachKafkaEvidence, attachMediaRaw,
+    ciRefresh, createProofPack, deleteArtifact, deleteProofPack, getRepoProofConfig, proofReport, runPrCheck, setRepoProofConfig, waiveProof } from '../../lib/api/proof';
   import { downloadText } from '../../lib/components/exporters';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { api } from '../../lib/api/client';
@@ -297,7 +279,11 @@
       if (!wantedMedia.has(id)) URL.revokeObjectURL(url);
       else mediaUrls[id] = url;
     } catch (e) {
-      if (wantedMedia.has(id)) mediaErrors[id] = loadErrorText(e);
+      if (wantedMedia.has(id)) {
+        mediaErrors[id] = loadErrorText(e);
+        // Spoken here, at the edge: the inline error below is plain text.
+        announce(`Couldn’t load the media. ${mediaErrors[id]}`, { assertive: true });
+      }
     } finally {
       mediaInflight.delete(id);
     }
@@ -1014,7 +1000,7 @@
                         <img class="art-media" src={mediaUrls[a.id]} alt={a.title} />
                       {/if}
                     {:else if mediaErrors[a.id]}
-                      <div role="alert">
+                      <div>
                         <p>Couldn’t load the media</p>
                         <p class="dim">{mediaErrors[a.id]}</p>
                         <button class="btn small" aria-label="Retry media" onclick={() => void fetchMedia(a.id)}>Retry</button>

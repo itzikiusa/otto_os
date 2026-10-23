@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announce } from '../../lib/announce.svelte';
   // History: the doc's full revision timeline (append-only — only "Delete
   // forever" from the trash removes it). Pick a revision to see it, diff it
   // against the current text or another revision, and restore it (restoring
@@ -219,6 +220,10 @@
     const [a, b] = detail.seq < other.seq ? [detail, other] : [other, detail];
     return { from: a.seq, to: b.seq, before: a.content, after: b.content, fromLabel: `Rev ${a.seq}`, toLabel: `Rev ${b.seq}` };
   });
+  // Spoken at the state edge through the shell's always-mounted announcer: a
+  // live region inserted together with its text is not read (WebKit/VoiceOver).
+  $effect(() => { if (compareError) announce(`Couldn’t compare revision: ${compareError}`, { assertive: true }); });
+  $effect(() => { if (detailError) announce(`Couldn’t load revision ${untrack(() => selected)}: ${detailError}`, { assertive: true }); });
 </script>
 
 <aside class="wb-hist" aria-label="History" data-testid="wb-history">
@@ -305,10 +310,10 @@
         </button>
       </div>
       {#if compareError}
-        <p class="wb-err" role="alert">Couldn’t compare revision: {compareError}</p>
+        <p class="wb-err">Couldn’t compare revision: {compareError}</p>
       {/if}
       {#if detailError}
-        <p class="wb-err" role="alert">Couldn’t load revision {selected}: {detailError}
+        <p class="wb-err">Couldn’t load revision {selected}: {detailError}
           <button class="btn small" onclick={() => { const s = selected; selected = null; queueMicrotask(() => (selected = s)); }}>Retry</button>
         </p>
       {:else if !detail}

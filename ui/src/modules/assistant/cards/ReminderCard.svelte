@@ -6,7 +6,7 @@
   import { assistant, describeError } from '../../../lib/stores/assistant.svelte';
   import { confirmer } from '../../../lib/confirm.svelte';
   import { toasts } from '../../../lib/toast.svelte';
-  import { taskStateLabel, taskTone } from '../model';
+  import { taskStateLabel, taskTone } from '../../../lib/assistant/model';
   import { deliverLabel, whenLabel } from '../format';
   import type { AssistantTask } from '../../../lib/api/types';
 

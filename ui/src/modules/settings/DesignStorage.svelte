@@ -102,7 +102,7 @@
       testid="design-auto-tidy"
     />
     {#if report.last_prune}
-      <p class="dim" role="status">
+      <p class="dim">
         Last tidy {new Date(report.last_prune.at).toLocaleString()}: removed {plural(report.last_prune.versions_removed, 'version')}.
       </p>
     {/if}

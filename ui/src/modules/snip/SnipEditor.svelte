@@ -116,7 +116,7 @@
       };
       el.onerror = () => {
         if (destroyed) return;
-        loadError = 'The image could not be decoded. Retry loading the snip.';
+        loadError = 'The image couldn’t be decoded. Retry loading the snip.';
         loading = false;
       };
       el.src = url;
@@ -305,7 +305,7 @@
     if (leavePending) return leavePending;
     const pending = (async () => {
       if (await drainPersistence()) return true;
-      const { value } = await confirmer.choose('The latest annotations could not be saved. Keep the editor open to try again, or discard these changes.', {
+      const { value } = await confirmer.choose('The latest annotations couldn’t be saved. Keep the editor open to try again, or discard these changes.', {
         title: 'Annotations not saved',
         options: [
           { label: 'Retry saving', value: 'retry', kind: 'primary' },

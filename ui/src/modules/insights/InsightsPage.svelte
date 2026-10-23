@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announce } from '../../lib/announce.svelte';
   import { untrack } from 'svelte';
   import { plural } from '../../lib/plural';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
@@ -45,20 +46,8 @@
   import { capabilitiesApi } from './capabilities';
   import type { SupportBundle } from './capabilities';
   import { escapeHtml } from '../../lib/html';
-  import {
-    METRIC_KEYS,
-    delta,
-    indexPathFrom,
-    itemStatus,
-    parseIndex,
-    parseSummaryCached,
-    periodKey,
-    reportMetrics,
-    siblingPath,
-    type InsightsIndex,
-    type MetricKey,
-    type ParsedSummary,
-  } from './insightsParse';
+  import { METRIC_KEYS, delta, indexPathFrom, itemStatus, parseIndex, parseSummaryCached,
+    periodKey, reportMetrics, siblingPath, type InsightsIndex, type MetricKey, type ParsedSummary } from './insightsParse';
 
   // ---------------------------------------------------------------------------
   // Routing
@@ -690,6 +679,7 @@
     }
     return { total: acts.length, regressed, improved, fresh };
   }
+  $effect(() => { if (runFailReason) announce(`${runFailKind === 'ended' ? 'The insights run didn’t publish a report.' : 'Couldn’t start the insights run.'} ${runFailReason}`, { assertive: true }); });
 </script>
 
 <div class="insights-page">
@@ -749,7 +739,7 @@
       {#if runFailReason || pollRunId}
         <div class="banners">
           {#if runFailReason}
-            <div class="banner warn" role="alert">
+            <div class="banner warn">
               <Icon name="warning" size={14} />
               <div class="banner-body">
                 <strong>{runFailKind === 'ended' ? 'The insights run didn’t publish a report.' : 'Couldn’t start the insights run.'}</strong>

@@ -15,7 +15,7 @@
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { toastError } from '../../lib/toastError';
-  import { copyTextOrThrow } from '../../lib/clipboard';
+  import { COPY_FAILED_BODY, copyTextOrThrow } from '../../lib/clipboard';
   import { baseUrl } from '../../lib/api/client';
   import { auth } from '../../lib/stores/auth.svelte';
   import { mcpCpApi } from '../../lib/api/mcp';
@@ -139,7 +139,7 @@
       await copyTextOrThrow(text);
       toasts.success(`${what} copied`);
     } catch {
-      toasts.error('Couldn’t copy', 'Select and copy manually.');
+      toasts.error('Couldn’t copy', COPY_FAILED_BODY);
     }
   }
 </script>

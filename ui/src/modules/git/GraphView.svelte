@@ -6,32 +6,26 @@
   import { dialogFocus } from '../../lib/dialogFocus';
   import { toastError } from '../../lib/toastError';
   import { sentenceCase } from '../../lib/labels';
-  import { branchTracking, splitRemoteRef } from './refTracking';
+  import { branchTracking } from './refTracking';
   import { planSection } from './ref-budget';
   // Two-pane: LEFT = refs tree (local/remote/tags), MIDDLE = commit graph, RIGHT = commit detail/diff.
   import { untrack } from 'svelte';
-  import { api, isDirtyGitRefusal } from '../../lib/api/client';
+  import { api } from '../../lib/api/client';
   import type {
     CommitInfo,
     RefsResp,
     RefBranch,
     RefTag,
-    Repo,
     StashInfo,
     SubmoduleInfo,
     WorktreeInfo,
     RepoStatusResp,
     CleanupBaseResp,
-    RebasePreview,
   } from '../../lib/api/types';
   import { toasts } from '../../lib/toast.svelte';
-  import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
-  import { confirmer } from '../../lib/confirm.svelte';
-  import { confirmOutward } from '../../lib/confirmOutward';
   import { ui } from '../../lib/stores/ui.svelte';
   import { startMouseDrag } from '../../lib/dragCursor';
   import { git } from '../../lib/stores/git.svelte';
-  import { ws } from '../../lib/stores/workspace.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
@@ -56,12 +50,12 @@
     type ChipKind,
     type RefChip,
   } from './ref-menus';
-  import { copyTextOrThrow } from '../../lib/clipboard';
-  import { runPull } from './pullFlow';
   import { listRange } from '../../lib/listWindow.svelte';
   import { gitBridge } from './gitBridge.svelte';
   import { router } from '../../lib/router.svelte';
   import { routeGraphRef } from './deepLink';
+  import { createGraphActions } from './graph/graphActions.svelte';
+  import { createGraphMenus } from './graph/graphMenus';
 
   /** Strip trailing slashes so worktree paths match registered repo paths. */
   function normPath(p: string): string {
@@ -198,7 +192,6 @@
     else next.add(key);
     collapsedFolders = next;
   }
-
 
   // Grouped once per `refs` change (not re-sorted inside the template on every
   // render of the section).
@@ -936,15 +929,47 @@
   });
 
   // ── Context-menu helpers ────────────────────────────────────────────────────
-  /** Copy `text` to the clipboard and toast success/failure with `label`. */
-  async function clip(text: string, label: string): Promise<void> {
-    try {
-      await copyTextOrThrow(text);
-      toasts.success('Copied', label);
-    } catch {
-      toasts.error('Couldn’t copy to the clipboard', 'The clipboard isn’t available here. Select the text and copy it manually.');
-    }
-  }
+  const actions = createGraphActions({
+    get repoId() { return repoId; },
+    get workspaceId() { return workspaceId; },
+    get onstatus() { return onstatus; },
+    get checkoutBusy() { return checkoutBusy; },
+    set checkoutBusy(v) { checkoutBusy = v; },
+    get openWtBusy() { return openWtBusy; },
+    set openWtBusy(v) { openWtBusy = v; },
+    get worktrees() { return worktrees; },
+    set worktrees(v) { worktrees = v; },
+    get submodules() { return submodules; },
+    set submodules(v) { submodules = v; },
+    get currentRepoPath() { return currentRepoPath; },
+    get refKnowledge() { return refKnowledge; },
+    normPath,
+    adoptRefsRev,
+    refreshAfter,
+    refreshAfterCheckout,
+    mutate,
+    holdDiff,
+    stashShortMsg,
+  });
+  const menus = createGraphMenus(
+    {
+      get repoId() { return repoId; },
+      get onmergerequest() { return onmergerequest; },
+      get refs() { return refs; },
+      get selectedCommit() { return selectedCommit; },
+      get worktreeByBranch() { return worktreeByBranch; },
+      get worktreeBranches() { return worktreeBranches; },
+      get refKnowledge() { return refKnowledge; },
+      get baseBranch() { return baseBranch; },
+      openCreatePr,
+      chipsFor,
+      setCleanupBase,
+    },
+    actions,
+  );
+  // The handlers the markup and the rest of this script call.
+  const { checkout, checkoutRemote, checkoutRemoteRef, isForeignWorktree, openWorktree, wtName, wtPrune } = actions;
+  const { commitMenu, branchMenu, tagMenu, stashMenu, wtMenu, subMenu, fileToolsMenu } = menus;
 
   /** After a mutating graph op: propagate the returned status (if any) to the
    *  parent and re-query refs + log so the graph reflects the change. Both
@@ -1121,547 +1146,8 @@
     createPrOpen = true;
   }
 
-  // ── GitFlow: start a feature/release/hotfix branch off a commit or branch tip.
-  //    Reuses the same /branch endpoint (checkout:true) as the plain create. ──
-  /** Normalize a user-typed flow name: trim, drop a leading flow prefix if they
-   *  typed it, and collapse internal whitespace to dashes. '' → skip. */
-  function normalizeFlowName(raw: string): string {
-    return raw
-      .trim()
-      .replace(/^(feature|release|hotfix)\//i, '')
-      .replace(/\s+/g, '-');
-  }
-
-  async function startFlowBranch(
-    flow: 'feature' | 'release' | 'hotfix',
-    startPoint: string,
-  ): Promise<void> {
-    const label = flow[0].toUpperCase() + flow.slice(1);
-    const raw = await confirmer.promptText(`New ${flow} branch name`, {
-      title: `Start ${flow}`,
-      confirmLabel: 'Start',
-      placeholder: 'short-name',
-    });
-    if (raw === null) return;
-    const norm = normalizeFlowName(raw);
-    if (norm === '') return;
-    const name = `${flow}/${norm}`;
-    await mutate('/branch', { name, start_point: startPoint, checkout: true }, `${label} branch created`, name);
-  }
-
-  /** Menu items for the "GitFlow" section, parameterised by start point
-   *  (a commit sha or a branch tip name). Shared by commit + branch menus. */
-  function gitFlowItems(startPoint: string): MenuItem[] {
-    return [
-      { label: 'Start feature branch…', icon: 'branch', action: () => void startFlowBranch('feature', startPoint) },
-      { label: 'Start release branch…', icon: 'branch', action: () => void startFlowBranch('release', startPoint) },
-      { label: 'Start hotfix branch…', icon: 'branch', action: () => void startFlowBranch('hotfix', startPoint) },
-    ];
-  }
-
-  /** Branch names decorating a commit (`HEAD -> x`, `x`, `origin/x` → `x`),
-   *  deduped, excluding tags/stash/detached-HEAD markers and branches held by a
-   *  FOREIGN worktree (checking those out errors hard — the refs tree routes
-   *  them to their worktree instead). */
-  function commitBranchNames(c: CommitInfo): string[] {
-    const names: string[] = [];
-    for (const chip of chipsFor(c)) {
-      if (!['head', 'local', 'remote'].includes(chip.kind)) continue;
-      const name = chip.kind === 'remote' ? chip.label.replace(/^[^/]+\//, '') : chip.label;
-      if (!name || names.includes(name) || worktreeBranches.has(name)) continue;
-      names.push(name);
-    }
-    return names;
-  }
-
-  // ── Commit context menu ─────────────────────────────────────────────────────
-  function commitMenu(e: MouseEvent, c: CommitInfo): void {
-    const { currentBranch } = refKnowledge;
-    const items: MenuItem[] = [];
-    // Branches on this commit → a one-click plain SWITCH (a branch that's easy
-    // to spot on the graph but hard to find in a crowded refs tree). Nothing
-    // here pulls: the current branch instead gets an explicit `Pull`, and a
-    // branch held by another worktree routes to that worktree (git refuses to
-    // check it out twice — same rule as `branchMenu`).
-    for (const name of commitBranchNames(c)) {
-      const wt = worktreeByBranch.get(name);
-      if (name === currentBranch) {
-        items.push({ label: `Pull ${name}`, icon: 'arrowDown', action: () => void pullCurrent() });
-      } else if (wt) {
-        items.push({
-          label: `Open worktree (${name})`,
-          icon: 'worktree',
-          action: () => void openWorktree(wt),
-        });
-      } else {
-        items.push({
-          label: `Check out ${name}`,
-          icon: 'branch',
-          // A remote-only decoration (`origin/x` → `x`) must take the
-          // `-b x --track origin/x` path, not git's `checkout.guess` DWIM
-          // (which fails outright with several remotes).
-          action: () => void checkout(name, !refKnowledge.localNames.has(name)),
-        });
-      }
-    }
-    if (items.length > 0) items.push({ separator: true });
-    items.push(
-      {
-        label: 'Check out commit (detached)',
-        icon: 'branch',
-        action: () => void checkout(c.sha, false),
-      },
-      { label: 'Cherry-pick commit', icon: 'note', action: () => void cherryPick(c) },
-      { label: 'Bisect: known good revision…', icon: 'check', action: () => gitBridge.selectBisect(repoId, 'good', c.sha) },
-      { label: 'Bisect: known bad revision…', icon: 'info', action: () => gitBridge.selectBisect(repoId, 'bad', c.sha) },
-      { label: 'Plan interactive rebase onto this commit…', icon: 'merge', action: () => gitBridge.openRecovery(repoId, 'rebase', c.sha) },
-      { separator: true },
-      { label: 'Create branch here…', icon: 'branch', action: () => void createBranchAt(c.sha) },
-      { label: 'Create tag here…', icon: 'tag', action: () => void createTagAt(c.sha, false) },
-      {
-        label: 'Create annotated tag here…',
-        icon: 'tag',
-        action: () => void createTagAt(c.sha, true),
-      },
-    );
-    // Open a PR from the checked-out branch (the "from a commit while on a
-    // branch" case) — only meaningful when a branch is checked out.
-    if (currentBranch) {
-      items.push({ separator: true });
-      items.push({
-        label: `Create PR from ${currentBranch}…`,
-        icon: 'send',
-        action: () => openCreatePr(currentBranch),
-      });
-    }
-    // GitFlow section — start a flow branch off this exact commit.
-    items.push({ separator: true });
-    items.push({ label: 'GitFlow', disabled: true });
-    items.push(...gitFlowItems(c.sha));
-    items.push(
-      { separator: true },
-      { label: 'Revert commit…', icon: 'refresh', action: () => void revertCommit(c) },
-      { separator: true },
-      { label: 'Copy commit SHA', icon: 'note', action: () => void clip(c.sha, c.sha) },
-      { label: 'Copy short SHA', icon: 'note', action: () => void clip(c.short_sha, c.short_sha) },
-      {
-        label: 'Copy commit message',
-        icon: 'note',
-        action: () => void clip(c.subject, c.subject),
-      },
-    );
-    ctxMenu.show(e, items, { filter: items.length > 12 });
-  }
-
-  async function cherryPick(c: CommitInfo): Promise<void> {
-    await mutate('/cherry-pick', { sha: c.sha }, 'Cherry-picked', c.short_sha);
-  }
-
-  async function revertCommit(c: CommitInfo): Promise<void> {
-    const ok = await confirmer.ask(
-      `Revert commit ${c.short_sha} — “${c.subject}”? This creates a new commit undoing its changes.`,
-      { title: 'Revert commit', confirmLabel: 'Revert', danger: false },
-    );
-    if (!ok) return;
-    await mutate('/revert', { sha: c.sha }, 'Reverted', c.short_sha);
-  }
-
-  async function createBranchAt(startPoint: string): Promise<void> {
-    const name = await confirmer.promptText('New branch name', {
-      title: 'Create branch',
-      confirmLabel: 'Create',
-      placeholder: 'feature/my-branch',
-    });
-    if (!name) return;
-    await mutate(
-      '/branch',
-      { name, start_point: startPoint, checkout: true },
-      'Branch created',
-      name,
-    );
-  }
-
-  async function createTagAt(sha: string, annotated: boolean): Promise<void> {
-    const name = await confirmer.promptText('Tag name', {
-      title: annotated ? 'Create annotated tag' : 'Create tag',
-      confirmLabel: 'Create',
-      placeholder: 'v1.0.0',
-    });
-    if (!name) return;
-    let message: string | null = null;
-    if (annotated) {
-      message = await confirmer.promptText('Tag message', {
-        title: 'Annotated tag message',
-        confirmLabel: 'Create',
-        placeholder: 'Release notes…',
-      });
-      if (!message) return;
-    }
-    // Ask whether to push the new tag straight to origin.
-    const push = await confirmer.ask(`Push tag “${name}” to origin?`, {
-      title: 'Push tag',
-      confirmLabel: 'Push',
-      danger: false,
-    });
-    await mutate(
-      '/tag',
-      annotated ? { name, sha, message, push } : { name, sha, push },
-      'Tag created',
-      name,
-    );
-  }
-
-  /** Local branches OTHER than `selfMerge` (the menu subject's merge name),
-   *  as "Merge into <t>" items routing through the existing merge+conflict flow
-   *  via `onmergerequest(<source merge name>, t)`. Empty if nothing to merge into. */
-  function mergeIntoItems(selfMerge: string): MenuItem[] {
-    const targets = (refs?.local ?? []).map((b) => b.name).filter((t) => t !== selfMerge);
-    if (!onmergerequest || targets.length === 0) return [];
-    return targets.map((t) => ({
-      label: `Merge into ${t}`,
-      icon: 'branch',
-      action: () => onmergerequest?.(selfMerge, t),
-    }));
-  }
-
-  // ── Branch context menu (local + remote ref rows) ───────────────────────────
-  function branchMenu(e: MouseEvent, b: RefBranch): void {
-    const { remoteNames, localNames, currentBranch } = refKnowledge;
-    const items: MenuItem[] = [];
-
-    if (b.remote) {
-      // Remote ref row: checkout as a local tracking branch; delete on ITS remote
-      // (`upstream/x` must never delete `origin/x`).
-      const { remote: remoteName, branch: localName } = splitRemoteRef(b.name);
-      items.push({ label: 'Checkout', icon: 'branch', action: () => checkoutRemote(b) });
-      // Rebasing onto a remote ref is the common "catch up with origin" move.
-      if (currentBranch && b.name !== currentBranch) {
-        items.push({
-          label: `Rebase ${currentBranch} onto ${b.name}…`,
-          icon: 'merge',
-          action: () => void rebaseOnto(b.name),
-        });
-      }
-      items.push({ separator: true });
-      items.push({
-        label: 'Create branch from here…',
-        icon: 'branch',
-        action: () => void createBranchFrom(b.name),
-      });
-      // Merge into … — remote refs merge by their short local name (drag logic).
-      const mergeInto = mergeIntoItems(localName);
-      if (mergeInto.length > 0) {
-        items.push({ separator: true });
-        items.push({ label: `Merge ${localName} into`, disabled: true });
-        items.push(...mergeInto);
-      }
-      // GitFlow — start a flow branch off the remote tip.
-      items.push({ separator: true });
-      items.push({ label: 'GitFlow', disabled: true });
-      items.push(...gitFlowItems(b.name));
-      // Delete options reflect what actually EXISTS: the remote ref always (this
-      // is a remote row); the local twin + "local + remote" only when a local
-      // branch of the same name exists and isn't the one checked out.
-      const localTwin = localNames.has(localName) && localName !== currentBranch;
-      items.push({ separator: true });
-      items.push({
-        label: `Delete ${b.name}…`,
-        icon: 'trash',
-        danger: true,
-        action: () => void deleteRemoteBranch(localName, remoteName),
-      });
-      if (localTwin) {
-        items.push({
-          label: `Delete ${localName}…`,
-          icon: 'trash',
-          danger: true,
-          action: () => void deleteLocalBranch(localName, false),
-        });
-        items.push({
-          label: `Delete ${localName} + ${b.name}…`,
-          icon: 'trash',
-          danger: true,
-          // The remote half targets THIS row's remote (S15-303) — never origin
-          // by default when the row says `upstream/x`.
-          action: () => void deleteLocalBranch(localName, true, remoteName),
-        });
-      }
-      items.push({ separator: true });
-      items.push({ label: 'Copy branch name', icon: 'note', action: () => void clip(localName, localName) });
-    } else {
-      const isCurrent = b.name === currentBranch;
-      // Branch checked out in another worktree → open that tree, never checkout
-      // (git refuses "already checked out at …").
-      const wtElsewhere = worktreeByBranch.get(b.name);
-      if (wtElsewhere) {
-        items.push({
-          label: 'Open worktree',
-          icon: 'worktree',
-          action: () => void openWorktree(wtElsewhere),
-        });
-      } else {
-        items.push({
-          label: 'Checkout',
-          icon: 'branch',
-          disabled: isCurrent,
-          action: () => !isCurrent && void checkout(b.name, false),
-        });
-      }
-      // Updating the branch is its own entry — only the CHECKED-OUT branch can
-      // be pulled; any other one is a rebase target.
-      if (isCurrent) {
-        items.push({ label: `Pull ${b.name}`, icon: 'arrowDown', action: () => void pullCurrent() });
-      } else if (currentBranch) {
-        items.push({
-          label: `Rebase ${currentBranch} onto ${b.name}…`,
-          icon: 'merge',
-          action: () => void rebaseOnto(b.name),
-        });
-      }
-      items.push({ separator: true });
-      items.push({
-        label: 'Create branch from here…',
-        icon: 'branch',
-        action: () => void createBranchFrom(b.name),
-      });
-      items.push({ label: 'Rename…', icon: 'edit', action: () => void renameBranch(b.name) });
-      // Open a PR sourced from this branch.
-      items.push({ separator: true });
-      items.push({
-        label: `Create pull request from ${b.name}…`,
-        icon: 'send',
-        action: () => openCreatePr(b.name),
-      });
-      // Merge into … — pick any OTHER local branch as the destination.
-      const mergeInto = mergeIntoItems(b.name);
-      if (mergeInto.length > 0) {
-        items.push({ separator: true });
-        items.push({ label: `Merge ${b.name} into`, disabled: true });
-        items.push(...mergeInto);
-      }
-      // GitFlow — start a flow branch off this branch tip.
-      items.push({ separator: true });
-      items.push({ label: 'GitFlow', disabled: true });
-      items.push(...gitFlowItems(b.name));
-      // A matching remote branch → offer remote deletes too. The remote is the
-      // branch's TRACKING remote when it tracks the same name (a fork's
-      // `upstream/x`), else origin — "local + remote" must delete the twin the
-      // user sees, not whatever origin holds under that name (S15-303).
-      const up = b.upstream ? splitRemoteRef(b.upstream) : null;
-      const trackRemote = up && up.branch === b.name ? up.remote : 'origin';
-      const hasRemote = remoteNames.has(`${trackRemote}/${b.name}`);
-      // Never offer Delete on the checked-out branch (git refuses).
-      if (!isCurrent) {
-        items.push({ separator: true });
-        items.push({
-          label: `Delete ${b.name}…`,
-          icon: 'trash',
-          danger: true,
-          action: () => void deleteLocalBranch(b.name, false),
-        });
-        if (hasRemote) {
-          items.push({
-            label: `Delete ${trackRemote}/${b.name}…`,
-            icon: 'trash',
-            danger: true,
-            action: () => void deleteRemoteBranch(b.name, trackRemote),
-          });
-          items.push({
-            label: `Delete ${b.name} + ${trackRemote}/${b.name}…`,
-            icon: 'trash',
-            danger: true,
-            action: () => void deleteLocalBranch(b.name, true, trackRemote),
-          });
-        }
-      }
-      items.push({ separator: true });
-      items.push({ label: 'Copy branch name', icon: 'note', action: () => void clip(b.name, b.name) });
-      if (b.upstream) {
-        items.push({
-          label: 'Copy upstream name',
-          icon: 'note',
-          action: () => void clip(b.upstream!, b.upstream!),
-        });
-      }
-    }
-    // Cleanup base branch (Feature 3): choose which base the "merged → safe to
-    // delete" indicators compute against, or clear back to the detected default.
-    // Indicator-only; never deletes a branch.
-    const baseName = b.remote ? b.name.replace(/^[^/]+\//, '') : b.name;
-    items.push({ separator: true });
-    if (baseName === baseBranch) {
-      items.push({
-        label: 'Clear cleanup base (use default)',
-        icon: 'gear',
-        action: () => void setCleanupBase(null),
-      });
-    } else {
-      items.push({
-        label: `Set “${baseName}” as cleanup base`,
-        icon: 'gear',
-        action: () => void setCleanupBase(baseName),
-      });
-    }
-    ctxMenu.show(e, items, { filter: items.length > 12 });
-  }
-
-  async function createBranchFrom(ref: string): Promise<void> {
-    const name = await confirmer.promptText(`New branch from ${ref}`, {
-      title: 'Create branch',
-      confirmLabel: 'Create',
-      placeholder: 'feature/my-branch',
-    });
-    if (!name) return;
-    await mutate('/branch', { name, start_point: ref, checkout: true }, 'Branch created', name);
-  }
-
-  async function renameBranch(from: string): Promise<void> {
-    const to = await confirmer.promptText(`Rename branch “${from}” to`, {
-      title: 'Rename branch',
-      confirmLabel: 'Rename',
-      initial: from,
-    });
-    if (!to || to === from) return;
-    await mutate('/branch/rename', { from, to }, 'Branch renamed', `${from} → ${to}`);
-  }
-
-  /** `remote` names WHICH remote the `alsoRemote` half deletes on; it is sent
-   *  as `remote_name` on both the safe and the forced request (the daemon
-   *  otherwise defaults to origin). */
-  async function deleteLocalBranch(name: string, alsoRemote: boolean, remote = 'origin'): Promise<void> {
-    const ok = await confirmer.ask(
-      alsoRemote
-        ? `Delete branch “${name}” locally AND “${remote}/${name}” on the remote “${remote}”? This cannot be undone.`
-        : `Delete local branch “${name}”?`,
-      { title: 'Delete branch', confirmLabel: 'Delete', danger: true },
-    );
-    if (!ok) return;
-    const okTitle = alsoRemote ? 'Branch deleted (local + remote)' : 'Branch deleted';
-    // Safe delete first (`-d`): git refuses when the branch holds unmerged
-    // commits. Only then ask again, explicitly, before escalating to `-D` —
-    // deleting unmerged work deserves its own consent, not a blanket force.
-    try {
-      const s = await api.post<RepoStatusResp>(`/repos/${repoId}/branch/delete`, {
-        name,
-        remote: alsoRemote,
-        ...(alsoRemote ? { remote_name: remote } : {}),
-      });
-      await refreshAfter(s);
-      toasts.success(okTitle, name);
-      return;
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      if (!/not fully merged/i.test(msg)) {
-        toastError(`Couldn’t delete ${name}`, e);
-        await refreshAfter().catch(() => {});
-        return;
-      }
-      const force = await confirmer.ask(
-        `“${name}” has commits that aren’t merged anywhere else. Force-delete it and DROP those commits? This cannot be undone.`,
-        { title: 'Branch not fully merged', confirmLabel: 'Force delete', danger: true },
-      );
-      if (!force) return;
-      await mutate(
-        '/branch/delete',
-        { name, remote: alsoRemote, ...(alsoRemote ? { remote_name: remote } : {}), force: true },
-        okTitle,
-        name,
-      );
-    }
-  }
-
-  async function deleteRemoteBranch(name: string, remote = 'origin'): Promise<void> {
-    const full = `${remote}/${name}`;
-    const ok = await confirmer.ask(`Delete branch “${full}” on the remote “${remote}”? This cannot be undone.`, {
-      title: 'Delete remote branch',
-      confirmLabel: 'Delete',
-      danger: true,
-    });
-    if (!ok) return;
-    // Remote-only: leave any local branch of the same name intact. `remote_name`
-    // pins WHICH remote — the daemon pushes `--delete` to that remote, not origin.
-    await mutate(
-      '/branch/delete',
-      { name, remote: true, remote_name: remote, local: false, force: true },
-      'Remote branch deleted',
-      full,
-    );
-  }
-
-  // ── Tag context menu ────────────────────────────────────────────────────────
-  function tagMenu(e: MouseEvent | KeyboardEvent, t: RefTag): void {
-    const items: MenuItem[] = [
-      {
-        label: 'Check out tag (detached)',
-        icon: 'branch',
-        action: () => void checkout(t.name, false),
-      },
-      { separator: true },
-      { label: 'Push tag to origin', icon: 'send', action: () => void pushTag(t.name) },
-      {
-        label: 'Delete tag…',
-        icon: 'trash',
-        danger: true,
-        action: () => void deleteTag(t.name, false),
-      },
-      {
-        label: 'Delete tag on origin…',
-        icon: 'trash',
-        danger: true,
-        action: () => void deleteTag(t.name, true),
-      },
-      { separator: true },
-      { label: 'Copy tag name', icon: 'note', action: () => void clip(t.name, t.name) },
-    ];
-    ctxMenu.show(e, items);
-  }
-
-  async function pushTag(name: string): Promise<void> {
-    const ok = await confirmOutward({
-      verb: 'Push tag',
-      where: `origin · tag ${name}`,
-      who: 'Everyone with access to the remote sees the tag; CI or release jobs may react to it.',
-    });
-    if (!ok) return;
-    await mutate('/tag/push', { name }, 'Tag pushed', name);
-  }
-
-  async function deleteTag(name: string, remote: boolean): Promise<void> {
-    const ok = remote // outward-facing like its push sibling: where + who (ux-design-5-15)
-      ? await confirmOutward({ verb: 'Delete tag', where: `origin · tag ${name}`, danger: true,
-          who: 'Everyone with access to the remote loses the tag; CI or release jobs may react.' })
-      : await confirmer.ask(`Delete local tag “${name}”?`, { title: 'Delete tag', confirmLabel: 'Delete', danger: true });
-    if (!ok) return;
-    await mutate('/tag/delete', { name, remote }, remote ? 'Tag deleted on origin' : 'Tag deleted', name);
-  }
-
-  // ── Stash context menu + actions (sidebar STASHES section) ──────────────────
-  async function stashApply(s: StashInfo): Promise<void> {
-    // SHA-anchored (not positional index): the backend resolves the live
-    // stash@{N} so a renumbered stack can't apply the wrong entry.
-    await mutate('/stash', { op: 'apply', sha: s.sha }, 'Stash applied', stashShortMsg(s));
-  }
-
-  async function stashDrop(s: StashInfo): Promise<void> {
-    const ok = await confirmer.ask(
-      `Drop ${s.ref} — “${stashShortMsg(s)}”? This discards the stash and cannot be undone.`,
-      { title: 'Drop stash', confirmLabel: 'Drop', danger: true },
-    );
-    if (!ok) return;
-    // SHA-anchored drop — irreversible, so never trust a stale positional index.
-    await mutate('/stash', { op: 'drop', sha: s.sha }, 'Stash dropped', s.ref);
-  }
-
-  function stashMenu(e: MouseEvent | KeyboardEvent, s: StashInfo): void {
-    const items: MenuItem[] = [
-      { label: 'Apply stash', icon: 'stash', action: () => void stashApply(s) },
-      { separator: true },
-      { label: 'Drop stash…', icon: 'trash', danger: true, action: () => void stashDrop(s) },
-      { separator: true },
-      { label: 'Copy message', icon: 'note', action: () => void clip(s.message, s.message) },
-    ];
-    ctxMenu.show(e, items);
-  }
+  // ── Stashes, worktrees, submodules: their actions and menus are in
+  //    graph/graphActions.svelte.ts and graph/graphMenus.ts. ─────────────────
 
   /** Click a stash row → select its commit in the graph if it's present (the top
    *  stash usually is via `--all`; older reflog-only stashes won't be). */
@@ -1670,290 +1156,10 @@
     if (c) void selectCommit(c);
   }
 
-  // ── Worktree actions (sidebar WORKTREES section + worktree branches) ────────
   /** Absolute path of the repo tab we're viewing (main or linked worktree). */
   const currentRepoPath = $derived(
     normPath(repoPath || git.allRepos.find((r) => r.id === repoId)?.path || ''),
   );
-
-  /** Display name for a worktree: the last path segment. */
-  function wtName(w: WorktreeInfo): string {
-    return w.path.split('/').filter(Boolean).pop() ?? w.path;
-  }
-
-  /** True when this worktree is a different checkout than the open repo tab. */
-  function isForeignWorktree(w: WorktreeInfo): boolean {
-    if (w.prunable) return false;
-    if (!currentRepoPath) return !w.is_main;
-    return normPath(w.path) !== currentRepoPath;
-  }
-
-  /**
-   * Open a linked (or main) worktree as its own git tab — never checkout the
-   * branch into the current tree (git refuses: branch already checked out).
-   * Registers the path via detect if needed, then opens/activates the tab.
-   */
-  async function openWorktree(w: WorktreeInfo): Promise<void> {
-    if (w.prunable) {
-      toasts.error('Couldn’t open the worktree', 'Its folder is gone — prune the stale entry first');
-      return;
-    }
-    const path = normPath(w.path);
-    if (currentRepoPath && path === currentRepoPath) {
-      toasts.info('Already open', wtName(w));
-      return;
-    }
-    // Prefer an already-registered repo at this path (any workspace).
-    const existing = git.allRepos.find((r) => normPath(r.path) === path);
-    if (existing) {
-      git.openRepoTab(existing.id);
-      toasts.success('Opened worktree', existing.name);
-      return;
-    }
-    const parent = git.allRepos.find((r) => r.id === repoId);
-    const wsId = workspaceId || parent?.workspace_id || ws.currentId;
-    if (!wsId) {
-      toasts.error('Couldn’t open worktree', 'No workspace available to register the worktree');
-      return;
-    }
-    openWtBusy = w.path;
-    try {
-      const repo = await api.post<Repo>(`/workspaces/${wsId}/repos/detect`, { path: w.path });
-      await git.loadAllRepos(true);
-      git.openRepoTab(repo.id);
-      toasts.success('Opened worktree', repo.name);
-    } catch (e) {
-      toastError('Couldn’t open worktree', e);
-    } finally {
-      openWtBusy = '';
-    }
-  }
-
-  async function wtRemove(w: WorktreeInfo): Promise<void> {
-    // A dirty tree needs --force and the confirm must say what that discards.
-    // Removal always KEEPS the branch (and its commits) either way.
-    const detail = !w.dirty_known
-      ? ' Its changes couldn’t be checked; removal will proceed only if Git can do so safely.'
-      : w.dirty
-      ? ' It has UNCOMMITTED changes that will be discarded.'
-      : w.locked
-        ? ` It is locked${w.lock_reason ? ` (${w.lock_reason})` : ''}.`
-        : '';
-    const ok = await confirmer.ask(
-      `Remove worktree “${wtName(w)}” at ${w.path}?${detail} The branch${w.branch ? ` “${w.branch}”` : ''} and its commits are kept.`,
-      { title: 'Remove worktree', confirmLabel: 'Remove', danger: true },
-    );
-    if (!ok) return;
-    try {
-      worktrees = await api.post<WorktreeInfo[]>(`/repos/${repoId}/worktrees/remove`, {
-        path: w.path,
-        force: w.dirty_known === true && (w.dirty || w.locked),
-      });
-      toasts.success('Worktree removed', wtName(w));
-    } catch (e) {
-      toastError('Couldn’t remove the worktree', e);
-    }
-  }
-
-  async function wtPrune(): Promise<void> {
-    try {
-      worktrees = await api.post<WorktreeInfo[]>(`/repos/${repoId}/worktrees/prune`, {});
-      toasts.success('Pruned', 'Stale worktree entries removed');
-    } catch (e) {
-      toastError('Couldn’t prune the worktrees', e);
-    }
-  }
-
-  function wtMenu(e: MouseEvent | KeyboardEvent, w: WorktreeInfo): void {
-    const items: MenuItem[] = [];
-    if (!w.prunable && isForeignWorktree(w)) {
-      items.push({
-        label: 'Open worktree',
-        icon: 'worktree',
-        action: () => void openWorktree(w),
-      });
-      items.push({ separator: true });
-    }
-    if (!w.is_main) {
-      if (w.prunable) {
-        // Directory is already gone — the only cleanup is dropping the entry.
-        items.push({ label: 'Remove stale entry', icon: 'trash', danger: true, action: () => void wtPrune() }); // ui-guards: allow — no confirm: the folder is already gone, only its record is dropped
-      } else {
-        items.push({
-          label: w.dirty ? 'Remove (discard changes)…' : 'Remove worktree…',
-          icon: 'trash',
-          danger: true,
-          action: () => void wtRemove(w),
-        });
-      }
-      items.push({ separator: true });
-    }
-    items.push({ label: 'Copy path', icon: 'copy', action: () => void clip(w.path, w.path) });
-    if (w.branch) {
-      const branch = w.branch;
-      items.push({ label: 'Copy branch', icon: 'branch', action: () => void clip(branch, branch) });
-    }
-    ctxMenu.show(e, items);
-  }
-
-  // ── Submodule actions (sidebar SUBMODULES section) ──────────────────────────
-  async function subUpdate(path?: string): Promise<void> {
-    try {
-      submodules = await api.post<SubmoduleInfo[]>(`/repos/${repoId}/submodules/update`, {
-        path: path ?? null,
-      });
-      toasts.success('Submodules updated', path ?? 'all');
-    } catch (e) {
-      toastError('Couldn’t update the submodule', e);
-    }
-  }
-
-  function subMenu(e: MouseEvent | KeyboardEvent, sub: SubmoduleInfo): void {
-    const items: MenuItem[] = [
-      {
-        label: sub.state === 'uninitialized' ? 'Initialize (clone)' : 'Update to recorded commit',
-        icon: 'refresh',
-        action: () => void subUpdate(sub.path),
-      },
-      { label: 'Update all submodules', icon: 'refresh', action: () => void subUpdate() },
-      { separator: true },
-      { label: 'Copy path', icon: 'copy', action: () => void clip(sub.path, sub.path) },
-    ];
-    if (sub.url) {
-      const url = sub.url;
-      items.push({ label: 'Copy URL', icon: 'copy', action: () => void clip(url, url) });
-    }
-    items.push({ label: 'Copy commit SHA', icon: 'copy', action: () => void clip(sub.sha, sub.sha.slice(0, 10)) });
-    ctxMenu.show(e, items);
-  }
-
-  /** Switch branches. NEVER pulls, fetches or merges — a dirty tree is cleared
-   *  with stash → switch → restore (for both `create` values; the remote-row
-   *  double-click used to dead-end on it), and bringing the branch up to date
-   *  is the separate, explicit Pull action. */
-  async function checkout(branch: string, create: boolean): Promise<void> {
-    checkoutBusy = branch;
-    try {
-      const s = await git.checkout(repoId, { branch, create });
-      adoptRefsRev();
-      toasts.success(create ? 'Branch created' : `Switched to ${branch}`, create ? branch : undefined);
-      await refreshAfterCheckout(s, false);
-    } catch (e) {
-      if (isDirtyGitRefusal(e)) {
-        const ok = await confirmer.ask(
-          `Your uncommitted changes overlap files that differ on “${branch}”. Otto will stash them, switch, and restore them on “${branch}”. Nothing is pulled or merged.`,
-          { title: 'Stash, switch & restore', confirmLabel: 'Stash & switch', danger: false },
-        );
-        if (ok) {
-          try {
-            const s = await git.checkout(repoId, { branch, create, auto_stash: true });
-            adoptRefsRev();
-            if (s.changes.some((c) => c.kind === 'conflicted')) {
-              toasts.warn(
-                `Switched to ${branch} — restoring your changes hit conflicts`,
-                'Open "Resolve conflicts".',
-              );
-            } else {
-              toasts.success(
-                `Switched to ${branch}`,
-                'Your changes were restored; a recovery backup remains in Stashes.',
-              );
-            }
-            await refreshAfterCheckout(s, true);
-          } catch (e2) {
-            // The switch landed but the restore didn't — the daemon's message
-            // already ends with "run `git stash pop`".
-            toastError(`Switched to ${branch}, but couldn’t restore your changes`, e2);
-            await refreshAfter().catch(() => {});
-          }
-        }
-      } else {
-        toastError('Couldn’t check out the branch', e);
-      }
-    } finally {
-      checkoutBusy = '';
-    }
-  }
-
-  function checkoutRemote(b: RefBranch): void {
-    holdDiff();
-    void checkoutRemoteRef(b.name);
-  }
-
-  /** Check out a REMOTE-tracking ref (`origin/x`, `upstream/x`) the way every
-   *  git client does: switch to the local twin when one exists (a `create`
-   *  there died with "a branch named 'x' already exists"); otherwise create
-   *  `x` AT that remote ref with tracking. Only `origin/*` may go through the
-   *  checkout route's create (it bases on `origin/<name>`) — any other remote
-   *  creates from its own ref via `/branch`, which used to fork `x` from the
-   *  current HEAD instead and toast "Branch created". */
-  async function checkoutRemoteRef(remoteRef: string): Promise<void> {
-    const localName = remoteRef.replace(/^[^/]+\//, '');
-    if (refKnowledge.localNames.has(localName)) return checkout(localName, false);
-    if (remoteRef.startsWith('origin/')) return checkout(localName, true);
-    checkoutBusy = localName;
-    try {
-      const s = await api.post<RepoStatusResp>(`/repos/${repoId}/branch`, {
-        name: localName,
-        start_point: remoteRef,
-        checkout: true,
-      });
-      toasts.success('Branch created', `${localName} tracking ${remoteRef}`);
-      await refreshAfterCheckout(s, false);
-    } catch (e) {
-      toastError('Couldn’t check out the branch', e);
-    } finally {
-      checkoutBusy = '';
-    }
-  }
-
-  /** ⋯ on a file row of the commit diff: the file-scoped history/blame tools.
-   *  Routed through `gitBridge` because the panels that render them live in
-   *  RepoView, above this component. */
-  function fileToolsMenu(e: MouseEvent, path: string): void {
-    const rev = selectedCommit?.sha;
-    ctxMenu.show(e, [
-      {
-        label: 'History',
-        icon: 'note',
-        action: () => gitBridge.openFileTool({ kind: 'history', repoId, path }),
-      },
-      {
-        label: 'Blame',
-        icon: 'note',
-        action: () => gitBridge.openFileTool({ kind: 'blame', repoId, path, rev }),
-      },
-    ]);
-  }
-
-  /** Pull the CURRENT branch (the only branch a pull can target) and re-read the
-   *  graph — new commits are exactly what a pull produces. */
-  async function pullCurrent(): Promise<void> {
-    await runPull(repoId, onstatus);
-    await refreshAfter().catch(() => {});
-  }
-
-  /** Replay the current branch onto `onto`, after saying how much will move.
-   *  A conflicting rebase comes back 200 with `op_in_progress` — `mutate`
-   *  already routes that to the resolver. */
-  async function rebaseOnto(onto: string): Promise<void> {
-    const { currentBranch } = refKnowledge;
-    if (!currentBranch) return;
-    let commits: number | string = '?';
-    try {
-      const p = await api.get<RebasePreview>(
-        `/repos/${repoId}/rebase-preview?onto=${encodeURIComponent(onto)}`,
-      );
-      commits = p.commits;
-    } catch {
-      // Preview is advisory — a repo whose daemon predates it still rebases.
-    }
-    const ok = await confirmer.ask(
-      `Rebase \`${currentBranch}\` onto \`${onto}\`? ${typeof commits === 'number' ? plural(commits, 'commit') : '? commits'} will be replayed; conflicts open the resolver. Uncommitted changes are stashed and restored afterwards.`,
-      { title: 'Rebase', confirmLabel: 'Rebase', danger: false },
-    );
-    if (ok) await mutate('/rebase', { onto, auto_stash: true }, 'Rebased', onto);
-  }
 
   /** Select a commit (opens the detail, lights its spine). `deferDiff` holds the
    *  diff load for DIFF_DEFER_MS — used by controls whose double-click checks
@@ -2226,7 +1432,6 @@
     const d = new Date(iso);
     return Number.isNaN(d.getTime()) ? '' : d.toLocaleString();
   }
-
 
   // ── Ref-chip classification (GitKraken-style) ─────────────────────────────
   // Decoration strings from `git log %D` arrive as e.g. "HEAD -> main",
@@ -2515,7 +1720,6 @@
     return merged.sort((a, b) => order[a.kind] - order[b.kind]);
   }
 
-
   // The open ref popover: which commit, its grouped refs, and where to anchor it
   // (viewport coords from the expander's rect, so position:fixed clears the scroll).
   let refMenu = $state<{
@@ -2591,7 +1795,6 @@
       },
     });
   }
-
 
   // ── Cleanup base branch (drives the "merged → safe to delete" indicators) ────
   // The resolved base comes back on every refs response (`base_branch`); a branch

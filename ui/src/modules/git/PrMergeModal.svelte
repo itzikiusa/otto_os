@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announceShown } from '../../lib/announce.svelte';
   import { plural } from '../../lib/plural';
   // Merge confirmation for a hosted PR. Nothing merges until the user clicks
   // Merge here — and the modal first shows everything that argues against it:
@@ -303,7 +304,7 @@
     </div>
 
     {#if error}
-      <div class="err" role="alert"><Icon name="warning" size={14} /><span>Couldn’t merge. {error}</span></div>
+      <div class="err" use:announceShown={{ text: `Couldn’t merge. ${error}`, assertive: true }}><Icon name="warning" size={14} /><span>Couldn’t merge. {error}</span></div>
     {/if}
     <p class="who dim">
       Merges <span class="mono">{pr.source_branch}</span> into <span class="mono">{pr.target_branch}</span> on the provider.

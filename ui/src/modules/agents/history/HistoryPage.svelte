@@ -220,7 +220,7 @@
 
   async function copyNotify(v: string, what = 'Copied'): Promise<void> {
     if (await copyText(v)) toasts.info(what, v);
-    else toasts.error('Couldn’t copy', v);
+    else toasts.error('Couldn’t copy', `The clipboard isn’t available here. Select the text and copy it manually: ${v}`);
   }
 
   /** Reveal the folder in the OS file manager (desktop app); in a plain

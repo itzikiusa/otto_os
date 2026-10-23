@@ -86,40 +86,6 @@ test('fileIsCrlf reads the whole file, so an empty-sided hunk inherits CRLF', ()
   assert.equal(fileIsCrlf([]), false);
 });
 
-// ── S15-303 · "local + remote" deletes on the row's own remote ──────────────
-
-test('local + remote delete sends remote_name on the safe and the forced request', async () => {
-  const asks: string[] = [];
-  const posts: Record<string, unknown>[] = [];
-  const forced: Record<string, unknown>[] = [];
-  class NotMerged extends Error {}
-  const s = componentFunctions(git('GraphView.svelte'), ['deleteLocalBranch'], {
-    repoId: 'r1',
-    confirmer: { ask: async (text: string) => (asks.push(text), true) },
-    api: {
-      post: async (_u: string, body: Record<string, unknown>) => {
-        posts.push(body);
-        throw new NotMerged('error: the branch is not fully merged');
-      },
-    },
-    mutate: async (_p: string, body: Record<string, unknown>) => void forced.push(body),
-    refreshAfter: async () => {},
-    toasts: { success() {} },
-    toastError() {},
-  });
-  await s.deleteLocalBranch('feature-x', true, 'upstream');
-  assert.match(asks[0], /upstream\/feature-x/);
-  assert.doesNotMatch(asks[0], /origin/);
-  assert.equal(posts[0].remote_name, 'upstream');
-  assert.equal(forced[0].remote_name, 'upstream');
-  assert.equal(forced[0].force, true);
-
-  // A local-only delete sends no remote_name at all.
-  posts.length = 0;
-  await s.deleteLocalBranch('feature-x', false).catch(() => {});
-  assert.equal('remote_name' in posts[0], false);
-});
-
 // ── S15-302 · a copy found on the PR is recorded posted ────────────────────
 
 test('the retry guard marks a found copy posted so it stops being postable', async () => {

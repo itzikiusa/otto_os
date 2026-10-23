@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announceShown } from '../../lib/announce.svelte';
   import { plural } from '../../lib/plural';
   import { toastError } from '../../lib/toastError';
   import { onTabKey } from './tabKeys';
@@ -41,12 +42,8 @@
   import { downloadText } from '../../lib/components/exporters';
   import * as api from '../../lib/api/design';
   import type {
-    DesignArtifact,
-    DesignArtifactDetail,
-    DesignArtifactFormat,
-    DesignLinksResp,
-    DesignStatus,
-    DesignVersion,
+    DesignArtifact, DesignArtifactDetail, DesignArtifactFormat,
+    DesignLinksResp, DesignStatus, DesignVersion,
   } from '../../lib/api/types';
   import { DEVICES, type DeviceKind } from '../../lib/design/DeviceFrame.svelte';
   import Studio3D from './studio3d/Studio3D.svelte';
@@ -777,7 +774,7 @@
     {:else}
       {#snippet notices()}
         {#if newerHead}
-          <span class="notice warnc" role="status">
+          <span class="notice warnc" use:announceShown={'A newer version was saved.'}>
             <Icon name="info" size={12} /> A newer version was saved.
             <button class="linkbtn" onclick={() => void discard()}>Load it (discard mine)</button>
           </span>

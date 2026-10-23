@@ -1,5 +1,6 @@
 <script lang="ts">
   import {onMount} from 'svelte';
+  import {announceShown} from '../../lib/announce.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import {loadErrorText} from '../../lib/loadError';
@@ -24,9 +25,9 @@
     <label>Recognition threads <select bind:value={config.threads}>{#each [1, 2, 3, 4] as threads}<option value={threads}>{threads}</option>{/each}</select></label>
   </div>
   {#if capability}<dl><dt>Speech recognition</dt><dd>{capability.speech_ready ? 'Ready' : capability.configuration_error ?? 'Setup needed'}</dd><dt>Codex subscription</dt><dd>{capability.codex_subscription_ready ? 'Ready' : 'Sign in to the local Codex CLI'}</dd><dt>Screen text recognition</dt><dd>{capability.screen_text_ready ? 'Ready' : 'Unavailable on this computer'}</dd></dl><p>{capability.setup}</p>{/if}{/if}
-  {#if error}<p role="alert">{error}</p>{/if}
+  {#if error}<p class="form-error" use:announceShown={{text: error, assertive: true}}>{error}</p>{/if}
   {#snippet footer()}<button class="btn" onclick={onclose}>Done</button><button class="btn primary" disabled={!loaded || loading || busy} onclick={save}>{busy ? 'Checking…' : 'Save and check'}</button>{/snippet}
 </Modal>
 <style>
-  p { line-height: 1.5; color: var(--text-dim); } .fields, label { display: grid; gap: 8px; } .fields { gap: 16px; } input { width: 100%; } dl { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); gap: 8px; } dd { margin: 0; overflow-wrap: anywhere; } [role='alert'] { color: var(--danger); }
+  p { line-height: 1.5; color: var(--text-dim); } .fields, label { display: grid; gap: 8px; } .fields { gap: 16px; } input { width: 100%; } dl { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); gap: 8px; } dd { margin: 0; overflow-wrap: anywhere; } .form-error { color: var(--danger); }
 </style>

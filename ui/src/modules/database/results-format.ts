@@ -3,7 +3,7 @@
 // components or runes here — `copyWithToast` is the one impure helper, and it
 // only touches the clipboard + the toast store.
 import { toasts } from '../../lib/toast.svelte';
-import { copyText } from '../../lib/clipboard';
+import { COPY_FAILED_BODY, copyText } from '../../lib/clipboard';
 import { clipHistory } from '../../lib/stores/clipHistory.svelte';
 import { bsonScalar } from '../../lib/jsonTree/bson';
 import { CELL_MAX, previewJson } from './json-preview';
@@ -150,10 +150,15 @@ export { formatBytes as fmtBytes } from '../../lib/metric-format';
 /** Clipboard write (lib/clipboard, so it also works on insecure origins) with
  *  a failure toast; pass `successToast` to also confirm (the cell viewer's Copy
  *  does, the silent "copy value" menu items don't). Resolves whether the copy
- *  landed, so a caller with its own success copy can stay honest. */
+ *  landed, so a caller with its own success copy can stay honest.
+ *
+ *  Not lib/clipboard's `copyWithToast`: that one always toasts `Copied {what}`
+ *  with the text as its body, and these menu copies are silent on purpose (a
+ *  cell value in a toast is noise). The failure toast is the shared one, so a
+ *  blocked clipboard reads the same everywhere. Also records the clip history. */
 export async function copyWithToast(s: string, successToast?: [title: string, body?: string]): Promise<boolean> {
   if (!(await copyText(s))) {
-    toasts.error('Couldn’t copy', 'Select the text and copy it manually.');
+    toasts.error('Couldn’t copy', COPY_FAILED_BODY);
     return false;
   }
   clipHistory.record(s, 'Results');

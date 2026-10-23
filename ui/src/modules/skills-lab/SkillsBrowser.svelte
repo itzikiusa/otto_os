@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announce } from '../../lib/announce.svelte';
   // Skills Lab → Skills. Every skill your agents can load, grouped by NAME —
   // one row per skill with a badge per copy (Library · Claude · Codex ·
   // Antigravity · Bundled) and a sync dot (in sync / drifted / one copy). The
@@ -342,6 +343,9 @@
         return 'Comparing copies…';
     }
   }
+  // Spoken at the state edge through the shell's always-mounted announcer: a
+  // live region inserted together with its text is not read (WebKit/VoiceOver).
+  $effect(() => { if (partialError) announce(partialError, { assertive: true }); });
 </script>
 
 <div class="browser" data-testid="skills-browser">
@@ -399,7 +403,7 @@
           </div>
         </div>
         {#if partialError}
-          <div class="partial" role="status">
+          <div class="partial">
             <Icon name="warning" size={12} />
             <span class="grow" title={partialError}>{partialError}</span>
             <button class="btn small ghost" onclick={loadAll}>Retry</button>

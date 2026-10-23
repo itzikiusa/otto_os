@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announce } from '../../lib/announce.svelte';
   // Inline S3 object preview body: text (pretty JSON tree, CSV/TSV table with
   // a raw toggle, plain text/logs), images and PDFs. Images/PDFs stream the
   // object through the size-capped `download?inline=true` route into a Blob
@@ -135,12 +136,16 @@
       mediaUrl = null;
     };
   });
+  // Spoken at the state edge through the shell's always-mounted announcer: a
+  // live region inserted together with its text is not read (WebKit/VoiceOver).
+  $effect(() => { if (error) announce(`Couldn’t preview. ${error}`, { assertive: true }); });
+  $effect(() => { if (mediaError) announce(`Couldn’t preview. ${mediaError}`, { assertive: true }); });
 </script>
 
 {#if loading}
   <Skeleton rows={6} />
 {:else if error}
-  <p class="pv-err" role="alert">{error} <button class="btn small" onclick={onretry}>Retry preview</button></p>
+  <p class="pv-err">{error} <button class="btn small" onclick={onretry}>Retry preview</button></p>
 {:else if tooBig}
   <div class="pv-note">
     <p>Too large to preview ({fmtBytes(size)}) — in-app preview is capped at 25 MB.</p>
@@ -150,7 +155,7 @@
   {#if mediaLoading}
     <div><Skeleton rows={4} label="preview" /></div>
   {:else if mediaError}
-    <p class="pv-err" role="alert">{mediaError} <button class="btn small" onclick={() => mediaTry++}>Retry preview</button></p>
+    <p class="pv-err">{mediaError} <button class="btn small" onclick={() => mediaTry++}>Retry preview</button></p>
   {:else if mediaUrl && kind === 'image'}
     <div class="pv-media"><img src={mediaUrl} alt={`Preview of ${obj.key}`} /></div>
   {:else if mediaUrl}

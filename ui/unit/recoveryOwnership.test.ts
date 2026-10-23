@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { componentFunctions } from './componentFunctions.ts';
 import { deferred, loadSource } from './sourceHarness.ts';
-import { computeRunStats, EMPTY_AGENT_STATS } from '../src/modules/swarm/runStats.ts';
+import { computeRunStats, EMPTY_AGENT_STATS } from '../src/lib/swarm/runStats.ts';
 function analysis(getAnalysis: (id: string) => Promise<any>) {
   const product = { selectedId: 'story', getAnalysis, captureSelection() {
     const id = this.selectedId; return () => this.selectedId === id;
@@ -32,7 +32,7 @@ test('late analysis refresh cannot overwrite a newly selected run', async () => 
 function swarmFixture(api: Record<string, unknown>) {
   const { swarm } = loadSource(new URL('../src/lib/stores/swarm.svelte.ts', import.meta.url), {
     '../api/client': { api }, '../loadError': { loadErrorText: String },
-    '../toastError': { toastError() {} }, '../../modules/swarm/runStats': { computeRunStats, EMPTY_AGENT_STATS },
+    '../toastError': { toastError() {} }, '../swarm/runStats': { computeRunStats, EMPTY_AGENT_STATS },
     '../lazyModule': { announceModule() {} },
   });
   swarm.wsId = 'w'; swarm.detail = { id: 'A' }; return swarm;

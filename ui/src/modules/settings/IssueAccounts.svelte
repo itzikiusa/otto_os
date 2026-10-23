@@ -1,5 +1,6 @@
 <script lang="ts">
   import { originChanged } from './credentialOrigin';
+  import { announceShown } from '../../lib/announce.svelte';
   import { rowMenu } from '../../lib/rowMenu';
   import { plural } from '../../lib/plural';
   import PageHeader from '../../lib/components/PageHeader.svelte';
@@ -279,7 +280,7 @@
               {/if}
             </div>
             {#if r}
-              <div class="test-result" role="status" class:ok={r !== 'busy' && r.ok} class:bad={r !== 'busy' && !r.ok}>
+              <div class="test-result" class:ok={r !== 'busy' && r.ok} class:bad={r !== 'busy' && !r.ok} use:announceShown={r === 'busy' ? 'Testing…' : { text: testLabel(a, r), assertive: !r.ok }}>
                 {#if r !== 'busy'}<Icon name={r.ok ? 'check' : 'warning'} size={12} />{/if}
                 {r === 'busy' ? 'Testing…' : testLabel(a, r)}
               </div>

@@ -109,7 +109,8 @@ test('retrying a failed room window does not create another room or navigate awa
   await startSheet(page);
   await page.evaluate(() => { (window as unknown as {__roomNative: Fixture}).__roomNative.failOpen = true; });
   await page.getByRole('button', {name: 'Start room', exact: true}).click();
-  await expect(page.getByRole('alert')).toContainText('Could not open room window');
+  // The failure line is announced (announceShown), not a role=alert region.
+  await expect(page.locator('.form-error')).toContainText('Couldn’t open the room window. Could not open room window');
   await expect(page).toHaveURL(/#\/agents$/);
   await page.evaluate(() => { (window as unknown as {__roomNative: Fixture}).__roomNative.failOpen = false; });
   await page.getByRole('button', {name: 'Open room', exact: true}).click();

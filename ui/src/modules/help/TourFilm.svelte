@@ -25,6 +25,7 @@
   // "Loading…") · unavailable (inline message + Retry, never a raw error) ·
   // playing.
   import { onDestroy } from 'svelte';
+  import { announceShown } from '../../lib/announce.svelte';
   import { api } from '../../lib/api/client';
   import type { ResolveWalkthroughResp } from '../../lib/api/types';
   import Icon from '../../lib/components/Icon.svelte';
@@ -177,13 +178,13 @@
 
 <section class="film" bind:this={filmEl} aria-label="Tour film" data-testid="tour-film">
   {#if !film}
-    <div class="film-missing" role="status" data-testid="tour-film-missing">
+    <div class="film-missing" data-testid="tour-film-missing">
       <span class="film-missing-icon" aria-hidden="true"><Icon name="play" size={14} /></span>
       <span>The tour film isn’t part of this build. The guides below cover everything it shows.</span>
     </div>
   {:else}
     {#if status === 'failed'}
-      <div class="film-frame fallback" role="status" data-testid="tour-film-unavailable">
+      <div class="film-frame fallback" data-testid="tour-film-unavailable" use:announceShown={{ text: 'The tour film can’t load right now. Check your connection, then retry.', assertive: true }}>
         <span class="fallback-icon" aria-hidden="true"><Icon name="play" size={16} /></span>
         <p class="fallback-title">The tour film can’t load right now</p>
         <p class="fallback-sub">It streams from the internet. Check your connection, then try again. The guides work offline.</p>
@@ -220,7 +221,7 @@
           {/if}
         </video>
         {#if status === 'loading'}
-          <div class="film-loading" role="status" aria-label="Loading the tour"><span class="spinner" style:--spinner-size="24px" aria-hidden="true"></span></div>
+          <div class="film-loading" role="img" aria-label="Loading the tour"><span class="spinner" style:--spinner-size="24px" aria-hidden="true"></span></div>
         {/if}
       </div>
     {/if}

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announceShown } from '../../lib/announce.svelte';
   import { untrack } from 'svelte';
   import PathField from '../../lib/components/PathField.svelte';
   // Create/edit sheet for one personal agent: name, avatar, persona (soul),
@@ -227,7 +228,7 @@
 
 <Modal title={agent ? `Edit ${agent.name}` : 'New personal agent'} width={620} {onclose}>
   <div class="sheet">
-    {#if error}<div class="err" role="alert" bind:this={errorEl}>{error}</div>{/if}
+    {#if error}<div class="err" use:announceShown={{ text: error, assertive: true }} bind:this={errorEl}>{error}</div>{/if}
     {#if !agent && !ws.currentId}
       <button class="btn" onclick={() => (ui.newWorkspaceOpen = true)}>Add workspace</button>
     {/if}

@@ -365,7 +365,7 @@ class BrowserStore {
     } catch (e) {
       if (!current() || opts.background) return;
       this.page = null;
-      this.pageError = e instanceof Error ? e.message : 'Failed to load page';
+      this.pageError = e instanceof Error ? e.message : 'Couldn’t load the page.';
     } finally {
       if (current() && !opts.background) this.loadingPage = false;
     }

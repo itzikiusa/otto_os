@@ -497,12 +497,12 @@
 
     ctxMenu.show(e, items);
   }
-  // Spoken at the state edge through the shell's always-mounted announcer: a
-  // live region inserted together with its text is not read (WebKit/VoiceOver).
   $effect(() => {
     const st = database.activeConnStatus;
     if (st?.phase === 'error') announce(`Couldn’t connect. ${st.error ?? ''}`.trim(), { assertive: true });
   });
+  $effect(() => { if (database.schemaLoading || database.activeConnStatus?.phase === 'connecting') announce('Loading schema…'); });
+  $effect(() => { if (database.objectSearching) announce('Searching…'); });
 </script>
 
 <!-- The search / scope / counts controls and the search-hit list sit OUTSIDE
@@ -559,7 +559,7 @@
     </div>
   {/if}
   {#if database.schemaLoading || database.activeConnStatus?.phase === 'connecting'}
-    <div class="tree-loading" role="status">
+    <div class="tree-loading">
       <span class="spinner" style="--spinner-size: 13px" aria-hidden="true"></span>
       Loading schema…
     </div>
@@ -577,7 +577,7 @@
     <!-- Server-side results: a flat list, each hit labelled with its schema so
          you can tell two same-named tables apart. -->
     {#if database.objectSearching && hits.length === 0}
-      <div class="tree-loading" role="status"><span class="spinner" style="--spinner-size: 13px" aria-hidden="true"></span><span>Searching…</span></div>
+      <div class="tree-loading"><span class="spinner" style="--spinner-size: 13px" aria-hidden="true"></span><span>Searching…</span></div>
     {:else if hits.length === 0}
       <div class="tree-empty">
         No object matching "{database.objectSearchQuery}"{database.objectSearchScope === 'schema'
@@ -631,9 +631,9 @@
         {#if row.t === 'node'}
           {@render nodeRow(row.node, row.depth, row.pos, row.size)}
         {:else if row.t === 'failed'}
-          <div class="node-failed" role="group" aria-label="{row.node.label}: failed to load" class:fixed-h={windowed} style="padding-inline-start: {(row.depth + 1) * 13 + 18}px">
+          <div class="node-failed" role="group" aria-label="{row.node.label}: couldn’t load" class:fixed-h={windowed} style="padding-inline-start: {(row.depth + 1) * 13 + 18}px">
             <Icon name="x" size={12} />
-            <span>failed to load</span>
+            <span>Couldn’t load</span>
             <button class="node-failed-retry" onclick={() => expandNode(row.node)}>retry</button>
           </div>
         {:else if row.t === 'redis'}

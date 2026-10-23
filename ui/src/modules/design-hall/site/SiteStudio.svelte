@@ -614,7 +614,7 @@
     </div>
 
     {#if !doc}
-      <div class="invalid" role="alert">
+      <div class="invalid">
         <Icon name="warning" size={16} />
         <div>
           <strong>This isn’t a valid Site Studio document.</strong>

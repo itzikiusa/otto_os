@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announceShown } from '../../../lib/announce.svelte';
   // The Otto tab of an open design (every studio — the assist pipeline works
   // on any text/JSON format):
   //
@@ -46,8 +47,7 @@
   import { interruptSession } from '../../../lib/api/interrupt';
   import { askError, sendAsk } from './run';
   import {
-    QUICK_ACTIONS,
-    REJECT_REASONS,
+    QUICK_ACTIONS, REJECT_REASONS,
     applyAssistEvent,
     buildThread,
     busyTurn,
@@ -591,7 +591,7 @@
       {/each}
     {/if}
     {#if appliedNote}
-      <p class="applied" role="status"><Icon name="check" size={12} /> {appliedNote} <a href="#/design/learned">See what Otto learned</a></p>
+      <p class="applied" use:announceShown={appliedNote}><Icon name="check" size={12} /> {appliedNote} <a href="#/design/learned">See what Otto learned</a></p>
     {/if}
   </div>
 

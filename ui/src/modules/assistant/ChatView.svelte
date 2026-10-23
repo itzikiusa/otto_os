@@ -20,7 +20,7 @@
   import { transcript } from '../../lib/stores/transcript.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { assistant } from '../../lib/stores/assistant.svelte';
-  import { buildTimeline, providerLabel, threadCards, type ChatCard } from './model';
+  import { buildTimeline, providerLabel, threadCards, type ChatCard } from '../../lib/assistant/model';
   import { mergeWithTranscript, messageAuthor, type ChatMessage } from './chat';
   import { clock } from './format';
   import AssistantComposer from './AssistantComposer.svelte';

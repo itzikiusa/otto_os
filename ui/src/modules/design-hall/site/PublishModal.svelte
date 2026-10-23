@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announceShown } from '../../../lib/announce.svelte';
   import { copyTextOrThrow } from '../../../lib/clipboard';
   import { plural } from '../../../lib/plural';
   // Publish sheets for a site. Both targets stay on this Mac:
@@ -130,7 +131,7 @@
       await copyTextOrThrow(local.url);
       toasts.success('Preview address copied', onNetwork ? 'It needs your Otto sign-in and design access; devices on your network can reach it.' : 'It needs your Otto sign-in and only works on this Mac.');
     } catch {
-      toasts.warn('Couldn’t copy the address', local.url);
+      toasts.warn('Couldn’t copy the address', `The clipboard isn’t available here. Select the address and copy it manually: ${local.url}`);
     }
   }
 </script>
@@ -138,7 +139,7 @@
 <Modal title={mode === 'zip' ? 'Export static site' : 'Publish preview (local)'} width={540} {onclose}>
   <div class="body" data-testid="site-publish-modal">
     {#if dirty}
-      <p class="banner warn" role="status"><Icon name="warning" size={12} /> You have unsaved edits. {mode === 'zip' ? 'The export' : 'The preview'} uses the last saved version (v{seq}) — press Save (⌘S) first to include them.</p>
+      <p class="banner warn"><Icon name="warning" size={12} /> You have unsaved edits. {mode === 'zip' ? 'The export' : 'The preview'} uses the last saved version (v{seq}) — press Save (⌘S) first to include them.</p>
     {/if}
     {#if mode === 'zip'}
       <p class="lead">Downloads <strong>{artifact.title}</strong> v{seq} as a static site you can host anywhere.</p>
@@ -171,10 +172,10 @@
     {/if}
 
     {#if errors.length}
-      <p class="banner" role="status"><Icon name="info" size={12} /> {plural(errors.length, 'accessibility issue')} on this site — see Checks in the Design panel. Publishing still works.</p>
+      <p class="banner"><Icon name="info" size={12} /> {plural(errors.length, 'accessibility issue')} on this site — see Checks in the Design panel. Publishing still works.</p>
     {/if}
     {#if error}
-      <p class="banner bad" role="alert">
+      <p class="banner bad" use:announceShown={{ text: `${error.what} ${error.detail ?? ''}`.trim(), assertive: true }}>
         <Icon name="warning" size={12} />
         <span class="err-text"><strong>{error.what}</strong>{#if error.detail}<span class="dim err-detail">{error.detail}</span>{/if}</span>
       </p>

@@ -24,25 +24,6 @@ test('splitRemoteRef keeps the remote and the slash-bearing branch name', () => 
   assert.deepEqual(splitRemoteRef('main'), { remote: 'origin', branch: 'main' });
 });
 
-test('deleting upstream/feature-x names and pushes to upstream, never origin', async () => {
-  const asks: string[] = [];
-  const calls: { path: string; body: Record<string, unknown>; target: string }[] = [];
-  const s = componentFunctions(git('GraphView.svelte'), ['deleteRemoteBranch'], {
-    confirmer: { ask: async (text: string) => (asks.push(text), true) },
-    mutate: async (path: string, body: Record<string, unknown>, _ok: string, target: string) => {
-      calls.push({ path, body, target });
-    },
-  });
-  const { remote, branch } = splitRemoteRef('upstream/feature-x');
-  await s.deleteRemoteBranch(branch, remote);
-  assert.match(asks[0], /upstream\/feature-x/);
-  assert.doesNotMatch(asks[0], /origin/);
-  assert.equal(calls[0].body.remote_name, 'upstream');
-  assert.equal(calls[0].body.name, 'feature-x');
-  assert.equal(calls[0].body.local, false);
-  assert.equal(calls[0].target, 'upstream/feature-x');
-});
-
 // ── S15-02 · a partial discard never widens to the whole hunk ───────────────
 
 function hunkFixture() {

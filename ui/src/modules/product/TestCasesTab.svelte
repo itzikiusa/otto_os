@@ -3,9 +3,7 @@
   // per-case approve/request-changes/edit, bulk-select + bulk-approve, drag-to-
   // reorder (persists order_idx), approve a run (triggers skill learning), and
   // publish to Confluence.
-  import { tick } from 'svelte';
   import { rel } from '../../lib/stores/now.svelte';
-  import { announce } from '../../lib/announce.svelte';
   import ConfluenceSpaceSelect from '../../lib/components/ConfluenceSpaceSelect.svelte';
   import ConfluencePagePicker from '../../lib/components/ConfluencePagePicker.svelte';
   import { toastError } from '../../lib/toastError';
@@ -13,6 +11,7 @@
   import type { Poller } from '../../lib/poll';
   import { liveQuery } from '../../lib/live';
   import { onStoryChange } from './storyReset.svelte';
+  import { CaseOrder } from './caseOrder.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { runStateLabel } from '../../lib/labels';
   import { plural } from '../../lib/plural';
@@ -90,102 +89,14 @@
     selected = new Set();
   }
 
-  // ── Drag-to-reorder state ────────────────────────────────────────────────────
-  // Flat ordered list (mirrors activeCases but can be locally rearranged before
-  // persisting).  Populated/reset whenever activeCases changes.
-  let orderedIds = $state<string[]>([]);
-
-  // Populate orderedIds from activeCases whenever the active run changes.
-  // We keep a separate reactive list so local drags don't fight with store
-  // refreshes until the user drops.
+  // ── Reorder (drag, ⌥↑/⌥↓ and the Move buttons): caseOrder.svelte.ts ──────
+  // `order.ids` mirrors activeCases but can be locally rearranged before
+  // persisting; reset whenever activeCases changes, so local drags don't
+  // fight with store refreshes until the user drops.
+  const order = new CaseOrder({ run: () => activeRun, save: (runId, ids) => product.reorderTestcases(runId, ids) });
   $effect(() => {
-    orderedIds = activeCases.map((c) => c.id);
+    order.ids = activeCases.map((c) => c.id);
   });
-
-  let dragSrcId = $state<string | null>(null);
-  let dragOverId = $state<string | null>(null);
-  let savingOrder = $state(false);
-
-  function onDragStart(id: string): void {
-    dragSrcId = id;
-  }
-
-  function onDragOver(id: string, e: DragEvent): void {
-    e.preventDefault();
-    dragOverId = id;
-  }
-
-  function onDragLeave(): void {
-    dragOverId = null;
-  }
-
-  function onDrop(targetId: string): void {
-    if (!dragSrcId || dragSrcId === targetId) {
-      dragSrcId = null;
-      dragOverId = null;
-      return;
-    }
-    // Reorder: move dragSrcId to be just before targetId.
-    const next = orderedIds.filter((id) => id !== dragSrcId);
-    const idx = next.indexOf(targetId);
-    if (idx === -1) {
-      next.push(dragSrcId);
-    } else {
-      next.splice(idx, 0, dragSrcId);
-    }
-    orderedIds = next;
-    dragSrcId = null;
-    dragOverId = null;
-    // Persist immediately after drop.
-    void persistOrder();
-  }
-
-  function onDragEnd(): void {
-    dragSrcId = null;
-    dragOverId = null;
-  }
-
-  async function persistOrder(): Promise<void> {
-    if (!activeRun || savingOrder) return;
-    savingOrder = true;
-    try {
-      await product.reorderTestcases(activeRun.id, orderedIds);
-    } catch (e) {
-      toastError('Couldn’t save the order', e);
-    } finally {
-      savingOrder = false;
-    }
-  }
-
-  // ── Keyboard reorder (a11y-6-04): drag is not the only way ─────────────────
-  /** Move `id` one place up (-1) or down (+1) among `group` (the cards shown
-   *  in its category), persist, and keep focus on the moved card. */
-  async function moveCase(id: string, dir: -1 | 1, group: string[]): Promise<void> {
-    const at = group.indexOf(id);
-    const neighbour = group[at + dir];
-    if (at === -1 || !neighbour) return;
-    const next = [...orderedIds];
-    const a = next.indexOf(id);
-    const b = next.indexOf(neighbour);
-    if (a === -1 || b === -1) return;
-    [next[a], next[b]] = [next[b], next[a]];
-    orderedIds = next;
-    const focusedMove = (document.activeElement as HTMLElement | null)?.dataset?.move;
-    void persistOrder();
-    await tick();
-    const card = document.querySelector<HTMLElement>(`[data-case-id="${CSS.escape(id)}"]`);
-    const keep = focusedMove ? card?.querySelector<HTMLButtonElement>(`[data-move="${focusedMove}"]`) : null;
-    // A Move button that just went disabled (top/bottom) can't hold focus.
-    (keep && !keep.disabled ? keep : card?.querySelector<HTMLElement>('.case-checkbox'))?.focus();
-    announce(`Moved to position ${group.indexOf(neighbour) + 1} of ${group.length}`);
-  }
-
-  /** ⌥↑ / ⌥↓ on a focused card control moves the case. */
-  function onCaseKey(e: KeyboardEvent, id: string, group: string[]): void {
-    if (!e.altKey || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown')) return;
-    e.preventDefault();
-    void moveCase(id, e.key === 'ArrowUp' ? -1 : 1, group);
-  }
 
   // Which test-case run we're viewing (most recent by default).
   let activeRunId = $state<string | null>(null);
@@ -293,7 +204,7 @@
     caseActions = {};
     showPublishForm = false;
     selected = new Set();
-    orderedIds = [];
+    order.ids = [];
     clearPoll();
     if (sid) void loadRuns();
   }, clearPoll);
@@ -335,18 +246,18 @@
   // the next store reload, which will bring the persisted order_idx back).
   const orderedCases = $derived.by(() => {
     const byId = new Map(activeCases.map((c) => [c.id, c]));
-    // orderedIds may be stale (set from a previous activeCases snapshot); fall
-    // back to any cases not present in orderedIds appended at the end.
+    // order.ids may be stale (set from a previous activeCases snapshot); fall
+    // back to any cases not present in order.ids appended at the end.
     const seen = new Set<string>();
     const result: ProductTestcase[] = [];
-    for (const id of orderedIds) {
+    for (const id of order.ids) {
       const tc = byId.get(id);
       if (tc) {
         result.push(tc);
         seen.add(id);
       }
     }
-    // Append cases that arrived after the local orderedIds was set.
+    // Append cases that arrived after the local order.ids was set.
     for (const c of activeCases) {
       if (!seen.has(c.id)) result.push(c);
     }
@@ -376,10 +287,10 @@
     // effective order_idx (i.e. newly inserted rows not yet reordered).
     for (const cat of CATEGORIES) {
       result[cat].sort((a, b) => {
-        const oa = orderedIds.indexOf(a.id);
-        const ob = orderedIds.indexOf(b.id);
+        const oa = order.ids.indexOf(a.id);
+        const ob = order.ids.indexOf(b.id);
         if (oa !== ob) {
-          // Both present — use the local orderedIds position.
+          // Both present — use the local order.ids position.
           if (oa !== -1 && ob !== -1) return oa - ob;
           // One missing (new row) → push it after the known ones.
           if (oa === -1) return 1;
@@ -848,7 +759,7 @@
             </button>
           {/if}
 
-          {#if savingOrder}
+          {#if order.saving}
             <span class="field-label save-indicator">Saving order…</span>
           {/if}
         </div>
@@ -874,14 +785,14 @@
                   class="case-card tc-card"
                   class:case-approved={tc.status === 'approved'}
                   class:case-selected={selected.has(tc.id)}
-                  class:drag-over={dragOverId === tc.id}
+                  class:drag-over={order.dragOverId === tc.id}
                   role="listitem"
                   draggable="true"
-                  ondragstart={() => onDragStart(tc.id)}
-                  ondragover={(e) => onDragOver(tc.id, e)}
-                  ondragleave={onDragLeave}
-                  ondrop={() => onDrop(tc.id)}
-                  ondragend={onDragEnd}
+                  ondragstart={() => order.dragStart(tc.id)}
+                  ondragover={(e) => order.dragOver(tc.id, e)}
+                  ondragleave={() => order.dragLeave()}
+                  ondrop={() => order.drop(tc.id)}
+                  ondragend={() => order.dragEnd()}
                 >
                   <!-- Case header -->
                   <div class="case-header">
@@ -894,7 +805,7 @@
                         checked={selected.has(tc.id)}
                         onchange={() => toggleSelect(tc.id)}
                         onclick={(e) => e.stopPropagation()}
-                        onkeydown={(e) => onCaseKey(e, tc.id, cases.map((c) => c.id))}
+                        onkeydown={(e) => order.onKey(e, tc.id, cases.map((c) => c.id))}
                         aria-label="Select {tc.title}"
                       />
                       <span class="case-title">{tc.title}</span>
@@ -934,18 +845,18 @@
                           <button
                             class="btn small ghost"
                             data-move="up"
-                            onclick={() => void moveCase(tc.id, -1, group)}
-                            onkeydown={(e) => onCaseKey(e, tc.id, group)}
-                            disabled={savingOrder || group[0] === tc.id}
+                            onclick={() => void order.move(tc.id, -1, group, 'up')}
+                            onkeydown={(e) => order.onKey(e, tc.id, group)}
+                            disabled={group[0] === tc.id}
                             title="Move up (⌥↑)"
                             aria-label="Move {tc.title} up"
                           ><Icon name="chevronUp" size={12} /></button>
                           <button
                             class="btn small ghost"
                             data-move="down"
-                            onclick={() => void moveCase(tc.id, 1, group)}
-                            onkeydown={(e) => onCaseKey(e, tc.id, group)}
-                            disabled={savingOrder || group[group.length - 1] === tc.id}
+                            onclick={() => void order.move(tc.id, 1, group, 'down')}
+                            onkeydown={(e) => order.onKey(e, tc.id, group)}
+                            disabled={group[group.length - 1] === tc.id}
                             title="Move down (⌥↓)"
                             aria-label="Move {tc.title} down"
                           ><Icon name="chevronDown" size={12} /></button>

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announceShown } from '../../lib/announce.svelte';
   // One personal agent: Overview / Activity / Autonomy / Schedules / Runs /
   // Chat / Memory / Context tabs.
   import { announce } from '../../lib/announce.svelte';
@@ -507,7 +508,7 @@
     {#if schedFormOpen}
       <div class="form pa-panel">
         <h2>{schedEditId ? 'Edit schedule' : 'New schedule'}</h2>
-        {#if error}<div class="err" role="alert">{error}</div>{/if}
+        {#if error}<div class="err" use:announceShown={{ text: error, assertive: true }}>{error}</div>{/if}
         <div class="field-row">
           <div class="field">
             <label for="{uid}-cadence">Cadence</label>

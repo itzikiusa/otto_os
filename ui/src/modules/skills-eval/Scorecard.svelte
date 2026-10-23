@@ -156,7 +156,7 @@
       {#if expanded}
         <div class="pack">
           {#if score.proof_status === 'pending'}
-            <div class="pmsg" role="status" data-testid="proof-pending-evidence">Proof evidence will be available when the score update finishes.</div>
+            <div class="pmsg" data-testid="proof-pending-evidence">Proof evidence will be available when the score update finishes.</div>
           {:else if loading || proofError}
             <LoadState what="the proof pack" {loading} error={proofError} empty={true} variant="compact" onretry={() => proofRetry++} />
           {:else if artifacts.length === 0}

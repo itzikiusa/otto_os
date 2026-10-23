@@ -2,11 +2,14 @@
 // area's inline load state (ux-design-6-03), the live Mermaid preview that
 // keeps its last good diagram (ui-correctness-6-03), keyboard reorder of test
 // cases (accessibility-responsive-6-04) and the inline load errors that never
-// read as "nothing yet" (ux-design-6-04).
+// read as "nothing yet" (ux-design-6-04). The Mermaid race/debounce and the
+// reorder queue + focus are driven as behaviour (test-quality-6w1-06,
+// accessibility-responsive-6w1-02), not matched as source text.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { componentFunctions } from './componentFunctions.ts';
+import { deferred as sourceDeferred, loadSource } from './sourceHarness.ts';
 
 const src = (file: string) => readFileSync(new URL(`../src/modules/product/${file}`, import.meta.url), 'utf8');
 
@@ -60,24 +63,167 @@ test('the run area shows the detail load state before the "Run analysis" invitat
   assert.ok(loadState > 0 && loadState < invite);
 });
 
-test('live Mermaid edits keep the last good SVG and guard stale renders', () => {
-  const s = src('MockupViewer.svelte');
-  assert.match(s, /renderMermaid\(id, text, \{ isStale: \(\) => myGen !== gen \}\)/);
-  assert.match(s, /finally \{\s*if \(myGen === gen\) rendering = false;/);
-  assert.match(s, /catch \(e\) \{\s*if \(myGen !== gen\) return;/);
-  // Live path: no blanking ("Rendering…") while the new source renders, and debounced.
-  assert.match(s, /const live = src !== null && renderedFor === a\.id/);
-  assert.match(s, /if \(!live\) \{\s*rendering = true;/);
-  assert.match(s, /setTimeout\(\(\) => void renderFor\(a, src\), LIVE_DEBOUNCE_MS\)/);
+// ── MockupViewer: the live Mermaid preview (driven, not regex-matched) ──────
+
+const deferred = sourceDeferred;
+const flush = () => new Promise((r) => setImmediate(r));
+const MERMAID = { id: 'm1', mime: 'text/vnd.mermaid', filename: 'flow.mmd' };
+
+function mockupViewer(extra: Record<string, any> = {}, names = ['classify', 'revokeCreated', 'renderFor', 'scheduleRender']) {
+  return componentFunctions(new URL('../src/modules/product/MockupViewer.svelte', import.meta.url), names, {
+      Date, gen: 0, createdUrls: [], mermaidSeq: 0, renderedFor: null, LIVE_DEBOUNCE_MS: 200,
+      rendering: false, renderError: null, liveError: null, imgUrl: null, htmlContent: null, mermaidSvg: null,
+      toasts: { error() {} }, ...extra,
+    });
+}
+
+test('a Mermaid render that resolves late never overwrites a newer one, and rendering ends', async () => {
+  const pending: { text: string; d: ReturnType<typeof deferred<{ svg: string }>> }[] = [];
+  const v = mockupViewer({
+    renderMermaid(_id: string, text: string) {
+      const d = deferred<{ svg: string }>();
+      pending.push({ text, d });
+      return d.promise;
+    },
+  });
+  const first = v.renderFor(MERMAID, 'graph A');
+  const second = v.renderFor(MERMAID, 'graph B');
+  assert.equal(v.rendering, true);
+  // The SECOND render lands first, then the stale first one.
+  pending[1].d.resolve({ svg: '<svg>B</svg>' });
+  await second;
+  pending[0].d.resolve({ svg: '<svg>A</svg>' });
+  await first;
+  assert.equal(v.mermaidSvg, '<svg>B</svg>', 'the newer diagram is kept');
+  assert.equal(v.rendering, false);
+
+  // A live edit of the diagram on screen keeps the last good SVG meanwhile.
+  const live = v.renderFor(MERMAID, 'graph C');
+  assert.equal(v.mermaidSvg, '<svg>B</svg>', 'no blanking while the edit renders');
+  assert.equal(v.rendering, false, 'no "Rendering…" for a live edit');
+  pending[2].d.resolve({ svg: '<svg>C</svg>' });
+  await live;
+  assert.equal(v.mermaidSvg, '<svg>C</svg>');
 });
 
-test('test cases reorder without a mouse; the drag glyph is hidden from screen readers', () => {
+/** A manual clock for the component's setTimeout/clearTimeout. */
+function fakeClock() {
+  let now = 0;
+  let seq = 0;
+  const timers = new Map<number, { at: number; fn: () => void }>();
+  return {
+    setTimeout(fn: () => void, ms: number) { timers.set(++seq, { at: now + ms, fn }); return seq; },
+    clearTimeout(id: number) { timers.delete(id); },
+    tick(ms: number) {
+      now += ms;
+      for (const [id, t] of [...timers]) if (t.at <= now) { timers.delete(id); t.fn(); }
+    },
+  };
+}
+
+test('two live edits inside the debounce window make exactly one render', () => {
+  const clock = fakeClock();
+  const renders: string[] = [];
+  const v = mockupViewer({
+    renderedFor: 'm1', setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout,
+    renderFor: (_a: unknown, src: string) => { renders.push(src); },
+  }, ['scheduleRender']);
+  // Svelte runs the previous effect's cleanup before re-running it.
+  const cleanup = v.scheduleRender(MERMAID, 'graph A');
+  clock.tick(150);
+  cleanup();
+  v.scheduleRender(MERMAID, 'graph AB');
+  clock.tick(199);
+  assert.deepEqual(renders, [], 'nothing renders inside the window');
+  clock.tick(1);
+  assert.deepEqual(renders, ['graph AB']);
+  // A first render (nothing of this attachment on screen) is immediate.
+  v.renderedFor = null;
+  assert.equal(v.scheduleRender(MERMAID, 'graph D'), undefined);
+  assert.deepEqual(renders, ['graph AB', 'graph D']);
+});
+
+// ── TestCasesTab reorder (product/caseOrder.svelte.ts): queued saves, focus ──
+
+function caseOrder(ids: string[]) {
+  const saves: string[][] = [];
+  const inflight: ReturnType<typeof deferred<void>>[] = [];
+  const focused: string[] = [];
+  const announced: string[] = [];
+  // Each card exposes its Move buttons and checkbox; a Move button at the
+  // list edge is disabled (as the re-rendered markup makes it).
+  const ctl = (name: string, disabled = () => false) => ({ focus() { focused.push(name); }, get disabled() { return disabled(); } });
+  const mod = loadSource(new URL('../src/modules/product/caseOrder.svelte.ts', import.meta.url), {
+    svelte: { tick: async () => {} },
+    '../../lib/announce.svelte': { announce(m: string) { announced.push(m); } },
+    '../../lib/toastError': { toastError() {} },
+  }, {
+    CSS: { escape: (s: string) => s },
+    document: {
+      activeElement: { dataset: {} },
+      querySelector(sel: string) {
+        const id = /data-case-id="([^"]+)"/.exec(sel)![1];
+        const order = () => state.ids as string[];
+        return { querySelector(q: string) {
+          if (q === '[data-move="up"]') return ctl(`${id}:up`, () => order()[0] === id);
+          if (q === '[data-move="down"]') return ctl(`${id}:down`, () => order()[order().length - 1] === id);
+          return ctl(`${id}:checkbox`);
+        } };
+      },
+    },
+  });
+  const state = new mod.CaseOrder({ run: () => ({ id: 'run1' }), save(_run: string, order: string[]) {
+    saves.push([...order]);
+    const d = deferred<void>();
+    inflight.push(d);
+    return d.promise;
+  } });
+  state.ids = [...ids];
+  return { state, saves, inflight, focused, announced };
+}
+
+test('a Move persists the swapped order and keeps focus on the pressed button mid-list', async () => {
+  const { state, saves, inflight, focused, announced } = caseOrder(['a', 'b', 'c', 'd']);
+  await state.move('b', 1, ['a', 'b', 'c', 'd'], 'down');
+  assert.deepEqual(saves, [['a', 'c', 'b', 'd']]);
+  assert.deepEqual(focused, ['b:down'], 'WebKit does not focus a clicked button; the pressed one is kept');
+  assert.deepEqual(announced, ['Moved to position 3 of 4']);
+  inflight[0].resolve();
+  await flush();
+  assert.equal(state.saving, false);
+});
+
+test('Move buttons stay live during a save: every move persists, the last save has the final order', async () => {
+  const { state, saves, inflight, focused } = caseOrder(['a', 'b', 'c', 'd']);
+  const group = ['a', 'b', 'c', 'd'];
+  await state.move('b', 1, group, 'down'); // save 1 in flight
+  assert.equal(state.saving, true);
+  await state.move('b', 1, ['a', 'c', 'b', 'd'], 'down'); // queued
+  // ⌥↑ from the card's checkbox is queued the same way.
+  let prevented = false;
+  state.onKey({ altKey: true, key: 'ArrowUp', preventDefault() { prevented = true; }, currentTarget: { dataset: {} } },
+    'c', ['a', 'c', 'd', 'b']);
+  await flush();
+  assert.equal(prevented, true);
+  assert.equal(saves.length, 1, 'one save at a time');
+  assert.deepEqual([...state.ids], ['c', 'a', 'd', 'b']);
+  inflight[0].resolve();
+  await flush();
+  assert.deepEqual(saves, [['a', 'c', 'b', 'd'], ['c', 'a', 'd', 'b']], 'the queued moves are saved with the final order');
+  inflight[1].resolve();
+  await flush();
+  assert.equal(saves.length, 2, 'nothing left queued');
+  assert.equal(state.saving, false);
+  // b reached the bottom: its Down button went disabled, so focus fell back
+  // to the checkbox; the ⌥↑ from c's checkbox stays on that checkbox.
+  assert.deepEqual(focused, ['b:down', 'b:checkbox', 'c:checkbox']);
+});
+
+test('test cases have labelled Move buttons; the drag glyph is hidden from screen readers', () => {
   const s = src('TestCasesTab.svelte');
   assert.match(s, /class="drag-handle" aria-hidden="true"/);
   assert.match(s, /aria-label="Move \{tc\.title\} up"/);
   assert.match(s, /aria-label="Move \{tc\.title\} down"/);
-  assert.match(s, /e\.key === 'ArrowUp' \? -1 : 1/);
-  assert.match(s, /async function moveCase[\s\S]*?void persistOrder\(\);[\s\S]*?\.focus\(\)/);
 });
 
 test('annotations and the canvas picker show failed loads inline, never as "nothing yet"', () => {

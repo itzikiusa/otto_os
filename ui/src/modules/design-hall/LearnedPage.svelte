@@ -456,7 +456,7 @@
     <div class="split" class:with-evidence={withEvidence}>
       <div class="list">
         {#if learned.mode === 'off'}
-          <p class="callout" role="status"><Icon name="info" size={13} /> Learning is off for this workspace, so Otto doesn’t propose rules.
+          <p class="callout"><Icon name="info" size={13} /> Learning is off for this workspace, so Otto doesn’t propose rules.
             <button class="linkbtn" onclick={() => go('settings')}>Turn it on</button></p>
         {/if}
         {#if tab === 'pending'}

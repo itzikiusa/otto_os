@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announceShown } from '../../lib/announce.svelte';
   // Workbench — per-user scratch files (scripts, JSON, Markdown, diagrams…)
   // with formatting, a live preview, placeholders, Send to… and the full,
   // append-only edit history. Layout: files | tabs + editor (+ preview) |
@@ -656,7 +657,7 @@
               </div>
 
               {#if active.remoteChanged}
-                <div class="wb-banner" role="status">
+                <div class="wb-banner" use:announceShown={'This file changed in another window. Reload, or keep yours.'}>
                   <Icon name="info" size={13} />
                   <span>This file changed in another window.</span>
                   <button class="btn small" onclick={() => void reloadRemote()}>Reload</button>
@@ -664,7 +665,7 @@
                 </div>
               {/if}
               {#if active.saveError}
-                <div class="wb-inline-err" role="alert">
+                <div class="wb-inline-err" use:announceShown={{ text: `Couldn’t save: ${active.saveError}. Your text is kept on this device until it saves.`, assertive: true }}>
                   <Icon name="warning" size={13} />
                   <span>Couldn’t save: {active.saveError}. Your text is kept on this device until it saves.</span>
                   <button class="btn small" onclick={() => void workbench.save(active.id, false)}>Retry</button>
@@ -883,9 +884,7 @@
     color: var(--text-dim);
     white-space: nowrap;
   }
-  .wb-save.dirty {
-    color: var(--warning);
-  }
+  .wb-save.dirty { color: var(--warning); }
   .wb-save.err {
     color: var(--danger);
   }

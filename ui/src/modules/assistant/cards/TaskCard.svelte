@@ -8,7 +8,7 @@
   import { rel } from '../../../lib/stores/now.svelte';
   import { toasts } from '../../../lib/toast.svelte';
   import { confirmer } from '../../../lib/confirm.svelte';
-  import { TASK_KIND, taskStateLabel, taskTone } from '../model';
+  import { TASK_KIND, taskStateLabel, taskTone } from '../../../lib/assistant/model';
   import type { AssistantTask } from '../../../lib/api/types';
 
   interface Props {

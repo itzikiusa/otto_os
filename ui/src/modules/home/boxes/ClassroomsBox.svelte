@@ -630,10 +630,12 @@
   const empty = $derived(school.total === 0);
   /** A crumb navigates up and turns into the (non-interactive) current crumb:
    *  move focus to the stage, the 3D view's key surface, before it unmounts. */
-  const upTo = (go: (h: SchoolHandle) => Promise<void>) => (): void => {
-    stage?.focus({ preventScroll: true });
-    if (handle) void go(handle);
-  };
+  function upTo(go: (h: SchoolHandle) => Promise<void>): () => void {
+    return () => {
+      stage?.focus({ preventScroll: true });
+      if (handle) void go(handle);
+    };
+  }
   const crumbs = $derived.by(() => {
     const out: { label: string; go?: () => void }[] = [{ label: 'Corridor', go: view.kind === 'corridor' ? undefined : upTo((h) => h.toCorridor()) }];
     if (openRoomModel) out.push({ label: openRoomModel.name, go: view.kind === 'screen' ? upTo((h) => h.backToRoom()) : undefined });

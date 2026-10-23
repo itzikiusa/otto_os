@@ -134,7 +134,10 @@ test('open room recap replaces archive identity and discards the old pending pag
     await expect(modal.getByText('Old archive event 1', {exact: true})).toBeVisible();
     failNextRevision = true;
     await modal.getByRole('button', {name: 'Next events', exact: true}).click();
-    await expect(modal.getByRole('alert')).toContainText('Synthetic revision failure');
+    // ux-design-6w1-01: the failed refresh is LoadState's stale bar (announced,
+    // not a role) that leads with what failed, over the still-shown recap.
+    await expect(modal.getByTestId('load-stale')).toContainText('Couldn’t refresh this recap');
+    await expect(modal.getByTestId('load-stale')).toContainText('Synthetic revision failure');
     await modal.getByRole('button', {name: 'Retry', exact: true}).click();
     await expect.poll(() => oldPageRequested).toBe(true);
     membership!.send(JSON.stringify({type: 'snapshot', room: {...room, recap: {...room.recap, id: 'archive-B'}}}));

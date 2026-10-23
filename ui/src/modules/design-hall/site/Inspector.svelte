@@ -483,7 +483,7 @@
           <input dir="auto" class="input hex" placeholder="# hex" bind:value={hexDraft} disabled={readonly} aria-label="Custom color (hex)" onchange={commitHex} />
         </div>
         {#if bg?.offBrand}
-          <p class="warnchip" role="status"><Icon name="warning" size={12} /> Off-brand color — not in {kitLabel ?? 'the palette'}.
+          <p class="warnchip"><Icon name="warning" size={12} /> Off-brand color — not in {kitLabel ?? 'the palette'}.
             {#if nearest && !readonly}<button class="linkbtn" onclick={() => setBg(nearest!.value)}>Use {nearest.label}</button>{/if}
           </p>
         {:else if bg?.unknownToken}

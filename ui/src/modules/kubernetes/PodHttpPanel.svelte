@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announce } from '../../lib/announce.svelte';
   import { plural } from '../../lib/plural';
   import { toastError } from '../../lib/toastError';
   // Drawer "HTTP" tab (K-3): call an HTTP endpoint inside one pod or every pod
@@ -224,6 +225,9 @@
     if (r.body_base64) return `(binary body, ${r.body.length} base64 chars)`;
     return prettyBody(r.body);
   }
+  // Spoken at the state edge through the shell's always-mounted announcer: a
+  // live region inserted together with its text is not read (WebKit/VoiceOver).
+  $effect(() => { if (runError) announce(runError, { assertive: true }); });
 </script>
 
 <div class="ph" data-testid="k8s-pod-http">
@@ -303,7 +307,7 @@
     {#if mutating && guarded}<div class="guard small" role="note"><Icon name="warning" size={12} /> {isProdEnv(cluster?.environment) ? 'Production' : 'Read-only'} cluster — you’ll be asked to type the target name.</div>{/if}
 
     {#if runError}
-      <div class="err" role="alert">{runError}</div>
+      <div class="err">{runError}</div>
     {:else if results && !results.length}
       <EmptyState icon="box" title="No pods matched" body="The workload has no running pods to call." />
     {:else if results}

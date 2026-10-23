@@ -22,7 +22,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import { recallSelection, rememberSelection } from '../../lib/lastSelection';
   import { assistant, describeError } from '../../lib/stores/assistant.svelte';
-  import { latestThreadId, providerLabel, spaceLabel } from './model';
+  import { latestThreadId, providerLabel, spaceLabel } from '../../lib/assistant/model';
   import ThreadList from './ThreadList.svelte';
   import ChatView from './ChatView.svelte';
   import TasksTab from './TasksTab.svelte';

@@ -16,7 +16,7 @@
   import { copyAsJson } from '../../lib/components/exporters';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import Modal from '../../lib/components/Modal.svelte';
-  import { copyTextOrThrow } from '../../lib/clipboard';
+  import { COPY_FAILED_BODY, copyTextOrThrow } from '../../lib/clipboard';
   import Icon from '../../lib/components/Icon.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -54,7 +54,7 @@
       await copyTextOrThrow(`@${u.username}`);
       toasts.success('Username copied', `@${u.username}`);
     } catch {
-      toasts.error('Couldn’t copy the username', 'The clipboard write was blocked.');
+      toasts.error('Couldn’t copy the username', COPY_FAILED_BODY);
     }
   }
 
@@ -63,7 +63,7 @@
       await copyAsJson(u);
       toasts.success('User JSON copied');
     } catch {
-      toasts.error('Couldn’t copy the user', 'The clipboard write was blocked.');
+      toasts.error('Couldn’t copy the user', COPY_FAILED_BODY);
     }
   }
 

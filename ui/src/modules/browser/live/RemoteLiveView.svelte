@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announce } from '../../../lib/announce.svelte';
   // Remote live browser: a tab's daemon-owned Chromium, streamed into this
   // pane as screencast frames over `WS /ws/browser/{tab_id}/live` and driven
   // back with input frames (docs/contracts/ws.md §1b). Unlike the desktop
@@ -36,32 +37,10 @@
   import { clientToPage, viewportChanged, viewportFor, type ViewportRequest } from './geometry';
   import { keyPayload, routeKey } from './keys';
   import { coalesce, mergeWheel, wheelPixels, type Clock, type WheelDelta } from './throttle';
-  import {
-    EMPTY_METER,
-    INITIAL,
-    isStale,
-    latencySample,
-    meterFps,
-    meterFrame,
-    meterLatency,
-    reduce,
-    type ConnEvent,
-    type ConnState,
-  } from './connection';
-  import {
-    blockedCopy,
-    buttonName,
-    closedReason,
-    driverFor,
-    encode,
-    parseBinaryFrame,
-    parseServer,
-    safeCursor,
-    type ClientMsg,
-    type FrameHeader,
-    type LiveViewState,
-    type ServerMsg,
-  } from './protocol';
+  import { EMPTY_METER, INITIAL, isStale, latencySample, meterFps,
+    meterFrame, meterLatency, reduce, type ConnEvent, type ConnState } from './connection';
+  import { blockedCopy, buttonName, closedReason, driverFor, encode, parseBinaryFrame,
+    parseServer, safeCursor, type ClientMsg, type FrameHeader, type LiveViewState, type ServerMsg } from './protocol';
 
   interface Props {
     tab: BrowserTab;
@@ -850,25 +829,42 @@
   );
 
   const isTouch = typeof matchMedia !== 'undefined' && matchMedia('(pointer: coarse)').matches;
+  // Each derived below is a STATE (not its ticking detail), so a reconnect
+  // attempt counter or an fps tick never re-announces.
+  const driveNote = $derived(
+    driver === 'agent' ? 'An agent is driving this page. Its actions pause while you drive.'
+    : tookOverFromAgent ? 'You have control. The agent is paused.'
+    : watchOnly ? 'You’re watching. Driving this page needs Edit access to Browser in this workspace.'
+    : '',
+  );
+  $effect(() => { if (driveNote) announce(driveNote); });
+  const startingNote = $derived(!hasFrame && conn.status !== 'ended' && conn.status !== 'reconnecting' ? (conn.status === 'live' ? 'Loading the page…' : 'Starting the live browser…') : '');
+  $effect(() => { if (startingNote) announce(startingNote); });
+  const reconnecting = $derived(conn.status === 'reconnecting' || (conn.status === 'connecting' && hasFrame));
+  // Connection loss interrupts (assertive); the attempt text is read once, at the edge.
+  $effect(() => { if (reconnecting) announce(untrack(() => statusText), { assertive: true }); });
+  const bannerText = $derived(banner?.text ?? '');
+  $effect(() => { if (bannerText) announce(bannerText, { assertive: untrack(() => banner?.tone) !== 'info' }); });
+  $effect(() => { if (conn.status === 'ended') announce(`The live session ended. ${untrack(() => conn.reason) || closedReason('closed')}`, { assertive: true }); });
 </script>
 
 <div class="rlv" data-testid="remote-live" data-status={conn.status}>
   {#if driver === 'agent'}
-    <div class="drive-bar" role="status" data-testid="live-drive-bar">
+    <div class="drive-bar" data-testid="live-drive-bar">
       <Icon name="cursor" size={14} />
       <span class="who"><AgentChip title="An agent is driving this page" /> An agent is driving this page. Its actions pause while you drive.</span>
       <span class="grow"></span>
       <button class="btn small primary" onclick={takeOver} disabled={watchOnly}>Take over</button>
     </div>
   {:else if tookOverFromAgent}
-    <div class="drive-bar mine" role="status" data-testid="live-drive-bar">
+    <div class="drive-bar mine" data-testid="live-drive-bar">
       <Icon name="user" size={14} />
       <span class="who">You have control. The agent is paused.</span>
       <span class="grow"></span>
       <button class="btn small" onclick={handBack}>Hand back</button>
     </div>
   {:else if watchOnly}
-    <div class="drive-bar mine" role="status" data-testid="live-drive-bar">
+    <div class="drive-bar mine" data-testid="live-drive-bar">
       <Icon name="eye" size={14} />
       <span class="who">You’re watching. Driving this page needs Edit access to Browser in this workspace.</span>
     </div>
@@ -915,7 +911,7 @@
   </div>
 
   {#if kbdFocused}
-    <div class="hint" role="status">
+    <div class="hint">
       Typing goes to the page · <kbd>Esc</kbd> releases · <kbd>⇧Esc</kbd> sends Esc
     </div>
   {/if}
@@ -927,21 +923,21 @@
   {/if}
 
   {#if !hasFrame && conn.status !== 'ended' && conn.status !== 'reconnecting'}
-    <div class="center" role="status" aria-live="polite">
+    <div class="center">
       <Icon name="globe" size={16} />
       <span>{conn.status === 'live' ? 'Loading the page…' : 'Starting the live browser…'}</span>
     </div>
   {/if}
 
   {#if conn.status === 'reconnecting' || (conn.status === 'connecting' && hasFrame)}
-    <div class="banner" role="status" aria-live="polite" data-testid="live-reconnecting">
+    <div class="banner" data-testid="live-reconnecting">
       <Icon name="warning" size={14} />
       <span class="text">{statusText}</span>
       {#if errorNote}<span class="dim" title={errorNote}>{errorNote}</span>{/if}
       <button class="btn small" onclick={retryNow}>Retry now</button>
     </div>
   {:else if banner}
-    <div class="banner" class:info={banner.tone === 'info'} role="status" data-testid="live-banner">
+    <div class="banner" class:info={banner.tone === 'info'} data-testid="live-banner">
       <Icon name={banner.tone === 'info' ? 'info' : 'shield'} size={14} />
       <span class="text">{banner.text}</span>
       {#if banner.action}
@@ -960,7 +956,7 @@
   {/if}
 
   {#if conn.status === 'ended'}
-    <div class="center ended" role="status" data-testid="live-ended">
+    <div class="center ended" data-testid="live-ended">
       <h2>The live session ended</h2>
       <p>{conn.reason || closedReason('closed')}</p>
       <div class="row">

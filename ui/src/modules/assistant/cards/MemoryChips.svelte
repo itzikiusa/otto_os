@@ -6,7 +6,7 @@
   import Icon from '../../../lib/components/Icon.svelte';
   import { toasts } from '../../../lib/toast.svelte';
   import { assistant, describeError } from '../../../lib/stores/assistant.svelte';
-  import type { ChatCard } from '../model';
+  import type { ChatCard } from '../../../lib/assistant/model';
 
   type MemoryCard = Extract<ChatCard, { kind: 'memory' }>;
   interface Props {

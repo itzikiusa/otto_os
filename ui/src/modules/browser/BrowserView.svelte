@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announceShown } from '../../lib/announce.svelte';
   // Browser module page: tab strip + URL bar + reader-mode page. Mirrors the
   // shape of VaultPage/LoopsPage (a thin view over a $state store).
 
@@ -780,7 +781,7 @@
   </div>
 
   {#if browser.summarizing && !browser.summary}
-    <div class="summary" role="status">
+    <div class="summary" use:announceShown={'Summarizing this page…'}>
       <div class="summary-head"><span>Summary · drafted by Otto</span></div>
       <p class="dim-line">Summarizing this page…</p>
       <div><button class="btn small" onclick={() => browser.stopSummarize()}><Icon name="stop" size={12} /> Stop</button></div>
@@ -818,7 +819,7 @@
       <LiveEngineSetup onreader={() => toggleMode('reader')} />
     {:else}
       {#if liveUnavailable}
-        <div class="live-note" role="status">
+        <div class="live-note">
           <Icon name="globe" size={13} />
           <span>This tab is in live mode, but this Otto daemon has no live browser. You’re seeing Reader view here.</span>
           <span class="grow"></span>
@@ -897,9 +898,7 @@
     color: var(--text);
     font-size: var(--fs-s);
   }
-  .live-note .grow {
-    flex: 1;
-  }
+  .live-note .grow { flex: 1; }
   .live-host {
     flex: 1;
     min-height: 0;

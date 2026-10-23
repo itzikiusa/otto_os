@@ -1,19 +1,15 @@
 // Brand Kit editor — the small interactive helpers the sections share: the
 // per-token "⋯" menu (rename, describe, copy reference / CSS variable, delete),
-// naming prompts and copy-with-toast. Everything goes through the shared
-// confirmer / ctxMenu / toasts (no native dialogs, no hand-rolled popups).
+// naming prompts. Everything goes through the shared confirmer / ctxMenu /
+// toasts and lib/clipboard's `copyWithToast` (no native dialogs, no
+// hand-rolled popups).
 
 import { ctxMenu, type MenuItem } from '../../../lib/contextmenu.svelte';
 import { confirmer } from '../../../lib/confirm.svelte';
 import { toasts } from '../../../lib/toast.svelte';
-import { copyText } from '../../../lib/clipboard';
+import { copyWithToast } from '../../../lib/clipboard';
 import type { BrandTokenGroup } from '../../../lib/api/types';
 import { cssVarName, isValidTokenName, tokenLabel, tokenRef } from './tokens';
-
-export async function copyWithToast(text: string, what: string): Promise<void> {
-  if (await copyText(text)) toasts.success(`Copied ${what}`, text.length > 80 ? undefined : text);
-  else toasts.error('Couldn’t copy', 'The clipboard isn’t available here. Select the text and copy it manually.');
-}
 
 /** Ask for a token name; null when cancelled, invalid (explained) or taken. */
 export async function askTokenName(

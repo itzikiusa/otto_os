@@ -3,7 +3,7 @@
   import { toastError } from '../../lib/toastError';
   import { api, baseUrl } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
-  import { copyTextOrThrow } from '../../lib/clipboard';
+  import { COPY_FAILED_BODY, copyTextOrThrow } from '../../lib/clipboard';
   import { confirmer } from '../../lib/confirm.svelte';
   import TokensPanel from './TokensPanel.svelte';
   import type { McpOttoToolInfo } from '../../lib/api/types';
@@ -55,7 +55,7 @@
       await copyTextOrThrow(text);
       toasts.success(`${what} copied`);
     } catch {
-      toasts.error('Couldn’t copy', 'Select and copy manually.');
+      toasts.error('Couldn’t copy', COPY_FAILED_BODY);
     }
   }
 

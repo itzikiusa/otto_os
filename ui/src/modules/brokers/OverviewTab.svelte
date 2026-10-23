@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announce } from '../../lib/announce.svelte';
   import { formatBytes } from '../../lib/metric-format';
   import { pluralNoun } from '../../lib/plural';
   import { api } from '../../lib/api/client';
@@ -90,11 +91,15 @@
   const peakRate = $derived(
     Math.max(1, ...(metrics?.throughput.map((p) => p.messages_per_sec) ?? [1])),
   );
+  // Spoken at the state edge through the shell's always-mounted announcer: a
+  // live region inserted together with its text is not read (WebKit/VoiceOver).
+  $effect(() => { if (loading && !overview) announce('Connecting to the cluster…'); });
+  $effect(() => { if (slow && loading && !overview) announce('Still waiting on the brokers. Check the bootstrap servers and your network, or try again.'); });
 </script>
 
 <div class="overview">
   {#if loading && !overview}
-    <div class="connecting" role="status">
+    <div class="connecting">
       <p class="muted">Connecting to the cluster…</p>
       {#if slow}
         <p class="muted slow-note">

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announce } from '../../lib/announce.svelte';
   import PathField from '../../lib/components/PathField.svelte';
   import { toastError } from '../../lib/toastError';
   // New/Edit connection sheet — unified form with optional SSH tunnel toggle.
@@ -9,15 +10,8 @@
   import Icon from '../../lib/components/Icon.svelte';
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
   import { api } from '../../lib/api/client';
-  import type {
-    Connection,
-    ConnectionKind,
-    ConnectionSection,
-    Environment,
-    TestConnectionResp,
-    TestUnsavedConnectionReq,
-    UpsertConnectionReq,
-  } from '../../lib/api/types';
+  import type { Connection, ConnectionKind, ConnectionSection,
+    Environment, TestConnectionResp, TestUnsavedConnectionReq, UpsertConnectionReq } from '../../lib/api/types';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { untrack } from 'svelte';
@@ -384,7 +378,12 @@
    *  the pasted value beside the reason, so it can be fixed in place. */
   function commitDsn(): void {
     dsnError = parseDsn(dsnValue);
-    if (dsnError) return;
+    // Spoken at the edge: the inline error below is plain text (an alert
+    // inserted with its text is not read by WebKit/VoiceOver).
+    if (dsnError) {
+      announce(dsnError, { assertive: true });
+      return;
+    }
     dsnValue = '';
     showDsnInput = false;
   }
@@ -514,7 +513,7 @@
         <button class="btn small primary" onclick={commitDsn}>Import</button>
         <button class="btn small" onclick={cancelDsn}>Cancel</button>
       </div>
-      {#if dsnError}<p class="field-error" id="dsn-err" role="alert">{dsnError}</p>{/if}
+      {#if dsnError}<p class="field-error" id="dsn-err">{dsnError}</p>{/if}
     {:else}
       <div class="dsn-hint">
         <button class="btn small ghost dsn-btn" onclick={() => (showDsnInput = true)}>

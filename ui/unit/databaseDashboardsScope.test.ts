@@ -39,7 +39,7 @@ function setup() {
     require: (path: string) => {
       if (path.startsWith('./database/')) return load(new URL(`../src/lib/stores/${path.slice(2)}.ts`, import.meta.url));
       // A sub-store's own sibling import (database/filters → ./statement).
-      if (path === './statement') return load(new URL('../src/lib/stores/database/statement.ts', import.meta.url));
+      if (path === './statement' || path === './model') return load(new URL(`../src/lib/stores/database/${path.slice(2)}.ts`, import.meta.url));
       if (path.endsWith('/client')) return { api, ApiError, withDeadline: (p: unknown) => p, READ_DEADLINE_MS: 1, isAbortError: (e: Error) => e.name === 'AbortError' };
       if (path.endsWith('/workspace.svelte')) return { ws };
       if (path.endsWith('/auth.svelte')) return { auth: { user: { id: 'user' } } };

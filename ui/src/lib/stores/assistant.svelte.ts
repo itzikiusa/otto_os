@@ -16,7 +16,7 @@ import { api, ApiError } from '../api/client';
 import { mapLimit } from '../poll';
 import type { ProviderUsage, UsageSummary } from '../api/usage.svelte';
 import { assistantApi } from '../api/assistant';
-import { needsYouByThread, reduceNeedsYou, upsertNewer, type NeedsYouAction, type NeedsYouState } from '../../modules/assistant/model';
+import { needsYouByThread, reduceNeedsYou, upsertNewer, type NeedsYouAction, type NeedsYouState } from '../assistant/model';
 import type {
   AssistantAttachment,
   AssistantDecisionReq,

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announceShown } from '../../lib/announce.svelte';
   import { rowMenu } from '../../lib/rowMenu';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import { sectionLabel } from '../settings/sections';
@@ -392,7 +393,7 @@
     </div>
 
     {#if formTest}
-      <div class="test-result form-test" role="status" class:ok={formTest !== 'busy' && formTest.ok} class:bad={formTest !== 'busy' && !formTest.ok}>
+      <div class="test-result form-test" use:announceShown={formTest === 'busy' ? 'Testing…' : testLabel(formTest)} class:ok={formTest !== 'busy' && formTest.ok} class:bad={formTest !== 'busy' && !formTest.ok}>
         {#if formTest !== 'busy'}<Icon name={formTest.ok ? 'check' : 'warning'} size={12} />{/if}
         {formTest === 'busy' ? 'Testing…' : testLabel(formTest)}
       </div>

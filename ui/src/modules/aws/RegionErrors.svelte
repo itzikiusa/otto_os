@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announce } from '../../lib/announce.svelte';
   import { plural } from '../../lib/plural';
   // Inline note for an "All enabled regions" list: the regions that failed
   // (denied, opt-in disabled, throttled…) while the rest still rendered.
@@ -10,12 +11,16 @@
   }
   let { errors }: Props = $props();
   let open = $state(false);
+  // Spoken at the state edge through the shell's always-mounted announcer: a
+  // live region inserted together with its text is not read (WebKit/VoiceOver).
+  const count = $derived(errors.length);
+  $effect(() => { if (count) announce(`${plural(count, 'region')} couldn’t be listed — the rows below come from the others.`); });
 </script>
 
 {#if errors.length}
-  <div class="rerr" role="status">
+  <div class="rerr">
     <Icon name="warning" size={13} />
-    <span>{plural(errors.length, 'region')} could not be listed — the rows below come from the others.</span>
+    <span>{plural(errors.length, 'region')} couldn’t be listed — the rows below come from the others.</span>
     <button class="link" onclick={() => (open = !open)} aria-expanded={open}>{open ? 'Hide' : 'Details'}</button>
     {#if open}
       <ul>

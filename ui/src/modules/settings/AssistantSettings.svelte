@@ -18,7 +18,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import { formatCount } from '../../lib/metric-format';
   import { assistant, describeError } from '../../lib/stores/assistant.svelte';
-  import { PROVIDER_NAME, ROUTE_ROWS, loadShare, parseKeywords, type Provider } from '../assistant/model';
+  import { PROVIDER_NAME, ROUTE_ROWS, loadShare, parseKeywords, type Provider } from '../../lib/assistant/model';
   import { whenLabel } from '../assistant/format';
   import Badge from '../../lib/components/Badge.svelte';
   import type { AssistantRouteKind, AssistantRouteTarget, AssistantRoutingSettings } from '../../lib/api/types';

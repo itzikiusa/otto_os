@@ -7,12 +7,13 @@
   import { auth } from '../../lib/stores/auth.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { toasts } from '../../lib/toast.svelte';
-  import { copyTextOrThrow } from '../../lib/clipboard';
+  import { copyWithToast } from '../../lib/clipboard';
   import { confirmer } from '../../lib/confirm.svelte';
   import { mcpCpExtraApi, type McpGatewayToolRow } from './cp-api';
   import ExposePanel from './ExposePanel.svelte';
   import AutoApprovePanel from './AutoApprovePanel.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
+  import { attachView } from './sessionAttach';
   import { loadErrorText } from '../../lib/loadError';
   import type {
     McpAutoApproveRef,
@@ -36,6 +37,7 @@
   let attachBusy = $state(false);
   let attachGeneration = 0;
   let attachError = $state<string | null>(null);
+  const attachState = $derived(attachView(wsId, attach, attachError));
   let gatewayTools = $state<McpGatewayToolRow[]>([]);
   let gatewayLoading = $state(false);
   let gatewayError = $state<string | null>(null);
@@ -286,13 +288,8 @@
     }
   }
 
-  async function copyGatewayTools(): Promise<void> {
-    try {
-      await copyTextOrThrow(gatewayNames.join('\n'));
-      toasts.success('Tool names copied');
-    } catch {
-      toasts.error('Couldn’t copy', 'Select and copy manually.');
-    }
+  function copyGatewayTools(): void {
+    void copyWithToast(gatewayNames.join('\n'), 'tool names');
   }
 
   $effect(() => {
@@ -328,17 +325,18 @@
       <span>Otto’s built-in MCP server</span>
     </div>
 
-    {#if wsId && attachError}
-      <!-- Never a guessed "attached" box: the daemon reported nothing. -->
+    {#if attachState === 'error'}
       <LoadState what="the session-attach setting" variant="compact" error={attachError} empty onretry={() => wsId && void loadAttach(wsId)} />
-    {:else if wsId}
+    {:else if attachState === 'loading'}
+      <LoadState what="the session-attach setting" variant="compact" loading empty rows={1} />
+    {:else if attachState === 'ready' && attach}
       {#key wsId}
       <label class="switchrow">
         <input
           type="checkbox"
           data-testid="mcp-session-attach"
-          checked={attach?.attached ?? true}
-          disabled={!attach || attachBusy || !isMcpAdmin}
+          checked={attach.attached}
+          disabled={attachBusy || !isMcpAdmin}
           onchange={(event) => void updateAttach(event.currentTarget.checked, event.currentTarget)}
         />
         <span class="switchcopy">

@@ -185,8 +185,8 @@ test('personal agent: failed save preserves form and a retry creates the paused 
   await dialog.getByLabel('Name', { exact: true }).fill('Offline review assistant');
   await dialog.getByLabel('Enabled', { exact: false }).uncheck();
   await dialog.getByRole('button', { name: 'Save', exact: true }).click();
-  await expect(dialog.getByRole('alert')).toContainText('Agent storage temporarily unavailable');
-  await expectFullyInViewport(page, dialog.getByRole('alert'));
+  await expect(dialog.locator('.err')).toContainText('Agent storage temporarily unavailable');
+  await expectFullyInViewport(page, dialog.locator('.err'));
   await expect(dialog.getByLabel('Name', { exact: true })).toHaveValue('Offline review assistant');
   await page.screenshot({ path: '/tmp/otto-ux-r3-automation-screens/phone-agent-save-retry.png' });
   fail = false;

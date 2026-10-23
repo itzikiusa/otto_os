@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announceShown } from '../../lib/announce.svelte';
   import { onDestroy, untrack } from 'svelte';
   import { plural } from '../../lib/plural';
   import Skeleton from '../../lib/components/Skeleton.svelte';
@@ -445,7 +446,7 @@
         <div class="label">What is published</div>
         <div class="pd-preview-title">{(mode === 'rfc' && rfcTitle.trim()) || storyTitle || 'Untitled'}</div>
         {#if previewError}
-          <div class="field-error" role="alert">{previewError}</div>
+          <div class="field-error" use:announceShown={{ text: previewError, assertive: true }}>{previewError}</div>
           <button class="btn small" onclick={() => void loadPreview(product.selectedId)}>Retry preview</button>
         {:else if previewBody === null}
           <Skeleton rows={4} height={14} label="the content" />

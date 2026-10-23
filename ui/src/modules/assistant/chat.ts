@@ -17,7 +17,7 @@ export interface RenderItem {
   model: string | null;
   reasoning_steps: number;
 }
-import type { Provider } from './model';
+import type { Provider } from '../../lib/assistant/model';
 
 /** Index turns are replaced (never mutated) when they change, so the render
  *  item can live as long as its turn object: the chat re-merges on every live

@@ -33,7 +33,8 @@ test('network profiles preserve conflict drafts, select saved endpoints, and sho
   await page.getByLabel('Network profile name').fill('Unsaved draft');
   conflict = true;
   await page.getByRole('button', {name:'Save network profile', exact:true}).click();
-  await expect(page.getByRole('alert')).toContainText('Profile changed');
+  // The visible line is plain text; the error is spoken through the shell announcer.
+  await expect(page.locator('p.error')).toContainText('Profile changed');
   await expect(page.getByLabel('Network profile name')).toHaveValue('Unsaved draft');
   await page.getByText('Network: Private DB', {exact:false}).click();
   await expect(page.getByTestId('network-status')).toContainText('127.0.0.1:43123');

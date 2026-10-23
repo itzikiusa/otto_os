@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announceShown } from '../../../lib/announce.svelte';
   // ✨ Generate → "Text → 3D model" / "Image → 3D model". A provider picker
   // (proposal §5.4): the local path runs one Otto agent turn on this scene
   // (Blender MCP tool calls ask first); Tripo / Meshy are opt-in cloud
@@ -174,11 +175,11 @@
     </label>
 
     {#if blocked && provider.where === 'local'}
-      <p class="note warn" role="status"><Icon name="warning" size={12} /> <span>{blocked}</span></p>
+      <p class="note warn" use:announceShown={blocked}><Icon name="warning" size={12} /> <span>{blocked}</span></p>
     {:else}
       <p class="note"><Icon name="info" size={12} /> <span>The result lands as a new <strong>agent</strong> version of this scene — review it, keep it or restore the previous one.</span></p>
     {/if}
-    {#if error}<p class="note err" role="alert">{error}</p>{/if}
+    {#if error}<p class="note err" use:announceShown={{ text: error, assertive: true }}>{error}</p>{/if}
   </div>
   {#snippet footer()}
     <button class="btn" onclick={onclose}>Cancel</button>

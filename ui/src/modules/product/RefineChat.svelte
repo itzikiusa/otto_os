@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announceShown } from '../../lib/announce.svelte';
   import { onDestroy, untrack } from 'svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   // RefineChat — displays a single refinement thread transcript and handles
@@ -334,7 +335,7 @@
               </div>
             </div>
             {#if stopNotice}
-              <p class="stop-notice" role="status">{stopNotice}</p>
+              <p class="stop-notice" use:announceShown={stopNotice}>{stopNotice}</p>
             {/if}
           </div>
         </div>

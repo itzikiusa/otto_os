@@ -1,5 +1,6 @@
 <script lang="ts">
   import { tick } from 'svelte';
+  import { announceShown } from '../../../lib/announce.svelte';
   import PageHeader from '../../../lib/components/PageHeader.svelte';
   import PageBody from '../../../lib/components/PageBody.svelte';
   import { router } from '../../../lib/router.svelte';
@@ -137,7 +138,7 @@
             </fieldset>
             <div class="games-start">
               <button class="btn primary" disabled={busy} onclick={start}>{busy ? 'Creating room…' : mode === 'solo' ? (kind === 'kart' ? 'Start race' : 'Drop in') : 'Create game room'}</button>
-              {#if error}<p class="field-error" role="alert">{mode === 'room' ? 'Couldn’t create the game room.' : 'Couldn’t start the game.'} {error}</p>{/if}
+              {#if error}<p class="field-error" use:announceShown={{ text: `${mode === 'room' ? 'Couldn’t create the game room.' : 'Couldn’t start the game.'} ${error}`, assertive: true }}>{mode === 'room' ? 'Couldn’t create the game room.' : 'Couldn’t start the game.'} {error}</p>{/if}
             </div>
           </section>
           <section class="games-environments" aria-labelledby="games-map-title">
