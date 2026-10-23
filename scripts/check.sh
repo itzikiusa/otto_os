@@ -217,13 +217,53 @@ fi
 # The allowlist is the files not migrated yet: shrink it, never grow it.
 if [ -n "$RUST_CHANGED" ]; then
   step "keyed-lock registry guard"
-  KEYED_LOCK_ALLOW='^crates/(otto-core/src/keyed_lock\.rs|otto-aws/src/(accounts|regions)\.rs|otto-brokers/src/service\.rs|otto-browser/src/lib\.rs|otto-channels/src/telegram\.rs|otto-dbviewer/src/(complete/mod|service)\.rs|otto-k8s/src/(eks_token|monitor/cache)\.rs|otto-server/src/(agent_session_lifecycle|proof|routes/mission|routes/personal_agents)\.rs|otto-sessions/src/(manager|mcp)\.rs|otto-vault/src/engine\.rs)$'
+  KEYED_LOCK_ALLOW='^crates/(otto-core/src/keyed_lock\.rs|otto-aws/src/(accounts|regions)\.rs|otto-brokers/src/service\.rs|otto-browser/src/lib\.rs|otto-dbviewer/src/(complete/mod|service)\.rs|otto-k8s/src/(eks_token|monitor/cache)\.rs|otto-sessions/src/(manager|mcp)\.rs|otto-vault/src/engine\.rs)$'
   KEYED_LOCK_HITS=$(grep -rlE --include='*.rs' '(HashMap|BTreeMap|DashMap)<[^;]*(Arc|Weak)<(tokio::sync::)?(Mutex|AsyncMutex)<\(\)>>' crates | sort | grep -vE "$KEYED_LOCK_ALLOW" || true)
   if [ -n "$KEYED_LOCK_HITS" ]; then
     echo "new hand-rolled per-key lock registry — use otto_core::keyed_lock::KeyedLocks:" >&2
     printf '  %s\n' $KEYED_LOCK_HITS >&2
     [ "$DRY" = 1 ] || exit 1
   fi
+fi
+
+# "Is this the isolated e2e daemon?" has ONE answer: otto_core::e2e::isolated()
+# (`OTTO_E2E` = 1/true). Crates that re-read the env var each drifted on what
+# counts as set (architecture-6-01). The count of direct reads outside
+# otto-core/src/e2e.rs can only go down; it is 0 — keep it there.
+if [ -n "$RUST_CHANGED" ]; then
+  step "OTTO_E2E predicate ratchet"
+  OTTO_E2E_MAX=0
+  OTTO_E2E_HITS=$(grep -rnE --include='*.rs' 'env::var(_os)?\("OTTO_E2E"\)' crates/*/src | grep -v '^crates/otto-core/src/e2e\.rs:' || true)
+  OTTO_E2E_COUNT=$(printf '%s' "$OTTO_E2E_HITS" | grep -c . || true)
+  echo "$OTTO_E2E_COUNT direct OTTO_E2E read(s), max $OTTO_E2E_MAX"
+  if [ "$OTTO_E2E_COUNT" -gt "$OTTO_E2E_MAX" ]; then
+    echo "read OTTO_E2E through otto_core::e2e::isolated(), not env::var:" >&2
+    printf '  %s\n' "$OTTO_E2E_HITS" >&2
+    [ "$DRY" = 1 ] || exit 1
+  fi
+fi
+
+# Raw C0 control bytes (other than tab / LF / CR) in source are invisible in
+# review and in most editors, and a NUL makes grep treat the file as binary —
+# a sentinel written as a literal NUL hid its file from every text search
+# (maintainability-6-04). Write them as escapes (`\u0000`, `\x1b`) instead.
+step "raw control bytes in tracked sources"
+# python3, not `grep -P`: macOS grep has no -P, and a failing grep would pass
+# the guard vacuously.
+C0_HITS=$(git ls-files -z -- '*.ts' '*.svelte' '*.rs' '*.js' | python3 -c '
+import re, sys
+bad = re.compile(rb"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+for f in sys.stdin.buffer.read().split(b"\0"):
+    try:
+        if f and bad.search(open(f, "rb").read()):
+            print(f.decode())
+    except OSError:
+        pass
+')
+if [ -n "$C0_HITS" ]; then
+  echo "raw C0 control bytes — write them as escapes:" >&2
+  printf '  %s\n' $C0_HITS >&2
+  [ "$DRY" = 1 ] || exit 1
 fi
 
 # Prompts reach an agent TUI through ONE locked submit:
@@ -245,7 +285,8 @@ if [ -n "$RUST_CHANGED" ]; then
   fi
 fi
 
-# Module re-export shims over ui/src/lib (`export * from '../../lib/…'`, "so
+# Module re-export shims over ui/src/lib (`export * from '../../lib/…'` or
+# `export type * from …`, "so
 # module importers keep working") hide where code lives and never get removed
 # once added (maintainability-4-03, 5-01). Repoint importers to lib/ and delete
 # the shim instead. The count can only go down: lower UI_LIB_SHIM_MAX when you
@@ -254,7 +295,7 @@ if [ "$UI_CHANGED" = 1 ]; then
   step "ui: module → lib re-export shim ratchet"
   UI_LIB_SHIM_MAX=3
   UI_LIB_SHIMS=$(grep -rnE --include='*.ts' --include='*.js' --include='*.svelte' \
-    "export \* from '(\.\./)+lib/" ui/src/modules || true)
+    "export (type )?\* from '(\.\./)+lib/" ui/src/modules || true)
   UI_LIB_SHIM_COUNT=$(printf '%s' "$UI_LIB_SHIMS" | grep -c . || true)
   echo "$UI_LIB_SHIM_COUNT shim(s), max $UI_LIB_SHIM_MAX"
   if [ "$UI_LIB_SHIM_COUNT" -gt "$UI_LIB_SHIM_MAX" ]; then
