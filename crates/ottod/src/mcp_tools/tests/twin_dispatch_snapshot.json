@@ -1,0 +1,1156 @@
+{
+  "otto_list_connections {}": {
+    "args": {},
+    "requests": [
+      [
+        "GET",
+        "/refs/directory?kind=connection&prefer_workspace_id=ws-test",
+        null
+      ]
+    ],
+    "result": {
+      "ok": {
+        "connections": []
+      },
+      "rows": 0
+    }
+  },
+  "otto_list_connections {\"workspace_id\":\"01ARZ3NDEKTSV4RRFFQ69G5FAV\"}": {
+    "args": {
+      "workspace_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+    },
+    "requests": [
+      [
+        "GET",
+        "/refs/directory?kind=connection&workspace_id=01ARZ3NDEKTSV4RRFFQ69G5FAV&prefer_workspace_id=ws-test",
+        null
+      ]
+    ],
+    "result": {
+      "ok": {
+        "connections": []
+      },
+      "rows": 0
+    }
+  },
+  "otto_list_workspaces {}": {
+    "args": {},
+    "requests": [
+      [
+        "GET",
+        "/refs/directory?kind=workspace&prefer_workspace_id=ws-test",
+        null
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true
+      },
+      "rows": 0
+    }
+  },
+  "otto_list_workflows {}": {
+    "args": {},
+    "requests": [
+      [
+        "GET",
+        "/refs/directory?kind=workflow&prefer_workspace_id=ws-test",
+        null
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true
+      },
+      "rows": 0
+    }
+  },
+  "otto_list_workflow_runs {\"workflow_id\":\"01ARZ3NDEKTSV4RRFFQ69G5FAV\"}": {
+    "args": {
+      "workflow_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+    },
+    "requests": [
+      [
+        "GET",
+        "/workflows/01ARZ3NDEKTSV4RRFFQ69G5FAV/runs?summary=true",
+        null
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true
+      },
+      "rows": 0
+    }
+  },
+  "otto_list_workflow_runs {\"workflow_id\":\"01ARZ3NDEKTSV4RRFFQ69G5FAV\",\"summary\":false}": {
+    "args": {
+      "workflow_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      "summary": false
+    },
+    "requests": [
+      [
+        "GET",
+        "/workflows/01ARZ3NDEKTSV4RRFFQ69G5FAV/runs?summary=false",
+        null
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true
+      },
+      "rows": 0
+    }
+  },
+  "otto_get_workflow_run {\"run_id\":\"run-1\"}": {
+    "args": {
+      "run_id": "run-1"
+    },
+    "requests": [
+      [
+        "GET",
+        "/workflow-runs/run-1",
+        null
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true
+      },
+      "rows": 0
+    }
+  },
+  "otto_list_goal_loops {}": {
+    "args": {},
+    "requests": [
+      [
+        "GET",
+        "/refs/directory?kind=goal_loop&prefer_workspace_id=ws-test",
+        null
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true
+      },
+      "rows": 0
+    }
+  },
+  "otto_list_broker_clusters {}": {
+    "args": {},
+    "requests": [
+      [
+        "GET",
+        "/refs/directory?kind=broker_cluster&prefer_workspace_id=ws-test",
+        null
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true
+      },
+      "rows": 0
+    }
+  },
+  "otto_list_broker_topics {\"cluster_id\":\"01ARZ3NDEKTSV4RRFFQ69G5FAV\"}": {
+    "args": {
+      "cluster_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+    },
+    "requests": [
+      [
+        "GET",
+        "/brokers/clusters/01ARZ3NDEKTSV4RRFFQ69G5FAV/topics",
+        null
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true
+      },
+      "rows": 0
+    }
+  },
+  "otto_list_issue_accounts {}": {
+    "args": {},
+    "requests": [
+      [
+        "GET",
+        "/refs/directory?kind=issue_account&prefer_workspace_id=ws-test",
+        null
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true
+      },
+      "rows": 0
+    }
+  },
+  "otto_search_issues {\"account_id\":\"01ARZ3NDEKTSV4RRFFQ69G5FAV\",\"query\":\"bug\",\"project\":\"OT\",\"limit\":5,\"start_at\":10}": {
+    "args": {
+      "account_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      "query": "bug",
+      "project": "OT",
+      "limit": 5,
+      "start_at": 10
+    },
+    "requests": [
+      [
+        "GET",
+        "/issue/search?account_id=01ARZ3NDEKTSV4RRFFQ69G5FAV&q=bug&project=OT&start_at=10&limit=5",
+        null
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true
+      },
+      "rows": 0
+    }
+  },
+  "otto_search_issues {\"account_id\":\"01ARZ3NDEKTSV4RRFFQ69G5FAV\",\"jql\":\"project = OT\",\"filter\":{\"state\":\"open\"}}": {
+    "args": {
+      "account_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      "jql": "project = OT",
+      "filter": {
+        "state": "open"
+      }
+    },
+    "requests": [
+      [
+        "GET",
+        "/issue/search?account_id=01ARZ3NDEKTSV4RRFFQ69G5FAV&jql=project%20%3D%20OT&filter=%7B%22state%22%3A%22open%22%7D",
+        null
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true
+      },
+      "rows": 0
+    }
+  },
+  "otto_list_issue_transitions {\"account_id\":\"01ARZ3NDEKTSV4RRFFQ69G5FAV\",\"key\":\"OT-1\"}": {
+    "args": {
+      "account_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      "key": "OT-1"
+    },
+    "requests": [
+      [
+        "GET",
+        "/issue/01ARZ3NDEKTSV4RRFFQ69G5FAV/OT-1/transitions",
+        null
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true
+      },
+      "rows": 0
+    }
+  },
+  "otto_list_swarms {}": {
+    "args": {},
+    "requests": [
+      [
+        "GET",
+        "/refs/directory?kind=swarm&prefer_workspace_id=ws-test",
+        null
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true
+      },
+      "rows": 0
+    }
+  },
+  "otto_list_repos {}": {
+    "args": {},
+    "requests": [
+      [
+        "GET",
+        "/git/repos/directory?prefer_workspace_id=ws-test",
+        null
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true
+      },
+      "rows": 0
+    }
+  },
+  "otto_list_repos {\"workspace_id\":\"01ARZ3NDEKTSV4RRFFQ69G5FAV\"}": {
+    "args": {
+      "workspace_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+    },
+    "requests": [
+      [
+        "GET",
+        "/git/repos/directory?workspace_id=01ARZ3NDEKTSV4RRFFQ69G5FAV&prefer_workspace_id=01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        null
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true
+      },
+      "rows": 0
+    }
+  },
+  "otto_list_sessions {}": {
+    "args": {},
+    "requests": [
+      [
+        "GET",
+        "/workspaces/ws-test/sessions",
+        null
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true
+      },
+      "rows": 0
+    }
+  },
+  "otto_list_sessions {\"workspace_id\":\"01ARZ3NDEKTSV4RRFFQ69G5FAV\"}": {
+    "args": {
+      "workspace_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+    },
+    "requests": [
+      [
+        "GET",
+        "/workspaces/01ARZ3NDEKTSV4RRFFQ69G5FAV/sessions",
+        null
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true
+      },
+      "rows": 0
+    }
+  },
+  "otto_get_session {\"session_id\":\"s1\"}": {
+    "args": {
+      "session_id": "s1"
+    },
+    "requests": [
+      [
+        "GET",
+        "/sessions/s1",
+        null
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true
+      },
+      "rows": 0
+    }
+  },
+  "otto_wait_session {\"session_id\":\"s1\",\"status\":\"idle\",\"timeout_secs\":1}": {
+    "args": {
+      "session_id": "s1",
+      "status": "idle",
+      "timeout_secs": 1
+    },
+    "requests": [
+      [
+        "GET",
+        "/sessions/s1/wait?status=idle&timeout_secs=1",
+        null
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true
+      },
+      "rows": 0
+    }
+  },
+  "otto_open_session {\"provider\":\"claude\",\"title\":\"t\",\"prompt\":\"p\",\"model\":\"\"}": {
+    "args": {
+      "provider": "claude",
+      "title": "t",
+      "prompt": "p",
+      "model": ""
+    },
+    "requests": [
+      [
+        "POST",
+        "/workspaces/ws-test/sessions/open",
+        {
+          "provider": "claude",
+          "title": "t",
+          "prompt": "p"
+        }
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true
+      },
+      "rows": 0
+    }
+  },
+  "otto_send_message {\"session_id\":\"s1\",\"text\":\"hi\"}": {
+    "args": {
+      "session_id": "s1",
+      "text": "hi"
+    },
+    "requests": [
+      [
+        "POST",
+        "/sessions/s1/message",
+        {
+          "text": "hi"
+        }
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true
+      },
+      "rows": 0
+    }
+  },
+  "otto_list_product_stories {}": {
+    "args": {},
+    "requests": [
+      [
+        "GET",
+        "/refs/directory?kind=product_story&prefer_workspace_id=ws-test",
+        null
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true
+      },
+      "rows": 0
+    }
+  },
+  "otto_list_findings {\"review_id\":\"r1\"}": {
+    "args": {
+      "review_id": "r1"
+    },
+    "requests": [
+      [
+        "GET",
+        "/reviews/r1/findings",
+        null
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true
+      },
+      "rows": 0
+    }
+  },
+  "otto_list_prs {\"repo_id\":\"web\",\"state\":\"open\"}": {
+    "args": {
+      "repo_id": "web",
+      "state": "open"
+    },
+    "requests": [
+      [
+        "GET",
+        "/repos/01ARZ3NDEKTSV4RRFFQ69G5REP/prs?state=open",
+        null
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true
+      },
+      "rows": 0
+    }
+  },
+  "otto_get_pr {\"repo_id\":\"web\",\"number\":7}": {
+    "args": {
+      "repo_id": "web",
+      "number": 7
+    },
+    "requests": [
+      [
+        "GET",
+        "/repos/01ARZ3NDEKTSV4RRFFQ69G5REP/prs/7",
+        null
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true
+      },
+      "rows": 0
+    }
+  },
+  "otto_get_pr {\"repo_id\":\"web\",\"pr_number\":\"8\"}": {
+    "args": {
+      "repo_id": "web",
+      "pr_number": "8"
+    },
+    "requests": [
+      [
+        "GET",
+        "/repos/01ARZ3NDEKTSV4RRFFQ69G5REP/prs/8",
+        null
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true
+      },
+      "rows": 0
+    }
+  },
+  "otto_comment_pr {\"repo_id\":\"web\",\"number\":7,\"body\":\"b\",\"path\":\"a.rs\",\"line\":3}": {
+    "args": {
+      "repo_id": "web",
+      "number": 7,
+      "body": "b",
+      "path": "a.rs",
+      "line": 3
+    },
+    "requests": [
+      [
+        "POST",
+        "/repos/01ARZ3NDEKTSV4RRFFQ69G5REP/prs/7/comments",
+        {
+          "body": "b",
+          "path": "a.rs",
+          "line": 3
+        }
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true
+      },
+      "rows": 0
+    }
+  },
+  "otto_comment_pr {\"repo_id\":\"web\",\"pr_number\":7,\"body\":\"b\"}": {
+    "args": {
+      "repo_id": "web",
+      "pr_number": 7,
+      "body": "b"
+    },
+    "requests": [
+      [
+        "POST",
+        "/repos/01ARZ3NDEKTSV4RRFFQ69G5REP/prs/7/comments",
+        {
+          "body": "b"
+        }
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true
+      },
+      "rows": 0
+    }
+  },
+  "otto_list_improvement_runs {}": {
+    "args": {},
+    "requests": [
+      [
+        "GET",
+        "/workspaces/ws-test/improvement/runs",
+        null
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true
+      },
+      "rows": 0
+    }
+  },
+  "otto_list_improvement_edits {}": {
+    "args": {},
+    "requests": [
+      [
+        "GET",
+        "/workspaces/ws-test/improvement/edits",
+        null
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true
+      },
+      "rows": 0
+    }
+  },
+  "otto_list_improvement_edits {\"status\":\"pending\"}": {
+    "args": {
+      "status": "pending"
+    },
+    "requests": [
+      [
+        "GET",
+        "/workspaces/ws-test/improvement/edits?status=pending",
+        null
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true
+      },
+      "rows": 0
+    }
+  },
+  "otto_vault_list {}": {
+    "args": {},
+    "requests": [
+      [
+        "GET",
+        "/workspaces/ws-test/vault/vaults",
+        null
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true
+      },
+      "rows": 0
+    }
+  },
+  "otto_vault_dir {\"vault_id\":3,\"path\":\"docs\"}": {
+    "args": {
+      "vault_id": 3,
+      "path": "docs"
+    },
+    "requests": [
+      [
+        "GET",
+        "/workspaces/ws-test/vault/vaults/3/dir?path=docs",
+        null
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true
+      },
+      "rows": 0
+    }
+  },
+  "otto_vault_dir {\"vault_id\":3}": {
+    "args": {
+      "vault_id": 3
+    },
+    "requests": [
+      [
+        "GET",
+        "/workspaces/ws-test/vault/vaults/3/dir?path=",
+        null
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true
+      },
+      "rows": 0
+    }
+  },
+  "otto_vault_read {\"vault_id\":3,\"path\":\"a b.md\"}": {
+    "args": {
+      "vault_id": 3,
+      "path": "a b.md"
+    },
+    "requests": [
+      [
+        "GET",
+        "/workspaces/ws-test/vault/vaults/3/note?path=a%20b.md",
+        null
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true
+      },
+      "rows": 0
+    }
+  },
+  "otto_vault_search {\"vault_id\":3,\"query\":\"q\"}": {
+    "args": {
+      "vault_id": 3,
+      "query": "q"
+    },
+    "requests": [
+      [
+        "POST",
+        "/workspaces/ws-test/vault/vaults/3/search",
+        {
+          "query": "q",
+          "limit": 20
+        }
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true
+      },
+      "rows": 0
+    }
+  },
+  "otto_vault_search {\"vault_id\":3,\"query\":\"q\",\"limit\":\"7\"}": {
+    "args": {
+      "vault_id": 3,
+      "query": "q",
+      "limit": "7"
+    },
+    "requests": [
+      [
+        "POST",
+        "/workspaces/ws-test/vault/vaults/3/search",
+        {
+          "query": "q",
+          "limit": 7
+        }
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true
+      },
+      "rows": 0
+    }
+  },
+  "otto_vault_backlinks {\"vault_id\":3,\"path\":\"a.md\"}": {
+    "args": {
+      "vault_id": 3,
+      "path": "a.md"
+    },
+    "requests": [
+      [
+        "GET",
+        "/workspaces/ws-test/vault/vaults/3/backlinks?path=a.md",
+        null
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true
+      },
+      "rows": 0
+    }
+  },
+  "otto_vault_tags {\"vault_id\":3}": {
+    "args": {
+      "vault_id": 3
+    },
+    "requests": [
+      [
+        "GET",
+        "/workspaces/ws-test/vault/vaults/3/tags",
+        null
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true
+      },
+      "rows": 0
+    }
+  },
+  "otto_vault_graph {\"vault_id\":3}": {
+    "args": {
+      "vault_id": 3
+    },
+    "requests": [
+      [
+        "GET",
+        "/workspaces/ws-test/vault/vaults/3/graph?mode=full",
+        null
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true
+      },
+      "rows": 0
+    }
+  },
+  "otto_vault_graph {\"vault_id\":3,\"path\":\"a.md\",\"depth\":2}": {
+    "args": {
+      "vault_id": 3,
+      "path": "a.md",
+      "depth": 2
+    },
+    "requests": [
+      [
+        "GET",
+        "/workspaces/ws-test/vault/vaults/3/graph?mode=local&path=a.md&depth=2",
+        null
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true
+      },
+      "rows": 0
+    }
+  },
+  "otto_vault_okf_validate {\"vault_id\":3}": {
+    "args": {
+      "vault_id": 3
+    },
+    "requests": [
+      [
+        "POST",
+        "/workspaces/ws-test/vault/vaults/3/okf/validate",
+        {}
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true
+      },
+      "rows": 0
+    }
+  },
+  "otto_vault_write {\"vault_id\":3,\"path\":\"a.md\",\"content\":\"x\",\"if_hash\":\"h\"}": {
+    "args": {
+      "vault_id": 3,
+      "path": "a.md",
+      "content": "x",
+      "if_hash": "h"
+    },
+    "requests": [
+      [
+        "PUT",
+        "/workspaces/ws-test/vault/vaults/3/note",
+        {
+          "path": "a.md",
+          "content": "x",
+          "if_hash": "h"
+        }
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true,
+        "meta": {
+          "ok": true
+        }
+      },
+      "rows": 0
+    }
+  },
+  "otto_vault_write_file {\"vault_id\":3,\"path\":\"a.txt\",\"content\":\"\"}": {
+    "args": {
+      "vault_id": 3,
+      "path": "a.txt",
+      "content": ""
+    },
+    "requests": [
+      [
+        "PUT",
+        "/workspaces/ws-test/vault/vaults/3/file",
+        {
+          "path": "a.txt",
+          "content": ""
+        }
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true,
+        "file": {
+          "ok": true
+        }
+      },
+      "rows": 0
+    }
+  },
+  "otto_vault_rename {\"vault_id\":3,\"from\":\"a.md\",\"to\":\"b.md\"}": {
+    "args": {
+      "vault_id": 3,
+      "from": "a.md",
+      "to": "b.md"
+    },
+    "requests": [
+      [
+        "POST",
+        "/workspaces/ws-test/vault/vaults/3/rename",
+        {
+          "from": "a.md",
+          "to": "b.md"
+        }
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true
+      },
+      "rows": 0
+    }
+  },
+  "otto_vault_delete {\"vault_id\":3,\"path\":\"a.md\"}": {
+    "args": {
+      "vault_id": 3,
+      "path": "a.md"
+    },
+    "requests": [
+      [
+        "DELETE",
+        "/workspaces/ws-test/vault/vaults/3/note?path=a.md",
+        null
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true,
+        "trashed": "a.md"
+      },
+      "rows": 0
+    }
+  },
+  "otto_list_agent_rooms {}": {
+    "args": {},
+    "requests": [
+      [
+        "GET",
+        "/refs/directory?kind=agent_room&prefer_workspace_id=ws-test",
+        null
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true
+      },
+      "rows": 0
+    }
+  },
+  "otto_room_post {\"room_id\":\"01ARZ3NDEKTSV4RRFFQ69G5FAV\",\"text\":\"hi\"}": {
+    "args": {
+      "room_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      "text": "hi"
+    },
+    "requests": [
+      [
+        "POST",
+        "/agent-rooms/01ARZ3NDEKTSV4RRFFQ69G5FAV/messages",
+        {
+          "text": "hi",
+          "session_id": "sess-test"
+        }
+      ]
+    ],
+    "result": {
+      "ok": {
+        "message": {
+          "ok": true
+        }
+      },
+      "rows": 0
+    }
+  },
+  "otto_room_read {\"room_id\":\"01ARZ3NDEKTSV4RRFFQ69G5FAV\"}": {
+    "args": {
+      "room_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+    },
+    "requests": [
+      [
+        "GET",
+        "/agent-rooms/01ARZ3NDEKTSV4RRFFQ69G5FAV/messages?tail=true&limit=50&session_id=sess-test",
+        null
+      ]
+    ],
+    "result": {
+      "ok": {
+        "messages": {
+          "ok": true
+        }
+      },
+      "rows": 0
+    }
+  },
+  "otto_room_read {\"room_id\":\"01ARZ3NDEKTSV4RRFFQ69G5FAV\",\"after\":\"m1\",\"limit\":10}": {
+    "args": {
+      "room_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      "after": "m1",
+      "limit": 10
+    },
+    "requests": [
+      [
+        "GET",
+        "/agent-rooms/01ARZ3NDEKTSV4RRFFQ69G5FAV/messages?after=m1&limit=10&session_id=sess-test",
+        null
+      ]
+    ],
+    "result": {
+      "ok": {
+        "messages": {
+          "ok": true
+        }
+      },
+      "rows": 0
+    }
+  },
+  "otto_room_read {\"room_id\":\"01ARZ3NDEKTSV4RRFFQ69G5FAV\",\"before\":\"m9\"}": {
+    "args": {
+      "room_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      "before": "m9"
+    },
+    "requests": [
+      [
+        "GET",
+        "/agent-rooms/01ARZ3NDEKTSV4RRFFQ69G5FAV/messages?before=m9&limit=50&session_id=sess-test",
+        null
+      ]
+    ],
+    "result": {
+      "ok": {
+        "messages": {
+          "ok": true
+        }
+      },
+      "rows": 0
+    }
+  },
+  "otto_api_list {}": {
+    "args": {},
+    "requests": [
+      [
+        "GET",
+        "/workspaces/ws-test/api-client/overview",
+        null
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true
+      },
+      "rows": 0
+    }
+  },
+  "otto_api_list {\"q\":\"x\",\"kind\":\"requests\"}": {
+    "args": {
+      "q": "x",
+      "kind": "requests"
+    },
+    "requests": [
+      [
+        "GET",
+        "/workspaces/ws-test/api-client/overview?q=x&kind=requests",
+        null
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true
+      },
+      "rows": 0
+    }
+  },
+  "otto_api_get_request {\"request_id\":\"01ARZ3NDEKTSV4RRFFQ69G5FAV\"}": {
+    "args": {
+      "request_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+    },
+    "requests": [
+      [
+        "GET",
+        "/workspaces/ws-test/api-client/requests/01ARZ3NDEKTSV4RRFFQ69G5FAV?shape=agent",
+        null
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true
+      },
+      "rows": 0
+    }
+  },
+  "otto_api_history {\"limit\":5}": {
+    "args": {
+      "limit": 5
+    },
+    "requests": [
+      [
+        "GET",
+        "/workspaces/ws-test/api-client/history/summaries?limit=5",
+        null
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true
+      },
+      "rows": 0
+    }
+  },
+  "otto_api_execute {\"request_id\":\"01ARZ3NDEKTSV4RRFFQ69G5FAV\"}": {
+    "args": {
+      "request_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+    },
+    "requests": [
+      [
+        "POST",
+        "/mcp/otto-tools/invoke",
+        {
+          "tool": "otto.api_execute",
+          "arguments": {
+            "workspace_id": "ws-test",
+            "request_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+          },
+          "wait_seconds": 15
+        }
+      ]
+    ],
+    "result": {
+      "err": "api_execute failed: {\"ok\":true}"
+    }
+  },
+  "otto_api_upsert_request {\"name\":\"n\",\"method\":\"GET\",\"url\":\"http://example.test\"}": {
+    "args": {
+      "name": "n",
+      "method": "GET",
+      "url": "http://example.test"
+    },
+    "requests": [
+      [
+        "POST",
+        "/workspaces/ws-test/api-client/requests",
+        {
+          "name": "n",
+          "method": "GET",
+          "url": "http://example.test",
+          "body_mode": "none"
+        }
+      ]
+    ],
+    "result": {
+      "err": "saved request has no id"
+    }
+  },
+  "otto_api_run_automation {\"automation_id\":\"01ARZ3NDEKTSV4RRFFQ69G5FAV\"}": {
+    "args": {
+      "automation_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+    },
+    "requests": [
+      [
+        "POST",
+        "/mcp/otto-tools/invoke",
+        {
+          "tool": "otto.api_run_automation",
+          "arguments": {
+            "workspace_id": "ws-test",
+            "automation_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+          },
+          "wait_seconds": 15
+        }
+      ]
+    ],
+    "result": {
+      "err": "api_run_automation failed: {\"ok\":true}"
+    }
+  }
+}

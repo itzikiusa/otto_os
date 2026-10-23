@@ -215,6 +215,31 @@ fn write_args(conn: &Id) -> Value {
     json!({"connection_id": conn, "statement": "SET otto:test 1"})
 }
 
+/// The connect error the fixture's Redis driver reports for the dead loopback
+/// port (`127.0.0.1:1`): the OS refusal, `Connection refused (os error 61)` on
+/// macOS / `(os error 111)` on Linux. Seeing it proves the statement passed
+/// every gate and reached the driver.
+const DRIVER_REACHED: &str = "Connection refused";
+
+/// A statement that passed every gate: the driver's connect error, and none of
+/// the refusals a gate answers with (the access-enforced read-only refusal,
+/// the production review gate, a 403).
+fn assert_reached_driver(err: &str) {
+    assert!(
+        err.contains(DRIVER_REACHED),
+        "expected the driver's connect error: {err}"
+    );
+    for refusal in [
+        "read-only connection",
+        "review_required",
+        "Forbidden",
+        "forbidden:",
+        "write_blocked",
+    ] {
+        assert!(!err.contains(refusal), "a gate refused ({refusal}): {err}");
+    }
+}
+
 /// The error text of an executed-but-failed governed call.
 fn call_error(env: &Value) -> String {
     assert_eq!(env["executed"], true, "{env}");
@@ -254,10 +279,7 @@ async fn a_write_asks_a_person_then_runs_on_a_writable_connection() {
     // The approved retry passes every gate (Editor role, resource access,
     // write-guard) and reaches the driver — which fails at the dead port.
     let err = call_error(&d.agent_invoke("query_db", write_args(&d.writable)).await);
-    assert!(
-        !err.contains("write_blocked") && !err.contains("read-only") && !err.contains("403"),
-        "a writable connection must not refuse the write: {err}"
-    );
+    assert_reached_driver(&err);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -295,6 +317,8 @@ async fn a_guarded_connection_refuses_the_write_and_names_the_setting() {
         "{err}"
     );
     // A read on the guarded connection is not a write: it reaches the driver.
+    // Were `GET` classified as a mutation, the enforced gate above would answer
+    // "read-only connection 'cache-ro'" instead of the connect error.
     let err = call_error(
         &d.agent_invoke(
             "query_db",
@@ -302,7 +326,7 @@ async fn a_guarded_connection_refuses_the_write_and_names_the_setting() {
         )
         .await,
     );
-    assert!(!err.contains("write_blocked"), "{err}");
+    assert_reached_driver(&err);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

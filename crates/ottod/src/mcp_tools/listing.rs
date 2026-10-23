@@ -1,20 +1,18 @@
-//! The native `tools/list` schemas GENERATED from the control-plane catalog
+//! The native `tools/list` entries GENERATED from the control-plane catalog
 //! (`otto_mcp::outward::otto_tool_specs`, architecture-1-05). The catalog is
 //! the source of truth (user rule: whatever is enabled in the control plane
 //! must be visible to sessions, and described one way):
 //!
-//! - a native tool with a governed twin (`otto_x` ⇄ `otto.x`) advertises the
-//!   twin's `inputSchema`, with the session-scoped `workspace_id` /
-//!   `session_id` defaulted from the calling session ([`native_twin_schema`]);
+//! - a tool this surface serves natively under the same stdio name (a twin,
+//!   `otto_x` ⇄ `otto.x`, listed in `catalog::NATIVE_TWINS`) is advertised
+//!   with the catalog's description and `inputSchema`, its session-scoped
+//!   `workspace_id` / `session_id` defaulted from the calling session
+//!   ([`generate_twin_entries`], [`native_twin_schema`]);
 //! - every other enabled catalog entry is proxied under its stdio name (see
-//!   `GOVERNED_BY_STDIO_NAME` in `mcp_tools.rs`) or served natively under an
+//!   `GOVERNED_BY_STDIO_NAME` in `catalog.rs`) or served natively under an
 //!   aliased name (`GOVERNED_ALIASED_BY_NATIVE`);
-//! - the hand-written tools with no twin are this surface's own
+//! - the hand-written tools are only those with no twin — this surface's own
 //!   (session-bound, assistant, cloud consoles…).
-//!
-//! The twin's hand-written schema contributes ONLY its scoped
-//! `workspace_id` / `session_id` properties — everything else comes from the
-//! catalog, so the two can no longer drift.
 
 use serde_json::Value;
 
@@ -78,23 +76,50 @@ pub(super) fn native_twin_schema(catalog: &Value, native: &Value) -> Value {
     out
 }
 
-/// Replace every twin's hand-written `inputSchema` in `tools` with the one
-/// generated from its catalog entry. `stdio_name` maps a catalog name to its
-/// stdio spelling.
-pub(super) fn generate_twin_schemas(
-    tools: &mut [Value],
+/// One control-plane tool this surface serves natively under its stdio name.
+pub(super) struct NativeTwin {
+    /// The catalog name without its `otto.` prefix.
+    pub(super) short: &'static str,
+    /// The session-scoped arguments this surface advertises, `(name,
+    /// description)`: defaulted from the calling session, never required.
+    pub(super) scoped: &'static [(&'static str, Option<&'static str>)],
+    /// A sentence appended to the catalog description where this surface's
+    /// answer differs from the outward one.
+    pub(super) note: Option<&'static str>,
+}
+
+/// The `tools/list` entry of every twin, generated from its `catalog` entry
+/// (a twin with no catalog entry is skipped — `every_twin_has_a_dispatch_case`
+/// counts them). `stdio_name` maps a catalog name to its stdio spelling.
+pub(super) fn generate_twin_entries(
     catalog: &[Value],
+    twins: &[NativeTwin],
     stdio_name: impl Fn(&str) -> String,
-) {
-    let by_stdio: std::collections::HashMap<String, &Value> = catalog
+) -> Vec<Value> {
+    twins
         .iter()
-        .filter_map(|s| Some((stdio_name(s["name"].as_str()?), s)))
-        .collect();
-    for tool in tools.iter_mut() {
-        let Some(spec) = tool["name"].as_str().and_then(|n| by_stdio.get(n)) else {
-            continue;
-        };
-        let generated = native_twin_schema(&spec["inputSchema"], &tool["inputSchema"]);
-        tool["inputSchema"] = generated;
-    }
+        .filter_map(|twin| {
+            let full = format!("otto.{}", twin.short);
+            let spec = catalog.iter().find(|s| s["name"] == full.as_str())?;
+            let mut scoped = serde_json::Map::new();
+            for (arg, desc) in twin.scoped {
+                let mut prop = serde_json::json!({ "type": "string" });
+                if let Some(d) = desc {
+                    prop["description"] = Value::from(*d);
+                }
+                scoped.insert(arg.to_string(), prop);
+            }
+            let native = serde_json::json!({ "properties": scoped });
+            let mut description = stdio_description(spec["description"].as_str().unwrap_or(""));
+            if let Some(note) = twin.note {
+                description.push(' ');
+                description.push_str(note);
+            }
+            Some(serde_json::json!({
+                "name": stdio_name(&full),
+                "description": description,
+                "inputSchema": native_twin_schema(&spec["inputSchema"], &native),
+            }))
+        })
+        .collect()
 }
