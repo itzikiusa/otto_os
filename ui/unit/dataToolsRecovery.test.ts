@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
 import { SchemaVersionCache } from '../src/modules/brokers/schemaVersionCache.ts';
+import { savedSteps } from '../src/modules/api/automationInput.ts';
 
 // Execute the actual component functions with controlled asynchronous boundaries.
 function componentFunctions(path: string, names: string[], state: Record<string, any>) {
@@ -32,7 +33,7 @@ test('automation cancel and failed save retain steps; successful save or discard
     dirty:true,leavePending:null,steps:[{request_id:'r',assertions:[{kind:'status',value:'201'}],extract:[]}],
     automation:{id:'a',name:'A'},canEdit:true,
     confirmer:{choose:async()=>({value:choice})},
-    apiClient:{saveAutomation:async()=>saved?{name:'A'}:null},toasts:{success(){}},
+    apiClient:{saveAutomation:async()=>saved?{name:'A'}:null},toasts:{success(){}},savedSteps,
   });
   assert.equal(await context.approveLeave(),false);assert.equal(context.dirty,true);
   choice='save';assert.equal(await context.approveLeave(),false);assert.equal(context.steps[0].assertions[0].value,'201');
@@ -47,7 +48,7 @@ test('automation edits arriving during save keep the editor open', async () => {
   const saving = new Promise<void>(resolve=>{started=resolve;});
   const context = componentFunctions('../src/modules/api/AutomationEditor.svelte', ['approveLeave','save'], {
     dirty:true,leavePending:null,steps:[{request_id:'r',assertions:[],extract:[]}],automation:{id:'a',name:'A'},canEdit:true,
-    confirmer:{choose:async()=>({value:'save'})},apiClient:{saveAutomation:()=>{started();return pending;}},toasts:{success(){}},
+    confirmer:{choose:async()=>({value:'save'})},apiClient:{saveAutomation:()=>{started();return pending;}},toasts:{success(){}},savedSteps,
   });
   const leaving=context.approveLeave();await saving;
   context.steps[0].request_id='edited-while-saving';release({name:'A'});

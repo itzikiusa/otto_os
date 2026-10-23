@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announceShown } from '../../lib/announce.svelte';
   import { onDestroy, untrack } from 'svelte';
   import { plural } from '../../lib/plural';
   import Skeleton from '../../lib/components/Skeleton.svelte';
@@ -24,6 +25,9 @@
     onclose: () => void;
   }
   let { mode, onclose }: Props = $props();
+  /** Why Publish is disabled once another story is selected underneath the dialog. */
+  const STORY_CHANGED =
+    'A different story is open now. Close this dialog and open Publish again to review what will be sent.';
   let alive = true;
   onDestroy(() => { alive = false; });
 
@@ -302,7 +306,7 @@
       <LoadState what="your publishing accounts" variant="compact" loading empty />
     {:else if accounts.length === 0 && formError}
       <!-- A failed accounts load is an error with Retry, not "no accounts yet". -->
-      <div class="field-error">
+      <div class="field-error" use:announceShown={{ text: formError, assertive: true }}>
         {formError}
         {#if formErrorDetail}<div class="pd-error-detail">{formErrorDetail}</div>{/if}
       </div>
@@ -336,7 +340,7 @@
           {#if projectsLoading}
             <Skeleton rows={1} height={27} label="projects" />
           {:else if projectsError}
-            <div role="alert" class="field-error">{projectsError}</div>
+            <div class="field-error" use:announceShown={{ text: projectsError, assertive: true }}>{projectsError}</div>
             <button class="btn small" onclick={loadProjects}>Retry projects</button>
           {:else}
             <select
@@ -390,7 +394,7 @@
           {#if spacesLoading}
             <Skeleton rows={1} height={27} label="spaces" />
           {:else if spacesError}
-            <div role="alert" class="field-error">{spacesError}</div>
+            <div class="field-error" use:announceShown={{ text: spacesError, assertive: true }}>{spacesError}</div>
             <button class="btn small" onclick={loadSpaces}>Retry spaces</button>
           {:else}
             <select
@@ -445,7 +449,7 @@
         <div class="label">What is published</div>
         <div class="pd-preview-title">{(mode === 'rfc' && rfcTitle.trim()) || storyTitle || 'Untitled'}</div>
         {#if previewError}
-          <div class="field-error" role="alert">{previewError}</div>
+          <div class="field-error" use:announceShown={{ text: previewError, assertive: true }}>{previewError}</div>
           <button class="btn small" onclick={() => void loadPreview(product.selectedId)}>Retry preview</button>
         {:else if previewBody === null}
           <Skeleton rows={4} height={14} label="the content" />
@@ -470,12 +474,12 @@
 
       {#if previewStoryId && previewStoryId !== product.selectedId}
         <!-- Publish is disabled for this reason: say so instead of a silent grey button. -->
-        <div class="field-error" role="status" data-testid="publish-story-changed">
-          A different story is open now. Close this dialog and open Publish again to review what will be sent.
+        <div class="field-error" data-testid="publish-story-changed" use:announceShown={STORY_CHANGED}>
+          {STORY_CHANGED}
         </div>
       {/if}
       {#if formError}
-        <div class="field-error">
+        <div class="field-error" use:announceShown={{ text: formError, assertive: true }}>
           {formError}
           {#if formErrorDetail}<div class="pd-error-detail">{formErrorDetail}</div>{/if}
         </div>

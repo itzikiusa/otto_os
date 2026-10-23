@@ -465,28 +465,28 @@ pub fn sanitize_paste(text: &str) -> String {
         .collect()
 }
 
-/// `~/.claude/projects/<enc(cwd)>/<sid>.jsonl` for a given session.
+/// `~/.claude/projects/<enc(cwd)>/<sid>.jsonl` for a given session — the
+/// shared [`TranscriptRoots::claude_session_file`] over the process's local
+/// roots (architecture-6w1-01), so an explicit `OTTO_TRANSCRIPT_ROOTS` pair
+/// moves the turn watchers to the same file the conversation view reads.
+/// The first existing file across the roots wins, else the primary root's
+/// expected path; no root at all (an isolated daemon) → `project_dir(cwd)`.
+///
+/// [`TranscriptRoots::claude_session_file`]: otto_transcript::roots::TranscriptRoots::claude_session_file
 pub fn session_jsonl_path(cwd: &str, sid: &str) -> PathBuf {
-    project_dir(cwd).join(format!("{sid}.jsonl"))
+    use otto_transcript::roots::{home_dir, RootsEnv};
+    RootsEnv::from_process()
+        .for_session(&serde_json::Value::Null, &home_dir(), None, None)
+        .claude_session_file(cwd, sid)
+        .unwrap_or_else(|| project_dir(cwd).join(format!("{sid}.jsonl")))
 }
 
-/// The directory where claude stores session JSONL files for `cwd`. The
-/// encoding replaces every non-alphanumeric character with '-'.
+/// The directory where claude stores per-project state for `cwd` (session
+/// JSONL, `memory/`) under the real `$HOME`: the default Claude root joined
+/// with the one cwd encoder, [`otto_transcript::roots::encode_cwd`].
 pub fn project_dir(cwd: &str) -> PathBuf {
-    let enc: String = cwd
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect();
-    let home = std::env::var("HOME").unwrap_or_else(|_| dirs_fallback().unwrap_or_default());
-    PathBuf::from(home)
-        .join(".claude")
-        .join("projects")
-        .join(enc)
-}
-
-/// Best-effort home lookup when $HOME is unset (rare on macOS/Linux).
-fn dirs_fallback() -> Option<String> {
-    std::env::var_os("USERPROFILE").map(|v| v.to_string_lossy().into_owned())
+    use otto_transcript::roots::{default_claude_root, encode_cwd, home_dir};
+    default_claude_root(&home_dir()).join(encode_cwd(cwd))
 }
 
 /// Text of the LAST assistant message in `jsonl` whose
@@ -606,6 +606,15 @@ pub fn last_user_text(jsonl: &str) -> Option<String> {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
             continue;
         };
+        // Injected, not typed: a skill body / command caveat (`isMeta`) or the
+        // `/compact` summary (integrations-6-02; `otto_transcript::turn::
+        // is_meta_line` is the same filter for the oracle's fold).
+        if ["isMeta", "isCompactSummary"]
+            .iter()
+            .any(|k| v.get(*k).and_then(|b| b.as_bool()) == Some(true))
+        {
+            continue;
+        }
         let Some(msg) = v.get("message") else {
             continue;
         };
@@ -904,6 +913,15 @@ mod tests {
         let asst = r#"{"message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"hi"}]}}"#;
         assert_eq!(last_user_text(asst), None);
         assert_eq!(last_user_text(""), None);
+        // integrations-6-02: an injected skill body (`isMeta`) or compact
+        // summary after the prompt is not the user's prompt.
+        let skill = r#"{"isMeta":true,"message":{"role":"user","content":[{"type":"text","text":"Base directory for this skill"}]}}"#;
+        let compact =
+            r#"{"isCompactSummary":true,"message":{"role":"user","content":"continued"}}"#;
+        assert_eq!(
+            last_user_text(&format!("{s}\n{skill}\n{compact}")).as_deref(),
+            Some("do the thing")
+        );
     }
 
     #[test]

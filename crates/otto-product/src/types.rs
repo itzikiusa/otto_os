@@ -310,7 +310,7 @@ pub struct ReviewedContent {
     pub url: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PublishAsRfcReq {
     /// Optional binding for a workflow's frozen account destination.
     #[serde(default)]
@@ -325,7 +325,7 @@ pub struct PublishAsRfcReq {
     pub title: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PublishAsStoryReq {
     /// Optional binding for a workflow's frozen account destination.
     #[serde(default)]

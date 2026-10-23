@@ -38,6 +38,7 @@
   // width.
   import { setContext, tick, untrack } from 'svelte';
   import Icon from '../../../lib/components/Icon.svelte';
+  import { announceShown } from '../../../lib/announce.svelte';
   import { splitter } from '../../../lib/paneResizer';
   import ProviderIcon, { hasProviderIcon } from '../../../lib/components/ProviderIcon.svelte';
   import TurnItem from './TurnItem.svelte';
@@ -45,6 +46,7 @@
   import LiveDraft from './LiveDraft.svelte';
   import LiveStatus from './LiveStatus.svelte';
   import EmptyState from '../../../lib/components/EmptyState.svelte';
+  import Skeleton from '../../../lib/components/Skeleton.svelte';
   import LoadState from '../../../lib/components/LoadState.svelte';
   import { transcript, type TranscriptSource } from '../../../lib/stores/transcript.svelte';
   import { ws } from '../../../lib/stores/workspace.svelte';
@@ -723,7 +725,7 @@
     },
     codex_rollout_unresolved: {
       title: 'Codex rollout not matched',
-      body: 'Otto could not match this session to a Codex rollout file yet. It usually resolves after the next turn; the terminal is complete meanwhile.',
+      body: 'Otto couldn’t match this session to a Codex rollout file yet. It usually resolves after the next turn; the terminal is complete meanwhile.',
     },
   };
   const unavailable = $derived(t?.unavailable_reason ? UNAVAILABLE[t.unavailable_reason] : null);
@@ -827,10 +829,9 @@
     <button class="icon-btn" aria-label="Conversation options" title="Conversation options" aria-haspopup="menu" data-conv-menu onclick={openHeadMenu}><Icon name="more" size={12} /></button>
   </header>
   {#if searchOpen && partialSearch}
-    <!-- Search runs over the loaded turns only; say so, and offer the page
-         that might hold the match. -->
+    <!-- Loaded turns only: say so (it describes the search box; “no matches” is spoken by the action) and offer the page that might hold the match. -->
     <div class="search-scope" data-testid="conv-search-scope">
-      <span id="conv-search-scope" aria-live="polite">{noMatches ? 'No matches in the loaded messages.' : 'Only the loaded messages are searched.'}</span>
+      <span id="conv-search-scope" use:announceShown={noMatches ? 'No matches in the loaded messages.' : ''}>{noMatches ? 'No matches in the loaded messages.' : 'Only the loaded messages are searched.'}</span>
       <button class="btn small ghost" disabled={conv.loadingEarlier} onclick={() => void loadEarlier()}>
         {conv.loadingEarlier ? 'Loading earlier messages…' : 'Load earlier messages'}
       </button>
@@ -865,7 +866,10 @@
     {#if conv.error && !t}
       <LoadState what="the conversation" error={conv.error} empty onretry={() => void conv.load()} />
     {:else if conv.loading && !t}
-      <div class="skeleton" role="status" aria-busy="true" aria-label="Loading the conversation">
+      <!-- a11y-6-02: the shared Skeleton owns the (delayed) "Loading" status;
+           the chat-shaped placeholder below is decoration. -->
+      <Skeleton rows={0} label="the conversation" />
+      <div class="skeleton" aria-hidden="true">
         <div class="sk sk-user chat-bubble-end"></div>
         <div class="sk sk-agent"></div>
         <div class="sk sk-line"></div>

@@ -27,6 +27,7 @@
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { buildSelector } from './selector';
+  import { announce } from '../../lib/announce.svelte';
   import type { BrowserPage } from '../../lib/api/types';
 
   let {
@@ -66,7 +67,10 @@
     markButton?.focus();
     markMode = !markMode;
     pending = null;
+    // Said at the state edge: a status line inserted with its text is silent.
+    if (markMode) announce(MARK_HINT);
   }
+  const MARK_HINT = 'Choose a passage · ↑↓ to move · Enter to mark · Esc to stop';
 
   // A composer belongs to one fetched page, never the next URL or refresh.
   $effect(() => {
@@ -228,7 +232,7 @@
     {/if}
 
     <div class="toolbar">
-      {#if markMode}<span class="mark-hint" role="status">Choose a passage · ↑↓ to move · Enter to mark · Esc to stop</span>{/if}
+      {#if markMode}<span class="mark-hint">{MARK_HINT}</span>{/if}
       <button
         class="btn small"
         class:mark-on={markMode}

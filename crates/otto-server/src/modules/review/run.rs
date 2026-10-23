@@ -164,7 +164,7 @@ pub(crate) async fn run_review(
                     .iter()
                     .filter_map(|a| a.session_id.clone())
                     .collect();
-                crate::review_session::stop_review_sessions(&ctx.manager, &ids).await;
+                otto_review::session::stop_review_sessions(&ctx.manager, &ids).await;
             }
             let msg = e.to_string();
             let _ = transition(
@@ -430,7 +430,7 @@ pub(crate) async fn run_review_core(
     // 4. Run each reviewer as a real, openable session. Each task persists its
     //    own live state (running → waiting → done/error) so the UI poll shows
     //    progress; one stuck/failed agent never aborts the others.
-    let states: crate::review_session::SharedStates =
+    let states: otto_review::session::SharedStates =
         Arc::new(tokio::sync::Mutex::new(agent_states));
     // Per-review cancel flag (set by POST /reviews/{id}/cancel). Threaded into
     // each agent's recovery loop so a Cancel short-circuits in-flight retries.
@@ -439,7 +439,7 @@ pub(crate) async fn run_review_core(
     // Make the FULL skill library available to CLAUDE review agents as first-class
     // skills (`Skill(<name>)`), staged into a shared out-of-tree bundle wired in
     // below via `meta.extra_dirs` → `--add-dir` (claude-only — see
-    // `review_session::review_skills_extra_dirs`). Skills are generic and
+    // `otto_review::session::review_skills_extra_dirs`). Skills are generic and
     // cross-context (e.g. `grill` is useful for review, not only product), and a
     // review config usually carries the lens in the agent NAME rather than the
     // `skill` field — so rather than guess which one each agent needs, we register
@@ -495,8 +495,8 @@ pub(crate) async fn run_review_core(
             compose_orchestrator_prompt(
                 &run.lenses,
                 &run.provider,
-                |slug| crate::review_session::lens_findings_path(&review_id_s, i, slug),
-                &crate::review_session::findings_path(&review_id_s, i),
+                |slug| otto_review::session::lens_findings_path(&review_id_s, i, slug),
+                &otto_review::session::findings_path(&review_id_s, i),
             )
         };
         let lens_slugs = run.lens_slugs();
@@ -553,7 +553,7 @@ pub(crate) async fn run_review_core(
         // Persist the prompt so a per-agent Retry can re-run exactly this agent:
         // temp file for the in-flight injection path, DB row (0100) so retry
         // survives reboots / temp sweeps / daemon redeploys.
-        let _ = std::fs::write(crate::review_session::prompt_path(review_id, i), &prompt);
+        let _ = std::fs::write(otto_review::session::prompt_path(review_id, i), &prompt);
         if let Err(e) = ctx
             .reviews_store
             .set_agent_prompt(review_id, i, &prompt)
@@ -567,7 +567,7 @@ pub(crate) async fn run_review_core(
             // SI-11: wait for a reviewer slot (a closed semaphore never
             // happens — it lives for the process).
             let _slot = slots.acquire_owned().await.ok();
-            let res = crate::review_session::run_agent_session_with_recovery(
+            let res = otto_review::session::run_agent_session_with_recovery(
                 &manager,
                 &reviews,
                 &states,
@@ -641,10 +641,10 @@ pub(crate) async fn run_review_core(
         let g = states.lock().await;
         g.iter().filter_map(|s| s.session_id.clone()).collect()
     };
-    crate::review_session::stop_review_sessions(&ctx.manager, &session_ids).await;
+    otto_review::session::stop_review_sessions(&ctx.manager, &session_ids).await;
     let rid = review_id.to_string();
     for i in 0..run_count {
-        crate::review_session::remove_lens_findings_files(&rid, i);
+        otto_review::session::remove_lens_findings_files(&rid, i);
     }
     result
 }

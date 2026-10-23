@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { onDestroy, untrack } from 'svelte';
+  import { announceEdge } from '../../lib/announce.svelte';
+  import { onDestroy, tick, untrack } from 'svelte';
   // DiscoveryChat — the chat pane for one Discovery Chat. A conversational agent
   // that works from an EMPTY/Untitled draft to help with early discovery &
   // research, and proposes Apply-able action cards.
@@ -52,6 +53,8 @@
   let activeTurnId = $state<string | null>(null);
   let stopNotice = $state<string | null>(null);
   let backgroundTurn = $state(false);
+  /** "Reload …" in the after-stop bubble: where focus goes once a stop control removes itself. */
+  let reloadBtn = $state<HTMLButtonElement | null>(null);
 
   let composerEl = $state<HTMLTextAreaElement | null>(null);
 
@@ -71,6 +74,7 @@
   let inFlightTurnId: string | null = null;
   const drafts = new Map<string, string>();
   const stopRequestedTurns = new Set<string>();
+  const BACKGROUND_NOTICE = 'Stopped waiting — the agent turn may still finish in the background.';
   onDestroy(() => { alive = false; ++loadSeq; });
 
   function newTurnId(): string {
@@ -180,11 +184,33 @@
     backgroundTurn = true;
   }
 
-  function reloadAfterStop(): void {
+  /** "Reload …" removes itself: once the reload lands, focus the composer. */
+  async function reloadAfterStop(): Promise<void> {
     backgroundTurn = false;
     stopNotice = null;
-    void loadChat(cid);
+    await loadChat(cid);
+    await tick();
+    composerEl?.focus();
   }
+
+  // a11y-6w2-02: the stop notice (in the thinking bubble, or the after-stop
+  // bubble once the turn is let go) is spoken ONCE, here at its edge. Neither
+  // bubble is a live region — a status bubble around a self-announcing line
+  // spoke it twice.
+  const sayStop = announceEdge();
+  function speakStopNotice(): void {
+    sayStop(backgroundTurn ? BACKGROUND_NOTICE : stopNotice);
+  }
+  $effect(speakStopNotice);
+
+  /** "Stop" / "Stop waiting" remove themselves with the thinking bubble: when
+   *  that drops focus to <body>, move it to "Reload …" in the after-stop
+   *  bubble. Focus the person put elsewhere is left alone. */
+  function rescueStopFocus(): void {
+    const lost = !document.activeElement || document.activeElement === document.body;
+    if (reloadBtn && lost) reloadBtn.focus();
+  }
+  $effect(rescueStopFocus);
 
   async function send(): Promise<void> {
     const body = inputText.trim();
@@ -361,7 +387,7 @@
       <!-- Thinking indicator while a turn is in flight -->
       {#if sending || stopping}
         <div class="bubble-row row-agent">
-          <div class="bubble bubble-agent thinking" role="status">
+          <div class="bubble bubble-agent thinking">
             <div class="bubble-header"><AgentByline {provider} model={chatModel} /></div>
             <div class="thinking-row">
               <span class="thinking-dots"><LiveWorkingDot label={stopping ? 'Stopping…' : 'Thinking…'} /></span>
@@ -386,20 +412,18 @@
               </div>
             </div>
             {#if stopNotice}
-              <p class="stop-notice" role="status">{stopNotice}</p>
+              <!-- Spoken once by speakStopNotice(); not a live region. -->
+              <p class="stop-notice">{stopNotice}</p>
             {/if}
           </div>
         </div>
       {:else if backgroundTurn || stopNotice}
         <div class="bubble-row row-agent">
-          <div class="bubble bubble-agent thinking" role="status">
+          <!-- Not a live region: speakStopNotice() says this text once. -->
+          <div class="bubble bubble-agent thinking">
             <div class="thinking-row">
-              <span class="thinking-dots">
-                {backgroundTurn
-                  ? 'Stopped waiting — the agent turn may still finish in the background.'
-                  : stopNotice}
-              </span>
-              <button class="btn small" type="button" onclick={reloadAfterStop}>
+              <span class="thinking-dots">{backgroundTurn ? BACKGROUND_NOTICE : stopNotice}</span>
+              <button class="btn small" type="button" bind:this={reloadBtn} onclick={() => void reloadAfterStop()}>
                 Reload chat
               </button>
             </div>

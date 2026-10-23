@@ -1,0 +1,37 @@
+[package]
+name = "otto-rooms"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Session rooms + game rooms domain: capability registries, room actions,
+# recap capture/archive/engines and the authority/maintenance logic behind
+# `RoomsCtx`. No web framework and no server context: otto-server keeps the HTTP handlers,
+# WebSocket upgrades and run loops (glue: otto-server/src/rooms/ctx.rs).
+[dependencies]
+otto-core.workspace = true
+otto-pty.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+base64.workspace = true
+sha2.workspace = true
+rand.workspace = true
+bytes.workspace = true
+tempfile.workspace = true
+tracing.workspace = true
+# `reqwest::Url` parses the public room origin (no requests are made here).
+reqwest.workspace = true
+# `HeaderMap` for the `Sec-WebSocket-Protocol` capability pair.
+http = "1.5.0"
+# TURN REST credentials: ephemeral HMAC-SHA1, never return the shared secret.
+hmac = "0.13.0"
+sha1 = "0.11.0"
+
+# Local shared-screen OCR; Vision ships with macOS (no cloud credentials).
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.4"
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSData", "NSDictionary", "NSError", "NSString"] }
+objc2-vision = { version = "0.3.2", default-features = false, features = ["std", "VNRequest", "VNRequestHandler", "VNRecognizeTextRequest", "VNObservation", "VNTypes"] }

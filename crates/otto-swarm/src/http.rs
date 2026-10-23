@@ -221,7 +221,7 @@ async fn update_swarm<S: SwarmCtx>(
 ) -> ApiResult<Json<Swarm>> {
     let swarm = s.swarm().get_swarm(&sid).await?;
     check(&s, &user, &swarm.workspace_id, WorkspaceRole::Editor).await?;
-    Ok(Json(s.swarm().update_swarm(&sid, req).await?))
+    Ok(Json(s.swarm().update_swarm(&sid, req, &user.0.id).await?))
 }
 
 // -- Agents -----------------------------------------------------------------
@@ -244,7 +244,89 @@ async fn create_agent<S: SwarmCtx>(
 ) -> ApiResult<Json<SwarmAgent>> {
     let swarm = s.swarm().get_swarm(&sid).await?;
     check(&s, &user, &swarm.workspace_id, WorkspaceRole::Editor).await?;
+    // access-control-6-01: a hire is the same identity write as a PATCH, so
+    // the PC-2 rule applies here too — compared against a blank agent. A
+    // plain hire (name, title, reporting line, skills, avatar, a library
+    // soul, a cadence with no directive, the swarm's default provider) stays
+    // Editor-level.
+    let changed = hire_identity_fields(&swarm, &req);
+    require_identity_editor(&s, &user, &swarm, &changed).await?;
     Ok(Json(s.swarm().create_agent(&swarm, &user.0.id, req).await?))
+}
+
+/// PC-2: what an agent IS — its prompt, soul, provider, model, cwd and
+/// schedule directive — is the swarm creator's, a ws Admin's or root's to
+/// write. `changed` lists the identity fields the request writes; empty
+/// passes for any Editor.
+async fn require_identity_editor<S: SwarmCtx>(
+    s: &S,
+    user: &AuthUser,
+    swarm: &Swarm,
+    changed: &[&'static str],
+) -> ApiResult<()> {
+    if changed.is_empty() || user.0.is_root || swarm.created_by == user.0.id {
+        return Ok(());
+    }
+    let admin = s
+        .roles()
+        .check(&user.0, &swarm.workspace_id, WorkspaceRole::Admin)
+        .await
+        .is_ok();
+    if admin {
+        return Ok(());
+    }
+    Err(ApiErr(Error::Forbidden(format!(
+        "only the swarm's creator or a workspace admin can change an agent's {}",
+        changed.join(", ")
+    ))))
+}
+
+/// Trimmed, non-empty.
+fn norm(v: Option<&str>) -> Option<&str> {
+    v.map(str::trim).filter(|s| !s.is_empty())
+}
+
+/// A schedule's non-empty `directive` (the scheduled turn's prompt).
+fn schedule_directive(s: Option<&serde_json::Value>) -> Option<String> {
+    s.and_then(|v| v.get("directive"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+        .map(str::to_string)
+}
+
+/// The identity fields a hire writes, compared against a blank agent on this
+/// swarm: any prompt / soul text, a schedule directive, and a provider, model
+/// or cwd mode other than the swarm's configured default (`config.provider`,
+/// `config.model`, `config.cwd_mode`; a swarm with no configured provider
+/// leaves the provider choice open). A library `soul_name` is a catalogue
+/// pick, not authored text, so it stays Editor-level.
+fn hire_identity_fields(swarm: &Swarm, req: &CreateAgentReq) -> Vec<&'static str> {
+    let cfg = |k: &str| swarm.config.get(k).and_then(serde_json::Value::as_str);
+    let mut out = Vec::new();
+    if norm(req.scope_md.as_deref()).is_some() || norm(req.specialization.as_deref()).is_some() {
+        out.push("prompt");
+    }
+    if norm(req.soul_md.as_deref()).is_some() {
+        out.push("soul");
+    }
+    if let Some(default) = norm(cfg("provider")) {
+        if norm(Some(req.provider.as_str())) != Some(default) {
+            out.push("provider");
+        }
+    }
+    if norm(req.model.as_deref()).is_some() && norm(req.model.as_deref()) != norm(cfg("model")) {
+        out.push("model");
+    }
+    if norm(req.cwd_mode.as_deref()).is_some()
+        && norm(req.cwd_mode.as_deref()) != norm(cfg("cwd_mode"))
+    {
+        out.push("cwd");
+    }
+    if schedule_directive(req.schedule.as_ref()).is_some() {
+        out.push("schedule directive");
+    }
+    out
 }
 
 async fn update_agent<S: SwarmCtx>(
@@ -263,17 +345,7 @@ async fn update_agent<S: SwarmCtx>(
     let changed = identity_changes(&agent, &req);
     if !changed.is_empty() {
         let swarm = s.swarm().get_swarm(&agent.swarm_id).await?;
-        let admin = s
-            .roles()
-            .check(&user.0, &agent.workspace_id, WorkspaceRole::Admin)
-            .await
-            .is_ok();
-        if !(admin || swarm.created_by == user.0.id) {
-            return Err(ApiErr(Error::Forbidden(format!(
-                "only the swarm's creator or a workspace admin can change an agent's {}",
-                changed.join(", ")
-            ))));
-        }
+        require_identity_editor(&s, &user, &swarm, &changed).await?;
     }
     Ok(Json(s.swarm().update_agent(&aid, req).await?))
 }
@@ -281,9 +353,6 @@ async fn update_agent<S: SwarmCtx>(
 /// The identity fields `req` would change on `agent` (an absent field keeps
 /// its value; an empty model / soul / cwd mode equals an unset one).
 fn identity_changes(agent: &SwarmAgent, req: &UpdateAgentReq) -> Vec<&'static str> {
-    fn norm(v: Option<&str>) -> Option<&str> {
-        v.map(str::trim).filter(|s| !s.is_empty())
-    }
     let differs = |new: Option<&String>, cur: Option<&str>| {
         new.is_some_and(|n| norm(Some(n.as_str())) != norm(cur))
     };
@@ -312,16 +381,9 @@ fn identity_changes(agent: &SwarmAgent, req: &UpdateAgentReq) -> Vec<&'static st
     // new directive is the creator's (or an Admin's) call, the same rule as a
     // personal agent's schedule (S3-05). Cadence, `at` and `enabled` stay
     // Editor-level; clearing the schedule or the directive adds no prompt.
-    let directive = |s: Option<&serde_json::Value>| {
-        s.and_then(|v| v.get("directive"))
-            .and_then(serde_json::Value::as_str)
-            .map(str::trim)
-            .filter(|d| !d.is_empty())
-            .map(str::to_string)
-    };
     if let Some(next) = &req.schedule {
-        let new = directive(next.as_ref());
-        if new.is_some() && new != directive(agent.schedule.as_ref()) {
+        let new = schedule_directive(next.as_ref());
+        if new.is_some() && new != schedule_directive(agent.schedule.as_ref()) {
             out.push("schedule directive");
         }
     }
@@ -372,7 +434,7 @@ async fn update_project<S: SwarmCtx>(
 ) -> ApiResult<Json<SwarmProject>> {
     let project = s.swarm().get_project(&pid).await?;
     check(&s, &user, &project.workspace_id, WorkspaceRole::Editor).await?;
-    Ok(Json(s.swarm().update_project(&pid, req).await?))
+    Ok(Json(s.swarm().update_project(&pid, req, &user.0.id).await?))
 }
 
 // -- Tasks ------------------------------------------------------------------

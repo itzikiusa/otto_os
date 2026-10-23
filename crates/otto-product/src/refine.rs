@@ -31,7 +31,7 @@ use otto_state::{
     NewRefinementMessage, NewRefinementThread, NewVersion, RefinementMessage, RefinementThread,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 use tracing::warn;
 
 use crate::host::ProductStudioHost;
@@ -569,7 +569,12 @@ fn build_refinement_prompt(
 /// update (never panics, never loses the agent's words). JSON `null` (or empty)
 /// for `updated_story_md`/`summary` → `None`.
 fn parse_turn(raw: &str) -> (String, Option<String>, Option<String>) {
-    let Some(v) = otto_core::text::extract_json(raw) else {
+    // Shape predicate: a quoted `{…}` before the real object (a config
+    // snippet, an example) must not shadow it — taking the first span fell
+    // back to the raw text and DROPPED `updated_story_md`.
+    let Some(v) =
+        otto_core::text::extract_json_where(raw, |v| v.get("reply").is_some_and(Value::is_string))
+    else {
         return (raw.to_string(), None, None);
     };
     let reply = v
@@ -673,5 +678,15 @@ mod tests {
         let (reply, updated, _summary) = parse_turn(raw);
         assert_eq!(reply, "no change needed");
         assert!(updated.is_none()); // JSON null → None (no version written)
+    }
+
+    #[test]
+    fn parse_skips_a_decoy_object_before_the_reply() {
+        // A quoted config object comes first; the turn object follows. The
+        // first-span parse fell back to raw text and dropped the update.
+        let raw = r##"The flag lives in `{"feature":"lockout","enabled":true}`. {"reply":"added the lockout AC","updated_story_md":"# Body v2"}"##;
+        let (reply, updated, _summary) = parse_turn(raw);
+        assert_eq!(reply, "added the lockout AC");
+        assert_eq!(updated.as_deref(), Some("# Body v2"));
     }
 }

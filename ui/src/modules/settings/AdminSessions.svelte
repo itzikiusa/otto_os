@@ -27,6 +27,11 @@
   let busy: Set<string> = $state(new Set());
   let selected: Set<string> = $state(new Set());
   let bulkBusy = $state(false);
+  // backend-performance-6-05: the daemon pages the overview (unarchived by
+  // default, newest first); archived history is opt-in.
+  let includeArchived = $state(false);
+  let nextCursor = $state<string | null>(null);
+  let loadingMore = $state(false);
 
   const exitedCount = $derived(sessions.filter((s) => !s.live).length);
   const liveCount = $derived(sessions.length - exitedCount);
@@ -51,11 +56,20 @@
     void load();
   });
 
+  function overviewUrl(cursor?: string): string {
+    const q = new URLSearchParams();
+    if (includeArchived) q.set('include_archived', 'true');
+    if (cursor) q.set('cursor', cursor);
+    const qs = q.toString();
+    return qs ? `/admin/sessions?${qs}` : '/admin/sessions';
+  }
+
   async function load(): Promise<void> {
     loading = true;
     try {
-      const resp = await api.get<AdminSessionsResp>('/admin/sessions');
+      const resp = await api.get<AdminSessionsResp>(overviewUrl());
       sessions = resp.sessions;
+      nextCursor = resp.next_cursor ?? null;
       // Drop selections for rows that no longer exist.
       const ids = new Set(sessions.map((s) => s.id));
       selected = new Set([...selected].filter((id) => ids.has(id)));
@@ -65,6 +79,26 @@
     } finally {
       loading = false;
     }
+  }
+
+  async function loadMore(): Promise<void> {
+    if (!nextCursor || loadingMore) return;
+    loadingMore = true;
+    try {
+      const resp = await api.get<AdminSessionsResp>(overviewUrl(nextCursor));
+      const have = new Set(sessions.map((s) => s.id));
+      sessions = [...sessions, ...resp.sessions.filter((s) => !have.has(s.id))];
+      nextCursor = resp.next_cursor ?? null;
+    } catch (e) {
+      toastError('Couldn’t load more sessions', e);
+    } finally {
+      loadingMore = false;
+    }
+  }
+
+  function setIncludeArchived(on: boolean): void {
+    includeArchived = on;
+    void load();
   }
 
   function toggle(id: string): void {
@@ -200,6 +234,11 @@
     </div>
   {/if}
 
+  <label class="archived-toggle">
+    <input type="checkbox" checked={includeArchived} onchange={(e) => setIncludeArchived(e.currentTarget.checked)} disabled={loading} />
+    Include archived sessions
+  </label>
+
   {#if selected.size > 0}
     <div class="bulk-bar" role="toolbar" aria-label="Selected sessions">
       <span class="bulk-count">{selected.size} selected</span>
@@ -273,11 +312,30 @@
         {/each}
       </div>
     </div>
+    {#if nextCursor}
+      <div class="more">
+        <button class="btn small" onclick={() => void loadMore()} disabled={loadingMore} aria-busy={loadingMore}>
+          {loadingMore ? 'Loading more sessions…' : 'Load more'}
+        </button>
+      </div>
+    {/if}
   </LoadState>
   </PageBody>
 </div>
 
 <style>
+  .archived-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-block-end: 8px;
+    font-size: var(--fs-s);
+  }
+  .more {
+    display: flex;
+    justify-content: center;
+    padding-block: 8px;
+  }
   /* Section chrome: shared PageHeader bar + scrolling PageBody. */
   .settings-section {
     display: flex;

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announceShown } from '../../lib/announce.svelte';
   import { toastError } from '../../lib/toastError';
   import { plural } from '../../lib/plural';
   // Response viewer shared by the page and the compact panel: status / time /
@@ -253,7 +254,7 @@
       await copyTextOrThrow(bodyView === 'raw' ? resp.body : displayBody);
       toasts.success('Response body copied');
     } catch {
-      toasts.error('Couldn’t copy', 'The clipboard isn’t available.');
+      toasts.error('Couldn’t copy', 'The clipboard isn’t available here. Select the text and copy it manually.');
     }
   }
 
@@ -354,7 +355,7 @@
     </div>
   {:else if failure}
     {#if fromHistory}{@render historyBanner(fromHistory)}{/if}
-    <div class="failure" role="alert">
+    <div class="failure" use:announceShown={{ text: `${failureTitle}. ${failure}`, assertive: true }}>
       <Icon name="warning" size={16} />
       <div class="f-body">
         <div class="f-title">{failureTitle}</div>
@@ -373,13 +374,11 @@
   {:else if !resp}
     <div class="empty">
       {#if apiClient.sending}
-        <p class="empty-title" role="status">Sending…</p>
+        <p class="empty-title" use:announceShown={'Sending…'}>Sending…</p>
       {:else}
         <Icon name="send" size={compact ? 24 : 24} />
         <p class="empty-title">Send the request to see the response here</p>
-        {#if !compact}
-          <p class="empty-sub">Press <kbd>⌘</kbd><kbd>↵</kbd> or click Send. You’ll see the status, timing, headers and body.</p>
-        {/if}
+        {#if !compact}<p class="empty-sub">Press <kbd>⌘</kbd><kbd>↵</kbd> or click Send. You’ll see the status, timing, headers and body.</p>{/if}
       {/if}
     </div>
   {:else}
@@ -389,7 +388,7 @@
       <span class="chip" title="Total time">{formatSeconds(resp.duration_ms / 1000)}</span>
       <span class="chip" title="Response size">{formatBytes(resp.size_bytes)}</span>
       {#if resp.content_type}<span class="meta mono ct" title={resp.content_type}>{resp.content_type}</span>{/if}
-      {#if apiClient.sending}<span class="meta" role="status">Sending again…</span>{/if}
+      {#if apiClient.sending}<span class="meta">Sending again…</span>{/if}
       <span class="grow"></span>
       <button class="btn small ghost" onclick={copyBody} disabled={resp.too_large || isImage} title={resp.too_large ? 'Too large to copy — download it from More response actions' : isImage ? 'Images can’t be copied as text — download it from More response actions' : 'Copy the body as shown'}>
         <Icon name="copy" size={12} />Copy

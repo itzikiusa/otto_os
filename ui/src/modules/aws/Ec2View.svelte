@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announce } from '../../lib/announce.svelte';
   import { rowMenu } from '../../lib/rowMenu';
   import type { BadgeTone } from '../../lib/status';
   import { sentenceCase } from '../../lib/labels';
@@ -179,8 +180,8 @@
     try {
       await copyTextOrThrow(text);
       toasts.success(`Copied ${what}`);
-    } catch (e) {
-      toastError('Couldn’t copy', e);
+    } catch {
+      toasts.error('Couldn’t copy', 'The clipboard isn’t available here. Select the text and copy it manually.');
     }
   }
 
@@ -209,6 +210,10 @@
     for (const i of instances ?? []) c[i.state] = (c[i.state] ?? 0) + 1;
     return c;
   });
+  // Spoken at the state edge through the shell's always-mounted announcer: a
+  // live region inserted together with its text is not read (WebKit/VoiceOver).
+  const detailError = $derived(detail?.error ?? '');
+  $effect(() => { if (detailError) announce(`Couldn’t load the instance details. ${awsErrorText(detailError)}`, { assertive: true }); });
 </script>
 
 <ViewToolbar
@@ -331,7 +336,7 @@
     {:else}
       <div class="dt">
         {#if d.error}
-          <p class="err" role="alert">{awsErrorText(d.error)}</p>
+          <p class="err">{awsErrorText(d.error)}</p>
         {:else if !d.full}
           <Skeleton rows={5} />
         {:else}

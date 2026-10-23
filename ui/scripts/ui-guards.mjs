@@ -24,7 +24,15 @@
 // 3. Icon-only buttons are labelled. A <button> whose only content is
 //    <Icon …/> needs BOTH aria-label (screen readers) and title (hover
 //    tooltip) — name the action, e.g. "Delete credential", not "Delete".
-//    (Ratcheted until the tree hit zero on 2026-10-03, then promoted.)
+//    (Ratcheted until the tree hit zero on 2026-10-03, then promoted.) The
+//    detector is `detectIconButtonName` (p04 block, unit-tested); this is the
+//    `icon-button-name` check, so no separate ratchet exists for it.
+//
+// 4. lib/ never imports modules/ (`lib-imports-modules`). An import in
+//    src/lib/** that resolves into src/modules/** makes shared code depend on
+//    a feature. Move the shared piece into lib/, or bind it through a port the
+//    module registers (lib/uiCommands/homePort.ts, vaultPort.ts). (Ratcheted
+//    until the tree hit zero in quality iteration 6, then promoted.)
 //
 // RATCHETED rules — the tree predates them, so today's debt is recorded per
 // file in scripts/ui-guards-baseline.json and only an INCREASE fails (a file
@@ -213,9 +221,10 @@
 //                     lines. Its "count" is its line count: a recorded god file
 //                     may shrink, never grow, and a NEW file (or one crossing
 //                     800) fails until it is split into a sibling directory.
-//   lib-imports-modules  an import in src/lib/** that resolves into
-//                     src/modules/** — shared code must not depend on a
-//                     feature. Move the shared piece into lib/ instead.
+//   cross-module-import  an import in src/modules/<a>/** that resolves into
+//                     src/modules/<b>/** (b ≠ a) — one feature reaching into
+//                     another's internals (architecture-6w1-02). Move the
+//                     shared piece into lib/, or go through a lib port.
 //   raw-error         `e instanceof Error ? e.message : String(e)` under
 //                     src/lib/stores or src/modules — a raw exception (WebKit's
 //                     bare "Load failed") shown to a person → loadErrorText
@@ -224,9 +233,66 @@
 //                     lib/html.ts → escapeHtml (one character set, quotes
 //                     included, so it is safe in attributes too).
 //
+// Status, lazy-load and reorder ratchets (quality iteration 6; their
+// detectors sit between the `p04-detectors` markers so ui/unit/p04-uiGuards
+// runs them on fixtures):
+//
+//   inserted-live-region  `{#if …}`, `{:else if …}` or `{:else}` whose own
+//                     line or next two mounting lines (blank, comment and
+//                     `{@const}` lines skipped; cut at `{/if}`, the next
+//                     `{:else…}` or a `{#snippet}`) open an element with
+//                     role="status" or aria-live (not "off") — a live region
+//                     inserted together with its text is usually silent in
+//                     VoiceOver → announce() at the state edge,
+//                     `use:announceShown`, or one always-mounted region
+//                     (lib/announce.svelte.ts); keep the line plain text.
+//   inserted-alert    the same opener with an untoned role="alert" — WebKit
+//                     does speak an inserted alert, so a real field / form
+//                     error may keep it (accessibility.md); the count only
+//                     goes down, and a notice, result or progress line is
+//                     not an alert (→ use:announceShown).
+//   busy-empty-status role="status" with aria-busy="true" — a busy region with
+//                     no text says nothing → LoadState / Skeleton.
+//   bare-lazy-import  `{#await import(…)}` with no `{:catch}` before its
+//                     `{/await}` — a failed chunk is a silent, sticky no-op →
+//                     LazyMount (or a {:catch} with Retry).
+//   empty-state-error <EmptyState> titled “Couldn’t …” or offering Retry,
+//                     without tone="error" → LoadState (error + onretry).
+//   could-not-copy    “Could not”, “Cannot open” or lower-case “failed to” in
+//                     code or markup (comments and console.* lines skipped) →
+//                     “Couldn’t …” (content.md §3).
+//   index-keyed-reorder an `{#each … , i (i)}` in a file that defines a move /
+//                     reorder function — focus stays on the slot, not the
+//                     moved row → key by a stable id.
+//   guessed-checked   `checked={… ?? true}` / `?? false` — while the value is
+//                     still loading the box shows a guess as if it were the
+//                     setting (ux-design-6w1-04) → disable the control (or
+//                     render a skeleton) until the value is known.
+//   announce-in-region `use:announceShown` on, or inside, an element opened
+//                     with role="status" / aria-live in the 40 lines before
+//                     and not yet closed — the text is spoken twice
+//                     (accessibility-responsive-6w2-02) → keep one.
+//   guessed-derived   `const x = $derived(… ?? true)` / `?? false` whose name
+//                     the markup renders as a text ternary (`{x ? 'on' : …}`)
+//                     — a guess shown as state while loading (ux-design-6w2-01;
+//                     the `$derived` twin of guessed-checked) → show the state
+//                     only once it is known.
+//   clipboard-no-next-step  a toasts.error / toasts.warn about a copy or the
+//                     clipboard whose text has no next step (“Select … and
+//                     copy it manually”, or another route: “Use …” / “Try …”)
+//                     → copyWithToast (lib/clipboard.ts) or
+//                     COPY_FAILED_BODY (ux-design-6w1-02, content.md).
+//   unit-source-regex a ui/unit/*.test.ts reading a .svelte file's SOURCE
+//                     (`readFileSync(….svelte…)`, or a local `src('….svelte')`
+//                     helper built on readFileSync) — source regexes stand in
+//                     for behaviour (test-quality-6w1-06). Drive the component's
+//                     handlers through unit/componentFunctions.ts instead; a
+//                     structural pin may stay, but the count only goes down.
+//
 // Updating the baseline: `node scripts/ui-guards.mjs --update-baseline`
 // rewrites scripts/ui-guards-baseline.json from the current tree (sorted keys,
-// deterministic). Do it when you PAY DOWN debt (so the lower count sticks) —
+// deterministic); `--update-baseline --only <rule>` rewrites that one rule's
+// entry and keeps the others (for a guard widened while other work is open). Do it when you PAY DOWN debt (so the lower count sticks) —
 // never to wave through a new violation; fix that instead.
 //
 // Escape hatch for a deliberate exception (any rule): put `ui-guards: allow`
@@ -242,6 +308,13 @@ const UI = fileURLToPath(new URL('..', import.meta.url));
 const SRC = join(UI, 'src');
 const BASELINE = join(UI, 'scripts', 'ui-guards-baseline.json');
 const UPDATE = process.argv.includes('--update-baseline');
+// `--update-baseline --only <rule>` rewrites that one rule's entry and keeps
+// every other rule's recorded counts as they are (a guard widened mid-wave
+// records its new hits without waving through anyone else's).
+const ONLY = (() => {
+  const i = process.argv.indexOf('--only');
+  return i === -1 ? null : (process.argv[i + 1] ?? '');
+})();
 
 /** Custom properties set by libraries we style against, not by our code
  *  (empty since @xyflow/svelte, the `--xy-` owner, was dropped). */
@@ -385,9 +458,21 @@ const RULES = {
   'body-style': 'document-level style write (body cursor/userSelect, documentElement setProperty) — use lib/dragCursor.ts or a scoped custom property',
   'clipboard-write': 'navigator.clipboard.writeText outside lib/clipboard.ts — use copyText / copyTextOrThrow (insecure-origin + unfocused-document fallback)',
   'file-loc': 'a .svelte/.ts file at or over 800 lines grew (or a new one appeared) — split it into a sibling directory with re-exports',
-  'lib-imports-modules': 'src/lib imports from src/modules — shared code must not depend on a feature; move the shared piece into lib/',
+  'cross-module-import': 'src/modules/<a> imports from src/modules/<b> — move the shared piece into lib/ (or a lib port) instead of reaching into another feature',
   'raw-error': 'raw `e instanceof Error ? e.message : String(e)` shown to a person — use loadErrorText (lib/loadError.ts)',
   'html-escape': "hand-written .replace(/&/g, '&amp;') escape chain — use escapeHtml (lib/html.ts)",
+  'inserted-live-region': 'status region inserted with its text ({#if} / {:else if} / {:else} + role="status" / aria-live) — announce() at the state edge, use:announceShown, or one always-mounted region (lib/announce.svelte.ts)',
+  'announce-in-region': 'use:announceShown on or inside a mounted role="status" / aria-live region — the text is spoken twice; keep one (the region, or the action with no role)',
+  'guessed-derived': '$derived(… ?? true|false) rendered as a state word ({x ? \'on\' : \'off\'}) — a loading value shown as known; render the state once it is known',
+  'inserted-alert': 'untoned role="alert" inserted with its text — allowed for a real field / form error only (accessibility.md); a notice, result or progress line uses use:announceShown instead',
+  'busy-empty-status': 'role="status" with aria-busy="true" — a busy region with no text says nothing; use LoadState / Skeleton',
+  'bare-lazy-import': '{#await import(…)} without {:catch} — a failed chunk is a silent no-op; use LazyMount or add a {:catch} with Retry',
+  'empty-state-error': '<EmptyState> used as a load error (“Couldn’t …” title or Retry) without tone="error" — use LoadState (error + onretry)',
+  'could-not-copy': '“Could not” / “Cannot open” / “failed to” in user copy — write “Couldn’t …” (content.md §3)',
+  'index-keyed-reorder': '{#each … (i)} in a file with a move/reorder function — key the rows by a stable id so focus follows the moved row',
+  'guessed-checked': 'checked={… ?? true|false} — a loading value shown as a guessed setting; disable the control until the value is known',
+  'clipboard-no-next-step': 'copy / clipboard failure toast with no next step — use copyWithToast or COPY_FAILED_BODY (“Select the text and copy it manually.”)',
+  'unit-source-regex': 'ui/unit test reading .svelte source — drive the handlers through unit/componentFunctions.ts; source pins only go down',
 };
 
 /** Clocks, UI animation and explicitly bounded protocol/media lifecycles, not
@@ -701,22 +786,9 @@ for (const f of files) {
     .replace(/<script\b[\s\S]*?<\/script[^>]*>/gi, blank)
     .replace(/<style\b[\s\S]*?<\/style[^>]*>/gi, blank)
     .replace(/<!--[\s\S]*?-->/g, blank);
-  for (const m of markup.matchAll(/<button(?=[\s>])/g)) {
-    const end = tagEnd(markup, m.index + 7);
-    if (end === -1) continue;
-    const attrs = markup.slice(m.index + 7, end);
-    if (attrs.trimEnd().endsWith('/')) continue;
-    const close = markup.indexOf('</button>', end);
-    if (close === -1) continue;
-    const body = markup.slice(end + 1, close).trim();
-    if (!body.startsWith('<Icon') || !body.endsWith('/>') || body.split('<').length !== 2) continue;
-    if (/\{\s*\.\.\./.test(attrs)) continue; // spread props may carry the labels
-    const hasAria = /(^|\s)aria-label(ledby)?\s*=|\{aria-label\}/.test(attrs);
-    const hasTitle = /(^|\s)title\s*=|\{title\}/.test(attrs);
-    if (hasAria && hasTitle) continue;
-    const missing = [!hasAria && 'aria-label', !hasTitle && 'title'].filter(Boolean).join(' + ');
-    if (allowed(f.text, m.index)) continue;
-    problems.push(`${f.rel}:${lineOf(f.text, m.index)}  icon-only <button> missing ${missing} — add both (name the action)`);
+  for (const d of detectIconButtonName(markup)) {
+    if (allowed(f.text, d.index)) continue;
+    problems.push(`${f.rel}:${lineOf(f.text, d.index)}  icon-only <button> missing ${d.detail} — add both (name the action)`);
   }
 }
 
@@ -899,10 +971,14 @@ for (const f of files) {
     found['file-loc'][f.rel] = { count: lines, hits: [`${f.rel}: ${lines} lines (new files stay under ${NEW_FILE_MAX})`] };
   }
   const code = stripComments(f.text);
-  if (f.rel.startsWith('src/lib/')) {
+  if (f.rel.startsWith('src/lib/') || f.rel.startsWith('src/modules/')) {
     for (const m of code.matchAll(IMPORT_SPEC)) {
       const target = relative(UI, join(f.path, '..', m[2]));
-      if (target.startsWith('src/modules/')) hit('lib-imports-modules', f, m.index, m[2]);
+      if (f.rel.startsWith('src/lib/')) {
+        if (target.startsWith('src/modules/') && !allowed(f.text, m.index)) {
+          problems.push(`${f.rel}:${lineOf(f.text, m.index)}  lib/ imports modules/ (${m[2]}) — move the shared piece into lib/, or bind it through a port the module registers (lib/uiCommands/vaultPort.ts)`);
+        }
+      } else if (detectCrossModuleImport(f.rel, target)) hit('cross-module-import', f, m.index, m[2]);
     }
   }
   if (f.rel.startsWith('src/lib/stores/') || f.rel.startsWith('src/modules/')) {
@@ -924,6 +1000,259 @@ if (existsSync(E2E)) {
   }
 }
 
+// ---------- status / lazy-load / reorder ratchets ----------
+// p04-detectors:start — pure detectors: (text) → [{ index, detail }].
+// `markup` is a .svelte file with comments, <script> and <style> blanked;
+// `code` is any source with comments blanked.
+// `aria-live="off"` is the opposite of a live region (a diagnostics HUD).
+const LIVE_REGION = /role="status"|aria-live=(?!\{?\s*["'`]off["'`])|role="alert"/;
+// A branch opener: `{#if …}`, `{:else if …}` or `{:else}` — each mounts its
+// body (and any live region in it) together with the body's text.
+const BRANCH_OPENER = /\{#if\b|\{:else\s+if\b|\{:else\s*\}/g;
+// Lines that mount nothing: blank (comments are already blanked) or `{@const …}`.
+const INERT_LINE = /^\s*(?:\{@const\b[^\n]*\}\s*)?$/;
+function detectInsertedLiveRegion(markup) {
+  const out = [];
+  const lines = markup.split('\n');
+  const starts = [];
+  for (let i = 0, at = 0; i < lines.length; i++) {
+    starts.push(at);
+    at += lines[i].length + 1;
+  }
+  const seen = new Set(); // a region nested under two openers is one hit
+  for (let i = 0; i < lines.length; i++) {
+    for (const m0 of lines[i].matchAll(BRANCH_OPENER)) {
+      const k = m0.index;
+      // The opener's own line plus the next two lines that mount something
+      // (blank / comment / {@const} lines are skipped, at most four of them),
+      // cut at the branch's end (`{/if}` or the next `{:else…}`). `pieces`
+      // keeps each part's offset in `markup` so a region is counted once.
+      const pieces = [{ text: lines[i].slice(k), at: starts[i] + k }];
+      for (let j = i + 1, taken = 0, skipped = 0; j < lines.length && taken < 2; j++) {
+        if (INERT_LINE.test(lines[j])) {
+          if (++skipped > 4) break;
+          continue;
+        }
+        pieces.push({ text: lines[j], at: starts[j] });
+        taken++;
+      }
+      // Cut at the branch's end (or a `{#snippet}`: its body mounts where it
+      // is rendered, not with this branch), then look for a region.
+      let seg = '';
+      let region = null;
+      for (let p = 0; p < pieces.length; p++) {
+        const skip = p === 0 ? 1 : 0; // the opener itself may be `{:else…}`
+        const end = pieces[p].text.slice(skip).search(/\{\/if\}|\{:else\b|\{#snippet\b/);
+        const text = end === -1 ? pieces[p].text : pieces[p].text.slice(0, end + skip);
+        const m = region ? null : LIVE_REGION.exec(text);
+        if (m) region = { kind: m[0], at: pieces[p].at + m.index };
+        seg += text + '\n';
+        if (end !== -1) break;
+      }
+      if (!region || seen.has(region.at)) continue;
+      if (region.kind === 'role="alert"' && /\btone=/.test(seg)) continue;
+      seen.add(region.at);
+      const opener = m0[0].startsWith('{#') ? '{#if …}' : m0[0].includes('if') ? '{:else if …}' : '{:else}';
+      out.push({ index: starts[i] + k, kind: region.kind, detail: `${opener} + ${region.kind}` });
+    }
+  }
+  return out;
+}
+function detectBusyEmptyStatus(markup) {
+  const out = [];
+  for (const m of markup.matchAll(/<[A-Za-z][^<>]*>/g)) {
+    if (/role="status"/.test(m[0]) && /aria-busy=(?:"true"|\{true\})/.test(m[0])) out.push({ index: m.index, detail: 'role="status" aria-busy="true"' });
+  }
+  return out;
+}
+function detectBareLazyImport(markup) {
+  const out = [];
+  for (const m of markup.matchAll(/\{#await\s+import\(/g)) {
+    const end = markup.indexOf('{/await}', m.index);
+    const body = markup.slice(m.index, end === -1 ? undefined : end);
+    if (!body.includes('{:catch')) out.push({ index: m.index, detail: '{#await import(…)} without {:catch}' });
+  }
+  return out;
+}
+function detectEmptyStateError(markup) {
+  const out = [];
+  for (const m of markup.matchAll(/<EmptyState\b/g)) {
+    const end = tagEnd(markup, m.index + m[0].length);
+    const tag = markup.slice(m.index, end === -1 ? undefined : end + 1);
+    if (/\btone=["{']*error/.test(tag)) continue;
+    const couldnt = /\btitle=\{?\s*["'`]Couldn[’']t/.test(tag);
+    const retry = /\bactionLabel=\{?[^>]*?["'`]Retry\b/.test(tag);
+    if (couldnt || retry) out.push({ index: m.index, detail: couldnt ? '<EmptyState title="Couldn’t …">' : '<EmptyState actionLabel="Retry">' });
+  }
+  return out;
+}
+function detectCouldNotCopy(code) {
+  const out = [];
+  let at = 0;
+  for (const l of code.split('\n')) {
+    if (!/\bconsole\.\w+\(/.test(l)) {
+      for (const m of l.matchAll(/\bCould not\b|\bCannot open\b|\bfailed to\b/g)) out.push({ index: at + m.index, detail: m[0] });
+    }
+    at += l.length + 1;
+  }
+  return out;
+}
+function detectIndexKeyedReorder(code) {
+  // A row-reordering editor: a move/reorder function AND an array swap or
+  // splice (a menu's cursor `move(delta)` or a drag handler is not one).
+  if (!/\bfunction\s+(?:move|reorder)\w*\s*\(|\b(?:move|reorder)\w*\s*=\s*(?:async\s*)?\(/.test(code)) return [];
+  if (!/\[\s*\w+\[\s*\w+\s*\]\s*,\s*\w+\[\s*\w+\s*\]\s*\]\s*=|\.splice\(/.test(code)) return [];
+  const out = [];
+  for (const m of code.matchAll(/\{#each\b[^}]*?,\s*(\w+)\s*\(\s*\1\s*\)\s*\}/g)) out.push({ index: m.index, detail: m[0].slice(0, 60) });
+  return out;
+}
+function detectIconButtonName(markup) {
+  // A <button> whose only content is one <Icon …/> needs BOTH aria-label
+  // (screen readers) and title (hover tooltip). Hard rule 3.
+  const out = [];
+  for (const m of markup.matchAll(/<button(?=[\s>])/g)) {
+    const end = tagEnd(markup, m.index + 7);
+    if (end === -1) continue;
+    const attrs = markup.slice(m.index + 7, end);
+    if (attrs.trimEnd().endsWith('/')) continue;
+    const close = markup.indexOf('</button>', end);
+    if (close === -1) continue;
+    const body = markup.slice(end + 1, close).trim();
+    if (!body.startsWith('<Icon') || !body.endsWith('/>') || body.split('<').length !== 2) continue;
+    if (/\{\s*\.\.\./.test(attrs)) continue; // spread props may carry the labels
+    const hasAria = /(^|\s)aria-label(ledby)?\s*=|\{aria-label\}/.test(attrs);
+    const hasTitle = /(^|\s)title\s*=|\{title\}/.test(attrs);
+    if (hasAria && hasTitle) continue;
+    out.push({ index: m.index, detail: [!hasAria && 'aria-label', !hasTitle && 'title'].filter(Boolean).join(' + ') });
+  }
+  return out;
+}
+/** `rel` (src/modules/<a>/…) importing `target` (a src/-relative path) in another module. */
+function detectCrossModuleImport(rel, target) {
+  const from = /^src\/modules\/([^/]+)\//.exec(rel);
+  const to = /^src\/modules\/([^/]+)\//.exec(target);
+  return !!from && !!to && from[1] !== to[1];
+}
+function detectGuessedChecked(markup) {
+  const out = [];
+  for (const m of markup.matchAll(/\bchecked=\{[^{}]*\?\?\s*(?:true|false)\s*\}/g)) out.push({ index: m.index, detail: m[0] });
+  return out;
+}
+/** Index just past the `)` closing the call whose `(` is at `open`, or -1. */
+function callEnd(code, open) {
+  let depth = 0;
+  let q = '';
+  for (let i = open; i < code.length; i++) {
+    const c = code[i];
+    if (q) {
+      if (c === '\\') i++;
+      else if (c === q) q = '';
+    } else if (c === '"' || c === "'" || c === '`') q = c;
+    else if (c === '(') depth++;
+    else if (c === ')' && --depth === 0) return i + 1;
+  }
+  return -1;
+}
+function detectClipboardNoNextStep(code) {
+  const out = [];
+  for (const m of code.matchAll(/\btoasts\.(?:error|warn)\s*\(/g)) {
+    const end = callEnd(code, m.index + m[0].length - 1);
+    const call = code.slice(m.index, end === -1 ? undefined : end);
+    if (!/Couldn[’']t copy|\bcopy (?:failed|blocked)|\bclipboard\b/i.test(call)) continue;
+    // A next step: copy by hand, or another route (“Use Download…”, “Try ⌘C again”).
+    if (/manually|\bSelect\b|COPY_FAILED_BODY|\b(?:Try|Use)\b/.test(call)) continue;
+    out.push({ index: m.index, detail: call.replace(/\s+/g, ' ').slice(0, 80) });
+  }
+  return out;
+}
+function detectUnitSourceRegex(code) {
+  // Direct reads of a component's source, plus calls to a local helper that
+  // wraps readFileSync (`const src = (p) => readFileSync(…${p}…)`).
+  const out = [];
+  for (const m of code.matchAll(/\breadFileSync\s*\(/g)) {
+    const end = callEnd(code, m.index + m[0].length - 1);
+    if (/\.svelte(?![.\w])/.test(code.slice(m.index, end === -1 ? undefined : end))) out.push({ index: m.index, detail: 'readFileSync(….svelte)' });
+  }
+  const helpers = [...code.matchAll(/\b(?:const|let)\s+(\w+)\s*=\s*(?:\([^()]*\)|\w+)\s*(?::[^=]*)?=>\s*readFileSync\(|\bfunction\s+(\w+)\s*\([^()]*\)[^{]*\{\s*return\s+readFileSync\(/g)].map((h) => h[1] ?? h[2]);
+  for (const name of helpers) {
+    for (const m of code.matchAll(new RegExp(`\\b${name}\\(\\s*['"\`][^'"\`]*\\.svelte['"\`]`, 'g'))) out.push({ index: m.index, detail: `${name}('….svelte')` });
+  }
+  return out;
+}
+function detectAnnounceInRegion(markup) {
+  // `use:announceShown` on, or inside, an element that is itself a status
+  // region (role="status" / aria-live, opened within the 40 lines before and
+  // not yet closed): the line is spoken twice — once by the region, once by
+  // the action (accessibility-responsive-6w2-02).
+  const out = [];
+  const lineStart = (i) => markup.lastIndexOf('\n', i - 1) + 1;
+  for (const m of markup.matchAll(/\buse:announceShown\b/g)) {
+    let from = lineStart(m.index);
+    for (let n = 0; n < 40 && from > 0; n++) from = lineStart(from - 1);
+    const win = markup.slice(from, m.index);
+    for (const t of win.matchAll(/<([A-Za-z][\w-]*)\b/g)) {
+      const at = from + t.index;
+      const end = tagEnd(markup, at + t[0].length);
+      if (end === -1) continue;
+      const tag = markup.slice(at, end + 1);
+      if (!/role="status"|aria-live=(?!\{?\s*["'`]off["'`])/.test(tag)) continue;
+      let inside = m.index < end; // the action sits on the region's own tag
+      if (!inside && !tag.endsWith('/>')) {
+        const between = markup.slice(end + 1, m.index);
+        const name = t[1].replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const opens = [...between.matchAll(new RegExp(`<${name}\\b(?:[^>]*[^/])?>`, 'g'))].length;
+        const closes = [...between.matchAll(new RegExp(`</${name}\\s*>`, 'g'))].length;
+        inside = closes <= opens;
+      }
+      if (inside) {
+        out.push({ index: m.index, detail: `use:announceShown inside <${t[1]} ${/role="status"/.test(tag) ? 'role="status"' : 'aria-live'}>` });
+        break;
+      }
+    }
+  }
+  return out;
+}
+function detectGuessedDerived(code, markup) {
+  // `const x = $derived(… ?? true)` / `?? false`, then `{x ? 'word' : …}` in
+  // the markup: while the value is still loading the page states a guess as
+  // if it were known (ux-design-6w2-01) → render the state only once it is
+  // known (`x === undefined` → skeleton / “Checking…”), or drop the fallback.
+  const out = [];
+  for (const m of code.matchAll(/\b(?:const|let)\s+(\w+)\s*=\s*\$derived\(([^;\n]*?)\?\?\s*(true|false)\s*\)/g)) {
+    const word = new RegExp(`(?<![=\\w])\\{\\s*!?\\s*${m[1]}\\s*\\?\\s*['"\`]`);
+    if (word.test(markup)) out.push({ index: m.index, detail: `${m[1]} = $derived(… ?? ${m[3]}) shown as a state word` });
+  }
+  return out;
+}
+// p04-detectors:end
+for (const f of files) {
+  if (!/\.(svelte|ts)$/.test(f.path)) continue;
+  const code = stripComments(f.text);
+  for (const d of detectCouldNotCopy(code)) hit('could-not-copy', f, d.index, d.detail);
+  if (f.rel !== 'src/lib/clipboard.ts') for (const d of detectClipboardNoNextStep(code)) hit('clipboard-no-next-step', f, d.index, d.detail);
+  if (!f.path.endsWith('.svelte')) continue;
+  const markup = code.replace(/<(script|style)\b[\s\S]*?<\/\1\s*>/gi, blank);
+  for (const d of detectInsertedLiveRegion(markup)) hit(d.kind === 'role="alert"' ? 'inserted-alert' : 'inserted-live-region', f, d.index, d.detail);
+  for (const d of detectBusyEmptyStatus(markup)) hit('busy-empty-status', f, d.index, d.detail);
+  for (const d of detectBareLazyImport(markup)) hit('bare-lazy-import', f, d.index, d.detail);
+  for (const d of detectEmptyStateError(markup)) hit('empty-state-error', f, d.index, d.detail);
+  for (const d of detectIndexKeyedReorder(code)) hit('index-keyed-reorder', f, d.index, d.detail);
+  for (const d of detectGuessedChecked(markup)) hit('guessed-checked', f, d.index, d.detail);
+  for (const d of detectAnnounceInRegion(markup)) hit('announce-in-region', f, d.index, d.detail);
+  for (const d of detectGuessedDerived(code, markup)) hit('guessed-derived', f, d.index, d.detail);
+}
+
+// Unit tests (ui/unit/*.test.ts, top level): source-regex reads of components.
+const UNIT = join(UI, 'unit');
+if (existsSync(UNIT)) {
+  for (const name of readdirSync(UNIT).sort()) {
+    if (!/\.test\.ts$/.test(name)) continue;
+    const p = join(UNIT, name);
+    const f = { path: p, rel: relative(UI, p), text: readFileSync(p, 'utf8') };
+    for (const d of detectUnitSourceRegex(stripComments(f.text))) hit('unit-source-regex', f, d.index, d.detail);
+  }
+}
+
 // ---------- baseline compare / update ----------
 const current = {};
 for (const rule of Object.keys(RULES).sort()) {
@@ -932,10 +1261,19 @@ for (const rule of Object.keys(RULES).sort()) {
   current[rule] = byFile;
 }
 
+if (ONLY !== null && !(ONLY in RULES)) {
+  console.error(`ui-guards: --only needs a ratchet rule name (one of: ${Object.keys(RULES).sort().join(', ')})`);
+  process.exit(2);
+}
 if (UPDATE) {
-  writeFileSync(BASELINE, JSON.stringify(current, null, 2) + '\n');
-  const total = Object.values(current).reduce((s, r) => s + Object.values(r).reduce((a, b) => a + b, 0), 0);
-  console.log(`ui-guards: baseline written (${relative(UI, BASELINE)}; ${total} recorded occurrence(s))`);
+  let written = current;
+  if (ONLY !== null) {
+    const was = existsSync(BASELINE) ? JSON.parse(readFileSync(BASELINE, 'utf8')) : {};
+    written = Object.fromEntries(Object.keys({ ...was, ...current }).sort().map((r) => [r, r === ONLY ? current[r] : (was[r] ?? {})]));
+  }
+  writeFileSync(BASELINE, JSON.stringify(written, null, 2) + '\n');
+  const total = Object.values(ONLY !== null ? { [ONLY]: current[ONLY] } : current).reduce((s, r) => s + Object.values(r).reduce((a, b) => a + b, 0), 0);
+  console.log(`ui-guards: baseline written (${relative(UI, BASELINE)}${ONLY !== null ? `, rule ${ONLY} only` : ''}; ${total} recorded occurrence(s))`);
   if (problems.length) {
     console.error(`\nui-guards: ${problems.length} HARD problem(s) (not baselinable)\n`);
     for (const p of problems) console.error('  ' + p);

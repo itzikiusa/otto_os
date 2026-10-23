@@ -9,6 +9,7 @@
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import TableDesigner from './TableDesigner.svelte';
   import JsonTree from '../../lib/components/JsonTree.svelte';
   import { database } from '../../lib/stores/database.svelte';
@@ -654,14 +655,9 @@
     </div>
   {:else if !detail && database.objectError}
     <!-- A failed open stays visible here (the toast fades) instead of decaying
-         into the neutral "no object" empty state. -->
-    <EmptyState
-      icon="x"
-      title="Couldn’t load object"
-      body={database.objectError}
-      actionLabel="Retry"
-      onaction={retryOpen}
-    />
+         into the neutral "no object" empty state: the shared error state
+         (danger tile, role="alert", Retry). -->
+    <LoadState what="the object" variant="page" empty error={database.objectError} onretry={retryOpen} />
   {:else if !detail}
     <EmptyState icon="box" title="No object selected" body="Pick a table, view, collection or key from the schema tree to inspect its structure." />
   {:else}

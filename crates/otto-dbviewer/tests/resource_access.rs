@@ -827,7 +827,7 @@ async fn governed_root_reads_cannot_call_a_mutating_builtin_overload() {
             Some(&schema),
             otto_dbviewer::export::ExportFormat::Csv,
             None,
-            Box::new(Vec::<u8>::new()),
+            otto_dbviewer::export::ExportWriter::Direct(Box::new(Vec::<u8>::new())),
         )
         .await
         .expect_err("export must refuse hidden writes")
@@ -899,6 +899,13 @@ async fn governed_readonly_profile_rejects_confirmed_root_write_before_network()
         .await;
     assert!(
         matches!(result,Err(Error::Forbidden(ref reason)) if reason.contains("read-only connection"))
+    );
+    // The refusal names the connection and the setting that lifts it.
+    let reason = result.unwrap_err().to_string();
+    assert!(
+        reason.contains("'root'")
+            && reason.contains("turn off Read-only in the connection's settings"),
+        "{reason}"
     );
 }
 

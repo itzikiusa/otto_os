@@ -25,7 +25,7 @@ use otto_core::cancel_signal::CancelSignal;
 use tokio::time::Instant;
 use tracing::warn;
 
-use crate::run::{build_improve_narrative_from_clarifications, extract_json_block};
+use crate::run::{build_improve_narrative_from_clarifications, extract_json_as};
 
 // ---------------------------------------------------------------------------
 // Watcher constants
@@ -482,8 +482,7 @@ fn parse_reconcile(raw: &str) -> otto_core::Result<ReconcileResult> {
     let bad = || {
         otto_core::Error::Upstream("invalid reconciliation result; comments remain pending".into())
     };
-    let value = extract_json_block(raw).ok_or_else(bad)?;
-    let result: ReconcileResult = serde_json::from_value(value).map_err(|_| bad())?;
+    let result: ReconcileResult = extract_json_as(raw).ok_or_else(bad)?;
     if result
         .answered
         .iter()

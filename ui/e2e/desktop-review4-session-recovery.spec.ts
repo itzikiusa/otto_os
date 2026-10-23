@@ -101,7 +101,8 @@ test('mixed session batch retains submitted settings and retries only its failed
   await dialog.locator('#ns-cwd').fill('/tmp');
   await dialog.getByRole('button', {name: 'Start 2 sessions', exact: true}).click();
   await expect(dialog).toBeVisible();
-  await expect(dialog.getByRole('status')).toContainText('1 started; 1 still need to start');
+  // The batch-result region (the dialog also keeps a session-count status).
+  await expect(dialog.getByRole('status').filter({ hasText: /started;/ })).toContainText('1 started; 1 still need to start');
   expect(submitted).toHaveLength(2);
   await dialog.locator('#ns-title').fill('Changed after failure');
   await dialog.locator('#ns-cwd').fill('/');

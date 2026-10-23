@@ -167,7 +167,10 @@ Row click opens a note; context menu:
   fails halfway: every index read happens before the move, and once the move
   succeeds a source whose links couldn't be rewritten is skipped (left
   untouched), listed in `links_failed`, and named in a warning toast — the
-  index is always refreshed to the new path.
+  index is always refreshed to the new path. The rename runs in its own task
+  that holds the vault's write lock, so a request that goes away mid-rename (a
+  closed window, an MCP call past the bridge's 20 s budget) still finishes
+  every link rewrite and the rescan.
 - **Delete (→ .trash)** — a **soft delete**: the note moves to
   `<vault>/.trash/…` inside the vault. Nothing is ever destroyed.
 
@@ -631,6 +634,16 @@ Routes: `POST …/vault/vaults/{id}/docs-agents/run`, `GET
 routes, `POST /vault/docs-agents/runs/{run_id}/cancel`, `POST
 …/docs-agents/refine`, and `GET …/docs-agents/refine-session?path=`. Exact
 request/response shapes and route paths are in `docs/contracts/api.md`.
+
+Code map: `crates/otto-server/src/vault_docs_agent.rs` (routes, run registry,
+persistence, recovery) with its phases in `vault_docs_agent/` — `run.rs`
+(orchestration), `authors.rs` (writer/summarizer turns), `review_loop.rs`,
+`retry.rs` (retry endpoints), `refine.rs` and `prompts.rs`. The writer fan-out,
+the summarizer and every per-slot retry run on the shared runner
+`otto_agent_run::fanout` (`run_slots`, `summarize_with_retries`, `attempts`
+over the run's `RetryQueue`): a retry re-runs only that slot, a failed writer
+keeps listening for a retry while a peer is still moving, and a failed
+summarizer keeps the drafts in place.
 
 ## 7. The memories layer (what remains of v1/v2)
 

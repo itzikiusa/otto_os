@@ -875,7 +875,7 @@ a loop is active, covering any missed event).
 
 ## Product AI-run completion (A3)
 
-Workspace-scoped. Emitted by `crates/otto-product/src/run.rs` at the end of every
+Workspace-scoped. Emitted by `crates/otto-product/src/run/analysis.rs` at the end of every
 AI-run task (analysis, rewrite, test-case generation, plan generation).
 
 ```json
@@ -901,7 +901,7 @@ AI-run task (analysis, rewrite, test-case generation, plan generation).
 
 ## Multi-agent plan kickoff (A3)
 
-Workspace-scoped. Emitted by `crates/otto-product/src/run.rs::run_generate_plan` each
+Workspace-scoped. Emitted by `crates/otto-product/src/run/plan.rs::run_generate_plan` each
 time a planning (or the summarizer) session is created during a `plan/generate` run, carrying
 the live session ids known so far. Lets the Plan tab tile the planning sessions side-by-side so
 the user can watch them (and answer questions when `interactive`).
@@ -964,7 +964,7 @@ non-terminal so the view converges even with no WS connection.
   Clients drop events/snapshots whose rev is behind what they already show, and
   apply a node payload in place only when `rev` is exactly contiguous.
 - `node` — the changed node's SUMMARY: exactly the node shape
-  `GET /workflows/runs/{id}/progress` serves (`logs: []` + `log_count`,
+  `GET /workflow-runs/{id}/progress` serves (`logs: []` + `log_count`,
   `output: null` + `has_output`, `error` clipped to 1 KiB, `detail_version` =
   hash of the full node). It may carry a bounded `activity` (`NodeActivity`:
   phase, pending task count, ≤ 32 sub-agent rows) while a running agent-backed

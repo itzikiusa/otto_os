@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announce } from '../../lib/announce.svelte';
   import Badge from '../../lib/components/Badge.svelte';
   import { plural } from '../../lib/plural';
   import { toastError } from '../../lib/toastError';
@@ -17,18 +18,8 @@
   import { adaptiveCadence } from '../../lib/pollBackoff';
   import { TableWindow } from '../../lib/tableWindow.svelte';
   import { copyAsJson, downloadJson, exportCsv } from '../../lib/components/exporters';
-  import type {
-    BrokerCluster,
-    ConsumeReq,
-    ConsumeResp,
-    KafkaMessage,
-    MessageHeader,
-    PartitionRange,
-    ProduceReq,
-    StartPosition,
-    TopicDetail,
-    ValueFormat,
-  } from '../../lib/api/types';
+  import type { BrokerCluster, ConsumeReq, ConsumeResp, KafkaMessage, MessageHeader,
+    PartitionRange, ProduceReq, StartPosition, TopicDetail, ValueFormat } from '../../lib/api/types';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { brokersTopicPort } from '../../lib/uiCommands/brokers';
@@ -650,9 +641,17 @@
       });
       toasts.success('Copied to clipboard');
     } catch {
-      toasts.error('Couldn’t copy', 'The browser blocked the clipboard write.');
+      toasts.error('Couldn’t copy', 'The browser blocked the clipboard write. Select the message text and copy it manually.');
     }
   }
+  $effect(() => { if (detailErr) announce(`Couldn’t load topic details. ${detailErr}`, { assertive: true }); });
+  $effect(() => { if (consumeError) announce(consumeError, { assertive: true }); });
+  $effect(() => { if (produceError) announce(produceError, { assertive: true }); });
+  $effect(() => { if (autoPoll && tailError) announce(`Live tail interrupted — retrying. ${tailError}`, { assertive: true }); });
+  // A derived flag, so a tail tick (a new offsets map) doesn't re-announce.
+  const tailActive = $derived(autoPoll && tailOffsets.size > 0 && !tailError);
+  $effect(() => { if (tailActive) announce('Live tail active — appending new messages.'); });
+  $effect(() => { if (selected?.value?.truncated && fullErr) announce(`${fullErr} Showing the first 2 KiB.`, { assertive: true }); });
 </script>
 
 <div class="td">
@@ -672,7 +671,7 @@
   </div>
 
   {#if detailErr}
-    <div class="err" role="alert">
+    <div class="err">
       <Icon name="warning" size={13} />
       <span class="err-text">Couldn’t load topic details. <span class="muted">{detailErr}</span></span>
       <button class="btn small" onclick={() => loadDetail(detail !== null)}>
@@ -745,7 +744,7 @@
       {/if}
     </div>
 
-    {#if consumeError}<p class="field-err" role="status">{consumeError}</p>{/if}
+    {#if consumeError}<p class="field-err">{consumeError}</p>{/if}
 
     <div class="msg-layout">
       <div
@@ -795,7 +794,7 @@
           <p class="masked-note pad small">PII masked — sensitive values were redacted server-side.</p>
         {/if}
         {#if autoPoll && (tailOffsets.size > 0 || tailError)}
-          <p class="muted pad small tail-note" role="status">
+          <p class="muted pad small tail-note">
             {#if tailError}
               Live tail interrupted — retrying. {tailError}{tailLastSuccess ? ` Last received successfully at ${fmtTs(tailLastSuccess)}.` : ''}
               <button class="btn small" disabled={consuming} onclick={() => consumeWithTail(true)}>Retry now</button>
@@ -843,7 +842,7 @@
           {/if}
           <h5>Value</h5>
           {#if selected.value?.truncated}
-            <p class="muted small" role="status">
+            <p class="muted small">
               {#if fullLoading}Loading the full value… (showing the first 2 KiB){:else if fullErr}{fullErr} Showing the first 2 KiB.
                 <button class="btn small" onclick={() => selected && selectMessage(selected)}>Retry</button>{:else}Showing the first 2 KiB.{/if}
             </p>
@@ -969,7 +968,7 @@
           </div>
         {/each}
       </div>
-      {#if produceError}<p class="field-err" role="alert">{produceError}</p>{/if}
+      {#if produceError}<p class="field-err">{produceError}</p>{/if}
       <button class="btn primary" onclick={produce} disabled={producing}>
         {producing ? 'Producing…' : pTombstone ? 'Produce tombstone' : 'Produce message'}
       </button>

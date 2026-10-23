@@ -147,7 +147,7 @@
       try {
         args = JSON.parse(argsText);
       } catch (e) {
-        argError = `Arguments must be valid JSON: ${e instanceof Error ? e.message : String(e)}`;
+        argError = `Arguments must be valid JSON: ${loadErrorText(e)}`;
         return;
       }
     }

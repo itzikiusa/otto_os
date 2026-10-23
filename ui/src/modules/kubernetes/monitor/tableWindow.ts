@@ -6,6 +6,8 @@
 // rows — a bounded DOM (≈ viewport / rowH + 2·overscan rows, each with two
 // SVG sparklines) however many workloads the cluster has.
 
+import { listRange } from '../../../lib/listWindow.svelte';
+
 /** Below this many rows the whole table renders (no spacers, exact layout). */
 export const WINDOW_MIN_ROWS = 80;
 
@@ -34,28 +36,15 @@ export interface TableWindow {
 }
 
 /** The rows to render and the spacer heights around them. Rows are laid out
- *  at `i * rowH`, plus `detailH` for every row after the expanded one. */
+ *  at `i * rowH`, plus `detailH` for every row after the expanded one — the
+ *  shared `listRange` with its `extra` band (one window primitive app-wide). */
 export function tableWindow(p: TableWindowInput): TableWindow {
   const { count, rowH } = p;
   if (count <= 0 || rowH <= 0) return { start: 0, end: 0, padTop: 0, padBottom: 0 };
-  const overscan = Math.max(0, p.overscan ?? 8);
   const exp = p.expanded ?? -1;
-  const detailH = exp >= 0 && exp < count ? Math.max(0, p.detailH ?? 0) : 0;
-  // y (tbody coords) → row index, skipping the detail row's band.
-  const indexAt = (y: number): number => {
-    const afterDetail = (exp + 1) * rowH + detailH;
-    const i = detailH > 0 && y >= afterDetail ? exp + 1 + Math.floor((y - afterDetail) / rowH) : Math.floor(y / rowH);
-    return Math.max(0, Math.min(count - 1, i));
-  };
-  const first = indexAt(Math.max(0, p.viewTop));
-  const last = indexAt(Math.max(0, p.viewTop + Math.max(0, p.viewH)));
-  const start = Math.max(0, first - overscan);
-  const end = Math.min(count, last + overscan + 1);
-  const top = (i: number): number => i * rowH + (detailH > 0 && i > exp ? detailH : 0);
-  return {
-    start,
-    end,
-    padTop: top(start),
-    padBottom: Math.max(0, top(count) - top(end)),
-  };
+  const r = listRange(count, rowH, p.viewTop, Math.max(0, p.viewH), Math.max(0, p.overscan ?? 8), 0, {
+    after: exp,
+    h: p.detailH ?? 0,
+  });
+  return { start: r.start, end: r.end, padTop: r.top, padBottom: r.bottom };
 }

@@ -222,7 +222,7 @@
         action: () =>
           void copyTextOrThrow(repo.path)
             .then(() => toasts.success('Copied', repo.path))
-            .catch(() => toasts.error('Couldn’t copy', 'The clipboard is unavailable.')),
+            .catch(() => toasts.error('Couldn’t copy', 'The clipboard isn’t available here. Select the text and copy it manually.')),
       },
     ]);
   }

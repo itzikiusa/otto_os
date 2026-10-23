@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announceShown } from '../../lib/announce.svelte';
   // Workbench — per-user scratch files (scripts, JSON, Markdown, diagrams…)
   // with formatting, a live preview, placeholders, Send to… and the full,
   // append-only edit history. Layout: files | tabs + editor (+ preview) |
@@ -9,6 +10,7 @@
   import PageBody from '../../lib/components/PageBody.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
+  import Skeleton from '../../lib/components/Skeleton.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import PaneDivider from '../../lib/components/PaneDivider.svelte';
   import { LIST_PANE, loadPaneWidth } from '../../lib/paneResizer';
@@ -57,9 +59,8 @@
   // ── Language: detected from a STICKY snapshot of the buffer ────────────────
   // Sniffing the live buffer flipped the language on every transient state
   // while typing (`{` → `{}` is JSON, `{""}` is not, `# H` is Markdown), and
-  // each flip rebuilt the editor. The snapshot is taken on open, when the doc
-  // finishes loading, on paste, and after 400 ms of idle; one sniff serves
-  // both `lang` and the "Auto (…)" label.
+  // each flip rebuilt the editor. Snapshot on open, on load, on paste, on Format
+  // and after 400 ms idle; one sniff serves `lang` and the "Auto (…)" label.
   let sniffText = $state('');
   let sniffKey = '';
   /** Set by a paste: the next buffer change re-sniffs at once. Plain field. */
@@ -257,6 +258,7 @@
 
   async function format(): Promise<void> {
     if (!active || !doc || isImage) return;
+    if (active.buffer !== sniffText) sniffText = active.buffer; // sniff what's typed now
     if (!canFormat(lang)) {
       toasts.info('Nothing to format', `No formatter for ${WB_LANGUAGES.find((l) => l.id === lang)?.label ?? lang}.`);
       return;
@@ -569,9 +571,7 @@
             {:else if active.loadError && !doc}
               <LoadState what="this file" error={active.loadError} empty onretry={() => void workbench.retryLoad(active.id)} />
             {:else if !doc}
-              <div class="wb-skel" role="status" aria-busy="true" aria-label="Loading file">
-                <span></span><span></span><span></span>
-              </div>
+              <div class="wb-skel"><Skeleton rows={3} height={12} label="the file" /></div>
             {:else}
               <div class="wb-toolbar" role="toolbar" aria-label="File tools">
                 {#if isImage}
@@ -657,7 +657,7 @@
               </div>
 
               {#if active.remoteChanged}
-                <div class="wb-banner" role="status">
+                <div class="wb-banner" use:announceShown={'This file changed in another window. Reload, or keep yours.'}>
                   <Icon name="info" size={13} />
                   <span>This file changed in another window.</span>
                   <button class="btn small" onclick={() => void reloadRemote()}>Reload</button>
@@ -665,7 +665,7 @@
                 </div>
               {/if}
               {#if active.saveError}
-                <div class="wb-inline-err" role="alert">
+                <div class="wb-inline-err" use:announceShown={{ text: `Couldn’t save: ${active.saveError}. Your text is kept on this device until it saves.`, assertive: true }}>
                   <Icon name="warning" size={13} />
                   <span>Couldn’t save: {active.saveError}. Your text is kept on this device until it saves.</span>
                   <button class="btn small" onclick={() => void workbench.save(active.id, false)}>Retry</button>
@@ -884,9 +884,7 @@
     color: var(--text-dim);
     white-space: nowrap;
   }
-  .wb-save.dirty {
-    color: var(--warning);
-  }
+  .wb-save.dirty { color: var(--warning); }
   .wb-save.err {
     color: var(--danger);
   }
@@ -966,26 +964,7 @@
     border-block-start: 1px solid var(--border);
   }
   .wb-skel {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
     padding: 16px;
-  }
-  .wb-skel span {
-    height: 12px;
-    border-radius: var(--radius-s);
-    background: var(--surface-2);
-  }
-  .wb-skel span:nth-child(2) {
-    width: 70%;
-  }
-  .wb-skel span:nth-child(3) {
-    width: 45%;
-  }
-  @media (prefers-reduced-motion: no-preference) {
-    .wb-skel span {
-      animation: otto-pulse 1.4s ease-in-out infinite;
-    }
   }
   
 </style>

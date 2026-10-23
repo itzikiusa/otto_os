@@ -28,7 +28,9 @@ test('memory edits preserve notes, report conflicts, and folder selection never 
   await page.getByLabel('Memory Markdown').fill('Stale editor text');
   saved = { ...saved, content: 'Agent updated this concurrently', version: 'v3' };
   await page.getByRole('button', { name: 'Save', exact: true }).click();
-  await expect(page.getByRole('alert')).toContainText('Memory changed');
+  // The error line is visible copy, spoken assertively through the announcer.
+  await expect(page.getByTestId('agent-document').getByText('Memory changed since you opened it', { exact: false })).toBeVisible();
+  await expect(page.getByTestId('announcer-assertive')).toContainText('Memory changed');
   await expect(page.getByLabel('Memory Markdown')).toHaveValue('Stale editor text');
   await page.getByRole('button', { name: 'Load saved version' }).click();
   await expect(page.getByTestId('agent-document')).toContainText('Agent updated this concurrently');
@@ -119,7 +121,8 @@ for (const kind of ['memory', 'context']) {
     await page.getByRole('button', { name: 'Leave document' }).click();
     await expect(page).not.toHaveURL(/#\/fixture-away$/);
     release();
-    await expect(page.getByRole('alert')).toContainText('Synthetic save unavailable');
+    await expect(page.getByTestId('agent-document').getByText('Synthetic save unavailable', { exact: false })).toBeVisible();
+    await expect(page.getByTestId('announcer-assertive')).toContainText('Synthetic save unavailable');
     await page.getByRole('button', { name: 'Leave document' }).click();
     await page.getByRole('button', { name: 'Keep editing', exact: true }).click();
     await expect(draft).toHaveValue('Preserve exact draft [[vault/notes.md]]');

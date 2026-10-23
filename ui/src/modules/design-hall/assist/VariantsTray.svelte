@@ -6,6 +6,8 @@
   // and Reject, which asks why (the reason feeds the learning loop). Nothing
   // is pre-applied: the head stays where it is until a person applies one.
   import Icon from '../../../lib/components/Icon.svelte';
+  import { announceEdge } from '../../../lib/announce.svelte';
+  import { plural } from '../../../lib/plural';
   import type { DesignArtifact, DesignVariantRun } from '../../../lib/api/types';
   import ArtifactThumb from '../ArtifactThumb.svelte';
   import { directionBlurb, directionName, variantCards, type VariantCard } from './model';
@@ -27,6 +29,24 @@
   const cards = $derived(variantCards(run));
   const letter = (k: number) => String.fromCharCode(64 + Math.min(26, Math.max(1, k)));
   const decided = $derived(!!run.accepted_version_id);
+
+  // The cards' “Drawing…” lines are plain text (inserted with their card, a
+  // role would be silent); the tray speaks the run's progress at its edges
+  // instead — once while drawing, once when the last card lands. A run that
+  // opens already finished says nothing.
+  const drawing = $derived(cards.filter((c) => !c.version && c.state === 'running').length);
+  const drawn = $derived(cards.filter((c) => !!c.version).length);
+  const sayProgress = announceEdge();
+  const seen = { drawing: false };
+  /** The run's progress line for a listener (null: nothing to say yet). */
+  function variantProgress(nDrawing: number, nDrawn: number, s: { drawing: boolean }): string | null {
+    if (nDrawing > 0) {
+      s.drawing = true;
+      return `Drawing ${plural(nDrawing, 'variant')}…`;
+    }
+    return s.drawing ? `${plural(nDrawn, 'variant')} ready to compare` : null;
+  }
+  $effect(() => sayProgress(variantProgress(drawing, drawn, seen)));
 </script>
 
 <div class="tray" role="group" aria-label="Variants" data-testid="design-variants-tray">
@@ -46,7 +66,7 @@
         {#if c.version}
           <ArtifactThumb {artifact} versionId={c.version.id} live compact />
         {:else if c.state === 'running'}
-          <div class="drawing" role="status"><span class="pulse" aria-hidden="true"></span> Drawing…</div>
+          <div class="drawing"><span class="pulse" aria-hidden="true"></span> Drawing…</div>
         {:else}
           <div class="drawing failed"><Icon name="warning" size={12} /> No result</div>
         {/if}

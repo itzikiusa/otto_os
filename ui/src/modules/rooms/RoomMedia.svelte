@@ -3,12 +3,18 @@
   import type { RoomSnapshot, RoomAction, RoomEvent } from '../../lib/api/room-types';
   import { RoomMediaClient, type RoomMediaState } from './room-media';
   import RoomScreens from './RoomScreens.svelte';
+  import { announce } from '../../lib/announce.svelte';
   let {room, send, connected}: {room: RoomSnapshot; send: (action: RoomAction) => boolean; connected: boolean} = $props();
   let media = $state<RoomMediaClient | null>(null);
   let mediaState = $state<RoomMediaState>({audioJoined: false, muted: true, presenting: false, error: null, connection: 'idle', relayConfigured: false});
   let streams = $state<ReadonlyMap<string, MediaStream>>(new Map());
   let busy = $state(false), localError = $state(''), devices = $state<MediaDeviceInfo[]>([]), microphone = $state('');
   const self = $derived(room.members?.find(m => m.id === room.member_id));
+  // a11y-6-01: announced at the edge; the visible lines are inserted with their text.
+  const mediaError = $derived(localError || mediaState.error || '');
+  const mediaConnecting = $derived(mediaState.connection === 'connecting');
+  $effect(() => { if (mediaError) announce(mediaError, { assertive: true }); });
+  $effect(() => { if (mediaConnecting) announce('Connecting voice and screens…'); });
   onMount(() => {
     media = new RoomMediaClient({memberId: room.member_id, send, onState: value => mediaState = value, onStreams: value => streams = value});
     return () => media?.dispose();
@@ -22,7 +28,7 @@
   export function getPresentationStreams() { return streams; }
   async function act(action: () => Promise<void>) {
     busy = true; localError = '';
-    try { await action(); } catch (e) { localError = e instanceof Error ? e.message : 'Media could not start. Session and chat remain available.'; }
+    try { await action(); } catch (e) { localError = e instanceof Error ? e.message : 'Media couldn’t start. Session and chat remain available.'; }
     finally { busy = false; }
   }
   async function unmute() {
@@ -43,14 +49,14 @@
     {:else}<button class="btn small" disabled={!connected || self?.presenter_requested} onclick={() => send({type: 'request_present'})}>{self?.presenter_requested ? 'Presentation requested' : 'Request to present'}</button>{/if}
     {#if room.member_id === room.host_member_id}<button class="btn small" onclick={() => send({type: 'annotations_enabled', enabled: room.annotations_enabled === false})}>{room.annotations_enabled === false ? 'Allow annotations' : 'Disable annotations'}</button>{/if}
   </div>
-  {#if mediaState.connection === 'connecting'}<p role="status">Connecting voice and screens…</p>{/if}
+  {#if mediaState.connection === 'connecting'}<p>Connecting voice and screens…</p>{/if}
   {#if !mediaState.relayConfigured}<p>A media relay is not configured. Voice and screen sharing may not connect across networks. Session and chat remain available.</p>{/if}
-  {#if mediaState.error || localError}<p role="alert">{localError || mediaState.error}</p>{/if}
+  {#if mediaError}<p class="alert-text">{mediaError}</p>{/if}
 </div>
 <RoomScreens {room} {streams} {send} onSubscriptions={subscriptions => media?.setSubscriptions(subscriptions)} />
 <style>
   .media-controls { padding: 8px 12px; border-bottom: 1px solid var(--border); background: var(--surface); }
   .controls { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
-  p { margin-block: 8px 0; font-size: var(--fs-s); color: var(--text-dim); line-height: 1.4; } [role='alert'] { color: var(--danger); }
+  p { margin-block: 8px 0; font-size: var(--fs-s); color: var(--text-dim); line-height: 1.4; } .alert-text { color: var(--danger); }
   label { display: flex; gap: 8px; align-items: center; } span, label { font-size: var(--fs-s); }
 </style>

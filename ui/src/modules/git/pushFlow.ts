@@ -5,7 +5,9 @@
 // rebase), "Force push with lease". Force is never sent without that explicit
 // pick, and it is always the lease form, which the daemon refuses when the
 // remote moved since it was last fetched and integrated.
-import { api, ApiError } from '../../lib/api/client';
+import { ApiError } from '../../lib/api/client';
+import { gitApi } from '../../lib/api/git';
+import { git } from '../../lib/stores/git.svelte';
 import { loadErrorText } from '../../lib/loadError';
 import type { PushReq, PushTarget, RepoStatusResp } from '../../lib/api/types';
 import { toasts } from '../../lib/toast.svelte';
@@ -26,7 +28,7 @@ export async function askRejectedPush(branch: string, upstream: string | null, a
       `replaces ${target} with your local branch — commits only on the remote are dropped ` +
       `from it. The lease refuses if someone pushed since you last fetched.` +
       (sourceSha ? `\n\nSource commit: ${sourceSha.slice(0, 12)}. If the source or destination changed, refresh and confirm again.` : '') :
-      'The force-push target could not be verified. Refresh the repository or review its push configuration before retrying a rewrite.'),
+      'The force-push target couldn’t be verified. Refresh the repository or review its push configuration before retrying a rewrite.'),
     {
       title: 'Push rejected',
       options: [
@@ -39,7 +41,8 @@ export async function askRejectedPush(branch: string, upstream: string | null, a
 }
 
 /** Push (or publish) the current branch. Never throws — every outcome is a
- *  toast; returns true when something was pushed. */
+ *  toast; returns true when something was pushed. The UX wrapper over
+ *  `git.push`, which stores the fresh status and bumps `refsRev` itself. */
 export async function runPush(
   repoId: string,
   status: Pick<RepoStatusResp, 'branch' | 'upstream'>,
@@ -53,9 +56,9 @@ export async function runPush(
   }
   // Capture before the first request. An unsupported multi-ref configuration
   // can still do a normal push, but cannot offer an unbound force retry.
-  const target = opts?.target ?? await api.get<PushTarget>(`/repos/${repoId}/push-target`).catch(() => null);
+  const target = opts?.target ?? await gitApi.pushTarget(repoId).catch(() => null);
   try {
-    const s = await api.post<RepoStatusResp>(`/repos/${repoId}/push`, body);
+    const s = await git.push(repoId, body);
     onstatus(s);
     toasts.success(
       opts?.forceWithLease ? 'Force pushed' : status.upstream ? 'Pushed' : 'Branch published',

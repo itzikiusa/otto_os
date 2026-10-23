@@ -298,7 +298,9 @@ test('"Always delete" set in Settings: working agents delete and close without c
   // harmless shell fixtures as working agents. Quiet events prevent shell
   // status updates from overwriting this deterministic mid-turn fixture.
   await page.routeWebSocket('**/ws/events*', () => {});
-  await page.route((url) => url.pathname === `/api/v1/workspaces/${wsId}/sessions`, async (route) => {
+  // Both list reads: the workspace list AND the by-id read of open tabs
+  // (`GET /sessions?ids=…`), which a refresh merges over the workspace rows.
+  await page.route((url) => url.pathname === `/api/v1/workspaces/${wsId}/sessions` || url.pathname === '/api/v1/sessions', async (route) => {
     if (route.request().method() !== 'GET') return route.continue();
     const response = await route.fetch();
     const rows = await response.json();

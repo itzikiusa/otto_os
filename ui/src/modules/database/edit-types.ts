@@ -83,11 +83,14 @@ export interface EditAdapter {
     columns: string[],
     ctx: { engine: DbEngine | null; activeDb: string | null },
   ): { target: EditTarget | null; reason: string | null };
-  /** ONE statement per pending row, joined by newlines (multi-row → batch). */
+  /** ONE statement per pending row, joined by newlines (multi-row → batch).
+   *  `stmtRows` names the row each executed statement writes, in order (a
+   *  skipped-row comment is not a statement): a batch that fails partway clears
+   *  only the drafts whose statements all completed. */
   buildUpdate(
     rows: { rowIdx: number; patch: RowPatch }[],
     ctx: EditCtx,
-  ): { title: string; sql: string; diff: DiffLine[] } | null;
+  ): { title: string; sql: string; diff: DiffLine[]; stmtRows: number[] } | null;
   buildDelete(idxs: number[], ctx: EditCtx): { title: string; sql: string } | null;
   /** "Copy as INSERT": insert statements for the given rows, every column. */
   buildInsert(idxs: number[], ctx: EditCtx): string | null;

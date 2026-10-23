@@ -397,6 +397,25 @@ pub struct AdminSessionRow {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdminSessionsResp {
     pub sessions: Vec<AdminSessionRow>,
+    /// Opaque keyset cursor for the next (older) page — pass it back as
+    /// `?cursor=`; absent on the last page (backend-performance-6-05).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
+/// `GET /api/v1/admin/sessions` query. By default the overview lists the
+/// unarchived sessions (live plus recent exited ones) newest first, one page
+/// of `limit` (default 200, max 1000) at a time; `include_archived=true`
+/// adds the archived history.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AdminSessionsQuery {
+    #[serde(default)]
+    pub include_archived: bool,
+    #[serde(default)]
+    pub limit: Option<u32>,
+    /// `next_cursor` of the previous page.
+    #[serde(default)]
+    pub cursor: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

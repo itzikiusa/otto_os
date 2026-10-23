@@ -1,5 +1,6 @@
 <script lang="ts">
   import { toastError } from '../../lib/toastError';
+  import { announceShown } from '../../lib/announce.svelte';
   // "Refine with Otto" — a bottom drawer under the note editor/reading view.
   // One refine session per note (server-side): the first Send spawns it (the
   // POST is LONG — it resolves when the agent's turn completes), and ~800ms
@@ -257,10 +258,10 @@
   </div>
 
   {#if queued && !sending}
-    <div class="notice" role="status">Review + fix is ready — press Send to start. The agent edits this note in place; you can undo it afterwards.</div>
+    <div class="notice" use:announceShown={'Review and fix is ready — press Send to start.'}>Review + fix is ready — press Send to start. The agent edits this note in place; you can undo it afterwards.</div>
   {/if}
   {#if result}
-    <div class="notice result" role="status" data-testid="refine-result">
+    <div class="notice result" data-testid="refine-result" use:announceShown={`Refined this note: ${result.added} lines added, ${result.removed} removed.`}>
       <AgentByline provider={result.provider} at={result.at} label="Refined this note" />
       <span class="delta">+{result.added} / −{result.removed} lines{result.summary ? ` · ${result.summary}` : ''}</span>
       <button class="btn small" disabled={undoing} onclick={() => void undoRefine()}>

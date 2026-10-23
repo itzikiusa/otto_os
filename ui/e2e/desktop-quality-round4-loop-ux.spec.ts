@@ -29,6 +29,18 @@ async function fixture(page: Page, scheme: string) {
     const id = new URL(route.request().url()).pathname.split('/').at(-1);
     return route.fulfill({ json: { loop: loops.find(item => item.id === id), iterations: [] } });
   });
+  // Recording the open answer unblocks the budget actions (they stay off while
+  // a question is unanswered): the next detail read carries the answer.
+  await page.route('**/goal-loops/*/questions/*/answer', async (route) => {
+    // …/goal-loops/{id}/questions/{question}/answer
+    const id = new URL(route.request().url()).pathname.split('/').at(-4);
+    const item = loops.find((loop) => loop.id === id);
+    if (item) {
+      item.ledger.questions[0].answer = 'Markdown';
+      item.ledger.questions[0].answered_by = 'human-user';
+    }
+    await route.fulfill({ json: item ?? {} });
+  });
   return loops;
 }
 for (const scheme of ['light', 'dark']) {
@@ -62,16 +74,7 @@ for (const scheme of ['light', 'dark']) {
 }
 
 test('direct loop navigation closes the previous budget dialog', async ({ page }) => {
-  const loops = await fixture(page, 'light');
-  await page.route('**/goal-loops/*/questions/*/answer', async (route) => {
-    const id = new URL(route.request().url()).pathname.split('/').at(-3);
-    const item = loops.find((loop) => loop.id === id);
-    if (item) {
-      item.ledger.questions[0].answer = 'Markdown';
-      item.ledger.questions[0].answered_by = 'human-user';
-    }
-    await route.fulfill({ json: item ?? {} });
-  });
+  await fixture(page, 'light');
   await page.goto('/#/loops/alpha');
   await page.getByLabel('Answer question').fill('Markdown');
   await page.getByRole('button', { name: 'Record answer', exact: true }).click();
@@ -123,6 +126,8 @@ test('a late delete for the previous loop cannot close the current detail', asyn
     await expect.poll(() => deleting).toBe(true);
     await page.evaluate(() => { location.hash = '#/loops/beta'; });
     await expect(page.getByRole('heading', { name: 'Report beta', exact: true })).toBeVisible();
+    await page.getByLabel('Answer question').fill('Plain text');
+    await page.getByRole('button', { name: 'Record answer', exact: true }).click();
     await page.getByRole('button', { name: 'Extend budget…', exact: true }).click();
     await page.getByLabel('Max iterations').fill('17');
     const response = page.waitForResponse(r => r.request().method() === 'DELETE' && r.url().endsWith('/goal-loops/alpha'));

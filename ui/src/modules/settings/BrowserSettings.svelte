@@ -6,6 +6,7 @@
   // The Chromium download is never silent: choosing a build that isn't
   // installed only offers a Download button that says how big it is.
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { announceShown } from '../../lib/announce.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import { sectionLabel } from './sections';
   import PageBody from '../../lib/components/PageBody.svelte';
@@ -201,7 +202,7 @@
             {/each}
           </div>
           {#if running && job}
-            <div class="progress" role="status" aria-live="polite">
+            <div class="progress" use:announceShown={job.state === 'downloading' ? 'Downloading the browser engine…' : job.state === 'verifying' ? 'Checking the download…' : 'Unpacking the browser engine…'}>
               <div class="bar" role="progressbar" aria-label="Engine download" aria-valuemin="0" aria-valuemax="100" aria-valuenow={pct}>
                 <span style:width="{job.state === 'downloading' ? pct : 100}%"></span>
               </div>

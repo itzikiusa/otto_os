@@ -43,6 +43,8 @@ export function createCamera(T: Three, reduced: boolean, host: CameraHost) {
     }
     return new Promise((resolve) => {
       cam.tween = { from: [cam.pos.clone(), cam.target.clone()], to: [pos.clone(), target.clone()], t: 0, ms, done: resolve };
+      // The render loop idles when nothing moves: a flight restarts it.
+      host.touch();
     });
   }
 

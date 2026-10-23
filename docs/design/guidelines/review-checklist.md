@@ -13,6 +13,7 @@ behind each item.
 | Step | Fails on |
 |---|---|
 | `node scripts/ui-guards.mjs` | **Native dialogs:** any `confirm(` / `prompt(` / `alert(` call (they are silent no-ops in the Tauri WKWebView). **Undefined CSS variables:** any `var(--x)` whose `--x` isn't defined anywhere under `ui/src/`, *even with a fallback*. Plus the **ratcheted** rules listed in the script header (an increase per file fails), including `icon-size`, `inline-retry`, `local-tablist`, `smooth-scroll` and `disabled-opacity`. |
+| `node scripts/ui-guards.mjs`, layering and clipboard (quality iteration 6) | **Hard:** `lib-imports-modules`, an import in `src/lib/**` that resolves into `src/modules/**` (move the piece into `lib/`, or bind it through a port the module registers, like `lib/uiCommands/vaultPort.ts`); `icon-button-name` (hard rule 3), an `<Icon/>`-only `<button>` without both `aria-label` and `title`. **Ratcheted per file:** `cross-module-import` (a file in `modules/<a>/` importing from `modules/<b>/`); `guessed-checked` (`checked={… ?? true}` / `?? false`: a loading value shown as a setting); `clipboard-no-next-step` (a `toasts.error` / `toasts.warn` about a copy or the clipboard with no “Select … and copy it manually” or other route; use `copyWithToast` or `COPY_FAILED_BODY` from `lib/clipboard.ts`); `inserted-live-region` (a `role="status"` / `aria-live` inserted together with its text by an `{#if}`, `{:else if}` or `{:else}` branch, on the opener's line or the next two lines that mount something; use `announce()` / `announceEdge()` / `use:announceShown` from `lib/announce.svelte.ts`, or one always-mounted region); `inserted-alert` (an untoned `role="alert"` inserted the same way: kept only for a real field or form error); `announce-in-region` (`use:announceShown` on or inside a mounted `role="status"` / `aria-live` element, so the text is spoken twice; keep one); `guessed-derived` (`$derived(… ?? true)` / `?? false` rendered as a state word, `{x ? 'on' : 'off'}`: a loading value shown as known); `unit-source-regex` (a `ui/unit` test reading `.svelte` source; drive handlers through `unit/componentFunctions.ts`). The detectors are unit-tested in `ui/unit/p04-uiGuards.test.ts`. |
 | `svelte-check` (`tsconfig.app.json`) | Type errors, including **unknown icon names** (`IconName`), wrong component props, and Svelte a11y warnings that aren't suppressed |
 | `tsc` (node, e2e, unit tsconfigs) | Type errors in config, e2e specs and unit tests |
 
@@ -153,6 +154,10 @@ use `rgba(0,0,0,…)`), but each one needs a reason.
       be resolved.
 - [ ] Numbers and dates use `rel()`, `formatBytes`, `formatCount` and
       `formatSeconds`. No new local formatters.
+- [ ] A Copy button uses `copyWithToast(text, what)` (or `copyText` with a
+      failure toast whose body is `COPY_FAILED_BODY`): never
+      `navigator.clipboard` directly, and never a failure that only restates
+      the cause.
 
 ### Accessibility ([accessibility.md](./accessibility.md))
 
@@ -165,6 +170,22 @@ use `rgba(0,0,0,…)`), but each one needs a reason.
       trigger.
 - [ ] Labels on every input. `aria-pressed`, `aria-selected` and
       `aria-expanded` where they apply.
+- [ ] Status changes are spoken from the state edge: `announce()` (assertive
+      for failures and connection loss), `announceEdge()` in an `$effect` for a
+      derived state, or `use:announceShown` on a line that is inserted with its
+      state. A `role="status"` region is either always mounted or absent,
+      in `{:else if}` / `{:else}` branches too. `LoadState` speaks its own
+      “Couldn’t refresh …” bar.
+- [ ] One voice per message: never `use:announceShown` inside (or on) a
+      mounted `role="status"` / `aria-live` element (`announce-in-region`).
+- [ ] A count that updates (search hits, “1–50 of 300”) lives in one
+      always-mounted `sr-only` region; the visible count is plain text.
+- [ ] No state word from a guessed fallback: a `$derived(… ?? true)` shown as
+      “attached” / “on” while loading is a guess (`guessed-derived`).
+- [ ] A control that removes itself (Dismiss, ✕, Clear) moves focus to a
+      named successor or `focusAppContent()`, never to `<body>`.
+- [ ] A checkbox whose value is still loading is disabled (or skeletoned),
+      not checked with a guessed default.
 - [ ] Logical properties (`inset-inline-*`, `margin-inline-*`…). Directional
       icons flip in RTL. Code and paths stay LTR.
 

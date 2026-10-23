@@ -8,6 +8,7 @@
   // no new backend is invented here. Dismissable; the dismissal is remembered
   // per-machine so it doesn't nag after the user has found their footing.
   import { contextApi } from '../../lib/api/context';
+  import { announceShown } from '../../lib/announce.svelte';
   import { toastError } from '../../lib/toastError';
   import type { BundledSkill } from '../../lib/api/types';
   import { auth } from '../../lib/stores/auth.svelte';
@@ -261,7 +262,7 @@
               <Icon name="refresh" size={12} /> {checkingProviders ? 'Checking…' : 'Re-check'}
             </button>
             {#if providerCheckFailed}
-              <p role="status">Couldn’t check agent CLIs. Try again.</p>
+              <p use:announceShown={{ text: 'Couldn’t check agent CLIs. Try again.', assertive: true }}>Couldn’t check agent CLIs. Try again.</p>
             {/if}
           </div>
         {/if}

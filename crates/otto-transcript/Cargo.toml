@@ -5,7 +5,11 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+# `otto_core::e2e::isolated` + `paths::safe_component` (roots.rs).
+otto-core.workspace = true
 hex = { workspace = true }
+# RFC 3339 timestamps in the turn folds (turn.rs).
+chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 base64.workspace = true

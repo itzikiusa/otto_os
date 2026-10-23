@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announce } from '../../lib/announce.svelte';
   import { rowMenu } from '../../lib/rowMenu';
   import { plural } from '../../lib/plural';
   // GitKraken-style WIP panel: shown in the graph's RIGHT detail pane when the
@@ -21,20 +22,13 @@
   import Icon from '../../lib/components/Icon.svelte';
   import Badge from '../../lib/components/Badge.svelte';
   import AgentByline from '../../lib/components/AgentByline.svelte';
-  import { ListWindow } from './list-window.svelte';
+  import { ListWindow } from '../../lib/listWindow.svelte';
   import LazyTerminal from '../../lib/components/LazyTerminal.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
-  import {
-    draftInFlight,
-    readComposer,
-    startDraft,
-    takePendingDraft,
-    watchComposer,
-    writeComposer,
-  } from './commitComposer';
+  import { draftInFlight, readComposer, startDraft, takePendingDraft, watchComposer, writeComposer } from './commitComposer';
 
   interface Props {
     repoId: string;
@@ -557,11 +551,12 @@
   const unstagedRows = $derived(visibleRows(unstagedTree, 'unstaged'));
   const stagedRows = $derived(visibleRows(stagedTree, 'staged'));
   // Each section is WINDOWED against the shared `.wp-scroll` scroller: only
-  // the rows in view (+ overscan) mount, between spacers sized to the rest,
-  // so a 20k-file expanded folder costs the same as a 50-file one. Lists up
-  // to 300 rows render whole (find-in-page still sees them).
+  // the rows in view (+ overscan) mount, between spacers sized to the rest, so
+  // a 20k-file folder costs what a 50-file one does; ⌘F searches every row.
   const unstagedWin = new ListWindow('.wp-file, .wp-folder');
   const stagedWin = new ListWindow('.wp-file, .wp-folder');
+  $effect(() => unstagedWin.findRows(() => null, () => unstagedRows, (r) => r.node.name));
+  $effect(() => stagedWin.findRows(() => null, () => stagedRows, (r) => r.node.name));
   const winOf = (section: 'unstaged' | 'staged') => (section === 'unstaged' ? unstagedWin : stagedWin);
 
   // Section collapse (GitKraken keeps both open; folding is still handy).
@@ -598,7 +593,9 @@
         signOn = c.gpgsign;
       })
       .catch(() => {
-        if (seq === signCfgSeq) signCfgError = true;
+        if (seq !== signCfgSeq) return;
+        signCfgError = true;
+        announce('Couldn’t read signing settings.');
       })
       .finally(() => {
         if (seq === signCfgSeq) signCfgLoading = false;
@@ -1140,7 +1137,7 @@
         Sign
       </label>
       {#if signCfgError}
-        <span class="sign-err" role="status">
+        <span class="sign-err">
           Couldn’t read signing settings ·
           <button class="btn small ghost" onclick={() => loadSignCfg(repoId)} disabled={signCfgLoading}>{signCfgLoading ? 'Retrying…' : 'Retry'}</button>
         </span>

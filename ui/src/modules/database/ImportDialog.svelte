@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announce } from '../../lib/announce.svelte';
   import { plural, pluralNoun } from '../../lib/plural';
   import { toastError } from '../../lib/toastError';
   // File → table import dialog (0002): the mirror of the export-to-path
@@ -203,6 +204,13 @@
     }
     return 'confirmed';
   }
+  // Spoken at the state edge through the shell's always-mounted announcer: a
+  // live region inserted together with its text is not read (WebKit/VoiceOver).
+  $effect(() => {
+    if (importing && !progress) announce('Importing…');
+    else if (progress?.error) announce(`Couldn’t import. ${progress.error}`, { assertive: true });
+    else if (progress?.done) announce(`Imported ${plural(progress.rows ?? 0, 'row')}`);
+  });
 </script>
 
 <Modal title="Import file into a table" width={520} onclose={close}>
@@ -275,7 +283,7 @@
     </div>
 
     {#if importing || progress}
-      <div class="imp-progress" role="status" aria-live="polite">
+      <div class="imp-progress">
         {#if importing && !progress}
           <div class="indeterminate" role="progressbar" aria-label="Importing"></div>
           <div class="imp-prog-text mono">Importing…</div>

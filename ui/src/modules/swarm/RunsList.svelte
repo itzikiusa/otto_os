@@ -15,6 +15,9 @@
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import type { RecruitedAgent, RunStatus, SwarmRun } from './types';
+  import { ws } from '../../lib/stores/workspace.svelte';
+  import { auth } from '../../lib/stores/auth.svelte';
+  import { canOpenRunSession, RUN_SESSION_NOT_YOURS } from './access';
 
   // `onhire` lets a completed recruit run open the Recruiter wizard pre-filled
   // with its proposal — so a candidate isn't lost if the modal was closed.
@@ -32,6 +35,12 @@
   // VirtualList assumes uniform rows, so the phone card row has a fixed height
   // (see the ≤640px block below).
   const ROW_H_PHONE = 104;
+
+  // access-control-6-04: a run's session is the acting user's; offer "Open"
+  // only for one in my (owner-scoped) store, or to root / a ws admin.
+  const myRole = $derived(ws.workspaces.find((w) => w.id === swarm.detail?.workspace_id)?.my_role);
+  const canOpen = (sid: string) =>
+    canOpenRunSession({ isRoot: auth.isRoot, myRole }, !!ws.getSession(sid));
 
   const STATUSES: RunStatus[] = ['queued', 'running', 'waiting', 'done', 'error', 'stopped'];
 
@@ -144,8 +153,12 @@
                   : '—'}
               </span>
               <span class="c-act">
-                {#if r.session_id}
+                {#if r.session_id && canOpen(r.session_id)}
                   <button class="icon-btn" title="Open {agent?.name ?? 'this agent'}’s session beside the view" aria-label="Open {agent?.name ?? 'this agent'}’s {sentenceCase(r.kind).toLowerCase()} session" onclick={() => (swarm.selectedSessionId = r.session_id!)}>
+                    <Icon name="terminal" size={14} />
+                  </button>
+                {:else if r.session_id}
+                  <button class="icon-btn" disabled title={RUN_SESSION_NOT_YOURS} aria-label="{agent?.name ?? 'This agent'}’s session: {RUN_SESSION_NOT_YOURS}">
                     <Icon name="terminal" size={14} />
                   </button>
                 {/if}

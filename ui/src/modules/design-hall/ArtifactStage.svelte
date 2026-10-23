@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announceShown } from '../../lib/announce.svelte';
   // The stage of the artifact view (and each side of Compare): renders one
   // version of a design by format with the EXISTING viewers/editors —
   // DeviceFrame + a sandboxed iframe for HTML, the Canvas Mermaid/D2 renderers,
@@ -9,7 +10,7 @@
   // Untrusted content stays isolated: HTML and rendered diagrams only ever run
   // inside `sandbox=""` iframes (no scripts, opaque origin); SVG renders as an
   // <img>; scene3d JSON is parsed + validated before it reaches the viewport.
-  import { untrack } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import CodeEditor from '../../lib/components/CodeEditor.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import type { DesignArtifact } from '../../lib/api/types';
@@ -27,7 +28,7 @@
   import { renderD2 } from '../canvas/d2';
   import { brandColors, contrastRatio, renderKind } from './model';
   import SiteStudio from './site/SiteStudio.svelte';
-  import { resolveModelRef } from './studio3d/sources';
+  import { modelScope } from './studio3d/sources';
 
   interface Props {
     artifact: DesignArtifact;
@@ -194,8 +195,11 @@
    *  legacy id (a Design Hall artifact, else a Product attachment). */
   function resolveAttachment(aid: string): Promise<string> {
     if (kind === 'model' && aid === artifact.id && blobUrl) return Promise.resolve(blobUrl);
-    return resolveModelRef(aid);
+    return models.resolve(aid);
   }
+  /** This stage's hold on the model blobs it shows (the cache may revoke them after). */
+  const models = modelScope();
+  onDestroy(() => models.release());
 
   // ── Brand kit ─────────────────────────────────────────────────────────────
   const brandDoc = $derived.by<Record<string, unknown> | null>(() => {
@@ -263,7 +267,7 @@
       </div>
     {:else if shown.kind === 'mermaid' || shown.kind === 'd2'}
       {#if diagramError}
-        <div class="msg err" role="status"><Icon name="warning" size={14} /> {diagramError}</div>
+        <div class="msg err" use:announceShown={{ text: diagramError, assertive: true }}><Icon name="warning" size={14} /> {diagramError}</div>
       {/if}
       {#if diagramSvg}
         <iframe class="doc" title={artifact.title} sandbox="" srcdoc={svgDoc(diagramSvg)}></iframe>
@@ -334,7 +338,8 @@
     {:else if kind === 'json'}
       <p class="msg">This studio’s editor isn’t built yet (planned). The document is stored and versioned; view it as source.</p>
     {:else if (kind === 'image' || kind === 'model' || kind === 'pdf') && !blobUrl}
-      <p class="msg" role="status">{noVersion ? 'No preview yet — this design has no saved version.' : `Loading ${kind === 'pdf' ? 'the PDF' : kind === 'model' ? 'the 3D model' : 'the image'}…`}</p>
+      <!-- A plain line: it is replaced by the preview itself in a moment. -->
+      <p class="msg">{noVersion ? 'No preview yet — this design has no saved version.' : `Loading ${kind === 'pdf' ? 'the PDF' : kind === 'model' ? 'the 3D model' : 'the image'}…`}</p>
     {:else}
       <p class="msg">Design Hall can’t preview {artifact.format} files yet.</p>
     {/if}

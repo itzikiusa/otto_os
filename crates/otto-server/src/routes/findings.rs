@@ -992,7 +992,7 @@ async fn regression_test(
 // ---------------------------------------------------------------------------
 
 fn e2e_enabled() -> bool {
-    matches!(std::env::var("OTTO_E2E").as_deref(), Ok("1") | Ok("true"))
+    otto_core::e2e::isolated()
 }
 
 /// Drive a freshly-seeded (open) finding to a target status via legal transitions

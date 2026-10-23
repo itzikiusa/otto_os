@@ -918,7 +918,7 @@ impl Driver for MysqlDriver {
         node: Option<&str>,
         format: ExportFormat,
         max_rows: Option<usize>,
-        w: Box<dyn std::io::Write + Send>,
+        w: crate::export::ExportWriter,
     ) -> Result<ExportCounts> {
         use futures_util::TryStreamExt as _;
 
@@ -996,6 +996,10 @@ impl Driver for MysqlDriver {
                 .collect();
             sink.write_row(&cells)
                 .map_err(|e| otto_core::Error::Internal(format!("write export row: {e}")))?;
+            // Wait for the consumer when a chunk is ready (bounded hand-off).
+            sink.pace()
+                .await
+                .map_err(|e| otto_core::Error::Internal(format!("write export row: {e}")))?;
             n += 1;
         }
         drop(rows);
@@ -1003,7 +1007,8 @@ impl Driver for MysqlDriver {
             sink.write_header(&[])
                 .map_err(|e| otto_core::Error::Internal(format!("write export header: {e}")))?;
         }
-        sink.finish()
+        sink.finish_paced()
+            .await
             .map_err(|e| otto_core::Error::Internal(format!("finish export file: {e}")))
     }
 }

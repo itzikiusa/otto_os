@@ -6,7 +6,7 @@
   // follows it through queued → running → needs you → done.
   import { untrack } from 'svelte';
   import { assistant } from '../../../lib/stores/assistant.svelte';
-  import { browserOf } from '../model';
+  import { browserOf } from '../../../lib/assistant/model';
   import NeedsYouCard from './NeedsYouCard.svelte';
   import BrowserCard from './BrowserCard.svelte';
   import ReminderCard from './ReminderCard.svelte';

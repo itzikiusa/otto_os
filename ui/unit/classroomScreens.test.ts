@@ -61,7 +61,7 @@ test('status-driven refreshes call now() at most once per POLL_MS', () => {
 
 test('the Classrooms box loads through freshness() like the other Home boxes', () => {
   const src = readFileSync(join(import.meta.dirname, '..', 'src/modules/home/boxes/ClassroomsBox.svelte'), 'utf8');
-  assert.match(src, /const fresh = freshness\(load\)/);
+  assert.match(src, /const fresh = freshness\(data\.load\)/); // classrooms/load.svelte.ts
   assert.match(src, /livePoll\(fresh\.run, 30_000, [^\n]*immediate: fresh\.start\(/);
   assert.doesNotMatch(src, /immediate: true/);
   // The grid copy of a zoomed box releases its scene (one WebGL context).

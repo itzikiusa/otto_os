@@ -1,7 +1,6 @@
 //! Durable, cancellable automation execution. Inputs are pinned before spawning;
 //! each completed step is saved before starting the next outbound request.
 use crate::{
-    api_secrets,
     auth::{require_ws_role, CurrentAuthContext, CurrentUser},
     error::{ApiError, ApiResult},
     state::ServerCtx,
@@ -11,6 +10,7 @@ use axum::{
     http::HeaderMap,
     Json,
 };
+use otto_apiclient::{engine, secrets as api_secrets};
 use otto_core::{
     api::{ApiAutomationRun, ApiRunResult, StartApiAutomationRunReq},
     domain::WorkspaceRole,
@@ -100,25 +100,19 @@ pub async fn start(
     let steps = automation.steps.as_array().cloned().unwrap_or_default();
     validate(&options, steps.len()).map_err(|e| ApiError(Error::Invalid(e)))?;
     let (initial_vars, environment, env_secrets) =
-        super::api_client::resolve_environment(&ctx, &api, &wid, options.environment_id.as_ref())
-            .await?;
+        engine::resolve_environment(&ctx, &api, &wid, options.environment_id.as_ref()).await?;
     let mut secret_values: Vec<String> = env_secrets.values().cloned().collect();
     // An agent-started run keeps every stored secret on its bound host (see
     // `run_step`); a person's run is theirs to aim.
-    let binding = if super::api_client::is_agent_caller(&headers, &auth) {
-        Some(super::api_client::StepSecretBinding {
-            bound_hosts: super::api_client::bound_env_secret_hosts(&api, &wid, &initial_vars)
-                .await?,
-            env_vars: initial_vars.clone(),
-            env_blob: env_secrets.clone(),
-            secret_keys: environment
-                .as_ref()
-                .map(|env| env.secret_keys.clone())
-                .unwrap_or_default(),
-        })
-    } else {
-        None
-    };
+    let binding = engine::StepSecretBinding::for_caller(
+        engine::is_agent_caller(&headers, &auth),
+        &api,
+        &wid,
+        &initial_vars,
+        environment.as_ref(),
+        &env_secrets,
+    )
+    .await?;
     let mut requests = Vec::new();
     let mut snapshot = Vec::new();
     for step in &steps {
@@ -190,7 +184,7 @@ pub async fn start(
                     break 'rows;
                 }
                 let result = tokio::select! {
-                    result = super::api_client::run_step(&ctx, &api, &wid, step, &mut vars, Some(request.clone()), &run.created_by, binding.as_ref()) => result,
+                    result = engine::run_step(&ctx, &api, &wid, step, &mut vars, Some(request.clone()), &run.created_by, binding.as_ref()) => result,
                     _ = cancelled.changed() => {run.status = "cancelled".into(); break 'rows;}
                 };
                 let step_id = new_id();
@@ -284,7 +278,7 @@ pub async fn start(
                 .await
                 .is_ok_and(|n| n > 0)
         {
-            super::api_client::invalidate_storage_gauge(&wid);
+            engine::invalidate_storage_gauge(&wid);
         }
         live().lock().unwrap().remove(&run.id);
         publish_progress(&ctx, &run);
@@ -316,13 +310,13 @@ pub(crate) async fn runs_keep(ctx: &ServerCtx, wid: &Id) -> i64 {
 }
 
 async fn prune_history(ctx: &ServerCtx, api: &ApiClientRepo, wid: &Id) {
-    let (max_rows, max_days) = super::api_client::history_retention(ctx, wid).await;
+    let (max_rows, max_days) = engine::history_retention(ctx, wid).await;
     if api
         .prune_history(wid, max_rows, max_days)
         .await
         .is_ok_and(|n| n > 0)
     {
-        super::api_client::invalidate_storage_gauge(wid);
+        engine::invalidate_storage_gauge(wid);
     }
 }
 

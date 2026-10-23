@@ -611,15 +611,21 @@ fn keyset_filter_with_cursor_ands_a_typed_gt_on_id() {
         .unwrap()
         .unwrap();
     // `$and` keeps a top-level `$or` intact, and the cursor is decoded to a
-    // real ObjectId (not compared as a string / sub-document).
-    assert_eq!(filter, doc! { "$and": [f, { "_id": { "$gt": oid } }] });
+    // real ObjectId (not compared as a string / sub-document); the later BSON
+    // types follow it in `{_id: 1}` order.
+    let after_oid = doc! { "$or": [
+        { "_id": { "$gt": oid } },
+        { "_id": { "$type": ["bool", "date", "timestamp", "regex", "maxKey"] } },
+    ] };
+    assert_eq!(filter, doc! { "$and": [f, after_oid] });
     assert_eq!(sort, doc! { "_id": 1 });
     // No filter + cursor ⇒ `$and: [{}, …]` (harmless, and keeps one shape).
     let cursor = json!(41);
     let (filter, _) = keyset_filter(None, None, false, Some(&cursor))
         .unwrap()
         .unwrap();
-    assert_eq!(filter, doc! { "$and": [{}, { "_id": { "$gt": 41_i64 } }] });
+    let after_41 = id_after(Bson::Int64(41));
+    assert_eq!(filter, doc! { "$and": [{}, after_41] });
     // A cursor that cannot be decoded is the caller's error, not a silent skip.
     let bad = json!({ "$oid": "nope" });
     assert!(keyset_filter(None, None, false, Some(&bad)).is_err());
@@ -1282,4 +1288,94 @@ fn native_chains_accept_comment_trivia_but_not_unclosed_comments() {
     assert!(parse_command("db.c.find({}) /* unfinished").is_err());
     assert!(parse_command("db.c.find({}) /* closed */ garbage").is_err());
     assert!(parse_command("db.c.find({}) // comment\ndb.c.deleteMany({})").is_err());
+}
+
+/// BP-6-02: the 5-minute reaper must reach the Mongo completion cache too —
+/// an evicted client's snapshot / field lists / first-db probe are dropped
+/// with it instead of staying resident for the daemon's lifetime.
+#[tokio::test]
+async fn evict_idle_drops_the_evicted_clients_completion_cache() {
+    let driver = MongoDriver::default();
+    // Never connects: the driver opens sockets lazily, on the first operation.
+    let client = Client::with_uri_str("mongodb://127.0.0.1:1/?serverSelectionTimeoutMS=50")
+        .await
+        .unwrap();
+    driver.clients.insert_ready("idle".into(), client);
+    driver.completions.put_first_db("idle", Some("app".into()));
+    driver
+        .completions
+        .put_first_db("live", Some("other".into()));
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    assert_eq!(
+        driver.evict_idle(std::time::Duration::from_millis(5)).await,
+        1
+    );
+    assert_eq!(driver.completions.get_first_db("idle"), None);
+    assert_eq!(
+        driver.completions.get_first_db("live"),
+        Some(Some("other".into())),
+        "a key with no evicted client keeps its (fresh) entry"
+    );
+}
+
+/// backend-correctness-6-03: a page boundary inside the string `_id`s must
+/// still reach the ObjectId-keyed documents. `$gt: "<last string>"` alone is
+/// type-bracketed (strings only), so the walk used to stop at the type change.
+#[test]
+fn keyset_after_a_string_id_reaches_later_bson_types() {
+    let cursor = json!("import-0999");
+    let (filter, _) = keyset_filter(None, None, false, Some(&cursor))
+        .unwrap()
+        .unwrap();
+    let clause = filter.get_array("$and").unwrap()[1]
+        .as_document()
+        .unwrap()
+        .clone();
+    let arms = clause.get_array("$or").unwrap();
+    assert_eq!(
+        arms[0].as_document().unwrap(),
+        &doc! { "_id": { "$gt": "import-0999" } },
+        "the rest of the strings, as before"
+    );
+    let types: Vec<&str> = arms[1]
+        .as_document()
+        .unwrap()
+        .get_document("_id")
+        .unwrap()
+        .get_array("$type")
+        .unwrap()
+        .iter()
+        .map(|t| t.as_str().unwrap())
+        .collect();
+    assert_eq!(
+        types,
+        [
+            "object",
+            "binData",
+            "objectId",
+            "bool",
+            "date",
+            "timestamp",
+            "regex",
+            "maxKey"
+        ],
+        "every type that sorts after a string — ObjectId included"
+    );
+    // Numbers sort before strings: a numeric cursor reaches the strings too.
+    let after_num = id_after(Bson::Int32(7));
+    let num_types = after_num.get_array("$or").unwrap()[1]
+        .as_document()
+        .unwrap()
+        .get_document("_id")
+        .unwrap()
+        .get_array("$type")
+        .unwrap()
+        .clone();
+    assert!(num_types.contains(&Bson::String("string".into())));
+    assert!(!num_types.contains(&Bson::String("number".into())));
+    // MaxKey sorts last: nothing follows its bracket.
+    assert_eq!(
+        id_after(Bson::MaxKey),
+        doc! { "_id": { "$gt": Bson::MaxKey } }
+    );
 }

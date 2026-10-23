@@ -21,6 +21,7 @@ use super::ui_commands;
 /// `workspace_id` for the pin, the audit and the approval scope).
 pub const REF_ARGS: &[(&str, &str, &str)] = &[
     ("query_db_readonly", "connection_id", "connection"),
+    ("query_db", "connection_id", "connection"),
     ("get_workflow", "workflow_id", "workflow"),
     ("list_workflow_runs", "workflow_id", "workflow"),
     ("run_workflow", "workflow_id", "workflow"),

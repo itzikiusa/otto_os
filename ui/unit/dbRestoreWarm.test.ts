@@ -175,7 +175,7 @@ test('restore: a close during the warm-up writes no snapshot', async () => {
   schema.get('bg:b')?.resolve([]);
   await flush();
   await flush();
-  assert.equal(db.snapshots.has('b'), false);
+  assert.equal(db.conn.snapshots.has('b'), false);
   assert.equal(db.connStatus.has('b'), false);
 });
 
@@ -200,8 +200,8 @@ test('a tab keeps its uid and its run start time across a reload', async () => {
   const t = db.tabs[0];
   assert.match(t.uid, /\S{8,}/);
   t.pending = { queryId: 'q1', connId: 'a', sql: 'SELECT SLEEP(5)', node: null, startedAt: 1_700_000_000_000 };
-  db.persistTabsNow('a');
-  const back = db.restoreTabs('a');
+  db.persist.persistTabsNow('a');
+  const back = db.persist.restoreTabs('a');
   assert.equal(back.tabs[0].uid, t.uid, 'the undo-history key survives');
   assert.equal(back.tabs[0].pending.startedAt, 1_700_000_000_000, 'the timer keeps counting from the real start');
   assert.notEqual(back.tabs[0].id, undefined);
@@ -226,5 +226,5 @@ test('a daemon restart marks open connections stale and re-warms them', async ()
   schema.get('bg:b')!.resolve([{ id: 'db:y', label: 'y', kind: 'database' }]);
   await flush();
   await flush();
-  assert.equal(db.snapshots.get('b').schemaRoot[0].id, 'db:y', 'the parked tree is refilled in place');
+  assert.equal(db.conn.snapshots.get('b').schemaRoot[0].id, 'db:y', 'the parked tree is refilled in place');
 });

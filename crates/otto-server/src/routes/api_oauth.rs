@@ -1,7 +1,6 @@
 //! Browser authorization-code + S256 PKCE, with one-use, expiring state.
 //! Tokens are exchanged by the daemon and stored only in Keychain.
 use crate::{
-    api_secrets,
     auth::{require_ws_role, CurrentUser},
     error::{ApiError, ApiResult},
     state::ServerCtx,
@@ -12,6 +11,7 @@ use axum::{
     Json,
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use otto_apiclient::secrets as api_secrets;
 use otto_core::{
     domain::{User, WorkspaceRole},
     Error, Id,
@@ -116,7 +116,7 @@ pub async fn start(
         return Err(invalid("Authorization URL must use HTTP or HTTPS"));
     }
     // Token exchange retains the same SSRF default as other API client traffic.
-    if !super::api_client::workspace_allows_local(&ctx, &wid).await {
+    if !otto_apiclient::engine::workspace_allows_local(&ctx, &wid).await {
         otto_netguard::check_url(token_url)
             .await
             .map_err(|e| invalid(&e))?;
@@ -281,7 +281,7 @@ async fn exchange(ctx: &ServerCtx, flow: &Flow, code: &str) -> Result<(), String
         }
     }
     let token_url = auth["token_url"].as_str().unwrap_or("");
-    let allow_local = super::api_client::workspace_allows_local(ctx, &flow.wid).await;
+    let allow_local = otto_apiclient::engine::workspace_allows_local(ctx, &flow.wid).await;
     if !allow_local {
         otto_netguard::check_url(token_url).await?;
     }

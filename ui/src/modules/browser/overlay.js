@@ -9,7 +9,7 @@
 // shipped as raw source text (see `overlaySrc` in BrowserView.svelte, a
 // `?raw` import of this file) and `eval`'d straight into the target page's
 // own JS context, which has no way to `import` an ES module from Otto's own
-// bundle. Duplicates `buildSelector()` from `./selector.ts` by hand for the
+// bundle. Duplicates `buildSelector()` (lib/stores/browser.svelte.ts, re-exported by `./selector.ts`) by hand for the
 // same reason — a live-tab webview is denied Tauri IPC (see Task 9's report),
 // so it can't call back into the app to reuse shared logic either. Keep the
 // two in sync if the selector algorithm changes.
@@ -25,7 +25,7 @@
   if (window.__ottoOverlay) return; // idempotent — this file is re-injected on every nav
 
   var DATA_ATTRS = ['data-testid', 'data-test', 'data-id', 'data-qa'];
-  // Same cap as ui/src/modules/browser/selector.ts's MAX_SELECTOR_LEN. A
+  // Same cap as ui/src/lib/stores/browser.svelte.ts's MAX_SELECTOR_LEN. A
   // hostile page's own id/data-* attribute VALUES are the real trust
   // boundary here (unlike reader mode's always-structural selector), and the
   // server (routes/browser.rs's SELECTOR_MAX_CHARS + build_context_block's
@@ -58,7 +58,7 @@
     return /^[A-Za-z_][A-Za-z0-9_-]*$/.test(id) ? '#' + id : '[id="' + escapeAttrValue(id) + '"]';
   }
 
-  // Same priority as ui/src/modules/browser/selector.ts's buildSelector:
+  // Same priority as ui/src/lib/stores/browser.svelte.ts's buildSelector:
   // #id > data-* test attribute (on el only) > nth-of-type tag-path from
   // document.body (exclusive) down to el. A candidate over MAX_SELECTOR_LEN
   // is skipped in favor of the next tier; the nth-of-type fallback (never

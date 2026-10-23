@@ -169,8 +169,9 @@ fn rel_of(root: &FsPath, canonical: &FsPath) -> String {
 
 /// Host-filesystem work for these routes goes through the same guard as
 /// `/fs/*` (BP-5-05): at most [`IN_FLIGHT`] blocking tasks per route (busy →
-/// 409), a 10 s deadline (→ 504) and a cancel flag checked per entry, so a
-/// stalled mount or a huge tree can't pile up the shared blocking pool.
+/// 409), a 10 s deadline (→ 502, `Error::Upstream`) and a cancel flag checked
+/// per entry, so a stalled mount or a huge tree can't pile up the shared
+/// blocking pool.
 const IN_FLIGHT: usize = 4;
 const DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
 

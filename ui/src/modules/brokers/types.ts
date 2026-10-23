@@ -1,6 +1,8 @@
 // Module-local types for the B6 broker operator workflow features.
 // Shared wire contracts are re-exported from lib/api/types.ts.
 
+import type { ClusterView } from '../../lib/stores/brokers.svelte';
+
 // ---- Schema registry version history & compat --------------------------------
 
 export type {
@@ -66,8 +68,10 @@ export interface LagAlert {
   breach_lag?: number;
 }
 
-/** The per-cluster views, in tab order (BrokersPage + the embedded ClusterViewer). */
-export type ClusterView = 'overview' | 'topics' | 'groups' | 'schema' | 'replay' | 'alerts';
+/** The per-cluster views, in tab order (BrokersPage + the embedded ClusterViewer).
+ *  `ClusterView` is defined beside the brokers store (lib/), which the agent
+ *  UI commands share. */
+export type { ClusterView };
 export const CLUSTER_VIEWS: { id: ClusterView; label: string }[] = [
   { id: 'overview', label: 'Overview' },
   { id: 'topics', label: 'Topics' },

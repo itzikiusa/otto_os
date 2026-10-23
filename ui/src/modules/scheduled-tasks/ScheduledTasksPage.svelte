@@ -29,6 +29,8 @@
   import { toasts } from '../../lib/toast.svelte';
   import { toastError } from '../../lib/toastError';
   import { events } from '../../lib/events.svelte';
+  import { announce, focusAppContent, announceShown } from '../../lib/announce.svelte';
+  import { fireLabel, previewSpeech } from './firePreview';
   import type { ScheduledTask, ScheduledTaskRun } from '../../lib/api/types';
   import { allProviders, defaultAgentProvider } from '../../lib/providers';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
@@ -498,13 +500,7 @@
   });
   /** Only a preview for the CURRENT form is shown (never a stale one). */
   const shownPreview = $derived(firePreview && firePreview.key === previewKey ? firePreview : null);
-  function fireLabel(at: string, tz: string): string {
-    try {
-      return new Date(at).toLocaleString(undefined, { timeZone: tz, weekday: 'short', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-    } catch {
-      return new Date(at).toLocaleString();
-    }
-  }
+  $effect(() => { if (shownPreview) announce(previewSpeech(shownPreview)); }); // the inserted line is silent
 
   function buildDestination(): Record<string, unknown> {
     switch (fDestType) {
@@ -702,6 +698,7 @@
     try {
       const res = await scheduledTasksApi.convertToWorkflow(t.id, disableTask);
       convertedWfId = res.workflow_id;
+      announce('Created a workflow from this task.');
       wfLoaded = false; // the picker re-fetches and sees the new workflow
       if (disableTask && ws.currentId) void scheduledTasks.loadList(ws.currentId);
       // A missing trigger_id means the workflow has no schedule: say so
@@ -859,6 +856,8 @@
   }
 
   /** In-flight Run now, or a loaded run that has not finished. */
+  let wasStale = false; // rows show "Reconnecting…" inline (silent): say it once, at the edge
+  $effect(() => { const stale = events.state !== 'connected' && list.some(taskRunLive); if (stale && !wasStale) announce('Reconnecting — live run status may be stale.'); wasStale = stale; });
   function taskRunLive(t: ScheduledTask): boolean {
     if (runningIds[t.id]) return true;
     return loadedRuns(t.id).some((r) => runIsLive(r.status));
@@ -925,7 +924,7 @@
       {@render addWorkspace(false)}
     {/if}
     <form class="form" onsubmit={(e) => { e.preventDefault(); void save(); }}>
-      {#if error}<div class="err" role="alert"><Icon name="warning" size={12} /> {error}</div>{/if}
+      {#if error}<div class="err" use:announceShown={{ text: error, assertive: true }}><Icon name="warning" size={12} /> {error}</div>{/if}
 
       {#if !editId && presets.length}
         <label class="field">
@@ -942,7 +941,7 @@
         <input id="sched-name" dir="auto" class="input" bind:value={fName} placeholder="Nightly ticket review"
           aria-invalid={fieldError?.id === 'sched-name'}
           aria-describedby={fieldError?.id === 'sched-name' ? 'sched-name-err' : undefined} />
-        {#if fieldError?.id === 'sched-name'}<small id="sched-name-err" class="field-hint bad" role="alert">{fieldError.message}</small>{/if}
+        {#if fieldError?.id === 'sched-name'}<small id="sched-name-err" class="field-hint bad" use:announceShown={{ text: fieldError.message, assertive: true }}>{fieldError.message}</small>{/if}
       </label>
 
       <div class="frow">
@@ -977,7 +976,7 @@
                 <option value={fWorkflowId}>Unknown workflow ({fWorkflowId.slice(0, 8)}…)</option>
               {/if}
             </select>
-            {#if fieldError?.id === 'sched-workflow'}<small id="sched-workflow-err" class="field-hint bad" role="alert">{fieldError.message}</small>{/if}
+            {#if fieldError?.id === 'sched-workflow'}<small id="sched-workflow-err" class="field-hint bad" use:announceShown={{ text: fieldError.message, assertive: true }}>{fieldError.message}</small>{/if}
             {#if wfError}
               <small class="field-hint bad">Couldn’t load workflows. {wfError}
                 <button type="button" class="btn small ghost" onclick={loadWorkflowOptions}>Retry</button></small>
@@ -1035,7 +1034,7 @@
             <input id="sched-every" class="input" type="number" bind:value={fEveryMin} onblur={onIntervalBlur} oninput={onIntervalInput}
               aria-invalid={!!intervalError}
               aria-describedby={intervalError ? 'sched-every-err' : undefined} />
-            {#if intervalError}<small id="sched-every-err" class="field-hint bad" role="alert">{intervalError}</small>{/if}
+            {#if intervalError}<small id="sched-every-err" class="field-hint bad" use:announceShown={{ text: intervalError, assertive: true }}>{intervalError}</small>{/if}
           </label>
         {:else if fCadence === 'once'}
           <label class="field">
@@ -1043,7 +1042,7 @@
             <input id="sched-run-at" class="input" type="datetime-local" bind:value={fRunAt}
               aria-invalid={!fRunAt}
               aria-describedby={fieldError?.id === 'sched-run-at' ? 'sched-run-at-err' : undefined} />
-            {#if fieldError?.id === 'sched-run-at'}<small id="sched-run-at-err" class="field-hint bad" role="alert">{fieldError.message}</small>{/if}
+            {#if fieldError?.id === 'sched-run-at'}<small id="sched-run-at-err" class="field-hint bad" use:announceShown={{ text: fieldError.message, assertive: true }}>{fieldError.message}</small>{/if}
           </label>
         {:else if fCadence === 'cron'}
           <label class="field">
@@ -1085,7 +1084,7 @@
         {/if}
       </div>
       {#if shownPreview}
-        <div class="fire-preview" class:bad={!!shownPreview.error} role="status" aria-live="polite" data-testid="sched-next-fires">
+        <div class="fire-preview" class:bad={!!shownPreview.error} data-testid="sched-next-fires">
           {#if shownPreview.error}
             <Icon name="warning" size={12} /> {shownPreview.error}
           {:else if shownPreview.times.length}
@@ -1135,7 +1134,7 @@
             <input id="sched-email" dir="ltr" class="input" type="email" bind:value={fEmailTo} placeholder="you@example.com"
               aria-invalid={fieldError?.id === 'sched-email'}
               aria-describedby={fieldError?.id === 'sched-email' ? 'sched-email-err' : undefined} />
-            {#if fieldError?.id === 'sched-email'}<small id="sched-email-err" class="field-hint bad" role="alert">{fieldError.message}</small>{/if}
+            {#if fieldError?.id === 'sched-email'}<small id="sched-email-err" class="field-hint bad" use:announceShown={{ text: fieldError.message, assertive: true }}>{fieldError.message}</small>{/if}
           </label>
         {:else if fDestType === 'webhook'}
           <label class="field">
@@ -1143,7 +1142,7 @@
             <input id="sched-webhook" dir="ltr" class="input" type="url" bind:value={fUrl} placeholder="https://…"
               aria-invalid={fieldError?.id === 'sched-webhook'}
               aria-describedby={fieldError?.id === 'sched-webhook' ? 'sched-webhook-err' : undefined} />
-            {#if fieldError?.id === 'sched-webhook'}<small id="sched-webhook-err" class="field-hint bad" role="alert">{fieldError.message}</small>{/if}
+            {#if fieldError?.id === 'sched-webhook'}<small id="sched-webhook-err" class="field-hint bad" use:announceShown={{ text: fieldError.message, assertive: true }}>{fieldError.message}</small>{/if}
           </label>
         {/if}
       </div>
@@ -1210,11 +1209,11 @@
     {@render addWorkspace(true)}
   {:else}
     {#if convertedWfId}
-      <div class="notice" role="status">
+      <div class="notice">
         <span>Created a workflow from this task.</span>
         <span class="grow"></span>
         <button class="btn small" onclick={() => { const id = convertedWfId; convertedWfId = null; router.go(id ? `workflows/${id}` : 'workflows'); }}>Open workflow</button>
-        <button class="btn small" onclick={() => (convertedWfId = null)}>Dismiss</button>
+        <button class="btn small" onclick={() => { convertedWfId = null; void focusAppContent(); }}>Dismiss</button>
       </div>
     {/if}
 
@@ -1292,7 +1291,7 @@
               </div>
             </div>
             {#if live && events.state !== 'connected'}
-              <p class="reconnect" role="status">Reconnecting — this run’s status may be stale.</p>
+              <p class="reconnect">Reconnecting — this run’s status may be stale.</p>
             {/if}
             {#if expandedId === t.id}
               <div class="runs" id="runs-{t.id}">

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announceShown } from '../../../lib/announce.svelte';
   import { rowMenu } from '../../../lib/rowMenu';
   // 3D Studio 1.5 — the Design Hall layout for a `scene3d` artifact (mockup S4):
   //
@@ -17,16 +18,15 @@
   // Keychain key; nothing is sent anywhere without an explicit click.
   import Tabs, { type TabItem } from '../../../lib/components/Tabs.svelte';
   import { toastError } from '../../../lib/toastError';
-  import type { Snippet } from 'svelte';
-  import { untrack } from 'svelte';
+  import { copyWithToast } from '../../../lib/clipboard';
+  import { untrack, type Snippet } from 'svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import Modal from '../../../lib/components/Modal.svelte';
   import { ctxMenu, type MenuItem } from '../../../lib/contextmenu.svelte';
   import { confirmer } from '../../../lib/confirm.svelte';
   import { toasts } from '../../../lib/toast.svelte';
   import { registry } from '../../../lib/commands.svelte';
-  import { api } from '../../../lib/api/client';
-  import { ApiError } from '../../../lib/api/client';
+  import { api, ApiError } from '../../../lib/api/client';
   import { downloadText } from '../../../lib/components/exporters';
   import * as dapi from '../../../lib/api/design';
   import { listTurns, startAssist as startTurn } from '../assist/api';
@@ -63,11 +63,11 @@
   import StatesBar from './StatesBar.svelte';
   import GenerateModal from './GenerateModal.svelte';
   import { blenderRefinePrompt, blockoutPrompt, type Gen3dContext, type Gen3dKind } from './providers';
-  import { loadBrandKit, resolveModelRef, type BrandKit } from './sources';
+  import { loadBrandKit, modelScope, type BrandKit } from './sources';
   import { openArtifact } from '../nav';
   import { library } from '../library.svelte';
   import { policyLabel, type LinkRow } from '../model';
-  import type { AssistSelection } from '../assist/model';
+  import { turnOutcome, type AssistSelection } from '../assist/model';
 
   interface Props {
     artifact: DesignArtifact;
@@ -181,16 +181,11 @@
     try {
       const turns = await listTurns(artifact.id);
       if (destroyed) return;
-      const t = turns.find((x) => x.turn_id === a.turnId);
-      if (!t || t.status === 'starting' || t.status === 'running') {
-        if (agent?.turnId === a.turnId) schedulePoll();
-        return;
-      }
+      const out = turnOutcome(turns.find((x) => x.turn_id === a.turnId));
+      if (agent?.turnId !== a.turnId) return;
+      if (out.kind === 'wait') return schedulePoll();
       agent = null;
-      if (t.status === 'done') toasts.success('Otto’s version is ready', t.message ?? 'Review it in the version strip.');
-      else if (t.status === 'unchanged') toasts.info('Otto made no changes', t.message ?? undefined);
-      else if (t.status === 'conflict') toasts.warn('Saved as a side version', 'The scene changed while Otto worked — compare and accept it from history.');
-      else toasts.error('Otto couldn’t finish', t.error ?? 'The turn failed; the scene is unchanged.');
+      toasts[out.kind](out.title, out.body);
     } catch {
       if (destroyed) return;
       if (agent?.turnId === a.turnId) schedulePoll();
@@ -199,7 +194,10 @@
   $effect(() => () => {
     destroyed = true;
     if (pollTimer) clearTimeout(pollTimer);
+    models.release();
   });
+  /** This editor’s hold on its model blobs (released on unmount, above). */
+  const models = modelScope();
 
   const genCtx = $derived<Gen3dContext>({ cloudKeys: {}, canEdit: !readonly, busy: !!agent, dirty });
   let genKind = $state<Gen3dKind | null>(null);
@@ -438,7 +436,7 @@
       {
         label: 'Copy embed reference',
         icon: 'link',
-        action: () => void navigator.clipboard?.writeText(`otto://design/${artifact.id}@approved#view:${id}`).then(() => toasts.success('Copied', `#view:${id}`)),
+        action: () => void copyWithToast(`otto://design/${artifact.id}@approved#view:${id}`, 'embed reference'),
       },
       { separator: true },
       {
@@ -532,7 +530,7 @@
 </script>
 
 {#if !doc}
-  <div class="bad" role="alert">
+  <div class="bad">
     <Icon name="warning" size={16} />
     <div>
       <strong>This isn’t a valid 3D scene document.</strong>
@@ -628,9 +626,9 @@
         </button>
         <span class="grow"></span>
         {#if agent}
-          <span class="agent" role="status" data-testid="s3d-agent"><span class="pulse" aria-hidden="true"></span> Otto · {agent.label}…</span>
+          <span class="agent" use:announceShown={`Otto · ${agent.label}…`} data-testid="s3d-agent"><span class="pulse" aria-hidden="true"></span> Otto · {agent.label}…</span>
         {:else if agentDraft && head}
-          <span class="draft-banner" role="status" data-testid="s3d-draft">
+          <span class="draft-banner" data-testid="s3d-draft" use:announceShown={`Showing v${head.seq} draft by Otto, not approved`}>
             <Icon name="sparkle" size={12} /> Showing <strong>v{head.seq} draft</strong> by Otto · not approved
           </span>
         {/if}
@@ -655,7 +653,7 @@
           compact
           {statusNote}
           onchange={edit}
-          resolveAttachment={resolveModelRef}
+          resolveAttachment={models.resolve}
         />
         <div class="states-host">
           <StatesBar {doc} {stateId} {selectedId} {readonly} onpick={(id) => (stateId = id ?? initialState(doc!))} onchange={edit} />

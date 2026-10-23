@@ -321,8 +321,10 @@
             text-anchor={i === 0 ? 'start' : i === xTicks.length - 1 ? 'end' : 'middle'}
           >{tk.label}</text>
         {/each}
-        <!-- series -->
-        {#each series as s, i (s.label)}
+        <!-- series: keyed by position, never by label — two clusters (or
+             namespaces) may share a display name, and a duplicate key throws
+             each_key_duplicate (UC-6-04). -->
+        {#each series as s, i (i)}
           {#if area}
             <path d={areaPath(s.points)} fill={colorOf(i)} fill-opacity="0.12" stroke="none" />
           {/if}
@@ -344,7 +346,7 @@
       {#if hover}
         <div class="mc-tip" class:flip={tipFlip} style="left:{tipLeft}%">
           <div class="mc-tip-t">{fmtFull(hover.t)}</div>
-          {#each series as s, i (s.label)}
+          {#each series as s, i (i)}
             <div class="mc-tip-row">
               <span class="sw" style="background:{colorOf(i)}"></span>
               <span class="lbl">{s.label}</span>
@@ -357,7 +359,7 @@
     <p class="sr-only" aria-live="polite">{readout}</p>
     {#if showLegend && series.length > 1}
       <ul class="mc-legend">
-        {#each series as s, i (s.label)}
+        {#each series as s, i (i)}
           <li><span class="sw" style="background:{colorOf(i)}"></span>{s.label}</li>
         {/each}
       </ul>
@@ -369,7 +371,7 @@
           <table>
             <caption class="sr-only">{chartLabel}</caption>
             <thead>
-              <tr><th scope="col">Time</th>{#each series as s (s.label)}<th scope="col">{s.label}</th>{/each}</tr>
+              <tr><th scope="col">Time</th>{#each series as s, i (i)}<th scope="col">{s.label}</th>{/each}</tr>
             </thead>
             <tbody>
               {#each times as t (t)}

@@ -1222,6 +1222,83 @@ fn query_db_readonly_leaves_the_read_only_verdict_to_the_route() {
 }
 
 #[test]
+fn query_db_is_a_governed_irreversible_database_writer() {
+    let specs = otto_tool_specs();
+    let spec = |n: &str| specs.iter().find(|s| s["name"] == n).cloned().unwrap();
+    let write = spec("otto.query_db");
+    assert_eq!(write["mutating"], json!(true));
+    assert_eq!(write["category"], json!("Database"));
+    // The read-only sibling's arguments, one for one.
+    assert_eq!(
+        write["inputSchema"],
+        spec("otto.query_db_readonly")["inputSchema"]
+    );
+    assert!(tool_is_mutating("query_db"));
+    assert!(tool_is_dangerous("query_db"), "approval-gated");
+    assert!(
+        tool_is_irreversible("query_db"),
+        "a category auto-approve rule never covers it"
+    );
+    assert!(!DEFAULT_ENABLED.contains(&"query_db"), "off by default");
+    assert!(!NATIVE_SESSION_WRITERS.contains(&"query_db"));
+    assert!(REF_ARGS.contains(&("query_db", "connection_id", "connection")));
+    // Siblings in the catalog, where the read-only tool always sat.
+    let names = spec_names();
+    let at = names.iter().position(|n| n == "otto.query_db_readonly");
+    assert_eq!(
+        names[at.unwrap() + 1..at.unwrap() + 3],
+        ["otto.query_db", "otto.open_pr_draft"]
+    );
+    // The read-only tool stays a non-mutating read.
+    assert!(!tool_is_mutating("query_db_readonly"));
+    assert!(!tool_is_dangerous("query_db_readonly"));
+}
+
+#[test]
+fn query_db_routes_to_the_explorer_query_path_without_a_confirmation() {
+    // A write goes through `/db/query` — the route a person's Explorer run
+    // uses, with its read-only / production write-guard — never through the
+    // read-only `/db/mcp-query`, and never carrying `confirm_write`.
+    let call = route_for(
+        "query_db",
+        &json!({"connection_id":"c1","statement":"DELETE FROM t","node":"db:shop",
+                "confirm_write":true,"read_only":false,"max_rows":5000}),
+    )
+    .unwrap();
+    assert_eq!(call.method, Method::Post);
+    assert_eq!(call.path, "/api/v1/connections/c1/db/query");
+    assert_eq!(
+        call.body.unwrap(),
+        json!({"statement":"DELETE FROM t","node":"db:shop","max_rows":QUERY_DB_MAX_ROWS,
+               "mask":true,"timeout_ms":QUERY_DB_TIMEOUT_MS}),
+        "only the listed fields — a caller's confirm_write never reaches the route"
+    );
+    let small = route_for(
+        "query_db",
+        &json!({"connection_id":"c1","statement":"SELECT 1","max_rows":"7"}),
+    )
+    .unwrap();
+    assert_eq!(small.body.unwrap()["max_rows"], json!(7));
+    assert!(route_for("query_db", &json!({"connection_id":"c1"})).is_err());
+    assert!(route_for("query_db", &json!({"statement":"SELECT 1"})).is_err());
+    // The self-call outlives the statement's own engine deadline.
+    assert!(
+        call_timeout("query_db", &json!({})).as_millis() > u128::from(QUERY_DB_TIMEOUT_MS),
+        "the engine must stop the statement before the self-call gives up"
+    );
+}
+
+#[test]
+fn query_db_approval_card_shows_the_statement() {
+    let d = dangerous_detail(
+        "otto.query_db",
+        &json!({"connection_id":"c1","node":"db:shop","statement":"UPDATE orders SET total = 0"}),
+    );
+    assert!(d.contains("'c1'") && d.contains("db:shop"), "{d}");
+    assert!(d.ends_with("UPDATE orders SET total = 0"), "{d}");
+}
+
+#[test]
 fn assistant_memory_tools_present_classified_and_routed() {
     let names = spec_names();
     for n in [
@@ -1456,6 +1533,67 @@ fn long_running_tools_get_a_longer_self_call_budget() {
     );
     assert!(call_timeout("api_run_automation", &json!({})).as_secs() >= 120);
     assert!(call_timeout("k8s_logs", &json!({})).as_secs() > 60);
+}
+
+#[test]
+fn multi_request_writes_get_a_budget_that_covers_every_upstream_request() {
+    use otto_core::mcp_budgets::GOVERNED_RUN_BUDGET;
+    use std::time::Duration;
+    let t = |tool: &str| call_timeout(tool, &json!({}));
+    // A merge: the merge (+ rebase) PUT on either side of the provider poll.
+    assert!(t("merge_pr") >= MERGE_PROVIDER_POLL + Duration::from_secs(30));
+    // create_issue: types + fields + parent lookup (rate-limited GETs), then
+    // the POST — the verify read may run over, not the write.
+    assert!(
+        t("create_issue") >= (ATLASSIAN_REQUEST_TIMEOUT + ATLASSIAN_RATE_LIMIT_WAIT) * 3,
+        "{:?}",
+        t("create_issue")
+    );
+    // Confluence: the write, then the verify GET (one rate-limit wait).
+    for tool in [
+        "create_confluence_page",
+        "update_confluence_page",
+        "comment_confluence_page",
+    ] {
+        assert!(
+            t(tool) >= ATLASSIAN_REQUEST_TIMEOUT * 2 + ATLASSIAN_RATE_LIMIT_WAIT,
+            "{tool}"
+        );
+    }
+    assert!(t("create_pr") > Duration::from_secs(30));
+    // No self-call outlives what the governed proxy grants the run.
+    for tool in MULTI_REQUEST_WRITES {
+        assert!(
+            t(tool) > Duration::from_secs(30),
+            "{tool} kept the flat 30 s"
+        );
+        assert!(t(tool) <= GOVERNED_RUN_BUDGET, "{tool}");
+    }
+    assert!(t("api_run_automation") <= GOVERNED_RUN_BUDGET);
+}
+
+#[test]
+fn a_timed_out_write_says_it_may_have_landed_and_names_the_target() {
+    use std::time::Duration;
+    let msg = timeout_error(
+        "create_issue",
+        &json!({"project_key": "OT", "summary": "Fix login"}),
+        Duration::from_secs(120),
+    );
+    assert!(msg.starts_with("self-call: timed out after 120s"), "{msg}");
+    assert!(msg.contains("\"Fix login\" in project OT"), "{msg}");
+    assert!(msg.contains("before retrying"), "{msg}");
+    let merge = timeout_error(
+        "merge_pr",
+        &json!({"repo_id": "r1", "number": 7}),
+        Duration::from_secs(90),
+    );
+    assert!(merge.contains("PR #7 in repo r1"), "{merge}");
+    // A read keeps the plain message.
+    assert_eq!(
+        timeout_error("list_prs", &json!({}), Duration::from_secs(30)),
+        "self-call: timed out after 30s"
+    );
 }
 
 #[test]

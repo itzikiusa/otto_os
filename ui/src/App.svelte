@@ -2,6 +2,8 @@
   import { onMount, untrack } from 'svelte';
   // Boot flow: GET /meta → onboarding wizard | login | main shell.
   import Toasts from './lib/components/Toasts.svelte';
+  import Announcer from './lib/components/Announcer.svelte';
+  import { announce } from './lib/announce.svelte';
   import BarHost from './modules/desktop/BarHost.svelte';
   import TrayPage from './modules/desktop/TrayPage.svelte';
   import { auth } from './lib/stores/auth.svelte';
@@ -85,7 +87,13 @@
       offlineLong = false;
       return;
     }
-    const t = setTimeout(() => (offlineLong = true), OFFLINE_GIVE_UP_MS);
+    // The boot lines below are inserted with their text, which VoiceOver
+    // doesn't read: speak each edge through the announcer instead.
+    announce('Starting the Otto daemon…');
+    const t = setTimeout(() => {
+      offlineLong = true;
+      announce('Otto can’t reach the daemon on 127.0.0.1:7700. Check the daemon log, then retry.', { assertive: true });
+    }, OFFLINE_GIVE_UP_MS);
     return () => clearTimeout(t);
   });
   // A failed `/auth/capabilities` read is retried with backoff inside the
@@ -193,12 +201,12 @@
   <div class="boot">
     <div class="boot-mark">Otto</div>
     {#if offlineLong}
-      <div class="boot-sub" role="status">Otto can’t reach the daemon on 127.0.0.1:7700.</div>
+      <div class="boot-sub">Otto can’t reach the daemon on 127.0.0.1:7700.</div>
       <div class="boot-hint">
         Check the daemon log at <span class="mono">~/Library/Logs/Otto/ottod.log</span>, then retry. Otto keeps trying in the background.
       </div>
     {:else}
-      <div class="boot-sub" role="status">
+      <div class="boot-sub">
         Starting the Otto daemon — first launch can take a few seconds…
       </div>
     {/if}
@@ -249,6 +257,7 @@
 {/snippet}
 
 <Toasts />
+<Announcer />
 
 <style>
   .boot {

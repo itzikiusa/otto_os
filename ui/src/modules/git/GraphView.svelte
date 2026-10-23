@@ -1,71 +1,40 @@
 <script lang="ts">
-  import { rel } from '../../lib/stores/now.svelte';
+  // Three panes: LEFT = refs tree (graph/RefSidebar), MIDDLE = the commit graph
+  // (this file), RIGHT = commit detail / diff or the WIP panel
+  // (graph/CommitDetailPane). On a phone they stack as accordion sections.
+  // The state lives in graph/*.svelte.ts behind narrow hosts: the data and
+  // its (re)loading (graphData), what the refs mean (graphRefIndex), the
+  // row window and lane layout (graphViewport), the selection and reveal
+  // (graphSelection), the actions (graphActions), the menus (graphMenus) and
+  // the ref popover (refPopoverState). This file wires them and renders rows.
   import { rowMenu } from '../../lib/rowMenu';
   import { plural } from '../../lib/plural';
   import { splitter } from '../../lib/paneResizer';
-  import { dialogFocus } from '../../lib/dialogFocus';
-  import { toastError } from '../../lib/toastError';
-  import { sentenceCase } from '../../lib/labels';
-  import { branchTracking, splitRemoteRef } from './refTracking';
-  import { planSection } from './ref-budget';
-  // Two-pane: LEFT = refs tree (local/remote/tags), MIDDLE = commit graph, RIGHT = commit detail/diff.
-  import { untrack } from 'svelte';
-  import { api, isDirtyGitRefusal } from '../../lib/api/client';
-  import type {
-    CommitInfo,
-    RefsResp,
-    RefBranch,
-    RefTag,
-    Repo,
-    StashInfo,
-    SubmoduleInfo,
-    WorktreeInfo,
-    RepoStatusResp,
-    CleanupBaseResp,
-    RebasePreview,
-  } from '../../lib/api/types';
-  import { toasts } from '../../lib/toast.svelte';
-  import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
-  import { confirmer } from '../../lib/confirm.svelte';
-  import { confirmOutward } from '../../lib/confirmOutward';
+  import type { RepoStatusResp } from '../../lib/api/types';
   import { ui } from '../../lib/stores/ui.svelte';
   import { startMouseDrag } from '../../lib/dragCursor';
   import { git } from '../../lib/stores/git.svelte';
-  import { ws } from '../../lib/stores/workspace.svelte';
+  import { rel } from '../../lib/stores/now.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
-  import { loadErrorText } from '../../lib/loadError';
   import Icon from '../../lib/components/Icon.svelte';
   import CreatePr from './CreatePr.svelte';
-  import WipPanel from './WipPanel.svelte';
-  import GraphCommitDiff, { prefetchCommitSummary } from './graph-commit-diff.svelte';
-  import { graphCache, type GraphSnapshot } from './graph-cache';
-  import { spliceHistory } from './graph-splice';
-  import { LANE_W, NODE_R, MAX_GUTTER_W, layoutLanes, type LaneMemo, type LaneRow } from './graph-lanes';
-  import {
-    groupBranches,
-    isTagRef,
-    midParts,
-    primaryChip,
-    refLabel,
-    shouldCollapseRow,
-    splitChips,
-    withoutRemoteHeads,
-    type BranchFolder,
-    type BranchLeaf,
-    type ChipKind,
-    type RefChip,
-  } from './ref-menus';
-  import { copyTextOrThrow } from '../../lib/clipboard';
-  import { runPull } from './pullFlow';
-  import { gitBridge } from './gitBridge.svelte';
-  import { router } from '../../lib/router.svelte';
-  import { routeGraphRef } from './deepLink';
-
-  /** Strip trailing slashes so worktree paths match registered repo paths. */
-  function normPath(p: string): string {
-    return p.replace(/\/+$/, '');
-  }
+  import { LANE_W, NODE_R, type LaneRow } from './graph-lanes';
+  import { branchTracking } from './refTracking';
+  import { normPath, primaryChip, shouldCollapseRow, stashShortMsg, type RefChip as Chip } from './ref-menus';
+  import { createGraphActions } from './graph/graphActions.svelte';
+  import { createGraphMenus } from './graph/graphMenus';
+  import { createGraphData } from './graph/graphData.svelte';
+  import { createGraphRefIndex } from './graph/graphRefIndex.svelte';
+  import { createGraphViewport } from './graph/graphViewport.svelte';
+  import { createGraphSelection } from './graph/graphSelection.svelte';
+  import { createRefPopover } from './graph/refPopoverState.svelte';
+  import { resizerKey } from './graph/resizerKey';
+  import RefSidebar from './graph/RefSidebar.svelte';
+  import RefChip from './graph/RefChip.svelte';
+  import LazyMount from '../../lib/components/LazyMount.svelte';
+  import { lazyComponent } from '../../lib/lazy-component.svelte';
+  import CommitDetailPane from './graph/CommitDetailPane.svelte';
 
   interface Props {
     repoId: string;
@@ -93,2139 +62,132 @@
     onresolveconflicts,
   }: Props = $props();
 
-  // ── Drag-to-merge state ─────────────────────────────────────────────────────
-  // The branch currently being dragged ({ name, remote }), and the local branch
-  // the pointer is hovering as a candidate drop target. A valid drop = a local
-  // branch whose name differs from the drag source's name.
-  let dragSource = $state<{ name: string; remote: boolean } | null>(null);
-  let dragOverTarget = $state<string | null>(null);
-
-  function dragSourceName(): string | null {
-    if (!dragSource) return null;
-    // A remote ref like "origin/feature" merges as its local short name.
-    return dragSource.remote ? dragSource.name.replace(/^[^/]+\//, '') : dragSource.name;
-  }
-
-  function isValidDropTarget(localName: string): boolean {
-    const src = dragSourceName();
-    return src !== null && src !== localName;
-  }
-
-  function onRefDragStart(e: DragEvent, name: string, remote: boolean): void {
-    dragSource = { name, remote };
-    if (e.dataTransfer) {
-      e.dataTransfer.effectAllowed = 'move';
-      // Stash a payload too so the drag is "real" in all browsers/webviews.
-      e.dataTransfer.setData('text/plain', name);
-    }
-  }
-
-  function onRefDragEnd(): void {
-    dragSource = null;
-    dragOverTarget = null;
-  }
-
-  function onTargetDragOver(e: DragEvent, localName: string): void {
-    if (!isValidDropTarget(localName)) return;
-    e.preventDefault(); // allow drop
-    if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
-    dragOverTarget = localName;
-  }
-
-  function onTargetDragLeave(localName: string): void {
-    if (dragOverTarget === localName) dragOverTarget = null;
-  }
-
-  function onTargetDrop(e: DragEvent, localName: string): void {
-    if (!isValidDropTarget(localName)) return;
-    e.preventDefault();
-    const source = dragSourceName();
-    dragOverTarget = null;
-    dragSource = null;
-    if (source && onmergerequest) onmergerequest(source, localName);
-  }
-
-  // ── Mobile (phone) layout ─────────────────────────────────────────────────
-  // On a phone the 3-pane desktop layout (refs | graph | diff) can't fit, so we
-  // stack the panes as COLLAPSIBLE accordion sections, each independently
-  // scrollable. Tracked via matchMedia so the same component serves both layouts
-  // without duplicating markup. The breakpoint is 1024px so it catches phone
-  // portrait + landscape AND the tablet range (iPad portrait 834, real-phone
-  // landscape 932) — the desktop 3-pane (refs | graph | diff) can't fit there
-  // without the diff getting clipped off-screen, so those widths get the stacked
-  // accordion + wrapping-diff layout. Desktop (≥1025) keeps the 3-pane view.
-  let isMobile = $state(false);
-  $effect(() => {
-    const mq = window.matchMedia('(max-width: 1024px)');
-    const sync = () => (isMobile = mq.matches);
-    sync();
-    mq.addEventListener('change', sync);
-    return () => mq.removeEventListener('change', sync);
-  });
-
-  // Which mobile sections are expanded. The refs (branches) tree starts collapsed
-  // — the commit graph is what users want first — and the diff opens on select.
+  // Which phone accordion sections are expanded. The refs (branches) tree
+  // starts collapsed — the commit graph is what users want first — and the
+  // diff opens on select.
   let secRefsOpen = $state(false);
   let secCommitsOpen = $state(true);
-
-  // ── Refs ──────────────────────────────────────────────────────────────────
-  // Server payloads below are `$state.raw`: they are only ever REPLACED, never
-  // mutated in place, and a deep proxy over 10k commits (or a big refs list)
-  // made every lane-layout pass 7-10x slower for no benefit.
-  let refs: RefsResp | null = $state.raw(null);
-  let refsLoading = $state(true);
-  /** Human cause of a failed `/refs` load — the sidebar shows it with Retry
-   *  instead of passing an empty tree off as "No local branches". */
-  let refsError = $state<string | null>(null);
-
-  // Section collapse state
-  let localOpen = $state(true);
-  let remoteOpen = $state(true);
-  let tagsOpen = $state(false);
-  let stashesOpen = $state(false);
-  let worktreesOpen = $state(false);
-  let submodulesOpen = $state(false);
-  // Collapsed branch FOLDERS (e.g. "local:feature", "remote:release"). Default
-  // expanded; a folder key here is collapsed. See groupBranches()/folderKey().
-  let collapsedFolders = $state(new Set<string>());
-  function folderKey(section: 'local' | 'remote', name: string): string {
-    return `${section}:${name}`;
-  }
-  function toggleFolder(key: string): void {
-    const next = new Set(collapsedFolders);
-    if (next.has(key)) next.delete(key);
-    else next.add(key);
-    collapsedFolders = next;
-  }
-
-
-  // Grouped once per `refs` change (not re-sorted inside the template on every
-  // render of the section).
-  const EMPTY_GROUPS: { loose: BranchLeaf[]; folders: BranchFolder[] } = { loose: [], folders: [] };
-  const groupedLocal = $derived.by(() => {
-    const r: RefsResp | null = refs;
-    return r ? groupBranches(r.local) : EMPTY_GROUPS;
-  });
-  const groupedRemote = $derived.by(() => {
-    const r: RefsResp | null = refs;
-    return r ? groupBranches(r.remote) : EMPTY_GROUPS;
-  });
-
-  // A repo with thousands of `origin/*` branches must not mount thousands of
-  // rows. The budget is per SECTION (LOCAL / REMOTE / TAGS), shared by loose
-  // leaves, folder headers and expanded folders' leaves — a per-folder cap
-  // bounded nothing when the branches sit under many prefix folders
-  // (r3-03-02). Past the budget one "Show more" row grows it.
-  const LEAF_PAGE = 150;
-  let leafLimits = $state<Record<string, number>>({});
-  function leafLimit(key: string): number {
-    return leafLimits[key] ?? LEAF_PAGE;
-  }
-  function showMoreLeaves(key: string): void {
-    leafLimits = { ...leafLimits, [key]: leafLimit(key) + LEAF_PAGE * 4 };
-  }
-  const localPlan = $derived(
-    planSection(groupedLocal.loose, groupedLocal.folders, leafLimit('local:'), (n) =>
-      collapsedFolders.has(folderKey('local', n)),
-    ),
-  );
-  const remotePlan = $derived(
-    planSection(groupedRemote.loose, groupedRemote.folders, leafLimit('remote:'), (n) =>
-      collapsedFolders.has(folderKey('remote', n)),
-    ),
-  );
 
   let checkoutBusy = $state('');
   /** Path of the worktree currently being opened as a git tab (busy guard). */
   let openWtBusy = $state('');
 
-  // ── Commits / graph ───────────────────────────────────────────────────────
-  let commits: CommitInfo[] = $state.raw([]);
-  let commitsLoading = $state(true);
-  /** The history load failed with nothing on screen — rendered inline with
-   *  Retry, never as "No commits found." (a later-page failure keeps the rows
-   *  and just retries on the next scroll). */
-  let commitsError = $state<string | null>(null);
-  /** Background / post-action refreshes that failed while history is on
-   *  screen. One miss stays quiet (the next tick usually heals it); two in a
-   *  row raise a slim "showing the last good load" bar with Retry instead of
-   *  leaving the graph silently stale. */
-  let refreshFailures = 0;
-  let refreshError = $state<string | null>(null);
-  /** The same rule for the quiet `/refs` + side-list re-reads (auto-fetch,
-   *  revalidate, post-action refresh), counted on their own: a miss used to
-   *  vanish into `.catch(() => {})`, leaving branches stale with nothing on
-   *  screen. Any success clears it. */
-  let refsMisses = 0;
-  let refsStaleError = $state<string | null>(null);
-  function noteBackgroundRead(e: unknown | null): void {
-    if (e === null) {
-      refsMisses = 0;
-      refsStaleError = null;
-    } else if (++refsMisses >= 2) {
-      refsStaleError = loadErrorText(e);
-    }
-  }
-
-  // ── History paging ────────────────────────────────────────────────────────
-  // There is no ceiling on how far back the graph can reach. The page is big
-  // enough that essentially every real repo loads its ENTIRE history in one
-  // request (6k commits = one page), so clicking a ref never waits on a chain of
-  // round-trips. Paging survives only as a backstop for genuinely huge repos —
-  // every row renders as real DOM, so an unbounded fetch on a 100k-commit repo
-  // would lock the webview on mount.
-  const PAGE = 10000;
-  /** The first page of a cold mount, and what a background reload re-reads
-   *  (perf R3): 2k commits paint at once; the next PAGE is prefetched right
-   *  after, so a ref click still rarely waits. A reload splices this onto the
-   *  held tail (graph-splice.ts). */
-  const FIRST_PAGE = 2000;
-  /** False once a short page comes back — that's the root of history. */
-  let hasMore = $state(true);
-  /** Guards against overlapping page fetches (scroll fires far faster than IO). */
-  let loadingMore = $state(false);
-  /** Bumped on every repo switch / full reload so an in-flight page from the
-   *  PREVIOUS repo can't append its commits onto the new one. */
-  let loadGen = 0;
-  /** How many rows have been REQUESTED so far — the `skip` cursor. Deliberately
-   *  not `commits.length`: dedupe can drop rows from a page, and reusing the
-   *  deduped length would re-request the same offset forever (a page of pure
-   *  duplicates would spin `loadUntil` without ever advancing). */
-  let skipCursor = 0;
-
-  /** The page fetch currently in flight, so a ref-click that needs more history
-   *  JOINS it instead of bailing out (bailing made a click during a scroll-load
-   *  falsely report the commit as unreachable). */
-  let inflight: Promise<boolean> | null = null;
-
-  /** Append the next page of history. Returns false when nothing more arrived.
-   *  `until` (a sha) makes it ONE daemon walk that stops right after that
-   *  commit — how a jump to an old ref reaches it, instead of a chain of
-   *  10k-commit `--skip` pages that each re-walk everything before them. */
-  function loadMore(until?: string, limit = PAGE): Promise<boolean> {
-    if (inflight) return inflight;
-    if (!hasMore) return Promise.resolve(false);
-    const p = loadPage(until, limit);
-    inflight = p;
-    loadingMore = true;
-    // Release the slot by PROMISE IDENTITY, never by generation: a reload that
-    // bumps `loadGen` while a page is in flight would otherwise strand `inflight`
-    // set forever, and every later loadMore() would hand back this one stale,
-    // already-settled promise — freezing history at whatever had loaded.
-    void p.finally(() => {
-      if (inflight === p) {
-        inflight = null;
-        loadingMore = false;
-      }
-    });
-    return p;
-  }
-
-  /** (Re)load the refs tree. A failure keeps an empty tree (the graph's chip
-   *  lookups need one) but records the cause so the sidebar can say so. */
-  function loadRefs(id: string): Promise<void> {
-    refsLoading = true;
-    refsError = null;
-    return api
-      .get<RefsResp>(`/repos/${id}/refs`)
-      .then((r) => {
-        if (id !== repoId) return;
-        setRefs(withoutRemoteHeads(r));
-      })
-      .catch((e) => {
-        if (id !== repoId) return;
-        setRefs({ local: [], remote: [], tags: [] });
-        refsError = loadErrorText(e);
-      })
-      .finally(() => (refsLoading = false));
-  }
-
-  /** JSON of the refs currently held — compared before every assignment so a
-   *  no-op refresh (the 30 s auto-fetch round, most checkouts) never hands the
-   *  lane layout, chips and sidebar a new object to recompute from. */
-  let refsKey = '';
-  /** Assign `refs` only when the content changed. */
-  function setRefs(next: RefsResp): void {
-    const key = JSON.stringify(next);
-    if (refs !== null && key === refsKey) return;
-    if (refs !== null && !refRemoved) refRemoved = lostRef(refs, next);
-    refsKey = key;
-    refs = next;
-  }
-
-  /** A removed ref, or a moved ref outside the prefix checked by the splice,
-   *  can orphan commits in the retained tail. Re-read that history in full.
-   *  A NEW ref (a fetched branch, a fork remote) can make commits reachable
-   *  that are older than the fresh page and absent from the held tail: its
-   *  tip must land in the fresh prefix, or the history is re-read too. */
-  let refRemoved = false;
-  const movedRefTips = new Set<string>();
-  const newRefTips = new Set<string>();
-  function lostRef(prev: RefsResp, next: RefsResp): boolean {
-    const entries = (r: RefsResp): [string, string | undefined][] => [
-      ...r.local.map((b): [string, string | undefined] => [`l:${b.name}`, b.sha]),
-      ...r.remote.map((b): [string, string | undefined] => [`r:${b.name}`, b.sha]),
-      ...r.tags.map((t): [string, string | undefined] => [`t:${t.name}`, t.sha]),
-    ];
-    const have = new Map(entries(next));
-    for (const [key, sha] of entries(prev)) {
-      if (sha && have.has(key) && have.get(key) !== sha) movedRefTips.add(sha);
-    }
-    const had = new Set(entries(prev).map(([key]) => key));
-    for (const [key, sha] of have) if (sha && !had.has(key)) newRefTips.add(sha);
-    const checked = new Set(commits.slice(0, FIRST_PAGE).map((c) => c.sha));
-    return entries(prev).some(([key, sha]) => !have.has(key) ||
-      (have.get(key) !== sha && (!sha || !checked.has(sha))));
-  }
-
-  /** Retry a failed first page (the inline error's Retry). */
-  function retryCommits(): void {
-    commitsLoading = true;
-    hasMore = true;
-    void loadMore().finally(() => (commitsLoading = false));
-  }
-
-  /** Every sha in `commits` (plus any batched page not flushed yet). Kept
-   *  across pages so dedupe and "is it loaded?" are O(1) instead of an O(N)
-   *  rebuild per page. Rebuilt whenever `commits` is replaced wholesale. */
-  let seenShas = new Set<string>();
-  /** >0 while `loadUntil` pages toward an old commit: pages collect in
-   *  `pendingPages` and land in ONE assignment (one lane layout), not one
-   *  full re-layout per 10k-commit page. */
-  let batching = 0;
-  let pendingPages: CommitInfo[] = [];
-  let pendingGen = 0;
-
-  /** Replace the whole history (first page / reload / cache restore). */
-  function setCommits(next: CommitInfo[]): void {
-    pendingPages = [];
-    seenShas = new Set(next.map((c) => c.sha));
-    commits = next;
-  }
-
-  function appendCommits(fresh: CommitInfo[]): void {
-    for (const c of fresh) seenShas.add(c.sha);
-    if (batching > 0) {
-      if (pendingGen !== loadGen) pendingPages = [];
-      pendingGen = loadGen;
-      for (const c of fresh) pendingPages.push(c);
-    } else {
-      commits = commits.concat(fresh);
-    }
-  }
-
-  function flushPending(): void {
-    if (pendingPages.length > 0 && pendingGen === loadGen) commits = commits.concat(pendingPages);
-    pendingPages = [];
-  }
-
-  async function loadPage(until?: string, limit = PAGE): Promise<boolean> {
-    const gen = loadGen;
-    try {
-      // Only a sha is a valid target (the daemon 400s anything else).
-      const to = until && /^[0-9a-f]{4,64}$/i.test(until) ? `&until=${until}` : '';
-      const page = await api.get<CommitInfo[]>(
-        `/repos/${repoId}/log?all=true&limit=${limit}&skip=${skipCursor}${to}`,
-      );
-      if (gen !== loadGen) return false; // repo changed under us — drop it
-      commitsError = null;
-      skipCursor += page.length;
-      if (page.length < limit) hasMore = false;
-      if (page.length > 0) {
-        // `--all` + skip can re-emit a commit if refs moved between pages; dedupe
-        // so the lane algorithm never sees the same sha twice.
-        const fresh = page.filter((c) => !seenShas.has(c.sha));
-        if (fresh.length > 0) appendCommits(fresh);
-      }
-      return page.length > 0;
-    } catch (e) {
-      // Leave `hasMore` alone: a transient failure shouldn't permanently declare
-      // the end of history — the next scroll retries.
-      if (gen === loadGen && commits.length === 0) commitsError = loadErrorText(e);
-      return false;
-    }
-  }
-
-  /** The scrolling commit list — also the element rows are looked up inside when
-   *  jumping to a ref. */
-  let graphPanelEl = $state<HTMLDivElement | null>(null);
-
-  // ── Row windowing (virtualization) ────────────────────────────────────────
-  // Only the rows near the viewport are put in the DOM. Every row is a button +
-  // an SVG lane gutter, so rendering a whole 6k-commit history cost seconds on
-  // mount; with a window it is flat no matter how deep history goes. Rows are a
-  // FIXED pitch, which is what makes the arithmetic (and the jump-to-ref
-  // scroll target) exact. The pitch is applied INLINE on every row (and the SVG
-  // gutter is drawn at the same height), so there is one source of truth:
-  //  - desktop 32px: two text lines (subject + sha/author/date) need ~29px; the
-  //    old 28px pitch jammed them together.
-  //  - ≤1024px 46px touch rows: these used to be CSS-only while the windowing
-  //    math and the gutter stayed at 28 — lanes broke into dashes between rows
-  //    and the spacers / jump-to-ref target drifted by 18px per row.
-  const ROW_H = $derived(isMobile ? 46 : 32);
-  const OVERSCAN = 25; // rows rendered beyond each edge, so scrolling isn't bare
-  let viewTop = $state(0);
-  let viewH = $state(0);
-  /** The top spacer — its position gives the exact offset of the rows region
-   *  inside the scroll content (sticky header + WIP row), so a jump can compute
-   *  a scroll target for a row that isn't rendered yet. */
-  let topSpacerEl = $state<HTMLDivElement | null>(null);
-
-  // (rowWindow / visibleRows / padTop / padBottom live with the lane algorithm
-  //  below, since they derive from `laneRows`.)
-
-  /** Mirror the scroller's geometry into state so the window recomputes. */
-  function syncViewport(): void {
-    const el = graphPanelEl;
-    if (!el) return;
-    viewTop = el.scrollTop;
-    viewH = el.clientHeight;
-  }
-
-  // Keep `viewH` correct across panel resizes (detail pane opening, window
-  // resize, mobile accordion) — a stale height renders too few or too many rows.
-  $effect(() => {
-    const el = graphPanelEl;
-    if (!el) return;
-    syncViewport();
-    const ro = new ResizeObserver(() => {
-      syncViewport();
-      flushResync();
-    });
-    ro.observe(el);
-    return () => ro.disconnect();
-  });
-
-  /** Pull the next page in as the user approaches the bottom, so history just
-   *  keeps going instead of stopping at an arbitrary cutoff. */
-  let scrollFrame = 0;
-  function onGraphScroll(): void {
-    // One state write per frame: scroll events fire several times a frame on
-    // trackpads, and each write re-derived the row window.
-    if (scrollFrame) return;
-    scrollFrame = requestAnimationFrame(() => {
-      scrollFrame = 0;
-      onGraphScrollFrame();
-    });
-  }
-  $effect(() => () => {
-    if (scrollFrame) cancelAnimationFrame(scrollFrame);
-    scrollFrame = 0;
-  });
-  function onGraphScrollFrame(): void {
-    syncViewport();
-    const el = graphPanelEl;
-    if (!el || loadingMore || !hasMore) return;
-    // Two viewports of runway — enough that the next page is usually there
-    // before the user reaches the end.
-    if (el.scrollTop + el.clientHeight * 3 >= el.scrollHeight) void loadMore();
-  }
-
-  /** Page forward until `sha` is loaded (or history runs out). Used when a ref
-   *  the user clicked points at a commit older than everything loaded so far. */
-  async function loadUntil(sha: string): Promise<boolean> {
-    if (seenShas.has(sha)) return true;
-    batching++;
-    try {
-      // Usually one round trip: the `until` walk ends AT the commit. The
-      // loop only repeats when it joined a scroll page already in flight.
-      while (hasMore) {
-        if (!(await loadMore(sha))) break;
-        if (seenShas.has(sha)) break;
-      }
-    } finally {
-      batching--;
-      if (batching === 0) flushPending();
-    }
-    return seenShas.has(sha);
-  }
-
-  // ── Stashes (read-only `git stash list`) ──────────────────────────────────
-  let stashes: StashInfo[] = $state.raw([]);
-  /** The stash list has been read for the current repo (vs the reset `[]`). */
-  let stashesKnown = $state(false);
-
-  // ── Worktrees + submodules (sidebar sections; best-effort like stashes) ───
-  let worktrees: WorktreeInfo[] = $state.raw([]);
-  let submodules: SubmoduleInfo[] = $state.raw([]);
-
-  // ── Commit detail / diff ─────────────────────────────────────────────────
-  let selectedSha = $state<string | null>(null);
-  let selectedCommit = $state.raw<CommitInfo | null>(null);
-  // The commit whose diff the detail pane loads (GraphCommitDiff owns the
-  // fetches, their AbortController and the stale-response guard). It trails
-  // `selectedSha` by DIFF_DEFER_MS on a branch-row click, so the lead click of
-  // a double-click (= checkout) never asks for a diff at all.
-  let diffSha = $state<string | null>(null);
-  /** Selected but deliberately not loaded (a double-click checked it out). */
-  let diffHeld = $state(false);
-  let diffTimer: ReturnType<typeof setTimeout> | null = null;
-  /** File count of the loaded diff (mobile section header). */
-  let diffFileCount = $state<number | null>(null);
-  const DIFF_DEFER_MS = 200;
-
-  // ── WIP (working tree) row selection ──────────────────────────────────────
-  // GitKraken-style: a dirty working tree renders as a dashed row pinned above
-  // the graph; selecting it opens the staging/commit panel in the detail pane
-  // (this replaced the separate "Changes" tab).
-  let wipSelected = $state(false);
-  /** The detail pane is open for EITHER a commit or the WIP row. */
-  const detailOpen = $derived(selectedSha !== null || wipSelected);
-
-  function selectWip(): void {
-    if (wipSelected) {
-      clearSelection();
-      return;
-    }
-    wipSelected = true;
-    selectedSha = null;
-    selectedCommit = null;
-    cancelDiff();
-    if (isMobile) secCommitsOpen = false;
-  }
-
-  // A commit (or an outside `git commit`) can leave the tree clean while the
-  // WIP panel is open — close it so the pane doesn't show a stale empty WIP.
-  $effect(() => {
-    if (wipSelected && status.changes.length === 0) {
-      wipSelected = false;
-      if (isMobile) secCommitsOpen = true;
-    }
-  });
-
-  // Agent UI control: `git.requestWip` (lib/uiCommands/git.ts) opens this
-  // repo's WIP panel; WipPanel then takes the request (file / composer).
-  $effect(() => {
-    const r = git.wipRequest;
-    if (!r || r.repoId !== repoId || status.changes.length === 0) return;
-    untrack(() => {
-      if (!wipSelected) selectWip();
-    });
-  });
-
-  /** Settles when the current repo's first load (or cache revalidation) is
-   *  done. The auto-fetch re-sync waits on it, so a fetch round landing
-   *  mid-mount can't throw away the in-flight first page and re-request it. */
-  let initialLoad: Promise<void> = Promise.resolve();
-
-  $effect(() => {
-    const id = repoId;
-    // UNTRACKED: the loaders read `hasMore` (and pages write it). Reading that
-    // inside the effect would subscribe this loader to it — so the first short
-    // page (`hasMore = false`) re-ran the whole effect, which resets `commits`
-    // and re-fetches skip=0, silently throwing away every page the user had
-    // scrolled in. The repo id read above is this effect's only real dependency.
-    untrack(() => {
-      initialLoad = mountRepo(id);
-    });
-  });
-
-  async function mountRepo(id: string): Promise<void> {
-    // Reset paging for the new repo and invalidate any in-flight page.
-    loadGen++;
-    loadingMore = false;
-    inflight = null;
-    commitsError = null;
-    refsError = null;
-    refreshFailures = 0;
-    refreshError = null;
-
-    const snap = graphCache.get(id);
-    if (snap) {
-      // Stale-while-revalidate: paint the last graph for this repo now, then
-      // let the cheap `/refs` check decide whether history needs a re-read.
-      refsKey = '';
-      setRefs(snap.refs);
-      setCommits(snap.commits);
-      stashes = snap.stashes;
-      stashesKnown = snap.stashesKnown;
-      worktrees = snap.worktrees;
-      submodules = snap.submodules;
-      hasMore = snap.hasMore;
-      skipCursor = snap.skipCursor;
-      refsLoading = false;
-      commitsLoading = false;
-      await revalidate(id);
-      return;
-    }
-
-    refsLoading = true;
-    commitsLoading = true;
-    refs = null;
-    setCommits([]);
-    stashes = [];
-    hasMore = true;
-    skipCursor = 0;
-
-    // Stashes / worktrees / submodules are best-effort: a failure (or empty
-    // list) just leaves the section empty; it must never block the graph.
-    stashesKnown = false;
-    worktrees = [];
-    submodules = [];
-    void reloadSideLists(id, true);
-    const gen = loadGen;
-    await Promise.all([
-      loadRefs(id),
-      loadMore(undefined, FIRST_PAGE).finally(() => {
-        commitsLoading = false;
-        // Prefetch the next page once the first one has painted.
-        setTimeout(() => {
-          if (gen === loadGen && id === repoId && hasMore) void loadMore();
-        }, 0);
-      }),
-    ]);
-  }
-
-  /** Stashes + worktrees + submodules — not part of the refs fingerprint, so a
-   *  revalidation re-reads them quietly (each assignment is skipped when
-   *  nothing changed). */
-  async function reloadSideLists(id: string, withSubmodules: boolean): Promise<void> {
-    let miss: unknown | null = null;
-    const fail = (e: unknown): void => {
-      miss ??= e;
-    };
-    await Promise.all([
-      api
-        .get<StashInfo[]>(`/repos/${id}/stashes`)
-        .then((s) => {
-          if (id !== repoId) return;
-          if (!sameJson(stashes, s)) stashes = s;
-          stashesKnown = true;
-        })
-        .catch(fail),
-      api
-        .get<WorktreeInfo[]>(`/repos/${id}/worktrees`)
-        .then((w) => {
-          if (id === repoId && !sameJson(worktrees, w)) worktrees = w;
-        })
-        .catch(fail),
-      withSubmodules
-        ? api
-            .get<SubmoduleInfo[]>(`/repos/${id}/submodules`)
-            .then((s) => {
-              if (id === repoId && !sameJson(submodules, s)) submodules = s;
-            })
-            .catch(fail)
-        : Promise.resolve(),
-    ]);
-    if (id === repoId) noteBackgroundRead(miss);
-  }
-
-  function sameJson(a: unknown, b: unknown): boolean {
-    return JSON.stringify(a) === JSON.stringify(b);
-  }
-
-  /** After painting a cached graph: refs first, history only if it moved. */
-  async function revalidate(id: string): Promise<void> {
-    let miss: unknown | null = null;
-    const raw = await api.get<RefsResp>(`/repos/${id}/refs`).catch((e: unknown) => ((miss = e), null));
-    if (id !== repoId) return;
-    noteBackgroundRead(miss);
-    if (raw && applyRefs(withoutRemoteHeads(raw))) {
-      await reloadGraph();
-      return;
-    }
-    await reloadSideLists(id, true);
-  }
-
-  // Keep the per-repo snapshot current (see graph-cache.ts). Only a complete,
-  // error-free state is worth restoring.
-  $effect(() => {
-    const id = repoId;
-    const r = refs;
-    const c = commits;
-    const st = stashes;
-    const wt = worktrees;
-    const sm = submodules;
-    const more = hasMore;
-    const known = stashesKnown;
-    if (!r || refsError || commitsError || refsLoading || commitsLoading || c.length === 0) return;
-    untrack(() =>
-      graphCache.set(id, {
-        refs: r,
-        commits: c,
-        stashes: st,
-        stashesKnown: known,
-        worktrees: wt,
-        submodules: sm,
-        hasMore: more,
-        skipCursor,
-      } satisfies GraphSnapshot),
-    );
-  });
-
-  // Auto-fetch runs `fetch --prune` on the daemon but deliberately doesn't
-  // remount the graph — re-sync QUIETLY (no loading flags, no flicker) when a
-  // round completes, so a ref that moved outside this view (a teammate's branch,
-  // a new tag, a branch deleted in a session terminal) shows up without a manual
-  // Fetch. `resyncRefs` pays only the cheap `/refs` call unless something
-  // actually moved. Plain (non-$state) bookkeeping: writing tracked state here
-  // would re-trigger the effect.
-  let refsSyncSeen: { id: string; rev: number } | null = null;
-  $effect(() => {
-    const id = repoId;
-    const rev = git.refsRev[id] ?? 0;
-    if (!refsSyncSeen || refsSyncSeen.id !== id) {
-      // First observation for this repo — the loader effect above owns it.
-      refsSyncSeen = { id, rev };
-      return;
-    }
-    if (refsSyncSeen.rev !== rev) {
-      refsSyncSeen = { id, rev };
-      untrack(() => requestResync());
-    }
-  });
-
-  // Toolbar / merge / recovery ask for a refresh through the bridge instead of
-  // remounting this component. A request that predates this mount is already
-  // covered by the mount's own load.
-  let refreshSeen = gitBridge.graphRefresh?.nonce ?? 0;
-  $effect(() => {
-    const req = gitBridge.graphRefresh;
-    if (!req || req.nonce === refreshSeen) return;
-    refreshSeen = req.nonce;
-    if (req.repoId !== repoId) return;
-    untrack(() => void refreshAfter().catch(noteBackgroundRead));
-  });
-
-  // A graph nobody can see (window hidden, another module/sub-tab covering
-  // it, the phone accordion folded) doesn't re-sync on every auto-fetch
-  // round: the request is parked and replayed once it is visible again.
-  let resyncPending = false;
-  function graphVisible(): boolean {
-    if (typeof document !== 'undefined' && document.hidden) return false;
-    const el = graphPanelEl;
-    return !!el && el.isConnected && el.getClientRects().length > 0;
-  }
-  function requestResync(): void {
-    if (!graphVisible()) {
-      resyncPending = true;
-      return;
-    }
-    resyncPending = false;
-    void resyncRefs().catch(noteBackgroundRead);
-  }
-  function flushResync(): void {
-    if (resyncPending && graphVisible()) requestResync();
-  }
-  $effect(() => {
-    const onVis = () => flushResync();
-    document.addEventListener('visibilitychange', onVis);
-    return () => document.removeEventListener('visibilitychange', onVis);
-  });
-
-  /** Does moving from `prev` to `next` change what `log --all` returns? Only
-   *  when a ref was REMOVED or MOVED (commits may become unreachable or new
-   *  ones appear), a new ref points outside the loaded history, or the tags
-   *  (whose decorations come from the log) changed. A plain checkout (only
-   *  `is_current` flips), or a new branch/remote on an already-loaded commit,
-   *  moves nothing — HEAD and branch chips come from the typed refs. `true`
-   *  whenever it can't tell (nothing held, or a daemon predating
-   *  `RefBranch.sha`), which degrades to an unconditional re-read. */
-  function historyMoved(prev: RefsResp | null, next: RefsResp): boolean {
-    if (!prev) return true;
-    const pb = [...prev.local, ...prev.remote];
-    const nb = [...next.local, ...next.remote];
-    if (pb.some((b) => !b.sha) || nb.some((b) => !b.sha)) return true;
-    const key = (b: RefBranch) => `${b.remote ? 'r' : 'l'}:${b.name}`;
-    const nextSha = new Map(nb.map((b) => [key(b), b.sha]));
-    for (const b of pb) if (nextSha.get(key(b)) !== b.sha) return true;
-    // Only a NEW ref can bring in unseen history (moved/removed ones were
-    // caught above). An UNCHANGED ref whose tip lies beyond the loaded page
-    // (a stale branch older than the first 10k commits) must not count: a
-    // re-read with the same `limit` would never page it in, so treating it
-    // as "moved" re-read `log --all` on every auto-fetch / checkout / mount.
-    const prevKeys = new Set(pb.map(key));
-    for (const b of nb) if (!prevKeys.has(key(b)) && !seenShas.has(b.sha!)) return true;
-    const tags = (r: RefsResp) => r.tags.map((t) => `${t.name}@${t.sha ?? ''}`).join('\n');
-    return tags(prev) !== tags(next);
-  }
-
-  /** Take a fresh refs response; returns whether the history must be re-read. */
-  function applyRefs(next: RefsResp): boolean {
-    const moved = historyMoved(refs, next);
-    setRefs(next);
-    return moved;
-  }
-
-  /** Quiet post-auto-fetch re-sync: read the CHEAP `/refs` first and replay the
-   *  EXPENSIVE fan-out (`log --all` + stashes + worktrees) only when history
-   *  actually moved. `refsRev` is bumped after every successful auto-fetch —
-   *  the store can't tell whether anything changed (`statusEq` sees only HEAD
-   *  and its upstream), so the decision lives here, where the cheap-vs-expensive
-   *  split is visible (investigation H4/WP3). */
-  async function resyncRefs(): Promise<void> {
-    const id = repoId;
-    // Never race the mount's own first load: with nothing held yet every
-    // response looks "moved" and would discard the in-flight first page.
-    await initialLoad;
-    if (id !== repoId) return;
-    let miss: unknown | null = null;
-    const raw = await api.get<RefsResp>(`/repos/${id}/refs`).catch((e: unknown) => ((miss = e), null));
-    if (id !== repoId) return;
-    // A miss keeps what we have and tries next round; two in a row say so.
-    noteBackgroundRead(miss);
-    if (!raw) return;
-    const next = withoutRemoteHeads(raw);
-    if (!historyMoved(refs, next)) {
-      setRefs(next);
-      return;
-    }
-    // History moved: land the new refs together WITH the re-read page (one
-    // layout pass, whose name-change floor sees the moved refs). Applying them
-    // first re-laid out every held row under the new names, and the splice
-    // after it could then never converge with that pass.
-    pendingRefs = { id, refs: next };
-    await backgroundReload();
-  }
-
-  /** Refs read by {@link resyncRefs} that wait for the history re-read they
-   *  triggered, so both land in one layout pass. */
-  let pendingRefs: { id: string; refs: RefsResp } | null = null;
-  function flushPendingRefs(): void {
-    const p = pendingRefs;
-    pendingRefs = null;
-    if (p && p.id === repoId) setRefs(p.refs);
-  }
-
-  // Background-triggered history re-reads (auto-fetch, repo watcher) are
-  // THROTTLED: each is a `log --all -n ≥10k` walk + 2–3 MB of JSON + a full
-  // lane relayout, and an agent committing in a loop or a fetch bringing one
-  // upstream commit at a time used to trigger one per event. At most one runs
-  // per BG_RELOAD_GAP_MS; triggers inside the gap (or during a run) coalesce
-  // into ONE trailing reload. User actions still reload immediately.
-  const BG_RELOAD_GAP_MS = 4_000;
-  let bgLast = 0;
-  let bgTimer: ReturnType<typeof setTimeout> | null = null;
-  let bgRunning = false;
-  let bgPending = false;
-  async function backgroundReload(): Promise<void> {
-    if (bgRunning) {
-      // Throttled: don't hold the new refs back for the trailing reload.
-      flushPendingRefs();
-      bgPending = true;
-      return;
-    }
-    const wait = bgLast + BG_RELOAD_GAP_MS - Date.now();
-    if (wait > 0) {
-      flushPendingRefs();
-      bgTimer ??= setTimeout(() => {
-        bgTimer = null;
-        void backgroundReload();
-      }, wait);
-      return;
-    }
-    bgRunning = true;
-    bgLast = Date.now();
-    try {
-      await reloadGraph();
-    } finally {
-      bgRunning = false;
-      if (bgPending) {
-        bgPending = false;
-        void backgroundReload();
-      }
-    }
-  }
-  $effect(() => () => {
-    if (bgTimer) clearTimeout(bgTimer);
-    bgTimer = null;
-  });
-
-  // ── Context-menu helpers ────────────────────────────────────────────────────
-  /** Copy `text` to the clipboard and toast success/failure with `label`. */
-  async function clip(text: string, label: string): Promise<void> {
-    try {
-      await copyTextOrThrow(text);
-      toasts.success('Copied', label);
-    } catch (e) {
-      toastError('Couldn’t copy to the clipboard', e);
-    }
-  }
-
-  /** After a mutating graph op: propagate the returned status (if any) to the
-   *  parent and re-query refs + log so the graph reflects the change. Both
-   *  responses are applied in ONE synchronous block, so the lane layout runs
-   *  once instead of once per assignment. */
-  async function refreshAfter(status?: RepoStatusResp): Promise<void> {
-    if (status) onstatus(status);
-    const id = repoId;
-    let miss: unknown | null = null;
-    const [r, g] = await Promise.all([
-      api.get<RefsResp>(`/repos/${id}/refs`).catch((e: unknown) => ((miss = e), null)),
-      fetchGraph(id),
-    ]);
-    if (id !== repoId) return;
-    noteBackgroundRead(miss);
-    if (r) setRefs(withoutRemoteHeads(r));
-    applyGraph(g);
-  }
-
-  /** After a checkout: the switch moves no commit, so read `/refs` (HEAD and
-   *  the current branch come from it) and re-read history only if it moved —
-   *  not `log --all -n 10000` just to move the `HEAD ->` decoration. */
-  async function refreshAfterCheckout(status: RepoStatusResp, stashed: boolean): Promise<void> {
-    onstatus(status);
-    const id = repoId;
-    const hadHead = headSha !== null;
-    const raw = await api.get<RefsResp>(`/repos/${id}/refs`).catch(() => null);
-    if (id !== repoId) return;
-    if (!raw) {
-      await refreshAfter();
-      return;
-    }
-    const moved = applyRefs(withoutRemoteHeads(raw));
-    // Detached before or after: HEAD then lives only in the log decorations.
-    if (moved || !hadHead || headSha === null) {
-      await reloadGraph();
-      return;
-    }
-    if (stashed) await reloadSideLists(id, false);
-  }
-
-  interface GraphFetch {
-    gen: number;
-    want: number;
-    /** Set when the result was spliced: `hasMore` carries over from before. */
-    more: boolean | null;
-    commits: CommitInfo[] | null;
-    error: unknown;
-    stashes: StashInfo[] | null;
-    worktrees: WorktreeInfo[] | null;
-  }
-
-  /** The EXPENSIVE half of a refresh: the `log --all` page plus stashes and
-   *  worktrees. Fetch only — [`applyGraph`] assigns. */
-  async function fetchGraph(id: string, full = false): Promise<GraphFetch> {
-    // Read ONE page and splice it onto the history already held (older
-    // commits are immutable — see graph-splice.ts). Only when the splice
-    // can't be proven safe (rewritten/deleted history inside the page) does
-    // it re-read exactly as much as the user had paged in, so a refresh never
-    // yanks the graph back to the first page — and never MORE: the old
-    // `ceil((n + 1) / PAGE)` grew the request by a page per refresh.
-    const held = commits;
-    const heldMore = hasMore;
-    loadGen++;
-    loadingMore = false;
-    inflight = null;
-    const gen = loadGen;
-    const readLog = (limit: number) =>
-      api
-        .get<CommitInfo[]>(`/repos/${id}/log?all=true&limit=${limit}`)
-        .then((v) => ({ v, e: null as unknown }))
-        .catch((e: unknown) => ({ v: null, e }));
-    if (full) refRemoved = false;
-    const [c0, st, wt] = await Promise.all([
-      readLog(full ? Math.max(PAGE, held.length) : FIRST_PAGE),
-      api.get<StashInfo[]>(`/repos/${id}/stashes`).catch(() => null),
-      api.get<WorktreeInfo[]>(`/repos/${id}/worktrees`).catch(() => null),
-    ]);
-    let c = c0;
-    let want = full ? Math.max(PAGE, held.length) : FIRST_PAGE;
-    let more: boolean | null = null;
-    if (!full && c.v && c.v.length >= FIRST_PAGE && held.length > FIRST_PAGE) {
-      const spliced = spliceHistory(held, c.v);
-      if (spliced) {
-        c = { v: spliced, e: null };
-        more = heldMore; // the tail (and whether more exists) is unchanged
-      } else if (gen === loadGen) {
-        want = held.length;
-        c = await readLog(want);
-      }
-    }
-    return { gen, want, more, commits: c.v, error: c.e, stashes: st, worktrees: wt };
-  }
-
-  function applyGraph(g: GraphFetch): void {
-    if (g.gen !== loadGen) return; // a newer reload / repo switch owns the state
-    const freshPrefix = new Set(g.commits?.slice(0, FIRST_PAGE).map((c) => c.sha));
-    const outside = (tips: Set<string>): boolean => [...tips].some((sha) => !freshPrefix.has(sha));
-    if (g.more !== null && (refRemoved || outside(movedRefTips) || outside(newRefTips))) {
-      // Spliced, but a ref vanished meanwhile (refs land beside the log in
-      // refreshAfter): the held tail may hold commits nothing reaches now.
-      // Or a new ref's tip is below the fresh page: its commits are in
-      // neither the page nor the held tail.
-      void reloadGraph(true);
-      return;
-    }
-    if (g.commits) {
-      movedRefTips.clear();
-      newRefTips.clear();
-      setCommits(g.commits);
-      commitsError = null;
-      skipCursor = g.commits.length;
-      hasMore = g.more ?? g.commits.length >= g.want;
-      refreshFailures = 0;
-      refreshError = null;
-    } else if (commits.length === 0) {
-      commitsError = loadErrorText(g.error);
-    } else if (++refreshFailures >= 2) {
-      refreshError = loadErrorText(g.error);
-    }
-    if (g.stashes) {
-      if (!sameJson(stashes, g.stashes)) stashes = g.stashes;
-      stashesKnown = true;
-    }
-    if (g.worktrees && !sameJson(worktrees, g.worktrees)) worktrees = g.worktrees;
-  }
-
-  async function reloadGraph(full = false): Promise<void> {
-    const id = repoId;
-    const g = await fetchGraph(id, full);
-    if (id !== repoId) return;
-    // Same synchronous block as the history, so the layout runs once.
-    flushPendingRefs();
-    applyGraph(g);
-  }
-
-  /** Run a mutating POST that returns RepoStatusResp, then refresh + toast.
-   *  Errors are surfaced via toast and swallowed (the graph is left untouched). */
-  async function mutate(
-    path: string,
-    body: unknown,
-    okTitle: string,
-    okDetail?: string,
-  ): Promise<void> {
-    try {
-      const s = await api.post<RepoStatusResp>(`/repos/${repoId}${path}`, body);
-      await refreshAfter(s);
-      // A 200 that left an operation mid-flight (a conflicting cherry-pick /
-      // revert) is NOT a success — say what happened and where to finish it.
-      if (s.op_in_progress) {
-        toasts.warn(
-          `${okTitle} — conflicts`,
-          'Unresolved conflicts remain. Open "Resolve conflicts" to finish or abort.',
-        );
-      } else {
-        toasts.success(okTitle, okDetail);
-      }
-    } catch (e) {
-      toastError('Couldn’t complete the Git action', e);
-      // A failed mutation can still have partially landed — most notably a
-      // "local + remote" delete whose LOCAL half succeeded before the remote
-      // push errored. Re-sync refs/log so the graph reflects what's actually
-      // there instead of showing a branch that's already gone (and offering to
-      // delete it again). Best-effort: the toast above already reported the
-      // failure, so a refresh error here must stay silent.
-      await refreshAfter().catch(() => {});
-    }
-  }
-
-  // ── Create-PR sheet (opened from branch / commit menus with a pre-filled
-  //    source). Reuses CreatePr.svelte; `initialSource` defaults the dropdown. ──
-  let createPrOpen = $state(false);
-  let createPrSource = $state<string | undefined>(undefined);
-
-  function openCreatePr(source: string): void {
-    createPrSource = source;
-    createPrOpen = true;
-  }
-
-  // ── GitFlow: start a feature/release/hotfix branch off a commit or branch tip.
-  //    Reuses the same /branch endpoint (checkout:true) as the plain create. ──
-  /** Normalize a user-typed flow name: trim, drop a leading flow prefix if they
-   *  typed it, and collapse internal whitespace to dashes. '' → skip. */
-  function normalizeFlowName(raw: string): string {
-    return raw
-      .trim()
-      .replace(/^(feature|release|hotfix)\//i, '')
-      .replace(/\s+/g, '-');
-  }
-
-  async function startFlowBranch(
-    flow: 'feature' | 'release' | 'hotfix',
-    startPoint: string,
-  ): Promise<void> {
-    const label = flow[0].toUpperCase() + flow.slice(1);
-    const raw = await confirmer.promptText(`New ${flow} branch name`, {
-      title: `Start ${flow}`,
-      confirmLabel: 'Start',
-      placeholder: 'short-name',
-    });
-    if (raw === null) return;
-    const norm = normalizeFlowName(raw);
-    if (norm === '') return;
-    const name = `${flow}/${norm}`;
-    await mutate('/branch', { name, start_point: startPoint, checkout: true }, `${label} branch created`, name);
-  }
-
-  /** Menu items for the "GitFlow" section, parameterised by start point
-   *  (a commit sha or a branch tip name). Shared by commit + branch menus. */
-  function gitFlowItems(startPoint: string): MenuItem[] {
-    return [
-      { label: 'Start feature branch…', icon: 'branch', action: () => void startFlowBranch('feature', startPoint) },
-      { label: 'Start release branch…', icon: 'branch', action: () => void startFlowBranch('release', startPoint) },
-      { label: 'Start hotfix branch…', icon: 'branch', action: () => void startFlowBranch('hotfix', startPoint) },
-    ];
-  }
-
-  /** Branch names decorating a commit (`HEAD -> x`, `x`, `origin/x` → `x`),
-   *  deduped, excluding tags/stash/detached-HEAD markers and branches held by a
-   *  FOREIGN worktree (checking those out errors hard — the refs tree routes
-   *  them to their worktree instead). */
-  function commitBranchNames(c: CommitInfo): string[] {
-    const names: string[] = [];
-    for (const chip of chipsFor(c)) {
-      if (!['head', 'local', 'remote'].includes(chip.kind)) continue;
-      const name = chip.kind === 'remote' ? chip.label.replace(/^[^/]+\//, '') : chip.label;
-      if (!name || names.includes(name) || worktreeBranches.has(name)) continue;
-      names.push(name);
-    }
-    return names;
-  }
-
-  // ── Commit context menu ─────────────────────────────────────────────────────
-  function commitMenu(e: MouseEvent, c: CommitInfo): void {
-    const { currentBranch } = refKnowledge;
-    const items: MenuItem[] = [];
-    // Branches on this commit → a one-click plain SWITCH (a branch that's easy
-    // to spot on the graph but hard to find in a crowded refs tree). Nothing
-    // here pulls: the current branch instead gets an explicit `Pull`, and a
-    // branch held by another worktree routes to that worktree (git refuses to
-    // check it out twice — same rule as `branchMenu`).
-    for (const name of commitBranchNames(c)) {
-      const wt = worktreeByBranch.get(name);
-      if (name === currentBranch) {
-        items.push({ label: `Pull ${name}`, icon: 'arrowDown', action: () => void pullCurrent() });
-      } else if (wt) {
-        items.push({
-          label: `Open worktree (${name})`,
-          icon: 'worktree',
-          action: () => void openWorktree(wt),
-        });
-      } else {
-        items.push({
-          label: `Check out ${name}`,
-          icon: 'branch',
-          // A remote-only decoration (`origin/x` → `x`) must take the
-          // `-b x --track origin/x` path, not git's `checkout.guess` DWIM
-          // (which fails outright with several remotes).
-          action: () => void checkout(name, !refKnowledge.localNames.has(name)),
-        });
-      }
-    }
-    if (items.length > 0) items.push({ separator: true });
-    items.push(
-      {
-        label: 'Check out commit (detached)',
-        icon: 'branch',
-        action: () => void checkout(c.sha, false),
-      },
-      { label: 'Cherry-pick commit', icon: 'note', action: () => void cherryPick(c) },
-      { label: 'Bisect: known good revision…', icon: 'check', action: () => gitBridge.selectBisect(repoId, 'good', c.sha) },
-      { label: 'Bisect: known bad revision…', icon: 'info', action: () => gitBridge.selectBisect(repoId, 'bad', c.sha) },
-      { label: 'Plan interactive rebase onto this commit…', icon: 'merge', action: () => gitBridge.openRecovery(repoId, 'rebase', c.sha) },
-      { separator: true },
-      { label: 'Create branch here…', icon: 'branch', action: () => void createBranchAt(c.sha) },
-      { label: 'Create tag here…', icon: 'tag', action: () => void createTagAt(c.sha, false) },
-      {
-        label: 'Create annotated tag here…',
-        icon: 'tag',
-        action: () => void createTagAt(c.sha, true),
-      },
-    );
-    // Open a PR from the checked-out branch (the "from a commit while on a
-    // branch" case) — only meaningful when a branch is checked out.
-    if (currentBranch) {
-      items.push({ separator: true });
-      items.push({
-        label: `Create PR from ${currentBranch}…`,
-        icon: 'send',
-        action: () => openCreatePr(currentBranch),
-      });
-    }
-    // GitFlow section — start a flow branch off this exact commit.
-    items.push({ separator: true });
-    items.push({ label: 'GitFlow', disabled: true });
-    items.push(...gitFlowItems(c.sha));
-    items.push(
-      { separator: true },
-      { label: 'Revert commit…', icon: 'refresh', action: () => void revertCommit(c) },
-      { separator: true },
-      { label: 'Copy commit SHA', icon: 'note', action: () => void clip(c.sha, c.sha) },
-      { label: 'Copy short SHA', icon: 'note', action: () => void clip(c.short_sha, c.short_sha) },
-      {
-        label: 'Copy commit message',
-        icon: 'note',
-        action: () => void clip(c.subject, c.subject),
-      },
-    );
-    ctxMenu.show(e, items, { filter: items.length > 12 });
-  }
-
-  async function cherryPick(c: CommitInfo): Promise<void> {
-    await mutate('/cherry-pick', { sha: c.sha }, 'Cherry-picked', c.short_sha);
-  }
-
-  async function revertCommit(c: CommitInfo): Promise<void> {
-    const ok = await confirmer.ask(
-      `Revert commit ${c.short_sha} — “${c.subject}”? This creates a new commit undoing its changes.`,
-      { title: 'Revert commit', confirmLabel: 'Revert', danger: false },
-    );
-    if (!ok) return;
-    await mutate('/revert', { sha: c.sha }, 'Reverted', c.short_sha);
-  }
-
-  async function createBranchAt(startPoint: string): Promise<void> {
-    const name = await confirmer.promptText('New branch name', {
-      title: 'Create branch',
-      confirmLabel: 'Create',
-      placeholder: 'feature/my-branch',
-    });
-    if (!name) return;
-    await mutate(
-      '/branch',
-      { name, start_point: startPoint, checkout: true },
-      'Branch created',
-      name,
-    );
-  }
-
-  async function createTagAt(sha: string, annotated: boolean): Promise<void> {
-    const name = await confirmer.promptText('Tag name', {
-      title: annotated ? 'Create annotated tag' : 'Create tag',
-      confirmLabel: 'Create',
-      placeholder: 'v1.0.0',
-    });
-    if (!name) return;
-    let message: string | null = null;
-    if (annotated) {
-      message = await confirmer.promptText('Tag message', {
-        title: 'Annotated tag message',
-        confirmLabel: 'Create',
-        placeholder: 'Release notes…',
-      });
-      if (!message) return;
-    }
-    // Ask whether to push the new tag straight to origin.
-    const push = await confirmer.ask(`Push tag “${name}” to origin?`, {
-      title: 'Push tag',
-      confirmLabel: 'Push',
-      danger: false,
-    });
-    await mutate(
-      '/tag',
-      annotated ? { name, sha, message, push } : { name, sha, push },
-      'Tag created',
-      name,
-    );
-  }
-
-  /** Local branches OTHER than `selfMerge` (the menu subject's merge name),
-   *  as "Merge into <t>" items routing through the existing merge+conflict flow
-   *  via `onmergerequest(<source merge name>, t)`. Empty if nothing to merge into. */
-  function mergeIntoItems(selfMerge: string): MenuItem[] {
-    const targets = (refs?.local ?? []).map((b) => b.name).filter((t) => t !== selfMerge);
-    if (!onmergerequest || targets.length === 0) return [];
-    return targets.map((t) => ({
-      label: `Merge into ${t}`,
-      icon: 'branch',
-      action: () => onmergerequest?.(selfMerge, t),
-    }));
-  }
-
-  // ── Branch context menu (local + remote ref rows) ───────────────────────────
-  function branchMenu(e: MouseEvent, b: RefBranch): void {
-    const { remoteNames, localNames, currentBranch } = refKnowledge;
-    const items: MenuItem[] = [];
-
-    if (b.remote) {
-      // Remote ref row: checkout as a local tracking branch; delete on ITS remote
-      // (`upstream/x` must never delete `origin/x`).
-      const { remote: remoteName, branch: localName } = splitRemoteRef(b.name);
-      items.push({ label: 'Checkout', icon: 'branch', action: () => checkoutRemote(b) });
-      // Rebasing onto a remote ref is the common "catch up with origin" move.
-      if (currentBranch && b.name !== currentBranch) {
-        items.push({
-          label: `Rebase ${currentBranch} onto ${b.name}…`,
-          icon: 'merge',
-          action: () => void rebaseOnto(b.name),
-        });
-      }
-      items.push({ separator: true });
-      items.push({
-        label: 'Create branch from here…',
-        icon: 'branch',
-        action: () => void createBranchFrom(b.name),
-      });
-      // Merge into … — remote refs merge by their short local name (drag logic).
-      const mergeInto = mergeIntoItems(localName);
-      if (mergeInto.length > 0) {
-        items.push({ separator: true });
-        items.push({ label: `Merge ${localName} into`, disabled: true });
-        items.push(...mergeInto);
-      }
-      // GitFlow — start a flow branch off the remote tip.
-      items.push({ separator: true });
-      items.push({ label: 'GitFlow', disabled: true });
-      items.push(...gitFlowItems(b.name));
-      // Delete options reflect what actually EXISTS: the remote ref always (this
-      // is a remote row); the local twin + "local + remote" only when a local
-      // branch of the same name exists and isn't the one checked out.
-      const localTwin = localNames.has(localName) && localName !== currentBranch;
-      items.push({ separator: true });
-      items.push({
-        label: `Delete ${b.name}…`,
-        icon: 'trash',
-        danger: true,
-        action: () => void deleteRemoteBranch(localName, remoteName),
-      });
-      if (localTwin) {
-        items.push({
-          label: `Delete ${localName}…`,
-          icon: 'trash',
-          danger: true,
-          action: () => void deleteLocalBranch(localName, false),
-        });
-        items.push({
-          label: `Delete ${localName} + ${b.name}…`,
-          icon: 'trash',
-          danger: true,
-          // The remote half targets THIS row's remote (S15-303) — never origin
-          // by default when the row says `upstream/x`.
-          action: () => void deleteLocalBranch(localName, true, remoteName),
-        });
-      }
-      items.push({ separator: true });
-      items.push({ label: 'Copy branch name', icon: 'note', action: () => void clip(localName, localName) });
-    } else {
-      const isCurrent = b.name === currentBranch;
-      // Branch checked out in another worktree → open that tree, never checkout
-      // (git refuses "already checked out at …").
-      const wtElsewhere = worktreeByBranch.get(b.name);
-      if (wtElsewhere) {
-        items.push({
-          label: 'Open worktree',
-          icon: 'worktree',
-          action: () => void openWorktree(wtElsewhere),
-        });
-      } else {
-        items.push({
-          label: 'Checkout',
-          icon: 'branch',
-          disabled: isCurrent,
-          action: () => !isCurrent && void checkout(b.name, false),
-        });
-      }
-      // Updating the branch is its own entry — only the CHECKED-OUT branch can
-      // be pulled; any other one is a rebase target.
-      if (isCurrent) {
-        items.push({ label: `Pull ${b.name}`, icon: 'arrowDown', action: () => void pullCurrent() });
-      } else if (currentBranch) {
-        items.push({
-          label: `Rebase ${currentBranch} onto ${b.name}…`,
-          icon: 'merge',
-          action: () => void rebaseOnto(b.name),
-        });
-      }
-      items.push({ separator: true });
-      items.push({
-        label: 'Create branch from here…',
-        icon: 'branch',
-        action: () => void createBranchFrom(b.name),
-      });
-      items.push({ label: 'Rename…', icon: 'edit', action: () => void renameBranch(b.name) });
-      // Open a PR sourced from this branch.
-      items.push({ separator: true });
-      items.push({
-        label: `Create pull request from ${b.name}…`,
-        icon: 'send',
-        action: () => openCreatePr(b.name),
-      });
-      // Merge into … — pick any OTHER local branch as the destination.
-      const mergeInto = mergeIntoItems(b.name);
-      if (mergeInto.length > 0) {
-        items.push({ separator: true });
-        items.push({ label: `Merge ${b.name} into`, disabled: true });
-        items.push(...mergeInto);
-      }
-      // GitFlow — start a flow branch off this branch tip.
-      items.push({ separator: true });
-      items.push({ label: 'GitFlow', disabled: true });
-      items.push(...gitFlowItems(b.name));
-      // A matching remote branch → offer remote deletes too. The remote is the
-      // branch's TRACKING remote when it tracks the same name (a fork's
-      // `upstream/x`), else origin — "local + remote" must delete the twin the
-      // user sees, not whatever origin holds under that name (S15-303).
-      const up = b.upstream ? splitRemoteRef(b.upstream) : null;
-      const trackRemote = up && up.branch === b.name ? up.remote : 'origin';
-      const hasRemote = remoteNames.has(`${trackRemote}/${b.name}`);
-      // Never offer Delete on the checked-out branch (git refuses).
-      if (!isCurrent) {
-        items.push({ separator: true });
-        items.push({
-          label: `Delete ${b.name}…`,
-          icon: 'trash',
-          danger: true,
-          action: () => void deleteLocalBranch(b.name, false),
-        });
-        if (hasRemote) {
-          items.push({
-            label: `Delete ${trackRemote}/${b.name}…`,
-            icon: 'trash',
-            danger: true,
-            action: () => void deleteRemoteBranch(b.name, trackRemote),
-          });
-          items.push({
-            label: `Delete ${b.name} + ${trackRemote}/${b.name}…`,
-            icon: 'trash',
-            danger: true,
-            action: () => void deleteLocalBranch(b.name, true, trackRemote),
-          });
-        }
-      }
-      items.push({ separator: true });
-      items.push({ label: 'Copy branch name', icon: 'note', action: () => void clip(b.name, b.name) });
-      if (b.upstream) {
-        items.push({
-          label: 'Copy upstream name',
-          icon: 'note',
-          action: () => void clip(b.upstream!, b.upstream!),
-        });
-      }
-    }
-    // Cleanup base branch (Feature 3): choose which base the "merged → safe to
-    // delete" indicators compute against, or clear back to the detected default.
-    // Indicator-only; never deletes a branch.
-    const baseName = b.remote ? b.name.replace(/^[^/]+\//, '') : b.name;
-    items.push({ separator: true });
-    if (baseName === baseBranch) {
-      items.push({
-        label: 'Clear cleanup base (use default)',
-        icon: 'gear',
-        action: () => void setCleanupBase(null),
-      });
-    } else {
-      items.push({
-        label: `Set “${baseName}” as cleanup base`,
-        icon: 'gear',
-        action: () => void setCleanupBase(baseName),
-      });
-    }
-    ctxMenu.show(e, items, { filter: items.length > 12 });
-  }
-
-  async function createBranchFrom(ref: string): Promise<void> {
-    const name = await confirmer.promptText(`New branch from ${ref}`, {
-      title: 'Create branch',
-      confirmLabel: 'Create',
-      placeholder: 'feature/my-branch',
-    });
-    if (!name) return;
-    await mutate('/branch', { name, start_point: ref, checkout: true }, 'Branch created', name);
-  }
-
-  async function renameBranch(from: string): Promise<void> {
-    const to = await confirmer.promptText(`Rename branch “${from}” to`, {
-      title: 'Rename branch',
-      confirmLabel: 'Rename',
-      initial: from,
-    });
-    if (!to || to === from) return;
-    await mutate('/branch/rename', { from, to }, 'Branch renamed', `${from} → ${to}`);
-  }
-
-  /** `remote` names WHICH remote the `alsoRemote` half deletes on; it is sent
-   *  as `remote_name` on both the safe and the forced request (the daemon
-   *  otherwise defaults to origin). */
-  async function deleteLocalBranch(name: string, alsoRemote: boolean, remote = 'origin'): Promise<void> {
-    const ok = await confirmer.ask(
-      alsoRemote
-        ? `Delete branch “${name}” locally AND “${remote}/${name}” on the remote “${remote}”? This cannot be undone.`
-        : `Delete local branch “${name}”?`,
-      { title: 'Delete branch', confirmLabel: 'Delete', danger: true },
-    );
-    if (!ok) return;
-    const okTitle = alsoRemote ? 'Branch deleted (local + remote)' : 'Branch deleted';
-    // Safe delete first (`-d`): git refuses when the branch holds unmerged
-    // commits. Only then ask again, explicitly, before escalating to `-D` —
-    // deleting unmerged work deserves its own consent, not a blanket force.
-    try {
-      const s = await api.post<RepoStatusResp>(`/repos/${repoId}/branch/delete`, {
-        name,
-        remote: alsoRemote,
-        ...(alsoRemote ? { remote_name: remote } : {}),
-      });
-      await refreshAfter(s);
-      toasts.success(okTitle, name);
-      return;
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      if (!/not fully merged/i.test(msg)) {
-        toastError(`Couldn’t delete ${name}`, e);
-        await refreshAfter().catch(() => {});
-        return;
-      }
-      const force = await confirmer.ask(
-        `“${name}” has commits that aren’t merged anywhere else. Force-delete it and DROP those commits? This cannot be undone.`,
-        { title: 'Branch not fully merged', confirmLabel: 'Force delete', danger: true },
-      );
-      if (!force) return;
-      await mutate(
-        '/branch/delete',
-        { name, remote: alsoRemote, ...(alsoRemote ? { remote_name: remote } : {}), force: true },
-        okTitle,
-        name,
-      );
-    }
-  }
-
-  async function deleteRemoteBranch(name: string, remote = 'origin'): Promise<void> {
-    const full = `${remote}/${name}`;
-    const ok = await confirmer.ask(`Delete branch “${full}” on the remote “${remote}”? This cannot be undone.`, {
-      title: 'Delete remote branch',
-      confirmLabel: 'Delete',
-      danger: true,
-    });
-    if (!ok) return;
-    // Remote-only: leave any local branch of the same name intact. `remote_name`
-    // pins WHICH remote — the daemon pushes `--delete` to that remote, not origin.
-    await mutate(
-      '/branch/delete',
-      { name, remote: true, remote_name: remote, local: false, force: true },
-      'Remote branch deleted',
-      full,
-    );
-  }
-
-  // ── Tag context menu ────────────────────────────────────────────────────────
-  function tagMenu(e: MouseEvent | KeyboardEvent, t: RefTag): void {
-    const items: MenuItem[] = [
-      {
-        label: 'Check out tag (detached)',
-        icon: 'branch',
-        action: () => void checkout(t.name, false),
-      },
-      { separator: true },
-      { label: 'Push tag to origin', icon: 'send', action: () => void pushTag(t.name) },
-      {
-        label: 'Delete tag…',
-        icon: 'trash',
-        danger: true,
-        action: () => void deleteTag(t.name, false),
-      },
-      {
-        label: 'Delete tag on origin…',
-        icon: 'trash',
-        danger: true,
-        action: () => void deleteTag(t.name, true),
-      },
-      { separator: true },
-      { label: 'Copy tag name', icon: 'note', action: () => void clip(t.name, t.name) },
-    ];
-    ctxMenu.show(e, items);
-  }
-
-  async function pushTag(name: string): Promise<void> {
-    const ok = await confirmOutward({
-      verb: 'Push tag',
-      where: `origin · tag ${name}`,
-      who: 'Everyone with access to the remote sees the tag; CI or release jobs may react to it.',
-    });
-    if (!ok) return;
-    await mutate('/tag/push', { name }, 'Tag pushed', name);
-  }
-
-  async function deleteTag(name: string, remote: boolean): Promise<void> {
-    const ok = remote // outward-facing like its push sibling: where + who (ux-design-5-15)
-      ? await confirmOutward({ verb: 'Delete tag', where: `origin · tag ${name}`, danger: true,
-          who: 'Everyone with access to the remote loses the tag; CI or release jobs may react.' })
-      : await confirmer.ask(`Delete local tag “${name}”?`, { title: 'Delete tag', confirmLabel: 'Delete', danger: true });
-    if (!ok) return;
-    await mutate('/tag/delete', { name, remote }, remote ? 'Tag deleted on origin' : 'Tag deleted', name);
-  }
-
-  // ── Stash context menu + actions (sidebar STASHES section) ──────────────────
-  async function stashApply(s: StashInfo): Promise<void> {
-    // SHA-anchored (not positional index): the backend resolves the live
-    // stash@{N} so a renumbered stack can't apply the wrong entry.
-    await mutate('/stash', { op: 'apply', sha: s.sha }, 'Stash applied', stashShortMsg(s));
-  }
-
-  async function stashDrop(s: StashInfo): Promise<void> {
-    const ok = await confirmer.ask(
-      `Drop ${s.ref} — “${stashShortMsg(s)}”? This discards the stash and cannot be undone.`,
-      { title: 'Drop stash', confirmLabel: 'Drop', danger: true },
-    );
-    if (!ok) return;
-    // SHA-anchored drop — irreversible, so never trust a stale positional index.
-    await mutate('/stash', { op: 'drop', sha: s.sha }, 'Stash dropped', s.ref);
-  }
-
-  function stashMenu(e: MouseEvent | KeyboardEvent, s: StashInfo): void {
-    const items: MenuItem[] = [
-      { label: 'Apply stash', icon: 'stash', action: () => void stashApply(s) },
-      { separator: true },
-      { label: 'Drop stash…', icon: 'trash', danger: true, action: () => void stashDrop(s) },
-      { separator: true },
-      { label: 'Copy message', icon: 'note', action: () => void clip(s.message, s.message) },
-    ];
-    ctxMenu.show(e, items);
-  }
-
-  /** Click a stash row → select its commit in the graph if it's present (the top
-   *  stash usually is via `--all`; older reflog-only stashes won't be). */
-  function selectStash(s: StashInfo): void {
-    const c = bySha.get(s.sha);
-    if (c) void selectCommit(c);
-  }
-
-  // ── Worktree actions (sidebar WORKTREES section + worktree branches) ────────
   /** Absolute path of the repo tab we're viewing (main or linked worktree). */
   const currentRepoPath = $derived(
     normPath(repoPath || git.allRepos.find((r) => r.id === repoId)?.path || ''),
   );
 
-  /** Display name for a worktree: the last path segment. */
-  function wtName(w: WorktreeInfo): string {
-    return w.path.split('/').filter(Boolean).pop() ?? w.path;
-  }
-
-  /** True when this worktree is a different checkout than the open repo tab. */
-  function isForeignWorktree(w: WorktreeInfo): boolean {
-    if (w.prunable) return false;
-    if (!currentRepoPath) return !w.is_main;
-    return normPath(w.path) !== currentRepoPath;
-  }
-
-  /**
-   * Open a linked (or main) worktree as its own git tab — never checkout the
-   * branch into the current tree (git refuses: branch already checked out).
-   * Registers the path via detect if needed, then opens/activates the tab.
-   */
-  async function openWorktree(w: WorktreeInfo): Promise<void> {
-    if (w.prunable) {
-      toasts.error('Couldn’t open the worktree', 'Its folder is gone — prune the stale entry first');
-      return;
-    }
-    const path = normPath(w.path);
-    if (currentRepoPath && path === currentRepoPath) {
-      toasts.info('Already open', wtName(w));
-      return;
-    }
-    // Prefer an already-registered repo at this path (any workspace).
-    const existing = git.allRepos.find((r) => normPath(r.path) === path);
-    if (existing) {
-      git.openRepoTab(existing.id);
-      toasts.success('Opened worktree', existing.name);
-      return;
-    }
-    const parent = git.allRepos.find((r) => r.id === repoId);
-    const wsId = workspaceId || parent?.workspace_id || ws.currentId;
-    if (!wsId) {
-      toasts.error('Couldn’t open worktree', 'No workspace available to register the worktree');
-      return;
-    }
-    openWtBusy = w.path;
-    try {
-      const repo = await api.post<Repo>(`/workspaces/${wsId}/repos/detect`, { path: w.path });
-      await git.loadAllRepos(true);
-      git.openRepoTab(repo.id);
-      toasts.success('Opened worktree', repo.name);
-    } catch (e) {
-      toastError('Couldn’t open worktree', e);
-    } finally {
-      openWtBusy = '';
-    }
-  }
-
-  async function wtRemove(w: WorktreeInfo): Promise<void> {
-    // A dirty tree needs --force and the confirm must say what that discards.
-    // Removal always KEEPS the branch (and its commits) either way.
-    const detail = !w.dirty_known
-      ? ' Its changes could not be checked; removal will proceed only if Git can do so safely.'
-      : w.dirty
-      ? ' It has UNCOMMITTED changes that will be discarded.'
-      : w.locked
-        ? ` It is locked${w.lock_reason ? ` (${w.lock_reason})` : ''}.`
-        : '';
-    const ok = await confirmer.ask(
-      `Remove worktree “${wtName(w)}” at ${w.path}?${detail} The branch${w.branch ? ` “${w.branch}”` : ''} and its commits are kept.`,
-      { title: 'Remove worktree', confirmLabel: 'Remove', danger: true },
-    );
-    if (!ok) return;
-    try {
-      worktrees = await api.post<WorktreeInfo[]>(`/repos/${repoId}/worktrees/remove`, {
-        path: w.path,
-        force: w.dirty_known === true && (w.dirty || w.locked),
-      });
-      toasts.success('Worktree removed', wtName(w));
-    } catch (e) {
-      toastError('Couldn’t remove the worktree', e);
-    }
-  }
-
-  async function wtPrune(): Promise<void> {
-    try {
-      worktrees = await api.post<WorktreeInfo[]>(`/repos/${repoId}/worktrees/prune`, {});
-      toasts.success('Pruned', 'Stale worktree entries removed');
-    } catch (e) {
-      toastError('Couldn’t prune the worktrees', e);
-    }
-  }
-
-  function wtMenu(e: MouseEvent | KeyboardEvent, w: WorktreeInfo): void {
-    const items: MenuItem[] = [];
-    if (!w.prunable && isForeignWorktree(w)) {
-      items.push({
-        label: 'Open worktree',
-        icon: 'worktree',
-        action: () => void openWorktree(w),
-      });
-      items.push({ separator: true });
-    }
-    if (!w.is_main) {
-      if (w.prunable) {
-        // Directory is already gone — the only cleanup is dropping the entry.
-        items.push({ label: 'Remove stale entry', icon: 'trash', danger: true, action: () => void wtPrune() }); // ui-guards: allow — no confirm: the folder is already gone, only its record is dropped
-      } else {
-        items.push({
-          label: w.dirty ? 'Remove (discard changes)…' : 'Remove worktree…',
-          icon: 'trash',
-          danger: true,
-          action: () => void wtRemove(w),
-        });
-      }
-      items.push({ separator: true });
-    }
-    items.push({ label: 'Copy path', icon: 'copy', action: () => void clip(w.path, w.path) });
-    if (w.branch) {
-      const branch = w.branch;
-      items.push({ label: 'Copy branch', icon: 'branch', action: () => void clip(branch, branch) });
-    }
-    ctxMenu.show(e, items);
-  }
-
-  // ── Submodule actions (sidebar SUBMODULES section) ──────────────────────────
-  async function subUpdate(path?: string): Promise<void> {
-    try {
-      submodules = await api.post<SubmoduleInfo[]>(`/repos/${repoId}/submodules/update`, {
-        path: path ?? null,
-      });
-      toasts.success('Submodules updated', path ?? 'all');
-    } catch (e) {
-      toastError('Couldn’t update the submodule', e);
-    }
-  }
-
-  function subMenu(e: MouseEvent | KeyboardEvent, sub: SubmoduleInfo): void {
-    const items: MenuItem[] = [
-      {
-        label: sub.state === 'uninitialized' ? 'Initialize (clone)' : 'Update to recorded commit',
-        icon: 'refresh',
-        action: () => void subUpdate(sub.path),
-      },
-      { label: 'Update all submodules', icon: 'refresh', action: () => void subUpdate() },
-      { separator: true },
-      { label: 'Copy path', icon: 'copy', action: () => void clip(sub.path, sub.path) },
-    ];
-    if (sub.url) {
-      const url = sub.url;
-      items.push({ label: 'Copy URL', icon: 'copy', action: () => void clip(url, url) });
-    }
-    items.push({ label: 'Copy commit SHA', icon: 'copy', action: () => void clip(sub.sha, sub.sha.slice(0, 10)) });
-    ctxMenu.show(e, items);
-  }
-
-  /** Switch branches. NEVER pulls, fetches or merges — a dirty tree is cleared
-   *  with stash → switch → restore (for both `create` values; the remote-row
-   *  double-click used to dead-end on it), and bringing the branch up to date
-   *  is the separate, explicit Pull action. */
-  async function checkout(branch: string, create: boolean): Promise<void> {
-    checkoutBusy = branch;
-    try {
-      const s = await api.post<RepoStatusResp>(`/repos/${repoId}/checkout`, { branch, create });
-      toasts.success(create ? 'Branch created' : `Switched to ${branch}`, create ? branch : undefined);
-      await refreshAfterCheckout(s, false);
-    } catch (e) {
-      if (isDirtyGitRefusal(e)) {
-        const ok = await confirmer.ask(
-          `Your uncommitted changes overlap files that differ on “${branch}”. Otto will stash them, switch, and restore them on “${branch}”. Nothing is pulled or merged.`,
-          { title: 'Stash, switch & restore', confirmLabel: 'Stash & switch', danger: false },
-        );
-        if (ok) {
-          try {
-            const s = await api.post<RepoStatusResp>(`/repos/${repoId}/checkout`, {
-              branch,
-              create,
-              auto_stash: true,
-            });
-            if (s.changes.some((c) => c.kind === 'conflicted')) {
-              toasts.warn(
-                `Switched to ${branch} — restoring your changes hit conflicts`,
-                'Open "Resolve conflicts".',
-              );
-            } else {
-              toasts.success(
-                `Switched to ${branch}`,
-                'Your changes were restored; a recovery backup remains in Stashes.',
-              );
-            }
-            await refreshAfterCheckout(s, true);
-          } catch (e2) {
-            // The switch landed but the restore didn't — the daemon's message
-            // already ends with "run `git stash pop`".
-            toastError(`Switched to ${branch}, but couldn’t restore your changes`, e2);
-            await refreshAfter().catch(() => {});
-          }
-        }
-      } else {
-        toastError('Couldn’t check out the branch', e);
-      }
-    } finally {
-      checkoutBusy = '';
-    }
-  }
-
-  function checkoutRemote(b: RefBranch): void {
-    holdDiff();
-    void checkoutRemoteRef(b.name);
-  }
-
-  /** Check out a REMOTE-tracking ref (`origin/x`, `upstream/x`) the way every
-   *  git client does: switch to the local twin when one exists (a `create`
-   *  there died with "a branch named 'x' already exists"); otherwise create
-   *  `x` AT that remote ref with tracking. Only `origin/*` may go through the
-   *  checkout route's create (it bases on `origin/<name>`) — any other remote
-   *  creates from its own ref via `/branch`, which used to fork `x` from the
-   *  current HEAD instead and toast "Branch created". */
-  async function checkoutRemoteRef(remoteRef: string): Promise<void> {
-    const localName = remoteRef.replace(/^[^/]+\//, '');
-    if (refKnowledge.localNames.has(localName)) return checkout(localName, false);
-    if (remoteRef.startsWith('origin/')) return checkout(localName, true);
-    checkoutBusy = localName;
-    try {
-      const s = await api.post<RepoStatusResp>(`/repos/${repoId}/branch`, {
-        name: localName,
-        start_point: remoteRef,
-        checkout: true,
-      });
-      toasts.success('Branch created', `${localName} tracking ${remoteRef}`);
-      await refreshAfterCheckout(s, false);
-    } catch (e) {
-      toastError('Couldn’t check out the branch', e);
-    } finally {
-      checkoutBusy = '';
-    }
-  }
-
-  /** ⋯ on a file row of the commit diff: the file-scoped history/blame tools.
-   *  Routed through `gitBridge` because the panels that render them live in
-   *  RepoView, above this component. */
-  function fileToolsMenu(e: MouseEvent, path: string): void {
-    const rev = selectedCommit?.sha;
-    ctxMenu.show(e, [
-      {
-        label: 'History',
-        icon: 'note',
-        action: () => gitBridge.openFileTool({ kind: 'history', repoId, path }),
-      },
-      {
-        label: 'Blame',
-        icon: 'note',
-        action: () => gitBridge.openFileTool({ kind: 'blame', repoId, path, rev }),
-      },
-    ]);
-  }
-
-  /** Pull the CURRENT branch (the only branch a pull can target) and re-read the
-   *  graph — new commits are exactly what a pull produces. */
-  async function pullCurrent(): Promise<void> {
-    await runPull(repoId, onstatus);
-    await refreshAfter().catch(() => {});
-  }
-
-  /** Replay the current branch onto `onto`, after saying how much will move.
-   *  A conflicting rebase comes back 200 with `op_in_progress` — `mutate`
-   *  already routes that to the resolver. */
-  async function rebaseOnto(onto: string): Promise<void> {
-    const { currentBranch } = refKnowledge;
-    if (!currentBranch) return;
-    let commits: number | string = '?';
-    try {
-      const p = await api.get<RebasePreview>(
-        `/repos/${repoId}/rebase-preview?onto=${encodeURIComponent(onto)}`,
-      );
-      commits = p.commits;
-    } catch {
-      // Preview is advisory — a repo whose daemon predates it still rebases.
-    }
-    const ok = await confirmer.ask(
-      `Rebase \`${currentBranch}\` onto \`${onto}\`? ${typeof commits === 'number' ? plural(commits, 'commit') : '? commits'} will be replayed; conflicts open the resolver. Uncommitted changes are stashed and restored afterwards.`,
-      { title: 'Rebase', confirmLabel: 'Rebase', danger: false },
-    );
-    if (ok) await mutate('/rebase', { onto, auto_stash: true }, 'Rebased', onto);
-  }
-
-  /** Select a commit (opens the detail, lights its spine). `deferDiff` holds the
-   *  diff load for DIFF_DEFER_MS — used by controls whose double-click checks
-   *  out, so that gesture's lead click costs nothing. */
-  function selectCommit(commit: CommitInfo, opts: { deferDiff?: boolean } = {}): void {
-    if (selectedSha === commit.sha) {
-      // clicking again deselects
-      clearSelection();
-      return;
-    }
-    wipSelected = false;
-    selectedSha = commit.sha;
-    selectedCommit = commit;
-    // On a phone, collapse the commit list so the diff section gets the room.
-    if (isMobile) secCommitsOpen = false;
-    scheduleDiff(commit.sha, opts.deferDiff ? DIFF_DEFER_MS : 0);
-  }
-
-  /** Abort for a summary prefetched during the double-click window; dropped
-   *  (NOT aborted) once the pane mounts and joins it. */
-  let prefetchStop: (() => void) | null = null;
-  function scheduleDiff(sha: string, delay: number): void {
-    cancelDiff();
-    if (delay <= 0) {
-      startDiff(sha);
-      return;
-    }
-    // The pane waits out the double-click window, but its file list need
-    // not: warm the (small, numstat-only) summary now so the list paints as
-    // soon as the window closes instead of a round-trip after it. A
-    // double-click (checkout) aborts it in `holdDiff` — only the summary is
-    // ever asked for, never a patch.
-    prefetchStop = prefetchCommitSummary(repoId, sha);
-    diffTimer = setTimeout(() => {
-      diffTimer = null;
-      if (selectedSha === sha) {
-        prefetchStop = null;
-        startDiff(sha);
-      }
-    }, delay);
-  }
-  let diffStartedAt = 0;
-  function startDiff(sha: string): void {
-    diffStartedAt = performance.now();
-    diffSha = sha;
-  }
-
-  /** Drop any pending/in-flight diff (unmounting the loader aborts it). */
-  function cancelDiff(): void {
-    if (diffTimer) clearTimeout(diffTimer);
-    diffTimer = null;
-    prefetchStop?.();
-    prefetchStop = null;
-    diffSha = null;
-    diffHeld = false;
-  }
-
-  // A pending deferred-diff timer must not fire into an unmounted pane.
-  $effect(() => () => {
-    if (diffTimer) clearTimeout(diffTimer);
+  const data = createGraphData({
+    get repoId() { return repoId; },
+    onstatus: (s) => onstatus(s),
+    graphVisible: () => vp.visible(),
+  });
+  const index = createGraphRefIndex({
+    get refs() { return data.refs; },
+    get commits() { return data.commits; },
+    get stashes() { return data.stashes; },
+    get worktrees() { return data.worktrees; },
+    get status() { return status; },
+    isForeignWorktree: (w) => actions.isForeignWorktree(w),
+  });
+  const vp = createGraphViewport({
+    get commits() { return data.commits; },
+    get laneNames() { return index.laneNames; },
+    get loadingMore() { return data.loadingMore; },
+    get hasMore() { return data.hasMore; },
+    loadMore: () => void data.loadMore(),
+    flushResync: () => data.flushResync(),
+  });
+  const sel = createGraphSelection({
+    get repoId() { return repoId; },
+    get status() { return status; },
+    get isMobile() { return vp.isMobile; },
+    get commitsOpen() { return secCommitsOpen; },
+    set commitsOpen(v) { secCommitsOpen = v; },
+    get refs() { return data.refs; },
+    get commits() { return data.commits; },
+    get commitsLoading() { return data.commitsLoading; },
+    get bySha() { return index.bySha; },
+    get firstParentChild() { return index.firstParentChild; },
+    has: (sha) => data.has(sha),
+    loadUntil: (sha) => data.loadUntil(sha),
+    chipsFor: (c) => index.chipsFor(c),
+    branchTipCommit: (b) => index.branchTipCommit(b),
+    scrollToCommit: (sha) => vp.scrollToCommit(sha),
+    focusRow: (sha) => void vp.focusRow(sha),
   });
 
-  /** A checkout gesture (double-click) on the selected ref: never load its diff
-   *  under the checkout — the pane offers it on demand instead. */
-  function holdDiff(): void {
-    // Pending, or started by the lead click of a SLOW double-click. A diff the
-    // user has been reading for a while stays put.
-    const recent = diffSha !== null && performance.now() - diffStartedAt < 600;
-    if (diffTimer === null && !recent) return;
-    cancelDiff();
-    if (selectedSha) diffHeld = true;
-  }
+  // ── Actions and context menus (graph/graphActions, graph/graphMenus) ──────
+  const actions = createGraphActions({
+    get repoId() { return repoId; },
+    get workspaceId() { return workspaceId; },
+    get onstatus() { return onstatus; },
+    get checkoutBusy() { return checkoutBusy; },
+    set checkoutBusy(v) { checkoutBusy = v; },
+    get openWtBusy() { return openWtBusy; },
+    set openWtBusy(v) { openWtBusy = v; },
+    get worktrees() { return data.worktrees; },
+    set worktrees(v) { data.worktrees = v; },
+    get submodules() { return data.submodules; },
+    set submodules(v) { data.submodules = v; },
+    get currentRepoPath() { return currentRepoPath; },
+    get refKnowledge() { return index.refKnowledge; },
+    normPath,
+    adoptRefsRev: () => data.adoptRefsRev(),
+    refreshAfter: (s) => data.refreshAfter(s),
+    refreshAfterCheckout: (s, stashed) => data.refreshAfterCheckout(s, stashed),
+    mutate: (path, body, okTitle, okDetail) => data.mutate(path, body, okTitle, okDetail),
+    holdDiff: () => sel.holdDiff(),
+    stashShortMsg,
+  });
+  const menus = createGraphMenus(
+    {
+      get repoId() { return repoId; },
+      get onmergerequest() { return onmergerequest; },
+      get refs() { return data.refs; },
+      get selectedCommit() { return sel.selectedCommit; },
+      get worktreeByBranch() { return index.worktreeByBranch; },
+      get worktreeBranches() { return index.worktreeBranches; },
+      get refKnowledge() { return index.refKnowledge; },
+      get baseBranch() { return index.baseBranch; },
+      openCreatePr,
+      chipsFor: (c) => index.chipsFor(c),
+      setCleanupBase: (name) => data.setCleanupBase(name),
+    },
+    actions,
+  );
+  const { commitMenu, fileToolsMenu } = menus;
 
-  function clearSelection(): void {
-    wipSelected = false;
-    selectedSha = null;
-    selectedCommit = null;
-    cancelDiff();
-    // Re-open the commit list when the diff closes (mobile accordion).
-    if (isMobile) secCommitsOpen = true;
-  }
-
-  // ── Lane / graph algorithm ────────────────────────────────────────────────
-  // Branch name per commit sha, for lane labels (tooltips). Split out of the
-  // layout so the layout depends on `commits` + THIS map only — refs,
-  // worktrees or status changing without renaming any lane (the usual case:
-  // an auto-fetch round, a checkout) no longer re-runs the whole O(N·L) pass.
-  // Same precedence as chipsFor/branchOf: the checked-out branch, then a
-  // local branch, then a remote-tracking one.
-  let prevLaneNames = new Map<string, string>();
-  const laneNames = $derived.by((): Map<string, string> => {
-    const m = new Map<string, string>();
-    const r: RefsResp | null = refs;
-    if (r && haveTypedRefs) {
-      for (const b of r.local) if (b.sha && b.is_current) m.set(b.sha, b.name);
-      for (const b of r.local) if (b.sha && !m.has(b.sha)) m.set(b.sha, b.name);
-      for (const b of r.remote) if (b.sha && !m.has(b.sha)) m.set(b.sha, b.name);
-    } else {
-      // Daemon without typed refs: classify the log decorations.
-      for (const c of commits) {
-        if (c.refs.length === 0) continue;
-        const chips = chipsFor(c);
-        const name = (chips.find((chip) => chip.kind === 'head')
-          ?? chips.find((chip) => chip.kind === 'local')
-          ?? chips.find((chip) => chip.kind === 'remote'))?.label;
-        if (name) m.set(c.sha, name);
-      }
-    }
-    // Same content ⇒ same object, so the layout below doesn't re-run.
-    const prev = prevLaneNames;
-    if (prev.size === m.size && [...m].every(([k, v]) => prev.get(k) === v)) return prev;
-    prevLaneNames = m;
-    return m;
+  // The "▾ +N" popover (graph/refPopoverState); its view loads on first open.
+  const RefPopover = lazyComponent(() => import('./graph/RefPopover.svelte'));
+  const refPop = createRefPopover({
+    get refs() { return data.refs; },
+    get selectedSha() { return sel.selectedSha; },
+    get worktreeByBranch() { return index.worktreeByBranch; },
+    selectCommit: (c, opts) => sel.selectCommit(c, opts),
+    holdDiff: () => sel.holdDiff(),
+    checkout: (name, create) => actions.checkout(name, create),
+    checkoutRemoteRef: (label) => actions.checkoutRemoteRef(label),
+    openWorktree: (w) => actions.openWorktree(w),
+    branchMenu: (e, b) => menus.branchMenu(e, b),
+    tagMenu: (e, t) => menus.tagMenu(e, t),
   });
 
-  let laneMemo: LaneMemo | null = null;
-  /** Rows laid out by the most recent pass (perf probe for the E2E budget). */
-  let lastLayoutRows = 0;
-
-  // The graph: rows + the widest lane count reached (drives the gutter width so
-  // it reflects the real fan-out, not just node columns). The pass itself is
-  // `layoutLanes` (graph-lanes.ts); this derived owns its memo.
-  const graph = $derived.by((): { rows: LaneRow[]; widest: number } => {
-    const names = laneNames;
-    if (commits.length === 0) {
-      laneMemo = null;
-      return { rows: [], widest: 1 };
-    }
-    const out = layoutLanes(commits, names, laneMemo);
-    laneMemo = out.memo;
-    lastLayoutRows = out.laidOut;
-    exposeLayoutProbe();
-    return { rows: out.rows, widest: out.widest };
-  });
-
-  /** E2E perf probe: how many rows the last layout pass computed. */
-  function exposeLayoutProbe(): void {
-    if (typeof window === 'undefined') return;
-    (window as unknown as { __ottoGraphLayoutRows?: number }).__ottoGraphLayoutRows = lastLayoutRows;
+  // ── Create-PR sheet (opened from branch / commit menus with a pre-filled
+  //    source). Reuses CreatePr.svelte; `initialSource` defaults the dropdown. ──
+  let createPrOpen = $state(false);
+  let createPrSource = $state<string | undefined>(undefined);
+  function openCreatePr(source: string): void {
+    createPrSource = source;
+    createPrOpen = true;
   }
-
-  const laneRows = $derived(graph.rows);
-
-  // The visible slice of `laneRows` (see "Row windowing" above for why). Only
-  // these rows are rendered; `padTop`/`padBottom` reserve the rest of the height
-  // so the scrollbar still measures the FULL history.
-  const rowWindow = $derived.by(() => {
-    const total = laneRows.length;
-    if (total === 0) return { start: 0, end: 0 };
-    // viewH is 0 until the first measure — fall back to a screenful so the very
-    // first paint isn't a single row.
-    const h = viewH || 900;
-    const start = Math.max(0, Math.floor(viewTop / ROW_H) - OVERSCAN);
-    const end = Math.min(total, Math.ceil((viewTop + h) / ROW_H) + OVERSCAN);
-    return { start, end };
-  });
-  const visibleRows = $derived(laneRows.slice(rowWindow.start, rowWindow.end));
-  const padTop = $derived(rowWindow.start * ROW_H);
-  const padBottom = $derived(Math.max(0, (laneRows.length - rowWindow.end) * ROW_H));
 
   // WIP row: sits on the HEAD commit's lane so the dashed stub visually hangs
   // off the checked-out branch (falls back to lane 0 while the log loads).
-  const wipCol = $derived(laneRows.find((r) => isHeadCommit(r.commit))?.col ?? 0);
+  const wipCol = $derived(vp.laneRows.find((r) => index.isHeadCommit(r.commit))?.col ?? 0);
   const wipStagedCount = $derived(status.changes.filter((c) => c.staged).length);
   const wipConflictCount = $derived(status.changes.filter((c) => c.kind === 'conflicted').length);
 
-  // Gutter width shared by every row so lane dots line up vertically. Sized to
-  // the widest lane count actually reached (plus a half-lane for the node
-  // radius), and capped (MAX_GUTTER_W) so a wide fan-out can't blow out the layout.
-  const gutterWidth = $derived.by(() => {
-    if (graph.rows.length === 0) return LANE_W;
-    return Math.min(graph.widest * LANE_W + LANE_W / 2, MAX_GUTTER_W);
-  });
-
-  // ── Stash detection (in-graph dashed rendering) ───────────────────────────
-  // From the stash list we know each stash's commit sha and its internal helper
-  // commits (the index/untracked parents = parents[1..]; parents[0] is the base
-  // commit = real history, left alone). Commits in the log matching either get a
-  // dashed, de-emphasised "stash plumbing" treatment instead of a normal node.
-  // Publish the stash count for the toolbar's Pop (see gitBridge.stashCount).
-  // Only once the list is known for THIS repo — the loader resets it to [].
-  $effect(() => {
-    const id = repoId;
-    const n = stashes.length;
-    if (stashesKnown) gitBridge.stashCount[id] = n;
-  });
-  const stashShas = $derived(new Set(stashes.map((s) => s.sha)));
-  const stashHelperShas = $derived.by(() => {
-    const set = new Set<string>();
-    for (const s of stashes) for (const p of s.parents.slice(1)) set.add(p);
-    return set;
-  });
-  const stashMsgBySha = $derived.by(() => {
-    const m = new Map<string, string>();
-    for (const s of stashes) m.set(s.sha, stashShortMsg(s));
-    return m;
-  });
-  // Fallback: the stash (WIP) commit also carries a `refs/stash` decoration in
-  // the log, so the in-graph dashed treatment survives even if the /stashes
-  // fetch failed (the two sources can't then visibly disagree on the entry node).
-  const stashRefShas = $derived.by(() => {
-    const set = new Set<string>();
-    for (const c of commits) if (c.refs.includes('refs/stash')) set.add(c.sha);
-    return set;
-  });
-  function isStashNode(sha: string): boolean {
-    return stashShas.has(sha) || stashHelperShas.has(sha) || stashRefShas.has(sha);
-  }
-  /** Strip the "WIP on <branch>: " / "On <branch>: " prefix for a compact label. */
-  function stashShortMsg(s: StashInfo): string {
-    const m = s.message.replace(/^(WIP on|On)\s+[^:]+:\s*/, '').trim();
-    return m || s.message;
-  }
-
-  // ── Branch-line highlight (press a commit → see which branch it's on) ──────
-  // Walk the FIRST-PARENT spine through the selected commit (ancestors via
-  // parents[0], descendants via the first child whose parents[0] is this commit).
-  // That contiguous spine reads as "the branch"; everything off it dims.
-  const bySha = $derived.by(() => {
-    const m = new Map<string, CommitInfo>();
-    for (const c of commits) m.set(c.sha, c);
-    return m;
-  });
-  const firstParentChild = $derived.by(() => {
-    // parentSha → child sha where the child's FIRST parent is parentSha. Commits
-    // arrive newest-first, so the first match is the most-recent (tip-ward) child.
-    const m = new Map<string, string>();
-    for (const c of commits) {
-      const fp = c.parents[0];
-      if (fp && !m.has(fp)) m.set(fp, c.sha);
-    }
-    return m;
-  });
-  const highlightSpine = $derived.by((): Set<string> | null => {
-    if (!selectedSha || commits.length === 0) return null;
-    const set = new Set<string>();
-    // ancestors (first-parent)
-    let cur: string | undefined = selectedSha;
-    while (cur && !set.has(cur)) {
-      set.add(cur);
-      cur = bySha.get(cur)?.parents[0];
-    }
-    // first-parent descendants
-    cur = firstParentChild.get(selectedSha);
-    while (cur && !set.has(cur)) {
-      set.add(cur);
-      cur = firstParentChild.get(cur);
-    }
-    return set;
-  });
-  // The branch the spine resolves to (for the detail-header "on <branch>" hint).
-  // The ancestor half of the spine is exact; the first-parent DESCENDANT half is
-  // best-effort (a commit has no single canonical branch — at a fork we follow
-  // the newest child), so this hint is indicative, not authoritative.
-  // First head/local ref found along the spine wins, else the first remote.
-  const selectedBranch = $derived.by((): string | null => {
-    const spine = highlightSpine;
-    if (!spine) return null;
-    let remoteFallback: string | null = null;
-    for (const c of commits) {
-      if (!spine.has(c.sha)) continue;
-      for (const chip of chipsFor(c)) {
-        if (chip.kind === 'head' || chip.kind === 'local') return chip.label;
-        if (chip.kind === 'remote' && remoteFallback === null) remoteFallback = chip.label;
-      }
-    }
-    return remoteFallback;
-  });
-
-  // ── Helpers ───────────────────────────────────────────────────────────────
   /** The shared relative-time label (content.md §7), compact for dense rows. */
   function fmtDate(iso: string): string {
     return rel(iso, { compact: true });
@@ -2235,427 +197,9 @@
     return Number.isNaN(d.getTime()) ? '' : d.toLocaleString();
   }
 
-
-  // ── Ref-chip classification (GitKraken-style) ─────────────────────────────
-  // Decoration strings from `git log %D` arrive as e.g. "HEAD -> main",
-  // "HEAD" (detached), "origin/main", "main", "tag: v1.0". We classify each into
-  // a chip kind so the row instantly shows what's local vs remote vs the
-  // checked-out branch. `RefsResp` (local/remote names) disambiguates a bare
-  // name when the decoration alone is ambiguous.
-
-  // Branches checked out in a DIFFERENT worktree than the open repo tab (linked
-  // or main). Chips + ref rows mark them so a branch that "lives elsewhere" is
-  // self-explaining; click/open routes to that worktree instead of checkout.
-  const worktreeByBranch = $derived.by(() => {
-    const m = new Map<string, WorktreeInfo>();
-    for (const w of worktrees) {
-      if (w.branch && isForeignWorktree(w)) m.set(w.branch, w);
-    }
-    return m;
-  });
-  const worktreeBranches = $derived(new Set(worktreeByBranch.keys()));
-  const localBranchByName = $derived.by(() =>
-    new Map<string, RefBranch>((refs?.local ?? []).map((b) => [b.name, b])),
-  );
-
-  /** Local branch DOUBLE-click: open foreign worktree, else checkout. Never try
-   *  to checkout a branch already held by another worktree (git errors hard). */
-  function activateLocalBranch(b: RefBranch): void {
-    if (b.is_current) return;
-    holdDiff();
-    const wt = worktreeByBranch.get(b.name);
-    if (wt) {
-      void openWorktree(wt);
-      return;
-    }
-    void checkout(b.name, false);
-  }
-
-  /** The tip commit of a branch ref, if it's present in the loaded log — a local
-   *  branch decorates its tip with `<name>` (or `HEAD -> <name>`); a remote ref
-   *  decorates with its full `origin/<name>`. Used for single-click highlight. */
-  function branchTipCommit(b: RefBranch): CommitInfo | null {
-    for (const c of commits) {
-      for (const r of c.refs) {
-        if (r === b.name) return c;
-        if (!b.remote) {
-          const arrow = r.match(/^HEAD\s*->\s*(.+)$/);
-          if (arrow && arrow[1].trim() === b.name) return c;
-        }
-      }
-    }
-    return null;
-  }
-
-  // ── Reveal a ref on the graph ─────────────────────────────────────────────
-  /** Sha the graph row for a revealed ref is pulsing on, so the row can flash
-   *  once the scroll lands (a selection highlight alone is easy to miss when the
-   *  jump moves the viewport hundreds of rows). */
-  let pulseSha = $state<string | null>(null);
-  let pulseTimer: ReturnType<typeof setTimeout> | null = null;
-  /** Ref whose commit we're currently paging history to reach (drives the row's
-   *  spinner/disabled state on very deep jumps). */
-  let revealBusy = $state('');
-
-  /** Jump the list so the row for `sha` sits in the middle, and flash it.
-   *
-   *  With windowing the target row is usually NOT in the DOM yet, so this can't
-   *  just call `scrollIntoView`. It computes the scroll offset from the row's
-   *  INDEX (fixed 28px pitch, measured off the top spacer so the sticky header
-   *  and WIP row are accounted for), jumps there, then corrects against the real
-   *  element once the window has rendered it. */
-  function scrollToCommit(sha: string): void {
-    const el = graphPanelEl;
-    if (!el) return;
-    const idx = laneRows.findIndex((r) => r.commit.sha === sha);
-    if (idx < 0) return;
-
-    // Offset of the rows region within the scroll content.
-    const rowsTop = topSpacerEl
-      ? topSpacerEl.getBoundingClientRect().top - el.getBoundingClientRect().top + el.scrollTop
-      : 0;
-    // INSTANT, never 'smooth': a jump to an old ref can span tens of thousands
-    // of pixels, and smooth-scrolling that far is a multi-second animation — it
-    // reads as the app being slow when the data was already local.
-    el.scrollTop = Math.max(0, rowsTop + idx * ROW_H - Math.max(0, (el.clientHeight - ROW_H) / 2));
-    syncViewport();
-
-    // Correct on the next frame, once the window has rendered the target.
-    requestAnimationFrame(() => {
-      const row = el.querySelector<HTMLElement>(`[data-sha="${CSS.escape(sha)}"]`);
-      if (row) row.scrollIntoView({ block: 'center', behavior: 'auto' });
-      pulseSha = sha;
-      if (pulseTimer) clearTimeout(pulseTimer);
-      pulseTimer = setTimeout(() => (pulseSha = null), 1200);
-    });
-  }
-
-  /** Jump the graph to `sha`: page history in until the commit is loaded, select
-   *  it (opens the detail + lights its spine) and scroll it into view. This is
-   *  what a sidebar branch/tag click does — the point is to SHOW WHERE the ref
-   *  sits, which a plain selection never did. */
-  async function revealSha(sha: string, label: string, opts: { deferDiff?: boolean } = {}): Promise<void> {
-    if (!sha) return;
-    revealBusy = label;
-    try {
-      const found = await loadUntil(sha);
-      if (!found) {
-        toasts.error('Not in this graph', `${label} points at a commit that isn’t reachable here.`);
-        return;
-      }
-      const c = bySha.get(sha);
-      if (!c) return;
-      // Selecting is synchronous (highlight + detail header); the diff pane
-      // loads on its own, deferred for a branch row whose double-click is a
-      // checkout. Never await a diff before the graph moves.
-      if (selectedSha !== c.sha) selectCommit(c, opts);
-      scrollToCommit(sha);
-    } finally {
-      revealBusy = '';
-    }
-  }
-
-  // A panel with no prop path to the graph (blame gutter, file history) asks it
-  // to select a commit through `gitBridge`. `nonce` makes re-selecting the same
-  // sha re-fire; a sha outside this repo's loaded history is a no-op with a
-  // note, never a jump into the wrong repo's graph.
-  let focusSeen = 0;
-  $effect(() => {
-    const req = gitBridge.focus;
-    if (!req || req.nonce === focusSeen) return;
-    focusSeen = req.nonce;
-    if (req.repoId !== repoId) return;
-    if (untrack(() => seenShas.has(req.sha))) {
-      void revealSha(req.sha, req.sha.slice(0, 8));
-    } else {
-      toasts.info('Commit not in loaded history', req.sha.slice(0, 8));
-    }
-  });
-
-  /** Branch row SINGLE-click: JUMP to the branch's tip in the graph — scroll it
-   *  into view, light its spine and open the commit detail — paging history in
-   *  first if the tip is older than what's loaded. Checkout stays on
-   *  double-click (activateLocalBranch / checkoutRemote). Prefers the sha the
-   *  refs response carries; falls back to matching decorations for daemons that
-   *  predate the field. */
-  function selectBranchRow(b: RefBranch): void {
-    const sha = b.sha || branchTipCommit(b)?.sha;
-    if (sha) void revealSha(sha, b.name, { deferDiff: true });
-  }
-
-  /** Tag row SINGLE-click: same jump-to-it-on-the-graph as a branch. The tag's
-   *  action menu moved to right-click (and is still on the row's ⋯ affordance),
-   *  because a left-click that only opened a menu never showed WHERE the tag is. */
-  function selectTagRow(t: RefTag): void {
-    const sha = t.sha || commits.find((c) => c.refs.some((r) => r === `tag: ${t.name}`))?.sha;
-    if (sha) void revealSha(sha, t.name);
-  }
-
-  // A deep link `#/git/<repo>/graph/<branch>` (Run with Otto's "View branch
-  // diff", S20-301) jumps to that branch's tip — once per link — as soon as
-  // the refs and the first history page are in.
-  const routeRef = $derived(routeGraphRef(router.parts, repoId));
-  let routeRefSeen = '';
-  $effect(() => {
-    const name = routeRef;
-    const r: RefsResp | null = refs;
-    if (!name) {
-      routeRefSeen = ''; // leaving the link re-arms it for the next visit
-      return;
-    }
-    if (!r || commitsLoading || name === routeRefSeen) return;
-    routeRefSeen = name;
-    untrack(() => {
-      const b =
-        r.local.find((x) => x.name === name) ??
-        r.remote.find((x) => x.name === name) ??
-        r.remote.find((x) => x.name.endsWith(`/${name}`));
-      if (b) selectBranchRow(b);
-      else toasts.info('Branch not found', `${name} isn’t in this repository any more (it may have been deleted).`);
-    });
-  });
-
-  // Set of remote-branch names (e.g. "origin/main") from the refs response, used
-  // to classify a decoration token that isn't obviously a tag/HEAD.
-  // Snapshot the refs response into plain arrays + lookup sets. Reading `refs`
-  // through a local const sidesteps a runes/null-narrowing quirk in svelte-check.
-  const refKnowledge = $derived.by(() => {
-    const r: RefsResp | null = refs;
-    const local = r?.local ?? [];
-    const remote = r?.remote ?? [];
-    return {
-      remoteNames: new Set<string>(remote.map((b) => b.name)),
-      localNames: new Set<string>(local.map((b) => b.name)),
-      currentBranch: local.find((b) => b.is_current)?.name ?? status.branch ?? null,
-    };
-  });
-
-  // Decorations from `git log %D` can contain the same text for a local
-  // origin/foo and the remote origin/foo. The refs endpoint already gives us
-  // unambiguous type and tip SHA; index it once instead of guessing per row.
-  const haveTypedRefs = $derived.by(() => {
-    const r: RefsResp | null = refs;
-    return r !== null && [...r.local, ...r.remote].every((b) => !!b.sha);
-  });
-  const branchChipsBySha = $derived.by(() => {
-    const bySha = new Map<string, RefChip[]>();
-    for (const b of [...(refs?.local ?? []), ...(refs?.remote ?? [])]) {
-      if (!b.sha) continue;
-      const chip: RefChip = {
-        kind: b.remote ? 'remote' : b.is_current ? 'head' : 'local',
-        label: b.name,
-        current: b.is_current,
-        worktree: !b.remote && worktreeBranches.has(b.name),
-      };
-      const list = bySha.get(b.sha) ?? [];
-      list.push(chip);
-      bySha.set(b.sha, list);
-    }
-    return bySha;
-  });
-
-  function classifyRef(ref: string): RefChip {
-    // Stash ref (`refs/stash` for the top stash, or a `stash@{N}` selector) —
-    // its own kind, never bucketed as a remote branch.
-    if (ref === 'refs/stash' || /^stash@\{/.test(ref)) {
-      return { kind: 'stash', label: 'stash', current: false };
-    }
-    if (isTagRef(ref)) return { kind: 'tag', label: refLabel(ref), current: false };
-    // "HEAD -> branch": the checked-out branch — the most prominent chip.
-    const arrow = ref.match(/^HEAD\s*->\s*(.+)$/);
-    if (arrow) {
-      const label = arrow[1].trim();
-      return { kind: 'head', label, current: true, worktree: worktreeBranches.has(label) };
-    }
-    // A bare "HEAD" decoration = detached HEAD (no branch).
-    if (ref === 'HEAD') return { kind: 'detached', label: 'HEAD', current: false };
-    // Remote-tracking ref (origin/…): match the refs response, else fall back to
-    // the "<remote>/<name>" shape (but never a purely-local name).
-    const { remoteNames, localNames, currentBranch } = refKnowledge;
-    if (remoteNames.has(ref) || (/^[^/]+\/.+/.test(ref) && !localNames.has(ref))) {
-      return { kind: 'remote', label: ref, current: false };
-    }
-    // Otherwise a local branch; it's "current" if it's the checked-out branch.
-    return {
-      kind: 'local',
-      label: ref,
-      current: ref === currentBranch,
-      worktree: worktreeBranches.has(ref),
-    };
-  }
-
-  // Chips for one commit row, ordered head → local → remote → tag → stash for a
-  // tidy column. `origin/HEAD` (and any `<remote>/HEAD` symbolic pointer) is
-  // dropped — it's noise that never helps the reader.
-  function chipsFor(c: CommitInfo): RefChip[] {
-    // Chips are right-aligned and CLIP ON THE LEFT (they butt against the graph
-    // node). So the RIGHTMOST chip is the one guaranteed visible — give that slot
-    // to the branch you actually care about (the checked-out/local branch) and
-    // let long tags clip first. Hence head/local sort LAST (rightmost), tag first.
-    const order: Record<ChipKind, number> = {
-      tag: 0, stash: 0, remote: 1, local: 2, detached: 3, head: 3,
-    };
-    const decorations = c.refs.filter((r) => !/\/HEAD$/.test(r)).map(classifyRef);
-    const all = haveTypedRefs
-      ? [...(branchChipsBySha.get(c.sha) ?? []), ...decorations.filter((chip) =>
-          chip.kind === 'tag' || chip.kind === 'stash' || chip.kind === 'detached')]
-      : decorations;
-    // Collapse a local/head branch and its same-named remote twin (origin/<name>)
-    // into ONE chip flagged `onRemote`: keeps the branch NAME, adds a small remote
-    // glyph to show it's pushed, and frees a whole chip in the narrow column.
-    const branchLabels = new Set(
-      all.filter((x) => x.kind === 'local' || x.kind === 'head').map((x) => x.label),
-    );
-    const merged: RefChip[] = [];
-    for (const chip of all) {
-      if (chip.kind === 'remote' && branchLabels.has(chip.label.replace(/^[^/]+\//, ''))) {
-        continue; // its local twin carries the remote flag instead
-      }
-      if (chip.kind === 'local' || chip.kind === 'head') {
-        const twin = all.some(
-          (o) => o.kind === 'remote' && o.label.replace(/^[^/]+\//, '') === chip.label,
-        );
-        merged.push({ ...chip, onRemote: twin });
-      } else {
-        merged.push(chip);
-      }
-    }
-    return merged.sort((a, b) => order[a.kind] - order[b.kind]);
-  }
-
-
-  // The open ref popover: which commit, its grouped refs, and where to anchor it
-  // (viewport coords from the expander's rect, so position:fixed clears the scroll).
-  let refMenu = $state<{
-    commit: CommitInfo;
-    branches: RefChip[];
-    tags: RefChip[];
-    x: number;
-    y: number;
-  } | null>(null);
-
-  function openRefMenu(e: MouseEvent, commit: CommitInfo, chips: RefChip[]): void {
-    e.stopPropagation(); // don't also select the commit (the row is a button)
-    e.preventDefault();
-    const { branches, tags } = splitChips(chips);
-    const trigger = e.currentTarget as HTMLElement;
-    trigger.focus(); // WebKit pointer clicks do not focus buttons automatically.
-    const r = trigger.getBoundingClientRect();
-    refMenu = { commit, branches, tags, x: r.left, y: r.bottom + 4 };
-  }
-
-  // Clamp the popover into the viewport once its size is known (mirrors
-  // ContextMenu): an anchor near the bottom/right edge would otherwise push
-  // part of the (internally scrollable) popover off-screen and unreachable.
-  let refPopEl = $state<HTMLDivElement | null>(null);
-  let refPopX = $state(0);
-  let refPopY = $state(0);
-  /** Height cap measured against the window (never a fixed 60vh): the room
-   *  left under the anchor, but at least ~a third of the window so a popover
-   *  near the bottom edge flips up into the clamp below instead of shrinking. */
-  let refPopMaxH = $state(320);
-  $effect(() => {
-    const m = refMenu;
-    if (!m) return;
-    refPopX = m.x;
-    refPopY = m.y;
-    refPopMaxH = Math.max(Math.round(window.innerHeight / 3), Math.min(window.innerHeight - 16, window.innerHeight - m.y - 8 + 160), 160);
-    requestAnimationFrame(() => {
-      if (!refPopEl || refMenu !== m) return;
-      const pad = 8;
-      refPopX = Math.max(pad, Math.min(m.x, window.innerWidth - refPopEl.offsetWidth - pad));
-      refPopY = Math.max(pad, Math.min(m.y, window.innerHeight - refPopEl.offsetHeight - pad));
-    });
-  });
-
-  $effect(() => {
-    if (!refMenu) return;
-    untrack(() => ui.pushModal());
-    return () => untrack(() => ui.popModal());
-  });
-
-  function closeRefMenu(): void {
-    refMenu = null;
-  }
-
-  // ── Left refs-sidebar drag-resize (desktop; persisted via gitGraphSideWidth) ──
-  // The GitKraken-style sidebar holds long branch names; a drag handle on its
-  // right edge lets the user widen it to read them. Mirrors startListResize.
-  let sideResizing = $state(false);
-  function startSideResize(e: MouseEvent): void {
-    sideResizing = true;
-    const startX = e.clientX;
-    const startW = ui.gitGraphSideWidth;
-    // Under RTL the sidebar sits on the right, so dragging left widens it.
-    const dir = document.dir === 'rtl' ? -1 : 1;
-    // lib/dragCursor (r3-03-08): overlay cursor instead of an inherited
-    // body.style write, one width write per frame, one persist on release.
-    startMouseDrag(e, {
-      cursor: 'col-resize',
-      onMove: (ev) => ui.setGitGraphSideWidth(startW + dir * (ev.clientX - startX), false),
-      onEnd: () => {
-        sideResizing = false;
-        ui.setGitGraphSideWidth(ui.gitGraphSideWidth);
-      },
-    });
-  }
-
-
-  // ── Cleanup base branch (drives the "merged → safe to delete" indicators) ────
-  // The resolved base comes back on every refs response (`base_branch`); a branch
-  // is flagged when its tip is contained in that base. The current + base branches
-  // are never flagged. Changing the base persists per-repo and re-derives flags.
-  // Read `refs` through a local const to sidestep the runes null-narrowing quirk
-  // svelte-check trips on (same pattern as refKnowledge below).
-  const baseBranch = $derived.by((): string | null => {
-    const r: RefsResp | null = refs;
-    return r?.base_branch ?? null;
-  });
-
-  /** The integration branches (develop / main / the base…) already holding this
-   *  branch's tip — what the row's "landed" mark names. A daemon predating
-   *  `merged_into` only knows the base, so fall back to that single flag. */
-  function landedIn(b: RefBranch): string[] {
-    if (b.merged_into) return b.merged_into;
-    if (!b.merged_into_base || !baseBranch) return [];
-    if (b.remote) return [baseBranch]; // backend already excludes the base's remote twin
-    return !b.is_current && b.name !== baseBranch ? [baseBranch] : [];
-  }
-
-  /** Set (or clear, on null) the per-repo cleanup base branch, then re-derive the
-   *  merged flags by refetching refs. Indicator-only — never deletes a branch. */
-  async function setCleanupBase(name: string | null): Promise<void> {
-    try {
-      const resp = await api.put<CleanupBaseResp>(`/repos/${repoId}/cleanup-base`, {
-        base_branch: name,
-      });
-      await refreshAfter();
-      toasts.success(
-        name ? 'Cleanup base branch set' : 'Cleanup base reset',
-        resp.resolved ?? 'default branch',
-      );
-    } catch (e) {
-      toastError('Couldn’t set the cleanup base branch', e);
-    }
-  }
-
   // Drag-to-resize the commit-list column while the detail panel is open
   // (desktop only; persisted via ui.gitGraphListWidth).
   let listResizing = $state(false); // suspends the panel's flex transition
-  /** Keyboard for a focused resizer (the ARIA window-splitter pattern):
-   *  ←/→ move it (⇧ for a big step), Home/End jump to the ends, Enter resets. */
-  function resizerKey(e: KeyboardEvent, get: () => number, set: (w: number) => void, def: number, mirror = false): void {
-    const step = e.shiftKey ? 64 : 16;
-    const rtl = mirror && document.dir === 'rtl' ? -1 : 1;
-    if (e.key === 'ArrowRight') set(get() + step * rtl);
-    else if (e.key === 'ArrowLeft') set(get() - step * rtl);
-    else if (e.key === 'Home') set(0);
-    else if (e.key === 'End') set(10_000);
-    else if (e.key === 'Enter') set(def);
-    else return;
-    e.preventDefault();
-  }
-
   function startListResize(e: MouseEvent): void {
     listResizing = true;
     const startX = e.clientX;
@@ -2669,84 +213,16 @@
       },
     });
   }
-
-  // Single-click a popover row → select the commit (this lights up the branch's
-  // spine via highlightSpine). Idempotent and harmless as the lead click of a
-  // double-click, which is what actually checks out.
-  function refRowSelect(commit: CommitInfo): void {
-    if (selectedSha !== commit.sha) selectCommit(commit, { deferDiff: true });
-  }
-
-  // Double-click a popover row → check it out (or open its worktree). Remote
-  // chips check out a local tracking branch (mirrors checkoutRemote); tags
-  // check out detached; worktree branches open the linked tree as a git tab.
-  function refRowCheckout(chip: RefChip): void {
-    // Keep the explicit local/remote identity; their display names may match.
-    closeRefMenu();
-    holdDiff();
-    if (chip.kind === 'remote') {
-      void checkoutRemoteRef(chip.label);
-      return;
-    }
-    if (chip.worktree) {
-      const wt = worktreeByBranch.get(chip.label);
-      if (wt) {
-        void openWorktree(wt);
-        return;
-      }
-    }
-    // local/head branch, or a tag (detached) — both check out by their label.
-    void checkout(chip.label, false);
-  }
-
-  // Right-click a popover row → the full existing branch/tag context menu (rename,
-  // merge, PR, delete…), resolved from the refs response. Silent no-op if the ref
-  // can't be matched (e.g. refs changed underneath the open popover).
-  function refRowMenu(e: MouseEvent, chip: RefChip): void {
-    e.preventDefault();
-    e.stopPropagation();
-    const r: RefsResp | null = refs;
-    if (!r) return;
-    if (chip.kind === 'tag') {
-      const t = r.tags.find((x) => x.name === chip.label);
-      if (t) tagMenu(e, t);
-      return;
-    }
-    const b = (chip.kind === 'remote' ? r.remote : r.local).find((x) => x.name === chip.label);
-    if (b) branchMenu(e, b);
-  }
-
-  /** HEAD's sha from the typed refs (the checked-out branch's tip), so a
-   *  checkout moves the "you are here" marker without re-reading the log.
-   *  `null` = unknown or detached — the log decorations decide then. */
-  const headSha = $derived.by((): string | null => {
-    const r: RefsResp | null = refs;
-    if (!r || !haveTypedRefs) return null;
-    return r.local.find((b) => b.is_current)?.sha ?? null;
-  });
-
-  // A commit is the HEAD ("you are here"): the typed current branch's tip, else
-  // any HEAD-ish decoration.
-  function isHeadCommit(c: CommitInfo): boolean {
-    const h = headSha;
-    if (h) return c.sha === h;
-    return c.refs.some((r) => r === 'HEAD' || /^HEAD\s*->/.test(r));
-  }
-
 </script>
-
-<!-- Escape closes the open multi-ref popover (top-level: svelte:window can't sit
-     inside a block). No-op when nothing is open. -->
 
 <!-- One commit-row ref chip — shared by the inline (single ref) and collapsed
      (primary ref) renderings so they never drift apart. -->
-{#snippet chipView(chip: RefChip, label: string, laneColor: string)}
-  {@const tracking = branchTracking(chip.kind === 'head' || chip.kind === 'local' ? localBranchByName.get(chip.label) : undefined, status)}
-  <span
-    class="ref-chip kind-{chip.kind}"
-    class:current-chip={chip.current}
-    class:is-worktree={chip.worktree && !chip.current}
-    style="--lane: {laneColor}"
+{#snippet chipView(chip: Chip, label: string, laneColor: string)}
+  <RefChip
+    {chip}
+    {label}
+    lane={laneColor}
+    tracking={branchTracking(chip.kind === 'head' || chip.kind === 'local' ? index.localBranchByName.get(chip.label) : undefined, status)}
     title={chip.kind === 'stash'
       ? `Stash · ${label}`
       : chip.current
@@ -2754,25 +230,12 @@
         : chip.worktree
           ? `Worktree · ${chip.label} — open worktree (do not switch branch)`
           : chip.label}
-  >
-    {#if chip.current}<Icon name="check" size={12} />{/if}
-    {#if chip.worktree && !chip.current}<Icon name="worktree" size={12} />{/if}
-    {#if chip.kind === 'remote' || chip.onRemote}<Icon name="globe" size={12} />{/if}
-    {#if chip.kind === 'tag'}<Icon name="tag" size={12} />{/if}
-    {#if chip.kind === 'stash'}<Icon name="stash" size={12} />{/if}
-    <span class="chip-label">{label}</span>
-    {#if tracking.ahead > 0 || tracking.behind > 0}
-      <span class="chip-ab" title="{tracking.ahead} ahead · {tracking.behind} behind upstream">
-        {#if tracking.ahead > 0}<span class="ab-ahead">↑{tracking.ahead}</span>{/if}
-        {#if tracking.behind > 0}<span class="ab-behind">↓{tracking.behind}</span>{/if}
-      </span>
-    {/if}
-  </span>
+  />
 {/snippet}
 
-<div class="graphview" class:mobile={isMobile}>
+<div class="graphview" class:mobile={vp.isMobile}>
   <!-- ── LEFT: refs tree ───────────────────────────────────────────────────── -->
-  {#if isMobile}
+  {#if vp.isMobile}
     <!-- Mobile accordion header for the branches/refs tree. -->
     <button
       class="mob-sec-head"
@@ -2784,424 +247,32 @@
       <Icon name="branch" size={13} />
       <span>Branches &amp; Tags</span>
       <span class="grow"></span>
-      {#if refs}<span class="mob-sec-count">{refs.local.length + refs.remote.length + refs.tags.length}</span>{/if}
+      {#if data.refs}<span class="mob-sec-count">{data.refs.local.length + data.refs.remote.length + data.refs.tags.length}</span>{/if}
     </button>
   {/if}
-  <aside
-    class="refs-panel"
-    class:mob-collapsed={isMobile && !secRefsOpen}
-    class:resizing={sideResizing}
-    style:width={!isMobile ? `${ui.gitGraphSideWidth}px` : null}
-  >
-    {#if refsLoading}
-      <div style="padding: 10px"><Skeleton rows={6} height={22} /></div>
-    {:else if refsError}
-      <div class="refs-error">
-        <LoadState what="branches" error={refsError} empty variant="compact" onretry={() => loadRefs(repoId)} />
-      </div>
-    {:else if refs}
-      <!-- Branch leaf name with MIDDLE ellipsis so the distinguishing suffix
-           (e.g. "…-retry-fix") stays visible; short names render plain. -->
-      {#snippet refName(label: string)}
-        {@const mp = midParts(label)}
-        {#if mp}
-          <span class="mono ref-name mid"
-            ><span class="mid-head">{mp.head}</span><span class="mid-tail">{mp.tail}</span></span
-          >
-        {:else}
-          <span class="mono ref-name">{label}</span>
-        {/if}
-      {/snippet}
-
-      <!-- "Already in develop / main" mark: names every integration branch that
-           holds the tip (git-flow lands in develop long before main). Never shown
-           on an integration branch itself (see landedIn). -->
-      {#snippet mergedMark(b: RefBranch, into: string[])}
-        <span
-          class="merged-mark"
-          title={`Already in ${into.join(', ')}${b.is_current ? '' : ' — safe to delete'}`}
-        >
-          <Icon name="check" size={12} /><span class="merged-into">{into.join(' · ')}</span>
-        </span>
-      {/snippet}
-
-      <!-- One branch row, reused for loose branches and folder children. `label`
-           is the short leaf name; `b.name` stays the full ref for every action. -->
-      {#snippet localRow(leaf: BranchLeaf, nested: boolean)}
-        {@const b = leaf.b}
-        {@const into = landedIn(b)}
-        {@const tracking = branchTracking(b, status)}
-        {@const wtElsewhere = worktreeByBranch.get(b.name)}
-        <div class="ref-action-row">
-        <button use:rowMenu
-          class="ref-row"
-          class:nested
-          class:current={b.is_current}
-          class:is-worktree={!!wtElsewhere}
-          class:drag-target={dragOverTarget === b.name}
-          class:dragging={dragSource?.name === b.name && !dragSource.remote}
-          draggable={checkoutBusy === '' && openWtBusy === ''}
-          ondragstart={(e) => onRefDragStart(e, b.name, false)}
-          ondragend={onRefDragEnd}
-          ondragover={(e) => onTargetDragOver(e, b.name)}
-          ondragleave={() => onTargetDragLeave(b.name)}
-          ondrop={(e) => onTargetDrop(e, b.name)}
-          disabled={checkoutBusy !== '' || openWtBusy !== ''}
-          onclick={() => selectBranchRow(b)}
-          ondblclick={() => activateLocalBranch(b)}
-          oncontextmenu={(e) => branchMenu(e, b)}
-          title={dragSource && isValidDropTarget(b.name)
-            ? `Merge ${dragSourceName()} → ${b.name}`
-            : wtElsewhere
-              ? `Double-click to open worktree · ${wtElsewhere.path}${wtElsewhere.branch ? ` · ${wtElsewhere.branch}` : ''}`
-              : `${b.name} — click to highlight, double-click to checkout`}
-        >
-          {#if b.is_current}
-            <span class="cur-pip" title="Checked out"><Icon name="check" size={12} /></span>
-          {:else if wtElsewhere}
-            <span class="cur-pip wt-pip" title="Worktree — click to open"><Icon name="worktree" size={12} /></span>
-          {:else}
-            <Icon name="dot" size={12} />
-          {/if}
-          {@render refName(leaf.label)}
-          {#if into.length > 0}{@render mergedMark(b, into)}{/if}
-          {#if wtElsewhere}
-            <span class="wt-open-hint" title="Open worktree (do not switch branch)">open worktree</span>
-          {/if}
-          {#if tracking.ahead > 0 || tracking.behind > 0}
-            <span class="ref-ab" title="{tracking.ahead} ahead · {tracking.behind} behind upstream">
-              {#if tracking.ahead > 0}<span class="ab-ahead">↑{tracking.ahead}</span>{/if}
-              {#if tracking.behind > 0}<span class="ab-behind">↓{tracking.behind}</span>{/if}
-            </span>
-          {/if}
-          {#if b.upstream}
-            {#if b.upstream.endsWith(`/${b.name}`)}
-              <!-- Default same-named tracking (e.g. origin/<branch>): redundant,
-                   so collapse to a small "tracked" glyph and leave the row's
-                   width for the branch NAME instead of a duplicate string. -->
-              <span class="ref-track" title={`tracks ${b.upstream}`}><Icon name="globe" size={12} /></span>
-            {:else}
-              <!-- Non-default upstream (tracks a differently-named branch) → show it. -->
-              <span class="ref-upstream mono dim" title={`upstream: ${b.upstream}`}>{b.upstream}</span>
-            {/if}
-          {/if}
-          {#if checkoutBusy === b.name || (wtElsewhere && openWtBusy === wtElsewhere.path)}<span class="dim" title="Working…">…</span>{/if}
-        </button>
-        <button
-          class="icon-btn ref-action"
-          aria-label="Actions for branch {b.name}"
-          title="Actions for branch {b.name}"
-          aria-haspopup="menu"
-          disabled={checkoutBusy !== '' || openWtBusy !== ''}
-          onclick={(e) => branchMenu(e, b)}
-        ><Icon name="more" size={13} /></button>
-        </div>
-      {/snippet}
-
-      {#snippet remoteRow(leaf: BranchLeaf, nested: boolean)}
-        {@const b = leaf.b}
-        {@const into = landedIn(b)}
-        <div class="ref-action-row">
-        <button use:rowMenu
-          class="ref-row remote"
-          class:nested
-          class:dragging={dragSource?.name === b.name && dragSource.remote}
-          draggable={checkoutBusy === ''}
-          ondragstart={(e) => onRefDragStart(e, b.name, true)}
-          ondragend={onRefDragEnd}
-          disabled={checkoutBusy !== ''}
-          onclick={() => selectBranchRow(b)}
-          ondblclick={() => checkoutRemote(b)}
-          oncontextmenu={(e) => branchMenu(e, b)}
-          title="{b.name} — click to highlight · double-click to checkout as a local tracking branch · drag onto a local branch to merge"
-        >
-          <Icon name="dot" size={12} />
-          {@render refName(leaf.label)}
-          {#if into.length > 0}{@render mergedMark(b, into)}{/if}
-          {#if checkoutBusy === b.name.replace(/^[^/]+\//, '')}<span class="dim">…</span>{/if}
-        </button>
-        <button
-          class="icon-btn ref-action"
-          aria-label="Actions for branch {b.name}"
-          title="Actions for branch {b.name}"
-          aria-haspopup="menu"
-          disabled={checkoutBusy !== '' || openWtBusy !== ''}
-          onclick={(e) => branchMenu(e, b)}
-        ><Icon name="more" size={13} /></button>
-        </div>
-      {/snippet}
-
-      <!-- A collapsible branch FOLDER header (feature/, release/, …). -->
-      {#snippet folderHeader(section: 'local' | 'remote', folder: BranchFolder)}
-        {@const key = folderKey(section, folder.name)}
-        {@const collapsed = collapsedFolders.has(key)}
-        <button class="ref-folder" class:collapsed onclick={() => toggleFolder(key)} title={folder.name}>
-          <Icon name={collapsed ? 'chevronRight' : 'chevronDown'} size={12} />
-          <Icon name="folder" size={12} />
-          <span class="folder-name">{folder.name}</span>
-          <span class="ref-count">{folder.leaves.length}</span>
-        </button>
-      {/snippet}
-
-      <!-- "Show more" for a section past its row budget. -->
-      {#snippet moreLeaves(key: string, hidden: number)}
-        {#if hidden > 0}
-          <button class="ref-more-leaves" onclick={() => showMoreLeaves(key)}>
-            <span class="dim">Show {Math.min(hidden, LEAF_PAGE * 4)} more ({hidden} hidden)</span>
-          </button>
-        {/if}
-      {/snippet}
-
-      <!-- LOCAL -->
-      <div class="ref-section">
-        <button class="ref-header" onclick={() => (localOpen = !localOpen)} aria-expanded={localOpen}>
-          <Icon name={localOpen ? 'chevronDown' : 'chevronRight'} size={12} />
-          <Icon name="branch" size={12} />
-          <span>LOCAL</span>
-          <span class="ref-count">{refs.local.length}</span>
-        </button>
-        {#if localOpen}
-          {#if refs.local.length === 0}
-            <div class="dim ref-empty">No local branches</div>
-          {/if}
-          {#each groupedLocal.loose.slice(0, localPlan.loose) as leaf (leaf.b.name)}
-            {@render localRow(leaf, false)}
-          {/each}
-          {#each localPlan.folders as { folder, shown } (folder.name)}
-            {@const fk = folderKey('local', folder.name)}
-            {@render folderHeader('local', folder)}
-            {#if !collapsedFolders.has(fk) && shown > 0}
-              <div class="folder-children">
-                {#each folder.leaves.slice(0, shown) as leaf (leaf.b.name)}
-                  {@render localRow(leaf, true)}
-                {/each}
-              </div>
-            {/if}
-          {/each}
-          {@render moreLeaves('local:', localPlan.hidden)}
-        {/if}
-      </div>
-
-      <!-- REMOTE -->
-      <div class="ref-section">
-        <button class="ref-header" onclick={() => (remoteOpen = !remoteOpen)} aria-expanded={remoteOpen}>
-          <Icon name={remoteOpen ? 'chevronDown' : 'chevronRight'} size={12} />
-          <Icon name="globe" size={12} />
-          <span>REMOTE</span>
-          <span class="ref-count">{refs.remote.length}</span>
-        </button>
-        {#if remoteOpen}
-          {#if refs.remote.length === 0}
-            <div class="dim ref-empty">No remote branches</div>
-          {/if}
-          {#each groupedRemote.loose.slice(0, remotePlan.loose) as leaf (leaf.b.name)}
-            {@render remoteRow(leaf, false)}
-          {/each}
-          {#each remotePlan.folders as { folder, shown } (folder.name)}
-            {@const fk = folderKey('remote', folder.name)}
-            {@render folderHeader('remote', folder)}
-            {#if !collapsedFolders.has(fk) && shown > 0}
-              <div class="folder-children">
-                {#each folder.leaves.slice(0, shown) as leaf (leaf.b.name)}
-                  {@render remoteRow(leaf, true)}
-                {/each}
-              </div>
-            {/if}
-          {/each}
-          {@render moreLeaves('remote:', remotePlan.hidden)}
-        {/if}
-      </div>
-
-      <!-- TAGS -->
-      <div class="ref-section">
-        <button class="ref-header" onclick={() => (tagsOpen = !tagsOpen)} aria-expanded={tagsOpen}>
-          <Icon name={tagsOpen ? 'chevronDown' : 'chevronRight'} size={12} />
-          <Icon name="tag" size={12} />
-          <span>TAGS</span>
-          <span class="ref-count">{refs.tags.length}</span>
-        </button>
-        {#if tagsOpen}
-          {#each refs.tags.slice(0, leafLimit('tags:')) as t (t.name)}
-            <div class="ref-action-row">
-            <button use:rowMenu
-              class="ref-row tag"
-              class:ref-row-busy={revealBusy === t.name}
-              title="{t.name} — click to show it on the graph, right-click for actions"
-              onclick={() => selectTagRow(t)}
-              oncontextmenu={(e) => tagMenu(e, t)}
-            >
-              <Icon name="tag" size={12} />
-              <span class="mono ref-name">{t.name}</span>
-            </button>
-            <!-- Actions stay reachable without a right-click (trackpad/touch),
-                 since left-click jumps to the tag instead of opening them: a
-                 real sibling button (never a control nested in the row). -->
-            <button
-              class="icon-btn ref-action ref-more"
-              title="Actions for tag {t.name}"
-              aria-label="Actions for tag {t.name}"
-              aria-haspopup="menu"
-              onclick={(e) => tagMenu(e, t)}
-            ><Icon name="more" size={13} /></button>
-            </div>
-          {:else}
-            <div class="dim ref-empty">No tags</div>
-          {/each}
-          {@render moreLeaves('tags:', refs.tags.length - Math.min(refs.tags.length, leafLimit('tags:')))}
-        {/if}
-      </div>
-
-      <!-- STASHES — read-only `git stash list`; right-click for Apply / Drop. -->
-      <div class="ref-section">
-        <button class="ref-header" onclick={() => (stashesOpen = !stashesOpen)} aria-expanded={stashesOpen}>
-          <Icon name={stashesOpen ? 'chevronDown' : 'chevronRight'} size={12} />
-          <Icon name="stash" size={12} />
-          <span>STASHES</span>
-          <span class="ref-count">{stashes.length}</span>
-        </button>
-        {#if stashesOpen}
-          {#each stashes as s (s.ref)}
-            <div class="ref-action-row">
-            <button use:rowMenu
-              class="ref-row stash-row"
-              title={`${s.ref} · ${s.message}`}
-              onclick={() => selectStash(s)}
-              oncontextmenu={(e) => stashMenu(e, s)}
-            >
-              <Icon name="stash" size={12} />
-              <span class="ref-name stash-msg">{stashShortMsg(s)}</span>
-              {#if s.branch}<span class="stash-branch mono dim">{s.branch}</span>{/if}
-            </button>
-            <button class="icon-btn ref-action" title="Actions for stash {s.ref}" aria-label="Actions for stash {s.ref}" onclick={(e) => stashMenu(e, s)}><Icon name="more" size={13} /></button>
-            </div>
-          {:else}
-            <div class="dim ref-empty">No stashes</div>
-          {/each}
-        {/if}
-      </div>
-
-      <!-- WORKTREES — `git worktree list`; click opens as a git tab (never
-           branch-switch). Right-click to remove/prune. Shows agent-created
-           trees (swarm, Run-with-Otto, goal loops) too. -->
-      <div class="ref-section">
-        <button class="ref-header" onclick={() => (worktreesOpen = !worktreesOpen)} aria-expanded={worktreesOpen}>
-          <Icon name={worktreesOpen ? 'chevronDown' : 'chevronRight'} size={12} />
-          <Icon name="worktree" size={12} />
-          <span>WORKTREES</span>
-          <span class="ref-count">{worktrees.length}</span>
-        </button>
-        {#if worktreesOpen}
-          {#each worktrees as w (w.path)}
-            {@const isHere = currentRepoPath !== '' && normPath(w.path) === currentRepoPath}
-            <div class="ref-action-row">
-            <button use:rowMenu
-              type="button"
-              class="ref-row stash-row is-worktree"
-              class:current={isHere}
-              disabled={w.prunable || openWtBusy !== ''}
-              title={w.prunable
-                ? `${w.path} · stale (folder gone)`
-                : isHere
-                  ? `Current worktree · ${w.path}`
-                  : `Open worktree · ${w.path}${w.branch ? ` · ${w.branch}` : ' · detached'}${w.dirty ? ' · uncommitted changes' : ''}`}
-              onclick={() => {
-                if (!w.prunable && !isHere) void openWorktree(w);
-              }}
-              oncontextmenu={(e) => {
-                e.preventDefault();
-                wtMenu(e, w);
-              }}
-            >
-              <Icon name="worktree" size={12} />
-              <span class="ref-name stash-msg" class:dim={w.prunable}>{wtName(w)}</span>
-              {#if !w.dirty_known}<span class="wt-dirty" title="Changes unknown — status check unavailable">?</span>
-              {:else if w.dirty}<span class="wt-dirty" title="Uncommitted changes">●</span>{/if}
-              {#if w.locked}<Icon name="lock" size={12} />{/if}
-              {#if w.prunable}
-                <span class="wt-flag mono dim">stale</span>
-              {:else if isHere}
-                <span class="wt-flag mono dim">current</span>
-              {:else if w.is_main}
-                <span class="wt-open-hint">open worktree</span>
-                <span class="wt-flag mono dim">main</span>
-              {:else}
-                <span class="wt-open-hint">open worktree</span>
-                {#if w.branch}
-                  <span class="stash-branch mono dim">{w.branch}</span>
-                {:else}
-                  <span class="wt-flag mono dim">detached</span>
-                {/if}
-              {/if}
-              {#if openWtBusy === w.path}<span class="dim">…</span>{/if}
-            </button>
-            <button class="icon-btn ref-action" title="Actions for worktree {w.path}" aria-label="Actions for worktree {w.path}" onclick={(e) => wtMenu(e, w)}><Icon name="more" size={13} /></button>
-            </div>
-          {:else}
-            <div class="dim ref-empty">No worktrees</div>
-          {/each}
-          {#if worktrees.some((w) => w.prunable)}
-            <button class="ref-row stash-row wt-prune" onclick={() => void wtPrune()}>
-              <Icon name="trash" size={12} />
-              <span class="ref-name">Prune stale entries</span>
-            </button>
-          {/if}
-        {/if}
-      </div>
-
-      <!-- SUBMODULES — `git submodule status`; right-click to init/update. -->
-      {#if submodules.length > 0}
-        <div class="ref-section">
-          <button class="ref-header" onclick={() => (submodulesOpen = !submodulesOpen)} aria-expanded={submodulesOpen}>
-            <Icon name={submodulesOpen ? 'chevronDown' : 'chevronRight'} size={12} />
-            <Icon name="shapes" size={12} />
-            <span>SUBMODULES</span>
-            <span class="ref-count">{submodules.length}</span>
-          </button>
-          {#if submodulesOpen}
-            {#each submodules as sub (sub.path)}
-              <button use:rowMenu
-                class="ref-row stash-row"
-                title={`${sub.path} @ ${sub.sha.slice(0, 10)}${sub.url ? ` · ${sub.url}` : ''}${sub.state !== 'ok' ? ` · ${sub.state}` : ''}`}
-                oncontextmenu={(e) => subMenu(e, sub)}
-                aria-label="Actions for submodule {sub.path}"
-                onclick={(e) => subMenu(e, sub)}
-              >
-                <Icon name="shapes" size={12} />
-                <span class="ref-name stash-msg">{sub.path}</span>
-                {#if sub.state !== 'ok'}
-                  <span class="wt-flag mono" class:sub-warn={sub.state !== 'uninitialized'}>{sentenceCase(sub.state)}</span>
-                {/if}
-                <Icon name="more" size={13} />
-              </button>
-            {/each}
-          {/if}
-        </div>
-      {/if}
-    {/if}
-  </aside>
-
-  <!-- Drag handle on the sidebar's right edge (desktop): widen it to read long
-       branch names. Double-click resets to the default width. -->
-  {#if !isMobile}
-    <!-- A focusable separator is the ARIA window-splitter widget; `splitter`
-         makes it focusable and wires its keys and drag (lib/paneResizer). -->
-    <div
-      class="refs-resizer"
-      role="separator"
-      aria-orientation="vertical"
-      aria-label="Resize the branch list"
-      aria-valuenow={ui.gitGraphSideWidth}
-      use:splitter={{
-        onkeydown: (e) => resizerKey(e, () => ui.gitGraphSideWidth, (w) => ui.setGitGraphSideWidth(w), 220, true),
-        onmousedown: startSideResize,
-        ondblclick: () => ui.setGitGraphSideWidth(220),
-      }}
-      title="Drag or use ←/→ to resize · double-click to reset"
-    ></div>
-  {/if}
+  <RefSidebar
+    refs={data.refs}
+    refsLoading={data.refsLoading}
+    refsError={data.refsError}
+    onretry={() => data.loadRefs(repoId)}
+    {status}
+    stashes={data.stashes}
+    worktrees={data.worktrees}
+    submodules={data.submodules}
+    {currentRepoPath}
+    isMobile={vp.isMobile}
+    collapsed={!secRefsOpen}
+    {checkoutBusy}
+    {openWtBusy}
+    {index}
+    {actions}
+    {menus}
+    selection={sel}
+    {onmergerequest}
+  />
 
   <!-- ── MIDDLE: commit graph ─────────────────────────────────────────────── -->
-  {#if isMobile}
+  {#if vp.isMobile}
     <button
       class="mob-sec-head"
       class:open={secCommitsOpen}
@@ -3212,33 +283,33 @@
       <Icon name="commit" size={13} />
       <span>Commits</span>
       <span class="grow"></span>
-      {#if !commitsLoading}<span class="mob-sec-count">{commits.length}</span>{/if}
+      {#if !data.commitsLoading}<span class="mob-sec-count">{data.commits.length}</span>{/if}
     </button>
   {/if}
   <div
     class="graph-panel"
-    class:panel-shrunk={detailOpen && !isMobile}
-    class:mob-collapsed={isMobile && !secCommitsOpen}
+    class:panel-shrunk={sel.detailOpen && !vp.isMobile}
+    class:mob-collapsed={vp.isMobile && !secCommitsOpen}
     class:resizing={listResizing}
-    style:flex-basis={detailOpen && !isMobile ? `${ui.gitGraphListWidth}px` : null}
-    bind:this={graphPanelEl}
-    onscroll={onGraphScroll}
+    style:flex-basis={sel.detailOpen && !vp.isMobile ? `${ui.gitGraphListWidth}px` : null}
+    bind:this={vp.panelEl}
+    onscroll={vp.onScroll}
   >
-    {#if commitsError && commits.length === 0}
-      <LoadState what="commits" error={commitsError} empty loading={commitsLoading} onretry={retryCommits} />
-    {:else if commitsLoading}
-      <div style="padding: 10px"><Skeleton rows={12} height={ROW_H} /></div>
-    {:else if commits.length === 0}
+    {#if data.commitsError && data.commits.length === 0}
+      <LoadState what="commits" error={data.commitsError} empty loading={data.commitsLoading} onretry={() => data.retryCommits()} />
+    {:else if data.commitsLoading}
+      <div style="padding: 10px"><Skeleton rows={12} height={vp.rowH} /></div>
+    {:else if data.commits.length === 0}
       <div class="dim" style="padding: 18px; font-size: var(--fs-s)">No commits yet — changes you commit from the WIP row appear here.</div>
     {:else}
-      {#if refreshError}
+      {#if data.refreshError}
         <div class="graph-stale">
-          <LoadState what="the graph" error={refreshError} onretry={() => void reloadGraph()} />
+          <LoadState what="the graph" error={data.refreshError} onretry={() => void data.reloadGraph()} />
         </div>
-      {:else if refsStaleError && commits.length > 0}
+      {:else if data.refsStaleError && data.commits.length > 0}
         <!-- Two background ref reads in a row failed: branches may be stale. -->
         <div class="graph-stale">
-          <LoadState what="branches" error={refsStaleError} onretry={() => void refreshAfter().catch(noteBackgroundRead)} />
+          <LoadState what="branches" error={data.refsStaleError} onretry={() => void data.refreshAfter().catch(data.noteBackgroundRead)} />
         </div>
       {/if}
       <div class="graph-list">
@@ -3249,53 +320,32 @@
           <span class="gh-branch" title="Branch / tag">BRANCH / TAG</span>
           <!-- The label is hidden (not clipped to "GRA") when a 1-lane gutter is
                too narrow to hold it at the readable size. -->
-          <span class="gh-graph" class:gh-label-hidden={gutterWidth < 40} style="width: {gutterWidth}px" title="Graph">GRAPH</span>
+          <span class="gh-graph" class:gh-label-hidden={vp.gutterWidth < 40} style="width: {vp.gutterWidth}px" title="Graph">GRAPH</span>
           <span class="gh-msg">COMMIT MESSAGE</span>
         </div>
         <!-- WIP row (GitKraken-style): uncommitted changes pinned above the
              graph; selecting it opens the staging/commit panel on the right. -->
         {#if status.changes.length > 0}
           {@const cx = wipCol * LANE_W + LANE_W / 2}
+          {@const rowH = vp.rowH}
           <button
             class="graph-row wip-row"
-            style:height="{ROW_H}px"
-            class:graph-row-selected={wipSelected}
-            onclick={selectWip}
+            style:height="{rowH}px"
+            class:graph-row-selected={sel.wipSelected}
+            onclick={sel.selectWip}
             title="Uncommitted changes — click to stage & commit"
-            aria-pressed={wipSelected}
+            aria-pressed={sel.wipSelected}
           >
             <div class="branch-cell">
               <span class="wip-chip mono">WIP</span>
             </div>
-            <svg
-              class="gutter"
-              width={gutterWidth}
-              height={ROW_H}
-              style="flex-shrink: 0; width: {gutterWidth}px;"
-            >
+            <svg class="gutter" width={vp.gutterWidth} height={rowH} style="flex-shrink: 0; width: {vp.gutterWidth}px;">
               <!-- dashed stub hanging toward the HEAD commit's lane -->
-              <line
-                x1={cx}
-                y1={ROW_H / 2 + NODE_R}
-                x2={cx}
-                y2={ROW_H}
-                stroke="var(--accent)"
-                stroke-width="1.5"
-                stroke-dasharray="2 2"
-                opacity="0.7"
-              />
-              {#if wipSelected}
-                <circle cx={cx} cy={ROW_H / 2} r={NODE_R + 3} fill="none" stroke="var(--accent)" stroke-width="1.5" opacity="0.55" />
+              <line x1={cx} y1={rowH / 2 + NODE_R} x2={cx} y2={rowH} stroke="var(--accent)" stroke-width="1.5" stroke-dasharray="2 2" opacity="0.7" />
+              {#if sel.wipSelected}
+                <circle cx={cx} cy={rowH / 2} r={NODE_R + 3} fill="none" stroke="var(--accent)" stroke-width="1.5" opacity="0.55" />
               {/if}
-              <circle
-                cx={cx}
-                cy={ROW_H / 2}
-                r={NODE_R}
-                fill="var(--surface)"
-                stroke="var(--accent)"
-                stroke-width="1.5"
-                stroke-dasharray="2.5 1.8"
-              />
+              <circle cx={cx} cy={rowH / 2} r={NODE_R} fill="var(--surface)" stroke="var(--accent)" stroke-width="1.5" stroke-dasharray="2.5 1.8" />
             </svg>
             <div class="commit-info">
               <div class="ci-top">
@@ -3303,9 +353,7 @@
               </div>
               <div class="ci-meta">
                 <span class="dim">
-                  {plural(status.changes.length, 'file')} changed{wipStagedCount > 0
-                    ? ` · ${wipStagedCount} staged`
-                    : ''}
+                  {plural(status.changes.length, 'file')} changed{wipStagedCount > 0 ? ` · ${wipStagedCount} staged` : ''}
                 </span>
                 {#if wipConflictCount > 0}
                   <span class="wip-conflicts" title="{plural(wipConflictCount, 'conflicted file')} — open the WIP panel to resolve">
@@ -3319,179 +367,23 @@
         <!-- Windowed rows: the spacers stand in for everything scrolled past /
              not yet reached, so the scrollbar reflects the FULL history while
              only ~a screenful of rows exists in the DOM. -->
-        <div
-          bind:this={topSpacerEl}
-          class="row-spacer"
-          style="height: {padTop}px"
-          aria-hidden="true"
-        ></div>
-        {#each visibleRows as row (row.commit.sha)}
-          {@const svgW = gutterWidth}
-          {@const cx = row.col * LANE_W + LANE_W / 2}
-          {@const cy = ROW_H / 2}
-          {@const totalH = ROW_H}
-          {@const isSelected = selectedSha === row.commit.sha}
-          {@const isHead = isHeadCommit(row.commit)}
-          {@const isStash = isStashNode(row.commit.sha)}
-          {@const chips = chipsFor(row.commit)}
-          {@const dimmed = highlightSpine !== null && !highlightSpine.has(row.commit.sha)}
-          {@const onSpine = highlightSpine !== null && highlightSpine.has(row.commit.sha)}
-          <div
-            class="graph-row"
-            style:height="{ROW_H}px"
-            class:graph-row-selected={isSelected}
-            class:graph-row-head={isHead}
-            class:dimmed
-            class:on-spine={onSpine}
-            class:stash-row-commit={isStash}
-            class:row-pulse={pulseSha === row.commit.sha}
-            data-sha={row.commit.sha}
-            title={isHead ? `${row.commit.subject} — you are here (HEAD)` : row.commit.subject}
-          >
-            <!-- BRANCH / TAG column: refs for this row, right-aligned so labels
-                 line up vertically and butt against the graph node (GitKraken). -->
-            <div class="branch-cell">
-              {#if shouldCollapseRow(chips)}
-                <!-- Keep collapsed refs on a separate keyboard-accessible control. -->
-                {@const primary = primaryChip(chips)}
-                <button use:rowMenu class="ref-select" tabindex="-1" title={primary.label} aria-label={`Select ${primary.label}`} onclick={() => selectCommit(row.commit)} oncontextmenu={(e) => commitMenu(e, row.commit)}>{@render chipView(primary, primary.label, row.color)}</button>
-                <button
-                  class="ref-expander"
-                  tabindex="0"
-                  aria-label={`Show ${chips.length} refs for ${row.commit.subject}`}
-                  aria-haspopup="dialog"
-                  disabled={refsLoading || !refs}
-                  aria-expanded={refMenu?.commit.sha === row.commit.sha}
-                  title="{chips.length} refs on this commit — click to list"
-                  onclick={(e) => openRefMenu(e, row.commit, chips)}
-                ><Icon name="chevronDown" size={12} />+{chips.length - 1}</button>
-              {:else}
-                {#each chips as chip (chip.kind + chip.label)}
-                  {@const label = chip.kind === 'stash'
-                    ? (stashMsgBySha.get(row.commit.sha) ?? 'stash')
-                    : chip.label}
-                  <button use:rowMenu class="ref-select" tabindex="-1" title={label} aria-label={`Select ${label}`} onclick={() => selectCommit(row.commit)} oncontextmenu={(e) => commitMenu(e, row.commit)}>{@render chipView(chip, label, row.color)}</button>
-                {/each}
-              {/if}
-              <!-- HEAD marker ("you are here") — rightmost so it stays visible as
-                   the cell clips on the left. -->
-              {#if isHead}
-                <span class="head-badge" title="HEAD — checked-out commit">HEAD</span>
-              {/if}
-            </div>
-
-            <button use:rowMenu class="graph-select" title={row.commit.subject} aria-label={row.commit.subject} aria-pressed={isSelected} onclick={() => selectCommit(row.commit)} oncontextmenu={(e) => commitMenu(e, row.commit)}>
-            <!-- SVG gutter -->
-            <svg
-              class="gutter"
-              width={svgW}
-              height={totalH}
-              style="flex-shrink: 0; width: {svgW}px;"
-            >
-              <!-- draw lane lines (background, behind node). Each segment gets an
-                   invisible WIDE companion stroke carrying the <title>: the real
-                   line is 1.5px, far too thin to hover, and a nested SVG <title>
-                   wins over the row's own title attribute — so pointing at a line
-                   names its branch instead of repeating the commit subject. -->
-              {#each row.lines as line}
-                {@const x1 = line.fromCol * LANE_W + LANE_W / 2}
-                {@const x2 = line.toCol * LANE_W + LANE_W / 2}
-                {@const d =
-                  line.kind === 'vert'
-                    ? `M${x1},0 L${x1},${totalH}`
-                    : line.kind === 'converge'
-                      ? `M${x1},0 Q${x1},${cy - 10} ${cx},${cy}`
-                      : `M${cx},${cy} Q${cx},${cy + 10} ${x2},${totalH}`}
-                <path d={d} stroke={line.color} stroke-width="1.5" fill="none" />
-                {#if line.branch}
-                  <path class="lane-hit" d={d} fill="none">
-                    <title>{line.branch}</title>
-                  </path>
-                {/if}
-              {/each}
-              <!-- Leader line tying this row's ref chip(s) to their node, so a
-                   `v1.2.31` / `feature/…` label visibly belongs to ONE lane
-                   instead of floating in the left column. Drawn faint so it
-                   reads as a connector, never as another lane. -->
-              {#if chips.length > 0 && cx > NODE_R}
-                <line
-                  x1={0}
-                  y1={cy}
-                  x2={cx - NODE_R}
-                  y2={cy}
-                  stroke={row.color}
-                  stroke-width="1"
-                  opacity="0.45"
-                />
-              {/if}
-              <!-- The node's OWN lane, split around the node: the half above
-                   (only when a lane above feeds into it — a tip has nothing
-                   above) and the half below (only when it has a parent — a root
-                   has nothing below). Drawing only the lower half is what made
-                   an active branch render as a dashed line while pass-through
-                   lanes rendered solid. -->
-              {#if row.hasAbove}
-                <line x1={cx} y1={0} x2={cx} y2={cy - NODE_R} stroke={row.color} stroke-width="1.5" />
-              {/if}
-              {#if row.hasBelow}
-                <line x1={cx} y1={cy + NODE_R} x2={cx} y2={totalH} stroke={row.color} stroke-width="1.5" />
-              {/if}
-              <!-- node: dashed + muted for stash plumbing; a halo ring when selected -->
-              {#if isStash}
-                <circle
-                  cx={cx}
-                  cy={cy}
-                  r={NODE_R}
-                  fill="var(--surface)"
-                  stroke="var(--text-dim)"
-                  stroke-width="1.3"
-                  stroke-dasharray="2 1.6"
-                />
-              {:else}
-                {#if isSelected}
-                  <circle cx={cx} cy={cy} r={NODE_R + 3} fill="none" stroke={row.color} stroke-width="1.5" opacity="0.55" />
-                {/if}
-                <circle cx={cx} cy={cy} r={NODE_R} fill={row.color} />
-              {/if}
-              <!-- The node's own column: one hit target spanning the full row
-                   height, so hovering this commit's dot OR the line running
-                   through it names the branch the lane belongs to. Last in the
-                   SVG so it sits above the painted marks. -->
-              {#if row.branch}
-                <path class="lane-hit" d="M{cx},0 L{cx},{totalH}" fill="none">
-                  <title>{row.branch}</title>
-                </path>
-              {/if}
-            </svg>
-
-            <!-- commit info -->
-            <div class="commit-info">
-              <div class="ci-top">
-                <span class="ci-subject">{row.commit.subject}</span>
-              </div>
-              <div class="ci-meta">
-                <span class="mono ci-sha">{row.commit.short_sha}</span>
-                <span class="dim ci-author">{row.commit.author}</span>
-                <span class="grow"></span>
-                <span class="dim ci-date" title={fmtDateTitle(row.commit.date)}>{fmtDate(row.commit.date)}</span>
-              </div>
-            </div>
-            </button>
-          </div>
+        <div bind:this={vp.topSpacerEl} class="row-spacer" style="height: {vp.padTop}px" aria-hidden="true"></div>
+        {#each vp.visibleRows as row (row.commit.sha)}
+          {@render commitRow(row)}
         {/each}
-        <div class="row-spacer" style="height: {padBottom}px" aria-hidden="true"></div>
+        <div class="row-spacer" style="height: {vp.padBottom}px" aria-hidden="true"></div>
         <!-- History footer: more pages stream in on scroll, so this is a status
              line (and a manual fallback for anyone who can't scroll-trigger it),
              never a cap. -->
         <div class="graph-more">
-          {#if loadingMore}
-            <span class="spinner" role="status" aria-label="Loading more history" title="Loading more history"></span>
-          {:else if hasMore}
-            <button class="btn small" onclick={() => void loadMore()}>
+          {#if data.loadingMore}
+            <span class="spinner" role="img" aria-label="Loading more history" title="Loading more history"></span>
+          {:else if data.hasMore}
+            <button class="btn small" onclick={() => void data.loadMore()}>
               Load older commits
             </button>
           {:else}
-            <span class="dim">{plural(commits.length, 'commit')} · beginning of history</span>
+            <span class="dim">{plural(data.commits.length, 'commit')} · beginning of history</span>
           {/if}
         </div>
       </div>
@@ -3506,13 +398,13 @@
       onclose={() => (createPrOpen = false)}
       oncreated={() => {
         createPrOpen = false;
-        void refreshAfter();
+        void data.refreshAfter();
       }}
     />
   {/if}
 
   <!-- ── RIGHT: commit detail + diff / WIP staging panel ─────────────────── -->
-  {#if detailOpen && !isMobile}
+  {#if sel.detailOpen && !vp.isMobile}
     <div
       class="graph-resizer"
       role="separator"
@@ -3528,502 +420,180 @@
     ></div>
   {/if}
 
-  {#if isMobile && detailOpen}
+  {#if vp.isMobile && sel.detailOpen}
     <!-- Mobile: a sticky section header for the open commit's diff (or the WIP
          panel), with a tap target to close it (re-opening the commit list). -->
-    <button class="mob-sec-head mob-diff-head" onclick={clearSelection} aria-expanded="true">
+    <button class="mob-sec-head mob-diff-head" onclick={sel.closeDetail} aria-expanded="true">
       <Icon name="chevronDown" size={13} />
       <Icon name="file" size={13} />
-      <span class="mob-diff-title mono">{wipSelected ? '// WIP' : (selectedCommit?.short_sha ?? 'Diff')}</span>
+      <span class="mob-diff-title mono">{sel.wipSelected ? '// WIP' : (sel.selectedCommit?.short_sha ?? 'Diff')}</span>
       <span class="grow"></span>
-      {#if wipSelected}
+      {#if sel.wipSelected}
         <span class="mob-sec-count">{plural(status.changes.length, 'file')}</span>
-      {:else if diffFileCount !== null}
-        <span class="mob-sec-count">{plural(diffFileCount, 'file')}</span>
+      {:else if sel.diffFileCount !== null}
+        <span class="mob-sec-count">{plural(sel.diffFileCount, 'file')}</span>
       {/if}
       <span class="mob-close" aria-hidden="true"><Icon name="x" size={14} /></span>
     </button>
   {/if}
-  <div
-    class="detail-panel"
-    class:detail-visible={detailOpen && !isMobile}
-    class:mob-visible={isMobile && detailOpen}
-    class:mob-hidden={isMobile && !detailOpen}
-  >
-    {#if wipSelected}
-      <WipPanel
-        {repoId}
-        {status}
-        {onstatus}
-        oncommitted={() => void refreshAfter()}
-        onclose={clearSelection}
-        onresolve={onresolveconflicts}
-      />
-    {:else if selectedSha === null}
-      <div class="detail-empty">
-        <span class="detail-empty-label">COMMIT</span>
-        <span class="dim detail-empty-hint">select a commit</span>
-      </div>
-    {:else if selectedCommit !== null}
-      <!-- Header -->
-      <div class="detail-header">
-        <div class="detail-header-main">
-          <!-- One line that never wraps: sha, the refs (each ellipsizes its own
-               label, the group shrinks first), then close pinned at the end. -->
-          <div class="detail-title-row">
-            <span class="mono detail-sha">{selectedCommit.short_sha}</span>
-            <span class="detail-refs">
-              {#each chipsFor(selectedCommit) as chip}
-                <span
-                  class="ref-chip kind-{chip.kind}"
-                  class:current-chip={chip.current}
-                  class:is-worktree={chip.worktree && !chip.current}
-                  title={chip.worktree && !chip.current
-                    ? `Worktree · ${chip.label}`
-                    : chip.current
-                      ? `Checked out · ${chip.label}`
-                      : chip.label}
-                >
-                  {#if chip.current}<Icon name="check" size={12} />{/if}
-                  {#if chip.worktree && !chip.current}<Icon name="worktree" size={12} />{/if}
-                  {#if chip.kind === 'remote' || chip.onRemote}<Icon name="globe" size={12} />{/if}
-                  {#if chip.kind === 'tag'}<Icon name="tag" size={12} />{/if}
-                  {#if chip.kind === 'stash'}<Icon name="stash" size={12} />{/if}
-                  <span class="chip-label">{chip.kind === 'stash' ? (stashMsgBySha.get(selectedCommit.sha) ?? 'stash') : chip.label}</span>
-                </span>
-              {/each}
-            </span>
-            <button class="icon-btn detail-close" onclick={clearSelection} title="Close commit detail" aria-label="Close commit detail">
-              <Icon name="x" size={14} />
-            </button>
-          </div>
-          <div class="detail-subject">{selectedCommit.subject}</div>
-          <div class="detail-meta">
-            <span class="detail-author">{selectedCommit.author}</span>
-            <span class="dim detail-dot">·</span>
-            <span class="dim detail-date" title={fmtDateTitle(selectedCommit.date)}>{fmtDate(selectedCommit.date)}</span>
-            {#if selectedBranch && !chipsFor(selectedCommit).some((c) => c.label === selectedBranch)}
-              <span class="on-branch-hint" title="On branch {selectedBranch}">
-                <Icon name="branch" size={12} /><span class="chip-label">{selectedBranch}</span>
-              </span>
-            {/if}
-          </div>
-        </div>
-      </div>
-
-      <!-- Diff area: summary-first, per-file lazy (see graph-commit-diff). -->
-      <GraphCommitDiff
-        {repoId}
-        sha={diffSha}
-        held={diffHeld}
-        onresume={() => selectedSha && scheduleDiff(selectedSha, 0)}
-        onfiletools={fileToolsMenu}
-        bind:fileCount={diffFileCount}
-      />
-    {/if}
-  </div>
+  <CommitDetailPane
+    {repoId}
+    {status}
+    {onstatus}
+    onresolve={onresolveconflicts}
+    open={sel.detailOpen}
+    isMobile={vp.isMobile}
+    wipSelected={sel.wipSelected}
+    selectedSha={sel.selectedSha}
+    selectedCommit={sel.selectedCommit}
+    chips={sel.selectedCommit ? index.chipsFor(sel.selectedCommit) : []}
+    stashLabel={index.stashLabel}
+    selectedBranch={sel.selectedBranch}
+    diffSha={sel.diffSha}
+    diffHeld={sel.diffHeld}
+    onresume={() => sel.selectedSha && sel.scheduleDiff(sel.selectedSha, 0)}
+    onfiletools={fileToolsMenu}
+    bind:fileCount={sel.diffFileCount}
+    onclose={sel.closeDetail}
+    oncommitted={() => void data.refreshAfter()}
+  />
 </div>
 
-<!-- Collapsed-row ref popover: branches (then tags) for one commit. Rendered at
-     the component root (position:fixed) so it clears the scroll container. A
-     full-screen backdrop closes it on any outside click; Escape also closes. -->
-{#if refMenu}
-  <button type="button" class="ref-pop-backdrop" aria-label="Close" onclick={closeRefMenu}></button>
-  <div class="ref-popover" role="dialog" aria-modal="true" aria-label="Commit references" use:dialogFocus={closeRefMenu} bind:this={refPopEl} style="left: {refPopX}px; top: {refPopY}px; max-height: {refPopMaxH}px;">
-    {#if refMenu.branches.length > 0}
-      <div class="ref-pop-group">Branches</div>
-      {#each refMenu.branches as chip (chip.kind + chip.label)}
-        <div class="ref-action-row">
-        <button use:rowMenu
-          type="button"
-          class="ref-pop-row kind-{chip.kind}"
-          class:is-current={chip.current}
-          class:is-worktree={chip.worktree && !chip.current}
-          title={chip.current
-            ? `Checked out · ${chip.label} — double-click to re-checkout`
-            : chip.worktree
-              ? `Worktree · ${chip.label} — double-click to open worktree`
-              : `Double-click to checkout · ${chip.label}`}
-          onclick={() => refRowSelect(refMenu!.commit)}
-          ondblclick={() => refRowCheckout(chip)}
-          oncontextmenu={(e) => refRowMenu(e, chip)}
-        >
-          {#if chip.current}
-            <Icon name="check" size={12} />
-          {:else if chip.worktree}
-            <Icon name="worktree" size={12} />
-          {:else if chip.kind === 'remote' || chip.onRemote}
-            <Icon name="globe" size={12} />
-          {:else}
-            <Icon name="branch" size={12} />
-          {/if}
-          <span class="ref-pop-label">{chip.label}</span>
-          {#if chip.current}
-            <span class="ref-pop-tag">current</span>
-          {:else if chip.worktree}
-            <span class="ref-pop-tag">worktree</span>
-          {/if}
-        </button>
-        <button class="icon-btn ref-action" title="Actions for {chip.label}" aria-label="Actions for {chip.label}" onclick={(e) => refRowMenu(e, chip)}><Icon name="more" size={13} /></button>
-        </div>
-      {/each}
-    {/if}
-    {#if refMenu.tags.length > 0}
-      <div class="ref-pop-group">Tags</div>
-      {#each refMenu.tags as chip (chip.kind + chip.label)}
-        <div class="ref-action-row">
-        <button use:rowMenu
-          type="button"
-          class="ref-pop-row kind-tag"
-          title={`Double-click to checkout tag (detached) · ${chip.label}`}
-          onclick={() => refRowSelect(refMenu!.commit)}
-          ondblclick={() => refRowCheckout(chip)}
-          oncontextmenu={(e) => refRowMenu(e, chip)}
-        >
-          <Icon name="tag" size={12} />
-          <span class="ref-pop-label">{chip.label}</span>
-        </button>
-        <button class="icon-btn ref-action" title="Actions for {chip.label}" aria-label="Actions for {chip.label}" onclick={(e) => refRowMenu(e, chip)}><Icon name="more" size={13} /></button>
-        </div>
-      {/each}
-    {/if}
-  </div>
+<!-- Collapsed-row ref popover: rendered at the component root (position:fixed)
+     so it clears the scroll container. -->
+{#if refPop.menu}
+  <LazyMount lazy={RefPopover} what="the ref list" quiet props={{ pop: refPop, menu: refPop.menu }} onerror={refPop.close} />
 {/if}
+
+<!-- One windowed commit row: the BRANCH / TAG cell, the SVG lane gutter and
+     the subject / sha / author / date. -->
+{#snippet commitRow(row: LaneRow)}
+  {@const rowH = vp.rowH}
+  {@const svgW = vp.gutterWidth}
+  {@const cx = row.col * LANE_W + LANE_W / 2}
+  {@const cy = rowH / 2}
+  {@const isSelected = sel.selectedSha === row.commit.sha}
+  {@const isHead = index.isHeadCommit(row.commit)}
+  {@const isStash = index.isStashNode(row.commit.sha)}
+  {@const chips = index.chipsFor(row.commit)}
+  {@const spine = sel.highlightSpine}
+  <div
+    class="graph-row"
+    style:height="{rowH}px"
+    class:graph-row-selected={isSelected}
+    class:graph-row-head={isHead}
+    class:dimmed={spine !== null && !spine.has(row.commit.sha)}
+    class:on-spine={spine !== null && spine.has(row.commit.sha)}
+    class:stash-row-commit={isStash}
+    class:row-pulse={vp.pulseSha === row.commit.sha}
+    data-sha={row.commit.sha}
+    title={isHead ? `${row.commit.subject} — you are here (HEAD)` : row.commit.subject}
+  >
+    <!-- BRANCH / TAG column: refs for this row, right-aligned so labels
+         line up vertically and butt against the graph node (GitKraken). -->
+    <div class="branch-cell">
+      {#if shouldCollapseRow(chips)}
+        <!-- Keep collapsed refs on a separate keyboard-accessible control. -->
+        {@const primary = primaryChip(chips)}
+        <button use:rowMenu class="ref-select" tabindex="-1" title={primary.label} aria-label={`Select ${primary.label}`} onclick={() => sel.selectCommit(row.commit)} oncontextmenu={(e) => commitMenu(e, row.commit)}>{@render chipView(primary, primary.label, row.color)}</button>
+        <button
+          class="ref-expander"
+          tabindex="0"
+          aria-label={`Show ${chips.length} refs for ${row.commit.subject}`}
+          aria-haspopup="dialog"
+          disabled={data.refsLoading || !data.refs}
+          aria-expanded={refPop.menu?.commit.sha === row.commit.sha}
+          title="{chips.length} refs on this commit — click to list"
+          onclick={(e) => refPop.open(e, row.commit, chips)}
+        ><Icon name="chevronDown" size={12} />+{chips.length - 1}</button>
+      {:else}
+        {#each chips as chip (chip.kind + chip.label)}
+          {@const label = chip.kind === 'stash' ? index.stashLabel(row.commit.sha) : chip.label}
+          <button use:rowMenu class="ref-select" tabindex="-1" title={label} aria-label={`Select ${label}`} onclick={() => sel.selectCommit(row.commit)} oncontextmenu={(e) => commitMenu(e, row.commit)}>{@render chipView(chip, label, row.color)}</button>
+        {/each}
+      {/if}
+      <!-- HEAD marker ("you are here") — rightmost so it stays visible as
+           the cell clips on the left. -->
+      {#if isHead}
+        <span class="head-badge" title="HEAD — checked-out commit">HEAD</span>
+      {/if}
+    </div>
+
+    <button use:rowMenu class="graph-select" title={row.commit.subject} aria-label={row.commit.subject} aria-pressed={isSelected} onclick={() => sel.selectCommit(row.commit)} oncontextmenu={(e) => commitMenu(e, row.commit)}>
+    <svg class="gutter" width={svgW} height={rowH} style="flex-shrink: 0; width: {svgW}px;">
+      <!-- Lane lines (behind the node). Each segment gets an invisible WIDE
+           companion stroke carrying the <title>: the real line is 1.5px, far
+           too thin to hover, and a nested SVG <title> wins over the row's own
+           title — so pointing at a line names its branch. -->
+      {#each row.lines as line}
+        {@const x1 = line.fromCol * LANE_W + LANE_W / 2}
+        {@const x2 = line.toCol * LANE_W + LANE_W / 2}
+        {@const d =
+          line.kind === 'vert'
+            ? `M${x1},0 L${x1},${rowH}`
+            : line.kind === 'converge'
+              ? `M${x1},0 Q${x1},${cy - 10} ${cx},${cy}`
+              : `M${cx},${cy} Q${cx},${cy + 10} ${x2},${rowH}`}
+        <path d={d} stroke={line.color} stroke-width="1.5" fill="none" />
+        {#if line.branch}
+          <path class="lane-hit" d={d} fill="none">
+            <title>{line.branch}</title>
+          </path>
+        {/if}
+      {/each}
+      <!-- Leader line tying this row's ref chip(s) to their node, so a label
+           visibly belongs to ONE lane. Faint: a connector, never a lane. -->
+      {#if chips.length > 0 && cx > NODE_R}
+        <line x1={0} y1={cy} x2={cx - NODE_R} y2={cy} stroke={row.color} stroke-width="1" opacity="0.45" />
+      {/if}
+      <!-- The node's OWN lane, split around the node: the half above (only
+           when a lane above feeds into it — a tip has nothing above) and the
+           half below (only when it has a parent — a root has nothing below). -->
+      {#if row.hasAbove}
+        <line x1={cx} y1={0} x2={cx} y2={cy - NODE_R} stroke={row.color} stroke-width="1.5" />
+      {/if}
+      {#if row.hasBelow}
+        <line x1={cx} y1={cy + NODE_R} x2={cx} y2={rowH} stroke={row.color} stroke-width="1.5" />
+      {/if}
+      <!-- node: dashed + muted for stash plumbing; a halo ring when selected -->
+      {#if isStash}
+        <circle cx={cx} cy={cy} r={NODE_R} fill="var(--surface)" stroke="var(--text-dim)" stroke-width="1.3" stroke-dasharray="2 1.6" />
+      {:else}
+        {#if isSelected}
+          <circle cx={cx} cy={cy} r={NODE_R + 3} fill="none" stroke={row.color} stroke-width="1.5" opacity="0.55" />
+        {/if}
+        <circle cx={cx} cy={cy} r={NODE_R} fill={row.color} />
+      {/if}
+      <!-- The node's own column: one hit target spanning the full row height,
+           so hovering this commit's dot OR its line names the lane's branch.
+           Last in the SVG so it sits above the painted marks. -->
+      {#if row.branch}
+        <path class="lane-hit" d="M{cx},0 L{cx},{rowH}" fill="none">
+          <title>{row.branch}</title>
+        </path>
+      {/if}
+    </svg>
+
+    <div class="commit-info">
+      <div class="ci-top">
+        <span class="ci-subject">{row.commit.subject}</span>
+      </div>
+      <div class="ci-meta">
+        <span class="mono ci-sha">{row.commit.short_sha}</span>
+        <span class="dim ci-author">{row.commit.author}</span>
+        <span class="grow"></span>
+        <span class="dim ci-date" title={fmtDateTitle(row.commit.date)}>{fmtDate(row.commit.date)}</span>
+      </div>
+    </div>
+    </button>
+  </div>
+{/snippet}
 
 <style>
   .graphview {
     display: flex;
     height: 100%;
     min-height: 0;
-  }
-
-  /* ── refs panel ── */
-  .refs-panel {
-    width: 220px;
-    flex-shrink: 0;
-    overflow-y: auto;
-    border-inline-end: 1px solid var(--border);
-    padding: 6px 0;
-  }
-  /* Drag handle on the sidebar's right edge (desktop). Mirrors .graph-resizer:
-     a thin hit-area straddling the border that lights up on hover. */
-  .refs-resizer {
-    flex: 0 0 6px;
-    margin-inline-start: -2px;
-    cursor: col-resize;
-    z-index: 1;
-  }
-  .refs-resizer:hover {
-    background: var(--accent-soft-strong);
-  }
-  /* Middle-ellipsized branch name: the head span shrinks + ellipsizes while the
-     tail (distinguishing suffix) stays pinned and fully visible. */
-  .ref-name.mid {
-    display: inline-flex;
-    align-items: baseline;
-    flex: 1;
-    min-width: 0;
-    overflow: hidden;
-    white-space: nowrap;
-  }
-  .mid-head {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    min-width: 0;
-    flex: 0 1 auto;
-  }
-  .mid-tail {
-    flex: 0 0 auto;
-    white-space: nowrap;
-  }
-  /* "Already in develop / main" mark: a small, muted success check + names. */
-  .merged-mark {
-    flex-shrink: 0;
-    display: inline-flex;
-    align-items: center;
-    gap: 2px;
-    color: var(--success);
-    opacity: 0.85;
-  }
-  .merged-into {
-    font-size: var(--fs-xs);
-    white-space: nowrap;
-  }
-  .ref-row:hover .merged-mark {
-    opacity: 1;
-  }
-  .ref-section {
-    margin-bottom: 2px;
-  }
-  .ref-header {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    width: 100%;
-    padding: 6px 10px;
-    border: none;
-    background: transparent;
-    color: var(--text-dim);
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    letter-spacing: 0.06em;
-    cursor: pointer;
-    text-transform: uppercase;
-    text-align: start;
-    transition: color var(--dur-fast) ease-out;
-  }
-  .ref-header:hover {
-    color: var(--text);
-  }
-  .ref-count {
-    margin-inline-start: auto;
-    background: var(--surface-2);
-    border-radius: 999px;
-    font-size: var(--fs-xs);
-    padding: 1px 6px;
-    font-weight: 600;
-    letter-spacing: 0;
-  }
-  /* Collapsible branch-folder header (feature/, release/, …). The folder icon +
-     twisty + medium-weight name set it apart from the leaf branch rows so the
-     nesting reads as a hierarchy, not a flat sibling list. */
-  .ref-folder {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    width: 100%;
-    /* Starts on the SAME indent as a loose branch row (22px): a folder is a
-       sibling of the loose branches, not of the LOCAL/REMOTE section header —
-       it used to sit 11px further out than the rows beside it. */
-    padding-block: 4px;
-    padding-inline: 22px 10px;
-    border: none;
-    background: transparent;
-    color: var(--text);
-    font-size: var(--fs-xs);
-    cursor: pointer;
-    text-align: start;
-    transition: background var(--dur-fast) ease-out, color var(--dur-fast) ease-out;
-  }
-  .ref-folder:hover {
-    background: var(--hover);
-  }
-  /* The count pill is surface-2 too — lift it so it doesn't vanish on hover. */
-  .ref-folder:hover .ref-count {
-    background: var(--surface-3);
-  }
-  /* The folder glyph picks up the accent so the grouping is obvious at a glance. */
-  .ref-folder :global(svg:nth-of-type(2)) {
-    color: var(--accent-text);
-    opacity: 0.8;
-  }
-  .folder-name {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    font-weight: 600;
-  }
-  /* Children of a folder: indented under a vertical tree guide so the nesting is
-     visually unmistakable. */
-  .folder-children {
-    /* The guide drops from the centre of the folder's 11px chevron (22 + 5.5),
-       and nested rows' dots then line up under the folder icon. */
-    margin-inline-start: 28px;
-    border-inline-start: 1.5px solid var(--border);
-  }
-  .ref-action-row {
-    display: flex;
-    align-items: stretch;
-    min-width: 0;
-  }
-  .ref-action-row .ref-row {
-    flex: 1;
-    min-width: 0;
-    width: 0;
-  }
-  .ref-action {
-    flex-shrink: 0;
-    align-self: center;
-  }
-  @media (max-width: 1024px) {
-    .ref-action, .ref-expander { min-width: 36px; min-height: 36px; }
-  }
-  .ref-row {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    width: 100%;
-    height: 24px;
-    padding-block: 0;
-    padding-inline: 22px 10px;
-    border: none;
-    background: transparent;
-    color: var(--text-dim);
-    font-size: var(--fs-s);
-    cursor: pointer;
-    text-align: start;
-    overflow: hidden;
-    transition: background var(--dur-fast) ease-out, color var(--dur-fast) ease-out;
-  }
-  .ref-more-leaves {
-    display: flex;
-    align-items: center;
-    width: 100%;
-    height: 24px;
-    padding-block: 0;
-    padding-inline: 22px 10px;
-    border: none;
-    background: transparent;
-    font-size: var(--fs-xs);
-    cursor: pointer;
-    text-align: start;
-  }
-  .ref-more-leaves:hover {
-    background: var(--hover);
-  }
-  .ref-row:hover:not(:disabled) {
-    background: var(--hover);
-    color: var(--text);
-  }
-  .ref-row:disabled {
-    cursor: default;
-  }
-  /* Deep jump in flight (paging history to reach the ref's commit). */
-  .ref-row-busy {
-    opacity: 0.6;
-    cursor: progress;
-  }
-  /* Tag actions: revealed on hover/focus so the row stays clean, but always
-     present for pointers that have no right-click. */
-  .ref-more {
-    opacity: 0;
-    transition: opacity var(--dur-fast) ease-out;
-  }
-  .ref-action-row:hover .ref-more,
-  .ref-action-row:focus-within .ref-more,
-  .ref-more:focus-visible {
-    opacity: 1;
-  }
-  /* A pointer that cannot hover keeps the tag actions visible. */
-  @media (hover: none) {
-    .ref-more {
-      opacity: 1;
-    }
-  }
-  /* Folder children sit just inside the tree guide of `.folder-children`. */
-  .ref-row.nested {
-    padding-inline-start: 10px;
-  }
-  /* The checked-out branch: accent text + a leading accent rail and faint wash so
-     the row itself is unmistakable, not just the check pip. */
-  .ref-row.current {
-    color: var(--accent-text);
-    font-weight: 600;
-    background: var(--accent-soft);
-    box-shadow: inset 2px 0 0 0 var(--accent);
-  }
-  .ref-row.current:hover:not(:disabled) {
-    background: var(--accent-soft);
-    color: var(--accent-text);
-  }
-  :global([dir='rtl']) .ref-row.current {
-    box-shadow: inset -2px 0 0 0 var(--accent);
-  }
-  .ref-row[draggable='true'] {
-    cursor: grab;
-  }
-  .ref-row.dragging {
-    opacity: 0.45;
-  }
-  /* Accent outline while a valid merge source hovers this local branch. */
-  .ref-row.drag-target {
-    background: var(--accent-soft);
-    color: var(--text);
-    outline: 1.5px solid var(--accent-text);
-    outline-offset: -1.5px;
-    border-radius: var(--radius-s);
-  }
-  .ref-row.tag {
-    cursor: default;
-    color: var(--text-dim);
-  }
-  .ref-row.remote {
-    color: var(--text-dim);
-  }
-  .ref-name {
-    flex: 1;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    font-size: var(--fs-xs);
-  }
-  /* Compact "also tracked on remote" glyph that replaces a redundant
-     origin/<same-name> upstream string, so the branch NAME keeps the row width. */
-  .ref-track {
-    flex-shrink: 0;
-    display: inline-flex;
-    align-items: center;
-    color: var(--text-dim);
-    opacity: 0.65;
-  }
-  /* Left-panel current-branch marker: a filled accent check pip. */
-  .cur-pip {
-    display: grid;
-    place-items: center;
-    flex-shrink: 0;
-    width: 14px;
-    height: 14px;
-    border-radius: 50%;
-    background: var(--accent-solid);
-    color: var(--accent-contrast);
-  }
-  /* Worktree pip: violet folder so it never reads as "checked out here". */
-  .cur-pip.wt-pip {
-    background: color-mix(in srgb, var(--worktree) 55%, transparent);
-    color: var(--worktree-text);
-    border: 1px solid color-mix(in srgb, var(--worktree) 50%, transparent);
-  }
-  /* Branch held by another worktree — distinct from a regular local branch. */
-  .ref-row.is-worktree {
-    color: var(--worktree-text);
-  }
-  .ref-row.is-worktree:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--worktree) 12%, transparent);
-  }
-  /* Inline "open worktree" affordance next to the branch / worktree name. */
-  .wt-open-hint {
-    flex-shrink: 0;
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    letter-spacing: .06em;
-    color: var(--worktree-text);
-    opacity: 0.85;
-    white-space: nowrap;
-  }
-  .ref-row:hover .wt-open-hint {
-    opacity: 1;
-  }
-  .ref-ab {
-    display: inline-flex;
-    gap: 2px;
-    flex-shrink: 0;
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    font-variant-numeric: tabular-nums;
-  }
-  .ref-upstream {
-    flex-shrink: 0;
-    font-size: var(--fs-xs);
-    max-width: 90px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .ref-empty {
-    padding: 4px 22px 6px;
-    font-size: var(--fs-xs);
   }
 
   /* ── graph panel ── */
@@ -4206,9 +776,6 @@
     padding: 10px 12px 16px;
     font-size: var(--fs-xs);
   }
-  .refs-error {
-    padding: 8px;
-  }
   /* ── WIP row (uncommitted changes, GitKraken-style) ── */
   .wip-row:not(.graph-row-selected) {
     background: var(--accent-soft);
@@ -4301,82 +868,6 @@
     flex: 1;
     min-width: 0;
   }
-  /* ── Color-coded ref chips (classified local / remote / tag / HEAD) ── */
-  .ref-chip {
-    display: inline-flex;
-    align-items: center;
-    gap: 2px;
-    flex-shrink: 0;
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    padding: 1px 6px;
-    border-radius: var(--radius-s);
-    background: var(--surface-2);
-    color: var(--text-dim);
-    border: 1px solid transparent;
-    /* Lane tint: a bar on the side facing the graph, in the SAME color as the
-       node this ref sits on, so a label is readable as belonging to one lane
-       (the SVG leader line completes the connection). */
-    border-inline-end: 3px solid var(--lane, transparent);
-    white-space: nowrap;
-    max-width: 160px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  /* Local branch — subtle, neutral. */
-  .ref-chip.kind-local {
-    background: var(--accent-soft);
-    color: var(--accent-text);
-  }
-  /* Remote-tracking branch — distinct teal/cyan so it never reads as local. */
-  .ref-chip.kind-remote {
-    background: color-mix(in srgb, var(--cat-6) 18%, transparent);
-    color: var(--text);
-  }
-  /* Tag — amber. */
-  .ref-chip.kind-tag {
-    background: var(--warning-soft);
-    color: var(--warning);
-  }
-  /* Detached HEAD — muted warning. */
-  .ref-chip.kind-detached {
-    background: color-mix(in srgb, var(--danger) 18%, transparent);
-    color: var(--danger);
-  }
-  /* The checked-out branch — the most prominent chip (filled accent). */
-  .ref-chip.kind-head,
-  .ref-chip.current-chip {
-    background: var(--accent-solid);
-    color: var(--accent-contrast);
-    border-color: var(--accent-solid);
-  }
-  /* Branch checked out in another worktree — violet, not local-branch blue. */
-  .ref-chip.is-worktree {
-    background: color-mix(in srgb, var(--worktree) 18%, transparent);
-    color: var(--worktree-text);
-    border-color: color-mix(in srgb, var(--worktree) 35%, transparent);
-  }
-  .chip-ab {
-    display: inline-flex;
-    flex-shrink: 0;
-    gap: 2px;
-    margin-inline-start: 2px;
-    padding-inline-start: 2px;
-    border-inline-start: 1px solid color-mix(in srgb, var(--accent-contrast) 45%, transparent);
-    font-variant-numeric: tabular-nums;
-  }
-  .ab-ahead {
-    color: var(--success);
-  }
-  .ab-behind {
-    color: var(--danger);
-  }
-  .current-chip .ab-ahead,
-  .current-chip .ab-behind,
-  .kind-head .ab-ahead,
-  .kind-head .ab-behind {
-    color: var(--accent-contrast);
-  }
   .ci-meta {
     display: flex;
     align-items: center;
@@ -4413,29 +904,14 @@
     overflow: hidden;
     padding-inline: 6px;
   }
-  .chip-label {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    min-width: 0;
-  }
   /* In the fixed-width column a chip SHRINKS to fit and ellipsizes its own
      label at the end. Left rigid (flex-shrink:0, max-width 160px) a long chip
      overflowed a 156px (or 76px with the detail open) cell and, being
      end-aligned, got clipped at its START — "gin/CS3-15178-goo…" lost both
      ends. The HEAD badge and the +N expander stay rigid. */
-  .branch-cell .ref-chip {
+  .branch-cell :global(.ref-chip) {
     flex-shrink: 1;
     min-width: 0;
-  }
-  .ref-chip > :global(svg) {
-    flex-shrink: 0;
-  }
-  /* Stash decoration — dashed + muted so it reads as plumbing, not a branch. */
-  .ref-chip.kind-stash {
-    background: transparent;
-    color: var(--text-dim);
-    border: 1px dashed var(--text-dim);
   }
 
   /* ── Multi-ref collapse: the "▾ +N" expander + its grouped popover ──────────── */
@@ -4462,86 +938,8 @@
     color: var(--accent-text);
     border-color: var(--accent-line);
   }
-  /* Full-screen click-catcher: any outside click closes the popover. */
-  .ref-pop-backdrop {
-    position: fixed;
-    inset: 0;
-    z-index: var(--z-popover-backdrop);
-    background: transparent;
-    border: 0;
-    padding: 0;
-    cursor: default;
-  }
-  .ref-popover {
-    position: fixed;
-    z-index: var(--z-popover);
-    min-width: 200px;
-    max-width: 340px;
-    overflow-y: auto;
-    padding: 4px;
-    background: var(--surface);
-    border: 1px solid var(--glass-border);
-    border-radius: var(--radius-l);
-    box-shadow: var(--glass-shadow);
-  }
-  .ref-pop-group {
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: .06em;
-    color: var(--text-dim);
-    padding: 6px 8px 2px;
-  }
-  .ref-pop-row {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    width: 100%;
-    text-align: start;
-    padding: 6px 8px;
-    border: 0;
-    border-radius: var(--radius-s);
-    background: transparent;
-    color: var(--text);
-    font-size: var(--fs-s);
-    cursor: pointer;
-  }
-  .ref-pop-row:hover,
-  .ref-pop-row:focus-visible {
-    background: var(--accent-soft);
-    color: var(--accent-text);
-    outline: none;
-  }
-  .ref-pop-label {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    flex: 1 1 auto;
-    min-width: 0;
-  }
-  .ref-pop-tag {
-    flex-shrink: 0;
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: .06em;
-    padding: 1px 6px;
-    border-radius: 999px;
-    background: var(--accent-soft-strong);
-    color: var(--accent-text);
-  }
-  .ref-pop-row.is-worktree {
-    color: var(--worktree-text);
-  }
-  .ref-pop-row.is-worktree .ref-pop-tag {
-    color: var(--worktree-text);
-    border-color: color-mix(in srgb, var(--worktree) 40%, transparent);
-  }
-  .ref-pop-row:hover .ref-pop-tag,
-  .ref-pop-row:focus-visible .ref-pop-tag {
-    background: var(--surface);
-    color: var(--accent-text);
-    border-color: var(--accent-line);
+  @media (max-width: 1024px) {
+    .ref-expander { min-width: 36px; min-height: 36px; }
   }
 
   /* ── Branch-line highlight (press a commit → see its branch) ───────────────
@@ -4561,179 +959,6 @@
   .graph-row.stash-row-commit .ci-subject {
     color: var(--text-dim);
     font-style: italic;
-  }
-
-  /* "on <branch>" hint in the open commit's detail header. */
-  .on-branch-hint {
-    display: inline-flex;
-    align-items: center;
-    gap: 2px;
-    min-width: 0;
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    color: var(--text-dim);
-    padding: 1px 8px;
-    border-radius: 999px;
-    background: var(--surface-2);
-    white-space: nowrap;
-  }
-
-  /* ── STASHES sidebar rows ── */
-  .stash-row {
-    cursor: pointer;
-    color: var(--text-dim);
-  }
-  .stash-row:hover {
-    background: var(--hover);
-    color: var(--text);
-  }
-  .stash-msg {
-    font-size: var(--fs-xs);
-  }
-  .stash-branch {
-    flex-shrink: 0;
-    font-size: var(--fs-xs);
-    max-width: 80px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  /* worktree/submodule row accents (share the stash-row base) */
-  .wt-dirty {
-    flex-shrink: 0;
-    color: var(--warning);
-    font-size: var(--fs-xs);
-    line-height: 1;
-  }
-  .wt-flag {
-    flex-shrink: 0;
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-  }
-  .wt-flag.sub-warn {
-    color: var(--warning);
-  }
-  .wt-prune {
-    width: 100%;
-    text-align: start;
-    background: none;
-    border: none;
-    cursor: pointer;
-    color: var(--text-dim);
-    font-size: var(--fs-xs);
-  }
-
-  /* ── detail panel ── */
-  .detail-panel {
-    width: 0;
-    min-width: 0;
-    flex-shrink: 0;
-    overflow: hidden;
-    display: flex;
-    flex-direction: column;
-    border-inline-start: 1px solid var(--border);
-    background: var(--surface);
-  }
-  .detail-panel.detail-visible {
-    /* Fill all remaining width after refs + commit-list so the page isn't
-       half-empty when a commit is open. */
-    flex: 1 1 0;
-    width: auto;
-    min-width: 360px;
-    overflow: hidden;
-  }
-  .detail-empty {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    height: 100%;
-    gap: 6px;
-  }
-  .detail-empty-label {
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    letter-spacing: .06em;
-    color: var(--text-dim);
-    text-transform: uppercase;
-  }
-  .detail-empty-hint {
-    font-size: var(--fs-s);
-  }
-
-  /* Detail header */
-  .detail-header {
-    flex-shrink: 0;
-    padding: 10px 12px 8px;
-    border-bottom: 1px solid var(--border);
-    background: var(--surface-2);
-  }
-  .detail-header-main {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-  }
-  .detail-title-row {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    min-width: 0;
-  }
-  .detail-sha {
-    flex-shrink: 0;
-  }
-  .detail-refs {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    flex: 1;
-    min-width: 0;
-    overflow: hidden;
-  }
-  .detail-refs .ref-chip {
-    flex-shrink: 1;
-    min-width: 0;
-  }
-  .detail-sha {
-    font-size: var(--fs-xs);
-    color: var(--accent-text);
-    font-weight: 600;
-    letter-spacing: .06em;
-  }
-  .detail-subject {
-    font-size: var(--fs-m);
-    font-weight: 600;
-    color: var(--text);
-    line-height: 1.35;
-    word-break: break-word;
-  }
-  .detail-meta {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    min-width: 0;
-    font-size: var(--fs-xs);
-  }
-  .detail-author {
-    color: var(--text-dim);
-    font-size: var(--fs-xs);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    min-width: 0;
-  }
-  .detail-dot {
-    font-size: var(--fs-xs);
-    flex-shrink: 0;
-  }
-  .detail-date {
-    font-size: var(--fs-xs);
-    flex-shrink: 0;
-  }
-  /* An .icon-btn; only its placement is local. */
-  .detail-close {
-    margin-inline-start: auto;
-    flex-shrink: 0;
   }
 
   /* Shared utilities */
@@ -4804,16 +1029,6 @@
     }
     .mobile .mob-sec-head { display: flex; }
 
-    /* Branches/refs pane: capped height, scrolls on its own when expanded. */
-    .mobile .refs-panel {
-      width: 100%;
-      flex: 0 0 auto;
-      max-height: 38vh;
-      overflow-y: auto;
-      overscroll-behavior: contain;
-      border-inline-end: none;
-      border-bottom: 1px solid var(--border);
-    }
     /* Commit list: takes the remaining room, scrolls on its own. */
     .mobile .graph-panel,
     .mobile .graph-panel.panel-shrunk {
@@ -4826,26 +1041,9 @@
       overscroll-behavior: contain;
       border-inline-end: none;
     }
-    /* Diff/detail pane: the prominent section once a commit is open. */
-    .mobile .detail-panel {
-      width: 100%;
-      border-inline-start: none;
-    }
-    .mobile .detail-panel.mob-visible {
-      flex: 1 1 auto;
-      min-width: 0;
-      min-height: 50vh;
-      width: 100%;
-      overflow: hidden;
-      display: flex;
-    }
 
     /* A collapsed section hides its body entirely (header stays tappable). */
     .mobile .mob-collapsed {
-      display: none !important;
-    }
-    /* No commit selected → drop the empty diff pane so the list fills the view. */
-    .mobile .detail-panel.mob-hidden {
       display: none !important;
     }
 
@@ -4856,32 +1054,11 @@
     .mobile .ci-sha { font-size: var(--fs-s); }
     .mobile .ci-author { font-size: var(--fs-s); max-width: 110px; }
     .mobile .ci-date { font-size: var(--fs-s); }
-    .mobile .ref-chip { font-size: var(--fs-xs); max-width: 120px; }
+    .mobile :global(.ref-chip) { font-size: var(--fs-xs); max-width: 120px; }
     /* Branch/tag column stays a compact, aligned column on phones; chips clip on
        the left and the full refs are available in the detail header on tap. */
     .mobile .graph-panel { --branch-col-w: 108px; }
     .mobile .branch-cell { gap: 2px; padding-inline: 4px; }
-    .mobile .branch-cell .ref-chip { max-width: 96px; }
-
-    /* Close (✕) for the open commit detail — bump to a ≥40px touch target. */
-    .mobile .detail-close {
-      min-width: 40px;
-      min-height: 40px;
-      font-size: var(--fs-xl);
-      padding: 8px;
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-    }
-
-    /* Refs rows: bigger tap targets + legible text. */
-    .mobile .ref-row { height: 36px; font-size: var(--fs-l); }
-    .mobile .ref-name { font-size: var(--fs-m); }
-    .mobile .ref-header { font-size: var(--fs-s); padding: 8px 12px; }
-
-    .mobile .detail-subject { font-size: var(--fs-l); }
-    .mobile .detail-sha { font-size: var(--fs-s); }
-    .mobile .detail-author,
-    .mobile .detail-date { font-size: var(--fs-s); }
+    .mobile .branch-cell :global(.ref-chip) { max-width: 96px; }
   }
 </style>

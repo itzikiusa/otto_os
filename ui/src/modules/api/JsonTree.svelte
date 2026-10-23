@@ -42,7 +42,7 @@
       await copyTextOrThrow(text);
       toasts.success(`Copied ${what}`);
     } catch {
-      toasts.error('Couldn’t copy', 'The clipboard isn’t available.');
+      toasts.error('Couldn’t copy', 'The clipboard isn’t available here. Select the text and copy it manually.');
     }
   }
   function menu(e: MouseEvent | KeyboardEvent, path: string, v: unknown): void {

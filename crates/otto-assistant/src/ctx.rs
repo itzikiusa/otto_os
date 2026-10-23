@@ -88,7 +88,7 @@ pub trait AssistantCtx: Clone + Send + Sync + 'static {
 
     // ---- session hooks -----------------------------------------------------
     /// Paste `prompt` into a live agent TUI and press Enter, verifying the
-    /// submit (`review_session::submit_prompt`). `false` = not delivered.
+    /// submit (`otto_sessions::submit::submit_prompt`). `false` = not delivered.
     fn submit_prompt<'a>(&'a self, sid: &'a Id, prompt: &'a str) -> BoxFut<'a, bool>;
 
     /// Run a personal agent's fresh visible session(s): create the session,

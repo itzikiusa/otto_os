@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { computeRunStats, EMPTY_AGENT_STATS } from '../src/modules/swarm/runStats.ts';
+import { computeRunStats, EMPTY_AGENT_STATS } from '../src/lib/swarm/runStats.ts';
 import type { SwarmRun } from '../src/modules/swarm/types.ts';
 
 const run = (id: string, agent: string, status: string, at: string, task: string | null = null): SwarmRun =>

@@ -302,11 +302,7 @@ async fn rating_waits_for_retry_publication_and_keeps_the_final_score_consistent
         .unwrap();
 
     // Pause the actual retry between its fresh snapshot and score publication.
-    let proof_lock = Arc::new(tokio::sync::Mutex::new(()));
-    ctx.proof_locks
-        .lock()
-        .unwrap()
-        .insert(pack.id.clone(), proof_lock.clone());
+    let proof_lock = ctx.proof_locks.handle(&pack.id);
     let blocked_proof = proof_lock.lock().await;
     let retry_ctx = ctx.clone();
     let eval_id = eval.id.clone();

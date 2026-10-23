@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announce } from '../../lib/announce.svelte';
   import { plural } from '../../lib/plural';
   // DLQ/Replay panel. Lets an operator re-publish selected messages from a
   // source topic to a target topic, with optional key/header transforms.
@@ -117,6 +118,9 @@
       running = false;
     }
   }
+  // Spoken at the state edge through the shell's always-mounted announcer: a
+  // live region inserted together with its text is not read (WebKit/VoiceOver).
+  $effect(() => { if (result?.error) announce(result.error, { assertive: true }); });
 </script>
 
 <div class="replay">
@@ -214,7 +218,7 @@
   <!-- Evidence table -->
   {#if result}
     <div class="evidence">
-      {#if result.error}<p role="alert" class="field-err">{result.error}</p>{/if}
+      {#if result.error}<p class="field-err">{result.error}</p>{/if}
       <h5>{result.evidence_saved === false ? 'Unsaved evidence' : 'Evidence'} — replay {result.replay_id.slice(0, 8)}…</h5>
       <p class="muted small">
         {plural(result.count, 'message')} replayed

@@ -204,6 +204,11 @@
     z-index: var(--z-modal);
     background: var(--scrim);
     display: grid;
+    /* One track exactly the window's size: an `auto` track grows to a tall
+       sheet's own height (a `height` prop of 800 on a 740px phone), and the
+       sheet's percentage max-height then resolves against that grown track —
+       so the footer was pushed below the window instead of the body scrolling. */
+    grid-template: minmax(0, 1fr) / minmax(0, 1fr);
     place-items: center;
     animation: otto-fade-in var(--dur-fast) var(--ease-out);
   }

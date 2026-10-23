@@ -205,8 +205,10 @@ collector keeps ONE long-lived `kubectl proxy` per monitored cluster (on a
 Unix socket in a private `0700` temp directory, accepting only pod-proxy GETs)
 and sends each probe to it as a pooled HTTP request — no process per pod
 (the same proxy also serves the read-only events and metrics-server lists). The
-proxy is restarted when it exits or its credentials change (kubeconfig or
-token overlay rewritten), and stops with the loop; if it cannot start, each
+proxy is restarted when it exits, when its credentials change (kubeconfig or
+token overlay rewritten), or when metrics-server answers it with a 401 (the
+loaded credential was rejected: the status reads "credentials rejected", not
+RBAC, and the next cycle starts a fresh proxy), and stops with the loop; if it cannot start, each
 probe falls back to a short `kubectl get --raw`. `auto` sniffs up to 3 pods (spread over the target list) and only an
 **API-server** refusal selects port-forward: a Kubernetes `Status` answer
 with reason `Forbidden`/`Unauthorized`, or a broken hop to the API server.

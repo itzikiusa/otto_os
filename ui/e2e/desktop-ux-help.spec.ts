@@ -37,7 +37,9 @@ test('Getting started opens from the list and the first chapter', async ({ page 
 test('search, no results, keyboard selection and unknown guide recovery', async ({ page }) => {
   await openHelp(page);
   await page.getByTestId('guide-search').fill('zzzznothing');
-  await expect(page.getByText('No guides match')).toBeVisible();
+  // The visible line, plus the always-mounted count status screen readers hear.
+  await expect(page.getByText('No guides match “zzzznothing”.', { exact: true })).toBeVisible();
+  await expect(page.getByTestId('guide-search-count')).toHaveText('No guides match “zzzznothing”');
   await page.getByRole('button', { name: 'Clear search' }).click();
   await page.getByTestId('guide-search').fill('cmd k');
   await expect(page.locator('[data-guide="command-bar"]')).toBeVisible();

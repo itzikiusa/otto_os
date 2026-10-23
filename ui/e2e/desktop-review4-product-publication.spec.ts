@@ -9,6 +9,16 @@ const originalBody = 'Reviewed café.\r\n  Keep these spaces.  \nThird\nFourth\n
 const revisedBody = 'Revised café.\r\n  New exact spaces.  \nThird\nFourth\nFifth\nSixth\nRevised final line.\n';
 const digest = (body: string) => createHash('sha256').update(body, 'utf8').digest('hex');
 
+/** Pick a parent page through the shared Confluence page picker (`#pd-parent`
+ *  searches pages by title; the form stores the picked page's id). */
+async function pickParentPage(page: Page, dialog: ReturnType<Page['getByRole']>, id: string, title: string) {
+  await page.context().route('**/api/v1/issue/confluence/search?*', route =>
+    route.fulfill({json: [{id, title, space_key: new URL(route.request().url()).searchParams.get('space') ?? '', url: `https://fixture.invalid/pages/${id}`}]}));
+  await dialog.locator('#pd-parent').fill(title);
+  await dialog.getByRole('option', {name: title, exact: true}).click();
+  await expect(dialog.getByRole('button', {name: 'Clear parent page', exact: true})).toBeVisible();
+}
+
 async function fixture(page: Page, withOtherStory = false) {
   const {ctx, base} = await apiCtx();
   let detail: ProductStoryDetail;
@@ -78,11 +88,11 @@ for (const mode of ['story', 'rfc'] as const) {
     const publish = dialog.getByRole('button', {name: mode === 'story' ? 'Publish story' : 'Publish RFC', exact: true});
     await publish.click();
     await expect(dialog).toBeVisible();
-    await expect(preview.getByRole('alert')).toContainText('Reload the preview');
+    await expect(preview.locator('.field-error')).toContainText('Select Retry preview and review it again');
     await expect(publish).toBeDisabled();
     expect(sent[0].reviewed_content).toEqual({version_id: f.versionId, body_sha256: digest(originalBody), title: oldTitle, source_kind: 'draft', url: f.snapshot().story.url});
     // The failed modal remains editable; source reload does not reset destination.
-    if (mode === 'rfc') await dialog.locator('#pd-parent').fill('4242');
+    if (mode === 'rfc') await pickParentPage(page, dialog, '4242', 'Reviewed parent');
     else await dialog.locator('#pd-issuetype').selectOption('Task');
     await dialog.getByRole('button', {name: 'Retry preview', exact: true}).click();
     await expect(preview).toContainText('Revised café.');
@@ -122,19 +132,24 @@ test('Product RFC destination retry preserves title and parent and ignores a dep
     const dialog = page.getByRole('dialog', {name: 'Publish as Confluence RFC', exact: true});
     await expect(dialog.locator('#pd-space')).toHaveValue('CURRENT');
     await dialog.locator('#pd-title').fill('My exact RFC title');
-    await dialog.locator('#pd-parent').fill('123456');
     await dialog.locator('#pd-account').selectOption('B');
-    await expect(dialog.getByRole('alert')).toContainText('Couldn’t load Confluence spaces');
+    // Visible in the dialog and spoken assertively through the shell's announcer.
+    await expect(dialog.getByText('Couldn’t load Confluence spaces', { exact: false })).toBeVisible();
+    await expect(page.getByTestId('announcer-assertive')).toContainText('Couldn’t load Confluence spaces');
     await dialog.getByRole('button', {name: 'Retry spaces', exact: true}).click();
     await expect.poll(() => bCalls).toBe(2);
     await dialog.locator('#pd-account').selectOption('A');
     await expect(dialog.locator('#pd-space')).toHaveValue('CURRENT');
+    // A parent page belongs to one account's space (switching account clears
+    // the pick by design), so it's picked back on A — and must survive the
+    // departed account's late response like the space and title do.
+    await pickParentPage(page, dialog, '123456', 'Exact parent page');
     release(); await expect.poll(() => staleCompleted).toBe(true);
     await expect(dialog.locator('#pd-space')).toHaveValue('CURRENT');
     await expect(dialog.locator('#pd-space option')).toHaveText('Current account space (CURRENT)');
     await expect(dialog.locator('#pd-title')).toHaveValue('My exact RFC title');
-    await expect(dialog.locator('#pd-parent')).toHaveValue('123456');
-    await expect(dialog.getByTestId('publish-visibility')).toContainText('under page 123456');
+    await expect(dialog.locator('.cpp .picked-title')).toHaveText('Exact parent page');
+    await expect(dialog.getByTestId('publish-visibility')).toContainText('under “Exact parent page”');
     await dialog.getByRole('button', {name: 'Publish RFC', exact: true}).click();
     await expect(dialog).toHaveCount(0);
     expect(sent).toHaveLength(1);

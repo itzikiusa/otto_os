@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announce } from '../../../lib/announce.svelte';
   // Per-cluster monitoring settings: enable, cadence, namespaces, probes
   // (preset-fillable; JSON probes carry field mappings, prometheus probes
   // carry include/exclude globs), exclusions, transport / concurrency /
@@ -31,6 +32,7 @@
   import LoadState from '../../../lib/components/LoadState.svelte';
   import Switch from '../../../lib/components/Switch.svelte';
   import { collectorLine, rbacMessage } from './monitor-util';
+  import { revalidateAfterRemove, validateMonitorConfig } from './monitor-settings';
 
   interface Props {
     cluster: K8sCluster;
@@ -127,31 +129,13 @@
   });
 
   function validate(c: K8sMonitorConfig): Record<string, string> {
-    const e: Record<string, string> = {};
-    if (c.interval_secs < 15 || c.interval_secs > 3600) e.interval_secs = 'Interval must be 15..3600 seconds.';
-    if (c.concurrency < 1 || c.concurrency > 32) e.concurrency = 'Concurrency must be 1..32.';
-    if (c.retention_days < 1 || c.retention_days > 90) e.retention_days = 'Retention must be 1..90 days.';
-    if (c.series_cap < 100 || c.series_cap > 10000) e.series_cap = 'Series cap must be 100..10000.';
-    if (c.probes.length > 10) e.probes = 'At most 10 probes.';
-    const names = new Set<string>();
-    c.probes.forEach((p, i) => {
-      if (!p.name.trim()) e[`probe.${i}.name`] = 'Name is required.';
-      else if (names.has(p.name.trim())) e[`probe.${i}.name`] = 'Duplicate name.';
-      names.add(p.name.trim());
-      if (!p.path.startsWith('/')) e[`probe.${i}.path`] = 'Path must start with /.';
-      if (p.port !== null && p.port !== undefined && (p.port < 1 || p.port > 65535)) e[`probe.${i}.port`] = 'Port must be 1..65535.';
-      (p.mappings ?? []).forEach((m, j) => {
-        if (!m.field.trim()) e[`probe.${i}.map.${j}`] = 'Field is required.';
-        else if (!m.metric && !m.label) e[`probe.${i}.map.${j}`] = 'Set a metric name or a label.';
-        else if (m.metric && !/^[A-Za-z0-9_:.]{1,128}$/.test(m.metric)) e[`probe.${i}.map.${j}`] = 'Metric: letters, digits, _ : . only.';
-      });
-    });
-    c.exclusions.forEach((x, i) => {
-      const v = x.kind === 'label' ? x.selector : x.match;
-      if (!v.trim()) e[`ex.${i}`] = 'Pattern is required.';
-    });
-    if (NEEDS_NS && c.namespaces.length === 0) e.namespaces = 'This cluster has no default namespace — list the namespaces to monitor.';
-    return e;
+    return validateMonitorConfig(c, NEEDS_NS);
+  }
+  /** UC-6-05: errors are keyed by row index, so a removal re-runs the
+   *  validation (only while errors show) instead of leaving a message on the
+   *  row that slid into the removed one's slot. */
+  function revalidate(): void {
+    if (cfg) errors = revalidateAfterRemove(errors, cfg, NEEDS_NS);
   }
 
   function syncNamespaces(): void {
@@ -241,6 +225,7 @@
   function removeProbe(i: number): void {
     if (!cfg) return;
     cfg.probes = cfg.probes.filter((_, j) => j !== i);
+    revalidate();
   }
   function applyPreset(p: K8sMonitorPreset): void {
     if (!cfg) return;
@@ -264,6 +249,7 @@
   }
   function removeMapping(p: K8sProbe, j: number): void {
     p.mappings = (p.mappings ?? []).filter((_, k) => k !== j);
+    revalidate();
   }
   function unitMenu(e: MouseEvent, m: K8sMapping): void {
     ctxMenu.show(
@@ -298,6 +284,7 @@
   function removeExclusion(i: number): void {
     if (!cfg) return;
     cfg.exclusions = cfg.exclusions.filter((_, j) => j !== i);
+    revalidate();
   }
   function transportMenu(e: MouseEvent): void {
     if (!cfg) return;
@@ -308,6 +295,11 @@
       { label: 'port_forward — kubectl port-forward per pod', action: () => (c.transport = 'port_forward') },
     ]);
   }
+  // Spoken at the state edge through the shell's always-mounted announcer: a
+  // live region inserted together with its text is not read (WebKit/VoiceOver).
+  const errorSummary = $derived(errorCount ? (errors.probes ?? `Fix the ${plural(errorCount, 'highlighted field')} to save.`) : '');
+  $effect(() => { if (errorSummary) announce(errorSummary, { assertive: true }); });
+  $effect(() => { if (toggleError) announce(`Couldn’t update monitoring: ${toggleError} Try the switch again.`, { assertive: true }); });
 </script>
 
 <div class="settings" data-testid="k8s-monitor-settings" bind:this={settingsEl}>
@@ -332,8 +324,8 @@
       </div>
       <div class="dim status">{collectorLine(status, cfg.enabled, rel)}</div>
       <div class="dim">The switch saves immediately. Use Save for changes to the settings below.</div>
-      {#if errorCount}<p class="err field-error" role="alert">{errors.probes ?? `Fix the ${plural(errorCount, 'highlighted field')} to save.`}</p>{/if}
-      {#if toggleError}<p class="error" role="alert">Couldn’t update monitoring: {toggleError} Try the switch again.</p>{/if}
+      {#if errorCount}<p class="err field-error">{errors.probes ?? `Fix the ${plural(errorCount, 'highlighted field')} to save.`}</p>{/if}
+      {#if toggleError}<p class="error">Couldn’t update monitoring: {toggleError} Try the switch again.</p>{/if}
       {#if rbacMessage(status?.metrics_server)}
         <div class="rbac"><strong>metrics-server denied.</strong> Ask your cluster admin for: <code>{rbacMessage(status?.metrics_server)}</code></div>
       {/if}

@@ -10,7 +10,11 @@ test('MCP arrow keys move focus together with the selected tab', async ({ page }
   await page.goto('/#/mcp');
   const otto = page.getByRole('tab', { name: 'Otto server' });
   const external = page.getByRole('tab', { name: /External servers/ });
+  const profiles = page.getByRole('tab', { name: 'Profiles', exact: true });
   await otto.focus();
+  await page.keyboard.press('ArrowRight');
+  await expect(profiles).toHaveAttribute('aria-selected', 'true');
+  await expect(profiles).toBeFocused();
   await page.keyboard.press('ArrowRight');
   await expect(external).toHaveAttribute('aria-selected', 'true');
   await expect(external).toBeFocused();

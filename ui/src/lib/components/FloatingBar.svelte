@@ -739,7 +739,7 @@
         >
           <div class="panel-inner" bind:this={panelInner}>
             {#if signedOut}
-              <div class="note" role="status">
+              <div class="note">
                 <Icon name="lock" size={14} />
                 <span>Sign in to Otto to use the bar.</span>
                 <button class="btn small" onclick={() => void openInOtto()}>Open Otto</button>

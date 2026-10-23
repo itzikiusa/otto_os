@@ -20,6 +20,7 @@
 <svelte:window onmessage={onFrameMessage} />
 
 <script lang="ts">
+  import { announce } from '../../lib/announce.svelte';
   import { plural } from '../../lib/plural';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   // The right-hand pane of Insights → Reports: one report, rendered.
@@ -202,6 +203,9 @@
     if (!m) return k;
     return `${kindLabel(m[1])} ${dateLabel(`${m[2]}-${m[3]}-${m[4]}`)}`;
   }
+  // Spoken at the state edge through the shell's always-mounted announcer: a
+  // live region inserted together with its text is not read (WebKit/VoiceOver).
+  $effect(() => { if (htmlError) announce(`Couldn’t load the HTML report. ${htmlError}`, { assertive: true }); });
 </script>
 
 <article class="report" data-testid="insight-report">
@@ -242,7 +246,7 @@
   {#if effectiveMode === 'html'}
     <div class="r-html">
       {#if htmlError}
-        <div class="r-error" role="alert">
+        <div class="r-error">
           <Icon name="warning" size={14} />
           <div>
             <strong>Couldn’t load the HTML report.</strong>

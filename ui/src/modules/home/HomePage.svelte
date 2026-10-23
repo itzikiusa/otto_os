@@ -25,7 +25,7 @@
   import HomeToday from './HomeToday.svelte';
   import { spaces, spaceNumber } from '../../lib/stores/spaces.svelte';
   import { home, MAX_BOXES, MAX_VIEWS, ROTATE_MS, ROW_PX, GAP_PX } from './home.svelte';
-  import { HOME_KINDS, type HomeBoxKind } from './kinds';
+  import { HOME_KINDS, type HomeBoxKind } from '../../lib/home/kinds';
 
   const can = (f: Parameters<typeof auth.can>[0]): boolean => auth.can(f, 'view');
   const kinds = $derived(HOME_KINDS.filter((k) => can(k.feature)));

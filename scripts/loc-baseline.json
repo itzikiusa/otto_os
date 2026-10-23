@@ -2,42 +2,31 @@
   "//": "Rust LOC ratchet (scripts/loc-ratchet.py, S12-307): tracked files, otto-server's src total and the tracked god functions may only shrink. PRODUCTION lines only (top-level #[cfg(test)] items, `mod tests`, tests/ dirs and *tests.rs excluded). Every production function in crates/**/src stays under `function_max` lines unless it is listed in `functions` (keyed path::name; the three legacy bare names are searched across crates/otto-server/src), and a listed one may only shrink. Lower with --update-baseline; raising needs --raise PATH|fn:NAME and a reason in the PR.",
   "new_file_max": 4000,
   "files": {
-    "crates/otto-dbviewer/src/drivers/mongodb.rs": 4224,
-    "crates/otto-git/src/local.rs": 5497,
-    "crates/otto-server/src/vault_docs_agent.rs": 4087,
-    "crates/otto-server/src/workflow_engine.rs": 5682,
-    "crates/otto-sessions/src/manager.rs": 6629,
-    "crates/ottod/src/mcp_tools.rs": 4882
+    "crates/otto-dbviewer/src/drivers/mongodb.rs": 4179,
+    "crates/otto-git/src/local.rs": 5335,
+    "crates/otto-server/src/workflow_engine.rs": 4531,
+    "crates/otto-sessions/src/manager.rs": 6499
   },
   "totals": {
-    "otto-server": 108690
+    "otto-server": 100055
   },
   "functions": {
     "crates/otto-automation/src/goal_loop.rs::controller_inner": 472,
     "crates/otto-channels/src/bridge.rs::handle": 451,
     "crates/otto-design/src/site/render.rs::body": 408,
-    "crates/otto-issues/src/confluence.rs::storage_to_markdown": 535,
+    "crates/otto-issues/src/confluence.rs::storage_to_markdown_depth": 535,
     "crates/otto-issues/src/jira.rs::parse_issue_full": 427,
-    "crates/otto-k8s/src/monitor/collector.rs::run_cycle_with": 413,
-    "crates/otto-mcp/src/outward/catalog.rs::otto_tool_specs": 624,
-    "crates/otto-mcp/src/outward/exec.rs::route_for": 1555,
-    "crates/otto-product/src/run.rs::run_analysis": 580,
-    "crates/otto-product/src/run.rs::run_generate_plan": 446,
-    "crates/otto-server/src/mcp_outward.rs::governed_invoke": 557,
-    "crates/otto-server/src/modules/review/summarize.rs::summarize_and_persist": 467,
+    "crates/otto-k8s/src/monitor/collector.rs::run_cycle_with": 412,
+    "crates/otto-mcp/src/outward/catalog.rs::otto_tool_specs": 623,
+    "crates/otto-mcp/src/outward/exec.rs::route_for": 1536,
     "crates/otto-server/src/policy.rs::policy_for": 1411,
     "crates/otto-server/src/routes/mod.rs::protected_routes": 641,
     "crates/otto-server/src/skill_eval.rs::run_skill_eval_core": 446,
     "crates/otto-server/src/skill_review_static.rs::static_review": 585,
-    "crates/otto-server/src/vault_docs_agent.rs::run_docs": 579,
-    "crates/otto-server/src/workflow_engine/nodes/review_run.rs::execute": 615,
     "crates/otto-swarm/src/runtime/engine.rs::route_result_inner": 416,
-    "crates/ottod/src/mcp_tools.rs::base_tool_catalog": 687,
-    "crates/ottod/src/mcp_tools.rs::read_route": 446,
-    "crates/ottod/src/mcp_tools.rs::run_tool": 1189,
     "execute_node": 35,
     "run_review_core": 406,
-    "run_workflow_with_budget": 1250
+    "run_workflow_with_budget": 93
   },
   "function_max": 400
 }

@@ -89,6 +89,8 @@ otto-memory.workspace = true
 otto-vault.workspace = true
 otto-pty.workspace = true
 otto-browser.workspace = true
+# Session + game rooms domain (glue: src/rooms/ctx.rs).
+otto-rooms.workspace = true
 async-trait.workspace = true
 reqwest.workspace = true
 chrono.workspace = true
@@ -102,9 +104,6 @@ uuid.workspace = true
 rand.workspace = true
 reqwest_cookie_store.workspace = true
 sha2.workspace = true
-# TURN REST credentials: ephemeral HMAC-SHA1, never return the shared secret.
-hmac = "0.13.0"
-sha1 = "0.11.0"
 
 # Secrets store status + the confirmed "Secure secrets" migration
 # (`/admin/secrets/*`); browser-credential route tests also use its FileStore.
@@ -122,9 +121,3 @@ wiremock = "0.6.5"
 # browser_login's audit-log test captures real `tracing` output (via a custom
 # `MakeWriter`) to assert the domain is logged and the password never is.
 tracing-subscriber.workspace = true
-
-# Local shared-screen OCR; Vision ships with macOS (no cloud credentials).
-[target.'cfg(target_os = "macos")'.dependencies]
-objc2 = "0.6.4"
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSData", "NSDictionary", "NSError", "NSString"] }
-objc2-vision = { version = "0.3.2", default-features = false, features = ["std", "VNRequest", "VNRequestHandler", "VNRecognizeTextRequest", "VNObservation", "VNTypes"] }

@@ -24,7 +24,9 @@
 //! Credentials: kubectl resolves them once at start. The gateway remembers a
 //! fingerprint of the argv, env and the kubeconfig files' mtimes (the EKS
 //! token overlay is rewritten in place when the token is re-minted), and the
-//! caller restarts it when that changes, when the child exits, or after a 401.
+//! caller restarts it when that changes, when the child exits, or after a 401
+//! (the collector drops `LoopState::gateway` when metrics-server answers 401,
+//! so the next `ensure` starts a proxy that re-resolves the credential).
 
 use std::path::PathBuf;
 use std::process::Stdio;

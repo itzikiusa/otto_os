@@ -120,55 +120,17 @@ fn resolve_path(session: &Session, persisted: Option<String>, data_dir: &Path) -
         .get("nested_cwd")
         .and_then(|v| v.as_str())
         .unwrap_or(&session.cwd);
-    if let Some(account) = session.meta.get("account_id").and_then(|v| v.as_str()) {
-        let root = otto_sessions::accounts::account_home(
-            &data_dir.join("provider-accounts"),
-            &account.to_owned(),
-        )
-        .ok()?;
-        return otto_sessions::transcript_path_in_roots(
-            &root.join("projects"),
-            &root.join("sessions"),
-            provider,
-            cwd,
-            session.provider_session_id.as_deref(),
-        )
-        .ok();
-    }
-    // Match the conversation view's explicit/isolated roots. A throwaway daemon
-    // must never discover a real user's default transcript tree.
-    if let Some(raw) = std::env::var_os("OTTO_TRANSCRIPT_ROOTS") {
-        let raw = raw.to_string_lossy();
-        let parts: Vec<_> = raw
-            .split(':')
-            .map(str::trim)
-            .filter(|p| !p.is_empty())
-            .collect();
-        if parts.len() >= 2 {
-            return otto_sessions::transcript_path_in_roots(
-                Path::new(parts[0]),
-                Path::new(parts[1]),
-                provider,
-                cwd,
-                session.provider_session_id.as_deref(),
-            )
-            .ok();
-        }
-    }
-    if std::env::var("OTTO_E2E").as_deref() == Ok("1") {
-        let root = data_dir.join("e2e-transcripts");
-        return otto_sessions::transcript_path_in_roots(
-            &root.join("claude"),
-            &root.join("codex"),
-            provider,
-            cwd,
-            session.provider_session_id.as_deref(),
-        )
-        .ok();
-    }
-    let home = std::env::var_os("HOME").map(PathBuf::from)?;
-    otto_sessions::transcript_path(&home, provider, cwd, session.provider_session_id.as_deref())
-        .ok()
+    // The same roots the conversation view resolves through (architecture-6-01):
+    // the account home, else the explicit pair / isolated fixture / defaults —
+    // a throwaway daemon never discovers a real user's transcript tree.
+    let roots = otto_transcript::roots::TranscriptRoots::for_session(&session.meta, data_dir);
+    otto_sessions::transcript_path_in(
+        &roots,
+        provider,
+        cwd,
+        session.provider_session_id.as_deref(),
+    )
+    .ok()
 }
 
 pub(crate) async fn collect(

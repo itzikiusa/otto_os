@@ -3047,13 +3047,16 @@ fn background_origin_sessions_still_suspend_when_idle() {
 /// An `end_turn` followed by a `<task-notification>` is a PENDING harness
 /// wake-up: the parent is about to speak again, so the turn is still open
 /// even though the transcript (and the PTY, and the CPU) have gone quiet.
+/// The verdict is the shared `otto_transcript::turn` fold (architecture-6-02),
+/// so notifications are parsed structurally (`<task-id>` + `<status>`), as
+/// claude writes them.
 #[test]
 fn claude_open_turn_keeps_session_alive() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("t.jsonl");
     let user = r#"{"type":"user","message":{"role":"user","content":"go"}}"#;
     let end_turn = r#"{"type":"assistant","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"done"}]}}"#;
-    let notif = r#"{"type":"user","message":{"role":"user","content":"<task-notification>id=1 status=completed</task-notification>"}}"#;
+    let notif = r#"{"type":"user","message":{"role":"user","content":"<task-notification><task-id>a1</task-id><status>completed</status></task-notification>"}}"#;
     let thinking = r#"{"type":"assistant","message":{"role":"assistant","stop_reason":"tool_use","content":[{"type":"tool_use","name":"Bash"}]}}"#;
 
     // Tail = a plain end_turn → the turn is closed.
@@ -3071,8 +3074,13 @@ fn claude_open_turn_keeps_session_alive() {
     // An `attachment` notification is stapled onto the user's NEXT prompt,
     // not a wake-up — it is the normal tail of a FINISHED session that ran
     // sub-agents, and reading it as "open" held engine sessions forever.
-    let attach = r#"{"type":"attachment","content":{"text":"<task-notification>id=1 status=completed</task-notification>"}}"#;
+    let attach = r#"{"type":"attachment","content":{"text":"<task-notification><task-id>a1</task-id><status>completed</status></task-notification>"}}"#;
     std::fs::write(&path, format!("{user}\n{end_turn}\n{attach}\n")).unwrap();
+    assert_eq!(agent_turn_open("claude", &path), Some(false));
+
+    // A `remove`d queue entry is never delivered: it does not wake the parent.
+    let removed = r#"{"type":"queue-operation","operation":"remove","content":"<task-notification><task-id>a1</task-id></task-notification>"}"#;
+    std::fs::write(&path, format!("{user}\n{end_turn}\n{removed}\n")).unwrap();
     assert_eq!(agent_turn_open("claude", &path), Some(false));
 
     // Sidechain (sub-agent) lines never decide the PARENT's turn.
@@ -3309,7 +3317,7 @@ fn stale_open_turn_does_not_hold_a_session() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("t.jsonl");
     let end_turn = r#"{"type":"assistant","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"done"}]}}"#;
-    let notif = r#"{"type":"user","message":{"role":"user","content":"<task-notification>id=1 status=completed</task-notification>"}}"#;
+    let notif = r#"{"type":"user","message":{"role":"user","content":"<task-notification><task-id>a1</task-id><status>completed</status></task-notification>"}}"#;
     std::fs::write(&path, format!("{end_turn}\n{notif}\n")).unwrap();
 
     // The verdict itself is "open" either way — the bound is what caps it.
@@ -3469,6 +3477,41 @@ async fn prune_keeps_session_with_existing_transcript() {
     let pruned = mgr.prune_dead_sessions().await;
     assert_eq!(pruned, 0, "existing transcript must be kept");
     assert!(repo.get(&id).await.is_ok());
+}
+
+/// architecture-6w1-01: the persisted `transcript_path` comes from the shared
+/// `TranscriptRoots::for_session` rule, so an injected `OTTO_TRANSCRIPT_ROOTS`
+/// pair keeps it inside that root (the conversation view reads the same file).
+/// Before, `persist_transcript_path` read `$HOME` itself and resolved under
+/// `~/.claude/projects` whatever the override said.
+#[tokio::test]
+async fn persisted_transcript_path_stays_inside_an_injected_root() {
+    let (mgr, repo, ws, user) = test_manager().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let (claude, codex) = (tmp.path().join("claude"), tmp.path().join("codex"));
+    let psid = "injected-root-1111";
+    let id = seed_session(&repo, &ws, &user, Some(psid)).await;
+    let session = repo.get(&id).await.unwrap();
+    let file = claude
+        .join(otto_transcript::roots::encode_cwd(&session.cwd))
+        .join(format!("{psid}.jsonl"));
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, b"{}\n").unwrap();
+
+    let env = otto_transcript::roots::RootsEnv {
+        explicit: Some(format!("{}:{}", claude.display(), codex.display())),
+        ..Default::default()
+    };
+    let roots = mgr.transcript_roots_in(&env, &session);
+    persist_transcript_path(&repo, &id, "claude", &session.cwd, psid, roots).await;
+
+    let persisted = repo.transcript_path(&id).await.unwrap().expect("persisted");
+    assert!(
+        std::path::Path::new(&persisted).starts_with(&claude),
+        "{persisted} escaped the injected root {}",
+        claude.display()
+    );
+    assert_eq!(persisted, file.to_string_lossy());
 }
 
 // ── Grid-size resolution tests ───────────────────────────────────────────
@@ -4110,4 +4153,36 @@ async fn kill_retires_live_generation_before_returning_without_status_poller() {
     })
     .await
     .expect("killed child exited");
+}
+
+/// test-quality-6-01: the hook-ingest gate. A token authenticates exactly
+/// the session it was minted for — empty, unknown-session and cross-session
+/// tokens are all refused.
+#[tokio::test]
+async fn verify_ingest_token_accepts_only_the_sessions_own_token() {
+    let (mgr, _repo, _ws, _owner) = test_manager().await;
+    let (a, b): (Id, Id) = ("session-a".into(), "session-b".into());
+    let env_of = |sid: &Id| -> String {
+        mgr.ingest_env(sid)
+            .into_iter()
+            .find(|(k, _)| k == "OTTO_INGEST_TOKEN")
+            .map(|(_, v)| v)
+            .unwrap()
+    };
+    let token_a = env_of(&a);
+    let token_b = env_of(&b);
+    assert_ne!(token_a, token_b);
+    // Minting is stable: a respawn reuses the session's token.
+    assert_eq!(env_of(&a), token_a);
+    assert!(!mgr.verify_ingest_token(&a, ""), "empty token");
+    assert!(
+        !mgr.verify_ingest_token(&"never-spawned".into(), &token_a),
+        "unknown session"
+    );
+    assert!(
+        !mgr.verify_ingest_token(&a, &token_b),
+        "another session's token"
+    );
+    assert!(mgr.verify_ingest_token(&a, &token_a), "the right token");
+    assert!(mgr.verify_ingest_token(&b, &token_b));
 }

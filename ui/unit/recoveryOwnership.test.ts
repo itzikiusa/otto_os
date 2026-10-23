@@ -2,14 +2,14 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { componentFunctions } from './componentFunctions.ts';
 import { deferred, loadSource } from './sourceHarness.ts';
-import { computeRunStats, EMPTY_AGENT_STATS } from '../src/modules/swarm/runStats.ts';
+import { computeRunStats, EMPTY_AGENT_STATS } from '../src/lib/swarm/runStats.ts';
 function analysis(getAnalysis: (id: string) => Promise<any>) {
   const product = { selectedId: 'story', getAnalysis, captureSelection() {
     const id = this.selectedId; return () => this.selectedId === id;
   } };
   return componentFunctions(new URL('../src/modules/product/AnalysisTab.svelte', import.meta.url),
-    ['pollOnce', 'clearPoll', 'isTerminal', 'selectHistory', 'startPolling'], {
-      activeId: 'A', activeDetail: null, pollStartedAt: 0, pollTimer: null,
+    ['pollOnce', 'clearPoll', 'isTerminal', 'selectHistory', 'selectRun', 'startPolling'], {
+      activeId: 'A', activeDetail: null, detailLoading: false, detailError: null, pollStartedAt: 0, pollTimer: null,
       POLL_MAX_MS: 30 * 60_000, POLL_INTERVAL_MS: 3000, viewGeneration: 0, readSequence: 0,
       polling: false, pollFailures: 0, lastPollError: null, pollStopped: null, loadErrorText: String,
       product, toasts: { warn() { throw new Error('Client must not claim server timed out'); } },
@@ -32,7 +32,7 @@ test('late analysis refresh cannot overwrite a newly selected run', async () => 
 function swarmFixture(api: Record<string, unknown>) {
   const { swarm } = loadSource(new URL('../src/lib/stores/swarm.svelte.ts', import.meta.url), {
     '../api/client': { api }, '../loadError': { loadErrorText: String },
-    '../toastError': { toastError() {} }, '../../modules/swarm/runStats': { computeRunStats, EMPTY_AGENT_STATS },
+    '../toastError': { toastError() {} }, '../swarm/runStats': { computeRunStats, EMPTY_AGENT_STATS },
     '../lazyModule': { announceModule() {} },
   });
   swarm.wsId = 'w'; swarm.detail = { id: 'A' }; return swarm;

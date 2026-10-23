@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announce, announceShown, focusAppContent } from '../../lib/announce.svelte';
   import { plural } from '../../lib/plural';
   import { NO_WORKSPACE } from '../../lib/labels';
   import { pollWhileVisible } from '../../lib/poll';
@@ -354,6 +355,10 @@
     const d = new Date(s);
     return Number.isNaN(d.getTime()) ? s : d.toLocaleString();
   }
+
+  // a11y-6-01: announce at the state edge — a status element inserted
+  // together with its text is not read by VoiceOver/WebKit.
+  $effect(() => { if (dirty && !formError) announce('Unsaved changes — Save to apply them.'); });
 </script>
 
 <div class="settings-section">
@@ -404,11 +409,11 @@
     {#if formError}
       <p class="form-note error" role="alert">{formError}</p>
     {:else if dirty}
-      <p class="form-note unsaved" role="status">Unsaved changes — Save to apply them.</p>
+      <p class="form-note unsaved">Unsaved changes — Save to apply them.</p>
     {/if}
     <!-- Evolve result — shown after an Evolve now completes. -->
     {#if evolveResult !== null}
-      <div class="evolve-badge" class:no-change={evolveResult.length === 0} role="status">
+      <div class="evolve-badge" class:no-change={evolveResult.length === 0} use:announceShown={evolveResult.length === 0 ? 'Evolve finished — no skill changes this session.' : `Evolve finished — ${plural(evolveResult.length, 'skill')} updated.`}>
         <Icon name={evolveResult.length === 0 ? 'info' : 'check'} size={14} />
         <span class="grow">
           {#if evolveResult.length === 0}
@@ -422,7 +427,7 @@
           class="icon-btn"
           aria-label="Dismiss evolve result"
           title="Dismiss evolve result"
-          onclick={() => (evolveResult = null)}
+          onclick={() => { evolveResult = null; void focusAppContent(); }}
         ><Icon name="x" size={12} /></button>
       </div>
     {/if}

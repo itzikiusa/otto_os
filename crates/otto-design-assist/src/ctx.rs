@@ -1,16 +1,15 @@
 //! Host context + HTTP plumbing for the Design Hall assist engine.
 //!
 //! The artifact graph comes from [`DesignCtx`] (service handle, roles, the
-//! host's deep format check); the agent turn itself runs in the host
-//! (otto-server owns the session manager + turn runner) behind
-//! [`DesignAssistCtx::run_agent_turn`]. The error type and the `CurrentUser`
+//! host's deep format check); the agent turn runs on the host's session
+//! manager ([`DesignAssistCtx::sessions`]) through the shared assist job in
+//! `otto_agent_run` (architecture-5-02: no host forwarder; resume ownership
+//! is the runner's). The error type and the `CurrentUser`
 //! extractor mirror otto-server's so the moved handlers answer byte-for-byte
 //! the same (401 when unauthenticated, 500s logged).
 
 use std::future::Future;
-use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
@@ -26,27 +25,12 @@ use otto_design::DesignCtx;
 use otto_improve::ImprovementEngine;
 use otto_memory::MemoryService;
 use otto_state::{ProductRepo, WorkspacesRepo};
-use serde_json::Value;
 use tokio::sync::broadcast;
 
-/// One agent turn the host runs for a design assist / variant.
-pub struct AgentTurn<'a> {
-    pub ws: &'a Workspace,
-    pub user: &'a User,
-    /// The artifact's session to RESUME (`None` → spawn a fresh one).
-    pub existing: Option<&'a Id>,
-    pub title: &'a str,
-    pub cwd: &'a str,
-    pub provider: &'a str,
-    pub meta: Value,
-    pub prompt: &'a str,
-    /// No-output idle trip.
-    pub stuck_after: Duration,
-    /// Completion marker file: the turn is done once it holds non-empty text.
-    pub done_file: Option<PathBuf>,
-    /// Legacy compatibility field; silence is never accepted as completion.
-    pub quiet_done: Option<Duration>,
-}
+/// One agent turn the host runs for a design assist / variant. Shared by
+/// every assist engine (architecture-4-02), so it lives with the turn runner.
+pub use otto_agent_run::session_turn::AgentTurn;
+use otto_agent_run::session_turn::SessionManager;
 
 /// What the design assist engine needs from the host beyond [`DesignCtx`].
 pub trait DesignAssistCtx: DesignCtx {
@@ -66,14 +50,9 @@ pub trait DesignAssistCtx: DesignCtx {
         requested: Option<&str>,
         site: &'static str,
     ) -> impl Future<Output = String> + Send;
-    /// Run ONE agent turn and return `(reply_text, session_id)`. `on_ready`
-    /// fires the moment the session exists.
-    fn run_agent_turn<F: FnOnce(&Id) + Send>(
-        &self,
-        turn: AgentTurn<'_>,
-        on_ready: F,
-    ) -> impl Future<Output = otto_core::Result<(String, Id)>> + Send;
-    fn kill_session(&self, sid: &Id) -> impl Future<Output = otto_core::Result<()>> + Send;
+    /// The host's session manager: runs the assist turns and is the resume
+    /// authority (it reads the session's owner row).
+    fn sessions(&self) -> &Arc<SessionManager>;
 }
 
 /// Require a workspace role (root short-circuits inside the checker).

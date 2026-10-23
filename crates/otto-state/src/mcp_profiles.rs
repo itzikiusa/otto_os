@@ -250,21 +250,30 @@ impl McpProfileRepo {
             .begin()
             .await
             .map_err(dberr("set default mcp profile"))?;
-        sqlx::query("UPDATE mcp_profiles SET is_default = 0 WHERE is_default = 1")
-            .execute(&mut *tx)
-            .await
-            .map_err(dberr("set default mcp profile"))?;
-        sqlx::query("UPDATE mcp_profiles SET is_default = 1, updated_at = ? WHERE id = ?")
-            .bind(fmt(Utc::now()))
-            .bind(id)
-            .execute(&mut *tx)
-            .await
-            .map_err(dberr("set default mcp profile"))?;
+        switch_default(&mut tx, id).await?;
         tx.commit()
             .await
             .map_err(dberr("set default mcp profile"))?;
         self.get(id).await
     }
+}
+
+/// The default switch itself — clear, then set — on a caller's open
+/// transaction: [`McpProfileRepo::set_default`] and the state-archive
+/// restore (which applies every row in one transaction) share it, so the
+/// one-default invariant has one writer.
+pub async fn switch_default(conn: &mut sqlx::SqliteConnection, id: &str) -> Result<()> {
+    sqlx::query("UPDATE mcp_profiles SET is_default = 0 WHERE is_default = 1")
+        .execute(&mut *conn)
+        .await
+        .map_err(dberr("set default mcp profile"))?;
+    sqlx::query("UPDATE mcp_profiles SET is_default = 1, updated_at = ? WHERE id = ?")
+        .bind(fmt(Utc::now()))
+        .bind(id)
+        .execute(&mut *conn)
+        .await
+        .map_err(dberr("set default mcp profile"))?;
+    Ok(())
 }
 
 #[cfg(test)]

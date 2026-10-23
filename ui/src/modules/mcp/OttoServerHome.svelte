@@ -7,12 +7,13 @@
   import { auth } from '../../lib/stores/auth.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { toasts } from '../../lib/toast.svelte';
-  import { copyTextOrThrow } from '../../lib/clipboard';
+  import { copyWithToast } from '../../lib/clipboard';
   import { confirmer } from '../../lib/confirm.svelte';
   import { mcpCpExtraApi, type McpGatewayToolRow } from './cp-api';
   import ExposePanel from './ExposePanel.svelte';
   import AutoApprovePanel from './AutoApprovePanel.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
+  import { attachView, builtInToolsLine, gatewayView } from './sessionAttach';
   import { loadErrorText } from '../../lib/loadError';
   import type {
     McpAutoApproveRef,
@@ -36,6 +37,7 @@
   let attachBusy = $state(false);
   let attachGeneration = 0;
   let attachError = $state<string | null>(null);
+  const attachState = $derived(attachView(wsId, attach, attachError));
   let gatewayTools = $state<McpGatewayToolRow[]>([]);
   let gatewayLoading = $state(false);
   let gatewayError = $state<string | null>(null);
@@ -53,9 +55,9 @@
   const skippedCount = $derived(
     tools.filter((tool) => tool.enabled && tool.mutating && (tool.auto_approved_by?.length ?? 0) > 0).length,
   );
-  const attached = $derived(attach?.attached ?? true);
   const gatewayNames = $derived([...new Set(gatewayTools.map((tool) => tool.name))]);
   const shownGatewayNames = $derived(gatewayNames.slice(0, 60));
+  const gatewayState = $derived(gatewayView(wsId, gatewayLoading, gatewayError, gatewayNames.length));
 
   const filtered = $derived.by(() => {
     const query = filter.trim().toLowerCase();
@@ -242,13 +244,14 @@
       const next = await mcpCpExtraApi.sessionAttach(id);
       if (wsId === id && generation === attachGeneration) attach = next;
     } catch (e) {
-      if (wsId === id && generation === attachGeneration) attachError = e instanceof Error ? e.message : String(e);
+      if (wsId === id && generation === attachGeneration) attachError = loadErrorText(e);
     }
   }
 
   async function updateAttach(enabled: boolean, input: HTMLInputElement): Promise<void> {
     const id = wsId;
     if (!id || !attach || attachBusy) return;
+    const reported = attach.attached; // the box goes back to it if the save fails
     const generation = ++attachGeneration;
     attachBusy = true;
     attachError = null;
@@ -263,7 +266,7 @@
     } catch (e) {
       if (wsId !== id || generation !== attachGeneration) return;
       // Put the box back: the daemon still has the old value.
-      input.checked = attach?.attached ?? true;
+      input.checked = reported;
       toastError(enabled ? 'Couldn’t attach to sessions' : 'Couldn’t detach from sessions', e);
     } finally {
       if (wsId === id && generation === attachGeneration) attachBusy = false;
@@ -279,20 +282,15 @@
     } catch (e) {
       if (wsId === id) {
         gatewayTools = [];
-        gatewayError = e instanceof Error ? e.message : String(e);
+        gatewayError = loadErrorText(e);
       }
     } finally {
       if (wsId === id) gatewayLoading = false;
     }
   }
 
-  async function copyGatewayTools(): Promise<void> {
-    try {
-      await copyTextOrThrow(gatewayNames.join('\n'));
-      toasts.success('Tool names copied');
-    } catch {
-      toasts.error('Couldn’t copy', 'Select and copy manually.');
-    }
+  function copyGatewayTools(): void {
+    void copyWithToast(gatewayNames.join('\n'), 'tool names');
   }
 
   $effect(() => {
@@ -328,14 +326,18 @@
       <span>Otto’s built-in MCP server</span>
     </div>
 
-    {#if wsId}
+    {#if attachState === 'error'}
+      <LoadState what="the session-attach setting" variant="compact" error={attachError} empty onretry={() => wsId && void loadAttach(wsId)} />
+    {:else if attachState === 'loading'}
+      <LoadState what="the session-attach setting" variant="compact" loading empty rows={1} />
+    {:else if attachState === 'ready' && attach}
       {#key wsId}
       <label class="switchrow">
         <input
           type="checkbox"
           data-testid="mcp-session-attach"
-          checked={attach?.attached ?? true}
-          disabled={!attach || attachBusy || !isMcpAdmin}
+          checked={attach.attached}
+          disabled={attachBusy || !isMcpAdmin}
           onchange={(event) => void updateAttach(event.currentTarget.checked, event.currentTarget)}
         />
         <span class="switchcopy">
@@ -349,7 +351,6 @@
     {:else}
       <p class="muted small">Select a workspace to manage session attachment.</p>
     {/if}
-    {#if attachError}<p class="warn">Couldn’t load session attachment: {attachError}</p>{/if}
 
     <label class="switchrow">
       <input
@@ -366,9 +367,9 @@
         </span>
       </span>
     </label>
-    <p class="counts muted small">
+    {#if status}<p class="counts muted small">
       {tools.length} tools · {enabledNames.size} exposed · {mutatingCount} mutating{#if skippedCount}{' '}· <span class="noask">{skippedCount} auto-approved</span>{/if}
-    </p>
+    </p>{/if}
   </section>
 
   <AutoApprovePanel {isMcpAdmin} revision={rulesRevision} onchange={() => void load()} />
@@ -506,13 +507,12 @@
         </div>
       {/if}
     </div>
-    <p class="small">
-      Built-in tools: {attached ? 'attached' : 'not attached'} — Otto’s read-only tool server (<code>ottod mcp-tools</code>).
-    </p>
-    {#if !wsId}
+    <p class="small" data-testid="mcp-builtin-tools">{builtInToolsLine(attachState, attach)} — Otto’s read-only tool server (<code>ottod mcp-tools</code>).</p>
+    {#if gatewayState === 'no-workspace'}
       <p class="muted small">Select a workspace to inspect its gateway tools.</p>
-    {:else if gatewayError}
-      <p class="muted small">Couldn’t load gateway tools: {gatewayError}</p>
+    {:else if gatewayState === 'error'}
+      <LoadState what="the gateway tools" variant="compact" error={gatewayError} empty onretry={() => wsId && void loadGatewayTools(wsId)} />
+    {:else if gatewayState === 'loading'}<LoadState what="the gateway tools" variant="compact" loading empty rows={1} />
     {:else}
       <p class="small">Gateway tools from governed external servers: {gatewayNames.length}</p>
       {#if shownGatewayNames.length}

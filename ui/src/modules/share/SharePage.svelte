@@ -12,6 +12,7 @@
   // After verification, `getSharedSession` is retried. An "Extend" control allows
   // re-sending a fresh OTP to the locked original recipient.
   import { onDestroy } from 'svelte';
+  import { announceShown } from '../../lib/announce.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import Terminal from '../../lib/components/Terminal.svelte';
   import { PRIMARY_SCROLLBACK } from '../../lib/components/termFlow';
@@ -311,9 +312,10 @@
 <!-- ── Loading ──────────────────────────────────────────────────────── -->
 {:else if viewState === 'loading'}
   <div class="share-error" style={`zoom:${ui.zoom}`}>
-    <div class="error-card" role="status">
+    <!-- Inserted with its text, so no role: the line is spoken by the action. -->
+    <div class="error-card">
       <div class="spinner" style:--spinner-size="28px" aria-hidden="true"></div>
-      <p class="dim">Connecting to the shared session…</p>
+      <p class="dim" use:announceShown={'Connecting to the shared session…'}>Connecting to the shared session…</p>
     </div>
   </div>
 
@@ -420,7 +422,7 @@
       <!-- The shared session's process ended. Its output stays readable
            underneath; Reconnect re-attaches if the owner restarts it. -->
       {#if termEnded}
-        <div class="extend-overlay" role="status">
+        <div class="extend-overlay" use:announceShown={{ text: 'This session has ended. Reconnect to pick it up again if the host restarts it.', assertive: true }}>
           <div class="extend-card">
             <div class="extend-icon"><Icon name="clock" size={26} /></div>
             <h3>This session has ended</h3>

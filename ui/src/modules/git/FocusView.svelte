@@ -336,11 +336,11 @@
         <div class="fx-empty dim">
           No open pull requests{prFilter === 'mine' ? ' opened by you' : ''} across
           {plural(git.allRepos.length, 'registered repository', 'registered repositories')}.
-          {#if prErrors > 0}({plural(prErrors, 'repo')} failed to list){/if}
+          {#if prErrors > 0}(couldn’t list {plural(prErrors, 'repo')}){/if}
         </div>
       {:else}
         {#if prErrors > 0}
-          <div class="fx-warn dim">{plural(prErrors, 'repo')} failed to list PRs (missing account/permissions) — showing the rest.</div>
+          <div class="fx-warn dim">Couldn’t list pull requests for {plural(prErrors, 'repo')} (missing account or permissions) — showing the rest.</div>
         {/if}
         {#each prGroups as [forge, rows] (forge)}
           <div class="fx-group-head">

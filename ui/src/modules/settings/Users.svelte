@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announce } from '../../lib/announce.svelte';
   import { plural } from '../../lib/plural';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import { toastError } from '../../lib/toastError';
@@ -15,7 +16,7 @@
   import { copyAsJson } from '../../lib/components/exporters';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import Modal from '../../lib/components/Modal.svelte';
-  import { copyTextOrThrow } from '../../lib/clipboard';
+  import { COPY_FAILED_BODY, copyTextOrThrow } from '../../lib/clipboard';
   import Icon from '../../lib/components/Icon.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -53,7 +54,7 @@
       await copyTextOrThrow(`@${u.username}`);
       toasts.success('Username copied', `@${u.username}`);
     } catch {
-      toasts.error('Couldn’t copy the username', 'The clipboard write was blocked.');
+      toasts.error('Couldn’t copy the username', COPY_FAILED_BODY);
     }
   }
 
@@ -62,7 +63,7 @@
       await copyAsJson(u);
       toasts.success('User JSON copied');
     } catch {
-      toasts.error('Couldn’t copy the user', 'The clipboard write was blocked.');
+      toasts.error('Couldn’t copy the user', COPY_FAILED_BODY);
     }
   }
 
@@ -218,6 +219,9 @@
   let savedTimer: ReturnType<typeof setTimeout> | undefined;
   function flashSaved(which: 'roles' | 'grants'): void {
     savedIn = which;
+    // a11y-6-01: announced at the state edge (the visible tick is inserted
+    // with its text, which VoiceOver/WebKit doesn't read).
+    announce('Saved');
     clearTimeout(savedTimer);
     savedTimer = setTimeout(() => (savedIn = null), 1800);
   }
@@ -522,7 +526,7 @@
     {:else}
     <div class="title-row">
       <h2 class="section-title">Workspace roles</h2>
-      {#if savedIn === 'roles'}<span class="saved" role="status"><Icon name="check" size={12} /> Saved</span>{/if}
+      {#if savedIn === 'roles'}<span class="saved"><Icon name="check" size={12} /> Saved</span>{/if}
     </div>
     <p class="sub">
       A user only reaches the workspaces they’re a member of. Switch to <b>By user</b> to grant one
@@ -657,7 +661,7 @@
     {#if auth.isRoot}
     <div class="title-row">
       <h2 class="section-title">Feature grants</h2>
-      {#if savedIn === 'grants'}<span class="saved" role="status"><Icon name="check" size={12} /> Saved</span>{/if}
+      {#if savedIn === 'grants'}<span class="saved"><Icon name="check" size={12} /> Saved</span>{/if}
     </div>
     <p class="sub">
       What each non-root user can do per feature; a change applies as soon as you click it. None = no access; root

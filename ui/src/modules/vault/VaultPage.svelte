@@ -1,11 +1,10 @@
 <script lang="ts">
   import { loadErrorText } from '../../lib/loadError';
-  // Vault v3 — the docs home. Obsidian-style three-pane layout: left sidebar
-  // (Files / Search / Tags over the active vault), center (note edit⇄read or
-  // the graph), and the note's details (backlinks / outgoing / outline /
-  // properties / OKF) as a "Note details" tab of the shell's Side panel — one
-  // right panel, not two. Files on disk are the truth; the daemon keeps a
-  // derived index.
+  import { announce } from '../../lib/announce.svelte';
+  // Vault v3 — the docs home. Obsidian-style three-pane layout: left sidebar (Files / Search / Tags
+  // over the active vault), center (note edit⇄read or the graph), and the note's details (backlinks /
+  // outgoing / outline / properties / OKF) as a "Note details" tab of the shell's Side panel — one
+  // right panel, not two. Files on disk are the truth; the daemon keeps a derived index.
   import { onMount, untrack } from 'svelte';
   import { focusOnMount } from '../../lib/focusOnMount';
   import Icon from '../../lib/components/Icon.svelte';
@@ -37,6 +36,7 @@
   import Switcher from './Switcher.svelte';
   import TagsPanel from './TagsPanel.svelte';
   import { vault } from './vault.svelte';
+  import { registerVaultPort } from '../../lib/uiCommands/vaultPort';
   import PathField from '../../lib/components/PathField.svelte';
   import Modal from '../../lib/components/Modal.svelte';
 
@@ -55,6 +55,10 @@
   const DETAILS_TAB = 'page:vault-details' as const;
   const DETAILS_KEY = 'otto_vault_right_open';
   const rightOpen = $derived(ui.rightOpenNow && rightPanel.shown === DETAILS_TAB);
+  // a11y-6-01: a backlinks refresh failure is announced at its edge (the status-bar glyph is no live region).
+  const backlinksError = $derived(vault.note ? (vault.backlinksError ?? '') : '');
+  $effect(() => { if (backlinksError) announce(`Couldn’t refresh the backlinks. ${backlinksError}`); });
+  $effect(() => registerVaultPort(vault)); // otto.ui_vault_* drive the store while the page is up (lib/uiCommands/vaultPort.ts)
   function rememberDetails(shown: boolean): void {
     lsSet(DETAILS_KEY, shown ? '1' : '0');
   }
@@ -569,7 +573,7 @@
       </span>
       {#if vault.note}
         <span>
-          {vault.backlinks.length} backlinks{#if vault.backlinksLoading}<span class="spinner vs-inline" role="status" aria-label="Loading backlinks"></span>{:else if vault.backlinksError}<span class="vs-warn" role="status" title={vault.backlinksError}><Icon name="warning" size={12} /> couldn’t refresh</span>{/if}
+          {vault.backlinks.length} backlinks{#if vault.backlinksLoading}<span class="spinner vs-inline" role="img" aria-label="Loading backlinks"></span>{:else if vault.backlinksError}<span class="vs-warn" title={vault.backlinksError}><Icon name="warning" size={12} /> couldn’t refresh</span>{/if}
         </span>
         <span>{vault.note.meta.word_count} words</span>
         <span>{(vault.editing ? vault.draft : vault.note.raw).length} characters</span>

@@ -801,15 +801,37 @@ pub async fn storage_to_markdown_async(storage_xhtml: String) -> String {
 }
 
 pub fn storage_to_markdown(storage_xhtml: &str) -> String {
-    let mut out = String::new();
-    let mut pos = 0;
-    let input = storage_xhtml;
     // SE-18: lowercase the document ONCE. ASCII lowercasing never changes a
     // byte offset, so every look-ahead below searches a slice of this copy
     // with the same indices as `input` — they used to lowercase the whole
     // remainder of the page per table / macro / image (quadratic: 34 ms on a
     // 741 KB page, on the async runtime).
     let input_lc = storage_xhtml.to_ascii_lowercase();
+    storage_to_markdown_depth(storage_xhtml, &input_lc, 0)
+}
+
+/// Nested panel macros (`info`/`note`/`warning`/`tip`) are converted
+/// recursively; past this many levels the panel body is emitted as plain text
+/// instead. Each level costs a stack frame, and a page that nests thousands of
+/// panels (a few hundred KB of storage XHTML anyone with edit rights can plant)
+/// used to overflow the 2 MiB worker stack — an abort, not a panic, taking the
+/// whole daemon down.
+const MAX_PANEL_DEPTH: usize = 16;
+
+/// A panel macro's body at nesting `depth`: converted recursively, or — past
+/// [`MAX_PANEL_DEPTH`] — as plain text (the markup dropped, the words kept).
+fn panel_body_markdown(body: &str, body_lc: &str, depth: usize) -> String {
+    if depth >= MAX_PANEL_DEPTH {
+        return decode_html_entities(&strip_tags(body)).trim().to_string();
+    }
+    storage_to_markdown_depth(body, body_lc, depth + 1)
+}
+
+/// [`storage_to_markdown`] with the caller's lowercase copy (`input_lc`, the
+/// same byte offsets as `input`) and the current panel nesting `depth`.
+fn storage_to_markdown_depth(input: &str, input_lc: &str, depth: usize) -> String {
+    let mut out = String::new();
+    let mut pos = 0;
 
     // ── List state ─────────────────────────────────────────────────────────
     #[derive(Clone, Copy, PartialEq)]
@@ -972,7 +994,12 @@ pub fn storage_to_markdown(storage_xhtml: &str) -> String {
     // matching `</ac:structured-macro>`, extracts the `ac:name` attribute and
     // any `<ac:plain-text-body>` / `<ac:rich-text-body>` / `<ac:parameter>`
     // children, and returns (md_string, bytes_consumed).
-    fn convert_ac_macro(input: &str, input_lc: &str, start_pos: usize) -> (String, usize) {
+    fn convert_ac_macro(
+        input: &str,
+        input_lc: &str,
+        start_pos: usize,
+        depth: usize,
+    ) -> (String, usize) {
         let src = &input[start_pos..];
         let src_lc = &input_lc[start_pos..];
 
@@ -982,26 +1009,26 @@ pub fn storage_to_markdown(storage_xhtml: &str) -> String {
         let end_offset = src_lc.find(&close_lc).unwrap_or(src.len());
         let consumed = end_offset + close.len();
         let macro_src = &src[..end_offset];
+        let macro_lc = &src_lc[..end_offset];
 
         // Extract ac:name from opening tag.
         let name = extract_attr(macro_src, "ac:name").unwrap_or_default();
         let name_lc = name.to_ascii_lowercase();
 
         // Extract <ac:plain-text-body> content (the typical body for code macros).
-        fn extract_body_tag<'a>(src: &'a str, tag: &str) -> Option<&'a str> {
-            let src_lc = src.to_ascii_lowercase();
+        // The body's byte range, found in the caller's lowercase copy (no re-lowercasing).
+        fn extract_body_tag(src_lc: &str, tag: &str) -> Option<std::ops::Range<usize>> {
             let open = format!("<{}", tag);
             let close = format!("</{}>", tag);
             let start = src_lc.find(&open)?;
             let open_end = src_lc[start..].find('>')? + start + 1;
             let end = src_lc[open_end..].find(&close)? + open_end;
-            Some(&src[open_end..end])
+            Some(open_end..end)
         }
 
         // Extract a parameter by name: <ac:parameter ac:name="X">value</ac:parameter>
-        fn extract_param(macro_src: &str, param_name: &str) -> Option<String> {
+        fn extract_param(macro_src: &str, src_lc: &str, param_name: &str) -> Option<String> {
             // Find <ac:parameter ac:name="X"> by scanning manually.
-            let src_lc = macro_src.to_ascii_lowercase();
             let needle = "ac:parameter";
             let mut search = 0;
             while let Some(rel) = src_lc[search..].find(needle) {
@@ -1030,10 +1057,10 @@ pub fn storage_to_markdown(storage_xhtml: &str) -> String {
         let md = match name_lc.as_str() {
             // ── Code macro → fenced code block ────────────────────────────
             "code" => {
-                let lang = extract_param(macro_src, "language").unwrap_or_default();
-                let body = extract_body_tag(macro_src, "ac:plain-text-body")
-                    .or_else(|| extract_body_tag(macro_src, "ac:rich-text-body"))
-                    .unwrap_or("");
+                let lang = extract_param(macro_src, macro_lc, "language").unwrap_or_default();
+                let body = extract_body_tag(macro_lc, "ac:plain-text-body")
+                    .or_else(|| extract_body_tag(macro_lc, "ac:rich-text-body"))
+                    .map_or("", |r| &macro_src[r]);
                 // Confluence wraps plain-text bodies in CDATA; the literal
                 // `<![CDATA[` / `]]>` used to leak into the Markdown (and from
                 // there, escaped, back into the page on publish).
@@ -1048,10 +1075,11 @@ pub fn storage_to_markdown(storage_xhtml: &str) -> String {
                     "tip" => "TIP",
                     _ => "",
                 };
-                let body = extract_body_tag(macro_src, "ac:rich-text-body")
-                    .or_else(|| extract_body_tag(macro_src, "ac:plain-text-body"))
-                    .unwrap_or("");
-                let body_md = storage_to_markdown(body);
+                let range = extract_body_tag(macro_lc, "ac:rich-text-body")
+                    .or_else(|| extract_body_tag(macro_lc, "ac:plain-text-body"))
+                    .unwrap_or(0..0);
+                let body_md =
+                    panel_body_markdown(&macro_src[range.clone()], &macro_lc[range], depth);
                 // Prefix every line with `> `.
                 let quoted: String = body_md
                     .lines()
@@ -1062,7 +1090,8 @@ pub fn storage_to_markdown(storage_xhtml: &str) -> String {
             }
             // ── Status macro → inline badge ────────────────────────────────
             "status" => {
-                let label = extract_param(macro_src, "title").unwrap_or_else(|| name.clone());
+                let label =
+                    extract_param(macro_src, macro_lc, "title").unwrap_or_else(|| name.clone());
                 format!("[{}]", label.to_uppercase())
             }
             // ── Unknown macro → strip silently ────────────────────────────
@@ -1135,7 +1164,7 @@ pub fn storage_to_markdown(storage_xhtml: &str) -> String {
             // `<p>👍`, `<em>—`), taking down page reads and the story watcher.
             if starts_with_ci(input, pos, "<table") {
                 push_block_sep!();
-                let (gfm, consumed) = convert_table(input, &input_lc, pos);
+                let (gfm, consumed) = convert_table(input, input_lc, pos);
                 out.push_str(&gfm);
                 pos += consumed;
                 continue;
@@ -1144,7 +1173,7 @@ pub fn storage_to_markdown(storage_xhtml: &str) -> String {
             // ── ac:structured-macro look-ahead ────────────────────────────
             if starts_with_ci(input, pos, "<ac:structured-macro") {
                 push_block_sep!();
-                let (md, consumed) = convert_ac_macro(input, &input_lc, pos);
+                let (md, consumed) = convert_ac_macro(input, input_lc, pos, depth);
                 out.push_str(&md);
                 pos += consumed;
                 continue;
@@ -1152,7 +1181,7 @@ pub fn storage_to_markdown(storage_xhtml: &str) -> String {
 
             // ── ac:image look-ahead ────────────────────────────────────────
             if starts_with_ci(input, pos, "<ac:image") {
-                let (md, consumed) = convert_ac_image(input, &input_lc, pos);
+                let (md, consumed) = convert_ac_image(input, input_lc, pos);
                 out.push_str(&md);
                 pos += consumed;
                 continue;
@@ -1852,6 +1881,29 @@ mod tests {
             let md = storage_to_markdown(storage);
             assert!(md.contains(text), "{storage:?} → {md:?}");
         }
+    }
+
+    #[test]
+    fn storage_to_markdown_bounds_deeply_nested_panels() {
+        // 5,000 nested info panels must return (a stack overflow aborts the
+        // whole daemon) with a bounded number of panel levels. The body is
+        // cut at the first `</ac:rich-text-body>`, which already limits how
+        // deep this shape recurses; MAX_PANEL_DEPTH bounds every shape.
+        let n = 5_000;
+        let mut storage = String::new();
+        for _ in 0..n {
+            storage.push_str(r#"<ac:structured-macro ac:name="info"><ac:rich-text-body>"#);
+        }
+        storage.push_str("<p>deep &amp; nested</p>");
+        for _ in 0..n {
+            storage.push_str("</ac:rich-text-body></ac:structured-macro>");
+        }
+        let md = storage_to_markdown(&storage);
+        let levels = md.matches("**ℹ INFO**").count();
+        assert!(
+            (1..=MAX_PANEL_DEPTH + 1).contains(&levels),
+            "panel nesting is bounded, got {levels} levels"
+        );
     }
 
     #[test]

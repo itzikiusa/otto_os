@@ -1,7 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { listRange } from '../src/modules/git/list-range.ts';
+import { loadSource } from './sourceHarness.ts';
+
+// The pure window arithmetic of the shared ListWindow (lib/listWindow.svelte.ts).
+const lib = loadSource(new URL('../src/lib/listWindow.svelte.ts', import.meta.url), {
+  svelte: { tick: async () => {}, untrack: (fn: () => unknown) => fn() },
+  './findProviders': { registerFindProvider: () => () => {} },
+});
+// Re-built in this realm (the vm sandbox has its own Object prototype).
+const listRange = (...a: number[]): { start: number; end: number; top: number; bottom: number } => ({ ...lib.listRange(...a) });
 
 // The Side panel's Files tab (modules/panels/FileTree.svelte) lists a folder's
 // entries with no daemon-side cap: opening node_modules or a build output

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announce } from '../../lib/announce.svelte';
   import { toastError } from '../../lib/toastError';
   // Per-task Goals view: the goals the Coordinator verifies for a task, each with
   // a live status, the measured value + verdict summary, and retry budget. Lets
@@ -71,7 +72,7 @@
     try {
       const res = await swarm.verifyTask(task.id);
       if (res.started) toasts.success('Verification started', 'Watch goal statuses update live.');
-      else toasts.info("Verification didn’t start", res.reason ?? 'Verification could not start.');
+      else toasts.info("Verification didn’t start", res.reason ?? 'Verification couldn’t start.');
     } catch (e) {
       toastError("Couldn’t start verification", e);
     } finally {
@@ -116,12 +117,16 @@
       }
     }
   }
+
+  // a11y-6-01: announce at the state edge — a status element inserted
+  // together with its text is not read by VoiceOver/WebKit.
+  $effect(() => { if (running) announce('Verifying…'); });
 </script>
 
 <Modal title="Goals — {task.title}" width={620} {onclose}>
   <div class="bar">
     {#if running}
-      <span class="running" role="status"><span class="spinner" style="--spinner-size: 10px" aria-hidden="true"></span> Verifying…</span>
+      <span class="running"><span class="spinner" style="--spinner-size: 10px" aria-hidden="true"></span> Verifying…</span>
       <button class="btn small danger" onclick={() => void stop()} title="Stop verifying — goals already checked keep their result"><Icon name="stop" size={12} /> Stop…</button>
     {:else}
       <button class="btn small primary" onclick={runVerify} disabled={verifying || !goals.length} title={goals.length ? 'Run every goal check for this task now' : 'Add a goal first'}>

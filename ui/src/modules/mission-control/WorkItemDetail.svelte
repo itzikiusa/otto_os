@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announceShown } from '../../lib/announce.svelte';
   import { onDestroy, untrack } from 'svelte';
   import { toastError } from '../../lib/toastError';
   import { router } from '../../lib/router.svelte';
@@ -8,10 +9,8 @@
   import { ApiError } from '../../lib/api/client';
   import { ws } from '../../lib/stores/workspace.svelte';
   import type { WorkItemDetail, RiskLevel } from '../../lib/api/types';
-  import {
-    KIND_ICON, KIND_LABEL, RISK_LABEL, RISK_LEVELS, ACTOR_LABEL, ARTIFACT_LABEL,
-    riskColor, fmtCost, workStatus, ownerLabel, shortId, isUlid,
-  } from './lib';
+  import { KIND_ICON, KIND_LABEL, RISK_LABEL, RISK_LEVELS, ACTOR_LABEL, ARTIFACT_LABEL } from './lib';
+  import { riskColor, fmtCost, workStatus, ownerLabel, shortId, isUlid } from './lib';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import ApprovalActions from '../../lib/components/ApprovalActions.svelte';
   import ApprovalOutcome from '../../lib/components/ApprovalOutcome.svelte';
@@ -314,7 +313,7 @@
   }
 
   async function copyId(v: string): Promise<void> {
-    if (await copyText(v)) toasts.success('Copied ID');
+    if (await copyText(v)) toasts.success('Copied ID'); else toasts.error('Couldn’t copy the ID', `The clipboard isn’t available here. Select the ID and copy it manually. ${v}`);
   }
 
   function isUrl(s: string | null): boolean {
@@ -363,7 +362,7 @@
     </div>
   {:else if detail}
     <div class="d-body">
-      {#if err}<div class="d-err" role="alert"><Icon name="warning" size={14} /><span>{err}</span></div>{/if}
+      {#if err}<div class="d-err" use:announceShown={{ text: err, assertive: true }}><Icon name="warning" size={14} /><span>{err}</span></div>{/if}
 
       <!-- status / risk / approval banner -->
       <div class="d-banner">

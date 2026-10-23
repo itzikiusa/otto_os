@@ -231,6 +231,10 @@ pub struct SwarmPatch {
     pub max_cost_usd: Option<Option<f64>>,
     pub max_runtime_secs: Option<Option<i64>>,
     pub max_attempts: Option<i64>,
+    /// The person whose edit this is when it rewrites the swarm's prompt text
+    /// (its description): stamped as `prompt_updated_by` / `_at` IN THE SAME
+    /// UPDATE (access-control-6-02, migration 0196). `None` keeps the stamp.
+    pub prompt_updated_by: Option<Id>,
 }
 
 /// Accumulated spend/run-count for a swarm (for the budget check + API surface).
@@ -355,6 +359,9 @@ pub struct ProjectPatch {
     pub origin_thread: Option<Option<String>>,
     pub status: Option<String>,
     pub order_idx: Option<i64>,
+    /// The person whose edit rewrites the project's prompt text (name,
+    /// description, goal): stamped in the same UPDATE (access-control-6-02).
+    pub prompt_updated_by: Option<Id>,
 }
 
 pub struct NewGoal {
@@ -391,6 +398,10 @@ pub struct GoalPatch {
     pub verdict: Option<Option<Value>>,
     pub iterations: Option<i64>,
     pub order_idx: Option<i64>,
+    /// The person rewriting the goal's text / verify command: stamped as the
+    /// goal's `updated_by` AND as its owner's prompt editor (task, project or
+    /// swarm) in one transaction (concurrency-async-6-03, data-integrity-6-02).
+    pub updated_by: Option<Id>,
 }
 
 pub struct NewTrigger {
@@ -445,6 +456,11 @@ pub struct TaskPatch {
     pub result_ref: Option<Option<String>>,
     pub delegated: Option<bool>,
     pub order_idx: Option<i64>,
+    /// The person whose edit rewrites the task's prompt (title, description,
+    /// labels): stamped as `prompt_updated_by` / `_at` in the same UPDATE as
+    /// the content, so the text never lands without its editor
+    /// (data-integrity-6-02). `None` keeps the stamp.
+    pub prompt_updated_by: Option<Id>,
 }
 
 pub struct NewRun {
@@ -651,6 +667,73 @@ fn row_to_message(r: &sqlx::sqlite::SqliteRow) -> Result<SwarmMessage> {
     })
 }
 
+/// Whose prompt text a [`SwarmRepo::prompt_edit`] stamp belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptScope {
+    Task,
+    Project,
+    Swarm,
+}
+
+/// Stamp `user` as `scope`'s prompt editor at `now`, inside `tx`.
+async fn stamp_prompt_editor(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    scope: PromptScope,
+    id: &str,
+    user: &str,
+    now: &str,
+) -> Result<()> {
+    let sql = match scope {
+        PromptScope::Task => {
+            "UPDATE swarm_tasks SET prompt_updated_by = ?, prompt_updated_at = ? WHERE id = ?"
+        }
+        PromptScope::Project => {
+            "UPDATE swarm_projects SET prompt_updated_by = ?, prompt_updated_at = ? WHERE id = ?"
+        }
+        PromptScope::Swarm => {
+            "UPDATE swarms SET prompt_updated_by = ?, prompt_updated_at = ? WHERE id = ?"
+        }
+    };
+    sqlx::query(sql)
+        .bind(user)
+        .bind(now)
+        .bind(id)
+        .execute(&mut **tx)
+        .await
+        .map_err(dberr("stamp prompt editor"))?;
+    Ok(())
+}
+
+/// A person's goal write: the goal's `updated_by`, plus its owner's prompt
+/// editor — the task for a task goal, else the project for a project goal,
+/// else the swarm for a standing template — inside the goal's transaction.
+async fn stamp_goal_editor(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    goal_id: &str,
+    task_id: Option<&Id>,
+    project_id: Option<&Id>,
+    swarm_id: Option<&Id>,
+    user: &str,
+) -> Result<()> {
+    let now = fmt(Utc::now());
+    sqlx::query("UPDATE swarm_goals SET updated_by = ? WHERE id = ?")
+        .bind(user)
+        .bind(goal_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(dberr("set goal editor"))?;
+    let owner = match (task_id, project_id, swarm_id) {
+        (Some(t), _, _) => Some((PromptScope::Task, t)),
+        (None, Some(p), _) => Some((PromptScope::Project, p)),
+        (None, None, Some(s)) => Some((PromptScope::Swarm, s)),
+        (None, None, None) => None,
+    };
+    if let Some((scope, id)) = owner {
+        stamp_prompt_editor(tx, scope, id, user, &now).await?;
+    }
+    Ok(())
+}
+
 fn row_to_goal(r: &sqlx::sqlite::SqliteRow) -> Result<SwarmGoal> {
     Ok(SwarmGoal {
         id: r.get("id"),
@@ -780,7 +863,10 @@ impl SwarmRepo {
         sqlx::query(
             "UPDATE swarms SET name = ?, description = ?, status = ?, config_json = ?,
                 max_total_runs = ?, max_cost_usd = ?, max_runtime_secs = ?, max_attempts = ?,
-                updated_at = ? WHERE id = ?",
+                updated_at = ?,
+                prompt_updated_by = COALESCE(?, prompt_updated_by),
+                prompt_updated_at = CASE WHEN ? IS NULL THEN prompt_updated_at ELSE ? END
+             WHERE id = ?",
         )
         .bind(&name)
         .bind(&description)
@@ -790,6 +876,9 @@ impl SwarmRepo {
         .bind(max_cost_usd)
         .bind(max_runtime_secs)
         .bind(max_attempts)
+        .bind(&now)
+        .bind(&p.prompt_updated_by)
+        .bind(&p.prompt_updated_by)
         .bind(&now)
         .bind(id)
         .execute(&self.pool)
@@ -1149,7 +1238,9 @@ impl SwarmRepo {
             "UPDATE swarm_projects SET name = ?, description = ?, repo_path = ?, goal_md = ?,
                 story_id = ?, skills_json = ?, integration_branch = ?, origin_channel = ?,
                 origin_chat = ?, origin_thread = ?, status = ?, order_idx = ?, updated_at = ?,
-                context_version = context_version + 1
+                context_version = context_version + 1,
+                prompt_updated_by = COALESCE(?, prompt_updated_by),
+                prompt_updated_at = CASE WHEN ? IS NULL THEN prompt_updated_at ELSE ? END
              WHERE id = ?",
         )
         .bind(&name)
@@ -1164,6 +1255,9 @@ impl SwarmRepo {
         .bind(&origin_thread)
         .bind(&status)
         .bind(order_idx)
+        .bind(&now)
+        .bind(&p.prompt_updated_by)
+        .bind(&p.prompt_updated_by)
         .bind(&now)
         .bind(id)
         .execute(&self.pool)
@@ -1391,7 +1485,10 @@ impl SwarmRepo {
         sqlx::query(
             "UPDATE swarm_tasks SET title = ?, description = ?, assignee_agent_id = ?, status = ?,
                 priority = ?, depends_on_json = ?, labels_json = ?, result_ref = ?, delegated = ?,
-                order_idx = ?, updated_at = ? WHERE id = ?",
+                order_idx = ?, updated_at = ?,
+                prompt_updated_by = COALESCE(?, prompt_updated_by),
+                prompt_updated_at = CASE WHEN ? IS NULL THEN prompt_updated_at ELSE ? END
+             WHERE id = ?",
         )
         .bind(&title)
         .bind(&description)
@@ -1403,6 +1500,9 @@ impl SwarmRepo {
         .bind(&result_ref)
         .bind(i64::from(delegated))
         .bind(order_idx)
+        .bind(&now)
+        .bind(&p.prompt_updated_by)
+        .bind(&p.prompt_updated_by)
         .bind(&now)
         .bind(id)
         .execute(&self.pool)
@@ -1521,13 +1621,52 @@ impl SwarmRepo {
     /// (access-control-5-01, migration 0195). `acting_user` prefers this
     /// person over the task's originator.
     pub async fn set_task_prompt_editor(&self, id: &Id, user: &str) -> Result<()> {
-        sqlx::query("UPDATE swarm_tasks SET prompt_updated_by = ? WHERE id = ?")
-            .bind(user)
-            .bind(id)
-            .execute(&self.pool)
-            .await
-            .map_err(dberr("set task prompt editor"))?;
+        sqlx::query(
+            "UPDATE swarm_tasks SET prompt_updated_by = ?, prompt_updated_at = ? WHERE id = ?",
+        )
+        .bind(user)
+        .bind(fmt(Utc::now()))
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("set task prompt editor"))?;
         Ok(())
+    }
+
+    /// The last person who rewrote the prompt text of a task, project or
+    /// swarm, with when (access-control-6-02, migration 0196). `None` =
+    /// nobody since it was created. A task stamped by the 0195 build has no
+    /// time: it reads as the task's `updated_at`.
+    pub async fn prompt_edit(
+        &self,
+        scope: PromptScope,
+        id: &Id,
+    ) -> Result<Option<(Id, DateTime<Utc>)>> {
+        let sql = match scope {
+            PromptScope::Task => {
+                "SELECT prompt_updated_by, COALESCE(prompt_updated_at, updated_at)
+                 FROM swarm_tasks WHERE id = ?"
+            }
+            PromptScope::Project => {
+                "SELECT prompt_updated_by, prompt_updated_at FROM swarm_projects WHERE id = ?"
+            }
+            PromptScope::Swarm => {
+                "SELECT prompt_updated_by, prompt_updated_at FROM swarms WHERE id = ?"
+            }
+        };
+        let row: Option<(Option<String>, Option<String>)> = sqlx::query_as(sql)
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(dberr("prompt editor"))?;
+        Ok(row.and_then(|(who, at)| {
+            let who = who.filter(|u| !u.is_empty())?;
+            let at = at
+                .and_then(|a| DateTime::parse_from_rfc3339(&a).ok())
+                .map(|a| a.with_timezone(&Utc))
+                .unwrap_or(DateTime::<Utc>::MIN_UTC);
+            Some((who, at))
+        }))
     }
 
     /// The last person who rewrote this task's prompt or goals (`None` = nobody
@@ -2399,8 +2538,21 @@ impl SwarmRepo {
     // -- Goals --------------------------------------------------------------
 
     pub async fn create_goal(&self, g: NewGoal) -> Result<SwarmGoal> {
+        self.create_goal_by(g, None).await
+    }
+
+    /// [`Self::create_goal`] for a person's edit: the goal row, its
+    /// `updated_by` and its owner's prompt editor (task, else project) commit
+    /// in ONE transaction, so a goal never lands without the identity its
+    /// verification turn must act as (concurrency-async-6-03).
+    pub async fn create_goal_by(&self, g: NewGoal, editor: Option<&str>) -> Result<SwarmGoal> {
         let id = new_id();
         let now = fmt(Utc::now());
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(dberr("create goal tx"))?;
         sqlx::query(
             "INSERT INTO swarm_goals (id, swarm_id, workspace_id, project_id, task_id, kind, title,
                 description, metric, comparator, target_value, block_value, verify_cmd, max_retries,
@@ -2426,9 +2578,21 @@ impl SwarmRepo {
         .bind(&g.created_by)
         .bind(&now)
         .bind(&now)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(dberr("create goal"))?;
+        if let Some(user) = editor {
+            stamp_goal_editor(
+                &mut tx,
+                &id,
+                g.task_id.as_ref(),
+                g.project_id.as_ref(),
+                None,
+                user,
+            )
+            .await?;
+        }
+        tx.commit().await.map_err(dberr("create goal commit"))?;
         self.get_goal(&id).await
     }
 
@@ -2495,6 +2659,11 @@ impl SwarmRepo {
         let iterations = p.iterations.unwrap_or(cur.iterations);
         let order_idx = p.order_idx.unwrap_or(cur.order_idx);
         let now = fmt(Utc::now());
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(dberr("update goal tx"))?;
         sqlx::query(
             "UPDATE swarm_goals SET title = ?, description = ?, metric = ?, comparator = ?,
                 target_value = ?, block_value = ?, verify_cmd = ?, max_retries = ?, blocking = ?,
@@ -2516,9 +2685,24 @@ impl SwarmRepo {
         .bind(order_idx)
         .bind(&now)
         .bind(id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(dberr("update goal"))?;
+        if let Some(user) = p.updated_by.as_deref() {
+            // A standing template (no task, no project) is the swarm's text.
+            let swarm =
+                (cur.task_id.is_none() && cur.project_id.is_none()).then_some(&cur.swarm_id);
+            stamp_goal_editor(
+                &mut tx,
+                id,
+                cur.task_id.as_ref(),
+                cur.project_id.as_ref(),
+                swarm,
+                user,
+            )
+            .await?;
+        }
+        tx.commit().await.map_err(dberr("update goal commit"))?;
         self.get_goal(id).await
     }
 
@@ -2530,6 +2714,19 @@ impl SwarmRepo {
         &self,
         swarm_id: &Id,
         goals: Vec<NewGoal>,
+    ) -> Result<Vec<SwarmGoal>> {
+        self.replace_standing_goals_by(swarm_id, goals, None).await
+    }
+
+    /// [`Self::replace_standing_goals`] for a person's edit: the swarm's
+    /// prompt editor is stamped in the same transaction (the standing goals'
+    /// `verify_cmd`s run in every task's verification turn —
+    /// access-control-6-02).
+    pub async fn replace_standing_goals_by(
+        &self,
+        swarm_id: &Id,
+        goals: Vec<NewGoal>,
+        editor: Option<&str>,
     ) -> Result<Vec<SwarmGoal>> {
         let mut tx = self
             .pool
@@ -2571,6 +2768,9 @@ impl SwarmRepo {
             .execute(&mut *tx)
             .await
             .map_err(dberr("insert standing goal"))?;
+        }
+        if let Some(user) = editor {
+            stamp_prompt_editor(&mut tx, PromptScope::Swarm, swarm_id, user, &now).await?;
         }
         tx.commit().await.map_err(dberr("standing goals commit"))?;
         self.list_standing_goals(swarm_id).await

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announceShown } from '../../lib/announce.svelte';
   import { plural } from '../../lib/plural';
   // Merge confirmation for a hosted PR. Nothing merges until the user clicks
   // Merge here — and the modal first shows everything that argues against it:
@@ -198,7 +199,7 @@
         <span class="rlabel">CI</span>
         <span class="rvalue">
           {#if checksLoading}
-            <span class="spinner" role="status" aria-label="Loading checks" title="Loading checks"></span>
+            <span class="spinner" role="img" aria-label="Loading checks" title="Loading checks"></span>
           {:else if checksError || checks === null}
             <span class="warn">Unavailable</span>
             <button class="btn small" onclick={() => probeTick++}>Retry</button>
@@ -230,7 +231,7 @@
       <div class="row-item">
         <span class="rlabel">Approvals</span>
         <span class="rvalue">
-          {#if readinessLoading}<span class="spinner" role="status" aria-label="Loading approvals" title="Loading approvals"></span>
+          {#if readinessLoading}<span class="spinner" role="img" aria-label="Loading approvals" title="Loading approvals"></span>
           {:else if readinessError || readiness === null}
             <span class="warn">Unavailable</span>
             <button class="btn small" onclick={() => probeTick++}>Retry</button>
@@ -250,7 +251,7 @@
       <div class="row-item">
         <span class="rlabel">Open blockers</span>
         <span class="rvalue">
-          {#if readinessLoading}<span class="spinner" role="status" aria-label="Loading blockers" title="Loading blockers"></span>
+          {#if readinessLoading}<span class="spinner" role="img" aria-label="Loading blockers" title="Loading blockers"></span>
           {:else if readiness?.review}
             <span class:bad={blockers > 0}>{blockers}</span>
             <span class="dim">of {readiness.review.unresolved_total} unresolved</span>
@@ -303,7 +304,7 @@
     </div>
 
     {#if error}
-      <div class="err" role="alert"><Icon name="warning" size={14} /><span>Couldn’t merge. {error}</span></div>
+      <div class="err" use:announceShown={{ text: `Couldn’t merge. ${error}`, assertive: true }}><Icon name="warning" size={14} /><span>Couldn’t merge. {error}</span></div>
     {/if}
     <p class="who dim">
       Merges <span class="mono">{pr.source_branch}</span> into <span class="mono">{pr.target_branch}</span> on the provider.

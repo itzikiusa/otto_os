@@ -1,0 +1,3891 @@
+{
+  "names:default": [
+    "aws_athena_get_query",
+    "aws_athena_list_tables",
+    "aws_athena_query",
+    "aws_ec2_list_instances",
+    "aws_eks_list_clusters",
+    "aws_list_accounts",
+    "aws_logs_filter",
+    "aws_logs_get_insights",
+    "aws_logs_insights",
+    "aws_logs_list_groups",
+    "aws_s3_list_buckets",
+    "aws_s3_list_objects",
+    "aws_s3_preview",
+    "aws_sqs_list_queues",
+    "aws_sqs_peek",
+    "aws_sqs_send",
+    "browser_login",
+    "browser_marks",
+    "browser_navigate",
+    "browser_page",
+    "browser_query",
+    "browser_summarize",
+    "canvas_create_scene",
+    "canvas_get_scene",
+    "canvas_list_scenes",
+    "canvas_update_scene",
+    "design_get",
+    "design_links",
+    "design_list",
+    "design_search",
+    "k8s_action",
+    "k8s_describe",
+    "k8s_get_resources",
+    "k8s_health",
+    "k8s_list_clusters",
+    "k8s_logs",
+    "k8s_pod_actions_list",
+    "k8s_pod_http",
+    "k8s_top",
+    "otto_api_execute",
+    "otto_api_get_request",
+    "otto_api_history",
+    "otto_api_list",
+    "otto_api_run_automation",
+    "otto_api_upsert_request",
+    "otto_approve_improvement_edit",
+    "otto_ask_human_approval",
+    "otto_broadcast_message",
+    "otto_cancel_workflow_run",
+    "otto_comment_confluence_page",
+    "otto_comment_issue",
+    "otto_comment_pr",
+    "otto_consume_broker_messages",
+    "otto_create_confluence_page",
+    "otto_create_issue",
+    "otto_create_pr",
+    "otto_create_scheduled_task",
+    "otto_create_work_item",
+    "otto_db_children",
+    "otto_db_object",
+    "otto_db_query",
+    "otto_db_schema",
+    "otto_delete_scheduled_task",
+    "otto_design_assist",
+    "otto_design_link",
+    "otto_get_broker_topic",
+    "otto_get_confluence_page",
+    "otto_get_context_packet",
+    "otto_get_finding",
+    "otto_get_improvement_run",
+    "otto_get_issue",
+    "otto_get_pr",
+    "otto_get_pr_checks",
+    "otto_get_pr_diff",
+    "otto_get_proof_pack",
+    "otto_get_scheduled_task",
+    "otto_get_self_improvement_config",
+    "otto_get_session",
+    "otto_get_swarm",
+    "otto_get_swarm_board",
+    "otto_get_workflow",
+    "otto_get_workflow_run",
+    "otto_git_pr_review",
+    "otto_git_status",
+    "otto_list_agent_rooms",
+    "otto_list_broker_clusters",
+    "otto_list_broker_topics",
+    "otto_list_bundled_skills",
+    "otto_list_confluence_page_comments",
+    "otto_list_connections",
+    "otto_list_consumer_groups",
+    "otto_list_design_projects",
+    "otto_list_findings",
+    "otto_list_goal_loops",
+    "otto_list_improvement_edits",
+    "otto_list_improvement_runs",
+    "otto_list_integrations",
+    "otto_list_issue_accounts",
+    "otto_list_issue_projects",
+    "otto_list_issue_transitions",
+    "otto_list_issue_types",
+    "otto_list_product_stories",
+    "otto_list_prs",
+    "otto_list_repos",
+    "otto_list_scheduled_task_runs",
+    "otto_list_scheduled_tasks",
+    "otto_list_sessions",
+    "otto_list_swarm_runs",
+    "otto_list_swarms",
+    "otto_list_workflow_runs",
+    "otto_list_workflows",
+    "otto_list_workspaces",
+    "otto_merge_pr",
+    "otto_open_pr_draft",
+    "otto_open_session",
+    "otto_post_swarm_board",
+    "otto_produce_broker_message",
+    "otto_product_story",
+    "otto_query_db",
+    "otto_reject_improvement_edit",
+    "otto_rollback_improvement_edit",
+    "otto_room_post",
+    "otto_room_read",
+    "otto_run_goal_loop",
+    "otto_run_scheduled_task",
+    "otto_run_self_improvement",
+    "otto_run_workflow",
+    "otto_search_codebase",
+    "otto_search_confluence",
+    "otto_search_issues",
+    "otto_search_memory",
+    "otto_send_message",
+    "otto_set_scheduled_task_enabled",
+    "otto_start_pr_review",
+    "otto_test_integration",
+    "otto_transition_issue",
+    "otto_ui_request_control",
+    "otto_update_confluence_page",
+    "otto_update_scheduled_task",
+    "otto_usage_summary",
+    "otto_vault_backlinks",
+    "otto_vault_delete",
+    "otto_vault_dir",
+    "otto_vault_graph",
+    "otto_vault_list",
+    "otto_vault_okf_validate",
+    "otto_vault_read",
+    "otto_vault_rename",
+    "otto_vault_search",
+    "otto_vault_tags",
+    "otto_vault_write",
+    "otto_vault_write_file",
+    "otto_wait_session",
+    "swarm_create_task",
+    "swarm_list_projects",
+    "swarm_list_tasks",
+    "swarm_run_task",
+    "swarm_stop_run",
+    "swarm_update_task",
+    "swarm_utilization",
+    "workbench_get",
+    "workbench_list",
+    "workbench_write"
+  ],
+  "names:review": [
+    "design_get",
+    "design_links",
+    "design_list",
+    "design_search",
+    "otto_api_execute",
+    "otto_api_get_request",
+    "otto_api_history",
+    "otto_api_list",
+    "otto_api_run_automation",
+    "otto_api_upsert_request",
+    "otto_approve_improvement_edit",
+    "otto_ask_human_approval",
+    "otto_broadcast_message",
+    "otto_cancel_workflow_run",
+    "otto_comment_confluence_page",
+    "otto_comment_issue",
+    "otto_comment_pr",
+    "otto_create_confluence_page",
+    "otto_create_issue",
+    "otto_create_pr",
+    "otto_create_scheduled_task",
+    "otto_create_work_item",
+    "otto_db_children",
+    "otto_db_object",
+    "otto_db_query",
+    "otto_db_schema",
+    "otto_delete_scheduled_task",
+    "otto_design_assist",
+    "otto_design_link",
+    "otto_get_confluence_page",
+    "otto_get_context_packet",
+    "otto_get_finding",
+    "otto_get_improvement_run",
+    "otto_get_issue",
+    "otto_get_pr",
+    "otto_get_pr_checks",
+    "otto_get_pr_diff",
+    "otto_get_proof_pack",
+    "otto_get_scheduled_task",
+    "otto_get_self_improvement_config",
+    "otto_get_session",
+    "otto_get_swarm",
+    "otto_get_swarm_board",
+    "otto_get_workflow",
+    "otto_get_workflow_run",
+    "otto_git_pr_review",
+    "otto_git_status",
+    "otto_list_agent_rooms",
+    "otto_list_bundled_skills",
+    "otto_list_confluence_page_comments",
+    "otto_list_connections",
+    "otto_list_design_projects",
+    "otto_list_findings",
+    "otto_list_goal_loops",
+    "otto_list_improvement_edits",
+    "otto_list_improvement_runs",
+    "otto_list_integrations",
+    "otto_list_issue_accounts",
+    "otto_list_issue_projects",
+    "otto_list_issue_transitions",
+    "otto_list_issue_types",
+    "otto_list_product_stories",
+    "otto_list_prs",
+    "otto_list_repos",
+    "otto_list_scheduled_task_runs",
+    "otto_list_scheduled_tasks",
+    "otto_list_sessions",
+    "otto_list_swarm_runs",
+    "otto_list_swarms",
+    "otto_list_workflow_runs",
+    "otto_list_workflows",
+    "otto_list_workspaces",
+    "otto_merge_pr",
+    "otto_open_pr_draft",
+    "otto_open_session",
+    "otto_post_swarm_board",
+    "otto_product_story",
+    "otto_query_db",
+    "otto_reject_improvement_edit",
+    "otto_rollback_improvement_edit",
+    "otto_room_post",
+    "otto_room_read",
+    "otto_run_goal_loop",
+    "otto_run_scheduled_task",
+    "otto_run_self_improvement",
+    "otto_run_workflow",
+    "otto_search_codebase",
+    "otto_search_confluence",
+    "otto_search_issues",
+    "otto_search_memory",
+    "otto_send_message",
+    "otto_set_scheduled_task_enabled",
+    "otto_start_pr_review",
+    "otto_test_integration",
+    "otto_transition_issue",
+    "otto_ui_request_control",
+    "otto_update_confluence_page",
+    "otto_update_scheduled_task",
+    "otto_usage_summary",
+    "otto_vault_backlinks",
+    "otto_vault_delete",
+    "otto_vault_dir",
+    "otto_vault_graph",
+    "otto_vault_list",
+    "otto_vault_okf_validate",
+    "otto_vault_read",
+    "otto_vault_rename",
+    "otto_vault_search",
+    "otto_vault_tags",
+    "otto_vault_write",
+    "otto_vault_write_file",
+    "otto_wait_session",
+    "swarm_create_task",
+    "swarm_list_projects",
+    "swarm_list_tasks",
+    "swarm_run_task",
+    "swarm_stop_run",
+    "swarm_update_task",
+    "swarm_utilization"
+  ],
+  "names:workflow": [
+    "aws_athena_get_query",
+    "aws_athena_list_tables",
+    "aws_athena_query",
+    "aws_ec2_list_instances",
+    "aws_eks_list_clusters",
+    "aws_list_accounts",
+    "aws_logs_filter",
+    "aws_logs_get_insights",
+    "aws_logs_insights",
+    "aws_logs_list_groups",
+    "aws_s3_list_buckets",
+    "aws_s3_list_objects",
+    "aws_s3_preview",
+    "aws_sqs_list_queues",
+    "aws_sqs_peek",
+    "aws_sqs_send",
+    "browser_login",
+    "browser_marks",
+    "browser_navigate",
+    "browser_page",
+    "browser_query",
+    "browser_summarize",
+    "canvas_create_scene",
+    "canvas_get_scene",
+    "canvas_list_scenes",
+    "canvas_update_scene",
+    "design_get",
+    "design_links",
+    "design_list",
+    "design_search",
+    "k8s_action",
+    "k8s_describe",
+    "k8s_get_resources",
+    "k8s_health",
+    "k8s_list_clusters",
+    "k8s_logs",
+    "k8s_pod_actions_list",
+    "k8s_pod_http",
+    "k8s_top",
+    "otto_api_execute",
+    "otto_api_get_request",
+    "otto_api_history",
+    "otto_api_list",
+    "otto_api_run_automation",
+    "otto_api_upsert_request",
+    "otto_approve_improvement_edit",
+    "otto_ask_human_approval",
+    "otto_broadcast_message",
+    "otto_cancel_workflow_run",
+    "otto_comment_confluence_page",
+    "otto_comment_issue",
+    "otto_comment_pr",
+    "otto_consume_broker_messages",
+    "otto_create_confluence_page",
+    "otto_create_issue",
+    "otto_create_pr",
+    "otto_create_scheduled_task",
+    "otto_create_work_item",
+    "otto_db_children",
+    "otto_db_object",
+    "otto_db_query",
+    "otto_db_schema",
+    "otto_delete_scheduled_task",
+    "otto_design_assist",
+    "otto_design_link",
+    "otto_get_broker_topic",
+    "otto_get_confluence_page",
+    "otto_get_context_packet",
+    "otto_get_finding",
+    "otto_get_improvement_run",
+    "otto_get_issue",
+    "otto_get_pr",
+    "otto_get_pr_checks",
+    "otto_get_pr_diff",
+    "otto_get_proof_pack",
+    "otto_get_scheduled_task",
+    "otto_get_self_improvement_config",
+    "otto_get_session",
+    "otto_get_swarm",
+    "otto_get_swarm_board",
+    "otto_get_workflow",
+    "otto_get_workflow_run",
+    "otto_git_pr_review",
+    "otto_git_status",
+    "otto_list_agent_rooms",
+    "otto_list_broker_clusters",
+    "otto_list_broker_topics",
+    "otto_list_bundled_skills",
+    "otto_list_confluence_page_comments",
+    "otto_list_connections",
+    "otto_list_consumer_groups",
+    "otto_list_design_projects",
+    "otto_list_findings",
+    "otto_list_goal_loops",
+    "otto_list_improvement_edits",
+    "otto_list_improvement_runs",
+    "otto_list_integrations",
+    "otto_list_issue_accounts",
+    "otto_list_issue_projects",
+    "otto_list_issue_transitions",
+    "otto_list_issue_types",
+    "otto_list_product_stories",
+    "otto_list_prs",
+    "otto_list_repos",
+    "otto_list_scheduled_task_runs",
+    "otto_list_scheduled_tasks",
+    "otto_list_sessions",
+    "otto_list_swarm_runs",
+    "otto_list_swarms",
+    "otto_list_workflow_runs",
+    "otto_list_workflows",
+    "otto_list_workspaces",
+    "otto_merge_pr",
+    "otto_open_pr_draft",
+    "otto_open_session",
+    "otto_post_swarm_board",
+    "otto_produce_broker_message",
+    "otto_product_story",
+    "otto_query_db",
+    "otto_reject_improvement_edit",
+    "otto_rollback_improvement_edit",
+    "otto_room_post",
+    "otto_room_read",
+    "otto_run_goal_loop",
+    "otto_run_scheduled_task",
+    "otto_run_self_improvement",
+    "otto_run_workflow",
+    "otto_search_codebase",
+    "otto_search_confluence",
+    "otto_search_issues",
+    "otto_search_memory",
+    "otto_send_message",
+    "otto_set_scheduled_task_enabled",
+    "otto_start_pr_review",
+    "otto_test_integration",
+    "otto_transition_issue",
+    "otto_ui_request_control",
+    "otto_update_confluence_page",
+    "otto_update_scheduled_task",
+    "otto_usage_summary",
+    "otto_vault_backlinks",
+    "otto_vault_delete",
+    "otto_vault_dir",
+    "otto_vault_graph",
+    "otto_vault_list",
+    "otto_vault_okf_validate",
+    "otto_vault_read",
+    "otto_vault_rename",
+    "otto_vault_search",
+    "otto_vault_tags",
+    "otto_vault_write",
+    "otto_vault_write_file",
+    "otto_wait_session",
+    "swarm_create_task",
+    "swarm_list_projects",
+    "swarm_list_tasks",
+    "swarm_run_task",
+    "swarm_stop_run",
+    "swarm_update_task",
+    "swarm_utilization",
+    "workbench_get",
+    "workbench_list",
+    "workbench_write"
+  ],
+  "names:assistant": [
+    "assistant_create_reminder",
+    "assistant_create_task",
+    "assistant_delegate",
+    "assistant_forget",
+    "assistant_recall",
+    "assistant_remember",
+    "assistant_request_approval",
+    "assistant_update_task",
+    "aws_athena_get_query",
+    "aws_athena_list_tables",
+    "aws_athena_query",
+    "aws_ec2_list_instances",
+    "aws_eks_list_clusters",
+    "aws_list_accounts",
+    "aws_logs_filter",
+    "aws_logs_get_insights",
+    "aws_logs_insights",
+    "aws_logs_list_groups",
+    "aws_s3_list_buckets",
+    "aws_s3_list_objects",
+    "aws_s3_preview",
+    "aws_sqs_list_queues",
+    "aws_sqs_peek",
+    "aws_sqs_send",
+    "browser_login",
+    "browser_marks",
+    "browser_navigate",
+    "browser_page",
+    "browser_query",
+    "browser_summarize",
+    "canvas_create_scene",
+    "canvas_get_scene",
+    "canvas_list_scenes",
+    "canvas_update_scene",
+    "design_get",
+    "design_links",
+    "design_list",
+    "design_search",
+    "k8s_action",
+    "k8s_describe",
+    "k8s_get_resources",
+    "k8s_health",
+    "k8s_list_clusters",
+    "k8s_logs",
+    "k8s_pod_actions_list",
+    "k8s_pod_http",
+    "k8s_top",
+    "otto_api_execute",
+    "otto_api_get_request",
+    "otto_api_history",
+    "otto_api_list",
+    "otto_api_run_automation",
+    "otto_api_upsert_request",
+    "otto_approve_improvement_edit",
+    "otto_ask_human_approval",
+    "otto_broadcast_message",
+    "otto_cancel_workflow_run",
+    "otto_comment_confluence_page",
+    "otto_comment_issue",
+    "otto_comment_pr",
+    "otto_consume_broker_messages",
+    "otto_create_confluence_page",
+    "otto_create_issue",
+    "otto_create_pr",
+    "otto_create_scheduled_task",
+    "otto_create_work_item",
+    "otto_db_children",
+    "otto_db_object",
+    "otto_db_query",
+    "otto_db_schema",
+    "otto_delete_scheduled_task",
+    "otto_design_assist",
+    "otto_design_link",
+    "otto_get_broker_topic",
+    "otto_get_confluence_page",
+    "otto_get_context_packet",
+    "otto_get_finding",
+    "otto_get_improvement_run",
+    "otto_get_issue",
+    "otto_get_pr",
+    "otto_get_pr_checks",
+    "otto_get_pr_diff",
+    "otto_get_proof_pack",
+    "otto_get_scheduled_task",
+    "otto_get_self_improvement_config",
+    "otto_get_session",
+    "otto_get_swarm",
+    "otto_get_swarm_board",
+    "otto_get_workflow",
+    "otto_get_workflow_run",
+    "otto_git_pr_review",
+    "otto_git_status",
+    "otto_list_agent_rooms",
+    "otto_list_broker_clusters",
+    "otto_list_broker_topics",
+    "otto_list_bundled_skills",
+    "otto_list_confluence_page_comments",
+    "otto_list_connections",
+    "otto_list_consumer_groups",
+    "otto_list_design_projects",
+    "otto_list_findings",
+    "otto_list_goal_loops",
+    "otto_list_improvement_edits",
+    "otto_list_improvement_runs",
+    "otto_list_integrations",
+    "otto_list_issue_accounts",
+    "otto_list_issue_projects",
+    "otto_list_issue_transitions",
+    "otto_list_issue_types",
+    "otto_list_product_stories",
+    "otto_list_prs",
+    "otto_list_repos",
+    "otto_list_scheduled_task_runs",
+    "otto_list_scheduled_tasks",
+    "otto_list_sessions",
+    "otto_list_swarm_runs",
+    "otto_list_swarms",
+    "otto_list_workflow_runs",
+    "otto_list_workflows",
+    "otto_list_workspaces",
+    "otto_merge_pr",
+    "otto_open_pr_draft",
+    "otto_open_session",
+    "otto_post_swarm_board",
+    "otto_produce_broker_message",
+    "otto_product_story",
+    "otto_query_db",
+    "otto_reject_improvement_edit",
+    "otto_rollback_improvement_edit",
+    "otto_room_post",
+    "otto_room_read",
+    "otto_run_goal_loop",
+    "otto_run_scheduled_task",
+    "otto_run_self_improvement",
+    "otto_run_workflow",
+    "otto_search_codebase",
+    "otto_search_confluence",
+    "otto_search_issues",
+    "otto_search_memory",
+    "otto_send_message",
+    "otto_set_scheduled_task_enabled",
+    "otto_start_pr_review",
+    "otto_test_integration",
+    "otto_transition_issue",
+    "otto_ui_request_control",
+    "otto_update_confluence_page",
+    "otto_update_scheduled_task",
+    "otto_usage_summary",
+    "otto_vault_backlinks",
+    "otto_vault_delete",
+    "otto_vault_dir",
+    "otto_vault_graph",
+    "otto_vault_list",
+    "otto_vault_okf_validate",
+    "otto_vault_read",
+    "otto_vault_rename",
+    "otto_vault_search",
+    "otto_vault_tags",
+    "otto_vault_write",
+    "otto_vault_write_file",
+    "otto_wait_session",
+    "swarm_create_task",
+    "swarm_list_projects",
+    "swarm_list_tasks",
+    "swarm_run_task",
+    "swarm_stop_run",
+    "swarm_update_task",
+    "swarm_utilization",
+    "workbench_get",
+    "workbench_list",
+    "workbench_write"
+  ],
+  "names:vault-docs-review": [
+    "otto_approve_improvement_edit",
+    "otto_ask_human_approval",
+    "otto_broadcast_message",
+    "otto_cancel_workflow_run",
+    "otto_comment_confluence_page",
+    "otto_comment_issue",
+    "otto_consume_broker_messages",
+    "otto_create_confluence_page",
+    "otto_create_issue",
+    "otto_create_pr",
+    "otto_create_scheduled_task",
+    "otto_create_work_item",
+    "otto_delete_scheduled_task",
+    "otto_design_assist",
+    "otto_design_link",
+    "otto_get_broker_topic",
+    "otto_get_confluence_page",
+    "otto_get_context_packet",
+    "otto_get_finding",
+    "otto_get_improvement_run",
+    "otto_get_issue",
+    "otto_get_pr_checks",
+    "otto_get_pr_diff",
+    "otto_get_proof_pack",
+    "otto_get_scheduled_task",
+    "otto_get_self_improvement_config",
+    "otto_get_swarm",
+    "otto_get_swarm_board",
+    "otto_get_workflow",
+    "otto_git_status",
+    "otto_list_bundled_skills",
+    "otto_list_confluence_page_comments",
+    "otto_list_consumer_groups",
+    "otto_list_design_projects",
+    "otto_list_integrations",
+    "otto_list_issue_projects",
+    "otto_list_issue_types",
+    "otto_list_scheduled_task_runs",
+    "otto_list_scheduled_tasks",
+    "otto_list_swarm_runs",
+    "otto_merge_pr",
+    "otto_open_pr_draft",
+    "otto_post_swarm_board",
+    "otto_produce_broker_message",
+    "otto_query_db",
+    "otto_reject_improvement_edit",
+    "otto_rollback_improvement_edit",
+    "otto_run_goal_loop",
+    "otto_run_scheduled_task",
+    "otto_run_self_improvement",
+    "otto_run_workflow",
+    "otto_search_codebase",
+    "otto_search_confluence",
+    "otto_set_scheduled_task_enabled",
+    "otto_start_pr_review",
+    "otto_test_integration",
+    "otto_transition_issue",
+    "otto_ui_request_control",
+    "otto_update_confluence_page",
+    "otto_update_scheduled_task",
+    "otto_vault_backlinks",
+    "otto_vault_dir",
+    "otto_vault_graph",
+    "otto_vault_list",
+    "otto_vault_okf_validate",
+    "otto_vault_read",
+    "otto_vault_search",
+    "otto_vault_tags"
+  ],
+  "names:skilleval": [
+    "design_get",
+    "design_links",
+    "design_list",
+    "design_search",
+    "otto_api_execute",
+    "otto_api_get_request",
+    "otto_api_history",
+    "otto_api_list",
+    "otto_api_run_automation",
+    "otto_api_upsert_request",
+    "otto_approve_improvement_edit",
+    "otto_ask_human_approval",
+    "otto_broadcast_message",
+    "otto_cancel_workflow_run",
+    "otto_comment_confluence_page",
+    "otto_comment_issue",
+    "otto_comment_pr",
+    "otto_create_confluence_page",
+    "otto_create_issue",
+    "otto_create_pr",
+    "otto_create_scheduled_task",
+    "otto_create_work_item",
+    "otto_db_children",
+    "otto_db_object",
+    "otto_db_query",
+    "otto_db_schema",
+    "otto_delete_scheduled_task",
+    "otto_design_assist",
+    "otto_design_link",
+    "otto_get_confluence_page",
+    "otto_get_context_packet",
+    "otto_get_finding",
+    "otto_get_improvement_run",
+    "otto_get_issue",
+    "otto_get_pr",
+    "otto_get_pr_checks",
+    "otto_get_pr_diff",
+    "otto_get_proof_pack",
+    "otto_get_scheduled_task",
+    "otto_get_self_improvement_config",
+    "otto_get_session",
+    "otto_get_swarm",
+    "otto_get_swarm_board",
+    "otto_get_workflow",
+    "otto_get_workflow_run",
+    "otto_git_pr_review",
+    "otto_git_status",
+    "otto_list_agent_rooms",
+    "otto_list_bundled_skills",
+    "otto_list_confluence_page_comments",
+    "otto_list_connections",
+    "otto_list_design_projects",
+    "otto_list_findings",
+    "otto_list_goal_loops",
+    "otto_list_improvement_edits",
+    "otto_list_improvement_runs",
+    "otto_list_integrations",
+    "otto_list_issue_accounts",
+    "otto_list_issue_projects",
+    "otto_list_issue_transitions",
+    "otto_list_issue_types",
+    "otto_list_product_stories",
+    "otto_list_prs",
+    "otto_list_repos",
+    "otto_list_scheduled_task_runs",
+    "otto_list_scheduled_tasks",
+    "otto_list_sessions",
+    "otto_list_swarm_runs",
+    "otto_list_swarms",
+    "otto_list_workflow_runs",
+    "otto_list_workflows",
+    "otto_list_workspaces",
+    "otto_merge_pr",
+    "otto_open_pr_draft",
+    "otto_open_session",
+    "otto_post_swarm_board",
+    "otto_product_story",
+    "otto_query_db",
+    "otto_reject_improvement_edit",
+    "otto_rollback_improvement_edit",
+    "otto_room_post",
+    "otto_room_read",
+    "otto_run_goal_loop",
+    "otto_run_scheduled_task",
+    "otto_run_self_improvement",
+    "otto_run_workflow",
+    "otto_search_codebase",
+    "otto_search_confluence",
+    "otto_search_issues",
+    "otto_search_memory",
+    "otto_send_message",
+    "otto_set_scheduled_task_enabled",
+    "otto_start_pr_review",
+    "otto_test_integration",
+    "otto_transition_issue",
+    "otto_ui_request_control",
+    "otto_update_confluence_page",
+    "otto_update_scheduled_task",
+    "otto_usage_summary",
+    "otto_vault_backlinks",
+    "otto_vault_delete",
+    "otto_vault_dir",
+    "otto_vault_graph",
+    "otto_vault_list",
+    "otto_vault_okf_validate",
+    "otto_vault_read",
+    "otto_vault_rename",
+    "otto_vault_search",
+    "otto_vault_tags",
+    "otto_vault_write",
+    "otto_vault_write_file",
+    "otto_wait_session",
+    "swarm_create_task",
+    "swarm_list_projects",
+    "swarm_list_tasks",
+    "swarm_run_task",
+    "swarm_stop_run",
+    "swarm_update_task",
+    "swarm_utilization"
+  ],
+  "schemas:default": {
+    "otto_list_connections": {
+      "type": "object",
+      "properties": {
+        "workspace_id": {
+          "type": "string",
+          "description": "Optional workspace id or name; omit = all you can read."
+        }
+      }
+    },
+    "otto_db_schema": {
+      "type": "object",
+      "properties": {
+        "connection_id": {
+          "type": "string",
+          "description": "Otto connection id or name (a DB-kind connection)."
+        }
+      },
+      "required": [
+        "connection_id"
+      ]
+    },
+    "otto_db_children": {
+      "type": "object",
+      "properties": {
+        "connection_id": {
+          "type": "string",
+          "description": "Otto connection id or name (otto_list_connections)."
+        },
+        "path": {
+          "type": "string",
+          "description": "NodePath of the node to expand, e.g. 'db:shop/folder:tables'."
+        },
+        "filter": {
+          "type": "string",
+          "description": "Optional substring/prefix filter (e.g. a Redis key prefix)."
+        }
+      },
+      "required": [
+        "connection_id",
+        "path"
+      ]
+    },
+    "otto_db_object": {
+      "type": "object",
+      "properties": {
+        "connection_id": {
+          "type": "string",
+          "description": "Otto connection id or name (otto_list_connections)."
+        },
+        "path": {
+          "type": "string",
+          "description": "NodePath of the table/collection."
+        }
+      },
+      "required": [
+        "connection_id",
+        "path"
+      ]
+    },
+    "otto_db_query": {
+      "type": "object",
+      "properties": {
+        "connection_id": {
+          "type": "string",
+          "description": "Otto connection id or name (otto_list_connections)."
+        },
+        "statement": {
+          "type": "string",
+          "description": "The read-only statement / command."
+        },
+        "database": {
+          "type": "string",
+          "description": "Optional active database to scope SQL/Mongo execution."
+        },
+        "node": {
+          "type": "string",
+          "description": "Optional raw node context (e.g. 'kdb:0' for a Redis keyspace); overrides `database`."
+        },
+        "max_rows": {
+          "type": "integer",
+          "description": "Optional row cap (clamped to 200)."
+        }
+      },
+      "required": [
+        "connection_id",
+        "statement"
+      ]
+    },
+    "otto_git_pr_review": {
+      "type": "object",
+      "properties": {
+        "repo_id": {
+          "type": "string",
+          "description": "Repo id, name, path or remote (any readable workspace). Omit = this session's repo."
+        },
+        "pr_number": {
+          "type": "integer",
+          "description": "Pull request number."
+        }
+      },
+      "required": [
+        "pr_number"
+      ]
+    },
+    "otto_product_story": {
+      "type": "object",
+      "properties": {
+        "story_id": {
+          "type": "string",
+          "description": "Otto product story id, or its Jira key (e.g. GS-123) / exact title."
+        }
+      },
+      "required": [
+        "story_id"
+      ]
+    },
+    "canvas_list_scenes": {
+      "type": "object",
+      "properties": {
+        "workspace_id": {
+          "type": "string",
+          "description": "Optional workspace id or name (default: this session's)."
+        }
+      }
+    },
+    "canvas_get_scene": {
+      "type": "object",
+      "properties": {
+        "scene_id": {
+          "type": "string",
+          "description": "Otto canvas scene id or title."
+        }
+      },
+      "required": [
+        "scene_id"
+      ]
+    },
+    "canvas_create_scene": {
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string",
+          "description": "Scene title."
+        },
+        "format": {
+          "type": "string",
+          "description": "mermaid (default) | d2 | excalidraw."
+        },
+        "source": {
+          "type": "string",
+          "description": "Mermaid/D2 diagram source text."
+        },
+        "section": {
+          "type": "string",
+          "description": "Optional folder path to group the scene under, e.g. \"Platform/Staging\"."
+        }
+      },
+      "required": [
+        "title"
+      ]
+    },
+    "canvas_update_scene": {
+      "type": "object",
+      "properties": {
+        "scene_id": {
+          "type": "string",
+          "description": "Otto canvas scene id."
+        },
+        "source": {
+          "type": "string",
+          "description": "The new mermaid/D2 diagram source text."
+        }
+      },
+      "required": [
+        "scene_id",
+        "source"
+      ]
+    },
+    "workbench_list": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "Optional case-insensitive name substring."
+        },
+        "trash": {
+          "type": "boolean",
+          "description": "List trashed files instead of live ones."
+        }
+      }
+    },
+    "workbench_get": {
+      "type": "object",
+      "properties": {
+        "doc_id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string",
+          "description": "Exact file name (used when doc_id is omitted)."
+        },
+        "revision": {
+          "type": "integer",
+          "description": "Optional revision seq to read."
+        },
+        "history": {
+          "type": "boolean",
+          "description": "Include one newest-first revision metadata page."
+        },
+        "history_limit": {
+          "type": "integer",
+          "default": 100,
+          "minimum": 1,
+          "maximum": 200,
+          "description": "Metadata rows per history page, clamped 1–200."
+        },
+        "before_seq": {
+          "type": "integer",
+          "description": "Exclusive revision cursor for an older history page."
+        }
+      }
+    },
+    "workbench_write": {
+      "type": "object",
+      "properties": {
+        "doc_id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string",
+          "description": "File name; required when doc_id is omitted."
+        },
+        "content": {
+          "type": "string"
+        },
+        "language": {
+          "type": "string"
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "workspace",
+            "global"
+          ]
+        }
+      },
+      "required": [
+        "content"
+      ]
+    },
+    "design_list": {
+      "type": "object",
+      "properties": {
+        "workspace_id": {
+          "type": "string",
+          "description": "Optional — narrows the global library to one workspace."
+        },
+        "project_id": {
+          "type": "string",
+          "description": "Optional design project id."
+        },
+        "studio": {
+          "type": "string",
+          "description": "frames | graphics | site | 3d | whiteboard | brand | spatial"
+        },
+        "format": {
+          "type": "string",
+          "description": "html | mermaid | d2 | excalidraw | scene3d | otto-canvas | otto-site | png | glb | …"
+        },
+        "status": {
+          "type": "string",
+          "description": "draft | review | approved | shipped | archived"
+        },
+        "story_id": {
+          "type": "string",
+          "description": "Only artifacts that implement this product story."
+        },
+        "limit": {
+          "type": "integer",
+          "description": "Max rows (default 100, cap 500)."
+        },
+        "cursor": {
+          "type": "string",
+          "description": "Next page: `<updated_at>|<id>` of the previous page's last row."
+        }
+      }
+    },
+    "design_get": {
+      "type": "object",
+      "properties": {
+        "artifact_id": {
+          "type": "string",
+          "description": "Design artifact id."
+        },
+        "version": {
+          "type": "string",
+          "description": "Optional `v<seq>` or version id (default: head)."
+        },
+        "include_content": {
+          "type": "boolean",
+          "description": "Inline the ≤ 256 KiB text source (default true)."
+        }
+      },
+      "required": [
+        "artifact_id"
+      ]
+    },
+    "design_links": {
+      "type": "object",
+      "properties": {
+        "artifact_id": {
+          "type": "string",
+          "description": "Design artifact id."
+        },
+        "dir": {
+          "type": "string",
+          "description": "out | in | both (default)."
+        }
+      },
+      "required": [
+        "artifact_id"
+      ]
+    },
+    "design_search": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "Search text."
+        },
+        "workspace_id": {
+          "type": "string",
+          "description": "Optional — narrows to one workspace."
+        },
+        "studio": {
+          "type": "string"
+        },
+        "format": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "story_id": {
+          "type": "string"
+        },
+        "project_id": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer",
+          "description": "Max hits (default 50)."
+        }
+      },
+      "required": [
+        "query"
+      ]
+    },
+    "otto_list_workspaces": {
+      "type": "object",
+      "properties": {}
+    },
+    "otto_list_workflows": {
+      "type": "object",
+      "properties": {
+        "workspace_id": {
+          "type": "string",
+          "description": "Optional workspace id or name; omit = all you can read."
+        }
+      }
+    },
+    "otto_list_workflow_runs": {
+      "type": "object",
+      "required": [
+        "workflow_id"
+      ],
+      "properties": {
+        "workflow_id": {
+          "type": "string",
+          "description": "Workflow id or name (otto_list_workflows)."
+        },
+        "summary": {
+          "type": "boolean",
+          "description": "Default true."
+        }
+      }
+    },
+    "otto_get_workflow_run": {
+      "type": "object",
+      "required": [
+        "run_id"
+      ],
+      "properties": {
+        "run_id": {
+          "type": "string",
+          "description": "Workflow run id."
+        }
+      }
+    },
+    "otto_list_goal_loops": {
+      "type": "object",
+      "properties": {
+        "workspace_id": {
+          "type": "string",
+          "description": "Optional workspace id or name; omit = all you can read."
+        }
+      }
+    },
+    "otto_list_broker_clusters": {
+      "type": "object",
+      "properties": {
+        "workspace_id": {
+          "type": "string",
+          "description": "Optional workspace id or name; omit = all you can read."
+        }
+      }
+    },
+    "otto_list_broker_topics": {
+      "type": "object",
+      "required": [
+        "cluster_id"
+      ],
+      "properties": {
+        "cluster_id": {
+          "type": "string",
+          "description": "Broker cluster id or name (otto_list_broker_clusters)."
+        }
+      }
+    },
+    "otto_list_issue_accounts": {
+      "type": "object",
+      "properties": {}
+    },
+    "otto_search_issues": {
+      "type": "object",
+      "properties": {
+        "account_id": {
+          "type": "string",
+          "description": "Jira/Confluence account id, label, email or URL; omit if you have one."
+        },
+        "query": {
+          "type": "string"
+        },
+        "project": {
+          "type": "string"
+        },
+        "jql": {
+          "type": "string"
+        },
+        "filter": {
+          "type": "object"
+        },
+        "start_at": {
+          "type": "integer"
+        },
+        "limit": {
+          "type": "integer"
+        }
+      }
+    },
+    "otto_list_issue_transitions": {
+      "type": "object",
+      "required": [
+        "key"
+      ],
+      "properties": {
+        "account_id": {
+          "type": "string",
+          "description": "Jira/Confluence account id, label, email or URL; omit if you have one."
+        },
+        "key": {
+          "type": "string"
+        }
+      }
+    },
+    "otto_list_swarms": {
+      "type": "object",
+      "properties": {
+        "workspace_id": {
+          "type": "string",
+          "description": "Optional workspace id or name; omit = all you can read."
+        }
+      }
+    },
+    "swarm_list_projects": {
+      "type": "object",
+      "properties": {
+        "swarm_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "swarm_id"
+      ]
+    },
+    "swarm_list_tasks": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "project_id"
+      ]
+    },
+    "swarm_utilization": {
+      "type": "object",
+      "properties": {
+        "swarm_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "swarm_id"
+      ]
+    },
+    "swarm_create_task": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "assignee_agent_id": {
+          "type": "string"
+        },
+        "priority": {
+          "type": "string",
+          "description": "low|medium|high|urgent"
+        }
+      },
+      "required": [
+        "project_id",
+        "title"
+      ]
+    },
+    "swarm_update_task": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "assignee_agent_id": {
+          "type": "string"
+        },
+        "priority": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "task_id"
+      ]
+    },
+    "swarm_run_task": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "task_id"
+      ]
+    },
+    "swarm_stop_run": {
+      "type": "object",
+      "properties": {
+        "run_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "run_id"
+      ]
+    },
+    "otto_search_memory": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string"
+        },
+        "k": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "query"
+      ]
+    },
+    "otto_list_repos": {
+      "type": "object",
+      "properties": {
+        "workspace_id": {
+          "type": "string",
+          "description": "Optional: only this workspace's repos."
+        }
+      }
+    },
+    "otto_list_sessions": {
+      "type": "object",
+      "properties": {
+        "workspace_id": {
+          "type": "string",
+          "description": "Optional workspace id or name (default: this session's)."
+        }
+      }
+    },
+    "otto_get_session": {
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "type": "string"
+        }
+      }
+    },
+    "otto_wait_session": {
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "description": "comma-separated: running,working,idle,exited,reconnectable"
+        },
+        "timeout_secs": {
+          "type": "integer",
+          "description": "seconds to wait, 1..25 (larger values wait 25), default 20; a timed-out wait returns reached:false, not an error"
+        }
+      }
+    },
+    "otto_open_session": {
+      "type": "object",
+      "required": [
+        "provider"
+      ],
+      "properties": {
+        "prompt": {
+          "type": "string",
+          "description": "submitted as the first user message"
+        },
+        "provider": {
+          "type": "string",
+          "description": "claude | codex"
+        },
+        "title": {
+          "type": "string"
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string",
+          "description": "optional; provider default when omitted"
+        }
+      }
+    },
+    "otto_send_message": {
+      "type": "object",
+      "required": [
+        "text"
+      ],
+      "properties": {
+        "session_id": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        }
+      }
+    },
+    "otto_list_product_stories": {
+      "type": "object",
+      "properties": {}
+    },
+    "otto_list_findings": {
+      "type": "object",
+      "required": [
+        "review_id"
+      ],
+      "properties": {
+        "review_id": {
+          "type": "string"
+        }
+      }
+    },
+    "otto_list_prs": {
+      "type": "object",
+      "properties": {
+        "repo_id": {
+          "type": "string",
+          "description": "Repo id, name, path or remote (any readable workspace). Omit = this session's repo."
+        },
+        "state": {
+          "type": "string"
+        },
+        "page": {
+          "type": "integer"
+        },
+        "per_page": {
+          "type": "integer"
+        }
+      }
+    },
+    "otto_get_pr": {
+      "type": "object",
+      "properties": {
+        "repo_id": {
+          "type": "string",
+          "description": "Repo id, name, path or remote (any readable workspace). Omit = this session's repo."
+        },
+        "number": {
+          "type": "integer",
+          "description": "Pull request number (otto_list_prs)."
+        },
+        "pr_number": {
+          "type": "integer",
+          "description": "Alias of `number`."
+        }
+      }
+    },
+    "otto_comment_pr": {
+      "type": "object",
+      "required": [
+        "body"
+      ],
+      "properties": {
+        "repo_id": {
+          "type": "string",
+          "description": "Repo id, name, path or remote (any readable workspace). Omit = this session's repo."
+        },
+        "number": {
+          "type": "integer",
+          "description": "Pull request number (otto_list_prs)."
+        },
+        "pr_number": {
+          "type": "integer",
+          "description": "Alias of `number`."
+        },
+        "body": {
+          "type": "string",
+          "description": "Markdown comment body."
+        },
+        "path": {
+          "type": "string",
+          "description": "Repo-relative file path to anchor the comment to."
+        },
+        "line": {
+          "type": "integer",
+          "description": "1-indexed line in `path` to anchor to."
+        },
+        "in_reply_to": {
+          "type": "string",
+          "description": "Existing comment id to reply to."
+        }
+      }
+    },
+    "otto_usage_summary": {
+      "type": "object",
+      "properties": {
+        "days": {
+          "type": "integer"
+        },
+        "otto_only": {
+          "type": "boolean"
+        }
+      }
+    },
+    "otto_list_improvement_runs": {
+      "type": "object",
+      "properties": {
+        "workspace_id": {
+          "type": "string",
+          "description": "Optional workspace id or name."
+        }
+      }
+    },
+    "otto_list_improvement_edits": {
+      "type": "object",
+      "properties": {
+        "workspace_id": {
+          "type": "string",
+          "description": "Optional workspace id or name."
+        },
+        "status": {
+          "type": "string",
+          "description": "pending (default) | applied | rejected | rolled_back | conflict"
+        }
+      }
+    },
+    "otto_vault_list": {
+      "type": "object",
+      "properties": {}
+    },
+    "otto_vault_dir": {
+      "type": "object",
+      "required": [
+        "vault_id"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Vault-relative folder path; empty for root."
+        },
+        "vault_id": {
+          "type": [
+            "integer",
+            "string"
+          ],
+          "description": "Vault id (integer) or vault name (otto_vault_list)."
+        }
+      }
+    },
+    "otto_vault_read": {
+      "type": "object",
+      "required": [
+        "vault_id",
+        "path"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Vault-relative note path incl. .md"
+        },
+        "vault_id": {
+          "type": [
+            "integer",
+            "string"
+          ],
+          "description": "Vault id (integer) or vault name (otto_vault_list)."
+        }
+      }
+    },
+    "otto_vault_search": {
+      "type": "object",
+      "required": [
+        "vault_id",
+        "query"
+      ],
+      "properties": {
+        "limit": {
+          "type": "integer"
+        },
+        "vault_id": {
+          "type": [
+            "integer",
+            "string"
+          ],
+          "description": "Vault id (integer) or vault name (otto_vault_list)."
+        },
+        "query": {
+          "type": "string"
+        }
+      }
+    },
+    "otto_vault_backlinks": {
+      "type": "object",
+      "required": [
+        "vault_id",
+        "path"
+      ],
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "vault_id": {
+          "type": [
+            "integer",
+            "string"
+          ],
+          "description": "Vault id (integer) or vault name (otto_vault_list)."
+        }
+      }
+    },
+    "otto_vault_tags": {
+      "type": "object",
+      "required": [
+        "vault_id"
+      ],
+      "properties": {
+        "vault_id": {
+          "type": [
+            "integer",
+            "string"
+          ],
+          "description": "Vault id (integer) or vault name (otto_vault_list)."
+        }
+      }
+    },
+    "otto_vault_graph": {
+      "type": "object",
+      "required": [
+        "vault_id"
+      ],
+      "properties": {
+        "depth": {
+          "type": "integer"
+        },
+        "vault_id": {
+          "type": [
+            "integer",
+            "string"
+          ],
+          "description": "Vault id (integer) or vault name (otto_vault_list)."
+        },
+        "mode": {
+          "type": "string",
+          "description": "local (default when path given) | full"
+        },
+        "path": {
+          "type": "string"
+        }
+      }
+    },
+    "otto_vault_okf_validate": {
+      "type": "object",
+      "required": [
+        "vault_id"
+      ],
+      "properties": {
+        "vault_id": {
+          "type": [
+            "integer",
+            "string"
+          ],
+          "description": "Vault id (integer) or vault name (otto_vault_list)."
+        }
+      }
+    },
+    "otto_vault_write": {
+      "type": "object",
+      "required": [
+        "vault_id",
+        "path",
+        "content"
+      ],
+      "properties": {
+        "if_hash": {
+          "type": "string"
+        },
+        "vault_id": {
+          "type": [
+            "integer",
+            "string"
+          ],
+          "description": "Vault id (integer) or vault name (otto_vault_list)."
+        },
+        "path": {
+          "type": "string",
+          "description": "Vault-relative note path incl. .md"
+        },
+        "content": {
+          "type": "string"
+        }
+      }
+    },
+    "otto_vault_write_file": {
+      "type": "object",
+      "required": [
+        "vault_id",
+        "path",
+        "content"
+      ],
+      "properties": {
+        "if_hash": {
+          "type": "string"
+        },
+        "vault_id": {
+          "type": [
+            "integer",
+            "string"
+          ],
+          "description": "Vault id (integer) or vault name (otto_vault_list)."
+        },
+        "path": {
+          "type": "string",
+          "description": "Vault-relative path ending .yaml/.yml/.json/.d2/.mmd/.txt/.csv"
+        },
+        "content": {
+          "type": "string"
+        }
+      }
+    },
+    "otto_vault_rename": {
+      "type": "object",
+      "required": [
+        "vault_id",
+        "from",
+        "to"
+      ],
+      "properties": {
+        "to": {
+          "type": "string"
+        },
+        "vault_id": {
+          "type": [
+            "integer",
+            "string"
+          ],
+          "description": "Vault id (integer) or vault name (otto_vault_list)."
+        },
+        "from": {
+          "type": "string"
+        }
+      }
+    },
+    "otto_vault_delete": {
+      "type": "object",
+      "required": [
+        "vault_id",
+        "path"
+      ],
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "vault_id": {
+          "type": [
+            "integer",
+            "string"
+          ],
+          "description": "Vault id (integer) or vault name (otto_vault_list)."
+        }
+      }
+    },
+    "browser_navigate": {
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "url"
+      ]
+    },
+    "browser_page": {
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "url"
+      ]
+    },
+    "browser_query": {
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string"
+        },
+        "selector": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "url",
+        "selector"
+      ]
+    },
+    "browser_summarize": {
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "url"
+      ]
+    },
+    "browser_marks": {
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string"
+        }
+      }
+    },
+    "browser_login": {
+      "type": "object",
+      "properties": {
+        "domain": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "domain"
+      ]
+    },
+    "otto_list_agent_rooms": {
+      "type": "object",
+      "properties": {
+        "workspace_id": {
+          "type": "string",
+          "description": "Optional workspace id or name; omit = all you can read."
+        }
+      }
+    },
+    "otto_room_post": {
+      "type": "object",
+      "required": [
+        "room_id",
+        "text"
+      ],
+      "properties": {
+        "room_id": {
+          "type": "string",
+          "description": "Agent room id or name (otto_list_agent_rooms)."
+        },
+        "text": {
+          "type": "string"
+        }
+      }
+    },
+    "otto_room_read": {
+      "type": "object",
+      "required": [
+        "room_id"
+      ],
+      "properties": {
+        "room_id": {
+          "type": "string",
+          "description": "Agent room id or name (otto_list_agent_rooms)."
+        },
+        "after": {
+          "type": "string"
+        },
+        "before": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer"
+        }
+      }
+    },
+    "otto_api_list": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "all",
+            "requests",
+            "environments",
+            "automations"
+          ]
+        },
+        "q": {
+          "type": "string",
+          "description": "optional substring filter"
+        },
+        "collection_id": {
+          "type": "string"
+        }
+      }
+    },
+    "otto_api_get_request": {
+      "type": "object",
+      "required": [
+        "request_id"
+      ],
+      "properties": {
+        "request_id": {
+          "type": "string",
+          "description": "Saved request id or name (otto_api_list), within `workspace_id`."
+        }
+      }
+    },
+    "otto_api_history": {
+      "type": "object",
+      "properties": {
+        "source": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "human"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "q": {
+          "type": "string"
+        },
+        "status": {
+          "type": "integer"
+        },
+        "request_id": {
+          "type": "string"
+        }
+      }
+    },
+    "otto_api_execute": {
+      "type": "object",
+      "required": [
+        "request_id"
+      ],
+      "properties": {
+        "decode_jwt": {
+          "type": "boolean",
+          "description": "Return safe JWT claims (default true), never tokens."
+        },
+        "request_id": {
+          "type": "string",
+          "description": "Saved request id or name (otto_api_list), within `workspace_id`."
+        },
+        "environment_id": {
+          "type": "string",
+          "description": "Environment id or name (default: the active one)."
+        },
+        "vars": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "timeout_ms": {
+          "type": "integer"
+        },
+        "confirm": {
+          "type": "boolean"
+        },
+        "confirm_new_host": {
+          "type": "boolean"
+        }
+      }
+    },
+    "otto_api_upsert_request": {
+      "type": "object",
+      "required": [
+        "name",
+        "method",
+        "url"
+      ],
+      "properties": {
+        "extras": {
+          "type": "object"
+        },
+        "request_id": {
+          "type": "string",
+          "description": "Saved request id or name (otto_api_list), within `workspace_id`."
+        },
+        "collection_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "method": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        },
+        "headers": {
+          "type": "array"
+        },
+        "query": {
+          "type": "array"
+        },
+        "body_mode": {
+          "type": "string"
+        },
+        "body": {
+          "type": "string"
+        },
+        "auth": {
+          "type": "object"
+        }
+      }
+    },
+    "otto_api_run_automation": {
+      "type": "object",
+      "required": [
+        "automation_id"
+      ],
+      "properties": {
+        "automation_id": {
+          "type": "string",
+          "description": "Automation id or name (see otto_api_list)."
+        }
+      }
+    },
+    "aws_list_accounts": {
+      "type": "object",
+      "properties": {}
+    },
+    "aws_s3_list_buckets": {
+      "type": "object",
+      "properties": {
+        "account_id": {
+          "type": "string"
+        },
+        "region": {
+          "type": "string",
+          "description": "Optional region override (defaults to the account's region)."
+        }
+      },
+      "required": [
+        "account_id"
+      ]
+    },
+    "aws_s3_list_objects": {
+      "type": "object",
+      "properties": {
+        "account_id": {
+          "type": "string"
+        },
+        "bucket": {
+          "type": "string"
+        },
+        "prefix": {
+          "type": "string"
+        },
+        "token": {
+          "type": "string"
+        },
+        "max": {
+          "type": "integer"
+        },
+        "region": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "account_id",
+        "bucket"
+      ]
+    },
+    "aws_s3_preview": {
+      "type": "object",
+      "properties": {
+        "account_id": {
+          "type": "string"
+        },
+        "bucket": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        },
+        "max_bytes": {
+          "type": "integer"
+        },
+        "region": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "account_id",
+        "bucket",
+        "key"
+      ]
+    },
+    "aws_sqs_list_queues": {
+      "type": "object",
+      "properties": {
+        "account_id": {
+          "type": "string"
+        },
+        "prefix": {
+          "type": "string"
+        },
+        "region": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "account_id"
+      ]
+    },
+    "aws_sqs_peek": {
+      "type": "object",
+      "properties": {
+        "account_id": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string",
+          "description": "Queue URL from aws_sqs_list_queues."
+        },
+        "max": {
+          "type": "integer"
+        },
+        "region": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "account_id",
+        "url"
+      ]
+    },
+    "aws_sqs_send": {
+      "type": "object",
+      "properties": {
+        "account_id": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        },
+        "body": {
+          "type": "string"
+        },
+        "delay_seconds": {
+          "type": "integer"
+        },
+        "group_id": {
+          "type": "string"
+        },
+        "dedup_id": {
+          "type": "string"
+        },
+        "message_attributes": {
+          "type": "object"
+        },
+        "region": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "account_id",
+        "url",
+        "body"
+      ]
+    },
+    "aws_ec2_list_instances": {
+      "type": "object",
+      "properties": {
+        "account_id": {
+          "type": "string"
+        },
+        "region": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        },
+        "q": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "account_id"
+      ]
+    },
+    "aws_athena_list_tables": {
+      "type": "object",
+      "properties": {
+        "account_id": {
+          "type": "string"
+        },
+        "database": {
+          "type": "string"
+        },
+        "catalog": {
+          "type": "string"
+        },
+        "region": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "account_id",
+        "database"
+      ]
+    },
+    "aws_athena_query": {
+      "type": "object",
+      "properties": {
+        "account_id": {
+          "type": "string"
+        },
+        "sql": {
+          "type": "string"
+        },
+        "database": {
+          "type": "string"
+        },
+        "workgroup": {
+          "type": "string"
+        },
+        "output_location": {
+          "type": "string",
+          "description": "s3://bucket/prefix/ — only when the workgroup has none."
+        },
+        "region": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "account_id",
+        "sql"
+      ]
+    },
+    "aws_athena_get_query": {
+      "type": "object",
+      "properties": {
+        "account_id": {
+          "type": "string"
+        },
+        "query_execution_id": {
+          "type": "string"
+        },
+        "token": {
+          "type": "string"
+        },
+        "max": {
+          "type": "integer"
+        },
+        "region": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "account_id",
+        "query_execution_id"
+      ]
+    },
+    "aws_eks_list_clusters": {
+      "type": "object",
+      "properties": {
+        "account_id": {
+          "type": "string"
+        },
+        "region": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "account_id"
+      ]
+    },
+    "aws_logs_list_groups": {
+      "type": "object",
+      "properties": {
+        "account_id": {
+          "type": "string"
+        },
+        "prefix": {
+          "type": "string"
+        },
+        "token": {
+          "type": "string"
+        },
+        "max": {
+          "type": "integer"
+        },
+        "region": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "account_id"
+      ]
+    },
+    "aws_logs_filter": {
+      "type": "object",
+      "properties": {
+        "account_id": {
+          "type": "string"
+        },
+        "group": {
+          "type": "string"
+        },
+        "pattern": {
+          "type": "string"
+        },
+        "streams": {
+          "type": "string"
+        },
+        "start": {
+          "type": "integer"
+        },
+        "end": {
+          "type": "integer"
+        },
+        "token": {
+          "type": "string"
+        },
+        "max": {
+          "type": "integer"
+        },
+        "region": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "account_id",
+        "group"
+      ]
+    },
+    "aws_logs_insights": {
+      "type": "object",
+      "properties": {
+        "account_id": {
+          "type": "string"
+        },
+        "groups": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "query": {
+          "type": "string"
+        },
+        "start": {
+          "type": "integer"
+        },
+        "end": {
+          "type": "integer"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "region": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "account_id",
+        "groups",
+        "query",
+        "start",
+        "end"
+      ]
+    },
+    "aws_logs_get_insights": {
+      "type": "object",
+      "properties": {
+        "account_id": {
+          "type": "string"
+        },
+        "query_id": {
+          "type": "string"
+        },
+        "region": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "account_id",
+        "query_id"
+      ]
+    },
+    "k8s_list_clusters": {
+      "type": "object",
+      "properties": {}
+    },
+    "k8s_get_resources": {
+      "type": "object",
+      "properties": {
+        "cluster_id": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "namespace": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "q": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "cluster_id",
+        "kind"
+      ]
+    },
+    "k8s_describe": {
+      "type": "object",
+      "properties": {
+        "cluster_id": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "namespace": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "cluster_id",
+        "kind",
+        "name"
+      ]
+    },
+    "k8s_logs": {
+      "type": "object",
+      "properties": {
+        "cluster_id": {
+          "type": "string"
+        },
+        "namespace": {
+          "type": "string"
+        },
+        "pod": {
+          "type": "string"
+        },
+        "container": {
+          "type": "string"
+        },
+        "tail": {
+          "type": "integer"
+        },
+        "since": {
+          "type": "string"
+        },
+        "previous": {
+          "type": "boolean"
+        },
+        "timestamps": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "cluster_id",
+        "namespace",
+        "pod"
+      ]
+    },
+    "k8s_top": {
+      "type": "object",
+      "properties": {
+        "cluster_id": {
+          "type": "string"
+        },
+        "namespace": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "cluster_id"
+      ]
+    },
+    "k8s_health": {
+      "type": "object",
+      "properties": {
+        "cluster_id": {
+          "type": "string"
+        },
+        "window": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "cluster_id"
+      ]
+    },
+    "k8s_action": {
+      "type": "object",
+      "properties": {
+        "cluster_id": {
+          "type": "string"
+        },
+        "action": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "namespace": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "params": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "cluster_id",
+        "action",
+        "kind",
+        "namespace",
+        "name"
+      ]
+    },
+    "k8s_pod_actions_list": {
+      "type": "object",
+      "properties": {
+        "cluster_id": {
+          "type": "string"
+        },
+        "namespace": {
+          "type": "string"
+        },
+        "workload_kind": {
+          "type": "string"
+        },
+        "workload": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "cluster_id"
+      ]
+    },
+    "k8s_pod_http": {
+      "type": "object",
+      "properties": {
+        "cluster_id": {
+          "type": "string"
+        },
+        "namespace": {
+          "type": "string"
+        },
+        "pod": {
+          "type": "string"
+        },
+        "workload": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            }
+          }
+        },
+        "port": {
+          "type": "integer"
+        },
+        "method": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "headers": {
+          "type": "object"
+        },
+        "body": {
+          "type": "string"
+        },
+        "timeout_ms": {
+          "type": "integer"
+        },
+        "max_concurrency": {
+          "type": "integer"
+        },
+        "confirm_name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "cluster_id",
+        "namespace",
+        "port",
+        "method",
+        "path"
+      ]
+    },
+    "otto_search_codebase": {
+      "type": "object",
+      "required": [
+        "workspace_id",
+        "query"
+      ],
+      "properties": {
+        "workspace_id": {
+          "type": "string"
+        },
+        "query": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string",
+          "description": "optional sub-path within the workspace"
+        },
+        "max_results": {
+          "type": "integer"
+        }
+      }
+    },
+    "otto_get_context_packet": {
+      "type": "object",
+      "required": [
+        "workspace_id"
+      ],
+      "properties": {
+        "workspace_id": {
+          "type": "string"
+        },
+        "query": {
+          "type": "string"
+        },
+        "story_id": {
+          "type": "string"
+        }
+      }
+    },
+    "otto_run_goal_loop": {
+      "type": "object",
+      "required": [
+        "workspace_id",
+        "name",
+        "repo_path",
+        "definition",
+        "limits",
+        "config"
+      ],
+      "properties": {
+        "workspace_id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "repo_path": {
+          "type": "string"
+        },
+        "definition": {
+          "type": "object"
+        },
+        "limits": {
+          "type": "object"
+        },
+        "config": {
+          "type": "object"
+        }
+      }
+    },
+    "otto_create_work_item": {
+      "type": "object",
+      "required": [
+        "project_id",
+        "title"
+      ],
+      "properties": {
+        "project_id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "priority": {
+          "type": "string"
+        }
+      }
+    },
+    "otto_query_db": {
+      "type": "object",
+      "required": [
+        "connection_id",
+        "statement"
+      ],
+      "properties": {
+        "connection_id": {
+          "type": "string",
+          "description": "Connection id or name (otto.list_connections)."
+        },
+        "statement": {
+          "type": "string"
+        },
+        "max_rows": {
+          "type": "integer"
+        },
+        "node": {
+          "type": "string"
+        }
+      }
+    },
+    "otto_open_pr_draft": {
+      "type": "object",
+      "required": [
+        "base"
+      ],
+      "properties": {
+        "repo_id": {
+          "type": "string",
+          "description": "Repo id, name, path or remote (any readable workspace). Omit = this session's repo."
+        },
+        "base": {
+          "type": "string"
+        }
+      }
+    },
+    "otto_get_proof_pack": {
+      "type": "object",
+      "required": [
+        "workspace_id"
+      ],
+      "properties": {
+        "workspace_id": {
+          "type": "string"
+        },
+        "repo_id": {
+          "type": "string",
+          "description": "Otto repo id (otto.list_repos) — must live in `workspace_id`."
+        },
+        "branch": {
+          "type": "string"
+        },
+        "goal_loop_id": {
+          "type": "string",
+          "description": "Goal loop id or name (otto.list_goal_loops) — must live in `workspace_id`."
+        }
+      }
+    },
+    "otto_ask_human_approval": {
+      "type": "object",
+      "required": [
+        "title"
+      ],
+      "properties": {
+        "workspace_id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "detail": {
+          "type": "string"
+        },
+        "wait_seconds": {
+          "type": "integer"
+        }
+      }
+    },
+    "otto_get_workflow": {
+      "type": "object",
+      "required": [
+        "workflow_id"
+      ],
+      "properties": {
+        "workflow_id": {
+          "type": "string",
+          "description": "Workflow id or name (otto.list_workflows)."
+        }
+      }
+    },
+    "otto_run_workflow": {
+      "type": "object",
+      "required": [
+        "workflow_id"
+      ],
+      "properties": {
+        "workflow_id": {
+          "type": "string",
+          "description": "Workflow id or name (otto.list_workflows)."
+        },
+        "input": {
+          "type": "object"
+        },
+        "start_node": {
+          "type": "string"
+        },
+        "review_mode": {
+          "type": "string",
+          "enum": [
+            "fan_out",
+            "orchestrator"
+          ]
+        }
+      }
+    },
+    "otto_cancel_workflow_run": {
+      "type": "object",
+      "required": [
+        "run_id"
+      ],
+      "properties": {
+        "run_id": {
+          "type": "string"
+        }
+      }
+    },
+    "otto_get_broker_topic": {
+      "type": "object",
+      "required": [
+        "cluster_id",
+        "topic"
+      ],
+      "properties": {
+        "cluster_id": {
+          "type": "string",
+          "description": "Broker cluster id or name (otto.list_broker_clusters)."
+        },
+        "topic": {
+          "type": "string"
+        }
+      }
+    },
+    "otto_list_consumer_groups": {
+      "type": "object",
+      "required": [
+        "cluster_id"
+      ],
+      "properties": {
+        "cluster_id": {
+          "type": "string",
+          "description": "Broker cluster id or name (otto.list_broker_clusters)."
+        }
+      }
+    },
+    "otto_consume_broker_messages": {
+      "type": "object",
+      "required": [
+        "cluster_id",
+        "topic"
+      ],
+      "properties": {
+        "cluster_id": {
+          "type": "string",
+          "description": "Broker cluster id or name (otto.list_broker_clusters)."
+        },
+        "topic": {
+          "type": "string"
+        },
+        "partition": {
+          "type": "integer"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "value_filter": {
+          "type": "string",
+          "description": "substring filter on the decoded value"
+        }
+      }
+    },
+    "otto_produce_broker_message": {
+      "type": "object",
+      "required": [
+        "cluster_id",
+        "topic",
+        "value"
+      ],
+      "properties": {
+        "cluster_id": {
+          "type": "string",
+          "description": "Broker cluster id or name (otto.list_broker_clusters)."
+        },
+        "topic": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        },
+        "partition": {
+          "type": "integer"
+        },
+        "confirm": {
+          "type": "boolean"
+        }
+      }
+    },
+    "otto_git_status": {
+      "type": "object",
+      "properties": {
+        "repo_id": {
+          "type": "string",
+          "description": "Repo id, name, path or remote (any readable workspace). Omit = this session's repo."
+        }
+      }
+    },
+    "otto_create_pr": {
+      "type": "object",
+      "required": [
+        "title",
+        "description",
+        "source_branch",
+        "target_branch"
+      ],
+      "properties": {
+        "repo_id": {
+          "type": "string",
+          "description": "Repo id, name, path or remote (any readable workspace). Omit = this session's repo."
+        },
+        "title": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "source_branch": {
+          "type": "string"
+        },
+        "target_branch": {
+          "type": "string"
+        },
+        "draft": {
+          "type": "boolean"
+        },
+        "reviewers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "proof_pack_id": {
+          "type": "string"
+        }
+      }
+    },
+    "otto_start_pr_review": {
+      "type": "object",
+      "properties": {
+        "repo_id": {
+          "type": "string",
+          "description": "Repo id, name, path or remote (any readable workspace). Omit = this session's repo."
+        },
+        "pr_number": {
+          "type": "integer",
+          "description": "Pull request number (otto.list_prs)."
+        },
+        "number": {
+          "type": "integer",
+          "description": "Alias of `pr_number`."
+        },
+        "context": {
+          "type": "string"
+        },
+        "issue_key": {
+          "type": "string"
+        },
+        "issue_account_id": {
+          "type": "string"
+        }
+      }
+    },
+    "otto_get_pr_checks": {
+      "type": "object",
+      "properties": {
+        "repo_id": {
+          "type": "string",
+          "description": "Repo id, name, path or remote (any readable workspace). Omit = this session's repo."
+        },
+        "number": {
+          "type": "integer",
+          "description": "Pull request number (otto.list_prs)."
+        },
+        "pr_number": {
+          "type": "integer",
+          "description": "Alias of `number`."
+        }
+      }
+    },
+    "otto_get_pr_diff": {
+      "type": "object",
+      "properties": {
+        "repo_id": {
+          "type": "string",
+          "description": "Repo id, name, path or remote (any readable workspace). Omit = this session's repo."
+        },
+        "number": {
+          "type": "integer",
+          "description": "Pull request number (otto.list_prs)."
+        },
+        "pr_number": {
+          "type": "integer",
+          "description": "Alias of `number`."
+        },
+        "summary": {
+          "type": "boolean",
+          "description": "File list + per-file counts only, no hunks."
+        },
+        "path": {
+          "type": "string",
+          "description": "Only this file (its current path; a deleted file's old path)."
+        },
+        "old_path": {
+          "type": "string",
+          "description": "A renamed file's origin, alongside `path`."
+        },
+        "full": {
+          "type": "boolean",
+          "description": "With `path`: lift the per-file cap (5,000 lines) to 50,000 lines."
+        }
+      }
+    },
+    "otto_merge_pr": {
+      "type": "object",
+      "properties": {
+        "repo_id": {
+          "type": "string",
+          "description": "Repo id, name, path or remote (any readable workspace). Omit = this session's repo."
+        },
+        "number": {
+          "type": "integer",
+          "description": "Pull request number (otto.list_prs)."
+        },
+        "pr_number": {
+          "type": "integer",
+          "description": "Alias of `number`."
+        },
+        "strategy": {
+          "type": "string",
+          "enum": [
+            "merge",
+            "squash",
+            "rebase"
+          ]
+        },
+        "delete_source_branch": {
+          "type": "boolean"
+        }
+      }
+    },
+    "otto_get_issue": {
+      "type": "object",
+      "required": [
+        "key"
+      ],
+      "properties": {
+        "account_id": {
+          "type": "string",
+          "description": "Jira/Confluence account id, label, email or URL; omit if you have one."
+        },
+        "key": {
+          "type": "string"
+        }
+      }
+    },
+    "otto_search_confluence": {
+      "type": "object",
+      "properties": {
+        "account_id": {
+          "type": "string",
+          "description": "Jira/Confluence account id, label, email or URL; omit if you have one."
+        },
+        "query": {
+          "type": "string"
+        },
+        "space": {
+          "type": "string"
+        },
+        "cql": {
+          "type": "string"
+        },
+        "full_text": {
+          "type": "boolean"
+        },
+        "start": {
+          "type": "integer"
+        },
+        "limit": {
+          "type": "integer"
+        }
+      }
+    },
+    "otto_get_confluence_page": {
+      "type": "object",
+      "required": [
+        "page_id"
+      ],
+      "properties": {
+        "account_id": {
+          "type": "string",
+          "description": "Jira/Confluence account id, label, email or URL; omit if you have one."
+        },
+        "page_id": {
+          "type": "string",
+          "description": "Confluence page id or URL."
+        }
+      }
+    },
+    "otto_list_confluence_page_comments": {
+      "type": "object",
+      "required": [
+        "page_id"
+      ],
+      "properties": {
+        "account_id": {
+          "type": "string",
+          "description": "Jira/Confluence account id, label, email or URL; omit if you have one."
+        },
+        "page_id": {
+          "type": "string",
+          "description": "Confluence page id or URL."
+        }
+      }
+    },
+    "otto_create_confluence_page": {
+      "type": "object",
+      "required": [
+        "space_key",
+        "title"
+      ],
+      "properties": {
+        "account_id": {
+          "type": "string",
+          "description": "Jira/Confluence account id, label, email or URL; omit if you have one."
+        },
+        "space_key": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "body_md": {
+          "type": "string"
+        },
+        "body_html": {
+          "type": "string"
+        },
+        "parent_id": {
+          "type": "string",
+          "description": "Parent page id or URL."
+        }
+      }
+    },
+    "otto_update_confluence_page": {
+      "type": "object",
+      "required": [
+        "page_id"
+      ],
+      "properties": {
+        "account_id": {
+          "type": "string",
+          "description": "Jira/Confluence account id, label, email or URL; omit if you have one."
+        },
+        "page_id": {
+          "type": "string",
+          "description": "Confluence page id or URL."
+        },
+        "body_md": {
+          "type": "string"
+        },
+        "body_html": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "base_version": {
+          "type": "integer"
+        }
+      }
+    },
+    "otto_comment_confluence_page": {
+      "type": "object",
+      "required": [
+        "page_id"
+      ],
+      "properties": {
+        "account_id": {
+          "type": "string",
+          "description": "Jira/Confluence account id, label, email or URL; omit if you have one."
+        },
+        "page_id": {
+          "type": "string",
+          "description": "Confluence page id or URL."
+        },
+        "body_md": {
+          "type": "string"
+        },
+        "body_html": {
+          "type": "string"
+        }
+      }
+    },
+    "otto_create_issue": {
+      "type": "object",
+      "required": [
+        "project_key",
+        "issue_type",
+        "summary"
+      ],
+      "properties": {
+        "account_id": {
+          "type": "string",
+          "description": "Jira/Confluence account id, label, email or URL; omit if you have one."
+        },
+        "project_key": {
+          "type": "string"
+        },
+        "issue_type": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "labels": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "priority": {
+          "type": "string"
+        },
+        "parent": {
+          "type": "string"
+        },
+        "epic": {
+          "type": "string"
+        },
+        "fields": {
+          "type": "object"
+        }
+      }
+    },
+    "otto_comment_issue": {
+      "type": "object",
+      "required": [
+        "key",
+        "body"
+      ],
+      "properties": {
+        "account_id": {
+          "type": "string",
+          "description": "Jira/Confluence account id, label, email or URL; omit if you have one."
+        },
+        "key": {
+          "type": "string"
+        },
+        "body": {
+          "type": "string"
+        }
+      }
+    },
+    "otto_transition_issue": {
+      "type": "object",
+      "required": [
+        "key",
+        "transition_id"
+      ],
+      "properties": {
+        "account_id": {
+          "type": "string",
+          "description": "Jira/Confluence account id, label, email or URL; omit if you have one."
+        },
+        "key": {
+          "type": "string"
+        },
+        "transition_id": {
+          "type": "string",
+          "description": "Transition id, name, or target status name."
+        }
+      }
+    },
+    "otto_list_issue_projects": {
+      "type": "object",
+      "properties": {
+        "account_id": {
+          "type": "string",
+          "description": "Jira/Confluence account id, label, email or URL; omit if you have one."
+        }
+      }
+    },
+    "otto_list_issue_types": {
+      "type": "object",
+      "required": [
+        "project_key"
+      ],
+      "properties": {
+        "account_id": {
+          "type": "string",
+          "description": "Jira/Confluence account id, label, email or URL; omit if you have one."
+        },
+        "project_key": {
+          "type": "string"
+        }
+      }
+    },
+    "otto_get_swarm": {
+      "type": "object",
+      "required": [
+        "swarm_id"
+      ],
+      "properties": {
+        "swarm_id": {
+          "type": "string",
+          "description": "Swarm id or name (otto.list_swarms)."
+        }
+      }
+    },
+    "otto_list_swarm_runs": {
+      "type": "object",
+      "required": [
+        "workspace_id"
+      ],
+      "properties": {
+        "workspace_id": {
+          "type": "string"
+        },
+        "swarm_id": {
+          "type": "string",
+          "description": "Swarm id or name (otto.list_swarms)."
+        }
+      }
+    },
+    "otto_get_swarm_board": {
+      "type": "object",
+      "required": [
+        "swarm_id"
+      ],
+      "properties": {
+        "swarm_id": {
+          "type": "string",
+          "description": "Swarm id or name (otto.list_swarms)."
+        },
+        "project_id": {
+          "type": "string"
+        },
+        "task_id": {
+          "type": "string"
+        }
+      }
+    },
+    "otto_post_swarm_board": {
+      "type": "object",
+      "required": [
+        "swarm_id",
+        "body"
+      ],
+      "properties": {
+        "swarm_id": {
+          "type": "string"
+        },
+        "body": {
+          "type": "string"
+        },
+        "project_id": {
+          "type": "string"
+        },
+        "task_id": {
+          "type": "string"
+        }
+      }
+    },
+    "otto_list_design_projects": {
+      "type": "object",
+      "properties": {
+        "workspace_id": {
+          "type": "string",
+          "description": "Optional — narrows the global library to one workspace."
+        },
+        "include_archived": {
+          "type": "boolean"
+        }
+      }
+    },
+    "otto_design_assist": {
+      "type": "object",
+      "required": [
+        "artifact_id",
+        "prompt"
+      ],
+      "properties": {
+        "artifact_id": {
+          "type": "string",
+          "description": "Design artifact id or exact title."
+        },
+        "prompt": {
+          "type": "string",
+          "description": "What to design or change."
+        },
+        "mode": {
+          "type": "string",
+          "description": "generate | refine (default) | critique | a11y"
+        },
+        "references": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Optional artifacts to build on (`<id>` or `<id>@v12`, ≤ 8) — offered to the agent as [R1] …"
+        },
+        "selection": {
+          "type": "object",
+          "description": "Optional focus, e.g. {\"node_id\":\"hero\"}."
+        }
+      }
+    },
+    "otto_design_link": {
+      "type": "object",
+      "required": [
+        "artifact_id",
+        "rel",
+        "dst_kind",
+        "dst_id"
+      ],
+      "properties": {
+        "artifact_id": {
+          "type": "string",
+          "description": "The link source artifact."
+        },
+        "rel": {
+          "type": "string"
+        },
+        "dst_kind": {
+          "type": "string"
+        },
+        "dst_id": {
+          "type": "string"
+        },
+        "dst_node": {
+          "type": "string"
+        },
+        "src_node": {
+          "type": "string"
+        },
+        "policy": {
+          "type": "string",
+          "description": "follow_approved | follow_latest | pinned (default by rel)."
+        },
+        "pinned_version_id": {
+          "type": "string"
+        }
+      }
+    },
+    "otto_broadcast_message": {
+      "type": "object",
+      "required": [
+        "workspace_id",
+        "text"
+      ],
+      "properties": {
+        "workspace_id": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        }
+      }
+    },
+    "otto_get_finding": {
+      "type": "object",
+      "required": [
+        "finding_id"
+      ],
+      "properties": {
+        "finding_id": {
+          "type": "string"
+        }
+      }
+    },
+    "otto_list_integrations": {
+      "type": "object",
+      "required": [
+        "workspace_id"
+      ],
+      "properties": {
+        "workspace_id": {
+          "type": "string"
+        }
+      }
+    },
+    "otto_test_integration": {
+      "type": "object",
+      "required": [
+        "workspace_id",
+        "channel"
+      ],
+      "properties": {
+        "workspace_id": {
+          "type": "string"
+        },
+        "channel": {
+          "type": "string"
+        }
+      }
+    },
+    "otto_list_bundled_skills": {
+      "type": "object",
+      "properties": {}
+    },
+    "otto_get_self_improvement_config": {
+      "type": "object",
+      "required": [
+        "workspace_id"
+      ],
+      "properties": {
+        "workspace_id": {
+          "type": "string"
+        }
+      }
+    },
+    "otto_get_improvement_run": {
+      "type": "object",
+      "required": [
+        "run_id"
+      ],
+      "properties": {
+        "run_id": {
+          "type": "string"
+        }
+      }
+    },
+    "otto_run_self_improvement": {
+      "type": "object",
+      "required": [
+        "workspace_id"
+      ],
+      "properties": {
+        "workspace_id": {
+          "type": "string"
+        }
+      }
+    },
+    "otto_approve_improvement_edit": {
+      "type": "object",
+      "required": [
+        "edit_id"
+      ],
+      "properties": {
+        "edit_id": {
+          "type": "string"
+        }
+      }
+    },
+    "otto_reject_improvement_edit": {
+      "type": "object",
+      "required": [
+        "edit_id"
+      ],
+      "properties": {
+        "edit_id": {
+          "type": "string"
+        }
+      }
+    },
+    "otto_rollback_improvement_edit": {
+      "type": "object",
+      "required": [
+        "edit_id"
+      ],
+      "properties": {
+        "edit_id": {
+          "type": "string"
+        }
+      }
+    },
+    "otto_list_scheduled_tasks": {
+      "type": "object",
+      "properties": {
+        "workspace_id": {
+          "type": "string",
+          "description": "Optional workspace id or name; omit = all you can read."
+        }
+      }
+    },
+    "otto_get_scheduled_task": {
+      "type": "object",
+      "required": [
+        "task_id"
+      ],
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "description": "Scheduled task id or name (otto.list_scheduled_tasks)."
+        }
+      }
+    },
+    "otto_list_scheduled_task_runs": {
+      "type": "object",
+      "required": [
+        "task_id"
+      ],
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "description": "Scheduled task id or name (otto.list_scheduled_tasks)."
+        }
+      }
+    },
+    "otto_create_scheduled_task": {
+      "type": "object",
+      "required": [
+        "workspace_id",
+        "name"
+      ],
+      "properties": {
+        "workspace_id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "prompt": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "schedule": {
+          "type": "object"
+        },
+        "destination": {
+          "type": "object"
+        },
+        "timezone": {
+          "type": "string"
+        },
+        "workflow_id": {
+          "type": "string"
+        },
+        "sandbox": {
+          "type": "string"
+        },
+        "max_retries": {
+          "type": "integer"
+        },
+        "notify_on_change": {
+          "type": "boolean"
+        },
+        "attach_proof": {
+          "type": "boolean"
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "skill": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        }
+      }
+    },
+    "otto_update_scheduled_task": {
+      "type": "object",
+      "required": [
+        "task_id"
+      ],
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "description": "Scheduled task id or name (otto.list_scheduled_tasks)."
+        },
+        "name": {
+          "type": "string"
+        },
+        "prompt": {
+          "type": "string"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "schedule": {
+          "type": "object"
+        },
+        "destination": {
+          "type": "object"
+        },
+        "timezone": {
+          "type": "string"
+        },
+        "workflow_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Workflow id or name; null clears it."
+        },
+        "sandbox": {
+          "type": "string"
+        },
+        "max_retries": {
+          "type": "integer"
+        },
+        "notify_on_change": {
+          "type": "boolean"
+        },
+        "attach_proof": {
+          "type": "boolean"
+        },
+        "skill": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "enabled": {
+          "type": "boolean"
+        }
+      }
+    },
+    "otto_set_scheduled_task_enabled": {
+      "type": "object",
+      "required": [
+        "task_id",
+        "enabled"
+      ],
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "description": "Scheduled task id or name (otto.list_scheduled_tasks)."
+        },
+        "enabled": {
+          "type": "boolean"
+        }
+      }
+    },
+    "otto_run_scheduled_task": {
+      "type": "object",
+      "required": [
+        "task_id"
+      ],
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "description": "Scheduled task id or name (otto.list_scheduled_tasks)."
+        }
+      }
+    },
+    "otto_delete_scheduled_task": {
+      "type": "object",
+      "required": [
+        "task_id"
+      ],
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "description": "Scheduled task id or name (otto.list_scheduled_tasks)."
+        }
+      }
+    },
+    "otto_ui_request_control": {
+      "type": "object",
+      "properties": {}
+    }
+  }
+}

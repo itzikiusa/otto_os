@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announceShown } from '../../lib/announce.svelte';
   // The thread composer: multi-line (Enter sends, Shift+Enter breaks the
   // line), a leading `@claude` / `@codex` routes one turn (the daemon strips
   // it), the model chip pins the thread, attachments land in the assistant's
@@ -9,7 +10,7 @@
   import { assistantApi } from '../../lib/api/assistant';
   import { assistant, describeError } from '../../lib/stores/assistant.svelte';
   import { formatBytes } from '../../lib/metric-format';
-  import { parseRouteHint, providerLabel, providerName } from './model';
+  import { parseRouteHint, providerLabel, providerName } from '../../lib/assistant/model';
   import PinModelSheet from './PinModelSheet.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import type { AssistantAttachment, AssistantThread } from '../../lib/api/types';
@@ -150,7 +151,7 @@
       <Icon name="arrowUp" size={14} />
     </button>
   </div>
-  {#if error}<p class="err" role="alert">{error}</p>{/if}
+  {#if error}<p class="err" use:announceShown={{ text: error, assertive: true }}>{error}</p>{/if}
 </div>
 {#if pinning}
   <PinModelSheet {thread} onclose={() => (pinning = false)} />

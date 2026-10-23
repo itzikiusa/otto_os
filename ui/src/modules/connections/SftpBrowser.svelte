@@ -361,7 +361,7 @@
     </div>
 
     {#if view.truncated && !view.loading}
-      <p class="list-trunc" role="status">Showing the first 20,000 entries — this directory has more. The filter searches the loaded entries only.</p>
+      <p class="list-trunc">Showing the first 20,000 entries — this directory has more. The filter searches the loaded entries only.</p>
     {/if}
 
     <!-- Listing -->

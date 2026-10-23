@@ -48,6 +48,11 @@ in audits.
 - Focus order follows the visual order. Don't use a positive `tabindex`.
 - Modals move focus in and give it back (`Modal` does this). Custom popovers
   and drawers must do the same.
+- A control that removes itself when activated (Dismiss, the last "show N
+  more", a Retry replaced by its result) moves focus to its natural successor
+  after `await tick()`: the next row, the control that replaced it, or the page
+  (`focusAppContent()` from `lib/announce.svelte.ts`). Focus never falls to
+  `<body>`.
 
 ## 3. Keyboard
 
@@ -111,6 +116,28 @@ in audits.
   - `role="switch"` plus `aria-checked` for switches
 - **Live regions:**
   - `Toasts` is `aria-live="polite"`.
+  - Announce status text with `announce(text)` from `lib/announce.svelte.ts`
+    (`{ assertive: true }` for an error that needs attention now), called at the
+    state edge: where the save resolves, the copy lands or the load fails. The
+    shell mounts one polite and one assertive region once (`Announcer`, beside
+    `Toasts`); repeating the same text speaks it again. Never insert a
+    `role="status"` (or `aria-live`) element together with its text, in an
+    `{#if}`, `{:else if}` or `{:else}` branch alike: WebKit/VoiceOver only
+    speak changes to a region that already exists, so the inserted text is
+    often silent. A count that updates (search hits, paging) is one
+    always-mounted `sr-only` region; the visible count stays plain text.
+    And one voice per message: no `use:announceShown` inside a mounted
+    region (the `announce-in-region` guard).
+  - Two helpers for the common shapes, both in `lib/announce.svelte.ts`:
+    `announceEdge()` returns a tracker to call from an `$effect` with the
+    current message (it speaks only a new message; `null` re-arms it), and
+    `use:announceShown={text | { text, assertive }}` speaks a line when it is
+    inserted and again when its text changes, so the line itself carries no
+    role. `LoadState` speaks its stale “Couldn’t refresh {what}” bar this way.
+  - An inline field or form error inserted as `role="alert"` is the one
+    inserted region that may stay: WebKit fires the alert event when an
+    `alert` element is added, and specs find errors by that role. Keep it to
+    real errors; a notice, a result or progress is not an alert.
   - Status that changes without user action (a run finishing, a session
     needing you) should be announced politely or reachable from the bell.
   - Loading regions get `aria-busy="true"` (as `Skeleton` sets) or

@@ -998,7 +998,7 @@ async fn mysql_streaming_export_preserves_empty_schema_and_native_values() {
                 None,
                 ExportFormat::CsvWithNames,
                 limit,
-                Box::new(buffer.clone()),
+                otto_dbviewer::export::ExportWriter::Direct(Box::new(buffer.clone())),
             )
             .await
             .unwrap();
@@ -1014,7 +1014,7 @@ async fn mysql_streaming_export_preserves_empty_schema_and_native_values() {
             None,
             ExportFormat::Csv,
             None,
-            Box::new(ExportBuffer::default()),
+            otto_dbviewer::export::ExportWriter::Direct(Box::new(ExportBuffer::default())),
         )
         .await
         .unwrap_err();

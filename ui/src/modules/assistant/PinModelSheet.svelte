@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announceShown } from '../../lib/announce.svelte';
   // Pin provider + model for the whole thread (the model chip), or go back to
   // the routing rules. Explicit always wins over the router (plan §2.4).
   import Modal from '../../lib/components/Modal.svelte';
@@ -6,7 +7,7 @@
   import ProviderIcon from '../../lib/components/ProviderIcon.svelte';
   import { assistant, describeError } from '../../lib/stores/assistant.svelte';
   import { toasts } from '../../lib/toast.svelte';
-  import { PROVIDER_NAME, type Provider } from './model';
+  import { PROVIDER_NAME, type Provider } from '../../lib/assistant/model';
   import type { AssistantThread } from '../../lib/api/types';
 
   interface Props {
@@ -74,7 +75,7 @@
   {#key provider}
     <ModelPicker {provider} value={model} onchange={(m) => (model = m)} hint="Empty uses the provider’s default model." />
   {/key}
-  {#if error}<p class="err" role="alert">{error}</p>{/if}
+  {#if error}<p class="err" use:announceShown={{ text: error, assertive: true }}>{error}</p>{/if}
   {#snippet footer()}
     {#if thread.route_pinned}
       <button class="btn ghost reset" onclick={() => void unpin()} disabled={busy}>Use routing rules</button>

@@ -19,6 +19,48 @@ pub struct ProofPackResp {
     pub artifact_count: u32,
 }
 
+/// What a diff assembly did (error-handling-6-02). `NotARepo` and
+/// `DiffFailed` write no artifact; a HEAD that moves mid-assembly is a 409.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum DiffAssembly {
+    /// A `diff` artifact was written (or refreshed).
+    Assembled { files_changed: usize },
+    /// The working tree has no changes vs the base: nothing to record.
+    NoChanges,
+    /// `cwd` is not a git repository (no `HEAD`).
+    NotARepo,
+    /// A git command failed; each entry is `"<command>: <error>"`.
+    DiffFailed { commands: Vec<String> },
+}
+
+/// One requested command of an assemble call.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssembledCommand {
+    pub cmd: String,
+    /// `passed` / `failed` when its artifact was stored; absent on `error`.
+    pub status: Option<crate::proof::ProofArtifactStatus>,
+    /// Why the command's artifact could not be stored.
+    pub error: Option<String>,
+}
+
+/// What `POST /proof-packs/{id}/assemble` did, beside the recomputed pack.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssembleSummary {
+    /// Absent when the request had no `cwd` (nothing to assemble).
+    pub diff: Option<DiffAssembly>,
+    pub commands: Vec<AssembledCommand>,
+}
+
+/// `POST /proof-packs/{id}/assemble` — the `ProofPackResp` fields plus
+/// `assembled`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssembleResp {
+    #[serde(flatten)]
+    pub pack: ProofPackResp,
+    pub assembled: AssembleSummary,
+}
+
 /// One artifact plus a capped inline preview for list/detail rendering.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProofArtifactView {

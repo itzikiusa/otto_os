@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announce } from '../../lib/announce.svelte';
   import { rowMenu } from '../../lib/rowMenu';
   import Badge from '../../lib/components/Badge.svelte';
   import { focusOnMount } from '../../lib/focusOnMount';
@@ -689,6 +690,7 @@
       return;
     }
     opening[c.id] = true;
+    announce(`Opening ${c.name}…`);
     try {
       const session = await api.long.post<Session>(`/connections/${c.id}/open`, {
         workspace_id: wsId,
@@ -1423,7 +1425,7 @@
       <span class="conn-glyph {c.kind}"><Icon name={engineGlyph(c.kind)} size={12} /></span>
       <span class="conn-name">{c.name}</span>
       <Badge variant="outline" label={c.kind} />
-      {#if opening[c.id]}<span class="spinner" style="--spinner-size: 10px" role="status" aria-label="Opening…" title="Opening…"></span>{/if}
+      {#if opening[c.id]}<span class="spinner" style="--spinner-size: 10px" aria-hidden="true" title="Opening…"></span>{/if}
       {#if envBadge(c)}<EnvBadge env={c.environment} readOnly={c.read_only} />{/if}
     </button>
     <div class="conn-actions">

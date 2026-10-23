@@ -9,6 +9,7 @@
   // designs that implement one product story. Artifacts are grouped by studio;
   // the header's primary action starts a new design already filed here.
   import { onDestroy, untrack } from 'svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -95,7 +96,7 @@
       sLoaded = true;
     } catch (e) {
       if (my !== sSeq) return;
-      sError = e instanceof Error ? e.message : String(e);
+      sError = loadErrorText(e);
     } finally {
       if (my === sSeq) sLoading = false;
     }

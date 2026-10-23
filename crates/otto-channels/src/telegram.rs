@@ -511,14 +511,10 @@ fn store_offset(token: &str, offset: i64) {
 /// the previous poller to notice its cancel flag and release this lock before
 /// it issues its own `getUpdates` — two concurrent long-polls on one token get
 /// a 409 "Conflict" from Telegram, which used to surface as a false failure.
-fn poller_lock(token: &str) -> Arc<tokio::sync::Mutex<()>> {
-    static MAP: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
-    > = std::sync::OnceLock::new();
-    let map = MAP.get_or_init(Default::default);
-    let mut m = map.lock().unwrap_or_else(|p| p.into_inner());
-    Arc::clone(m.entry(token.to_string()).or_default())
-}
+/// The shared [`otto_core::keyed_lock::KeyedLocks`] prunes an idle token's entry, so a rotated
+/// token's string does not stay in memory for the life of the process.
+static POLLER_LOCKS: otto_core::keyed_lock::KeyedLocks<String> =
+    otto_core::keyed_lock::KeyedLocks::new();
 
 /// Sleep `ms`, waking early (in 250 ms slices) once `cancel` is set so a
 /// stopped poller in backoff releases its token promptly.
@@ -628,8 +624,7 @@ pub async fn run(
 ) {
     // Wait out the previous generation's poller on this token (it releases
     // the lock once it sees its own cancel flag — at most one long-poll).
-    let lock = poller_lock(&token);
-    let _guard = lock.lock().await;
+    let _guard = POLLER_LOCKS.lock(token.as_str()).await;
     if cancel.load(Ordering::Relaxed) {
         debug!("telegram listener cancelled before start");
         return;
@@ -1065,6 +1060,76 @@ mod tests {
         std::fs::remove_dir_all(directory).unwrap();
     }
 
+    /// The sender allow-list is the ONLY gate in front of a Telegram text
+    /// message (`Bridge::handle`): a stranger's text must start nothing and be
+    /// listed as rejected so the owner can find (and admit) the id.
+    #[tokio::test]
+    async fn a_strangers_text_starts_no_session_and_is_listed_rejected() {
+        let base = fixture(axum::Router::new()).await;
+        let directory =
+            std::env::temp_dir().join(format!("otto-tg-stranger-{}", otto_core::new_id()));
+        let pool = otto_state::db::open(&directory.join("state.sqlite"))
+            .await
+            .unwrap();
+        let (events, _) = tokio::sync::broadcast::channel(16);
+        let manager = Arc::new(otto_sessions::SessionManager::new(
+            otto_state::SessionsRepo::new(pool.clone()),
+            events,
+            otto_sessions::providers::ProviderRegistry::new(None),
+        ));
+        let bridge = Bridge::new(
+            manager.clone(),
+            otto_state::WorkspacesRepo::new(pool.clone()),
+            otto_state::SettingsRepo::new(pool.clone()),
+            crate::mirror::Mirror::new(manager.clone()),
+            "root".into(),
+        );
+        let ws = format!("ws-tg-stranger-{}", otto_core::new_id());
+        let integ: Integration = serde_json::from_value(serde_json::json!({
+            "workspace_id": ws, "channel":"telegram", "enabled":true,
+            "allowed_users":"7", "open_to_all":false, "agent_reply":false,
+            "reply_instructions":"", "channel_id":"1", "preferred_cli":"claude",
+            "has_bot_token":true, "has_app_token":false, "updated_at":"2026-10-18T00:00:00Z"
+        }))
+        .unwrap();
+        let update: TgUpdate = serde_json::from_value(serde_json::json!({"update_id":11,
+            "message":{"message_id":6,"from":{"id":8},"chat":{"id":1},"text":"rm -rf the repo"}}))
+        .unwrap();
+        let adapter = Arc::new(TelegramAdapter::with_base("TOKEN", base));
+        let health = crate::health::Health::begin(&ws, Channel::Telegram);
+        handle_update(
+            &update,
+            &integ,
+            &adapter,
+            &bridge,
+            &health,
+            &AtomicBool::new(false),
+        )
+        .await;
+        // The bridge runs off the poll loop: wait for its verdict.
+        let rejected = async {
+            loop {
+                let listed = crate::health::snapshot(&ws)
+                    .into_iter()
+                    .any(|s| s.rejected_senders.iter().any(|r| r.user == "8"));
+                if listed {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(5), rejected)
+            .await
+            .expect("user 8 is listed as a rejected sender");
+        assert!(
+            manager.list_by_workspace(&ws).await.unwrap().is_empty(),
+            "a stranger's message starts no session"
+        );
+        crate::health::remove(&ws, Channel::Telegram);
+        drop((bridge, manager, pool));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
     #[tokio::test]
     async fn non_2xx_error_keeps_description_and_status() {
         use axum::http::StatusCode;
@@ -1241,8 +1306,8 @@ mod tests {
 
     #[tokio::test]
     async fn new_generation_waits_for_previous_poller() {
-        let a = poller_lock("lock-test-token");
-        let b = poller_lock("lock-test-token");
+        let a = POLLER_LOCKS.handle("lock-test-token");
+        let b = POLLER_LOCKS.handle("lock-test-token");
         assert!(Arc::ptr_eq(&a, &b), "one lock per token");
         let held = a.lock().await;
         assert!(b.try_lock().is_err(), "second poller must wait");

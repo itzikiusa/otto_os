@@ -1,5 +1,6 @@
 <script lang="ts">
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { announceShown } from '../../lib/announce.svelte';
   import { sectionLabel } from './sections';
   import SectionIntro from './SectionIntro.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
@@ -205,7 +206,7 @@
               {/if}
             </div>
             {#if stopped(p)}
-              <div class="pstopped" role="status">
+              <div class="pstopped" use:announceShown={`${p.name}: its service isn’t running${p.last_error ? ` — ${p.last_error}` : ''}.`}>
                 Its service isn’t running{p.last_error ? ` — ${p.last_error}` : ''}. Its page loads, but nothing in it works until it starts.
               </div>
             {/if}

@@ -21,7 +21,7 @@ test('incomplete history banner compiles and keeps the saved-request contract', 
   assert.ok(start > 0, 'incomplete-history banner is present');
   const banner = source.slice(Math.max(0, start - 240), start + 700);
   assert.doesNotMatch(banner, /\{#if\s+[^\n}]*\bas\b/);
-  assert.match(banner, /role="status"/);
+  assert.match(banner, /use:announceShown=\{apiClient\.replayIssue\(\) \?\? ''\}/);
   assert.match(banner, /class="tab-help"/);
   assert.match(banner, /apiClient\.replayIssue\(\)/);
   assert.match(banner, /draft\.historyReplay\?\.requestId/);

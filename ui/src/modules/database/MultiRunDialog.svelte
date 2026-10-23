@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announce } from '../../lib/announce.svelte';
   import { scrollRegion } from './scroll-region';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import Badge from '../../lib/components/Badge.svelte';
@@ -378,13 +379,20 @@
     stage === 'results' ? 'Multi-run' : stage === 'confirm' ? 'Confirm production writes' : 'Run on multiple targets',
   );
   const scriptLines = $derived(statement.split('\n').length);
+  $effect(() => { if (notice) announce(notice); });
+  $effect(() => { if (planStale) announce('Cluster choice changed — update the preview to see the final statements.'); });
+  $effect(() => { if (planError) announce(planError, { assertive: true }); });
+  $effect(() => { if (startError) announce(startError, { assertive: true }); });
+  $effect(() => { if (detailError) announce(detailError, { assertive: true }); });
+  const confirming = $derived(stage === 'confirm' && !!plan);
+  $effect(() => { if (confirming && guardedRuns.length) announce(`${plural(guardedRuns.length, 'run')} will write or change the schema on production or read-only targets. Check every target and statement.`, { assertive: true }); });
 </script>
 
 <Modal {title} width={920} onclose={close}>
   <div class="mr" data-testid="multi-run" bind:this={mrEl}>
-    {#if notice && stage !== 'results'}<p class="mr-notice" role="status">{notice}</p>{/if}
+    {#if notice && stage !== 'results'}<p class="mr-notice">{notice}</p>{/if}
     {#if planError && stage === 'preview'}
-      <div class="mr-error" role="alert"><Icon name="warning" size={13} /><span>{planError}</span></div>
+      <div class="mr-error"><Icon name="warning" size={13} /><span>{planError}</span></div>
     {/if}
     {#if stage === 'setup'}
       {#if recent.length > 0}
@@ -530,7 +538,7 @@
       </section>
 
       {#if planError}
-        <div class="mr-error" role="alert">
+        <div class="mr-error">
           <Icon name="warning" size={13} />
           <span>{planError}</span>
           <button class="btn small ghost" onclick={preview}>Retry</button>
@@ -596,7 +604,7 @@
             {/each}
           </ul>
           {#if planStale}
-            <p class="mr-notice" role="status">Cluster choice changed — update the preview to see the final statements.</p>
+            <p class="mr-notice">Cluster choice changed — update the preview to see the final statements.</p>
             <button class="btn small" onclick={preview} disabled={planning}>
               <Icon name="refresh" size={12} /> Update preview
             </button>
@@ -628,9 +636,9 @@
           {/each}
         </ul>
       </section>
-      {#if startError}<div class="mr-error" role="alert"><Icon name="warning" size={13} /><span>{startError}</span></div>{/if}
+      {#if startError}<div class="mr-error"><Icon name="warning" size={13} /><span>{startError}</span></div>{/if}
     {:else if stage === 'confirm' && plan}
-      <div class="mr-danger" role="alert">
+      <div class="mr-danger">
         <Icon name="warning" size={14} />
         <span>
           {plural(guardedRuns.length, 'run')} will WRITE / change the schema on production or
@@ -664,7 +672,7 @@
           }}
         />
       </label>
-      {#if startError}<div class="mr-error" role="alert"><Icon name="warning" size={13} /><span>{startError}</span></div>{/if}
+      {#if startError}<div class="mr-error"><Icon name="warning" size={13} /><span>{startError}</span></div>{/if}
     {:else if stage === 'results' && job}
       <div class="mr-status" tabindex="-1" data-stage-focus>
         <StatusBadge status={runStatus(job.status === 'done' ? (job.summary.failed > 0 ? 'failed' : 'done') : job.status)} />
@@ -709,7 +717,7 @@
             {#if openItem === it.index}
               <div class="mr-detail">
                 {#if detailError}
-                  <div class="mr-error" role="alert"><Icon name="warning" size={13} /><span>{detailError}</span></div>
+                  <div class="mr-error"><Icon name="warning" size={13} /><span>{detailError}</span></div>
                 {:else if !detail}
                   <Skeleton rows={3} height={20} label="result details" />
                 {:else}

@@ -16,7 +16,7 @@ session** — attached to that session's right-panel **Canvas** tab so the agent
 (and you) can see it without leaving the conversation (§7a).
 
 > **Where this lives in the code.** CRUD crate: `crates/otto-canvas/` (`http.rs`,
-> `types.rs`, `lib.rs`). Agent-assist: `assist.rs` (+ `assist_ctx.rs` — the host runs the agent turn through `CanvasAssistCtx`).
+> `types.rs`, `lib.rs`). Agent-assist: `assist.rs` (+ `assist_ctx.rs` — the host hands over its session manager through `CanvasAssistCtx::sessions`; the claim, turn, live poll and Stop are the shared assist job in `otto-agent-run/src/assist/`).
 > Persistence: `crates/otto-state/src/canvas.rs` (`CanvasRepo`), migrations
 > `0072_canvas_scenes.sql` / `0074_session_links.sql` / `0075_canvas_scene_meta.sql` /
 > `0093_canvas_scene_refs.sql` (session references, §7a). Session-ref routes (need
@@ -52,7 +52,7 @@ session** — attached to that session's right-panel **Canvas** tab so the agent
 |---|---|
 | Scene CRUD router + DTOs | `crates/otto-canvas/src/http.rs`, `types.rs` (`CanvasCtx`, `router`, `CreateSceneReq`, `UpdateSceneReq`, `empty_doc`) |
 | Agent-assist (file-backed draw) | `crates/otto-canvas/src/assist.rs` (`assist_scene`, `assist_preview`) |
-| One managed agent turn (create/resume) | `crates/otto-server/src/agent_session.rs` (`run_session_turn`) |
+| One managed agent turn (create/resume) | `crates/otto-agent-run/src/session_turn.rs` (`run_session_turn`; otto-server's `agent_session.rs` wraps it for `ServerCtx`) |
 | Persistence + repo | `crates/otto-state/src/canvas.rs` (`CanvasScene`, `CanvasSceneSummary`, `CanvasRepo`) |
 | Server wiring (router mount + assist routes) | `crates/otto-server/src/modules.rs` |
 | RBAC policy | `crates/otto-server/src/policy.rs` (`/canvas/` + `/workspaces/{ws}/canvas/` ⇒ `Require(Canvas, …)`) |
@@ -173,13 +173,16 @@ turn:
    `<data_dir>/canvas/<scene_id>/<canvas.mermaid|canvas.json>`. The directory is
    marked trusted (`otto_sessions::trust::ensure_trusted`) so the PTY doesn't stall
    on a first-run trust prompt.
-2. Start a background **file poll** (every ~900 ms): each time the file changes
+2. Poll the **file** (every ~900 ms) while the turn runs: each time it changes
    while the agent writes, the server broadcasts `CanvasUpdated`, so the diagram
-   visibly *"draws itself"* mid-turn.
-3. Run the turn via `run_session_turn` — **resuming** the scene's session
-   (`scene.session_id`) when it exists, so the agent keeps the prior diagram and
-   conversation in context. The first turn creates the session and stores its id
-   (`CanvasRepo::set_session`).
+   visibly *"draws itself"* mid-turn. The poll is part of the shared assist job
+   (`otto_agent_run::assist::run_assist_job`): it ends with the turn, on Stop,
+   or when the request is dropped.
+3. Run the turn via `otto_agent_run::session_turn::run_agent_turn` —
+   **resuming** the scene's session (`scene.session_id`) when it exists, so the
+   agent keeps the prior diagram and conversation in context. Only the user who
+   created that session in this workspace may resume it (403 otherwise). The
+   first turn creates the session and stores its id (`CanvasRepo::set_session`).
 4. Read the file back and commit it: the **edited file wins**; if the agent printed
    a fenced ```` ```mermaid ````/```` ```json ```` block instead of editing the
    file (or in the offline E2E stub), that block is used as a fallback and written

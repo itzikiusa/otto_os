@@ -26,6 +26,8 @@ mod agent_run_recovery;
 mod auth_security;
 #[path = "canvas_refs_api.rs"]
 mod canvas_refs_api;
+#[path = "database_changes_api.rs"]
+mod database_changes_api;
 #[path = "email_sender_storage.rs"]
 mod email_sender_storage;
 #[path = "foundation_integrity.rs"]
@@ -42,6 +44,8 @@ mod k8s_backfill_budget;
 mod k8s_monitor_clickhouse;
 #[path = "mcp_auto_approve.rs"]
 mod mcp_auto_approve;
+#[path = "mcp_db_execute.rs"]
+mod mcp_db_execute;
 #[path = "mcp_profiles_edges.rs"]
 mod mcp_profiles_edges;
 #[path = "personal_agent_policy.rs"]
@@ -54,6 +58,8 @@ mod policy_coverage;
 mod proof_assemble_scope;
 #[path = "provider_resolve.rs"]
 mod provider_resolve;
+#[path = "public_entry_gates.rs"]
+mod public_entry_gates;
 #[path = "rbac_matrix.rs"]
 mod rbac_matrix;
 #[path = "resume_missing_cwd.rs"]
@@ -86,6 +92,8 @@ mod share_otp;
 mod share_scope_guard;
 #[path = "swarm_identity.rs"]
 mod swarm_identity;
+#[path = "swarm_ingest_bodies.rs"]
+mod swarm_ingest_bodies;
 #[path = "swarm_router.rs"]
 mod swarm_router;
 #[path = "swarm_scope_api.rs"]

@@ -220,6 +220,7 @@ the context-library root, `<data_dir>/library`):
 ```text
 <data_dir>/insights/
   config.json                                  ← scheduler opt-in (this module)
+  schedule-state.json                          ← last failed scheduled run per cadence (served as `schedule_status`)
   index.json                                   ← rolling series + action ledger
   <kind>/                                       (daily | weekly | monthly)
     metrics-<kind>-<start>_<end>.json

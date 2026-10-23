@@ -9,7 +9,7 @@
   import LoadState from '../../lib/components/LoadState.svelte';
   import { assistant } from '../../lib/stores/assistant.svelte';
   import { formatCount } from '../../lib/metric-format';
-  import { TASK_KIND, loadShare, providerName } from './model';
+  import { TASK_KIND, loadShare, providerName } from '../../lib/assistant/model';
   import { whenLabel } from './format';
   import NeedsYouLink from '../home/LazyNeedsYouLink.svelte';
 

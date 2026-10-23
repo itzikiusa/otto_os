@@ -25,6 +25,7 @@
   import { TableWindow } from '../../lib/tableWindow.svelte';
   import { exportCsv } from '../../lib/components/exporters';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import PaneDivider from '../../lib/components/PaneDivider.svelte';
@@ -338,8 +339,8 @@
     try {
       await copyTextOrThrow(text);
       toasts.success(`Copied ${what}`);
-    } catch (e) {
-      toastError('Couldn’t copy', e);
+    } catch {
+      toasts.error('Couldn’t copy', 'The clipboard isn’t available here. Select the text and copy it manually.');
     }
   }
 
@@ -540,14 +541,7 @@
     {#if groupsLoading && !groups}
       <div class="pad"><Skeleton rows={8} label="log groups" /></div>
     {:else if groupsError && !groups}
-      <EmptyState
-        actionKind={groupsLogin ? 'primary' : 'secondary'}
-        icon="warning"
-        title="Couldn’t list log groups"
-        body={awsErrorText(groupsError)}
-        actionLabel={groupsLogin ? 'Sign in' : 'Retry'}
-        onaction={groupsLogin ? onsignin : () => void loadGroups()}
-      />
+      <LoadState what="log groups" error={awsErrorText(groupsError)} empty onretry={() => void loadGroups()}>{#snippet errorActions()}{#if groupsLogin && onsignin}<button class="btn primary" onclick={onsignin}><Icon name="key" size={12} /> Sign in</button>{/if}{/snippet}</LoadState>
     {:else if groups && groups.length === 0}
       <EmptyState icon="file" title={groupPrefix.trim() ? `No log groups starting with “${groupPrefix.trim()}”` : `No log groups in ${region}`} body="Group names are case-sensitive prefixes." />
     {:else if groups}
@@ -622,14 +616,7 @@
             {#if eventsLoading && !events.length}
               <div class="pad"><Skeleton rows={8} label="events" /></div>
             {:else if eventsError && !events.length}
-              <EmptyState
-                actionKind={eventsLogin ? 'primary' : 'secondary'}
-                icon="warning"
-                title="Couldn’t read log events"
-                body={awsErrorText(eventsError)}
-                actionLabel={eventsLogin ? 'Sign in' : 'Retry'}
-                onaction={eventsLogin ? onsignin : () => void loadEvents()}
-              />
+              <LoadState what="log events" error={awsErrorText(eventsError)} empty onretry={() => void loadEvents()}>{#snippet errorActions()}{#if eventsLogin && onsignin}<button class="btn primary" onclick={onsignin}><Icon name="key" size={12} /> Sign in</button>{/if}{/snippet}</LoadState>
             {:else if !events.length}
               <EmptyState
                 icon="file"
@@ -717,14 +704,7 @@
         {/if}
         <div class="ins-res">
           {#if iError && !iResult}
-            <EmptyState
-              actionKind={iLogin ? 'primary' : 'secondary'}
-              icon="warning"
-              title="The Insights query failed"
-              body={awsErrorText(iError)}
-              actionLabel={iLogin ? 'Sign in' : 'Retry'}
-              onaction={iLogin ? onsignin : () => void runInsights()}
-            />
+            <LoadState what="the Insights results" error={awsErrorText(iError)} empty onretry={() => void runInsights()}>{#snippet errorActions()}{#if iLogin && onsignin}<button class="btn primary" onclick={onsignin}><Icon name="key" size={12} /> Sign in</button>{/if}{/snippet}</LoadState>
           {:else if !iResult && !iRunning}
             <EmptyState icon="search" title="Run a Logs Insights query" body="Results over the selected groups and time range appear here. Insights bills per GB scanned." />
           {:else}

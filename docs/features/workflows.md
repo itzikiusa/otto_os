@@ -71,10 +71,18 @@ API-client automations are a thin, self-contained feature covered in §8.
 ui/src/modules/workflows/WorkflowsPage.svelte   — the page: generate / list / edit / run / inspect
 ui/src/modules/workflows/WorkflowCanvas.svelte  — n8n-style pan/zoom node-graph canvas (SVG + cards)
 ui/src/modules/workflows/RunSteps.svelte        — per-step run detail (status, logs, "work product")
+ui/src/modules/workflows/RunMonitor.svelte      — the inspector's run view: run bar, timeline, steps, final output
+ui/src/modules/workflows/runSync.svelte.ts      — RunSync (run state): live run sync (WS fast path + safety poll), approvals, final output
+ui/src/modules/workflows/RunApprovals.svelte    — the approval gate preview + Approve / Reject
+ui/src/modules/workflows/RunContextSidebar.svelte — the run's context files (shared <Tabs>)
+ui/src/modules/workflows/RunFinalOutput.svelte  — the run's final deliverable (one view for mobile and desktop)
+ui/src/modules/workflows/RunInputPanel.svelte   — manual-run input editor (state in runInputForm.svelte.ts)
 ui/src/modules/workflows/TriggersPanel.svelte   — list/add/edit/preview/toggle/delete schedule|webhook|event|chat triggers
 ui/src/modules/api/AutomationsView.svelte       — API-client collection runner (the *other* "automations")
 
-crates/otto-server/src/workflow_engine.rs              — the executor: run loop, per-node exec, branching/retry, proof
+crates/otto-server/src/workflow_engine.rs              — the executor: thin run driver, per-node exec, branching/retry, proof
+crates/otto-server/src/workflow_engine/run/           — run phases: admission.rs (graph, scope, identity, input, repo isolation, Running CAS), state.rs (RunState + NodeFlow), schedule.rs (one node per step: decision, attempts, outcome), finalize.rs
+crates/otto-server/src/workflow_engine/nodes/         — one file per large node kind (review_run.rs keeps its pure gate: review_score / review_verdict / aggregate)
 crates/otto-workflows/src/                             — server-free pieces: node catalog, validation, retry, checkpoints, run context files, event-trigger listener (`WorkflowCtx`)
 crates/otto-server/src/routes/workflows.rs             — HTTP handlers: CRUD, generate, run, versions, triggers, webhook, approve, templates
 crates/otto-server/src/workflow_trigger_scheduler.rs   — schedule scheduler + boot glue for the event-bus listener (both spawned at boot)
@@ -344,7 +352,7 @@ The catalog is returned by `GET /workflows/node-types` (`node_catalog()` in
 `workflow_engine.rs`). Each descriptor (`NodeTypeSpec`) carries
 `kind, label, category, description, inputs, outputs, color, icon`. The UI's
 "+ Node" palette is built directly from this list, and per-kind parameter forms
-live in `WorkflowsPage.svelte`.
+live in `inspector/NodeParams.svelte`.
 
 **Status legend:** **Real** = executes against a live subsystem · **Real
 (scaffold)** = runs and produces real structured output but emits a canned spec

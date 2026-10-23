@@ -13,10 +13,13 @@
 //!      new size + resumable session id, and
 //!   4. broadcasts `Event::MockupUpdated` so the open Assistant panel re-renders.
 //!
-//! While the turn runs we poll the file and broadcast each change LIVE, so the
-//! mockup "builds itself" as the agent writes (no `notify` dep — same poll the
-//! session runner uses). The agent shell is surfaced at turn START via
-//! `Event::MockupSessionStarted` so the panel attaches the live Terminal then.
+//! While the turn runs the file is polled and each change broadcast LIVE, so
+//! the mockup "builds itself" as the agent writes. The claim, the turn, the
+//! poll and the turn's resume-ownership check are the shared assist job
+//! (`otto_agent_run::assist::run_assist_job`, architecture-4-02); this module
+//! is its mockup adapter ([`MockupTurn`]). The agent shell is surfaced at turn
+//! START via `Event::MockupSessionStarted` so the panel attaches the live
+//! Terminal then.
 //!
 //! Four formats — the one `DesignFormat` enum (`design_format.rs`): a
 //! self-contained **HTML** screen (default), a **Mermaid** diagram, an
@@ -29,15 +32,18 @@
 //! Route (registered in modules.rs):
 //!   POST /api/v1/product/stories/{sid}/mockups/assist  (ws editor) → ProductAttachment
 
+use otto_agent_run::assist::{
+    run_assist_job, AssistClaim, AssistOutcome, AssistSlots, AssistState, AssistTarget, Stage,
+};
 use otto_agent_run::fence::extract_fenced;
-use std::time::Duration;
+use otto_agent_run::session_turn::AgentTurn;
 
 use axum::extract::{Path, State};
 use axum::Json;
-use otto_core::domain::WorkspaceRole;
+use otto_core::domain::{User, Workspace, WorkspaceRole};
 use otto_core::event::Event;
 use otto_core::{Error, Id};
-use otto_state::{NewAttachment, ProductAttachment};
+use otto_state::{NewAttachment, ProductAttachment, ProductStory};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -46,8 +52,6 @@ use crate::design_format::DesignFormat;
 use crate::error::{ApiError, ApiResult};
 use crate::state::ServerCtx;
 
-/// Live-preview file poll cadence while the agent edits.
-const POLL: Duration = Duration::from_millis(900);
 /// Attachment storage root (mirrors `otto_product::media::ATTACH_ROOT`).
 const ATTACH_ROOT: &str = "product/attachments";
 /// Per-artifact agent scratch dirs: `data_dir/product/mockup_assist/<aid>/`.
@@ -93,7 +97,7 @@ pub async fn assist_mockup(
         .map_err(ApiError)?;
 
     // Own an existing target before reading its resumable session and source.
-    let mut _ownership = req.mockup_id.as_deref().map(claim_mockup).transpose()?;
+    let ownership = req.mockup_id.as_deref().map(claim_mockup).transpose()?;
 
     // Resolve the agent provider (honored only when a NEW mockup session is
     // created; a refine resumes the existing one). Precedence mirrors Discovery
@@ -108,9 +112,11 @@ pub async fn assist_mockup(
     let (att, created_now, format, current, session_id) =
         resolve_target(&ctx, &story, &user.id, &req).await?;
     let attachment_id = att.id.clone();
-    if _ownership.is_none() {
-        _ownership = Some(claim_mockup(&attachment_id)?);
-    }
+    // A new mockup is claimed once minted (its id cannot be busy before).
+    let claim = match ownership {
+        Some(claim) => claim,
+        None => claim_mockup(&attachment_id)?,
+    };
 
     // Working dir (isolated from sibling attachments) — the agent's cwd + file.
     // Attachment ids are daemon-minted, but a refine's id arrived in the request
@@ -126,132 +132,221 @@ pub async fn assist_mockup(
             "mockup scratch dir: {e}"
         ))));
     }
-    let work_file = dir.join(format.file_name());
-    if let Err(error) = write_source(&work_file, current.as_bytes()).await {
-        if created_now {
-            cleanup(&ctx, &att).await;
-        }
-        return Err(ApiError(error));
-    }
-    let dir_str = dir.to_string_lossy().to_string();
-    otto_sessions::trust::ensure_trusted(&provider, &dir_str);
-
-    // Live preview: broadcast each file change while the turn runs.
-    let poll = AbortOnDrop(spawn_file_poll(
-        &ctx,
-        &story,
-        &attachment_id,
-        &work_file,
+    let target = MockupTurn {
+        ctx: &ctx,
+        story: &story,
+        ws: &ws,
+        user: &user,
+        att: &att,
         format,
-        &current,
-    ));
-
-    let prompt = build_mockup_prompt(
-        &req.prompt,
-        format,
-        format.file_name(),
-        &current,
-        &story.title,
-    );
-    let mut meta = serde_json::json!({
-        "source": "mockup_assist", "story_id": story.id, "attachment_id": attachment_id,
-    });
-    if let Some(m) = req
-        .model
-        .as_deref()
-        .map(str::trim)
-        .filter(|m| !m.is_empty())
-    {
-        meta["model"] = serde_json::json!(m);
-    }
-    // Surface the session the MOMENT it exists (turn start) so the Assistant panel
-    // attaches the live shell immediately, not after the turn.
-    let ready_events = ctx.events.clone();
-    let ready_ws = story.workspace_id.clone();
-    let ready_story = story.id.clone();
-    let ready_att = attachment_id.clone();
-    let on_ready = move |sid: &Id| {
-        let _ = ready_events.send(Event::MockupSessionStarted {
-            workspace_id: ready_ws.clone(),
-            story_id: ready_story.clone(),
-            attachment_id: ready_att.clone(),
-            session_id: sid.clone(),
-        });
+        current,
+        session_id,
+        provider,
+        request: &req.prompt,
+        model: req.model.as_deref(),
+        work_file: dir.join(format.file_name()),
+        dir_str: dir.to_string_lossy().to_string(),
+        title: format!("Mockup: {}", story.title),
     };
-    crate::agent_session::require_owned_resume(&ctx.pool, &ws.id, &user.id, session_id.as_ref())
-        .await
-        .map_err(ApiError)?;
-    let turn = crate::agent_session::run_session_turn(
-        &ctx,
-        &ws,
-        &user,
-        session_id.as_ref(),
-        &format!("Mockup: {}", story.title),
-        &dir_str,
-        &provider,
-        meta,
-        &prompt,
-        crate::agent_session::STUCK_IDLE,
-        on_ready,
-    )
-    .await;
-    drop(poll);
-    // (S2) On turn failure, don't leak the just-minted "Generating…" attachment.
-    let (raw, sid) = match turn {
-        Ok(v) => v,
-        Err(e) => {
-            if created_now {
-                cleanup(&ctx, &att).await;
+    match run_assist_job(&ctx.manager, &target, &claim).await {
+        AssistOutcome::Applied { applied, .. } => Ok(Json(applied)),
+        // Nothing stops a mockup turn today; treat it like a failed turn.
+        AssistOutcome::Stopped { .. } => {
+            discard(&ctx, &att, created_now, Some(dir.as_path())).await;
+            Err(ApiError(Error::Conflict(
+                "the mockup turn was stopped".into(),
+            )))
+        }
+        AssistOutcome::Failed { stage, error, .. } => {
+            // (S2) A failed preparation or turn must not leak the just-minted
+            // "Generating…" attachment (nor, after a turn, its scratch dir).
+            match stage {
+                Stage::Load => discard(&ctx, &att, created_now, None).await,
+                Stage::Turn | Stage::Deadline => {
+                    discard(&ctx, &att, created_now, Some(dir.as_path())).await
+                }
+                Stage::Parse | Stage::Apply => {}
             }
-            let _ = tokio::fs::remove_dir_all(&dir).await;
-            return Err(e);
-        }
-    };
-
-    // Committed source = the agent's file edit, or the reply's fenced block. A
-    // 3D document that fails validation is NOT committed (the prior source
-    // stays) — the viewer must never receive an unvalidated scene.
-    let mut new_source = resolve_source(&work_file, &current, format, &raw).await;
-    if format == DesignFormat::Scene3d {
-        if let Err(e) = crate::design_scene3d::validate_bytes(new_source.as_bytes()) {
-            tracing::warn!("mockup assist: agent produced an invalid scene3d, keeping prior: {e}");
-            new_source = current.clone();
+            Err(ApiError(error))
         }
     }
-    let bytes = new_source.into_bytes();
+}
 
-    // Write the committed bytes to the attachment's storage + record size + the
-    // resumable session id and format in meta_json.
-    let meta_json = serde_json::json!({
-        "assist_session_id": sid, "format": format, "group": format.default_group(),
-    })
-    .to_string();
-    let updated = otto_product::media::publish_content(
-        &ctx.attachment_repo,
-        &ctx.data_dir,
-        &att,
-        &bytes,
-        true,
-        Some(meta_json),
-    )
-    .await
-    .map_err(ApiError)?;
+/// Drop what a failed "Create with AI" minted (and the scratch dir).
+async fn discard(
+    ctx: &ServerCtx,
+    att: &ProductAttachment,
+    created_now: bool,
+    dir: Option<&std::path::Path>,
+) {
+    if created_now {
+        cleanup(ctx, att).await;
+    }
+    if let Some(dir) = dir {
+        let _ = tokio::fs::remove_dir_all(dir).await;
+    }
+}
 
-    let _ = ctx.events.send(Event::MockupUpdated {
-        workspace_id: story.workspace_id.clone(),
-        story_id: story.id.clone(),
-        attachment_id,
-        format: format.to_string(),
-        content: otto_product::media::event_content(format.mime(), &bytes),
-    });
+/// One mockup turn as the shared assist job sees it.
+struct MockupTurn<'a> {
+    ctx: &'a ServerCtx,
+    story: &'a ProductStory,
+    ws: &'a Workspace,
+    user: &'a User,
+    att: &'a ProductAttachment,
+    format: DesignFormat,
+    current: String,
+    /// The mockup's resumable assist session.
+    session_id: Option<Id>,
+    provider: String,
+    request: &'a str,
+    model: Option<&'a str>,
+    work_file: std::path::PathBuf,
+    dir_str: String,
+    title: String,
+}
 
-    Ok(Json(updated))
+impl AssistTarget for MockupTurn<'_> {
+    type Proposal = Vec<u8>;
+    type Applied = ProductAttachment;
+
+    fn busy_key(&self) -> &str {
+        &self.att.id
+    }
+
+    async fn load(&self) -> otto_core::Result<()> {
+        write_source(&self.work_file, self.current.as_bytes()).await?;
+        otto_sessions::trust::ensure_trusted(&self.provider, &self.dir_str);
+        Ok(())
+    }
+
+    fn prompt(&self) -> String {
+        build_mockup_prompt(
+            self.request,
+            self.format,
+            self.format.file_name(),
+            &self.current,
+            &self.story.title,
+        )
+    }
+
+    fn turn<'a>(&'a self, prompt: &'a str) -> AgentTurn<'a> {
+        let mut meta = serde_json::json!({
+            "source": "mockup_assist", "story_id": self.story.id, "attachment_id": self.att.id,
+        });
+        if let Some(m) = self.model.map(str::trim).filter(|m| !m.is_empty()) {
+            meta["model"] = serde_json::json!(m);
+        }
+        AgentTurn {
+            ws: self.ws,
+            user: self.user,
+            existing: self.session_id.as_ref(),
+            title: &self.title,
+            cwd: &self.dir_str,
+            provider: &self.provider,
+            meta,
+            prompt,
+            stuck_after: crate::agent_session::STUCK_IDLE,
+            done_file: None,
+            quiet_done: None,
+        }
+    }
+
+    fn live_path(&self) -> Option<std::path::PathBuf> {
+        Some(self.work_file.clone())
+    }
+
+    /// A runaway agent file over the raw attachment cap is skipped, never
+    /// loaded into memory or broadcast.
+    fn live_cap(&self) -> usize {
+        otto_product::media::MAX_RAW_BYTES
+    }
+
+    fn live_base(&self) -> Vec<u8> {
+        self.current.as_bytes().to_vec()
+    }
+
+    fn on_live(&self, bytes: &[u8]) {
+        if std::str::from_utf8(bytes).is_err() {
+            return;
+        }
+        // A half-written / invalid 3D document is never pushed to viewers —
+        // the next poll picks up the agent's completed edit.
+        if self.format == DesignFormat::Scene3d
+            && crate::design_scene3d::validate_bytes(bytes).is_err()
+        {
+            return;
+        }
+        let _ = self.ctx.events.send(Event::MockupUpdated {
+            workspace_id: self.story.workspace_id.clone(),
+            story_id: self.story.id.clone(),
+            attachment_id: self.att.id.clone(),
+            format: self.format.to_string(),
+            // `None` above the WS payload cap → clients re-fetch.
+            content: otto_product::media::event_content(self.format.mime(), bytes),
+        });
+    }
+
+    /// Surface the session the MOMENT it exists (turn start) so the Assistant
+    /// panel attaches the live shell immediately, not after the turn.
+    fn report(&self, state: AssistState<'_>) {
+        if let AssistState::Running { session } = state {
+            let _ = self.ctx.events.send(Event::MockupSessionStarted {
+                workspace_id: self.story.workspace_id.clone(),
+                story_id: self.story.id.clone(),
+                attachment_id: self.att.id.clone(),
+                session_id: session.clone(),
+            });
+        }
+    }
+
+    /// Committed source = the agent's file edit, or the reply's fenced block.
+    /// A 3D document that fails validation is NOT committed (the prior source
+    /// stays) — the viewer must never receive an unvalidated scene.
+    async fn parse(&self, reply: &str) -> otto_core::Result<Vec<u8>> {
+        let mut new_source =
+            resolve_source(&self.work_file, &self.current, self.format, reply).await;
+        if self.format == DesignFormat::Scene3d {
+            if let Err(e) = crate::design_scene3d::validate_bytes(new_source.as_bytes()) {
+                tracing::warn!(
+                    "mockup assist: agent produced an invalid scene3d, keeping prior: {e}"
+                );
+                new_source = self.current.clone();
+            }
+        }
+        Ok(new_source.into_bytes())
+    }
+
+    /// Write the committed bytes to the attachment's storage + record size +
+    /// the resumable session id and format in meta_json, then broadcast.
+    async fn apply(&self, bytes: Vec<u8>, sid: &Id) -> otto_core::Result<ProductAttachment> {
+        let meta_json = serde_json::json!({
+            "assist_session_id": sid, "format": self.format, "group": self.format.default_group(),
+        })
+        .to_string();
+        let updated = otto_product::media::publish_content(
+            &self.ctx.attachment_repo,
+            &self.ctx.data_dir,
+            self.att,
+            &bytes,
+            true,
+            Some(meta_json),
+        )
+        .await?;
+        let _ = self.ctx.events.send(Event::MockupUpdated {
+            workspace_id: self.story.workspace_id.clone(),
+            story_id: self.story.id.clone(),
+            attachment_id: self.att.id.clone(),
+            format: self.format.to_string(),
+            content: otto_product::media::event_content(self.format.mime(), &bytes),
+        });
+        Ok(updated)
+    }
 }
 
 // Preparation and publication share checked writes; the owner spans the turn.
-fn claim_mockup(id: &str) -> ApiResult<otto_core::cancel_signal::InFlightGuard> {
-    static TURNS: std::sync::OnceLock<otto_core::cancel_signal::InFlightSet> =
-        std::sync::OnceLock::new();
+fn claim_mockup(id: &str) -> ApiResult<AssistClaim> {
+    static TURNS: std::sync::OnceLock<AssistSlots> = std::sync::OnceLock::new();
     TURNS
         .get_or_init(Default::default)
         .claim(id)
@@ -269,13 +364,6 @@ async fn write_source(path: &std::path::Path, bytes: &[u8]) -> otto_core::Result
         let _ = tokio::fs::remove_file(&temporary).await;
     }
     result.map_err(|e| Error::Internal(format!("write mockup source: {e}")))
-}
-
-struct AbortOnDrop(tokio::task::JoinHandle<()>);
-impl Drop for AbortOnDrop {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
 }
 
 /// Resolve the artifact we're going to edit. Either an existing `mockup_id`
@@ -430,62 +518,6 @@ async fn resolve_source(
         return src;
     }
     current.to_string()
-}
-
-// ---------------------------------------------------------------------------
-// Live poll
-// ---------------------------------------------------------------------------
-
-fn spawn_file_poll(
-    ctx: &ServerCtx,
-    story: &otto_state::ProductStory,
-    attachment_id: &Id,
-    work_file: &std::path::Path,
-    format: DesignFormat,
-    base: &str,
-) -> tokio::task::JoinHandle<()> {
-    let events = ctx.events.clone();
-    let workspace_id = story.workspace_id.clone();
-    let story_id = story.id.clone();
-    let attachment_id = attachment_id.clone();
-    let path = work_file.to_path_buf();
-    let mut last = base.to_string();
-    tokio::spawn(async move {
-        // Stat-gated like the canvas and Design Hall previews: an unchanged
-        // (len, mtime) skips the read entirely, and a runaway agent file over
-        // MAX_RAW_BYTES is skipped, never loaded into memory or broadcast.
-        let mut gate = otto_agent_run::live_file::StatGate::default();
-        loop {
-            tokio::time::sleep(POLL).await;
-            let otto_agent_run::live_file::Poll::Changed(bytes) =
-                gate.poll(&path, otto_product::media::MAX_RAW_BYTES).await
-            else {
-                continue;
-            };
-            let Ok(content) = String::from_utf8(bytes) else {
-                continue;
-            };
-            if content == last || content.trim().is_empty() {
-                continue;
-            }
-            last = content.clone();
-            // A half-written / invalid 3D document is never pushed to viewers —
-            // the next poll picks up the agent's completed edit.
-            if format == DesignFormat::Scene3d
-                && crate::design_scene3d::validate_bytes(content.as_bytes()).is_err()
-            {
-                continue;
-            }
-            let _ = events.send(Event::MockupUpdated {
-                workspace_id: workspace_id.clone(),
-                story_id: story_id.clone(),
-                attachment_id: attachment_id.clone(),
-                format: format.to_string(),
-                // `None` above the WS payload cap → clients re-fetch.
-                content: otto_product::media::event_content(format.mime(), content.as_bytes()),
-            });
-        }
-    })
 }
 
 // ---------------------------------------------------------------------------
@@ -717,19 +749,6 @@ mod tests {
         let path = dir.path().join("source");
         write_source(&path, b"stored").await.unwrap();
         assert_eq!(tokio::fs::read(path).await.unwrap(), b"stored");
-    }
-
-    #[tokio::test]
-    async fn dropped_request_aborts_the_live_file_poll() {
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(1);
-        let poll = AbortOnDrop(tokio::spawn(async move {
-            let _tx = tx;
-            std::future::pending::<()>().await;
-        }));
-        drop(poll);
-        assert!(tokio::time::timeout(Duration::from_secs(1), rx.recv())
-            .await
-            .is_ok());
     }
 
     #[tokio::test]

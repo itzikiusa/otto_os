@@ -191,7 +191,9 @@ test('failed comment reply stays editable and presents an inline retry error', a
   await thread.getByRole('button', { name: 'Reply', exact: true }).click();
   await thread.getByPlaceholder('Reply…').fill('Reply must not disappear');
   await thread.getByRole('button', { name: 'Reply', exact: true }).click();
-  await expect(thread.getByRole('alert')).toContainText('Forge temporarily unavailable');
+  // The inline line carries no live role; the failure is spoken via the announcer.
+  await expect(thread.locator('.reply-error')).toContainText('Forge temporarily unavailable');
+  await expect(page.getByTestId('announcer-assertive')).toContainText('Couldn’t post reply. Forge temporarily unavailable');
   await expect(thread.getByPlaceholder('Reply…')).toHaveValue('Reply must not disappear');
   await expectNoHorizontalOverflow(page);
   await page.screenshot({path: testInfo.outputPath('reply-error-warm-light-phone.png')});
@@ -306,7 +308,8 @@ test('phone RTL merge failure preserves strategy and retries the mocked publicat
   await modal.getByLabel('Strategy').selectOption('squash');
   await modal.getByLabel('Delete source branch after merge').check();
   await modal.getByRole('button', {name: 'Merge pull request', exact: true}).click();
-  await expect(modal.getByRole('alert')).toContainText('Forge temporarily unavailable');
+  await expect(modal.getByText(/Couldn’t merge\. Forge temporarily unavailable/)).toBeVisible();
+  await expect(page.getByTestId('announcer-assertive')).toContainText('Couldn’t merge. Forge temporarily unavailable');
   await expect(modal.getByLabel('Strategy')).toHaveValue('squash');
   await expectFullyInViewport(page, modal);
   await expectNoHorizontalOverflow(page);

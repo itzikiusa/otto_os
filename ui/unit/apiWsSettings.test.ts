@@ -7,11 +7,12 @@ import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { randomUUID } from 'node:crypto';
 import ts from 'typescript';
+import { apiClientParts } from './apiClientParts.ts';
 import { strictRequire, unused } from './strictRequire.ts';
 import * as loadError from '../src/lib/loadError.ts';
 import { HistoryRefresh, HistoryDetail } from '../src/lib/stores/apiHistory.ts';
 import * as scriptRuntime from '../src/lib/api/scripts.ts';
-import * as graphqlVars from '../src/modules/api/graphqlVars.ts';
+import * as graphqlVars from '../src/lib/api/graphqlVars.ts';
 import * as secretShapes from '../src/lib/api/apiSecretShapes.ts';
 
 function setup(settings: unknown) {
@@ -21,12 +22,15 @@ function setup(settings: unknown) {
     current: { id: 'A', settings },
     patchSettings: async (wsId: string, patch: unknown) => { patches.push({ wsId, patch }); },
   };
+  const parts = apiClientParts();
   const context = {
     exports: {} as Record<string, any>,
     $state: Object.assign((v: unknown) => v, { snapshot: (v: unknown) => v, raw: (v: unknown) => v }), $derived: (v: unknown) => v,
     crypto: { randomUUID }, URL, URLSearchParams, AbortController, setTimeout, clearTimeout,
     localStorage: { getItem() { return null; }, setItem() {} },
     require: strictRequire([
+      ...parts.entries,
+      ['/announce.svelte', { announce() {} }],
       ['/api/client', { api: {}, isAbortError: () => false, newHostConfirmHost: () => null }],
       ['/workspace.svelte', { ws }],
       ['/toast.svelte', unused('toast')],
@@ -44,6 +48,7 @@ function setup(settings: unknown) {
     ]),
   };
   const src = readFileSync(new URL('../src/lib/stores/apiClient.svelte.ts', import.meta.url), 'utf8');
+  parts.load(context);
   runInNewContext(ts.transpileModule(src, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, context);
   return { v: context.exports.apiClient, ws, patches };
 }

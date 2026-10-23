@@ -1,8 +1,8 @@
 <script lang="ts">
-  import { onMount, tick, untrack } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import LoadState from '../../../../lib/components/LoadState.svelte';
   import {
-    aliveCount, createMatch, DOWN_HP, heldItem, idleShooterInput, nearestClosedChest, nearestDowned, nearestDrop, nearestWeaponLoot, PICKAXE_KEY, PICKAXE_SLOT, REVIVE_RANGE, REVIVE_TIME,
+    aliveCount, createMatch, heldItem, idleShooterInput, nearestClosedChest, nearestDowned, nearestDrop, nearestWeaponLoot, PICKAXE_KEY, PICKAXE_SLOT, REVIVE_RANGE, REVIVE_TIME,
     shooterResults, SLOTS, stepMatch, STORM, teamsAlive,
     type Fighter, type Held, type ShooterEvent, type ShooterInput, type ShooterLink, type ShooterSetup, type ShooterState,
   } from './sim';
@@ -22,6 +22,10 @@
   import { drawMap, hex, type MapCache } from './hud/minimap';
   import TeamPanel from './hud/TeamPanel.svelte';
   import Vitals from './hud/Vitals.svelte';
+  import MatchResults from './hud/MatchResults.svelte';
+  import PauseMenu from './hud/PauseMenu.svelte';
+  import Knocked from './hud/Knocked.svelte';
+  import { announce } from '../../../../lib/announce.svelte';
 
   interface Props {
     setup: ShooterSetup | null; selfSlot: number; fighter: FighterId; link?: ShooterLink;
@@ -144,7 +148,7 @@
   }
   const nades = { lethal: false, tactical: false };
 
-  function say(text: string, ms = 1800) { toast = text; const shown = text; setTimeout(() => { if (toast === shown) toast = ''; }, ms); }
+  function say(text: string, ms = 1800) { toast = text; announce(text); const shown = text; setTimeout(() => { if (toast === shown) toast = ''; }, ms); }
   function post(id: number, text: string, mine: boolean) {
     feed = [...feed.slice(-4), { id, text, mine }];
     setTimeout(() => { feed = feed.filter(f => f.id !== id); }, 6000);
@@ -321,7 +325,7 @@
     const losses = lossBudget();
     loading = true; error = ''; menu = false; feed = []; spectate = -1; building = false; showMap = false; recap = null;
     dealt.clear(); taken.clear(); lastHeadFrom = -1;
-    const fail = (e: unknown) => { if (!disposed) { loading = false; error = e instanceof Error ? e.message : 'The match could not start.'; } };
+    const fail = (e: unknown) => { if (!disposed) { loading = false; error = e instanceof Error ? e.message : 'The match couldn’t start.'; } };
     const boot = async (first: ShooterState) => {
       const { ShooterRenderer } = await import('./render');
       if (disposed) return;
@@ -467,8 +471,6 @@
     return () => { document.removeEventListener('fullscreenchange', change); stop?.(); audio.dispose(); };
   });
   $effect(() => { if (paused || menu) input?.release(); });
-  // The Paused overlay covers the Menu button: move focus onto its Resume button.
-  $effect(() => { const b = resumeButton; if (b) void tick().then(() => b.focus()); });
   function resume() { menu = false; renderer?.view.canvas.focus(); }
   async function toggleFullscreen() { try { if (document.fullscreenElement) await document.exitFullscreen(); else await root.requestFullscreen(); } catch { /* embedding may block fullscreen */ } }
   function wake() { void audio.start().catch(() => {}); }
@@ -510,7 +512,6 @@
   /** The one always-mounted screen-reader status: edges only (round start, helicopter,
    *  respawning, the result headline). Ticking timers stay visual. */
   let srStatus = $state('');
-  let resumeButton = $state<HTMLButtonElement>();
   const objectiveEdge = $derived(obj ? `${obj.wave}:${obj.round}` : '');
   $effect(() => {
     if (!objectiveEdge) return;
@@ -522,6 +523,9 @@
   });
   const respawning = $derived(!!(arena && me && me.mode === 'dead' && hud?.phase !== 'done'));
   $effect(() => { if (respawning) srStatus = 'Respawning. Pick a class with 6 to 9.'; });
+  const knocked = $derived(me?.mode === 'down');
+  $effect(() => { if (knocked) srStatus = 'Knocked. Crawl to a teammate; they can revive you.'; });
+  $effect(() => { if (loading && !error) srStatus = isGuest && !hud ? 'Waiting for the host…' : 'Preparing the island…'; });
   $effect(() => { if (paused && hud && hud.phase !== 'done') srStatus = 'Match paused while someone reconnects.'; });
   const headline = $derived.by(() => {
     if (!hud || hud.phase !== 'done' || !me) return '';
@@ -537,7 +541,7 @@
   <div class="br-stage" bind:this={stage}></div>
   <canvas class="br-overlay" bind:this={overlay} aria-hidden="true"></canvas>
   <p class="sr-only" role="status">{srStatus}</p>
-  {#if loading && !error}<div class="br-cover" role="status"><h2>{isGuest && !hud ? 'Waiting for the host…' : 'Preparing the island…'}</h2><p>Loading survivors, weapons and scenery</p></div>{/if}
+  {#if loading && !error}<div class="br-cover"><h2>{isGuest && !hud ? 'Waiting for the host…' : 'Preparing the island…'}</h2><p>Loading survivors, weapons and scenery</p></div>{/if}
   {#if error}<div class="br-cover"><LoadState what="match" {error} empty onretry={start} /><button class="btn" onclick={onexit}>Back to games</button></div>{/if}
   {#if hud && me && !loading && !error}
     {#if outside}<div class="br-storm-tint" aria-hidden="true"></div>{/if}
@@ -598,17 +602,10 @@
     {/if}
     {#if performance.now() - hitMark < 220}<div class="br-hitmark" class:kill={hitKill} aria-hidden="true"><i></i><i></i></div>{/if}
     {#if prompt}<div class="br-prompt">{prompt}</div>{/if}
-    {#if toast}<div class="br-toast" aria-live="polite">{toast}</div>{/if}
+    {#if toast}<div class="br-toast">{toast}</div>{/if}
     {#if me.reload > 0 && heldWeapon}<div class="br-reload" aria-label="Reloading"><span style:width={`${(1 - me.reload / heldWeapon.reload) * 100}%`}></span><em>Reloading</em></div>{/if}
     {#if me.useT > 0 && heldUse}<div class="br-reload use" aria-label={`Using ${heldUse.name}`}><span style:width={`${Math.min(1, me.useT / heldUse.time) * 100}%`}></span><em>Using {heldUse.name}</em></div>{/if}
-    {#if me.mode === 'down'}
-      <div class="br-knocked" role="status">
-        <h2>Knocked</h2>
-        <p>{me.revive > 0 ? 'A teammate is reviving you — hold on' : 'Crawl to a teammate; they can revive you (E)'}</p>
-        <div class="br-reload" aria-label="Bleeding out"><span style:width={`${(me.hp / DOWN_HP) * 100}%`}></span><em>Bleeding out</em></div>
-        {#if me.revive > 0}<div class="br-reload use" aria-label="Revive progress"><span style:width={`${Math.min(1, me.revive / REVIVE_TIME) * 100}%`}></span><em>Revive</em></div>{/if}
-      </div>
-    {/if}
+    {#if me.mode === 'down'}<Knocked {me} />{/if}
     {#if me.mode !== 'dead'}
       <Vitals {me} {mode} {uavUp} {building} {material} />
       {#if building}
@@ -656,30 +653,11 @@
       {/if}
     {/if}
     {#if !focused && !locked && hud.phase !== 'done' && !menu && !paused}<div class="br-hint">Click the game to aim · WASD move · Mouse aim · Click fire / use · Right-click aim down sights · 1–5 hotbar · F pickaxe · Q build (1 wall, 2 floor, 3 ramp, R material, G edit) · G grenade · T smoke / flash · X killstreak · C crouch (slide while sprinting) · Shift sprint (double-tap: tactical) · Space jump / mantle · E pick up / open / revive{mode === 'zombies' ? ' / buy' : ''} · R reload · M map</div>{/if}
-    {#if paused && hud.phase !== 'done'}<div class="br-cover" role="status"><h2>Waiting for players</h2><p>The match is paused while someone reconnects.</p><button class="btn" onclick={onexit}>Leave match</button></div>
+    {#if paused && hud.phase !== 'done'}<div class="br-cover"><h2>Waiting for players</h2><p>The match is paused while someone reconnects.</p><button class="btn" onclick={onexit}>Leave match</button></div>
     {:else if hud.phase === 'done'}
-      <div class="br-cover br-results">
-        <p class="br-kicker">{mapLabel} · {modeTitle(mode)}{isRoyale(mode) && squad > 1 ? ` · ${modeName}` : ''} · Match results · {mm(hud.clock)}</p>
-        {#if arena && obj}
-          <h2 class:victory={hud.winTeam === me.team}>{headline}</h2>
-          <p>Your team {ours} · enemy {theirs} · {me.kills} eliminations · {me.deaths} deaths · {Math.round(me.damage)} damage</p>
-        {:else if mode === 'zombies' && obj}
-          <h2 class:victory={me.place === 1}>{headline}</h2>
-          <p>{obj.aboard > 0 ? `${obj.aboard} made the helicopter after ${obj.round} rounds` : `The crew survived ${Math.max(0, obj.round - 1)} of ${obj.lastRound} rounds`} · {me.kills} infected killed · {me.points.toLocaleString()} points</p>
-        {:else}
-          <h2 class:victory={me.place === 1}>{headline}</h2>
-          <p>{me.kills} eliminations · {Math.round(me.damage)} damage · survived {mm(me.aliveTime)}</p>
-        {/if}
-        <table>
-          <thead><tr><th scope="col">{arena ? 'Team' : 'Place'}</th><th scope="col">Survivor</th><th scope="col">{mode === 'zombies' ? 'Kills' : 'Elims'}</th>{#if arena}<th scope="col">Deaths</th>{/if}<th scope="col">{mode === 'zombies' ? 'Points' : 'Damage'}</th></tr></thead>
-          <tbody>{#each results.filter((r, i) => i < 8 || (squad > 1 ? r.team === me.team : r.id === me.id)) as r (r.id)}<tr class:me={r.id === me.id} class:mate={squad > 1 && r.team === me.team}><td>{arena ? (r.team === me.team ? 'Yours' : 'Enemy') : `#${r.place}`}</td><td>{#if squad > 1}<i class="br-swatch" style:background={hex(teamColour(r.team))} title={`Team ${r.team + 1}`}></i>{/if}<img src={`/room-games/portraits/fighter-${r.fighter}.webp`} alt="" /><span>{r.name}{r.human ? '' : ' (bot)'}</span></td><td>{r.kills}</td>{#if arena}<td>{r.deaths}</td>{/if}<td>{mode === 'zombies' ? r.points : r.damage}</td></tr>{/each}</tbody>
-        </table>
-        <div class="br-actions"><button class="btn primary" disabled={rematchDisabled} onclick={onrematch}>{rematchLabel}</button><button class="btn" onclick={onexit}>Back to games</button></div>
-      </div>
+      <MatchResults {hud} {me} {results} {headline} {mapLabel} {modeName} {ours} {theirs} {rematchLabel} {rematchDisabled} {onrematch} {onexit} />
     {:else if menu}
-      <div class="br-cover"><h2>Paused</h2><p>{link ? 'The match continues for everyone else while this menu is open.' : 'The island waits for you.'}</p>
-        <p class="br-keys">WASD move · Mouse aim · Left click fire (hold to use heals, shields and launch pads) · Right click / Z aim down sights (zooms; attachments: scope, grip, extended mag, suppressor) · pull the mouse down against the recoil · 1–5 or wheel switch hotbar slots · F pickaxe (harvest materials; Zombies: repair barricades) · Q build mode: 1 wall, 2 floor, 3 ramp, R material, G edit your piece (door / window, flip ramp), click to place · G frag / molotov · T smoke / flash · X call in a killstreak (UAV, airstrike at the crosshair, attack drone) · C crouch, or slide out of a sprint · Shift sprint, double-tap for a tactical sprint · Space jump, or mantle a ledge ahead · E pick up / hold to open chests and supply drops / hold next to a knocked teammate to revive / buy from a wall (Zombies) · R reload (fire to cancel) · 6–9 respawn class (TDM, Domination) · M full map · Esc release the mouse</p>
-        <button class="btn primary" bind:this={resumeButton} onclick={resume}>Resume</button><button class="btn" onclick={onexit}>Leave match</button></div>
+      <PauseMenu networked={!!link} onresume={resume} {onexit} />
     {/if}
     <div class="br-touch" aria-label="Touch controls">
       <div class="br-touch-move">{#each [['Up', '▲'], ['Left', '◀'], ['Down', '▼'], ['Right', '▶']] as [k, label] (k)}<button aria-label={`Move ${k.toLowerCase()}`} onpointerdown={e => touchKey(e, k, true)} onpointerup={e => touchKey(e, k, false)} onpointercancel={e => touchKey(e, k, false)}>{label}</button>{/each}</div>
@@ -698,7 +676,6 @@
   .br-overlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
   .br-cover { position: absolute; inset: 0; z-index: 6; display: flex; flex-direction: column; align-items: center; justify-content: safe center; overflow-y: auto; gap: 12px; padding: 24px; text-align: center; background: color-mix(in srgb, var(--surface) 90%, transparent); }
   .br-cover h2 { margin: 0; font-size: var(--fs-2xl); }
-  .br-cover h2.victory { color: var(--warning); font-size: clamp(28px, 5vw, 52px); letter-spacing: -0.01em; }
   .br-cover p { margin: 0; max-width: 600px; color: var(--text-dim); line-height: 1.6; }
   .br-top { position: absolute; inset-block-start: 14px; inset-inline: 14px; display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; pointer-events: none; }
   .br-stats, .br-tools, .br-minimap, .br-slot, .br-spectate, .br-prompt, .br-buildbar { background: var(--scrim-media); color: var(--on-scrim); border: 1px solid color-mix(in srgb, var(--on-scrim) 18%, transparent); border-radius: var(--radius-m); }
@@ -765,23 +742,6 @@
   .br-scope { position: absolute; inset: 0; pointer-events: none; background: radial-gradient(circle at center, transparent 0 32vmin, var(--scrim-media) 32.4vmin); }
   .br-scope i { position: absolute; inset-block-start: 50%; inset-inline: calc(50% - 32vmin); height: 1px; background: var(--on-scrim); }
   .br-scope::after { content: ''; position: absolute; inset-inline-start: 50%; inset-block: calc(50% - 32vmin); width: 1px; background: var(--on-scrim); }
-  .br-results table { border-collapse: collapse; min-width: min(560px, 100%); font-size: var(--fs-m); font-variant-numeric: tabular-nums; }
-  .br-results th { text-align: start; font-size: var(--fs-s); color: var(--text-dim); font-weight: 500; padding: 4px 10px; }
-  .br-results td { padding: 4px 10px; border-block-start: 1px solid var(--border); text-align: start; }
-  .br-results td:nth-child(2) { display: flex; align-items: center; gap: 8px; }
-  .br-results td img { width: 32px; height: 32px; object-fit: contain; }
-  .br-results tr.me td { background: var(--accent-soft); font-weight: 600; }
-  .br-results tr.mate td:first-child { box-shadow: inset 3px 0 0 var(--accent-solid); }
-  .br-swatch { width: 10px; height: 10px; border-radius: 50%; flex: none; }
-  .br-knocked { position: absolute; inset-block-start: 30%; inset-inline: 12px; margin-inline: auto; max-width: 360px; text-align: center; color: var(--on-scrim); pointer-events: none; }
-  .br-knocked h2 { margin: 0; color: var(--danger); font-size: var(--fs-2xl); text-shadow: 0 2px 8px var(--scrim-media); }
-  .br-knocked p { margin: 4px 0 8px; font-size: var(--fs-m); text-shadow: 0 1px 4px var(--scrim-media); }
-  .br-knocked .br-reload { position: relative; inset: auto; transform: none; width: 220px; margin: 0 auto 22px; }
-  .br-knocked .br-reload span { background: var(--danger); }
-  .br-knocked .br-reload.use span { background: var(--success); }
-  .br-kicker { text-transform: uppercase; letter-spacing: .06em; font-size: var(--fs-s); }
-  .br-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
-  .br-keys { font-size: var(--fs-s); }
   /* Modes: arena score, Zombies points, Domination points, objective note. */
   .br-score { display: inline-flex; align-items: baseline; gap: 6px; }
   .br-score .us { color: var(--us); } .br-score .them { color: var(--them); }
@@ -818,7 +778,7 @@
   .br-class-note { font-size: var(--fs-s) !important; opacity: .85; }
   .br-touch { display: none; }
   /* Compact results so Play again / Back to games stay reachable on a short phone screen. */
-  @media (max-width: 640px) { .br-cover { padding: 16px; gap: 8px; } .br-results table { min-width: 0; width: 100%; font-size: var(--fs-s); } .br-results th, .br-results td { padding: 2px 6px; } .br-results td img { width: 22px; height: 22px; } }
+  @media (max-width: 640px) { .br-cover { padding: 16px; gap: 8px; } }
   @media (max-width: 640px) { .br-objective-note { inset-inline: 12px; inset-block-start: 150px; } .br-objective { inset-block-start: 100px; } .br-mapbox { width: 130px; } .br-minimap { width: 130px; height: 130px; } .br-tools { margin-inline-end: 144px; flex-wrap: wrap; } .br-inventory { grid-template-columns: repeat(6, 50px); } .br-slot { height: 54px; } .br-slot img { width: 40px; } .br-stats { flex-wrap: wrap; gap: 8px; } .br-buildbar { inset-block-end: 210px; } }
   @media (pointer: coarse) {
     .br-touch { position: absolute; inset-inline: 10px; inset-block-end: 130px; display: flex; justify-content: space-between; align-items: flex-end; gap: 8px; }

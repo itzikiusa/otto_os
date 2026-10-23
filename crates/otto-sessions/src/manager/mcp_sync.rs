@@ -207,14 +207,23 @@ impl SessionManager {
             }
             _ => mcp_json_names,
         };
-        // Snapshot-at-spawn: what this provider was actually given, plus the
-        // lookup fault if any (json_patch: a null clears a stale error).
+        // The enabled user servers this provider was NOT given, with why
+        // (error-handling-6-06). Unknown user set (a failed lookup) → nothing
+        // claimed skipped; `mcp_servers_error` already says so.
+        let skipped = user_servers
+            .as_deref()
+            .map(|users| crate::mcp::skipped_servers(&session.provider, users, &delivered))
+            .filter(|s| !s.is_empty());
+        // Snapshot-at-spawn: what this provider was actually given, what it
+        // was not, plus the lookup fault if any (json_patch: a null clears a
+        // stale error / skip list).
         if let Err(e) = self
             .repo
             .merge_meta(
                 &session.id,
                 &serde_json::json!({
                     "mcp_servers": delivered,
+                    "mcp_skipped": skipped,
                     "mcp_servers_error": lookup_error,
                 }),
             )

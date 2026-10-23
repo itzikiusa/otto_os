@@ -87,7 +87,8 @@ test('proof: failed media fetch shows an inline error and retries the image', as
     else await r.continue();
   });
   await page.goto('/#/proof');
-  await expect(page.getByText('Couldn’t load the media')).toBeVisible();
+  // Scoped to the page: the failure is also spoken via the sr-only announcer.
+  await expect(page.locator('#app-content').getByText('Couldn’t load the media')).toBeVisible();
   await expect(page.getByText('Loading media…')).toHaveCount(0);
   failing = false;
   await page.getByRole('button', { name: 'Retry media' }).click();

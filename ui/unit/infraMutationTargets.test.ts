@@ -13,6 +13,7 @@ test('production scaling confirms the replica count actually submitted', async (
     '../../lib/toast.svelte': { toasts: { success() {} } },
     '../../lib/stores/k8s.svelte': { k8s: { clusters: [{ id: 'prod', name: 'Production', environment: 'prod' }] } },
     './k8s-util': { clusterLabel: (c: any) => c.name, kindDef: () => ({ singular: 'Deployment' }) },
+    '../../lib/k8s/actions': {},
     '../../lib/toastError': { toastError: assert.fail },
   });
   for (const replicas of [0, 3]) {

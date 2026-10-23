@@ -223,7 +223,7 @@
   async function copyPath(a: Artifact): Promise<void> {
     const v = a.path ?? a.url ?? '';
     if (await copyText(v)) toasts.info('Copied', v);
-    else toasts.error('Couldn’t copy', v);
+    else toasts.error('Couldn’t copy', `The clipboard isn’t available here. Select the path and copy it manually. ${v}`);
   }
 
   /** Absolute time for the hover title next to the relative `rel()` label. */

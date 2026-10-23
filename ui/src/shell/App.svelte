@@ -1021,8 +1021,8 @@
       <div class="nav-pending-bar" role="progressbar" aria-label="Loading page" data-testid="nav-pending-bar"></div>
     </div>
   {/if}
-  <div class="content">
-    <!-- The page for the current route (shell/pages.svelte.ts). A component swap is
+  <div class="content" id="app-content" tabindex="-1">
+    <!-- #app-content: focusAppContent() target. The page for the current route (shell/pages.svelte.ts). A component swap is
          the only remount on navigation: connections ↔ database share one
          page and stay mounted, and so does any page across its own sub-routes.
          Rooms and plugins key their inner view by id (RoomsRoute /
@@ -1170,7 +1170,7 @@
             <Drawer bind:open={ui.rightOpen} inline={!compactShell} side="right" label={SIDE_PANEL} width="min(92vw, 360px)">
               <!-- Its chunk starts with the Agents page, or on first show (pages.svelte.ts). -->
               {@const RightPanel = loadedRightPanel()}
-              {#if RightPanel}<RightPanel forceOpen={compactShell} />{:else}<div class="rp-loading" class:rail={!compactShell}>{#if compactShell}<Skeleton rows={4} height={28} label="the {SIDE_PANEL}" />{/if}</div>{/if}
+              {#if RightPanel}<RightPanel forceOpen={compactShell} />{:else}<div class="rp-loading" class:rail-slot={!compactShell}>{#if compactShell}<Skeleton rows={4} height={28} label="the {SIDE_PANEL}" />{/if}</div>{/if}
             </Drawer>
           {/if}
         </div>
@@ -1242,8 +1242,8 @@
   .rp-loading {
     padding: 12px;
   }
-  /* Desktop: hold the rail's 36px while its chunk lands (no layout jump). */
-  .rp-loading.rail {
+  /* Desktop: hold the rail's 36px while its chunk lands (no layout jump). Not `.rail`: the module nav owns it. */
+  .rp-loading.rail-slot {
     width: 36px;
     padding: 0;
     flex-shrink: 0;

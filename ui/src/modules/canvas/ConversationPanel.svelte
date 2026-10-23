@@ -6,6 +6,7 @@
   // shows live output regardless of whether the session is in the workspace store.
   import { rel } from '../../lib/stores/now.svelte';
   import { onMount } from 'svelte';
+  import { announce } from '../../lib/announce.svelte';
   import { toastError } from '../../lib/toastError';
   import LiveWorkingDot from '../../lib/components/LiveWorkingDot.svelte';
   import Icon from '../../lib/components/Icon.svelte';
@@ -72,6 +73,15 @@
   }
 
   const working = $derived(busy || editor?.isGenerating());
+  // The working dot is inserted with its label, which VoiceOver doesn't
+  // speak: announce the edge instead.
+  let wasWorking = false;
+  $effect(() => {
+    const now = !!working;
+    if (now && !wasWorking) announce('Otto is working on the canvas…');
+    else if (!now && wasWorking) announce('Otto finished.');
+    wasWorking = now;
+  });
 
   // Stop: flag the turn server-side. It commits nothing of its own and
   // broadcasts the document currently stored, so a save made during the turn
@@ -155,7 +165,7 @@
       </select>
     {/if}
     {#if working}
-      <span class="working" role="status"><LiveWorkingDot label="Working…" /></span>
+      <span class="working"><LiveWorkingDot label="Working…" /></span>
       {#if canvas.sessionId}
         <button class="hist-btn stop" onclick={() => void stop()} disabled={stopping} aria-busy={stopping} aria-label="Stop Ask Otto" title="Stop Ask Otto"><Icon name="stop" size={14} /></button>
       {/if}

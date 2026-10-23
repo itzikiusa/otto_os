@@ -36,7 +36,7 @@ test('unknown locked worktree status is visible and never requests force', async
     await row.click({button:'right'});
     await page.getByRole('menuitem', {name:'Remove worktree…',exact:true}).click();
     const dialog = page.getByRole('dialog', {name:'Remove worktree',exact:true});
-    await expect(dialog).toContainText('changes could not be checked');
+    await expect(dialog).toContainText('changes couldn’t be checked');
     await dialog.getByRole('button', {name:'Remove',exact:true}).click();
     await expect.poll(() => removal).toEqual({path,force:false});
   } finally {

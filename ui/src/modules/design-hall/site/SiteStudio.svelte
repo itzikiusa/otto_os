@@ -36,7 +36,7 @@
   import PreviewModal from './PreviewModal.svelte';
   import PublishModal from './PublishModal.svelte';
   import { siteSelection } from './selection.svelte';
-  import { librarySites, resolveBrand, resolveEmbed, resolveImage, siteContent } from './siteApi';
+  import { librarySites, resolveBrand, resolveEmbed, resolveImage, siteContent, type BrandResolution } from './siteApi';
 
   interface Props {
     artifact: DesignArtifact;
@@ -230,10 +230,9 @@
   });
 
   // ── Brand theme ────────────────────────────────────────────────────────────
-  let theme = $state<Theme>(buildTheme(null));
-  let kitLabel = $state<string | null>(null);
-  let kitId = $state<string | null>(null);
-  let brandNote = $state<string | null>(null);
+  let brand = $state<BrandResolution>({ theme: buildTheme(null), kit: null, seq: null, note: null, error: null });
+  const theme = $derived<Theme>(brand.theme);
+  const kitId = $derived(brand.kit?.id ?? null);
   let brandSeq = 0;
   const projectKit = $derived(hallLibrary.projectOf(artifact.project_id)?.brand_kit_id ?? null);
   const docBrand = $derived(doc?.brand);
@@ -241,10 +240,7 @@
     const my = ++brandSeq;
     void resolveBrand({ projectKitId: projectKit, docBrand, artifactId: artifact.id }).then((r) => {
       if (my !== brandSeq) return;
-      theme = r.theme;
-      kitId = r.kit?.id ?? null;
-      kitLabel = r.kit ? `${r.kit.title}${r.seq != null ? ` v${r.seq}` : ''}` : null;
-      brandNote = r.note;
+      brand = r;
     });
   }
   $effect(() => {
@@ -515,7 +511,7 @@
   }
 
   // ── Checks, publish, preview ───────────────────────────────────────────────
-  const findings = $derived(doc && page ? auditPage(doc, page, theme) : []);
+  const findings = $derived(doc && page ? auditPage(doc, page, theme, { brand: !brand.error }) : []);
   const embedCount = $derived(doc ? doc.pages.reduce((n, p) => n + p.sections.reduce((m, s) => m + (s.blocks ?? []).filter((b) => b.block === 'embed/3d').length, 0), 0) : 0);
   let previewOpen = $state(false);
   let served = $state<{ pages: Record<string, string>; url: string } | null>(null);
@@ -618,7 +614,7 @@
     </div>
 
     {#if !doc}
-      <div class="invalid" role="alert">
+      <div class="invalid">
         <Icon name="warning" size={16} />
         <div>
           <strong>This isn’t a valid Site Studio document.</strong>
@@ -689,8 +685,8 @@
               {doc}
               pageId={page.id}
               {theme}
-              {kitLabel}
-              {brandNote}
+              {brand}
+              onretrybrand={loadBrand}
               {sectionId}
               {blockId}
               {readonly}

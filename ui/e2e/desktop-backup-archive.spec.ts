@@ -44,7 +44,7 @@ test('data archives include feature records and Vault files with reviewed additi
     await card.getByRole('button', { name: 'Preview restore', exact: true }).click();
     await card.getByLabel('I reviewed the contents, conflicts, and reconnect requirements.').check();
     await card.getByRole('button', { name: 'Restore new items', exact: true }).click();
-    await expect(card.getByRole('status').last()).toContainText('Restored');
+    await expect(card.getByText(/^Restored \d+ records and \d+ files/)).toBeVisible();
     expect((await ctx.get(`${base}/api/v1/workflows/${workflow.id}`)).ok()).toBeTruthy();
     const connections = await (await ctx.get(`${base}/api/v1/workspaces/${ws}/connections`)).json();
     expect(connections.find((row: { id: string }) => row.id === connection.id).secret_ref).toBe(connection.secret_ref);

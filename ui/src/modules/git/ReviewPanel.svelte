@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announceShown } from '../../lib/announce.svelte';
   import { registry } from '../../lib/commands.svelte';
   import { plural } from '../../lib/plural';
   // AI review panel: start review agents, refresh via WS reviewBus (no poll),
@@ -13,8 +14,7 @@
   import { alreadyOnPr } from './reviewPost';
   import type {
     Review, ReviewComment, ReviewConfig, ReviewAgentCfg, ReviewConfigPreset, RepoReviewBinding,
-    RepoReviewConfigResp, StartReviewReq, FileDiff, DiffLine, MergeReadiness, ReviewFindingRow,
-    EditReviewCommentReq, PrDetail,
+    RepoReviewConfigResp, StartReviewReq, FileDiff, DiffLine, MergeReadiness, ReviewFindingRow, EditReviewCommentReq, PrDetail,
   } from '../../lib/api/types';
   import { toasts } from '../../lib/toast.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -1181,7 +1181,7 @@
   <!-- Non-blocking pre-check: review skills missing or with available updates.
        The user can still run a review with whatever is installed. -->
   {#if showPrecheck}
-    <div class="rp-precheck" role="status">
+    <div class="rp-precheck" use:announceShown={`${missingReviewSkills > 0 ? `${missingReviewSkills} review skill${missingReviewSkills === 1 ? ' isn’t' : 's aren’t'} installed` : ''}${missingReviewSkills > 0 && outdatedReviewSkills > 0 ? ' · ' : ''}${outdatedReviewSkills > 0 ? `${outdatedReviewSkills} ${outdatedReviewSkills === 1 ? 'has an update' : 'have updates'}` : ''}`}>
       <span class="rp-precheck-icon"><Icon name="warning" size={14} /></span>
       <span class="rp-precheck-msg">
         {#if missingReviewSkills > 0}{missingReviewSkills} review skill{missingReviewSkills === 1 ? " isn’t" : "s aren’t"} installed{/if}{#if missingReviewSkills > 0 && outdatedReviewSkills > 0}{' · '}{/if}{#if outdatedReviewSkills > 0}{outdatedReviewSkills} {outdatedReviewSkills === 1 ? 'has an update' : 'have updates'}{/if}

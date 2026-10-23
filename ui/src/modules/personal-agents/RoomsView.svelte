@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announceShown } from '../../lib/announce.svelte';
   import { rowMenu } from '../../lib/rowMenu';
   import { plural } from '../../lib/plural';
   // Agent channels (stored as "rooms") — the only agent-to-agent transport,
@@ -238,7 +239,7 @@
       />
       <button class="btn small" disabled={busy || !newRoomName.trim()} onclick={createRoom}>Create</button>
     </div>
-    {#if createError}<div class="err" role="alert">{createError}</div>{/if}
+    {#if createError}<div class="err" use:announceShown={{ text: createError, assertive: true }}>{createError}</div>{/if}
     <ul>
       {#each rooms as r (r.room.id)}
         <li>
@@ -376,7 +377,7 @@
         {/if}
         </div>
 
-        {#if error}<div class="err" role="alert">{error}</div>{/if}
+        {#if error}<div class="err" use:announceShown={{ text: error, assertive: true }}>{error}</div>{/if}
         <div class="composer">
           <textarea dir="auto"
             value={draft}

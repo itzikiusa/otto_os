@@ -84,8 +84,9 @@
 <div class="caps">
 
   {#if !loading && caps.length > 0}
-    <!-- Summary: counts by state, worst first. -->
-    <div class="summary-row" role="status">
+    <!-- Summary: counts by state, worst first. Rendered with the loaded list
+         (not a live region: inserted with its text it would be silent). -->
+    <div class="summary-row">
       {#if summary.degraded > 0}
         <StatusBadge tone="warning" label="{summary.degraded} degraded" />
       {/if}

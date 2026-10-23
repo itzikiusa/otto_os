@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announceShown } from '../../../lib/announce.svelte';
   // The Otto tab of an open design (every studio — the assist pipeline works
   // on any text/JSON format):
   //
@@ -20,6 +21,7 @@
   // recorded server-side.
   import { untrack } from 'svelte';
   import { toastError } from '../../../lib/toastError';
+  import { loadErrorText } from '../../../lib/loadError';
   import Icon, { asIcon } from '../../../lib/components/Icon.svelte';
   import ProviderIcon from '../../../lib/components/ProviderIcon.svelte';
   import AgentChip from '../../../lib/components/AgentChip.svelte';
@@ -45,14 +47,14 @@
   import { interruptSession } from '../../../lib/api/interrupt';
   import { askError, sendAsk } from './run';
   import {
-    QUICK_ACTIONS,
-    REJECT_REASONS,
+    QUICK_ACTIONS, REJECT_REASONS,
     applyAssistEvent,
     buildThread,
     busyTurn,
     directionName,
     fixRequest,
     isTerminal,
+    a11yFixesOf,
     mergeTurns,
     parseBranch,
     promptRequest,
@@ -129,9 +131,10 @@
   let runsSeq = 0;
   async function loadTurns(): Promise<void> {
     const my = ++turnsSeq;
+    const known = new Set(turns.map((t) => t.turn_id)); // authoritative for these
     const fetched = await listTurns(artifact.id);
     if (my !== turnsSeq) return;
-    turns = mergeTurns(turns, fetched);
+    turns = mergeTurns(turns, fetched, known);
   }
   async function loadRuns(): Promise<void> {
     const my = ++runsSeq;
@@ -146,7 +149,7 @@
       loadError = null;
     } catch (e) {
       if (phase !== 'ready') phase = 'error';
-      loadError = e instanceof Error ? e.message : String(e);
+      loadError = loadErrorText(e);
     }
   }
   async function loadRejections(): Promise<void> {
@@ -235,11 +238,7 @@
       const t = turns.find((x) => x.turn_id === id);
       const ask = asks.get(id);
       if (!t || t.status !== 'done' || ask?.intent !== 'fix_a11y') continue;
-      const fixed = t.findings
-        .filter((f) => f.fixed !== false && typeof f.rule === 'string' && f.rule)
-        .map((f) => ({ rule: f.rule as string, message: typeof f.message === 'string' ? f.message : '' }));
-      const list = fixed.length ? fixed : (pendingFix.get(id) ?? []).filter((f) => f.rule).map((f) => ({ rule: f.rule!, message: f.message }));
-      for (const f of list.slice(0, 12)) {
+      for (const f of a11yFixesOf(t, pendingFix.get(id))) {
         captureSignal({
           artifact_id: artifact.id,
           kind: 'a11y_fix',
@@ -592,7 +591,7 @@
       {/each}
     {/if}
     {#if appliedNote}
-      <p class="applied" role="status"><Icon name="check" size={12} /> {appliedNote} <a href="#/design/learned">See what Otto learned</a></p>
+      <p class="applied" use:announceShown={appliedNote}><Icon name="check" size={12} /> {appliedNote} <a href="#/design/learned">See what Otto learned</a></p>
     {/if}
   </div>
 
@@ -604,7 +603,7 @@
         {#if sel}
           <span class="chip ctx" data-testid="design-otto-selection">
             <Icon name="target" size={12} /> <span class="ct" title={selLabel}>{selLabel}</span>
-            <button class="x" onclick={() => (useSelection = false)} aria-label="Don’t focus the selection" title="Don’t focus the selection"><Icon name="x" size={12} /></button>
+            <button class="x" onclick={(e) => { const box = (e.currentTarget as HTMLElement).closest('footer')?.querySelector<HTMLTextAreaElement>('textarea'); useSelection = false; box?.focus(); }} aria-label="Don’t focus the selection" title="Don’t focus the selection"><Icon name="x" size={12} /></button>
           </span>
         {/if}
         {#if brandKit}

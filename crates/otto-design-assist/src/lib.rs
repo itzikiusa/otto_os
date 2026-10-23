@@ -79,14 +79,16 @@ use serde_json::{json, Value};
 use tokio::sync::{broadcast, oneshot};
 
 mod ctx;
+mod job;
 use ctx::{require_ws_role, ApiError, ApiResult, CurrentUser};
 pub use ctx::{AgentTurn, DesignAssistCtx};
+#[cfg(test)]
+use job::restore_document;
+use job::{run_job, TurnJob};
 /// Moved to `otto-design::format` (architecture-4-02 interim); kept here so
 /// existing `otto_design_assist::excalidraw` paths stay stable.
 pub use otto_design::format::excalidraw;
 
-/// Live-preview file poll cadence while the agent edits.
-const POLL: Duration = Duration::from_millis(900);
 /// Wall-clock cap on one agent turn (cost bound); the session is killed past it.
 const TURN_CAP: Duration = Duration::from_secs(20 * 60);
 /// No-output idle trip for one turn.
@@ -1025,30 +1027,48 @@ fn prune_inactive_history(runs: &mut HashMap<Id, ArtifactRuns>) {
     }
 }
 
-/// Holds an artifact's single run slot; released on drop (every path).
-struct BusyGuard(Id);
+/// Holds an artifact's single run slot; released on drop (every path). The
+/// exclusivity is the shared assist job's claim
+/// (`otto_agent_run::assist::AssistSlots`, architecture-4-02); the registry's
+/// `busy` only names the run for status. `Drop` clears that label before the
+/// claim field releases the slot.
+struct BusyGuard {
+    id: Id,
+    claim: otto_agent_run::assist::AssistClaim,
+}
 
 impl Drop for BusyGuard {
     fn drop(&mut self) {
         with_registry(|m| {
-            if let Some(r) = m.get_mut(&self.0) {
+            if let Some(r) = m.get_mut(&self.id) {
                 r.busy = None;
             }
         });
     }
 }
 
+fn artifact_slots() -> &'static otto_agent_run::assist::AssistSlots {
+    static SLOTS: OnceLock<otto_agent_run::assist::AssistSlots> = OnceLock::new();
+    SLOTS.get_or_init(Default::default)
+}
+
 fn try_busy(artifact_id: &str, what: String) -> Result<BusyGuard, Error> {
+    // Claim and label under the registry lock, so a status read never sees a
+    // claimed slot without its label.
     with_registry(|m| {
         let r = m.entry(artifact_id.to_string()).or_default();
-        if let Some(b) = &r.busy {
+        let Some(claim) = artifact_slots().claim(artifact_id) else {
+            let b = r.busy.as_deref().unwrap_or("another run");
             return Err(Error::Conflict(format!(
                 "an agent is already working on design artifact {artifact_id} ({b}); wait for it to finish"
             )));
-        }
+        };
         r.busy = Some(what);
         r.touched = Some(std::time::Instant::now());
-        Ok(BusyGuard(artifact_id.to_string()))
+        Ok(BusyGuard {
+            id: artifact_id.to_string(),
+            claim,
+        })
     })
 }
 
@@ -1629,578 +1649,6 @@ async fn materialize(
 }
 
 // ---------------------------------------------------------------------------
-// The turn
-// ---------------------------------------------------------------------------
-
-/// Everything one spawned turn owns.
-struct TurnJob<C> {
-    ctx: C,
-    ws: Workspace,
-    user: User,
-    artifact: DesignArtifact,
-    turn_id: Id,
-    mode: Mode,
-    branch: Branch,
-    direction: Option<String>,
-    provider: String,
-    model: Option<String>,
-    existing_session: Option<Id>,
-    adapter: Adapter,
-    dir: PathBuf,
-    agent_path: PathBuf,
-    /// The artifact's working copy (main turns) — restored on failure.
-    work_file: Option<PathBuf>,
-    base_doc: Vec<u8>,
-    base_source: String,
-    base_version_id: Option<Id>,
-    prompt: String,
-    user_prompt: String,
-    offered: Vec<OfferedRef>,
-    rule_keys: Vec<String>,
-    brand: Option<Value>,
-    selection: Option<Value>,
-    ready_tx: Option<oneshot::Sender<Id>>,
-}
-
-fn done_marker() -> (PathBuf, String) {
-    let path = std::env::temp_dir().join(format!("otto-design-done-{}.txt", new_id()));
-    let _ = std::fs::write(&path, "");
-    let line = format!(
-        "\nLAST OF ALL — strictly after every other step above is complete — write your ONE-LINE \
-         summary (with its [R…] citations) as plain text to this exact filesystem path: `{}`. \
-         Writing this file ends your turn; never write it early.\n",
-        path.display()
-    );
-    (path, line)
-}
-
-/// Broadcast each valid change of the agent's file while a MAIN turn runs.
-fn spawn_live_poll<C: DesignAssistCtx>(job: &TurnJob<C>) -> tokio::task::JoinHandle<()> {
-    let events = job.ctx.events().clone();
-    let path = job.agent_path.clone();
-    let adapter = job.adapter.clone();
-    let base_doc = job.base_doc.clone();
-    let ws = job.artifact.workspace_id.clone();
-    let aid = job.artifact.id.clone();
-    let mut last = job.base_source.clone().into_bytes();
-    let host = job.ctx.clone();
-    tokio::spawn(async move {
-        // Stat-gated: an unchanged (len, mtime) skips the read entirely.
-        let mut gate = otto_agent_run::live_file::StatGate::default();
-        loop {
-            tokio::time::sleep(POLL).await;
-            let bytes = match gate.poll(&path, dformat::MAX_CONTENT_BYTES).await {
-                otto_agent_run::live_file::Poll::Changed(bytes) => bytes,
-                otto_agent_run::live_file::Poll::TooLarge(len) => {
-                    tracing::warn!(
-                        "design assist: {} is {len} bytes, over {}; ignored",
-                        path.display(),
-                        dformat::MAX_CONTENT_BYTES
-                    );
-                    continue;
-                }
-                _ => continue,
-            };
-            if bytes == last || bytes.iter().all(u8::is_ascii_whitespace) {
-                continue;
-            }
-            last = bytes.clone();
-            let Ok(src) = String::from_utf8(bytes) else {
-                continue;
-            };
-            let Ok(doc) = adapter.wrap(&base_doc, &src) else {
-                continue;
-            };
-            // A half-written / invalid document is never pushed to viewers.
-            if validate_doc(&adapter.format, &doc, |f, b| host.validate_content(f, b)).is_err() {
-                continue;
-            }
-            let content =
-                dformat::spec(&adapter.format).and_then(|s| dformat::event_content(s, &doc));
-            let _ = events.send(Event::DesignArtifactUpdated {
-                workspace_id: ws.clone(),
-                artifact_id: aid.clone(),
-                format: adapter.format.clone(),
-                change: "live".into(),
-                version_id: None,
-                content,
-            });
-        }
-    })
-}
-
-/// Restore the current published head after a failed, invalid, or critique
-/// turn. A user's save during the turn must win over the captured base.
-async fn restore_current_head<C: DesignAssistCtx>(job: &TurnJob<C>) {
-    if job.branch != Branch::Main {
-        return;
-    }
-    if let Err(error) = restore_document(
-        &job.ctx.design(),
-        &job.artifact,
-        &job.adapter,
-        job.work_file.as_deref(),
-        &job.agent_path,
-    )
-    .await
-    {
-        tracing::warn!(artifact = %job.artifact.id, "restore design working head: {error}");
-    }
-}
-
-async fn restore_document(
-    svc: &DesignService,
-    artifact: &DesignArtifact,
-    adapter: &Adapter,
-    work_file: Option<&FsPath>,
-    agent_path: &FsPath,
-) -> otto_core::Result<()> {
-    let io = |e: std::io::Error| Error::Internal(format!("restore design working copy: {e}"));
-    let _publication = svc.lock_working_copy(&artifact.id).await?;
-    let fresh = svc.store().require_artifact(&artifact.id).await?;
-    let (_, head) = svc.head_content(&fresh).await?;
-    if let Some(wf) = work_file {
-        tokio::fs::write(wf, &head).await.map_err(io)?;
-    }
-    if adapter.canvas_inner.is_some() {
-        tokio::fs::write(agent_path, adapter.agent_source(&head))
-            .await
-            .map_err(io)?;
-    }
-    Ok(())
-}
-
-/// Run one turn to completion and return its final state (also stored in the
-/// registry and broadcast as `design_assist_updated`).
-async fn run_job<C: DesignAssistCtx>(mut job: TurnJob<C>) -> DesignAssistTurn {
-    let ctx = job.ctx.clone();
-    let svc = ctx.design();
-    let aid = job.artifact.id.clone();
-    let tid = job.turn_id.clone();
-
-    let (done_path, done_line) = done_marker();
-    let prompt = format!("{}{done_line}", job.prompt);
-    let poll = (job.branch == Branch::Main && job.mode.edits()).then(|| spawn_live_poll(&job));
-
-    let sid_cell: Arc<Mutex<Option<Id>>> = Arc::new(Mutex::new(None));
-    let on_ready = {
-        let events = ctx.events().clone();
-        let cell = Arc::clone(&sid_cell);
-        let aid = aid.clone();
-        let tid = tid.clone();
-        let ready_tx = job.ready_tx.take();
-        move |sid: &Id| {
-            *cell.lock().unwrap_or_else(|e| e.into_inner()) = Some(sid.clone());
-            if let Some(t) = update_turn(&aid, &tid, |t| {
-                t.session_id = Some(sid.clone());
-                t.status = "running".into();
-            }) {
-                emit_turn(&events, &t);
-            }
-            if let Some(tx) = ready_tx {
-                let _ = tx.send(sid.clone());
-            }
-        }
-    };
-    let mut meta = json!({
-        "source": "design_assist",
-        "artifact_id": aid,
-        "turn_id": tid,
-        "mode": job.mode.as_str(),
-        "branch": job.branch.name(),
-    });
-    if let Some(m) = job
-        .model
-        .as_deref()
-        .map(str::trim)
-        .filter(|m| !m.is_empty())
-    {
-        meta["model"] = json!(m);
-    }
-    let title = match &job.branch {
-        Branch::Main => format!("Design: {}", job.artifact.title),
-        Branch::Variant { k, .. } => format!("Design variant {k}: {}", job.artifact.title),
-    };
-    let dir_str = job.dir.to_string_lossy().to_string();
-    let turn = tokio::time::timeout(
-        TURN_CAP,
-        ctx.run_agent_turn(
-            AgentTurn {
-                ws: &job.ws,
-                user: &job.user,
-                existing: job.existing_session.as_ref(),
-                title: &title,
-                cwd: &dir_str,
-                provider: &job.provider,
-                meta,
-                prompt: &prompt,
-                stuck_after: STUCK_AFTER,
-                done_file: Some(done_path.clone()),
-                quiet_done: None,
-            },
-            on_ready,
-        ),
-    )
-    .await;
-    if let Some(p) = poll {
-        p.abort();
-    }
-    let _ = std::fs::remove_file(done_path);
-    let known_sid: Option<Id> = { sid_cell.lock().unwrap_or_else(|e| e.into_inner()).clone() };
-
-    let result: Result<(String, Id), String> = match turn {
-        Ok(Ok(v)) => Ok(v),
-        Ok(Err(e)) => Err(e.to_string()),
-        Err(_) => {
-            if let Some(s) = &known_sid {
-                let _ = ctx.kill_session(s).await;
-            }
-            Err(format!(
-                "the agent turn exceeded {} minutes and was stopped",
-                TURN_CAP.as_secs() / 60
-            ))
-        }
-    };
-    let sid = result
-        .as_ref()
-        .ok()
-        .map(|(_, s)| s.clone())
-        .or(known_sid.clone());
-
-    // Keep the main assist session resumable (success or not).
-    if job.branch == Branch::Main {
-        if let Some(s) = &sid {
-            let _ = svc
-                .update_meta(
-                    &aid,
-                    UpdateArtifactReq {
-                        meta: Some(
-                            json!({ "assist": { "session_id": s, "provider": job.provider } }),
-                        ),
-                        ..Default::default()
-                    },
-                    &Author::user(&job.user.id),
-                )
-                .await;
-        }
-    }
-
-    let outcome = match result {
-        Ok((reply, sid)) => finalize(&svc, &job, &reply, &sid).await,
-        Err(e) => {
-            restore_current_head(&job).await;
-            Outcome::failed(e)
-        }
-    };
-    let final_turn = update_turn(&aid, &tid, |t| {
-        t.status = outcome.status.to_string();
-        t.session_id = sid.clone().or(t.session_id.clone());
-        t.version_id = outcome.version_id.clone();
-        t.cited = outcome.cit.cited.clone();
-        t.unverified_citations = outcome.cit.unverified.clone();
-        t.findings = outcome.findings.clone();
-        t.message = outcome.message.clone();
-        t.error = outcome.error.clone();
-        t.finished_at = Some(Utc::now());
-    });
-    match final_turn {
-        Some(t) => {
-            emit_turn(ctx.events(), &t);
-            t
-        }
-        None => {
-            // Evicted from the history (very busy artifact) — still report.
-            let t = DesignAssistTurn {
-                turn_id: tid,
-                artifact_id: aid,
-                workspace_id: job.artifact.workspace_id.clone(),
-                mode: job.mode.as_str().into(),
-                status: outcome.status.to_string(),
-                branch: job.branch.name(),
-                direction: job.direction.clone(),
-                provider: job.provider.clone(),
-                session_id: sid,
-                base_version_id: job.base_version_id.clone(),
-                version_id: outcome.version_id,
-                references: job.offered.clone(),
-                cited: outcome.cit.cited,
-                unverified_citations: outcome.cit.unverified,
-                team_rules: job.rule_keys.clone(),
-                findings: outcome.findings,
-                message: outcome.message,
-                error: outcome.error,
-                started_at: Utc::now(),
-                finished_at: Some(Utc::now()),
-            };
-            emit_turn(ctx.events(), &t);
-            t
-        }
-    }
-}
-
-/// How a finished turn ended.
-#[derive(Default)]
-struct Outcome {
-    status: &'static str,
-    version_id: Option<Id>,
-    cit: CitationReport,
-    findings: Vec<Value>,
-    message: Option<String>,
-    error: Option<String>,
-}
-
-impl Outcome {
-    fn failed(e: impl Into<String>) -> Self {
-        Self {
-            status: "failed",
-            error: Some(e.into()),
-            ..Default::default()
-        }
-    }
-}
-
-/// Read the agent's result, validate it and commit it (main head, a variant
-/// branch, or — when a human saved meanwhile — a side version).
-async fn finalize<C: DesignAssistCtx>(
-    svc: &DesignService,
-    job: &TurnJob<C>,
-    reply: &str,
-    sid: &Id,
-) -> Outcome {
-    let findings = match read_capped(&job.dir.join("findings.json"), 64 * 1024).await {
-        Some(b) => parse_findings(&String::from_utf8_lossy(&b)),
-        None => vec![],
-    };
-    let prov_file: Option<Value> = read_capped(&job.dir.join("provenance.json"), 16 * 1024)
-        .await
-        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
-        .filter(Value::is_object);
-    let cit = cite::verify(&job.offered, reply, prov_file.as_ref());
-    let message = summary_line(reply);
-    let mut out = Outcome {
-        status: "unchanged",
-        cit,
-        findings,
-        message: message.clone(),
-        ..Default::default()
-    };
-
-    if !job.mode.edits() {
-        restore_current_head(job).await;
-        return out;
-    }
-
-    // The committed source: the agent's in-place edit, else a fenced block in
-    // the reply (an agent that printed instead of editing / the E2E stub).
-    let after = read_capped(&job.agent_path, dformat::MAX_CONTENT_BYTES).await;
-    let src: Option<String> = match after {
-        Some(b) if b != job.base_source.as_bytes() && !b.iter().all(u8::is_ascii_whitespace) => {
-            match String::from_utf8(b) {
-                Ok(s) => Some(s),
-                Err(_) => {
-                    restore_current_head(job).await;
-                    return Outcome {
-                        status: "failed",
-                        error: Some("the agent wrote a non-UTF-8 file".into()),
-                        ..out
-                    };
-                }
-            }
-        }
-        _ => extract_fenced(reply, job.adapter.fence),
-    };
-    let Some(src) = src else {
-        return out; // nothing changed
-    };
-    let doc = match job.adapter.wrap(&job.base_doc, &src).and_then(|d| {
-        validate_doc(&job.adapter.format, &d, |f, b| {
-            job.ctx.validate_content(f, b)
-        })
-        .map(|_| d)
-    }) {
-        Ok(d) => d,
-        Err(e) => {
-            restore_current_head(job).await;
-            return Outcome {
-                status: "failed",
-                error: Some(format!(
-                    "the agent produced an invalid {} document — nothing committed: {e}",
-                    job.adapter.format
-                )),
-                ..out
-            };
-        }
-    };
-
-    let author = Author {
-        kind: "agent".into(),
-        id: job.user.id.clone(),
-        session_id: Some(sid.clone()),
-    };
-    let provenance = build_provenance(
-        &job.turn_id,
-        job.mode,
-        &job.branch,
-        job.direction.as_deref(),
-        &job.provider,
-        Some(sid.as_str()),
-        &job.user_prompt,
-        &job.offered,
-        &out.cit,
-        job.brand.as_ref(),
-        &job.rule_keys,
-        job.selection.as_ref(),
-    );
-    let commit_msg = message
-        .clone()
-        .unwrap_or_else(|| format!("Design assist ({})", job.mode.as_str()));
-
-    let committed: Result<(DesignVersion, bool), Error> = match &job.branch {
-        Branch::Variant { run_id, k } => svc
-            .commit_variant(
-                &job.artifact,
-                doc,
-                run_id,
-                *k,
-                job.base_version_id.as_deref(),
-                author.clone(),
-                commit_msg,
-                provenance,
-            )
-            .await
-            .map(|v| (v, true)),
-        Branch::Main => {
-            let fresh = match svc.store().require_artifact(&job.artifact.id).await {
-                Ok(a) => a,
-                Err(e) => return Outcome::failed(e.to_string()),
-            };
-            let res = svc
-                .commit_bytes(
-                    &fresh,
-                    doc.clone(),
-                    SaveOpts {
-                        base: Some(job.base_version_id.clone().unwrap_or_default()),
-                        kind: "agent".into(),
-                        author: author.clone(),
-                        message: commit_msg.clone(),
-                        provenance: provenance.clone(),
-                        force: false,
-                        validate: true,
-                        change: "content",
-                    },
-                )
-                .await;
-            match res {
-                Ok(saved) => Ok((saved.version, saved.created)),
-                Err(Error::Conflict(_)) => {
-                    // A human (or another writer) saved while the agent worked:
-                    // never clobber — keep the draft as a side version they can
-                    // compare and accept (`POST …/variants/{v}/accept`).
-                    out.status = "conflict";
-                    out.error = Some(
-                        "the design changed while the agent worked — its draft was kept as a \
-                         variant instead of replacing your edits"
-                            .into(),
-                    );
-                    let variant = svc
-                        .commit_variant(
-                            &fresh,
-                            doc,
-                            &job.turn_id,
-                            1,
-                            job.base_version_id.as_deref(),
-                            author.clone(),
-                            commit_msg,
-                            provenance,
-                        )
-                        .await
-                        .map(|v| (v, true));
-                    // The working copy keeps mirroring the HEAD (S4-21): the
-                    // live poll left the agent's draft in the work/agent
-                    // files while the head is the human's save — put the
-                    // human's version back so the editor and the next turn
-                    // start from it, not from the side-lined draft.
-                    if variant.is_ok() {
-                        restore_current_head(job).await;
-                    }
-                    variant
-                }
-                Err(e) => Err(e),
-            }
-        }
-    };
-    let (version, created) = match committed {
-        Ok(v) => v,
-        Err(e) => {
-            restore_current_head(job).await;
-            return Outcome {
-                status: "failed",
-                error: Some(e.to_string()),
-                ..out
-            };
-        }
-    };
-    if !created {
-        return out; // byte-identical to the head
-    }
-    if out.status != "conflict" {
-        out.status = "done";
-    }
-    out.version_id = Some(version.id.clone());
-
-    // Learning signal + provenance links (best-effort).
-    let payload = json!({
-        "turn_id": job.turn_id,
-        "mode": job.mode.as_str(),
-        "branch": version.branch,
-        "direction": job.direction,
-        "provider": job.provider,
-        "cited": out.cit.cited.iter().map(|c| c.artifact_id.clone()).collect::<Vec<_>>(),
-        "offered": job.offered.len(),
-        "unverified": out.cit.unverified.len(),
-    });
-    let _ = svc
-        .record_signal(
-            &job.artifact,
-            SignalReq {
-                artifact_id: job.artifact.id.clone(),
-                kind: "agent_draft".into(),
-                version_id: Some(version.id.clone()),
-                actor_kind: Some("agent".into()),
-                session_id: Some(sid.clone()),
-                payload: Some(payload),
-            },
-            &author,
-        )
-        .await;
-    if version.branch == "main" {
-        for c in &out.cit.cited {
-            let _ = svc
-                .create_link(
-                    &job.artifact,
-                    CreateLinkReq {
-                        rel: "references".into(),
-                        dst_kind: "artifact".into(),
-                        dst_id: c.artifact_id.clone(),
-                        dst_node: None,
-                        src_node: None,
-                        policy: Some("pinned".into()),
-                        pinned_version_id: c.version_id.clone(),
-                        meta: Some(json!({
-                            "via": "design_assist",
-                            "label": c.label,
-                            "cited_in_version": version.id,
-                        })),
-                    },
-                    &author,
-                )
-                .await;
-        }
-    }
-    out
-}
-
-// ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
 
@@ -2388,8 +1836,7 @@ pub async fn start_assist<C: DesignAssistCtx>(
         ready_tx: Some(tx),
     };
     tokio::spawn(async move {
-        let _slot = guard;
-        run_job(job).await;
+        run_job(job, &guard.claim).await;
     });
     let _ = tokio::time::timeout(READY_WAIT, rx).await;
     let snapshot = get_turn(&a.id, &turn_id).unwrap_or(turn);
@@ -2547,9 +1994,16 @@ pub async fn start_variants<C: DesignAssistCtx>(
         run_id.clone(),
         Some(head.id.clone()),
     );
+    // Every variant turn runs under the run's one claim on the artifact.
+    let guard = Arc::new(guard);
     tokio::spawn(async move {
-        let _slot = guard;
-        let handles: Vec<_> = jobs.into_iter().map(|j| tokio::spawn(run_job(j))).collect();
+        let handles: Vec<_> = jobs
+            .into_iter()
+            .map(|j| {
+                let guard = Arc::clone(&guard);
+                tokio::spawn(async move { run_job(j, &guard.claim).await })
+            })
+            .collect();
         let mut version_ids = Vec::new();
         let mut failed = 0usize;
         for h in handles {

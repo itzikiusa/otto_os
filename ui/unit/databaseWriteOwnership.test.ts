@@ -53,6 +53,8 @@ function setup(options: { holdCancel?: boolean; holdReplacement?: boolean } = {}
     $derived: Object.assign((v: unknown) => v, { by: (fn: () => unknown) => fn() }),
     require: (path: string) => {
       if (path.startsWith('./database/')) return load(new URL(`../src/lib/stores/${path.slice(2)}.ts`, import.meta.url));
+      // A sub-store's own sibling import (database/filters → ./statement).
+      if (path === './statement' || path === './model') return load(new URL(`../src/lib/stores/database/${path.slice(2)}.ts`, import.meta.url));
       if (path.endsWith('/client')) return { api, ApiError, withDeadline: transport.withDeadline, READ_DEADLINE_MS: transport.READ_DEADLINE_MS, isAbortError: (e: Error) => e.name === 'AbortError' };
       if (path.endsWith('/workspace.svelte')) return { ws: { currentId: 'workspace' } };
       if (path.endsWith('/auth.svelte')) return { auth: { user: { id: 'user' } } };
@@ -283,19 +285,19 @@ for (const late of ['result', 'write_blocked: production', 'read_only: writes re
     const oldRun = h.v.runQuery('DELETE FROM orders', null, { readOnly: true });
     // Use the production snapshot boundary: connection switches retain tab
     // objects by reference while replacing the active connection's tab list.
-    h.v.captureSnapshot();
+    h.v.conn.captureSnapshot();
     h.v.selectedConnId = 'B'; h.v.tabs = []; h.v.newTab('SELECT 2');
     const newRun = h.v.runQuery();
     h.v.flushTabDrafts();
-    const savedB = h.storage.get(h.v.tabsKey('B'));
+    const savedB = h.storage.get(h.v.persist.tabsKey('B'));
     assert.notEqual(h.v.tab.id, oldTab.id, 'tab IDs are unique across connections');
     h.v.abortQuery(oldTab.id);
     try {
       assert.equal(oldTab.running, false);
       assert.equal(oldTab.pending, null);
-      assert.equal(JSON.parse(h.storage.get(h.v.tabsKey('A'))!).tabs[0].pending, undefined,
+      assert.equal(JSON.parse(h.storage.get(h.v.persist.tabsKey('A'))!).tabs[0].pending, undefined,
         'the stopped marker is removed from the owning connection on disk');
-      assert.equal(h.storage.get(h.v.tabsKey('B')), savedB);
+      assert.equal(h.storage.get(h.v.persist.tabsKey('B')), savedB);
       assert.equal(h.queries[0].signal?.aborted, false);
       if (late === 'result') h.refused.resolve(result);
       else h.refused.reject(new ApiError(late));

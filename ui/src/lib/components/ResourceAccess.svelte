@@ -1,5 +1,6 @@
 <script lang="ts">
   import { confirmer } from '../confirm.svelte';
+  import { announce } from '../announce.svelte';
   import Skeleton from './Skeleton.svelte';
   import { toasts } from '../toast.svelte';
   import { untrack } from 'svelte';
@@ -152,6 +153,7 @@
       original = JSON.stringify(saved);
       preview = null;
       notice = 'Access saved.';
+      announce(notice);
       toasts.success('Access saved');
       resourceAccess.invalidate();
     } catch (e) {
@@ -194,7 +196,9 @@
     >
   </header>
   {#if error}<p class="error" role="alert">{error}</p>{/if}
-  {#if notice}<p role="status">{notice}</p>{/if}
+  <!-- Spoken through announce() where it's set (a status inserted with its
+       text is silent in VoiceOver); this line is the visible copy. -->
+  {#if notice}<p>{notice}</p>{/if}
   {#if loading}<Skeleton rows={2} height={28} label="access" />
   {:else if policy}
     <nav aria-label="Access views">

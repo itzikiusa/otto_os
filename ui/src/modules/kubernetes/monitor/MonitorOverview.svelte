@@ -83,7 +83,7 @@
       await copyTextOrThrow(text);
       toasts.success('Copied', 'RBAC message copied to the clipboard.');
     } catch {
-      toasts.error('Couldn’t copy', text);
+      toasts.error('Couldn’t copy', `Select the message and copy it manually: ${text}`);
     }
   }
 

@@ -7,10 +7,10 @@
   // trailing + button opens a picker of repos not already open. Styled like
   // ApiPage's `.req-tabs`. Workspace-independent — driven entirely by the git
   // store's open-tabs state, which persists across restarts.
-  import { untrack } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import type { Repo } from '../../lib/api/types';
   import { git } from '../../lib/stores/git.svelte';
-  import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { onTabKey } from '../../lib/tabKeys';
   import { branchMode, repoTabLabel } from './repoTabFit';
@@ -84,9 +84,14 @@
 
   /** Tablist keys: Enter/Space open, Delete or Backspace closes (focus moves to
    *  the neighbour); ←/→ (Home/End, RTL-aware) move + open via the shared
-   *  roving-tabindex handler. */
+   *  roving-tabindex handler; ⌥⇧←/→ moves the tab itself (the keyboard path
+   *  for drag-to-reorder, as in shell/TabBar). */
   function onRepoTabKey(e: KeyboardEvent, id: string): void {
-    if (e.key === 'Enter' || e.key === ' ') {
+    if (e.altKey && e.shiftKey && !e.metaKey && !e.ctrlKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+      e.preventDefault();
+      const rtl = getComputedStyle(e.currentTarget as Element).direction === 'rtl';
+      moveTab(id, (e.key === 'ArrowRight') !== rtl ? 1 : -1);
+    } else if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault();
       onopen(id);
     } else if (e.key === 'Delete' || e.key === 'Backspace') {
@@ -102,6 +107,33 @@
     } else {
       onTabKey(e);
     }
+  }
+
+  /** Move a repo tab one place (in strip order) and keep focus on it. */
+  function moveTab(id: string, dir: 1 | -1): void {
+    const from = git.openRepoIds.indexOf(id);
+    const to = from + dir;
+    if (from < 0 || to < 0 || to >= git.openRepoIds.length) return;
+    git.reorderRepoTab(id, to);
+    void tick().then(() => listEl?.querySelector<HTMLElement>(`[data-repo-id="${CSS.escape(id)}"]`)?.focus());
+  }
+
+  /** The tab's context menu: "Move left / right" are the pointer-free way to
+   *  reorder (also ⌥⇧←/→); they name the VISUAL direction, so in RTL "Move
+   *  left" moves toward the end of the strip. */
+  function tabMenu(e: MouseEvent, id: string): void {
+    const rtl = getComputedStyle(e.currentTarget as Element).direction === 'rtl';
+    const i = git.openRepoIds.indexOf(id);
+    const canBack = i > 0;
+    const canFwd = i >= 0 && i < git.openRepoIds.length - 1;
+    const leftOk = rtl ? canFwd : canBack;
+    const rightOk = rtl ? canBack : canFwd;
+    ctxMenu.show(e, [
+      ...(leftOk ? [{ label: 'Move left', hint: '⌥⇧←', action: () => moveTab(id, rtl ? 1 : -1) } as MenuItem] : []),
+      ...(rightOk ? [{ label: 'Move right', hint: '⌥⇧→', action: () => moveTab(id, rtl ? -1 : 1) } as MenuItem] : []),
+      ...(leftOk || rightOk ? [{ separator: true } as MenuItem] : []),
+      { label: 'Close tab', icon: 'x', action: () => git.closeRepoTab(id) },
+    ]);
   }
 
   // ── Drag-to-reorder (mirrors shell/TabBar) ───────────────────────────────
@@ -257,6 +289,7 @@
         title={`${label}${dirty ? ' · uncommitted changes' : ''}\n${r.path}`}
         onclick={() => onopen(r.id)}
         onkeydown={(e) => onRepoTabKey(e, r.id)}
+        oncontextmenu={(e) => tabMenu(e, r.id)}
         onauxclick={(e) => {
           if (e.button === 1) {
             e.preventDefault();

@@ -208,7 +208,8 @@ test('queued chapter requests use the latest selection and survive fullscreen re
     await r.fulfill({ json: { url: `${new URL(page.url()).origin}/__r3tour.mp4` } });
   });
   await page.goto('/#/walkthroughs');
-  await expect(page.getByRole('status', { name: 'Loading the tour' })).toBeVisible();
+  // A spinner image (not a live region): the loading state is drawn, not inserted with text.
+  await expect(page.getByRole('img', { name: 'Loading the tour' })).toBeVisible();
   const insights = tourChapter('Insights and Usage');
   await page.getByRole('button', { name: tourChapter('Git, reviews and proof').label }).click();
   await page.getByRole('button', { name: insights.label }).click();

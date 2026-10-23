@@ -1,6 +1,7 @@
 <script lang="ts">
   import AgentDocuments from '../../src/modules/personal-agents/AgentDocuments.svelte';
   import ConfirmDialog from '../../src/lib/components/ConfirmDialog.svelte';
+  import Announcer from '../../src/lib/components/Announcer.svelte';
   import { router } from '../../src/lib/router.svelte';
   import PathField from '../../src/lib/components/PathField.svelte';
   let path = $state('~/original');
@@ -15,3 +16,5 @@
 
 <button onclick={() => router.go("fixture-away")}>Leave document</button>
 <ConfirmDialog />
+<!-- The shell's live regions, so a spec can hear what the document announces. -->
+<Announcer />

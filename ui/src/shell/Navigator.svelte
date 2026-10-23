@@ -441,7 +441,7 @@
         title: w.root_path,
         action: async () => {
           if (await copyText(w.root_path)) toasts.success('Copied', w.root_path);
-          else toasts.warn('Couldn’t copy the path');
+          else toasts.error('Couldn’t copy the path', `The clipboard isn’t available here. Select the path and copy it manually: ${w.root_path}`);
         },
       },
       { label: 'Workspace context', icon: 'note', action: async () => { if (await ws.select(w.id)) router.go('settings/context-soul'); } },

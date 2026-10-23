@@ -30,7 +30,7 @@
   import Icon from '../../../lib/components/Icon.svelte';
   import EmptyState from '../../../lib/components/EmptyState.svelte';
   import LoadState from '../../../lib/components/LoadState.svelte';
-  import { ws, visibleOnThisDevice } from '../../../lib/stores/workspace.svelte';
+  import { ws } from '../../../lib/stores/workspace.svelte';
   import { auth } from '../../../lib/stores/auth.svelte';
   import { ui } from '../../../lib/stores/ui.svelte';
   import { events } from '../../../lib/events.svelte';
@@ -47,13 +47,16 @@
   import { attentionQueue, buildSchool, busiestRoom, type Kid } from '../school/model';
   import { kickOut, release, sendToDetention } from '../school/actions';
   import { POLL_MS, pollScreens, roomScreensKey, throttledNow, visibleLines, type ScreenFeed } from '../school/screens';
+  import { lossBudget } from '../../../lib/three/stage';
   import { mountSchool, webglAvailable, type SchoolHandle, type SchoolPick, type SchoolView } from '../school/scene';
+  import DoorBubbles from './classrooms/DoorBubbles.svelte';
   import HoverTag from './classrooms/HoverTag.svelte';
   import KidCard from './classrooms/KidCard.svelte';
   import NeedsYouQueue from './classrooms/NeedsYouQueue.svelte';
   import SchoolBar from './classrooms/SchoolBar.svelte';
   import SchoolList from './classrooms/SchoolList.svelte';
   import { hintFor, keySurface, kidMenuItems, place, queueLabelFor } from './classrooms/helpers';
+  import { SchoolData } from './classrooms/load.svelte';
 
   interface Props {
     box: HomeBox;
@@ -93,38 +96,16 @@
     typeof window !== 'undefined' && !!window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
   // ── Data ─────────────────────────────────────────────────────────────────
-  let fetched = $state.raw<Session[]>([]);
-  let archivedRows = $state.raw<Session[]>([]);
-  let loaded = $state(false);
-  let error = $state('');
+  const data = new SchoolData();
   /** Kicked out here: hidden at once, before the refetch confirms it. */
   let removed = $state.raw<Set<string>>(new Set());
   /** Rows held in the model while their walk (out / to the bench) plays. */
   let held = $state.raw<Map<string, Session>>(new Map());
 
-  async function load(signal?: AbortSignal): Promise<boolean> {
-    try {
-      const [rows, arch] = await Promise.all([
-        api.bg.get<Session[]>('/sessions?archived=false&limit=1000', signal),
-        api.bg.get<Session[]>('/sessions?archived=true&limit=60', signal).catch(() => [] as Session[]),
-      ]);
-      fetched = rows.filter(visibleOnThisDevice);
-      archivedRows = arch.filter(visibleOnThisDevice);
-      error = '';
-      return true;
-    } catch (e) {
-      if (signal?.aborted) return true;
-      error = loadErrorText(e);
-      return false;
-    } finally {
-      loaded = true;
-    }
-  }
-
   let poller: Poller | null = null;
   // Every Home space stays mounted: a slide back, a scroll back into view or an
   // un-zoom must not refetch ~1,000 sessions when the last load is still fresh.
-  const fresh = freshness(load);
+  const fresh = freshness(data.load);
   $effect(() => {
     if (!onScreen) return;
     const p = livePoll(fresh.run, 30_000, ['session_created', 'session_removed', 'session_archive_changed', 'session_renamed'], { immediate: fresh.start('', 30_000) });
@@ -140,14 +121,14 @@
 
   const sessions = $derived.by(() => {
     const m = new Map<string, Session>();
-    for (const s of fetched) m.set(s.id, s);
+    for (const s of data.fetched) m.set(s.id, s);
     for (const s of ws.sessions) m.set(s.id, s);
     for (const s of ws.otherWsSessions) m.set(s.id, s);
     for (const [id, row] of held) m.set(id, { ...row, archived: false });
     for (const id of removed) m.delete(id);
     return [...m.values()];
   });
-  const archived = $derived(archivedRows.filter((s) => !removed.has(s.id) && !held.has(s.id) && !sessions.some((x) => x.id === s.id && !x.archived)));
+  const archived = $derived(data.archivedRows.filter((s) => !removed.has(s.id) && !held.has(s.id) && !sessions.some((x) => x.id === s.id && !x.archived)));
 
   const school = $derived(
     buildSchool({
@@ -218,9 +199,7 @@
           x.destroy();
           // The browser reclaims GPU contexts under pressure: remount on our
           // own (twice a minute at most), keeping the room, before we ask.
-          const t = Date.now();
-          lostAt = lostAt.filter((at) => t - at < 60_000).concat(t);
-          if (lostAt.length <= 2) {
+          if (losses.allow()) {
             setTimeout(() => {
               if (!dead) sceneAttempt += 1;
             }, 1200);
@@ -243,8 +222,8 @@
     };
   });
   let pendingRoom: string | null = null;
-  /** Recent context losses (auto-remount budget). */
-  let lostAt: number[] = [];
+  /** Recent context losses (auto-remount budget: twice a minute). */
+  const losses = lossBudget(2, 60_000);
   $effect(() => {
     const h = handle;
     const s = school;
@@ -649,9 +628,17 @@
   });
 
   const empty = $derived(school.total === 0);
+  /** A crumb navigates up and turns into the (non-interactive) current crumb:
+   *  move focus to the stage, the 3D view's key surface, before it unmounts. */
+  function upTo(go: (h: SchoolHandle) => Promise<void>): () => void {
+    return () => {
+      stage?.focus({ preventScroll: true });
+      if (handle) void go(handle);
+    };
+  }
   const crumbs = $derived.by(() => {
-    const out: { label: string; go?: () => void }[] = [{ label: 'Corridor', go: view.kind === 'corridor' ? undefined : () => void handle?.toCorridor() }];
-    if (openRoomModel) out.push({ label: openRoomModel.name, go: view.kind === 'screen' ? () => void handle?.backToRoom() : undefined });
+    const out: { label: string; go?: () => void }[] = [{ label: 'Corridor', go: view.kind === 'corridor' ? undefined : upTo((h) => h.toCorridor()) }];
+    if (openRoomModel) out.push({ label: openRoomModel.name, go: view.kind === 'screen' ? upTo((h) => h.backToRoom()) : undefined });
     if (view.kind === 'screen') out.push({ label: `${byId.get(view.kidId)?.title ?? 'Screen'}` });
     return out;
   });
@@ -661,13 +648,13 @@
 <div class="school" bind:this={rootEl}>
   <SchoolBar boxId={box.id} {mode} {gl} {zoomed} {school} {handle} {crumbs} {setMode} />
 
-  {#if !loaded && fetched.length === 0 && ws.sessions.length === 0}
+  {#if !data.loaded && data.fetched.length === 0 && ws.sessions.length === 0}
     <LoadState what="the school" empty={true} loading={true} variant="compact" rows={3} />
-  {:else if error && fetched.length === 0 && ws.sessions.length === 0}
-    <LoadState what="the school" empty={true} error={error} variant="compact" onretry={() => poller?.now()} />
+  {:else if data.error && data.fetched.length === 0 && ws.sessions.length === 0}
+    <LoadState what="the school" empty={true} error={data.error} variant="compact" onretry={() => poller?.now()} />
   {:else}
-    {#if error}
-      <LoadState what="the school" error={error} empty={false} variant="compact" onretry={() => poller?.now()} />
+    {#if data.error}
+      <LoadState what="the school" error={data.error} empty={false} variant="compact" onretry={() => poller?.now()} />
     {/if}
     {#if !gl}
       <p class="note" role="note"><Icon name="info" size={12} />3D isn’t available here (WebGL is off), so the school is listed instead.</p>
@@ -686,11 +673,7 @@
         <div class="canvas" bind:this={host}></div>
         {#if handle}
           <div class="overlay" aria-hidden="true">
-            {#each needDoors as r (r.id)}
-              <div class="bubble door" class:err={r.counts.needsYou === 0} use:bubble={`door:${r.id}`}>
-                {r.counts.needsYou > 0 ? `✋ ${r.counts.needsYou}` : `❗ ${r.counts.error}`}
-              </div>
-            {/each}
+            <DoorBubbles rooms={needDoors} {bubble} />
             <HoverTag {hover} {hoverKid} {hoverRoom} {peek} bind:el={tagEl} />
           </div>
           <NeedsYouQueue {queue} {queueLabel} bind:queueOpen {view} {busiest} {handle} {open} {goTo} />
@@ -760,38 +743,6 @@
     inset: 0;
     pointer-events: none;
     overflow: hidden;
-  }
-  .bubble {
-    position: absolute;
-    top: 0;
-    left: 0; /* ui-guards: allow — origin of projected screen coordinates, not layout */
-    visibility: hidden;
-    white-space: nowrap;
-  }
-  .bubble {
-    font-size: var(--fs-l);
-    line-height: 1;
-    padding: 4px 6px;
-    border-radius: var(--radius-m);
-    background: var(--warning-soft);
-    border: 1px solid var(--warning);
-    animation: otto-pulse 1.4s ease-in-out infinite;
-  }
-  .bubble.err {
-    background: var(--danger-soft);
-    border-color: var(--danger);
-  }
-  .bubble.door {
-    font-size: var(--fs-m);
-    font-weight: 600;
-    color: var(--text);
-    background: var(--surface);
-    box-shadow: var(--shadow-xs);
-  }
-  @media (prefers-reduced-motion: reduce) {
-    .bubble {
-      animation: none;
-    }
   }
   .hint {
     position: absolute;

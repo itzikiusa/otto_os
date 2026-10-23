@@ -4,8 +4,9 @@
 // directly (unit/dbQueryBuilder.test.ts).
 //
 // Safety model: every identifier goes through `quoteIdent` and every VALUE the
-// user types goes through `literal` (or `likeLiteral` for the contains /
-// starts-with / ends-with operators), escaped for the dialect. The only text
+// user types goes through `literal`; the contains / starts-with / ends-with
+// operators first escape the LIKE wildcards with `escapeLike`, then quote the
+// pattern with `stringLiteral` — both escaped for the dialect. The only text
 // emitted verbatim is an explicit "expression" select item — raw SQL the user
 // writes on purpose, exactly like the editor.
 

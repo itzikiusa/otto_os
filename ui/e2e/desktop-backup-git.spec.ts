@@ -37,10 +37,12 @@ test('Git backup preview commits only snapshot files and supports reviewed impor
       await card.getByRole('button', { name: 'Write snapshot', exact: true }).click();
       await expect(card.getByRole('button', { name: 'Snapshot written', exact: true })).toBeDisabled({ timeout: 5_000 });
     }).toPass({ timeout: 45_000 });
+    // The result notice is plain visible copy (spoken through the app's
+    // announcer, not a role="status" of its own).
     const commitSnapshot = async (message: string) => {
       await card.getByLabel('Snapshot commit message').fill(message);
       await card.getByRole('button', { name: 'Commit snapshot', exact: true }).click();
-      await expect(card.getByRole('status')).toContainText('Snapshot committed');
+      await expect(card.getByText('Snapshot committed.', { exact: false })).toBeVisible();
       // Only the snapshot was committed, all of it, and staged user work stays staged.
       expect(git('diff', '--cached', '--name-only')).toBe('unrelated.txt');
       expect(git('status', '--porcelain', '--', '.otto-sync')).toBe('');
@@ -85,7 +87,7 @@ test('Git backup preview commits only snapshot files and supports reviewed impor
     // an idle daemon, but on the shared e2e daemon it queues behind other
     // workers' writes (e.g. desktop-backup-archive's own restore running in
     // parallel), so allow it more than the default 10 s to report.
-    await expect(card.getByRole('status')).toContainText('Restored', { timeout: 60_000 });
+    await expect(card.getByText(/^Restored \d+ records/)).toBeVisible({ timeout: 60_000 });
     expect(git('diff', '--cached', '--name-only')).toBe('unrelated.txt');
   } finally { await ctx.dispose(); rmSync(repo, { recursive: true, force: true }); }
 });

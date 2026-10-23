@@ -2,12 +2,13 @@
 // `Pull <branch>` menu entries. Pulling is now a DELIBERATE action everywhere —
 // a branch switch never pulls — so its reporting (conflicted merge, dirty-tree
 // retry, ff-only refusal) must read identically from all three call sites.
-import { api, isDirtyGitRefusal } from '../../lib/api/client';
+import { isDirtyGitRefusal } from '../../lib/api/client';
+import { git } from '../../lib/stores/git.svelte';
 import { loadErrorText } from '../../lib/loadError';
-import type { PullMode, PullReq, PullResp, RepoStatusResp } from '../../lib/api/types';
+import type { PullMode, PullResp, RepoStatusResp } from '../../lib/api/types';
 import { toasts } from '../../lib/toast.svelte';
 import { confirmer } from '../../lib/confirm.svelte';
-import { plural } from '../../lib/plural';
+import { pullReport } from '../../lib/api/git';
 
 /** Apply a pull response: propagate the status, then say what happened.
  *  A pull whose merge conflicted comes back 200 with unmerged paths (the daemon
@@ -15,16 +16,8 @@ import { plural } from '../../lib/plural';
  *  resolver, and RepoView raises the banner off the same status. */
 export function reportPull(r: PullResp, onstatus: (s: RepoStatusResp) => void): void {
   onstatus(r.status);
-  const conflicts = r.status.changes.filter((c) => c.kind === 'conflicted').length;
-  if (conflicts > 0) {
-    toasts.warn(
-      'Pulled with conflicts',
-      r.note ??
-        `${plural(conflicts, 'file')} need resolution — open "Resolve conflicts"`,
-    );
-  } else {
-    toasts.success('Pulled', r.note ?? undefined);
-  }
+  const m = pullReport(r);
+  toasts[m.tone](m.title, m.body);
 }
 
 /** `git pull` for `repoId`: POSTs `/pull`, offers "Stash, pull & restore" on a
@@ -36,11 +29,10 @@ export async function runPull(
   onstatus: (s: RepoStatusResp) => void,
   opts?: { mode?: PullMode; autoStash?: boolean },
 ): Promise<void> {
-  const body: PullReq = {};
-  if (opts?.mode) body.mode = opts.mode;
-  if (opts?.autoStash) body.auto_stash = true;
   try {
-    reportPull(await api.post<PullResp>(`/repos/${repoId}/pull`, body), onstatus);
+    // `git.pull` stores the status and bumps `refsRev` (the store's
+    // post-mutation contract); `onstatus` lets the caller follow along.
+    reportPull(await git.pull(repoId, opts?.autoStash ?? false, opts?.mode), onstatus);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     // `ff_only` on a diverged branch is a 409 the user can act on — say which

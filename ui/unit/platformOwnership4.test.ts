@@ -122,7 +122,7 @@ function settingsFixture(first: ReturnType<typeof deferred<any>>, failLater = fa
     ['flashSaved', 'onModelChange', 'saveAgent', 'toggle', 'drainQueuedAgent', 'retryAgent'], {
       cfg, modelDraft: 'A', saving: false, queuedAgent: null, failedAgent: null, agentSaveError: '', savedIn: null, savedTimer: null, modelSaveTimer: null,
       insightsApi: { putConfig: async (body: any) => { bodies.push(plain(body)); if (bodies.length === 1) return first.promise; if (failLater) throw new Error('model save failed'); return plain(body); } },
-      toastError: (...args: unknown[]) => errors.push(args), loadErrorText: errorText,
+      toastError: (...args: unknown[]) => errors.push(args), loadErrorText: errorText, announce: () => {},
       setTimeout: (fn: () => void, ms: number) => { const id = ++timerId; timers.set(id, { fn, ms }); return id; },
       clearTimeout: (id: number) => timers.delete(id),
     });

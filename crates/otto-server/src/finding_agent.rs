@@ -164,7 +164,7 @@ pub async fn judge_verify(finding: &Finding, worktree: Option<&Path>) -> Result<
 }
 
 fn e2e_mode() -> bool {
-    matches!(std::env::var("OTTO_E2E").as_deref(), Ok("1") | Ok("true"))
+    otto_core::e2e::isolated()
 }
 
 /// How to run a linked test with cargo: `(manifest_path, args)` relative to
@@ -366,7 +366,7 @@ pub async fn spawn_session(
     let manager = ctx.manager.clone();
     let sid_for_task = sid.clone();
     tokio::spawn(async move {
-        if !crate::review_session::submit_prompt(&manager, &sid_for_task, &prompt).await {
+        if !otto_sessions::submit::submit_prompt(&manager, &sid_for_task, &prompt).await {
             tracing::warn!(
                 "finding agent: session {sid_for_task} never drew its TUI; prompt not sent"
             );

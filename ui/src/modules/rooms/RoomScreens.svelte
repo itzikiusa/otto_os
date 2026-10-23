@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { RoomSnapshot, RoomAction, RoomSubscriptionTier } from '../../lib/api/room-types';
   import RoomAnnotations from './RoomAnnotations.svelte';
+  import { announceShown } from '../../lib/announce.svelte';
   import { reconcilePin } from './room-state';
   let { room, streams, send, onSubscriptions }: {room: RoomSnapshot; streams: ReadonlyMap<string, MediaStream>; send: (action: RoomAction) => boolean; onSubscriptions: (subscriptions: {sourceId: string; generation: number; tier: RoomSubscriptionTier}[]) => void} = $props();
   let pin = $state<string | null>(null), hidden = $state(document.hidden);
@@ -29,7 +30,7 @@
             <video use:streamVideo={streams.get(source.id)} muted autoplay playsinline aria-label={`${presenter?.name ?? 'Participant'}’s shared screen`}></video>
           </RoomAnnotations>
           {:else}<div class="video-stage"><video use:streamVideo={streams.get(source.id)} muted autoplay playsinline aria-label={`${presenter?.name ?? 'Participant'}’s shared screen`}></video></div>{/if}
-        {:else}<div class="video-stage"><p role="status">Waiting for {presenter?.name ?? 'the presenter'}’s screen…</p></div>{/if}
+        {:else}<div class="video-stage"><p use:announceShown={`Waiting for ${presenter?.name ?? 'the presenter'}’s screen…`}>Waiting for {presenter?.name ?? 'the presenter'}’s screen…</p></div>{/if}
       </div>
     </article>
   {/each}</div>

@@ -193,9 +193,9 @@ pub(crate) fn lens_progress_note(done: &[String], total: usize, running: usize) 
 fn progress_idle(cwd: &str, provider_session_id: Option<&str>) -> Option<Duration> {
     let psid = provider_session_id?;
     let jsonl = otto_orchestrator::claude_pty::session_jsonl_path(cwd, psid);
-    let subagents = otto_orchestrator::claude_pty::project_dir(cwd)
-        .join(psid)
-        .join("subagents");
+    // Beside the transcript (architecture-6w1-01: one root lookup, never a
+    // second `$HOME`-relative path).
+    let subagents = jsonl.parent()?.join(psid).join("subagents");
     let stamp = turn_oracle::progress_stamp(&jsonl, Some(&subagents), None)?;
     SystemTime::now().duration_since(stamp).ok()
 }

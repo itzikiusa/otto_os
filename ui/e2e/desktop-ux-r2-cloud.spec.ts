@@ -243,7 +243,7 @@ test('S3 folder response cannot replace newer navigation and text preview retrie
   await oldResponse;
   await expect(page.getByRole('cell', { name: 'readme.txt', exact: true })).toHaveAttribute('title', 'new/readme.txt');
   await page.getByRole('cell', { name: 'readme.txt', exact: true }).click();
-  await expect(page.getByText('Preview temporarily unavailable', { exact: false })).toBeVisible();
+  await expect(page.locator('#app-content').getByText('Preview temporarily unavailable', { exact: false })).toBeVisible();
   failed = false;
   await page.getByRole('button', { name: 'Retry preview', exact: true }).click();
   await expect(page.getByText('Synthetic preview recovered')).toBeVisible();

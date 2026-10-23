@@ -15,6 +15,10 @@ use otto_core::{Error, Result};
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
+mod errors;
+pub(crate) use errors::{is_missing_remote_ref, push_err, unborn_or_err, upstream_err};
+pub use errors::{PUSH_LEASE_REFUSED, PUSH_REJECTED};
+
 /// Result of a pull that may have merged with conflicts. `conflicted_files` is
 /// empty on a clean pull; when it isn't, the fetch+merge ran and left a merge in
 /// progress that the caller must surface for resolution.
@@ -2820,9 +2824,9 @@ impl LocalGit {
             DiffTarget::Worktree => run(diff("diff", &["-U3", m, l])).await?,
             DiffTarget::Working => {
                 // Staged + unstaged tracked changes vs HEAD (a staged-new file
-                // shows as fully added). Falls back to cached+worktree when HEAD
-                // is unborn (no commits yet).
-                let (head_ok, head_out, head_err, _) = self
+                // shows as fully added). Falls back to cached+worktree ONLY when
+                // HEAD is unborn; any other failure is an error, not "no changes".
+                let (head_ok, head_out, head_err, code) = self
                     .exec(&diff("diff", &["-U3", m, l, "HEAD"]), None)
                     .await?;
                 note_renames(&head_err, ri);
@@ -2830,10 +2834,9 @@ impl LocalGit {
                 if head_ok {
                     head_out
                 } else {
-                    let mut s = run(diff("diff", &["-U3", m, l, "--cached"]))
-                        .await
-                        .unwrap_or_default();
-                    s.extend(run(diff("diff", &["-U3", m, l])).await.unwrap_or_default());
+                    unborn_or_err(&head_err, &head_out, code)?;
+                    let mut s = run(diff("diff", &["-U3", m, l, "--cached"])).await?;
+                    s.extend(run(diff("diff", &["-U3", m, l])).await?);
                     s
                 }
             }
@@ -2891,15 +2894,18 @@ impl LocalGit {
             DiffTarget::Worktree => run(stat("diff", &[])).await?,
             DiffTarget::Staged => run(stat("diff", &["--cached"])).await?,
             DiffTarget::Working => {
-                let (head_ok, head_out, head_err, _) =
+                let (head_ok, head_out, head_err, code) =
                     self.exec(&stat("diff", &["HEAD"]), None).await?;
                 note_renames(&head_err, &ri);
+                if !head_ok {
+                    unborn_or_err(&head_err, &head_out, code)?;
+                }
                 untracked = self.untracked(paths).await?;
                 if head_ok {
                     head_out
                 } else {
-                    let mut s = run(stat("diff", &["--cached"])).await.unwrap_or_default();
-                    s.extend(run(stat("diff", &[])).await.unwrap_or_default());
+                    let mut s = run(stat("diff", &["--cached"])).await?;
+                    s.extend(run(stat("diff", &[])).await?);
                     s
                 }
             }
@@ -5076,7 +5082,7 @@ impl LocalGit {
     }
 }
 
-pub(crate) use crate::output_noise::{is_noise_line, strip_noise};
+pub(crate) use crate::output_noise::strip_noise;
 pub use crate::remote_url::{strip_url_userinfo, validate_remote_url};
 
 /// `.git` as a path component, compared the way the default case-insensitive
@@ -5108,126 +5114,6 @@ fn remote_ref_absent(stderr: &str) -> bool {
     stderr.contains("remote ref does not exist")
 }
 
-/// True when git's own message says the LOCAL repository refused the operation
-/// — a dirty tree, an unconfigured upstream, divergent branches, an unfinished
-/// merge. Nothing is wrong with the remote (git usually never even dialled it),
-/// so these must NOT surface as `Error::Upstream`/502: the UI reports a 502 as
-/// "the git provider is unavailable" and raises a global outage banner, which
-/// for "please commit your changes before you merge" is simply untrue.
-///
-/// Matched on git's stable porcelain wording; anything unrecognised keeps the
-/// conservative 502 (a genuine network/auth failure looks like nothing here).
-pub(crate) fn local_refusal(msg: &str) -> bool {
-    const MARKERS: [&str; 29] = [
-        "local changes to the following files would be overwritten",
-        "would be overwritten by",
-        "please commit your changes or stash them",
-        "you have unstaged changes",
-        "cannot pull with rebase",
-        "need to specify how to reconcile divergent branches",
-        "there is no tracking information for the current branch",
-        "you have not concluded your merge",
-        "fix conflicts and run",
-        "refusing to merge unrelated histories",
-        "not something we can merge",
-        "no such ref was fetched",
-        // Unresolved index / mid-operation refusals (merge onto a conflicted
-        // index, a second cherry-pick, …).
-        "you need to resolve your current index first",
-        "you have unmerged files",
-        "unmerged files",
-        "cherry-pick or revert is already in progress",
-        "a rebase is in progress",
-        "no rebase in progress",
-        // A bad/unknown ref is the caller's input, not a provider outage.
-        "did not match any file",
-        // `checkout <name> --` of a name that is no revision.
-        "invalid reference",
-        // Nothing to do — e.g. `commit` with an empty index.
-        "nothing to commit",
-        // A concurrent git process holds the index lock — transient, retryable.
-        "index.lock",
-        "another git process seems to be running",
-        // `pull --ff-only` on a diverged branch — the caller's choice of mode,
-        // not an outage.
-        "not possible to fast-forward",
-        // Push/pull on a detached HEAD, or pushing an unborn branch (no
-        // commit yet) — nothing was sent anywhere.
-        "you are not currently on a branch",
-        "src refspec",
-        // Unborn branch (no first commit) — stash/log have nothing to act on.
-        "you do not have the initial commit yet",
-        "does not have any commits yet",
-        // A conflicted path handed to restore/unstage — resolve it first.
-        "is unmerged",
-    ];
-    let lc = msg.to_ascii_lowercase();
-    MARKERS.iter().any(|m| lc.contains(m))
-}
-
-/// Stable prefix of the 409 a non-fast-forward push rejection maps to. The UI
-/// matches on it to offer "Pull" / "Force push with lease…" instead of a dead
-/// end — keep it in sync with `ui/src/modules/git/push-errors.ts`.
-pub const PUSH_REJECTED: &str = "push rejected: the remote branch has commits yours doesn't";
-/// Stable prefix of the 409 a refused force-with-lease maps to.
-pub const PUSH_LEASE_REFUSED: &str = "force push refused: the remote branch moved";
-
-/// Map a failed `git push` to an error the caller can act on. A rejection
-/// because the remote has commits we don't (`fetch first` / `non-fast-forward`)
-/// or a refused lease (`stale info` / `remote ref updated since checkout`) is
-/// a LOCAL-state 409 — nothing is wrong with the provider, and calling it a 502
-/// told the user the remote was down when the fix is "pull first". Everything
-/// else (auth, network, hook/protected-branch refusals) goes through
-/// [`upstream_err`].
-pub(crate) fn push_err(stderr: &str, stdout: &str, code: Option<i32>) -> Error {
-    let rejected = stderr
-        .lines()
-        .map(str::trim)
-        .find(|l| l.starts_with("! [rejected]"));
-    if let Some(line) = rejected {
-        if line.contains("(stale info)") || line.contains("(remote ref updated since checkout)") {
-            return Error::Conflict(format!(
-                "{PUSH_LEASE_REFUSED} since you last fetched and integrated it — fetch, review \
-                 the new commits, then try again ({line})"
-            ));
-        }
-        if line.contains("(fetch first)") || line.contains("(non-fast-forward)") {
-            return Error::Conflict(format!(
-                "{PUSH_REJECTED} — pull to bring them in, then push again ({line})"
-            ));
-        }
-    }
-    upstream_err(stderr, stdout, code)
-}
-
-/// A one-line next step for a remote op that failed on CREDENTIALS, appended
-/// to the error so "fatal: Authentication failed for …" says where to fix it.
-/// `None` for anything that isn't recognisably an auth failure.
-fn auth_hint(full_lc: &str) -> Option<&'static str> {
-    const HTTPS: [&str; 5] = [
-        "authentication failed",
-        "could not read username",
-        "could not read password",
-        "the requested url returned error: 401",
-        "the requested url returned error: 403",
-    ];
-    if full_lc.contains("permission denied (publickey")
-        || full_lc.contains("host key verification failed")
-    {
-        return Some(
-            "SSH authentication failed — check that your SSH agent has a key this remote accepts \
-             (`ssh-add -l`) and that the host is in known_hosts",
-        );
-    }
-    if HTTPS.iter().any(|m| full_lc.contains(m)) {
-        return Some(
-            "authentication failed — check the repository's git account token (Settings → Git \
-             Accounts: Test, expiry and write scope)",
-        );
-    }
-    None
-}
-
 /// The private ref [`LocalGit::fetch_pr_head`] fetches a PR head into:
 /// `refs/otto/pr-review/<n>-<first 12 of head_sha>`, or `<n>` when the head
 /// is unknown. A sibling name (not `<n>/<sha>`) so it never D/F-conflicts with
@@ -5249,54 +5135,6 @@ pub(crate) fn pr_review_ref(pr_number: u64, head_sha: Option<&str>) -> String {
         }
         None => format!("refs/otto/pr-review/{pr_number}"),
     }
-}
-
-/// A `git fetch` failure that only means "the host doesn't publish this
-/// ref" (try the next one) — as opposed to auth / network / repo errors.
-pub(crate) fn is_missing_remote_ref(stderr: &str) -> bool {
-    let lc = stderr.to_ascii_lowercase();
-    lc.contains("couldn't find remote ref") || lc.contains("could not find remote ref")
-}
-
-pub(crate) fn upstream_err(stderr: &str, stdout: &str, code: Option<i32>) -> Error {
-    // Among the meaningful (non-noise) lines, prefer one that actually names the
-    // failure — git scatters the real reason ("! [remote rejected] …", "error:
-    // failed to push …") after benign chatter like "To <url>".
-    let meaningful: Vec<&str> = stderr
-        .lines()
-        .chain(stdout.lines())
-        .map(str::trim)
-        .filter(|&l| !is_noise_line(l))
-        .collect();
-    let pick = meaningful
-        .iter()
-        .copied()
-        .find(|l| {
-            let lc = l.to_ascii_lowercase();
-            lc.contains("rejected")
-                || lc.starts_with("error:")
-                || lc.starts_with("fatal:")
-                || lc.starts_with("remote:")
-        })
-        .or_else(|| meaningful.first().copied())
-        .unwrap_or("git failed with no output");
-    // Classify BEFORE wrapping: a local refusal is a 409 the user can act on
-    // ("stash your changes"), not a 502 that accuses the remote of being down.
-    // Scan every meaningful line, not just `pick` — git prints the reason
-    // ("Please commit your changes…") on a different line from the "error:" it
-    // leads with.
-    let full = meaningful.join("\n");
-    if local_refusal(&full) {
-        return Error::Conflict(pick.to_string());
-    }
-    let hint = auth_hint(&full.to_ascii_lowercase())
-        .map(|h| format!(" — {h}"))
-        .unwrap_or_default();
-    Error::Upstream(format!(
-        "git exited {}: {}{hint}",
-        code.map_or_else(|| "?".to_string(), |c| c.to_string()),
-        pick
-    ))
 }
 
 // ---------------------------------------------------------------------------

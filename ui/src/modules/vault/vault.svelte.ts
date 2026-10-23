@@ -1019,7 +1019,7 @@ class VaultStore {
   async conflictReload(): Promise<void> {
     if (this.notePath) {
       if (this.dirty && !(await confirmer.ask(
-        `Discard your unsaved edits to "${this.notePath}" and load the version on disk? This cannot be undone.`,
+        `Discard your unsaved edits to "${this.notePath}" and load the version on disk? This can’t be undone.`,
         { title: 'Discard your edits?', confirmLabel: 'Discard my edits', danger: true },
       ))) return;
       if (this.current) {

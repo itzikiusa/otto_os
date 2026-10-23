@@ -168,7 +168,7 @@
     if (!name) return;
     busy = 'branch';
     try {
-      const s = await api.post<RepoStatusResp>(`/repos/${repoId}/checkout`, { branch: name, create: true });
+      const s = await git.checkout(repoId, { branch: name, create: true });
       onstatus(s);
       onrefresh?.();
       toasts.success('Branch created', name);

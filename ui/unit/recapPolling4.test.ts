@@ -31,6 +31,8 @@ function panel(eventCount = 100, scheduler?: (run: (signal: AbortSignal) => unkn
   const context: Record<string, any> = {
     console, Error, AbortController, encodeURIComponent, setTimeout, clearTimeout,
     $props: () => ({ recapId: 'recap-1' }), $state: (value: unknown) => value,
+    // a11y-6-01 announce effects: polling is what this suite pins, not speech.
+    $derived: (value: unknown) => value, $effect: () => {}, announce: () => {},
     onMount: (fn: () => () => void) => { cleanup = fn(); },
     pollWhileVisible: (fn: typeof poll, opts: {ms: number}) => { poll = fn; const scheduled = scheduler?.(fn, opts); return { stop() { stopped = true; controller.abort(); scheduled?.stop(); } }; },
     loadErrorText: (e: unknown) => String(e),

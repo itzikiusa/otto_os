@@ -521,8 +521,12 @@ fn post_listen_housekeeping(data_dir: std::path::PathBuf) {
 fn start_usage_tailer(cfg: &Config, ctx: &ServerCtx) -> otto_usage::tailer::UsageTailerHandle {
     // An isolated E2E daemon must not import the developer's real provider
     // history. Besides privacy, that startup scan distorts load baselines.
-    let transcript_home = if std::env::var("OTTO_E2E").as_deref() == Ok("1") {
-        cfg.data_dir.join("fixture-home")
+    // `otto_transcript::roots` points the Claude/Codex roots at the one e2e
+    // fixture dir; that dir is also the "home" for the native (Grok /
+    // Antigravity) roots, so nothing under the real home is read.
+    let isolated = otto_core::e2e::isolated();
+    let transcript_home = if isolated {
+        otto_transcript::roots::isolated_dir(&cfg.data_dir)
     } else {
         dirs::home_dir().unwrap_or_else(|| cfg.data_dir.clone())
     };
@@ -531,8 +535,9 @@ fn start_usage_tailer(cfg: &Config, ctx: &ServerCtx) -> otto_usage::tailer::Usag
         ctx.pool.clone(),
         cfg.data_dir.clone(),
         transcript_home,
-    );
-    let tailer = if std::env::var("OTTO_E2E").as_deref() == Ok("1") {
+    )
+    .with_roots_env(otto_transcript::roots::RootsEnv::from_process());
+    let tailer = if isolated {
         tailer
     } else {
         tailer.with_native_roots(

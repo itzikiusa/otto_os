@@ -1,11 +1,16 @@
 //! `otto-mcp` — the MCP Control Plane engine.
 //!
 //! Otto here is an **outbound MCP client** (it connects out to registered MCP
-//! servers — stdio or remote HTTP), and the home of the single **governance
-//! pipeline** (`McpService::invoke`) every governed tool call funnels through:
+//! servers — stdio or remote HTTP), and the home of the **governance
+//! pipeline** (`McpService::invoke`) every registered-server tool call funnels
+//! through:
 //!
 //!   allowlist → per-tool permission → policy-as-code → risk/approval gate →
 //!   dry-run → execute → (guaranteed) audit → stats.
+//!
+//! The tail of it (policy-as-code → approval → dry-run → fail-closed audit) is
+//! [`governance::run`], which `otto-server`'s `otto.*` entry point
+//! (`mcp_outward::governed_invoke`) runs too, with its own stage set.
 //!
 //! See `docs/features/mcp-control-plane-design.md` (incl. §14 review resolutions)
 //! for the threat model and the requirement traceability. The HTTP surface
@@ -13,6 +18,7 @@
 
 pub mod auto_approve;
 pub mod client;
+pub mod governance;
 pub mod http;
 pub mod outward;
 pub mod policy;

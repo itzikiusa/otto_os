@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announce } from '../../lib/announce.svelte';
   import { plural } from '../../lib/plural';
   // Skills Lab → Review. A list of skill reviews + a detail pane that mirrors the
   // code-review UX: a deterministic static-analysis card, N visible embedded
@@ -372,6 +373,12 @@
   function sevTone(sev: string): BadgeTone {
     return SEV_TONE[sev.toLowerCase()] ?? 'neutral';
   }
+  // Spoken at the state edge through the shell's always-mounted announcer: a
+  // live region inserted together with its text is not read (WebKit/VoiceOver).
+  const skillsFailedText = $derived(skillsFailed.join(', '));
+  $effect(() => { if (skillsFailedText) announce(`${skillsFailedText} skills didn’t load. Retry to load them.`, { assertive: true }); });
+  const selectedError = $derived(selected?.error ?? '');
+  $effect(() => { if (selectedError) announce(selectedError, { assertive: true }); });
 </script>
 
 <div class="review-wrap">
@@ -428,7 +435,7 @@
           </select>
         </label>
         {#if skillsFailed.length > 0}
-          <span class="lr-skills-failed" role="status">
+          <span class="lr-skills-failed">
             <Icon name="warning" size={12} />
             {skillsFailed.join(', ')} skills didn’t load
             <span aria-hidden="true">·</span>
@@ -485,7 +492,7 @@
         </div>
 
         {#if selected.error}
-          <p class="lr-error" role="alert"><Icon name="warning" size={12} /> {selected.error}</p>
+          <p class="lr-error"><Icon name="warning" size={12} /> {selected.error}</p>
         {/if}
 
         {#if selected.instructions}

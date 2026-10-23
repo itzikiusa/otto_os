@@ -670,6 +670,38 @@ pub struct CodexUserServers {
     pub delivered: Vec<String>,
 }
 
+/// The user servers `provider` was NOT given at this spawn, each with a
+/// plain-language reason (error-handling-6-06): the session meta's
+/// `mcp_skipped` (`{server, reason}`), which the session's MCP menu shows so a
+/// silently missing server is visible without the daemon log. `delivered` is
+/// the snapshot this spawn recorded (`mcp_servers`). Otto's reserved names are
+/// never user servers. The reason re-derives the launcher's skip rules (env
+/// key not a shell name; no free codex-safe key); anything else is the env
+/// file / launcher write that failed.
+pub fn skipped_servers(
+    provider: &str,
+    users: &[UserMcpServer],
+    delivered: &[String],
+) -> Vec<Value> {
+    users
+        .iter()
+        .filter(|s| s.name != SERVER_KEY && s.name != OTTO_TOOLS_KEY)
+        .filter(|s| !delivered.contains(&s.name))
+        .map(|s| {
+            let reason = if let Some(bad) = s.env.keys().find(|k| !is_shell_name(k)) {
+                format!("its env variable “{bad}” isn’t a valid shell variable name")
+            } else if provider == "codex" && !is_bare_toml_key(&s.name) {
+                "Codex needs a name of letters, digits, ‘_’ and ‘-’, and no free one was left                  for this server"
+                    .to_string()
+            } else {
+                "Otto couldn’t write its launcher entry or private env file (see the daemon log)"
+                    .to_string()
+            };
+            json!({ "server": s.name, "reason": reason })
+        })
+        .collect()
+}
+
 /// `sh -c` program that loads a server's env file and execs the real server:
 /// `$0` is the env file, `"$@"` the server's command and args. `set -a` exports
 /// every assignment the file makes; a missing/unreadable file is a fatal `.`

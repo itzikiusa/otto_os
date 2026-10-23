@@ -22,6 +22,8 @@
   // with auth); there is no URL surface here. Meshopt-compressed GLBs (Optimize
   // for web) decode with three's bundled decoder.
   import { onDestroy } from 'svelte';
+  import { demandLoop, releaseRenderer, watchVisibility } from '../../three/stage';
+  import { viewportHasWork, viewportOwnsKey } from './viewportLoop';
   import type * as THREE_NS from 'three';
   import type { OrbitControls as OrbitControlsT } from 'three/examples/jsm/controls/OrbitControls.js';
   import type { TransformControls as TransformControlsT } from 'three/examples/jsm/controls/TransformControls.js';
@@ -91,7 +93,6 @@
   let loading = $state(true);
   let loadError = $state<string | null>(null);
   let mode = $state<GizmoMode>('translate');
-  let hovering = $state(false);
   let gltfErrors = $state<Record<string, string>>({});
   const status = $derived(summarize(doc));
   const canEdit = $derived(!readonly && !play);
@@ -115,7 +116,7 @@
   let env: BuiltEnvironment | null = null;
   let envKey = '';
   let ro: ResizeObserver | null = null;
-  let raf = 0;
+  let visible = true; // in (or near) the viewport, document visible
   let dirty = true;
   let destroyed = false;
   let dragging = false;
@@ -136,8 +137,11 @@
   // Camera move to a named view.
   let camTween: { fromPos: THREE_NS.Vector3; fromTarget: THREE_NS.Vector3; toPos: THREE_NS.Vector3; toTarget: THREE_NS.Vector3; fromFov: number; toFov: number; start: number; duration: number } | null = null;
 
+  // On-demand frames: `invalidate` requests one; only motion re-arms (viewportLoop.ts).
+  const loop = demandLoop((now) => step(now), { canRun: () => !destroyed && visible });
   const invalidate = () => {
     dirty = true;
+    loop.kick();
   };
   const reducedMotion = (): boolean =>
     typeof window !== 'undefined' && !!window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -228,7 +232,7 @@
       applyEnvironment();
       applyPlay();
       loading = false;
-      loop(performance.now());
+      invalidate();
     } catch (e) {
       loadError = e instanceof Error ? e.message : String(e);
       loading = false;
@@ -245,9 +249,8 @@
     invalidate();
   }
 
-  function loop(now: number): void {
-    if (destroyed) return;
-    raf = requestAnimationFrame(loop);
+  /** One frame; true while something still moves. */
+  function step(now: number): boolean {
     const dt = lastFrame ? Math.min(0.1, (now - lastFrame) / 1000) : 0;
     lastFrame = now;
     stepTween(now);
@@ -260,11 +263,13 @@
       camera.lookAt(orbit.target);
       dirty = true;
     }
-    if (!dirty || !renderer || !scene || !camera) return;
-    dirty = false;
-    if (selectionBox) selectionBox.update();
-    renderer.render(scene, camera);
-    syncCube();
+    if (dirty && renderer && scene && camera) {
+      dirty = false;
+      if (selectionBox) selectionBox.update();
+      renderer.render(scene, camera);
+      syncCube();
+    }
+    return viewportHasWork({ tween: !!tween, camTween: !!camTween, turntable, dragging });
   }
 
   // ── doc → three reconciliation ───────────────────────────────────────────────
@@ -423,6 +428,7 @@
     }
     tween = { from, to: target, start: performance.now(), duration, easing };
     syncSelection(); // the gizmo stays detached while a tween owns the pose
+    invalidate();
   }
 
   function stepTween(now: number): void {
@@ -743,6 +749,7 @@
       start: performance.now(),
       duration: 450,
     };
+    invalidate();
   }
 
   function stepCamera(now: number): void {
@@ -805,18 +812,9 @@
     invalidate();
   }
 
-  function isTypingTarget(t: EventTarget | null): boolean {
-    const el = t as HTMLElement | null;
-    if (!el) return false;
-    const tag = el.tagName;
-    return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable;
-  }
-
   function onKey(e: KeyboardEvent): void {
-    if (isTypingTarget(e.target)) return;
-    // Only react while the viewport is the thing the user is working in.
-    const active = hovering || (host?.contains(document.activeElement) ?? false);
-    if (!active || loading || loadError) return;
+    // Focus in the viewport only (pointer-down focuses it); hovering never counts.
+    if (!viewportOwnsKey(host, e.target) || loading || loadError) return;
     const meta = e.metaKey || e.ctrlKey;
     const gm = !meta ? gizmoModeForKey(e.key) : null;
     if (gm) {
@@ -893,14 +891,20 @@
     lastFrame = 0;
     invalidate();
   });
+  // Off screen (a scrolled-away card, a hidden pane) or a hidden document: no frames.
   $effect(() => {
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    const el = host;
+    if (!el) return;
+    return watchVisibility(el, (v) => {
+      visible = v;
+      if (!v) loop.stop();
+      else invalidate();
+    });
   });
 
   onDestroy(() => {
     destroyed = true;
-    cancelAnimationFrame(raf);
+    loop.stop();
     ro?.disconnect();
     orbit?.dispose();
     gizmo?.detach();
@@ -914,11 +918,7 @@
     axes?.dispose();
     for (const p of gltfCache.values()) p.then((t) => disposeTree(t)).catch(() => {});
     gltfCache.clear();
-    if (renderer) {
-      renderer.dispose();
-      renderer.forceContextLoss();
-      renderer.domElement.remove();
-    }
+    if (renderer) releaseRenderer(renderer);
     renderer = null;
     scene = null;
   });
@@ -992,11 +992,10 @@
   aria-label="3D viewport"
   onpointerdown={onPointerDown}
   onpointerup={onPointerUp}
-  onpointerenter={() => (hovering = true)}
-  onpointerleave={() => (hovering = false)}
+  {@attach (el) => (el.addEventListener('keydown', onKey), () => el.removeEventListener('keydown', onKey))}
 >
   {#if loading}
-    <div class="s3d-overlay center"><span class="spinner" role="status" aria-label="Loading the 3D engine" title="Loading the 3D engine"></span></div>
+    <div class="s3d-overlay center"><span class="spinner" role="img" aria-label="Loading the 3D engine" title="Loading the 3D engine"></span></div>
   {:else if loadError}
     <div class="s3d-overlay center">
       <div class="s3d-error">
@@ -1035,7 +1034,7 @@
       {#if !compact}<span>{status}</span>{/if}
       {#if Object.keys(gltfErrors).length}
         <span class="s3d-warn" title={Object.values(gltfErrors).join('\n')}>
-          {plural(Object.keys(gltfErrors).length, 'model')} failed to load
+          Couldn’t load {plural(Object.keys(gltfErrors).length, 'model')}
         </span>
       {/if}
       {#if canEdit && !compact}

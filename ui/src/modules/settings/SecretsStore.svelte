@@ -1,5 +1,6 @@
 <script lang="ts">
   import { plural } from '../../lib/plural';
+  import { announceShown } from '../../lib/announce.svelte';
   // Settings → Trust & safety → "Secret storage" (root only).
   // Shows which store holds integration secrets (GET /admin/secrets/status)
   // and, while they sit in the PLAINTEXT secrets.json, a warning banner plus
@@ -118,7 +119,8 @@
     <LoadState what="the secret store status" {loading} error={loadError} empty={true} onretry={load} />
   {:else}
     {#if status.mode === 'plaintext'}
-      <div class="banner" role="alert">
+      <!-- A standing notice, not an error: spoken politely when it appears. -->
+      <div class="banner" use:announceShown={status.plaintext_entries > 0 ? 'Secrets are stored unencrypted.' : 'The plaintext secret store is active.'}>
         <Icon name="warning" size={14} />
         {#if status.plaintext_entries > 0}
           <p>

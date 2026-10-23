@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announce } from '../../lib/announce.svelte';
   import { plural } from '../../lib/plural';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   // One evaluation run: header summary + per-iteration report. Each iteration
@@ -9,15 +10,8 @@
   import { untrack } from 'svelte';
   import { skillsEvalApi } from '../../lib/api/skillsEval';
   import { skillEvalBus } from '../../lib/events.svelte';
-  import type {
-    EvalFinding,
-    EvalIteration,
-    EvalValidationState,
-    ImplDiffResp,
-    PromoteGate,
-    PromoteSkillReq,
-    SkillEval,
-  } from '../../lib/api/types';
+  import type { EvalFinding, EvalIteration, EvalValidationState,
+    ImplDiffResp, PromoteGate, PromoteSkillReq, SkillEval } from '../../lib/api/types';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
@@ -54,7 +48,7 @@
   }
   let { evalId, onupdate, ondeleted }: Props = $props();
 
-  let run: SkillEval | null = $state(null);
+  let run = $state<SkillEval | null>(null);
   let loading = $state(true);
   // First-load failure: shown inline with Retry (a toast over a blank pane
   // left nothing to act on).
@@ -462,6 +456,8 @@
       },
     ]);
   }
+  const runError = $derived(run?.error ?? '');
+  $effect(() => { if (runError) announce(runError, { assertive: true }); });
 </script>
 
 {#if (loading || loadError) && !run}
@@ -511,7 +507,7 @@
         {/each}
       </div>
       {#if run.summary && !run.iterations.some(it => it.scoring?.proof_status === 'pending')}<p class="rd-summary">{run.summary}</p>{/if}
-      {#if run.error}<p class="rd-error" role="alert"><Icon name="warning" size={12} /> {run.error}</p>{/if}
+      {#if run.error}<p class="rd-error"><Icon name="warning" size={12} /> {run.error}</p>{/if}
     </header>
 
     {#each run.iterations as it, idx (it.id)}

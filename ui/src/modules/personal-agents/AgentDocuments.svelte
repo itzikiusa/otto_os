@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announceShown } from '../../lib/announce.svelte';
   import { personalAgentsApi } from '../../lib/api/personalAgents';
   import { listVaults } from '../../lib/api/vault';
   import type { PersonalAgentDocument, Vault } from '../../lib/api/types';
@@ -86,7 +87,7 @@
   {#if kind === 'memory' && sharedWorkspace}<p class="hint">Agents using this same working folder share this memory file.</p>{/if}
   {#if loading}<Skeleton rows={3} label={label.toLowerCase()} />
   {:else}
-    {#if error}<div class="error" role="alert">{error}</div>{/if}
+    {#if error}<div class="error" use:announceShown={{ text: error, assertive: true }}>{error}</div>{/if}
     {#if document}
       {#if editing}
         <textarea dir="auto" aria-label={`${label} Markdown`} bind:value={draft} disabled={saving} spellcheck="false" use:focusFirstField></textarea>

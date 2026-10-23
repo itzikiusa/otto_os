@@ -62,66 +62,60 @@ pub(crate) async fn while_run_active<T>(
     }
 }
 
-async fn guarded_dispatch(
+/// The swarm's [`RunGuard`] for one run (architecture-4-01r): active while the
+/// run's DB status is queued/running/waiting ([`run_is_active`], the check
+/// [`while_run_active`] polls) and `stopped` (the run's cancel flag, which
+/// every stop path signals) is unset. Each check reads both, so a stop is
+/// seen at the next check with no poll lag.
+pub fn run_guard(
     repo: &otto_state::SwarmRepo,
-    swarm_id: &str,
     run_id: &str,
-    send: impl std::future::Future<Output = bool>,
-) -> bool {
-    let _operation = operation_guard(swarm_id).await;
-    if !run_is_active(repo, run_id).await {
-        return false;
-    }
-    send.await
-}
-
-pub(crate) async fn send_run_input(
-    ctx: &SwarmRt,
-    swarm_id: &str,
-    run_id: &str,
-    session_id: &str,
-    input: &[u8],
-) -> bool {
-    guarded_dispatch(ctx.swarm_repo(), swarm_id, run_id, async {
-        ctx.manager()
-            .input(&session_id.to_string(), input)
-            .await
-            .is_ok()
+    stopped: impl Fn() -> bool + Send + Sync + 'static,
+) -> otto_sessions::submit::RunGuard {
+    let (repo, run_id, stopped) = (repo.clone(), run_id.to_string(), Arc::new(stopped));
+    otto_sessions::submit::RunGuard::new(move || {
+        let (repo, run_id, stopped) = (repo.clone(), run_id.clone(), Arc::clone(&stopped));
+        async move { !stopped() && run_is_active(&repo, &run_id).await }
     })
-    .await
 }
 
-/// Paste `paste` into a run's session, wait the paste-to-Enter window and press
-/// Enter — and, with `confirm_dispatch`, press it once more when the TUI shows
-/// no dispatch — all under the session's submit lock
-/// (`SessionManager::submit_lock`). A workspace broadcast or an agent→agent
-/// `/message` (`submit_text`) on the same session therefore can't land its
-/// paste or Enter inside our window and merge two prompts into one. Each write
-/// still goes through [`send_run_input`] (the swarm operation guard + the
-/// run-still-active check). `false` when the run stopped or a write failed.
-#[doc(hidden)]
-pub async fn submit_run_prompt(
+/// How a turn's prompt submit ended ([`submit_turn_prompt`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnSubmit {
+    /// Pasted and submitted.
+    Sent,
+    /// The run stopped first; nothing more was typed.
+    Stopped,
+    /// The session died, or its TUI never drew, before the prompt was sent.
+    NotSent,
+}
+
+/// Submit a run's prompt through the ONE submit path
+/// (`SessionManager::submit_prompt_while`, [`SubmitOpts::VERIFIED`]): strict
+/// TUI wait, then under the session's submit lock — so a broadcast or an
+/// agent→agent `/message` can't land inside the paste → Enter window — paste
+/// until echoed, Enter, re-Enter, with `guard` checked before each write.
+///
+/// Public (with [`run_guard`]) so otto-server's `swarm_router` interleave
+/// test drives this live path, not a copy of it.
+///
+/// [`SubmitOpts::VERIFIED`]: otto_sessions::submit::SubmitOpts::VERIFIED
+pub async fn submit_turn_prompt(
     ctx: &SwarmRt,
-    swarm_id: &str,
-    run_id: &str,
-    session_id: &str,
-    paste: &[u8],
-    confirm_dispatch: bool,
-) -> bool {
-    let sid: Id = session_id.to_string();
-    let lock = ctx.manager().submit_lock(&sid);
-    let _submit = lock.lock().await;
-    if !send_run_input(ctx, swarm_id, run_id, session_id, paste).await {
-        return false;
+    guard: &otto_sessions::submit::RunGuard,
+    sid: &Id,
+    prompt: &str,
+) -> TurnSubmit {
+    let opts = otto_sessions::submit::SubmitOpts::VERIFIED;
+    match ctx
+        .manager()
+        .submit_prompt_while(sid, prompt, opts, guard.clone())
+        .await
+    {
+        Some(_) => TurnSubmit::Sent,
+        None if !guard.is_active().await => TurnSubmit::Stopped,
+        None => TurnSubmit::NotSent,
     }
-    tokio::time::sleep(ctx.pty_timings().paste_to_enter).await;
-    let before = ctx.manager().live_handle(&sid).map(|h| h.last_output_at());
-    if !send_run_input(ctx, swarm_id, run_id, session_id, b"\r").await {
-        return false;
-    }
-    !confirm_dispatch
-        || ctx.dispatched(&sid, before).await
-        || send_run_input(ctx, swarm_id, run_id, session_id, b"\r").await
 }
 
 #[cfg(test)]
@@ -144,6 +138,54 @@ mod dispatch_tests {
             budget_reason(&swarm, &spend).is_none(),
             "admitting the last permitted run must not interrupt it"
         );
+    }
+
+    /// architecture-4-01r: the swarm's submit guard is ASYNC — each check
+    /// reads the run's DB status and its cancel flag — so a stop (status or
+    /// flag) between the TUI wait and the paste ends the guard at once.
+    #[tokio::test]
+    async fn run_guard_ends_on_a_stop_status_or_the_cancel_flag() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("../otto-state/migrations")
+            .run(&pool)
+            .await
+            .unwrap();
+        let repo = otto_state::SwarmRepo::new(pool);
+        let run = repo
+            .create_run(NewRun {
+                swarm_id: "guard-test".into(),
+                workspace_id: "ws".into(),
+                project_id: None,
+                task_id: None,
+                agent_id: "agent".into(),
+                kind: "task".into(),
+                trigger: "coordinator".into(),
+            })
+            .await
+            .unwrap();
+        let flag = Arc::new(AtomicBool::new(false));
+        let guard = run_guard(&repo, &run.id, {
+            let flag = Arc::clone(&flag);
+            move || flag.load(Ordering::Relaxed)
+        });
+        assert!(guard.is_active().await, "a queued run is active");
+        flag.store(true, Ordering::Relaxed);
+        assert!(!guard.is_active().await, "the cancel flag ends it");
+        flag.store(false, Ordering::Relaxed);
+        repo.update_run(
+            &run.id,
+            RunPatch {
+                status: Some("stopped".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(!guard.is_active().await, "a stopped run is not active");
     }
 
     #[tokio::test]
@@ -268,16 +310,11 @@ mod dispatch_tests {
             result.is_none(),
             "stop interrupts readiness without waiting for the provider"
         );
-        let sent = AtomicBool::new(false);
+        // The submit guard every turn's paste → Enter checks
+        // (`submit_turn_prompt`) reads the same status, so a prompt can't be
+        // typed after readiness completes for a stopped run.
         assert!(
-            !guarded_dispatch(&repo, &sid, &run.id, async {
-                sent.store(true, Ordering::Relaxed);
-                true
-            })
-            .await
-        );
-        assert!(
-            !sent.load(Ordering::Relaxed),
+            !run_guard(&repo, &run.id, || false).is_active().await,
             "a stopped run cannot send a prompt after readiness completes"
         );
     }
@@ -2063,21 +2100,27 @@ async fn create_task_goal(
 ) -> ApiResult<Json<SwarmGoal>> {
     let task = ctx.swarm_repo().get_task(&tid).await.map_err(ApiError)?;
     check(&ctx, &user, &task.workspace_id, WorkspaceRole::Editor).await?;
+    // Held like `update_task`: no verification turn starts between the goal
+    // write and the identity it must act as (concurrency-async-6-03).
+    let _operation = operation_guard(&task.swarm_id).await;
+    // A goal added to someone else's task is text its verification turn runs:
+    // the task now acts as the person who added it (access-control-5-01) —
+    // stamped in the goal's own transaction.
     let goal = ctx
         .swarm_repo()
-        .create_goal(new_goal_from(
-            req,
-            &task.swarm_id,
-            &task.workspace_id,
-            Some(task.project_id.clone()),
-            Some(tid),
-            &user.0.id,
-        ))
+        .create_goal_by(
+            new_goal_from(
+                req,
+                &task.swarm_id,
+                &task.workspace_id,
+                Some(task.project_id.clone()),
+                Some(tid),
+                &user.0.id,
+            ),
+            Some(&user.0.id),
+        )
         .await
         .map_err(ApiError)?;
-    // A goal added to someone else's task is text its verification turn runs:
-    // the task now acts as the person who added it (access-control-5-01).
-    note_goal_editor(&ctx, &goal, &user.0.id).await?;
     emit_goal(&ctx, &goal).await;
     Ok(Json(goal))
 }
@@ -2090,16 +2133,22 @@ async fn create_project_goal(
 ) -> ApiResult<Json<SwarmGoal>> {
     let project = ctx.swarm_repo().get_project(&pid).await.map_err(ApiError)?;
     check(&ctx, &user, &project.workspace_id, WorkspaceRole::Editor).await?;
+    let _operation = operation_guard(&project.swarm_id).await;
+    // A project goal is copied onto every task of the project at verification
+    // time: the project now acts as its author (access-control-6-02).
     let goal = ctx
         .swarm_repo()
-        .create_goal(new_goal_from(
-            req,
-            &project.swarm_id,
-            &project.workspace_id,
-            Some(pid),
-            None,
-            &user.0.id,
-        ))
+        .create_goal_by(
+            new_goal_from(
+                req,
+                &project.swarm_id,
+                &project.workspace_id,
+                Some(pid),
+                None,
+                &user.0.id,
+            ),
+            Some(&user.0.id),
+        )
         .await
         .map_err(ApiError)?;
     emit_goal(&ctx, &goal).await;
@@ -2142,9 +2191,12 @@ async fn update_goal_h(
 ) -> ApiResult<Json<SwarmGoal>> {
     let cur = ctx.swarm_repo().get_goal(&gid).await.map_err(ApiError)?;
     check(&ctx, &user, &cur.workspace_id, WorkspaceRole::Editor).await?;
-    // access-control-5-01: the goal text and verify command are what the
-    // verification turn executes — record who changed them, and on a task
-    // goal make that person the task's prompt editor (its turns act as them).
+    let _operation = operation_guard(&cur.swarm_id).await;
+    let cur = ctx.swarm_repo().get_goal(&gid).await.map_err(ApiError)?;
+    // access-control-5-01 / 6-02: the goal text and verify command are what
+    // the verification turn executes — record who changed them and make that
+    // person its owner's (task, project or swarm) prompt editor, in the goal
+    // write's own transaction.
     let rewrites = req.title.as_ref().is_some_and(|t| t != &cur.title)
         || req
             .description
@@ -2169,31 +2221,14 @@ async fn update_goal_h(
                 max_retries: req.max_retries,
                 blocking: req.blocking,
                 order_idx: req.order_idx,
+                updated_by: rewrites.then(|| user.0.id.clone()),
                 ..Default::default()
             },
         )
         .await
         .map_err(ApiError)?;
-    if rewrites {
-        note_goal_editor(&ctx, &goal, &user.0.id).await?;
-    }
     emit_goal(&ctx, &goal).await;
     Ok(Json(goal))
-}
-
-/// Record `user` as `goal`'s last editor and, for a task goal, as the task's
-/// prompt editor (access-control-5-01).
-async fn note_goal_editor(ctx: &SwarmRt, goal: &SwarmGoal, user: &str) -> ApiResult<()> {
-    let repo = ctx.swarm_repo();
-    repo.set_goal_editor(&goal.id, user)
-        .await
-        .map_err(ApiError)?;
-    if let Some(tid) = &goal.task_id {
-        repo.set_task_prompt_editor(tid, user)
-            .await
-            .map_err(ApiError)?;
-    }
-    Ok(())
 }
 
 async fn delete_goal_h(
@@ -2203,6 +2238,7 @@ async fn delete_goal_h(
 ) -> ApiResult<Json<serde_json::Value>> {
     let cur = ctx.swarm_repo().get_goal(&gid).await.map_err(ApiError)?;
     check(&ctx, &user, &cur.workspace_id, WorkspaceRole::Editor).await?;
+    let _operation = operation_guard(&cur.swarm_id).await;
     ctx.swarm_repo().delete_goal(&gid).await.map_err(ApiError)?;
     Ok(Json(json!({})))
 }
@@ -2263,10 +2299,13 @@ async fn put_standing_goals_h(
             ng
         })
         .collect();
-    // One transaction, errors propagated (S4-24).
+    // One transaction, errors propagated (S4-24); the swarm's prompt editor
+    // is stamped inside it — every task's verification turn runs these
+    // `verify_cmd`s (access-control-6-02).
+    let _operation = operation_guard(&sid).await;
     Ok(Json(
         ctx.swarm_repo()
-            .replace_standing_goals(&sid, goals)
+            .replace_standing_goals_by(&sid, goals, Some(&user.0.id))
             .await
             .map_err(ApiError)?,
     ))

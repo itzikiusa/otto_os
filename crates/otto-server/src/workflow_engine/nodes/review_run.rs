@@ -1,18 +1,351 @@
-//! The `review_run` workflow node, moved verbatim out of
-//! `execute_node`'s match (see `nodes/mod.rs`).
+//! The `review_run` workflow node, moved out of `execute_node`'s match (see
+//! `nodes/mod.rs`). `execute` builds one [`ReviewPlan`] (config, reviewers,
+//! goals, prior run context) and reviews each target in two phases —
+//! [`launch`] (repo check, checkpointed review start) and [`score_target`]
+//! (counts → score → verdict → output). The gate itself is pure and
+//! unit-tested: [`review_score`], [`blended_score`], [`review_verdict`],
+//! [`goals_from_reply`], [`aggregate`] and [`ScoreWeights::from_params`].
 
 use super::super::*;
 use super::NodeCall;
 
+/// Per-severity deductions (percent off 100) over the OPEN findings —
+/// `scoring: { bug, warn, info }`. Defaults (20/5/5) preserve the historical
+/// blocking/advisory formula.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::workflow_engine) struct ScoreWeights {
+    pub(in crate::workflow_engine) bug: i64,
+    pub(in crate::workflow_engine) warn: i64,
+    pub(in crate::workflow_engine) info: i64,
+}
+
+impl Default for ScoreWeights {
+    fn default() -> Self {
+        Self {
+            bug: 20,
+            warn: 5,
+            info: 5,
+        }
+    }
+}
+
+impl ScoreWeights {
+    /// The node's `scoring` overrides over the defaults. A missing or
+    /// non-integer weight keeps its default.
+    pub(in crate::workflow_engine) fn from_params(p: &Value) -> Self {
+        let d = Self::default();
+        let weight = |key: &str, default: i64| -> i64 {
+            p.get("scoring")
+                .and_then(|s| s.get(key))
+                .and_then(Value::as_i64)
+                .unwrap_or(default)
+        };
+        Self {
+            bug: weight("bug", d.bug),
+            warn: weight("warn", d.warn),
+            info: weight("info", d.info),
+        }
+    }
+}
+
+/// The review's own score: 100 minus the weighted OPEN findings, clamped to
+/// 0..=100. An EMPTY diff scores 0, not 100: the formula starts at a perfect
+/// 100 and subtracts findings, so "nothing was reviewed" and "reviewed,
+/// spotless" would produce the same number. Only one of them earned it.
+pub(in crate::workflow_engine) fn review_score(
+    bugs: u64,
+    warns: u64,
+    infos: u64,
+    w: ScoreWeights,
+    no_changes: bool,
+) -> i64 {
+    if no_changes {
+        return 0;
+    }
+    (100 - bugs as i64 * w.bug - warns as i64 * w.warn - infos as i64 * w.info).clamp(0, 100)
+}
+
+/// The gate's score for one target: the review's own score, averaged with
+/// the goals grade when the node has goals (integer mean, rounding down).
+pub(in crate::workflow_engine) fn blended_score(review: i64, goals: Option<i64>) -> i64 {
+    match goals {
+        Some(gs) => (review + gs) / 2,
+        None => review,
+    }
+}
+
+/// Whether one target's review passed, and why (not).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::workflow_engine) struct ReviewVerdict {
+    /// Completed (status `done`) with full reviewer coverage.
+    pub(in crate::workflow_engine) complete: bool,
+    pub(in crate::workflow_engine) passed: bool,
+    pub(in crate::workflow_engine) reason: String,
+}
+
+/// A review must COMPLETE (status "done" with full coverage), have had
+/// something to review, AND clear the threshold to pass. The reasons stay
+/// distinct: an incomplete review (error / timeout / still running) and an
+/// empty diff BOTH produce zero findings, so reporting either as "below
+/// threshold" is nonsense — the score was never the problem.
+pub(in crate::workflow_engine) fn review_verdict(
+    status: &str,
+    coverage_complete: bool,
+    no_changes: bool,
+    score: i64,
+    threshold: i64,
+    base: &str,
+) -> ReviewVerdict {
+    let complete = status == "done" && coverage_complete;
+    let passed = complete && !no_changes && score >= threshold;
+    let reason = if passed {
+        "passed".to_string()
+    } else if !complete {
+        if status == "done" {
+            "review coverage incomplete or summary fallback not allowed".into()
+        } else {
+            format!("review did not complete (status: {status})")
+        }
+    } else if no_changes {
+        format!("empty diff vs {base} — nothing was reviewed")
+    } else {
+        format!("below threshold ({score} < {threshold})")
+    };
+    ReviewVerdict {
+        complete,
+        passed,
+        reason,
+    }
+}
+
+/// Read the goals agent's reply: `(goals_score, goals_detail)`.
+///
+/// The reply is searched for the object the prompt asked for — one with an
+/// overall `score` or a `goals` array — so a quoted `{"name":…}` from a
+/// `package.json` ahead of it can't shadow it. A reply with no such object,
+/// or one without an overall score, is NOT parseable: it keeps the review
+/// score (the goals can't be graded) and says so in the detail, instead of
+/// silently reporting `goals: []` as if no goals were configured.
+pub(in crate::workflow_engine) fn goals_from_reply(
+    reply: &str,
+    review_score: i64,
+) -> (Option<i64>, Value) {
+    let found = otto_core::text::extract_json_where(reply, |v| {
+        v.get("score").and_then(Value::as_i64).is_some()
+            || v.get("goals").is_some_and(Value::is_array)
+    });
+    match found {
+        Some(v) => match v.get("score").and_then(Value::as_i64) {
+            Some(gs) => (
+                Some(gs.clamp(0, 100)),
+                v.get("goals").cloned().unwrap_or(json!([])),
+            ),
+            None => {
+                let mut detail = v
+                    .get("goals")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                detail.push(json!({ "note": "goals eval reply had no overall score" }));
+                (Some(review_score), Value::Array(detail))
+            }
+        },
+        None => (
+            Some(review_score),
+            json!([{ "note": "goals eval reply not parseable" }]),
+        ),
+    }
+}
+
+/// Fold the per-target outputs into the step output: `(output, passed)`.
+///
+/// Single target: its output as is. Several: the FIRST reviewed repo's fields
+/// stay mirrored at the top level (back-compat for single-repo consumers);
+/// the strict union gates multi-repo runs — worst score, pass only when EVERY
+/// target was reviewed and passed — with per-repo detail under `reviews[]`
+/// and every reviewed reference under `repos[]`. `outs` is non-empty.
+pub(in crate::workflow_engine) fn aggregate(
+    outs: Vec<serde_json::Map<String, Value>>,
+    n_targets: usize,
+) -> (serde_json::Map<String, Value>, bool) {
+    let mut out = outs.first().cloned().unwrap_or_default();
+    if n_targets <= 1 {
+        let passed = out.get("passed").and_then(Value::as_bool).unwrap_or(false);
+        return (out, passed);
+    }
+    let agg_score = outs
+        .iter()
+        .filter_map(|o| o.get("score").and_then(Value::as_i64))
+        .min()
+        .unwrap_or(0);
+    let agg_passed = outs.len() == n_targets
+        && outs
+            .iter()
+            .all(|o| o.get("passed").and_then(Value::as_bool).unwrap_or(false));
+    out.insert("score".into(), json!(agg_score));
+    out.insert("passed".into(), json!(agg_passed));
+    // EVERY reviewed reference, in the `repos[]` shape collect_pr_targets
+    // consumes — without this a downstream git_pr would see only the first
+    // repo mirrored at top level and never open the other entries' PRs.
+    let repo_targets: Vec<Value> = outs
+        .iter()
+        .map(|o| {
+            let mut m = serde_json::Map::new();
+            for k in ["repo_id", "worktree", "base"] {
+                if let Some(v) = o.get(k) {
+                    m.insert(k.to_string(), v.clone());
+                }
+            }
+            Value::Object(m)
+        })
+        .collect();
+    out.insert("repos".into(), Value::Array(repo_targets));
+    out.insert(
+        "reviews".into(),
+        Value::Array(outs.into_iter().map(Value::Object).collect()),
+    );
+    (out, agg_passed)
+}
+
+/// What every target of one `review_run` step shares: the node call, the
+/// reviewer config, the goals, the prior run context and the progress-post
+/// label fragments.
+struct ReviewPlan<'a> {
+    ctx: &'a ServerCtx,
+    ws: &'a Workspace,
+    user: &'a User,
+    node: &'a WorkflowNode,
+    input: &'a Value,
+    env: &'a RunEnv,
+    scope: &'a StepScope,
+    session_tx: &'a tokio::sync::mpsc::UnboundedSender<AgentAssociation>,
+    log_tx: &'a tokio::sync::mpsc::UnboundedSender<String>,
+    activity_tx: &'a tokio::sync::mpsc::UnboundedSender<NodeActivity>,
+    progress: &'a ProgressSink,
+    threshold: i64,
+    await_done: bool,
+    timeout_s: u64,
+    mode: otto_core::domain::ReviewMode,
+    providers: Vec<String>,
+    lenses: Vec<String>,
+    check_specs: Vec<(String, String)>,
+    cfg_override: Option<otto_core::api::ReviewConfig>,
+    weights: ScoreWeights,
+    goals: Vec<String>,
+    jira_context: Option<String>,
+    run_context: Option<String>,
+    iter_label: String,
+    /// " · lenses: …", " · providers: …", " · N check(s) …" (each may be empty).
+    label_tail: String,
+    n_targets: usize,
+}
+
+impl ReviewPlan<'_> {
+    fn multi(&self) -> bool {
+        self.n_targets > 1
+    }
+}
+
 pub(in crate::workflow_engine) async fn execute(
     call: NodeCall<'_>,
 ) -> Result<(Value, Vec<String>)> {
+    let p = &call.node.params;
+    // When set, the step itself FAILS if the score is below threshold — so a
+    // downstream "create PR" step is error-skipped unless the review passed.
+    let require_pass = p
+        .get("require_pass")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let mode = review_mode(&call).await;
+    let (targets, logs_pre) = resolve_targets(
+        call.ctx,
+        call.ws,
+        p,
+        &call.input,
+        call.env,
+        call.env.run_cwd.as_str(),
+    )
+    .await?;
+    let (plan, mut logs) = plan_review(&call, mode, targets.len(), logs_pre).await;
+    // Review every target; a per-target failure in the multi-repo case
+    // is logged and skipped (one bad repo never sinks the others), the
+    // single-target case keeps its hard error.
+    let mut outs: Vec<serde_json::Map<String, Value>> = Vec::new();
+    for (t_idx, target) in targets.iter().enumerate() {
+        let Some(launched) = launch(&plan, t_idx, target, &mut logs).await? else {
+            continue;
+        };
+        let status = await_review(
+            plan.ctx,
+            plan.ws,
+            &plan.env.run_id,
+            &launched.review_id,
+            plan.await_done.then_some(plan.timeout_s),
+            plan.session_tx,
+            &launched.tag,
+            &mut logs,
+        )
+        .await?;
+        outs.push(score_target(&plan, &launched, &status, &mut logs).await);
+    }
+    if outs.is_empty() {
+        return Err(otto_core::Error::Upstream(format!(
+            "review_run: no declared repo could be reviewed ({})",
+            logs.join("; ")
+        )));
+    }
+    let (mut out, passed) = aggregate(outs, plan.n_targets);
+    // `require_pass`: fail the step (so downstream gates error-skip) when the
+    // score didn't clear the bar. A failed check surfaces as a blocking
+    // finding from the checks reviewer, which drops the score below it.
+    if require_pass && !passed {
+        let reason = if plan.multi() {
+            "one or more required review targets did not pass".to_string()
+        } else {
+            out.get("reason")
+                .and_then(Value::as_str)
+                .unwrap_or("review did not pass")
+                .to_string()
+        };
+        out.insert(
+            "_workflow_error".into(),
+            json!(format!("review_run: {reason} (require_pass)")),
+        );
+    }
+    Ok((Value::Object(out), logs))
+}
+
+/// R2: the reviewers' mode, logged BEFORE target resolution (which can fail).
+/// Run input > node param > repo config, from `env.run_input`.
+async fn review_mode(call: &NodeCall<'_>) -> otto_core::domain::ReviewMode {
+    let p = &call.node.params;
+    let (mode, mode_src) = match resolve_review_mode_source(&call.env.run_input, p) {
+        Some(r) => r,
+        None => {
+            let rid = p.get("repo_id").and_then(Value::as_str).map(str::trim);
+            let rid: Option<Id> = rid.filter(|s| !s.is_empty()).map(str::to_string);
+            crate::modules::effective_review_mode(call.ctx, rid.as_ref()).await
+        }
+    };
+    let line = format!("review_run: mode {} ({mode_src})", mode.as_str());
+    let _ = call.log_tx.send(line);
+    mode
+}
+
+/// Build the step's shared [`ReviewPlan`] from the node params, the run
+/// input and the run's context files. Returns it with the step's opening
+/// log lines.
+async fn plan_review<'a>(
+    call: &'a NodeCall<'a>,
+    mode: otto_core::domain::ReviewMode,
+    n_targets: usize,
+    mut logs: Vec<String>,
+) -> (ReviewPlan<'a>, Vec<String>) {
     let NodeCall {
         ctx,
         ws,
         user,
         node,
-        input,
         env,
         scope,
         session_tx,
@@ -20,9 +353,8 @@ pub(in crate::workflow_engine) async fn execute(
         activity_tx,
         progress,
         ..
-    } = call;
-    let run_id: &Id = &env.run_id;
-    let run_cwd: &str = env.run_cwd.as_str();
+    } = *call;
+    let input = &call.input;
     let p = &node.params;
     let threshold = p.get("threshold").and_then(Value::as_u64).unwrap_or(80) as i64;
     let await_done = p.get("await").and_then(Value::as_bool).unwrap_or(true);
@@ -32,32 +364,13 @@ pub(in crate::workflow_engine) async fn execute(
     // explicit node param, so the node abandoned reviews that then went on
     // to complete and persist findings minutes later — the run scored those
     // as a clean sweep. Default 5h, node-tunable, with a 60s FLOOR — the
-    // same shape as the human_approval arm above. RUN_WALL_CLOCK_TIMEOUT
-    // (10h) remains the real backstop.
+    // same shape as the human_approval arm. RUN_WALL_CLOCK_TIMEOUT (10h)
+    // remains the real backstop.
     let timeout_s = p
         .get("timeout_s")
         .and_then(Value::as_u64)
         .unwrap_or(18_000)
         .max(60);
-    // R2: which execution mode the reviewers run in. The RUN's own input
-    // wins over the node's param (that is what makes the run dialog an
-    // override); a node param wins over the repo's stored config. Read
-    // from `env.run_input`, never the node input — node inputs lose
-    // run-level keys hop by hop (`assemble_input`).
-    let (mode, mode_src) = match resolve_review_mode_source(&env.run_input, p) {
-        Some(r) => r,
-        None => {
-            // `otto_core::Id` is a plain `String` alias.
-            let rid: Option<Id> = p
-                .get("repo_id")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string);
-            crate::modules::effective_review_mode(ctx, rid.as_ref()).await
-        }
-    };
-    let _ = log_tx.send(format!("review_run: mode {} ({mode_src})", mode.as_str()));
     // Reviewer providers + lenses (skills) — drive the SAME multi-agent
     // engine as PR review (multi-provider × multi-lens, one summarizer that
     // consolidates + scores). Empty → the stored/default PR-review config.
@@ -71,14 +384,6 @@ pub(in crate::workflow_engine) async fn execute(
         }
         l
     };
-    // When set, the step itself FAILS if the score is below threshold — so a
-    // downstream "create PR" step is error-skipped unless the review passed.
-    let require_pass = p
-        .get("require_pass")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let (targets, mut logs_pre) = resolve_targets(ctx, ws, p, &input, env, run_cwd).await?;
-    let multi = targets.len() > 1;
     // Iteration label so a fix→review loop streams "Review #1, #2, …".
     let iter_label = input
         .get("_iteration")
@@ -99,11 +404,67 @@ pub(in crate::workflow_engine) async fn execute(
     // to goals. A safety net for what the implementer's skill may have
     // skipped. From the node's `checks` or the run input's `checks`.
     let check_specs = parse_checks(p.get("checks").or_else(|| input.get("checks")));
+    let cfg_override = review_config(ctx, p, &reviewers, &providers, &lenses, &check_specs).await;
+    let label_tail = label_tail(&reviewers, &lenses, &providers, &check_specs);
+    // Optional goals — assessed by an agent per target and blended in.
+    let goals: Vec<String> = p
+        .get("goals")
+        .and_then(Value::as_array)
+        .or_else(|| input.get("goals").and_then(Value::as_array))
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    let (jira_context, run_context) = prior_run_context(env, p, &mut logs);
+    let plan = ReviewPlan {
+        ctx,
+        ws,
+        user,
+        node,
+        input,
+        env,
+        scope,
+        session_tx,
+        log_tx,
+        activity_tx,
+        progress,
+        threshold,
+        await_done,
+        timeout_s,
+        mode,
+        providers,
+        lenses,
+        check_specs,
+        cfg_override,
+        weights: ScoreWeights::from_params(p),
+        goals,
+        jira_context,
+        run_context,
+        iter_label,
+        label_tail,
+        n_targets,
+    };
+    (plan, logs)
+}
+
+/// The reviewer config override: the rich `reviewers` form, else the flat
+/// providers/lenses form, else `None` (the stored/default PR-review config) —
+/// plus a dedicated "Required checks" reviewer when checks were given.
+async fn review_config(
+    ctx: &ServerCtx,
+    p: &Value,
+    reviewers: &[Value],
+    providers: &[String],
+    lenses: &[String],
+    check_specs: &[(String, String)],
+) -> Option<otto_core::api::ReviewConfig> {
     let mut cfg_override = if !reviewers.is_empty() {
         let default_provider = crate::modules::default_review_provider(ctx).await;
         Some(crate::modules::workflow_review_config_from_json(
             &default_provider,
-            &reviewers,
+            reviewers,
             p.get("summarizer"),
         ))
     } else if providers.is_empty() && lenses.is_empty() {
@@ -112,8 +473,8 @@ pub(in crate::workflow_engine) async fn execute(
         let default_provider = crate::modules::default_review_provider(ctx).await;
         Some(crate::modules::workflow_review_config(
             &default_provider,
-            &providers,
-            &lenses,
+            providers,
+            lenses,
         ))
     };
     // Append a dedicated "Required checks" reviewer that RUNS the commands
@@ -126,11 +487,20 @@ pub(in crate::workflow_engine) async fn execute(
             crate::modules::workflow_review_config(&default_provider, &[], &[])
         });
         cfg.agents
-            .push(checks_review_agent(&default_provider, &check_specs));
+            .push(checks_review_agent(&default_provider, check_specs));
     }
-    // Progress-post label fragments (shared by every target).
+    cfg_override
+}
+
+/// Progress-post label fragments shared by every target.
+fn label_tail(
+    reviewers: &[Value],
+    lenses: &[String],
+    providers: &[String],
+    check_specs: &[(String, String)],
+) -> String {
     let lens_list: Vec<String> = if reviewers.is_empty() {
-        lenses.clone()
+        lenses.to_vec()
     } else {
         reviewers
             .iter()
@@ -161,40 +531,27 @@ pub(in crate::workflow_engine) async fn execute(
             check_specs.len()
         )
     };
-    // Per-severity deductions (percent off 100) over the OPEN findings
-    // — `scoring: { bug, warn, info }`. Defaults (20/5/5) preserve the
-    // historical blocking/advisory formula.
-    let weight = |key: &str, default: i64| -> i64 {
-        p.get("scoring")
-            .and_then(|s| s.get(key))
-            .and_then(Value::as_i64)
-            .unwrap_or(default)
-    };
-    // Optional goals — assessed by an agent per target and blended in.
-    let goals: Vec<String> = p
-        .get("goals")
-        .and_then(Value::as_array)
-        .or_else(|| input.get("goals").and_then(Value::as_array))
-        .map(|a| {
-            a.iter()
-                .filter_map(|v| v.as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default();
+    format!("{lens_txt}{prov_txt}{chk_txt}")
+}
 
-    // What this run already established about the change, handed to the
-    // reviewers.
-    //
-    // Every OTHER node kind gets the run context directory named in its
-    // preamble and reads it; `review_run` is not an agent node, so its
-    // reviewers used to see the diff and nothing else — no ticket, no
-    // brief from the steps that ran before them. They then re-derive the
-    // system from raw hunks, and behavior that is documented, ticketed and
-    // intentional comes back as a defect of whichever change happened to
-    // touch its line. The engine already renders both blocks into every
-    // reviewer prompt (`run_review_core`); only this caller withheld them.
-    //
-    // `include_context: false` opts out.
+/// What this run already established about the change, handed to the
+/// reviewers: `(ticket, step briefs)`.
+///
+/// Every OTHER node kind gets the run context directory named in its
+/// preamble and reads it; `review_run` is not an agent node, so its
+/// reviewers used to see the diff and nothing else — no ticket, no brief
+/// from the steps that ran before them. They then re-derive the system from
+/// raw hunks, and behavior that is documented, ticketed and intentional
+/// comes back as a defect of whichever change happened to touch its line.
+/// The engine already renders both blocks into every reviewer prompt
+/// (`run_review_core`); only this caller withheld them.
+///
+/// `include_context: false` opts out.
+fn prior_run_context(
+    env: &RunEnv,
+    p: &Value,
+    logs: &mut Vec<String>,
+) -> (Option<String>, Option<String>) {
     let want_context = p
         .get("include_context")
         .and_then(Value::as_bool)
@@ -232,7 +589,7 @@ pub(in crate::workflow_engine) async fn execute(
         (None, None)
     };
     if jira_context.is_some() || run_context.is_some() {
-        logs_pre.push(format!(
+        logs.push(format!(
             "review_run: reviewers given prior run context ({}{}{} chars)",
             if jira_context.is_some() {
                 "ticket + "
@@ -248,376 +605,325 @@ pub(in crate::workflow_engine) async fn execute(
                 + run_context.as_ref().map_or(0, |s| s.len()),
         ));
     }
+    (jira_context, run_context)
+}
 
-    // Review every target; a per-target failure in the multi-repo case
-    // is logged and skipped (one bad repo never sinks the others), the
-    // single-target case keeps its hard error.
-    let mut logs: Vec<String> = std::mem::take(&mut logs_pre);
-    let mut outs: Vec<serde_json::Map<String, Value>> = Vec::new();
-    for (t_idx, (repo_id, worktree, want_base, label)) in targets.iter().enumerate() {
-        // Validate the repo exists (clear error if not); the review
-        // engine looks the repo up again by id internally. Its name
-        // labels the per-repo progress lines when the target didn't
-        // carry one (input-published references).
-        let label = match ctx.git_store.get_repo(repo_id).await {
-            Ok(r) if label.is_empty() => r.name,
-            Ok(_) => label.clone(),
-            Err(e) => {
-                let msg = format!("review_run [{label}]: repo: {e}");
-                if multi {
-                    logs.push(msg);
-                    continue;
-                }
-                return Err(otto_core::Error::NotFound(msg));
+/// One target whose review was started (or adopted).
+struct Launched {
+    repo_id: String,
+    worktree: String,
+    review_id: Id,
+    /// The RESOLVED base branch (what was actually reviewed).
+    base: String,
+    no_changes: bool,
+    /// " [label i/n]" in the multi-repo case, else empty.
+    tag: String,
+}
+
+/// Launch phase: validate the repo, post the start line, and start (or adopt,
+/// on a restart) the checkpointed review. `Ok(None)` is a multi-repo target
+/// that was logged and skipped; the single-target case keeps its hard error.
+async fn launch(
+    plan: &ReviewPlan<'_>,
+    t_idx: usize,
+    target: &ReviewTarget,
+    logs: &mut Vec<String>,
+) -> Result<Option<Launched>> {
+    let (repo_id, worktree, want_base, label) = target;
+    let ReviewPlan {
+        ctx,
+        node,
+        input,
+        scope,
+        session_tx,
+        log_tx,
+        progress,
+        threshold,
+        ..
+    } = *plan;
+    let run_id = &plan.env.run_id;
+    let multi = plan.multi();
+    let iter_label = &plan.iter_label;
+    let label_tail = &plan.label_tail;
+    // Validate the repo exists (clear error if not); the review
+    // engine looks the repo up again by id internally. Its name
+    // labels the per-repo progress lines when the target didn't
+    // carry one (input-published references).
+    let label = match ctx.git_store.get_repo(repo_id).await {
+        Ok(r) if label.is_empty() => r.name,
+        Ok(_) => label.clone(),
+        Err(e) => {
+            let msg = format!("review_run [{label}]: repo: {e}");
+            if multi {
+                logs.push(msg);
+                return Ok(None);
             }
-        };
-        let tag = if multi {
-            format!(" [{} {}/{}]", label, t_idx + 1, targets.len())
-        } else {
-            String::new()
-        };
-        if progress.enabled() {
-            progress.post(format!(
-                "🔍 *{iter_label}{tag}* started (pass ≥ {threshold}){lens_txt}{prov_txt}{chk_txt}"
-            ));
+            return Err(otto_core::Error::NotFound(msg));
         }
-        let mut association = loop_checkpoint(
-            node,
-            node.id.split('#').next().unwrap_or(&node.id),
-            scope.iter.unwrap_or(0),
-            t_idx,
-            json!({"params":node.params,"input":input,"iteration":scope.iter,"target":t_idx}),
-        );
-        association.node_id = format!("{}#review.{t_idx}", node.id);
-        association.name = format!("{} — {}", node_display_name(node), label);
-        let prior_review_id = WorkflowsRepo::new(ctx.pool.clone())
-            .checkpoint(run_id, &association.node_id)
-            .await?
-            .and_then(|checkpoint| checkpoint.output)
-            .and_then(|output| {
-                output
-                    .get("review_id")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-            });
-        let (review_id, resolved_base, no_changes) = match crate::modules::run_review_for_branch(
-            ctx,
-            repo_id,
-            worktree,
-            want_base.as_deref(),
-            cfg_override.clone(),
-            jira_context.clone(),
-            run_context.clone(),
-            Some(mode),
-            (run_id, association),
-        )
-        .await
-        {
-            Ok(v) => v,
-            Err(e) => {
-                let msg = format!("review_run{tag}: {e}");
-                if multi {
-                    logs.push(msg);
-                    if progress.enabled() {
-                        progress.post(format!(
-                            "🔍 *{iter_label}{tag}* skipped — {}",
-                            truncate(&e.to_string(), 200)
-                        ));
-                    }
-                    continue;
-                }
-                return Err(e);
-            }
-        };
-        let _ = session_tx.send(AgentAssociation::Review(review_id.clone()));
-        // Publish the RESOLVED branch from here on — the loop harvest,
-        // the repos registry and a downstream git_pr must target what
-        // was actually reviewed, not the pre-resolution wish.
-        let base = resolved_base.branch.clone();
-        let action = if prior_review_id.as_deref() == Some(&review_id) {
-            "adopted"
-        } else {
-            "started"
-        };
-        let line = format!(
-            "review_run{tag}: {action} review {review_id} ({worktree} vs {base}; iteration {})",
-            scope.iter.unwrap_or(0)
-        );
-        let _ = log_tx.send(line.clone());
-        logs.push(line);
-        if no_changes {
-            // Nothing was reviewed. Say so where the run is read — the
-            // step otherwise looks identical to a clean sweep (status
-            // "done", 0 findings) and used to score 100/PASS.
-            logs.push(format!(
-                "review_run{tag}: EMPTY diff vs {base} — 0 reviewers ran; \
-                         this is NOT a clean review. Check the base branch: a run that \
-                         declares the PR's own source branch as the base diffs it against itself."
-            ));
-        }
-        let status = await_review(
-            ctx,
-            ws,
-            run_id,
-            &review_id,
-            await_done.then_some(timeout_s),
-            session_tx,
-            &tag,
-            &mut logs,
-        )
-        .await?;
-        let (total, open, blocker) = crate::modules::review_findings_counts(ctx, &review_id).await;
-        let blocking = blocker as i64;
-        let advisory = (open.saturating_sub(blocker)) as i64;
-        let (bugs, warns, infos) =
-            crate::modules::review_open_counts_by_severity(ctx, &review_id).await;
-        // An EMPTY diff scores 0, not 100: the formula starts at a
-        // perfect 100 and subtracts findings, so "nothing was reviewed"
-        // and "reviewed, spotless" produce the same number. Only one of
-        // them earned it.
-        let review_score = if no_changes {
-            0
-        } else {
-            (100 - bugs as i64 * weight("bug", 20)
-                - warns as i64 * weight("warn", 5)
-                - infos as i64 * weight("info", 5))
-            .clamp(0, 100)
-        };
-        // Goals are assessed against the worktree, so with an empty diff
-        // the agent grades code this run never reviewed and blends a
-        // passing number into the score. Skip it — there is nothing to grade.
-        let (goals_score, goals_detail) = if goals.is_empty() || no_changes {
-            (None, json!([]))
-        } else {
-            // Score goals with the configured summarizer provider (it's the
-            // node's consolidating agent), else the first reviewer provider,
-            // else the workspace/global default — never a bare hardcoded
-            // "claude" that ignores the user's Providers config.
-            let goals_provider = match p
-                .get("summarizer")
-                .and_then(|s| s.get("provider"))
-                .and_then(Value::as_str)
-                .filter(|s| !s.trim().is_empty())
-            {
-                Some(s) => s.to_string(),
-                None => match providers.first() {
-                    Some(s) => s.clone(),
-                    None => crate::modules::default_review_provider(ctx).await,
-                },
-            };
-            let gprompt = format!(
-                        "Assess whether each goal below is met for the repository at `{worktree}` \
-                         (review the code/tests). Reply with ONLY JSON of the form \
-                         {{\"goals\":[{{\"goal\":\"...\",\"met\":true,\"score\":0,\"note\":\"...\"}}],\"score\":0}} \
-                         where each score and the overall score are 0–100.\n\nGoals:\n- {}",
-                        goals.join("\n- ")
-                    );
-            match run_node_agent(
-                ctx,
-                ws,
-                user,
-                node,
-                &env.wf_name,
-                &env.run_id,
-                &goals_provider,
-                None,
-                &gprompt,
-                worktree,
-                None,
-                session_tx,
-                log_tx,
-                activity_tx,
-            )
-            .await
-            {
-                Ok((reply, _sid)) => match extract_json(&reply) {
-                    Some(v) => {
-                        let gs = v
-                            .get("score")
-                            .and_then(Value::as_i64)
-                            .unwrap_or(review_score)
-                            .clamp(0, 100);
-                        (Some(gs), v.get("goals").cloned().unwrap_or(json!([])))
-                    }
-                    None => (
-                        Some(review_score),
-                        json!([{ "note": "goals eval reply not parseable" }]),
-                    ),
-                },
-                Err(e) => {
-                    logs.push(format!("review_run{tag}: goals eval failed: {e}"));
-                    (Some(review_score), json!([{ "note": "goals eval failed" }]))
-                }
-            }
-        };
-        let score = match goals_score {
-            Some(gs) => (review_score + gs) / 2,
-            None => review_score,
-        };
-        // A review must COMPLETE (status "done"), have had something to
-        // review, AND clear the threshold to pass. Keep the reasons
-        // distinct: an incomplete review (error / timeout / still
-        // running) and an empty diff BOTH produce zero findings, so
-        // reporting either as "below threshold" is nonsense — the score
-        // was never the problem.
-        let coverage_complete = ctx
-            .reviews_store
-            .get_review(&review_id)
-            .await
-            .map(|review| {
-                review_coverage_complete(
-                    &review,
-                    p.get("allow_summary_fallback")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false),
-                )
-            })
-            .unwrap_or(false);
-        let complete = status == "done" && coverage_complete;
-        let passed = complete && !no_changes && score >= threshold;
-        let reason = if passed {
-            "passed".to_string()
-        } else if !complete {
-            if status == "done" {
-                "review coverage incomplete or summary fallback not allowed".into()
-            } else {
-                format!("review did not complete (status: {status})")
-            }
-        } else if no_changes {
-            format!("empty diff vs {base} — nothing was reviewed")
-        } else {
-            format!("below threshold ({score} < {threshold})")
-        };
-        logs.push(format!(
-            "review_run{tag}: score {score} (review {review_score}{}) — {reason}",
-            goals_score
-                .map(|g| format!(", goals {g}"))
-                .unwrap_or_default(),
-        ));
-        // Stream the verdict + top findings to the chat thread.
-        let finding_briefs = crate::modules::review_finding_briefs(ctx, &review_id, 10).await;
-        if progress.enabled() {
-            let verdict = if passed {
-                "✅ passed".to_string()
-            } else if !complete {
-                format!("⚠️ review did not complete (status: {status})")
-            } else if no_changes {
-                format!("⚠️ empty diff vs `{base}` — nothing was reviewed")
-            } else {
-                "⚠️ below threshold".to_string()
-            };
-            // Only headline a score for a COMPLETED review that had a
-            // diff — otherwise the "100/100" is an artifact of a review
-            // that never finished or never had anything to look at.
-            let mut msg = if complete && !no_changes {
-                format!("🔍 *{iter_label}{tag}* done — score *{score}/100* (pass ≥ {threshold}) — {verdict}")
-            } else {
-                format!("🔍 *{iter_label}{tag}* — {verdict}")
-            };
-            if no_changes {
-                msg.push_str("\nNo reviewers ran. Check the base branch this run declared.");
-            } else if finding_briefs.is_empty() {
-                msg.push_str("\nFindings: none 🎉");
-            } else {
-                msg.push_str(&format!("\nFindings ({open} open):"));
-                for b in &finding_briefs {
-                    msg.push_str(&format!("\n • {b}"));
-                }
-            }
-            progress.post(msg);
-        }
-        let out = json!({
-            "review_id": review_id, "status": status,
-            // Publish the exact reference reviewed so a downstream git_pr
-            // (or another review) opens the PR on the SAME
-            // repo/branch/worktree — no need to re-type them on the PR
-            // node (design: PR is aware).
-            "repo_id": repo_id, "base": base, "worktree": worktree,
-            "total": total, "open": open, "blocking": blocking, "advisory": advisory,
-            "severity": { "bug": bugs, "warn": warns, "info": infos },
-            "review_score": review_score, "goals_score": goals_score, "goals": goals_detail,
-            // The checks delegated to the reviewer agent (it runs them and
-            // reports failures as findings — see the cfg injection above).
-            "checks_requested": check_specs.iter().map(|(_, c)| c.clone()).collect::<Vec<_>>(),
-            "score": score, "threshold": threshold, "passed": passed,
-            // TRUE ⇒ the diff vs `base` was empty: no reviewer ran and
-            // `total: 0` means "nothing looked at", not "nothing found".
-            // A downstream step that posts or gates on this review must
-            // branch on it rather than on the finding counts.
-            "no_changes": no_changes, "coverage_complete": coverage_complete, "reason": reason,
-            "findings": finding_briefs, "providers": providers, "lenses": lenses,
-        });
-        outs.push(out.as_object().cloned().unwrap_or_default());
-    }
-    if outs.is_empty() {
-        return Err(otto_core::Error::Upstream(format!(
-            "review_run: no declared repo could be reviewed ({})",
-            logs.join("; ")
-        )));
-    }
-    // Aggregate: the FIRST reviewed repo's fields stay mirrored at the
-    // top level (back-compat for single-repo consumers); the strict
-    // union gates multi-repo runs — worst score, pass only when all
-    // passed — with per-repo detail under `reviews[]`.
-    let mut out = outs[0].clone();
-    let (_score, passed) = if multi {
-        let agg_score = outs
-            .iter()
-            .filter_map(|o| o.get("score").and_then(Value::as_i64))
-            .min()
-            .unwrap_or(0);
-        let agg_passed = outs.len() == targets.len()
-            && outs
-                .iter()
-                .all(|o| o.get("passed").and_then(Value::as_bool).unwrap_or(false));
-        out.insert("score".into(), json!(agg_score));
-        out.insert("passed".into(), json!(agg_passed));
-        // EVERY reviewed reference, in the `repos[]` shape
-        // collect_pr_targets consumes — without this a downstream
-        // git_pr would see only the first repo mirrored at top level
-        // and never open the other entries' PRs.
-        let repo_targets: Vec<Value> = outs
-            .iter()
-            .map(|o| {
-                let mut m = serde_json::Map::new();
-                for k in ["repo_id", "worktree", "base"] {
-                    if let Some(v) = o.get(k) {
-                        m.insert(k.to_string(), v.clone());
-                    }
-                }
-                Value::Object(m)
-            })
-            .collect();
-        out.insert("repos".into(), Value::Array(repo_targets));
-        out.insert(
-            "reviews".into(),
-            Value::Array(outs.into_iter().map(Value::Object).collect()),
-        );
-        (agg_score, agg_passed)
-    } else {
-        (
-            out.get("score").and_then(Value::as_i64).unwrap_or(0),
-            out.get("passed").and_then(Value::as_bool).unwrap_or(false),
-        )
     };
-    // `require_pass`: fail the step (so downstream gates error-skip) when the
-    // score didn't clear the bar. A failed check surfaces as a blocking
-    // finding from the checks reviewer, which drops the score below it.
-    if require_pass && !passed {
-        let reason = if multi {
-            "one or more required review targets did not pass".to_string()
-        } else {
-            out.get("reason")
-                .and_then(Value::as_str)
-                .unwrap_or("review did not pass")
-                .to_string()
-        };
-        out.insert(
-            "_workflow_error".into(),
-            json!(format!("review_run: {reason} (require_pass)")),
-        );
+    let tag = if multi {
+        format!(" [{} {}/{}]", label, t_idx + 1, plan.n_targets)
+    } else {
+        String::new()
+    };
+    if progress.enabled() {
+        progress.post(format!(
+            "🔍 *{iter_label}{tag}* started (pass ≥ {threshold}){label_tail}"
+        ));
     }
-    Ok((Value::Object(out), logs))
+    let mut association = loop_checkpoint(
+        node,
+        node.id.split('#').next().unwrap_or(&node.id),
+        scope.iter.unwrap_or(0),
+        t_idx,
+        json!({"params":node.params,"input":input,"iteration":scope.iter,"target":t_idx}),
+    );
+    association.node_id = format!("{}#review.{t_idx}", node.id);
+    association.name = format!("{} — {}", node_display_name(node), label);
+    let prior_review_id = WorkflowsRepo::new(ctx.pool.clone())
+        .checkpoint(run_id, &association.node_id)
+        .await?
+        .and_then(|checkpoint| checkpoint.output)
+        .and_then(|output| {
+            output
+                .get("review_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        });
+    let (review_id, resolved_base, no_changes) = match crate::modules::run_review_for_branch(
+        ctx,
+        repo_id,
+        worktree,
+        want_base.as_deref(),
+        plan.cfg_override.clone(),
+        plan.jira_context.clone(),
+        plan.run_context.clone(),
+        Some(plan.mode),
+        (run_id, association),
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            let msg = format!("review_run{tag}: {e}");
+            if multi {
+                logs.push(msg);
+                if progress.enabled() {
+                    progress.post(format!(
+                        "🔍 *{iter_label}{tag}* skipped — {}",
+                        truncate(&e.to_string(), 200)
+                    ));
+                }
+                return Ok(None);
+            }
+            return Err(e);
+        }
+    };
+    let _ = session_tx.send(AgentAssociation::Review(review_id.clone()));
+    // Publish the RESOLVED branch from here on — the loop harvest,
+    // the repos registry and a downstream git_pr must target what
+    // was actually reviewed, not the pre-resolution wish.
+    let base = resolved_base.branch.clone();
+    let action = if prior_review_id.as_deref() == Some(&review_id) {
+        "adopted"
+    } else {
+        "started"
+    };
+    let line = format!(
+        "review_run{tag}: {action} review {review_id} ({worktree} vs {base}; iteration {})",
+        scope.iter.unwrap_or(0)
+    );
+    let _ = log_tx.send(line.clone());
+    logs.push(line);
+    if no_changes {
+        // Nothing was reviewed. Say so where the run is read — the
+        // step otherwise looks identical to a clean sweep (status
+        // "done", 0 findings) and used to score 100/PASS.
+        logs.push(format!(
+            "review_run{tag}: EMPTY diff vs {base} — 0 reviewers ran; \
+                     this is NOT a clean review. Check the base branch: a run that \
+                     declares the PR's own source branch as the base diffs it against itself."
+        ));
+    }
+    Ok(Some(Launched {
+        repo_id: repo_id.clone(),
+        worktree: worktree.clone(),
+        review_id,
+        base,
+        no_changes,
+        tag,
+    }))
+}
+
+/// Goals phase: grade the goals against the target's worktree with the
+/// configured summarizer provider. `(None, [])` without goals or with an
+/// empty diff — goals graded against code this run never reviewed would
+/// blend a passing number into the score.
+async fn grade_goals(
+    plan: &ReviewPlan<'_>,
+    t: &Launched,
+    review_score: i64,
+    logs: &mut Vec<String>,
+) -> (Option<i64>, Value) {
+    if plan.goals.is_empty() || t.no_changes {
+        return (None, json!([]));
+    }
+    let p = &plan.node.params;
+    // Score goals with the configured summarizer provider (it's the
+    // node's consolidating agent), else the first reviewer provider,
+    // else the workspace/global default — never a bare hardcoded
+    // "claude" that ignores the user's Providers config.
+    let goals_provider = match p
+        .get("summarizer")
+        .and_then(|s| s.get("provider"))
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+    {
+        Some(s) => s.to_string(),
+        None => match plan.providers.first() {
+            Some(s) => s.clone(),
+            None => crate::modules::default_review_provider(plan.ctx).await,
+        },
+    };
+    let gprompt = format!(
+        "Assess whether each goal below is met for the repository at `{}` \
+         (review the code/tests). Reply with ONLY JSON of the form \
+         {{\"goals\":[{{\"goal\":\"...\",\"met\":true,\"score\":0,\"note\":\"...\"}}],\"score\":0}} \
+         where each score and the overall score are 0–100.\n\nGoals:\n- {}",
+        t.worktree,
+        plan.goals.join("\n- ")
+    );
+    match run_node_agent(
+        plan.ctx,
+        plan.ws,
+        plan.user,
+        plan.node,
+        &plan.env.wf_name,
+        &plan.env.run_id,
+        &goals_provider,
+        None,
+        &gprompt,
+        &t.worktree,
+        None,
+        plan.session_tx,
+        plan.log_tx,
+        plan.activity_tx,
+    )
+    .await
+    {
+        Ok((reply, _sid)) => goals_from_reply(&reply, review_score),
+        Err(e) => {
+            logs.push(format!("review_run{}: goals eval failed: {e}", t.tag));
+            (Some(review_score), json!([{ "note": "goals eval failed" }]))
+        }
+    }
+}
+
+/// Score/verdict phase: counts → review score → goals → verdict, the chat
+/// verdict post, and the target's output object.
+async fn score_target(
+    plan: &ReviewPlan<'_>,
+    t: &Launched,
+    status: &str,
+    logs: &mut Vec<String>,
+) -> serde_json::Map<String, Value> {
+    let ctx = plan.ctx;
+    let (threshold, iter_label) = (plan.threshold, &plan.iter_label);
+    let (review_id, base, tag, no_changes) = (&t.review_id, &t.base, &t.tag, t.no_changes);
+    let (total, open, blocker) = crate::modules::review_findings_counts(ctx, review_id).await;
+    let blocking = blocker as i64;
+    let advisory = (open.saturating_sub(blocker)) as i64;
+    let (bugs, warns, infos) = crate::modules::review_open_counts_by_severity(ctx, review_id).await;
+    let review_score = review_score(bugs, warns, infos, plan.weights, no_changes);
+    let (goals_score, goals_detail) = grade_goals(plan, t, review_score, logs).await;
+    let score = blended_score(review_score, goals_score);
+    let coverage_complete = ctx
+        .reviews_store
+        .get_review(review_id)
+        .await
+        .map(|review| {
+            review_coverage_complete(
+                &review,
+                plan.node
+                    .params
+                    .get("allow_summary_fallback")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            )
+        })
+        .unwrap_or(false);
+    let ReviewVerdict {
+        complete,
+        passed,
+        reason,
+    } = review_verdict(
+        status,
+        coverage_complete,
+        no_changes,
+        score,
+        threshold,
+        base,
+    );
+    logs.push(format!(
+        "review_run{tag}: score {score} (review {review_score}{}) — {reason}",
+        goals_score
+            .map(|g| format!(", goals {g}"))
+            .unwrap_or_default(),
+    ));
+    // Stream the verdict + top findings to the chat thread.
+    let finding_briefs = crate::modules::review_finding_briefs(ctx, review_id, 10).await;
+    if plan.progress.enabled() {
+        let verdict = if passed {
+            "✅ passed".to_string()
+        } else if !complete {
+            format!("⚠️ review did not complete (status: {status})")
+        } else if no_changes {
+            format!("⚠️ empty diff vs `{base}` — nothing was reviewed")
+        } else {
+            "⚠️ below threshold".to_string()
+        };
+        // Only headline a score for a COMPLETED review that had a
+        // diff — otherwise the "100/100" is an artifact of a review
+        // that never finished or never had anything to look at.
+        let mut msg = if complete && !no_changes {
+            format!("🔍 *{iter_label}{tag}* done — score *{score}/100* (pass ≥ {threshold}) — {verdict}")
+        } else {
+            format!("🔍 *{iter_label}{tag}* — {verdict}")
+        };
+        if no_changes {
+            msg.push_str("\nNo reviewers ran. Check the base branch this run declared.");
+        } else if finding_briefs.is_empty() {
+            msg.push_str("\nFindings: none 🎉");
+        } else {
+            msg.push_str(&format!("\nFindings ({open} open):"));
+            for b in &finding_briefs {
+                msg.push_str(&format!("\n • {b}"));
+            }
+        }
+        plan.progress.post(msg);
+    }
+    let out = json!({
+        "review_id": review_id, "status": status,
+        // Publish the exact reference reviewed so a downstream git_pr
+        // (or another review) opens the PR on the SAME
+        // repo/branch/worktree — no need to re-type them on the PR
+        // node (design: PR is aware).
+        "repo_id": t.repo_id, "base": base, "worktree": t.worktree,
+        "total": total, "open": open, "blocking": blocking, "advisory": advisory,
+        "severity": { "bug": bugs, "warn": warns, "info": infos },
+        "review_score": review_score, "goals_score": goals_score, "goals": goals_detail,
+        // The checks delegated to the reviewer agent (it runs them and
+        // reports failures as findings — see the cfg injection above).
+        "checks_requested": plan.check_specs.iter().map(|(_, c)| c.clone()).collect::<Vec<_>>(),
+        "score": score, "threshold": threshold, "passed": passed,
+        // TRUE ⇒ the diff vs `base` was empty: no reviewer ran and
+        // `total: 0` means "nothing looked at", not "nothing found".
+        // A downstream step that posts or gates on this review must
+        // branch on it rather than on the finding counts.
+        "no_changes": no_changes, "coverage_complete": coverage_complete, "reason": reason,
+        "findings": finding_briefs, "providers": plan.providers, "lenses": plan.lenses,
+    });
+    out.as_object().cloned().unwrap_or_default()
 }
 
 /// One review target: `(repo_id, worktree, want_base, label)`.

@@ -370,7 +370,7 @@ async fn copy_png_to_clipboard(ctx: &ServerCtx, png: &Path) -> bool {
         }
         Err(e) => tracing::warn!("snips: clipboard sink write failed: {e}"),
     }
-    if matches!(std::env::var("OTTO_E2E").as_deref(), Ok("1") | Ok("true")) {
+    if otto_core::e2e::isolated() {
         return true;
     }
     // The path is passed OUT-OF-BAND as an argv item (`on run argv`) rather

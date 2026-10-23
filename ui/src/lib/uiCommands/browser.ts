@@ -10,11 +10,10 @@
 // attributed confirm the user may remember for the session.
 
 import { registerUiCommands, registerUiState, UiCommandError, whenMounted, type UiCommandCtx } from '../uiCommands';
-import { browser } from '../stores/browser.svelte';
+import { browser, buildSelector } from '../stores/browser.svelte';
 import { ws } from '../stores/workspace.svelte';
 import * as browserApi from '../api/browser';
 import type { BrowserTab } from '../api/types';
-import { buildSelector } from '../../modules/browser/selector';
 import { asUiError, capList, highlightWhenReady, waitFor } from './pagePort';
 
 const PAGE_MAX_CHARS = 20_000;

@@ -173,7 +173,10 @@ What actually crosses the bridge — derived directly from `bridge.rs` and
    - **Short reply** → posted inline (with channel-native formatting:
      Slack `mrkdwn`, Telegram legacy `Markdown`).
    - **Long reply** (> ~1800 chars) → a short head is posted and the full text is
-     attached as `investigation.md`.
+     attached as `investigation.md`. A rate-limited upload is retried; an upload
+     refused for good (Slack `missing_scope`, a group that restricts media, a
+     timeout) still posts the head, ending "⚠️ the full reply could not be
+     attached (…); open the session in Otto for the rest."
    - **Explicit file attachments** the agent wrote on disk are uploaded if it
      wraps the absolute path in `⟦otto-file⟧/abs/path⟦/otto-file⟧`. A
      rate-limited upload is retried once after the channel's `retry after`

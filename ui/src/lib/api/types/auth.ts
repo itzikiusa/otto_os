@@ -104,6 +104,17 @@ export interface AdminSessionRow {
 /** `GET /api/v1/admin/sessions` response — mirrors `AdminSessionsResp` in api.rs. */
 export interface AdminSessionsResp {
   sessions: AdminSessionRow[];
+  /** Opaque cursor for the next (older) page; absent on the last page. */
+  next_cursor?: string | null;
+}
+
+/** `GET /api/v1/admin/sessions` query: unarchived sessions (live + recent
+ *  exited) by default, newest first, `limit` (default 200, max 1000) per page. */
+export interface AdminSessionsQuery {
+  include_archived?: boolean;
+  limit?: number;
+  /** `next_cursor` of the previous page (malformed → 400). */
+  cursor?: string;
 }
 
 /**

@@ -9,6 +9,7 @@
   // Opened via the `findInPage` store (Cmd+F when no terminal is focused).
 
   import { scrollBehavior } from '../motion';
+  import { announceShown } from '../announce.svelte';
   import { untrack } from 'svelte';
   import { findInPage } from '../findinpage.svelte';
   import Icon from './Icon.svelte';
@@ -429,7 +430,7 @@
     />
 
     {#if query}
-      <span class="find-count" aria-live="polite" aria-atomic="true" title={searchError || undefined}>{countLabel}</span>
+      <span class="find-count" use:announceShown={countLabel} title={searchError || undefined}>{countLabel}</span>
       {#if searchError}<button class="btn small" onclick={() => void runSearch()}>Retry</button>{/if}
     {/if}
 

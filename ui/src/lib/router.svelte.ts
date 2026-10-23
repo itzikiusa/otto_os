@@ -15,8 +15,7 @@ import { dropShareToken, storeShareToken, storedShareToken } from './shareTokenS
 import { winKey } from './win';
 import { lsGet, lsSet } from './storage';
 import { isEmbedded } from './desktop';
-import { captureGameInvite } from '../modules/rooms/games/access';
-import { captureRoomInvite } from '../modules/rooms/room-access';
+import { captureGameInvite, captureRoomInvite } from './rooms/invites';
 import { activeNavId } from './sidebar';
 
 // ---------------------------------------------------------------------------

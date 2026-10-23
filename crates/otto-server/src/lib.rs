@@ -68,7 +68,6 @@ pub mod repo_directory;
 pub use otto_automation::report_delivery;
 pub mod resource_sessions;
 pub use otto_review::fallback as review_fallback;
-pub use otto_review::session as review_session;
 use otto_review::summarizer as review_summarizer;
 pub mod game_rooms;
 pub mod rooms;

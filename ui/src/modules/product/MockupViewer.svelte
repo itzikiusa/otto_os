@@ -11,6 +11,7 @@
   //     DOM, since mermaid input is agent/user-controlled).
   // The render box is exposed to a sibling MockupAnnotations overlay so pins sit
   // exactly over the mockup.
+  import { announceShown } from '../../lib/announce.svelte';
   import { onMount } from 'svelte';
   import { renderMermaid } from '../../lib/render/mermaid';
   import { authedBlobUrl, authedText } from '../../lib/api/client';
@@ -95,23 +96,49 @@
 
   // ── Render pipeline — re-runs whenever the attachment OR the source changes ──
   $effect(() => {
-    // Read the attachment id + source so this effect re-runs on change.
-    const a = attachment;
-    const src = source;
-    void renderFor(a, src);
+    // Read the attachment id + source so this effect re-runs on change; the
+    // returned cleanup cancels a pending debounced render.
+    return scheduleRender(attachment, source);
   });
+
+  /** Live edit of a diagram already on screen (the code view's keystrokes):
+   *  debounce, and renderFor keeps the last good SVG meanwhile. Anything else
+   *  renders now. Returns the cleanup that drops a still-pending render. */
+  function scheduleRender(a: ProductAttachment, src: string | null): (() => void) | undefined {
+    if (src !== null && renderedFor === a.id) {
+      const t = setTimeout(() => void renderFor(a, src), LIVE_DEBOUNCE_MS);
+      return () => clearTimeout(t);
+    }
+    void renderFor(a, src);
+    return undefined;
+  }
 
   $effect(() => {
     // Revoke object URLs on unmount.
     return () => revokeCreated();
   });
 
+  /** Attachment id whose Mermaid diagram is on screen (plain, not reactive):
+   *  a source edit of THAT diagram re-renders in place. */
+  let renderedFor: string | null = null;
+  const LIVE_DEBOUNCE_MS = 200;
+  /** A mid-edit parse error, shown under the last good diagram. */
+  let liveError = $state<string | null>(null);
+
   async function renderFor(a: ProductAttachment, src: string | null): Promise<void> {
-    rendering = true;
-    renderError = null;
-    imgUrl = null;
-    htmlContent = null;
-    mermaidSvg = null;
+    // Typing in the code view used to blank the diagram to "Rendering…" and
+    // remount the annotation overlay per keystroke (refetching annotations and
+    // dropping a half-placed pin). Keep the last good SVG while re-rendering.
+    const live = src !== null && renderedFor === a.id && mermaidSvg !== null && classify(a) === 'mermaid';
+    if (!live) {
+      rendering = true;
+      renderError = null;
+      imgUrl = null;
+      htmlContent = null;
+      mermaidSvg = null;
+      renderedFor = null;
+    }
+    liveError = null;
     revokeCreated();
     const myGen = gen;
     try {
@@ -132,21 +159,26 @@
           mermaidSvg = '';
         } else {
           const id = `otto-mermaid-${Date.now()}-${mermaidSeq++}`;
-          const { svg, error } = await renderMermaid(id, text);
-          if (myGen !== gen) return; // superseded while mermaid loaded/rendered
+          const { svg, error, stale } = await renderMermaid(id, text, { isStale: () => myGen !== gen });
+          if (stale || myGen !== gen) return; // superseded while mermaid loaded/rendered
           if (svg === undefined) throw new Error(error ?? 'Diagram error');
           mermaidSvg = svg;
+          renderedFor = a.id;
         }
       } else {
         renderError = `Unsupported mockup type: ${a.mime || 'unknown'}`;
       }
     } catch (e) {
-      renderError = e instanceof Error ? e.message : String(e);
+      if (myGen !== gen) return; // a newer render owns the box
+      const msg = e instanceof Error ? e.message : String(e);
       // A source override means the user is TYPING (code view) — a transient
       // Mermaid parse error is expected mid-edit; show it inline, don't toast.
-      if (src === null) toasts.error('Couldn’t render mockup', renderError);
+      // Mid-edit, the last good diagram (and its pins) stays above the error.
+      if (live) liveError = msg;
+      else renderError = msg;
+      if (src === null) toasts.error('Couldn’t render mockup', msg);
     } finally {
-      rendering = false;
+      if (myGen === gen) rendering = false;
     }
   }
 
@@ -214,6 +246,9 @@
 
     <!-- Pinned-annotation overlay + side note list. Mounted once the render box
          exists so the overlay can anchor to it. -->
+    {#if liveError}
+      <div class="live-err" use:announceShown={liveError}>{liveError}</div>
+    {/if}
     {#if !rendering && !renderError && renderBox}
       <MockupAnnotations attachmentId={attachment.id} box={renderBox} />
     {/if}
@@ -221,6 +256,11 @@
 </div>
 
 <style>
+  .live-err {
+    padding: 4px 8px;
+    font-size: var(--fs-s);
+    color: var(--danger);
+  }
   .viewer {
     flex: 1;
     min-height: 0;

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announce } from '../../lib/announce.svelte';
   import { rowMenu } from '../../lib/rowMenu';
   import { toastError } from '../../lib/toastError';
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
@@ -29,13 +30,7 @@
   import { statusPollMs } from '../../lib/pollBackoff';
   import { confirmProd, isProdEnv } from '../../lib/confirmProd';
   import { athenaIsRead, athenaLeadKeyword } from './athena-sql';
-  import type {
-    AthenaExecution,
-    AthenaQueryState,
-    AthenaTable,
-    AwsAccount,
-    QueryResult,
-  } from '../../lib/api/types';
+  import type { AthenaExecution, AthenaQueryState, AthenaTable, AwsAccount, QueryResult } from '../../lib/api/types';
 
   interface Props {
     account: AwsAccount;
@@ -411,8 +406,8 @@
     try {
       await copyTextOrThrow(text);
       toasts.success(`Copied ${what}`);
-    } catch (e) {
-      toastError('Couldn’t copy', e);
+    } catch {
+      toasts.error('Couldn’t copy', 'The clipboard isn’t available here. Select the text and copy it manually.');
     }
   }
 
@@ -439,6 +434,7 @@
   });
   const loginNeeded = $derived(isLoginRequired(new Error(catError)));
   let treeOpen = $state(!viewport.isMobile);
+  $effect(() => { if (statusUnknown) announce(`Query status unknown. ${statusUnknown}`); });
 </script>
 
 <div class="ath" class:mobile={viewport.isMobile}>
@@ -534,7 +530,7 @@
       <span class="spacer"></span>
       {#if running && qid}
         {#if statusUnknown}
-          <span class="dim" role="status" title={statusUnknown}>Status unknown{pollFails < MAX_POLL_FAILS ? ' · retrying' : ''}</span>
+          <span class="dim" title={statusUnknown}>Status unknown{pollFails < MAX_POLL_FAILS ? ' · retrying' : ''}</span>
           {#if pollFails >= MAX_POLL_FAILS}
             <button class="btn small" onclick={checkAgain}>Check again</button>
           {/if}

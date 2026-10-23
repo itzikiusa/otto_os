@@ -19,8 +19,8 @@ import { toasts } from '../toast.svelte';
 import { toastError } from '../toastError';
 import type { K8sAction, K8sCluster, K8sResourceKind, K8sRow } from '../api/types';
 import type { K8sDrawerTab } from '../stores/k8s.svelte';
-import { ACTIONS, typedConfirm } from '../../modules/kubernetes/actions';
-import { clusterLabel, isKind, kindDef } from '../../modules/kubernetes/k8s-util';
+import { ACTIONS, typedConfirm } from '../k8s/actions';
+import { clusterLabel, isKind, kindDef } from '../k8s/kinds';
 import { parseK8sRoute } from '../k8s/viewState';
 import {
   agentLabel,

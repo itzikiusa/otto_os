@@ -478,7 +478,7 @@ async fn mongo_shell_fallback_preserves_options_and_returns_values() {
                 None,
                 format,
                 None,
-                Box::new(file.reopen().unwrap()),
+                otto_dbviewer::export::ExportWriter::Direct(Box::new(file.reopen().unwrap())),
             )
             .await
             .expect("JSON export");

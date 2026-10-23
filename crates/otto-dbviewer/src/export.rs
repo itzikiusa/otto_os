@@ -22,10 +22,21 @@
 //! [`ExportSink::write_row`] per row, then [`ExportSink::finish`]; the ClickHouse
 //! HTTP path bypasses the row formatter entirely and streams the server's own
 //! `FORMAT` bytes via [`ExportSink::write_raw`].
+//!
+//! The driver side never does IO and never outruns its consumer: the sink's
+//! writer is an [`ExportWriter`], which collects bytes in memory and, once a
+//! 64 KiB chunk is ready, hands it over a BOUNDED channel
+//! ([`ExportSink::pace`], awaited after each row). The consumer is either one
+//! `spawn_blocking` task that owns the destination `File` (export to a path —
+//! no blocking `write(2)` on a runtime worker) or the `/db/export` response
+//! body (a slow client makes the driver wait instead of queueing the whole
+//! result in daemon memory). In flight at most [`EXPORT_CHANNEL_CHUNKS`] ×
+//! [`EXPORT_CHUNK_BYTES`] plus the chunk being filled.
 
 use std::io::Write;
 
 use serde_json::Value;
+use tokio::sync::mpsc;
 
 use crate::types::Column;
 
@@ -213,16 +224,21 @@ impl<W: Write> ExportSink<W> {
     /// Close any open container (the JSON array bracket) and flush. Returns the
     /// accumulated `{rows, bytes}`.
     pub fn finish(mut self) -> std::io::Result<ExportCounts> {
+        self.close_container()?;
+        self.out.flush()?;
+        Ok(self.counts)
+    }
+
+    /// Close the JSON array (an empty result still produces a valid `[]`).
+    fn close_container(&mut self) -> std::io::Result<()> {
         if self.format == ExportFormat::Json {
-            // An empty result still produces a valid `[]`.
             if !self.json_started {
                 self.write_bytes(b"[")?;
                 self.json_started = true;
             }
             self.write_bytes(b"]")?;
         }
-        self.out.flush()?;
-        Ok(self.counts)
+        Ok(())
     }
 
     /// Write a text line plus a trailing `\n`, counting the bytes.
@@ -307,14 +323,123 @@ fn row_object(columns: &[String], row: &[Value]) -> serde_json::Map<String, Valu
         .collect()
 }
 
-/// Open the destination file wrapped in the 64 KiB `BufWriter` that keeps the
-/// streaming exporters' per-row writes from hitting the disk one row at a time,
-/// boxed as the [`crate::driver::Driver::export_to_writer`] sink type. This lets
-/// `export_to_path` be a thin file-opening wrapper over the one streaming writer
-/// path (the HTTP `/db/export` handler passes a channel-backed writer instead).
-pub fn open_file_sink(dest: &std::path::Path) -> std::io::Result<Box<dyn Write + Send>> {
-    let file = std::fs::File::create(dest)?;
-    Ok(Box::new(std::io::BufWriter::with_capacity(64 * 1024, file)))
+/// Bytes an [`ExportWriter`] collects before it hands a chunk to its consumer.
+pub const EXPORT_CHUNK_BYTES: usize = 64 * 1024;
+/// Chunks queued between the driver and the consumer before the driver waits.
+pub const EXPORT_CHANNEL_CHUNKS: usize = 8;
+
+/// The writer behind a driver's [`ExportSink`]. `Channel` (every daemon path)
+/// is an in-memory chunk buffer feeding a bounded channel, so a row write is a
+/// memcpy and [`Self::pace`] applies the consumer's backpressure; `Direct`
+/// wraps any synchronous `io::Write` (tests, embedders) and paces nothing.
+pub enum ExportWriter {
+    Direct(Box<dyn Write + Send>),
+    Channel {
+        buf: Vec<u8>,
+        tx: mpsc::Sender<Vec<u8>>,
+    },
+}
+
+impl ExportWriter {
+    /// A paced writer plus the receiving end of its bounded chunk channel.
+    /// Dropping the writer (the driver returned) ends the receiver's stream; a
+    /// dropped receiver (consumer gone) fails the next hand-off as `BrokenPipe`.
+    pub fn channel() -> (Self, mpsc::Receiver<Vec<u8>>) {
+        let (tx, rx) = mpsc::channel(EXPORT_CHANNEL_CHUNKS);
+        (
+            Self::Channel {
+                buf: Vec::with_capacity(EXPORT_CHUNK_BYTES),
+                tx,
+            },
+            rx,
+        )
+    }
+
+    /// Hand the filled chunk to the consumer, waiting while the channel is
+    /// full. A no-op below [`EXPORT_CHUNK_BYTES`] and for `Direct`.
+    pub async fn pace(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::Channel { buf, tx } if buf.len() >= EXPORT_CHUNK_BYTES => {
+                let chunk = std::mem::replace(buf, Vec::with_capacity(EXPORT_CHUNK_BYTES));
+                tx.send(chunk).await.map_err(|_| closed())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Hand over whatever is left (the last, short chunk) / flush `Direct`.
+    pub async fn close(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::Channel { buf, tx } if !buf.is_empty() => {
+                tx.send(std::mem::take(buf)).await.map_err(|_| closed())
+            }
+            Self::Channel { .. } => Ok(()),
+            Self::Direct(w) => w.flush(),
+        }
+    }
+}
+
+fn closed() -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::BrokenPipe, "export stream closed")
+}
+
+impl From<Box<dyn Write + Send>> for ExportWriter {
+    fn from(w: Box<dyn Write + Send>) -> Self {
+        Self::Direct(w)
+    }
+}
+
+impl Write for ExportWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Direct(w) => w.write(bytes),
+            Self::Channel { buf, .. } => {
+                buf.extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+        }
+    }
+    /// `Channel`: bytes leave through [`ExportWriter::pace`] / `close` only.
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::Direct(w) => w.flush(),
+            Self::Channel { .. } => Ok(()),
+        }
+    }
+}
+
+impl ExportSink<ExportWriter> {
+    /// Await the consumer when a chunk is ready — call after each row / raw
+    /// block, so the driver's read loop runs at the consumer's pace.
+    pub async fn pace(&mut self) -> std::io::Result<()> {
+        self.out.pace().await
+    }
+
+    /// [`ExportSink::finish`], then hand the last chunk to the consumer.
+    pub async fn finish_paced(mut self) -> std::io::Result<ExportCounts> {
+        self.close_container()?;
+        self.out.close().await?;
+        Ok(self.counts)
+    }
+}
+
+/// Drain an export channel into a fresh file at `dest` on the BLOCKING pool:
+/// `File::create` and every `write(2)` happen here, never on a runtime worker
+/// (a slow, external or network volume stalls this thread, not the runtime).
+/// Returns when the writer side is dropped (the export finished or failed).
+pub async fn drain_to_file(
+    dest: std::path::PathBuf,
+    mut rx: mpsc::Receiver<Vec<u8>>,
+) -> std::io::Result<()> {
+    tokio::task::spawn_blocking(move || {
+        let mut file = std::fs::File::create(&dest)?;
+        while let Some(chunk) = rx.blocking_recv() {
+            file.write_all(&chunk)?;
+        }
+        file.flush()
+    })
+    .await
+    .map_err(std::io::Error::other)?
 }
 
 /// Last-resort fallback writer for the trait-default `export_to_writer`: take an
@@ -322,8 +447,8 @@ pub fn open_file_sink(dest: &std::path::Path) -> std::io::Result<Box<dyn Write +
 /// over `w`. This is NOT streaming — the whole result is in memory by the time
 /// we're here — and only used by engines without a native row stream (Redis),
 /// bounded by the caller's row cap.
-pub fn write_buffered_result_to(
-    w: Box<dyn Write + Send>,
+pub fn write_buffered_result_to<W: Write>(
+    w: W,
     format: ExportFormat,
     result: &crate::types::QueryResult,
 ) -> std::io::Result<ExportCounts> {
@@ -558,5 +683,68 @@ mod tests {
         assert_eq!(String::from_utf8(buf).unwrap(), "a,b\n1,2\n");
         assert_eq!(counts.bytes, 8);
         assert_eq!(counts.rows, 1);
+    }
+
+    /// backend-performance-6-01: a consumer that stops reading makes the
+    /// driver's row loop WAIT once the bounded channel is full, instead of
+    /// queueing the whole (uncapped) result in daemon memory.
+    #[tokio::test]
+    async fn a_stalled_consumer_bounds_what_the_export_buffers() {
+        let (w, mut rx) = ExportWriter::channel();
+        let mut sink = ExportSink::new(w, ExportFormat::Csv);
+        let row = vec![json!("x".repeat(1000))];
+        let mut written = 0usize;
+        // 100k rows ≈ 100 MB if nothing pushed back; the consumer reads nothing.
+        let produce = async {
+            for _ in 0..100_000 {
+                sink.write_row(&row).unwrap();
+                sink.pace().await.unwrap();
+                written += 1;
+            }
+        };
+        let stalled = tokio::time::timeout(std::time::Duration::from_millis(200), produce).await;
+        assert!(
+            stalled.is_err(),
+            "the producer must block on a full channel"
+        );
+        // 8 queued chunks + the one waiting to be queued, each at most one row
+        // past the 64 KiB threshold — independent of the 100 MB on offer.
+        let bound = (EXPORT_CHANNEL_CHUNKS + 1) * (EXPORT_CHUNK_BYTES + 1001);
+        assert!(
+            written * 1001 <= bound,
+            "{written} rows ({} bytes) buffered past the {bound}-byte bound",
+            written * 1001
+        );
+        // Draining frees the producer; every queued byte arrives in order.
+        let mut queued = 0usize;
+        while let Ok(chunk) = rx.try_recv() {
+            assert!(chunk.len() >= EXPORT_CHUNK_BYTES);
+            queued += 1;
+        }
+        assert_eq!(
+            queued, EXPORT_CHANNEL_CHUNKS,
+            "exactly a full channel was queued"
+        );
+    }
+
+    #[tokio::test]
+    async fn drain_to_file_writes_every_chunk_then_the_short_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("out.csv");
+        let (w, rx) = ExportWriter::channel();
+        let file = tokio::spawn(drain_to_file(dest.clone(), rx));
+        let mut sink = ExportSink::new(w, ExportFormat::CsvWithNames);
+        sink.write_header(&cols(&["n"])).unwrap();
+        for n in 0..50_000 {
+            sink.write_row(&[json!(n)]).unwrap();
+            sink.pace().await.unwrap();
+        }
+        let counts = sink.finish_paced().await.unwrap();
+        file.await.unwrap().unwrap();
+        let text = std::fs::read_to_string(&dest).unwrap();
+        assert_eq!(counts.rows, 50_000);
+        assert_eq!(text.len() as u64, counts.bytes);
+        assert!(text.starts_with("n\n0\n1\n"));
+        assert!(text.ends_with("\n49999\n"));
     }
 }

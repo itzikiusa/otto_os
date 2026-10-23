@@ -1,6 +1,7 @@
 <script lang="ts">
   // SourceSearch — unified tracker issue (Jira / Linear) / Confluence page picker.
   // Mirrors the structure and CSS of JiraIssuePicker.svelte.
+  import { announceShown } from '../../lib/announce.svelte';
   import { listConfluenceSpaces, listIssueProjects, searchConfluence, searchIssues } from '../../lib/api/issues';
   import type { IssueProject, IssueProviderKind, IssueSummary } from '../../lib/api/types';
   import { truncatedNote } from '../../lib/listingPage';
@@ -382,7 +383,7 @@
 {/if}
 
 {#if filterError}
-  <div role="alert">Couldn’t load the filters. {filterError}</div>
+  <div use:announceShown={{ text: `Couldn’t load the filters. ${filterError}`, assertive: true }}>Couldn’t load the filters. {filterError}</div>
   <button class="btn small" onclick={() => sourceKind === 'jira' ? void loadProjects(accountId) : void loadSpaces(accountId)}>Retry filters</button>
 {/if}
 
@@ -449,7 +450,7 @@
 </div>
 
 {#if searchError}
-  <div role="alert">Search failed. {searchError}</div>
+  <div use:announceShown={{ text: `Couldn’t search. ${searchError}`, assertive: true }}>Couldn’t search. {searchError}</div>
   <button class="btn small" onclick={() => retrySearch?.()}>Retry search</button>
 {/if}
 

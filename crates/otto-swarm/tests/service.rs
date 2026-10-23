@@ -97,7 +97,7 @@ async fn update_swarm_is_a_partial_patch_and_null_clears_a_budget() {
 
     // Absent keys stay; present keys change.
     let u = svc
-        .update_swarm(&s.id, req::<UpdateSwarmReq>(json!({"name": "B"})))
+        .update_swarm(&s.id, req::<UpdateSwarmReq>(json!({"name": "B"})), &user())
         .await
         .unwrap();
     assert_eq!(u.name, "B");
@@ -110,6 +110,7 @@ async fn update_swarm_is_a_partial_patch_and_null_clears_a_budget() {
         .update_swarm(
             &s.id,
             req(json!({"max_total_runs": null, "max_cost_usd": 7.5})),
+            &user(),
         )
         .await
         .unwrap();
@@ -129,7 +130,11 @@ async fn status_active_does_not_clear_a_budget_pause_reason() {
         .await
         .unwrap();
     let err = svc
-        .update_swarm(&s.id, req::<UpdateSwarmReq>(json!({"status": "active"})))
+        .update_swarm(
+            &s.id,
+            req::<UpdateSwarmReq>(json!({"status": "active"})),
+            &user(),
+        )
         .await
         .expect_err("active patch must not clear a pause reason");
     let held = svc.repo.get_swarm(&s.id).await.unwrap();

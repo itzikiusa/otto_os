@@ -8,6 +8,9 @@ license.workspace = true
 otto-core = { workspace = true }
 otto-pty = { workspace = true }
 otto-sandbox = { workspace = true }
+# The one Claude transcript layout + cwd encoder (`roots::encode_cwd`,
+# `TranscriptRoots::claude_session_file`) behind `claude_pty::session_jsonl_path`.
+otto-transcript = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

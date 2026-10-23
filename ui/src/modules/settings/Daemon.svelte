@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announce } from '../../lib/announce.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import { sectionLabel } from './sections';
   import { settingsSaveErrorText } from './ownerOnly';
@@ -203,6 +204,10 @@
       saving = false;
     }
   }
+
+  // a11y-6-01: announce at the state edge — a status element inserted
+  // together with its text is not read by VoiceOver/WebKit.
+  $effect(() => { if (dirty) announce('Unsaved changes — Save to apply them.'); });
 </script>
 
 <div class="settings-section">
@@ -227,7 +232,7 @@
   {:else if loadError}
     <LoadState what="daemon settings" error={loadError} empty onretry={() => void load()} />
   {:else}
-    {#if dirty}<p class="unsaved" role="status">Unsaved changes — Save to apply them.</p>{/if}
+    {#if dirty}<p class="unsaved">Unsaved changes — Save to apply them.</p>{/if}
     <h2 class="section-title first">Network</h2>
     <div class="card pad dm-card">
       <SettingToggle label="Enable network listener (binds 0.0.0.0)" checked={enabled} onchange={(v) => { enabled = v; }}>

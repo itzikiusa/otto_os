@@ -369,6 +369,15 @@ git/Jira identity, and that person can open it:
   `swarm_tasks.prompt_updated_by`); an Editor who edits Alice's task and runs it
   acts as themselves, never as Alice. A status, priority, assignee or order move
   changes nothing;
+- text **one level up** counts the same way: a person who changes the project's
+  name, description or goal, or adds/edits a **project goal**, is stamped as the
+  project's prompt editor (`swarm_projects.prompt_updated_by`); one who changes
+  the swarm's description or replaces/edits its **standing goals** (their
+  `verify_cmd` runs in every task's verification) as the swarm's
+  (`swarms.prompt_updated_by`). The **most recent** of the task's, project's and
+  swarm's editors wins; untouched work still runs as its originator. The stamp
+  is written in the same UPDATE / transaction as the text, and goal writes hold
+  the swarm's operation lock, so text never runs under its previous editor;
 - otherwise a task a person added (board, API, Product) runs as that person
   (`task.created_by`), and a channel-trigger launch as the person who set the
   trigger up (the swarm's creator once that user is gone);
@@ -382,10 +391,26 @@ git/Jira identity, and that person can open it:
   Admin) may write its schedule **directive**;
 - the **swarm creator** only when no person originated the work.
 
-Verification (verify/fix) turns of a task act as the same originator. Sessions are
-reused per **(agent, acting user)**: Bob's turn never resumes the session an agent
-opened for Alice. Session access is unchanged (owner, workspace Admin or root), so
-the originator — not only the swarm creator — can open their turns.
+Verification (verify/fix) turns of a task act as the same person (both turn
+kinds share `run::acting_user`); goals copied from project / standing templates
+keep the template's author. Sessions are reused per **(agent, acting user)**: Bob's turn never resumes the session an agent
+opened for Alice. Both the reuse lookup and a new session's `created_by` come from
+one `run::TurnSession` built from `acting_user`, so they cannot disagree.
+
+A turn's brief is submitted through the one session submit path
+(`SessionManager::submit_prompt_while` with `SubmitOpts::VERIFIED`, via
+`engine::submit_turn_prompt`): strict TUI wait, then — under the session's submit
+lock — paste until echoed, Enter and re-Enter. The run's guard
+(`engine::run_guard`: the run's DB status plus its cancel flag) is checked during
+the wait and before every write, so a run stopped mid-submit types nothing more.
+There is no other swarm paste → Enter path: the old `engine::submit_run_prompt` /
+`send_run_input` pair is gone, and `tests/swarm_router.rs` drives
+`submit_turn_prompt` itself (a broadcast fired inside its paste → Enter window still
+lands as its own submission; a stopped run types nothing). Session access is unchanged (owner, workspace Admin or root), so
+the originator — not only the swarm creator — can open their turns. The Runs
+list and Run Inspector offer **Open session** only for a session you can open
+(your own, or as root / a workspace Admin); otherwise the button is disabled and
+its tooltip says whose it is.
 
 ### 5.4 Graph (`AgentGraph.svelte`)
 
@@ -557,7 +582,7 @@ authoritative spec is `docs/contracts/api.md` (#59–#86 + "Swarm lifecycle") an
 | 63 | `DELETE /swarm/swarms/{sid}` | editor | → 204 |
 | 64 | `GET /swarm/presets` | member | → `SwarmPreset[]` |
 | 65 | `GET /swarm/swarms/{sid}/agents` | viewer | → `SwarmAgent[]` |
-| 66 | `POST /swarm/swarms/{sid}/agents` | editor | `CreateAgentReq` → `SwarmAgent` |
+| 66 | `POST /swarm/swarms/{sid}/agents` | editor; creator / ws admin / root to set prompt, soul, provider, model, cwd mode or a schedule directive | `CreateAgentReq` → `SwarmAgent` |
 | 67 | `PATCH /swarm/agents/{aid}` | editor; creator / ws admin / root to change prompt (`scope_md`, `specialization`), soul, provider, model or `cwd_mode` (403 otherwise) | `UpdateAgentReq` → `SwarmAgent` |
 | 68 | `DELETE /swarm/agents/{aid}` | editor | → 204 |
 | 70 | `GET /swarm/swarms/{sid}/projects` | viewer | → `SwarmProject[]` |
@@ -756,11 +781,19 @@ post + notice rather than re-run forever.
   **directive**: a scheduled turn has no task, runs as the swarm's creator and
   executes the directive as its prompt (the personal-agent schedule rule). Name,
   title, skills, the schedule's cadence / time / enabled flag (and clearing it),
-  status, order and the reporting line stay Editor.
+  status, order and the reporting line stay Editor. **Hiring** follows the same
+  rule against a blank agent: an Editor who is not the creator may hire a plain
+  agent (name, title, reports-to, skills, avatar, a library soul, a cadence
+  without directive, the swarm's default provider), but a hire with a prompt,
+  inline soul, non-default provider / model / cwd mode or a directive is 403. The
+  Agent editor shows those fields read-only, with the owner note, to anyone who
+  can't change them.
 - **Turns act as their originator, not the creator.** A task an Editor adds — or
   rewrites, or gives a goal — runs with that Editor's identity and credentials
-  (§5.3), as does a channel trigger they set up, so adding or editing work on
-  someone else's swarm never borrows their MCP token, connections or accounts.
+  (§5.3), as does a channel trigger they set up — and so does work under project
+  or swarm text they last rewrote (project brief and goals, swarm description,
+  standing goals) — so adding or editing work on someone else's swarm never
+  borrows their MCP token, connections or accounts.
 - **Workspace isolation.** Swarms, agents, projects, tasks, runs, and board
   messages all carry `workspace_id`; the listing and graph queries scope to it.
   WS `swarm_*` events are only delivered to members with viewer+ on that

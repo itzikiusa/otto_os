@@ -128,7 +128,7 @@ impl Default for RunEngine {
 }
 
 fn is_e2e() -> bool {
-    matches!(std::env::var("OTTO_E2E").as_deref(), Ok("1") | Ok("true"))
+    otto_core::e2e::isolated()
 }
 
 /// Drive the run forward until it reaches `AwaitingApproval` or a terminal state.

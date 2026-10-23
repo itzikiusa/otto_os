@@ -13,7 +13,7 @@
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { escapeHtml } from '../../lib/html';
-  import { copyText } from '../../lib/clipboard';
+  import { COPY_FAILED_BODY, copyText } from '../../lib/clipboard';
 
   type LogMode = 'all' | 'tail';
 
@@ -137,7 +137,7 @@
   async function copyLog(): Promise<void> {
     const ok = await copyText(visibleContent);
     if (ok) toasts.success(filter.trim() ? 'Matching lines copied' : 'Log copied');
-    else toasts.error('Couldn’t copy the log', 'The clipboard write was blocked.');
+    else toasts.error('Couldn’t copy the log', COPY_FAILED_BODY);
   }
 
   $effect(() => {

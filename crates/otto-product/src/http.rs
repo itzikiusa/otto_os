@@ -969,11 +969,16 @@ async fn list_testcase_runs<S: ProductCtx>(
 ) -> ApiResult<Response> {
     ws_from_story(&ctx, &user, &sid, WorkspaceRole::Viewer).await?;
     let runs = ctx.product_repo().list_testcase_runs(&sid).await?;
-    let mut details = Vec::with_capacity(runs.len());
-    for run in runs {
-        let cases = ctx.product_repo().list_testcases(&run.id).await?;
-        details.push(crate::types::ProductTestcaseRunDetail { run, cases });
-    }
+    // One batched query for every run's cases (it was one query per run).
+    let ids: Vec<Id> = runs.iter().map(|r| r.id.clone()).collect();
+    let mut by_run = ctx.product_repo().list_testcases_for_runs(&ids).await?;
+    let details: Vec<_> = runs
+        .into_iter()
+        .map(|run| {
+            let cases = by_run.remove(&run.id).unwrap_or_default();
+            crate::types::ProductTestcaseRunDetail { run, cases }
+        })
+        .collect();
     Ok(Json(details).into_response())
 }
 

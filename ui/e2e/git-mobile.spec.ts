@@ -307,10 +307,11 @@ test('shell: repo tab strip + new-tab + sub-route nav + toolbar fit', async ({ p
   await expect(page.locator('.git-tabs')).toBeVisible({ timeout: 15_000 });
   await expect(page.locator('.git-tab-new')).toBeVisible();
   await expectElemFits(page, '.git-tab-new');
-  // The per-repo sub-route nav (graph/changes/history/prs/review) renders with all
-  // tabs and never overflows the document (it scrolls within its own strip).
+  // The per-repo sub-route nav (graph/prs/review; Focus is a page-level view)
+  // renders with all tabs and never overflows the document (it scrolls within
+  // its own strip).
   await expect(page.locator('.rv-tabs')).toBeVisible({ timeout: 15_000 });
-  expect(await page.locator('.rv-tabs .rv-tab').count()).toBeGreaterThanOrEqual(4);
+  await expect(page.locator('.rv-tabs .rv-tab')).toContainText(['Graph', 'Pull requests', 'Review']);
   // The git verbs (Fetch/Pull/Push/…) live in the page header's actions.
   await expect(page.locator('.ph-actions').first()).toBeVisible();
   await expectFitsWidth(page);

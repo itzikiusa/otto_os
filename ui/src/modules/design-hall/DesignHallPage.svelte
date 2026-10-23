@@ -7,6 +7,7 @@
   //   #/design/a/<id>         one artifact        #/design/p/<id>      a project
   //   #/design/studio/<id>    a studio            #/design/story/<id>  designs for a story
   //   #/design/brand          Brand Kit           #/design/learned[/rules|/memory]
+  import { onDestroy } from 'svelte';
   import { router } from '../../lib/router.svelte';
   import { toastError } from '../../lib/toastError';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
@@ -28,8 +29,12 @@
   import { parseDesignRoute, studioInfo } from './model';
   import { IMPORT_ACCEPT, importDesignFile } from './create';
   import { library } from './library.svelte';
+  import { releaseModelCache } from './studio3d/sources';
 
   const route = $derived(parseDesignRoute(router.parts));
+  // Leaving the Design Hall: hand back the cached 3D model blobs (each pins
+  // its bytes until revoked; the ones a live scene still holds go on release).
+  onDestroy(releaseModelCache);
   const canView = $derived(auth.can('design', 'view'));
   const canEdit = $derived(auth.can('design', 'edit'));
 

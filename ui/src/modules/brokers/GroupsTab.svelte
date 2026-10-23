@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announce } from '../../lib/announce.svelte';
   import { plural } from '../../lib/plural';
   import { toastError } from '../../lib/toastError';
   import { LIST_PANE, loadPaneWidth } from '../../lib/paneResizer';
@@ -302,6 +303,9 @@
       resetting = false;
     }
   }
+  // Spoken at the state edge through the shell's always-mounted announcer: a
+  // live region inserted together with its text is not read (WebKit/VoiceOver).
+  $effect(() => { if (resetError) announce(resetError, { assertive: true }); });
 </script>
 
 <div class="groups-container">
@@ -494,7 +498,7 @@
         </button>
       </div>
 
-      {#if resetError}<p class="muted small" role="status">{resetError}</p>{/if}
+      {#if resetError}<p class="muted small">{resetError}</p>{/if}
 
       {#if dryRunResult}<!-- Dry-run preview table -->
         <ResetWarning preview={dryRunResult} group={selected} />

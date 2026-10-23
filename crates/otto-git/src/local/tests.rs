@@ -3218,3 +3218,36 @@ async fn squash_abort_keeps_unrelated_uncommitted_edits() {
         "hello\nUNRELATED\n"
     );
 }
+
+/// EH-6-07: the `Working` diff falls back to cached+worktree only for an
+/// unborn HEAD. A HEAD naming a missing object used to come back as a partial
+/// "everything is new" diff (or an empty one) instead of an error.
+#[tokio::test]
+async fn working_diff_errors_on_a_broken_head_and_still_handles_an_unborn_one() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("repo");
+    std::fs::create_dir(&dir).unwrap();
+    sh_git(&dir, &["init", "-b", "main"]);
+    sh_git(&dir, &["config", "user.email", "otto@test.local"]);
+    sh_git(&dir, &["config", "user.name", "Otto Test"]);
+    sh_git(&dir, &["config", "commit.gpgsign", "false"]);
+    write(&dir, "a.txt", "fresh\n");
+    sh_git(&dir, &["add", "a.txt"]);
+    let git = LocalGit::new(&dir);
+    // Unborn: the staged file is the whole diff, with and without a path.
+    let unborn = git.diff(DiffTarget::Working, None).await.unwrap();
+    assert!(unborn.files.iter().any(|f| f.path == "a.txt"), "{unborn:?}");
+    let scoped = git.diff(DiffTarget::Working, Some("a.txt")).await.unwrap();
+    assert!(scoped.files.iter().any(|f| f.path == "a.txt"));
+
+    sh_git(&dir, &["commit", "-m", "first"]);
+    write(&dir, "a.txt", "changed\n");
+    write(
+        &dir,
+        ".git/refs/heads/main",
+        "1111111111111111111111111111111111111111\n",
+    );
+    let git = LocalGit::new(&dir);
+    let err = git.diff(DiffTarget::Working, None).await.unwrap_err();
+    assert!(err.to_string().contains("bad object"), "{err}");
+}

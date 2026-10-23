@@ -20,6 +20,7 @@ use otto_core::api::CreateSessionReq;
 use otto_core::domain::{
     ReviewAgentState, ReviewFinding, SessionKind, SessionStatus, User, Workspace,
 };
+use otto_sessions::submit::submit_prompt;
 use otto_sessions::SessionManager;
 use otto_state::ReviewsRepo;
 use tokio::sync::Mutex;
@@ -856,12 +857,6 @@ pub async fn run_agent_session_with_recovery(
         }
     }
 }
-
-// The prompt-submit primitive lives in otto-sessions (architecture-4-01):
-// these re-exports keep the old `otto_review::session::*` paths compiling.
-pub use otto_sessions::submit::{
-    bracketed_paste, dispatched, submit_prompt, wait_for_tui, wait_for_tui_strict, PASTE_TO_ENTER,
-};
 
 /// How long an injected claude prompt gets to LAND in the transcript before the
 /// caller re-injects (first window) or fails the attempt (second window).

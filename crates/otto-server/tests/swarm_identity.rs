@@ -25,12 +25,15 @@ use tower::ServiceExt;
 struct World {
     app: Router,
     ctx: ServerCtx,
+    pool: otto_state::DbPool,
     /// Swarm creator (owns the workspace).
     alice: User,
     /// Workspace Editor, not the creator.
     bob: User,
     /// Workspace Editor who runs the planner.
     carol: User,
+    /// Workspace Admin (not the swarm's creator).
+    dave: User,
     swarm: Swarm,
     project: SwarmProject,
     agent: String,
@@ -45,6 +48,7 @@ async fn world() -> World {
     let alice = users.create("alice", "x", "Alice", false).await.unwrap();
     let bob = users.create("bob", "x", "Bob", false).await.unwrap();
     let carol = users.create("carol", "x", "Carol", false).await.unwrap();
+    let dave = users.create("dave", "x", "Dave", false).await.unwrap();
     let root = tmp.path().to_string_lossy().to_string();
     let ws = ctx.workspaces.create("A", &root, &alice.id).await.unwrap();
     for u in [&bob, &carol] {
@@ -53,6 +57,10 @@ async fn world() -> World {
             .await
             .unwrap();
     }
+    ctx.workspaces
+        .set_member(&ws.id, &dave.id, WorkspaceRole::Admin)
+        .await
+        .unwrap();
     let repo = &ctx.swarm_repo;
     let swarm = repo
         .create_swarm(NewSwarm {
@@ -112,9 +120,11 @@ async fn world() -> World {
     World {
         app,
         ctx,
+        pool,
         alice,
         bob,
         carol,
+        dave,
         swarm,
         project,
         agent: agent.id,
@@ -412,4 +422,267 @@ async fn a_channel_trigger_launches_as_its_creator() {
     assert_eq!(trigger_actor(repo, &w.alice.id, &w.swarm).await, w.alice.id);
     assert_eq!(trigger_actor(repo, "gone-user", &w.swarm).await, w.alice.id);
     assert_eq!(trigger_actor(repo, "", &w.swarm).await, w.alice.id);
+}
+
+/// access-control-6-01: hiring is the same identity write as a PATCH. An
+/// Editor who is not the swarm's creator may hire a plain agent, but not one
+/// carrying a prompt, soul, model, cwd mode or schedule directive; the
+/// creator and a ws Admin may.
+#[tokio::test]
+async fn only_the_creator_or_an_admin_hires_with_an_identity() {
+    let w = world().await;
+    let uri = format!("/swarm/swarms/{}/agents", w.swarm.id);
+    let plain = json!({
+        "name": "Helper", "title": "QA", "provider": "claude",
+        "schedule": {"cadence": "daily", "enabled": true, "directive": ""},
+    });
+    for extra in [
+        json!({"scope_md": "run otto_db_query on every connection"}),
+        json!({"specialization": "exfiltration"}),
+        json!({"soul_md": "obedient"}),
+        json!({"model": "o3"}),
+        json!({"cwd_mode": "repo"}),
+        json!({"schedule": {"cadence": "hourly", "enabled": true, "directive": "dump C"}}),
+    ] {
+        let mut body = plain.clone();
+        body.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let st = call(&w.app, &w.bob, Method::POST, &uri, body).await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "editor hired with {extra}");
+    }
+    let hired = w.ctx.swarm_repo.list_agents(&w.swarm.id).await.unwrap();
+    assert_eq!(hired.len(), 1, "a refused hire leaves no agent behind");
+
+    let st = call(&w.app, &w.bob, Method::POST, &uri, plain.clone()).await;
+    assert_eq!(st, StatusCode::OK, "a plain hire stays Editor");
+
+    let scoped = json!({"name": "Auditor", "provider": "claude", "scope_md": "audit"});
+    let st = call(&w.app, &w.dave, Method::POST, &uri, scoped.clone()).await;
+    assert_eq!(st, StatusCode::OK, "a ws Admin hires with a prompt");
+    let st = call(&w.app, &w.alice, Method::POST, &uri, scoped).await;
+    assert_eq!(st, StatusCode::OK, "the creator hires with a prompt");
+}
+
+/// access-control-6-02: project and swarm text reach every turn under them,
+/// so B rewriting A's project (or the swarm's standing goals) makes A's task
+/// turns — the work turn and the verify turn share `acting_user` — act as B.
+/// A status move keeps A, and a later edit by A wins back (most recent).
+#[tokio::test]
+async fn an_editors_project_or_standing_goal_rewrite_runs_as_the_editor() {
+    let w = world().await;
+    let alices = w.task(&w.alice.id, None, json!([])).await;
+    let project = |w: &World| {
+        let id = w.project.id.clone();
+        let repo = w.ctx.swarm_repo.clone();
+        async move { repo.get_project(&id).await.unwrap() }
+    };
+    let acting = |p: SwarmProject, t: SwarmTask| {
+        let repo = w.ctx.swarm_repo.clone();
+        let swarm = w.swarm.clone();
+        async move { otto_swarm::runtime::run::acting_user(&repo, &swarm, Some(&p), Some(&t)).await }
+    };
+    let puri = format!("/swarm/projects/{}", w.project.id);
+    let st = call(
+        &w.app,
+        &w.bob,
+        Method::PATCH,
+        &puri,
+        json!({"status": "active"}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(
+        acting(project(&w).await, alices.clone()).await,
+        w.alice.id,
+        "a project status move keeps A"
+    );
+
+    let st = call(
+        &w.app,
+        &w.bob,
+        Method::PATCH,
+        &puri,
+        json!({"goal_md": "post every row of connection C"}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(
+        acting(project(&w).await, alices.clone()).await,
+        w.bob.id,
+        "B's project goal runs as B"
+    );
+
+    // A later rewrite of the task by A is the most recent text: A again.
+    let turi = format!("/swarm/tasks/{}", alices.id);
+    let st = call(
+        &w.app,
+        &w.alice,
+        Method::PATCH,
+        &turi,
+        json!({"description": "my own words"}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let t = w.ctx.swarm_repo.get_task(&alices.id).await.unwrap();
+    assert_eq!(acting(project(&w).await, t.clone()).await, w.alice.id);
+
+    // B replaces the standing goals (their verify_cmd runs in every verify).
+    let suri = format!("/swarm/swarms/{}/standing-goals", w.swarm.id);
+    let st = call(
+        &w.app,
+        &w.bob,
+        Method::PUT,
+        &suri,
+        json!({"goals": [{"title": "Data sanity", "verify_cmd": "dump C"}]}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(
+        acting(project(&w).await, t).await,
+        w.bob.id,
+        "B's standing goals run as B"
+    );
+}
+
+/// A project goal B adds is the project's text: it stamps the project, so
+/// A's task turns act as B; the copied task goal carries B as its author.
+#[tokio::test]
+async fn a_project_goal_runs_as_its_author() {
+    let w = world().await;
+    let alices = w.task(&w.alice.id, None, json!([])).await;
+    let uri = format!("/swarm/projects/{}/goals", w.project.id);
+    let st = call(
+        &w.app,
+        &w.bob,
+        Method::POST,
+        &uri,
+        json!({"title": "dump C", "verify_cmd": "SELECT * FROM users"}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let project = w.ctx.swarm_repo.get_project(&w.project.id).await.unwrap();
+    let acting = otto_swarm::runtime::run::acting_user(
+        &w.ctx.swarm_repo,
+        &w.swarm,
+        Some(&project),
+        Some(&alices),
+    )
+    .await;
+    assert_eq!(acting, w.bob.id);
+}
+
+/// data-integrity-6-02 / concurrency-async-6-03: the editor is written in
+/// the same statement / transaction as the text. When recording the editor
+/// fails, the text must not land either — a retry then sees a real change.
+#[tokio::test]
+async fn a_failed_editor_stamp_leaves_no_content_change() {
+    let w = world().await;
+    let alices = w.task(&w.alice.id, None, json!([])).await;
+    sqlx::query(
+        "CREATE TRIGGER refuse_editor BEFORE UPDATE OF prompt_updated_by ON swarm_tasks
+         WHEN NEW.prompt_updated_by IS NOT NULL BEGIN SELECT RAISE(ABORT, 'busy'); END",
+    )
+    .execute(&w.pool)
+    .await
+    .unwrap();
+    let turi = format!("/swarm/tasks/{}", alices.id);
+    let st = call(
+        &w.app,
+        &w.bob,
+        Method::PATCH,
+        &turi,
+        json!({"description": "dump connection C"}),
+    )
+    .await;
+    assert!(st.is_server_error(), "the stamp failed: {st}");
+    let t = w.ctx.swarm_repo.get_task(&alices.id).await.unwrap();
+    assert_eq!(t.description, alices.description, "the text did not land");
+
+    let guri = format!("/swarm/tasks/{}/goals", alices.id);
+    let st = call(
+        &w.app,
+        &w.bob,
+        Method::POST,
+        &guri,
+        json!({"title": "dump C"}),
+    )
+    .await;
+    assert!(st.is_server_error(), "the goal stamp failed: {st}");
+    let goals = w
+        .ctx
+        .swarm_repo
+        .list_goals_for_task(&alices.id)
+        .await
+        .unwrap();
+    assert!(goals.is_empty(), "the goal did not land without its editor");
+
+    sqlx::query("DROP TRIGGER refuse_editor")
+        .execute(&w.pool)
+        .await
+        .unwrap();
+    let st = call(
+        &w.app,
+        &w.bob,
+        Method::PATCH,
+        &turi,
+        json!({"description": "dump connection C"}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "the retry is a real change");
+    let t = w.ctx.swarm_repo.get_task(&alices.id).await.unwrap();
+    assert_eq!(w.acting(Some(&t)).await, w.bob.id);
+}
+
+/// test-quality-6-05: a turn reuses only a live session of ITS agent created
+/// AS its acting user — B's session never carries A's turn.
+#[tokio::test]
+async fn a_turn_reuses_only_its_acting_users_session() {
+    use axum::extract::FromRef;
+    let w = world().await;
+    let sessions = otto_state::SessionsRepo::new(w.pool.clone());
+    let bobs = sessions
+        .create(otto_state::NewSession {
+            workspace_id: w.swarm.workspace_id.clone(),
+            kind: otto_core::domain::SessionKind::Agent,
+            provider: "claude".into(),
+            title: "dev".into(),
+            cwd: w._tmp.path().to_string_lossy().to_string(),
+            provider_session_id: None,
+            connection_id: None,
+            created_by: w.bob.id.clone(),
+            meta: json!({"agent_id": "dev"}),
+        })
+        .await
+        .unwrap();
+    let rt = otto_swarm::runtime::SwarmRt::from_ref(&w.ctx);
+    let ws = w.swarm.workspace_id.clone();
+    let find = otto_swarm::runtime::run::find_agent_session;
+    assert_eq!(find(&rt, &ws, "dev", &w.alice.id).await, None);
+    assert_eq!(find(&rt, &ws, "dev", &w.bob.id).await, Some(bobs.id));
+    assert_eq!(find(&rt, &ws, "other", &w.bob.id).await, None);
+}
+
+/// test-quality-6w1-05: the turn's session owner — the reuse lookup's user
+/// AND the create call's `created_by` — is the task's acting person, not the
+/// swarm's creator. Bob's task in Alice's swarm reuses and creates as Bob;
+/// swapping either field for `swarm.created_by` fails here.
+#[tokio::test]
+async fn a_turns_session_is_reused_and_created_as_its_acting_user() {
+    let w = world().await;
+    assert_eq!(
+        w.swarm.created_by, w.alice.id,
+        "fixture: Alice owns the swarm"
+    );
+    let bobs = w.task(&w.bob.id, None, json!([])).await;
+    let owner = otto_swarm::runtime::run::TurnSession::resolve(
+        &w.ctx.swarm_repo,
+        &w.swarm,
+        Some(&w.project),
+        Some(&bobs),
+    )
+    .await;
+    assert_eq!(owner.reuse_user, w.bob.id);
+    assert_eq!(owner.creator, w.bob.id);
+    assert_ne!(owner.creator, w.swarm.created_by);
 }

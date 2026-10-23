@@ -553,6 +553,7 @@ mod tests {
             "api_run_automation",
             "delete_scheduled_task",
             "assistant_forget",
+            "query_db",
         ] {
             assert!(tool_is_irreversible(t), "{t}");
             assert!(tool_is_dangerous(t), "{t} must be approval-gated");

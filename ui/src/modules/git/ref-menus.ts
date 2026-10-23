@@ -2,7 +2,7 @@
 // menu (the "▾ +N" multi-ref popover): branch folder grouping, ref-chip
 // types and ordering, and the middle-ellipsis split of long branch names.
 // No component state — GraphView passes refs in and renders what comes back.
-import type { RefBranch, RefsResp } from '../../lib/api/types';
+import type { RefBranch, RefsResp, StashInfo } from '../../lib/api/types';
 
 // Group a flat branch list into top-level "folders" by first path segment, so
 // feature/PROJ-1, feature/PROJ-2 nest under a single collapsible "feature" group.
@@ -119,4 +119,29 @@ export function midParts(label: string): { head: string; tail: string } | null {
     }
   }
   return { head: label.slice(0, cut), tail: label.slice(cut) };
+}
+
+/** Every branch carries its tip sha (a daemon predating `RefBranch.sha` does
+ *  not): only then are the typed refs trusted over the log decorations. */
+export function haveTypedRefs(r: RefsResp | null): boolean {
+  return r !== null && [...r.local, ...r.remote].every((b) => !!b.sha);
+}
+
+/** HEAD's sha from the typed refs (the checked-out branch's tip), so a
+ *  checkout moves the "you are here" marker without re-reading the log.
+ *  `null` = unknown or detached — the log decorations decide then. */
+export function headShaOf(r: RefsResp | null): string | null {
+  if (!r || !haveTypedRefs(r)) return null;
+  return r.local.find((b) => b.is_current)?.sha ?? null;
+}
+
+/** Strip the "WIP on <branch>: " / "On <branch>: " prefix for a compact label. */
+export function stashShortMsg(s: StashInfo): string {
+  const m = s.message.replace(/^(WIP on|On)\s+[^:]+:\s*/, '').trim();
+  return m || s.message;
+}
+
+/** Strip trailing slashes so worktree paths match registered repo paths. */
+export function normPath(p: string): string {
+  return p.replace(/\/+$/, '');
 }

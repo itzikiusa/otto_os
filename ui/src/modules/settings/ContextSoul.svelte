@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announce } from '../../lib/announce.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import { NO_WORKSPACE } from '../../lib/labels';
   import { toastError } from '../../lib/toastError';
@@ -226,6 +227,10 @@
       materializing = null;
     }
   }
+
+  // a11y-6-01: announce at the state edge — a status element inserted
+  // together with its text is not read by VoiceOver/WebKit.
+  $effect(() => { if (dirty && editing && !error) announce('Unsaved changes — Save to apply them.'); });
 </script>
 
 <div class="settings-section">
@@ -262,7 +267,7 @@
       <span class="path mono" title={ws.current?.root_path}>{ws.current?.root_path}</span>
     </p>
     {#if !editing}<p class="readonly"><strong>Read-only.</strong> Workspace administrators can edit shared context.</p>{/if}
-    {#if dirty && editing && !error}<p class="form-note unsaved" role="status">Unsaved changes — Save to apply them.</p>{/if}
+    {#if dirty && editing && !error}<p class="form-note unsaved">Unsaved changes — Save to apply them.</p>{/if}
     {#if error}
       <div class="save-err" role="alert">
         <p><strong>Couldn’t save workspace context.</strong> <span class="dim">{error}</span></p>
@@ -385,7 +390,7 @@
         <SettingToggle
           label="Inject a repo map (tree-sitter)"
           hint="A map of the repo’s most-referenced symbols (tree-sitter + PageRank), so agents find their way faster."
-          checked={cfg.include_repo_map ?? false}
+          checked={!!cfg.include_repo_map}
           testid="context-repomap"
           onchange={(v) => { if (cfg) cfg.include_repo_map = v; }}
         />

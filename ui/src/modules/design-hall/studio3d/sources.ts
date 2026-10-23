@@ -29,30 +29,123 @@ export function versionFor(a: DesignArtifact, sel: OttoUri['selector']): string 
   }
 }
 
-const modelCache = new Map<string, Promise<string>>();
+/** Model blobs kept warm when no scene holds them (most recently used). */
+const MODEL_CACHE_MAX = 12;
 
-/**
- * Blob URL for a gltf reference. Cached per reference for the session (a
- * model's bytes are immutable per version; `@latest` re-resolves on reload).
- */
-export function resolveModelRef(ref: string): Promise<string> {
-  let p = modelCache.get(ref);
-  if (!p) {
-    p = loadModel(ref);
-    modelCache.set(ref, p);
-    p.catch(() => modelCache.delete(ref));
-  }
-  return p;
+interface ModelEntry {
+  url: Promise<string>;
+  /** Live scenes holding this blob (never revoked while > 0). */
+  holders: number;
+  /** Dropped from the cache while held: revoke on the last release. */
+  orphan: boolean;
 }
 
-async function loadModel(ref: string): Promise<string> {
-  const uri = parseOttoUri(ref);
-  if (uri) {
-    const d = await getArtifact(uri.artifactId);
-    const c = await fetchContent(uri.artifactId, { version: versionFor(d.artifact, uri.selector) ?? undefined, asText: false });
-    if (!c.blobUrl) throw new Error('The model has no content');
-    return c.blobUrl;
+/**
+ * Model blob URLs by resolved version (`<artifact>@<version id>`, so
+ * `@latest` and `@approved` follow new versions and a version is fetched
+ * once whichever selector named it). A small LRU: an entry no live scene
+ * holds is revoked once more than {@link MODEL_CACHE_MAX} are cached, and
+ * {@link releaseModelCache} (Design Hall teardown) revokes them all — a GLB
+ * pins its bytes in the WebContent process until its URL is revoked.
+ */
+const modelCache = new Map<string, ModelEntry>();
+
+function revoke(e: ModelEntry): void {
+  void e.url.then((u) => {
+    if (u.startsWith('blob:')) URL.revokeObjectURL(u);
+  }, () => {});
+}
+
+function trimModelCache(): void {
+  for (const [key, e] of modelCache) {
+    if (modelCache.size <= MODEL_CACHE_MAX) return;
+    if (e.holders > 0) continue;
+    modelCache.delete(key);
+    revoke(e);
   }
+}
+
+/** The cache key a reference resolves to, and how to load its bytes. */
+async function resolveKey(ref: string): Promise<{ key: string; load: () => Promise<string> }> {
+  const uri = parseOttoUri(ref);
+  if (!uri) return { key: `legacy:${ref}`, load: () => loadLegacy(ref) };
+  const a = (await getArtifact(uri.artifactId)).artifact;
+  const version = versionFor(a, uri.selector) ?? a.head_version_id ?? 'head';
+  return { key: `${a.id}@${version}`, load: () => loadModel(a.id, version === 'head' ? null : version) };
+}
+
+async function acquire(ref: string): Promise<{ key: string; entry: ModelEntry }> {
+  const { key, load } = await resolveKey(ref);
+  let entry = modelCache.get(key);
+  if (entry) modelCache.delete(key); // re-inserted below: most recently used
+  else {
+    entry = { url: load(), holders: 0, orphan: false };
+    const mine = entry;
+    entry.url.catch(() => {
+      if (modelCache.get(key) === mine) modelCache.delete(key);
+    });
+  }
+  entry.holders += 1;
+  modelCache.set(key, entry);
+  trimModelCache();
+  return { key, entry };
+}
+
+function releaseEntry(key: string, entry: ModelEntry): void {
+  entry.holders = Math.max(0, entry.holders - 1);
+  if (entry.holders > 0) return;
+  if (entry.orphan) revoke(entry);
+  else if (modelCache.get(key) === entry) trimModelCache();
+}
+
+/**
+ * A scene's hold on its model blobs: `resolve(ref)` gives a blob URL for a
+ * gltf reference that stays valid until `release()` (the scene's teardown —
+ * `embed.destroy()`, ArtifactStage and Studio3D unmount).
+ */
+export function modelScope(): { resolve: (ref: string) => Promise<string>; release: () => void } {
+  const held: { key: string; entry: ModelEntry }[] = [];
+  let released = false;
+  return {
+    async resolve(ref) {
+      const h = await acquire(ref);
+      if (released) {
+        // Resolved after the scene went away: don't pin it.
+        releaseEntry(h.key, h.entry);
+        throw new Error('The 3D view was closed');
+      }
+      held.push(h);
+      return h.entry.url;
+    },
+    release() {
+      released = true;
+      for (const h of held.splice(0)) releaseEntry(h.key, h.entry);
+    },
+  };
+}
+
+/** Design Hall teardown: revoke every cached model blob no scene holds, and
+ *  revoke the held ones as their scenes release them. */
+export function releaseModelCache(): void {
+  for (const e of modelCache.values()) {
+    if (e.holders > 0) e.orphan = true;
+    else revoke(e);
+  }
+  modelCache.clear();
+}
+
+/** Cached entries (tests). */
+export function modelCacheSize(): number {
+  return modelCache.size;
+}
+
+async function loadModel(id: string, version: string | null): Promise<string> {
+  const c = await fetchContent(id, { version: version ?? undefined, asText: false });
+  if (!c.blobUrl) throw new Error('The model has no content');
+  return c.blobUrl;
+}
+
+async function loadLegacy(ref: string): Promise<string> {
   // Legacy bare id: a Design Hall artifact first, else a Product attachment.
   try {
     const c = await fetchContent(ref, { asText: false });

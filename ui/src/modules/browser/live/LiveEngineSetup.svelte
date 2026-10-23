@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announce, announceShown } from '../../../lib/announce.svelte';
   // The one-time "Enable live browsing" step. Outside the desktop app a live
   // tab runs in a daemon-owned Chromium, downloaded once — never silently:
   // this pane says what is downloaded, how big it is and where it runs, and
@@ -60,6 +61,11 @@
       `Otto downloads ${lighter ? 'the lighter Chromium engine' : 'Chrome for Testing'} once (about ${formatBytes(browserLive.downloadBytes(build))}) and checks it against a pinned checksum. ` +
       `Every request the pages make goes through Otto’s network guard.`,
   );
+  // Spoken at the state edge through the shell's always-mounted announcer: a
+  // live region inserted together with its text is not read (WebKit/VoiceOver).
+  const unpinned = $derived(!pinned(build));
+  $effect(() => { if (unpinned) announce('This Otto build has no checksum for that engine, so it can’t be downloaded safely.', { assertive: true }); });
+  $effect(() => { if (startError) announce(`Couldn’t start the download: ${startError}`, { assertive: true }); });
 </script>
 
 <div class="setup" data-testid="live-engine-setup">
@@ -73,9 +79,12 @@
       onretry={() => void browserLive.load()}
     />
   {:else if engine === 'installing'}
-    <div class="progress-card" role="status" aria-live="polite">
+    <!-- Inserted with its text, so no live region: the heading's phase is
+         spoken by the action (each phase once — not every percent tick; the
+         progressbar carries the number). -->
+    <div class="progress-card">
       <div class="icon-tile"><Icon name="download" size={24} /></div>
-      <h3>{phase ?? `Downloading ${jobName}…`}</h3>
+      <h3 use:announceShown={phase ?? `Downloading ${jobName}…`}>{phase ?? `Downloading ${jobName}…`}</h3>
       <div
         class="bar"
         role="progressbar"
@@ -142,10 +151,10 @@
         </label>
       {/if}
       {#if !pinned(build)}
-        <p class="field-error" role="alert">This Otto build has no checksum for that engine, so it can’t be downloaded safely.</p>
+        <p class="field-error">This Otto build has no checksum for that engine, so it can’t be downloaded safely.</p>
       {/if}
       {#if startError}
-        <p class="field-error" role="alert">Couldn’t start the download: {startError}</p>
+        <p class="field-error">Couldn’t start the download: {startError}</p>
       {/if}
       {#if onreader}
         <button class="btn ghost" onclick={onreader}>Use Reader view instead</button>

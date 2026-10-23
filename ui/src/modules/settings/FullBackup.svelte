@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announce } from '../../lib/announce.svelte';
   import { onDestroy } from 'svelte';
   import RestorePreviewPanel from './RestorePreviewPanel.svelte';
   import { api } from '../../lib/api/client';
@@ -87,6 +88,11 @@
       }
     } finally { if (seq === generation) busy = false; }
   }
+
+  // a11y-6-01: announce at the state edge — a status element inserted
+  // together with its text is not read by VoiceOver/WebKit.
+  $effect(() => { if (downloaded) announce(`Downloaded ${downloaded.records} records and ${downloaded.files} files.`); });
+  $effect(() => { if (result) announce(`Restored ${result.records_inserted} records and ${result.files_restored} files.`); });
 </script>
 
 <section class="full-backup" aria-label="Otto data backup">
@@ -97,7 +103,7 @@
     contents remain in their original locations. The archive lists exclusions and anything that needs reconnecting.</p>
   <div class="controls"><button class="btn primary" disabled={exporting || busy} onclick={exportArchive}><Icon name="download" size={13} /> {exporting ? 'Preparing archive…' : 'Download data archive'}</button></div>
   {#if downloaded}
-    <div class="notice" role="status">Downloaded {downloaded.records} records and {downloaded.files} files.</div>
+    <div class="notice">Downloaded {downloaded.records} records and {downloaded.files} files.</div>
     {#if downloaded.excluded.length}<details><summary>Excluded from this archive ({downloaded.excluded.length})</summary><ul>{#each downloaded.excluded as item}<li>{item}</li>{/each}</ul></details>{/if}
     {#if downloaded.reconnect.length}<details><summary>Reconnect after restore ({downloaded.reconnect.length})</summary><ul>{#each downloaded.reconnect as item}<li>{item}</li>{/each}</ul></details>{/if}
   {/if}
@@ -126,7 +132,7 @@
     <RestorePreviewPanel {preview} {busy} bind:reviewed onrestore={restoreArchive} />
   {/if}
   {#if result}
-    <div class="notice" role="status">Restored {result.records_inserted} records and {result.files_restored} files.
+    <div class="notice">Restored {result.records_inserted} records and {result.files_restored} files.
       Kept {result.records_skipped} existing records and {result.files_skipped} existing files.</div>
     {#if result.reconnect.length}<ul>{#each result.reconnect as item}<li>{item}</li>{/each}</ul>{/if}
   {/if}

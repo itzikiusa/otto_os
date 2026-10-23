@@ -271,7 +271,11 @@ confirmations still apply.
   step. Modules whose view state lives in a component (Workflows, the Brokers
   sub-tabs, Scheduled Tasks, Swarm, Goal Loops) expose it through a small
   **page port** (`uiCommands/pagePort.ts`) that the page binds while it's
-  mounted.
+  mounted. Modules whose state lives in a module store bind that store to a
+  typed port (`uiCommands/vaultPort.ts`, bound by the Vault page;
+  `uiCommands/homePort.ts`, bound by the Home store): the handler navigates to
+  the page, waits for the port and drives the store through it, so
+  `ui/src/lib` never imports a module (a hard `ui-guards` rule).
 
 ## 8. Capabilities and limits
 

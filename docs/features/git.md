@@ -49,7 +49,7 @@ Each repo tab has its own sub-tabs: **Graph**, **Changes**, **History**,
 | Git page (repo tabs + landing) | `ui/src/modules/git/GitPage.svelte`, `GitTabs.svelte` |
 | One repo (toolbar + Graph/Changes/History/PRs/Review tabs) | `ui/src/modules/git/RepoView.svelte` |
 | Stage/commit/discard panel | `ui/src/modules/git/WipPanel.svelte` |
-| Commit graph + branch chips + context menus | `ui/src/modules/git/GraphView.svelte` |
+| Commit graph + branch chips + context menus | `ui/src/modules/git/GraphView.svelte` (the shell: wiring and the windowed commit rows); `ui/src/modules/git/graph/RefSidebar.svelte` + `RefSideLists.svelte` (refs tree: branches, tags, stashes, worktrees, submodules, drag-to-merge via `refDrag.svelte.ts`); `graph/CommitDetailPane.svelte` (commit header + diff, or the WIP panel); `graph/RefPopover.svelte` + `refPopoverState.svelte.ts` (the "▾ +N" ref popover, viewport-clamped); `graph/RefChip.svelte` (one ref chip); `graph/graphData.svelte.ts` (refs, paged history, side lists, refresh) + `graphSync.svelte.ts` (auto-fetch re-sync, throttled background reload); `graph/graphRefIndex.svelte.ts` (chip classification, HEAD, lane names, landed marks); `graph/graphViewport.svelte.ts` (lane layout, row window, jump-to-commit); `graph/graphSelection.svelte.ts` (selection, deferred diff, reveal, deep link); `graph/graphActions.svelte.ts` (checkout, branch / tag / stash / worktree / submodule actions, pull, rebase); `graph/graphMenus.ts` (the commit / branch / tag / stash / worktree / submodule menus) |
 | Diff rendering | `ui/src/modules/git/DiffViewer.svelte` |
 | Create-PR sheet | `ui/src/modules/git/CreatePr.svelte` |
 | PR list / PR detail | `ui/src/modules/git/PrList.svelte`, `PrDetail.svelte` |
@@ -218,6 +218,15 @@ From the Git landing page, **Add Repository** offers three modes:
   an error. Fetch never checks out or pulls a branch.
 - Every local branch displays its own ahead/behind counts in the branch tree and
   graph chips, updated after fetch without having to check it out.
+- Reorder tabs by dragging, or from the keyboard: **⌥⇧←/→** on a focused tab,
+  or **Move left / Move right** in the tab's right-click menu.
+- A push, checkout or pull from any surface — the toolbar, the graph, Create pull
+  request or an agent command — goes through the git store
+  (`ui/src/lib/stores/git.svelte.ts` over the typed client `ui/src/lib/api/git.ts`),
+  which stores the fresh status and re-syncs every open graph of that repo. A
+  rejected push from the toolbar offers **Pull** or **Force push with lease**.
+- Long lists (the WIP file trees, the side-panel file tree, the PR file nav, blame)
+  mount only the rows in view; **⌘F** still searches every row.
 
 ### The Graph view & branch chips
 

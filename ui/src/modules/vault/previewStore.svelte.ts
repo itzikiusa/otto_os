@@ -11,6 +11,10 @@ import { vault } from './vault.svelte';
 const cache = new Map<string, Promise<VaultNote>>();
 const CACHE_MAX = 100;
 const DELAY_MS = 300;
+/** The popover's id: the hovered / focused anchor points `aria-describedby`
+ *  at it while it shows, so a screen reader reads the preview with the link
+ *  (accessibility-responsive-6-07). */
+export const LINK_PREVIEW_ID = 'vault-link-preview';
 
 export interface PreviewState {
   path: string;
@@ -41,11 +45,20 @@ class LinkPreview {
   current = $state<PreviewState | null>(null);
   #timer: ReturnType<typeof setTimeout> | undefined;
   #generation = 0;
+  #anchor: Element | null = null;
+
+  /** Point (or stop pointing) the anchor's `aria-describedby` at the popover. */
+  #describe(anchor: Element | null): void {
+    if (this.#anchor && this.#anchor !== anchor) this.#anchor.removeAttribute?.('aria-describedby');
+    this.#anchor = anchor;
+    anchor?.setAttribute?.('aria-describedby', LINK_PREVIEW_ID);
+  }
 
   show(anchor: Element, path: string | null | undefined): void {
     clearTimeout(this.#timer);
     const request = ++this.#generation;
     this.current = null;
+    this.#describe(null);
     if (!path || !/\.md$/i.test(path) || !vault.current || path === vault.notePath) return;
     const workspace = vault.wsId, id = vault.current.id;
     const current = () => request === this.#generation && vault.wsId === workspace && vault.current?.id === id;
@@ -56,6 +69,7 @@ class LinkPreview {
         path, x: r.left, y: r.bottom + 6, top: r.top,
         title: path.split('/').pop()!.replace(/\.md$/i, ''), type: null, text: '', state: 'loading',
       };
+      this.#describe(anchor);
       load(path).then(
         (n) => {
           if (!current() || this.current?.path !== path) return;
@@ -68,10 +82,13 @@ class LinkPreview {
     }, DELAY_MS);
   }
 
+  /** Close the preview. Never moves focus: Escape dismisses the popover and
+   *  leaves the reader on the link they were on. */
   hide(): void {
     this.#generation++;
     clearTimeout(this.#timer);
     this.current = null;
+    this.#describe(null);
   }
 }
 

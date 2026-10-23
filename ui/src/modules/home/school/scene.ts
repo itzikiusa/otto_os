@@ -10,8 +10,10 @@
 //  • Static kit pieces are InstancedMeshes (one per kit mesh), so a 40-desk
 //    room costs a handful of draw calls; only the pieces the runtime paints or
 //    moves (screens, board title, door leaves, door signs) are per-instance.
-//  • Only the room you are in is built. The loop runs while the box is on
-//    screen and active, at ≤ 30 fps; the corridor renders on demand.
+//  • Only the room you are in is built. Frames are requested only while
+//    there is work (scene/loop.ts — a flight, held keys, a live room, a door
+//    swing), at ≤ 30 fps, and never while the box is inactive, off screen or
+//    the document hidden (lib/three/stage.ts `demandLoop`/`watchVisibility`).
 //  • Light: daylight from the window wall (a low sun, soft shadows) plus warm
 //    ceiling lamps; the dark theme is evening — moonlight, lamps up, the
 //    window views dimmed. Rooms and the corridor have a ceiling.
@@ -46,7 +48,8 @@ import { paintBoardTitle, paintPlate, paintSign } from './scene/paint.ts';
 import { createPicker } from './scene/pick.ts';
 import { EYE, FPS_MS, ease, type Character, type Door, type Obj, type Painted, type Three } from './scene/shared.ts';
 import { aimRoomLights, applyTheme, createStage } from './scene/stage.ts';
-import { onContextLost, releaseRenderer } from '../../../lib/three/stage.ts';
+import { demandLoop, onContextLost, releaseRenderer, watchVisibility } from '../../../lib/three/stage.ts';
+import { schoolHasWork } from './scene/loop.ts';
 
 export * from './scene/api.ts';
 
@@ -350,6 +353,7 @@ function build(
     view: () => view,
     touch: () => {
       dirty = true;
+      kick();
     },
   });
   const { cam, keys, lookDir, fly, corridorPose, roomPose, syncOrbitFromCam, syncWalkFromCam, applyWalk, stepInput } = rig;
@@ -361,9 +365,12 @@ function build(
     d.target = open ? -Math.PI * 0.55 : 0;
     if (reduced) d.angle = d.target;
     dirty = true;
+    kick();
   }
 
-  function stepDoors(dt: number): void {
+  /** Swings the doors toward their targets; true while any leaf moved. */
+  function stepDoors(dt: number): boolean {
+    let moved = false;
     for (const d of doors.values()) {
       const pivots = openRoom?.id === d.roomId ? [...d.pivots, ...roomDoorPivots] : d.pivots;
       if (Math.abs(d.angle - d.target) < 1e-3 && pivots.every((p) => p.obj.userData.angle === d.angle)) continue;
@@ -376,7 +383,9 @@ function build(
         p.obj.userData.angle = d.angle;
       }
       dirty = true;
+      moved = true;
     }
+    return moved;
   }
 
   // ── Transitions ──────────────────────────────────────────────────────────
@@ -482,7 +491,8 @@ function build(
 
   // ── Loop ─────────────────────────────────────────────────────────────────
   let active = true;
-  let raf = 0;
+  /** In (or near) the viewport and the document is visible. */
+  let visible = true;
   let last = performance.now();
   let acc = 0;
   /** Uncapped time since the last drawn frame (camera flights run on it). */
@@ -490,18 +500,15 @@ function build(
   const frameFns: (() => void)[] = [];
   const lostFns: (() => void)[] = [];
 
-  function frame(now: number): void {
-    raf = 0;
-    if (!active || document.hidden) return;
+  /** One frame; true while there is more work (the loop re-arms only then). */
+  function frame(now: number): boolean {
     const raw = Math.max(0, now - last);
     const dt = Math.min(1000, raw);
     last = now;
     acc += dt;
     accRaw += raw;
-    if (acc < FPS_MS) {
-      raf = requestAnimationFrame(frame);
-      return;
-    }
+    // Below the 30 fps step: wait for the next display frame.
+    if (acc < FPS_MS) return true;
     // Life steps are capped at 1 s (a long stall never teleports anyone, a
     // slow GPU still walks in real time); camera flights use real time.
     const step = acc;
@@ -521,7 +528,7 @@ function build(
       }
       dirty = true;
     } else stepInput(step);
-    stepDoors(step);
+    const doorsMoving = stepDoors(step);
     // Life.
     const r = openRoom;
     if (r) {
@@ -574,29 +581,31 @@ function build(
       dirty = false;
       for (const f of frameFns) f();
     }
-    raf = requestAnimationFrame(frame);
+    return schoolHasWork({ tween: !!cam.tween, keys: keys.size, roomOpen: !!openRoom, reduced, kicks: kicks.size, doorsMoving });
   }
+  const loop = demandLoop(frame, { canRun: () => active && visible });
 
   function kick(): void {
-    if (raf || !active || document.hidden) return;
-    last = performance.now();
-    raf = requestAnimationFrame(frame);
+    // Restarting from idle: time the first step from now, not from the
+    // last frame minutes ago (life steps would jump).
+    if (!loop.pending) last = performance.now();
+    loop.kick();
   }
 
   // Native WebKit deliberately disables background throttling for terminals.
-  // The School must pause explicitly; losing focus alone is not a reason to
-  // stop a still-visible window. Preserve the room and camera while hidden.
-  function visibilityChanged(): void {
-    if (document.hidden) {
+  // The School must pause explicitly (hidden document, or the stage scrolled
+  // off screen); losing focus alone is not a reason to stop a still-visible
+  // window. Preserve the room and camera while hidden.
+  const unwatch = watchVisibility(host, (v) => {
+    visible = v;
+    if (!v) {
       keys.clear();
-      if (raf) cancelAnimationFrame(raf);
-      raf = 0;
+      loop.stop();
     } else {
       dirty = true;
       kick();
     }
-  }
-  document.addEventListener('visibilitychange', visibilityChanged);
+  }, '120px 0px');
 
   // ── Size / context / theme ───────────────────────────────────────────────
   const ro = new ResizeObserver(() => {
@@ -744,8 +753,7 @@ function build(
         kick();
       } else {
         keys.clear();
-        if (raf) cancelAnimationFrame(raf);
-        raf = 0;
+        loop.stop();
       }
     },
     setTheme,
@@ -759,9 +767,9 @@ function build(
       return schoolDebug({ view, frames, assets, life, screens, openRoom, cam, hiTag: hi.tag, lamps: lamps.length });
     },
     destroy() {
-      document.removeEventListener('visibilitychange', visibilityChanged);
+      unwatch();
       active = false;
-      if (raf) cancelAnimationFrame(raf);
+      loop.stop();
       ro.disconnect();
       dropCharacters();
       setHiRes(null);

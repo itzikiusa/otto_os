@@ -9,9 +9,11 @@
 //!   3. reads the file back, commits it as the scene's `doc_json`, and
 //!   4. broadcasts `Event::CanvasUpdated` so the open editor re-renders.
 //!
-//! While the turn runs we poll the file and broadcast each change LIVE, so the
-//! diagram "draws itself" as the agent writes (no `notify` dependency — mirrors
-//! the JSONL-transcript poll the session runner already does).
+//! While the turn runs the file is polled and each change broadcast LIVE, so
+//! the diagram "draws itself" as the agent writes. The claim, the turn, the
+//! poll and Stop are the shared assist job
+//! (`otto_agent_run::assist::run_assist_job`, architecture-4-02); this module
+//! is its canvas adapter ([`SceneTurn`]) plus the prompt and the commit.
 //!
 //! Mermaid is the default because the agent edits TEXT (fast, clean auto-layout)
 //! instead of hand-computing coordinates for dozens of nodes. The UI renders the
@@ -31,7 +33,10 @@ use std::time::Duration;
 
 use axum::extract::{Path, State};
 use axum::Json;
-use otto_core::domain::WorkspaceRole;
+use otto_agent_run::assist::{
+    run_assist_job, AssistClaim, AssistOutcome, AssistSlots, AssistState, AssistTarget,
+};
+use otto_core::domain::{User, Workspace, WorkspaceRole};
 use otto_core::event::Event;
 use otto_core::{Error, Id};
 use serde::{Deserialize, Serialize};
@@ -39,10 +44,7 @@ use serde_json::Value;
 
 use crate::assist_ctx::{AgentTurn, ApiError, ApiResult, CanvasAssistCtx, CurrentUser};
 use otto_agent_run::fence::extract_fenced;
-use otto_design_assist::excalidraw::{merge_excalidraw, split_excalidraw, ExcalidrawKeep};
-
-/// Live-preview file poll cadence while the agent edits.
-const POLL: Duration = Duration::from_millis(900);
+use otto_design::format::excalidraw::{merge_excalidraw, split_excalidraw, ExcalidrawKeep};
 /// The idle trip a canvas turn reports (the host's `STUCK_IDLE`, 10 h: an
 /// interactive edit is never cut short for being quiet).
 const CANVAS_STUCK_AFTER: Duration = Duration::from_secs(10 * 60 * 60);
@@ -144,118 +146,206 @@ pub async fn assist_scene<C: CanvasAssistCtx>(
     } else {
         (current.clone(), ExcalidrawKeep::default())
     };
-    let busy = prepare_scene_file(&scene.id, &file_path, &agent_view).await?;
-    let dir_str = dir.to_string_lossy().to_string();
-    // The agent gets Edit/Write tools in this cwd; trust it so the PTY doesn't
-    // stall on a first-run trust prompt (same as the orchestrate path). Trust the
-    // SCENE's provider — a non-claude provider must trust the dir it will run in.
-    ctx.ensure_trusted(&scene.provider, &dir_str);
-
-    // Live preview: broadcast each file change while the turn runs.
-    // Abort-on-drop (S4-12): the turn runs inside the HTTP request, and a
-    // dropped request future (client disconnect / reload) never reached the
-    // `abort()` after the turn — the poller then leaked forever, re-broadcasting
-    // this PRE-turn doc on every later change of the file.
-    let poll = AbortOnDrop(spawn_file_poll(
-        &ctx,
-        &scene,
-        &doc,
-        &file_path,
-        &format,
-        &agent_view,
-        &keep,
-    ));
-
-    let prompt = build_assist_prompt(&req.prompt, &format, file_name(&format), &agent_view);
-    let meta = serde_json::json!({ "source": "canvas_assist", "scene_id": scene.id });
-    // Surface the agent session the MOMENT it exists (turn start) so the Canvas
-    // Assistant panel can attach the live shell immediately, not after the turn.
-    let ready_events = ctx.events().clone();
-    let ready_ws = scene.workspace_id.clone();
-    let ready_scene = scene.id.clone();
-    let on_ready = move |sid: &Id| {
-        let _ = ready_events.send(Event::CanvasSessionStarted {
-            workspace_id: ready_ws.clone(),
-            scene_id: ready_scene.clone(),
-            session_id: sid.clone(),
-        });
+    // One Ask AI turn per scene, held across the file write, the turn and
+    // the commit (S4-20); the shared job runs the turn, the live "draws
+    // itself" poll and Stop (architecture-4-02).
+    let claim = claim_scene(&scene.id).ok_or_else(|| {
+        ApiError(Error::Conflict(
+            "an Ask AI turn is already running on this canvas".into(),
+        ))
+    })?;
+    let target = SceneTurn {
+        ctx: &ctx,
+        scene: &scene,
+        ws: &ws,
+        user: &user,
+        request: &req.prompt,
+        title: format!("Canvas: {}", scene.title),
+        dir_str: dir.to_string_lossy().to_string(),
+        file_path,
+        doc,
+        format,
+        current,
+        agent_view,
+        keep,
     };
-    let turn = ctx
-        .run_agent_turn(
-            AgentTurn {
-                ws: &ws,
-                user: &user,
-                existing: scene.session_id.as_ref(),
-                title: &format!("Canvas: {}", scene.title),
-                cwd: &dir_str,
-                provider: &scene.provider,
-                meta,
-                prompt: &prompt,
-                // The canvas host completes on idle (`STUCK_IDLE`); the
-                // shared turn type's done-marker fields stay unset.
-                stuck_after: CANVAS_STUCK_AFTER,
-                done_file: None,
-                quiet_done: None,
-            },
-            on_ready,
+    match run_assist_job(ctx.sessions(), &target, &claim).await {
+        AssistOutcome::Applied { applied, .. } => Ok(Json(applied)),
+        AssistOutcome::Stopped { .. } => {
+            let (current_doc, result) =
+                stopped_document(ctx.canvas_repo(), &scene.id, &dir).await?;
+            let _ = ctx.events().send(Event::CanvasUpdated {
+                workspace_id: scene.workspace_id.clone(),
+                scene_id: scene.id.clone(),
+                doc: current_doc,
+            });
+            Ok(Json(result))
+        }
+        AssistOutcome::Failed { error, .. } => Err(ApiError(error)),
+    }
+}
+
+/// One scene's Ask AI turn, as the shared assist job sees it: the agent edits
+/// `file_path` (its view of the board), the reply's fenced block is the
+/// fallback source, and the commit is guarded by the pre-turn `updated_at`.
+struct SceneTurn<'a, C> {
+    ctx: &'a C,
+    scene: &'a otto_state::CanvasScene,
+    ws: &'a Workspace,
+    user: &'a User,
+    request: &'a str,
+    title: String,
+    dir_str: String,
+    file_path: std::path::PathBuf,
+    doc: Value,
+    format: String,
+    /// The scene's full source (images, freehand, `files` included).
+    current: String,
+    /// What the agent sees and rewrites (C2: the rest is in `keep`).
+    agent_view: String,
+    keep: ExcalidrawKeep,
+}
+
+impl<C: CanvasAssistCtx> AssistTarget for SceneTurn<'_, C> {
+    /// The source to commit and the note for the result.
+    type Proposal = (String, String);
+    type Applied = AssistResult;
+
+    fn busy_key(&self) -> &str {
+        &self.scene.id
+    }
+
+    async fn load(&self) -> otto_core::Result<()> {
+        write_scene_source(&self.file_path, &self.agent_view).await?;
+        // The agent gets Edit/Write tools in this cwd; trust it so the PTY
+        // doesn't stall on a first-run trust prompt (same as the orchestrate
+        // path). Trust the SCENE's provider — a non-claude provider must trust
+        // the dir it will run in.
+        self.ctx.ensure_trusted(&self.scene.provider, &self.dir_str);
+        Ok(())
+    }
+
+    fn prompt(&self) -> String {
+        build_assist_prompt(
+            self.request,
+            &self.format,
+            file_name(&self.format),
+            &self.agent_view,
         )
-        .await;
-    drop(poll);
-    let (raw, sid) = turn?;
-    remember_session(ctx.canvas_repo(), &scene, &sid).await;
-    if busy.stopped() {
-        let (current_doc, result) = stopped_document(ctx.canvas_repo(), &scene.id, &dir).await?;
-        let _ = ctx.events().send(Event::CanvasUpdated {
-            workspace_id: scene.workspace_id.clone(),
-            scene_id: scene.id.clone(),
-            doc: current_doc,
+    }
+
+    fn turn<'a>(&'a self, prompt: &'a str) -> AgentTurn<'a> {
+        AgentTurn {
+            ws: self.ws,
+            user: self.user,
+            existing: self.scene.session_id.as_ref(),
+            title: &self.title,
+            cwd: &self.dir_str,
+            provider: &self.scene.provider,
+            meta: serde_json::json!({ "source": "canvas_assist", "scene_id": self.scene.id }),
+            prompt,
+            // An interactive edit completes on idle (`STUCK_IDLE`); the
+            // shared turn type's done-marker fields stay unset.
+            stuck_after: CANVAS_STUCK_AFTER,
+            done_file: None,
+            quiet_done: None,
+        }
+    }
+
+    fn live_path(&self) -> Option<std::path::PathBuf> {
+        Some(self.file_path.clone())
+    }
+
+    /// The same byte budget as `read_agent_source` (over it: skipped).
+    fn live_cap(&self) -> usize {
+        crate::http::SCENE_BODY_LIMIT
+    }
+
+    fn live_base(&self) -> Vec<u8> {
+        self.agent_view.as_bytes().to_vec()
+    }
+
+    fn on_live(&self, bytes: &[u8]) {
+        let Ok(content) = std::str::from_utf8(bytes) else {
+            return;
+        };
+        let _ = self.ctx.events().send(Event::CanvasUpdated {
+            workspace_id: self.scene.workspace_id.clone(),
+            scene_id: self.scene.id.clone(),
+            // Merge the set-aside elements back in so the live preview (which
+            // the editor may autosave) never shows the board without its
+            // images/freehand.
+            doc: build_doc(
+                &self.doc,
+                &self.format,
+                &merge_excalidraw(content, &self.keep),
+            ),
         });
-        return Ok(Json(result));
     }
 
-    // The committed source = the edited file, or the reply's block as a fallback.
-    let parsed = parse_assist(&raw);
-    let resolved = resolve_source(&file_path, &agent_view, &format, &parsed).await?;
-    // Untouched view → keep the ORIGINAL source (full elements + files);
-    // otherwise fold the set-aside elements back into the agent's scene.
-    let new_source = if resolved.trim() == agent_view.trim() {
-        current.clone()
-    } else {
-        merge_excalidraw(&resolved, &keep)
-    };
-
-    // Commit it as the scene's document + broadcast the final result.
-    // Guarded by the PRE-TURN `updated_at`: an agent turn can run for minutes,
-    // and a bare update would silently clobber anything the user saved while
-    // it ran. On conflict, overwrite only when the user's save left the source
-    // identical to the pre-turn snapshot (title/section-only edit); otherwise
-    // KEEP the user's version and say so instead of losing their work.
-    let mut committed_doc = build_doc(&doc, &format, &new_source);
-    let mut note = parsed.note;
-    // Version history (C5): keep the board as it was before this turn so a bad
-    // turn is one "Restore" away. Best-effort — never blocks the commit.
-    if new_source != current {
-        let _ = ctx
-            .canvas_repo()
-            .snapshot(&scene.id, "agent", Some(&user.id), None)
-            .await;
+    /// Surface the agent session the MOMENT it exists (turn start) so the
+    /// Canvas Assistant panel can attach the live shell immediately.
+    fn report(&self, state: AssistState<'_>) {
+        if let AssistState::Running { session } = state {
+            let _ = self.ctx.events().send(Event::CanvasSessionStarted {
+                workspace_id: self.scene.workspace_id.clone(),
+                scene_id: self.scene.id.clone(),
+                session_id: session.clone(),
+            });
+        }
     }
-    committed_doc = commit_assist_doc(
-        ctx.canvas_repo(),
-        &scene,
-        &current,
-        committed_doc,
-        &mut note,
-    )
-    .await?;
-    let final_source = current_source(&committed_doc, &doc_format(&committed_doc));
-    let _ = ctx.events().send(Event::CanvasUpdated {
-        workspace_id: scene.workspace_id.clone(),
-        scene_id: scene.id.clone(),
-        doc: committed_doc,
-    });
 
-    Ok(Json(result_for(&format, &final_source, note)))
+    async fn remember(&self, session: &Id, turn_ok: bool) {
+        if turn_ok {
+            remember_session(self.ctx.canvas_repo(), self.scene, session).await;
+        }
+    }
+
+    /// The committed source = the edited file, or the reply's block as a
+    /// fallback. An untouched view keeps the ORIGINAL source (full elements +
+    /// files); otherwise the set-aside elements fold back into the agent's.
+    async fn parse(&self, reply: &str) -> otto_core::Result<(String, String)> {
+        let parsed = parse_assist(reply);
+        let resolved =
+            resolve_source(&self.file_path, &self.agent_view, &self.format, &parsed).await?;
+        let new_source = if resolved.trim() == self.agent_view.trim() {
+            self.current.clone()
+        } else {
+            merge_excalidraw(&resolved, &self.keep)
+        };
+        Ok((new_source, parsed.note))
+    }
+
+    /// Commit it as the scene's document + broadcast the final result.
+    /// Guarded by the PRE-TURN `updated_at`: an agent turn can run for
+    /// minutes, and a bare update would silently clobber anything the user
+    /// saved while it ran (see [`commit_assist_doc`]).
+    async fn apply(
+        &self,
+        (new_source, mut note): (String, String),
+        _session: &Id,
+    ) -> otto_core::Result<AssistResult> {
+        let repo = self.ctx.canvas_repo();
+        // Version history (C5): keep the board as it was before this turn so
+        // a bad turn is one "Restore" away. Best-effort — never blocks the commit.
+        if new_source != self.current {
+            let _ = repo
+                .snapshot(&self.scene.id, "agent", Some(&self.user.id), None)
+                .await;
+        }
+        let committed_doc = build_doc(&self.doc, &self.format, &new_source);
+        let committed_doc =
+            commit_assist_doc(repo, self.scene, &self.current, committed_doc, &mut note)
+                .await
+                .map_err(|e| e.0)?;
+        let final_source = current_source(&committed_doc, &doc_format(&committed_doc));
+        let _ = self.ctx.events().send(Event::CanvasUpdated {
+            workspace_id: self.scene.workspace_id.clone(),
+            scene_id: self.scene.id.clone(),
+            doc: committed_doc,
+        });
+        Ok(result_for(&self.format, &final_source, note))
+    }
 }
 
 /// Cancellation discards only the agent draft, never a saved human edit.
@@ -284,21 +374,13 @@ async fn stopped_document(
     ))
 }
 
-/// Materialize only while owning the scene's entire turn, including preparation.
-async fn prepare_scene_file(
-    scene: &Id,
-    path: &std::path::Path,
-    source: &str,
-) -> ApiResult<SceneBusy> {
-    let busy = SceneBusy::claim(scene).ok_or_else(|| {
-        ApiError(Error::Conflict(
-            "an Ask AI turn is already running on this canvas".into(),
-        ))
-    })?;
+/// Materialize the agent's view into the scene file — the job's `load`, so it
+/// runs only while the scene's claim is held (a refused second Ask AI never
+/// reaches it and cannot overwrite the file a running turn edits).
+async fn write_scene_source(path: &std::path::Path, source: &str) -> otto_core::Result<()> {
     tokio::fs::write(path, source)
         .await
-        .map_err(|e| ApiError(Error::Internal(format!("write canvas source: {e}"))))?;
-    Ok(busy)
+        .map_err(|e| Error::Internal(format!("write canvas source: {e}")))
 }
 
 /// Publish only the document actually accepted by optimistic concurrency.
@@ -426,28 +508,28 @@ pub async fn assist_preview<C: CanvasAssistCtx>(
     // per dead preview dir piled up in `~/.claude.json` forever.
     ctx.ensure_trusted_scratch(&provider, &preview_root, &cwd);
     let sid_slot = Arc::clone(&cleanup.sid);
-    let (raw, _sid) = ctx
-        .run_agent_turn(
-            AgentTurn {
-                ws: &ws,
-                user: &user,
-                existing: None,
-                title: "Canvas: preview",
-                cwd: &cwd,
-                provider: &provider,
-                meta,
-                prompt: &prompt,
-                // The canvas host completes on idle (`STUCK_IDLE`); the
-                // shared turn type's done-marker fields stay unset.
-                stuck_after: CANVAS_STUCK_AFTER,
-                done_file: None,
-                quiet_done: None,
-            },
-            move |sid: &Id| {
-                *sid_slot.lock().unwrap() = Some(sid.clone());
-            },
-        )
-        .await?;
+    let (raw, _sid) = otto_agent_run::session_turn::run_agent_turn(
+        ctx.sessions(),
+        AgentTurn {
+            ws: &ws,
+            user: &user,
+            existing: None,
+            title: "Canvas: preview",
+            cwd: &cwd,
+            provider: &provider,
+            meta,
+            prompt: &prompt,
+            // The canvas host completes on idle (`STUCK_IDLE`); the
+            // shared turn type's done-marker fields stay unset.
+            stuck_after: CANVAS_STUCK_AFTER,
+            done_file: None,
+            quiet_done: None,
+        },
+        move |sid: &Id| {
+            *sid_slot.lock().unwrap() = Some(sid.clone());
+        },
+    )
+    .await?;
     drop(cleanup); // kills the throwaway session + removes the scratch dir
     let parsed = parse_assist(&raw);
     let src = parsed.mermaid.clone().unwrap_or_default();
@@ -455,75 +537,25 @@ pub async fn assist_preview<C: CanvasAssistCtx>(
 }
 
 // ---------------------------------------------------------------------------
-// Drop guards
+// Turn slots + drop guards
 // ---------------------------------------------------------------------------
 
-/// Aborts the wrapped task when dropped (a `JoinHandle` drop only detaches).
-struct AbortOnDrop(tokio::task::JoinHandle<()>);
-
-impl Drop for AbortOnDrop {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
+/// Scenes with an assist turn in flight (S4-20): the exclusive slot and the
+/// turn's stop signal are the shared assist job's ([`AssistSlots`]).
+fn scene_slots() -> &'static AssistSlots {
+    static SLOTS: std::sync::OnceLock<AssistSlots> = std::sync::OnceLock::new();
+    SLOTS.get_or_init(Default::default)
 }
 
-/// Scenes with an assist turn in flight (S4-20) → that turn's stop flag.
-type BusyScenes = std::collections::HashMap<Id, Arc<std::sync::atomic::AtomicBool>>;
-
-fn busy_scenes() -> &'static std::sync::Mutex<BusyScenes> {
-    static BUSY: std::sync::OnceLock<std::sync::Mutex<BusyScenes>> = std::sync::OnceLock::new();
-    BUSY.get_or_init(Default::default)
-}
-
-/// A claimed per-scene assist slot (with the turn's stop flag); released on drop.
-struct SceneBusy {
-    scene: Id,
-    stop: Arc<std::sync::atomic::AtomicBool>,
-}
-
-impl SceneBusy {
-    fn claim(scene: &Id) -> Option<Self> {
-        let mut busy = busy_scenes().lock().unwrap();
-        if busy.contains_key(scene) {
-            return None;
-        }
-        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        busy.insert(scene.clone(), Arc::clone(&stop));
-        Some(Self {
-            scene: scene.clone(),
-            stop,
-        })
-    }
-
-    /// True once [`request_stop`] flagged this turn.
-    fn stopped(&self) -> bool {
-        self.stop.load(std::sync::atomic::Ordering::Acquire)
-    }
-}
-
-impl Drop for SceneBusy {
-    fn drop(&mut self) {
-        let mut busy = busy_scenes().lock().unwrap();
-        // Only our own entry (a later turn may hold the slot by now).
-        if busy
-            .get(&self.scene)
-            .is_some_and(|f| Arc::ptr_eq(f, &self.stop))
-        {
-            busy.remove(&self.scene);
-        }
-    }
+/// Claim the scene's assist slot (with the turn's stop signal); released on drop.
+fn claim_scene(scene: &Id) -> Option<AssistClaim> {
+    scene_slots().claim(scene)
 }
 
 /// Flag the scene's in-flight assist turn as stopped. Returns false when no
 /// turn is running.
 fn request_stop(scene: &Id) -> bool {
-    match busy_scenes().lock().unwrap().get(scene) {
-        Some(flag) => {
-            flag.store(true, std::sync::atomic::Ordering::Release);
-            true
-        }
-        None => false,
-    }
+    scene_slots().stop(scene)
 }
 
 /// `POST /canvas/scenes/{id}/assist/stop` — mark the scene's running Ask AI
@@ -577,7 +609,7 @@ impl<C: CanvasAssistCtx> Drop for PreviewCleanup<C> {
             let ctx = self.ctx.clone();
             if let Ok(rt) = tokio::runtime::Handle::try_current() {
                 rt.spawn(async move {
-                    let _ = ctx.kill_session(&sid).await;
+                    let _ = ctx.sessions().kill_session(&sid).await;
                 });
             }
         }
@@ -730,54 +762,6 @@ fn result_for(format: &str, source: &str, note: String) -> AssistResult {
     r
 }
 
-/// Spawn a background task that broadcasts `CanvasUpdated` on each file change
-/// while the agent edits, for a live "draws itself" preview. Aborted when the
-/// turn returns.
-fn spawn_file_poll<C: CanvasAssistCtx>(
-    ctx: &C,
-    scene: &otto_state::CanvasScene,
-    doc: &Value,
-    file_path: &std::path::Path,
-    format: &str,
-    base: &str,
-    keep: &ExcalidrawKeep,
-) -> tokio::task::JoinHandle<()> {
-    let doc = doc.clone();
-    let keep = keep.clone();
-    let events = ctx.events().clone();
-    let workspace_id = scene.workspace_id.clone();
-    let scene_id = scene.id.clone();
-    let path = file_path.to_path_buf();
-    let format = format.to_string();
-    let mut last = base.to_string();
-    tokio::spawn(async move {
-        // Stat-gated: an unchanged (len, mtime) skips the read entirely; the
-        // same byte budget as `read_agent_source` (over it: skipped).
-        let mut gate = otto_agent_run::live_file::StatGate::default();
-        loop {
-            tokio::time::sleep(POLL).await;
-            let otto_agent_run::live_file::Poll::Changed(bytes) =
-                gate.poll(&path, crate::http::SCENE_BODY_LIMIT).await
-            else {
-                continue;
-            };
-            if let Ok(content) = String::from_utf8(bytes) {
-                if content != last && !content.trim().is_empty() {
-                    last = content.clone();
-                    let _ = events.send(Event::CanvasUpdated {
-                        workspace_id: workspace_id.clone(),
-                        scene_id: scene_id.clone(),
-                        // Merge the set-aside elements back in so the live
-                        // preview (which the editor may autosave) never shows
-                        // the board without its images/freehand.
-                        doc: build_doc(&doc, &format, &merge_excalidraw(&content, &keep)),
-                    });
-                }
-            }
-        }
-    })
-}
-
 // ---------------------------------------------------------------------------
 // Prompt (unit-tested, no DB / no agent)
 // ---------------------------------------------------------------------------
@@ -897,13 +881,18 @@ fn parse_assist(raw: &str) -> AssistResult {
             ..Default::default()
         };
     }
-    if let Some(v) = otto_core::text::extract_json(raw) {
-        let has_elements = v
-            .get("elements")
-            .and_then(|e| e.as_array())
-            .map(|a| !a.is_empty())
-            .unwrap_or(false);
-        if has_elements {
+    // Only a non-empty `elements` or `nodes` object is a diagram: a `{}` or a
+    // quoted config snippet earlier in the reply must not shadow it
+    // (backend-correctness-6-04).
+    let non_empty = |v: &Value, key: &str| {
+        v.get(key)
+            .and_then(Value::as_array)
+            .is_some_and(|a| !a.is_empty())
+    };
+    if let Some(v) = otto_core::text::extract_json_where(raw, |v| {
+        non_empty(v, "elements") || non_empty(v, "nodes")
+    }) {
+        if non_empty(&v, "elements") {
             return AssistResult {
                 excalidraw: Some(v),
                 note: prose_before_fence(raw),
@@ -953,19 +942,19 @@ fn prose_before_fence(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use otto_design_assist::excalidraw::el_id;
+    use otto_design::format::excalidraw::el_id;
 
     /// S4-20: one assist turn per scene; the slot frees on drop.
     #[test]
     fn scene_busy_slot_is_exclusive_and_released_on_drop() {
         let id: Id = "scene-busy-test".into();
-        let a = SceneBusy::claim(&id).expect("first claim");
+        let a = claim_scene(&id).expect("first claim");
         assert!(
-            SceneBusy::claim(&id).is_none(),
+            claim_scene(&id).is_none(),
             "second concurrent claim refused"
         );
         drop(a);
-        assert!(SceneBusy::claim(&id).is_some(), "released on drop");
+        assert!(claim_scene(&id).is_some(), "released on drop");
     }
 
     /// S4-20: Stop flags only the scene's in-flight turn; a scene with no
@@ -974,29 +963,14 @@ mod tests {
     fn stop_flags_only_the_running_turn() {
         let id: Id = "scene-stop-test".into();
         assert!(!request_stop(&id), "nothing running");
-        let turn = SceneBusy::claim(&id).expect("claim");
+        let turn = claim_scene(&id).expect("claim");
         assert!(!turn.stopped());
         assert!(request_stop(&id));
         assert!(turn.stopped(), "the running turn sees the stop");
         assert!(!request_stop(&"other-scene".into()));
         drop(turn);
-        let next = SceneBusy::claim(&id).expect("re-claim");
+        let next = claim_scene(&id).expect("re-claim");
         assert!(!next.stopped(), "a new turn starts unflagged");
-    }
-
-    /// S4-12: dropping the guard aborts the poller (a bare JoinHandle drop
-    /// only detaches it, leaking the loop for the daemon's lifetime).
-    #[tokio::test]
-    async fn abort_on_drop_stops_the_task() {
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(1);
-        let g = AbortOnDrop(tokio::spawn(async move {
-            let _tx = tx; // dropped only when the task ends
-            std::future::pending::<()>().await;
-        }));
-        drop(g);
-        // The sender is dropped once the aborted task is torn down.
-        let r = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await;
-        assert!(matches!(r, Ok(None)), "task was aborted");
     }
 
     #[test]
@@ -1113,6 +1087,24 @@ mod tests {
         assert!(r.excalidraw.is_some());
         assert!(r.mermaid.is_none());
         assert_eq!(r.note, "Drawn.");
+    }
+
+    /// backend-correctness-6-04: a decoy object earlier in the reply (a quoted
+    /// config, an empty `{}`) used to shadow the diagram, so the assist fell
+    /// through as if nothing came back.
+    #[test]
+    fn parse_skips_decoy_objects_before_the_diagram() {
+        let raw = "Your config {\"name\":\"svc\",\"version\":\"1.0.0\"} and {} are fine.\n\n\
+                   {\"elements\":[{\"type\":\"rectangle\",\"id\":\"a\",\"x\":0,\"y\":0}]}";
+        let r = parse_assist(raw);
+        assert!(
+            r.excalidraw.is_some(),
+            "the elements object wins over the decoys"
+        );
+
+        let raw = "Decoy {\"nodes\":[]} first, then {\"nodes\":[{\"id\":\"a\"}],\"edges\":[]}";
+        let r = parse_assist(raw);
+        assert_eq!(r.nodes.len(), 1, "an empty nodes list is a decoy too");
     }
 
     #[test]

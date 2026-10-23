@@ -71,9 +71,9 @@
     <label for="room-message">Message everyone</label>
     <textarea dir="auto" id="room-message" bind:this={inputEl} bind:value={draft} onkeydown={onDraftKey} aria-keyshortcuts="Meta+Enter Control+Enter" rows="3" placeholder={connected ? 'Write a message…' : 'Reconnecting — your draft is saved here'}></textarea>
     <div class="send-row"><span class:too-long={bytes > 4096}>{bytes > 4096 ? 'Message exceeds 4 KiB' : ''}</span>
-      <!-- Always mounted: swapping Send ↔ Retry for two buttons destroyed the
+      <!-- Always mounted: swapping Send ↔ Resend for two buttons destroyed the
            focused one, dropping keyboard focus to <body> on every message. -->
-      <button class="btn" type="submit" title="Send (⌘↵)" disabled={pending ? !connected : !connected || !draft.trim() || bytes > 4096}>{pending ? 'Retry message' : 'Send'}</button>
+      <button class="btn" type="submit" title="Send (⌘↵)" disabled={pending ? !connected : !connected || !draft.trim() || bytes > 4096}>{pending ? 'Resend message' : 'Send'}</button>
     </div>
   </form>
 </section>

@@ -546,3 +546,79 @@ async fn ws_admin_without_shell_grant_does_not_see_the_bound_row() {
     assert_eq!(seen, ["legacy-bound", "plain"]);
     server.abort();
 }
+
+// ---------------------------------------------------------------------------
+// backend-performance-6-05: the overview defaults to unarchived sessions,
+// pages by `(created_at, id)` keyset, and `include_archived` adds history.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn overview_pages_unarchived_sessions_by_default() {
+    let pool = mk_pool().await;
+    let root = seed_user(&pool, "root", true).await;
+    let alice = seed_user(&pool, "alice", false).await;
+    let ws = seed_workspace(&pool).await;
+    let repo = SessionsRepo::new(pool.clone());
+    let mut live = Vec::new();
+    for i in 0..5 {
+        live.push(seed_session(&repo, &ws, &alice, &format!("live-{i}")).await);
+    }
+    let archived = seed_session(&repo, &ws, &alice, "old").await;
+    sqlx::query("UPDATE sessions SET archived = 1 WHERE id = ?")
+        .bind(&archived)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let manager = make_manager(pool.clone());
+    let app = build_app(TestCtx { pool, manager }, root);
+
+    let ids = |body: &serde_json::Value| -> Vec<String> {
+        body["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["id"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let (st, body) = do_req(&app, Method::GET, "/api/v1/admin/sessions").await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    assert_eq!(
+        ids(&body).len(),
+        5,
+        "archived history is left out by default"
+    );
+    assert!(body.get("next_cursor").is_none(), "one page: {body}");
+
+    // Two-row pages walk every unarchived session exactly once.
+    let mut seen = Vec::new();
+    let mut uri = "/api/v1/admin/sessions?limit=2".to_string();
+    loop {
+        let (st, body) = do_req(&app, Method::GET, &uri).await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        let page = ids(&body);
+        assert!(page.len() <= 2);
+        seen.extend(page);
+        match body["next_cursor"].as_str() {
+            Some(c) => uri = format!("/api/v1/admin/sessions?limit=2&cursor={c}"),
+            None => break,
+        }
+    }
+    let mut want = live.clone();
+    want.sort();
+    seen.sort();
+    assert_eq!(seen, want);
+
+    let (_, body) = do_req(
+        &app,
+        Method::GET,
+        "/api/v1/admin/sessions?include_archived=true",
+    )
+    .await;
+    assert!(
+        ids(&body).contains(&archived),
+        "include_archived lists history"
+    );
+
+    let (st, _) = do_req(&app, Method::GET, "/api/v1/admin/sessions?cursor=bogus").await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+}

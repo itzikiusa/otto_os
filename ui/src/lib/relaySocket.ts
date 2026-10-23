@@ -2,7 +2,7 @@
  * The capability WebSocket both in-memory relays use: session rooms
  * (`modules/rooms/room-client.ts`) and room games
  * (`modules/rooms/games/client.ts`). The daemon side shares one primitive set
- * too (`otto-server/src/rooms/capability.rs`).
+ * too (`otto-rooms/src/capability.rs`).
  *
  * One transport: the token rides only in the `Sec-WebSocket-Protocol` pair
  * (`<protocol>, <token>`), a silence deadline closes a socket that stops

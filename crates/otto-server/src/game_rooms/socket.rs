@@ -1,7 +1,3 @@
-use super::{
-    registry::{SharedRoom, RATE_LIMITED},
-    types::*,
-};
 use crate::rooms::capability::socket_token;
 use crate::{ApiResult, ServerCtx};
 use axum::{
@@ -13,6 +9,7 @@ use axum::{
     response::Response,
 };
 use otto_core::{Error, Result};
+use otto_rooms::games::{Command, Event, SharedRoom, RATE_LIMITED};
 use std::time::{Duration, Instant};
 
 pub(super) async fn upgrade(

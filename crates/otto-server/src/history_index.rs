@@ -1,6 +1,8 @@
-//! History index scan (design §4.6). Walks `~/.claude/projects/*/*.jsonl` (top
-//! level only — `subagents/` files are children, not sessions) and
-//! `$CODEX_HOME/sessions/**/rollout-*.jsonl`, skips files whose `(mtime, size)`
+//! History index scan (design §4.6). Walks every Claude root's `*/*.jsonl`
+//! (top level only — `subagents/` files are children, not sessions) and every
+//! Codex root's `**/rollout-*.jsonl` — the roots are
+//! [`otto_transcript::roots::TranscriptRoots::discover`]'s (`~/.claude*`,
+//! `$CODEX_HOME`, subscription accounts, or the e2e fixture) — skips files whose `(mtime, size)`
 //! the index already has, peeks head 64 KB + tail 16 KB of the rest, and
 //! upserts `transcript_index`. Tolerates files appearing/vanishing mid-walk.
 //! Runs at daemon boot (low priority: yields between files) and on
@@ -80,15 +82,22 @@ fn stat(path: &Path, provider: Provider) -> Option<Found> {
 pub fn list_transcripts(claude_root: &Path, codex_root: &Path) -> (Vec<Found>, bool) {
     let mut out = Vec::new();
     let mut errors = false;
+    list_claude(claude_root, &mut out, &mut errors);
+    walk_codex(codex_root, 0, &mut out, &mut errors);
+    (out, errors)
+}
+
+#[allow(clippy::disallowed_methods)] // sync helper: async callers run it via spawn_blocking / offload::blocking
+fn list_claude(claude_root: &Path, out: &mut Vec<Found>, errors: &mut bool) {
     // Claude: `<root>/<slug>/<sid>.jsonl` — one level, no recursion into
     // `<sid>/subagents/`.
     match std::fs::read_dir(claude_root) {
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => errors = true,
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => *errors = true,
         Err(_) => {}
         Ok(slugs) => {
             for slug in slugs.flatten() {
                 let Ok(files) = std::fs::read_dir(slug.path()) else {
-                    errors = true;
+                    *errors = true;
                     continue;
                 };
                 for f in files.flatten() {
@@ -102,37 +111,52 @@ pub fn list_transcripts(claude_root: &Path, codex_root: &Path) -> (Vec<Found>, b
             }
         }
     }
-    // Codex: `<root>/YYYY/MM/DD/rollout-*.jsonl` (bounded walk).
-    #[allow(clippy::disallowed_methods)] // sync helper: async callers run it via spawn_blocking / offload::blocking
-    fn walk(dir: &Path, depth: usize, out: &mut Vec<Found>, errors: &mut bool) {
-        if depth > 5 {
+}
+
+/// Codex: `<root>/YYYY/MM/DD/rollout-*.jsonl` (bounded walk).
+#[allow(clippy::disallowed_methods)] // sync helper: async callers run it via spawn_blocking / offload::blocking
+fn walk_codex(dir: &Path, depth: usize, out: &mut Vec<Found>, errors: &mut bool) {
+    if depth > 5 {
+        return;
+    }
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) => {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                *errors = true;
+            }
             return;
         }
-        let entries = match std::fs::read_dir(dir) {
-            Ok(e) => e,
-            Err(e) => {
-                if e.kind() != std::io::ErrorKind::NotFound {
-                    *errors = true;
-                }
-                return;
-            }
-        };
-        for e in entries.flatten() {
-            let p = e.path();
-            if p.is_dir() {
-                walk(&p, depth + 1, out, errors);
-            } else if p
-                .file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.starts_with("rollout-") && n.ends_with(".jsonl"))
-            {
-                if let Some(found) = stat(&p, Provider::Codex) {
-                    out.push(found);
-                }
+    };
+    for e in entries.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            walk_codex(&p, depth + 1, out, errors);
+        } else if p
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with("rollout-") && n.ends_with(".jsonl"))
+        {
+            if let Some(found) = stat(&p, Provider::Codex) {
+                out.push(found);
             }
         }
     }
-    walk(codex_root, 0, &mut out, &mut errors);
+}
+
+/// [`list_transcripts`] over every discovered root (architecture-6-01: the
+/// same set the usage tailer reads, so a subscription account's sessions are
+/// in History too). A file reachable from two roots is listed once.
+pub fn list_roots(roots: &otto_transcript::roots::TranscriptRoots) -> (Vec<Found>, bool) {
+    let (mut out, mut errors) = (Vec::new(), false);
+    for root in roots.claude_dirs() {
+        list_claude(root, &mut out, &mut errors);
+    }
+    for root in roots.codex_dirs() {
+        walk_codex(root, 0, &mut out, &mut errors);
+    }
+    let mut seen = HashSet::new();
+    out.retain(|f| seen.insert(f.path.clone()));
     (out, errors)
 }
 
@@ -162,11 +186,12 @@ fn iso_from_unix(secs: i64) -> Option<String> {
 /// The scan proper. Returns `(files seen, files (re)indexed)`.
 async fn scan(ctx: &ServerCtx, workspace_id: Option<&Id>) -> otto_core::Result<(u64, u64)> {
     let repo = TranscriptIndexRepo::new(ctx.pool.clone());
-    let (claude_root, codex_root) = crate::transcript::resolve::transcript_roots(&ctx.data_dir);
-    let (files, list_errors) =
-        tokio::task::spawn_blocking(move || list_transcripts(&claude_root, &codex_root))
-            .await
-            .map_err(|e| otto_core::Error::Internal(format!("list transcripts: {e}")))?;
+    let data_dir = ctx.data_dir.clone();
+    let (files, list_errors) = tokio::task::spawn_blocking(move || {
+        list_roots(&crate::transcript::resolve::transcript_roots(&data_dir))
+    })
+    .await
+    .map_err(|e| otto_core::Error::Internal(format!("list transcripts: {e}")))?;
     let total = files.len() as u64;
     let stamps = repo.stamps().await?;
     let mut seen: HashSet<String> = HashSet::with_capacity(files.len());
@@ -265,6 +290,38 @@ mod tests {
             none.is_empty() && !errors,
             "a missing root is empty, not an error"
         );
+    }
+
+    #[test]
+    fn list_roots_covers_account_and_codex_home_rollouts() {
+        let dir = tempfile::tempdir().unwrap();
+        let (home, data) = (dir.path().join("home"), dir.path().join("data"));
+        let codex_home = dir.path().join("codex-home");
+        let mut want = Vec::new();
+        for root in [
+            data.join("provider-accounts/acct/sessions"),
+            codex_home.join("sessions"),
+        ] {
+            let day = root.join("2026/10/23");
+            std::fs::create_dir_all(&day).unwrap();
+            let f = day.join("rollout-2026-10-23T00-00-00-x.jsonl");
+            std::fs::write(&f, "{}\n").unwrap();
+            want.push(f);
+        }
+        let acct = data.join("provider-accounts/acct/projects/-r");
+        std::fs::create_dir_all(&acct).unwrap();
+        std::fs::write(acct.join("s.jsonl"), "{}\n").unwrap();
+        want.push(acct.join("s.jsonl"));
+        let env = otto_transcript::roots::RootsEnv {
+            codex_home: Some(codex_home),
+            ..Default::default()
+        };
+        let (found, errors) = list_roots(&env.discover(&home, &data));
+        assert!(!errors);
+        let mut got: Vec<_> = found.into_iter().map(|f| f.path).collect();
+        got.sort();
+        want.sort();
+        assert_eq!(got, want);
     }
 
     #[test]

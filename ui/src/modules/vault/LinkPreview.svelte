@@ -2,7 +2,7 @@
   // The vault's page-preview popover (state in previewStore.svelte.ts). Clamped
   // into the viewport: hangs under the anchor, flips above it only when that
   // fits, otherwise pins to the bottom edge; height capped + scrollable.
-  import { linkPreview } from './previewStore.svelte';
+  import { LINK_PREVIEW_ID, linkPreview } from './previewStore.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
 
   let el = $state<HTMLElement | undefined>();
@@ -25,9 +25,12 @@
   });
 </script>
 
+<!-- Escape dismisses a showing preview without moving focus (a11y-6-07). -->
+<svelte:window onkeydown={(e) => { if (e.key === 'Escape' && linkPreview.current) linkPreview.hide(); }} />
+
 {#if linkPreview.current}
   {@const p = linkPreview.current}
-  <div class="lp" role="tooltip" bind:this={el} {style} data-testid="vault-link-preview">
+  <div class="lp" id={LINK_PREVIEW_ID} role="tooltip" bind:this={el} {style} data-testid="vault-link-preview">
     <div class="lp-title">{p.title}{#if p.type}<span class="lp-type">{p.type}</span>{/if}</div>
     <div class="lp-path">{p.path}</div>
     {#if p.state === 'loading'}<Skeleton rows={2} height={12} label="the preview" />

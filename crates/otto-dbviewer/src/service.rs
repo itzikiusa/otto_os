@@ -51,6 +51,16 @@ pub(crate) fn person_confirmed(confirm_write: bool) -> bool {
     confirm_write && !otto_core::auth::request_is_agent()
 }
 
+/// The connection setting(s) that lift a write-guard, for a refusal an agent
+/// cannot confirm past: `read_only` and a `Prod` environment each guard.
+fn guard_setting_hint(conn: &Connection) -> &'static str {
+    match (conn.read_only, conn.environment.is_production()) {
+        (true, true) => "turn off Read-only and set an environment other than Production",
+        (true, false) => "turn off Read-only",
+        _ => "set an environment other than Production",
+    }
+}
+
 #[cfg(test)]
 mod person_confirm_tests {
     use otto_core::auth::{with_request_credential, RequestCredential};
@@ -897,18 +907,23 @@ impl DbViewerService {
             }
         }
         if conn.read_only && operations.iter().any(|op| *op != "db_query") {
-            return Err(Error::Forbidden(
-                "read-only connection cannot perform database mutations".into(),
-            ));
+            return Err(Error::Forbidden(format!(
+                "read-only connection '{}' cannot perform database mutations; \
+                 turn off Read-only in the connection's settings to allow them",
+                conn.name
+            )));
         }
         // Production writes must use the independent reviewed-change adapter.
         // Neither root nor confirm_write can turn an approval into an access grant.
         if conn.environment == otto_core::domain::Environment::Prod
             && operations.iter().any(|op| *op != "db_query")
         {
-            return Err(Error::Forbidden(
-                "review_required: production changes require an approved immutable change".into(),
-            ));
+            return Err(Error::Forbidden(format!(
+                "review_required: on production connection '{}', changes require an approved \
+                 immutable change — submit one in Database Explorer → Changes, or set an \
+                 environment other than Production in the connection's settings",
+                conn.name
+            )));
         }
         Ok(())
     }
@@ -1949,10 +1964,26 @@ impl DbViewerService {
         } else {
             format!("read-only connection '{}'", conn.name)
         };
+        // An agent credential can never give the typed confirmation (S6-304),
+        // so "confirm" would be a dead end: say what does lift the guard.
+        let agent = otto_core::auth::request_is_agent();
         if !is_write {
+            let next = if agent {
+                "use SCAN with MATCH/COUNT instead"
+            } else {
+                "use SCAN with MATCH/COUNT, or confirm to run it"
+            };
             return Err(Error::Conflict(format!(
                 "{WRITE_BLOCKED_PREFIX}KEYS blocks the Redis server while it scans every key \
-                 on this {reason}; use SCAN with MATCH/COUNT, or confirm to run it"
+                 on this {reason}; {next}"
+            )));
+        }
+        if agent {
+            return Err(Error::Conflict(format!(
+                "{WRITE_BLOCKED_PREFIX}this is a {reason}, so an agent cannot write to it; \
+                 a person can run the write in the Database Explorer, or {} in the \
+                 connection's settings",
+                guard_setting_hint(conn)
             )));
         }
         Err(Error::Conflict(format!(
@@ -2784,10 +2815,12 @@ impl DbViewerService {
 
     /// Streaming variant of [`Self::export_to_path`] that writes through an
     /// arbitrary `w` instead of a local file — the HTTP `/db/export` handler
-    /// passes a channel-backed writer so bytes stream straight to the browser
-    /// without the daemon ever buffering the full result (the fix for the old
-    /// `/db/export` truncation, spec §2.1). Same write-guard, resolve, and
-    /// history semantics as `export_to_path`; returns `{rows, bytes}` + duration.
+    /// passes a paced [`crate::export::ExportWriter::channel`] so bytes stream
+    /// straight to the browser at the client's pace, without the daemon ever
+    /// buffering the full result (spec §2.1, backend-performance-6-01). A plain
+    /// `Box<dyn Write + Send>` is accepted too (unpaced). Same write-guard,
+    /// resolve, and history semantics as `export_to_path`; returns
+    /// `{rows, bytes}` + duration.
     #[allow(clippy::too_many_arguments)]
     pub async fn export_to_writer(
         &self,
@@ -2797,8 +2830,9 @@ impl DbViewerService {
         node: Option<&str>,
         format: crate::export::ExportFormat,
         max_rows: Option<usize>,
-        w: Box<dyn std::io::Write + Send>,
+        w: impl Into<crate::export::ExportWriter> + Send,
     ) -> Result<(crate::export::ExportCounts, u64)> {
+        let w = w.into();
         let canonical = crate::access::canonical_node(node);
         let node = canonical.as_deref();
         self.guard_export(conn_id, user_id, statement, node).await?;

@@ -53,11 +53,31 @@ export async function copyText(text: string): Promise<boolean> {
 
 /** `copyText` for the many call sites shaped as `try { copy } catch { toast }`:
  *  throws when the copy could not be made, so an existing catch block keeps
- *  reporting failure to the user instead of silently claiming success. */
+ *  reporting failure to the user instead of silently claiming success. The
+ *  message is the toast body those blocks show, so it says what to do next
+ *  (ux-design-6-07), not only what broke. */
 export async function copyTextOrThrow(text: string): Promise<void> {
   if (!(await copyText(text))) {
-    throw new Error('Clipboard unavailable — the browser blocked the copy');
+    throw new Error(COPY_FAILED_BODY);
   }
+}
+
+/** The toast body every clipboard failure shows: what to do next, not the
+ *  cause again (content.md: "Clipboard failures say what to do next"). */
+export const COPY_FAILED_BODY = 'The clipboard isn’t available here. Select the text and copy it manually.';
+
+/** A Copy button's whole job: copy, then say so. Success toasts `Copied
+ *  {what}` (with the text itself as the body when it is short enough to read
+ *  in a toast); failure toasts `Couldn’t copy` + the manual next step. Returns
+ *  whether it copied, for a caller that also flips a "Copied ✓" label. */
+export async function copyWithToast(text: string, what: string): Promise<boolean> {
+  const ok = await copyText(text);
+  // Loaded on use, not at the top: this file stays rune-free so plain-Node
+  // importers (the code-block helpers and their unit tests) can load it.
+  const { toasts } = await import('./toast.svelte');
+  if (ok) toasts.success(`Copied ${what}`, text.length > 80 ? undefined : text);
+  else toasts.error('Couldn’t copy', COPY_FAILED_BODY);
+  return ok;
 }
 
 /** Hidden-textarea `execCommand('copy')`. Works on insecure origins and in

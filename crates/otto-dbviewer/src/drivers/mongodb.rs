@@ -732,8 +732,13 @@ impl Driver for MongoDriver {
     /// dropped — no explicit `shutdown()` — so a query still running on its own
     /// clone finishes; the client's monitors stop with the last clone.
     async fn evict_idle(&self, idle: std::time::Duration) -> usize {
+        // Same 5-minute tick as the SQL drivers: expired completion snapshots,
+        // per-collection field lists and first-db probes go too (DB2-07).
+        self.completions.sweep();
         let evicted = self.clients.take_idle(idle);
         for (key, _) in &evicted {
+            // An evicted client's cached completions are as cold as it is.
+            self.completions.invalidate(key);
             self.samples.invalidate_where(|(k, _, _)| k == key);
         }
         evicted.len()
@@ -814,7 +819,7 @@ impl Driver for MongoDriver {
         node: Option<&str>,
         format: ExportFormat,
         max_rows: Option<usize>,
-        w: Box<dyn std::io::Write + Send>,
+        w: crate::export::ExportWriter,
     ) -> Result<ExportCounts> {
         let parsed = parse_command(statement.trim())?;
         if !matches!(parsed.op, MongoOp::Find | MongoOp::Aggregate) {
@@ -890,13 +895,18 @@ impl Driver for MongoDriver {
                 .collect();
             sink.write_row(&row)
                 .map_err(|e| otto_core::Error::Internal(format!("write export row: {e}")))?;
+            // Wait for the consumer when a chunk is ready (bounded hand-off).
+            sink.pace()
+                .await
+                .map_err(|e| otto_core::Error::Internal(format!("write export row: {e}")))?;
             n += 1;
         }
         if !header_written {
             sink.write_header(&[])
                 .map_err(|e| otto_core::Error::Internal(format!("write export header: {e}")))?;
         }
-        sink.finish()
+        sink.finish_paced()
+            .await
             .map_err(|e| otto_core::Error::Internal(format!("finish export file: {e}")))
     }
 }
@@ -3032,63 +3042,10 @@ fn is_unauthorized(e: &impl std::fmt::Display) -> bool {
 
 // --- keyset pagination -------------------------------------------------------
 
-/// Decide whether a `find` can page by keyset, and if so build the page's
-/// `(filter, sort)`. Eligible ⇔ no explicit `.limit(n)` (the auto-limiter's own
-/// rule — an explicit limit is never paged), the sort is absent or exactly
-/// `{_id: 1}`, and the filter carries no top-level `_id` (a user already pinning
-/// `_id` gets the natural order they asked for). When eligible the sort is
-/// `{_id: 1}` ALWAYS — page 1 included — so every page of the walk shares one
-/// order; with a `cursor` (the previous page's last `_id`, Extended JSON) the
-/// filter becomes `{$and: [<filter or {}>, {_id: {$gt: cursor}}]}` — `$and`
-/// rather than a merged key, so a filter using `$or`/`$and` at the top stays
-/// intact. `Ok(None)` ⇒ not eligible, use offset/`skip`. An undecodable cursor
-/// is the caller's error (a 400), never a silent fall-back to `skip`.
-fn keyset_filter(
-    filter: Option<&Document>,
-    sort: Option<&Document>,
-    explicit_limit: bool,
-    cursor: Option<&Value>,
-) -> Result<Option<(Document, Document)>> {
-    if explicit_limit || !sort.is_none_or(sort_is_id_asc) {
-        return Ok(None);
-    }
-    if filter.is_some_and(|f| f.contains_key("_id")) {
-        return Ok(None);
-    }
-    let base = filter.cloned().unwrap_or_default();
-    let filter = match cursor {
-        Some(c) => {
-            let last = json_to_bson(c)
-                .map_err(|e| types::invalid(format!("invalid keyset cursor: {e}")))?;
-            doc! { "$and": [base, { "_id": { "$gt": last } }] }
-        }
-        None => base,
-    };
-    Ok(Some((filter, doc! { "_id": 1 })))
-}
-
-/// `{_id: 1}` exactly — one key, ascending — with the direction compared
-/// numerically (the parser yields `Int64(1)`, a pasted EJSON sort may say
-/// `Int32`/`Double`).
-fn sort_is_id_asc(sort: &Document) -> bool {
-    sort.len() == 1
-        && sort.get("_id").is_some_and(|dir| match dir {
-            Bson::Int32(n) => *n == 1,
-            Bson::Int64(n) => *n == 1,
-            Bson::Double(f) => *f == 1.0,
-            _ => false,
-        })
-}
-
-/// The `_id` cell of the LAST row (already the typed Extended-JSON projection
-/// the wire carries, so it round-trips through [`json_to_bson`] unchanged) —
-/// the keyset cursor for the next page. `None` when the result has no `_id`
-/// column (a projection dropped it) or no rows, in which case the client keeps
-/// paging by offset.
-fn last_row_id(r: &QueryResult) -> Option<Value> {
-    let idx = r.columns.iter().position(|c| c.name == "_id")?;
-    r.rows.last()?.get(idx).filter(|v| !v.is_null()).cloned()
-}
+mod keyset;
+#[cfg(test)]
+use keyset::id_after;
+use keyset::{keyset_filter, last_row_id};
 
 // --- bson / json helpers ----------------------------------------------------
 

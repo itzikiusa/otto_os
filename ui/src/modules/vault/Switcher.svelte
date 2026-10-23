@@ -3,6 +3,8 @@
   // title/aliases/path; Enter opens, Shift+Enter creates a note by that name.
   import type { VaultSwitchHit } from '../../lib/api/types';
   import { vault } from './vault.svelte';
+  import { loadErrorText } from '../../lib/loadError';
+  import { announce } from '../../lib/announce.svelte';
   import Modal from '../../lib/components/Modal.svelte';
 
   let query = $state('');
@@ -34,7 +36,7 @@
       const got = await vault.switcherQuery(q);
       if (current()) { hits = got; sel = 0; resolvedQuery = q; }
     } catch (e) {
-      if (current()) lookupError = e instanceof Error ? e.message : String(e);
+      if (current()) { lookupError = loadErrorText(e); announce(`Couldn’t search notes. ${lookupError}`, { assertive: true }); }
     } finally {
       if (current()) loading = false;
     }
@@ -96,9 +98,9 @@
         onkeydown={onKey}
       />
       {#if loading}
-        <div role="status">Searching notes…</div>
+        <div>Searching notes…</div>
       {:else if lookupError}
-        <div role="alert">Couldn’t search notes. {lookupError}</div>
+        <div class="lookup-error">Couldn’t search notes. {lookupError}</div>
         <button class="btn small" onclick={() => void refresh(query)}>Retry</button>
       {/if}
       <!-- Combobox + listbox: focus stays in the input, ↑/↓ move the active

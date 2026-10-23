@@ -7,6 +7,7 @@
 // downloads default sensibly.
 
 import { api } from '../api/client';
+import { loadErrorText } from '../loadError';
 import type {
   SftpTransfer,
   SftpTransferReq,
@@ -95,7 +96,7 @@ class SftpStore {
       s.truncated = resp.truncated === true;
       s.loaded = true;
     } catch (e) {
-      s.error = e instanceof Error ? e.message : String(e);
+      s.error = loadErrorText(e);
     } finally {
       s.loading = false;
     }

@@ -679,22 +679,61 @@ async fn namespace_metrics(
             .get(&path, Duration::from_secs(30), 64 * 1024 * 1024)
             .await
         {
-            match r.status {
-                200 => {
-                    return parse_off_runtime(r.body, |v| resources::parse_pod_metrics(&v)).await;
-                }
-                401 | 403 => {
-                    return Err(Error::Forbidden(format!(
-                        "cluster RBAC: metrics-server answered HTTP {}",
-                        r.status
-                    )));
-                }
-                _ => {}
+            if r.status == 200 {
+                return parse_off_runtime(r.body, |v| resources::parse_pod_metrics(&v)).await;
+            }
+            if let Some(e) = metrics_denial(r.status) {
+                return Err(e);
             }
         }
     }
     let out = k.run(["get", "--raw", path.as_str()]).await?;
     parse_off_runtime(out.stdout, |v| resources::parse_pod_metrics(&v)).await
+}
+
+/// What a refused metrics-server answer from the gateway means. A 401 is the
+/// proxy's loaded credential being rejected (an expired token the proxy will
+/// keep sending until it restarts), so it is [`Error::Unauthorized`] and the
+/// cycle drops the gateway; a 403 is cluster RBAC, which a restart won't fix.
+fn metrics_denial(status: u16) -> Option<Error> {
+    match status {
+        401 => Some(Error::Unauthorized),
+        403 => Some(Error::Forbidden(
+            "cluster RBAC: metrics-server answered HTTP 403".into(),
+        )),
+        _ => None,
+    }
+}
+
+/// The `metrics_server` status for a cycle whose gateway credential was
+/// rejected (and no namespace answered). Same `forbidden: <message>` shape as
+/// RBAC so the wire values stay as documented; the UI tells the two apart by
+/// the `credentials rejected` lead.
+const METRICS_CREDENTIALS_REJECTED: &str =
+    "forbidden: credentials rejected (metrics-server answered HTTP 401); restarting the proxy";
+
+/// The cycle's `metrics_server` status: an `ok` cycle stays `ok`; otherwise
+/// RBAC (`forbidden: <m>`) wins over a rejected gateway credential.
+fn metrics_server_state(ms_state: String, forbidden: Option<String>, rejected: bool) -> String {
+    if ms_state == "ok" {
+        return ms_state;
+    }
+    match forbidden {
+        Some(m) => format!("forbidden: {m}"),
+        None if rejected => METRICS_CREDENTIALS_REJECTED.into(),
+        None => ms_state,
+    }
+}
+
+/// Drop the gateway after its credential was rejected (the fingerprint alone
+/// only notices a kubeconfig rewrite), so the next cycle's
+/// [`gateway::ensure`] starts a fresh `kubectl proxy` that re-resolves it.
+fn drop_rejected_gateway(slot: &mut Option<KubeProxy>, rejected: bool) {
+    if rejected && slot.take().is_some() {
+        tracing::info!(
+            "k8s monitor: gateway credentials rejected (HTTP 401); restarting kubectl proxy"
+        );
+    }
 }
 
 /// [`run_cycle`] reusing the loop's [`LoopState`]: the cluster's `kubectl
@@ -860,6 +899,7 @@ pub async fn run_cycle_with<S: K8sCtx>(
     // Per pod (snap key): the samples the wide row is built from.
     let mut wide_samples: std::collections::HashMap<String, Vec<Sample>> = Default::default();
     let mut forbidden = None;
+    let mut gateway_rejected = false;
     for (ns, res) in metrics {
         match res {
             Ok(pods) => {
@@ -887,17 +927,13 @@ pub async fn run_cycle_with<S: K8sCtx>(
             Err(Error::Forbidden(m)) => {
                 forbidden.get_or_insert(m);
             }
+            Err(Error::Unauthorized) => gateway_rejected = true,
             Err(e) => {
                 tracing::debug!("k8s monitor: metrics-server in {ns}: {e}");
             }
         }
     }
-    if let Some(m) = forbidden {
-        if ms_state != "ok" {
-            ms_state = format!("forbidden: {m}");
-        }
-    }
-    status.metrics_server = ms_state;
+    status.metrics_server = metrics_server_state(ms_state, forbidden, gateway_rejected);
 
     // 4. Targets + transport.
     let targets: Vec<&PodSnap> = cur
@@ -1018,6 +1054,8 @@ pub async fn run_cycle_with<S: K8sCtx>(
         state.forwards.clear().await;
     }
     state.event_rv = event_rv;
+    // Past the gateway's last use: a rejected credential restarts it next cycle.
+    drop_rejected_gateway(&mut state.gateway, gateway_rejected);
     // Versions: what the probes reported this cycle, else what we knew last
     // cycle for the same pod (so an unscraped pod does not look downgraded).
     for (key, version) in scraped_versions {
@@ -1317,6 +1355,26 @@ async fn sleep_or_cancel(total: Duration, cancel: &AtomicBool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// integrations-6-04: a gateway 401 is a rejected credential (the cycle
+    /// drops the proxy so `ensure` restarts it), not cluster RBAC; a 403 stays
+    /// RBAC and keeps the proxy.
+    #[test]
+    fn gateway_401_is_credentials_rejected_not_rbac() {
+        assert!(matches!(metrics_denial(401), Some(Error::Unauthorized)));
+        match metrics_denial(403) {
+            Some(Error::Forbidden(m)) => assert!(m.starts_with("cluster RBAC"), "{m}"),
+            other => panic!("403 must stay RBAC, got {other:?}"),
+        }
+        assert!(metrics_denial(200).is_none());
+        assert!(metrics_denial(503).is_none());
+        assert!(METRICS_CREDENTIALS_REJECTED.starts_with("forbidden: credentials rejected"));
+        assert!(!METRICS_CREDENTIALS_REJECTED.contains("RBAC"));
+        // No gateway: nothing to drop, and nothing invented.
+        let mut slot: Option<KubeProxy> = None;
+        drop_rejected_gateway(&mut slot, true);
+        assert!(slot.is_none());
+    }
 
     #[test]
     fn repeated_failures_back_off_without_shortening_configured_interval() {

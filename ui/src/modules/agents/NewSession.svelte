@@ -694,14 +694,14 @@
     </div>
   {/if}
 
-  {#if batchFailures.length}
-    <div role="status">
+  <div role="status"><!-- always mounted: VoiceOver only speaks a live region that exists before its text -->
+    {#if batchFailures.length}
       <p>{batchSuccesses.length} started; {pendingSpawns.length} still need to start. Retry uses the submitted settings.</p>
       {#each batchFailures as failure, i}
         <p>{failure}<br /><span class="hint">{pendingSpawns[i]?.cwd}</span></p>
       {/each}
-    </div>
-  {/if}
+    {/if}
+  </div>
 
   {#snippet footer()}
     <button class="btn" onclick={requestClose}>Cancel</button>

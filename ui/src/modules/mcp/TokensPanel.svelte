@@ -11,7 +11,7 @@
   import { rel } from '../../lib/stores/now.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
-  import { copyTextOrThrow } from '../../lib/clipboard';
+  import { COPY_FAILED_BODY, copyTextOrThrow } from '../../lib/clipboard';
   import { mcpCpExtraApi } from './cp-api';
   import type { McpOttoToolInfo, McpScope, McpTokenInfo, User } from '../../lib/api/types';
 
@@ -159,7 +159,7 @@
       await copyTextOrThrow(text);
       toasts.success(`${what} copied`);
     } catch {
-      toasts.error('Couldn’t copy', 'Select and copy manually.');
+      toasts.error('Couldn’t copy', COPY_FAILED_BODY);
     }
   }
 

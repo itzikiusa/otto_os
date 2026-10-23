@@ -22,6 +22,20 @@ export interface InsightsConfig {
   provider?: string;
   /** Optional model alias (empty = provider default). */
   model?: string;
+  /** GET only: cadence word → its last scheduled attempt that produced no
+   *  report (cleared once a report lands). Ignored on PUT. */
+  schedule_status?: Partial<Record<'daily' | 'weekly' | 'monthly', ScheduleAttempt>>;
+}
+
+/** The last scheduled insights run of one cadence that produced no report. */
+export interface ScheduleAttempt {
+  /** The due period's key (`daily:20261022_20261022`). */
+  period: string;
+  attempts: number;
+  last_error?: string | null;
+  /** The scheduler stopped retrying this period (3 attempts). */
+  gave_up: boolean;
+  at: string;
 }
 
 export type InsightKind = 'daily' | 'weekly' | 'monthly' | 'adhoc';

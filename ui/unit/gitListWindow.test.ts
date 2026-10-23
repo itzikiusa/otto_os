@@ -1,6 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { listRange } from '../src/modules/git/list-range.ts';
+import { loadSource } from './sourceHarness.ts';
+
+// The pure window arithmetic of the shared ListWindow (lib/listWindow.svelte.ts).
+const lib = loadSource(new URL('../src/lib/listWindow.svelte.ts', import.meta.url), {
+  svelte: { tick: async () => {}, untrack: (fn: () => unknown) => fn() },
+  './findProviders': { registerFindProvider: () => () => {} },
+});
+// Re-built in this realm (the vm sandbox has its own Object prototype).
+const listRange = (...a: number[]): { start: number; end: number; top: number; bottom: number } => ({ ...lib.listRange(...a) });
 
 // The window arithmetic behind the WIP panel, the PR file-nav tree (and the
 // shared ListWindow): a list of n uniform rows inside an OUTER scroller.

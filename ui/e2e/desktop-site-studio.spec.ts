@@ -71,6 +71,10 @@ test.beforeAll(async () => {
 test.beforeEach(async ({ page }) => {
   await page.addInitScript((id) => {
     localStorage.setItem('otto_workspace', id as string);
+    // Collapsed sidebar: with the shell's Side panel rail and the Design
+    // details panel, an expanded sidebar leaves the studio under its 700px
+    // narrow breakpoint (one pane at a time) at this 1280px viewport.
+    localStorage.setItem('otto_rail_expanded', '0');
   }, wsId);
 });
 

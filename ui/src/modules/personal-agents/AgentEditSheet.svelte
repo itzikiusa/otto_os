@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announceShown } from '../../lib/announce.svelte';
   import { untrack } from 'svelte';
   import PathField from '../../lib/components/PathField.svelte';
   // Create/edit sheet for one personal agent: name, avatar, persona (soul),
@@ -217,7 +218,7 @@
       onclose();
     } catch (e) {
       error = createdAgent
-        ? `Agent created; its schedule could not be added. Save again to finish setup for ${createdAgent.name}. ${loadErrorText(e)}`
+        ? `Agent created; its schedule couldn’t be added. Save again to finish setup for ${createdAgent.name}. ${loadErrorText(e)}`
         : `Couldn’t save the agent. ${loadErrorText(e)}`;
     } finally {
       busy = false;
@@ -227,7 +228,7 @@
 
 <Modal title={agent ? `Edit ${agent.name}` : 'New personal agent'} width={620} {onclose}>
   <div class="sheet">
-    {#if error}<div class="err" role="alert" bind:this={errorEl}>{error}</div>{/if}
+    {#if error}<div class="err" use:announceShown={{ text: error, assertive: true }} bind:this={errorEl}>{error}</div>{/if}
     {#if !agent && !ws.currentId}
       <button class="btn" onclick={() => (ui.newWorkspaceOpen = true)}>Add workspace</button>
     {/if}

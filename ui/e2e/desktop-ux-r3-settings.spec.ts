@@ -160,5 +160,5 @@ test('backup restore preview requires review and a fresh preview after failure u
  await section.getByRole('checkbox', { name: /I reviewed/ }).check(); await restore.click();
  await expect(section.getByRole('alert')).toContainText('Preview expired'); await expect(restore).toHaveCount(0); expect(restores).toBe(1);
  await section.getByRole('button', { name: 'Preview restore', exact: true }).click(); await expect(restore).toBeDisabled();
- await section.getByRole('checkbox', { name: /I reviewed/ }).check(); await restore.click(); await expect(section.getByRole('status')).toContainText('Restored 1 records and 0 files'); expect(restores).toBe(2);
+ await section.getByRole('checkbox', { name: /I reviewed/ }).check(); await restore.click(); await expect(section.getByText(/^Restored 1 records and 0 files/)).toBeVisible(); expect(restores).toBe(2);
 });

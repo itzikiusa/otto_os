@@ -1,5 +1,6 @@
 <script lang="ts">
   import { plural } from '../../lib/plural';
+  import { announceShown } from '../../lib/announce.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import { sectionLabel } from './sections';
   import SectionIntro from './SectionIntro.svelte';
@@ -46,7 +47,7 @@
       catch { failed += 1; }
     }
     revoking = new Set([...revoking].filter((id) => !candidates.some((t) => t.id === id)));
-    if (failed) toasts.error('Some tokens could not be revoked', `${failed} failed; they remain listed.`);
+    if (failed) toasts.error('Some tokens couldn’t be revoked', `${failed} failed; they remain listed.`);
     else toasts.success('Tokens revoked', `${candidates.length} deleted-session tokens removed.`);
   }
 
@@ -149,7 +150,7 @@
 
   <!-- ── One-time secret reveal ── -->
   {#if freshSecret && freshInfo}
-    <div class="secret-banner" role="status">
+    <div class="secret-banner" use:announceShown={'Token created. Copy your new token now — it won’t be shown again.'}>
       <div class="secret-header">
         <Icon name="key" size={14} />
         <span class="secret-title">Copy your new token now — it won’t be shown again.</span>

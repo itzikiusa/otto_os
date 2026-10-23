@@ -1,5 +1,5 @@
 //! Engine error normalisation — the driver-side half of the Database Explorer's
-//! error UX (the UI half is `ui/src/modules/database/error-normalize.ts`).
+//! error UX (the UI half is `ui/src/lib/database/error-normalize.ts`).
 //!
 //! Every driver used to flatten its failure with `Display` into
 //! `Error::Upstream(String)`. That threw away exactly what a person needs

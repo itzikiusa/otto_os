@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announceShown } from '../../lib/announce.svelte';
   // The Memory tab: everything Otto knows about you, visible and editable.
   //  • Profile — `profile.md`, facts you own (Otto only proposes additions).
   //  • Waiting for review — memories Otto suggested (memory approval on) or
@@ -7,6 +8,7 @@
   //    search, forget one, or forget everything matching a phrase (with Undo).
   //  • Import from Hermes — a one-off, read-only scan of ~/.hermes/memories
   //    that only QUEUES entries for review. Hermes itself is never changed.
+  import { announce, focusAppContent } from '../../lib/announce.svelte';
   import { sentenceCase } from '../../lib/labels';
   import Badge from '../../lib/components/Badge.svelte';
   import { guardUnsaved } from '../../lib/leaveGuard';
@@ -88,6 +90,10 @@
   // The last forget, undoable inline (toasts have no actions).
   let undoBar = $state<{ label: string; tokens: string[] } | null>(null);
   let undoing = $state(false);
+  // Spoken at the edge (the bar is inserted with its text, which is silent).
+  $effect(() => {
+    if (undoBar) announce(`${undoBar.label}. Undo is available.`);
+  });
   async function undoForget(): Promise<void> {
     if (!undoBar) return;
     undoing = true;
@@ -207,7 +213,7 @@
         placeholder={'- Prefers aisle seats and quiet hotel rooms\n- Usually free after 17:00 on weekdays'}
         dir="auto"
       ></textarea>
-      {#if profileError}<p class="err" role="alert">{profileError}</p>{/if}
+      {#if profileError}<p class="err" use:announceShown={{ text: profileError, assertive: true }}>{profileError}</p>{/if}
     </section>
 
     {#if pendingMem.length}
@@ -248,11 +254,11 @@
         <button class="btn small" onclick={() => void forgetMatching()} disabled={!memories.length}>Forget…</button>
       </div>
       {#if undoBar}
-        <div class="undo-bar" role="status">
+        <div class="undo-bar">
           <Icon name="undo" size={14} />
           <span class="grow">{undoBar.label}</span>
           <button class="btn small" onclick={() => void undoForget()} disabled={undoing}>{undoing ? 'Restoring…' : 'Undo'}</button>
-          <button class="icon-btn" onclick={() => (undoBar = null)} aria-label="Dismiss" title="Dismiss"><Icon name="x" size={12} /></button>
+          <button class="icon-btn" onclick={() => { undoBar = null; void focusAppContent(); }} aria-label="Dismiss" title="Dismiss"><Icon name="x" size={12} /></button>
         </div>
       {/if}
       {#if memories.length}

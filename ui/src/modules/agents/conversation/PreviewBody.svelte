@@ -25,6 +25,8 @@
   import { api, authedBlobUrl } from '../../../lib/api/client';
   import { langFromPath } from '../../../lib/hl';
   import EmptyState from '../../../lib/components/EmptyState.svelte';
+  import Skeleton from '../../../lib/components/Skeleton.svelte';
+  import { loadErrorText } from '../../../lib/loadError';
   import Markdown from './Markdown.svelte';
   import CodeView from './CodeView.svelte';
   import InlineDiff from './InlineDiff.svelte';
@@ -142,7 +144,7 @@
       },
       (e) => {
         if (!alive) return;
-        error = e instanceof Error ? e.message : String(e);
+        error = loadErrorText(e);
         retryable = true;
         loading = false;
       },
@@ -198,7 +200,9 @@
       />
     </div>
   {:else if loading || (content == null && !imageUrl)}
-    <div class="pb-loading" role="status" aria-busy="true" aria-label="Loading the file">
+    <!-- a11y-6-02: the shared Skeleton owns the (delayed) "Loading" status. -->
+    <Skeleton rows={0} label="the file" />
+    <div class="pb-loading" aria-hidden="true">
       <div class="sk"></div>
       <div class="sk short"></div>
       <div class="sk"></div>

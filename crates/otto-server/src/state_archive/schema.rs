@@ -75,7 +75,6 @@ pub fn excluded_table(name: &str, portable: bool) -> bool {
             | "plugin_feature_grants"
             | "mcp_allowlist"
             | "mcp_policies"
-            | "mcp_profiles"
             | "auth_sessions"
             | "transcript_index"
             | "provider_models"
@@ -126,6 +125,7 @@ pub fn excluded_table(name: &str, portable: bool) -> bool {
                 | "swarm_agents"
                 | "mcp_servers"
                 | "mcp_policies"
+                | "mcp_profiles"
                 | "broker_clusters"
                 | "aws_accounts"
                 | "k8s_clusters"
@@ -134,6 +134,100 @@ pub fn excluded_table(name: &str, portable: bool) -> bool {
                 | "users"
         ))
 }
+/// How an archived `mcp_profiles` row restores (data-integrity-6-03). The
+/// table is archived — custom profiles, edits to the presets and the choice
+/// of default — but every install SEEDS the built-in presets, so a plain
+/// insert of an archived built-in always collided and the preview refused
+/// the restore (why the table used to be excluded, which silently widened
+/// every session that named a custom profile to Full).
+pub enum ProfileRestore {
+    /// A built-in whose id exists here: merged, never a conflict.
+    MergedBuiltin,
+    /// Not a built-in already present: insert it like any other row.
+    Insert,
+}
+
+/// An archived 0/1 (or boolean) column.
+pub fn truthy(row: &ArchiveRow, column: &str) -> bool {
+    match row.get(column) {
+        Some(Value::Bool(b)) => *b,
+        Some(Value::Number(n)) => n.as_i64().is_some_and(|n| n != 0),
+        _ => false,
+    }
+}
+
+/// Merge an archived built-in profile into this install's seeded copy: its
+/// editable fields are applied only while the local copy is untouched
+/// (`updated_at == created_at`) and not locked — an edit made here wins, as
+/// "existing rows are never overwritten" promises. `is_default` is never
+/// written here; [`restore_default_profile`] applies it once all rows are in.
+pub async fn restore_mcp_profile(
+    conn: &mut SqliteConnection,
+    row: &mut ArchiveRow,
+) -> ApiResult<ProfileRestore> {
+    row.insert("is_default".into(), json!(0));
+    let id = row.get("id").and_then(Value::as_str).unwrap_or_default();
+    if !truthy(row, "builtin") {
+        return Ok(ProfileRestore::Insert);
+    }
+    let local = sqlx::query(
+        "SELECT locked, created_at = updated_at AS pristine FROM mcp_profiles WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(|e| invalid(&e.to_string()))?;
+    let Some(local) = local else {
+        return Ok(ProfileRestore::Insert);
+    };
+    if local.get::<i64, _>("locked") == 0 && local.get::<i64, _>("pristine") != 0 {
+        let text = |c: &str| row.get(c).and_then(Value::as_str).unwrap_or("").to_owned();
+        // A name taken by another local profile keeps the local preset as is.
+        let _ = sqlx::query(
+            "UPDATE mcp_profiles SET name = ?, description = ?, all_tools = ?,
+                 groups_json = ?, include_tools_json = ?, exclude_tools_json = ?,
+                 updated_at = ?
+             WHERE id = ?",
+        )
+        .bind(text("name"))
+        .bind(text("description"))
+        .bind(i64::from(truthy(row, "all_tools")))
+        .bind(text("groups_json"))
+        .bind(text("include_tools_json"))
+        .bind(text("exclude_tools_json"))
+        .bind(text("updated_at"))
+        .bind(id)
+        .execute(&mut *conn)
+        .await;
+    }
+    Ok(ProfileRestore::MergedBuiltin)
+}
+
+/// Re-apply the archive's default profile through the repo's one-default
+/// switch — only onto an install still on the initial default (`full`), so
+/// a default chosen here is kept, and only when the profile was restored.
+pub async fn restore_default_profile(conn: &mut SqliteConnection, id: &str) -> ApiResult<()> {
+    let current: Option<String> =
+        sqlx::query_scalar("SELECT id FROM mcp_profiles WHERE is_default = 1")
+            .fetch_optional(&mut *conn)
+            .await
+            .map_err(|e| invalid(&e.to_string()))?;
+    let exists: Option<i64> = sqlx::query_scalar("SELECT 1 FROM mcp_profiles WHERE id = ?")
+        .bind(id)
+        .fetch_optional(&mut *conn)
+        .await
+        .map_err(|e| invalid(&e.to_string()))?;
+    let initial = current
+        .as_deref()
+        .is_none_or(|c| c == otto_state::FULL_PROFILE_ID);
+    if exists.is_some() && initial && current.as_deref() != Some(id) {
+        otto_state::mcp_profiles::switch_default(conn, id)
+            .await
+            .map_err(crate::error::ApiError)?;
+    }
+    Ok(())
+}
+
 pub fn secret_key(key: &str) -> bool {
     let key = key.to_ascii_lowercase().replace('-', "_");
     !matches!(

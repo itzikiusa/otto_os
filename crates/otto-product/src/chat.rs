@@ -655,32 +655,82 @@ fn build_chat_prompt(context: &str, history: &[DiscoveryChatMessage], new_messag
 }
 
 /// Split an agent reply into `(markdown, actions_json)`. The `actions` array
-/// (when present and valid) is returned as a JSON string; the markdown is the
-/// prose with the json block removed. Tolerant — never panics.
+/// (when present, non-empty and valid) is returned as a JSON string; the
+/// markdown is the reply with ONLY the block that carried it removed — an
+/// example payload fence, a `{orderId}` placeholder and every word after them
+/// stay. (It used to cut at the first ```` ```json ```` or `{`, so a reply that
+/// showed an example payload lost it, everything after it, and — since the
+/// example parsed first — the actions too.) Tolerant — never panics.
 fn split_actions(raw: &str) -> (String, Option<String>) {
-    // Find an actions array via the shared extractor.
-    let actions_json = otto_core::text::extract_json(raw)
-        .and_then(|v| v.get("actions").cloned())
-        .filter(|a| a.is_array() && !a.as_array().map(|x| x.is_empty()).unwrap_or(true))
-        .map(|a| a.to_string());
+    let has_actions = |v: &Value| {
+        v.get("actions")
+            .and_then(Value::as_array)
+            .is_some_and(|a| !a.is_empty())
+    };
+    let Some(found) = otto_core::text::extract_json_where(raw, has_actions) else {
+        return (raw.trim().to_string(), None);
+    };
+    let actions_json = found.get("actions").map(Value::to_string);
 
-    // Markdown = prose before the json fence / object.
-    let cut = raw
-        .find("```json")
-        .or_else(|| {
-            // No fence — cut at the first '{' that starts the object (best effort).
-            actions_json.as_ref().and_then(|_| raw.find('{'))
-        })
-        .unwrap_or(raw.len());
-    let mut markdown = raw[..cut].trim().to_string();
+    let mut markdown = match actions_span(raw, &found) {
+        Some(span) => {
+            let before = raw[..span.start].trim_end();
+            let after = raw[span.end..].trim_start();
+            match (before.is_empty(), after.is_empty()) {
+                (false, false) => format!("{before}\n\n{after}"),
+                (false, true) => before.to_string(),
+                _ => after.to_string(),
+            }
+        }
+        None => raw.trim().to_string(),
+    };
     if markdown.is_empty() {
-        markdown = if actions_json.is_some() {
-            "Here are some suggestions.".to_string()
-        } else {
-            raw.trim().to_string()
-        };
+        markdown = "Here are some suggestions.".to_string();
     }
     (markdown, actions_json)
+}
+
+/// The byte range in `raw` of the block that parsed to `found`: a whole
+/// ```` ```json … ``` ```` fence (markers included) when one holds it, else
+/// the bare balanced object.
+fn actions_span(raw: &str, found: &Value) -> Option<std::ops::Range<usize>> {
+    const FENCE: &str = "```json";
+    let mut from = 0;
+    while let Some(rel) = raw[from..].find(FENCE) {
+        let start = from + rel;
+        let body_start = start + FENCE.len();
+        let Some(end_rel) = raw[body_start..].find("```") else {
+            break;
+        };
+        let body_end = body_start + end_rel;
+        if serde_json::from_str::<Value>(raw[body_start..body_end].trim())
+            .ok()
+            .as_ref()
+            == Some(found)
+        {
+            return Some(start..body_end + 3);
+        }
+        from = body_end + 3;
+    }
+    // No fence holds it: try each `{` in turn, skipping past objects that
+    // parse but are not the one we want (their inner `{`s are not
+    // candidates — same order as the shared balanced-span scan).
+    let mut i = 0;
+    while let Some(rel) = raw[i..].find('{') {
+        let start = i + rel;
+        let mut stream = serde_json::Deserializer::from_str(&raw[start..]).into_iter::<Value>();
+        match stream.next() {
+            Some(Ok(v)) => {
+                let end = start + stream.byte_offset();
+                if &v == found {
+                    return Some(start..end);
+                }
+                i = end;
+            }
+            _ => i = start + 1,
+        }
+    }
+    None
 }
 
 /// Build a Scene doc from a `create_canvas` action (mermaid or nodes) in the
@@ -867,6 +917,31 @@ mod tests {
         assert_eq!(md, "Here's my take.");
         let actions = actions.expect("actions");
         assert!(actions.contains("add_questions"));
+    }
+
+    #[test]
+    fn split_actions_keeps_example_fence_and_trailing_prose() {
+        // An example payload fence comes first and parses; the actions fence
+        // is the second one, and prose follows both. The example and the
+        // prose survive, and the actions are still found.
+        let raw = "The webhook body looks like\n\n```json\n{\"event\":\"paid\"}\n```\n\nEdge cases: refunds, retries.\n\n```json\n{\"actions\":[{\"type\":\"add_questions\",\"questions\":[{\"text\":\"q1\"}]}]}\n```\n\nTell me which fits.";
+        let (md, actions) = split_actions(raw);
+        let actions = actions.expect("actions found past the example fence");
+        assert!(actions.contains("add_questions"));
+        assert!(md.contains("{\"event\":\"paid\"}"), "example kept: {md}");
+        assert!(md.contains("Edge cases: refunds, retries."), "{md}");
+        assert!(md.contains("Tell me which fits."), "{md}");
+        assert!(!md.contains("add_questions"), "actions block removed: {md}");
+    }
+
+    #[test]
+    fn split_actions_bare_object_keeps_placeholders_and_prose() {
+        // No fence: a `{orderId}` placeholder before the bare actions object
+        // used to be the cut point, dropping everything after it.
+        let raw = "Use the `{orderId}` path parameter. {\"actions\":[{\"type\":\"add_questions\",\"questions\":[]}]} And log it.";
+        let (md, actions) = split_actions(raw);
+        assert!(actions.is_some());
+        assert_eq!(md, "Use the `{orderId}` path parameter.\n\nAnd log it.");
     }
 
     #[test]

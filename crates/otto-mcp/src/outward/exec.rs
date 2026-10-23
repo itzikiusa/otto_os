@@ -24,10 +24,47 @@ pub fn ui_error_envelope(code: &str, message: &str) -> Value {
            "reason":message,"content":{"error":message,"code":code}})
 }
 
+/// The longest a provider merge route polls before it answers: GitLab's
+/// `wait_for_rebase` (60 polls × 1 s, between the rebase PUT and the merge
+/// PUT) and Bitbucket's `MERGE_POLL_BUDGET` for a 202 merge (60 s). Mirrors
+/// `otto-git/src/providers/{gitlab,bitbucket}.rs` (no dependency edge here).
+pub const MERGE_PROVIDER_POLL: Duration = Duration::from_secs(60);
+
+/// One Atlassian request's own timeout (`otto-issues/src/atlassian.rs`
+/// `REQUEST_TIMEOUT`) and the longest rate-limit wait a GET may add before it
+/// (`RATE_LIMIT_RETRY_MAX`).
+pub const ATLASSIAN_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+pub const ATLASSIAN_RATE_LIMIT_WAIT: Duration = Duration::from_secs(10);
+
+/// Mutating tools whose route makes several sequential upstream requests
+/// (writes, then a verify read). When their budget fires the write may
+/// already have landed, so the timeout error says so (see [`timeout_error`]).
+pub const MULTI_REQUEST_WRITES: &[&str] = &[
+    "merge_pr",
+    "create_pr",
+    "create_issue",
+    "create_confluence_page",
+    "update_confluence_page",
+    "comment_confluence_page",
+];
+
+/// `otto.query_db`'s row cap — the read-only tool's (`MCP_MAX_ROWS`), applied
+/// here because the Explorer's `/db/query` route honours the caller's cap.
+pub const QUERY_DB_MAX_ROWS: u64 = 200;
+
+/// `otto.query_db`'s statement deadline: a migration-sized write may run
+/// longer than a read's 15 s, but the engine still stops it before the
+/// governed self-call gives up ([`call_timeout`]).
+pub const QUERY_DB_TIMEOUT_MS: u64 = 60_000;
+
 /// Wall-clock budget of one governed self-call. The flat 30 s cut off calls
 /// whose route legitimately runs longer: a saved API request may itself wait
 /// up to its `timeout_ms` (≤ 60 s), an automation runs several, pod logs shell
-/// out to kubectl with a 60 s budget. Pure — unit-tested.
+/// out to kubectl with a 60 s budget. A multi-request write gets enough for
+/// every upstream request it makes (integrations-6-01): a timeout there told
+/// the agent "failed" after the issue/page/merge had landed, and its retry
+/// made a duplicate. Every value stays at or below `GOVERNED_RUN_BUDGET`.
+/// Pure — unit-tested.
 pub fn call_timeout(tool: &str, args: &Value) -> Duration {
     let secs = match tool {
         "api_execute" => {
@@ -39,13 +76,55 @@ pub fn call_timeout(tool: &str, args: &Value) -> Duration {
             ms / 1000 + 15
         }
         "api_run_automation" => 180,
+        // The statement's own engine deadline (`QUERY_DB_TIMEOUT_MS`) + margin.
+        "query_db" => QUERY_DB_TIMEOUT_MS / 1000 + 15,
         "k8s_logs" | "k8s_action" | "aws_athena_query" | "aws_athena_get_query" => 75,
         // ≤30 s per pod request + a pod list + proxy start-up.
         "k8s_pod_http" => 90,
         "consume_broker_messages" | "run_workflow" | "start_pr_review" | "open_session" => 60,
+        // Merge PUT (+ GitLab rebase PUT) around a ≤ 60 s provider poll.
+        "merge_pr" => 90,
+        // createmeta types + fields (paged), parent lookup, POST, verify GET.
+        "create_issue" => 120,
+        // Write (+ full-width property POSTs / version GET), then a verify GET.
+        "create_confluence_page" | "update_confluence_page" | "comment_confluence_page" => 90,
+        // Push check + create + reviewer/proof-pack follow-ups.
+        "create_pr" => 60,
         _ => 30,
     };
     Duration::from_secs(secs)
+}
+
+/// The agent-facing error when a self-call's budget fires. For a
+/// [`MULTI_REQUEST_WRITES`] tool the write may already be done (only the
+/// verify read ran over), so the message names what was being written and
+/// tells the agent to look before retrying — a blind retry duplicates an
+/// outward-facing artifact the human approved once. Pure — unit-tested.
+pub fn timeout_error(tool: &str, args: &Value, budget: Duration) -> String {
+    let base = format!("self-call: timed out after {}s", budget.as_secs());
+    if !MULTI_REQUEST_WRITES.contains(&tool) {
+        return base;
+    }
+    let s = |k: &str| args.get(k).and_then(Value::as_str).unwrap_or("?");
+    let n = args.get("number").and_then(i64_lenient).unwrap_or_default();
+    let target = match tool {
+        "merge_pr" => format!("PR #{n} in repo {}", s("repo_id")),
+        "create_pr" => format!(
+            "a PR {} → {} in repo {}",
+            s("source_branch"),
+            s("target_branch"),
+            s("repo_id")
+        ),
+        "create_issue" => format!("issue \"{}\" in project {}", s("summary"), s("project_key")),
+        "create_confluence_page" => {
+            format!("page \"{}\" in space {}", s("title"), s("space_key"))
+        }
+        _ => format!("page {}", s("page_id")),
+    };
+    format!(
+        "{base}, but the {tool} for {target} may already have completed upstream. \
+         Check it (get/search it) before retrying — a retry can create a duplicate."
+    )
 }
 
 /// Fields of a saved API request that the PATCH route REPLACES wholesale when
@@ -386,6 +465,56 @@ fn issue_route(tool: &str, args: &Value) -> Result<SelfCall, Error> {
     })
 }
 
+/// The two DB query tools' self-calls: `write = false` for
+/// `query_db_readonly`, `true` for the approval-gated `query_db`.
+fn db_query_call(args: &Value, write: bool) -> Result<SelfCall, Error> {
+    let conn = arg_str(args, "connection_id")?;
+    let stmt = arg_str(args, "statement")?;
+    if !write {
+        // Routed through `/db/mcp-query` (not `/db/query`): that route's
+        // engine-specific classifier (`otto_dbviewer::ensure_read_only`)
+        // is the ONE read-only gate — it refuses writes/DDL/multi-statement
+        // batches on every connection, whatever its write-guard flag, and
+        // then executes inside the engine's read-only mode (read-only
+        // transaction / ClickHouse `readonly`) with cell masking forced.
+        // A second, cruder prefix check here used to refuse reads the
+        // explorer accepts (a leading comment, a `;` inside a literal).
+        let body = json!({
+            "statement": stmt,
+            "max_rows": args.get("max_rows").and_then(u64_lenient).unwrap_or(200),
+            "node": args.get("node").and_then(Value::as_str),
+        });
+        return Ok(SelfCall::post(
+            format!("/api/v1/connections/{}/db/mcp-query", seg(&conn)),
+            body,
+        ));
+    }
+    // The Database Explorer's own `/db/query` route, so a write meets
+    // exactly the gates a person's run does: Editor role, the
+    // resource-access policy (enforced read-only / reviewed production
+    // changes) and the read-only / production write-guard. The body never
+    // carries `confirm_write` — and an agent credential's would not count
+    // anyway (S6-304) — so a guarded connection refuses the write. Rows come
+    // back masked and capped like the read-only tool; the statement stops
+    // itself before the self-call budget.
+    let max_rows = args
+        .get("max_rows")
+        .and_then(u64_lenient)
+        .unwrap_or(QUERY_DB_MAX_ROWS)
+        .clamp(1, QUERY_DB_MAX_ROWS);
+    let body = json!({
+        "statement": stmt,
+        "max_rows": max_rows,
+        "node": args.get("node").and_then(Value::as_str),
+        "mask": true,
+        "timeout_ms": QUERY_DB_TIMEOUT_MS,
+    });
+    Ok(SelfCall::post(
+        format!("/api/v1/connections/{}/db/query", seg(&conn)),
+        body,
+    ))
+}
+
 /// Map an outward tool + its (validated) arguments to the exact self-call against
 /// the daemon's own REST API. Pure: no I/O, no token — every tool reuses its
 /// endpoint's native RBAC when the call is later executed as the user. `ask_human_approval`
@@ -427,27 +556,8 @@ pub fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
             SelfCall::get(path)
         }
         // ---- Database ----
-        "query_db_readonly" => {
-            let conn = arg_str(args, "connection_id")?;
-            let stmt = arg_str(args, "statement")?;
-            // Routed through `/db/mcp-query` (not `/db/query`): that route's
-            // engine-specific classifier (`otto_dbviewer::ensure_read_only`)
-            // is the ONE read-only gate — it refuses writes/DDL/multi-statement
-            // batches on every connection, whatever its write-guard flag, and
-            // then executes inside the engine's read-only mode (read-only
-            // transaction / ClickHouse `readonly`) with cell masking forced.
-            // A second, cruder prefix check here used to refuse reads the
-            // explorer accepts (a leading comment, a `;` inside a literal).
-            let body = json!({
-                "statement": stmt,
-                "max_rows": args.get("max_rows").and_then(u64_lenient).unwrap_or(200),
-                "node": args.get("node").and_then(Value::as_str),
-            });
-            SelfCall::post(
-                format!("/api/v1/connections/{}/db/mcp-query", seg(&conn)),
-                body,
-            )
-        }
+        "query_db_readonly" => db_query_call(args, false)?,
+        "query_db" => db_query_call(args, true)?,
         "list_connections" => {
             let ws = arg_str(args, "workspace_id")?;
             SelfCall::get(format!("/api/v1/workspaces/{}/connections", seg(&ws)))

@@ -7,6 +7,8 @@
   // display and which reason is shown.
   import { untrack } from 'svelte';
   import { toastError } from '../../lib/toastError';
+  import { loadErrorText } from '../../lib/loadError';
+  import { announce } from '../../lib/announce.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import { mcpCpApi } from '../../lib/api/mcp';
   import { toasts } from '../../lib/toast.svelte';
@@ -51,7 +53,16 @@
   let nameError = $state<string | null>(null);
   let saving = $state(false);
 
+  /** Field errors are plain text tied to their field (`aria-describedby`);
+   *  the failed save is spoken once, at the edge (a role="alert" inserted
+   *  with its text is silent in VoiceOver). */
   async function save(): Promise<void> {
+    await validateThenSave();
+    const error = nameError ?? matchError;
+    if (error) announce(error, { assertive: true });
+  }
+
+  async function validateThenSave(): Promise<void> {
     if (!name.trim()) {
       nameError = 'Give the policy a name.';
       return;
@@ -62,7 +73,7 @@
       try {
         match = JSON.parse(matchText);
       } catch (e) {
-        matchError = `Match must be valid JSON: ${e instanceof Error ? e.message : String(e)}`;
+        matchError = `Match must be valid JSON: ${loadErrorText(e)}`;
         return;
       }
     }
@@ -118,9 +129,10 @@
         bind:value={name}
         placeholder="Approve all dangerous writes"
         aria-invalid={nameError != null}
+        aria-describedby={nameError ? 'mcp-policy-name-err' : undefined}
         oninput={() => (nameError = null)}
       />
-      {#if nameError}<span class="field-error" role="alert">{nameError}</span>{/if}
+      {#if nameError}<span id="mcp-policy-name-err" class="field-error">{nameError}</span>{/if}
     </label>
 
     <div class="row3">
@@ -158,12 +170,13 @@
         class="mono"
         spellcheck="false"
         aria-invalid={matchError != null}
+        aria-describedby={matchError ? 'mcp-policy-match-err' : undefined}
         oninput={() => (matchError = null)}
       ></textarea>
       <span class="hint">
         Keys (all optional, AND-combined): {matchKeysText}.
       </span>
-      {#if matchError}<span class="field-error" role="alert">{matchError}</span>{/if}
+      {#if matchError}<span id="mcp-policy-match-err" class="field-error">{matchError}</span>{/if}
     </label>
 
     <label class="field">

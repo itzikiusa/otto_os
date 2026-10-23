@@ -1,5 +1,7 @@
 <script lang="ts">
+  import { announce } from '../../lib/announce.svelte';
   import { api } from '../../lib/api/client';
+  import { loadErrorText } from '../../lib/loadError';
   import type { NetworkProfile } from '../../lib/api/types';
   import NetworkProfiles from './NetworkProfiles.svelte';
   let { workspaceId, value = '', onchange, editable = false, disabled = false }: {
@@ -15,7 +17,7 @@
     let alive = true;
     profiles = []; loading = true; error = ''; managing = false;
     void api.get<NetworkProfile[]>(`/workspaces/${scope}/network-profiles`).then((rows) => { if (alive) profiles = rows; })
-      .catch((e) => { if (alive) error = e instanceof Error ? e.message : String(e); }).finally(() => { if (alive) loading = false; });
+      .catch((e) => { if (alive) error = loadErrorText(e); }).finally(() => { if (alive) loading = false; });
     return () => { alive = false; };
   });
   function saved(profile: NetworkProfile) {
@@ -23,6 +25,9 @@
     if (!profile.archived) onchange(profile.id);
     else if (value === profile.id) onchange('');
   }
+  // Spoken at the state edge through the shell's always-mounted announcer: a
+  // live region inserted together with its text is not read (WebKit/VoiceOver).
+  $effect(() => { if (error) announce(`${error} Retry loading profiles.`, { assertive: true }); });
 </script>
 <div class="network-picker">
   <label>Network profile<select aria-label="Network profile" value={value} disabled={disabled || loading} onchange={(e) => onchange(e.currentTarget.value)}>
@@ -31,7 +36,7 @@
     {#if value && !profiles.some((p) => p.id === value && !p.archived)}<option value={value} disabled>Selected profile unavailable</option>{/if}
   </select></label>
   {#if editable}<button type="button" aria-expanded={managing} disabled={disabled || loading} onclick={() => managing = !managing}>Manage network profiles</button>{/if}
-  {#if error}<p role="alert">{error} <button type="button" onclick={() => reload++}>Retry loading profiles</button></p>{/if}
+  {#if error}<p>{error} <button type="button" onclick={() => reload++}>Retry loading profiles</button></p>{/if}
   {#if managing}{#key workspaceId}<NetworkProfiles {workspaceId} {profiles} onsaved={saved} />{/key}{/if}
 </div>
 <style>

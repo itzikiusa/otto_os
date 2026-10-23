@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { announceShown } from '../../lib/announce.svelte';
+  import { announce } from '../../lib/announce.svelte';
   import { plural } from '../../lib/plural';
   import { onMount, onDestroy } from 'svelte';
   import { api } from '../../lib/api/client';
@@ -23,6 +25,11 @@
   // svelte-ignore state_referenced_locally
   let mode = $state<RecoveryMode>(initialMode);
   let busy = $state(false);
+  // Spoken through the shell's always-mounted region: a status element
+  // inserted together with its text is silent in VoiceOver.
+  $effect(() => {
+    if (busy) announce('Working…');
+  });
   let error = $state('');
   let entries = $state<GitRecoveryEntry[]>([]);
   let more = $state(true);
@@ -129,8 +136,8 @@
       </div>
       <button class="btn" disabled={busy} onclick={() => run(refresh)}>Refresh</button>
     </nav>
-    {#if error}<p class="error" role="alert">{error}</p>{/if}
-    {#if busy}<p role="status">Working…</p>{/if}
+    {#if error}<p class="error" use:announceShown={{ text: error, assertive: true }}>{error}</p>{/if}
+    {#if busy}<p>Working…</p>{/if}
     {#if mode === 'history'}
       <p>Browse previous HEAD positions. Recover creates a new branch without moving your current branch.</p>
       <div class="scroll">
@@ -186,7 +193,7 @@
           {#if !bisect.finished}
             <button class="btn primary" disabled={busy} onclick={() => bisectAction('good')}>Works (good)</button>
             <button class="btn danger" disabled={busy} onclick={() => bisectAction('bad')}>Broken (bad)</button>
-            <button class="btn" disabled={busy} onclick={() => bisectAction('skip')}>Cannot test (skip)</button>
+            <button class="btn" disabled={busy} onclick={() => bisectAction('skip')}>Can’t test (skip)</button>
           {/if}
           <button class="btn" disabled={busy} onclick={() => bisectAction('reset')}>End bisect / return to branch</button>
         </div>

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announceShown } from '../../../lib/announce.svelte';
   import { rel } from '../../../lib/stores/now.svelte';
   import { rowMenu as rowMenuKeys } from '../../../lib/rowMenu';
   import { plural } from '../../../lib/plural';
@@ -41,15 +42,12 @@
   import K8sViewSwitch from '../K8sViewSwitch.svelte';
   import { monitorPath, resourcesPath } from '../../../lib/k8s/viewState';
   import type { K8sDrawerTab } from '../../../lib/stores/k8s.svelte';
-  import { WINDOWS, classColor, classLabel, collectorLine, fmtMs, fmtPct, fmtRate, isWindow, rbacMessage } from './monitor-util';
+  import { WINDOWS, classColor, classLabel, collectorLine, fmtMs, fmtPct, fmtRate, isWindow, rbacMessage, credentialsRejected } from './monitor-util';
 
   // The Insights tab renders markdown (`marked`): load it on first open.
   const MonitorInsightsLazy = lazyComponent(() => import('./MonitorInsights.svelte'));
 
-  interface Props {
-    cluster: K8sCluster;
-    tab: string;
-  }
+  interface Props { cluster: K8sCluster; tab: string }
   let { cluster, tab }: Props = $props();
 
   const TABS = [
@@ -504,8 +502,8 @@
       {/if}
       {#if rbacMessage(status?.metrics_server)}
         <span class="chip" title={rbacMessage(status?.metrics_server) ?? ''}>metrics-server: RBAC denied — CPU unavailable</span>
-      {:else if status?.metrics_server === 'ok'}
-        <span class="chip ok">metrics-server ok</span>
+      {:else if credentialsRejected(status?.metrics_server)}<span class="chip" title={status?.metrics_server}>metrics-server: credentials rejected — reconnecting</span>
+      {:else if status?.metrics_server === 'ok'}<span class="chip ok">metrics-server ok</span>
       {:else if status?.metrics_server === 'disabled'}
         <span class="chip" title="Metrics-server probing is off in Settings">metrics-server off</span>
       {/if}
@@ -612,7 +610,7 @@
                     {#if seriesLoading}
                       <Skeleton rows={2} height={60} />
                     {:else if seriesError}
-                      <div class="trend-error" role="alert"><strong>Couldn’t load trends</strong><p>{seriesError}</p><button class="btn small" onclick={() => void loadTrends(r)}>Retry trends</button></div>
+                      <div class="trend-error" use:announceShown={{ text: `Couldn’t load trends. ${seriesError}`, assertive: true }}><strong>Couldn’t load trends</strong><p>{seriesError}</p><button class="btn small" onclick={() => void loadTrends(r)}>Retry trends</button></div>
                     {:else}
                       <div class="charts">
                         <div class="chart">

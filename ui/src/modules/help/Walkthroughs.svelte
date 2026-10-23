@@ -114,6 +114,13 @@
       (s) => s.items.length > 0,
     ),
   );
+  /** What the rail's one always-mounted count region says: nothing until a
+   *  search starts, then the match count (or that nothing matched). */
+  function searchCountText(q: string, n: number): string {
+    if (!q.trim()) return '';
+    return n === 0 ? `No guides match “${q.trim()}”` : `${n} ${n === 1 ? 'guide' : 'guides'}`;
+  }
+  const countText = $derived(searchCountText(query, hits.length));
   /** The rail's rows in on-screen order (arrow-key navigation walks this). */
   const railOrder = $derived(searching ? hits.map((h) => h.section.id) : GUIDES.map((g) => g.id));
 
@@ -255,6 +262,10 @@
                 data-testid="guide-search"
               />
             </div>
+            <!-- Always mounted with the rail, so the first count after typing is
+                 spoken too (a region inserted with its text is silent); the
+                 visible count below is plain text. -->
+            <span class="sr-only" role="status" data-testid="guide-search-count">{countText}</span>
 
             {#if viewport.isPhone && FILM && !searching}
               <div class="rail-film"><TourFilm bind:this={film} film={FILM} {guideIds} onopenguide={(id) => open(id)} /></div>
@@ -268,7 +279,7 @@
                     <button class="btn small" onclick={() => { query = ''; searchEl?.focus(); }}>Clear search</button>
                   </div>
                 {:else}
-                  <div class="rail-count" role="status">{hits.length} {hits.length === 1 ? 'guide' : 'guides'}</div>
+                  <div class="rail-count">{hits.length} {hits.length === 1 ? 'guide' : 'guides'}</div>
                   {#each hits as h (h.section.id)}
                     {@render row(h.section, h.match)}
                   {/each}

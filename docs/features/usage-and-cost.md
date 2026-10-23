@@ -86,10 +86,14 @@ sessions, and daemon restarts.
 | Provider | Transcript glob | Per-turn signal |
 |---|---|---|
 | **Claude Code and custom Claude providers** | `~/.claude/projects/<enc_cwd>/<session-uuid>.jsonl`, `~/.claude-*/projects/` (including `claude-work`), `~/.config/claude/projects/`, and Otto subscription-account `projects/` directories, plus subagent transcripts `<session-uuid>/subagents/*.jsonl` (billed to the parent session) | `type=="assistant"` lines carry `message.usage.*`; model at `message.model`. Each API response is counted once by its `message.id:requestId` key, so a subagent response that also appears in the parent file is not double counted. |
-| **Codex** | `~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl` | `type=="event_msg"` + `payload.type=="token_count"` lines; counts from `payload.info.total_token_usage`, differenced against a persisted per-session baseline. Model from `session_meta` and `turn_context` (else `"codex"`). |
+| **Codex** | `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl` (else `~/.codex/sessions/…`), plus every Otto subscription-account `sessions/` directory | `type=="event_msg"` + `payload.type=="token_count"` lines; counts from `payload.info.total_token_usage`, differenced against a persisted per-session baseline. Model from `session_meta` and `turn_context` (else `"codex"`). |
 | **Grok** | `~/.grok/sessions/**/updates.jsonl` | Completed-turn model usage; cache is split out of input and reasoning is already included in output. Reported `costUsdTicks` is used when available; otherwise cost is estimated. |
 | **Antigravity (`agy`)** | `~/.gemini/{antigravity-cli,antigravity,antigravity-ide}/conversations/*.db` | Read-only per-step SQLite metadata supplies historical dates, models, and disjoint input/output/cache counts. JSONL mirrors are not summed again. |
 
+The Claude and Codex roots come from `otto_transcript::roots::TranscriptRoots::discover`,
+the same set History indexes, so a new root (another config dir, an account kind)
+reaches Usage and History together. `OTTO_TRANSCRIPT_ROOTS=<claude>:<codex>` replaces
+them; an isolated E2E daemon (`OTTO_E2E=1|true`) reads only `<data dir>/e2e-transcripts/`.
 `GROK_HOME` and `ANTIGRAVITY_DATA_DIR` override/add provider roots for the
 normal daemon. Isolated E2E daemons ignore those environment overrides. Additional
 Antigravity backup/ACP and `~/.config/antigravity` roots are discovered as well.

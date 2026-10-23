@@ -13,6 +13,7 @@
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { copyAsJson } from '../../lib/components/exporters';
+  import { COPY_FAILED_BODY } from '../../lib/clipboard';
   import LoadState from '../../lib/components/LoadState.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import { router } from '../../lib/router.svelte';
@@ -187,7 +188,7 @@
         if (copyingId === e.id) copyingId = null;
       }, 1200);
     } catch {
-      toasts.error('Couldn’t copy the entry', 'The clipboard write was blocked.');
+      toasts.error('Couldn’t copy the entry', COPY_FAILED_BODY);
     }
   }
 
@@ -317,11 +318,14 @@
     {/if}
   </div>
 
+  <!-- One always-mounted count region, so paging and filtering are spoken
+       (a region inserted with the bar would miss the first count). -->
+  <span class="sr-only" role="status">{total > 0 ? `${pageStart}–${pageEnd} of ${total} entr${total === 1 ? 'y' : 'ies'}` : ''}</span>
   <!-- The count bar only while there is something to count; an empty log says
      so once, in the body below. -->
   {#if total > 0}
   <div class="log-meta">
-    <span aria-live="polite">
+    <span>
       {pageStart}–{pageEnd} of {total} entr{total === 1 ? 'y' : 'ies'}
     </span>
     {#if total > PAGE_SIZE}

@@ -4,7 +4,7 @@
   // what {{variables}} resolve against when you send — and the selected
   // environment's variables as a full-width table on the right.
   import Icon from '../../lib/components/Icon.svelte';
-  import { focusAfterRowRemoval, rowListOf } from './rowFocus';
+  import { focusAfterRowRemoval, rowListOf } from '../../lib/rowFocus';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import PaneDivider from '../../lib/components/PaneDivider.svelte';

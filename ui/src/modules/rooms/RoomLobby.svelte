@@ -1,5 +1,6 @@
 <script lang="ts">
   import RoomSettingsModal from './RoomSettingsModal.svelte';
+  import { announceShown } from '../../lib/announce.svelte';
   import { onMount } from 'svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
@@ -10,6 +11,7 @@
   import { auth } from '../../lib/stores/auth.svelte';
   import { api } from '../../lib/api/client';
   import { confirmer } from '../../lib/confirm.svelte';
+  import { toasts } from '../../lib/toast.svelte';
   import { router } from '../../lib/router.svelte';
   import { registry } from '../../lib/commands.svelte';
   import { parseRoomInvite } from './room-state';
@@ -19,11 +21,13 @@
   let settingsOpen = $state(false);
   let rooms = $state<RoomSnapshot[]>([]);
   let loading = $state(true), error = $state(''), joinOpen = $state(false), link = $state(''), joinError = $state('');
-  let opening = $state(''), openError = $state(''), joining = $state(false), lastOpened = $state('');
+  let opening = $state(''), joining = $state(false);
+  /** Opening the room's window is an action: its failure is a toast whose
+   *  action tries again (the room list itself stays as loaded). */
   async function openRoom(id: string) {
-    opening = id; lastOpened = id; openError = '';
+    opening = id;
     try { await openHostedRoom(id); }
-    catch (e) { openError = loadErrorText(e); }
+    catch (e) { toasts.push('error', 'Couldn’t open the room', loadErrorText(e), 12000, {action: {label: 'Open again', run: () => openRoom(id)}}); }
     finally { opening = ''; }
   }
   onMount(() => { void load(); });
@@ -64,7 +68,6 @@
     {#snippet actions()}<button class="btn small" onclick={() => router.go('rooms/games')}>Games</button><button class="btn small" onclick={() => router.go('rooms/recaps')}>Recap archives</button>{#if auth.isRoot}<button class="btn small" onclick={() => settingsOpen = true}>Connection settings…</button>{/if}<button class="btn small primary" onclick={() => joinOpen = true}>Join room…</button>{/snippet}
   </PageHeader>
   <PageBody>
-    {#if openError}<p role="alert">Couldn’t open the room. {openError} <button class="btn small" disabled={!!opening || !lastOpened} onclick={() => openRoom(lastOpened)}>Retry</button></p>{/if}
     <LoadState what="rooms" variant="page" {loading} {error} empty={!rooms.length} onretry={load}>
     {#snippet emptyView()}<EmptyState variant="page" icon="people" title="Bring someone into your session" body="Open a running session’s More menu and choose Start room. You control admission and terminal access." />{/snippet}
     <div class="room-list">{#each rooms as room (room.room_id)}
@@ -80,7 +83,7 @@
 {#if joinOpen}<Modal title="Join a room" onclose={() => joinOpen = false}>
   <label>Invitation link <input dir="ltr" type="url" bind:value={link} placeholder="https://host/#/room/…" autocomplete="off" spellcheck="false" /></label>
   <p>You will see the destination before connecting.</p>
-  {#if joinError}<p role="alert">{joinError}</p>{/if}
+  {#if joinError}<p class="form-error" use:announceShown={{ text: joinError, assertive: true }}>{joinError}</p>{/if}
   {#snippet footer()}<button class="btn" onclick={() => joinOpen = false}>Cancel</button><button class="btn primary" disabled={!link.trim() || joining} onclick={join}>{joining ? 'Joining…' : 'Continue'}</button>{/snippet}
 </Modal>{/if}
 <style>
@@ -89,5 +92,5 @@
   .room-list { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(min(280px, 100%), 1fr)); }
   article { border: 1px solid var(--border); border-radius: var(--radius-m); padding: 16px; background: var(--surface); }
   h2 { font-size: var(--fs-l); margin: 0; } p { color: var(--text-dim); line-height: 1.5; }
-  [role='alert'] { color: var(--danger); }
+  .form-error { color: var(--danger); }
 </style>

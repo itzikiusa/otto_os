@@ -5,7 +5,7 @@
 import { api } from '../api/client';
 import { loadErrorText } from '../loadError';
 import { toastError } from '../toastError';
-import { computeRunStats, EMPTY_AGENT_STATS, type AgentRunStats, type RunStats } from '../../modules/swarm/runStats';
+import { computeRunStats, EMPTY_AGENT_STATS, type AgentRunStats, type RunStats } from '../swarm/runStats';
 import type { OttoEvent } from '../api/types';
 import type {
   CreateAgentReq,
@@ -28,7 +28,7 @@ import type {
   UpdateAgentReq,
   UpdateGoalReq,
   UpdateTriggerReq,
-} from '../../modules/swarm/types';
+} from '../api/types/swarm';
 import { announceModule } from '../lazyModule';
 import { latestOnly } from '../latest';
 

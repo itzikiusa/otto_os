@@ -21,6 +21,7 @@ use otto_core::api::{
     MaterializeProviderResult, WorkspaceContextConfig,
 };
 use otto_core::hooks::SpawnInjection;
+use otto_transcript::roots;
 use serde_json::{json, Value};
 
 use crate::library::Library;
@@ -139,10 +140,11 @@ pub fn default_context_root() -> PathBuf {
 }
 
 /// The out-of-tree bundle dir for `(provider, cwd)` under `ctx_root`:
-/// `<ctx_root>/<provider>/<enc(cwd)>`. Deterministic, so the launch injection
-/// can be reconstructed on resume without re-materializing.
+/// `<ctx_root>/<provider>/<encode_cwd(cwd)>` (Claude's per-project encoding).
+/// Deterministic, so the launch injection can be reconstructed on resume
+/// without re-materializing.
 fn bundle_dir(ctx_root: &Path, provider: &str, cwd: &str) -> PathBuf {
-    ctx_root.join(provider).join(enc_project(cwd))
+    ctx_root.join(provider).join(roots::encode_cwd(cwd))
 }
 
 /// Materialize the active context for `provider` into its out-of-tree bundle
@@ -390,22 +392,13 @@ fn active_soul_body(library: &Library, name: &Option<String>) -> Option<String> 
     library.get_soul(name).map(|s| s.body)
 }
 
-/// Encode a cwd into claude's per-project directory name: every non-alphanumeric
-/// char becomes `-`. Mirrors `otto_orchestrator::claude_pty::project_dir`.
-fn enc_project(cwd: &str) -> String {
-    cwd.chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect()
-}
-
 /// Best-effort read of the workspace `MEMORY.md` at
-/// `~/.claude/projects/<enc(cwd)>/memory/MEMORY.md`. Missing ⇒ `None`.
+/// `<claude root>/<encode_cwd(cwd)>/memory/MEMORY.md` under `$HOME` — the one
+/// Claude layout in [`otto_transcript::roots`] (architecture-6w2-01).
+/// Missing ⇒ `None`.
 fn read_memory(cwd: &str) -> Option<String> {
-    let home = std::env::var("HOME").ok()?;
-    let path = Path::new(&home)
-        .join(".claude")
-        .join("projects")
-        .join(enc_project(cwd))
+    let path = roots::default_claude_root(&roots::home_dir())
+        .join(roots::encode_cwd(cwd))
         .join("memory")
         .join("MEMORY.md");
     fs::read_to_string(path).ok()
@@ -1129,7 +1122,7 @@ mod tests {
 
     /// The bundle dir a provision for `(provider, cwd)` would target under `root`.
     fn bundle_of(root: &TempDir, provider: &str, cwd: &str) -> PathBuf {
-        root.path().join(provider).join(enc_project(cwd))
+        root.path().join(provider).join(roots::encode_cwd(cwd))
     }
 
     /// Assert the working tree was never written: no Otto context files in `cwd`.
@@ -1146,10 +1139,13 @@ mod tests {
         }
     }
 
+    /// The bundle dir and `read_memory` name directories with the shared
+    /// Claude encoder (`otto_transcript::roots::encode_cwd`); these are the
+    /// encodings they rely on.
     #[test]
     fn enc_replaces_non_alphanumeric() {
-        assert_eq!(enc_project("/Users/x/my proj"), "-Users-x-my-proj");
-        assert_eq!(enc_project("abc123"), "abc123");
+        assert_eq!(roots::encode_cwd("/Users/x/my proj"), "-Users-x-my-proj");
+        assert_eq!(roots::encode_cwd("abc123"), "abc123");
     }
 
     #[test]

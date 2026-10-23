@@ -16,6 +16,8 @@ otto-orchestrator = { workspace = true }
 otto-swarm = { workspace = true }
 otto-design = { workspace = true }
 otto-skills = { workspace = true }
+# The shared fan-out + summarizer runner the analysis and plan runs use.
+otto-agent-run = { workspace = true }
 axum = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

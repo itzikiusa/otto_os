@@ -6,11 +6,12 @@ import { loadSource } from './sourceHarness.ts';
 const plain = <T>(v: T): T => JSON.parse(JSON.stringify(v)) as T;
 
 const tableWindow = () =>
-  loadSource(new URL('../src/lib/tableWindow.svelte.ts', import.meta.url), { svelte: { tick: async () => {} }, './findProviders': { registerFindProvider: () => () => {} } }, { requestAnimationFrame: (fn: () => void) => { fn(); return 1; } });
+  loadSource(new URL('../src/lib/tableWindow.svelte.ts', import.meta.url), { svelte: { tick: async () => {}, untrack: (fn: () => unknown) => fn() }, './findProviders': { registerFindProvider: () => () => {} } }, { requestAnimationFrame: (fn: () => void) => { fn(); return 1; } }, { relative: true });
 
 
 /** k8s-util reads the shared clock (`rowAge`). */
-const K8S_UTIL_FIXTURES = { '../../lib/stores/now.svelte': { now: () => Date.now() } };
+const K8S_KINDS = () => loadSource(new URL('../src/lib/k8s/kinds.ts', import.meta.url), {});
+const K8S_UTIL_FIXTURES = { '../../lib/stores/now.svelte': { now: () => Date.now() }, '../../lib/k8s/kinds': K8S_KINDS() };
 
 test('TableWindow renders small lists whole and windows big ones', () => {
   const { TableWindow } = tableWindow();
@@ -138,6 +139,7 @@ test('rowAge ticks from created_at, falls back to age_seconds (perf R1)', () => 
   let nowMs = 1_790_848_800_000 + 90_000;
   const { rowAge } = loadSource(new URL('../src/modules/kubernetes/k8s-util.ts', import.meta.url), {
     '../../lib/stores/now.svelte': { now: () => nowMs },
+    '../../lib/k8s/kinds': K8S_KINDS(),
   });
   const row = { age_seconds: 5, created_at: 1_790_848_800 };
   assert.equal(rowAge(row), 90);

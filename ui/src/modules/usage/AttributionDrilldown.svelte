@@ -107,7 +107,7 @@
     try {
       await copyAsJson(r);
     } catch {
-      toasts.error("Couldn’t copy the row", 'Clipboard access was blocked.');
+      toasts.error("Couldn’t copy the row", 'Clipboard access was blocked. Select the row’s text and copy it manually.');
       return;
     }
     copiedRow = r.key;

@@ -15,6 +15,9 @@
   import { toasts } from '../../lib/toast.svelte';
   import { openExternal, isExternalUrl } from '../../lib/external';
   import { swarm } from '../../lib/stores/swarm.svelte';
+  import { ws } from '../../lib/stores/workspace.svelte';
+  import { auth } from '../../lib/stores/auth.svelte';
+  import { canOpenRunSession, RUN_SESSION_NOT_YOURS } from './access';
   import type { SwarmRun, SwarmMessage, TurnResult, TurnArtifact } from './types';
   import { copyTextOrThrow } from '../../lib/clipboard';
   import { formatCount, formatUsd } from '../../lib/metric-format';
@@ -27,6 +30,12 @@
     onclose: () => void;
   }
   let { run, onclose }: Props = $props();
+
+  // access-control-6-04: same rule as the Runs list.
+  const canOpen = $derived(!!run.session_id && canOpenRunSession(
+    { isRoot: auth.isRoot, myRole: ws.workspaces.find((w) => w.id === run.workspace_id)?.my_role },
+    !!ws.getSession(run.session_id),
+  ));
 
   const agent = $derived(swarm.agentById(run.agent_id));
   // The runs list is `lite` (no per-run result blob); a live event's run does
@@ -133,8 +142,12 @@
            Failed, stopped → Cancelled) instead of the raw status word. -->
       <StatusBadge status={runStatus(run.status)} />
       <span class="grow"></span>
-      {#if run.session_id}
+      {#if run.session_id && canOpen}
         <button class="btn small ghost" aria-label="Open {agent?.name ?? 'this run'}’s session" onclick={() => { swarm.selectedSessionId = run.session_id!; onclose(); }}>
+          <Icon name="terminal" size={12} /> Open session
+        </button>
+      {:else if run.session_id}
+        <button class="btn small ghost" disabled title={RUN_SESSION_NOT_YOURS} aria-label="Open session: {RUN_SESSION_NOT_YOURS}">
           <Icon name="terminal" size={12} /> Open session
         </button>
       {/if}

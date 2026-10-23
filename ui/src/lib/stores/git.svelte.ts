@@ -6,7 +6,9 @@ import { api } from '../api/client';
 import { latestOnly } from '../latest';
 import { loadErrorText } from '../loadError';
 import { mergeTouched, touches, type TouchedPaths } from '../gitLivePaths';
+import { gitApi, statusEq, type RefsRead } from '../api/git';
 import type {
+  CheckoutReq,
   ConflictFile,
   Id,
   MergeBranchReq,
@@ -16,6 +18,7 @@ import type {
   PullMode,
   PullReq,
   PullResp,
+  PushReq,
   Repo,
   RepoStatusResp,
 } from '../api/types';
@@ -94,40 +97,6 @@ function readAutoFetchConfig(): { enabled: boolean; intervalSec: number } {
   }
 }
 
-/** Cheap structural equality for a repo status — scalars first, then a light
- *  per-file signature. Lets `setStatus` skip no-op writes so a fetch that found
- *  nothing new doesn't recompute the `$derived` status / re-render the toolbar +
- *  tab chips every round. NOTE: this is load-bearing for ALL status propagation
- *  (manual fetch/pull/push/checkout/merge route through `setStatus` too), so keep
- *  it in lockstep with the `RepoStatusResp` shape — any newly-rendered field must
- *  be compared here or a real change could be silently suppressed. */
-function statusEq(a: RepoStatusResp, b: RepoStatusResp): boolean {
-  if (
-    a.branch !== b.branch ||
-    a.upstream !== b.upstream ||
-    a.ahead !== b.ahead ||
-    a.behind !== b.behind ||
-    (a.op_in_progress ?? null) !== (b.op_in_progress ?? null) ||
-    a.changes.length !== b.changes.length
-  ) {
-    return false;
-  }
-  for (let i = 0; i < a.changes.length; i++) {
-    const x = a.changes[i];
-    const y = b.changes[i];
-    if (
-      x.path !== y.path ||
-      x.orig_path !== y.orig_path ||
-      x.kind !== y.kind ||
-      x.staged !== y.staged ||
-      x.unstaged !== y.unstaged
-    ) {
-      return false;
-    }
-  }
-  return true;
-}
-
 const INITIAL_AUTO_FETCH = readAutoFetchConfig();
 
 class GitStore {
@@ -198,6 +167,16 @@ class GitStore {
    *  fingerprint differs (investigation H4/WP3). A pruned ref disappears from
    *  `/refs`, so that case is covered too. */
   refsRev: Record<string, number> = $state({});
+
+  /** A mutation moved refs or history: every open graph of `repoId` re-syncs. */
+  bumpRefs(repoId: string): void {
+    this.refsRev[repoId] = (this.refsRev[repoId] ?? 0) + 1;
+  }
+
+  /** The one `/refs` read (never throws — see `gitApi.readRefs`). */
+  refs(repoId: Id): Promise<RefsRead> {
+    return gitApi.readRefs(repoId);
+  }
   private autoFetchTimer: ReturnType<typeof setTimeout> | null = null;
   private autoFetchRunning = false;
   private autoFetchInFlight = false;
@@ -402,7 +381,7 @@ class GitStore {
     this.primary = repo;
     if (!this.repos.some((r) => r.id === repo.id)) this.repos = [...this.repos, repo];
     try {
-      const s = this.freshFetchStatus(repo.id) ?? await api.get<RepoStatusResp>(`/repos/${repo.id}/status`);
+      const s = this.freshFetchStatus(repo.id) ?? await gitApi.status(repo.id);
       this.setStatus(repo.id, s);
       if (!t.current || this.primary?.id !== repo.id) return;
       this.primaryStatus = s;
@@ -450,7 +429,7 @@ class GitStore {
     const repo = this.primary;
     if (!repo) return;
     try {
-      const s = this.freshFetchStatus(repo.id) ?? await api.get<RepoStatusResp>(`/repos/${repo.id}/status`);
+      const s = this.freshFetchStatus(repo.id) ?? await gitApi.status(repo.id);
       this.setStatus(repo.id, s);
       if (this.primary?.id !== repo.id) return; // primary moved on meanwhile
       this.primaryStatus = s;
@@ -507,7 +486,7 @@ class GitStore {
 
   private async readStatus(repoId: string): Promise<void> {
     try {
-      const s = await api.get<RepoStatusResp>(`/repos/${repoId}/status`);
+      const s = await gitApi.status(repoId);
       this.setStatus(repoId, s);
       if (repoId in this.statusErrorById) {
         const { [repoId]: _cleared, ...rest } = this.statusErrorById;
@@ -628,7 +607,7 @@ class GitStore {
           try {
             const status = await api.post<RepoStatusResp>(`/repos/${repoId}/fetch`);
             this.setStatus(repoId, status);
-            this.refsRev[repoId] = (this.refsRev[repoId] ?? 0) + 1;
+            this.bumpRefs(repoId);
             this.lastFetchAt[repoId] = Date.now();
             this.autoFetchFailStreak[repoId] = 0;
             this.retryFetchAt[repoId] = 0;
@@ -741,11 +720,16 @@ class GitStore {
 
   /** Pull the repo. `autoStash` wraps a dirty tree in stash → pull → pop (the
    *  retry offered after a 409 "commit or stash first" refusal). */
-  pull(repoId: Id, autoStash = false, mode?: PullMode): Promise<PullResp> {
+  /** Post-mutation contract (like `push` / `checkout`): the fresh status is
+   *  stored and `refsRev` bumped, whoever triggered the pull. */
+  async pull(repoId: Id, autoStash = false, mode?: PullMode): Promise<PullResp> {
     const body: PullReq = {};
     if (autoStash) body.auto_stash = true;
     if (mode) body.mode = mode;
-    return api.post<PullResp>(`/repos/${repoId}/pull`, Object.keys(body).length ? body : undefined);
+    const r = await gitApi.pull(repoId, Object.keys(body).length ? body : undefined);
+    this.setStatus(repoId, r.status);
+    this.bumpRefs(repoId);
+    return r;
   }
 
   /** Merge `req.source` into `req.target`. Conflicts are a normal 200 result. */
@@ -799,24 +783,37 @@ class GitStore {
     };
     if (opts.sign !== undefined) body.sign = opts.sign;
     const r = await api.post<{ sha: string }>(`/repos/${repoId}/commit`, body);
-    const status = await api.get<RepoStatusResp>(`/repos/${repoId}/status`);
+    const status = await gitApi.status(repoId);
     this.setStatus(repoId, status);
-    this.refsRev[repoId] = (this.refsRev[repoId] ?? 0) + 1;
+    this.bumpRefs(repoId);
     return { sha: r.sha, status };
   }
 
   /** Stage (or unstage) paths; the fresh status is stored and returned. */
   async stage(repoId: Id, paths: string[], stage = true): Promise<RepoStatusResp> {
-    const s = await api.post<RepoStatusResp>(`/repos/${repoId}/${stage ? 'stage' : 'unstage'}`, { paths });
+    const s = await gitApi.stage(repoId, paths, stage);
     this.setStatus(repoId, s);
     return s;
   }
 
-  /** Push (or publish) the current branch; stores the fresh status. */
-  async push(repoId: Id): Promise<RepoStatusResp> {
-    const s = await api.post<RepoStatusResp>(`/repos/${repoId}/push`, {});
+  // Post-mutation contract: every push / checkout / pull — the toolbar, the
+  // graph, Create PR or an agent command — stores the fresh status and bumps
+  // `refsRev` HERE, so no call site can skip half of it (architecture-6-04).
+  // `pushFlow.runPush` is the UX wrapper (toasts, rejected-push dialog).
+
+  /** Push (or publish) a branch — the checked-out one unless `body.branch`. */
+  async push(repoId: Id, body: PushReq = {}): Promise<RepoStatusResp> {
+    const s = await gitApi.push(repoId, body);
     this.setStatus(repoId, s);
-    this.refsRev[repoId] = (this.refsRev[repoId] ?? 0) + 1;
+    this.bumpRefs(repoId);
+    return s;
+  }
+
+  /** Switch (or create and switch to) a branch. */
+  async checkout(repoId: Id, body: CheckoutReq): Promise<RepoStatusResp> {
+    const s = await gitApi.checkout(repoId, body);
+    this.setStatus(repoId, s);
+    this.bumpRefs(repoId);
     return s;
   }
 

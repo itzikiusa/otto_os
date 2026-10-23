@@ -229,7 +229,7 @@ pub(crate) const MAX_WAIT_SESSION_SECS: u64 = 25;
 
 /// `POST /workspaces/{id}/sessions/open` — open an agent session for a
 /// delegating lead and queue its opening prompt. The prompt goes through
-/// [`crate::review_session::submit_prompt`] (wait for the TUI, paste, verify
+/// [`otto_sessions::submit::submit_prompt`] (wait for the TUI, paste, verify
 /// the echo, Enter) on a background task, so the caller gets the session row
 /// back immediately and polls `/sessions/{id}/wait` for the outcome. Editor.
 pub(crate) async fn open_agent_session(
@@ -302,7 +302,7 @@ pub(crate) async fn open_agent_session(
             let manager = ctx.manager.clone();
             let sid = session.id.clone();
             tokio::spawn(async move {
-                if crate::review_session::submit_prompt(&manager, &sid, &prompt).await {
+                if otto_sessions::submit::submit_prompt(&manager, &sid, &prompt).await {
                     manager.record_user_message(&sid, &prompt).await;
                 } else {
                     tracing::warn!(session = %sid, "delegation: session ended before its opening prompt was sent");

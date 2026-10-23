@@ -94,11 +94,13 @@ test('swarm feed: failed refresh retains posts and offers Retry', async ({ page 
     ? r.fulfill({ status: 503, json: { code: 'upstream', message: 'Board temporarily unavailable' } })
     : r.continue());
   await page.getByRole('button', { name: 'Refresh board' }).click();
-  await expect(page.getByText(/Board temporarily unavailable/)).toBeVisible();
+  // Scoped to the page: the failure is also spoken via the sr-only announcer.
+  const content = page.locator('#app-content');
+  await expect(content.getByText(/Board temporarily unavailable/)).toBeVisible();
   await expect(page.getByText('Decided to ship behind a flag first.')).toBeVisible();
   fail = false;
   await page.getByRole('button', { name: 'Retry', exact: true }).click();
-  await expect(page.getByText(/Board temporarily unavailable/)).toHaveCount(0);
+  await expect(content.getByText(/Board temporarily unavailable/)).toHaveCount(0);
 });
 
 test('swarm tabs: RTL arrows follow the visible direction', async ({ page }) => {
@@ -185,8 +187,8 @@ test('personal agent: failed save preserves form and a retry creates the paused 
   await dialog.getByLabel('Name', { exact: true }).fill('Offline review assistant');
   await dialog.getByLabel('Enabled', { exact: false }).uncheck();
   await dialog.getByRole('button', { name: 'Save', exact: true }).click();
-  await expect(dialog.getByRole('alert')).toContainText('Agent storage temporarily unavailable');
-  await expectFullyInViewport(page, dialog.getByRole('alert'));
+  await expect(dialog.locator('.err')).toContainText('Agent storage temporarily unavailable');
+  await expectFullyInViewport(page, dialog.locator('.err'));
   await expect(dialog.getByLabel('Name', { exact: true })).toHaveValue('Offline review assistant');
   await page.screenshot({ path: '/tmp/otto-ux-r3-automation-screens/phone-agent-save-retry.png' });
   fail = false;

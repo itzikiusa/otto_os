@@ -40,14 +40,14 @@ test('provider recheck announces pending and failed detection, then recovers wit
   // Release even on a red assertion, so fixture teardown never leaves a pending request.
   try { await expect.soft(coach.getByRole('button', { name: 'Checking…', exact: true })).toBeDisabled(); }
   finally { release(); }
-  await expect(coach.getByText('Could not check agent CLIs. Try again.')).toBeVisible();
+  await expect(coach.getByText('Couldn’t check agent CLIs. Try again.')).toBeVisible();
   await expect(recheck).toBeEnabled();
   expect(requests).toBe(1);
   await page.screenshot({ path: info.outputPath('provider-recheck-error-phone.png'), animations: 'disabled' });
   phase = 'found';
   await recheck.click();
   await expect(coach.getByText('claude Synthetic 1.0')).toBeVisible();
-  await expect(coach.getByText('Could not check agent CLIs. Try again.')).toHaveCount(0);
+  await expect(coach.getByText('Couldn’t check agent CLIs. Try again.')).toHaveCount(0);
   await expectNoHorizontalOverflow(page);
 });
 

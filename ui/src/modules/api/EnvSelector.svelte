@@ -2,7 +2,7 @@
   // Environment picker: dropdown of environments with an active indicator,
   // create/activate/delete, and an inline variable editor (key/value rows).
   import Icon from '../../lib/components/Icon.svelte';
-  import { focusAfterRowRemoval, rowListOf } from './rowFocus';
+  import { focusAfterRowRemoval, rowListOf } from '../../lib/rowFocus';
   import { apiClient } from '../../lib/stores/apiClient.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { confirmer } from '../../lib/confirm.svelte';

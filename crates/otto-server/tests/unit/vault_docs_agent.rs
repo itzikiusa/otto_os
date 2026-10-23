@@ -511,8 +511,7 @@ fn errored_writer_waits_only_while_a_peer_is_still_moving() {
         RunEntry {
             run,
             cancel: Arc::new(AtomicBool::new(false)),
-            retries: Arc::new(Mutex::new(HashSet::new())),
-            closed_retries: HashSet::new(),
+            retries: Default::default(),
             persist_tx: None,
         },
     );
@@ -624,19 +623,18 @@ fn retry_handler_state_composition_flags_only_the_requested_error_slot() {
             revision: VaultDocsRevision::default(),
         }],
     };
-    let retries = Arc::new(Mutex::new(HashSet::new()));
+    let retries = otto_agent_run::fanout::Retries::default();
     let mut entry = RunEntry {
         run,
         cancel: Arc::new(AtomicBool::new(false)),
         retries: Arc::clone(&retries),
-        closed_retries: HashSet::new(),
         persist_tx: None,
     };
 
     let (sid, key) = activate_review_retry(&mut entry, 1, Some(1)).unwrap();
     assert_eq!(sid.as_deref(), Some("failed-session"));
     assert_eq!(key, reviewer_retry_key(1, 1));
-    assert!(retries.lock().unwrap().contains(&key));
+    assert!(retries.lock().unwrap().is_requested(key));
     assert_eq!(entry.run.review.rounds[0].reviewers[0].state, "done");
     assert_eq!(
         entry.run.review.rounds[0].reviewers[0].findings[0].summary,
@@ -841,7 +839,7 @@ fn review_loop_fixture(
 ) -> (
     RunRegistry,
     Arc<AtomicBool>,
-    Arc<Mutex<HashSet<usize>>>,
+    otto_agent_run::fanout::Retries,
     crate::modules::StagedSkillPackages,
     String,
 ) {
@@ -863,7 +861,7 @@ fn review_loop_fixture(
         rounds: vec![],
     };
     let cancel = Arc::new(AtomicBool::new(false));
-    let retries = Arc::new(Mutex::new(HashSet::new()));
+    let retries = otto_agent_run::fanout::Retries::default();
     let reg = new_run_registry();
     reg.lock().unwrap().insert(
         run.id.clone(),
@@ -871,7 +869,6 @@ fn review_loop_fixture(
             run,
             cancel: Arc::clone(&cancel),
             retries: Arc::clone(&retries),
-            closed_retries: HashSet::new(),
             persist_tx: None,
         },
     );
@@ -1020,7 +1017,11 @@ async fn malformed_reviewer_output_is_not_clean_and_consumes_targeted_retry() {
     let runner =
         ScriptedReviewTurnRunner::with_outputs([(kind.clone(), vec![Ok("not-json"), Ok("[]")])]);
     let (reg, cancel, retries, packages, run_id) = review_loop_fixture(1, 1);
-    retries.lock().unwrap().insert(reviewer_retry_key(1, 0));
+    retries
+        .lock()
+        .unwrap()
+        .request(reviewer_retry_key(1, 0))
+        .unwrap();
     let result = run_review_loop_with_runner(
         Arc::new(runner.clone()),
         1,
@@ -1236,8 +1237,7 @@ fn run_state_transitions_respect_terminal_states() {
         RunEntry {
             run,
             cancel: Arc::new(AtomicBool::new(false)),
-            retries: Arc::new(Mutex::new(HashSet::new())),
-            closed_retries: HashSet::new(),
+            retries: Default::default(),
             persist_tx: None,
         },
     );
@@ -1277,10 +1277,14 @@ fn exhausted_reviewer_retry_is_rejected_while_peer_runs() {
         ],
         revision: VaultDocsRevision::default(),
     });
-    entry.closed_retries.insert(reviewer_retry_key(1, 0));
+    entry
+        .retries
+        .lock()
+        .unwrap()
+        .close(reviewer_retry_key(1, 0));
     assert!(activate_review_retry(entry, 1, Some(0)).is_err());
     assert_eq!(entry.run.review.rounds[0].reviewers[0].state, "error");
-    assert!(entry.retries.lock().unwrap().is_empty());
+    assert!(entry.retries.lock().unwrap().nothing_requested());
 }
 
 #[test]
@@ -1323,10 +1327,10 @@ fn exhausted_writer_retry_is_rejected_while_peer_runs() {
     let entry = guard.get_mut(&run_id).unwrap();
     entry.run.state = "running".into();
     entry.run.agents[0].state = "error".into();
-    entry.closed_retries.insert(0);
+    entry.retries.lock().unwrap().close(0);
     assert!(author_retry_target(entry, 0).is_err());
     assert_eq!(entry.run.agents[0].state, "error");
-    assert!(entry.retries.lock().unwrap().is_empty());
+    assert!(entry.retries.lock().unwrap().nothing_requested());
 }
 
 /// Exercise the actual generated prompts against the offline adapter and the
@@ -1399,4 +1403,162 @@ fn offline_multi_writer_ignores_result_paths_in_user_content() {
     let prompt = build_writer_prompt(&request, 1, 1, 2, "12345678", "", false, None, None);
     otto_orchestrator::e2e_stub::write_vault_artifacts(&prompt, None).unwrap();
     assert!(!results.exists());
+}
+
+// --- the writer/summarizer slots on the shared fan-out runner (arch-1-04) ---
+
+/// A two-writer run in the registry, both writers pending, plus the run's
+/// writer slot control.
+fn author_fixture() -> (
+    RunRegistry,
+    Arc<AtomicBool>,
+    otto_agent_run::fanout::SlotControl,
+) {
+    let reg = new_run_registry();
+    let mut run = sample_run("running");
+    run.agents.truncate(2);
+    for a in &mut run.agents {
+        a.state = "pending".into();
+        a.session_id = None;
+    }
+    let cancel = Arc::new(AtomicBool::new(false));
+    let retries = otto_agent_run::fanout::Retries::default();
+    reg.lock().unwrap().insert(
+        run.id.clone(),
+        RunEntry {
+            run,
+            cancel: Arc::clone(&cancel),
+            retries: Arc::clone(&retries),
+            persist_tx: None,
+        },
+    );
+    let mut ctl = writer_control(&reg, "run-12345678", &cancel, &retries);
+    ctl.poll = std::time::Duration::from_millis(5);
+    (reg, cancel, ctl)
+}
+
+type WriterFut = std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>>;
+type WriterSlot = Box<dyn FnMut() -> WriterFut + Send>;
+
+/// A writer that fails, then (through the real retry endpoint logic) is
+/// retried by the user while its peer still runs: only that slot re-runs, and
+/// both rows end "done". Without the runner's wait-for-retry window the
+/// retried writer would stay "error".
+#[tokio::test]
+async fn a_user_retry_of_one_writer_reruns_only_that_writer() {
+    let (reg, _cancel, ctl) = author_fixture();
+    let calls = [
+        Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+    ];
+    let (c0, c1) = (Arc::clone(&calls[0]), Arc::clone(&calls[1]));
+    let retry_reg = reg.clone();
+    let slots: Vec<WriterSlot> = vec![
+        Box::new(move || -> WriterFut {
+            let (c0, retry_reg) = (Arc::clone(&c0), retry_reg.clone());
+            Box::pin(async move {
+                c0.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+                {
+                    let mut guard = retry_reg.lock().unwrap();
+                    let entry = guard.get_mut("run-12345678").unwrap();
+                    assert_eq!(entry.run.agents[1].state, "error");
+                    let (sid, needs_kill) = activate_author_retry(entry, 1).unwrap();
+                    assert!(
+                        sid.is_none() && !needs_kill,
+                        "an errored writer needs no kill"
+                    );
+                    assert_eq!(entry.run.agents[1].state, "pending");
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+                Ok(())
+            })
+        }),
+        Box::new(move || -> WriterFut {
+            let c1 = Arc::clone(&c1);
+            Box::pin(async move {
+                match c1.fetch_add(1, Ordering::SeqCst) {
+                    0 => Err("auth expired".to_string()),
+                    _ => Ok(()),
+                }
+            })
+        }),
+    ];
+    let done = otto_agent_run::fanout::run_slots(slots, &ctl)
+        .await
+        .expect("not cancelled");
+    assert_eq!(done.len(), 2);
+    assert_eq!(
+        calls[0].load(Ordering::SeqCst),
+        1,
+        "the healthy writer ran once"
+    );
+    assert_eq!(
+        calls[1].load(Ordering::SeqCst),
+        2,
+        "only the retried writer re-ran"
+    );
+    let run = reg.lock().unwrap()["run-12345678"].run.clone();
+    assert_eq!(run.agents[0].state, "done");
+    assert_eq!(run.agents[1].state, "done");
+    assert!(run.agents[1].error.is_none());
+    // The settled slot is closed: the endpoint refuses another retry.
+    let mut guard = reg.lock().unwrap();
+    let entry = guard.get_mut("run-12345678").unwrap();
+    entry.run.agents[1].state = "error".into();
+    assert!(activate_author_retry(entry, 1).is_err());
+}
+
+/// One writer fails for good (the stage closes once its peer is done), the
+/// summarizer still runs over the surviving writer's result; a failing
+/// summarizer lands "error" on its row with the reason, and the run keeps the
+/// drafts (the vault-docs fallback).
+#[tokio::test]
+async fn a_failed_writer_leaves_the_summarizer_running_and_its_failure_is_recorded() {
+    let (reg, _cancel, ctl) = author_fixture();
+    let slots: Vec<WriterSlot> = vec![
+        Box::new(|| -> WriterFut {
+            Box::pin(async {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                Ok(())
+            })
+        }),
+        Box::new(|| -> WriterFut { Box::pin(async { Err("quota".to_string()) }) }),
+    ];
+    let done = otto_agent_run::fanout::run_slots(slots, &ctl)
+        .await
+        .expect("not cancelled");
+    assert_eq!(done.iter().map(|(i, _)| *i).collect::<Vec<_>>(), vec![0]);
+    {
+        let run = reg.lock().unwrap()["run-12345678"].run.clone();
+        assert_eq!(run.agents[1].state, "error");
+        assert_eq!(run.agents[1].error.as_deref(), Some("quota"));
+    }
+    let mut sum_ctl = ctl.clone();
+    sum_ctl.max_auto_retries = 0;
+    sum_ctl.wait = otto_agent_run::fanout::WaitForRetry::Never;
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let seen_in = Arc::clone(&seen);
+    let (summary, cancelled) = otto_agent_run::fanout::summarize_with_retries(
+        &done,
+        &sum_ctl,
+        move |r: &[(usize, ())]| {
+            seen_in.lock().unwrap().extend(r.iter().map(|(i, _)| *i));
+            std::future::ready(Err::<bool, _>("summarizer vanished".to_string()))
+        },
+        |_: &[(usize, ())]| false,
+    )
+    .await;
+    assert!(!cancelled);
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![0],
+        "it ran over the surviving draft"
+    );
+    assert!(!summary.value, "the fallback keeps the drafts");
+    assert_eq!(summary.error.as_deref(), Some("summarizer vanished"));
+    let run = reg.lock().unwrap()["run-12345678"].run.clone();
+    assert_eq!(run.state, "summarizing");
+    assert_eq!(run.summarizer.state, "error");
+    assert_eq!(run.summarizer.error.as_deref(), Some("summarizer vanished"));
 }

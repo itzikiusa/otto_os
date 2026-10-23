@@ -398,7 +398,7 @@ fn is_human_edit(event: &serde_json::Value) -> bool {
 /// rewrite (unfurl, preview) look like a brand-new message, so those key on
 /// the ORIGINAL ts and dedup onto the post itself.
 ///
-/// A HUMAN edit is new content and must be forwarded (see `process_event`),
+/// A HUMAN edit is new content and must be forwarded (see `handle_event` and `drop_reason`),
 /// so it keys on the original ts PLUS its `edited.ts`: distinct from the
 /// original post (which used to swallow every edit), yet each specific edit
 /// is still delivered at most once (Socket Mode redelivers).

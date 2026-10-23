@@ -10,7 +10,7 @@
   import { router } from '../../lib/router.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
-  import type { CanvasFormat, CanvasSceneSummary } from '../canvas/types';
+  import type { CanvasFormat, CanvasSceneSummary } from '../../lib/canvas/types';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
 
@@ -47,11 +47,26 @@
   // Existing canvases that aren't already linked to this story (the picker).
   const candidates = $derived(canvas.scenes.filter((c) => !scenes.some((l) => l.id === c.id)));
 
+  // The picker's own load: a failure shows inline with Retry, and the
+  // "No other canvases" line waits for a finished, successful load.
+  let pickerLoading = $state(false);
+  let pickerError = $state<string | null>(null);
+
+  async function loadPicker(): Promise<void> {
+    pickerLoading = true;
+    pickerError = null;
+    try {
+      await canvas.loadScenes();
+    } catch (e) {
+      pickerError = loadErrorText(e);
+    } finally {
+      pickerLoading = false;
+    }
+  }
+
   async function openPicker(): Promise<void> {
     picking = !picking;
-    if (picking && !canvas.scenes.length) {
-      await canvas.loadScenes().catch((e) => toastError('Couldn’t load your canvases', e));
-    }
+    if (picking && !canvas.scenes.length) await loadPicker();
   }
 
   async function link(sceneId: string): Promise<void> {
@@ -153,7 +168,12 @@
 
   {#if picking}
     <div class="lc-picker">
-      {#if !candidates.length}
+      {#if pickerLoading || pickerError}
+        <LoadState what="your canvases" variant="compact" rows={2} loading={pickerLoading} error={pickerError} empty={!canvas.scenes.length} onretry={() => void loadPicker()} />
+      {/if}
+      {#if pickerLoading || (pickerError && !canvas.scenes.length)}
+        <!-- Loading / failed: the LoadState above says so. -->
+      {:else if !candidates.length}
         <p class="lc-empty">No other canvases to link.</p>
       {:else}
         {#each candidates as c (c.id)}

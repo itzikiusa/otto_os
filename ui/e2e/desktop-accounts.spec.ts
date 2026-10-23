@@ -31,10 +31,13 @@ test('subscription picker isolates providers, adds a profile and checks its logi
   await page.getByLabel('Account label').fill('Personal');
   await page.getByRole('button', { name: 'Create profile', exact: true }).click();
   await expect(picker).toHaveValue('b');
+  // The status line is plain visible copy (it's spoken through the app's
+  // announcer, not a role="status" of its own).
+  const status = page.locator('.account-picker > p:not(.error)');
   await page.getByRole('button', { name: 'Check sign-in' }).click();
-  await expect(page.locator('p[role=status]')).toHaveText('Sign-in required');
+  await expect(status).toHaveText('Sign-in required');
   await page.getByRole('button', { name: 'Check sign-in' }).click();
-  await expect(page.locator('p[role=status]')).toHaveText('Signed in');
+  await expect(status).toHaveText('Signed in');
   await picker.selectOption('');
   await expect(page.getByLabel('Selected account')).toHaveText('default');
   await expect(page.getByRole('button', { name: 'Check sign-in' })).toHaveCount(0);

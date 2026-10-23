@@ -25,7 +25,7 @@
   import { canvasDocBus } from '../../lib/events.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
   import { toasts } from '../../lib/toast.svelte';
-  import type { CanvasDoc } from './types';
+  import type { CanvasDoc } from '../../lib/canvas/types';
   import { docFromAssist } from './assistDoc';
   import { buildExcalidrawElements, isSimplified } from '../../lib/excalidraw/excalidraw-build';
   import { filesForSave, releaseFiles, resolveFiles, sha256Hex } from './canvasFiles';

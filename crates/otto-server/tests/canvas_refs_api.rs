@@ -465,3 +465,53 @@ async fn canvas_files_are_served_once_and_scoped_to_the_workspace() {
         "image still rehydrates"
     );
 }
+
+/// architecture-5-02: a canvas Ask AI turn resumes the scene's session only
+/// for its owner. The scene names another user's session → 403 before any
+/// agent runs (the check now lives in the shared turn runner, not a host
+/// forwarder).
+#[tokio::test]
+async fn canvas_assist_refuses_to_resume_another_users_session() {
+    let pool = mem_pool().await;
+    seed_user(&pool, "carol", false).await;
+    seed_user(&pool, "bob", false).await;
+    seed_workspace(&pool, "ws-assist").await;
+    set_member(&pool, "ws-assist", "carol", "editor").await;
+    set_member(&pool, "ws-assist", "bob", "editor").await;
+    let bobs = insert_session(&SessionsRepo::new(pool.clone()), "ws-assist", "bob").await;
+    let canvas = CanvasRepo::new(pool.clone());
+    let scene = canvas
+        .create(NewScene {
+            workspace_id: "ws-assist".into(),
+            story_id: None,
+            title: "Shared board".into(),
+            doc_json: r#"{"format":"mermaid","source":"flowchart TD\n"}"#.into(),
+            // A provider with no trust side effects on the developer's home.
+            provider: "shell".into(),
+            section: None,
+            created_by: "carol".into(),
+        })
+        .await
+        .expect("insert scene");
+    canvas
+        .set_session(&scene.id, &bobs)
+        .await
+        .expect("bind session");
+    let app = Router::new()
+        .route(
+            "/api/v1/canvas/scenes/{id}/assist",
+            axum::routing::post(otto_canvas::assist::assist_scene::<ServerCtx>),
+        )
+        .with_state(test_ctx(&pool).await);
+    let status = post_json_as(
+        &app,
+        &user("carol", false),
+        &format!("/api/v1/canvas/scenes/{}/assist", scene.id),
+        serde_json::json!({ "prompt": "add a cache" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    // The refused turn left the scene bound to nothing new.
+    let after = canvas.get(&scene.id).await.unwrap().unwrap();
+    assert_eq!(after.session_id.as_ref(), Some(&bobs));
+}

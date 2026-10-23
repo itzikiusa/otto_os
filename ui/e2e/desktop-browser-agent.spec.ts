@@ -125,7 +125,7 @@ test('browser page: dock starts detached, attaches a session, ask sends page + m
   // the TAIL of the block (the head scrolls out of xterm's rendered rows).
   await expect(dock.locator('.xterm')).toContainText('Question from user', { timeout: 15_000 });
   await expect(dock.locator('.xterm')).toContainText('what does the marked element do?');
-  await expect(dock.locator('.xterm')).toContainText('Selector: h1');
+  await expect(dock.locator('.xterm')).toContainText('Selector: h2');
 
   // Detach → back to the empty state; the session itself is untouched.
   await dock.getByRole('button', { name: 'Detach session' }).click();

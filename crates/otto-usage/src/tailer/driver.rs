@@ -32,6 +32,7 @@ use crate::{
     UsageEvent, EXTERNAL_WORKSPACE,
 };
 use otto_state::{DbPool, SessionsRepo};
+use otto_transcript::roots::{RootKind, RootsEnv, TranscriptRoots};
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
@@ -103,12 +104,17 @@ impl Drop for UsageTailerHandle {
 pub struct UsageTailer {
     usage: Arc<UsageEngine>,
     pool: DbPool,
-    /// Home directory — the root of `~/.claude` and `~/.codex`.
+    /// Home directory — the root of `~/.claude*`, `~/.codex`, `~/.grok`.
     home: PathBuf,
-    account_root: PathBuf,
+    /// The daemon data dir (`provider-accounts/*`, the e2e fixture).
+    data_dir: PathBuf,
     grok_root: PathBuf,
     agy_extra_dir: Option<PathBuf>,
-    claude_roots: Vec<(PathBuf, String)>,
+    /// Transcript-root inputs ([`otto_transcript::roots`]). Empty by default
+    /// — the daemon injects the process environment, isolated tests do not.
+    roots_env: RootsEnv,
+    /// The Claude/Codex roots of the last full listing (labels + kinds).
+    roots: TranscriptRoots,
     cursors: CursorStore,
     /// Size of each transcript when it was last tailed (memory only). Change
     /// detection compares against THIS, not the cursor: the cursor stops at
@@ -210,8 +216,10 @@ impl UsageTailer {
         Self {
             usage,
             pool,
-            claude_roots: vec![(home.join(".claude/projects"), "claude".into())],
-            account_root: data_dir.join("provider-accounts"),
+            // Filled by the first listing (`list_files`, before any watch).
+            roots: TranscriptRoots::default(),
+            roots_env: RootsEnv::default(),
+            data_dir: data_dir.clone(),
             grok_root: home.join(".grok"),
             agy_extra_dir: None,
             home,
@@ -253,12 +261,13 @@ impl UsageTailer {
         self
     }
 
-    fn claude_root(&self) -> PathBuf {
-        self.home.join(".claude").join("projects")
-    }
-
-    fn codex_root(&self) -> PathBuf {
-        self.home.join(".codex").join("sessions")
+    /// The transcript-root environment (`OTTO_TRANSCRIPT_ROOTS`, the isolated
+    /// e2e flag, `$CODEX_HOME`) — the daemon passes
+    /// [`RootsEnv::from_process`]; without it only `home`'s defaults and the
+    /// data dir's provider accounts are read.
+    pub fn with_roots_env(mut self, env: RootsEnv) -> Self {
+        self.roots_env = env;
+        self
     }
 
     /// Where Grok writes `updates.jsonl` (watched like the transcript roots).
@@ -358,9 +367,7 @@ impl UsageTailer {
                     return;
                 }
                 if let Some(w) = watch.as_mut() {
-                    let mut roots: Vec<_> =
-                        self.claude_roots.iter().map(|(p, _)| p.clone()).collect();
-                    roots.push(self.codex_root());
+                    let mut roots: Vec<_> = self.roots.all_dirs().map(Path::to_path_buf).collect();
                     // Native providers too: an event-driven pass only scans
                     // them when one of their files changed (see scan_paths).
                     roots.push(self.grok_sessions_root());
@@ -434,11 +441,11 @@ impl UsageTailer {
             }
             // Preserve legacy default-root history; newly supported account
             // roots were never ingested and can safely backfill at true time.
-            let offset = if f.starts_with(self.claude_root()) {
-                size
-            } else {
-                0
-            };
+            let legacy = self
+                .roots
+                .claude_root_of(&f)
+                .is_some_and(|root| root.kind == RootKind::Default);
+            let offset = if legacy { size } else { 0 };
             self.cursors.set(&f, offset);
             seeded += 1;
         }
@@ -534,16 +541,15 @@ impl UsageTailer {
         let agy_dirty = paths
             .iter()
             .any(|p| agy_roots.iter().any(|root| p.starts_with(root)));
-        let claude_roots = self.claude_roots.clone();
-        let codex_root = self.codex_root();
+        let roots = self.roots.clone();
         let (claude, codex) = tokio::task::spawn_blocking(move || {
             let mut claude = Vec::new();
             let mut codex = Vec::new();
             for p in paths {
-                let is_claude = claude_roots
-                    .iter()
-                    .any(|(root, _)| is_claude_transcript(root, &p));
-                if !is_claude && !is_codex_rollout(&codex_root, &p) {
+                let is_claude = roots
+                    .claude_dirs()
+                    .any(|root| is_claude_transcript(root, &p));
+                if !is_claude && !roots.codex_dirs().any(|root| is_codex_rollout(root, &p)) {
                     continue;
                 }
                 // Gone (deleted/renamed) → the reconcile pass evicts it.
@@ -735,26 +741,35 @@ impl UsageTailer {
 
     /// List both transcript trees (with sizes) in ONE blocking task.
     async fn list_files(&mut self) -> (Vec<(PathBuf, u64)>, Vec<(PathBuf, u64)>) {
-        let home = self.home.clone();
-        let accounts = self.account_root.clone();
+        let (home, data_dir, env) = (
+            self.home.clone(),
+            self.data_dir.clone(),
+            self.roots_env.clone(),
+        );
         match tokio::task::spawn_blocking(move || {
-            let roots = claude_source_roots(&home, &accounts);
-            let mut files = Vec::new();
+            let roots = env.discover(&home, &data_dir);
             let mut seen = HashSet::new();
-            for (root, _) in &roots {
-                for (path, size) in list_claude_files_under(root) {
+            let mut unique = |files: Vec<(PathBuf, u64)>, out: &mut Vec<(PathBuf, u64)>| {
+                for (path, size) in files {
                     let identity = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
                     if seen.insert(identity) {
-                        files.push((path, size));
+                        out.push((path, size));
                     }
                 }
+            };
+            let (mut claude, mut codex) = (Vec::new(), Vec::new());
+            for root in roots.claude_dirs() {
+                unique(list_claude_files_under(root), &mut claude);
             }
-            (roots, files, list_codex_files(&home))
+            for root in roots.codex_dirs() {
+                unique(list_codex_files_under(root), &mut codex);
+            }
+            (roots, claude, codex)
         })
         .await
         {
             Ok((roots, claude, codex)) => {
-                self.claude_roots = roots;
+                self.roots = roots;
                 (claude, codex)
             }
             Err(error) => {
@@ -765,10 +780,9 @@ impl UsageTailer {
     }
 
     fn claude_provider(&self, file: &Path) -> String {
-        self.claude_roots
-            .iter()
-            .find(|(root, _)| file.starts_with(root))
-            .map(|(_, provider)| provider.clone())
+        self.roots
+            .claude_root_of(file)
+            .map(|root| root.label.clone())
             .unwrap_or_else(|| "claude".into())
     }
 
@@ -1329,28 +1343,6 @@ fn list_claude_files(home: &Path) -> Vec<(PathBuf, u64)> {
     list_claude_files_under(&home.join(".claude/projects"))
 }
 
-fn claude_source_roots(home: &Path, accounts: &Path) -> Vec<(PathBuf, String)> {
-    let mut roots = vec![(home.join(".claude/projects"), "claude".into())];
-    for dir in read_subdirs(home) {
-        let Some(name) = dir.file_name().and_then(|v| v.to_str()) else {
-            continue;
-        };
-        if name.starts_with(".claude-") && dir.join("projects").is_dir() {
-            roots.push((
-                dir.join("projects"),
-                name.trim_start_matches('.').to_string(),
-            ));
-        }
-    }
-    roots.push((home.join(".config/claude/projects"), "claude".into()));
-    for dir in read_subdirs(accounts) {
-        if dir.join("projects").is_dir() {
-            roots.push((dir.join("projects"), "claude".into()));
-        }
-    }
-    roots
-}
-
 fn list_claude_files_under(root: &Path) -> Vec<(PathBuf, u64)> {
     let mut out = Vec::new();
     for project in read_subdirs(root) {
@@ -1380,13 +1372,11 @@ fn claude_session_stem(file: &Path) -> String {
         .unwrap_or_default()
 }
 
-/// All codex rollout files with their sizes:
-/// `<home>/.codex/sessions/*/*/*/rollout-*.jsonl`. Blocking — call off the
-/// runtime.
-fn list_codex_files(home: &Path) -> Vec<(PathBuf, u64)> {
-    let root = home.join(".codex").join("sessions");
+/// All codex rollout files under one sessions root, with their sizes:
+/// `<root>/*/*/*/rollout-*.jsonl`. Blocking — call off the runtime.
+fn list_codex_files_under(root: &Path) -> Vec<(PathBuf, u64)> {
     let mut out = Vec::new();
-    for y in read_subdirs(&root) {
+    for y in read_subdirs(root) {
         for m in read_subdirs(&y) {
             for d in read_subdirs(&m) {
                 out.extend(read_files_with_ext(&d, "jsonl", |n| {
@@ -1737,7 +1727,7 @@ mod tests {
         std::fs::create_dir_all(proj.join("s/tool-results")).unwrap();
         std::fs::write(proj.join("s/tool-results/t.jsonl"), b"z").unwrap();
 
-        let codex = list_codex_files(home);
+        let codex = list_codex_files_under(&home.join(".codex/sessions"));
         assert_eq!(codex, vec![(day.join("rollout-a.jsonl"), 5)]);
         let mut claude = list_claude_files(home);
         claude.sort();
@@ -1747,7 +1737,7 @@ mod tests {
             vec![(subs.join("agent-x.jsonl"), 4), (proj.join("s.jsonl"), 3)]
         );
         // Missing trees are empty, not errors.
-        assert!(list_codex_files(&home.join("nope")).is_empty());
+        assert!(list_codex_files_under(&home.join("nope")).is_empty());
         std::fs::remove_dir_all(&root).unwrap();
     }
 
@@ -2247,6 +2237,47 @@ mod accounting_tests {
         assert_eq!(restarted.pending_events[0].provider, "claude-work");
         assert_eq!(restarted.pending_events[0].workspace_id, "w");
         assert_eq!(restarted.pending_events[0].session_id, "s");
+        pool.close().await;
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn codex_rollouts_under_accounts_and_codex_home_are_listed() {
+        // architecture-6-01: the tailer used to list `~/.codex/sessions` only,
+        // so account-run and `$CODEX_HOME` Codex sessions never reached Usage.
+        let root = std::env::temp_dir().join(format!("otto-codex-roots-{}", otto_core::new_id()));
+        let (home, data) = (root.join("home"), root.join("data"));
+        let codex_home = root.join("codex-home");
+        let mut want = Vec::new();
+        for sessions in [
+            data.join("provider-accounts/acct/sessions"),
+            codex_home.join("sessions"),
+        ] {
+            let day = sessions.join("2026/10/23");
+            std::fs::create_dir_all(&day).unwrap();
+            let file = day.join("rollout-2026-10-23T00-00-00-x.jsonl");
+            std::fs::write(&file, b"{}\n").unwrap();
+            want.push(file);
+        }
+        let pool = otto_state::open(&root.join("state.db")).await.unwrap();
+        let usage = UsageEngine::start(
+            crate::UsageConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            root.join("usage"),
+        )
+        .await;
+        let mut tailer =
+            UsageTailer::new(usage, pool.clone(), data, home).with_roots_env(RootsEnv {
+                codex_home: Some(codex_home),
+                ..RootsEnv::default()
+            });
+        let (_, codex) = tailer.list_files().await;
+        let mut got: Vec<_> = codex.into_iter().map(|(p, _)| p).collect();
+        got.sort();
+        want.sort();
+        assert_eq!(got, want);
         pool.close().await;
         tokio::fs::remove_dir_all(root).await.unwrap();
     }

@@ -895,8 +895,10 @@ scripts it did not intend to change.
 | Editor / response / left pane | `RequestBuilder.svelte`, `ResponseViewer.svelte` (+ `JsonTree.svelte`), `CollectionsTree.svelte`, `HistoryList.svelte`, `AutomationsView.svelte` |
 | Main-area editors / sheets | `EnvironmentsView.svelte`, `AutomationEditor.svelte`, `SaveRequestDialog.svelte`, `ImportDialog.svelte`, `GitSyncDialog.svelte`, `RetentionDialog.svelte` (compact panel: `EnvSelector.svelte`) |
 | Plain-language helpers | `ui/src/lib/api/apiVars.ts` (variable resolution, method/status tones), `ui/src/lib/api/jsonTree.ts` |
-| UI store / scripts / import / codegen | `ui/src/lib/stores/apiClient.svelte.ts`, `apiStream.svelte.ts`, `ui/src/lib/api/scripts.ts`, `importers.ts`, `codegen.ts` |
-| Backend (REST) | `crates/otto-server/src/routes/api_client.rs`, `grpc.rs`, `api_stream.rs` |
+| UI store / scripts / import / codegen | `ui/src/lib/stores/apiClient.svelte.ts` (façade over `ui/src/lib/stores/apiClient/{model,tabs.svelte,drafts.svelte,execute.svelte,curl,cookies.svelte,collectionsSync,automations.svelte}.ts`), `apiStream.svelte.ts`, `ui/src/lib/api/scripts.ts`, `importers.ts`, `codegen.ts` |
+| Backend (REST handlers) | `crates/otto-server/src/routes/api_client.rs` (+ `api_client/*`: handler groups and `ctx.rs`, the `ApiClientCtx` impl for the server), `grpc.rs`, `api_stream.rs`, `api_automation_runs.rs`, `api_oauth.rs` |
+| REST execute engine | `crates/otto-apiclient/src/engine/` — environment + Keychain resolution (`env.rs`), secret ↔ host binding (`binding.rs`), cookie jars and clients (`client.rs`), SSH/SOCKS tunnels (`tunnel.rs`), send (`send.rs`, `auth.rs`, `multipart.rs`), history + retention (`history.rs`), ad-hoc and saved execute (`execute.rs`), automation steps (`steps.rs`); everything it needs from the daemon goes through the `ApiClientCtx` trait (`mod.rs`) |
+| Request / environment secrets | `crates/otto-apiclient/src/secrets.rs` (Keychain blobs, `$secret` markers, scrubbing) |
 | Engines (gRPC, automation scripts) | `crates/otto-apiclient/src/grpc.rs` (tonic/protox/prost-reflect), `crates/otto-apiclient/src/scripts.rs` (boa_engine `pm` runtime) — `routes/grpc.rs` is the thin auth wrapper |
 | SSRF guard | `crates/otto-netguard/src/lib.rs` |
 | Domain / contract DTOs | `crates/otto-core/src/domain.rs`, `crates/otto-core/src/api.rs`, `docs/contracts/api.md` |

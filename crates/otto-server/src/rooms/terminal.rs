@@ -1,11 +1,6 @@
 //! Room-only terminal transport. It never calls ensure_live and never follows
 //! a replacement process. All input/resize crosses SessionManager authority.
-use super::{
-    auth::socket_token,
-    capability::TokenBucket,
-    registry::{SharedRoom, RATE_LIMITED},
-    socket::{send, send_frame},
-};
+use super::socket::{send, send_frame};
 use crate::{ApiResult, ServerCtx};
 use axum::{
     extract::{
@@ -17,103 +12,15 @@ use axum::{
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
 use otto_core::{api::RoomEvent, Error, Result};
+use otto_rooms::{
+    auth::socket_token,
+    capability::TokenBucket,
+    terminal::{decode_input, flow_deadline, FlowGate, Frame, ResyncQueue, ACK_BURST, ACK_RATE},
+    SharedRoom, RATE_LIMITED,
+};
 use otto_sessions::ws::{CreditGate, CreditStep};
-use serde::Deserialize;
 use std::sync::Arc;
-use std::time::Duration;
-use tokio::sync::broadcast;
 
-const FLOW_AUTO_RESUME: Duration = Duration::from_secs(2);
-const RESYNC_INTERVAL: Duration = Duration::from_millis(500);
-/// Credit `ack` budget. A viewer acks every 64 KB it parses — ~100/s while
-/// it drains a flood at WebKit's 5–8 MB/s — which would trip the 60/s
-/// general frame limit and drop the socket. An ack only moves this viewer's
-/// own window, so it gets its own budget and skips the room lock.
-const ACK_RATE: f64 = 400.0;
-const ACK_BURST: f64 = 800.0;
-
-/// Recovery cannot be rejected after the client discards its renderer backlog.
-/// Keep one pending request, coalescing bursts without delaying its deadline.
-#[derive(Default)]
-struct ResyncQueue {
-    pending: Option<(usize, tokio::time::Instant)>,
-    next_allowed: Option<tokio::time::Instant>,
-}
-impl ResyncQueue {
-    fn request(&mut self, lines: usize, now: tokio::time::Instant) {
-        let due = self.next_allowed.unwrap_or(now).max(now);
-        self.pending = Some((lines.min(10_000), self.pending.map_or(due, |(_, at)| at)));
-    }
-    fn deadline(&self) -> Option<tokio::time::Instant> {
-        self.pending.map(|(_, at)| at)
-    }
-    fn take_ready(&mut self, now: tokio::time::Instant) -> Option<usize> {
-        let (lines, at) = self.pending?;
-        if now < at {
-            return None;
-        }
-        self.pending = None;
-        self.next_allowed = Some(now + RESYNC_INTERVAL);
-        Some(lines)
-    }
-}
-
-/// Output flow belongs to this viewer, independently of the room driver.
-#[derive(Default)]
-struct FlowGate {
-    paused_until: Option<tokio::time::Instant>,
-}
-impl FlowGate {
-    fn pause(&mut self) {
-        self.paused_until = Some(tokio::time::Instant::now() + FLOW_AUTO_RESUME);
-    }
-    fn resume(&mut self, output: &mut broadcast::Receiver<axum::body::Bytes>) -> bool {
-        // Inspect a fixed backlog count, never chase a continuously producing
-        // PTY with a drain loop. The snapshot replaces this receiver atomically.
-        self.paused_until.take().is_some() && !output.is_empty()
-    }
-}
-async fn flow_deadline(deadline: Option<tokio::time::Instant>) {
-    match deadline {
-        Some(at) => tokio::time::sleep_until(at).await,
-        None => std::future::pending().await,
-    }
-}
-#[derive(Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-enum Frame {
-    Input {
-        data: String,
-        grant_epoch: u64,
-    },
-    Resize {
-        cols: u16,
-        rows: u16,
-        grant_epoch: u64,
-    },
-    Scrollback {
-        #[serde(default)]
-        lines: Option<usize>,
-    },
-    Snapshot,
-    Resync {
-        #[serde(default)]
-        lines: Option<usize>,
-    },
-    Pause,
-    Resume,
-    /// Credit flow control, same contract as `/ws/term` (docs/contracts/
-    /// ws.md): at most `window` unacknowledged binary bytes to this viewer.
-    /// Like pause/resume it needs no driver grant.
-    Credit {
-        #[serde(default)]
-        window: u64,
-    },
-    /// Cumulative credited bytes this viewer parsed or dropped.
-    Ack {
-        bytes: u64,
-    },
-}
 pub async fn upgrade(
     State(ctx): State<ServerCtx>,
     Path(id): Path<String>,
@@ -369,136 +276,4 @@ async fn serve(
         },
     )
     .await;
-}
-
-fn decode_input(data: &str) -> Result<Vec<u8>> {
-    let bytes = STANDARD
-        .decode(data)
-        .map_err(|_| Error::Invalid("Input must use base64 encoding".into()))?;
-    if bytes.len() > 32768 {
-        return Err(Error::Invalid("Input exceeds 32 KiB".into()));
-    }
-    Ok(bytes)
-}
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn input_decodes_the_existing_terminal_wire_format() {
-        assert_eq!(decode_input("aGVsbG8NCg==").unwrap(), b"hello\r\n");
-        assert!(decode_input("%invalid").is_err());
-    }
-
-    #[test]
-    fn terminal_flow_frames_need_no_driver_epoch() {
-        assert!(matches!(
-            serde_json::from_str::<Frame>(r#"{"type":"pause"}"#),
-            Ok(Frame::Pause)
-        ));
-        assert!(matches!(
-            serde_json::from_str::<Frame>(r#"{"type":"resume"}"#),
-            Ok(Frame::Resume)
-        ));
-        assert!(matches!(
-            serde_json::from_str::<Frame>(r#"{"type":"resync","lines":1000}"#),
-            Ok(Frame::Resync { lines: Some(1000) })
-        ));
-    }
-
-    /// r3-10-06: room viewers use the same credit window as `/ws/term`.
-    #[test]
-    fn terminal_credit_frames_parse_without_a_driver_epoch() {
-        assert!(matches!(
-            serde_json::from_str::<Frame>(r#"{"type":"credit","window":1048576}"#),
-            Ok(Frame::Credit { window: 1_048_576 })
-        ));
-        assert!(matches!(
-            serde_json::from_str::<Frame>(r#"{"type":"credit"}"#),
-            Ok(Frame::Credit { window: 0 })
-        ));
-        assert!(matches!(
-            serde_json::from_str::<Frame>(r#"{"type":"ack","bytes":65536}"#),
-            Ok(Frame::Ack { bytes: 65_536 })
-        ));
-        assert!(
-            serde_json::from_str::<Frame>(r#"{"type":"ack","bytes":1,"grant_epoch":3}"#).is_err(),
-            "still deny_unknown_fields"
-        );
-    }
-
-    #[test]
-    fn resync_bursts_coalesce_without_starving_recovery() {
-        let now = tokio::time::Instant::now();
-        let mut recovery = ResyncQueue::default();
-        recovery.request(100, now);
-        assert_eq!(
-            recovery.take_ready(now),
-            Some(100),
-            "first recovery is immediate"
-        );
-        recovery.request(200, now + Duration::from_millis(10));
-        for ms in 11..500 {
-            recovery.request(usize::MAX, now + Duration::from_millis(ms));
-            assert_eq!(recovery.take_ready(now + Duration::from_millis(ms)), None);
-            assert_eq!(recovery.deadline(), Some(now + RESYNC_INTERVAL));
-        }
-        assert_eq!(recovery.take_ready(now + RESYNC_INTERVAL), Some(10_000));
-        assert_eq!(
-            recovery.take_ready(now + RESYNC_INTERVAL),
-            None,
-            "one response per coalesced burst"
-        );
-        recovery.request(0, now + RESYNC_INTERVAL);
-        assert_eq!(recovery.deadline(), Some(now + 2 * RESYNC_INTERVAL));
-        assert_eq!(recovery.take_ready(now + 2 * RESYNC_INTERVAL), Some(0));
-    }
-
-    #[test]
-    fn resume_requests_one_snapshot_only_when_output_was_skipped() {
-        let (tx, mut output) = broadcast::channel(2);
-        let mut flow = FlowGate::default();
-        flow.pause();
-        assert!(
-            !flow.resume(&mut output),
-            "quiet pause must not rebuild the screen"
-        );
-        flow.pause();
-        for _ in 0..8 {
-            tx.send(axum::body::Bytes::from_static(b"output")).unwrap();
-        }
-        assert!(
-            flow.resume(&mut output),
-            "lagged receiver must resynchronize"
-        );
-        assert!(
-            !flow.resume(&mut output),
-            "duplicate resume must not send another snapshot"
-        );
-        // The caller replaces the old receiver with the snapshot subscription.
-        // Flow detection itself never drains a live producer.
-        assert!(!output.is_empty());
-        output = tx.subscribe();
-        tx.send(axum::body::Bytes::from_static(b"live")).unwrap();
-        assert_eq!(output.try_recv().unwrap(), b"live"[..]);
-    }
-
-    #[tokio::test]
-    async fn repeated_pause_rearms_auto_resume() {
-        let (tx, mut output) = broadcast::channel(2);
-        let mut flow = FlowGate::default();
-        flow.pause();
-        let first = flow.paused_until.unwrap();
-        tokio::time::sleep(Duration::from_millis(1)).await;
-        flow.pause();
-        assert!(flow.paused_until.unwrap() > first);
-        assert!(flow.paused_until.unwrap() > tokio::time::Instant::now() + Duration::from_secs(1));
-        // Expire the deadline without spending two wall-clock seconds in a unit test.
-        flow.paused_until = Some(tokio::time::Instant::now());
-        tx.send(axum::body::Bytes::from_static(b"held")).unwrap();
-        tokio::time::timeout(Duration::from_millis(100), flow_deadline(flow.paused_until))
-            .await
-            .unwrap();
-        assert!(flow.resume(&mut output));
-        assert!(flow.paused_until.is_none());
-    }
 }

@@ -13,10 +13,11 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use otto_core::api::{
-    AddArtifactReq, ApiEvidenceReq, AssembleCmd, AssembleReq, AttachMediaReq, CiRefreshReq,
-    CreateProofPackReq, CreateSnapshotReq, DbEvidenceReq, KafkaEvidenceReq, PrCheckReq,
-    ProofArtifactView, ProofPackDetailResp, ProofPackResp, ProofSnapshotMeta, ProofSnapshotResp,
-    ProofSummaryResp, ProofSummaryRow, RepoProofConfigResp, WaiveReq,
+    AddArtifactReq, ApiEvidenceReq, AssembleCmd, AssembleReq, AssembleResp, AssembleSummary,
+    AssembledCommand, AttachMediaReq, CiRefreshReq, CreateProofPackReq, CreateSnapshotReq,
+    DbEvidenceReq, KafkaEvidenceReq, PrCheckReq, ProofArtifactView, ProofPackDetailResp,
+    ProofPackResp, ProofSnapshotMeta, ProofSnapshotResp, ProofSummaryResp, ProofSummaryRow,
+    RepoProofConfigResp, WaiveReq,
 };
 use otto_core::auth::{AuthContext, AuthUser};
 use otto_core::domain::WorkspaceRole;
@@ -629,23 +630,46 @@ async fn assemble(
     CurrentAuthContext(auth): CurrentAuthContext,
     Path(id): Path<Id>,
     Json(req): Json<AssembleReq>,
-) -> ApiResult<Json<ProofPackResp>> {
+) -> ApiResult<Json<AssembleResp>> {
     let commands = req.commands.unwrap_or_default();
     require_person_for_commands(&auth, &commands)?;
     let pack = pack_for(&ctx, &user, &id, WorkspaceRole::Editor).await?;
+    // error-handling-6-02: report what was assembled instead of a blanket
+    // success — a folder that isn't a repo or a failed git command is named,
+    // a HEAD that moved mid-assembly is the 409 ("retry"), and each command
+    // whose artifact couldn't be stored says why.
+    let mut assembled = AssembleSummary {
+        diff: None,
+        commands: Vec::new(),
+    };
     if let Some(cwd) = req.cwd.as_deref() {
         require_assemble_cwd(&ctx, &auth, &user.0, &pack, cwd).await?;
-        // Best-effort diff assembly.
-        let _ = engine::assemble_diff(&ctx, &pack, cwd, req.base.as_deref()).await;
+        let diff = engine::assemble_diff(&ctx, &pack, cwd, req.base.as_deref())
+            .await
+            .map_err(ApiError)?;
+        assembled.diff = Some(diff);
         // Run any requested commands as command artifacts.
         for c in commands {
-            let _ = engine::run_command_artifact(&ctx, &pack, cwd, &c.cmd, c.kind.as_deref()).await;
+            let ran =
+                engine::run_command_artifact(&ctx, &pack, cwd, &c.cmd, c.kind.as_deref()).await;
+            let (status, error) = match ran {
+                Ok(status) => (Some(status), None),
+                Err(e) => (None, Some(e.to_string())),
+            };
+            assembled.commands.push(AssembledCommand {
+                cmd: c.cmd,
+                status,
+                error,
+            });
         }
     }
     let pack = engine::recompute_and_emit(&ctx, &pack.id)
         .await
         .map_err(ApiError)?;
-    Ok(Json(pack_resp(&ctx, pack).await?))
+    Ok(Json(AssembleResp {
+        pack: pack_resp(&ctx, pack).await?,
+        assembled,
+    }))
 }
 
 /// Whether waiving requires workspace Admin. Opt-in via

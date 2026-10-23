@@ -35,6 +35,7 @@
   import { getContext } from 'svelte';
   import { ctxMenu } from '../../../lib/contextmenu.svelte';
   import { toasts } from '../../../lib/toast.svelte';
+  import { copyText } from '../../../lib/clipboard';
   import { openExternal } from '../../../lib/external';
   import { runCodeAction, type CodeActionHost } from './codeBlocks';
   import { splitLocation } from './chatMarkdown';
@@ -105,11 +106,12 @@
     openFile: (path) => ctx?.openPreview?.({ kind: 'file', path }),
   };
 
-  function copy(text: string, what: string): void {
-    void navigator.clipboard?.writeText(text).then(
-      () => toasts.info('Copied', what),
-      () => toasts.error('Couldn’t copy', what),
-    );
+  /** Copy a path / link from a menu row. Through lib/clipboard so an origin
+   *  without `navigator.clipboard` (LAN http, the self-signed listener) still
+   *  copies, or at least says so — never a silent no-op. */
+  async function copy(text: string, what: string): Promise<void> {
+    if (await copyText(text)) toasts.info('Copied', what);
+    else toasts.error('Couldn’t copy', `The clipboard isn’t available here. Select the text and copy it manually: ${what}`);
   }
 
   /** A file reference, an issue chip or an external link — what it opens. */

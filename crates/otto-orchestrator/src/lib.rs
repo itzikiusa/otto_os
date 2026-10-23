@@ -144,7 +144,7 @@ impl Orchestrator {
         // assist) get a canned, prompt-routed reply instead of spawning a real
         // claude PTY (which the E2E harness deliberately makes fail-fast). Only a
         // truthy value enables it, so `OTTO_E2E=0` can't silently turn it on.
-        if matches!(std::env::var("OTTO_E2E").as_deref(), Ok("1") | Ok("true")) {
+        if otto_core::e2e::isolated() {
             return Ok(crate::e2e_stub::canned_reply(prompt));
         }
         self.claude
@@ -163,7 +163,7 @@ impl Orchestrator {
         model: Option<&str>,
         no_progress: std::time::Duration,
     ) -> otto_core::Result<String> {
-        if matches!(std::env::var("OTTO_E2E").as_deref(), Ok("1") | Ok("true")) {
+        if otto_core::e2e::isolated() {
             return Ok(crate::e2e_stub::canned_reply(prompt));
         }
         let scratch = UntrustedScratch::create()?;
@@ -193,7 +193,7 @@ impl Orchestrator {
     /// plain-English flow is drivable offline without a real claude PTY. In
     /// normal operation it drives the real interactive session.
     async fn planner_turn(&self, prompt: &str, cwd: &str) -> Result<String> {
-        if matches!(std::env::var("OTTO_E2E").as_deref(), Ok("1") | Ok("true")) {
+        if otto_core::e2e::isolated() {
             return Ok(crate::e2e_stub::canned_reply(prompt));
         }
         self.claude

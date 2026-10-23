@@ -176,7 +176,7 @@
       await copyTextOrThrow(mintedUrl);
       toasts.success('Link copied', 'The share link is in your clipboard.');
     } catch {
-      toasts.error('Couldn’t copy the link', 'The clipboard isn’t available.');
+      toasts.error('Couldn’t copy the link', 'The clipboard isn’t available here. Select the link and copy it manually.');
     }
   }
 

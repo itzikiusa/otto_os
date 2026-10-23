@@ -160,7 +160,7 @@ for (const scheme of ['light', 'dark']) {
     await boot(page, 'files');
     await expect(page.locator('.ft-wrap').getByRole('alert')).toContainText('Folder listing unavailable');
     fail = false; await page.locator('.ft-wrap').getByRole('button', { name: 'Retry', exact: true }).click();
-    await page.getByRole('button', { name: 'release-review.md', exact: true }).click();
+    await page.getByRole('treeitem', { name: 'release-review.md', exact: true }).click();
     const preview = page.frameLocator('.preview-frame');
     await expect(preview.getByRole('heading', { name: 'Release review', exact: true })).toBeVisible();
     await page.getByRole('button', { name: 'Add file section', exact: true }).click();

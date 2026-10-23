@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { announce } from '../../lib/announce.svelte';
   import { plural } from '../../lib/plural';
   import { toastError } from '../../lib/toastError';
   // Drawer "HTTP" tab (K-3): call an HTTP endpoint inside one pod or every pod
@@ -65,6 +66,11 @@
   // Latest-wins: switching workload / namespace / cluster while a list is in
   // flight must not show the previous target's saved actions.
   let savedSeq = 0;
+  /** ux-6-07: a refused copy says what to do next (it was silent). */
+  async function copyBody(text: string): Promise<void> {
+    if (await copyText(text)) toasts.success('Copied response body');
+    else toasts.error('Couldn’t copy', 'The clipboard isn’t available here. Select the text and copy it manually.');
+  }
   async function loadSaved(): Promise<void> {
     const seq = ++savedSeq;
     if (!workload) return;
@@ -219,6 +225,9 @@
     if (r.body_base64) return `(binary body, ${r.body.length} base64 chars)`;
     return prettyBody(r.body);
   }
+  // Spoken at the state edge through the shell's always-mounted announcer: a
+  // live region inserted together with its text is not read (WebKit/VoiceOver).
+  $effect(() => { if (runError) announce(runError, { assertive: true }); });
 </script>
 
 <div class="ph" data-testid="k8s-pod-http">
@@ -298,7 +307,7 @@
     {#if mutating && guarded}<div class="guard small" role="note"><Icon name="warning" size={12} /> {isProdEnv(cluster?.environment) ? 'Production' : 'Read-only'} cluster — you’ll be asked to type the target name.</div>{/if}
 
     {#if runError}
-      <div class="err" role="alert">{runError}</div>
+      <div class="err">{runError}</div>
     {:else if results && !results.length}
       <EmptyState icon="box" title="No pods matched" body="The workload has no running pods to call." />
     {:else if results}
@@ -317,7 +326,7 @@
                 {#if r.body}
                   <div class="res-tools">
                     <span class="dim small">{r.truncated ? 'Truncated at 256 KB' : ''}</span>
-                    <button class="btn small" onclick={() => void copyText(r.body)}><Icon name="copy" size={12} /> Copy</button>
+                    <button class="btn small" onclick={() => void copyBody(r.body)}><Icon name="copy" size={12} /> Copy</button>
                   </div>
                   <pre class="mono">{shownBody(r)}</pre>
                 {/if}

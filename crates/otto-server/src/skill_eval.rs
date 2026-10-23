@@ -3,7 +3,7 @@
 //! over the result, score it, and (between iterations) have an improver agent
 //! edit a *copy* of the skill following best practices and re-run.
 //!
-//! Mirrors the PR-review subsystem ([`crate::review_session`]): each agent runs
+//! Mirrors the PR-review subsystem ([`otto_review::session`]): each agent runs
 //! as a real, openable [`SessionManager`] session (tagged `meta.source =
 //! "skilleval"`, hidden from the main grid) that writes its result to a temp
 //! file we poll for. Per-validation live state lives in each iteration's
@@ -1022,7 +1022,7 @@ async fn run_agent_capture(
         };
     }
 
-    crate::review_session::submit_prompt(manager, &sid, prompt).await;
+    otto_sessions::submit::submit_prompt(manager, &sid, prompt).await;
 
     let deadline = Instant::now() + timeout;
     let mut flagged_waiting = false;

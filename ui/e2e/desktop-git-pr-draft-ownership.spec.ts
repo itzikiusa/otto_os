@@ -52,7 +52,7 @@ test('discarding a PR draft before opening another PR clears its edit state', as
   });
   await page.goto(`/#/git/${repoId}/pr/1`);
   await expect(page.locator('.prd-title')).toHaveText('PR 1 original title');
-  await page.locator('.prd-desc').getByRole('button', { name: 'Edit', exact: true }).click();
+  await page.locator('.prd-desc').getByRole('button', { name: 'Edit the title and description', exact: true }).click();
   await page.getByRole('textbox', { name: 'Pull request title', exact: true }).fill('Private draft for PR one');
   await page.getByRole('textbox', { name: 'Pull request description', exact: true }).fill('Do not publish this to PR two');
   await page.evaluate((id) => { location.hash = `#/git/${id}/pr/2`; }, repoId);
@@ -63,7 +63,7 @@ test('discarding a PR draft before opening another PR clears its edit state', as
   await page.screenshot({ path: testInfo.outputPath('pr-two-after-discard.png'), fullPage: true });
   await expect(page.getByRole('textbox', { name: 'Pull request title', exact: true })).toBeHidden();
   await expect(page.getByRole('textbox', { name: 'Pull request description', exact: true })).toBeHidden();
-  await page.locator('.prd-desc').getByRole('button', { name: 'Edit', exact: true }).click();
+  await page.locator('.prd-desc').getByRole('button', { name: 'Edit the title and description', exact: true }).click();
   await expect(page.getByRole('textbox', { name: 'Pull request title', exact: true })).toHaveValue('PR 2 original title');
   await expect(page.getByRole('textbox', { name: 'Pull request description', exact: true })).toHaveValue('PR 2 original description');
 });

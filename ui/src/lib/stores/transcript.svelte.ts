@@ -513,7 +513,7 @@ export class Conversation {
       if (!current()) return;
       reader.retry = {before, index};
       this.setSub(agentId, {...(previous ?? empty), loading: false, retryable,
-        error: error instanceof Error ? error.message : String(error)});
+        error: loadErrorText(error)});
     } finally {
       if (reader.controller === ac) {
         // A collapsed/reopened reader may already own a new reservation.

@@ -187,7 +187,7 @@ test('policy activation binds preview to exact rules, shows child impact and sav
   await second.getByLabel('Modify schema', { exact: true }).check();
   await editor.getByRole('button', { name: 'Review changes', exact: true }).click();
   await editor.getByRole('button', { name: 'Activate enforced access' }).click();
-  await expect(editor.getByRole('status')).toHaveText('Access saved.');
+  await expect(editor.getByText('Access saved.', { exact: true })).toBeVisible();
   expect(saved).toBeTruthy();
   expect(policy.rules[1]).toMatchObject({
     subject_kind: 'user',

@@ -11,6 +11,7 @@
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import { sentenceCase } from '../../lib/labels';
   import { loadErrorText } from '../../lib/loadError';
+  import { announce } from '../../lib/announce.svelte';
   import { mcpCpApi } from '../../lib/api/mcp';
   import { ws } from '../../lib/stores/workspace.svelte';
   import type { McpCallLogRow, McpServerDetail } from '../../lib/api/types';
@@ -111,7 +112,11 @@
       hasMore = page.has_more;
       moreError = null;
     } catch (e) {
-      if (gen === generation) moreError = loadErrorText(e);
+      if (gen === generation) {
+        moreError = loadErrorText(e);
+        // Spoken here: the inline line below is inserted with its text.
+        announce(`Couldn’t load more rows: ${moreError}`, { assertive: true });
+      }
     } finally {
       if (gen === generation) loadingMore = false;
     }
@@ -248,7 +253,7 @@
       </div>
       {#if hasMore || moreError}
         <div class="more">
-          {#if moreError}<span class="bad-text" role="alert">{moreError}</span>{/if}
+          {#if moreError}<span class="bad-text">{moreError}</span>{/if}
           <button
             class="btn small"
             data-testid="mcp-audit-more"

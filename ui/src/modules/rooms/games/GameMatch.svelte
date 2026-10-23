@@ -1,5 +1,7 @@
 <script lang="ts">
-  import { onMount, untrack } from 'svelte';
+  import { onMount, tick, untrack } from 'svelte';
+  import { copyText } from '../../../lib/clipboard';
+  import { announce } from '../../../lib/announce.svelte';
   import { GameClient, type GameConnection } from './client';
   import type { GameRoomCredential, GameRoomEvent, GameRoomMember, GameRoomState } from '../../../lib/api/game-room-types';
   import { gameFor, RACERS, FIGHTERS, type Difficulty } from './catalog';
@@ -24,6 +26,7 @@
   let room = $state<GameRoomState | null>(null);
   let connection = $state<GameConnection>('connecting');
   let error = $state(''), closed = $state(''), copied = $state(false);
+  let backButton = $state<HTMLButtonElement>();
   let choice = $state(untrack(() => pick));
   let cpuFill = $state(true);
   let botCount = $state(untrack(() => bots));
@@ -72,8 +75,14 @@
       if (event.room.phase === 'playing' && (!prev || prev.phase === 'lobby')) { resetRound(); beginRound(event.room); }
       return;
     }
-    if (event.type === 'closed') { closed = event.reason; return; }
-    if (event.type === 'error') { if (!event.message.includes('Stale game round')) error = event.message; return; }
+    if (event.type === 'closed') {
+      // Closed mid-game: the canvas (and any focus in it) unmounts, so focus
+      // moves to "Back to games" and the end is announced (a11y-6-09).
+      closed = event.reason; announce(`Match ended. ${event.reason}`);
+      void tick().then(() => backButton?.focus());
+      return;
+    }
+    if (event.type === 'error') { if (!event.message.includes('Stale game round')) { error = event.message; announce(event.message, { assertive: true }); } return; }
     if (event.type === 'pong' || !room || !('round' in event) || event.round !== room.round || event.generation !== room.generation) return;
     if (event.type === 'snapshot' && !isHost) {
       if (event.seq <= (lastSeq.get(0) ?? 0)) return;
@@ -125,7 +134,10 @@
     client.send({ type: 'finish', round: room.round, generation: room.generation, result: { game: 'shooter', standings: result } });
   }
   function rematch() { client.send({ type: 'rematch' }); }
-  async function copyInvite() { try { await navigator.clipboard.writeText(credential.invite_url ?? ''); copied = true; } catch { error = 'Copy the invitation from the field below.'; } }
+  async function copyInvite() {
+    if (await copyText(credential.invite_url ?? '')) { copied = true; announce('Invitation copied'); return; }
+    error = 'Select the invitation link and copy it.'; announce(error, { assertive: true });
+  }
   const statusOf = (m: GameRoomMember) => (m.left ? 'Left' : !m.connected ? 'Connecting…' : m.ready ? 'Ready' : 'Not ready');
   const rematchRequests = $derived(room?.members.filter(m => m.rematch && !m.left).length ?? 0);
   const lobbyLine = $derived(
@@ -140,11 +152,13 @@
     connection !== 'connected' ? lobbyLine
     : `${active.length} ${active.length === 1 ? 'player' : 'players'}, ${readyCount} ready.${everyoneReady ? (isHost ? ' Everyone is ready; you can start the match.' : ' Everyone is ready.') : ''}`);
   function reconnect() { error = ''; client.reconnect(); }
+  const lostMidGame = $derived(connection === 'gave-up' && !!room && !closed && (room.phase === 'playing' || room.phase === 'finished'));
+  $effect(() => { if (lostMidGame) announce('Couldn’t reconnect to the game room.', { assertive: true }); });
 </script>
 
 <div class="match">
   {#if closed}
-    <div class="match-wait" role="status"><h2>Match ended</h2><p>{closed}</p><button class="btn primary" onclick={onexit}>Back to games</button></div>
+    <div class="match-wait"><h2>Match ended</h2><p>{closed}</p><button class="btn primary" bind:this={backButton} onclick={onexit}>Back to games</button></div>
   {:else if room && (room.phase === 'playing' || room.phase === 'finished')}
     {#key room.round}
       {#if kind === 'kart'}
@@ -199,10 +213,12 @@
     </div>
   {/if}
   {#if connection === 'gave-up' && room && !closed && (room.phase === 'playing' || room.phase === 'finished')}
-    <div class="match-lost" role="alert"><span>Couldn’t reconnect to the game room.</span><button class="btn primary" onclick={reconnect}>Reconnect</button></div>
+    <div class="match-lost"><span>Couldn’t reconnect to the game room.</span><button class="btn primary" onclick={reconnect}>Reconnect</button></div>
   {/if}
-  {#if !closed && !(room && (room.phase === 'playing' || room.phase === 'finished'))}<p class="sr-only" role="status" aria-live="polite">{lobbyAnnouncement}</p>{/if}
-  {#if error}<p class="match-error" role="alert">{error}</p>{/if}
+  <!-- Always mounted (a region inserted with its text is silent in VoiceOver):
+       only its text changes, and it empties once the match leaves the lobby. -->
+  <p class="sr-only" role="status" aria-live="polite">{!closed && !(room && (room.phase === 'playing' || room.phase === 'finished')) ? lobbyAnnouncement : ''}</p>
+  {#if error}<p class="match-error">{error}</p>{/if}
 </div>
 
 <style>

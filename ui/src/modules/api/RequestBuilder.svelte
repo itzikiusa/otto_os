@@ -4,12 +4,12 @@
   // else) · type + method + URL + Send · the {{variables}} this request uses
   // and what they resolve to · Params / Headers / Body / Auth / Scripts / Docs
   // / Settings, each with a one-line explanation.
+  import { announceShown } from '../../lib/announce.svelte';
   import { openExternal } from '../../lib/external';
   import { toastError } from '../../lib/toastError';
   import { onTabKey } from '../../lib/tabKeys';
-  import { baseUrl } from '../../lib/api/client';
   import Icon from '../../lib/components/Icon.svelte';
-  import { focusAfterRowRemoval, rowListOf } from './rowFocus';
+  import { focusAfterRowRemoval, rowListOf } from '../../lib/rowFocus';
   import LoadState from '../../lib/components/LoadState.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import CodeEditor from '../../lib/components/CodeEditor.svelte';
@@ -18,7 +18,7 @@
   import ImportDialog from './ImportDialog.svelte';
   import { apiClient, HTTP_METHODS, defaultSettings, confirmNewHost, draftSecrets, type ApiDraft, type ApiRequestKind, type ApiSettings } from '../../lib/stores/apiClient.svelte';
   import { apiStream } from '../../lib/stores/apiStream.svelte';
-  import { api, newHostConfirmHost } from '../../lib/api/client';
+  import { api, baseUrl, newHostConfirmHost } from '../../lib/api/client';
   import { generateCode, CODE_LANGS, type CodeLang } from '../../lib/api/codegen';
   import { collectionPaths, fullRequestUrl, requestVarNames, resolveVar, splitVars, varNames } from '../../lib/api/apiVars';
   import { renderMarkdownGfm } from '../../lib/md';
@@ -681,7 +681,7 @@
       await copyTextOrThrow(text);
       toasts.success(`Copied ${what}`);
     } catch {
-      toasts.error('Couldn’t copy', 'The clipboard isn’t available.');
+      toasts.error('Couldn’t copy', 'The clipboard isn’t available here. Select the text and copy it manually.');
     }
   }
 
@@ -759,7 +759,7 @@
   </div>
 
   {#if apiClient.replayIssue()}
-    <div class="tab-help" role="status" data-testid="incomplete-history">
+    <div class="tab-help" data-testid="incomplete-history" use:announceShown={apiClient.replayIssue() ?? ''}>
       <p>{apiClient.replayIssue()}</p>
       {#if draft.historyReplay?.requestId}
         <button type="button" class="btn small" onclick={() => void apiClient.openHistorySavedRequest()}>Open current saved request</button>

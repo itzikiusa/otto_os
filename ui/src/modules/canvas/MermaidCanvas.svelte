@@ -15,6 +15,7 @@
   import { PanZoom, type Transform } from './pointerZoom';
   import { toastAgentEdit } from './agentUndo';
   import { toastError } from '../../lib/toastError';
+  import { announce } from '../../lib/announce.svelte';
   import { onMount, onDestroy, tick, untrack } from 'svelte';
   import { canvas } from '../../lib/stores/canvas.svelte';
   import { canvasDocBus } from '../../lib/events.svelte';
@@ -23,7 +24,7 @@
   import { svgToPngDownload } from './export';
   import { copyText } from '../../lib/clipboard';
   import { ui } from '../../lib/stores/ui.svelte';
-  import type { CanvasDoc, CanvasFormat } from './types';
+  import type { CanvasDoc, CanvasFormat } from '../../lib/canvas/types';
   import { docFromAssist } from './assistDoc';
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -134,6 +135,7 @@
     if (token !== renderToken) return; // superseded
     if (out.error || !out.svg) {
       renderError = out.error || 'Couldn’t render the diagram';
+      announce(`Diagram error: ${renderError}`);
       return; // keep the last good SVG on screen
     }
     renderError = '';
@@ -332,7 +334,7 @@
         {/if}
 
         {#if renderError}
-          <div class="err" role="status">
+          <div class="err">
             <Icon name="x" size={14} /> Diagram error: {renderError}
           </div>
         {/if}

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { announceShown } from '../../lib/announce.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
@@ -41,9 +42,9 @@
     </div>
     <p>TURN helps voice and screen sharing cross different networks. The shared secret stays in the host’s Keychain; guests receive short-lived credentials.</p>
   {/if}
-  {#if error}<p role="alert">{error}</p>{/if}
+  {#if error}<p class="form-error" use:announceShown={{ text: error, assertive: true }}>{error}</p>{/if}
   {#snippet footer()}<button class="btn" onclick={onclose} disabled={busy}>Cancel</button><button class="btn primary" disabled={!loaded || loading || busy || !origin.trim()} onclick={save}>{busy ? 'Saving…' : 'Save settings'}</button>{/snippet}
 </Modal>
 <style>
-  p { line-height: 1.5; color: var(--text-dim); } .fields, label { display: grid; gap: 8px; } .fields { gap: 16px; } input, textarea { width: 100%; } textarea { resize: vertical; } .check { display: flex; align-items: center; gap: 8px; } .check input { width: auto; } [role='alert'] { color: var(--danger); }
+  p { line-height: 1.5; color: var(--text-dim); } .fields, label { display: grid; gap: 8px; } .fields { gap: 16px; } input, textarea { width: 100%; } textarea { resize: vertical; } .check { display: flex; align-items: center; gap: 8px; } .check input { width: auto; } .form-error { color: var(--danger); }
 </style>

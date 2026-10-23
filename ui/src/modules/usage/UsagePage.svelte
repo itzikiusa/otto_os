@@ -1,6 +1,7 @@
 <script lang="ts">
   import { scrollBehavior } from '../../lib/motion';
   import { loadErrorText } from '../../lib/loadError';
+  import { announce, announceShown } from '../../lib/announce.svelte';
   import PathField from '../../lib/components/PathField.svelte';
   // Usage dashboard: tokens first (provider/day/model/session rollups; cost is
   // the secondary figure), the ccusage-style Report tab, and — for root only —
@@ -238,6 +239,8 @@
 
   // Spend couldn't be read (error-handling-5-07): rows carry 0, not a reading.
   const spendUnavailable = $derived(usage.budgets?.spend_unavailable === true);
+  // a11y-6-01: announced at the edge — the warning line is inserted with its text.
+  $effect(() => { if (spendUnavailable) announce('Spend unavailable: the usage engine couldn’t report spend for this window.'); });
 
   function addWsBudget(): void {
     budgetsDirty = true;
@@ -545,7 +548,7 @@
     <!-- Ingestion health (PC-2): a retrying or stopped tailer means the totals
          below are going stale; say so, with the cause, instead of nothing. -->
     {#if usage.status?.tailer && usage.status.tailer.state !== 'running'}
-      <div class="budget-banner tailer-banner" role="status">
+      <div class="budget-banner tailer-banner" use:announceShown={{ text: `Usage isn’t being recorded: ${usage.status.tailer.cause ?? 'the usage journal is unavailable'}`, assertive: true }}>
         <Icon name="warning" size={14} />
         <span>
           Usage isn’t being recorded{usage.status.tailer.state === 'retrying' ? ' — Otto is retrying' : ''}: {usage.status.tailer.cause ?? 'the usage journal is unavailable'}{usage.status.tailer.state === 'stopped' ? '. Restart Otto after fixing it.' : '.'}
@@ -556,7 +559,7 @@
     <!-- Live budget banner (driven by the BudgetExceeded WS event).
          Dismissible; clears automatically on a "recovered" event. -->
     {#if budgetAlert}
-      <div class="budget-banner" class:recovered={budgetAlert.direction === 'recovered'} role="status">
+      <div class="budget-banner" class:recovered={budgetAlert.direction === 'recovered'} use:announceShown={budgetAlert.direction === 'recovered' ? `Back under budget: ${budgetAlert.provider || 'workspace'}` : { text: `Over budget: ${budgetAlert.provider || 'workspace'} spent ${formatUsd(budgetAlert.spendUsd)} of its ${formatUsd(budgetAlert.capUsd)} cap.`, assertive: true }}>
         <Icon name={budgetAlert.direction === 'recovered' ? 'check' : 'warning'} size={14} />
         {#if budgetAlert.direction === 'recovered'}
           <span>
@@ -1014,7 +1017,7 @@
 
           <!-- Status: budget vs spend -->
           {#if usage.budgets && usage.budgets.rows.length > 0}
-            {#if spendUnavailable}<div class="budget-alert" role="status"><Icon name="warning" size={14} />Spend unavailable: the usage engine couldn’t report spend for this window.</div>{/if}
+            {#if spendUnavailable}<div class="budget-alert"><Icon name="warning" size={14} />Spend unavailable: the usage engine couldn’t report spend for this window.</div>{/if}
             <div class="budget-rows">
               {#each usage.budgets.rows as r (r.scope + ':' + r.key)}
                 {@const name = r.scope === 'workspace' ? wsName(r.key) : (r.label ?? r.key)}
@@ -1046,7 +1049,7 @@
               {/each}
             </div>
             {#if usage.budgets.config.enforce && usage.budgets.rows.some((r) => r.exceeded)}
-              <div class="budget-alert" role="status">
+              <div class="budget-alert" use:announceShown={{ text: usage.budgets.config.block_on_exceed ? 'A budget is exceeded and enforcement is blocking new work in that scope.' : 'A budget is exceeded; enforcement is warn-only.', assertive: true }}>
                 <Icon name="warning" size={14} />
                 {usage.budgets.config.block_on_exceed
                   ? 'Enforcement is on and blocking: new work in an over-budget scope can be refused.'

@@ -19,26 +19,8 @@
   import DoneContractMeter from '../../lib/components/DoneContractMeter.svelte';
   import ProofSnapshotList from '../../lib/components/ProofSnapshotList.svelte';
   import { proof } from '../../lib/stores/proof.svelte';
-  import {
-    addArtifact,
-    archiveStaleSessionPacks,
-    artifactBlobUrl,
-    artifactContent,
-    assembleProof,
-    attachApiEvidence,
-    attachDbEvidence,
-    attachKafkaEvidence,
-    attachMediaRaw,
-    ciRefresh,
-    createProofPack,
-    deleteArtifact,
-    deleteProofPack,
-    getRepoProofConfig,
-    proofReport,
-    runPrCheck,
-    setRepoProofConfig,
-    waiveProof,
-  } from '../../lib/api/proof';
+  import { addArtifact, archiveStaleSessionPacks, artifactBlobUrl, artifactContent, assembleProof, attachApiEvidence, attachDbEvidence, attachKafkaEvidence, attachMediaRaw,
+    ciRefresh, createProofPack, deleteArtifact, deleteProofPack, getRepoProofConfig, proofReport, runPrCheck, setRepoProofConfig, waiveProof } from '../../lib/api/proof';
   import { downloadText } from '../../lib/components/exporters';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { api } from '../../lib/api/client';
@@ -49,7 +31,9 @@
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { registry } from '../../lib/commands.svelte';
   import { router } from '../../lib/router.svelte';
-  import type { ProofArtifactView, Repo } from '../../lib/api/types';
+  import type { AssembleResp, ProofArtifactView, Repo } from '../../lib/api/types';
+  import { announce } from '../../lib/announce.svelte';
+  import { assembleOutcome } from './assembleOutcome';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { sentenceCase } from '../../lib/status';
@@ -295,7 +279,11 @@
       if (!wantedMedia.has(id)) URL.revokeObjectURL(url);
       else mediaUrls[id] = url;
     } catch (e) {
-      if (wantedMedia.has(id)) mediaErrors[id] = loadErrorText(e);
+      if (wantedMedia.has(id)) {
+        mediaErrors[id] = loadErrorText(e);
+        // Spoken here, at the edge: the inline error below is plain text.
+        announce(`Couldn’t load the media. ${mediaErrors[id]}`, { assertive: true });
+      }
     } finally {
       mediaInflight.delete(id);
     }
@@ -372,7 +360,7 @@
       { label: 'Add artifact…', icon: 'plus', action: () => { resetAdd(); addOpen = true; } },
       { label: 'Add media…', icon: 'file', action: () => { resetMedia(); mediaOpen = true; } },
       { label: 'Add evidence…', icon: 'db', action: () => { resetEvidence(); evidenceOpen = true; } },
-      { label: 'PR check…', icon: 'pr', action: () => { resetPr(); prOpen = true; void packRepoPath().then(({ path, error }) => { if (!prOpen) return; if (!prCwd) prCwd = path; prRepoError = error; }); } },
+      { label: 'PR check…', icon: 'pr', action: () => { resetPr(); prOpen = true; void packRepoPath().then(({ path, error }) => { if (!prOpen) return; if (!prCwd) prCwd = path; prRepoError = error; if (error) announce(`Couldn’t prefill the pack’s repository folder: ${error}`); }); } },
     ]);
   }
 
@@ -433,9 +421,11 @@
     if (cwd === null) return;
     assembling = true;
     try {
-      await assembleProof(packId, { cwd: cwd.trim() || undefined });
+      // The daemon answers `AssembleResp` (the pack + what it assembled).
+      const res = (await assembleProof(packId, { cwd: cwd.trim() || undefined })) as AssembleResp;
       if (detail?.pack.id === packId) await proof.refreshDetail();
-      toasts.success('Proof assembled', 'Re-assembled from the working folder.');
+      const o = assembleOutcome(res.assembled);
+      toasts[o.tone](o.title, o.body);
     } catch (e) {
       toasts.error("Couldn’t assemble proof", loadErrorText(e));
     } finally {
@@ -1010,7 +1000,7 @@
                         <img class="art-media" src={mediaUrls[a.id]} alt={a.title} />
                       {/if}
                     {:else if mediaErrors[a.id]}
-                      <div role="alert">
+                      <div>
                         <p>Couldn’t load the media</p>
                         <p class="dim">{mediaErrors[a.id]}</p>
                         <button class="btn small" aria-label="Retry media" onclick={() => void fetchMedia(a.id)}>Retry</button>
@@ -1260,7 +1250,7 @@
       <div class="field">
         <label for="pr-cwd">Working dir (optional)</label>
         <PathField bind:value={prCwd}><input dir="ltr" id="pr-cwd" class="input" bind:value={prCwd} placeholder="e.g. ~/code/my-repo" aria-describedby={prRepoError ? 'pr-cwd-note' : undefined} /></PathField>
-        {#if prRepoError}<p id="pr-cwd-note" class="pr-cwd-note" role="status">Couldn’t prefill the pack’s repository folder: {prRepoError}</p>{/if}
+        {#if prRepoError}<p id="pr-cwd-note" class="pr-cwd-note">Couldn’t prefill the pack’s repository folder: {prRepoError}</p>{/if}
       </div>
     </div>
     {#snippet footer()}

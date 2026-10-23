@@ -20,7 +20,8 @@
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
   import { emptyHistory, folderCrumbs, historyTarget, parentFolder, resolveJump, settleFolder } from '../../lib/components/folderNavigation';
   import { lsGet, lsSet } from '../../lib/storage';
-  import { ListWindow } from '../git/list-window.svelte';
+  import { ListWindow } from '../../lib/listWindow.svelte';
+  import { tabRowIn, treeKeyAction } from './treeKeys';
   import { renderMarkdownGfm } from '../../lib/md';
   import type { FsBrowse, FsEntry, FsRead } from '../../lib/api/types';
 
@@ -251,24 +252,25 @@
     if (generation === rootGeneration) rootNodes = [...rootNodes];
   }
 
+  /** APG tree keys (treeKeys.ts): ↑/↓/Home/End, → into / ← out of folders. */
   function onTreeRowKey(e: KeyboardEvent, node: TreeNode): void {
-    const btn = e.currentTarget as HTMLElement;
-    const list = btn.closest('.tree-list');
-    if (e.key === 'ArrowRight' && node.entry.is_dir && !node.open) {
-      e.preventDefault();
-      void toggleDir(node);
-    } else if (e.key === 'ArrowLeft' && node.entry.is_dir && node.open) {
-      e.preventDefault();
-      void toggleDir(node);
-    } else if (e.key === 'ContextMenu' || (e.key === 'F10' && e.shiftKey)) {
-      rowMenu(e, node);
-    } else if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && list) {
-      e.preventDefault();
-      const rows = Array.from(list.querySelectorAll<HTMLButtonElement>('button.tree-row'));
-      const i = rows.indexOf(btn as HTMLButtonElement);
-      const next = rows[i + (e.key === 'ArrowDown' ? 1 : -1)];
-      next?.focus();
-    }
+    if (e.key === 'ContextMenu' || (e.key === 'F10' && e.shiftKey)) return rowMenu(e, node);
+    const list = (e.currentTarget as HTMLElement).closest<HTMLElement>('.tree-list');
+    const rows = visibleNodes.map((n) => ({ depth: n.depth, isDir: n.entry.is_dir, open: n.open }));
+    const i = visibleNodes.findIndex((n) => n.entry.path === node.entry.path);
+    const act = treeKeyAction(e.key, rows, i, !!list && getComputedStyle(list).direction === 'rtl');
+    if (act.kind === 'none' || !list) return;
+    e.preventDefault();
+    if (act.kind === 'toggle') void toggleDir(node);
+    else void focusRow(list, act.index);
+  }
+  /** Focus visible row `i`, first scrolling it into the window (it may be unmounted). */
+  async function focusRow(list: HTMLElement, i: number): Promise<void> {
+    activeRow = visibleNodes[i]?.entry.path ?? activeRow;
+    treeWin.reveal(i);
+    await new Promise((r) => requestAnimationFrame(r));
+    await tick();
+    list.querySelectorAll<HTMLButtonElement>('button.tree-row')[i - treeRange.start]?.focus();
   }
 
   async function openFile(entry: FsEntry): Promise<void> {
@@ -303,7 +305,7 @@
       if (revealParent) overriddenRoot = folderOf(data.path);
     } catch (e) {
       if (generation !== fileGeneration) return;
-      viewerError = `Cannot open ${path}: ${loadErrorText(e)}. If the terminal shortened the filename, use its full path.`;
+      viewerError = `Couldn’t open ${path}: ${loadErrorText(e)}. If the terminal shortened the filename, use its full path.`;
     } finally {
       if (generation === fileGeneration) viewerLoading = false;
     }
@@ -391,11 +393,7 @@
     return out;
   }
   const positions = $derived(treePositions(visibleNodes));
-  // Roving tabindex: the tree is ONE Tab stop; ↑/↓ move within it.
   let activeRow = $state<string | null>(null);
-  const tabRow = $derived(
-    activeRow && visibleNodes.some((n) => n.entry.path === activeRow) ? activeRow : (visibleNodes[0]?.entry.path ?? null),
-  );
 
   /** Row menu: "Open folder" (navigation mode) — a per-row button used to
    *  add a second Tab stop to every folder. Also on Shift+F10 / ContextMenu. */
@@ -404,11 +402,13 @@
     e.preventDefault();
     ctxMenu.show(e, [{ label: `Open folder ${node.entry.name}`, icon: 'arrow', action: () => navigate(node.entry.path) }]);
   }
-  // Windowed past 300 rows (ListWindow): opening node_modules or a build
-  // output folder listed every entry as a button + icons — thousands of rows
-  // mounted (and re-diffed on every expand) in a pane that shows ~40.
+  // Windowed past 300 rows (ListWindow): opening node_modules or a build output
+  // folder used to mount thousands of rows in a pane that shows ~40.
   const treeWin = new ListWindow('.tree-item');
   const treeRange = $derived(treeWin.range(visibleNodes.length));
+  // Roving tabindex: ONE Tab stop, always on a MOUNTED row; ⌘F sees every row.
+  const tabRow = $derived(tabRowIn(visibleNodes.map((n) => n.entry.path), activeRow, treeRange.start, treeRange.end));
+  $effect(() => treeWin.findRows(() => null, () => visibleNodes, (n) => n.entry.name));
   const hiddenCount = $derived(navigation && !showHidden ? rootNodes.filter((n) => n.entry.name.startsWith('.')).length : 0);
 
   // Basename of root for display.

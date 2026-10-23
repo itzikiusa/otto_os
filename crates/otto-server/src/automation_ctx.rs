@@ -176,7 +176,7 @@ impl AutomationCtx for ServerCtx {
             cancelled,
             publish,
             |id| async move {
-                crate::review_session::stop_review_sessions(&self.manager, &[id]).await;
+                otto_review::session::stop_review_sessions(&self.manager, &[id]).await;
             },
         )
         .await

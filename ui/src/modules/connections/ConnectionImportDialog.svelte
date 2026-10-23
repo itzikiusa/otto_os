@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { announce } from '../../lib/announce.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import Badge from '../../lib/components/Badge.svelte';
   import { plural } from '../../lib/plural';
   // Import connections from another DB tool. No file picker, no path config: the
@@ -92,7 +94,7 @@
     try {
       sources = await importSources(wsId);
     } catch (e) {
-      sourcesError = e instanceof Error ? e.message : String(e);
+      sourcesError = loadErrorText(e);
       sources = [];
     } finally {
       loadingSources = false;
@@ -205,6 +207,11 @@
     if (creating) return;
     onclose();
   }
+  // Spoken at the state edge through the shell's always-mounted announcer: a
+  // live region inserted together with its text is not read (WebKit/VoiceOver).
+  $effect(() => { if (loadingSources) announce('Looking for installed tools…'); });
+  $effect(() => { if (sourcesError) announce(`Couldn’t look for installed tools. ${sourcesError}`, { assertive: true }); });
+  $effect(() => { if (scanning) announce(`Scanning ${activeLabel}…`); });
 </script>
 
 <Modal title="Import connections" width={560} onclose={close}>
@@ -217,12 +224,12 @@
       </p>
 
       {#if loadingSources}
-        <div class="imp-loading" role="status" aria-live="polite">
+        <div class="imp-loading">
           <div class="indeterminate" role="progressbar" aria-label="Looking for installed tools"></div>
           <span class="imp-loading-text">Looking for installed tools…</span>
         </div>
       {:else if sourcesError}
-        <div class="imp-error" role="alert">
+        <div class="imp-error">
           <span>Couldn’t look for installed tools. {sourcesError}</span>
           <button class="btn small" onclick={() => void loadSources()}>Retry</button>
         </div>
@@ -276,7 +283,7 @@
       </div>
 
       {#if scanning}
-        <div class="imp-loading" role="status" aria-live="polite">
+        <div class="imp-loading">
           <div class="indeterminate" role="progressbar" aria-label="Scanning {activeLabel}"></div>
           <span class="imp-loading-text">Scanning {activeLabel}…</span>
         </div>

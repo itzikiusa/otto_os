@@ -54,7 +54,7 @@
 <Modal title="History retention" width={420} {onclose}>
   <p class="lead">Every request you send is kept in this workspace’s history, including response bodies. Limit how much is kept; older requests are deleted for good.</p>
   {#if gauge}
-    <p class="gauge" role="status">
+    <p class="gauge">
       Now: {gauge.history_rows.toLocaleString()} requests ({formatBytes(gauge.history_bytes)}) · {gauge.run_rows.toLocaleString()} automation runs ({formatBytes(gauge.run_bytes)})
     </p>
   {/if}

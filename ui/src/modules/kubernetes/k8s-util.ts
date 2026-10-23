@@ -3,54 +3,13 @@
 // shared <EnvBadge>).
 
 import { now } from '../../lib/stores/now.svelte';
-import { formatBytes as sharedFormatBytes } from '../../lib/metric-format';
 import type { BadgeTone } from '../../lib/status';
-import type {
-  K8sCapabilities,
-  K8sCluster,
-  K8sContainer,
-  K8sHealth,
-  K8sResourceKind,
-} from '../../lib/api/types';
+import type { K8sCapabilities, K8sContainer, K8sHealth } from '../../lib/api/types';
+import { KINDS, type KindDef } from '../../lib/k8s/kinds';
 
-export interface KindDef {
-  id: K8sResourceKind;
-  label: string;
-  /** Singular label for the drawer header / confirms. */
-  singular: string;
-  /** Cluster-scoped kinds ignore the namespace filter. */
-  clusterScoped?: boolean;
-  /** Only shown when the capability probe says the CRD exists. */
-  requires?: keyof Pick<K8sCapabilities, 'argo_rollouts' | 'argocd'>;
-}
-
-export const KINDS: KindDef[] = [
-  { id: 'pods', label: 'Pods', singular: 'Pod' },
-  { id: 'deployments', label: 'Deployments', singular: 'Deployment' },
-  { id: 'statefulsets', label: 'StatefulSets', singular: 'StatefulSet' },
-  { id: 'daemonsets', label: 'DaemonSets', singular: 'DaemonSet' },
-  { id: 'replicasets', label: 'ReplicaSets', singular: 'ReplicaSet' },
-  { id: 'jobs', label: 'Jobs', singular: 'Job' },
-  { id: 'cronjobs', label: 'CronJobs', singular: 'CronJob' },
-  { id: 'services', label: 'Services', singular: 'Service' },
-  { id: 'ingresses', label: 'Ingresses', singular: 'Ingress' },
-  { id: 'configmaps', label: 'ConfigMaps', singular: 'ConfigMap' },
-  { id: 'secrets', label: 'Secrets', singular: 'Secret' },
-  { id: 'pvcs', label: 'PVCs', singular: 'PersistentVolumeClaim' },
-  { id: 'hpas', label: 'HPAs', singular: 'HorizontalPodAutoscaler' },
-  { id: 'nodes', label: 'Nodes', singular: 'Node', clusterScoped: true },
-  { id: 'events', label: 'Events', singular: 'Event' },
-  { id: 'rollouts', label: 'Argo Rollouts', singular: 'Rollout', requires: 'argo_rollouts' },
-  { id: 'applications', label: 'ArgoCD Apps', singular: 'Application', requires: 'argocd' },
-];
-
-export function kindDef(id: string): KindDef {
-  return KINDS.find((k) => k.id === id) ?? { id: 'pods', label: id, singular: id };
-}
-
-export function isKind(id: string | undefined): id is K8sResourceKind {
-  return !!id && KINDS.some((k) => k.id === id);
-}
+export {
+  KINDS, kindDef, isKind, formatBytes, formatMillicores, clusterLabel, type KindDef,
+} from '../../lib/k8s/kinds';
 
 /** Kinds visible for a cluster given its capability probe (unknown ⇒ hide
  *  the CRD-backed ones until the probe lands). */
@@ -80,17 +39,6 @@ export function formatAge(seconds: number | null | undefined): string {
   return `${Math.floor(d / 365)}y`;
 }
 
-/** kubectl-style sizes ("128Mi"), blank when unknown — the shared
- *  formatter's IEC style (lib/metric-format), not a local copy. */
-export function formatBytes(n: number | null | undefined): string {
-  return sharedFormatBytes(n, { iec: true, empty: '' });
-}
-
-export function formatMillicores(m: number | null | undefined): string {
-  if (m == null || !Number.isFinite(m)) return '';
-  return m >= 1000 ? `${(m / 1000).toFixed(2)} cores` : `${Math.round(m)}m`;
-}
-
 export function healthClass(h: K8sHealth | null | undefined, status?: string): string {
   if (h) return `health-${h}`;
   const s = (status ?? '').toLowerCase();
@@ -105,10 +53,6 @@ export function healthClass(h: K8sHealth | null | undefined, status?: string): s
 export function healthTone(h: K8sHealth | null | undefined, status?: string): BadgeTone {
   const c = healthClass(h, status);
   return c === 'health-ok' ? 'ok' : c === 'health-bad' ? 'bad' : c === 'health-warn' ? 'warn' : c === 'health-progressing' ? 'info' : 'neutral';
-}
-
-export function clusterLabel(c: K8sCluster | null): string {
-  return c ? c.name || c.context_name : '';
 }
 
 /** Filename-safe stem for log downloads. */

@@ -234,7 +234,7 @@
   import { openExternal } from '../external';
   import { terminalLinksForRow, resolveTerminalFile, oscTerminalLink, type TerminalLink } from './terminalLinks';
   import { keyContext, registerFindOwner } from '../keys';
-  import { copyText } from '../clipboard';
+  import { copyText, copyWithToast } from '../clipboard';
   import { snipApi } from '../snip';
   import { toasts } from '../toast.svelte';
   import { noteTerminalKey, OPTION_META_HINT_KEY } from '../optionMetaHint';
@@ -1813,7 +1813,7 @@
   function activateLink(event: MouseEvent, link: TerminalLink): void {
     event.preventDefault();
     if (link.kind === 'url') {
-      if (socketFactory) { void copyText(link.text).then(ok => { if (ok) toasts.success('Link copied'); }); return; }
+      if (socketFactory) { void copyWithToast(link.text, 'the link'); return; }
       void openExternal(link.text);
     } else if (link.path) {
       const context = localFileContext();
@@ -2033,8 +2033,8 @@
             void copyText(sel).then((ok) => {
               if (!ok) {
                 toasts.error(
-                  'Copy blocked',
-                  'The browser refused the clipboard write. Right-click → Copy still works.',
+                  'Couldn’t copy',
+                  'The browser refused the clipboard write. Select the text and copy it manually with right-click → Copy.',
                 );
               }
             });

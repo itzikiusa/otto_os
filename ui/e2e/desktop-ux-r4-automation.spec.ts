@@ -24,16 +24,22 @@ test('desktop-to-tablet swarm: detail gains rail width and navigation preserves 
   await expect(page.locator('.swarm-item.active')).toBeFocused();
   await page.setViewportSize({ width: 834, height: 1112 });
   await page.evaluate(() => document.documentElement.dir = 'rtl');
-  await expect(page.locator('.rail-list')).toBeHidden();
-  const toggle = page.getByRole('button', { name: 'Toggle swarms list' });
-  await expect(toggle).toBeFocused();
-  expect((await page.locator('.swarm-page .main').boundingBox())!.width).toBeGreaterThan(560);
-  await toggle.press('Enter');
+  // Only a phone collapses the picker when a swarm opens; a tablet keeps the
+  // list (stacked above the detail) and the focused selection survives the resize.
   const selected = page.locator('.swarm-item.active');
-  await expect(selected).toBeVisible();
-  await selected.focus(); await selected.press('Enter');
-  await expect(toggle).toBeFocused();
+  await expect(page.locator('.rail-list')).toBeVisible();
+  await expect(selected).toBeFocused();
+  const toggle = page.getByRole('button', { name: 'Toggle swarms list' });
+  await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+  expect((await page.locator('.swarm-page .main').boundingBox())!.width).toBeGreaterThan(560);
+  await selected.press('Enter');
+  await expect(page.locator('.rail-list')).toBeVisible();
+  await expect(selected).toBeFocused();
+  // The toggle still folds the list away on demand and keeps focus.
+  await toggle.focus(); await toggle.press('Enter');
   await expect(page.locator('.rail-list')).toBeHidden();
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+  await expect(toggle).toBeFocused();
   await expect(page.getByRole('tab', { name: 'Feed', exact: true })).toHaveAttribute('aria-selected', 'true');
   await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toHaveValue('Keep this draft across layout changes');
   await expectNoHorizontalOverflow(page);
@@ -165,7 +171,7 @@ test('swarm board: keyboard assignment and move preserve dependencies, rejected 
 });
 
 
-test('tablet swarm: picker collapses with focus return and phone resize retains the draft', async ({ page }) => {
+test('tablet swarm: picker folds with focus kept and phone resize retains the draft', async ({ page }) => {
   const { ctx } = await setup(page); await ctx.dispose();
   await page.setViewportSize({ width: 834, height: 1112 });
   await page.addInitScript(() => {
@@ -174,13 +180,16 @@ test('tablet swarm: picker collapses with focus return and phone resize retains 
   await page.goto('/#/swarm');
   await page.evaluate(() => document.documentElement.dir = 'rtl');
   await expect(page.getByRole('tab', { name: 'Org', exact: true })).toBeVisible();
-  await expect(page.locator('.rail-list')).toBeHidden();
+  // A tablet keeps the picker open beside (above) the detail; the toggle folds it.
+  await expect(page.locator('.rail-list')).toBeVisible();
   expect((await page.locator('.swarm-page .main').boundingBox())!.width).toBeGreaterThan(560);
   const toggle = page.getByRole('button', { name: 'Toggle swarms list' });
   await toggle.focus(); await toggle.press('Enter');
+  await expect(page.locator('.rail-list')).toBeHidden(); await expect(toggle).toBeFocused();
+  await toggle.press('Enter');
   const selected = page.locator('.swarm-item.active');
   await expect(selected).toBeVisible(); await selected.focus(); await selected.press('Enter');
-  await expect(page.locator('.rail-list')).toBeHidden(); await expect(toggle).toBeFocused();
+  await expect(page.locator('.rail-list')).toBeVisible(); await expect(selected).toBeFocused();
   await page.getByRole('tab', { name: 'Feed', exact: true }).click();
   const input = page.getByRole('textbox', { name: 'Message', exact: true });
   await input.fill('Keep this draft across layout changes');

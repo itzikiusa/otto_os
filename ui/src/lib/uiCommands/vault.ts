@@ -1,6 +1,8 @@
 // Agent UI control — Vault (docs home) handlers (`otto.ui_vault_*`). They
 // drive the vault store the page renders (tabs, the open note, the search
-// panel), so the note the agent reads is the one open in the user's pane.
+// panel), so the note the agent reads is the one open in the user's pane. The
+// store lives in modules/vault, so they reach it through `vaultPort`, which
+// the Vault page binds while it is mounted (lib/ never imports modules/).
 //
 // Writing is `local_write` and stays the user's call: the new text lands in
 // the note's EDITOR first (edit mode, highlighted) and is only saved after the
@@ -10,15 +12,18 @@
 
 import { registerUiCommands, registerUiState, UiCommandError, type UiCommandCtx } from '../uiCommands';
 import { router } from '../router.svelte';
-import { vault } from '../../modules/vault/vault.svelte';
+import { vaultPort, type VaultPort } from './vaultPort';
 import { vaultNote } from '../api/vault';
 import { ApiError } from '../api/client';
 import { toasts } from '../toast.svelte';
 import type { Vault } from '../api/types';
 import { agentLabel, asUiError, highlightWhenReady, resolveByIdOrName, tailText, waitFor } from './pagePort';
 
-async function showVault(key: string | number | undefined, ctx: UiCommandCtx): Promise<Vault> {
+/** Navigate to the vault, wait for its store to bind the port, and select the
+ *  vault `key` names (else the current one). */
+async function showVault(key: string | number | undefined, ctx: UiCommandCtx): Promise<{ vault: VaultPort; v: Vault }> {
   if (router.parts[0] !== 'vault') router.go('vault');
+  const vault = await vaultPort.get(ctx.signal, 15_000);
   if (vault.vaults.length === 0 && !vault.loading) await vault.load();
   await waitFor(() => !vault.loading, ctx.signal, 15_000, 'the vault list');
   if (vault.loadError) throw new UiCommandError('failed', vault.loadError);
@@ -29,7 +34,7 @@ async function showVault(key: string | number | undefined, ctx: UiCommandCtx): P
   if (!v) throw new UiCommandError('not_found', 'There is no vault yet — the user can add one on the Vault page.');
   if (vault.current?.id !== v.id) await vault.select(v.id);
   if (vault.current?.id !== v.id) throw new UiCommandError('failed', 'The vault did not switch (an unsaved note may be blocking it).');
-  return v;
+  return { vault, v };
 }
 
 function normPath(p: string): string {
@@ -40,10 +45,13 @@ function normPath(p: string): string {
 
 registerUiCommands('vault', {
   async vault_list(_args, ctx) {
-    const v = await showVault(undefined, ctx).catch((e) => {
+    const shown = await showVault(undefined, ctx).catch((e) => {
       if (e instanceof UiCommandError && e.code === 'not_found') return null;
       throw e;
     });
+    const v = shown?.v ?? null;
+    // `not_found` (no vault yet) still means the store bound; peek it.
+    const vault = shown?.vault ?? (await vaultPort.get(ctx.signal, 15_000));
     return {
       vaults: vault.vaults.map((x) => ({ id: x.id, name: x.name, root_path: x.root_path, okf: x.okf, notes: x.notes })),
       current: v ? { id: v.id, name: v.name } : null,
@@ -53,7 +61,7 @@ registerUiCommands('vault', {
   },
 
   async vault_open_note(args: { vault?: string; path: string; edit?: boolean }, ctx) {
-    const v = await showVault(args.vault, ctx);
+    const { vault, v } = await showVault(args.vault, ctx);
     const path = normPath(args.path);
     await vault.open(path, { edit: args.edit });
     if (vault.notePath !== path || !vault.note) {
@@ -74,7 +82,7 @@ registerUiCommands('vault', {
   },
 
   async vault_search(args: { vault?: string; query: string }, ctx) {
-    const v = await showVault(args.vault, ctx);
+    const { vault, v } = await showVault(args.vault, ctx);
     vault.leftMode = 'search';
     vault.searchQuery = args.query;
     await vault.runSearch();
@@ -88,7 +96,7 @@ registerUiCommands('vault', {
   },
 
   async vault_write_note(args: { vault?: string; path: string; content: string }, ctx) {
-    const v = await showVault(args.vault, ctx);
+    const { vault, v } = await showVault(args.vault, ctx);
     const path = normPath(args.path);
     if (!/\.(md|markdown)$/i.test(path)) throw new UiCommandError('invalid_args', 'Only markdown notes (`.md`) can be written.');
     let exists = true;
@@ -146,13 +154,18 @@ registerUiCommands('vault', {
 });
 
 // `otto.ui_state` view: the vault, the open note and whether it's edited.
-registerUiState('vault', () => ({
-  vault: vault.current ? { id: vault.current.id, name: vault.current.name } : null,
-  view: vault.centerMode,
-  open_note: vault.notePath,
-  editing: vault.editing,
-  unsaved_changes: vault.dirty,
-  tabs: vault.tabs.map((t) => t.path),
-  left_panel: vault.leftMode,
-  search: vault.leftMode === 'search' ? vault.searchedQuery || null : null,
-}));
+// Off the Vault page (the port unbound) there is nothing open to report.
+registerUiState('vault', () => {
+  const vault = vaultPort.peek();
+  if (!vault) return { vault: null, view: null, open_note: null, editing: false, unsaved_changes: false, tabs: [], left_panel: null, search: null };
+  return {
+    vault: vault.current ? { id: vault.current.id, name: vault.current.name } : null,
+    view: vault.centerMode,
+    open_note: vault.notePath,
+    editing: vault.editing,
+    unsaved_changes: vault.dirty,
+    tabs: vault.tabs.map((t) => t.path),
+    left_panel: vault.leftMode,
+    search: vault.leftMode === 'search' ? vault.searchedQuery || null : null,
+  };
+});

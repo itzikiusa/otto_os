@@ -3055,7 +3055,7 @@ impl Driver for ClickhouseDriver {
         node: Option<&str>,
         format: ExportFormat,
         max_rows: Option<usize>,
-        w: Box<dyn std::io::Write + Send>,
+        w: crate::export::ExportWriter,
     ) -> Result<ExportCounts> {
         let sql = statement.trim();
         if sql.is_empty() {
@@ -3090,7 +3090,7 @@ impl ClickhouseDriver {
         active_db: Option<&str>,
         format: ExportFormat,
         max_rows: Option<usize>,
-        w: Box<dyn std::io::Write + Send>,
+        w: crate::export::ExportWriter,
     ) -> Result<ExportCounts> {
         use futures_util::StreamExt;
         let mut scoped = cfg.clone();
@@ -3129,6 +3129,7 @@ impl ClickhouseDriver {
                 .await
                 .map_err(types::upstream)??;
             sink = next_sink;
+            sink.pace().await.map_err(types::upstream)?;
             header = wrote_header;
             count += rows;
             if max_rows.is_some_and(|cap| count >= cap) {
@@ -3140,9 +3141,7 @@ impl ClickhouseDriver {
         if !max_rows.is_some_and(|cap| count >= cap) && client.is_closed() {
             return Err(native_closed_error());
         }
-        tokio::task::spawn_blocking(move || sink.finish().map_err(types::upstream))
-            .await
-            .map_err(types::upstream)?
+        sink.finish_paced().await.map_err(types::upstream)
     }
 
     /// Decode complete JSON row lines, retaining at most one incomplete line.
@@ -3154,7 +3153,7 @@ impl ClickhouseDriver {
         active_db: Option<&str>,
         format: ExportFormat,
         cap: usize,
-        w: Box<dyn std::io::Write + Send>,
+        w: crate::export::ExportWriter,
     ) -> Result<ExportCounts> {
         use futures_util::StreamExt as _;
         let id = new_query_id();
@@ -3222,6 +3221,7 @@ impl ClickhouseDriver {
                     }
                     Ok(true)
                 })?;
+                sink.pace().await.map_err(types::upstream)?;
                 if !keep_reading {
                     return Ok(());
                 }
@@ -3244,7 +3244,7 @@ impl ClickhouseDriver {
             conn.spawn_kill();
         }
         result?;
-        sink.finish().map_err(types::upstream)
+        sink.finish_paced().await.map_err(types::upstream)
     }
 
     /// The HTTP `FORMAT`-streaming export: issue `<sql> FORMAT <ch_format>` and
@@ -3259,7 +3259,7 @@ impl ClickhouseDriver {
         ch_format: &str,
         max_rows: Option<usize>,
         format: ExportFormat,
-        w: Box<dyn std::io::Write + Send>,
+        w: crate::export::ExportWriter,
     ) -> Result<ExportCounts> {
         use futures_util::StreamExt as _;
 
@@ -3281,8 +3281,10 @@ impl ClickhouseDriver {
                 sink.write_raw(bytes).map_err(types::upstream)?;
                 Ok(true)
             })?;
+            sink.pace().await.map_err(types::upstream)?;
         }
-        sink.finish()
+        sink.finish_paced()
+            .await
             .map_err(|e| otto_core::Error::Internal(format!("finish export file: {e}")))
     }
 }

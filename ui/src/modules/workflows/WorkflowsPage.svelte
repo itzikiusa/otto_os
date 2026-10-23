@@ -1,15 +1,11 @@
 <script lang="ts">
+  import { announceShown } from '../../lib/announce.svelte';
   import { rowMenu as rowMenuKeys } from '../../lib/rowMenu';
-  import type { ProductPublicationPreview } from '../product/types';
   import { toastError } from '../../lib/toastError';
   import { focusOnMount } from '../../lib/focusOnMount';
-  import { liveQuery } from '../../lib/live';
   // Workflows: build automations by *describing* them (agent mode) or by hand
   // on the canvas. Left = generate + list + running; center = node-graph editor + run.
   import { tick, untrack } from 'svelte';
-  import { renderMarkdownGfm } from '../../lib/md';
-  import ApprovalActions from '../../lib/components/ApprovalActions.svelte';
-  import ApprovalOutcome from '../../lib/components/ApprovalOutcome.svelte';
   import Icon, { asIcon } from '../../lib/components/Icon.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import Badge from '../../lib/components/Badge.svelte';
@@ -26,34 +22,32 @@
   import { initialSelection, rememberSelection } from '../../lib/lastSelection';
   import { effectiveRetry, updateRetry, clearRetry } from './retryPolicy';
   import WorkflowCanvas from './WorkflowCanvas.svelte';
-  import RunSteps from './RunSteps.svelte';
-  import RunAgents from './RunAgents.svelte';
-  import FileTree from '../panels/FileTree.svelte';
+  import RunMonitor from './RunMonitor.svelte';
+  import RunApprovals from './RunApprovals.svelte';
+  import RunContextSidebar from './RunContextSidebar.svelte';
+  import { RunSync } from './runSync.svelte';
   import TriggersPanel from './TriggersPanel.svelte';
   import NodeParams from './inspector/NodeParams.svelte';
   import { InspectorOptions } from './inspector/options.svelte';
   import { jsonValue, paramJson, withParam } from './inspector/util';
-  import { ui, WF_CTX_MIN, WF_CTX_MAX } from '../../lib/stores/ui.svelte';
+  import { ui } from '../../lib/stores/ui.svelte';
   import { startMouseDrag } from '../../lib/dragCursor';
   import { LIST_PANE, loadPaneWidth, paneResizer } from '../../lib/paneResizer';
-  import { onTabKey } from '../../lib/tabKeys';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
-  import { api, ApiError } from '../../lib/api/client';
-  import { browseRunContext, readRunContext, patchWorkflow, workflowProgress, workflowNodeDetail, listWorkflowVersions, restoreWorkflowVersion } from '../../lib/api/workflows';
-  import { applyLiveNode, mergeRunProgress, fmtStepMs, sharedNodeBodies } from './runProgress';
+  import { api } from '../../lib/api/client';
+  import { patchWorkflow, workflowProgress, workflowNodeDetail, listWorkflowVersions, restoreWorkflowVersion } from '../../lib/api/workflows';
+  import { fmtStepMs, sharedNodeBodies } from './runProgress';
   import RelTime from '../../lib/components/RelTime.svelte';
-  import { workflowRunBus } from '../../lib/events.svelte';
   import { workflowsPagePort } from '../../lib/uiCommands/workflows';
   import { router } from '../../lib/router.svelte';
   import { guardUnsaved } from '../../lib/leaveGuard';
   import { registry } from '../../lib/commands.svelte';
-  import { auth } from '../../lib/stores/auth.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
-  import { runContextPath } from './runContext';
-  import { findPlaceholder, resultDestinations, runInputExample, runInputSkeleton } from './runInput';
+  import { RunInputForm } from './runInputForm.svelte';
+  import RunInputPanel from './RunInputPanel.svelte';
   import type {
     Workflow,
     WorkflowGraph,
@@ -63,7 +57,6 @@
     WorkflowTemplate,
     WorkflowTrigger,
     WorkflowVersionSummary,
-    ReviewMode,
     RunWorkflowReq,
   } from '../../lib/api/types';
 
@@ -91,27 +84,20 @@
    *  on EVERY workflow and pointing the header's Cancel at whatever run was on
    *  screen. The header now follows the viewed run (`runActive`). */
   let running = $state(false);
-  let run = $state<WorkflowRun | null>(null);
+  // The run on screen and its live sync, approvals and final output
+  // (runSync.svelte.ts). The page assigns `mon.run`; reads use `run`.
+  const mon = new RunSync();
+  mon.track();
+  const run = $derived(mon.run);
   let runs = $state<Pick<WorkflowRun, 'id' | 'workflow_id' | 'status' | 'started_at' | 'rev'>[]>([]);
   let requestedRunId: string | null = null;
   let runsOpen = $state(false);
   // Manual-run input editor: where you provide repo_id / story_id / goals / msg
   // that the trigger emits to the graph.
-  let runInputOpen = $state(false);
-  let runInputText = $state('');
-  // Prompt box shown above the JSON textarea in the run popover — merged into
-  // the parsed input as `prompt` (non-empty only) on run.
-  let runPromptText = $state('');
-  // Per-run review-mode override, posted as `review_mode` only when set. Wins
-  // over every review_run node's own `params.mode` for this run.
-  let runReviewMode = $state<'' | ReviewMode>('');
   let paletteOpen = $state(false);
   let templatesOpen = $state(false);
   let triggersOpen = $state(false);
   let triggers = $state<WorkflowTrigger[]>([]);
-  let approving = $state(false);
-  // Which decision is in flight, so the busy label reads "Approving…" / "Denying…".
-  let approvingKind = $state<'approve' | 'deny'>('approve');
 
   // Instructions editor: standing free-text guidance every step follows,
   // distinct from `description`. Saved via an explicit action (like graph
@@ -119,15 +105,6 @@
   let instructionsOpen = $state(false);
   let wfInstructions = $state('');
   let savingInstructions = $state(false);
-
-  // Final-output panel: `<context_dir>/final-output.md`, fetched once per
-  // successful run id. `finalOutputRunId` doubles as the "already attempted"
-  // guard so a run with no deliverable doesn't get refetched forever.
-  let finalOutputRunId = $state<string | null>(null);
-  let finalOutputHtml = $state('');
-  let finalOutputAvailable = $state(false);
-  /** A failed read that isn't a plain "no deliverable" (404): shown inline with Retry. */
-  let finalOutputError = $state<{ runId: string; text: string } | null>(null);
 
   const runStates = $derived<Record<string, NodeRunState>>(
     Object.fromEntries((run?.nodes ?? []).map((n) => [n.node_id, n])),
@@ -205,231 +182,9 @@
     }
   });
 
-  // ── live run sync ──────────────────────────────────────────────────────────
-  // ONE path keeps the viewed run live, whatever started it. Updates are
-  // MERGED INTO the existing `run` object (never a wholesale replacement), so
-  // everything the user is looking at — an expanded step, the timeline
-  // selection, scroll positions — survives every tick. The run's monotonic
-  // `rev` guards against stale/out-of-order snapshots ever regressing the view.
-  //
-  // Sources, all funneled through applyRunSnapshot / the WS fast-path:
-  //   1. workflow_run_updated events carrying the changed node + a contiguous
-  //      rev → merged in place, no network at all.
-  //   2. Events with a rev gap / no node payload / terminal status → ONE
-  //      single-flight, rev-guarded GET of the full run.
-  //   3. A 2.5s fallback poll while the viewed run is non-terminal (missed
-  //      events, or no WS connection).
-
-  // Product approval previews are full node bodies; progress polling carries
-  // only summaries. Load exactly this pending gate/version before approving.
-  let approvalPreview = $state<ProductPublicationPreview | null>(null);
-  let approvalPreviewLoading = $state(false);
-  let approvalPreviewError = $state('');
-  let approvalPreviewReady = $state(false);
-  let approvalPreviewVersion = $state<string | null>(null);
-  let approvalPreviewSequence = 0;
-  let approvalPreviewAbort: AbortController | null = null;
-  const approvalNode = $derived(run?.nodes.find(node => node.node_id === run?.approval_node_id));
-  const approvalNeedsPreview = $derived(!!(approvalNode?.has_output || approvalNode?.output));
-  const approvalBody = $derived(approvalPreview?.kind === 'jira' && approvalPreview.request.reviewed_content.source_kind === 'confluence' && approvalPreview.request.reviewed_content.url
-    ? `> RFC: ${approvalPreview.request.reviewed_content.url}\n\n${approvalPreview.body_md}` : (approvalPreview?.body_md ?? ''));
-
-  async function loadApprovalPreview(runId: string, node: NodeRunState): Promise<void> {
-    const sequence = ++approvalPreviewSequence;
-    approvalPreviewAbort?.abort();
-    const ctl = new AbortController(); approvalPreviewAbort = ctl;
-    approvalPreview = null; approvalPreviewError = ''; approvalPreviewReady = false; approvalPreviewVersion = null; approvalPreviewLoading = true;
-    const current = () => !ctl.signal.aborted && sequence === approvalPreviewSequence && run?.id === runId && run.waiting_approval && run.approval_node_id === node.node_id;
-    try {
-      const result = await workflowNodeDetail(runId, node.node_id, ctl.signal);
-      if (!current()) return;
-      if (node.detail_version && result.detail_version !== node.detail_version) throw new Error('The approval preview changed. Retry to load the current review.');
-      const output = result.body.output as { publication_preview?: ProductPublicationPreview } | null;
-      const preview = output?.publication_preview;
-      if (preview && ((preview.kind !== 'jira' && preview.kind !== 'rfc') || typeof preview.body_md !== 'string' || !preview.request?.reviewed_content)) throw new Error('The publication preview is incomplete. Run a new preview before approving.');
-      approvalPreview = preview ?? null; approvalPreviewVersion = result.detail_version; approvalPreviewReady = true;
-    } catch (error) {
-      if (current()) approvalPreviewError = loadErrorText(error);
-    } finally { if (current()) approvalPreviewLoading = false; }
-  }
-
-  $effect(() => {
-    const id = run?.id, waiting = run?.waiting_approval, node = approvalNode;
-    void node?.detail_version;
-    if (id && waiting && node && approvalNeedsPreview) untrack(() => void loadApprovalPreview(id, node));
-    else untrack(() => { approvalPreview = null; approvalPreviewReady = false; approvalPreviewVersion = null; approvalPreviewError = ''; approvalPreviewLoading = false; });
-    return () => { approvalPreviewAbort?.abort(); };
-  });
-
   let destroyed = false;
   $effect(() => () => {
     destroyed = true;
-  });
-
-  /** Cheap change signature over the fields a node update can touch. Object
-   *  fields (output/logs/sessions) are only reassigned when it changes, so
-   *  unchanged step subtrees don't re-render on every merge. */
-  function applyRunSnapshot(nr: WorkflowRun): void {
-    if (run) mergeRunProgress(run,nr);
-  }
-
-  // Single-flight refetch: at most one GET in the air; a request that arrives
-  // while one is flying coalesces into one trailing fetch.
-  let runRead: AbortController | null = null;
-  /** The run `runRead` is fetching. A queued refetch only coalesces into a
-   *  read for the SAME run: Start's catch-up refetch used to be queued behind
-   *  the PREVIOUS run's read, which the run switch then aborted — dropping the
-   *  catch-up and leaving the new run on "Queued" for up to 15 s. */
-  let runReadFor: string | null = null;
-  let runRefetchQueued = false;
-  async function refetchRun(runId: string): Promise<void> {
-    if (destroyed || document.hidden || run?.id !== runId) return;
-    if (runRead && runReadFor === runId) {runRefetchQueued = true; return;}
-    runRead?.abort();
-    const ac = new AbortController();
-    runRead = ac;
-    runReadFor = runId;
-    try {
-      do {
-        runRefetchQueued = false;
-        const result = await workflowProgress(runId,run?.summary ? run.rev : undefined,ac.signal);
-        if (ac.signal.aborted || document.hidden || run?.id !== runId) return;
-        if (result.changed) applyRunSnapshot(result.run);
-      } while (runRefetchQueued && run?.id === runId && !destroyed);
-    } catch { /* The visible fallback poll heals transient errors. */ }
-    finally {if (runRead === ac) {runRead = null; runReadFor = null;}}
-  }
-  $effect(() => {
-    const id = run?.id;
-    // Abort only THIS run's read: by the time the switch's cleanup runs,
-    // `startRun` has already made `runRead` the NEW run's catch-up — aborting
-    // it left a re-run on "Queued" until the 15 s poll (S17-301).
-    return () => {if (id && runReadFor === id) {runRead?.abort(); runRead = null; runReadFor = null;}};
-  });
-  $effect(() => {
-    const visibility = () => {
-      if (document.hidden) {runRead?.abort();runRead = null;runReadFor = null;}
-      else if (run) void refetchRun(run.id);
-    };
-    document.addEventListener('visibilitychange',visibility);
-    return () => document.removeEventListener('visibilitychange',visibility);
-  });
-
-  // (1) WS fast-path: apply the event to the viewed run without refetching
-  // when it carries the changed node and the very next rev.
-  $effect(() => {
-    const _tick = workflowRunBus.tick; // dependency: re-run on each WS event
-    void _tick;
-    untrack(() => {
-      const cur = run;
-      if (!cur || workflowRunBus.runId !== cur.id) return;
-      const evRev = workflowRunBus.rev;
-      const curRev = cur.rev ?? 0;
-      if (evRev > 0 && evRev <= curRev) return; // already have this state
-      // Perf W5: the event carries the node's summary (the exact `/progress`
-      // node shape, with its `detail_version`) — apply a contiguous one in
-      // place. A gap, a status change, a new node or a checkpointed run still
-      // polls the small projection.
-      if (applyLiveNode(cur, {
-        rev: evRev,
-        status: workflowRunBus.status,
-        node: workflowRunBus.node,
-        waitingApproval: workflowRunBus.waitingApproval,
-      })) return;
-      void refetchRun(cur.id);
-    });
-  });
-
-  // (2) Guaranteed: a safety poll while the viewed run is non-terminal, so
-  // the view still converges with no WS connection at all — 2.5 s while the
-  // event socket is down, 15 s while `workflow_run_updated` flows (and a
-  // refetch after a reconnect/lag resync). Shared chain: no overlap, paused
-  // while hidden.
-  $effect(() => {
-    const cur = run;
-    if (!cur) return;
-    if (cur.status !== 'pending' && cur.status !== 'running') return;
-    const id = cur.id;
-    const p = liveQuery({ run: () => refetchRun(id), on: [], fallbackMs: 2500, safetyMs: 15_000, immediate: false });
-    return () => p.stop();
-  });
-
-  // ── final-output panel ──────────────────────────────────────────────────
-  // On a successful run, `<context_dir>/final-output.md` holds the run's
-  // deliverable (see workflow_context.rs's write_final_output). Rendered
-  // into a sandboxed iframe (srcdoc, no scripts run), never raw HTML in the
-  // page; the shared renderer also sanitizes it.
-  // The srcdoc is themed from the app's tokens (resolved values copied in,
-  // like PluginFrame's `otto:init` theme) so it reads in light AND dark; it
-  // re-renders when the theme/scheme/accent changes (`finalOutputSrcdoc`).
-  const FINAL_OUTPUT_CSS = `
-    body { font: 14px/1.6 var(--font-ui); margin: 16px; color: var(--text); background: transparent; }
-    h1,h2,h3 { line-height: 1.25; } h1,h2 { border-bottom: 1px solid var(--border); padding-bottom: .2em; }
-    a { color: var(--accent-text); } code { background: var(--surface-2); padding: .15em .35em; border-radius: 4px; font-family: var(--font-mono); }
-    pre { background: var(--surface-2); padding: 12px; border-radius: 6px; overflow: auto; } pre code { background: none; padding: 0; }
-    table { border-collapse: collapse; } th,td { border: 1px solid var(--border); padding: 4px 8px; }
-    blockquote { border-inline-start: 3px solid var(--border-strong); margin: 0; padding-inline-start: 12px; color: var(--text-dim); }
-    img { max-width: 100%; }
-  `;
-  const FINAL_OUTPUT_TOKENS = ['--text', '--text-dim', '--border', '--border-strong', '--surface-2', '--accent-text', '--font-ui', '--font-mono'];
-  /** Markdown → HTML body (stored); the themed document is `finalOutputSrcdoc`. */
-  /** Through the shared GFM renderer (lib/md): sanitized on top of the
-   *  sandbox, and it never throws (a parse failure falls back to the escaped
-   *  tiny renderer). */
-  function renderFinalOutputSrcdoc(md: string): string {
-    // `breaks`: final-output.md is an agent report written line by line
-    // ("Status: done" / "Files: 3" / "PR: …"), not reflowed prose.
-    return renderMarkdownGfm(md, { breaks: true });
-  }
-  function themedFinalOutput(body: string, scheme: 'light' | 'dark'): string {
-    const cs = getComputedStyle(document.documentElement);
-    const vars = FINAL_OUTPUT_TOKENS.map((v) => `${v}: ${cs.getPropertyValue(v).trim()};`).join(' ');
-    return `<!doctype html><html><head><meta charset="utf-8"><style>
-  :root { color-scheme: ${scheme}; ${vars} }${FINAL_OUTPUT_CSS}</style></head><body>${body}</body></html>`;
-  }
-  const finalOutputSrcdoc = $derived.by(() => {
-    // Theme inputs are read so the frame re-themes when they change.
-    void ui.theme;
-    void ui.accent;
-    return finalOutputHtml ? themedFinalOutput(finalOutputHtml, ui.resolvedScheme) : '';
-  });
-  /** The Context panel's FileTree source: the run-scoped context routes. */
-  function contextFs(runId: string, contextDir: string) {
-    return {
-      lister: (path: string, signal?: AbortSignal) => browseRunContext(runId, runContextPath(contextDir, path), signal),
-      reader: (path: string, signal?: AbortSignal) => readRunContext(runId, runContextPath(contextDir, path), signal),
-    };
-  }
-  async function loadFinalOutput(runId: string): Promise<void> {
-    finalOutputRunId = runId; // mark attempted up front — no duplicate fetches
-    finalOutputAvailable = false;
-    finalOutputHtml = '';
-    finalOutputError = null;
-    try {
-      // The run-scoped route (ws Viewer), not /fs/read: that refuses the Otto
-      // data dir — where every run's context lives — to everyone but root.
-      const data = await readRunContext(runId, 'final-output.md');
-      if (run?.id !== runId) return; // the view moved on while this was in flight
-      finalOutputHtml = renderFinalOutputSrcdoc(data.content);
-      finalOutputAvailable = true;
-    } catch (e) {
-      if (run?.id !== runId) return;
-      // No final-output.md (404) is normal: the panel just stays hidden.
-      // Anything else (403, a timeout, a restarting daemon) says so with Retry,
-      // and forgets the attempt so the next run update tries again.
-      if (e instanceof ApiError && e.status === 404) return;
-      finalOutputError = { runId, text: loadErrorText(e) };
-      finalOutputRunId = null;
-    }
-  }
-  $effect(() => {
-    const cur = run;
-    if (!cur || cur.status !== 'success' || !cur.context_dir) return;
-    const runId = cur.id;
-    untrack(() => {
-      if (finalOutputRunId === runId) return;
-      void loadFinalOutput(runId);
-    });
   });
 
   /** Open a run from the "Running" sidebar list: ensure its workflow is open,
@@ -447,7 +202,7 @@
       }
       const result = await workflowProgress(runId);
       if (requestedRunId !== runId || current?.id !== workflowId || destroyed) return;
-      if (result.changed) run = result.run;
+      if (result.changed) mon.run = result.run;
       runsOpen = false;
     } catch (e) {toastError('Couldn’t open the run', e);}
   }
@@ -529,7 +284,7 @@
       ++versionsGeneration;
     graph = { nodes: [], edges: [] };
     selectedId = null;
-    run = null;
+    mon.run = null;
     dirty = false;
   }
 
@@ -655,7 +410,7 @@
         ++viewGeneration;
         ++versionsGeneration;
         // Another workspace's run must not stay open (its liveQuery polling).
-        run = null;
+        mon.run = null;
         runs = [];
         graph = { nodes: [], edges: [] };
       }
@@ -707,7 +462,7 @@
     graph = g && g.nodes ? g : { nodes: [], edges: [] };
     selectedId = null;
     selectedEdgeId = null;
-    run = null;
+    mon.run = null;
     runsOpen = false;
     versionsOpen = false;
     versions = [];
@@ -718,10 +473,7 @@
     runs = [];
     runsError = null;
     wfInstructions = wf.instructions ?? '';
-    finalOutputRunId = null;
-    finalOutputHtml = '';
-    finalOutputAvailable = false;
-    finalOutputError = null;
+    mon.resetFinalOutput();
     void loadRuns();
     dirty = false;
   }
@@ -901,7 +653,7 @@
           ++viewGeneration;
           ++versionsGeneration;
           // The deleted workflow's run view (and its live poll) goes too.
-          run = null;
+          mon.run = null;
           runs = [];
           graph = { nodes: [], edges: [] };
         }
@@ -995,55 +747,6 @@
     dirty = true;
   }
 
-  /** Await a run's terminal status WITHOUT driving the view: while the run is
-   *  the one on screen, its live-merged state is authoritative (no network);
-   *  once the user switches the view elsewhere, fall back to a cheap poll.
-   *  This is what lets a user inspect another run while one is in flight —
-   *  nothing here ever writes `run`. */
-  async function waitRunTerminal(runId: string): Promise<{ status: string; error?: string | null }> {
-    // Off-screen: the run's WS events (workflowRunBus) say when it settles; a
-    // rev-guarded `/progress?after_rev=` is only a slow safety net (every
-    // OFFSCREEN_POLL_MS, skipped while the window is hidden). It used to GET
-    // the full progress every second for the whole run — ~3.6k requests/hour.
-    const OFFSCREEN_POLL_MS = 15_000;
-    let lastRev: number | undefined;
-    let lastStatus = 'running';
-    let lastError: string | null | undefined = null;
-    let nextFetch = 0;
-    const fetchProgress = async () => {
-      try {
-        const g = await workflowProgress(runId, lastRev);
-        if (g.changed) {
-          lastRev = g.rev;
-          lastStatus = g.run.status;
-          lastError = g.run.error;
-        }
-      } catch {
-        /* transient fetch error — keep waiting */
-      }
-      nextFetch = Date.now() + OFFSCREEN_POLL_MS;
-    };
-    for (;;) {
-      if (destroyed) return { status: 'canceled', error: null };
-      const cur = untrack(() => run);
-      let status: string;
-      let error: string | null | undefined;
-      if (cur?.id === runId) {
-        status = cur.status;
-        error = cur.error;
-      } else {
-        const bus = untrack(() => ({ id: workflowRunBus.runId, status: workflowRunBus.status }));
-        const busSettled = bus.id === runId && bus.status !== '' && bus.status !== 'pending' && bus.status !== 'running';
-        // Settled per the bus → one read for the final status + error.
-        if (busSettled || (!document.hidden && Date.now() >= nextFetch)) await fetchProgress();
-        status = busSettled && (lastStatus === 'pending' || lastStatus === 'running') ? bus.status : lastStatus;
-        error = lastError;
-      }
-      if (status !== 'pending' && status !== 'running') return { status, error };
-      await new Promise((res) => setTimeout(res, 1000));
-    }
-  }
-
   let validationIssues = $state<import('../../lib/api/types').WorkflowValidationIssue[]>([]);
   let validating = $state(false);
   async function validateGraph(): Promise<boolean> {
@@ -1082,13 +785,13 @@
       const r = await api.post<WorkflowRun>(`/workflows/${workflowId}/run`, body);
       if (ownsView()) {
         requestedRunId = r.id;
-        run = r;
+        mon.run = r;
         // The engine starts the run before this POST answers, so its first
         // workflow_run_updated events can reach the page while `run` is still
         // unset — the fast path drops them, and the view would sit on this
         // creation snapshot ("Queued") until the run's NEXT event, possibly a
         // whole step later. Catch up once (rev-guarded, single-flight).
-        if (r.status === 'pending' || r.status === 'running') void refetchRun(r.id);
+        if (r.status === 'pending' || r.status === 'running') void mon.refetchRun(r.id);
       }
       return r;
     } catch (e) {
@@ -1101,7 +804,7 @@
 
   async function followRun(r: WorkflowRun): Promise<void> {
     try {
-      const done = await waitRunTerminal(r.id);
+      const done = await mon.waitRunTerminal(r.id);
       if (destroyed) return;
       if (done.status === 'success') toasts.success('Run complete');
       else if (done.status === 'canceled') toasts.info('Run canceled');
@@ -1127,7 +830,7 @@
       { id: 'workflows.new', title: 'New workflow…', group: 'Workflows', keywords: 'create describe generate automation', run: () => void focusGenerator() },
       { id: 'workflows.blank', title: 'New blank workflow', group: 'Workflows', keywords: 'create empty canvas', run: () => void createBlank() },
       ...(open && !live
-        ? [{ id: 'workflows.run', title: 'Run workflow…', group: 'Workflows', keywords: 'start execute input', run: () => { runInputOpen = true; } }]
+        ? [{ id: 'workflows.run', title: 'Run workflow…', group: 'Workflows', keywords: 'start execute input', run: () => { runForm.open = true; } }]
         : []),
       ...(open && live
         ? [{ id: 'workflows.stop', title: 'Stop run…', group: 'Workflows', keywords: 'cancel halt', run: () => void stop() }]
@@ -1173,78 +876,19 @@
     return s;
   }
 
-  // The run-input template is guidance only (W2): the full annotated example
-  // is the textarea placeholder; "Suggest" inserts just the `<…>` slots this
-  // graph needs. Placeholder values are rejected before the run is sent.
-  const runInputPlaceholder = $derived(runInputExample(collectKinds()));
-  const runDestinations = $derived.by(() => {
-    try {
-      return resultDestinations(JSON.parse(runInputText));
-    } catch {
-      return [];
-    }
-  });
-
-  // Invalid run-input JSON is a field error: said inline under the field (the
-  // panel opens if a "Run from here" found it), never as a toast.
-  let runInputError = $state('');
-  $effect(() => {
-    void runInputText;
-    runInputError = '';
-  });
-  function parseRunInput(): Record<string, unknown> | undefined | null {
-    const t = runInputText.trim();
-    if (!t) return undefined;
-    try {
-      const parsed = JSON.parse(t);
-      const slot = findPlaceholder(parsed);
-      if (slot) {
-        runInputError = `Replace the placeholder in \`${slot}\` with a real value, or remove the key.`;
-        runInputOpen = true;
-        return null;
-      }
-      return parsed;
-    } catch (e) {
-      runInputError = `Run input isn’t valid JSON (${e instanceof Error ? e.message : 'parse error'}). Fix it, or clear the field to run with no input.`;
-      runInputOpen = true;
-      return null; // signal: invalid
-    }
-  }
-
-  function openRunInput(): void {
-    runInputOpen = !runInputOpen;
-  }
-
-  /** Merge the Prompt box into the parsed run input as `prompt`, only when
-   *  non-empty — leaves `input` untouched otherwise (including `undefined`,
-   *  which still means "run with no input"). */
-  function mergeRunPrompt(input: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
-    const p = runPromptText.trim();
-    if (!p) return input;
-    return { ...(input ?? {}), prompt: p };
-  }
+  // Run… panel state (prompt, JSON input, review mode): RunInputForm.
+  const runForm = new RunInputForm(collectKinds);
 
   async function confirmRun(): Promise<void> {
-    const input = parseRunInput();
-    if (input === null) return; // invalid JSON; shown under the field
-    const merged = mergeRunPrompt(input);
-    runInputOpen = false;
-    await execRun({
-      ...(merged !== undefined ? { input: merged } : {}),
-      ...(runReviewMode ? { review_mode: runReviewMode } : {}),
-    });
+    const body = runForm.request();
+    if (!body) return; // invalid JSON; shown under the field
+    runForm.open = false;
+    await execRun(body);
   }
 
   const runFrom = (nodeId: string, only: boolean): Promise<void> => {
-    const input = parseRunInput();
-    if (input === null) return Promise.resolve();
-    const merged = mergeRunPrompt(input);
-    return execRun({
-      start_node: nodeId,
-      only_node: only,
-      ...(merged !== undefined ? { input: merged } : {}),
-      ...(runReviewMode ? { review_mode: runReviewMode } : {}),
-    });
+    const body = runForm.request({ start_node: nodeId, only_node: only });
+    return body ? execRun(body) : Promise.resolve();
   };
 
   // Re-flow the graph into a few readable rows (topological order, snaking
@@ -1384,11 +1028,6 @@
     return c;
   });
 
-  // Total agent sessions the current run spawned — the Agents-tab badge.
-  const runSessionCount = $derived(
-    (run?.nodes ?? []).reduce((a, n) => a + (n.sessions?.length ?? 0), 0),
-  );
-
   // Open a step's session INLINE in the WF page's Agents tab (never navigate to
   // the global Agents panel). Ensures the sidebar is open + on the Agents tab,
   // then focuses the session (reset-then-set so re-clicking the same id retriggers).
@@ -1412,15 +1051,6 @@
     }
   });
 
-  // Context-files sidebar width: drag its left edge (anchored right → dragging
-  // left widens it). (R1)
-  function startCtxResize(e: MouseEvent): void {
-    e.preventDefault();
-    const startX = e.clientX;
-    const startW = ui.wfCtxWidth;
-    startMouseDrag(e, { onMove: (ev) => ui.setWfCtxWidth(startW + (startX - ev.clientX)) });
-  }
-
   // Runs popover load state: a failed load says so (with Retry) instead of
   // showing a stale or empty "No runs yet" list.
   let runsLoading = $state(false);
@@ -1442,64 +1072,13 @@
     }
   }
 
-  async function approveRun(approved: boolean, note?: string | null): Promise<void> {
-    if (!run?.waiting_approval || !run.approval_node_id || approving) return;
-    if (approvalNeedsPreview && (!approvalPreviewReady || !approvalPreviewVersion || approvalPreviewLoading || approvalPreviewError)) return;
-    const runId = run.id, nodeId = run.approval_node_id;
-    const reviewedVersion = approvalNeedsPreview ? approvalPreviewVersion : null;
-    approving = true;
-    approvingKind = approved ? 'approve' : 'deny';
-    try {
-      await api.post(`/workflow-runs/${runId}/approve`, {
-        node_id: nodeId,
-        ...(reviewedVersion ? { expected_detail_version: reviewedVersion } : {}),
-        approved,
-        ...(note ? { note } : {}),
-      });
-      toasts.success(approved ? 'Approved — run resuming' : 'Denied — the run will stop with an error');
-    } catch (e) {
-      if (reviewedVersion && run?.id === runId && run.approval_node_id === nodeId && (e as {status?: number})?.status === 409) {
-        approvalPreviewReady = false; approvalPreviewVersion = null;
-        approvalPreviewError = 'The publication preview changed. Select Retry preview and review it again before deciding.';
-        void refetchRun(runId);
-      }
-      toastError('Couldn’t record the approval', e);
-    } finally {
-      approving = false;
-    }
-  }
-
-  /** "“Title”" for a parent page picked by name in the publish node (PC-9 keeps
-   *  its title beside the id), else "page {id}". */
-  function parentPageLabel(parentId: string): string {
-    const n = graph.nodes.find((x) => x.kind === 'product_publish' && (x.params as { parent_id?: unknown } | null)?.parent_id === parentId);
-    const t = (n?.params as { parent_title?: unknown } | null)?.parent_title;
-    return typeof t === 'string' && t ? `“${t}”` : `page ${parentId}`;
-  }
   function nodeName(id: string): string {
     const n = graph.nodes.find((x) => x.id === id);
     return n?.name || n?.kind || id;
   }
-  /** What a paused run's approval gates: the step(s) that fed it (whose work
-   *  is being approved), the node's own prompt, and the step(s) an approval
-   *  lets run next. */
-  function approvalGate(nodeId: string): { after: string[]; ask: string; next: string[] } {
-    const params = graph.nodes.find((n) => n.id === nodeId)?.params as { prompt?: unknown } | null | undefined;
-    return {
-      after: graph.edges.filter((e) => e.target === nodeId).map((e) => nodeName(e.source)),
-      ask: typeof params?.prompt === 'string' ? params.prompt.trim() : '',
-      next: graph.edges.filter((e) => e.source === nodeId).map((e) => nodeName(e.target)),
-    };
-  }
   // The node forms' picker lists (repos, swarms, connections, …), fetched on
   // demand once per workspace / key for the life of the page.
   const pickers = new InspectorOptions();
-  /** "you" for the signed-in approver, a name as given, nothing for a bare id. */
-  function approverLabel(by: string | null | undefined): string | null {
-    if (!by) return null;
-    if (by === auth.me?.id) return 'you';
-    return /^[0-9A-HJKMNP-TV-Z]{26}$/i.test(by) ? null : by;
-  }
   const fmtMs = fmtStepMs;
 
   function onParam(field: string, value: unknown): void {
@@ -1777,12 +1356,12 @@
       {:else}
         <button
           class="btn small"
-          class:primary={!runInputOpen}
-          class:active={runInputOpen}
-          aria-pressed={runInputOpen}
-          onclick={openRunInput}
+          class:primary={!runForm.open}
+          class:active={runForm.open}
+          aria-pressed={runForm.open}
+          onclick={() => (runForm.open = !runForm.open)}
           title="Run — set the input (repo_id / story_id / goals / msg) the trigger emits"
-          aria-expanded={runInputOpen}
+          aria-expanded={runForm.open}
         >
           <Icon name="play" size={12} /> Run…
         </button>
@@ -1925,120 +1504,16 @@
         </div>
       {/if}
 
-      <!-- Manual-run input editor: this is WHERE you provide the run input the
-           trigger emits (repo_id, story_id, goals, msg, jira_ticket, …). -->
-      {#if runInputOpen}
-        <div class="run-input">
-          <div class="ri-head">
-            <strong>Prompt</strong>
-            <span class="ri-hint">What you want done this run — merged into the JSON below as `prompt` (optional).</span>
-          </div>
-          <textarea dir="auto" aria-label="Run prompt"
-            class="ri-prompt"
-            rows="3"
-            bind:value={runPromptText}
-            placeholder="What you want done — instructions for the agents."
-          ></textarea>
-          <div class="ri-head">
-            <strong>Run input</strong>
-            <span class="ri-hint">JSON the Start trigger emits to the graph — fill in repo_id / story_id / goals as needed. Leave empty to run with no input.</span>
-            <button class="btn small ghost" onclick={() => { runInputText = runInputSkeleton(collectKinds()); }} title="Insert the keys this workflow needs, as placeholders to replace">Suggest</button>
-          </div>
-          <textarea dir="ltr"
-            class="ri-text mono"
-            rows="8"
-            bind:value={runInputText}
-            spellcheck="false"
-            aria-label="Run input (JSON)"
-            aria-invalid={runInputError ? 'true' : undefined}
-            aria-describedby={runInputError ? 'wf-run-input-err' : undefined}
-            placeholder={runInputPlaceholder}
-          ></textarea>
-          {#if runInputError}<p class="ri-err" id="wf-run-input-err" role="alert">{runInputError}</p>{/if}
-          <div class="ri-head">
-            <strong>Review mode</strong>
-            <span class="ri-hint">Overrides the execution mode of every review step in this run, including steps that set their own.</span>
-          </div>
-          <select
-            class="ri-select"
-            data-testid="run-review-mode"
-            bind:value={runReviewMode}
-            title="Overrides the execution mode of every review step in this run, including steps that set their own."
-          >
-            <option value="">Workflow default</option>
-            <option value="fan_out">Fan-out</option>
-            <option value="orchestrator">Orchestrator</option>
-          </select>
-          {#if runDestinations.length}
-            <p class="ri-dest" data-testid="run-result-destination">
-              <Icon name="send" size={12} /> Results will be posted to {runDestinations.join(' and ')}.
-            </p>
-          {/if}
-          <div class="ri-actions">
-            <button class="btn small" onclick={() => (runInputOpen = false)}>Cancel</button>
-            <button class="btn primary small" disabled={running} onclick={confirmRun}>
-              <Icon name="play" size={12} /> {running ? 'Starting…' : 'Run'}
-            </button>
-          </div>
-        </div>
+      <!-- Manual-run input editor (RunInputPanel). -->
+      {#if runForm.open}
+        <RunInputPanel form={runForm} {running} onrun={() => void confirmRun()} />
       {/if}
 
-      <!-- Human-approval banner: shown when a run is paused at a human_approval node -->
-      {#if run && (run.resume_attempts ?? 0) > 0}
-        <div class="resumed-banner" title="A daemon restart interrupted this run; it picked up from the step it was on">
-          <Icon name="refresh" size={13} />
-          <span>Resumed after a daemon restart (attempt {run.resume_attempts})</span>
-        </div>
-      {/if}
-
-      {#if run?.waiting_approval && run.approval_node_id}
-        {@const gate = approvalGate(run.approval_node_id)}
-        {#if approvalNeedsPreview}
-          <section aria-label="Publication review">
-            {#if approvalPreviewLoading}<LoadState what="the content and destination for review" variant="compact" loading empty />
-            {:else if approvalPreviewError}
-              <p role="alert">{approvalPreviewError}</p>
-              <button class="btn small" onclick={() => { if (run && approvalNode) void loadApprovalPreview(run.id, approvalNode); }}>Retry preview</button>
-            {:else if approvalPreview}
-              <h3>{approvalPreview.kind === 'rfc' ? (approvalPreview.request.title ?? approvalPreview.request.reviewed_content.title) : approvalPreview.request.reviewed_content.title}</h3>
-              <p>Publish via {approvalPreview.account_label} ({approvalPreview.account_url}).
-                {#if approvalPreview.kind === 'jira'}Create {approvalPreview.request.issue_type} in project {approvalPreview.request.project_key}; visible to people with access to that project.
-                {:else}Create a page in space {approvalPreview.request.space_key}{approvalPreview.request.parent_id ? ` under ${parentPageLabel(approvalPreview.request.parent_id)}` : ''}; visible to people with access to that space.{/if}
-              </p>
-              <textarea dir="auto" class="np-prompt" aria-label="Full publication content" rows="12" readonly value={approvalBody}></textarea>
-            {/if}
-          </section>
-        {/if}
-        <div class="approval-banner" role="group" aria-label="Approval needed">
-          <Icon name="userCheck" size={14} />
-          <span>
-            Run paused at <strong title={run.approval_node_id}>{nodeName(run.approval_node_id)}</strong>{#if gate.after.length > 0}, after <strong>{gate.after.join(', ')}</strong>{/if} — waiting for your approval
-            {#if gate.ask}<span class="approval-ask">“{gate.ask}”</span>{/if}
-            <span class="approval-sub">Run started <RelTime iso={run.started_at} /> · approving runs {gate.next.length > 0 ? gate.next.join(', ') : 'the rest of the run'}; denying stops the run with an error.</span>
-          </span>
-          <ApprovalActions
-            disabled={approvalNeedsPreview && (!approvalPreviewReady || approvalPreviewLoading || !!approvalPreviewError)}
-            disabledReason="Load and review the publication preview before approving."
-            busy={approving ? approvingKind : null}
-            denyTarget={`the run at ${nodeName(run.approval_node_id)}`}
-            denyTitle="Deny approval"
-            onapprove={() => approveRun(true)}
-            ondeny={(reason) => approveRun(false, reason)}
-          />
-        </div>
-      {:else if run?.approved_at && !run.waiting_approval}
-        <div class="approval-outcome">
-          <ApprovalOutcome
-            outcome={run.approved_by ? 'approved' : 'denied'}
-            by={approverLabel(run.approved_by)}
-            at={run.approved_at}
-            note={run.approval_note && run.approval_note !== 'rejected' ? run.approval_note : null}
-          />
-        </div>
-      {/if}
+      <!-- The run's approval gate (RunApprovals): resumed note, preview, Approve / Deny. -->
+      <RunApprovals {mon} {graph} {nodeName} />
 
       {#if validationIssues.length}
-        <div class="preflight" role="alert"><strong>Resolve these issues before running</strong>
+        <div class="preflight" use:announceShown={{ text: `Resolve these issues before running: ${validationIssues.map((i) => i.message).join('; ')}`, assertive: true }}><strong>Resolve these issues before running</strong>
           {#each validationIssues as issue}
             <button class="btn ghost small" onclick={() => { selectedId = issue.node_id; selectedEdgeId = issue.edge_id; }}>{issue.node_id ? nodeName(issue.node_id) : issue.edge_id ? 'Connection' : 'Graph'}: {issue.message}</button>
           {/each}
@@ -2181,82 +1656,8 @@
               </button>
             </div>
           {/if}
-          {#if run}
-            <!-- Run bar: live status + Stop (R7) + maximize/zoom (R6). -->
-            <div class="insp-bar">
-              <span class="tl-label"><StatusBadge status={runStatus(run.status)} testid="run-status" /></span>
-              <span class="grow"></span>
-              {#if runActive}
-                <button
-                  class="btn small danger"
-                  data-testid="run-cancel"
-                  onclick={stop}
-                  title="Stop this run (finishes the current step, then halts)"
-                >
-                  <Icon name="stop" size={12} /> Stop run…
-                </button>
-              {/if}
-              <button
-                class="icon-btn"
-                data-testid="run-detail-max"
-                onclick={() => (runDetailMax = !runDetailMax)}
-                aria-pressed={runDetailMax}
-                aria-label="Maximize run detail"
-                title={runDetailMax ? 'Restore run-detail height' : 'Maximize run detail'}
-              >
-                <Icon name={runDetailMax ? 'minimize' : 'maximize'} size={13} />
-              </button>
-            </div>
-            <!-- The run-level reason (an invalid graph, an exhausted restart
-                 resume, a queued run that couldn't start) often has no step
-                 error to show — without this a failed run said only "Failed". -->
-            {#if run.status === 'error' && run.error}
-              <p class="run-error" role="alert" data-testid="run-error"><Icon name="warning" size={12} /> {run.error}</p>
-            {/if}
-            <div class="timeline">
-              {#each run.nodes as ns (ns.node_id)}
-                <button
-                  class="tl-step"
-                  class:active={selectedId === ns.node_id}
-                  data-status={ns.status}
-                  onclick={() => (selectedId = ns.node_id)}
-                >
-                  <span class="dot {dotKey(ns.status)}" role="img" aria-label={runStatusLabel(ns.status)}></span>
-                  <span class="tl-name">{nodeName(ns.node_id)}</span>
-                  {#if ns.duration_ms != null}<span class="tl-ms">{fmtMs(ns.duration_ms)}</span>{/if}
-                </button>
-              {/each}
-            </div>
-            <div class="run-detail"><RunSteps {run} nodeName={(id) => nodeName(id)} onOpenSession={openSessionInline} onRunUpdated={applyRunSnapshot} onRefresh={() => { if (run) void refetchRun(run.id); }} /></div>
-            {#if run.status === 'success' && run.context_dir && finalOutputAvailable && finalOutputRunId === run.id && !viewport.isDesktop}
-              <!-- Mobile/tablet: the run's deliverable, above the context-file tree
-                   below. On desktop this moves into the Context-files sidebar. -->
-              <details open class="final-output">
-                <summary>
-                  <Icon name="check" size={13} />
-                  <span>Final output</span>
-                </summary>
-                <iframe class="final-output-frame" title="Final output" sandbox="allow-same-origin" srcdoc={finalOutputSrcdoc}></iframe>
-              </details>
-            {:else if finalOutputError?.runId === run.id && !viewport.isDesktop}
-              {@const runId = run.id}
-              <LoadState what="the final output" variant="compact" error={finalOutputError.text} empty onretry={() => void loadFinalOutput(runId)} />
-            {/if}
-            {#if run.context_dir && !viewport.isDesktop}
-              <!-- Mobile/tablet: the run's context files inline (instruction brief,
-                   repos.json, per-step handoffs). On desktop these move to the
-                   full-height Context-files sidebar (see below) so they get real
-                   room — same browsable tree + viewer the agent Files panel uses. -->
-              <details class="ctx-files">
-                <summary>
-                  <Icon name="folder" size={13} />
-                  <span>Context files</span>
-                  <code class="dim">{run.context_dir}</code>
-                </summary>
-                <div class="ctx-files-tree"><FileTree root={run.context_dir} {...contextFs(run.id, run.context_dir)} /></div>
-              </details>
-            {/if}
-          {/if}
+          <!-- The run on screen: run bar, timeline, steps (RunMonitor). -->
+          <RunMonitor {mon} {nodeName} bind:selectedId bind:runDetailMax onstop={() => void stop()} onOpenSession={openSessionInline} />
 
           {#if selectedNode}
             <div class="insp-h">
@@ -2383,81 +1784,9 @@
   </main>
   {/if}
 
-  <!-- Right sidebar (R1 + Agents): desktop-only, for a run with a context dir.
-       Tabbed — Files (the run's context-file tree) and Agents (the run's live
-       agent sessions, embedded). Collapse via the header "Panel" button so there's
-       no second full-height rail beside the app shell's right rail. Resizable. -->
   {#if viewport.isDesktop && run && run.context_dir && ui.wfCtxOpen}
-    <aside class="ctx-sidebar" style="width:{ui.wfCtxWidth}px" data-testid="ctx-sidebar">
-      <div
-        class="ctx-resize"
-        role="separator"
-        aria-label="Resize context panel"
-        title="Drag or use ←/→ to resize"
-        use:paneResizer={{ value: ui.wfCtxWidth, min: WF_CTX_MIN, max: WF_CTX_MAX, invert: true, onChange: (w) => ui.setWfCtxWidth(w), onDragStart: startCtxResize, text: pxText }}
-      ></div>
-      <div class="ctx-head">
-        <div class="ctx-tabs" role="tablist" aria-label="Context panel sections">
-          <button
-            class="ctx-tab"
-            class:active={ui.wfCtxTab === 'files'}
-            role="tab"
-            aria-selected={ui.wfCtxTab === 'files'}
-            tabindex={ui.wfCtxTab === 'files' ? 0 : -1}
-            onkeydown={onTabKey}
-            onclick={() => ui.setWfCtxTab('files')}
-          >
-            <Icon name="folder" size={12} /> Files
-          </button>
-          <button
-            class="ctx-tab"
-            class:active={ui.wfCtxTab === 'agents'}
-            role="tab"
-            aria-selected={ui.wfCtxTab === 'agents'}
-            tabindex={ui.wfCtxTab === 'agents' ? 0 : -1}
-            onkeydown={onTabKey}
-            data-testid="ctx-tab-agents"
-            onclick={() => ui.setWfCtxTab('agents')}
-          >
-            <Icon name="terminal" size={12} /> Agents{#if runSessionCount > 0}<span class="tab-count">{runSessionCount}</span>{/if}
-          </button>
-        </div>
-        <span class="grow"></span>
-        <button
-          class="icon-btn"
-          data-testid="ctx-collapse"
-          onclick={() => ui.toggleWfCtx()}
-          title="Collapse panel"
-          aria-label="Collapse panel"
-        >
-          <Icon name="panel" size={13} />
-        </button>
-      </div>
-      {#if ui.wfCtxTab === 'files'}
-        <div class="ctx-pathline"><code class="ctx-path dim" title={run.context_dir}>{run.context_dir}</code></div>
-        {#if run.status === 'success' && finalOutputAvailable && finalOutputRunId === run.id}
-          <details open class="final-output">
-            <summary>
-              <Icon name="check" size={13} />
-              <span>Final output</span>
-            </summary>
-            <iframe class="final-output-frame" title="Final output" sandbox="allow-same-origin" srcdoc={finalOutputSrcdoc}></iframe>
-          </details>
-        {:else if finalOutputError?.runId === run.id}
-          {@const runId = run.id}
-          <LoadState what="the final output" variant="compact" error={finalOutputError.text} empty onretry={() => void loadFinalOutput(runId)} />
-        {/if}
-        <div class="ctx-body">
-          {#key run.context_dir}
-            <FileTree root={run.context_dir} primary={false} {...contextFs(run.id, run.context_dir)} />
-          {/key}
-        </div>
-      {:else}
-        <div class="ctx-body">
-          <RunAgents {run} nodeName={(id) => nodeName(id)} focusSid={agentsFocusSid} />
-        </div>
-      {/if}
-    </aside>
+    <!-- Desktop: the run's Files / Agents sidebar (RunContextSidebar). -->
+    <RunContextSidebar {mon} {run} contextDir={run.context_dir} {nodeName} focusSid={agentsFocusSid} />
   {/if}
 </div>
 </PageBody>
@@ -2484,19 +1813,6 @@
   .wf-tog.on {
     background: var(--accent-soft);
     color: var(--accent-text);
-  }
-  .ri-dest {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    margin: 0;
-    font-size: var(--fs-s);
-    color: var(--warning);
-  }
-  .ri-err {
-    margin: 0;
-    font-size: var(--fs-s);
-    color: var(--danger);
   }
   /* Header toggles (Instructions, Triggers, Versions, Dock, Panel) show
      that their panel is open: the selection tint, never a solid fill. */
@@ -2581,10 +1897,6 @@
   .tpl.tpl-card {
     border: 1px solid var(--border);
     background: var(--surface);
-  }
-  .ctx-resize:focus-visible,
-  .insp-grip:focus-visible {
-    outline: none;
   }
   .gen {
     padding: 12px;
@@ -2766,12 +2078,6 @@
     border: 1px solid var(--accent);
     border-radius: var(--radius-s);
     outline: none;
-  }
-  /* "Running" sidebar list — in-flight runs across the workspace, live. */
-  .run-error {
-    margin: 0 0 6px; padding: 6px 10px; border-radius: var(--radius-s);
-    background: var(--danger-soft); color: var(--danger); font-size: var(--fs-s);
-    display: flex; gap: 6px; align-items: baseline; overflow-wrap: anywhere;
   }
   .running {
     flex-shrink: 0;
@@ -3084,23 +2390,6 @@
       transparent
     );
   }
-  /* Run bar: sticky so status + Cancel + maximize stay reachable while the run
-     detail scrolls. (R6/R7) */
-  .insp-bar {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    position: sticky;
-    top: -10px;
-    margin: -10px -12px 4px;
-    padding: 8px 12px;
-    background: var(--surface);
-    border-bottom: 1px solid var(--border);
-    z-index: 2;
-  }
-  .insp-bar .grow {
-    flex: 1;
-  }
   .insp-h {
     display: flex;
     align-items: center;
@@ -3169,223 +2458,6 @@
     border-radius: var(--radius-s);
     overflow-x: auto;
     margin: 0;
-  }
-
-  /* Run timeline */
-  .timeline {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    overflow-x: auto;
-    padding-bottom: 8px;
-    margin-bottom: 8px;
-    border-bottom: 1px solid var(--border);
-    /* overflow-x zeroes a flex item's automatic min-height, so the flex-column
-       inspector would vertically compress (clip) this row. Pin it. (R8) */
-    flex-shrink: 0;
-  }
-  .run-detail {
-    margin: 8px 0;
-  }
-  .ctx-files {
-    margin: 8px 0;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m);
-    background: var(--surface-2);
-  }
-  .ctx-files > summary {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 6px 10px;
-    font-size: var(--fs-s);
-    font-weight: 600;
-    cursor: pointer;
-    user-select: none;
-    min-width: 0;
-  }
-  .ctx-files > summary code {
-    font-size: var(--fs-xs);
-    font-weight: 400;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    direction: ltr;
-  }
-  .ctx-files-tree {
-    border-top: 1px solid var(--border);
-    max-height: 420px;
-    overflow: auto;
-  }
-  /* Final-output panel: the run's deliverable, shown above the context-file
-     tree (both the mobile inline block and the desktop sidebar). Same shell
-     as .ctx-files; content is a sandboxed iframe like FileTree's own markdown
-     preview (see renderFinalOutputSrcdoc). */
-  .final-output {
-    margin: 8px 0;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m);
-    background: var(--surface-2);
-    flex-shrink: 0;
-  }
-  .final-output > summary {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 6px 10px;
-    font-size: var(--fs-s);
-    font-weight: 600;
-    cursor: pointer;
-    user-select: none;
-  }
-  .final-output-frame {
-    display: block;
-    width: 100%;
-    height: 320px;
-    border: none;
-    border-top: 1px solid var(--border);
-    background: var(--surface); /* the srcdoc body is transparent + token-themed */
-  }
-  .tl-label {
-    display: inline-flex;
-    align-items: center;
-    flex-shrink: 0;
-    padding-inline-end: 4px;
-  }
-  .tl-step {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    flex-shrink: 0;
-    padding: 4px 10px;
-    border: 1px solid var(--border);
-    border-radius: 999px;
-    background: var(--surface-2);
-    color: var(--text);
-    font-size: var(--fs-s);
-    cursor: pointer;
-  }
-  .tl-step.active {
-    border-color: var(--accent);
-  }
-  .tl-step[data-status='success'] {
-    border-color: color-mix(in srgb, var(--success) 55%, var(--border));
-  }
-  .tl-step[data-status='error'] {
-    border-color: color-mix(in srgb, var(--danger) 55%, var(--border));
-  }
-  /* Running is info-blue (lib/status.ts) — the accent border is `.active`
-     (selection), so a running step no longer looks selected. */
-  .tl-step[data-status='running'] {
-    border-color: color-mix(in srgb, var(--info) 60%, var(--border));
-  }
-  .tl-name {
-    white-space: nowrap;
-  }
-  .tl-ms {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    font-family: var(--font-mono);
-  }
-
-  /* Context-files sidebar (R1): a full-height file viewer on the right edge. */
-  .ctx-sidebar {
-    position: relative;
-    flex-shrink: 0;
-    height: 100%;
-    display: flex;
-    flex-direction: column;
-    border-inline-start: 1px solid var(--border);
-    background: var(--bg);
-    min-height: 0;
-  }
-  .ctx-resize {
-    position: absolute;
-    inset-inline-start: -3px;
-    top: 0;
-    bottom: 0;
-    width: 7px;
-    cursor: col-resize;
-    z-index: 5;
-  }
-  .ctx-resize:hover,
-  .ctx-resize:focus-visible {
-    background: linear-gradient(
-      to right,
-      transparent,
-      var(--accent-line),
-      transparent
-    );
-  }
-  .ctx-head {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding-block: 6px 6px; padding-inline: 10px 8px;
-    border-bottom: 1px solid var(--border);
-    background: var(--surface);
-    flex-shrink: 0;
-    min-width: 0;
-  }
-  .ctx-tabs {
-    display: flex;
-    gap: 2px;
-    min-width: 0;
-  }
-  .ctx-tab {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    border: none;
-    background: transparent;
-    color: var(--text-dim);
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: .06em;
-    padding: 2px 8px;
-    border-radius: var(--radius-s);
-    cursor: pointer;
-    border-bottom: 2px solid transparent;
-  }
-  .ctx-tab:hover {
-    color: var(--text);
-  }
-  .ctx-tab.active {
-    color: var(--text);
-    border-bottom-color: var(--accent);
-  }
-  .tab-count {
-    font-family: var(--font-mono);
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    letter-spacing: 0;
-    color: var(--text-dim);
-    background: var(--accent-soft);
-    padding: 0 4px;
-    border-radius: 999px;
-  }
-  .ctx-pathline {
-    padding: 4px 10px;
-    border-bottom: 1px solid var(--border);
-    flex-shrink: 0;
-  }
-  .ctx-path {
-    display: block;
-    min-width: 0;
-    font-size: var(--fs-xs);
-    font-family: var(--font-mono);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    direction: ltr;
-  }
-  .ctx-body {
-    flex: 1;
-    min-height: 0;
-    overflow: hidden;
-    display: flex;
-    flex-direction: column;
   }
 
   .json-zoom {
@@ -3521,105 +2593,8 @@
     margin-top: 1px;
     accent-color: var(--accent);
   }
-  /* Human-approval banner */
-  .run-input {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    padding: 10px 12px;
-    background: var(--surface-2);
-    border-bottom: 1px solid var(--border);
-    max-height: min(50vh, 420px);
-    overflow-y: auto;
-  }
-  .ri-head {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-wrap: wrap;
-  }
-  .ri-hint {
-    flex: 1;
-    min-width: 0;
-    font-size: var(--fs-s);
-    color: var(--text-dim);
-  }
-  /* `.ri-text` is the JSON run-input box; the prompt box above it is
-     `.ri-prompt` — same tokens, its own hook (a single `.ri-text` is what
-     identifies the run input, in the UI and in e2e). */
-  .ri-text,
-  .ri-prompt {
-    width: 100%;
-    min-height: 120px;
-    resize: vertical;
-    padding: 8px 10px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    background: var(--bg);
-    color: var(--text);
-    font-size: var(--fs-s);
-    line-height: 1.5;
-  }
-  /* Same tokens as .ri-text, but sized to its content — the popover is a
-     column flexbox, so an auto width needs the cross-axis opt-out too. */
-  .ri-select {
-    width: auto;
-    align-self: flex-start;
-    padding: 6px 10px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    background: var(--bg);
-    color: var(--text);
-    font-size: var(--fs-s);
-  }
-  .ri-actions {
-    display: flex;
-    gap: 8px;
-  }
   .mono {
     font-family: var(--font-mono);
-  }
-  .resumed-banner {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 6px 12px;
-    background: var(--surface-2);
-    border-bottom: 1px solid var(--border);
-    font-size: var(--fs-s);
-    color: var(--text-dim);
-  }
-  .approval-banner {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 8px 12px;
-    background: var(--warning-soft);
-    border-bottom: 1px solid var(--border);
-    font-size: var(--fs-m);
-    color: var(--text);
-  }
-  .approval-banner strong {
-    font-weight: 600;
-  }
-  .approval-banner > span {
-    flex: 1;
-    min-width: 0;
-  }
-  .approval-ask {
-    display: block;
-    margin-block-start: 2px;
-    font-style: italic;
-    overflow-wrap: anywhere;
-  }
-  .approval-sub {
-    display: block;
-    font-size: var(--fs-s);
-    color: var(--text-dim);
-  }
-  .approval-outcome {
-    padding: 6px 12px;
-    border-bottom: 1px solid var(--border);
   }
   /* Node hint / info text in the inspector */
   .node-hint {
@@ -3706,5 +2681,8 @@
     font-size: var(--fs-xs);
     color: var(--text-dim);
     flex-shrink: 0;
+  }
+  .insp-grip:focus-visible {
+    outline: none;
   }
 </style>

@@ -8,6 +8,7 @@
   import EnvSelector from './EnvSelector.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
 
   // Load on first mount / workspace change — keyed on the workspace only
@@ -41,11 +42,10 @@
 </script>
 
 <div class="panel">
-  {#if apiClient.historyLoadingId}<span class="note" role="status"><span class="spinner" style="--spinner-size: 11px" aria-hidden="true"></span> Loading history request…</span>{/if}
+  {#if apiClient.historyLoadingId}<span class="note"><span class="spinner" style="--spinner-size: 11px" aria-hidden="true"></span> Loading history request…</span>{/if}
   {#if apiClient.requestsLoadError}
-    <div class="note err" role="alert">
-      Couldn’t load saved requests. <button class="btn small" onclick={() => void apiClient.loadAll()}>Retry</button>
-    </div>
+    <LoadState what="saved requests" variant="compact" empty error={apiClient.requestsLoadError} loading={apiClient.loading}
+      onretry={() => void apiClient.loadAll()} />
   {/if}
   <div class="picker-row">
     <button type="button" class="input picker" aria-label="Load request" aria-haspopup="menu" title="Load a saved or recent request" onclick={openPicker}>
@@ -83,9 +83,6 @@
     gap: 8px;
     font-size: var(--fs-s);
     color: var(--text-dim);
-  }
-  .note.err {
-    color: var(--danger);
   }
   .picker-row {
     flex-shrink: 0;

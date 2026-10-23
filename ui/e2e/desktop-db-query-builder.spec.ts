@@ -76,12 +76,12 @@ test('build a GROUP BY report with filters, HAVING and sort — and run it', asy
   // WHERE: status = 'paid' OR status contains "ship" (escaped value).
   await page.getByRole('button', { name: 'Group', exact: true }).click();
   const grp = page.locator('.cgroup.nested').first();
-  const c1 = grp.locator('.row.cond').first();
+  const c1 = grp.locator('.qb-row.cond').first();
   await c1.getByLabel('Column').selectOption('orders.status');
   await c1.getByLabel('Operator').selectOption('=');
   await c1.getByLabel('Value').fill("pa'id");
   await grp.getByRole('button', { name: 'Condition', exact: true }).click();
-  const c2 = grp.locator('.row.cond').nth(1);
+  const c2 = grp.locator('.qb-row.cond').nth(1);
   await c2.getByLabel('Column').selectOption('orders.status');
   await c2.getByLabel('Operator').selectOption('CONTAINS');
   await c2.getByLabel('Value').fill('50%');
@@ -89,11 +89,11 @@ test('build a GROUP BY report with filters, HAVING and sort — and run it', asy
 
   // HAVING COUNT(*) > 2, ORDER BY the aggregate DESC NULLS LAST (emulated on MySQL).
   await page.locator('section[aria-labelledby="qb-having"]').getByRole('button', { name: 'Condition', exact: true }).click();
-  const h = page.locator('section[aria-labelledby="qb-having"] .row.cond').first();
+  const h = page.locator('section[aria-labelledby="qb-having"] .qb-row.cond').first();
   await h.getByLabel('Value').fill('2');
   await expect(sqlText(page)).toContainText('HAVING COUNT(*) > 2');
   await page.getByRole('button', { name: 'Sort', exact: true }).click();
-  const o = page.locator('section[aria-labelledby="qb-order"] .row').first();
+  const o = page.locator('section[aria-labelledby="qb-order"] .qb-row').first();
   await o.getByLabel('NULLs position').selectOption('last');
   await expect(sqlText(page)).toContainText('ORDER BY `sum_total` IS NULL ASC, `sum_total` DESC');
   await expect(sqlText(page)).toContainText('LIMIT 100;');

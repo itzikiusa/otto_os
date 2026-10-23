@@ -7,7 +7,11 @@
   // polls the saved report.
   import { toastError } from '../../lib/toastError';
   import { router } from '../../lib/router.svelte';
-  import { editableSteps } from './automationInput';
+  import { editableAssertion, editableExtract, editableSteps, movedArrow, rowKey, savedSteps, type EditableStep } from './automationInput';
+  import { KIND_LABEL, NO_VALUE_OPS, OP_LABEL, RUN_STATUS } from './automationLabels';
+  import { focusAfterRowRemoval, rowListOf } from '../../lib/rowFocus';
+  import { announce, announceShown } from '../../lib/announce.svelte';
+  import { tick } from 'svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
@@ -20,7 +24,7 @@
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { rel } from '../../lib/stores/now.svelte';
   import { formatSeconds } from '../../lib/metric-format';
-  import type { ApiAutomationRun, ApiAssertion, ApiAutomation, ApiAutomationStep, ApiExtract, Id } from '../../lib/api/types';
+  import type { ApiAutomationRun, ApiAssertion, ApiAutomation, ApiExtract, Id } from '../../lib/api/types';
 
   interface Props {
     automationId: Id;
@@ -33,7 +37,8 @@
   const automation = $derived(apiClient.automations.find((a) => a.id === automationId) ?? null);
 
   // Working copy (edits aren't live until Save).
-  let steps: ApiAutomationStep[] = $state([]);
+  let steps: EditableStep[] = $state([]);
+  let stepsEl = $state<HTMLOListElement | null>(null);
   let dirty = $state(false);
   let environmentId = $state('');
   let stopOnFailure = $state(false);
@@ -77,31 +82,6 @@
     if (a && a.id !== loadedFor) loadInto(a);
   });
 
-  const KIND_LABEL: Record<ApiAssertion['kind'], string> = {
-    status: 'Status code',
-    json_path: 'JSON value at',
-    header: 'Response header',
-    body_text: 'Response body text',
-    duration_ms: 'Response time (ms)',
-  };
-  const OP_LABEL: Record<ApiAssertion['op'], string> = {
-    eq: 'equals',
-    ne: 'does not equal',
-    contains: 'contains',
-    lt: 'is less than',
-    gt: 'is greater than',
-    lte: 'is at most',
-    gte: 'is at least',
-    exists: 'exists',
-    not_exists: 'does not exist',
-    matches: 'matches regex',
-  };
-  /** Operators that take no expected value. */
-  const NO_VALUE_OPS: ReadonlySet<ApiAssertion['op']> = new Set(['exists', 'not_exists']);
-  const RUN_STATUS: Record<ApiAutomationRun['status'], string> = {
-    running: 'running', passed: 'passed', failed: 'failed', cancelled: 'canceled', interrupted: 'interrupted',
-  };
-
   // Id → request, built once per list change (a per-step `.find` re-scanned
   // every saved request for every step on every render).
   const reqById = $derived(new Map(apiClient.requests.map((r) => [r.id, r])));
@@ -136,53 +116,60 @@
   function addStep(): void {
     const rid = apiClient.requests[0]?.id;
     if (!rid) return;
-    steps = [...steps, { request_id: rid, assertions: [{ kind: 'status', op: 'lt', value: '400' }], extract: [] }];
+    steps = [...steps, { key: rowKey(), request_id: rid, assertions: [editableAssertion({ kind: 'status', op: 'lt', value: '400' })], extract: [] }];
     dirty = true;
   }
+  // a11y-6-03: removal keeps focus in the list (the next step's Remove, else
+  // the previous one's, else "Add step"); a move keeps it on the moved step.
   function removeStep(i: number): void {
     steps = steps.filter((_, idx) => idx !== i);
     dirty = true;
+    void focusAfterRowRemoval(stepsEl?.parentElement ?? null, i, '.add-step', '[data-remove-step]');
   }
-  function moveStep(i: number, dir: -1 | 1): void {
+  async function moveStep(i: number, dir: -1 | 1): Promise<void> {
     const j = i + dir;
     if (j < 0 || j >= steps.length) return;
+    const moved = steps[i].key;
     const next = [...steps];
     [next[i], next[j]] = [next[j], next[i]];
     steps = next;
     dirty = true;
+    const { arrow } = movedArrow(i, dir, steps.length);
+    await tick();
+    stepsEl?.querySelector<HTMLElement>(`[data-step-key="${moved}"] [data-move="${arrow}"]`)?.focus();
+    announce(`Step moved to position ${j + 1} of ${steps.length}`);
   }
-  function patchStep(i: number, patch: Partial<ApiAutomationStep>): void {
+  function patchStep(i: number, patch: Partial<EditableStep>): void {
     steps = steps.map((s, idx) => (idx === i ? { ...s, ...patch } : s));
     dirty = true;
   }
   function addAssertion(i: number): void {
-    patchStep(i, { assertions: [...steps[i].assertions, { kind: 'status', op: 'eq', value: '200' }] });
+    patchStep(i, { assertions: [...steps[i].assertions, editableAssertion({ kind: 'status', op: 'eq', value: '200' })] });
   }
   function updateAssertion(i: number, a: number, patch: Partial<ApiAssertion>): void {
     patchStep(i, { assertions: steps[i].assertions.map((x, ai) => (ai === a ? { ...x, ...patch } : x)) });
   }
-  function removeAssertion(i: number, a: number): void {
+  function removeAssertion(e: Event, i: number, a: number): void {
+    const list = rowListOf(e, '.sub');
     patchStep(i, { assertions: steps[i].assertions.filter((_, ai) => ai !== a) });
+    void focusAfterRowRemoval(list, a, '.add');
   }
   function addExtract(i: number): void {
-    patchStep(i, { extract: [...steps[i].extract, { path: '', var: '' }] });
+    patchStep(i, { extract: [...steps[i].extract, editableExtract({ path: '', var: '' })] });
   }
   function updateExtract(i: number, e: number, patch: Partial<ApiExtract>): void {
     patchStep(i, { extract: steps[i].extract.map((x, ei) => (ei === e ? { ...x, ...patch } : x)) });
   }
-  function removeExtract(i: number, e: number): void {
+  function removeExtract(ev: Event, i: number, e: number): void {
+    const list = rowListOf(ev, '.sub');
     patchStep(i, { extract: steps[i].extract.filter((_, ei) => ei !== e) });
+    void focusAfterRowRemoval(list, e, '.add');
   }
 
   async function save(): Promise<boolean> {
     if (!automation || !canEdit) return false;
     const snapshot = JSON.stringify(steps);
-    const clean = steps.map((s) => ({
-      request_id: s.request_id,
-      assertions: s.assertions.map((a) => ({ ...a })),
-      // Drop incomplete rows (both path + variable name are required).
-      extract: s.extract.filter((e) => e.path.trim() !== '' && e.var.trim() !== ''),
-    }));
+    const clean = savedSteps(steps);
     const saved = await apiClient.saveAutomation({ name: automation.name, steps: clean }, automation.id);
     if (saved) {
       dirty = JSON.stringify(steps) !== snapshot;
@@ -262,6 +249,15 @@
   const runs = $derived(apiClient.automationRuns.filter((r) => r.automation_id === automationId));
   /** The live run's polls kept failing: it may still be running server-side,
    *  so its partial report is not a verdict ("Last run failed" was wrong). */
+  // a11y-6-01: the run error line is plain text; the live run's error is
+  // spoken once, assertively, where it first appears (an opened past run is
+  // read on demand, not announced).
+  let spokenRunError = '';
+  $effect(() => {
+    const err = !historyRun && runDetails?.automation_id === automationId ? runDetails.error ?? '' : '';
+    if (err && err !== spokenRunError) announce(`Run failed: ${err}`, { assertive: true });
+    spokenRunError = err;
+  });
   const lost = $derived(!historyRun && !apiClient.running && !!showRun && apiClient.runLost != null && apiClient.currentRun?.id === apiClient.runLost);
 </script>
 
@@ -307,13 +303,13 @@
       <summary>Run once per data row (advanced)</summary>
       <p class="hint">A JSON array of objects. Each object runs every step once, with its keys available as <code>{'{{variables}}'}</code> on top of the environment. Values stay in memory. Up to 1 MiB and 1,000 requests per run.</p>
       <textarea dir="ltr" class="input mono" aria-label="Dataset rows" rows="4" bind:value={datasetText} placeholder={'[{"customer_id":"cus_1"},{"customer_id":"cus_2"}]'} disabled={apiClient.running}></textarea>
-      {#if datasetError}<p class="err" role="alert">{datasetError}</p>{/if}
+      {#if datasetError}<p class="err" use:announceShown={{ text: datasetError, assertive: true }}>{datasetError}</p>{/if}
     </details>
 
-    <ol class="steps">
-      {#each steps as step, i (i)}
+    <ol class="steps" bind:this={stepsEl}>
+      {#each steps as step, i (step.key)}
         {@const r = req(step.request_id)}
-        <li class="step">
+        <li class="step" data-step-key={step.key}>
           <div class="step-top">
             <span class="step-idx" aria-hidden="true">{i + 1}</span>
             <MethodTag method={r?.method ?? ''} fixed />
@@ -323,9 +319,9 @@
               <Icon name="chevronDown" size={12} />
             </button>
             {#if canEdit}
-              <button class="icon-btn" title="Move up" aria-label="Move step {i + 1} up" disabled={i === 0} onclick={() => moveStep(i, -1)}><Icon name="arrowUp" size={14} /></button>
-              <button class="icon-btn" title="Move down" aria-label="Move step {i + 1} down" disabled={i === steps.length - 1} onclick={() => moveStep(i, 1)}><Icon name="arrowDown" size={14} /></button>
-              <button class="icon-btn" title="Remove step" aria-label="Remove step {i + 1}" onclick={() => removeStep(i)}><Icon name="trash" size={14} /></button>
+              <button class="icon-btn" title="Move up" aria-label="Move step {i + 1} up" data-move="up" disabled={i === 0} onclick={() => void moveStep(i, -1)}><Icon name="arrowUp" size={14} /></button>
+              <button class="icon-btn" title="Move down" aria-label="Move step {i + 1} down" data-move="down" disabled={i === steps.length - 1} onclick={() => void moveStep(i, 1)}><Icon name="arrowDown" size={14} /></button>
+              <button class="icon-btn" title="Remove step" aria-label="Remove step {i + 1}" data-remove-step onclick={() => removeStep(i)}><Icon name="trash" size={14} /></button>
             {/if}
           </div>
 
@@ -334,7 +330,7 @@
             {#if step.assertions.length === 0}
               <p class="sub-empty">No checks, so the step passes on any 2xx response.</p>
             {/if}
-            {#each step.assertions as as, ai (ai)}
+            {#each step.assertions as as, ai (as.key)}
               <div class="rule">
                 <select class="input k-kind" aria-label="What to check" value={as.kind} disabled={!canEdit}
                   onchange={(e) => updateAssertion(i, ai, { kind: (e.currentTarget as HTMLSelectElement).value as ApiAssertion['kind'] })}>
@@ -357,7 +353,7 @@
                     oninput={(e) => updateAssertion(i, ai, { value: (e.currentTarget as HTMLInputElement).value })} />
                 {/if}
                 {#if canEdit}
-                  <button class="icon-btn" title="Remove check" aria-label="Remove check" onclick={() => removeAssertion(i, ai)}><Icon name="x" size={12} /></button>
+                  <button class="icon-btn" title="Remove check" aria-label="Remove check on {as.path || KIND_LABEL[as.kind]} in step {i + 1}" data-remove-row onclick={(e) => removeAssertion(e, i, ai)}><Icon name="x" size={12} /></button>
                 {/if}
               </div>
             {/each}
@@ -366,7 +362,7 @@
 
           <div class="sub">
             <div class="sub-title">Save for later steps</div>
-            {#each step.extract as ex, ei (ei)}
+            {#each step.extract as ex, ei (ex.key)}
               <div class="rule">
                 <span class="word">Take</span>
                 <input dir="ltr" class="input mono k-path" aria-label="JSONPath, header:Name or status to take" title="A JSONPath into the body ($.access_token), header:Name for a response header, or status" placeholder="$.access_token" value={ex.path} disabled={!canEdit}
@@ -379,7 +375,7 @@
                   <span class="brace" aria-hidden="true">{'}}'}</span>
                 </span>
                 {#if canEdit}
-                  <button class="icon-btn" title="Remove" aria-label="Remove saved value" onclick={() => removeExtract(i, ei)}><Icon name="x" size={12} /></button>
+                  <button class="icon-btn" title="Remove" aria-label="Remove saved value {ex.var || ex.path || ei + 1} in step {i + 1}" data-remove-row onclick={(e) => removeExtract(e, i, ei)}><Icon name="x" size={12} /></button>
                 {/if}
               </div>
             {/each}
@@ -406,9 +402,9 @@
           <p class="run-meta">
             Run <span class="mono" title="Run id">{runDetails.id}</span> · {RUN_STATUS[runDetails.status]} · {rel(runDetails.created_at)}{#if runDetails.dataset_rows}{' '}· {plural(runDetails.dataset_rows, 'data row')}{/if}
           </p>
-          {#if runDetails.error}<p class="err" role="status">{runDetails.error}</p>{/if}
+          {#if runDetails.error}<p class="err">{runDetails.error}</p>{/if}
         {/if}
-        {#each showRun.steps.length > reportLimit ? showRun.steps.slice(0, reportLimit) : showRun.steps as r, ri (ri)}
+        {#each showRun.steps.length > reportLimit ? showRun.steps.slice(0, reportLimit) : showRun.steps as r, ri (ri)}<!-- ui-guards: allow (read-only run report; never reordered) -->
           <div class="r-step" class:ok={r.ok} class:fail={!r.ok}>
             <div class="r-top">
               <Icon name={r.ok ? 'check' : 'x'} size={12} />
@@ -418,7 +414,7 @@
               <span class="r-dur">{formatSeconds(r.duration_ms / 1000)}</span>
             </div>
             {#if r.error}<div class="r-error mono">{r.error}</div>{/if}
-            {#each r.assertions as a, ax (ax)}
+            {#each r.assertions as a, ax (ax)}<!-- ui-guards: allow (read-only run report) -->
               <div class="r-assert" class:ok={a.passed} class:fail={!a.passed}>
                 <span class="r-word">{a.passed ? 'Passed' : 'Failed'}</span><span class="r-desc">{a.desc}</span>
               </div>
