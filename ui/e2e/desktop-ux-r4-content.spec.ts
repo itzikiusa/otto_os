@@ -213,7 +213,11 @@ test('Vault long phone tree leaves useful space for reading and editing', async 
   await page.locator('.tree').getByText('note-15', { exact: true }).click();
   await expect(page.locator('.note-view')).toContainText('Note 15');
   await page.screenshot({ path: '/tmp/otto-ux-r4-content-vault-long.png' });
-  expect((await page.locator('.vault-page .left').boundingBox())!.height).toBeLessThanOrEqual(200);
+  // On a phone an open note takes the whole page (list → detail): the tree
+  // steps aside behind a Back button instead of eating the reading space.
+  await expect(page.locator('.vault-page .left')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Back to vault sidebar' })).toBeVisible();
+  expect((await page.locator('.note-view').boundingBox())!.height).toBeGreaterThan(600);
   await page.getByRole('button', { name: 'Edit', exact: true }).click();
   await page.locator('.cm-content').fill('# Long tree edited note\n\nThis draft has room to breathe.');
   await expect.poll(async () => {

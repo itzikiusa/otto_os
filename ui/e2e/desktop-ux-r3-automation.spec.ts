@@ -94,11 +94,13 @@ test('swarm feed: failed refresh retains posts and offers Retry', async ({ page 
     ? r.fulfill({ status: 503, json: { code: 'upstream', message: 'Board temporarily unavailable' } })
     : r.continue());
   await page.getByRole('button', { name: 'Refresh board' }).click();
-  await expect(page.getByText(/Board temporarily unavailable/)).toBeVisible();
+  // Scoped to the page: the failure is also spoken via the sr-only announcer.
+  const content = page.locator('#app-content');
+  await expect(content.getByText(/Board temporarily unavailable/)).toBeVisible();
   await expect(page.getByText('Decided to ship behind a flag first.')).toBeVisible();
   fail = false;
   await page.getByRole('button', { name: 'Retry', exact: true }).click();
-  await expect(page.getByText(/Board temporarily unavailable/)).toHaveCount(0);
+  await expect(content.getByText(/Board temporarily unavailable/)).toHaveCount(0);
 });
 
 test('swarm tabs: RTL arrows follow the visible direction', async ({ page }) => {

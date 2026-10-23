@@ -166,7 +166,7 @@ test('Kafka consume validates selectors before reading and produce preserves fai
   mkdirSync(shots,{recursive:true});await page.screenshot({animations:'disabled',path:`${shots}/kafka-consume.png`});
   await page.locator('.subtabs').getByRole('tab',{name:'Produce',exact:true}).click();
   await page.getByLabel('Key (optional)',{exact:true}).fill('customer-2');await page.getByLabel('Value',{exact:true}).fill('{"name":"Second fixture"}');
-  await page.getByRole('button',{name:'Produce message',exact:true}).click();await expect(page.getByText('Synthetic broker unavailable',{exact:true})).toBeVisible();
+  await page.getByRole('button',{name:'Produce message',exact:true}).click();await expect(page.getByRole('tabpanel',{name:'Produce'}).getByText('Synthetic broker unavailable',{exact:true})).toBeVisible();
   await expect(page.getByLabel('Value',{exact:true})).toHaveValue('{"name":"Second fixture"}');
   fail=false;await page.getByRole('button',{name:'Produce message',exact:true}).click();await expect(page.getByLabel('Value',{exact:true})).toHaveValue('');
   expect(produced).toMatchObject({key:'customer-2',value:'{"name":"Second fixture"}',partition:null});

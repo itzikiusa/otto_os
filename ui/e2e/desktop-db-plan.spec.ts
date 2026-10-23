@@ -52,7 +52,8 @@ async function openConn(page: Page, name: string, engine: string): Promise<void>
   await expect(page.locator('.main-tabs')).toBeVisible({ timeout: 20_000 });
   // The cap-chip confirms capabilities loaded — the Explain button's visibility
   // keys off capabilities.explain, so we must wait for that before asserting it.
-  await expect(page.locator('.cap-chip', { hasText: engine })).toBeVisible({ timeout: 20_000 });
+  // A sub-900px workbench hides the chip by design: wait for it in the DOM.
+  await expect(page.locator('.cap-chip', { hasText: engine })).toBeAttached({ timeout: 20_000 });
 }
 
 async function setEditor(page: Page, sql: string): Promise<void> {

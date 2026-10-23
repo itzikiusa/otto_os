@@ -68,7 +68,9 @@ test('agent form: losing workspace preserves typed fields and explains how to sa
   await dialog.getByRole('button', { name: 'Save', exact: true }).click();
   await expect(dialog).toBeVisible();
   await expect(dialog.getByLabel('Name', { exact: true })).toHaveValue('Keep my new agent');
-  await expect(dialog.getByRole('alert')).toContainText('workspace');
+  // The form's error line has no live role; it is spoken via the announcer.
+  await expect(dialog.locator('.err')).toContainText('workspace');
+  await expect(page.getByTestId('announcer-assertive')).toContainText('select a workspace');
 });
 
 test('goal definition: workspace switching asks before discarding the complete draft', async ({ page }) => {
@@ -206,7 +208,9 @@ test.describe('loaded automation visual and interaction fixtures', () => {
       await page.goto('/#/personal-agents');
       await expect(page.locator('.pa-card').first()).toBeVisible();
       await page.locator('.pa-card .name').first().click();
-      await page.getByRole('tab', { name: 'Schedules', exact: true }).click();
+      // ≤640px the agent's sections are a picker instead of a tab strip.
+      if (width <= 640) await page.getByRole('combobox', { name: 'Agent sections' }).selectOption({ label: 'Schedules' });
+      else await page.getByRole('tab', { name: 'Schedules', exact: true }).click();
       await shot('agent-schedules');
       await page.goto('/#/scheduled-tasks');
       await expect(page.getByText('Weekly review — security and release readiness', { exact: true }).first()).toBeVisible();

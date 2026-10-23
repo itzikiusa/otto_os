@@ -18,7 +18,9 @@ test('Insights phone loading stays on the list and period filters have touch tar
   await page.route('**/insights/runs/active', r => r.fulfill({ json: [] }));
   await page.goto('/#/insights');
   try {
-    await expect(page.locator('.list-pane[aria-busy="true"]')).toBeVisible();
+    // The list pane holds the loading skeleton (a status named after what
+    // loads; no aria-busy, which would defer its announcement).
+    await expect(page.locator('.list-pane').getByRole('status', { name: 'Loading insight reports' })).toBeVisible();
     await expect(page.locator('.detail-pane')).not.toBeVisible();
   } finally { release(); }
   await expect(page.getByTestId('report-list')).toBeVisible();

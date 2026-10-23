@@ -65,9 +65,8 @@ test('real daemon: plaintext store active, nothing to migrate yet', async ({ pag
     await expect(card(page).getByRole('button', { name: /Secure secrets/ })).toHaveCount(0);
   } else {
     const n = status.plaintext_entries;
-    await expect(card(page).getByRole('alert')).toContainText(
-      `${n} secret${n === 1 ? ' is' : 's are'} in a plaintext file`,
-    );
+    // The banner is a standing notice (no alert role; announced politely).
+    await expect(card(page).getByText(`${n} secret${n === 1 ? ' is' : 's are'} in a plaintext file`)).toBeVisible();
     await expect(card(page).getByRole('button', { name: /Secure secrets/ })).toBeVisible();
   }
 });
@@ -84,7 +83,7 @@ test('plaintext secrets: banner, confirm, migrate, encrypted', async ({ page }) 
     await r.fulfill({ json: { migrated: 3, total: 3, duration_ms: 12 } });
   });
   await boot(page);
-  await expect(card(page).getByRole('alert')).toContainText('3 secrets are in a plaintext file');
+  await expect(card(page).getByText('3 secrets are in a plaintext file')).toBeVisible();
   await card(page).getByRole('button', { name: 'Secure secrets…' }).click();
   // Confirms first: cancelling sends nothing.
   await page.getByRole('button', { name: 'Cancel' }).click();
@@ -93,6 +92,7 @@ test('plaintext secrets: banner, confirm, migrate, encrypted', async ({ page }) 
   await page.getByRole('button', { name: 'Encrypt secrets' }).click();
   await expect.poll(() => body).toEqual({ confirm: true });
   await expect(card(page).getByText('Encrypted file, key in the macOS Keychain')).toBeVisible();
+  await expect(card(page).getByText('Secrets are stored unencrypted.')).toHaveCount(0);
   await expect(card(page).getByRole('alert')).toHaveCount(0);
   await expect(card(page).getByText('Unlocked')).toBeVisible();
 });

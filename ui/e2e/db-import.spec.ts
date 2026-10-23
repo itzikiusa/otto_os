@@ -208,8 +208,12 @@ test('MongoDB: restricted import refuses unsupported native scope without writes
   await page.locator('input[placeholder="target_table"]').fill(MONGO_COLL);
   await page.getByLabel('Import file into a table').getByRole('button', { name: 'Import', exact: true }).click();
   const dialog = page.getByRole('dialog', { name: 'Import file into a table' });
-  await expect(dialog.getByRole('status')).toContainText('native_scope_required');
-  await expect(dialog.getByRole('status')).toContainText('restricted imports are unsupported');
+  // The refusal is visible in the dialog and spoken assertively by the
+  // shell's announcer (the progress line itself carries no live role).
+  const progress = dialog.locator('.imp-progress');
+  await expect(progress).toContainText('native_scope_required');
+  await expect(progress).toContainText('restricted imports are unsupported');
+  await expect(page.getByTestId('announcer-assertive')).toContainText('native_scope_required');
   await expect(dialog.getByRole('button', { name: 'Import', exact: true })).toBeEnabled();
   await expect(page.locator('.toast.success', { hasText: 'Imported' })).toHaveCount(0);
   // Verify refusal at the actual fixture database, independently of Otto's UI.

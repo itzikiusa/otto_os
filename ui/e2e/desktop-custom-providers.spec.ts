@@ -283,10 +283,11 @@ test('Dock opens a persistent side panel with a working close button', async ({ 
   await expect(inspector.locator('.insp-side-head .bell-wrap')).toHaveCount(0);
   await expect(page.locator('.sidebar').getByRole('button', { name: 'Notifications' })).toBeVisible();
 
-  // The panel reaches the right edge of the viewport — no gutter black-strip.
+  // The panel reaches the trailing edge of the page column (the shell's Side
+  // panel rail sits beyond it) — no gutter black-strip.
   const box = (await inspector.boundingBox())!;
-  const vw = page.viewportSize()!.width;
-  expect(box.x + box.width).toBeGreaterThan(vw - 4);
+  const content = (await page.locator('#app-content').boundingBox())!;
+  expect(box.x + box.width).toBeGreaterThan(content.x + content.width - 4);
 
   // The × close button in the side header dismisses the dock.
   await inspector.getByRole('button', { name: 'Close panel' }).click();

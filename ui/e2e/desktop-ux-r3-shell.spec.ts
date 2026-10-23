@@ -33,7 +33,9 @@ for (const scheme of ['light', 'dark']) {
     const resizeColumns: number[] = [];
     page.on('websocket', socket => socket.on('framesent', ({ payload }) => {
       if (typeof payload !== 'string') return;
-      try { const frame = JSON.parse(payload); if (frame.type === 'resize') resizeColumns.push(frame.cols); } catch { /* binary input */ }
+      // A PTY grid change is a `resize`, or (agent panes, perf 01 N6) a
+      // compact `scrollback` request carrying the new grid.
+      try { const frame = JSON.parse(payload); if (frame.type === 'resize' || (frame.type === 'scrollback' && typeof frame.cols === 'number')) resizeColumns.push(frame.cols); } catch { /* binary input */ }
     }));
     const { ctx, base } = await apiCtx();
     const res = await ctx.post(`${base}/api/v1/workspaces/${workspaceId}/sessions`, { data: { kind: 'agent', provider: 'shell', title: 'Release review', cwd: '/tmp', meta: { origin: 'e2e', nested_provider: 'claude', e2e_transcript_path: `${process.cwd()}/../crates/otto-transcript/fixtures/claude/01-basic-tools.jsonl` } } });
@@ -105,8 +107,8 @@ test('Outputs revokes image URLs resolving after panel unmount', async ({ page }
   await boot(page);
   await page.getByTestId('outputs-panel').getByRole('option').click();
   await expect.poll(() => requested).toBe(true);
-  await page.getByRole('tab', { name: 'Outputs', exact: true }).focus();
-  await page.keyboard.press('ArrowLeft');
+  // Switching the Side panel to another tab unmounts Outputs mid-fetch.
+  await page.getByRole('toolbar', { name: 'Side panel' }).getByRole('button', { name: 'Activity', exact: true }).click();
   await expect(page.getByTestId('outputs-panel')).toBeHidden();
   release();
   await expect.poll(() => page.evaluate(() => (window as unknown as { blobAudit: { created: string[] } }).blobAudit.created.length)).toBeGreaterThan(0);
@@ -116,7 +118,7 @@ test('Outputs revokes image URLs resolving after panel unmount', async ({ page }
   })).toEqual([]);
 });
 
-test('terminal preserves visible scrollback when a delayed compact arrives', async ({ page }) => {
+test('terminal keeps its scrollback when a delayed compact arrives while reading', async ({ page }) => {
   const { ctx, base } = await apiCtx();
   await ctx.post(`${base}/api/v1/sessions/${sessionId}/input`, { data: { text: 'for i in $(seq 1 180); do echo SCROLL-REVIEW-$i; done', submit: true } });
   await ctx.dispose();
@@ -167,12 +169,15 @@ test('terminal preserves visible scrollback when a delayed compact arrives', asy
   }
   await expect.poll(() => firstRow.innerText()).not.toBe(bottomRow);
   await expect.poll(() => slider.evaluate(el => parseFloat(getComputedStyle(el).top))).toBeLessThan(bottomTop - 10);
-  const readingTop = await slider.evaluate(el => parseFloat(getComputedStyle(el).top));
-  const readingRow = await firstRow.innerText();
   release!();
-  await page.waitForTimeout(300); // ui-guards: allow — absence: release must not jump the view
-  await expect(firstRow).toHaveText(readingRow);
-  await expect.poll(() => slider.evaluate(el => parseFloat(getComputedStyle(el).top))).toBe(readingTop);
+  // A received compact is authoritative (docs/reviews/terminal-redraw-20261009):
+  // it is never discarded, so it may move a reading position taken after its
+  // request — but the rebuilt buffer keeps the history scrollable to the end.
+  await expect(firstRow).toHaveText(/SCROLL-REVIEW-\d+/);
+  expect((await slider.boundingBox())!.height).toBeLessThan((await track.boundingBox())!.height);
+  await page.locator('.xterm-screen').hover();
+  await page.mouse.wheel(0, 100000);
+  await expect(page.locator('.xterm-rows')).toContainText('SCROLL-REVIEW-180');
 });
 
 for (const scheme of ['light', 'dark']) {

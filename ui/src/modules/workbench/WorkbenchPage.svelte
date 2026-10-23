@@ -59,9 +59,8 @@
   // ── Language: detected from a STICKY snapshot of the buffer ────────────────
   // Sniffing the live buffer flipped the language on every transient state
   // while typing (`{` → `{}` is JSON, `{""}` is not, `# H` is Markdown), and
-  // each flip rebuilt the editor. The snapshot is taken on open, when the doc
-  // finishes loading, on paste, and after 400 ms of idle; one sniff serves
-  // both `lang` and the "Auto (…)" label.
+  // each flip rebuilt the editor. Snapshot on open, on load, on paste, on Format
+  // and after 400 ms idle; one sniff serves `lang` and the "Auto (…)" label.
   let sniffText = $state('');
   let sniffKey = '';
   /** Set by a paste: the next buffer change re-sniffs at once. Plain field. */
@@ -259,6 +258,7 @@
 
   async function format(): Promise<void> {
     if (!active || !doc || isImage) return;
+    if (active.buffer !== sniffText) sniffText = active.buffer; // sniff what's typed now
     if (!canFormat(lang)) {
       toasts.info('Nothing to format', `No formatter for ${WB_LANGUAGES.find((l) => l.id === lang)?.label ?? lang}.`);
       return;

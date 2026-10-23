@@ -44,7 +44,7 @@ test('guest admission, driver handoff and chat stay isolated from owner APIs', a
   await expect(page.getByText('Maya', {exact: true})).toHaveCount(0);
   expect(terminalInput).toEqual([]);
   membership!.send(JSON.stringify({type: 'snapshot', room: admitted}));
-  await expect(page.getByText(/Maya controls the terminal/)).toBeVisible();
+  await expect(page.locator('.room-status').getByText(/Maya controls the terminal/)).toBeVisible();
   await page.getByRole('button', {name: 'Request control', exact: true}).click();
   await expect.poll(() => actions.some(a => a.type === 'request_control')).toBeTruthy();
   // ≤1024 px the room shows one view at a time behind Session | People & chat tabs.
@@ -79,6 +79,8 @@ test('guest admission, driver handoff and chat stay isolated from owner APIs', a
   await expect.poll(() => actions.some(a => a.type === 'recap_consent' && a.epoch === 7 && a.allow === true)).toBeTruthy();
   membership!.send(JSON.stringify({type: 'snapshot', room: {...admitted, recap: {id: 'recap', state: 'capturing', epoch: 7, pending_jobs: 0, consented_member_ids: ['host', 'guest'], reason: null, started_at: new Date().toISOString()}}}));
   await page.getByRole('button', {name: 'Withdraw consent'}).click();
+  // Withdrawing pauses capture for everyone, so it asks first.
+  await page.getByRole('dialog', {name: 'Pause capture for everyone?'}).getByRole('button', {name: 'Pause capture', exact: true}).click();
   await expect.poll(() => actions.some(a => a.type === 'recap_consent' && a.epoch === 7 && a.allow === false)).toBeTruthy();
   expect(requests).toHaveLength(1);
   await page.screenshot({path: `/tmp/otto-room-${testInfo.project.name}.png`, fullPage: true});
@@ -222,7 +224,7 @@ test('read-only room terminal applies backpressure and resumes after parsing a l
   await page.goto('/#/room/demo/invite_1234567890');
   await page.getByLabel('Your display name').fill('Alex');
   await page.getByRole('button', {name: 'Request entry'}).click();
-  await expect(page.getByText(/Maya controls the terminal/)).toBeVisible();
+  await expect(page.locator('.room-status').getByText(/Maya controls the terminal/)).toBeVisible();
   await expect.poll(() => frames.some(frame => frame.type === 'scrollback')).toBeTruthy();
   // One snapshot above xterm's high watermark deterministically exercises the
   // actual Terminal → room transport path, even on a fast renderer.

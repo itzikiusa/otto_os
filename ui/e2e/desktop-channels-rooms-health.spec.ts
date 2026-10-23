@@ -42,7 +42,8 @@ test('channels: an enabled Slack card shows why it is not connected', async ({ p
 
   const badge = page.getByTestId('channel-health-slack');
   await expect(badge).toHaveText('Not connected');
-  await expect(page.getByText(/Slack rejected the app token \(invalid_auth\)/)).toBeVisible();
+  // Scoped to the page: the same detail is also spoken via the sr-only announcer.
+  await expect(page.locator('#app-content').getByText(/Slack rejected the app token \(invalid_auth\)/)).toBeVisible();
   // Opened to everyone is flagged on the card…
   await expect(page.getByText('Open to everyone')).toBeVisible();
   // …and explained in the editor.

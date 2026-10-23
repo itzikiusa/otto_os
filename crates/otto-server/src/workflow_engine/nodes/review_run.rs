@@ -256,6 +256,10 @@ pub(in crate::workflow_engine) async fn execute(
         .get("require_pass")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    // The mode line is the step's first log line: it is sent before the
+    // target resolution that can fail the step, so an errored run still
+    // shows which mode it would have reviewed in.
+    let mode = review_mode(&call).await;
     let (targets, logs_pre) = resolve_targets(
         call.ctx,
         call.ws,
@@ -265,7 +269,7 @@ pub(in crate::workflow_engine) async fn execute(
         call.env.run_cwd.as_str(),
     )
     .await?;
-    let (plan, mut logs) = plan_review(&call, targets.len(), logs_pre).await;
+    let (plan, mut logs) = plan_review(&call, mode, targets.len(), logs_pre).await;
     // Review every target; a per-target failure in the multi-repo case
     // is logged and skipped (one bad repo never sinks the others), the
     // single-target case keeps its hard error.
@@ -314,11 +318,38 @@ pub(in crate::workflow_engine) async fn execute(
     Ok((Value::Object(out), logs))
 }
 
+/// R2: which execution mode the reviewers run in, sent to the step's live
+/// log. The RUN's own input wins over the node's param (that is what makes
+/// the run dialog an override); a node param wins over the repo's stored
+/// config. Read from `env.run_input`, never the node input — node inputs
+/// lose run-level keys hop by hop (`assemble_input`).
+async fn review_mode(call: &NodeCall<'_>) -> otto_core::domain::ReviewMode {
+    let p = &call.node.params;
+    let (mode, mode_src) = match resolve_review_mode_source(&call.env.run_input, p) {
+        Some(r) => r,
+        None => {
+            // `otto_core::Id` is a plain `String` alias.
+            let rid: Option<Id> = p
+                .get("repo_id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+            crate::modules::effective_review_mode(call.ctx, rid.as_ref()).await
+        }
+    };
+    let _ = call
+        .log_tx
+        .send(format!("review_run: mode {} ({mode_src})", mode.as_str()));
+    mode
+}
+
 /// Build the step's shared [`ReviewPlan`] from the node params, the run
 /// input and the run's context files. Returns it with the step's opening
 /// log lines.
 async fn plan_review<'a>(
     call: &'a NodeCall<'a>,
+    mode: otto_core::domain::ReviewMode,
     n_targets: usize,
     mut logs: Vec<String>,
 ) -> (ReviewPlan<'a>, Vec<String>) {
@@ -352,25 +383,6 @@ async fn plan_review<'a>(
         .and_then(Value::as_u64)
         .unwrap_or(18_000)
         .max(60);
-    // R2: which execution mode the reviewers run in. The RUN's own input
-    // wins over the node's param (that is what makes the run dialog an
-    // override); a node param wins over the repo's stored config. Read
-    // from `env.run_input`, never the node input — node inputs lose
-    // run-level keys hop by hop (`assemble_input`).
-    let (mode, mode_src) = match resolve_review_mode_source(&env.run_input, p) {
-        Some(r) => r,
-        None => {
-            // `otto_core::Id` is a plain `String` alias.
-            let rid: Option<Id> = p
-                .get("repo_id")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string);
-            crate::modules::effective_review_mode(ctx, rid.as_ref()).await
-        }
-    };
-    let _ = log_tx.send(format!("review_run: mode {} ({mode_src})", mode.as_str()));
     // Reviewer providers + lenses (skills) — drive the SAME multi-agent
     // engine as PR review (multi-provider × multi-lens, one summarizer that
     // consolidates + scores). Empty → the stored/default PR-review config.

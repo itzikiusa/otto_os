@@ -37,7 +37,9 @@ test('Assistant failed send preserves a newer draft and protects thread navigati
   await input.fill('Original message'); await input.press('Enter');
   await expect.poll(() => !!release).toBe(true);
   await input.fill('Newer draft while sending'); release();
-  await expect(page.getByRole('alert')).toContainText('Couldn’t send');
+  // The composer's error line has no live role; it is spoken via the announcer.
+  await expect(page.locator('.composer .err')).toContainText('Couldn’t send');
+  await expect(page.getByTestId('announcer-assertive')).toContainText('Couldn’t send');
   await expect(input).toHaveValue('Original message\n\nNewer draft while sending');
   await page.getByRole('tab', { name: /^Tasks/ }).click();
   await expect(page.getByRole('dialog')).toContainText('Discard unsaved changes?');
@@ -106,11 +108,11 @@ test('Assistant phone attachment recovery shows the full identity and model pin 
   const longName = 'synthetic-review-for-september-with-complete-customer-identity-final-approved-version.txt';
   state.fail['/assistant/threads/th-personal/attachments'] = 503;
   await page.locator('input[type=file]').setInputFiles({ name: longName, mimeType: 'text/plain', buffer: Buffer.from('synthetic') });
-  await expect(page.getByRole('alert')).toContainText('Couldn’t attach');
+  await expect(page.locator('.composer .err')).toContainText('Couldn’t attach');
   delete state.fail['/assistant/threads/th-personal/attachments'];
   await page.locator('input[type=file]').setInputFiles({ name: longName, mimeType: 'text/plain', buffer: Buffer.from('synthetic') });
   await expect(page.locator('.fname')).toHaveText(longName);
-  await expect(page.locator('.composer').getByRole('alert')).toHaveCount(0);
+  await expect(page.locator('.composer .err')).toHaveCount(0);
   await expect.poll(() => page.locator('.fname').evaluate(e => e.scrollWidth <= e.clientWidth)).toBe(true);
   await page.screenshot({ path: '/tmp/otto-ux-screenshots/insights-r3-attachment-phone.png' });
   await page.getByRole('button', { name: `Remove ${longName}`, exact: true }).click();
@@ -120,7 +122,7 @@ test('Assistant phone attachment recovery shows the full identity and model pin 
   state.fail['/assistant/threads/th-personal/route'] = 503;
   await sheet.getByRole('button', { name: 'Codex', exact: true }).click();
   await sheet.getByRole('button', { name: 'Pin to thread' }).click();
-  await expect(sheet.getByRole('alert')).toContainText('Couldn’t pin');
+  await expect(sheet.locator('.err')).toContainText('Couldn’t pin');
   delete state.fail['/assistant/threads/th-personal/route'];
   await sheet.getByRole('button', { name: 'Pin to thread' }).click();
   await expect(sheet).toHaveCount(0);

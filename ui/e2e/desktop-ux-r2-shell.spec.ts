@@ -9,6 +9,9 @@ const artifacts = [
   { id: 'report', kind: 'report', label: 'Release readiness report with a deliberately long descriptive title.md', path: '/tmp/report.md', url: null, mime: 'text/markdown', produced_at: '2026-09-25T10:00:00Z', turn_id: 'turn' },
   { id: 'link', kind: 'url', label: 'Preview documentation', path: null, url: 'https://example.com/review', mime: null, produced_at: '2026-09-25T10:01:00Z', turn_id: 'turn' },
 ];
+// The list is newest-first (activity store), so the link opens first: pick rows by name.
+const reportOption = { name: /^Release readiness report/ };
+const linkOption = { name: /^Preview documentation/ };
 test.beforeAll(async () => {
   const { ctx, base } = await apiCtx();
   workspaceId = await seedWorkspace(ctx, base);
@@ -52,9 +55,9 @@ test('Outputs switching from a pending preview to a link clears loading', async 
   });
   await boot(page);
   const panel = page.getByTestId('outputs-panel');
-  await panel.getByRole('option').first().click();
+  await panel.getByRole('option', reportOption).click();
   await expect(panel.getByRole('status', { name: 'Loading the preview' })).toBeVisible();
-  await panel.getByRole('option').nth(1).click();
+  await panel.getByRole('option', linkOption).click();
   try {
     await expect(panel.getByRole('link', { name: 'https://example.com/review' })).toBeVisible();
     await expect(panel.getByRole('status', { name: 'Loading the preview' })).toBeHidden();
@@ -78,7 +81,7 @@ for (const variant of [
     await page.route(`**/sessions/${sessionId}/artifacts/report`, route => route.fulfill({ contentType: 'text/markdown', body: '# Release readiness\n\nThe agent completed the requested checks. Review the changes before publishing.\n\n' + Array.from({ length: 24 }, (_, i) => `- Check ${i + 1}: passed`).join('\n') }));
     await boot(page);
     const panel = page.getByTestId('outputs-panel');
-    await panel.getByRole('option').first().click();
+    await panel.getByRole('option', reportOption).click();
     await expect(panel.getByRole('heading', { name: 'Release readiness' })).toBeVisible();
     await expectFullyInViewport(page, panel);
     await expectNoHorizontalOverflow(page);
@@ -98,10 +101,10 @@ test('Outputs reselecting an artifact ignores an older in-flight preview', async
   });
   await boot(page);
   const panel = page.getByTestId('outputs-panel');
-  await panel.getByRole('option').first().click();
+  await panel.getByRole('option', reportOption).click();
   await expect.poll(() => requests).toBe(1);
-  await panel.getByRole('option').nth(1).click();
-  await panel.getByRole('option').first().click();
+  await panel.getByRole('option', linkOption).click();
+  await panel.getByRole('option', reportOption).click();
   await expect(panel.getByRole('heading', { name: 'Current response' })).toBeVisible();
   const completed = page.waitForResponse(`**/sessions/${sessionId}/artifacts/report`);
   release();
@@ -125,7 +128,7 @@ test('Outputs list supports arrow and Home/End keyboard selection', async ({ pag
   await expect(options.nth(1)).toBeFocused();
 });
 
-test('terminal preserves a selection when an in-flight resize snapshot arrives', async ({ page }) => {
+test('terminal applies an in-flight resize snapshot that arrives after a selection', async ({ page }) => {
   const { ctx, base } = await apiCtx();
   await ctx.post(`${base}/api/v1/sessions/${sessionId}/input`, { data: { text: 'for i in $(seq 1 20); do echo SELECTION-REVIEW-$i; done', submit: true } });
   await ctx.dispose();
@@ -170,9 +173,18 @@ test('terminal preserves a selection when an in-flight resize snapshot arrives',
   const mirror = page.locator('.xterm-helper-textarea');
   await expect(mirror).toHaveValue(/SELECTION-REVIEW/);
   release!();
-  // The snapshot crosses the socket task and xterm's asynchronous write queue.
-  await page.waitForTimeout(300);
-  await expect(mirror).toHaveValue(/SELECTION-REVIEW/);
+  // A received snapshot is authoritative (docs/reviews/terminal-redraw-20261009):
+  // output between its request and capture exists only in it, so the rebuild is
+  // never discarded, and a selection made while it was in flight may be cleared.
+  // The rebuilt grid keeps every line and selects again (a different range).
+  await expect(page.locator('.xterm-rows')).toContainText('SELECTION-REVIEW-20');
+  await expect(async () => {
+    await page.mouse.move(box.x + 8, box.y + 140);
+    await page.mouse.down();
+    await page.mouse.move(box.x + box.width - 40, box.y + 220, { steps: 20 });
+    await page.mouse.up();
+    await expect(mirror).toHaveValue(/SELECTION-REVIEW-1\d/, { timeout: 1000 });
+  }).toPass();
 });
 
 for (const scheme of ['light', 'dark']) {

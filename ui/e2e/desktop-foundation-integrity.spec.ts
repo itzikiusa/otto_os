@@ -20,7 +20,8 @@ test('daemon settings retain a newer port draft while the prior save finishes', 
   await pending!.fulfill({ json: { network_listener: { enabled: true, port: 7701 } } });
   await expect(port).toHaveValue('7702');
   await expect(page.getByRole('button', { name: 'Save', exact: true })).toBeEnabled();
-  await expect(page.getByRole('status').filter({ hasText: 'Unsaved changes' })).toBeVisible();
+  // The visible note in the page (the announcer repeats it for screen readers).
+  await expect(page.locator('#app-content').getByText(/^Unsaved changes/)).toBeVisible();
 });
 
 test('safety posture shows actual exposure and pending restart at desktop and phone widths', async ({ page }) => {

@@ -50,17 +50,17 @@ test('Assistant attachment-only failed send restores files and partial upload na
   await page.goto('/#/assistant/th-personal');
   await page.locator('input[type=file]').setInputFiles(['bad-first.txt', 'good.txt', 'bad-last.txt'].map(name => ({ name, mimeType: 'text/plain', buffer: Buffer.from('synthetic') })));
   await expect(page.locator('.composer .fname')).toHaveText('good.txt');
-  await expect(page.locator('.composer').getByRole('alert')).toContainText('bad-first.txt');
-  await expect(page.locator('.composer').getByRole('alert')).toContainText('bad-last.txt');
+  await expect(page.locator('.composer .err')).toContainText('bad-first.txt');
+  await expect(page.locator('.composer .err')).toContainText('bad-last.txt');
   state.fail['/assistant/threads/th-personal/turns'] = 503;
   await page.locator('.composer').getByRole('button', { name: 'Send', exact: true }).click();
-  await expect(page.locator('.composer').getByRole('alert')).toContainText('Couldn’t send');
+  await expect(page.locator('.composer .err')).toContainText('Couldn’t send');
   await expect(page.locator('.composer .fname')).toHaveText('good.txt');
   await expect(page.getByRole('textbox', { name: 'Message Otto' })).toHaveValue('');
   delete state.fail['/assistant/threads/th-personal/turns'];
   await page.locator('.composer').getByRole('button', { name: 'Send', exact: true }).click();
   await expect(page.locator('.composer .fname')).toHaveCount(0);
-  await expect(page.locator('.composer').getByRole('alert')).toHaveCount(0);
+  await expect(page.locator('.composer .err')).toHaveCount(0);
   await expectNoHorizontalOverflow(page);
 });
 test('Health support bundle failure leaves download available for retry', async ({ page }) => {
