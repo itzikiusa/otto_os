@@ -55,9 +55,9 @@ pub const GROUPS: &[ToolGroup] = &[
     ToolGroup {
         id: "database",
         label: "Database",
-        description: "Database connections: schema, objects and read-only queries.",
+        description: "Database connections: schema, objects, queries and approval-gated writes.",
         prefixes: &["db_"],
-        exact: &["list_connections", "query_db_readonly"],
+        exact: &["list_connections", "query_db_readonly", "query_db"],
     },
     ToolGroup {
         id: "issues",

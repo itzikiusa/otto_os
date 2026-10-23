@@ -338,3 +338,32 @@ fn issue_create_tools_reach_sessions_through_the_governed_bridge() {
         );
     }
 }
+
+/// Control-plane parity for the database writer: enabling `otto.query_db`
+/// under MCP → Otto server makes it visible to a session as `otto_query_db`
+/// with the catalog's schema, proxied through the governed path (approval +
+/// audit). The read-only twin stays served natively as `otto_db_query`.
+#[test]
+fn query_db_reaches_sessions_through_the_governed_bridge() {
+    let enabled = vec![
+        "otto.query_db".to_string(),
+        "otto.query_db_readonly".to_string(),
+    ];
+    let tools = governed_tools_for(&enabled);
+    let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+    assert_eq!(names, ["otto_query_db"], "the read-only twin is native");
+    let spec = GOVERNED_SPECS
+        .iter()
+        .find(|s| s["name"] == "otto.query_db")
+        .unwrap();
+    assert_eq!(
+        comparable_schema(&tools[0]["inputSchema"]),
+        comparable_schema(&spec["inputSchema"])
+    );
+    assert_eq!(
+        governed_tool_for_stdio_name("otto_query_db").as_deref(),
+        Some("otto.query_db")
+    );
+    assert!(native_tool_names().iter().any(|n| n == "otto_db_query"));
+    assert!(governed_tool_for_stdio_name("otto_db_query").is_none());
+}

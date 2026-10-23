@@ -900,6 +900,13 @@ async fn governed_readonly_profile_rejects_confirmed_root_write_before_network()
     assert!(
         matches!(result,Err(Error::Forbidden(ref reason)) if reason.contains("read-only connection"))
     );
+    // The refusal names the connection and the setting that lifts it.
+    let reason = result.unwrap_err().to_string();
+    assert!(
+        reason.contains("'root'")
+            && reason.contains("turn off Read-only in the connection's settings"),
+        "{reason}"
+    );
 }
 
 #[tokio::test]

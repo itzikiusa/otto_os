@@ -360,7 +360,8 @@
     >
       Otto’s own <code>otto</code> server, <strong>read-only</strong>: agents can list your database
       connections and run read-only queries (<code>otto_list_connections</code>, <code>otto_db_schema</code>,
-      <code>otto_db_query</code>, …). Writes and DDL are refused; rows are capped, PII-masked and audited.
+      <code>otto_db_query</code>, …). Writes and DDL are refused unless you enable the approval-gated
+      <code>otto.query_db</code> on the MCP page; rows are capped, PII-masked and audited.
       For this workspace; the same switch as “Attach to sessions” on the MCP page.
     </SettingToggle>
     {#if ottoError}

@@ -1440,7 +1440,7 @@ execution/cancel/export = `ws editor` (global connections: `Database:Edit`):
 | `POST …/db/schema/children` | lazy-expand a node (`{node}`; Redis `filter`) |
 | `POST …/db/object` | object detail (columns / keys / indexes / DDL / extra; opt-in `approx_row_count`) |
 | `POST …/db/schema-graph` | read-only ERD (`{schema, max_tables?}`; default 60, clamp 1..200) |
-| `POST …/db/query` | run a statement (`RunQueryReq` incl. `max_rows`, `node`, `query_id`, `timeout_ms`, `mask`, `confirm_write`) |
+| `POST …/db/query` | run a statement (`RunQueryReq` incl. `max_rows`, `node`, `query_id`, `timeout_ms`, `mask`, `confirm_write`); also the target of the approval-gated MCP writer `otto.query_db` (`mask:true`, ≤ 200 rows, `timeout_ms` 60 s, never `confirm_write`) |
 | `POST …/db/cancel` | engine-native cancel of an in-flight `query_id` (204) |
 | `POST …/db/close` | tear down the connection's server-side state — cancel in-flight queries, close the cached driver pool, drop the SSH tunnel; idempotent (`ws viewer`; fired on tab close) |
 | `POST …/db/mcp-query` | read-only query surface for agents over MCP — writes/DDL refused before any driver call, rows capped at 200, masking forced on, and always a server-side time limit of 15 s (`MCP_QUERY_TIMEOUT_MS`; the engine stops the statement itself, below the MCP bridge's own call budget, so an agent's timed-out query does not keep running on the database) (`ws viewer`) |
@@ -1627,6 +1627,15 @@ parses (and which read fine as plain text in history rows and MCP results):
   writes on a guarded connection are **audited** (`db.write_confirmed`). The UI also
   shows danger styling — a red rail / **PROD** badge for production, an amber rail /
   **RO** badge for read-only — and a banner.
+- **Agent writes (`otto.query_db`) meet the same guard.** The approval-gated MCP
+  writer runs through this `…/db/query` path with the agent's credential and never
+  sends `confirm_write` (an agent's would not count, S6-304), so a guarded
+  connection refuses it. For an agent credential the `write_blocked:` message names
+  the setting instead of a typed confirmation — *turn off Read-only* / *set an
+  environment other than Production* in the connection's settings, or run the write
+  yourself here. On an access-enforced connection the read-only refusal and the
+  production `review_required:` refusal name the same settings. See the
+  [MCP control plane guide](./mcp-control-plane.md).
 - **Multi-target runs ("Run on…") keep the guard per target.** Every run goes
   through the same `…/db/query` path (write-guard, access enforcement, history,
   audit). A multi-run with any write to a production / read-only target is

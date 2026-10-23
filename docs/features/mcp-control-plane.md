@@ -199,10 +199,10 @@ counts the tools some rule auto-approves.
   rule over a category rule.
 - **Guardrail — irreversible tools.** `merge_pr`, `k8s_action`,
   `produce_broker_message`, `aws_sqs_send`, `api_execute`, `api_run_automation`,
-  `delete_scheduled_task` and `assistant_forget` act on something nobody can take back
-  from inside Otto (a merge into the target branch, a live cluster, a message
-  consumers already acted on, an arbitrary — possibly production — HTTP write, a hard
-  delete). A **category rule never covers them**; a per-tool rule covers one only with
+  `delete_scheduled_task`, `assistant_forget` and `query_db` act on something nobody
+  can take back from inside Otto (a merge into the target branch, a live cluster, a
+  message consumers already acted on, an arbitrary — possibly production — HTTP write,
+  a hard delete, a committed database write). A **category rule never covers them**; a per-tool rule covers one only with
   the **second explicit toggle** `allow_irreversible` (the UI asks twice). Opening,
   commenting on or reviewing a PR, Jira/Confluence edits, messages to agents and vault
   edits (`vault_delete` is a soft trash move) are reversible and auto-approvable.
@@ -325,7 +325,7 @@ Coverage by category (✅ = read tools, ⚠ = mutating tools, approval-gated):
 | **Workflows** | ✅ list (every workspace) / get / list_runs (summary rows) / get_run | ⚠ run, cancel_run |
 | **Message Brokers** | ✅ list_clusters (every workspace) / list_topics / get_topic / list_consumer_groups / *consume*¹ | ⚠ produce |
 | **Git** | ✅ list_repos / status / list_prs (paged) / get_pr / get_pr_checks / *get_pr_diff*¹ / *open_pr_draft*¹ | ⚠ create_pr, comment_pr, merge_pr, start_pr_review |
-| **Database** | ✅ list_connections (every workspace) / *query_db_readonly*¹ | — |
+| **Database** | ✅ list_connections (every workspace) / *query_db_readonly*¹ | ⚠ query_db (a statement that may write, through the Explorer's own query path; the connection's read-only / production setting still refuses it) |
 | **API Client** | ✅ api_list / api_get_request / api_history (masked: no secret values, no tokens, JWTs as claims) | ⚠ api_execute (sends one saved request; method/new-host confirm flags), api_upsert_request, api_run_automation |
 | **Issues** | ✅ list_issue_accounts / search_issues / get_issue / list_issue_transitions / list_issue_projects / list_issue_types / search_confluence / get_confluence_page / list_confluence_page_comments — `account_id` optional with one account | ⚠ create_issue (Markdown description → ADF; labels / priority / parent / epic / fields; createmeta pre-checks → `{key, url, verification}`), comment_issue, transition_issue, create/update/comment_confluence_page (validated storage; each returns a read-back `verification`) |
 | **Swarm** | ✅ list (every workspace) / get / list_runs / list_swarm_projects / list_swarm_tasks / get_board | ⚠ post_swarm_board, create_work_item² |
@@ -605,6 +605,7 @@ complete list and `otto_tool_specs()` / `route_for` for the authoritative source
 | `otto.run_goal_loop` | **yes (dangerous)** | no | Create **and start** a bounded goal loop. |
 | `otto.create_work_item` | **yes (dangerous)** | no | Create a Swarm task under a project. |
 | `otto.query_db_readonly` | no | no | A **read-only** SQL query against a connection (statement-classified; writes/DDL/multi-statement rejected). |
+| `otto.query_db` | **yes (dangerous, irreversible)** | no | A statement that **may write** (INSERT/UPDATE/DELETE/DDL) against a connection, through the Database Explorer's `/db/query` path — refused on a read-only or production connection. |
 | `otto.open_pr_draft` | no | no | Draft a PR title + description from a diff — **does not** publish a PR. |
 | `otto.get_proof_pack` | no | **yes** | An evidence bundle: git status/recent-commits/diffstat + a goal loop's machine-checked acceptance criteria. |
 | `otto.ask_human_approval` | no (creates a request) | **yes** | Create a pending human-approval item and optionally wait (`wait_seconds ≤ 30`) for the decision. |
@@ -628,6 +629,34 @@ per-session DB tools use — which re-classifies with the engine's own lexer and
 executes inside the engine's read-only mode (a read-only transaction on
 MySQL/Postgres, `readonly` on ClickHouse), with sensitive cells masked. An
 optional `node` (e.g. `db:<name>`) scopes the query.
+
+`otto.query_db` is its **writing** sibling: the same arguments (`connection_id` id
+or name, `statement`, `max_rows`, `node`), and the same result shape — rows for a
+read (masked, ≤ 200), the driver's affected-row counts for a write. It is
+`DANGEROUS` and `IRREVERSIBLE`: every call asks a person (the card shows the
+connection and the statement), a category auto-approve rule never covers it, and a
+per-tool rule needs `allow_irreversible`. After the approval it runs through
+`POST /connections/{id}/db/query` — the route a person's Explorer run uses — **as the
+calling credential**, so the connection's own settings decide exactly as they do in
+the UI:
+
+- **Workspace role Editor** and **Database Edit**, like any Explorer run.
+- **Resource access** (new connections are access-enforced): the caller needs the
+  data/schema operations on the target database. On an enforced **read-only**
+  connection a write is refused (`read-only connection '<name>' cannot perform
+  database mutations; turn off Read-only in the connection's settings…`); on an
+  enforced **production** connection it is refused with `review_required:` — changes
+  there go through Database Explorer → Changes.
+- **The write-guard** (legacy connections): a connection marked **Read-only** or with
+  environment **Production** refuses the write with `write_blocked: … so an agent
+  cannot write to it; a person can run the write in the Database Explorer, or turn
+  off Read-only / set an environment other than Production in the connection's
+  settings`. The tool never sends `confirm_write`, and an agent credential's
+  confirmation would not count anyway (S6-304), so no approval lifts the guard.
+
+A writable (dev / staging, not read-only) connection the caller may write to takes
+the statement once approved. `otto.query_db_readonly` is unchanged — still refused
+for every write, on every connection.
 
 ---
 
@@ -1101,7 +1130,14 @@ the new one-time secret for the token you intentionally rotated.
 
 **`otto.query_db_readonly` rejected my statement.** It permits a **single read-only**
 statement (`SELECT/SHOW/DESCRIBE/EXPLAIN/WITH`); writes, DDL, and multi-statement
-input are rejected server-side regardless of the connection's write-guard.
+input are rejected server-side regardless of the connection's write-guard. For a
+write, enable the approval-gated `otto.query_db`.
+
+**`otto.query_db` was refused with `write_blocked:` / `read-only connection` /
+`review_required:`.** The connection is marked Read-only or its environment is
+Production. That is the connection's own setting, honoured exactly as in the
+Database Explorer: change it in the connection's settings, run the write yourself in
+the Explorer, or (production, access-enforced) submit a reviewed change.
 
 **Stats show no cost.** By design — Otto meters latency/bytes/errors; per-vendor USD
 cost is not tracked.

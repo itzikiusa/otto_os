@@ -200,6 +200,9 @@ pub const DANGEROUS: &[&str] = &[
     // through the native stdio tools, which chip + Undo every write).
     "assistant_remember",
     "assistant_forget",
+    // A database write/DDL through the Explorer's own query path — the
+    // connection's read-only / production guard still refuses it there.
+    "query_db",
 ];
 
 /// The **irreversible** tier of [`DANGEROUS`] — the guardrail for auto-approve
@@ -223,6 +226,8 @@ pub const IRREVERSIBLE: &[&str] = &[
     "api_run_automation",
     "delete_scheduled_task",
     "assistant_forget",
+    // A committed UPDATE / DELETE / DROP has no undo inside Otto.
+    "query_db",
 ];
 
 /// The IRREVERSIBLE writers an agent session's in-session stdio bridge
@@ -414,11 +419,6 @@ pub fn otto_tool_specs() -> Vec<Value> {
             "inputSchema":{"type":"object","required":["project_id","title"],"properties":{
                 "project_id":{"type":"string"},"title":{"type":"string"},
                 "description":{"type":"string"},"priority":{"type":"string"}}}}),
-        json!({"name":"otto.query_db_readonly","mutating":false,"category":"Database",
-            "description":"Run a READ-ONLY query against an Otto DB connection. Writes/DDL and multi-statement input are rejected server-side regardless of the connection's guard, and the query executes in the engine's read-only mode with sensitive cells masked. Optional `node` scopes it (e.g. `db:<name>` / `kdb:<n>`).",
-            "inputSchema":{"type":"object","required":["connection_id","statement"],"properties":{
-                "connection_id":{"type":"string","description":CONNECTION_REF_DESC},"statement":{"type":"string"},"max_rows":{"type":"integer"},
-                "node":{"type":"string"}}}}),
         json!({"name":"otto.open_pr_draft","mutating":false,"category":"Git",
             "description":"Draft a PR title + description from a repo's diff vs a base branch. Drafts text only — does NOT open/publish a PR.",
             "inputSchema":{"type":"object","required":["base"],"properties":{
@@ -587,6 +587,10 @@ pub fn otto_tool_specs() -> Vec<Value> {
                 "pr_number":{"type":"integer","description":"Alias of `number`."},
                 "strategy":{"type":"string","enum":["merge","squash","rebase"]},"delete_source_branch":{"type":"boolean"}}}}),
     ];
+    // The DB query pair sits just before `open_pr_draft`, as it always has.
+    let at = specs.iter().position(|s| s["name"] == "otto.open_pr_draft");
+    let at = at.unwrap_or(specs.len());
+    specs.splice(at..at, database_query_specs());
     specs.extend(issue_tool_specs());
     specs.extend([
         // ================= Swarm =================
@@ -1017,6 +1021,24 @@ pub fn otto_tool_specs() -> Vec<Value> {
     specs
 }
 
+/// The Database query slice of [`otto_tool_specs`] — the read-only query and
+/// its approval-gated writing sibling (split out to keep that function under
+/// the size ratchet).
+fn database_query_specs() -> [Value; 2] {
+    [
+        json!({"name":"otto.query_db_readonly","mutating":false,"category":"Database",
+            "description":"Run a READ-ONLY query against an Otto DB connection. Writes/DDL and multi-statement input are rejected server-side regardless of the connection's guard, and the query executes in the engine's read-only mode with sensitive cells masked. Optional `node` scopes it (e.g. `db:<name>` / `kdb:<n>`).",
+            "inputSchema":{"type":"object","required":["connection_id","statement"],"properties":{
+                "connection_id":{"type":"string","description":CONNECTION_REF_DESC},"statement":{"type":"string"},"max_rows":{"type":"integer"},
+                "node":{"type":"string"}}}}),
+        json!({"name":"otto.query_db","mutating":true,"category":"Database",
+            "description":"Run a statement that may WRITE (INSERT/UPDATE/DELETE/DDL) on an Otto DB connection, via the Database Explorer's query path. A read-only or production connection refuses writes (its settings can change that). Returns rows (masked, ≤200) or affected-row counts. Approval-gated; use otto.query_db_readonly for reads.",
+            "inputSchema":{"type":"object","required":["connection_id","statement"],"properties":{
+                "connection_id":{"type":"string","description":CONNECTION_REF_DESC},"statement":{"type":"string"},"max_rows":{"type":"integer"},
+                "node":{"type":"string"}}}}),
+    ]
+}
+
 /// The Issues (Jira / Confluence) slice of [`otto_tool_specs`], in catalog
 /// order (split out to keep that function under the size ratchet).
 fn issue_tool_specs() -> Vec<Value> {
@@ -1230,6 +1252,23 @@ pub fn dangerous_detail(tool: &str, args: &Value) -> String {
             "Cancel workflow run '{}'",
             args.get("run_id").and_then(Value::as_str).unwrap_or("?")
         ),
+        "query_db" => {
+            let stmt: String = args
+                .get("statement")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .chars()
+                .take(400)
+                .collect();
+            format!(
+                "Run a database statement that may write, on connection '{}'{}: {stmt}",
+                args.get("connection_id").and_then(Value::as_str).unwrap_or("?"),
+                args.get("node")
+                    .and_then(Value::as_str)
+                    .map(|n| format!(" ({n})"))
+                    .unwrap_or_default()
+            )
+        }
         "produce_broker_message" => format!(
             "Produce a message to topic '{}' on cluster '{}'",
             args.get("topic").and_then(Value::as_str).unwrap_or("?"),
