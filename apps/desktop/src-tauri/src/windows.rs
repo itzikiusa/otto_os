@@ -731,5 +731,10 @@ mod tests {
             .collect();
         assert!(perms.contains(&"core:window:allow-start-dragging"));
         assert!(perms.contains(&"core:window:allow-toggle-maximize"));
+        // A JS `onCloseRequested` listener (the snip editor) makes Tauri hold
+        // the native close and finish it with `destroy()`: without it the
+        // window ignores Close, the red button and Delete alike.
+        assert!(perms.contains(&"core:window:allow-close"));
+        assert!(perms.contains(&"core:window:allow-destroy"));
     }
 }
