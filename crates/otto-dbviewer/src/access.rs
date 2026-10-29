@@ -719,6 +719,19 @@ pub(crate) fn operations(engine: Engine, sql: &str) -> Result<Vec<&'static str>>
             } if options.is_none() && matches!(statement.as_ref(), Statement::Query(_)) => {
                 "db_query"
             }
+            // Plain transaction control grants nothing by itself: the grid's
+            // Review & apply wraps a multi-row edit in `BEGIN; … COMMIT;`
+            // (ui review-batch.ts) and every statement inside is still
+            // classified above. A `BEGIN … END` block body is not — refuse it.
+            Statement::StartTransaction {
+                ref statements,
+                ref exception,
+                ..
+            } if statements.is_empty() && exception.is_none() => "db_query",
+            Statement::Commit { .. }
+            | Statement::Rollback {
+                savepoint: None, ..
+            } => "db_query",
             _ => {
                 return Err(Error::Forbidden(
                     "this SQL form is unsupported for governed direct execution".into(),
@@ -807,6 +820,30 @@ mod tests {
         assert_eq!(canonical_node(Some("")), None);
     }
 
+    #[test]
+    fn governed_sql_allows_the_review_batch_transaction_wrapper() {
+        let ops = operations(
+            Engine::Mysql,
+            "BEGIN;\nUPDATE `shop`.`orders` SET `total` = 2 WHERE `id` = 1;\nUPDATE `shop`.`orders` SET `total` = 3 WHERE `id` = 2;\nCOMMIT;",
+        )
+        .unwrap();
+        assert_eq!(ops, vec!["db_query", "db_data"]);
+        assert_eq!(
+            operations(
+                Engine::Postgres,
+                "BEGIN; DELETE FROM shop.orders; ROLLBACK;"
+            )
+            .unwrap(),
+            vec!["db_query", "db_data"]
+        );
+        // The wrapper never hides what runs inside it.
+        assert!(
+            operations(Engine::Mysql, "BEGIN; DROP TABLE shop.orders; COMMIT;")
+                .unwrap()
+                .contains(&"db_schema")
+        );
+        assert!(operations(Engine::Postgres, "BEGIN; SET ROLE owner; COMMIT;").is_err());
+    }
     #[test]
     fn governed_sql_accounts_for_nested_writes_and_rejects_session_commands() {
         assert!(operations(
