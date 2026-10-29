@@ -671,7 +671,7 @@
         // fall through to the guarded router
       }
     }
-    if (router.parts.length && history.length > 1) router.back();
+    if (router.canGoBack) router.back(); // a relaunch restores this route with nothing behind it
     else router.go('agents');
   }
 
