@@ -540,6 +540,14 @@ class Router {
     this.go(this.lastByModule.get(id) ?? id);
   }
 
+  /** Whether {@link back} has an entry to step to. `history.length` is not a
+   *  substitute: a relaunched window restores its last route with an empty
+   *  stack while the webview's own history can already be > 1. */
+  get canGoBack(): boolean {
+    for (let i = this.index - 1; i >= 0; i -= 1) if (!this.claimed(this.stack[i])) return true;
+    return false;
+  }
+
   /** Back/forward step over entries the split-view partner now owns (a
    *  module that moved into the other pane) rather than opening it twice. */
   back(): void {

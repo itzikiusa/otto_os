@@ -104,3 +104,14 @@ test('a new link navigation after Back still truncates forward history', async (
   b.router.back(); await flush();
   assert.equal(b.router.module, 'git');
 });
+
+test('canGoBack is false on a freshly restored route and true once something is behind it', async () => {
+  // A relaunched window lands straight on its saved route (e.g. the snip
+  // editor) with an empty in-app stack — Close must not rely on back().
+  const b = browser('#/snip/abc');
+  assert.equal(b.router.canGoBack, false);
+  b.router.go('git'); await flush();
+  assert.equal(b.router.canGoBack, true);
+  b.router.back(); await flush();
+  assert.equal(b.router.canGoBack, false);
+});
