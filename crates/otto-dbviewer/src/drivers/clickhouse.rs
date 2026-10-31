@@ -650,7 +650,7 @@ impl ClickhouseDriver {
         } else {
             self.native_client(cfg).await?
         };
-        let mut stream = client.query_raw(sql).await.map_err(native_err)?;
+        let mut stream = client.query_raw(sql, None).await.map_err(native_err)?;
 
         let mut meta: Vec<(String, String)> = Vec::new();
         let mut data: Vec<Vec<Value>> = Vec::new();
@@ -1409,6 +1409,41 @@ impl Conn {
     /// non-2xx the error body is small, so we read it fully to surface the
     /// server's message; on success the body is left unread for the caller to
     /// stream chunk-by-chunk to disk.
+    /// `statement` in the URL (`query=`), the request body streamed as its
+    /// data — ClickHouse's documented `INSERT … FORMAT X` upload. Never sets
+    /// `readonly` (it is a write the caller already guarded).
+    async fn post_body(&self, statement: &str, body: reqwest::Body) -> Result<u64> {
+        let mut req = self
+            .client
+            .post(&self.base)
+            .headers(self.headers.clone())
+            .query(&[("query", statement)]);
+        if let Some(tz) = &self.timezone {
+            req = req.query(&[("session_timezone", tz.as_str())]);
+        }
+        if let Some(db) = &self.database {
+            req = req.query(&[("database", db.as_str())]);
+        }
+        // A large file over a tunnel can take long; the per-request timeout
+        // must not cut it mid-upload (same 24h ceiling as the export stream).
+        req = req.timeout(Duration::from_secs(24 * 60 * 60));
+        let resp = req.body(body).send().await.map_err(req_err)?;
+        if !resp.status().is_success() {
+            let text = self.read_capped(resp).await?;
+            return Err(otto_core::Error::Upstream(crate::errors::clean_ch_message(
+                text.trim(),
+            )));
+        }
+        // `X-ClickHouse-Summary: {"written_rows":"N",…}` — the insert's row count.
+        Ok(resp
+            .headers()
+            .get("x-clickhouse-summary")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| serde_json::from_str::<serde_json::Value>(v).ok())
+            .and_then(|v| v.get("written_rows")?.as_str()?.parse().ok())
+            .unwrap_or(0))
+    }
+
     async fn post_stream(&self, body: String, json_array: bool) -> Result<reqwest::Response> {
         let mut req = compressed(self.client.post(&self.base).headers(self.headers.clone()));
         if self.map_arrays {
@@ -1465,6 +1500,8 @@ async fn native_connect(cfg: &ResolvedConfig) -> Result<klickhouse::Client> {
         password: cfg.password.clone().unwrap_or_default(),
         default_database: cfg.database.clone().unwrap_or_default(),
         tcp_nodelay: true,
+        // klickhouse 0.16: no client-wide default settings (per-query as before).
+        settings: Default::default(),
     };
     // 9440 (or a forwarded *9440) is the conventional native-TLS port; also
     // honour an explicit TLS mode in the profile.
@@ -3041,6 +3078,24 @@ impl Driver for ClickhouseDriver {
         crate::complete::sql::assemble(&sql_ctx, snap, KEYWORDS, FUNCTIONS)
     }
 
+    async fn insert_formatted(
+        &self,
+        cfg: &ResolvedConfig,
+        statement: &str,
+        body: reqwest::Body,
+        node: Option<&str>,
+    ) -> Result<u64> {
+        if transport_for(cfg) != Transport::Http {
+            return Err(types::invalid(
+                "file import streams over the ClickHouse HTTP port (8123/8443); \
+                 this connection uses the native protocol",
+            ));
+        }
+        let active_db = node.map(str::trim).filter(|s| !s.is_empty());
+        let conn = self.connect_id(cfg, active_db, None).await?;
+        conn.post_body(statement, body).await
+    }
+
     /// Streaming export. On the HTTP transport (the common case, incl. over an
     /// SSH tunnel) we ask ClickHouse for an explicit `FORMAT <fmt>` and stream the
     /// response body (`reqwest` `bytes_stream()`) straight to the file — constant
@@ -3067,6 +3122,29 @@ impl Driver for ClickhouseDriver {
             ));
         }
         let active_db = node.map(str::trim).filter(|s| !s.is_empty());
+
+        // Parquet / Arrow / ORC: only the server renders them, so they need the
+        // HTTP `FORMAT` passthrough; a cap becomes a LIMIT (the capped reader
+        // counts decoded JSON rows, which a binary body does not have).
+        if format.is_binary() {
+            if transport_for(cfg) != Transport::Http {
+                return Err(types::invalid(
+                    "Parquet, Arrow and ORC exports need the ClickHouse HTTP port (8123/8443)",
+                ));
+            }
+            let ch_format = format.clickhouse_format().unwrap_or("Parquet");
+            let capped;
+            let sql = match max_rows {
+                Some(cap) => {
+                    capped = format!("SELECT * FROM ({sql}) LIMIT {cap}");
+                    capped.as_str()
+                }
+                None => sql,
+            };
+            return self
+                .export_http_format(cfg, sql, active_db, ch_format, None, format, w)
+                .await;
+        }
 
         // JSONEachRow can stream a single array directly with
         // output_format_json_array_of_rows: no whole-result decode or byte cap.
@@ -3100,7 +3178,7 @@ impl ClickhouseDriver {
         let client = native_connect(&scoped).await?;
         let id = new_query_id();
         let query = format!("/* otto-query:{id} */\n{}", capped_sql(sql, max_rows));
-        let mut stream = client.query_raw(query).await.map_err(native_err)?;
+        let mut stream = client.query_raw(query, None).await.map_err(native_err)?;
         let mut sink = ExportSink::new(w, format);
         let mut header = false;
         let mut count = 0usize;
@@ -3287,6 +3365,12 @@ impl ClickhouseDriver {
             .await
             .map_err(|e| otto_core::Error::Internal(format!("finish export file: {e}")))
     }
+}
+
+/// True when this connection talks to ClickHouse over HTTP (the transport the
+/// streamed `INSERT … FORMAT` import and the binary exports need).
+pub fn uses_http(cfg: &ResolvedConfig) -> bool {
+    transport_for(cfg) == Transport::Http
 }
 
 // --- HTTP response compression (DB2-05) -------------------------------------

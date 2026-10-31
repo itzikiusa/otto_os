@@ -1,0 +1,312 @@
+///<reference types="svelte" />
+;
+  import { putThumbnail } from '../../lib/api/design';
+  // Thumbnail cache shared by every card on screen: object URLs (thumbnails,
+  // images) and small text sources (live previews), keyed by the version they
+  // came from so a new head re-fetches. Bounded — the oldest entries are
+  // evicted (and their object URLs revoked) past the cap.
+  const CAP = 120;
+  const urls = new Map<string, Promise<string | null>>();
+  const texts = new Map<string, Promise<string | null>>();
+  // Rendered mermaid/D2 thumbnails by kind:artifact:version (SD-16): a lobby
+  // reload hands every card a fresh artifact object, which used to re-run the
+  // diagram render (and swap the iframe srcdoc) for every card on screen.
+  const diagrams = new Map<string, Promise<string | null>>();
+
+  function remember<T>(m: Map<string, Promise<T>>, key: string, make: () => Promise<T>, onEvict?: (v: T) => void): Promise<T> {
+    const hit = m.get(key);
+    if (hit) {
+      m.delete(key);
+      m.set(key, hit); // refresh recency
+      return hit;
+    }
+    const p = make();
+    m.set(key, p);
+    while (m.size > CAP) {
+      const [oldKey, oldVal] = m.entries().next().value as [string, Promise<T>];
+      m.delete(oldKey);
+      if (onEvict) void oldVal.then(onEvict);
+    }
+    return p;
+  }
+
+  // Object URLs are reference-counted by the cards that show them (DH-12):
+  // evicting a cache entry used to revoke a URL a mounted <img> still
+  // displayed, so the card broke / re-fetched. Eviction now only revokes a URL
+  // nobody holds; a held one is revoked when its last card lets go.
+  const holders = new Map<string, number>();
+  const evicted = new Set<string>();
+  function hold(u: string): void {
+    holders.set(u, (holders.get(u) ?? 0) + 1);
+  }
+  function release(u: string): void {
+    const n = (holders.get(u) ?? 1) - 1;
+    if (n > 0) {
+      holders.set(u, n);
+      return;
+    }
+    holders.delete(u);
+    if (evicted.delete(u)) URL.revokeObjectURL(u);
+  }
+  const revoke = (u: string | null) => {
+    if (!u) return;
+    if (holders.has(u)) evicted.add(u);
+    else URL.revokeObjectURL(u);
+  };
+
+  // Persisted thumbnails: a rendered diagram is rasterized ONCE and stored
+  // (`PUT …/thumbnail`), so later loads show a cached PNG instead of
+  // re-fetching the source and re-running mermaid/D2 per card. Tried once per
+  // artifact version per session; a viewer (403) or a tainted canvas
+  // (foreignObject labels) just keeps the live render.
+  const persisted = new Set<string>();
+  async function persistSvgThumb(id: string, key: string, svg: string): Promise<void> {
+    if (persisted.has(key) || typeof document === 'undefined') return;
+    persisted.add(key);
+    const url = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml' }));
+    try {
+      const img = new Image();
+      await new Promise<void>((resolve, reject) => {
+        img.onload = () => resolve();
+        img.onerror = () => reject(new Error('svg load'));
+        img.src = url;
+      });
+      const W = 640;
+      const H = 400;
+      const c = document.createElement('canvas');
+      c.width = W;
+      c.height = H;
+      const g = c.getContext('2d');
+      if (!g) return;
+      g.fillStyle = 'white'; // a design thumbnail is a picture of the design, not themed chrome
+      g.fillRect(0, 0, W, H);
+      const iw = img.naturalWidth || W;
+      const ih = img.naturalHeight || H;
+      const k = Math.min((W * 0.92) / iw, (H * 0.92) / ih);
+      g.drawImage(img, (W - iw * k) / 2, (H - ih * k) / 2, iw * k, ih * k);
+      const png = await new Promise<Blob | null>((resolve) => {
+        try {
+          c.toBlob(resolve, 'image/png');
+        } catch {
+          resolve(null); // tainted canvas
+        }
+      });
+      if (png && png.size > 0 && png.size <= 2 * 1024 * 1024) await putThumbnail(id, png);
+    } catch {
+      /* best effort — the live render stays */
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
+
+  // Live previews are full documents (style, layout, paint — at 1280 px — per
+  // card). They render only while the card is on (or near) screen, and at
+  // most LIVE_CAP at once across every view (r3-03-03: the Lobby mounted up to
+  // 32, SpatialView 4 × every project). A card past the cap shows its
+  // placeholder until a slot frees.
+  const LIVE_CAP = 12;
+  class LiveSlots {
+    used = $state(0);
+  }
+  const slots = new LiveSlots();
+;;// The picture on a design card: the stored PNG thumbnail when there is one;
+// otherwise, with `live`, a small sandboxed render of the actual design
+// (HTML/SVG/Mermaid/D2 — scripts off, opaque origin) or the image itself;
+// otherwise a quiet placeholder with the studio badge. Never blocks a card.
+
+
+import { untrack } from 'svelte';
+import type { DesignArtifact } from '../../lib/api/types';
+import { fetchContent, getArtifact, thumbnailUrl } from '../../lib/api/design';
+import { renderMermaid } from '../../lib/render/mermaid';
+import { renderD2 } from '../canvas/d2';
+import StudioBadge from './StudioBadge.svelte';
+import { formatLabel, isImageFormat, renderKind } from './model';
+;
+
+  interface Props {
+    artifact: DesignArtifact;
+    /** Render the design itself when there is no stored thumbnail. */
+    live?: boolean;
+    /** A small cell (mosaics): the placeholder shows the badge only. */
+    compact?: boolean;
+    /** Render this version instead of the head (a variant tray card). The
+     *  stored thumbnail belongs to the head, so it is skipped. */
+    versionId?: string | null;
+  };;
+
+  type Pic =
+    | { kind: 'img'; src: string }
+    | { kind: 'doc'; html: string }
+    | { kind: 'none' };;function $$render() {
+
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+
+  let { artifact, live = false, compact = false, versionId = null }: Props = $props();
+
+  let pic = $state<Pic>({ kind: 'none' });
+  let boxW = $state(0);
+  let box: HTMLDivElement | undefined = $state();
+  /** On screen (with a margin so a scroll doesn't flash placeholders). */
+  let visible = $state(false);
+  /** This card holds one of the LIVE_CAP iframe slots. */
+  let hasSlot = $state(false);
+
+  // Every card (live or not) fetches only once it is near the viewport.
+  $effect(() => {
+    const el = box;
+    if (!el) return;
+    if (typeof IntersectionObserver === 'undefined') {
+      visible = true;
+      return;
+    }
+    const io = new IntersectionObserver(
+      (entries) => {
+        for (const e of entries) visible = e.isIntersecting;
+      },
+      { rootMargin: '200px' },
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  });
+
+  // Take a slot while a live document should show; give it back otherwise
+  // (and on destroy). Re-runs when another card frees one.
+  const wantsFrame = $derived(pic.kind === 'doc' && visible);
+  $effect(() => {
+    const used = slots.used;
+    if (wantsFrame && !hasSlot && used < LIVE_CAP) {
+      slots.used = used + 1;
+      hasSlot = true;
+    } else if (!wantsFrame && hasSlot) {
+      slots.used = Math.max(0, used - 1);
+      hasSlot = false;
+    }
+  });
+  $effect(() => () => {
+    if (untrack(() => hasSlot)) slots.used = Math.max(0, untrack(() => slots.used) - 1);
+  });
+
+  const version = $derived(versionId ?? artifact.head_version_id ?? 'none');
+  const rk = $derived(renderKind(artifact.format));
+
+  async function sourceOf(a: DesignArtifact, v: string | null): Promise<string | null> {
+    return remember(texts, `${a.id}:${v ?? a.head_version_id}`, async () => {
+      try {
+        const d = await getArtifact(a.id, v ? { content: true, version: v } : { content: true });
+        return d.content_truncated ? null : d.content;
+      } catch {
+        return null;
+      }
+    });
+  }
+
+  function svgDoc(svg: string): string {
+    return (
+      '<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;height:100%;background:#fff}' + // ui-guards: allow — rendered page canvas (the artifact’s own white page)
+      'body{display:flex;align-items:center;justify-content:center}svg{max-width:92%;max-height:92%;height:auto}</style>' +
+      `</head><body>${svg}</body></html>`
+    );
+  }
+
+  function samePic(a: Pic, b: Pic): boolean {
+    if (a.kind !== b.kind) return false;
+    if (a.kind === 'img' && b.kind === 'img') return a.src === b.src;
+    if (a.kind === 'doc' && b.kind === 'doc') return a.html === b.html;
+    return true;
+  }
+
+  let gen = 0;
+  $effect(() => {
+    const a = artifact;
+    const v = versionId;
+    void version;
+    // Live sources are fetched/rendered only once the card is near the
+    // viewport; an off-screen card keeps whatever it already has.
+    const liveNow = live && visible;
+    if (!visible) return; // off-screen cards keep what they have and fetch nothing
+    const myGen = ++gen;
+    void (async () => {
+      let next: Pic = { kind: 'none' };
+      if (a.thumb_blob && !v) {
+        const sha = a.thumb_blob;
+        const u = await remember(urls, `t:${a.id}:${sha}`, () => thumbnailUrl(a.id, sha).catch(() => null), revoke);
+        if (u) next = { kind: 'img', src: u };
+      } else if (liveNow && isImageFormat(a.format)) {
+        const u = await remember(
+          urls,
+          `c:${a.id}:${v ?? a.head_version_id}`,
+          () => fetchContent(a.id, v ? { asText: false, version: v } : { asText: false }).then((c) => c.blobUrl, () => null),
+          revoke,
+        );
+        if (u) next = { kind: 'img', src: u };
+      } else if (liveNow && (rk === 'html' || rk === 'svg' || rk === 'mermaid' || rk === 'd2')) {
+        const src = await sourceOf(a, v);
+        if (src && src.trim()) {
+          if (rk === 'html') next = { kind: 'doc', html: src };
+          else if (rk === 'svg') next = { kind: 'doc', html: svgDoc(src) };
+          else {
+            const isStale = () => myGen !== gen;
+            const key = `${rk}:${a.id}:${v ?? a.head_version_id}`;
+            const html = await remember(diagrams, key, async () => {
+              const r = rk === 'mermaid' ? await renderMermaid(`dh-thumb-${a.id}-${v ?? 'h'}`, src, { isStale }) : await renderD2(a.id, src, { isStale });
+              // Head renders become a stored thumbnail (once), so the next
+              // load skips the source fetch + render entirely.
+              if (r.svg && !v) void persistSvgThumb(a.id, key, r.svg);
+              return r.svg ? svgDoc(r.svg) : null;
+            });
+            // A skipped (stale) or failed render must not stick in the cache.
+            if (html == null) diagrams.delete(key);
+            else next = { kind: 'doc', html };
+          }
+        }
+      }
+      // Same picture → keep the object, so the iframe srcdoc never reloads.
+      if (myGen === gen && !untrack(() => samePic(pic, next))) pic = next;
+    })();
+  });
+
+  // Hold the object URL this card shows (released on change / destroy).
+  $effect(() => {
+    if (pic.kind !== 'img') return;
+    const src = pic.src;
+    hold(src);
+    return () => release(src);
+  });
+
+  // HTML previews render at a 1280px desktop width, scaled to the card.
+  const scale = $derived(boxW > 0 ? boxW / 1280 : 0.2);
+;
+async () => {
+
+
+
+ { const $$_div0 = svelteHTML.createElement("div", {     "class":`thumb`,"aria-hidden":`true`,});box = $$_div0;boxW= $$_div0.clientWidth;
+  if(pic.kind === 'img'){
+     { svelteHTML.createElement("img", {    "src":pic.src,"alt":"","loading":`lazy`,});}
+  } else if (pic.kind === 'doc' && hasSlot){
+     { svelteHTML.createElement("iframe", {         "title":"","tabindex":-1,"sandbox":"","srcdoc":pic.html,});__sveltets_2_ensureType(String, Number, `scale(${scale})`);__sveltets_2_ensureType(String, Number, `${Math.ceil(100 / scale)}%`); }
+  }else{
+     { svelteHTML.createElement("div", { "class":`placeholder`,});
+       { const $$_egdaBoidutS2C = __sveltets_2_ensureComponent(StudioBadge); new $$_egdaBoidutS2C({ target: __sveltets_2_any(), props: {    "studio":artifact.studio,"size":compact ? 20 : 28,}});}
+      if(!compact){ { svelteHTML.createElement("span", { "class":`fmt`,});formatLabel(artifact.format); }}
+     }
+  }
+ }
+
+
+};
+return { props: {} as any as Props, exports: {}, bindings: __sveltets_$$bindings(''), slots: {}, events: {} }}
+const ArtifactThumb__SvelteComponent_ = __sveltets_2_fn_component($$render());
+/*Ωignore_startΩ*/type ArtifactThumb__SvelteComponent_ = ReturnType<typeof ArtifactThumb__SvelteComponent_>;
+/*Ωignore_endΩ*/export default ArtifactThumb__SvelteComponent_;

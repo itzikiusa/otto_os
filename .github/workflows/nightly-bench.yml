@@ -55,10 +55,10 @@ jobs:
       - uses: actions/checkout@v7.0.1
 
       - name: Install stable toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99.1
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2.9.2
+        uses: Swatinem/rust-cache@v2.9.3
         with:
           shared-key: nightly-bench
 
@@ -99,16 +99,16 @@ jobs:
       - uses: actions/checkout@v7.0.1
 
       - name: Install stable toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99.1
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2.9.2
+        uses: Swatinem/rust-cache@v2.9.3
         with:
           shared-key: nightly-bench-k8s
 
       - name: Install ClickHouse
         env:
-          CLICKHOUSE_VERSION: 26.8.15.10
+          CLICKHOUSE_VERSION: 26.8.34.13
           CLICKHOUSE_SHA512: d54f83e187b19399260fa9d7f68403a7c3adf48059f211d0620216e6ea49687490898b5aa32f49d9728db58c5912cfb700148b814b8c3314f88ccfa940ffd85a
         run: |
           archive="$RUNNER_TEMP/clickhouse.tgz"
@@ -163,10 +163,10 @@ jobs:
       - uses: actions/checkout@v7.0.1
 
       - name: Install stable toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99.1
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2.9.2
+        uses: Swatinem/rust-cache@v2.9.3
         with:
           shared-key: nightly-bench
 
@@ -197,10 +197,10 @@ jobs:
       - uses: actions/checkout@v7.0.1
 
       - name: Install stable toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99.1
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2.9.2
+        uses: Swatinem/rust-cache@v2.9.3
         with:
           shared-key: nightly-bench-release
 

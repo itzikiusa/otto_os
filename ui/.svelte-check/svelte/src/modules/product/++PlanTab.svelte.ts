@@ -1,0 +1,661 @@
+///<reference types="svelte" />
+;// Plan / Tasks tab — generate (or regenerate) an implementation plan for the
+// story, render it as a task tree with 3-state checkboxes the PO can toggle,
+// and persist toggles in place. Modeled on RewriteTab's load/poll pattern.
+
+import { product } from '../../lib/stores/product.svelte';
+import { toastError } from '../../lib/toastError';
+import { plural } from '../../lib/plural';
+import type { Poller } from '../../lib/poll';
+import { liveQuery } from '../../lib/live';
+import { onStoryChange } from './storyReset.svelte';
+import { swarm } from '../../lib/stores/swarm.svelte';
+import { ws } from '../../lib/stores/workspace.svelte';
+import { router } from '../../lib/router.svelte';
+import { toasts } from '../../lib/toast.svelte';
+import { renderMarkdown } from '../../lib/md';
+import { confirmer } from '../../lib/confirm.svelte';
+import { parsePlan, setItemStatus, type Status, type Task } from './plan_parse';
+import type { ProductStoryVersion } from './types';
+import { agentProviders, defaultAgentProvider } from '../../lib/providers';
+import Icon from '../../lib/components/Icon.svelte';
+import ProviderIcon from '../../lib/components/ProviderIcon.svelte';
+import AgentByline from '../../lib/components/AgentByline.svelte';
+import LoadState from '../../lib/components/LoadState.svelte';
+import { loadErrorText } from '../../lib/loadError';
+function $$render() {
+
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+
+  // ── Provider selection (Otto's REAL provider list, like NewSession) ──────────
+  // Drop the 'shell' pseudo-provider — it can't plan. Fall back to ['claude'] if
+  // /meta hasn't loaded yet.
+  const availableProviders = $derived(
+    agentProviders(),
+  );
+  // Effective default agent: this workspace's override, else the shared
+  // resolution (configured global default → claude → first available).
+  const wsDefaultProvider = $derived(
+    typeof ws.current?.settings?.default_provider === 'string'
+      ? (ws.current.settings.default_provider as string)
+      : '',
+  );
+  const defaultProvider = $derived(wsDefaultProvider || defaultAgentProvider());
+
+  // Multi-select set of planning providers + the consolidating summarizer.
+  let selectedProviders = $state<string[]>([]);
+  let summarizerProvider = $state<string>('');
+  // Autonomy toggle — DEFAULT ON (non-interactive): agents work unattended and
+  // do NOT ask questions; the user reviews the finished plan. OFF ⇒ interactive.
+  let dontAsk = $state(true);
+
+  // Seed the selection once providers/default are known (and prune stale picks if
+  // the provider list changes). Pre-selects the default provider.
+  $effect(() => {
+    const avail = availableProviders;
+    if (avail.length === 0) return;
+    const pruned = selectedProviders.filter((p) => avail.includes(p));
+    if (pruned.length === 0) {
+      selectedProviders = [defaultProvider];
+    } else if (pruned.length !== selectedProviders.length) {
+      selectedProviders = pruned;
+    }
+    if (!avail.includes(summarizerProvider)) summarizerProvider = defaultProvider;
+  });
+
+  const multiAgent = $derived(selectedProviders.length > 1);
+
+  function toggleProvider(p: string): void {
+    if (selectedProviders.includes(p)) {
+      // Keep at least one provider selected.
+      if (selectedProviders.length === 1) return;
+      selectedProviders = selectedProviders.filter((x) => x !== p);
+    } else {
+      selectedProviders = [...selectedProviders, p];
+    }
+  }
+
+  // ── Local UI state ──────────────────────────────────────────────────────────
+  let generating = $state(false);
+  let saving = $state(false);
+  let showRaw = $state(false);
+
+  // The loaded plan version + its markdown body (the source of truth we edit).
+  let planVersion = $state<ProductStoryVersion | null>(null);
+  let body = $state<string>('');
+  let loading = $state(false);
+
+  // Parsed tasks (re-derived whenever `body` changes).
+  const tasks = $derived<Task[]>(parsePlan(body).tasks);
+
+  // Overall rollup across all items.
+  const totals = $derived.by(() => {
+    let done = 0;
+    let inProgress = 0;
+    let total = 0;
+    for (const t of tasks) {
+      for (const it of t.items) {
+        total++;
+        if (it.status === 'done') done++;
+        else if (it.status === 'in_progress') inProgress++;
+      }
+    }
+    return { done, inProgress, total };
+  });
+
+  const renderedRaw = $derived(body ? renderMarkdown(body) : '');
+
+  // ── Polling for a freshly generated plan ─────────────────────────────────────
+  // Shared poll helper (lib/poll.ts): paused while hidden, never stacked,
+  // aborted on stop. `pollTimer !== null` still means "polling" to the UI.
+  let pollTimer = $state.raw<Poller | null>(null);
+  const POLL_INTERVAL_MS = 3000;
+  const POLL_MAX_MS = 120_000;
+  let pollStartedAt = 0;
+  // Consecutive failed reads while waiting: after POLL_FAIL_SHOWN the waiting
+  // state says why (with Retry), and a timeout after failed reads blames the
+  // read — not the agent, which may well have written the plan.
+  const POLL_FAIL_SHOWN = 2;
+  let pollFailures = $state(0);
+  let lastPollError = $state<string | null>(null);
+  let pollLoadingPlan = false;
+
+  function clearPoll(): void {
+    if (pollTimer !== null) {
+      pollTimer.stop();
+      pollTimer = null;
+    }
+  }
+
+  function latestPlan(): ProductStoryVersion | null {
+    let best: ProductStoryVersion | null = null;
+    for (const v of product.versions) {
+      if (v.kind === 'plan') {
+        if (!best || v.version_no > best.version_no) best = v;
+      }
+    }
+    return best;
+  }
+
+  /** True only when the body actually loaded. From the poll a failure is
+   *  recorded as a poll failure (no toast per tick); the poll keeps going. */
+  async function loadPlanBody(v: ProductStoryVersion, fromPoll = false): Promise<boolean> {
+    loading = true;
+    try {
+      const full = await product.getVersion(v.id);
+      planVersion = full;
+      body = full.body_md ?? '';
+      return true;
+    } catch (e) {
+      // Nothing on screen yet → inline error with Retry; a refresh of a shown plan → toast.
+      if (fromPoll) { pollFailures++; lastPollError = loadErrorText(e); }
+      else if (planVersion) toastError('Couldn’t load plan', e);
+      else loadError = loadErrorText(e);
+      return false;
+    } finally {
+      loading = false;
+    }
+  }
+
+  async function pollForPlan(): Promise<void> {
+    if (pollLoadingPlan) return;
+    // A `product_changed` nudge also lands here with no poll running (after
+    // "Stop waiting" the plan still appears): no timeout, no failure count then.
+    const polling = pollTimer !== null;
+    if (polling && Date.now() - pollStartedAt > POLL_MAX_MS) {
+      const cause = pollFailures > 0 ? lastPollError : null;
+      clearPoll();
+      if (cause) toasts.warn('Couldn’t check for the plan', cause);
+      else toasts.warn('Plan timed out', 'No plan appeared within 2 minutes.');
+      return;
+    }
+    try {
+      await product.loadVersions();
+      const plan = latestPlan();
+      if (plan && (!planVersion || plan.version_no > planVersion.version_no)) {
+        pollLoadingPlan = true;
+        try {
+          if (!(await loadPlanBody(plan, true))) return; // keep polling; the failure is shown inline
+        } finally {
+          pollLoadingPlan = false;
+        }
+        clearPoll();
+        toasts.success('Plan ready', 'Implementation plan generated.');
+      }
+      pollFailures = 0;
+      lastPollError = null;
+    } catch (e) {
+      if (!polling) return;
+      pollFailures++;
+      lastPollError = loadErrorText(e);
+    }
+  }
+
+  /** Stop waiting for the plan (neutral: agents already started keep running,
+   *  and their plan still lands on this tab when it's written). */
+  function stopWaiting(): void {
+    clearPoll();
+    toasts.info('Stopped waiting for the plan', 'Planning agents already started keep running — the plan appears here when it’s ready.');
+  }
+
+  function startPolling(): void {
+    clearPoll();
+    pollStartedAt = Date.now();
+    pollFailures = 0;
+    lastPollError = null;
+    // Immediate first poll, then every POLL_INTERVAL_MS after each settles.
+    // `product_changed` (onSectionChange, below) settles it; this chain is
+    // a 15 s safety net while events flow, POLL_INTERVAL_MS while they cannot.
+    pollTimer = liveQuery({ run: () => pollForPlan(), on: [], fallbackMs: POLL_INTERVAL_MS, safetyMs: 15_000, jitter: 0 });
+  }
+
+  // ── Initial load + reset on story change ─────────────────────────────────────
+  // Depends on the story id only (storyReset.svelte.ts).
+  onStoryChange(() => product.selectedId, (sid) => {
+    planVersion = null;
+    body = '';
+    showRaw = false;
+    planSessionIds = [];
+    clearPoll();
+    if (sid) void initialLoad();
+  }, clearPoll);
+
+  // Subscribe to `product_changed { section: 'plan' }` WS events for faster feedback.
+  $effect(() => {
+    const off = product.onSectionChange('plan', (_status: string) => {
+      void pollForPlan(); // trigger an immediate poll that also clears timer if ready
+    });
+    return off;
+  });
+
+  // Live planning sessions surfaced by the `plan_run` event — tiled side-by-side
+  // so the user can watch them (and answer questions in interactive mode).
+  let planSessionIds = $state<string[]>([]);
+  let planInteractive = $state(false);
+
+  // Subscribe to `plan_run`: tile the live planning sessions the moment they
+  // spawn. We open them automatically on the FIRST event so multi-agent planning
+  // is visible by default; later events (e.g. the summarizer starting) just keep
+  // the id list fresh for the "Watching N agents" affordance.
+  $effect(() => {
+    const off = product.onPlanRun((sessionIds: string[], interactive: boolean) => {
+      const firstBatch = planSessionIds.length === 0;
+      planSessionIds = sessionIds;
+      planInteractive = interactive;
+      if (sessionIds.length > 0 && firstBatch) tilePlanSessions();
+    });
+    return off;
+  });
+
+  /** Tile the live planning sessions in the Agents grid and jump there. */
+  function tilePlanSessions(): void {
+    if (planSessionIds.length === 0) return;
+    ws.tileSessions(planSessionIds);
+    router.go('agents');
+  }
+
+  const story = $derived(product.detail?.story ?? null);
+
+  /** A failed first load — shown inline with Retry, never as "No plan yet". */
+  let loadError = $state<string | null>(null);
+
+  async function initialLoad(): Promise<void> {
+    loadError = null;
+    loading = true;
+    try {
+      await product.loadVersions();
+      const plan = latestPlan();
+      if (plan) await loadPlanBody(plan);
+    } catch (e) {
+      loadError = loadErrorText(e);
+    } finally {
+      loading = false;
+    }
+  }
+
+  // ── Actions ──────────────────────────────────────────────────────────────────
+
+  async function generate(): Promise<void> {
+    if (generating) return;
+    const providers =
+      selectedProviders.length > 0 ? selectedProviders : [defaultProvider];
+    generating = true;
+    try {
+      await product.generatePlan({
+        // Keep single-provider back-compat: also send `provider` for the 1-agent case.
+        provider: providers.length === 1 ? providers[0] : null,
+        providers,
+        summarizer_provider: summarizerProvider || defaultProvider,
+        interactive: !dontAsk,
+      });
+      const n = providers.length;
+      toasts.info(
+        n > 1 ? `Planning with ${n} agents` : 'Plan triggered',
+        dontAsk
+          ? 'Agents run unattended — watch them, then review the plan.'
+          : 'Watch the agents and answer any questions they ask.',
+      );
+      startPolling();
+    } catch (e) {
+      toastError('Couldn’t start planning', e);
+    } finally {
+      generating = false;
+    }
+  }
+
+  async function regenerate(): Promise<void> {
+    const current = product.captureSelection();
+    const ok = await confirmer.ask(
+      'Generate a new plan? This creates a new plan version; your current checkbox progress stays on the existing version but a fresh plan will be shown.',
+      { title: 'Regenerate plan', confirmLabel: 'Regenerate', danger: false },
+    );
+    if (!ok || !current()) return;
+    await generate();
+  }
+
+  async function refresh(): Promise<void> {
+    try {
+      await product.loadVersions();
+      const plan = latestPlan();
+      if (plan) await loadPlanBody(plan);
+      toasts.info('Refreshed', 'Loaded the latest plan version.');
+    } catch (e) {
+      toastError('Couldn’t refresh the plan', e);
+    }
+  }
+
+  // Cycle a single item's status todo → in_progress → done → todo, optimistic
+  // local re-parse, then persist the whole body in place. Debounced ~500ms so
+  // rapid clicks don't fire a POST per click.
+  const NEXT: Record<Status, Status> = {
+    todo: 'in_progress',
+    in_progress: 'done',
+    done: 'todo',
+  };
+
+  // Debounce state for savePlan
+  let saveDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+  let savedTick = $state(false); // briefly true after a successful save
+
+  function scheduleSave(latestBody: string): void {
+    if (saveDebounceTimer !== null) clearTimeout(saveDebounceTimer);
+    saveDebounceTimer = setTimeout(() => {
+      saveDebounceTimer = null;
+      saving = true;
+      product.savePlan(latestBody).then(() => {
+        savedTick = true;
+        setTimeout(() => { savedTick = false; }, 1500);
+      }).catch((e) => {
+        toastError('Couldn’t save progress', e);
+        // Best-effort reload to resync with the server.
+        const plan = latestPlan();
+        if (plan) void loadPlanBody(plan);
+      }).finally(() => {
+        saving = false;
+      });
+    }, 500);
+  }
+
+  // Cleanup debounce timer on unmount.
+  $effect(() => {
+    return () => {
+      if (saveDebounceTimer !== null) clearTimeout(saveDebounceTimer);
+    };
+  });
+
+  async function cycleItem(lineIndex: number, current: Status): Promise<void> {
+    const next = NEXT[current];
+    const updated = setItemStatus(body, lineIndex, next);
+    if (updated === body) return; // unrecognized line — no-op
+    body = updated; // optimistic; `tasks` re-derives automatically
+    scheduleSave(body);
+  }
+
+  function statusLabel(s: Status): string {
+    if (s === 'done') return 'done';
+    if (s === 'in_progress') return 'in progress';
+    return 'todo';
+  }
+
+  function taskCount(t: Task): string {
+    const done = t.items.filter((i) => i.status === 'done').length;
+    return `${done}/${t.items.length}`;
+  }
+
+  // ── Send to Swarm ─────────────────────────────────────────────────────────
+  // The flagship Product → Swarm hand-off: turn the story (+ its plan) into a
+  // runnable swarm project and jump to the project's Kanban board.
+  let sendingToSwarm = $state(false);
+  // Operator-chosen target swarm (blank = first/auto). Populated from the swarm
+  // list so the user picks WHICH swarm (e.g. Platform Team) implements the story.
+  let targetSwarmId = $state('');
+  $effect(() => {
+    if (ws.currentId) void swarm.ensureSwarms(ws.currentId);
+  });
+
+  // Existing linked swarm project, if this story was already sent (drives the
+  // badge + flips the action to "Open in Swarm").
+  const swarmLink = $derived(product.detail?.swarm_link ?? null);
+
+  async function openLinkedSwarm(): Promise<void> {
+    const link = swarmLink;
+    const wsId = ws.currentId;
+    if (!link || !wsId) return;
+    await swarm.openProject(wsId, link.swarm_id, link.project_id);
+    router.go('swarm');
+  }
+
+  async function sendToSwarm(): Promise<void> {
+    if (sendingToSwarm || !ws.currentId) return;
+    if (swarmLink) {
+      await openLinkedSwarm();
+      return;
+    }
+    const current = product.captureSelection();
+    const wsId = ws.currentId;
+    const swarmId = targetSwarmId;
+    const target = swarm.swarms.find((s) => s.id === swarmId);
+    const where = target ? `“${target.name}”` : 'a swarm';
+    // Lifecycle gate: nudge the operator to approve the story first (soft gate).
+    const stage = product.detail?.story?.stage;
+    const notApproved = stage && stage !== 'approved' && stage !== 'done';
+    const warn = notApproved
+      ? `\n\n⚠ This story is still “${stage}”, not “approved”. Send it for implementation anyway?`
+      : '';
+    const ok = await confirmer.ask(
+      `Create a project in ${where} from this story and seed it with the plan tasks? You can then run the swarm to implement it.${warn}`,
+      { title: 'Send to Swarm', confirmLabel: 'Send to Swarm', danger: !!notApproved },
+    );
+    if (!ok || !current()) return;
+    sendingToSwarm = true;
+    try {
+      const resp = await product.sendToSwarm(swarmId ? { swarm_id: swarmId } : {});
+      toasts.success(
+        'Sent to Swarm',
+        `Project “${resp.project.name}” created in “${resp.swarm.name}” with ${resp.tasks.length} task(s).`,
+      );
+      if (!current()) return;
+      await swarm.openProject(wsId, resp.swarm.id, resp.project.id);
+      if (current()) router.go('swarm');
+    } catch (e) {
+      toastError('Couldn’t send to Swarm', e);
+    } finally {
+      sendingToSwarm = false;
+    }
+  }
+;
+async () => {
+
+
+ { svelteHTML.createElement("span", {   "class":`sr-only`,"role":`status`,});pollTimer !== null && pollFailures >= POLL_FAIL_SHOWN && lastPollError ? `Couldn’t check progress: ${lastPollError}` : ''; }
+
+if(!story){
+   { svelteHTML.createElement("div", { "class":`muted`,});   }
+}else{
+   { svelteHTML.createElement("div", { "class":`plan-tab`,});
+    
+     { const $$_etatSdaoL1C = __sveltets_2_ensureComponent(LoadState); const $$_etatSdaoL1 = new $$_etatSdaoL1C({ target: __sveltets_2_any(), props: {        children:() => { return __sveltets_2_any(0); },"what":`the plan`,loading,"error":loadError,"empty":!planVersion,"onretry":() => void initialLoad(),emptyView:() => { async ()/*Ωignore_positionΩ*/ => {
+        
+         { svelteHTML.createElement("section", { "class":`pl-card gen-panel`,});
+          
+           { svelteHTML.createElement("div", { "class":`cfg-row`,});
+             { svelteHTML.createElement("span", { "class":`field-label`,});
+               
+               { svelteHTML.createElement("span", { "class":`sel-count`,});selectedProviders.length;  }
+             }
+             { svelteHTML.createElement("div", { "class":`pl-provider-group`,});
+                 for(let p of __sveltets_2_ensureArray(availableProviders)){p;
+                 { svelteHTML.createElement("button", {            "class":`pill-toggle`,"aria-pressed":selectedProviders.includes(p),"disabled":generating || pollTimer !== null,"onclick":() => toggleProvider(p),"title":p,});selectedProviders.includes(p);
+                   { const $$_nocIredivorP4C = __sveltets_2_ensureComponent(ProviderIcon); new $$_nocIredivorP4C({ target: __sveltets_2_any(), props: {    "provider":p,"size":12,}});}
+                  p;
+                 }
+              }
+             }
+           }
+
+          
+          if(multiAgent){
+             { svelteHTML.createElement("div", { "class":`cfg-row`,});
+               { svelteHTML.createElement("label", {   "class":`field-label`,"for":`plan-summarizer-sel`,});  }
+               { svelteHTML.createElement("select", {         "id":`plan-summarizer-sel`,"class":`input pl-sel`,"bind:value":summarizerProvider,"disabled":generating || pollTimer !== null,});/*Ωignore_startΩ*/() => summarizerProvider = __sveltets_2_any(null);/*Ωignore_endΩ*/
+                   for(let p of __sveltets_2_ensureArray(availableProviders)){p;
+                   { svelteHTML.createElement("option", { "value":p,});p; }
+                }
+               }
+               { svelteHTML.createElement("span", { "class":`cfg-hint`,});      }
+             }
+          }
+
+          
+           { svelteHTML.createElement("label", { "class":`autonomy-toggle`,});
+             { svelteHTML.createElement("input", {      "type":`checkbox`,"bind:checked":dontAsk,"disabled":generating,});/*Ωignore_startΩ*/() => dontAsk = __sveltets_2_any(null);/*Ωignore_endΩ*/}
+             { svelteHTML.createElement("span", { "class":`autonomy-text`,});
+                            
+             }
+           }
+
+           { svelteHTML.createElement("div", { "class":`gen-row`,});
+             { svelteHTML.createElement("button", {         "class":`btn primary`,"onclick":generate,"disabled":generating || pollTimer !== null || selectedProviders.length === 0,"title":selectedProviders.length === 0 ? 'Pick at least one provider' : undefined,});
+              if(generating){ } else if (pollTimer !== null){ } else if (multiAgent){   plural(selectedProviders.length, 'agent');
+              }else{ }
+             }
+            if(pollTimer !== null){
+               { svelteHTML.createElement("button", {     "class":`btn`,"onclick":stopWaiting,"title":`Stop waiting for the plan (agents already started keep running)`,});
+                 { const $$_nocI3C = __sveltets_2_ensureComponent(Icon); new $$_nocI3C({ target: __sveltets_2_any(), props: {    "name":`x`,"size":12,}});}  
+               }
+               { svelteHTML.createElement("span", { "class":`polling-indicator`,});   }
+              if(pollFailures >= POLL_FAIL_SHOWN && lastPollError){
+                 { svelteHTML.createElement("span", { "class":`poll-error`,});   lastPollError; }
+                 { svelteHTML.createElement("button", {   "class":`btn small`,"onclick":() => pollTimer?.now(),});  }
+              }
+            }
+            if(!swarmLink && swarm.swarms.length > 1){
+               { svelteHTML.createElement("select", {       "class":`input pl-sel`,"bind:value":targetSwarmId,"title":`Which swarm implements this story`,"aria-label":`Target swarm`,});/*Ωignore_startΩ*/() => targetSwarmId = __sveltets_2_any(null);/*Ωignore_endΩ*/
+                 { svelteHTML.createElement("option", {"value":"",});  }
+                   for(let s of __sveltets_2_ensureArray(swarm.swarms)){s.id; { svelteHTML.createElement("option", { "value":s.id,});s.name; }}
+               }
+            }
+             { svelteHTML.createElement("button", {         "class":`btn`,"onclick":sendToSwarm,"disabled":sendingToSwarm,"title":swarmLink ? 'Open the linked swarm project' : 'Create a swarm project from this story (the swarm planner generates tasks)',});
+               { const $$_nocI3C = __sveltets_2_ensureComponent(Icon); new $$_nocI3C({ target: __sveltets_2_any(), props: {    "name":`zap`,"size":13,}});}
+              if(sendingToSwarm){ } else if (swarmLink){  }else{  }
+             }
+           }
+         }
+
+        if(planSessionIds.length > 0){
+           { svelteHTML.createElement("div", { "class":`watching`,});
+             { svelteHTML.createElement("span", { "class":`watching-dot`,}); }
+             { svelteHTML.createElement("span", { "class":`watching-text`,});
+               plural(planSessionIds.length, 'planning agent');
+              planInteractive ? ' — answer any questions in their tiles' : ' (running unattended)';
+             }
+             { svelteHTML.createElement("button", {   "class":`btn small`,"onclick":tilePlanSessions,});  }
+           }
+        }
+        if(swarmLink){
+           { svelteHTML.createElement("div", { "class":`muted`,});
+                 { svelteHTML.createElement("strong", {});swarmLink.project_name; }
+           }
+        }
+        if(pollTimer === null && !swarmLink && planSessionIds.length === 0){
+           { svelteHTML.createElement("div", { "class":`muted`,});                   }
+        }
+      };return __sveltets_2_any(0)},}});/*Ωignore_startΩ*/const {emptyView} = $$_etatSdaoL1.$$prop_def;/*Ωignore_endΩ*/
+      
+      if(planVersion){
+        
+         { svelteHTML.createElement("section", { "class":`pl-card plan-header`,});
+           { svelteHTML.createElement("div", { "class":`ph-row`,});
+             { svelteHTML.createElement("div", { "class":`ph-info`,});
+               { svelteHTML.createElement("span", { "class":`ph-label`,});  planVersion.version_no; }
+              
+               { const $$_enilyBtnegA5C = __sveltets_2_ensureComponent(AgentByline); new $$_enilyBtnegA5C({ target: __sveltets_2_any(), props: {    "at":planVersion.created_at,"testid":`plan-byline`,}});}
+             }
+             { svelteHTML.createElement("div", { "class":`ph-progress`,});
+               { svelteHTML.createElement("span", { "class":`prog-text`,});
+                totals.done; totals.total; totals.inProgress > 0 ? `, ${totals.inProgress} in progress` : '';
+               }
+               { svelteHTML.createElement("div", {   "class":`prog-bar`,"aria-hidden":`true`,});
+                 { svelteHTML.createElement("div", {     "class":`prog-fill`,"style":`width: ${totals.total ? Math.round((totals.done / totals.total) * 100) : 0}%`,}); }
+               }
+             }
+             { svelteHTML.createElement("div", { "class":`ph-actions`,});
+              if(saving){ { svelteHTML.createElement("span", { "class":`saving`,});  }} else if (savedTick){ { svelteHTML.createElement("span", { "class":`saved-tick`,});  }}
+              if(swarmLink){
+                 { svelteHTML.createElement("span", {   "class":`chip pl-swarm-chip`,"title":`Linked to swarm project “${swarmLink.project_name}”`,});
+                   { const $$_nocI6C = __sveltets_2_ensureComponent(Icon); new $$_nocI6C({ target: __sveltets_2_any(), props: {    "name":`zap`,"size":12,}});}  { svelteHTML.createElement("span", { "class":`pl-swarm-name`,});swarmLink.project_name; }
+                 }
+              }
+               { svelteHTML.createElement("button", {     "class":`btn small`,"onclick":refresh,"disabled":generating,});  }
+               { svelteHTML.createElement("button", {   "class":`btn small`,"onclick":() => (showRaw = !showRaw),});
+                showRaw ? 'Hide raw' : 'Raw';
+               }
+               { svelteHTML.createElement("button", {     "class":`btn small`,"onclick":regenerate,"disabled":generating || pollTimer !== null,});
+                pollTimer !== null ? 'Generating…' : 'Regenerate…';
+               }
+              if(pollTimer !== null){
+                 { svelteHTML.createElement("button", {     "class":`btn small`,"onclick":stopWaiting,"title":`Stop waiting for the plan (agents already started keep running)`,});
+                   { const $$_nocI6C = __sveltets_2_ensureComponent(Icon); new $$_nocI6C({ target: __sveltets_2_any(), props: {    "name":`x`,"size":12,}});}  
+                 }
+                if(pollFailures >= POLL_FAIL_SHOWN && lastPollError){
+                   { svelteHTML.createElement("span", { "class":`poll-error`,});   lastPollError; }
+                   { svelteHTML.createElement("button", {   "class":`btn small`,"onclick":() => pollTimer?.now(),});  }
+                }
+              }
+              if(!swarmLink && swarm.swarms.length > 1){
+                 { svelteHTML.createElement("select", {       "class":`input pl-sel`,"bind:value":targetSwarmId,"title":`Which swarm implements this story`,"aria-label":`Target swarm`,});/*Ωignore_startΩ*/() => targetSwarmId = __sveltets_2_any(null);/*Ωignore_endΩ*/
+                   { svelteHTML.createElement("option", {"value":"",});  }
+                     for(let s of __sveltets_2_ensureArray(swarm.swarms)){s.id; { svelteHTML.createElement("option", { "value":s.id,});s.name; }}
+                 }
+              }
+              
+               { svelteHTML.createElement("button", {         "class":`btn small primary`,"onclick":sendToSwarm,"disabled":sendingToSwarm,"title":swarmLink ? 'Open the linked swarm project' : 'Create a swarm project from this story',});
+                 { const $$_nocI6C = __sveltets_2_ensureComponent(Icon); new $$_nocI6C({ target: __sveltets_2_any(), props: {    "name":`zap`,"size":12,}});}
+                if(sendingToSwarm){ } else if (swarmLink){  }else{  }
+               }
+             }
+           }
+         }
+
+        if(tasks.length === 0){
+           { svelteHTML.createElement("div", { "class":`muted`,});             }
+        }
+
+         { svelteHTML.createElement("div", { "class":`tasks`,});
+             for(let task of __sveltets_2_ensureArray(tasks)){task.lineIndex;
+             { svelteHTML.createElement("section", {  "class":`pl-card task`,});task.status === 'done';
+               { svelteHTML.createElement("header", { "class":`task-head`,});
+                 { svelteHTML.createElement("span", { "class":`task-status status-${task.status}`,});statusLabel(task.status); }
+                 { svelteHTML.createElement("h3", { "class":`task-title`,});task.title; }
+                 { svelteHTML.createElement("span", { "class":`task-count`,});taskCount(task); }
+               }
+               { svelteHTML.createElement("ul", { "class":`items`,});
+                   for(let item of __sveltets_2_ensureArray(task.items)){item.lineIndex;
+                   { svelteHTML.createElement("li", { "class":`item status-${item.status}`,});
+                     { svelteHTML.createElement("button", {           "class":`checkbox status-${item.status}`,"title":`Mark ${statusLabel(NEXT[item.status])}`,"aria-label":`Toggle: currently ${statusLabel(item.status)}`,"onclick":() => cycleItem(item.lineIndex, item.status),"disabled":saving,});if(item.status === 'done'){ { const $$_nocI7C = __sveltets_2_ensureComponent(Icon); new $$_nocI7C({ target: __sveltets_2_any(), props: {    "name":`check`,"size":12,}});}} else if (item.status === 'in_progress'){ { const $$_nocI7C = __sveltets_2_ensureComponent(Icon); new $$_nocI7C({ target: __sveltets_2_any(), props: {    "name":`dot`,"size":12,}});}} }
+                     { svelteHTML.createElement("span", { "class":`item-text`,});item.text; }
+                   }
+                }
+               }
+             }
+          }
+         }
+
+        if(showRaw){
+           { svelteHTML.createElement("section", { "class":`pl-card raw`,});
+             { svelteHTML.createElement("div", { "class":`md-body`,}); renderedRaw; }
+           }
+        }
+      }
+     LoadState}
+   }
+}
+
+
+};
+return { props: {} as Record<string, never>, exports: {}, bindings: __sveltets_$$bindings(''), slots: {}, events: {} }}
+const PlanTab__SvelteComponent_ = __sveltets_2_fn_component($$render());
+/*Ωignore_startΩ*/type PlanTab__SvelteComponent_ = ReturnType<typeof PlanTab__SvelteComponent_>;
+/*Ωignore_endΩ*/export default PlanTab__SvelteComponent_;

@@ -48,7 +48,7 @@ rustix = { workspace = true, features = ["process"] }
 # so the default is ambiguous and would panic). `rcgen` mints a persisted
 # self-signed cert on first use so the listener works out of the box.
 axum-server = { version = "0.8.0", default-features = false, features = ["tls-rustls-no-provider"] }
-rustls = { version = "0.23.45", default-features = false, features = ["ring"] }
+rustls = { version = "0.23.46", default-features = false, features = ["ring"] }
 rustls-pemfile = "2.2.0"
 rcgen = "0.14.10"
-sha2 = "0.11.0"
+sha2 = "0.11.1"

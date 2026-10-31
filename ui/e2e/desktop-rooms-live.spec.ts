@@ -84,7 +84,7 @@ test('real daemon room admission, control, chat and end preserve the running ses
     await guest.getByRole('button', {name: 'Request entry'}).click();
     await expect(guest.getByText('Waiting for the host')).toBeVisible();
     await page.getByRole('button', {name: 'Admit view only'}).click();
-    await expect(guest.getByText('Live host controls the terminal', {exact: false})).toBeVisible();
+    await expect(guest.locator('.room-status').getByText('Live host controls the terminal', {exact: false})).toBeVisible();
     await expect.poll(() => terminalText(guest)).toContain('the real claude CLI is disabled in tests');
     await expect.poll(() => terminalFrames.some(frame => frame.type === 'scrollback')).toBeTruthy();
     const processEpoch = terminalFrames.find(frame => frame.type === 'scrollback')!.epoch;
@@ -96,6 +96,8 @@ test('real daemon room admission, control, chat and end preserve the running ses
     await expect(page.getByText('REAL_ROOM_CHAT', {exact: true})).toBeVisible();
     expect(await terminalText(page)).not.toContain('REAL_ROOM_CHAT');
     await page.getByRole('combobox', {name: 'Access', exact: true}).selectOption('editor');
+    // Raising a member's access is confirmed by the host.
+    await page.getByRole('button', {name: 'Allow', exact: true}).click();
     await expect.poll(() => guestRoom?.members?.find(member => member.id === guestRoom?.member_id)?.role, {message: 'Host role selection reaches the guest snapshot'}).toBe('editor');
     await guest.getByRole('button', {name: 'Request control', exact: true}).click();
     await page.getByRole('button', {name: 'Give control…'}).click();
@@ -110,7 +112,9 @@ test('real daemon room admission, control, chat and end preserve the running ses
     await forgedInput(grantedEpoch);
     await expect.poll(() => terminalFrames.filter(frame => frame.type === 'error').length).toBeGreaterThan(errors);
     expect(await terminalText(page)).not.toContain('FORBIDDEN_ROOM_INPUT');
-    await page.getByRole('button', {name: 'End room…'}).click();
+    // End room sits in the host's ⋯ menu (beside the terminal controls).
+    await page.getByRole('button', {name: 'More room actions'}).click();
+    await page.getByRole('menuitem', {name: 'End room…'}).click();
     await page.getByRole('button', {name: 'End room', exact: true}).click();
     await expect(guest.getByRole('heading', {name: 'Room closed'})).toBeVisible();
     const after = await ctx.get(`${base}/api/v1/sessions/${session.id}`);
@@ -298,4 +302,142 @@ test('real daemon media connects separate pages and survives concurrent screen r
     await guestContext.close(); await ctx.delete(`${base}/api/v1/rooms/${host.room_id}`);
     await ctx.post(`${base}/api/v1/sessions/${session.id}/kill`); await ctx.dispose();
   }
+});
+
+/** The whole browser flow against the REAL daemon, step by step, with a
+ * screenshot per step: Start room from the session's More menu (the room opens
+ * in its own tab — the postMessage hand-off of a reactive credential), invite,
+ * admit, hand over control, type, paste an image, message the agent from the
+ * Chat view, and find in the terminal. Watchable: `--headed` + slowMo. */
+test.describe('room parity, live', () => {
+  test('start in its own tab, join, control, paste an image, prompt from Chat, find', async ({page, browser, baseURL}, info) => {
+    test.skip(info.project.name !== 'rooms-live', 'Requires the isolated same-origin proxy in e2e/rooms-live.config.ts');
+    const {ctx, base} = await apiCtx();
+    const workspace = await seedWorkspace(ctx, base);
+    const created = await ctx.post(`${base}/api/v1/workspaces/${workspace}/sessions`, {
+      data: {kind: 'agent', provider: 'claude', title: 'Room parity live', cwd: '/tmp', meta: {origin: 'e2e'}},
+    });
+    expect(created.ok(), await created.text()).toBeTruthy();
+    const session = await created.json() as {id: string};
+    const shots = info.outputPath('steps');
+    let step = 0;
+    const shot = async (target: Page, name: string) => {
+      const path = `${shots}/${String(++step).padStart(2, '0')}-${name}.png`;
+      await target.screenshot({path});
+      await info.attach(`${String(step).padStart(2, '0')} ${name}`, {path, contentType: 'image/png'});
+    };
+    const probe = () => {(window as unknown as {__ottoTermProbe: unknown[]}).__ottoTermProbe = [];};
+    const terminalText = (target: Page) => target.evaluate(() =>
+      (window as unknown as {__ottoTermProbe: {disposed: boolean; text(): string}[]})
+        .__ottoTermProbe.filter(p => !p.disposed).map(p => p.text()).join('\n'));
+    const errors: string[] = [];
+    await page.context().addInitScript(probe);
+    await page.addInitScript((id) => {
+      localStorage.setItem('otto_workspace', id); localStorage.setItem('otto_rail_expanded', '1'); localStorage.setItem('otto_firstrun_dismissed', '1');
+    }, workspace);
+    page.context().on('page', p => p.on('pageerror', e => errors.push(`host-tab: ${e.message}`)));
+    page.on('pageerror', e => errors.push(`host: ${e.message}`));
+    const guestContext = await browser.newContext({baseURL, storageState: {cookies: [], origins: []}});
+    await guestContext.addInitScript(probe);
+    const guest = await guestContext.newPage();
+    guest.on('pageerror', e => errors.push(`guest: ${e.message}`));
+    let roomId = '';
+    try {
+      // 1. Start the room from the session's own More menu.
+      await page.goto(`/#/agents/${session.id}`);
+      await page.getByRole('button', {name: /^More… —/}).first().click();
+      await page.getByRole('menuitem', {name: 'Start room…'}).click();
+      await page.getByLabel('Your display name').fill('Live host');
+      await shot(page, 'start-room-dialog');
+      const tabPromise = page.waitForEvent('popup');
+      await page.getByRole('button', {name: 'Start room', exact: true}).click();
+      const host = await tabPromise;
+      await expect(host).toHaveURL(/#\/room-host\//);
+      roomId = decodeURIComponent(host.url().split('#/room-host/')[1]);
+      await expect(host.getByRole('button', {name: 'Invite someone…'})).toBeVisible({timeout: 20_000});
+      await expect(host.getByText('didn’t answer', {exact: false})).toHaveCount(0);
+      await shot(host, 'room-opened-in-its-own-tab');
+      // The original tab stays free: navigate it elsewhere, the room keeps going.
+      await page.goto('/#/rooms');
+      await expect(host.getByRole('button', {name: 'Invite someone…'})).toBeVisible();
+
+      // 2. Invite + admit a guest from a separate browser.
+      await host.getByRole('button', {name: 'Invite someone…'}).click();
+      await host.getByLabel('Maximum access').selectOption('editor');
+      await host.getByRole('button', {name: 'Create invitation'}).click();
+      const invitation = await host.getByRole('textbox', {name: 'Invitation link'}).inputValue();
+      await shot(host, 'invitation');
+      await host.getByRole('button', {name: 'Done', exact: true}).click();
+      await guest.goto(`/${new URL(invitation).hash}`);
+      await guest.getByLabel('Your display name').fill('Live guest');
+      await guest.getByRole('button', {name: 'Request entry'}).click();
+      await expect(guest.getByText('Waiting for the host')).toBeVisible();
+      await shot(guest, 'guest-waiting');
+      await host.getByRole('button', {name: 'Admit view only'}).click();
+      await expect(guest.locator('.room-status').getByText('Live host controls the terminal', {exact: false})).toBeVisible();
+      // The host (driver) types in the room terminal; the guest sees it live.
+      await host.locator('.xterm-helper-textarea').focus();
+      await host.keyboard.type('echo HOST_TYPED_IN_ROOM');
+      await host.keyboard.press('Enter');
+      await expect.poll(() => terminalText(guest), {timeout: 20_000}).toContain('HOST_TYPED_IN_ROOM');
+      await host.getByRole('combobox', {name: 'Access', exact: true}).selectOption('editor');
+      await host.getByRole('button', {name: 'Allow', exact: true}).click();
+      await shot(guest, 'guest-admitted');
+
+      // 3. Control hand-off.
+      await guest.getByRole('button', {name: 'Request control', exact: true}).click();
+      await host.getByRole('button', {name: 'Give control…'}).click();
+      await host.getByRole('button', {name: 'Give control', exact: true}).click();
+      await expect(guest.getByRole('button', {name: 'Release control'})).toBeVisible();
+
+      // 4. Typing reaches the host's terminal.
+      await guest.locator('.xterm-helper-textarea').focus();
+      await guest.keyboard.type('echo LIVE_ROOM_TYPED');
+      await guest.keyboard.press('Enter');
+      await expect.poll(() => terminalText(host)).toContain('LIVE_ROOM_TYPED');
+      await shot(host, 'host-sees-guest-typing');
+
+      // 5. A pasted image is stored on the HOST and its path typed in.
+      const png = await guest.evaluate(async () => {
+        const c = document.createElement('canvas'); c.width = 32; c.height = 32;
+        const g = c.getContext('2d')!; g.fillStyle = '#3a7'; g.fillRect(0, 0, 32, 32);
+        const blob: Blob = await new Promise(r => c.toBlob(b => r(b!), 'image/png'));
+        const file = new File([blob], 'shot.png', {type: 'image/png'});
+        const data = new DataTransfer(); data.items.add(file);
+        document.querySelector('.xterm-helper-textarea')!.dispatchEvent(new ClipboardEvent('paste', {clipboardData: data, bubbles: true, cancelable: true}));
+        return blob.size;
+      });
+      expect(png).toBeGreaterThan(0);
+      await expect.poll(() => terminalText(host), {timeout: 15_000}).toMatch(/snips\/[^\s]+\.png/);
+      await shot(host, 'host-sees-pasted-image-path');
+
+      // 6. Chat view: the conversation (or its empty state) and the composer.
+      await guest.getByRole('button', {name: 'Chat', exact: true}).click();
+      await expect(guest.getByLabel('Agent conversation')).toBeVisible();
+      await guest.getByLabel('Message the agent').fill('LIVE_ROOM_PROMPT from chat');
+      await guest.getByLabel('Agent conversation').getByRole('button', {name: 'Send', exact: true}).click();
+      await expect.poll(() => terminalText(host), {timeout: 15_000}).toContain('LIVE_ROOM_PROMPT from chat');
+      await shot(guest, 'guest-chat-view');
+
+      // 7. Find in the terminal from the room's ⋯ menu.
+      await guest.getByRole('button', {name: 'Terminal', exact: true}).click();
+      // Back from Chat at full size: hiding it must not have shrunk its font.
+      // Room terminals render on the DOM: real rows at a readable size.
+      const fontPx = await guest.locator('.xterm-rows').first().evaluate(e => parseFloat(getComputedStyle(e).fontSize));
+      expect(fontPx).toBeGreaterThanOrEqual(11);
+      await guest.getByRole('button', {name: 'Terminal options'}).click();
+      await guest.getByRole('menuitem', {name: 'Find in terminal'}).click();
+      await guest.keyboard.type('LIVE_ROOM_TYPED');
+      // Local + scrollback search answer; the counter settles on the matches.
+      await expect(guest.getByText(/^\d+\/\d+$/).first()).toBeVisible({timeout: 10_000});
+      await shot(guest, 'guest-find');
+      await shot(host, 'host-final');
+      expect(errors).toEqual([]);
+    } finally {
+      await guestContext.close();
+      if (roomId) await ctx.delete(`${base}/api/v1/rooms/${roomId}`);
+      await ctx.post(`${base}/api/v1/sessions/${session.id}/kill`);
+      await ctx.dispose();
+    }
+  });
 });

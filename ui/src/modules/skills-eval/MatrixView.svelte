@@ -24,11 +24,11 @@
     listCollapsed = false,
     onopenrun,
     onphonedetail,
-  } = $props<{
+  }: {
     listCollapsed?: boolean;
     onopenrun?: (evalId: string) => void;
     onphonedetail?: (open: boolean) => void;
-  }>();
+  } = $props();
 
   let matrices: EvalMatrix[] = $state([]);
   let loading = $state(true);

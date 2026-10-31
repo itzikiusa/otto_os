@@ -403,7 +403,7 @@ async function request<T>(
  *  goes through `fetch` (S13-10): the JSON `request` and the raw helpers
  *  (text / blob / ndjson). Returns the Response when it is OK; throws the
  *  parsed Problem as an `ApiError` otherwise. */
-async function rawRequest(
+export async function rawRequest(
   lane: Lane,
   path: string,
   init: { method?: string; body?: BodyInit | null; contentType?: string; accept?: string; signal?: AbortSignal; headers?: Record<string, string> } = {},

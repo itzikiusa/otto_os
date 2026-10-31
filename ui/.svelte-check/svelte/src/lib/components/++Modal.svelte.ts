@@ -1,0 +1,202 @@
+///<reference types="svelte" />
+;// Sheet-style modal: centered card, dimmed backdrop, Esc / backdrop click to
+// close. `dismissable={false}` (a busy form mid-submit) blocks Esc, the
+// backdrop and the header ✕ — the caller closes it when the work settles.
+
+import type { Snippet } from 'svelte';
+import { untrack } from 'svelte';
+import { ui } from '../stores/ui.svelte';
+import Icon from './Icon.svelte';
+import { dialogFocusReturn } from '../dialogFocus';
+;
+
+  interface Props {
+    title: string;
+    width?: number;
+    /** Preferred fixed height for forms whose fields change; capped to the backdrop. */
+    height?: number;
+    onclose: () => void;
+    children: Snippet;
+    footer?: Snippet;
+    /** false blocks Esc / backdrop / ✕ close while the form is busy. */
+    dismissable?: boolean;
+  };function $$render() {
+
+  
+  
+  
+  
+  
+  
+  
+  
+
+  let { title, width = 460, height, onclose, children, footer, dismissable = true }: Props = $props();
+  const titleId = $props.id();
+
+  // A drag that starts inside the sheet (selecting text) and ends on the
+  // backdrop fires `click` on the backdrop — only a press that BEGAN on the
+  // backdrop may close.
+  let downOnBackdrop = false;
+
+  let sheetEl = $state<HTMLElement | null>(null);
+  // Text-only confirmations need a keyboard stop for their scrolling body.
+  // Keep ordinary short sheets out of the Tab order.
+  function scrollableBody(node: HTMLElement) {
+    const update = () => {
+      if (node.scrollHeight > node.clientHeight + 1) node.tabIndex = 0;
+      else node.removeAttribute('tabindex');
+    };
+    const resize = new ResizeObserver(update);
+    // Children are observed too: the body's own box is capped, so content
+    // growth shows up only as a child resize. Re-observe only when the child
+    // list actually changed, and at most once per frame — streaming content
+    // (logs, progress) mutates many times a frame.
+    let observed: Element[] = [];
+    const observeChildren = () => {
+      const kids = Array.from(node.children);
+      if (kids.length !== observed.length || kids.some((k, i) => k !== observed[i])) {
+        resize.disconnect();
+        resize.observe(node);
+        for (const child of kids) resize.observe(child);
+        observed = kids;
+      }
+      update();
+    };
+    let raf = 0;
+    const content = new MutationObserver(() => {
+      if (!raf) raf = requestAnimationFrame(() => ((raf = 0), observeChildren()));
+    });
+    observeChildren();
+    content.observe(node, { childList: true, subtree: true, characterData: true });
+    return {
+      destroy() {
+        if (raf) cancelAnimationFrame(raf);
+        resize.disconnect();
+        content.disconnect();
+      },
+    };
+  }
+  // `[contenteditable]` covers CodeMirror's content node: without it, focus
+  // inside an editor counts as "outside" the list and Tab jumps to the ✕.
+  const FOCUSABLE =
+    'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [contenteditable="true"], [contenteditable=""], [tabindex]:not([tabindex="-1"])';
+
+  function focusables(): HTMLElement[] {
+    if (!sheetEl) return [];
+    // offsetParent filters display:none/collapsed elements (a fixed-position
+    // sheet still gives its children an offsetParent).
+    return Array.from(sheetEl.querySelectorAll<HTMLElement>(FOCUSABLE)).filter(
+      (el) => el.tabIndex >= 0 && !el.closest('[inert]') && (el.offsetParent !== null || el === document.activeElement),
+    );
+  }
+
+  // Register as an open overlay so the native browser webview (which paints
+  // above the HTML) hides while this modal is up.
+  //
+  // `untrack` is essential: `pushModal()` does `modalCount += 1`, which READS
+  // modalCount. Without untrack the effect would depend on the very state it
+  // mutates → it re-runs on every change → infinite push/pop loop
+  // (`effect_update_depth_exceeded`), which wedges Svelte's flush and makes the
+  // whole UI unclickable (Cancel/Save/✕ all dead). We only want push-on-mount
+  // / pop-on-unmount, so the effect must have no reactive dependencies.
+  $effect(() => {
+    untrack(() => ui.pushModal());
+    return () => untrack(() => ui.popModal());
+  });
+
+  // Move focus into the sheet on open and hand it back to whatever had it
+  // when the modal closes. An explicit `data-autofocus` / `autofocus` control
+  // wins (the default button of a confirm, a prompt's field), else the first
+  // body control, else the close button.
+  // Focusing dispatches synchronous focusin handlers in other components.
+  // Keep their reactive reads out of this mount-only lifecycle, or a shell
+  // breakpoint can rerun it and queue the old trigger restoration mid-edit.
+  $effect(() => untrack(() => {
+    const restoreFocus = dialogFocusReturn();
+    const els = focusables();
+    (
+      els.find((el) => el.hasAttribute('data-autofocus') || el.hasAttribute('autofocus')) ??
+      els.find((el) => !el.closest('header') && !el.classList.contains('sheet-body')) ??
+      els[0]
+    )?.focus();
+    // Only hand focus back if it is still ours to give: in the sheet (now
+    // detached) or dropped on <body>. A sheet whose action moved focus on
+    // purpose — New Session's launched terminal takes the keyboard on mount —
+    // must not have it yanked back to the trigger as the sheet unmounts.
+    const sheet = sheetEl;
+    return () =>
+      queueMicrotask(() => {
+        const active = document.activeElement;
+        if (!active || active === document.body || sheet?.contains(active)) restoreFocus();
+      });
+  }));
+
+  function onKeydown(e: KeyboardEvent) {
+    // A key something inside already handled — CodeMirror closing its
+    // completion popup or search panel on Escape, a nested picker — bubbles
+    // here with defaultPrevented set. Closing the sheet on top of that throws
+    // away the user's edit (same rule as lib/dialogFocus.ts).
+    if (e.defaultPrevented) return;
+    // Nested pickers are separate sheets. Only the top sheet may trap keys;
+    // otherwise an underlying New Session modal steals focus on every Tab.
+    const sheets = document.querySelectorAll<HTMLElement>('.sheet[role="dialog"][aria-modal="true"]');
+    if (sheets[sheets.length - 1] !== sheetEl) return;
+    if (e.key === 'Escape') {
+      e.stopPropagation();
+      if (dismissable) onclose();
+    } else if (e.key === 'Tab') {
+      // Trap Tab inside the sheet: wrap at the ends, and pull focus back in if
+      // it somehow escaped (e.g. a click on the backdrop).
+      const els = focusables();
+      if (els.length === 0) {
+        e.preventDefault();
+        return;
+      }
+      const active = document.activeElement;
+      const inside = active instanceof HTMLElement && sheetEl?.contains(active);
+      const idx = inside ? els.indexOf(active as HTMLElement) : -1;
+      if (e.shiftKey) {
+        if (idx <= 0) {
+          e.preventDefault();
+          els[els.length - 1].focus();
+        }
+      } else if (idx === -1 || idx === els.length - 1) {
+        e.preventDefault();
+        els[0].focus();
+      }
+    }
+  }
+;
+async () => {
+
+ { svelteHTML.createElement("svelte:window", {  "onkeydown":onKeydown,});}
+
+  { svelteHTML.createElement("div", {        "class":`backdrop`,"role":`presentation`,"onpointerdown":(e) => {
+    downOnBackdrop = e.target === e.currentTarget;
+  },"onclick":(e) => {
+    const closes = downOnBackdrop && e.target === e.currentTarget;
+    downOnBackdrop = false;
+    if (closes && dismissable) onclose();
+  },});
+  
+   { const $$_div1 = svelteHTML.createElement("div", {               "class":`sheet`,"role":`dialog`,"aria-modal":`true`,"aria-labelledby":titleId,"aria-label":title,"style":`width: min(${width}px, calc(100vw - 24px))`,});sheetEl = $$_div1;__sveltets_2_ensureType(String, Number, height === undefined ? undefined : `${height}px`);
+     { svelteHTML.createElement("header", {});
+       { svelteHTML.createElement("h2", { "id":titleId,});title; }
+       { svelteHTML.createElement("button", {           "class":`icon-btn`,"onclick":onclose,"disabled":!dismissable,"aria-label":`Close`,"title":`Close`,"aria-keyshortcuts":`Escape`,});
+         { const $$_nocI4C = __sveltets_2_ensureComponent(Icon); new $$_nocI4C({ target: __sveltets_2_any(), props: {    "name":`x`,"size":14,}});}
+       }
+     }
+     {const $$action_0 = __sveltets_2_ensureAction(scrollableBody(svelteHTML.mapElementTag('div')));{ svelteHTML.createElement("div", __sveltets_2_union($$action_0), {  "class":`sheet-body`,});;__sveltets_2_ensureSnippet(children()); }}
+    if(footer){
+       { svelteHTML.createElement("footer", {});;__sveltets_2_ensureSnippet(footer()); }
+    }
+   }
+ }
+
+
+};
+return { props: {} as any as Props, exports: {}, bindings: __sveltets_$$bindings(''), slots: {}, events: {} }}
+const Modal__SvelteComponent_ = __sveltets_2_fn_component($$render());
+/*Ωignore_startΩ*/type Modal__SvelteComponent_ = ReturnType<typeof Modal__SvelteComponent_>;
+/*Ωignore_endΩ*/export default Modal__SvelteComponent_;

@@ -37,7 +37,7 @@ env:
   # The ONE ClickHouse pin (SHA-512 of this exact release asset) for every job
   # that installs the single binary: the Rust job's k8s-monitor ratchets and
   # the e2e-functional shards' usage/telemetry engine.
-  CLICKHOUSE_VERSION: 26.8.15.10
+  CLICKHOUSE_VERSION: 26.8.34.13
   CLICKHOUSE_SHA512: d54f83e187b19399260fa9d7f68403a7c3adf48059f211d0620216e6ea49687490898b5aa32f49d9728db58c5912cfb700148b814b8c3314f88ccfa940ffd85a
 
 jobs:
@@ -45,7 +45,7 @@ jobs:
     name: Rust (fmt · clippy · test)
     runs-on: ubuntu-latest
     env:
-      NEXTEST_VERSION: 0.9.146
+      NEXTEST_VERSION: 0.9.150
     steps:
       - uses: actions/checkout@v7.0.1
 
@@ -70,7 +70,7 @@ jobs:
           fi
 
       - name: Install stable toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99.1
         with:
           components: rustfmt, clippy
 
@@ -87,7 +87,7 @@ jobs:
 
       # Caches ~/.cargo registry/git + ./target, keyed on Cargo.lock.
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2.9.2
+        uses: Swatinem/rust-cache@v2.9.3
 
       - name: Report restored cache disk usage
         run: |
@@ -248,9 +248,9 @@ jobs:
         run: python3 -B -m unittest discover -s scripts -p 'test_ci_apt_install.py'
 
       - name: Install Node
-        uses: actions/setup-node@v7.0.0
+        uses: actions/setup-node@v7.1.0
         with:
-          node-version: 26.10.0
+          node-version: 26.13.0
           cache: npm
           cache-dependency-path: ui/package-lock.json
 
@@ -297,10 +297,10 @@ jobs:
       - uses: actions/checkout@v7.0.1
 
       - name: Install stable toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99.1
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2.9.2
+        uses: Swatinem/rust-cache@v2.9.3
         with:
           shared-key: perf-gates
 
@@ -314,7 +314,7 @@ jobs:
         run: cargo build -p ottod
 
       - name: Upload the test daemon
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: ottod-debug
           path: target/debug/ottod
@@ -338,7 +338,7 @@ jobs:
       - uses: actions/checkout@v7.0.1
 
       - name: Download the test daemon
-        uses: actions/download-artifact@v7.0.0
+        uses: actions/download-artifact@v8.0.2
         with:
           name: ottod-debug
           path: target/debug
@@ -347,9 +347,9 @@ jobs:
         run: chmod +x target/debug/ottod
 
       - name: Install Node
-        uses: actions/setup-node@v7.0.0
+        uses: actions/setup-node@v7.1.0
         with:
-          node-version: 26.10.0
+          node-version: 26.13.0
           cache: npm
           cache-dependency-path: ui/package-lock.json
 
@@ -385,7 +385,7 @@ jobs:
 
       - name: Upload the Playwright report
         if: failure()
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: e2e-gate-report
           path: |
@@ -493,7 +493,7 @@ jobs:
           echo "OTTO_E2E_TOUR_VIDEO=$out" >> "$GITHUB_ENV"
 
       - name: Download the test daemon
-        uses: actions/download-artifact@v7.0.0
+        uses: actions/download-artifact@v8.0.2
         with:
           name: ottod-debug
           path: target/debug
@@ -503,9 +503,9 @@ jobs:
         run: chmod +x target/debug/ottod
 
       - name: Install Node
-        uses: actions/setup-node@v7.0.0
+        uses: actions/setup-node@v7.1.0
         with:
-          node-version: 26.10.0
+          node-version: 26.13.0
           cache: npm
           cache-dependency-path: ui/package-lock.json
 
@@ -567,7 +567,7 @@ jobs:
 
       - name: Upload the shard's JSON results
         if: success() || failure()
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: e2e-functional-results-${{ matrix.shard }}
           path: ui/e2e/.results-0.json
@@ -576,7 +576,7 @@ jobs:
 
       - name: Upload the Playwright report
         if: failure()
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: e2e-functional-report-${{ matrix.shard }}
           path: |
@@ -616,15 +616,15 @@ jobs:
       - uses: actions/checkout@v7.0.1
 
       - name: Download the shards' JSON results
-        uses: actions/download-artifact@v7.0.0
+        uses: actions/download-artifact@v8.0.2
         with:
           pattern: e2e-functional-results-*
           path: shard-results
 
       - name: Install Node
-        uses: actions/setup-node@v7.0.0
+        uses: actions/setup-node@v7.1.0
         with:
-          node-version: 26.10.0
+          node-version: 26.13.0
 
       - name: Red count vs baseline
         working-directory: ui
@@ -659,7 +659,7 @@ jobs:
       - uses: actions/checkout@v7.0.1
 
       - name: Download the test daemon
-        uses: actions/download-artifact@v7.0.0
+        uses: actions/download-artifact@v8.0.2
         with:
           name: ottod-debug
           path: target/debug
@@ -668,9 +668,9 @@ jobs:
         run: chmod +x target/debug/ottod
 
       - name: Install Node
-        uses: actions/setup-node@v7.0.0
+        uses: actions/setup-node@v7.1.0
         with:
-          node-version: 26.10.0
+          node-version: 26.13.0
           cache: npm
           cache-dependency-path: ui/package-lock.json
 
@@ -724,7 +724,7 @@ jobs:
 
       - name: Upload the Playwright report
         if: failure()
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: perf-gates-report
           path: ui/e2e/.report-0
@@ -745,7 +745,7 @@ jobs:
       - uses: actions/checkout@v7.0.1
 
       - name: Download the test daemon
-        uses: actions/download-artifact@v7.0.0
+        uses: actions/download-artifact@v8.0.2
         with:
           name: ottod-debug
           path: target/debug
@@ -754,9 +754,9 @@ jobs:
         run: chmod +x target/debug/ottod
 
       - name: Install Node
-        uses: actions/setup-node@v7.0.0
+        uses: actions/setup-node@v7.1.0
         with:
-          node-version: 26.10.0
+          node-version: 26.13.0
 
       - name: Daemon perf budget
         env:
@@ -775,7 +775,7 @@ jobs:
       - uses: actions/checkout@v7.0.1
 
       - name: Install stable toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99.1
 
       # Cache only the pinned executable, never audit results or the advisory
       # database. Every run still fetches current RustSec advisories below.

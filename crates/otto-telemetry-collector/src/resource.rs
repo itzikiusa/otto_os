@@ -19,7 +19,7 @@ pub(crate) struct CollectorRegistration {
 impl CollectorRegistration {
     pub fn new(registry: CollectorProcess, pid: Option<u32>) -> Self {
         let identity = pid.and_then(|pid| {
-            let mut system = System::new();
+            let mut system = System::new().ok()?;
             system.refresh_processes_specifics(
                 ProcessesToUpdate::Some(&[Pid::from_u32(pid)]),
                 true,
@@ -52,7 +52,9 @@ struct DesktopProcess {
 }
 
 pub(crate) struct Sampler {
-    system: System,
+    /// `None` when sysinfo cannot open the process table (`System::new` is
+    /// fallible since sysinfo 0.40): samples are then empty.
+    system: Option<System>,
     sampled_pids: std::collections::BTreeSet<(u32, u64)>,
     desktop_processes: Vec<DesktopProcess>,
     last_discovery: Option<std::time::Instant>,
@@ -60,7 +62,7 @@ pub(crate) struct Sampler {
 impl Sampler {
     pub fn new() -> Self {
         Self {
-            system: System::new(),
+            system: System::new().ok(),
             sampled_pids: Default::default(),
             desktop_processes: Vec::new(),
             last_discovery: None,
@@ -89,7 +91,10 @@ impl Sampler {
             )
             .collect();
         let pids: Vec<Pid> = processes.iter().map(|(_, id)| Pid::from_u32(*id)).collect();
-        self.system.refresh_processes_specifics(
+        let Some(system) = self.system.as_mut() else {
+            return Vec::new();
+        };
+        system.refresh_processes_specifics(
             ProcessesToUpdate::Some(&pids),
             true,
             ProcessRefreshKind::nothing()
@@ -100,7 +105,7 @@ impl Sampler {
         let time = now_seconds();
         let mut points = Vec::new();
         for (name, pid) in &processes {
-            if let Some(process) = self.system.process(Pid::from_u32(*pid)) {
+            if let Some(process) = system.process(Pid::from_u32(*pid)) {
                 if name == "collector"
                     && collector.is_none_or(|owned| owned.start_time != process.start_time())
                 {
@@ -149,12 +154,12 @@ impl Sampler {
             process: "host".into(),
             cpu_percent: None,
             rss_mb: None,
-            host_load: Some(System::load_average().one),
+            host_load: System::load_average().ok().map(|l| l.one),
         });
         self.sampled_pids = processes
             .iter()
             .filter_map(|(_, pid)| {
-                self.system
+                system
                     .process(Pid::from_u32(*pid))
                     .map(|p| (*pid, p.start_time()))
             })
@@ -252,7 +257,9 @@ fn desktop_processes() -> Vec<DesktopProcess> {
     if !deployed {
         return Vec::new();
     }
-    let mut discover = System::new();
+    let Ok(mut discover) = System::new() else {
+        return Vec::new();
+    };
     discover.refresh_processes_specifics(
         ProcessesToUpdate::All,
         true,

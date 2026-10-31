@@ -175,6 +175,23 @@ pub trait Driver: Send + Sync {
         ))
     }
 
+    /// Stream a file into `statement` (`INSERT INTO t FORMAT <fmt>`) and let
+    /// the SERVER parse it — every ClickHouse input format, including binary
+    /// Parquet/Arrow/ORC, with server-side typing and constant daemon memory.
+    /// Only ClickHouse over HTTP implements it. The caller has run the write
+    /// guards; `node` scopes the active database.
+    async fn insert_formatted(
+        &self,
+        _cfg: &ResolvedConfig,
+        _statement: &str,
+        _body: reqwest::Body,
+        _node: Option<&str>,
+    ) -> Result<u64> {
+        Err(otto_core::Error::Invalid(
+            "streamed format import is not supported for this engine".into(),
+        ))
+    }
+
     /// Autocomplete items for the editor, scoped to the given context.
     async fn completion(
         &self,

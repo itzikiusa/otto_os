@@ -941,3 +941,103 @@ async fn clickhouse_parity_export_failure_and_bad_credentials() {
         assert!(d.run(&c, &query("SELECT 1")).await.is_ok());
     }
 }
+
+/// File import/export in ClickHouse's own formats: a Parquet export of 1000
+/// rows streams back in through `INSERT … FORMAT Parquet` (the browser
+/// "From my computer" upload path), and a CSV-with-header file through
+/// `CSVWithNames` — the server parses both, no row parsing in the daemon.
+#[tokio::test]
+#[ignore]
+async fn clickhouse_parity_parquet_and_csv_round_trip_through_insert_format() {
+    if std::env::var("OTTO_DBV_E2E").is_err() {
+        return;
+    }
+    use otto_dbviewer::export::ExportFormat;
+
+    let d = ClickhouseDriver::default();
+    let cfg = parity_cfg(false);
+    let table = format!("otto_import_rt_{}", std::process::id());
+    d.run(
+        &cfg,
+        &query(&format!("DROP TABLE IF EXISTS default.{table}")),
+    )
+    .await
+    .expect("drop");
+    d.run(
+        &cfg,
+        &query(&format!(
+            "CREATE TABLE default.{table} (id UInt32, name String) ENGINE = Memory"
+        )),
+    )
+    .await
+    .expect("create");
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let parquet = dir.path().join("rows.parquet");
+    d.export_to_path(
+        &cfg,
+        "SELECT toUInt32(number) AS id, concat('n', toString(number)) AS name FROM numbers(1000)",
+        None,
+        ExportFormat::Parquet,
+        None,
+        &parquet,
+    )
+    .await
+    .expect("parquet export");
+    let bytes = std::fs::read(&parquet).expect("read parquet");
+    assert_eq!(&bytes[..4], b"PAR1", "a real Parquet file");
+
+    let rows = d
+        .insert_formatted(
+            &cfg,
+            &format!("INSERT INTO default.{table} FORMAT Parquet"),
+            reqwest::Body::from(bytes),
+            None,
+        )
+        .await
+        .expect("parquet import");
+    assert_eq!(rows, 1000, "written_rows from X-ClickHouse-Summary");
+
+    let csv = "id,name\n5000,alpha\n5001,\"b,eta\"\n";
+    d.insert_formatted(
+        &cfg,
+        &format!("INSERT INTO default.{table} FORMAT CSVWithNames"),
+        reqwest::Body::from(csv),
+        None,
+    )
+    .await
+    .expect("csv import");
+
+    let res = d
+        .run(
+            &cfg,
+            &query(&format!(
+                "SELECT count() AS c, countIf(name = 'b,eta') AS q FROM default.{table}"
+            )),
+        )
+        .await
+        .expect("count");
+    let row = &res.rows[0];
+    assert_eq!(row[0].to_string().trim_matches('"'), "1002");
+    assert_eq!(row[1].to_string().trim_matches('"'), "1");
+
+    // A capped binary export becomes a LIMIT (no row decode on binary).
+    let capped = dir.path().join("capped.arrow");
+    d.export_to_path(
+        &cfg,
+        &format!("SELECT * FROM default.{table}"),
+        None,
+        ExportFormat::Arrow,
+        Some(10),
+        &capped,
+    )
+    .await
+    .expect("capped arrow export");
+    assert!(std::fs::read(&capped)
+        .expect("read arrow")
+        .starts_with(b"ARROW1"));
+
+    d.run(&cfg, &query(&format!("DROP TABLE default.{table}")))
+        .await
+        .expect("cleanup");
+}

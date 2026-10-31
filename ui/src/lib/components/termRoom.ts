@@ -1,5 +1,10 @@
 // Terminal helpers for the session-room transport (and the pasted-image
 // re-encode shared with the owner's paste path). Split out of Terminal.svelte.
+//
+// Room terminals (`socketFactory`) always render on the DOM: on a guest's
+// room page the WebGL renderer drew glyphs at a fraction of the font size
+// (seen in the live two-browser room test), and a room is one low-throughput
+// viewer — not what the per-window GPU budget is for.
 import { bytesToBase64, textToBase64, textToBytes } from '../b64.ts';
 
 /** The room relay caps one input frame at 32 KiB decoded (otto-rooms

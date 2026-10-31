@@ -1,0 +1,140 @@
+///<reference types="svelte" />
+;// Insights box: the newest report of each kind (daily / weekly / monthly /
+// ad-hoc) with its plain-text summary. Reports are generated on a schedule
+// (or on demand from the Insights page), so a 5-minute cadence is plenty.
+
+import { untrack } from 'svelte';
+import Icon from '../../../lib/components/Icon.svelte';
+import { loadErrorText } from '../../../lib/loadError';
+import EmptyState from '../../../lib/components/EmptyState.svelte';
+import Skeleton from '../../../lib/components/Skeleton.svelte';
+import { insightsApi } from '../../../lib/api/insights';
+import { router } from '../../../lib/router.svelte';
+import type { InsightReport } from '../../../lib/api/types';
+import type { HomeBox } from '../home.svelte';
+import { freshness, livePoll, type Poller } from './poll';
+import LoadState from '../../../lib/components/LoadState.svelte';
+;
+
+  interface Props {
+    box: HomeBox;
+    zoomed: boolean;
+    tick: number;
+    /** False while this box's Home space is not on screen (or another box
+     *  is zoomed): the poller stops, the data stays (review 06 F3). */
+    active?: boolean;
+  };function $$render() {
+
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+
+  let { box: _box, zoomed, tick, active = true }: Props = $props();
+
+  let reports = $state<InsightReport[]>([]);
+  let loading = $state(true);
+  let error = $state('');
+
+  async function load(): Promise<boolean> {
+    try {
+      reports = await insightsApi.latestReports();
+      error = '';
+      return true;
+    } catch (e) {
+      error = loadErrorText(e);
+      return false;
+    } finally {
+      loading = false;
+    }
+  }
+
+  let poller: Poller | null = null;
+  const fresh = freshness(load);
+  $effect(() => {
+    if (!active) return;
+    // A finished report arrives as `insight_ready`; 300 s only while offline.
+    poller = livePoll(fresh.run, 300_000, ['insight_ready'], { immediate: fresh.start('', 300_000) });
+    return () => poller?.stop();
+  });
+  // Frame refresh only — not on mount, where the poller's first run is
+  // already loading (a now() then queued a second load on every Home boot).
+  let seenTick = untrack(() => tick);
+  $effect(() => {
+    const t = tick;
+    if (t === seenTick) return;
+    seenTick = t;
+    untrack(() => poller?.now());
+  });
+
+  const KIND_LABEL: Record<string, string> = { daily: 'Daily', weekly: 'Weekly', monthly: 'Monthly', adhoc: 'Ad-hoc' };
+
+  // Newest per kind (the list arrives newest-first); zoomed shows everything.
+  const shown = $derived.by(() => {
+    if (zoomed) return reports;
+    const seen = new Set<string>();
+    const out: InsightReport[] = [];
+    for (const r of reports) {
+      if (seen.has(r.kind)) continue;
+      seen.add(r.kind);
+      out.push(r);
+    }
+    return out;
+  });
+
+  function period(r: InsightReport): string {
+    const s = new Date(r.period_start);
+    const e = new Date(r.period_end);
+    const f = (d: Date): string => d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+    return r.kind === 'daily' ? f(s) : `${f(s)} – ${f(e)}`;
+  }
+;
+async () => {
+
+ { svelteHTML.createElement("div", { "class":`ins`,});
+  if(loading && reports.length === 0){
+     { const $$_notelekS1C = __sveltets_2_ensureComponent(Skeleton); new $$_notelekS1C({ target: __sveltets_2_any(), props: {  "rows":3,}});}
+  } else if (error && reports.length === 0){
+     { const $$_etatSdaoL1C = __sveltets_2_ensureComponent(LoadState); new $$_etatSdaoL1C({ target: __sveltets_2_any(), props: {      "what":`Insights`,"error":error,"empty":true,"onretry":() => poller?.now(),}});}
+  } else if (reports.length === 0){
+     { const $$_etatSytpmE1C = __sveltets_2_ensureComponent(EmptyState); new $$_etatSytpmE1C({ target: __sveltets_2_any(), props: {     children:() => { return __sveltets_2_any(0); },"icon":`gauge`,"title":`No reports yet`,"body":`Turn on daily or weekly reports, or run one now.`,}});
+       { svelteHTML.createElement("button", {   "class":`btn small`,"onclick":() => router.go('insights'),});  }
+     EmptyState}
+  }else{
+    if(error){
+       { const $$_etatSdaoL1C = __sveltets_2_ensureComponent(LoadState); new $$_etatSdaoL1C({ target: __sveltets_2_any(), props: {         "what":`Insights`,"variant":`compact`,error,"empty":false,"onretry":() => poller?.now(),}});}
+    }
+     { svelteHTML.createElement("ul", { "class":`rows`,});
+         for(let r of __sveltets_2_ensureArray(shown)){r.html_path;
+         { svelteHTML.createElement("li", {});
+          
+           { svelteHTML.createElement("button", {     "class":`ins-card`,"onclick":() => router.go(`insights/r/${r.kind}/${r.period_start}/${r.period_end}`),"title":`Open this report in Insights`,});
+             { svelteHTML.createElement("div", { "class":`head`,});
+               { svelteHTML.createElement("span", { "class":`kind`,});KIND_LABEL[r.kind] ?? r.kind; }
+               { svelteHTML.createElement("span", { "class":`per`,});period(r); }
+               { const $$_nocI5C = __sveltets_2_ensureComponent(Icon); new $$_nocI5C({ target: __sveltets_2_any(), props: {    "name":`external`,"size":12,}});}
+             }
+             { svelteHTML.createElement("p", {  "class":`sum`,});!zoomed;r.summary || 'No summary.'; }
+           }
+         }
+      }
+     }
+  }
+ }
+
+
+};
+return { props: {} as any as Props, exports: {}, bindings: __sveltets_$$bindings(''), slots: {}, events: {} }}
+const InsightsBox__SvelteComponent_ = __sveltets_2_fn_component($$render());
+/*Ωignore_startΩ*/type InsightsBox__SvelteComponent_ = ReturnType<typeof InsightsBox__SvelteComponent_>;
+/*Ωignore_endΩ*/export default InsightsBox__SvelteComponent_;

@@ -18,9 +18,10 @@ pub struct Metric {
 
 /// Holds a `sysinfo::System` and the current process id. `sample` is blocking
 /// (it sleeps a CPU-refresh interval to compute a real %), so callers run it on
-/// a blocking thread.
+/// a blocking thread. `sys` is `None` when sysinfo could not open the host
+/// (`System::new` is fallible since sysinfo 0.40): samples then read zeros.
 pub struct MetricsSampler {
-    sys: System,
+    sys: Option<System>,
     pid: Option<Pid>,
 }
 
@@ -33,39 +34,44 @@ impl Default for MetricsSampler {
 impl MetricsSampler {
     pub fn new() -> Self {
         Self {
-            sys: System::new(),
+            sys: System::new().ok(),
             pid: sysinfo::get_current_pid().ok(),
         }
     }
 
     /// Hostname (for the `host` column / multi-host dashboards).
     pub fn host() -> String {
-        System::host_name().unwrap_or_else(|| "localhost".to_string())
+        System::host_name().unwrap_or_else(|_| "localhost".to_string())
     }
 
     /// Take one sample. CPU % needs two refreshes a short interval apart, so
     /// this sleeps `MINIMUM_CPU_UPDATE_INTERVAL` (~200ms) — **blocking**.
     pub fn sample(&mut self, active_sessions: u32) -> Metric {
-        self.sys.refresh_cpu_usage();
+        let Some(sys) = self.sys.as_mut() else {
+            return Metric {
+                active_sessions,
+                ..Metric::default()
+            };
+        };
+        sys.refresh_cpu_usage();
         std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
-        self.sys.refresh_cpu_usage();
-        self.sys.refresh_memory();
+        sys.refresh_cpu_usage();
+        sys.refresh_memory();
         if let Some(pid) = self.pid {
-            self.sys
-                .refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
+            sys.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
         }
 
         let mb = 1024.0 * 1024.0;
-        let total = self.sys.total_memory() as f64;
-        let used = self.sys.used_memory() as f64;
+        let total = sys.total_memory() as f64;
+        let used = sys.used_memory() as f64;
         let (rss, pcpu) = self
             .pid
-            .and_then(|pid| self.sys.process(pid))
+            .and_then(|pid| sys.process(pid))
             .map(|p| (p.memory() as f64 / mb, p.cpu_usage() as f64))
             .unwrap_or((0.0, 0.0));
 
         Metric {
-            cpu_pct: self.sys.global_cpu_usage() as f64,
+            cpu_pct: sys.global_cpu_usage() as f64,
             mem_used_mb: used / mb,
             mem_total_mb: total / mb,
             mem_pct: if total > 0.0 {
@@ -73,7 +79,7 @@ impl MetricsSampler {
             } else {
                 0.0
             },
-            load_avg_1: System::load_average().one,
+            load_avg_1: System::load_average().map_or(0.0, |l| l.one),
             process_rss_mb: rss,
             process_cpu_pct: pcpu,
             active_sessions,

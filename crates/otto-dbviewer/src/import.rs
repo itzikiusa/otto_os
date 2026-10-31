@@ -23,6 +23,35 @@ pub enum ImportFormat {
     Tsv,
     Ndjson,
     Json,
+    /// Binary columnar formats: ClickHouse parses them server-side
+    /// (`INSERT … FORMAT Parquet|Arrow|ORC`); no engine-agnostic parser here.
+    Parquet,
+    Arrow,
+    Orc,
+}
+
+impl ImportFormat {
+    /// The ClickHouse input `FORMAT` for a streamed `INSERT`. Delimited files
+    /// carry a header row (the contract above), hence the `WithNames` forms;
+    /// ClickHouse's JSONEachRow also reads a single top-level array.
+    pub fn clickhouse_format(self) -> &'static str {
+        match self {
+            ImportFormat::Csv => "CSVWithNames",
+            ImportFormat::Tsv => "TabSeparatedWithNames",
+            ImportFormat::Ndjson | ImportFormat::Json => "JSONEachRow",
+            ImportFormat::Parquet => "Parquet",
+            ImportFormat::Arrow => "Arrow",
+            ImportFormat::Orc => "ORC",
+        }
+    }
+
+    /// Only ClickHouse can read these (see [`Self::clickhouse_format`]).
+    pub fn is_binary(self) -> bool {
+        matches!(
+            self,
+            ImportFormat::Parquet | ImportFormat::Arrow | ImportFormat::Orc
+        )
+    }
 }
 
 /// A parsed table ready for insertion: column names + positional rows.
@@ -64,6 +93,9 @@ pub fn parse_rows(format: ImportFormat, bytes: &[u8]) -> Result<ParsedTable> {
                 .ok_or_else(|| Error::Invalid("JSON import must be an array of objects".into()))?;
             parse_objects(arr.clone())
         }
+        ImportFormat::Parquet | ImportFormat::Arrow | ImportFormat::Orc => Err(Error::Invalid(
+            "Parquet, Arrow and ORC imports are supported for ClickHouse only".into(),
+        )),
     }
 }
 
@@ -255,7 +287,7 @@ impl SqlFlavor {
     /// Quote an identifier for this flavor, escaping the quote char (and, for
     /// ClickHouse, embedded backslashes — its backtick idents honor `\` escapes,
     /// so an unescaped trailing `\` would swallow the closing backtick).
-    fn ident(self, name: &str) -> String {
+    pub(crate) fn ident(self, name: &str) -> String {
         match self {
             SqlFlavor::Mysql => format!("`{}`", name.replace('`', "``")),
             SqlFlavor::Clickhouse => {

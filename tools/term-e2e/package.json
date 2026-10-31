@@ -9,7 +9,7 @@
   },
   "dependencies": {
     "@xterm/headless": "6.0.0",
-    "ws": "8.22.0"
+    "ws": "8.22.1"
   },
   "engines": {
     "node": ">=26.10.0"

@@ -71,7 +71,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
-      NEXTEST_VERSION: 0.9.146
+      NEXTEST_VERSION: 0.9.150
     steps:
       - uses: actions/checkout@v7.0.1
 
@@ -123,10 +123,10 @@ jobs:
             -v "$fixture/pg:/docker-entrypoint-initdb.d:ro" postgres:17
 
       - name: Install stable toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99.1
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2.9.2
+        uses: Swatinem/rust-cache@v2.9.3
         with:
           shared-key: db-drivers
 
