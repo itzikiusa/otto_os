@@ -17,6 +17,7 @@ mod panes;
 mod panes_policy;
 mod panic_guard;
 mod popout;
+mod room_trust;
 mod rooms;
 mod shortcuts;
 mod snip;

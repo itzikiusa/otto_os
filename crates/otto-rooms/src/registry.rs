@@ -285,6 +285,33 @@ impl RoomRegistry {
             .map(|m| m.view.id.clone())
             .ok_or(Error::Unauthorized)
     }
+    /// An admitted member's shared session id (any role) — the room-capability
+    /// HTTP reads (`/room-transcript/…`).
+    pub async fn member_session(&self, id: &str, token: &str) -> Result<String> {
+        let member = self.authenticate(id, token).await?;
+        let room = self.get(id).await?;
+        let room = room.lock().await;
+        room.admitted(&member)?;
+        Ok(room.session.clone())
+    }
+    /// `(room id, session, member)` for the member who drives the terminal
+    /// under grant `epoch` — the room-capability HTTP writes. `room_input`
+    /// re-checks the grant and the live process at the actual write.
+    pub async fn driver_session(
+        &self,
+        id: &str,
+        token: &str,
+        epoch: u64,
+    ) -> Result<(String, String, String)> {
+        let member = self.authenticate(id, token).await?;
+        let room = self.get(id).await?;
+        let room = room.lock().await;
+        room.admitted(&member)?;
+        if room.driver != member || room.grant_epoch != epoch {
+            return Err(Error::Forbidden("You don't control the terminal".into()));
+        }
+        Ok((room.id.clone(), room.session.clone(), member))
+    }
     pub async fn admit(&self, id: &str, host: &str, member: &str, role: RoomRole) -> Result<()> {
         let room = self.get(id).await?;
         let mut room = room.lock().await;

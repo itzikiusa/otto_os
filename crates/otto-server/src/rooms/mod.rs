@@ -2,6 +2,7 @@
 //! WebSocket upgrades and run loops. The domain lives in `otto-rooms`
 //! (behind `RoomsCtx`, implemented for `ServerCtx` in `ctx.rs`).
 mod ctx;
+mod guest;
 mod http;
 mod ice;
 mod recap;
@@ -44,7 +45,20 @@ pub fn protected_routes() -> Router<ServerCtx> {
         )
 }
 pub fn public_routes() -> Router<ServerCtx> {
-    Router::new().route("/room-join", post(http::join))
+    Router::new()
+        .route("/room-join", post(http::join))
+        .route(
+            "/room-paste/{id}",
+            post(guest::paste).layer(axum::extract::DefaultBodyLimit::max(
+                guest::MAX_ROOM_PASTE_BYTES,
+            )),
+        )
+        .route("/room-prompt/{id}", post(guest::prompt))
+        .route("/room-transcript/{id}", get(guest::transcript))
+        .route(
+            "/room-transcript/{id}/images/{img}",
+            get(guest::transcript_image),
+        )
 }
 pub fn ws_routes() -> Router<ServerCtx> {
     Router::new()

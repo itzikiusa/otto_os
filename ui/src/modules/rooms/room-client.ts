@@ -1,4 +1,5 @@
 import type { RoomAction, RoomCredential, RoomEvent } from '../../lib/api/room-types';
+import type { Transcript } from '../../lib/api/types';
 import { roomSocketAddress } from './room-state.ts';
 import { RelaySocket } from '../../lib/relaySocket.ts';
 export type RoomConnection = 'connecting' | 'connected' | 'disconnected' | 'ended';
@@ -21,6 +22,47 @@ export async function joinRoom(origin: string, roomId: string, invite: string, n
     throw new Error(problem.message ?? 'Couldn’t join this room. Ask the host for a fresh invitation.');
   }
   return await response.json() as RoomCredential;
+}
+/** A request to the room host authenticated ONLY by the room capability
+ *  (header, never the URL) — owner auth is never read or sent. */
+export async function roomFetch(origin: string, credential: RoomCredential, path: string, init: RequestInit = {}): Promise<Response> {
+  let response: Response;
+  try {
+    response = await fetch(new URL(`/api/v1${path}`, origin), {
+      ...init, credentials: 'omit', referrerPolicy: 'no-referrer',
+      headers: {...(init.headers as Record<string, string> | undefined), 'x-otto-room-token': credential.token},
+    });
+  } catch {
+    throw new Error(JOIN_UNREACHABLE);
+  }
+  if (!response.ok) {
+    const problem = await response.json().catch(() => ({})) as {message?: string};
+    throw new Error(problem.message ?? `The host refused this request (${response.status}).`);
+  }
+  return response;
+}
+/** Store a pasted image on the host and type its path (driver only). */
+export async function pasteRoomImage(origin: string, credential: RoomCredential, grantEpoch: number, png: Blob): Promise<void> {
+  await roomFetch(origin, credential, `/room-paste/${encodeURIComponent(credential.room_id)}`, {
+    method: 'POST', body: png, headers: {'Content-Type': 'image/png', 'x-otto-grant-epoch': String(grantEpoch)},
+  });
+}
+/** The shared session's conversation page (same shape as the owner's `GET …/transcript`). */
+export async function fetchRoomTranscript(origin: string, credential: RoomCredential, limit = 80): Promise<Transcript> {
+  const r = await roomFetch(origin, credential, `/room-transcript/${encodeURIComponent(credential.room_id)}?limit=${limit}`);
+  return await r.json() as Transcript;
+}
+/** A transcript image as a revocable blob URL. */
+export async function roomImageUrl(origin: string, credential: RoomCredential, imageId: string): Promise<string> {
+  const r = await roomFetch(origin, credential, `/room-transcript/${encodeURIComponent(credential.room_id)}/images/${encodeURIComponent(imageId)}`);
+  return URL.createObjectURL(await r.blob());
+}
+/** Submit a prompt (or, with `submit: false`, raw keys such as Esc) as the driver. */
+export async function roomPrompt(origin: string, credential: RoomCredential, grantEpoch: number, text: string, submit: boolean): Promise<void> {
+  await roomFetch(origin, credential, `/room-prompt/${encodeURIComponent(credential.room_id)}`, {
+    method: 'POST', body: JSON.stringify({text, submit}),
+    headers: {'Content-Type': 'application/json', 'x-otto-grant-epoch': String(grantEpoch)},
+  });
 }
 /** The session-room transport: a `RelaySocket` on the `otto-room` subprotocol. */
 export class RoomClient {

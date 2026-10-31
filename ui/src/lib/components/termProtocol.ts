@@ -28,6 +28,9 @@ export type TermFrame =
   | { type: 'status'; status: SessionStatus | undefined }
   | { type: 'exit'; code: number }
   | { type: 'error'; code: unknown; message: string }
+  /** Room relay only: this terminal stream is over for good (the shared
+   *  process exited or was replaced, or this member lost access). */
+  | { type: 'ended'; reason: string }
   | WsTermGridFrame
   | WsTermProbeAckFrame
   | WsSearchResultFrame;
@@ -77,6 +80,8 @@ export function decodeTermFrame(ev: { data: unknown }, sock: object): TermFrame 
       return { type: 'exit', code: (msg.code as number | undefined) ?? 0 };
     case 'error':
       return { type: 'error', code: msg.code, message: (msg.message as string | undefined) ?? '' };
+    case 'ended':
+      return { type: 'ended', reason: typeof msg.reason === 'string' ? msg.reason : 'Terminal sharing ended' };
     case 'grid':
       return msg as unknown as WsTermGridFrame;
     case 'probe_ack':

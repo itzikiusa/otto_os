@@ -225,6 +225,7 @@
   import { reconnectDelay } from './guestReconnect';
   import { KeyLatency, ProbeClock, fmtMs, fmtPair, loopMonitor, termLatencyEnabled, type EchoStats } from './termLatency';
   import { textToBase64, bytesToBase64 } from '../b64';
+  import { endedLine, inputFrames, toPngBlob, toPngBytes } from './termRoom';
   import type { TermFrame } from './termProtocol';
   import { terminalTheme } from '../termtheme';
   import { ui } from '../stores/ui.svelte';
@@ -284,6 +285,9 @@
     /** Capability-only room transport; bypasses owner authentication entirely. */
     socketFactory?: () => WebSocket;
     transformFrame?: (frame: unknown) => unknown | null;
+    /** Room transport: store a pasted image (PNG) on the HOST and type its path
+     *  (the room's capability-authenticated upload). Absent = text only. */
+    onImagePaste?: (png: Blob) => Promise<void>;
     readOnlyReason?: string;
     onstatus?: (status: SessionStatus) => void;
     /** The font size actually drawn (px) — below the user's size while the
@@ -344,7 +348,7 @@
      *  find. A focused terminal / editor / text field still wins. Default 0. */
     findRank?: number;
   }
-  let { sessionId, readOnly = false, resumable = false, restartable = false, onrestart, restartNonce = 0, forceDark = false, preferDom = false, shareToken, socketFactory, transformFrame, readOnlyReason, onstatus, onfontfit, onsearchresult, showToolbar = true, autoFocus = false, claimOnAttach = false, keepAlive = false, scrollback = EMBED_SCROLLBACK, resumeOnOpen = true, findRank = 0 }: Props = $props();
+  let { sessionId, readOnly = false, resumable = false, restartable = false, onrestart, restartNonce = 0, forceDark = false, preferDom = false, shareToken, socketFactory, transformFrame, onImagePaste, readOnlyReason, onstatus, onfontfit, onsearchresult, showToolbar = true, autoFocus = false, claimOnAttach = false, keepAlive = false, scrollback = EMBED_SCROLLBACK, resumeOnOpen = true, findRank = 0 }: Props = $props();
   // Scrollback results: a listbox driven from the find input (aria-activedescendant).
   const findId = $props.id();
 
@@ -788,25 +792,6 @@
     }
   }
 
-  /** PNG bytes for an arbitrary pasted image. The daemon stores PNG only
-   *  (`store_snip`'s `png_dims` rejects anything else) and a clipboard image is
-   *  frequently JPEG or TIFF — re-encode through a canvas instead of refusing
-   *  the paste. PNG input is passed through untouched (no needless re-encode). */
-  async function toPngBytes(file: File): Promise<Uint8Array> {
-    if (file.type === 'image/png') return new Uint8Array(await file.arrayBuffer());
-    const bitmap = await createImageBitmap(file);
-    const canvas = document.createElement('canvas');
-    canvas.width = bitmap.width;
-    canvas.height = bitmap.height;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) throw new Error('canvas 2d context unavailable');
-    ctx.drawImage(bitmap, 0, 0);
-    bitmap.close();
-    const blob = await new Promise<Blob | null>((res) => canvas.toBlob(res, 'image/png'));
-    if (!blob) throw new Error('could not re-encode the image as PNG');
-    return new Uint8Array(await blob.arrayBuffer());
-  }
-
   /** `view`: attach view-only (never resumes a suspended session). Default:
    *  view-only unless `resumeOnOpen`. Explicit user actions pass false. */
   function connect(opts: { view?: boolean } = {}): void {
@@ -951,6 +936,9 @@
         break;
       case 'exit':
         exitCode = f.code;
+        break;
+      case 'ended': // room relay: every re-upgrade would be refused (termRoom.ts)
+        if (socketFactory) { closedByUs = true; reconnecting = false; term?.write(endedLine(f.reason)); }
         break;
       case 'error':
         term?.write(`\r\n\x1b[31m[otto] ${f.code}: ${f.message}\x1b[0m\r\n`);
@@ -2090,7 +2078,7 @@
     if (readOnly) return;
     const user = !terminalReply(data);
     if (user) keyLat?.input(performance.now());
-    sendJson({ type: 'input', data: textToBase64(data), user });
+    for (const frame of inputFrames(data, user, !!socketFactory)) sendJson(frame);
     if (user) resyncOnInput();
   }
 
@@ -2569,7 +2557,11 @@
       if (!file) return;
       e.preventDefault();
       e.stopPropagation();
-      if (socketFactory) { toasts.info('Room terminals accept text only'); return; }
+      if (socketFactory) {
+        if (!onImagePaste) { toasts.info('This terminal accepts text only'); return; }
+        void toPngBlob(file).then(onImagePaste).catch((e) => toastError('Couldn’t paste image', e));
+        return;
+      }
       void uploadPastedImage(file);
     };
     container.addEventListener('paste', onPaste, true);

@@ -5,12 +5,17 @@ use tauri::webview::NewWindowResponse;
 use tauri::{Url, WebviewUrl, WebviewWindowBuilder};
 
 const PREFIX: &str = "room-";
+/// Returned instead of a window label when the room opened in the browser.
+pub const BROWSER: &str = "browser";
 static NEXT_WINDOW: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug)]
 struct Invitation {
     url: Url,
     room_id: String,
+    /// The host's pinned certificate (`…/<code>/<sha256>`, minted by an Otto
+    /// whose invite points at its own self-signed network listener).
+    fingerprint: Option<[u8; 32]>,
 }
 
 fn opaque_segment(value: &str, maximum: usize) -> bool {
@@ -47,7 +52,11 @@ fn parse_invitation(raw: &str) -> Result<Invitation, String> {
         return Err(invalid());
     }
     let parts: Vec<_> = url.fragment().unwrap_or_default().split('/').collect();
-    if parts.len() != 4
+    let fingerprint = match parts.get(4) {
+        None => None,
+        Some(hex) => Some(crate::room_trust::parse_fingerprint(hex).ok_or_else(invalid)?),
+    };
+    if !(parts.len() == 4 || parts.len() == 5)
         || !parts[0].is_empty()
         || parts[1] != "room"
         || !opaque_segment(parts[2], 128)
@@ -57,7 +66,29 @@ fn parse_invitation(raw: &str) -> Result<Invitation, String> {
         return Err(invalid());
     }
     let room_id = parts[2].to_string();
-    Ok(Invitation { url, room_id })
+    Ok(Invitation {
+        url,
+        room_id,
+        fingerprint,
+    })
+}
+
+/// A host on this network (private/link-local IP or a `.local` name) whose
+/// invitation carries NO pinned certificate (an older Otto). Otto's
+/// network listener serves those over a SELF-SIGNED certificate, and WKWebView
+/// (via wry) has no certificate-challenge hook: the native window would load a
+/// blank page with no prompt. The default browser lets the guest accept the
+/// certificate once, and keeps camera, mic and screen sharing (secure context).
+fn local_network_host(url: &Url) -> bool {
+    let host = url.host_str().unwrap_or_default();
+    match host.trim_matches(['[', ']']).parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(ip)) => ip.is_private() || ip.is_link_local(),
+        Ok(std::net::IpAddr::V6(ip)) => {
+            let first = ip.segments()[0];
+            (first & 0xfe00) == 0xfc00 || (first & 0xffc0) == 0xfe80
+        }
+        Err(_) => host.to_ascii_lowercase().ends_with(".local"),
+    }
 }
 
 fn allows_navigation(invitation: &Invitation, url: &Url) -> bool {
@@ -93,6 +124,27 @@ pub async fn open_room_window(
         return Err("Join rooms from Otto's local Join room screen".into());
     }
     let invitation = parse_invitation(&url)?;
+    if let Some(fingerprint) = invitation.fingerprint {
+        // Teach wry's delegate the challenge handler BEFORE this window's
+        // webview exists (WebKit caches delegate capabilities on assignment).
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        webview
+            .with_webview(move |platform| {
+                crate::room_trust::install(platform.inner());
+                let _ = tx.send(());
+            })
+            .map_err(|_| "Otto could not prepare the room window".to_string())?;
+        let _ = rx.await;
+        let host = invitation.url.host_str().unwrap_or_default();
+        let port = invitation.url.port_or_known_default().unwrap_or(443);
+        crate::room_trust::pin(host, port, fingerprint);
+    } else if invitation.url.scheme() == "https" && local_network_host(&invitation.url) {
+        use tauri_plugin_opener::OpenerExt;
+        app.opener()
+            .open_url(invitation.url.as_str(), None::<&str>)
+            .map_err(|_| "Otto could not open the room in your browser".to_string())?;
+        return Ok(BROWSER.into());
+    }
     let label = format!("{PREFIX}{}", NEXT_WINDOW.fetch_add(1, Ordering::Relaxed));
     let title = format!(
         "Otto room — {}",
@@ -158,6 +210,60 @@ mod tests {
                 !error.contains(url),
                 "errors must not echo secret-bearing URLs"
             );
+        }
+    }
+
+    #[test]
+    fn pinned_invites_carry_a_64_hex_certificate_fingerprint() {
+        let fp = "ab".repeat(32);
+        let parsed = parse_invitation(&format!(
+            "https://192.168.60.96:7701/#/room/room_123/0123456789abcdef0123456789abcdef/{fp}"
+        ))
+        .unwrap();
+        assert_eq!(parsed.room_id, "room_123");
+        assert_eq!(parsed.fingerprint, Some([0xab; 32]));
+        assert!(parse_invitation(INVITE).unwrap().fingerprint.is_none());
+        for bad in ["abc", "zz".repeat(32).as_str(), "ab".repeat(33).as_str()] {
+            assert!(parse_invitation(&format!(
+                "https://192.168.60.96:7701/#/room/room_123/0123456789abcdef0123456789abcdef/{bad}"
+            ))
+            .is_err());
+        }
+        // The pinned invite may still navigate to its own room route.
+        let pinned = parse_invitation(&format!(
+            "https://192.168.60.96:7701/#/room/room_123/0123456789abcdef0123456789abcdef/{fp}"
+        ))
+        .unwrap();
+        assert!(allows_navigation(
+            &pinned,
+            &"https://192.168.60.96:7701/#/room/room_123"
+                .parse()
+                .unwrap()
+        ));
+    }
+
+    #[test]
+    fn lan_hosts_go_to_the_browser_public_hosts_stay_native() {
+        for url in [
+            "https://192.168.60.96:7701/",
+            "https://10.0.0.5:7701/",
+            "https://172.16.4.2:7701/",
+            "https://169.254.1.1:7701/",
+            "https://[fd00::1]:7701/",
+            "https://[fe80::1]:7701/",
+            "https://otto.local:7701/",
+            "https://MacBook.local:7701/",
+        ] {
+            assert!(local_network_host(&url.parse().unwrap()), "{url}");
+        }
+        for url in [
+            "https://rooms.example/",
+            "https://8.8.8.8/",
+            "https://[2001:db8::1]/",
+            "http://127.0.0.1:7700/",
+            "https://mac.tail1234.ts.net/",
+        ] {
+            assert!(!local_network_host(&url.parse().unwrap()), "{url}");
         }
     }
 

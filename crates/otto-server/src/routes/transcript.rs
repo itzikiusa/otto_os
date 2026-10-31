@@ -365,6 +365,18 @@ pub async fn get_transcript(
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<Json<Transcript>> {
     let session = session_gate(&ctx, &user, &id, WorkspaceRole::Viewer).await?;
+    transcript_page(&ctx, &id, &session, q).await.map(Json)
+}
+
+/// The page behind `GET …/transcript`, for a session the caller was already
+/// authorized for (owner gate above, or a session room's capability).
+pub(crate) async fn transcript_page(
+    ctx: &ServerCtx,
+    id: &Id,
+    session: &Session,
+    q: TranscriptQuery,
+) -> Result<Transcript, ApiError> {
+    let (ctx, id, session) = (ctx.clone(), id.clone(), session.clone());
     let before = parse_before(q.before.as_deref())?;
     let limit = q.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
     let provider_name = effective_provider(&session);
@@ -372,11 +384,11 @@ pub async fn get_transcript(
         Ok(r) => r,
         Err(why) => {
             let provider = Provider::parse(&provider_name).unwrap_or(Provider::Agy);
-            return Ok(Json(Transcript::unavailable(
+            return Ok(Transcript::unavailable(
                 provider,
                 session.provider_session_id.clone(),
                 why,
-            )));
+            ));
         }
     };
     let sub = q.sub.as_deref().filter(|s| !s.is_empty());
@@ -423,7 +435,7 @@ pub async fn get_transcript(
     if t.session_id.is_none() {
         t.session_id = session.provider_session_id.clone();
     }
-    Ok(Json(t))
+    Ok(t)
 }
 
 /// Passive viewers keep an existing tail warm without starting a process.
@@ -524,10 +536,19 @@ pub async fn transcript_image(
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<Response> {
     let session = session_gate(&ctx, &user, &id, WorkspaceRole::Viewer).await?;
-    let resolved = resolve_transcript(&ctx, &session)
+    session_image(&ctx, &session, &img_id).await
+}
+
+/// One transcript image of an already-authorized session.
+pub(crate) async fn session_image(
+    ctx: &ServerCtx,
+    session: &Session,
+    img_id: &str,
+) -> ApiResult<Response> {
+    let resolved = resolve_transcript(ctx, session)
         .await
         .map_err(|_| ApiError(Error::NotFound("transcript not available".into())))?;
-    serve_image(&ctx, resolved.provider, &resolved.path, &img_id).await
+    serve_image(ctx, resolved.provider, &resolved.path, img_id).await
 }
 
 /// `GET /sessions/{id}/transcript/tool/{tool_id}` — one `tool_call` block

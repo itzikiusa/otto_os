@@ -57,6 +57,15 @@ fn is_mcp_rules_path(p: &str) -> bool {
     p == "/mcp/auto-approve" || p == "/mcp/auto-approve/{id}" || p.starts_with("/mcp/profiles")
 }
 
+/// Room-capability routes, authenticated in their handlers by the room token
+/// (writes also by the driver grant, re-checked by `room_input`).
+fn room_capability_route(p: &str) -> bool {
+    matches!(
+        p,
+        "/room-join" | "/game-room-join" | "/room-paste/{id}" | "/room-prompt/{id}"
+    ) || p.starts_with("/room-transcript/")
+}
+
 /// Map an `(method, matched_path)` pair to its feature-axis [`PolicyDecision`].
 ///
 /// `matched_path` is the Axum route **template** with `{id}`-style placeholders,
@@ -84,7 +93,7 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     //    it precedes the feature families below).
     // ----------------------------------------------------------------------
 
-    if p == "/room-join" || p == "/game-room-join" {
+    if room_capability_route(p) {
         return Exempt;
     }
     // perf2/10-mcp R7: an agent session's stdio bridge appends its OWN tool-call

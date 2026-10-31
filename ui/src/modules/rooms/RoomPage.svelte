@@ -10,21 +10,60 @@
   import RoomMedia from './RoomMedia.svelte';
   import RoomParticipants from './RoomParticipants.svelte';
   import RoomChat from './RoomChat.svelte';
+  import LazyMount from '../../lib/components/LazyMount.svelte';
+  import { lazyComponent } from '../../lib/lazy-component.svelte';
+  // The Chat view pulls in the conversation renderer — load it on first use.
+  const RoomConversationLazy = lazyComponent(() => import('./RoomConversation.svelte'));
   import { confirmer } from '../../lib/confirm.svelte';
-  import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
+  import { ui } from '../../lib/stores/ui.svelte';
+  import { providerName } from '../../lib/uiCommands/frames';
   import Icon from '../../lib/components/Icon.svelte';
   import { copyTextOrThrow } from '../../lib/clipboard';
   import { announce } from '../../lib/announce.svelte';
   import { router } from '../../lib/router.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { applyRoomEvent, hostRequests } from './room-state';
-  import { RoomClient, joinRoom, type RoomConnection } from './room-client';
+  import { RoomClient, joinRoom, pasteRoomImage, type RoomConnection } from './room-client';
   import { recallRoom, rememberRoom, forgetRoom, roomInvite } from './room-access';
   import type { RoomSnapshot, RoomAction, RoomEvent, RoomInvite } from '../../lib/api/room-types';
   let { roomId, guest = false }: {roomId: string; guest?: boolean} = $props();
   let mediaPanel: RoomMedia | undefined = $state();
   let room = $state<RoomSnapshot | null>(null), connection = $state<RoomConnection>('connecting');
   let recapPanel: RoomRecap | undefined = $state();
+  let termRef: Terminal | undefined = $state();
+  /** The shared session shown as its terminal or as the agent's Chat view
+   *  (the session's own view switch). The terminal stays mounted under Chat. */
+  let view = $state<'terminal' | 'chat'>('terminal');
+  /** The terminal controls a session's More menu has (font, copy on select,
+   *  find, redraw) — per viewer, so every member gets them. */
+  function terminalItems(): MenuItem[] {
+    if (!room?.session_id || !connected) return [];
+    return [
+      { label: 'Find in terminal', icon: 'search', hint: '⌘F', action: () => termRef?.openFind() },
+      { label: 'Terminal font larger', icon: 'plus', hint: '⌘+', disabled: ui.termFontSize >= 28, action: () => ui.termZoomIn() },
+      { label: 'Terminal font smaller', icon: 'minus', hint: '⌘−', disabled: ui.termFontSize <= 8, action: () => ui.termZoomOut() },
+      { label: `Reset terminal font (${ui.termFontSize}px)`, icon: 'text', hint: '⌘0', action: () => ui.termZoomReset() },
+      { label: 'Copy on select', checked: ui.termCopyOnSelect, action: () => ui.setTermCopyOnSelect(!ui.termCopyOnSelect) },
+      { label: 'Redraw terminal', icon: 'refresh', title: 'Rebuild the screen from the session — fixes a garbled or half-drawn pane', action: () => termRef?.redraw() },
+    ];
+  }
+  function moreMenu(anchor: HTMLElement) {
+    const items: MenuItem[] = terminalItems();
+    if (host) items.push({ label: endLabel(), icon: 'stop', danger: true, disabled: finishing, action: () => void leave() });
+    ctxMenu.showAt(anchor, items, { align: 'end' });
+  }
+  // Room windows run without the app shell, so its ⌘F / ⌘± / ⌘0 map is absent.
+  function onKeydown(e: KeyboardEvent) {
+    if (!e.metaKey || e.ctrlKey || e.altKey || !room?.session_id || !connected) return;
+    const k = e.key;
+    if (k === 'f' && !e.shiftKey) termRef?.openFind();
+    else if (k === '=' || k === '+') ui.termZoomIn();
+    else if (k === '-') ui.termZoomOut();
+    else if (k === '0') ui.termZoomReset();
+    else return;
+    e.preventDefault();
+  }
   let client = $state<RoomClient | null>(null), joining = $state(false), name = $state(''), error = $state(''), ended = $state('');
   let waitingForRecap = $state(false);
   let finishing = $state(false), needsName = $state(false), inviteOpen = $state(false), inviteRole = $state<'viewer' | 'editor'>('viewer');
@@ -114,10 +153,16 @@
     if (data.type === 'credit') return {type: 'credit', window: data.window};
     if (data.type === 'ack') return {type: 'ack', bytes: data.bytes};
     if (data.type === 'scrollback' || data.type === 'resync') return {type: data.type, lines: data.lines};
+    // Find-bar scrollback search: read-only, any admitted member.
+    if (data.type === 'search') return {type: 'search', query: (frame as {query?: string}).query ?? ''};
     if (!canType || room?.grant_epoch === undefined) return null;
     if (data.type === 'input') return {type: 'input', data: data.data, grant_epoch: room.grant_epoch};
     if (data.type === 'resize') return {type: 'resize', cols: data.cols, rows: data.rows, grant_epoch: room.grant_epoch};
     return null;
+  }
+  async function pasteImage(png: Blob): Promise<void> {
+    if (!client || !canType || room?.grant_epoch === undefined) throw new Error('Take control of the terminal to paste an image.');
+    await pasteRoomImage(client.origin, client.credential, room.grant_epoch, png);
   }
   function controlButton() {
     if (canType) send({type: 'release_control'});
@@ -154,15 +199,17 @@
     try { await copyTextOrThrow(invitation.url); copied = true; } catch { inviteError = 'Couldn’t copy. Select and copy the invitation link below.'; }
   }
 </script>
+<svelte:window onkeydown={onKeydown} />
 <div class="room-page">
   <!-- Always mounted so a screen reader hears each new knock or request once. -->
   <div class="sr-only" aria-live="polite">{host ? announcement : ''}</div>
-  <PageHeader title={room?.session_title ?? 'Session room'} subtitle={room ? `${room.members?.filter(m => m.admission === 'admitted').length ?? 1}/4 people` : ''}>
+  <PageHeader title={room?.session_title ?? 'Session room'} subtitle={room ? `${room.provider ? `${providerName(room.provider)} · ` : ''}${room.members?.filter(m => m.admission === 'admitted').length ?? 1}/4 people` : ''}>
     {#snippet actions()}{#if room?.admission === 'admitted'}
       {#if host}
-        <button class="icon-btn" data-keep aria-haspopup="menu" disabled={finishing} title={endLabel()} aria-label={finishing ? endLabel() : 'More room actions'} onclick={(e) => ctxMenu.showAt(e.currentTarget, [{ label: endLabel(), icon: 'stop', danger: true, disabled: finishing, action: () => void leave() }], { align: 'end' })}><Icon name="more" size={14} /></button>
+        <button class="icon-btn" data-keep aria-haspopup="menu" title="More room actions" aria-label="More room actions" onclick={(e) => moreMenu(e.currentTarget)}><Icon name="more" size={14} /></button>
         <button class="btn small primary" disabled={!connected} onclick={() => { invitation = null; inviteError = ''; inviteOpen = true; }}>Invite someone…</button>
       {:else}
+        {#if room.session_id && connected}<button class="icon-btn" data-keep aria-haspopup="menu" title="Terminal options" aria-label="Terminal options" onclick={(e) => moreMenu(e.currentTarget)}><Icon name="more" size={14} /></button>{/if}
         <button class="btn small danger" disabled={finishing} onclick={leave}>{endLabel()}</button>
       {/if}
     {/if}{/snippet}
@@ -191,7 +238,9 @@
       {#if error}<div class="error">{error}<button class="btn small" onclick={() => error = ''}>Dismiss</button></div>{/if}
       <RoomRecap bind:this={recapPanel} {room} {connected} {send} audioSources={() => mediaPanel?.getRecapAudioSources() ?? new Map()} screenStreams={() => mediaPanel?.getPresentationStreams() ?? new Map()} />
       <nav class="mobile-tabs" aria-label="Room view"><button class="btn" aria-pressed={tab === 'session'} onclick={() => tab = 'session'}>Session</button><button class="btn" aria-pressed={tab === 'conversation'} aria-label={host && requests.total ? `People & chat, ${requests.total} ${requests.total === 1 ? 'request' : 'requests'}` : undefined} onclick={() => tab = 'conversation'}>People & chat{#if host && requests.total}<span class="count" aria-hidden="true">{requests.total}</span>{/if}</button></nav>
-      <div class="room-workspace"><main class:mobile-hidden={tab !== 'session'}><RoomMedia bind:this={mediaPanel} {room} {send} {connected} /><div class="terminal-pane">{#if room.session_id && client && connected}<Terminal sessionId={room.session_id} socketFactory={() => client!.terminal()} transformFrame={terminalFrame} readOnly={!canType} readOnlyReason={self?.role === 'viewer' ? 'View only. The host decides who can control the terminal.' : `${driver?.name ?? 'The host'} currently controls the terminal.`} showToolbar={false} scrollback={PRIMARY_SCROLLBACK} preferDom />{/if}</div></main>
+      <div class="room-workspace"><main class:mobile-hidden={tab !== 'session'}><RoomMedia bind:this={mediaPanel} {room} {send} {connected} />{#if room.session_id && client && connected}<div class="view-switch" role="group" aria-label="Session view"><button class="btn small" aria-pressed={view === 'terminal'} onclick={() => view = 'terminal'}>Terminal</button><button class="btn small" aria-pressed={view === 'chat'} onclick={() => view = 'chat'}>Chat</button></div>{/if}
+          {#if view === 'chat' && room.session_id && client && connected}<div class="chat-pane"><LazyMount lazy={RoomConversationLazy} what="the conversation" variant="panel" props={{ origin: client.origin, credential: client.credential, sessionId: room.session_id, grantEpoch: canType && room.grant_epoch !== undefined ? room.grant_epoch : null }} /></div>{/if}
+          <div class="terminal-pane" class:view-hidden={view === 'chat'}>{#if room.session_id && client && connected}<Terminal bind:this={termRef} sessionId={room.session_id} socketFactory={() => client!.terminal()} transformFrame={terminalFrame} onImagePaste={pasteImage} readOnly={!canType} readOnlyReason={self?.role === 'viewer' ? 'View only. The host decides who can control the terminal.' : `${driver?.name ?? 'The host'} currently controls the terminal.`} showToolbar={false} scrollback={PRIMARY_SCROLLBACK} preferDom />{/if}</div></main>
         <aside class:mobile-hidden={tab !== 'conversation'}>
           <details class="people" bind:open={peopleOpen}>
             <summary>People</summary>
@@ -220,6 +269,8 @@
   .count { display: inline-block; margin-inline-start: 6px; min-width: 18px; padding-inline: 4px; border-radius: var(--radius-l); background: var(--warning-soft); color: var(--text); font-size: var(--fs-xs); } .error, .alert-text { color: var(--danger); }
   .room-workspace { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, 340px); }
   main { min-width: 0; min-height: 0; display: flex; flex-direction: column; } .terminal-pane { flex: 1; min-height: 160px; }
+  .terminal-pane.view-hidden { display: none; } .chat-pane { flex: 1; min-height: 160px; display: flex; flex-direction: column; }
+  .view-switch { display: flex; gap: 4px; padding: 6px 12px 0; } .view-switch [aria-pressed='true'] { background: var(--accent-soft); color: var(--accent-text); }
   aside { min-width: 0; min-height: 0; overflow: hidden; border-inline-start: 1px solid var(--border); display: flex; flex-direction: column; background: var(--surface); }
   .people { flex: 0 1 auto; min-height: 0; overflow: auto; max-height: 45%; border-bottom: 1px solid var(--border); }
   .people > summary { display: none; }

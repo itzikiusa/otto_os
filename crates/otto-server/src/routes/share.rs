@@ -251,7 +251,10 @@ pub fn emailable(o: &ShareOrigin) -> bool {
 /// ([`crate::transport::network_listener_port`]), not the saved setting, which
 /// only applies after a restart and is ignored when TLS setup or the bind
 /// failed (S20-303) — and this Mac has a non-loopback primary address.
-fn lan_listener_origin(bound_port: Option<u16>, ip: Option<std::net::IpAddr>) -> Option<String> {
+pub(crate) fn lan_listener_origin(
+    bound_port: Option<u16>,
+    ip: Option<std::net::IpAddr>,
+) -> Option<String> {
     let port = bound_port?;
     let ip = ip?;
     Some(match ip {
@@ -262,7 +265,7 @@ fn lan_listener_origin(bound_port: Option<u16>, ip: Option<std::net::IpAddr>) ->
 
 /// The address the OS would route outbound traffic from. A UDP `connect` only
 /// selects a route — no packet is sent.
-fn primary_lan_ip() -> Option<std::net::IpAddr> {
+pub(crate) fn primary_lan_ip() -> Option<std::net::IpAddr> {
     let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
     sock.connect("192.0.2.1:9").ok()?; // TEST-NET-1: never contacted
     let ip = sock.local_addr().ok()?.ip();

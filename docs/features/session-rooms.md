@@ -68,6 +68,17 @@ network listener, create a tunnel, or publish the host's machine. Remote guests
 need a reachable HTTPS origin serving the host's Otto UI, HTTP routes and
 WebSocket routes. A loopback invitation works only on the same computer.
 
+**Two computers on one network.** When the network listener is on (Settings →
+remote access; it serves `https://<this Mac's LAN IP>:<port>` with a
+self-signed certificate) and no public origin is set, invitations point at that
+LAN address instead of `127.0.0.1`, and carry the listener certificate's
+SHA-256 as a last fragment segment (`#/room/<id>/<code>/<sha256>`). The joining
+Otto app pins exactly that certificate for exactly that host:port in its room
+window, so the room opens in-app with no certificate prompt; every other site
+keeps normal validation. A browser ignores the pin and shows its usual
+certificate warning once. An invitation from an older Otto (a LAN address with
+no pin) opens in the default browser instead of a blank native window.
+
 A root administrator opens **Rooms → Connection settings** to set the public
 HTTPS origin and STUN/TURN URLs. This setting describes existing network
 infrastructure; it does not provision a certificate, reverse proxy or relay.
@@ -94,6 +105,17 @@ capabilities. They are confined to the invited origin and room. Credentials live
 only in window memory, so reloading or closing the window may require a new
 invitation. Disconnecting withdraws control and capture grants immediately;
 reconnecting does not restart the microphone or screen automatically.
+
+In a browser, **Open room** (and starting a room) opens the room in its own tab,
+so the original tab stays free for other sessions. The credential crosses a
+same-origin `postMessage` to the tab it opened — never a URL or storage. With
+pop-ups blocked the room opens in place as before.
+
+Inside a room, everyone has the session's **Terminal | Chat** switch (the Chat
+view reads the agent's transcript with the room capability), and the terminal
+⋯ menu (find, font size, copy on select, redraw; ⌘F / ⌘± / ⌘0). The member who
+controls the terminal can also message the agent from Chat, paste images into
+the terminal (stored on the host, path typed in), and paste large text.
 
 Hosted desktop rooms use a separate authenticated window loading only the room
 UI. Navigating the main sidebar does not remount that window, disconnect audio,

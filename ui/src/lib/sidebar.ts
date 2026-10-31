@@ -314,6 +314,18 @@ export function favoriteModules(list: SidebarModule[], favorites: readonly strin
 }
 
 /**
+ * A section's modules as the Navigator draws them outside edit mode. Agents
+ * renders its whole session list (plus channel groups and the archive)
+ * inline, so any module saved after it in the same section — Rooms, History,
+ * Mission Control in Work — sat below every session, out of sight until
+ * favorited. It renders last; the saved order (and edit mode) are unchanged.
+ */
+export function agentsLast(mods: SidebarModule[]): SidebarModule[] {
+  const i = mods.findIndex((m) => m.id === 'agents');
+  return i < 0 || i === mods.length - 1 ? mods : [...mods.slice(0, i), ...mods.slice(i + 1), mods[i]];
+}
+
+/**
  * The sections the sidebar renders: Favorites first (only when it holds at
  * least one module of `list`), then every group in the user's section order.
  * A favorited module appears ONLY in Favorites — it leaves its own group, and

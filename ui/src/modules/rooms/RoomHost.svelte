@@ -4,6 +4,7 @@
   import { isTauri } from '../../lib/desktop';
   import { rememberRoom, forgetRoom } from './room-access';
   import RoomPage from './RoomPage.svelte';
+  import { requestRoomContext } from './room-window';
   import LoadState from '../../lib/components/LoadState.svelte';
   import ConfirmDialog from '../../lib/components/ConfirmDialog.svelte';
   import ContextMenu from '../../lib/components/ContextMenu.svelte';
@@ -15,9 +16,9 @@
   async function load() {
     loading = true; error = '';
     try {
-      if (!isTauri) throw new Error('Open this room from the Otto desktop app.');
-      const { invoke } = await import('@tauri-apps/api/core');
-      const context = await invoke<{ origin: string; credential: RoomCredential }>('get_host_room_context');
+      const context = isTauri
+        ? await (await import('@tauri-apps/api/core')).invoke<{ origin: string; credential: RoomCredential }>('get_host_room_context')
+        : await requestRoomContext(roomId);
       if (disposed) return;
       if (context.credential.room_id !== roomId) throw new Error('This window belongs to another room. Reopen it from Rooms.');
       rememberRoom(context.origin, context.credential);

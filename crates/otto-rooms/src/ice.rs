@@ -64,15 +64,53 @@ fn valid_urls(items: &[String], turn: bool) -> Result<()> {
     Ok(())
 }
 /// The public origin invites point at: the configured `room_public_origin`,
-/// else this daemon's base URL, validated either way.
+/// else the LAN TLS listener's address when it is serving, else this daemon's
+/// (loopback) base URL — validated either way.
 pub async fn public_origin<C: RoomsCtx>(ctx: &C) -> Result<String> {
     let configured = ctx.setting("room_public_origin").await?;
-    valid_origin(
-        configured
-            .as_ref()
-            .and_then(|v| v.as_str())
-            .unwrap_or(ctx.base_url()),
+    if let Some(origin) = configured.as_ref().and_then(|v| v.as_str()) {
+        return valid_origin(origin);
+    }
+    match ctx.lan_origin() {
+        Some(lan) => valid_origin(&format!("{lan}/")),
+        None => valid_origin(ctx.base_url()),
+    }
+}
+/// Lowercase-hex SHA-256 of the first certificate (DER) in a PEM file — the
+/// network listener's self-signed leaf, pinned by LAN invites.
+pub fn pem_sha256(pem: &str) -> Option<String> {
+    use base64::Engine;
+    use sha2::Digest;
+    let body: String = pem
+        .lines()
+        .skip_while(|l| !l.starts_with("-----BEGIN CERTIFICATE"))
+        .skip(1)
+        .take_while(|l| !l.starts_with("-----END"))
+        .collect();
+    let der = base64::engine::general_purpose::STANDARD
+        .decode(body)
+        .ok()?;
+    Some(
+        sha2::Sha256::digest(&der)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect(),
     )
+}
+/// [`public_origin`] plus, when it is the LAN listener (self-signed), that
+/// certificate's SHA-256 for the invite to carry (`…/<code>/<sha256>`).
+pub async fn invite_origin<C: RoomsCtx>(ctx: &C) -> Result<(String, Option<String>)> {
+    let configured = ctx.setting("room_public_origin").await?;
+    if configured.as_ref().and_then(|v| v.as_str()).is_none() {
+        if let Some(lan) = ctx.lan_origin() {
+            return Ok((
+                valid_origin(&format!("{lan}/"))?,
+                ctx.lan_certificate_sha256()
+                    .filter(|fp| fp.len() == 64 && fp.bytes().all(|b| b.is_ascii_hexdigit())),
+            ));
+        }
+    }
+    Ok((public_origin(ctx).await?, None))
 }
 /// The operator's room settings (root-only routes; the handler checks).
 pub async fn settings<C: RoomsCtx>(ctx: &C) -> Result<RoomSettings> {
