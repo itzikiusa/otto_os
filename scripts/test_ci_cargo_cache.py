@@ -35,6 +35,7 @@ class CiCargoCacheTests(unittest.TestCase):
 
             # Cold cache: no manifest yet -> stamps deterministic baseline mtime_ns.
             self.assertEqual(ci_cargo_cache.cmd_restore(root), 0)
+            self.assertTrue((root / "target" / "tmp").is_dir())
             lib_rs = root / "crates" / "foo" / "src" / "lib.rs"
             mig_sql = root / "crates" / "foo" / "migrations" / "001.sql"
             self.assertEqual(lib_rs.stat().st_mtime_ns, ci_cargo_cache.STABLE_MTIME_NS)

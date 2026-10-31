@@ -231,14 +231,14 @@ jobs:
         run: python3 scripts/ci-cargo-cache.py prepare-save
 
   rust-test:
-    name: Rust · nextest (${{ matrix.shard }}/8)
+    name: Rust · nextest (${{ matrix.shard }}/10)
     needs: rust-build
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     steps:
       - uses: actions/checkout@v7.0.1
 
@@ -274,15 +274,16 @@ jobs:
           rm -rf "$RUNNER_TEMP/ch" "$archive"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      - name: cargo nextest (shard ${{ matrix.shard }}/8)
+      - name: cargo nextest (shard ${{ matrix.shard }}/10)
         env:
           OTTO_REQUIRE_CLICKHOUSE: "1"
         run: |
+          mkdir -p target/tmp
           cargo nextest run \
             --archive-file "$RUNNER_TEMP/nextest.tar.zst" \
             --workspace-remap . \
             --profile ci --no-fail-fast \
-            --partition count:${{ matrix.shard }}/8
+            --partition count:${{ matrix.shard }}/10
 
   ui:
     name: UI (svelte-check · tsc)

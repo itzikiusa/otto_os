@@ -151,8 +151,8 @@ structured around single-pass compilation and zero-compile test fan-out:
   single `rust-build` job compiles the workspace (`ottod` + all unit/integration
   test binaries) once using `--workspace --features otto-server/test-util` so
   Cargo `resolver = "2"` never compiles the 89k-LOC `otto-server` crate twice,
-  archives all test binaries into `nextest.tar.zst`, and fans out to 8
-  zero-compile `rust-test` nextest shards (`--partition count:M/8` so adjacent
+  archives all test binaries into `nextest.tar.zst`, and fans out to 10
+  zero-compile `rust-test` nextest shards (`--partition count:M/10` so adjacent
   serialized ClickHouse/budget tests spread evenly across shards, `test-threads = "num-cpus"`), 4
   single-browser E2E smoke shards, and `daemon-budget`.
 - **Full workspace + vendor target caching (`scripts/ci-cargo-cache.py`).**

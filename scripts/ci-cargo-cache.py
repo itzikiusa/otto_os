@@ -111,6 +111,9 @@ def _stamp_cold_baseline(root: Path, cur_files: dict[str, str], cur_dirs: dict[s
 
 
 def cmd_restore(root: Path) -> int:
+    # Integration tests using `env!("CARGO_TARGET_TMPDIR")` expect `target/tmp`
+    # to exist even when Cargo skips compilation on a warm cache hit.
+    (root / "target" / "tmp").mkdir(parents=True, exist_ok=True)
     cur_files, cur_dirs = snapshot(root)
     manifest_path = root / MANIFEST_REL
     if not manifest_path.is_file():
