@@ -150,8 +150,6 @@ export interface WorkflowRun {
   approved_at?: string | null;
   /** The workflow version this run executed against. */
   workflow_version?: number | null;
-  /** Proof pack assembled for this run, if any. */
-  proof_pack_id?: string | null;
   /** How many times the startup reconciler resumed this run after a daemon
    *  restart (0/absent = never interrupted). */
   resume_attempts?: number;

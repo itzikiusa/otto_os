@@ -1754,6 +1754,16 @@ pub struct GoalLoopIteration {
     pub finished_at: Option<DateTime<Utc>>,
 }
 
+/// One captured command run (`sh -c <cmd>`): combined output, exit code, wall
+/// time. Produced by goal-loop and skill-eval verification commands.
+#[derive(Debug, Clone)]
+pub struct CmdRun {
+    pub success: bool,
+    pub exit_code: i32,
+    pub output: String,
+    pub duration_ms: u64,
+}
+
 /// A loop together with its iterations (the detail view payload).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GoalLoopDetail {
@@ -1893,10 +1903,6 @@ pub struct EvalIteration {
     /// produced code. `None` until the scoring pipeline has run.
     #[serde(default)]
     pub scoring: Option<EvalScore>,
-    /// The Proof Pack assembled for this iteration's evidence (tests/lint/diff/
-    /// review/human). Openable in the UI.
-    #[serde(default)]
-    pub proof_pack_id: Option<String>,
     /// Human quality rating 0–5 (None when not yet rated).
     #[serde(default)]
     pub human_rating: Option<u8>,
@@ -2566,8 +2572,6 @@ pub struct ScheduledTask {
     pub max_retries: i64,
     /// Deliver the report only when it meaningfully differs from the last ok run.
     pub notify_on_change: bool,
-    /// Build a proof pack (report + run metadata) for each run.
-    pub attach_proof: bool,
     /// Internal dispatch/settlement ownership; never accepted from API clients.
     #[serde(skip)]
     pub schedule_generation: i64,
@@ -2610,8 +2614,6 @@ pub struct ScheduledTaskRun {
     // --- v2 ---
     /// Normalized hash of the report — backs `notify_on_change` change detection.
     pub report_hash: Option<String>,
-    /// The proof pack built for this run (when `attach_proof`).
-    pub proof_pack_id: Option<String>,
     /// Total agent attempts made (1 + retries used).
     pub attempts: i64,
     /// Delivery was suppressed because the report didn't meaningfully change.
@@ -2636,7 +2638,7 @@ pub struct ScheduledTaskPreset {
     pub skill: Option<String>,
 }
 
-/// The 32 independently-gatable product features.
+/// The 30 independently-gatable product features.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Feature {
@@ -2646,7 +2648,6 @@ pub enum Feature {
     Git,
     Issues,
     Product,
-    Swarm,
     ApiClient,
     Workflows,
     Channels,
@@ -2662,14 +2663,9 @@ pub enum Feature {
     /// Design Hall — the artifact graph (projects, artifacts, versions, links,
     /// search, signals). Granted wherever `Canvas` was (the Hall absorbs it).
     Design,
-    ProofPack,
     Mcp,
-    /// Mission Control — the unified work graph across every activity.
-    MissionControl,
     /// Scheduled Tasks — recurring agent jobs with reports + delivery.
     ScheduledTasks,
-    /// Run with Otto — the one-button source→PR-draft pipeline.
-    RunWithOtto,
     /// Browser — in-app reader/annotate tabs + on-demand page fetch.
     Browser,
     /// AWS — account (profile) management for the AWS console module.
@@ -2703,7 +2699,6 @@ impl Feature {
             "git" => Some(Self::Git),
             "issues" => Some(Self::Issues),
             "product" => Some(Self::Product),
-            "swarm" => Some(Self::Swarm),
             "api_client" => Some(Self::ApiClient),
             "workflows" => Some(Self::Workflows),
             "channels" => Some(Self::Channels),
@@ -2717,11 +2712,8 @@ impl Feature {
             "users" => Some(Self::Users),
             "canvas" => Some(Self::Canvas),
             "design" => Some(Self::Design),
-            "proof_pack" => Some(Self::ProofPack),
             "mcp" => Some(Self::Mcp),
-            "mission_control" => Some(Self::MissionControl),
             "scheduled_tasks" => Some(Self::ScheduledTasks),
-            "run_with_otto" => Some(Self::RunWithOtto),
             "browser" => Some(Self::Browser),
             "aws" => Some(Self::Aws),
             "aws_s3" => Some(Self::AwsS3),
@@ -2744,7 +2736,6 @@ impl Feature {
             Self::Git => "git",
             Self::Issues => "issues",
             Self::Product => "product",
-            Self::Swarm => "swarm",
             Self::ApiClient => "api_client",
             Self::Workflows => "workflows",
             Self::Channels => "channels",
@@ -2758,11 +2749,8 @@ impl Feature {
             Self::Users => "users",
             Self::Canvas => "canvas",
             Self::Design => "design",
-            Self::ProofPack => "proof_pack",
             Self::Mcp => "mcp",
-            Self::MissionControl => "mission_control",
             Self::ScheduledTasks => "scheduled_tasks",
-            Self::RunWithOtto => "run_with_otto",
             Self::Browser => "browser",
             Self::Aws => "aws",
             Self::AwsS3 => "aws_s3",
@@ -2819,8 +2807,10 @@ mod tests {
             Some(Feature::ScheduledTasks)
         );
         assert_eq!(Feature::ScheduledTasks.as_str(), "scheduled_tasks");
-        assert_eq!(Feature::parse("run_with_otto"), Some(Feature::RunWithOtto));
-        assert_eq!(Feature::RunWithOtto.as_str(), "run_with_otto");
+        assert_eq!(Feature::parse("swarm"), None);
+        assert_eq!(Feature::parse("proof_pack"), None);
+        assert_eq!(Feature::parse("mission_control"), None);
+        assert_eq!(Feature::parse("run_with_otto"), None);
         assert_eq!(Feature::parse("browser"), Some(Feature::Browser));
         assert_eq!(Feature::Browser.as_str(), "browser");
         assert_eq!(Feature::parse("design"), Some(Feature::Design));
@@ -2936,6 +2926,10 @@ mod tests {
             "implement",
             "approve",
             "approve2",
+            // Antigravity (`agy`) JSONL transcript record `source` values (otto-transcript).
+            "MODEL",
+            "SYSTEM",
+            "USER_EXPLICIT",
         ];
         let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()

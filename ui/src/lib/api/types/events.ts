@@ -5,9 +5,6 @@ import type {
   AgentTask, TrailEvent,
 } from './activity';
 import type {
-  AssistantLimitState, AssistantRouteTarget, AssistantTask, AssistantThread, AssistantTurn,
-} from './assistant';
-import type {
   BrowserChromeBuild, BrowserEngineInstallState, BrowserLiveSessionState,
 } from './browser';
 import type {
@@ -129,29 +126,6 @@ export type OttoEvent =
       deleted: boolean;
     }
   | { type: 'tasks_updated'; workspace_id: Id; session_id: Id; tasks: AgentTask[] }
-  | { type: 'swarm_run_updated'; workspace_id: Id; swarm_id: Id; run: Record<string, unknown> }
-  | {
-      type: 'swarm_task_updated';
-      workspace_id: Id;
-      swarm_id: Id;
-      project_id: Id;
-      task: Record<string, unknown>;
-    }
-  | { type: 'swarm_project_cleared'; workspace_id: Id; swarm_id: Id; project_id: Id }
-  | {
-      type: 'swarm_message_posted';
-      workspace_id: Id;
-      swarm_id: Id;
-      message: Record<string, unknown>;
-    }
-  | {
-      type: 'swarm_goal_updated';
-      workspace_id: Id;
-      swarm_id: Id;
-      task_id?: Id | null;
-      goal: Record<string, unknown>;
-    }
-  | { type: 'swarm_status'; workspace_id: Id; swarm_id: Id; status: string }
   /** Emitted after each metrics-sampler tick so the dashboard can refresh
    *  sparklines in near-real-time. `ts` is the sample timestamp (UTC ISO-8601).
    *  A9 — Usage/Insights cluster. */
@@ -252,48 +226,12 @@ export type OttoEvent =
       cap_usd: number;
       direction: string;
     }
-  /** A proof pack was created, (re)assembled, had an artifact added, or was
-   *  waived — its derived status/risk may have changed. The Proof page + sidebar
-   *  badges re-fetch the affected pack and refresh the workspace proof summary. */
-  | {
-      type: 'proof_pack_updated';
-      workspace_id: Id;
-      proof_pack_id: Id;
-      work_item_kind: string;
-      work_item_id: string;
-      status: string;
-      risk_score: number;
-      done_score?: number;
-      /** Badges after this recompute — present on current daemons; lets the
-       *  store patch the summary/list row instead of refetching. */
-      badges?: string[];
-      /** Evidence count after this recompute. */
-      artifact_count?: number;
-    }
-  | {
-      /** A Mission Control work item was created or its normalized status
-       *  changed — the page re-fetches the workspace summary/list on a match. */
-      type: 'work_graph_updated';
-      workspace_id: Id;
-      item_id: Id;
-      kind: string;
-      status: string;
-    }
   | {
       /** A scheduled-task run started/finished/errored — the Scheduled Tasks page
        *  re-fetches the task's run history on a matching tick. */
       type: 'scheduled_task_run_updated';
       workspace_id: Id;
       task_id: Id;
-      run_id: Id;
-      status: string;
-    }
-  | {
-      /** A Run with Otto run advanced through its stage machine (status changed,
-       *  proof/review attached, or it reached approval/PR/terminal). The Run with
-       *  Otto page re-fetches the affected run + the workspace list on a match. */
-      type: 'otto_run_updated';
-      workspace_id: Id;
       run_id: Id;
       status: string;
     }
@@ -360,42 +298,6 @@ export type OttoEvent =
       workspace_id: Id;
       scene_id: Id;
       doc: unknown;
-    }
-  | {
-      /** Otto Assistant: a turn was indexed (user send echo, landed reply,
-       *  memory chip, delegation, reminder, route/limit notice). Owner-only.
-       *  Clients append/replace by `turn.id`; `thread` is the row after the
-       *  change, or null when unchanged. */
-      type: 'assistant_turn';
-      user_id: Id;
-      thread_id: Id;
-      turn: AssistantTurn;
-      thread: AssistantThread | null;
-    }
-  | {
-      /** Otto Assistant: a task was created or changed state. Owner-only. */
-      type: 'assistant_task_update';
-      user_id: Id;
-      task: AssistantTask;
-    }
-  | {
-      /** Otto Assistant: an item entered or left the needs-you queue.
-       *  `open_count` = queue size after the change (menu-bar dot, phone badge). */
-      type: 'assistant_needs_you';
-      user_id: Id;
-      task: AssistantTask;
-      open_count: number;
-    }
-  | {
-      /** Otto Assistant: a provider usage limit was detected on a thread's
-       *  route. Nothing switches unless `auto_switched` (auto-failover on). */
-      type: 'assistant_limit';
-      user_id: Id;
-      thread_id: Id | null;
-      limit: AssistantLimitState;
-      suggestion: AssistantRouteTarget | null;
-      task_id: Id | null;
-      auto_switched: boolean;
     }
   | {
       /** The canvas Ask-AI agent session became live (turn start) — the Canvas
@@ -535,14 +437,6 @@ export type OttoEvent =
       session_id?: Id | null;
     }
   | {
-      /** A review's Proof Pack was exported (snapshot persisted + verified
-       *  findings ingested into memory). */
-      type: 'proof_pack_exported';
-      workspace_id: Id;
-      review_id: Id;
-      proof_pack_id: Id;
-    }
-  | {
       /** A session's set of referenced Canvas scenes changed (attach/detach).
        *  The session's Canvas panel re-fetches `GET /sessions/{id}/canvas-refs`
        *  on a matching tick instead of polling. */
@@ -636,15 +530,6 @@ export type OttoEvent =
       artifact: Artifact;
     }
   | {
-      /** Progress of the background History index walk (boot or
-       *  `POST /workspaces/{wid}/history/rescan`); Scope::Workspace. */
-      type: 'history_index_progress';
-      workspace_id: Id;
-      scanned: number;
-      total: number;
-      done: boolean;
-    }
-  | {
       /** An AWS account row was created / updated / deleted (global scope) —
        *  the AWS console refreshes its account list. */
       type: 'aws_account_updated';
@@ -699,5 +584,23 @@ export type OttoEvent =
        *  owner-only; refetch `/notifications`. */
       type: 'notifications_changed';
       user_id: Id;
+    }
+  | {
+      type: 'db_mcp_activity';
+      workspace_id: Id;
+      connection_id: Id;
+      session_id: Id | null;
+      session_title: string | null;
+      activity_id: string;
+      tool: string;
+      sql: string | null;
+      node: string | null;
+      status: 'started' | 'finished' | 'error';
+      row_count: number | null;
+      duration_ms: number | null;
+      columns: string[];
+      rows_preview: unknown[][];
+      error: string | null;
+      ts: string;
     }
   | WorkbenchDocChangedEvent;

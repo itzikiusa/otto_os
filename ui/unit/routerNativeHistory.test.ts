@@ -1,4 +1,3 @@
-import {captureGameInvite} from '../src/modules/rooms/games/access.ts';
 // S13-09: a native traversal (mouse back, swipe, browser Back) moves the
 // in-app stack pointer instead of truncating + pushing, and a refused one is
 // undone with history.go — never by overwriting the back-target entry.
@@ -46,7 +45,7 @@ function browser(initial = '#/home') {
     './win': { winKey: (k: string) => k },
     './storage': { lsGet: () => null, lsSet: () => {} },
     './desktop': { isEmbedded: false },
-    './rooms/invites': { captureGameInvite, captureRoomInvite },
+    './rooms/invites': { captureRoomInvite },
     './sidebar': { activeNavId },
     './shareTokenStore': { dropShareToken: () => {}, storeShareToken: () => {}, storedShareToken: () => null },
   }, { window, history });

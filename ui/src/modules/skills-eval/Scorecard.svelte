@@ -1,14 +1,7 @@
 <script lang="ts">
   // Renders one iteration's multi-signal eval score (composite + the five
-  // signals that feed it) and, on demand, the assembled proof pack. Read-only —
-  // it never mutates the eval; rating happens elsewhere.
+  // signals that feed it). Read-only — it never mutates the eval; rating happens elsewhere.
   import type { EvalScore } from '../../lib/api/types';
-  import { untrack } from 'svelte';
-  import LoadState from '../../lib/components/LoadState.svelte';
-  import { loadErrorText } from '../../lib/loadError';
-  import { kindLabel } from '../../lib/labels';
-  import { skillsEvalApi } from '../../lib/api/skillsEval';
-  import Icon from '../../lib/components/Icon.svelte';
   import { sentenceCase } from '../../lib/status';
 
   interface Props {
@@ -17,22 +10,7 @@
     iterId?: string;
     compact?: boolean;
   }
-  let { score, evalId, iterId, compact = false }: Props = $props();
-
-  type Artifact = {
-    kind: string;
-    title: string;
-    status: string;
-    preview: string;
-    truncated: boolean;
-    metadata: unknown;
-  };
-
-  let expanded = $state(false);
-  let loading = $state(false);
-  let proofError: string | null = $state(null);
-  let proofRetry = $state(0);
-  let artifacts = $state<Artifact[]>([]);
+  let { score }: Props = $props();
 
   // Proof-status pill palette: soft tone tint + text-safe tone, per the
   // design tokens (passed/failed/partial/waived; anything else = neutral).
@@ -66,47 +44,9 @@
       : [],
   );
 
-  function dotTone(status: string): string {
-    if (status === 'passed') return 'var(--status-working)';
-    if (status === 'failed') return 'var(--status-exited)';
-    return 'var(--text-dim)';
-  }
-
   function clamp(n: number): number {
     return Math.max(0, Math.min(100, n));
   }
-
-  function clip(s: string): string {
-    return s.length > 400 ? s.slice(0, 400) : s;
-  }
-
-  // Evidence changes when a rating or validator result is published. Keep an
-  // open pack current, and discard a response for an older score or iteration.
-  $effect(() => {
-    const opened = expanded;
-    const evaluation = evalId;
-    const iteration = iterId;
-    JSON.stringify(score);
-    proofRetry;
-    // A pending score may have a saved rating but only the previous published
-    // proof artifacts. Do not present those as evidence of the new score.
-    if (!opened || !evaluation || !iteration || score?.proof_status === 'pending') return;
-    let current = true;
-    untrack(() => {
-      loading = true;
-      proofError = null;
-      artifacts = [];
-      void skillsEvalApi.iterProofPack(evaluation, iteration).then(pack => {
-        if (current) artifacts = pack.artifacts ?? [];
-      }).catch(error => {
-        if (current) proofError = loadErrorText(error);
-      }).finally(() => {
-        if (current) loading = false;
-      });
-    });
-    return () => { current = false; };
-  });
-
 </script>
 
 {#if score}
@@ -121,11 +61,11 @@
           class="proof"
           data-testid="scorecard-proof"
           style="background:{proofTone.bg};color:{proofTone.fg}"
-          title="Proof pack status"
+          title="Verification status"
         >
           Proof: {sentenceCase(score.proof_status || 'missing')}
         </span>
-        <span class="done" title="How much of the done contract (tests, lint, proof) this iteration met">Done contract {score.done_score}/100</span>
+        <span class="done" title="How much of the done contract (tests, lint) this iteration met">Done contract {score.done_score}/100</span>
       </div>
     </div>
 
@@ -146,41 +86,6 @@
         </div>
       {/each}
     </div>
-
-    {#if !compact}
-      <button class="btn small ghost proofpack-btn" data-testid="scorecard-proofpack-btn" aria-expanded={expanded} onclick={() => (expanded = !expanded)}>
-        <Icon name={expanded ? 'chevronDown' : 'chevronRight'} size={12} />
-        {expanded ? 'Hide proof pack' : 'View proof pack'}
-      </button>
-
-      {#if expanded}
-        <div class="pack">
-          {#if score.proof_status === 'pending'}
-            <div class="pmsg" data-testid="proof-pending-evidence">Proof evidence will be available when the score update finishes.</div>
-          {:else if loading || proofError}
-            <LoadState what="the proof pack" {loading} error={proofError} empty={true} variant="compact" onretry={() => proofRetry++} />
-          {:else if artifacts.length === 0}
-            <div class="pmsg">No proof artifacts were captured for this iteration.</div>
-          {:else}
-            {#each artifacts as a, i (i)}
-              <div class="artifact">
-                <div class="ahead">
-                  <span class="adot" style="background:{dotTone(a.status)}"></span>
-                  <span class="akind">{kindLabel(a.kind)}</span>
-                  <span class="sep">·</span>
-                  <span class="atitle">{a.title}</span>
-                  <span class="sep">·</span>
-                  <span class="astatus">{sentenceCase(a.status)}</span>
-                </div>
-                {#if a.preview}
-                  <pre class="apreview">{clip(a.preview)}{a.truncated ? '\n…' : ''}</pre>
-                {/if}
-              </div>
-            {/each}
-          {/if}
-        </div>
-      {/if}
-    {/if}
   </div>
 {/if}
 
@@ -191,7 +96,7 @@
   .head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
   .composite { display: flex; align-items: baseline; gap: 6px; }
   .composite .num { font-size: var(--fs-2xl); font-weight: 600; line-height: 1; color: var(--text); font-variant-numeric: tabular-nums; }
-  .composite .lbl, .done, .rlabel, .pmsg { font-size: var(--fs-xs); color: var(--text-dim); }
+  .composite .lbl, .done, .rlabel { font-size: var(--fs-xs); color: var(--text-dim); }
   .composite .lbl { text-transform: uppercase; letter-spacing: .06em; }
   .meta { display: flex; align-items: center; gap: 8px; }
   .proof { padding: 2px 8px; border-radius: 999px; font-size: var(--fs-xs); font-weight: 500; white-space: nowrap; }
@@ -206,12 +111,4 @@
   .rscore { font-size: var(--fs-xs); font-weight: 600; text-align: end; color: var(--text); font-variant-numeric: tabular-nums; }
   .row.dim .rscore { color: var(--text-dim); }
   .rdetail { grid-column: 2 / -1; font-size: var(--fs-xs); color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .proofpack-btn { align-self: flex-start; }
-  .pack { display: flex; flex-direction: column; gap: 8px; }
-  .artifact { border: 1px solid var(--border); border-radius: var(--radius-m); padding: 6px 8px; }
-  .ahead { display: flex; align-items: center; gap: 4px; font-size: var(--fs-xs); color: var(--text); }
-  .adot { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto; }
-  .akind { font-weight: 600; }
-  .sep, .atitle, .astatus { color: var(--text-dim); }
-  .apreview { margin: 6px 0 0; padding: 6px 8px; max-height: 160px; overflow: auto; font-size: var(--fs-xs); line-height: 1.4; color: var(--text-dim); background: var(--surface-2); border-radius: var(--radius-m); white-space: pre-wrap; word-break: break-word; }
 </style>

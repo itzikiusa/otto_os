@@ -108,7 +108,6 @@ fn valid_clean_transcript_is_a_verdict_and_invalid_passes_do_not_score() {
 
 #[tokio::test]
 async fn malformed_validation_cannot_publish_passed_review_evidence() {
-    use otto_core::proof::{ProofArtifactKind, ProofArtifactStatus, WorkItemKind};
     let pool = otto_state::db::test_pool().await;
     sqlx::query("INSERT INTO users(id,username,password_hash,is_root,created_at) VALUES('editor','editor','unused',0,'2026-10-08T00:00:00Z')")
         .execute(&pool).await.unwrap();
@@ -131,24 +130,11 @@ async fn malformed_validation_cannot_publish_passed_review_evidence() {
         )
         .await
         .unwrap();
-    let mut iter = ctx
+    let iter = ctx
         .skill_evals_store
         .add_iteration(&eval.id, 1, None, "skill", "body", "fixture", &[])
         .await
         .unwrap();
-    let pack = ctx
-        .proof_repo
-        .create_pack(
-            &ws.id,
-            WorkItemKind::Task,
-            &iter.id,
-            "fixture",
-            "editor",
-            None,
-        )
-        .await
-        .unwrap();
-    iter.proof_pack_id = Some(pack.id.clone());
     for (texts, expected_status, expected_score) in [
         (vec!["[]"], "done", 100.0),
         (vec!["not json"], "error", 0.0),
@@ -194,27 +180,14 @@ async fn malformed_validation_cannot_publish_passed_review_evidence() {
             .set_iter_agents(&iter.id, &[state, clean])
             .await
             .unwrap();
-        let mut stored = ctx.skill_evals_store.get_iteration(&iter.id).await.unwrap();
-        stored.proof_pack_id = Some(pack.id.clone());
-        let (score, _) = crate::eval_score::rescore_validation(&ctx, &eval, &stored, None)
-            .await
-            .unwrap();
+        let stored = ctx.skill_evals_store.get_iteration(&iter.id).await.unwrap();
+        let score = crate::eval_score::rescore_validation(&stored, None);
         assert_eq!(score.review.score, expected_score);
-        let artifacts = ctx.proof_repo.list_artifacts_meta(&pack.id).await.unwrap();
-        let review = artifacts
-            .iter()
-            .find(|a| a.kind == ProofArtifactKind::Review)
-            .unwrap();
-        assert_eq!(
-            review.status,
-            if expected_status == "done" {
-                ProofArtifactStatus::Passed
-            } else {
-                ProofArtifactStatus::Failed
-            }
-        );
+        if expected_status != "done" {
+            assert_eq!(score.proof_status, "failed");
+        }
         ctx.skill_evals_store
-            .set_iter_scoring(&iter.id, &score, Some(&pack.id))
+            .set_iter_scoring(&iter.id, &score)
             .await
             .unwrap();
         ctx.skill_evals_store
@@ -236,7 +209,6 @@ async fn malformed_validation_cannot_publish_passed_review_evidence() {
 
 #[tokio::test]
 async fn rating_waits_for_retry_publication_and_keeps_the_final_score_consistent() {
-    use otto_core::proof::{ProofArtifactKind, WorkItemKind};
     let pool = otto_state::db::test_pool().await;
     sqlx::query("INSERT INTO users(id,username,password_hash,is_root,created_at) VALUES('editor','editor','unused',0,'2026-10-08T00:00:00Z')")
         .execute(&pool).await.unwrap();
@@ -276,24 +248,12 @@ async fn rating_waits_for_retry_publication_and_keeps_the_final_score_consistent
         .add_iteration(&eval.id, 1, None, "skill", "body", "fixture", &[agent])
         .await
         .unwrap();
-    let pack = ctx
-        .proof_repo
-        .create_pack(
-            &ws.id,
-            WorkItemKind::Task,
-            &iter.id,
-            "fixture",
-            "editor",
-            None,
-        )
-        .await
-        .unwrap();
     let previous = EvalScore {
         human: otto_core::eval_score::human_score(Some(5), "old", "editor"),
         ..Default::default()
     };
     ctx.skill_evals_store
-        .set_iter_scoring(&iter.id, &previous, Some(&pack.id))
+        .set_iter_scoring(&iter.id, &previous)
         .await
         .unwrap();
     ctx.skill_evals_store
@@ -302,8 +262,12 @@ async fn rating_waits_for_retry_publication_and_keeps_the_final_score_consistent
         .unwrap();
 
     // Pause the actual retry between its fresh snapshot and score publication.
-    let proof_lock = ctx.proof_locks.handle(&pack.id);
-    let blocked_proof = proof_lock.lock().await;
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    crate::eval_score::retry_checkpoints()
+        .lock()
+        .unwrap()
+        .insert(iter.id.clone(), (entered_tx, release_rx));
     let retry_ctx = ctx.clone();
     let eval_id = eval.id.clone();
     let iter_id = iter.id.clone();
@@ -311,23 +275,10 @@ async fn rating_waits_for_retry_publication_and_keeps_the_final_score_consistent
         crate::eval_score::publish_validation_retry(&retry_ctx, &eval_id, &iter_id, Some(previous))
             .await
     });
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if ctx
-                .proof_repo
-                .list_artifacts_meta(&pack.id)
-                .await
-                .unwrap()
-                .iter()
-                .any(|a| a.kind == ProofArtifactKind::Review)
-            {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), entered_rx)
+        .await
+        .unwrap()
+        .unwrap();
     let user = otto_state::UsersRepo::new(pool)
         .get(&"editor".into())
         .await
@@ -354,7 +305,7 @@ async fn rating_waits_for_retry_publication_and_keeps_the_final_score_consistent
         Some(5),
         "rating must wait before persisting while retry owns publication"
     );
-    drop(blocked_proof);
+    let _ = release_tx.send(());
     retry.await.unwrap().unwrap();
     let _ = rating.await.unwrap();
     let stored = ctx.skill_evals_store.get_iteration(&iter.id).await.unwrap();
@@ -457,16 +408,6 @@ async fn initial_scoring_publishes_rating_saved_while_commands_run() {
     assert_eq!(score.human.note, "during command");
     assert_eq!(stored.composite_score, Some(score.composite));
     assert_eq!(stored.best_score, Some(score.composite));
-    let artifacts = ctx
-        .proof_repo
-        .list_artifacts_meta(iter.proof_pack_id.as_ref().unwrap())
-        .await
-        .unwrap();
-    let approval = artifacts
-        .iter()
-        .find(|a| a.kind == otto_core::proof::ProofArtifactKind::Approval)
-        .unwrap();
-    assert_eq!(approval.metadata["rating"], serde_json::json!(1));
 }
 
 #[tokio::test]
@@ -594,7 +535,7 @@ async fn rating_storage_failure_does_not_keep_a_stale_publishable_score() {
         .unwrap();
     previous.tests = otto_core::eval_score::signal_from_cmd(true, true, "already ran");
     ctx.skill_evals_store
-        .set_iter_scoring(&iter.id, &previous, None)
+        .set_iter_scoring(&iter.id, &previous)
         .await
         .unwrap();
     ctx.skill_evals_store
@@ -615,8 +556,6 @@ async fn rating_storage_failure_does_not_keep_a_stale_publishable_score() {
     for trigger in [
         "CREATE TRIGGER reject_publication BEFORE UPDATE OF scoring_json ON skill_eval_iterations WHEN json_extract(NEW.scoring_json, '$.proof_status') != 'pending' BEGIN SELECT RAISE(ABORT, 'injected scoring failure'); END",
         "CREATE TRIGGER reject_publication BEFORE UPDATE OF composite_score ON skill_evals WHEN NEW.composite_score IS NOT NULL BEGIN SELECT RAISE(ABORT, 'injected headline failure'); END",
-        "CREATE TRIGGER reject_publication BEFORE UPDATE ON proof_artifacts WHEN NEW.kind = 'approval' BEGIN SELECT RAISE(ABORT, 'injected approval failure'); END",
-        "CREATE TRIGGER reject_publication BEFORE UPDATE ON proof_packs BEGIN SELECT RAISE(ABORT, 'injected proof status failure'); END",
     ] {
         sqlx::query(trigger).execute(&pool).await.unwrap();
         let result = rate_iteration(

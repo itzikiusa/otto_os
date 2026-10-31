@@ -84,12 +84,6 @@ registerLazyUiCommands(
   'home',
 );
 registerLazyUiCommands(
-  'swarm',
-  ['swarm_list', 'swarm_open', 'swarm_list_tasks', 'swarm_list_runs', 'swarm_run_task', 'swarm_stop_run'],
-  () => import('./swarm'),
-  'swarm',
-);
-registerLazyUiCommands(
   'loops',
   ['loops_list', 'loops_open', 'loops_control'],
   () => import('./loops'),

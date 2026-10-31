@@ -4,7 +4,6 @@
 // consumers through `liveEvents` subscribers only.
 import type { EventRoutes, EventType } from './types';
 import { shellRoutes } from './shell';
-import { swarmRoutes } from './swarm';
 import { apiClientRoutes } from './apiClient';
 import { productRoutes } from './product';
 import { databaseRoutes } from './database';
@@ -14,13 +13,14 @@ import { browserRoutes } from './browser';
 import { personalAgentsRoutes } from './personalAgents';
 import { cloudRoutes } from './cloud';
 
+import { usageStore, databaseStore, personalAgentsStore } from './stores';
+
 export type { EventOf, EventRoutes, EventType } from './types';
-export { swarmStore, usageStore, databaseStore, personalAgentsStore } from './stores';
+export { usageStore, databaseStore, personalAgentsStore };
 export { resyncAutomation } from './automation';
 
 export const featureRoutes: EventRoutes = {
   ...shellRoutes,
-  ...swarmRoutes,
   ...apiClientRoutes,
   ...productRoutes,
   ...databaseRoutes,
@@ -29,6 +29,7 @@ export const featureRoutes: EventRoutes = {
   ...browserRoutes,
   ...personalAgentsRoutes,
   ...cloudRoutes,
+  usage_metrics_tick: () => usageStore.peek()?.applyMetricsTick(),
 };
 
 /** Event types with no store route: their consumers subscribe through

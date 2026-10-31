@@ -169,11 +169,6 @@
         icon: ws.viewMode === 'tiled' ? 'square' : 'grid',
         action: () => ws.setViewMode(ws.viewMode === 'tiled' ? 'tabs' : 'tiled'),
       },
-      {
-        label: ws.viewMode === 'mission' ? 'Exit Work Queue' : 'Work Queue',
-        icon: 'gauge',
-        action: () => ws.setViewMode(ws.viewMode === 'mission' ? 'tabs' : 'mission'),
-      },
     ]);
   }
 
@@ -400,17 +395,6 @@
       </div>
     {/each}
   </div>
-  <!-- History entry point (⌘K "Go to History" and the sidebar row are the
-       others). It used to own a whole 26px strip under the tabs. -->
-  <button
-    class="icon-btn history-btn"
-    onclick={() => router.go('history')}
-    title="Session history"
-    aria-label="Session history"
-    data-testid="agents-history-btn"
-  >
-    <Icon name="clock" size={14} />
-  </button>
   <div class="view-toggle" role="group" aria-label="View mode">
     <button
       class:active={ws.viewMode === 'tabs'}
@@ -429,15 +413,6 @@
       aria-label="Tiled view"
     >
       <Icon name="grid" size={12} />
-    </button>
-    <button
-      class:active={ws.viewMode === 'mission'}
-      aria-pressed={ws.viewMode === 'mission'}
-      onclick={() => ws.setViewMode('mission')}
-      title="Work Queue"
-      aria-label="Work Queue"
-    >
-      <Icon name="gauge" size={12} />
     </button>
   </div>
   <button
@@ -693,9 +668,6 @@
   .view-toggle button.active {
     background: var(--surface);
     color: var(--accent-text);
-  }
-  .history-btn {
-    flex-shrink: 0;
   }
 </style>
 

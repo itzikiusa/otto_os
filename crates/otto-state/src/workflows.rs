@@ -102,7 +102,6 @@ fn row_to_run(r: &sqlx::sqlite::SqliteRow) -> Result<WorkflowRun> {
         approval_note: r.try_get("approval_note").ok().flatten(),
         approved_at: approved_at.as_deref().map(ts).transpose()?,
         workflow_version: r.try_get("workflow_version").ok().flatten(),
-        proof_pack_id: r.try_get("proof_pack_id").ok().flatten(),
         resume_attempts: r.try_get("resume_attempts").unwrap_or(0),
         // Derived at the API layer (routes/workflows.rs) from data_dir +
         // run id when the directory exists — never persisted.
@@ -1051,17 +1050,6 @@ impl WorkflowsRepo {
         Ok(())
     }
 
-    /// Link a run to the Proof Pack assembled for it.
-    pub async fn set_run_proof_pack(&self, run_id: &Id, proof_pack_id: &str) -> Result<()> {
-        sqlx::query("UPDATE workflow_runs SET proof_pack_id = ? WHERE id = ?")
-            .bind(proof_pack_id)
-            .bind(run_id)
-            .execute(&self.pool)
-            .await
-            .map_err(dberr("set run proof pack"))?;
-        Ok(())
-    }
-
     /// Persist run progress: status, the per-node states, optional error, and
     /// (when terminal) the finished timestamp. Bumps and returns the run's
     /// monotonic `rev` so callers can stamp the change's WS event with it.
@@ -1381,7 +1369,7 @@ impl WorkflowsRepo {
                 .map(serde_json::to_string)
                 .transpose()
                 .map_err(|e| Error::Internal(format!("approval node version: {e}")))?
-                .map(|json| otto_core::proof::content_sha256(&json));
+                .map(|json| otto_core::text::content_sha256(&json));
             if expected_detail_version.is_none() || expected_detail_version != version.as_deref() {
                 return Err(Error::Conflict("The publication preview changed or was not reviewed. Reload and review it before deciding.".into()));
             }
@@ -1481,9 +1469,8 @@ impl WorkflowsRepo {
     /// A run is deleted only when ALL hold: it is terminal (`success` /
     /// `error` / `canceled`) and not parked on an approval; it is outside its
     /// workflow's newest `keep` terminal runs; it started before
-    /// `now - older_than_days`; no Proof Pack references it (the run's
-    /// `proof_pack_id` or a `proof_packs` row of kind `workflow_run`); and no
-    /// scheduled-task run links to it (`scheduled_task_runs.workflow_run_id`).
+    /// `now - older_than_days`; and no scheduled-task run links to it
+    /// (`scheduled_task_runs.workflow_run_id`).
     /// Candidates are found by one read, then deleted in
     /// [`RUN_PRUNE_BATCH`]-row transactions. Returns the deleted run ids so
     /// the caller can remove each `workflow-context/<id>` dir.
@@ -1492,16 +1479,14 @@ impl WorkflowsRepo {
         let cutoff = fmt(Utc::now() - chrono::Duration::days(older_than_days.max(1)));
         let ids: Vec<String> = sqlx::query_scalar(
             "SELECT id FROM (
-                 SELECT r.id, r.started_at, r.proof_pack_id,
+                 SELECT r.id, r.started_at,
                         ROW_NUMBER() OVER (PARTITION BY r.workflow_id
                                            ORDER BY r.started_at DESC, r.id DESC) AS rn
                  FROM workflow_runs r
                  WHERE r.status IN ('success','error','canceled')
                    AND COALESCE(r.waiting_approval, 0) = 0
              ) t
-             WHERE t.rn > ? AND t.started_at < ? AND t.proof_pack_id IS NULL
-               AND NOT EXISTS (SELECT 1 FROM proof_packs p
-                               WHERE p.work_item_kind = 'workflow_run' AND p.work_item_id = t.id)
+             WHERE t.rn > ? AND t.started_at < ?
                AND NOT EXISTS (SELECT 1 FROM scheduled_task_runs s
                                WHERE s.workflow_run_id = t.id)",
         )
@@ -2280,14 +2265,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(run.workflow_version, Some(1));
-        assert_eq!(run.proof_pack_id, None);
 
         repo.set_run_version(&run.id, 1).await.unwrap();
-        repo.set_run_proof_pack(&run.id, "pack-123").await.unwrap();
 
         let run = repo.get_run(&run.id).await.unwrap();
         assert_eq!(run.workflow_version, Some(1));
-        assert_eq!(run.proof_pack_id.as_deref(), Some("pack-123"));
     }
 
     #[tokio::test]
@@ -2661,8 +2643,8 @@ mod tests {
                 .unwrap();
             ids.push(run.id);
         }
-        // A young terminal run, an old running run, an old proof-linked run
-        // and an old scheduled-task-linked run: all must survive.
+        // A young terminal run, an old running run, and an old
+        // scheduled-task-linked run: all must survive.
         let young = repo
             .create_run(&wf.id, &wf.workspace_id, &serde_json::Value::Null, None)
             .await
@@ -2680,7 +2662,6 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        repo.set_run_proof_pack(&ids[4], "pack1").await.unwrap();
         sqlx::query(
             "INSERT INTO scheduled_task_runs (id, task_id, workspace_id, status, started_at, \
              workflow_run_id, created_at) VALUES ('str1', 't1', 'ws1', 'ok', ?1, ?2, ?1)",
@@ -2694,10 +2675,10 @@ mod tests {
         let gone = repo.prune_runs(3, 30).await.unwrap();
         let mut gone_sorted = gone.clone();
         gone_sorted.sort();
-        let mut want = vec![ids[2].clone(), ids[3].clone()];
+        let mut want = vec![ids[2].clone(), ids[3].clone(), ids[4].clone()];
         want.sort();
         assert_eq!(gone_sorted, want);
-        for keep in [&young.id, &live.id, &ids[0], &ids[1], &ids[4], &ids[5]] {
+        for keep in [&young.id, &live.id, &ids[0], &ids[1], &ids[5]] {
             assert!(repo.get_run(keep).await.is_ok(), "{keep} must survive");
         }
         // Idempotent.

@@ -60,10 +60,8 @@ fn is_mcp_rules_path(p: &str) -> bool {
 /// Room-capability routes, authenticated in their handlers by the room token
 /// (writes also by the driver grant, re-checked by `room_input`).
 fn room_capability_route(p: &str) -> bool {
-    matches!(
-        p,
-        "/room-join" | "/game-room-join" | "/room-paste/{id}" | "/room-prompt/{id}"
-    ) || p.starts_with("/room-transcript/")
+    matches!(p, "/room-join" | "/room-paste/{id}" | "/room-prompt/{id}")
+        || p.starts_with("/room-transcript/")
 }
 
 /// Map an `(method, matched_path)` pair to its feature-axis [`PolicyDecision`].
@@ -120,11 +118,6 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     }
     if p == "/rooms" {
         return Require(Agents, if get { View } else { Edit });
-    }
-    // A game room is session-less: `owner_auth` + per-owner room limits in
-    // the handler, so a View member may host one (game-rooms.md "HTTP").
-    if p == "/game-rooms" {
-        return Require(Agents, if method == Method::POST { View } else { Edit });
     }
     // Hosting a session room needs a running session of your own (itself
     // Agents:Edit); ending one and inviting are writes.
@@ -251,7 +244,7 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     // so it requires Agents/Edit — a Viewer can no longer read the host disk.
     // Root bypasses; non-root callers additionally hit the secret deny list in
     // `routes/fs.rs` (Otto data dir, ~/.ssh & co., key files).
-    if matches!(p, "/fs/browse" | "/fs/read" | "/fs/stat") {
+    if matches!(p, "/fs/browse" | "/fs/read" | "/fs/raw" | "/fs/stat") {
         return Require(Agents, Edit);
     }
     // Agent discovery / friendly-reference resolution (`agent_refs`): GET-only
@@ -267,7 +260,7 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     // Static catalogs (no per-user data; safe to read for any authed user).
     if matches!(
         p,
-        "/swarm/presets" | "/workflows/node-types" | "/lsp/capabilities" | "/walkthroughs/resolve"
+        "/workflows/node-types" | "/lsp/capabilities" | "/walkthroughs/resolve"
     ) {
         return Exempt;
     }
@@ -572,14 +565,6 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p.starts_with("/workspaces/{wid}/agents/") {
         return Require(Agents, Edit);
     }
-    // Mission Control (B4): work-queue read aggregation = View; saved-view
-    // create/delete = Edit (the handler adds the per-view owner guard).
-    if p.starts_with("/workspaces/{id}/mission") {
-        return Require(Agents, if get { View } else { Edit });
-    }
-    if p.starts_with("/mission-views/") {
-        return Require(Agents, Edit);
-    }
     // Cross-module workspace search (B5): broad read-only fan-out.
     if p == "/workspaces/{id}/search" {
         return Require(Agents, View);
@@ -656,9 +641,6 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p == "/workspaces/{wid}/transcript/touch" {
         // Workspace-wide tail keep-alive: any member who can read chats.
         return Require(Agents, View);
-    }
-    if p == "/workspaces/{wid}/history" || p.starts_with("/workspaces/{wid}/history/") {
-        return Require(Agents, if get { View } else { Edit });
     }
     if p == "/sessions/{id}/evolve" {
         // Manual trigger for the per-session live-evolve pass.
@@ -898,13 +880,6 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         return Require(Mcp, if read { View } else { Edit });
     }
 
-    // ---- Swarm ----------------------------------------------------------------
-    // §3.2: view swarms/board/runs=View; create/edit/run/start/pause/abort/
-    // recruit/plan=Edit.
-    if p.starts_with("/swarm/") || p.starts_with("/workspaces/{id}/swarm/") {
-        return Require(Swarm, if get { View } else { Edit });
-    }
-
     // ---- Goal Loops -----------------------------------------------------------
     // Workspace-axis feature: every handler enforces ws Viewer/Editor via the
     // role check (`require_ws_role`), so the feature-capability axis is not gated
@@ -951,18 +926,6 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     // handler validates the `X-Otto-Webhook-Key` against the keychain — exempt
     // from the feature gate, like the workflow webhook trigger.
     if p == "/webhooks/{workspace_id}" {
-        return Exempt;
-    }
-    // Run with Otto webhook entry is PUBLIC-by-key too (same per-workspace webhook
-    // key as the channel webhook); exempt from the feature gate.
-    if p == "/webhooks/{workspace_id}/run" {
-        return Exempt;
-    }
-    // Inbound swarm-trigger webhook is PUBLIC-by-key too (registered in
-    // public_routes); the handler validates the same per-workspace webhook key
-    // via `X-Otto-Webhook-Key` / `Authorization: Bearer` — exempt from the
-    // feature gate, like the channel webhook above.
-    if p == "/webhooks/swarm/{workspace_id}/{swarm_id}" {
         return Exempt;
     }
     if p.starts_with("/workspaces/{id}/integrations") {
@@ -1093,71 +1056,6 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         return Require(Agents, View);
     }
 
-    // Mission Control / work graph — the unified cross-activity view. A single
-    // prefix covers every route (summary/items/graph/items/{id}/edges/approvals/
-    // approvals/{aid}/decide/backfill). Reads = View, writes/backfill = Edit.
-    // Placeholder MUST match the route templates (`{wid}`) verbatim.
-    if p.starts_with("/workspaces/{wid}/workgraph/") {
-        return Require(MissionControl, if get { View } else { Edit });
-    }
-    // ---- Proof Packs (the evidence layer) --------------------------------
-    // Workspace-axis: list=View, create=Edit; the cheap summary=View. Flat
-    // routes mirror the reviews precedent (Require(Feature, …)), NOT goal-loops'
-    // Exempt — the handler does the orthogonal workspace-membership check.
-    if p == "/workspaces/{id}/proof-packs" {
-        return Require(ProofPack, if get { View } else { Edit });
-    }
-    if p == "/workspaces/{id}/proof-summary" {
-        return Require(ProofPack, View);
-    }
-    if p == "/workspaces/{id}/proof-packs/archive-sessions" {
-        // Opt-in archive of stale session packs (hides, never deletes).
-        return Require(ProofPack, Admin);
-    }
-    if p == "/proof-packs/{id}" {
-        // GET detail = View; PATCH = Edit; DELETE = Edit.
-        return Require(ProofPack, if get { View } else { Edit });
-    }
-    if p == "/proof-packs/{id}/artifacts" || p == "/proof-packs/{id}/assemble" {
-        return Require(ProofPack, Edit);
-    }
-    if p == "/proof-packs/{id}/waive" {
-        // Waiving the proof requirement is a human override (spec §7 = Edit).
-        return Require(ProofPack, Edit);
-    }
-    if p == "/proof-artifacts/{id}/content" {
-        return Require(ProofPack, View);
-    }
-    if p == "/proof-artifacts/{id}" {
-        return Require(ProofPack, Edit);
-    }
-    // ---- Proof Packs v2 (snapshots, evidence, CI, PR-check, reports, config) --
-    if p == "/proof-packs/{id}/snapshots" || p == "/proof-snapshots/{id}" {
-        // List a pack's snapshots / fetch one — read.
-        return Require(ProofPack, View);
-    }
-    if p == "/proof-packs/{id}/report" {
-        return Require(ProofPack, View);
-    }
-    if p == "/proof-artifacts/{id}/blob" {
-        return Require(ProofPack, View);
-    }
-    if p == "/proof-packs/{id}/snapshot"
-        || p == "/proof-packs/{id}/media"
-        || p == "/proof-packs/{id}/evidence/api"
-        || p == "/proof-packs/{id}/evidence/db"
-        || p == "/proof-packs/{id}/evidence/kafka"
-        || p == "/proof-packs/{id}/pr-check"
-        || p == "/proof-packs/{id}/ci-refresh"
-    {
-        // All write evidence into a pack.
-        return Require(ProofPack, Edit);
-    }
-    if p == "/repos/{id}/proof-config" {
-        // GET = View, PUT = Edit. (Per-repo proof requirements, R3.)
-        return Require(ProofPack, if get { View } else { Edit });
-    }
-
     // ---- Scheduled Tasks -------------------------------------------------
     // Workspace-axis list/create; flat by-id read/mutate; the report + presets are
     // reads. The handler does the orthogonal workspace-membership check (flat routes
@@ -1247,35 +1145,6 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     }
     if p == "/agent-rooms/{id}/messages" {
         return Require(ScheduledTasks, if get { View } else { Edit });
-    }
-
-    // ---- Otto Assistant ---------------------------------------------------
-    // The personal assistant (threads, turns, tasks, memory, routing, agent
-    // tools). Every row is the CALLER's own (handlers 404 anyone else's id), so
-    // there is no workspace axis; the feature axis is `Agents` like the session
-    // routes it drives. The route preview is a read that happens to POST.
-    // Delegation's extra `scheduled_tasks:Edit` + Editor check is in-handler.
-    if p == "/assistant/route/preview" {
-        return Require(Agents, View);
-    }
-    if p.starts_with("/assistant/") {
-        return Require(Agents, if get { View } else { Edit });
-    }
-
-    // Run with Otto — the one-button source→PR-draft pipeline. List/launch are
-    // workspace-scoped; the flat by-id routes load the run and re-check the role on
-    // its workspace (the IDOR guard). (The webhook entry is Exempt above.)
-    if p == "/workspaces/{wid}/runs" {
-        return Require(RunWithOtto, if get { View } else { Edit });
-    }
-    if p == "/workspaces/{wid}/runs/detect" {
-        return Require(RunWithOtto, View);
-    }
-    if p == "/runs/{id}" || p == "/runs/{id}/events" {
-        return Require(RunWithOtto, View);
-    }
-    if p == "/runs/{id}/approve" || p == "/runs/{id}/cancel" || p == "/runs/{id}/open-pr" {
-        return Require(RunWithOtto, Edit);
     }
 
     // ---- Browser (reader/annotate tabs + on-demand page fetch) ---------------
@@ -1596,9 +1465,7 @@ pub fn route_class(method: &Method, matched_path: &str) -> Option<RouteClass> {
                     // must never pass it itself (S3-01).
                     | "/mcp/approvals/{id}/decide"
                     | "/workflow-runs/{id}/approve"
-                    | "/runs/{id}/approve"
                     | "/database-changes/{id}/approve"
-                    | "/workspaces/{wid}/workgraph/approvals/{aid}/decide"
             )
             || p.starts_with("/state/git/")
             // MCP control-plane registry (S11-301): a server row names the
@@ -1874,17 +1741,16 @@ mod tests {
     }
 
     /// access-control-1-03: the Rooms module shows at Agents:View, so a View
-    /// member reads their own rooms/recaps and hosts a game room; recording,
-    /// summarising, ending, inviting and hosting a SESSION room stay Edit.
+    /// member reads their own rooms/recaps; recording, summarising, ending,
+    /// inviting and hosting a SESSION room stay Edit.
     #[test]
-    fn rooms_reads_and_game_hosting_are_view_writes_stay_edit() {
+    fn rooms_reads_are_view_writes_stay_edit() {
         for (m, p) in [
             (Method::GET, "/api/v1/rooms"),
             (Method::GET, "/api/v1/room-recaps"),
             (Method::GET, "/api/v1/room-recaps/{id}/export"),
             (Method::GET, "/api/v1/room-recaps/{id}/images/{image}"),
             (Method::GET, "/api/v1/room-recap-capabilities"),
-            (Method::POST, "/api/v1/game-rooms"),
         ] {
             assert_eq!(pol(m.clone(), p), Require(Agents, View), "{m} {p}");
         }
@@ -2187,104 +2053,6 @@ mod tests {
         );
     }
 
-    // ---- Otto Assistant -----------------------------------------------------
-
-    #[test]
-    fn assistant_routes_ride_the_agents_feature() {
-        for path in [
-            "/api/v1/assistant/threads",
-            "/api/v1/assistant/threads/{id}",
-            "/api/v1/assistant/threads/{id}/turns",
-            "/api/v1/assistant/needs-you",
-            "/api/v1/assistant/tasks",
-            "/api/v1/assistant/tasks/{id}",
-            "/api/v1/assistant/memory",
-            "/api/v1/assistant/memory/import/hermes",
-            "/api/v1/assistant/routing",
-            "/api/v1/assistant/limits",
-        ] {
-            assert_eq!(pol(Method::GET, path), Require(Agents, View), "{path}");
-        }
-        for (m, path) in [
-            (Method::POST, "/api/v1/assistant/threads"),
-            (Method::PATCH, "/api/v1/assistant/threads/{id}"),
-            (Method::DELETE, "/api/v1/assistant/threads/{id}"),
-            (Method::POST, "/api/v1/assistant/threads/{id}/turns"),
-            (Method::POST, "/api/v1/assistant/threads/{id}/attachments"),
-            (Method::POST, "/api/v1/assistant/threads/{id}/route"),
-            (Method::POST, "/api/v1/assistant/threads/{id}/delegate"),
-            (Method::POST, "/api/v1/assistant/tasks"),
-            (Method::POST, "/api/v1/assistant/tasks/{id}/{action}"),
-            (Method::PUT, "/api/v1/assistant/memory"),
-            (Method::POST, "/api/v1/assistant/memory"),
-            (Method::DELETE, "/api/v1/assistant/memory/{id}"),
-            (Method::POST, "/api/v1/assistant/memory/{id}/accept"),
-            (Method::POST, "/api/v1/assistant/memory/undo"),
-            (Method::POST, "/api/v1/assistant/forget"),
-            (Method::POST, "/api/v1/assistant/memory/import/hermes"),
-            (Method::PUT, "/api/v1/assistant/routing"),
-            (Method::POST, "/api/v1/assistant/agent/{tool}"),
-        ] {
-            assert_eq!(pol(m.clone(), path), Require(Agents, Edit), "{m} {path}");
-        }
-        // The preview is a read that happens to POST.
-        assert_eq!(
-            pol(Method::POST, "/api/v1/assistant/route/preview"),
-            Require(Agents, View)
-        );
-        // The bare prefix is not a route: still fail closed.
-        assert_eq!(pol(Method::GET, "/api/v1/assistant"), Deny);
-    }
-
-    // ---- Proof Packs --------------------------------------------------------
-
-    #[test]
-    fn proof_pack_routes_are_feature_gated() {
-        assert_eq!(
-            pol(Method::GET, "/api/v1/workspaces/{id}/proof-packs"),
-            Require(ProofPack, View),
-        );
-        assert_eq!(
-            pol(Method::POST, "/api/v1/workspaces/{id}/proof-packs"),
-            Require(ProofPack, Edit),
-        );
-        assert_eq!(
-            pol(Method::GET, "/api/v1/workspaces/{id}/proof-summary"),
-            Require(ProofPack, View),
-        );
-        assert_eq!(
-            pol(
-                Method::POST,
-                "/api/v1/workspaces/{id}/proof-packs/archive-sessions"
-            ),
-            Require(ProofPack, Admin),
-        );
-        assert_eq!(
-            pol(Method::GET, "/api/v1/proof-packs/{id}"),
-            Require(ProofPack, View),
-        );
-        assert_eq!(
-            pol(Method::DELETE, "/api/v1/proof-packs/{id}"),
-            Require(ProofPack, Edit),
-        );
-        assert_eq!(
-            pol(Method::POST, "/api/v1/proof-packs/{id}/artifacts"),
-            Require(ProofPack, Edit),
-        );
-        assert_eq!(
-            pol(Method::POST, "/api/v1/proof-packs/{id}/waive"),
-            Require(ProofPack, Edit),
-        );
-        assert_eq!(
-            pol(Method::GET, "/api/v1/proof-artifacts/{id}/content"),
-            Require(ProofPack, View),
-        );
-        assert_eq!(
-            pol(Method::DELETE, "/api/v1/proof-artifacts/{id}"),
-            Require(ProofPack, Edit),
-        );
-    }
-
     // ---- Security-critical mappings from the plan (Task 1.3 Step 1) ----------
 
     #[test]
@@ -2534,7 +2302,6 @@ mod tests {
         assert_eq!(pol(Method::POST, "/api/v1/onboarding/root"), Exempt);
         assert_eq!(pol(Method::POST, "/api/v1/ingest/claude"), Exempt);
         assert_eq!(pol(Method::POST, "/api/v1/ingest/usage"), Exempt);
-        assert_eq!(pol(Method::POST, "/api/v1/ingest/swarm/board"), Exempt);
     }
 
     #[test]
@@ -2731,7 +2498,6 @@ mod tests {
 
     #[test]
     fn static_catalogs_exempt() {
-        assert_eq!(pol(Method::GET, "/api/v1/swarm/presets"), Exempt);
         assert_eq!(pol(Method::GET, "/api/v1/workflows/node-types"), Exempt);
         assert_eq!(pol(Method::GET, "/api/v1/lsp/capabilities"), Exempt);
     }
@@ -2867,13 +2633,6 @@ mod tests {
                 "/api/v1/skill-evaluations/{id}/iterations/{iter_id}/rate"
             ),
             Require(SkillEval, Edit)
-        );
-        assert_eq!(
-            pol(
-                Method::GET,
-                "/api/v1/skill-evaluations/{id}/iterations/{iter_id}/proof-pack"
-            ),
-            Require(SkillEval, View)
         );
         // golden tasks + matrices.
         assert_eq!(
@@ -3035,10 +2794,6 @@ mod tests {
             Require(Agents, View)
         );
         assert_eq!(
-            pol(Method::GET, "/api/v1/workspaces/{wid}/history/artifacts"),
-            Require(Agents, View)
-        );
-        assert_eq!(
             pol(Method::GET, "/api/v1/sessions/{id}/artifacts"),
             Require(Agents, View)
         );
@@ -3052,29 +2807,6 @@ mod tests {
         );
         assert_eq!(
             pol(Method::POST, "/api/v1/sessions/{id}/inbox"),
-            Require(Agents, Edit)
-        );
-        assert_eq!(
-            pol(Method::GET, "/api/v1/workspaces/{wid}/history"),
-            Require(Agents, View)
-        );
-        assert_eq!(
-            pol(Method::GET, "/api/v1/workspaces/{wid}/history/transcript"),
-            Require(Agents, View)
-        );
-        assert_eq!(
-            pol(
-                Method::GET,
-                "/api/v1/workspaces/{wid}/history/transcript/images/{img_id}"
-            ),
-            Require(Agents, View)
-        );
-        assert_eq!(
-            pol(Method::POST, "/api/v1/workspaces/{wid}/history/import"),
-            Require(Agents, Edit)
-        );
-        assert_eq!(
-            pol(Method::POST, "/api/v1/workspaces/{wid}/history/rescan"),
             Require(Agents, Edit)
         );
         assert_eq!(
@@ -3263,17 +2995,6 @@ mod tests {
         assert_eq!(
             pol(Method::POST, "/api/v1/workspaces/{ws}/product/stories"),
             Require(Product, Edit)
-        );
-        assert_eq!(
-            pol(Method::GET, "/api/v1/workspaces/{id}/swarm/swarms"),
-            Require(Swarm, View)
-        );
-        assert_eq!(
-            pol(
-                Method::POST,
-                "/api/v1/workspaces/{id}/swarm/swarms/{sid}/start"
-            ),
-            Require(Swarm, Edit)
         );
         assert_eq!(
             pol(

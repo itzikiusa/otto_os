@@ -61,11 +61,6 @@ pub fn node_catalog() -> Vec<NodeTypeSpec> {
           "Evaluate an expression on the input; outputs { result, value }. Pair with edge conditions to branch.", 1, 1, "#f0c040", "git-branch"),
         n("loop", "Repeat (Until)", "Flow",
           "Re-run inner steps until an expression holds or max iterations (e.g. fix → review until score ≥ 80).", 1, 1, "#f0c040", "repeat"),
-        // Swarm task: wired — enqueues via SwarmRepo. Requires swarm_id +
-        // project_id in params; the task is created in "todo" status so the
-        // swarm coordinator picks it up on its next tick.
-        n("swarm_task", "Swarm Task", "AI",
-          "Enqueue a task in a running Agent Swarm project.", 1, 1, "#a070ff", "users"),
         // --- Product nodes (wired: run a real single-agent turn over the story's
         // context + the matching product skill, as a visible session). ---------
         n("product_analyze", "Product Analyze", "Product",
@@ -193,7 +188,6 @@ pub fn output_schema_for(kind: &str) -> Option<Value> {
             ("edits", "array"),
         ]),
         "canvas" => obj(&[("scene_id", "string"), ("summary", "string")]),
-        "swarm_task" => obj(&[("task_id", "string"), ("title", "string")]),
         _ => None,
     }
 }

@@ -125,7 +125,7 @@ class WorkspaceStore {
   /** Every sidebar list in ONE pass over `sessions` (see `bucketSessions`). */
   private buckets = $derived(bucketSessions(this.sessions));
   /** Background sources a mounted panel asked to have loaded with the main
-   *  list (e.g. the swarm page's `swarm` agents) — {@link includeSources}. */
+   *  list — {@link includeSources}. */
   private extraSources = new Map<string, number>();
   sessionsLoading = $state(false);
   sessionsError = $state<string | null>(null);
@@ -162,10 +162,9 @@ class WorkspaceStore {
     return workflowRuns.list;
   }
 
-  /** view mode for Agent Mode: tabbed (one at a time), tiled (grid), or the
-   *  Mission Control work-queue surface. */
-  viewMode: 'tabs' | 'tiled' | 'mission' = $state(
-    (lsGet(winKey('otto_view_mode')) as 'tabs' | 'tiled' | 'mission') ?? 'tabs',
+  /** view mode for Agent Mode: tabbed (one at a time / split) or tiled (grid). */
+  viewMode: 'tabs' | 'tiled' = $state(
+    lsGet(winKey('otto_view_mode')) === 'tiled' ? 'tiled' : 'tabs',
   );
 
   /** In tiled view, a session id to show maximized (zoomed) on its own. */
@@ -761,8 +760,7 @@ class WorkspaceStore {
   }
 
   /** Ask for a background source to be loaded with the main list while a
-   *  panel that lists those sessions is mounted (the swarm org tree reads
-   *  `meta.source = 'swarm'` rows). Returns the release function. */
+   *  panel that lists those sessions is mounted. Returns the release function. */
   includeSources(...sources: string[]): () => void {
     // Ref-counted: two mounted panels asking for the same source share it.
     const fresh = sources.filter((src) => !this.extraSources.has(src));
@@ -1561,7 +1559,7 @@ class WorkspaceStore {
     if (id) this.navigateToSession(id);
   }
 
-  setViewMode(mode: 'tabs' | 'tiled' | 'mission'): void {
+  setViewMode(mode: 'tabs' | 'tiled'): void {
     this.viewMode = mode;
     if (mode === 'tabs') this.maximizedId = null;
     lsSet(winKey('otto_view_mode'), mode);

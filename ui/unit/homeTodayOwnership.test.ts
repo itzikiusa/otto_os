@@ -7,10 +7,8 @@ function fixture() {
   const ws = { currentId: 'A', listSettled: true, foregroundActive: [], activeWorkflowRuns: [], needsYou: {}, statusMap: {} };
   const { today } = loadSource(new URL('../src/modules/home/today.svelte.ts', import.meta.url), {
     '../../lib/api/client': { api: { get: () => pending.promise } }, '../../lib/api/design': { listArtifacts: async () => [] },
-    '../../lib/api/missionControl': { missionControlApi: { summary: async () => null, items: async () => [] } },
     '../../lib/api/scheduledTasks': { scheduledTasksApi: { list: async () => [] } }, svelte: { untrack: (fn: () => unknown) => fn() },
     '../../lib/router.svelte': { router: { go() {} } }, '../../lib/stores/auth.svelte': { auth: { can: () => true } },
-    '../../lib/stores/assistant.svelte': { assistant: { tasks: { data: [], state: 'loaded' }, needs: { items: [] }, loadNeedsYou() {}, loadTasks() {} } },
     '../../lib/stores/notifications.svelte': { notifications: { notices: [], ensureLoaded() {} } },
     '../../lib/stores/workspace.svelte': { ws }, './boxes/poll': { livePoll: () => ({ now() {}, stop() {} }) },
     '../../lib/plural': { plural: () => '' },

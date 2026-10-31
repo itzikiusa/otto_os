@@ -52,14 +52,15 @@ test('paneKey groups routes by the sidebar entry that owns them', () => {
   assert.equal(paneKey('connections/abc'), 'connections');
   assert.equal(paneKey('database/abc'), 'connections');
   assert.equal(paneKey('brokers/c1/topic'), 'connections');
-  assert.equal(paneKey('canvas/scene'), 'design');
+  assert.equal(paneKey('design/a1'), 'product');
+  assert.equal(paneKey('canvas/scene'), 'product');
+  assert.equal(paneKey('personal-agents/rooms'), 'scheduled-tasks');
   assert.equal(paneKey('plugin/jira/x'), 'plugin/jira');
-  assert.equal(paneKey('history/abc'), 'history');
   assert.equal(paneKey('settings/appearance'), 'settings');
 });
 
 test('paneKey matches the sidebar highlight (activeNavId) for every route shape', () => {
-  for (const r of ['', 'agents', 'agents/x', 'git/r/pr/7', 'database/x', 'brokers', 'canvas', 'plugin/a/b', 'home', 'settings/x']) {
+  for (const r of ['', 'agents', 'agents/x', 'git/r/pr/7', 'database/x', 'brokers', 'design', 'canvas', 'personal-agents', 'plugin/a/b', 'home', 'settings/x']) {
     assert.equal(paneKey(r), activeNavId(r === '' ? [] : r.split('/')), r);
   }
 });

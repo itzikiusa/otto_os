@@ -8,7 +8,6 @@
   import type { Poller } from '../../lib/poll';
   import { liveQuery } from '../../lib/live';
   import { onStoryChange } from './storyReset.svelte';
-  import { swarm } from '../../lib/stores/swarm.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { router } from '../../lib/router.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -377,68 +376,6 @@
     const done = t.items.filter((i) => i.status === 'done').length;
     return `${done}/${t.items.length}`;
   }
-
-  // ── Send to Swarm ─────────────────────────────────────────────────────────
-  // The flagship Product → Swarm hand-off: turn the story (+ its plan) into a
-  // runnable swarm project and jump to the project's Kanban board.
-  let sendingToSwarm = $state(false);
-  // Operator-chosen target swarm (blank = first/auto). Populated from the swarm
-  // list so the user picks WHICH swarm (e.g. Platform Team) implements the story.
-  let targetSwarmId = $state('');
-  $effect(() => {
-    if (ws.currentId) void swarm.ensureSwarms(ws.currentId);
-  });
-
-  // Existing linked swarm project, if this story was already sent (drives the
-  // badge + flips the action to "Open in Swarm").
-  const swarmLink = $derived(product.detail?.swarm_link ?? null);
-
-  async function openLinkedSwarm(): Promise<void> {
-    const link = swarmLink;
-    const wsId = ws.currentId;
-    if (!link || !wsId) return;
-    await swarm.openProject(wsId, link.swarm_id, link.project_id);
-    router.go('swarm');
-  }
-
-  async function sendToSwarm(): Promise<void> {
-    if (sendingToSwarm || !ws.currentId) return;
-    if (swarmLink) {
-      await openLinkedSwarm();
-      return;
-    }
-    const current = product.captureSelection();
-    const wsId = ws.currentId;
-    const swarmId = targetSwarmId;
-    const target = swarm.swarms.find((s) => s.id === swarmId);
-    const where = target ? `“${target.name}”` : 'a swarm';
-    // Lifecycle gate: nudge the operator to approve the story first (soft gate).
-    const stage = product.detail?.story?.stage;
-    const notApproved = stage && stage !== 'approved' && stage !== 'done';
-    const warn = notApproved
-      ? `\n\n⚠ This story is still “${stage}”, not “approved”. Send it for implementation anyway?`
-      : '';
-    const ok = await confirmer.ask(
-      `Create a project in ${where} from this story and seed it with the plan tasks? You can then run the swarm to implement it.${warn}`,
-      { title: 'Send to Swarm', confirmLabel: 'Send to Swarm', danger: !!notApproved },
-    );
-    if (!ok || !current()) return;
-    sendingToSwarm = true;
-    try {
-      const resp = await product.sendToSwarm(swarmId ? { swarm_id: swarmId } : {});
-      toasts.success(
-        'Sent to Swarm',
-        `Project “${resp.project.name}” created in “${resp.swarm.name}” with ${resp.tasks.length} task(s).`,
-      );
-      if (!current()) return;
-      await swarm.openProject(wsId, resp.swarm.id, resp.project.id);
-      if (current()) router.go('swarm');
-    } catch (e) {
-      toastError('Couldn’t send to Swarm', e);
-    } finally {
-      sendingToSwarm = false;
-    }
-  }
 </script>
 
 <!-- One ALWAYS-mounted live region for progress-check failures: a region
@@ -531,21 +468,6 @@
                 <button class="btn small" onclick={() => pollTimer?.now()}>Check again</button>
               {/if}
             {/if}
-            {#if !swarmLink && swarm.swarms.length > 1}
-              <select class="input pl-sel" bind:value={targetSwarmId} title="Which swarm implements this story" aria-label="Target swarm">
-                <option value="">First swarm</option>
-                {#each swarm.swarms as s (s.id)}<option value={s.id}>{s.name}</option>{/each}
-              </select>
-            {/if}
-            <button
-              class="btn"
-              onclick={sendToSwarm}
-              disabled={sendingToSwarm}
-              title={swarmLink ? 'Open the linked swarm project' : 'Create a swarm project from this story (the swarm planner generates tasks)'}
-            >
-              <Icon name="zap" size={13} />
-              {#if sendingToSwarm}Sending…{:else if swarmLink}Open in Swarm{:else}Send to Swarm…{/if}
-            </button>
           </div>
         </section>
 
@@ -559,13 +481,8 @@
             <button class="btn small" onclick={tilePlanSessions}>Show agents</button>
           </div>
         {/if}
-        {#if swarmLink}
-          <div class="muted">
-            Linked to swarm project <strong>{swarmLink.project_name}</strong>.
-          </div>
-        {/if}
-        {#if pollTimer === null && !swarmLink && planSessionIds.length === 0}
-          <div class="muted">No implementation plan yet. Generate one to break the story into trackable tasks, or send straight to a swarm.</div>
+        {#if pollTimer === null && planSessionIds.length === 0}
+          <div class="muted">No implementation plan yet. Generate one to break the story into trackable tasks.</div>
         {/if}
       {/snippet}
       {#if planVersion}
@@ -591,16 +508,11 @@
             </div>
             <div class="ph-actions">
               {#if saving}<span class="saving">Saving…</span>{:else if savedTick}<span class="saved-tick">Saved</span>{/if}
-              {#if swarmLink}
-                <span class="chip pl-swarm-chip" title="Linked to swarm project “{swarmLink.project_name}”">
-                  <Icon name="zap" size={12} /> <span class="pl-swarm-name">{swarmLink.project_name}</span>
-                </span>
-              {/if}
               <button class="btn small" onclick={refresh} disabled={generating}>Refresh</button>
               <button class="btn small" onclick={() => (showRaw = !showRaw)}>
                 {showRaw ? 'Hide raw' : 'Raw'}
               </button>
-              <button class="btn small" onclick={regenerate} disabled={generating || pollTimer !== null}>
+              <button class="btn small primary" onclick={regenerate} disabled={generating || pollTimer !== null}>
                 {pollTimer !== null ? 'Generating…' : 'Regenerate…'}
               </button>
               {#if pollTimer !== null}
@@ -612,22 +524,6 @@
                   <button class="btn small" onclick={() => pollTimer?.now()}>Check again</button>
                 {/if}
               {/if}
-              {#if !swarmLink && swarm.swarms.length > 1}
-                <select class="input pl-sel" bind:value={targetSwarmId} title="Which swarm implements this story" aria-label="Target swarm">
-                  <option value="">First swarm</option>
-                  {#each swarm.swarms as s (s.id)}<option value={s.id}>{s.name}</option>{/each}
-                </select>
-              {/if}
-              <!-- The plan's next step — hand it to a swarm — is THE primary. -->
-              <button
-                class="btn small primary"
-                onclick={sendToSwarm}
-                disabled={sendingToSwarm}
-                title={swarmLink ? 'Open the linked swarm project' : 'Create a swarm project from this story'}
-              >
-                <Icon name="zap" size={12} />
-                {#if sendingToSwarm}Sending…{:else if swarmLink}Open in Swarm{:else}Send to Swarm…{/if}
-              </button>
             </div>
           </div>
         </section>
@@ -798,11 +694,6 @@
   .ph-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-inline-start: auto; }
   .saving { font-size: var(--fs-xs); color: var(--text-dim); font-style: italic; }
   .saved-tick { font-size: var(--fs-xs); color: var(--success); font-weight: 600; }
-
-  /* Linked swarm project: a neutral chip + the kind icon (no per-feature hue). */
-  /* Ellipsis on the inner span: it never applies to an inline-flex's bare text node. */
-  .pl-swarm-chip { max-width: 200px; min-width: 0; }
-  .pl-swarm-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
   /* Tasks */
   .tasks { display: flex; flex-direction: column; gap: 10px; }

@@ -18,21 +18,15 @@
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import { storyStage, STORY_STAGES } from '../../lib/status';
   import { product } from '../../lib/stores/product.svelte';
-  import { swarm } from '../../lib/stores/swarm.svelte';
-  import { ws } from '../../lib/stores/workspace.svelte';
   import { renderMarkdown } from '../../lib/md';
   import { toasts } from '../../lib/toast.svelte';
   import { AttachmentUrls } from './attachmentUrls.svelte';
   import * as issues from '../../lib/api/issues';
   import type { ProductStoryVersion } from './types';
   import type { ProductAttachment } from './types';
-  import { router } from '../../lib/router.svelte';
-  import { confirmer } from '../../lib/confirm.svelte';
   import { confirmOutward } from '../../lib/confirmOutward';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import PublishDialog from './PublishDialog.svelte';
-  import { reseedDraft, type DraftSeed } from './draftSeed';
-  import SwarmLinkCard from './SwarmLinkCard.svelte';
   import AttachmentsPanel from './AttachmentsPanel.svelte';
   import DraftEditor from './DraftEditor.svelte';
   import LinkedCanvases from './LinkedCanvases.svelte';
@@ -47,10 +41,6 @@
   let versionLoading = $state(false);
   let refreshing = $state(false);
   let watchWorking = $state(false);
-
-  // ── Discovery launch state ────────────────────────────────────────────────
-  let discoverySwarmId = $state('');
-  let runningDiscovery = $state(false);
 
   // The detail object for the currently selected story.
   const detail = $derived(product.detail);
@@ -238,35 +228,6 @@
       bodyAtts.dispose();
     };
   });
-
-  // Load swarms lazily so the discovery team picker is populated.
-  $effect(() => {
-    const wsId = ws.currentId;
-    if (wsId) void swarm.ensureSwarms(wsId);
-  });
-
-  /** Launch a discovery swarm run and switch to the Discovery tab. */
-  async function runDiscovery(): Promise<void> {
-    if (runningDiscovery) return;
-    const targetSwarm = swarm.swarms.find((s) => s.id === discoverySwarmId);
-    const teamName = targetSwarm ? `“${targetSwarm.name}”` : 'a swarm';
-    const attCount = 0; // attachments listed in the panel; count not tracked here
-    const ok = await confirmer.ask(
-      `Run Discovery in ${teamName}? This will START the swarm and send the story info${attCount > 0 ? ` + ${attCount} attachments` : ''} as discovery context.`,
-      { title: 'Run discovery', confirmLabel: 'Run discovery', danger: false },
-    );
-    if (!ok) return;
-    runningDiscovery = true;
-    try {
-      await product.discover(discoverySwarmId ? { swarm_id: discoverySwarmId } : {});
-      toasts.success('Discovery started', 'The swarm is now analyzing the story.');
-      await product.changeTab('discovery');
-    } catch (e) {
-      toastError('Couldn’t start discovery', e);
-    } finally {
-      runningDiscovery = false;
-    }
-  }
 
   // ── Body preview: resolve markdown image tokens in rendered HTML ────────
   // renderMarkdown HTML-escapes `![alt](attachment:<id>)` literally — it never
@@ -574,7 +535,7 @@
           onclick={openStageMenu}
           aria-haspopup="menu"
           aria-label="Lifecycle stage: {storyStage(story.stage).label}. Change stage"
-          title="Lifecycle stage — advance to Approved before sending to a swarm"
+          title="Lifecycle stage"
         >
           <StatusBadge status={storyStage(story.stage)} title="" />
           <Icon name="chevronDown" size={12} />
@@ -719,27 +680,6 @@
         {refreshing ? 'Refreshing…' : 'Refresh'}
       </button>
       {/if}
-
-      <!-- Discovery: team picker + launch button -->
-      {#if swarm.swarms.length > 1}
-        <select
-          class="disc-swarm-pick"
-          bind:value={discoverySwarmId}
-          title="Which swarm runs the discovery"
-        >
-          <option value="">First swarm</option>
-          {#each swarm.swarms as s (s.id)}<option value={s.id}>{s.name}</option>{/each}
-        </select>
-      {/if}
-      <button
-        class="btn small"
-        onclick={runDiscovery}
-        disabled={runningDiscovery}
-        title="Launch a discovery swarm run — agents analyze the story and report findings"
-        aria-label="Run discovery"
-      >
-        <Icon name="zap" size={12} /> {runningDiscovery ? 'Starting…' : 'Run discovery'}
-      </button>
     </div>
 
     <!-- ── Body area ──────────────────────────────────────────────── -->
@@ -1031,9 +971,6 @@
     {#if story.tree_kind === 'epic' || product.childrenOf(story.id).length > 0}
       <ChildrenBoard epicId={story.id} />
     {/if}
-
-    <!-- ── Swarm link (cross-link back to the project this story spawned) ── -->
-    <SwarmLinkCard storyId={story.id} />
 
     <!-- ── Canvases linked to this story ─────────────────────────── -->
     <LinkedCanvases storyId={story.id} />
@@ -1404,17 +1341,6 @@
   }
   .grow {
     flex: 1;
-  }
-  /* Discovery swarm picker (toolbar) — matches PlanTab .swarm-pick style */
-  .disc-swarm-pick {
-    height: 26px;
-    padding: 0 6px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    background: var(--surface);
-    color: var(--text);
-    font-size: var(--fs-s);
-    cursor: pointer;
   }
 
   /* Body */

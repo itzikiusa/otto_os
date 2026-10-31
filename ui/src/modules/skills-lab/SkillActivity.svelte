@@ -129,8 +129,6 @@
         return 'Used by Product analysis (story refinement, plans).';
       case 'insights':
         return 'Runs the Insights reports.';
-      case 'swarm':
-        return 'Loaded by Agent Swarm role agents.';
       default:
         return 'Materialized into agent sessions from the library; agents load it by name when it fits the task.';
     }

@@ -121,8 +121,6 @@
       case 'story': return 'ticket';
       case 'workflow': return 'merge';
       case 'api_request': return 'zap';
-      case 'swarm_task': return 'check';
-      case 'swarm_project': return 'layers';
       case 'memory': return 'db';
       case 'repo': return 'branch';
       case 'broker_cluster': return 'box';

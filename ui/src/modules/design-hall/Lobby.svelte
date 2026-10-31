@@ -30,6 +30,7 @@
   import LearnedCard from './LearnedCard.svelte';
   import StudioBadge from './StudioBadge.svelte';
   import SpatialView from './SpatialView.svelte';
+  import ProductModeTabs from '../../lib/components/ProductModeTabs.svelte';
   import { STUDIOS, filterProjects, studioInfo, titleFromPrompt, type ProjectFilter } from './model';
   import { createDesign } from './create';
   import { generateFromBrief, referenceOf, suggestReferences } from './assist/handoff';
@@ -262,16 +263,19 @@
   </label>
 {/snippet}
 
-<PageHeader title="Design Hall" class="dh-header">
+<PageHeader title="Product" subtitle="Stories, specs and design studios" class="dh-header">
   {#snippet tabs()}
-    <div class="segmented" role="tablist" aria-label="Lobby view">
-      <button role="tab" aria-selected={view === 'grid'} tabindex={view === 'grid' ? 0 : -1} onkeydown={onTabKey} class:active={view === 'grid'} onclick={() => goView('grid')}>
-        <Icon name="grid" size={12} /> Grid
-      </button>
-      <button role="tab" aria-selected={view === 'spatial'} tabindex={view === 'spatial' ? 0 : -1} onkeydown={onTabKey} class:active={view === 'spatial'} onclick={() => goView('spatial')}
-        data-testid="design-spatial-tab">
-        <Icon name="gallery" size={12} /> Spatial <span class="beta">Beta</span>
-      </button>
+    <div class="dh-tabs">
+      <ProductModeTabs active="design" />
+      <div class="segmented" role="tablist" aria-label="Lobby view">
+        <button role="tab" aria-selected={view === 'grid'} tabindex={view === 'grid' ? 0 : -1} onkeydown={onTabKey} class:active={view === 'grid'} onclick={() => goView('grid')}>
+          <Icon name="grid" size={12} /> Grid
+        </button>
+        <button role="tab" aria-selected={view === 'spatial'} tabindex={view === 'spatial' ? 0 : -1} onkeydown={onTabKey} class:active={view === 'spatial'} onclick={() => goView('spatial')}
+          data-testid="design-spatial-tab">
+          <Icon name="gallery" size={12} /> Spatial <span class="beta">Beta</span>
+        </button>
+      </div>
     </div>
   {/snippet}
   {#snippet actions()}
@@ -574,6 +578,12 @@
     padding: 0 6px;
     margin-inline-start: 2px;
   }
+  .dh-tabs {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+  }
   .segmented > button {
     display: inline-flex;
     align-items: center;
@@ -584,7 +594,7 @@
     align-items: center;
     gap: 6px;
     height: 27px;
-    width: min(320px, 32vw);
+    width: min(240px, 26vw);
     padding: 0 8px;
     border-radius: var(--radius-s);
     background: var(--surface-2);
@@ -840,87 +850,21 @@
     color: var(--danger);
   }
   /* Rail */
-  .rail {
-    display: flex;
-    flex-direction: column;
-    gap: 16px;
-    min-width: 0;
-  }
-  .activity {
-    padding: 14px;
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }
-  .activity header {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-  .activity h2 {
-    margin: 0;
-    font-size: var(--fs-m);
-    font-weight: 600;
-  }
-  .ico {
-    width: 24px;
-    height: 24px;
-    display: grid;
-    place-items: center;
-    border-radius: var(--radius-s);
-    background: var(--surface-2);
-    color: var(--text-dim);
-  }
-  .activity ul {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-  }
-  .activity li {
-    padding: 8px 0;
-    border-block-start: 1px solid var(--border);
-    font-size: var(--fs-s);
-  }
-  .act-line {
-    display: flex;
-    align-items: baseline;
-    gap: 6px;
-  }
-  .act-line a {
-    color: var(--text);
-    font-weight: 500;
-  }
-  .who {
-    font-weight: 600;
-  }
-  .act-meta {
-    display: flex;
-    justify-content: space-between;
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    margin-block-start: 2px;
-  }
-  .quick {
-    padding: 6px;
-    display: flex;
-    flex-direction: column;
-  }
-  .quick a {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 6px 8px;
-    border-radius: var(--radius-s);
-    color: var(--text);
-    text-decoration: none;
-    font-size: var(--fs-s);
-  }
-  .quick a:hover {
-    background: var(--hover);
-  }
-  .quick a :global(svg) {
-    color: var(--text-dim);
-  }
+  .rail { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+  .activity { padding: 14px; display: flex; flex-direction: column; gap: 8px; }
+  .activity header { display: flex; align-items: center; gap: 8px; }
+  .activity h2 { margin: 0; font-size: var(--fs-m); font-weight: 600; }
+  .ico { width: 24px; height: 24px; display: grid; place-items: center; border-radius: var(--radius-s); background: var(--surface-2); color: var(--text-dim); }
+  .activity ul { list-style: none; margin: 0; padding: 0; }
+  .activity li { padding: 8px 0; border-block-start: 1px solid var(--border); font-size: var(--fs-s); }
+  .act-line { display: flex; align-items: baseline; gap: 6px; }
+  .act-line a { color: var(--text); font-weight: 500; }
+  .who { font-weight: 600; }
+  .act-meta { display: flex; justify-content: space-between; font-size: var(--fs-xs); color: var(--text-dim); margin-block-start: 2px; }
+  .quick { padding: 6px; display: flex; flex-direction: column; }
+  .quick a { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: var(--radius-s); color: var(--text); text-decoration: none; font-size: var(--fs-s); }
+  .quick a:hover { background: var(--hover); }
+  .quick a :global(svg) { color: var(--text-dim); }
   @media (pointer: coarse), (max-width: 640px) {
     .search, .sel select { min-block-size: var(--hit-min); }
   }

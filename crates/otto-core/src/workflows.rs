@@ -349,9 +349,6 @@ pub struct WorkflowRun {
     /// The workflow `version` this run executed (snapshot at run start).
     #[serde(default)]
     pub workflow_version: Option<i64>,
-    /// The Proof Pack assembled for this run on completion, if any.
-    #[serde(default)]
-    pub proof_pack_id: Option<String>,
     /// How many times the startup reconciler resumed this run after a daemon
     /// restart (0 = never interrupted). Drives the "resumed after restart
     /// (attempt N)" badge in the run view.

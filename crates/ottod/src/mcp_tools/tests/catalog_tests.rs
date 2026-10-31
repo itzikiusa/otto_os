@@ -166,7 +166,7 @@ fn tools_list_catalog_stays_within_its_byte_budget() {
 }
 
 /// A narrow (review) session's listing hides the infra/canvas/browser
-/// families, but the default and assistant listings keep them.
+/// families, while the default listing keeps them.
 #[test]
 fn narrow_sources_drop_the_infra_consoles_from_the_listing() {
     let names = |source: Option<&str>| -> Vec<String> {

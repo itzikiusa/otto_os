@@ -54,6 +54,90 @@ pub trait DbViewerCtx: Clone + Send + Sync + 'static {
     fn drafter(&self) -> Option<std::sync::Arc<dyn crate::nl::SqlDrafter>> {
         None
     }
+
+    /// Live-activity hook fired when an agent session calls a DB tool
+    /// (`otto_db_query`, `otto_query_db`, `otto_db_schema`, `otto_db_children`,
+    /// `otto_db_object`). Async so `"started"` broadcasts strictly before
+    /// `"finished"` / `"error"`.
+    fn on_mcp_activity(
+        &self,
+        _auth: Option<&otto_core::auth::AuthContext>,
+        _conn: &Connection,
+        _ev: McpDbEvent,
+    ) -> impl std::future::Future<Output = ()> + Send {
+        async {}
+    }
+}
+
+/// Payload handed to [`DbViewerCtx::on_mcp_activity`] at the start and end of
+/// an agent DB tool invocation.
+#[derive(Debug, Clone)]
+pub struct McpDbEvent {
+    pub activity_id: String,
+    pub tool: &'static str,
+    pub sql: Option<String>,
+    pub node: Option<String>,
+    /// `"started"` | `"finished"` | `"error"`.
+    pub status: &'static str,
+    pub row_count: Option<usize>,
+    pub duration_ms: Option<u64>,
+    pub columns: Vec<String>,
+    pub rows_preview: Vec<Vec<Value>>,
+    pub error: Option<String>,
+}
+
+const MCP_PREVIEW_MAX_COLS: usize = 16;
+const MCP_PREVIEW_MAX_ROWS: usize = 10;
+const MCP_PREVIEW_CELL_CHARS: usize = 200;
+
+fn is_agent_auth(auth: Option<&otto_core::auth::AuthContext>) -> bool {
+    auth.is_some_and(|a| a.managed_session_id.is_some() || a.mcp_session_id.is_some())
+}
+
+fn clip_preview_cell(v: &Value) -> Value {
+    match v {
+        Value::String(s) => {
+            if s.chars().count() > MCP_PREVIEW_CELL_CHARS {
+                let prefix: String = s.chars().take(MCP_PREVIEW_CELL_CHARS).collect();
+                Value::String(format!("{prefix}…"))
+            } else {
+                Value::String(s.clone())
+            }
+        }
+        Value::Array(_) | Value::Object(_) => {
+            let s = serde_json::to_string(v).unwrap_or_default();
+            if s.chars().count() > MCP_PREVIEW_CELL_CHARS {
+                let prefix: String = s.chars().take(MCP_PREVIEW_CELL_CHARS).collect();
+                Value::String(format!("{prefix}…"))
+            } else {
+                v.clone()
+            }
+        }
+        _ => v.clone(),
+    }
+}
+
+fn query_result_preview(
+    res: &crate::types::QueryResult,
+) -> (usize, u64, Vec<String>, Vec<Vec<Value>>) {
+    let cols: Vec<String> = res
+        .columns
+        .iter()
+        .take(MCP_PREVIEW_MAX_COLS)
+        .map(|c| c.name.clone())
+        .collect();
+    let rows: Vec<Vec<Value>> = res
+        .rows
+        .iter()
+        .take(MCP_PREVIEW_MAX_ROWS)
+        .map(|r| {
+            r.iter()
+                .take(MCP_PREVIEW_MAX_COLS)
+                .map(clip_preview_cell)
+                .collect()
+        })
+        .collect();
+    (res.stats.row_count, res.stats.duration_ms, cols, rows)
 }
 
 /// Local problem-details mapper (orphan rule: can't impl IntoResponse for
@@ -448,33 +532,189 @@ async fn capabilities<S: DbViewerCtx>(
 async fn schema_root<S: DbViewerCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
+    auth: Option<Extension<otto_core::auth::AuthContext>>,
     Path(id): Path<Id>,
 ) -> ApiResult<Response> {
     let conn = ctx.db().get_connection(&id).await?;
     check_conn_role(&ctx, &user, &conn, WorkspaceRole::Viewer).await?;
-    Ok(Json(ctx.db().schema_root(&id, &user.id).await?).into_response())
+    let auth_ctx = auth.as_ref().map(|Extension(a)| a);
+    let track = is_agent_auth(auth_ctx);
+    let activity_id = if track {
+        let aid = otto_core::new_id();
+        ctx.on_mcp_activity(
+            auth_ctx,
+            &conn,
+            McpDbEvent {
+                activity_id: aid.clone(),
+                tool: "otto_db_schema",
+                sql: None,
+                node: None,
+                status: "started",
+                row_count: None,
+                duration_ms: None,
+                columns: Vec::new(),
+                rows_preview: Vec::new(),
+                error: None,
+            },
+        )
+        .await;
+        Some((aid, std::time::Instant::now()))
+    } else {
+        None
+    };
+    match ctx.db().schema_root(&id, &user.id).await {
+        Ok(nodes) => {
+            if let Some((aid, started)) = activity_id {
+                let rows_preview: Vec<Vec<Value>> = nodes
+                    .iter()
+                    .take(MCP_PREVIEW_MAX_ROWS)
+                    .map(|n| {
+                        vec![
+                            clip_preview_cell(&Value::String(n.id.clone())),
+                            clip_preview_cell(&Value::String(n.label.clone())),
+                        ]
+                    })
+                    .collect();
+                ctx.on_mcp_activity(
+                    auth_ctx,
+                    &conn,
+                    McpDbEvent {
+                        activity_id: aid,
+                        tool: "otto_db_schema",
+                        sql: None,
+                        node: None,
+                        status: "finished",
+                        row_count: Some(nodes.len()),
+                        duration_ms: Some(started.elapsed().as_millis() as u64),
+                        columns: vec!["id".into(), "label".into()],
+                        rows_preview,
+                        error: None,
+                    },
+                )
+                .await;
+            }
+            Ok(Json(nodes).into_response())
+        }
+        Err(e) => {
+            if let Some((aid, started)) = activity_id {
+                ctx.on_mcp_activity(
+                    auth_ctx,
+                    &conn,
+                    McpDbEvent {
+                        activity_id: aid,
+                        tool: "otto_db_schema",
+                        sql: None,
+                        node: None,
+                        status: "error",
+                        row_count: None,
+                        duration_ms: Some(started.elapsed().as_millis() as u64),
+                        columns: Vec::new(),
+                        rows_preview: Vec::new(),
+                        error: Some(e.to_string()),
+                    },
+                )
+                .await;
+            }
+            Err(e.into())
+        }
+    }
 }
 
 async fn schema_children<S: DbViewerCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
+    auth: Option<Extension<otto_core::auth::AuthContext>>,
     Path(id): Path<Id>,
     Json(req): Json<PathReq>,
 ) -> ApiResult<Response> {
     let conn = ctx.db().get_connection(&id).await?;
     check_conn_role(&ctx, &user, &conn, WorkspaceRole::Viewer).await?;
-    Ok(Json(
-        ctx.db()
-            .schema_children_with_counts(
-                &id,
-                &user.id,
-                &req.path,
-                req.filter.as_deref(),
-                req.counts,
-            )
-            .await?,
-    )
-    .into_response())
+    let auth_ctx = auth.as_ref().map(|Extension(a)| a);
+    let track = is_agent_auth(auth_ctx);
+    let node_path = Some(req.path.clone());
+    let activity_id = if track {
+        let aid = otto_core::new_id();
+        ctx.on_mcp_activity(
+            auth_ctx,
+            &conn,
+            McpDbEvent {
+                activity_id: aid.clone(),
+                tool: "otto_db_children",
+                sql: None,
+                node: node_path.clone(),
+                status: "started",
+                row_count: None,
+                duration_ms: None,
+                columns: Vec::new(),
+                rows_preview: Vec::new(),
+                error: None,
+            },
+        )
+        .await;
+        Some((aid, std::time::Instant::now()))
+    } else {
+        None
+    };
+    match ctx
+        .db()
+        .schema_children_with_counts(&id, &user.id, &req.path, req.filter.as_deref(), req.counts)
+        .await
+    {
+        Ok(nodes) => {
+            if let Some((aid, started)) = activity_id {
+                let rows_preview: Vec<Vec<Value>> = nodes
+                    .iter()
+                    .take(MCP_PREVIEW_MAX_ROWS)
+                    .map(|n| {
+                        vec![
+                            clip_preview_cell(&Value::String(n.id.clone())),
+                            clip_preview_cell(&Value::String(n.label.clone())),
+                        ]
+                    })
+                    .collect();
+                ctx.on_mcp_activity(
+                    auth_ctx,
+                    &conn,
+                    McpDbEvent {
+                        activity_id: aid,
+                        tool: "otto_db_children",
+                        sql: None,
+                        node: node_path,
+                        status: "finished",
+                        row_count: Some(nodes.len()),
+                        duration_ms: Some(started.elapsed().as_millis() as u64),
+                        columns: vec!["id".into(), "label".into()],
+                        rows_preview,
+                        error: None,
+                    },
+                )
+                .await;
+            }
+            Ok(Json(nodes).into_response())
+        }
+        Err(e) => {
+            if let Some((aid, started)) = activity_id {
+                ctx.on_mcp_activity(
+                    auth_ctx,
+                    &conn,
+                    McpDbEvent {
+                        activity_id: aid,
+                        tool: "otto_db_children",
+                        sql: None,
+                        node: node_path,
+                        status: "error",
+                        row_count: None,
+                        duration_ms: Some(started.elapsed().as_millis() as u64),
+                        columns: Vec::new(),
+                        rows_preview: Vec::new(),
+                        error: Some(e.to_string()),
+                    },
+                )
+                .await;
+            }
+            Err(e.into())
+        }
+    }
 }
 
 /// Find tables/views/collections by NAME across one schema or every schema the
@@ -493,17 +733,100 @@ async fn search_objects<S: DbViewerCtx>(
 async fn object_detail<S: DbViewerCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
+    auth: Option<Extension<otto_core::auth::AuthContext>>,
     Path(id): Path<Id>,
     Json(req): Json<PathReq>,
 ) -> ApiResult<Response> {
     let conn = ctx.db().get_connection(&id).await?;
     check_conn_role(&ctx, &user, &conn, WorkspaceRole::Viewer).await?;
-    Ok(Json(
-        ctx.db()
-            .object_detail(&id, &user.id, &req.path, req.approx_row_count)
-            .await?,
-    )
-    .into_response())
+    let auth_ctx = auth.as_ref().map(|Extension(a)| a);
+    let track = is_agent_auth(auth_ctx);
+    let node_path = Some(req.path.clone());
+    let activity_id = if track {
+        let aid = otto_core::new_id();
+        ctx.on_mcp_activity(
+            auth_ctx,
+            &conn,
+            McpDbEvent {
+                activity_id: aid.clone(),
+                tool: "otto_db_object",
+                sql: None,
+                node: node_path.clone(),
+                status: "started",
+                row_count: None,
+                duration_ms: None,
+                columns: Vec::new(),
+                rows_preview: Vec::new(),
+                error: None,
+            },
+        )
+        .await;
+        Some((aid, std::time::Instant::now()))
+    } else {
+        None
+    };
+    match ctx
+        .db()
+        .object_detail(&id, &user.id, &req.path, req.approx_row_count)
+        .await
+    {
+        Ok(detail) => {
+            if let Some((aid, started)) = activity_id {
+                let rows_preview: Vec<Vec<Value>> = detail
+                    .columns
+                    .iter()
+                    .take(MCP_PREVIEW_MAX_ROWS)
+                    .map(|c| {
+                        vec![
+                            clip_preview_cell(&Value::String(c.name.clone())),
+                            clip_preview_cell(&Value::String(c.data_type.clone())),
+                            Value::Bool(c.nullable),
+                        ]
+                    })
+                    .collect();
+                ctx.on_mcp_activity(
+                    auth_ctx,
+                    &conn,
+                    McpDbEvent {
+                        activity_id: aid,
+                        tool: "otto_db_object",
+                        sql: None,
+                        node: node_path,
+                        status: "finished",
+                        row_count: Some(detail.columns.len()),
+                        duration_ms: Some(started.elapsed().as_millis() as u64),
+                        columns: vec!["column".into(), "type".into(), "nullable".into()],
+                        rows_preview,
+                        error: None,
+                    },
+                )
+                .await;
+            }
+            Ok(Json(detail).into_response())
+        }
+        Err(e) => {
+            if let Some((aid, started)) = activity_id {
+                ctx.on_mcp_activity(
+                    auth_ctx,
+                    &conn,
+                    McpDbEvent {
+                        activity_id: aid,
+                        tool: "otto_db_object",
+                        sql: None,
+                        node: node_path,
+                        status: "error",
+                        row_count: None,
+                        duration_ms: Some(started.elapsed().as_millis() as u64),
+                        columns: Vec::new(),
+                        rows_preview: Vec::new(),
+                        error: Some(e.to_string()),
+                    },
+                )
+                .await;
+            }
+            Err(e.into())
+        }
+    }
 }
 
 /// Read-only relationship graph (ERD) for a schema: tables + columns + FK edges.
@@ -530,12 +853,90 @@ async fn schema_graph<S: DbViewerCtx>(
 async fn run_query<S: DbViewerCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
+    auth: Option<Extension<otto_core::auth::AuthContext>>,
     Path(id): Path<Id>,
     Json(req): Json<QueryRequest>,
 ) -> ApiResult<Response> {
     let conn = ctx.db().get_connection(&id).await?;
     check_conn_role(&ctx, &user, &conn, WorkspaceRole::Editor).await?;
-    let result = ctx.db().run(&id, &user.id, &req).await?;
+    let auth_ctx = auth.as_ref().map(|Extension(a)| a);
+    let track = is_agent_auth(auth_ctx);
+    let sql_preview: Option<String> = if track {
+        Some(req.statement.chars().take(4096).collect())
+    } else {
+        None
+    };
+    let node_path = req.node.clone();
+    let activity_id = if track {
+        let aid = otto_core::new_id();
+        ctx.on_mcp_activity(
+            auth_ctx,
+            &conn,
+            McpDbEvent {
+                activity_id: aid.clone(),
+                tool: "otto_query_db",
+                sql: sql_preview.clone(),
+                node: node_path.clone(),
+                status: "started",
+                row_count: None,
+                duration_ms: None,
+                columns: Vec::new(),
+                rows_preview: Vec::new(),
+                error: None,
+            },
+        )
+        .await;
+        Some((aid, std::time::Instant::now()))
+    } else {
+        None
+    };
+    let result = match ctx.db().run(&id, &user.id, &req).await {
+        Ok(res) => {
+            if let Some((aid, _)) = activity_id {
+                let (row_count, duration_ms, columns, rows_preview) = query_result_preview(&res);
+                ctx.on_mcp_activity(
+                    auth_ctx,
+                    &conn,
+                    McpDbEvent {
+                        activity_id: aid,
+                        tool: "otto_query_db",
+                        sql: sql_preview,
+                        node: node_path,
+                        status: "finished",
+                        row_count: Some(row_count),
+                        duration_ms: Some(duration_ms),
+                        columns,
+                        rows_preview,
+                        error: None,
+                    },
+                )
+                .await;
+            }
+            res
+        }
+        Err(e) => {
+            if let Some((aid, started)) = activity_id {
+                ctx.on_mcp_activity(
+                    auth_ctx,
+                    &conn,
+                    McpDbEvent {
+                        activity_id: aid,
+                        tool: "otto_query_db",
+                        sql: sql_preview,
+                        node: node_path,
+                        status: "error",
+                        row_count: None,
+                        duration_ms: Some(started.elapsed().as_millis() as u64),
+                        columns: Vec::new(),
+                        rows_preview: Vec::new(),
+                        error: Some(e.to_string()),
+                    },
+                )
+                .await;
+            }
+            return Err(e.into());
+        }
+    };
     // A confirmed write on a guarded (production / read-only) connection is a
     // security-relevant override worth auditing. Fire only after a successful
     // run so we don't log writes the engine rejected. `confirm_write` is a no-op
@@ -642,18 +1043,83 @@ struct McpQueryReq {
 async fn mcp_query<S: DbViewerCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
+    auth: Option<Extension<otto_core::auth::AuthContext>>,
     Path(id): Path<Id>,
     Json(req): Json<McpQueryReq>,
 ) -> ApiResult<Response> {
     let conn = ctx.db().get_connection(&id).await?;
     check_conn_role(&ctx, &user, &conn, WorkspaceRole::Viewer).await?;
+    let auth_ctx = auth.as_ref().map(|Extension(a)| a);
+    let sql_preview: Option<String> = Some(req.statement.chars().take(4096).collect());
+    let node_path = req.node.clone();
+    let aid = otto_core::new_id();
+    let started = std::time::Instant::now();
+    ctx.on_mcp_activity(
+        auth_ctx,
+        &conn,
+        McpDbEvent {
+            activity_id: aid.clone(),
+            tool: "otto_db_query",
+            sql: sql_preview.clone(),
+            node: node_path.clone(),
+            status: "started",
+            row_count: None,
+            duration_ms: None,
+            columns: Vec::new(),
+            rows_preview: Vec::new(),
+            error: None,
+        },
+    )
+    .await;
     let qreq = QueryRequest {
         statement: req.statement,
         max_rows: req.max_rows,
         node: req.node,
         ..Default::default()
     };
-    Ok(Json(ctx.db().run_read_only(&id, &user.id, &qreq).await?).into_response())
+    match ctx.db().run_read_only(&id, &user.id, &qreq).await {
+        Ok(res) => {
+            let (row_count, duration_ms, columns, rows_preview) = query_result_preview(&res);
+            ctx.on_mcp_activity(
+                auth_ctx,
+                &conn,
+                McpDbEvent {
+                    activity_id: aid,
+                    tool: "otto_db_query",
+                    sql: sql_preview,
+                    node: node_path,
+                    status: "finished",
+                    row_count: Some(row_count),
+                    duration_ms: Some(duration_ms),
+                    columns,
+                    rows_preview,
+                    error: None,
+                },
+            )
+            .await;
+            Ok(Json(res).into_response())
+        }
+        Err(e) => {
+            ctx.on_mcp_activity(
+                auth_ctx,
+                &conn,
+                McpDbEvent {
+                    activity_id: aid,
+                    tool: "otto_db_query",
+                    sql: sql_preview,
+                    node: node_path,
+                    status: "error",
+                    row_count: None,
+                    duration_ms: Some(started.elapsed().as_millis() as u64),
+                    columns: Vec::new(),
+                    rows_preview: Vec::new(),
+                    error: Some(e.to_string()),
+                },
+            )
+            .await;
+            Err(e.into())
+        }
+    }
 }
 
 /// Cancel an in-flight query (server-side, engine-native). Gated at the SAME

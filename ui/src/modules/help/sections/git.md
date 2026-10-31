@@ -97,9 +97,7 @@ Git is where you work with repositories without leaving Otto. You can stage and 
 
 ## Related
 
-- [Proof](#/walkthroughs/proof)
 - [Product](#/walkthroughs/product)
 - [Agents](#/walkthroughs/agents)
-- [Run with Otto](#/walkthroughs/run-with-otto)
 - [Workflows](#/walkthroughs/workflows)
 - [Skills Lab](#/walkthroughs/skills-eval)

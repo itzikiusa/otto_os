@@ -146,28 +146,15 @@ pub async fn create_thread<C: ProductStudioHost>(
         .check(&user, &story.workspace_id, WorkspaceRole::Editor)
         .await?;
 
-    // Pick the working dir: prefer the repo path the discovery used (when the
-    // request links a resolvable run AND the story has a cwd); else a fresh,
-    // per-thread scratch dir. The scratch dir name is a fresh ULID so it's unique
-    // regardless of the row id the repo generates.
+    // Pick the working dir: fresh per-thread scratch dir (fresh ULID so it's
+    // unique regardless of the row id the repo generates).
     let discovery_run_id = req.discovery_run_id.filter(|r| !r.trim().is_empty());
-    let mut cwd: Option<String> = None;
-    if let Some(run_id) = &discovery_run_id {
-        if let Ok(Some(_run)) = ctx.discovery_repo().get(run_id).await {
-            if let Some(story_cwd) = &story.cwd {
-                if !story_cwd.trim().is_empty() {
-                    cwd = Some(story_cwd.clone());
-                }
-            }
-        }
-    }
-    let cwd = cwd.unwrap_or_else(|| {
-        ctx.data_dir()
-            .join("product/refine")
-            .join(new_id())
-            .to_string_lossy()
-            .to_string()
-    });
+    let cwd = ctx
+        .data_dir()
+        .join("product/refine")
+        .join(new_id())
+        .to_string_lossy()
+        .to_string();
 
     let title = req
         .title
@@ -336,22 +323,6 @@ async fn send_message_inner<C: ProductStudioHost>(
         })
         .collect();
 
-    // 3c. Discovery context (optional): the run's report + its task titles.
-    let mut discovery_report: Option<String> = None;
-    let mut discovery_task_summaries: Vec<String> = Vec::new();
-    if let Some(run_id) = &thread.discovery_run_id {
-        if let Ok(Some(run)) = ctx.discovery_repo().get(run_id).await {
-            discovery_report = run.report_md.filter(|r| !r.trim().is_empty());
-            if let Ok(tasks) = ctx.swarms().list_tasks(&run.project_id).await {
-                discovery_task_summaries = tasks
-                    .into_iter()
-                    .map(|t| t.title)
-                    .filter(|t| !t.trim().is_empty())
-                    .collect();
-            }
-        }
-    }
-
     // 3d. History — replay the last `HISTORY_TURN_CAP` messages (chronological).
     let all_history = ctx
         .refinement_repo()
@@ -370,8 +341,8 @@ async fn send_message_inner<C: ProductStudioHost>(
     let prompt = build_refinement_prompt(
         &story.title,
         &story_body,
-        discovery_report.as_deref(),
-        &discovery_task_summaries,
+        None,
+        &[],
         &attachment_lines,
         &history,
         &req.body,

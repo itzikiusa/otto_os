@@ -17,12 +17,9 @@ test('a failed agents load is not "Agent not found" (ux-design-6-04)', () => {
   assert.match(s.slice(err, notFound), /<LoadState what="this agent"[^>]*onretry=/);
 });
 
-test('PR list and Mission Control load errors use LoadState (ux-design-6-02)', () => {
+test('PR list load errors use LoadState (ux-design-6-02)', () => {
   assert.match(src('git/PrList.svelte'), /<LoadState what="pull requests"/);
   assert.doesNotMatch(src('git/PrList.svelte'), /title=\{errorTitle\}/);
-  const mc = src('mission-control/MissionControlPage.svelte');
-  assert.match(mc, /<LoadState what="Mission Control"/);
-  assert.doesNotMatch(mc, /title="Couldn’t load Mission Control"/);
 });
 
 // a11y-6-04, behaviour (test-quality-6w1-06): run GitTabs' real key handler

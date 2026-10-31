@@ -1,76 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { apiCtx, seedWorkspace, seedGitRepo } from './seed';
-import { expectNoHorizontalOverflow } from './helpers';
 
 test.use({ serviceWorkers: 'block', viewport: { width: 390, height: 844 } });
-
-for (const theme of ['light', 'dark']) {
-  test(`proof phone list and detail stay separate (${theme})`, async ({ page }) => {
-    const { ctx, base } = await apiCtx();
-    const ws = await seedWorkspace(ctx, base);
-    const response = await ctx.post(`${base}/api/v1/workspaces/${ws}/proof-packs`, {
-      data: { work_item_kind: 'manual', work_item_id: `phone-${theme}`, title: 'Phone proof evidence' },
-    });
-    expect(response.ok()).toBeTruthy();
-    const pack = await response.json();
-    await ctx.post(`${base}/api/v1/proof-packs/${pack.id}/artifacts`, {
-      data: { kind: 'log', title: 'A long artifact title that must wrap on a phone', content: 'Evidence retained', status: 'info' },
-    });
-    await ctx.dispose();
-    await page.addInitScript(({ ws, theme }) => {
-      localStorage.setItem('otto_workspace', ws);
-      localStorage.setItem('otto_scheme', theme);
-      localStorage.setItem('otto_rail_expanded', '0');
-    }, { ws, theme });
-    await page.goto('/#/proof');
-    const row = page.getByRole('button', { name: /Phone proof evidence/ });
-    await expect(row).toBeVisible();
-    await expect(page.getByText('No proof pack open', { exact: true })).not.toBeVisible();
-    const filter = page.getByRole('button', { name: /^All/ }).first();
-    expect((await filter.boundingBox())!.height).toBeGreaterThanOrEqual(36);
-    await row.click();
-    await expect(page.getByRole('button', { name: 'Back to list' })).toBeVisible();
-    await expect(row).not.toBeVisible();
-    const remove = page.getByRole('button', { name: 'Delete artifact A long artifact title that must wrap on a phone' });
-    await expect(remove).toBeVisible();
-    expect((await remove.boundingBox())!.height).toBeGreaterThanOrEqual(36);
-    await expectNoHorizontalOverflow(page);
-    await page.getByRole('button', { name: 'Back to list' }).click();
-    await expect(row).toBeVisible();
-    await expect(page.getByText('No proof pack open', { exact: true })).not.toBeVisible();
-  });
-}
-
-test('run phone detail has Back and preserves the launcher draft', async ({ page }) => {
-  const { ctx, base } = await apiCtx();
-  const ws = await seedWorkspace(ctx, base);
-  await ctx.dispose();
-  const run = {
-    id: 'phone-run', workspace_id: ws, title: 'Phone run', source_kind: 'channel',
-    source_ref: 'example', mode: 'single_agent', status: 'completed', provider: 'codex',
-    goal: 'Review the outcome', findings_total: 0, findings_blocking: 0,
-    created_at: '2026-10-18T10:00:00Z', updated_at: '2026-10-18T10:00:00Z',
-  };
-  await page.route(`**/api/v1/workspaces/${ws}/runs`, r => r.fulfill({ json: [run] }));
-  await page.route('**/api/v1/runs/phone-run', r => r.fulfill({ json: run }));
-  await page.route('**/api/v1/runs/phone-run/events', r => r.fulfill({ json: [] }));
-  await page.addInitScript(ws => localStorage.setItem('otto_workspace', ws), ws);
-  await page.goto('/#/run-with-otto');
-  const input = page.getByRole('textbox', { name: 'Source or description' });
-  await expect(input).toBeVisible();
-  await input.fill('Keep this draft');
-  const source = page.getByRole('button', { name: 'Jira', exact: true });
-  expect((await source.boundingBox())!.height).toBeGreaterThanOrEqual(36);
-  await page.locator('.run', { hasText: 'Phone run' }).click();
-  await expect(page.getByRole('button', { name: 'Back to runs' })).toBeVisible();
-  await expect(input).not.toBeVisible();
-  await expect(page.getByRole('region', { name: 'Runs', exact: true })).not.toBeVisible();
-  await expectNoHorizontalOverflow(page);
-  await page.getByRole('button', { name: 'Back to runs' }).click();
-  await expect(input).toHaveValue('Keep this draft');
-  await expect(input).toBeVisible();
-});
-
 
 test('finding reasons persist and a failed proof modal offers retry without export', async ({ page }) => {
   const { ctx, base } = await apiCtx();

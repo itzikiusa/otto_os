@@ -27,7 +27,6 @@ pub const FIREABLE_EVENT_KINDS: &[&str] = &[
     "review_changed",
     "budget_exceeded",
     "product_changed",
-    "swarm_status",
     "improvement_run_finished",
     "insight_ready",
 ];
@@ -258,7 +257,6 @@ fn event_to_kind(event: &Event) -> Option<&'static str> {
         Event::ReviewChanged { .. } => Some("review_changed"),
         Event::BudgetExceeded { .. } => Some("budget_exceeded"),
         Event::ProductChanged { .. } => Some("product_changed"),
-        Event::SwarmStatus { .. } => Some("swarm_status"),
         Event::ImprovementRunFinished { .. } => Some("improvement_run_finished"),
         Event::InsightReady { .. } => Some("insight_ready"),
         // `WorkflowRunUpdated` is deliberately NOT triggerable: the engine
@@ -267,8 +265,8 @@ fn event_to_kind(event: &Event) -> Option<&'static str> {
         // explosion. Trigger create/update rejects the kind too; this guard
         // also silences any pre-existing rows.
         //
-        // Session, metric, notice, trail, task, swarm-run, improvement-edit,
-        // skill-eval, swarm-message, swarm-task, meta-updated events are
+        // Session, metric, notice, trail, task, improvement-edit,
+        // skill-eval, meta-updated events are
         // deliberately excluded — too noisy or not useful as macro triggers.
         _ => None,
     }
@@ -283,7 +281,6 @@ fn event_workspace(event: &Event) -> Option<&otto_core::Id> {
         Event::ReviewChanged { workspace_id, .. }
         | Event::BudgetExceeded { workspace_id, .. }
         | Event::ProductChanged { workspace_id, .. }
-        | Event::SwarmStatus { workspace_id, .. }
         | Event::ImprovementRunFinished { workspace_id, .. } => Some(workspace_id),
         _ => None,
     }
@@ -612,11 +609,6 @@ mod tests {
                 story_id: "s".into(),
                 section: "analysis".into(),
                 status: "done".into(),
-            },
-            Event::SwarmStatus {
-                workspace_id: ws(),
-                swarm_id: "sw".into(),
-                status: "running".into(),
             },
             Event::ImprovementRunFinished {
                 workspace_id: ws(),

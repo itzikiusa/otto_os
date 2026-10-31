@@ -98,3 +98,20 @@ visibility, the `Grid::set_size` reflow path + helpers, and
   screen's cap at runtime (otto-pty keeps a shallower history for
   long-unviewed terminals); `Screen::scrollback_stats()` reports
   `(rows, cells)` for memory accounting and budgets.
+
+## Patch 6: ECMA-48 / xterm cursor, repeat, tab, IRM, and DECAWM sequences (`agy` / BubbleTea v2)
+
+`src/perform.rs` / `src/screen.rs` / `src/grid.rs`:
+
+- `CSI Ps b` (`REP` — Repeat Preceding Graphic Character): repeats the last
+  printed graphic character up to `rows × cols` times; cleared by non-graphic
+  cursor/erase/mode sequences. BubbleTea v2's `cursedRenderer` (`agy`) emits
+  `REP` for run-length spaces and box-drawing borders (`'─'\x1b[134b`), so
+  ignoring it shifted subsequent columns onto the middle of prior text in
+  every server-side reattach/compact snapshot.
+- `` CSI Ps ` `` (`HPA`), `CSI Ps a` (`HPR`), `CSI Ps e` (`VPR`), `CSI Pl;Pc f`
+  (`HVP`), `CSI Ps I` (`CHT`), `CSI Ps Z` (`CBT`), and `CSI s` / `CSI u`
+  (`SCOSC` / `SCORC` when parameterless).
+- `CSI 4 h` / `CSI 4 l` (`IRM` — Insert/Replace Mode) and `CSI ? 7 h` /
+  `CSI ? 7 l` (`DECAWM` — Auto-Wrap Mode; default enabled, preserved across
+  `state_formatted` / `input_mode_diff`).

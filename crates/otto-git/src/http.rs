@@ -42,29 +42,6 @@ pub trait GitCtx: Clone + Send + Sync + 'static {
     fn secrets(&self) -> &Arc<dyn SecretStore>;
     fn roles(&self) -> &Arc<dyn RoleChecker>;
     fn events(&self) -> &tokio::sync::broadcast::Sender<Event>;
-    /// Optional gate run before a PR is created. The default allows everything;
-    /// `otto-server` overrides it to enforce the PR's linked proof pack (a PR
-    /// over an unproven pack is rejected unless `allow_unproven`).
-    async fn check_pr_allowed(&self, _workspace_id: &str, _req: &CreatePrReq) -> Result<()> {
-        Ok(())
-    }
-
-    /// Optional hook after a PR is successfully created. `otto-server` overrides
-    /// it to (1) link the proof pack to the new PR, (2) capture its CI status as a
-    /// `ci` evidence artifact, and (3) run the PR-description consistency check
-    /// against the actual change, recording a `pr_check` artifact (Proof Packs v2 —
-    /// automatic CI + PR-consistency integration). The full `req` is passed so the
-    /// override has the PR title/description and target branch. Best-effort: the
-    /// default does nothing and overrides must never fail PR creation. `ci` is the
-    /// freshly-fetched aggregate for the new PR.
-    async fn after_pr_created(
-        &self,
-        _repo: &Repo,
-        _pr_number: u64,
-        _req: &CreatePrReq,
-        _ci: &crate::types::CiStatus,
-    ) {
-    }
 
     /// The per-repo `cleanup_base_branch` override used by the "safe to delete
     /// (merged)" branch indicators. The default returns `None` (follow the
@@ -2825,35 +2802,23 @@ async fn pr_create<S: GitCtx>(
     Json(req): Json<CreatePrReq>,
 ) -> ApiResult<Json<PrSummary>> {
     let (repo, _) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
-    // Proof gate: refuse to open a PR over an unproven linked proof pack.
-    s.check_pr_allowed(&repo.workspace_id, &req).await?;
     let (provider, remote) = provider_ctx(&s, &user, &repo).await?;
     let summary = provider.create_pr(&remote, &req).await?;
-    // Proof Packs v2: link the pack to the new PR, capture its CI status as a `ci`
-    // evidence artifact, and run the PR-description consistency check (best-effort;
-    // never fails the PR creation).
-    let ci = provider.ci_status(&remote, summary.number).await;
-    s.after_pr_created(&repo, summary.number, &req, &ci).await;
     Ok(Json(summary))
 }
 
 /// Open a PR for `repo` on behalf of `user` **in-process** — the same path as the
-/// `POST /repos/{id}/pr` route (proof gate via `check_pr_allowed`, provider
-/// resolution, create, then the `after_pr_created` Proof-Packs hook), without
-/// going through HTTP. Exposed so the workflow engine's `git_pr` node can open a
-/// PR once a review step has passed.
+/// `POST /repos/{id}/pr` route (provider resolution and create), without going
+/// through HTTP. Exposed so the workflow engine's `git_pr` node can open a PR
+/// once a review step has passed.
 pub async fn create_pr_for_repo<S: GitCtx>(
     s: &S,
     user: &AuthUser,
     repo: &Repo,
     req: &CreatePrReq,
 ) -> Result<PrSummary> {
-    s.check_pr_allowed(&repo.workspace_id, req).await?;
     let (provider, remote) = provider_ctx(s, user, repo).await?;
-    let summary = provider.create_pr(&remote, req).await?;
-    let ci = provider.ci_status(&remote, summary.number).await;
-    s.after_pr_created(repo, summary.number, req, &ci).await;
-    Ok(summary)
+    provider.create_pr(&remote, req).await
 }
 
 async fn pr_detail<S: GitCtx>(

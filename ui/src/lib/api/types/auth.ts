@@ -9,7 +9,7 @@ import type {
 // RBAC — features + capabilities
 // ---------------------------------------------------------------------------
 
-/** The 32 protected features (snake_case, mirrors Rust Feature enum). */
+/** Protected features (snake_case, mirrors Rust Feature enum). */
 export type Feature =
   | 'agents'
   | 'connections'
@@ -17,7 +17,6 @@ export type Feature =
   | 'git'
   | 'issues'
   | 'product'
-  | 'swarm'
   | 'api_client'
   | 'workflows'
   | 'channels'
@@ -32,11 +31,8 @@ export type Feature =
   | 'canvas'
   /** Design Hall — the artifact graph (granted wherever `canvas` was). */
   | 'design'
-  | 'proof_pack'
   | 'mcp'
-  | 'mission_control'
   | 'scheduled_tasks'
-  | 'run_with_otto'
   | 'browser'
   | 'aws'
   | 'aws_s3'

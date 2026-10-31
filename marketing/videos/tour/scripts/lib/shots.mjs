@@ -88,7 +88,7 @@ export const SHOTS = {
     await wait(900);
     await page.keyboard.press('Meta+k');
     await wait(700);
-    await typeSlow(page, 'go to mission', 80);
+    await typeSlow(page, 'go to threads', 80);
     await wait(1300);
     await still(page, c, 'cmdk-typed');
     await page.keyboard.press('Enter');
@@ -138,17 +138,8 @@ export const SHOTS = {
     }
   },
   // ── Work ──────────────────────────────────────────────────────────────────
-  assistant: async (c) => {
-    const { context, page } = await open(c, c.meta.ids.thread ? `assistant/${c.meta.ids.thread}` : 'assistant', { settle: 4000 });
-    await still(page, c, 'assistant');
-    if (await tryClick(page.getByRole('tab', { name: /Memory/ }).or(page.getByRole('button', { name: /^Memory/ })), 'memory tab')) {
-      await wait(1500);
-      await still(page, c, 'assistant-memory');
-    }
-    await context.close();
-  },
   agents: async (c) => {
-    const [s0, s1] = c.meta.ids.sessions;
+    const [s0] = c.meta.ids.sessions;
     const { context, page } = await open(c, `agents/${s0}`, { settle: 5000 });
     await still(page, c, 'agents-tab');
     const rec = await record(page);
@@ -156,11 +147,6 @@ export const SHOTS = {
     await glide(page, page.getByRole('button', { name: 'Tiled view' }));
     await wait(2600);
     await still(page, c, 'agents-tiled');
-    await glide(page, page.getByRole('button', { name: 'Work Queue' }));
-    await wait(2600);
-    await still(page, c, 'agents-queue');
-    await glide(page, page.getByRole('button', { name: 'Tiled view' }));
-    await wait(1200);
     await page.keyboard.press('Meta+Shift+b');
     await wait(1500);
     await page.keyboard.type('Rebase on main and re-run the tests', { delay: 35 });
@@ -169,29 +155,105 @@ export const SHOTS = {
     await rec.stop(join(c.out, 'agents.mp4'));
     await page.keyboard.press('Escape');
     await context.close();
-    void s1;
   },
-  history: route('history', 'history', 4000),
-  'run-with-otto': route('run-with-otto', 'run-with-otto', 3500),
-  'mission-control': async (c) => {
-    const { context, page } = await open(c, 'mission-control', { settle: 3500 });
-    await still(page, c, 'mission-control');
-    if (await tryClick(page.getByRole('tab', { name: 'Graph' }), 'graph toggle')) {
-      await wait(2500);
-      await still(page, c, 'mission-graph');
-    }
+  threads: async (c) => {
+    const [s0, s1] = c.meta.ids.sessions;
+    const { context, page } = await open(c, `threads/${s0}`, {
+      settle: 4000,
+      extra: [
+        {
+          name: 'otto_threads_v1',
+          value: JSON.stringify({
+            pinnedIds: s0 ? [s0] : [],
+            paneIds: [s0, s1].filter(Boolean),
+            focusedSessionId: s0 ?? null,
+            layoutMode: 'split',
+            sidebarOpen: true,
+            inspectorOpen: true,
+            inspectorTab: 'files',
+            openFilesByWorkspace: {
+              [c.meta.ids.ws]: {
+                tabs: [
+                  { path: 'src/middleware/rateLimit.ts', pinned: true },
+                  { path: 'docs/rate-limits.md' },
+                ],
+                activeFilePath: 'src/middleware/rateLimit.ts',
+              },
+            },
+          }),
+        },
+      ],
+    });
+    await wait(1800);
+    await still(page, c, 'threads-split');
+
+    await tryClick(page.getByTestId('threads-tab-peers'), 'peers tab');
+    await wait(1600);
+    await still(page, c, 'threads-peers');
+
+    await tryClick(page.getByTestId('threads-new-btn'), 'new thread stage');
+    await wait(1600);
+    await still(page, c, 'threads-stage');
     await context.close();
+
+    // Also capture Light mode + RTL stills for visual QA and README docs.
+    {
+      const { context: lightCtx, page: lightPage } = await open(c, `threads/${s0}`, {
+        settle: 3500,
+        scheme: 'light',
+        extra: [
+          {
+            name: 'otto_threads_v1',
+            value: JSON.stringify({
+              pinnedIds: s0 ? [s0] : [],
+              paneIds: [s0, s1].filter(Boolean),
+              focusedSessionId: s0 ?? null,
+              layoutMode: 'split',
+              sidebarOpen: true,
+              inspectorOpen: true,
+              inspectorTab: 'changes',
+            }),
+          },
+        ],
+      });
+      await wait(1500);
+      await still(lightPage, c, 'threads-light');
+      await lightCtx.close();
+    }
+    {
+      const { context: rtlCtx, page: rtlPage } = await open(c, `threads/${s0}`, {
+        settle: 3500,
+        extra: [
+          { name: 'otto_dir', value: 'rtl' },
+          {
+            name: 'otto_threads_v1',
+            value: JSON.stringify({
+              pinnedIds: s0 ? [s0] : [],
+              paneIds: [s0].filter(Boolean),
+              focusedSessionId: s0 ?? null,
+              layoutMode: 'single',
+              sidebarOpen: true,
+              inspectorOpen: true,
+              inspectorTab: 'files',
+              openFilesByWorkspace: {
+                [c.meta.ids.ws]: {
+                  tabs: [{ path: 'docs/rate-limits.md', pinned: true }],
+                  activeFilePath: 'docs/rate-limits.md',
+                },
+              },
+            }),
+          },
+        ],
+      });
+      await rtlPage.evaluate(() => {
+        document.documentElement.setAttribute('dir', 'rtl');
+      });
+      await wait(1200);
+      await still(rtlPage, c, 'threads-rtl');
+      await rtlCtx.close();
+    }
   },
   // ── Automate ──────────────────────────────────────────────────────────────
-  swarm: async (c) => {
-    const { context, page } = await open(c, 'swarm', { settle: 3500 });
-    await still(page, c, 'swarm');
-    if (await tryClick(page.getByRole('button', { name: /^Board/ }).or(page.getByRole('tab', { name: /Board/ })), 'board tab')) {
-      await wait(2000);
-      await still(page, c, 'swarm-board');
-    }
-    await context.close();
-  },
   loops: async (c) => {
     const { context, page } = await open(c, 'loops', { settle: 3500 });
     await tryClick(page.getByText('Checkout p95 under 300 ms'), 'loop card');
@@ -225,13 +287,6 @@ export const SHOTS = {
     await wait(3000);
     await still(page, c, 'git-review');
     await rec.stop(join(c.out, 'git.mp4'));
-    await context.close();
-  },
-  proof: async (c) => {
-    const { context, page } = await open(c, c.meta.ids.proof ? `proof/${c.meta.ids.proof}` : 'proof', { settle: 3500 });
-    await tryClick(page.getByText('Checkout rate limiting'), 'proof pack');
-    await wait(2000);
-    await still(page, c, 'proof');
     await context.close();
   },
   product: route('product', 'product', 3500),

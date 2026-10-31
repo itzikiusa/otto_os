@@ -180,8 +180,8 @@ export type SubagentStatus = 'running' | 'done' | 'error';
 
 export type Block =
   | { kind: 'text'; md: string }
-  /** Marker only — no thinking text is persisted on disk. */
-  | { kind: 'thinking'; count: number }
+  /** Thinking marker; `text` carries reasoning prose when persisted by the provider (e.g. `agy`). */
+  | { kind: 'thinking'; count: number; text?: string | null }
   | { kind: 'image'; id: string; media_type: string; alt: string | null }
   | {
       kind: 'tool_call';
@@ -206,49 +206,6 @@ export type Block =
   | { kind: 'queued'; op: 'enqueue' | 'dequeue' | 'remove'; text: string; injected: boolean }
   | { kind: 'artifact'; artifact: Artifact }
   | { kind: 'notice'; note: SystemNote };
-
-export type HistoryStatus = 'running' | 'working' | 'idle' | 'exited' | 'reconnectable' | 'on_disk';
-
-/** Bounded metadata page; a non-null cursor can accompany an empty result. */
-export interface HistoryPage {
-  entries: HistoryEntry[];
-  next_cursor: string | null;
-}
-
-/** One history row: an Otto session or an unclaimed on-disk transcript. */
-export interface HistoryEntry {
-  session_id: string | null;
-  provider: 'claude' | 'codex';
-  title: string | null;
-  first_prompt: string | null;
-  cwd: string;
-  repo_name: string | null;
-  started_at: string;
-  last_active_at: string;
-  turns: number | null;
-  status: HistoryStatus;
-  transcript_path: string;
-  /** The CLI left resumable state (a provider session id), whatever the
-   *  status — an ended conversation resumes too. Archived rows stay true;
-   *  resume refuses them (409) until unarchived. */
-  resumable: boolean;
-  /** Archived Otto row (false for `on_disk`; absent from older daemons). */
-  archived?: boolean;
-}
-
-export interface HistoryQuery {
-  q?: string;
-  provider?: 'claude' | 'codex';
-  cwd?: string;
-  status?: HistoryStatus;
-  before?: string;
-  limit?: number;
-}
-
-export interface HistoryImportReq {
-  provider: 'claude' | 'codex';
-  transcript_path: string;
-}
 
 /** `POST /sessions/{id}/tasks` — a board / Activity-panel task pushed to the agent. */
 export interface CreateAgentTaskReq {

@@ -1,0 +1,51 @@
+name: Otto CodeQL Configuration
+
+# Right-sized CodeQL config for a local-loopback developer desktop app:
+# 1. Never scan vendored third-party crates, test suites, E2E harnesses,
+#    example plugins, or docs (eliminates huge compile/analysis waste and
+#    test-fixture false positives).
+# 2. Run only high-precision, high/critical-severity vulnerability rules, and
+#    exclude rules whose assumptions do not fit a local developer workbench
+#    (e.g. user-configured HTTP endpoints in the REST/Confluence client,
+#    content-hash SHA/MD5 keys, UI tab state in localStorage, or intentional
+#    `insecure_tls` toggles in the API client).
+
+disable-default-queries: true
+
+queries:
+  - name: High-precision security vulnerabilities
+    uses: security-default
+
+query-filters:
+  - include:
+      kind:
+        - problem
+        - path-problem
+      problem.severity:
+        - error
+      precision:
+        - high
+        - very-high
+  - exclude:
+      id:
+        - rust/cleartext-transmission
+        - rust/cleartext-logging
+        - rust/weak-sensitive-data-hashing
+        - rust/disabled-certificate-check
+        - rust/path-injection
+        - js/clear-text-storage-of-sensitive-data
+        - js/functionality-from-untrusted-source
+
+paths-ignore:
+  - vendor/**
+  - '**/tests/**'
+  - '**/*_test.rs'
+  - '**/*_tests.rs'
+  - crates/**/benches/**
+  - ui/e2e/**
+  - ui/unit/**
+  - examples/**
+  - packaging/tests/**
+  - scripts/test_*.py
+  - docs/**
+  - dev/**

@@ -77,11 +77,10 @@ fn listing(source: Option<&str>) -> Vec<Value> {
 #[test]
 fn tools_list_names_and_schemas_per_source_are_pinned() {
     let mut out = serde_json::Map::new();
-    let sources: [(&str, Option<&str>); 6] = [
+    let sources: [(&str, Option<&str>); 5] = [
         ("default", None),
         ("review", Some("review")),
         ("workflow", Some("workflow")),
-        ("assistant", Some(ASSISTANT_SOURCE)),
         ("vault-docs-review", Some("vault-docs-review")),
         ("skilleval", Some("skilleval")),
     ];
@@ -173,7 +172,6 @@ fn twin_cases() -> Vec<(&'static str, Value)> {
             "otto_list_issue_transitions",
             json!({"account_id": ID, "key": "OT-1"}),
         ),
-        ("otto_list_swarms", json!({})),
         ("otto_list_repos", json!({})),
         ("otto_list_repos", json!({"workspace_id": ID})),
         ("otto_list_sessions", json!({})),
@@ -271,7 +269,7 @@ fn every_twin_has_a_dispatch_case() {
         .map(governed_stdio_name)
         .filter(|n| NATIVE_TOOL_NAMES.contains(n))
         .collect();
-    assert_eq!(twins.len(), 46, "{twins:?}");
+    assert_eq!(twins.len(), 45, "{twins:?}");
     let missing: Vec<&String> = twins
         .iter()
         .filter(|n| !cased.contains(n.as_str()))

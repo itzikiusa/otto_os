@@ -193,15 +193,9 @@ pub struct ChannelManager {
     /// Daemon event bus (the same one the WS subscribes to). The proactive
     /// self-improvement notifier subscribes to this; `None` disables it.
     pub events: Option<broadcast::Sender<Event>>,
-    /// Optional hook: an inbound message on a swarm-bound channel launches that
-    /// swarm instead of starting a normal session. Injected by otto-server.
-    pub swarm_trigger: Option<Arc<dyn crate::swarm_trigger::SwarmTrigger>>,
     /// Optional hook: after a channel interaction finishes, run self-improvement
     /// on it and reply in-thread. Injected by otto-server (owns the engine).
     pub improver: Option<Arc<dyn crate::mirror::InteractionImprover>>,
-    /// Optional hook: an inbound `/run <ref>` (or `approve`/`reject` reply)
-    /// launches/advances a Run with Otto run. Injected by otto-server.
-    pub run_trigger: Option<Arc<dyn crate::run_trigger::RunTrigger>>,
     /// Optional hook: a structured `Action: Workflow` message starts a workflow
     /// run. Injected by otto-server (owns the workflow engine).
     pub workflow_trigger: Option<Arc<dyn crate::workflow_trigger::WorkflowChatTrigger>>,
@@ -226,9 +220,7 @@ impl ChannelManager {
             root_user_id,
             admission: Default::default(),
             events,
-            swarm_trigger: None,
             improver: None,
-            run_trigger: None,
             workflow_trigger: None,
         }
     }
@@ -239,27 +231,12 @@ impl ChannelManager {
         self
     }
 
-    /// Wire the Run with Otto launch/approval hook (otto-server provides it).
-    pub fn with_run_trigger(mut self, trigger: Arc<dyn crate::run_trigger::RunTrigger>) -> Self {
-        self.run_trigger = Some(trigger);
-        self
-    }
-
     /// Wire the workflow-command hook (otto-server provides the implementation).
     pub fn with_workflow_trigger(
         mut self,
         trigger: Arc<dyn crate::workflow_trigger::WorkflowChatTrigger>,
     ) -> Self {
         self.workflow_trigger = Some(trigger);
-        self
-    }
-
-    /// Wire the swarm-launch hook (otto-server provides the implementation).
-    pub fn with_swarm_trigger(
-        mut self,
-        trigger: Arc<dyn crate::swarm_trigger::SwarmTrigger>,
-    ) -> Self {
-        self.swarm_trigger = Some(trigger);
         self
     }
 
@@ -303,14 +280,12 @@ impl ChannelManager {
         // Shared mirror + bridge survive across generations so an in-flight
         // session keeps its channel mapping when adapters are respawned.
         let mirror = Mirror::new_with_improver(Arc::clone(&self.manager), self.improver.clone());
-        let bridge = Bridge::new_with_swarm_trigger(
+        let bridge = Bridge::new_with_workflow_trigger(
             Arc::clone(&self.manager),
             self.workspaces.clone(),
             self.settings.clone(),
             Arc::clone(&mirror),
             self.root_user_id.clone(),
-            self.swarm_trigger.clone(),
-            self.run_trigger.clone(),
             self.workflow_trigger.clone(),
             self.admission.clone(),
         );

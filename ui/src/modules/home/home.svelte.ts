@@ -158,7 +158,7 @@ class HomeStore {
   ensureDefault(can: (f: Feature) => boolean): void {
     if (this.views.length > 0) return;
     const boxes: HomeBox[] = [];
-    for (const kind of ['sessions', 'mission-control', 'k8s', 'db-dashboard'] as HomeBoxKind[]) {
+    for (const kind of ['sessions', 'k8s', 'db-dashboard'] as HomeBoxKind[]) {
       const def = kindDef(kind);
       if (can(def.feature)) boxes.push({ id: uid(), kind, w: def.w, h: def.h, config: {} });
     }

@@ -38,9 +38,10 @@ can open: admin-only panes are hidden rather than shown disabled.
   Wallpaper (generated, or your own photo, which stays on this device). A
   **Reduce transparency** switch makes the chrome solid; Otto also follows the
   macOS setting.
-- Terminal font (System, Cousine, Menlo) and an experimental **Right-to-left
-  text in the terminal** switch for Hebrew and other RTL text (reloads open
-  terminals).
+- Terminal font (System, Cousine, Menlo) and **Right-to-left text** — per-block
+  bidirectional (BiDi) layout works automatically across Threads, Chat,
+  Markdown and Rooms, plus a **Right-to-left text in the terminal** switch for
+  Hebrew, Arabic and other RTL text in raw terminals (reloads open terminals).
 - Floating bar mode: Auto, Always full, Docked or Hidden (Hidden makes ⌘K open
   the command palette sheet instead). Desktop window only.
 - **Isolate sessions to this device** — show only sessions started here.

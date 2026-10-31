@@ -12,7 +12,7 @@
 //!   `GOVERNED_BY_STDIO_NAME` in `catalog.rs`) or served natively under an
 //!   aliased name (`GOVERNED_ALIASED_BY_NATIVE`);
 //! - the hand-written tools are only those with no twin — this surface's own
-//!   (session-bound, assistant, cloud consoles…).
+//!   (session-bound, cloud consoles…).
 
 use serde_json::Value;
 

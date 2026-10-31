@@ -40,17 +40,16 @@ A scheduled task is a recurring job: "every hour, review the tickets updated in 
 - **Destination:** **Slack** or **Telegram** (the integration's channel, or a chat/channel id you enter), **Email** (sent from your verified Gmail sender), or **HTTP webhook**.
 - Delivered copies are redacted before they leave your Mac. Webhook targets are checked so private and loopback addresses are refused.
 - **Only notify on meaningful change:** skips delivery when the report matches the last one; the run shows "no change".
-- **Attach a proof pack to each run.**
 - **Retries on failure (0–5):** a failed or stuck agent or shell run is stopped and tried again.
 
 **Presets**
 - **Processed-ticket follow-up review** — hourly ticket re-review.
-- **Weekly security scan**, **Weekly code-quality review**, **Weekly dependency / PR scan** — each fills in a worktree sandbox; the security and dependency presets turn on "only notify on change", the code-quality preset attaches a proof pack.
+- **Weekly security scan**, **Weekly code-quality review**, **Weekly dependency / PR scan** — each fills in a worktree sandbox; the security and dependency presets turn on "only notify on change".
 
 **Managing tasks**
 - Per task: **Run now**, **Runs**, **Pause** / **Enable**, **Edit**, **To workflow**, and delete.
 - **To workflow** turns a task into a multi-step workflow with a matching schedule trigger.
-- Run rows show status, start time, summary, attempts, delivered / delivery failed / no change, and links to **View report**, **Open session**, the proof pack and the workflow run.
+- Run rows show status, start time, summary, attempts, delivered / delivery failed / no change, and links to **View report**, **Open session** and the workflow run.
 - The last 100 runs of each task are kept.
 
 **From other agents**
@@ -78,6 +77,5 @@ A scheduled task is a recurring job: "every hour, review the tickets updated in 
 
 - [Workflows](#/walkthroughs/workflows)
 - [Personal Agents](#/walkthroughs/personal-agents)
-- [Proof](#/walkthroughs/proof)
 - [MCP Control Plane](#/walkthroughs/mcp)
 - [Agents](#/walkthroughs/agents)

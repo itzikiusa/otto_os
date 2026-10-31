@@ -109,8 +109,11 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
                 'D' => self.screen.cub(canonicalize_params_1(params, 1)),
                 'E' => self.screen.cnl(canonicalize_params_1(params, 1)),
                 'F' => self.screen.cpl(canonicalize_params_1(params, 1)),
-                'G' => self.screen.cha(canonicalize_params_1(params, 1)),
-                'H' => self.screen.cup(canonicalize_params_2(params, 1, 1)),
+                'G' | '`' => self.screen.cha(canonicalize_params_1(params, 1)),
+                'H' | 'f' => {
+                    self.screen.cup(canonicalize_params_2(params, 1, 1));
+                }
+                'I' => self.screen.cht(canonicalize_params_1(params, 1)),
                 'J' => self
                     .screen
                     .ed(canonicalize_params_1(params, 0), unhandled),
@@ -123,12 +126,20 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
                 'S' => self.screen.su(canonicalize_params_1(params, 1)),
                 'T' => self.screen.sd(canonicalize_params_1(params, 1)),
                 'X' => self.screen.ech(canonicalize_params_1(params, 1)),
+                'Z' => self.screen.cbt(canonicalize_params_1(params, 1)),
+                'a' => self.screen.cuf(canonicalize_params_1(params, 1)),
+                'b' => self.screen.rep(canonicalize_params_1(params, 1)),
                 'd' => self.screen.vpa(canonicalize_params_1(params, 1)),
+                'e' => self.screen.cud(canonicalize_params_1(params, 1)),
+                'h' => self.screen.sm(params, unhandled),
+                'l' => self.screen.rm(params, unhandled),
                 'm' => self.screen.sgr(params, unhandled),
                 'r' => self.screen.decstbm(canonicalize_params_decstbm(
                     params,
                     self.screen.grid().size(),
                 )),
+                's' if has_no_params(params) => self.screen.decsc(),
+                'u' if has_no_params(params) => self.screen.decrc(),
                 't' => {
                     let mut params_iter = params.iter();
                     let op =
@@ -236,6 +247,12 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
             }
         }
     }
+}
+
+fn has_no_params(params: &vte::Params) -> bool {
+    params.is_empty()
+        || (params.len() == 1
+            && matches!(params.iter().next(), Some(&[] | &[0])))
 }
 
 fn canonicalize_params_1(params: &vte::Params, default: u16) -> u16 {

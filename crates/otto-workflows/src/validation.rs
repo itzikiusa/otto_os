@@ -114,7 +114,6 @@ fn validate_node(node: &WorkflowNode, root_id: &str, depth: usize, issues: &mut 
         "http_request" | "api_run" => &["url"],
         "db_query" => &["connection_id", "statement"],
         "broker_peek" => &["cluster_id", "topic"],
-        "swarm_task" => &["swarm_id", "project_id"],
         _ => &[],
     };
     for key in required {

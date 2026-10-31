@@ -157,6 +157,14 @@ fn normalize_rejects_unknown_groups_and_tools() {
     assert!(normalize_fields(&s(&["nope"]), &[], &[]).is_err());
     assert!(normalize_fields(&[], &s(&["typo_tool"]), &[]).is_err());
     assert_eq!(parse_ids(" database, ,issues "), ["database", "issues"]);
+
+    // Legacy "design" group in persisted profiles normalizes and grants "product".
+    let (legacy_g, _, _) = normalize_fields(&s(&["design", "product"]), &[], &[]).unwrap();
+    assert_eq!(legacy_g, s(&["product"]));
+    let legacy_def = def("legacy", &["design"]);
+    assert!(legacy_def.allows("design_list"));
+    assert!(legacy_def.allows("canvas_get_scene"));
+    assert!(legacy_def.allows("otto.list_product_stories"));
 }
 
 // ---- the HTTP transport hook --------------------------------------------

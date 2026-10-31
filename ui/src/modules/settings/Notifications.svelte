@@ -64,11 +64,6 @@
       sub: 'Sends a message when a code-review run finishes or fails.',
     },
     {
-      key: 'channels.notify_swarm_done',
-      label: 'Agent swarm completed',
-      sub: 'Sends a message when a swarm run finishes, is aborted, or fails.',
-    },
-    {
       key: 'channels.notify_insight_ready',
       label: 'Insights report ready',
       sub: 'Sends a message when a daily, weekly or monthly insights report is ready.',

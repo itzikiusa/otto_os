@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
 import { loadErrorText } from '../src/lib/loadError.ts';
-import { deferred, loadSource } from './sourceHarness.ts';
+import { deferred } from './sourceHarness.ts';
 
 function functions(file: string, names: string[], context: Record<string, any>) {
   const text = readFileSync(new URL(`../src/${file}`, import.meta.url), 'utf8');
@@ -63,50 +63,6 @@ test('Athena history keeps its response region and rejects a late foreign histor
   assert.equal(c.history[0].id, 'ap-query');
   c.openExecution(eu); assert.equal(c.qid, 'eu-query');
   c.openExecution(ap); await c.poll(); assert.equal(statusCalls[1][4], 'ap-south-1');
-});
-
-function assistantFixture() {
-  const requests: { id: string; request: ReturnType<typeof deferred<any[]>>; signal: AbortSignal }[] = [];
-  const exports = loadSource(new URL('../src/lib/stores/assistant.svelte.ts', import.meta.url), {
-    svelte: { untrack: (fn: () => any) => fn() },
-    '../api/client': { api: {}, ApiError: class extends Error {} },
-    '../poll': { mapLimit: async (items: any[], _n: number, f: (v: any) => Promise<any>) => { for (const item of items) await f(item); } },
-    '../api/assistant': { assistantApi: { turns: (id: string, _before: any, _limit: any, signal: AbortSignal) => {
-      const request = deferred<any[]>(); requests.push({ id, request, signal }); return request.promise;
-    }, needsYou: async () => [] } },
-    '../assistant/model': { needsYouByThread: () => ({}), reduceNeedsYou: (state: any) => state,
-      upsertNewer: (list: any[], row: any) => [...list.filter((t) => t.id !== row.id), row] },
-  });
-  return { store: exports.assistant, requests };
-}
-
-test('100 visited Assistant threads retain only acquired data and reconnect refreshes one view', async () => {
-  const { store, requests } = assistantFixture();
-  for (let i = 0; i < 100; i++) {
-    const release = store.acquireTurns(`thread-${i}`);
-    requests.at(-1)!.request.resolve([{ id: `${i}`, role: 'assistant', text: 'saved', created_at: '1' }]);
-    await Promise.resolve(); release();
-  }
-  assert.equal(Object.keys(store.turns).length, 0);
-  const release = store.acquireTurns('visible'); requests.at(-1)!.request.resolve([]); await Promise.resolve();
-  const before = requests.length; store.resync();
-  assert.equal(requests.length - before, 1); assert.equal(requests.at(-1)!.id, 'visible');
-  requests.at(-1)!.request.resolve([]); await Promise.resolve(); release();
-});
-
-test('late Assistant fetch and live events cannot revive released history or remove pending sends', async () => {
-  const { store, requests } = assistantFixture();
-  const release = store.acquireTurns('thread');
-  store.pending.thread = [{ id: 'local', text: 'pending', attachments: [], created_at: '1' }];
-  release(); assert.equal(requests[0].signal.aborted, true);
-  requests[0].request.resolve([{ id: 'stale', role: 'assistant', text: 'late', created_at: '2' }]); await Promise.resolve();
-  store.applyEvent({ type: 'assistant_turn', thread_id: 'thread', turn: { id: 'event', role: 'assistant', text: 'event' } });
-  assert.equal(store.turns.thread, undefined); assert.equal(store.pending.thread.length, 1);
-  const again = store.acquireTurns('thread'); assert.equal(requests.length, 2);
-  requests[1].request.resolve([]); await Promise.resolve();
-  for (let i = 0; i < 250; i++) store.applyEvent({ type: 'assistant_turn', thread_id: 'thread', turn: { id: `${i}`, role: 'assistant', text: 'x'.repeat(65536), created_at: `${i}` } });
-  assert.ok(JSON.stringify(store.turns.thread.data).length * 2 < 2.1 * 1024 * 1024);
-  assert.ok(store.turns.thread.data.length <= 200); again();
 });
 
 for (const [file, globals] of [

@@ -95,7 +95,6 @@ fn row_to_iteration(r: &sqlx::sqlite::SqliteRow) -> Result<EvalIteration> {
         improvement_summary: r.get("improvement_summary"),
         skill_diff: r.get("skill_diff"),
         scoring,
-        proof_pack_id: r.try_get("proof_pack_id").ok().flatten(),
         human_rating,
         human_note: r.try_get("human_note").unwrap_or_default(),
         human_rater: r.try_get("human_rater").unwrap_or_default(),
@@ -520,24 +519,16 @@ impl SkillEvalsRepo {
         Ok(())
     }
 
-    /// Persist an iteration's multi-signal score + its proof pack id.
-    pub async fn set_iter_scoring(
-        &self,
-        iter_id: &Id,
-        scoring: &EvalScore,
-        proof_pack_id: Option<&str>,
-    ) -> Result<()> {
+    /// Persist an iteration's multi-signal score.
+    pub async fn set_iter_scoring(&self, iter_id: &Id, scoring: &EvalScore) -> Result<()> {
         let json = serde_json::to_string(scoring)
             .map_err(|e| Error::Internal(format!("serialize eval scoring: {e}")))?;
-        sqlx::query(
-            "UPDATE skill_eval_iterations SET scoring_json = ?, proof_pack_id = ? WHERE id = ?",
-        )
-        .bind(&json)
-        .bind(proof_pack_id)
-        .bind(iter_id)
-        .execute(&self.pool)
-        .await
-        .map_err(dberr("set eval iteration scoring"))?;
+        sqlx::query("UPDATE skill_eval_iterations SET scoring_json = ? WHERE id = ?")
+            .bind(&json)
+            .bind(iter_id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("set eval iteration scoring"))?;
         Ok(())
     }
 
@@ -568,15 +559,12 @@ impl SkillEvalsRepo {
         tx.commit().await.map_err(dberr("commit human rating"))
     }
 
-    /// Publish an iteration and its reselected run headline atomically. Proof
-    /// evidence has already been assembled; no external work occurs in this tx.
-    #[allow(clippy::too_many_arguments)]
+    /// Publish an iteration and its reselected run headline atomically.
     pub async fn publish_iter_scoring(
         &self,
         eval_id: &Id,
         iter_id: &Id,
         scoring: &EvalScore,
-        proof_pack_id: &str,
         badge_score: Option<f64>,
         reason: &str,
     ) -> Result<()> {
@@ -587,8 +575,8 @@ impl SkillEvalsRepo {
             .begin()
             .await
             .map_err(dberr("begin score publication"))?;
-        let row = sqlx::query("UPDATE skill_eval_iterations SET scoring_json = ?, proof_pack_id = ?, score = COALESCE(?, score) WHERE id = ? AND eval_id = ?")
-            .bind(json).bind(proof_pack_id).bind(badge_score).bind(iter_id).bind(eval_id)
+        let row = sqlx::query("UPDATE skill_eval_iterations SET scoring_json = ?, score = COALESCE(?, score) WHERE id = ? AND eval_id = ?")
+            .bind(json).bind(badge_score).bind(iter_id).bind(eval_id)
             .execute(&mut *tx).await.map_err(dberr("publish iteration score"))?;
         if row.rows_affected() != 1 {
             return Err(Error::NotFound("iteration".into()));
@@ -893,7 +881,7 @@ mod tests {
             human: otto_core::eval_score::human_score(Some(5), "old", "editor"),
             ..Default::default()
         };
-        repo.publish_iter_scoring(&eval.id, &iter.id, &old, "pack", Some(100.0), "original")
+        repo.publish_iter_scoring(&eval.id, &iter.id, &old, Some(100.0), "original")
             .await
             .unwrap();
         repo.set_iter_human(&iter.id, 5, "old", "editor")
@@ -904,21 +892,13 @@ mod tests {
         new.composite = 20.0;
         new.human = otto_core::eval_score::human_score(Some(1), "new", "editor");
         assert!(repo
-            .publish_iter_scoring(
-                &eval.id,
-                &iter.id,
-                &new,
-                "new-pack",
-                Some(20.0),
-                "replacement"
-            )
+            .publish_iter_scoring(&eval.id, &iter.id, &new, Some(20.0), "replacement")
             .await
             .is_err());
         let stored = repo.get_eval(&eval.id).await.unwrap();
         assert_eq!(stored.composite_score, Some(100.0));
         assert_eq!(stored.best_score, Some(100.0));
         assert_eq!(stored.iterations[0].score, 100.0);
-        assert_eq!(stored.iterations[0].proof_pack_id.as_deref(), Some("pack"));
         assert_eq!(
             stored.iterations[0].scoring.as_ref().unwrap().composite,
             100.0
@@ -971,9 +951,7 @@ mod tests {
         };
         previous.tests =
             otto_core::eval_score::signal_from_cmd(true, false, "original failed test command");
-        repo.set_iter_scoring(&iter.id, &previous, Some("pack"))
-            .await
-            .unwrap();
+        repo.set_iter_scoring(&iter.id, &previous).await.unwrap();
         repo.set_status(&eval.id, SkillEvalStatus::Done, None)
             .await
             .unwrap();
@@ -1032,9 +1010,7 @@ mod tests {
             proof_status: "passed".into(),
             ..Default::default()
         };
-        repo.set_iter_scoring(&it.id, &score, Some("proof"))
-            .await
-            .unwrap();
+        repo.set_iter_scoring(&it.id, &score).await.unwrap();
         repo.set_eval_composite(&eval.id, 99.0).await.unwrap();
         repo.set_summary(&eval.id, "passed", Some(1), Some(99.0))
             .await
@@ -1278,9 +1254,7 @@ mod tests {
         sc.composite = 92.5;
         sc.proof_status = "passed".into();
         sc.done_score = 88;
-        repo.set_iter_scoring(&it.id, &sc, Some("pp1"))
-            .await
-            .unwrap();
+        repo.set_iter_scoring(&it.id, &sc).await.unwrap();
         repo.set_iter_human(&it.id, 4, "looks good", "root")
             .await
             .unwrap();
@@ -1296,7 +1270,6 @@ mod tests {
         assert_eq!(scoring.proof_status, "passed");
         assert_eq!(scoring.done_score, 88);
         assert!((scoring.composite - 92.5).abs() < 1e-9);
-        assert_eq!(it.proof_pack_id.as_deref(), Some("pp1"));
         assert_eq!(it.human_rating, Some(4));
         assert_eq!(it.human_note, "looks good");
 

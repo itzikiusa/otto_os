@@ -304,7 +304,19 @@ export function activeQueued(turns: Turn[]): Extract<Block, { kind: 'queued' }>[
 export type ToolCallBlock = Extract<Block, { kind: 'tool_call' }>;
 export type StepBlock = Extract<Block, { kind: 'tool_call' | 'subagent' | 'thinking' | 'tasks' }>;
 
-/** Display name of the CLI behind a transcript ("Claude", "Codex", …). */
+/** Coalesce non-empty reasoning prose across one or more `thinking` blocks. */
+export function joinThinkingText(steps: readonly Block[]): string | null {
+  const parts: string[] = [];
+  for (let i = 0; i < steps.length; i++) {
+    const b = steps[i];
+    if (b?.kind === 'thinking' && typeof b.text === 'string' && b.text.trim()) {
+      parts.push(b.text.trim());
+    }
+  }
+  return parts.length > 0 ? parts.join('\n\n') : null;
+}
+
+/** Display name of the CLI behind a transcript ("Claude", "Codex", "Antigravity", …). */
 export function providerName(provider: string | null | undefined): string {
   const p = (provider ?? '').trim();
   switch (p.toLowerCase()) {
@@ -313,6 +325,7 @@ export function providerName(provider: string | null | undefined): string {
     case 'codex':
       return 'Codex';
     case 'agy':
+    case 'antigravity':
       return 'Antigravity';
     case '':
       return 'Agent';
@@ -758,7 +771,7 @@ export function usageParts(u: TurnUsage | null | undefined): UsagePart[] {
   const answer = Math.max(0, u.output_tokens - u.thinking_tokens);
   const parts: UsagePart[] = [
     { key: 'input', label: 'in', value: u.input_tokens, title: 'Input tokens — your message, tool results and context sent to the model (not counting the cache)' },
-    { key: 'thinking', label: 'thinking', value: u.thinking_tokens, title: 'Thinking tokens — output the model spent reasoning before answering (the text is not saved)' },
+    { key: 'thinking', label: 'thinking', value: u.thinking_tokens, title: 'Thinking tokens — output the model spent reasoning before answering' },
     { key: 'output', label: 'out', value: answer, title: 'Output tokens — the visible answer and tool calls (output minus thinking)' },
     { key: 'cache_read', label: 'cache read', value: u.cache_read_tokens, title: 'Cache read — context re-used from the prompt cache (billed at a discount)' },
     { key: 'cache_write', label: 'cache write', value: u.cache_creation_tokens, title: 'Cache write — context added to the prompt cache this turn' },

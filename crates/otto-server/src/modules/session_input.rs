@@ -74,14 +74,53 @@ pub(crate) async fn input_session(ctx: &ServerCtx, user_id: &Id, id: &Id) -> Res
 pub(crate) struct Typist<'a> {
     pub(crate) user_id: &'a Id,
     pub(crate) agent: Option<&'a Id>,
+    pub(crate) attributed_from: Option<&'a Id>,
 }
 
 impl<'a> Typist<'a> {
     pub(crate) fn new(user_id: &'a Id, auth: &'a otto_core::auth::AuthContext) -> Self {
+        let agent = crate::feature_guard::agent_session_of(auth);
         Self {
             user_id,
-            agent: crate::feature_guard::agent_session_of(auth),
+            agent,
+            attributed_from: agent,
         }
+    }
+
+    /// Resolve trail attribution when a request body optionally supplies
+    /// `from_session_id`. An agent session credential ALWAYS uses its own
+    /// session ID and ignores `body_from` (S11-305). A person credential with
+    /// `from_session_id` must be authorized for that sender session in the same
+    /// workspace.
+    pub(crate) async fn resolve(
+        ctx: &ServerCtx,
+        user_id: &'a Id,
+        auth: &'a otto_core::auth::AuthContext,
+        workspace_id: &Id,
+        body_from: Option<&'a Id>,
+    ) -> Result<Self> {
+        if crate::feature_guard::agent_session_of(auth).is_some() {
+            return Ok(Self::new(user_id, auth));
+        }
+        let Some(from_id) = body_from.filter(|s| !s.trim().is_empty()) else {
+            return Ok(Self::new(user_id, auth));
+        };
+        let from_session = input_session(ctx, user_id, from_id).await?;
+        if from_session.workspace_id != *workspace_id {
+            return Err(Error::Forbidden(
+                "from_session_id belongs to another workspace".into(),
+            ));
+        }
+        if from_session.kind != SessionKind::Agent {
+            return Err(Error::Invalid(
+                "from_session_id must be an agent session".into(),
+            ));
+        }
+        Ok(Self {
+            user_id,
+            agent: None,
+            attributed_from: Some(from_id),
+        })
     }
 }
 
@@ -104,7 +143,7 @@ pub(crate) async fn submit_session_text(
             input_session(ctx, user_id, id).await.map(|_| ())
         })
         .await?;
-    match who.agent {
+    match who.attributed_from {
         Some(from) => ctx.manager.record_agent_message(id, from, text).await,
         None => ctx.manager.record_user_message(id, text).await,
     }
@@ -364,7 +403,16 @@ pub(crate) async fn session_message(
             session.status.as_str()
         ))));
     }
-    submit_session_text(&ctx, Typist::new(&user.id, &auth), &session, text)
+    let who = Typist::resolve(
+        &ctx,
+        &user.id,
+        &auth,
+        &session.workspace_id,
+        req.from_session_id.as_ref(),
+    )
+    .await
+    .map_err(ApiError)?;
+    submit_session_text(&ctx, who, &session, text)
         .await
         .map_err(ApiError)?;
     Ok(Json(otto_core::api::SessionMessageResp {
@@ -489,7 +537,7 @@ pub(crate) async fn send_input(
     // sent (docs/design/conversation-view.md §1). `submit: false`: the text
     // verbatim, for the user to inspect/edit before pressing Enter.
     let bracketed_tui = session.kind == otto_core::domain::SessionKind::Agent
-        && matches!(session.provider.as_str(), "claude" | "codex");
+        && matches!(session.provider.as_str(), "claude" | "codex" | "agy");
     if req.submit.unwrap_or(true) && bracketed_tui {
         ctx.manager
             .human_submit_text(&session_id, &user.id, auth.scope.is_some(), &req.text)

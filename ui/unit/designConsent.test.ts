@@ -40,13 +40,12 @@ for (const action of ['renameProject', 'archiveProject']) {
   });
 }
 
-for (const action of ['sendToSwarm', 'regenerate']) {
+for (const action of ['regenerate']) {
   test(`Product ${action} does not act after its confirmed story is replaced`, async () => {
     const confirm = deferred<boolean>(); const calls: unknown[] = []; let current = true;
     const state = componentFunctions(new URL('../src/modules/product/PlanTab.svelte', import.meta.url), [action], {
-      sendingToSwarm: false, ws: { currentId: 'ws-A' }, swarmLink: null, targetSwarmId: 'team-A',
-      product: { detail: { story: { stage: 'approved' } }, captureSelection: () => () => current, sendToSwarm: async () => { calls.push('sent'); } },
-      swarm: { swarms: [{ id: 'team-A', name: 'Team A' }] },
+      ws: { currentId: 'ws-A' },
+      product: { detail: { story: { stage: 'approved' } }, captureSelection: () => () => current },
       confirmer: { ask: () => confirm.promise }, generate: async () => calls.push('generated'),
       toastError() {}, toasts: { success() {} },
     });

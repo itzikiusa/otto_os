@@ -6,7 +6,6 @@
 
 export * from './types/activity';
 export * from './types/api-client';
-export * from './types/assistant';
 export * from './types/auth';
 export * from './types/automation';
 export * from './types/aws';
@@ -27,12 +26,10 @@ export * from './types/k8s';
 export * from './types/k8s-monitor';
 export * from './types/mcp';
 export * from './types/memory';
-export * from './types/mission-control';
 export * from './types/notifications';
 export * from './types/orchestrator';
 export * from './types/personal-agents';
 export type { ProductStopTurnReq, ProductStopTurnResp, ProductTurnIdentity } from './types/product';
-export * from './types/proof';
 export * from './types/review';
 export * from './types/sessions';
 export * from './types/skills-context';
@@ -55,5 +52,3 @@ export type {
   ProductTranscriptPage, ProductTranscriptSearchPage,
 } from './types/product';
 export type { ProductPublicationPreview } from './types/product-studio';
-// Ephemeral two-player game relay contracts.
-export type * from "./game-room-types";

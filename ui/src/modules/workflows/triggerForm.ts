@@ -8,7 +8,7 @@ import type { TriggerKind, WorkflowTrigger } from '../../lib/api/types';
  *  of this comment: the test finds the list by its first mention.) */
 export const EVENT_KINDS = [
   ['review_changed', 'Review changed'], ['budget_exceeded', 'Budget exceeded'],
-  ['product_changed', 'Product changed'], ['swarm_status', 'Swarm status'],
+  ['product_changed', 'Product changed'],
   ['improvement_run_finished', 'Improvement finished'], ['insight_ready', 'Insight ready'],
 ] as const;
 

@@ -23,7 +23,7 @@ test('every sidebar module routes to its own page chunk', () => {
   // Connections is the Database page (an alias in pageKeyOf).
   const missing = SIDEBAR_MODULES.map((m) => (m.id === 'connections' ? 'database' : m.id)).filter((id) => !keys.has(id));
   assert.deepEqual(missing, [], 'add a loader in shell/pages.svelte.ts — an unmapped module renders the Agents page');
-  for (const id of ['settings', 'walkthroughs', 'plugin', 'snip', 'canvas']) assert.ok(keys.has(id), id);
+  for (const id of ['settings', 'walkthroughs', 'plugin', 'snip', 'canvas', 'design', 'personal-agents']) assert.ok(keys.has(id), id);
 });
 
 test('the shell imports no module page statically', () => {
@@ -61,7 +61,6 @@ test('the shell chunk evaluates no page-owned store, handler file or the ui-comm
     'lib/stores/k8s.svelte.ts',
     'lib/stores/aws.svelte.ts',
     'lib/stores/product.svelte.ts',
-    'lib/stores/swarm.svelte.ts',
     'lib/stores/canvas.svelte.ts',
     'lib/uiCommands/database.ts',
     'lib/uiCommands/catalog.ts',

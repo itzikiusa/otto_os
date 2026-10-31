@@ -15,7 +15,6 @@ use axum::{Json, Router};
 use serde::Deserialize;
 
 use otto_core::domain::WorkspaceRole;
-use otto_core::event::Event;
 use otto_core::finding::{
     Finding, FindingStatus, ReviewProofPack, ReviewProofPackEntry, ReviewProofPackExport,
     ReviewProofPackSummary,
@@ -184,11 +183,6 @@ async fn export_proof_pack(
         }
     }
 
-    let _ = ctx.events.send(Event::ProofPackExported {
-        workspace_id: ws,
-        review_id,
-        proof_pack_id: snapshot.id.clone(),
-    });
     Ok(Json(snapshot))
 }
 

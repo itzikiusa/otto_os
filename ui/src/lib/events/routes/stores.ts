@@ -13,7 +13,6 @@
 // dispatcher also needs (resync, restart) are exported here.
 import { lazyModule } from '../../lazyModule';
 
-export const swarmStore = lazyModule(() => import('../../stores/swarm.svelte').then((m) => m.swarm), 'swarm');
 export const usageStore = lazyModule(() => import('../../api/usage.svelte').then((m) => m.usage), 'usage');
 export const databaseStore = lazyModule(() => import('../../stores/database.svelte').then((m) => m.database), 'database');
 export const personalAgentsStore = lazyModule(() => import('../../stores/personalAgents.svelte').then((m) => m.personalAgents), 'personalAgents');

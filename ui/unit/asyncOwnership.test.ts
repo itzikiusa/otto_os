@@ -170,23 +170,6 @@ test('selection waits for a superseding refresh before restoring saved tabs', as
   assert.deepEqual(restored, ['A']);
 });
 
-test('old History pagination cannot append to a new provider list', async () => {
-  const page = deferred<{ entries: any[]; next_cursor: string | null }>();
-  let calls = 0;
-  const rows = Array.from({ length: 100 }, (_, i) => ({ session_id: `claude-${i}`, provider: 'claude', last_active_at: String(i) }));
-  const api = { get: async () => ++calls === 1 ? { entries: rows, next_cursor: 'more' } : calls === 2 ? page.promise : { entries: [{ session_id: 'codex', provider: 'codex' }], next_cursor: null } };
-  const { history } = loadSource(new URL('../src/modules/agents/history/history.svelte.ts', import.meta.url), {
-    '../../../lib/api/client': { api }, '../../../lib/stores/activity.svelte': { activity: {} },
-  });
-  await history.load('A');
-  const loading = history.loadMore();
-  assert.equal(calls, 2, 'the continuation starts before changing the provider');
-  history.provider = 'codex'; await history.load('A');
-  page.resolve({ entries: [{ session_id: 'stale', provider: 'claude' }], next_cursor: null }); await loading;
-  assert.equal(history.entries.length, 1);
-  assert.equal(history.entries[0].provider, 'codex');
-});
-
 test('failed workspace selection clears foreign sessions and retry restores the selected layout', async () => {
   const {ws, requests, restored} = workspace();
   const a = ws.select('A'); requests.find(r => r.path.includes('/A/'))!.result.resolve([{id: 'a', workspace_id: 'A', status: 'idle'}]); await a;

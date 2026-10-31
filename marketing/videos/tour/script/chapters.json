@@ -1,6 +1,6 @@
 {
   "title": "Otto — product tour",
-  "edition": "20261005",
+  "edition": "20261031",
   "bpm": 120,
   "fps": 30,
   "chapters": [
@@ -18,7 +18,7 @@
       "title": "Home",
       "bars": 3,
       "music": "chorus",
-      "captions": ["Home shows what needs you, what's running and what's next.", "Light or dark, one design system."]
+      "captions": ["Home shows live sessions, dashboards, usage and findings.", "Light, dark and right-to-left, one design system."]
     },
     {
       "id": "command-bar",
@@ -28,62 +28,55 @@
       "captions": ["Press ⌘K, type or speak. Otto runs it or answers.", "⌥Space calls the bar from anywhere on your Mac."]
     },
     {
-      "id": "assistant",
-      "section": "assistant",
-      "title": "Assistant",
-      "bars": 3,
-      "captions": ["Your personal agent keeps threads, memory and tasks.", "It asks before anything leaves your Mac."]
-    },
-    {
       "id": "agents",
       "section": "agents",
-      "title": "Agents and History",
-      "bars": 6,
-      "captions": ["Claude Code, Codex and shells run as real sessions.", "Tile them, work a queue, broadcast one prompt to many.", "Resume any past conversation from History."]
+      "title": "Agents",
+      "bars": 5,
+      "captions": ["Claude Code, Codex, Antigravity and shells run as real sessions.", "Tile up to 15 live terminals, or broadcast one prompt to many."]
     },
     {
-      "id": "mission-control",
-      "section": "mission-control",
-      "title": "Run with Otto and Mission Control",
-      "bars": 4,
-      "captions": ["Run with Otto turns a ticket into a reviewed branch.", "Mission Control shows the work: running, waiting, approvals, spend."]
+      "id": "threads",
+      "section": "threads",
+      "title": "Threads",
+      "bars": 5,
+      "captions": ["Threads gives your agents a calm, inbox-style workspace.", "Split live conversations side-by-side, inspect files and diffs, and relay between peers."]
     },
     {
-      "id": "swarm",
-      "section": "swarm",
-      "title": "Swarms and Goal Loops",
-      "bars": 4,
+      "id": "loops",
+      "section": "loops",
+      "title": "Goal Loops",
+      "bars": 3,
       "music": "verse",
-      "captions": ["Swarms give agents roles, an org chart and a shared board.", "Goal loops plan, execute and evaluate until the checks pass."]
+      "captions": ["Give a goal and acceptance checks.", "Goal loops plan, execute and evaluate until every check passes."]
     },
     {
       "id": "workflows",
       "section": "workflows",
-      "title": "Workflows and schedules",
+      "title": "Workflows and Scheduled Tasks",
       "bars": 4,
-      "captions": ["Workflows chain agents, approvals and tools.", "Scheduled tasks and personal agents run on their own."]
+      "captions": ["Workflows chain agents, approvals and tools.", "Scheduled tasks and personal agents run on one unified hub."]
     },
     {
       "id": "git",
       "section": "git",
-      "title": "Git, reviews and proof",
+      "title": "Git and AI review",
       "bars": 4,
       "music": "chorus",
-      "captions": ["A commit graph with your work in progress and PRs.", "Multi-agent review, and proof packs behind every change."]
+      "captions": ["A commit graph with your work in progress and pull requests.", "Multi-agent code review turns findings into tracked fixes."]
+    },
+    {
+      "id": "product",
+      "section": "product",
+      "title": "Product and Design Hall",
+      "bars": 5,
+      "captions": ["Product unites stories, designs and learnings in one hub.", "Frames, 3D, sites and brand kits live in one versioned library."]
     },
     {
       "id": "vault",
       "section": "vault",
-      "title": "Product and Vault",
+      "title": "Vault and Skills Lab",
       "bars": 3,
-      "captions": ["Product turns stories into analysis and drafts.", "The Vault links your docs into a live knowledge graph."]
-    },
-    {
-      "id": "design",
-      "section": "design",
-      "title": "Design Hall and Skills Lab",
-      "bars": 5,
-      "captions": ["Design Hall: frames, 3D, sites and brand kits in one library.", "Skills Lab evaluates and sharpens your agent skills."]
+      "captions": ["The Vault links your markdown docs into a live knowledge graph.", "Skills Lab reviews, benchmarks and sharpens your agent skills."]
     },
     {
       "id": "database",
@@ -91,7 +84,7 @@
       "title": "Database Explorer",
       "bars": 4,
       "music": "verse",
-      "captions": ["MySQL, Postgres, MongoDB, Redis and ClickHouse.", "Build a query visually, then read the results."]
+      "captions": ["MySQL, Postgres, MongoDB, Redis and ClickHouse.", "Build a query visually and watch agent MCP queries live."]
     },
     {
       "id": "infra",

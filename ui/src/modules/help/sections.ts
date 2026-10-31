@@ -35,9 +35,14 @@ function load(): GuideSection[] {
     seen.add(s.id);
     out.push(s);
   }
-  // Sidebar order; the Database Explorer and Message Brokers views (opened
-  // from Connections, no rows of their own) read right after Connections.
-  const order = SIDEBAR_MODULES.flatMap((m) => (m.id === 'connections' ? [m.id, 'database', 'brokers'] : [m.id]));
+  // Sidebar order; merged sub-views (opened from Connections, Product or
+  // Scheduled Tasks, no rows of their own) read right after their parent module.
+  const order = SIDEBAR_MODULES.flatMap((m) => {
+    if (m.id === 'connections') return [m.id, 'database', 'brokers'];
+    if (m.id === 'product') return [m.id, 'design'];
+    if (m.id === 'scheduled-tasks') return [m.id, 'personal-agents'];
+    return [m.id];
+  });
   return orderSections(out, order);
 }
 

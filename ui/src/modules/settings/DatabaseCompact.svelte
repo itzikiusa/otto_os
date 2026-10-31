@@ -69,9 +69,8 @@
     if (days === historyDays) return;
     if (days > 0) {
       const ok = await confirmer.ask(
-        `Delete finished runs older than ${days} days, every hour from now on? This removes Run with Otto runs and their ` +
-          'events (unless a Proof Pack is attached), finished swarm runs and swarm messages, and all but the last iteration ' +
-          'of finished goal loops. Running work is never touched, and swarm budgets keep counting what was removed. ' +
+        `Delete finished runs older than ${days} days, every hour from now on? This removes all but the last iteration ` +
+          'of finished goal loops. Running work is never touched. ' +
           'Deleted history can’t be recovered.',
         { title: 'Prune old run history', confirmLabel: `Keep ${days} days`, danger: true },
       );
@@ -184,7 +183,7 @@
     {/if}
   </div>
   <p id="run-history-hint" class="dim">
-    Finished Run with Otto runs, swarm runs and messages, and old goal-loop iterations. Off by default; at least 14 days.
+    Old goal-loop iterations. Off by default; at least 14 days.
   </p>
   {#if !stats}
     <LoadState what="the database size" {loading} error={loadError} empty={true} onretry={load} />

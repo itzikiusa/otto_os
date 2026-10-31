@@ -391,9 +391,6 @@ impl otto_product::ProductStudioHost for ServerCtx {
     fn discovery_chat_repo(&self) -> &otto_state::DiscoveryChatRepo {
         &self.discovery_chat_repo
     }
-    fn discovery_repo(&self) -> &otto_state::ProductDiscoveryRepo {
-        &self.discovery_repo
-    }
     fn refinement_repo(&self) -> &otto_state::ProductRefinementRepo {
         &self.refinement_repo
     }
@@ -402,12 +399,6 @@ impl otto_product::ProductStudioHost for ServerCtx {
     }
     fn canvas_repo(&self) -> &otto_state::CanvasRepo {
         &self.canvas_repo
-    }
-    fn swarms(&self) -> &otto_state::SwarmRepo {
-        &self.swarm_repo
-    }
-    fn orchestrator(&self) -> &Arc<otto_orchestrator::Orchestrator> {
-        &self.orchestrator
     }
     fn pool(&self) -> &otto_state::DbPool {
         &self.pool
@@ -482,16 +473,6 @@ impl otto_product::ProductStudioHost for ServerCtx {
             blocked: v.blocked,
             reason: v.reason,
         }
-    }
-    async fn activate_swarm(&self, workspace_id: &Id, swarm_id: &Id) -> otto_core::Result<()> {
-        otto_swarm::runtime::lifecycle::activate(
-            &self.swarm_rt(),
-            workspace_id,
-            swarm_id,
-            otto_swarm::runtime::lifecycle::ActivatePolicy::UserStart,
-        )
-        .await
-        .map(|_| ())
     }
 }
 

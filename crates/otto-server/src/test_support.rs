@@ -146,7 +146,6 @@ impl ServerCtx {
             usage,
             telemetry: None,
             memory: Arc::new(otto_memory::MemoryService::with_defaults(pool.clone())),
-            proof_media_dir: None,
             browser: Arc::new(crate::routes::browser::BrowserEngineHandle::new(
                 None,
                 data_dir.join("browser"),

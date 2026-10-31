@@ -29,7 +29,6 @@ members = [
     "crates/ottod",
     "crates/otto-product",
     "crates/otto-skills",
-    "crates/otto-swarm",
     "crates/otto-memory",
     "crates/otto-vault",
     "crates/otto-brokers",
@@ -38,7 +37,6 @@ members = [
     "crates/otto-canvas",
     "crates/otto-design",
     "crates/otto-design-assist",
-    "crates/otto-workgraph",
     "crates/otto-mcp",
     "crates/otto-sandbox",
     "crates/otto-browser",
@@ -86,7 +84,6 @@ otto-agent-run = { path = "crates/otto-agent-run" }
 otto-review = { path = "crates/otto-review" }
 otto-server = { path = "crates/otto-server" }
 otto-product = { path = "crates/otto-product" }
-otto-swarm = { path = "crates/otto-swarm" }
 otto-memory = { path = "crates/otto-memory" }
 otto-assistant = { path = "crates/otto-assistant" }
 otto-vault = { path = "crates/otto-vault" }
@@ -96,7 +93,6 @@ otto-ssh = { path = "crates/otto-ssh" }
 otto-canvas = { path = "crates/otto-canvas" }
 otto-design = { path = "crates/otto-design" }
 otto-design-assist = { path = "crates/otto-design-assist" }
-otto-workgraph = { path = "crates/otto-workgraph" }
 otto-mcp = { path = "crates/otto-mcp" }
 otto-sandbox = { path = "crates/otto-sandbox" }
 otto-browser = { path = "crates/otto-browser" }

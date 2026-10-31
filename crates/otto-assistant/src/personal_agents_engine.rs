@@ -73,6 +73,23 @@ pub fn repo<C: AssistantCtx>(ctx: &C) -> PersonalAgentsRepo {
     PersonalAgentsRepo::new(ctx.pool().clone())
 }
 
+/// Who owns a [`PersonalAgent`] relative to `user_id` (`created_by` empty =
+/// ownerless preset).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentOwnership {
+    Owner,
+    Ownerless,
+    Other,
+}
+
+pub fn agent_ownership(agent: &PersonalAgent, user_id: &str) -> AgentOwnership {
+    match agent.created_by.as_deref().filter(|o| !o.is_empty()) {
+        None => AgentOwnership::Ownerless,
+        Some(o) if o == user_id => AgentOwnership::Owner,
+        Some(_) => AgentOwnership::Other,
+    }
+}
+
 /// Process-wide cap on concurrent personal-agent runs (bounds unattended-agent
 /// CPU/LLM cost). Override with `OTTO_PERSONAL_MAX_CONCURRENT`.
 fn run_semaphore() -> &'static Arc<Semaphore> {
@@ -1607,7 +1624,35 @@ mod tests {
 
 #[cfg(test)]
 mod cwd_tests {
-    use super::validate_agent_cwd;
+    use super::{agent_ownership, validate_agent_cwd, AgentOwnership};
+
+    #[test]
+    fn ownership_distinguishes_owner_ownerless_and_other() {
+        let mut agent = otto_state::PersonalAgent {
+            admission_generation: 0,
+            id: "a1".into(),
+            workspace_id: "w1".into(),
+            name: "Daily".into(),
+            avatar: String::new(),
+            soul_md: String::new(),
+            provider: "claude".into(),
+            model: String::new(),
+            cwd: String::new(),
+            browser: false,
+            delivery: serde_json::json!({"type": "none"}),
+            enabled: true,
+            chat_session_id: None,
+            created_by: None,
+            created_at: "2026-01-01T00:00:00Z".into(),
+            updated_at: "2026-01-01T00:00:00Z".into(),
+        };
+        assert_eq!(agent_ownership(&agent, "u1"), AgentOwnership::Ownerless);
+        agent.created_by = Some(String::new());
+        assert_eq!(agent_ownership(&agent, "u1"), AgentOwnership::Ownerless);
+        agent.created_by = Some("u1".into());
+        assert_eq!(agent_ownership(&agent, "u1"), AgentOwnership::Owner);
+        assert_eq!(agent_ownership(&agent, "u2"), AgentOwnership::Other);
+    }
 
     #[test]
     fn empty_means_default() {

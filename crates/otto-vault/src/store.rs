@@ -1371,7 +1371,7 @@ pub struct OkfNoteRow {
 
 /// Escape a LIKE pattern for `ESCAPE '\\'` — the one shared helper (backslash
 /// first, then `%` and `_`), re-exported so callers here keep their path.
-pub use otto_state::workgraph::like_escape;
+pub use otto_state::like_escape;
 
 /// Replace one note's FTS row through the rowid map (see
 /// [`Store::ensure_fts`]): an UPDATE by rowid when the note is indexed,

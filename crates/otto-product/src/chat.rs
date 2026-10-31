@@ -504,16 +504,6 @@ async fn assemble_context<C: ProductStudioHost>(ctx: &C, story_id: &Id) -> Strin
         }
     }
 
-    // Most recent discovery report.
-    let discovery = ctx
-        .discovery_repo()
-        .list_for_story(story_id)
-        .await
-        .ok()
-        .and_then(|runs| runs.into_iter().next())
-        .and_then(|r| r.report_md)
-        .filter(|r| !r.trim().is_empty());
-
     // Open questions + notes.
     let questions: Vec<String> = ctx
         .product_repo()
@@ -533,14 +523,7 @@ async fn assemble_context<C: ProductStudioHost>(ctx: &C, story_id: &Id) -> Strin
         .map(|n| n.body)
         .collect();
 
-    format_context(
-        &story.title,
-        &body,
-        &attachments,
-        discovery.as_deref(),
-        &questions,
-        &notes,
-    )
+    format_context(&story.title, &body, &attachments, None, &questions, &notes)
 }
 
 // ---------------------------------------------------------------------------

@@ -240,10 +240,6 @@ const PUBLIC_ROUTES: &[&str] = &[
     // Agent/CLI sidecar ingest — authenticated by its own key, not a bearer.
     "POST /api/v1/ingest/claude",
     "POST /api/v1/ingest/codex",
-    "POST /api/v1/ingest/swarm/board",
-    "POST /api/v1/ingest/swarm/discovery-report",
-    "POST /api/v1/ingest/swarm/mockup",
-    "POST /api/v1/ingest/swarm/product",
     "POST /api/v1/ingest/usage",
     // DB Assistant `q` tool — per-assist `x-assist-key`.
     "POST /api/v1/db-assist/{aid}/query",
@@ -252,11 +248,8 @@ const PUBLIC_ROUTES: &[&str] = &[
     "POST /api/v1/share/verify",
     // Inbound webhooks — per-workspace webhook key.
     "POST /api/v1/webhooks/{workspace_id}",
-    "POST /api/v1/webhooks/{workspace_id}/run",
-    "POST /api/v1/webhooks/swarm/{workspace_id}/{swarm_id}",
-    // Room / game-room guests join with an invite credential.
+    // Room guests join with an invite credential.
     "POST /api/v1/room-join",
-    "POST /api/v1/game-room-join",
     // Plugin host API — the plugin's own host token.
     "GET /api/v1/plugin-host/jira/credentials",
     "POST /api/v1/plugin-host/agents/run",
@@ -266,7 +259,6 @@ const PUBLIC_ROUTES: &[&str] = &[
     "GET /ws/api-client/stream",
     "GET /ws/browser/{tab_id}/live",
     "GET /ws/events",
-    "GET /ws/game-rooms/{id}",
     "GET /ws/lsp",
     "GET /ws/rooms/{id}",
     "GET /ws/rooms/{id}/terminal",

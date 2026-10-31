@@ -12,11 +12,6 @@ use crate::state::ServerCtx;
 /// Restore sessions, fail orphaned reviews / skill evals, settle interrupted
 /// API runs and recover workflow runs. Marks the `restore` boot phase.
 pub async fn recover_before_serve(ctx: &ServerCtx, boot: &mut BootPhases) -> Result<(), String> {
-    // Finish the old-life scan before restored sessions or channel/background
-    // supervisors can admit fresh live work. A failed scan must prevent serving.
-    crate::run_scheduler::recover_interrupted(ctx)
-        .await
-        .map_err(|e| format!("run-with-otto recovery: {e}"))?;
     restore_sessions(ctx).await?;
     boot.mark("restore");
     fail_orphaned_reviews(ctx).await;
@@ -49,14 +44,8 @@ pub async fn recover_before_serve(ctx: &ServerCtx, boot: &mut BootPhases) -> Res
         .await
         .map_err(|e| e.to_string())?;
     // Cross-engine admission matters too: resumed workflows can launch a goal
-    // loop, swarm, or Product analysis before HTTP starts serving.
+    // loop or Product analysis before HTTP starts serving.
     recover_goal_loops(ctx).await;
-    warn_on_err(
-        "swarm recovery",
-        ctx.swarm_repo
-            .fail_running("Interrupted by a daemon restart — the coordinator will re-run the task.")
-            .await,
-    );
     crate::scheduled_tasks_scheduler::reap_interrupted(ctx).await;
     otto_product::run::reap_orphaned_agents_on_startup(ctx.clone()).await;
     recover_workflow_runs(ctx).await;

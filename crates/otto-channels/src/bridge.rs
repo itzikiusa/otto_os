@@ -27,8 +27,6 @@ use tracing::{info, warn};
 
 use crate::adapter::{Adapter, Inbound};
 use crate::mirror::Mirror;
-use crate::run_trigger::RunTrigger;
-use crate::swarm_trigger::SwarmTrigger;
 
 /// Composite key that identifies a conversation thread.
 type ConvKey = (String, String, String, Option<String>);
@@ -449,14 +447,6 @@ pub struct Bridge {
     ingress_locks: ConvLocks,
     /// Per-session turn serialization (see `submit_to_agent`).
     turn_locks: KeyedLocks<Id>,
-    /// Optional hook: if an inbound message matches a configured swarm trigger,
-    /// launch that swarm instead of starting a normal session. Injected by
-    /// otto-server (which owns the swarm runtime).
-    swarm_trigger: Option<Arc<dyn SwarmTrigger>>,
-    /// Optional hook: an inbound `/run <ref>` launches a Run with Otto run, and an
-    /// `approve`/`reject` reply resolves an awaiting run's gate. Injected by
-    /// otto-server (which owns the run engine).
-    run_trigger: Option<Arc<dyn RunTrigger>>,
     /// Optional hook: a structured `Action: Workflow` message starts a workflow
     /// run (resolved by Name). Injected by otto-server (owns the workflow engine).
     workflow_trigger: Option<Arc<dyn crate::workflow_trigger::WorkflowChatTrigger>>,
@@ -509,23 +499,18 @@ impl Bridge {
             conv_locks: ConvLocks::default(),
             ingress_locks: ConvLocks::default(),
             turn_locks: KeyedLocks::default(),
-            swarm_trigger: None,
-            run_trigger: None,
             workflow_trigger: None,
         })
     }
 
-    /// Builder variant that wires the swarm-launch + run + workflow hooks (used by
+    /// Builder variant that wires the workflow hook + shared admission (used by
     /// otto-server).
-    #[allow(clippy::too_many_arguments)]
-    pub fn new_with_swarm_trigger(
+    pub fn new_with_workflow_trigger(
         manager: Arc<SessionManager>,
         workspaces: WorkspacesRepo,
         settings: SettingsRepo,
         mirror: Arc<Mirror>,
         root_user_id: String,
-        swarm_trigger: Option<Arc<dyn SwarmTrigger>>,
-        run_trigger: Option<Arc<dyn RunTrigger>>,
         workflow_trigger: Option<Arc<dyn crate::workflow_trigger::WorkflowChatTrigger>>,
         admission: crate::admission::InboundAdmission,
     ) -> Arc<Self> {
@@ -540,8 +525,6 @@ impl Bridge {
             conv_locks: ConvLocks::default(),
             ingress_locks: ConvLocks::default(),
             turn_locks: KeyedLocks::default(),
-            swarm_trigger,
-            run_trigger,
             workflow_trigger,
         })
     }
@@ -728,68 +711,7 @@ impl Bridge {
             }
         };
 
-        // --- 3b. Swarm trigger: a message on a swarm-bound channel launches the
-        // team instead of starting a normal session. Webhook callers can launch
-        // via the dedicated /webhooks/swarm route, so only chat channels route here.
-        if fresh && adapter.channel() != Channel::Webhook {
-            if let Some(trigger) = &self.swarm_trigger {
-                if let Some(ack) = trigger
-                    .try_launch(
-                        &msg.workspace_id,
-                        adapter.channel().as_str(),
-                        &msg.chat,
-                        msg.thread.as_deref(),
-                        &msg.user,
-                        &msg.text,
-                    )
-                    .await
-                {
-                    info!(
-                        channel = %adapter.channel().as_str(),
-                        workspace = %msg.workspace_id,
-                        chat = %msg.chat,
-                        "bridge: inbound message launched a swarm"
-                    );
-                    let _ = adapter
-                        .send_formatted(&msg.chat, msg.thread.as_deref(), &ack.reply)
-                        .await;
-                    return;
-                }
-            }
-        }
-
-        // --- 3c. Run with Otto trigger: `/run <ref>` (or "run with otto …")
-        // launches the one-button pipeline, and an `approve`/`reject` reply
-        // resolves an awaiting run's gate. Like the swarm trigger, chat channels
-        // only (webhook has its dedicated /webhooks/{ws}/run route).
-        if fresh && adapter.channel() != Channel::Webhook {
-            if let Some(trigger) = &self.run_trigger {
-                if let Some(ack) = trigger
-                    .handle(
-                        &msg.workspace_id,
-                        adapter.channel().as_str(),
-                        &msg.chat,
-                        msg.thread.as_deref(),
-                        &msg.user,
-                        &msg.text,
-                    )
-                    .await
-                {
-                    info!(
-                        channel = %adapter.channel().as_str(),
-                        workspace = %msg.workspace_id,
-                        chat = %msg.chat,
-                        "bridge: inbound message handled by Run with Otto"
-                    );
-                    let _ = adapter
-                        .send_formatted(&msg.chat, msg.thread.as_deref(), &ack.reply)
-                        .await;
-                    return;
-                }
-            }
-        }
-
-        // --- 3c². Workflow CONTROL: a `status` / `skip` / `abort` reply in the
+        // --- 3b. Workflow CONTROL: a `status` / `skip` / `abort` reply in the
         // thread of a running workflow controls THAT run. Checked BEFORE the
         // Action:Workflow trigger so a control word in a live run's thread isn't
         // mistaken for a new run; a non-command reply (or no matching active run)
@@ -1361,14 +1283,12 @@ mod conv_lock_tests {
         };
         let webhook = make();
         let unrelated = make();
-        let chat = Bridge::new_with_swarm_trigger(
+        let chat = Bridge::new_with_workflow_trigger(
             manager.clone(),
             WorkspacesRepo::new(pool.clone()),
             SettingsRepo::new(pool.clone()),
             Mirror::new(manager.clone()),
             "fixture-root".into(),
-            None,
-            None,
             None,
             webhook.admission.clone(),
         );

@@ -157,9 +157,15 @@
 
 <div class="design-hall">
   {#if !canView}
-    <PageHeader title="Design Hall" />
-    <EmptyState variant="page" icon="designHall" title="You don’t have access to Design Hall"
-      body="Ask a workspace admin to grant the Design Hall feature (Settings → Users)." />
+    <PageHeader title="Product" />
+    <EmptyState
+      variant="page"
+      icon="designHall"
+      title="You don’t have access to Design Hall"
+      body="Ask a workspace admin to grant the Design Hall feature (Settings → Users)."
+      actionLabel={auth.can('product', 'view') ? 'Open Stories' : undefined}
+      onaction={auth.can('product', 'view') ? () => router.go('product') : undefined}
+    />
   {:else if route.view === 'lobby' || route.view === 'spatial'}
     <Lobby view={route.view === 'spatial' ? 'spatial' : 'grid'} onnew={newMenu} onimport={pickFile} onnewproject={() => void newProject()} />
   {:else if route.view === 'artifact'}

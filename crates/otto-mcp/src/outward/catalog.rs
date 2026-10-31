@@ -12,7 +12,6 @@ use super::ui_commands;
 
 pub const DEFAULT_ENABLED: &[&str] = &[
     "get_context_packet",
-    "get_proof_pack",
     "ask_human_approval",
     // Scheduled-tasks reads are safe to expose by default so an agent can inspect
     // existing jobs; the write tools below stay off until an admin enables them.
@@ -62,13 +61,6 @@ pub const DEFAULT_ENABLED: &[&str] = &[
     "search_confluence",
     "get_confluence_page",
     "list_confluence_page_comments",
-    // Swarm
-    "list_swarms",
-    "get_swarm",
-    "list_swarm_runs",
-    "list_swarm_projects",
-    "list_swarm_tasks",
-    "get_swarm_board",
     // Vault v3 — the docs home (file-backed markdown vaults, OKF)
     "vault_list",
     "vault_dir",
@@ -131,7 +123,6 @@ pub const DEFAULT_ENABLED: &[&str] = &[
 ];
 pub const DANGEROUS: &[&str] = &[
     "run_goal_loop",
-    "create_work_item",
     // Creating/altering/running a recurring autonomous job that triggers agents and
     // posts to an external destination is approval-gated (off by default).
     "create_scheduled_task",
@@ -161,7 +152,6 @@ pub const DANGEROUS: &[&str] = &[
     "create_confluence_page",
     "update_confluence_page",
     "comment_confluence_page",
-    "post_swarm_board",
     "test_integration",
     "broadcast_message",
     // Delegation: opening a worker session and driving one session by id are
@@ -195,11 +185,6 @@ pub const DANGEROUS: &[&str] = &[
     // An HTTP request to a pod's port (actuator loggers / refresh / env…) —
     // approval-gated even for GET: an actuator GET can dump env/secrets.
     "k8s_pod_http",
-    // Otto Assistant memory writes: an outside agent writing / erasing the
-    // user's personal memory is approval-gated (in-session assistant calls go
-    // through the native stdio tools, which chip + Undo every write).
-    "assistant_remember",
-    "assistant_forget",
     // A database write/DDL through the Explorer's own query path — the
     // connection's read-only / production guard still refuses it there.
     "query_db",
@@ -211,7 +196,7 @@ pub const DANGEROUS: &[&str] = &[
 /// against a live cluster (delete pod / scale / rollback / Argo prune), a
 /// message produced to a live topic or queue that consumers act on, an
 /// arbitrary HTTP request (an API-client call can be a production write or a
-/// DELETE), a hard delete, an erased memory. A category rule never covers one;
+/// DELETE), a hard delete. A category rule never covers one;
 /// a per-tool rule covers one only with the second explicit toggle
 /// `allow_irreversible`. Reversible writes (opening/commenting a PR, Jira and
 /// Confluence edits, messages to agents, vault edits — `vault_delete` is a soft
@@ -225,7 +210,6 @@ pub const IRREVERSIBLE: &[&str] = &[
     "api_execute",
     "api_run_automation",
     "delete_scheduled_task",
-    "assistant_forget",
     // A committed UPDATE / DELETE / DROP has no undo inside Otto.
     "query_db",
 ];
@@ -335,8 +319,6 @@ pub const OPT_IN_READS: &[&str] = &[
     // A PR diff streams code, like code search.
     "get_pr_diff",
     // (search_memory + Vault v2 content reads removed — Vault feature disabled.)
-    // Recalled personal memory is content — off until the operator opts in.
-    "assistant_recall",
 ];
 
 /// The git tools whose `repo_id` is a friendly reference resolved server-side
@@ -376,7 +358,6 @@ pub const API_REQUEST_REF_DESC: &str =
 pub const ISSUE_ACCOUNT_REF_DESC: &str =
     "Jira/Confluence account id, label, email or URL; omit if you have one.";
 pub const PAGE_REF_DESC: &str = "Confluence page id or URL.";
-pub const SWARM_REF_DESC: &str = "Swarm id or name (otto.list_swarms).";
 pub const VAULT_REF_DESC: &str = "Vault id (integer) or vault name (otto.vault_list).";
 pub const DESIGN_REF_DESC: &str = "Design artifact id or exact title.";
 pub const ROOM_REF_DESC: &str = "Agent room id or name (otto.list_agent_rooms).";
@@ -414,25 +395,15 @@ pub fn otto_tool_specs() -> Vec<Value> {
             "inputSchema":{"type":"object","required":["workspace_id","name","repo_path","definition","limits","config"],"properties":{
                 "workspace_id":{"type":"string"},"name":{"type":"string"},"repo_path":{"type":"string"},
                 "definition":{"type":"object"},"limits":{"type":"object"},"config":{"type":"object"}}}}),
-        json!({"name":"otto.create_work_item","mutating":true,"category":"Swarm",
-            "description":"Create a work item (a Swarm task) under a project. DANGEROUS: mutates project state — approval-gated.",
-            "inputSchema":{"type":"object","required":["project_id","title"],"properties":{
-                "project_id":{"type":"string"},"title":{"type":"string"},
-                "description":{"type":"string"},"priority":{"type":"string"}}}}),
         json!({"name":"otto.open_pr_draft","mutating":false,"category":"Git",
             "description":"Draft a PR title + description from a repo's diff vs a base branch. Drafts text only — does NOT open/publish a PR.",
             "inputSchema":{"type":"object","required":["base"],"properties":{
                 "repo_id":{"type":"string","description":REPO_REF_DESC},"base":{"type":"string"}}}}),
-        json!({"name":"otto.get_proof_pack","mutating":false,"category":"Code & Context",
-            "description":"Assemble an evidence bundle for a target: git status/recent-commits/diffstat for a repo and a goal loop's machine-checked acceptance criteria.",
-            "inputSchema":{"type":"object","required":["workspace_id"],"properties":{
-                "workspace_id":{"type":"string"},"repo_id":{"type":"string","description":"Otto repo id (otto.list_repos) — must live in `workspace_id`."},
-                "branch":{"type":"string"},"goal_loop_id":{"type":"string","description":"Goal loop id or name (otto.list_goal_loops) — must live in `workspace_id`."}}}}),
         json!({"name":"otto.list_workspaces","mutating":false,"category":"Code & Context",
             "description":"List the Otto workspaces you can read — `{items}` with id, name, root_path, my_role. Every `workspace_id` argument accepts one of these ids OR the workspace's name. Read-only.",
             "inputSchema":{"type":"object","properties":{}}}),
         json!({"name":"otto.list_goal_loops","mutating":false,"category":"Agents",
-            "description":"List goal loops across EVERY workspace you can read — `{items, …}` with id, name, repo_path, status, workspace_id + workspace_name. The ids feed otto.get_proof_pack `goal_loop_id`. Read-only.",
+            "description":"List goal loops across EVERY workspace you can read — `{items, …}` with id, name, repo_path, status, workspace_id + workspace_name. Read-only.",
             "inputSchema":{"type":"object","properties":{"workspace_id":{"type":"string","description":WS_DIR_DESC}}}}),
         json!({"name":"otto.ask_human_approval","mutating":false,"category":"Approvals",
             "description":"Request a human's approval for an action and (optionally) wait for the decision. Creates a pending item in the MCP approval queue.",
@@ -541,12 +512,11 @@ pub fn otto_tool_specs() -> Vec<Value> {
                 "repo_id":{"type":"string","description":REPO_REF_DESC},"number":{"type":"integer","description":PR_NUMBER_DESC},
                 "pr_number":{"type":"integer","description":"Alias of `number`."}}}}),
         json!({"name":"otto.create_pr","mutating":true,"category":"Git",
-            "description":"Open a pull request on a repo's provider. `repo_id` may be a repo name, path or remote — the repo is found across all your workspaces. Optional `draft`, `reviewers` (provider usernames/ids) and `proof_pack_id` (ties the PR to a proof pack so the repo's proof gate can pass). DANGEROUS: outward-facing publish — approval-gated.",
+            "description":"Open a pull request on a repo's provider. `repo_id` may be a repo name, path or remote — the repo is found across all your workspaces. Optional `draft` and `reviewers` (provider usernames/ids). DANGEROUS: outward-facing publish — approval-gated.",
             "inputSchema":{"type":"object","required":["title","description","source_branch","target_branch"],"properties":{
                 "repo_id":{"type":"string","description":REPO_REF_DESC},"title":{"type":"string"},"description":{"type":"string"},
                 "source_branch":{"type":"string"},"target_branch":{"type":"string"},
-                "draft":{"type":"boolean"},"reviewers":{"type":"array","items":{"type":"string"}},
-                "proof_pack_id":{"type":"string"}}}}),
+                "draft":{"type":"boolean"},"reviewers":{"type":"array","items":{"type":"string"}}}}}),
         json!({"name":"otto.comment_pr","mutating":true,"category":"Git",
             "description":"Post a comment on a pull request — general, inline when `path` (and optionally `line`) anchor it to a file in the diff, or a threaded reply when `in_reply_to` names an existing comment id. DANGEROUS: outward-facing — approval-gated.",
             "inputSchema":{"type":"object","required":["body"],"properties":{
@@ -593,32 +563,6 @@ pub fn otto_tool_specs() -> Vec<Value> {
     specs.splice(at..at, database_query_specs());
     specs.extend(issue_tool_specs());
     specs.extend([
-        // ================= Swarm =================
-        json!({"name":"otto.list_swarms","mutating":false,"category":"Swarm",
-            "description":"List agent swarms across EVERY workspace you can read — `{items, …}` with id, name, status, workspace_id + workspace_name. Pass a swarm's id OR name as `swarm_id`. Read-only.",
-            "inputSchema":{"type":"object","properties":{"workspace_id":{"type":"string","description":WS_DIR_DESC}}}}),
-        json!({"name":"otto.get_swarm","mutating":false,"category":"Swarm",
-            "description":"Get a swarm's detail (agents, projects, counts) by id. Read-only.",
-            "inputSchema":{"type":"object","required":["swarm_id"],"properties":{"swarm_id":{"type":"string","description":SWARM_REF_DESC}}}}),
-        json!({"name":"otto.list_swarm_runs","mutating":false,"category":"Swarm",
-            "description":"List a workspace's swarm runs (newest first, up to 500). Optional `swarm_id` narrows to one swarm. Read-only.",
-            "inputSchema":{"type":"object","required":["workspace_id"],"properties":{"workspace_id":{"type":"string"},
-                "swarm_id":{"type":"string","description":SWARM_REF_DESC}}}}),
-        json!({"name":"otto.list_swarm_projects","mutating":false,"category":"Swarm",
-            "description":"List a swarm's projects (id, name, repo_path, goal) — the `project_id`s otto.list_swarm_tasks / otto.create_work_item take. Read-only.",
-            "inputSchema":{"type":"object","required":["swarm_id"],"properties":{"swarm_id":{"type":"string","description":SWARM_REF_DESC}}}}),
-        json!({"name":"otto.list_swarm_tasks","mutating":false,"category":"Swarm",
-            "description":"List a swarm project's board tasks (id, title, status, assignee, priority, depends_on). Read-only.",
-            "inputSchema":{"type":"object","required":["project_id"],"properties":{"project_id":{"type":"string","description":"Swarm project id (otto.list_swarm_projects)."}}}}),
-        json!({"name":"otto.get_swarm_board","mutating":false,"category":"Swarm",
-            "description":"Read a swarm's shared message board (newest 300). Optional `project_id` / `task_id` narrow it. Read-only.",
-            "inputSchema":{"type":"object","required":["swarm_id"],"properties":{"swarm_id":{"type":"string","description":SWARM_REF_DESC},
-                "project_id":{"type":"string"},"task_id":{"type":"string"}}}}),
-        json!({"name":"otto.post_swarm_board","mutating":true,"category":"Swarm",
-            "description":"Post a message to a swarm's shared board. Optional `project_id`/`task_id` context. DANGEROUS: drives swarm agents — approval-gated.",
-            "inputSchema":{"type":"object","required":["swarm_id","body"],"properties":{
-                "swarm_id":{"type":"string"},"body":{"type":"string"},
-                "project_id":{"type":"string"},"task_id":{"type":"string"}}}}),
         // ================= Vault (docs home) =================
         json!({"name":"otto.vault_list","mutating":false,"category":"Vault",
             "description":"List markdown doc vaults (id, name, root, OKF flag, note/link counts). Vaults are a global library — every workspace sees them all. Read-only.",
@@ -672,7 +616,7 @@ pub fn otto_tool_specs() -> Vec<Value> {
         // ================= Design Hall (artifact graph) =================
         // Read-only: find and cite earlier design work (the References drawer's
         // library). The design library is global; `workspace_id` only narrows.
-        json!({"name":"otto.design_list","mutating":false,"category":"Design",
+        json!({"name":"otto.design_list","mutating":false,"category":"Product & Design",
             "description":"List Design Hall artifacts (frames, graphics, sites, 3D scenes, whiteboards, brand kits) with id, title, studio, format, status, head version, who created / last edited it (created_by_name, last_editor_name) and the product stories it implements (story_ids). Optional filters: project_id, studio, format, status, story_id (artifacts implementing a product story). Newest first; for the next page pass cursor = the last row's `updated_at|id`. Read-only.",
             "inputSchema":{"type":"object","required":[],"properties":{
                 "workspace_id":{"type":"string","description":"Optional — the design library is global; narrows to one workspace."},
@@ -683,23 +627,23 @@ pub fn otto_tool_specs() -> Vec<Value> {
                 "story_id":{"type":"string"},
                 "limit":{"type":"integer"},
                 "cursor":{"type":"string","description":"Next page: `<updated_at>|<id>` of the previous page's last row."}}}}),
-        json!({"name":"otto.list_design_projects","mutating":false,"category":"Design",
+        json!({"name":"otto.list_design_projects","mutating":false,"category":"Product & Design",
             "description":"List Design Hall projects (id, name, workspace_id) — the `project_id` filter of otto.design_list / otto.design_search. Read-only.",
             "inputSchema":{"type":"object","properties":{
                 "workspace_id":{"type":"string","description":"Optional — narrows the global library to one workspace."},
                 "include_archived":{"type":"boolean"}}}}),
-        json!({"name":"otto.design_get","mutating":false,"category":"Design",
+        json!({"name":"otto.design_get","mutating":false,"category":"Product & Design",
             "description":"One design artifact: metadata, head + approved versions, link counts, the working-copy and thumbnail file paths, and (text formats) its source — the head's, or `version` (`v3` or a version id). Cite it as otto://design/<id>@v<seq>. Read-only.",
             "inputSchema":{"type":"object","required":["artifact_id"],"properties":{
                 "artifact_id":{"type":"string","description":DESIGN_REF_DESC},
                 "version":{"type":"string","description":"Optional `v<seq>` or version id; default the head."},
                 "include_content":{"type":"boolean","description":"Default true — inline the (≤ 256 KiB) text source."}}}}),
-        json!({"name":"otto.design_links","mutating":false,"category":"Design",
+        json!({"name":"otto.design_links","mutating":false,"category":"Product & Design",
             "description":"A design artifact's links: what it uses (embeds, components, brand tokens, stories it implements, what it was derived from) and where it is used, with the linked artifacts' titles. Broken references are flagged. Read-only.",
             "inputSchema":{"type":"object","required":["artifact_id"],"properties":{
                 "artifact_id":{"type":"string","description":DESIGN_REF_DESC},
                 "dir":{"type":"string","description":"out | in | both (default)"}}}}),
-        json!({"name":"otto.design_search","mutating":false,"category":"Design",
+        json!({"name":"otto.design_search","mutating":false,"category":"Product & Design",
             "description":"Full-text search over the design library (titles, tags, extracted copy/layer/token names, linked story keys, project names) — shipped work first. Use it to find references to build on and cite. Read-only.",
             "inputSchema":{"type":"object","required":["query"],"properties":{
                 "query":{"type":"string"},
@@ -710,7 +654,7 @@ pub fn otto_tool_specs() -> Vec<Value> {
         // Writes — approval-gated (DANGEROUS) unless the operator exempts the
         // tool. The artifact's own workspace scopes the call (see
         // `fill_design_workspace`). No tool approves a version.
-        json!({"name":"otto.design_assist","mutating":true,"category":"Design",
+        json!({"name":"otto.design_assist","mutating":true,"category":"Product & Design",
             "description":"Start a Design Hall agent turn on an artifact: the agent edits the artifact's working copy, the result is validated and committed as a new version (author agent) whose provenance records the references it was offered and the ones it cited. Returns the turn (turn_id, status, session_id); completion arrives as the design_assist_updated event. mode: generate | refine (default) | critique | a11y. DANGEROUS: spawns an agent session and writes a version — approval-gated.",
             "inputSchema":{"type":"object","required":["artifact_id","prompt"],"properties":{
                 "artifact_id":{"type":"string","description":DESIGN_REF_DESC},
@@ -718,8 +662,8 @@ pub fn otto_tool_specs() -> Vec<Value> {
                 "mode":{"type":"string","description":"generate | refine (default) | critique | a11y"},
                 "references":{"type":"array","items":{"type":"string"},"description":"Optional artifacts to build on (`<id>` or `<id>@v12`, ≤ 8) — offered to the agent as [R1] …"},
                 "selection":{"type":"object","description":"Optional focus, e.g. {\"node_id\":\"hero\"}."}}}}),
-        json!({"name":"otto.design_link","mutating":true,"category":"Design",
-            "description":"Create an explicit link from a design artifact — e.g. it `implements` a product story, `references` another artifact or a URL, `describes` frames, `embeds` a 3D model. rel: embeds | uses_component | uses_tokens | describes | derived_from | references | implements | variant_of | resized_from | created_in; dst_kind: artifact | story | session | swarm_project | vault_note | pr | url. Render links that would close a cycle are refused (409). DANGEROUS — approval-gated.",
+        json!({"name":"otto.design_link","mutating":true,"category":"Product & Design",
+            "description":"Create an explicit link from a design artifact — e.g. it `implements` a product story, `references` another artifact or a URL, `describes` frames, `embeds` a 3D model. rel: embeds | uses_component | uses_tokens | describes | derived_from | references | implements | variant_of | resized_from | created_in; dst_kind: artifact | story | session | vault_note | pr | url. Render links that would close a cycle are refused (409). DANGEROUS — approval-gated.",
             "inputSchema":{"type":"object","required":["artifact_id","rel","dst_kind","dst_id"],"properties":{
                 "artifact_id":{"type":"string","description":"The link source artifact."},
                 "rel":{"type":"string"},"dst_kind":{"type":"string"},"dst_id":{"type":"string"},
@@ -760,11 +704,11 @@ pub fn otto_tool_specs() -> Vec<Value> {
             "description":"Get one review finding's detail + event timeline by id. Read-only.",
             "inputSchema":{"type":"object","required":["finding_id"],"properties":{"finding_id":{"type":"string"}}}}),
         // ================= Product =================
-        json!({"name":"otto.list_product_stories","mutating":false,"category":"Product",
+        json!({"name":"otto.list_product_stories","mutating":false,"category":"Product & Design",
             "description":"List product stories — a GLOBAL library shared by every workspace (Jira/Confluence-backed) — `{items}` with id, source_key (the Jira key), title, stage, url, workspace_id. Pass a story's id OR its Jira key as `story_id`. Read-only.",
             "inputSchema":{"type":"object","properties":{"workspace_id":{"type":"string","description":"Optional: the workspace whose role check to use (default: the first you can read)."}}}}),
-        json!({"name":"otto.get_product_story","mutating":false,"category":"Product",
-            "description":"Get one product story's detail (story, source, counts, swarm link). Read-only.",
+        json!({"name":"otto.get_product_story","mutating":false,"category":"Product & Design",
+            "description":"Get one product story's detail (story, source, counts). Read-only.",
             "inputSchema":{"type":"object","required":["story_id"],"properties":{"story_id":{"type":"string","description":"Product story id, or its Jira key (e.g. GS-123) or exact title."}}}}),
         // ================= Channels =================
         json!({"name":"otto.list_integrations","mutating":false,"category":"Channels",
@@ -816,34 +760,17 @@ pub fn otto_tool_specs() -> Vec<Value> {
         // personal agent via the session's `meta.personal_agent` (the engine
         // stamps it on every run + chat session); a caller with no
         // personal-agent session posts/reads as the user via the REST routes.
-        json!({"name":"otto.room_post","mutating":false,"category":"Personal Agents",
+        json!({"name":"otto.room_post","mutating":false,"category":"Scheduled Tasks",
             "description":"Post a message into an agent room you are a member of. The calling personal-agent session is resolved via its session identity; the message (max 16KB) is persisted and shown to the user live. Rooms are the only agent-to-agent channel.",
             "inputSchema":{"type":"object","required":["room_id","text"],"properties":{
                 "room_id":{"type":"string","description":ROOM_REF_DESC},"text":{"type":"string"},
                 "session_id":{"type":"string","description":"the calling session (injected automatically by Otto's MCP bridge; used to resolve which personal agent is speaking)"}}}}),
-        json!({"name":"otto.room_read","mutating":false,"category":"Personal Agents",
+        json!({"name":"otto.room_read","mutating":false,"category":"Scheduled Tasks",
             "description":"Read messages from an agent room you are a member of (oldest first within the page). With no cursor it returns the room's NEWEST messages (default 50); pass `after` (the last message id you saw) for only newer ones, or `before` (the oldest id you hold) to page back.",
             "inputSchema":{"type":"object","required":["room_id"],"properties":{
                 "room_id":{"type":"string","description":ROOM_REF_DESC},"after":{"type":"string"},"before":{"type":"string"},"limit":{"type":"integer"},
                 "session_id":{"type":"string","description":"the calling session (injected automatically by Otto's MCP bridge)"}}}}),
-        // ---- Otto Assistant (the user's personal memory) ----
-        json!({"name":"otto.assistant_remember","mutating":true,"category":"Assistant",
-            "description":"Save ONE short, atomic fact about the user (a preference, a person, a recurring plan) to the Otto Assistant's private memory. Never store secrets. Shown to the user with Undo; queued for review when memory approval is on. DANGEROUS: writes the user's memory — approval-gated.",
-            "inputSchema":{"type":"object","required":["text"],"properties":{
-                "text":{"type":"string"},"kind":{"type":"string","description":"fact | decision | learning … (default fact)"},
-                "tags":{"type":"array","items":{"type":"string"}},
-                "session_id":{"type":"string","description":"the calling assistant session (injected by Otto)"}}}}),
-        json!({"name":"otto.assistant_forget","mutating":true,"category":"Assistant",
-            "description":"Forget the user's assistant memories that match `query` (up to 10; each can be restored with its undo token). DANGEROUS: erases personal memory — approval-gated.",
-            "inputSchema":{"type":"object","required":["query"],"properties":{
-                "query":{"type":"string"},
-                "session_id":{"type":"string","description":"the calling assistant session (injected by Otto)"}}}}),
-        json!({"name":"otto.assistant_recall","mutating":false,"category":"Assistant",
-            "description":"Recall the user's profile and the assistant memories matching `query` (keyword recall; omit `query` for the most recent). Read-only; off by default (personal content).",
-            "inputSchema":{"type":"object","properties":{
-                "query":{"type":"string"},"k":{"type":"integer","description":"max memories (1..20, default 10)"},
-                "session_id":{"type":"string","description":"the calling assistant session (injected by Otto)"}}}}),
-        json!({"name":"otto.list_agent_rooms","mutating":false,"category":"Personal Agents",
+        json!({"name":"otto.list_agent_rooms","mutating":false,"category":"Scheduled Tasks",
             "description":"List agent rooms across EVERY workspace you can read — `{items, …}` with id, name, workspace_id + workspace_name. Pass a room's id OR name as `room_id` to otto.room_read / otto.room_post. Read-only.",
             "inputSchema":{"type":"object","properties":{"workspace_id":{"type":"string","description":WS_DIR_DESC}}}}),
         // ---- Scheduled Tasks ----
@@ -859,23 +786,23 @@ pub fn otto_tool_specs() -> Vec<Value> {
             "inputSchema":{"type":"object","required":["task_id"],"properties":{
                 "task_id":{"type":"string","description":TASK_REF_DESC}}}}),
         json!({"name":"otto.create_scheduled_task","mutating":true,"category":"Scheduled Tasks",
-            "description":"Create a scheduled task: a recurring job that runs an agent (or hands off to a workflow) on a cadence, writes a Markdown report, and delivers it to a destination. DANGEROUS: an autonomous recurring capability — approval-gated. `schedule` = {cadence:'interval'|'daily'|'weekly'|'cron', every_min, at:'HH:MM', weekday, expr:'<5-field cron>'} interpreted in `timezone` (IANA). `provider` = claude|codex|agy|shell|<custom>. `kind` = 'agent_prompt'|'workflow' (workflow requires workflow_id). `sandbox` = 'none'|'worktree'. `max_retries` 0..5. `notify_on_change` only delivers when the report changes. `attach_proof` builds a proof pack. `destination` = {type:'none'|'slack'|'telegram'|'email'|'webhook', ...}.",
+            "description":"Create a scheduled task: a recurring job that runs an agent (or hands off to a workflow) on a cadence, writes a Markdown report, and delivers it to a destination. DANGEROUS: an autonomous recurring capability — approval-gated. `schedule` = {cadence:'interval'|'daily'|'weekly'|'cron', every_min, at:'HH:MM', weekday, expr:'<5-field cron>'} interpreted in `timezone` (IANA). `provider` = claude|codex|agy|shell|<custom>. `kind` = 'agent_prompt'|'workflow' (workflow requires workflow_id). `sandbox` = 'none'|'worktree'. `max_retries` 0..5. `notify_on_change` only delivers when the report changes. `destination` = {type:'none'|'slack'|'telegram'|'email'|'webhook', ...}.",
             "inputSchema":{"type":"object","required":["workspace_id","name"],"properties":{
                 "workspace_id":{"type":"string"},"name":{"type":"string"},"prompt":{"type":"string"},
                 "kind":{"type":"string"},"provider":{"type":"string"},"model":{"type":"string"},
                 "schedule":{"type":"object"},"destination":{"type":"object"},"timezone":{"type":"string"},
                 "workflow_id":{"type":"string"},"sandbox":{"type":"string"},"max_retries":{"type":"integer"},
-                "notify_on_change":{"type":"boolean"},"attach_proof":{"type":"boolean"},
+                "notify_on_change":{"type":"boolean"},
                 "cwd":{"type":"string"},"skill":{"type":"string"},"enabled":{"type":"boolean"}}}}),
         json!({"name":"otto.update_scheduled_task","mutating":true,"category":"Scheduled Tasks",
-            "description":"Update a scheduled task's fields (name/prompt/schedule/destination/provider/model/cwd/timezone/sandbox/max_retries/notify_on_change/attach_proof/workflow_id/skill/enabled); omitted fields keep their value, `null` clears `workflow_id` / `skill`. `kind` is fixed at creation. DANGEROUS — approval-gated.",
+            "description":"Update a scheduled task's fields (name/prompt/schedule/destination/provider/model/cwd/timezone/sandbox/max_retries/notify_on_change/workflow_id/skill/enabled); omitted fields keep their value, `null` clears `workflow_id` / `skill`. `kind` is fixed at creation. DANGEROUS — approval-gated.",
             "inputSchema":{"type":"object","required":["task_id"],"properties":{
                 "task_id":{"type":"string","description":TASK_REF_DESC},"name":{"type":"string"},"prompt":{"type":"string"},
                 "provider":{"type":"string"},"model":{"type":"string"},"cwd":{"type":"string"},
                 "schedule":{"type":"object"},"destination":{"type":"object"},
                 "timezone":{"type":"string"},"workflow_id":{"type":["string","null"],"description":"Workflow id or name; null clears it."},"sandbox":{"type":"string"},
                 "max_retries":{"type":"integer"},"notify_on_change":{"type":"boolean"},
-                "attach_proof":{"type":"boolean"},"skill":{"type":["string","null"]},"enabled":{"type":"boolean"}}}}),
+                "skill":{"type":["string","null"]},"enabled":{"type":"boolean"}}}}),
         json!({"name":"otto.set_scheduled_task_enabled","mutating":true,"category":"Scheduled Tasks",
             "description":"Enable or disable a scheduled task. DANGEROUS — approval-gated.",
             "inputSchema":{"type":"object","required":["task_id","enabled"],"properties":{
@@ -1345,24 +1272,6 @@ pub fn dangerous_detail(tool: &str, args: &Value) -> String {
             "Run API automation '{}' in workspace '{}'",
             args.get("automation_id").and_then(Value::as_str).unwrap_or("?"),
             args.get("workspace_id").and_then(Value::as_str).unwrap_or("?")
-        ),
-        "post_swarm_board" => format!(
-            "Post to swarm '{}' board",
-            args.get("swarm_id").and_then(Value::as_str).unwrap_or("?")
-        ),
-        "assistant_remember" => {
-            let text: String = args
-                .get("text")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .chars()
-                .take(160)
-                .collect();
-            format!("Remember about you (Otto Assistant memory): {text}")
-        }
-        "assistant_forget" => format!(
-            "Forget your Otto Assistant memories matching '{}'",
-            args.get("query").and_then(Value::as_str).unwrap_or("?")
         ),
         "test_integration" => format!(
             "Send a test message to the '{}' channel of a workspace",

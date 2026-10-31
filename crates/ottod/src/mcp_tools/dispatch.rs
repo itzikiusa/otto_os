@@ -14,9 +14,6 @@ pub(super) const FEATURE_READ_TOOLS: &[&str] = &[
     "otto_list_broker_topics",
     "otto_search_issues",
     "otto_list_issue_transitions",
-    "swarm_list_projects",
-    "swarm_list_tasks",
-    "swarm_utilization",
     "otto_search_memory",
     "otto_list_repos",
     "otto_list_prs",
@@ -107,7 +104,7 @@ pub(super) enum TwinReply {
 ///
 /// Twins that stay native, and why (each keeps its own arm):
 /// - the directory lists (`otto_list_workspaces`, `_workflows`,
-///   `_goal_loops`, `_broker_clusters`, `_swarms`, `_product_stories`,
+///   `_goal_loops`, `_broker_clusters`, `_product_stories`,
 ///   `_agent_rooms`, `_issue_accounts`, `_connections`): served by the
 ///   cross-workspace `/refs/directory`, which the outward executor reaches
 ///   in-process (`otto_mcp::outward::refs::DIRECTORY_TOOLS`), not through a
@@ -380,18 +377,6 @@ pub(super) fn read_route(name: &str, args: &Value, ws: Option<&str>) -> Result<R
             .ok_or_else(|| "no workspace context (OTTO_WORKSPACE_ID unset)".to_string())
     };
     Ok(match name {
-        "swarm_list_projects" => ReadCall::get(format!(
-            "/swarm/swarms/{}/projects",
-            seg(&arg_str(args, "swarm_id")?)
-        )),
-        "swarm_list_tasks" => ReadCall::get(format!(
-            "/swarm/projects/{}/tasks",
-            seg(&arg_str(args, "project_id")?)
-        )),
-        "swarm_utilization" => ReadCall::get(format!(
-            "/swarm/swarms/{}/utilization",
-            seg(&arg_str(args, "swarm_id")?)
-        )),
         "otto_search_memory" => {
             // `k` defaults to 0 server-side (MemoryQuery) → no hits; supply a useful default.
             let k = args.get("k").and_then(u64_lenient).unwrap_or(20);
@@ -697,24 +682,6 @@ pub(super) async fn run_tool(
         | "otto_api_execute"
         | "otto_api_upsert_request"
         | "otto_api_run_automation" => run_api_tool(ctx, name, args).await,
-        // Otto Assistant tools: forward the arguments plus this session's id;
-        // the daemon resolves the session to its thread (the token's own
-        // session binding wins) and refuses non-assistant sessions.
-        name if assistant_segment(name).is_some() => {
-            let seg_name = assistant_segment(name).unwrap_or_default();
-            let mut body = if args.is_object() {
-                args.clone()
-            } else {
-                json!({})
-            };
-            if let Some(sid) = ctx.session_id.clone() {
-                body["session_id"] = json!(sid);
-            }
-            let raw = ctx
-                .post_json(&format!("/assistant/agent/{seg_name}"), &body)
-                .await?;
-            Ok(finalize(raw))
-        }
         // Database Explorer reads, PR reviews and product stories (`run_data_tool`).
         "otto_list_connections"
         | "otto_db_schema"
@@ -731,63 +698,6 @@ pub(super) async fn run_tool(
         | "workbench_get"
         | "workbench_list"
         | "workbench_write" => run_canvas_tool(ctx, name, args).await,
-        "swarm_create_task" => {
-            let pid = arg_str(args, "project_id")?;
-            let mut body = json!({ "title": arg_str(args, "title")? });
-            for k in ["description", "assignee_agent_id", "priority"] {
-                if let Some(v) = args
-                    .get(k)
-                    .and_then(Value::as_str)
-                    .filter(|s| !s.is_empty())
-                {
-                    body[k] = json!(v);
-                }
-            }
-            let task = ctx
-                .post_json(&format!("/swarm/projects/{}/tasks", seg(&pid)), &body)
-                .await?;
-            Ok(finalize(json!({ "ok": true, "task": task })))
-        }
-        "swarm_update_task" => {
-            let tid = arg_str(args, "task_id")?;
-            let mut body = json!({});
-            for k in [
-                "status",
-                "assignee_agent_id",
-                "priority",
-                "title",
-                "description",
-            ] {
-                if let Some(v) = args
-                    .get(k)
-                    .and_then(Value::as_str)
-                    .filter(|s| !s.is_empty())
-                {
-                    body[k] = json!(v);
-                }
-            }
-            if body.as_object().is_some_and(|o| o.is_empty()) {
-                return Err("nothing to update — pass at least one of status/assignee_agent_id/priority/title/description".into());
-            }
-            let task = ctx
-                .patch_json(&format!("/swarm/tasks/{}", seg(&tid)), &body)
-                .await?;
-            Ok(finalize(json!({ "ok": true, "task": task })))
-        }
-        "swarm_run_task" => {
-            let tid = arg_str(args, "task_id")?;
-            let run = ctx
-                .post_json(&format!("/swarm/tasks/{}/run", seg(&tid)), &json!({}))
-                .await?;
-            Ok(finalize(json!({ "ok": true, "run": run })))
-        }
-        "swarm_stop_run" => {
-            let rid = arg_str(args, "run_id")?;
-            let run = ctx
-                .post_json(&format!("/swarm/runs/{}/stop", seg(&rid)), &json!({}))
-                .await?;
-            Ok(finalize(json!({ "ok": true, "run": run })))
-        }
         // Browser tools — all call the governed browser routes with the
         // session's own token (netguard + RBAC enforced there, same as the
         // Browser module UI). `browser_navigate` is the only write: it opens

@@ -9,7 +9,7 @@ summary: The floating "Type or speak… ⌘K" bar — run any command, search yo
 The command bar is Otto's front door. It's the pill that floats at the bottom of the window with "Type or speak…" and `⌘K` in it. One box does 3 things:
 
 - **Run a command**: go to any module, focus a session, open a repo, change the theme and more.
-- **Search your workspace**: repos, workflows, product stories, API requests, Swarm tasks and projects, Kafka clusters and saved memory.
+- **Search your workspace**: repos, workflows, product stories, API requests, Kafka clusters and saved memory.
 - **Ask Otto**: type a plain-English request ("open 2 claude sessions", "send to session 1: run the tests") and Otto plans it.
 
 The bar has 4 **spaces** (01–04). Each space remembers its own name, workspace, agent, model and conversation thread, so you can keep work and personal requests apart.
@@ -93,6 +93,5 @@ The bar has 4 **spaces** (01–04). Each space remembers its own name, workspace
 
 - [Keyboard shortcuts](#/walkthroughs/keyboard-shortcuts)
 - [Home](#/walkthroughs/home)
-- [Assistant](#/walkthroughs/assistant)
 - [Desktop app](#/walkthroughs/desktop-app)
 - [Getting started](#/walkthroughs/getting-started)

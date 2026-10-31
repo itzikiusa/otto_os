@@ -20,12 +20,11 @@ use std::time::Duration;
 
 use otto_core::domain::Workspace;
 use otto_core::event::Event;
-use otto_core::proof::{ProofArtifact, ProofArtifactKind, ProofArtifactStatus, ProofPack};
 use otto_core::secrets::SecretStore;
 use otto_core::workflows::{NodeRunState, RunScope, Workflow};
 use otto_core::{Id, Result};
 use otto_sessions::SessionManager;
-use otto_state::{DbPool, GoalLoopsRepo, ProofRepo, ScheduledTasksRepo, WorkspacesRepo};
+use otto_state::{DbPool, GoalLoopsRepo, ScheduledTasksRepo, WorkspacesRepo};
 use serde_json::Value;
 use tokio::sync::broadcast;
 
@@ -46,7 +45,6 @@ pub trait AutomationCtx: Clone + Send + Sync + 'static {
     fn workspaces(&self) -> &WorkspacesRepo;
     /// The headless runner (owner-less scheduled tasks).
     fn orchestrator(&self) -> &Arc<otto_orchestrator::Orchestrator>;
-    fn proof_repo(&self) -> &ProofRepo;
     fn scheduled_tasks(&self) -> &ScheduledTasksRepo;
     fn goal_loops_repo(&self) -> &GoalLoopsRepo;
     /// Live goal-loop controllers (owned by the daemon state, run by this crate).
@@ -140,35 +138,6 @@ pub trait AutomationCtx: Clone + Send + Sync + 'static {
         scope: RunScope,
         prior_nodes: Option<Vec<NodeRunState>>,
     );
-
-    /// Ensure the proof pack for a work item (the proof gate).
-    fn proof_gate(
-        &self,
-        kind: otto_core::proof::WorkItemKind,
-        work_item_id: &str,
-        workspace_id: &str,
-        title: &str,
-        created_by: &str,
-    ) -> impl Future<Output = Result<ProofPack>> + Send;
-
-    /// Store a text artifact on a proof pack (offloading large content).
-    #[allow(clippy::too_many_arguments)]
-    fn proof_upsert_content_artifact(
-        &self,
-        pack: &ProofPack,
-        kind: ProofArtifactKind,
-        title: &str,
-        content: &str,
-        status: ProofArtifactStatus,
-        extra_meta: Value,
-        created_by: &str,
-    ) -> impl Future<Output = Result<ProofArtifact>> + Send;
-
-    /// Recompute a pack's status/risk/done score and broadcast it.
-    fn proof_recompute_and_emit(
-        &self,
-        pack_id: &str,
-    ) -> impl Future<Output = Result<ProofPack>> + Send;
 
     /// Notification-center streak for an unattended entity (`kind`, `id`):
     /// `failure = Some((title, body))` posts once per failure streak (clicking

@@ -1,11 +1,6 @@
 import { beginNavigation, finishNavigationPaint } from './telemetry';
 // Tiny hash router. Routes look like "#/agents", "#/git/<repoId>/pr/42",
-// "#/settings/appearance", "#/history/<sessionId>". No SvelteKit — App.svelte
-// switches on `router.module`.
-//
-// Note: `#/agents/<x>` reads `<x>` as a SESSION id, so sibling agent surfaces
-// get their own top-level module — History is `#/history` (optional second
-// segment = the session id to preselect), Mission Control `#/mission-control`.
+// "#/settings/appearance". No SvelteKit — App.svelte switches on `router.module`.
 //
 // Keeps a browser-style navigation stack so back/forward (buttons + ⌘⇧←/→)
 // can return to previously-viewed pages.
@@ -15,7 +10,7 @@ import { dropShareToken, storeShareToken, storedShareToken } from './shareTokenS
 import { winKey } from './win';
 import { lsGet, lsSet } from './storage';
 import { isEmbedded } from './desktop';
-import { captureGameInvite, captureRoomInvite } from './rooms/invites';
+import { captureRoomInvite } from './rooms/invites';
 import { activeNavId } from './sidebar';
 
 // ---------------------------------------------------------------------------
@@ -58,14 +53,14 @@ function restoreLastRoute(): void {
   if (h !== '' && h !== '#/' && h !== '#') return; // explicit route wins
   const saved = lsGet(winKey(LS_LAST_ROUTE));
   // Never restore into a share route (`#/s/…` is one-time-view by design).
-  if (saved && saved.startsWith('#/') && !saved.startsWith('#/s/') && !saved.startsWith('#/room/') && !saved.startsWith('#/room-host/') && !saved.startsWith('#/game-room/')) {
+  if (saved && saved.startsWith('#/') && !saved.startsWith('#/s/') && !saved.startsWith('#/room/') && !saved.startsWith('#/room-host/')) {
     history.replaceState(null, '', saved);
   }
 }
 
 function persistLastRoute(hash: string): void {
   if (!IS_TAURI) return;
-  if (hash.startsWith('#/s/') || hash.startsWith('#/room/') || hash.startsWith('#/room-host/') || hash.startsWith('#/game-room/')) return; // ephemeral room/share views are never sticky
+  if (hash.startsWith('#/s/') || hash.startsWith('#/room/') || hash.startsWith('#/room-host/')) return; // ephemeral room/share views are never sticky
   lsSet(winKey(LS_LAST_ROUTE), hash);
 }
 
@@ -95,7 +90,7 @@ function ssSet(key: string, value: string): void {
 
 /** Routes never remembered as a module's resume point (one-time share/room views). */
 function ephemeralRoute(hash: string): boolean {
-  return hash.startsWith('#/s/') || hash.startsWith('#/room/') || hash.startsWith('#/room-host/') || hash.startsWith('#/game-room/');
+  return hash.startsWith('#/s/') || hash.startsWith('#/room/') || hash.startsWith('#/room-host/');
 }
 
 /** The sidebar nav id a hash belongs to (see `activeNavId`). */
@@ -260,14 +255,6 @@ class Router {
   private read(): string[] {
     const raw = window.location.hash.replace(/^#\/?/, '');
     let parts = raw === '' ? [] : raw.split('/').map(safeDecode);
-
-    if (parts[0] === 'game-room') {
-      const match = /^game-room\/([\w-]{1,128})\?invite=([\w-]{16,512})$/.exec(raw);
-      const roomId = match?.[1] ?? (parts[1] ?? '').split('?')[0];
-      if (match) captureGameInvite(roomId, match[2]);
-      history.replaceState(null, '', `#/game-room/${encodeURIComponent(roomId)}`);
-      parts = ['game-room', roomId];
-    }
 
     // `#/room/<id>/<invite>[/<sha256>]` — the optional pinned-certificate
     // segment is for the joining Otto APP; a browser validates TLS itself.

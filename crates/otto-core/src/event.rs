@@ -138,50 +138,6 @@ pub enum Event {
         id: Option<Id>,
         deleted: bool,
     },
-    /// A swarm run was created or changed. `run` is the serialized SwarmRun row
-    /// (otto-core can't depend on otto-state, so it travels as JSON).
-    SwarmRunUpdated {
-        workspace_id: Id,
-        swarm_id: Id,
-        run: serde_json::Value,
-    },
-    /// A swarm task was created or changed. `task` is the serialized SwarmTask row.
-    SwarmTaskUpdated {
-        workspace_id: Id,
-        swarm_id: Id,
-        project_id: Id,
-        task: serde_json::Value,
-    },
-    /// A project's board was cleared (all tasks + project-scoped feed deleted,
-    /// in-flight runs stopped). Clients drop their local task/board state for
-    /// the project instead of waiting for per-row updates that won't come.
-    SwarmProjectCleared {
-        workspace_id: Id,
-        swarm_id: Id,
-        project_id: Id,
-    },
-    /// A new message was posted to a swarm's shared board. `message` is the
-    /// serialized SwarmMessage row.
-    SwarmMessagePosted {
-        workspace_id: Id,
-        swarm_id: Id,
-        message: serde_json::Value,
-    },
-    /// A swarm's lifecycle status changed (active | paused | aborted).
-    SwarmStatus {
-        workspace_id: Id,
-        swarm_id: Id,
-        status: String,
-    },
-    /// A swarm goal was created/changed (verification progress). `goal` is the
-    /// serialized SwarmGoal row (otto-core can't depend on otto-state).
-    SwarmGoalUpdated {
-        workspace_id: Id,
-        swarm_id: Id,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        task_id: Option<Id>,
-        goal: serde_json::Value,
-    },
     /// Throttle marker emitted after each metrics-sampler tick. The UI can
     /// subscribe to refresh the `/usage/metrics` sparklines in near-real-time
     /// instead of polling blindly. `ts` is the sample timestamp (UTC ISO-8601).
@@ -450,16 +406,6 @@ pub enum Event {
         sql: String,
         note: String,
     },
-    /// A work-graph item was created or changed — Mission Control's live signal.
-    /// The Mission Control page re-fetches the matching workspace's summary/list
-    /// on a matching tick instead of polling. `kind`/`status` are the normalized
-    /// snake_case strings (otto-core stays free of otto-state types).
-    WorkGraphUpdated {
-        workspace_id: Id,
-        item_id: Id,
-        kind: String,
-        status: String,
-    },
     /// A review finding's workflow `status` (or a tracked field) changed — emitted
     /// after every triage action / transition. The Findings board subscribes and
     /// refetches the matching finding (like `review_changed` drives the panel).
@@ -480,35 +426,6 @@ pub enum Event {
         action: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session_id: Option<Id>,
-    },
-    /// A review's Proof Pack was exported (a snapshot persisted + verified findings
-    /// ingested into memory). The Review panel can surface the new evidence bundle.
-    ProofPackExported {
-        workspace_id: Id,
-        review_id: Id,
-        proof_pack_id: Id,
-    },
-    /// A proof pack was created, (re)assembled, had an artifact added, or was
-    /// waived — its derived status / risk may have changed. The UI re-fetches the
-    /// affected pack and refreshes the workspace proof summary.
-    ProofPackUpdated {
-        workspace_id: Id,
-        proof_pack_id: Id,
-        work_item_kind: String,
-        work_item_id: String,
-        status: String,
-        risk_score: u8,
-        /// Done-contract readiness 0..100 (see `proof::compute_done_contract`).
-        #[serde(default)]
-        done_score: u8,
-        /// The pack's badges after this recompute, so a listener can patch its
-        /// summary row in place instead of refetching (absent from older
-        /// emitters).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        badges: Option<Vec<String>>,
-        /// Evidence count after this recompute.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        artifact_count: Option<u32>,
     },
     /// A scheduled-task run started, finished, or errored. The Scheduled Tasks page
     /// subscribes and re-fetches the task's run history on a matching tick instead
@@ -551,14 +468,6 @@ pub enum Event {
         author_id: Id,
         text: String,
         created_at: String,
-    },
-    /// A Run with Otto run advanced a stage, errored, or finished. The Run with
-    /// Otto page re-fetches the run + its timeline on a matching tick. `status` is
-    /// the snake_case `RunStatus`.
-    OttoRunUpdated {
-        workspace_id: Id,
-        run_id: Id,
-        status: String,
     },
     /// A session's set of referenced Canvas scenes changed (attach/detach). The
     /// session's Canvas panel re-fetches `GET /sessions/{id}/canvas-refs` on a
@@ -674,14 +583,6 @@ pub enum Event {
         session_id: Id,
         artifact: serde_json::Value,
     },
-    /// History index rescan progress (`POST /workspaces/{wid}/history/rescan`).
-    /// Workspace-scoped. `done` is true on the final tick.
-    HistoryIndexProgress {
-        workspace_id: Id,
-        scanned: u64,
-        total: u64,
-        done: bool,
-    },
     /// Kubernetes monitoring: a collector cycle finished for `cluster_id`
     /// (dashboards refresh; `ok` = samples were written).
     K8sMonitorCycle {
@@ -691,48 +592,11 @@ pub enum Event {
         pods_failed: u32,
         cycle_ms: u64,
     },
-    /// Otto Assistant: a turn was indexed into a thread (a user send echo, a
-    /// landed reply with its provider badge, or a system line — memory chip,
-    /// delegation, reminder, route/limit notice). `turn` / `thread` are the
-    /// serialized `otto_state::AssistantTurn` / `AssistantThread` (otto-core
-    /// can't depend on otto-state); `thread` is `null` when it didn't change.
-    /// OWNER-scoped: delivered only to `user_id`'s connections.
-    AssistantTurn {
-        user_id: Id,
-        thread_id: Id,
-        turn: serde_json::Value,
-        thread: Option<serde_json::Value>,
-    },
-    /// Otto Assistant: a task was created or changed state. Owner-scoped.
-    AssistantTaskUpdate {
-        user_id: Id,
-        task: serde_json::Value,
-    },
-    /// Otto Assistant: a task entered or left the needs-you queue;
-    /// `open_count` is the queue size after the change. Owner-scoped.
-    AssistantNeedsYou {
-        user_id: Id,
-        task: serde_json::Value,
-        open_count: i64,
-    },
-    /// Otto Assistant: a provider usage limit was detected on a thread's
-    /// route. `suggestion` is the route to continue on (null when none);
-    /// `task_id` the "continue on X?" needs-you item; `auto_switched` means
-    /// auto-failover already moved the thread. Owner-scoped.
-    AssistantLimit {
-        user_id: Id,
-        thread_id: Option<Id>,
-        limit: serde_json::Value,
-        suggestion: Option<serde_json::Value>,
-        task_id: Option<Id>,
-        auto_switched: bool,
-    },
     /// Agent UI control: an agent in `session_id` called an `otto.ui_*` tool
     /// but the session has no "Allow UI control" grant yet. The UI shows an
     /// inline Allow / Deny prompt beside the session (the grant itself is
     /// `POST /sessions/{id}/ui-control`, human credentials only). Delivered
-    /// ONLY to the session owner's connections (owner-scoped, like the
-    /// Assistant events) — never to workspace admins or root.
+    /// ONLY to the session owner's connections — never to workspace admins or root.
     UiControlRequested {
         user_id: Id,
         workspace_id: Id,
@@ -794,6 +658,28 @@ pub enum Event {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         client_id: Option<String>,
     },
+    /// Live agent MCP database activity (`otto_db_query`, `otto_query_db`,
+    /// `otto_db_schema`, `otto_db_children`, `otto_db_object`). Emitted on
+    /// `"started"` and again on `"finished"` or `"error"` so the Database
+    /// Explorer's Live Agent Activity strip can render in-flight queries and
+    /// bounded result previews in real time.
+    DbMcpActivity {
+        workspace_id: Id,
+        connection_id: Id,
+        session_id: Option<Id>,
+        session_title: Option<String>,
+        activity_id: String,
+        tool: String,
+        sql: Option<String>,
+        node: Option<String>,
+        status: String,
+        row_count: Option<usize>,
+        duration_ms: Option<u64>,
+        columns: Vec<String>,
+        rows_preview: Vec<Vec<serde_json::Value>>,
+        error: Option<String>,
+        ts: String,
+    },
 }
 
 impl Event {
@@ -830,12 +716,6 @@ impl Event {
             Event::ApiHistoryAppended { .. } => "api_history_appended",
             Event::ApiRunProgress { .. } => "api_run_progress",
             Event::ApiClientChanged { .. } => "api_client_changed",
-            Event::SwarmRunUpdated { .. } => "swarm_run_updated",
-            Event::SwarmTaskUpdated { .. } => "swarm_task_updated",
-            Event::SwarmProjectCleared { .. } => "swarm_project_cleared",
-            Event::SwarmMessagePosted { .. } => "swarm_message_posted",
-            Event::SwarmStatus { .. } => "swarm_status",
-            Event::SwarmGoalUpdated { .. } => "swarm_goal_updated",
             Event::UsageMetricsTick { .. } => "usage_metrics_tick",
             Event::ProductChanged { .. } => "product_changed",
             Event::PlanRun { .. } => "plan_run",
@@ -858,16 +738,12 @@ impl Event {
             Event::MockupSessionStarted { .. } => "mockup_session_started",
             Event::DbAssistSessionStarted { .. } => "db_assist_session_started",
             Event::DbAssistUpdated { .. } => "db_assist_updated",
-            Event::WorkGraphUpdated { .. } => "work_graph_updated",
             Event::FindingUpdated { .. } => "finding_updated",
             Event::FindingActionStarted { .. } => "finding_action_started",
-            Event::ProofPackExported { .. } => "proof_pack_exported",
-            Event::ProofPackUpdated { .. } => "proof_pack_updated",
             Event::ScheduledTaskRunUpdated { .. } => "scheduled_task_run_updated",
             Event::PersonalAgentRunUpdated { .. } => "personal_agent_run_updated",
             Event::PersonalAgentActivity { .. } => "personal_agent_activity",
             Event::AgentRoomMessage { .. } => "agent_room_message",
-            Event::OttoRunUpdated { .. } => "otto_run_updated",
             Event::CanvasRefsChanged { .. } => "canvas_refs_changed",
             Event::RepoStatusChanged { .. } => "repo_status_changed",
             Event::BrowserTabUpdated { .. } => "browser_tab_updated",
@@ -881,17 +757,13 @@ impl Event {
             Event::TranscriptAppended { .. } => "transcript_appended",
             Event::TranscriptLive { .. } => "transcript_live",
             Event::ArtifactAdded { .. } => "artifact_added",
-            Event::HistoryIndexProgress { .. } => "history_index_progress",
             Event::K8sMonitorCycle { .. } => "k8s_monitor_cycle",
-            Event::AssistantTurn { .. } => "assistant_turn",
-            Event::AssistantTaskUpdate { .. } => "assistant_task_update",
-            Event::AssistantNeedsYou { .. } => "assistant_needs_you",
-            Event::AssistantLimit { .. } => "assistant_limit",
             Event::UiControlRequested { .. } => "ui_control_requested",
             Event::McpApprovalChanged { .. } => "mcp_approval_changed",
             Event::ResourceAccessChanged { .. } => "resource_access_changed",
             Event::NotificationsChanged { .. } => "notifications_changed",
             Event::WorkbenchDocChanged { .. } => "workbench_doc_changed",
+            Event::DbMcpActivity { .. } => "db_mcp_activity",
         }
     }
 }
@@ -1018,6 +890,23 @@ mod tests {
                 updated_at: "2026-10-03T00:00:00Z".into(),
                 client_id: None,
             },
+            Event::DbMcpActivity {
+                workspace_id: "w".into(),
+                connection_id: "c".into(),
+                session_id: Some("s".into()),
+                session_title: Some("Investigate".into()),
+                activity_id: "a1".into(),
+                tool: "otto_db_query".into(),
+                sql: Some("SELECT 1".into()),
+                node: None,
+                status: "finished".into(),
+                row_count: Some(1),
+                duration_ms: Some(12),
+                columns: vec!["1".into()],
+                rows_preview: vec![vec![serde_json::json!(1)]],
+                error: None,
+                ts: "2026-10-31T00:00:00Z".into(),
+            },
         ];
         for e in events {
             let v = serde_json::to_value(&e).unwrap();
@@ -1082,56 +971,8 @@ mod tests {
         assert!(v.get("node").is_none());
     }
 
-    /// Otto Assistant events: snake_case tags; `thread` / `thread_id` /
-    /// `suggestion` / `task_id` travel as explicit `null` (the contract's
-    /// `| null`), never omitted.
     #[test]
-    fn assistant_event_wire_shapes() {
-        let v = serde_json::to_value(Event::AssistantTurn {
-            user_id: "u1".into(),
-            thread_id: "t1".into(),
-            turn: serde_json::json!({"id":"x","role":"assistant","provider":"claude"}),
-            thread: None,
-        })
-        .unwrap();
-        assert_eq!(v["type"], "assistant_turn");
-        assert_eq!(v["user_id"], "u1");
-        assert_eq!(v["turn"]["provider"], "claude");
-        assert!(v.get("thread").is_some_and(|t| t.is_null()));
-
-        let v = serde_json::to_value(Event::AssistantTaskUpdate {
-            user_id: "u1".into(),
-            task: serde_json::json!({"id":"k1","state":"running"}),
-        })
-        .unwrap();
-        assert_eq!(v["type"], "assistant_task_update");
-        assert_eq!(v["task"]["state"], "running");
-
-        let v = serde_json::to_value(Event::AssistantNeedsYou {
-            user_id: "u1".into(),
-            task: serde_json::json!({"id":"k1","state":"needs_you"}),
-            open_count: 2,
-        })
-        .unwrap();
-        assert_eq!(v["type"], "assistant_needs_you");
-        assert_eq!(v["open_count"], 2);
-
-        let v = serde_json::to_value(Event::AssistantLimit {
-            user_id: "u1".into(),
-            thread_id: Some("t1".into()),
-            limit: serde_json::json!({"provider":"claude","limited":true}),
-            suggestion: None,
-            task_id: None,
-            auto_switched: false,
-        })
-        .unwrap();
-        assert_eq!(v["type"], "assistant_limit");
-
-        assert_eq!(v["limit"]["provider"], "claude");
-        assert!(v.get("suggestion").is_some_and(|s| s.is_null()));
-        assert!(v.get("task_id").is_some_and(|s| s.is_null()));
-        assert_eq!(v["auto_switched"], false);
-
+    fn ui_control_event_wire_shape() {
         let v = serde_json::to_value(Event::UiControlRequested {
             user_id: "u1".into(),
             workspace_id: "w1".into(),

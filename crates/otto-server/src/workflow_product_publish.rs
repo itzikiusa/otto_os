@@ -46,7 +46,7 @@ fn parse(value: &Value) -> Result<Preview> {
     };
     if account.is_empty()
         || reviewed.as_ref().map(|r| r.body_sha256.as_str())
-            != Some(otto_core::proof::content_sha256(&preview.body_md).as_str())
+            != Some(otto_core::text::content_sha256(&preview.body_md).as_str())
     {
         return Err(invalid("preview body does not match its reviewed identity"));
     }

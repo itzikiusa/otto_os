@@ -781,14 +781,6 @@ fn route_for_maps_git_issues_swarm_memory_usage() {
     assert_eq!(c.body.unwrap(), json!({"transition_id":"21"}));
 
     let c = route_for(
-        "post_swarm_board",
-        &json!({"swarm_id":"s1","body":"hello","project_id":"p1"}),
-    )
-    .unwrap();
-    assert_eq!(c.path, "/api/v1/swarm/swarms/s1/board");
-    assert_eq!(c.body.unwrap(), json!({"body":"hello","project_id":"p1"}));
-
-    let c = route_for(
         "search_memory",
         &json!({"workspace_id":"ws1","query":"schema","k":5}),
     )
@@ -1299,53 +1291,6 @@ fn query_db_approval_card_shows_the_statement() {
 }
 
 #[test]
-fn assistant_memory_tools_present_classified_and_routed() {
-    let names = spec_names();
-    for n in [
-        "otto.assistant_remember",
-        "otto.assistant_forget",
-        "otto.assistant_recall",
-    ] {
-        assert!(names.contains(&n.to_string()), "missing assistant spec {n}");
-    }
-    // Writes are approval-gated; the recall read is opt-in (personal content).
-    assert!(DANGEROUS.contains(&"assistant_remember"));
-    assert!(DANGEROUS.contains(&"assistant_forget"));
-    assert!(OPT_IN_READS.contains(&"assistant_recall"));
-    assert!(!DEFAULT_ENABLED.contains(&"assistant_recall"));
-    let c = route_for(
-        "assistant_remember",
-        &json!({"text":"prefers aisle seats","session_id":"s1","bogus":1}),
-    )
-    .unwrap();
-    assert_eq!(c.method, Method::Post);
-    assert_eq!(c.path, "/api/v1/assistant/agent/remember");
-    let body = c.body.unwrap();
-    assert_eq!(body["text"], "prefers aisle seats");
-    assert_eq!(body["session_id"], "s1");
-    assert!(
-        body.get("bogus").is_none(),
-        "only declared args are forwarded"
-    );
-    assert_eq!(
-        route_for("assistant_forget", &json!({"query":"seats"}))
-            .unwrap()
-            .path,
-        "/api/v1/assistant/agent/forget"
-    );
-    assert_eq!(
-        route_for("assistant_recall", &json!({})).unwrap().path,
-        "/api/v1/assistant/agent/recall"
-    );
-    assert!(route_for("assistant_remember", &json!({})).is_err());
-    assert!(route_for("assistant_forget", &json!({})).is_err());
-    assert!(
-        dangerous_detail("otto.assistant_remember", &json!({"text":"likes tea"}))
-            .contains("likes tea")
-    );
-}
-
-#[test]
 fn self_improvement_tools_present_classified_and_routed() {
     let names = spec_names();
     for n in [
@@ -1605,8 +1550,6 @@ fn new_discovery_and_git_tools_route_and_classify() {
         "list_issue_accounts",
         "list_issue_transitions",
         "get_scheduled_task",
-        "list_swarm_projects",
-        "list_swarm_tasks",
         "list_design_projects",
         "list_pr_reviews",
         "get_pr_checks",
@@ -1708,18 +1651,6 @@ fn new_discovery_and_git_tools_route_and_classify() {
         .unwrap()
         .path,
         "/api/v1/workspaces/ws/improvement/edits?status=applied"
-    );
-    assert_eq!(
-        route_for("list_swarm_projects", &json!({"swarm_id":"s"}))
-            .unwrap()
-            .path,
-        "/api/v1/swarm/swarms/s/projects"
-    );
-    assert_eq!(
-        route_for("get_swarm_board", &json!({"swarm_id":"s","task_id":"t"}))
-            .unwrap()
-            .path,
-        "/api/v1/swarm/swarms/s/board?task_id=t"
     );
     let c = route_for(
         "create_pr",
@@ -1964,7 +1895,7 @@ fn design_tools_are_default_on_reads_and_route_to_the_design_api() {
             .iter()
             .find(|s| s["name"] == format!("otto.{r}"))
             .unwrap_or_else(|| panic!("missing spec otto.{r}"));
-        assert_eq!(spec["category"], json!("Design"));
+        assert_eq!(spec["category"], json!("Product & Design"));
         assert_eq!(spec["mutating"], json!(false));
         assert!(DEFAULT_ENABLED.contains(r), "{r} must be default-enabled");
         assert!(!DANGEROUS.contains(r), "{r} must not be DANGEROUS");
@@ -2023,7 +1954,7 @@ fn design_writes_are_approval_gated_and_route_to_the_design_api() {
             .iter()
             .find(|s| s["name"] == format!("otto.{w}"))
             .unwrap_or_else(|| panic!("missing spec otto.{w}"));
-        assert_eq!(spec["category"], json!("Design"));
+        assert_eq!(spec["category"], json!("Product & Design"));
         assert_eq!(spec["mutating"], json!(true));
         assert!(DANGEROUS.contains(&w), "{w} must be approval-gated");
         assert!(!DEFAULT_ENABLED.contains(&w), "{w} must be off by default");

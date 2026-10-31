@@ -7,7 +7,6 @@ import { editLines, editSeed, isCrlfBlock } from '../src/modules/git/conflictEdi
 import { alreadyOnPr } from '../src/modules/git/reviewPost.ts';
 import { carryViewState, carryViewed } from '../src/modules/git/diff-viewstate.ts';
 import { ROW_KEY_SEP, buildFileRows } from '../src/modules/git/diff-model.ts';
-import { prNumberFromUrl } from '../src/modules/run-with-otto/runStatus.ts';
 
 // Review S15 / S20 (iteration 2): destructive and outward git flows must act on
 // exactly what the user saw and confirmed. Each test drives the real component
@@ -455,29 +454,4 @@ test('⌘] / Ctrl+N are left to the app; a bare ] moves to the next file', () =>
   assert.deepEqual(moves, []);
   s.onDiffKeydown(ev(']'));
   assert.deepEqual(moves, [1]);
-});
-
-// ── S15-05 / S20-09 · Run with Otto ──────────────────────────────────────────
-
-test('a repo pick from another workspace is dropped when the repo list loads', async () => {
-  const s = componentFunctions(new URL('../src/modules/run-with-otto/RunLauncher.svelte', import.meta.url), ['loadRepos'], {
-    wsId: 'wsB',
-    repoId: 'repo-of-A',
-    repos: [],
-    reposError: '',
-    reposLoading: false,
-    loadErrorText: String,
-    api: { get: async () => [{ id: 'repo-of-B' }] },
-  });
-  await s.loadRepos('wsB');
-  assert.equal(s.repoId, '');
-  assert.deepEqual(s.repos.map((r: { id: string }) => r.id), ['repo-of-B']);
-});
-
-test('PR numbers parse from every forge URL shape', () => {
-  assert.equal(prNumberFromUrl('https://github.com/o/r/pull/42'), 42);
-  assert.equal(prNumberFromUrl('https://gitlab.com/o/r/-/merge_requests/7'), 7);
-  assert.equal(prNumberFromUrl('https://bitbucket.org/o/r/pull-requests/13/overview'), 13);
-  assert.equal(prNumberFromUrl('https://example.com/o/r'), null);
-  assert.equal(prNumberFromUrl(undefined), null);
 });

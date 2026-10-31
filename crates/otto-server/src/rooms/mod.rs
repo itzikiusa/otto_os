@@ -13,7 +13,6 @@ use axum::{
     routing::{delete, get, post, put},
     Router,
 };
-pub(crate) use otto_rooms::auth::owner_auth;
 pub use otto_rooms::{capability, recap_engines, RoomRegistry};
 pub fn protected_routes() -> Router<ServerCtx> {
     Router::new()

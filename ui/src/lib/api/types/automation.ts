@@ -39,8 +39,6 @@ export interface ScheduledTask {
   max_retries: number;
   /** Deliver only when the report meaningfully changes from the last ok run. */
   notify_on_change: boolean;
-  /** Build a proof pack (report + run metadata) for each run. */
-  attach_proof: boolean;
   last_run_at?: string | null;
   last_status?: string | null;
   next_run_at?: string | null;
@@ -74,7 +72,6 @@ export interface ScheduledTaskRun {
   session_id?: string | null;
   // v2
   report_hash?: string | null;
-  proof_pack_id?: string | null;
   attempts: number;
   /** Delivery was suppressed because the report didn't meaningfully change. */
   skipped_delivery: boolean;
@@ -98,135 +95,4 @@ export interface ScheduledTaskPreset {
   schedule: Record<string, unknown>;
   suggested_destination: Record<string, unknown>;
   skill?: string | null;
-}
-
-// ---------------------------------------------------------------------------
-// Run with Otto — the "one button" flow: a source item driven through a stage
-// machine (resolve source → context → worktree → agent/goal-loop → proof → AI
-// review → human approval → PR draft). Mirrors otto-core / otto_state::otto_runs.
-// ---------------------------------------------------------------------------
-
-/** Where a run is in its stage machine. The `*_*` mid-states are the live
- *  stages; the trailing ones are terminal. */
-export type RunStatus =
-  | 'queued'
-  | 'resolving_source'
-  | 'building_context'
-  | 'provisioning'
-  | 'executing'
-  | 'proving'
-  | 'reviewing'
-  | 'awaiting_approval'
-  | 'drafting_pr'
-  | 'completed'
-  | 'failed'
-  | 'rejected'
-  | 'cancelled';
-
-/** The kind of source an a run was seeded from. */
-export type SourceKind =
-  | 'jira'
-  | 'confluence'
-  | 'github_pr'
-  | 'github_issue'
-  | 'channel'
-  | 'product_story'
-  | 'finding'
-  | 'test'
-  | 'scheduled_report';
-
-/** Single agent turn vs an iterative goal loop. */
-export type RunMode = 'single_agent' | 'goal_loop';
-
-/** Where the run was launched from. */
-export type RunOrigin = 'slack' | 'telegram' | 'webhook' | 'ui' | 'mcp' | 'api';
-
-/** A Run with Otto run: a source item driven end-to-end into a reviewed,
- *  evidence-backed PR draft. */
-export interface OttoRun {
-  id: Id;
-  workspace_id: Id;
-  title: string;
-  source_kind: SourceKind;
-  source_ref: string;
-  source_url?: string;
-  goal: string;
-  mode: RunMode;
-  provider: string;
-  /** Model override handed to the executing agent ("" = provider default). */
-  model: string;
-  repo_id?: string;
-  repo_path?: string;
-  base_branch?: string;
-  branch?: string;
-  worktree_path?: string;
-  base_commit?: string;
-  status: RunStatus;
-  error?: string;
-  origin_kind: RunOrigin;
-  origin_chat?: string;
-  origin_thread?: string;
-  origin_user?: string;
-  callback_url?: string;
-  goal_loop_id?: string;
-  review_id?: string;
-  proof_pack_id?: string;
-  proof_status?: string;
-  risk_score?: number;
-  findings_total: number;
-  findings_blocking: number;
-  pr_draft_json?: string;
-  pr_url?: string;
-  auto_open_pr: boolean;
-  approval_decision?: string;
-  approved_by?: string;
-  approved_at?: string;
-  result_summary?: string;
-  context_summary?: string;
-  created_by: string;
-  created_at: string;
-  updated_at: string;
-}
-
-/** One entry in a run's stage timeline (a stage start/finish/note). */
-export interface RunEvent {
-  id: Id;
-  run_id: Id;
-  workspace_id: Id;
-  kind: string;
-  status?: string;
-  message: string;
-  detail?: unknown;
-  created_at: string;
-}
-
-/** Launch a run — either from a detected source (`source_kind`/`source_ref` or
- *  `url`) or free `seed_text` (→ a channel run). */
-export interface LaunchRunReq {
-  source_kind?: SourceKind;
-  source_ref?: string;
-  url?: string;
-  seed_text?: string;
-  mode?: RunMode;
-  provider?: string;
-  /** Model override (e.g. "opus"); blank/absent = the provider's default. */
-  model?: string;
-  repo_id?: string;
-  auto_open_pr?: boolean;
-  title?: string;
-}
-
-/** Human approval / rejection of a run awaiting approval. */
-export interface ApproveRunReq {
-  decision: 'approve' | 'reject';
-  note?: string;
-}
-
-/** The shape returned by `GET /runs/:id/detect` — a best-effort source guess. */
-export interface RunDetectResp {
-  detected?: {
-    source_kind: SourceKind;
-    source_ref: string;
-    url: string;
-  };
 }

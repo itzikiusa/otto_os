@@ -76,6 +76,11 @@ pub struct OpenAgentSessionResp {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionMessageReq {
     pub text: String,
+    /// Optional sender session ID when a person relays a peer message on behalf
+    /// of another session in the same workspace. Ignored when authenticating
+    /// with an agent session credential (its own session ID is authoritative).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_session_id: Option<Id>,
 }
 
 /// Response of `POST /api/v1/sessions/{id}/message`.
@@ -110,6 +115,11 @@ pub struct BroadcastReq {
     /// agents receive it.
     #[serde(default)]
     pub session_ids: Option<Vec<Id>>,
+    /// Optional sender session ID when a person relays a peer broadcast on
+    /// behalf of another session in the same workspace. Ignored when
+    /// authenticating with an agent session credential.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_session_id: Option<Id>,
 }
 
 /// Result of a broadcast: the sessions that actually received the message.
@@ -218,4 +228,32 @@ pub struct SendInputReq {
     /// user can inspect / edit before pressing Enter.
     #[serde(default)]
     pub submit: Option<bool>,
+}
+
+// ---------------------------------------------------------------------------
+// Conversation view (design docs/design/conversation-view.md §4.3)
+// ---------------------------------------------------------------------------
+
+/// `POST /sessions/{id}/tasks` — add a task to a session's board from the UI.
+/// The row is `source: "user"`, `nudge_pending: true`; the nudge sweep hands
+/// it to the agent once the session is idle.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateAgentTaskReq {
+    pub title: String,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+/// `POST /sessions/{id}/inbox` — drop a pasted image next to the session so the
+/// composer can reference it as `[Image: <path>]`. `image/*` only, ≤ 10 MB.
+#[derive(Debug, Clone, Deserialize)]
+pub struct InboxUploadReq {
+    pub filename: String,
+    pub mime: String,
+    pub data_b64: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InboxUploadResp {
+    pub path: String,
 }

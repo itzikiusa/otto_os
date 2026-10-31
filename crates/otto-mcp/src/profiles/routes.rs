@@ -20,7 +20,7 @@ use otto_state::{McpProfile, McpProfileFields, McpProfileRepo, NewAuditEntry};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use super::{canonical, group_of, normalize_fields, GROUPS};
+use super::{canonical, canonical_group_id, group, group_of, normalize_fields, GROUPS};
 use crate::http::{ApiErr, McpCtx};
 
 type ApiResult<T> = std::result::Result<T, ApiErr>;
@@ -203,13 +203,28 @@ async fn update_profile<S: McpCtx>(
 ) -> ApiResult<Json<McpProfile>> {
     require_person(auth.as_ref().map(|a| &a.0))?;
     let cur = repo(&ctx).get(&id).await?;
+    let clean_groups = cur
+        .groups
+        .iter()
+        .map(|g| canonical_group_id(g.trim()).to_string())
+        .filter(|g| group(g).is_some())
+        .collect();
+    let clean_tools = |ts: &[String]| -> Vec<String> {
+        ts.iter()
+            .filter(|t| {
+                let k = canonical(t.trim());
+                !k.is_empty() && group_of(k).is_some()
+            })
+            .cloned()
+            .collect()
+    };
     let base = McpProfileFields {
         name: cur.name.clone(),
         description: cur.description.clone(),
         all_tools: cur.all_tools,
-        groups: cur.groups.clone(),
-        include_tools: cur.include_tools.clone(),
-        exclude_tools: cur.exclude_tools.clone(),
+        groups: clean_groups,
+        include_tools: clean_tools(&cur.include_tools),
+        exclude_tools: clean_tools(&cur.exclude_tools),
     };
     let fields = fields_from(req, base)?;
     let p = repo(&ctx).update(&id, &fields).await?;

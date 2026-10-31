@@ -11,7 +11,6 @@ pub mod api_client;
 pub(crate) mod api_oauth;
 pub(crate) mod api_response_cache;
 pub mod api_stream;
-pub mod assistant;
 pub mod audit;
 pub mod auth_routes;
 pub mod backup;
@@ -28,13 +27,11 @@ pub mod goal_loops;
 pub mod grants;
 pub mod grpc;
 pub mod handover;
-pub mod history_page;
 pub mod impersonate;
 pub mod logs;
 pub mod mcp_cp;
 pub mod mcp_servers;
 pub mod meta;
-pub mod mission;
 pub mod name_themes;
 pub mod network_profiles;
 pub mod notifications;
@@ -42,11 +39,9 @@ pub mod onboarding;
 pub mod personal_agents;
 pub mod product_memory;
 pub mod projects;
-pub mod proof;
 pub mod proof_pack;
 pub mod provider_accounts;
 pub mod repo_rules;
-pub mod runs;
 pub mod scheduled_tasks;
 pub mod search;
 pub mod session_files;
@@ -54,8 +49,6 @@ pub mod settings;
 pub mod share;
 pub mod slash_commands;
 pub mod snips;
-pub mod swarm_ingest;
-pub mod swarm_webhook;
 pub mod telemetry;
 pub mod transcript;
 pub mod ui_commands;
@@ -65,7 +58,6 @@ pub mod workbench;
 pub mod workflow_progress;
 pub mod workflow_run_files;
 pub mod workflows;
-pub mod workgraph;
 pub mod workspaces;
 
 use axum::extract::Request;
@@ -94,18 +86,6 @@ pub fn public_routes() -> Router<ServerCtx> {
         .route("/ingest/codex", post(activity::codex_ingest))
         // Provider token-usage ingest (same per-session token gate as above).
         .route("/ingest/usage", post(usage::ingest))
-        // Swarm agents post to the shared board via their per-session token.
-        .route("/ingest/swarm/board", post(swarm_ingest::board_ingest))
-        // Swarm (PO) agents publish a feature draft to the Product page.
-        .route("/ingest/swarm/product", post(swarm_ingest::product_ingest))
-        // Swarm discovery/design agents publish a generated mockup (HTML/Mermaid)
-        // for the story under discovery.
-        .route("/ingest/swarm/mockup", post(swarm_ingest::ingest_mockup))
-        // Swarm discovery agents publish the consolidated discovery report.
-        .route(
-            "/ingest/swarm/discovery-report",
-            post(swarm_ingest::ingest_discovery_report),
-        )
         // Runtime-plugin host API: sidecars call back here with their own
         // OTTO_PLUGIN_TOKEN (validated in each handler) — NOT a user bearer, so it
         // lives in public_routes (outside the user auth chokepoint), like /ingest/*.
@@ -136,19 +116,6 @@ pub fn public_routes() -> Router<ServerCtx> {
         // the keychain before triggering any agent session.
         // POLICY EXEMPTION: same allowlist treatment as /workflows/*/webhook/*.
         .route("/webhooks/{workspace_id}", post(channel_webhook::inbound))
-        // Run with Otto webhook entry: launch a source→PR-draft run. Same
-        // per-workspace webhook key as the channel webhook. POLICY EXEMPTION:
-        // classified `Exempt` in policy.rs (key-guarded, no bearer).
-        .route(
-            "/webhooks/{workspace_id}/run",
-            post(channel_webhook::run_inbound),
-        )
-        // External trigger that auto-plans + starts a specific swarm (worktree
-        // isolation). Same per-workspace webhook key as the channel webhook.
-        .route(
-            "/webhooks/swarm/{workspace_id}/{swarm_id}",
-            post(swarm_webhook::trigger),
-        )
         // DB Assistant `q` tool: the file-backed agent runs `./q '<read-only SQL>'`,
         // which POSTs here with its per-assist `x-assist-key` (NOT a user bearer —
         // the agent's PTY has no user session). Lives in public_routes (outside the
@@ -415,10 +382,6 @@ pub fn protected_routes() -> Router<ServerCtx> {
             "/workspaces/{wid}/mcp/context-packet",
             post(crate::mcp_capabilities::context_packet),
         )
-        .route(
-            "/workspaces/{wid}/mcp/proof-pack",
-            get(crate::mcp_capabilities::proof_pack),
-        )
         // --- Usage tracking & system metrics (embedded ClickHouse) -------
         .route(
             "/telemetry/config",
@@ -486,6 +449,7 @@ pub fn protected_routes() -> Router<ServerCtx> {
         )
         .route("/fs/browse", get(fs::browse))
         .route("/fs/read", get(fs::read_file))
+        .route("/fs/raw", get(fs::raw_file))
         .route("/fs/stat", get(fs::stat))
         .route("/logs/daemon", get(logs::daemon_logs))
         // UI last-resort error report (self-heal hook in ui/src/main.ts).
@@ -668,31 +632,9 @@ pub fn protected_routes() -> Router<ServerCtx> {
         )
         .route("/sessions/{id}/tasks", post(transcript::create_task))
         .route("/sessions/{id}/inbox", post(transcript::inbox_upload))
-        .route("/workspaces/{wid}/history", get(transcript::history))
-        .route("/workspaces/{wid}/history/page", get(history_page::list))
-        .route(
-            "/workspaces/{wid}/history/transcript",
-            get(transcript::history_transcript),
-        )
-        .route(
-            "/workspaces/{wid}/history/transcript/images/{img_id}",
-            get(transcript::history_transcript_image),
-        )
-        .route(
-            "/workspaces/{wid}/history/artifacts",
-            get(transcript::history_artifacts),
-        )
-        .route(
-            "/workspaces/{wid}/history/import",
-            post(transcript::history_import),
-        )
         .route(
             "/workspaces/{wid}/transcript/touch",
             post(transcript::touch_workspace_transcripts),
-        )
-        .route(
-            "/workspaces/{wid}/history/rescan",
-            post(transcript::history_rescan),
         )
         .route("/sessions/{id}/handover", post(handover::handover_session))
         .route(

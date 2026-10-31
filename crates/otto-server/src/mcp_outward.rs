@@ -479,9 +479,6 @@ pub(crate) async fn governed_invoke(
     // personal agent.
     let bound_session = match short.as_str() {
         "room_post" | "room_read" => crate::ui_bridge::calling_session(auth).map(String::as_str),
-        "assistant_remember" | "assistant_forget" | "assistant_recall" => {
-            auth.mcp_session_id.as_deref()
-        }
         _ => None,
     };
     let rebound;
@@ -2244,7 +2241,6 @@ mod tests {
             ("run_scheduled_task", "task_id"),
             ("update_scheduled_task", "task_id"),
             ("delete_scheduled_task", "task_id"),
-            ("post_swarm_board", "swarm_id"),
         ] {
             assert!(tool_is_dangerous(tool), "{tool}");
             assert!(
@@ -2269,8 +2265,6 @@ mod tests {
         for t in [
             "approve_improvement_edit",
             "rollback_improvement_edit",
-            "create_work_item",
-            "assistant_forget",
             "vault_write",
             "vault_delete",
             "vault_rename",

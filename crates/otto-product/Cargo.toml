@@ -13,7 +13,6 @@ otto-memory = { workspace = true }
 otto-sessions = { workspace = true }
 otto-improve = { workspace = true }
 otto-orchestrator = { workspace = true }
-otto-swarm = { workspace = true }
 otto-design = { workspace = true }
 otto-skills = { workspace = true }
 # The shared fan-out + summarizer runner the analysis and plan runs use.

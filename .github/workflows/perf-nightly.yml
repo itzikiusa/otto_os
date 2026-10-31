@@ -60,3 +60,14 @@ jobs:
           # ClickHouse needs time to settle after its first schema/merge pass.
           OTTO_PERF_SETTLE_SECS: '60'
         run: node scripts/perf/daemon-budget.mjs target/debug/ottod
+
+      # Embedded ClickHouse budgets (perf2/09 R6): idle thread count of the
+      # usage server with Otto's config (OTTO_PERF), plus the per-summary /
+      # per-report statement + rows-read guard and the idle-stop wake test.
+      - name: ClickHouse usage budgets (otto-usage)
+        continue-on-error: true
+        env:
+          OTTO_PERF: '1'
+        run: |
+          cargo test -p otto-usage --test e2e \
+            -- budget summary_and_report_query_budget idle_stop --nocapture

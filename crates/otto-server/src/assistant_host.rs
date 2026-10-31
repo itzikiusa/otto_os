@@ -386,32 +386,3 @@ async fn run_one_session(
     )
     .await
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use otto_assistant::assistant::tasks::resolve_run_at;
-
-    // Moved from `assistant::tasks` with the engine: it exercises the real
-    // `cadence` through this impl's hooks.
-    #[test]
-    fn run_at_resolves_through_the_once_cadence() {
-        let now = Utc::now();
-        let future = (now + chrono::Duration::hours(2)).to_rfc3339();
-        let (spec, at) = resolve_run_at::<ServerCtx>(&future, "UTC", now).unwrap();
-        assert_eq!(spec["cadence"], "once");
-        assert!(
-            (at - (now + chrono::Duration::hours(2)))
-                .num_seconds()
-                .abs()
-                <= 1
-        );
-        // Local wall-clock in a named zone.
-        let (_, at) =
-            resolve_run_at::<ServerCtx>("2099-01-01T09:00", "Asia/Jerusalem", now).unwrap();
-        assert_eq!(at.to_rfc3339(), "2099-01-01T07:00:00+00:00");
-        // Past and garbage are refused.
-        assert!(resolve_run_at::<ServerCtx>("2001-01-01T09:00", "UTC", now).is_err());
-        assert!(resolve_run_at::<ServerCtx>("at five", "UTC", now).is_err());
-    }
-}

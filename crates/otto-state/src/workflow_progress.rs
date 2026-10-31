@@ -297,7 +297,7 @@ async fn repair(pool: &DbPool, id: &str) -> Result<()> {
     }).await.map_err(json_error)?
 }
 
-const RUN_COLUMNS: &str="id,workflow_id,workspace_id,status,error,started_at,finished_at,rev,waiting_approval,approval_node_id,approved_by,created_by,approval_note,approved_at,workflow_version,proof_pack_id,resume_attempts,progress_json,checkpoint_rev,checkpoint_generation";
+const RUN_COLUMNS: &str="id,workflow_id,workspace_id,status,error,started_at,finished_at,rev,waiting_approval,approval_node_id,approved_by,created_by,approval_note,approved_at,workflow_version,resume_attempts,progress_json,checkpoint_rev,checkpoint_generation";
 pub async fn progress(pool: &DbPool, id: &Id, after_rev: Option<i64>) -> Result<Value> {
     for attempt in 0..2 {
         let mut tx = pool
@@ -342,7 +342,6 @@ pub async fn progress(pool: &DbPool, id: &Id, after_rev: Option<i64>) -> Result<
             "created_by",
             "approval_note",
             "approved_at",
-            "proof_pack_id",
         ] {
             run.insert(
                 key.into(),

@@ -11,8 +11,6 @@ const read = (p: string): string => readFileSync(join(import.meta.dirname, '..',
 
 const ARCHIVE_ENTRY_POINTS = [
   'src/modules/agents/SessionView.svelte',
-  'src/modules/agents/history/HistoryPage.svelte',
-  'src/modules/home/boxes/ClassroomsBox.svelte',
   'src/shell/TabBar.svelte',
   'src/shell/Navigator.svelte',
   'src/shell/App.svelte',

@@ -2,7 +2,7 @@ import { test, expect } from '@playwright/test';
 import { mkdirSync } from 'node:fs';
 import { expectNoHorizontalOverflow } from './helpers';
 
-const routes = ['home', 'assistant', 'agents', 'history', 'run-with-otto', 'mission-control', 'swarm', 'loops', 'workflows', 'scheduled-tasks', 'personal-agents', 'git', 'proof', 'product', 'vault', 'canvas', 'design', 'design/brand', 'design/learned', 'browser', 'connections', 'database', 'brokers', 'api', 'aws', 'kubernetes', 'mcp', 'skills-eval', 'settings/plugins', 'insights', 'usage', 'walkthroughs', 'settings/appearance', 'settings/users', 'settings/assistant'];
+const routes = ['home', 'agents', 'loops', 'workflows', 'scheduled-tasks', 'personal-agents', 'git', 'product', 'vault', 'canvas', 'design', 'design/brand', 'design/learned', 'browser', 'connections', 'database', 'brokers', 'api', 'aws', 'kubernetes', 'mcp', 'skills-eval', 'settings/plugins', 'insights', 'usage', 'walkthroughs', 'settings/appearance', 'settings/users'];
 const variants = [
   { name: 'native-light', theme: 'native', scheme: 'light', direction: 'ltr', width: 1440, height: 900 },
   { name: 'native-dark', theme: 'native', scheme: 'dark', direction: 'ltr', width: 1440, height: 900 },

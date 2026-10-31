@@ -122,19 +122,10 @@ test('score-only run with a green test command → proof passed + composite', as
   // R6: diff-quality signal collected from the working-tree change.
   expect(s.diff.ran).toBe(true);
   expect(s.diff.files_changed).toBeGreaterThan(0);
-  // R2: proof pack assembled + derived "passed" (diff + recognized passing test).
+  // R2: proof status derived "passed" (diff + recognized passing test).
   expect(s.proof_status).toBe('passed');
-  expect(it.proof_pack_id).toBeTruthy();
   expect(s.composite).toBeGreaterThan(0);
   expect(e.composite_score).toBeGreaterThan(0);
-
-  // R2: the proof pack endpoint returns assembled evidence artifacts.
-  const pack = await getJson(`/api/v1/skill-evaluations/${e.id}/iterations/${it.id}/proof-pack`);
-  expect(pack.exists).toBe(true);
-  expect(pack.status).toBe('passed');
-  const kinds = (pack.artifacts ?? []).map((a: { kind: string }) => a.kind);
-  expect(kinds).toContain('command'); // the test command
-  expect(kinds).toContain('diff');
 
   passEvalId = e.id;
   passIterId = it.id;

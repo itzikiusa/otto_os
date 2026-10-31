@@ -143,6 +143,17 @@ pub fn transcript_path_in(
     provider_session_id: Option<&str>,
 ) -> Result<PathBuf, otto_transcript::UnavailableReason> {
     use otto_transcript::UnavailableReason as R;
+    if provider == "agy" {
+        let Some(psid) = provider_session_id.filter(|s| !s.is_empty()) else {
+            return Err(R::NoProviderSessionId);
+        };
+        for dir in roots.agy_dirs() {
+            if let Some(path) = otto_transcript::roots::agy_transcript_path_under(dir, psid) {
+                return Ok(path);
+            }
+        }
+        return Err(R::TranscriptMissing);
+    }
     let dirs: Vec<&Path> = match provider {
         "claude" => roots.claude_dirs().collect(),
         "codex" => roots.codex_dirs().collect(),
@@ -400,7 +411,7 @@ mod tests {
         use otto_transcript::UnavailableReason as R;
         let home = tempfile::tempdir().unwrap();
         let sid = "11111111-2222-3333-4444-555555555555";
-        // No id → NoProviderSessionId; shell/agy → ProviderUnsupported.
+        // No id → NoProviderSessionId; shell → ProviderUnsupported.
         assert_eq!(
             transcript_path(home.path(), "claude", "/x", None),
             Err(R::NoProviderSessionId)
@@ -411,7 +422,19 @@ mod tests {
         );
         assert_eq!(
             transcript_path(home.path(), "agy", "/x", Some(sid)),
-            Err(R::ProviderUnsupported)
+            Err(R::TranscriptMissing)
+        );
+        let agy_logs = home
+            .path()
+            .join(".gemini/antigravity-cli/brain")
+            .join(sid)
+            .join(".system_generated/logs");
+        std::fs::create_dir_all(&agy_logs).unwrap();
+        let agy_full = agy_logs.join("transcript_full.jsonl");
+        std::fs::write(&agy_full, b"{}\n").unwrap();
+        assert_eq!(
+            transcript_path(home.path(), "agy", "/x", Some(sid)),
+            Ok(agy_full)
         );
         // Missing file → TranscriptMissing; present (even under a differently
         // encoded project dir) → the path.

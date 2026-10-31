@@ -1,9 +1,8 @@
 <script lang="ts">
-  // Agent Mode: tabbed split panes, tiled grid, or Mission Control work queue.
+  // Agent Mode: tabbed split panes or tiled grid.
   import { untrack } from 'svelte';
   import Splits from './Splits.svelte';
   import TiledView from './TiledView.svelte';
-  import WorkQueue from './WorkQueue.svelte';
   import FirstRunCoach from './FirstRunCoach.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
@@ -13,7 +12,6 @@
   import { router } from '../../lib/router.svelte';
 
   const tiled = $derived(ws.viewMode === 'tiled');
-  const mission = $derived(ws.viewMode === 'mission');
 
   // First-run coach: a guided path from a fresh account to a launched agent.
   // Shown only on a truly empty Agents view (no agent sessions at all) and only
@@ -29,7 +27,7 @@
   );
   const showCoach = $derived(!coachDismissed && ws.agentSessions.length === 0);
   const preserveCoachDraft = $derived(
-    showCoach && ws.currentId === null && !tiled && !mission && ws.panes.length === 0,
+    showCoach && ws.currentId === null && !tiled && ws.panes.length === 0,
   );
 
   // Never open onto a "pick one" void when there are sessions: once per
@@ -46,7 +44,7 @@
     if (autoOpenedFor === key) return;
     autoOpenedFor = key;
     if (untrack(() => router.module === 'agents' && !!router.parts[1])) return;
-    if (ws.panes.length > 0 || tiled || mission) return;
+    if (ws.panes.length > 0 || tiled) return;
     const latest = [...ws.mainSessions].sort(
       (a, b) => Date.parse(b.last_active_at) - Date.parse(a.last_active_at),
     )[0];
@@ -68,8 +66,6 @@
     <div style="padding: 16px">
       <Skeleton rows={3} height={48} />
     </div>
-  {:else if mission}
-    <WorkQueue />
   {:else if tiled}
     <TiledView />
   {:else if ws.panes.length === 0}

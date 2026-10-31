@@ -20,7 +20,7 @@ use otto_rbac::AuthRepo;
 use otto_server::ServerCtx;
 use otto_state::{
     AgentAutonomy, AgentRule, DbPool, NewPersonalAgent, NewSession, PersonalAgentsRepo,
-    SessionsRepo, SwarmRepo,
+    SessionsRepo,
 };
 use serde_json::{json, Value};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
@@ -725,77 +725,6 @@ async fn activity_and_guard_reads_stay_within_budget() {
         assert_eq!(ans["epoch"], epoch.as_str());
         assert!(ans["items"].as_array().unwrap().len() >= 55, "{ans}");
     }
-}
-
-/// Perf N2 (swarm W7 budget, reusing this file's full-daemon harness): an
-/// ACTIVE swarm with nothing ready and no events costs nothing between
-/// safety ticks. Its coordinator ticks when started and once for the
-/// start's own status event (≤ 6 statements each), then parks on the
-/// swarm's bell: no swarm statement runs for several MIN_GAPs.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_idle_swarm_coordinator_issues_no_statements_between_safety_ticks() {
-    let d = boot(&[]).await;
-    let swarm = SwarmRepo::new(d.pool.clone())
-        .create_swarm(otto_state::NewSwarm {
-            workspace_id: "ws1".into(),
-            name: "Idle".into(),
-            description: String::new(),
-            preset_slug: None,
-            config: json!({}),
-            // A budget, so the tick also reads spend.
-            max_total_runs: Some(100),
-            max_cost_usd: None,
-            max_runtime_secs: None,
-            max_attempts: None,
-            created_by: "alice".into(),
-        })
-        .await
-        .unwrap();
-    let probe = d.pool.statement_probe();
-    let (st, body) = d
-        .send(
-            "POST",
-            &d.human,
-            &format!("/workspaces/ws1/swarm/swarms/{}/start", swarm.id),
-            None,
-        )
-        .await;
-    assert_eq!(st, 200, "{body}");
-    // The first tick runs at start; the start's own `swarm_status` event
-    // rings the bell once more (after MIN_GAP). One tick of an idle swarm
-    // with a budget: swarm + spend + active count + ready tasks.
-    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
-    probe.reset();
-    tokio::time::sleep(otto_swarm::runtime::wake::MIN_GAP + std::time::Duration::from_millis(1000))
-        .await;
-    let tick: Vec<String> = probe
-        .take()
-        .into_iter()
-        .filter(|q| q.contains("swarm"))
-        .collect();
-    assert!(
-        tick.len() <= 6,
-        "an idle tick is at most 6 statements: {tick:?}"
-    );
-    // Then nothing: no event, and the safety tick is a minute away.
-    tokio::time::sleep(
-        otto_swarm::runtime::wake::MIN_GAP * 2 + std::time::Duration::from_millis(500),
-    )
-    .await;
-    let idle: Vec<String> = probe
-        .take()
-        .into_iter()
-        .filter(|q| q.contains("swarm"))
-        .collect();
-    assert!(
-        idle.is_empty(),
-        "an idle coordinator parks until an event or the {:?} safety tick: {idle:?}",
-        otto_swarm::runtime::wake::SAFETY_TICK
-    );
-    assert!(
-        otto_swarm::runtime::wake::has_bell(&swarm.id),
-        "parked on its bell"
-    );
 }
 
 /// S11 "flip the default" + S11-301/303/306/308, S8-304, S3-301 through the

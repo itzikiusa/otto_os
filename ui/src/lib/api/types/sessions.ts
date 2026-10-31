@@ -122,6 +122,7 @@ export interface OpenAgentSessionResp {
 /** POST /sessions/{id}/message — one message to ONE live agent session (typed + Enter). */
 export interface SessionMessageReq {
   text: string;
+  from_session_id?: Id | null;
 }
 
 export interface SessionMessageResp {

@@ -26,7 +26,6 @@ export const DESKTOP_GATE_SPECS = [
   'desktop-api-postman-import.spec.ts',
   'desktop-api-run-recovery.spec.ts',
   'desktop-api-search.spec.ts',
-  'desktop-assistant.spec.ts',
   'desktop-backup-archive.spec.ts',
   'desktop-browser-overlay-selector.spec.ts',
   'desktop-canvas-panel.spec.ts',
@@ -36,21 +35,19 @@ export const DESKTOP_GATE_SPECS = [
   'desktop-personal-autonomy.spec.ts',
   'desktop-personal-documents.spec.ts',
   'desktop-platform-settings-recovery.spec.ts',
-  'desktop-proof-packs.spec.ts',
-  'desktop-proof-packs-v2.spec.ts',
   'desktop-review-agent-stop.spec.ts',
   'desktop-review5-mcp-audit-details.spec.ts',
   'desktop-review5-scheduled-draft.spec.ts',
   'desktop-review5-vault-backlinks.spec.ts',
   'desktop-review6-product-routing.spec.ts',
   'desktop-rpanel-tabs.spec.ts',
-  'desktop-run-with-otto.spec.ts',
   'desktop-scheduled-tasks.spec.ts',
   'desktop-session-menu.spec.ts',
   'desktop-settings-run-history.spec.ts',
   'desktop-shell.spec.ts',
   'desktop-shell-reopen.spec.ts',
   'desktop-skills-lab.spec.ts',
+  'desktop-threads.spec.ts',
   'desktop-tiled-maximize.spec.ts',
   'desktop-token-cleanup.spec.ts',
   'desktop-transcript-cache-live.spec.ts',
@@ -72,7 +69,7 @@ export const MOBILE_GATE_PROJECT = 'iphone-portrait';
  * --project=iphone-portrait` when promoting a spec; lower it only when a spec
  * leaves the gate.
  */
-export const GATE_MIN_EXPECTED = 166;
+export const GATE_MIN_EXPECTED = 121;
 
 /** Exact-file matcher for a Playwright project's `testMatch`. */
 export function gateMatcher(files: readonly string[]): RegExp {

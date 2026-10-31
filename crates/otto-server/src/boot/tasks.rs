@@ -118,20 +118,16 @@ pub async fn spawn_background(ctx: &ServerCtx, root_user_id: Option<String>) -> 
 
     start_notices(ctx);
     bg.keep(start_conversation_view(ctx));
-    start_design_hall_and_proof_media(ctx);
+    start_design_hall(ctx);
     bg.keep(start_insights_scheduler(ctx));
     if let Some(h) = start_cli_update_scheduler(ctx) {
         bg.keep(h);
     }
-    bg.keep(start_swarm(ctx).await);
     bg.keep(start_workflow_event_triggers(ctx));
     bg.keep(start_workflow_schedule_triggers(ctx));
     bg.keep(start_k8s_monitor(ctx));
-    bg.keep(start_workgraph_projector(ctx));
     bg.keep(start_scheduled_tasks(ctx).await);
     bg.keep(start_personal_agents(ctx));
-    bg.keep(start_assistant(ctx));
-    bg.keep(start_run_scheduler(ctx));
     start_model_catalog(ctx);
     start_usage_tracking(ctx);
     spawn_mcp_health_sweep(ctx);
@@ -564,16 +560,6 @@ async fn start_channel_manager(
             .map(|bridge| bridge.admission.clone())
             .unwrap_or_default(),
     )
-    // An inbound message on a swarm-bound channel launches that swarm.
-    .with_swarm_trigger(Arc::new(otto_swarm::runtime::channels::SwarmTriggerImpl {
-        ctx: ctx.swarm_rt(),
-    }))
-    // An inbound `/run <ref>` (or `approve`/`reject` reply) drives a Run with
-    // Otto run on the root user's behalf (the channel-trust model).
-    .with_run_trigger(Arc::new(crate::run_channels::ChannelRunTrigger::new(
-        ctx.clone(),
-        uid.clone(),
-    )))
     // A structured `Action: Workflow` message starts a workflow run by name.
     .with_workflow_trigger(Arc::new(crate::workflow_chat::WorkflowChatTriggerImpl {
         ctx: ctx.clone(),
@@ -648,24 +634,19 @@ fn start_notices(ctx: &ServerCtx) {
 
 /// Conversation view (docs/design/conversation-view.md). Board→agent nudge
 /// sweep: hands `POST /sessions/{id}/tasks` rows to the agent's PTY once the
-/// session is idle (SessionStatus events + a 15 s tick). History index: a
-/// low-priority boot walk of ~/.claude/projects and ~/.codex/sessions (skips
-/// unchanged files); `POST …/history/rescan` re-runs it on demand.
+/// session is idle (SessionStatus events + a 15 s tick).
 fn start_conversation_view(ctx: &ServerCtx) -> impl Send + 'static {
     let nudge = crate::agent_tasks_nudge::spawn(ctx.clone());
-    crate::history_index::spawn_scan(ctx.clone(), None);
-    tracing::info!("conversation view: nudge sweep + history index scan started");
+    tracing::info!("conversation view: nudge sweep started");
     AbortOnDrop(nudge)
 }
 
 /// Design Hall: FTS index + idempotent legacy import (background). Mirrors
 /// Product-arena design attachments and Canvas scenes into the design graph
 /// (graph rows only; the legacy rows/files are never touched) and re-syncs a
-/// `sync` version when a legacy source changed. Then moves legacy inline
-/// proof media into the file store + daily GC.
-fn start_design_hall_and_proof_media(ctx: &ServerCtx) {
+/// `sync` version when a legacy source changed.
+fn start_design_hall(ctx: &ServerCtx) {
     crate::design_hall::spawn_startup_import(ctx);
-    crate::proof::spawn_media_maintenance(ctx.proof_repo.clone());
 }
 
 // -- Schedulers -----------------------------------------------------------
@@ -695,25 +676,6 @@ fn start_cli_update_scheduler(ctx: &ServerCtx) -> Option<impl Send + 'static> {
     let h = crate::cli_update::CliUpdateScheduler::new(ctx.clone()).start();
     tracing::info!("cli auto-update scheduler started");
     Some(h)
-}
-
-/// Agent Swarm: reconcile stale runs, then scheduler + restore coordinators.
-/// A swarm run's background task dies with the process. A row left
-/// queued/running/waiting would permanently consume the parallel cap and
-/// block its agent's one-turn-at-a-time gate, so fail them BEFORE restarting
-/// any coordinator (mirrors the review/skill-eval recovery).
-async fn start_swarm(ctx: &ServerCtx) -> impl Send + 'static {
-    let scheduler = otto_swarm::runtime::scheduler::start(ctx.swarm_rt());
-    match ctx.swarm_repo.list_all_active_swarms().await {
-        Ok(active) => {
-            for s in active {
-                otto_swarm::runtime::engine::start_coordinator(ctx.swarm_rt(), s.id.clone());
-            }
-            tracing::info!("swarm scheduler started; coordinators restored");
-        }
-        Err(e) => tracing::warn!("swarm restore: {e}"),
-    }
-    CancelOnDrop(scheduler)
 }
 
 /// Workflow event-trigger listener (B8). Subscribes to the daemon event bus;
@@ -749,20 +711,10 @@ fn start_k8s_monitor(ctx: &ServerCtx) -> impl Send + 'static {
     CancelOnDrop(h)
 }
 
-/// Mission Control / work-graph projector: subscribes to the daemon event
-/// bus and materializes every agentic activity into the unified work graph
-/// (live), plus a 60 s reconcile + boot backfill that re-derive from the
-/// authoritative repos and refresh per-session cost.
-fn start_workgraph_projector(ctx: &ServerCtx) -> impl Send + 'static {
-    let h = crate::workgraph_projector::spawn(ctx.clone());
-    tracing::info!("workgraph projector started");
-    AbortOnDrop(h)
-}
-
 /// Scheduled Tasks. Reap runs a previous daemon life left `running` BEFORE
 /// the router serves: reaping inside the spawned supervisor raced the first
 /// "Run now" and marked that fresh run "interrupted by daemon restart" (like
-/// the workflow/swarm recovery, this is awaited). Then fire due recurring
+/// the workflow recovery, this is awaited). Then fire due recurring
 /// jobs (interval/daily/weekly/cron) with bounded concurrency.
 async fn start_scheduled_tasks(ctx: &ServerCtx) -> impl Send + 'static {
     let h = crate::scheduled_tasks_scheduler::start(ctx.clone());
@@ -777,23 +729,6 @@ fn start_personal_agents(ctx: &ServerCtx) -> impl Send + 'static {
     let h = crate::personal_agents_scheduler::start(ctx.clone());
     tracing::info!("personal agents scheduler started");
     CancelOnDrop(h)
-}
-
-/// Otto Assistant: 30 s tick that fires due reminders (`once`), reports
-/// finished delegations into their thread, syncs approvals decided in the
-/// MCP queue, and deletes incognito threads 24 h after their last turn.
-fn start_assistant(ctx: &ServerCtx) -> impl Send + 'static {
-    let h = crate::assistant::start(ctx.clone());
-    tracing::info!("assistant supervisor started");
-    CancelOnDrop(h)
-}
-
-/// Run with Otto: a 30 s tick re-drives resumable runs. Interrupted live
-/// work was already settled by `recover_before_serve`, before admission.
-fn start_run_scheduler(ctx: &ServerCtx) -> impl Send + 'static {
-    let stop = crate::run_scheduler::spawn(ctx.clone());
-    tracing::info!("run-with-otto scheduler started");
-    CancelOnDrop(stop)
 }
 
 /// Dynamic model catalog: hourly per-provider model discovery (CLI probe /
@@ -857,10 +792,6 @@ fn spawn_mcp_health_sweep(ctx: &ServerCtx) {
     });
     tracing::info!("mcp control plane: health sweep started");
 }
-
-#[cfg(test)]
-#[path = "../../tests/unit/run_scheduler_boot.rs"]
-mod run_scheduler_boot_tests;
 
 #[cfg(test)]
 mod background_shutdown_tests {

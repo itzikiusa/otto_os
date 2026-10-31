@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { needsYouLinkLabel } from '../src/modules/home/needsYou.ts';
+import { AUTOMATE_TASKS_TABS } from '../src/lib/automateTasksTabs.ts';
 
 test('the shared inbox link says how many things need you (S20-07)', () => {
   assert.equal(needsYouLinkLabel(0), 'Needs you inbox');
@@ -11,9 +12,6 @@ test('the shared inbox link says how many things need you (S20-07)', () => {
 
 test('every narrower needs-you surface links to the one canonical inbox', () => {
   for (const file of [
-    '../src/modules/assistant/NeedsYouRail.svelte',
-    '../src/modules/agents/WorkQueue.svelte',
-    '../src/modules/mission-control/MissionControlPage.svelte',
     '../src/modules/mcp/ApprovalsTab.svelte',
   ]) {
     const src = readFileSync(new URL(file, import.meta.url), 'utf8');
@@ -24,8 +22,10 @@ test('every narrower needs-you surface links to the one canonical inbox', () => 
 test('the agent-to-agent transport is never labelled "Rooms" (the sidebar module owns that noun)', () => {
   const page = readFileSync(new URL('../src/modules/personal-agents/PersonalAgentsPage.svelte', import.meta.url), 'utf8');
   assert.doesNotMatch(page, />Agent rooms</);
-  assert.match(page, />Agent channels</);
+  const labels = AUTOMATE_TASKS_TABS.map((t) => t.label);
+  assert.ok(labels.includes('Agent channels'));
+  assert.ok(!labels.some((l) => /\broom\b/i.test(l)));
   const sidebar = readFileSync(new URL('../src/lib/sidebar.ts', import.meta.url), 'utf8');
-  const pa = sidebar.split('\n').find((l) => l.includes("id: 'personal-agents'")) ?? '';
-  assert.doesNotMatch(pa, /\broom\b/);
+  const st = sidebar.slice(sidebar.indexOf("id: 'scheduled-tasks'"), sidebar.indexOf('},', sidebar.indexOf("id: 'scheduled-tasks'")));
+  assert.doesNotMatch(st, /\broom\b/);
 });

@@ -3,10 +3,10 @@
 use super::*;
 use otto_server::mcp_profiles::{canonical, GROUPS};
 
-/// Every tool this surface can list — the native catalog (assistant tools
-/// included), the UI-control request stub and every governed tool under its
-/// stdio name — belongs to exactly one profile group. A native tool added
-/// without a group fails here (`otto_mcp::profiles` holds the table).
+/// Every tool this surface can list — the native catalog, the UI-control
+/// request stub and every governed tool under its stdio name — belongs to
+/// exactly one profile group. A native tool added without a group fails here
+/// (`otto_mcp::profiles` holds the table).
 #[test]
 fn native_catalog_tools_have_exactly_one_group() {
     let mut names: Vec<String> = native_tool_names();

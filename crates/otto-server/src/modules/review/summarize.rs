@@ -169,9 +169,6 @@ pub(crate) async fn summarize_and_persist(
     )
     .await;
 
-    // 7. Assemble the proof pack for this review from the now-persisted findings.
-    assemble_review_proof(ctx, review_id, &workspace.id).await;
-
     Ok(())
 }
 

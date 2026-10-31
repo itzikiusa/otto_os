@@ -28,7 +28,6 @@
   import { reviewBus } from '../../lib/events.svelte';
   import { appLive } from '../../lib/live';
   import { routeReviewId } from './deepLink';
-  import { runWithOtto } from '../../lib/stores/runWithOtto.svelte';
   import { summaryFallback, summaryFallbackSentence, summaryFallbackTitle } from './reviewFallback';
 
   interface Props {
@@ -83,17 +82,14 @@
   const pastRuns = $derived(review ? history.slice(1) : history);
 
   // ---------------------------------------------------------------------------
-  // Deep link to ONE review (S20-301): `#/git/<repo>/review/<review_id>` —
-  // Run with Otto's "Open findings". That review is shown read-only on its own
-  // (findings board with severities, the run it came from), instead of the
-  // clean-slate panel where the run's findings hid in "Past reviews".
+  // Deep link to ONE review (S20-301): `#/git/<repo>/review/<review_id>`.
+  // That review is shown read-only on its own instead of the clean-slate panel
+  // where past findings hid in "Past reviews".
   // ---------------------------------------------------------------------------
   const focusId = $derived(routeReviewId(router.parts, repoId));
   let pinned: Review | null = $state(null);
   let pinnedLoading = $state(false);
   let pinnedError = $state<string | null>(null);
-  /** The run that produced the linked review, when the run list knows it. */
-  const pinnedRun = $derived(focusId ? (runWithOtto.list.find((r) => r.review_id === focusId) ?? null) : null);
   $effect(() => {
     const id = focusId;
     pinned = null;
@@ -440,13 +436,7 @@
       <header class="lrp-pinned-head">
         <div class="lrp-pinned-title">
           <h3>Review findings</h3>
-          <p class="dim">
-            {#if pinnedRun}
-              From run <button type="button" class="link" onclick={() => router.go(`run-with-otto/${encodeURIComponent(pinnedRun.id)}`)}>“{pinnedRun.title}”</button>{pinnedRun.branch ? ` on ${pinnedRun.branch}` : ''} · read-only
-            {:else}
-              A review linked from another page · read-only
-            {/if}
-          </p>
+          <p class="dim">A review linked from another page · read-only</p>
         </div>
         <button type="button" class="btn small" onclick={closePinned}>Show local reviews</button>
       </header>
@@ -706,17 +696,6 @@
   .lrp-pinned-title h3 { margin: 0; font-size: var(--fs-m); }
   .lrp-pinned-title p { margin: 2px 0 0; font-size: var(--fs-s); overflow-wrap: anywhere; }
   .lrp-pinned-meta { display: flex; align-items: center; gap: 6px; margin: 0; font-size: var(--fs-s); }
-  .lrp-pinned .link {
-    background: none;
-    border: 0;
-    padding: 0;
-    font: inherit;
-    color: var(--accent-text);
-    cursor: pointer;
-    text-decoration: underline;
-    text-underline-offset: 2px;
-  }
-  .lrp-pinned .link:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 2px; border-radius: var(--radius-s); }
   .lrp-idle-note { margin: 4px 0; color: var(--text-dim); font-size: var(--fs-s); line-height: 1.5; }
   .lrp-idle-note strong { color: var(--text); font-weight: 500; }
   .lrp {

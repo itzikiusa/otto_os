@@ -20,16 +20,17 @@ use otto_core::domain::WorkspaceRole;
 use otto_core::{Error, Id};
 use otto_state::{
     LearningPatch, NewEvent, NewLearning, NewNote, NewQuestion, NewTranscript, ProductRepo,
-    QuestionPatch, RunFilter, StoryPatch, TestcasePatch,
+    QuestionPatch, StoryPatch, TestcasePatch,
 };
 use serde::Deserialize;
 
+use crate::host::ProductStudioHost;
 use crate::service::ProductService;
 use crate::types::{
     BulkApproveTestcasesReq, CreateChildReq, NewDraftReq, NewLearningReq, NewNoteReq,
     NewQuestionReq, NewTranscriptReq, PostQuestionsReq, PublishAsRfcReq, PublishAsStoryReq,
-    PublishTestsReq, ReorderTestcasesReq, StorySwarmLink, UpdateDraftReq, UpdateLearningReq,
-    UpdateNoteReq, UpdateQuestionReq, UpdateStoryReq, UpdateTestcaseReq,
+    PublishTestsReq, ReorderTestcasesReq, UpdateDraftReq, UpdateLearningReq, UpdateNoteReq,
+    UpdateQuestionReq, UpdateStoryReq, UpdateTestcaseReq,
 };
 
 // ---------------------------------------------------------------------------
@@ -41,12 +42,6 @@ pub trait ProductCtx: Clone + Send + Sync + 'static {
     fn product(&self) -> &Arc<ProductService>;
     fn product_repo(&self) -> &ProductRepo;
     fn roles(&self) -> &Arc<dyn RoleChecker>;
-    /// Swarm repository — used by the Product↔Swarm closure endpoint to read
-    /// swarm projects/tasks/runs linked to a story.  Implementors that have no
-    /// swarm layer return `None`; the endpoint returns an empty `StorySwarmLink`.
-    fn swarm_repo(&self) -> Option<&otto_state::SwarmRepo> {
-        None
-    }
     /// Root directory of story attachment files
     /// (`data_dir/product/attachments`). `DELETE /product/stories/{sid}` removes
     /// `<root>/<sid>/` best-effort after the rows are gone; implementors without
@@ -352,8 +347,6 @@ pub fn router<S: ProductCtx>() -> Router<S> {
             "/product/stories/{sid}/publish-as-story",
             post(publish_as_story::<S>),
         )
-        // Product↔Swarm closure: full swarm project view linked to a story.
-        .route("/product/stories/{sid}/swarm", get(story_swarm_link::<S>))
 }
 
 // ---------------------------------------------------------------------------
@@ -1262,103 +1255,27 @@ async fn publish_as_story<S: ProductCtx>(
 }
 
 // ---------------------------------------------------------------------------
-// Product↔Swarm closure  (GET /product/stories/{sid}/swarm)
+// Linked canvases  (GET /product/stories/{sid}/linked-canvases)
 // ---------------------------------------------------------------------------
 
-/// `GET /product/stories/{sid}/swarm` — Aggregate view of the swarm project
-/// that was created from this story's implementation plan (Plan → Swarm).
-///
-/// Read-only join across the swarm state; requires workspace Viewer. Assembles
-/// tasks, runs, and accumulated cost from the linked project. Artifacts/PRs/
-/// reviews are extracted best-effort from run `result_json` blobs. Returns an
-/// empty `StorySwarmLink` (no project, empty collections) when no swarm project
-/// is linked — never 404; the caller can distinguish by `project: null`.
-async fn story_swarm_link<S: ProductCtx>(
-    State(ctx): State<S>,
-    Extension(AuthUser(user)): Extension<AuthUser>,
-    Path(StoryId { sid }): Path<StoryId>,
-) -> ApiResult<Json<StorySwarmLink>> {
-    ws_from_story(&ctx, &user, &sid, WorkspaceRole::Viewer).await?;
+/// `GET /api/v1/product/stories/{sid}/linked-canvases` — list the Canvas scenes
+/// linked to a story (newest first). Requires Viewer on the story's workspace.
+pub async fn list_linked_canvases<C: ProductStudioHost>(
+    Path(sid): Path<Id>,
+    State(ctx): State<C>,
+    CurrentUser(user): CurrentUser,
+) -> ApiResult<Json<Vec<otto_state::CanvasSceneSummary>>> {
+    let story = ctx.product_repo().get_story(&sid).await.map_err(ApiError)?;
+    ctx.roles()
+        .check(&user, &story.workspace_id, WorkspaceRole::Viewer)
+        .await?;
 
-    let Some(swarm_repo) = ctx.swarm_repo() else {
-        // Host application has no swarm layer; return empty link.
-        return Ok(Json(StorySwarmLink {
-            project: None,
-            tasks: vec![],
-            runs: vec![],
-            artifacts: vec![],
-            prs: vec![],
-            reviews: vec![],
-            cost_usd: 0.0,
-        }));
-    };
-
-    // Look up the swarm project that was created from this story.
-    let project = swarm_repo.project_for_story(&sid).await?;
-
-    let Some(ref proj) = project else {
-        return Ok(Json(StorySwarmLink {
-            project: None,
-            tasks: vec![],
-            runs: vec![],
-            artifacts: vec![],
-            prs: vec![],
-            reviews: vec![],
-            cost_usd: 0.0,
-        }));
-    };
-
-    let tasks = swarm_repo.list_tasks(&proj.id).await.unwrap_or_default();
-    let runs = swarm_repo
-        .list_runs(&RunFilter {
-            project_id: Some(proj.id.clone()),
-            ..Default::default()
-        })
+    let scenes = ctx
+        .canvas_repo()
+        .list_for_story(&story.id)
         .await
-        .unwrap_or_default();
-
-    // Accumulated cost (best-effort; cost_usd may be null/0 until usage attribution).
-    let cost_usd: f64 = runs.iter().filter_map(|r| r.cost_usd).sum();
-
-    // Best-effort extraction of artifacts/PRs/reviews from run result blobs.
-    let mut artifacts: Vec<String> = Vec::new();
-    let mut prs: Vec<String> = Vec::new();
-    let mut reviews: Vec<String> = Vec::new();
-    for run in &runs {
-        if let Some(result) = &run.result {
-            if let Some(arr) = result.get("artifacts").and_then(|v| v.as_array()) {
-                for v in arr {
-                    if let Some(s) = v.as_str() {
-                        artifacts.push(s.to_string());
-                    }
-                }
-            }
-            if let Some(arr) = result.get("prs").and_then(|v| v.as_array()) {
-                for v in arr {
-                    if let Some(s) = v.as_str() {
-                        prs.push(s.to_string());
-                    }
-                }
-            }
-            if let Some(arr) = result.get("reviews").and_then(|v| v.as_array()) {
-                for v in arr {
-                    if let Some(s) = v.as_str() {
-                        reviews.push(s.to_string());
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(Json(StorySwarmLink {
-        project,
-        tasks,
-        runs,
-        artifacts,
-        prs,
-        reviews,
-        cost_usd,
-    }))
+        .map_err(ApiError)?;
+    Ok(Json(scenes))
 }
 
 // ---------------------------------------------------------------------------
@@ -1976,7 +1893,7 @@ mod tests {
         let preview = body_json(preview_response).await;
         assert_eq!(preview["body_md"], original_body);
         let reviewed = serde_json::json!({
-            "version_id": vid, "body_sha256": otto_core::proof::content_sha256(preview["body_md"].as_str().unwrap()),
+            "version_id": vid, "body_sha256": otto_core::text::content_sha256(preview["body_md"].as_str().unwrap()),
             "title": "Reviewed title", "source_kind": "confluence", "url": reference,
         });
         match mutation {

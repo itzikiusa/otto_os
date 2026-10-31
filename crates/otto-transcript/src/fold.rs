@@ -53,6 +53,7 @@ pub struct Folded {
     pub turns: Vec<FoldedTurn>,
     pub stats: Stats,
     pub artifacts: Vec<Artifact>,
+    pub subagents: Vec<SubagentMeta>,
     /// Number of records folded (= the index the next appended record gets).
     pub record_count: usize,
     /// First user prompt (plain text), for the history index.
@@ -136,6 +137,10 @@ fn cap_block(block: Block) -> Block {
     match block {
         Block::Text { md } => Block::Text {
             md: cap_owned(md).0,
+        },
+        Block::Thinking { count, text } => Block::Thinking {
+            count,
+            text: text.map(|t| cap_owned(t).0),
         },
         Block::Queued { op, text, injected } => Block::Queued {
             op,
@@ -418,18 +423,34 @@ impl<'a> Fold<'a> {
         self.block_or_pending(t, Block::Notice { note }, idx);
     }
 
-    /// Add / bump a `thinking` marker on turn `t`.
+    /// Add / bump a marker-only `thinking` block on turn `t`.
     pub fn thinking(&mut self, t: usize, idx: usize) {
         self.stats.thinking_steps += 1;
         let ft = &mut self.turns[t];
         ft.last = ft.last.max(idx);
         for b in ft.turn.blocks.iter_mut().rev() {
-            if let Block::Thinking { count } = b {
+            if let Block::Thinking { count, text: None } = b {
                 *count += 1;
                 return;
             }
         }
-        ft.turn.blocks.push(Block::Thinking { count: 1 });
+        ft.turn.blocks.push(Block::Thinking {
+            count: 1,
+            text: None,
+        });
+    }
+
+    /// Add a `thinking` block carrying persisted reasoning prose on turn `t`.
+    pub fn thinking_prose(&mut self, t: usize, text: String, idx: usize) {
+        self.stats.thinking_steps += 1;
+        self.push_block(
+            t,
+            Block::Thinking {
+                count: 1,
+                text: Some(text),
+            },
+            idx,
+        );
     }
 
     /// Extract one base64 image: returns the image id (written when a store is
@@ -686,6 +707,11 @@ impl<'a> Fold<'a> {
         &self.artifacts
     }
 
+    /// Subagent metadata attached/discovered so far.
+    pub fn subagents(&self) -> &[SubagentMeta] {
+        &self.opts.subagents
+    }
+
     /// Finish: flush pending notes/blocks onto the last turn, attach subagent
     /// blocks, finalize stats.
     pub fn finish(mut self, record_count: usize) -> Folded {
@@ -717,6 +743,7 @@ impl<'a> Fold<'a> {
         } else {
             self.cost_fallback
         };
+        let subagents = self.opts.subagents;
         Folded {
             provider: self.provider,
             session_id: self.session_id,
@@ -726,6 +753,7 @@ impl<'a> Fold<'a> {
             turns: self.turns,
             stats: self.stats,
             artifacts: self.artifacts,
+            subagents,
             record_count,
             first_prompt: self.first_prompt,
             first_ts: self.first_ts,

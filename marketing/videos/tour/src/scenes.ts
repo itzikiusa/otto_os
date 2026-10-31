@@ -14,7 +14,7 @@ const room = (f: string) => `capture/rooms/${f}`;
 export const SCENES: Record<string, ChapterSpec> = {
   intro: { id: 'intro', group: 'Shell', title: 'Meet Otto', shots: [{ kind: 'custom', id: 'intro', beats: 16 }] },
 
-  // 3 bars
+  // 3 bars = 12 beats
   home: {
     id: 'home',
     group: 'Work',
@@ -25,16 +25,15 @@ export const SCENES: Record<string, ChapterSpec> = {
         kind: 'screen',
         src: cap('home.jpg'),
         beats: 8,
-        label: 'What needs you, what’s running, what’s next',
+        label: 'Live sessions, dashboards, usage and findings',
         cam: [
           { b: 0, x: 0.5, y: 0.5, z: 1 },
-          { b: 2.5, x: 0.45, y: 0.3, z: 1.4 },
+          { b: 2.5, x: 0.45, y: 0.32, z: 1.35 },
         ],
         callouts: [
           { b: 0.75, until: 2.5, x: 0.07, y: 0.475, label: 'Grouped sidebar', side: 'right' },
-          { b: 3, x: 0.21, y: 0.325, label: 'What needs you', side: 'bottom' },
-          { b: 4, x: 0.45, y: 0.325, label: 'What’s running', side: 'bottom' },
-          { b: 5, x: 0.67, y: 0.325, label: 'What’s next', side: 'bottom' },
+          { b: 3, x: 0.25, y: 0.3, label: 'Live sessions', side: 'bottom' },
+          { b: 4.5, x: 0.65, y: 0.32, label: 'Dashboards & usage', side: 'bottom' },
         ],
       },
       {
@@ -42,14 +41,14 @@ export const SCENES: Record<string, ChapterSpec> = {
         src: cap('home.jpg'),
         beats: 4,
         transition: 'push',
-        label: 'Light and dark, one design system',
+        label: 'Light, dark and right-to-left, one design system',
         wipeTo: { src: cap('home-light.jpg'), b0: 0.5, b1: 2.5 },
         cam: [{ b: 0, x: 0.5, y: 0.5, z: 1.06 }],
       },
     ],
   },
 
-  // 4 bars
+  // 4 bars = 16 beats
   'command-bar': {
     id: 'command-bar',
     group: 'Shell',
@@ -57,7 +56,6 @@ export const SCENES: Record<string, ChapterSpec> = {
     kicker: 'Type or speak. ⌘K from anywhere.',
     shots: [
       {
-        // cmdk.mp4: ⌘K at ~0.9 s, "go to mission" typed by ~2.9 s, Enter ~4.5 s, then it docks.
         kind: 'screen',
         src: cap('cmdk.mp4'),
         from: 0.6,
@@ -74,71 +72,33 @@ export const SCENES: Record<string, ChapterSpec> = {
         ],
       },
       {
-        // Reopened at ~7.1 s, "what needs me today?" by ~9.6 s, ⌃2 at ~11.1 s.
         kind: 'screen',
         src: cap('cmdk.mp4'),
         from: 7,
-        rate: 2.4,
+        rate: 2.2,
         beats: 4,
         transition: 'push',
-        label: 'Ask, and answer in four spaces',
+        label: 'Jump straight to any module or ask Otto',
         cam: [
           { b: 0, x: 0.5, y: 0.74, z: 1.35 },
           { b: 2.6, x: 0.55, y: 0.78, z: 1.45 },
         ],
-        callouts: [{ b: 3.2, x: 0.73, y: 0.935, label: 'Four spaces', keys: '⌃1 ⌃4', side: 'top' }],
       },
       { kind: 'custom', id: 'desktop', beats: 7, label: '⌥Space from any app, the menu bar, pop-out windows' },
     ],
   },
 
-  // 3 bars
-  assistant: {
-    id: 'assistant',
-    group: 'Work',
-    title: 'Assistant',
-    kicker: 'Your personal agent, asks before anything leaves your Mac',
-    shots: [
-      {
-        kind: 'screen',
-        src: cap('assistant.jpg'),
-        beats: 7,
-        label: 'Threads, tasks and approvals',
-        cam: [
-          { b: 0, x: 0.5, y: 0.5, z: 1 },
-          { b: 2, x: 0.5, y: 0.35, z: 1.25 },
-        ],
-        callouts: [
-          { b: 1, until: 4, x: 0.17, y: 0.108, label: 'Threads in four spaces', side: 'bottom' },
-          { b: 2.5, x: 0.61, y: 0.405, label: 'Otto asks, you decide', side: 'bottom' },
-          { b: 4, x: 0.86, y: 0.105, label: 'Needs you', side: 'left' },
-        ],
-      },
-      {
-        kind: 'screen',
-        src: cap('assistant-memory.jpg'),
-        beats: 5,
-        label: 'Memory you can read and edit',
-        cam: [
-          { b: 0, x: 0.4, y: 0.4, z: 1.15 },
-          { b: 1, x: 0.4, y: 0.45, z: 1.35 },
-        ],
-        callouts: [{ b: 1.5, x: 0.33, y: 0.35, label: 'Remembers what matters', side: 'right' }],
-      },
-    ],
-  },
-
-  // 6 bars
+  // 5 bars = 20 beats
   agents: {
     id: 'agents',
     group: 'Work',
     title: 'Agents',
-    kicker: 'Claude Code, Codex and shells as real sessions',
+    kicker: 'Claude Code, Codex, Antigravity and shells as real sessions',
     shots: [
       {
         kind: 'screen',
         src: cap('agents-tab.jpg'),
-        beats: 4,
+        beats: 6,
         cam: [
           { b: 0, x: 0.5, y: 0.5, z: 1 },
           { b: 1.5, x: 0.4, y: 0.4, z: 1.25 },
@@ -148,135 +108,109 @@ export const SCENES: Record<string, ChapterSpec> = {
       {
         kind: 'screen',
         src: cap('agents-tiled.jpg'),
-        beats: 5,
+        beats: 7,
+        transition: 'push',
         label: 'Tiled: see every agent at once',
         cam: [
           { b: 0, x: 0.5, y: 0.5, z: 1.2 },
-          { b: 1, x: 0.55, y: 0.5, z: 1 },
-        ],
-      },
-      {
-        kind: 'screen',
-        src: cap('agents-queue.jpg'),
-        beats: 5,
-        label: 'Work queue: what needs you first',
-        cam: [
-          { b: 0, x: 0.5, y: 0.5, z: 1 },
-          { b: 1, x: 0.6, y: 0.3, z: 1.35 },
+          { b: 1.5, x: 0.55, y: 0.5, z: 1 },
         ],
       },
       {
         kind: 'screen',
         src: cap('agents-broadcast.jpg'),
-        beats: 5,
+        beats: 7,
+        transition: 'whip',
         label: 'Broadcast one prompt to many agents',
         cam: [
           { b: 0, x: 0.5, y: 0.5, z: 1.1 },
-          { b: 1, x: 0.5, y: 0.5, z: 1.4 },
+          { b: 1.5, x: 0.5, y: 0.5, z: 1.38 },
         ],
-      },
-      {
-        kind: 'screen',
-        src: cap('history.jpg'),
-        beats: 5,
-        label: 'History: every past conversation',
-        cam: [
-          { b: 0, x: 0.5, y: 0.5, z: 1 },
-          { b: 1.5, x: 0.7, y: 0.3, z: 1.3 },
-        ],
-        callouts: [{ b: 2, x: 0.905, y: 0.075, label: 'Resume any conversation', side: 'bottom' }],
       },
     ],
   },
 
-  // 4 bars
-  'mission-control': {
-    id: 'mission-control',
+  // 5 bars = 20 beats
+  threads: {
+    id: 'threads',
     group: 'Work',
-    title: 'Run with Otto',
-    kicker: 'From a ticket to a reviewed branch',
+    title: 'Threads',
+    kicker: 'Inbox-style conversations, multi-session splits and workspace files',
     shots: [
       {
         kind: 'screen',
-        src: cap('run-with-otto.jpg'),
-        beats: 8,
-        label: 'One click: source, branch, proof, review, PR',
+        src: cap('threads-stage.jpg'),
+        beats: 6,
+        label: 'Pick Claude, Codex or Antigravity and start a thread',
         cam: [
-          { b: 0, x: 0.5, y: 0.45, z: 1.05 },
-          { b: 1.5, x: 0.55, y: 0.38, z: 1.3 },
-          { b: 4.5, x: 0.7, y: 0.45, z: 1.4 },
+          { b: 0, x: 0.5, y: 0.5, z: 1 },
+          { b: 1.5, x: 0.5, y: 0.44, z: 1.28 },
         ],
         callouts: [
-          { b: 1.5, until: 4.5, x: 0.38, y: 0.38, label: 'Source → branch → proof → review → PR', side: 'top' },
-          { b: 5, x: 0.96, y: 0.48, label: 'Waits for your approval', side: 'left' },
+          { b: 1.2, until: 4.5, x: 0.16, y: 0.26, label: 'Pins · Active · Projects · History', side: 'right' },
+          { b: 2.5, x: 0.5, y: 0.36, label: 'Claude · Codex · Antigravity', side: 'bottom' },
         ],
       },
       {
         kind: 'screen',
-        src: cap('mission-control.jpg'),
+        src: cap('threads-split.jpg'),
         beats: 8,
-        transition: 'whip',
-        label: 'Mission Control: the whole work graph',
+        transition: 'push',
+        label: 'Split live threads beside files, diffs and connections',
         cam: [
-          { b: 0, x: 0.5, y: 0.5, z: 1 },
-          { b: 2, x: 0.5, y: 0.32, z: 1.3 },
+          { b: 0, x: 0.5, y: 0.5, z: 1.02 },
+          { b: 2.5, x: 0.56, y: 0.42, z: 1.28 },
         ],
-        callouts: [{ b: 2.5, x: 0.4, y: 0.085, label: 'Running · waiting · approvals · spend', side: 'bottom' }],
+        callouts: [
+          { b: 1.5, until: 5, x: 0.45, y: 0.18, label: 'Multi-session split', side: 'bottom' },
+          { b: 3.5, x: 0.84, y: 0.24, label: 'Files · Changes · Connections · Peers', side: 'left' },
+        ],
+      },
+      {
+        kind: 'screen',
+        src: cap('threads-peers.jpg'),
+        beats: 6,
+        transition: 'whip',
+        label: 'Direct session-to-session relay and peer timeline',
+        cam: [
+          { b: 0, x: 0.62, y: 0.45, z: 1.1 },
+          { b: 1.5, x: 0.76, y: 0.38, z: 1.4 },
+        ],
       },
     ],
   },
 
-  // 4 bars — verse
-  swarm: {
-    id: 'swarm',
+  // 3 bars = 12 beats — verse
+  loops: {
+    id: 'loops',
     group: 'Automate',
-    title: 'Swarms and Goal Loops',
-    kicker: 'Teams of agents with roles, a board and a goal',
+    title: 'Goal Loops',
+    kicker: 'Plan, execute and evaluate until every acceptance check passes',
     shots: [
-      {
-        kind: 'screen',
-        src: cap('swarm.jpg'),
-        beats: 5,
-        label: 'Roles and an org chart',
-        cam: [
-          { b: 0, x: 0.45, y: 0.4, z: 1.1 },
-          { b: 1.5, x: 0.35, y: 0.3, z: 1.5 },
-        ],
-        callouts: [{ b: 2, x: 0.325, y: 0.2, label: 'Coordinator and roles', side: 'right' }],
-      },
-      {
-        kind: 'screen',
-        src: cap('swarm-board.jpg'),
-        beats: 5,
-        label: 'A shared board',
-        cam: [
-          { b: 0, x: 0.55, y: 0.4, z: 1.05 },
-          { b: 1, x: 0.62, y: 0.35, z: 1.3 },
-        ],
-      },
       {
         kind: 'screen',
         src: cap('loops.jpg'),
-        beats: 6,
-        label: 'Goal Loops: plan, execute, evaluate',
+        beats: 12,
+        label: 'Goal Loops: autonomous iterations with hard budgets',
         cam: [
-          { b: 0, x: 0.5, y: 0.4, z: 1.1 },
-          { b: 1, x: 0.4, y: 0.25, z: 1.55 },
+          { b: 0, x: 0.5, y: 0.45, z: 1.05 },
+          { b: 3, x: 0.42, y: 0.28, z: 1.45 },
+          { b: 8, x: 0.55, y: 0.42, z: 1.2 },
         ],
         callouts: [
-          { b: 1.5, x: 0.2, y: 0.1, label: 'Plan → execute → evaluate', side: 'bottom' },
-          { b: 3, x: 0.18, y: 0.26, label: 'Until the acceptance checks pass', side: 'right' },
+          { b: 1.5, until: 6, x: 0.2, y: 0.12, label: 'Plan → execute → evaluate', side: 'bottom' },
+          { b: 5, x: 0.24, y: 0.3, label: 'Machine-checked acceptance criteria', side: 'right' },
         ],
       },
     ],
   },
 
-  // 4 bars
+  // 4 bars = 16 beats
   workflows: {
     id: 'workflows',
     group: 'Automate',
-    title: 'Workflows',
-    kicker: 'Pipelines of agents, approvals and tools',
+    title: 'Workflows and Scheduled Tasks',
+    kicker: 'Pipelines, schedules and personal agents in one place',
     shots: [
       {
         kind: 'screen',
@@ -292,150 +226,153 @@ export const SCENES: Record<string, ChapterSpec> = {
         kind: 'screen',
         src: cap('scheduled-tasks.jpg'),
         beats: 5,
-        label: 'Scheduled tasks on a cadence',
+        transition: 'push',
+        label: 'Unified Scheduled Tasks: Tasks · Agents · Agent channels',
         cam: [
-          { b: 0, x: 0.5, y: 0.4, z: 1.1 },
-          { b: 1, x: 0.45, y: 0.22, z: 1.55 },
+          { b: 0, x: 0.5, y: 0.4, z: 1.08 },
+          { b: 1, x: 0.45, y: 0.22, z: 1.45 },
         ],
       },
       {
         kind: 'screen',
         src: cap('personal-agents.jpg'),
         beats: 5,
-        label: 'Personal agents with their own soul and memory',
+        transition: 'whip',
+        label: 'Personal agents with their own soul, memory and rooms',
         cam: [
           { b: 0, x: 0.5, y: 0.4, z: 1.1 },
-          { b: 1, x: 0.48, y: 0.22, z: 1.55 },
+          { b: 1, x: 0.48, y: 0.22, z: 1.5 },
         ],
       },
     ],
   },
 
-  // 4 bars — chorus 2
+  // 4 bars = 16 beats — chorus 2
   git: {
     id: 'git',
     group: 'Build',
-    title: 'Git, review and proof',
-    kicker: 'Graph, work in progress, PRs and AI review',
+    title: 'Git and AI review',
+    kicker: 'Commit graph, work in progress, PRs and multi-lens review',
     shots: [
       {
         kind: 'screen',
         src: cap('git.jpg'),
-        beats: 5,
+        beats: 6,
         label: 'A commit graph with your work in progress',
         cam: [
           { b: 0, x: 0.5, y: 0.5, z: 1 },
-          { b: 1, x: 0.4, y: 0.38, z: 1.3 },
+          { b: 1.5, x: 0.4, y: 0.38, z: 1.3 },
         ],
         callouts: [
           { b: 1.5, x: 0.3, y: 0.225, label: 'Work in progress', side: 'right' },
-          { b: 3, x: 0.2, y: 0.315, label: 'Branches and worktrees', side: 'right' },
+          { b: 3.5, x: 0.2, y: 0.315, label: 'Branches and worktrees', side: 'right' },
         ],
       },
       {
         kind: 'screen',
         src: cap('git-wip.jpg'),
-        beats: 3,
-        label: 'Stage, commit, draft the message with AI',
+        beats: 4,
+        transition: 'push',
+        label: 'Stage, commit and draft the PR description with AI',
         cam: [
           { b: 0, x: 0.7, y: 0.4, z: 1.15 },
-          { b: 0.5, x: 0.76, y: 0.35, z: 1.45 },
+          { b: 1, x: 0.76, y: 0.35, z: 1.45 },
         ],
       },
       {
         kind: 'screen',
         src: cap('git-review.jpg'),
-        beats: 4,
-        label: 'Multi-agent AI review with findings',
+        beats: 6,
+        transition: 'whip',
+        label: 'Multi-agent AI review with tracked findings and proof',
         cam: [
           { b: 0, x: 0.5, y: 0.45, z: 1.05 },
-          { b: 1, x: 0.5, y: 0.35, z: 1.35 },
-        ],
-      },
-      {
-        kind: 'screen',
-        src: cap('proof.jpg'),
-        beats: 4,
-        label: 'Proof packs: the evidence behind every change',
-        cam: [
-          { b: 0, x: 0.6, y: 0.4, z: 1.1 },
-          { b: 1, x: 0.7, y: 0.3, z: 1.4 },
+          { b: 1.5, x: 0.5, y: 0.35, z: 1.35 },
         ],
       },
     ],
   },
 
-  // 3 bars
-  vault: {
-    id: 'vault',
+  // 5 bars = 20 beats
+  product: {
+    id: 'product',
     group: 'Build',
-    title: 'Product and Vault',
-    kicker: 'Stories, analysis and a living knowledge graph',
+    title: 'Product and Design Hall',
+    kicker: 'Stories, designs and learnings in one unified hub',
     shots: [
       {
         kind: 'screen',
         src: cap('product.jpg'),
-        beats: 5,
-        label: 'Product: stories into analysis and drafts',
+        beats: 6,
+        label: 'Product: Stories · Designs · Learnings',
         cam: [
-          { b: 0, x: 0.45, y: 0.4, z: 1.1 },
-          { b: 1, x: 0.4, y: 0.3, z: 1.4 },
+          { b: 0, x: 0.45, y: 0.4, z: 1.08 },
+          { b: 1.5, x: 0.4, y: 0.28, z: 1.38 },
         ],
       },
-      {
-        kind: 'screen',
-        src: cap('vault-graph.jpg'),
-        beats: 7,
-        transition: 'wipe',
-        label: 'Vault: linked markdown and a live graph',
-        cam: [
-          { b: 0, x: 0.55, y: 0.5, z: 1 },
-          { b: 2, x: 0.65, y: 0.5, z: 1.4 },
-        ],
-      },
-    ],
-  },
-
-  // 5 bars
-  design: {
-    id: 'design',
-    group: 'Build',
-    title: 'Design Hall',
-    kicker: 'Every studio, one shared library',
-    shots: [
       {
         kind: 'screen',
         src: cap('design.jpg'),
         beats: 6,
+        transition: 'push',
         cam: [
           { b: 0, x: 0.5, y: 0.5, z: 1 },
           { b: 2, x: 0.45, y: 0.55, z: 1.25 },
         ],
         callouts: [
           { b: 1.5, until: 4, x: 0.35, y: 0.46, label: 'Frames · Graphics · Site · 3D · Brand', side: 'top' },
-          { b: 4, x: 0.82, y: 0.12, label: 'What Otto learned', side: 'bottom' },
         ],
       },
-      // Quick cuts through the studios, one every two beats.
       { kind: 'screen', src: cap('design-frame.jpg'), beats: 2, transition: 'whip', card: { title: 'Frames', sub: 'Versions you compare' }, cam: [{ b: 0, x: 0.4, y: 0.4, z: 1.25 }] },
       { kind: 'screen', src: cap('design-3d.jpg'), beats: 2, transition: 'whip', card: { title: '3D Studio' }, cam: [{ b: 0, x: 0.35, y: 0.45, z: 1.35 }] },
       { kind: 'screen', src: cap('design-site.jpg'), beats: 2, transition: 'whip', card: { title: 'Site Studio' }, cam: [{ b: 0, x: 0.35, y: 0.4, z: 1.35 }] },
       { kind: 'screen', src: cap('design-brand.jpg'), beats: 2, transition: 'whip', card: { title: 'Brand Kit' }, cam: [{ b: 0, x: 0.5, y: 0.3, z: 1.5 }] },
+    ],
+  },
+
+  // 3 bars = 12 beats
+  vault: {
+    id: 'vault',
+    group: 'Build',
+    title: 'Vault and Skills Lab',
+    kicker: 'Linked markdown docs and evaluated agent skills',
+    shots: [
+      {
+        kind: 'screen',
+        src: cap('vault.jpg'),
+        beats: 4,
+        label: 'Vault: Obsidian-parity docs in your repo',
+        cam: [
+          { b: 0, x: 0.5, y: 0.45, z: 1.06 },
+          { b: 1, x: 0.48, y: 0.36, z: 1.28 },
+        ],
+      },
+      {
+        kind: 'screen',
+        src: cap('vault-graph.jpg'),
+        beats: 4,
+        transition: 'wipe',
+        label: 'A live knowledge graph over your notes',
+        cam: [
+          { b: 0, x: 0.55, y: 0.5, z: 1 },
+          { b: 1.5, x: 0.65, y: 0.5, z: 1.38 },
+        ],
+      },
       {
         kind: 'screen',
         src: cap('skills-eval.jpg'),
-        beats: 6,
+        beats: 4,
         transition: 'push',
         label: 'Skills Lab evaluates and sharpens your agent skills',
         cam: [
           { b: 0, x: 0.45, y: 0.45, z: 1.05 },
-          { b: 1, x: 0.35, y: 0.32, z: 1.4 },
+          { b: 1, x: 0.35, y: 0.32, z: 1.38 },
         ],
       },
     ],
   },
 
-  // 4 bars — verse 2
+  // 4 bars = 16 beats — verse 2
   database: {
     id: 'database',
     group: 'Infrastructure',
@@ -443,7 +380,6 @@ export const SCENES: Record<string, ChapterSpec> = {
     kicker: 'MySQL · Postgres · MongoDB · Redis · ClickHouse',
     shots: [
       {
-        // db-builder.mp4 at 2.6×: tables join by ~3 s, aggregate ~7 s, HAVING/sort ~11 s, Run ~13.7 s.
         kind: 'screen',
         src: cap('db-builder.mp4'),
         from: 1,
@@ -466,7 +402,7 @@ export const SCENES: Record<string, ChapterSpec> = {
         src: cap('db-results.jpg'),
         beats: 4,
         transition: 'push',
-        label: 'Results in a grid, or one record at a time',
+        label: 'Results in a grid, plus live agent MCP tabs',
         cam: [
           { b: 0, x: 0.6, y: 0.6, z: 1.2 },
           { b: 1, x: 0.55, y: 0.6, z: 1.45 },
@@ -476,7 +412,7 @@ export const SCENES: Record<string, ChapterSpec> = {
     ],
   },
 
-  // 4 bars — quick cuts across the infrastructure modules
+  // 4 bars = 16 beats
   infra: {
     id: 'infra',
     group: 'Infrastructure',
@@ -493,7 +429,7 @@ export const SCENES: Record<string, ChapterSpec> = {
     ],
   },
 
-  // 4 bars — breakdown: slower, wider moves
+  // 4 bars = 16 beats — breakdown
   insights: {
     id: 'insights',
     group: 'Insight',
@@ -525,7 +461,7 @@ export const SCENES: Record<string, ChapterSpec> = {
     ],
   },
 
-  // 8 bars — the final chorus. Genuine two-person room footage (1920×1080).
+  // 8 bars = 32 beats — the final chorus
   rooms: {
     id: 'rooms',
     group: 'Work',

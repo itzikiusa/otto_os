@@ -34,15 +34,11 @@ use crate::auth::{require_root, CurrentUser};
 use crate::error::ApiResult;
 use crate::state::ServerCtx;
 
-/// All 22 product features in a stable iteration order (matches `Feature` enum).
+/// All 30 product features in a stable iteration order (matches `Feature` enum).
 ///
-/// `Canvas`, `ProofPack`, `MissionControl`, and `Browser` were added here
-/// together (Task 4 review fix) — the first three had shipped without ever
-/// being added to this list, silently making them ungrantable to non-root
-/// users through `PUT /users/{id}/grants` / `/auth/capabilities` even though
-/// their routes are properly `Feature`-gated in `policy.rs`. Any future
-/// `Feature` variant belongs here too — this is the single grantable-features
-/// list, not just documentation of what existed when it was written.
+/// Any future `Feature` variant belongs here too — this is the single
+/// grantable-features list, not just documentation of what existed when it was
+/// written.
 const ALL_FEATURES: &[Feature] = &[
     Feature::Agents,
     Feature::Connections,
@@ -50,7 +46,6 @@ const ALL_FEATURES: &[Feature] = &[
     Feature::Git,
     Feature::Issues,
     Feature::Product,
-    Feature::Swarm,
     Feature::ApiClient,
     Feature::Workflows,
     Feature::Channels,
@@ -66,11 +61,8 @@ const ALL_FEATURES: &[Feature] = &[
     // Design Hall (the artifact graph); granted wherever Canvas was — see the
     // `design_graph` migration's additive grant copy.
     Feature::Design,
-    Feature::ProofPack,
     Feature::Mcp,
-    Feature::MissionControl,
     Feature::ScheduledTasks,
-    Feature::RunWithOtto,
     Feature::Browser,
     Feature::Aws,
     Feature::AwsS3,

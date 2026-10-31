@@ -12,7 +12,7 @@ Design Hall is where your team's visual work lives. Every design is an artifact 
 
 ## Getting started
 
-1. Open **Design Hall** in the sidebar.
+1. Open **Product** in the sidebar and switch to **Designs**.
 2. In the lobby, describe what you want in the prompt, pick a studio, and choose how many variants (1 to 4). Tick **Use references** to give the agent your team's closest past designs, or **Draft only** to skip generation.
 3. The design opens on its **Otto** tab while the agent works. When it finishes, the result is a new version.
 4. Edit the design, then choose **Save** (`⌘S`). Use **Compare** to see what changed between versions.
@@ -115,5 +115,4 @@ Design Hall is where your team's visual work lives. Every design is an artifact 
 - [Product](#/walkthroughs/product)
 - [Vault](#/walkthroughs/vault)
 - [Agents](#/walkthroughs/agents)
-- [Swarm](#/walkthroughs/swarm)
 - [MCP Control Plane](#/walkthroughs/mcp)

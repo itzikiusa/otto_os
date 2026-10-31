@@ -3,10 +3,8 @@
 import { ws } from '../../stores/workspace.svelte';
 import { notifications } from '../../stores/notifications.svelte';
 import { activity } from '../../stores/activity.svelte';
-import { proof } from '../../stores/proof.svelte';
 import { transcript } from '../../stores/transcript.svelte';
 import { git } from '../../stores/git.svelte';
-import { assistant } from '../../stores/assistant.svelte';
 import { uiControl } from '../../stores/uiControl.svelte';
 import type { EventOf, EventRoutes } from './types';
 
@@ -15,18 +13,12 @@ const toWorkspace = (ev: EventOf<'session_status' | 'session_created' | 'session
   ws.applyEvent(ev);
 };
 
-type TranscriptEvent = EventOf<'transcript_appended' | 'transcript_live' | 'artifact_added' | 'history_index_progress'>;
+type TranscriptEvent = EventOf<'transcript_appended' | 'transcript_live' | 'artifact_added'>;
 /** Conversation view: live tail deltas (+ artifact chips) for the open
- *  session's chat; History page index progress. The activity store also takes
- *  the artifact / index events (Outputs panel + rescan bar). */
+ *  session's chat. The activity store also takes the artifact event (Outputs panel). */
 const toTranscript = (ev: TranscriptEvent): void => {
   transcript.applyEvent(ev);
-  if (ev.type !== 'transcript_appended' && ev.type !== 'transcript_live') activity.applyEvent(ev);
-};
-
-/** Assistant: thread turns/cards, task board, needs-you badge, limits. */
-const toAssistant = (ev: EventOf<'assistant_turn' | 'assistant_task_update' | 'assistant_needs_you' | 'assistant_limit'>): void => {
-  assistant.applyEvent(ev);
+  if (ev.type === 'artifact_added') activity.applyEvent(ev);
 };
 
 const toActivity = (ev: EventOf<'trail_appended' | 'tasks_updated'>): void => {
@@ -66,15 +58,8 @@ export const shellRoutes: EventRoutes = {
   transcript_appended: toTranscript,
   transcript_live: toTranscript,
   artifact_added: toTranscript,
-  history_index_progress: toTranscript,
-  assistant_turn: toAssistant,
-  assistant_task_update: toAssistant,
-  assistant_needs_you: toAssistant,
-  assistant_limit: toAssistant,
   // An agent asked to drive the UI: the session's pane shows the prompt.
   ui_control_requested: (ev) => uiControl.applyEvent(ev),
   // A watched repo changed on disk: the Git page re-reads its status.
   repo_status_changed: (ev) => git.applyRepoChanged(ev.repo_id, ev.paths),
-  // Proof page list/detail + sidebar proof chips refresh on the event.
-  proof_pack_updated: (ev) => proof.applyEvent(ev),
 };

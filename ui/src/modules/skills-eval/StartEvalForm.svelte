@@ -55,7 +55,7 @@
   let validatorPasses = $state(1);
   let improverProvider = $state(defaultAgentProvider());
   let baseRef = $state('');
-  // Repo-specific commands → scored as tests/lint signals + proof-pack evidence.
+  // Repo-specific commands → scored as tests/lint signals.
   let testCmd = $state('');
   let lintCmd = $state('');
   // Saved defaults (Settings → Skill eval). A blank field falls back to these
@@ -338,7 +338,7 @@
       <div class="block adv-body" id="se-advanced">
         <div class="grid2">
           <div class="field">
-            <label class="field-label" for="se-test">Test command <span class="hint-inline">scored and added to the proof pack</span></label>
+            <label class="field-label" for="se-test">Test command <span class="hint-inline">scored</span></label>
             <input dir="ltr" id="se-test" class="input" bind:value={testCmd} placeholder={testDefault ? `Default: ${testDefault}` : 'e.g. cargo test  /  npm test'} data-testid="eval-test-cmd" />
           </div>
           <div class="field">

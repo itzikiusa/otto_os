@@ -2,8 +2,6 @@
 //! Nearly every tool here is **read-only**; the exceptions are
 //! `canvas_create_scene` / `canvas_update_scene` (Task B5), the Vault v3
 //! doc writers `otto_vault_write` / `otto_vault_rename` / `otto_vault_delete`,
-//! the swarm board tools `swarm_create_task` / `swarm_update_task` /
-//! `swarm_run_task` / `swarm_stop_run` (the manager's utilization levers),
 //! `browser_navigate` (Task 6, opens a reader-mode browser tab), `workbench_write`
 //! (writes the owner's Workbench scratch file as a new history revision), and the three
 //! cloud-console writers `aws_athena_query` (starts an Athena query execution),
@@ -11,15 +9,11 @@
 //! rollout/scale/delete/Argo verb, see `docs/design/aws-k8s-consoles.md` §4.6),
 //! and the API-client writers `otto_api_execute` (sends one saved request),
 //! `otto_api_upsert_request` (persists a saved request), and
-//! `otto_api_run_automation` (runs a human-authored automation), and the Otto
-//! Assistant tools `assistant_*` (advertised to `source: "assistant"` sessions
-//! only; they write the owner's OWN assistant data — memories with Undo,
-//! tasks, reminders — and open approvals, never an outward action themselves)
+//! `otto_api_run_automation` (runs a human-authored automation)
 //! — which call the normal governed HTTP endpoints AS THE SESSION OWNER — the
 //! same workspace-role check (`Editor`) a human gets, no more. Canvas is meant
 //! to be agent-drawable, the vault is the agents' documentation home
-//! (delete is a soft move to `.trash/`), the swarm board is how a manager
-//! agent keeps its team utilized, a reader tab is the same one-URL "open
+//! (delete is a soft move to `.trash/`), a reader tab is the same one-URL "open
 //! a tab" action the Browser module UI does, and the AWS/K8s writers are the
 //! per-service `Edit`-gated console actions (`aws_athena:Edit`, `aws_sqs:Edit`,
 //! `kubernetes:Edit` — destructive k8s actions additionally demand
@@ -369,9 +363,9 @@ impl Ctx {
         parse_ok_body(&bytes)
     }
 
-    /// PATCH an `/api/v1` path with the bearer token. Used by the swarm write
-    /// tools (`swarm_update_task`) — same governed Editor-gated routes the UI
-    /// hits; same timeout/size handling as [`Self::put_json`].
+    /// PATCH an `/api/v1` path with the bearer token — same governed
+    /// Editor-gated routes the UI hits; same timeout/size handling as
+    /// [`Self::put_json`].
     async fn patch_json(&self, path: &str, body: &Value) -> Result<Value, String> {
         let url = format!("{}/api/v1{}", self.base.trim_end_matches('/'), path);
         let resp = tokio::time::timeout(
@@ -815,10 +809,8 @@ fn tail_text(text: &str, max: usize) -> (String, bool) {
     (kept.to_string(), true)
 }
 
-// The native catalog, assistant tools, references and dispatch live in
-// `mcp_tools/{catalog,assistant,native_refs,dispatch}.rs`.
-mod assistant;
-use assistant::*;
+// The native catalog, references and dispatch live in
+// `mcp_tools/{catalog,native_refs,dispatch}.rs`.
 mod catalog;
 use catalog::*;
 mod dispatch;
@@ -3421,25 +3413,6 @@ mod tests {
             .contains("mode=full"));
         let c = read_route("otto_vault_okf_validate", &json!({"vault_id":3}), ws).unwrap();
         assert!(c.post);
-        // Swarm board reads: explicit-id tools, no workspace needed.
-        assert_eq!(
-            read_route("swarm_list_projects", &json!({"swarm_id":"s1"}), ws)
-                .unwrap()
-                .path,
-            "/swarm/swarms/s1/projects"
-        );
-        assert_eq!(
-            read_route("swarm_list_tasks", &json!({"project_id":"p1"}), ws)
-                .unwrap()
-                .path,
-            "/swarm/projects/p1/tasks"
-        );
-        assert_eq!(
-            read_route("swarm_utilization", &json!({"swarm_id":"s1"}), ws)
-                .unwrap()
-                .path,
-            "/swarm/swarms/s1/utilization"
-        );
         // Routed twins (`route_for`, `/api/v1` stripped once): same URLs.
         assert_eq!(
             read_route(
@@ -3505,25 +3478,6 @@ mod tests {
             "otto_send_message",
         ] {
             assert!(names.contains(&t), "catalog missing delegation tool {t}");
-        }
-    }
-
-    #[test]
-    fn catalog_lists_the_swarm_board_tools() {
-        let tools = tool_catalog();
-        let names: Vec<&str> = tools["tools"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|t| t["name"].as_str().unwrap())
-            .collect();
-        for t in [
-            "swarm_create_task",
-            "swarm_update_task",
-            "swarm_run_task",
-            "swarm_stop_run",
-        ] {
-            assert!(names.contains(&t), "catalog missing swarm write tool {t}");
         }
     }
 
@@ -3913,80 +3867,6 @@ mod tests {
             .contains("workspace"));
     }
 
-    #[test]
-    fn assistant_tools_are_shown_only_to_assistant_sessions() {
-        let names = |source: Option<&str>| -> Vec<String> {
-            tool_catalog_for_source(source)["tools"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|t| t["name"].as_str().unwrap().to_string())
-                .collect()
-        };
-        let assistant = names(Some("assistant"));
-        for (tool, _) in ASSISTANT_TOOLS {
-            assert!(
-                assistant.contains(&tool.to_string()),
-                "assistant catalog missing {tool}"
-            );
-        }
-        // Everyone else keeps the normal catalog without them.
-        for source in [None, Some("personal_agent"), Some("vault-docs")] {
-            let other = names(source);
-            assert!(other.contains(&"otto_db_schema".to_string()));
-            assert!(
-                !other.iter().any(|n| n.starts_with("assistant_")),
-                "{source:?} leaked assistant tools"
-            );
-        }
-        // Every assistant spec is well formed and maps to one endpoint segment.
-        for spec in assistant_tool_specs() {
-            let name = spec["name"].as_str().unwrap();
-            assert!(assistant_segment(name).is_some(), "{name}");
-            assert_eq!(spec["inputSchema"]["type"], json!("object"), "{name}");
-            if let Some(req) = spec["inputSchema"]["required"].as_array() {
-                for r in req {
-                    assert!(spec["inputSchema"]["properties"]
-                        .get(r.as_str().unwrap())
-                        .is_some());
-                }
-            }
-        }
-        assert_eq!(assistant_tool_specs().len(), ASSISTANT_TOOLS.len());
-    }
-
-    #[test]
-    fn assistant_memory_tools_win_over_their_governed_twins() {
-        // The governed otto.assistant_* catalog entries are covered natively,
-        // so `otto_assistant_remember` is never advertised twice.
-        for n in ["assistant_remember", "assistant_forget", "assistant_recall"] {
-            assert!(
-                governed_tool_for_stdio_name(&format!("otto_{n}")).is_none(),
-                "{n}"
-            );
-        }
-        let enabled = vec!["otto.assistant_recall".to_string()];
-        assert!(governed_tools_for(&enabled).is_empty());
-    }
-
-    #[tokio::test]
-    async fn assistant_tool_call_surfaces_a_daemon_error() {
-        let mut ctx = test_ctx();
-        ctx.source = Some("assistant".into());
-        let resp = handle(
-            &ctx,
-            json!({"jsonrpc":"2.0","id":41,"method":"tools/call","params":{
-                "name":"assistant_remember","arguments":{"text":"likes tea"}
-            }}),
-        )
-        .await
-        .unwrap();
-        // The daemon is unreachable in tests: a tool error, never "unknown tool".
-        assert_eq!(resp["result"]["isError"], json!(true));
-        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
-        assert!(!text.contains("unknown tool"), "{text}");
-    }
-
     // --- Performance guards (perf/10-mcp F1/F2/F3/F9) -------------------------
     //
     // A mock daemon on an ephemeral port answers the three routes the bridge
@@ -4326,10 +4206,10 @@ mod tests {
     /// the native twins (id-or-name vault_id, PR `number` alias, room refs —
     /// missing text, not padding); 85_412 with otto_create_issue and its
     /// discovery reads (list_issue_projects / _types); 84_834 with
-    /// otto_query_db (review sessions: 59_688).
-    const TOOLS_LIST_BYTE_BUDGET: usize = 86_000;
-    /// A review-type session (R2 per-source scoping): 56_830; 60_266 with those.
-    const NARROW_TOOLS_LIST_BYTE_BUDGET: usize = 61_000;
+    /// otto_query_db; 77_821 after slim-app cleanup (review sessions: 52_595).
+    const TOOLS_LIST_BYTE_BUDGET: usize = 79_500;
+    /// A review-type session (R2 per-source scoping): 52_595 after slim-app cleanup.
+    const NARROW_TOOLS_LIST_BYTE_BUDGET: usize = 54_500;
 
     /// A Ctx pointing at an unreachable base; used by the no-upstream tests above
     /// (which never actually call out). Audit disabled.

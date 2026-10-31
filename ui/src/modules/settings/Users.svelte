@@ -182,14 +182,14 @@
 
   // ---- feature grant matrix -----------------------------------------------
   const FEATURE_LABELS: Record<Feature, string> = {
-    agents: 'Agents', mission_control: 'Mission Control', connections: 'Connections', database: 'Database',
-    git: 'Git', issues: 'Issues', product: 'Product', swarm: 'Swarm',
+    agents: 'Agents', connections: 'Connections', database: 'Database',
+    git: 'Git', issues: 'Issues', product: 'Product',
     api_client: 'API Client', workflows: 'Workflows', channels: 'Channels',
     skill_eval: 'Skills Evaluator', skills: 'Skills', insights: 'Insights',
     usage: 'Usage', self_improvement: 'Self-Improvement', context: 'Context',
     settings: 'Settings', users: 'Users', canvas: 'Canvas', design: 'Design Hall',
-    proof_pack: 'Proof Packs', mcp: 'MCP Control Plane', scheduled_tasks: 'Scheduled Tasks',
-    run_with_otto: 'Run with Otto', browser: 'Browser',
+    mcp: 'MCP Control Plane', scheduled_tasks: 'Scheduled Tasks',
+    browser: 'Browser',
     aws: 'AWS — accounts', aws_s3: 'AWS — S3', aws_sqs: 'AWS — SQS', aws_ec2: 'AWS — EC2',
     aws_athena: 'AWS — Athena', aws_eks: 'AWS — EKS', aws_rds: 'AWS — RDS', kubernetes: 'Kubernetes',
   };

@@ -7,7 +7,6 @@
 import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { RelaySocket, type RelayStatus } from '../src/lib/relaySocket.ts';
-import { GameClient, type GameConnection } from '../src/modules/rooms/games/client.ts';
 
 class Socket {
   static OPEN = 1;
@@ -81,21 +80,4 @@ test('an ended relay never reconnects, and invalid frames do not count as livene
   r.reconnect();
   context.mock.timers.tick(10_000);
   assert.equal(Socket.instances.length, count);
-});
-
-test('GameClient exposes gave-up and a Reconnect that resets the attempts', (context) => {
-  install(context);
-  const states: GameConnection[] = [];
-  const client = new GameClient('https://host.test', { room_id: 'g', member_id: 'm', role: 'guest', token: 'k'.repeat(43), config: { game: 'kart', map: 'meadow' } }, () => {}, (s) => states.push(s));
-  context.after(() => client.dispose());
-  client.connect();
-  assert.deepEqual(Socket.instances.at(-1)!.protocols, ['otto-game', 'k'.repeat(43)]);
-  for (let i = 0; i < 5; i++) { Socket.instances.at(-1)!.close(); context.mock.timers.tick(5000); }
-  Socket.instances.at(-1)!.close();
-  assert.equal(states.at(-1), 'gave-up');
-  const count = Socket.instances.length;
-  client.reconnect();
-  assert.equal(Socket.instances.length, count + 1);
-  Socket.instances.at(-1)!.onmessage!({ data: JSON.stringify({ type: 'closed', reason: 'Host left' }) });
-  assert.equal(states.at(-1), 'closed');
 });

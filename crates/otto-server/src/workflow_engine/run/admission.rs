@@ -309,7 +309,7 @@ async fn isolate_repos(
             .ok()
             .flatten();
         if let Some(rev) = rev {
-            deliver_run_result(ctx, workflow, &nodes, RunStatus::Error, None, &input, None).await;
+            deliver_run_result(ctx, workflow, &nodes, RunStatus::Error, &input, None).await;
             emit_run_updated(
                 ctx,
                 &workflow.workspace_id,

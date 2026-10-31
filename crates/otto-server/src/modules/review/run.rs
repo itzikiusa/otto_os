@@ -90,16 +90,6 @@ pub(crate) async fn effective_review_mode(
     mode_source(&cfg)
 }
 
-/// How long a caller that BLOCKS on a review (Run with Otto's review stage)
-/// may wait before declaring it overdue: the per-agent grace period the run
-/// will actually use (config override / diff heuristic, orchestrator-scaled)
-/// plus the summarizer's ceiling plus slack for spawn + persistence. Waiting
-/// any less reads the finding counts mid-run and reports a false "0 findings".
-pub(crate) async fn review_wait_budget(ctx: &ServerCtx, repo_id: &Id, diff_len: usize) -> Duration {
-    let cfg = load_review_config_for_repo(ctx, repo_id).await;
-    review_wait_budget_for(&cfg, diff_len)
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_review(
     ctx: ServerCtx,
@@ -781,54 +771,6 @@ pub(crate) async fn review_open_counts_by_severity(
         }
     }
     (bug, warn, info)
-}
-
-/// Build/update the review's proof pack with a `review` artifact whose status is
-/// Failed when unresolved findings remain, else Passed. Drives the
-/// `review_unresolved` badge. Best-effort.
-pub(crate) async fn assemble_review_proof(ctx: &ServerCtx, review_id: &Id, workspace_id: &Id) {
-    use otto_core::proof::{ProofArtifactKind, ProofArtifactStatus, WorkItemKind};
-    let (total, open, blocker) = review_findings_counts(ctx, review_id).await;
-    let pack = match crate::proof::gate(
-        ctx,
-        WorkItemKind::Review,
-        review_id,
-        workspace_id,
-        "Code review",
-        "otto",
-    )
-    .await
-    {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::debug!(review = %review_id, "review proof gate failed: {e}");
-            return;
-        }
-    };
-    let status = if open > 0 {
-        ProofArtifactStatus::Failed
-    } else {
-        ProofArtifactStatus::Passed
-    };
-    let resolved = total.saturating_sub(open);
-    let body = format!(
-        "Review findings: {open} unresolved ({blocker} blocker), {resolved} resolved, {total} total.",
-    );
-    let meta = serde_json::json!({
-        "open": open, "resolved": resolved, "total": total, "blocker_count": blocker,
-    });
-    let _ = crate::proof::upsert_content_artifact(
-        ctx,
-        &pack,
-        ProofArtifactKind::Review,
-        "Review findings",
-        &body,
-        status,
-        meta,
-        "otto",
-    )
-    .await;
-    let _ = crate::proof::recompute_and_emit(ctx, &pack.id).await;
 }
 
 /// Resolve the repo's git token (the fetch must reach a private origin) and

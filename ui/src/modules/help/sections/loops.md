@@ -56,7 +56,7 @@ Build loops work in an isolated `goal-loop/<id>` git worktree, so your own check
 - Draft, Running, Paused, Blocked (needs a decision, repeated failure, a human check or review findings), Exhausted (hit a limit), Succeeded, Failed, Stopped.
 
 **Evidence**
-- Build loops attach the real working contents (committed, staged, unstaged and untracked changes), command output and evaluator evidence to a proof pack. Research reports are attached as evidence.
+- Build loops record the real working contents (committed, staged, unstaged and untracked changes), command output and evaluator evidence. Research reports are attached as evidence.
 
 ## Keyboard shortcuts
 
@@ -79,7 +79,5 @@ None specific to this page.
 ## Related
 
 - [Agents](#/walkthroughs/agents)
-- [Swarm](#/walkthroughs/swarm)
 - [Workflows](#/walkthroughs/workflows)
-- [Proof](#/walkthroughs/proof)
-- [Mission Control](#/walkthroughs/mission-control)
+- [Scheduled Tasks](#/walkthroughs/scheduled-tasks)

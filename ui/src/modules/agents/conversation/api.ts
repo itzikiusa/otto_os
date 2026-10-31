@@ -2,7 +2,7 @@
 // Every path the daemon derives itself; the ONLY client-supplied path is the
 // History route's `?path=` (server-confined to the two provider roots).
 import { api, authedBlobUrl } from '../../../lib/api/client';
-import type { InboxUploadResp, SlashCommand } from '../../../lib/api/types';
+import type { FsBrowse, InboxUploadResp, SlashCommand } from '../../../lib/api/types';
 
 // Reading lives in the store (it owns paging + the live tail); re-exported so
 // the module has one import surface.
@@ -59,4 +59,23 @@ function blobToBase64(blob: Blob): Promise<string> {
  *  ("esc to interrupt"). `submit: false` writes the byte verbatim. */
 export function interruptAgent(sessionId: string): Promise<void> {
   return api.post<void>(`/sessions/${encodeURIComponent(sessionId)}/input`, { text: '\u001b', submit: false });
+}
+
+/** Write raw keystrokes (e.g. `"y\r"`, `"a\r"`, `"n\r"`) into the session's PTY
+ *  verbatim (`submit: false`) to answer an approval or interactive prompt. */
+export function sendRawInput(sessionId: string, text: string): Promise<void> {
+  return api.post<void>(`/sessions/${encodeURIComponent(sessionId)}/input`, { text, submit: false });
+}
+
+/** Interrupt the active turn (Esc), let the CLI settle out of streaming mode,
+ *  and immediately submit a new prompt to redirect ("steer") the agent mid-turn. */
+export async function steerAgent(sessionId: string, text: string): Promise<void> {
+  await interruptAgent(sessionId);
+  await new Promise<void>((resolve) => setTimeout(resolve, 120));
+  await submitPrompt(sessionId, text);
+}
+
+/** Browse one workspace folder (including files) for `@file` mention typeahead. */
+export function browseWorkspaceFiles(path: string, signal?: AbortSignal): Promise<FsBrowse> {
+  return api.get<FsBrowse>(`/fs/browse?path=${encodeURIComponent(path)}&files=true`, signal);
 }

@@ -86,24 +86,40 @@ Examples in the shell that mirror for free:
 - `BottomNav.svelte`: `.more-sheet { inset-inline-start/-end: 0 }`,
   `.bn-badge { inset-inline-end: -8px }`.
 - `Appearance.svelte`: `.theme-card { text-align: start }`,
-  `.exp-tag { margin-inline-start: 6px }`.
+  `.term-size-label { margin-inline-end: 6px }`.
 
 This same logical-property discipline runs across the module pages (Git, Database,
 Brokers, Product, API, Swarm, Vault, …) — `grep`-able as the long list of files
 using `inset-inline`/`margin-inline`. The net effect: toggling RTL mirrors the
 chrome **and** the content panes with no extra work.
 
-### 2.3 Terminal RTL — the hard problem (deep-dive)
+### 2.2b Per-block BiDi across Threads, Chat, Markdown & Rooms
+
+Regardless of the shell layout direction, prose in Threads, Agent Chat, Markdown,
+and Rooms uses **per-block Unicode word-counted direction detection**
+(`ui/src/lib/textDirection.ts`):
+
+- Code blocks (`<pre>`), inline code (`<code>`), URLs, `@file` mentions, and file
+  paths are stripped before counting strong RTL vs strong LTR words so technical
+  identifiers inside a Hebrew or Arabic sentence never flip the paragraph to LTR.
+- Rendered HTML blocks (`<p>`, `<li>`, `<h1>`–`<h6>`, `<blockquote>`, `<td>`,
+  `<th>`) receive explicit `dir="rtl"` or `dir="ltr"`, while `<pre>` and `<code>`
+  always get `dir="ltr" style="unicode-bidi: isolate"`.
+- Composer `<textarea>` controls and user bubbles use `unicode-bidi: plaintext;
+  text-align: start` alongside dynamic direction detection, while file chips,
+  git branches, CWD badges, and model tags stay `dir="ltr"` isolated.
+
+### 2.3 Terminal RTL — the grid reflow toggle (deep-dive)
 
 A terminal is the one place where `<html dir="rtl">` is **not** enough. xterm.js
 renders text to a grid, and with the default **WebGL renderer** it paints cells in
 raw *logical* order with no bidi awareness — so Hebrew would come out reversed and
-left-aligned regardless of document direction. Otto therefore ships a **separate,
-opt-in experimental toggle** specifically for terminal text:
+left-aligned regardless of document direction. Otto therefore ships a **dedicated,
+opt-in toggle** specifically for terminal text:
 
-**Settings → Appearance → "Right-to-left text in the terminal"** (labelled
-*Experimental*), bound to `ui.rtlBidi`, persisted to `localStorage` key
-**`otto_term_rtl_bidi`**. Its warning text spells out the trade-off verbatim:
+**Settings → Appearance → "Right-to-left text in the terminal"**, bound to
+`ui.rtlBidi`, persisted to `localStorage` key **`otto_term_rtl_bidi`**. Its hint
+text spells out the trade-off verbatim:
 
 > ⚠ Lays out Hebrew right-to-left with English embedded left-to-right, using the
 > browser's bidi engine (switches the terminal off the GPU renderer). Because text
@@ -508,7 +524,9 @@ violation across the WCAG 2.0/2.1 A/AA tag set, on every page, on every profile.
 **Capabilities**
 - Full layout mirroring (LTR↔RTL) via a single `<html dir>` flip, no per-component
   RTL code.
-- Optional bidi-correct terminal output for Hebrew + embedded English.
+- Automatic per-block BiDi layout across Threads, Chat, Markdown, and Rooms with
+  isolated LTR code spans, file paths, and URLs (`ui/src/lib/textDirection.ts`).
+- Optional bidi-correct terminal output for Hebrew, Arabic + embedded English.
 - Bundled Cousine Hebrew monospace; live terminal-font switching.
 - Three responsive shells (desktop 3-pane, tablet 2-pane, phone single-pane +
   drawers + bottom nav + action bar), live-rebucketing on rotation.
@@ -518,9 +536,10 @@ violation across the WCAG 2.0/2.1 A/AA tag set, on every page, on every profile.
 - Verified by an extensive Playwright matrix incl. light, RTL, and a11y gates.
 
 **Limitations**
-- **Terminal RTL is experimental.** The DOM-renderer bidi reflow breaks exact
-  monospace column alignment — good for prose/chat output, imperfect for TUI tables
-  and box-drawing. It also disables the GPU renderer for that terminal.
+- **Terminal RTL trades off strict grid alignment.** The DOM-renderer bidi reflow
+  breaks exact monospace column alignment — good for prose/chat output, imperfect
+  for TUI tables and box-drawing. It also disables the GPU renderer for that
+  terminal.
 - RTL/theme/direction/isolation are **per-device only** — not synced to the
   account or across devices.
 - The two RTL toggles are independent on purpose; **layout RTL does not reflow the

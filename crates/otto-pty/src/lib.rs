@@ -2371,4 +2371,92 @@ mod tests {
             "history row emitted at the narrowed width — replayed content truncated"
         );
     }
+
+    #[test]
+    fn agy_cursed_renderer_sequences_survive_snapshot_roundtrip() {
+        // BubbleTea v2 (`cursedRenderer` in Antigravity `agy`) drives incremental
+        // TUI diffs with ECMA-48 horizontal/vertical relative jumps, tab jumps,
+        // repeat-char (`REP`), `HVP`, `SCOSC`/`SCORC`, `DECAWM` wrap toggling,
+        // and `IRM` insert mode. Feed all of them into a PTY mirror, format a
+        // `snapshot_with_history` payload, replay into a fresh `vt100::Parser`,
+        // and verify both expected layout and exact screen round-trip parity.
+        let mirror = Mirror::new(80, 24, RingBuffer::new(200, 8192));
+
+        // Scroll a few header lines into history first so `snapshot_with_history`
+        // exercises both scrollback and live-viewport formatting.
+        let mut stream = Vec::new();
+        for i in 1..=30 {
+            stream.extend_from_slice(format!("AGY_HIST_{i:02}\r\n").as_bytes());
+        }
+        // Clear live viewport and exercise every BubbleTea v2 sequence:
+        // - HVP `\x1b[4;1f` (row 4, col 1, 1-based -> row idx 3, col 0) + REP `═\x1b[5b` (6 `═` total)
+        // - HPA `\x1b[15\`` (col 15 -> idx 14) + "BOX"
+        // - CHT `\x1b[2I` (2 tab stops forward) + CBT `\x1b[1Z` (1 tab stop back) + "TAB"
+        // - HPR `\x1b[3a` (+3 cols) + VPR `\x1b[2e` (+2 rows -> row idx 5) + "REL"
+        // - SCOSC `\x1b[s`, jump away to paint row 1, SCORC `\x1b[u` + "!END"
+        // - IRM `\x1b[4h` / `\x1b[4l`: write "ABCD" at row 8 col 1, move to col 3, insert "XY" -> "ABXYCD"
+        // - DECAWM `\x1b[?7l` / `\x1b[?7h`: disable autowrap on row 10, write 90 chars -> clamps at col 80 without spilling to row 11
+        stream.extend_from_slice(b"\x1b[2J\x1b[H");
+        stream.extend_from_slice("\x1b[4;1f═\x1b[5b".as_bytes());
+        stream.extend_from_slice(b"\x1b[15`BOX\x1b[2I\x1b[1ZTAB");
+        stream.extend_from_slice(b"\x1b[3a\x1b[2eREL");
+        stream.extend_from_slice(b"\x1b[s\x1b[1;1HTOP_BANNER\x1b[u!END");
+        stream.extend_from_slice(b"\x1b[8;1HABCD\x1b[8;3H\x1b[4hXY\x1b[4l");
+        stream.extend_from_slice(b"\x1b[10;1H\x1b[?7l");
+        stream.extend_from_slice(&[b'W'; 89]);
+        stream.extend_from_slice(b"Z\x1b[?7h");
+
+        mirror.feed_bytes(Bytes::from(stream));
+
+        let capture = ScreenCapture {
+            screen: lock_unpoisoned(&mirror.parser).screen().clone(),
+        };
+        let snap = capture.format(1000);
+
+        let orig_rows: Vec<String> = capture.screen.rows(0, 80).collect();
+        assert_eq!(orig_rows[0], "TOP_BANNER");
+        assert!(
+            orig_rows[3].starts_with("══════"),
+            "REP sequence failed on row 4: {:?}",
+            orig_rows[3]
+        );
+        assert!(
+            orig_rows[3].contains("BOX") && orig_rows[3].contains("TAB"),
+            "HPA/CHT/CBT failed on row 4: {:?}",
+            orig_rows[3]
+        );
+        assert!(
+            orig_rows[5].contains("REL!END"),
+            "HPR/VPR/SCOSC/SCORC failed on row 6: {:?}",
+            orig_rows[5]
+        );
+        assert_eq!(orig_rows[7], "ABXYCD", "IRM insert mode failed on row 8");
+        assert_eq!(
+            orig_rows[9].len(),
+            80,
+            "DECAWM off row 10 should fill 80 cols"
+        );
+        assert!(
+            orig_rows[9].ends_with('Z'),
+            "DECAWM off final char should overwrite col 80"
+        );
+        assert_eq!(
+            orig_rows[10], "",
+            "DECAWM off must not wrap onto row 11: {:?}",
+            orig_rows[10]
+        );
+
+        let mut second = vt100::Parser::new(24, 80, 1000);
+        second.process(&snap);
+        let replayed_rows: Vec<String> = second.screen().rows(0, 80).collect();
+        assert_eq!(replayed_rows, orig_rows);
+        assert_eq!(
+            second.screen().cursor_position(),
+            capture.screen.cursor_position()
+        );
+        assert!(
+            String::from_utf8_lossy(&snap).contains("AGY_HIST_01"),
+            "scrollback history should also survive snapshot formatting"
+        );
+    }
 }

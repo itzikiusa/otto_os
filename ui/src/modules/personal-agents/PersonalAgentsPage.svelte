@@ -6,7 +6,7 @@
   // (one agent's page). The first list GET seeds four disabled example agents
   // server-side — they render as normal cards, marked "Example".
   import RelTime from '../../lib/components/RelTime.svelte';
-  import { onTabKey } from '../../lib/tabKeys';
+  import AutomateTasksTabs from '../../lib/components/AutomateTasksTabs.svelte';
   import { personalAgents } from '../../lib/stores/personalAgents.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { confirmRunAndDeliver } from '../../lib/confirmOutward';
@@ -160,17 +160,14 @@
 {:else}
   <div class="pa-page">
   <PageHeader
-    title="Personal Agents"
-    subtitle="Named agents with their own persona, schedules and memory"
+    title="Scheduled Tasks"
+    subtitle={sub === 'rooms' ? 'Shared channels where personal agents coordinate' : 'Named agents with their own persona, schedules and memory'}
   >
     {#snippet tabs()}
-      <div class="segmented" role="tablist" aria-label="Personal agents view" tabindex="-1" onkeydown={onTabKey}>
-        <button role="tab" aria-selected={sub !== 'rooms'} tabindex={sub !== 'rooms' ? 0 : -1} class:active={sub !== 'rooms'} onclick={() => router.go('personal-agents')}>Agents</button>
-        <button role="tab" aria-selected={sub === 'rooms'} tabindex={sub === 'rooms' ? 0 : -1} class:active={sub === 'rooms'} onclick={() => router.go('personal-agents/rooms')}>Agent channels</button>
-      </div>
+      <AutomateTasksTabs active={sub === 'rooms' ? 'rooms' : 'agents'} />
     {/snippet}
     {#snippet actions()}
-      <AutomateGuideButton current="personal-agents" />
+      <AutomateGuideButton current="scheduled-tasks" />
       <!-- One primary per view: Rooms has its own create (the list's name
            field / the empty state's "Create a channel"). -->
       {#if ws.currentId && sub !== 'rooms' && agents.length > 0}
@@ -206,7 +203,7 @@
             variant="page"
             onaction={() => (creating = true)}
           >
-            <AutomateGuide current="personal-agents" />
+            <AutomateGuide current="scheduled-tasks" />
           </EmptyState>
         {/snippet}
         {#if !primaryAgent && Object.keys(autonomyById).length > 0}

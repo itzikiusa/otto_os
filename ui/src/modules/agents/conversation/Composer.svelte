@@ -16,35 +16,34 @@
 <script lang="ts">
   // Chat composer (sessionId mode, editor role, session not exited). One box
   // that grows with the text (2 lines at rest, up to ~40% of the window) with
-  // its tools on a row inside it: attach image · the key hints · Stop (while
-  // the agent works: one Esc into its terminal, what "esc to interrupt" does)
-  // · Send. While the agent is busy a send is still accepted — Claude Code /
-  // Codex queue typed input and deliver it when the turn ends (the chat shows
-  // it as a "Queued" chip until then), so the box says so instead of blocking.
-  // ⏎ submits
-  // exactly the typed text as ONE prompt into the agent's PTY, ⇧⏎ inserts a
-  // newline, `/` passes through untouched (slash commands are the CLI's) — with
-  // a completion popup listing the provider's built-ins plus the user's own
-  // commands/skills (`GET …/slash-commands`). Pasted / dropped images upload
-  // to the session inbox and show as thumbnails under the box; on send each
-  // becomes an explicit `[Image: <path>]` line after the text. The status line
-  // shows the session status and any board tasks still waiting to be nudged in.
-  // OS text prediction / autocorrect is off here: the bubble it pops over the
-  // box is noise when you are typing paths, flags and slash commands.
-  import { untrack } from 'svelte';
+  // its tools on a row inside it: attach image · key hints · Stop / Steer /
+  // Queue (while busy) or Send, plus an inline Pending Approval dock on the top
+  // edge when `status === 'approval'` / `waiting`, and `@file` workspace mention
+  // typeahead alongside `/` slash-command completion.
+  import { tick, untrack } from 'svelte';
   import { toastError } from '../../../lib/toastError';
   import { announce } from '../../../lib/announce.svelte';
   import { toasts } from '../../../lib/toast.svelte';
-  import { activity } from '../../../lib/stores/activity.svelte';
+  import { detectBlockDirection } from '../../../lib/textDirection';
   import type { SessionStatus, SlashCommand } from '../../../lib/api/types';
-  import { fetchSlashCommands, interruptAgent, submitPrompt, uploadInboxImage } from './api';
-  import { tick } from 'svelte';
+  import { fetchSlashCommands, interruptAgent, steerAgent, submitPrompt, uploadInboxImage } from './api';
+  import type { ToolCallBlock } from './format';
+  import {
+    detectMentionAtCaret,
+    extractMentionedFiles,
+    removeMentionFromDraft,
+    searchWorkspaceFiles,
+    type MentionEntry,
+  } from './fileMentions';
+  import ComposerApprovalDock from './ComposerApprovalDock.svelte';
+  import ComposerAttachments, { type ComposerAttachment } from './ComposerAttachments.svelte';
+  import ComposerFooter from './ComposerFooter.svelte';
+  import ComposerPopups from './ComposerPopups.svelte';
 
   import { transcript } from '../../../lib/stores/transcript.svelte';
   import { ws } from '../../../lib/stores/workspace.svelte';
   import { events } from '../../../lib/events.svelte';
   import { sessionState } from '../../../lib/status';
-  import StatusDot from '../../../lib/components/StatusDot.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
 
   interface Props {
@@ -61,28 +60,41 @@
     /** Unsent text sitting in the terminal's input box — a chat send is
      *  appended to it by the CLI, so it is shown as the message's prefix. */
     termInput?: string;
-    /** "Claude" / "Codex" — the placeholder and hints name the agent. */
+    /** "Claude" / "Codex" / "Antigravity" — placeholder and hints name the agent. */
     agentName?: string;
+    /** Provider slug (`claude` / `codex` / `agy` / …) for the footer badge. */
+    provider?: string;
+    /** Open tool call when the session is paused on an approval / question. */
+    pendingCall?: ToolCallBlock | null;
+    /** True when the session needs user confirmation right now. */
+    waiting?: boolean;
   }
-  let { sessionId, status, onresume, cwd = '', branch = null, model = null, termStatus = '', termInput = '', agentName = 'the agent' }: Props = $props();
+  let {
+    sessionId,
+    status,
+    onresume,
+    cwd = '',
+    branch = null,
+    model = null,
+    termStatus = '',
+    termInput = '',
+    agentName = 'the agent',
+    provider = '',
+    pendingCall = null,
+    waiting = false,
+  }: Props = $props();
 
-  // The keyed parent creates one instance per session. Capture ownership once
-  // so an upload or submit that finishes after navigation still updates A.
   const ownerId = untrack(() => sessionId);
-  // Read the shared draft directly: an older pending send can finish after
-  // this same session is reopened, so component-local copies would go stale.
   const text = $derived(transcript.draft(ownerId));
-  const shortCwd = $derived(cwd.replace(/^\/Users\/[^/]+/, '~').replace(/^\/home\/[^/]+/, '~'));
+  const draftDir = $derived(detectBlockDirection(text));
+  const workspaceRoot = $derived(cwd || ws.current?.root_path || '');
   const sending = $derived(transcript.sending(ownerId));
   const uploading = $derived(pendingUploads.get(ownerId) ?? 0);
-  // a11y-6-01: the upload edge is announced; the visible "Uploading…" is not a live region.
   const isUploading = $derived(uploading > 0);
   $effect(() => { if (isUploading) announce('Uploading images…'); });
   let ta = $state<HTMLTextAreaElement | null>(null);
+  let customReplyHint = $state(false);
 
-  // A pending send/upload must not take the caret back from search, another
-  // editor or a dialog opened in the meantime. The body case covers a composer
-  // button losing focus when it becomes disabled during its request.
   function restoreComposerFocus(): void {
     const focused = document.activeElement;
     if (ta?.isConnected && (focused === document.body || composerEl?.contains(focused))) {
@@ -90,16 +102,9 @@
     }
   }
 
-  interface Attachment {
-    path: string;
-    name: string;
-    /** Object URL of the local file — preview only, never sent. */
-    url: string;
-  }
   const attachments = $derived(transcript.attachments(ownerId));
+  const mentionedFiles = $derived(extractMentionedFiles(text));
 
-  // The shared session state (lib/status.ts): the same words the sidebar, tab
-  // and pane header use — a resumable session is "Suspended", not "ended".
   const st = $derived(
     sessionState(
       ws.getSession(sessionId),
@@ -109,25 +114,11 @@
     ),
   );
   const exited = $derived(st.inactive);
-  const pendingNudges = $derived(activity.tasks(sessionId).filter((t) => t.nudge_pending).length);
-  const statusLabel = $derived(st.key === 'working' ? 'Working…' : st.label);
+  const busy = $derived(status === 'working');
+  const needsApproval = $derived(!exited && !busy && ((status as string) === 'approval' || waiting));
 
-  // Two lines at rest (CSS min-height; one in a narrow tile), growing with the
-  // text up to ~40% of the window; the textarea itself never scrolls sideways (wrap +
-  // overflow-x hidden), so nothing overlays the placeholder.
-  // The cap is the smaller of 40% of the window and half of the PANE the composer
-  // sits in (a short tile or split pane), so the box never crowds out the chat;
-  // past it the textarea scrolls inside.
-  // Half the pane is not enough on its own: in a short tile the composer's own
-  // rows (attachments, toolbar) and the pane's fixed rows (header, status) eat
-  // the rest, so the cap also reserves MIN_CHAT px for the conversation itself.
   let paneH = $state(0);
-  /** Conversation viewport kept visible however tall the draft gets (~5 lines). */
   const MIN_CHAT = 96;
-  /** `paneBudget()`, cached. Measuring walks every pane child (computed style
-   *  + offsetHeight), which on a keystroke forces a full layout of the chat —
-   *  so it's refreshed only when the pane resizes or the composer's own rows
-   *  change (attachments), never per keystroke. Plain `let`: nothing renders it. */
   let budget = Infinity;
   function measureBudget(): void {
     budget = paneBudget();
@@ -143,17 +134,16 @@
     const chrome = composerEl.offsetHeight - ta.offsetHeight;
     return pane.clientHeight - fixed - chrome - MIN_CHAT;
   }
-  /** One forced layout: reset → read scrollHeight → set. */
   function autosize(): void {
     if (!ta) return;
     ta.style.height = 'auto';
     const byWindow = Math.floor(window.innerHeight * 0.4);
     const byPane = paneH > 0 ? Math.floor(paneH * 0.5) : byWindow;
-    // One line is the floor when the pane is too short for the budget.
     const cap = Math.max(24, Math.min(byWindow, byPane, Math.floor(budget)));
     ta.style.height = `${Math.min(cap, Math.max(ta.scrollHeight, 0))}px`;
   }
   let composerEl = $state<HTMLDivElement | null>(null);
+  let wrapEl = $state<HTMLDivElement | null>(null);
   $effect(() => {
     const pane = composerEl?.parentElement;
     if (!pane || typeof ResizeObserver === 'undefined') return;
@@ -170,27 +160,25 @@
     ro.observe(pane);
     return () => ro.disconnect();
   });
-  // The composer's own optional rows (the attachment strip, the "In terminal"
-  // line) eat into the pane budget: re-measure when they appear or go.
   $effect(() => {
     void attachments.length;
+    void mentionedFiles.length;
+    void needsApproval;
     void !!termInput;
     void tick().then(() => {
       measureBudget();
       autosize();
     });
   });
-  // The ONE per-keystroke resize: typing updates the bound draft, which re-runs
-  // this (there is no `oninput` resize too); a draft restored on mount, a
-  // reopened session or an accepted /command lands here the same way.
   $effect(() => {
     void text;
+    if (!text) customReplyHint = false;
     void tick().then(autosize);
   });
 
-  // ---- busy: queue + interrupt -------------------------------------------------
-  const busy = $derived(status === 'working');
+  // ---- busy: queue, steer + interrupt ------------------------------------------
   let stopping = $state(false);
+  let steering = $state(false);
   async function interrupt(): Promise<void> {
     if (stopping) return;
     stopping = true;
@@ -212,13 +200,11 @@
     void addImages(files);
   }
 
-  // ---- slash-command completion ------------------------------------------------
+  // ---- slash-command & @file mention completion --------------------------------
   let cmds = $state<SlashCommand[] | null>(null);
   let cmdsFor = '';
   let cmdIdx = $state(0);
   let cmdDismissed = $state(false);
-  let listEl = $state<HTMLDivElement | null>(null);
-  /** `/pre` on a single line → the prefix being completed, else null. */
   const cmdPrefix = $derived.by(() => {
     const m = /^\/([\w:-]*)$/.exec(text);
     return m ? m[1].toLowerCase() : null;
@@ -230,11 +216,42 @@
     return [...starts, ...within].slice(0, 12);
   });
   const cmdOpen = $derived(suggestions.length > 0);
-  // The slash popup is a listbox driven from the textarea (aria-activedescendant):
-  // focus never leaves the composer, ↑/↓ move the active option.
   const popId = $props.id();
+
+  let caret = $state(0);
+  let mentionDismissed = $state(false);
+  let fileHits = $state<MentionEntry[]>([]);
+  let fileIdx = $state(0);
+
+  function syncCaret(): void {
+    if (ta) caret = ta.selectionStart ?? text.length;
+  }
+
+  const activeMention = $derived(!cmdOpen && !mentionDismissed ? detectMentionAtCaret(text, caret) : null);
+  const mentionOpen = $derived(activeMention !== null && fileHits.length > 0);
+
   $effect(() => {
-    // Load once per session, the first time a `/` is typed at the start.
+    const m = activeMention;
+    const root = workspaceRoot;
+    if (!m || !root) {
+      fileHits = [];
+      return;
+    }
+    const ctrl = new AbortController();
+    void searchWorkspaceFiles(root, m.query, ctrl.signal)
+      .then((hits) => {
+        if (!ctrl.signal.aborted) {
+          fileHits = hits;
+          fileIdx = 0;
+        }
+      })
+      .catch(() => {
+        if (!ctrl.signal.aborted) fileHits = [];
+      });
+    return () => ctrl.abort();
+  });
+
+  $effect(() => {
     if (cmdPrefix == null || cmdsFor === sessionId) return;
     cmdsFor = sessionId;
     void fetchSlashCommands(sessionId)
@@ -246,43 +263,52 @@
     cmdIdx = 0;
   });
   $effect(() => {
-    // Typing again after Esc re-opens the list.
     void text;
     cmdDismissed = false;
+    mentionDismissed = false;
   });
-  $effect(() => {
-    const el = listEl?.children[cmdIdx] as HTMLElement | undefined;
-    el?.scrollIntoView({ block: 'nearest' });
-  });
-  // The popup opens ABOVE the box: cap its height to the room between the box and
-  // the top of the pane (or the window), so it never runs off the top edge.
-  let wrapEl = $state<HTMLDivElement | null>(null);
-  let popMax = $state(320);
-  function measurePopMax(): void {
-    if (!cmdOpen || !wrapEl) return;
-    const paneTop = Math.max(0, composerEl?.parentElement?.getBoundingClientRect().top ?? 0);
-    const room = wrapEl.getBoundingClientRect().top - paneTop - 12;
-    // Honour the real room even when it is tiny (a short split + attachments):
-    // a taller floor would push the list past the pane's clip. It scrolls.
-    popMax = Math.floor(Math.max(0, Math.min(320, window.innerHeight * 0.5, room)));
-  }
-  $effect(() => {
-    void suggestions.length;
-    void attachments.length;
-    void paneH;
-    if (!cmdOpen || !wrapEl) return;
-    measurePopMax();
-    window.addEventListener('resize', measurePopMax);
-    return () => window.removeEventListener('resize', measurePopMax);
-  });
+
   function acceptCmd(c: SlashCommand): void {
-    transcript.setDraft(ownerId, `/${c.name} `);
+    const next = `/${c.name} `;
+    transcript.setDraft(ownerId, next);
     cmdDismissed = true;
     queueMicrotask(() => {
       autosize();
       ta?.focus();
-      ta?.setSelectionRange(text.length, text.length);
+      ta?.setSelectionRange(next.length, next.length);
+      caret = next.length;
     });
+  }
+
+  function acceptMention(entry: MentionEntry): void {
+    const m = activeMention;
+    if (!m) return;
+    const insert = entry.isDir ? `@${entry.relPath}/` : `@${entry.relPath} `;
+    const next = `${text.slice(0, m.start)}${insert}${text.slice(m.end)}`;
+    const nextCaret = m.start + insert.length;
+    transcript.setDraft(ownerId, next);
+    if (!entry.isDir) mentionDismissed = true;
+    caret = nextCaret;
+    queueMicrotask(() => {
+      autosize();
+      ta?.focus();
+      ta?.setSelectionRange(nextCaret, nextCaret);
+    });
+  }
+
+  function removeFileMention(rel: string): void {
+    const next = removeMentionFromDraft(text, rel);
+    transcript.setDraft(ownerId, next);
+    queueMicrotask(() => {
+      autosize();
+      ta?.focus();
+      syncCaret();
+    });
+  }
+
+  function beginCustomReply(): void {
+    customReplyHint = true;
+    ta?.focus();
   }
 
   async function send(): Promise<void> {
@@ -309,27 +335,53 @@
     }
   }
 
+  async function steer(): Promise<void> {
+    const typed = text.replace(/\s+$/, '');
+    const imgs = attachments.map((a) => `[Image: ${a.path}]`);
+    const body = [typed, ...imgs].filter(Boolean).join('\n');
+    if (!body || uploading > 0 || steering || !transcript.tryBeginSend(ownerId)) return;
+    steering = true;
+    try {
+      const submittedImages = [...attachments];
+      await steerAgent(ownerId, body);
+      if (transcript.draft(ownerId).replace(/\s+$/, '') === typed) {
+        transcript.setDraft(ownerId, '');
+      }
+      for (const a of submittedImages) URL.revokeObjectURL(a.url);
+      transcript.setAttachments(ownerId, transcript.attachments(ownerId).filter((a) => !submittedImages.includes(a)));
+      queueMicrotask(autosize);
+      toasts.info('Steered', `Interrupted and redirected ${agentName}`);
+    } catch (e) {
+      toastError('Couldn’t steer the agent', e);
+    } finally {
+      steering = false;
+      transcript.finishSend(ownerId);
+      restoreComposerFocus();
+    }
+  }
+
   function onKeydown(e: KeyboardEvent): void {
     if (e.isComposing) return;
+    if (busy && e.key === 'Enter' && e.shiftKey && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      void steer();
+      return;
+    }
+    if (mentionOpen) {
+      if (e.key === 'ArrowDown') { e.preventDefault(); fileIdx = (fileIdx + 1) % fileHits.length; return; }
+      if (e.key === 'ArrowUp') { e.preventDefault(); fileIdx = (fileIdx - 1 + fileHits.length) % fileHits.length; return; }
+      if (e.key === 'Escape') { e.preventDefault(); mentionDismissed = true; return; }
+      if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey)) {
+        const pick = fileHits[fileIdx];
+        if (pick) { e.preventDefault(); acceptMention(pick); return; }
+      }
+    }
     if (cmdOpen) {
-      if (e.key === 'ArrowDown') {
-        e.preventDefault();
-        cmdIdx = (cmdIdx + 1) % suggestions.length;
-        return;
-      }
-      if (e.key === 'ArrowUp') {
-        e.preventDefault();
-        cmdIdx = (cmdIdx - 1 + suggestions.length) % suggestions.length;
-        return;
-      }
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        cmdDismissed = true;
-        return;
-      }
+      if (e.key === 'ArrowDown') { e.preventDefault(); cmdIdx = (cmdIdx + 1) % suggestions.length; return; }
+      if (e.key === 'ArrowUp') { e.preventDefault(); cmdIdx = (cmdIdx - 1 + suggestions.length) % suggestions.length; return; }
+      if (e.key === 'Escape') { e.preventDefault(); cmdDismissed = true; return; }
       if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey)) {
         const pick = suggestions[cmdIdx];
-        // ⏎ on an exact, fully-typed name sends it; anything else completes.
         if (e.key === 'Enter' && pick && `/${pick.name}`.toLowerCase() === text.trim().toLowerCase()) {
           e.preventDefault();
           void send();
@@ -345,11 +397,12 @@
       void send();
     }
   }
+
   const sendTitle = $derived(
     uploading > 0
       ? 'Uploading images… send is available when they finish'
       : busy
-        ? `Send (⏎) — ${agentName} is busy, so it is queued and delivered when the current turn ends`
+        ? `Queue (⏎) — ${agentName} is busy, so this waits until the current turn finishes`
         : 'Send (⏎)',
   );
 
@@ -371,7 +424,7 @@
     restoreComposerFocus();
   }
 
-  function removeAttachment(a: Attachment): void {
+  function removeAttachment(a: ComposerAttachment): void {
     URL.revokeObjectURL(a.url);
     transcript.setAttachments(ownerId, attachments.filter((x) => x !== a));
   }
@@ -390,7 +443,14 @@
     void addImages(files);
   }
 
-  const canSend = $derived(!sending && uploading === 0 && (text.trim().length > 0 || attachments.length > 0));
+  const canSend = $derived(!sending && !steering && uploading === 0 && (text.trim().length > 0 || attachments.length > 0));
+  const placeholderText = $derived(
+    customReplyHint && needsApproval
+      ? `Type a custom reply for ${agentName} and press ⏎…`
+      : busy
+        ? `Queue a follow-up (⏎) or steer ${agentName} mid-turn (⇧⌘⏎)…`
+        : `Message ${agentName} — @ files · / commands`,
+  );
 </script>
 
 <div class="composer" bind:this={composerEl} data-status={status} ondragover={(e) => e.preventDefault()} ondrop={onDrop} role="group" aria-label="Message composer">
@@ -401,87 +461,89 @@
     </div>
   {:else}
     <div class="box-wrap" bind:this={wrapEl}>
-      {#if cmdOpen}
-        <div class="cmd-pop" id="{popId}-list" bind:this={listEl} style="--pop-max:{popMax}px" role="listbox" aria-label="Slash commands" data-slash-pop>
-          {#each suggestions as c, i (c.name)}
-            <!-- Picked on press: mousedown keeps focus (and the caret) in the
-                 textarea; the keyboard path is ↑/↓ + Tab/⏎ there. -->
-            <div
-              id="{popId}-opt-{i}"
-              class="cmd-row"
-              class:active={i === cmdIdx}
-              role="option"
-              tabindex="-1"
-              aria-selected={i === cmdIdx}
-              onmousedown={(e) => { e.preventDefault(); acceptCmd(c); }}
-              onmouseenter={() => (cmdIdx = i)}
-            >
-              <span class="cmd-name mono">/{c.name}</span>
-              <span class="cmd-desc dim">{c.description}</span>
-              <span class="cmd-src dim">{c.source === 'builtin' ? '' : c.source}</span>
-            </div>
-          {/each}
-          <div class="cmd-hint dim">↑↓ choose · Tab/⏎ complete · Esc dismiss</div>
-        </div>
-      {/if}
-      <div class="box" class:busy>
+      <ComposerPopups
+        {popId}
+        anchorEl={wrapEl}
+        paneEl={composerEl?.parentElement ?? null}
+        {paneH}
+        attachmentCount={attachments.length}
+        {mentionOpen}
+        {fileHits}
+        {fileIdx}
+        onfilehover={(i) => (fileIdx = i)}
+        onacceptmention={acceptMention}
+        {cmdOpen}
+        {suggestions}
+        {cmdIdx}
+        oncmdhover={(i) => (cmdIdx = i)}
+        onacceptcmd={acceptCmd}
+      />
+      <div class="box" class:busy class:needs-approval={needsApproval}>
+        {#if needsApproval}
+          <ComposerApprovalDock sessionId={ownerId} {agentName} {pendingCall} oncustomreply={beginCustomReply} />
+        {/if}
+        <ComposerAttachments {mentionedFiles} onremovemention={removeFileMention} />
         <textarea
           bind:this={ta}
           bind:value={() => text, (value) => transcript.setDraft(ownerId, value)}
           rows="1"
-          placeholder={busy ? `Queue a message for ${agentName}…` : `Message ${agentName} — / for commands`}
+          placeholder={placeholderText}
           aria-label="Message {agentName}"
           spellcheck="false"
           {...{ autocorrect: 'off' }}
           autocapitalize="off"
           autocomplete="off"
-          dir="auto"
+          dir={draftDir}
+          oninput={syncCaret}
+          onclick={syncCaret}
+          onkeyup={syncCaret}
+          onselect={syncCaret}
           onkeydown={onKeydown}
           onpaste={onPaste}
           aria-autocomplete="list"
-          aria-controls={cmdOpen ? `${popId}-list` : undefined}
-          aria-activedescendant={cmdOpen ? `${popId}-opt-${cmdIdx}` : undefined}
+          aria-controls={mentionOpen ? `${popId}-files` : cmdOpen ? `${popId}-list` : undefined}
+          aria-activedescendant={mentionOpen ? `${popId}-file-${fileIdx}` : cmdOpen ? `${popId}-opt-${cmdIdx}` : undefined}
         ></textarea>
         <div class="tools">
           <input bind:this={fileEl} type="file" accept="image/*" multiple hidden onchange={pickImages} />
           <button class="icon-btn tool" onclick={() => fileEl?.click()} aria-label="Attach images" title="Attach images (or paste / drop them)"><Icon name="image" size={14} /></button>
-          <span class="keys" aria-hidden="true">{busy ? 'Busy — ⏎ queues' : '⏎ send'} · ⇧⏎ new line</span>
+          <span class="keys" aria-hidden="true">
+            {busy ? '⏎ queue · ⇧⌘⏎ steer · ⇧⏎ new line' : '⏎ send · ⇧⏎ new line · @ file'}
+          </span>
           <span class="grow"></span>
+          {#if uploading > 0}<span class="uploading">Uploading…</span>{/if}
           {#if busy}
             <button class="btn small stop" onclick={() => void interrupt()} disabled={stopping} title="Interrupt {agentName} — sends Esc to its terminal"><Icon name="stop" size={12} /> Stop</button>
+            <button
+              class="btn small steer-btn"
+              onclick={() => void steer()}
+              disabled={!canSend}
+              title="Steer {agentName} (⇧⌘⏎) — interrupt the current step and send this prompt immediately"
+            >
+              <Icon name="zap" size={12} /> Steer
+            </button>
+            <button class="btn small primary queue-btn" onclick={() => void send()} disabled={!canSend} title={sendTitle}>
+              <Icon name="send" size={12} /> Queue
+            </button>
+          {:else}
+            <button class="send" onclick={() => void send()} disabled={!canSend} title={sendTitle} aria-label={uploading > 0 ? 'Send (uploading images)' : 'Send'}><Icon name="send" size={14} /></button>
           {/if}
-          {#if uploading > 0}<span class="uploading">Uploading…</span>{/if}
-          <button class="send" onclick={() => void send()} disabled={!canSend} title={sendTitle} aria-label={uploading > 0 ? 'Send (uploading images)' : 'Send'}><Icon name="send" size={14} /></button>
         </div>
       </div>
-      {#if attachments.length}
-        <div class="thumbs" data-attachments={attachments.length}>
-          {#each attachments as a (a.path)}
-            <div class="thumb" title={a.path}>
-              <img src={a.url} alt={a.name} />
-              <button class="thumb-x" onclick={() => removeAttachment(a)} title="Remove" aria-label="Remove {a.name}"><Icon name="x" size={12} /></button>
-            </div>
-          {/each}
-        </div>
-      {/if}
+      <ComposerAttachments {attachments} onremoveattachment={removeAttachment} />
     </div>
-    {#if termInput}
-      <div class="term-input" data-term-input title="Typed in the terminal but not sent. Sending from here appends your text after it — the CLI submits both as one message.">
-        <span class="dim">In terminal:</span> <span class="mono">{termInput}</span>
-      </div>
-    {/if}
-    <div class="status" data-status-line>
-      <StatusDot state={st} />
-      <span>{statusLabel}</span>
-      {#if uploading}<span class="dim">· uploading {uploading} image{uploading > 1 ? 's' : ''}…</span>{/if}
-      {#if pendingNudges}
-        <span class="dim" title="Board tasks waiting for the agent to go idle">· {pendingNudges} board task{pendingNudges > 1 ? 's' : ''} pending</span>
-      {/if}
-      {#if shortCwd}<span class="sep sep-cwd">·</span><span class="mono cwd" title={cwd}>{shortCwd}</span>{/if}
-      {#if branch}<span class="sep sep-branch">·</span><span class="mono branch" title="Git branch">⎇ {branch}</span>{/if}
-      {#if model}<span class="sep sep-model">·</span><span class="mono model" title="Model">{model}</span>{/if}
-      {#if termStatus}<span class="sep">·</span><span class="term-status" title="The agent’s own status line">{termStatus}</span>{/if}
-    </div>
+    <ComposerFooter
+      {sessionId}
+      {agentName}
+      {provider}
+      {st}
+      {cwd}
+      {branch}
+      {model}
+      {termStatus}
+      {termInput}
+      {uploading}
+    />
   {/if}
 </div>
 
@@ -489,18 +551,12 @@
   .composer {
     border-top: 1px solid var(--border);
     background: var(--bg);
-    /* The chat column's gutters, so the box lines up with the messages. */
     padding-block: 8px 6px;
     padding-inline: clamp(12px, 3.2cqi, 40px);
-    /* May shrink with a short pane (the box scrolls inside) instead of pushing
-       the chat out; the textarea is capped by the pane height in autosize(). */
     flex-shrink: 1;
     min-height: 0;
     display: flex;
     flex-direction: column;
-    /* Shed the tool row's hints and the status line's secondary spans by the
-       COMPOSER's width — it sits in a narrow tiled pane as readily as a
-       full-window chat. Same numbers as the `@container` blocks below. */
     container-type: inline-size;
   }
   .box-wrap {
@@ -520,14 +576,18 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-l);
     background: var(--surface);
-    padding-block: 8px 4px; padding-inline: 12px 6px;
+    padding-block: 8px 4px;
+    padding-inline: 12px 6px;
     overflow: hidden;
     min-width: 0;
     min-height: 0;
     box-shadow: var(--shadow-card);
   }
+  .box.needs-approval {
+    border-color: color-mix(in srgb, var(--warning) 48%, var(--border));
+  }
   .box:focus-within {
-    border-color: color-mix(in srgb, var(--accent) 60%, var(--border));
+    border-color: var(--accent-line-strong);
     box-shadow: 0 0 0 3px var(--accent-soft), var(--shadow-card);
   }
   textarea {
@@ -543,12 +603,15 @@
     min-height: 40px;
     max-height: 40vh;
     flex: 0 1 auto;
-    padding-block: 2px; padding-inline: 0 6px;
+    padding-block: 2px;
+    padding-inline: 0 6px;
     overflow-x: hidden;
     overflow-y: auto;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
     scrollbar-gutter: stable;
+    unicode-bidi: plaintext;
+    text-align: start;
   }
   .tools {
     display: flex;
@@ -571,15 +634,24 @@
   .grow {
     flex: 1;
   }
-  .stop {
+  .stop,
+  .steer-btn,
+  .queue-btn {
     flex-shrink: 0;
+  }
+  .steer-btn {
+    border-color: var(--accent-line);
+    color: var(--accent-text);
+    background: var(--accent-faint);
+  }
+  .steer-btn:hover:not(:disabled) {
+    background: var(--accent-soft);
   }
   .uploading {
     flex-shrink: 0;
     font-size: var(--fs-xs);
     color: var(--text-dim);
   }
-  /* Send: the composer's one filled control. */
   .send {
     flex-shrink: 0;
     display: inline-grid;
@@ -608,147 +680,8 @@
   textarea::placeholder {
     color: var(--text-dim);
   }
-  /* Completion popup: anchored above the box, clamped to the pane, scrolls. */
-  .cmd-pop {
-    position: absolute;
-    bottom: calc(100% + 6px);
-    inset-inline-start: 0;
-    width: min(100%, 560px);
-    max-width: 100%;
-    /* popMax (script) is the room above the box, from window.innerHeight. */
-    max-height: var(--pop-max);
-    overflow-y: auto;
-    background: var(--surface);
-    border: 1px solid var(--glass-border);
-    border-radius: var(--radius-l);
-    box-shadow: var(--glass-shadow);
-    padding: 4px;
-    z-index: var(--z-popover);
-  }
-  .cmd-row {
-    display: grid;
-    grid-template-columns: auto 1fr auto;
-    align-items: baseline;
-    gap: 10px;
-    padding: 4px 8px;
-    border-radius: var(--radius-s);
-    cursor: pointer;
-    font-size: var(--fs-s);
-    min-width: 0;
-  }
-  .cmd-row.active {
-    background: var(--accent-soft);
-  }
-  .cmd-name {
-    color: var(--accent-text);
-    white-space: nowrap;
-  }
-  .cmd-desc {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    min-width: 0;
-    font-size: var(--fs-xs);
-  }
-  .cmd-src {
-    font-size: var(--fs-xs);
-    text-transform: uppercase;
-    letter-spacing: .06em;
-  }
-  .cmd-hint {
-    font-size: var(--fs-xs);
-    padding: 4px 8px 2px;
-    border-top: 1px solid var(--border);
-    margin-top: 2px;
-  }
-  .thumbs {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-  }
-  .thumb {
-    position: relative;
-    width: 84px;
-    height: 84px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m);
-    overflow: hidden;
-    background: var(--surface-2);
-  }
-  .thumb img {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-    display: block;
-  }
-  .thumb-x {
-    position: absolute;
-    inset-block-start: 3px;
-    inset-inline-end: 3px;
-    width: 18px;
-    height: 18px;
-    border-radius: 50%;
-    border: 0;
-    background: var(--scrim-media);
-    color: var(--on-scrim);
-    display: grid;
-    place-items: center;
-    padding: 0;
-    cursor: pointer;
-  }
-  .status,
-  .term-input {
-    width: 100%;
-    box-sizing: border-box;
-    max-width: var(--chat-measure, none);
-    margin-inline: auto;
-  }
-  .status {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    padding: 4px 6px 0;
-    min-width: 0;
-    flex-wrap: wrap;
-    row-gap: 2px;
-  }
-  .sep {
-    opacity: 0.6;
-  }
-  .cwd,
-  .branch {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    max-width: 260px;
-  }
-  .branch {
-    color: var(--accent-text);
-  }
-  .term-status {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    min-width: 0;
-    flex: 0 1 auto;
-    max-width: 48%;
-  }
-  .term-input {
-    margin-block-start: 6px;
-    font-size: var(--fs-xs);
-    padding: 4px 10px;
-    border-radius: var(--radius-s);
-    background: var(--warning-soft);
-    border: 1px dashed color-mix(in srgb, var(--warning) 50%, var(--border));
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
   @media (max-width: 640px), (pointer: coarse) {
-    .send,
-    .thumb-x {
+    .send {
       width: var(--hit-min);
       height: var(--hit-min);
     }
@@ -761,8 +694,6 @@
     padding: 6px 0;
     font-size: var(--fs-s);
   }
-  /* ≤480px (a tile in a 2×2 grid): the box rests at one line and the status
-     row keeps only the state — cwd / branch / model are in the pane header. */
   @container (max-width: 480px) {
     .composer {
       padding-block: 6px 4px;
@@ -771,16 +702,7 @@
     textarea {
       min-height: 22px;
     }
-    .cwd,
-    .branch,
-    .model,
-    .sep-cwd,
-    .sep-branch,
-    .sep-model {
-      display: none;
-    }
   }
-  /* ≤420px: the key hints go too (a tip, not state). */
   @container (max-width: 420px) {
     .keys {
       display: none;

@@ -3,7 +3,7 @@
 //!
 //! WHY: the git tools were fixed so an agent names a repo instead of guessing
 //! an opaque id in the wrong workspace, but the SAME failure lived in every
-//! other tool: `otto_list_workflows` / `_connections` / `_swarms` listed only
+//! other tool: `otto_list_workflows` / `_connections` listed only
 //! the session's own workspace, `search_issues` demanded an `account_id` no
 //! tool listed, `list_scheduled_task_runs` wanted a task id, `k8s_*` a cluster
 //! id, and a name passed where an id was expected produced a bare 404 the agent
@@ -179,24 +179,6 @@ pub(crate) const KINDS: &[RefKind] = &[
             "/api/v1/workspaces/{ws}/brokers/clusters",
             &["name"],
             "list_broker_clusters",
-        )
-    },
-    RefKind {
-        keep: Some(&[
-            "id",
-            "name",
-            "description",
-            "status",
-            "workspace_id",
-            "preset_slug",
-        ]),
-        ..kind(
-            "swarm",
-            "swarm",
-            Scope::Workspace,
-            "/api/v1/workspaces/{ws}/swarm/swarms",
-            &["name"],
-            "list_swarms",
         )
     },
     kind(

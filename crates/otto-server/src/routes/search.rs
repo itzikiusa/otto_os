@@ -8,7 +8,6 @@
 //!   - product stories (`ctx.product_repo`)
 //!   - workflows (`WorkflowsRepo`)
 //!   - API-client saved requests (`ApiClientRepo`)
-//!   - swarm projects + tasks (`ctx.swarm_repo`)
 //!   - memories (`MemoriesRepo` keyword search)
 //!   - git repos (`ctx.git_store`)
 //!   - broker clusters (`BrokerClustersRepo`)
@@ -40,9 +39,8 @@ use crate::state::ServerCtx;
 /// A single ranked search hit across all object types.
 #[derive(Debug, Clone, Serialize)]
 pub struct SearchHit {
-    /// Discriminant: `"story"`, `"workflow"`, `"api_request"`, `"swarm_task"`,
-    /// `"swarm_project"`, `"memory"`, `"vault_note"`, `"repo"`,
-    /// `"broker_cluster"`, `"canvas"`.
+    /// Discriminant: `"story"`, `"workflow"`, `"api_request"`, `"memory"`,
+    /// `"vault_note"`, `"repo"`, `"broker_cluster"`, `"canvas"`.
     pub kind: String,
     /// Object id (workspace-scoped row id).
     pub id: String,
@@ -118,9 +116,7 @@ pub async fn search(
         if let Ok(rows) = otto_state::search::search(&ctx.pool, source, &ws_id, &q, CAP).await {
             for row in rows {
                 let actions: &[&str] = match source {
-                    otto_state::search::Source::Story | otto_state::search::Source::SwarmTask => {
-                        &["open", "send-to-agent", "copy-context"]
-                    }
+                    otto_state::search::Source::Story => &["open", "send-to-agent", "copy-context"],
                     otto_state::search::Source::Workflow => &["open", "rerun"],
                     otto_state::search::Source::ApiRequest => &["open", "rerun", "send-to-agent"],
                     otto_state::search::Source::Repo => &["open", "review"],

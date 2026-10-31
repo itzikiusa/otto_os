@@ -82,7 +82,7 @@ test('sections render in order, each module in exactly one', async ({ page }) =>
   expect(ids).toEqual(ORDER);
   await expect(head(page, 'infra')).toContainText('Infrastructure');
 
-  await expect(group(page, 'work').getByRole('button', { name: 'Mission Control', exact: true })).toBeVisible();
+  await expect(group(page, 'work').getByRole('button', { name: 'Rooms', exact: true })).toBeVisible();
   await expect(group(page, 'automate').getByRole('button', { name: 'Workflows', exact: true })).toBeVisible();
   await expect(group(page, 'build').getByRole('button', { name: 'Vault', exact: true })).toBeVisible();
   await expect(group(page, 'infra').getByRole('button', { name: 'Connections', exact: true })).toBeVisible();
@@ -164,12 +164,12 @@ test('customize: moves stay in-section, hidden stays hidden, empty sections vani
   await boot(page, 'home');
   // A folded section still lists every row while editing.
   await head(page, 'automate').click();
-  await expect(row(page, 'Swarm')).toHaveCount(0);
+  await expect(row(page, 'Goal Loops')).toHaveCount(0);
   await page.getByTestId('sidebar-edit-toggle').click();
-  await expect(page.getByTestId('sidebar-edit-row-swarm')).toBeVisible();
+  await expect(page.getByTestId('sidebar-edit-row-loops')).toBeVisible();
 
   // First row of a section can't move up (no crossing into the previous one).
-  await expect(page.getByRole('button', { name: 'Move Swarm up' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Move Goal Loops up' })).toBeDisabled();
   await expect(page.getByRole('button', { name: 'Move Home up' })).toBeDisabled();
   await expect(page.getByRole('button', { name: 'Move Usage down' })).toBeDisabled();
 
@@ -178,11 +178,11 @@ test('customize: moves stay in-section, hidden stays hidden, empty sections vani
     group(page, 'automate')
       .locator('[data-testid^="sidebar-edit-row-"]')
       .evaluateAll((els) => els.map((e) => e.getAttribute('data-testid')!.replace('sidebar-edit-row-', '')));
-  expect((await automateRows()).slice(0, 3)).toEqual(['swarm', 'loops', 'workflows']);
+  expect((await automateRows()).slice(0, 3)).toEqual(['loops', 'workflows', 'scheduled-tasks']);
   // The arrows open up on row hover / focus (the label keeps its room).
   await page.getByTestId('sidebar-edit-row-workflows').hover();
   await page.getByRole('button', { name: 'Move Workflows up' }).click();
-  expect((await automateRows()).slice(0, 3)).toEqual(['swarm', 'workflows', 'loops']);
+  expect((await automateRows()).slice(0, 3)).toEqual(['workflows', 'loops', 'scheduled-tasks']);
 
   // Hide both Insight modules → that section disappears outside edit mode.
   await page.getByTestId('sidebar-hide-insights').click();
@@ -201,7 +201,7 @@ test('customize: moves stay in-section, hidden stays hidden, empty sections vani
   const order = await group(page, 'automate')
     .locator('.nav-item')
     .evaluateAll((els) => els.map((e) => e.textContent!.trim()));
-  expect(order.slice(0, 3)).toEqual(['Swarm', 'Workflows', 'Goal Loops']);
+  expect(order.slice(0, 3)).toEqual(['Workflows', 'Goal Loops', 'Scheduled Tasks']);
   await page.locator('.navigator').getByRole('button', { name: 'Collapse sidebar' }).click();
   await expect(page.locator('.rail')).toBeVisible();
   await expect(page.locator('.rail').getByRole('button', { name: 'Usage', exact: true })).toHaveCount(0);
@@ -224,7 +224,7 @@ test('collapsed Rail: section separators, unique glyphs, accent selection', asyn
   const paths = await rail
     .locator('.rail-modules .rail-btn svg path')
     .evaluateAll((els) => els.map((e) => e.getAttribute('d')));
-  expect(paths.length).toBeGreaterThan(20);
+  expect(paths.length).toBeGreaterThanOrEqual(15);
   expect(new Set(paths).size).toBe(paths.length);
   const vault = rail.getByRole('button', { name: 'Vault', exact: true });
   await expect(vault).toHaveClass(/active/);
@@ -252,12 +252,12 @@ test('runtime plugins get their own trailing section (Navigator and Rail)', asyn
   await expect(page.locator('.rail').getByRole('button', { name: 'E2E Sidebar Plugin', exact: true })).toBeVisible();
 });
 
-test('⌘K reaches Vault, Workflows and Mission Control (derived from the registry)', async ({ page }) => {
+test('⌘K reaches Vault, Workflows and Rooms (derived from the registry)', async ({ page }) => {
   await boot(page, 'home');
   for (const [label, route, section] of [
     ['Vault', 'vault', 'Build'],
     ['Workflows', 'workflows', 'Automate'],
-    ['Mission Control', 'mission-control', 'Work'],
+    ['Rooms', 'rooms', 'Work'],
   ] as const) {
     // ⌘K focuses the floating bar — the desktop command surface.
     await page.keyboard.press('Meta+k');

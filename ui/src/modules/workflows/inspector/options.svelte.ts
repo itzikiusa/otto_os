@@ -1,7 +1,7 @@
-// The node inspector's picker lists (repositories, swarms, DB connections,
+// The node inspector's picker lists (repositories, DB connections,
 // broker clusters/topics, product stories, Jira accounts), so no form asks a
 // person to type an opaque id the UI never shows. One instance per page: each
-// list is fetched ONCE per key (workspace, swarm or cluster) — pending or
+// list is fetched ONCE per key (workspace or cluster) — pending or
 // failed — because the forms' effects re-run per keystroke, and used to
 // re-fetch per character after a failure. `rows(key)` is null while loading or
 // after a failure; the forms then fall back to a free-text input so a saved id
@@ -67,14 +67,6 @@ const DB_QUERY_KINDS = new Set(['mysql', 'postgres', 'redis', 'mongodb', 'clickh
 
 export class InspectorOptions {
   readonly repos = new OptionCache<Repo>((wsId) => api.get<Repo[]>(`/workspaces/${wsId}/repos`));
-  readonly swarms = new OptionCache<Named>((wsId) =>
-    api.get<Named[]>(`/workspaces/${wsId}/swarm/swarms`).then((l) => l.map((x) => ({ id: x.id, name: x.name }))),
-  );
-  readonly swarmProjects = new OptionCache<Named>((sid) =>
-    api
-      .get<{ projects: Named[] }>(`/swarm/swarms/${encodeURIComponent(sid)}`)
-      .then((d) => d.projects.map((x) => ({ id: x.id, name: x.name }))),
-  );
   readonly dbConnections = new OptionCache<Connection>((wsId) =>
     api.get<Connection[]>(`/workspaces/${wsId}/connections`).then((all) => all.filter((c) => DB_QUERY_KINDS.has(c.kind))),
   );

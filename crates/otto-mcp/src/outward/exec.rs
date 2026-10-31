@@ -88,7 +88,7 @@ pub fn call_timeout(tool: &str, args: &Value) -> Duration {
         "create_issue" => 120,
         // Write (+ full-width property POSTs / version GET), then a verify GET.
         "create_confluence_page" | "update_confluence_page" | "comment_confluence_page" => 90,
-        // Push check + create + reviewer/proof-pack follow-ups.
+        // Push check + create + reviewer follow-ups.
         "create_pr" => 60,
         _ => 30,
     };
@@ -545,16 +545,6 @@ pub fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
                 args.clone(),
             )
         }
-        "get_proof_pack" => {
-            let ws = arg_str(args, "workspace_id")?;
-            let mut path = format!("/api/v1/workspaces/{}/mcp/proof-pack?", seg(&ws));
-            for k in ["repo_id", "branch", "goal_loop_id"] {
-                if let Some(v) = args.get(k).and_then(Value::as_str) {
-                    path.push_str(&format!("{k}={}&", seg(v)));
-                }
-            }
-            SelfCall::get(path)
-        }
         // ---- Database ----
         "query_db_readonly" => db_query_call(args, false)?,
         "query_db" => db_query_call(args, true)?,
@@ -816,13 +806,6 @@ pub fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
             }
             if let Some(r) = args.get("reviewers").filter(|v| v.is_array()) {
                 body["reviewers"] = r.clone();
-            }
-            if let Some(p) = args
-                .get("proof_pack_id")
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty())
-            {
-                body["proof_pack_id"] = json!(p);
             }
             SelfCall::post(format!("/api/v1/repos/{}/prs", seg(&repo)), body)
         }
@@ -1111,55 +1094,6 @@ pub fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
                 ),
                 body,
             )
-        }
-        // ---- Swarm ----
-        "list_swarms" => {
-            let ws = arg_str(args, "workspace_id")?;
-            SelfCall::get(format!("/api/v1/workspaces/{}/swarm/swarms", seg(&ws)))
-        }
-        "get_swarm" => {
-            let id = arg_str(args, "swarm_id")?;
-            SelfCall::get(format!("/api/v1/swarm/swarms/{}", seg(&id)))
-        }
-        "list_swarm_runs" => {
-            let ws = arg_str(args, "workspace_id")?;
-            let q = opt_query(args, &[("swarm_id", "swarm_id")]);
-            SelfCall::get(if q.is_empty() {
-                format!("/api/v1/workspaces/{}/swarm/runs", seg(&ws))
-            } else {
-                format!("/api/v1/workspaces/{}/swarm/runs?{q}", seg(&ws))
-            })
-        }
-        "list_swarm_projects" => {
-            let id = arg_str(args, "swarm_id")?;
-            SelfCall::get(format!("/api/v1/swarm/swarms/{}/projects", seg(&id)))
-        }
-        "list_swarm_tasks" => {
-            let id = arg_str(args, "project_id")?;
-            SelfCall::get(format!("/api/v1/swarm/projects/{}/tasks", seg(&id)))
-        }
-        "get_swarm_board" => {
-            let id = arg_str(args, "swarm_id")?;
-            let q = opt_query(
-                args,
-                &[("project_id", "project_id"), ("task_id", "task_id")],
-            );
-            SelfCall::get(if q.is_empty() {
-                format!("/api/v1/swarm/swarms/{}/board", seg(&id))
-            } else {
-                format!("/api/v1/swarm/swarms/{}/board?{q}", seg(&id))
-            })
-        }
-        "post_swarm_board" => {
-            let id = arg_str(args, "swarm_id")?;
-            let mut body = json!({ "body": arg_str(args, "body")? });
-            if let Some(p) = args.get("project_id").and_then(Value::as_str) {
-                body["project_id"] = json!(p);
-            }
-            if let Some(t) = args.get("task_id").and_then(Value::as_str) {
-                body["task_id"] = json!(t);
-            }
-            SelfCall::post(format!("/api/v1/swarm/swarms/{}/board", seg(&id)), body)
         }
         // ---- Memory / vault ----
         "list_memory" => {
@@ -1604,18 +1538,6 @@ pub fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
             }
             SelfCall::post(format!("/api/v1/workspaces/{}/goal-loops", seg(&ws)), body)
         }
-        "create_work_item" => {
-            let project = arg_str(args, "project_id")?;
-            let body = json!({
-                "title": arg_str(args, "title")?,
-                "description": args.get("description").and_then(Value::as_str),
-                "priority": args.get("priority").and_then(Value::as_str),
-            });
-            SelfCall::post(
-                format!("/api/v1/swarm/projects/{}/tasks", seg(&project)),
-                body,
-            )
-        }
         "room_post" => {
             let room = arg_str(args, "room_id")?;
             let text = arg_str(args, "text")?;
@@ -1659,27 +1581,6 @@ pub fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
                 seg(&room),
                 q.trim_start_matches('&')
             ))
-        }
-        // Otto Assistant memory: one agent-tool endpoint per verb; the body
-        // carries the (bound) calling session so chips land in its thread.
-        "assistant_remember" | "assistant_forget" | "assistant_recall" => {
-            let verb = tool.strip_prefix("assistant_").unwrap_or(tool);
-            let mut body = serde_json::Map::new();
-            for k in ["text", "kind", "tags", "query", "k", "session_id"] {
-                if let Some(v) = args.get(k).filter(|v| !v.is_null()) {
-                    body.insert(k.to_string(), v.clone());
-                }
-            }
-            if verb == "remember" {
-                arg_str(args, "text")?;
-            }
-            if verb == "forget" {
-                arg_str(args, "query")?;
-            }
-            SelfCall::post(
-                format!("/api/v1/assistant/agent/{verb}"),
-                Value::Object(body),
-            )
         }
         "list_scheduled_tasks" => {
             let ws = arg_str(args, "workspace_id")?;

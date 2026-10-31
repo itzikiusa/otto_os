@@ -1,11 +1,8 @@
 <script lang="ts" module>
   import type { Repo } from '../../../lib/api/types';
   import { appLive } from '../../../lib/live';
-  /** Exactly one of `sessionId` / `transcriptPath`; the latter reads the
-   *  workspace history route (read-only, `on_disk` entries). */
   export interface ConversationViewProps {
-    sessionId?: string;
-    transcriptPath?: string;
+    sessionId: string;
     workspaceId: string;
     readonly?: boolean;
     /** Active panes resume on mount; passive tiles only read/keep alive. */
@@ -63,15 +60,13 @@
   import { groupTurns, stableGroupTurns, activeQueued, changedDiff, changedFiles, countUnread, dayKey, fmtCost, fmtDay, fmtDuration, fmtTokens, pendingTool, providerName } from './format';
   import { registerFindProvider } from '../../../lib/findProviders';
   import { appModifier, isMacPlatform, keyContext } from '../../../lib/keys';
-  import type { SessionStatus, TranscriptUnavailableReason, Turn } from '../../../lib/api/types';
+  import type { SessionStatus, TranscriptProvider, TranscriptUnavailableReason, Turn } from '../../../lib/api/types';
   import type { RenderItem } from './format';
   import { CONV_CTX, type ConvContext, type PreviewReq } from './context';
 
-  let { sessionId, transcriptPath, workspaceId, readonly = false, resumeOnOpen = true }: ConversationViewProps = $props();
+  let { sessionId, workspaceId, readonly = false, resumeOnOpen = true }: ConversationViewProps = $props();
 
-  const src = $derived<TranscriptSource>(
-    sessionId ? { sessionId } : { workspaceId, transcriptPath: transcriptPath ?? '' },
-  );
+  const src = $derived<TranscriptSource>({ sessionId });
   const conv = $derived(transcript.conversation(src));
 
   // Context for the tree (images, file opens, lazy subagents). Kept as one
@@ -97,7 +92,9 @@
     ctx.conv = conv;
     ctx.sessionId = sessionId ?? null;
     ctx.readonly = readonly || !sessionId;
-    ctx.provider = conv.transcript?.provider ?? 'claude';
+    ctx.provider =
+      conv.transcript?.provider ??
+      ((sessionId ? (ws.getSession(sessionId)?.provider as TranscriptProvider | undefined) : undefined) ?? 'claude');
     // Where the agent actually ran (the transcript's own cwd) resolves its
     // relative file references; the session's launch dir is the fallback.
     ctx.cwd = conv.transcript?.cwd || (sessionId ? ws.getSession(sessionId)?.cwd : null) || null;
@@ -338,7 +335,9 @@
   );
 
   // ---- live state at the foot of the chat -------------------------------------
-  const agentName = $derived(providerName(t?.provider ?? 'claude'));
+  const sessionProvider = $derived((sessionId ? ws.getSession(sessionId)?.provider : null) ?? null);
+  const effectiveProvider = $derived(t?.provider ?? sessionProvider ?? 'claude');
+  const agentName = $derived(providerName(effectiveProvider));
   const working = $derived(!!sessionId && status === 'working');
   /** The shared session vocabulary (lib/status): while the events socket is
    *  down a "working" claim may be minutes old, so the foot of the chat says
@@ -795,9 +794,9 @@
 </script>
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="conv" bind:clientWidth={convW} data-session={sessionId} data-path={transcriptPath} data-ws={workspaceId} data-readonly={ctx.readonly} data-loaded={t != null} onkeydown={onConvKey} onfocusin={claimFind} onfocusout={releaseFind}>
+<div class="conv" bind:clientWidth={convW} data-session={sessionId} data-ws={workspaceId} data-readonly={ctx.readonly} data-loaded={t != null} onkeydown={onConvKey} onfocusin={claimFind} onfocusout={releaseFind}>
   <header class="conv-head" class:folded={narrowHead && searchOpen}>
-    {#if t?.provider && hasProviderIcon(t.provider)}<ProviderIcon provider={t.provider} size={13} />{/if}
+    {#if effectiveProvider && hasProviderIcon(effectiveProvider)}<ProviderIcon provider={effectiveProvider} size={13} />{/if}
     <span class="conv-title" title={[t?.title, t?.model, statsText].filter(Boolean).join(' · ')}>{t?.title ?? (conv.loading ? 'Loading conversation…' : 'Conversation')}</span>
     {#if statsText}
       <span class="stats" title="turns · tool calls · cost · tokens in/out · duration">{statsText}</span>
@@ -857,7 +856,6 @@
     onwheel={touched}
     ontouchstart={touched}
     onkeydown={touched}
-    dir="auto"
     tabindex="0"
     role="region"
     aria-label="Conversation with {agentName}"
@@ -933,6 +931,7 @@
           {#each conv.liveArtifacts as a (a.id)}
             <button
               class="chip"
+              dir="ltr"
               title={a.url ?? a.path ?? a.label}
               onclick={() => (a.url ? openUrl(a.url) : a.path ? openPreview({ kind: 'file', path: a.path }) : undefined)}
             ><Icon name={a.url ? 'link' : 'file'} size={12} /> {a.label}</button>
@@ -953,17 +952,9 @@
 
   {#if canCompose && sessionId}
     {#key sessionId}
-    <Composer
-      {sessionId}
-      {status}
-      {agentName}
-      onresume={() => void resume()}
-      cwd={ws.getSession(sessionId)?.cwd ?? ''}
-      branch={conv.liveBranch}
-      model={t?.model ?? null}
-      termStatus={conv.liveStatus}
-      termInput={conv.liveInput}
-    />
+    <Composer {sessionId} {status} provider={effectiveProvider} {agentName} {pendingCall} {waiting}
+      onresume={() => void resume()} cwd={ws.getSession(sessionId)?.cwd ?? ''} branch={conv.liveBranch}
+      model={t?.model ?? null} termStatus={conv.liveStatus} termInput={conv.liveInput} />
     {/key}
   {/if}
   </div>
@@ -1336,6 +1327,7 @@
     font: inherit;
     font-size: var(--fs-xs);
     cursor: pointer;
+    unicode-bidi: isolate;
   }
   .inline-err {
     display: flex;

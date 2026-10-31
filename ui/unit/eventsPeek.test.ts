@@ -9,7 +9,6 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
-import { latestOnly } from '../src/lib/latest.ts';
 
 const SRC = new URL('../src/lib/', import.meta.url);
 
@@ -50,7 +49,6 @@ const STORES = {
   product: ['./stores/product.svelte', ['applyEvent', 'applyPlanRun']],
   loops: ['./stores/loops.svelte', ['applyEvent']],
   scheduledTasks: ['./stores/scheduledTasks.svelte', ['applyEvent']],
-  runWithOtto: ['./stores/runWithOtto.svelte', ['applyEvent']],
   browser: ['./stores/browser.svelte', ['applyEvent']],
   browserLive: ['./stores/browserLive.svelte', ['applyEvent']],
   personalAgents: ['./stores/personalAgents.svelte', ['applyRunEvent', 'applyRoomEvent']],
@@ -67,7 +65,6 @@ const PEEKED: Record<string, unknown>[] = [
   { type: 'plan_run', story_id: 's1', session_ids: ['x'], interactive: false },
   { type: 'goal_loop_updated', loop_id: 'l1', status: 'running', phase: 'p', current_iteration: 1, progress_pct: 5 },
   { type: 'scheduled_task_run_updated', workspace_id: 'w1', task_id: 't1', run_id: 'tr1', status: 'ok' },
-  { type: 'otto_run_updated', workspace_id: 'w1', run_id: 'o1', status: 'running' },
   { type: 'browser_tab_updated', workspace_id: 'w1', tab: { id: 'b1', url: 'https://x.test' } },
   { type: 'browser_annotation_added', workspace_id: 'w1', annotation: { id: 'a1', url: 'https://x.test' } },
   { type: 'browser_engine_install_updated', build: 'b', version: '1', state: 'downloading', received_bytes: 1, total_bytes: 2 },
@@ -137,7 +134,6 @@ test('events: with the page open (its store announced), every peeked event reach
     'product.applyPlanRun:plan_run',
     'loops.applyEvent:goal_loop_updated',
     'scheduledTasks.applyEvent:scheduled_task_run_updated',
-    'runWithOtto.applyEvent:otto_run_updated',
     'browser.applyEvent:browser_tab_updated',
     'browser.applyEvent:browser_annotation_added',
     'browserLive.applyEvent:browser_engine_install_updated',
@@ -156,36 +152,4 @@ test('events: an allow-listed payload event still loads its store, so the page s
   await h.send({ type: 'db_assist_updated', assist_id: 'a', connection_id: 'c', sql: 'select 1', note: null });
   assert.deepEqual(h.loaded, ['./stores/database.svelte']);
   assert.deepEqual(h.calls, ['database.applyAssistUpdate:a']);
-});
-
-test('runWithOtto: a tick for a run the store holds nothing for, with no list loaded, fetches nothing', async () => {
-  const gets: string[] = [];
-  const runWithOttoApi = {
-    get: async (id: string) => (gets.push(`get ${id}`), { id }),
-    list: async (ws: string) => (gets.push(`list ${ws}`), []),
-    events: async (id: string) => (gets.push(`events ${id}`), []),
-  };
-  const require = (p: string): unknown =>
-    p.endsWith('/latest') ? { latestOnly }
-      : p.endsWith('/api/runWithOtto') ? { runWithOttoApi }
-      : p.endsWith('/loadError') ? { loadErrorText: String }
-        : p.endsWith('/lazyModule') ? { announceModule() {} } : {};
-  const $state = Object.assign((v: unknown) => v, { raw: (v: unknown) => v });
-  const { runWithOtto } = cjs('stores/runWithOtto.svelte.ts', { require, $state, setTimeout, Promise, Object });
-  const tick = (run_id: string) => runWithOtto.applyEvent({ type: 'otto_run_updated', workspace_id: 'w1', run_id, status: 'running' });
-  tick('o1');
-  await new Promise((r) => setTimeout(r, 0));
-  assert.deepEqual(gets, []);
-  // A run this store opened (cached) still refreshes without a list.
-  await runWithOtto.refreshRun('o2');
-  gets.length = 0;
-  tick('o2');
-  await new Promise((r) => setTimeout(r, 0));
-  assert.deepEqual(gets, ['get o2']);
-  // With the page's list loaded: the run + the list, as before.
-  await runWithOtto.loadList('w1');
-  gets.length = 0;
-  tick('o3');
-  await new Promise((r) => setTimeout(r, 0));
-  assert.deepEqual(gets, ['get o3', 'list w1']);
 });

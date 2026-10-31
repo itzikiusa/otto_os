@@ -21,7 +21,6 @@ export interface ScheduledTaskInput {
   sandbox?: string;
   max_retries?: number;
   notify_on_change?: boolean;
-  attach_proof?: boolean;
 }
 
 export const scheduledTasksApi = {

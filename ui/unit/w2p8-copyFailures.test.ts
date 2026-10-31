@@ -40,18 +40,6 @@ test('Markdown “Copy link” without navigator.clipboard toasts the failure (w
   assert.match(shown[0][2] ?? '', NEXT_STEP);
 });
 
-test('History “Copy path” failure says what to do next, not just the value', async () => {
-  const { clipboard, toasts, shown } = noClipboard();
-  const { copyNotify } = componentFunctions(new URL('../src/modules/agents/history/HistoryPage.svelte', import.meta.url), ['copyNotify'], {
-    copyText: clipboard.copyText,
-    toasts,
-  });
-  await copyNotify('/repo/a', 'Path copied');
-  assert.deepEqual(shown.map((s) => s[0]), ['error']);
-  assert.match(shown[0][2] ?? '', NEXT_STEP);
-  assert.match(shown[0][2] ?? '', /\/repo\/a/, 'the value stays selectable in the toast');
-});
-
 test('Notification “Copy details” failure goes through copyWithToast', async () => {
   const { clipboard, toasts, shown } = noClipboard();
   const { copyDetail } = componentFunctions(new URL('../src/shell/NotificationBell.svelte', import.meta.url), ['copyDetail'], {

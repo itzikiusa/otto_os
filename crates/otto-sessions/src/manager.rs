@@ -1872,6 +1872,20 @@ impl SessionManager {
         level: TrailLevel,
         summary: String,
     ) {
+        self.record_trail_with_detail(session_id, workspace_id, source, kind, level, summary, None);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_trail_with_detail(
+        &self,
+        session_id: &Id,
+        workspace_id: &Id,
+        source: TrailSource,
+        kind: TrailKind,
+        level: TrailLevel,
+        summary: String,
+        detail: Option<serde_json::Value>,
+    ) {
         let Some(repo) = self.activity.clone() else {
             return;
         };
@@ -1885,7 +1899,7 @@ impl SessionManager {
                 kind,
                 level,
                 summary,
-                detail: None,
+                detail,
             };
             match repo.append_trail(new).await {
                 Ok(event) => {
@@ -1949,17 +1963,36 @@ impl SessionManager {
         if trimmed.is_empty() {
             return;
         }
-        let summary = match from {
-            Some(from) => trail_clip(&format!("from session {from}: {trimmed}"), 200),
-            None => trail_clip(trimmed, 200),
+        let (summary, detail) = match from {
+            Some(from) => {
+                let sender_title = self
+                    .repo
+                    .get(from)
+                    .await
+                    .ok()
+                    .map(|s| s.title.trim().to_string())
+                    .filter(|t| !t.is_empty());
+                let summary = match &sender_title {
+                    Some(title) => trail_clip(&format!("from {title} ({from}): {trimmed}"), 200),
+                    None => trail_clip(&format!("from session {from}: {trimmed}"), 200),
+                };
+                let detail = serde_json::json!({
+                    "from_session_id": from,
+                    "from_title": sender_title,
+                    "text": trimmed,
+                });
+                (summary, Some(detail))
+            }
+            None => (trail_clip(trimmed, 200), None),
         };
-        self.record_trail(
+        self.record_trail_with_detail(
             session_id,
             &session.workspace_id,
             source,
             TrailKind::Prompt,
             TrailLevel::Info,
             summary,
+            detail,
         );
     }
 

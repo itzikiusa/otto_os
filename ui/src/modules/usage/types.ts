@@ -16,7 +16,6 @@ export type AttributionDim =
   | 'branch'
   | 'pr'
   | 'story'
-  | 'swarm_task'
   | 'workflow'
   | 'channel'
   | 'review'
@@ -28,7 +27,6 @@ export const DIM_LABELS: Record<AttributionDim, string> = {
   branch: 'Branch',
   pr: 'Pull Request',
   story: 'Story',
-  swarm_task: 'Swarm Task',
   workflow: 'Workflow',
   channel: 'Channel',
   review: 'Code Review',

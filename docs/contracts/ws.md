@@ -5,8 +5,6 @@ completes; invalid token → HTTP 401, no upgrade.
 
 Session rooms have separate capability-authenticated [room sockets](./rooms.md);
 room credentials are never accepted by ordinary terminal/event sockets.
-Standalone [game-room sockets](./game-rooms.md) at `/ws/game-rooms/{id}` use
-`otto-game` capabilities and never authorize terminals or ordinary APIs.
 
 - The event stream (`/ws/events`) accepts the token via the
   `Sec-WebSocket-Protocol` request header — the client offers
@@ -439,7 +437,7 @@ Server → client only. Each message is one JSON-serialized `otto_core::event::E
 (see crate; tag field `type`, snake_case). The server filters events: a client
 receives a **session-scoped** event only if it is a member (`viewer`+) of the
 event's workspace **and** is the session's owner (`created_by`), a workspace
-`admin`, or root. Other **workspace-scoped** events (improvement, swarm) reach
+`admin`, or root. Other **workspace-scoped** events (improvement, product, design) reach
 every member (`viewer`+) of the workspace. Root receives all. `Notice` events
 are delivered to all authenticated clients.
 
@@ -591,15 +589,14 @@ Delivery scope: **session-family events** (`session_status`, `session_created`,
 `session_meta_updated`, `session_renamed`, `session_archive_changed`, `session_removed`, `session_attention`, `trail_appended`,
 `tasks_updated`, `transcript_appended`, `transcript_live`, `artifact_added`) reach only the session's owner (`created_by`), a workspace
 `admin`, or root — and only after the `viewer`+ membership gate on the event's
-`workspace_id`; other **workspace-scoped events** (improvement, swarm,
+`workspace_id`; other **workspace-scoped events** (improvement,
 `api_history_appended`) reach
 every member with `viewer`+ on the event's `workspace_id` (root receives all);
-**owner-scoped events** (`assistant_turn`, `assistant_task_update`,
-`assistant_needs_you`, `assistant_limit`, `ui_control_requested`,
+**owner-scoped events** (`ui_control_requested`,
 `notifications_changed`, `workbench_doc_changed`) reach only the user named by their `user_id` (not root);
 **broadcast events** (`Notice`, `resource_access_changed`, a workspace-less
 `mcp_approval_changed`) reach every authenticated client. The sections below
-cover every variant (80 as of this writing — `Event::type_name()` in
+cover every variant (`Event::type_name()` in
 `crates/otto-core/src/event.rs` is the authoritative list; each `## …`/`### …`
 heading is one feature family). `ui/unit/eventContract.test.ts` checks every variant's tag is
 documented here and that its fields match the `OttoEvent` union in
@@ -704,40 +701,6 @@ Self-improvement (workspace-scoped):
   (`target_ref` names the file).
 - `improvement_approval_pending` — an edit is awaiting human approval.
 
-### Agent Swarm events
-
-Workspace-scoped (delivered to members with `viewer`+ on the event's `workspace_id`). The
-`run`/`task`/`message` payloads travel as serialized JSON (otto-core can't depend on
-otto-state, so the row is embedded as `serde_json::Value`):
-
-```json
-{"type":"swarm_status","workspace_id":"…","swarm_id":"…","status":"active|paused|aborted"}
-{"type":"swarm_run_updated","workspace_id":"…","swarm_id":"…","run":{…SwarmRun…}}
-{"type":"swarm_task_updated","workspace_id":"…","swarm_id":"…","project_id":"…","task":{…SwarmTask…}}
-{"type":"swarm_project_cleared","workspace_id":"…","swarm_id":"…","project_id":"…"}
-{"type":"swarm_message_posted","workspace_id":"…","swarm_id":"…","message":{…SwarmMessage…}}
-{"type":"swarm_goal_updated","workspace_id":"…","swarm_id":"…","task_id":"…|null","goal":{…SwarmGoal…}}
-```
-
-- `swarm_status` — a swarm's lifecycle status changed (`active|paused|aborted`).
-- `swarm_run_updated` — a swarm run was created or changed. `run` is lite like
-  `GET /swarm/runs`: `result` is `null` unless `kind = 'recruit'`; read one run's
-  result with `GET /swarm/runs/{rid}`.
-- `swarm_task_updated` — a swarm task was created or changed.
-- `swarm_project_cleared` — a project's board was cleared (all tasks + project-scoped
-  feed deleted, in-flight runs stopped). Clients drop local task/board state for the
-  project instead of waiting for per-row updates that won't come.
-- `swarm_message_posted` — a new message was posted to a swarm's shared board. New
-  Coordinator-lifecycle message kinds — `worktree`, `shared`, `merge`, `verify`,
-  `escalation` — arrive on this same event.
-- `swarm_goal_updated` — a swarm goal was created or its verification status/verdict
-  changed (drives the per-task Goals panel + Kanban goal badges live). `task_id` is the
-  goal's task (null for project/standing goals).
-
-The UI mirrors all of these in `OttoEvent` (`ui/src/lib/events.svelte.ts`) and routes the
-`swarm_*` set into the `swarm` store, which updates the org tree, run graph, Kanban, runs
-list and board live.
-
 ## Usage metrics tick (A9)
 
 Emitted by the metrics sampler after each system-metrics sample is stored:
@@ -784,11 +747,11 @@ instead of waiting for the next timed tick.
   `ui/src/lib/api/types.ts` as `{ type: 'review_changed'; workspace_id: string;
   session_id?: string | null; review_id: string; status: string }`.
 
-## Review findings workflow (finding_updated / finding_action_started / proof_pack_exported)
+## Review findings workflow (finding_updated / finding_action_started)
 
-Workspace-scoped. Emitted by `crates/otto-server/src/routes/{findings,proof_pack}.rs`
+Workspace-scoped. Emitted by `crates/otto-server/src/routes/findings.rs`
 as the Review Findings workflow advances. The `FindingsBoard.svelte` board
-subscribes to all three (routed through the `findingBus` in
+subscribes to both (routed through the `findingBus` in
 `ui/src/lib/events.svelte.ts`) and refetches the matching review's findings — the
 same pattern `review_changed` uses to drive the Review panel.
 
@@ -819,22 +782,10 @@ regression-test) spawned a live, openable session:
 }
 ```
 
-**`proof_pack_exported`** — a review's Proof Pack was exported (a snapshot
-persisted + verified findings ingested into memory):
-
-```json
-{
-  "type": "proof_pack_exported",
-  "workspace_id": "<Id>",
-  "review_id": "<review_id>",
-  "proof_pack_id": "<proof_pack_id>"
-}
-```
-
 - `status` (finding_updated) — the new `FindingStatus` (snake_case).
 - `session_id` (finding_action_started) — the spawned agent session; omitted/`null`
   when the action ran without one.
-- UI routing: `finding_updated`/`finding_action_started`/`proof_pack_exported` are
+- UI routing: `finding_updated`/`finding_action_started` are
   routed into `findingBus.apply(...)`; `FindingsBoard` re-fetches
   `GET /reviews/{id}/findings` when the event's `review_id` matches the open board.
 - TypeScript types: added to the `OttoEvent` discriminated union in
@@ -888,11 +839,7 @@ AI-run task (analysis, rewrite, test-case generation, plan generation).
 }
 ```
 
-- `section` — which product tab completed: `analysis`, `rewrite`, `testcases`, or `plan`;
-  `source` when a swarm agent publishes a top-level draft (`status: "draft"`); **`tree`**
-  (`status: "changed"`) when the epic tree changed — a swarm agent minted a project epic,
-  filed a child under it or updated an existing child (`routes/swarm_ingest.rs`). The list
-  pane refreshes on `tree`.
+- `section` — which product tab completed: `analysis`, `rewrite`, `testcases`, or `plan`.
 - `status` — final state of the run.
 - UI routing: `events.svelte.ts` dispatches to `product.applyEvent()` in the product store,
   which fires per-section subscriber callbacks registered by each product tab (`AnalysisTab`,
@@ -1009,9 +956,7 @@ its 2s×600 polling pattern and refresh on demand.
   string }`.
 - Eval lab: each matrix **cell** is a `skill_evals` row, so it emits this same
   event; the Matrix view also polls `GET /eval-matrices/{id}` (which lazily settles
-  the matrix to `done` once all cells are terminal) for the live grid. The eval
-  lab's per-iteration scoring additionally emits `proof_pack_updated` (the
-  iteration's Proof Pack), documented above.
+  the matrix to `done` once all cells are terminal) for the live grid.
 
 ## Skills-review update (A12)
 
@@ -1102,50 +1047,6 @@ blind timer.
   Slack / Telegram via `otto-channels/improve_notify.rs`.
 - TypeScript type: `{ type: 'budget_exceeded'; workspace_id: Id; provider: string; spend_usd: number; cap_usd: number; direction: string }`.
 
-### `work_graph_updated`
-
-```json
-{
-  "type": "work_graph_updated",
-  "workspace_id": "<workspace_id>",
-  "item_id": "<work_item_id>",
-  "kind": "session",
-  "status": "running"
-}
-```
-
-- Emitted by the `workgraph_projector` when a Mission Control work item is
-  created or its normalized status changes (cost/title-only refreshes stay
-  quiet). `kind` is the work kind (`session|swarm|goal_loop|workflow|review|
-  product_story|pr|external_trigger|otto_run`); `status` is the normalized lifecycle.
-- Scope: `Workspace` (delivered to members with viewer+ on `workspace_id`).
-- The Mission Control page re-fetches the workspace summary/list on a matching
-  tick instead of polling.
-- TypeScript type: `{ type: 'work_graph_updated'; workspace_id: Id; item_id: Id; kind: string; status: string }`.
-
----
-
-### `proof_pack_updated`
-
-```json
-{ "type": "proof_pack_updated", "workspace_id": "<Id>", "proof_pack_id": "<Id>",
-  "work_item_kind": "session|goal_loop|review|workflow_run|task|manual",
-  "work_item_id": "<id>", "status": "missing|partial|passed|failed|waived",
-  "risk_score": 0, "done_score": 0,
-  "badges": ["tests_passed"], "artifact_count": 3 }
-```
-
-- Emitted by `otto_server::proof::recompute_and_emit` whenever a proof pack is
-  created, (re)assembled, gains/loses an artifact, or is waived.
-- Scope: `Workspace` (gated on viewer access to that workspace).
-- `badges` / `artifact_count` (optional; added in the perf wave) are the
-  pack's values after this recompute. The UI patches its summary row and the
-  loaded list entry in place from them; it refetches only when they are absent
-  (older daemon) or the pack is not in the loaded page, and re-fetches the
-  open detail only while the Proof page is mounted.
-- `done_score` (0..100) is the done-contract readiness (added in Proof Packs v2).
-- TypeScript type: `{ type: 'proof_pack_updated'; workspace_id: Id; proof_pack_id: Id; work_item_kind: string; work_item_id: string; status: string; risk_score: number; done_score: number }`.
-
 ---
 
 ### `scheduled_task_run_updated`
@@ -1221,21 +1122,6 @@ blind timer.
 
 ---
 
-### `otto_run_updated`
-
-```json
-{ "type": "otto_run_updated", "workspace_id": "<Id>", "run_id": "<Id>",
-  "status": "queued|resolving_source|building_context|provisioning|executing|proving|reviewing|awaiting_approval|drafting_pr|completed|failed|rejected|cancelled" }
-```
-
-- Emitted by `otto_server::run_engine` on every Run with Otto stage transition,
-  failure, or completion. `status` is the snake_case `RunStatus`.
-- Scope: `Workspace` (delivered to members with viewer+ on `workspace_id`).
-- The Run with Otto page re-fetches the run + its timeline on a matching tick.
-- TypeScript type: `{ type: 'otto_run_updated'; workspace_id: Id; run_id: Id; status: string }`.
-
----
-
 ### `db_assist_session_started` / `db_assist_updated`
 
 Workspace-scoped. Emitted by `crates/otto-server/src/db_assist.rs` as the DB
@@ -1267,6 +1153,36 @@ the committed answer.
 - TypeScript types: in the `OttoEvent` union in `ui/src/lib/api/types.ts` as
   `{ type: 'db_assist_session_started'; workspace_id: Id; connection_id: Id; assist_id: Id; session_id: Id }`
   and `{ type: 'db_assist_updated'; workspace_id: Id; connection_id: Id; assist_id: Id; sql: string; note: string }`.
+
+---
+
+### `db_mcp_activity`
+
+Workspace-scoped. Emitted when an agent session calls a database tool (`otto_db_query`, `otto_query_db`, `otto_db_schema`, `otto_db_children`, `otto_db_object`), once with `status: "started"` before driver execution and once with `status: "finished"` (including bounded column names and up to 10 preview rows) or `status: "error"` afterwards.
+
+```json
+{
+  "type": "db_mcp_activity",
+  "workspace_id": "<Id>",
+  "connection_id": "<Id>",
+  "session_id": "<Id|null>",
+  "session_title": "<string|null>",
+  "activity_id": "<Id>",
+  "tool": "otto_db_query",
+  "sql": "SELECT * FROM users LIMIT 5",
+  "node": "db:shop",
+  "status": "started|finished|error",
+  "row_count": 5,
+  "duration_ms": 14,
+  "columns": ["id", "email"],
+  "rows_preview": [[1, "a@example.com"]],
+  "error": null,
+  "ts": "<RFC3339>"
+}
+```
+
+- Scope: `Workspace` (delivered to members with viewer+ on `workspace_id`).
+- TypeScript mirror: `{ type: 'db_mcp_activity'; workspace_id: Id; connection_id: Id; session_id: Id | null; session_title: string | null; activity_id: string; tool: string; sql: string | null; node: string | null; status: 'started' | 'finished' | 'error'; row_count: number | null; duration_ms: number | null; columns: string[]; rows_preview: unknown[][]; error: string | null; ts: string }`.
 
 ---
 
@@ -1545,20 +1461,18 @@ repository's working tree, index or refs change on disk: an editor save, a CLI
     on its next focus/visibility.
 - TypeScript type: `{ type: 'repo_status_changed'; workspace_id: Id; repo_id: Id; paths?: string[] }`.
 
-### `transcript_appended` / `transcript_live` / `artifact_added` / `history_index_progress`
+### `transcript_appended` / `transcript_live` / `artifact_added`
 
 Conversation view (`docs/design/conversation-view.md` §4.3). Emitted by
 `crates/otto-server/src/transcript_tail.rs` (the per-session live tail, armed by
 `GET /sessions/{id}/transcript` on a live session — which then pages the
 tail's own fold, so the first delta continues exactly from that page; 700 ms
-poll) and
-`history_index.rs` (rescan progress).
+poll).
 
 ```json
 {"type":"transcript_appended","workspace_id":"…","session_id":"…","cursor":"<record_index>","turns":[{…Turn…}]}
 {"type":"transcript_live","workspace_id":"…","session_id":"…","text":"⏺ Still exploring…","input":"option 2","status":"~ | Fable 5.1 | ▓▓░░ 11%","branch":"main"}
 {"type":"artifact_added","workspace_id":"…","session_id":"…","artifact":{…Artifact…}}
-{"type":"history_index_progress","workspace_id":"…","scanned":120,"total":2705,"done":false}
 ```
 
 - `transcript_appended` — the session's transcript grew. `turns` are the turns
@@ -1590,9 +1504,6 @@ poll) and
   git branch from `.git/HEAD` (re-read every 10 s). Session-family scoped.
 - `artifact_added` — the fold found a new artifact (written file, PR link, image).
   Carries the full `Artifact`. Session-family scoped.
-- `history_index_progress` — a `POST /workspaces/{wid}/history/rescan` walk
-  advanced; `done: true` on the final tick. Workspace-scoped (viewer+). The boot
-  scan emits nothing (it has no requesting workspace).
 - TypeScript types live in `ui/src/lib/api/types.ts` (`// ── Transcript`).
 
 ### `browser_tab_updated` / `browser_annotation_added`
@@ -1711,46 +1622,6 @@ after workflow completion. No new event type is introduced.
 Personal Agent Memory/Context document edits use the versioned HTTP responses
 documented in `api.md`; they do not introduce a WS event. New runs/chats snapshot
 saved Context, while existing sessions retain their initial context.
-
-### `assistant_turn` / `assistant_task_update` / `assistant_needs_you` / `assistant_limit`
-
-Otto Assistant (`api.md` "Otto Assistant"). **Owner-scoped**: each event carries
-the assistant owner's `user_id` and is delivered ONLY to that user's
-connections — not to workspace members and not to root (the assistant is
-personal). Emitted by `crates/otto-assistant/src/assistant.rs` and its submodules.
-Reply prose still streams over the session-family `transcript_live` /
-`transcript_appended` events of `thread.session_id`; these four events carry the
-assistant's own index and queue.
-
-```json
-{"type":"assistant_turn","user_id":"…","thread_id":"…","turn":{…AssistantTurn…},"thread":{…AssistantThread…}}
-{"type":"assistant_task_update","user_id":"…","task":{…AssistantTask…}}
-{"type":"assistant_needs_you","user_id":"…","task":{…AssistantTask…},"open_count":2}
-{"type":"assistant_limit","user_id":"…","thread_id":"…","limit":{…AssistantLimitState…},"suggestion":{"provider":"codex","model":null,"account_id":null},"task_id":"…","auto_switched":false}
-```
-
-- `assistant_turn` — a turn was added to a thread's index: the user's own send
-  (echoed so the bar, the window and the phone stay in step), an assistant reply
-  once it has landed in the transcript (with its provider badge), or a system
-  line — a memory chip (`kind:"memory"`, `data.undo` says how to undo it), a
-  delegation ("Asked *Daily Recap*…"), a delivered reminder, a route change or a
-  limit notice. `thread` is the thread row after the change (its `status`,
-  provider and `updated_at` moved), or `null` when unchanged. Clients append by
-  `turn.id` (idempotent — a re-sent id replaces).
-- `assistant_task_update` — a task was created or changed state
-  (`queued → running → needs_you → done | failed | cancelled`). Carries the full
-  row; clients replace by `task.id`.
-- `assistant_needs_you` — an item entered OR left the needs-you queue (a task
-  moved into or out of `needs_you`). `open_count` is the queue size after the
-  change, so the menu-bar dot and phone badge update without a re-fetch.
-- `assistant_limit` — a provider usage limit was detected for the thread's
-  current route (PTY or transcript text such as "usage limit reached … resets
-  2pm"). `suggestion` is the route the user can continue on (`null` when no other
-  provider is configured); `task_id` is the `limit` needs-you item asking
-  "continue on X?". `auto_switched: true` means `auto_failover` was on and the
-  thread already moved (a `route` turn follows); otherwise nothing switches until
-  the user answers.
-- TypeScript types live in `ui/src/lib/api/types.ts` (`// ── Otto Assistant`).
 
 ### `ui_control_requested`
 

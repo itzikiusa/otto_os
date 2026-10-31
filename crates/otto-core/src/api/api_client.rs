@@ -399,3 +399,26 @@ pub struct RunSavedRequestResp {
     #[serde(default)]
     pub script_tests: Value,
 }
+
+// ---------------------------------------------------------------------------
+// API client storage gauge (perf N2)
+// ---------------------------------------------------------------------------
+
+/// `GET /workspaces/{wid}/api-client/storage`: how much the workspace's API
+/// history and automation run reports hold. Counts and byte sizes only —
+/// retention stays opt-in; the History list uses this to offer presets.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApiClientStorage {
+    /// `api_history` rows.
+    pub history_rows: i64,
+    /// Stored bytes of those rows' request + response snapshots.
+    pub history_bytes: i64,
+    /// `api_automation_runs` rows (all automations).
+    pub run_rows: i64,
+    /// Step results recorded across those runs.
+    pub step_rows: i64,
+    /// Stored bytes of the run headers + step results.
+    pub run_bytes: i64,
+    /// The largest run count held by any one automation.
+    pub max_runs_per_automation: i64,
+}

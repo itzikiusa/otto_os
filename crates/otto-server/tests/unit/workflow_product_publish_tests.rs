@@ -267,7 +267,7 @@ async fn review4_product_publish_dry_run_captures_complete_review_and_destinatio
     assert_eq!(out["publication_preview"]["request"]["project_key"], "PRJ");
     assert_eq!(
         out["publication_preview"]["request"]["reviewed_content"]["body_sha256"],
-        otto_core::proof::content_sha256("Reviewed body\nExact café.  ")
+        otto_core::text::content_sha256("Reviewed body\nExact café.  ")
     );
     assert!(f.remote.received_requests().await.unwrap().is_empty());
 }

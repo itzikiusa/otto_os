@@ -71,34 +71,29 @@ test('events: reconnect / restart / periodic events peek page stores instead of 
   const src = join(import.meta.dirname, '..', 'src');
   const ev = eventsSources();
   for (const call of [
-    'swarmStore.peek()?.resync()',
     'databaseStore.peek()?.onDaemonRestart()',
     'usageStore.peek()?.applyMetricsTick()',
-    'swarmStore.peek()?.applyEvent(parsed)',
     'k8sStore.peek()?.applyEvent(parsed)',
     'personalAgentsStore.peek()?.resyncRooms()',
     // perf H1: per-event page-store handlers.
     'apiClientStore.peek()?.noteHistoryAppended(parsed.workspace_id, parsed.entry_id)',
     'apiClientStore.peek()?.noteRunProgress(parsed.run_id, parsed.status)',
-    'runWithOttoStore.peek()?.applyEvent(parsed)',
     'awsStore.peek()?.applyEvent(parsed)',
     'personalAgentsStore.peek()?.applyRunEvent(parsed)',
     'personalAgentsStore.peek()?.applyRoomEvent(parsed)',
   ]) {
     assert.ok(ev.includes(call), `expected ${call}`);
   }
-  for (const banned of ['swarm.resync()', 'database.onDaemonRestart()', 'usage.applyMetricsTick()']) {
+  for (const banned of ['database.onDaemonRestart()', 'usage.applyMetricsTick()']) {
     assert.ok(!ev.includes(`.use((${banned.split('.')[0]}) => ${banned})`) && !ev.includes(`=> void ${banned}`), banned);
   }
   // Every peeked handle has a key, and its store announces itself under it.
   const files: Record<string, string> = {
-    swarm: 'lib/stores/swarm.svelte.ts',
     database: 'lib/stores/database.svelte.ts',
     usage: 'lib/api/usage.svelte.ts',
     personalAgents: 'lib/stores/personalAgents.svelte.ts',
     k8s: 'lib/stores/k8s.svelte.ts',
     apiClient: 'lib/stores/apiClient.svelte.ts',
-    runWithOtto: 'lib/stores/runWithOtto.svelte.ts',
     aws: 'lib/stores/aws.svelte.ts',
     scheduledTasks: 'lib/stores/scheduledTasks.svelte.ts',
     product: 'lib/stores/product.svelte.ts',
@@ -134,6 +129,7 @@ test('events: only allow-listed events load a page store (`.use`)', async () => 
     'canvas_session_started → canvas',
     'db_assist_session_started → database',
     'db_assist_updated → database',
+    'db_mcp_activity → database',
     'mockup_session_started → mockupAssist',
     'mockup_updated → mockupAssist',
   ]);

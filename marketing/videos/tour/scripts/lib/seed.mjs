@@ -31,19 +31,74 @@ export async function seedAll(api, { dataDir, home, fakeBin, repoRoot, docker })
   // Clear the credential notices the fake HOME triggers (Claude keychain probe).
   await api.try('DELETE', '/notifications');
 
-  // ── agent sessions (scripted stand-ins, never the real CLIs) ─────────────
+  // ── agent sessions (scripted stand-ins + rich transcripts for Threads) ──
+  const trDir = join(dataDir, 'tour-transcripts');
+  mkdirSync(trDir, { recursive: true });
+  const trRate = join(trDir, '00000000-0000-4000-8000-000000000101.jsonl');
+  const trFlaky = join(trDir, 'rollout-2026-10-31T10-12-00-00000000-0000-4000-8000-000000000102.jsonl');
+  const trReview = join(trDir, '00000000-0000-4000-8000-000000000103.jsonl');
+  const trNotes = join(trDir, '00000000-0000-4000-8000-000000000104.jsonl');
+
+  writeFileSync(trRate, [
+    { type: 'user', uuid: 'rl-u1', timestamp: '2026-10-31T09:40:00Z', sessionId: '00000000-0000-4000-8000-000000000101', cwd: repoDir, message: { role: 'user', content: 'Add token-bucket rate limiting (60 req/min, burst 60) to `/checkout` in `src/middleware/rateLimit.ts`, verify traffic volume in `shopdb.orders`, and notify the cart worker when ready.' } },
+    { type: 'assistant', uuid: 'rl-a1', requestId: 'rl-r1', timestamp: '2026-10-31T09:40:06Z', sessionId: '00000000-0000-4000-8000-000000000101', cwd: repoDir, message: { id: 'm-rl-1', model: 'claude-opus-4-8', content: [
+      { type: 'thinking', thinking: 'Check peak per-region order rate in shopdb first so 60 req/min has generous headroom, then wire tokenBucket with idle eviction.' },
+      { type: 'tool_use', id: 'toolu_rl_db', name: 'mcp__otto__otto_db_query', input: { connection: 'shop · mariadb', sql: 'SELECT region, COUNT(*) AS orders FROM shopdb.orders GROUP BY region ORDER BY orders DESC' } },
+      { type: 'tool_use', id: 'toolu_rl_edit', name: 'Edit', input: { file_path: `${repoDir}/src/middleware/rateLimit.ts`, old_string: 'const buckets = new Map();', new_string: 'const buckets = new Map<string, { tokens: number; at: number }>();' } },
+    ], usage: { input_tokens: 14200, output_tokens: 890, cache_read_input_tokens: 28400 } } },
+    { type: 'user', uuid: 'rl-u2', timestamp: '2026-10-31T09:40:10Z', sessionId: '00000000-0000-4000-8000-000000000101', cwd: repoDir, message: { role: 'user', content: [
+      { type: 'tool_result', tool_use_id: 'toolu_rl_db', content: JSON.stringify({ columns: ['region', 'orders'], rows: [['us-east', 42], ['eu-west', 31], ['eu-central', 19]], row_count: 3, duration_ms: 8 }) },
+      { type: 'tool_result', tool_use_id: 'toolu_rl_edit', content: 'Updated src/middleware/rateLimit.ts (+14 -1)' },
+    ] } },
+    { type: 'assistant', uuid: 'rl-a2', requestId: 'rl-r2', timestamp: '2026-10-31T09:40:24Z', sessionId: '00000000-0000-4000-8000-000000000101', cwd: repoDir, message: { id: 'm-rl-2', model: 'claude-opus-4-8', content: [
+      { type: 'text', text: 'Implemented `tokenBucket({ capacity: 60, refillPerSec: 1 })` in `src/middleware/rateLimit.ts:1` with 60s idle bucket eviction and `429 Retry-After: 1` on `/checkout`.\n\n| Check | Result |\n| :--- | :--- |\n| Burst + refill suite | **32 passed** |\n| Idle key eviction | Bounded (`60s` TTL) |\n| Peak regional traffic | `42` orders (`us-east`) |' },
+    ], usage: { input_tokens: 6400, output_tokens: 520 } } },
+  ].map((l) => JSON.stringify(l)).join('\n') + '\n');
+
+  writeFileSync(trFlaky, [
+    { timestamp: '2026-10-31T09:41:00Z', type: 'session_meta', payload: { session_id: '00000000-0000-4000-8000-000000000102', id: '00000000-0000-4000-8000-000000000102', cwd: repoDir, cli_version: '0.150.0', model: 'gpt-5.5-codex' } },
+    { timestamp: '2026-10-31T09:41:00Z', type: 'turn_context', payload: { cwd: repoDir, model: 'gpt-5.5-codex' } },
+    { timestamp: '2026-10-31T09:41:01Z', type: 'event_msg', payload: { type: 'task_started', turn_id: 'T1' } },
+    { timestamp: '2026-10-31T09:41:01Z', type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Fix the flaky cart totals rounding failure in `src/cart/totals.ts` and re-run 50 iterations.' }] } },
+    { timestamp: '2026-10-31T09:41:14Z', type: 'event_msg', payload: { type: 'item_completed', turn_id: 'T1', item: { type: 'CommandExecution', id: 'e1', command: ['/bin/zsh', '-lc', 'npm test -- cart --runInBand'], cwd: `file://${repoDir}`, status: 'completed', aggregated_output: 'PASS test/cart.test.ts (50/50 runs)\n', exit_code: 0 } } },
+    { timestamp: '2026-10-31T09:41:20Z', type: 'event_msg', payload: { type: 'item_completed', turn_id: 'T1', item: { type: 'AgentMessage', id: 'm1', content: [{ type: 'Text', text: 'Fixed integer-cent rounding in `src/cart/totals.ts:1` and pinned the test clock:\n\n```ts\nexport function total(items: { price: number; qty: number }[], taxBps = 2000) {\n  const netCents = items.reduce((sum, i) => sum + i.price * i.qty, 0);\n  return Math.round((netCents * (10_000 + taxBps)) / 10_000);\n}\n```\n\nAll **50 consecutive runs** passed with zero drift.' }] } } },
+    { timestamp: '2026-10-31T09:41:21Z', type: 'event_msg', payload: { type: 'task_complete', turn_id: 'T1', last_agent_message: 'All 50 consecutive runs passed.' } },
+  ].map((l) => JSON.stringify(l)).join('\n') + '\n');
+
+  writeFileSync(trReview, [
+    { type: 'user', uuid: 'rv-u1', timestamp: '2026-10-31T09:42:00Z', sessionId: '00000000-0000-4000-8000-000000000103', cwd: repoDir, message: { role: 'user', content: 'Review PR #214 (refunds) for security and correctness.' } },
+    { type: 'assistant', uuid: 'rv-a1', requestId: 'rv-r1', timestamp: '2026-10-31T09:42:18Z', sessionId: '00000000-0000-4000-8000-000000000103', cwd: repoDir, message: { id: 'm-rv-1', model: 'claude-sonnet-4-8', content: [{ type: 'text', text: 'Reviewed 7 changed files (`+312 −48`). Two actionable findings:\n\n- **High** (`src/refunds/handler.ts:88`): post-refund redirect URL is not validated against allowlist.\n- **Medium** (`src/refunds/api.ts:41`): `POST /refund` lacks CSRF token verification.' }], usage: { input_tokens: 9200, output_tokens: 410 } } },
+  ].map((l) => JSON.stringify(l)).join('\n') + '\n');
+
+  writeFileSync(trNotes, [
+    { type: 'user', uuid: 'rn-u1', timestamp: '2026-10-31T09:43:00Z', sessionId: '00000000-0000-4000-8000-000000000104', cwd: repoDir, message: { role: 'user', content: 'Draft release notes for 1.5.0' } },
+    { type: 'assistant', uuid: 'rn-a1', requestId: 'rn-r1', timestamp: '2026-10-31T09:43:15Z', sessionId: '00000000-0000-4000-8000-000000000104', cwd: repoDir, message: { id: 'm-rn-1', model: 'claude-opus-4-8', content: [{ type: 'text', text: '## Acme Checkout 1.5.0\n\n- **Payments:** declined cards retry with exponential backoff; hard declines fail fast.\n- **Cart:** regional tax rules are memoized per region.\n- **API:** token-bucket rate limiter (`60 req/min`) with `Retry-After` headers.' }], usage: { input_tokens: 5800, output_tokens: 360 } } },
+  ].map((l) => JSON.stringify(l)).join('\n') + '\n');
+
   const sessions = [
-    ['work', 'claude', 'Add rate limiting to checkout', 'claude-opus-4-8'],
-    ['flaky', 'codex', 'Fix the flaky cart totals test', 'gpt-5.5-codex'],
-    ['review', 'claude', 'Review PR #214 — refunds', 'claude-sonnet-4-8'],
-    ['notes', 'claude', 'Draft release notes for 1.5.0', 'claude-opus-4-8'],
+    ['work', 'claude', 'Add rate limiting to checkout', 'claude-opus-4-8', trRate, false],
+    ['flaky', 'codex', 'Fix the flaky cart totals test', 'gpt-5.5-codex', trFlaky, true],
+    ['review', 'claude', 'Review PR #214 — refunds', 'claude-sonnet-4-8', trReview, false],
+    ['notes', 'claude', 'Draft release notes for 1.5.0', 'claude-opus-4-8', trNotes, false],
   ];
   ids.sessions = [];
-  for (const [mode, provider, title, model] of sessions) {
+  for (const [mode, provider, title, model, trPath, delegated] of sessions) {
     agentMode(fakeBin, mode);
-    const s = await api.post(`${W}/sessions`, { kind: 'agent', provider, title, cwd: repoDir, model, meta: { origin: 'manual' } });
+    const meta = {
+      origin: 'manual',
+      e2e_transcript_path: trPath,
+      ...(delegated && ids.sessions[0] ? { delegated_by: ids.sessions[0] } : {}),
+    };
+    const s = await api.post(`${W}/sessions`, { kind: 'agent', provider, title, cwd: repoDir, model, meta });
     ids.sessions.push(s.id);
     await sleep(900);
+  }
+  if (ids.sessions[0] && ids.sessions[1]) {
+    await api.try('POST', `/sessions/${ids.sessions[1]}/message`, {
+      text: 'Rate-limit middleware landed on feat/rate-limit — safe to rebase cart totals.',
+      submit: false,
+      from_session_id: ids.sessions[0],
+    });
   }
   const shell = await api.post(`${W}/sessions`, { kind: 'agent', provider: 'shell', title: 'checkout · dev server', cwd: repoDir, meta: { origin: 'manual' } });
   ids.shell = shell.id;
@@ -51,35 +106,6 @@ export async function seedAll(api, { dataDir, home, fakeBin, repoRoot, docker })
   await api.try('POST', `/sessions/${shell.id}/input`, {
     text: `clear; for i in $(seq 1 3000); do printf '\\033[2m%s\\033[0m  \\033[32mGET\\033[0m /api/checkout/%d  \\033[36m200\\033[0m  %dms\\n' "$(date +%H:%M:%S)" $((RANDOM%900+100)) $((RANDOM%40+8)); sleep 0.7; done`,
     submit: true,
-  });
-
-  // ── assistant: threads, memory, tasks, needs-you ─────────────────────────
-  const t1 = await api.try('POST', '/assistant/threads', { title: 'Plan the 1.5 release', space_slot: 1, provider: 'claude', model: null, incognito: false });
-  const t2 = await api.try('POST', '/assistant/threads', { title: 'Weekly status for the team', space_slot: 2, provider: 'claude', model: null, incognito: false });
-  await api.try('POST', '/assistant/threads', { title: 'Compare error trackers', space_slot: 3, provider: 'codex', model: null, incognito: false });
-  await api.try('POST', '/assistant/threads', { title: 'Lisbon offsite logistics', space_slot: null, provider: 'claude', model: null, incognito: false });
-  ids.thread = t1?.id;
-  for (const [text, kind, tags] of [
-    ['Release branches are cut on Tuesdays; freeze starts Monday 18:00.', 'fact', ['release']],
-    ['Prefers short PR descriptions with a test plan checklist.', 'preference', ['prs']],
-    ['Checkout is owned by the Payments squad (Noah, Iris).', 'fact', ['ownership']],
-    ['Never deploy on Fridays after 15:00.', 'preference', ['deploy']],
-    ['Staging DB is read-only for agents.', 'fact', ['db', 'safety']],
-  ]) {
-    await api.try('POST', '/assistant/memory', { text, kind, tags });
-  }
-  const inHours = (h) => new Date(Date.now() + h * 3600000).toISOString();
-  await api.try('POST', '/assistant/tasks', { kind: 'reminder', title: 'Release freeze starts', run_at: inHours(3), timezone: 'UTC', thread_id: t1?.id });
-  await api.try('POST', '/assistant/tasks', { kind: 'reminder', title: 'Send the weekly status', run_at: inHours(6), timezone: 'UTC', thread_id: t2?.id });
-  const task = await api.try('POST', '/assistant/tasks', { kind: 'task', title: 'Collect merged PRs since 1.4', detail: 'Group by area for the release notes.', thread_id: t1?.id });
-  const task2 = await api.try('POST', '/assistant/tasks', { kind: 'task', title: 'Pick the release date', detail: 'Two candidates from the team calendar.', thread_id: t1?.id });
-  if (task2?.id) {
-    await api.try('POST', '/assistant/agent/task_update', { task_id: task2.id, state: 'needs_you', question: 'Ship 1.5 on Tuesday or Thursday?', options: ['Tuesday', 'Thursday'] });
-  }
-  if (task?.id) await api.try('POST', '/assistant/agent/task_update', { task_id: task.id, state: 'running' });
-  await api.try('POST', '/assistant/agent/approval', {
-    where: 'Slack · #payments', what: 'Release plan summary for 1.5', who_sees: 'The #payments channel (14 people)',
-    reason: 'You asked me to share the plan when it was ready', category: 'post', tool: 'slack_post', destination: '#payments',
   });
 
   // ── DB connections, saved queries, dashboard ─────────────────────────────
@@ -205,39 +231,6 @@ export async function seedAll(api, { dataDir, home, fakeBin, repoRoot, docker })
     await api.try('POST', '/mcp/tokens', { label: 'ci-readonly', scope: { allow_writes: false, tools: null, workspace_id: null } });
   }
 
-  // ── Swarm ────────────────────────────────────────────────────────────────
-  const swarm = await api.try('POST', `${W}/swarm/swarms`, { name: 'Checkout Squad', preset_slug: 'engineering-squad' });
-  if (swarm?.id) {
-    ids.swarm = swarm.id;
-    const full = await api.try('GET', `/swarm/swarms/${swarm.id}`);
-    let project = full?.projects?.[0];
-    if (!project) project = await api.try('POST', `/swarm/swarms/${swarm.id}/projects`, { name: 'Checkout v2', goal_md: 'Ship one-page checkout with saved cards and rate limiting.', repo_path: repoDir });
-    const agents = full?.agents ?? [];
-    const pick = (i) => agents[i % Math.max(1, agents.length)]?.id ?? null;
-    if (project?.id) {
-      const tasks = [
-        ['Design the one-page checkout flow', 'done', 'high'],
-        ['Token-bucket rate limiter', 'in_review', 'urgent'],
-        ['Saved cards API', 'in_progress', 'high'],
-        ['Retry declined payments', 'in_progress', 'medium'],
-        ['Load test at 2k rps', 'todo', 'medium'],
-        ['Update the checkout runbook', 'todo', 'low'],
-        ['Accessibility pass on the payment form', 'backlog', 'medium'],
-        ['Fraud score threshold review', 'blocked', 'high'],
-      ];
-      for (const [i, [title, status, priority]] of tasks.entries()) {
-        const t = await api.try('POST', `/swarm/projects/${project.id}/tasks`, { title, priority, assignee_agent_id: pick(i + 1), description: '', labels: ['checkout'] });
-        if (t?.id && status !== 'backlog') await api.try('PATCH', `/swarm/tasks/${t.id}`, { status });
-      }
-      for (const [kind, body] of [
-        ['decision', 'We ship rate limiting behind a flag first, then enable per region.'],
-        ['idea', 'Reuse the retry helper for webhook deliveries too.'],
-        ['concern', 'Saved cards need a PCI review before launch.'],
-        ['message', 'Rate limiter PR is ready for review — 42 tests passing.'],
-      ]) await api.try('POST', `/swarm/swarms/${swarm.id}/board`, { body, kind, project_id: project.id });
-    }
-  }
-
   // ── Goal loop (draft) ────────────────────────────────────────────────────
   const loop = await api.try('POST', `${W}/goal-loops`, {
     name: 'Checkout p95 under 300 ms', repo_path: repoDir, autostart: false,
@@ -296,17 +289,17 @@ export async function seedAll(api, { dataDir, home, fakeBin, repoRoot, docker })
   const st1 = await api.try('POST', `${W}/scheduled-tasks`, {
     name: 'Morning ticket review', prompt: 'Review new tickets and produce a report.', provider: 'claude',
     schedule: { cadence: 'daily', at: '09:00' }, timezone: 'Europe/London', sandbox: 'worktree', max_retries: 2,
-    notify_on_change: true, attach_proof: true, destination: { type: 'none' }, enabled: true,
+    notify_on_change: true, destination: { type: 'none' }, enabled: true,
   });
   await api.try('POST', `${W}/scheduled-tasks`, {
     name: 'Weekly dependency audit', prompt: 'Audit outdated and vulnerable dependencies.', provider: 'codex',
     schedule: { cadence: 'weekly', at: '08:00', weekday: 0 }, timezone: 'Europe/London', sandbox: 'worktree', max_retries: 1,
-    notify_on_change: true, attach_proof: false, destination: { type: 'none' }, enabled: true,
+    notify_on_change: true, destination: { type: 'none' }, enabled: true,
   });
   const st3 = await api.try('POST', `${W}/scheduled-tasks`, {
     name: 'Flaky test hunt', prompt: 'Find tests that failed then passed on retry this week.', provider: 'claude',
     schedule: { cadence: 'cron', expr: '0 18 * * 5' }, timezone: 'Europe/London', sandbox: 'worktree', max_retries: 2,
-    notify_on_change: false, attach_proof: true, destination: { type: 'none' }, enabled: true,
+    notify_on_change: false, destination: { type: 'none' }, enabled: true,
   });
   if (st3?.id) await api.try('PATCH', `/scheduled-tasks/${st3.id}`, { enabled: false });
   if (st1?.id) {
@@ -325,24 +318,6 @@ export async function seedAll(api, { dataDir, home, fakeBin, repoRoot, docker })
       ids.personalAgent ??= pa.id;
       await api.try('POST', `/personal-agents/${pa.id}/schedules`, { schedule: { cadence: 'daily', at }, timezone: 'Europe/London', directive, enabled: true });
     }
-  }
-
-  // ── Run with Otto (offline stub drives it to the approval gate) ──────────
-  const run1 = await api.try('POST', `${W}/runs`, { source_kind: 'channel', source_ref: 'slack-payments-1', seed_text: 'Add a short note describing the checkout rate limits to the docs.', mode: 'single_agent', repo_id: ids.repo, title: 'Document checkout rate limits' });
-  const run2 = await api.try('POST', `${W}/runs`, { source_kind: 'channel', source_ref: 'slack-payments-2', seed_text: 'Add a CHANGELOG entry for the retry helper.', mode: 'single_agent', repo_id: ids.repo, title: 'Changelog: payment retries' });
-  ids.runs = [run1?.id, run2?.id].filter(Boolean);
-
-  // ── Proof pack ───────────────────────────────────────────────────────────
-  const pp = await api.try('POST', `${W}/proof-packs`, { work_item_kind: 'manual', work_item_id: 'checkout-rate-limit', title: 'Checkout rate limiting' });
-  if (pp?.id) {
-    ids.proof = pp.id;
-    await api.try('POST', `/proof-packs/${pp.id}/artifacts`, { kind: 'command', title: 'npm test', content: 'Test Suites: 12 passed, 12 total\nTests:       42 passed, 42 total\nTime:        3.1 s', status: 'passed' });
-    await api.try('POST', `/proof-packs/${pp.id}/artifacts`, { kind: 'ci', title: 'CI · build + lint', content: 'All 6 checks passed', status: 'passed' });
-    await api.try('POST', `/proof-packs/${pp.id}/artifacts`, { kind: 'diff', title: 'src/middleware/rateLimit.ts', content: '+ export function tokenBucket(…)\n+ router.use("/checkout", rateLimit)', status: 'info' });
-    await api.try('POST', `/proof-packs/${pp.id}/evidence/api`, { title: 'GET /checkout/limits', method: 'GET', url: 'https://staging.acme.example/checkout/limits', status: 200 });
-    await api.try('POST', `/proof-packs/${pp.id}/evidence/db`, { title: 'No duplicate orders', engine: 'mysql', query: 'SELECT COUNT(*) FROM orders GROUP BY idempotency_key HAVING COUNT(*) > 1', row_count: 0, sample: '0 rows' });
-    await api.try('POST', `/proof-packs/${pp.id}/evidence/kafka`, { title: 'orders.events emitted', topic: 'orders.events', message_count: 3, sample: '{"order_id":1042,"status":"paid"}' });
-    await api.try('POST', `/proof-packs/${pp.id}/pr-check`, { title: 'Rate limiting for checkout', description: 'All tests pass. Load test at 2k rps shows 429s after 60 req/min per client.' });
   }
 
   // ── Product story ────────────────────────────────────────────────────────
@@ -416,18 +391,6 @@ export async function seedAll(api, { dataDir, home, fakeBin, repoRoot, docker })
   // ── Insights (report files the insights skill would write) ───────────────
   writeInsights(join(dataDir, 'insights'));
 
-  // Let Run with Otto reach its approval gate, then approve the first run.
-  await sleep(8000);
-  if (run1?.id) {
-    for (let i = 0; i < 30; i++) {
-      const r = await api.try('GET', `/runs/${run1.id}`);
-      if (r?.status === 'awaiting_approval' || r?.run?.status === 'awaiting_approval') {
-        await api.try('POST', `/runs/${run1.id}/approve`, { decision: 'approve' });
-        break;
-      }
-      await sleep(1500);
-    }
-  }
   // ── Git: local AI review + findings (offline seed endpoints) ─────────────
   const rev = await api.try('POST', `${W}/__e2e/review`, {
     repo_id: ids.repo, pr_number: 0,
@@ -452,8 +415,6 @@ export async function seedAll(api, { dataDir, home, fakeBin, repoRoot, docker })
     ]) await api.try('POST', `${W}/__e2e/findings`, { review_id: ids.review, repo_id: ids.repo, ...f });
   }
 
-  // Mission Control projects everything above into the work graph.
-  await api.try('POST', `${W}/workgraph/backfill`, {});
   await clearCredentialNotices(api);
   return ids;
 }

@@ -61,21 +61,15 @@ pub const HEADLESS: &[&str] = &["presence", "db_list_connections", "db_mcp_query
 pub const KNOWN_MODULES: &[&str] = &[
     "shell",
     "home",
-    "assistant",
     "agents",
-    "history",
-    "run-with-otto",
-    "mission-control",
-    "swarm",
+    "rooms",
     "loops",
     "workflows",
     "scheduled-tasks",
-    "personal-agents",
     "git",
-    "proof",
     "product",
     "vault",
-    "design",
+    "workbench",
     "skills-eval",
     "connections",
     "aws",
@@ -195,7 +189,8 @@ fn risk_label(r: Risk) -> &'static str {
 
 /// Port of `paneKey` (`ui/src/lib/sidePane.ts`): the sidebar entry a hash
 /// route belongs to. `''` → agents, `plugin/<slug>` per plugin, the Database /
-/// Message Brokers views → connections, Canvas → design.
+/// Message Brokers views → connections, Design / Canvas → product, Personal
+/// Agents → scheduled-tasks.
 pub fn pane_key(route: &str) -> String {
     let r = route.trim_start_matches('#').trim_start_matches('/');
     let mut parts = r.split(['/', '?']);
@@ -204,7 +199,8 @@ pub fn pane_key(route: &str) -> String {
         "" => "agents".into(),
         "plugin" => format!("plugin/{}", parts.next().unwrap_or("")),
         "database" | "brokers" => "connections".into(),
-        "canvas" => "design".into(),
+        "design" | "canvas" => "product".into(),
+        "personal-agents" => "scheduled-tasks".into(),
         other => other.into(),
     }
 }
@@ -488,7 +484,9 @@ mod tests {
         assert_eq!(pane_key("database"), "connections");
         assert_eq!(pane_key("/database/x"), "connections");
         assert_eq!(pane_key("brokers"), "connections");
-        assert_eq!(pane_key("canvas/abc"), "design");
+        assert_eq!(pane_key("canvas/abc"), "product");
+        assert_eq!(pane_key("design/abc"), "product");
+        assert_eq!(pane_key("personal-agents"), "scheduled-tasks");
         assert_eq!(pane_key("plugin/foo/bar"), "plugin/foo");
         assert_eq!(pane_key("git/repo?x=1"), "git");
         assert_eq!(pane_key("kubernetes"), "kubernetes");
