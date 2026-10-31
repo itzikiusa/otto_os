@@ -8,8 +8,10 @@ test-threads = 8
 retries = 0
 
 [profile.ci]
-# Keep fan-out bounded on the smaller hosted runner; inherit resource groups.
-test-threads = 4
+# Run async/IO-bound unit tests 8-wide in parallel; PTY/ClickHouse/timing suites
+# remain bounded by their explicit `test-groups` overrides below.
+test-threads = 8
+slow-timeout = { period = "30s", terminate-after = 4 }
 
 [test-groups]
 # e2e.rs has an in-process SERIAL mutex around ClickHouse startup. Reproduce

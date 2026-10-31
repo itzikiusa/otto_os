@@ -233,9 +233,30 @@ impl Fixture {
                         .is_some()),
                 "the actual pending approval must expose the full preview"
             );
-            sqlx::query("UPDATE workflow_runs SET waiting_approval=0,approved_by=?,approved_at=?,approval_note=? WHERE id=?")
-                .bind(if accepted {Some(&self.user.id)} else {None}).bind(chrono::Utc::now().to_rfc3339())
-                .bind(if accepted {"reviewed"} else {"rejected"}).bind(&self.run.id).execute(&self.ctx.pool).await.unwrap();
+            let rev: i64 = sqlx::query_scalar(
+                "UPDATE workflow_runs
+                 SET waiting_approval=0, approved_by=?, approved_at=?, approval_note=?, rev=rev+1
+                 WHERE id=?
+                 RETURNING rev",
+            )
+            .bind(if accepted { Some(&self.user.id) } else { None })
+            .bind(chrono::Utc::now().to_rfc3339())
+            .bind(if accepted { "reviewed" } else { "rejected" })
+            .bind(&self.run.id)
+            .fetch_one(&self.ctx.pool)
+            .await
+            .unwrap();
+            let _ = self.ctx.events.send(Event::WorkflowRunUpdated {
+                workspace_id: self.ws.id.clone(),
+                run_id: self.run.id.clone(),
+                status: "running".into(),
+                node_id: Some("gate".into()),
+                rev,
+                node: None,
+                nodes_done: 0,
+                nodes_total: 0,
+                waiting_approval: false,
+            });
         };
         let (out, ()) = tokio::join!(pending, decision);
         if let Ok(out) = &out {

@@ -146,7 +146,10 @@ def main(argv: list[str]) -> int:
         ]
         if not disjuncts:
             return 0
-        for pkg in sorted({p for _, d in disjuncts for p in disjunct_packages(d)}):
+        # Keep the caller's full `--packages` set on the cargo invocation so
+        # resolver-v2 feature unification matches the preceding `cargo nextest
+        # run` step and reuses its compiled binaries without recompiling.
+        for pkg in ns.packages:
             extra_args.extend(["-p", pkg])
         extra_args.extend(ns.cargo_arg)
 

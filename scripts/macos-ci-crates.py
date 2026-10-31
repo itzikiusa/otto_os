@@ -95,11 +95,20 @@ def compute(meta: dict | None = None) -> tuple[set[str], set[str], dict[str, Pat
 
 
 def workflow_packages(text: str, step_marker: str) -> set[str]:
-    """The `-p` crates of the (possibly folded) `run:` under a step name."""
-    i = text.index(step_marker)
-    j = text.find("- name:", i + len(step_marker))
-    block = text[i : j if j != -1 else len(text)]
-    return set(re.findall(r"-p\s+([A-Za-z0-9_-]+)", block))
+    """The `-p` crates across all steps whose name starts with `step_marker`."""
+    pkgs: set[str] = set()
+    pos = 0
+    while True:
+        i = text.find(step_marker, pos)
+        if i == -1:
+            break
+        j = text.find("- name:", i + len(step_marker))
+        block = text[i : j if j != -1 else len(text)]
+        pkgs |= set(re.findall(r"-p\s+([A-Za-z0-9_-]+)", block))
+        pos = i + len(step_marker)
+    if not pkgs and step_marker not in text:
+        raise ValueError(f"missing step marker: {step_marker}")
+    return pkgs
 
 
 def workflow_crate_paths(text: str, event: str = "pull_request") -> set[str]:

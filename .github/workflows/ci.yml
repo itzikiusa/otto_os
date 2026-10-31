@@ -81,7 +81,13 @@ jobs:
           ci = pathlib.Path(".github/workflows/ci.yml").read_text()
 
           tested = set()
-          for marker in ("# TEST_GROUP_CORE", "# TEST_GROUP_FEATURES", "# TEST_GROUP_SERVER_UNIT"):
+          for marker in (
+              "# TEST_GROUP_CORE",
+              "# TEST_GROUP_FEATURES_A",
+              "# TEST_GROUP_FEATURES_B",
+              "# TEST_GROUP_SERVER_UNIT",
+              "# TEST_GROUP_SERVER_BINS",
+          ):
               i = ci.rindex(marker)
               j = ci.find("- name:", i + len(marker))
               block = ci[i : j if j != -1 else len(ci)]
@@ -122,14 +128,16 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2.9.3
         with:
-          shared-key: rust-lint
+          shared-key: rust-lint-v2
           cache-all-crates: true
           cache-on-failure: true
 
       - name: Install librdkafka build deps
         run: |
-          sudo grep -lE 'dl\.google\.com|packages\.microsoft\.com' /etc/apt/sources.list.d/* 2>/dev/null | xargs -r sudo rm -f
-          sudo python3 scripts/ci-apt-install.py cmake libcurl4-openssl-dev
+          if ! dpkg -s cmake libcurl4-openssl-dev >/dev/null 2>&1; then
+            sudo grep -lE 'dl\.google\.com|packages\.microsoft\.com' /etc/apt/sources.list.d/* 2>/dev/null | xargs -r sudo rm -f
+            sudo python3 scripts/ci-apt-install.py cmake libcurl4-openssl-dev
+          fi
 
       - name: cargo fmt --check
         run: cargo fmt --all --check
@@ -137,10 +145,44 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+  rust-doctests:
+    name: Rust · doctests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@1.99.1
+
+      - name: Enable fast lld linker
+        run: |
+          if command -v ld.lld >/dev/null 2>&1; then
+            sudo ln -sf "$(command -v ld.lld)" /usr/bin/ld
+            sudo ln -sf "$(command -v ld.lld)" /usr/bin/x86_64-linux-gnu-ld
+          fi
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2.9.3
+        with:
+          shared-key: perf-gates-v2
+          cache-all-crates: true
+          save-if: false
+
+      - name: Install librdkafka build deps
+        run: |
+          if ! dpkg -s cmake libcurl4-openssl-dev >/dev/null 2>&1; then
+            sudo grep -lE 'dl\.google\.com|packages\.microsoft\.com' /etc/apt/sources.list.d/* 2>/dev/null | xargs -r sudo rm -f
+            sudo python3 scripts/ci-apt-install.py cmake libcurl4-openssl-dev
+          fi
+
+      - name: cargo test --workspace --doc
+        run: cargo test --workspace --doc
+
   rust-test-core:
     name: Rust · core & sessions (${{ matrix.shard }}/2)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -161,9 +203,10 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2.9.3
         with:
-          shared-key: perf-gates
+          shared-key: rust-core-v2
           cache-all-crates: true
-          save-if: false
+          cache-on-failure: true
+          save-if: ${{ matrix.shard == 1 }}
 
       - name: Install nextest
         run: |
@@ -191,6 +234,15 @@ jobs:
           rm -rf "$RUNNER_TEMP/ch" "$archive"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
+      - name: Build test binaries (core & sessions)
+        run: |
+          cargo nextest run --no-run \
+            -p otto-core -p otto-git -p otto-git-cmd -p otto-keychain -p otto-netguard \
+            -p otto-pty -p otto-rbac -p otto-sandbox -p otto-sessions -p otto-ssh \
+            -p otto-state -p otto-telemetry -p otto-telemetry-collector -p otto-transcript \
+            -p otto-usage \
+            --profile ci
+
       - name: cargo nextest (core & sessions)
         env:
           OTTO_REQUIRE_CLICKHOUSE: "1"
@@ -205,7 +257,7 @@ jobs:
 
       - name: nextest override filters match tests (core)
         if: matrix.shard == 1
-        run: python3 scripts/check-nextest-filters.py --packages otto-usage otto-state otto-keychain otto-pty otto-sessions otto-sandbox
+        run: python3 scripts/check-nextest-filters.py --packages otto-core otto-git otto-git-cmd otto-keychain otto-netguard otto-pty otto-rbac otto-sandbox otto-sessions otto-ssh otto-state otto-telemetry otto-telemetry-collector otto-transcript otto-usage
 
       - name: Terminal emulator budgets (otto-pty, release)
         if: matrix.shard == 1
@@ -214,18 +266,10 @@ jobs:
           OTTO_PERF_BUDGET_SCALE: '3'
         run: cargo test -p otto-pty --release --lib perf_budgets -- --nocapture
 
-      - name: cargo test (doctests · core)
-        if: matrix.shard == 2
-        run: cargo test --doc -p otto-sessions
-
-  rust-test-features:
-    name: Rust · domain & features (${{ matrix.shard }}/2)
+  rust-test-features-a:
+    name: Rust · domain & features (1/2)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2]
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7.0.1
 
@@ -242,9 +286,9 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2.9.3
         with:
-          shared-key: perf-gates
+          shared-key: rust-features-a-v2
           cache-all-crates: true
-          save-if: false
+          cache-on-failure: true
 
       - name: Install nextest
         run: |
@@ -258,39 +302,32 @@ jobs:
           tar -xzf "$archive" -C "$tool_dir" cargo-nextest
           echo "$tool_dir" >> "$GITHUB_PATH"
 
-      - name: Install librdkafka build deps
+      - name: Build test binaries (features 1/2)
         run: |
-          sudo grep -lE 'dl\.google\.com|packages\.microsoft\.com' /etc/apt/sources.list.d/* 2>/dev/null | xargs -r sudo rm -f
-          sudo python3 scripts/ci-apt-install.py cmake libcurl4-openssl-dev
+          cargo nextest run --no-run \
+            -p otto-agent-run -p otto-apiclient -p otto-assistant -p otto-automation \
+            -p otto-aws -p otto-browser -p otto-canvas -p otto-channels \
+            -p otto-connections -p otto-context -p otto-dbviewer -p otto-design \
+            -p otto-design-assist -p otto-improve \
+            --profile ci
 
-      - name: cargo nextest (domain & features)
+      - name: cargo nextest (features 1/2)
         run: |
-          # TEST_GROUP_FEATURES
+          # TEST_GROUP_FEATURES_A
           cargo nextest run \
             -p otto-agent-run -p otto-apiclient -p otto-assistant -p otto-automation \
-            -p otto-aws -p otto-brokers -p otto-browser -p otto-canvas -p otto-channels \
+            -p otto-aws -p otto-browser -p otto-canvas -p otto-channels \
             -p otto-connections -p otto-context -p otto-dbviewer -p otto-design \
-            -p otto-design-assist -p otto-improve -p otto-insights -p otto-issues \
-            -p otto-k8s -p otto-mcp -p otto-memory -p otto-orchestrator -p otto-product \
-            -p otto-review -p otto-rooms -p otto-skills -p otto-vault -p otto-workflows \
-            --profile ci --no-fail-fast --partition hash:${{ matrix.shard }}/2
+            -p otto-design-assist -p otto-improve \
+            --profile ci --no-fail-fast
 
       - name: nextest override filters match tests (features)
-        if: matrix.shard == 1
-        run: python3 scripts/check-nextest-filters.py --packages otto-automation otto-agent-run
+        run: python3 scripts/check-nextest-filters.py --packages otto-agent-run otto-apiclient otto-assistant otto-automation otto-aws otto-browser otto-canvas otto-channels otto-connections otto-context otto-dbviewer otto-design otto-design-assist otto-improve
 
-      - name: cargo test (doctests · features)
-        if: matrix.shard == 2
-        run: cargo test --doc -p otto-context -p otto-design -p otto-issues -p otto-product -p otto-review
-
-  rust-test-server-unit:
-    name: Rust · server unit & ottod (${{ matrix.shard }}/2)
+  rust-test-features-b:
+    name: Rust · domain & features (2/2)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2]
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7.0.1
 
@@ -307,9 +344,9 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2.9.3
         with:
-          shared-key: perf-gates
+          shared-key: rust-features-b-v2
           cache-all-crates: true
-          save-if: false
+          cache-on-failure: true
 
       - name: Install nextest
         run: |
@@ -325,25 +362,32 @@ jobs:
 
       - name: Install librdkafka build deps
         run: |
-          sudo grep -lE 'dl\.google\.com|packages\.microsoft\.com' /etc/apt/sources.list.d/* 2>/dev/null | xargs -r sudo rm -f
-          sudo python3 scripts/ci-apt-install.py cmake libcurl4-openssl-dev
+          if ! dpkg -s cmake libcurl4-openssl-dev >/dev/null 2>&1; then
+            sudo grep -lE 'dl\.google\.com|packages\.microsoft\.com' /etc/apt/sources.list.d/* 2>/dev/null | xargs -r sudo rm -f
+            sudo python3 scripts/ci-apt-install.py cmake libcurl4-openssl-dev
+          fi
 
-      - name: cargo nextest (server unit & ottod)
+      - name: Build test binaries (features 2/2)
         run: |
-          # TEST_GROUP_SERVER_UNIT
-          cargo nextest run \
-            -p otto-server -p ottod \
-            --lib --bins --test snips --test profile_lock \
-            --profile ci --no-fail-fast --partition hash:${{ matrix.shard }}/2
+          cargo nextest run --no-run \
+            -p otto-brokers -p otto-insights -p otto-issues -p otto-k8s -p otto-mcp \
+            -p otto-memory -p otto-orchestrator -p otto-product -p otto-review \
+            -p otto-rooms -p otto-skills -p otto-vault -p otto-workflows \
+            --profile ci
 
-  rust-test-server-it:
-    name: Rust · server integration (${{ matrix.shard }}/3)
+      - name: cargo nextest (features 2/2)
+        run: |
+          # TEST_GROUP_FEATURES_B
+          cargo nextest run \
+            -p otto-brokers -p otto-insights -p otto-issues -p otto-k8s -p otto-mcp \
+            -p otto-memory -p otto-orchestrator -p otto-product -p otto-review \
+            -p otto-rooms -p otto-skills -p otto-vault -p otto-workflows \
+            --profile ci --no-fail-fast
+
+  rust-test-server-unit:
+    name: Rust · server unit
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2, 3]
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7.0.1
 
@@ -360,9 +404,65 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2.9.3
         with:
-          shared-key: perf-gates
+          shared-key: rust-server-unit-v2
           cache-all-crates: true
-          save-if: false
+          cache-on-failure: true
+
+      - name: Install nextest
+        run: |
+          archive="$RUNNER_TEMP/cargo-nextest.tar.gz"
+          tool_dir="$RUNNER_TEMP/otto-test-tools"
+          curl --fail --location --silent --show-error --retry 3 \
+            "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-$NEXTEST_VERSION/cargo-nextest-$NEXTEST_VERSION-x86_64-unknown-linux-gnu.tar.gz" \
+            --output "$archive"
+          printf '%s  %s\n' 'b0959bc64232974224cf9fb22c915845398c0e8668fa7831eb5b43fb1eef781f' "$archive" | sha256sum --check
+          mkdir -p "$tool_dir"
+          tar -xzf "$archive" -C "$tool_dir" cargo-nextest
+          echo "$tool_dir" >> "$GITHUB_PATH"
+
+      - name: Install librdkafka build deps
+        run: |
+          if ! dpkg -s cmake libcurl4-openssl-dev >/dev/null 2>&1; then
+            sudo grep -lE 'dl\.google\.com|packages\.microsoft\.com' /etc/apt/sources.list.d/* 2>/dev/null | xargs -r sudo rm -f
+            sudo python3 scripts/ci-apt-install.py cmake libcurl4-openssl-dev
+          fi
+
+      - name: Build test binary (otto-server unit)
+        run: cargo nextest run --no-run -p otto-server --lib --profile ci
+
+      - name: cargo nextest (otto-server unit)
+        run: |
+          # TEST_GROUP_SERVER_UNIT
+          cargo nextest run -p otto-server --lib --profile ci --no-fail-fast
+
+  rust-test-server-it:
+    name: Rust · server integration (${{ matrix.shard }}/4)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@1.99.1
+
+      - name: Enable fast lld linker
+        run: |
+          if command -v ld.lld >/dev/null 2>&1; then
+            sudo ln -sf "$(command -v ld.lld)" /usr/bin/ld
+            sudo ln -sf "$(command -v ld.lld)" /usr/bin/x86_64-linux-gnu-ld
+          fi
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2.9.3
+        with:
+          shared-key: rust-server-it-v2
+          cache-all-crates: true
+          cache-on-failure: true
+          save-if: ${{ matrix.shard == 1 }}
 
       - name: Install nextest
         run: |
@@ -392,51 +492,48 @@ jobs:
 
       - name: Install librdkafka build deps
         run: |
-          sudo grep -lE 'dl\.google\.com|packages\.microsoft\.com' /etc/apt/sources.list.d/* 2>/dev/null | xargs -r sudo rm -f
-          sudo python3 scripts/ci-apt-install.py cmake libcurl4-openssl-dev
+          if ! dpkg -s cmake libcurl4-openssl-dev >/dev/null 2>&1; then
+            sudo grep -lE 'dl\.google\.com|packages\.microsoft\.com' /etc/apt/sources.list.d/* 2>/dev/null | xargs -r sudo rm -f
+            sudo python3 scripts/ci-apt-install.py cmake libcurl4-openssl-dev
+          fi
+
+      - name: Build test binary (server integration)
+        run: cargo nextest run --no-run -p otto-server -p ottod --bins --test it --test snips --test profile_lock --profile ci
 
       - name: cargo nextest (server integration)
         env:
           OTTO_REQUIRE_CLICKHOUSE: "1"
-        run: cargo nextest run -p otto-server --test it --profile ci --no-fail-fast --partition hash:${{ matrix.shard }}/3
+        run: cargo nextest run -p otto-server -p ottod --test it --profile ci --no-fail-fast --partition hash:${{ matrix.shard }}/4
+
+      - name: cargo nextest (ottod & snips)
+        if: matrix.shard == 1
+        run: |
+          # TEST_GROUP_SERVER_BINS
+          cargo nextest run -p otto-server -p ottod --bins --test snips --test profile_lock --profile ci --no-fail-fast
 
       - name: nextest override filters match tests (server integration)
         if: matrix.shard == 1
-        run: python3 scripts/check-nextest-filters.py --packages otto-server --cargo-arg=--test --cargo-arg=it
+        run: python3 scripts/check-nextest-filters.py --packages otto-server ottod --cargo-arg=--bins --cargo-arg=--test --cargo-arg=it --cargo-arg=--test --cargo-arg=snips --cargo-arg=--test --cargo-arg=profile_lock
 
   ui:
     name: UI (svelte-check · tsc)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: ui
     steps:
       - uses: actions/checkout@v7.0.1
 
-      - name: Test deployment verification (mocked OS operations)
+      - name: Test repo guard scripts & packaging
         working-directory: .
-        run: python3 -B -m unittest discover -s packaging/tests -p 'test_*.py'
-
-      - name: Test Insights collector calendar boundaries
-        working-directory: .
-        run: python3 -B -m unittest discover -s crates/otto-skills/assets/skills/insights/insights/scripts -p test_collect_window.py
-
-      - name: Test the nextest override-filter guard (parsing)
-        working-directory: .
-        run: python3 -B -m unittest discover -s scripts -p 'test_check_nextest_filters.py'
-
-      - name: Test the macOS crate-coverage guard
-        working-directory: .
-        run: python3 -B -m unittest discover -s scripts -p 'test_macos_ci_crates.py'
-
-      - name: Test the Rust LOC ratchet
-        working-directory: .
-        run: python3 -B -m unittest discover -s scripts -p 'test_loc_ratchet.py'
-
-      - name: Test bounded CI dependency installation
-        working-directory: .
-        run: python3 -B -m unittest discover -s scripts -p 'test_ci_apt_install.py'
+        run: |
+          python3 -B -m unittest discover -s packaging/tests -p 'test_*.py'
+          python3 -B -m unittest discover -s crates/otto-skills/assets/skills/insights/insights/scripts -p test_collect_window.py
+          python3 -B -m unittest discover -s scripts -p 'test_check_nextest_filters.py'
+          python3 -B -m unittest discover -s scripts -p 'test_macos_ci_crates.py'
+          python3 -B -m unittest discover -s scripts -p 'test_loc_ratchet.py'
+          python3 -B -m unittest discover -s scripts -p 'test_ci_apt_install.py'
 
       - name: Install Node
         uses: actions/setup-node@v7.1.0
@@ -454,6 +551,30 @@ jobs:
       - name: npm run test:unit
         run: npm run test:unit
 
+      - name: npm run build
+        run: npm run build
+
+      - name: Bundle-size budget
+        run: node scripts/bundle-budget.mjs
+
+  plugin-team-performance:
+    name: Plugin · Team Performance
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Install Node
+        uses: actions/setup-node@v7.1.0
+        with:
+          node-version: 26.13.0
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: npm ci
+        working-directory: ui
+        run: npm ci
+
       - name: Cache Playwright browsers
         id: pw-cache
         uses: actions/cache@v6.1.0
@@ -462,6 +583,7 @@ jobs:
           key: pw-chromium-${{ runner.os }}-${{ hashFiles('ui/package-lock.json') }}
 
       - name: Install Chromium for the Team Performance plugin gate
+        working-directory: ui
         run: |
           if [ "${{ steps.pw-cache.outputs.cache-hit }}" != "true" ]; then
             sudo python3 ../scripts/ci-apt-install.py --prepare-external
@@ -477,16 +599,10 @@ jobs:
           OTTO_TP_REQUIRE_BROWSER: '1'
         run: node --test --test-concurrency=1 test/*.test.js
 
-      - name: npm run build
-        run: npm run build
-
-      - name: Bundle-size budget
-        run: node scripts/bundle-budget.mjs
-
   build-ottod:
     name: Build test daemon (ottod, debug)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7.0.1
 
@@ -503,14 +619,16 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2.9.3
         with:
-          shared-key: perf-gates
+          shared-key: perf-gates-v2
           cache-all-crates: true
           cache-on-failure: true
 
       - name: Install librdkafka build deps
         run: |
-          sudo grep -lE 'dl\.google\.com|packages\.microsoft\.com' /etc/apt/sources.list.d/* 2>/dev/null | xargs -r sudo rm -f
-          sudo python3 scripts/ci-apt-install.py cmake libcurl4-openssl-dev
+          if ! dpkg -s cmake libcurl4-openssl-dev >/dev/null 2>&1; then
+            sudo grep -lE 'dl\.google\.com|packages\.microsoft\.com' /etc/apt/sources.list.d/* 2>/dev/null | xargs -r sudo rm -f
+            sudo python3 scripts/ci-apt-install.py cmake libcurl4-openssl-dev
+          fi
 
       - name: Build the test daemon
         run: cargo build -p ottod
