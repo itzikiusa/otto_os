@@ -36,3 +36,6 @@ e2e/.shots/
 e2e/.diag*.log
 e2e/.run*.log
 e2e/.deep*.log
+
+# svelte-check --tsgo working directory (generated on every check)
+.svelte-check/
