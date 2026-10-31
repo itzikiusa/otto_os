@@ -151,7 +151,7 @@ structured around single-pass compilation and zero-compile test fan-out:
   single `rust-build` job compiles the workspace (`ottod` + all unit/integration
   test binaries) once using `--workspace --features otto-server/test-util` so
   Cargo `resolver = "2"` never compiles the 89k-LOC `otto-server` crate twice,
-  archives all test binaries into `nextest.tar.zst`, and fans out to 4
+  archives all test binaries into `nextest.tar.zst`, and fans out to 6
   zero-compile `rust-test` nextest shards (`test-threads = "num-cpus"`), 4
   single-browser E2E smoke shards, and `daemon-budget`.
 - **Lean uncached dependency builds.** Linux links the runner's `libssl-dev`

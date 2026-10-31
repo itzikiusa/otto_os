@@ -7,7 +7,7 @@ name: CI
 #      archive --workspace --features otto-server/test-util` (one shared Cargo
 #      cache, `ld.lld`, system OpenSSL on Linux, targeted `opt-level` overrides,
 #      and unified `test-util` so the 89k-LOC `otto-server` crate compiles once
-#      instead of twice), then fans out to 4 zero-compile `rust-test` shards +
+#      instead of twice), then fans out to 6 zero-compile `rust-test` shards +
 #      `e2e-gate-shard` + `daemon-budget`.
 #   2. `e2e-gate` splits across 4 parallel single-browser shards (`chromium`
 #      1/2 & 2/2, `webkit` 1/2 & 2/2) and folds all 4 JSON reports into the
@@ -188,14 +188,14 @@ jobs:
           if-no-files-found: error
 
   rust-test:
-    name: Rust · nextest (${{ matrix.shard }}/4)
+    name: Rust · nextest (${{ matrix.shard }}/6)
     needs: rust-build
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5, 6]
     steps:
       - uses: actions/checkout@v7.0.1
 
@@ -231,7 +231,7 @@ jobs:
           rm -rf "$RUNNER_TEMP/ch" "$archive"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      - name: cargo nextest (shard ${{ matrix.shard }}/4)
+      - name: cargo nextest (shard ${{ matrix.shard }}/6)
         env:
           OTTO_REQUIRE_CLICKHOUSE: "1"
         run: |
@@ -239,7 +239,7 @@ jobs:
             --archive-file "$RUNNER_TEMP/nextest.tar.zst" \
             --workspace-remap . \
             --profile ci --no-fail-fast \
-            --partition hash:${{ matrix.shard }}/4
+            --partition hash:${{ matrix.shard }}/6
 
   ui:
     name: UI (svelte-check · tsc)
