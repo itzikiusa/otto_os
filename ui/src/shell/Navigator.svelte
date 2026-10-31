@@ -951,7 +951,7 @@
             {/if}
           </div>
           {#if open}
-            {#each ui.sidebarEditMode ? sec.modules : agentsLast(sec.modules) as m, i (m.id)}
+            {#each ui.sidebarEditMode || fav ? sec.modules : agentsLast(sec.modules) as m, i (m.id)}
               {#if ui.sidebarEditMode}
                 {@render editRow(m, i === 0, i === sec.modules.length - 1)}
               {:else if m.id === 'agents'}

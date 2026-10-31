@@ -324,7 +324,11 @@ export type DbExportFormat =
   | 'tsv'
   | 'tsv_with_names'
   | 'json'
-  | 'ndjson';
+  | 'ndjson'
+  /** Binary columnar formats — ClickHouse (HTTP) renders them. */
+  | 'parquet'
+  | 'arrow'
+  | 'orc';
 
 /**
  * `POST /connections/{id}/db/export-to-path` — stream an uncapped result to a
@@ -362,7 +366,8 @@ export interface ExportToPathResp {
 
 /** Supported import file formats (the mirror of the export). Delimited formats
  *  take the first row as the header; JSON/NDJSON carry keys per object. */
-export type ImportFormat = 'csv' | 'tsv' | 'ndjson' | 'json';
+/** `parquet` / `arrow` / `orc`: ClickHouse only (the server parses them). */
+export type ImportFormat = 'csv' | 'tsv' | 'ndjson' | 'json' | 'parquet' | 'arrow' | 'orc';
 
 /**
  * `POST /connections/{id}/db/import` — import a local file (on the daemon host)

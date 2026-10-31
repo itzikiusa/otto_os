@@ -41,6 +41,11 @@ interface Exchange {
   res: WireResult;
 }
 
+// Both tests read ONE seeded collection: run them in one worker. With
+// fullyParallel each worker ran beforeAll — two concurrent drop + insert
+// passes left 3,000–5,000 docs and every page count was off.
+test.describe.configure({ mode: 'serial' });
+
 let workspaceId = '';
 let mongoConnId: string | null = null;
 

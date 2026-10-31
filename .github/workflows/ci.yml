@@ -37,8 +37,8 @@ env:
   # The ONE ClickHouse pin (SHA-512 of this exact release asset) for every job
   # that installs the single binary: the Rust job's k8s-monitor ratchets and
   # the e2e-functional shards' usage/telemetry engine.
-  CLICKHOUSE_VERSION: 26.8.15.10
-  CLICKHOUSE_SHA512: d54f83e187b19399260fa9d7f68403a7c3adf48059f211d0620216e6ea49687490898b5aa32f49d9728db58c5912cfb700148b814b8c3314f88ccfa940ffd85a
+  CLICKHOUSE_VERSION: 26.8.34.13
+  CLICKHOUSE_SHA512: e5c753b258679daa882747aaec10b351a85bcad1412af7957d4a4616dcf5b45663da219bd37fe0697fde2ae76dbed2ba5b414ce9a5c8044c6d1fa0142e03e4cc
 
 jobs:
   rust-lint:
@@ -60,7 +60,7 @@ jobs:
           df -h /
 
       - name: Install stable toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99.1
         with:
           components: rustfmt, clippy
 
@@ -76,7 +76,7 @@ jobs:
         run: python3 scripts/loc-ratchet.py
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2.9.2
+        uses: Swatinem/rust-cache@v2.9.3
         with:
           shared-key: rust-lint
 
@@ -107,7 +107,7 @@ jobs:
     name: Rust (test)
     runs-on: ubuntu-latest
     env:
-      NEXTEST_VERSION: 0.9.146
+      NEXTEST_VERSION: 0.9.150
     steps:
       - uses: actions/checkout@v7.0.1
 
@@ -132,11 +132,11 @@ jobs:
           fi
 
       - name: Install stable toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99.1
 
       # Caches ~/.cargo registry/git + ./target, keyed on Cargo.lock.
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2.9.2
+        uses: Swatinem/rust-cache@v2.9.3
 
       - name: Report restored cache disk usage
         run: |
@@ -152,7 +152,7 @@ jobs:
           curl --fail --location --silent --show-error --retry 3 \
             "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-$NEXTEST_VERSION/cargo-nextest-$NEXTEST_VERSION-x86_64-unknown-linux-gnu.tar.gz" \
             --output "$archive"
-          printf '%s  %s\n' '682c21b777c333e96fd532e114d3a5a894e0729ab88d94c0a9f20f8419695428' "$archive" | sha256sum --check
+          printf '%s  %s\n' 'b0959bc64232974224cf9fb22c915845398c0e8668fa7831eb5b43fb1eef781f' "$archive" | sha256sum --check
           mkdir -p "$tool_dir"
           tar -xzf "$archive" -C "$tool_dir" cargo-nextest
           "$tool_dir/cargo-nextest" nextest --version
@@ -267,9 +267,9 @@ jobs:
         run: python3 -B -m unittest discover -s scripts -p 'test_ci_apt_install.py'
 
       - name: Install Node
-        uses: actions/setup-node@v7.0.0
+        uses: actions/setup-node@v7.1.0
         with:
-          node-version: 26.10.0
+          node-version: 26.13.0
           cache: npm
           cache-dependency-path: ui/package-lock.json
 
@@ -306,8 +306,6 @@ jobs:
         run: node scripts/bundle-budget.mjs
 
   # Build the debug test daemon ONCE and hand it to every job that drives a
-  # real ottod (e2e-functional shards, perf-gates, daemon-budget) as an
-  # Build the debug test daemon ONCE and hand it to every job that drives a
   # real ottod (e2e-gate, daemon-budget) as an artifact. The full 4-shard
   # functional E2E suite + WebKit perf gates run nightly in e2e-nightly.yml so
   # PRs only wait on the selected e2e-gate smoke suite (~4m30s).
@@ -319,10 +317,10 @@ jobs:
       - uses: actions/checkout@v7.0.1
 
       - name: Install stable toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99.1
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2.9.2
+        uses: Swatinem/rust-cache@v2.9.3
         with:
           shared-key: perf-gates
 
@@ -336,7 +334,7 @@ jobs:
         run: cargo build -p ottod
 
       - name: Upload the test daemon
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: ottod-debug
           path: target/debug/ottod
@@ -358,7 +356,7 @@ jobs:
       - uses: actions/checkout@v7.0.1
 
       - name: Download the test daemon
-        uses: actions/download-artifact@v7.0.0
+        uses: actions/download-artifact@v8.0.2
         with:
           name: ottod-debug
           path: target/debug
@@ -367,9 +365,9 @@ jobs:
         run: chmod +x target/debug/ottod
 
       - name: Install Node
-        uses: actions/setup-node@v7.0.0
+        uses: actions/setup-node@v7.1.0
         with:
-          node-version: 26.10.0
+          node-version: 26.13.0
           cache: npm
           cache-dependency-path: ui/package-lock.json
 
@@ -405,7 +403,7 @@ jobs:
 
       - name: Upload the Playwright report
         if: failure()
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: e2e-gate-report
           path: |
@@ -428,7 +426,7 @@ jobs:
       - uses: actions/checkout@v7.0.1
 
       - name: Download the test daemon
-        uses: actions/download-artifact@v7.0.0
+        uses: actions/download-artifact@v8.0.2
         with:
           name: ottod-debug
           path: target/debug
@@ -437,9 +435,9 @@ jobs:
         run: chmod +x target/debug/ottod
 
       - name: Install Node
-        uses: actions/setup-node@v7.0.0
+        uses: actions/setup-node@v7.1.0
         with:
-          node-version: 26.10.0
+          node-version: 26.13.0
 
       - name: Daemon perf budget
         env:
@@ -458,7 +456,7 @@ jobs:
       - uses: actions/checkout@v7.0.1
 
       - name: Install stable toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99.1
 
       # Cache only the pinned executable, never audit results or the advisory
       # database. Every run still fetches current RustSec advisories below.
@@ -512,6 +510,9 @@ jobs:
         uses: EmbarkStudios/cargo-deny-action@v2.1.1
         with:
           command: check bans
+          # Matches rust-toolchain.toml (the action's image cannot install an
+          # override toolchain it was not told about).
+          rust-version: "1.99.1"
 
   # Bug-fix commits that touch the UI should carry a test (ui/unit or ui/e2e).
   # Non-blocking: prints a ::warning:: per offending commit in the PR range.

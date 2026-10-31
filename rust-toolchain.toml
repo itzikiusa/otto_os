@@ -1,0 +1,5 @@
+# One exact toolchain for local builds and CI (the workflows pin the same
+# number via dtolnay/rust-toolchain@<version>). Bump both together.
+[toolchain]
+channel = "1.99.1"
+components = ["rustfmt", "clippy"]

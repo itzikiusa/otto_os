@@ -841,9 +841,19 @@ impl ImprovementEngine {
                     .open(&edit.target_path)
                     .await
                 {
-                    Ok(mut file) => file.write_all(before.as_bytes()).await.map_err(|e| {
-                        Error::Internal(format!("restore {}: {e}", edit.target_path))
-                    })?,
+                    Ok(mut file) => {
+                        // tokio's File::write_all only hands the bytes to a
+                        // background write: flush before reporting the restore
+                        // done, or a reader (the next rollback check, the
+                        // user's editor) can still see the new file empty.
+                        let restore = async {
+                            file.write_all(before.as_bytes()).await?;
+                            file.flush().await
+                        };
+                        restore.await.map_err(|e| {
+                            Error::Internal(format!("restore {}: {e}", edit.target_path))
+                        })?
+                    }
                     Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
                     Err(e) => {
                         return Err(Error::Internal(format!(

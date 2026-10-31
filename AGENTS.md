@@ -187,7 +187,7 @@ cargo run -p ottod          # daemon on http://127.0.0.1:7700
 cd ui && npm run dev        # UI on http://localhost:5173
 ```
 
-For faster full-suite execution, install cargo-nextest 0.9.146 and run
+For faster full-suite execution, install cargo-nextest 0.9.150 and run
 `cargo nextest run --workspace`, followed by `cargo test --workspace --doc`.
 Nextest uses the resource limits in `.config/nextest.toml`; it does not execute
 doc-tests. CI uses its four-process `ci` profile. Standard `cargo test` remains

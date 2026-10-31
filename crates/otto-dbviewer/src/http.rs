@@ -318,6 +318,12 @@ pub fn api_router<S: DbViewerCtx>() -> Router<S> {
             post(refresh_completion::<S>),
         )
         .route("/connections/{id}/db/import", post(import_query::<S>))
+        // The raw file is the body: ClickHouse streams it into `INSERT … FORMAT`
+        // (unbounded), other engines buffer under `IMPORT_MAX_BYTES` (service).
+        .route(
+            "/connections/{id}/db/import-upload",
+            post(import_upload::<S>).layer(axum::extract::DefaultBodyLimit::disable()),
+        )
         .route("/connections/{id}/db/nl-to-sql", post(nl_to_sql::<S>))
         .route("/connections/{id}/db/history", get(history::<S>))
         .route(
@@ -1185,23 +1191,19 @@ async fn query_status<S: DbViewerCtx>(
 #[derive(Debug, Deserialize)]
 struct ExportReq {
     statement: String,
-    /// `csv` (default) or `json`.
+    /// Any export format (`csv` keeps its header row, as before; binary
+    /// Parquet/Arrow/ORC are ClickHouse over HTTP only).
     #[serde(default)]
-    format: ExportFormat,
+    format: PathFormat,
     /// Optional node context (active database) — same semantics as `QueryRequest.node`.
     #[serde(default)]
     node: Option<String>,
+    /// Optional row cap; absent = every row.
+    #[serde(default)]
+    max_rows: Option<usize>,
 }
 
-#[derive(Debug, Default, Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum ExportFormat {
-    #[default]
-    Csv,
-    Json,
-}
-
-/// Export a query result as a CSV or JSON browser file download, **streaming**
+/// Export a query result as a browser file download, **streaming**
 /// (never buffering the full result) and **uncapped** — the interactive query
 /// endpoint's row cap does not apply. Bytes are produced by the driver's
 /// streaming `export_to_writer` and piped straight to the response body through
@@ -1232,26 +1234,22 @@ async fn export_query<S: DbViewerCtx>(
         .guard_export(&id, &user.id, &req.statement, node.as_deref())
         .await?;
 
-    // Map the browser export format (csv/json — the wire contract is unchanged)
-    // onto the streaming writer's richer format set. CSV keeps its header row (the
-    // old path emitted one) → CsvWithNames; JSON stays a single array of objects.
-    let (export_format, content_type, disposition) = match req.format {
-        ExportFormat::Csv => (
-            PathFormat::CsvWithNames,
-            "text/csv; charset=utf-8",
-            "attachment; filename=\"export.csv\"",
-        ),
-        ExportFormat::Json => (
-            PathFormat::Json,
-            "application/json; charset=utf-8",
-            "attachment; filename=\"export.json\"",
-        ),
+    // `csv` keeps its header row (the old browser contract) → CsvWithNames.
+    let export_format = match req.format {
+        PathFormat::Csv => PathFormat::CsvWithNames,
+        other => other,
     };
+    let content_type = export_format.content_type();
+    let disposition = format!(
+        "attachment; filename=\"export.{}\"",
+        export_format.extension()
+    );
 
     let db = ctx.db().clone();
     let uid = user.id.clone();
     let conn_id = id.clone();
     let statement = req.statement.clone();
+    let max_rows = req.max_rows.filter(|n| *n > 0);
 
     // Bounded hand-off (backend-performance-6-01): the driver fills 64 KiB
     // chunks in memory and awaits a free slot in an 8-chunk channel, so a slow
@@ -1271,7 +1269,7 @@ async fn export_query<S: DbViewerCtx>(
                 &statement,
                 node.as_deref(),
                 export_format,
-                None,
+                max_rows,
                 w,
             )
             .await
@@ -1296,7 +1294,7 @@ async fn export_query<S: DbViewerCtx>(
     Ok((
         [
             (header::CONTENT_TYPE, content_type),
-            (header::CONTENT_DISPOSITION, disposition),
+            (header::CONTENT_DISPOSITION, disposition.as_str()),
             (header::CACHE_CONTROL, "no-store"),
         ],
         axum::body::Body::from_stream(stream),
@@ -1546,6 +1544,55 @@ async fn import_query<S: DbViewerCtx>(
         axum::body::Body::from_stream(stream),
     )
         .into_response())
+}
+
+/// Query string of `POST …/db/import-upload` (the body is the file itself).
+#[derive(Debug, Deserialize)]
+struct ImportUploadQuery {
+    format: crate::import::ImportFormat,
+    /// Destination table (must already exist).
+    table: String,
+    /// Rows per INSERT for the parsed path; clamped 1..=5000 (default 500).
+    #[serde(default)]
+    batch_size: Option<usize>,
+    #[serde(default)]
+    confirm_write: bool,
+}
+
+/// Import a file uploaded from the caller's computer (the browser's "From my
+/// computer"). Unlike `import_query` it reads no daemon-host path, so it is not
+/// root-only: `Editor` on the connection plus every write gate in
+/// `DbViewerService::import_upload`. Answers `{done,rows,batches}` JSON.
+async fn import_upload<S: DbViewerCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    axum::extract::Query(q): axum::extract::Query<ImportUploadQuery>,
+    body: axum::body::Body,
+) -> ApiResult<Json<serde_json::Value>> {
+    let conn = ctx.db().get_connection(&id).await?;
+    check_conn_role(&ctx, &user, &conn, WorkspaceRole::Editor).await?;
+    if q.table.trim().is_empty() {
+        return Err(ApiErr(Error::Invalid("table is required".into())));
+    }
+    use futures_util::TryStreamExt as _;
+    let stream = body.into_data_stream().map_err(std::io::Error::other);
+    let counts = ctx
+        .db()
+        .import_upload(
+            &id,
+            &user.id,
+            q.format,
+            q.table.trim(),
+            q.batch_size.unwrap_or(500).clamp(1, 5000),
+            // An agent credential's `confirm_write` is not a person's (S6-304).
+            crate::service::person_confirmed(q.confirm_write),
+            stream,
+        )
+        .await?;
+    Ok(Json(
+        serde_json::json!({ "done": true, "rows": counts.rows, "batches": counts.batches }),
+    ))
 }
 
 /// Request body for the verified NL→SQL endpoint.

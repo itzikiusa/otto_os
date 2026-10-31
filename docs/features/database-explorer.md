@@ -1337,8 +1337,13 @@ Two export paths, both gated at the same role as running a query (workspace
 **Editor**; global connections: `Database:Edit`):
 
 **A. Browser download (`POST …/db/export`).** Re-runs the statement **uncapped**
-and returns the whole result as a file attachment the browser downloads —
-`csv` or `json`. The daemon streams the driver output into the response. This
+(or up to an optional row limit) and returns the whole result as a file
+attachment the browser downloads — any export format: CSV / TSV (with or
+without a header row), JSON, NDJSON (JSONEachRow), and for **ClickHouse over
+HTTP** the server-rendered **Parquet, Arrow and ORC** (ClickHouse writes them
+with `FORMAT …`; the bytes stream through unchanged). The **Export all rows…**
+dialog offers **Save to: My computer** (this download — any editor) or **Otto
+host path** (B, root only). The daemon streams the driver output into the response. This
 backs **Full Export** (uncapped re-run); the grid's **CSV / JSON** buttons instead
 download the already displayed rows without re-running the statement.
 
@@ -1390,8 +1395,18 @@ path). The response reports `{local_path, rows, bytes, duration_ms}`.
 
 ## 10b. Import
 
-The mirror of the export: import a **local file on the daemon host** into an
-existing SQL table (`POST …/db/import`). Launch it from a table node's
+**Source: My computer** (the default — any editor) uploads the file from the
+browser (`POST …/db/import-upload`, the file is the request body). **ClickHouse
+over HTTP** streams it straight into `INSERT INTO <table> FORMAT <fmt>` — the
+server parses it, so there is no size cap and column types come from the table;
+formats: CSV / TSV (first row = header), NDJSON / JSON (JSONEachRow), **Parquet,
+Arrow, ORC**. Other engines take the parse + batched-INSERT path below (100 MiB
+cap). The same write guard applies: a Prod/read-only connection asks you to type
+its name first.
+
+**Source: Otto host path** (root only) imports a **local file on the daemon host** into an
+existing SQL table (`POST …/db/import`); ClickHouse over HTTP streams that file
+the same way. Launch it from a table node's
 right-click **"Import into…"** (prefills the table name) or the results-grid
 toolbar **Import file…**. The dialog picks a **format**, a **file** (via the
 shared file picker — the extension auto-selects the format), the **target

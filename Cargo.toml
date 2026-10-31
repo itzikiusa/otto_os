@@ -102,32 +102,32 @@ otto-rooms = { path = "crates/otto-rooms" }
 
 # Tree-sitter repo map (otto-context). A coherent grammar set pinned to one
 # tree-sitter ABI; `ignore` walks the repo honoring .gitignore.
-tree-sitter = "0.27.0"
+tree-sitter = "0.27.1"
 tree-sitter-rust = "0.24.2"
 tree-sitter-typescript = "0.23.2"
 tree-sitter-javascript = "0.25.0"
 tree-sitter-python = "0.25.0"
 tree-sitter-go = "0.25.0"
-ignore = "0.4.33"
+ignore = "0.4.34"
 
-tokio = { version = "1.53.1", features = ["full"] }
+tokio = { version = "1.54.1", features = ["full"] }
 axum = { version = "0.8.9", features = ["ws", "macros"] }
 tower-http = { version = "0.7.1", features = ["cors", "trace"] }
 sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "sqlite", "macros", "migrate", "chrono", "json"] }
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"
+serde_json = "1.0.154"
 chrono = { version = "0.4.45", features = ["serde"] }
 thiserror = "2.0.21"
 anyhow = "1.0.104"
 ulid = "3.0.0"
-uuid = { version = "1.27.0", features = ["v4"] }
+uuid = { version = "1.29.0", features = ["v4"] }
 argon2 = "0.6.0"
-sha2 = "0.11.0"
+sha2 = "0.11.1"
 # YAML frontmatter (Vault v3 / OKF). Already in the lockfile via otto-swarm.
 serde_yaml = "0.9.34"
 rand = "0.10.3"
 hex = "0.4.3"
-base64 = "0.22.1"
+base64 = "0.23.1"
 keyring = "4.2.0"
 # AES-256-GCM for the encrypted secrets file (otto-keychain). Already in the
 # lockfile via rustls; reused instead of adding a second AEAD crate.
@@ -140,22 +140,22 @@ async-trait = "0.1.92"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 tracing-appender = "0.2.5"
-rust-embed = { version = "8.12.0", features = ["interpolate-folder-path"] }
+rust-embed = { version = "8.13.0", features = ["interpolate-folder-path"] }
 mime_guess = "2.0.5"
-rustix = { version = "1.1.5", features = ["fs"] }
+rustix = { version = "1.1.6", features = ["fs"] }
 futures-util = "0.3.34"
 tokio-tungstenite = { version = "0.29.0", features = ["rustls-tls-webpki-roots"] }
 tempfile = "3.27.0"
 shell-words = "1.1.1"
-vt100 = "0.16.2"
+vt100 = "0.18.1"
 dirs = "6.0.0"
-protox = "0.9.1"
+protox = "0.10.0"
 prost = "0.14.4"
 prost-reflect = { version = "0.16.5", features = ["serde"] }
 prost-types = "0.14.4"
 # `tls-native-roots`: gRPC trusts the OS store (corporate / internal CAs) like
 # reqwest's platform verifier does for REST, with the bundled Mozilla roots on top.
-tonic = { version = "0.14.6", features = ["tls-ring", "tls-native-roots", "tls-webpki-roots"] }
+tonic = { version = "0.14.9", features = ["tls-ring", "tls-native-roots", "tls-webpki-roots"] }
 reqwest_cookie_store = "0.10.0"
 # Message Brokers (Kafka) — librdkafka statically built (cmake) with vendored
 # OpenSSL so SASL_SSL works on machines without a system librdkafka/OpenSSL.
@@ -197,9 +197,9 @@ lto = false
 # address — useless without the ASLR slide. DWARF debuginfo still goes.
 strip = "debuginfo"
 
-# Vendored vt100 fork: top-anchored scroll regions feed scrollback so codex
-# (ratatui insert_before) transcript history survives reattach snapshots.
-# See vendor/vt100/README-OTTO.md for the single patched conditional.
+# Vendored vt100 fork (upstream 0.18.1): reflow-on-resize, full-width
+# reflowable scrollback replay, compact shared scrollback rows + runtime cap.
+# See vendor/vt100/README-OTTO.md for the patch list.
 [patch.crates-io]
 vt100 = { path = "vendor/vt100" }
 # Preserve MySQL result metadata and authorize explicit LOCAL INFILE transfers.
@@ -207,3 +207,8 @@ sqlx-mysql = { path = "vendor/sqlx-mysql" }
 
 # Permit native ClickHouse startup under server-enforced readonly=1 profiles.
 klickhouse = { path = "vendor/klickhouse" }
+
+# zstd 0.14: the zstd/zstd-safe 0.13/7.x RUSTSEC-2026-0391/0398/0403 fixes
+# (and the unsound-API notices) exist only in zstd 0.14 / zstd-safe 8.2, and
+# mongodb 3.9.1 (latest) still pins zstd 0.13. See vendor/mongodb/README-OTTO.md.
+mongodb = { path = "vendor/mongodb" }

@@ -38,7 +38,7 @@ for (const draft of ['DELETE FROM imported', 'INSERT INTO audit VALUES (1)', 'SE
       selectedObjectPath: null,
       runQuery: async () => { queries.push(database.tab.statement); },
     };
-    const context = component('../src/modules/database/ImportDialog.svelte', {
+    const context = component('../src/modules/database/ImportDialog.svelte', { source: 'host', file: null,
       database, importing: false, importAbort: null, progress: null,
       filePath: '/fixture/import.csv', table: 'imported', batchSize: '500', format: 'csv', canImport: true,
       toasts: { success() {}, info() {}, error(message: string) { assert.fail(message); } },
@@ -173,7 +173,7 @@ test('successful import after a connection change never refreshes another connec
   const pending = deferred<void>(); let refreshes = 0, queries = 0;
   const database = { selectedConnId: 'A', selectedObjectPath: 'db:app/table:imported', importDialogOpen: true,
     tab: { statement: 'DELETE FROM imported' }, refreshObject: async () => { refreshes++; }, runQuery: async () => { queries++; } };
-  const c = component('../src/modules/database/ImportDialog.svelte', {
+  const c = component('../src/modules/database/ImportDialog.svelte', { source: 'host', file: null,
     database, importing: false, importAbort: null, progress: null,
     filePath: '/fixture/import.csv', table: 'imported', batchSize: '500', format: 'csv', canImport: true,
     toasts: { success() {}, info() {}, error(message: string) { assert.fail(message); } },
@@ -224,7 +224,7 @@ function guardedImport() {
   const requests: { url: string; body: any }[] = [], prompts: string[] = [];
   const database = { selectedConnId: 'A', selectedConn: { id: 'A', name: 'Production A', environment: 'prod' }, selectedObjectPath: null,
     importDialogOpen: true, tab: { statement: '' } };
-  const c = component('../src/modules/database/ImportDialog.svelte', {
+  const c = component('../src/modules/database/ImportDialog.svelte', { source: 'host', file: null,
     database, importing: false, importAbort: null, progress: null,
     filePath: '/fixture/import.csv', table: 'imported', batchSize: '500', format: 'csv', canImport: true,
     toasts: { success() {}, info() {}, error(message: string) { assert.fail(message); } },
@@ -257,7 +257,7 @@ test('canceled import while typed confirmation waits cannot retry after late app
 test('old import completion leaves a replacement table dialog open', async () => {
   const pending = deferred<void>();
   const database = { selectedConnId: 'A', importTable: 'first_table', selectedObjectPath: null, importDialogOpen: true, tab: { statement: '' } };
-  const c = component('../src/modules/database/ImportDialog.svelte', {
+  const c = component('../src/modules/database/ImportDialog.svelte', { source: 'host', file: null,
     database, importing: false, importAbort: null, progress: null,
     filePath: '/fixture/import.csv', table: 'first_table', batchSize: '500', format: 'csv', canImport: true,
     toasts: { success() {}, info() {}, error(message: string) { assert.fail(message); } },
@@ -359,4 +359,35 @@ test('database dialogs + page reach storage only through the guarded helpers (S1
       .replace(/<!--[\s\S]*?-->/g, ' ');
     assert.doesNotMatch(code, /\blocalStorage\s*\./, f);
   }
+});
+
+test('an uploaded file goes to import-upload as the raw body, and a guarded connection retries only after typed confirmation', async () => {
+  const uploads: { url: string; body: unknown; confirm: string | null }[] = [];
+  const upload = { name: 'rows.parquet', type: '' };
+  const database = {
+    selectedConnId: 'A', importDialogOpen: true, importTable: 'events', selectedObjectPath: null,
+    selectedConn: { name: 'prod-ch', environment: 'prod' }, tab: { statement: '' },
+  };
+  const context = component('../src/modules/database/ImportDialog.svelte', {
+    source: 'upload', file: upload,
+    database, importing: false, importAbort: null, progress: null,
+    filePath: '', table: 'events', batchSize: '500', format: 'parquet', canImport: true,
+    URLSearchParams,
+    toasts: { success() {}, info() {}, error(message: string) { assert.fail(message); } },
+    confirmer: { promptText: async () => 'prod-ch' },
+    postNdjsonStream: async () => assert.fail('the host-path stream must not run for an upload'),
+    postFile: async (url: string, body: unknown) => {
+      const confirm = new URL(url, 'http://x').searchParams.get('confirm_write');
+      uploads.push({ url, body, confirm });
+      return uploads.length === 1 ? Promise.reject(new Error('write_blocked: production connection')) : { done: true, rows: 1000, batches: 1 };
+    },
+  });
+  await context.runImport();
+  assert.equal(uploads.length, 2);
+  assert.ok(uploads[0].url.startsWith('/connections/A/db/import-upload?'));
+  assert.match(uploads[0].url, /format=parquet/);
+  assert.equal(uploads[0].body, upload, 'the File itself is the request body');
+  assert.equal(uploads[0].confirm, 'false');
+  assert.equal(uploads[1].confirm, 'true');
+  assert.equal(database.importDialogOpen, false);
 });

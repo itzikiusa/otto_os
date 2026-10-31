@@ -15,7 +15,7 @@
   import { loadErrorText } from '../../lib/loadError';
   import { toastError } from '../../lib/toastError';
 
-  let { onopenrun } = $props<{ onopenrun?: (e: SkillEval) => void }>();
+  let { onopenrun }: { onopenrun?: (e: SkillEval) => void } = $props();
 
   let tasks: GoldenTask[] = $state([]);
   let loading = $state(true);

@@ -144,3 +144,28 @@ for (const scheme of ['light', 'dark'] as const) {
     await page.screenshot({path: info.outputPath(`host-room-${scheme}.png`)});
   });
 }
+
+// Browser (no Tauri): a hosted room opens in its own tab and receives the
+// credential from the tab that opened it by postMessage. The credential is
+// often a Svelte `$state` proxy (StartRoomModal's `created`), which
+// postMessage cannot clone — the reply threw DataCloneError and the room tab
+// timed out with "The Otto tab that started this room didn't answer".
+test('browser room tab receives a proxied host credential from its opener', async ({ page }) => {
+  await page.goto('/#/rooms');
+  await expect(page.locator('.navigator')).toBeVisible({ timeout: 30_000 });
+  const popupPromise = page.waitForEvent('popup');
+  await page.evaluate(async (credential) => {
+    // Served by Vite inside the page; paths as values so tsc does not resolve them.
+    const accessPath = '/src/modules/rooms/room-access.ts', windowPath = '/src/modules/rooms/room-window.ts';
+    const access = await import(/* @vite-ignore */ accessPath) as { rememberRoom(origin: string, c: unknown): void };
+    const win = await import(/* @vite-ignore */ windowPath) as { openHostedRoom(id: string): Promise<void> };
+    // A Proxy is exactly what postMessage refuses to clone.
+    access.rememberRoom(location.origin, new Proxy({ ...credential }, {}));
+    await win.openHostedRoom(credential.room_id);
+  }, credential);
+  const popup = await popupPromise;
+  await expect(popup).toHaveURL(/#\/room-host\/fixture-room$/);
+  // The tab got its credential: it goes on to connect instead of failing.
+  await expect(popup.getByText(/Connecting to the room|Connection interrupted|Room closed/).first()).toBeVisible({ timeout: 15_000 });
+  await expect(popup.getByText('didn’t answer', { exact: false })).toHaveCount(0);
+});

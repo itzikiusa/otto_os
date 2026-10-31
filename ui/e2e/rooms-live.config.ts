@@ -6,7 +6,8 @@ export default defineConfig({
   ...base,
   use: {...base.use, baseURL: origin, actionTimeout: 15000,
     permissions: ['microphone'],
-    launchOptions: {args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream']},
+    // OTTO_E2E_SLOWMO=<ms> slows every action so a `--headed` run can be watched.
+    launchOptions: {slowMo: Number(process.env.OTTO_E2E_SLOWMO ?? 0), args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream']},
   },
   testDir: '.', testMatch: 'desktop-rooms-live.spec.ts',
   globalSetup: './global-setup.ts', globalTeardown: './global-teardown.ts',

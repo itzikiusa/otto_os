@@ -27,9 +27,9 @@ apache-avro = { workspace = true }
 # SSH-tunnel Kafka proxy: SOCKS5 dial to brokers + broker-side TLS termination.
 tokio-socks = "0.5.3"
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12"] }
-rustls = { version = "0.23.45", default-features = false, features = ["ring", "tls12", "std"] }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "tls12", "std"] }
 rustls-pki-types = "1.15.1"
-webpki-roots = "1.0.9"
+webpki-roots = "1.0.11"
 futures-util = { workspace = true }
 
 [dev-dependencies]

@@ -101,7 +101,7 @@ int main(int argc, char **argv) {
             assert!(Instant::now() < deadline, "fixture child not launched");
             std::thread::sleep(Duration::from_millis(20));
         };
-        let mut system = System::new();
+        let mut system = System::new().unwrap();
         system.refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]), true, refresh_kind());
         let candidate = Candidate {
             pid,
@@ -281,7 +281,7 @@ async fn relative_data_directory_launches_with_recoverable_absolute_config() {
         let observed = async {
             let deadline = Instant::now() + Duration::from_secs(5);
             loop {
-                let mut system = System::new();
+                let mut system = System::new().unwrap();
                 system.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh_kind());
                 if system
                     .processes()
