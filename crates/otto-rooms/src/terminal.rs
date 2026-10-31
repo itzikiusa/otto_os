@@ -99,6 +99,23 @@ pub enum Frame {
     Ack {
         bytes: u64,
     },
+    /// Find-bar search over the session's ring-buffer scrollback, same reply
+    /// as `/ws/term` (`search_result`). Read-only: any admitted member.
+    Search {
+        query: String,
+    },
+}
+/// Longest find query the relay will scan for.
+pub const MAX_SEARCH_QUERY: usize = 256;
+/// Matches returned per search (same cap as `/ws/term`).
+pub const MAX_SEARCH_RESULTS: usize = 200;
+/// The `search_result` frame the terminal find bar consumes.
+pub fn search_result_frame(query: &str, matches: Vec<(usize, String)>) -> String {
+    let matches: Vec<serde_json::Value> = matches
+        .into_iter()
+        .map(|(line, text)| serde_json::json!({ "line": line, "text": text }))
+        .collect();
+    serde_json::json!({ "type": "search_result", "query": query, "matches": matches }).to_string()
 }
 /// A driver's `input` frame: base64, at most 32 KiB decoded.
 pub fn decode_input(data: &str) -> Result<Vec<u8>> {
@@ -117,6 +134,20 @@ mod tests {
     fn input_decodes_the_existing_terminal_wire_format() {
         assert_eq!(decode_input("aGVsbG8NCg==").unwrap(), b"hello\r\n");
         assert!(decode_input("%invalid").is_err());
+    }
+
+    #[test]
+    fn search_frame_parses_and_replies_in_the_find_bar_shape() {
+        assert!(matches!(
+            serde_json::from_str::<Frame>(r#"{"type":"search","query":"err"}"#),
+            Ok(Frame::Search { query }) if query == "err"
+        ));
+        let reply: serde_json::Value =
+            serde_json::from_str(&search_result_frame("a\tb", vec![(3, "x\u{1b}y".into())]))
+                .unwrap();
+        assert_eq!(reply["type"], "search_result");
+        assert_eq!(reply["query"], "a\tb");
+        assert_eq!(reply["matches"][0]["line"], 3);
     }
 
     #[test]

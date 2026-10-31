@@ -240,7 +240,7 @@ async fn load_snip(ctx: &ServerCtx, id: &str) -> Result<Snip, Error> {
     Ok(snip)
 }
 
-async fn store_snip(ctx: &ServerCtx, bytes: &[u8], source: &str) -> Result<Snip, Error> {
+pub(crate) async fn store_snip(ctx: &ServerCtx, bytes: &[u8], source: &str) -> Result<Snip, Error> {
     let (width, height) =
         png_dims(bytes).ok_or_else(|| Error::Invalid("payload is not a PNG image".into()))?;
     let id = otto_core::new_id();

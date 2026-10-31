@@ -11,6 +11,7 @@ const admitted: RoomSnapshot = {
 };
 test('guest admission, driver handoff and chat stay isolated from owner APIs', async ({page}, testInfo) => {
   const requests: string[] = [], shellRequests: string[] = [], terminalInput: unknown[] = [], actions: Record<string, unknown>[] = [];
+  const pastes: Record<string, string>[] = [];
   page.on('request', request => { if (new URL(request.url()).pathname === '/src/shell/App.svelte') shellRequests.push(request.url()); });
   let membership: WebSocketRoute | undefined;
   await page.addInitScript(() => { localStorage.setItem('otto_token', 'owner-secret-must-not-travel'); });
@@ -18,6 +19,8 @@ test('guest admission, driver handoff and chat stay isolated from owner APIs', a
     requests.push(route.request().url());
     expect(route.request().headers().authorization).toBeUndefined();
     if (route.request().url().endsWith('/room-join')) await route.fulfill({json: {room_id: 'demo', member_id: 'guest', token: 'guest-token'}});
+    // The driver's pasted image goes to the HOST with the room capability only.
+    else if (route.request().url().endsWith('/room-paste/demo')) { pastes.push(route.request().headers()); await route.fulfill({json: {ok: true}}); }
     else await route.fulfill({status: 403, json: {message: 'Unexpected owner request'}});
   });
   await page.routeWebSocket('**/ws/rooms/demo', ws => {
@@ -66,7 +69,10 @@ test('guest admission, driver handoff and chat stay isolated from owner APIs', a
     const clipboardData = new DataTransfer(); clipboardData.items.add(new File(['fake'], 'test.png', {type: 'image/png'}));
     node.dispatchEvent(new ClipboardEvent('paste', {clipboardData, bubbles: true, cancelable: true}));
   });
-  expect(requests).toHaveLength(1);
+  await expect.poll(() => pastes.length).toBe(1);
+  expect(pastes[0]['x-otto-room-token']).toBe('guest-token');
+  expect(pastes[0]['x-otto-grant-epoch']).toBe('4');
+  expect(requests.map(u => new URL(u).pathname)).toEqual(['/api/v1/room-join', '/api/v1/room-paste/demo']);
   const written = terminalInput.length;
   membership!.send(JSON.stringify({type: 'snapshot', room: {...admitted, grant_epoch: 5}}));
   await expect(page.getByRole('button', {name: 'Request control', exact: true})).toBeVisible();
@@ -82,7 +88,7 @@ test('guest admission, driver handoff and chat stay isolated from owner APIs', a
   // Withdrawing pauses capture for everyone, so it asks first.
   await page.getByRole('dialog', {name: 'Pause capture for everyone?'}).getByRole('button', {name: 'Pause capture', exact: true}).click();
   await expect.poll(() => actions.some(a => a.type === 'recap_consent' && a.epoch === 7 && a.allow === false)).toBeTruthy();
-  expect(requests).toHaveLength(1);
+  expect(requests).toHaveLength(2);
   await page.screenshot({path: `/tmp/otto-room-${testInfo.project.name}.png`, fullPage: true});
   membership!.send(JSON.stringify({type: 'ended', reason: 'The host ended the room.'}));
   await expect(page.getByText('The host ended the room.')).toBeVisible();

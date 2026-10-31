@@ -5,7 +5,8 @@ export function parseRoomInvite(value: string): RoomInvitation {
   const url = new URL(value.trim());
   const loopback = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
   if ((url.protocol !== 'https:' && !(url.protocol === 'http:' && loopback)) || url.username || url.password || url.search || url.pathname !== '/' || url.hostname === 'tauri.localhost') throw new Error('Use an HTTPS room invitation (HTTP is supported only on this computer).');
-  const match = /^#\/room\/([A-Za-z0-9_-]+)\/([A-Za-z0-9_-]+)$/.exec(url.hash);
+  // An optional 4th segment pins the host's self-signed certificate (SHA-256).
+  const match = /^#\/room\/([A-Za-z0-9_-]+)\/([A-Za-z0-9_-]+)(?:\/[0-9a-fA-F]{64})?$/.exec(url.hash);
   if (!match || match[1].length > 128 || match[2].length < 16 || match[2].length > 512) throw new Error('Paste the complete room invitation, including its invitation code.');
   return { origin: url.origin, roomId: match[1], invite: match[2], url: url.href };
 }

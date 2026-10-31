@@ -31,6 +31,18 @@ pub trait RoomsCtx: Clone + Send + Sync + 'static {
     /// This daemon's loopback base URL: the invite origin when no public
     /// room origin is configured.
     fn base_url(&self) -> &str;
+    /// `https://<lan-ip>:<port>` of the TLS network listener when it is
+    /// actually serving — the invite origin when no public origin is set, so
+    /// a second computer on the same network can reach the room (a loopback
+    /// invite only ever points the guest at their OWN daemon).
+    fn lan_origin(&self) -> Option<String> {
+        None
+    }
+    /// Lowercase-hex SHA-256 of the network listener's (self-signed) leaf
+    /// certificate. Rides LAN invites so the joining Otto app can pin it.
+    fn lan_certificate_sha256(&self) -> Option<String> {
+        None
+    }
     /// Keychain-backed secrets (the TURN shared secret).
     fn secrets(&self) -> &Arc<dyn SecretStore>;
     /// A global setting (`room_ice`, `room_public_origin`, `room_recap_engine`).

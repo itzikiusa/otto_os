@@ -1,5 +1,7 @@
 //! Isolated acceptance fixture: production room window and ACL, no Otto startup.
 //! Run through scripts/room-media-probe/native.py, never the installed app.
+#[path = "../src/room_trust.rs"]
+mod room_trust;
 #[path = "../src/rooms.rs"]
 mod rooms;
 

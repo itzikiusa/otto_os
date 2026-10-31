@@ -477,6 +477,32 @@ pub(crate) fn screen_shows_paste(norm_screen: &str, probe: &str) -> bool {
     lower.contains("[pasted content ") || lower.contains("[pasted text #")
 }
 
+impl SessionManager {
+    /// [`Self::submit_text`] for a session room's driver: the same submit
+    /// lock, control-byte stripping and paste-then-Enter timing, with every
+    /// write re-checked against the room grant (`room_input`). `submit: false`
+    /// pastes only (a pasted image's path the driver keeps typing around).
+    pub async fn room_paste_text(
+        &self,
+        id: &Id,
+        room: &str,
+        member: &str,
+        epoch: u64,
+        text: &str,
+        submit: bool,
+    ) -> otto_core::Result<()> {
+        let lock = self.submit_lock(id);
+        let _submit = lock.lock().await;
+        self.room_input(id, room, member, epoch, &bracketed_paste(text))
+            .await?;
+        if !submit {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        self.room_input(id, room, member, epoch, b"\r").await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

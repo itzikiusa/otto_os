@@ -15,7 +15,10 @@ use otto_core::{api::RoomEvent, Error, Result};
 use otto_rooms::{
     auth::socket_token,
     capability::TokenBucket,
-    terminal::{decode_input, flow_deadline, FlowGate, Frame, ResyncQueue, ACK_BURST, ACK_RATE},
+    terminal::{
+        decode_input, flow_deadline, search_result_frame, FlowGate, Frame, ResyncQueue, ACK_BURST,
+        ACK_RATE, MAX_SEARCH_QUERY, MAX_SEARCH_RESULTS,
+    },
     SharedRoom, RATE_LIMITED,
 };
 use otto_sessions::ws::{CreditGate, CreditStep};
@@ -181,6 +184,9 @@ async fn serve(
     let mut frame_rate = TokenBucket::new(120.0);
     let mut ack_rate = TokenBucket::new(ACK_BURST);
     let mut history_rate = TokenBucket::new(2.0);
+    // Find-as-you-type (debounced client-side); its own budget so a search
+    // never steals a snapshot's.
+    let mut search_rate = TokenBucket::new(8.0);
     let mut flow = FlowGate::default();
     let mut recovery = ResyncQueue::default();
     let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
@@ -224,7 +230,12 @@ async fn serve(
                     }
                     continue;
                 }
-                if frame_rate.take(60.0,120.0,RATE_LIMITED).is_err(){break;}
+                // Over the limit: refuse THIS frame and keep the socket (closing
+                // it dropped the whole terminal on one fast paste or key-repeat).
+                if let Err(error)=frame_rate.take(60.0,120.0,RATE_LIMITED){
+                    if send(&mut socket,&RoomEvent::Error{code:error.code().into(),message:error.to_string()}).await.is_err(){break;}
+                    continue;
+                }
                 if !valid(&shared,&member,generation).await{break;}
                 let action=match (parsed,incoming) {
                     (Some(Ok(frame)),_)=>frame,
@@ -261,6 +272,20 @@ async fn serve(
                     },
                     // Routed above (before the general limiter).
                     Frame::Ack{..}=>Ok(()),
+                    Frame::Search{query}=>{
+                        let query: String=query.chars().take(MAX_SEARCH_QUERY).collect();
+                        if query.trim().is_empty(){Ok(())}else{
+                            // Over budget: an empty answer (the find bar still has its
+                            // local buffer matches) instead of an error painted into
+                            // the terminal and a spinner that never stops.
+                            let matches=if search_rate.take(4.0,8.0,RATE_LIMITED).is_ok(){
+                                let lines=handle.search_lines();
+                                let q=query.clone();
+                                tokio::task::spawn_blocking(move||otto_pty::ring::search_lines(&lines,&q,MAX_SEARCH_RESULTS)).await.unwrap_or_default()
+                            }else{Vec::new()};
+                            send_frame(&mut socket,Message::Text(search_result_frame(&query,matches).into())).await
+                        }
+                    },
                 };
                 if let Err(error)=result {if send(&mut socket,&RoomEvent::Error{code:error.code().into(),message:error.to_string()}).await.is_err(){break;}}
             }

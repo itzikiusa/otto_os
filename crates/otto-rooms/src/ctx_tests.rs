@@ -35,6 +35,7 @@ struct Fake {
     audits: Arc<Mutex<Vec<RoomAudit>>>,
     authority: Arc<Mutex<HashMap<String, Authority>>>,
     ended: Arc<Mutex<Vec<(String, String)>>>,
+    lan: Arc<Mutex<Option<String>>>,
 }
 impl Fake {
     fn new() -> Self {
@@ -47,6 +48,7 @@ impl Fake {
             audits: Arc::default(),
             authority: Arc::default(),
             ended: Arc::default(),
+            lan: Arc::default(),
         }
     }
     fn actions(&self) -> Vec<String> {
@@ -70,6 +72,12 @@ impl RoomsCtx for Fake {
     }
     fn base_url(&self) -> &str {
         "http://127.0.0.1:7700"
+    }
+    fn lan_origin(&self) -> Option<String> {
+        self.lan.lock().unwrap().clone()
+    }
+    fn lan_certificate_sha256(&self) -> Option<String> {
+        Some("ab".repeat(32))
     }
     fn secrets(&self) -> &Arc<dyn SecretStore> {
         &self.secrets
@@ -118,7 +126,7 @@ impl RoomsCtx for Fake {
 }
 
 #[tokio::test]
-async fn invites_use_the_public_origin_else_the_daemon_and_are_audited() {
+async fn invites_use_the_public_origin_else_the_lan_listener_else_the_daemon_and_are_audited() {
     let ctx = Fake::new();
     let host = ctx
         .rooms
@@ -131,6 +139,17 @@ async fn invites_use_the_public_origin_else_the_daemon_and_are_audited() {
     assert!(invite
         .url
         .starts_with(&format!("http://127.0.0.1:7700/#/room/{}/", host.room_id)));
+    // A serving LAN listener beats loopback: another computer can reach it.
+    *ctx.lan.lock().unwrap() = Some("https://192.168.1.20:7701".into());
+    let invite = lifecycle::invite(&ctx, &host.room_id, "owner", "real", RoomRole::Viewer)
+        .await
+        .unwrap();
+    // …and pins its self-signed certificate for the joining app.
+    assert!(invite.url.ends_with(&format!("/{}", "ab".repeat(32))));
+    assert!(invite.url.starts_with(&format!(
+        "https://192.168.1.20:7701/#/room/{}/",
+        host.room_id
+    )));
     ctx.put_setting(
         "room_public_origin",
         &serde_json::json!("https://rooms.example.test/"),
@@ -152,7 +171,7 @@ async fn invites_use_the_public_origin_else_the_daemon_and_are_audited() {
     .await
     .is_err());
     let audits = ctx.audits.lock().unwrap().clone();
-    assert_eq!(audits.len(), 2);
+    assert_eq!(audits.len(), 3);
     assert_eq!(audits[0].action, "room.invite");
     assert_eq!(audits[0].user_id.as_deref(), Some("real"));
     assert_eq!(audits[0].target, host.room_id);

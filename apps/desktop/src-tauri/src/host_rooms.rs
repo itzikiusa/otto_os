@@ -72,13 +72,17 @@ fn parse_context(origin: &str, credential: RoomCredential) -> Result<HostRoomCon
     })
 }
 
+/// Tauri loads the config `main` window and every `w<N>` window from plain
+/// `index.html`, which it shortens to `tauri://localhost` — a non-special
+/// scheme with an EMPTY path, not "/". Rejecting "" refused every normal Otto
+/// window (only panes and pop-outs, loaded with a query, reached `/index.html`).
 fn bundled(url: &Url) -> bool {
     ((url.scheme() == "tauri" && url.host_str() == Some("localhost"))
         || (url.scheme() == "https" && url.host_str() == Some("tauri.localhost")))
         && url.port().is_none()
         && url.username().is_empty()
         && url.password().is_none()
-        && matches!(url.path(), "/" | "/index.html")
+        && matches!(url.path(), "" | "/" | "/index.html")
 }
 
 fn numbered(label: &str, prefix: &str) -> bool {
@@ -269,6 +273,12 @@ mod tests {
     #[test]
     fn only_bundled_workspace_views_can_open_host_rooms() {
         for label in ["main", "w2", "popout-1", "otto-pane-main", "otto-pane-w2"] {
+            // What a `WebviewUrl::App("index.html")` window really reports.
+            for url in ["tauri://localhost", "tauri://localhost#/agents"] {
+                let parsed: Url = url.parse().unwrap();
+                assert_eq!(parsed.path(), "", "{url}");
+                assert!(trusted_caller(label, &parsed), "{label} {url}");
+            }
             assert!(trusted_caller(
                 label,
                 &"tauri://localhost/index.html#/agents".parse().unwrap()

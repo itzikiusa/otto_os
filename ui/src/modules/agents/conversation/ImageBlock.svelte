@@ -26,11 +26,12 @@
   $effect(() => {
     const sid = ctx.sessionId;
     if (!sid) return;
+    const load = ctx.imageUrl ?? ((img: string) => fetchImageUrl(sid, img));
     let alive = true;
     let got: string | null = null;
     url = null;
     failed = false;
-    fetchImageUrl(sid, id)
+    load(id)
       .then((u) => {
         if (!alive) {
           URL.revokeObjectURL(u);

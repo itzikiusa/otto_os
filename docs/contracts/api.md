@@ -29,9 +29,13 @@ recap writes need `Agents:Edit`; `/room-settings` and `/room-recap-settings` are
 | DELETE | `/rooms/{id}` | End a room, leaving its session running |
 | POST | `/rooms/{id}/invites` | Create a single-use invitation |
 | POST | `/room-join` | Redeem an invitation into pending membership |
+| GET | `/room-transcript/{id}` | Room capability (`x-otto-room-token`): the shared session's conversation page (same body as `GET /sessions/{id}/transcript`, no `sub`) for any admitted member |
+| GET | `/room-transcript/{id}/images/{img}` | Room capability: one transcript image |
+| POST | `/room-prompt/{id}` | Room capability + current driver grant (`x-otto-grant-epoch`): `{text, submit}` — submit a prompt (bracketed text + Enter) or raw keys (`submit: false`, e.g. Esc) |
+| POST | `/room-paste/{id}` | Room capability + driver grant: raw `image/png` body (≤ 100 MB) stored on the host; its path is typed into the terminal |
 | GET, PUT | `/room-settings` | Read/configure public origin and media connectivity |
 | WS | `/ws/rooms/{id}` | Membership, admission, chat, media and recap control |
-| WS | `/ws/rooms/{id}/terminal` | Narrow room-authorized terminal stream |
+| WS | `/ws/rooms/{id}/terminal` | Narrow room-authorized terminal stream (also answers `{"type":"search","query"}` with `search_result`; over-rate frames get an `error`, the socket stays open) |
 | POST | `/rooms/{id}/recaps` | Prepare a consent-gated recap |
 | GET | `/room-recaps` | List owner-local archives |
 | GET | `/room-recaps/{id}` | Read a paginated archive |

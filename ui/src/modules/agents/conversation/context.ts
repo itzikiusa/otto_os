@@ -39,6 +39,9 @@ export interface ConvContext {
   openUrl?: (url: string, inApp?: boolean) => void;
   /** `#123` → the session repo's pull request / issue URL, when known. */
   issueUrl?: (n: number) => string | null;
+  /** Fetch a transcript image as a blob URL — set by hosts that are not the
+   *  session's owner (a session room reads it with its room capability). */
+  imageUrl?: (imageId: string) => Promise<string>;
   /** Put text into the composer (reuse a prompt). Null when read-only. */
   reusePrompt?: ((text: string) => void) | null;
 }

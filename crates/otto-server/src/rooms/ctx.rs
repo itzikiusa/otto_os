@@ -19,6 +19,16 @@ impl RoomsCtx for ServerCtx {
     fn base_url(&self) -> &str {
         &self.base_url
     }
+    fn lan_origin(&self) -> Option<String> {
+        crate::routes::share::lan_listener_origin(
+            crate::transport::network_listener_port(),
+            crate::routes::share::primary_lan_ip(),
+        )
+    }
+    fn lan_certificate_sha256(&self) -> Option<String> {
+        let pem = std::fs::read_to_string(self.data_dir.join("tls").join("cert.pem")).ok()?;
+        otto_rooms::ice::pem_sha256(&pem)
+    }
     fn secrets(&self) -> &Arc<dyn SecretStore> {
         &self.secrets
     }

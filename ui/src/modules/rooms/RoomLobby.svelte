@@ -56,10 +56,13 @@
       if (!await confirmer.ask(`Connect to ${invitation.origin}? Your display name and room activity will be shared with this host and admitted participants.`, {title: 'Join room', confirmLabel: 'Join'})) return;
       if ('__TAURI_INTERNALS__' in window) {
         const { invoke } = await import('@tauri-apps/api/core');
-        await invoke<string>('open_room_window', {url: invitation.url});
+        const opened = await invoke<string>('open_room_window', {url: invitation.url});
         joinOpen = false; link = '';
+        // A host on this network serves a self-signed certificate the native
+        // window cannot accept, so the room opens in the default browser.
+        if (opened === 'browser') toasts.push('info', 'Room opened in your browser', 'This host is on your local network. If the browser warns about its certificate, confirm the address matches and continue.', 12000);
       } else { window.location.assign(invitation.url); }
-    } catch (e) { joinError = e instanceof Error ? e.message : 'Couldn’t open this room. Try again.'; }
+    } catch (e) { joinError = loadErrorText(e) || 'Couldn’t open this room. Try again.'; }
     finally { joining = false; }
   }
 </script>

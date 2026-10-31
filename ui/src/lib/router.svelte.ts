@@ -269,7 +269,9 @@ class Router {
       parts = ['game-room', roomId];
     }
 
-    if (parts[0] === 'room' && parts.length === 3) {
+    // `#/room/<id>/<invite>[/<sha256>]` — the optional pinned-certificate
+    // segment is for the joining Otto APP; a browser validates TLS itself.
+    if (parts[0] === 'room' && (parts.length === 3 || (parts.length === 4 && /^[0-9a-fA-F]{64}$/.test(parts[3])))) {
       const [, roomId, invite] = parts;
       if (/^[A-Za-z0-9_-]+$/.test(roomId) && /^[A-Za-z0-9_-]+$/.test(invite)) {
         captureRoomInvite(roomId, invite);

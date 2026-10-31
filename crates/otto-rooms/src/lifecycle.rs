@@ -82,9 +82,12 @@ pub async fn invite<C: RoomsCtx>(
     actor: &str,
     role: RoomRole,
 ) -> Result<RoomInvite> {
-    let origin = ice::public_origin(ctx).await?;
+    let (origin, pin) = ice::invite_origin(ctx).await?;
     let invite = ctx.rooms().invite(id, owner, role).await?;
-    let url = format!("{origin}/#/room/{id}/{invite}");
+    let url = match pin {
+        Some(sha256) => format!("{origin}/#/room/{id}/{invite}/{sha256}"),
+        None => format!("{origin}/#/room/{id}/{invite}"),
+    };
     authority::audit(ctx, id, Some(actor.into()), None, "invite").await;
     Ok(RoomInvite {
         invite,
