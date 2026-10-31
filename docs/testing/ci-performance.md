@@ -152,13 +152,16 @@ structured around single-pass compilation and zero-compile test fan-out:
   test binaries) once using `--workspace --features otto-server/test-util` so
   Cargo `resolver = "2"` never compiles the 89k-LOC `otto-server` crate twice,
   archives all test binaries into `nextest.tar.zst`, and fans out to 8
-  zero-compile `rust-test` nextest shards (`test-threads = "num-cpus"`), 4
+  zero-compile `rust-test` nextest shards (`--partition count:M/8` so adjacent
+  serialized ClickHouse/budget tests spread evenly across shards, `test-threads = "num-cpus"`), 4
   single-browser E2E smoke shards, and `daemon-budget`.
 - **Full workspace + vendor target caching (`scripts/ci-cargo-cache.py`).**
-  `actions/cache` preserves `target/debug/{.fingerprint,build,deps}` across runs
-  while `ci-cargo-cache.py` restores deterministic pre-build `mtime`s on
-  unchanged tracked files and directories (`crates/otto-state/migrations`,
-  `vendor/*`, `crates/*`) via `target/.ci-source-hashes.json`, so warm PR builds
+  `actions/cache` preserves `target/debug/{.fingerprint,build,deps}` (plus
+  `ottod` and `examples`) across `CI`, `macOS`, and `DB & Kafka driver suites`
+  while `ci-cargo-cache.py` stamps a deterministic baseline `mtime_ns` on cold
+  builds and restores exact saved `[sha256, mtime_ns]` entries from
+  `target/.ci-source-hashes.json` on warm runs (alongside explicit
+  `cargo:rerun-if-changed=build.rs` in `vendor/klickhouse`), so warm PR builds
   re-compile only modified crates instead of rebuilding ~280k LOC of workspace
   Rust from scratch.
 - **Lean uncached dependency builds.** Linux links the runner's `libssl-dev`
