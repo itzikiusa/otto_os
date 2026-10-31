@@ -55,12 +55,6 @@ test('palette handlers ignore IME composition keys', () => {
   }
 });
 
-test('History ⌘K resume is registered only when the button would allow it', () => {
-  const h = read('src/modules/agents/history/HistoryPage.svelte');
-  assert.match(h, /sel && canEdit && canResume\(sel\) \? \[\{ id: 'history\.resume'/);
-  assert.match(h, /if \(e\.archived\) return false;/);
-});
-
 // ── S20-302 · agent channels never say "room"; Settings' Slack/Telegram page
 // no longer shares the "Channels" noun ──────────────────────────────────────
 test('agent-channel UI copy never shows the internal "room" noun (S20-302)', () => {

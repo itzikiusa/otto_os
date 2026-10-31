@@ -310,7 +310,11 @@ async fn page_of(live: Arc<Live>, before: Option<usize>, limit: usize) -> Option
             before,
             limit,
             if before.is_none() {
-                st.subagents.tree().to_vec()
+                if live.provider == Provider::Agy {
+                    st.folder.subagents().to_vec()
+                } else {
+                    st.subagents.tree().to_vec()
+                }
             } else {
                 vec![]
             },
@@ -822,7 +826,6 @@ async fn run(ctx: ServerCtx, session: Session, live: Arc<Live>) {
             }) {
                 break;
             }
-            crate::transcript::artifacts::register_work_artifact(&ctx, &session, a).await;
         }
     }
 }

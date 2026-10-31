@@ -54,8 +54,6 @@ pub struct CtxParts {
     pub telemetry: Option<Arc<otto_telemetry::TelemetryService>>,
     /// Local SQLite, a shared remote host, or vault write-through.
     pub memory: Arc<otto_memory::MemoryService>,
-    /// Content-addressed proof media store (`None` keeps media inline).
-    pub proof_media_dir: Option<PathBuf>,
     pub browser: Arc<crate::routes::browser::BrowserEngineHandle>,
     /// Wire `auth_cache` into the authenticator (the daemon). `false` keeps
     /// the authenticator uncached — every request hits the DB, as test
@@ -84,7 +82,6 @@ impl ServerCtx {
             usage,
             telemetry,
             memory,
-            proof_media_dir,
             browser,
             cache_auth_lookups,
         } = parts;
@@ -94,12 +91,6 @@ impl ServerCtx {
         // share the same backing map (Arc-backed).
         let auth_cache = otto_rbac::AuthCache::new();
         let product_repo = otto_state::ProductRepo::new(pool.clone());
-        let swarm_repo = otto_state::SwarmRepo::new(pool.clone());
-        let proof_repo = match proof_media_dir {
-            // Proof media lives in a content-addressed file store, not the state DB.
-            Some(dir) => otto_state::ProofRepo::new(pool.clone()).with_media_dir(dir),
-            None => otto_state::ProofRepo::new(pool.clone()),
-        };
 
         let authenticator = if cache_auth_lookups {
             otto_rbac::RbacAuthenticator::new_with_cache(pool.clone(), auth_cache.clone())
@@ -117,7 +108,6 @@ impl ServerCtx {
             plugins,
             manager,
             rooms: Default::default(),
-            game_rooms: Default::default(),
             workspaces: otto_state::WorkspacesRepo::new(pool.clone()),
             connections: Arc::new(otto_connections::ConnectionsService::new(
                 otto_state::ConnectionsRepo::new(pool.clone()),
@@ -170,7 +160,6 @@ impl ServerCtx {
             )),
             product_repo,
             attachment_repo: otto_state::ProductAttachmentRepo::new(pool.clone()),
-            discovery_repo: otto_state::ProductDiscoveryRepo::new(pool.clone()),
             refinement_repo: otto_state::ProductRefinementRepo::new(pool.clone()),
             mockup_repo: otto_state::ProductMockupRepo::new(pool.clone()),
             discovery_chat_repo: otto_state::DiscoveryChatRepo::new(pool.clone()),
@@ -183,21 +172,9 @@ impl ServerCtx {
             vault: Arc::new(otto_vault::VaultEngine::new(pool.clone())),
             vault_docs_runs: crate::vault_docs_agent::new_run_registry(),
             vault_docs_refine: crate::vault_docs_agent::new_refine_registry(),
-            swarm: Arc::new(otto_swarm::SwarmService::new(swarm_repo.clone())),
-            swarm_repo,
-            swarm_coords: otto_swarm::runtime::engine::new_registry(),
-            swarm_run_cancels: otto_swarm::runtime::run::new_cancel_registry(),
             goal_loops_repo: otto_state::GoalLoopsRepo::new(pool.clone()),
             goal_loops: crate::goal_loop::new_registry(),
-            workgraph: Arc::new(otto_workgraph::WorkGraphService::new(
-                otto_state::WorkGraphRepo::new(pool.clone()),
-                events.clone(),
-            )),
             scheduled_tasks: otto_state::ScheduledTasksRepo::new(pool.clone()),
-            proof_repo,
-            proof_locks: crate::proof::new_locks(),
-            runs: otto_state::RunsRepo::new(pool.clone()),
-            runs_engine: crate::run_engine::RunEngine::new(),
             browser_tabs: otto_state::BrowserTabsRepo::new(pool.clone()),
             browser_annotations: otto_state::BrowserAnnotationsRepo::new(pool.clone()),
             browser_credentials: otto_state::BrowserCredentialsRepo::new(pool.clone()),

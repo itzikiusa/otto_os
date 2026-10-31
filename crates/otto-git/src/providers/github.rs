@@ -1408,8 +1408,6 @@ mod tests {
             description: "d".into(),
             source_branch: "feat/x".into(),
             target_branch: "main".into(),
-            proof_pack_id: None,
-            allow_unproven: None,
             draft,
             reviewers,
         }

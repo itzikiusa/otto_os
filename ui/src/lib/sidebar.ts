@@ -84,37 +84,32 @@ export const SIDEBAR_MODULES: SidebarModuleDef[] = [
   // kind is gated individually by its own feature, so the page itself is safe
   // for any role.
   { id: 'home', icon: 'home', label: 'Home', group: 'work', keywords: 'dashboard overview boxes views' },
-  // Assistant — Otto's personal assistant: one front door that chats (rendered
-  // from the CLI transcript), remembers, reminds, runs tasks and delegates to
-  // Personal Agents, asking before anything leaves the Mac. `#/assistant`.
-  { id: 'assistant', icon: 'assistant', label: 'Assistant', group: 'work', keywords: 'otto personal assistant chat ask remember remind reminder memory tasks approvals needs you' },
   { id: 'agents', icon: 'terminal', label: 'Agents', group: 'work', feature: 'agents', special: true, keywords: 'sessions terminal claude codex shell' },
-  // History — every past Claude/Codex conversation (Otto sessions + transcripts
-  // found on disk), read-only, resumable. Lives in the Agents group and shares
-  // its RBAC gate; the route is `#/history` (NOT `#/agents/…`, whose second
-  // segment is a session id). See docs/design/conversation-view.md §5.3.
+  { id: 'threads', icon: 'threads', label: 'Threads', group: 'work', feature: 'agents', keywords: 'threads chat conversational agents v2 pandacode t3code multi-session split pins history files' },
   { id: 'rooms', icon: 'people', label: 'Rooms', group: 'work', feature: 'agents', keywords: 'collaborate join invite session room chat voice' },
-  { id: 'history', icon: 'clock', label: 'History', group: 'work', feature: 'agents', keywords: 'conversations transcripts past resume' },
-  { id: 'run-with-otto', icon: 'play', label: 'Run with Otto', group: 'work', feature: 'run_with_otto', keywords: 'one button launch jira github issue pr confluence finding test story channel review proof approval' },
-  { id: 'mission-control', icon: 'radar', label: 'Mission Control', group: 'work', feature: 'mission_control', keywords: 'work graph overview approvals spend running waiting' },
   // ── Automate ──
-  { id: 'swarm', icon: 'grid', label: 'Swarm', group: 'automate', feature: 'swarm', keywords: 'agents team org orchestrator kanban board company' },
   { id: 'loops', icon: 'refresh', label: 'Goal Loops', group: 'automate', keywords: 'goal loop iterate autonomous objective plan execute evaluate' },
   { id: 'workflows', icon: 'split', label: 'Workflows', group: 'automate', feature: 'workflows', keywords: 'pipeline steps runs pr review automation' },
-  { id: 'scheduled-tasks', icon: 'calendar', label: 'Scheduled Tasks', group: 'automate', feature: 'scheduled_tasks', keywords: 'cron recurring job report cadence hourly daily' },
-  // Personal Agents share the scheduled_tasks feature gate (same RBAC axis on
-  // the daemon: View for GET, Edit for writes).
-  { id: 'personal-agents', icon: 'user', label: 'Personal Agents', group: 'automate', feature: 'scheduled_tasks', keywords: 'persona soul bot agent channels chat schedule recap' },
+  {
+    id: 'scheduled-tasks',
+    icon: 'calendar',
+    label: 'Scheduled Tasks',
+    group: 'automate',
+    feature: 'scheduled_tasks',
+    keywords: 'cron recurring job report cadence hourly daily personal agents persona soul bot channels chat schedule recap',
+  },
   // ── Build ──
   { id: 'git', icon: 'branch', label: 'Git', group: 'build', feature: 'git', keywords: 'repos prs pull requests diff commit' },
-  { id: 'proof', icon: 'check', label: 'Proof', group: 'build', feature: 'proof_pack', keywords: 'proof pack evidence badge verified tests ci approval audit' },
-  { id: 'product', icon: 'note', label: 'Product', group: 'build', feature: 'product', keywords: 'story jira confluence analysis rfc' },
+  {
+    id: 'product',
+    icon: 'note',
+    label: 'Product',
+    group: 'build',
+    featureAny: ['product', 'design'],
+    keywords: 'story jira confluence analysis rfc design hall studio frames graphics site 3d whiteboard canvas brand kit mockup diagram sketch excalidraw mermaid d2 spatial',
+  },
   // Vault v3 — the file-backed docs home (Obsidian-parity markdown vaults, OKF).
   { id: 'vault', icon: 'book', label: 'Vault', group: 'build', keywords: 'docs notes markdown obsidian okf knowledge graph' },
-  // Design Hall — one library for every design studio (Frames, Graphics, Site,
-  // 3D, Whiteboard, Brand Kit, Spatial). It replaces the Canvas entry: Canvas
-  // lives on as the Whiteboard studio (`#/canvas` still routes; see navIdForModule).
-  { id: 'design', icon: 'designHall', label: 'Design Hall', group: 'build', feature: 'design', keywords: 'design studio frames graphics site 3d whiteboard canvas brand kit mockup diagram sketch excalidraw mermaid d2 spatial' },
   // Workbench — per-user scratch files (scripts, JSON, Markdown, diagrams) with
   // formatting, previews, placeholders, Send to… and full edit history.
   { id: 'workbench', icon: 'workbench', label: 'Workbench', group: 'build', feature: 'agents', keywords: 'scratch scripts editor format json markdown html mermaid d2 sql snippets notes vscode history placeholders' },
@@ -180,20 +175,23 @@ export function availableModules(
  */
 export function routeAllowed(route: string, can: (feature: Feature) => boolean): boolean {
   const id = route.split(/[/?]/)[0];
+  if (id === 'design') return can('design');
+  if (id === 'canvas') return can('canvas');
+  if (id === 'personal-agents') return can('scheduled_tasks');
   const m = SIDEBAR_MODULES.find((x) => x.id === id);
   if (!m) return true;
   return m.featureAny ? m.featureAny.some(can) : m.feature == null || can(m.feature);
 }
 
 /**
- * The sidebar entry a router module belongs to. The Database Explorer and
- * Message Brokers views have no nav entries of their own — they are opened from
- * the unified Connections hub, so their routes highlight `connections`.
+ * The sidebar entry a router module belongs to. Merged views highlight their
+ * unified parent module: Database / Message Brokers → Connections, Design Hall
+ * / Whiteboard → Product, and Personal Agents → Scheduled Tasks.
  */
 export function navIdForModule(routerModule: string): string {
   if (routerModule === 'database' || routerModule === 'brokers') return 'connections';
-  // Canvas is Design Hall's Whiteboard studio.
-  if (routerModule === 'canvas') return 'design';
+  if (routerModule === 'design' || routerModule === 'canvas') return 'product';
+  if (routerModule === 'personal-agents') return 'scheduled-tasks';
   return routerModule;
 }
 
@@ -433,6 +431,9 @@ export function moduleLabel(routerModule: string): string {
   const other: Record<string, string> = {
     database: 'Database',
     brokers: 'Message Brokers',
+    design: 'Product',
+    canvas: 'Whiteboard',
+    'personal-agents': 'Personal Agents',
     settings: 'Settings',
     walkthroughs: 'Help',
     plugin: 'Plugin',

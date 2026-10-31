@@ -14,4 +14,8 @@ export const databaseRoutes: EventRoutes = {
     databaseStore.use((database) =>
       database.applyAssistUpdate(parsed.assist_id, parsed.connection_id, parsed.sql, parsed.note),
     ),
+  // Live MCP database tool execution (`otto_db_query` / `otto_query_db` / …) →
+  // records activity and surfaces the running/completed query on DatabasePage.
+  db_mcp_activity: (parsed) =>
+    databaseStore.use((db) => db.applyMcpActivity(parsed)),
 };

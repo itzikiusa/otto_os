@@ -29,12 +29,11 @@ A workflow is a graph of steps you build once and run many times. Each step is a
   - 3 game pipelines: **Slots game**, **Crash game (Aviator style)** and **Scratch card**.
 - Rename inline, duplicate or delete from the list.
 
-**Node types (26)**
+**Node types (25)**
 - **Triggers:** Manual Trigger — the entry point; emits the run input.
 - **AI:**
   - **Agent** — an agent turn with a prompt, provider, model and optional skills inlined.
   - **Prepare relevant data** — fetches a referenced Jira ticket into the run's files, then optionally runs an analysis agent.
-  - **Swarm Task** — adds a task to a running swarm project.
   - **Review Run** — the multi-provider × multi-lens code review; outputs findings, a 0–100 score and pass/fail. Fan-out mode (one agent per lens × provider) or orchestrator mode (one agent per provider running every lens).
   - **Self-Improve (offer)** — reflects on recent sessions and offers skill/memory edits for approval. Nothing is applied automatically.
 - **Network:**
@@ -73,13 +72,13 @@ A workflow is a graph of steps you build once and run many times. Each step is a
 - Runs survive a daemon restart and resume from the step they were on.
 - Run view: status per step, attempt counts, logs, the step's work product (copyable), sub-agent rows, a zoomed step view, and paged checkpoints.
 - **Retry step** re-runs only a failed step; **Re-run from here** re-runs a step and everything after it. Both keep the run's files and worktree.
-- **Final output** shows the run's deliverable. Each run links to the proof pack assembled from it.
+- **Final output** shows the run's deliverable.
 - The sidebar shows a count of running workflows; open any from the **Running** list.
 
 **Triggers**
 - **Schedule:** every N minutes, daily, weekly or 5-field cron, in any IANA timezone, with an optional run prompt.
 - **Webhook:** a secret URL; anything that POSTs to it starts a run with the request body as input.
-- **Event:** review changed, budget exceeded, product changed, swarm status, improvement finished, insight ready — with an optional JSON filter.
+- **Event:** review changed, budget exceeded, product changed, improvement finished, insight ready — with an optional JSON filter.
 - **Chat binding:** a Slack or Telegram chat (optionally one thread, optionally @mention only on Slack); matching messages start a run.
 - Any trigger can send results to a Slack or Telegram chat/thread and to a result webhook.
 - **Preview / validate** checks a trigger without saving and shows the next 5 fire times for a schedule.
@@ -99,7 +98,7 @@ A workflow is a graph of steps you build once and run many times. Each step is a
 - Node settings are stored as plain JSON. Don't put secrets in them — use **API Run** with an API-client environment, or an integration whose credentials live in the Keychain.
 - A webhook URL is the credential. Anyone who has it can start runs; delete the trigger to revoke it. The daemon is only reachable from outside your Mac if you enable remote access.
 - Anyone who can post in a bound Slack or Telegram channel can start that workspace's workflows by name.
-- Several nodes need other features set up first: **DB Query** (a saved connection), **Broker Peek** (a Kafka cluster), **Swarm Task** (a running swarm), **Review Run** and **Git PR** (a registered repository), Product nodes (a story, and a Jira/Confluence account to publish).
+- Several nodes need other features set up first: **DB Query** (a saved connection), **Broker Peek** (a Kafka cluster), **Review Run** and **Git PR** (a registered repository), Product nodes (a story, and a Jira/Confluence account to publish).
 - A cycle in the graph fails the run before any step starts. A run stops after 10 hours.
 - An agent step that shows no real progress for 5 minutes is treated as stuck and retried in a fresh session. The 5-minute limit is a daemon setting and can be raised or turned off.
 - DB Query is always read-only; Broker Peek never produces.
@@ -108,9 +107,6 @@ A workflow is a graph of steps you build once and run many times. Each step is a
 ## Related
 
 - [Scheduled Tasks](#/walkthroughs/scheduled-tasks)
-- [Swarm](#/walkthroughs/swarm)
 - [Goal Loops](#/walkthroughs/loops)
 - [Git](#/walkthroughs/git)
-- [Proof](#/walkthroughs/proof)
 - [Product](#/walkthroughs/product)
-- [Mission Control](#/walkthroughs/mission-control)

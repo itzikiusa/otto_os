@@ -66,7 +66,7 @@ test.describe('scheduled tasks API (route → policy → engine → report)', ()
     await ctx.dispose();
   });
 
-  test('v2: codex provider + cron + worktree + retries + proof persist', async () => {
+  test('v2: codex provider + cron + worktree + retries persist', async () => {
     const { ctx } = await apiCtx();
     const r = await ctx.post(`${base}${V1}/workspaces/${wsA}/scheduled-tasks`, {
       data: {
@@ -78,7 +78,6 @@ test.describe('scheduled tasks API (route → policy → engine → report)', ()
         sandbox: 'worktree',
         max_retries: 2,
         notify_on_change: true,
-        attach_proof: true,
       },
     });
     expect(r.ok(), await r.text()).toBeTruthy();
@@ -90,7 +89,6 @@ test.describe('scheduled tasks API (route → policy → engine → report)', ()
     expect(t.sandbox).toBe('worktree');
     expect(t.max_retries).toBe(2);
     expect(t.notify_on_change).toBe(true);
-    expect(t.attach_proof).toBe(true);
     // A cron cadence still computes a next_run_at for display.
     expect(t.next_run_at, 'cron next_run_at set').toBeTruthy();
     await ctx.dispose();
@@ -211,16 +209,15 @@ test.describe('scheduled tasks API (route → policy → engine → report)', ()
     await ctx.dispose();
   });
 
-  test('v2: attach_proof builds a proof pack; undelivered reports never establish a notification baseline', async () => {
+  test('v2: undelivered reports never establish a notification baseline', async () => {
     const { ctx } = await apiCtx();
     const t = await (
       await ctx.post(`${base}${V1}/workspaces/${wsA}/scheduled-tasks`, {
         data: {
-          name: 'E2E proof+notify',
+          name: 'E2E notify',
           prompt: 'review',
           schedule: { cadence: 'interval', every_min: 60 },
           notify_on_change: true,
-          attach_proof: true,
         },
       })
     ).json();
@@ -238,7 +235,6 @@ test.describe('scheduled tasks API (route → policy → engine → report)', ()
 
     const first = await runOnce();
     expect(first.status, JSON.stringify(first)).toBe('ok');
-    expect(first.proof_pack_id, 'attach_proof → proof pack id').toBeTruthy();
     expect(first.delivered).toBe(false);
     expect(first.skipped_delivery).toBe(false);
 
@@ -247,7 +243,6 @@ test.describe('scheduled tasks API (route → policy → engine → report)', ()
     const second = await runOnce();
     expect(second.status).toBe('ok');
     expect(second.report_hash).toBe(first.report_hash);
-    expect(second.proof_pack_id).toBeTruthy();
     expect(second.delivered).toBe(false);
     expect(second.skipped_delivery, 'store-only is not a prior delivery').toBe(false);
 
@@ -344,7 +339,6 @@ test.describe('scheduled tasks UI', () => {
     // The rarer fields (sandbox, retries, delivery rules) sit behind "Advanced".
     await page.getByRole('button', { name: /Advanced/ }).click();
     await expect(page.getByText('Only deliver when the report meaningfully changes')).toBeVisible();
-    await expect(page.getByText('Attach a proof pack to each run')).toBeVisible();
     // Switching the cadence to Cron reveals the cron expression + timezone fields.
     await page.locator('select').filter({ hasText: 'Interval' }).selectOption('cron');
     await expect(page.getByText('Cron expression (5 fields)')).toBeVisible();

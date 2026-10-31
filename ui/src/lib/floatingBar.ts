@@ -246,9 +246,6 @@ export function hitRoute(hit: { kind: string; id: string }): string {
       return 'product';
     case 'api_request':
       return 'api';
-    case 'swarm_task':
-    case 'swarm_project':
-      return 'swarm';
     case 'broker_cluster':
       return 'brokers';
     case 'memory':

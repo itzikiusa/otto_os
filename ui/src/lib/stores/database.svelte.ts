@@ -13,30 +13,12 @@
 // connection switch snapshots and restores it whole) and re-exports every
 // part, so importers keep using `lib/stores/database.svelte`.
 
-import {
-  api,
-  isAbortError,
-} from '../api/client';
+import { api, isAbortError } from '../api/client';
 import { resourceAccess, type ResourceAccessChange } from './resource-access.svelte';
 import type {
-  Connection,
-  DbAssistMode,
-  DbCapabilities,
-  DbCompletionResponse,
-  DbDashboard,
-  DbExportFormat,
-  DbHistoryEntry,
-  DbQueryPlan,
-  DbSavedQuery,
-  DbSchemaGraph,
-  DbTestResult,
-  DbWidget,
-  Id,
-  ObjectDetail,
-  ObjectHit,
-  QueryResult,
-  SchemaNode,
-  Session,
+  Connection, DbAssistMode, DbCapabilities, DbCompletionResponse, DbDashboard,
+  DbExportFormat, DbHistoryEntry, DbQueryPlan, DbSavedQuery, DbSchemaGraph,
+  DbTestResult, DbWidget, Id, ObjectDetail, ObjectHit, QueryResult, SchemaNode, Session,
 } from '../api/types';
 import { ws } from './workspace.svelte';
 import { toasts } from '../toast.svelte';
@@ -95,6 +77,7 @@ import { DbSchemaTreeStore } from './database/schemaTree.svelte';
 import { DbObjectOpsStore } from './database/objectOps.svelte';
 import { DbQueryRunsStore } from './database/queryRuns.svelte';
 import { DbWorkbenchPersistStore } from './database/workbenchPersist.svelte';
+import { DbMcpActivityStore, type DbMcpActivityEvent, type DbMcpActivityItem } from './database/mcpActivity.svelte';
 export { DbDashboardsStore, type DashboardsHost } from './database/dashboards.svelte';
 export { DbAssistStore, type AssistHost } from './database/assist.svelte';
 export { DbSavedQueriesStore, type SavedQueriesHost } from './database/savedQueries.svelte';
@@ -105,6 +88,7 @@ export { DbSchemaTreeStore, type SchemaTreeHost } from './database/schemaTree.sv
 export { DbObjectOpsStore, type ObjectOpsHost } from './database/objectOps.svelte';
 export { DbQueryRunsStore, type QueryRunsHost } from './database/queryRuns.svelte';
 export { DbWorkbenchPersistStore, type WorkbenchPersistHost } from './database/workbenchPersist.svelte';
+export { DbMcpActivityStore, type DbMcpActivityEvent, type DbMcpActivityItem, type McpActivityHost } from './database/mcpActivity.svelte';
 
 export class DatabaseStore {
   // ── Connections ────────────────────────────────────────────────────────────
@@ -149,6 +133,10 @@ export class DatabaseStore {
   readonly objects: DbObjectOpsStore = new DbObjectOpsStore(this);
   readonly runs: DbQueryRunsStore = new DbQueryRunsStore(this);
   readonly persist: DbWorkbenchPersistStore = new DbWorkbenchPersistStore(this);
+  readonly mcp: DbMcpActivityStore = new DbMcpActivityStore(this);
+  get mcpActivities(): DbMcpActivityItem[] { return this.mcp.activities; }
+  applyMcpActivity(ev: DbMcpActivityEvent): void { this.mcp.handleMcpActivity(ev); }
+  handleMcpActivity(ev: DbMcpActivityEvent): void { this.mcp.handleMcpActivity(ev); }
 
   /**
    * Per-connection liveness, keyed by connection id. Persisted across tab
@@ -509,6 +497,7 @@ export class DatabaseStore {
       this.dashboardsError = null;
       this.savedQueries = [];
       this.history = [];
+      this.mcp.clear();
     } else if (
       change.type === 'decision' &&
       change.child === undefined &&

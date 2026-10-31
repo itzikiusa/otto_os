@@ -19,7 +19,7 @@ test('HomeBox loads every box kind lazily', () => {
   const src = read('src/modules/home/HomeBox.svelte');
   const boxes = staticImports(src).filter((s) => /\/boxes\/\w+Box\.svelte$/.test(s));
   assert.deepEqual(boxes, [], 'map the kind to () => import(...) in BODY_LOADERS');
-  for (const k of ['SessionsBox', 'MissionControlBox', 'DbDashboardBox', 'K8sBox', 'InsightsBox', 'UsageBox', 'ClassroomsBox']) {
+  for (const k of ['SessionsBox', 'DbDashboardBox', 'K8sBox', 'InsightsBox', 'UsageBox']) {
     assert.match(src, new RegExp(`import\\('\\./boxes/${k}\\.svelte'\\)`), k);
   }
 });
@@ -65,25 +65,11 @@ test('service worker never caches the proxy, plugin UIs or credentialed URLs', (
   assert.doesNotMatch(sw, /CACHE_NAME = 'otto-shell-v4'/, 'bump CACHE_NAME on a policy change');
 });
 
-test('Otto School (Classrooms) keeps three.js behind a dynamic import', () => {
-  const school = ['scene', 'model', 'life', 'furnish', 'screens', 'actions', 'assets'].map((f) => `src/modules/home/school/${f}.ts`);
-  for (const f of ['src/modules/home/boxes/ClassroomsBox.svelte', ...school]) {
-    const imports = staticImports(read(f));
-    assert.ok(!imports.some((s) => s === 'three' || s.startsWith('three/')), `${f} must not statically import three`);
-  }
-  assert.match(read('src/modules/home/school/scene.ts'), /import\('three'\)/);
-  assert.match(read('scripts/bundle-budget.mjs'), /three: \['home'/);
-});
-
 test('host pages load the Needs-you link lazily (it pulls the whole Today store)', () => {
-  // NeedsYouLink → today.svelte.ts joins assistant, MCP, scheduled-tasks,
-  // design and mission-control sources; a static import put all of that into
-  // each host page's chunk (Mission Control +17 % gzip vs main).
+  // NeedsYouLink → today.svelte.ts joins MCP, scheduled-tasks, and design
+  // sources; a static import would pull all of that into each host page's chunk.
   for (const host of [
-    'src/modules/mission-control/MissionControlPage.svelte',
     'src/modules/mcp/ApprovalsTab.svelte',
-    'src/modules/assistant/NeedsYouRail.svelte',
-    'src/modules/agents/WorkQueue.svelte',
   ]) {
     const imports = staticImports(read(host));
     assert.ok(!imports.some((s) => s.endsWith('/home/NeedsYouLink.svelte')), `${host}: use LazyNeedsYouLink`);

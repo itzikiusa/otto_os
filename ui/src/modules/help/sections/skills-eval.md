@@ -78,5 +78,4 @@ A skill is a `SKILL.md` that tells an agent how to do a kind of work. Skills Lab
 - [Git](#/walkthroughs/git)
 - [Product](#/walkthroughs/product)
 - [Agents](#/walkthroughs/agents)
-- [Proof](#/walkthroughs/proof)
 - [Vault](#/walkthroughs/vault)

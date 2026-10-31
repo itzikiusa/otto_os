@@ -25,8 +25,6 @@
   import { auth } from '../lib/stores/auth.svelte';
   import { plugins } from '../lib/stores/plugins.svelte';
   import { activity } from '../lib/stores/activity.svelte';
-  import { proof } from '../lib/stores/proof.svelte';
-  import ProofStatusChip from '../lib/components/ProofStatusChip.svelte';
   import { ctxMenu, type MenuItem } from '../lib/contextmenu.svelte';
   import { sidePane, splitMenuItems, navClick, SPLIT_HINT } from '../lib/stores/sidePane.svelte';
   import { popoutItems } from '../lib/popoutMenu';
@@ -64,16 +62,6 @@
   $effect(() => {
     const w = ws.currentId;
     if (w) void activity.loadSummary(w);
-  });
-
-  // Load the per-work-item proof roll-up so each session row can show an inline
-  // proof chip; kept fresh from the events WS (proof_pack_updated). Scoped to
-  // the sessions this sidebar lists: only their packs are read (never every
-  // pack in the workspace), and only sessions not asked for before.
-  $effect(() => {
-    const w = ws.currentId;
-    const keys = ws.sessions.map((s) => `session:${s.id}`);
-    if (w) void proof.loadSummary(w, keys);
   });
 
   // One session vocabulary (lib/status.ts): a row's dot, tooltip and resume
@@ -1124,7 +1112,7 @@
     {@render sideMark(m.id)}
     {#if navBadge(m.id)}
       {@const b = navBadge(m.id)!}
-      <span class="sr-only">{b.spoken}</span><span class="count-chip {b.tone}" aria-hidden="true" title={b.title} data-testid={m.id === 'assistant' && b.tone === 'needs' ? 'assistant-needs-badge' : undefined}>{b.count}</span>
+      <span class="sr-only">{b.spoken}</span><span class="count-chip {b.tone}" aria-hidden="true" title={b.title}>{b.count}</span>
     {/if}
   </button>
 {/snippet}
@@ -1535,7 +1523,6 @@
 {#snippet sessionRow(s: Session, otherWs?: string, reorderable = false)}
   {@const status = ws.statusMap[s.id] ?? s.status}
   {@const sum = activity.summary(s.id)}
-  {@const proofRow = proof.summaryFor('session', s.id)}
   {@const needsYou = ws.needsYou[s.id] === true}
   {@const st = sessionState(s, status, needsYou, { stale: staleEvents })}
   {@const resumable = st.resumable}
@@ -1619,19 +1606,14 @@
             <Icon name="bell" size={12} />
           </span>
         {/if}
-        {#if (sum && sum.total > 0) || proofRow}
+        {#if sum && sum.total > 0}
           <span class="row-secondary">
-            {#if sum && sum.total > 0}
-              <span
-                class="task-chip"
-                class:done={sum.done === sum.total}
-                class:active={sum.in_progress != null}
-                title={sum.in_progress ? `Now: ${sum.in_progress}` : `${sum.done}/${sum.total} tasks done`}
-              >{sum.done}/{sum.total}</span>
-            {/if}
-            {#if proofRow}
-              <ProofStatusChip status={proofRow.status} risk={proofRow.risk_score} compact />
-            {/if}
+            <span
+              class="task-chip"
+              class:done={sum.done === sum.total}
+              class:active={sum.in_progress != null}
+              title={sum.in_progress ? `Now: ${sum.in_progress}` : `${sum.done}/${sum.total} tasks done`}
+            >{sum.done}/{sum.total}</span>
           </span>
         {/if}
         {#if hasProviderIcon(s.provider)}

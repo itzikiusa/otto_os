@@ -82,15 +82,8 @@ async fn fixture(
     score.tests = otto_core::eval_score::signal_from_cmd(true, false, "original failed tests");
     score.lint = otto_core::eval_score::signal_from_cmd(true, true, "original passing lint");
     score.composite = otto_core::eval_score::compute_composite(&score);
-    let pack = ctx
-        .skill_evals_store
-        .get_iteration(&iter.id)
-        .await
-        .unwrap()
-        .proof_pack_id
-        .unwrap();
     ctx.skill_evals_store
-        .publish_iter_scoring(&eval.id, &iter.id, &score, &pack, None, "fixture")
+        .publish_iter_scoring(&eval.id, &iter.id, &score, None, "fixture")
         .await
         .unwrap();
     ctx.skill_evals_store
@@ -139,14 +132,7 @@ async fn human_rating_preserves_explicit_zero_signal_weights() {
     score.composite = otto_core::eval_score::compute_composite(&score);
     assert_eq!(score.composite, 100.0);
     ctx.skill_evals_store
-        .publish_iter_scoring(
-            &eval.id,
-            &iter.id,
-            &score,
-            current.proof_pack_id.as_deref().unwrap(),
-            None,
-            "custom weights",
-        )
+        .publish_iter_scoring(&eval.id, &iter.id, &score, None, "custom weights")
         .await
         .unwrap();
     let Json(rated) = rate_iteration(
@@ -224,16 +210,6 @@ async fn dropped_rating_handler_recovers_pending_evidence_and_approval() {
     assert_eq!(score.human.rating, Some(1));
     assert_eq!(recovered.composite_score, Some(score.composite));
     assert_eq!(recovered.best_score, Some(score.composite));
-    let arts = ctx
-        .proof_repo
-        .list_artifacts(recovered.iterations[0].proof_pack_id.as_ref().unwrap())
-        .await
-        .unwrap();
-    let approval = arts
-        .iter()
-        .find(|a| a.kind == otto_core::proof::ProofArtifactKind::Approval)
-        .unwrap();
-    assert_eq!(approval.metadata["rating"], 1);
 }
 
 #[tokio::test]
@@ -584,91 +560,6 @@ async fn promotion_metadata_failure_reports_written_skill_and_can_retry() {
     let saved = ctx.skill_evals_store.get_eval(&eval.id).await.unwrap();
     assert!(saved.promoted && saved.promoted_at.is_some());
     assert_eq!(saved.promoted_by.as_deref(), Some(user.id.as_str()));
-}
-
-#[tokio::test]
-async fn promotion_waiver_failure_preserves_library_and_can_retry() {
-    let dir = tempfile::tempdir().unwrap();
-    let pool = otto_state::db::test_pool().await;
-    let (ctx, eval, iter, mut user) = fixture(&pool, dir.path()).await;
-    user.is_root = true;
-    let name = "promotion-waiver-fixture";
-    ctx.context_library
-        .put_skill(name, "previous body")
-        .unwrap();
-    // A failed command signal makes this iteration require an explicit override.
-    let mut config = default_skill_eval_config("fixture");
-    config.promote_min_score = 100.0;
-    config.require_proof_pass = true;
-    otto_state::SettingsRepo::new(pool.clone())
-        .put("skill_eval", &serde_json::to_value(config).unwrap())
-        .await
-        .unwrap();
-    sqlx::query("CREATE TRIGGER reject_waiver BEFORE UPDATE OF waived_by ON proof_packs BEGIN SELECT RAISE(ABORT, 'waiver unavailable'); END").execute(&pool).await.unwrap();
-    let request = || {
-        Json(PromoteSkillReq {
-            iteration_id: iter.id.clone(),
-            source: "tested".into(),
-            name: name.into(),
-            force: true,
-        })
-    };
-    let result = promote_skill(
-        AxPath(eval.id.clone()),
-        State(ctx.clone()),
-        promotion_auth(&user),
-        CurrentUser(user.clone()),
-        request(),
-    )
-    .await;
-    assert!(
-        result.is_err(),
-        "forced promotion returned success although its proof waiver failed"
-    );
-    assert_eq!(
-        ctx.context_library.get_skill(name).unwrap().body,
-        "previous body"
-    );
-    let saved = ctx.skill_evals_store.get_eval(&eval.id).await.unwrap();
-    assert!(!saved.promoted);
-    let pack_id = saved.iterations[0].proof_pack_id.as_ref().unwrap();
-    assert!(ctx
-        .proof_repo
-        .get_pack(pack_id)
-        .await
-        .unwrap()
-        .waived_by
-        .is_none());
-    sqlx::query("DROP TRIGGER reject_waiver")
-        .execute(&pool)
-        .await
-        .unwrap();
-    let Json(skill) = promote_skill(
-        AxPath(eval.id.clone()),
-        State(ctx.clone()),
-        promotion_auth(&user),
-        CurrentUser(user.clone()),
-        request(),
-    )
-    .await
-    .unwrap();
-    assert_eq!(skill.body, iter.skill_before);
-    assert!(
-        ctx.skill_evals_store
-            .get_eval(&eval.id)
-            .await
-            .unwrap()
-            .promoted
-    );
-    assert_eq!(
-        ctx.proof_repo
-            .get_pack(pack_id)
-            .await
-            .unwrap()
-            .waived_by
-            .as_deref(),
-        Some(user.id.as_str())
-    );
 }
 
 #[tokio::test]

@@ -295,8 +295,6 @@ pub(in crate::workflow_engine) async fn execute(
             description: draft.description.clone(),
             source_branch: draft.source_branch.clone(),
             target_branch: draft.target_branch.clone(),
-            proof_pack_id: None,
-            allow_unproven: Some(true),
             draft: None,
             reviewers: None,
         };

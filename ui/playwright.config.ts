@@ -41,7 +41,7 @@ export default defineConfig({
   // fails on any `flaky` count in the JSON report (scripts/e2e-flaky-check.mjs)
   // in case a spec opts back into retries via test.describe.configure.
   retries: 0,
-  workers: process.env.CI ? 2 : 4,
+  workers: 4,
   reporter: [
     ['list'],
     ['html', { open: 'never', outputFolder: `e2e/.report-${SLOT}` }],

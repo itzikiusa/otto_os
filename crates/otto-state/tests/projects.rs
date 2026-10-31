@@ -3,9 +3,9 @@ use otto_state::DbPool;
 use otto_state::{
     projects::{ProjectInput, ProjectsRepo},
     sessions::{NewSession, SessionsRepo},
-    swarm::{NewProject, SwarmRepo},
 };
 use serde_json::json;
+use sqlx::Row;
 
 async fn fixture() -> DbPool {
     let pool = sqlx::sqlite::SqlitePoolOptions::new()
@@ -33,41 +33,47 @@ fn input() -> ProjectInput {
 #[tokio::test]
 async fn projects_share_existing_swarm_identity_and_preserve_execution_fields() {
     let pool = fixture().await;
-    let swarm = SwarmRepo::new(pool.clone());
-    let old = swarm
-        .create_project(NewProject {
-            swarm_id: "team".into(),
-            workspace_id: "one".into(),
-            name: "Existing".into(),
-            description: "old".into(),
-            repo_path: Some("/repo".into()),
-            goal_md: Some("goal".into()),
-            story_id: None,
-            order_idx: 4,
-            created_by: "user".into(),
-        })
-        .await
-        .unwrap();
-    let repo = ProjectsRepo::new(pool);
-    let shared = repo.get(&old.id).await.unwrap();
+    let old_id = "legacy-swarm-proj".to_string();
+    sqlx::query(
+        "INSERT INTO swarm_projects(id,swarm_id,workspace_id,name,description,repo_path,goal_md,order_idx,created_by,created_at,updated_at) \
+         VALUES (?,'team','one','Existing','old','/repo','goal',4,'user','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')",
+    )
+    .bind(&old_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let repo = ProjectsRepo::new(pool.clone());
+    let shared = repo.get(&old_id).await.unwrap();
     assert_eq!(shared.swarm_id.as_deref(), Some("team"));
     let updated = repo
-        .update(&old.id, input(), shared.context_version)
+        .update(&old_id, input(), shared.context_version)
         .await
         .unwrap();
-    assert_eq!(updated.id, old.id);
-    let still_swarm = swarm.get_project(&old.id).await.unwrap();
-    assert_eq!(still_swarm.swarm_id, "team");
-    assert_eq!(still_swarm.order_idx, 4);
+    assert_eq!(updated.id, old_id);
+    let still_swarm = sqlx::query("SELECT swarm_id, order_idx FROM swarm_projects WHERE id = ?")
+        .bind(&old_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        still_swarm.get::<Option<String>, _>("swarm_id").as_deref(),
+        Some("team")
+    );
+    assert_eq!(still_swarm.get::<i64, _>("order_idx"), 4);
     let standalone = repo
         .create(&"one".into(), &"user".into(), input())
         .await
         .unwrap();
     assert_eq!(standalone.swarm_id, None);
     assert_eq!(repo.list(&"one".into()).await.unwrap().len(), 2);
-    assert_eq!(swarm.list_projects(&"team".into()).await.unwrap().len(), 1);
+    let swarm_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM swarm_projects WHERE swarm_id = 'team'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(swarm_count, 1);
     assert!(matches!(
-        repo.update(&old.id, input(), shared.context_version).await,
+        repo.update(&old_id, input(), shared.context_version).await,
         Err(Error::Conflict(_))
     ));
 }
@@ -190,14 +196,29 @@ async fn migration_preserves_legacy_project_and_backfills_swarm_membership() {
         .execute(&pool)
         .await
         .unwrap();
-    let old = SwarmRepo::new(pool.clone())
-        .get_project(&"project".into())
-        .await
-        .unwrap();
-    assert_eq!(old.swarm_id, "team");
-    assert_eq!(old.goal_md.as_deref(), Some("Preserved goal"));
-    assert_eq!(old.story_id.as_deref(), Some("story"));
-    assert_eq!(old.integration_branch.as_deref(), Some("integration/keep"));
+    let old = sqlx::query(
+        "SELECT swarm_id, goal_md, story_id, integration_branch FROM swarm_projects WHERE id = 'project'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        old.get::<Option<String>, _>("swarm_id").as_deref(),
+        Some("team")
+    );
+    assert_eq!(
+        old.get::<Option<String>, _>("goal_md").as_deref(),
+        Some("Preserved goal")
+    );
+    assert_eq!(
+        old.get::<Option<String>, _>("story_id").as_deref(),
+        Some("story")
+    );
+    assert_eq!(
+        old.get::<Option<String>, _>("integration_branch")
+            .as_deref(),
+        Some("integration/keep")
+    );
     let session = SessionsRepo::new(pool.clone())
         .get(&"session".into())
         .await
@@ -212,10 +233,13 @@ async fn migration_preserves_legacy_project_and_backfills_swarm_membership() {
         .create(&"one".into(), &"user".into(), input())
         .await
         .unwrap();
-    assert!(matches!(
-        SwarmRepo::new(pool).get_project(&free.id).await,
-        Err(Error::NotFound(_))
-    ));
+    let free_swarm_id: Option<String> =
+        sqlx::query_scalar("SELECT swarm_id FROM swarm_projects WHERE id = ?")
+            .bind(&free.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(free_swarm_id, None);
 }
 
 #[tokio::test]

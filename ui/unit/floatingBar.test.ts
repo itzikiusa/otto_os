@@ -142,7 +142,7 @@ test('selection wraps and handles empty lists', () => {
 
 test('search hits map to module routes', () => {
   assert.equal(hitRoute({ kind: 'repo', id: 'abc' }), 'git/abc');
-  assert.equal(hitRoute({ kind: 'swarm_task', id: 'x' }), 'swarm');
+  assert.equal(hitRoute({ kind: 'story', id: 'x' }), 'product');
   assert.equal(hitRoute({ kind: 'weird', id: 'x' }), 'home');
 });
 

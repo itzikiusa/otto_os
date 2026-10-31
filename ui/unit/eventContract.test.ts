@@ -163,7 +163,7 @@ const members = tsMembers();
 const byTag = new Map(members.map((m) => [m.tag, m]));
 
 test('the parsers see the whole contract (sanity)', () => {
-  assert.ok(variants.length >= 79, `parsed ${variants.length} Rust variants`);
+  assert.ok(variants.length >= 64, `parsed ${variants.length} Rust variants`);
   assert.equal(new Set(variants.map((v) => v.tag)).size, variants.length, 'unique tags');
   assert.ok(members.length >= variants.length - 2, `parsed ${members.length} OttoEvent members`);
 });

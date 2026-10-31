@@ -13,9 +13,9 @@ import { parseRoomInvite } from '../src/modules/rooms/room-state.ts';
 const mod = (id: string) => ({ id, icon: 'home' as const, label: id, group: 'work' as const });
 
 test('agentsLast moves Agents after its section siblings and leaves other sections alone', () => {
-  const work = ['home', 'agents', 'rooms', 'history'].map(mod);
-  assert.deepEqual(agentsLast(work).map((m) => m.id), ['home', 'rooms', 'history', 'agents']);
-  const noAgents = ['git', 'proof'].map(mod);
+  const work = ['home', 'agents', 'rooms'].map(mod);
+  assert.deepEqual(agentsLast(work).map((m) => m.id), ['home', 'rooms', 'agents']);
+  const noAgents = ['git', 'vault'].map(mod);
   assert.equal(agentsLast(noAgents), noAgents);
   const already = ['rooms', 'agents'].map(mod);
   assert.equal(agentsLast(already), already);

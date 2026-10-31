@@ -511,9 +511,9 @@
         "zoom": { "type": "boolean" } },
         "additionalProperties": false } },
     { "name": "home_add_box", "module": "home", "route": "home", "risk": "local_write", "timeout_ms": 120000,
-      "description": "Add a live box to a Home view (default the active one) after the user's attributed confirm. Kinds: sessions, mission-control, db-dashboard, k8s, insights, usage (only those the user may view).",
+      "description": "Add a live box to a Home view (default the active one) after the user's attributed confirm. Kinds: sessions, db-dashboard, k8s, insights, usage (only those the user may view).",
       "input_schema": { "type": "object", "required": ["kind"], "properties": {
-        "kind": { "type": "string", "enum": ["sessions", "mission-control", "db-dashboard", "k8s", "insights", "usage"] },
+        "kind": { "type": "string", "enum": ["sessions", "db-dashboard", "k8s", "insights", "usage"] },
         "view": { "type": "string", "description": "1-based index, id or name." },
         "config": { "type": "object", "description": "Kind-specific settings (e.g. a DB dashboard id)." } },
         "additionalProperties": false } },
@@ -521,43 +521,6 @@
       "description": "Remove a box from Home after the user's attributed confirm.",
       "input_schema": { "type": "object", "required": ["box_id"], "properties": {
         "box_id": { "type": "string" } },
-        "additionalProperties": false } },
-
-    { "$comment": "── Agent Swarm (Agent 5) ──",
-      "name": "swarm_list", "module": "swarm", "route": "swarm", "risk": "read", "timeout_ms": 15000,
-      "description": "List the workspace's swarms (id, name, status, description) and which one the Swarm page has open.",
-      "input_schema": { "type": "object", "properties": {}, "additionalProperties": false } },
-    { "name": "swarm_open", "module": "swarm", "route": "swarm", "risk": "navigate", "timeout_ms": 30000,
-      "description": "Open a swarm on the Swarm page, optionally selecting a project and a view (tree | graph | kanban | runs | board). Returns its agents, projects and counts.",
-      "input_schema": { "type": "object", "required": ["swarm"], "properties": {
-        "swarm": { "type": "string", "description": "Swarm id or name (otto.ui_swarm_list)." },
-        "view": { "type": "string", "enum": ["tree", "graph", "kanban", "runs", "board"] },
-        "project": { "type": "string", "description": "Project id or name." } },
-        "additionalProperties": false } },
-    { "name": "swarm_list_tasks", "module": "swarm", "route": "swarm", "risk": "read", "timeout_ms": 30000,
-      "description": "Show the swarm's Kanban board and return its tasks (id, project, title, status, priority, assignee, labels, dependencies; ≤200), optionally for one project / status.",
-      "input_schema": { "type": "object", "properties": {
-        "swarm": { "type": "string", "description": "Default: the open swarm." },
-        "project": { "type": "string" },
-        "status": { "type": "string" } },
-        "additionalProperties": false } },
-    { "name": "swarm_list_runs", "module": "swarm", "route": "swarm", "risk": "read", "timeout_ms": 30000,
-      "description": "Show the swarm's Runs view and return its agent runs (id, task, agent, session, kind, status, attempt, summary, error; ≤200).",
-      "input_schema": { "type": "object", "properties": {
-        "swarm": { "type": "string" },
-        "status": { "type": "string" } },
-        "additionalProperties": false } },
-    { "name": "swarm_run_task", "module": "swarm", "route": "swarm", "risk": "local_write", "timeout_ms": 120000,
-      "description": "Run a swarm task now (spawns its agent) after the user's attributed confirm (may be allowed for the session).",
-      "input_schema": { "type": "object", "required": ["task_id"], "properties": {
-        "swarm": { "type": "string" },
-        "task_id": { "type": "string" } },
-        "additionalProperties": false } },
-    { "name": "swarm_stop_run", "module": "swarm", "route": "swarm", "risk": "local_write", "timeout_ms": 120000,
-      "description": "Stop a swarm agent run after the user's attributed confirm.",
-      "input_schema": { "type": "object", "required": ["run_id"], "properties": {
-        "swarm": { "type": "string" },
-        "run_id": { "type": "string" } },
         "additionalProperties": false } },
 
     { "$comment": "── Goal Loops (Agent 5) ──",

@@ -18,7 +18,6 @@
   import RawParams from './RawParams.svelte';
   import ReviewRun from './ReviewRun.svelte';
   import SelfImprove from './SelfImprove.svelte';
-  import SwarmTask from './SwarmTask.svelte';
   import Utility from './Utility.svelte';
   import type { InspectorOptions } from './options.svelte';
   import LazyMount from '../../../lib/components/LazyMount.svelte';
@@ -61,8 +60,6 @@
     <DbQuery {node} {set} {wsId} {pickers} />
   {:else if node.kind === 'broker_peek'}
     <BrokerPeek {node} {set} {wsId} {pickers} />
-  {:else if node.kind === 'swarm_task'}
-    <SwarmTask {node} {set} {wsId} {pickers} />
   {:else if node.kind === 'loop'}
     <Loop {node} {set} {onzoom} />
   {:else if node.kind === 'review_run'}
@@ -83,7 +80,7 @@
 
   <!-- Universal Provider + Model: EVERY node that doesn't render its own
        provider control gets one here, so no node is ever missing it. For
-       agent-running kinds (git_pr drafts the PR message, swarm_task, …) it
+       agent-running kinds (git_pr drafts the PR message, …) it
        drives the agent; for pure utility nodes it's simply present and unused.
        Kinds with their own control are excluded to avoid a duplicate. -->
   {#if !KINDS_WITH_OWN_PROVIDER.includes(node.kind) && node.kind !== 'manual_trigger'}

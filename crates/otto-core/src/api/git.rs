@@ -783,14 +783,6 @@ pub struct CreatePrReq {
     pub description: String,
     pub source_branch: String,
     pub target_branch: String,
-    /// Optional proof pack to gate this PR on. When set, Otto refuses to open the
-    /// PR unless the pack is `passed`/`waived` (or `allow_unproven` is set).
-    #[serde(default)]
-    pub proof_pack_id: Option<String>,
-    /// Open the PR even if its proof pack isn't passed — records an audit
-    /// `approval` artifact on the pack ("PR opened over unproven proof").
-    #[serde(default)]
-    pub allow_unproven: Option<bool>,
     /// Open the PR as a draft. GitHub: native `draft` flag; GitLab: `Draft: `
     /// title prefix (the API-blessed convention); Bitbucket Cloud: `draft` on
     /// the create payload. Absent/None = today's ready-for-review behavior.

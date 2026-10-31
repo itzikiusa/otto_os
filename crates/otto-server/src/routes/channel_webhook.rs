@@ -117,9 +117,8 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
-/// The ONE credential gate of every per-workspace webhook route
-/// (`/webhooks/{ws}`, `/webhooks/{ws}/run`, `/webhooks/swarm/{ws}/{sid}`):
-/// these sit in `public_routes`, outside the bearer chokepoint, so this guard
+/// The ONE credential gate of `POST /webhooks/{ws}`:
+/// sits in `public_routes`, outside the bearer chokepoint, so this guard
 /// is all that stands between a caller and an agent running as root.
 ///
 /// - the workspace's webhook integration must exist AND be enabled (404
@@ -271,175 +270,9 @@ pub async fn inbound(
         .into_response()
 }
 
-/// Inbound payload for `POST /api/v1/webhooks/{workspace_id}/run` — launch a
-/// Run with Otto run (the webhook entry to the one-button flow).
-#[derive(Debug, Deserialize)]
-pub struct RunInboundReq {
-    #[serde(default)]
-    pub source_kind: Option<otto_core::run::SourceKind>,
-    #[serde(default)]
-    pub source_ref: Option<String>,
-    #[serde(default)]
-    pub url: Option<String>,
-    /// Free-text request (becomes a `channel` run when no source is recognizable).
-    #[serde(default)]
-    pub seed_text: Option<String>,
-    #[serde(default)]
-    pub mode: Option<otto_core::run::RunMode>,
-    #[serde(default)]
-    pub provider: Option<String>,
-    /// Model override for the executing agent ("" / absent = provider default).
-    #[serde(default)]
-    pub model: Option<String>,
-    #[serde(default)]
-    pub repo_id: Option<String>,
-    #[serde(default)]
-    pub auto_open_pr: Option<bool>,
-    #[serde(default)]
-    pub callback_url: Option<String>,
-}
-
-#[derive(Serialize)]
-struct RunInboundResp {
-    accepted: bool,
-    run_id: String,
-    status: String,
-}
-
-/// `POST /api/v1/webhooks/{workspace_id}/run` — launch a Run with Otto run from a
-/// webhook. Same per-webhook-key auth as [`inbound`]; runs on the root user's
-/// behalf and returns `202` with the new run id.
-pub async fn run_inbound(
-    Path(ws_id): Path<Id>,
-    State(ctx): State<ServerCtx>,
-    headers: HeaderMap,
-    body: axum::body::Bytes,
-) -> Response {
-    // 1. Enabled webhook integration + key (the shared guard).
-    if let Err(response) = webhook_key_guard(&ctx, &ws_id, &headers).await {
-        return *response;
-    }
-
-    // 2. Parse body.
-    let req: RunInboundReq = match serde_json::from_slice(&body) {
-        Ok(r) => r,
-        Err(e) => {
-            return problem(
-                StatusCode::BAD_REQUEST,
-                "invalid",
-                &format!("invalid JSON body: {e}"),
-            )
-        }
-    };
-
-    // 3. Root user is the actor (the webhook has no Otto session).
-    let Some(bridge) = ctx.channel_bridge.clone() else {
-        return problem(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "unavailable",
-            "no root user yet — finish onboarding first",
-        );
-    };
-    let created_by = bridge.root_user_id.clone();
-
-    // The run launches AS ROOT, whose repo-scope check passes everywhere — so
-    // the webhook key of workspace A (configurable by A's editors) must not
-    // name another workspace's checkout. Same rule as the swarm webhook.
-    if !repo_in_workspace(&ctx, &ws_id, req.repo_id.as_deref()).await {
-        return problem(
-            StatusCode::BAD_REQUEST,
-            "invalid",
-            "repo_id is not a repository registered in this workspace",
-        );
-    }
-
-    let launch = otto_core::run::LaunchRunReq {
-        source_kind: req.source_kind,
-        source_ref: req.source_ref,
-        url: req.url,
-        seed_text: req.seed_text,
-        mode: req.mode,
-        provider: req.provider,
-        model: req.model,
-        repo_id: req.repo_id,
-        auto_open_pr: req.auto_open_pr,
-        title: None,
-    };
-    let origin = crate::run_service::LaunchOrigin {
-        callback_url: req.callback_url,
-        ..Default::default()
-    };
-    match crate::run_service::launch(
-        &ctx,
-        &ws_id,
-        &created_by,
-        otto_core::run::RunOrigin::Webhook,
-        origin,
-        launch,
-    )
-    .await
-    {
-        Ok(run) => (
-            StatusCode::ACCEPTED,
-            Json(RunInboundResp {
-                accepted: true,
-                run_id: run.id,
-                status: run.status.as_str().to_string(),
-            }),
-        )
-            .into_response(),
-        Err(e) => problem(StatusCode::BAD_REQUEST, "invalid", &e.to_string()),
-    }
-}
-
-/// Whether a webhook run's `repo_id` (absent = no explicit repo) names a
-/// repository registered in the webhook's own workspace.
-async fn repo_in_workspace(ctx: &ServerCtx, ws_id: &Id, repo_id: Option<&str>) -> bool {
-    match repo_id.map(str::trim).filter(|r| !r.is_empty()) {
-        None => true,
-        Some(id) => ctx
-            .git_store
-            .get_repo(&Id::from(id))
-            .await
-            .is_ok_and(|r| &r.workspace_id == ws_id),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[tokio::test]
-    async fn a_webhook_run_may_only_name_its_own_workspaces_repo() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let pool = crate::test_support::mem_pool().await;
-        let ctx = ServerCtx::for_tests(&pool, tmp.path().join("data")).await;
-        let owner = otto_state::UsersRepo::new(pool.clone())
-            .create("owner", "unused", "Owner", true)
-            .await
-            .unwrap();
-        let root = tmp.path().to_str().unwrap();
-        let a = ctx.workspaces.create("A", root, &owner.id).await.unwrap();
-        let b = ctx.workspaces.create("B", root, &owner.id).await.unwrap();
-        let repo_b = ctx
-            .git_store
-            .create_repo(otto_state::NewRepo {
-                workspace_id: b.id.clone(),
-                name: "b".into(),
-                path: root.into(),
-                remote_url: None,
-                provider: None,
-                git_account_id: None,
-            })
-            .await
-            .unwrap();
-        assert!(repo_in_workspace(&ctx, &b.id, Some(repo_b.id.as_str())).await);
-        assert!(repo_in_workspace(&ctx, &a.id, None).await);
-        assert!(repo_in_workspace(&ctx, &a.id, Some(" ")).await);
-        // A's webhook key cannot reach B's checkout, or a made-up id.
-        assert!(!repo_in_workspace(&ctx, &a.id, Some(repo_b.id.as_str())).await);
-        assert!(!repo_in_workspace(&ctx, &a.id, Some("no-such-repo")).await);
-    }
 
     #[test]
     fn a_full_webhook_conversation_is_retryable_without_starting_more_work() {

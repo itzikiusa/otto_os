@@ -87,6 +87,7 @@ impl<CB: crate::Callbacks> vte::Perform for crate::screen::WrappedScreen<CB> {
                 'H' | 'f' => {
                     self.cup(canonicalize_params_2(params, 1, 1));
                 }
+                'I' => self.cht(canonicalize_params_1(params, 1)),
                 'J' => self.ed(canonicalize_params_1(params, 0), unhandled),
                 'K' => self.el(canonicalize_params_1(params, 0), unhandled),
                 'L' => self.il(canonicalize_params_1(params, 1)),
@@ -95,14 +96,21 @@ impl<CB: crate::Callbacks> vte::Perform for crate::screen::WrappedScreen<CB> {
                 'S' => self.su(canonicalize_params_1(params, 1)),
                 'T' => self.sd(canonicalize_params_1(params, 1)),
                 'X' => self.ech(canonicalize_params_1(params, 1)),
+                'Z' => self.cbt(canonicalize_params_1(params, 1)),
                 '`' => self.hpa(canonicalize_params_1(params, 1)),
+                'a' => self.cuf(canonicalize_params_1(params, 1)),
                 'b' => self.rep(canonicalize_params_1(params, 1)),
                 'd' => self.vpa(canonicalize_params_1(params, 1)),
+                'e' => self.cud(canonicalize_params_1(params, 1)),
+                'h' => self.sm(params, unhandled),
+                'l' => self.rm(params, unhandled),
                 'm' => self.sgr(params, unhandled),
                 'r' => self.decstbm(canonicalize_params_decstbm(
                     params,
                     self.screen.grid().size(),
                 )),
+                's' if has_no_params(params) => self.decsc(),
+                'u' if has_no_params(params) => self.decrc(),
                 't' => {
                     let mut params_iter = params.iter();
                     let op =
@@ -227,6 +235,12 @@ impl<CB: crate::Callbacks> vte::Perform for crate::screen::WrappedScreen<CB> {
             }
         }
     }
+}
+
+fn has_no_params(params: &vte::Params) -> bool {
+    params.is_empty()
+        || (params.len() == 1
+            && matches!(params.iter().next(), Some(&[] | &[0])))
 }
 
 fn canonicalize_params_1(params: &vte::Params, default: u16) -> u16 {

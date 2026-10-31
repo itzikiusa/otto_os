@@ -169,12 +169,6 @@ export interface CreatePrReq {
   description: string;
   source_branch: string;
   target_branch: string;
-  /** Proof pack to gate this PR on: Otto refuses to open the PR unless the pack
-   *  is `passed`/`waived` (or `allow_unproven` is set). */
-  proof_pack_id?: string | null;
-  /** Open the PR even over an unproven pack — records an audit `approval`
-   *  artifact on the pack. */
-  allow_unproven?: boolean | null;
   /** Open as a draft (GitHub native flag; GitLab `Draft:` title prefix;
    *  Bitbucket Cloud draft field). Absent = ready for review. */
   draft?: boolean;

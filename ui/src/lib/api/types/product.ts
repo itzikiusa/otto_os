@@ -8,8 +8,6 @@
 // DateTime<Utc> → string (ISO-8601 wire format), Id → string, i64 → number,
 // bool → boolean.  JSON-as-TEXT columns stay as string on the wire.
 
-import type { Swarm, SwarmProject, SwarmTask } from './swarm';
-
 // ---------------------------------------------------------------------------
 // Domain structs (otto-state/src/product.rs)
 // ---------------------------------------------------------------------------
@@ -191,37 +189,11 @@ export interface StoryCounts {
   testcases: number;
 }
 
-/** Back-link to the swarm project created from this story (Plan → Swarm). */
-export interface SwarmStoryLink {
-  project_id: string;
-  swarm_id: string;
-  project_name: string;
-}
-
 export interface ProductStoryDetail {
   story: ProductStory;
   /** Latest editable draft revision for local drafts; latest source revision for imports. */
   source: ProductStoryVersion | null;
   counts: StoryCounts;
-  /** The swarm project created from this story (Plan → Swarm), or null. */
-  swarm_link: SwarmStoryLink | null;
-}
-
-/** Request body for `POST /product/stories/{sid}/to-swarm`. */
-export interface ToSwarmReq {
-  /** Target swarm; omit to use the first swarm or auto-create a default one. */
-  swarm_id?: string | null;
-  /** Override the new project's name (defaults to the story title). */
-  name?: string | null;
-}
-
-/** Response from `to-swarm`: the swarm + created project + seeded tasks. */
-export interface ToSwarmResp {
-  swarm: Swarm;
-  project: SwarmProject;
-  tasks: SwarmTask[];
-  /** True when this call created the project; false on idempotent re-send. */
-  created: boolean;
 }
 
 export interface ProductAnalysisDetail {

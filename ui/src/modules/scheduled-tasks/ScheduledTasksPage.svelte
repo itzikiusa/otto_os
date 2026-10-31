@@ -41,6 +41,7 @@
   import type { EmailSenderResp, Integration, Workflow } from '../../lib/api/types';
   import { copyText } from '../../lib/clipboard';
   import { convertOutcome } from './convertOutcome';
+  import AutomateTasksTabs from '../../lib/components/AutomateTasksTabs.svelte';
 
   let creating = $state(false);
   let editId = $state<string | null>(null);
@@ -57,9 +58,11 @@
   $effect(() => {
     const [mod, id] = router.parts;
     if (mod !== 'scheduled-tasks' || !id) return;
-    untrack(() => {
-      if (id !== expandedId) void expandLinked(id);
-    });
+    if (id === 'agents' || id === 'rooms') {
+      untrack(() => router.replace(id === 'rooms' ? 'personal-agents/rooms' : 'personal-agents'));
+      return;
+    }
+    untrack(() => { if (id !== expandedId) void expandLinked(id); });
   });
   async function expandLinked(id: string): Promise<void> {
     expandedId = id;
@@ -75,7 +78,9 @@
     routedId = id;
     if (!id && !was) return;
     untrack(() => {
-      if (router.module === 'scheduled-tasks' && (router.parts[1] ?? null) !== id) router.replace(id ? `scheduled-tasks/${id}` : 'scheduled-tasks');
+      const sub = router.parts[1] ?? null;
+      if (sub === 'agents' || sub === 'rooms') return;
+      if (router.module === 'scheduled-tasks' && sub !== id) router.replace(id ? `scheduled-tasks/${id}` : 'scheduled-tasks');
     });
   });
 
@@ -201,7 +206,6 @@
   let fSandbox = $state<'none' | 'worktree'>('none');
   let fMaxRetries = $state(0);
   let fNotifyOnChange = $state(false);
-  let fAttachProof = $state(false);
   let fDestType = $state<'none' | 'slack' | 'telegram' | 'email' | 'webhook'>('none');
   let fChatId = $state('');
   let fEmailTo = $state('');
@@ -302,7 +306,6 @@
     fSandbox = 'none';
     fMaxRetries = 0;
     fNotifyOnChange = false;
-    fAttachProof = false;
     fDestType = 'none';
     fChatId = '';
     fEmailTo = '';
@@ -320,7 +323,7 @@
 
   function formState(): string {
     return JSON.stringify([fName, fPrompt, fSkill, fKind, fProvider, fModel, fWorkflowId, fCadence, fEveryMin, fAt, fWeekday,
-      fCronExpr, fRunAt, fTimezone, fSandbox, fMaxRetries, fNotifyOnChange, fAttachProof, fDestType, fChatId, fEmailTo, fUrl, fEnabled, fCwd]);
+      fCronExpr, fRunAt, fTimezone, fSandbox, fMaxRetries, fNotifyOnChange, fDestType, fChatId, fEmailTo, fUrl, fEnabled, fCwd]);
   }
 
   function startCreate(): void {
@@ -385,7 +388,6 @@
       showAdvanced = true;
       fSandbox = 'worktree';
       fNotifyOnChange = p.id !== 'weekly-code-review';
-      fAttachProof = p.id === 'weekly-code-review';
     }
     const dt = (p.suggested_destination?.type as string) ?? 'none';
     fDestType = ['slack', 'telegram', 'email', 'webhook'].includes(dt) ? (dt as typeof fDestType) : 'none';
@@ -422,7 +424,6 @@
     fSandbox = t.sandbox === 'worktree' ? 'worktree' : 'none';
     fMaxRetries = t.max_retries ?? 0;
     fNotifyOnChange = !!t.notify_on_change;
-    fAttachProof = !!t.attach_proof;
     const d = t.destination ?? {};
     const dt = (d.type as string) ?? 'none';
     fDestType = ['slack', 'telegram', 'email', 'webhook'].includes(dt) ? (dt as typeof fDestType) : 'none';
@@ -432,7 +433,7 @@
     fEnabled = t.enabled;
     fCwd = t.cwd ?? '';
     originalDest = JSON.stringify(buildDestination());
-    showAdvanced = !!(fSkill || (fCwd && fProvider !== 'shell') || fSandbox !== 'none' || fMaxRetries || fNotifyOnChange || fAttachProof);
+    showAdvanced = !!(fSkill || (fCwd && fProvider !== 'shell') || fSandbox !== 'none' || fMaxRetries || fNotifyOnChange);
     formSnapshot = formState();
   }
 
@@ -609,7 +610,6 @@
       sandbox: fSandbox,
       max_retries: fMaxRetries,
       notify_on_change: fNotifyOnChange,
-      attach_proof: fAttachProof,
       ...(fKind === 'workflow' ? { workflow_id: fWorkflowId.trim() || null } : {}),
     };
     const wsId = ws.currentId;
@@ -892,6 +892,11 @@
       <button class="icon-btn" title="Back to Scheduled Tasks" aria-label="Back to Scheduled Tasks" disabled={busy} onclick={closeForm}>
         <Icon name="chevronLeft" size={14} />
       </button>
+    {/if}
+  {/snippet}
+  {#snippet tabs()}
+    {#if !(creating || editId)}
+      <AutomateTasksTabs active="tasks" />
     {/if}
   {/snippet}
   {#snippet actions()}
@@ -1192,7 +1197,6 @@
 
       <div class="toggles">
         <label class="checkbox-row"><input type="checkbox" bind:checked={fNotifyOnChange} /> Only deliver when the report meaningfully changes</label>
-        <label class="checkbox-row"><input type="checkbox" bind:checked={fAttachProof} /> Attach a proof pack to each run</label>
       </div>
       </div>
       {/if}
@@ -1322,9 +1326,6 @@
                     {#if r.delivered}<Badge tone="ok" label="Delivered" />{/if}
                     {#if r.skipped_delivery}<Badge label="No change" title="Not delivered: the report is unchanged since the last run" />{/if}
                     {#if r.delivery_error}<Badge tone="warn" label="Delivery failed" title={r.delivery_error ?? undefined} />{/if}
-                    {#if r.proof_pack_id}
-                      <button class="btn small" title="Open the proof pack for this run" onclick={() => router.go(`proof/${encodeURIComponent(r.proof_pack_id ?? '')}`)}>Proof</button>
-                    {/if}
                     {#if r.workflow_run_id}
                       <button class="btn small" title={`Open the workflow this run launched (run ${r.workflow_run_id})`} onclick={() => void openWorkflowRun(r.workflow_run_id!, t.workflow_id)}>Workflow run</button>
                     {/if}
@@ -1398,19 +1399,9 @@
      fields the global `.input` / `.checkbox-row`. */
   .sched-page { display: flex; flex-direction: column; height: 100%; min-height: 0; }
   .muted { color: var(--text-dim); padding: 8px 0; font-size: var(--fs-s); }
-  .err {
-    display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
-    background: var(--danger-soft);
-    color: var(--text); padding: 8px 12px;
-    border-radius: var(--radius-s); margin-block-end: 12px; font-size: var(--fs-s);
-  }
+  .err { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; background: var(--danger-soft); color: var(--text); padding: 8px 12px; border-radius: var(--radius-s); margin-block-end: 12px; font-size: var(--fs-s); }
   .err :global(svg) { color: var(--danger); flex-shrink: 0; }
-  .notice {
-    display: flex; align-items: center; gap: 8px;
-    background: var(--accent-soft);
-    color: var(--text); padding: 8px 12px;
-    border-radius: var(--radius-s); margin-block-end: 12px; font-size: var(--fs-s);
-  }
+  .notice { display: flex; align-items: center; gap: 8px; background: var(--accent-soft); color: var(--text); padding: 8px 12px; border-radius: var(--radius-s); margin-block-end: 12px; font-size: var(--fs-s); }
   .grow { flex: 1; }
   .tasks { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
   .task { border: 1px solid var(--border); background: var(--surface); border-radius: var(--radius-m); padding: 10px 12px; color: var(--text); }

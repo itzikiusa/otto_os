@@ -12,21 +12,20 @@ function fixture(component: string, method: string) {
   const methods = parsed.statements.filter((node) => ts.isFunctionDeclaration(node) && [method, 'act', 'errText'].includes(node.name?.text ?? '')).map((node) => source.slice(node.getStart(parsed), node.end)).join('\n');
   const confirmation = deferred<boolean>(); const targets: string[] = [];
   const compiled = ts.transpileModule(`
-    let id = 'A', loop = { name: 'Loop A' }, run = { id: 'A', title: 'Run A' };
-    let acting = false, busy = false, deciding = null, error = '', alive = true, prDraft = null;
+    let id = 'A', loop = { name: 'Loop A' };
+    let acting = false, busy = false, deciding = null, error = '', alive = true;
     ${methods}
-    return { invoke: ${method}, switchToB() { id = 'B'; loop = { name: 'Loop B' }; run = { id: 'B', title: 'Run B' }; } };
+    return { invoke: ${method}, switchToB() { id = 'B'; loop = { name: 'Loop B' }; } };
   `, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }).outputText;
   const record = async (id: string) => { targets.push(id); };
-  const state = new Function('confirmer', 'loops', 'runWithOtto', 'toasts', 'onback', compiled)(
-    { ask: () => confirmation.promise }, { remove: record, stop: record }, { cancel: record, openPr: record },
+  const state = new Function('confirmer', 'loops', 'toasts', 'onback', compiled)(
+    { ask: () => confirmation.promise }, { remove: record, stop: record },
     { error() {}, success() {} }, () => {},
   );
   return { state, confirmation, targets };
 }
 for (const [component, method] of [
   ['loops/LoopDetail', 'del'], ['loops/LoopDetail', 'stop'],
-  ['run-with-otto/RunDetail', 'cancel'], ['run-with-otto/RunDetail', 'openPr'],
 ]) {
   test(`${component} ${method} acts on the target named by its confirmation`, async () => {
     const { state, confirmation, targets } = fixture(component, method);
@@ -41,23 +40,20 @@ function pageFixture(component: string, method: string) {
   const body = parsed.statements.filter((node) => ts.isFunctionDeclaration(node) && node.name?.text === method).map((node) => source.slice(node.getStart(parsed), node.end)).join('\n');
   const confirmation = deferred<any>(); const targets: string[] = []; const followups: string[] = [];
   const compiled = ts.transpileModule(`
-    let detail = { pack: { id: 'A', title: 'Pack A' }, artifacts: [] }, run = { id: 'A' }, current = { name: 'Workflow A' };
-    let ws = { currentId: 'workspace-A' }, filter = {}, assembling = false;
+    let run = { id: 'A' }, current = { name: 'Workflow A' };
+    let ws = { currentId: 'workspace-A' };
     ${body}
-    return { invoke: ${method}, switchToB() { detail = { pack: { id: 'B', title: 'Pack B' }, artifacts: [] }; run = { id: 'B' }; ws.currentId = 'workspace-B'; } };
+    return { invoke: ${method}, switchToB() { run = { id: 'B' }; ws.currentId = 'workspace-B'; } };
   `, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }).outputText;
   const record = async (id: string) => { targets.push(id); return { id: 'created-A' }; };
-  const state = new Function('confirmer', 'deleteProofPack', 'assembleProof', 'createProofPack', 'api', 'proof', 'toasts', 'plural', 'loadList', 'viewport', 'open', 'loadErrorText', 'toastError', 'packRepoPath', compiled)(
-    { ask: () => confirmation.promise, promptText: () => confirmation.promise }, record, record, record,
-    { post: record }, { closeDetail: () => followups.push('close'), refreshDetail: async () => followups.push('refresh'), packs: [] },
-    { error() {}, success() {}, info() {}, warn() {} }, (n: number) => String(n), async (id: string) => followups.push(id), { isPhone: false }, async (id: string) => followups.push(id), String, () => {}, async () => '/tmp/repo-A',
+  const state = new Function('confirmer', 'api', 'toasts', 'plural', 'loadList', 'viewport', 'open', 'loadErrorText', 'toastError', compiled)(
+    { ask: () => confirmation.promise, promptText: () => confirmation.promise },
+    { post: record },
+    { error() {}, success() {}, info() {}, warn() {} }, (n: number) => String(n), async (id: string) => followups.push(id), { isPhone: false }, async (id: string) => followups.push(id), String, () => {},
   );
   return { state, confirmation, targets, followups };
 }
 for (const [component, method, answer, target] of [
-  ['proof/ProofPage', 'removePack', true, 'A'],
-  ['proof/ProofPage', 'assemble', '/tmp/repo-A', 'A'],
-  ['proof/ProofPage', 'newPack', 'New pack', 'workspace-A'],
   ['workflows/WorkflowsPage', 'stop', true, '/workflow-runs/A/cancel'],
 ] as const) {
   test(`${component} ${method} keeps its confirmed target after navigation`, async () => {

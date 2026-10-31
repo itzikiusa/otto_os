@@ -46,10 +46,6 @@ function setup() {
       return { activity: { reset: () => log.push('activity-reset'), resync: async () => { log.push('activity-resync'); }, loadSummary: async () => {}, load: async () => {} } };
     }
     if (p === './lazyModule') return { lazyModule: () => ({ peek: () => null }) };
-    if (p === './stores/proof.svelte') return { proof: { identityChanged: () => log.push('proof-reset') } };
-    if (p === './stores/assistant.svelte') {
-      return { assistant: { needsState: 'ready', resync: () => log.push('assistant-resync'), loadNeedsYou: async () => {} } };
-    }
     if (p === './stores/workspace.svelte') {
       return { ws: { currentId: 'w', activeSessionId: null, otherWsSessions: [], statusMap: {},
         refreshSessions: async () => {}, refreshActiveWorkflowRuns: async () => {}, refreshOtherSessions: async () => {} } };
@@ -95,10 +91,10 @@ test('a token change reconnects /ws/events as a first connect for the new identi
   assert.equal(h.sockets[0].onclose, null, 'and cannot schedule a competing reconnect');
   h.sockets[1].onopen();
   // S13-02: the new identity's first open drops the old identity's per-user
-  // caches and refetches (the bell, needs-you, activity, proof).
+  // caches and refetches (the bell, activity, automation).
   assert.deepEqual(
     h.log.filter((x) => x !== 'resync'),
-    ['notifications-reset', 'activity-reset', 'proof-reset', 'activity-resync', 'notifications-load', 'assistant-resync', 'automation-resync w'],
+    ['notifications-reset', 'activity-reset', 'activity-resync', 'notifications-load', 'automation-resync w'],
   );
   assert.ok(h.log.includes('resync'), 'live views refetch too');
 });

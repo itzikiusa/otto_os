@@ -18,7 +18,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::auth::{require_ws_role, CurrentUser};
-use crate::error::{ApiError, ApiResult};
+use crate::error::ApiResult;
 use crate::state::ServerCtx;
 
 const MAX_FILE_BYTES: u64 = 256 * 1024;
@@ -324,119 +324,6 @@ pub async fn context_packet(
         "code_excerpts": excerpts,
         "assembled_by": "otto.get_context_packet",
     })))
-}
-
-#[derive(Deserialize)]
-pub struct ProofPackQuery {
-    #[serde(default)]
-    pub repo_id: Option<String>,
-    #[serde(default)]
-    pub branch: Option<String>,
-    #[serde(default)]
-    pub goal_loop_id: Option<String>,
-}
-
-fn valid_ref(s: &str) -> bool {
-    !s.is_empty()
-        && !s.starts_with('-')
-        && s.chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '/' | '.'))
-        && !s.contains("..")
-}
-
-/// Fixed-argv git on tokio's process driver — `status` on a large repo can take
-/// seconds, which must not park a runtime worker.
-async fn safe_git(path: &Path, args: &[&str]) -> Option<String> {
-    let out = otto_git::hardened_command()
-        .arg("-C")
-        .arg(path)
-        .args(args)
-        .kill_on_drop(true)
-        .output()
-        .await
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    Some(
-        String::from_utf8_lossy(&out.stdout)
-            .chars()
-            .take(8000)
-            .collect(),
-    )
-}
-
-/// `GET /workspaces/{wid}/mcp/proof-pack?repo_id=&branch=&goal_loop_id=` — a
-/// redacted evidence bundle: git status/recent-commits/diffstat for a repo (safe
-/// fixed-argv git, validated ref) and a goal loop's machine-checked acceptance
-/// criteria. This is the "proof pack" Otto can hand back to prove a claim of done.
-pub async fn proof_pack(
-    AxPath(wid): AxPath<Id>,
-    State(ctx): State<ServerCtx>,
-    CurrentUser(user): CurrentUser,
-    Query(q): Query<ProofPackQuery>,
-) -> ApiResult<Json<Value>> {
-    require_ws_role(&ctx, &user, &wid, WorkspaceRole::Viewer).await?;
-    let mut pack = json!({ "assembled_by": "otto.get_proof_pack" });
-
-    if let Some(repo_id) = q.repo_id.as_deref().filter(|r| !r.is_empty()) {
-        let repo = ctx.git_store.get_repo(&repo_id.to_string()).await?;
-        // The Viewer check above is for `{wid}` only — a repo registered in
-        // another workspace must not be readable through it.
-        if repo.workspace_id != wid {
-            return Err(ApiError(Error::NotFound(format!(
-                "repo {repo_id} is not in workspace {wid}"
-            ))));
-        }
-        let path = PathBuf::from(&repo.path);
-        let branch = q.branch.as_deref().unwrap_or("HEAD");
-        if !valid_ref(branch) {
-            return Err(ApiError(Error::Invalid("invalid branch/ref".into())));
-        }
-        // Independent reads: run the three concurrently.
-        let log_args = [
-            "log",
-            "-n",
-            "20",
-            "--pretty=format:%h %an %ad %s",
-            "--date=short",
-            branch,
-        ];
-        let (commits, status, diffstat) = tokio::join!(
-            safe_git(&path, &log_args),
-            safe_git(&path, &["status", "--porcelain"]),
-            safe_git(&path, &["diff", "--stat", "HEAD"]),
-        );
-        pack["repo"] = json!({
-            "id": repo.id,
-            "name": repo.name,
-            "branch": branch,
-            "recent_commits": commits.map(|c| redact_text(&c).value),
-            "working_tree_status": status.map(|s| redact_text(&s).value),
-            "uncommitted_diffstat": diffstat.map(|d| redact_text(&d).value),
-        });
-    }
-
-    if let Some(loop_id) = q.goal_loop_id.as_deref().filter(|r| !r.is_empty()) {
-        let gl = ctx
-            .goal_loops_repo
-            .get(&loop_id.to_string())
-            .await
-            .ok()
-            // Same workspace confinement as the repo above.
-            .filter(|gl| gl.workspace_id == wid);
-        if let Some(gl) = gl {
-            // Machine-checked acceptance criteria + status = the strongest evidence.
-            pack["goal_loop"] = json!({
-                "id": gl.id,
-                "name": gl.name,
-                "status": gl.status,
-                "acceptance_criteria": gl.definition.acceptance_criteria,
-            });
-        }
-    }
-
-    Ok(Json(pack))
 }
 
 #[cfg(test)]

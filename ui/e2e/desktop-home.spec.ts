@@ -59,17 +59,17 @@ test('Home is the first sidebar entry and seeds a default view of live boxes', a
   await expect(page).toHaveURL(/#\/home$/);
   const home = page.getByRole('region', { name: 'Home dashboard' });
   await expect(home).toBeVisible();
-  // Root sees every kind → the seed places four boxes.
+  // Root sees every kind → the seed places three boxes.
   const boxes = home.locator('section.hbox');
-  await expect(boxes).toHaveCount(4);
+  await expect(boxes).toHaveCount(3);
   await expect(boxes.nth(0)).toHaveAttribute('data-kind', 'sessions');
-  await expect(boxes.nth(1)).toHaveAttribute('data-kind', 'mission-control');
+  await expect(boxes.nth(1)).toHaveAttribute('data-kind', 'k8s');
+  await expect(boxes.nth(2)).toHaveAttribute('data-kind', 'db-dashboard');
   // Every box body reaches a settled state (empty state or data), never a
   // permanent skeleton.
   await expect(boxes.nth(0)).toContainText(/open|No open agent sessions/);
-  await expect(boxes.nth(1)).toContainText(/Nothing in flight|active/);
-  await expect(boxes.nth(2)).toContainText(/No clusters yet|cluster/);
-  await expect(boxes.nth(3)).toContainText(/No DB dashboards yet|Pick a dashboard/);
+  await expect(boxes.nth(1)).toContainText(/No clusters yet|cluster/);
+  await expect(boxes.nth(2)).toContainText(/No DB dashboards yet|Pick a dashboard/);
   // A single space: no cycling control; one numbered tab.
   await expect(page.getByRole('tab')).toHaveCount(1);
   await expect(current(page)).toHaveAccessibleName('Overview');

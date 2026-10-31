@@ -98,16 +98,6 @@ test('Self-Improvement lists the custom provider and NOT non-agent tools', async
   await expect(chips.filter({ hasText: /^clickhouse$/ })).toHaveCount(0);
 });
 
-test('Run with Otto (single-agent) offers the custom provider', async ({ page }) => {
-  await openPage(page, 'run-with-otto');
-
-  // Single-agent mode is the default; its Provider <select> used to be a fixed
-  // "claude" label and now comes from the live registry (both modes honor it).
-  const providerSelect = page.locator('select[aria-label="Provider"]');
-  await expect(providerSelect).toBeVisible({ timeout: 10_000 });
-  await expect(providerSelect.locator('option', { hasText: /^grok$/ })).toHaveCount(1);
-});
-
 test('Insights settings offers a custom provider for report generation', async ({ page }) => {
   await page.goto('/#/settings/insights');
   await expect(page.locator('.shell')).toBeVisible({ timeout: 15_000 });

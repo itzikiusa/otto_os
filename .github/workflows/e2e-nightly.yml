@@ -1,10 +1,13 @@
-name: E2E (nightly, mobile/tablet)
+name: E2E (nightly, full functional + mobile/tablet + perf)
 
-# The mobile/tablet Playwright projects that the per-PR `e2e-functional` job
-# (ci.yml) does not run: iPhone landscape, iPad portrait/landscape and iPhone
-# SE. Same isolated throwaway daemon as CI (ui/e2e/global-setup.ts); desktop-*
-# specs are excluded from these projects in playwright.config.ts. Nightly + on
-# demand — four device projects per PR would quadruple the E2E bill.
+# Nightly + on-demand full E2E coverage:
+#   1. `e2e-functional` (4 shards) + `e2e-advisory-ratchet`: every desktop-*
+#      spec on desktop-browser (Chromium) + mobile specs on iphone-portrait
+#      (WebKit) against seeded DB/Kafka/LocalStack/ClickHouse stacks.
+#   2. `perf-gates`: WebKit Playwright perf subset + DB-at-scale `@ci`.
+#   3. `e2e-mobile`: iPhone landscape, iPad portrait/landscape and iPhone SE.
+# Per-PR `ci.yml` runs only the selected `e2e-gate` smoke suite (~4m30s) so
+# pull requests stay fast.
 
 on:
   schedule:
@@ -17,6 +20,8 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   CARGO_PROFILE_DEV_DEBUG: 0
+  CLICKHOUSE_VERSION: 26.8.34.13
+  CLICKHOUSE_SHA512: e5c753b258679daa882747aaec10b351a85bcad1412af7957d4a4616dcf5b45663da219bd37fe0697fde2ae76dbed2ba5b414ce9a5c8044c6d1fa0142e03e4cc
 
 jobs:
   build-ottod:
@@ -32,17 +37,19 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2.9.3
         with:
-          shared-key: perf-gates
+          shared-key: rust-workspace
+          cache-all-crates: true
           save-if: false
 
       - name: Install librdkafka build deps
         run: |
-          sudo grep -lE 'dl\.google\.com|packages\.microsoft\.com' /etc/apt/sources.list.d/* 2>/dev/null | xargs -r sudo rm -f
-          sudo apt-get update || echo "::warning::apt-get update failed for some sources; installing from what refreshed"
-          sudo apt-get install -y cmake libcurl4-openssl-dev
+          if ! dpkg -s cmake libcurl4-openssl-dev pkg-config libssl-dev >/dev/null 2>&1; then
+            sudo grep -lE 'dl\.google\.com|packages\.microsoft\.com' /etc/apt/sources.list.d/* 2>/dev/null | xargs -r sudo rm -f
+            sudo python3 scripts/ci-apt-install.py cmake libcurl4-openssl-dev pkg-config libssl-dev
+          fi
 
       - name: Build the test daemon
-        run: cargo build -p ottod
+        run: cargo build -p ottod --features otto-server/test-util
 
       - name: Upload the test daemon
         uses: actions/upload-artifact@v7.0.2
@@ -52,8 +59,279 @@ jobs:
           retention-days: 2
           if-no-files-found: error
 
-  # Advisory like ci.yml's e2e-functional: results (retries 0, flaky report)
-  # stay honest per job, but a red device never fails the workflow.
+  e2e-functional:
+    name: E2E functional (shard ${{ matrix.shard }}/4, advisory)
+    needs: build-ottod
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Start the seeded DB stack + Redpanda
+        run: |
+          docker compose -f dev/dbviewer/docker-compose.yml up -d
+          docker compose -f dev/brokers/docker-compose.yml up -d
+
+      - name: Start LocalStack before browser workers
+        run: |
+          container=$(docker run -d --rm \
+            --name "otto-e2e-localstack-${OTTO_E2E_SLOT:-0}" \
+            -p 127.0.0.1:4566:4566 \
+            -e SERVICES=s3,sqs,sts,iam,ec2,logs \
+            -e SQS_ENDPOINT_STRATEGY=path \
+            -e LOCALSTACK_HOST=127.0.0.1:4566 \
+            --health-cmd "python3 -c 'import json,urllib.request; s=json.load(urllib.request.urlopen(\"http://127.0.0.1:4566/_localstack/health\", timeout=2))[\"services\"]; assert all(s.get(k) in (\"available\", \"running\") for k in (\"s3\", \"sqs\", \"sts\", \"iam\", \"ec2\", \"logs\"))'" \
+            --health-interval=5s --health-timeout=3s --health-retries=12 \
+            localstack/localstack:4.14.0)
+          echo "OTTO_CI_LOCALSTACK_ID=$container" >> "$GITHUB_ENV"
+
+      - name: Install redis-server + ffmpeg
+        run: |
+          sudo grep -lE 'dl\.google\.com|packages\.microsoft\.com' /etc/apt/sources.list.d/* 2>/dev/null | xargs -r sudo rm -f
+          sudo python3 scripts/ci-apt-install.py --no-install-recommends redis-server ffmpeg
+          sudo systemctl disable --now redis-server || true
+          redis-server --version
+
+      - name: Install ClickHouse (usage engine)
+        run: |
+          archive="$RUNNER_TEMP/clickhouse.tgz"
+          curl --fail --location --silent --show-error --retry 3 \
+            "https://github.com/ClickHouse/ClickHouse/releases/download/v$CLICKHOUSE_VERSION-lts/clickhouse-common-static-$CLICKHOUSE_VERSION-amd64.tgz" \
+            --output "$archive"
+          printf '%s  %s\n' "$CLICKHOUSE_SHA512" "$archive" | sha512sum --check
+          mkdir -p "$RUNNER_TEMP/ch"
+          tar -xzf "$archive" -C "$RUNNER_TEMP/ch"
+          mkdir -p "$HOME/.local/bin"
+          install -m 0755 "$(find "$RUNNER_TEMP/ch" -type f -name clickhouse -path '*/bin/*' | head -n 1)" "$HOME/.local/bin/clickhouse"
+          rm -rf "$RUNNER_TEMP/ch" "$archive"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/clickhouse" local --version
+
+      - name: Generate the synthetic tour film
+        run: |
+          duration=$(node -p "Math.ceil(require('./ui/src/lib/walkthroughs/film.json').duration) + 1")
+          out="$RUNNER_TEMP/otto-tour.mp4"
+          ffmpeg -hide_banner -loglevel error -y \
+            -f lavfi -i "testsrc=size=320x180:rate=10:duration=$duration" \
+            -f lavfi -i "sine=frequency=440:sample_rate=48000:duration=$duration" \
+            -c:v libvpx-vp9 -b:v 40k -deadline realtime -cpu-used 8 -g 10 \
+            -c:a libopus -b:a 24k -shortest -movflags +faststart "$out"
+          ls -l "$out"
+          echo "OTTO_E2E_TOUR_VIDEO=$out" >> "$GITHUB_ENV"
+
+      - name: Download the test daemon
+        uses: actions/download-artifact@v7.0.0
+        with:
+          name: ottod-debug
+          path: target/debug
+
+      - name: Make the test daemon executable
+        run: chmod +x target/debug/ottod
+
+      - name: Install Node
+        uses: actions/setup-node@v7.0.0
+        with:
+          node-version: 26.10.0
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: npm ci
+        working-directory: ui
+        run: npm ci
+
+      - name: Install Playwright browsers
+        working-directory: ui
+        run: |
+          sudo python3 ../scripts/ci-apt-install.py --prepare-external
+          timeout --kill-after=10s 15m npx playwright install --with-deps chromium webkit
+
+      - name: Wait for healthy servers
+        run: |
+          for _ in $(seq 1 60); do
+            unhealthy=$(docker ps --filter name=otto- --format '{{.Names}} {{.Status}}' \
+              | grep -v 'redis-seed' | grep -vc '(healthy)' || true)
+            [ "$unhealthy" = "0" ] && break
+            sleep 5
+          done
+          docker ps --format '{{.Names}}  {{.Status}}'
+          localstack_health=$(docker inspect --format '{{if .State.Running}}{{.State.Health.Status}}{{else}}stopped{{end}}' "$OTTO_CI_LOCALSTACK_ID")
+          if [ "$localstack_health" != "healthy" ]; then
+            echo "::error::The job-owned LocalStack fixture is not healthy"
+            exit 1
+          fi
+          if [ "$unhealthy" != "0" ]; then
+            echo "::error::DB/Kafka/LocalStack services never became healthy"
+            docker compose -f dev/dbviewer/docker-compose.yml logs --tail 80
+            docker compose -f dev/brokers/docker-compose.yml logs --tail 80
+            exit 1
+          fi
+
+      - name: E2E (desktop-browser + iphone-portrait)
+        working-directory: ui
+        env:
+          OTTO_E2E_BIN: ${{ github.workspace }}/target/debug/ottod
+          OTTO_E2E_FUNCTIONAL_ONLY: '1'
+        run: >-
+          npx playwright test
+          --project=desktop-browser --project=iphone-portrait
+          --shard=${{ matrix.shard }}/4 --retries=0
+
+      - name: Fail on flaky tests
+        if: success() || failure()
+        working-directory: ui
+        env:
+          OTTO_E2E_SUMMARY_LABEL: E2E functional shard ${{ matrix.shard }}/4
+        run: node scripts/e2e-flaky-check.mjs --summary
+
+      - name: Upload the shard's JSON results
+        if: success() || failure()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: e2e-functional-results-${{ matrix.shard }}
+          path: ui/e2e/.results-0.json
+          include-hidden-files: true
+          retention-days: 7
+
+      - name: Upload the Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: e2e-functional-report-${{ matrix.shard }}
+          path: |
+            ui/e2e/.report-0
+            ui/test-results
+          retention-days: 7
+
+      - name: Server logs
+        if: failure()
+        run: |
+          docker compose -f dev/dbviewer/docker-compose.yml logs --tail 200
+          docker compose -f dev/brokers/docker-compose.yml logs --tail 200
+          if [ -n "${OTTO_CI_LOCALSTACK_ID:-}" ]; then
+            docker logs --tail 200 "$OTTO_CI_LOCALSTACK_ID"
+          fi
+
+      - name: Stop the job-owned LocalStack after browser workers
+        if: always()
+        run: |
+          if [ -n "${OTTO_CI_LOCALSTACK_ID:-}" ]; then
+            docker rm -f "$OTTO_CI_LOCALSTACK_ID"
+          fi
+
+  e2e-advisory-ratchet:
+    name: E2E advisory red-count ratchet
+    needs: e2e-functional
+    if: always() && needs.e2e-functional.result != 'skipped'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Download the shards' JSON results
+        uses: actions/download-artifact@v7.0.0
+        with:
+          pattern: e2e-functional-results-*
+          path: shard-results
+
+      - name: Install Node
+        uses: actions/setup-node@v7.0.0
+        with:
+          node-version: 26.10.0
+
+      - name: Red count vs baseline
+        working-directory: ui
+        run: |
+          shopt -s globstar nullglob
+          files=(../shard-results/**/.results-*.json)
+          if [ "${#files[@]}" -ne 4 ]; then
+            echo "::error::expected 4 shard reports, found ${#files[@]} — a shard never produced results"
+            exit 1
+          fi
+          OTTO_E2E_SUMMARY_LABEL='E2E functional (all shards)' \
+            node scripts/e2e-flaky-check.mjs --summary --ratchet "${files[@]}"
+
+  perf-gates:
+    name: Perf gates (WebKit subset, advisory)
+    needs: build-ottod
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Download the test daemon
+        uses: actions/download-artifact@v7.0.0
+        with:
+          name: ottod-debug
+          path: target/debug
+
+      - name: Make the test daemon executable
+        run: chmod +x target/debug/ottod
+
+      - name: Install Node
+        uses: actions/setup-node@v7.0.0
+        with:
+          node-version: 26.10.0
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: npm ci
+        working-directory: ui
+        run: npm ci
+
+      - name: Install Playwright WebKit
+        working-directory: ui
+        run: |
+          sudo python3 ../scripts/ci-apt-install.py --prepare-external
+          timeout --kill-after=10s 15m npx playwright install --with-deps webkit
+
+      - name: Perf gates (desktop-webkit)
+        working-directory: ui
+        env:
+          OTTO_E2E_BIN: ${{ github.workspace }}/target/debug/ottod
+          OTTO_PERF_BUDGET_SCALE: '3'
+        run: >-
+          npx playwright test --project=desktop-webkit --workers=1
+          e2e/desktop-git-sidebar-perf.spec.ts
+          e2e/desktop-docs-orch-perf.spec.ts
+          e2e/desktop-infra-perf.spec.ts
+          e2e/desktop-db-results-perf.spec.ts
+          e2e/desktop-nav-smooth-perf.spec.ts
+          e2e/desktop-boot-perf.spec.ts
+          e2e/desktop-terminal-flood-perf.spec.ts
+          e2e/desktop-terminal-park-redraw.spec.ts
+          e2e/desktop-terminal-compact-queue-perf.spec.ts
+          e2e/desktop-agents-scale-perf.spec.ts
+
+      - name: Perf gates — DB at scale (desktop-webkit, @ci)
+        if: success() || failure()
+        working-directory: ui
+        env:
+          OTTO_E2E_BIN: ${{ github.workspace }}/target/debug/ottod
+          OTTO_PERF_BUDGET_SCALE: '3'
+        run: >-
+          npx playwright test --project=desktop-webkit --workers=1
+          e2e/desktop-db-scale-perf.spec.ts --grep @ci
+
+      - name: Fail on flaky tests
+        if: success() || failure()
+        working-directory: ui
+        run: node scripts/e2e-flaky-check.mjs
+
+      - name: Upload the Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: perf-gates-report
+          path: ui/e2e/.report-0
+          retention-days: 7
+
   e2e-mobile:
     name: E2E ${{ matrix.project }} (advisory)
     needs: build-ottod
@@ -90,7 +368,9 @@ jobs:
       # Every mobile/tablet device descriptor defaults to WebKit.
       - name: Install Playwright WebKit
         working-directory: ui
-        run: npx playwright install --with-deps webkit
+        run: |
+          sudo python3 ../scripts/ci-apt-install.py --prepare-external
+          timeout --kill-after=10s 15m npx playwright install --with-deps webkit
 
       - name: E2E (${{ matrix.project }})
         working-directory: ui

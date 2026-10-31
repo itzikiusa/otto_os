@@ -90,12 +90,13 @@ impl Root {
     }
 }
 
-/// Claude project roots and Codex sessions roots, in precedence order (the
-/// first of each is the "primary" one).
+/// Claude project roots, Codex sessions roots, and Antigravity (`agy`) brain
+/// roots, in precedence order (the first of each is the "primary" one).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TranscriptRoots {
     pub claude: Vec<Root>,
     pub codex: Vec<Root>,
+    pub agy: Vec<Root>,
 }
 
 /// The process-environment inputs to root discovery, captured once so tests
@@ -124,14 +125,21 @@ impl RootsEnv {
         }
     }
 
-    /// The explicit pair or the isolated fixture dirs, when either applies.
+    /// The explicit pair (plus optional 3rd `agy` segment) or the isolated
+    /// fixture dirs, when either applies.
     fn overridden(&self, data_dir: Option<&Path>) -> Option<TranscriptRoots> {
         if let Some(raw) = &self.explicit {
             let mut parts = raw.split(':').map(str::trim).filter(|p| !p.is_empty());
             if let (Some(c), Some(x)) = (parts.next(), parts.next()) {
-                return Some(TranscriptRoots::pair(PathBuf::from(c), PathBuf::from(x)));
+                let mut roots = TranscriptRoots::pair(PathBuf::from(c), PathBuf::from(x));
+                if let Some(a) = parts.next() {
+                    roots.agy = vec![Root::new(PathBuf::from(a), "agy", RootKind::Default)];
+                }
+                return Some(roots);
             }
-            tracing::warn!("{ROOTS_ENV} must be `<claude root>:<codex root>`; ignoring");
+            tracing::warn!(
+                "{ROOTS_ENV} must be `<claude root>:<codex root>[:<agy root>]`; ignoring"
+            );
         }
         if self.isolated {
             // No data dir to anchor the fixture on: an empty set, never the
@@ -142,10 +150,12 @@ impl RootsEnv {
             let base = isolated_dir(data_dir);
             let _ = std::fs::create_dir_all(base.join("claude"));
             let _ = std::fs::create_dir_all(base.join("codex"));
-            return Some(TranscriptRoots::pair(
-                base.join("claude"),
-                base.join("codex"),
-            ));
+            let _ = std::fs::create_dir_all(base.join("agy"));
+            return Some(TranscriptRoots {
+                claude: vec![Root::new(base.join("claude"), "claude", RootKind::Default)],
+                codex: vec![Root::new(base.join("codex"), "codex", RootKind::Default)],
+                agy: vec![Root::new(base.join("agy"), "agy", RootKind::Default)],
+            });
         }
         None
     }
@@ -180,6 +190,40 @@ impl RootsEnv {
             "claude",
             RootKind::Extra,
         ));
+        let agy = vec![
+            Root::new(
+                home.join(".gemini").join("antigravity-cli").join("brain"),
+                "agy",
+                RootKind::Default,
+            ),
+            Root::new(
+                home.join(".gemini").join("antigravity").join("brain"),
+                "agy",
+                RootKind::Default,
+            ),
+            Root::new(
+                home.join(".gemini").join("antigravity-ide").join("brain"),
+                "agy",
+                RootKind::Extra,
+            ),
+            Root::new(
+                home.join(".gemini").join("antigravity-acp").join("brain"),
+                "agy",
+                RootKind::Extra,
+            ),
+            Root::new(
+                home.join(".gemini")
+                    .join("antigravity-backup")
+                    .join("brain"),
+                "agy",
+                RootKind::Extra,
+            ),
+            Root::new(
+                home.join(".config").join("antigravity").join("brain"),
+                "agy",
+                RootKind::Extra,
+            ),
+        ];
         TranscriptRoots {
             claude,
             codex: vec![Root::new(
@@ -187,6 +231,7 @@ impl RootsEnv {
                 "codex",
                 RootKind::Default,
             )],
+            agy,
         }
     }
 
@@ -208,7 +253,11 @@ impl RootsEnv {
         let mut accounts = read_subdirs(&data_dir.join("provider-accounts"));
         accounts.sort();
         for account in accounts {
-            let (projects, sessions) = (account.join("projects"), account.join("sessions"));
+            let (projects, sessions, brain) = (
+                account.join("projects"),
+                account.join("sessions"),
+                account.join("brain"),
+            );
             if projects.is_dir() {
                 roots
                     .claude
@@ -218,6 +267,18 @@ impl RootsEnv {
                 roots
                     .codex
                     .push(Root::new(sessions, "codex", RootKind::Account));
+            }
+            if brain.is_dir() {
+                roots.agy.push(Root::new(brain, "agy", RootKind::Account));
+            }
+            let gemini_brain = account
+                .join(".gemini")
+                .join("antigravity-cli")
+                .join("brain");
+            if gemini_brain.is_dir() {
+                roots
+                    .agy
+                    .push(Root::new(gemini_brain, "agy", RootKind::Account));
             }
         }
         roots.dedup();
@@ -248,6 +309,14 @@ impl RootsEnv {
                             RootKind::Account,
                         )],
                         codex: vec![Root::new(home.join("sessions"), "codex", RootKind::Account)],
+                        agy: vec![
+                            Root::new(home.join("brain"), "agy", RootKind::Account),
+                            Root::new(
+                                home.join(".gemini").join("antigravity-cli").join("brain"),
+                                "agy",
+                                RootKind::Account,
+                            ),
+                        ],
                     }
                 }
                 // An invalid id never falls back to another tree.
@@ -283,11 +352,12 @@ impl TranscriptRoots {
         Self {
             claude: vec![Root::new(claude, "claude", RootKind::Default)],
             codex: vec![Root::new(codex, "codex", RootKind::Default)],
+            agy: Vec::new(),
         }
     }
 
     fn dedup(&mut self) {
-        for list in [&mut self.claude, &mut self.codex] {
+        for list in [&mut self.claude, &mut self.codex, &mut self.agy] {
             let mut seen = std::collections::HashSet::new();
             list.retain(|r| seen.insert(r.dir.clone()));
         }
@@ -301,9 +371,15 @@ impl TranscriptRoots {
         self.codex.iter().map(|r| r.dir.as_path())
     }
 
+    pub fn agy_dirs(&self) -> impl Iterator<Item = &Path> {
+        self.agy.iter().map(|r| r.dir.as_path())
+    }
+
     /// Every directory, Claude roots first.
     pub fn all_dirs(&self) -> impl Iterator<Item = &Path> {
-        self.claude_dirs().chain(self.codex_dirs())
+        self.claude_dirs()
+            .chain(self.codex_dirs())
+            .chain(self.agy_dirs())
     }
 
     /// Where one Claude session's transcript lives: the first existing
@@ -326,6 +402,31 @@ impl TranscriptRoots {
     pub fn claude_root_of(&self, file: &Path) -> Option<&Root> {
         self.claude.iter().find(|r| file.starts_with(&r.dir))
     }
+}
+
+/// Resolve an Antigravity (`agy`) transcript under `brain_root` for
+/// `session_id`: prefers non-empty `<sid>/.system_generated/logs/transcript_full.jsonl`
+/// over `transcript.jsonl`, falling back to `<sid>.jsonl` (flat E2E fixtures).
+#[allow(clippy::disallowed_methods)] // sync helper: blocking by contract — async callers offload it
+pub fn agy_transcript_path_under(brain_root: &Path, session_id: &str) -> Option<PathBuf> {
+    let sid = otto_core::paths::safe_component(session_id)?;
+    let logs = brain_root.join(sid).join(".system_generated").join("logs");
+    let full = logs.join("transcript_full.jsonl");
+    let compact = logs.join("transcript.jsonl");
+    if full.is_file() {
+        let non_empty = std::fs::metadata(&full).is_ok_and(|m| m.len() > 0);
+        if non_empty || !compact.is_file() {
+            return Some(full);
+        }
+    }
+    if compact.is_file() {
+        return Some(compact);
+    }
+    let flat = brain_root.join(format!("{sid}.jsonl"));
+    if flat.is_file() {
+        return Some(flat);
+    }
+    None
 }
 
 /// `$HOME` (the root of `~/.claude`), falling back to `/` when unset.
@@ -391,6 +492,7 @@ mod tests {
                 Root::new(b.clone(), "claude", RootKind::Extra),
             ],
             codex: vec![],
+            agy: vec![],
         };
         // Nothing on disk yet: the primary root's expected path.
         let expected = a.join("-w-p").join("s1.jsonl");
@@ -523,8 +625,13 @@ mod tests {
             );
             assert_eq!(roots.claude.len(), 1);
             assert_eq!(roots.codex.len(), 1);
+            assert_eq!(roots.agy.len(), 1);
         }
-        assert!(fixture.join("claude").is_dir() && fixture.join("codex").is_dir());
+        assert!(
+            fixture.join("claude").is_dir()
+                && fixture.join("codex").is_dir()
+                && fixture.join("agy").is_dir()
+        );
         // No data dir to anchor on: nothing, still not the home.
         let none = env.for_session(&serde_json::json!({}), &home, None, None);
         assert_eq!(none, TranscriptRoots::default());

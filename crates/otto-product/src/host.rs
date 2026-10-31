@@ -18,10 +18,9 @@ use otto_core::domain::{User, Workspace};
 use otto_core::event::Event;
 use otto_core::{Id, Result};
 use otto_improve::ImprovementEngine;
-use otto_orchestrator::Orchestrator;
 use otto_state::{
-    CanvasRepo, DbPool, DiscoveryChatRepo, ProductAttachmentRepo, ProductDiscoveryRepo,
-    ProductMockupRepo, ProductRefinementRepo, SwarmRepo, WorkspacesRepo,
+    CanvasRepo, DbPool, DiscoveryChatRepo, ProductAttachmentRepo, ProductMockupRepo,
+    ProductRefinementRepo, WorkspacesRepo,
 };
 use tokio::sync::broadcast;
 
@@ -80,20 +79,15 @@ pub struct BudgetGate {
 
 /// Host-application context required by the story studio handlers — the
 /// discovery chat, refinement threads, media/annotations and the
-/// Product↔Swarm bridge and the analysis/rewrite/test/plan launchers
-/// (`analysis`, `chat`, `refine`, `media`, `swarm`).
+/// analysis/rewrite/test/plan launchers (`analysis`, `chat`, `refine`, `media`).
 pub trait ProductStudioHost: ProductRunHost {
     /// The daemon data dir (attachment files, scratch working dirs).
     fn data_dir(&self) -> &Path;
     fn attachments(&self) -> &ProductAttachmentRepo;
     fn discovery_chat_repo(&self) -> &DiscoveryChatRepo;
-    fn discovery_repo(&self) -> &ProductDiscoveryRepo;
     fn refinement_repo(&self) -> &ProductRefinementRepo;
     fn mockup_repo(&self) -> &ProductMockupRepo;
     fn canvas_repo(&self) -> &CanvasRepo;
-    fn swarms(&self) -> &SwarmRepo;
-    /// Headless planner runs (swarm task seeding).
-    fn orchestrator(&self) -> &Arc<Orchestrator>;
     /// The daemon DB pool (global settings: the default provider).
     fn pool(&self) -> &DbPool;
     /// Skill self-improvement (test-case approval feeds it).
@@ -131,20 +125,11 @@ pub trait ProductStudioHost: ProductRunHost {
         cancel: otto_core::cancel_signal::CancelSignal,
     ) -> impl Future<Output = Result<(String, Id)>> + Send;
 
-    /// The point-of-action usage-budget gate (`provider` empty = any) a swarm
-    /// start or an analysis/rewrite/test/plan run must pass.
+    /// The point-of-action usage-budget gate (`provider` empty = any) an
+    /// analysis/rewrite/test/plan run must pass.
     fn usage_budget(
         &self,
         workspace_id: &str,
         provider: &str,
     ) -> impl Future<Output = BudgetGate> + Send;
-    /// Make the swarm active exactly as its start route does (the swarm's
-    /// operation guard, the workspace budget gate, status, coordinator,
-    /// broadcast — `otto_swarm::runtime::lifecycle::activate`). A blocked
-    /// start is `Error::Invalid`.
-    fn activate_swarm(
-        &self,
-        workspace_id: &Id,
-        swarm_id: &Id,
-    ) -> impl Future<Output = otto_core::Result<()>> + Send;
 }

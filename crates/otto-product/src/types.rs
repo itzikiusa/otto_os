@@ -6,7 +6,7 @@ use serde_json::Value;
 
 use otto_state::{
     ProductAnalysis, ProductAnalysisAgent, ProductStory, ProductStoryVersion, ProductTestcase,
-    ProductTestcaseRun, SwarmStoryLink,
+    ProductTestcaseRun,
 };
 
 // ---------------------------------------------------------------------------
@@ -348,9 +348,6 @@ pub struct ProductStoryDetail {
     /// Latest `draft` revision for local drafts; latest `source` for imports.
     pub source: Option<ProductStoryVersion>,
     pub counts: StoryCounts,
-    /// The swarm project created from this story (Plan → Swarm), if any. Drives
-    /// the "linked swarm project" badge in the story view.
-    pub swarm_link: Option<SwarmStoryLink>,
 }
 
 /// Aggregate counts for a story's child collections.
@@ -400,30 +397,4 @@ pub struct InjectSessionReq {
     pub model: Option<String>,
     #[serde(default)]
     pub cwd: Option<String>,
-}
-
-// ---------------------------------------------------------------------------
-// Product↔Swarm closure response  (`GET /product/stories/{sid}/swarm`)
-// ---------------------------------------------------------------------------
-
-/// Aggregated view of the swarm project spawned from a Product story
-/// (Plan → Swarm back-link).  Read-only; assembled from the swarm state without
-/// any migration.  Returned by `GET /product/stories/{sid}/swarm`.
-#[derive(Debug, Clone, Serialize)]
-pub struct StorySwarmLink {
-    /// The linked swarm project, if one exists.
-    pub project: Option<otto_state::SwarmProject>,
-    /// All tasks in the linked project (empty when no project).
-    pub tasks: Vec<otto_state::SwarmTask>,
-    /// All runs in the linked project (empty when no project).
-    pub runs: Vec<otto_state::SwarmRun>,
-    /// Artifact paths / references collected from run results that contain an
-    /// `"artifacts"` array.  Best-effort extraction from `result_json`.
-    pub artifacts: Vec<String>,
-    /// PR numbers/references found in run results.  Best-effort.
-    pub prs: Vec<String>,
-    /// Review ids found in run results.  Best-effort.
-    pub reviews: Vec<String>,
-    /// Accumulated cost in USD across all runs in the linked project.
-    pub cost_usd: f64,
 }

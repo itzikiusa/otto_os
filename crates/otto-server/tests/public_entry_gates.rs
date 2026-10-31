@@ -18,9 +18,7 @@
 //! `verify_ingest_token` by its own unit test in `otto-sessions`.
 use otto_core::domain::{Channel, ConnectionKind, Environment};
 use otto_server::ServerCtx;
-use otto_state::{
-    NewAgent, NewConnection, NewDiscoveryRun, NewPlugin, NewProject, NewSwarm, UsersRepo,
-};
+use otto_state::{NewConnection, NewPlugin, UsersRepo};
 use serde_json::json;
 
 const KEY: &str = "right-webhook-key";
@@ -103,47 +101,11 @@ async fn webhook_routes_refuse_a_missing_or_wrong_key_and_a_disabled_integration
     let (f, root) = fixture().await;
     let ws = webhook_workspace(&f, &root.id, "A", true).await;
     let off = webhook_workspace(&f, &root.id, "Off", false).await;
-    let other = webhook_workspace(&f, &root.id, "B", true).await;
-    let swarm = |ws: String| NewSwarm {
-        workspace_id: ws,
-        name: "team".into(),
-        description: String::new(),
-        preset_slug: None,
-        config: json!({}),
-        max_total_runs: None,
-        max_cost_usd: None,
-        max_runtime_secs: None,
-        max_attempts: None,
-        created_by: root.id.clone(),
-    };
-    let own_swarm = f
-        .ctx
-        .swarm_repo
-        .create_swarm(swarm(ws.clone()))
-        .await
-        .unwrap();
-    let off_swarm = f
-        .ctx
-        .swarm_repo
-        .create_swarm(swarm(off.clone()))
-        .await
-        .unwrap();
-    let other_swarm = f.ctx.swarm_repo.create_swarm(swarm(other)).await.unwrap();
 
     let channel = |ws: &str| format!("{}/webhooks/{ws}", f.origin);
-    let run = |ws: &str| format!("{}/webhooks/{ws}/run", f.origin);
-    let swarm_url = |ws: &str, sid: &str| format!("{}/webhooks/swarm/{ws}/{sid}", f.origin);
-    let body = json!({"text": "do it", "seed_text": "do it", "goal": "ship it"});
+    let body = json!({"text": "do it"});
 
-    for (label, url_on, url_off) in [
-        ("channel", channel(&ws), channel(&off)),
-        ("run", run(&ws), run(&off)),
-        (
-            "swarm",
-            swarm_url(&ws, &own_swarm.id),
-            swarm_url(&off, &off_swarm.id),
-        ),
-    ] {
+    for (label, url_on, url_off) in [("channel", channel(&ws), channel(&off))] {
         for key in [None, Some("wrong-key"), Some("")] {
             let r = keyed(f.client.post(&url_on), key)
                 .json(&body)
@@ -171,7 +133,7 @@ async fn webhook_routes_refuse_a_missing_or_wrong_key_and_a_disabled_integration
         assert_eq!(r.status(), 404, "{label} on a disabled integration");
     }
 
-    // The right key passes the gate: each route reaches its next check.
+    // The right key passes the gate: the route reaches its next check.
     let r = keyed(f.client.post(channel(&ws)), Some(KEY))
         .json(&json!({"text": "  "}))
         .send()
@@ -191,48 +153,10 @@ async fn webhook_routes_refuse_a_missing_or_wrong_key_and_a_disabled_integration
         .await
         .unwrap();
     assert_eq!(r.status(), 503, "channel: the bearer slot works too");
-    let r = keyed(f.client.post(run(&ws)), Some(KEY))
-        .json(&json!({"seed_text": "hi"}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(r.status(), 503, "run: past the key, onboarding is checked");
-    let r = keyed(f.client.post(swarm_url(&ws, &own_swarm.id)), Some(KEY))
-        .json(&json!({"goal": " "}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(r.status(), 400, "swarm: past the key, the goal is checked");
-    // A's key never reaches B's swarm.
-    let r = keyed(f.client.post(swarm_url(&ws, &other_swarm.id)), Some(KEY))
-        .json(&body)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(r.status(), 404, "another workspace's swarm");
 
     // Nothing was started anywhere.
     for w in [&ws, &off] {
         assert!(f.ctx.manager.list_by_workspace(w).await.unwrap().is_empty());
-        assert!(f
-            .ctx
-            .runs
-            .list_by_workspace(w, 10)
-            .await
-            .unwrap()
-            .is_empty());
-    }
-    for s in [&own_swarm, &off_swarm, &other_swarm] {
-        assert!(
-            f.ctx
-                .swarm_repo
-                .list_projects(&s.id)
-                .await
-                .unwrap()
-                .is_empty(),
-            "no swarm project for {}",
-            s.id
-        );
     }
     f.server.abort();
 }
@@ -308,53 +232,16 @@ async fn db_assist_query_needs_the_assist_key_and_stays_read_only() {
     f.server.abort();
 }
 
-/// What the ingest routes can write, read straight from the stores: board
-/// rows, product stories, design attachments, the discovery report, the
+/// What the ingest routes can write, read straight from the stores: the
 /// session's activity trail and whether usage was recorded at all.
 #[derive(Debug, PartialEq)]
 struct Written {
-    board: usize,
-    stories: i64,
-    attachments: i64,
-    report: Option<String>,
     trail: usize,
     usage_recorded: bool,
 }
 
-async fn written(
-    f: &Fixture,
-    swarm: &otto_core::Id,
-    run: &otto_core::Id,
-    sid: &otto_core::Id,
-) -> Written {
-    // Fixed statements (sqlx 0.9 refuses an unaudited `format!` query).
-    let count = |sql: &'static str| {
-        let pool = f.ctx.pool.clone();
-        async move {
-            sqlx::query_scalar::<_, i64>(sql)
-                .fetch_one(&pool)
-                .await
-                .unwrap()
-        }
-    };
+async fn written(f: &Fixture, sid: &otto_core::Id) -> Written {
     Written {
-        board: f
-            .ctx
-            .swarm_repo
-            .list_board(swarm, None, None, 50)
-            .await
-            .unwrap()
-            .len(),
-        stories: count("SELECT COUNT(*) FROM product_stories").await,
-        attachments: count("SELECT COUNT(*) FROM product_attachments").await,
-        report: f
-            .ctx
-            .discovery_repo
-            .get(run)
-            .await
-            .unwrap()
-            .unwrap()
-            .report_md,
         trail: otto_state::ActivityRepo::new(f.ctx.pool.clone())
             .list_trail(sid, 50)
             .await
@@ -367,13 +254,9 @@ async fn written(
 }
 
 /// test-quality-6w1-01/-02: every `/ingest/*` route that takes a session's
-/// hook token. The session is a REAL swarm agent session (swarm, agent,
-/// project and a discovery run all exist), so once the token check passes
-/// each handler has everything it needs to write — the 204s alone prove
-/// nothing (accepted and refused posts both return 204). Each route is
-/// refused with no token, an empty token and ANOTHER live session's token,
-/// then accepted with the session's own token: the positive case is what
-/// makes the negatives count.
+/// hook token. Each route is refused with no token, an empty token and ANOTHER
+/// live session's token, then accepted with the session's own token: the
+/// positive case is what makes the negatives count.
 #[tokio::test]
 async fn ingest_routes_write_only_with_the_sessions_own_token() {
     let (f, root) = fixture().await;
@@ -381,83 +264,6 @@ async fn ingest_routes_write_only_with_the_sessions_own_token() {
         .ctx
         .workspaces
         .create("A", f._tmp.path().to_str().unwrap(), &root.id)
-        .await
-        .unwrap();
-    let swarm = f
-        .ctx
-        .swarm_repo
-        .create_swarm(NewSwarm {
-            workspace_id: ws.id.clone(),
-            name: "team".into(),
-            description: String::new(),
-            preset_slug: None,
-            config: json!({}),
-            max_total_runs: None,
-            max_cost_usd: None,
-            max_runtime_secs: None,
-            max_attempts: None,
-            created_by: root.id.clone(),
-        })
-        .await
-        .unwrap();
-    let agent = f
-        .ctx
-        .swarm_repo
-        .create_agent(NewAgent {
-            swarm_id: swarm.id.clone(),
-            workspace_id: ws.id.clone(),
-            name: "po".into(),
-            title: "Product owner".into(),
-            reports_to: None,
-            provider: "claude".into(),
-            model: None,
-            soul_name: None,
-            soul_md: None,
-            specialization: String::new(),
-            scope_md: String::new(),
-            skills: json!([]),
-            schedule: None,
-            cwd_mode: None,
-            avatar: String::new(),
-            order_idx: 0,
-            created_by: root.id.clone(),
-        })
-        .await
-        .unwrap();
-    let project = f
-        .ctx
-        .swarm_repo
-        .create_project(NewProject {
-            swarm_id: swarm.id.clone(),
-            workspace_id: ws.id.clone(),
-            name: "p".into(),
-            description: String::new(),
-            repo_path: None,
-            goal_md: None,
-            story_id: None,
-            order_idx: 0,
-            created_by: root.id.clone(),
-        })
-        .await
-        .unwrap();
-    let story = f
-        .ctx
-        .product
-        .create_draft(&ws.id, &root.id, Some("Under discovery"))
-        .await
-        .unwrap()
-        .story;
-    let run = f
-        .ctx
-        .discovery_repo
-        .create(NewDiscoveryRun {
-            story_id: story.id.clone(),
-            workspace_id: ws.id.clone(),
-            swarm_id: swarm.id.clone(),
-            project_id: project.id.clone(),
-            brief_md: String::new(),
-            created_by: root.id.clone(),
-        })
         .await
         .unwrap();
     let sessions = otto_state::SessionsRepo::new(f.ctx.pool.clone());
@@ -473,15 +279,7 @@ async fn ingest_routes_write_only_with_the_sessions_own_token() {
         meta,
     };
     let own = sessions
-        .create(session(
-            "po",
-            json!({
-                "swarm_id": swarm.id,
-                "agent_id": agent.id,
-                "workspace_id": ws.id,
-                "project_id": project.id,
-            }),
-        ))
+        .create(session("po", json!({"workspace_id": ws.id})))
         .await
         .unwrap();
     let other = sessions.create(session("other", json!({}))).await.unwrap();
@@ -491,19 +289,6 @@ async fn ingest_routes_write_only_with_the_sessions_own_token() {
     assert_ne!(own_token, other_token);
 
     let routes = [
-        ("swarm/board", json!({"body": "I am the leader now"})),
-        (
-            "swarm/product",
-            json!({"title": "Plan", "body_md": "# forged"}),
-        ),
-        (
-            "swarm/mockup",
-            json!({"title": "Screen", "content": "<p>x</p>"}),
-        ),
-        (
-            "swarm/discovery-report",
-            json!({"report_md": "forged report"}),
-        ),
         (
             "usage",
             json!({"model": "claude-sonnet-4", "input_tokens": 10}),
@@ -522,14 +307,10 @@ async fn ingest_routes_write_only_with_the_sessions_own_token() {
         }
         rb.send()
     };
-    let before = written(&f, &swarm.id, &run.id, &own.id).await;
+    let before = written(&f, &own.id).await;
     assert_eq!(
         before,
         Written {
-            board: 0,
-            stories: 1,
-            attachments: 0,
-            report: None,
             trail: 0,
             usage_recorded: false,
         }
@@ -543,7 +324,7 @@ async fn ingest_routes_write_only_with_the_sessions_own_token() {
             let status = post(route, body, token).await.unwrap().status();
             assert_eq!(status, 204, "{route} with {label}");
             assert_eq!(
-                written(&f, &swarm.id, &run.id, &own.id).await,
+                written(&f, &own.id).await,
                 before,
                 "{route} with {label} wrote something"
             );
@@ -555,7 +336,7 @@ async fn ingest_routes_write_only_with_the_sessions_own_token() {
     // by exactly one line per accepted post (test-quality-6w2-01). A shared
     // `trail > 0` would be met by either route alone.
     for (route, body) in &routes {
-        let trail_before = written(&f, &swarm.id, &run.id, &own.id).await.trail;
+        let trail_before = written(&f, &own.id).await.trail;
         let status = post(route, body, Some(own_token.as_str()))
             .await
             .unwrap()
@@ -563,17 +344,13 @@ async fn ingest_routes_write_only_with_the_sessions_own_token() {
         assert_eq!(status, 204, "{route} with the session's own token");
         if matches!(*route, "claude" | "codex") {
             assert_eq!(
-                written(&f, &swarm.id, &run.id, &own.id).await.trail,
+                written(&f, &own.id).await.trail,
                 trail_before + 1,
                 "{route} with the session's own token appends one trail line"
             );
         }
     }
-    let after = written(&f, &swarm.id, &run.id, &own.id).await;
-    assert_eq!(after.board, 1, "exactly one board row");
-    assert!(after.stories > before.stories, "a product draft was filed");
-    assert_eq!(after.attachments, 1, "one mockup attachment");
-    assert_eq!(after.report.as_deref(), Some("forged report"));
+    let after = written(&f, &own.id).await;
     assert_eq!(after.trail, 2, "one trail line per hook route");
     assert!(after.usage_recorded, "usage was recorded");
     f.server.abort();

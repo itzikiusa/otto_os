@@ -76,7 +76,7 @@ export function absoluteDeadline(deadlineMs: number, nowMs: number): number {
 /** Module prefixes that a command name repeats (`db_run_query` → "Run query"). */
 const PREFIXES = new Set([
   'db', 'api', 'git', 'browser', 'k8s', 'aws', 'brokers', 'broker', 'vault', 'workflows', 'workflow',
-  'scheduled', 'sched', 'wf', 'home', 'swarm', 'loops', 'loop', 'nav',
+  'scheduled', 'sched', 'wf', 'home', 'loops', 'loop', 'nav',
 ]);
 
 /** Commands whose name alone reads badly as an action. */

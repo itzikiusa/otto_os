@@ -2,7 +2,7 @@ import { apiCtx, seedWorkspace } from './seed';
 import { test, expect } from '@playwright/test';
 import { expectNoHorizontalOverflow, expectFullyInViewport } from './helpers';
 
-for (const route of ['workflows', 'proof', 'run-with-otto']) {
+for (const route of ['workflows']) {
   test(`${route}: no workspace offers an actionable setup state`, async ({ page }) => {
     await page.route('**/api/v1/workspaces', r => r.fulfill({ json: [] }));
     await page.setViewportSize({ width: 375, height: 812 });
@@ -31,16 +31,16 @@ test('personal agents: keyboard tab selection moves focus to the selected tab', 
   await expect(rooms).toHaveAttribute('aria-selected', 'true');
   await expect(rooms).toBeFocused();
   await page.keyboard.press('Home');
-  await expect(agents).toHaveAttribute('aria-selected', 'true');
-  await expect(agents).toBeFocused();
+  const tasks = page.getByRole('tab', { name: 'Tasks', exact: true });
+  await expect(tasks).toHaveAttribute('aria-selected', 'true');
+  await expect(tasks).toBeFocused();
 });
 
 
 for (const [route, endpoint] of [
-  ['mission-control', 'workgraph/items'], ['run-with-otto', 'runs'],
-  ['swarm', 'swarm/swarms'], ['loops', 'goal-loops'],
+  ['loops', 'goal-loops'],
   ['workflows', 'workflows'], ['scheduled-tasks', 'scheduled-tasks'],
-  ['personal-agents', 'personal-agents'], ['proof', 'proof-packs'],
+  ['personal-agents', 'personal-agents'],
 ]) {
   test(`${route}: a failed load recovers through inline Retry`, async ({ page }) => {
     const { ctx, base } = await apiCtx();
@@ -66,37 +66,6 @@ for (const [route, endpoint] of [
   });
 }
 
-test('proof: failed media fetch shows an inline error and retries the image', async ({ page }) => {
-  const { ctx, base } = await apiCtx();
-  const wsId = await seedWorkspace(ctx, base);
-  const pack = await ctx.post(`${base}/api/v1/workspaces/${wsId}/proof-packs`, { data: {
-    work_item_kind: 'manual', work_item_id: `ux-media-${Date.now()}`, title: 'Media recovery evidence',
-  }});
-  expect(pack.ok(), await pack.text()).toBeTruthy();
-  const packId = (await pack.json()).id;
-  const media = await ctx.post(`${base}/api/v1/proof-packs/${packId}/media`, { data: {
-    kind: 'screenshot', title: 'Recovered screenshot', mime: 'image/png',
-    data_base64: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
-  }});
-  expect(media.ok(), await media.text()).toBeTruthy();
-  await ctx.dispose();
-  await page.addInitScript(id => localStorage.setItem('otto_workspace', id), wsId);
-  let failing = true;
-  await page.route('**/api/v1/proof-artifacts/*/blob', async r => {
-    if (failing) await r.fulfill({ status: 503, body: 'temporarily unavailable' });
-    else await r.continue();
-  });
-  await page.goto('/#/proof');
-  // Scoped to the page: the failure is also spoken via the sr-only announcer.
-  await expect(page.locator('#app-content').getByText('Couldn’t load the media')).toBeVisible();
-  await expect(page.getByText('Loading media…')).toHaveCount(0);
-  failing = false;
-  await page.getByRole('button', { name: 'Retry media' }).click();
-  const img = page.getByRole('img', { name: 'Recovered screenshot' });
-  await expect(img).toBeVisible();
-  await expect.poll(() => img.evaluate(el => (el as HTMLImageElement).naturalWidth)).toBe(1);
-});
-
 for (const [theme, scheme, width, height, rtl] of [
   ['native', 'light', 1440, 900, false], ['native', 'dark', 1440, 900, false],
   ['warm', 'dark', 1440, 900, false], ['native', 'dark', 1024, 768, true],
@@ -109,7 +78,7 @@ for (const [theme, scheme, width, height, rtl] of [
       localStorage.setItem('otto_scheme', scheme);
     }, { theme, scheme });
     for (const [route, title] of [
-      ['workflows', 'Workflows'], ['proof', 'Proof packs'], ['run-with-otto', 'Run with Otto'],
+      ['workflows', 'Workflows'],
     ]) {
       await page.goto(`/#/${route}`);
       if (rtl) await page.evaluate(() => document.documentElement.dir = 'rtl');

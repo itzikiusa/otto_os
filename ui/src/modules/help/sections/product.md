@@ -8,7 +8,7 @@ summary: Turn a Jira issue, a Confluence page or a blank draft into an analysed,
 
 ## What it's for
 
-Product is the product owner's workspace. Import a Jira issue or Confluence page, or start a blank draft. Agents then analyse it, raise questions, suggest a rewrite, write test cases and plan the work. You can post the results back to Jira and Confluence, send the plan to a swarm, or open a coding agent with the full context.
+Product is the product owner's workspace. Import a Jira issue or Confluence page, or start a blank draft. Agents then analyse it, raise questions, suggest a rewrite, write test cases and plan the work. You can post the results back to Jira and Confluence, or open a coding agent with the full context.
 
 ## Getting started
 
@@ -17,7 +17,7 @@ Product is the product owner's workspace. Import a Jira issue or Confluence page
 3. Optionally set a **Repo path** so agents can map the story to your code, and tick **Watch this story for changes**.
 4. Open the story and go to **Discover → Analysis**. Choose lenses and providers, then **Run analysis**.
 5. Answer the open questions in **Questions**, then use **Deliver → Plan** to break the work into tasks.
-6. Choose **Send to Swarm**, or open **Inject** to start a coding agent with everything it needs.
+6. Open **Inject** to start a coding agent with everything it needs.
 
 ## Everything it can do
 
@@ -25,7 +25,7 @@ Product is the product owner's workspace. Import a Jira issue or Confluence page
 - Import Jira issues and Confluence pages by searching a project or space, or by pasting a key, a `/browse/` URL or a page ID.
 - **New ▾** creates a **Draft** (a blank story) or an **Epic**. Inside an epic, add a **Story** or a **Doc** child and file it in a folder such as Design, PO or QA.
 - Right-click a story to move it to an epic, set its folder, detach it, mark or unmark it as an epic, make it a doc or a full story, or delete it. Deleting an epic moves its children to the top level.
-- Filter the list by tag. Switch between **Stories** and **Learnings** at the top.
+- Filter the list by tag. Switch between **Stories**, **Designs** and **Learnings** in the page header.
 - Stories and learnings are one shared library across all workspaces.
 
 **Story tabs**
@@ -36,9 +36,8 @@ Product is the product owner's workspace. Import a Jira issue or Confluence page
 - **Discover → Analysis**: run the PO Overview, Architecture and Clarifying Questions lenses on one or more providers. Each lens is an openable session you can stop or retry. A summarizer merges the results into related repos, functionalities, integration points, risks, open questions and suggested learnings.
 - **Discover → Questions**: filter by status and category, then edit, answer, discard or delete. Tick questions to post them as one comment on the Jira issue or Confluence page.
 - **Discover → Notes**: private notes on the story.
-- **Discover → Discovery**: run a multi-agent discovery investigation and read its report, task summaries and board messages.
-- **Discover → Refine**: chat threads that refine the story, including threads started from a discovery run.
-- **Deliver → Plan**: one or more planning agents write a task-by-task plan. They don't ask questions unless you untick **Don't ask me questions**. Tick items to track progress. **Send to Swarm** creates or reuses a swarm project with one task per plan task.
+- **Discover → Refine**: chat threads that refine the story.
+- **Deliver → Plan**: one or more planning agents write a task-by-task plan. They don't ask questions unless you untick **Don't ask me questions**. Tick items to track progress.
 - **Deliver → Test Cases**: generate test cases grouped as happy path, validation, error and edge cases. Approve, request changes, edit, reorder and bulk-approve them, then publish the approved ones to a Confluence page.
 - **Deliver → Inject**: build a context bundle (story, analysis summary, answered questions, approved test cases, learnings and plan) and open it in a new agent session.
 - **Log → History**: every event on the story, filterable by section.
@@ -84,9 +83,7 @@ Product is the product owner's workspace. Import a Jira issue or Confluence page
 
 ## Related
 
-- [Swarm](#/walkthroughs/swarm)
 - [Design Hall](#/walkthroughs/design)
 - [Agents](#/walkthroughs/agents)
 - [Git](#/walkthroughs/git)
 - [Vault](#/walkthroughs/vault)
-- [Run with Otto](#/walkthroughs/run-with-otto)

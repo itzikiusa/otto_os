@@ -30,8 +30,9 @@ export function routeOf(hashOrRoute: string): string {
  * The pane-ownership key of a route: the sidebar entry it belongs to. Mirrors
  * `activeNavId` (lib/sidebar.ts — a parity test pins them together) without
  * importing it, so this file stays dependency-free: the default route is
- * Agents, `plugin/<slug>` is per plugin, the Database / Message Brokers views
- * belong to Connections and Canvas to Design Hall.
+ * Agents, `plugin/<slug>` is per plugin, Database / Message Brokers belong to
+ * Connections, Design Hall / Canvas belong to Product, and Personal Agents to
+ * Scheduled Tasks.
  */
 export function paneKey(route: string): string {
   const parts = routeOf(route).split(/[/?]/);
@@ -39,7 +40,8 @@ export function paneKey(route: string): string {
   if (mod === '') return 'agents';
   if (mod === 'plugin') return `plugin/${parts[1] ?? ''}`;
   if (mod === 'database' || mod === 'brokers') return 'connections';
-  if (mod === 'canvas') return 'design';
+  if (mod === 'design' || mod === 'canvas') return 'product';
+  if (mod === 'personal-agents') return 'scheduled-tasks';
   return mod;
 }
 

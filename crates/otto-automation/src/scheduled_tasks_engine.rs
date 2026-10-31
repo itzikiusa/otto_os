@@ -496,13 +496,6 @@ async fn complete_run_with(
                 (d, e, false)
             };
 
-            // --- attach proof pack ---
-            let proof_pack_id = if task.attach_proof {
-                build_proof_pack(ctx, task, &run_id, &out).await
-            } else {
-                None
-            };
-
             let derr_for_notice = derr.clone();
             record_finish(
                 repo,
@@ -517,7 +510,6 @@ async fn complete_run_with(
                     delivery_error: derr.clone(),
                     session_id: out.session_id.clone(),
                     report_hash: Some(hash),
-                    proof_pack_id,
                     attempts: out.attempts,
                     skipped_delivery: skipped,
                     workflow_run_id: out.workflow_run_id.clone(),
@@ -1724,51 +1716,6 @@ fn workflow_report(name: &str, run: &otto_core::workflows::WorkflowRun) -> Strin
         body.push_str(&format!("\n## Error\n\n{err}\n"));
     }
     body
-}
-
-/// Build a proof pack for a run: the report (+ run metadata) as evidence, status
-/// recomputed. Returns the pack id. Best-effort — never fails the run.
-async fn build_proof_pack(
-    ctx: &impl AutomationCtx,
-    task: &ScheduledTask,
-    run_id: &str,
-    out: &ExecOutcome,
-) -> Option<String> {
-    use otto_core::proof::{ProofArtifactKind, ProofArtifactStatus, WorkItemKind};
-
-    let created_by = task.created_by.clone().unwrap_or_else(|| "system".into());
-    let pack = ctx
-        .proof_repo()
-        .ensure_pack(
-            &task.workspace_id,
-            WorkItemKind::Task,
-            run_id,
-            &format!("Scheduled task: {}", task.name),
-            &created_by,
-        )
-        .await
-        .ok()?;
-
-    let meta = json!({
-        "task_id": task.id,
-        "provider": task.provider,
-        "session_id": out.session_id,
-        "workflow_run_id": out.workflow_run_id,
-        "attempts": out.attempts,
-    });
-    let _ = ctx
-        .proof_upsert_content_artifact(
-            &pack,
-            ProofArtifactKind::Log,
-            "Scheduled run report",
-            &out.report,
-            ProofArtifactStatus::Info,
-            meta,
-            &created_by,
-        )
-        .await;
-    let _ = ctx.proof_recompute_and_emit(&pack.id).await;
-    Some(pack.id)
 }
 
 async fn prune(ctx: &impl AutomationCtx, task_id: &str) {

@@ -33,7 +33,7 @@ pub mod types;
 
 pub use driver::Driver;
 pub use export::{ExportCounts, ExportFormat};
-pub use http::{api_router, DbViewerCtx};
+pub use http::{api_router, DbViewerCtx, McpDbEvent};
 pub use import::{
     build_insert_statements, coerce_scalar, parse_rows, sql_string_literal, ImportFormat,
     ParsedTable, SqlFlavor,

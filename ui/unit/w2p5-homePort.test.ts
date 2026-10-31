@@ -102,7 +102,7 @@ test('ui_state reports an empty layout until the store has loaded', () => {
 });
 
 test('lib/ reaches Home only through the port (no modules/ import)', () => {
-  for (const f of ['../src/lib/uiCommands/home.ts', '../src/lib/stores/assistant.svelte.ts', '../src/lib/uiCommands/homePort.ts']) {
+  for (const f of ['../src/lib/uiCommands/home.ts', '../src/lib/uiCommands/homePort.ts']) {
     assert.doesNotMatch(readFileSync(new URL(f, import.meta.url), 'utf8'), /from '[^']*modules\//, f);
   }
   assert.match(readFileSync(new URL('../src/modules/home/home.svelte.ts', import.meta.url), 'utf8'), /^registerHomePort\(home\);$/m);

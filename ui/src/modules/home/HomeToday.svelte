@@ -67,16 +67,16 @@
   }
   const cards: Card[] = $derived([
     { id: 'needs', title: 'Needs you', icon: 'bell', rows: today.needs, empty: 'Nothing needs you right now.' },
-    { id: 'running', title: 'Working', icon: 'play', rows: today.running, empty: 'No agent, task or workflow is working right now.' },
+    { id: 'running', title: 'Working', icon: 'play', rows: today.running, empty: 'No agent or workflow is working right now.' },
     {
       id: 'next',
       title: 'Up next',
       icon: 'calendar',
       rows: today.upNext,
-      empty: 'Nothing due in the next 24 hours. Reminders and scheduled tasks land here.',
+      empty: 'Nothing due in the next 24 hours. Scheduled tasks land here.',
       fetched: true,
     },
-    { id: 'recent', title: 'Recent', icon: 'clock', rows: today.recent, empty: 'Designs and pull requests you touch show up here.', fetched: true },
+    { id: 'recent', title: 'Recent', icon: 'clock', rows: today.recent, empty: 'Designs you touch show up here.', fetched: true },
   ]);
 </script>
 

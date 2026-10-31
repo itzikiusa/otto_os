@@ -12,43 +12,70 @@ expect rough edges. Prebuilt builds: see [Download](#download-prebuilt-dmg).
 
 ### What's new in 0.2
 
-- **One design system, everywhere.** Every page now uses the same shared
-  components: page header, loading, empty and error states with Retry,
-  Badge, Switch, docked drawers and resizable panes. Spacing, accent tints,
-  shadows, motion and type all come from tokens. About 30 automated
-  `ui-guards` ratchets in `npm run check` stop old patterns from coming back.
-- **Keyboard and accessibility.** Every module has ⌘K verbs. Trees, tab strips,
-  comboboxes, charts and splitters work from the keyboard. Dialogs are named by
-  their headings, and the UI works in right-to-left layouts and down to phone
-  width.
-- **Shareable state.** The selected item is in the URL on more pages, including
-  Brokers, API and Workbench. Copy is consistent: "Couldn’t …" errors with the
-  real cause, Filter vs Search wording, and US English throughout.
-- **Session Rooms**, **Design Hall**, detachable panes and multi-window,
-  conversation view v2, and many performance and correctness fixes since 0.1.
-- **A new product tour** in Help → Walkthroughs.
+- **Threads (Experimental) — conversational workspace (`#/threads`).** A dedicated
+  inbox-style workspace alongside classic terminal **Agents**: `Pinned`,
+  `Active`, `Projects` (nested worker trees + branch chips), and `History` in
+  the left rail; a `1-up | Split | Grid` multi-session conversation canvas (up
+  to 4 live threads side-by-side) with a slide-up PTY terminal drawer; full GFM
+  Markdown, inline workspace images with zoomable lightbox, expandable reasoning
+  prose across Claude, Codex, and Antigravity (`agy`), `@file` mentions, inline
+  permission docks, and **Steer vs Queue** mid-turn composer controls; plus a
+  right-hand **Files · Changes · Connections · Peers** inspector with multi-tab
+  file preview/source, unified/split diffs, live DB MCP query streams, and
+  direct session-to-session messaging.
+- **Streamlined sidebar & unified hubs.** **Product** unifies Jira/Confluence
+  **Stories**, **Design Hall** (**Designs**), and **Learnings** in one hub;
+  **Scheduled Tasks** unifies recurring **Tasks**, **Personal Agents**, and
+  **Agent channels** in one hub. Rarely used standalone surfaces were retired
+  for a faster, sharper app.
+- **Graduated BiDi & Right-to-Left (RTL).** First-strong Unicode paragraph
+  direction (`dir="auto"`) across Markdown turns, streaming drafts, and
+  composers, with code blocks, diffs, paths, and SQL kept strictly LTR — plus
+  full `LTR / RTL` layout support in **Settings → Appearance**.
+- **One design system, everywhere.** Shared page headers, loading/empty/error
+  states with Retry, Badge, Switch, docked drawers, and resizable panes, backed
+  by ~30 automated `ui-guards` ratchets in `npm run check`.
+- **Session Rooms**, detachable panes and multi-window, live attributed Agent
+  MCP tabs in **Database Explorer**, and an updated **product tour film** in
+  **Help → Walkthroughs**.
+
+![Otto Home dashboard](docs/screenshots/home.jpg)
+
+| Threads — 2-up Split + File Viewer | Threads — New Thread Stage |
+| :---: | :---: |
+| ![Threads 2-up split beside open workspace files](docs/screenshots/threads-split.jpg) | ![Threads welcome stage](docs/screenshots/threads-stage.jpg) |
+| **Git & Multi-Agent AI Code Review** | **Database Explorer & Visual Query Builder** |
+| ![Git commit graph and AI review](docs/screenshots/git-review.jpg) | ![Database Explorer results grid](docs/screenshots/db-results.jpg) |
+| **Unified Product & Design Hall** | **Threads — Light Mode & Diffs** |
+| ![Product and Design Hall](docs/screenshots/product.jpg) | ![Threads in light mode](docs/screenshots/threads-light.jpg) |
 
 ---
 
 ## Features
 
-- **Run with Otto** — the flagship **one-button** flow. Point Otto at a single
-  source item — a **Jira** story, a **Confluence** page, a **GitHub** issue or PR,
-  a **Slack/Telegram** thread, a **Product** task, a **review finding**, a
-  **failing test**, or a **scheduled-task report** — and it runs a fixed pipeline
-  end to end: *normalize the source → build a Context Packet → cut an isolated
-  branch/worktree → do the work (a single agent **or** a full Goal Loop) →
-  assemble a Proof Pack → run AI review → **pause for human approval** → draft the
-  PR*. It chains the subsystems below behind one entity (`OttoRun`) and one
-  trigger so it feels like **one button, not eight modules**, and projects into
-  Mission Control. Launch it from the UI, a Slack/Telegram `/run <ref>`, a REST
-  call, or a key-guarded webhook (which can POST the result back to a
-  `callback_url` at the gate + each terminal state). It never opens a PR without
-  human approval **and** a passing/waived Proof Pack.
+- **Threads (Experimental)** — an inbox-first conversational workspace (`#/threads`)
+  inspired by modern agentic IDEs while keeping Otto's multi-session power:
+  - **Inbox & project rail:** `Pinned` threads, `Active` ("needs you" / running)
+    threads, `Projects` grouped by workspace/repo with `delegated_by` sub-worker
+    nesting and branch chips, and `History`.
+  - **Multi-session Split & Grid:** watch and drive 1, 2 (`Split`), or up to 4
+    (`Grid`) live agent conversations at once, with an on-demand **Terminal**
+    drawer attached to the same underlying PTY.
+  - **Rich conversation & composer:** GitHub-flavored Markdown, syntax-highlighted
+    code blocks, inline workspace images + zoomable lightbox, expandable
+    `Thinking` blocks, inline MCP approval docks, `@file` typeahead, and
+    explicit **Steer** (interrupt/nudge now) vs **Queue** (wait for turn end)
+    submission.
+  - **Workspace inspector (`Files · Changes · Connections · Peers`):** multi-tab
+    file explorer with rendered Markdown/image preview + source lines, working-tree
+    git status + Unified/Split diffs, live `otto_db_query` activity with 1-click
+    **Open side-by-side** Database Explorer, and direct **Session-to-Session**
+    message relay, broadcast, peer timeline, and **Session Rooms**.
 - **Agent sessions** — run `claude`, `codex`, `agy`, a plain shell, or **any
   custom agent CLI you register** (custom providers are first-class on every
   agent surface, with per-surface provider/model pickers) in real PTY-backed
-  terminals you can watch, split, and type into. Every session can **pin its
+  terminals you can watch, split, and type into, or flip any session between
+  **Terminal** and **Chat** mode. Every session can **pin its
   own model** — chosen from a live per-provider **model catalog** (refreshed
   hourly from the providers' docs/CLIs, no API keys needed) — and the pin
   applies to that session only, so switching models never leaks into the next
@@ -69,6 +96,11 @@ expect rough edges. Prebuilt builds: see [Download](#download-prebuilt-dmg).
   a single **Settings → Providers → Permissions** checkbox opts out and falls back
   to each CLI's own ask / auto permission mode (tool use then prompts in the
   session terminal). Applies to new sessions.
+- **Session Rooms** — turn any live agent session into a real-time collaborative
+  room: invite teammates with host admission, talk over WebRTC voice and live
+  screen share, draw annotations directly on the shared screen (with permission),
+  hand over and reclaim terminal control at any moment, and generate a local
+  structured recap (decisions, actions, open questions) once participants consent.
 - **Git & Pull Requests** — a GitKraken-style **commit graph** with a WIP row +
   staging panel, per-file diffs, folder-level stage/discard, an interactive
   **conflict resolver** (A/B line picking with live output) that covers merge,
@@ -88,69 +120,37 @@ expect rough edges. Prebuilt builds: see [Download](#download-prebuilt-dmg).
   grace period; lenses are **per-repo presets** built from your installed
   `review` skills.
   Findings become **tracked items** — a review-findings workflow with statuses
-  and fix / verify / open-Jira / false-positive / regression-test actions — and
-  can be **ingested into a Proof Pack** or saved to workspace memory.
-- **Proof Packs — the trust layer** — an evidence layer so "done" means *proven*,
-  not asserted. Each unit of work collects **artifacts** — diffs, recognized test
-  output, **CI status**, **screenshots/video**, **API/DB/Kafka read** samples,
-  review findings, self-review, and human approvals — and pure rules derive its
-  **status, risk, badges, and an explainable "done contract" score** purely from
-  the evidence (the agent never sets it). On PR creation it auto-captures CI and
-  **checks the PR description against the actual change**; it enforces optional
-  **per-repo policy** ("a passing test / green CI required"), freezes
-  **immutable, tamper-evident snapshots**, exports a self-contained
-  **Markdown/HTML report**, and records an **accountable human waiver** (approver
-  + reason). Artifacts are redacted and size-capped, and a **gate** can block a PR
-  over an unproven pack (with an audited override).
-- **Product (Jira / Confluence)** — import a Jira issue or Confluence page
-  (search by project or space — no key prefix needed) and run a product-owner
-  workflow over it: multi-agent, multi-provider **analysis** with a summarizer
-  and **open questions** you can post back as comments; a suggested **rewrite**;
-  **test-case** generation with approval published to a linked Confluence page;
-  **discovery** drafts (start blank, drop in ideas or call transcripts, then
-  publish as an RFC or a Jira story); plus versioning, sectioned history, tags,
-  a **Plan/Tasks** breakdown, and a recurring-patterns **learnings** base. A
-  background watcher polls for new comments/updates, and you can inject a story's
-  full refined context into any running agent. Story titles/descriptions are
-  editable inline, and Otto reads **and writes Confluence pages** directly
-  (rich HTML publishing — tables, task lists, panels, full-width layout).
-- **Canvas** — think visually. Each canvas scene is **file-backed** in one of two
-  modes: **Excalidraw** (`canvas.json`, freeform shapes & arrows) or **Mermaid**
-  (`canvas.mermaid`, diagram-as-code). An agent edits the underlying file while
-  you converse in an embedded terminal, so a diagram becomes something an agent
-  builds *with* you.
-- **Design Hall** — one artifact graph for everything visual a team makes:
-  UI frames, graphics, sites, 3D scenes, whiteboards and brand kits, organised
-  into projects. Each artifact is versioned and linkable, and an agent can
-  help design it. See [`docs/features/design-hall.md`](./docs/features/design-hall.md).
+  and fix / verify / open-Jira / false-positive / regression-test actions — backed
+  by a **Review Proof Pack** (diff, test & CI evidence, risk badges, and human
+  sign-off) or saved to workspace memory.
+- **Product & Design Hall (Unified Hub)** — one sidebar home with three tabs
+  (**Stories · Designs · Learnings**):
+  - **Stories (Jira / Confluence):** import a Jira issue or Confluence page and
+    run multi-agent, multi-provider **analysis** with open questions you can post
+    back as comments, a suggested **rewrite**, **test-case** generation published
+    to Confluence, **discovery** drafts, versioning, a **Plan/Tasks** breakdown,
+    background comment polling, and rich Confluence HTML publishing.
+  - **Designs (Design Hall):** one versioned, linkable artifact graph for UI
+    frames, graphics, sites, 3D scenes, whiteboards, and brand kits organised
+    into projects, with side-by-side variant comparison and agent design assist.
+    See [`docs/features/design-hall.md`](./docs/features/design-hall.md).
+  - **Learnings:** recurring product and design rules distilled from your team's
+    decisions.
+- **Canvas** — think visually. Each canvas scene is **file-backed** in
+  **Excalidraw** (`canvas.json`), **Mermaid** (`canvas.mermaid`), or **D2**
+  (`canvas.d2`). An agent edits the underlying file while you converse, so
+  diagrams evolve live alongside your session.
 - **Channels** — bridge a Slack or Telegram thread to an agent session: messages
   (and file attachments) are relayed in, the agent's reply (and any file) is
   relayed back. One agent per ticket, auto-archived when idle.
-- **Broadcast** — send one literal message to many live agent sessions at once
-  (no AI in the loop) — e.g. tell every working agent to "wrap up and commit."
-- **Agent Swarm** — assemble a *swarm*: a team of role-specialized agents with an
-  org hierarchy (CEO → CTO → VP → Team Lead → Devs) that autonomously works
-  **projects** broken into **tasks**. A built-in **recruiter** drafts each agent
-  (role, "soul"/persona, skills, schedule); a per-swarm **Coordinator** schedules
-  ready work onto agents within a **parallel-session cap**, delegates leader→reports,
-  and routes hand-offs/reviews. Agents coordinate on a **shared board** you watch
-  live; every agent runs as a normal openable session. Watch progress in an **org
-  tree**, a **run-graph (DAG)**, and per-project **Kanban + filterable runs list**;
-  set agents to **scheduled runs** (e.g. a daily trend researcher); **pause / abort
-  all / resume** any time. Five preset swarms ship in the box. It's far leaner on
-  tokens than API-driven equivalents: sessions are **persistent and resumed** (no
-  whole-history re-feed each turn) and agents' outputs are read from transcripts/
-  files (zero model tokens).
+- **Broadcast & Peer Messaging** — send one literal message to many live agent
+  sessions at once (⌘⇧B, no AI in the loop) or relay structured session-to-session
+  messages with full sender attribution.
 - **Goal Loops** — give a **goal**, machine-checkable acceptance criteria, and a
   **budget** (max iterations + active time). A team of agents iterates
   **Plan → Execute → Evaluate → Digest** on an isolated `goal-loop/<id>` branch,
   repeating until the criteria pass or the budget runs out — with live
   phase/iteration monitoring and openable executor sessions.
-- **Mission Control** — one **unified work graph** over everything your agents are
-  doing across all eight kinds (sessions, swarms, goal loops, reviews, product
-  stories, workflows, PRs, external triggers). A projector builds it from the
-  daemon's event bus, so every workstream shows up as a node with a live status —
-  click one to jump straight to the work behind it.
 - **Connections** — open SSH / MySQL / PostgreSQL / Redis / MongoDB / ClickHouse
   sessions side-by-side with agents. One sidebar entry holds the **unified
   hub**: every connection and Kafka cluster in one folder tree with per-kind
@@ -173,7 +173,8 @@ expect rough edges. Prebuilt builds: see [Download](#download-prebuilt-dmg).
   quoting/ALTERs, ClickHouse `ADD INDEX`/`MODIFY COLUMN`), the grid and schema
   tree are fully keyboard-navigable, and dashboards/widgets are editable in
   place with cancelable streaming export/import. Also: NL→SQL assistance, full
-  **mongosh scripts** in the Mongo query tab, index management
+  **mongosh scripts** in the Mongo query tab, **live attributed Agent MCP query
+  tabs** whenever an agent queries a database, index management
   (view/create/edit/drop from the Structure view), foreign-key navigation, JSON
   cell/document editing, file import, and streaming CSV/format export.
 - **Message Brokers (Kafka)** — connect Kafka clusters (incl. **AWS MSK over an
@@ -281,7 +282,7 @@ expect rough edges. Prebuilt builds: see [Download](#download-prebuilt-dmg).
   single-use approval → dry-run → fail-closed audit → stats). **Outward:** Otto
   exposes its own `otto.*` tools — across every feature (codebase search, context
   packets, workflows, git/PRs incl. inline + threaded `comment_pr`, issues,
-  brokers, swarm, vault, read-only DB, proof packs, scheduled tasks, AWS,
+  brokers, product & design, vault, read-only DB, scheduled tasks, AWS,
   Kubernetes, …) — to external MCP clients **over HTTP, not only
   locally**: a **Streamable-HTTP** endpoint (`POST /api/v1/mcp/http`) a client
   connects to with a bearer token, no local subprocess (the `ottod mcp-server`
@@ -294,7 +295,7 @@ expect rough edges. Prebuilt builds: see [Download](#download-prebuilt-dmg).
   settings in **MCP → Otto Server**.
 - **Workflows** — a visual workflow engine that chains steps (agent prompts, HTTP
   requests, DB queries, broker peeks, channel notifications, human approvals,
-  swarm tasks, …) into runnable graphs, with per-workflow instructions +
+  …) into runnable graphs, with per-workflow instructions +
   `prompt.md` context files, per-step retry / re-run-from-here, a stall
   watchdog, and a concurrency cap with queueing. Runs **survive daemon
   restarts**: finished steps are adopted from the persisted per-node state and
@@ -303,22 +304,18 @@ expect rough edges. Prebuilt builds: see [Download](#download-prebuilt-dmg).
   a **multi-repo run**. Manual, webhook, **chat** (run a workflow from a bound
   Slack/Telegram channel), **schedule** (interval / daily / weekly / cron) and
   event triggers fire today; a few Product/Review nodes are still being wired.
-- **Scheduled Tasks** — recurring agent jobs on an **interval / daily / weekly**
-  schedule. Each run executes a prompt, writes a **Markdown report**, and
-  **delivers** it to Slack, Telegram, email, or a webhook (secrets redacted) —
-  with a run history and a set of `otto.*` MCP tools to manage jobs.
-- **Personal Agents** — grok-bot-style **preset personal agents**: each one is a
-  named persona (soul) with a **pinned provider + model**, its own working
-  folder and **memory notes**, one **or more** schedules (e.g. a daily recap at
-  09:00 *plus* a 15-minute "needs attention" sweep on the same agent), optional
-  **browser use** (Playwright MCP), and per-agent delivery to Slack/Telegram/
-  email/webhook. Every run is a fresh, watchable session; each agent also has a
-  **chat-anytime** session pinned to the same persona/model. Agents can talk to
-  each other in **rooms** (group chats) that are **always visible to you** —
-  every message is persisted, streamed live to the UI, and you can post into
-  any room; rooms are the only agent-to-agent transport, so nothing happens
-  behind your back. Ships with editable example agents (personal assistant,
-  daily recap, casino reviewers).
+- **Scheduled Tasks & Personal Agents (Unified Hub)** — one sidebar entry with
+  three tabs (**Tasks · Agents · Agent channels**):
+  - **Tasks:** recurring agent jobs on an **interval / daily / weekly** schedule
+    that execute a prompt, write a **Markdown report**, and **deliver** it to
+    Slack, Telegram, email, or a webhook (secrets redacted), with full run
+    history and `otto.*` MCP tools.
+  - **Agents (Personal Agents):** named personas (souls) with a **pinned
+    provider + model**, dedicated working folder and **memory notes**, one **or
+    more** schedules, optional **browser use** (Playwright MCP), per-agent
+    delivery, and a **chat-anytime** session.
+  - **Agent channels:** transparent group rooms where personal agents and humans
+    post messages persisted and streamed live to the UI.
 - **Custom plugins** — extend Otto at runtime with out-of-process **sidecar
   plugins** (any language) you install/enable/remove **without rebuilding**: the
   daemon supervises each plugin process, reverse-proxies its HTTP/UI into an
@@ -362,23 +359,27 @@ Otto is a Tauri 2 desktop app with a Rust backend daemon and a Svelte 5 frontend
   TS types mirror it.
 - **Rust crates** (`crates/`): `otto-core` (domain/API), `otto-state` (SQLite),
   `otto-sessions` (session manager + PTY + trust + prompt-guard), `otto-pty`,
-  `otto-orchestrator`, `otto-git`, `otto-issues` (Jira/Confluence),
-  `otto-channels`, `otto-connections`, `otto-dbviewer` (Database Explorer),
-  `otto-apiclient` (API-client gRPC + scripting engines),
-  `otto-brokers` (Kafka viewer), `otto-ssh` (shared SSH-tunnel helper),
+  `otto-orchestrator`, `otto-git`, `otto-git-cmd`, `otto-issues`
+  (Jira/Confluence), `otto-channels`, `otto-connections`, `otto-dbviewer`
+  (Database Explorer), `otto-apiclient` (API-client gRPC + scripting + REST
+  engines), `otto-brokers` (Kafka viewer), `otto-ssh` (shared SSH-tunnel helper),
   `otto-browser` (in-app browser: reader/live tabs, annotations, Lightpanda
   sidecar engine), `otto-aws` (AWS console — `aws` CLI v2 runner, accounts,
   S3/SQS/EC2/Athena/EKS), `otto-k8s` (Kubernetes console — `kubectl` runner,
-  clusters, resources/logs/exec/actions), `otto-swarm` (Agent Swarm), `otto-vault` (the docs home — file-backed
-  markdown vaults + OKF), `otto-memory` (workspace memory layer),
-  `otto-product` (Jira/Confluence story workflows), `otto-improve`
-  (self-improvement), `otto-usage` (ClickHouse usage/metrics), `otto-skills`
-  (bundled skill library), `otto-context`, `otto-rbac`, `otto-netguard`
-  (SSRF guard), `otto-sandbox` (macOS Seatbelt confinement for spawned
-  agent/shell sessions), `otto-keychain` (macOS Keychain secret storage),
-  `otto-canvas` (Canvas scenes), `otto-mcp` (MCP control plane + governance),
-  `otto-workgraph` (Mission Control work graph), `otto-server` (routes),
-  `ottod` (binary).
+  clusters, resources/logs/exec/actions), `otto-vault` (the docs home —
+  file-backed markdown vaults + OKF), `otto-memory` (workspace memory layer),
+  `otto-product` (Jira/Confluence story workflows), `otto-design` &
+  `otto-design-assist` (Design Hall artifact graph & agent assist),
+  `otto-assistant` (Personal Agents engine & scheduler), `otto-automation`
+  (Scheduled Tasks + Goal Loops), `otto-rooms` (Session Rooms), `otto-review`
+  (AI code-review engine), `otto-transcript` (Claude/Codex/Antigravity
+  transcript folder), `otto-improve` (self-improvement), `otto-insights`,
+  `otto-usage` (ClickHouse usage/metrics), `otto-skills` (bundled skill
+  library), `otto-context`, `otto-rbac`, `otto-netguard` (SSRF guard),
+  `otto-sandbox` (macOS Seatbelt confinement for spawned agent/shell sessions),
+  `otto-keychain` (macOS Keychain secret storage), `otto-canvas` (Canvas
+  scenes), `otto-mcp` (MCP control plane + governance), `otto-workflows`,
+  `otto-server` (routes), `ottod` (binary).
 
 ## Download (prebuilt DMG)
 

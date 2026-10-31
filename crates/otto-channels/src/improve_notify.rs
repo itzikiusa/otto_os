@@ -45,8 +45,6 @@ pub const NOTIFY_SETTING_KEY: &str = "channels.notify_self_improvement";
 
 /// Forward "insight ready" events (an insights report became available).
 pub const NOTIFY_INSIGHT_KEY: &str = "channels.notify_insight_ready";
-/// Forward swarm-run status-changed events (done / failed).
-pub const NOTIFY_SWARM_KEY: &str = "channels.notify_swarm_done";
 /// Forward code-review completion events.
 pub const NOTIFY_REVIEW_KEY: &str = "channels.notify_review_done";
 /// Forward budget-exceeded events (spend cap crossed while enforcement is on).
@@ -181,28 +179,6 @@ fn classify(event: &Event) -> Option<(&'static str, Option<String>, String)> {
                 NOTIFY_REVIEW_KEY,
                 Some(workspace_id.clone()),
                 format!("Code review {label}"),
-            ))
-        }
-
-        // ---- swarm ---------------------------------------------------------
-        Event::SwarmStatus {
-            workspace_id,
-            status,
-            swarm_id,
-        } => {
-            // Only notify for terminal states.
-            if !matches!(status.as_str(), "done" | "aborted" | "failed") {
-                return None;
-            }
-            let label = match status.as_str() {
-                "done" => "completed",
-                "aborted" => "aborted",
-                _ => "failed",
-            };
-            Some((
-                NOTIFY_SWARM_KEY,
-                Some(workspace_id.clone()),
-                format!("Agent swarm `{swarm_id}` {label}"),
             ))
         }
 
@@ -491,29 +467,6 @@ mod tests {
             session_id: None,
             review_id: Id::from("r1"),
             status: "queued".into(),
-        })
-        .is_none());
-    }
-
-    #[test]
-    fn swarm_done_routes_to_swarm_key() {
-        let (key, ws, line) = classify(&Event::SwarmStatus {
-            workspace_id: "ws_3".into(),
-            swarm_id: Id::from("sw1"),
-            status: "done".into(),
-        })
-        .unwrap();
-        assert_eq!(key, NOTIFY_SWARM_KEY);
-        assert_eq!(ws.as_deref(), Some("ws_3"));
-        assert!(line.contains("completed"));
-    }
-
-    #[test]
-    fn swarm_active_is_silent() {
-        assert!(classify(&Event::SwarmStatus {
-            workspace_id: "ws_3".into(),
-            swarm_id: Id::from("sw1"),
-            status: "active".into(),
         })
         .is_none());
     }

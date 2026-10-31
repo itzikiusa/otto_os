@@ -8,8 +8,11 @@ test-threads = 8
 retries = 0
 
 [profile.ci]
-# Keep fan-out bounded on the smaller hosted runner; inherit resource groups.
-test-threads = 4
+# Match runner vCPUs (4 on ubuntu-latest, 3 on macOS) so process-per-test fan-out
+# never oversubscribes shared VMs; PTY/ClickHouse/timing suites remain bounded
+# by their explicit `test-groups` overrides below.
+test-threads = "num-cpus"
+slow-timeout = { period = "30s", terminate-after = 4 }
 
 [test-groups]
 # e2e.rs has an in-process SERIAL mutex around ClickHouse startup. Reproduce
@@ -18,7 +21,7 @@ test-threads = 4
 clickhouse = { max-threads = 1 }
 # PTY/session tests spawn real shells and use short readiness/kill deadlines.
 # Keep their system process pressure bounded across all test binaries.
-processes = { max-threads = 2 }
+processes = { max-threads = 4 }
 # Wall-clock gates (otto-server tests/runtime_lag.rs: worst ticker lag under a
 # 20 ms budget). One at a time, and each runs ALONE (`threads-required` in the
 # override below) — on main's CI (d6207941) they shared the 4 vCPUs with three
@@ -54,20 +57,20 @@ threads-required = 'num-test-threads'
 # orphan an entry again (the 2026-10 split left three of these pointing at
 # otto-server paths that no longer existed). This override sits BEFORE the
 # `processes` one: nextest applies the first matching override per setting,
-# and otto-automation / otto-swarm are in `processes` too.
+# and otto-automation is in `processes` too.
 [[profile.default.overrides]]
 filter = '''
 (package(otto-automation) & test(/^goal_loop::goal_loop_tests::until_flag_wakes_on_ring_and_backstops_a_silent_store$/))
 | (package(otto-automation) & test(/^goal_loop_commands::tests::cancellation_kills_verification_descendants$/))
-| (package(otto-swarm) & test(/^runtime::wake::tests::a_poke_wakes_the_coordinator_after_the_min_gap$/))
 | (package(otto-state) & test(/maintenance::tests::offline_compaction_swaps_verified_copy_and_keeps_old_until_confirmed$/))
 | (package(otto-keychain) & test(/control::tests::locked_keychain_times_out_instead_of_blocking$/))
+| (package(otto-server) & binary(snips) & test(/^raw_15mb_upload_and_annotated_save_within_budget$/))
 '''
 test-group = 'timing'
 threads-required = 'num-test-threads'
 
 # Crates whose tests spawn real shells / PTYs / git children (goal-loop
-# verification commands, swarm worktrees, agent-run session drives).
+# verification commands, agent-run session drives).
 [[profile.default.overrides]]
-filter = 'package(otto-pty) | package(otto-sessions) | package(otto-sandbox) | package(otto-automation) | package(otto-swarm) | package(otto-agent-run)'
+filter = 'package(otto-pty) | package(otto-sessions) | package(otto-sandbox) | package(otto-automation) | package(otto-agent-run)'
 test-group = 'processes'

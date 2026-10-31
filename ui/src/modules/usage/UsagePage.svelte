@@ -413,7 +413,6 @@
     agent: 'Ad-hoc agents',
     connection: 'Connections',
     external: 'External',
-    swarm: 'Swarm',
   };
   function featureLabel(k: string): string {
     return FEATURE_LABELS[k] ?? (k ? k[0].toUpperCase() + k.slice(1) : 'Other');

@@ -21,12 +21,15 @@
   import WorkSteps from './WorkSteps.svelte';
   import TasksBlock from './TasksBlock.svelte';
   import ImageBlock from './ImageBlock.svelte';
+  import LocalImageThumb from './LocalImageThumb.svelte';
   import ThinkingMarker from './ThinkingMarker.svelte';
   import UsageLine from './UsageLine.svelte';
   import ChangedFiles from './ChangedFiles.svelte';
   import { transcript } from '../../../lib/stores/transcript.svelte';
+  import { ws } from '../../../lib/stores/workspace.svelte';
+  import { router } from '../../../lib/router.svelte';
   import { toasts } from '../../../lib/toast.svelte';
-  import { changedFiles, fmtClock, fmtDuration, foldResponse, foldStats, providerName, segment, type RenderItem, type Segment } from './format';
+  import { changedFiles, fmtClock, fmtDuration, foldResponse, foldStats, joinThinkingText, providerName, segment, type RenderItem, type Segment } from './format';
   import type { Artifact, SystemNote } from '../../../lib/api/types';
   import { CONV_CTX, type ConvContext } from './context';
 
@@ -63,23 +66,67 @@
     item.role === 'user' ? item.blocks.flatMap((b) => (b.kind === 'text' ? [b.md] : [])).join('\n\n').trim() : '',
   );
   // The composer sends attached images as `[Image: <path>]` lines after the
-  // text; the bubble shows them as attachment chips, not as raw markers.
-  const IMAGE_LINE = /^\[Image: (.+)\]\s*$/gm;
-  function splitAttachments(md: string): { md: string; images: string[] } {
+  // text; standalone `file:///.../img.png` lines also render as inline image
+  // thumbnails with click-to-zoom Modal lightbox.
+  const IMAGE_LINE = /^(?:\[Image:\s*(.+?)\]|file:\/\/(?:localhost)?(\/[^\s]+\.(?:png|jpe?g|gif|webp|svg|avif|bmp)))\s*$/gim;
+  const PEER_MESSAGE_RE = /^\[Message from (?:session\s+)?([^\]]+)\]:?\s*([\s\S]*)$/i;
+
+  interface ParsedUserText {
+    md: string;
+    images: string[];
+    peerSender: string | null;
+    peerSessionId: string | null;
+  }
+
+  function resolvePeerSessionId(sender: string): string | null {
+    const paren = /\(([A-Za-z0-9_-]{6,})\)\s*$/.exec(sender);
+    if (paren?.[1]) return paren[1];
+    const clean = sender.trim();
+    const byId = ws.getSession(clean);
+    if (byId) return byId.id;
+    const lower = clean.toLowerCase();
+    const byTitle = ws.sessions.find((s) => s.title.toLowerCase() === lower);
+    return byTitle?.id ?? null;
+  }
+
+  function parseUserBlock(rawMd: string): ParsedUserText {
+    let working = rawMd;
+    let peerSender: string | null = null;
+    let peerSessionId: string | null = null;
+    const pm = PEER_MESSAGE_RE.exec(working.trim());
+    if (pm) {
+      const rawSender = pm[1]!.trim();
+      peerSessionId = resolvePeerSessionId(rawSender);
+      peerSender = rawSender.replace(/\s*\([A-Za-z0-9_-]{6,}\)\s*$/, '').trim() || rawSender;
+      working = pm[2] ?? '';
+    }
     const images: string[] = [];
-    const rest = md.replace(IMAGE_LINE, (_m, p: string) => {
-      images.push(p.trim());
+    const rest = working.replace(IMAGE_LINE, (_m, bracketPath?: string, fileUrlPath?: string) => {
+      const raw = (bracketPath ?? fileUrlPath ?? '').trim();
+      if (raw) {
+        let decoded = raw;
+        if (fileUrlPath) {
+          try {
+            decoded = decodeURIComponent(raw);
+          } catch {
+            /* keep raw */
+          }
+        }
+        images.push(decoded);
+      }
       return '';
     });
-    return { md: images.length ? rest.trim() : md, images };
+    return {
+      md: images.length || peerSender ? rest.trim() : working,
+      images,
+      peerSender,
+      peerSessionId,
+    };
   }
-  async function copyPath(path: string): Promise<void> {
-    try {
-      await copyTextOrThrow(path);
-      toasts.info('Path copied', path);
-    } catch (e) {
-      toastError('Couldn’t copy to the clipboard', e);
-    }
+
+  function openPeerSession(id: string): void {
+    ws.openSession(id);
+    router.go(router.module === 'threads' ? `threads/${encodeURIComponent(id)}` : `agents/${encodeURIComponent(id)}`);
   }
   async function copyTurn(): Promise<void> {
     try {
@@ -155,7 +202,12 @@
 {#snippet seg(s: Segment, i: number)}
   {#if s.kind === 'steps'}
     {#if s.steps.every((b) => b.kind === 'thinking')}
-      <ThinkingMarker count={s.steps.reduce((n, b) => n + (b.kind === 'thinking' ? b.count : 0), 0)} tokens={s === firstThink ? (item.usage?.thinking_tokens ?? null) : null} {agentName} />
+      <ThinkingMarker
+        count={s.steps.reduce((n, b) => n + (b.kind === 'thinking' ? b.count : 0), 0)}
+        text={joinThinkingText(s.steps)}
+        tokens={s === firstThink ? (item.usage?.thinking_tokens ?? null) : null}
+        {agentName}
+      />
     {:else}
       <WorkSteps steps={s.steps} durationMs={!fold && i === firstStepsIdx ? item.duration_ms : null} {live} {active} {waiting} />
     {/if}
@@ -169,7 +221,7 @@
     {@render pendingChip(s.block.text)}
   {:else if s.block.kind === 'artifact'}
     {@const a = s.block.artifact}
-    <button class="chip artifact" onclick={() => openArtifact(a)} title={a.url ?? a.path ?? a.label}>
+    <button class="chip artifact" dir="ltr" onclick={() => openArtifact(a)} title={a.url ?? a.path ?? a.label}>
       <Icon name={artifactIcon(a)} size={12} /> {a.label}
       {#if a.path && !a.url}<Icon name="eye" size={12} />{/if}
     </button>
@@ -191,17 +243,36 @@
   aria-label={item.role === 'user' ? `You${clock ? `, ${clock}` : ''}` : `${agentName}${clock ? `, ${clock}` : ''}`}
 >
   {#if item.role === 'user'}
-    <div class="bubble chat-bubble-end" dir="auto">
+    <div class="bubble chat-bubble-end">
       {#each item.blocks as b, i (i)}
         {#if b.kind === 'text'}
-          {@const parts = splitAttachments(b.md)}
-          {#if parts.md}<Markdown md={parts.md} />{/if}
+          {@const parts = parseUserBlock(b.md)}
+          {#if parts.peerSender}
+            {#if parts.peerSessionId}
+              <button
+                type="button"
+                class="peer-msg-head clickable"
+                onclick={() => openPeerSession(parts.peerSessionId!)}
+                title="Open peer session {parts.peerSender}"
+              >
+                <Icon name="people" size={12} />
+                <span>From <strong>{parts.peerSender}</strong> · Peer session</span>
+                <Icon name="external" size={12} />
+              </button>
+            {:else}
+              <div class="peer-msg-head">
+                <Icon name="people" size={12} />
+                <span>From <strong>{parts.peerSender}</strong> · Peer session</span>
+              </div>
+            {/if}
+          {/if}
+          {#if parts.md}
+            <div class="user-text"><Markdown md={parts.md} /></div>
+          {/if}
           {#if parts.images.length}
             <div class="attach" data-attachments={parts.images.length}>
               {#each parts.images as p (p)}
-                <button class="attach-chip" onclick={() => void copyPath(p)} title="Attached image — {p} (click to copy the path)">
-                  <Icon name="image" size={12} /> <span class="attach-name">{p.split('/').pop()}</span>
-                </button>
+                <LocalImageThumb path={p} />
               {/each}
             </div>
           {/if}
@@ -230,7 +301,7 @@
         <span class="avatar" aria-hidden="true"><ProviderIcon provider={ctx.provider} size={13} /></span>
         <span class="agent-name">{agentName}</span>
         <AgentChip />
-        {#if item.model}<span class="agent-model mono" title="Model">{item.model}</span>{/if}
+        {#if item.model}<span class="agent-model mono" dir="ltr" title="Model">{item.model}</span>{/if}
         {#if clock}<time class="ts" datetime={item.ts ?? undefined} title={fullTime}>{clock}</time>{/if}
       </header>
     {/if}
@@ -316,33 +387,48 @@
   .bubble :global(.md) {
     --prose-measure: none;
   }
-  .attach {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-    margin-block: 6px 2px;
+  .user-text {
+    unicode-bidi: plaintext;
+    text-align: start;
+    min-width: 0;
   }
-  .attach-chip {
+  .peer-msg-head {
     display: inline-flex;
     align-items: center;
-    gap: 4px;
-    max-width: 100%;
-    padding: 2px 8px;
-    border-radius: var(--radius-m);
-    border: 1px solid color-mix(in srgb, var(--you) 30%, var(--border));
-    background: var(--surface);
+    gap: 6px;
+    margin-block-end: 6px;
+    padding: 2px 10px;
+    border-radius: 999px;
+    border: 1px solid color-mix(in srgb, var(--warning) 42%, var(--border));
+    background: var(--warning-soft);
     color: var(--text);
     font: inherit;
     font-size: var(--fs-xs);
+    line-height: 1.3;
+    max-width: 100%;
+  }
+  .peer-msg-head :global(svg) {
+    color: var(--warning);
+    flex-shrink: 0;
+  }
+  .peer-msg-head strong {
+    font-weight: 600;
+  }
+  .peer-msg-head.clickable {
     cursor: pointer;
   }
-  .attach-chip:hover {
-    border-color: var(--border-strong);
+  .peer-msg-head.clickable:hover {
+    border-color: var(--warning);
   }
-  .attach-name {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+  .peer-msg-head.clickable:focus-visible {
+    outline: 2px solid var(--accent-text);
+    outline-offset: 2px;
+  }
+  .attach {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-block: 6px 2px;
   }
   /* The agent: green disc + name + model + time, then the response. */
   .agent-head {
@@ -373,6 +459,7 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     min-width: 0;
+    unicode-bidi: isolate;
   }
   .ts {
     color: var(--text-dim);
@@ -621,6 +708,7 @@
     cursor: pointer;
     font: inherit;
     font-size: var(--fs-xs);
+    unicode-bidi: isolate;
   }
   .chip.artifact:hover {
     border-color: var(--border-strong);

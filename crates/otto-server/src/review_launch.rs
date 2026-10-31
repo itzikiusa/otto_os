@@ -43,48 +43,10 @@ pub(crate) async fn run_review_for_branch(
         jira_context,
         run_context,
         mode_override,
-        None,
         Some(workflow),
     )
     .await
     .map(|(id, resolved, no_changes, _)| (id, resolved, no_changes))
-}
-
-/// [`run_review_for_branch`] that also returns the reviewed diff's byte
-/// length — the caller's wait budget is sized off it, and recomputing the
-/// whole review diff (one git spawn per untracked file) just for its length
-/// doubled the stage's git work.
-///
-/// `for_run`: a Run-with-Otto run to record the new `review_id` on BEFORE the
-/// background review is spawned. A run cancel drops the stage future at any
-/// await; recording it afterwards (in the stage) left a window where the
-/// review was running but the run did not name it, so cancel could not stop
-/// its reviewers (S2-302 / S15-306).
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn run_review_for_branch_sized(
-    ctx: &ServerCtx,
-    repo_id: &Id,
-    worktree_path: &str,
-    base: Option<&str>,
-    cfg_override: Option<ReviewConfig>,
-    jira_context: Option<String>,
-    run_context: Option<String>,
-    mode_override: Option<otto_core::domain::ReviewMode>,
-    for_run: Option<&Id>,
-) -> Result<(Id, otto_git::ResolvedBase, bool, usize)> {
-    start_review_for_branch(
-        ctx,
-        repo_id,
-        worktree_path,
-        base,
-        cfg_override,
-        jira_context,
-        run_context,
-        mode_override,
-        for_run,
-        None,
-    )
-    .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -97,7 +59,6 @@ async fn start_review_for_branch(
     jira_context: Option<String>,
     run_context: Option<String>,
     mode_override: Option<otto_core::domain::ReviewMode>,
-    for_run: Option<&Id>,
     mut workflow: Option<(&Id, otto_core::workflows::WorkflowCheckpoint)>,
 ) -> Result<(Id, otto_git::ResolvedBase, bool, usize)> {
     let repo = ctx.git_store.get_repo(repo_id).await?;
@@ -160,17 +121,6 @@ async fn start_review_for_branch(
         .create_review(repo_id, LOCAL_REVIEW_PR_NUMBER)
         .await?;
     let review_id = review.id.clone();
-    if let Some(run_id) = for_run {
-        ctx.runs
-            .set_fields(
-                run_id,
-                &otto_state::runs::RunPatch {
-                    review_id: Some(review_id.clone()),
-                    ..Default::default()
-                },
-            )
-            .await?;
-    }
     let no_changes = diff_text.trim().is_empty();
     let diff_len = diff_text.len();
     if let Some((run_id, mut checkpoint)) = workflow {

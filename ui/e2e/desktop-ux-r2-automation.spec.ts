@@ -1,5 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
-import { apiCtx, seedWorkspace, seedSwarm, seedGitRepo } from './seed';
+import { apiCtx, seedWorkspace } from './seed';
 import { expectNoHorizontalOverflow, expectFullyInViewport } from './helpers';
 
 async function workspace(page: Page) {
@@ -12,7 +12,7 @@ async function workspace(page: Page) {
   }, id);
   return id;
 }
-for (const route of ['personal-agents', 'loops', 'mission-control']) {
+for (const route of ['personal-agents', 'loops']) {
   test(`${route}: first run offers workspace setup`, async ({ page }) => {
     await page.route('**/api/v1/workspaces', r => r.fulfill({ json: [] }));
     await page.setViewportSize({ width: 375, height: 812 });
@@ -37,21 +37,6 @@ test('agent detail: arrow keys and End move focus with selection', async ({ page
   await expect(activity).toBeFocused();
   await page.keyboard.press('End');
   await expect(page.getByRole('tab', { name: 'Context', exact: true })).toBeFocused();
-});
-test('Mission Control: pending summary is not zero and load is explicit', async ({ page }) => {
-  const id = await workspace(page);
-  let release!: () => void;
-  const pending = new Promise<void>(resolve => { release = resolve; });
-  await page.route(`**/api/v1/workspaces/${id}/workgraph/**`, async route => {
-    await pending;
-    await route.continue();
-  });
-  await page.goto('/#/mission-control');
-  try {
-    await expect(page.getByLabel('Loading work items')).toBeVisible();
-    await expect(page.locator('.t-val').first()).toHaveText('—');
-  } finally { release(); }
-  await expect(page.getByLabel('Loading work items')).toHaveCount(0);
 });
 
 test('agent form: losing workspace preserves typed fields and explains how to save', async ({ page }) => {
@@ -152,8 +137,6 @@ test.describe('loaded automation visual and interaction fixtures', () => {
   test.beforeAll(async () => {
     const { ctx, base } = await apiCtx();
     wsId = await seedWorkspace(ctx, base);
-    await seedSwarm(ctx, base, wsId);
-    await ctx.post(`${base}/api/v1/workspaces/${wsId}/workgraph/backfill`);
     const room = await (await ctx.post(`${base}/api/v1/workspaces/${wsId}/agent-rooms`, { data: { name: 'Design decisions — cross-team rollout and follow-up' } })).json();
     for (let i = 0; i < 8; i++) await ctx.post(`${base}/api/v1/agent-rooms/${room.id}/messages`, { data: { text: `Decision ${i + 1}: ${'A long discussion with a concrete acceptance condition. '.repeat(5)}` } });
     await ctx.post(`${base}/api/v1/workspaces/${wsId}/scheduled-tasks`, { data: { name: 'Weekly review — security and release readiness', prompt: 'Review release readiness', enabled: false, schedule: { cadence: 'interval', every_min: 60 }, destination: { type: 'none' } } });
@@ -164,12 +147,6 @@ test.describe('loaded automation visual and interaction fixtures', () => {
     ], edges: [{ id: 'e1', source: 'start', target: 'transform' }, { id: 'e2', source: 'transform', target: 'log' }] } } })).json();
     workflowId = wf.id;
     await ctx.post(`${base}/api/v1/workflows/${workflowId}/run`, { data: {} });
-    const repo = await seedGitRepo(ctx, base, wsId);
-    const run = await ctx.post(`${base}/api/v1/workspaces/${wsId}/runs`, { data: {
-      source_kind: 'channel', source_ref: 'automation-review', seed_text: 'Add a short project note.',
-      mode: 'single_agent', repo_id: repo.repoId, title: 'Release evidence ready for review',
-    } });
-    expect(run.ok()).toBeTruthy();
     await ctx.dispose();
   });
   for (const [theme, scheme, width, height, rtl] of variants) {
@@ -186,22 +163,8 @@ test.describe('loaded automation visual and interaction fixtures', () => {
         await expectNoHorizontalOverflow(page);
         await page.screenshot({ path: `/tmp/otto-ux-r2-automation-screens/${theme}-${scheme}-${width}-${name}.png` });
       };
-      await page.goto('/#/swarm');
-      if (rtl) await page.evaluate(() => document.documentElement.dir = 'rtl');
-      if (width <= 640 || width > 1024) await page.locator('.swarm-item', { hasText: 'E2E Swarm' }).first().click();
-      await expect(page.getByRole('tab', { name: 'Org', exact: true })).toBeVisible();
-      for (const view of ['Graph', 'Board', 'Feed']) {
-        const tab = page.locator('.switcher .seg', { hasText: view }).first();
-        await tab.click();
-        await expect(tab).toHaveAttribute('aria-selected', 'true');
-        await shot(`swarm-${view}`);
-      }
-      await page.goto('/#/mission-control');
-      await expect(page.locator('.t-val').first()).not.toHaveText('—');
-      await page.getByRole('tab', { name: 'Graph', exact: true }).click();
-      await expect(page.getByRole('tab', { name: 'Graph', exact: true })).toHaveAttribute('aria-selected', 'true');
-      await shot('mission-control');
       await page.goto('/#/personal-agents/rooms');
+      if (rtl) await page.evaluate(() => document.documentElement.dir = 'rtl');
       await expect(page.getByRole('log', { name: 'Channel messages' }).getByText('Decision 8:', { exact: false })).toBeVisible();
       await page.getByLabel('Message to the channel').fill('Draft kept while reading the discussion');
       await shot('rooms');
@@ -233,32 +196,11 @@ test.describe('loaded automation visual and interaction fixtures', () => {
         id: `loop-${i}`, workspace_id: wsId, name: `Release readiness ${i + 1} ${'long goal title '.repeat(8)}`, definition: { summary: 'Verify every delivery condition and preserve the evidence. '.repeat(6), acceptance_criteria: [] },
         limits: { max_iterations: 5 }, status: i % 2 ? 'running' : 'succeeded', phase: 'executing', progress_pct: i % 2 ? 50 : 100, current_iteration: 2, updated_at: '2026-09-25T12:00:00Z',
       })) }));
-      await page.goto('/#/run-with-otto');
-      await page.locator('.runs .run').first().click();
-      await expect(page.getByRole('region', { name: 'Run detail' })).toBeVisible();
-      await shot('run-with-otto');
-      await page.goto('/#/proof');
-      await page.locator('.pack-item').first().click();
-      await expect(page.locator('.badges-row')).toBeVisible();
-      await shot('proof');
       await page.goto('/#/loops');
       await expect(page.locator('.loop-card')).toHaveCount(12);
       await shot('loops');
     });
   }
-});
-
-test('Mission Control: keyboard switches view tabs with focus', async ({ page }) => {
-  await workspace(page);
-  await page.goto('/#/mission-control');
-  const list = page.getByRole('tab', { name: 'List', exact: true });
-  await list.focus();
-  await page.keyboard.press('ArrowRight');
-  const graph = page.getByRole('tab', { name: 'Graph', exact: true });
-  await expect(graph).toHaveAttribute('aria-selected', 'true');
-  await expect(graph).toBeFocused();
-  await page.keyboard.press('Home');
-  await expect(list).toBeFocused();
 });
 
 test('agent detail: RTL arrow keys follow visual tab direction', async ({ page }) => {
@@ -319,24 +261,4 @@ test('goal research flow: draft, edit, launch and inspect within a phone viewpor
   await expect(page.getByRole('heading', { name: 'Research release options', exact: true })).toBeVisible();
   await expectNoHorizontalOverflow(page);
   await page.screenshot({ path: '/tmp/otto-ux-r2-automation-screens/phone-goal-detail.png' });
-});
-
-test('proof: optional successes never count as completed requirements', async ({ page }) => {
-  const id = await workspace(page);
-  const { ctx, base } = await apiCtx();
-  const pack = await (await ctx.post(`${base}/api/v1/workspaces/${id}/proof-packs`, { data: { work_item_kind: 'manual', work_item_id: `contract-${Date.now()}`, title: 'Incomplete required evidence' } })).json();
-  const detail = await (await ctx.get(`${base}/api/v1/proof-packs/${pack.id}`)).json();
-  await ctx.dispose();
-  detail.done_contract = {
-    score: 58, satisfied: 3, required: 3,
-    items: [
-      { key: 'diff', label: 'Code diff captured', required: true, satisfied: true, weight: 1, detail: 'diff present' },
-      { key: 'tests', label: 'Tests passed', required: true, satisfied: false, weight: 1, detail: 'no passing recognized test' },
-      { key: 'failures', label: 'No failed evidence', required: true, satisfied: true, weight: 1, detail: 'nothing failing' },
-      { key: 'review', label: 'Agent self-review', required: false, satisfied: true, weight: 1, detail: 'self-review present' },
-    ],
-  };
-  await page.route(`**/api/v1/proof-packs/${pack.id}`, r => r.fulfill({ json: detail }));
-  await page.goto('/#/proof');
-  await expect(page.getByRole('region', { name: 'Done contract' }).getByText('2/3 required met')).toBeVisible();
 });

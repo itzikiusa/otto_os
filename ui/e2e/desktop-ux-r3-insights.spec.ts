@@ -1,5 +1,4 @@
 import { test, expect } from '@playwright/test';
-import { assistantState, mockAssistant } from './assistant-fixture';
 import { apiCtx, seedWorkspace } from './seed';
 type BudgetFixture = { enforce: boolean; block_on_exceed: boolean; window_days: number; providers: { provider: string; monthly_usd: number }[]; workspaces: { workspace_id: string; monthly_usd: number }[] };
 test.use({ serviceWorkers: 'block', actionTimeout: 10_000 });
@@ -22,30 +21,6 @@ test('Insights waits for the requested period when another scheduled report arri
   phase = 2;
   await expect(page.getByTestId('insight-report')).toContainText('Requested daily result', { timeout: 10_000 });
   await expect(page.getByRole('button', { name: 'Run now', exact: true })).toBeEnabled();
-});
-
-test('Assistant failed send preserves a newer draft and protects thread navigation', async ({ page }) => {
-  await mockAssistant(page, assistantState());
-  let release!: () => void;
-  await page.route('**/api/v1/assistant/threads/th-personal/turns', async r => {
-    if (r.request().method() !== 'POST') return r.fallback();
-    await new Promise<void>(resolve => { release = resolve; });
-    return r.fulfill({ status: 503, json: { code: 'upstream', message: 'Synthetic send failure' } });
-  });
-  await page.goto('/#/assistant');
-  const input = page.getByRole('textbox', { name: 'Message Otto' });
-  await input.fill('Original message'); await input.press('Enter');
-  await expect.poll(() => !!release).toBe(true);
-  await input.fill('Newer draft while sending'); release();
-  // The composer's error line has no live role; it is spoken via the announcer.
-  await expect(page.locator('.composer .err')).toContainText('Couldn’t send');
-  await expect(page.getByTestId('announcer-assertive')).toContainText('Couldn’t send');
-  await expect(input).toHaveValue('Original message\n\nNewer draft while sending');
-  await page.getByRole('tab', { name: /^Tasks/ }).click();
-  await expect(page.getByRole('dialog')).toContainText('Discard unsaved changes?');
-  await page.getByRole('button', { name: 'Keep editing', exact: true }).click();
-  await expect(input).toHaveValue(/Newer draft/);
-  await page.screenshot({ path: '/tmp/otto-ux-screenshots/insights-r3-chat-recovery.png' });
 });
 
 test('Usage rejects an invalid window and guards a newer budget draft on navigation', async ({ page }) => {
@@ -97,78 +72,6 @@ test('Insights regeneration cannot be overwritten by an earlier summary response
   await page.waitForTimeout(300);
   await expect(page.getByTestId('insight-report')).toContainText('Current result.');
   await expect(page.getByTestId('insight-report')).not.toContainText('Old generation body.');
-});
-
-test('Assistant phone attachment recovery shows the full identity and model pin retries', async ({ page }) => {
-  const state = assistantState();
-  await mockAssistant(page, state);
-  await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto('/#/assistant/th-personal');
-  await expect(page.getByRole('textbox', { name: 'Message Otto' })).toBeVisible();
-  const longName = 'synthetic-review-for-september-with-complete-customer-identity-final-approved-version.txt';
-  state.fail['/assistant/threads/th-personal/attachments'] = 503;
-  await page.locator('input[type=file]').setInputFiles({ name: longName, mimeType: 'text/plain', buffer: Buffer.from('synthetic') });
-  await expect(page.locator('.composer .err')).toContainText('Couldn’t attach');
-  delete state.fail['/assistant/threads/th-personal/attachments'];
-  await page.locator('input[type=file]').setInputFiles({ name: longName, mimeType: 'text/plain', buffer: Buffer.from('synthetic') });
-  await expect(page.locator('.fname')).toHaveText(longName);
-  await expect(page.locator('.composer .err')).toHaveCount(0);
-  await expect.poll(() => page.locator('.fname').evaluate(e => e.scrollWidth <= e.clientWidth)).toBe(true);
-  await page.screenshot({ path: '/tmp/otto-ux-screenshots/insights-r3-attachment-phone.png' });
-  await page.getByRole('button', { name: `Remove ${longName}`, exact: true }).click();
-  await expect(page.locator('.fname')).toHaveCount(0);
-  await page.getByTestId('model-chip').click();
-  const sheet = page.getByRole('dialog', { name: 'Model for this thread' });
-  state.fail['/assistant/threads/th-personal/route'] = 503;
-  await sheet.getByRole('button', { name: 'Codex', exact: true }).click();
-  await sheet.getByRole('button', { name: 'Pin to thread' }).click();
-  await expect(sheet.locator('.err')).toContainText('Couldn’t pin');
-  delete state.fail['/assistant/threads/th-personal/route'];
-  await sheet.getByRole('button', { name: 'Pin to thread' }).click();
-  await expect(sheet).toHaveCount(0);
-  await expect(page.getByTestId('model-chip')).toContainText('Codex');
-});
-
-test('Memory discard branch and delayed thread load preserve the newly selected thread', async ({ page }) => {
-  await mockAssistant(page, assistantState());
-  let release!: () => void;
-  await page.route('**/api/v1/assistant/threads/th-personal/turns*', async r => { await new Promise<void>(resolve => { release = resolve; }); return r.fulfill({ json: assistantState().turns['th-personal'] }); });
-  await page.goto('/#/assistant/memory');
-  await page.getByLabel('Profile (markdown)').fill('Discard this synthetic edit');
-  await page.getByRole('tab', { name: 'Chat', exact: true }).click();
-  await page.getByRole('button', { name: 'Discard', exact: true }).click();
-  await expect.poll(() => !!release).toBe(true);
-  await page.getByRole('button', { name: /02 Work/ }).click();
-  await expect(page.getByTestId('assistant-thread')).toContainText('Two PRs');
-  release();
-  await expect(page.getByTestId('assistant-thread')).not.toContainText('Three good fits');
-  await page.getByRole('tab', { name: 'Memory', exact: true }).click();
-  await expect(page.getByLabel('Profile (markdown)')).not.toHaveValue('Discard this synthetic edit');
-});
-
-test('History provider change ignores older pagination and exposes the full selected title on phone', async ({ page }) => {
-  const row = { session_id: null, provider: 'claude', title: 'Synthetic history initial', first_prompt: 'Review the design', cwd: '/tmp/synthetic-history', repo_name: 'Synthetic', started_at: new Date().toISOString(), last_active_at: new Date().toISOString(), turns: 2, status: 'on_disk', transcript_path: '/tmp/current.jsonl', resumable: true };
-  const title = 'Synthetic final design review covering the complete September release and remaining accessibility decisions';
-  let release!: () => void;
-  await page.route('**/api/v1/workspaces/*/history/page?*', async r => {
-    const query = new URL(r.request().url()).searchParams;
-    if (query.has('cursor')) { await new Promise<void>(resolve => { release = resolve; }); return r.fulfill({ json: { entries: [{ ...row, title: 'Old paginated Claude result', transcript_path: '/tmp/older.jsonl' }], next_cursor: null } }); }
-    return r.fulfill({ json: query.get('provider') === 'codex' ? { entries: [{ ...row, title, provider: 'codex', transcript_path: '/tmp/codex.jsonl' }], next_cursor: null } : { entries: [row], next_cursor: 'older' } });
-  });
-  await page.route('**/api/v1/workspaces/*/history/transcript?*', r => r.fulfill({ json: { session_id: null, provider: 'codex', title, cwd: '/tmp/synthetic-history', model: null, cursor: '', has_earlier: false, turns: [], stats: { turns: 0, tool_calls: 0, cost_usd: null, input_tokens: null, output_tokens: null, duration_ms: null, reasoning_steps: 0, thinking_steps: 0, unknown_records: 0 }, subagents: [], unavailable_reason: null } }));
-  await page.goto('/#/history');
-  await page.getByRole('button', { name: 'Load older conversations' }).click();
-  await expect.poll(() => !!release).toBe(true);
-  await page.getByRole('combobox', { name: 'Provider', exact: true }).selectOption('codex');
-  await expect(page.getByTestId('history-row')).toHaveCount(1);
-  await expect(page.getByTestId('history-row')).toContainText(title);
-  release();
-  await expect(page.getByText('Old paginated Claude result', { exact: true })).toHaveCount(0);
-  await page.setViewportSize({ width: 390, height: 844 });
-  const selectedTitle = page.locator('.hdetail .dfull');
-  await expect(selectedTitle).toHaveText(title);
-  await expect.poll(() => selectedTitle.evaluate(e => e.scrollWidth <= e.clientWidth)).toBe(true);
-  await page.screenshot({ path: '/tmp/otto-ux-screenshots/insights-r3-history-phone.png' });
 });
 
 test('Insights regeneration retains current metrics when an old index arrives late', async ({ page }) => {

@@ -45,18 +45,12 @@ import type {
   NewTranscriptReq,
   PublishAsRfcReq,
   PublishAsStoryReq,
-  ToSwarmReq,
-  ToSwarmResp,
   ProductAttachment,
   UploadAttachmentReq,
   TreeKind,
   CreateChildReq,
 } from '../api/types/product';
 import type {
-  DiscoverReq,
-  DiscoverResp,
-  DiscoveryRunSummary,
-  DiscoveryRunDetail,
   MockupAnnotation,
   RefinementThread,
   RefinementThreadDetail,
@@ -830,19 +824,6 @@ class ProductStore {
     await api.post(`/workspaces/${wsId}/product/stories/${id}/plan`, { body_md });
   }
 
-  /**
-   * Plan → Swarm: create a swarm project from this story (seeding tasks from its
-   * plan) and return the created swarm/project so the caller can navigate to the
-   * Kanban board. Refreshes the detail so the linked-project badge appears.
-   */
-  async sendToSwarm(req: ToSwarmReq = {}): Promise<ToSwarmResp> {
-    const current = this.owner();
-    const id = this.storyId();
-    const resp = await api.post<ToSwarmResp>(`/product/stories/${id}/to-swarm`, req);
-    if (current()) await this.loadDetail();
-    return resp;
-  }
-
   // ── Attachments ────────────────────────────────────────────────────────────
 
   async listAttachments(): Promise<ProductAttachment[]> {
@@ -1081,22 +1062,6 @@ class ProductStore {
     patch: { kind?: string; filename?: string },
   ): Promise<ProductAttachment> {
     return api.patch<ProductAttachment>(`/product/attachments/${aid}`, patch);
-  }
-
-  // ── Discovery ──────────────────────────────────────────────────────────────
-
-  async discover(req: DiscoverReq = {}): Promise<DiscoverResp> {
-    const id = this.storyId();
-    return api.post<DiscoverResp>(`/product/stories/${id}/discover`, req);
-  }
-
-  async listDiscoveryRuns(): Promise<DiscoveryRunSummary[]> {
-    const id = this.storyId();
-    return api.get<DiscoveryRunSummary[]>(`/product/stories/${id}/discovery-runs`);
-  }
-
-  async getDiscoveryRun(rid: string): Promise<DiscoveryRunDetail> {
-    return api.get<DiscoveryRunDetail>(`/product/discovery-runs/${rid}`);
   }
 
   // ── Refinement threads ─────────────────────────────────────────────────────

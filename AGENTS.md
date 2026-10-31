@@ -59,7 +59,7 @@ Otto.app (Tauri / otto-desktop)
 | `otto-improve` | Self-improvement engine |
 | `otto-insights` | Insights — opt-in catch-up scheduler + reports/config/run API that runs the `insights` skill in a headless agent session (behind `InsightsCtx`) |
 | `otto-context` | Context assembly |
-| `otto-assistant` | Personal Assistant (threads, tasks, memory, routing, limits) + Personal Agents engine & scheduler, behind an `AssistantCtx` trait (routes, read-only agent policy and activity feed stay in `otto-server`) |
+| `otto-assistant` | Personal Agents engine & scheduler (personas, schedules, agent rooms, memory), behind an `AssistantCtx` trait (routes, read-only agent policy and activity feed stay in `otto-server`) |
 | `otto-memory` | Workspace-scoped agent knowledge store (keyword/FTS5 recall; no embeddings) |
 | `otto-vault` | Vault docs home — file-backed Obsidian-parity markdown vaults + OKF (derived SQLite index: notes, links, tags, FTS, graph) |
 | `otto-canvas` | Canvas scene CRUD (file-backed visual scenes) + the agent-assist engine (`assist.rs`; the host hands over its SessionManager via `CanvasAssistCtx::sessions`; the turn runs in the shared assist job) |
@@ -67,19 +67,17 @@ Otto.app (Tauri / otto-desktop)
 | `otto-design-assist` | Design Hall agent-assist engine — assist turns, variants, learned team rules (the host hands over its SessionManager via `DesignAssistCtx::sessions`; the turn runs in the shared assist job; keeps `otto-design` free of session/agent deps) |
 | `otto-mcp` | MCP Control Plane — outbound MCP client + the governance pipeline every governed tool call funnels through; `outward/` holds the outward `otto.*` tool catalog, policy lists, `route_for` self-call map and the MCP HTTP JSON-RPC framing (server glue: `otto-server`'s `mcp_outward` / `mcp_http`) |
 | `otto-workflows` | Workflow engine pieces with no server dependency — node catalog, graph validation, retry policy, loop checkpoints, run context files, `prepare_context` helpers, chat + event triggers — behind the `WorkflowCtx` trait (the executor itself is still `otto-server/src/workflow_engine.rs`) |
-| `otto-workgraph` | Mission Control work-graph service (persist + audit + broadcast; projection lives in `otto-server`) |
 | `otto-usage` | Embedded ClickHouse usage/metrics |
-| `otto-transcript` | The one parser for the agent CLIs' on-disk transcripts (Claude Code, Codex, …): the usage store's per-line token parsers + cursor stores, and the conversation-view fold into a normalized transcript |
+| `otto-transcript` | The one parser for the agent CLIs' on-disk transcripts (Claude Code, Codex, Antigravity): the usage store's per-line token parsers + cursor stores, and the conversation-view fold into a normalized transcript |
 | `otto-telemetry` | Instrumentation leaf: span context, `measure`/`scope` and the `SpanSink` trait (no collector, no otto-usage) |
 | `otto-telemetry-collector` | The daemon's `TelemetryService` (implements `SpanSink`), collector, schema and analysis; otto-server/ottod link it under the dependency name `otto-telemetry` |
 | `otto-skills` | Bundled, versioned skill library |
-| `otto-product` | Product Story Analysis — Jira/Confluence story workflows, the analysis/rewrite/test/plan runners, story watcher, discovery chat, refinement, attachments/annotations, design formats, Product↔Swarm (host hooks via `ProductCtx` / `ProductRunHost` / `ProductStudioHost`) |
-| `otto-swarm` | Agent Swarm — role agents, org tree, CRUD router, and the orchestration runtime (Coordinator, turn runner, scheduler, verifier, channel triggers) behind the `SwarmHost` trait otto-server implements |
+| `otto-product` | Product Story Analysis — Jira/Confluence story workflows, the analysis/rewrite/test/plan runners, story watcher, discovery chat, refinement, attachments/annotations, design formats (host hooks via `ProductCtx` / `ProductRunHost` / `ProductStudioHost`) |
 | `otto-agent-run` | Agent-run primitives for PTY-driven CLI agents: result-file watcher + recovery (`agent_run`), transcript turn oracle, off-runtime blocking IO, the retrying fan-out runner (`fanout`, `fanout::retry`), the shared assist job (`assist`: `AssistTarget` / `run_assist_job`) and resume authority (`session_turn::resume`) |
 | `otto-review` | Multi-agent code-review engine — reviewer sessions, managed summarizer + deterministic fallback, and the pure core (diff render/caps, configs/budgets, lens expansion, prompts, draft parsing); routes + ctx-bound orchestration stay in `otto-server` |
 | `otto-automation` | Scheduled Tasks (cadence, 60 s supervisor, run engine, report delivery) + Goal Loops controller, behind the `AutomationCtx` trait (otto-server's impl: `src/automation_ctx.rs`) |
-| `otto-rooms` | Session rooms + game rooms domain — capability registries, room actions, recap capture/archive/engines, the session-authority sync and per-room maintenance, ICE/TURN settings — behind the `RoomsCtx` trait (otto-server's impl: `src/rooms/ctx.rs`; the handlers, WS upgrades and socket run loops stay in `otto-server`) |
-| `otto-server` | Axum routes wiring the crates together; also hosts the code-review routes + orchestration, the rooms/game-rooms routes and sockets only (domain in `otto-rooms`), workflow engine & plugin supervisor. `boot/` is the daemon composition root (`open_state` → `build_ctx` → recovery → `spawn_background`; `ServerCtx::from_parts` is the one context literal, shared with `ServerCtx::for_tests`) |
+| `otto-rooms` | Session rooms domain — capability registries, room actions, recap capture/archive/engines, the session-authority sync and per-room maintenance, ICE/TURN settings — behind the `RoomsCtx` trait (otto-server's impl: `src/rooms/ctx.rs`; the handlers, WS upgrades and socket run loops stay in `otto-server`) |
+| `otto-server` | Axum routes wiring the crates together; also hosts the code-review routes + orchestration, the session-rooms routes and sockets (domain in `otto-rooms`), workflow engine & plugin supervisor. `boot/` is the daemon composition root (`open_state` → `build_ctx` → recovery → `spawn_background`; `ServerCtx::from_parts` is the one context literal, shared with `ServerCtx::for_tests`) |
 | `ottod` | The daemon binary: process setup, single-instance lock, listeners, shutdown; drives `otto_server::boot` |
 
 > The Tauri desktop shell lives in `apps/desktop/src-tauri` and is a **separate,
@@ -89,20 +87,21 @@ Otto.app (Tauri / otto-desktop)
 
 ### UI module areas (`ui/src/modules/`)
 
-`agents`, `api` (REST client), `assistant` (Personal Assistant), `aws` (AWS
-console), `brokers` (Kafka viewer), `browser`, `canvas`,
-`connections`, `database` (Database Explorer), `design-hall` (Design Hall:
-lobby, artifact view, brand kit, learning log), `desktop` (menu-bar tray
-pages), `git`, `help`, `home` (personal
-dashboard of live boxes), `insights`, `kubernetes` (Kubernetes console),
-`loops` (goal loops), `mcp` (MCP control plane), `mission-control`, `panels`,
-`personal-agents`, `plugins`, `product`, `proof` (proof packs), `rooms`
-(session rooms), `run-with-otto`,
-`scheduled-tasks`, `settings`, `share` (remote/mobile), `skills-eval`,
-`skills-lab`, `snip` (snipping tool), `swarm`, `usage`, `vault` (docs home),
-`workbench`, `workflows`. Shared code lives in `ui/src/lib/`
-(`api/`, `components/`, `stores/`); the app shell is `ui/src/shell/` +
-`ui/src/App.svelte`.
+`agents`, `api` (REST client), `aws` (AWS console), `brokers` (Kafka viewer),
+`browser`, `canvas`, `connections`, `database` (Database Explorer),
+`design-hall` (Design Hall: lobby, artifact view, brand kit, learning log —
+embedded under unified `Product`), `desktop` (menu-bar tray & floating bar
+pages), `git`, `help`, `home` (personal dashboard of live boxes), `insights`,
+`kubernetes` (Kubernetes console), `loops` (goal loops), `mcp` (MCP control
+plane), `panels`, `personal-agents` (embedded under unified `Scheduled Tasks`),
+`plugins`, `product` (unified Stories · Designs · Learnings hub), `rooms`
+(session rooms), `scheduled-tasks` (unified Tasks · Agents · Agent channels
+hub), `settings`, `share` (remote/mobile), `skills-eval`, `skills-lab`, `snip`
+(snipping tool), `threads` (experimental inbox-style conversational workspace:
+multi-session splits, file viewer, inspector, session-to-session relay),
+`usage`, `vault` (docs home), `workbench`, `workflows`. Shared code lives in
+`ui/src/lib/` (`api/`, `components/`, `stores/`); the app shell is
+`ui/src/shell/` + `ui/src/App.svelte`.
 
 ## Build & test commands
 

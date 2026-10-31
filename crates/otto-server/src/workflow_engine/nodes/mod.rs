@@ -29,7 +29,6 @@ pub(super) mod prepare_context;
 pub(super) mod product;
 pub(super) mod review_run;
 pub(super) mod self_improve;
-pub(super) mod swarm_task;
 pub(super) mod verifier;
 
 /// The arguments of one `execute_node` call, bundled so every node kind takes
@@ -155,15 +154,6 @@ pub(in crate::workflow_engine) async fn dispatch(
         // node errors. If the deadline expires the node errors with
         // "approval timed out".
         "human_approval" => human_approval::execute(call).await,
-
-        // --- Swarm Task (wired) ---------------------------------------------
-        // Enqueues a new task in a named Swarm project.  The swarm coordinator
-        // picks it up on its next tick.
-        // `params.swarm_id`    — the SwarmService swarm id.
-        // `params.project_id`  — the SwarmProject id.
-        // `params.title`       — task title (supports {key} substitution).
-        // `params.description` — optional task body.
-        "swarm_task" => swarm_task::execute(call).await,
 
         // --- API Run --------------------------------------------------------
         // Share the API client's environment, auth, transport and history path.

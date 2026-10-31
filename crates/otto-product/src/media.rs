@@ -590,7 +590,7 @@ pub async fn publish_content(
             previous,
             &relative,
             bytes.len() as i64,
-            &otto_core::proof::bytes_sha256(bytes),
+            &otto_core::text::bytes_sha256(bytes),
             conditional,
             meta_json,
         )

@@ -23,7 +23,7 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use otto_assistant::assistant::tasks::AgentOwnership;
+use otto_assistant::personal_agents_engine::{agent_ownership, AgentOwnership};
 use otto_core::api::CreateSessionReq;
 use otto_core::domain::{SessionKind, User, WorkspaceRole};
 use otto_core::event::Event;
@@ -314,8 +314,7 @@ async fn require_agent_owner(
     agent: &PersonalAgent,
     changed: &[&str],
 ) -> Result<(), ApiError> {
-    // One predicate with assistant delegation (access-control-5-03).
-    let ownership = otto_assistant::assistant::tasks::agent_ownership(agent, &user.id);
+    let ownership = agent_ownership(agent, &user.id);
     if changed.is_empty() || ownership == AgentOwnership::Owner {
         return Ok(());
     }

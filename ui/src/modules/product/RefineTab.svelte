@@ -1,14 +1,7 @@
 <script lang="ts">
   import { rel } from '../../lib/stores/now.svelte';
-  // RefineTab — left: list of refinement threads with "New thread" / "New from
-  // discovery run…" controls, in a shared ListPane; right: RefineChat for the
-  // selected thread. Mirrors DiscoveryTab for the list+detail layout and
-  // PlanTab for the <select> idiom.
-  //
-  // Doesn't use ListPane's `empty` snippet: the discovery-run picker must stay
-  // visible even with zero threads, so the loading/error/empty/rows branching
-  // all lives in `children` (unlike ChatTab/MockupsTab, whose empty state has
-  // nothing else to keep showing).
+  // RefineTab — left: list of refinement threads with "New thread" control, in a
+  // shared ListPane; right: RefineChat for the selected thread.
   import { untrack } from 'svelte';
   import { toastError } from '../../lib/toastError';
   import { product } from '../../lib/stores/product.svelte';
@@ -19,8 +12,7 @@
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { confirmer } from '../../lib/confirm.svelte';
-  import { runStatus } from '../../lib/status';
-  import type { RefinementThread, DiscoveryRunSummary } from './types';
+  import type { RefinementThread } from './types';
 
   // ── State ──────────────────────────────────────────────────────────────────
   let threads = $state<RefinementThread[]>([]);
@@ -29,10 +21,6 @@
   let loadError = $state<string | null>(null);
 
   let creating = $state(false);
-
-  // Discovery runs for the "New from discovery run…" picker
-  let discoveryRuns = $state<DiscoveryRunSummary[]>([]);
-  let selectedRunId = $state('');
 
   // ── Load on mount / story change ──────────────────────────────────────────
   $effect(() => {
@@ -44,11 +32,8 @@
       threads = [];
       activeTid = null;
       creating = false;
-      selectedRunId = '';
-      discoveryRuns = [];
     });
     void loadThreads();
-    void loadDiscoveryRuns();
   });
 
   async function loadThreads(): Promise<void> {
@@ -72,19 +57,6 @@
     }
   }
 
-  async function loadDiscoveryRuns(): Promise<void> {
-    const current = product.captureSelection();
-    try {
-      const loaded = await product.listDiscoveryRuns();
-      if (!current()) return;
-      discoveryRuns = loaded;
-    } catch {
-      if (!current()) return;
-      // Discovery runs are optional context — ignore errors here.
-      discoveryRuns = [];
-    }
-  }
-
   // ── Create new thread ──────────────────────────────────────────────────────
 
   async function createThread(): Promise<void> {
@@ -96,24 +68,6 @@
       if (!current()) return;
       threads = [newThread, ...threads];
       activeTid = newThread.id;
-    } catch (e) {
-      if (!current()) return;
-      toastError('Couldn’t create thread', e);
-    } finally {
-      if (current()) creating = false;
-    }
-  }
-
-  async function createFromRun(): Promise<void> {
-    const current = product.captureSelection();
-    if (!selectedRunId || creating) return;
-    creating = true;
-    try {
-      const newThread = await product.createRefinementThread({ discovery_run_id: selectedRunId });
-      if (!current()) return;
-      threads = [newThread, ...threads];
-      activeTid = newThread.id;
-      selectedRunId = '';
     } catch (e) {
       if (!current()) return;
       toastError('Couldn’t create thread', e);
@@ -166,39 +120,10 @@
       </button>
     {/snippet}
     {#snippet children()}
-      <!-- "New from discovery run…" picker (only when runs exist) — stays
-           visible regardless of the thread list's own state below. -->
-      {#if discoveryRuns.length > 0}
-        <div class="run-picker-row">
-          <select
-            class="picker"
-            bind:value={selectedRunId}
-            title="Seed the thread with a discovery run’s findings"
-          >
-            <option value="">New from discovery run…</option>
-            {#each discoveryRuns as dr (dr.run.id)}
-              <option value={dr.run.id}>
-                {rel(dr.run.created_at)} — {runStatus(dr.derived_status).label}
-              </option>
-            {/each}
-          </select>
-          <button
-            class="btn small"
-            onclick={createFromRun}
-            disabled={creating || !selectedRunId}
-            title="Create a thread seeded from the selected discovery run"
-          >
-            Create
-          </button>
-        </div>
-      {/if}
-
       {#if (loading || loadError) && threads.length === 0}
         <LoadState what="threads" variant="compact" loading={loading} error={loadError} empty onretry={() => void loadThreads()} />
       {:else if threads.length === 0}
-        <p class="empty-rail-hint">
-          {discoveryRuns.length > 0 ? 'No threads yet — use New thread or seed one from a discovery run above.' : 'No threads yet — use New thread above to start one.'}
-        </p>
+        <p class="empty-rail-hint">No threads yet — use New thread above to start one.</p>
       {:else}
         {#if loadError}
           <LoadState what="threads" variant="compact" loading={loading} error={loadError} onretry={() => void loadThreads()} />
@@ -248,7 +173,7 @@
         icon="comment"
         title={threads.length === 0 ? 'No refinement threads yet' : 'No thread open'}
         body={threads.length === 0
-          ? 'Start a New thread to refine this story with an agent — optionally seeded from a discovery run.'
+          ? 'Start a New thread to refine this story with an agent.'
           : 'Open a thread on the left, or start a New thread.'}
       />
     {/if}
@@ -271,28 +196,6 @@
     padding: 12px 10px;
     font-size: var(--fs-xs);
     color: var(--text-dim);
-  }
-
-  /* Discovery run picker */
-  .run-picker-row {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 6px 10px;
-    border-bottom: 1px solid var(--border);
-    flex-shrink: 0;
-  }
-  .picker {
-    flex: 1;
-    min-width: 0;
-    height: 26px;
-    padding: 0 4px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    background: var(--surface);
-    color: var(--text);
-    font-size: var(--fs-xs);
-    cursor: pointer;
   }
 
   /* Thread list */

@@ -5,6 +5,8 @@
   // see text arrive before the folded turn lands. Shown while the session is
   // working; hidden as soon as the last folded turn already contains the
   // draft's tail (the screen keeps showing finished text).
+  import { detectBlockDirection } from '../../../lib/textDirection';
+
   interface Props {
     text: string;
     /** Markdown of the last folded assistant text (dedupe against it). */
@@ -41,7 +43,7 @@
      chat announces the finished response instead (ConversationView). -->
 {#if visible}
   <div class="live-draft" data-live-draft>
-    <p class="draft" dir="auto">{shown}<span class="caret" aria-hidden="true"></span></p>
+    <p class="draft" dir={detectBlockDirection(shown)}>{shown}<span class="caret" aria-hidden="true"></span></p>
     <div class="draft-note">Live preview from the terminal</div>
   </div>
 {/if}
@@ -70,6 +72,7 @@
     font-size: var(--fs-m);
     line-height: 1.6;
     color: var(--text);
+    unicode-bidi: plaintext;
     text-align: start;
   }
   .caret {

@@ -136,16 +136,9 @@ fn app(pool: DbPool, user: User) -> Router {
         .route("/connections/{id}/open", post(ok))
         // Agents feature
         .route("/workspaces/{id}/sessions", get(ok))
-        // Swarm feature
-        .route("/workspaces/{id}/swarm/swarms", get(ok))
         // Personal documents: read-only grants cannot save memory/context.
         .route("/personal-agents/{id}/memory", get(ok).put(ok))
         .route("/personal-agents/{id}/context", get(ok).put(ok))
-        // Otto Assistant (Feature::Agents): reads View, writes Edit; the route
-        // preview is a POST read.
-        .route("/assistant/threads", get(ok).post(ok))
-        .route("/assistant/route/preview", post(ok))
-        .route("/assistant/agent/{tool}", post(ok))
         // Users / Settings (Admin)
         .route("/users", post(ok))
         .route("/settings", put(ok))
@@ -289,16 +282,6 @@ async fn db_view_user_cannot_touch_agents() {
 }
 
 #[tokio::test]
-async fn db_view_user_cannot_touch_swarm() {
-    let app = app_for(&[(Feature::Database, Capability::View)], false).await;
-    assert_eq!(
-        status(&app, Method::GET, "/api/v1/workspaces/w1/swarm/swarms").await,
-        StatusCode::FORBIDDEN,
-        "swarm needs Swarm:View"
-    );
-}
-
-#[tokio::test]
 async fn db_view_user_cannot_admin() {
     let app = app_for(&[(Feature::Database, Capability::View)], false).await;
     assert_eq!(
@@ -346,7 +329,6 @@ async fn root_passes_everything() {
         (Method::DELETE, "/api/v1/connections/c1"),
         (Method::POST, "/api/v1/connections/c1/open"),
         (Method::GET, "/api/v1/workspaces/w1/sessions"),
-        (Method::GET, "/api/v1/workspaces/w1/swarm/swarms"),
         (Method::POST, "/api/v1/users"),
         (Method::PUT, "/api/v1/settings"),
     ] {
@@ -382,37 +364,6 @@ async fn personal_document_viewer_cannot_save() {
         );
         assert_eq!(status(&editor, Method::PUT, path).await, StatusCode::OK);
     }
-}
-
-#[tokio::test]
-async fn assistant_routes_follow_the_agents_view_edit_ladder() {
-    let viewer = app_for(&[(Feature::Agents, Capability::View)], false).await;
-    assert_eq!(
-        status(&viewer, Method::GET, "/api/v1/assistant/threads").await,
-        StatusCode::OK
-    );
-    assert_eq!(
-        status(&viewer, Method::POST, "/api/v1/assistant/route/preview").await,
-        StatusCode::OK,
-        "the route preview is a read"
-    );
-    assert_eq!(
-        status(&viewer, Method::POST, "/api/v1/assistant/threads").await,
-        StatusCode::FORBIDDEN
-    );
-    assert_eq!(
-        status(&viewer, Method::POST, "/api/v1/assistant/agent/remember").await,
-        StatusCode::FORBIDDEN
-    );
-    let editor = app_for(&[(Feature::Agents, Capability::Edit)], false).await;
-    assert_eq!(
-        status(&editor, Method::POST, "/api/v1/assistant/threads").await,
-        StatusCode::OK
-    );
-    assert_eq!(
-        status(&editor, Method::POST, "/api/v1/assistant/agent/remember").await,
-        StatusCode::OK
-    );
 }
 
 #[tokio::test]

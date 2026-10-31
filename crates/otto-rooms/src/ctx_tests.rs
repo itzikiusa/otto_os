@@ -1,6 +1,6 @@
 //! The `RoomsCtx` seam, driven through a fake host: invite origins, the
 //! authority sync, the audit trail, ICE credentials and the maintenance pass.
-use crate::{authority, games, ice, lifecycle, Authority, RoomAudit, RoomRegistry, RoomsCtx};
+use crate::{authority, ice, lifecycle, Authority, RoomAudit, RoomRegistry, RoomsCtx};
 use otto_core::{api::*, secrets::SecretStore, Error, Result};
 use std::{
     collections::HashMap,
@@ -28,7 +28,6 @@ impl SecretStore for MemSecrets {
 #[derive(Clone)]
 struct Fake {
     rooms: Arc<RoomRegistry>,
-    games: Arc<games::Registry>,
     dir: PathBuf,
     secrets: Arc<dyn SecretStore>,
     settings: Arc<Mutex<HashMap<String, serde_json::Value>>>,
@@ -41,7 +40,6 @@ impl Fake {
     fn new() -> Self {
         Self {
             rooms: Arc::default(),
-            games: Arc::default(),
             dir: std::env::temp_dir(),
             secrets: Arc::new(MemSecrets::default()),
             settings: Arc::default(),
@@ -63,9 +61,6 @@ impl Fake {
 impl RoomsCtx for Fake {
     fn rooms(&self) -> &RoomRegistry {
         &self.rooms
-    }
-    fn game_rooms(&self) -> &games::Registry {
-        &self.games
     }
     fn data_dir(&self) -> &Path {
         &self.dir

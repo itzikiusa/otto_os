@@ -145,13 +145,6 @@ pub async fn put_tasks(
     // (`claude_ingest`/`codex_ingest`), which is unaffected by this check.
     let session = session_in_ws(&ctx, &wid, &sid).await?;
     require_session_owner_or_admin(&ctx, &user, &session).await?;
-    let prior_all_done = all_done(
-        &ctx.activity()
-            .repo()
-            .list_tasks(&sid)
-            .await
-            .unwrap_or_default(),
-    );
     let tasks: Vec<NewTask> = req
         .tasks
         .into_iter()
@@ -166,15 +159,6 @@ pub async fn put_tasks(
         .put_tasks(&sid, &wid, &tasks)
         .await
         .map_err(ApiError)?;
-    // Proof gate on the transition into all-complete (mirrors the ingest path),
-    // so a client/test driving tasks to done also gets evidence packaged.
-    if !prior_all_done && all_done(&tasks) {
-        let cx = ctx.clone();
-        let s = session.clone();
-        tokio::spawn(async move {
-            crate::proof::gate_session(&cx, &s).await;
-        });
-    }
     Ok(Json(tasks))
 }
 
@@ -289,14 +273,6 @@ pub async fn claude_ingest(
                     "tasks_done",
                 )
                 .await;
-                // Proof gate: an agent may not declare "done" without evidence.
-                // Assemble what we can (diff, optional tests) into a proof pack and
-                // surface its derived status. Backgrounded — never blocks ingest.
-                let cx = ctx.clone();
-                let s = session.clone();
-                tokio::spawn(async move {
-                    crate::proof::gate_session(&cx, &s).await;
-                });
             }
         }
     }
@@ -305,7 +281,6 @@ pub async fn claude_ingest(
     // same-titled board task; broadcasts the full list like a plan sync.
     if let Some(op) = norm.task_op {
         let prior = activity.repo().list_tasks(&sid).await.unwrap_or_default();
-        let prior_all_done = all_done(&prior);
         if let Ok(updated) = activity
             .repo()
             .upsert_task(&sid, &wid, &op.ext_id, op.title.as_deref(), op.status)
@@ -328,13 +303,6 @@ pub async fn claude_ingest(
                         detail: None,
                     })
                     .await;
-            }
-            if !prior_all_done && all_done(&updated) {
-                let cx = ctx.clone();
-                let s = session.clone();
-                tokio::spawn(async move {
-                    crate::proof::gate_session(&cx, &s).await;
-                });
             }
         }
     }

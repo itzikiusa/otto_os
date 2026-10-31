@@ -35,7 +35,7 @@ use otto_core::workflows::{
 };
 use otto_core::{Id, Result};
 use otto_dbviewer::QueryRequest;
-use otto_state::{swarm::NewTask as NewSwarmTask, WorkflowsRepo};
+use otto_state::WorkflowsRepo;
 use serde_json::{json, Value};
 
 use crate::state::ServerCtx;
@@ -1085,7 +1085,7 @@ fn spawn_recovery_delivery(
 ) {
     let (ctx, wf, nodes, input) = (ctx.clone(), wf.clone(), nodes.to_vec(), input.clone());
     tokio::spawn(async move {
-        deliver_run_result(&ctx, &wf, &nodes, status, None, &input, None).await;
+        deliver_run_result(&ctx, &wf, &nodes, status, &input, None).await;
     });
 }
 
@@ -2040,16 +2040,7 @@ async fn finalize_canceled_run(
             0
         }
     };
-    deliver_run_result(
-        ctx,
-        workflow,
-        states,
-        RunStatus::Canceled,
-        None,
-        input,
-        None,
-    )
-    .await;
+    deliver_run_result(ctx, workflow, states, RunStatus::Canceled, input, None).await;
     emit_run_updated(
         ctx,
         &workflow.workspace_id,
@@ -2083,123 +2074,12 @@ async fn kill_run_sessions(ctx: &ServerCtx, states: &[NodeRunState]) {
     }
 }
 
-/// Assemble the proof pack for a completed workflow run: each node's output is a
-/// `log` artifact (status from the node status), a `human_approval` node becomes
-/// an `approval` artifact (passed iff approved), and the run's approval metadata
-/// is captured. Best-effort.
-async fn assemble_workflow_proof(
-    ctx: &ServerCtx,
-    workflow: &Workflow,
-    run_id: &Id,
-    states: &[NodeRunState],
-) -> Option<String> {
-    use otto_core::proof::{ProofArtifactKind as K, ProofArtifactStatus as S, WorkItemKind};
-    use sqlx::Row;
-
-    let pack = match crate::proof::gate(
-        ctx,
-        WorkItemKind::WorkflowRun,
-        run_id,
-        &workflow.workspace_id,
-        &workflow.name,
-        "otto",
-    )
-    .await
-    {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::debug!(run = %run_id, "workflow proof gate failed: {e}");
-            return None;
-        }
-    };
-
-    // Approval fields live on the `workflow_runs` row, not the `WorkflowRun`
-    // struct (added by migration 0058).
-    let arow = sqlx::query(
-        "SELECT approved_by, approval_note, approved_at FROM workflow_runs WHERE id = ?",
-    )
-    .bind(run_id)
-    .fetch_optional(&ctx.pool)
-    .await
-    .ok()
-    .flatten();
-    let approved_by: Option<String> = arow.as_ref().and_then(|r| r.try_get("approved_by").ok());
-    let approval_note: Option<String> = arow.as_ref().and_then(|r| r.try_get("approval_note").ok());
-    let approved_at: Option<String> = arow.as_ref().and_then(|r| r.try_get("approved_at").ok());
-
-    let mut state_by_id = std::collections::HashMap::new();
-    for s in states {
-        state_by_id.insert(s.node_id.as_str(), s);
-    }
-
-    for node in &workflow.graph.nodes {
-        let st = state_by_id.get(node.id.as_str()).copied();
-        let node_status = st.map(|s| s.status);
-        let title = if node.name.is_empty() {
-            node.kind.clone()
-        } else {
-            format!("{}: {}", node.kind, node.name)
-        };
-
-        if node.kind == "human_approval" {
-            let approved = approved_by.is_some();
-            let astatus = if approved { S::Passed } else { S::Failed };
-            let body = if approved {
-                format!("Approved by {}", approved_by.clone().unwrap_or_default())
-            } else {
-                "Not approved".to_string()
-            };
-            let meta = json!({
-                "approved_by": approved_by, "approval_note": approval_note,
-                "approved_at": approved_at, "node_id": node.id,
-            });
-            let _ = crate::proof::upsert_content_artifact(
-                ctx,
-                &pack,
-                K::Approval,
-                &title,
-                &body,
-                astatus,
-                meta,
-                "otto",
-            )
-            .await;
-        } else {
-            let art_status = match node_status {
-                Some(NodeStatus::Success) => S::Passed,
-                Some(NodeStatus::Error) => S::Failed,
-                _ => S::Info,
-            };
-            let content = st
-                .and_then(|s| s.output.as_ref())
-                .map(|o| serde_json::to_string_pretty(o).unwrap_or_default())
-                .unwrap_or_else(|| "(no output)".to_string());
-            let meta = json!({ "node_kind": node.kind, "node_id": node.id });
-            let _ = crate::proof::upsert_content_artifact(
-                ctx,
-                &pack,
-                K::Log,
-                &title,
-                &content,
-                art_status,
-                meta,
-                "otto",
-            )
-            .await;
-        }
-    }
-
-    let _ = crate::proof::recompute_and_emit(ctx, &pack.id).await;
-    Some(pack.id)
-}
-
 /// Build a `(brief, full_markdown)` summary of a finished run. `brief` is the
 /// short chat message; `full_markdown` is the attached `summary.md`.
 fn build_run_summary(
     workflow: &Workflow,
     states: &[NodeRunState],
     status: RunStatus,
-    proof_pack_id: Option<&str>,
 ) -> (String, String) {
     let emoji = match status {
         RunStatus::Success => "✅",
@@ -2233,12 +2113,9 @@ fn build_run_summary(
     let score_line = score
         .map(|sc| format!("\n*Review score:* {sc}/100"))
         .unwrap_or_default();
-    let proof_line = proof_pack_id
-        .map(|p| format!("\n*Proof pack:* `{p}`"))
-        .unwrap_or_default();
 
     let brief = format!(
-        "{emoji} *{}* — {}\n{counts}{score_line}{proof_line}\n_Full summary attached (summary.md)._",
+        "{emoji} *{}* — {}\n{counts}{score_line}\n_Full summary attached (summary.md)._",
         workflow.name,
         status.as_str(),
     );
@@ -2250,9 +2127,6 @@ fn build_run_summary(
     md.push_str(&format!("- **Steps:** {counts}\n"));
     if let Some(sc) = score {
         md.push_str(&format!("- **Review score:** {sc}/100\n"));
-    }
-    if let Some(p) = proof_pack_id {
-        md.push_str(&format!("- **Proof pack:** `{p}`\n"));
     }
     md.push_str("\n## Steps\n\n");
     for (i, s) in states.iter().enumerate() {
@@ -2312,7 +2186,6 @@ async fn deliver_run_result(
     workflow: &Workflow,
     states: &[NodeRunState],
     status: RunStatus,
-    proof_pack_id: Option<&str>,
     input: &Value,
     final_output: Option<&[u8]>,
 ) {
@@ -2343,7 +2216,7 @@ async fn deliver_run_result(
         return; // no origin to report back to (e.g. a manual UI run)
     }
 
-    let (brief, full) = build_run_summary(workflow, states, status, proof_pack_id);
+    let (brief, full) = build_run_summary(workflow, states, status);
     let brief = otto_core::redact::redact_text(&brief).value;
     // The attachment: the run's actual deliverable when it produced one (the
     // last content-bearing step's handoff, copied to final-output.md), else

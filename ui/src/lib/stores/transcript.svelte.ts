@@ -1,11 +1,10 @@
 // Conversation-view state (docs/design/conversation-view.md §3/§5.2): one
-// `Conversation` per source (session id, or an on-disk transcript path from the
-// History page), holding the folded transcript, paging ("Load earlier" via the
-// opaque `before` cursor) and the live tail fed by `transcript_appended`
-// deltas. Subagent bodies are fetched lazily (`?sub=`) and cached per parent.
-// Also owns the two persisted UI preferences: the global "Show system" toggle
-// and the per-session Terminal · Chat view (winKey-namespaced, like the rest of
-// the pane layout state).
+// `Conversation` per session id, holding the folded transcript, paging ("Load
+// earlier" via the opaque `before` cursor) and the live tail fed by
+// `transcript_appended` deltas. Subagent bodies are fetched lazily (`?sub=`)
+// and cached per parent. Also owns the two persisted UI preferences: the global
+// "Show system" toggle and the per-session Terminal · Chat view
+// (winKey-namespaced, like the rest of the pane layout state).
 import { api } from '../api/client';
 import { loadErrorText } from '../loadError';
 import { winKey } from '../win';
@@ -17,11 +16,8 @@ import type { Transcript, TranscriptTouchQuery, Turn, Artifact, OttoEvent } from
 // Reading
 // ---------------------------------------------------------------------------
 
-/** Where a conversation is read from: a live/known Otto session, or a raw
- *  transcript on disk that no session row claims (History `on_disk` rows). */
-export type TranscriptSource =
-  | { sessionId: string }
-  | { workspaceId: string; transcriptPath: string };
+/** Where a conversation is read from: a live or archived Otto session. */
+export type TranscriptSource = { sessionId: string };
 
 export interface TranscriptPage {
   /** Opaque cursor (exclusive) — page earlier than this turn. */
@@ -34,12 +30,12 @@ export interface TranscriptPage {
 
 /** Stable identity of a source — the store keys its per-conversation state by it. */
 export function sourceKey(src: TranscriptSource): string {
-  return 'sessionId' in src ? `s:${src.sessionId}` : `p:${src.workspaceId}:${src.transcriptPath}`;
+  return `s:${src.sessionId}`;
 }
 
-function qs(page: TranscriptPage, extra: Record<string, string | undefined> = {}): string {
+function qs(page: TranscriptPage): string {
   const p = new URLSearchParams();
-  for (const [k, v] of Object.entries({ ...extra, before: page.before, sub: page.sub })) {
+  for (const [k, v] of Object.entries({ before: page.before, sub: page.sub })) {
     if (v !== undefined && v !== '') p.set(k, v);
   }
   if (page.limit !== undefined) p.set('limit', String(page.limit));
@@ -52,14 +48,8 @@ export function fetchTranscript(
   page: TranscriptPage = {},
   signal?: AbortSignal,
 ): Promise<Transcript> {
-  if ('sessionId' in src) {
-    return api.get<Transcript>(
-      `/sessions/${encodeURIComponent(src.sessionId)}/transcript${qs(page)}`,
-      signal,
-    );
-  }
   return api.get<Transcript>(
-    `/workspaces/${encodeURIComponent(src.workspaceId)}/history/transcript${qs(page, { path: src.transcriptPath })}`,
+    `/sessions/${encodeURIComponent(src.sessionId)}/transcript${qs(page)}`,
     signal,
   );
 }
@@ -231,8 +221,8 @@ export class Conversation {
     return sourceKey(this.src);
   }
 
-  get sessionId(): string | null {
-    return 'sessionId' in this.src ? this.src.sessionId : null;
+  get sessionId(): string {
+    return this.src.sessionId;
   }
 
   /** True when the server resolved no transcript (chat shows the empty state). */
@@ -727,10 +717,6 @@ class TranscriptStore {
         (this.lifecycle.active(`s:${ev.session_id}`) ? this.convs.get(`s:${ev.session_id}`) : undefined)?.addArtifact(ev.artifact);
         return true;
       }
-      case 'history_index_progress':
-        // The History page (Track C) reads `historyIndex` below.
-        this.historyIndex = { scanned: ev.scanned, total: ev.total, done: ev.done };
-        return true;
       default:
         return false;
     }
@@ -786,9 +772,6 @@ class TranscriptStore {
       else sessionStorage.removeItem(key);
     } catch { /* In-memory drafts remain available. */ }
   }
-
-  /** Latest `history_index_progress` (null until the first event). */
-  historyIndex: { scanned: number; total: number; done: boolean } | null = $state(null);
 }
 
 export const transcript = new TranscriptStore();

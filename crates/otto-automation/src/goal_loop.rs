@@ -759,7 +759,7 @@ async fn controller_inner(ctx: impl AutomationCtx, loop_id: Id, handle: LoopHand
                 .update_iteration_status(&iter.id, "evaluating", false)
                 .await,
         );
-        let (mut eval, verify_caps) = evaluate(
+        let mut eval = evaluate(
             &ctx,
             &loop_,
             &iter.id,
@@ -870,51 +870,6 @@ async fn controller_inner(ctx: impl AutomationCtx, loop_id: Id, handle: LoopHand
         // ---- DECISION ----
         let all_met = !eval.criteria.is_empty() && eval.criteria.iter().all(|c| c.met);
         if eval.verdict == "achieved" && all_met {
-            // Package this iteration's evidence into a proof pack (diff, verify
-            // commands, self-review, criteria summary) and read back its derived
-            // status. Always attached — this is the "no done without evidence" record.
-            let proof_status =
-                assemble_goal_loop_proof(&ctx, &loop_, &eval, &verify_caps, &wt).await;
-            if stop_requested(&handle) {
-                continue;
-            }
-
-            // Teeth (opt-in via OTTO_PROOF_REQUIRE_GOAL_LOOP): refuse to finalize
-            // "achieved" without a passing machine-checked test, including the
-            // final iteration. Missing proof remains unmet when limits expire.
-            if crate::goal_loop_policy::missing_required_proof(
-                require_goal_loop_proof(),
-                proof_status,
-            ) {
-                if let Some(pe) = prior_eval.as_mut() {
-                    pe.feedback = format!(
-                        "{}\n\n[Otto proof] You reported the goal done but did not produce a passing, \
-                         machine-checked verification (test) command. Add one to an acceptance \
-                         criterion (verify_kind=command) or run your tests, then report done.",
-                        pe.feedback
-                    );
-                }
-                let _ = ctx.events().send(Event::Notice {
-                    level: "warn".into(),
-                    title: "Goal loop: proof required".into(),
-                    body:
-                        "Reported done without passing test evidence — continuing to gather proof."
-                            .into(),
-                });
-                clear_evaluation_continuation(&ctx, &loop_id).await;
-                continue;
-            }
-
-            if stop_requested(&handle) {
-                continue;
-            }
-            let proof_note = match proof_status {
-                Some(otto_core::proof::ProofStatus::Passed) => " Proof: passed.",
-                Some(otto_core::proof::ProofStatus::Partial) => {
-                    " Proof: partial (no machine-checked test)."
-                }
-                _ => "",
-            };
             if loop_.config.require_review {
                 let review = run_role(&ctx, &loop_, &iter.id, "Completion reviewer", &loop_.config.evaluator,
                     format!("{}\nIndependently review the final work against the goal. Report concrete unresolved defects. Return JSON {{\"approved\":true|false,\"findings\":[string]}}. Approve only when no material issue remains.", goal_context(&loop_)),
@@ -942,10 +897,7 @@ async fn controller_inner(ctx: impl AutomationCtx, loop_id: Id, handle: LoopHand
                     return;
                 }
             }
-            let summary = format!(
-                "Goal achieved in {idx} iteration(s). {}{}",
-                eval.rationale, proof_note
-            );
+            let summary = format!("Goal achieved in {idx} iteration(s). {}", eval.rationale);
             let _ = finalize(
                 &ctx,
                 &loop_id,
@@ -1484,7 +1436,7 @@ async fn evaluate(
     exec_summaries: &[String],
     per_phase_secs: u64,
     handle: &LoopHandle,
-) -> (GoalLoopEvaluation, Vec<VerifyCapture>) {
+) -> GoalLoopEvaluation {
     let prompt = format!(
         "{}\n\n{}\n\n## Executor results this iteration\n{}\n\nReply with ONLY a JSON object: {{\"progress_pct\": 0-100, \"verdict\": \"achieved|continue|blocked\", \"criteria\": [{{\"id\": string, \"met\": bool, \"evidence\": string}}], \"feedback\": string, \"rationale\": string}}. Include one entry per acceptance criterion. Provide concrete evidence for every met=true.",
         loop_.config.evaluator.prompt,
@@ -1508,9 +1460,7 @@ async fn evaluate(
         Err(e) => fallback_eval(&format!("evaluator turn failed: {e}")),
     };
 
-    // Ground-truth command criteria by exit code, capturing the output so the
-    // proof pack can keep each as a `command` test-evidence artifact.
-    let mut captures: Vec<VerifyCapture> = Vec::new();
+    // Ground-truth command criteria by exit code.
     for crit in &loop_.definition.acceptance_criteria {
         if stop_requested(handle) {
             break;
@@ -1535,7 +1485,6 @@ async fn evaluate(
                             "verify command failed"
                         },
                     );
-                    captures.push((crit.id.clone(), cmd.to_string(), run));
                 }
                 None => set_criterion(&mut eval, &crit.id, false, "verify command is missing"),
             }
@@ -1564,157 +1513,7 @@ async fn evaluate(
             eval.rationale
         );
     }
-    (eval, captures)
-}
-
-/// One captured verify-command run: (criterion id, command, run outcome).
-type VerifyCapture = (String, String, otto_core::proof::CmdRun);
-
-/// Whether to ENFORCE machine-checked test evidence before a goal loop may
-/// finalize "achieved". Opt-in (default off) — evidence is always packaged
-/// regardless; this only controls the hard block, which is bounded by the
-/// iteration cap when on.
-fn require_goal_loop_proof() -> bool {
-    std::env::var("OTTO_PROOF_REQUIRE_GOAL_LOOP")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
-}
-
-/// Assemble the proof pack for a successful goal-loop iteration and return its
-/// recomputed status. Each verify command becomes a `command` test artifact, the
-/// worktree diff a `diff` artifact, the evaluator's feedback a `self_review`, and
-/// the acceptance criteria a `review` summary. Best-effort.
-async fn assemble_goal_loop_proof(
-    ctx: &impl AutomationCtx,
-    loop_: &GoalLoop,
-    eval: &GoalLoopEvaluation,
-    verify_caps: &[VerifyCapture],
-    wt: &str,
-) -> Option<otto_core::proof::ProofStatus> {
-    use otto_core::proof::{ProofArtifactKind as K, ProofArtifactStatus as S, WorkItemKind};
-    let pack = ctx
-        .proof_gate(
-            WorkItemKind::GoalLoop,
-            &loop_.id,
-            &loop_.workspace_id,
-            &loop_.definition.title,
-            &loop_.created_by,
-        )
-        .await
-        .ok()?;
-
-    // Verify-command test artifacts (machine-checked evidence).
-    for (crit_id, cmd, run) in verify_caps {
-        let status = if run.success { S::Passed } else { S::Failed };
-        let meta = serde_json::json!({
-            "test_kind": "test", "criterion_id": crit_id,
-            "exit_code": run.exit_code, "duration_ms": run.duration_ms,
-        });
-        let _ = ctx
-            .proof_upsert_content_artifact(
-                &pack,
-                K::Command,
-                cmd,
-                &run.output,
-                status,
-                meta,
-                "otto",
-            )
-            .await;
-    }
-
-    // Working-tree diff vs the loop's base commit.
-    if loop_.config.mode == "research" {
-        if let Ok(report) =
-            tokio::fs::read_to_string(std::path::Path::new(wt).join("findings.md")).await
-        {
-            let _ = ctx
-                .proof_upsert_content_artifact(
-                    &pack,
-                    K::SelfReview,
-                    "Research findings",
-                    &report,
-                    S::Info,
-                    serde_json::json!({}),
-                    "otto",
-                )
-                .await;
-        }
-    } else if let Ok(diff) =
-        crate::goal_loop_workspace::capture_work(wt, loop_.base_commit.as_deref()).await
-    {
-        let parsed = otto_git::parse::parse_diff(&diff);
-        let meta = serde_json::json!({
-            "files_changed": parsed.files.len(),
-            "additions": parsed.files.iter().filter_map(|f| f.added).sum::<u32>(),
-            "deletions": parsed.files.iter().filter_map(|f| f.deleted).sum::<u32>(),
-            "includes_uncommitted": true,
-        });
-        let _ = ctx
-            .proof_upsert_content_artifact(
-                &pack,
-                K::Diff,
-                "Working tree diff",
-                &diff,
-                S::Info,
-                meta,
-                "otto",
-            )
-            .await;
-    }
-
-    // Self-review from the evaluator's feedback + rationale + per-criterion evidence.
-    let crit_lines: Vec<String> = eval
-        .criteria
-        .iter()
-        .map(|c| {
-            format!(
-                "- [{}] {}: {}",
-                if c.met { "x" } else { " " },
-                c.id,
-                c.evidence
-            )
-        })
-        .collect();
-    let selfreview = format!(
-        "Feedback: {}\n\nRationale: {}\n\nCriteria:\n{}",
-        eval.feedback,
-        eval.rationale,
-        crit_lines.join("\n")
-    );
-    let _ = ctx
-        .proof_upsert_content_artifact(
-            &pack,
-            K::SelfReview,
-            "Goal-loop self-review",
-            &selfreview,
-            S::Info,
-            serde_json::json!({}),
-            "otto",
-        )
-        .await;
-
-    // Acceptance-criteria review summary.
-    let unmet = eval.criteria.iter().filter(|c| !c.met).count();
-    let met = eval.criteria.len().saturating_sub(unmet);
-    let rev_status = if unmet == 0 { S::Passed } else { S::Failed };
-    let rev = format!("{met} of {} acceptance criteria met.", eval.criteria.len());
-    let _ = ctx
-        .proof_upsert_content_artifact(
-            &pack,
-            K::Review,
-            "Acceptance criteria",
-            &rev,
-            rev_status,
-            serde_json::json!({"met": met, "unmet": unmet}),
-            "otto",
-        )
-        .await;
-
-    ctx.proof_recompute_and_emit(&pack.id)
-        .await
-        .ok()
-        .map(|p| p.status)
+    eval
 }
 
 fn fallback_eval(reason: &str) -> GoalLoopEvaluation {

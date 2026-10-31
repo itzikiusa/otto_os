@@ -4,7 +4,6 @@
 
 pub mod activity;
 pub mod api_client;
-pub mod assistant;
 pub mod audit;
 pub mod aws_accounts;
 pub mod broker_audit;
@@ -45,11 +44,9 @@ pub mod plugins;
 pub mod product;
 pub mod product_attachments;
 pub mod product_chat;
-pub mod product_discovery;
 pub mod product_mockup;
 pub mod product_refinement;
 pub mod projects;
-pub mod proof;
 pub mod provider_accounts;
 pub mod provider_models;
 pub mod repo_rules;
@@ -58,32 +55,22 @@ pub mod retention;
 pub mod review_findings;
 pub mod review_proof_packs;
 pub mod reviews;
-pub mod runs;
-pub mod saved_views;
 pub mod scheduled_tasks;
 pub mod search;
 pub mod sessions;
 pub mod settings;
 pub mod skill_evals;
 pub mod skill_reviews;
-pub mod swarm;
-pub mod transcript_index;
 pub mod users;
 pub mod vault_docs_runs;
 pub mod workflow_triggers;
 pub mod workflows;
-pub mod workgraph;
 pub mod workspaces;
 
 pub use activity::{normalize_title, ActivityRepo, NewTask, NewTrail, PendingNudge};
 pub use api_client::{
     ApiClientRepo, NewApiAutomation, NewApiCollection, NewApiEnvironment, NewApiHistory,
     NewApiRequest,
-};
-pub use assistant::{
-    AssistantAttachment, AssistantRepo, AssistantRoutingRow, AssistantTask, AssistantThread,
-    AssistantTurn, NewTask as NewAssistantTask, NewThread as NewAssistantThread,
-    NewTurn as NewAssistantTurn,
 };
 pub use audit::{AuditRepo, NewAuditEntry};
 pub use aws_accounts::{AwsAccountPatch, AwsAccountRow, AwsAccountsRepo, NewAwsAccount};
@@ -114,13 +101,9 @@ pub use goal_loops::{GoalLoopsRepo, NewGoalLoop};
 pub use grants::{capability_for_role, GrantCache, GrantsRepo, GRANT_CACHE_TTL};
 pub use name_themes::{CustomTheme, NameThemesRepo};
 pub use pool::DbPool;
-pub use proof::{PackCursor, ProofBlob, ProofRepo, ProofSnapshotRow};
 pub use provider_models::{ProviderModel, ProviderModelsRepo};
 // The raw sqlx pool type, for callers that build their own (tests, tools);
 // daemon code holds a `DbPool`.
-pub use sqlx::SqlitePool;
-// NewRun/RunPatch/NewRunEvent are referenced via the `runs::` path downstream to
-// avoid colliding with swarm's `RunPatch`/`RunFilter` re-exports.
 pub use canvas::{
     CanvasRepo, CanvasScene, CanvasSceneSummary, CanvasSceneVersion, NewScene, SceneUpdate,
     SCENE_VERSIONS_KEPT, USER_SNAPSHOT_EVERY_SECS,
@@ -166,7 +149,6 @@ pub use product_chat::{
     DiscoveryChat, DiscoveryChatMessage, DiscoveryChatRepo, NewDiscoveryChat,
     NewDiscoveryChatMessage,
 };
-pub use product_discovery::{DiscoveryRun, NewDiscoveryRun, ProductDiscoveryRepo};
 pub use product_mockup::{AnnotationPatch, MockupAnnotation, NewAnnotation, ProductMockupRepo};
 pub use product_refinement::{
     NewRefinementMessage, NewRefinementThread, ProductRefinementRepo, RefinementMessage,
@@ -181,8 +163,6 @@ pub use review_findings::{
 };
 pub use review_proof_packs::ReviewProofPacksRepo;
 pub use reviews::{ReviewRunContext, ReviewsRepo};
-pub use runs::RunsRepo;
-pub use saved_views::{NewSavedView, SavedView, SavedViewsRepo};
 pub use scheduled_tasks::{
     FinishRun, NewRun as NewScheduledRun, NewScheduledTask, ScheduledTaskPatch, ScheduledTasksRepo,
 };
@@ -196,30 +176,14 @@ pub use settings::{
 };
 pub use skill_evals::{SkillEvalSummary, SkillEvalSummaryPage, SkillEvalsRepo};
 pub use skill_reviews::SkillReviewsRepo;
-pub use transcript_index::{TranscriptIndexRepo, TranscriptIndexRow};
-pub use vault_docs_runs::{VaultDocsRunRow, VaultDocsRunsRepo};
-// Note: `swarm::NewTask` collides with `activity::NewTask`; access it via the
-// module path (`otto_state::swarm::NewTask`). The rest are re-exported here.
-pub use swarm::{
-    merge_agent_schedule, AgentPatch, GoalPatch, NewAgent, NewGoal, NewMessage, NewProject, NewRun,
-    NewSwarm, NewTrigger, ProjectPatch, RunFilter, RunPatch, Swarm, SwarmAgent,
-    SwarmChannelTrigger, SwarmGoal, SwarmMessage, SwarmPatch, SwarmProject, SwarmRepo, SwarmRun,
-    SwarmTask, TaskPatch, TriggerPatch,
-};
+pub use sqlx::SqlitePool;
 pub use users::{UserRecord, UsersRepo};
+pub use vault_docs_runs::{VaultDocsRunRow, VaultDocsRunsRepo};
 pub use workflow_triggers::{NewWorkflowTrigger, TriggersRepo, WorkflowTrigger};
 pub use workflows::{RunHead, WorkflowsRepo};
-pub use workgraph::{
-    ApprovalStatus, ArtifactKind, CountBucket, EdgeRelation, EdgeView, GraphEdge, GraphNode,
-    GraphView, MissionFilter, MissionSummary, NewArtifact, NewWorkEvent, RiskLevel, UpsertResult,
-    WorkActor, WorkApproval, WorkArtifact, WorkEdge, WorkEvent, WorkGraphRepo, WorkItem,
-    WorkItemDetail, WorkItemUpsert, WorkKind, WorkStatus,
-};
 pub use workspaces::{Member, WorkspacesRepo};
 
 pub mod api_runs;
-
-pub mod history_page;
 
 pub mod workflow_progress;
 
@@ -232,3 +196,10 @@ pub use workbench::{
     NewWorkbenchDoc, WorkbenchAsset, WorkbenchDiff, WorkbenchDoc, WorkbenchDocFull, WorkbenchPatch,
     WorkbenchRepo, WorkbenchRevision, WorkbenchRevisionDetail,
 };
+
+/// Escape a SQLite `LIKE` pattern for `ESCAPE '\\'` (backslash first, then `%` and `_`).
+pub fn like_escape(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}

@@ -938,6 +938,7 @@ mod root_route_tests {
     #[test]
     fn host_files_routes_are_recognised() {
         assert!(is_host_files_route("/api/v1/fs/read"));
+        assert!(is_host_files_route("/api/v1/fs/raw"));
         assert!(is_host_files_route("/api/v1/fs/browse"));
         assert!(is_host_files_route("/api/v1/fs/stat"));
         assert!(is_host_files_route("/api/v1/sessions/{id}/files/browse"));
@@ -981,11 +982,6 @@ mod root_route_tests {
                 "/ws/term/{session_id}",
                 "otto-sessions/src/ws.rs",
                 "agent_attach_rule(&auth",
-            ),
-            (
-                "/ws/game-rooms/{id}",
-                "otto-server/src/game_rooms/socket.rs",
-                "ctx.game_rooms.authenticate(",
             ),
             // Room sockets authenticate a ROOM token, never an Otto bearer
             // token; agent credentials are refused when a room is joined.

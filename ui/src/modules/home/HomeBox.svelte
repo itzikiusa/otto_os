@@ -10,12 +10,10 @@
   type BoxBody = Component<any>;
   const BODY_LOADERS: Record<string, () => Promise<{ default: BoxBody }>> = {
     sessions: () => import('./boxes/SessionsBox.svelte'),
-    'mission-control': () => import('./boxes/MissionControlBox.svelte'),
     'db-dashboard': () => import('./boxes/DbDashboardBox.svelte'),
     k8s: () => import('./boxes/K8sBox.svelte'),
     insights: () => import('./boxes/InsightsBox.svelte'),
     usage: () => import('./boxes/UsageBox.svelte'),
-    classrooms: () => import('./boxes/ClassroomsBox.svelte'),
   };
   const bodies = new SvelteMap<string, BoxBody>();
   const inflight = new Map<string, Promise<void>>();

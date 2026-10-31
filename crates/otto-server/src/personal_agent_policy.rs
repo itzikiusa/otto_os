@@ -40,14 +40,9 @@ pub enum AgentGate {
 }
 
 /// Non-mutating catalog tools a read-only session still may not call: a room
-/// post is a SEND, memory writes are writes, and an approval request asks a
-/// human to let the agent act — a read-only run reports instead.
-const READ_ONLY_EXTRA_DENY: &[&str] = &[
-    "room_post",
-    "ask_human_approval",
-    "assistant_remember",
-    "assistant_forget",
-];
+/// post is a SEND and an approval request asks a human to let the agent act —
+/// a read-only run reports instead.
+const READ_ONLY_EXTRA_DENY: &[&str] = &["room_post", "ask_human_approval"];
 
 /// True iff a read-only session may NOT call the bare tool.
 pub fn read_only_denies(bare: &str) -> bool {
@@ -657,8 +652,8 @@ mod tests {
                 );
             }
         }
-        // Sends / memory writes / approval requests, though not "mutating".
-        for bare in ["room_post", "ask_human_approval", "assistant_remember"] {
+        // Sends / approval requests, though not "mutating".
+        for bare in ["room_post", "ask_human_approval"] {
             assert!(matches!(
                 decide(true, &[], bare, &json!({})),
                 AgentGate::Deny(_)
@@ -941,16 +936,7 @@ mod tests {
     /// Catalog tools a read-only session may call (`!read_only_denies`) but
     /// whose self-call is a non-GET the allow-list deliberately does not
     /// cover, each with why the refusal changes nothing.
-    const READ_ONLY_POST_EXEMPT: &[(&str, &str)] = &[(
-        // `/assistant/agent/{tool}` is one template for remember/forget/
-        // recall AND the task/reminder/delegate/approval writes, so it cannot
-        // be allow-listed by template. A read-only session (a proactive or
-        // read-only personal-agent run, a read-only schedule) never carries
-        // `meta.assistant_thread`, so `otto_assistant::assistant::tools` would
-        // refuse it 403 "not an Otto Assistant session" anyway.
-        "assistant_recall",
-        "no read-only session is an assistant thread",
-    )];
+    const READ_ONLY_POST_EXEMPT: &[(&str, &str)] = &[];
 
     /// A sample value per input-schema type. Strings use one sentinel so the
     /// concrete self-call path can be turned back into its `{}` template.

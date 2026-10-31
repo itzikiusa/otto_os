@@ -13,7 +13,6 @@
 //! nosniff). A session without a resolvable transcript gets
 //! `200 { unavailable_reason }`, never 404.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use axum::body::Body;
@@ -22,17 +21,17 @@ use axum::http::{header, StatusCode};
 use axum::response::Response;
 use axum::Json;
 use base64::Engine;
-use otto_core::api::{CreateAgentTaskReq, HistoryImportReq, InboxUploadReq, InboxUploadResp};
+use otto_core::api::{CreateAgentTaskReq, InboxUploadReq, InboxUploadResp};
 use otto_core::domain::{
     AgentTask, Session, SessionKind, SessionStatus, TrailKind, TrailLevel, TrailSource,
     WorkspaceRole,
 };
 use otto_core::event::Event;
 use otto_core::{Error, Id};
-use otto_state::{NewSession, NewTrail, SessionsRepo};
+use otto_state::NewTrail;
 use otto_transcript::{
-    fold_file_limited, read_subagents_limited, subagent_path, Artifact, FoldOpts, Folded,
-    HistoryEntry, Provider, Transcript,
+    fold_file_limited, read_subagents_limited, subagent_path_for, Artifact, FoldOpts, Folded,
+    Provider, Transcript,
 };
 use serde::Deserialize;
 
@@ -49,139 +48,14 @@ const MAX_LIMIT: usize = 500;
 const ARTIFACT_CAP: u64 = 25 * 1024 * 1024;
 /// `POST …/inbox` accepts at most this many DECODED bytes (design §4.3).
 const INBOX_CAP: usize = 10 * 1024 * 1024;
-/// History page size.
-const HISTORY_DEFAULT_LIMIT: usize = 100;
-const HISTORY_MAX_LIMIT: usize = 1000;
 
 // ── shared helpers ─────────────────────────────────────────────────────────
 
-// Transcript resolution (provider roots, the effective provider and session →
-// transcript path), the fold knobs and the work-graph artifact mirror live in
-// `crate::transcript` (architecture-3-03/-3-03r); callers outside this route
-// import them from there. Two stay re-exported for sibling routes not yet
-// repointed: `routes/history_page.rs` (`transcript::resolve_transcript_sync`)
-// and `routes/slash_commands.rs` (`super::transcript::effective_provider`).
-use crate::transcript::artifacts::register_work_artifacts;
 use crate::transcript::fold::{image_store, store_key};
-use crate::transcript::resolve::{e2e_enabled, resolve_transcript, transcript_roots};
-pub(crate) use crate::transcript::resolve::{effective_provider, resolve_transcript_sync};
-
-/// Workspace Admin or root — the callers allowed to see transcripts they do
-/// not own (`on_disk` History rows, arbitrary paths under the roots).
-pub(crate) async fn is_ws_admin(ctx: &ServerCtx, user: &otto_core::domain::User, wid: &Id) -> bool {
-    user.is_root
-        || ctx
-            .roles
-            .check(user, wid, WorkspaceRole::Admin)
-            .await
-            .is_ok()
-}
-
-/// History path gate: admins/root may read any confined path; everyone else
-/// only a path that is the transcript of one of THEIR OWN sessions in `wid`
-/// (same owner rule as every per-session route).
-///
-/// backend-performance-5-02: one indexed lookup answers the common case — an
-/// own session whose persisted `transcript_path` is this file, or (no path
-/// persisted yet) whose `provider_session_id` is the id in its filename. Only
-/// a miss falls back to resolving the caller's sessions one by one, skipping
-/// rows with a fresh "no transcript" mark, and a hit there persists the path
-/// so the next page takes the indexed route.
-async fn history_path_gate(
-    ctx: &ServerCtx,
-    user: &otto_core::domain::User,
-    wid: &Id,
-    path: &Path,
-) -> Result<(), ApiError> {
-    if is_ws_admin(ctx, user, wid).await {
-        return Ok(());
-    }
-    let raw = path.to_path_buf();
-    #[allow(clippy::disallowed_methods)] // canonicalize on the blocking pool
-    let canon = crate::offload::blocking(move || raw.canonicalize().ok()).await;
-    let Some(canon) = canon else {
-        return Err(not_your_transcript());
-    };
-    if own_session_for_path(ctx, wid, &user.id, path, &canon)
-        .await
-        .map_err(ApiError)?
-    {
-        return Ok(());
-    }
-    // Fallback: a session whose path was never persisted (or was stored in a
-    // non-canonical form). Rows the root scan found nothing for within the
-    // mark's TTL are skipped — they would only re-scan the roots.
-    let own = ctx
-        .manager
-        .list_by_workspace_for_user(wid, &user.id)
-        .await
-        .map_err(ApiError)?;
-    let ids: Vec<String> = own.iter().map(|s| s.id.clone()).collect();
-    let missing = crate::transcript::resolve::fresh_missing_marks(&ctx.pool, &ids).await;
-    let persisted: HashMap<Id, Option<String>> = SessionsRepo::new(ctx.pool.clone())
-        .transcript_paths_for_workspace(wid)
-        .await
-        .map_err(ApiError)?
-        .into_iter()
-        .collect();
-    let data_dir = ctx.data_dir.clone();
-    let hit = tokio::task::spawn_blocking(move || {
-        own.iter()
-            .filter(|s| !missing.contains(&s.id))
-            .find_map(|s| {
-                let p = persisted.get(&s.id).cloned().flatten();
-                let (r, fresh) = resolve_transcript_sync(&data_dir, p.as_deref(), s).ok()?;
-                let c = r.path.canonicalize().ok()?;
-                (c == canon).then(|| (s.id.clone(), fresh.then_some(r.path)))
-            })
-    })
-    .await
-    .map_err(|e| ApiError(Error::Internal(format!("gate task: {e}"))))?;
-    match hit {
-        Some((id, found)) => {
-            if let Some(found) = found {
-                crate::transcript::resolve::record_found(&ctx.pool, &id, &found).await;
-            }
-            Ok(())
-        }
-        None => Err(not_your_transcript()),
-    }
-}
-
-fn not_your_transcript() -> ApiError {
-    ApiError(Error::Forbidden(
-        "this transcript is not one of your sessions; workspace admin required".into(),
-    ))
-}
-
-/// The indexed half of [`history_path_gate`]: does `user_id` own a session in
-/// `wid` whose persisted transcript is `path` / `canon`, or — with no path
-/// persisted — whose provider session id is the one in the file's name?
-async fn own_session_for_path(
-    ctx: &ServerCtx,
-    wid: &Id,
-    user_id: &Id,
-    path: &Path,
-    canon: &Path,
-) -> otto_core::Result<bool> {
-    let sid = otto_transcript::provider_for_path(canon)
-        .and_then(|p| otto_transcript::peek::session_id_from_name(p, canon));
-    let row: Option<i64> = sqlx::query_scalar(
-        "SELECT 1 FROM sessions WHERE workspace_id = ?1 AND created_by = ?2 \
-         AND (transcript_path IN (?3, ?4) \
-              OR (?5 IS NOT NULL AND provider_session_id = ?5 AND transcript_path IS NULL)) \
-         LIMIT 1",
-    )
-    .bind(wid)
-    .bind(user_id)
-    .bind(canon.to_string_lossy().as_ref())
-    .bind(path.to_string_lossy().as_ref())
-    .bind(sid)
-    .fetch_optional(&ctx.pool)
-    .await
-    .map_err(|e| Error::Internal(format!("history gate lookup: {e}")))?;
-    Ok(row.is_some())
-}
+pub(crate) use crate::transcript::resolve::effective_provider;
+use crate::transcript::resolve::resolve_transcript;
+#[cfg(test)]
+use crate::transcript::resolve::{resolve_transcript_sync, transcript_roots};
 
 /// Fold a transcript file with the server's knobs: images written to the
 /// store, cost priced exactly like the Usage module, subagent tree attached
@@ -207,7 +81,7 @@ pub(crate) fn fold_with(
     let target = match sub {
         None => path.to_path_buf(),
         Some(agent_id) => {
-            let p = subagent_path(path, agent_id)
+            let p = subagent_path_for(provider, path, agent_id)
                 .ok_or_else(|| Error::Invalid("bad subagent id".into()))?;
             if !p.is_file() {
                 return Err(Error::NotFound("subagent transcript not found".into()));
@@ -233,6 +107,11 @@ pub(crate) fn fold_with(
             Error::Internal(format!("read transcript: {e}"))
         }
     })?;
+    let subagents = if sub.is_none() && provider == Provider::Agy {
+        folded.subagents.clone()
+    } else {
+        subagents
+    };
     Ok((folded, subagents))
 }
 
@@ -244,7 +123,7 @@ async fn cached_fold(
     sub: Option<&str>,
 ) -> ApiResult<std::sync::Arc<crate::transcript_cache::Snapshot>> {
     if let Some(sub) = sub {
-        if subagent_path(path, sub).is_none() {
+        if subagent_path_for(provider, path, sub).is_none() {
             return Err(ApiError(Error::Invalid("bad subagent id".into())));
         }
     }
@@ -517,7 +396,7 @@ pub async fn touch_workspace_transcripts(
             continue;
         }
         let provider_name = effective_provider(&s);
-        if !matches!(provider_name.as_str(), "claude" | "codex") {
+        if !matches!(provider_name.as_str(), "claude" | "codex" | "agy") {
             continue;
         }
         let Ok(resolved) = resolve_transcript(&ctx, &s).await else {
@@ -637,14 +516,6 @@ pub async fn list_artifacts(
 ) -> ApiResult<Json<Vec<Artifact>>> {
     let session = session_gate(&ctx, &user, &id, WorkspaceRole::Viewer).await?;
     let arts = session_artifacts(&ctx, &session).await?;
-    // Best-effort work-graph registration, off the request path. The live
-    // tail already registers each artifact as it appears, so this usually
-    // inserts nothing: one item lookup + one key read, never a per-artifact
-    // query pair (the panel re-fetches on every open and WS resync).
-    let cx = ctx.clone();
-    let s = session.clone();
-    let snapshot = arts.clone();
-    tokio::spawn(async move { register_work_artifacts(&cx, &s, &snapshot).await });
     Ok(Json(arts))
 }
 
@@ -919,281 +790,11 @@ pub async fn inbox_upload(
     }))
 }
 
-// ── History ────────────────────────────────────────────────────────────────
-
-#[derive(Debug, Deserialize)]
-pub struct HistoryQuery {
-    #[serde(default)]
-    pub q: Option<String>,
-    #[serde(default)]
-    pub provider: Option<String>,
-    #[serde(default)]
-    pub cwd: Option<String>,
-    #[serde(default)]
-    pub status: Option<String>,
-    /// `last_active_at` cursor (exclusive): entries older than this.
-    #[serde(default)]
-    pub before: Option<String>,
-    #[serde(default)]
-    pub limit: Option<usize>,
-}
-
-/// Confine a client-supplied transcript path to the two provider roots
-/// (symlink-aware). Returns the canonical path + provider. Under `OTTO_E2E` a
-/// checked-in fixture (`…/crates/otto-transcript/fixtures/**.jsonl`) is also
-/// accepted.
-pub(crate) fn confine_history_path(
-    ctx: &ServerCtx,
-    raw: &str,
-) -> Result<(PathBuf, Provider), ApiError> {
-    let candidate = Path::new(raw);
-    if !candidate.is_absolute() {
-        return Err(ApiError(Error::Invalid(
-            "transcript_path must be absolute".into(),
-        )));
-    }
-    if e2e_enabled() && raw.contains("/crates/otto-transcript/fixtures/") {
-        if let (Ok(canon), Some(provider)) = (
-            candidate.canonicalize(),
-            otto_transcript::provider_for_path(candidate),
-        ) {
-            if canon.is_file() {
-                return Ok((canon, provider));
-            }
-        }
-    }
-    let roots = transcript_roots(&ctx.data_dir);
-    let claude = roots.claude_dirs().map(|root| (root, Provider::Claude));
-    for (root, provider) in claude.chain(roots.codex_dirs().map(|root| (root, Provider::Codex))) {
-        if let Some(canon) = otto_core::paths::resolves_under(root, candidate) {
-            if canon.is_file() && canon.extension().is_some_and(|e| e == "jsonl") {
-                return Ok((canon, provider));
-            }
-        }
-    }
-    Err(ApiError(Error::Forbidden(
-        "transcript_path must be a .jsonl under a Claude projects or Codex sessions root".into(),
-    )))
-}
-
-/// History's "Resume in Otto" gate for an Otto session row: the CLI left
-/// resumable state (a provider session id). Deliberately NOT gated on status —
-/// `ensure_live` resumes any agent with a provider id (History's transcripts
-/// are claude/codex only, both resume-capable), so an ENDED conversation is
-/// resumable; the old `status != Exited` check greyed it out with a false
-/// "no resumable state" reason. Reconnectable rows always are. Archived rows
-/// stay `resumable` and carry `archived: true` (the UI offers Unarchive).
-pub(crate) fn history_resumable(s: &Session) -> bool {
-    s.provider_session_id.is_some() || s.status == SessionStatus::Reconnectable
-}
-
-/// `GET /workspaces/{wid}/history?q=&provider=&cwd=&status=&before=&limit=` —
-/// the legacy array form of History. It delegates to the bounded, paged
-/// [`super::history_page::list`] (same scoping, filters and resolution) and
-/// returns that page's entries; `before` (an entry's `last_active_at`,
-/// exclusive) stands in for the opaque cursor.
-pub async fn history(
-    AxPath(wid): AxPath<Id>,
-    Query(q): Query<HistoryQuery>,
-    State(ctx): State<ServerCtx>,
-    CurrentUser(user): CurrentUser,
-) -> ApiResult<Json<Vec<HistoryEntry>>> {
-    let limit = q
-        .limit
-        .unwrap_or(HISTORY_DEFAULT_LIMIT)
-        .clamp(1, HISTORY_MAX_LIMIT);
-    super::history_page::legacy_entries(&ctx, &user, &wid, q, limit)
-        .await
-        .map(Json)
-}
-
-pub(crate) fn repo_name(cwd: &str) -> Option<String> {
-    Path::new(cwd)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .filter(|n| !n.is_empty())
-        .map(str::to_string)
-}
-
-#[derive(Debug, Deserialize)]
-pub struct HistoryTranscriptQuery {
-    pub path: String,
-    #[serde(default)]
-    pub before: Option<String>,
-    #[serde(default)]
-    pub limit: Option<usize>,
-    #[serde(default)]
-    pub sub: Option<String>,
-}
-
-/// `GET /workspaces/{wid}/history/transcript?path=&before=&limit=&sub=` — a
-/// transcript straight from disk. The ONE route that accepts a client path;
-/// confined to the two provider roots (§4.7).
-pub async fn history_transcript(
-    AxPath(wid): AxPath<Id>,
-    Query(q): Query<HistoryTranscriptQuery>,
-    State(ctx): State<ServerCtx>,
-    CurrentUser(user): CurrentUser,
-) -> ApiResult<Json<Transcript>> {
-    require_ws_role(&ctx, &user, &wid, WorkspaceRole::Viewer).await?;
-    let (path, provider) = confine_history_path(&ctx, &q.path)?;
-    history_path_gate(&ctx, &user, &wid, &path).await?;
-    let before = parse_before(q.before.as_deref())?;
-    let limit = q.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
-    let sub = q.sub.as_deref().filter(|s| !s.is_empty());
-    let snapshot = cached_fold(&ctx, provider, &path, sub).await?;
-    Ok(Json(page(
-        &snapshot.folded,
-        before,
-        limit,
-        sub,
-        snapshot.subagents.clone(),
-    )))
-}
-
-#[derive(Debug, Deserialize)]
-pub struct HistoryArtifactsQuery {
-    pub path: String,
-}
-
-/// `GET /workspaces/{wid}/history/artifacts?path=` — the artifacts an
-/// on-disk transcript produced, newest first (the same order as
-/// `GET /sessions/{id}/artifacts`). History's "Outputs" used to pull 500
-/// full turns (up to the 2 MB page budget) just to pick the artifact chips
-/// out of their blocks (SA-07); the fold already collects them. Same path
-/// confinement and gate as `history/transcript`.
-pub async fn history_artifacts(
-    AxPath(wid): AxPath<Id>,
-    Query(q): Query<HistoryArtifactsQuery>,
-    State(ctx): State<ServerCtx>,
-    CurrentUser(user): CurrentUser,
-) -> ApiResult<Json<Vec<Artifact>>> {
-    require_ws_role(&ctx, &user, &wid, WorkspaceRole::Viewer).await?;
-    let (path, provider) = confine_history_path(&ctx, &q.path)?;
-    history_path_gate(&ctx, &user, &wid, &path).await?;
-    let snapshot = cached_fold(&ctx, provider, &path, None).await?;
-    Ok(Json(newest_first(&snapshot.folded.artifacts)))
-}
-
 /// Artifacts sorted newest first (stable for equal timestamps).
 fn newest_first(arts: &[Artifact]) -> Vec<Artifact> {
     let mut arts = arts.to_vec();
     arts.sort_by(|a, b| b.produced_at.cmp(&a.produced_at));
     arts
-}
-
-#[derive(Debug, Deserialize)]
-pub struct HistoryImageQuery {
-    pub path: String,
-}
-
-/// `GET /workspaces/{wid}/history/transcript/images/{img_id}?path=` — an image
-/// extracted while folding an on-disk transcript (same store as the session
-/// route, keyed by the provider session id in the filename).
-pub async fn history_transcript_image(
-    AxPath((wid, img_id)): AxPath<(Id, String)>,
-    Query(q): Query<HistoryImageQuery>,
-    State(ctx): State<ServerCtx>,
-    CurrentUser(user): CurrentUser,
-) -> ApiResult<Response> {
-    require_ws_role(&ctx, &user, &wid, WorkspaceRole::Viewer).await?;
-    let (path, provider) = confine_history_path(&ctx, &q.path)?;
-    history_path_gate(&ctx, &user, &wid, &path).await?;
-    serve_image(&ctx, provider, &path, &img_id).await
-}
-
-/// `POST /workspaces/{wid}/history/import { provider, transcript_path }` —
-/// adopt an on-disk transcript as a `reconnectable` session (with
-/// `provider_session_id` + `transcript_path`) so the existing resume path
-/// continues it. Returns the existing session when one already owns the id.
-pub async fn history_import(
-    AxPath(wid): AxPath<Id>,
-    State(ctx): State<ServerCtx>,
-    CurrentUser(user): CurrentUser,
-    Json(req): Json<HistoryImportReq>,
-) -> ApiResult<Json<Session>> {
-    require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
-    let (path, provider) = confine_history_path(&ctx, &req.transcript_path)?;
-    // Importing an unowned on-disk transcript is an admin action (it is the
-    // same read as the `on_disk` History rows only admins see).
-    history_path_gate(&ctx, &user, &wid, &path).await?;
-    if Provider::parse(&req.provider).is_some_and(|p| p != provider) {
-        return Err(ApiError(Error::Invalid(
-            "provider does not match the transcript location".into(),
-        )));
-    }
-    let p2 = path.clone();
-    let peek = tokio::task::spawn_blocking(move || otto_transcript::peek(provider, &p2))
-        .await
-        .map_err(|e| ApiError(Error::Internal(format!("peek task: {e}"))))?
-        .map_err(|e| ApiError(Error::Internal(format!("read transcript: {e}"))))?;
-    let psid = peek
-        .provider_session_id
-        .clone()
-        .ok_or_else(|| ApiError(Error::Invalid("transcript carries no session id".into())))?;
-    let repo = SessionsRepo::new(ctx.pool.clone());
-    if let Some(existing) = repo
-        .find_by_provider_session(&psid)
-        .await
-        .map_err(ApiError)?
-    {
-        if existing.workspace_id != wid {
-            return Err(ApiError(Error::Conflict(
-                "this conversation already belongs to a session in another workspace".into(),
-            )));
-        }
-        let _ = repo
-            .set_transcript_path(&existing.id, &path.to_string_lossy())
-            .await;
-        return Ok(Json(existing));
-    }
-    let ws = ctx.workspaces.get(&wid).await.map_err(ApiError)?;
-    let title = peek
-        .title
-        .clone()
-        .or_else(|| {
-            peek.first_prompt
-                .as_deref()
-                .map(|p| otto_transcript::util::clip(p, 80))
-        })
-        .unwrap_or_else(|| format!("Imported {} session", provider.as_str()));
-    let session = repo
-        .create(NewSession {
-            workspace_id: wid.clone(),
-            kind: SessionKind::Agent,
-            provider: provider.as_str().to_string(),
-            title,
-            cwd: peek.cwd.clone().unwrap_or_else(|| ws.root_path.clone()),
-            provider_session_id: Some(psid),
-            connection_id: None,
-            created_by: user.id.clone(),
-            meta: serde_json::json!({ "imported_from": "history", "title_source": "provider" }),
-        })
-        .await
-        .map_err(ApiError)?;
-    repo.update_status(&session.id, SessionStatus::Reconnectable)
-        .await
-        .map_err(ApiError)?;
-    let _ = repo
-        .set_transcript_path(&session.id, &path.to_string_lossy())
-        .await;
-    let session = repo.get(&session.id).await.map_err(ApiError)?;
-    let _ = ctx.events.send(Event::SessionCreated {
-        session: session.clone(),
-    });
-    Ok(Json(session))
-}
-
-/// `POST /workspaces/{wid}/history/rescan` → 202; progress arrives as
-/// `history_index_progress` events on the workspace.
-pub async fn history_rescan(
-    AxPath(wid): AxPath<Id>,
-    State(ctx): State<ServerCtx>,
-    CurrentUser(user): CurrentUser,
-) -> ApiResult<StatusCode> {
-    require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
-    crate::history_index::spawn_scan(ctx.clone(), Some(wid));
-    Ok(StatusCode::ACCEPTED)
 }
 
 #[cfg(test)]
@@ -1369,38 +970,5 @@ mod tests {
         assert_eq!(effective_provider(&s), "codex");
         s.provider = "claude".into();
         assert_eq!(effective_provider(&s), "claude");
-    }
-
-    /// S20-03: an ENDED (or archived) conversation with a provider id is
-    /// resumable — History used to grey it out ("no resumable state"), though
-    /// `ensure_live` resumes it fine.
-    #[test]
-    fn history_resumable_ignores_status_and_archive() {
-        let mut s = Session {
-            id: "s".into(),
-            workspace_id: "ws".into(),
-            kind: SessionKind::Agent,
-            provider: "claude".into(),
-            title: "t".into(),
-            status: SessionStatus::Exited,
-            cwd: "/x".into(),
-            provider_session_id: Some("psid".into()),
-            connection_id: None,
-            created_by: "u".into(),
-            created_at: chrono::Utc::now(),
-            last_active_at: chrono::Utc::now(),
-            archived: true,
-            meta: serde_json::json!({}),
-        };
-        assert!(
-            history_resumable(&s),
-            "exited + archived with a provider id"
-        );
-        s.archived = false;
-        assert!(history_resumable(&s), "exited with a provider id");
-        s.provider_session_id = None;
-        assert!(!history_resumable(&s), "no provider id → nothing to resume");
-        s.status = SessionStatus::Reconnectable;
-        assert!(history_resumable(&s), "reconnectable always resumes");
     }
 }

@@ -507,13 +507,6 @@ fn scope_of(event: &Event) -> Scope<'_> {
         | Event::ImprovementRunFinished { workspace_id, .. }
         | Event::ImprovementEditApplied { workspace_id, .. }
         | Event::ImprovementApprovalPending { workspace_id, .. }
-        // Agent-swarm events are workspace-scoped, like the improvement events.
-        | Event::SwarmRunUpdated { workspace_id, .. }
-        | Event::SwarmTaskUpdated { workspace_id, .. }
-        | Event::SwarmProjectCleared { workspace_id, .. }
-        | Event::SwarmMessagePosted { workspace_id, .. }
-        | Event::SwarmStatus { workspace_id, .. }
-        | Event::SwarmGoalUpdated { workspace_id, .. }
         // Product events are workspace-scoped.
         | Event::ProductChanged { workspace_id, .. }
         | Event::PlanRun { workspace_id, .. }
@@ -558,33 +551,25 @@ fn scope_of(event: &Event) -> Scope<'_> {
         // members, like the canvas/mockup agent-session-started signals.
         | Event::DesignAssistUpdated { workspace_id, .. }
         | Event::DesignVariantsReady { workspace_id, .. }
-        // Live DB-Assistant answer edits + the assist-agent-started signal go to the
-        // connection's workspace members (same delivery as canvas/mockup).
+        // Live DB-Assistant answer edits + the assist-agent-started signal +
+        // live agent MCP DB activity go to the workspace members.
         | Event::DbAssistUpdated { workspace_id, .. }
         | Event::DbAssistSessionStarted { workspace_id, .. }
-        // Findings-workflow events (status changes, agent-action started, proof-pack
-        // exported) are workspace-scoped, like reviews.
+        | Event::DbMcpActivity { workspace_id, .. }
+        // Findings-workflow events (status changes, agent-action started) are
+        // workspace-scoped, like reviews.
         | Event::FindingUpdated { workspace_id, .. }
         | Event::FindingActionStarted { workspace_id, .. }
-        | Event::ProofPackExported { workspace_id, .. }
         // Budget-exceeded alerts are scoped to the workspace that crossed the cap
         // (it carries `workspace_id`), so they go to that workspace's members.
         | Event::BudgetExceeded { workspace_id, .. }
-        // Work-graph (Mission Control) updates go to the item's workspace members.
-        | Event::WorkGraphUpdated { workspace_id, .. }
-        // Proof-pack updates are workspace-scoped (gated on viewer access).
-        | Event::ProofPackUpdated { workspace_id, .. }
         // Scheduled-task run updates go to the task's workspace members.
         | Event::ScheduledTaskRunUpdated { workspace_id, .. }
         // Personal-agent run updates + room messages go to the workspace members
         // (rooms are always fully user-visible by design).
         | Event::PersonalAgentRunUpdated { workspace_id, .. }
         | Event::PersonalAgentActivity { workspace_id, .. }
-        | Event::AgentRoomMessage { workspace_id, .. }
-        // Run with Otto stage updates go to the run's workspace members.
-        | Event::OttoRunUpdated { workspace_id, .. }
-        // History index rescan progress goes to the requesting workspace.
-        | Event::HistoryIndexProgress { workspace_id, .. } => Scope::Workspace(workspace_id),
+        | Event::AgentRoomMessage { workspace_id, .. } => Scope::Workspace(workspace_id),
         // Usage tick, self-improvement updates, and insight-ready are global
         // (no workspace axis — insights are a cross-workspace cadence report).
         // Deliver them to every authenticated client, matching the `Notice` pattern.
@@ -613,14 +598,9 @@ fn scope_of(event: &Event) -> Scope<'_> {
             workspace_id: None, ..
         }
         | Event::ResourceAccessChanged { .. } => Scope::Everyone,
-        // Otto Assistant events are personal: the owner only (no root fan-out).
-        Event::AssistantTurn { user_id, .. }
-        | Event::AssistantTaskUpdate { user_id, .. }
-        | Event::AssistantNeedsYou { user_id, .. }
-        | Event::AssistantLimit { user_id, .. }
         // Agent UI control asks ONLY the session's owner (the one person who
         // can grant it) — not workspace admins, not root.
-        | Event::UiControlRequested { user_id, .. }
+        Event::UiControlRequested { user_id, .. }
         // A notice-list change (read/dismiss) cues only the actor's windows.
         | Event::NotificationsChanged { user_id }
         // Workbench docs are per-user: only the owner's windows hear of them.
@@ -1224,43 +1204,12 @@ mod tests {
             }),
             Scope::Workspace(_)
         ));
-        assert!(matches!(
-            scope_of(&Event::SwarmStatus {
-                workspace_id: "ws1".into(),
-                swarm_id: "sw1".into(),
-                status: "active".into(),
-            }),
-            Scope::Workspace(_)
-        ));
     }
 
-    /// Otto Assistant events are owner-only — never workspace-wide or global.
+    /// Owner-scoped events never go workspace-wide or global.
     #[test]
-    fn assistant_events_are_owner_scoped() {
+    fn owner_events_are_owner_scoped() {
         let evs = [
-            Event::AssistantTurn {
-                user_id: "alice".into(),
-                thread_id: "t1".into(),
-                turn: serde_json::json!({}),
-                thread: None,
-            },
-            Event::AssistantTaskUpdate {
-                user_id: "alice".into(),
-                task: serde_json::json!({}),
-            },
-            Event::AssistantNeedsYou {
-                user_id: "alice".into(),
-                task: serde_json::json!({}),
-                open_count: 1,
-            },
-            Event::AssistantLimit {
-                user_id: "alice".into(),
-                thread_id: None,
-                limit: serde_json::json!({}),
-                suggestion: None,
-                task_id: None,
-                auto_switched: false,
-            },
             // Agent UI control asks only the session owner.
             Event::UiControlRequested {
                 user_id: "alice".into(),

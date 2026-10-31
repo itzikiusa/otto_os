@@ -75,19 +75,6 @@ test('link rows: removing one focuses the Remove now in its place, else the prev
   assert.deepEqual(log, ['remove C', 'remove A', 'add']);
 });
 
-test('School breadcrumbs: a crumb focuses the stage BEFORE the view (and the crumb) changes', async () => {
-  const log: string[] = [];
-  const stage = el('stage', log);
-  const handle = { toCorridor: async () => { log.push('toCorridor'); } };
-  const ctx = componentFunctions(comp('modules/home/boxes/ClassroomsBox.svelte'), ['upTo'], { stage, handle });
-  ctx.upTo((h: typeof handle) => h.toCorridor())();
-  assert.deepEqual(log, ['stage+{"preventScroll":true}', 'toCorridor']);
-  // No scene yet: focus still moves off the crumb, nothing else runs.
-  const empty = componentFunctions(comp('modules/home/boxes/ClassroomsBox.svelte'), ['upTo'], { stage, handle: null });
-  empty.upTo(() => { throw new Error('must not navigate without a scene'); })();
-  assert.equal(log.at(-1), 'stage+{"preventScroll":true}');
-});
-
 test('3D viewport: typing in a field inside it is never a shortcut', () => {
   const field = { tagName: 'INPUT' } as unknown as EventTarget;
   const host = { contains: () => true };

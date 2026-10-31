@@ -44,10 +44,10 @@ test('favorites come first, in the saved order, and leave their own sections', (
   for (const id of favs) assert.equal(sectionOf(secs, id), 'favorites');
   // The rest of each section keeps its order.
   const work = secs.find((s) => s.group.id === 'work')!;
-  assert.deepEqual(ids(work.modules), ['home', 'assistant', 'rooms', 'history', 'run-with-otto', 'mission-control']);
+  assert.deepEqual(ids(work.modules), ['home', 'threads', 'rooms']);
   // Unfavoriting puts a module back in its section, in its saved slot.
   const back = sidebarSections(all(), ['workflows', 'git', 'connections']);
-  assert.deepEqual(ids(back.find((s) => s.group.id === 'work')!.modules).slice(0, 3), ['home', 'assistant', 'agents']);
+  assert.deepEqual(ids(back.find((s) => s.group.id === 'work')!.modules), ['home', 'agents', 'threads', 'rooms']);
 });
 
 test('a section emptied by favorites disappears; a user order still applies inside Favorites', () => {

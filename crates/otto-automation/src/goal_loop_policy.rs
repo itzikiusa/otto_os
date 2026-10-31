@@ -78,13 +78,6 @@ pub fn record_progress(ledger: &mut GoalLoopLedger, eval: &GoalLoopEvaluation) -
     ledger.repeated_failures >= 2
 }
 
-pub fn missing_required_proof(
-    required: bool,
-    status: Option<otto_core::proof::ProofStatus>,
-) -> bool {
-    required && status != Some(otto_core::proof::ProofStatus::Passed)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -97,15 +90,6 @@ mod tests {
     }
     fn eval() -> GoalLoopEvaluation {
         serde_json::from_value(serde_json::json!({"progress_pct":100,"verdict":"achieved","criteria":[{"id":"h","met":true,"evidence":"model claims done"}]})).unwrap()
-    }
-    #[test]
-    fn required_proof_has_no_budget_exhaustion_exception() {
-        use otto_core::proof::ProofStatus;
-        for status in [None, Some(ProofStatus::Partial), Some(ProofStatus::Failed)] {
-            assert!(missing_required_proof(true, status));
-        }
-        assert!(!missing_required_proof(true, Some(ProofStatus::Passed)));
-        assert!(!missing_required_proof(false, None));
     }
     #[test]
     fn model_cannot_satisfy_human_criterion() {

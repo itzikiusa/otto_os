@@ -142,11 +142,13 @@ export async function startStack({ bin, dist, log, prepare }) {
       if (String(e.message).includes('refusing')) throw e;
     }
   }
-  const dataDir = mkdtempSync(join(tmpdir(), 'otto-tour-'));
+  const rootDir = mkdtempSync(join(tmpdir(), 'otto-tour-'));
+  const dataDir = join(rootDir, 'data');
+  mkdirSync(dataDir, { recursive: true });
   // Harmless stand-ins for the agent CLIs: sessions launch providers by bare
   // name, so without these a claude/codex session would start the user's REAL
   // CLI on their account.
-  const fakeBin = join(dataDir, 'fake-agent-bin');
+  const fakeBin = join(rootDir, 'fake-agent-bin');
   mkdirSync(fakeBin, { recursive: true });
   for (const cli of ['claude', 'codex', 'agy', 'gemini', 'grok']) {
     const shim = join(fakeBin, cli);
@@ -159,9 +161,9 @@ export async function startStack({ bin, dist, log, prepare }) {
   chmodSync(join(fakeBin, 'agent-sim'), 0o755);
 
   // A fake HOME: the daemon scans ~/.claude / ~/.codex for past transcripts
-  // (History) and ~/.gitconfig etc. — point all of it at the temp dir so the
-  // user's real agent history is never read. Seeded transcripts go here.
-  const home = join(dataDir, 'home');
+  // (History) and ~/.git-credentials etc. — point all of it at a sibling dir
+  // outside OTTO_DATA_DIR so sessions in ~/Code never trip the data-dir guard.
+  const home = join(rootDir, 'home');
   mkdirSync(home, { recursive: true });
   writeFileSync(join(home, '.gitconfig'), '[user]\n\tname = Maya Chen\n\temail = maya@example.com\n[init]\n\tdefaultBranch = main\n');
   // Shell sessions: a neutral prompt (never the host's user@machine).
@@ -221,7 +223,7 @@ export async function startStack({ bin, dist, log, prepare }) {
     killClickhouseFor(dataDir);
     await new Promise((r) => server.close(() => r()));
     try {
-      rmSync(dataDir, { recursive: true, force: true });
+      rmSync(rootDir, { recursive: true, force: true });
     } catch {
       /* ignore */
     }

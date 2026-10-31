@@ -39,7 +39,6 @@ pub use otto_automation::goal_loop;
 pub use otto_automation::goal_loop_parse;
 use otto_automation::goal_loop_roles;
 pub use otto_automation::goal_loop_workspace;
-pub mod history_index;
 pub mod host_guard;
 pub mod improve_channels;
 pub mod k8s_monitor_scheduler;
@@ -62,25 +61,15 @@ pub mod personal_agent_policy;
 pub mod plugins;
 pub mod policy;
 pub mod product_host;
-pub mod proof;
 pub mod provider_resolve;
 pub mod repo_directory;
 pub use otto_automation::report_delivery;
 pub mod resource_sessions;
 pub use otto_review::fallback as review_fallback;
 use otto_review::summarizer as review_summarizer;
-pub mod game_rooms;
 pub mod rooms;
 pub mod routes;
-pub mod run_callback;
-pub mod run_channels;
-pub mod run_context;
-pub mod run_engine;
 pub mod run_notices;
-pub mod run_scheduler;
-pub mod run_service;
-pub mod run_sources;
-pub mod run_workspace;
 pub use otto_automation::scheduled_tasks_engine;
 pub use otto_automation::scheduled_tasks_scheduler;
 #[cfg(test)]
@@ -92,7 +81,6 @@ pub mod skill_eval;
 pub mod skill_review;
 pub mod spa;
 pub mod state;
-pub mod swarm_host;
 pub mod telemetry;
 #[cfg(any(test, feature = "test-util"))]
 pub mod test_support;
@@ -115,7 +103,6 @@ use otto_workflows::checkpoint as workflow_checkpoint;
 pub use otto_workflows::context as workflow_context;
 pub use otto_workflows::prepare as workflow_prepare;
 use otto_workflows::validation as workflow_validation;
-pub mod workgraph_projector;
 pub mod ws_events;
 pub mod ws_fanout;
 
@@ -131,10 +118,10 @@ pub use monitor::{
     spawn_budget_sampler, spawn_metrics_sampler, spawn_session_event_listener,
     spawn_usage_recorder, AuthScanner, CredentialMonitor,
 };
-// The Assistant + Personal Agents engines live in `otto-assistant` (wired to
-// the daemon by `assistant_host`); re-exported at their historical paths.
+// The Personal Agents engine lives in `otto-assistant` (wired to
+// the daemon by `assistant_host`); re-exported at its historical paths.
 pub use otto_assistant::{
-    assistant, personal_agent_documents, personal_agent_memory, personal_agents_engine,
+    personal_agent_documents, personal_agent_memory, personal_agents_engine,
     personal_agents_scheduler,
 };
 pub use state::ServerCtx;
@@ -167,9 +154,7 @@ pub fn build_router_with_assets(
     root_extras: Vec<Router>,
     assets: Option<spa::AssetLoader>,
 ) -> Router {
-    let mut protected = routes::protected_routes()
-        .merge(rooms::protected_routes())
-        .merge(game_rooms::protected_routes());
+    let mut protected = routes::protected_routes().merge(rooms::protected_routes());
     for extra in api_extras {
         protected = protected.merge(extra);
     }
@@ -198,7 +183,6 @@ pub fn build_router_with_assets(
 
     let api = routes::public_routes()
         .merge(rooms::public_routes())
-        .merge(game_rooms::public_routes())
         .merge(protected);
     let events_tx = ctx.events.clone();
     let host_guard_state = host_guard::HostGuardState::new(ctx.pool.clone());
@@ -208,7 +192,6 @@ pub fn build_router_with_assets(
         .nest("/api/v1", api)
         .route("/ws/events", get(ws_events::events_ws))
         .merge(rooms::ws_routes())
-        .merge(game_rooms::ws_routes())
         .with_state(ctx)
         .fallback(move |uri| spa::spa_fallback_with_assets(uri, assets));
 

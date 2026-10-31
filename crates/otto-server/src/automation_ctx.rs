@@ -16,14 +16,11 @@ use otto_automation::goal_loop::GoalLoopRegistry;
 use otto_automation::AutomationCtx;
 use otto_core::domain::{NoticeSeverity, Workspace};
 use otto_core::event::Event;
-use otto_core::proof::{
-    ProofArtifact, ProofArtifactKind, ProofArtifactStatus, ProofPack, WorkItemKind,
-};
 use otto_core::secrets::SecretStore;
 use otto_core::workflows::{NodeRunState, RunScope, Workflow};
 use otto_core::{Id, Result};
 use otto_sessions::SessionManager;
-use otto_state::{DbPool, GoalLoopsRepo, ProofRepo, ScheduledTasksRepo, WorkspacesRepo};
+use otto_state::{DbPool, GoalLoopsRepo, ScheduledTasksRepo, WorkspacesRepo};
 use serde_json::Value;
 use tokio::sync::broadcast;
 
@@ -51,9 +48,6 @@ impl AutomationCtx for ServerCtx {
     }
     fn orchestrator(&self) -> &Arc<otto_orchestrator::Orchestrator> {
         &self.orchestrator
-    }
-    fn proof_repo(&self) -> &ProofRepo {
-        &self.proof_repo
     }
     fn scheduled_tasks(&self) -> &ScheduledTasksRepo {
         &self.scheduled_tasks
@@ -205,37 +199,6 @@ impl AutomationCtx for ServerCtx {
             scope,
             prior_nodes,
         );
-    }
-
-    async fn proof_gate(
-        &self,
-        kind: WorkItemKind,
-        work_item_id: &str,
-        workspace_id: &str,
-        title: &str,
-        created_by: &str,
-    ) -> Result<ProofPack> {
-        crate::proof::gate(self, kind, work_item_id, workspace_id, title, created_by).await
-    }
-
-    async fn proof_upsert_content_artifact(
-        &self,
-        pack: &ProofPack,
-        kind: ProofArtifactKind,
-        title: &str,
-        content: &str,
-        status: ProofArtifactStatus,
-        extra_meta: Value,
-        created_by: &str,
-    ) -> Result<ProofArtifact> {
-        crate::proof::upsert_content_artifact(
-            self, pack, kind, title, content, status, extra_meta, created_by,
-        )
-        .await
-    }
-
-    async fn proof_recompute_and_emit(&self, pack_id: &str) -> Result<ProofPack> {
-        crate::proof::recompute_and_emit(self, pack_id).await
     }
 
     async fn run_notice(

@@ -552,7 +552,6 @@ mod tests {
             "api_execute",
             "api_run_automation",
             "delete_scheduled_task",
-            "assistant_forget",
             "query_db",
         ] {
             assert!(tool_is_irreversible(t), "{t}");

@@ -43,7 +43,6 @@ pub struct NewScheduledTask {
     pub sandbox: String,
     pub max_retries: i64,
     pub notify_on_change: bool,
-    pub attach_proof: bool,
 }
 
 impl NewScheduledTask {
@@ -67,7 +66,6 @@ impl NewScheduledTask {
             sandbox: "none".into(),
             max_retries: 0,
             notify_on_change: false,
-            attach_proof: false,
         }
     }
 }
@@ -90,7 +88,6 @@ pub struct ScheduledTaskPatch {
     pub sandbox: Option<String>,
     pub max_retries: Option<i64>,
     pub notify_on_change: Option<bool>,
-    pub attach_proof: Option<bool>,
 }
 
 /// Fields for opening a run row (status starts `running`).
@@ -124,7 +121,6 @@ pub struct FinishRun {
     pub error: Option<String>,
     pub session_id: Option<String>,
     pub report_hash: Option<String>,
-    pub proof_pack_id: Option<String>,
     pub attempts: i64,
     pub skipped_delivery: bool,
     pub workflow_run_id: Option<String>,
@@ -153,7 +149,6 @@ fn row_to_task(r: &sqlx::sqlite::SqliteRow) -> Result<ScheduledTask> {
         sandbox: r.get("sandbox"),
         max_retries: r.get("max_retries"),
         notify_on_change: r.get::<i64, _>("notify_on_change") != 0,
-        attach_proof: r.get::<i64, _>("attach_proof") != 0,
         schedule_generation: r.get("schedule_generation"),
         admission_generation: r.get("admission_generation"),
         last_run_at: r.get("last_run_at"),
@@ -183,7 +178,6 @@ fn row_to_run(r: &sqlx::sqlite::SqliteRow) -> Result<ScheduledTaskRun> {
         error: r.get("error"),
         session_id: r.get("session_id"),
         report_hash: r.get("report_hash"),
-        proof_pack_id: r.get("proof_pack_id"),
         attempts: r.get("attempts"),
         skipped_delivery: r.get::<i64, _>("skipped_delivery") != 0,
         workflow_run_id: r.get("workflow_run_id"),
@@ -205,9 +199,9 @@ impl ScheduledTasksRepo {
         sqlx::query(
             "INSERT INTO scheduled_tasks (id, workspace_id, name, kind, prompt, skill, provider, \
              model, cwd, schedule_json, destination_json, enabled, timezone, workflow_id, sandbox, \
-             max_retries, notify_on_change, attach_proof, created_by, created_at, updated_at, \
+             max_retries, notify_on_change, created_by, created_at, updated_at, \
              armed_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(&t.workspace_id)
@@ -226,7 +220,6 @@ impl ScheduledTasksRepo {
         .bind(&t.sandbox)
         .bind(t.max_retries)
         .bind(t.notify_on_change as i64)
-        .bind(t.attach_proof as i64)
         .bind(&t.created_by)
         .bind(&now)
         .bind(&now)
@@ -327,7 +320,6 @@ impl ScheduledTasksRepo {
                sandbox = COALESCE(?, sandbox), \
                max_retries = COALESCE(?, max_retries), \
                notify_on_change = COALESCE(?, notify_on_change), \
-               attach_proof = COALESCE(?, attach_proof), \
                updated_at = ? \
              WHERE id = ?",
         )
@@ -348,7 +340,6 @@ impl ScheduledTasksRepo {
         .bind(p.sandbox)
         .bind(p.max_retries)
         .bind(p.notify_on_change.map(|b| b as i64))
-        .bind(p.attach_proof.map(|b| b as i64))
         .bind(&now)
         .bind(id)
         .execute(&mut *tx)
@@ -622,7 +613,7 @@ impl ScheduledTasksRepo {
             "UPDATE scheduled_task_runs SET status = ?, summary = ?, report_path = ?, \
              report_rel = ?, delivered = ?, delivery_error = ?, error = ?, \
              session_id = COALESCE(?, session_id), \
-             report_hash = ?, proof_pack_id = ?, attempts = ?, skipped_delivery = ?, \
+             report_hash = ?, attempts = ?, skipped_delivery = ?, \
              workflow_run_id = COALESCE(?, workflow_run_id), finished_at = ? WHERE id = ?",
         )
         .bind(&f.status)
@@ -634,7 +625,6 @@ impl ScheduledTasksRepo {
         .bind(&f.error)
         .bind(&f.session_id)
         .bind(&f.report_hash)
-        .bind(&f.proof_pack_id)
         .bind(f.attempts.max(1))
         .bind(f.skipped_delivery as i64)
         .bind(&f.workflow_run_id)
@@ -1387,7 +1377,6 @@ mod tests {
                 name: Some("edited".into()),
                 prompt: Some("edited prompt".into()),
                 destination: Some(json!({"type":"none"})),
-                attach_proof: Some(true),
                 ..Default::default()
             },
         )

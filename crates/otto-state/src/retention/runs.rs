@@ -1,18 +1,12 @@
-//! Run-history retention (perf W6): `otto_runs` (+ `otto_run_events`),
-//! `swarm_runs`, `swarm_messages` and the iterations of finished goal loops
-//! had no delete path at all. Kept in its own block of the retention job:
+//! Run-history retention (perf W6): the iterations of finished goal loops had
+//! no delete path at all. Kept in its own block of the retention job:
 //! one window, [`RetentionPolicy::run_history_days`](super::RetentionPolicy).
 //! OFF by default (`0` = keep forever): these are user records, so the block
 //! only runs once someone sets a window (floored at [`MIN_RUN_HISTORY_DAYS`]).
 //!
 //! Safety rules, on top of the module's (cutoff-bounded, batched, paused):
-//! - only TERMINAL rows are touched — a queued/running Run with Otto, swarm
-//!   run or goal loop keeps everything whatever its age;
-//! - a Run with Otto a Proof Pack references (its `proof_pack_id`, or a
-//!   `proof_packs` row of kind `otto_run`) is kept;
-//! - a pruned swarm run is first folded into its swarm's
-//!   `pruned_runs`/`pruned_cost_usd` rollup (migration 0161), in the SAME
-//!   transaction, so the lifetime budget (`swarm_spend`) never shrinks;
+//! - only TERMINAL rows are touched — a running/paused/blocked goal loop keeps
+//!   everything whatever its age;
 //! - a finished goal loop keeps its LAST iteration (the outcome its detail
 //!   page shows); only the earlier ones go.
 
@@ -28,170 +22,21 @@ pub const DEFAULT_RUN_HISTORY_DAYS: i64 = 0;
 /// Rows removed by one run-history pass.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RunHistoryReport {
-    pub otto_runs: u64,
-    pub otto_run_events: u64,
-    pub swarm_runs: u64,
-    pub swarm_messages: u64,
     pub goal_loop_iterations: u64,
 }
 
 impl RunHistoryReport {
     pub fn total(&self) -> u64 {
-        self.otto_runs
-            + self.otto_run_events
-            + self.swarm_runs
-            + self.swarm_messages
-            + self.goal_loop_iterations
+        self.goal_loop_iterations
     }
-}
-
-/// `?, ?, …` for `n` binds.
-fn marks(n: usize) -> String {
-    vec!["?"; n].join(",")
 }
 
 impl RetentionRepo {
     /// One run-history pass over everything older than `cutoff` (RFC 3339).
     pub(super) async fn prune_run_history(&self, cutoff: &str) -> Result<RunHistoryReport> {
-        let mut r = RunHistoryReport::default();
-        (r.otto_runs, r.otto_run_events) = self.prune_otto_runs(cutoff).await?;
-        r.swarm_runs = self.prune_swarm_runs(cutoff).await?;
-        r.swarm_messages = self
-            .delete_older("swarm_messages", "created_at", cutoff)
-            .await?;
-        r.goal_loop_iterations = self.prune_goal_loop_iterations(cutoff).await?;
-        Ok(r)
-    }
-
-    /// Terminal Run-with-Otto runs last updated before `cutoff`, no Proof
-    /// Pack attached. Events go explicitly too (the FK cascade needs
-    /// `foreign_keys`, which a tool connection may lack).
-    async fn prune_otto_runs(&self, cutoff: &str) -> Result<(u64, u64)> {
-        let (mut runs, mut events) = (0u64, 0u64);
-        loop {
-            let ids: Vec<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-                "SELECT r.id FROM otto_runs r \
-                 WHERE r.status IN ('completed','failed','rejected','cancelled') \
-                   AND r.updated_at < ? AND r.proof_pack_id IS NULL \
-                   AND NOT EXISTS (SELECT 1 FROM proof_packs p \
-                                   WHERE p.work_item_kind = 'otto_run' AND p.work_item_id = r.id) \
-                 LIMIT {BATCH}"
-            )))
-            .bind(cutoff)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(dberr("retention: otto_runs scan"))?;
-            if ids.is_empty() {
-                return Ok((runs, events));
-            }
-            let m = marks(ids.len());
-            let mut tx = self
-                .pool
-                .begin()
-                .await
-                .map_err(dberr("retention: otto_runs begin"))?;
-            // Re-check terminal under the write lock (a run can't leave a
-            // terminal state today, but the guard is free).
-            let q = format!(
-                "DELETE FROM otto_runs WHERE id IN ({m}) \
-                 AND status IN ('completed','failed','rejected','cancelled') RETURNING id"
-            );
-            let mut del = sqlx::query_scalar::<_, String>(sqlx::AssertSqlSafe(q.as_str()));
-            for id in &ids {
-                del = del.bind(id);
-            }
-            let gone = del
-                .fetch_all(&mut *tx)
-                .await
-                .map_err(dberr("retention: otto_runs delete"))?;
-            if !gone.is_empty() {
-                let q = format!(
-                    "DELETE FROM otto_run_events WHERE run_id IN ({})",
-                    marks(gone.len())
-                );
-                let mut del = sqlx::query(sqlx::AssertSqlSafe(q.as_str()));
-                for id in &gone {
-                    del = del.bind(id);
-                }
-                events += del
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(dberr("retention: otto_run_events delete"))?
-                    .rows_affected();
-            }
-            tx.commit()
-                .await
-                .map_err(dberr("retention: otto_runs commit"))?;
-            runs += gone.len() as u64;
-            if ids.len() < BATCH as usize {
-                return Ok((runs, events));
-            }
-            tokio::time::sleep(BATCH_PAUSE).await;
-        }
-    }
-
-    /// Terminal swarm runs finished before `cutoff`, rolled into their
-    /// swarm's spend first (same transaction).
-    async fn prune_swarm_runs(&self, cutoff: &str) -> Result<u64> {
-        let mut total = 0u64;
-        loop {
-            let ids: Vec<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-                "SELECT id FROM swarm_runs \
-                 WHERE finished_at IS NOT NULL AND finished_at < ? \
-                   AND status IN ('done','error','stopped') \
-                 LIMIT {BATCH}"
-            )))
-            .bind(cutoff)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(dberr("retention: swarm_runs scan"))?;
-            if ids.is_empty() {
-                return Ok(total);
-            }
-            let m = marks(ids.len());
-            let terminal = "status IN ('done','error','stopped')";
-            let counts = crate::swarm::not_unstarted_scheduled_stop("r");
-            let mut tx = self
-                .pool
-                .begin()
-                .await
-                .map_err(dberr("retention: swarm_runs begin"))?;
-            let q = format!(
-                "UPDATE swarms SET \
-                   pruned_runs = pruned_runs + (SELECT COUNT(*) FROM swarm_runs r \
-                       WHERE r.swarm_id = swarms.id AND r.id IN ({m}) AND r.{terminal} AND {counts}), \
-                   pruned_cost_usd = pruned_cost_usd + (SELECT COALESCE(SUM(r.cost_usd), 0.0) \
-                       FROM swarm_runs r \
-                       WHERE r.swarm_id = swarms.id AND r.id IN ({m}) AND r.{terminal} AND {counts}) \
-                 WHERE id IN (SELECT swarm_id FROM swarm_runs WHERE id IN ({m}))"
-            );
-            let mut up = sqlx::query(sqlx::AssertSqlSafe(q.as_str()));
-            for _ in 0..3 {
-                for id in &ids {
-                    up = up.bind(id);
-                }
-            }
-            up.execute(&mut *tx)
-                .await
-                .map_err(dberr("retention: swarm spend rollup"))?;
-            let q = format!("DELETE FROM swarm_runs WHERE id IN ({m}) AND {terminal}");
-            let mut del = sqlx::query(sqlx::AssertSqlSafe(q.as_str()));
-            for id in &ids {
-                del = del.bind(id);
-            }
-            total += del
-                .execute(&mut *tx)
-                .await
-                .map_err(dberr("retention: swarm_runs delete"))?
-                .rows_affected();
-            tx.commit()
-                .await
-                .map_err(dberr("retention: swarm_runs commit"))?;
-            if ids.len() < BATCH as usize {
-                return Ok(total);
-            }
-            tokio::time::sleep(BATCH_PAUSE).await;
-        }
+        Ok(RunHistoryReport {
+            goal_loop_iterations: self.prune_goal_loop_iterations(cutoff).await?,
+        })
     }
 
     /// Every iteration but the last of goal loops that finished (terminal)
@@ -256,13 +101,6 @@ mod tests {
         fmt(Utc::now() - Duration::days(days))
     }
 
-    async fn exec(pool: &DbPool, sql: &str) {
-        sqlx::query(sqlx::AssertSqlSafe(sql))
-            .execute(pool)
-            .await
-            .unwrap();
-    }
-
     async fn ids(pool: &DbPool, sql: &str) -> Vec<String> {
         sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
             .fetch_all(pool)
@@ -270,117 +108,9 @@ mod tests {
             .unwrap()
     }
 
-    async fn otto_run(pool: &DbPool, id: &str, status: &str, updated: &str, pack: Option<&str>) {
-        sqlx::query(
-            "INSERT INTO otto_runs (id, workspace_id, title, source_kind, source_ref, status, \
-             proof_pack_id, created_by, created_at, updated_at) \
-             VALUES (?, 'w', 't', 'manual', 'r', ?, ?, 'u', ?, ?)",
-        )
-        .bind(id)
-        .bind(status)
-        .bind(pack)
-        .bind(updated)
-        .bind(updated)
-        .execute(pool)
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO otto_run_events (id, run_id, workspace_id, kind, message, created_at) \
-             VALUES (?, ?, 'w', 'note', 'm', ?)",
-        )
-        .bind(format!("ev-{id}"))
-        .bind(id)
-        .bind(updated)
-        .execute(pool)
-        .await
-        .unwrap();
-    }
-
     #[tokio::test]
-    async fn otto_runs_only_terminal_old_and_unproven() {
+    async fn finished_loops_keep_last_iteration() {
         let pool = mem_pool().await;
-        otto_run(&pool, "old-done", "completed", &ago(200), None).await;
-        otto_run(&pool, "old-failed", "failed", &ago(120), None).await;
-        otto_run(&pool, "old-live", "implementing", &ago(200), None).await;
-        otto_run(&pool, "old-proven", "completed", &ago(200), Some("pp1")).await;
-        otto_run(&pool, "young-done", "completed", &ago(5), None).await;
-        let r = RetentionRepo::new(pool.clone())
-            .prune(&opted_in())
-            .await
-            .unwrap();
-        assert_eq!(r.run_history.otto_runs, 2);
-        assert_eq!(r.run_history.otto_run_events, 2);
-        let left = ids(&pool, "SELECT id FROM otto_runs ORDER BY id").await;
-        assert_eq!(left, ["old-live", "old-proven", "young-done"]);
-        let ev = ids(&pool, "SELECT run_id FROM otto_run_events ORDER BY run_id").await;
-        assert_eq!(
-            ev,
-            ["old-live", "old-proven", "young-done"],
-            "events follow runs"
-        );
-    }
-
-    #[tokio::test]
-    async fn swarm_runs_roll_into_spend_before_pruning() {
-        let pool = mem_pool().await;
-        exec(
-            &pool,
-            "INSERT INTO swarms (id, workspace_id, name, created_by, created_at, updated_at) \
-             VALUES ('s1', 'w', 'S', 'u', '2020-01-01T00:00:00Z', '2020-01-01T00:00:00Z')",
-        )
-        .await;
-        let run = |id: &str, status: &str, fin: Option<String>, cost: Option<f64>| {
-            let (id, status) = (id.to_string(), status.to_string());
-            let pool = pool.clone();
-            async move {
-                sqlx::query(
-                    "INSERT INTO swarm_runs (id, swarm_id, workspace_id, agent_id, status, \
-                     cost_usd, enqueued_at, finished_at) VALUES (?, 's1', 'w', 'a', ?, ?, ?, ?)",
-                )
-                .bind(&id)
-                .bind(&status)
-                .bind(cost)
-                .bind(ago(300))
-                .bind(fin)
-                .execute(&pool)
-                .await
-                .unwrap();
-            }
-        };
-        run("old1", "done", Some(ago(200)), Some(1.5)).await;
-        run("old2", "error", Some(ago(150)), None).await;
-        run("old-running", "running", None, Some(9.0)).await;
-        run("young", "done", Some(ago(3)), Some(0.25)).await;
-        let swarms = crate::swarm::SwarmRepo::new(pool.clone());
-        let before = swarms.swarm_spend(&"s1".to_string()).await.unwrap();
-        assert_eq!(before.total_runs, 4);
-
-        let r = RetentionRepo::new(pool.clone())
-            .prune(&opted_in())
-            .await
-            .unwrap();
-        assert_eq!(r.run_history.swarm_runs, 2);
-        let left = ids(&pool, "SELECT id FROM swarm_runs ORDER BY id").await;
-        assert_eq!(left, ["old-running", "young"]);
-        let after = swarms.swarm_spend(&"s1".to_string()).await.unwrap();
-        assert_eq!(after.total_runs, before.total_runs, "budget never refunded");
-        assert!((after.cost_usd - before.cost_usd).abs() < 1e-9);
-    }
-
-    #[tokio::test]
-    async fn swarm_messages_age_out_and_finished_loops_keep_last_iteration() {
-        let pool = mem_pool().await;
-        for (id, ts) in [("m-old", ago(200)), ("m-young", ago(2))] {
-            sqlx::query(
-                "INSERT INTO swarm_messages (id, swarm_id, workspace_id, body, created_at) \
-                 VALUES (?, 's', 'w', 'b', ?)",
-            )
-            .bind(id)
-            .bind(ts)
-            .execute(&pool)
-            .await
-            .unwrap();
-        }
         for (id, status, fin) in [
             ("done-old", "succeeded", Some(ago(200))),
             ("done-young", "failed", Some(ago(2))),
@@ -417,12 +147,7 @@ mod tests {
             .prune(&opted_in())
             .await
             .unwrap();
-        assert_eq!(r.run_history.swarm_messages, 1);
         assert_eq!(r.run_history.goal_loop_iterations, 2);
-        assert_eq!(
-            ids(&pool, "SELECT id FROM swarm_messages").await,
-            ["m-young"]
-        );
         let iters = ids(&pool, "SELECT id FROM goal_loop_iterations ORDER BY id").await;
         assert_eq!(
             iters,
@@ -461,16 +186,36 @@ mod tests {
     #[tokio::test]
     async fn default_policy_keeps_run_history() {
         let pool = mem_pool().await;
-        otto_run(&pool, "old-done", "completed", &ago(400), None).await;
+        sqlx::query(
+            "INSERT INTO goal_loops (id, workspace_id, name, repo_path, definition_json, \
+             limits_json, config_json, status, created_by, created_at, updated_at, \
+             finished_at) VALUES ('l1', 'w', 'n', '/r', '{}', '{}', '{}', 'succeeded', 'u', ?1, ?1, ?1)",
+        )
+        .bind(ago(400))
+        .execute(&pool)
+        .await
+        .unwrap();
+        for idx in 1..=2 {
+            sqlx::query(
+                "INSERT INTO goal_loop_iterations (id, loop_id, workspace_id, idx, status, \
+                 started_at) VALUES (?, 'l1', 'w', ?, 'done', ?)",
+            )
+            .bind(format!("l1-{idx}"))
+            .bind(idx)
+            .bind(ago(400))
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
         let r = RetentionRepo::new(pool.clone())
             .prune(&RetentionPolicy::default())
             .await
             .unwrap();
         assert_eq!(r.run_history.total(), 0);
-        let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM otto_runs")
+        let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM goal_loop_iterations")
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(left, 1);
+        assert_eq!(left, 2);
     }
 }

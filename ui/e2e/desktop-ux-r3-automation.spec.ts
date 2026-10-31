@@ -1,6 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
-import { apiCtx, seedWorkspace, seedSwarm } from './seed';
-import { expectNoHorizontalOverflow, expectFullyInViewport } from './helpers';
+import { apiCtx, seedWorkspace } from './seed';
+import { expectFullyInViewport } from './helpers';
 
 test.use({ serviceWorkers: 'block' });
 async function setup(page: Page) {
@@ -82,37 +82,6 @@ test('rooms: live messages append from the WS event without a refetch (perf R2/R
   await ctx.dispose();
 });
 
-test('swarm feed: failed refresh retains posts and offers Retry', async ({ page }) => {
-  const { ctx, base, ws } = await setup(page);
-  const { swarmId } = await seedSwarm(ctx, base, ws);
-  await ctx.dispose();
-  await page.goto('/#/swarm');
-  await page.getByRole('tab', { name: 'Feed', exact: true }).click();
-  await expect(page.getByText('Decided to ship behind a flag first.')).toBeVisible();
-  let fail = true;
-  await page.route(`**/api/v1/swarm/swarms/${swarmId}/board*`, r => fail
-    ? r.fulfill({ status: 503, json: { code: 'upstream', message: 'Board temporarily unavailable' } })
-    : r.continue());
-  await page.getByRole('button', { name: 'Refresh board' }).click();
-  // Scoped to the page: the failure is also spoken via the sr-only announcer.
-  const content = page.locator('#app-content');
-  await expect(content.getByText(/Board temporarily unavailable/)).toBeVisible();
-  await expect(page.getByText('Decided to ship behind a flag first.')).toBeVisible();
-  fail = false;
-  await page.getByRole('button', { name: 'Retry', exact: true }).click();
-  await expect(content.getByText(/Board temporarily unavailable/)).toHaveCount(0);
-});
-
-test('swarm tabs: RTL arrows follow the visible direction', async ({ page }) => {
-  const { ctx, base, ws } = await setup(page);
-  await seedSwarm(ctx, base, ws); await ctx.dispose();
-  await page.goto('/#/swarm');
-  await page.evaluate(() => document.documentElement.dir = 'rtl');
-  await page.getByRole('tab', { name: 'Org', exact: true }).focus();
-  await page.keyboard.press('ArrowLeft');
-  await expect(page.getByRole('tab', { name: 'Graph', exact: true })).toBeFocused();
-});
-
 async function workflows(page: Page) {
   const { ctx, base, ws } = await setup(page);
   const ids: string[] = [];
@@ -160,21 +129,6 @@ test('workflow instructions: late save cannot switch the active workflow', async
   await expect(page.getByTestId(`wf-row-${second}`)).toHaveClass(/active/);
 });
 
-test('swarm feed: phone composer has usable message width', async ({ page }) => {
-  const { ctx, base, ws } = await setup(page);
-  await seedSwarm(ctx, base, ws); await ctx.dispose();
-  await page.setViewportSize({ width: 375, height: 812 });
-  await page.goto('/#/swarm');
-  await page.locator('.swarm-item', { hasText: 'E2E Swarm' }).click();
-  await page.getByRole('tab', { name: 'Feed', exact: true }).click();
-  const composer = page.getByRole('textbox', { name: 'Message', exact: true });
-  await expectFullyInViewport(page, composer);
-  expect((await composer.boundingBox())!.width).toBeGreaterThan(240);
-  await composer.fill('Review the complete release evidence before approving');
-  await expectNoHorizontalOverflow(page);
-  await page.screenshot({ path: '/tmp/otto-ux-r3-automation-screens/phone-swarm-composer.png' });
-});
-
 test('personal agent: failed save preserves form and a retry creates the paused agent', async ({ page }) => {
   const { ctx, ws } = await setup(page); await ctx.dispose();
   let fail = true;
@@ -195,56 +149,6 @@ test('personal agent: failed save preserves form and a retry creates the paused 
   await dialog.getByRole('button', { name: 'Save', exact: true }).click();
   await expect(dialog).toHaveCount(0);
   await expect(page.getByText('Offline review assistant', { exact: true }).first()).toBeVisible();
-});
-
-test('proof waiver: reason is required, denied approval preserves it, retry records waiver', async ({ page }) => {
-  const { ctx, base, ws } = await setup(page);
-  const r = await ctx.post(`${base}/api/v1/workspaces/${ws}/proof-packs`, { data: { title: 'Release exception review', work_item_kind: 'manual', work_item_id: `r3-proof-${Date.now()}` } });
-  expect(r.ok()).toBeTruthy(); const pack = await r.json(); await ctx.dispose();
-  let fail = true;
-  await page.route(`**/api/v1/proof-packs/${pack.id}/waive`, route => fail
-    ? route.fulfill({ status: 403, json: { code: 'forbidden', message: 'Approval access temporarily unavailable' } }) : route.continue());
-  await page.goto('/#/proof');
-  // The ⋯ menu is built when it opens: the pack verbs (Waive…) are only there
-  // once the page has opened the pack, so wait for it before opening the menu.
-  await expect(page.getByRole('heading', { level: 1, name: 'Release exception review' })).toBeVisible({ timeout: 20_000 });
-  await page.getByRole('button', { name: 'More actions', exact: true }).click();
-  await page.getByRole('menuitem', { name: /^Waive/ }).click();
-  const dialog = page.getByRole('dialog', { name: 'Waive proof gate' });
-  await expect(dialog).toContainText('records you as the approver');
-  await dialog.getByLabel('Reason', { exact: true }).fill('Short');
-  await expect(dialog.getByRole('button', { name: 'Waive', exact: true })).toBeDisabled();
-  await dialog.getByLabel('Reason', { exact: true }).fill('Verified manually with the release evidence.');
-  await dialog.getByRole('button', { name: 'Waive', exact: true }).click();
-  await expect(page.getByText("Couldn’t waive the proof gate", { exact: true })).toBeVisible();
-  await expect(dialog.getByLabel('Reason', { exact: true })).toHaveValue('Verified manually with the release evidence.');
-  fail = false;
-  await dialog.getByRole('button', { name: 'Waive', exact: true }).click();
-  await expect(dialog).toHaveCount(0);
-  await expect(page.locator('.waived-note')).toContainText('Verified manually with the release evidence.');
-  await page.screenshot({ path: '/tmp/otto-ux-r3-automation-screens/proof-waiver-recorded.png' });
-});
-
-test('swarm feed: finishing a post keeps the next message draft', async ({ page }) => {
-  const { ctx, base, ws } = await setup(page);
-  const { swarmId } = await seedSwarm(ctx, base, ws); await ctx.dispose();
-  await page.goto('/#/swarm');
-  await page.getByRole('tab', { name: 'Feed', exact: true }).click();
-  let release!: () => void;
-  const gate = new Promise<void>(resolve => { release = resolve; });
-  let requested = false;
-  await page.route(`**/api/v1/swarm/swarms/${swarmId}/board`, async r => {
-    if (r.request().method() !== 'POST') return r.continue();
-    requested = true; await gate; await r.fulfill({ json: { id: 'synthetic-post' } });
-  });
-  const input = page.getByRole('textbox', { name: 'Message', exact: true });
-  await input.fill('Sent message');
-  await page.getByRole('button', { name: 'Post', exact: true }).click();
-  await expect.poll(() => requested).toBe(true);
-  await input.fill('Next message still being written');
-  release();
-  await expect(page.getByRole('button', { name: 'Post', exact: true })).toBeEnabled();
-  await expect(input).toHaveValue('Next message still being written');
 });
 
 test('workflow graph: completing Save retains edits made while saving', async ({ page }) => {
@@ -319,59 +223,4 @@ test('rooms: opens the latest 200 messages and pages earlier evidence', async ({
   await expect(page.locator('.msg-text')).toHaveCount(201);
   await expect(page.getByText('Evidence note 1', { exact: true })).toBeVisible();
   expect(requests.at(-1)).toEqual({ after: null, before: messages[1].id, tail: false, limit: 200 });
-});
-
-test.describe('Swarm organization keyboard flow in five themes', () => {
-  let workspaceId = '';
-  test.beforeAll(async () => {
-    const { ctx, base } = await apiCtx();
-    workspaceId = await seedWorkspace(ctx, base);
-    await seedSwarm(ctx, base, workspaceId);
-    await ctx.dispose();
-  });
-  for (const [theme, scheme, width, height, rtl] of [
-    ['native', 'light', 1440, 900, false], ['native', 'dark', 1440, 900, false],
-    ['warm', 'light', 375, 812, false], ['warm', 'dark', 834, 1112, true],
-    ['pro-dark', 'dark', 1440, 900, false],
-  ] as const) {
-    test(`org expansion and editor focus: ${theme} ${scheme} ${width}`, async ({ page }) => {
-      await page.setViewportSize({ width, height });
-      await page.addInitScript(({ workspaceId, theme, scheme }) => {
-        localStorage.setItem('otto_workspace', workspaceId);
-        localStorage.setItem('otto_rail_expanded', '0');
-        localStorage.setItem('otto_theme', theme);
-        localStorage.setItem('otto_scheme', scheme);
-      }, { workspaceId, theme, scheme });
-      await page.goto('/#/swarm');
-      if (width <= 640 || width > 1024) await page.locator('.swarm-item', { hasText: 'E2E Swarm' }).click();
-      await expect(page.getByRole('tab', { name: 'Org', exact: true })).toBeVisible();
-      if (rtl) await page.evaluate(() => document.documentElement.dir = 'rtl');
-      if (width === 834) {
-        await expect(page.locator('.switcher')).toHaveCSS('overflow-x', 'auto');
-        await page.getByRole('spinbutton', { name: 'Max parallel' }).focus();
-        await expectFullyInViewport(page, page.getByRole('spinbutton', { name: 'Max parallel' }));
-        await page.getByRole('tab', { name: 'Org', exact: true }).focus();
-        await expectFullyInViewport(page, page.getByRole('tab', { name: 'Org', exact: true }));
-      }
-      const toggle = page.locator('.org-row .twist').first();
-      await expect(toggle).toBeVisible();
-      const rows = await page.locator('.org-row').count();
-      await toggle.focus(); await page.keyboard.press('Enter');
-      await expect(toggle).toHaveAttribute('aria-expanded', 'false');
-      expect(await page.locator('.org-row').count()).toBeLessThan(rows);
-      await page.keyboard.press('Enter');
-      await expect(page.locator('.org-row')).toHaveCount(rows);
-      await expectNoHorizontalOverflow(page);
-      await page.screenshot({ path: `/tmp/otto-ux-r3-automation-screens/${theme}-${scheme}-${width}-org.png` });
-      const editorTrigger = page.locator('.org-row .who').first();
-      await editorTrigger.focus(); await page.keyboard.press('Enter');
-      const dialog = page.getByRole('dialog');
-      await expect(dialog.getByLabel('Name', { exact: true })).not.toHaveValue('');
-      await expectFullyInViewport(page, dialog);
-      await page.screenshot({ animations: 'disabled', path: `/tmp/otto-ux-r3-automation-screens/${theme}-${scheme}-${width}-swarm-agent.png` });
-      await page.keyboard.press('Escape');
-      await expect(dialog).toHaveCount(0);
-      await expect(editorTrigger).toBeFocused();
-    });
-  }
 });

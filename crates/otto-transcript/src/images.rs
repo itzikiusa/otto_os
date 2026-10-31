@@ -37,6 +37,13 @@ impl ImageStore {
         hex::encode(h.finalize())
     }
 
+    /// Stable id for raw image bytes (e.g. `file://` media attachments).
+    pub fn id_for_bytes(bytes: &[u8]) -> String {
+        let mut h = Sha1::new();
+        h.update(bytes);
+        hex::encode(h.finalize())
+    }
+
     /// File extension for a media type (unknown types are stored as `.png` —
     /// the route serves the media type from the block, not the extension).
     pub fn ext_for(media_type: &str) -> &'static str {
@@ -64,6 +71,23 @@ impl ImageStore {
         if let Err(e) = std::fs::create_dir_all(&self.dir).and_then(|_| {
             let tmp = self.dir.join(format!("{id}.tmp"));
             std::fs::write(&tmp, &bytes)?;
+            std::fs::rename(&tmp, &path)
+        }) {
+            tracing::debug!(%id, "transcript image: write failed: {e}");
+        }
+        id
+    }
+
+    /// Persist raw image `bytes` (if not already there) and return the id.
+    pub fn put_bytes(&self, media_type: &str, bytes: &[u8]) -> String {
+        let id = Self::id_for_bytes(bytes);
+        let path = self.dir.join(format!("{id}.{}", Self::ext_for(media_type)));
+        if path.is_file() {
+            return id;
+        }
+        if let Err(e) = std::fs::create_dir_all(&self.dir).and_then(|_| {
+            let tmp = self.dir.join(format!("{id}.tmp"));
+            std::fs::write(&tmp, bytes)?;
             std::fs::rename(&tmp, &path)
         }) {
             tracing::debug!(%id, "transcript image: write failed: {e}");

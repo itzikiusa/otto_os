@@ -126,7 +126,6 @@ const GROUP_OF: Record<string, string> = {
   Analysis: 'Discover',
   Questions: 'Discover',
   Notes: 'Discover',
-  Discovery: 'Discover',
   Refine: 'Discover',
   Plan: 'Deliver',
   'Test cases': 'Deliver',

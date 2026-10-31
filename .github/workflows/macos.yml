@@ -50,7 +50,6 @@ on:
       - 'crates/otto-server/**'
       - 'crates/otto-sessions/**'
       - 'crates/otto-ssh/**'
-      - 'crates/otto-swarm/**'
       - 'crates/otto-telemetry-collector/**'
       - 'crates/otto-workflows/**'
       - 'crates/ottod/**'
@@ -87,7 +86,6 @@ on:
       - 'crates/otto-server/**'
       - 'crates/otto-sessions/**'
       - 'crates/otto-ssh/**'
-      - 'crates/otto-swarm/**'
       - 'crates/otto-telemetry-collector/**'
       - 'crates/otto-workflows/**'
       - 'crates/ottod/**'
@@ -110,6 +108,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  CARGO_INCREMENTAL: '0'
   CARGO_PROFILE_DEV_DEBUG: 0
   CARGO_PROFILE_TEST_DEBUG: 0
 
@@ -149,7 +148,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.daemon == 'true'
     runs-on: macos-latest
-    timeout-minutes: 90
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7.0.1
 
@@ -158,10 +157,27 @@ jobs:
         with:
           components: clippy
 
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2.9.3
+      - name: Cache cargo + workspace targets
+        id: cargo-cache
+        uses: actions/cache@v6.1.0
         with:
-          shared-key: macos-daemon
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            ~/.cargo/git/checkouts
+            target/debug/.fingerprint
+            target/debug/build
+            target/debug/deps
+            target/debug/ottod
+            target/.ci-source-hashes.json
+          key: cargo-full-${{ runner.os }}-daemon-v1-${{ hashFiles('**/Cargo.toml', 'Cargo.lock', '.cargo/config.toml') }}-${{ hashFiles('crates/**', 'vendor/**') }}
+          restore-keys: |
+            cargo-full-${{ runner.os }}-daemon-v1-${{ hashFiles('**/Cargo.toml', 'Cargo.lock', '.cargo/config.toml') }}-
+            cargo-full-${{ runner.os }}-daemon-v1-
+
+      - name: Restore cached source mtimes
+        run: python3 scripts/ci-cargo-cache.py restore
 
       - name: Install nextest
         uses: taiki-e/install-action@v2.88.1
@@ -176,19 +192,35 @@ jobs:
       - name: cargo clippy (macOS cfg)
         run: >-
           cargo clippy
-          -p otto-apiclient -p otto-automation -p otto-browser -p otto-keychain -p otto-pty -p otto-rooms -p otto-sandbox -p otto-server -p otto-sessions -p otto-ssh -p otto-telemetry-collector -p ottod
-          --all-targets -- -D warnings
+          -p otto-apiclient -p otto-automation -p otto-brokers -p otto-browser -p otto-keychain -p otto-pty -p otto-rooms -p otto-sandbox -p otto-server -p otto-sessions -p otto-ssh -p otto-telemetry-collector -p ottod
+          --features otto-server/test-util
+          --lib --bins --test holder --test ring_allocation --test seatbelt_exec --test agent_messaging --test broadcast_e2e --test folder_trust_overcome --test isolation --test persist_restart --test terminal_latency --test lightpanda --test lightpanda_login --test snips --test profile_lock
+          -- -D warnings
 
       # Unit tests plus each crate's integration binaries — except
       # otto-server's `it`, platform-neutral HTTP/DB coverage that Linux CI
-      # already runs in full. The Keychain-touching cases are #[ignore]d /
-      # opt-in; the default set still runs the macOS cfg branches.
+      # already runs in full (omitted from `--test` so Cargo never compiles it
+      # on macOS, while `--features otto-server/test-util` compiles `otto-server`
+      # once for both `ottod` and `snips`).
+      - name: Build test binaries
+        run: >-
+          cargo nextest run --no-run
+          -p otto-apiclient -p otto-automation -p otto-brokers -p otto-browser -p otto-keychain -p otto-pty -p otto-rooms -p otto-sandbox -p otto-server -p otto-sessions -p otto-ssh -p otto-telemetry-collector -p ottod
+          --features otto-server/test-util
+          --lib --bins --test holder --test ring_allocation --test seatbelt_exec --test agent_messaging --test broadcast_e2e --test folder_trust_overcome --test isolation --test persist_restart --test terminal_latency --test lightpanda --test lightpanda_login --test snips --test profile_lock
+          --profile ci
+
+      - name: Prepare cargo cache manifest
+        if: steps.cargo-cache.outputs.cache-hit != 'true'
+        run: python3 scripts/ci-cargo-cache.py prepare-save
+
       - name: cargo nextest
         run: >-
           cargo nextest run
-          -p otto-apiclient -p otto-automation -p otto-browser -p otto-keychain -p otto-pty -p otto-rooms -p otto-sandbox -p otto-server -p otto-sessions -p otto-ssh -p otto-telemetry-collector -p ottod
+          -p otto-apiclient -p otto-automation -p otto-brokers -p otto-browser -p otto-keychain -p otto-pty -p otto-rooms -p otto-sandbox -p otto-server -p otto-sessions -p otto-ssh -p otto-telemetry-collector -p ottod
+          --features otto-server/test-util
+          --lib --bins --test holder --test ring_allocation --test seatbelt_exec --test agent_messaging --test broadcast_e2e --test folder_trust_overcome --test isolation --test persist_restart --test terminal_latency --test lightpanda --test lightpanda_login --test snips --test profile_lock
           --profile ci --no-fail-fast
-          -E 'not (package(otto-server) & binary(it))'
 
   desktop:
     name: Desktop app (Tauri, macOS)

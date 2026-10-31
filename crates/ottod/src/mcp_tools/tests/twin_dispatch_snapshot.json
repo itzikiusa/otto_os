@@ -249,22 +249,6 @@
       "rows": 0
     }
   },
-  "otto_list_swarms {}": {
-    "args": {},
-    "requests": [
-      [
-        "GET",
-        "/refs/directory?kind=swarm&prefer_workspace_id=ws-test",
-        null
-      ]
-    ],
-    "result": {
-      "ok": {
-        "ok": true
-      },
-      "rows": 0
-    }
-  },
   "otto_list_repos {}": {
     "args": {},
     "requests": [

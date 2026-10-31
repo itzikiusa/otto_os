@@ -124,12 +124,13 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           "$HOME/.local/bin/clickhouse" local --version
 
-      # otto-server links librdkafka (built from source: cmake + libcurl headers).
+      # otto-server links librdkafka (built from source: cmake + libcurl/openssl headers).
       - name: Install librdkafka build deps
         run: |
-          sudo grep -lE 'dl\.google\.com|packages\.microsoft\.com' /etc/apt/sources.list.d/* 2>/dev/null | xargs -r sudo rm -f
-          sudo apt-get update || echo "::warning::apt-get update failed for some sources; installing from what refreshed"
-          sudo apt-get install -y cmake libcurl4-openssl-dev
+          if ! dpkg -s cmake libcurl4-openssl-dev pkg-config libssl-dev >/dev/null 2>&1; then
+            sudo grep -lE 'dl\.google\.com|packages\.microsoft\.com' /etc/apt/sources.list.d/* 2>/dev/null | xargs -r sudo rm -f
+            sudo python3 scripts/ci-apt-install.py cmake libcurl4-openssl-dev pkg-config libssl-dev
+          fi
 
       - name: Rows-read ratchet at 600 pods
         shell: bash

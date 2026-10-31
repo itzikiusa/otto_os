@@ -127,7 +127,6 @@ function storyDetail(fx: Fixture): Record<string, unknown> {
       created_at: now,
     },
     counts: { versions: 1, analyses: 0, open_questions: 0, notes: 0, testcases: 0 },
-    swarm_link: null,
   };
 }
 

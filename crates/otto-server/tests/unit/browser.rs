@@ -11,32 +11,10 @@ use http_body_util::BodyExt;
 use otto_core::auth::AuthUser;
 use otto_core::domain::User;
 use otto_core::secrets::SecretStore;
-use otto_core::Result;
-use otto_rbac::RbacRoleChecker;
-use otto_sessions::{ProviderRegistry, SessionManager};
-use otto_state::{
-    ConnectionSectionsRepo, ConnectionsRepo, DbExplorerRepo, DbPool, GitStore, IntegrationsRepo,
-    IssuesRepo, ProductRepo, ReviewsRepo, SessionsRepo, SkillEvalsRepo, SwarmRepo, WorkspacesRepo,
-};
+use otto_state::DbPool;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use tempfile::TempDir;
-use tokio::sync::broadcast;
 use tower::ServiceExt; // for `oneshot`
-
-struct NoopSpawner;
-impl otto_connections::Spawner for NoopSpawner {
-    fn spawn_connection<'a>(
-        &'a self,
-        _ws_id: &'a Id,
-        _user_id: &'a Id,
-        _conn: &'a otto_core::domain::Connection,
-        _spec: otto_pty::CommandSpec,
-        _first_command: Option<String>,
-        _title: Option<String>,
-    ) -> otto_core::auth::BoxFuture<'a, Result<otto_core::domain::Session>> {
-        Box::pin(async { Err(Error::Internal("noop spawner".into())) })
-    }
-}
 
 pub(crate) async fn mem_pool() -> DbPool {
     let opts = SqliteConnectOptions::new()
@@ -68,150 +46,18 @@ pub(crate) fn root_user() -> User {
 }
 
 pub(crate) async fn test_ctx(pool: &DbPool, data_dir: PathBuf) -> ServerCtx {
-    let (events, _rx) = broadcast::channel(64);
     // Browser-credentials tests need a real (non-erroring) `SecretStore`
     // to round-trip put/get/delete — `otto_keychain::FileStore` is exactly
     // the `OTTO_SECRETS=file` dev/CI fallback the real daemon uses, backed
     // here by this test's own tempdir so nothing touches the real macOS
     // Keychain.
     let secrets: Arc<dyn SecretStore> = Arc::new(otto_keychain::FileStore::new(&data_dir));
-    let roles = Arc::new(RbacRoleChecker::new(pool.clone()));
-    let repo = SessionsRepo::new(pool.clone());
-    let providers = ProviderRegistry::new(None);
-    let manager = Arc::new(SessionManager::new(repo, events.clone(), providers));
-    let orchestrator = Arc::new(otto_orchestrator::Orchestrator::new("claude"));
-    let improve_engine = Arc::new(otto_improve::ImprovementEngine {
-        improvements: otto_state::ImprovementsRepo::new(pool.clone()),
-        sessions: SessionsRepo::new(pool.clone()),
-        workspaces: WorkspacesRepo::new(pool.clone()),
-        producer: Arc::new(otto_improve::RealProposalProducer::new(
-            orchestrator.clone(),
-        )),
-        events: events.clone(),
-        library_root: PathBuf::from("/tmp/otto-test-lib-browser"),
-    });
-    let connections = Arc::new(otto_connections::ConnectionsService::new(
-        ConnectionsRepo::new(pool.clone()),
-        ConnectionSectionsRepo::new(pool.clone()),
-        secrets.clone(),
+    let mut ctx = ServerCtx::for_tests_with_secrets(pool, data_dir.clone(), secrets).await;
+    ctx.browser = Arc::new(BrowserEngineHandle::new(
+        Some("/definitely/not/a/real/lightpanda/binary".into()),
+        data_dir,
     ));
-    let db_explorer = Arc::new(otto_dbviewer::DbViewerService::new(
-        ConnectionsRepo::new(pool.clone()),
-        secrets.clone(),
-        DbExplorerRepo::new(pool.clone()),
-    ));
-    let brokers = Arc::new(otto_brokers::BrokersService::new(
-        otto_state::BrokerClustersRepo::new(pool.clone()),
-        secrets.clone(),
-        None,
-    ));
-    let mcp = Arc::new(otto_mcp::McpService::new(pool.clone(), secrets.clone()));
-    let swarm_repo = SwarmRepo::new(pool.clone());
-    let swarm = Arc::new(otto_swarm::SwarmService::new(swarm_repo.clone()));
-    let product_repo = ProductRepo::new(pool.clone());
-    let product = Arc::new(otto_product::ProductService::new(
-        product_repo.clone(),
-        IssuesRepo::new(pool.clone()),
-        secrets.clone(),
-    ));
-    let usage = otto_usage::UsageEngine::start(
-        otto_usage::UsageConfig {
-            enabled: false, // This fixture does not exercise metrics or start ClickHouse.
-            ..Default::default()
-        },
-        PathBuf::from("/tmp/otto-test-usage-browser"),
-    )
-    .await;
-    let context_library = otto_context::Library::new("/tmp/otto-test-ctxlib-browser");
-
-    ServerCtx {
-        pool: pool.clone(),
-        secrets,
-        events: events.clone(),
-        authenticator: Arc::new(otto_rbac::RbacAuthenticator::new(pool.clone())),
-        roles,
-        auth_cache: otto_rbac::AuthCache::new(),
-        version: "test".into(),
-        base_url: "http://127.0.0.1:0".into(),
-        data_dir: data_dir.clone(),
-        plugins: Arc::new(crate::plugins::PluginManager::new(
-            otto_state::PluginsRepo::new(pool.clone()),
-            PathBuf::from("/tmp/otto-test-plugins-browser"),
-            data_dir.clone(),
-            "http://127.0.0.1:7700/api/v1/plugin-host".into(),
-        )),
-        manager,
-        workspaces: WorkspacesRepo::new(pool.clone()),
-        connections,
-        db_explorer,
-        db_assist: crate::db_assist::new_registry(),
-        transcript_cache: Default::default(),
-        rooms: Default::default(),
-        game_rooms: Default::default(),
-        brokers,
-        mcp,
-        spawner: Arc::new(NoopSpawner),
-        git_store: GitStore::new(pool.clone()),
-        issues_store: IssuesRepo::new(pool.clone()),
-        integrations_store: IntegrationsRepo::new(pool.clone()),
-        channel_bridge: None,
-        wf_skip_current: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
-        reviews_store: ReviewsRepo::new(pool.clone()),
-        findings_store: otto_state::ReviewFindingsRepo::new(pool.clone()),
-        finding_events_store: otto_state::FindingEventsRepo::new(pool.clone()),
-        repo_rules_store: otto_state::RepoRulesRepo::new(pool.clone()),
-        proof_packs_store: otto_state::ReviewProofPacksRepo::new(pool.clone()),
-        skill_evals_store: SkillEvalsRepo::new(pool.clone()),
-        golden_tasks_store: otto_state::GoldenTasksRepo::new(pool.clone()),
-        eval_matrices_store: otto_state::EvalMatricesRepo::new(pool.clone()),
-        skill_eval_cancels: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-        skill_reviews_store: otto_state::SkillReviewsRepo::new(pool.clone()),
-        skill_review_cancels: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-        review_agent_cancels: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-        review_cancels: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-        orchestrator,
-        improve_engine,
-        context_library,
-        usage,
-        telemetry: None,
-        product,
-        product_repo,
-        attachment_repo: otto_state::ProductAttachmentRepo::new(pool.clone()),
-        discovery_repo: otto_state::ProductDiscoveryRepo::new(pool.clone()),
-        refinement_repo: otto_state::ProductRefinementRepo::new(pool.clone()),
-        mockup_repo: otto_state::ProductMockupRepo::new(pool.clone()),
-        discovery_chat_repo: otto_state::DiscoveryChatRepo::new(pool.clone()),
-        canvas_repo: otto_state::CanvasRepo::new(pool.clone()),
-        product_agent_cancels: otto_core::cancel::new_cancel_registry(),
-        design_jobs: crate::design_blender::new_job_registry(),
-        memory: Arc::new(otto_memory::MemoryService::with_defaults(pool.clone())),
-        vault: Arc::new(otto_vault::VaultEngine::new(pool.clone())),
-        vault_docs_runs: crate::vault_docs_agent::new_run_registry(),
-        vault_docs_refine: crate::vault_docs_agent::new_refine_registry(),
-        swarm,
-        swarm_repo,
-        swarm_coords: otto_swarm::runtime::engine::new_registry(),
-        swarm_run_cancels: otto_swarm::runtime::run::new_cancel_registry(),
-        goal_loops_repo: otto_state::GoalLoopsRepo::new(pool.clone()),
-        goal_loops: crate::goal_loop::new_registry(),
-        workgraph: Arc::new(otto_workgraph::WorkGraphService::new(
-            otto_state::WorkGraphRepo::new(pool.clone()),
-            events.clone(),
-        )),
-        scheduled_tasks: otto_state::ScheduledTasksRepo::new(pool.clone()),
-        proof_repo: otto_state::ProofRepo::new(pool.clone()),
-        proof_locks: crate::proof::new_locks(),
-        runs: otto_state::RunsRepo::new(pool.clone()),
-        runs_engine: crate::run_engine::RunEngine::new(),
-        browser_tabs: otto_state::BrowserTabsRepo::new(pool.clone()),
-        browser_annotations: otto_state::BrowserAnnotationsRepo::new(pool.clone()),
-        browser_credentials: otto_state::BrowserCredentialsRepo::new(pool.clone()),
-        ui_bridge: Default::default(),
-        browser: Arc::new(BrowserEngineHandle::new(
-            Some("/definitely/not/a/real/lightpanda/binary".into()),
-            data_dir,
-        )),
-    }
+    ctx
 }
 
 fn browser_router(ctx: ServerCtx) -> Router {

@@ -319,7 +319,6 @@ fn mk_run(status: RunStatus, nodes: Vec<NodeRunState>) -> WorkflowRun {
         approval_note: None,
         approved_at: None,
         workflow_version: None,
-        proof_pack_id: None,
         resume_attempts: 0,
         context_dir: None,
     }
@@ -758,7 +757,6 @@ fn side_effect_kinds_are_not_restart_resumable() {
     for k in [
         "git_pr",
         "channel_notify",
-        "swarm_task",
         "product_publish",
         "api_run",
         "http_request",
@@ -995,14 +993,13 @@ fn run_summary_has_status_steps_and_score() {
             json!({ "score": 92, "passed": true }),
         ),
     ];
-    let (brief, full) = build_run_summary(&wf, &states, RunStatus::Success, Some("pack1"));
+    let (brief, full) = build_run_summary(&wf, &states, RunStatus::Success);
     assert!(brief.contains("Write tests"));
     assert!(brief.contains("2/2 steps ok"));
     assert!(brief.contains("92/100"), "brief shows the review score");
     assert!(brief.contains("summary.md"));
     assert!(full.contains("## Steps"));
     assert!(full.contains("review_run"));
-    assert!(full.contains("pack1"), "full summary names the proof pack");
 }
 
 #[test]

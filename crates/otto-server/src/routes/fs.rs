@@ -1,20 +1,25 @@
 //! `GET /api/v1/fs/browse` — daemon-side filesystem browser for folder pickers.
 //! `GET /api/v1/fs/read`   — read a file's contents (read-only, ~400KB cap).
+//! `GET /api/v1/fs/raw`    — serve allowlisted inline image/PDF media (16 MiB cap).
 //! `GET /api/v1/fs/stat`   — does a path exist, and is it a folder (no listing).
 //!
-//! All three require root or Agents/Edit (see `policy.rs`) and use the
+//! All four require root or Agents/Edit (see `policy.rs`) and use the
 //! filesystem permissions of the OS account running ottod. Paths are
 //! canonicalized; non-root callers are additionally refused Otto's data dir and
 //! the credential locations in [`sandbox`] (see `non_root_fs_denied`). Existing token
 //! endpoint scopes remain enforced by the server middleware. Browsing returns
 //! metadata; reading returns bounded regular-file content, never device/FIFO data.
 
-use axum::extract::Query;
+use axum::body::Body;
+use axum::extract::{Query, State};
+use axum::http::{header, StatusCode};
+use axum::response::Response;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
 use crate::auth::CurrentUser;
 use crate::error::{ApiError, ApiResult};
+use crate::state::ServerCtx;
 use otto_core::Error;
 
 pub(crate) mod sandbox {
@@ -519,6 +524,311 @@ pub(crate) fn read_at_most(path: &std::path::Path, limit: usize) -> std::io::Res
     let mut buf = Vec::with_capacity(limit.min(64 * 1024));
     file.take(limit as u64).read_to_end(&mut buf)?;
     Ok(buf)
+}
+
+/// Hard cap for `GET /api/v1/fs/raw` (16 MiB).
+pub(crate) const MAX_RAW_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Strict sandbox CSP applied to all `/fs/raw` responses (prevents script
+/// execution in inline SVG/PDF previews).
+const RAW_CSP: &str =
+    "sandbox; default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'";
+
+/// Allowlisted MIME types for `GET /api/v1/fs/raw`, matched strictly by
+/// lowercase file extension. Everything else returns `415 Unsupported Media Type`.
+pub(crate) fn raw_mime_for_path(path: &std::path::Path) -> Option<&'static str> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())?
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "gif" => Some("image/gif"),
+        "webp" => Some("image/webp"),
+        "avif" => Some("image/avif"),
+        "bmp" => Some("image/bmp"),
+        "ico" => Some("image/x-icon"),
+        "svg" => Some("image/svg+xml"),
+        "pdf" => Some("application/pdf"),
+        _ => None,
+    }
+}
+
+/// Files that `/fs/raw` refuses unconditionally — even for the root user:
+/// Otto's SQLite DB, secret sidecars, private keys/certs, and everything in
+/// [`otto_core::secret_paths::is_denied_file`].
+fn is_raw_denied_file(canonical: &std::path::Path) -> bool {
+    let name = canonical
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    name.starts_with("otto.db")
+        || name.starts_with("secrets")
+        || name.ends_with(".key")
+        || name.ends_with(".pem")
+        || otto_core::secret_paths::is_denied_file(canonical)
+}
+
+/// Canonicalizes `p` when present and folds away macOS `/System/Volumes/Data`
+/// firmlinks so prefix comparisons agree across spellings.
+#[allow(clippy::disallowed_methods)] // sync helper: runs on the blocking pool
+fn canon_folded(p: &std::path::Path) -> std::path::PathBuf {
+    let resolved = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    otto_core::secret_paths::strip_firmlink(&resolved)
+}
+
+/// Media subtrees inside otherwise-protected directories (`data_dir`,
+/// `~/.gemini`, `~/.config`) that `/fs/raw` explicitly permits for inline
+/// conversation/artifact previews:
+/// - `<data_dir>/snips/<file...>`
+/// - `<data_dir>/sessions/<safe_sid>/inbox/<file...>` (never session logs/tokens)
+/// - `<data_dir>/e2e-transcripts/<file...>`
+/// - `~/.gemini/antigravity*/brain/<file...>`
+/// - `~/.config/antigravity/brain/<file...>`
+#[allow(clippy::disallowed_methods)] // sync helper: runs on the blocking pool
+fn is_in_safe_media_subtree(canonical: &std::path::Path, data_dirs: &[std::path::PathBuf]) -> bool {
+    use std::path::Component;
+    let folded = otto_core::secret_paths::strip_firmlink(canonical);
+    for base in data_dirs {
+        let snips = base.join("snips");
+        if folded.starts_with(&snips) && folded != snips {
+            return true;
+        }
+        let e2e = base.join("e2e-transcripts");
+        if folded.starts_with(&e2e) && folded != e2e {
+            return true;
+        }
+        if let Ok(rel) = folded.strip_prefix(base.join("sessions")) {
+            let mut comps = rel.components();
+            if let (
+                Some(Component::Normal(sid)),
+                Some(Component::Normal(inbox)),
+                Some(Component::Normal(_)),
+            ) = (comps.next(), comps.next(), comps.next())
+            {
+                if inbox == "inbox"
+                    && otto_core::paths::safe_component(&sid.to_string_lossy()).is_some()
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    if let Some(home) = otto_core::secret_paths::home_dir() {
+        if let Ok(rel) = folded.strip_prefix(home.join(".gemini")) {
+            let mut comps = rel.components();
+            if let (
+                Some(Component::Normal(app_dir)),
+                Some(Component::Normal(brain)),
+                Some(Component::Normal(_)),
+            ) = (comps.next(), comps.next(), comps.next())
+            {
+                if app_dir.to_string_lossy().starts_with("antigravity") && brain == "brain" {
+                    return true;
+                }
+            }
+        }
+        if let Ok(rel) = folded.strip_prefix(home.join(".config/antigravity/brain")) {
+            if matches!(rel.components().next(), Some(Component::Normal(_))) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn build_raw_response(mime: &'static str, bytes: Vec<u8>) -> ApiResult<Response> {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, mime)
+        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+        .header(header::CONTENT_SECURITY_POLICY, RAW_CSP)
+        .header(header::CACHE_CONTROL, "private, max-age=300")
+        .body(Body::from(bytes))
+        .map_err(|e| ApiError(Error::Internal(format!("response build: {e}"))))
+}
+
+/// `GET /api/v1/fs/raw?path=<abs-or-~-path>` — inline image/PDF preview with
+/// strict extension MIME allowlist, secret/state refusal, workspace/media-dir
+/// confinement, `nosniff`, and `CSP: sandbox`.
+pub async fn raw_file(
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+    Query(params): Query<ReadParams>,
+) -> ApiResult<Response> {
+    if params.path.trim().is_empty() {
+        return Err(ApiError(Error::Invalid("path is required".into())));
+    }
+    let restricted = !user.is_root;
+    let mut raw_allowed_roots: Vec<String> = Vec::new();
+    if restricted {
+        let ws_rows = ctx
+            .workspaces
+            .list_for_user(&user.id)
+            .await
+            .map_err(ApiError)?;
+        let member_ws_ids: std::collections::HashSet<_> =
+            ws_rows.iter().map(|(w, _)| w.id.clone()).collect();
+        for (w, _) in &ws_rows {
+            if !w.root_path.trim().is_empty() {
+                raw_allowed_roots.push(w.root_path.clone());
+            }
+        }
+        if let Ok(repos) = ctx.git_store.list_all_repos().await {
+            for r in repos {
+                if member_ws_ids.contains(&r.workspace_id) && !r.path.trim().is_empty() {
+                    raw_allowed_roots.push(r.path);
+                }
+            }
+        }
+        let scopes: Vec<_> = member_ws_ids
+            .iter()
+            .map(|wid| otto_state::SessionScope {
+                workspace_id: wid.clone(),
+                owner: None,
+            })
+            .collect();
+        if !scopes.is_empty() {
+            if let Ok(sessions) = ctx
+                .manager
+                .list_filtered(&scopes, &otto_state::SessionListFilter::default())
+                .await
+            {
+                for s in sessions {
+                    if !s.cwd.trim().is_empty() {
+                        raw_allowed_roots.push(s.cwd);
+                    }
+                }
+            }
+        }
+    }
+    let data_dir = ctx.data_dir.clone();
+    static ADMISSION: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> =
+        std::sync::OnceLock::new();
+    let admission = ADMISSION
+        .get_or_init(|| std::sync::Arc::new(tokio::sync::Semaphore::new(8)))
+        .clone();
+    let (mime, bytes) = filesystem_work(
+        admission,
+        std::time::Duration::from_secs(10),
+        move |cancel| {
+            browse_canceled(&cancel)?;
+            let out = raw_file_sync(&params.path, restricted, &data_dir, &raw_allowed_roots);
+            browse_canceled(&cancel)?;
+            out
+        },
+    )
+    .await?;
+    build_raw_response(mime, bytes)
+}
+
+#[allow(clippy::disallowed_methods)] // sync helper: raw_file runs it via filesystem_work (blocking pool)
+fn raw_file_sync(
+    raw_path: &str,
+    restricted: bool,
+    data_dir: &std::path::Path,
+    allowed_roots: &[String],
+) -> ApiResult<(&'static str, Vec<u8>)> {
+    if raw_path.trim().is_empty() {
+        return Err(ApiError(Error::Invalid("path is required".into())));
+    }
+    let expanded = expand_home(raw_path.trim())?;
+    let target = std::path::Path::new(&expanded);
+    let canonical = target
+        .canonicalize()
+        .map_err(|e| filesystem_error("resolve file", target, e))?;
+
+    if is_raw_denied_file(&canonical) {
+        return Err(ApiError(Error::Forbidden(format!(
+            "{} holds credentials or Otto's own state and cannot be served",
+            canonical.display()
+        ))));
+    }
+
+    let mut data_dirs = vec![canon_folded(data_dir)];
+    for d in otto_core::secret_paths::otto_data_dirs() {
+        if !data_dirs.contains(&d) {
+            data_dirs.push(d);
+        }
+    }
+    let folded_canonical = otto_core::secret_paths::strip_firmlink(&canonical);
+    let in_safe_subtree = is_in_safe_media_subtree(&canonical, &data_dirs);
+
+    if restricted {
+        if !in_safe_subtree {
+            non_root_canonical_denied(&canonical)?;
+            let in_workspace_or_repo = allowed_roots.iter().any(|r| {
+                let Ok(exp) = expand_home(r.trim()) else {
+                    return false;
+                };
+                let Ok(canon_root) = exp.canonicalize() else {
+                    return false;
+                };
+                let folded_root = otto_core::secret_paths::strip_firmlink(&canon_root);
+                folded_canonical.starts_with(&folded_root)
+            });
+            if !in_workspace_or_repo {
+                return Err(ApiError(Error::Forbidden(format!(
+                    "{} is outside registered workspaces and allowed media directories",
+                    canonical.display()
+                ))));
+            }
+        }
+    } else {
+        // Root may read any non-secret file on disk (like `/fs/read`), except
+        // inside Otto's own state directory where only `snips/`,
+        // `sessions/*/inbox/`, `e2e-transcripts/`, and agent work areas are served.
+        let in_data_dir = data_dirs.iter().any(|d| folded_canonical.starts_with(d));
+        if in_data_dir && !in_safe_subtree {
+            let in_agent_work_area = data_dirs.iter().any(|d| {
+                otto_sandbox::AGENT_DATA_SUBDIRS
+                    .iter()
+                    .any(|sub| folded_canonical.starts_with(d.join(sub)))
+            });
+            if !in_agent_work_area {
+                return Err(ApiError(Error::Forbidden(format!(
+                    "{} is inside Otto's state directory outside allowed media folders",
+                    canonical.display()
+                ))));
+            }
+        }
+    }
+
+    let metadata = std::fs::metadata(&canonical)
+        .map_err(|e| filesystem_error("inspect file", &canonical, e))?;
+    if !metadata.is_file() {
+        return Err(ApiError(Error::Invalid(format!(
+            "not a regular file: {}",
+            canonical.display()
+        ))));
+    }
+
+    let mime = raw_mime_for_path(&canonical).ok_or_else(|| {
+        ApiError(Error::UnsupportedMedia(format!(
+            "unsupported file extension for /fs/raw: {}",
+            canonical.display()
+        )))
+    })?;
+
+    if metadata.len() > MAX_RAW_BYTES {
+        return Err(ApiError(Error::PayloadTooLarge(format!(
+            "file exceeds 16 MiB cap: {}",
+            canonical.display()
+        ))));
+    }
+
+    let bytes = read_at_most(&canonical, (MAX_RAW_BYTES + 1) as usize)
+        .map_err(|e| filesystem_error("read file", &canonical, e))?;
+    if bytes.len() as u64 > MAX_RAW_BYTES {
+        return Err(ApiError(Error::PayloadTooLarge(format!(
+            "file exceeds 16 MiB cap: {}",
+            canonical.display()
+        ))));
+    }
+
+    Ok((mime, bytes))
 }
 
 #[cfg(test)]
@@ -1071,5 +1381,143 @@ mod tests {
         assert!(super::sandbox::is_denied_file(std::path::Path::new(
             "/fixture/id_ed25519"
         )));
+    }
+
+    #[test]
+    fn raw_file_serves_png_with_nosniff_and_sandbox_csp_and_rejects_disallowed_paths() {
+        use axum::http::{header, StatusCode};
+
+        let data_dir = tempfile::tempdir().unwrap();
+        let ws_dir = tempfile::tempdir().unwrap();
+        let outside_dir = tempfile::tempdir().unwrap();
+
+        // 1x1 valid PNG fixture inside workspace root.
+        let png_bytes: &[u8] = &[
+            0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, b'I', b'H',
+            b'D', b'R',
+        ];
+        let png_path = ws_dir.path().join("diagram.png");
+        std::fs::write(&png_path, png_bytes).unwrap();
+
+        let roots = vec![ws_dir.path().to_string_lossy().into_owned()];
+        let (mime, body) =
+            super::raw_file_sync(png_path.to_str().unwrap(), true, data_dir.path(), &roots)
+                .expect("valid workspace png should succeed");
+        assert_eq!(mime, "image/png");
+        assert_eq!(body, png_bytes);
+
+        let resp = super::build_raw_response(mime, body).unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "image/png"
+        );
+        assert_eq!(
+            resp.headers()
+                .get(header::X_CONTENT_TYPE_OPTIONS)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "nosniff"
+        );
+        let csp = resp
+            .headers()
+            .get(header::CONTENT_SECURITY_POLICY)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(csp.starts_with("sandbox;"), "unexpected CSP: {csp}");
+        assert_eq!(
+            resp.headers()
+                .get(header::CACHE_CONTROL)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "private, max-age=300"
+        );
+
+        // Unsupported extension (.rs) -> 415 Unsupported Media Type.
+        let rs_path = ws_dir.path().join("main.rs");
+        std::fs::write(&rs_path, "fn main() {}").unwrap();
+        assert!(matches!(
+            super::raw_file_sync(rs_path.to_str().unwrap(), false, data_dir.path(), &[])
+                .unwrap_err()
+                .0,
+            otto_core::Error::UnsupportedMedia(_)
+        ));
+
+        // Secret / DB files (.env, .pem, otto.db) -> 403 Forbidden even for root.
+        for secret_name in [".env", "server.pem", "otto.db", "secrets.json"] {
+            let p = ws_dir.path().join(secret_name);
+            std::fs::write(&p, "secret").unwrap();
+            assert!(
+                matches!(
+                    super::raw_file_sync(p.to_str().unwrap(), false, data_dir.path(), &[])
+                        .unwrap_err()
+                        .0,
+                    otto_core::Error::Forbidden(_)
+                ),
+                "{secret_name} must be 403 Forbidden"
+            );
+        }
+
+        // Missing file -> 404 NotFound.
+        let missing = ws_dir.path().join("missing.png");
+        assert!(matches!(
+            super::raw_file_sync(missing.to_str().unwrap(), true, data_dir.path(), &roots)
+                .unwrap_err()
+                .0,
+            otto_core::Error::NotFound(_)
+        ));
+
+        // Non-root outside registered workspace -> 403 Forbidden.
+        let outside_png = outside_dir.path().join("outside.png");
+        std::fs::write(&outside_png, png_bytes).unwrap();
+        assert!(matches!(
+            super::raw_file_sync(outside_png.to_str().unwrap(), true, data_dir.path(), &roots)
+                .unwrap_err()
+                .0,
+            otto_core::Error::Forbidden(_)
+        ));
+
+        // Non-root inside `<data_dir>/snips/` and `<data_dir>/sessions/<sid>/inbox/` -> 200,
+        // while `<data_dir>/sessions/<sid>/other.png` -> 403!
+        let snip_png = data_dir.path().join("snips/s1.png");
+        std::fs::create_dir_all(snip_png.parent().unwrap()).unwrap();
+        std::fs::write(&snip_png, png_bytes).unwrap();
+        assert_eq!(
+            super::raw_file_sync(snip_png.to_str().unwrap(), true, data_dir.path(), &[])
+                .unwrap()
+                .0,
+            "image/png"
+        );
+
+        let inbox_png = data_dir.path().join("sessions/sess_123/inbox/pasted.png");
+        std::fs::create_dir_all(inbox_png.parent().unwrap()).unwrap();
+        std::fs::write(&inbox_png, png_bytes).unwrap();
+        assert_eq!(
+            super::raw_file_sync(inbox_png.to_str().unwrap(), true, data_dir.path(), &[])
+                .unwrap()
+                .0,
+            "image/png"
+        );
+
+        let session_non_inbox = data_dir.path().join("sessions/sess_123/token.png");
+        std::fs::write(&session_non_inbox, png_bytes).unwrap();
+        assert!(matches!(
+            super::raw_file_sync(
+                session_non_inbox.to_str().unwrap(),
+                false,
+                data_dir.path(),
+                &[]
+            )
+            .unwrap_err()
+            .0,
+            otto_core::Error::Forbidden(_)
+        ));
     }
 }

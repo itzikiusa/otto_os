@@ -496,14 +496,5 @@ export async function seedProductStory(
 
   execFileSync('sqlite3', [dbPath()], { input: stmts.join('\n'), stdio: ['pipe', 'ignore', 'pipe'] });
 
-  // 7. ── Plan → Swarm (offline-safe now a kind='plan' version exists) ────────
-  try {
-    await postJson(ctx, `${base}/api/v1/product/stories/${storyId}/to-swarm`, {
-      name: 'Instant withdrawals',
-    });
-  } catch {
-    // best-effort: the SwarmLinkCard simply won't show if this fails.
-  }
-
   return { storyId, createdBy };
 }

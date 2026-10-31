@@ -3,15 +3,12 @@
 //! manager.
 use crate::ServerCtx;
 use otto_core::{secrets::SecretStore, Id, Result};
-use otto_rooms::{games, Authority, RoomAudit, RoomRegistry, RoomsCtx};
+use otto_rooms::{Authority, RoomAudit, RoomRegistry, RoomsCtx};
 use std::{path::Path, sync::Arc};
 
 impl RoomsCtx for ServerCtx {
     fn rooms(&self) -> &RoomRegistry {
         &self.rooms
-    }
-    fn game_rooms(&self) -> &games::Registry {
-        &self.game_rooms
     }
     fn data_dir(&self) -> &Path {
         &self.data_dir

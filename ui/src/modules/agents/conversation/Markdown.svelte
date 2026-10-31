@@ -33,12 +33,15 @@
 
 <script lang="ts">
   import { getContext } from 'svelte';
+  import { authedBlobUrl } from '../../../lib/api/client';
   import { ctxMenu } from '../../../lib/contextmenu.svelte';
   import { toasts } from '../../../lib/toast.svelte';
   import { copyText } from '../../../lib/clipboard';
   import { openExternal } from '../../../lib/external';
   import { runCodeAction, type CodeActionHost } from './codeBlocks';
   import { splitLocation } from './chatMarkdown';
+  import { resolvePath } from './format';
+  import Lightbox from './Lightbox.svelte';
   import { CONV_CTX, type ConvContext } from './context';
   import { ui } from '../../../lib/stores/ui.svelte';
 
@@ -100,6 +103,40 @@
     }
   });
 
+  let lightboxImg = $state<{ src: string; alt: string; path: string | null } | null>(null);
+
+  // Hydrate inline `file://` / local workspace `<img data-asset="...">` thumbnails via `/fs/raw`.
+  $effect(() => {
+    const h = html;
+    const host = rootEl;
+    if (!host || !h.includes('data-asset')) return;
+    let alive = true;
+    const blobs: string[] = [];
+    for (const img of Array.from(host.querySelectorAll<HTMLImageElement>('img[data-asset]:not([data-hydrated])'))) {
+      img.setAttribute('data-hydrated', '1');
+      const raw = img.getAttribute('data-asset') ?? '';
+      const resolved = resolvePath(raw, ctx?.cwd ?? null);
+      if (!resolved) continue;
+      img.dataset.resolvedPath = resolved;
+      void authedBlobUrl(`/fs/raw?path=${encodeURIComponent(resolved)}`)
+        .then((u) => {
+          if (!alive || !img.isConnected) {
+            URL.revokeObjectURL(u);
+            return;
+          }
+          blobs.push(u);
+          img.src = u;
+        })
+        .catch(() => {
+          if (alive && img.isConnected) img.classList.add('asset-missing');
+        });
+    }
+    return () => {
+      alive = false;
+      for (const u of blobs) URL.revokeObjectURL(u);
+    };
+  });
+
   const host: CodeActionHost = {
     openCode: ({ text, lang, file }) =>
       ctx?.openPreview?.({ kind: 'code', title: file ?? (lang ? `${lang} snippet` : 'Snippet'), text, lang, file }),
@@ -145,6 +182,15 @@
 
   function onClick(e: MouseEvent): void {
     if (runCodeAction(e.target, host)) return;
+    if (e.target instanceof HTMLImageElement && e.target.src) {
+      e.preventDefault();
+      lightboxImg = {
+        src: e.target.src,
+        alt: e.target.alt || 'Image',
+        path: e.target.dataset.resolvedPath ?? e.target.getAttribute('data-asset') ?? null,
+      };
+      return;
+    }
     const a = e.target instanceof Element ? e.target.closest('a') : null;
     if (a && activate(a, e.altKey)) e.preventDefault();
   }
@@ -183,7 +229,10 @@
      handler drives them (keyboard activation bubbles as a click too). File
      references / issue chips are `a[tabindex][role=link]` (⏎ opens them). -->
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="md md-body" class:small dir="auto" bind:this={rootEl} onclick={onClick} onkeydown={onKey} oncontextmenu={onContext}>{@html html}</div>
+<div class="md md-body" class:small bind:this={rootEl} onclick={onClick} onkeydown={onKey} oncontextmenu={onContext}>{@html html}</div>
+{#if lightboxImg}
+  <Lightbox src={lightboxImg.src} alt={lightboxImg.alt} path={lightboxImg.path} onclose={() => (lightboxImg = null)} />
+{/if}
 
 <style>
   .md {
@@ -196,9 +245,25 @@
   .md.small {
     font-size: var(--fs-s);
   }
-  /* Prose keeps a readable measure; code, tables and diagrams use the width. */
+  /* Prose keeps a readable measure; code, tables and diagrams use the width.
+     Each block gets an explicit dir="rtl" or dir="ltr" from applyHtmlBlockDirections,
+     so text-align: start aligns RTL paragraphs right and LTR paragraphs left. */
   .md :global(:is(p, ul, ol, blockquote, h1, h2, h3, h4, h5, h6)) {
     max-width: var(--prose-measure, none);
+    text-align: start;
+  }
+  .md :global(:is(ul, ol)) {
+    padding-inline-start: 1.5em;
+  }
+  .md :global(blockquote) {
+    margin: 0.4em 0 0.7em;
+    padding-inline-start: 12px;
+    border-inline-start: 3px solid var(--border-strong);
+    color: var(--text-dim);
+  }
+  .md :global(code) {
+    direction: ltr;
+    unicode-bidi: isolate;
   }
   .md :global(p) {
     margin: 0 0 0.65em;
@@ -496,6 +561,20 @@
   .md :global(img) {
     max-width: 100%;
     border-radius: var(--radius-s);
+    cursor: zoom-in;
+  }
+  .md :global(img.chat-local-img) {
+    display: block;
+    max-width: min(100%, 360px);
+    max-height: 240px;
+    object-fit: contain;
+    margin: 6px 0;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-m);
+    background: var(--surface-2);
+  }
+  .md :global(img.asset-missing) {
+    display: none;
   }
   .md :global(input[type='checkbox']) {
     margin-inline-end: 6px;

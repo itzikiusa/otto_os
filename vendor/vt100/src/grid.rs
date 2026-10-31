@@ -1158,6 +1158,11 @@ impl Grid {
         self.col_clamp();
     }
 
+    pub fn col_btab(&mut self) {
+        let col = self.pos.col.min(self.size.cols().saturating_sub(1));
+        self.pos.col = col.saturating_sub(1) & !7;
+    }
+
     pub fn col_set(&mut self, i: u16) {
         self.pos.col = i;
         self.col_clamp();

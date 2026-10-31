@@ -74,31 +74,11 @@ export const skillsEvalApi = {
       `/skill-evaluations/${evalId}/iterations/${iterId}/agents/${index}/retry`,
     ),
 
-  // --- Eval lab: scoring, proof, rating, gate -----------------------------
+  // --- Eval lab: scoring, rating, gate ------------------------------------
 
   /** An iteration's multi-signal score. */
   iterScore: (evalId: string, iterId: string) =>
     api.get<EvalScore>(`/skill-evaluations/${evalId}/iterations/${iterId}/score`),
-
-  /** An iteration's assembled proof pack (header + evidence artifacts). */
-  iterProofPack: (evalId: string, iterId: string) =>
-    api.get<{
-      exists: boolean;
-      id?: string;
-      status?: string;
-      risk_score?: number;
-      done_score?: number;
-      badges?: string[];
-      contract?: unknown;
-      artifacts?: Array<{
-        kind: string;
-        title: string;
-        status: string;
-        preview: string;
-        truncated: boolean;
-        metadata: unknown;
-      }>;
-    }>(`/skill-evaluations/${evalId}/iterations/${iterId}/proof-pack`),
 
   /** Record a human rating (0–5) and re-derive the iteration's score. */
   rate: (evalId: string, iterId: string, body: RateIterationReq) =>

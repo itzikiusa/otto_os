@@ -7,12 +7,14 @@
   // renders that row directly. Thinking markers carry no text (the transcript
   // keeps only that it happened): in the timeline they are their own violet,
   // italic "Thought" rows, never confusable with a step or the answer.
-  import { untrack } from 'svelte';
+  import { getContext, untrack } from 'svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import ToolStep from './ToolStep.svelte';
   import SubagentCard from './SubagentCard.svelte';
   import TasksBlock from './TasksBlock.svelte';
-  import { fmtDuration, stepSummary, type StepBlock } from './format';
+  import ThinkingMarker from './ThinkingMarker.svelte';
+  import { fmtDuration, providerName, stepSummary, type StepBlock } from './format';
+  import { CONV_CTX, type ConvContext } from './context';
   import type { Block } from '../../../lib/api/types';
 
   interface Props {
@@ -28,8 +30,11 @@
     waiting?: boolean;
   }
   let { steps, durationMs = null, live = false, active = live, waiting = false }: Props = $props();
+  const ctx = getContext<ConvContext | undefined>(CONV_CTX);
+  const agentName = $derived(providerName(ctx?.provider));
 
   const visible = $derived(steps.filter((s) => s.kind !== 'thinking'));
+  const richThoughts = $derived(steps.filter((s): s is Extract<Block, { kind: 'thinking' }> => s.kind === 'thinking' && !!s.text?.trim()));
   const calls = $derived(steps.filter((s) => s.kind === 'tool_call' || s.kind === 'subagent').length);
   const thinking = $derived(steps.reduce((n, s) => (s.kind === 'thinking' ? n + s.count : n), 0));
   const failed = $derived(steps.filter((s) => s.kind === 'tool_call' && s.result != null && !s.result.ok).length);
@@ -47,6 +52,9 @@
 
 {#if single}
   <div class="steps single" data-steps={calls}>
+    {#each richThoughts as th, ti (`th-${ti}`)}
+      <ThinkingMarker count={th.count} text={th.text ?? null} {agentName} />
+    {/each}
     <ToolStep block={visible[0] as Extract<Block, { kind: 'tool_call' }>} live={active} {waiting} />
   </div>
 {:else if visible.length}
@@ -67,10 +75,14 @@
       <div class="steps-list">
         {#each steps as s, i (s.kind === 'tool_call' ? s.id : s.kind === 'subagent' ? s.agent_id : `${s.kind}-${i}`)}
           {#if s.kind === 'thinking'}
-            <div class="think-step" title="Reasoning — the text is not saved to the transcript">
-              <span class="think-icon" aria-hidden="true"><Icon name="sparkle" size={12} /></span>
-              <span>Thought{s.count > 1 ? ` ×${s.count}` : ''}</span>
-            </div>
+            {#if s.text?.trim()}
+              <ThinkingMarker count={s.count} text={s.text} {agentName} />
+            {:else}
+              <div class="think-step" title="Reasoning — the text is not saved to the transcript">
+                <span class="think-icon" aria-hidden="true"><Icon name="sparkle" size={12} /></span>
+                <span>Thought{s.count > 1 ? ` ×${s.count}` : ''}</span>
+              </div>
+            {/if}
           {:else if s.kind === 'tool_call'}
             <ToolStep block={s} live={active} {waiting} />
           {:else if s.kind === 'subagent'}

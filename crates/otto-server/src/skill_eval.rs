@@ -2599,33 +2599,15 @@ async fn iteration_gate(
     it: &otto_core::domain::EvalIteration,
 ) -> PromoteGate {
     let cfg = load_skill_eval_config(ctx).await;
-    let composite = (eval.status == SkillEvalStatus::Done
+    let ready = eval.status == SkillEvalStatus::Done
         && it.status == "done"
-        && it.agents.iter().all(|a| a.status == "done"))
-    .then(|| {
-        it.scoring
-            .as_ref()
-            .filter(|s| s.proof_status != "pending")
-            .map(|s| s.composite)
-    })
-    .flatten();
-    // Scoring is a snapshot; promotion must use current evidence and policy.
-    let proof_status = match it.proof_pack_id.as_deref() {
-        Some(id) => match crate::proof::recompute_and_emit(ctx, id).await {
-            Ok(pack)
-                if pack.workspace_id == eval.workspace_id
-                    && pack.work_item_id == it.id
-                    && pack.work_item_kind == otto_core::proof::WorkItemKind::Task =>
-            {
-                pack.status.as_str().to_string()
-            }
-            _ => String::new(),
-        },
-        None => String::new(),
-    };
+        && it.agents.iter().all(|a| a.status == "done");
+    let valid_scoring = it.scoring.as_ref().filter(|s| s.proof_status != "pending");
+    let composite = ready.then(|| valid_scoring.map(|s| s.composite)).flatten();
+    let proof_status = valid_scoring.map(|s| s.proof_status.as_str()).unwrap_or("");
     otto_core::eval_score::promote_gate(
         composite,
-        &proof_status,
+        proof_status,
         cfg.promote_min_score,
         cfg.require_proof_pass,
     )
@@ -2748,15 +2730,8 @@ async fn promote_skill(
         return Err(ApiError(Error::Invalid("skill name is required".into())));
     }
 
-    // A forced promotion past an unmet gate is an audited override; it also waives
-    // the iteration's proof pack so the bypass is visible there too.
+    // A forced promotion past an unmet gate is an audited override.
     if !gate.allowed && req.force {
-        if let Some(pack_id) = &it.proof_pack_id {
-            ctx.proof_repo
-                .waive(pack_id, &user.id, "force-promoted past the eval-lab gate")
-                .await
-                .map_err(ApiError)?;
-        }
         ctx.audit(otto_state::NewAuditEntry {
             user_id: Some(user.id.clone()),
             action: "skill_eval.force_promote".into(),
@@ -2831,62 +2806,6 @@ async fn get_iter_score(
     Ok(Json(it.scoring.clone().unwrap_or_default()))
 }
 
-/// `GET /skill-evaluations/{id}/iterations/{iter_id}/proof-pack` — the iteration's
-/// assembled proof pack (header + evidence artifacts), recomputed live.
-async fn get_iter_proof_pack(
-    AxPath((eval_id, iter_id)): AxPath<(Id, Id)>,
-    State(ctx): State<ServerCtx>,
-    CurrentUser(user): CurrentUser,
-) -> ApiResult<Json<serde_json::Value>> {
-    let eval = ctx
-        .skill_evals_store
-        .get_eval(&eval_id)
-        .await
-        .map_err(ApiError)?;
-    require_ws_role(&ctx, &user, &eval.workspace_id, WorkspaceRole::Viewer).await?;
-    let it = eval
-        .iterations
-        .iter()
-        .find(|i| i.id == iter_id)
-        .ok_or_else(|| ApiError(Error::NotFound("iteration".into())))?;
-    let Some(pack_id) = it.proof_pack_id.clone() else {
-        return Ok(Json(serde_json::json!({ "exists": false })));
-    };
-    let pack = ctx.proof_repo.get_pack(&pack_id).await.map_err(ApiError)?;
-    let arts = ctx
-        .proof_repo
-        .list_artifacts(&pack_id)
-        .await
-        .unwrap_or_default();
-    let badges = crate::proof::badge_strings(&pack, &arts);
-    let contract = crate::proof::live_contract(&ctx, &pack, &arts).await;
-    let artifacts: Vec<serde_json::Value> = arts
-        .iter()
-        .map(|a| {
-            let (preview, truncated) =
-                crate::proof::preview(a.content_ref.as_deref().unwrap_or(""));
-            serde_json::json!({
-                "kind": a.kind.as_str(),
-                "title": a.title,
-                "status": a.status.as_str(),
-                "preview": preview,
-                "truncated": truncated,
-                "metadata": a.metadata,
-            })
-        })
-        .collect();
-    Ok(Json(serde_json::json!({
-        "exists": true,
-        "id": pack.id,
-        "status": pack.status.as_str(),
-        "risk_score": pack.risk_score,
-        "done_score": pack.done_score,
-        "badges": badges,
-        "contract": contract,
-        "artifacts": artifacts,
-    })))
-}
-
 /// `POST /skill-evaluations/{id}/iterations/{iter_id}/rate` — record a human
 /// rating and re-derive the iteration's score (cheaply — no command re-run).
 async fn rate_iteration(
@@ -2926,17 +2845,13 @@ async fn rate_iteration(
     #[cfg(test)]
     recovery_tests::after_rating_pending(&iter_id).await;
     // The pending snapshot durably preserves non-human signals for recovery.
-    // Until Proof and the headline publish, promotion must reject this snapshot.
-    let (score, pack_id) =
-        crate::eval_score::rescore_with_human(&ctx, &eval, &it, rating, &req.note, &user.id)
-            .await
-            .map_err(ApiError)?;
+    // Until the headline publishes, promotion must reject this snapshot.
+    let score = crate::eval_score::rescore_with_human(&it, rating, &req.note, &user.id);
     ctx.skill_evals_store
         .publish_iter_scoring(
             &eval_id,
             &iter_id,
             &score,
-            &pack_id,
             (eval.mode == "score_only").then_some(score.composite),
             "Rating updated",
         )
@@ -3015,7 +2930,7 @@ async fn iteration_regression(
     ])
     .unwrap_or_default();
     let repo_key = match it.worktree_path.as_deref() {
-        Some(wt) => crate::proof::resolve_repo_for_cwd(&ctx, &eval.workspace_id, wt)
+        Some(wt) => resolve_repo_for_cwd(&ctx, &eval.workspace_id, wt)
             .await
             .unwrap_or_else(|| eval.workspace_id.clone()),
         None => eval.workspace_id.clone(),
@@ -3325,6 +3240,16 @@ async fn retry_validation(
     Ok(Json(eval))
 }
 
+/// Resolve the longest-prefix git repo in `ws_id` covering `cwd`.
+async fn resolve_repo_for_cwd(ctx: &ServerCtx, ws_id: &str, cwd: &str) -> Option<String> {
+    let repos = ctx.git_store.list_repos(&ws_id.to_string()).await.ok()?;
+    repos
+        .into_iter()
+        .filter(|r| cwd == r.path || cwd.starts_with(&format!("{}/", r.path)))
+        .max_by_key(|r| r.path.len())
+        .map(|r| r.id)
+}
+
 /// Routes under /api/v1 for the Skills Evaluator.
 pub fn routes() -> Router<ServerCtx> {
     Router::new()
@@ -3347,10 +3272,6 @@ pub fn routes() -> Router<ServerCtx> {
         .route(
             "/skill-evaluations/{id}/iterations/{iter_id}/score",
             get(get_iter_score),
-        )
-        .route(
-            "/skill-evaluations/{id}/iterations/{iter_id}/proof-pack",
-            get(get_iter_proof_pack),
         )
         .route(
             "/skill-evaluations/{id}/iterations/{iter_id}/rate",
@@ -3452,7 +3373,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn promotion_ignores_cached_pass_when_live_proof_is_missing_or_foreign() {
+    async fn promotion_rejects_pending_scoring_snapshot() {
         let pool = otto_state::db::test_pool().await;
         sqlx::query("INSERT INTO users(id,username,password_hash,is_root,created_at) VALUES('editor','editor','unused',0,'2026-10-08T00:00:00Z')").execute(&pool).await.unwrap();
         let dir = tempfile::tempdir().unwrap();
@@ -3483,24 +3404,9 @@ mod tests {
         iteration.status = "done".into();
         iteration.scoring = Some(EvalScore {
             composite: 100.0,
-            proof_status: "passed".into(),
+            proof_status: "pending".into(),
             ..Default::default()
         });
-        iteration.proof_pack_id = Some("missing".into());
-        assert!(!iteration_gate(&ctx, &eval, &iteration).await.allowed);
-        let pack = ctx
-            .proof_repo
-            .create_pack(
-                &ws.id,
-                otto_core::proof::WorkItemKind::Task,
-                "different-iteration",
-                "foreign",
-                "editor",
-                None,
-            )
-            .await
-            .unwrap();
-        iteration.proof_pack_id = Some(pack.id);
         assert!(!iteration_gate(&ctx, &eval, &iteration).await.allowed);
     }
 

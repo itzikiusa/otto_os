@@ -185,9 +185,12 @@ pub enum Block {
     Text {
         md: String,
     },
-    /// Marker only — no thinking text is persisted on disk.
+    /// Reasoning marker or prose (`text` is populated by providers like `agy`
+    /// that persist reasoning; `None` for Claude's signature-only markers).
     Thinking {
         count: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
     },
     /// Served by `GET …/transcript/images/{id}`.
     Image {
@@ -305,6 +308,28 @@ pub fn tool_kind_for_codex_function(name: &str) -> ToolKind {
         "web_search" => ToolKind::Web,
         "request_user_input" => ToolKind::Ask,
         n if n.starts_with("mcp__") || n.contains("__") => ToolKind::Mcp,
+        _ => ToolKind::Other,
+    }
+}
+
+/// Antigravity (`agy`) tool name → kind.
+pub fn tool_kind_for_agy(name: &str) -> ToolKind {
+    let bare = name.strip_prefix("default_api:").unwrap_or(name);
+    match bare {
+        "run_command" | "command_status" | "send_command_input" | "manage_task" => ToolKind::Shell,
+        "read_file" | "view_file" | "view_file_outline" | "view_code_item" | "read_resource"
+        | "list_resources" => ToolKind::Read,
+        "edit_file" | "replace_file_content" | "multi_replace_file_content" => ToolKind::Edit,
+        "write_file" | "write_to_file" => ToolKind::Write,
+        "grep_search" | "find_by_name" | "list_dir" | "codebase_search" => ToolKind::Search,
+        "invoke_subagent" | "define_subagent" | "manage_subagents" | "send_message" => {
+            ToolKind::Agent
+        }
+        "search_web" | "read_url_content" | "browser_subagent" => ToolKind::Web,
+        "ask_question" | "notify_user" => ToolKind::Ask,
+        "schedule" | "task_boundary" => ToolKind::Task,
+        "call_mcp_tool" => ToolKind::Mcp,
+        n if n.starts_with("mcp__") || n.starts_with("mcp_") => ToolKind::Mcp,
         _ => ToolKind::Other,
     }
 }
@@ -479,8 +504,19 @@ mod tests {
         assert_eq!(v["kind"], "tool_call");
         assert_eq!(v["tool"], "shell");
         assert!(v["result"].is_null());
-        let t = serde_json::to_value(Block::Thinking { count: 2 }).unwrap();
+        let t = serde_json::to_value(Block::Thinking {
+            count: 2,
+            text: None,
+        })
+        .unwrap();
         assert_eq!(t["kind"], "thinking");
+        assert!(t.get("text").is_none());
+        let tp = serde_json::to_value(Block::Thinking {
+            count: 1,
+            text: Some("step-by-step".into()),
+        })
+        .unwrap();
+        assert_eq!(tp["text"], "step-by-step");
         let n = serde_json::to_value(SystemNoteKind::SystemReminder).unwrap();
         assert_eq!(n, "system_reminder");
         let u = serde_json::to_value(UnavailableReason::NoProviderSessionId).unwrap();

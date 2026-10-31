@@ -18,6 +18,7 @@
   import { recallSelection, rememberSelection } from '../../lib/lastSelection';
   import { router } from '../../lib/router.svelte';
   import { registry } from '../../lib/commands.svelte';
+  import { auth } from '../../lib/stores/auth.svelte';
   import { product, buildTree, type TreeNode } from '../../lib/stores/product.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
@@ -28,10 +29,10 @@
   import RewriteTab from './RewriteTab.svelte';
   import TestCasesTab from './TestCasesTab.svelte';
   import PlanTab from './PlanTab.svelte';
-  import DiscoveryTab from './DiscoveryTab.svelte';
   import MockupsTab from './MockupsTab.svelte';
   import RefineTab from './RefineTab.svelte';
   import ChatTab from './ChatTab.svelte';
+  import ProductModeTabs, { type ProductMode } from '../../lib/components/ProductModeTabs.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import LazyMount from '../../lib/components/LazyMount.svelte';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
@@ -224,7 +225,18 @@
     const k = `${epicId}/${folder}`;
     collapsedFolders = { ...collapsedFolders, [k]: !collapsedFolders[k] };
   }
-  const tabsHiddenForDoc = new Set(['analysis', 'discovery', 'plan', 'testcases', 'inject']);
+  const tabsHiddenForDoc = new Set(['analysis', 'plan', 'testcases', 'inject']);
+  const canProduct = $derived(auth.can('product', 'view'));
+  const canDesign = $derived(auth.can('design', 'view'));
+
+  async function handleModeSelect(mode: ProductMode): Promise<void> {
+    if (mode === 'design') {
+      if (!(await product.mayLeaveDraft())) return;
+      router.go('design');
+      return;
+    }
+    await product.changeView(mode);
+  }
 
   // ── Mobile (≤640px) accordion state ───────────────────────────────────────
   // On a phone the two panels (story list + the per-story content) stack and
@@ -285,9 +297,17 @@
    *  (≥641px) and the page EmptyState owns the ONE import CTA. */
   const noStories = $derived(product.view === 'stories' && !product.loadingStories && !storiesError && product.stories.length === 0);
 
+  // Design-only RBAC: #/product redirects straight to #/design so the shared
+  // sidebar entry lands on the view the user is allowed to see.
+  $effect(() => {
+    if (!canProduct && canDesign && router.module === 'product') {
+      untrack(() => router.replace('design'));
+    }
+  });
+
   // Reload stories whenever the workspace changes (mirrors DatabasePage pattern).
   $effect(() => {
-    if (ws.currentId) {
+    if (ws.currentId && canProduct) {
       // A workspace switch leaves no artifact open: release the arena's cached
       // blob URLs / editor bases before the new list loads.
       untrack(() => {
@@ -304,7 +324,7 @@
   let autoPickedFor: string | null = null;
   $effect(() => {
     const w = ws.currentId;
-    if (!w || autoPickedFor === w || product.loadingStories || product.view !== 'stories') return;
+    if (!canProduct || !w || autoPickedFor === w || product.loadingStories || product.view !== 'stories') return;
     if (product.stories.length === 0) return;
     untrack(() => {
       autoPickedFor = w;
@@ -325,10 +345,17 @@
   let routePending = $state<string | null>(null);
   $effect(() => {
     const [mod, storyId] = router.parts;
+    if (mod === 'product' && (storyId === 'design' || storyId === 'learnings')) {
+      untrack(() => {
+        if (storyId === 'design') router.replace('design');
+        else { void product.changeView('learnings'); router.replace('product'); }
+      });
+      return;
+    }
     // Workspace initialization clears selection; follow its reset before opening
     // a deep link, including when the workspace arrives after this page mounts.
     const workspaceId = ws.currentId;
-    if (!workspaceId || mod !== 'product' || !storyId) return;
+    if (!canProduct || !workspaceId || mod !== 'product' || !storyId) return;
     untrack(() => {
       if (storyId === product.selectedId && product.view === 'stories') return;
       routePending = storyId;
@@ -349,7 +376,7 @@
   });
   $effect(() => {
     const id = product.view === 'stories' ? product.selectedId : null;
-    if (!ws.currentId || routePending || router.module !== 'product') return;
+    if (!canProduct || !ws.currentId || routePending || router.module !== 'product' || router.parts[1] === 'design' || router.parts[1] === 'learnings') return;
     const want = id ? `product/${id}` : 'product';
     untrack(() => {
       if (router.parts.join('/') !== want) router.replace(want);
@@ -357,13 +384,14 @@
   });
 
   // ⌘K: the page's verbs.
-  $effect(() =>
-    registry.register('product', [
-      { id: 'product.new-draft', title: 'New draft story', group: 'Product', keywords: 'create story blank discovery', run: () => void createDraft() },
+  $effect(() => {
+    if (!canProduct) return registry.register('product', []);
+    return registry.register('product', [
+      { id: 'product.new-draft', title: 'New draft story', group: 'Product', keywords: 'create story blank', run: () => void createDraft() },
       { id: 'product.new-epic', title: 'New epic', group: 'Product', keywords: 'create group folder stories', run: () => void createEpic() },
       { id: 'product.import', title: 'Import story…', group: 'Product', keywords: 'jira confluence issue page', run: () => (importOpen = true) },
-    ]),
-  );
+    ]);
+  });
 
   /** The selected story's parent epic (breadcrumb) and epic-ness (Add child ▾). */
   const selectedStory = $derived(product.detail?.story ?? null);
@@ -403,7 +431,6 @@
         { id: 'analysis', label: 'Analysis' },
         { id: 'questions', label: 'Questions' },
         { id: 'notes', label: 'Notes' },
-        { id: 'discovery', label: 'Discovery' },
         { id: 'refine', label: 'Refine' },
       ],
     },
@@ -433,7 +460,8 @@
   });
   // A doc landing on a hidden tab (deep link / kind change) falls back to overview.
   $effect(() => {
-    if (selectedStory?.tree_kind === 'doc' && tabsHiddenForDoc.has(product.tab)) product.tab = 'overview';
+    if ((product.tab as string) === 'discovery') product.tab = 'chat';
+    else if (selectedStory?.tree_kind === 'doc' && tabsHiddenForDoc.has(product.tab)) product.tab = 'overview';
   });
 
   /** The group that owns the currently-active sub (`product.tab`). Falls back to
@@ -624,6 +652,17 @@
   </div>
 {/snippet}
 
+{#if !canProduct}
+<div class="product-shell">
+  <PageHeader title="Product" />
+  <EmptyState
+    variant="page"
+    icon="note"
+    title="You don’t have access to Product"
+    body="Ask a workspace admin to grant the Product or Design Hall feature (Settings → Users)."
+  />
+</div>
+{:else}
 <div class="product-shell">
 <PageHeader
   title={headerTitle}
@@ -655,23 +694,7 @@
     {/if}
   {/snippet}
   {#snippet tabs()}
-    <!-- The ONE Stories|Learnings toggle, at every breakpoint. -->
-    <div class="segmented m-view-toggle" role="tablist" aria-label="View" tabindex="-1" onkeydown={onTabKey}>
-      <button
-        class:active={product.view === 'stories'}
-        role="tab"
-        aria-selected={product.view === 'stories'}
-        tabindex={product.view === 'stories' ? 0 : -1}
-        onclick={(event) => void activateProductTab(event, () => product.changeView('stories'))}
-      >Stories</button>
-      <button
-        class:active={product.view === 'learnings'}
-        role="tab"
-        aria-selected={product.view === 'learnings'}
-        tabindex={product.view === 'learnings' ? 0 : -1}
-        onclick={(event) => void activateProductTab(event, () => product.changeView('learnings'))}
-      >Learnings</button>
-    </div>
+    <ProductModeTabs active={product.view === 'learnings' ? 'learnings' : 'stories'} onselect={handleModeSelect} />
   {/snippet}
   {#snippet actions()}
     {#if product.view === 'stories'}
@@ -690,7 +713,7 @@
         class="btn small"
         class:primary={!noStories && !product.selectedId}
         onclick={newMenu}
-        title="New: a blank draft (Discovery) or an epic that groups stories/docs in folders"
+        title="New: a blank draft or an epic that groups stories/docs in folders"
         disabled={draftCreating}
         data-label="New draft or epic…"
       >
@@ -927,8 +950,6 @@
         <LazyMount lazy={HistoryLazy} what="the story history" variant="panel" />
       {:else if product.tab === 'inject'}
         <LazyMount lazy={InjectLazy} what="the inject tab" variant="panel" />
-      {:else if product.tab === 'discovery'}
-        <DiscoveryTab />
       {:else if product.tab === 'refine'}
         <RefineTab />
       {:else if product.tab === 'mockups'}
@@ -939,6 +960,7 @@
 </div>
 </PageBody>
 </div>
+{/if}
 
 {#if importOpen}
   <LazyMount
@@ -1403,13 +1425,6 @@
       flex-direction: column;
     }
 
-    /* Slightly bigger touch target for the segmented view toggle. */
-    .m-view-toggle > button {
-      min-height: var(--hit-min);
-      font-size: var(--fs-m);
-      padding: 0 12px;
-    }
-
     .m-acc-head {
       display: flex;
       align-items: center;
@@ -1482,43 +1497,15 @@
     }
 
     /* ── Bigger, more legible text on phones ───────────────────────────── */
-    .story-title {
-      font-size: var(--fs-l);
-    }
-    .story-key,
-    .story-meta {
-      font-size: var(--fs-s);
-    }
-    .tag-filter-btn,
-    .story-tag-chip {
-      font-size: var(--fs-s);
-    }
-    .tag-filter-btn {
-      min-height: var(--hit-min);
-      padding: 0 10px;
-    }
-    .st {
-      height: 38px;
-      font-size: var(--fs-m);
-      padding: 0 12px;
-    }
+    .story-title { font-size: var(--fs-l); }
+    .story-key, .story-meta, .tag-filter-btn, .story-tag-chip { font-size: var(--fs-s); }
+    .tag-filter-btn { min-height: var(--hit-min); padding: 0 10px; }
+    .st { height: 38px; font-size: var(--fs-m); padding: 0 12px; }
     /* Keep the sub-nav touch-friendly while staying visually subordinate. */
-    .sub-tab-strip .st {
-      min-height: var(--hit-min);
-      font-size: var(--fs-m);
-      padding: 0 10px;
-    }
-    .product-body {
-      padding: 14px;
-    }
+    .sub-tab-strip .st { min-height: var(--hit-min); font-size: var(--fs-m); padding: 0 10px; }
+    .product-body { padding: 14px; }
     /* Comfortable touch target for the per-row ⋯ and epic expand buttons. */
-    .row-menu-btn,
-    .tree-toggle {
-      width: var(--hit-min);
-      height: var(--hit-min);
-    }
-    .story-row {
-      padding: 10px 8px;
-    }
+    .row-menu-btn, .tree-toggle { width: var(--hit-min); height: var(--hit-min); }
+    .story-row { padding: 10px 8px; }
   }
 </style>

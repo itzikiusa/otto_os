@@ -239,6 +239,47 @@ impl otto_dbviewer::DbViewerCtx for ServerCtx {
             .await;
         });
     }
+    fn on_mcp_activity(
+        &self,
+        auth: Option<&otto_core::auth::AuthContext>,
+        conn: &otto_core::domain::Connection,
+        ev: otto_dbviewer::McpDbEvent,
+    ) -> impl std::future::Future<Output = ()> + Send {
+        let manager = Arc::clone(&self.manager);
+        let events = self.events.clone();
+        let agent_sid = auth.and_then(|a| crate::feature_guard::agent_session_of(a).cloned());
+        let conn_id = conn.id.clone();
+        let conn_ws = conn.workspace_id.clone();
+        async move {
+            let (ws_id, session_id, session_title) = match agent_sid {
+                Some(sid) => match manager.get(&sid).await {
+                    Ok(s) => (Some(s.workspace_id), Some(s.id), Some(s.title)),
+                    Err(_) => (conn_ws, Some(sid), None),
+                },
+                None => (conn_ws, None, None),
+            };
+            let Some(workspace_id) = ws_id else {
+                return;
+            };
+            let _ = events.send(otto_core::event::Event::DbMcpActivity {
+                workspace_id,
+                connection_id: conn_id,
+                session_id,
+                session_title,
+                activity_id: ev.activity_id,
+                tool: ev.tool.to_string(),
+                sql: ev.sql,
+                node: ev.node,
+                status: ev.status.to_string(),
+                row_count: ev.row_count,
+                duration_ms: ev.duration_ms,
+                columns: ev.columns,
+                rows_preview: ev.rows_preview,
+                error: ev.error,
+                ts: chrono::Utc::now().to_rfc3339(),
+            });
+        }
+    }
 }
 
 impl otto_brokers::BrokersCtx for ServerCtx {
@@ -286,57 +327,6 @@ impl otto_git::GitCtx for ServerCtx {
     }
     fn events(&self) -> &tokio::sync::broadcast::Sender<Event> {
         &self.events
-    }
-    async fn check_pr_allowed(
-        &self,
-        workspace_id: &str,
-        req: &otto_core::api::CreatePrReq,
-    ) -> otto_core::Result<()> {
-        crate::proof::gate_pr(self, workspace_id, req).await
-    }
-
-    async fn after_pr_created(
-        &self,
-        repo: &otto_core::domain::Repo,
-        pr_number: u64,
-        req: &otto_core::api::CreatePrReq,
-        ci: &otto_git::CiStatus,
-    ) {
-        // Only act when a proof pack is linked. Best-effort throughout — a capture
-        // failure must never surface to the PR caller.
-        let Some(pack_id) = req.proof_pack_id.as_deref() else {
-            return;
-        };
-        let Ok(pack) = self.proof_repo.get_pack(pack_id).await else {
-            return;
-        };
-        let _ = self
-            .proof_repo
-            .set_repo_link(&pack.id, Some(&repo.id), Some(pr_number as i64))
-            .await;
-        let summary = otto_core::proof::CiSummary {
-            state: ci.state.clone(),
-            total: ci.total,
-            passed: ci.passed,
-            failed: ci.failed,
-            url: ci.url.clone(),
-        };
-        let _ = crate::proof::record_ci_artifact(self, &pack, &summary).await;
-        // R7: run the PR-description consistency check against the actual change
-        // (target_branch..HEAD in the repo) and record a `pr_check` artifact. A
-        // dishonest description (false "tests pass" claim) flips the pack to
-        // `failed`; an honest-but-thin one is neutral. The endpoint remains for
-        // re-running on demand.
-        let _ = crate::proof::run_pr_check(
-            self,
-            &pack,
-            &req.title,
-            &req.description,
-            Some(&req.target_branch),
-            Some(&repo.path),
-            "otto",
-        )
-        .await;
     }
 
     async fn cleanup_base_branch(&self, repo_id: &Id) -> Option<String> {
@@ -424,9 +414,6 @@ impl otto_product::ProductCtx for ServerCtx {
     }
     fn roles(&self) -> &Arc<dyn RoleChecker> {
         &self.roles
-    }
-    fn swarm_repo(&self) -> Option<&otto_state::SwarmRepo> {
-        Some(&self.swarm_repo)
     }
     fn attachments_root(&self) -> Option<std::path::PathBuf> {
         Some(self.data_dir.join(otto_product::media::ATTACH_ROOT))
@@ -617,33 +604,6 @@ impl otto_design_assist::DesignAssistCtx for ServerCtx {
     }
     fn sessions(&self) -> &Arc<otto_sessions::SessionManager> {
         &self.manager
-    }
-}
-
-impl otto_swarm::SwarmCtx for ServerCtx {
-    fn swarm(&self) -> &Arc<otto_swarm::SwarmService> {
-        &self.swarm
-    }
-    fn roles(&self) -> &Arc<dyn RoleChecker> {
-        &self.roles
-    }
-    fn workspaces(&self) -> &WorkspacesRepo {
-        &self.workspaces
-    }
-    fn events(&self) -> &tokio::sync::broadcast::Sender<Event> {
-        &self.events
-    }
-    fn available_providers(&self) -> Vec<String> {
-        // Agent-capable providers from the live registry (exclude the plain shell).
-        self.manager
-            .providers()
-            .names()
-            .into_iter()
-            .filter(|n| n != "shell")
-            .collect()
-    }
-    fn product_repo(&self) -> Option<&otto_state::ProductRepo> {
-        Some(&self.product_repo)
     }
 }
 

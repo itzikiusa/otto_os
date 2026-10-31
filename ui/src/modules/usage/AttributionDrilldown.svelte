@@ -22,7 +22,6 @@
     'branch',
     'pr',
     'story',
-    'swarm_task',
     'workflow',
     'channel',
     'review',
@@ -155,7 +154,7 @@
         title="Nothing attributed by {DIM_LABELS[selectedDim].toLowerCase()} in the last {days} days"
         body={selectedDim === 'origin'
           ? 'Usage shows up here once agents run in this window.'
-          : 'Reviews, product stories, swarms and workflows tag the sessions they start. Ad-hoc sessions only appear under Origin.'}
+          : 'Reviews, product stories and workflows tag the sessions they start. Ad-hoc sessions only appear under Origin.'}
       />
     {/snippet}
     <div class="attr-table-wrap">

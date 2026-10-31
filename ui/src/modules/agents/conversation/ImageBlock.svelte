@@ -3,10 +3,11 @@
   // → lightbox. On-disk history transcripts have no session to serve images
   // from, so they get a labelled placeholder instead.
   import { getContext } from 'svelte';
+  import { authedBlobUrl } from '../../../lib/api/client';
   import Icon from '../../../lib/components/Icon.svelte';
   import Lightbox from './Lightbox.svelte';
   import { fetchImageUrl } from './api';
-  import type { ConvContext } from './context';
+  import { CONV_CTX, type ConvContext } from './context';
 
   interface Props {
     id: string;
@@ -17,21 +18,39 @@
   }
   let { id, alt, mediaType = null, small = false }: Props = $props();
 
-  const ctx = getContext<ConvContext>('conv');
+  const ctx = getContext<ConvContext>(CONV_CTX);
+
+  const localPath = $derived.by(() => {
+    if (id.startsWith('file://')) {
+      const raw = id.replace(/^file:\/\/(?:localhost)?/i, '');
+      try {
+        return decodeURIComponent(raw);
+      } catch {
+        return raw;
+      }
+    }
+    return id.startsWith('/') ? id : null;
+  });
 
   let url = $state<string | null>(null);
   let failed = $state(false);
   let open = $state(false);
 
   $effect(() => {
-    const sid = ctx.sessionId;
-    if (!sid) return;
-    const load = ctx.imageUrl ?? ((img: string) => fetchImageUrl(sid, img));
+    const sid = ctx?.sessionId;
+    const lp = localPath;
+    if (!sid && !lp) return;
+    const primary = sid
+      ? (ctx.imageUrl ?? ((img: string) => fetchImageUrl(sid, img)))(id)
+      : Promise.reject(new Error('no session'));
+    const task = lp
+      ? primary.catch(() => authedBlobUrl(`/fs/raw?path=${encodeURIComponent(lp)}`))
+      : primary;
     let alive = true;
     let got: string | null = null;
     url = null;
     failed = false;
-    load(id)
+    task
       .then((u) => {
         if (!alive) {
           URL.revokeObjectURL(u);
@@ -50,16 +69,16 @@
   });
 </script>
 
-{#if !ctx.sessionId || failed}
+{#if (!ctx?.sessionId && !localPath) || failed}
   <span class="img-ph" class:small title={mediaType ?? 'image'}>
     <Icon name="image" size={12} /> {alt ?? 'Image'}{failed ? ' (unavailable)' : ' (not served for on-disk transcripts)'}
   </span>
 {:else if url}
-  <button class="img-btn" class:small onclick={() => (open = true)} title="Open image">
+  <button type="button" class="img-btn" class:small onclick={() => (open = true)} aria-label="Open image {alt ?? 'preview'}" title="Click to zoom">
     <img src={url} alt={alt ?? 'Image'} loading="lazy" />
   </button>
   {#if open}
-    <Lightbox src={url} alt={alt ?? 'Image'} onclose={() => (open = false)} />
+    <Lightbox src={url} alt={alt ?? 'Image'} path={localPath} onclose={() => (open = false)} />
   {/if}
 {:else}
   <span class="img-ph loading" class:small><Icon name="image" size={12} /> loading…</span>

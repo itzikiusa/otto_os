@@ -1,15 +1,14 @@
 //! The native `tools/list` catalog of this stdio surface (architecture-1-05):
 //! the tools only this surface serves ([`base_tool_catalog`] +
 //! [`console_tool_catalog`]), the `otto_x` ⇄ `otto.x` twins GENERATED from the
-//! control-plane catalog ([`NATIVE_TWINS`], see `listing.rs`), the assistant
-//! tools, the per-source scoping, and the governed (`otto.*`) listing.
+//! control-plane catalog ([`NATIVE_TWINS`], see `listing.rs`), the per-source
+//! scoping, and the governed (`otto.*`) listing.
 
 use super::listing::NativeTwin;
 use super::*;
 
-/// The full native catalog: the static first-party tools, the twins generated
-/// from the control-plane catalog, and the Otto Assistant tools (which
-/// [`tool_catalog_for_source`] shows only to assistant sessions).
+/// The full native catalog: the static first-party tools and the twins
+/// generated from the control-plane catalog.
 pub(super) fn tool_catalog() -> Value {
     TOOL_CATALOG.clone()
 }
@@ -26,7 +25,6 @@ pub(super) static TOOL_CATALOG: std::sync::LazyLock<Value> = std::sync::LazyLock
             NATIVE_TWINS,
             governed_stdio_name,
         ));
-        tools.extend(assistant_tool_specs());
     }
     catalog
 });
@@ -99,7 +97,6 @@ pub(super) const NATIVE_TWINS: &[NativeTwin] = &[
     twin("list_issue_accounts"),
     twin("search_issues"),
     twin("list_issue_transitions"),
-    scoped_twin("list_swarms", WS_DIR_ARG),
     scoped_twin(
         "list_repos",
         &[("workspace_id", Some("Optional: only this workspace's repos."))],
@@ -146,7 +143,7 @@ pub(super) const NATIVE_TWINS: &[NativeTwin] = &[
 ];
 
 /// The tools ONLY this surface serves (no control-plane twin): DB explorer,
-/// canvas, workbench, Design Hall, swarm, memory, usage, browser.
+/// canvas, workbench, Design Hall, memory, usage, browser.
 pub(super) fn base_tool_catalog() -> Value {
     json!({
         "tools": [
@@ -370,41 +367,6 @@ pub(super) fn base_tool_catalog() -> Value {
                     },
                     "required": ["query"]
                 }
-            },
-            {
-                "name": "swarm_list_projects",
-                "description": "Read-only: list a swarm's projects (id, name, repo, goal). Project ids feed swarm_list_tasks / swarm_create_task.",
-                "inputSchema": { "type": "object", "properties": { "swarm_id": { "type": "string" } }, "required": ["swarm_id"] }
-            },
-            {
-                "name": "swarm_list_tasks",
-                "description": "Read-only: list a project's board tasks (id, title, status, assignee, priority, depends_on).",
-                "inputSchema": { "type": "object", "properties": { "project_id": { "type": "string" } }, "required": ["project_id"] }
-            },
-            {
-                "name": "swarm_utilization",
-                "description": "Read-only: a swarm's board-utilization snapshot — parallel cap vs live runs, ready vs open tasks by status, and which agents are busy/idle. Use it to spot wasted capacity before dispatching.",
-                "inputSchema": { "type": "object", "properties": { "swarm_id": { "type": "string" } }, "required": ["swarm_id"] }
-            },
-            {
-                "name": "swarm_create_task",
-                "description": "Create a task on a project board (Editor-gated). Unassigned tasks are auto-assigned to the best-fitting agent when scheduled. Managers: prefer editing the plan over piling on new tasks.",
-                "inputSchema": { "type": "object", "properties": { "project_id": { "type": "string" }, "title": { "type": "string" }, "description": { "type": "string" }, "assignee_agent_id": { "type": "string" }, "priority": { "type": "string", "description": "low|medium|high|urgent" } }, "required": ["project_id", "title"] }
-            },
-            {
-                "name": "swarm_update_task",
-                "description": "Update a board task (Editor-gated): status (backlog|todo|in_progress|in_review|blocked|done|cancelled), assignee_agent_id, priority, title, description. Use to unblock, reassign, reprioritize or close stale items.",
-                "inputSchema": { "type": "object", "properties": { "task_id": { "type": "string" }, "status": { "type": "string" }, "assignee_agent_id": { "type": "string" }, "priority": { "type": "string" }, "title": { "type": "string" }, "description": { "type": "string" } }, "required": ["task_id"] }
-            },
-            {
-                "name": "swarm_run_task",
-                "description": "Dispatch a board task now (Editor-gated): creates a run and launches the assignee's agent session immediately instead of waiting for the coordinator tick. Refused (409) when the task is not todo/blocked/backlog, the swarm is aborted or budget-paused, or the agent is busy; 400 when the swarm has no active agent.",
-                "inputSchema": { "type": "object", "properties": { "task_id": { "type": "string" } }, "required": ["task_id"] }
-            },
-            {
-                "name": "swarm_stop_run",
-                "description": "Stop an in-flight swarm run (Editor-gated): cancels the turn and marks the run stopped. Use on wedged or duplicate dispatches. A run that already finished is returned unchanged — check `run.status`.",
-                "inputSchema": { "type": "object", "properties": { "run_id": { "type": "string" } }, "required": ["run_id"] }
             },
             {
                 "name": "otto_search_memory",
@@ -648,15 +610,6 @@ pub(super) fn is_vault_docs_reviewer(source: Option<&str>) -> bool {
 
 pub(super) fn tool_catalog_for_source(source: Option<&str>) -> Value {
     let mut catalog = tool_catalog();
-    if source != Some(ASSISTANT_SOURCE) {
-        if let Some(tools) = catalog["tools"].as_array_mut() {
-            tools.retain(|tool| {
-                tool["name"]
-                    .as_str()
-                    .is_some_and(|name| assistant_segment(name).is_none())
-            });
-        }
-    }
     if is_vault_docs_reviewer(source) {
         if let Some(tools) = catalog["tools"].as_array_mut() {
             tools.retain(|tool| {
@@ -701,13 +654,7 @@ pub(super) const GOVERNED_ALIASED_BY_NATIVE: &[(&str, &str)] = &[
     ("design_get", "design_get"),
     ("design_links", "design_links"),
     ("design_search", "design_search"),
-    // Otto Assistant memory: served natively (session-bound, chip + Undo).
-    ("assistant_remember", "assistant_remember"),
-    ("assistant_forget", "assistant_forget"),
-    ("assistant_recall", "assistant_recall"),
-    // Swarm board reads + PR review runs are native under other names.
-    ("list_swarm_projects", "swarm_list_projects"),
-    ("list_swarm_tasks", "swarm_list_tasks"),
+    // PR review runs are native under another name.
     ("list_pr_reviews", "otto_git_pr_review"),
     // The cloud consoles are native under their bare names; without these the
     // session saw every AWS/K8s tool twice (`k8s_top` AND `otto_k8s_top`).

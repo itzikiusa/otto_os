@@ -73,7 +73,18 @@ pub fn session_id_from_name(provider: Provider, path: &Path) -> Option<String> {
                 Some(s.to_string())
             }
         }
-        Provider::Agy => None,
+        Provider::Agy => {
+            if matches!(stem, "transcript" | "transcript_full") {
+                path.parent()?
+                    .parent()?
+                    .parent()?
+                    .file_name()?
+                    .to_str()
+                    .map(str::to_string)
+            } else {
+                Some(stem.to_string())
+            }
+        }
     }
 }
 

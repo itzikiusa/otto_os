@@ -47,21 +47,45 @@ pub(crate) fn normalize(md: &str) -> Vec<String> {
         .replace('\r', "\n")
         .split('\n')
         .map(|l| {
-            let lead = l.len() - l.trim_start_matches([' ', '\t']).len();
+            let bytes = l.as_bytes();
+            let lead = bytes
+                .iter()
+                .position(|&b| b != b' ' && b != b'\t')
+                .unwrap_or(bytes.len());
             let (head, rest) = l.split_at(lead);
-            let mut s = head.replace('\t', "    ");
-            s.extend(rest.chars().filter(|c| !c.is_control() || *c == '\t'));
+            let mut s = if head.contains('\t') {
+                head.replace('\t', "    ")
+            } else {
+                head.to_string()
+            };
+            if rest.chars().any(|c| c.is_control() && c != '\t') {
+                s.extend(rest.chars().filter(|c| !c.is_control() || *c == '\t'));
+            } else {
+                s.push_str(rest);
+            }
             s
         })
         .collect()
 }
 
 fn indent(line: &str) -> usize {
-    line.len() - line.trim_start_matches(' ').len()
+    let bytes = line.as_bytes();
+    let mut n = 0;
+    while n < bytes.len() && bytes[n] == b' ' {
+        n += 1;
+    }
+    n
 }
 
 fn is_blank(line: &str) -> bool {
-    line.trim().is_empty()
+    let rest = &line[indent(line)..];
+    if rest.is_empty() {
+        true
+    } else if rest.as_bytes()[0].is_ascii_graphic() {
+        false
+    } else {
+        rest.trim().is_empty()
+    }
 }
 
 /// `(fence char run, info string)` for an opening code fence.
@@ -495,9 +519,10 @@ fn code_span(c: &[char], i: usize) -> Option<(usize, usize)> {
 }
 
 /// Index of the `close` char matching the `open` at `i`, skipping escapes and
-/// code spans and honouring nesting.
-fn matching(c: &[char], i: usize, open: char, close: char) -> Option<usize> {
+/// code spans and honouring nesting, plus whether any `close` was seen.
+fn matching_scan(c: &[char], i: usize, open: char, close: char) -> (Option<usize>, bool) {
     let mut depth = 0usize;
+    let mut saw_close = false;
     let mut j = i;
     while j < c.len() {
         match c[j] {
@@ -509,16 +534,17 @@ fn matching(c: &[char], i: usize, open: char, close: char) -> Option<usize> {
             }
             x if x == open => depth += 1,
             x if x == close => {
+                saw_close = true;
                 depth -= 1;
                 if depth == 0 {
-                    return Some(j);
+                    return (Some(j), true);
                 }
             }
             _ => {}
         }
         j += 1;
     }
-    None
+    (None, saw_close)
 }
 
 /// Start of the delimiter run that closes a `size`-long `ch` opener whose
@@ -538,16 +564,31 @@ fn closer(
     memo: &mut Memo,
     depth: usize,
 ) -> Option<usize> {
-    if let Some(hit) = memo.get(&(from, size, ch)) {
+    if (1..=size).any(|s| memo.flat_dead.get(&(ch, s)).is_some_and(|&d| from >= d)) {
+        return None;
+    }
+    if let Some(hit) = memo.entries.get(&(from, size, ch)) {
         return *hit;
     }
     let found = closer_scan(c, from, ch, size, memo, depth);
-    memo.insert((from, size, ch), found);
+    if depth >= NEST_MAX && found.is_none() {
+        memo.flat_dead
+            .entry((ch, size))
+            .and_modify(|d| *d = (*d).min(from))
+            .or_insert(from);
+    }
+    memo.entries.insert((from, size, ch), found);
     found
 }
 
-/// Closer lookups already answered, keyed by `(from, size, delimiter)`.
-type Memo = std::collections::HashMap<(usize, usize, char), Option<usize>>;
+/// Closer lookups already answered, keyed by `(from, size, delimiter)`, plus
+/// the earliest `from` where a flat scan proved no closer exists in `c[from..]`.
+#[derive(Default)]
+struct Memo {
+    entries: std::collections::HashMap<(usize, usize, char), Option<usize>>,
+    flat_dead: std::collections::HashMap<(char, usize), usize>,
+    no_bracket_close_from: Option<usize>,
+}
 
 /// How deep nested emphasis spans are followed while looking for a closer.
 const NEST_MAX: usize = 8;
@@ -592,12 +633,22 @@ fn closer_scan(
 }
 
 /// `[text](dest "title")` starting at `i` (the `[`): (text, dest, end index).
-fn link_at(c: &[char], i: usize) -> Option<(Vec<char>, String, usize)> {
-    let close = matching(c, i, '[', ']')?;
+fn link_at(c: &[char], i: usize, memo: &mut Memo) -> Option<(Vec<char>, String, usize)> {
+    if memo.no_bracket_close_from.is_some_and(|d| i >= d) {
+        return None;
+    }
+    let (close, saw_close) = matching_scan(c, i, '[', ']');
+    let Some(close) = close else {
+        if !saw_close {
+            memo.no_bracket_close_from = Some(memo.no_bracket_close_from.map_or(i, |d| d.min(i)));
+        }
+        return None;
+    };
     if c.get(close + 1) != Some(&'(') {
         return None;
     }
-    let end = matching(c, close + 1, '(', ')')?;
+    let (end, _) = matching_scan(c, close + 1, '(', ')');
+    let end = end?;
     let raw: String = c[close + 2..end].iter().collect();
     let raw = raw.trim();
     let dest = match raw.find([' ', '\t']) {
@@ -641,7 +692,7 @@ fn parse_inline(c: &[char], marks: &[Mark], out: &mut Vec<Inl>, depth: usize) {
         out.push(Inl::Text(c.iter().collect(), marks.to_vec()));
         return;
     }
-    let mut memo = Memo::new();
+    let mut memo = Memo::default();
     let mut buf = String::new();
     let flush = |buf: &mut String, out: &mut Vec<Inl>| {
         if !buf.is_empty() {
@@ -706,7 +757,7 @@ fn parse_inline(c: &[char], marks: &[Mark], out: &mut Vec<Inl>, depth: usize) {
         // Links and images (an image has no upload path: it becomes a link).
         if ch == '[' || (ch == '!' && c.get(i + 1) == Some(&'[')) {
             let at = if ch == '!' { i + 1 } else { i };
-            if let Some((text, dest, end)) = link_at(c, at) {
+            if let Some((text, dest, end)) = link_at(c, at, &mut memo) {
                 flush(&mut buf, out);
                 let text = if text.is_empty() {
                     dest.chars().collect()

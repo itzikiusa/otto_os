@@ -24,7 +24,7 @@ const drawer = (page: Page) => page.locator('.drawer[aria-label="Navigator"]');
 const title = (page: Page) => page.locator('.mtop-title');
 
 test('phone: drawer closed on load; top-bar title uses registry labels', async ({ page }) => {
-  await boot(page, 'mission-control');
+  await boot(page, 'scheduled-tasks');
   test.skip(!(await isPhone(page)), 'phone-mode only (≤640px live viewport)');
   await expect(drawer(page)).toHaveCount(0);
 
@@ -36,7 +36,7 @@ test('phone: drawer closed on load; top-bar title uses registry labels', async (
   // Pages that draw their own PageHeader aren't titled twice: the bar's title
   // steps aside (its text is still the registry label, never the raw id).
   await expect(page.getByTestId('page-header').first()).toBeVisible();
-  await expect(title(page)).toHaveText('Mission Control');
+  await expect(title(page)).toHaveText('Scheduled Tasks');
   await expect(title(page)).toBeHidden();
   await page.goto('/#/skills-eval');
   await expect(title(page)).toHaveText('Skills Lab');

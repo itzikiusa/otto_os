@@ -46,8 +46,6 @@ pub struct ServerCtx {
     pub manager: Arc<SessionManager>,
     /// Capability-isolated, ephemeral session rooms (never persisted to AuthRepo).
     pub rooms: Arc<crate::rooms::RoomRegistry>,
-    /// Two-player game capabilities; never persisted or shared with terminals.
-    pub game_rooms: Arc<crate::game_rooms::Registry>,
     pub workspaces: WorkspacesRepo,
     pub connections: Arc<ConnectionsService>,
     /// Native data-access layer for the DB Explorer (browse/query/schema).
@@ -114,8 +112,6 @@ pub struct ServerCtx {
     pub product_repo: otto_state::ProductRepo,
     /// Story attachments (files/images) repo — backs `otto_product::media`.
     pub attachment_repo: otto_state::ProductAttachmentRepo,
-    /// Discovery-run repo — repeatable discovery-swarm launches per story.
-    pub discovery_repo: otto_state::ProductDiscoveryRepo,
     /// Refinement-thread repo — conversational agent refinement threads per story.
     pub refinement_repo: otto_state::ProductRefinementRepo,
     /// Mockup pinned-annotation repo.
@@ -141,39 +137,15 @@ pub struct ServerCtx {
     /// Vault docs-agents: the resumable refine session per (vault, note),
     /// mirroring canvas_assist's one-session-per-artifact registry.
     pub vault_docs_refine: crate::vault_docs_agent::RefineRegistry,
-    // -- Agent Swarm -------------------------------------------------------
-    pub swarm: Arc<otto_swarm::SwarmService>,
-    pub swarm_repo: otto_state::SwarmRepo,
-    /// Per-swarm Coordinator runtime handles (start/pause/abort/resume).
-    pub swarm_coords: otto_swarm::runtime::engine::CoordinatorRegistry,
-    /// Per-run cancellation flags for in-flight swarm runs (manual Stop / abort).
-    pub swarm_run_cancels: otto_core::cancel::CancelRegistry,
     // -- Goal Loops --------------------------------------------------------
     pub goal_loops_repo: otto_state::GoalLoopsRepo,
     /// Per-loop controller runtime handles (start/pause/resume/stop).
     pub goal_loops: crate::goal_loop::GoalLoopRegistry,
-    // -- Mission Control / work graph --------------------------------------
-    /// Unified work-graph service (persist + emit). The projector
-    /// (`workgraph_projector`) feeds it from the event bus; the routes read it.
-    pub workgraph: std::sync::Arc<otto_workgraph::WorkGraphService>,
     // -- Scheduled Tasks ---------------------------------------------------
     /// Recurring agent jobs (tasks + run history). The scheduler
     /// (`scheduled_tasks_scheduler`) fires due tasks; the engine
     /// (`scheduled_tasks_engine`) runs + delivers them; the routes read/write them.
     pub scheduled_tasks: otto_state::ScheduledTasksRepo,
-    // -- Proof Packs -------------------------------------------------------
-    pub proof_repo: otto_state::ProofRepo,
-    /// Per-pack async locks serializing status/risk recompute so concurrent
-    /// artifact adds / gates can't interleave a stale read→write (no lost-update).
-    pub proof_locks: crate::proof::ProofLocks,
-    // -- Run with Otto -----------------------------------------------------
-    /// Source→PR-draft pipeline runs (the "one button"). The engine
-    /// (`run_engine`) drives the stage machine; the scheduler (`run_scheduler`)
-    /// reaps + re-drives on boot; the routes + channel trigger launch them.
-    pub runs: otto_state::RunsRepo,
-    /// Per-run in-flight guard so a racing reaper / double-approve can't
-    /// double-advance a run.
-    pub runs_engine: std::sync::Arc<crate::run_engine::RunEngine>,
     // -- Browser -------------------------------------------------------
     /// In-app reader/annotate tabs (workspace-scoped).
     pub browser_tabs: otto_state::BrowserTabsRepo,

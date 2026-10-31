@@ -245,7 +245,6 @@ impl ProductService {
         let open_questions = questions.iter().filter(|q| q.status == "open").count() as i64;
         // One COUNT(*) (was: every run's testcases loaded, one query per run).
         let testcase_count = self.repo.count_testcases_for_story(story_id).await?;
-        let swarm_link = self.repo.swarm_link_for_story(story_id).await?;
         Ok(ProductStoryDetail {
             story,
             source,
@@ -256,7 +255,6 @@ impl ProductService {
                 notes: notes.len() as i64,
                 testcases: testcase_count,
             },
-            swarm_link,
         })
     }
 
@@ -1413,7 +1411,7 @@ impl ProductService {
         let body = version.map(|version| version.body_md).unwrap_or_default();
         let reviewed = ReviewedContent {
             version_id,
-            body_sha256: otto_core::proof::content_sha256(&body),
+            body_sha256: otto_core::text::content_sha256(&body),
             title: story.title.clone(),
             source_kind: story.source_kind.clone(),
             url: story.url.clone(),
@@ -3132,7 +3130,7 @@ mod tests {
         assert_eq!(winner.size_bytes, bytes.len() as i64);
         assert_eq!(
             winner.sha256.as_deref(),
-            Some(otto_core::proof::bytes_sha256(&bytes).as_str())
+            Some(otto_core::text::bytes_sha256(&bytes).as_str())
         );
         // A late agent holding the original row must also conflict.
         assert!(crate::media::publish_content(
@@ -3497,7 +3495,7 @@ mod tests {
                     issue_type: "Story".into(),
                     reviewed_content: Some(ReviewedContent {
                         version_id: detail.source.as_ref().map(|version| version.id.clone()),
-                        body_sha256: otto_core::proof::content_sha256(
+                        body_sha256: otto_core::text::content_sha256(
                             detail
                                 .source
                                 .as_ref()
@@ -3533,7 +3531,7 @@ mod tests {
             issue_type: "Story".into(),
             reviewed_content: Some(ReviewedContent {
                 version_id: detail.source.as_ref().map(|version| version.id.clone()),
-                body_sha256: otto_core::proof::content_sha256(
+                body_sha256: otto_core::text::content_sha256(
                     detail
                         .source
                         .as_ref()

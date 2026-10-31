@@ -1,8 +1,7 @@
 // Contract mirror: product, part 2 — Design Arena, refinement / discovery chat
-// threads and the Product↔Swarm closure types. modules/product/types.ts re-exports it.
+// threads and publication preview types. modules/product/types.ts re-exports it.
 
-import type { ProductStory, PublishAsRfcReq, PublishAsStoryReq } from './product';
-import type { Swarm, SwarmMessage, SwarmProject, SwarmRun, SwarmTask } from './swarm';
+import type { PublishAsRfcReq, PublishAsStoryReq } from './product';
 
 // ---------------------------------------------------------------------------
 // Design Arena (design/product-design-arena.md §2.2, §4.4)
@@ -62,48 +61,6 @@ export interface ProductMockupAssistReq {
   provider?: string;
   /** Optional model alias for the first turn. */
   model?: string;
-}
-
-export interface DiscoveryRun {
-  id: string;
-  story_id: string;
-  workspace_id: string;
-  swarm_id: string;
-  project_id: string;
-  status: string;
-  brief_md: string;
-  report_md: string | null;
-  created_by: string;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface DiscoveryRunSummary {
-  run: DiscoveryRun;
-  derived_status: string;
-  task_count: number;
-  done_count: number;
-}
-
-export interface DiscoveryRunDetail {
-  run: DiscoveryRun;
-  derived_status: string;
-  tasks: SwarmTask[];
-  task_summaries: [string, string | null][];
-  messages: SwarmMessage[];
-}
-
-export interface DiscoverReq {
-  swarm_id?: string | null;
-  name?: string | null;
-}
-
-/** Response from `POST /product/stories/{sid}/discover`. */
-export interface DiscoverResp {
-  run: DiscoveryRun;
-  swarm: Swarm;
-  project: SwarmProject;
-  tasks: SwarmTask[];
 }
 
 export interface MockupAnnotation {
@@ -205,27 +162,6 @@ export interface ApplyResult {
   canvas_id: string | null;
 }
 
-// ---------------------------------------------------------------------------
-// Product↔Swarm closure types  (GET /product/stories/{sid}/swarm)
-// ---------------------------------------------------------------------------
-
-/** Full swarm project view linked to a story via the Plan → Swarm hand-off.
- *  Returned by `GET /product/stories/{sid}/swarm`. */
-export interface StorySwarmLink {
-  /** The linked swarm project, null when no project exists for this story. */
-  project: SwarmProject | null;
-  tasks: SwarmTask[];
-  runs: SwarmRun[];
-  /** File paths / references collected from run result blobs (best-effort). */
-  artifacts: string[];
-  /** PR numbers / references (best-effort). */
-  prs: string[];
-  /** Review ids (best-effort). */
-  reviews: string[];
-  /** Accumulated cost in USD across all runs. */
-  cost_usd: number;
-}
-
 /** Frozen dry-run workflow output, forwarded unchanged through human approval. */
 export type ProductPublicationPreview = {
   story_id: string;
@@ -233,16 +169,3 @@ export type ProductPublicationPreview = {
   account_label: string;
   account_url: string;
 } & ({ kind: 'jira'; request: PublishAsStoryReq } | { kind: 'rfc'; request: PublishAsRfcReq });
-
-// ---------------------------------------------------------------------------
-// Swarm↔Product closure types  (GET /swarm/tasks/{tid}/story)
-// ---------------------------------------------------------------------------
-
-/** Back-link from a swarm task to the Product story that originated it.
- *  Returned by `GET /swarm/tasks/{tid}/story`. */
-export interface TaskStoryLink {
-  /** Source Product story, null when the task was not created from a story plan. */
-  story: ProductStory | null;
-  /** Acceptance criteria from the task description (convenience field). */
-  acceptance: string | null;
-}

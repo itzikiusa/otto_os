@@ -36,7 +36,6 @@ Agents is where your coding agents run. Each session is a real terminal on this 
 - **Tabs**: one tab per open session. Drag tabs to reorder; middle-click closes. Right-click a tab for Rename, Close others, Close to the right, Close all tabs, Reopen closed tab, Share…, Open in New Window (desktop app) and view switching.
 - **Split panes**: split any pane left/right/up/down, up to 15 panes. Drag any divider (arrow keys, `Home` and `End` also work on a focused divider). Drag a pane by its grip onto another pane's centre to swap, or onto an edge to split beside it. Layout presets: Equal columns, Equal rows, One above two, One beside two, Grid (pane ⋯ menu or ⌘K). The layout is remembered per workspace.
 - **Tiled view**: every session in a grid. Up to 15 tiles are live at once; the rest show a light placeholder and only connect when you click **Click to attach**, so opening the grid doesn't wake every suspended agent. Drag tiles to reorder. **Free layout** turns the grid into split panes.
-- **Work Queue**: the tab bar's gauge button shows your sessions and runs in 6 buckets — Needs You, Working, Review Ready, Waiting, Failed, Budget Warning. Save filtered views by status, provider and repository (or advanced JSON), and push a sub-task to a running agent.
 - Per pane: **Terminal** or **Chat** (the conversation rebuilt from the agent's transcript). Chat works for `claude` and `codex`. For both at once, split the pane (`⌘D`) and put one side in Chat.
 
 **Terminal**
@@ -67,7 +66,7 @@ Agents is where your coding agents run. Each session is a real terminal on this 
 **Session lifecycle**
 - Status dots: running, working, idle, exited, suspended (resumable). A **Needs you** badge marks a session waiting for your input or a permission.
 - Sessions resume on open after a daemon restart. `claude`, `codex` and `agy` conversations resume when their conversation id was captured. A `shell` always comes back as a fresh shell, and an agent you started inside it is resumed with its own resume command.
-- Sessions you start here are never auto-suspended. Background sessions (workflows, reviews, swarms, channels…) are suspended after 5 idle minutes to free memory, and the pane header's details chip shows the countdown (hover it, or click it for the full details). **Pin (keep alive)** stops that.
+- Sessions you start here are never auto-suspended. Background sessions (workflows, reviews, channels…) are suspended after 5 idle minutes to free memory, and the pane header's details chip shows the countdown (hover it, or click it for the full details). **Pin (keep alive)** stops that.
 - **Restart session** respawns the process (resuming the conversation when possible). It's in the pane's ⋯ menu and, while an agent is running, in the sidebar row menu (for a stuck process). If the agent is mid-turn, Otto asks first.
 - Close a tab to only hide it (the session keeps running), **Archive** to stop it and keep its history, or **Delete** to remove it and its history (always confirmed). Closed tabs reopen with `⌘⇧T`.
 - Select many sessions in the sidebar to archive or delete them together. Archived sessions live in the Archived section, where you can restore them.
@@ -123,9 +122,6 @@ Agents is where your coding agents run. Each session is a real terminal on this 
 
 ## Related
 
-- [History](#/walkthroughs/history)
-- [Mission Control](#/walkthroughs/mission-control)
-- [Run with Otto](#/walkthroughs/run-with-otto)
 - [Command bar](#/walkthroughs/command-bar)
 - [Keyboard shortcuts](#/walkthroughs/keyboard-shortcuts)
 - [Phone and remote access](#/walkthroughs/phone-and-remote)

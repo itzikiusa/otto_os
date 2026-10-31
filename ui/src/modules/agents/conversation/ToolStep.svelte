@@ -20,11 +20,13 @@
   import InlineDiff from './InlineDiff.svelte';
   import CodeView from './CodeView.svelte';
   import Markdown from './Markdown.svelte';
+  import McpToolCard from './McpToolCard.svelte';
   import { openFile } from '../../../lib/stores/openfile.svelte';
   import { toasts } from '../../../lib/toast.svelte';
   import { linkifyOutput } from './chatMarkdown';
   import { openExternal } from '../../../lib/external';
   import { TOOL_CHROME, editInputPatch, relPath, lastLine, patchToDiff, toolLine, toolStatus } from './format';
+  import { extractRichMcpCard } from './mcpToolInfo';
   import { autoLang, ensureHljs, highlightBlock, highlightLine, langFromPath } from '../../../lib/hl';
   import type { Block } from '../../../lib/api/types';
   import { CONV_CTX, type ConvContext } from './context';
@@ -119,6 +121,7 @@
         : null),
   );
   const text = $derived(result?.text ?? '');
+  const mcpCard = $derived(extractRichMcpCard(block, text));
   // The collapsed row's second line: a command's last output line (a preview
   // cut from the head would lie about the tail, so not for elided results).
   const tail = $derived(isShell && !previewOnly && status !== 'running' ? lastLine(text) : '');
@@ -252,6 +255,9 @@
     </span>
     <span class="step-caret" aria-hidden="true"><Icon name={open ? 'chevronDown' : 'chevronRight'} size={12} /></span>
   </button>
+  {#if mcpCard}
+    <McpToolCard card={mcpCard} {status} />
+  {/if}
   {#if open}
     <div class="step-body" bind:this={bodyEl}>
       {#if isShell && command}

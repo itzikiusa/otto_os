@@ -19,6 +19,7 @@
 //! test in `tests/corpus.rs`.
 
 pub mod agy;
+pub mod agy_fold;
 pub mod claude;
 pub mod codex;
 pub mod fold;
@@ -41,19 +42,18 @@ pub use model::*;
 pub use peek::{peek, Peek};
 pub use records::{for_each_record, parse_records, read_head_tail, read_records};
 pub use subagents::{
-    read_subagents, read_subagents_limited, subagent_charge, subagent_path, subagents_dir,
-    SubagentScanner,
+    read_subagents, read_subagents_limited, subagent_charge, subagent_path, subagent_path_for,
+    subagents_dir, SubagentScanner,
 };
 pub use tailer::{TailDelta, Tailer};
 pub use util::{TOOL_INPUT_CAP, TOOL_TEXT_CAP};
 
-/// Fold parsed records for `provider`. agy yields an empty fold (the adapter is
-/// a stub — the route reports `provider_unsupported` before getting here).
+/// Fold parsed records for `provider`.
 pub fn fold(provider: Provider, records: &[serde_json::Value], opts: FoldOpts<'_>) -> Folded {
     match provider {
         Provider::Claude => claude::fold_claude(records, opts),
         Provider::Codex => codex::fold_codex(records, opts),
-        Provider::Agy => fold::Fold::new(Provider::Agy, opts).finish(0),
+        Provider::Agy => agy_fold::fold_agy(records, opts),
     }
 }
 
@@ -65,24 +65,28 @@ pub fn fold(provider: Provider, records: &[serde_json::Value], opts: FoldOpts<'_
 pub enum Folder<'a> {
     Claude(claude::ClaudeFolder<'a>),
     Codex(codex::CodexFolder<'a>),
+    Agy(agy_fold::AgyFolder<'a>),
 }
 
 impl<'a> Folder<'a> {
     pub fn new(provider: Provider, opts: FoldOpts<'a>) -> Self {
         match provider {
+            Provider::Claude => Folder::Claude(claude::ClaudeFolder::new(opts)),
             Provider::Codex => Folder::Codex(codex::CodexFolder::new(opts)),
-            // agy is a stub: fold as Claude-shaped (yields unknown records).
-            Provider::Claude | Provider::Agy => Folder::Claude(claude::ClaudeFolder::new(opts)),
+            Provider::Agy => Folder::Agy(agy_fold::AgyFolder::new(opts)),
         }
     }
 
-    /// [`seed`](Self::seed) from raw file bytes. Claude streams them one
+    /// [`seed`](Self::seed) from raw file bytes. Claude and Agy stream them one
     /// record at a time (no whole-file `Vec<Value>`); Codex needs the
     /// per-file prescan first, so it parses them all.
     pub fn seed_bytes(&mut self, bytes: &[u8]) {
         match self {
             Folder::Claude(c) => {
                 for_each_record(bytes, |v| c.push(&v));
+            }
+            Folder::Agy(a) => {
+                for_each_record(bytes, |v| a.push(&v));
             }
             Folder::Codex(_) => self.seed(&parse_records(bytes)),
         }
@@ -106,6 +110,10 @@ impl<'a> Folder<'a> {
                 c.push(v);
                 false
             }
+            Folder::Agy(a) => {
+                a.push(v);
+                false
+            }
             Folder::Codex(c) => c.push(v),
         }
     }
@@ -114,6 +122,7 @@ impl<'a> Folder<'a> {
         match self {
             Folder::Claude(c) => c.record_count(),
             Folder::Codex(c) => c.record_count(),
+            Folder::Agy(a) => a.record_count(),
         }
     }
 
@@ -121,6 +130,15 @@ impl<'a> Folder<'a> {
         match self {
             Folder::Claude(c) => c.set_subagents(subagents),
             Folder::Codex(c) => c.set_subagents(subagents),
+            Folder::Agy(a) => a.set_subagents(subagents),
+        }
+    }
+
+    pub fn subagents(&self) -> &[SubagentMeta] {
+        match self {
+            Folder::Claude(c) => c.subagents(),
+            Folder::Codex(c) => c.subagents(),
+            Folder::Agy(a) => a.subagents(),
         }
     }
 
@@ -132,6 +150,7 @@ impl<'a> Folder<'a> {
         match self {
             Folder::Claude(c) => c.bounded_snapshot(limit, byte_limit),
             Folder::Codex(c) => c.bounded_snapshot(limit, byte_limit),
+            Folder::Agy(a) => a.bounded_snapshot(limit, byte_limit),
         }
     }
 
@@ -145,6 +164,7 @@ impl<'a> Folder<'a> {
         match self {
             Folder::Claude(c) => c.page(before, limit, subagents),
             Folder::Codex(c) => c.page(before, limit, subagents),
+            Folder::Agy(a) => a.page(before, limit, subagents),
         }
     }
 
@@ -152,6 +172,7 @@ impl<'a> Folder<'a> {
         match self {
             Folder::Claude(c) => c.snapshot(),
             Folder::Codex(c) => c.snapshot(),
+            Folder::Agy(a) => a.snapshot(),
         }
     }
 
@@ -161,6 +182,7 @@ impl<'a> Folder<'a> {
         match self {
             Folder::Claude(c) => c.turns_since(since),
             Folder::Codex(c) => c.turns_since(since),
+            Folder::Agy(a) => a.turns_since(since),
         }
     }
 
@@ -169,6 +191,7 @@ impl<'a> Folder<'a> {
         match self {
             Folder::Claude(c) => c.tool_block(tool_id),
             Folder::Codex(c) => c.tool_block(tool_id),
+            Folder::Agy(a) => a.tool_block(tool_id),
         }
     }
 
@@ -177,12 +200,13 @@ impl<'a> Folder<'a> {
         match self {
             Folder::Claude(c) => c.artifacts(),
             Folder::Codex(c) => c.artifacts(),
+            Folder::Agy(a) => a.artifacts(),
         }
     }
 }
 
 /// Fold a transcript from its raw bytes — [`fold`] over
-/// [`parse_records`], but Claude files are streamed (see
+/// [`parse_records`], but Claude and Agy files are streamed (see
 /// [`Folder::seed_bytes`]).
 pub fn fold_bytes(provider: Provider, bytes: &[u8], opts: FoldOpts<'_>) -> Folded {
     match provider {
@@ -191,7 +215,12 @@ pub fn fold_bytes(provider: Provider, bytes: &[u8], opts: FoldOpts<'_>) -> Folde
             for_each_record(bytes, |v| c.push(&v));
             c.into_folded()
         }
-        Provider::Codex | Provider::Agy => fold(provider, &parse_records(bytes), opts),
+        Provider::Agy => {
+            let mut a = agy_fold::AgyFolder::new(opts);
+            for_each_record(bytes, |v| a.push(&v));
+            a.into_folded()
+        }
+        Provider::Codex => fold(provider, &parse_records(bytes), opts),
     }
 }
 
@@ -282,11 +311,13 @@ pub fn fold_file_limited(
     Ok(match folder {
         Folder::Claude(c) => c.into_folded(),
         Folder::Codex(c) => c.into_folded(),
+        Folder::Agy(a) => a.into_folded(),
     })
 }
 
 /// Guess the provider from a transcript path: Codex rollouts are named
-/// `rollout-…`, everything else under a `projects/<slug>/` dir is Claude.
+/// `rollout-…`, Antigravity brain logs live under `brain/` / `.system_generated/logs/`
+/// or `agy/` (or are named `agy-*.jsonl`), and everything else is Claude.
 pub fn provider_for_path(path: &std::path::Path) -> Option<Provider> {
     let name = path.file_name()?.to_str()?;
     if !name.ends_with(".jsonl") {
@@ -294,6 +325,18 @@ pub fn provider_for_path(path: &std::path::Path) -> Option<Provider> {
     }
     if name.starts_with("rollout-") {
         return Some(Provider::Codex);
+    }
+    if name.starts_with("agy-") || matches!(name, "transcript.jsonl" | "transcript_full.jsonl") {
+        return Some(Provider::Agy);
+    }
+    let has_agy_dir = path.components().any(|c| {
+        matches!(
+            c.as_os_str().to_str(),
+            Some("brain" | ".system_generated" | "agy")
+        )
+    });
+    if has_agy_dir {
+        return Some(Provider::Agy);
     }
     Some(Provider::Claude)
 }

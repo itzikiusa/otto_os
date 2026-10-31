@@ -8,12 +8,10 @@ import type { Feature } from '../api/types';
 
 export type HomeBoxKind =
   | 'sessions'
-  | 'mission-control'
   | 'db-dashboard'
   | 'k8s'
   | 'insights'
-  | 'usage'
-  | 'classrooms';
+  | 'usage';
 
 export interface HomeBoxKindDef {
   kind: HomeBoxKind;
@@ -41,16 +39,6 @@ export const HOME_KINDS: HomeBoxKindDef[] = [
     w: 4,
     h: 4,
     route: 'agents',
-  },
-  {
-    kind: 'mission-control',
-    label: 'Mission Control',
-    blurb: 'Summary of every running piece of work across the workspace.',
-    icon: 'radar',
-    feature: 'mission_control',
-    w: 8,
-    h: 4,
-    route: 'mission-control',
   },
   {
     kind: 'db-dashboard',
@@ -91,16 +79,6 @@ export const HOME_KINDS: HomeBoxKindDef[] = [
     w: 6,
     h: 4,
     route: 'usage',
-  },
-  {
-    kind: 'classrooms',
-    label: 'Classrooms',
-    blurb: 'Otto School in 3D: walk the corridor into each workspace’s classroom — every session is a kid at a PC with its live screen.',
-    icon: 'people',
-    feature: 'agents',
-    w: 8,
-    h: 6,
-    route: 'agents',
   },
 ];
 

@@ -2229,7 +2229,6 @@ mod tests {
             "channel_notify",
             "budget_gate",
             "human_approval",
-            "swarm_task",
             "api_run",
             "product_analyze",
             "product_rewrite",

@@ -21,14 +21,8 @@ const ROUTES = [
   'home',
   'rooms',
   'rooms/recaps',
-  'assistant',
-  'history',
-  'run-with-otto',
-  'mission-control',
   'connections',
-  'swarm',
   'loops',
-  'proof',
   'git',
   'product',
   'vault',
@@ -50,27 +44,14 @@ const ROUTES = [
   'walkthroughs',
   'settings/appearance',
   'settings/users',
-  'settings/assistant',
   'brokers',
 ];
 
 let wsId = '';
-let packA = '';
-let packB = '';
 
 test.beforeAll(async () => {
   const { ctx, base } = await apiCtx();
   wsId = await seedWorkspace(ctx, base);
-  // Two proof packs → the auto-select / restore checks.
-  for (const title of ['Chrome proof A', 'Chrome proof B']) {
-    const r = await ctx.post(`${base}${V1}/workspaces/${wsId}/proof-packs`, {
-      data: { work_item_kind: 'manual', work_item_id: `wi-chrome-${title.slice(-1)}-${Date.now()}`, title },
-    });
-    expect(r.ok(), await r.text()).toBeTruthy();
-    const id = (await r.json()).id as string;
-    if (title.endsWith('A')) packA = id;
-    else packB = id;
-  }
   // A workflow → its editor header carries the longest action row.
   const wf = await ctx.post(`${base}${V1}/workspaces/${wsId}/workflows`, {
     data: {
@@ -167,50 +148,6 @@ test('header actions overflow into a ⋯ menu that stays inside the viewport', a
   await page.setViewportSize({ width: 1800, height: 900 });
   await expect(more).toHaveCount(1);
   await expect(header.locator('.ph-actions > [data-ph-hidden]')).toHaveCount(0);
-});
-
-test('a list/detail page opens on its first item and restores the last one', async ({ page }) => {
-  await page.addInitScript(() => {
-    // Start without a remembered selection (one-shot: init scripts re-run on reload).
-    if (!sessionStorage.getItem('chrome-reset')) {
-      sessionStorage.setItem('chrome-reset', '1');
-      localStorage.removeItem('otto.lastSelection.proof');
-    }
-  });
-  await gotoRoute(page, 'proof');
-  const title = page.locator('[data-testid="page-header"] h1');
-  // No click: the page opened on an item, not on a "Select a proof pack" pane.
-  await expect(title).toHaveText(/Chrome proof [AB]/, { timeout: 20_000 });
-  await expect(page.getByText('Select a proof pack')).toHaveCount(0);
-
-  // Pick the other pack, reload → that one is restored.
-  const current = (await title.textContent())?.trim() ?? '';
-  const other = current.endsWith('A') ? 'Chrome proof B' : 'Chrome proof A';
-  await page.getByText(other, { exact: true }).first().click();
-  await expect(title).toHaveText(other);
-  await page.reload();
-  await expect(page.locator('.shell')).toBeVisible({ timeout: 30_000 });
-  await expect(title).toHaveText(other, { timeout: 20_000 });
-  expect([packA, packB]).toContain(await page.evaluate(() => localStorage.getItem('otto.lastSelection.proof')));
-});
-
-test('a Proof deep link waits for delayed workspace startup and then opens its named pack', async ({ page }) => {
-  let release!: () => void;
-  const gate = new Promise<void>(resolve => { release = resolve; });
-  let detailReads = 0;
-  await page.route('**/api/v1/workspaces', async route => { await gate; await route.continue(); });
-  page.on('request', request => {
-    if (new URL(request.url()).pathname === `/api/v1/proof-packs/${packA}`) detailReads++;
-  });
-  await gotoRoute(page, `proof/${packA}`);
-  const title = page.locator('[data-testid="page-header"] h1');
-  await expect(title).toHaveText('Proof packs');
-  // No detail request belongs to a workspace until that workspace is known.
-  expect(detailReads).toBe(0);
-  release();
-  await expect(title).toHaveText('Chrome proof A');
-  expect(detailReads).toBe(1);
-  await expect(page).toHaveURL(new RegExp(`#/proof/${packA}$`));
 });
 
 // Ambient backdrop + glass (foundations.md §7): the backdrop shows through the

@@ -2358,7 +2358,7 @@ impl Store {
         limit: i64,
         offset: i64,
     ) -> Result<Vec<(DesignArtifact, String, f64)>> {
-        let needle = format!("%{}%", otto_state::workgraph::like_escape(query.trim()));
+        let needle = format!("%{}%", otto_state::like_escape(query.trim()));
         let mut args = vec![Arg::S(needle.clone()), Arg::S(needle)];
         let mut sql = format!(
             "{ART_SELECT} WHERE (a.title LIKE ? ESCAPE '\\' OR a.tags_json LIKE ? ESCAPE '\\')"

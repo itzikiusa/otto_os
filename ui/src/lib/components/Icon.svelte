@@ -8,6 +8,8 @@
     // modules
     home: 'M2.5 8.2 8 3l5.5 5.2M4 7.2V13h8V7.2M6.5 13V9.5h3V13',
     terminal: 'M2.5 3.5h11a1 1 0 0 1 1 1v7a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1v-7a1 1 0 0 1 1-1Zm2 3 2 1.7-2 1.8M8.5 10.5h3',
+    // Threads (module): overlapping conversation bubbles — multi-session textual workspace
+    threads: 'M2.8 2.5h7.2a1 1 0 0 1 1 1v4.2a1 1 0 0 1-1 1H6.2L3.8 10.8V8.7H2.8a1 1 0 0 1-1-1V3.5a1 1 0 0 1 1-1ZM11 6h2.2a1 1 0 0 1 1 1v4.2a1 1 0 0 1-1 1h-1v2.1L9.8 12.2H7.2a1 1 0 0 1-1-1V9.8',
     shapes: 'M2.5 3a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v4a1 1 0 0 1-1 1h-4a1 1 0 0 1-1-1ZM11 8.5a3 3 0 1 1 0 6 3 3 0 0 1 0-6Z',
     chart: 'M2.5 2.5v10a1 1 0 0 0 1 1h10M5 11V8m3 3V5m3 6V7.5',
     gauge: 'M8 13.5a5.5 5.5 0 1 1 5.5-5.5M8 8l2.5-2M3.4 8.4l.5.2m8.2-.2-.5.2M5.2 5.2l.4.4',

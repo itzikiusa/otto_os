@@ -98,13 +98,16 @@
     let blob: string | null = null;
     content = null;
     if (kind === 'image') {
-      const id = artifactId(path);
-      if (!ctx.sessionId || !id) {
-        error = 'Images preview only when the session produced them as an output.';
-        return;
-      }
+      const id = ctx.sessionId ? artifactId(path) : null;
+      const rawUrl = `/fs/raw?path=${encodeURIComponent(path)}`;
+      const fetchImg =
+        ctx.sessionId && id
+          ? authedBlobUrl(`/sessions/${encodeURIComponent(ctx.sessionId)}/artifacts/${encodeURIComponent(id)}`).catch(
+              () => authedBlobUrl(rawUrl),
+            )
+          : authedBlobUrl(rawUrl);
       loading = true;
-      authedBlobUrl(`/sessions/${encodeURIComponent(ctx.sessionId)}/artifacts/${encodeURIComponent(id)}`).then(
+      fetchImg.then(
         (u) => {
           if (!alive) return URL.revokeObjectURL(u);
           blob = u;
@@ -113,7 +116,7 @@
         },
         (e) => {
           if (!alive) return;
-          error = e instanceof Error ? e.message : String(e);
+          error = loadErrorText(e);
           retryable = true;
           loading = false;
         },

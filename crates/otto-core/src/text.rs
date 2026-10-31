@@ -211,6 +211,19 @@ pub fn strip_ansi_bytes(raw: &[u8]) -> String {
     strip_ansi(&String::from_utf8_lossy(raw))
 }
 
+/// SHA-256 (lowercase hex) of `content`.
+pub fn content_sha256(content: &str) -> String {
+    bytes_sha256(content.as_bytes())
+}
+
+/// SHA-256 (lowercase hex) of raw bytes.
+pub fn bytes_sha256(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(bytes);
+    hex::encode(h.finalize())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

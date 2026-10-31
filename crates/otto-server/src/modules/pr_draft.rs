@@ -148,29 +148,8 @@ pub(crate) async fn draft_pr(
     Ok(Json(resp))
 }
 
-/// Core PR-draft logic shared by the `POST /repos/{id}/pr/draft` handler and the
-/// Run with Otto engine: diff the checkout at `repo_path` against `base`, draft a
-/// title + description with the `pull-request` skill, and return them. The caller
-/// owns auth/HTTP concerns. `repo_path` may be a worktree (Run with Otto passes
-/// the run's `otto-run/<id>` worktree). `base: None` (or a ref that doesn't
-/// exist here) falls back to the repo's detected default branch — never a
-/// fabricated `main`, so a master-/develop-based repo can't exit 128.
-pub(crate) async fn draft_pr_core(
-    ctx: &ServerCtx,
-    ws: &otto_core::domain::Workspace,
-    user: &otto_core::domain::User,
-    repo_path: &str,
-    base: Option<&str>,
-    run_id: Option<&Id>,
-) -> Result<otto_core::api::DraftPrResp> {
-    draft_pr_core_for(ctx, ws, user, repo_path, base, None, run_id).await
-}
-
-/// [`draft_pr_core`] for an explicit source branch `head` (`None` ⇒ the
+/// Core PR-draft logic for an explicit source branch `head` (`None` ⇒ the
 /// checkout's current branch). The reply's `source_branch` is `head`.
-/// `run_id` (Run with Otto) is stamped into the drafting session's meta so a
-/// run cancel can find and stop it — dropping this future does not kill a
-/// manager-owned session.
 pub(crate) async fn draft_pr_core_for(
     ctx: &ServerCtx,
     ws: &otto_core::domain::Workspace,

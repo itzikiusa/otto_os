@@ -1,12 +1,11 @@
 //! The eval-lab scoring pipeline — turns one iteration's produced code into a
-//! multi-signal [`EvalScore`] backed by a Proof Pack.
+//! multi-signal [`EvalScore`].
 //!
-//! It is the wiring between the eval engine and the proof engine: it assembles a
-//! Proof Pack (`WorkItemKind::Task` ⇒ `CodeChange`) from the iteration's
-//! tests / lint / diff / review / human signals, lets the proof engine derive the
-//! authoritative status + done-score, and blends the signals into a composite via
-//! the pure math in [`otto_core::eval_score`]. No agent is involved, so it runs in
-//! both `generate` mode (after validation) and `score_only` mode (no agent at all).
+//! Computes the iteration's diff / tests / lint / review / human signals,
+//! derives the authoritative verification status + readiness score, and blends
+//! the signals into a composite via the pure math in [`otto_core::eval_score`].
+//! No agent is involved, so it runs in both `generate` mode (after validation)
+//! and `score_only` mode (no agent at all).
 
 use otto_core::domain::{
     DiffScore, EvalIteration, EvalScore, GoldenTask, ScoreWeights, SignalScore, SkillEval,
@@ -14,14 +13,12 @@ use otto_core::domain::{
 use otto_core::eval_score::{
     compute_composite, diff_score, human_score, signal_from_cmd, signal_score,
 };
-use otto_core::proof::{
-    compute_risk, ProofArtifact, ProofArtifactKind, ProofArtifactStatus, WorkItemKind,
-};
 use otto_core::Result;
-use serde_json::json;
 
-use crate::proof;
 use crate::state::ServerCtx;
+
+/// Wall-clock cap per test/lint command during iteration scoring.
+const CMD_TIMEOUT_SECS: u64 = 600;
 
 /// Serialize rating writes, retry admission and final score publication for one
 /// evaluation. The lock is never held while agents run. Weak entries are pruned
@@ -30,6 +27,21 @@ pub(crate) async fn update_guard(id: &str) -> tokio::sync::OwnedMutexGuard<()> {
     static LOCKS: otto_core::keyed_lock::KeyedLocks<String> =
         otto_core::keyed_lock::KeyedLocks::new();
     LOCKS.lock(id).await
+}
+
+#[cfg(test)]
+type RetryCheckpoint = (
+    tokio::sync::oneshot::Sender<()>,
+    tokio::sync::oneshot::Receiver<()>,
+);
+
+#[cfg(test)]
+pub(crate) fn retry_checkpoints(
+) -> &'static std::sync::Mutex<std::collections::HashMap<String, RetryCheckpoint>> {
+    static POINTS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, RetryCheckpoint>>,
+    > = std::sync::OnceLock::new();
+    POINTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
 /// Publish a retried validator score under the same lock as human ratings. The
@@ -41,8 +53,15 @@ pub(crate) async fn publish_validation_retry(
     previous: Option<EvalScore>,
 ) -> Result<()> {
     let _guard = update_guard(eval_id).await;
-    let eval = ctx.skill_evals_store.get_eval(eval_id).await?;
     let updated = ctx.skill_evals_store.get_iteration(iter_id).await?;
+    #[cfg(test)]
+    {
+        let cp = retry_checkpoints().lock().unwrap().remove(iter_id.as_str());
+        if let Some((entered, release)) = cp {
+            let _ = entered.send(());
+            let _ = release.await;
+        }
+    }
     // The legacy iteration badge uses the same validator denominator as an
     // initial run. Incomplete validators contribute zero, never disappear.
     let mean = (!updated.agents.is_empty()).then(|| {
@@ -59,13 +78,12 @@ pub(crate) async fn publish_validation_retry(
             .sum::<f64>()
             / updated.agents.len() as f64
     });
-    let (scoring, pack_id) = rescore_validation(ctx, &eval, &updated, previous).await?;
+    let scoring = rescore_validation(&updated, previous);
     ctx.skill_evals_store
         .publish_iter_scoring(
             eval_id,
             iter_id,
             &scoring,
-            &pack_id,
             mean,
             "Validation retry complete",
         )
@@ -75,19 +93,9 @@ pub(crate) async fn publish_validation_retry(
         .await
 }
 
-/// A short, human title for an eval iteration's proof pack.
-fn pack_title(eval: &SkillEval) -> String {
-    let task: String = eval.task.chars().take(60).collect();
-    format!("eval: {} · {}", eval.source_skill, task.trim())
-}
-
-fn meta_u32(a: &ProofArtifact, key: &str) -> u32 {
-    a.metadata.get(key).and_then(|v| v.as_u64()).unwrap_or(0) as u32
-}
-
 /// Run the full scoring pipeline for one iteration and return its [`EvalScore`].
-/// Assembles the iteration's Proof Pack, then publishes the score under the
-/// evaluation update lock using the latest rating. Commands run outside the lock.
+/// Publishes the score under the evaluation update lock using the latest rating.
+/// Commands run outside the lock.
 ///
 /// - `diff_base` is the git ref the diff is measured against: `None` ⇒ working tree
 ///   vs HEAD (uncommitted impl-agent changes / dirty target), `Some(ref)` ⇒
@@ -104,7 +112,7 @@ pub async fn score_iteration(
     test_cmd: Option<&str>,
     lint_cmd: Option<&str>,
     cancel: &std::sync::atomic::AtomicBool,
-) -> Result<(EvalScore, String)> {
+) -> Result<EvalScore> {
     cancellable(
         cancel,
         score_iteration_inner(
@@ -114,7 +122,7 @@ pub async fn score_iteration(
     .await
 }
 
-/// Dropping a proof command future terminates its owned process group.
+/// Dropping a command future terminates its owned process group.
 pub(crate) async fn cancellable<T>(
     cancel: &std::sync::atomic::AtomicBool,
     future: impl std::future::Future<Output = Result<T>>,
@@ -141,106 +149,32 @@ async fn score_iteration_inner(
     test_cmd: Option<&str>,
     lint_cmd: Option<&str>,
     cancel: &std::sync::atomic::AtomicBool,
-) -> Result<(EvalScore, String)> {
-    let ws = &eval.workspace_id;
+) -> Result<EvalScore> {
     let Some(worktree) = iter.worktree_path.clone() else {
-        // Nothing on disk to score — return an empty score, no pack.
-        return Ok((
-            EvalScore {
-                weights: weights.clone(),
-                ..Default::default()
-            },
-            String::new(),
-        ));
+        // Nothing on disk to score — return an empty score.
+        return Ok(EvalScore {
+            weights: weights.clone(),
+            ..Default::default()
+        });
     };
 
-    // 1. Ensure the proof pack (idempotent) + link it to the resolved repo.
-    let pack = proof::gate(
-        ctx,
-        WorkItemKind::Task,
-        &iter.id,
-        ws,
-        &pack_title(eval),
-        "otto",
-    )
-    .await?;
-    if let Some(repo_id) = proof::resolve_repo_for_cwd(ctx, ws, &worktree).await {
-        let _ = ctx
-            .proof_repo
-            .set_repo_link(&pack.id, Some(&repo_id), None)
-            .await;
-    }
+    // 1. Diff-quality signal over the iteration's changes.
+    let diff = score_worktree_diff(&worktree, diff_base).await;
 
-    // 2. Diff artifact → diff-quality signal.
-    let _ = proof::assemble_diff(ctx, &pack, &worktree, diff_base).await;
-    let arts = ctx
-        .proof_repo
-        .list_artifacts(&pack.id)
-        .await
-        .unwrap_or_default();
-    let diff: DiffScore = match arts.iter().find(|a| a.kind == ProofArtifactKind::Diff) {
-        Some(d) => {
-            let files = meta_u32(d, "files_changed");
-            let add = meta_u32(d, "additions");
-            let del = meta_u32(d, "deletions");
-            let risky = d
-                .metadata
-                .get("risky_files")
-                .and_then(|v| v.as_array())
-                .map(|a| a.len() as u32)
-                .unwrap_or(0);
-            // Risk over the diff artifact ALONE so the failing-test / review
-            // penalties inside `compute_risk` don't double-count those signals.
-            let risk = compute_risk(std::slice::from_ref(d));
-            diff_score(files, add, del, risky, risk)
-        }
-        None => DiffScore::default(),
-    };
-
-    // 3. Tests + lint command signals (recorded as proof `command` artifacts).
-    let tests = cancellable(
-        cancel,
-        run_cmd_signal(ctx, &pack, &worktree, test_cmd, "test"),
-    )
-    .await?;
-    let lint = cancellable(
-        cancel,
-        run_cmd_signal(ctx, &pack, &worktree, lint_cmd, "lint"),
-    )
-    .await?;
+    // 2. Tests + lint command signals.
+    let tests = cancellable(cancel, run_cmd_signal(&worktree, test_cmd, cancel)).await?;
+    let lint = cancellable(cancel, run_cmd_signal(&worktree, lint_cmd, cancel)).await?;
 
     // Commands can take minutes. Re-read user edits only after they finish, and
-    // serialize proof/score publication with ratings and validation retries.
+    // serialize score publication with ratings and validation retries.
     let _guard = update_guard(&eval.id).await;
     let iter = ctx.skill_evals_store.get_iteration(&iter.id).await?;
 
-    // 4. Review signal from the iteration's validator findings.
-    let review = review_signal(ctx, &pack, &iter).await?;
+    // 3. Review signal from the iteration's validator findings.
+    let (review, review_passed) = review_signal(&iter);
 
-    // 5. Human rating signal (Approval artifact when present).
+    // 4. Human rating signal (when present).
     let human = human_score(iter.human_rating, &iter.human_note, &iter.human_rater);
-    if let Some(r) = iter.human_rating {
-        let body = format!("rating: {r}/5\n{}", iter.human_note);
-        let by = if iter.human_rater.is_empty() {
-            "otto"
-        } else {
-            &iter.human_rater
-        };
-        proof::upsert_content_artifact(
-            ctx,
-            &pack,
-            ProofArtifactKind::Approval,
-            "Human rating",
-            &body,
-            ProofArtifactStatus::Passed,
-            json!({ "rating": r }),
-            by,
-        )
-        .await?;
-    }
-
-    // 6. Let the proof engine derive the authoritative status + done score.
-    let refreshed = proof::recompute_and_emit(ctx, &pack.id).await?;
 
     let mut score = EvalScore {
         tests,
@@ -250,150 +184,213 @@ async fn score_iteration_inner(
         human,
         weights: weights.clone(),
         composite: 0.0,
-        proof_status: refreshed.status.as_str().to_string(),
-        done_score: refreshed.done_score,
+        proof_status: String::new(),
+        done_score: 0,
     };
-    score.composite = compute_composite(&score);
+    finalize_eval_score(&mut score, review_passed);
+
     ctx.skill_evals_store
         .publish_iter_scoring(
             &eval.id,
             &iter.id,
             &score,
-            &pack.id,
             (eval.mode == "score_only").then_some(score.composite),
             "Scoring complete",
         )
         .await?;
-    Ok((score, pack.id))
+    Ok(score)
 }
 
 /// Re-derive an iteration's score after a human rating change WITHOUT re-running
-/// commands: re-reads the persisted signals, upserts the Approval artifact,
-/// recomputes the proof status, and recomputes the composite. Deterministic and
-/// cheap — a star rating never re-runs tests.
-pub async fn rescore_with_human(
-    ctx: &ServerCtx,
-    eval: &SkillEval,
-    iter: &EvalIteration,
-    rating: u8,
-    note: &str,
-    rater: &str,
-) -> Result<(EvalScore, String)> {
-    let pack = proof::gate(
-        ctx,
-        WorkItemKind::Task,
-        &iter.id,
-        &eval.workspace_id,
-        &pack_title(eval),
-        "otto",
-    )
-    .await?;
-    let body = format!("rating: {rating}/5\n{note}");
-    let by = if rater.is_empty() { "otto" } else { rater };
-    proof::upsert_content_artifact(
-        ctx,
-        &pack,
-        ProofArtifactKind::Approval,
-        "Human rating",
-        &body,
-        ProofArtifactStatus::Passed,
-        json!({ "rating": rating }),
-        by,
-    )
-    .await?;
-    let refreshed = proof::recompute_and_emit(ctx, &pack.id).await?;
-
+/// commands: re-reads the persisted signals, updates the human signal,
+/// recomputes the verification status, and recomputes the composite.
+/// Deterministic and cheap — a star rating never re-runs tests.
+pub fn rescore_with_human(iter: &EvalIteration, rating: u8, note: &str, rater: &str) -> EvalScore {
     // A recorded zero weight is intentional (e.g. lint-only scoring). Only an
     // absent score needs defaults; EvalScore::default already supplies them.
     let mut score = iter.scoring.clone().unwrap_or_default();
+    let (_, review_passed) = review_signal(iter);
     score.human = human_score(Some(rating), note, rater);
-    score.proof_status = refreshed.status.as_str().to_string();
-    score.done_score = refreshed.done_score;
-    score.composite = compute_composite(&score);
-    Ok((score, pack.id))
+    finalize_eval_score(&mut score, review_passed);
+    score
 }
 
 /// Refresh only validator evidence after retry; original test/lint commands
 /// are not re-run. Admission cleared the published score until this succeeds.
-pub(crate) async fn rescore_validation(
-    ctx: &ServerCtx,
-    eval: &SkillEval,
-    iter: &EvalIteration,
-    previous: Option<EvalScore>,
-) -> Result<(EvalScore, String)> {
-    let id = iter.proof_pack_id.as_deref().ok_or_else(|| {
-        otto_core::Error::Conflict("iteration has no proof pack; run a new evaluation".into())
-    })?;
-    let pack = ctx.proof_repo.get_pack(id).await?;
-    if pack.workspace_id != eval.workspace_id
-        || pack.work_item_id != iter.id
-        || pack.work_item_kind != WorkItemKind::Task
-    {
-        return Err(otto_core::Error::Conflict(
-            "proof pack belongs to another iteration".into(),
-        ));
-    }
+pub(crate) fn rescore_validation(iter: &EvalIteration, previous: Option<EvalScore>) -> EvalScore {
     let mut score = previous.unwrap_or_default();
-    score.review = review_signal(ctx, &pack, iter).await?;
+    let (review, review_passed) = review_signal(iter);
+    score.review = review;
     score.human = human_score(iter.human_rating, &iter.human_note, &iter.human_rater);
-    // A rating may have saved its pending snapshot but failed to write Proof.
-    // A subsequent validator retry must repair that Approval before publishing.
-    if let Some(rating) = iter.human_rating {
-        proof::upsert_content_artifact(
-            ctx,
-            &pack,
-            ProofArtifactKind::Approval,
-            "Human rating",
-            &format!("rating: {rating}/5\n{}", iter.human_note),
-            ProofArtifactStatus::Passed,
-            json!({ "rating": rating }),
-            if iter.human_rater.is_empty() {
-                "otto"
-            } else {
-                &iter.human_rater
-            },
-        )
-        .await?;
-    }
-    let fresh = proof::recompute_and_emit(ctx, id).await?;
-    score.proof_status = fresh.status.as_str().to_string();
-    score.done_score = fresh.done_score;
-    score.composite = compute_composite(&score);
-    Ok((score, id.to_string()))
+    finalize_eval_score(&mut score, review_passed);
+    score
 }
 
-/// Run a test/lint command (if configured) as a proof `command` artifact and map
-/// it to a 0/100 gate signal.
+fn finalize_eval_score(score: &mut EvalScore, review_passed: bool) {
+    score.composite = compute_composite(score);
+    let any_failed = (score.tests.ran && score.tests.score < 100.0)
+        || (score.lint.ran && score.lint.score < 100.0)
+        || (score.review.ran && !review_passed);
+    let status = if any_failed {
+        "failed"
+    } else if score.diff.ran
+        && score.tests.ran
+        && score.tests.score >= 100.0
+        && looks_like_test_command(&score.tests.detail)
+    {
+        "passed"
+    } else if score.tests.ran
+        || score.lint.ran
+        || score.diff.ran
+        || score.review.ran
+        || score.human.rating.is_some()
+    {
+        "partial"
+    } else {
+        "missing"
+    };
+    score.proof_status = status.to_string();
+    score.done_score = score.composite.round().clamp(0.0, 100.0) as u8;
+}
+
+/// True if `cmd` looks like a recognized test/quality runner (not a trivial `true`).
+fn looks_like_test_command(cmd: &str) -> bool {
+    let c = cmd.to_lowercase();
+    const NEEDLES: &[&str] = &[
+        "cargo test",
+        "cargo nextest",
+        "go test",
+        "npm test",
+        "npm run test",
+        "npm run check",
+        "yarn test",
+        "pnpm test",
+        "jest",
+        "vitest",
+        "playwright test",
+        "pytest",
+        "python -m pytest",
+        "go vet",
+        "cargo clippy",
+        "svelte-check",
+        "ctest",
+        "gradle test",
+        "mvn test",
+        "rspec",
+        "phpunit",
+    ];
+    NEEDLES.iter().any(|n| c.contains(n))
+}
+
+fn is_risky_file(path: &str) -> bool {
+    let p = path.to_lowercase();
+    if p.contains("migrations/")
+        || p.ends_with(".sql")
+        || p.starts_with(".github/workflows/")
+        || p == "cargo.toml"
+        || p.ends_with("/cargo.toml")
+        || p == "package.json"
+        || p.ends_with("/package.json")
+    {
+        return true;
+    }
+    let base = p.rsplit('/').next().unwrap_or(&p);
+    const RISKY_WORDS: &[&str] = &[
+        "auth",
+        "rbac",
+        "policy",
+        "secret",
+        "secrets",
+        "keychain",
+        "sandbox",
+        "netguard",
+        "permission",
+        "permissions",
+        "password",
+        "passwords",
+        "crypto",
+        "token",
+        "tokens",
+        "credential",
+        "credentials",
+    ];
+    base.split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .any(|w| RISKY_WORDS.contains(&w))
+}
+
+async fn score_worktree_diff(cwd: &str, base: Option<&str>) -> DiffScore {
+    let git = otto_git::LocalGit::new(cwd);
+    if git.rev_parse("HEAD").await.is_err() {
+        return DiffScore::default();
+    }
+    let target = match base {
+        Some(b) => otto_git::DiffTarget::Range(b.to_string(), "HEAD".to_string()),
+        None => otto_git::DiffTarget::Working,
+    };
+    let opts = otto_git::DiffOpts {
+        summary: true,
+        ..otto_git::DiffOpts::default()
+    };
+    let Ok(resp) = git.diff_with(&target, &opts).await else {
+        return DiffScore::default();
+    };
+    if resp.files.is_empty() {
+        return DiffScore::default();
+    }
+    let files = resp.files.len() as u32;
+    let additions: u32 = resp.files.iter().filter_map(|f| f.added).sum();
+    let deletions: u32 = resp.files.iter().filter_map(|f| f.deleted).sum();
+    let risky_files: Vec<&str> = resp
+        .files
+        .iter()
+        .map(|f| f.path.as_str())
+        .filter(|p| is_risky_file(p))
+        .collect();
+    let migration_touched = risky_files
+        .iter()
+        .any(|s| s.contains("migrations/") || s.ends_with(".sql"));
+    let loc = (additions + deletions) as usize;
+    // Diff-alone risk (excludes test/review failure penalties so signals are not double-counted).
+    let mut risk: i32 = ((loc / 20) as i32).min(40) + ((risky_files.len() as i32) * 8).min(32) + 10;
+    if migration_touched {
+        risk += 10;
+    }
+    diff_score(
+        files,
+        additions,
+        deletions,
+        risky_files.len() as u32,
+        risk.clamp(0, 100) as u8,
+    )
+}
+
+/// Run a test/lint command (if configured) and map it to a 0/100 gate signal.
 async fn run_cmd_signal(
-    ctx: &ServerCtx,
-    pack: &otto_core::proof::ProofPack,
     cwd: &str,
     cmd: Option<&str>,
-    kind_hint: &str,
+    cancel: &std::sync::atomic::AtomicBool,
 ) -> Result<SignalScore> {
     match cmd {
         Some(c) if !c.trim().is_empty() => {
-            let st = proof::run_command_artifact(ctx, pack, cwd, c, Some(kind_hint)).await?;
-            let ok = st == ProofArtifactStatus::Passed;
+            let run =
+                otto_automation::goal_loop_commands::run(cwd, c, CMD_TIMEOUT_SECS, cancel).await;
+            let ok = run.success;
             Ok(signal_from_cmd(
                 true,
                 ok,
-                format!("`{c}` → {}", st.as_str()),
+                format!("`{c}` → {}", if ok { "passed" } else { "failed" }),
             ))
         }
         _ => Ok(SignalScore::default()),
     }
 }
 
-/// Aggregate the iteration's validator findings into a review signal + a Review
-/// proof artifact. No-op (signal not run) when the iteration has no validators.
-async fn review_signal(
-    ctx: &ServerCtx,
-    pack: &otto_core::proof::ProofPack,
-    iter: &EvalIteration,
-) -> Result<SignalScore> {
+/// Aggregate the iteration's validator findings into `(SignalScore, passed)`.
+/// Returns `(default, true)` when the iteration has no validators.
+pub(crate) fn review_signal(iter: &EvalIteration) -> (SignalScore, bool) {
     if iter.agents.is_empty() {
-        return Ok(SignalScore::default());
+        return (SignalScore::default(), true);
     }
     let mut findings = Vec::new();
     for a in &iter.agents {
@@ -403,47 +400,16 @@ async fn review_signal(
     let complete = iter.agents.iter().all(|agent| agent.status == "done");
     let passed = complete && findings_passed;
     let score = if complete { findings_score } else { 0.0 };
-    let status = if passed {
-        ProofArtifactStatus::Passed
-    } else {
-        ProofArtifactStatus::Failed
-    };
-    let mut body = format!(
-        "{} finding(s); all validators completed: {complete}\n",
-        findings.len()
-    );
-    for f in &findings {
-        body.push_str(&format!(
-            "- [{}] {}{}\n",
-            f.severity,
-            f.issue,
-            f.location
-                .as_deref()
-                .map(|l| format!(" ({l})"))
-                .unwrap_or_default()
-        ));
-    }
-    proof::upsert_content_artifact(
-        ctx,
-        pack,
-        ProofArtifactKind::Review,
-        "Validator findings",
-        &body,
-        status,
-        json!({ "findings": findings.len(), "passed": passed }),
-        "otto",
+    (
+        signal_score(true, score, format!("{} finding(s)", findings.len())),
+        passed,
     )
-    .await?;
-    Ok(signal_score(
-        true,
-        score,
-        format!("{} finding(s)", findings.len()),
-    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use std::sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -508,26 +474,13 @@ mod tests {
 
     #[tokio::test]
     async fn validation_retry_keeps_the_latest_persisted_human_rating() {
-        let (_dir, ctx, eval, mut iter) = fixture().await;
-        let pack = ctx
-            .proof_repo
-            .create_pack(
-                &eval.workspace_id,
-                WorkItemKind::Task,
-                &iter.id,
-                "fixture",
-                "editor",
-                None,
-            )
-            .await
-            .unwrap();
-        iter.proof_pack_id = Some(pack.id.clone());
+        let (_dir, ctx, _eval, iter) = fixture().await;
         let previous = EvalScore {
             human: human_score(Some(5), "before retry", "editor"),
             ..Default::default()
         };
         ctx.skill_evals_store
-            .set_iter_scoring(&iter.id, &previous, Some(&pack.id))
+            .set_iter_scoring(&iter.id, &previous)
             .await
             .unwrap();
         // The human rating is changed while the validators are still running.
@@ -536,11 +489,9 @@ mod tests {
             .await
             .unwrap();
         let fresh = ctx.skill_evals_store.get_iteration(&iter.id).await.unwrap();
-        let (score, _) = rescore_validation(&ctx, &eval, &fresh, Some(previous))
-            .await
-            .unwrap();
+        let score = rescore_validation(&fresh, Some(previous));
         ctx.skill_evals_store
-            .set_iter_scoring(&iter.id, &score, Some(&pack.id))
+            .set_iter_scoring(&iter.id, &score)
             .await
             .unwrap();
         let stored = ctx.skill_evals_store.get_iteration(&iter.id).await.unwrap();
@@ -553,20 +504,7 @@ mod tests {
 
     #[tokio::test]
     async fn errored_or_failed_retry_replaces_previously_passed_review_evidence() {
-        let (_dir, ctx, eval, mut iter) = fixture().await;
-        let pack = ctx
-            .proof_repo
-            .create_pack(
-                &eval.workspace_id,
-                WorkItemKind::Task,
-                &iter.id,
-                "fixture",
-                "editor",
-                None,
-            )
-            .await
-            .unwrap();
-        iter.proof_pack_id = Some(pack.id.clone());
+        let (_dir, _ctx, _eval, mut iter) = fixture().await;
         let agent = |status: &str, findings: Vec<otto_core::domain::EvalFinding>| {
             otto_core::domain::EvalValidationState {
                 validation: "fixture".into(),
@@ -582,10 +520,9 @@ mod tests {
             }
         };
         iter.agents = vec![agent("done", vec![])];
-        assert_eq!(
-            review_signal(&ctx, &pack, &iter).await.unwrap().score,
-            100.0
-        );
+        let (sig, passed) = review_signal(&iter);
+        assert_eq!(sig.score, 100.0);
+        assert!(passed);
         for failed in [
             agent("error", vec![]),
             agent(
@@ -604,16 +541,9 @@ mod tests {
                 proof_status: "passed".into(),
                 ..Default::default()
             };
-            let (score, _) = rescore_validation(&ctx, &eval, &iter, Some(previous))
-                .await
-                .unwrap();
+            let score = rescore_validation(&iter, Some(previous));
             assert!(score.review.score < 100.0);
-            let artifacts = ctx.proof_repo.list_artifacts_meta(&pack.id).await.unwrap();
-            assert!(artifacts
-                .iter()
-                .any(|a| a.kind == ProofArtifactKind::Review
-                    && a.status == ProofArtifactStatus::Failed));
-            assert_ne!(score.proof_status, "passed");
+            assert_eq!(score.proof_status, "failed");
         }
     }
 }

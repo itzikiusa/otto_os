@@ -7,6 +7,10 @@ const MODE_APPLICATION_CURSOR: u8 = 0b0000_0010;
 const MODE_HIDE_CURSOR: u8 = 0b0000_0100;
 const MODE_ALTERNATE_SCREEN: u8 = 0b0000_1000;
 const MODE_BRACKETED_PASTE: u8 = 0b0001_0000;
+// OTTO PATCH 6 (vendor/vt100/README-OTTO.md): ANSI IRM (CSI 4 h/l) and DEC
+// auto-wrap disable (CSI ? 7 l; default 0 = auto-wrap enabled).
+const MODE_INSERT: u8 = 0b0010_0000;
+const MODE_NO_AUTOWRAP: u8 = 0b0100_0000;
 
 /// The xterm mouse handling mode currently in use.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
@@ -91,6 +95,8 @@ pub struct Screen {
     mouse_protocol_encoding: MouseProtocolEncoding,
     cursor_style: CursorStyle,
 
+    // OTTO PATCH 6: last graphic character drawn, repeated by REP (CSI Ps b)
+    // and cleared by cursor/erase/mode sequences.
     last_char: Option<char>,
 }
 
@@ -350,6 +356,12 @@ impl Screen {
     }
 
     fn write_contents_formatted(&self, contents: &mut String) {
+        if self.mode(MODE_NO_AUTOWRAP) {
+            contents.push_str("\x1b[?7h");
+        }
+        if self.mode(MODE_INSERT) {
+            contents.push_str("\x1b[4l");
+        }
         crate::term::HideCursor::new(self.hide_cursor()).write_buf(contents);
         let prev_attrs = self.grid().write_contents_formatted(contents);
         self.attrs.write_escape_code_diff(contents, &prev_attrs);
@@ -634,6 +646,12 @@ impl Screen {
             CursorStyle::Default,
         )
         .write_buf(contents);
+        if self.mode(MODE_NO_AUTOWRAP) {
+            contents.push_str("\x1b[?7l");
+        }
+        if self.mode(MODE_INSERT) {
+            contents.push_str("\x1b[4h");
+        }
     }
 
     /// Returns terminal escape sequences sufficient to change the previous
@@ -680,6 +698,20 @@ impl Screen {
         .write_buf(contents);
         crate::term::CursorStyle::new(self.cursor_style, prev.cursor_style)
             .write_buf(contents);
+        if self.mode(MODE_NO_AUTOWRAP) != prev.mode(MODE_NO_AUTOWRAP) {
+            if self.mode(MODE_NO_AUTOWRAP) {
+                contents.push_str("\x1b[?7l");
+            } else {
+                contents.push_str("\x1b[?7h");
+            }
+        }
+        if self.mode(MODE_INSERT) != prev.mode(MODE_INSERT) {
+            if self.mode(MODE_INSERT) {
+                contents.push_str("\x1b[4h");
+            } else {
+                contents.push_str("\x1b[4l");
+            }
+        }
     }
 
     /// Returns terminal escape sequences sufficient to set the current
@@ -888,21 +920,25 @@ impl Screen {
     }
 
     fn enter_alternate_grid(&mut self) {
+        self.last_char = None;
         self.grid_mut().set_scrollback(0);
         self.set_mode(MODE_ALTERNATE_SCREEN);
         self.alternate_grid.allocate_rows();
     }
 
     fn exit_alternate_grid(&mut self) {
+        self.last_char = None;
         self.clear_mode(MODE_ALTERNATE_SCREEN);
     }
 
     fn save_cursor(&mut self) {
+        self.last_char = None;
         self.grid_mut().save_cursor();
         self.saved_attrs = self.attrs;
     }
 
     fn restore_cursor(&mut self) {
+        self.last_char = None;
         self.grid_mut().restore_cursor();
         self.attrs = self.saved_attrs;
     }
@@ -981,6 +1017,9 @@ impl Screen {
     // whether wrapping that character to the next row should set the row's
     // wrapping flag
     fn new_character_should_wrap(&self, width: u16) -> bool {
+        if self.mode(MODE_NO_AUTOWRAP) {
+            return false;
+        }
         let pos = self.grid().pos();
         let size = self.grid().size();
 
@@ -1164,8 +1203,64 @@ impl<CB: crate::Callbacks> WrappedScreen<CB> {
     }
 
     pub fn text(&mut self, c: char) {
+        if (' '..='~').contains(&c)
+            && (self.screen.modes & (MODE_NO_AUTOWRAP | MODE_INSERT)) == 0
+        {
+            let screen = &mut self.screen;
+            let attrs = screen.attrs;
+            let is_alt = screen.mode(MODE_ALTERNATE_SCREEN);
+            let grid = if is_alt {
+                &mut screen.alternate_grid
+            } else {
+                &mut screen.grid
+            };
+            let cols = grid.size().cols();
+            if grid.pos().col >= cols {
+                let wrap = grid
+                    .drawing_cell(crate::grid::Pos {
+                        row: grid.pos().row,
+                        col: cols - 1,
+                    })
+                    .is_some_and(|last| {
+                        last.has_contents() || last.is_wide_continuation()
+                    });
+                let callbacks = &mut self.callbacks;
+                grid.col_wrap(1, wrap, |row| {
+                    callbacks
+                        .on_scroll(crate::capture::RowContents(row), is_alt);
+                });
+            }
+            let base_pos = grid.pos();
+            if let Some(row) = grid.drawing_row_mut(base_pos.row) {
+                if base_pos.col > 0 {
+                    if let Some(prev) = row.get_mut(base_pos.col - 1) {
+                        if prev.is_wide() {
+                            prev.clear(*prev.attrs());
+                        }
+                    }
+                }
+                let cell_was_wide =
+                    if let Some(cell) = row.get_mut(base_pos.col) {
+                        let was_wide = cell.is_wide();
+                        cell.set(c, attrs);
+                        was_wide
+                    } else {
+                        false
+                    };
+                if cell_was_wide {
+                    if let Some(next) = row.get_mut(base_pos.col + 1) {
+                        next.set(' ', attrs);
+                    }
+                }
+            }
+            screen.last_char = Some(c);
+            grid.col_inc(1);
+            return;
+        }
+
         let screen = &mut self.screen;
         let pos = screen.grid().pos();
+        let size = screen.grid().size();
         let attrs = screen.attrs;
 
         let Some(width) = screen.calculate_width(c) else {
@@ -1178,10 +1273,21 @@ impl<CB: crate::Callbacks> WrappedScreen<CB> {
         let cell_was_wide;
 
         if width > 0 {
-            let wrap = screen.new_character_should_wrap(width);
-            let on_row = Self::on_row(screen, &mut self.callbacks);
-            screen.grid_mut().col_wrap(width, wrap, on_row);
-            // col_wrap always sets self.grid().pos() to a valid cell
+            if screen.mode(MODE_NO_AUTOWRAP) {
+                if pos.col > size.cols().saturating_sub(width) {
+                    screen
+                        .grid_mut()
+                        .col_set(size.cols().saturating_sub(width));
+                }
+            } else {
+                let wrap = screen.new_character_should_wrap(width);
+                let on_row = Self::on_row(screen, &mut self.callbacks);
+                screen.grid_mut().col_wrap(width, wrap, on_row);
+            }
+            if screen.mode(MODE_INSERT) {
+                screen.grid_mut().insert_cells(width);
+            }
+            // col_wrap / col_set always sets self.grid().pos() to a valid cell
             base_pos = screen.grid().pos();
             cell_was_wide =
                 screen.grid().drawing_cell(base_pos).unwrap().is_wide();
@@ -1193,7 +1299,13 @@ impl<CB: crate::Callbacks> WrappedScreen<CB> {
                 .set(c, attrs);
             screen.last_char = Some(c);
             screen.grid_mut().col_inc(width);
+            if screen.mode(MODE_NO_AUTOWRAP)
+                && screen.grid().pos().col >= size.cols()
+            {
+                screen.grid_mut().col_set(size.cols().saturating_sub(1));
+            }
         } else {
+            screen.last_char = None;
             // pos.row is valid, since it comes directly from
             // self.grid().pos() which we assume to always have a
             // valid row value. pos.col - 1 is valid because we just
@@ -1230,15 +1342,24 @@ impl<CB: crate::Callbacks> WrappedScreen<CB> {
             let cell_is_wide =
                 screen.grid().drawing_cell(base_pos).unwrap().is_wide();
             if !cell_was_wide && cell_is_wide {
-                let on_row = Self::on_row(screen, &mut self.callbacks);
-                screen.grid_mut().col_wrap(1, false, on_row);
-                // col_wrap always leaves self.grid().pos() on a valid cell,
-                // so .drawing_cell(new_pos).unwrap() will always be valid.
-                let new_pos = screen.grid().pos();
-                screen.wrap_widened_cell(base_pos, new_pos);
-                if new_pos.col == 0 {
-                    base_pos = new_pos;
+                if !screen.mode(MODE_NO_AUTOWRAP) {
+                    let on_row = Self::on_row(screen, &mut self.callbacks);
+                    screen.grid_mut().col_wrap(1, false, on_row);
+                    // col_wrap always leaves self.grid().pos() on a valid cell,
+                    // so .drawing_cell(new_pos).unwrap() will always be valid.
+                    let new_pos = screen.grid().pos();
+                    screen.wrap_widened_cell(base_pos, new_pos);
+                    if new_pos.col == 0 {
+                        base_pos = new_pos;
+                    }
+                } else if base_pos.col + 1 < size.cols() {
+                    screen.grid_mut().col_inc(1);
                 }
+            }
+            if screen.mode(MODE_NO_AUTOWRAP)
+                && screen.grid().pos().col >= size.cols()
+            {
+                screen.grid_mut().col_set(size.cols().saturating_sub(1));
             }
         }
 
@@ -1251,14 +1372,17 @@ impl<CB: crate::Callbacks> WrappedScreen<CB> {
     // control codes
 
     pub fn bs(&mut self) {
+        self.screen.last_char = None;
         self.screen.grid_mut().col_dec(1);
     }
 
     pub fn tab(&mut self) {
+        self.screen.last_char = None;
         self.screen.grid_mut().col_tab();
     }
 
     pub fn lf(&mut self) {
+        self.screen.last_char = None;
         let on_row = Self::on_row(&self.screen, &mut self.callbacks);
         self.screen.grid_mut().row_inc_scroll(1, on_row);
     }
@@ -1272,6 +1396,7 @@ impl<CB: crate::Callbacks> WrappedScreen<CB> {
     }
 
     pub fn cr(&mut self) {
+        self.screen.last_char = None;
         self.screen.grid_mut().col_set(0);
     }
 
@@ -1299,6 +1424,7 @@ impl<CB: crate::Callbacks> WrappedScreen<CB> {
 
     // ESC M
     pub fn ri(&mut self) {
+        self.screen.last_char = None;
         self.screen.grid_mut().row_dec_scroll(1);
     }
 
@@ -1332,43 +1458,51 @@ impl<CB: crate::Callbacks> WrappedScreen<CB> {
 
     // CSI @
     pub fn ich(&mut self, count: u16) {
+        self.screen.last_char = None;
         self.screen.grid_mut().insert_cells(count);
     }
 
     // CSI A
     pub fn cuu(&mut self, offset: u16) {
+        self.screen.last_char = None;
         self.screen.grid_mut().row_dec_clamp(offset);
     }
 
-    // CSI B
+    // CSI B / CSI e
     pub fn cud(&mut self, offset: u16) {
+        self.screen.last_char = None;
         self.screen.grid_mut().row_inc_clamp(offset);
     }
 
-    // CSI C
+    // CSI C / CSI a
     pub fn cuf(&mut self, offset: u16) {
+        self.screen.last_char = None;
         self.screen.grid_mut().col_inc_clamp(offset);
     }
 
     // CSI D
     pub fn cub(&mut self, offset: u16) {
+        self.screen.last_char = None;
         self.screen.grid_mut().col_dec(offset);
     }
 
     // CSI E
     pub fn cnl(&mut self, offset: u16) {
+        self.screen.last_char = None;
         self.screen.grid_mut().col_set(0);
         self.screen.grid_mut().row_inc_clamp(offset);
     }
 
     // CSI F
     pub fn cpl(&mut self, offset: u16) {
+        self.screen.last_char = None;
         self.screen.grid_mut().col_set(0);
         self.screen.grid_mut().row_dec_clamp(offset);
     }
 
     // CSI G
     pub fn cha(&mut self, col: u16) {
+        self.screen.last_char = None;
         self.screen.grid_mut().col_set(col - 1);
     }
 
@@ -1377,25 +1511,41 @@ impl<CB: crate::Callbacks> WrappedScreen<CB> {
         self.cha(col);
     }
 
-    // CSI b (REP - Repeat last printed character)
+    // CSI b (REP - Repeat last printed character, bounded to screen cells)
     pub(crate) fn rep(&mut self, count: u16) {
         if let Some(c) = self.screen.last_char {
-            for _ in 0..count {
+            let size = self.screen.grid().size();
+            let cap = u32::from(size.rows())
+                .saturating_mul(u32::from(size.cols()))
+                .max(1);
+            let n = u32::from(count).min(cap);
+            for _ in 0..n {
                 self.text(c);
             }
         }
     }
 
-    // CSI H
+    // CSI H / CSI f
     pub fn cup(&mut self, (row, col): (u16, u16)) {
+        self.screen.last_char = None;
         self.screen.grid_mut().set_pos(crate::grid::Pos {
             row: row - 1,
             col: col - 1,
         });
     }
 
+    // CSI I
+    pub(crate) fn cht(&mut self, count: u16) {
+        self.screen.last_char = None;
+        let cols = self.screen.grid().size().cols();
+        for _ in 0..count.min(cols) {
+            self.screen.grid_mut().col_tab();
+        }
+    }
+
     // CSI J
     pub fn ed(&mut self, mode: u16, mut unhandled: impl FnMut(&mut Self)) {
+        self.screen.last_char = None;
         let attrs = self.screen.attrs;
         match mode {
             0 => self.screen.grid_mut().erase_all_forward(attrs),
@@ -1416,6 +1566,7 @@ impl<CB: crate::Callbacks> WrappedScreen<CB> {
 
     // CSI K
     pub fn el(&mut self, mode: u16, mut unhandled: impl FnMut(&mut Self)) {
+        self.screen.last_char = None;
         let attrs = self.screen.attrs;
         match mode {
             0 => self.screen.grid_mut().erase_row_forward(attrs),
@@ -1432,39 +1583,86 @@ impl<CB: crate::Callbacks> WrappedScreen<CB> {
 
     // CSI L
     pub fn il(&mut self, count: u16) {
+        self.screen.last_char = None;
         self.screen.grid_mut().insert_lines(count);
     }
 
     // CSI M
     pub fn dl(&mut self, count: u16) {
+        self.screen.last_char = None;
         self.screen.grid_mut().delete_lines(count);
     }
 
     // CSI P
     pub fn dch(&mut self, count: u16) {
+        self.screen.last_char = None;
         self.screen.grid_mut().delete_cells(count);
     }
 
     // CSI S
     pub fn su(&mut self, count: u16) {
+        self.screen.last_char = None;
         let on_row = Self::on_row(&self.screen, &mut self.callbacks);
         self.screen.grid_mut().scroll_up(count, on_row);
     }
 
     // CSI T
     pub fn sd(&mut self, count: u16) {
+        self.screen.last_char = None;
         self.screen.grid_mut().scroll_down(count);
     }
 
     // CSI X
     pub fn ech(&mut self, count: u16) {
+        self.screen.last_char = None;
         let attrs = self.screen.attrs;
         self.screen.grid_mut().erase_cells(count, attrs);
     }
 
+    // CSI Z
+    pub(crate) fn cbt(&mut self, count: u16) {
+        self.screen.last_char = None;
+        let cols = self.screen.grid().size().cols();
+        for _ in 0..count.min(cols) {
+            self.screen.grid_mut().col_btab();
+            if self.screen.grid().pos().col == 0 {
+                break;
+            }
+        }
+    }
+
     // CSI d
     pub fn vpa(&mut self, row: u16) {
+        self.screen.last_char = None;
         self.screen.grid_mut().row_set(row - 1);
+    }
+
+    // CSI h
+    pub(crate) fn sm(
+        &mut self,
+        params: &vte::Params,
+        mut unhandled: impl FnMut(&mut Self),
+    ) {
+        for param in params {
+            match param {
+                [4] => self.screen.set_mode(MODE_INSERT),
+                _ => unhandled(self),
+            }
+        }
+    }
+
+    // CSI l
+    pub(crate) fn rm(
+        &mut self,
+        params: &vte::Params,
+        mut unhandled: impl FnMut(&mut Self),
+    ) {
+        for param in params {
+            match param {
+                [4] => self.screen.clear_mode(MODE_INSERT),
+                _ => unhandled(self),
+            }
+        }
     }
 
     // CSI ? h
@@ -1478,6 +1676,7 @@ impl<CB: crate::Callbacks> WrappedScreen<CB> {
             match param {
                 [1] => screen.set_mode(MODE_APPLICATION_CURSOR),
                 [6] => screen.grid_mut().set_origin_mode(true),
+                [7] => screen.clear_mode(MODE_NO_AUTOWRAP),
                 [9] => screen.set_mouse_mode(MouseProtocolMode::Press),
                 [25] => screen.clear_mode(MODE_HIDE_CURSOR),
                 [47] => screen.enter_alternate_grid(),
@@ -1516,6 +1715,7 @@ impl<CB: crate::Callbacks> WrappedScreen<CB> {
             match param {
                 [1] => screen.clear_mode(MODE_APPLICATION_CURSOR),
                 [6] => screen.grid_mut().set_origin_mode(false),
+                [7] => screen.set_mode(MODE_NO_AUTOWRAP),
                 [9] => screen.clear_mouse_mode(MouseProtocolMode::Press),
                 [25] => screen.set_mode(MODE_HIDE_CURSOR),
                 [47] => {
@@ -1675,6 +1875,7 @@ impl<CB: crate::Callbacks> WrappedScreen<CB> {
 
     // CSI r
     pub fn decstbm(&mut self, (top, bottom): (u16, u16)) {
+        self.screen.last_char = None;
         self.screen
             .grid_mut()
             .set_scroll_region(top - 1, bottom - 1);

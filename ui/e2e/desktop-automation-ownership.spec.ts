@@ -32,24 +32,6 @@ test('goal-loop Stop remains bound to the loop confirmed before a route change',
   await expectNoHorizontalOverflow(page);
 });
 
-test('Open PR rechecks a partial snapshot and keeps the confirmed target across navigation', async ({ page }) => {
-  const mutations: string[] = [];
-  await page.addInitScript(() => { localStorage.setItem('otto_base', location.origin); localStorage.setItem('otto_token', 'fixture'); });
-  await page.route('**/api/v1/**', async (route) => {
-    const path = new URL(route.request().url()).pathname;
-    if (route.request().method() === 'POST') mutations.push(path);
-    return route.fulfill({ json: path.endsWith('/events') ? [] : { id: 'A', workspace_id: 'ws' } });
-  });
-  await page.goto('/e2e/fixtures/automation-ownership.html?kind=run&proof=partial');
-  await expect(page.getByRole('button', { name: 'Open PR', exact: true })).toBeEnabled({ timeout: 1500 });
-  await page.getByRole('button', { name: 'Open PR', exact: true }).click();
-  const sheet = page.getByRole('dialog'); await expect(sheet).toContainText('Run A');
-  await page.evaluate(() => window.dispatchEvent(new Event('review-target-change')));
-  await sheet.getByRole('button', { name: 'Open PR', exact: true }).click();
-  await expect.poll(() => mutations).toEqual(['/api/v1/runs/A/open-pr']);
-  await expect(page.getByRole('heading', { name: 'Run B', exact: true })).toBeVisible();
-});
-
 for (const scheme of ['light', 'dark'] as const) {
   test(`goal-loop loaded state ${scheme} remains usable at desktop and phone widths`, async ({ page }) => {
     await page.addInitScript((scheme) => { localStorage.setItem('otto_base', location.origin); localStorage.setItem('otto_token', 'fixture'); localStorage.setItem('otto_scheme', scheme); localStorage.setItem('otto_theme', 'native'); }, scheme);

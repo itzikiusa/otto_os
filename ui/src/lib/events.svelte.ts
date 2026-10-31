@@ -3,7 +3,6 @@
 
 import { api, getToken, resumeAltLoopback, suspendAltLoopback, wsConnect } from './api/client';
 import { inLane } from './api/lane';
-import { invalidateMissionSummary } from './api/missionControl';
 import { auth } from './stores/auth.svelte';
 import { appLive, type LiveEvent } from './live';
 import type { EventsResyncFrame, NodeRunState, OttoEvent, UiHelloAckFrame } from './api/types';
@@ -15,16 +14,13 @@ import { restartSummaryText } from './status';
 const RESTART_TOAST_KEY = 'otto_restart_toast_boot';
 import { notifications } from './stores/notifications.svelte';
 import { activity } from './stores/activity.svelte';
-import { proof } from './stores/proof.svelte';
 import { transcript } from './stores/transcript.svelte';
-import { assistant } from './stores/assistant.svelte';
 
 // Store routes live per feature in `events/routes/` (architecture-2-04), each
-// with its own lazy loader; the four loaders the reconnect / restart paths
-// below also need are re-exported from there.
+// with its own lazy loader; the loaders the reconnect / restart paths below
+// also need are re-exported from there.
 import {
   featureRoutes,
-  swarmStore,
   databaseStore,
   personalAgentsStore,
   resyncAutomation,
@@ -210,33 +206,6 @@ export class BudgetBus {
 
 export const budgetBus = new BudgetBus();
 
-/** Incremented each time a `work_graph_updated` WS event arrives. The Mission
- *  Control page subscribes and re-fetches the workspace summary/list when the
- *  event's workspace matches the open one — replacing any polling. A tick with
- *  an EMPTY `workspaceId` is a resync (events were lost while the socket was
- *  down) that every open view honours. */
-export class MissionControlBus {
-  tick: number = $state(0);
-  workspaceId: string = $state('');
-  itemId: string = $state('');
-  status: string = $state('');
-
-  apply(workspaceId: string, itemId: string, status: string): void {
-    invalidateMissionSummary(workspaceId || undefined);
-    this.workspaceId = workspaceId;
-    this.itemId = itemId;
-    this.status = status;
-    this.tick += 1;
-  }
-
-  /** Events were missed (WS reconnect): every open Mission Control view reloads. */
-  resync(): void {
-    this.apply('', '', '');
-  }
-}
-
-export const missionControlBus = new MissionControlBus();
-
 // ---------------------------------------------------------------------------
 // canvas_updated — live canvas-document push. The server broadcasts the scene's
 // source doc on every file change while an agent edits (and once committed); the
@@ -397,15 +366,8 @@ const busRoutes: EventRoutes = {
   // session — let the board reflect the in-flight action.
   finding_action_started: (parsed) =>
     findingBus.apply(parsed.workspace_id, parsed.review_id, '', parsed.action, parsed.session_id),
-  // A Proof Pack snapshot was exported; the board can refresh if open. We
-  // route it through the finding bus tick so subscribers re-render.
-  proof_pack_exported: (parsed) =>
-    findingBus.apply(parsed.workspace_id, parsed.review_id, '', 'proof_pack_exported', null),
   // Surface a budget cap crossing/recovery to any subscribed banner.
   budget_exceeded: (parsed) => budgetBus.apply(parsed.provider, parsed.spend_usd, parsed.cap_usd, parsed.direction),
-  // Mission Control: a work item was created or changed status. The page
-  // re-fetches the matching workspace's summary/list on the event.
-  work_graph_updated: (parsed) => missionControlBus.apply(parsed.workspace_id, parsed.item_id, parsed.status),
   // Live canvas edits: the open Canvas editor re-renders the matching scene.
   canvas_updated: (parsed) => canvasDocBus.apply(parsed.scene_id, parsed.doc),
   // A scene was attached/detached to a session — the session's Canvas panel
@@ -642,7 +604,6 @@ class EventsClient {
   private resyncForIdentity(): void {
     notifications.resetForIdentity();
     activity.reset();
-    proof.identityChanged();
     this.resyncAfterReconnect();
   }
 
@@ -652,10 +613,7 @@ class EventsClient {
     liveEvents.resync();
     void activity.resync();
     if (ws.currentId) void activity.loadSummary(ws.currentId);
-    // Nothing to resync in a document that never opened the Swarm page.
-    void swarmStore.peek()?.resync();
     transcript.resyncVisible();
-    missionControlBus.resync();
     designBus.resync();
     designAssistBus.resync();
     void ws.refreshSessions().catch(() => {
@@ -669,11 +627,10 @@ class EventsClient {
       for (const s of ws.otherWsSessions) ws.statusMap[s.id] = s.status;
     });
     void notifications.load();
-    assistant.resync();
     // Live room messages append straight from events — a gap needs a re-read.
     // Only when the store is loaded: nothing to resync if no room view opened.
     personalAgentsStore.peek()?.resyncRooms();
-    // Scheduled Tasks / Run with Otto are event-fed only: re-read them too.
+    // Scheduled Tasks are event-fed only: re-read them too.
     resyncAutomation(ws.currentId);
   }
 
@@ -745,10 +702,6 @@ class EventsClient {
       this.identityPending = false;
       if (identityChanged) this.resyncForIdentity();
       else if (reconnected) this.resyncAfterReconnect();
-      // The Assistant's needs-you badge lives in the sidebar, so it loads on
-      // first connect too (quietly: an older daemon without the route → no badge)
-      // — unless a page's own first load (Home's Today) already has it.
-      else if (!['loading', 'ready'].includes(assistant.needsState)) void assistant.loadNeedsYou();
     };
     this.sock.onmessage = (ev: MessageEvent) => {
       if (typeof ev.data !== 'string') return;

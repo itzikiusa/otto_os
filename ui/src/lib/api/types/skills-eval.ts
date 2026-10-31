@@ -118,8 +118,6 @@ export interface EvalIteration {
   skill_diff: string;
   /** Multi-signal score (null until the scoring pipeline has run). */
   scoring?: EvalScore | null;
-  /** The Proof Pack assembled for this iteration's evidence. */
-  proof_pack_id?: string | null;
   /** Human quality rating 0–5. */
   human_rating?: number | null;
   human_note?: string;

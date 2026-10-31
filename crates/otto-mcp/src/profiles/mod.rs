@@ -148,7 +148,6 @@ pub const GROUPS: &[ToolGroup] = &[
             "list_workspaces",
             "search_codebase",
             "get_context_packet",
-            "get_proof_pack",
             "search_memory",
             "usage_summary",
             "get_usage_summary",
@@ -217,29 +216,6 @@ pub const GROUPS: &[ToolGroup] = &[
         ],
     },
     ToolGroup {
-        id: "swarm",
-        label: "Swarm & work items",
-        description: "Agent swarms, their boards, runs, projects and work items.",
-        prefixes: &["swarm_"],
-        exact: &[
-            "list_swarms",
-            "get_swarm",
-            "get_swarm_board",
-            "post_swarm_board",
-            "list_swarm_runs",
-            "list_swarm_projects",
-            "list_swarm_tasks",
-            "create_work_item",
-        ],
-    },
-    ToolGroup {
-        id: "design",
-        label: "Design & canvas",
-        description: "Design Hall artifacts and links, and canvas scenes.",
-        prefixes: &["design_", "canvas_"],
-        exact: &["list_design_projects"],
-    },
-    ToolGroup {
         id: "brokers",
         label: "Message brokers",
         description: "Kafka clusters, topics, consumer groups, consume and produce.",
@@ -262,17 +238,15 @@ pub const GROUPS: &[ToolGroup] = &[
     },
     ToolGroup {
         id: "product",
-        label: "Product stories",
-        description: "Product story analysis.",
-        prefixes: &[],
-        exact: &["list_product_stories", "get_product_story", "product_story"],
-    },
-    ToolGroup {
-        id: "assistant",
-        label: "Assistant",
-        description: "The personal assistant's memory, tasks and reminders.",
-        prefixes: &["assistant_"],
-        exact: &[],
+        label: "Product & design",
+        description: "Product story analysis, Design Hall artifacts and links, and canvas scenes.",
+        prefixes: &["design_", "canvas_"],
+        exact: &[
+            "list_product_stories",
+            "get_product_story",
+            "product_story",
+            "list_design_projects",
+        ],
     },
     ToolGroup {
         id: "channels",
@@ -359,6 +333,14 @@ pub fn group(id: &str) -> Option<&'static ToolGroup> {
     GROUPS.iter().find(|g| g.id == id)
 }
 
+/// Map retired group aliases in persisted profiles onto their unified home.
+pub fn canonical_group_id(id: &str) -> &str {
+    match id {
+        "design" => "product",
+        other => other,
+    }
+}
+
 /// One profile's tool set — what the filter needs (persisted as
 /// `otto_state::McpProfile`, served to the stdio bridges by
 /// `GET /mcp/otto-server/enabled?profiles=`).
@@ -386,7 +368,7 @@ impl ProfileDef {
         if self.all_tools || has(&self.include_tools) {
             return true;
         }
-        group_of(key).is_some_and(|g| self.groups.iter().any(|id| id == g.id))
+        group_of(key).is_some_and(|g| self.groups.iter().any(|id| canonical_group_id(id) == g.id))
     }
 
     /// Every tool, nothing excluded.
@@ -397,11 +379,18 @@ impl ProfileDef {
 
 impl From<&otto_state::McpProfile> for ProfileDef {
     fn from(p: &otto_state::McpProfile) -> Self {
+        let mut groups = Vec::with_capacity(p.groups.len());
+        for g in &p.groups {
+            let cg = canonical_group_id(g.trim());
+            if !groups.iter().any(|x| x == cg) {
+                groups.push(cg.to_string());
+            }
+        }
         Self {
             id: p.id.clone(),
             name: p.name.clone(),
             all_tools: p.all_tools,
-            groups: p.groups.clone(),
+            groups,
             include_tools: p.include_tools.clone(),
             exclude_tools: p.exclude_tools.clone(),
         }
@@ -534,7 +523,7 @@ pub fn normalize_fields(
 ) -> Result<(Vec<String>, Vec<String>, Vec<String>)> {
     let mut gs: Vec<String> = Vec::new();
     for g in groups {
-        let g = g.trim();
+        let g = canonical_group_id(g.trim());
         if group(g).is_none() {
             return Err(Error::Invalid(format!("unknown tool group '{g}'")));
         }

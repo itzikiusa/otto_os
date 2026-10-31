@@ -27,7 +27,7 @@ test.afterEach(async({page})=>{
   session='';await root?.dispose();if(fixtureDir)rmSync(fixtureDir,{recursive:true,force:true});fixtureDir='';
 });
 
-test('warm transcript cache and History cursors recheck changed authorization',async()=>{
+test('warm transcript cache rechecks changed authorization',async()=>{
   const username=`transcript-reader-${randomUUID()}`,password='fixture-password-12345';
   const userResponse=await root.post(`${base}/api/v1/users`,{data:{username,password,display_name:'Isolated transcript reader'}});
   expect(userResponse.ok(),await userResponse.text()).toBeTruthy();const user=(await userResponse.json()).id;
@@ -36,32 +36,17 @@ test('warm transcript cache and History cursors recheck changed authorization',a
   await member('admin');
   const logged=await root.post(`${base}/api/v1/auth/login`,{data:{username,password}});expect(logged.ok(),await logged.text()).toBeTruthy();
   const reader=await request.newContext({extraHTTPHeaders:{Authorization:`Bearer ${(await logged.json()).token}`}});
-  let second='';
   try {
-    const created=await root.post(`${base}/api/v1/workspaces/${workspace}/sessions`,{data:{kind:'agent',provider:'shell',title:'Second isolated History reader',cwd:fixtureDir,meta:{origin:'e2e',nested_provider:'claude',e2e_transcript_path:transcriptPath}}});
-    expect(created.ok(),await created.text()).toBeTruthy();second=(await created.json()).id;
-    const historyUrl=`${base}/api/v1/workspaces/${workspace}/history/page?limit=1&cwd=${encodeURIComponent(fixtureDir)}`;
-    const firstPage=await reader.get(historyUrl);expect(firstPage.status()).toBe(200);const firstBody=await firstPage.json();
-    expect(firstBody.entries).toHaveLength(1);expect(typeof firstBody.next_cursor).toBe('string');
-    const continuation=`${historyUrl}&cursor=${encodeURIComponent(firstBody.next_cursor)}`;
-    const nextPage=await reader.get(continuation);expect(nextPage.status()).toBe(200);const nextBody=await nextPage.json();
-    expect(nextBody.entries).toHaveLength(1);expect(nextBody.entries[0].session_id).not.toBe(firstBody.entries[0].session_id);expect(nextBody.next_cursor).toBeNull();
-    for(const response of [await reader.get(`${continuation}&q=changed-filter`),await root.get(continuation),await reader.get(`${historyUrl}&cursor=malformed`)]){
-      expect(response.status()).toBe(400);expect(await response.text()).not.toContain(fixtureDir);
-    }
     const url=`${base}/api/v1/sessions/${session}/transcript?limit=60`;
     // Same path, provider, stat and options: the second read uses the retained
     // entry. The cache unit test separately counts the actual fold invocation.
     for(let n=0;n<2;n++){const r=await reader.get(url);expect(r.status()).toBe(200);expect(await r.text()).toContain(sentinel);}
     await member('viewer'); // Workspace access remains, session ownership does not.
-    const changedRole=await reader.get(continuation);expect(changedRole.status()).toBe(400);expect(await changedRole.text()).not.toContain(fixtureDir);
-    const ownOnly=await reader.get(historyUrl);expect(ownOnly.status()).toBe(200);expect((await ownOnly.json()).entries).toEqual([]);
     const noOwner=await reader.get(url);expect(noOwner.status()).toBe(403);expect(await noOwner.text()).toContain('not the session owner or a workspace admin');expect(await noOwner.text()).not.toContain(sentinel);
     await member(null);
-    const revokedPage=await reader.get(continuation);expect(revokedPage.status()).toBe(403);expect(await revokedPage.text()).toContain('not a member of this workspace');expect(await revokedPage.text()).not.toContain(fixtureDir);
     const noWorkspace=await reader.get(url);expect(noWorkspace.status()).toBe(403);expect(await noWorkspace.text()).toContain('not a member of this workspace');expect(await noWorkspace.text()).not.toContain(sentinel);
     const stillAllowed=await root.get(url);expect(stillAllowed.status()).toBe(200);expect(await stillAllowed.text()).toContain(sentinel);
-  } finally {await reader.dispose();if(second){const removed=await root.delete(`${base}/api/v1/sessions/${second}`);expect(removed.ok(),await removed.text()).toBeTruthy();}}
+  } finally {await reader.dispose();}
 });
 
 test('first transcript GET on a running shell arms live append delivery without a touch request',async({page})=>{

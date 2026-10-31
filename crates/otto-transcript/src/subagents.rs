@@ -24,14 +24,69 @@ pub fn subagents_dir(transcript_path: &Path) -> Option<PathBuf> {
 /// The JSONL of one subagent (`?sub=<agent_id>`). `agent_id` is validated to a
 /// plain `[A-Za-z0-9_-]` token so a client value can never leave the dir.
 pub fn subagent_path(transcript_path: &Path, agent_id: &str) -> Option<PathBuf> {
-    if agent_id.is_empty()
-        || !agent_id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    {
+    if !valid_agent_id(agent_id) {
         return None;
     }
     Some(subagents_dir(transcript_path)?.join(format!("agent-{agent_id}.jsonl")))
+}
+
+/// Provider-aware subagent transcript path (`?sub=<agent_id>`).
+///
+/// * `Provider::Claude`: `<stem>/subagents/agent-<agent_id>.jsonl`
+/// * `Provider::Agy`: resolves `agent_id` under the parent conversation's
+///   `<brain_root>` (`<brain_root>/<parent>/.system_generated/logs/transcript*.jsonl`
+///   or flat `<brain_root>/<parent>.jsonl`), preferring non-empty
+///   `transcript_full.jsonl` via [`crate::roots::agy_transcript_path_under`].
+///   When `agent_id` is syntactically valid and `brain_root` is resolved,
+///   returns the expected path even if the file does not exist yet so callers
+///   distinguish `400` (bad id) from `404` (missing subagent transcript).
+pub fn subagent_path_for(
+    provider: crate::model::Provider,
+    transcript_path: &Path,
+    agent_id: &str,
+) -> Option<PathBuf> {
+    if !valid_agent_id(agent_id) {
+        return None;
+    }
+    let agent_id = otto_core::paths::safe_component(agent_id)?;
+    match provider {
+        crate::model::Provider::Claude => subagent_path(transcript_path, agent_id),
+        crate::model::Provider::Codex => None,
+        crate::model::Provider::Agy => {
+            let brain_root = agy_brain_root_of(transcript_path)?;
+            Some(
+                crate::roots::agy_transcript_path_under(brain_root, agent_id).unwrap_or_else(
+                    || {
+                        brain_root
+                            .join(agent_id)
+                            .join(".system_generated")
+                            .join("logs")
+                            .join("transcript_full.jsonl")
+                    },
+                ),
+            )
+        }
+    }
+}
+
+fn valid_agent_id(agent_id: &str) -> bool {
+    !agent_id.is_empty()
+        && agent_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// Locate `<brain_root>` from an `agy` transcript path:
+/// `<brain_root>/<uuid>/.system_generated/logs/transcript*.jsonl` or flat
+/// `<brain_root>/<uuid>.jsonl`.
+fn agy_brain_root_of(transcript_path: &Path) -> Option<&Path> {
+    let logs_or_root = transcript_path.parent()?;
+    if let Some(sys) = logs_or_root.parent() {
+        if sys.file_name().and_then(|s| s.to_str()) == Some(".system_generated") {
+            return sys.parent()?.parent();
+        }
+    }
+    Some(logs_or_root)
 }
 
 /// Sidecar metadata is independently bounded: many tiny files still consume

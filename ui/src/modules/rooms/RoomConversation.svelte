@@ -13,6 +13,7 @@
   import { loadErrorText } from '../../lib/loadError';
   import { announceShown } from '../../lib/announce.svelte';
   import { pollWhileVisible } from '../../lib/poll';
+  import { detectBlockDirection } from '../../lib/textDirection';
   import type { RoomCredential } from '../../lib/api/room-types';
   import type { Transcript, TranscriptProvider } from '../../lib/api/types';
   import { fetchRoomTranscript, roomImageUrl, roomPrompt } from './room-client';
@@ -119,7 +120,7 @@
   </div>
   {#if grantEpoch !== null}
     <form class="composer" onsubmit={(e) => { e.preventDefault(); void submit(); }}>
-      <textarea dir="auto" rows="2" bind:value={draft} onkeydown={onKey} placeholder="Message the agent (Enter to send, Shift+Enter for a new line)" aria-label="Message the agent" disabled={sending}></textarea>
+      <textarea dir={detectBlockDirection(draft)} rows="2" bind:value={draft} onkeydown={onKey} placeholder="Message the agent (Enter to send, Shift+Enter for a new line)" aria-label="Message the agent" disabled={sending}></textarea>
       <div class="actions">
         <button type="button" class="btn small" onclick={interrupt} title="Interrupt the agent (Esc)">Stop</button>
         <button class="btn small primary" disabled={sending || !draft.trim()}>{sending ? 'Sending…' : 'Send'}</button>
@@ -135,7 +136,7 @@
   .room-conv { display: flex; flex-direction: column; min-height: 0; height: 100%; }
   .turns { flex: 1; min-height: 0; overflow-y: auto; padding: 12px 16px; display: flex; flex-direction: column; gap: 8px; }
   .composer { border-top: 1px solid var(--border); padding: 8px 12px; display: grid; gap: 6px; }
-  textarea { width: 100%; resize: vertical; min-height: 44px; font: inherit; }
+  textarea { width: 100%; resize: vertical; min-height: 44px; font: inherit; unicode-bidi: plaintext; text-align: start; }
   .actions { display: flex; justify-content: flex-end; gap: 8px; }
   .muted { color: var(--text-dim); font-size: var(--fs-s); }
   .hint { padding: 8px 12px; border-top: 1px solid var(--border); margin: 0; }

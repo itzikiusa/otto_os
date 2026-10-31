@@ -82,8 +82,6 @@ otto-canvas.workspace = true
 # Design Hall — the artifact graph (projects / artifacts / versions / links).
 otto-design.workspace = true
 otto-design-assist.workspace = true
-otto-swarm.workspace = true
-otto-workgraph.workspace = true
 otto-workflows.workspace = true
 otto-memory.workspace = true
 otto-vault.workspace = true

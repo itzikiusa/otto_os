@@ -19,13 +19,6 @@ import type {
   TrailEvent,
 } from '../api/types';
 
-/** Progress of the background History index walk (`history_index_progress`). */
-export interface HistoryIndexProgress {
-  scanned: number;
-  total: number;
-  done: boolean;
-}
-
 /** Keep the trail bounded in memory (matches the server's list cap). */
 const TRAIL_CAP = 500;
 
@@ -64,9 +57,6 @@ class ActivityStore {
   /** Artifact fetch states stay scoped to the session while panels switch. */
   artifactsLoadingBySession: Record<string, boolean> = $state({});
   artifactsErrorBySession: Record<string, string> = $state({});
-  /** Latest History-index walk progress; null until a walk reports in. Reset to
-   *  `{…, done:false}` when a rescan is requested so the button can show it. */
-  historyIndex: HistoryIndexProgress | null = $state(null);
   /** session id -> why its trail/tasks load failed (cleared on success), so
    *  the Activity panel shows "Couldn’t load" + Retry, not an empty board. */
   loadErrorBySession: Record<string, string> = $state({});
@@ -304,10 +294,6 @@ class ActivityStore {
         this.artifactsBySession[ev.session_id] = mergeArtifacts(list, [ev.artifact]);
         return true;
       }
-      case 'history_index_progress': {
-        this.historyIndex = { scanned: ev.scanned, total: ev.total, done: ev.done };
-        return true;
-      }
       default:
         return false;
     }
@@ -335,11 +321,6 @@ class ActivityStore {
     this.summaryBySession[sessionId] = { ...cur, ...patch };
   }
 
-  /** Mark a History rescan as requested (progress frames overwrite this). */
-  beginHistoryRescan(): void {
-    this.historyIndex = { scanned: 0, total: 0, done: false };
-  }
-
   /** The signed-in identity changed (S13-02): drop every cached trail, task
    *  list, roll-up and artifact list — they were read with the previous
    *  identity's token. Panels refetch through `load` / `loadSummary`. */
@@ -358,7 +339,6 @@ class ActivityStore {
     this.artifactsLoadingBySession = {};
     this.artifactsErrorBySession = {};
     this.loadErrorBySession = {};
-    this.historyIndex = null;
     this.loaded.clear();
     this.artifactsLoaded.clear();
   }

@@ -5,11 +5,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { groupTurns, stableGroupTurns, type RenderItem } from '../src/modules/agents/conversation/format.ts';
 import { createMdCache } from '../src/modules/agents/conversation/mdCache.ts';
-import { indexToRenderItem } from '../src/modules/assistant/chat.ts';
 import { loadSource } from './sourceHarness.ts';
 import { TranscriptLifecycle } from '../src/lib/stores/transcriptLifecycle.ts';
 import * as paneHeader from '../src/lib/paneHeader.ts';
-import type { AssistantTurn, Turn } from '../src/lib/api/types.ts';
+import type { Turn } from '../src/lib/api/types.ts';
 
 const user = (id: string, md = `ask ${id}`): Turn => ({
   id, role: 'user', ts: null, blocks: [{ kind: 'text', md }], duration_ms: null, model: null, system: [], reasoning_steps: 0,
@@ -79,16 +78,6 @@ test('md cache: hits return the memo, misses render once, bounds evict oldest', 
   small.get('bb'); // 12 → evict aaaa
   assert.equal(small.size, 1);
   assert.equal(small.chars, 4);
-});
-
-test('indexToRenderItem is memoized per index turn object', () => {
-  const t = { id: 'i1', role: 'assistant', text: 'hi', created_at: '2026-01-01T00:00:00Z', model: 'm' } as unknown as AssistantTurn;
-  const a = indexToRenderItem(t);
-  assert.equal(indexToRenderItem(t), a);
-  const replaced = { ...t, text: 'hi, edited' } as AssistantTurn;
-  const b = indexToRenderItem(replaced);
-  assert.notEqual(b, a);
-  assert.equal(b.blocks[0].kind === 'text' && b.blocks[0].md, 'hi, edited');
 });
 
 function loadStore() {

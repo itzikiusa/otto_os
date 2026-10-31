@@ -155,7 +155,7 @@ export const LOOP_STEP_KINDS = [...LOOP_AGENT_KINDS, 'review_run', 'http_request
 // Kinds that render their OWN Provider control (inline or a richer multi-agent
 // config). EVERY OTHER kind gets the shared universal Provider+Model block, so
 // NO node is ever missing a provider selector — including git_pr (drafts the PR
-// message with an agent), swarm_task, and the utility nodes.
+// message with an agent) and the utility nodes.
 export const KINDS_WITH_OWN_PROVIDER = [
   'agent_prompt',
   'prepare_context',

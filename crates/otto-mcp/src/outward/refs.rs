@@ -55,11 +55,6 @@ pub const REF_ARGS: &[(&str, &str, &str)] = &[
     ("update_confluence_page", "account_id", "issue_account"),
     ("comment_confluence_page", "account_id", "issue_account"),
     ("start_pr_review", "issue_account_id", "issue_account"),
-    ("get_swarm", "swarm_id", "swarm"),
-    ("list_swarm_runs", "swarm_id", "swarm"),
-    ("list_swarm_projects", "swarm_id", "swarm"),
-    ("get_swarm_board", "swarm_id", "swarm"),
-    ("post_swarm_board", "swarm_id", "swarm"),
     ("vault_dir", "vault_id", "vault"),
     ("vault_read", "vault_id", "vault"),
     ("vault_search", "vault_id", "vault"),
@@ -85,7 +80,6 @@ pub const REF_ARGS: &[(&str, &str, &str)] = &[
     ("delete_scheduled_task", "task_id", "scheduled_task"),
     ("create_scheduled_task", "workflow_id", "workflow"),
     ("update_scheduled_task", "workflow_id", "workflow"),
-    ("get_proof_pack", "goal_loop_id", "goal_loop"),
     ("room_post", "room_id", "agent_room"),
     ("room_read", "room_id", "agent_room"),
     ("aws_s3_list_buckets", "account_id", "aws_account"),
@@ -121,7 +115,6 @@ pub const DIRECTORY_TOOLS: &[(&str, &str)] = &[
     ("list_workflows", "workflow"),
     ("list_connections", "connection"),
     ("list_broker_clusters", "broker_cluster"),
-    ("list_swarms", "swarm"),
     ("list_scheduled_tasks", "scheduled_task"),
     ("list_goal_loops", "goal_loop"),
     ("list_agent_rooms", "agent_room"),
@@ -227,18 +220,11 @@ pub const PIN_NARROW_TOOLS: &[&str] = &[
 /// whatever `workspace_id` the caller sends). Listed so the classification
 /// test forces a conscious choice for every new tool.
 pub const PIN_UNVERIFIABLE: &[&str] = &[
-    "create_work_item",
-    "list_swarm_tasks",
     "list_findings",
     "get_finding",
     "approve_improvement_edit",
     "reject_improvement_edit",
     "rollback_improvement_edit",
-    // The Assistant's memory is the owner's, across every workspace — a
-    // token pinned to one workspace must not read or rewrite it.
-    "assistant_remember",
-    "assistant_forget",
-    "assistant_recall",
 ];
 
 /// The workspace-pin verdict on fully resolved arguments: `McpScope`'s own

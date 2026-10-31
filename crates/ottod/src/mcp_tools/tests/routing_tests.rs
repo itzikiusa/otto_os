@@ -31,11 +31,9 @@ fn every_control_plane_tool_is_in_the_session_listing_as_specified() {
         let full = spec["name"].as_str().unwrap();
         let stdio = governed_stdio_name(full);
         let short = stdio.strip_prefix("otto_").unwrap();
-        // The assistant memory tools are native under the same bare names
-        // and listed only to assistant sessions (by design).
-        let aliased = GOVERNED_ALIASED_BY_NATIVE.iter().any(|(g, n)| {
-            *g == short && (listed.contains_key(n) || assistant_segment(n).is_some())
-        });
+        let aliased = GOVERNED_ALIASED_BY_NATIVE
+            .iter()
+            .any(|(g, n)| *g == short && listed.contains_key(n));
         if !listed.contains_key(stdio.as_str()) && !aliased {
             missing.push(full);
         }
@@ -45,7 +43,7 @@ fn every_control_plane_tool_is_in_the_session_listing_as_specified() {
         "control-plane tools no session sees: {missing:?}"
     );
 
-    assert_eq!(NATIVE_TWINS.len(), 46);
+    assert_eq!(NATIVE_TWINS.len(), 45);
     for twin in NATIVE_TWINS {
         let full = format!("otto.{}", twin.short);
         let spec = GOVERNED_SPECS

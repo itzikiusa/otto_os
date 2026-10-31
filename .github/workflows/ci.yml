@@ -1,26 +1,29 @@
 name: CI
 
-# Lint, type-check, and test the Rust workspace + the Svelte UI on every push
-# and pull request. The Tauri desktop app (apps/desktop/src-tauri) is a separate,
-# macOS-only workspace (launchd + Keychain + codesigning), so it is NOT built on
-# these Linux runners: macos.yml's `desktop` job runs its fmt/clippy/`cargo test`
-# (supervisor plist + keep_previous_daemon, browser allow-list, window registry,
-# the no-remote-webviews capability pin) on every PR touching apps/desktop/**
-# and nightly. The daemon crates' macOS cfg branches run in macos.yml's `daemon`
-# job (crate list kept in sync by scripts/macos-ci-crates.py --check, below).
+# Sub-5-minute PR gate for the Rust workspace + Svelte UI.
+# Architecture for <5m wall-clock feedback:
+#   1. Compile ONCE (`rust-build`): builds the entire workspace (`ottod` + all
+#      unit/integration test binaries) in a single pass via `cargo nextest
+#      archive --workspace --features otto-server/test-util` (one shared Cargo
+#      cache, `ld.lld`, system OpenSSL on Linux, targeted `opt-level` overrides,
+#      and unified `test-util` so the 89k-LOC `otto-server` crate compiles once
+#      instead of twice), then fans out to 8 zero-compile `rust-test` shards +
+#      `e2e-gate-shard` + `daemon-budget`.
+#   2. `e2e-gate` splits across 4 parallel single-browser shards (`chromium`
+#      1/2 & 2/2, `webkit` 1/2 & 2/2) and folds all 4 JSON reports into the
+#      blocking `e2e-flaky-check.mjs --gate` verdict.
+#   3. Long `#[ignore]`d stress/sleep suites (`_at_50k_revisions_`, telemetry
+#      crash-recovery) and the 4-shard full functional E2E matrix run nightly in
+#      `perf-nightly.yml` and `e2e-nightly.yml`.
 
 on:
   push:
     branches: [main]
   pull_request:
 
-# Least privilege: every job here only reads the checked-out tree (build, lint,
-# type-check, test). Pin the GITHUB_TOKEN to read-only contents at the top level
-# so no job can mutate the repo, and so the default broad token scope is dropped.
 permissions:
   contents: read
 
-# Cancel superseded runs on the same ref to save CI minutes.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -28,33 +31,24 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  # No debuginfo in CI builds. Each otto-server integration-test binary links
-  # the full workspace; with debuginfo the parallel link step exhausts the
-  # 14 GB runner disk and ld dies with SIGBUS ("ld terminated with signal 7").
-  # CI never reads the debuginfo anyway — a backtrace still has symbol names.
+  CARGO_INCREMENTAL: '0'
   CARGO_PROFILE_DEV_DEBUG: 0
   CARGO_PROFILE_TEST_DEBUG: 0
-  # The ONE ClickHouse pin (SHA-512 of this exact release asset) for every job
-  # that installs the single binary: the Rust job's k8s-monitor ratchets and
-  # the e2e-functional shards' usage/telemetry engine.
   CLICKHOUSE_VERSION: 26.8.34.13
   CLICKHOUSE_SHA512: e5c753b258679daa882747aaec10b351a85bcad1412af7957d4a4616dcf5b45663da219bd37fe0697fde2ae76dbed2ba5b414ce9a5c8044c6d1fa0142e03e4cc
+  NEXTEST_VERSION: 0.9.150
 
 jobs:
-  rust:
-    name: Rust (fmt · clippy · test)
+  rust-lint:
+    name: Rust (fmt · clippy · guards)
     runs-on: ubuntu-latest
-    env:
-      NEXTEST_VERSION: 0.9.150
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7.0.1
 
-      # Older images had only ~14 GiB free and exhausted disk during linking.
-      # Keep conservative headroom without paying for a blanket purge on larger
-      # images. Only unused, preinstalled tools on this disposable runner go.
       - name: Ensure runner disk headroom
         run: |
-          required_kib=$((40 * 1024 * 1024))
+          required_kib=$((30 * 1024 * 1024))
           for unused_tool in /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL; do
             available_kib=$(df -Pk . | awk 'NR == 2 {print $4}')
             if (( available_kib >= required_kib )); then
@@ -63,39 +57,124 @@ jobs:
             sudo rm -rf "$unused_tool"
           done
           df -h /
-          available_kib=$(df -Pk . | awk 'NR == 2 {print $4}')
-          if (( available_kib < required_kib )); then
-            echo "::error::Less than 40 GiB free before restoring the Rust cache"
-            exit 1
-          fi
 
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@1.99.1
         with:
           components: rustfmt, clippy
 
-      # Linux never compiles `cfg(target_os = "macos")` code: every crate that
-      # has some must be linted + tested by macos.yml, and macos.yml must
-      # trigger on it and its reverse dependents (S12-306). Metadata only.
       - name: macOS workflow covers every crate with macOS-only code
         run: python3 scripts/macos-ci-crates.py --check
 
-      # God-module LOC ratchet (scripts/loc-baseline.json): tracked files and
-      # otto-server's total may only shrink; a new >=4000-line file fails.
       - name: Rust LOC ratchet
         run: python3 scripts/loc-ratchet.py
 
-      # Caches ~/.cargo registry/git + ./target, keyed on Cargo.lock.
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2.9.3
-
-      - name: Report restored cache disk usage
+      - name: Enable fast lld linker
         run: |
-          df -h /
-          du -sh target || true
+          if command -v ld.lld >/dev/null 2>&1; then
+            sudo ln -sf "$(command -v ld.lld)" /usr/bin/ld
+            sudo ln -sf "$(command -v ld.lld)" /usr/bin/x86_64-linux-gnu-ld
+          fi
 
-      # Upstream prebuilt binary: avoid compiling the test runner on every job.
-      # SHA-256 is pinned to the x86_64 Linux asset of this exact release.
+      - name: Cache cargo + workspace metadata
+        id: cargo-cache
+        uses: actions/cache@v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            ~/.cargo/git/checkouts
+            target/debug/.fingerprint
+            target/debug/build
+            target/debug/deps
+            target/debug/examples
+            target/release/.fingerprint
+            target/release/build
+            target/release/deps
+            target/.ci-source-hashes.json
+          key: cargo-full-${{ runner.os }}-lint-v1-${{ hashFiles('**/Cargo.toml', 'Cargo.lock', '.cargo/config.toml') }}-${{ hashFiles('crates/**', 'vendor/**') }}
+          restore-keys: |
+            cargo-full-${{ runner.os }}-lint-v1-${{ hashFiles('**/Cargo.toml', 'Cargo.lock', '.cargo/config.toml') }}-
+            cargo-full-${{ runner.os }}-lint-v1-
+
+      - name: Restore cached source mtimes
+        run: python3 scripts/ci-cargo-cache.py restore
+
+      - name: Install librdkafka build deps
+        run: |
+          if ! compgen -G "target/debug/build/rdkafka-sys-*/out/lib/librdkafka.a" >/dev/null && ! dpkg -s cmake libcurl4-openssl-dev pkg-config libssl-dev >/dev/null 2>&1; then
+            sudo grep -lE 'dl\.google\.com|packages\.microsoft\.com' /etc/apt/sources.list.d/* 2>/dev/null | xargs -r sudo rm -f
+            sudo python3 scripts/ci-apt-install.py cmake libcurl4-openssl-dev pkg-config libssl-dev
+          fi
+
+      - name: cargo fmt --check
+        run: cargo fmt --all --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --features otto-server/test-util -- -D warnings
+
+      - name: Terminal emulator budgets (otto-pty, release)
+        env:
+          OTTO_PERF: '1'
+          OTTO_PERF_BUDGET_SCALE: '3'
+        run: cargo test -p otto-pty --release --lib perf_budgets -- --nocapture
+
+      - name: Prepare cargo cache manifest
+        if: steps.cargo-cache.outputs.cache-hit != 'true'
+        run: python3 scripts/ci-cargo-cache.py prepare-save
+
+  rust-build:
+    name: Build workspace & test archive
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Ensure runner disk headroom
+        run: |
+          required_kib=$((30 * 1024 * 1024))
+          for unused_tool in /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL; do
+            available_kib=$(df -Pk . | awk 'NR == 2 {print $4}')
+            if (( available_kib >= required_kib )); then
+              break
+            fi
+            sudo rm -rf "$unused_tool"
+          done
+          df -h /
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@1.99.1
+
+      - name: Enable fast lld linker
+        run: |
+          if command -v ld.lld >/dev/null 2>&1; then
+            sudo ln -sf "$(command -v ld.lld)" /usr/bin/ld
+            sudo ln -sf "$(command -v ld.lld)" /usr/bin/x86_64-linux-gnu-ld
+          fi
+
+      - name: Cache cargo + workspace targets
+        id: cargo-cache
+        uses: actions/cache@v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            ~/.cargo/git/checkouts
+            target/debug/.fingerprint
+            target/debug/build
+            target/debug/deps
+            target/debug/ottod
+            target/.ci-source-hashes.json
+          key: cargo-full-${{ runner.os }}-build-v1-${{ hashFiles('**/Cargo.toml', 'Cargo.lock', '.cargo/config.toml') }}-${{ hashFiles('crates/**', 'vendor/**') }}
+          restore-keys: |
+            cargo-full-${{ runner.os }}-build-v1-${{ hashFiles('**/Cargo.toml', 'Cargo.lock', '.cargo/config.toml') }}-
+            cargo-full-${{ runner.os }}-build-v1-
+
+      - name: Restore cached source mtimes
+        run: python3 scripts/ci-cargo-cache.py restore
+
       - name: Install nextest
         run: |
           archive="$RUNNER_TEMP/cargo-nextest.tar.gz"
@@ -106,15 +185,82 @@ jobs:
           printf '%s  %s\n' 'b0959bc64232974224cf9fb22c915845398c0e8668fa7831eb5b43fb1eef781f' "$archive" | sha256sum --check
           mkdir -p "$tool_dir"
           tar -xzf "$archive" -C "$tool_dir" cargo-nextest
-          "$tool_dir/cargo-nextest" nextest --version
           echo "$tool_dir" >> "$GITHUB_PATH"
 
-      # The k8s-monitor ClickHouse tests (every query builder against a real
-      # engine + the rows-read-per-refresh ratchet) skip without a `clickhouse`
-      # binary, so they passed vacuously here. Install the pinned single binary
-      # (SHA-512 pinned to this exact release asset) and REQUIRE it: the tests
-      # fail instead of skipping when OTTO_REQUIRE_CLICKHOUSE is set.
-      - name: Install ClickHouse (k8s monitor ratchets)
+      - name: Install librdkafka build deps
+        run: |
+          if ! compgen -G "target/debug/build/rdkafka-sys-*/out/lib/librdkafka.a" >/dev/null && ! dpkg -s cmake libcurl4-openssl-dev pkg-config libssl-dev >/dev/null 2>&1; then
+            sudo grep -lE 'dl\.google\.com|packages\.microsoft\.com' /etc/apt/sources.list.d/* 2>/dev/null | xargs -r sudo rm -f
+            sudo python3 scripts/ci-apt-install.py cmake libcurl4-openssl-dev pkg-config libssl-dev
+          fi
+
+      - name: Build & archive workspace tests + ottod
+        run: |
+          cargo nextest archive \
+            --workspace --features otto-server/test-util \
+            --profile ci \
+            --archive-file "$RUNNER_TEMP/nextest.tar.zst"
+          test -x target/debug/ottod || cargo build --bin ottod --features otto-server/test-util
+          test -x target/debug/ottod
+
+      - name: nextest override filters match tests
+        run: python3 scripts/check-nextest-filters.py --cargo-arg=--features --cargo-arg=otto-server/test-util
+
+      - name: cargo test (doctests)
+        run: cargo test --workspace --doc --features otto-server/test-util
+
+      - name: Upload the test daemon
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: ottod-debug
+          path: target/debug/ottod
+          retention-days: 1
+          if-no-files-found: error
+
+      - name: Upload nextest archive
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: nextest-archive
+          path: ${{ runner.temp }}/nextest.tar.zst
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
+
+      - name: Prepare cargo cache manifest
+        if: steps.cargo-cache.outputs.cache-hit != 'true'
+        run: python3 scripts/ci-cargo-cache.py prepare-save
+
+  rust-test:
+    name: Rust · nextest (${{ matrix.shard }}/10)
+    needs: rust-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Download nextest archive
+        uses: actions/download-artifact@v8.0.2
+        with:
+          name: nextest-archive
+          path: ${{ runner.temp }}
+
+      - name: Install nextest
+        run: |
+          archive="$RUNNER_TEMP/cargo-nextest.tar.gz"
+          tool_dir="$RUNNER_TEMP/otto-test-tools"
+          curl --fail --location --silent --show-error --retry 3 \
+            "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-$NEXTEST_VERSION/cargo-nextest-$NEXTEST_VERSION-x86_64-unknown-linux-gnu.tar.gz" \
+            --output "$archive"
+          printf '%s  %s\n' 'b0959bc64232974224cf9fb22c915845398c0e8668fa7831eb5b43fb1eef781f' "$archive" | sha256sum --check
+          mkdir -p "$tool_dir"
+          tar -xzf "$archive" -C "$tool_dir" cargo-nextest
+          echo "$tool_dir" >> "$GITHUB_PATH"
+
+      - name: Install ClickHouse
         run: |
           archive="$RUNNER_TEMP/clickhouse.tgz"
           curl --fail --location --silent --show-error --retry 3 \
@@ -127,125 +273,38 @@ jobs:
           install -m 0755 "$(find "$RUNNER_TEMP/ch" -type f -name clickhouse -path '*/bin/*' | head -n 1)" "$HOME/.local/bin/clickhouse"
           rm -rf "$RUNNER_TEMP/ch" "$archive"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          "$HOME/.local/bin/clickhouse" local --version
 
-      # librdkafka (rdkafka-sys, for the Message Brokers viewer) is compiled from
-      # source by CMake and links libcurl for OAUTHBEARER/OIDC. Ubuntu runners
-      # preinstall cmake and ship the libcurl runtime but NOT its dev headers, so
-      # the build aborts on <curl/curl.h>. Install cmake (explicit — don't rely on
-      # the runner image) + the headers (macOS already has both in the SDK).
-      - name: Install librdkafka build deps
-        # The runner image ships third-party apt sources (Google Chrome, …) that
-        # intermittently fail `apt-get update` with "Hash Sum mismatch" and sank
-        # whole runs before our code built. We only need Ubuntu's own archive
-        # for cmake/libcurl, so drop the extras first.
-        run: |
-          sudo grep -lE 'dl\.google\.com|packages\.microsoft\.com' /etc/apt/sources.list.d/* 2>/dev/null | xargs -r sudo rm -f
-          sudo python3 scripts/ci-apt-install.py cmake libcurl4-openssl-dev
-
-      # Blocking: the tree was formatted repo-wide once; keep it that way.
-      - name: cargo fmt --check
-        run: cargo fmt --all --check
-
-      - name: cargo clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-      # Same full binary/test inventory as cargo test; shared external resources
-      # are bounded in .config/nextest.toml. Ignored tests remain ignored.
-      - name: cargo nextest
-        id: nextest
+      - name: cargo nextest (shard ${{ matrix.shard }}/10)
         env:
           OTTO_REQUIRE_CLICKHOUSE: "1"
-        run: cargo nextest run --workspace --profile ci --no-fail-fast
-
-      # Every `.config/nextest.toml` override disjunct must still match >=1
-      # test: a crate split / module move otherwise orphans a `timing` or
-      # `processes` entry silently and the wall-clock asserts it protects
-      # run under full contention again. Lists the binaries built above.
-      # Only when nextest actually ran (pass or test failure): after an
-      # earlier step failed (fmt, clippy) the binaries were never built and
-      # listing would compile the whole workspace just to report noise.
-      - name: nextest override filters match tests
-        if: (success() || failure()) && (steps.nextest.outcome == 'success' || steps.nextest.outcome == 'failure')
-        run: python3 scripts/check-nextest-filters.py
-
-      # Scale gates kept out of the everyday run (#[ignore], e.g. the 50k-revision
-      # vault listing, ~40 s of fixture creation) still gate every PR here. Same
-      # build as above (--workspace), so this only lists + runs; no recompile.
-      - name: cargo nextest (ignored scale gates)
-        run: cargo nextest run --workspace --profile ci --run-ignored only -E 'test(/_at_50k_revisions_/)'
-
-      # Exercise the real pinned collector/exporter and isolated crash fixtures.
-      # Keep process recovery serial and separate from the shared test fan-out.
-      - name: Telemetry delivery and collector recovery
-        run: cargo test -p otto-telemetry-collector --lib -- --ignored --test-threads=1
-
-      # Daemon-side terminal budgets (perf 01 F7/N4): snapshot capture /
-      # format / reflow / feed throughput, release profile, ×3 for shared
-      # runners, best-of-N rounds. BLOCKING — unlike the advisory perf-gates
-      # job, this is pure CPU work with no browser, daemon or network, so a
-      # failure is a real regression. (The scrollback memory assertion,
-      # `short_lines_at_wide_grid_keep_a_small_scrollback`, runs in nextest.)
-      - name: Terminal emulator budgets (otto-pty, release)
-        env:
-          OTTO_PERF: '1'
-          OTTO_PERF_BUDGET_SCALE: '3'
-        run: cargo test -p otto-pty --release --lib perf_budgets -- --nocapture
-
-      # Embedded ClickHouse budgets (perf2/09 R6): idle thread count of the
-      # usage server with Otto's config (OTTO_PERF), plus the per-summary /
-      # per-report statement + rows-read guard and the idle-stop wake test.
-      # Uses the pinned clickhouse installed above. Report-only.
-      - name: ClickHouse usage budgets (otto-usage)
-        continue-on-error: true
-        env:
-          OTTO_PERF: '1'
         run: |
-          cargo test -p otto-usage --test e2e \
-            -- budget summary_and_report_query_budget idle_stop --nocapture
-
-      # nextest does not execute doctests, so retain Cargo's separate gate.
-      - name: cargo test (doctests)
-        run: cargo test --workspace --doc
-
-      - name: Report Rust build disk usage
-        if: always()
-        run: |
-          df -h /
-          du -sh target || true
+          mkdir -p target/tmp
+          cargo nextest run \
+            --archive-file "$RUNNER_TEMP/nextest.tar.zst" \
+            --workspace-remap . \
+            --profile ci --no-fail-fast \
+            --partition count:${{ matrix.shard }}/10
 
   ui:
     name: UI (svelte-check · tsc)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: ui
     steps:
       - uses: actions/checkout@v7.0.1
 
-      - name: Test deployment verification (mocked OS operations)
+      - name: Test repo guard scripts & packaging
         working-directory: .
-        run: python3 -B -m unittest discover -s packaging/tests -p 'test_*.py'
-
-      - name: Test Insights collector calendar boundaries
-        working-directory: .
-        run: python3 -B -m unittest discover -s crates/otto-skills/assets/skills/insights/insights/scripts -p test_collect_window.py
-
-      - name: Test the nextest override-filter guard (parsing)
-        working-directory: .
-        run: python3 -B -m unittest discover -s scripts -p 'test_check_nextest_filters.py'
-
-      - name: Test the macOS crate-coverage guard
-        working-directory: .
-        run: python3 -B -m unittest discover -s scripts -p 'test_macos_ci_crates.py'
-
-      - name: Test the Rust LOC ratchet
-        working-directory: .
-        run: python3 -B -m unittest discover -s scripts -p 'test_loc_ratchet.py'
-
-      - name: Test bounded CI dependency installation
-        working-directory: .
-        run: python3 -B -m unittest discover -s scripts -p 'test_ci_apt_install.py'
+        run: |
+          python3 -B -m unittest discover -s packaging/tests -p 'test_*.py'
+          python3 -B -m unittest discover -s crates/otto-skills/assets/skills/insights/insights/scripts -p test_collect_window.py
+          python3 -B -m unittest discover -s scripts -p 'test_check_nextest_filters.py'
+          python3 -B -m unittest discover -s scripts -p 'test_macos_ci_crates.py'
+          python3 -B -m unittest discover -s scripts -p 'test_loc_ratchet.py'
+          python3 -B -m unittest discover -s scripts -p 'test_ci_apt_install.py'
+          python3 -B -m unittest discover -s scripts -p 'test_ci_cargo_cache.py'
 
       - name: Install Node
         uses: actions/setup-node@v7.1.0
@@ -257,18 +316,53 @@ jobs:
       - name: npm ci
         run: npm ci
 
-      # `check` = svelte-check (against tsconfig.app.json) + tsc -p tsconfig.node.json.
       - name: npm run check
         run: npm run check
 
-      # Pure-module unit tests (node:test on Node 22's built-in type stripping; no extra dependency).
       - name: npm run test:unit
         run: npm run test:unit
 
+      - name: npm run build
+        run: npm run build
+
+      - name: Bundle-size budget
+        run: node scripts/bundle-budget.mjs
+
+  plugin-team-performance:
+    name: Plugin · Team Performance
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Install Node
+        uses: actions/setup-node@v7.1.0
+        with:
+          node-version: 26.13.0
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: npm ci
+        working-directory: ui
+        run: npm ci
+
+      - name: Cache Playwright browsers
+        id: pw-cache
+        uses: actions/cache@v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: pw-chromium-${{ runner.os }}-${{ hashFiles('ui/package-lock.json') }}
+
       - name: Install Chromium for the Team Performance plugin gate
+        working-directory: ui
         run: |
-          sudo python3 ../scripts/ci-apt-install.py --prepare-external
-          timeout --kill-after=10s 15m npx playwright install --with-deps chromium
+          if [ "${{ steps.pw-cache.outputs.cache-hit }}" != "true" ]; then
+            sudo python3 ../scripts/ci-apt-install.py --prepare-external
+            timeout --kill-after=10s 15m npx playwright install --with-deps chromium
+          else
+            sudo python3 ../scripts/ci-apt-install.py --prepare-external
+            timeout --kill-after=10s 5m npx playwright install-deps chromium
+          fi
 
       - name: Team Performance unit, server and browser regressions
         working-directory: examples/plugins/team-performance
@@ -276,221 +370,33 @@ jobs:
           OTTO_TP_REQUIRE_BROWSER: '1'
         run: node --test --test-concurrency=1 test/*.test.js
 
-      # Catches build-only breakage that type-checking alone misses.
-      - name: npm run build
-        run: npm run build
-
-      # Gzip bytes of the entry, the shell chunk and every page chunk (static
-      # closure from dist/.vite/manifest.json) vs scripts/bundle-budget.json —
-      # >3 % growth fails; ratchet with `node scripts/bundle-budget.mjs --update`.
-      - name: Bundle-size budget
-        run: node scripts/bundle-budget.mjs
-
-  # Build the debug test daemon ONCE and hand it to every job that drives a
-  # real ottod (e2e-functional shards, perf-gates, daemon-budget) as an
-  # artifact — each of those used to compile the whole workspace itself.
-  build-ottod:
-    name: Build test daemon (ottod, debug)
+  e2e-gate-shard:
+    name: E2E smoke (${{ matrix.project }} ${{ matrix.shard }}/2)
+    needs: rust-build
     runs-on: ubuntu-latest
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v7.0.1
-
-      - name: Install stable toolchain
-        uses: dtolnay/rust-toolchain@1.99.1
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2.9.3
-        with:
-          shared-key: perf-gates
-
-      # Same librdkafka prerequisites as the Rust job (ottod links otto-brokers).
-      - name: Install librdkafka build deps
-        run: |
-          sudo grep -lE 'dl\.google\.com|packages\.microsoft\.com' /etc/apt/sources.list.d/* 2>/dev/null | xargs -r sudo rm -f
-          sudo python3 scripts/ci-apt-install.py cmake libcurl4-openssl-dev
-
-      - name: Build the test daemon
-        run: cargo build -p ottod
-
-      - name: Upload the test daemon
-        uses: actions/upload-artifact@v7.0.2
-        with:
-          name: ottod-debug
-          path: target/debug/ottod
-          retention-days: 3
-          if-no-files-found: error
-
-  # BLOCKING e2e smoke gate: the green-history subset listed in
-  # ui/e2e/gate-specs.ts (~35 specs: shell, sessions, API client, canvas,
-  # proof packs, scheduled tasks, git, assistant, two mobile pages) on the
-  # `desktop-gate` (Chromium) + `iphone-gate` (WebKit) projects. Unlike the
-  # sharded suite below it has NO continue-on-error: retries 0, any `flaky`
-  # count fails, and a red result fails the workflow — make this job a
-  # required status check. Gate specs need only the isolated throwaway daemon
-  # (no docker stack / redis / ClickHouse / tour film), so setup stays small.
-  e2e-gate:
-    name: E2E smoke gate (blocking)
-    needs: build-ottod
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v7.0.1
-
-      - name: Download the test daemon
-        uses: actions/download-artifact@v8.0.2
-        with:
-          name: ottod-debug
-          path: target/debug
-
-      - name: Make the test daemon executable
-        run: chmod +x target/debug/ottod
-
-      - name: Install Node
-        uses: actions/setup-node@v7.1.0
-        with:
-          node-version: 26.13.0
-          cache: npm
-          cache-dependency-path: ui/package-lock.json
-
-      - name: npm ci
-        working-directory: ui
-        run: npm ci
-
-      - name: Install Playwright browsers
-        working-directory: ui
-        run: |
-          sudo python3 ../scripts/ci-apt-install.py --prepare-external
-          timeout --kill-after=10s 15m npx playwright install --with-deps chromium webkit
-
-      # OTTO_E2E_GATE narrows the REAL desktop-browser / iphone-portrait
-      # projects to ui/e2e/gate-specs.ts, so every spec's project guard
-      # behaves exactly as in the advisory shards.
-      - name: E2E smoke gate (gate specs on desktop-browser + iphone-portrait)
-        working-directory: ui
-        env:
-          OTTO_E2E_BIN: ${{ github.workspace }}/target/debug/ottod
-          OTTO_E2E_FUNCTIONAL_ONLY: '1'
-          OTTO_E2E_GATE: '1'
-        run: npx playwright test --project=desktop-browser --project=iphone-portrait --retries=0
-
-      # Fails on flaky, on ANY skipped test, and on fewer passes than
-      # GATE_MIN_EXPECTED — a self-skipping gate spec can't pass vacuously.
-      - name: Fail on flaky / skipped / missing gate tests
-        if: success() || failure()
-        working-directory: ui
-        env:
-          OTTO_E2E_SUMMARY_LABEL: E2E smoke gate
-        run: node scripts/e2e-flaky-check.mjs --gate --summary
-
-      - name: Upload the Playwright report
-        if: failure()
-        uses: actions/upload-artifact@v7.0.2
-        with:
-          name: e2e-gate-report
-          path: |
-            ui/e2e/.report-0
-            ui/test-results
-          retention-days: 7
-
-  # ADVISORY functional E2E: every desktop-* spec on the desktop-browser
-  # project (Chromium, 1280×800 3-pane shell) plus the mobile specs at iPhone
-  # portrait (WebKit), sharded across 4 runners. Isolated throwaway daemon per
-  # shard (ui/e2e/global-setup.ts: temp data dir, own port, file secret store,
-  # fake agent CLIs). Perf specs are skipped here (OTTO_E2E_FUNCTIONAL_ONLY) —
-  # they run in perf-gates. Retries are 0 and any `flaky` count fails the
-  # shard, so a red shard is an honest result — but the suite is too slow to
-  # gate merges, so it never fails the workflow (continue-on-error) and no
-  # job `needs:` it. Keep it out of the branch's required status checks; the
-  # blocking subset is `e2e-gate` above (promote a spec into it through
-  # ui/e2e/gate-specs.ts once it shows a green history here).
-  # The other mobile/tablet projects run nightly (e2e-nightly.yml).
-  e2e-functional:
-    name: E2E functional (shard ${{ matrix.shard }}/4, advisory)
-    needs: build-ottod
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    timeout-minutes: 60
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        include:
+          - slot: 1
+            project: desktop-browser
+            browser: chromium
+            shard: 1
+          - slot: 2
+            project: desktop-browser
+            browser: chromium
+            shard: 2
+          - slot: 3
+            project: iphone-portrait
+            browser: webkit
+            shard: 1
+          - slot: 4
+            project: iphone-portrait
+            browser: webkit
+            shard: 2
     steps:
       - uses: actions/checkout@v7.0.1
-
-      # The DB Explorer / Connections / Brokers specs drive the seeded dev
-      # stacks (dev/dbviewer: MySQL, Postgres, Mongo, ClickHouse, Redis;
-      # dev/brokers: Redpanda) — the same compose files as db-drivers.yml.
-      # Started on EVERY shard: Playwright shards by test, so which shard gets
-      # a DB spec moves with the suite. Started first and detached, so the
-      # images pull and seed while the steps below install; the health wait
-      # right before Playwright usually finds them ready.
-      - name: Start the seeded DB stack + Redpanda
-        run: |
-          docker compose -f dev/dbviewer/docker-compose.yml up -d
-          docker compose -f dev/brokers/docker-compose.yml up -d
-
-      # The AWS spec reuses this container instead of creating/removing a
-      # Docker interface while another worker loads the UI. That churn caused
-      # Chromium ERR_NETWORK_CHANGED and failed app-module imports on Linux.
-      - name: Start LocalStack before browser workers
-        run: |
-          container=$(docker run -d --rm \
-            --name "otto-e2e-localstack-${OTTO_E2E_SLOT:-0}" \
-            -p 127.0.0.1:4566:4566 \
-            -e SERVICES=s3,sqs,sts,iam,ec2,logs \
-            -e SQS_ENDPOINT_STRATEGY=path \
-            -e LOCALSTACK_HOST=127.0.0.1:4566 \
-            --health-cmd "python3 -c 'import json,urllib.request; s=json.load(urllib.request.urlopen(\"http://127.0.0.1:4566/_localstack/health\", timeout=2))[\"services\"]; assert all(s.get(k) in (\"available\", \"running\") for k in (\"s3\", \"sqs\", \"sts\", \"iam\", \"ec2\", \"logs\"))'" \
-            --health-interval=5s --health-timeout=3s --health-retries=12 \
-            localstack/localstack:4.14.0)
-          echo "OTTO_CI_LOCALSTACK_ID=$container" >> "$GITHUB_ENV"
-
-      # redis-server: the Connections/DB/ops specs spawn their own throwaway
-      # Redis. ffmpeg: generates the synthetic tour film below.
-      - name: Install redis-server + ffmpeg
-        run: |
-          sudo grep -lE 'dl\.google\.com|packages\.microsoft\.com' /etc/apt/sources.list.d/* 2>/dev/null | xargs -r sudo rm -f
-          sudo python3 scripts/ci-apt-install.py --no-install-recommends redis-server ffmpeg
-          # The specs start their own instances; the distro service would
-          # only hold :6379.
-          sudo systemctl disable --now redis-server || true
-          redis-server --version
-
-      # The usage + telemetry specs need the daemon's embedded ClickHouse
-      # (the daemon resolves `clickhouse` on PATH / ~/.local/bin). Same pin
-      # as the Rust job (workflow env).
-      - name: Install ClickHouse (usage engine)
-        run: |
-          archive="$RUNNER_TEMP/clickhouse.tgz"
-          curl --fail --location --silent --show-error --retry 3 \
-            "https://github.com/ClickHouse/ClickHouse/releases/download/v$CLICKHOUSE_VERSION-lts/clickhouse-common-static-$CLICKHOUSE_VERSION-amd64.tgz" \
-            --output "$archive"
-          printf '%s  %s\n' "$CLICKHOUSE_SHA512" "$archive" | sha512sum --check
-          mkdir -p "$RUNNER_TEMP/ch"
-          tar -xzf "$archive" -C "$RUNNER_TEMP/ch"
-          mkdir -p "$HOME/.local/bin"
-          install -m 0755 "$(find "$RUNNER_TEMP/ch" -type f -name clickhouse -path '*/bin/*' | head -n 1)" "$HOME/.local/bin/clickhouse"
-          rm -rf "$RUNNER_TEMP/ch" "$archive"
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          "$HOME/.local/bin/clickhouse" local --version
-
-      # The Help tour playback specs (desktop-ux{,-r2,-r3,-r4}-help) need a
-      # real MP4 at OTTO_E2E_TOUR_VIDEO. The published film is not in the
-      # repo, so synthesize one as long as the film (film.json `duration`, so
-      # every chapter is seekable), with an audio track (the r1 spec asserts
-      # decoded audio). VP9 + Opus: Playwright's Chromium has no H.264/AAC.
-      - name: Generate the synthetic tour film
-        run: |
-          duration=$(node -p "Math.ceil(require('./ui/src/lib/walkthroughs/film.json').duration) + 1")
-          out="$RUNNER_TEMP/otto-tour.mp4"
-          ffmpeg -hide_banner -loglevel error -y \
-            -f lavfi -i "testsrc=size=320x180:rate=10:duration=$duration" \
-            -f lavfi -i "sine=frequency=440:sample_rate=48000:duration=$duration" \
-            -c:v libvpx-vp9 -b:v 40k -deadline realtime -cpu-used 8 -g 10 \
-            -c:a libopus -b:a 24k -shortest -movflags +faststart "$out"
-          ls -l "$out"
-          echo "OTTO_E2E_TOUR_VIDEO=$out" >> "$GITHUB_ENV"
 
       - name: Download the test daemon
         uses: actions/download-artifact@v8.0.2
@@ -498,7 +404,6 @@ jobs:
           name: ottod-debug
           path: target/debug
 
-      # Artifacts drop the executable bit.
       - name: Make the test daemon executable
         run: chmod +x target/debug/ottod
 
@@ -513,234 +418,92 @@ jobs:
         working-directory: ui
         run: npm ci
 
-      # desktop-browser = Chromium; iphone-portrait = WebKit (device default).
-      - name: Install Playwright browsers
+      - name: Cache Playwright ${{ matrix.browser }}
+        id: pw-cache
+        uses: actions/cache@v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: pw-${{ matrix.browser }}-${{ runner.os }}-${{ hashFiles('ui/package-lock.json') }}
+
+      - name: Install Playwright ${{ matrix.browser }}
         working-directory: ui
         run: |
           sudo python3 ../scripts/ci-apt-install.py --prepare-external
-          timeout --kill-after=10s 15m npx playwright install --with-deps chromium webkit
-
-      # Same wait as db-drivers.yml: every service has a compose healthcheck
-      # (seeds run before it reports healthy); redis-seed is a one-shot.
-      - name: Wait for healthy servers
-        run: |
-          for _ in $(seq 1 60); do
-            unhealthy=$(docker ps --filter name=otto- --format '{{.Names}} {{.Status}}' \
-              | grep -v 'redis-seed' | grep -vc '(healthy)' || true)
-            [ "$unhealthy" = "0" ] && break
-            sleep 5
-          done
-          docker ps --format '{{.Names}}  {{.Status}}'
-          # `docker ps` omits exited/auto-removed containers. Require the exact
-          # fixture we created, or the AWS spec could start a new one mid-run.
-          localstack_health=$(docker inspect --format '{{if .State.Running}}{{.State.Health.Status}}{{else}}stopped{{end}}' "$OTTO_CI_LOCALSTACK_ID")
-          if [ "$localstack_health" != "healthy" ]; then
-            echo "::error::The job-owned LocalStack fixture is not healthy"
-            exit 1
-          fi
-          if [ "$unhealthy" != "0" ]; then
-            echo "::error::DB/Kafka/LocalStack services never became healthy"
-            docker compose -f dev/dbviewer/docker-compose.yml logs --tail 80
-            docker compose -f dev/brokers/docker-compose.yml logs --tail 80
-            exit 1
+          if [ "${{ steps.pw-cache.outputs.cache-hit }}" != "true" ]; then
+            timeout --kill-after=10s 10m npx playwright install --with-deps ${{ matrix.browser }}
+          else
+            timeout --kill-after=10s 5m npx playwright install-deps ${{ matrix.browser }}
           fi
 
-      - name: E2E (desktop-browser + iphone-portrait)
+      - name: E2E smoke shard
         working-directory: ui
         env:
           OTTO_E2E_BIN: ${{ github.workspace }}/target/debug/ottod
+          OTTO_E2E_SLOT: '${{ matrix.slot }}'
           OTTO_E2E_FUNCTIONAL_ONLY: '1'
-        run: >-
-          npx playwright test
-          --project=desktop-browser --project=iphone-portrait
-          --shard=${{ matrix.shard }}/4 --retries=0
+          OTTO_E2E_GATE: '1'
+        run: npx playwright test --project=${{ matrix.project }} --shard=${{ matrix.shard }}/2 --retries=0
 
-      # Writes this shard's pass/fail/skip counts (and failed test names) to
-      # the step summary — the job itself is continue-on-error, so this is
-      # where an advisory red shows up. e2e-advisory-ratchet sums the shards.
-      - name: Fail on flaky tests
-        if: success() || failure()
-        working-directory: ui
-        env:
-          OTTO_E2E_SUMMARY_LABEL: E2E functional shard ${{ matrix.shard }}/4
-        run: node scripts/e2e-flaky-check.mjs --summary
-
-      - name: Upload the shard's JSON results
+      - name: Upload shard JSON result
         if: success() || failure()
         uses: actions/upload-artifact@v7.0.2
         with:
-          name: e2e-functional-results-${{ matrix.shard }}
-          path: ui/e2e/.results-0.json
+          name: e2e-gate-json-${{ matrix.slot }}
+          path: ui/e2e/.results-${{ matrix.slot }}.json
+          include-hidden-files: true
+          retention-days: 3
+          if-no-files-found: error
+
+      - name: Upload Playwright report on failure
+        if: failure()
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: e2e-gate-report-${{ matrix.slot }}
+          path: |
+            ui/e2e/.report-${{ matrix.slot }}
+            ui/test-results
           include-hidden-files: true
           retention-days: 7
 
-      - name: Upload the Playwright report
-        if: failure()
-        uses: actions/upload-artifact@v7.0.2
-        with:
-          name: e2e-functional-report-${{ matrix.shard }}
-          path: |
-            ui/e2e/.report-0
-            ui/test-results
-          retention-days: 7
-
-      - name: Server logs
-        if: failure()
-        run: |
-          docker compose -f dev/dbviewer/docker-compose.yml logs --tail 200
-          docker compose -f dev/brokers/docker-compose.yml logs --tail 200
-          if [ -n "${OTTO_CI_LOCALSTACK_ID:-}" ]; then
-            docker logs --tail 200 "$OTTO_CI_LOCALSTACK_ID"
-          fi
-
-      - name: Stop the job-owned LocalStack after browser workers
-        if: always()
-        run: |
-          if [ -n "${OTTO_CI_LOCALSTACK_ID:-}" ]; then
-            docker rm -f "$OTTO_CI_LOCALSTACK_ID"
-          fi
-
-  # The advisory suite's RED COUNT ratchet (S12-304): sums the four shards'
-  # failed tests and fails when it rises above ui/e2e/advisory-red-baseline.json
-  # (lower the baseline in the PR that fixes failures; never raise it to land a
-  # regression). Advisory like the shards (continue-on-error): it makes a
-  # rising red count visible on the run page instead of a silent `success`.
-  e2e-advisory-ratchet:
-    name: E2E advisory red-count ratchet
-    needs: e2e-functional
-    if: always() && needs.e2e-functional.result != 'skipped'
+  e2e-gate:
+    name: E2E smoke gate (blocking)
+    needs: e2e-gate-shard
+    if: always() && needs.e2e-gate-shard.result != 'skipped'
     runs-on: ubuntu-latest
-    continue-on-error: true
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7.0.1
 
-      - name: Download the shards' JSON results
-        uses: actions/download-artifact@v8.0.2
-        with:
-          pattern: e2e-functional-results-*
-          path: shard-results
-
       - name: Install Node
         uses: actions/setup-node@v7.1.0
         with:
           node-version: 26.13.0
 
-      - name: Red count vs baseline
+      - name: Download shard JSON results
+        uses: actions/download-artifact@v8.0.2
+        with:
+          pattern: e2e-gate-json-*
+          path: shard-results
+
+      - name: Fail on flaky / skipped / missing gate tests
         working-directory: ui
+        env:
+          OTTO_E2E_SUMMARY_LABEL: E2E smoke gate
         run: |
           shopt -s globstar nullglob
           files=(../shard-results/**/.results-*.json)
           if [ "${#files[@]}" -ne 4 ]; then
-            echo "::error::expected 4 shard reports, found ${#files[@]} — a shard never produced results"
+            echo "::error::expected 4 shard reports, found ${#files[@]}"
             exit 1
           fi
-          OTTO_E2E_SUMMARY_LABEL='E2E functional (all shards)' \
-            node scripts/e2e-flaky-check.mjs --summary --ratchet "${files[@]}"
+          node scripts/e2e-flaky-check.mjs --gate --summary "${files[@]}"
+          test "${{ needs.e2e-gate-shard.result }}" = "success"
 
-  # A SMALL, fast subset of the Playwright perf gates on WebKit — the engine
-  # closest to the app's WKWebView — against an isolated debug daemon
-  # (ui/e2e/global-setup.ts: temp data dir, own port, file secret store).
-  # Chosen for stability: bounded-DOM counts (git sidebar, file viewer,
-  # insights, Kafka/K8s lists, a 100k-row grid) plus the grid's scroll/paint
-  # timings, the terminal flood/^C and park-redraw budgets, and the daemon's
-  # terminal emulator budgets (otto-pty, gated by OTTO_PERF), which run with
-  # OTTO_PERF_BUDGET_SCALE=3 (budgets were measured on a Mac; counts are never scaled). The full perf set runs locally with
-  # `npx playwright test --project=desktop-webkit` (docs/testing/ci-performance.md).
-  # Advisory until it has a green history: this is the first job to run the
-  # daemon + Playwright WebKit on the Linux runner.
-  perf-gates:
-    name: Perf gates (WebKit subset, advisory)
-    needs: build-ottod
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v7.0.1
-
-      - name: Download the test daemon
-        uses: actions/download-artifact@v8.0.2
-        with:
-          name: ottod-debug
-          path: target/debug
-
-      - name: Make the test daemon executable
-        run: chmod +x target/debug/ottod
-
-      - name: Install Node
-        uses: actions/setup-node@v7.1.0
-        with:
-          node-version: 26.13.0
-          cache: npm
-          cache-dependency-path: ui/package-lock.json
-
-      - name: npm ci
-        working-directory: ui
-        run: npm ci
-
-      - name: Install Playwright WebKit
-        working-directory: ui
-        run: |
-          sudo python3 ../scripts/ci-apt-install.py --prepare-external
-          timeout --kill-after=10s 15m npx playwright install --with-deps webkit
-
-      - name: Perf gates (desktop-webkit)
-        working-directory: ui
-        env:
-          OTTO_E2E_BIN: ${{ github.workspace }}/target/debug/ottod
-          OTTO_PERF_BUDGET_SCALE: '3'
-        run: >-
-          npx playwright test --project=desktop-webkit --workers=1
-          e2e/desktop-git-sidebar-perf.spec.ts
-          e2e/desktop-docs-orch-perf.spec.ts
-          e2e/desktop-infra-perf.spec.ts
-          e2e/desktop-db-results-perf.spec.ts
-          e2e/desktop-nav-smooth-perf.spec.ts
-          e2e/desktop-boot-perf.spec.ts
-          e2e/desktop-terminal-flood-perf.spec.ts
-          e2e/desktop-terminal-park-redraw.spec.ts
-          e2e/desktop-terminal-compact-queue-perf.spec.ts
-          e2e/desktop-agents-scale-perf.spec.ts
-
-      # DB Explorer at scale: the deterministic `@ci` subset of the scale spec
-      # (wide 20k × 300 grid, column filter over 100k JSON rows, result memory
-      # budget release + Re-run). The other scenarios run locally.
-      # Runs even when the subset above failed: the two are independent, and
-      # skipping this one left DB-at-scale with no result at all.
-      - name: Perf gates — DB at scale (desktop-webkit, @ci)
-        if: success() || failure()
-        working-directory: ui
-        env:
-          OTTO_E2E_BIN: ${{ github.workspace }}/target/debug/ottod
-          OTTO_PERF_BUDGET_SCALE: '3'
-        run: >-
-          npx playwright test --project=desktop-webkit --workers=1
-          e2e/desktop-db-scale-perf.spec.ts --grep @ci
-
-      - name: Fail on flaky tests
-        if: success() || failure()
-        working-directory: ui
-        run: node scripts/e2e-flaky-check.mjs
-
-      - name: Upload the Playwright report
-        if: failure()
-        uses: actions/upload-artifact@v7.0.2
-        with:
-          name: perf-gates-report
-          path: ui/e2e/.report-0
-          retention-days: 7
-
-  # Daemon budgets (perf/03 F8, perf2/03 N4): an isolated throwaway daemon on
-  # a SEEDED, fragmented otto.db (boot runs the offline compaction), then
-  # boot phases, idle CPU/wakeups, threads, WAL size and freelist share.
-  # BLOCKING for the deterministic metrics (threads, wal_bytes, free_pct, the
-  # compaction outcome); time/CPU on a shared runner are reported in the step
-  # summary only. macOS + ClickHouse: .github/workflows/perf-nightly.yml.
   daemon-budget:
     name: Daemon perf budget
-    needs: build-ottod
+    needs: rust-build
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7.0.1
 
@@ -766,8 +529,6 @@ jobs:
   audit:
     name: cargo audit (advisory)
     runs-on: ubuntu-latest
-    # Advisory-only: a new RustSec advisory in the dependency tree should warn,
-    # not block a PR. Promote to blocking once the tree is triaged.
     continue-on-error: true
     env:
       CARGO_AUDIT_VERSION: 0.22.2
@@ -777,8 +538,6 @@ jobs:
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@1.99.1
 
-      # Cache only the pinned executable, never audit results or the advisory
-      # database. Every run still fetches current RustSec advisories below.
       - name: Cache cargo-audit
         id: cargo-audit-cache
         uses: actions/cache/restore@v6.1.0
@@ -796,8 +555,6 @@ jobs:
           test "$("$audit_bin/cargo-audit" --version)" = "cargo-audit $CARGO_AUDIT_VERSION"
           echo "$audit_bin" >> "$GITHUB_PATH"
 
-      # Save after installation, before scanning: a newly reported advisory
-      # must not force the next run to compile the unchanged audit tool again.
       - name: Save cargo-audit cache
         if: steps.cargo-audit-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v6.1.0
@@ -806,19 +563,8 @@ jobs:
           key: cargo-audit-${{ runner.os }}-${{ runner.arch }}-${{ env.CARGO_AUDIT_VERSION }}-v1
 
       - name: cargo audit
-        # RUSTSEC-2023-0071 (rsa "Marvin Attack" timing sidechannel) has NO fixed
-        # upgrade available and reaches us only transitively via sqlx-mysql's
-        # caching_sha2_password auth (the DB Explorer's `mysql-rsa` feature).
-        # That path only ENCRYPTS the password to the server's public key; the
-        # attack recovers plaintext from a party performing RSA DECRYPTION,
-        # which Otto never does. Ignore until sqlx-mysql swaps its RSA backend.
         run: cargo audit --ignore RUSTSEC-2023-0071
 
-  # Duplicate-version gate (deny.toml: multiple-versions = "deny" + a `skip`
-  # list of today's known duplicates). BLOCKING: a PR that adds a second
-  # semver-incompatible copy of a crate fails here — align the pin or, if an
-  # upstream forces it, add a skip with the reason. Licenses/advisories are
-  # not gated here (see the audit job).
   deny:
     name: cargo deny (duplicates)
     runs-on: ubuntu-latest
@@ -829,12 +575,8 @@ jobs:
         uses: EmbarkStudios/cargo-deny-action@v2.1.1
         with:
           command: check bans
-          # Matches rust-toolchain.toml (the action's image cannot install an
-          # override toolchain it was not told about).
           rust-version: "1.99.1"
 
-  # Bug-fix commits that touch the UI should carry a test (ui/unit or ui/e2e).
-  # Non-blocking: prints a ::warning:: per offending commit in the PR range.
   fix-has-test:
     name: UI fix carries a test (advisory)
     if: github.event_name == 'pull_request'

@@ -235,8 +235,6 @@ struct CreateReq {
     max_retries: Option<i64>,
     #[serde(default)]
     notify_on_change: Option<bool>,
-    #[serde(default)]
-    attach_proof: Option<bool>,
 }
 
 fn default_true() -> bool {
@@ -263,7 +261,6 @@ struct UpdateReq {
     sandbox: Option<String>,
     max_retries: Option<i64>,
     notify_on_change: Option<bool>,
-    attach_proof: Option<bool>,
 }
 
 /// The PATCH fields that would change WHAT a task runs or WHERE its result
@@ -467,7 +464,6 @@ async fn create(
             sandbox,
             max_retries,
             notify_on_change: req.notify_on_change.unwrap_or(false),
-            attach_proof: req.attach_proof.unwrap_or(false),
             ..NewScheduledTask::defaults(ws_id.clone(), req.name.trim().to_string())
         })
         .await
@@ -577,7 +573,6 @@ async fn update(
                 sandbox: req.sandbox,
                 max_retries: req.max_retries,
                 notify_on_change: req.notify_on_change,
-                attach_proof: req.attach_proof,
             },
             |task| {
                 cadence::next_run(
@@ -842,7 +837,7 @@ pub fn builtin_presets() -> Vec<ScheduledTaskPreset> {
             id: "weekly-code-review".into(),
             name: "Weekly code-quality review".into(),
             description: "Weekly: review recent changes for quality/maintainability in an \
-                          isolated worktree and report. Attach a proof pack."
+                          isolated worktree and report."
                 .into(),
             kind: "agent_prompt".into(),
             prompt: "Review the repository's recent changes (last 7 days of commits) for code \

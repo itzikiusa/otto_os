@@ -1,0 +1,176 @@
+name: CodeQL
+
+# Lightweight, high-signal CodeQL setup (replaces GitHub Default Setup):
+# - Never blocks PRs for 20-30 minutes on Rust/Go/Java builds:
+#   * On `pull_request`: runs ONLY fast static JS/TS or GitHub Actions checks
+#     (~1m) when `.github/workflows/**` or `ui/src/**` changed, filtered by
+#     `.github/codeql/codeql-config.yml` (high/very-high precision errors only,
+#     excluding false-positive local-app rules, `vendor/**`, and tests).
+#   * On weekly `schedule` and `workflow_dispatch`: runs `actions`,
+#     `javascript-typescript`, `python`, and cached `rust` (`go` and
+#     `java-kotlin` had zero production code — only 2 test fixtures).
+
+on:
+  schedule:
+    - cron: '23 4 * * 6'
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/**'
+      - '.github/codeql/**'
+      - 'ui/src/**'
+  workflow_dispatch:
+    inputs:
+      rust_extractor_cache:
+        description: Reuse the Rust extractor's internal Cargo target directory
+        type: boolean
+        default: true
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codeql-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  changes:
+    name: Select CodeQL languages
+    runs-on: ubuntu-latest
+    outputs:
+      has_languages: ${{ steps.select.outputs.has_languages }}
+      matrix: ${{ steps.select.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Select language matrix
+        id: select
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, subprocess
+
+          scheduled = [
+              {"language": "actions", "build-mode": "none"},
+              {"language": "javascript-typescript", "build-mode": "none"},
+              {"language": "python", "build-mode": "none"},
+              {"language": "rust", "build-mode": "none"},
+          ]
+
+          event = os.environ.get("EVENT_NAME", "")
+          base_ref = os.environ.get("BASE_REF", "main") or "main"
+
+          if event != "pull_request":
+              selected = scheduled
+          else:
+              diff = subprocess.check_output(
+                  ["git", "diff", "--name-only", f"origin/{base_ref}...HEAD"],
+                  text=True,
+              ).splitlines()
+              selected = []
+              if any(p.startswith(".github/workflows/") for p in diff):
+                  selected.append({"language": "actions", "build-mode": "none"})
+              if any(p.startswith("ui/src/") for p in diff):
+                  selected.append({"language": "javascript-typescript", "build-mode": "none"})
+
+          out_path = os.environ["GITHUB_OUTPUT"]
+          with open(out_path, "a", encoding="utf-8") as fh:
+              fh.write(f"has_languages={'true' if selected else 'false'}\n")
+              fh.write(f"matrix={json.dumps({'include': selected})}\n")
+          print("Selected CodeQL languages:", [x["language"] for x in selected])
+          PY
+
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    needs: changes
+    if: needs.changes.outputs.has_languages == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.changes.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Initialize CodeQL
+        id: init
+        uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          config-file: ./.github/codeql/codeql-config.yml
+
+      - name: Verify Rust extractor option and record environment
+        if: matrix.language == 'rust'
+        id: rust
+        env:
+          CODEQL_PATH: ${{ steps.init.outputs.codeql-path }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$CODEQL_PATH" resolve extractor --language=rust --format=betterjson > "$RUNNER_TEMP/rust-extractor.json"
+          python3 - "$RUNNER_TEMP/rust-extractor.json" <<'PY'
+          import json, sys
+          with open(sys.argv[1]) as f:
+              extractor = json.load(f)
+          option = extractor.get('extractor_options', {}).get('cargo_target_dir')
+          if not option or option.get('type') != 'string':
+              raise SystemExit('Rust cargo_target_dir option missing; review .github/workflows/codeql.yml before enabling caching')
+          print('cargo_target_dir:', option['description'])
+          PY
+          {
+            rustc -Vv
+            cargo -Vv
+            rustup toolchain list -v
+            printf 'ImageOS=%s\nImageVersion=%s\n' "${ImageOS:-}" "${ImageVersion:-}"
+          } | tee "$RUNNER_TEMP/rust-cache-toolchain.txt"
+          fingerprint=$(sha256sum "$RUNNER_TEMP/rust-cache-toolchain.txt" | cut -d ' ' -f 1)
+          printf 'toolchain=%s\n' "$fingerprint" >> "$GITHUB_OUTPUT"
+          df -h /
+
+      - name: Restore Rust extractor Cargo artifacts
+        if: matrix.language == 'rust' && (github.event_name != 'workflow_dispatch' || inputs.rust_extractor_cache)
+        id: rust-cache
+        uses: actions/cache/restore@v6.1.0
+        with:
+          path: ${{ runner.temp }}/codeql-rust-cargo-target
+          key: codeql-rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.init.outputs.codeql-version }}-${{ steps.rust.outputs.toolchain }}-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml', '**/rust-toolchain', '**/rust-toolchain.toml', '**/.cargo/config', '**/.cargo/config.toml', '**/build.rs', '.github/workflows/codeql.yml') }}-${{ github.sha }}
+          restore-keys: |
+            codeql-rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.init.outputs.codeql-version }}-${{ steps.rust.outputs.toolchain }}-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml', '**/rust-toolchain', '**/rust-toolchain.toml', '**/.cargo/config', '**/.cargo/config.toml', '**/build.rs', '.github/workflows/codeql.yml') }}-
+
+      - name: Select persistent Rust extractor target
+        if: matrix.language == 'rust' && (github.event_name != 'workflow_dispatch' || inputs.rust_extractor_cache)
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/codeql-rust-cargo-target"
+          printf 'CODEQL_EXTRACTOR_RUST_OPTION_CARGO_TARGET_DIR=%s/codeql-rust-cargo-target\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+
+      - name: Analyze and upload
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: /language:${{ matrix.language }}
+
+      - name: Record Rust cache size
+        if: matrix.language == 'rust' && (github.event_name != 'workflow_dispatch' || inputs.rust_extractor_cache)
+        shell: bash
+        run: du -sh "$RUNNER_TEMP/codeql-rust-cargo-target" || true
+
+      - name: Save Rust extractor Cargo artifacts
+        if: matrix.language == 'rust' && (github.event_name != 'workflow_dispatch' || inputs.rust_extractor_cache) && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && steps.rust-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6.1.0
+        with:
+          path: ${{ runner.temp }}/codeql-rust-cargo-target
+          key: ${{ steps.rust-cache.outputs.cache-primary-key }}

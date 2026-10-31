@@ -7,15 +7,13 @@ use std::time::Duration;
 
 use dashmap::DashMap;
 use otto_core::api::CreateSessionReq;
-use otto_core::domain::{
-    Session, SessionKind, SessionStatus, TrailKind, TrailLevel, TrailSource, Workspace,
-};
+use otto_core::domain::{Session, SessionKind, SessionStatus, Workspace};
 use otto_core::event::Event;
 use otto_core::hooks::PreSpawnHook;
 use otto_core::{Error, Id, Result};
 use otto_pty::{resolve_grid, CommandSpec, PtyHandle};
 use otto_rbac::AuthRepo;
-use otto_state::{ActivityRepo, NewSession, NewTrail, SessionsRepo};
+use otto_state::{ActivityRepo, NewSession, SessionsRepo};
 use tokio::sync::{broadcast, Mutex};
 
 use crate::agy::{agy_cli_root, scan_agy_conversation};
@@ -944,18 +942,6 @@ fn read_transcript_head(path: &std::path::Path) -> Option<(String, bool)> {
     Some((String::from_utf8_lossy(&head).into_owned(), capped))
 }
 
-/// Truncate `s` to at most `max` chars (char-boundary safe), appending `…`.
-/// Used for one-line trail summaries.
-fn trail_clip(s: &str, max: usize) -> String {
-    let s = s.trim();
-    if s.chars().count() <= max {
-        return s.to_string();
-    }
-    let mut out: String = s.chars().take(max).collect();
-    out.push('…');
-    out
-}
-
 /// Window after the last output chunk during which a session is `working`.
 const WORKING_WINDOW: Duration = Duration::from_secs(5);
 /// Status poll interval.
@@ -1858,147 +1844,6 @@ impl SessionManager {
         let home = crate::accounts::account_home(root, &account.id)?;
         crate::accounts::prepare_home(&home)?;
         Ok(Some((account, home)))
-    }
-
-    /// Best-effort: persist a trail entry and broadcast it. Fire-and-forget so
-    /// callers (lifecycle methods) never block on the DB. No-op without an
-    /// activity store.
-    fn record_trail(
-        &self,
-        session_id: &Id,
-        workspace_id: &Id,
-        source: TrailSource,
-        kind: TrailKind,
-        level: TrailLevel,
-        summary: String,
-    ) {
-        let Some(repo) = self.activity.clone() else {
-            return;
-        };
-        let events = self.events.clone();
-        let (sid, wid) = (session_id.clone(), workspace_id.clone());
-        tokio::spawn(async move {
-            let new = NewTrail {
-                session_id: sid.clone(),
-                workspace_id: wid.clone(),
-                source,
-                kind,
-                level,
-                summary,
-                detail: None,
-            };
-            match repo.append_trail(new).await {
-                Ok(event) => {
-                    let _ = events.send(Event::TrailAppended {
-                        workspace_id: wid,
-                        session_id: sid,
-                        event,
-                    });
-                }
-                Err(e) => tracing::warn!(session = %sid, "record trail: {e}"),
-            }
-        });
-    }
-
-    /// Record an Otto-side lifecycle entry (spawn/suspend/archive/…) for an
-    /// agent session. Skips connection sessions to keep the trail agent-focused.
-    fn record_lifecycle(&self, session: &Session, summary: impl Into<String>) {
-        if session.kind != SessionKind::Agent {
-            return;
-        }
-        self.record_trail(
-            &session.id,
-            &session.workspace_id,
-            TrailSource::Otto,
-            TrailKind::Session,
-            TrailLevel::Info,
-            summary.into(),
-        );
-    }
-
-    /// Record a user-authored message relayed into a session (channel relay,
-    /// orchestrator command). Surfaces the "by user" side of the trail for every
-    /// provider. Best-effort; loads the session to resolve its workspace.
-    pub async fn record_user_message(&self, session_id: &Id, text: &str) {
-        self.record_relayed_message(session_id, TrailSource::User, None, text)
-            .await;
-    }
-
-    /// Record a message another agent session sent into this one with its own
-    /// credential (`/message`, broadcast, relay — S11-305). Attributed to the
-    /// agent and the sending session, never to the person who owns both.
-    pub async fn record_agent_message(&self, session_id: &Id, from: &Id, text: &str) {
-        self.record_relayed_message(session_id, TrailSource::Agent, Some(from), text)
-            .await;
-    }
-
-    async fn record_relayed_message(
-        &self,
-        session_id: &Id,
-        source: TrailSource,
-        from: Option<&Id>,
-        text: &str,
-    ) {
-        if self.activity.is_none() {
-            return;
-        }
-        let Ok(session) = self.repo.get(session_id).await else {
-            return;
-        };
-        let trimmed = text.trim();
-        if trimmed.is_empty() {
-            return;
-        }
-        let summary = match from {
-            Some(from) => trail_clip(&format!("from session {from}: {trimmed}"), 200),
-            None => trail_clip(trimmed, 200),
-        };
-        self.record_trail(
-            session_id,
-            &session.workspace_id,
-            source,
-            TrailKind::Prompt,
-            TrailLevel::Info,
-            summary,
-        );
-    }
-
-    /// Record an auto-approved prompt-guard action on the session activity trail.
-    /// Called by [`crate::prompt_guard::PromptGuard`] after injecting approval
-    /// keys. Best-effort; no-op when the activity store is absent.
-    pub fn record_approval_trail(&self, session_id: &Id, provider: &str) {
-        let summary = format!("Auto-approved trust/permission prompt for {provider}");
-        let repo = self.repo.clone();
-        let sid = session_id.clone();
-        let activity = self.activity.clone();
-        let events = self.events.clone();
-        tokio::spawn(async move {
-            let Ok(session) = repo.get(&sid).await else {
-                return;
-            };
-            let Some(activity) = activity else {
-                return;
-            };
-            let new = NewTrail {
-                session_id: sid.clone(),
-                workspace_id: session.workspace_id.clone(),
-                source: TrailSource::Otto,
-                kind: TrailKind::Session,
-                level: TrailLevel::Info,
-                summary,
-                detail: None,
-            };
-            match activity.append_trail(new).await {
-                Ok(event) => {
-                    let _ = events.send(Event::TrailAppended {
-                        workspace_id: session.workspace_id,
-                        session_id: sid,
-                        event,
-                    });
-                }
-                Err(e) => tracing::warn!("prompt-guard record trail: {e}"),
-            }
-        });
     }
 
     /// Submit a message to a live session as if a human typed it and pressed
@@ -6492,6 +6337,8 @@ mod otto_tools_env;
 mod session_files;
 #[path = "manager/shutdown_guard.rs"]
 mod shutdown_guard;
+#[path = "manager/trail.rs"]
+mod trail;
 #[path = "manager/transcript_roots.rs"]
 mod transcript_roots;
 use otto_tools_env::{otto_tools_env, session_mcp_profiles, write_codex_creds};

@@ -307,6 +307,9 @@ impl GrantsRepo {
     }
 
     /// Return all grants for `user_id` as `(Feature, Capability)` pairs.
+    ///
+    /// Rows naming retired/unknown features from an older schema or build are
+    /// silently skipped so reading grants on an existing user DB never errors.
     pub async fn grants_for(&self, user_id: &str) -> Result<Vec<(Feature, Capability)>> {
         use sqlx::Row;
         let rows = sqlx::query(
@@ -317,17 +320,18 @@ impl GrantsRepo {
         .await
         .map_err(|e| Error::Internal(format!("grants_for: {e}")))?;
 
-        rows.iter()
-            .map(|r| {
-                let fs: String = r.get("feature");
-                let cs: String = r.get("capability");
-                let feature = Feature::parse(&fs)
-                    .ok_or_else(|| Error::Internal(format!("bad feature value '{fs}'")))?;
-                let cap = Capability::parse(&cs)
-                    .ok_or_else(|| Error::Internal(format!("bad capability value '{cs}'")))?;
-                Ok((feature, cap))
-            })
-            .collect()
+        let mut out = Vec::with_capacity(rows.len());
+        for r in &rows {
+            let fs: String = r.get("feature");
+            let Some(feature) = Feature::parse(&fs) else {
+                continue;
+            };
+            let cs: String = r.get("capability");
+            let cap = Capability::parse(&cs)
+                .ok_or_else(|| Error::Internal(format!("bad capability value '{cs}'")))?;
+            out.push((feature, cap));
+        }
+        Ok(out)
     }
 
     /// Atomically replace all grants for `user_id`.
@@ -650,6 +654,30 @@ mod tests {
         // Sorted by feature text: "connections" < "database"
         assert_eq!(grants[0], (Feature::Connections, Capability::Edit));
         assert_eq!(grants[1], (Feature::Database, Capability::View));
+    }
+
+    #[tokio::test]
+    async fn grants_for_skips_unknown_retired_features() {
+        let pool = mem_pool().await;
+        let repo = GrantsRepo::new(pool.clone());
+        let u = seed_user(&pool, "legacy", false).await;
+
+        repo.set_grants(&u.id, &[(Feature::Git, Capability::Edit)])
+            .await
+            .unwrap();
+        for retired in ["swarm", "proof_pack", "mission_control", "run_with_otto"] {
+            sqlx::query(
+                "INSERT INTO user_feature_grants (user_id, feature, capability) VALUES (?, ?, 'admin')",
+            )
+            .bind(&u.id)
+            .bind(retired)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let grants = repo.grants_for(&u.id).await.unwrap();
+        assert_eq!(grants, vec![(Feature::Git, Capability::Edit)]);
     }
 
     // ── SG-11 grant cache ──────────────────────────────────────────────────

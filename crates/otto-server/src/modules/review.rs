@@ -23,6 +23,6 @@ pub(crate) mod service {
     pub(crate) use super::lifecycle::cancel_running_review;
     pub(crate) use super::run::{
         default_review_provider, effective_review_mode, review_finding_briefs,
-        review_findings_counts, review_open_counts_by_severity, review_wait_budget,
+        review_findings_counts, review_open_counts_by_severity,
     };
 }

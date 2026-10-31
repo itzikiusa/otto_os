@@ -113,6 +113,10 @@ impl<'a> CodexFolder<'a> {
         self.st.f.opts.subagents = subagents;
     }
 
+    pub fn subagents(&self) -> &[crate::model::SubagentMeta] {
+        self.st.f.subagents()
+    }
+
     fn with_tokens(mut st: CodexState<'a>) -> CodexState<'a> {
         if let Some((model, input, output, cached)) = st.last_tokens.take() {
             st.f.usage(&model, input.saturating_sub(cached), output, cached, 0);

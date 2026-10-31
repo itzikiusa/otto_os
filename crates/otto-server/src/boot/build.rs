@@ -77,9 +77,6 @@ pub async fn build_ctx(
     });
     let orchestrator = orchestrator();
     let improve_engine = improve_engine(&pool, &events, &workspaces, &orchestrator, cfg);
-    // Agent Swarm: seed role skills + preset souls into the library (only if
-    // absent). The Coordinator runtime + scheduler start in spawn_background.
-    otto_swarm::presets::seed(&context_library);
     let memory = memory_service(&pool);
     let plugins = plugin_manager(cfg, &pool);
     let root_user_id = root_user_id(&pool).await;
@@ -103,7 +100,6 @@ pub async fn build_ctx(
         usage,
         telemetry: Some(telemetry),
         memory,
-        proof_media_dir: Some(cfg.data_dir.join("proof-media")),
         // Config is captured now; the Lightpanda sidecar itself is only
         // located/started on the first `/browser/page` request (see
         // `BrowserEngineHandle`) so daemon boot never waits on it.

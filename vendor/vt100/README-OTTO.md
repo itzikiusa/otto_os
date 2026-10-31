@@ -111,6 +111,21 @@ daemon-core F9):
   for the ACTIVE screen's cap, which is 0 on the alternate screen.)
   `Screen::scrollback_stats()` reports `(rows, cells)` for memory accounting.
 
+## Patch 6: ECMA-48 / xterm cursor, repeat, tab, IRM, and DECAWM sequences (`agy` / BubbleTea v2)
+
+`src/perform.rs` / `src/screen.rs` / `src/grid.rs`:
+
+- `CSI Ps b` (`REP` — Repeat Preceding Graphic Character): upstream 0.18 added
+  `REP`, `HPA` (`` CSI Ps ` ``) and `HVP` (`CSI Pl;Pc f`); Patch 6 bounds `REP`
+  to `rows × cols` and clears `last_char` on non-graphic cursor/erase/mode
+  sequences per ECMA-48 so BubbleTea v2's `cursedRenderer` (`agy`) never repeats
+  stale glyphs across cursor jumps.
+- `CSI Ps a` (`HPR`), `CSI Ps e` (`VPR`), `CSI Ps I` (`CHT`), `CSI Ps Z` (`CBT`),
+  and `CSI s` / `CSI u` (`SCOSC` / `SCORC` when parameterless).
+- `CSI 4 h` / `CSI 4 l` (`IRM` — Insert/Replace Mode) and `CSI ? 7 h` /
+  `CSI ? 7 l` (`DECAWM` — Auto-Wrap Mode; default enabled, preserved across
+  `state_formatted` / `input_mode_diff`).
+
 ## Upgrading
 
 Re-vendor the new upstream version (copy `src/`, `Cargo.toml`,
@@ -126,6 +141,7 @@ and run `cargo update -p vt100`. Regression tests live in `crates/otto-pty`
 `codex_3j_resize_repaint_keeps_single_transcript_copy`,
 `history_cap_shrinks_and_regrows`,
 `short_lines_at_wide_grid_keep_a_small_scrollback`, `vt100_reflow_*`,
-`vt100_height_*`). The published crate ships no `tests/` directory, so only
-its one unit test and doc-tests can be run standalone (copy the directory
-out of the workspace and add an empty `[workspace]` table).
+`vt100_height_*`, `agy_cursed_renderer_sequences_survive_snapshot_roundtrip`).
+The published crate ships no `tests/` directory, so only its one unit test and
+doc-tests can be run standalone (copy the directory out of the workspace and
+add an empty `[workspace]` table).

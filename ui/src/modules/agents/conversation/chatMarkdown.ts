@@ -13,8 +13,23 @@ import type { MarkedExtension, Tokens } from 'marked';
 import { renderNote, type RenderCtx } from '../../../lib/render/markdown.ts';
 import { decorateCodeBlocks } from './codeBlocks';
 import { escapeHtml } from '../../../lib/html.ts';
+import { applyHtmlBlockDirections } from '../../../lib/textDirection.ts';
 
 const esc = escapeHtml;
+const LOCAL_IMG_EXT = /\.(?:png|jpe?g|gif|webp|svg|avif|bmp)$/i;
+
+function parseFileUrl(href: string): FileRef | null {
+  const trimmed = href.trim();
+  if (!/^file:\/\//i.test(trimmed)) return null;
+  let rawPath = trimmed.replace(/^file:\/\/(?:localhost)?/i, '');
+  if (!rawPath.startsWith('/')) return null;
+  try {
+    rawPath = decodeURIComponent(rawPath);
+  } catch {
+    /* keep rawPath as-is on malformed percent-encoding */
+  }
+  return splitLocation(rawPath);
+}
 
 /** Extensions a bare file name (no directory) must have to count as a file
  *  reference inside a code span — `retry.rs` yes, `v0.4.1` / `self.x` no. */
@@ -118,7 +133,24 @@ export const chatMarkedExtension: MarkedExtension = {
       if (!ref) return false;
       return fileRefHtml(ref, `<code>${esc(text)}</code>`, true);
     },
+    image({ href, text }: Tokens.Image) {
+      const fileRef = parseFileUrl(href);
+      const localPath = fileRef?.path ?? ((href.startsWith('/') || href.startsWith('~/')) && LOCAL_IMG_EXT.test(href) ? href : null);
+      if (!localPath) return false;
+      const alt = text || localPath.split('/').pop() || 'Image';
+      return `<img class="chat-local-img" data-asset="${esc(localPath)}" alt="${esc(alt)}" title="${esc(localPath)}" loading="lazy" />`;
+    },
     link({ href, tokens }: Tokens.Link) {
+      const fileRef = parseFileUrl(href);
+      if (fileRef) {
+        const text = tokens?.map((t) => ('raw' in t ? t.raw : '')).join('').trim() ?? '';
+        if (LOCAL_IMG_EXT.test(fileRef.path)) {
+          const alt = text || fileRef.path.split('/').pop() || 'Image';
+          return `<img class="chat-local-img" data-asset="${esc(fileRef.path)}" alt="${esc(alt)}" title="${esc(fileRef.path)}" loading="lazy" />`;
+        }
+        const label = text || fileRef.path.split('/').pop() || fileRef.path;
+        return fileRefHtml(fileRef, esc(label), false);
+      }
       const gh = githubRef(href);
       if (!gh) return false;
       const text = tokens?.map((t) => ('raw' in t ? t.raw : '')).join('') ?? '';
@@ -161,8 +193,11 @@ const REF_OPEN = /<a class="(file-ref|ref-chip)/g;
 // global `_blank` handler would open them a second time.
 const BLANK = / target="_blank"/g;
 
-/** Render one block of chat prose to sanitized, decorated HTML. */
+/** Render one block of chat prose to sanitized, decorated, BiDi-isolated HTML. */
 export function renderChatMarkdown(md: string): string {
   const html = renderNote(md, ctx);
-  return decorateCodeBlocks(html).replace(REF_OPEN, '<a tabindex="0" role="link" class="$1').replace(BLANK, '');
+  const decorated = decorateCodeBlocks(html)
+    .replace(REF_OPEN, '<a tabindex="0" role="link" class="$1')
+    .replace(BLANK, '');
+  return applyHtmlBlockDirections(decorated);
 }

@@ -60,3 +60,65 @@ jobs:
           # ClickHouse needs time to settle after its first schema/merge pass.
           OTTO_PERF_SETTLE_SECS: '60'
         run: node scripts/perf/daemon-budget.mjs target/debug/ottod
+
+      # Embedded ClickHouse budgets (perf2/09 R6): idle thread count of the
+      # usage server with Otto's config (OTTO_PERF), plus the per-summary /
+      # per-report statement + rows-read guard and the idle-stop wake test.
+      - name: ClickHouse usage budgets (otto-usage)
+        continue-on-error: true
+        env:
+          OTTO_PERF: '1'
+        run: |
+          cargo test -p otto-usage --test e2e \
+            -- budget summary_and_report_query_budget idle_stop --nocapture
+
+  scale-and-recovery-linux:
+    name: Scale & crash-recovery gates (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      NEXTEST_VERSION: 0.9.150
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@1.99.1
+
+      - name: Enable fast lld linker
+        run: |
+          if command -v ld.lld >/dev/null 2>&1; then
+            sudo ln -sf "$(command -v ld.lld)" /usr/bin/ld
+            sudo ln -sf "$(command -v ld.lld)" /usr/bin/x86_64-linux-gnu-ld
+          fi
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2.9.3
+        with:
+          shared-key: perf-gates
+          cache-all-crates: true
+          cache-on-failure: true
+
+      - name: Install nextest
+        run: |
+          archive="$RUNNER_TEMP/cargo-nextest.tar.gz"
+          tool_dir="$RUNNER_TEMP/otto-test-tools"
+          curl --fail --location --silent --show-error --retry 3 \
+            "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-$NEXTEST_VERSION/cargo-nextest-$NEXTEST_VERSION-x86_64-unknown-linux-gnu.tar.gz" \
+            --output "$archive"
+          printf '%s  %s\n' 'b0959bc64232974224cf9fb22c915845398c0e8668fa7831eb5b43fb1eef781f' "$archive" | sha256sum --check
+          mkdir -p "$tool_dir"
+          tar -xzf "$archive" -C "$tool_dir" cargo-nextest
+          echo "$tool_dir" >> "$GITHUB_PATH"
+
+      - name: Install librdkafka build deps
+        run: |
+          if ! dpkg -s cmake libcurl4-openssl-dev pkg-config libssl-dev >/dev/null 2>&1; then
+            sudo grep -lE 'dl\.google\.com|packages\.microsoft\.com' /etc/apt/sources.list.d/* 2>/dev/null | xargs -r sudo rm -f
+            sudo python3 scripts/ci-apt-install.py cmake libcurl4-openssl-dev pkg-config libssl-dev
+          fi
+
+      - name: Ignored 50k-revision scale gates
+        run: cargo nextest run -p otto-vault -p otto-design --profile ci --run-ignored only -E 'test(/_at_50k_revisions_/)'
+
+      - name: Telemetry delivery and collector recovery
+        run: cargo nextest run -p otto-telemetry-collector --lib --profile ci --run-ignored only --test-threads 1

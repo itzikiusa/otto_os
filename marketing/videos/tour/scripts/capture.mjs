@@ -157,14 +157,13 @@ async function newContext(browser, meta, { scheme = 'dark', viewport = VIEW, dpr
       id: 'tourview1',
       name: 'Overview',
       boxes: [
-        { id: 'b1', kind: 'sessions', w: 5, h: 4, config: {} },
-        { id: 'b2', kind: 'mission-control', w: 7, h: 4, config: {} },
+        { id: 'b1', kind: 'sessions', w: 6, h: 4, config: {} },
+        { id: 'b2', kind: 'usage', w: 6, h: 4, config: {} },
         ...(meta.ids.dashboard ? [{ id: 'b3', kind: 'db-dashboard', w: 7, h: 5, config: { dashboardId: meta.ids.dashboard } }] : []),
-        { id: 'b4', kind: 'usage', w: 5, h: 5, config: {} },
-        { id: 'b5', kind: 'insights', w: 12, h: 4, config: {} },
+        { id: 'b4', kind: 'insights', w: 5, h: 5, config: {} },
       ],
     },
-    { id: 'tourview2', name: 'Release', boxes: [{ id: 'c1', kind: 'mission-control', w: 12, h: 5, config: {} }] },
+    { id: 'tourview2', name: 'Release', boxes: [{ id: 'c1', kind: 'sessions', w: 12, h: 5, config: {} }] },
   ];
   const ctx = await browser.newContext({
     viewport,

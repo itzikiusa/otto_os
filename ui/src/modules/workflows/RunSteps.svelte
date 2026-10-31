@@ -15,7 +15,6 @@
   import { plural } from '../../lib/plural';
   import { toasts } from '../../lib/toast.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
-  import { proof } from '../../lib/stores/proof.svelte';
   import { router } from '../../lib/router.svelte';
   import { workflowNodeDetail, workflowCheckpointDetail, workflowCheckpointPage, retryRunNode } from '../../lib/api/workflows';
   import type { WorkflowRun, NodeRunState, WorkflowCheckpoint, WorkflowCheckpointPage } from '../../lib/api/types';
@@ -112,12 +111,6 @@
   function openSession(id: string): void {
     if (onOpenSession) onOpenSession(id);
     else ws.navigateToSession(id);
-  }
-
-  /** Open the proof pack assembled for this run in the Proof module. */
-  function viewProof(id: string): void {
-    void proof.open(id);
-    router.go('proof');
   }
 
   /** Open the review a step produced. There's no standalone review-by-id route,
@@ -289,20 +282,9 @@
   });
 </script>
 
-{#if run.proof_pack_id || run.workflow_version != null}
+{#if run.workflow_version != null}
   <div class="run-meta">
-    {#if run.workflow_version != null}
-      <span class="rm-ver" title="workflow version this run executed">v{run.workflow_version}</span>
-    {/if}
-    {#if run.proof_pack_id}
-      <button
-        class="link-btn"
-        title="Open the proof pack assembled for this run"
-        onclick={() => { if (run.proof_pack_id) viewProof(run.proof_pack_id); }}
-      >
-        <Icon name="check" size={12} /> View proof pack
-      </button>
-    {/if}
+    <span class="rm-ver" title="workflow version this run executed">v{run.workflow_version}</span>
   </div>
 {/if}
 

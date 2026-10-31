@@ -165,15 +165,6 @@ test('agent node surfaces an openable session on its step', async () => {
   expect(Array.isArray(agent.sessions) && agent.sessions.length >= 1).toBeTruthy();
 });
 
-test('a finished run links a Proof Pack with evidence', async () => {
-  const run = await runToCompletion(branchWfId);
-  expect(run.proof_pack_id, 'run links a proof pack').toBeTruthy();
-  const p = await ctx.get(`${base}${V1}/proof-packs/${run.proof_pack_id}`);
-  expect(p.ok(), await p.text()).toBeTruthy();
-  const detail = await p.json();
-  expect((detail.artifacts ?? []).length).toBeGreaterThan(0);
-});
-
 test('loop stops when the until-expression is satisfied', async () => {
   const run = await runToCompletion(loopWfId);
   expect(run.status).toBe('success');

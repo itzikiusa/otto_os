@@ -54,8 +54,6 @@ mod personal_agent_policy;
 mod personal_agents_owner;
 #[path = "policy_coverage.rs"]
 mod policy_coverage;
-#[path = "proof_assemble_scope.rs"]
-mod proof_assemble_scope;
 #[path = "provider_resolve.rs"]
 mod provider_resolve;
 #[path = "public_entry_gates.rs"]
@@ -76,8 +74,6 @@ mod rooms_api;
 mod route_inventory;
 #[path = "router_mount.rs"]
 mod router_mount;
-#[path = "run_repo_scope.rs"]
-mod run_repo_scope;
 #[path = "runtime_lag.rs"]
 mod runtime_lag;
 #[path = "session_files.rs"]
@@ -90,14 +86,6 @@ mod share_api;
 mod share_otp;
 #[path = "share_scope_guard.rs"]
 mod share_scope_guard;
-#[path = "swarm_identity.rs"]
-mod swarm_identity;
-#[path = "swarm_ingest_bodies.rs"]
-mod swarm_ingest_bodies;
-#[path = "swarm_router.rs"]
-mod swarm_router;
-#[path = "swarm_scope_api.rs"]
-mod swarm_scope_api;
 #[path = "ui_control.rs"]
 mod ui_control;
 #[path = "workbench_api.rs"]

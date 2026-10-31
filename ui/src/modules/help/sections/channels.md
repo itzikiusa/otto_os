@@ -113,14 +113,9 @@ have one Slack, one Telegram and one Webhook integration.
 | `/new` or `/restart` | Detach the current session; the next message starts fresh |
 
 **Launch other Otto work from a message**
-- **Run with Otto:** `/run <Jira key | GitHub or Confluence URL | finding:/story:/test:/report:<id>>`,
-  `/run <describe what you want>`, or "run with otto …". Reply `approve` or
-  `reject` in the run's thread to resolve its approval gate.
 - **Workflows:** `run <workflow name>: <prompt>`, a structured
   `Action: Workflow` message, or a chat binding set on the workflow. In a
   running workflow's thread, `status`, `skip` and `abort` control that run.
-- **Swarm:** a swarm with a channel trigger (optional keyword and chat) launches
-  from a matching message and reports progress back to the chat.
 
 **Card actions**
 - Enable or disable with the toggle, **Test** (needs a default chat), **Edit**,
@@ -128,7 +123,7 @@ have one Slack, one Telegram and one Webhook integration.
   the same actions.
 
 **Notifications to the default chat** (opt-in, in **Settings →
-Notifications**): self-improvement events, code review finished, swarm finished,
+Notifications**): self-improvement events, code review finished,
 insights report ready, and budget cap exceeded.
 
 ## Keyboard shortcuts
@@ -151,7 +146,7 @@ for the global ones.
   other Slack bots do not reach an agent. Join/leave notices are ignored too.
 - **Allowed users** is a comma-separated allowlist of channel user ids; other
   senders are dropped silently. Blank allows everyone in the chat. Actions that
-  start runs, workflows or swarms run as the daemon's owner.
+  start workflows run as the daemon's owner.
 - **Webhook**: slash commands are not treated as quick commands. The endpoint is
   reachable wherever the daemon listens — loopback (`127.0.0.1`) by default.
   Callback URLs pass Otto's outbound guard, so loopback, private and cloud
@@ -173,7 +168,5 @@ for the global ones.
 
 - [Settings](#/walkthroughs/settings)
 - [Agents](#/walkthroughs/agents)
-- [Run with Otto](#/walkthroughs/run-with-otto)
 - [Workflows](#/walkthroughs/workflows)
-- [Swarm](#/walkthroughs/swarm)
 - [Keyboard shortcuts](#/walkthroughs/keyboard-shortcuts)

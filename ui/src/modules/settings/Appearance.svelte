@@ -293,17 +293,18 @@
     />
   </div>
 
-  <div class="section-title">Right-to-left text <span class="chip exp-tag">Experimental</span></div>
+  <div class="section-title">Right-to-left text</div>
+  <p class="hint-line">Bidirectional (BiDi) text layout works across Threads, Chat, Markdown, Rooms, and Terminals — each prose block aligns to its language while code, paths, and URLs stay isolated left-to-right.</p>
   <div class="toggle-block">
     <SettingToggle
       label="Right-to-left text in the terminal"
       checked={ui.rtlBidi}
       onchange={(v) => ui.setRtlBidi(v)}
     >
-      Lays out Hebrew right-to-left with English embedded left-to-right, using the browser’s bidi
-      engine (it switches the terminal off the GPU renderer). Text is reflowed for reading, so the
-      monospace grid no longer lines up exactly: good for chat-style output, imperfect for TUI
-      tables or box art. Toggling reloads open terminals.
+      Lays out Hebrew and Arabic right-to-left with English embedded left-to-right, using the
+      browser’s bidi engine (it switches the terminal off the GPU renderer). Text is reflowed for
+      reading, so the monospace grid no longer lines up exactly: good for chat-style output,
+      imperfect for TUI tables or box art. Toggling reloads open terminals.
     </SettingToggle>
   </div>
 
@@ -686,13 +687,6 @@
     height: 15px;
     accent-color: var(--accent);
     cursor: pointer;
-  }
-  /* A sentence-case chip inside the uppercase section title. */
-  .exp-tag {
-    text-transform: none;
-    letter-spacing: normal;
-    margin-inline-start: 6px;
-    vertical-align: middle;
   }
   .num-input {
     width: 64px;

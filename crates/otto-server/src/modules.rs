@@ -44,8 +44,8 @@ use otto_review::engine::{
     diff_file_paths, expand_agent_runs, general_comment_body, inline_anchor_rejected,
     is_blocking_severity, label_findings_with_lens, mode_source, orchestrator_budget,
     parse_draft_comments, render_diff, repo_review_binding_key, resolve_blocker,
-    review_agent_cancel_key, review_agent_timeout, review_run_complete, review_wait_budget_for,
-    reviewer_slots, same_draft_comment, severity_rank, ReviewBranches, REVIEW_SPAWN_STAGGER,
+    review_agent_cancel_key, review_agent_timeout, review_run_complete, reviewer_slots,
+    same_draft_comment, severity_rank, ReviewBranches, REVIEW_SPAWN_STAGGER,
 };
 pub(crate) use otto_review::engine::{
     resolve_skill_inline, workflow_review_config, workflow_review_config_from_json,
@@ -71,12 +71,12 @@ use self::skill_staging::*;
 
 pub use self::ctx_impls::PtySpawner;
 pub(crate) use self::pr_draft::{
-    compose_draft_prompt, draft_pr_core, ensure_jira_in_subject, jira_key_from_branch,
-    parse_pr_draft, pr_draft_prompt, resolve_provider_remote,
+    compose_draft_prompt, ensure_jira_in_subject, jira_key_from_branch, parse_pr_draft,
+    pr_draft_prompt, resolve_provider_remote,
 };
 pub(crate) use self::review::service::{
     cancel_running_review, default_review_provider, effective_review_mode, review_finding_briefs,
-    review_findings_counts, review_open_counts_by_severity, review_wait_budget,
+    review_findings_counts, review_open_counts_by_severity,
 };
 pub(crate) use self::skill_staging::{stage_skill_packages_at, StagedSkillPackages};
 
@@ -118,32 +118,10 @@ pub fn orchestrator_routes() -> Router<ServerCtx> {
             "/workspaces/{id}/product/stories/{sid}/plan",
             post(otto_product::analysis::save_plan::<ServerCtx>),
         )
-        // Product → Swarm: turn a refined story into a runnable swarm project.
-        // Flat item route (resolves the workspace from the owning story).
-        .route(
-            "/product/stories/{sid}/to-swarm",
-            post(otto_product::swarm::story_to_swarm::<ServerCtx>),
-        )
-        // Discovery: launch a repeatable INVESTIGATION swarm from a story (Editor),
-        // then list/read the runs (Viewer). Discovery projects are NOT story-linked
-        // (the unique story_id index is reserved for the implementation project);
-        // the run row carries the linkage.
-        .route(
-            "/product/stories/{sid}/discover",
-            post(otto_product::swarm::discover_story::<ServerCtx>),
-        )
-        .route(
-            "/product/stories/{sid}/discovery-runs",
-            get(otto_product::swarm::list_discovery_runs::<ServerCtx>),
-        )
         // Product → Canvas: list the Canvas scenes linked to a story (Viewer).
         .route(
             "/product/stories/{sid}/linked-canvases",
-            get(otto_product::swarm::list_linked_canvases::<ServerCtx>),
-        )
-        .route(
-            "/product/discovery-runs/{rid}",
-            get(otto_product::swarm::get_discovery_run::<ServerCtx>),
+            get(otto_product::http::list_linked_canvases::<ServerCtx>),
         )
         // Talk-to-agent refinement: a conversational thread on a story. Create +
         // list its threads (story-scoped), then read/converse/archive a thread
@@ -388,7 +366,9 @@ async fn workspace_broadcast(
     }
     // Treat an empty target list the same as "no targets" → broadcast to all.
     let targets = req.session_ids.filter(|ids| !ids.is_empty());
-    let who = Typist::new(&user.id, &auth);
+    let who = Typist::resolve(&ctx, &user.id, &auth, &ws_id, req.from_session_id.as_ref())
+        .await
+        .map_err(ApiError)?;
     let session_ids = broadcast_sessions(&ctx, who, &ws_id, text, targets.as_deref())
         .await
         .map_err(ApiError)?;
@@ -472,9 +452,11 @@ struct ExecHelper {
 
 impl ExecHelper {
     fn typist(&self) -> Typist<'_> {
+        let agent = self.agent.as_ref();
         Typist {
             user_id: &self.user.id,
-            agent: self.agent.as_ref(),
+            agent,
+            attributed_from: agent,
         }
     }
 }
@@ -553,7 +535,7 @@ impl PlanIo for ExecHelper {
 
 #[path = "review_launch.rs"]
 mod review_launch;
-pub(crate) use review_launch::{run_review_for_branch, run_review_for_branch_sized};
+pub(crate) use review_launch::run_review_for_branch;
 
 /// Routes: POST /workspaces/{id}/providers/update
 pub fn provider_routes() -> Router<ServerCtx> {
@@ -1030,10 +1012,7 @@ pub fn module_routers(ctx: &ServerCtx) -> (Vec<Router<ServerCtx>>, Vec<Router>) 
         otto_improve::router::<ServerCtx>(),
         otto_context::router::<ServerCtx>(),
         otto_skills::http::router::<ServerCtx>(),
-        otto_swarm::router::<ServerCtx>(),
-        otto_swarm::runtime::engine::routes::<ServerCtx>(),
         crate::routes::goal_loops::routes(),
-        crate::routes::proof::routes(),
         otto_insights::routes::<ServerCtx>(),
         orchestrator_routes(),
         db_explorer_routes(),
@@ -1043,9 +1022,6 @@ pub fn module_routers(ctx: &ServerCtx) -> (Vec<Router<ServerCtx>>, Vec<Router>) 
         crate::routes::proof_pack::routes(),
         crate::routes::scheduled_tasks::routes(),
         crate::routes::personal_agents::routes(),
-        // Otto Assistant — personal threads, tasks, memory, routing (`Agents`).
-        crate::routes::assistant::routes(),
-        crate::routes::runs::routes(),
         review_config_routes(),
         crate::skill_eval::routes(),
         crate::eval_lab_routes::routes(),
@@ -1057,8 +1033,6 @@ pub fn module_routers(ctx: &ServerCtx) -> (Vec<Router<ServerCtx>>, Vec<Router>) 
         crate::context_packet::context_packet_routes(),
         crate::lsp::api_router(),
         crate::routes::capabilities::capabilities_routes(),
-        crate::routes::mission::mission_routes(),
-        crate::routes::workgraph::workgraph_routes(),
         crate::routes::search::search_routes(),
         crate::routes::backup::backup_routes(),
         crate::routes::connection_export::routes(),

@@ -82,16 +82,7 @@ pub(in crate::workflow_engine) async fn finish(
                 return;
             }
         };
-        deliver_run_result(
-            &ctx,
-            &workflow,
-            &states,
-            RunStatus::Error,
-            None,
-            &input,
-            None,
-        )
-        .await;
+        deliver_run_result(&ctx, &workflow, &states, RunStatus::Error, &input, None).await;
         emit_run_updated(
             &ctx,
             &workflow.workspace_id,
@@ -152,12 +143,6 @@ pub(in crate::workflow_engine) async fn finish(
     } else {
         None
     };
-    // Proof pack: package the run's node outputs, human approvals, and budget
-    // gate into inspectable evidence; link the pack to the run. Best-effort.
-    let pack_id = assemble_workflow_proof(&ctx, &workflow, &run_id, &states).await;
-    if let Some(pid) = &pack_id {
-        let _ = repo.set_run_proof_pack(&run_id, pid).await;
-    }
     // Report the result back to wherever the run was triggered from (Slack
     // thread / webhook): a brief status + the run's deliverable (final-output.md
     // when the run produced one, else the generated summary.md). Best-effort.
@@ -166,7 +151,6 @@ pub(in crate::workflow_engine) async fn finish(
         &workflow,
         &states,
         final_status,
-        pack_id.as_deref(),
         &input,
         final_output.as_deref(),
     )

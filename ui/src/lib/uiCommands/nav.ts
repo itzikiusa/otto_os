@@ -61,7 +61,9 @@ function openableModules(): Set<string> {
     set.add('database');
     set.add('brokers');
   }
-  if (set.has('design')) set.add('canvas');
+  if (auth.can('design', 'view')) set.add('design');
+  if (auth.can('canvas', 'view')) set.add('canvas');
+  if (set.has('scheduled-tasks')) set.add('personal-agents');
   set.add('settings');
   return set;
 }

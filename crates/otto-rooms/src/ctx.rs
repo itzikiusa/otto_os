@@ -1,6 +1,6 @@
 //! What the rooms domain needs from its host. otto-server implements this for
 //! the daemon context (`otto-server/src/rooms/ctx.rs`); tests use fakes.
-use crate::{games, RoomRegistry};
+use crate::RoomRegistry;
 use otto_core::{secrets::SecretStore, Result};
 use std::{future::Future, path::Path, sync::Arc};
 
@@ -25,7 +25,6 @@ pub struct RoomAudit {
 
 pub trait RoomsCtx: Clone + Send + Sync + 'static {
     fn rooms(&self) -> &RoomRegistry;
-    fn game_rooms(&self) -> &games::Registry;
     /// The daemon data directory; recap archives live under `room-recaps/`.
     fn data_dir(&self) -> &Path;
     /// This daemon's loopback base URL: the invite origin when no public

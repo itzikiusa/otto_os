@@ -123,6 +123,10 @@ impl<'a> ClaudeFolder<'a> {
         self.st.f.artifacts()
     }
 
+    pub fn subagents(&self) -> &[crate::model::SubagentMeta] {
+        self.st.f.subagents()
+    }
+
     pub fn into_folded(self) -> Folded {
         self.st.f.finish(self.count)
     }
@@ -848,7 +852,13 @@ mod tests {
         assert_eq!(u.system[0].kind, SystemNoteKind::SystemReminder);
         let a = &f.turns[1].turn;
         assert_eq!(a.id, "req_1");
-        assert!(matches!(a.blocks[0], Block::Thinking { count: 1 }));
+        assert!(matches!(
+            a.blocks[0],
+            Block::Thinking {
+                count: 1,
+                text: None
+            }
+        ));
         let Block::ToolCall {
             result: Some(r1),
             tool,

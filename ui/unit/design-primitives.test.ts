@@ -91,7 +91,7 @@ test('chart palette is the scheme-aware --cat-* set and wraps', () => {
 });
 
 test('status-* tokens are not used for text in shared components', () => {
-  for (const f of ['ProofBadge', 'ProofStatusChip', 'DoneContractMeter', 'ResourceAccess', 'DiffView']) {
+  for (const f of ['ResourceAccess', 'DiffView']) {
     assert.doesNotMatch(read(`src/lib/components/${f}.svelte`), /(^|\s)color:\s*var\(--status-/m, f);
   }
 });

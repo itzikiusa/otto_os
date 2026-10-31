@@ -87,16 +87,6 @@ test('Canvas queues in-flight saves and keeps both scene drafts',async({page})=>
  const {ctx,base}=await apiCtx();await expect.poll(async()=>JSON.parse((await (await ctx.get(`${base}/api/v1/canvas/scenes/${a.id}`)).json()).doc_json).source).toContain('Newest Alpha draft');
  await expect.poll(async()=>JSON.parse((await (await ctx.get(`${base}/api/v1/canvas/scenes/${b.id}`)).json()).doc_json).source).toContain('Newest Beta draft');await ctx.dispose();
 });
-test('Product Discovery ignores late report responses',async({page})=>{
- const {ctx,base}=await apiCtx();const response=await ctx.post(`${base}/api/v1/workspaces/${workspaceId}/product/drafts`,{data:{title:`R3 safe discovery story ${workspaceId}`} });expect(response.ok()).toBeTruthy();const sid=(await response.json()).story.id;await ctx.dispose();
- const run=(id:string)=>({id,story_id:sid,swarm_id:'synthetic',project_id:'synthetic',status:'done',brief_md:'Synthetic review',report_md:`# Report ${id}`,created_by:'fixture',created_at:new Date().toISOString(),updated_at:new Date().toISOString()});
- await page.context().route(`**/product/stories/${sid}/discovery-runs`,route=>route.fulfill({json:['alpha','beta'].map(id=>({run:run(id),derived_status:'done',task_count:2,done_count:2}))}));
- let release!:()=>void,started!:()=>void;const held=new Promise<void>(r=>release=r),requested=new Promise<void>(r=>started=r);
- await page.context().route('**/product/discovery-runs/*',async route=>{const id=route.request().url().split('/').at(-1)!;if(id==='alpha'){started();await held;}return route.fulfill({json:{run:run(id),derived_status:'done',tasks:[],task_summaries:[],messages:[]}});});
- await openPage(page,'product');await page.locator('.story-row',{hasText:`R3 safe discovery story ${workspaceId}`}).click();await page.getByRole('tab',{name:'Discover',exact:true}).click();await page.locator('.sub-tab-strip .st',{hasText:'Discovery'}).click();
- await page.locator('.run-header').nth(0).click();await requested;await page.locator('.run-header').nth(1).click();await expect(page.locator('.run-body')).toContainText('Report beta');const delivered=page.waitForResponse('**/product/discovery-runs/alpha');release();await (await delivered).finished();await page.evaluate(()=>new Promise<void>(resolve=>requestAnimationFrame(()=>requestAnimationFrame(()=>resolve()))));await expect(page.locator('.run-body')).toContainText('Report beta');
- await page.screenshot({path:'/tmp/otto-ux-r3-content-discovery.png'});
-});
 test('Product dashboard template has readable labels and pin annotations',async({page})=>{
  const {ctx,base}=await apiCtx();const response=await ctx.post(`${base}/api/v1/workspaces/${workspaceId}/product/drafts`,{data:{title:`R3 template story ${workspaceId}`} });expect(response.ok()).toBeTruthy();await ctx.dispose();
  await openPage(page,'product');await page.locator('.story-row',{hasText:`R3 template story ${workspaceId}`}).click();await page.getByRole('tab',{name:'Story',exact:true}).click();await page.locator('.sub-tab-strip .st',{hasText:'Design'}).click();

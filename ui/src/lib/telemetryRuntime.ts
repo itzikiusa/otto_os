@@ -3,11 +3,11 @@ import { pollWhileVisible, type Poller } from './poll';
 /** Bounded, opt-in application measurements. No URLs, payloads or user text. */
 
 export const TELEMETRY_COMPONENTS = [
-  'agents', 'workbench', 'connections', 'history', 'assistant', 'home', 'git', 'database', 'api', 'vault',
-  'mission-control', 'rooms', 'workflows', 'scheduled-tasks', 'personal-agents',
-  'loops', 'swarm', 'product', 'design', 'canvas', 'browser', 'run-with-otto',
+  'agents', 'workbench', 'connections', 'home', 'git', 'database', 'api', 'vault',
+  'rooms', 'workflows', 'scheduled-tasks', 'personal-agents',
+  'loops', 'product', 'design', 'canvas', 'browser',
   'mcp', 'brokers', 'kubernetes', 'aws', 'insights', 'usage', 'skills-eval',
-  'proof', 'settings', 'walkthroughs', 'plugin', 'snip', 'shell', 'other',
+  'settings', 'walkthroughs', 'plugin', 'snip', 'shell', 'other',
 ] as const;
 const components = new Set<string>(TELEMETRY_COMPONENTS);
 export function telemetryComponent(value: string): string {

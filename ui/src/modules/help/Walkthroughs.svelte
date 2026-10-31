@@ -25,7 +25,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
-  import { SIDEBAR_MODULES } from '../../lib/sidebar';
+  import { routeAllowed as sidebarRouteAllowed } from '../../lib/sidebar';
   import { GUIDE_GROUPS, searchSections, splitChord, timeLabel, type GuideSection } from './guide';
   import { DEFAULT_GUIDE_ID, FILM, GUIDES, guideById } from './sections';
   import { renderGuideHtml } from './render';
@@ -97,10 +97,7 @@
   function routeAllowed(route: string): boolean {
     const mod = route.split('/')[0];
     if (mod === 'plugin') return auth.canPlugin(route.split('/')[1] ?? '', 'view');
-    const def = SIDEBAR_MODULES.find((m) => m.id === mod);
-    if (!def) return true;
-    if (def.featureAny) return def.featureAny.some((f) => auth.can(f, 'view'));
-    return def.feature == null || auth.can(def.feature, 'view');
+    return sidebarRouteAllowed(mod, (f) => auth.can(f, 'view'));
   }
   const openAllowed = $derived(selected?.route ? routeAllowed(selected.route) : false);
 
