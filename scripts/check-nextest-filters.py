@@ -152,6 +152,8 @@ def main(argv: list[str]) -> int:
         for pkg in ns.packages:
             extra_args.extend(["-p", pkg])
         extra_args.extend(ns.cargo_arg)
+    elif ns.cargo_arg:
+        extra_args.extend(["--workspace", *ns.cargo_arg])
 
     # Build/list the target scope ONCE up front: when the tests don't compile
     # (the nextest step already failed on that), every per-disjunct

@@ -1083,8 +1083,17 @@ fn pick_response(msgs: Vec<Value>, want_id: i64) -> Option<Value> {
 async fn write_line<W: AsyncWriteExt + Unpin>(w: &mut W, v: &Value) -> Result<(), String> {
     let mut buf = serde_json::to_vec(v).map_err(|e| format!("encode: {e}"))?;
     buf.push(b'\n');
-    w.write_all(&buf).await.map_err(|e| format!("write: {e}"))?;
-    w.flush().await.map_err(|e| format!("flush: {e}"))?;
+    let map_write_err = |op: &str, e: std::io::Error| {
+        if e.kind() == std::io::ErrorKind::BrokenPipe {
+            "server closed before responding".to_string()
+        } else {
+            format!("{op}: {e}")
+        }
+    };
+    w.write_all(&buf)
+        .await
+        .map_err(|e| map_write_err("write", e))?;
+    w.flush().await.map_err(|e| map_write_err("flush", e))?;
     Ok(())
 }
 

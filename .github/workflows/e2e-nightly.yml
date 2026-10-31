@@ -37,16 +37,19 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2.9.3
         with:
-          shared-key: perf-gates
+          shared-key: rust-workspace
+          cache-all-crates: true
           save-if: false
 
       - name: Install librdkafka build deps
         run: |
-          sudo grep -lE 'dl\.google\.com|packages\.microsoft\.com' /etc/apt/sources.list.d/* 2>/dev/null | xargs -r sudo rm -f
-          sudo python3 scripts/ci-apt-install.py cmake libcurl4-openssl-dev
+          if ! dpkg -s cmake libcurl4-openssl-dev pkg-config libssl-dev >/dev/null 2>&1; then
+            sudo grep -lE 'dl\.google\.com|packages\.microsoft\.com' /etc/apt/sources.list.d/* 2>/dev/null | xargs -r sudo rm -f
+            sudo python3 scripts/ci-apt-install.py cmake libcurl4-openssl-dev pkg-config libssl-dev
+          fi
 
       - name: Build the test daemon
-        run: cargo build -p ottod
+        run: cargo build -p ottod --features otto-server/test-util
 
       - name: Upload the test daemon
         uses: actions/upload-artifact@v7.0.2

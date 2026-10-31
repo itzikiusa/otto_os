@@ -142,12 +142,12 @@ jobs:
           echo "daemon=$d" >> "$GITHUB_OUTPUT"
           echo "desktop=$t" >> "$GITHUB_OUTPUT"
 
-  daemon-lint:
-    name: Daemon clippy (macOS)
+  daemon:
+    name: Daemon crates (macOS)
     needs: changes
     if: needs.changes.outputs.daemon == 'true'
     runs-on: macos-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7.0.1
 
@@ -159,9 +159,14 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2.9.3
         with:
-          shared-key: macos-daemon-lint
+          shared-key: macos-daemon
           cache-all-crates: true
           cache-on-failure: true
+
+      - name: Install nextest
+        uses: taiki-e/install-action@v2.88.1
+        with:
+          tool: cargo-nextest@0.9.150
 
       # otto-server links otto-brokers → rdkafka-sys, which builds librdkafka
       # with CMake (libcurl headers ship in the macOS SDK).
@@ -171,119 +176,30 @@ jobs:
       - name: cargo clippy (macOS cfg)
         run: >-
           cargo clippy
-          -p otto-apiclient -p otto-automation -p otto-browser -p otto-keychain -p otto-pty -p otto-rooms -p otto-sandbox -p otto-server -p otto-sessions -p otto-ssh -p otto-telemetry-collector -p ottod
-          --lib --bins -- -D warnings
+          -p otto-apiclient -p otto-automation -p otto-brokers -p otto-browser -p otto-keychain -p otto-pty -p otto-rooms -p otto-sandbox -p otto-server -p otto-sessions -p otto-ssh -p otto-telemetry-collector -p ottod
+          --features otto-server/test-util
+          --lib --bins --test holder --test ring_allocation --test seatbelt_exec --test agent_messaging --test broadcast_e2e --test folder_trust_overcome --test isolation --test persist_restart --test terminal_latency --test lightpanda --test lightpanda_login --test snips --test profile_lock
+          -- -D warnings
 
-  daemon-crates:
-    name: Daemon crates (macOS · leaf & sessions)
-    needs: changes
-    if: needs.changes.outputs.daemon == 'true'
-    runs-on: macos-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v7.0.1
-
-      - name: Install stable toolchain
-        uses: dtolnay/rust-toolchain@1.99.1
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2.9.3
-        with:
-          shared-key: macos-daemon-crates
-          cache-all-crates: true
-          cache-on-failure: true
-
-      - name: Install nextest
-        uses: taiki-e/install-action@v2.88.1
-        with:
-          tool: cargo-nextest@0.9.150
-
-      - name: Build test binaries (leaf & sessions)
+      # Unit tests plus each crate's integration binaries — except
+      # otto-server's `it`, platform-neutral HTTP/DB coverage that Linux CI
+      # already runs in full (omitted from `--test` so Cargo never compiles it
+      # on macOS, while `--features otto-server/test-util` compiles `otto-server`
+      # once for both `ottod` and `snips`).
+      - name: Build test binaries
         run: >-
           cargo nextest run --no-run
-          -p otto-apiclient -p otto-automation -p otto-browser -p otto-keychain -p otto-pty -p otto-rooms -p otto-sandbox -p otto-sessions -p otto-ssh -p otto-telemetry-collector
-          --lib --bins --test holder --test ring_allocation --test seatbelt_exec --test agent_messaging --test broadcast_e2e --test folder_trust_overcome --test isolation --test persist_restart --test terminal_latency --test lightpanda --test lightpanda_login
+          -p otto-apiclient -p otto-automation -p otto-brokers -p otto-browser -p otto-keychain -p otto-pty -p otto-rooms -p otto-sandbox -p otto-server -p otto-sessions -p otto-ssh -p otto-telemetry-collector -p ottod
+          --features otto-server/test-util
+          --lib --bins --test holder --test ring_allocation --test seatbelt_exec --test agent_messaging --test broadcast_e2e --test folder_trust_overcome --test isolation --test persist_restart --test terminal_latency --test lightpanda --test lightpanda_login --test snips --test profile_lock
           --profile ci
 
-      - name: cargo nextest (leaf & sessions)
+      - name: cargo nextest
         run: >-
           cargo nextest run
-          -p otto-apiclient -p otto-automation -p otto-browser -p otto-keychain -p otto-pty -p otto-rooms -p otto-sandbox -p otto-sessions -p otto-ssh -p otto-telemetry-collector
-          --lib --bins --test holder --test ring_allocation --test seatbelt_exec --test agent_messaging --test broadcast_e2e --test folder_trust_overcome --test isolation --test persist_restart --test terminal_latency --test lightpanda --test lightpanda_login
-          --profile ci --no-fail-fast
-
-  daemon-server:
-    name: Daemon crates (macOS · otto-server unit)
-    needs: changes
-    if: needs.changes.outputs.daemon == 'true'
-    runs-on: macos-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v7.0.1
-
-      - name: Install stable toolchain
-        uses: dtolnay/rust-toolchain@1.99.1
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2.9.3
-        with:
-          shared-key: macos-daemon-server
-          cache-all-crates: true
-          cache-on-failure: true
-
-      - name: Install nextest
-        uses: taiki-e/install-action@v2.88.1
-        with:
-          tool: cargo-nextest@0.9.150
-
-      - name: Ensure cmake
-        run: command -v cmake || brew install cmake
-
-      - name: Build test binaries (otto-server unit)
-        run: cargo nextest run --no-run -p otto-server --lib --profile ci
-
-      - name: cargo nextest (otto-server unit)
-        run: cargo nextest run -p otto-server --lib --profile ci --no-fail-fast
-
-  daemon-bins:
-    name: Daemon crates (macOS · ottod & snips)
-    needs: changes
-    if: needs.changes.outputs.daemon == 'true'
-    runs-on: macos-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v7.0.1
-
-      - name: Install stable toolchain
-        uses: dtolnay/rust-toolchain@1.99.1
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2.9.3
-        with:
-          shared-key: macos-daemon-bins
-          cache-all-crates: true
-          cache-on-failure: true
-
-      - name: Install nextest
-        uses: taiki-e/install-action@v2.88.1
-        with:
-          tool: cargo-nextest@0.9.150
-
-      - name: Ensure cmake
-        run: command -v cmake || brew install cmake
-
-      - name: Build test binaries (ottod & snips)
-        run: >-
-          cargo nextest run --no-run
-          -p otto-server -p ottod
-          --bins --test snips --test profile_lock
-          --profile ci
-
-      - name: cargo nextest (ottod & snips)
-        run: >-
-          cargo nextest run
-          -p otto-server -p ottod
-          --bins --test snips --test profile_lock
+          -p otto-apiclient -p otto-automation -p otto-brokers -p otto-browser -p otto-keychain -p otto-pty -p otto-rooms -p otto-sandbox -p otto-server -p otto-sessions -p otto-ssh -p otto-telemetry-collector -p ottod
+          --features otto-server/test-util
+          --lib --bins --test holder --test ring_allocation --test seatbelt_exec --test agent_messaging --test broadcast_e2e --test folder_trust_overcome --test isolation --test persist_restart --test terminal_latency --test lightpanda --test lightpanda_login --test snips --test profile_lock
           --profile ci --no-fail-fast
 
   desktop:

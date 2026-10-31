@@ -157,21 +157,13 @@ prost-types = "0.14.4"
 # reqwest's platform verifier does for REST, with the bundled Mozilla roots on top.
 tonic = { version = "0.14.9", features = ["tls-ring", "tls-native-roots", "tls-webpki-roots"] }
 reqwest_cookie_store = "0.10.0"
-# Message Brokers (Kafka) — librdkafka statically built (cmake) with vendored
-# OpenSSL so SASL_SSL works on machines without a system librdkafka/OpenSSL.
-rdkafka = { version = "0.39.0", default-features = false, features = ["cmake-build", "ssl-vendored", "libz", "zstd", "tokio"] }
+# Message Brokers (Kafka) — librdkafka statically built (cmake); macOS enables
+# `ssl-vendored` in crates/otto-brokers/Cargo.toml so the standalone .dmg needs
+# no system OpenSSL, while Linux links the runner's libssl-dev instead of
+# compiling OpenSSL 3.x from source.
+rdkafka = { version = "0.39.0", default-features = false, features = ["cmake-build", "ssl", "libz", "zstd", "tokio"] }
 apache-avro = "0.22.0"
 
-# Dependencies build at opt-level 1 in dev/test (workspace crates stay at 0, so
-# an edit recompiles exactly as fast as before). Tests spend most of their time
-# inside dependencies — SQLite (C, compiled by its build script at the
-# package's opt-level), sqlx, tokio, serde — and at -O0 they crawl: A/B of the
-# same nextest run, otto-state 271-309 s -> 86 s of test time, otto-sessions
-# 82 s -> 30 s. One-time cost: those crates' 284 dependency units took 358 s of
-# CPU to rebuild (cached afterwards, locally and by CI's rust-cache).
-# docs/testing/build-performance.md
-[profile.dev.package."*"]
-opt-level = 1
 # No debug info anywhere in dev/test builds: nobody here runs a debugger, and
 # on macOS debuginfo is kept in each crate's object files next to the binary
 # (split-debuginfo "unpacked"), re-linked into every test binary — the bulk
@@ -179,7 +171,44 @@ opt-level = 1
 # and backtraces still name every function via the symbol table; only
 # file:line is lost. `CARGO_PROFILE_DEV_DEBUG=true cargo …` brings it back
 # for a one-off debugging session.
+#
+# Most external crates (~720: boa_engine, tonic, protox, mongodb, klickhouse,
+# reqwest, icu_*, …) stay at opt-level 0 so uncached builds skip LLVM
+# optimization passes; only the hot C/crypto/DB/async crates hammered by tests
+# are optimized explicitly below.
+[profile.dev.package."*"]
 debug = false
+
+[profile.dev.package.libsqlite3-sys]
+opt-level = 2
+[profile.dev.package.argon2]
+opt-level = 2
+[profile.dev.package.password-hash]
+opt-level = 2
+[profile.dev.package.sha2]
+opt-level = 2
+[profile.dev.package.sha1]
+opt-level = 2
+[profile.dev.package.ring]
+opt-level = 2
+[profile.dev.package.aws-lc-sys]
+opt-level = 2
+[profile.dev.package.aws-lc-rs]
+opt-level = 2
+[profile.dev.package.zstd-sys]
+opt-level = 2
+[profile.dev.package.libz-sys]
+opt-level = 2
+[profile.dev.package.sqlx-core]
+opt-level = 1
+[profile.dev.package.sqlx-sqlite]
+opt-level = 1
+[profile.dev.package.serde]
+opt-level = 1
+[profile.dev.package.serde_json]
+opt-level = 1
+[profile.dev.package.tokio]
+opt-level = 1
 
 [profile.dev]
 debug = false

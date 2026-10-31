@@ -8,9 +8,10 @@ test-threads = 8
 retries = 0
 
 [profile.ci]
-# Run async/IO-bound unit tests 8-wide in parallel; PTY/ClickHouse/timing suites
-# remain bounded by their explicit `test-groups` overrides below.
-test-threads = 8
+# Match runner vCPUs (4 on ubuntu-latest, 3 on macOS) so process-per-test fan-out
+# never oversubscribes shared VMs; PTY/ClickHouse/timing suites remain bounded
+# by their explicit `test-groups` overrides below.
+test-threads = "num-cpus"
 slow-timeout = { period = "30s", terminate-after = 4 }
 
 [test-groups]
@@ -63,6 +64,7 @@ filter = '''
 | (package(otto-automation) & test(/^goal_loop_commands::tests::cancellation_kills_verification_descendants$/))
 | (package(otto-state) & test(/maintenance::tests::offline_compaction_swaps_verified_copy_and_keeps_old_until_confirmed$/))
 | (package(otto-keychain) & test(/control::tests::locked_keychain_times_out_instead_of_blocking$/))
+| (package(otto-server) & binary(snips) & test(/^raw_15mb_upload_and_annotated_save_within_budget$/))
 '''
 test-group = 'timing'
 threads-required = 'num-test-threads'
