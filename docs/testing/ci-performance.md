@@ -151,14 +151,22 @@ structured around single-pass compilation and zero-compile test fan-out:
   single `rust-build` job compiles the workspace (`ottod` + all unit/integration
   test binaries) once using `--workspace --features otto-server/test-util` so
   Cargo `resolver = "2"` never compiles the 89k-LOC `otto-server` crate twice,
-  archives all test binaries into `nextest.tar.zst`, and fans out to 6
+  archives all test binaries into `nextest.tar.zst`, and fans out to 8
   zero-compile `rust-test` nextest shards (`test-threads = "num-cpus"`), 4
   single-browser E2E smoke shards, and `daemon-budget`.
+- **Full workspace + vendor target caching (`scripts/ci-cargo-cache.py`).**
+  `actions/cache` preserves `target/debug/{.fingerprint,build,deps}` across runs
+  while `ci-cargo-cache.py` restores deterministic pre-build `mtime`s on
+  unchanged tracked files and directories (`crates/otto-state/migrations`,
+  `vendor/*`, `crates/*`) via `target/.ci-source-hashes.json`, so warm PR builds
+  re-compile only modified crates instead of rebuilding ~280k LOC of workspace
+  Rust from scratch.
 - **Lean uncached dependency builds.** Linux links the runner's `libssl-dev`
   instead of compiling OpenSSL 3.x from source (`ssl-vendored` stays macOS-only
   in `crates/otto-brokers/Cargo.toml` for standalone `.dmg` builds), and
   `[profile.dev.package.*]` optimizes only the 15 hot C/crypto/DB/async test
   dependencies instead of running LLVM `-O1` across all ~735 external crates.
 - **Single-job macOS daemon gate (`macos.yml`).** One `daemon` job with one
-  `macos-daemon` cache lints and runs Darwin-specific crates + `ottod` + `snips`
-  without compiling `otto-server`'s platform-neutral `it` binary on macOS.
+  `cargo-full-macOS-daemon` cache lints and runs Darwin-specific crates + `ottod`
+  + `snips` without compiling `otto-server`'s platform-neutral `it` binary on
+  macOS.
