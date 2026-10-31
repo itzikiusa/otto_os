@@ -2428,7 +2428,7 @@
     const rtl = ui.rtlBidi;
     // Screen-reader support needs the DOM renderer: a WebGL canvas exposes no
     // text to assistive tech, so toggling it rebuilds like RTL does.
-    const wantDom = viewport.isPhone || FORCE_DOM_RENDERER || ui.termScreenReader;
+    const wantDom = viewport.isPhone || FORCE_DOM_RENDERER || ui.termScreenReader || !!socketFactory; // rooms: DOM (WebGL drew tiny glyphs; termRoom.ts)
     // Everything else is untracked. Loading the WebGL addon (and the xterm
     // callbacks it fires synchronously) reads component state such as
     // `connected`; tracked, the socket opening re-ran this effect, whose

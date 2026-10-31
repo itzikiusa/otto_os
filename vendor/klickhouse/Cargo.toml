@@ -13,7 +13,7 @@
 edition = "2024"
 rust-version = "1.85.0"
 name = "klickhouse"
-version = "0.15.3"
+version = "0.16.0"
 authors = ["Protryon <max.bruce12@gmail.com>"]
 build = "build.rs"
 autolib = false

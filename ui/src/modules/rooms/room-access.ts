@@ -5,7 +5,10 @@ import { captureRoomInvite, dropRoomInvite, roomInvite } from '../../lib/rooms/i
 export { captureRoomInvite, roomInvite };
 const credentials = new Map<string, { origin: string; credential: RoomCredential }>();
 export function rememberRoom(origin: string, credential: RoomCredential): void {
-  credentials.set(credential.room_id, { origin, credential });
+  // A plain copy: callers often hold a Svelte `$state` proxy, which neither
+  // postMessage (the browser room tab hand-off) nor structuredClone can copy.
+  const { room_id, member_id, token } = credential;
+  credentials.set(room_id, { origin, credential: { room_id, member_id, token } });
   dropRoomInvite(credential.room_id);
 }
 export function recallRoom(roomId: string) { return credentials.get(roomId); }

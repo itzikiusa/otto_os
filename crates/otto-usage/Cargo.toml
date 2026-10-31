@@ -13,7 +13,7 @@ otto-transcript.workspace = true
 # The tailer driver (`tailer/driver.rs`, moved from ottod): session lookups
 # for attribution, and FSEvents for transcript changes.
 otto-state.workspace = true
-notify = { version = "8.2.0", default-features = false, features = ["macos_fsevent"] }
+notify = { version = "8.2.1", default-features = false, features = ["macos_fsevent"] }
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -21,7 +21,7 @@ chrono.workspace = true
 tracing.workspace = true
 dirs.workspace = true
 reqwest.workspace = true
-sysinfo = "0.39.6"
+sysinfo = "0.40.1"
 
 [dev-dependencies]
 tempfile.workspace = true

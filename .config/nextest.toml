@@ -1,6 +1,6 @@
 # Comparison and resource audit: docs/testing/ci-performance.md.
 # nextest does not run doctests: follow it with `cargo test --workspace --doc`.
-nextest-version = "0.9.146"
+nextest-version = "0.9.150"
 
 [profile.default]
 # Bound process-per-test fan-out, including each test's own Tokio/SQLite threads.

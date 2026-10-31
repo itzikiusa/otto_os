@@ -1,4 +1,5 @@
 use crate::term::BufWrite as _;
+use alloc::{string::String, string::ToString as _};
 use unicode_width::UnicodeWidthChar as _;
 
 const MODE_APPLICATION_KEYPAD: u8 = 0b0000_0001;
@@ -50,6 +51,32 @@ pub enum MouseProtocolEncoding {
     // Urxvt,
 }
 
+/// The cursor's visual style.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
+pub enum CursorStyle {
+    /// The cursor should match the terminal's default.
+    #[default]
+    Default,
+
+    /// The cursor should be a blinking block.
+    BlinkBlock,
+
+    /// The cursor should be a steady block.
+    SteadyBlock,
+
+    /// The cursor should be a blinking underline.
+    BlinkUnderline,
+
+    /// The cursor should be a steady underline.
+    SteadyUnderline,
+
+    /// The cursor should be a blinking vertical bar.
+    BlinkVerticalBar,
+
+    /// The cursor should be a steady vertical bar.
+    SteadyVerticalBar,
+}
+
 /// Represents the overall terminal state.
 #[derive(Clone, Debug)]
 pub struct Screen {
@@ -62,18 +89,29 @@ pub struct Screen {
     modes: u8,
     mouse_protocol_mode: MouseProtocolMode,
     mouse_protocol_encoding: MouseProtocolEncoding,
+    cursor_style: CursorStyle,
+
+    last_char: Option<char>,
 }
 
 impl Screen {
     pub(crate) fn new(
         size: crate::grid::Size,
-        scrollback_len: usize,
+        scrollback_capacity: usize,
     ) -> Self {
-        let mut grid = crate::grid::Grid::new(size, scrollback_len);
+        let mut grid = crate::grid::Grid::new(
+            size,
+            crate::grid::Scrollback::Enabled {
+                capacity: scrollback_capacity,
+            },
+        );
         grid.allocate_rows();
         Self {
             grid,
-            alternate_grid: crate::grid::Grid::new(size, 0),
+            alternate_grid: crate::grid::Grid::new(
+                size,
+                crate::grid::Scrollback::Disabled,
+            ),
 
             attrs: crate::attrs::Attrs::default(),
             saved_attrs: crate::attrs::Attrs::default(),
@@ -81,23 +119,70 @@ impl Screen {
             modes: 0,
             mouse_protocol_mode: MouseProtocolMode::default(),
             mouse_protocol_encoding: MouseProtocolEncoding::default(),
+            cursor_style: CursorStyle::default(),
+
+            last_char: None,
         }
     }
 
-    /// Resizes the terminal.
-    pub fn set_size(&mut self, rows: u16, cols: u16) {
-        self.grid.set_size(crate::grid::Size { rows, cols });
+    /// Resizes the screen **without calling** the [`on_scroll`] callback.
+    ///
+    /// This method behaves the same as [`Parser::set_size`] but does not call
+    /// the [`on_scroll`] callback. If you want that, use [`Parser::set_size`].
+    ///
+    /// [`on_scroll`]: crate::Callbacks::on_scroll
+    /// [`Parser::set_size`]: crate::Parser::set_size
+    pub fn set_size(
+        &mut self,
+        rows: core::num::NonZeroU16,
+        cols: core::num::NonZeroU16,
+    ) {
+        self.grid.set_size(crate::grid::Size { rows, cols }, |_| {});
         self.alternate_grid
-            .set_size(crate::grid::Size { rows, cols });
+            .set_size(crate::grid::Size { rows, cols }, |_| {});
     }
 
     /// Returns the current size of the terminal.
     ///
     /// The return value will be (rows, cols).
     #[must_use]
-    pub fn size(&self) -> (u16, u16) {
+    pub fn size(&self) -> (core::num::NonZeroU16, core::num::NonZeroU16) {
         let size = self.grid().size();
         (size.rows, size.cols)
+    }
+
+    /// Returns the number of lines in the scrollback.
+    #[must_use]
+    pub fn scrollback_len(&self) -> usize {
+        self.grid().scrollback_len()
+    }
+
+    /// Returns the maximum capacity of the scrollback.
+    #[must_use]
+    pub fn scrollback_capacity(&self) -> usize {
+        self.grid().scrollback_capacity()
+    }
+
+    /// OTTO PATCH 5 (vendor/vt100/README-OTTO.md): change the PRIMARY
+    /// screen's scrollback capacity at runtime. Lowering it drops the oldest
+    /// rows immediately; raising it only lets history grow again.
+    pub fn set_scrollback_capacity(&mut self, rows: usize) {
+        self.grid.set_scrollback_capacity(rows);
+    }
+
+    /// OTTO PATCH 5: the PRIMARY screen's scrollback capacity (unlike
+    /// [`Self::scrollback_capacity`], which follows the active screen and is
+    /// 0 while the alternate screen is up).
+    #[must_use]
+    pub fn primary_scrollback_capacity(&self) -> usize {
+        self.grid.scrollback_capacity()
+    }
+
+    /// OTTO PATCH 5: `(rows, cells)` retained in the primary screen's
+    /// scrollback — `cells × size_of::<Cell>()` approximates its heap.
+    #[must_use]
+    pub fn scrollback_stats(&self) -> (usize, usize) {
+        self.grid.scrollback_stats()
     }
 
     /// Scrolls to the given position in the scrollback.
@@ -114,24 +199,15 @@ impl Screen {
         self.grid_mut().set_scrollback(rows);
     }
 
-    /// OTTO PATCH 5 (vendor/vt100/README-OTTO.md): change the PRIMARY
-    /// screen's scrollback cap at runtime. Lowering it drops the oldest rows
-    /// immediately; raising it only lets history grow again.
-    pub fn set_scrollback_len(&mut self, rows: usize) {
-        self.grid.set_scrollback_len(rows);
-    }
-
-    /// OTTO PATCH 5: the primary screen's scrollback cap.
-    #[must_use]
-    pub fn scrollback_len(&self) -> usize {
-        self.grid.scrollback_len()
-    }
-
-    /// OTTO PATCH 5: `(rows, cells)` retained in the primary screen's
-    /// scrollback — `cells × size_of::<Cell>()` approximates its heap.
-    #[must_use]
-    pub fn scrollback_stats(&self) -> (usize, usize) {
-        self.grid.scrollback_stats()
+    /// Clears the scrollback history for the active screen and returns the
+    /// scrollback position to the live viewport.
+    ///
+    /// This does not erase the visible screen contents, reset terminal
+    /// modes, or call the `on_row` callback. To model a terminal action that
+    /// clears both the visible display and scrollback history, process both
+    /// `CSI 2 J` and `CSI 3 J`.
+    pub fn clear_scrollback(&mut self) {
+        self.grid_mut().erase_all_scrollback(|_| {});
     }
 
     /// Returns the current position in the scrollback.
@@ -192,8 +268,9 @@ impl Screen {
         end_col: u16,
     ) -> String {
         match start_row.cmp(&end_row) {
-            std::cmp::Ordering::Less => {
+            core::cmp::Ordering::Less => {
                 let (_, cols) = self.size();
+                let cols = cols.get();
                 let mut contents = String::new();
                 for (i, row) in self
                     .grid()
@@ -223,7 +300,7 @@ impl Screen {
                 }
                 contents
             }
-            std::cmp::Ordering::Equal => {
+            core::cmp::Ordering::Equal => {
                 if start_col < end_col {
                     self.rows(start_col, end_col - start_col)
                         .nth(usize::from(start_row))
@@ -232,7 +309,7 @@ impl Screen {
                     String::new()
                 }
             }
-            std::cmp::Ordering::Greater => String::new(),
+            core::cmp::Ordering::Greater => String::new(),
         }
     }
 
@@ -241,8 +318,8 @@ impl Screen {
     /// [`contents_formatted`](Self::contents_formatted) and
     /// [`input_mode_formatted`](Self::input_mode_formatted).
     #[must_use]
-    pub fn state_formatted(&self) -> Vec<u8> {
-        let mut contents = vec![];
+    pub fn state_formatted(&self) -> String {
+        let mut contents = String::new();
         self.write_contents_formatted(&mut contents);
         self.write_input_mode_formatted(&mut contents);
         contents
@@ -253,8 +330,8 @@ impl Screen {
     /// wrapper around [`contents_diff`](Self::contents_diff) and
     /// [`input_mode_diff`](Self::input_mode_diff).
     #[must_use]
-    pub fn state_diff(&self, prev: &Self) -> Vec<u8> {
-        let mut contents = vec![];
+    pub fn state_diff(&self, prev: &Self) -> String {
+        let mut contents = String::new();
         self.write_contents_diff(&mut contents, prev);
         self.write_input_mode_diff(&mut contents, prev);
         contents
@@ -266,16 +343,69 @@ impl Screen {
     /// codes. The result will be suitable for feeding directly to a raw
     /// terminal parser, and will result in the same visual output.
     #[must_use]
-    pub fn contents_formatted(&self) -> Vec<u8> {
-        let mut contents = vec![];
+    pub fn contents_formatted(&self) -> String {
+        let mut contents = String::new();
         self.write_contents_formatted(&mut contents);
         contents
     }
 
-    fn write_contents_formatted(&self, contents: &mut Vec<u8>) {
+    fn write_contents_formatted(&self, contents: &mut String) {
         crate::term::HideCursor::new(self.hide_cursor()).write_buf(contents);
         let prev_attrs = self.grid().write_contents_formatted(contents);
         self.attrs.write_escape_code_diff(contents, &prev_attrs);
+    }
+
+    /// Returns the formatted visible contents of the terminal in a "basic"
+    /// format.
+    ///
+    /// The contents will contain no escape sequences except SGR sequences,
+    /// and no control characters except `'\n'`.
+    ///
+    /// A newline will be inserted after each row that does not wrap onto the
+    /// next line, except the last. Trailing whitespace will not be trimmed
+    /// from the string; a blank terminal *n* rows tall will result in a string
+    /// with *n* - 1 newlines.
+    ///
+    /// Terminal attributes should be reset before and after displaying the
+    /// returned string; it will not begin or end with a reset sequence.
+    #[must_use]
+    pub fn contents_formatted_basic(&self) -> String {
+        let mut contents = String::new();
+        // Writing to a `String` cannot fail.
+        #[allow(clippy::missing_panics_doc)]
+        self.write_contents_formatted_basic(
+            &mut contents,
+            crate::capture::BasicFormattedCaptureRange::Visible,
+        )
+        .unwrap();
+        contents
+    }
+
+    /// Like [`Self::contents_formatted_basic`] but writes into the provided
+    /// writer.
+    ///
+    /// For the `range` parameter, if you used the callback to write terminal
+    /// data into this writer in a streaming fashion, pass
+    /// [`BasicFormattedCaptureRange::Full`][full] with your existing
+    /// [`BasicFormattedCaptureState`][state]. Otherwise, if you want the same
+    /// result as [`Self::contents_formatted_basic`], pass
+    /// [`BasicFormattedCaptureRange::Visible`][visible].
+    ///
+    /// [`on_scroll`]: crate::Callbacks::on_scroll
+    /// [full]: crate::capture::BasicFormattedCaptureRange::Full
+    /// [state]: crate::capture::BasicFormattedCaptureState
+    /// [visible]: crate::capture::BasicFormattedCaptureRange::Visible
+    ///
+    /// # Errors
+    ///
+    /// If the writer returns an error, this method will forward that error.
+    /// Otherwise, this method will not return any errors of its own.
+    pub fn write_contents_formatted_basic(
+        &self,
+        writer: &mut impl alloc::fmt::Write,
+        range: crate::capture::BasicFormattedCaptureRange<'_>,
+    ) -> alloc::fmt::Result {
+        self.grid().write_contents_formatted_basic(writer, range)
     }
 
     /// Returns the formatted visible contents of the terminal by row,
@@ -294,13 +424,13 @@ impl Screen {
         &self,
         start: u16,
         width: u16,
-    ) -> impl Iterator<Item = Vec<u8>> + '_ {
+    ) -> impl Iterator<Item = String> + '_ {
         let mut wrapping = false;
         self.grid().visible_rows().enumerate().map(move |(i, row)| {
             // number of rows in a grid is stored in a u16 (see Size), so
             // visible_rows can never return enough rows to overflow here
             let i = i.try_into().unwrap();
-            let mut contents = vec![];
+            let mut contents = String::new();
             row.write_contents_formatted(
                 &mut contents,
                 start,
@@ -310,21 +440,21 @@ impl Screen {
                 None,
                 None,
             );
-            if start == 0 && width == self.grid.size().cols {
+            if start == 0 && width == self.grid.size().cols() {
                 wrapping = row.wrapped();
             }
             contents
         })
     }
 
-    /// OTTO PATCH (vendor/vt100/README-OTTO.md): scrollback history formatted
-    /// for replay into a live terminal. Differs from driving `rows_formatted`
-    /// through `set_scrollback` offsets in two ways that make the replay
-    /// width-independent:
+    /// OTTO PATCH 2 (vendor/vt100/README-OTTO.md): scrollback history
+    /// formatted for replay into a live terminal. Differs from driving
+    /// `rows_formatted` through `set_scrollback` offsets in two ways that make
+    /// the replay width-independent:
     ///
-    /// - every row is emitted at its FULL stored width (scrollback rows are
-    ///   never resized by `set_size`), so a row captured on a wider grid is
-    ///   replayed untruncated instead of being clipped to the current width;
+    /// - every row is emitted at its FULL stored width, so a row stored on a
+    ///   wider grid is replayed untruncated instead of being clipped to the
+    ///   current width;
     /// - soft-wrapped rows are JOINED into one logical line: no CRLF at a
     ///   wrapped boundary, and `write_contents_formatted`'s natural-flow
     ///   suppression keeps the join escape-free — the receiving terminal
@@ -339,9 +469,10 @@ impl Screen {
     /// output is position-independent and safe to write into a scrolled
     /// terminal. Returns the newest `take` visual rows (all when larger).
     #[must_use]
-    pub fn scrollback_rows_formatted(&self, take: usize) -> Vec<u8> {
-        let mut contents = vec![];
-        let rows: Vec<_> = self.grid().scrollback_rows().collect();
+    pub fn scrollback_rows_formatted(&self, take: usize) -> String {
+        let mut contents = String::new();
+        let rows: alloc::vec::Vec<_> =
+            self.grid().scrollback_rows().collect();
         let skip = rows.len().saturating_sub(take);
         // Soft-wrap continuation state of the previously emitted row: the
         // flag drives the writer's natural-flow suppression and the attrs
@@ -355,11 +486,12 @@ impl Screen {
             // never an absolute CUP, so scrolled replay can't jump rows.
             let idx = u16::try_from((i - skip).min(usize::from(u16::MAX)))
                 .unwrap_or(u16::MAX);
-            // Zero-width rows (defensive — reflow pads, but any other source
-            // would panic `write_contents_formatted`'s `cells[0]` index):
-            // emit just the line break.
+            // Zero-width rows (defensive — Otto's scrollback trim keeps one
+            // cell and reflow pads, but any other source would panic
+            // `write_contents_formatted`'s `cells[start]` index): emit just
+            // the line break.
             if row.cols() == 0 {
-                contents.extend_from_slice(b"\x1b[0m\r\n");
+                contents.push_str("\x1b[0m\r\n");
                 wrapping = false;
                 join_attrs = None;
                 continue;
@@ -381,19 +513,19 @@ impl Screen {
             if wrapping {
                 join_attrs = Some(attrs);
             } else {
-                contents.extend_from_slice(b"\x1b[0m\r\n");
+                contents.push_str("\x1b[0m\r\n");
                 join_attrs = None;
             }
         }
         if wrapping {
-            contents.extend_from_slice(b"\x1b[0m\r\n");
+            contents.push_str("\x1b[0m\r\n");
         }
         contents
     }
 
-    /// Returns a terminal byte stream sufficient to turn the visible contents
-    /// of the screen described by `prev` into the visible contents of the
-    /// screen described by `self`.
+    /// Returns a string containing escape sequences sufficient to turn the
+    /// visible contents of the screen described by `prev` into the visible
+    /// contents of the screen described by `self`.
     ///
     /// The result of rendering `prev.contents_formatted()` followed by
     /// `self.contents_diff(prev)` should be equivalent to the result of
@@ -402,13 +534,13 @@ impl Screen {
     /// since the diff will likely require less memory and cause less
     /// flickering than redrawing the entire screen contents.
     #[must_use]
-    pub fn contents_diff(&self, prev: &Self) -> Vec<u8> {
-        let mut contents = vec![];
+    pub fn contents_diff(&self, prev: &Self) -> String {
+        let mut contents = String::new();
         self.write_contents_diff(&mut contents, prev);
         contents
     }
 
-    fn write_contents_diff(&self, contents: &mut Vec<u8>, prev: &Self) {
+    fn write_contents_diff(&self, contents: &mut String, prev: &Self) {
         if self.hide_cursor() != prev.hide_cursor() {
             crate::term::HideCursor::new(self.hide_cursor())
                 .write_buf(contents);
@@ -421,10 +553,10 @@ impl Screen {
         self.attrs.write_escape_code_diff(contents, &prev_attrs);
     }
 
-    /// Returns a sequence of terminal byte streams sufficient to turn the
-    /// visible contents of the subset of each row from `prev` (as described
-    /// by `start` and `width`) into the visible contents of the corresponding
-    /// row subset in `self`.
+    /// Returns a sequence of strings containing escape sequences sufficient to
+    /// turn the visible contents of the subset of each row from `prev` (as
+    /// described by `start` and `width`) into the visible contents of the
+    /// corresponding row subset in `self`.
     ///
     /// You are responsible for positioning the cursor before printing each
     /// row, and the final cursor position after displaying each row is
@@ -436,7 +568,7 @@ impl Screen {
         prev: &'a Self,
         start: u16,
         width: u16,
-    ) -> impl Iterator<Item = Vec<u8>> + 'a {
+    ) -> impl Iterator<Item = String> + 'a {
         self.grid()
             .visible_rows()
             .zip(prev.grid().visible_rows())
@@ -445,7 +577,7 @@ impl Screen {
                 // number of rows in a grid is stored in a u16 (see Size), so
                 // visible_rows can never return enough rows to overflow here
                 let i = i.try_into().unwrap();
-                let mut contents = vec![];
+                let mut contents = String::new();
                 row.write_contents_diff(
                     &mut contents,
                     prev_row,
@@ -470,13 +602,13 @@ impl Screen {
     /// * bracketed paste
     /// * xterm mouse support
     #[must_use]
-    pub fn input_mode_formatted(&self) -> Vec<u8> {
-        let mut contents = vec![];
+    pub fn input_mode_formatted(&self) -> String {
+        let mut contents = String::new();
         self.write_input_mode_formatted(&mut contents);
         contents
     }
 
-    fn write_input_mode_formatted(&self, contents: &mut Vec<u8>) {
+    fn write_input_mode_formatted(&self, contents: &mut String) {
         crate::term::ApplicationKeypad::new(
             self.mode(MODE_APPLICATION_KEYPAD),
         )
@@ -497,19 +629,24 @@ impl Screen {
             MouseProtocolEncoding::Default,
         )
         .write_buf(contents);
+        crate::term::CursorStyle::new(
+            self.cursor_style,
+            CursorStyle::Default,
+        )
+        .write_buf(contents);
     }
 
     /// Returns terminal escape sequences sufficient to change the previous
     /// terminal's input modes to the input modes enabled in the current
     /// terminal.
     #[must_use]
-    pub fn input_mode_diff(&self, prev: &Self) -> Vec<u8> {
-        let mut contents = vec![];
+    pub fn input_mode_diff(&self, prev: &Self) -> String {
+        let mut contents = String::new();
         self.write_input_mode_diff(&mut contents, prev);
         contents
     }
 
-    fn write_input_mode_diff(&self, contents: &mut Vec<u8>, prev: &Self) {
+    fn write_input_mode_diff(&self, contents: &mut String, prev: &Self) {
         if self.mode(MODE_APPLICATION_KEYPAD)
             != prev.mode(MODE_APPLICATION_KEYPAD)
         {
@@ -541,6 +678,8 @@ impl Screen {
             prev.mouse_protocol_encoding,
         )
         .write_buf(contents);
+        crate::term::CursorStyle::new(self.cursor_style, prev.cursor_style)
+            .write_buf(contents);
     }
 
     /// Returns terminal escape sequences sufficient to set the current
@@ -562,13 +701,13 @@ impl Screen {
     /// terminal output, since you will need to restore the terminal state
     /// without the terminal contents necessarily being the same.
     #[must_use]
-    pub fn attributes_formatted(&self) -> Vec<u8> {
-        let mut contents = vec![];
+    pub fn attributes_formatted(&self) -> String {
+        let mut contents = String::new();
         self.write_attributes_formatted(&mut contents);
         contents
     }
 
-    fn write_attributes_formatted(&self, contents: &mut Vec<u8>) {
+    fn write_attributes_formatted(&self, contents: &mut String) {
         crate::term::ClearAttrs.write_buf(contents);
         self.attrs.write_escape_code_diff(
             contents,
@@ -595,7 +734,7 @@ impl Screen {
     /// need to restore the terminal state without the terminal contents
     /// necessarily being the same.
     ///
-    /// Note that the bytes returned by this function may alter the active
+    /// Note that the string returned by this function may alter the active
     /// drawing attributes, because it may require redrawing existing cells in
     /// order to position the cursor correctly (for instance, in the case
     /// where the cursor is past the end of a row). Therefore, you should
@@ -603,13 +742,13 @@ impl Screen {
     /// processing this data, for instance by using
     /// [`attributes_formatted`](Self::attributes_formatted).
     #[must_use]
-    pub fn cursor_state_formatted(&self) -> Vec<u8> {
-        let mut contents = vec![];
+    pub fn cursor_state_formatted(&self) -> String {
+        let mut contents = String::new();
         self.write_cursor_state_formatted(&mut contents);
         contents
     }
 
-    fn write_cursor_state_formatted(&self, contents: &mut Vec<u8>) {
+    fn write_cursor_state_formatted(&self, contents: &mut String) {
         crate::term::HideCursor::new(self.hide_cursor()).write_buf(contents);
         self.grid()
             .write_cursor_position_formatted(contents, None, None);
@@ -677,6 +816,12 @@ impl Screen {
     #[must_use]
     pub fn mouse_protocol_encoding(&self) -> MouseProtocolEncoding {
         self.mouse_protocol_encoding
+    }
+
+    /// Returns the currently active [`CursorStyle`].
+    #[must_use]
+    pub fn cursor_style(&self) -> CursorStyle {
+        self.cursor_style
     }
 
     /// Returns the currently active foreground color.
@@ -793,523 +938,616 @@ impl Screen {
             self.mouse_protocol_encoding = MouseProtocolEncoding::default();
         }
     }
-}
 
-impl Screen {
-    pub(crate) fn text(&mut self, c: char) {
+    fn set_cursor_style(&mut self, style: CursorStyle) {
+        self.cursor_style = style;
+    }
+
+    // determine the width of the character we're about to draw, and whether
+    // it makes sense to even attempt to draw a character of that width.
+    fn calculate_width(&self, c: char) -> Option<u16> {
         let pos = self.grid().pos();
         let size = self.grid().size();
-        let attrs = self.attrs;
 
         let width = c.width();
         if width.is_none() && (u32::from(c)) < 256 {
             // don't even try to draw control characters
-            return;
+            return None;
         }
-        let width = width
-            .unwrap_or(1)
-            .try_into()
-            // width() can only return 0, 1, or 2
+        let width = u16::try_from(width.unwrap_or(1))
+            // char::width() can only return 0, 1, 2, or 3
             .unwrap();
+        // TODO: this is invalid for U+17D8 which has a width of 3 for some
+        // reason, but adding triple width characters is going to be a
+        // massive pain just for this one character
+        let width = width.min(2);
+
+        // if the character is wider than the screen, we can't draw it, so
+        // just ignore it
+        if width > size.cols() {
+            return None;
+        }
+
+        // a continuation character without a base character before it is
+        // meaningless
+        if width == 0 && pos.col == 0 {
+            return None;
+        }
+
+        Some(width)
+    }
+
+    // if this is the initial codepoint in a new cell, we need to determine
+    // whether wrapping that character to the next row should set the row's
+    // wrapping flag
+    fn new_character_should_wrap(&self, width: u16) -> bool {
+        let pos = self.grid().pos();
+        let size = self.grid().size();
 
         // it doesn't make any sense to wrap if the last column in a row
-        // didn't already have contents. don't try to handle the case where a
-        // character wraps because there was only one column left in the
-        // previous row - literally everything handles this case differently,
-        // and this is tmux behavior (and also the simplest). i'm open to
-        // reconsidering this behavior, but only with a really good reason
-        // (xterm handles this by introducing the concept of triple width
-        // cells, which i really don't want to do).
+        // didn't already have contents. don't try to handle the case
+        // where a character wraps because there was only one column left
+        // in the previous row - literally everything handles this case
+        // differently, and this is tmux behavior (and also the
+        // simplest). i'm open to reconsidering this behavior, but only
+        // with a really good reason (xterm handles this by introducing
+        // the concept of triple width cells, which i really don't want
+        // to do).
         let mut wrap = false;
-        if pos.col > size.cols - width {
+        if pos.col + width > size.cols() {
             let last_cell = self
                 .grid()
                 .drawing_cell(crate::grid::Pos {
                     row: pos.row,
-                    col: size.cols - 1,
+                    col: size.cols() - 1,
                 })
                 // pos.row is valid, since it comes directly from
-                // self.grid().pos() which we assume to always have a valid
-                // row value. size.cols - 1 is also always a valid column.
+                // self.grid().pos() which we assume to always have a
+                // valid row value. size.cols - 1 is also always a valid
+                // column.
                 .unwrap();
             if last_cell.has_contents() || last_cell.is_wide_continuation() {
                 wrap = true;
             }
         }
-        self.grid_mut().col_wrap(width, wrap);
-        let pos = self.grid().pos();
 
-        if width == 0 {
-            if pos.col > 0 {
-                let mut prev_cell = self
+        wrap
+    }
+
+    // if we already have a character in a cell, but adding a continuation
+    // character widened the cell off the end of the row, we need to move the
+    // base character to the beginning of the next row
+    fn wrap_widened_cell(
+        &mut self,
+        old_pos: crate::grid::Pos,
+        new_pos: crate::grid::Pos,
+    ) {
+        if new_pos.col == 0 {
+            let attrs = self.attrs;
+            let contents = self
+                .grid()
+                .drawing_cell(old_pos)
+                .unwrap()
+                .contents()
+                .to_string();
+            self.grid_mut()
+                .drawing_cell_mut(new_pos)
+                .unwrap()
+                .set_contents(&contents, attrs);
+            self.grid_mut()
+                .drawing_cell_mut(old_pos)
+                .unwrap()
+                .clear(attrs);
+            self.grid_mut().col_inc(2);
+        } else {
+            self.grid_mut().col_inc(1);
+        }
+    }
+
+    // once we have drawn a character, clean up the wide character state of
+    // nearby cells that may have been disrupted.
+    fn text_cleanup(
+        &mut self,
+        base_pos: crate::grid::Pos,
+        cell_was_wide: bool,
+        cell_is_wide: bool,
+    ) {
+        let size = self.grid().size();
+        let attrs = self.attrs;
+
+        if base_pos.col > 0 {
+            let prev_cell = self
+                .grid_mut()
+                .drawing_cell_mut(crate::grid::Pos {
+                    row: base_pos.row,
+                    col: base_pos.col - 1,
+                })
+                // pos.row is assumed valid, and pos.col was just
+                // checked to be greater than 0.
+                .unwrap();
+            if prev_cell.is_wide() {
+                prev_cell.clear(*prev_cell.attrs());
+            }
+        }
+
+        if cell_was_wide && !cell_is_wide {
+            let next_cell = self
+                .grid_mut()
+                .drawing_cell_mut(crate::grid::Pos {
+                    row: base_pos.row,
+                    col: base_pos.col + 1,
+                })
+                // base_pos.row is assumed valid, and this cell previously
+                // was wide, so there must have been a continuation cell
+                // after it.
+                .unwrap();
+            next_cell.set(' ', attrs);
+        }
+
+        if !cell_was_wide && cell_is_wide {
+            let next_cell = self
+                .grid_mut()
+                .drawing_cell_mut(crate::grid::Pos {
+                    row: base_pos.row,
+                    col: base_pos.col + 1,
+                })
+                // base_pos.row is assumed valid, and the cell at base_pos
+                // has become wide, so it must have a cell after it (if it
+                // didn't, we would have wrapped earlier when widening the
+                // cell).
+                .unwrap();
+            let next_cell_was_wide = next_cell.is_wide();
+            next_cell.clear(crate::attrs::Attrs::default());
+            next_cell.set_wide_continuation(true);
+            if next_cell_was_wide {
+                let next_next_cell = self
                     .grid_mut()
                     .drawing_cell_mut(crate::grid::Pos {
-                        row: pos.row,
-                        col: pos.col - 1,
+                        row: base_pos.row,
+                        col: base_pos.col + 2,
                     })
-                    // pos.row is valid, since it comes directly from
-                    // self.grid().pos() which we assume to always have a
-                    // valid row value. pos.col - 1 is valid because we just
-                    // checked for pos.col > 0.
+                    // the cell at base_pos.col + 1 was previously wide, so
+                    // it must have had a continuation cell after it.
                     .unwrap();
-                if prev_cell.is_wide_continuation() {
-                    prev_cell = self
-                        .grid_mut()
-                        .drawing_cell_mut(crate::grid::Pos {
-                            row: pos.row,
-                            col: pos.col - 2,
-                        })
-                        // pos.row is valid, since it comes directly from
-                        // self.grid().pos() which we assume to always have a
-                        // valid row value. we know pos.col - 2 is valid
-                        // because the cell at pos.col - 1 is a wide
-                        // continuation character, which means there must be
-                        // the first half of the wide character before it.
-                        .unwrap();
-                }
-                prev_cell.append(c);
-            } else if pos.row > 0 {
-                let prev_row = self
-                    .grid()
-                    .drawing_row(pos.row - 1)
-                    // pos.row is valid, since it comes directly from
-                    // self.grid().pos() which we assume to always have a
-                    // valid row value. pos.row - 1 is valid because we just
-                    // checked for pos.row > 0.
-                    .unwrap();
-                if prev_row.wrapped() {
-                    let mut prev_cell = self
-                        .grid_mut()
-                        .drawing_cell_mut(crate::grid::Pos {
-                            row: pos.row - 1,
-                            col: size.cols - 1,
-                        })
-                        // pos.row is valid, since it comes directly from
-                        // self.grid().pos() which we assume to always have a
-                        // valid row value. pos.row - 1 is valid because we
-                        // just checked for pos.row > 0. col of size.cols - 1
-                        // is always valid.
-                        .unwrap();
-                    if prev_cell.is_wide_continuation() {
-                        prev_cell = self
-                            .grid_mut()
-                            .drawing_cell_mut(crate::grid::Pos {
-                                row: pos.row - 1,
-                                col: size.cols - 2,
-                            })
-                            // pos.row is valid, since it comes directly from
-                            // self.grid().pos() which we assume to always
-                            // have a valid row value. pos.row - 1 is valid
-                            // because we just checked for pos.row > 0. col of
-                            // size.cols - 2 is valid because the cell at
-                            // size.cols - 1 is a wide continuation character,
-                            // so it must have the first half of the wide
-                            // character before it.
-                            .unwrap();
-                    }
-                    prev_cell.append(c);
+                next_next_cell.clear(attrs);
+                if base_pos.col + 2 == size.cols() - 1 {
+                    self.grid_mut()
+                        .drawing_row_mut(base_pos.row)
+                        .unwrap()
+                        .wrap(false);
                 }
             }
+        }
+    }
+}
+
+pub struct WrappedScreen<CB: crate::Callbacks> {
+    pub screen: Screen,
+    pub callbacks: CB,
+}
+
+impl<CB: crate::Callbacks> WrappedScreen<CB> {
+    /// Gets the `on_row` callback for methods like
+    /// [`crate::grid::Grid::scroll_up`].
+    fn on_row<'cb>(
+        screen: &Screen,
+        callbacks: &'cb mut CB,
+    ) -> impl FnMut(&crate::row::Row) + 'cb {
+        let is_alternate = screen.mode(MODE_ALTERNATE_SCREEN);
+        move |row| {
+            callbacks
+                .on_scroll(crate::capture::RowContents(row), is_alternate);
+        }
+    }
+
+    /// Resizes the screen, calling [`on_scroll`] for each row that is pushed
+    /// off the top of the screen's scrollback.
+    ///
+    /// [`on_scroll`]: crate::Callbacks::on_scroll
+    pub fn set_size_with_cb(
+        &mut self,
+        rows: core::num::NonZeroU16,
+        cols: core::num::NonZeroU16,
+    ) {
+        let callbacks = &mut self.callbacks;
+        self.screen
+            .grid
+            .set_size(crate::grid::Size { rows, cols }, |row| {
+                callbacks.on_scroll(crate::capture::RowContents(row), false);
+            });
+        self.screen.alternate_grid.set_size(
+            crate::grid::Size { rows, cols },
+            |row| {
+                callbacks.on_scroll(crate::capture::RowContents(row), true);
+            },
+        );
+    }
+
+    pub fn text(&mut self, c: char) {
+        let screen = &mut self.screen;
+        let pos = screen.grid().pos();
+        let attrs = screen.attrs;
+
+        let Some(width) = screen.calculate_width(c) else {
+            return;
+        };
+
+        // base_pos will always be set to a valid cell, so
+        // .drawing_cell(base_pos).unwrap() will always be valid
+        let mut base_pos;
+        let cell_was_wide;
+
+        if width > 0 {
+            let wrap = screen.new_character_should_wrap(width);
+            let on_row = Self::on_row(screen, &mut self.callbacks);
+            screen.grid_mut().col_wrap(width, wrap, on_row);
+            // col_wrap always sets self.grid().pos() to a valid cell
+            base_pos = screen.grid().pos();
+            cell_was_wide =
+                screen.grid().drawing_cell(base_pos).unwrap().is_wide();
+
+            screen
+                .grid_mut()
+                .drawing_cell_mut(base_pos)
+                .unwrap()
+                .set(c, attrs);
+            screen.last_char = Some(c);
+            screen.grid_mut().col_inc(width);
         } else {
-            if self
-                .grid()
-                .drawing_cell(pos)
-                // pos.row is valid because we assume self.grid().pos() to
-                // always have a valid row value. pos.col is valid because we
-                // called col_wrap() immediately before this, which ensures
-                // that self.grid().pos().col has a valid value.
+            // pos.row is valid, since it comes directly from
+            // self.grid().pos() which we assume to always have a
+            // valid row value. pos.col - 1 is valid because we just
+            // returned early if pos.col == 0.
+            base_pos = crate::grid::Pos {
+                row: pos.row,
+                col: pos.col - 1,
+            };
+            if screen
+                .grid_mut()
+                .drawing_cell_mut(base_pos)
                 .unwrap()
                 .is_wide_continuation()
             {
-                let prev_cell = self
-                    .grid_mut()
-                    .drawing_cell_mut(crate::grid::Pos {
-                        row: pos.row,
-                        col: pos.col - 1,
-                    })
-                    // pos.row is valid because we assume self.grid().pos() to
-                    // always have a valid row value. pos.col is valid because
-                    // we called col_wrap() immediately before this, which
-                    // ensures that self.grid().pos().col has a valid value.
-                    // pos.col - 1 is valid because the cell at pos.col is a
-                    // wide continuation character, so it must have the first
-                    // half of the wide character before it.
-                    .unwrap();
-                prev_cell.clear(attrs);
+                // pos.row is valid, since it comes directly from
+                // self.grid().pos() which we assume to always have a
+                // valid row value. we know pos.col - 2 is valid
+                // because the cell at pos.col - 1 is a wide
+                // continuation character, which means there must be
+                // the first half of the wide character before it.
+                base_pos = crate::grid::Pos {
+                    row: pos.row,
+                    col: pos.col - 2,
+                };
             }
+            cell_was_wide =
+                screen.grid().drawing_cell(base_pos).unwrap().is_wide();
 
-            if self
-                .grid()
-                .drawing_cell(pos)
-                // pos.row is valid because we assume self.grid().pos() to
-                // always have a valid row value. pos.col is valid because we
-                // called col_wrap() immediately before this, which ensures
-                // that self.grid().pos().col has a valid value.
-                .unwrap()
-                .is_wide()
-            {
-                let next_cell = self
-                    .grid_mut()
-                    .drawing_cell_mut(crate::grid::Pos {
-                        row: pos.row,
-                        col: pos.col + 1,
-                    })
-                    // pos.row is valid because we assume self.grid().pos() to
-                    // always have a valid row value. pos.col is valid because
-                    // we called col_wrap() immediately before this, which
-                    // ensures that self.grid().pos().col has a valid value.
-                    // pos.col + 1 is valid because the cell at pos.col is a
-                    // wide character, so it must have the second half of the
-                    // wide character after it.
-                    .unwrap();
-                next_cell.set(' ', attrs);
-            }
-
-            let cell = self
+            screen
                 .grid_mut()
-                .drawing_cell_mut(pos)
-                // pos.row is valid because we assume self.grid().pos() to
-                // always have a valid row value. pos.col is valid because we
-                // called col_wrap() immediately before this, which ensures
-                // that self.grid().pos().col has a valid value.
-                .unwrap();
-            cell.set(c, attrs);
-            self.grid_mut().col_inc(1);
-            if width > 1 {
-                let pos = self.grid().pos();
-                if self
-                    .grid()
-                    .drawing_cell(pos)
-                    // pos.row is valid because we assume self.grid().pos() to
-                    // always have a valid row value. pos.col is valid because
-                    // we called col_wrap() earlier, which ensures that
-                    // self.grid().pos().col has a valid value. this is true
-                    // even though we just called col_inc, because this branch
-                    // only happens if width > 1, and col_wrap takes width
-                    // into account.
-                    .unwrap()
-                    .is_wide()
-                {
-                    let next_next_pos = crate::grid::Pos {
-                        row: pos.row,
-                        col: pos.col + 1,
-                    };
-                    let next_next_cell = self
-                        .grid_mut()
-                        .drawing_cell_mut(next_next_pos)
-                        // pos.row is valid because we assume
-                        // self.grid().pos() to always have a valid row value.
-                        // pos.col is valid because we called col_wrap()
-                        // earlier, which ensures that self.grid().pos().col
-                        // has a valid value. this is true even though we just
-                        // called col_inc, because this branch only happens if
-                        // width > 1, and col_wrap takes width into account.
-                        // pos.col + 1 is valid because the cell at pos.col is
-                        // wide, and so it must have the second half of the
-                        // wide character after it.
-                        .unwrap();
-                    next_next_cell.clear(attrs);
-                    if next_next_pos.col == size.cols - 1 {
-                        self.grid_mut()
-                            .drawing_row_mut(pos.row)
-                            // we assume self.grid().pos().row is always valid
-                            .unwrap()
-                            .wrap(false);
-                    }
+                .drawing_cell_mut(base_pos)
+                .unwrap()
+                .append(c);
+            let cell_is_wide =
+                screen.grid().drawing_cell(base_pos).unwrap().is_wide();
+            if !cell_was_wide && cell_is_wide {
+                let on_row = Self::on_row(screen, &mut self.callbacks);
+                screen.grid_mut().col_wrap(1, false, on_row);
+                // col_wrap always leaves self.grid().pos() on a valid cell,
+                // so .drawing_cell(new_pos).unwrap() will always be valid.
+                let new_pos = screen.grid().pos();
+                screen.wrap_widened_cell(base_pos, new_pos);
+                if new_pos.col == 0 {
+                    base_pos = new_pos;
                 }
-                let next_cell = self
-                    .grid_mut()
-                    .drawing_cell_mut(pos)
-                    // pos.row is valid because we assume self.grid().pos() to
-                    // always have a valid row value. pos.col is valid because
-                    // we called col_wrap() earlier, which ensures that
-                    // self.grid().pos().col has a valid value. this is true
-                    // even though we just called col_inc, because this branch
-                    // only happens if width > 1, and col_wrap takes width
-                    // into account.
-                    .unwrap();
-                next_cell.clear(crate::attrs::Attrs::default());
-                next_cell.set_wide_continuation(true);
-                self.grid_mut().col_inc(1);
             }
         }
+
+        let cell_is_wide =
+            screen.grid().drawing_cell(base_pos).unwrap().is_wide();
+
+        screen.text_cleanup(base_pos, cell_was_wide, cell_is_wide);
     }
 
     // control codes
 
-    pub(crate) fn bs(&mut self) {
-        self.grid_mut().col_dec(1);
+    pub fn bs(&mut self) {
+        self.screen.grid_mut().col_dec(1);
     }
 
-    pub(crate) fn tab(&mut self) {
-        self.grid_mut().col_tab();
+    pub fn tab(&mut self) {
+        self.screen.grid_mut().col_tab();
     }
 
-    pub(crate) fn lf(&mut self) {
-        self.grid_mut().row_inc_scroll(1);
+    pub fn lf(&mut self) {
+        let on_row = Self::on_row(&self.screen, &mut self.callbacks);
+        self.screen.grid_mut().row_inc_scroll(1, on_row);
     }
 
-    pub(crate) fn vt(&mut self) {
+    pub fn vt(&mut self) {
         self.lf();
     }
 
-    pub(crate) fn ff(&mut self) {
+    pub fn ff(&mut self) {
         self.lf();
     }
 
-    pub(crate) fn cr(&mut self) {
-        self.grid_mut().col_set(0);
+    pub fn cr(&mut self) {
+        self.screen.grid_mut().col_set(0);
     }
 
     // escape codes
 
     // ESC 7
-    pub(crate) fn decsc(&mut self) {
-        self.save_cursor();
+    pub fn decsc(&mut self) {
+        self.screen.save_cursor();
     }
 
     // ESC 8
-    pub(crate) fn decrc(&mut self) {
-        self.restore_cursor();
+    pub fn decrc(&mut self) {
+        self.screen.restore_cursor();
     }
 
     // ESC =
-    pub(crate) fn deckpam(&mut self) {
-        self.set_mode(MODE_APPLICATION_KEYPAD);
+    pub fn deckpam(&mut self) {
+        self.screen.set_mode(MODE_APPLICATION_KEYPAD);
     }
 
     // ESC >
-    pub(crate) fn deckpnm(&mut self) {
-        self.clear_mode(MODE_APPLICATION_KEYPAD);
+    pub fn deckpnm(&mut self) {
+        self.screen.clear_mode(MODE_APPLICATION_KEYPAD);
     }
 
     // ESC M
-    pub(crate) fn ri(&mut self) {
-        self.grid_mut().row_dec_scroll(1);
+    pub fn ri(&mut self) {
+        self.screen.grid_mut().row_dec_scroll(1);
     }
 
     // ESC c
-    pub(crate) fn ris(&mut self) {
-        *self = Self::new(self.grid.size(), self.grid.scrollback_len());
+    pub fn ris(&mut self) {
+        self.screen = Screen::new(
+            self.screen.grid.size(),
+            self.screen.grid.scrollback_capacity(),
+        );
     }
 
     // csi codes
 
+    // CSI SP
+    pub(crate) fn decscusr(
+        &mut self,
+        cursor_style: u16,
+        mut unhandled: impl FnMut(&mut Self),
+    ) {
+        match cursor_style {
+            0 => self.screen.set_cursor_style(CursorStyle::Default),
+            1 => self.screen.set_cursor_style(CursorStyle::BlinkBlock),
+            2 => self.screen.set_cursor_style(CursorStyle::SteadyBlock),
+            3 => self.screen.set_cursor_style(CursorStyle::BlinkUnderline),
+            4 => self.screen.set_cursor_style(CursorStyle::SteadyUnderline),
+            5 => self.screen.set_cursor_style(CursorStyle::BlinkVerticalBar),
+            6 => self.screen.set_cursor_style(CursorStyle::SteadyVerticalBar),
+            _ => unhandled(self),
+        }
+    }
+
     // CSI @
-    pub(crate) fn ich(&mut self, count: u16) {
-        self.grid_mut().insert_cells(count);
+    pub fn ich(&mut self, count: u16) {
+        self.screen.grid_mut().insert_cells(count);
     }
 
     // CSI A
-    pub(crate) fn cuu(&mut self, offset: u16) {
-        self.grid_mut().row_dec_clamp(offset);
+    pub fn cuu(&mut self, offset: u16) {
+        self.screen.grid_mut().row_dec_clamp(offset);
     }
 
     // CSI B
-    pub(crate) fn cud(&mut self, offset: u16) {
-        self.grid_mut().row_inc_clamp(offset);
+    pub fn cud(&mut self, offset: u16) {
+        self.screen.grid_mut().row_inc_clamp(offset);
     }
 
     // CSI C
-    pub(crate) fn cuf(&mut self, offset: u16) {
-        self.grid_mut().col_inc_clamp(offset);
+    pub fn cuf(&mut self, offset: u16) {
+        self.screen.grid_mut().col_inc_clamp(offset);
     }
 
     // CSI D
-    pub(crate) fn cub(&mut self, offset: u16) {
-        self.grid_mut().col_dec(offset);
+    pub fn cub(&mut self, offset: u16) {
+        self.screen.grid_mut().col_dec(offset);
     }
 
     // CSI E
-    pub(crate) fn cnl(&mut self, offset: u16) {
-        self.grid_mut().col_set(0);
-        self.grid_mut().row_inc_clamp(offset);
+    pub fn cnl(&mut self, offset: u16) {
+        self.screen.grid_mut().col_set(0);
+        self.screen.grid_mut().row_inc_clamp(offset);
     }
 
     // CSI F
-    pub(crate) fn cpl(&mut self, offset: u16) {
-        self.grid_mut().col_set(0);
-        self.grid_mut().row_dec_clamp(offset);
+    pub fn cpl(&mut self, offset: u16) {
+        self.screen.grid_mut().col_set(0);
+        self.screen.grid_mut().row_dec_clamp(offset);
     }
 
     // CSI G
-    pub(crate) fn cha(&mut self, col: u16) {
-        self.grid_mut().col_set(col - 1);
+    pub fn cha(&mut self, col: u16) {
+        self.screen.grid_mut().col_set(col - 1);
+    }
+
+    // CSI `  (HPA - Horizontal Position Absolute, equivalent to CHA)
+    pub(crate) fn hpa(&mut self, col: u16) {
+        self.cha(col);
+    }
+
+    // CSI b (REP - Repeat last printed character)
+    pub(crate) fn rep(&mut self, count: u16) {
+        if let Some(c) = self.screen.last_char {
+            for _ in 0..count {
+                self.text(c);
+            }
+        }
     }
 
     // CSI H
-    pub(crate) fn cup(&mut self, (row, col): (u16, u16)) {
-        self.grid_mut().set_pos(crate::grid::Pos {
+    pub fn cup(&mut self, (row, col): (u16, u16)) {
+        self.screen.grid_mut().set_pos(crate::grid::Pos {
             row: row - 1,
             col: col - 1,
         });
     }
 
     // CSI J
-    pub(crate) fn ed(
-        &mut self,
-        mode: u16,
-        mut unhandled: impl FnMut(&mut Self),
-    ) {
-        let attrs = self.attrs;
+    pub fn ed(&mut self, mode: u16, mut unhandled: impl FnMut(&mut Self)) {
+        let attrs = self.screen.attrs;
         match mode {
-            0 => self.grid_mut().erase_all_forward(attrs),
-            1 => self.grid_mut().erase_all_backward(attrs),
-            2 => self.grid_mut().erase_all(attrs),
-            // OTTO PATCH 4: xterm's "erase saved lines" — see grid.rs.
-            3 => self.grid_mut().erase_scrollback(),
+            0 => self.screen.grid_mut().erase_all_forward(attrs),
+            1 => self.screen.grid_mut().erase_all_backward(attrs),
+            2 => self.screen.grid_mut().erase_all(attrs),
+            3 => {
+                let on_row = Self::on_row(&self.screen, &mut self.callbacks);
+                self.screen.grid_mut().erase_all_scrollback(on_row);
+            }
             _ => unhandled(self),
         }
     }
 
     // CSI ? J
-    pub(crate) fn decsed(
-        &mut self,
-        mode: u16,
-        unhandled: impl FnMut(&mut Self),
-    ) {
+    pub fn decsed(&mut self, mode: u16, unhandled: impl FnMut(&mut Self)) {
         self.ed(mode, unhandled);
     }
 
     // CSI K
-    pub(crate) fn el(
-        &mut self,
-        mode: u16,
-        mut unhandled: impl FnMut(&mut Self),
-    ) {
-        let attrs = self.attrs;
+    pub fn el(&mut self, mode: u16, mut unhandled: impl FnMut(&mut Self)) {
+        let attrs = self.screen.attrs;
         match mode {
-            0 => self.grid_mut().erase_row_forward(attrs),
-            1 => self.grid_mut().erase_row_backward(attrs),
-            2 => self.grid_mut().erase_row(attrs),
+            0 => self.screen.grid_mut().erase_row_forward(attrs),
+            1 => self.screen.grid_mut().erase_row_backward(attrs),
+            2 => self.screen.grid_mut().erase_row(attrs),
             _ => unhandled(self),
         }
     }
 
     // CSI ? K
-    pub(crate) fn decsel(
-        &mut self,
-        mode: u16,
-        unhandled: impl FnMut(&mut Self),
-    ) {
+    pub fn decsel(&mut self, mode: u16, unhandled: impl FnMut(&mut Self)) {
         self.el(mode, unhandled);
     }
 
     // CSI L
-    pub(crate) fn il(&mut self, count: u16) {
-        self.grid_mut().insert_lines(count);
+    pub fn il(&mut self, count: u16) {
+        self.screen.grid_mut().insert_lines(count);
     }
 
     // CSI M
-    pub(crate) fn dl(&mut self, count: u16) {
-        self.grid_mut().delete_lines(count);
+    pub fn dl(&mut self, count: u16) {
+        self.screen.grid_mut().delete_lines(count);
     }
 
     // CSI P
-    pub(crate) fn dch(&mut self, count: u16) {
-        self.grid_mut().delete_cells(count);
+    pub fn dch(&mut self, count: u16) {
+        self.screen.grid_mut().delete_cells(count);
     }
 
     // CSI S
-    pub(crate) fn su(&mut self, count: u16) {
-        self.grid_mut().scroll_up(count);
+    pub fn su(&mut self, count: u16) {
+        let on_row = Self::on_row(&self.screen, &mut self.callbacks);
+        self.screen.grid_mut().scroll_up(count, on_row);
     }
 
     // CSI T
-    pub(crate) fn sd(&mut self, count: u16) {
-        self.grid_mut().scroll_down(count);
+    pub fn sd(&mut self, count: u16) {
+        self.screen.grid_mut().scroll_down(count);
     }
 
     // CSI X
-    pub(crate) fn ech(&mut self, count: u16) {
-        let attrs = self.attrs;
-        self.grid_mut().erase_cells(count, attrs);
+    pub fn ech(&mut self, count: u16) {
+        let attrs = self.screen.attrs;
+        self.screen.grid_mut().erase_cells(count, attrs);
     }
 
     // CSI d
-    pub(crate) fn vpa(&mut self, row: u16) {
-        self.grid_mut().row_set(row - 1);
+    pub fn vpa(&mut self, row: u16) {
+        self.screen.grid_mut().row_set(row - 1);
     }
 
     // CSI ? h
-    pub(crate) fn decset(
+    pub fn decset(
         &mut self,
         params: &vte::Params,
         mut unhandled: impl FnMut(&mut Self),
     ) {
         for param in params {
+            let screen = &mut self.screen;
             match param {
-                [1] => self.set_mode(MODE_APPLICATION_CURSOR),
-                [6] => self.grid_mut().set_origin_mode(true),
-                [9] => self.set_mouse_mode(MouseProtocolMode::Press),
-                [25] => self.clear_mode(MODE_HIDE_CURSOR),
-                [47] => self.enter_alternate_grid(),
+                [1] => screen.set_mode(MODE_APPLICATION_CURSOR),
+                [6] => screen.grid_mut().set_origin_mode(true),
+                [9] => screen.set_mouse_mode(MouseProtocolMode::Press),
+                [25] => screen.clear_mode(MODE_HIDE_CURSOR),
+                [47] => screen.enter_alternate_grid(),
                 [1000] => {
-                    self.set_mouse_mode(MouseProtocolMode::PressRelease);
+                    screen.set_mouse_mode(MouseProtocolMode::PressRelease);
                 }
                 [1002] => {
-                    self.set_mouse_mode(MouseProtocolMode::ButtonMotion);
+                    screen.set_mouse_mode(MouseProtocolMode::ButtonMotion);
                 }
-                [1003] => self.set_mouse_mode(MouseProtocolMode::AnyMotion),
+                [1003] => screen.set_mouse_mode(MouseProtocolMode::AnyMotion),
                 [1005] => {
-                    self.set_mouse_encoding(MouseProtocolEncoding::Utf8);
+                    screen.set_mouse_encoding(MouseProtocolEncoding::Utf8);
                 }
                 [1006] => {
-                    self.set_mouse_encoding(MouseProtocolEncoding::Sgr);
+                    screen.set_mouse_encoding(MouseProtocolEncoding::Sgr);
                 }
                 [1049] => {
                     self.decsc();
-                    self.alternate_grid.clear();
-                    self.enter_alternate_grid();
+                    self.screen.alternate_grid.clear();
+                    self.screen.enter_alternate_grid();
                 }
-                [2004] => self.set_mode(MODE_BRACKETED_PASTE),
+                [2004] => screen.set_mode(MODE_BRACKETED_PASTE),
                 _ => unhandled(self),
             }
         }
     }
 
     // CSI ? l
-    pub(crate) fn decrst(
+    pub fn decrst(
         &mut self,
         params: &vte::Params,
         mut unhandled: impl FnMut(&mut Self),
     ) {
         for param in params {
+            let screen = &mut self.screen;
             match param {
-                [1] => self.clear_mode(MODE_APPLICATION_CURSOR),
-                [6] => self.grid_mut().set_origin_mode(false),
-                [9] => self.clear_mouse_mode(MouseProtocolMode::Press),
-                [25] => self.set_mode(MODE_HIDE_CURSOR),
+                [1] => screen.clear_mode(MODE_APPLICATION_CURSOR),
+                [6] => screen.grid_mut().set_origin_mode(false),
+                [9] => screen.clear_mouse_mode(MouseProtocolMode::Press),
+                [25] => screen.set_mode(MODE_HIDE_CURSOR),
                 [47] => {
-                    self.exit_alternate_grid();
+                    screen.exit_alternate_grid();
                 }
                 [1000] => {
-                    self.clear_mouse_mode(MouseProtocolMode::PressRelease);
+                    screen.clear_mouse_mode(MouseProtocolMode::PressRelease);
                 }
                 [1002] => {
-                    self.clear_mouse_mode(MouseProtocolMode::ButtonMotion);
+                    screen.clear_mouse_mode(MouseProtocolMode::ButtonMotion);
                 }
                 [1003] => {
-                    self.clear_mouse_mode(MouseProtocolMode::AnyMotion);
+                    screen.clear_mouse_mode(MouseProtocolMode::AnyMotion);
                 }
                 [1005] => {
-                    self.clear_mouse_encoding(MouseProtocolEncoding::Utf8);
+                    screen.clear_mouse_encoding(MouseProtocolEncoding::Utf8);
                 }
                 [1006] => {
-                    self.clear_mouse_encoding(MouseProtocolEncoding::Sgr);
+                    screen.clear_mouse_encoding(MouseProtocolEncoding::Sgr);
                 }
                 [1049] => {
-                    self.exit_alternate_grid();
+                    screen.exit_alternate_grid();
                     self.decrc();
                 }
-                [2004] => self.clear_mode(MODE_BRACKETED_PASTE),
+                [2004] => screen.clear_mode(MODE_BRACKETED_PASTE),
                 _ => unhandled(self),
             }
         }
     }
 
     // CSI m
-    pub(crate) fn sgr(
+    pub fn sgr(
         &mut self,
         params: &vte::Params,
         mut unhandled: impl FnMut(&mut Self),
@@ -1318,7 +1556,7 @@ impl Screen {
         // instance with a 0 in it, but vte doesn't allow creating new Params
         // instances
         if params.is_empty() {
-            self.attrs = crate::attrs::Attrs::default();
+            self.screen.attrs = crate::attrs::Attrs::default();
             return;
         }
 
@@ -1354,36 +1592,37 @@ impl Screen {
         }
 
         loop {
+            let screen = &mut self.screen;
             match next_param!() {
-                [0] => self.attrs = crate::attrs::Attrs::default(),
-                [1] => self.attrs.set_bold(),
-                [2] => self.attrs.set_dim(),
-                [3] => self.attrs.set_italic(true),
-                [4] => self.attrs.set_underline(true),
-                [7] => self.attrs.set_inverse(true),
-                [22] => self.attrs.set_normal_intensity(),
-                [23] => self.attrs.set_italic(false),
-                [24] => self.attrs.set_underline(false),
-                [27] => self.attrs.set_inverse(false),
+                [0] => screen.attrs = crate::attrs::Attrs::default(),
+                [1] => screen.attrs.set_bold(),
+                [2] => screen.attrs.set_dim(),
+                [3] => screen.attrs.set_italic(true),
+                [4] => screen.attrs.set_underline(true),
+                [7] => screen.attrs.set_inverse(true),
+                [22] => screen.attrs.set_normal_intensity(),
+                [23] => screen.attrs.set_italic(false),
+                [24] => screen.attrs.set_underline(false),
+                [27] => screen.attrs.set_inverse(false),
                 [n] if (30..=37).contains(n) => {
-                    self.attrs.fgcolor = crate::Color::Idx(to_u8!(*n) - 30);
+                    screen.attrs.fgcolor = crate::Color::Idx(to_u8!(*n) - 30);
                 }
                 [38, 2, r, g, b] => {
-                    self.attrs.fgcolor =
+                    screen.attrs.fgcolor =
                         crate::Color::Rgb(to_u8!(*r), to_u8!(*g), to_u8!(*b));
                 }
                 [38, 5, i] => {
-                    self.attrs.fgcolor = crate::Color::Idx(to_u8!(*i));
+                    screen.attrs.fgcolor = crate::Color::Idx(to_u8!(*i));
                 }
                 [38] => match next_param!() {
                     [2] => {
                         let r = next_param_u8!();
                         let g = next_param_u8!();
                         let b = next_param_u8!();
-                        self.attrs.fgcolor = crate::Color::Rgb(r, g, b);
+                        screen.attrs.fgcolor = crate::Color::Rgb(r, g, b);
                     }
                     [5] => {
-                        self.attrs.fgcolor =
+                        screen.attrs.fgcolor =
                             crate::Color::Idx(next_param_u8!());
                     }
                     _ => {
@@ -1392,27 +1631,27 @@ impl Screen {
                     }
                 },
                 [39] => {
-                    self.attrs.fgcolor = crate::Color::Default;
+                    screen.attrs.fgcolor = crate::Color::Default;
                 }
                 [n] if (40..=47).contains(n) => {
-                    self.attrs.bgcolor = crate::Color::Idx(to_u8!(*n) - 40);
+                    screen.attrs.bgcolor = crate::Color::Idx(to_u8!(*n) - 40);
                 }
                 [48, 2, r, g, b] => {
-                    self.attrs.bgcolor =
+                    screen.attrs.bgcolor =
                         crate::Color::Rgb(to_u8!(*r), to_u8!(*g), to_u8!(*b));
                 }
                 [48, 5, i] => {
-                    self.attrs.bgcolor = crate::Color::Idx(to_u8!(*i));
+                    screen.attrs.bgcolor = crate::Color::Idx(to_u8!(*i));
                 }
                 [48] => match next_param!() {
                     [2] => {
                         let r = next_param_u8!();
                         let g = next_param_u8!();
                         let b = next_param_u8!();
-                        self.attrs.bgcolor = crate::Color::Rgb(r, g, b);
+                        screen.attrs.bgcolor = crate::Color::Rgb(r, g, b);
                     }
                     [5] => {
-                        self.attrs.bgcolor =
+                        screen.attrs.bgcolor =
                             crate::Color::Idx(next_param_u8!());
                     }
                     _ => {
@@ -1421,13 +1660,13 @@ impl Screen {
                     }
                 },
                 [49] => {
-                    self.attrs.bgcolor = crate::Color::Default;
+                    screen.attrs.bgcolor = crate::Color::Default;
                 }
                 [n] if (90..=97).contains(n) => {
-                    self.attrs.fgcolor = crate::Color::Idx(to_u8!(*n) - 82);
+                    screen.attrs.fgcolor = crate::Color::Idx(to_u8!(*n) - 82);
                 }
                 [n] if (100..=107).contains(n) => {
-                    self.attrs.bgcolor = crate::Color::Idx(to_u8!(*n) - 92);
+                    screen.attrs.bgcolor = crate::Color::Idx(to_u8!(*n) - 92);
                 }
                 _ => unhandled(self),
             }
@@ -1435,8 +1674,10 @@ impl Screen {
     }
 
     // CSI r
-    pub(crate) fn decstbm(&mut self, (top, bottom): (u16, u16)) {
-        self.grid_mut().set_scroll_region(top - 1, bottom - 1);
+    pub fn decstbm(&mut self, (top, bottom): (u16, u16)) {
+        self.screen
+            .grid_mut()
+            .set_scroll_region(top - 1, bottom - 1);
     }
 }
 

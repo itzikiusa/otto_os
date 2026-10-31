@@ -15,6 +15,7 @@
   import { auth } from '../../lib/stores/auth.svelte';
   import type { DbExportFormat, ExportToPathResp } from '../../lib/api/types';
   import { postNdjsonStream } from '../../lib/api/client';
+  import { postForBlob } from '../../lib/api/files';
   import Modal from '../../lib/components/Modal.svelte';
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
   import { fmtBytes } from './results-format';
@@ -57,14 +58,22 @@
   }: Props = $props();
 
   type ExportFmtOpt = { value: DbExportFormat; label: string };
-  const EXPORT_FORMATS: ExportFmtOpt[] = [
+  const TEXT_FORMATS: ExportFmtOpt[] = [
     { value: 'csv', label: 'CSV' },
     { value: 'csv_with_names', label: 'CSV (with header)' },
     { value: 'tsv', label: 'TSV' },
     { value: 'tsv_with_names', label: 'TSV (with header)' },
     { value: 'json', label: 'JSON (array)' },
-    { value: 'ndjson', label: 'NDJSON' },
+    { value: 'ndjson', label: 'NDJSON / JSONEachRow' },
   ];
+  // Rendered by the database server itself (ClickHouse `FORMAT …`).
+  const BINARY_FORMATS: ExportFmtOpt[] = [
+    { value: 'parquet', label: 'Parquet' },
+    { value: 'arrow', label: 'Arrow' },
+    { value: 'orc', label: 'ORC' },
+  ];
+  const clickhouse = $derived(database.capabilities?.engine === 'clickhouse');
+  const EXPORT_FORMATS = $derived(clickhouse ? [...TEXT_FORMATS, ...BINARY_FORMATS] : TEXT_FORMATS);
   const EXT_BY_FORMAT: Record<DbExportFormat, string> = {
     csv: 'csv',
     csv_with_names: 'csv',
@@ -72,7 +81,13 @@
     tsv_with_names: 'tsv',
     json: 'json',
     ndjson: 'ndjson',
+    parquet: 'parquet',
+    arrow: 'arrow',
+    orc: 'orc',
   };
+  /** Where the file goes: a browser download (any editor), or a path on the
+   *  Otto host (root only — it writes the daemon's disk). */
+  let destination = $state<'download' | 'host'>('download');
   const LS_FORMAT = 'otto_db_export_format';
   const LS_DIR = 'otto_db_export_dir';
 
@@ -80,7 +95,7 @@
   // throwing post-success write must not report a finished export as failed.
   function loadFormat(): DbExportFormat {
     const v = lsGet(LS_FORMAT) || 'csv';
-    return EXPORT_FORMATS.some((f) => f.value === v) ? (v as DbExportFormat) : 'csv';
+    return [...TEXT_FORMATS, ...BINARY_FORMATS].some((f) => f.value === v) ? (v as DbExportFormat) : 'csv';
   }
   function loadDir(): string {
     return lsGet(LS_DIR) || '~/Downloads';
@@ -132,12 +147,52 @@
       exportName = defaultExportName();
       return;
     }
-    exportName = exportName.replace(/\.(csv|tsv|json|ndjson)$/i, '') + `.${ext}`;
+    exportName = exportName.replace(/\.(csv|tsv|json|ndjson|parquet|arrow|orc)$/i, '') + `.${ext}`;
   }
 
   function joinPath(dir: string, name: string): string {
     const d = dir.replace(/\/+$/, '');
     return `${d}/${name}`;
+  }
+
+  /** Stream the uncapped result through the daemon and save it as a browser
+   *  download (`POST …/db/export`) — no daemon-disk access, so not root-only. */
+  async function runDownload(): Promise<void> {
+    if (!canExport || writeVerb || !connectionId || !statement || exportingPath || limitError) return;
+    const name = exportName.trim() || defaultExportName();
+    const rawLimit = String(exportLimit ?? '').trim();
+    exportingPath = true;
+    exportProgress = null;
+    exportAbort = new AbortController();
+    try {
+      const blob = await postForBlob(
+        `/connections/${connectionId}/db/export`,
+        {
+          statement,
+          node: (node === undefined ? database.activeDb : node) ?? undefined,
+          format: exportFormat,
+          max_rows: rawLimit ? Number(rawLimit) : undefined,
+        },
+        exportAbort.signal,
+      );
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = name;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1500);
+      lsSet(LS_FORMAT, exportFormat);
+      onclose();
+      toasts.success('Exported', `${fmtBytes(blob.size)} → ${name}`);
+    } catch (e) {
+      if (e instanceof DOMException && e.name === 'AbortError') toasts.info('Export canceled');
+      else toastError('Couldn’t export', e);
+    } finally {
+      exportingPath = false;
+      exportAbort = null;
+    }
   }
 
   async function runPathExport(): Promise<void> {
@@ -232,16 +287,19 @@
       </p>
     {/if}
     <p class="exp-hint">
-      Runs the statement on the daemon host and <strong>streams</strong> the full result to a local
-      file — for sets too large to pull into the browser. Choose the format, destination folder,
-      and an optional row limit.
+      Re-runs the statement and <strong>streams</strong> every row (not just the rows on screen).
+      Download it, or — for sets too large for the browser — write it straight to a file on the Otto host.
     </p>
-    {#if !auth.isRoot}
-      <p class="exp-hint" role="note">
-        Only the root user can write files on the Otto host computer. Download the rows from the
-        results toolbar in your browser instead.
-      </p>
-    {/if}
+
+    <div class="exp-row" role="radiogroup" aria-label="Save to">
+      <span class="exp-label">Save to</span>
+      <div class="exp-dest-choice">
+        <label><input type="radio" bind:group={destination} value="download" /> My computer (download)</label>
+        <label title={auth.isRoot ? undefined : 'Only the root user can write files on the Otto host computer'}>
+          <input type="radio" bind:group={destination} value="host" disabled={!auth.isRoot} /> Otto host path
+        </label>
+      </div>
+    </div>
 
     <label class="exp-row">
       <span class="exp-label">Format</span>
@@ -252,6 +310,7 @@
       </select>
     </label>
 
+    {#if destination === 'host'}
     <div class="exp-row">
       <span class="exp-label">Folder</span>
       <div class="exp-dir">
@@ -261,6 +320,8 @@
         </button>
       </div>
     </div>
+
+    {/if}
 
     <label class="exp-row">
       <span class="exp-label">File name</span>
@@ -282,9 +343,11 @@
     </label>
     {#if limitError}<p class="exp-err" id="exp-limit-err">{limitError}</p>{/if}
 
+    {#if destination === 'host'}
     <div class="exp-dest mono" title="Resolved destination on the daemon host">
       → {joinPath(exportDir.trim() || '~/Downloads', exportName.trim() || defaultExportName())}
     </div>
+    {/if}
 
     {#if exportingPath}
       <div class="exp-progress">
@@ -306,8 +369,8 @@
     </button>
     <button
       class="btn primary"
-      onclick={() => void runPathExport()}
-      disabled={exportingPath || !!writeVerb || !auth.isRoot || limitError !== null}
+      onclick={() => void (destination === 'download' ? runDownload() : runPathExport())}
+      disabled={exportingPath || !!writeVerb || (destination === 'host' && !auth.isRoot) || limitError !== null}
       title={writeVerb ? 'Export re-runs the statement — not available for a write' : undefined}
     >
       {exportingPath ? 'Exporting…' : 'Export all'}
@@ -334,6 +397,16 @@
     font-size: var(--fs-s);
   }
   /* ── Local-file export dialog ─────────────────────────────────────────────── */
+  .exp-dest-choice {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 16px;
+  }
+  .exp-dest-choice label {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
   .exp-form {
     display: flex;
     flex-direction: column;

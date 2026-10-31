@@ -179,6 +179,8 @@ test('MySQL: import a CSV into a table via the dialog', async ({ page }) => {
   await page.locator('.grid-toolbar').getByTitle('Download, export all rows, or import a file', { exact: true }).click();
   await page.locator('.ctx-item', { hasText: 'Import file' }).click();
   await expect(page.locator('.imp-form')).toBeVisible({ timeout: 10_000 });
+  // The file is on the Otto host (root): pick that source first.
+  await page.locator('.imp-form').getByRole('radio', { name: /Otto host path/ }).check();
   await page.locator('input[placeholder="~/Downloads/data.csv"]').fill(join(importDir, 'people.csv'));
   await page.locator('input[placeholder="target_table"]').fill(MYSQL_TABLE);
   // Format defaults to CSV. Submit.
@@ -204,6 +206,8 @@ test('MongoDB: restricted import refuses unsupported native scope without writes
   await exportBtn.click();
   await page.locator('.ctx-item', { hasText: 'Import file' }).click();
   await expect(page.locator('.imp-form')).toBeVisible({ timeout: 10_000 });
+  // The file is on the Otto host (root): pick that source first.
+  await page.locator('.imp-form').getByRole('radio', { name: /Otto host path/ }).check();
   await page.locator('input[placeholder="~/Downloads/data.csv"]').fill(join(importDir, 'people.csv'));
   await page.locator('input[placeholder="target_table"]').fill(MONGO_COLL);
   await page.getByLabel('Import file into a table').getByRole('button', { name: 'Import', exact: true }).click();

@@ -29,7 +29,7 @@ test-util = []
 [dependencies]
 hex = { workspace = true }
 regex = "1.13"
-tokio-util = { version = "0.7.19", features = ["io"] }
+tokio-util = { version = "0.7.20", features = ["io"] }
 tempfile.workspace = true
 rustix = { workspace = true, features = ["process"] }
 otto-core.workspace = true

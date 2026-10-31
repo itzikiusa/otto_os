@@ -239,6 +239,16 @@ const TUNNEL_IDLE_TTL: Duration = Duration::from_secs(30 * 60);
 /// this bounds worst-case daemon memory for `import_from_path` at a few × this.
 const IMPORT_MAX_BYTES: u64 = 100 * 1024 * 1024;
 
+/// `INSERT INTO <table> FORMAT <fmt>` for a streamed ClickHouse import; the
+/// table is quoted like the batched-insert path's.
+fn clickhouse_insert(table: &str, format: crate::import::ImportFormat) -> String {
+    format!(
+        "INSERT INTO {} FORMAT {}",
+        crate::import::SqlFlavor::Clickhouse.ident(table),
+        format.clickhouse_format()
+    )
+}
+
 /// Table cap for [`DbViewerService::schema_context`] — the COMPLETE schema fed to
 /// the DB Assistant agent. Generous (a model wants the whole picture) but bounded:
 /// each table is one `object_detail` round-trip, so a runaway schema with tens of
@@ -2748,6 +2758,7 @@ impl DbViewerService {
         max_rows: Option<usize>,
         dest: &std::path::Path,
     ) -> Result<(crate::export::ExportCounts, u64)> {
+        self.refuse_binary_export(conn_id, format).await?;
         self.require_local_path_access(conn_id, user_id).await?;
         // Drivers receive the canonical scope (see `access::canonical_node`).
         let canonical = crate::access::canonical_node(node);
@@ -2821,6 +2832,26 @@ impl DbViewerService {
     /// `Box<dyn Write + Send>` is accepted too (unpaced). Same write-guard,
     /// resolve, and history semantics as `export_to_path`; returns
     /// `{rows, bytes}` + duration.
+    /// Parquet/Arrow/ORC are rendered by the database server: only ClickHouse
+    /// can produce them. Refused up front for every other engine, before a
+    /// download starts (the row formatter would fail after the header).
+    async fn refuse_binary_export(
+        &self,
+        conn_id: &Id,
+        format: crate::export::ExportFormat,
+    ) -> Result<()> {
+        if !format.is_binary() {
+            return Ok(());
+        }
+        let conn = self.connections.get(conn_id).await?;
+        if !matches!(Engine::from_kind(conn.kind), Some(Engine::Clickhouse)) {
+            return Err(Error::Invalid(
+                "Parquet, Arrow and ORC exports are available for ClickHouse connections".into(),
+            ));
+        }
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn export_to_writer(
         &self,
@@ -2832,6 +2863,7 @@ impl DbViewerService {
         max_rows: Option<usize>,
         w: impl Into<crate::export::ExportWriter> + Send,
     ) -> Result<(crate::export::ExportCounts, u64)> {
+        self.refuse_binary_export(conn_id, format).await?;
         let w = w.into();
         let canonical = crate::access::canonical_node(node);
         let node = canonical.as_deref();
@@ -2984,6 +3016,29 @@ impl DbViewerService {
                 "restricted imports are unsupported for this engine",
             ));
         }
+        // ClickHouse over HTTP parses the file itself (`INSERT … FORMAT X`):
+        // stream it from disk — no byte cap, no row parse, server-side typing.
+        if matches!(engine, Engine::Clickhouse) {
+            let statement = clickhouse_insert(table, format);
+            if let Some(r) = self
+                .clickhouse_stream_target(conn_id, user_id, &statement, confirm_write)
+                .await?
+            {
+                let file = tokio::fs::File::open(local_path)
+                    .await
+                    .map_err(|e| Error::Invalid(format!("read import file: {e}")))?;
+                let body = reqwest::Body::wrap_stream(tokio_util::io::ReaderStream::new(file));
+                return self
+                    .clickhouse_stream_import(conn_id, user_id, &r, &statement, table, body)
+                    .await;
+            }
+            if format.is_binary() {
+                return Err(Error::Invalid(
+                    "Parquet, Arrow and ORC imports need the ClickHouse HTTP port (8123/8443)"
+                        .into(),
+                ));
+            }
+        }
         // Hard byte cap BEFORE reading: the request names any daemon-host file,
         // and the parse/render pipeline holds several copies of the data in RAM
         // — an unbounded multi-GB path would OOM the daemon.
@@ -3001,6 +3056,167 @@ impl DbViewerService {
         let bytes = tokio::fs::read(local_path)
             .await
             .map_err(|e| Error::Invalid(format!("read import file: {e}")))?;
+        self.import_bytes(
+            conn_id,
+            user_id,
+            engine,
+            bytes,
+            format,
+            table,
+            batch_size,
+            confirm_write,
+        )
+        .await
+    }
+
+    /// Import an UPLOADED file (the browser's "From my computer"): the same
+    /// gates as [`Self::import_from_path`] except the root-only daemon-path
+    /// check, since the bytes come from the caller, not the daemon's disk.
+    /// ClickHouse over HTTP streams the body straight into `INSERT … FORMAT X`
+    /// (no size cap); every other engine buffers up to `IMPORT_MAX_BYTES` and
+    /// takes the parse + batched-insert path.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn import_upload<B>(
+        &self,
+        conn_id: &Id,
+        user_id: &Id,
+        format: crate::import::ImportFormat,
+        table: &str,
+        batch_size: usize,
+        confirm_write: bool,
+        body: B,
+    ) -> Result<ImportCounts>
+    where
+        B: futures_util::Stream<Item = std::io::Result<bytes::Bytes>> + Send + 'static,
+    {
+        use futures_util::StreamExt as _;
+        let conn = self.connections.get(conn_id).await?;
+        let engine = Engine::from_kind(conn.kind)
+            .ok_or_else(|| Error::Invalid("connection is not a browsable database".into()))?;
+        if matches!(engine, Engine::Redis) {
+            return Err(Error::Invalid(
+                "file import is not supported for redis".into(),
+            ));
+        }
+        self.authorize(conn_id, user_id, None, "db_data").await?;
+        if self.is_enforced(conn_id).await? && !matches!(engine, Engine::Mysql | Engine::Postgres) {
+            return Err(crate::native_access::setup_error(
+                "restricted imports are unsupported for this engine",
+            ));
+        }
+        if matches!(engine, Engine::Clickhouse) {
+            let statement = clickhouse_insert(table, format);
+            if let Some(r) = self
+                .clickhouse_stream_target(conn_id, user_id, &statement, confirm_write)
+                .await?
+            {
+                let body = reqwest::Body::wrap_stream(body);
+                return self
+                    .clickhouse_stream_import(conn_id, user_id, &r, &statement, table, body)
+                    .await;
+            }
+        }
+        if format.is_binary() {
+            return Err(Error::Invalid(
+                "Parquet, Arrow and ORC imports are supported for ClickHouse (HTTP) only".into(),
+            ));
+        }
+        let mut bytes = Vec::new();
+        let mut body = std::pin::pin!(body);
+        while let Some(chunk) = body.next().await {
+            let chunk = chunk.map_err(|e| Error::Invalid(format!("read upload: {e}")))?;
+            if (bytes.len() + chunk.len()) as u64 > IMPORT_MAX_BYTES {
+                return Err(Error::Invalid(format!(
+                    "upload is larger than the {} MiB import cap for this engine",
+                    IMPORT_MAX_BYTES / (1024 * 1024)
+                )));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        self.import_bytes(
+            conn_id,
+            user_id,
+            engine,
+            bytes,
+            format,
+            table,
+            batch_size,
+            confirm_write,
+        )
+        .await
+    }
+
+    /// Run the write gates for a streamed ClickHouse `INSERT … FORMAT X` —
+    /// the same sequence as `run_with` (access snapshot + execution access,
+    /// write guard with the person's confirmation, resolution, native
+    /// verification) — and return the target when it speaks HTTP. `None`:
+    /// a native-protocol connection, which takes the parsed-rows path.
+    async fn clickhouse_stream_target(
+        &self,
+        conn_id: &Id,
+        user_id: &Id,
+        statement: &str,
+        confirm_write: bool,
+    ) -> Result<Option<Resolved>> {
+        let req = QueryRequest {
+            statement: statement.to_string(),
+            confirm_write,
+            ..QueryRequest::default()
+        };
+        let snap = self.access_snapshot(conn_id).await?;
+        self.execution_access_snap(&snap, user_id, &req).await?;
+        Self::guard_write_conn(&snap.conn, &req)?;
+        let r = self
+            .resolve_snap(&snap, conn_id, user_id, None, "db_data", SecretRead::Fresh)
+            .await?;
+        self.verify_native_snap(&snap, conn_id, user_id, &r).await?;
+        Ok(crate::drivers::clickhouse::uses_http(&r.config).then_some(r))
+    }
+
+    /// Stream `body` into `statement` and record ONE history row.
+    async fn clickhouse_stream_import(
+        &self,
+        conn_id: &Id,
+        user_id: &Id,
+        r: &Resolved,
+        statement: &str,
+        table: &str,
+        body: reqwest::Body,
+    ) -> Result<ImportCounts> {
+        let started = Instant::now();
+        let result = r
+            .with_lifecycle(r.driver.insert_formatted(&r.config, statement, body, None))
+            .await;
+        let rows = *result.as_ref().unwrap_or(&0);
+        let _ = self
+            .repo
+            .add_history(
+                conn_id,
+                user_id,
+                &format!("import {rows} row(s) → {table} ({statement})"),
+                result.is_ok(),
+                started.elapsed().as_millis() as i64,
+                rows as i64,
+                result.as_ref().err().map(|e| e.to_string()).as_deref(),
+            )
+            .await;
+        result.map(|rows| ImportCounts { rows, batches: 1 })
+    }
+
+    /// The parse + batched-insert import shared by the path and upload entry
+    /// points (MySQL/PostgreSQL/MongoDB, and ClickHouse over native TCP).
+    #[allow(clippy::too_many_arguments)]
+    async fn import_bytes(
+        &self,
+        conn_id: &Id,
+        user_id: &Id,
+        engine: Engine,
+        bytes: Vec<u8>,
+        format: crate::import::ImportFormat,
+        table: &str,
+        batch_size: usize,
+        confirm_write: bool,
+    ) -> Result<ImportCounts> {
         // Parsing up to IMPORT_MAX_BYTES of CSV/JSON is up to a second of CPU:
         // run it on the blocking pool, and let the raw bytes go with it.
         let mut parsed =

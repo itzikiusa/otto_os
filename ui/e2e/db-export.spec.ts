@@ -154,6 +154,8 @@ async function openExportDialog(page: Page, fileName: string): Promise<void> {
   await page.locator('.grid-toolbar').getByTitle('Download, export all rows, or import a file', { exact: true }).first().click();
   await page.locator('.ctx-item', { hasText: 'Export all rows' }).click();
   await expect(page.locator('.exp-form')).toBeVisible({ timeout: 10_000 });
+  // The file goes to the Otto host (root): pick that destination first.
+  await page.locator('.exp-form').getByRole('radio', { name: /Otto host path/ }).check();
   await page.locator('.exp-input[placeholder="~/Downloads"]').fill(exportDir);
   await page.locator('.exp-input[placeholder="result.csv"]').fill(fileName);
 }

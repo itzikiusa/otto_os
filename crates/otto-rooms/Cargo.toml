@@ -32,6 +32,6 @@ sha1 = "0.11.0"
 
 # Local shared-screen OCR; Vision ships with macOS (no cloud credentials).
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2 = "0.6.4"
+objc2 = "0.6.5"
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSData", "NSDictionary", "NSError", "NSString"] }
 objc2-vision = { version = "0.3.2", default-features = false, features = ["std", "VNRequest", "VNRequestHandler", "VNRecognizeTextRequest", "VNObservation", "VNTypes"] }

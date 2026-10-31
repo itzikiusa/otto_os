@@ -1203,6 +1203,18 @@ mod tests {
             let address = listener.local_addr().unwrap();
             let producer = tokio::spawn(async move {
                 let (mut socket, _) = listener.accept().await.unwrap();
+                // Read the request head first: hyper >= 1.12 rejects a
+                // response that arrives before its request was sent
+                // (`UnexpectedMessage`), as a real server never does that.
+                let mut head = Vec::new();
+                let mut byte = [0u8; 1];
+                while !head.ends_with(b"\r\n\r\n") {
+                    use tokio::io::AsyncReadExt;
+                    if socket.read(&mut byte).await.unwrap_or(0) == 0 {
+                        break;
+                    }
+                    head.push(byte[0]);
+                }
                 socket.write_all(format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nTransfer-Encoding: chunked\r\n\r\n"
                 ).as_bytes()).await.unwrap();

@@ -1,9 +1,9 @@
 # Otto patch: strict read-only native startup
 
-Vendored from crates.io klickhouse **0.15.3**, checksum
-`43df4e6356e65204d50730a3699b49a0ad345a947b725a0aaf7544f691c8e98a`.
-Upstream: https://github.com/Protryon/klickhouse at
-`0e514f93fb07073dbf86f7b7a180e4656f117244`, subdirectory `klickhouse`.
+Vendored from crates.io klickhouse **0.16.0** (re-vendored 2026-10-31 from 0.15.3;
+the patch below re-applied unchanged — the startup code it touches is identical).
+Upstream: https://github.com/Protryon/klickhouse (license files from revision
+`0e514f93fb07073dbf86f7b7a180e4656f117244`, unchanged since), subdirectory `klickhouse`.
 MIT and Apache-2.0 license files are copied from that exact upstream revision.
 Registry-normalized Cargo.toml and Cargo.toml.orig are retained; registry cache
 markers and package Cargo.lock are omitted. This patch is not upstream acceptance.

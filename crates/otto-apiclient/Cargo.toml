@@ -38,7 +38,7 @@ boa_engine = "0.22.0"
 regex = "1.13"
 # Basic-auth decoding in `rest`'s curl parser.
 base64.workspace = true
-libc = "0.2.190"
+libc = "0.2.191"
 otto-state.workspace = true
 otto-ssh.workspace = true
 async-trait.workspace = true
@@ -51,7 +51,7 @@ rand.workspace = true
 [dev-dependencies]
 # The gRPC endpoint test builds a TLS config, which needs the process-level
 # rustls provider `ottod` installs at startup. Same version/feature ottod pins.
-rustls = { version = "0.23.45", default-features = false, features = ["ring"] }
+rustls = { version = "0.23.46", default-features = false, features = ["ring"] }
 # The gRPC channel-reuse test (perf N5) dials a minimal h2c server. Same
 # version tonic/hyper already resolve.
-h2 = "0.4.19"
+h2 = "0.4.20"

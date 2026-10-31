@@ -19,7 +19,7 @@ shell-words = { workspace = true }
 chrono = { workspace = true }
 tracing = { workspace = true }
 # Read-only XML parser for importing MySQL Workbench / DataGrip configs.
-roxmltree = "0.21.1"
+roxmltree = "0.21.2"
 
 [dev-dependencies]
 otto-keychain = { workspace = true }

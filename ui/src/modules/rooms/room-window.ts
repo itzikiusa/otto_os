@@ -42,7 +42,12 @@ function listen(): void {
     const tab = opened.get(data.roomId);
     if (!tab || e.source !== tab) return;
     const context = recallRoom(data.roomId);
-    if (context) tab.postMessage({ type: REPLY, roomId: data.roomId, context }, location.origin);
+    if (!context) return;
+    // Plain fields only: a reactive proxy throws DataCloneError in postMessage.
+    const { room_id, member_id, token } = context.credential;
+    try {
+      tab.postMessage({ type: REPLY, roomId: data.roomId, context: { origin: context.origin, credential: { room_id, member_id, token } } }, location.origin);
+    } catch (err) { console.error('room hand-off failed', err); }
   });
 }
 

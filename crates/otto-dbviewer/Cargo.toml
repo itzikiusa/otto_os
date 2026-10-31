@@ -19,6 +19,8 @@ async-trait = { workspace = true }
 chrono = { workspace = true }
 tracing = { workspace = true }
 futures-util = { workspace = true }
+bytes = { workspace = true }
+tokio-util = { version = "0.7.20", features = ["io"] }
 base64 = { workspace = true }
 sha2 = { workspace = true }
 reqwest = { workspace = true }
@@ -26,13 +28,13 @@ reqwest = { workspace = true }
 # driver rather than via reqwest's zstd feature (that would turn on silent
 # auto-decompression for every reqwest client in the daemon). Already in the
 # tree through the mongodb driver's zstd wire compression.
-zstd = { version = "0.13.3", default-features = false }
+zstd = { version = "0.14.3", default-features = false }
 # `mysql-rsa`: sqlx 0.9 no longer enables the RSA backend by default, and
 # without it MySQL 8/9's default `caching_sha2_password` fails on a plaintext
 # connection ("RSA auth backend disabled") — the client encrypts the password
 # with the server's public key. TLS connections never take that path.
 sqlx = { workspace = true, features = ["mysql", "mysql-rsa", "postgres", "tls-rustls", "bigdecimal", "time", "chrono", "uuid", "ipnetwork", "mac_address"] }
-redis = { version = "1.7.1", default-features = false, features = ["tokio-comp", "tokio-rustls-comp", "connection-manager"] }
+redis = { version = "1.8.1", default-features = false, features = ["tokio-comp", "tokio-rustls-comp", "connection-manager"] }
 # Wire compression is not a nice-to-have here: a fat-document collection read
 # over an SSH tunnel is bandwidth-bound (measured ~68 KB/s on a real bastion),
 # and this payload shape compresses ~39x with zstd — 54s → ~1.5s.
@@ -43,13 +45,13 @@ mongodb = { version = "3.9.1", features = [
     "zlib-compression",
 ] }
 sqlparser = { version = "0.63.0", features = ["visitor"] }
-clickhouse = { version = "0.15.2", features = ["rustls-tls"] }
-klickhouse = { version = "0.15.3", features = ["tls"] }
+clickhouse = { version = "0.15.3", features = ["rustls-tls"] }
+klickhouse = { version = "0.16.0", features = ["tls"] }
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12"] }
-rustls = { version = "0.23.45", default-features = false, features = ["ring", "tls12", "std"] }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "tls12", "std"] }
 rustls-pki-types = "1.15.1"
-rustls-native-certs = "0.8.4"
-webpki-roots = "1.0.9"
+rustls-native-certs = "0.8.5"
+webpki-roots = "1.0.11"
 # mongosh-script execution: the pasted script is written to a temp .js file and
 # run through the real `mongosh --file` (drivers/mongodb.rs `run_script`).
 tempfile = { workspace = true }

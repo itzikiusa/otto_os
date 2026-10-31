@@ -58,6 +58,13 @@ pub enum ExportFormat {
     Json,
     /// Newline-delimited JSON — one JSON object per line.
     Ndjson,
+    /// Apache Parquet (binary, columnar). ClickHouse over HTTP only: the server
+    /// renders it (`FORMAT Parquet`) and the bytes stream through untouched.
+    Parquet,
+    /// Apache Arrow IPC file (binary). ClickHouse over HTTP only.
+    Arrow,
+    /// Apache ORC (binary, columnar). ClickHouse over HTTP only.
+    Orc,
 }
 
 impl ExportFormat {
@@ -69,7 +76,34 @@ impl ExportFormat {
             ExportFormat::Tsv | ExportFormat::TsvWithNames => "tsv",
             ExportFormat::Json => "json",
             ExportFormat::Ndjson => "ndjson",
+            ExportFormat::Parquet => "parquet",
+            ExportFormat::Arrow => "arrow",
+            ExportFormat::Orc => "orc",
         }
+    }
+
+    /// The download `Content-Type` for this format.
+    pub fn content_type(self) -> &'static str {
+        match self {
+            ExportFormat::Csv | ExportFormat::CsvWithNames => "text/csv; charset=utf-8",
+            ExportFormat::Tsv | ExportFormat::TsvWithNames => {
+                "text/tab-separated-values; charset=utf-8"
+            }
+            ExportFormat::Json => "application/json; charset=utf-8",
+            ExportFormat::Ndjson => "application/x-ndjson; charset=utf-8",
+            ExportFormat::Parquet => "application/vnd.apache.parquet",
+            ExportFormat::Arrow => "application/vnd.apache.arrow.file",
+            ExportFormat::Orc => "application/octet-stream",
+        }
+    }
+
+    /// Binary columnar formats only the database server can render (no row
+    /// formatter here): ClickHouse over HTTP streams them through as-is.
+    pub fn is_binary(self) -> bool {
+        matches!(
+            self,
+            ExportFormat::Parquet | ExportFormat::Arrow | ExportFormat::Orc
+        )
     }
 
     /// The ClickHouse `FORMAT <name>` to request so the server renders the bytes
@@ -83,6 +117,9 @@ impl ExportFormat {
             ExportFormat::Tsv => Some("TabSeparated"),
             ExportFormat::TsvWithNames => Some("TabSeparatedWithNames"),
             ExportFormat::Ndjson => Some("JSONEachRow"),
+            ExportFormat::Parquet => Some("Parquet"),
+            ExportFormat::Arrow => Some("Arrow"),
+            ExportFormat::Orc => Some("ORC"),
             // A JSON *array* has no streaming single-FORMAT match in CH.
             ExportFormat::Json => None,
         }
@@ -101,7 +138,7 @@ impl ExportFormat {
         match self {
             ExportFormat::Csv | ExportFormat::CsvWithNames => Some(','),
             ExportFormat::Tsv | ExportFormat::TsvWithNames => Some('\t'),
-            ExportFormat::Json | ExportFormat::Ndjson => None,
+            _ => None,
         }
     }
 }
@@ -202,6 +239,13 @@ impl<W: Write> ExportSink<W> {
                 self.write_bytes(&bytes)?;
                 self.json_any = true;
             }
+            // No row formatter: only the database server renders these.
+            ExportFormat::Parquet | ExportFormat::Arrow | ExportFormat::Orc => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "Parquet, Arrow and ORC exports are rendered by ClickHouse (HTTP) only",
+                ));
+            }
         }
         self.counts.rows += 1;
         Ok(())
@@ -297,7 +341,7 @@ fn escape_field(s: &str, format: ExportFormat) -> String {
         }
         ExportFormat::Tsv | ExportFormat::TsvWithNames => s.replace(['\t', '\n', '\r'], " "),
         // Not delimited — never called for these.
-        ExportFormat::Json | ExportFormat::Ndjson => s.to_string(),
+        _ => s.to_string(),
     }
 }
 

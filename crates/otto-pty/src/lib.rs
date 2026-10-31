@@ -358,8 +358,8 @@ impl Mirror {
             // avoids a spurious SIGWINCH on reconnect when the client echoes
             // back the same dimensions we already reported.
             parser: Arc::new(Mutex::new(vt100::Parser::new(
-                rows,
-                cols,
+                nz(rows),
+                nz(cols),
                 EMULATOR_SCROLLBACK_LINES,
             ))),
             tx,
@@ -421,7 +421,7 @@ impl Mirror {
     pub(crate) fn reset_to(&self, cols: u16, rows: u16, snapshot: &[u8], initial: bool) {
         let (cols, rows) = clamp_live_grid(cols, rows);
         let mut parser = lock_unpoisoned(&self.parser);
-        let mut fresh = vt100::Parser::new(rows, cols, EMULATOR_SCROLLBACK_LINES);
+        let mut fresh = vt100::Parser::new(nz(rows), nz(cols), EMULATOR_SCROLLBACK_LINES);
         fresh.process(snapshot);
         *parser = fresh;
         if initial {
@@ -447,7 +447,7 @@ pub struct ScreenCapture {
 impl ScreenCapture {
     /// Emulator grid at capture time as `(cols, rows)`.
     pub fn size(&self) -> (u16, u16) {
-        let (rows, cols) = self.screen.size();
+        let (rows, cols) = grid_size(&self.screen);
         (cols, rows)
     }
 
@@ -465,6 +465,19 @@ pub struct OutputSnapshot {
     pub cols: u16,
     pub rows: u16,
     pub output: broadcast::Receiver<Bytes>,
+}
+
+/// vt100 0.18 sizes are `NonZeroU16`. Every grid that reaches the emulator is
+/// already validated/clamped to at least [`RESIZE_MIN_COLS`] ×
+/// [`RESIZE_MIN_ROWS`]; `MIN` is only a defensive floor.
+fn nz(v: u16) -> std::num::NonZeroU16 {
+    std::num::NonZeroU16::new(v).unwrap_or(std::num::NonZeroU16::MIN)
+}
+
+/// The emulator grid as plain `(rows, cols)` (vt100 order).
+fn grid_size(screen: &vt100::Screen) -> (u16, u16) {
+    let (rows, cols) = screen.size();
+    (rows.get(), cols.get())
 }
 
 fn lock_unpoisoned<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -790,7 +803,7 @@ impl PtyHandle {
     /// Current emulator grid as `(cols, rows)`.
     pub fn size(&self) -> (u16, u16) {
         let parser = lock_unpoisoned(&self.mirror.parser);
-        let (rows, cols) = parser.screen().size();
+        let (rows, cols) = grid_size(parser.screen());
         (cols, rows)
     }
 
@@ -816,15 +829,16 @@ impl PtyHandle {
         validate_resize(cols, rows)?;
         let mut parser = lock_unpoisoned(&self.mirror.parser);
         let (old_rows, old_cols) = parser.screen().size();
-        if (old_rows, old_cols) == (rows, cols) {
+        let (rows_nz, cols_nz) = (nz(rows), nz(cols));
+        if (old_rows, old_cols) == (rows_nz, cols_nz) {
             return Ok(());
         }
         let multi_thread = tokio::runtime::Handle::try_current()
             .is_ok_and(|h| h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread);
         if multi_thread {
-            tokio::task::block_in_place(|| parser.screen_mut().set_size(rows, cols));
+            tokio::task::block_in_place(|| parser.screen_mut().set_size(rows_nz, cols_nz));
         } else {
-            parser.screen_mut().set_size(rows, cols);
+            parser.screen_mut().set_size(rows_nz, cols_nz);
         }
         drop(parser);
         let res = match &self.backend {
@@ -850,7 +864,7 @@ impl PtyHandle {
             // size" no-op, so the PTY and the mirror stayed out of sync
             // (review S1-20).
             let mut parser = lock_unpoisoned(&self.mirror.parser);
-            if parser.screen().size() == (rows, cols) {
+            if parser.screen().size() == (rows_nz, cols_nz) {
                 parser.screen_mut().set_size(old_rows, old_cols);
             }
         }
@@ -868,8 +882,8 @@ impl PtyHandle {
     pub fn set_history_cap(&self, lines: usize) {
         let lines = lines.clamp(1, EMULATOR_SCROLLBACK_LINES);
         let mut parser = lock_unpoisoned(&self.mirror.parser);
-        if parser.screen().scrollback_len() != lines {
-            parser.screen_mut().set_scrollback_len(lines);
+        if parser.screen().primary_scrollback_capacity() != lines {
+            parser.screen_mut().set_scrollback_capacity(lines);
         }
         drop(parser);
         if let Backend::Held(conn) = &self.backend {
@@ -887,7 +901,7 @@ impl PtyHandle {
         let (rows, cells) = screen.scrollback_stats();
         EmulatorStats {
             scrollback_rows: rows,
-            scrollback_cap: screen.scrollback_len(),
+            scrollback_cap: screen.primary_scrollback_capacity(),
             scrollback_bytes: cells * std::mem::size_of::<vt100::Cell>(),
         }
     }
@@ -983,7 +997,7 @@ impl PtyHandle {
         let screen = parser.screen();
         // Reset + home, then the formatted contents (incl. cursor + attrs).
         let mut out = b"\x1b[2J\x1b[H".to_vec();
-        out.extend_from_slice(&screen.state_formatted());
+        out.extend_from_slice(screen.state_formatted().as_bytes());
         out
     }
 
@@ -1058,7 +1072,7 @@ impl PtyHandle {
     fn format_snapshot(screen: &vt100::Screen, lines: usize) -> Vec<u8> {
         if lines == 0 {
             let mut out = b"\x1b[2J\x1b[H".to_vec();
-            out.extend_from_slice(&screen.state_formatted());
+            out.extend_from_slice(screen.state_formatted().as_bytes());
             return out;
         }
 
@@ -1068,7 +1082,7 @@ impl PtyHandle {
         // reflow on later resizes, instead of inheriting hard breaks from
         // whatever width this emulator had when the row scrolled off. See the
         // OTTO PATCH notes in vendor/vt100.
-        let mut out = screen.scrollback_rows_formatted(lines);
+        let mut out = screen.scrollback_rows_formatted(lines).into_bytes();
 
         if !out.is_empty() {
             // Scroll the tail of the replayed history off the client's grid
@@ -1079,7 +1093,7 @@ impl PtyHandle {
             // the cursor is at most `rows - 1` lines above the bottom, so
             // `rows - 1` CRLFs push every remaining history row into the
             // client's scrollback and never push a blank one.
-            let (rows, _) = screen.size();
+            let (rows, _) = grid_size(screen);
             for _ in 1..rows {
                 out.extend_from_slice(b"\r\n");
             }
@@ -1087,7 +1101,7 @@ impl PtyHandle {
 
         // Then the coherent current-screen frame on a clean grid.
         out.extend_from_slice(b"\x1b[2J\x1b[H");
-        out.extend_from_slice(&screen.state_formatted());
+        out.extend_from_slice(screen.state_formatted().as_bytes());
         out
     }
 
@@ -1097,7 +1111,7 @@ impl PtyHandle {
     pub fn screen_rows(&self) -> Vec<String> {
         let parser = lock_unpoisoned(&self.mirror.parser);
         let screen = parser.screen();
-        let (_, cols) = screen.size();
+        let (_, cols) = grid_size(screen);
         screen
             .rows(0, cols)
             .map(|r| r.trim_end().to_string())
@@ -1106,7 +1120,7 @@ impl PtyHandle {
 
     /// Current emulator size (rows, cols) — clients sync their xterm to this.
     pub fn screen_size(&self) -> (u16, u16) {
-        lock_unpoisoned(&self.mirror.parser).screen().size()
+        grid_size(lock_unpoisoned(&self.mirror.parser).screen())
     }
 
     /// Watch the child's exit: `None` while running, `Some(code)` after exit.
@@ -1377,7 +1391,7 @@ mod tests {
     async fn wide_glyph_after_minimum_width_resize_does_not_panic() {
         for rows in [RESIZE_MIN_ROWS, RESIZE_MIN_ROWS + 1, 24] {
             for cols in RESIZE_MIN_COLS..RESIZE_MIN_COLS + 4 {
-                let mut p = vt100::Parser::new(rows, cols, 100);
+                let mut p = vt100::Parser::new(nz(rows), nz(cols), 100);
                 p.process(
                     "\u{1F600}x\u{4E2D}\u{6587}\u{1F600}\r\nlong-line-wraps\u{1F600}\u{1F600}"
                         .as_bytes(),
@@ -1867,7 +1881,7 @@ mod tests {
     /// and the lock is held only for the copy (r3-06-02).
     #[test]
     fn capture_formats_like_the_locked_snapshot_and_holds_the_lock_briefly() {
-        let mut parser = vt100::Parser::new(50, 160, EMULATOR_SCROLLBACK_LINES);
+        let mut parser = vt100::Parser::new(nz(50), nz(160), EMULATOR_SCROLLBACK_LINES);
         // TUI-like rows: a colour/attribute change every 8 cells.
         let row: String = (0..19)
             .map(|k| {
@@ -1907,7 +1921,7 @@ mod tests {
     /// cells instead of 25.6 MB — and the snapshot of it is unchanged.
     #[test]
     fn short_lines_at_wide_grid_keep_a_small_scrollback() {
-        let mut parser = vt100::Parser::new(50, 200, EMULATOR_SCROLLBACK_LINES);
+        let mut parser = vt100::Parser::new(nz(50), nz(200), EMULATOR_SCROLLBACK_LINES);
         for i in 0..(EMULATOR_SCROLLBACK_LINES + 100) {
             parser.process(format!("line {i:014}\r\n").as_bytes());
         }
@@ -1930,15 +1944,15 @@ mod tests {
     /// widening reflow round-trips the text.
     #[test]
     fn trimmed_rows_survive_height_growth_and_reflow() {
-        let mut parser = vt100::Parser::new(10, 120, EMULATOR_SCROLLBACK_LINES);
+        let mut parser = vt100::Parser::new(nz(10), nz(120), EMULATOR_SCROLLBACK_LINES);
         for i in 0..60 {
             parser.process(format!("row-{i:03}\r\n").as_bytes());
         }
-        parser.screen_mut().set_size(40, 120); // pulls 30 rows back
+        parser.screen_mut().set_size(nz(40), nz(120)); // pulls 30 rows back
         parser.process(b"\x1b[1;100Hedge");
         assert!(parser.screen().contents().contains("edge"));
-        parser.screen_mut().set_size(40, 30);
-        parser.screen_mut().set_size(40, 160);
+        parser.screen_mut().set_size(nz(40), nz(30));
+        parser.screen_mut().set_size(nz(40), nz(160));
         let text = String::from_utf8_lossy(&PtyHandle::format_snapshot(parser.screen(), 4000))
             .into_owned();
         for i in [0, 29, 30, 59] {
@@ -1961,20 +1975,20 @@ mod tests {
             handle.emulator_stats().scrollback_cap,
             EMULATOR_SCROLLBACK_LINES
         );
-        let mut parser = vt100::Parser::new(24, 80, EMULATOR_SCROLLBACK_LINES);
+        let mut parser = vt100::Parser::new(nz(24), nz(80), EMULATOR_SCROLLBACK_LINES);
         for i in 0..3000 {
             parser.process(format!("{i}\r\n").as_bytes());
         }
         parser
             .screen_mut()
-            .set_scrollback_len(UNVIEWED_SCROLLBACK_LINES);
+            .set_scrollback_capacity(UNVIEWED_SCROLLBACK_LINES);
         assert_eq!(
             parser.screen().scrollback_stats().0,
             UNVIEWED_SCROLLBACK_LINES
         );
         parser
             .screen_mut()
-            .set_scrollback_len(EMULATOR_SCROLLBACK_LINES);
+            .set_scrollback_capacity(EMULATOR_SCROLLBACK_LINES);
         for i in 0..500 {
             parser.process(format!("more {i}\r\n").as_bytes());
         }
@@ -2013,7 +2027,7 @@ mod tests {
         let row: String = (0..24)
             .map(|j| format!("\x1b[{}m{:<8}", 31 + (j % 7), format!("seg{j:02}")))
             .collect();
-        let mut parser = vt100::Parser::new(50, 200, EMULATOR_SCROLLBACK_LINES);
+        let mut parser = vt100::Parser::new(nz(50), nz(200), EMULATOR_SCROLLBACK_LINES);
         for i in 0..(EMULATOR_SCROLLBACK_LINES + 100) {
             parser.process(format!("{i:05} {row}\x1b[0m\r\n").as_bytes());
         }
@@ -2034,7 +2048,7 @@ mod tests {
             // Alternate narrow / wide: every round reflows the whole history.
             let cols = if round % 2 == 0 { 150 } else { 200 };
             let t = Instant::now();
-            parser.screen_mut().set_size(50, cols);
+            parser.screen_mut().set_size(nz(50), nz(cols));
             reflow_cost = reflow_cost.min(t.elapsed());
         }
 
@@ -2219,13 +2233,11 @@ mod tests {
 
     #[test]
     fn vt100_reflow_narrow_keeps_all_content() {
-        let mut p = vt100::Parser::new(10, 80, 100);
+        let mut p = vt100::Parser::new(nz(10), nz(80), 100);
         p.process(&[b"A".repeat(200), b"\r\n$ ".to_vec()].concat());
-        p.screen_mut().set_size(10, 40);
+        p.screen_mut().set_size(nz(10), nz(40));
         let mut text = String::new();
-        for line in
-            String::from_utf8_lossy(&p.screen().scrollback_rows_formatted(100)).split("\r\n")
-        {
+        for line in p.screen().scrollback_rows_formatted(100).split("\r\n") {
             text.push_str(line.trim_end_matches(['\u{1b}', '[', '0', 'm']));
         }
         text.push_str(&p.screen().contents());
@@ -2240,9 +2252,9 @@ mod tests {
 
     #[test]
     fn vt100_reflow_widen_rejoins_wrapped_lines() {
-        let mut p = vt100::Parser::new(10, 80, 100);
+        let mut p = vt100::Parser::new(nz(10), nz(80), 100);
         p.process(&[b"B".repeat(200), b"\r\n$ ".to_vec()].concat());
-        p.screen_mut().set_size(10, 120);
+        p.screen_mut().set_size(nz(10), nz(120));
         // visual row 0 must now be FULL at the new width (120 B's), row 1
         // holds the remaining 80 — i.e. the wrapped rows re-joined and
         // re-split at 120, instead of keeping the old 80-col breaks.
@@ -2264,14 +2276,14 @@ mod tests {
 
     #[test]
     fn vt100_reflow_hard_lines_untouched() {
-        let mut p = vt100::Parser::new(10, 80, 100);
+        let mut p = vt100::Parser::new(nz(10), nz(80), 100);
         p.process(b"alpha\r\nbravo\r\ncharlie\r\n$ ");
-        p.screen_mut().set_size(10, 40);
+        p.screen_mut().set_size(nz(10), nz(40));
         let contents = p.screen().contents();
         for l in ["alpha", "bravo", "charlie", "$ "] {
             assert!(contents.contains(l), "hard line {l:?} damaged by reflow");
         }
-        p.screen_mut().set_size(10, 100);
+        p.screen_mut().set_size(nz(10), nz(100));
         let contents = p.screen().contents();
         for l in ["alpha", "bravo", "charlie"] {
             assert!(contents.contains(l), "hard line {l:?} damaged by widen");
@@ -2285,38 +2297,38 @@ mod tests {
         // every subsequent snapshot panic on `cells[0]` — each WS replay
         // killed its connection handler (seen as a reconnect loop after the
         // first resize). Snapshot both directions and verify content.
-        let mut p = vt100::Parser::new(10, 80, 4000);
+        let mut p = vt100::Parser::new(nz(10), nz(80), 4000);
         for i in 0..30 {
             p.process(
                 format!("line {i} long enough to wrap once the pane narrows below it {i}\r\n\r\n")
                     .as_bytes(),
             );
         }
-        p.screen_mut().set_size(10, 40);
+        p.screen_mut().set_size(nz(10), nz(40));
         let snap = p.screen().scrollback_rows_formatted(4000);
-        assert!(String::from_utf8_lossy(&snap).contains("line 0"));
-        p.screen_mut().set_size(10, 120);
+        assert!(snap.contains("line 0"));
+        p.screen_mut().set_size(nz(10), nz(120));
         let snap = p.screen().scrollback_rows_formatted(4000);
-        assert!(String::from_utf8_lossy(&snap).contains("line 0"));
+        assert!(snap.contains("line 0"));
         // the newest line sits on the (bottom-anchored) visible grid
         assert!(p.screen().contents().contains("line 29"));
     }
 
     #[test]
     fn vt100_height_shrink_keeps_bottom_prompt() {
-        let mut p = vt100::Parser::new(10, 80, 100);
+        let mut p = vt100::Parser::new(nz(10), nz(80), 100);
         for i in 0..9 {
             p.process(format!("line{i}\r\n").as_bytes());
         }
         p.process(b"$ tail");
-        p.screen_mut().set_size(5, 80);
+        p.screen_mut().set_size(nz(5), nz(80));
         let contents = p.screen().contents();
         assert!(
             contents.contains("$ tail"),
             "height shrink must keep the bottom (prompt) — upstream truncated it: {contents:?}"
         );
         // pushed-off top rows live in scrollback, not the void
-        let hist = String::from_utf8_lossy(&p.screen().scrollback_rows_formatted(100)).into_owned();
+        let hist = p.screen().scrollback_rows_formatted(100);
         assert!(
             hist.contains("line0"),
             "shrunk-off rows must enter scrollback"
@@ -2325,11 +2337,11 @@ mod tests {
 
     #[test]
     fn vt100_reflow_cursor_tracks_prompt() {
-        let mut p = vt100::Parser::new(10, 80, 100);
+        let mut p = vt100::Parser::new(nz(10), nz(80), 100);
         p.process(&[b"C".repeat(100), b"\r\n$ ".to_vec()].concat());
         let before = p.screen().cursor_position();
         assert_eq!(before.1, 2, "premise: cursor after '$ '");
-        p.screen_mut().set_size(10, 40);
+        p.screen_mut().set_size(nz(10), nz(40));
         let (r, c) = p.screen().cursor_position();
         // the prompt row must be the row the cursor is on, right after "$ "
         assert_eq!(c, 2, "cursor column lost through reflow");

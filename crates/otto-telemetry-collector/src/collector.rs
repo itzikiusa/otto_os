@@ -117,17 +117,20 @@ impl Collector {
     pub async fn stop(&mut self) {
         if let Some(pid) = self.child.id().filter(|_| self.alive()) {
             let pid = Pid::from_u32(pid);
-            let mut system = System::new();
-            system.refresh_processes_specifics(
-                ProcessesToUpdate::Some(&[pid]),
-                true,
-                ProcessRefreshKind::nothing(),
-            );
-            if system
-                .process(pid)
-                .and_then(|p| p.kill_with(Signal::Term))
-                .unwrap_or(false)
-            {
+            // No process table (sysinfo 0.40 `System::new` is fallible): skip
+            // the graceful SIGTERM, the kill below still stops the child.
+            let termed = System::new().is_ok_and(|mut system| {
+                system.refresh_processes_specifics(
+                    ProcessesToUpdate::Some(&[pid]),
+                    true,
+                    ProcessRefreshKind::nothing(),
+                );
+                system
+                    .process(pid)
+                    .and_then(|p| p.kill_with(Signal::Term))
+                    .unwrap_or(false)
+            });
+            if termed {
                 let _ = tokio::time::timeout(Duration::from_secs(5), self.child.wait()).await;
             }
         }
@@ -588,7 +591,7 @@ fn managed_identity(dir: &Path) -> Result<Option<ManagedIdentity>> {
     }
     let config = managed_dir.join("collector.json");
     let config = canonical_argument(&config).context("resolve managed collector configuration")?;
-    let mut system = System::new();
+    let mut system = System::new().context("open the process table")?;
     let me = Pid::from_u32(std::process::id());
     system.refresh_processes_specifics(ProcessesToUpdate::Some(&[me]), true, refresh_kind());
     let uid = system
@@ -603,7 +606,7 @@ fn managed_identity(dir: &Path) -> Result<Option<ManagedIdentity>> {
     }))
 }
 fn snapshot(identity: &ManagedIdentity) -> Result<Vec<Candidate>> {
-    let mut system = System::new();
+    let mut system = System::new().context("open the process table")?;
     // Inspect command arguments only after UID and executable match. Unrelated
     // agent processes may carry prompts or credentials in their arguments.
     system.refresh_processes_specifics(
@@ -657,7 +660,7 @@ fn revalidate_and_signal(
     candidate: Candidate,
     signal: Option<Signal>,
 ) -> Result<bool> {
-    let mut system = System::new();
+    let mut system = System::new().context("open the process table")?;
     system.refresh_processes_specifics(
         ProcessesToUpdate::Some(&[candidate.pid]),
         true,
