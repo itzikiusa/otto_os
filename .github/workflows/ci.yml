@@ -7,7 +7,7 @@ name: CI
 #      archive --workspace --features otto-server/test-util` (one shared Cargo
 #      cache, `ld.lld`, system OpenSSL on Linux, targeted `opt-level` overrides,
 #      and unified `test-util` so the 89k-LOC `otto-server` crate compiles once
-#      instead of twice), then fans out to 6 zero-compile `rust-test` shards +
+#      instead of twice), then fans out to 8 zero-compile `rust-test` shards +
 #      `e2e-gate-shard` + `daemon-budget`.
 #   2. `e2e-gate` splits across 4 parallel single-browser shards (`chromium`
 #      1/2 & 2/2, `webkit` 1/2 & 2/2) and folds all 4 JSON reports into the
@@ -31,6 +31,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  CARGO_INCREMENTAL: '0'
   CARGO_PROFILE_DEV_DEBUG: 0
   CARGO_PROFILE_TEST_DEBUG: 0
   CLICKHOUSE_VERSION: 26.8.34.13
@@ -75,16 +76,33 @@ jobs:
             sudo ln -sf "$(command -v ld.lld)" /usr/bin/x86_64-linux-gnu-ld
           fi
 
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2.9.3
+      - name: Cache cargo + workspace metadata
+        id: cargo-cache
+        uses: actions/cache@v6.1.0
         with:
-          shared-key: rust-lint
-          cache-all-crates: true
-          cache-on-failure: true
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            ~/.cargo/git/checkouts
+            target/debug/.fingerprint
+            target/debug/build
+            target/debug/deps
+            target/release/.fingerprint
+            target/release/build
+            target/release/deps
+            target/.ci-source-hashes.json
+          key: cargo-full-${{ runner.os }}-lint-v1-${{ hashFiles('**/Cargo.toml', 'Cargo.lock', '.cargo/config.toml') }}-${{ hashFiles('crates/**', 'vendor/**') }}
+          restore-keys: |
+            cargo-full-${{ runner.os }}-lint-v1-${{ hashFiles('**/Cargo.toml', 'Cargo.lock', '.cargo/config.toml') }}-
+            cargo-full-${{ runner.os }}-lint-v1-
+
+      - name: Restore cached source mtimes
+        run: python3 scripts/ci-cargo-cache.py restore
 
       - name: Install librdkafka build deps
         run: |
-          if ! dpkg -s cmake libcurl4-openssl-dev pkg-config libssl-dev >/dev/null 2>&1; then
+          if ! compgen -G "target/debug/build/rdkafka-sys-*/out/lib/librdkafka.a" >/dev/null && ! dpkg -s cmake libcurl4-openssl-dev pkg-config libssl-dev >/dev/null 2>&1; then
             sudo grep -lE 'dl\.google\.com|packages\.microsoft\.com' /etc/apt/sources.list.d/* 2>/dev/null | xargs -r sudo rm -f
             sudo python3 scripts/ci-apt-install.py cmake libcurl4-openssl-dev pkg-config libssl-dev
           fi
@@ -100,6 +118,10 @@ jobs:
           OTTO_PERF: '1'
           OTTO_PERF_BUDGET_SCALE: '3'
         run: cargo test -p otto-pty --release --lib perf_budgets -- --nocapture
+
+      - name: Prepare cargo cache manifest
+        if: steps.cargo-cache.outputs.cache-hit != 'true'
+        run: python3 scripts/ci-cargo-cache.py prepare-save
 
   rust-build:
     name: Build workspace & test archive
@@ -130,12 +152,27 @@ jobs:
             sudo ln -sf "$(command -v ld.lld)" /usr/bin/x86_64-linux-gnu-ld
           fi
 
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2.9.3
+      - name: Cache cargo + workspace targets
+        id: cargo-cache
+        uses: actions/cache@v6.1.0
         with:
-          shared-key: rust-workspace
-          cache-all-crates: true
-          cache-on-failure: true
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            ~/.cargo/git/checkouts
+            target/debug/.fingerprint
+            target/debug/build
+            target/debug/deps
+            target/debug/ottod
+            target/.ci-source-hashes.json
+          key: cargo-full-${{ runner.os }}-build-v1-${{ hashFiles('**/Cargo.toml', 'Cargo.lock', '.cargo/config.toml') }}-${{ hashFiles('crates/**', 'vendor/**') }}
+          restore-keys: |
+            cargo-full-${{ runner.os }}-build-v1-${{ hashFiles('**/Cargo.toml', 'Cargo.lock', '.cargo/config.toml') }}-
+            cargo-full-${{ runner.os }}-build-v1-
+
+      - name: Restore cached source mtimes
+        run: python3 scripts/ci-cargo-cache.py restore
 
       - name: Install nextest
         run: |
@@ -151,7 +188,7 @@ jobs:
 
       - name: Install librdkafka build deps
         run: |
-          if ! dpkg -s cmake libcurl4-openssl-dev pkg-config libssl-dev >/dev/null 2>&1; then
+          if ! compgen -G "target/debug/build/rdkafka-sys-*/out/lib/librdkafka.a" >/dev/null && ! dpkg -s cmake libcurl4-openssl-dev pkg-config libssl-dev >/dev/null 2>&1; then
             sudo grep -lE 'dl\.google\.com|packages\.microsoft\.com' /etc/apt/sources.list.d/* 2>/dev/null | xargs -r sudo rm -f
             sudo python3 scripts/ci-apt-install.py cmake libcurl4-openssl-dev pkg-config libssl-dev
           fi
@@ -162,6 +199,7 @@ jobs:
             --workspace --features otto-server/test-util \
             --profile ci \
             --archive-file "$RUNNER_TEMP/nextest.tar.zst"
+          test -x target/debug/ottod || cargo build --bin ottod --features otto-server/test-util
           test -x target/debug/ottod
 
       - name: nextest override filters match tests
@@ -187,15 +225,19 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
+      - name: Prepare cargo cache manifest
+        if: steps.cargo-cache.outputs.cache-hit != 'true'
+        run: python3 scripts/ci-cargo-cache.py prepare-save
+
   rust-test:
-    name: Rust · nextest (${{ matrix.shard }}/6)
+    name: Rust · nextest (${{ matrix.shard }}/8)
     needs: rust-build
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
     steps:
       - uses: actions/checkout@v7.0.1
 
@@ -231,7 +273,7 @@ jobs:
           rm -rf "$RUNNER_TEMP/ch" "$archive"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      - name: cargo nextest (shard ${{ matrix.shard }}/6)
+      - name: cargo nextest (shard ${{ matrix.shard }}/8)
         env:
           OTTO_REQUIRE_CLICKHOUSE: "1"
         run: |
@@ -239,7 +281,7 @@ jobs:
             --archive-file "$RUNNER_TEMP/nextest.tar.zst" \
             --workspace-remap . \
             --profile ci --no-fail-fast \
-            --partition hash:${{ matrix.shard }}/6
+            --partition hash:${{ matrix.shard }}/8
 
   ui:
     name: UI (svelte-check · tsc)
@@ -260,6 +302,7 @@ jobs:
           python3 -B -m unittest discover -s scripts -p 'test_macos_ci_crates.py'
           python3 -B -m unittest discover -s scripts -p 'test_loc_ratchet.py'
           python3 -B -m unittest discover -s scripts -p 'test_ci_apt_install.py'
+          python3 -B -m unittest discover -s scripts -p 'test_ci_cargo_cache.py'
 
       - name: Install Node
         uses: actions/setup-node@v7.1.0
