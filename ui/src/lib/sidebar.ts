@@ -319,6 +319,7 @@ export function favoriteModules(list: SidebarModule[], favorites: readonly strin
  * inline, so any module saved after it in the same section — Rooms, History,
  * Mission Control in Work — sat below every session, out of sight until
  * favorited. It renders last; the saved order (and edit mode) are unchanged.
+ * Not applied to Favorites: that section is the user's own explicit order.
  */
 export function agentsLast(mods: SidebarModule[]): SidebarModule[] {
   const i = mods.findIndex((m) => m.id === 'agents');
