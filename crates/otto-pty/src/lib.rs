@@ -2458,7 +2458,11 @@ mod tests {
             orig_rows[10]
         );
 
-        let mut second = vt100::Parser::new(24, 80, 1000);
+        let mut second = vt100::Parser::new(
+            std::num::NonZeroU16::new(24).unwrap(),
+            std::num::NonZeroU16::new(80).unwrap(),
+            1000,
+        );
         second.process(&snap);
         let replayed_rows: Vec<String> = second.screen().rows(0, 80).collect();
         assert_eq!(replayed_rows, orig_rows);

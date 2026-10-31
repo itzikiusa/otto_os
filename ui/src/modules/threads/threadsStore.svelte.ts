@@ -549,8 +549,8 @@ class ThreadsStore {
       }
       const targetSession = ws.getSession(opts.target);
       await api.post(`/sessions/${encodeURIComponent(opts.target)}/message`, {
-        message: fromSession ? `[Message from thread “${fromTitle}”]: ${msg}` : msg,
-        sender: fromTitle,
+        text: fromSession ? `[From ${fromTitle}] ${msg}` : msg,
+        ...(opts.fromSessionId ? { from_session_id: opts.fromSessionId } : {}),
       });
       toasts.success('Sent to thread', `Delivered to ${targetSession?.title ?? 'thread'}`);
       this.recordLocalPeerEvent({

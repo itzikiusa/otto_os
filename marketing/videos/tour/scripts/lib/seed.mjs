@@ -182,7 +182,7 @@ export async function seedAll(api, { dataDir, home, fakeBin, repoRoot, docker })
   // ── AWS + Kubernetes registrations (cards only; no live cloud calls) ─────
   await api.try('POST', '/aws/accounts', { name: 'acme-prod', auth_mode: 'access_keys', region: 'eu-west-1', access_key_id: 'AKIADEMOPLACEHOLDER0', secret_access_key: 'demo-placeholder-not-a-key', environment: 'prod', color: '#ef4444' });
   await api.try('POST', '/aws/accounts', { name: 'acme-staging', auth_mode: 'access_keys', region: 'us-east-1', access_key_id: 'AKIADEMOPLACEHOLDER1', secret_access_key: 'demo-placeholder-not-a-key', environment: 'staging', color: '#f59e0b' });
-  const kube = join(dataDir, 'kubeconfig-demo.yaml');
+  const kube = join(home, 'kubeconfig-demo.yaml');
   writeFileSync(kube, `apiVersion: v1\nkind: Config\nclusters:\n- name: demo\n  cluster:\n    server: https://127.0.0.1:1\n    insecure-skip-tls-verify: true\ncontexts:\n- name: prod-eu\n  context: { cluster: demo, user: demo }\n- name: stg-us\n  context: { cluster: demo, user: demo }\ncurrent-context: prod-eu\nusers:\n- name: demo\n  user: { token: demo }\n`);
   await api.try('POST', '/k8s/clusters', { name: 'prod-eu', source: 'kubeconfig', kubeconfig_path: kube, context_name: 'prod-eu', default_namespace: 'checkout', environment: 'prod' });
   await api.try('POST', '/k8s/clusters', { name: 'stg-us', source: 'kubeconfig', kubeconfig_path: kube, context_name: 'stg-us', default_namespace: 'default', environment: 'staging' });

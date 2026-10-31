@@ -87,8 +87,8 @@ summary: One sentence, what it's for.
 `film.json`:
 
 ```json
-{ "file": "otto-tour-20261005.mp4", "poster": "otto-tour-20261005-poster.jpg", "captions": "otto-tour-20261005.vtt",
-  "duration": 140, "chapters": [ { "id": "agents", "section": "agents", "title": "Agents", "start": 12, "duration": 20 } ] }
+{ "file": "otto-tour-20261031.mp4", "poster": "otto-tour-20261031-poster.jpg", "captions": "otto-tour-20261031.vtt",
+  "duration": 132, "chapters": [ { "id": "threads", "section": "threads", "title": "Threads", "start": 32, "duration": 10 } ] }
 ```
 
 - The MP4 and poster are **not bundled**. They are streamed from

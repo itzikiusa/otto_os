@@ -24,12 +24,12 @@ export const Poster: React.FC = () => (
     >
       <Img src={staticFile('capture/home.jpg')} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
     </div>
-    <div style={{ position: 'absolute', left: 120, top: 280, width: 760 }}>
+    <div style={{ position: 'absolute', left: 120, top: 260, width: 580 }}>
       <Logo size={120} glow={24} />
       <div style={{ font: `800 128px ${FONT}`, color: C.text, letterSpacing: -5, marginTop: 20 }}>Otto</div>
       <div style={{ font: `650 46px ${FONT}`, color: '#d6d8e2', letterSpacing: -0.8, marginTop: 4 }}>The product tour</div>
       <div style={{ font: `500 28px ${FONT}`, color: C.textDim, marginTop: 18, lineHeight: 1.4 }}>
-        Agents, automation, git, design, data, infrastructure and rooms — in one native Mac app.
+        Threads, agents, git, design, data, infra and rooms — in one native Mac app.
       </div>
       <div
         style={{

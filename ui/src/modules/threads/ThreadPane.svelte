@@ -187,16 +187,18 @@
       {/if}
 
       <StatusDot state={paneState} />
-      <Badge tone={badgeTone(paneState.tone)} variant="outline" label={paneState.label} />
+      {#if !multiPane}
+        <Badge tone={badgeTone(paneState.tone)} variant="outline" label={paneState.label} />
+      {/if}
 
-      {#if branch}
+      {#if branch && !multiPane}
         <span class="tp-branch mono ellipsis" dir="ltr" title="Git branch: {branch}">
           <Icon name="branch" size={12} />
           {branch}
         </span>
       {/if}
 
-      {#if parentId}
+      {#if parentId && !multiPane}
         <button
           type="button"
           class="chip tp-parent-link"
@@ -221,23 +223,25 @@
         <Icon name="star" size={13} />
       </button>
 
-      <button
-        type="button"
-        class="icon-btn"
-        class:active={showPeerBar}
-        aria-pressed={showPeerBar}
-        aria-label="Send message to peer thread"
-        title="Send to peer…"
-        data-testid="pane-peer-btn-{paneId}"
-        onclick={() => {
-          showPeerBar = !showPeerBar;
-          if (showPeerBar && peerTargets.length > 0 && peerTarget === 'broadcast') {
-            peerTarget = peerTargets[0].id;
-          }
-        }}
-      >
-        <Icon name="send" size={13} />
-      </button>
+      {#if !multiPane}
+        <button
+          type="button"
+          class="icon-btn"
+          class:active={showPeerBar}
+          aria-pressed={showPeerBar}
+          aria-label="Send message to peer thread"
+          title="Send to peer…"
+          data-testid="pane-peer-btn-{paneId}"
+          onclick={() => {
+            showPeerBar = !showPeerBar;
+            if (showPeerBar && peerTargets.length > 0 && peerTarget === 'broadcast') {
+              peerTarget = peerTargets[0].id;
+            }
+          }}
+        >
+          <Icon name="send" size={13} />
+        </button>
+      {/if}
 
       {#if !isPlainShellSession(session)}
         <button
@@ -254,15 +258,17 @@
         </button>
       {/if}
 
-      <button
-        type="button"
-        class="icon-btn"
-        aria-label="Session room"
-        title="Jump to or start a Session Room"
-        onclick={() => onstartroom(paneId)}
-      >
-        <Icon name="people" size={13} />
-      </button>
+      {#if !multiPane}
+        <button
+          type="button"
+          class="icon-btn"
+          aria-label="Session room"
+          title="Jump to or start a Session Room"
+          onclick={() => onstartroom(paneId)}
+        >
+          <Icon name="people" size={13} />
+        </button>
+      {/if}
 
       <button
         type="button"
@@ -418,7 +424,8 @@
     font-weight: 600;
     text-align: start;
     cursor: pointer;
-    max-width: 240px;
+    min-width: 0;
+    max-width: 320px;
   }
   .tp-title:hover {
     background: var(--hover);

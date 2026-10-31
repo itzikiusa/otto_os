@@ -1,8 +1,7 @@
 //! Hook that lets a structured inbound channel message **start a workflow run**
 //! instead of starting a normal session. otto-channels can't depend on
 //! otto-server (where the workflow engine lives), so the `Bridge` holds an
-//! `Arc<dyn WorkflowChatTrigger>` that otto-server implements and injects
-//! (mirrors [`crate::swarm_trigger::SwarmTrigger`]).
+//! `Arc<dyn WorkflowChatTrigger>` that otto-server implements and injects.
 //!
 //! The recognized message shape (case-insensitive field labels) is:
 //! ```text

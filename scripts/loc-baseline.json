@@ -4,26 +4,24 @@
   "files": {
     "crates/otto-dbviewer/src/drivers/mongodb.rs": 4179,
     "crates/otto-git/src/local.rs": 5335,
-    "crates/otto-server/src/workflow_engine.rs": 4531,
-    "crates/otto-sessions/src/manager.rs": 6499
+    "crates/otto-server/src/workflow_engine.rs": 4404,
+    "crates/otto-sessions/src/manager.rs": 6346
   },
   "totals": {
-    "otto-server": 100271
+    "otto-server": 89226
   },
   "functions": {
-    "crates/otto-automation/src/goal_loop.rs::controller_inner": 472,
-    "crates/otto-channels/src/bridge.rs::handle": 451,
+    "crates/otto-automation/src/goal_loop.rs::controller_inner": 424,
     "crates/otto-design/src/site/render.rs::body": 408,
     "crates/otto-issues/src/confluence.rs::storage_to_markdown_depth": 535,
     "crates/otto-issues/src/jira.rs::parse_issue_full": 427,
     "crates/otto-k8s/src/monitor/collector.rs::run_cycle_with": 412,
-    "crates/otto-mcp/src/outward/catalog.rs::otto_tool_specs": 623,
-    "crates/otto-mcp/src/outward/exec.rs::route_for": 1536,
-    "crates/otto-server/src/policy.rs::policy_for": 1411,
-    "crates/otto-server/src/routes/mod.rs::protected_routes": 641,
+    "crates/otto-mcp/src/outward/catalog.rs::otto_tool_specs": 569,
+    "crates/otto-mcp/src/outward/exec.rs::route_for": 1437,
+    "crates/otto-server/src/policy.rs::policy_for": 1282,
+    "crates/otto-server/src/routes/mod.rs::protected_routes": 616,
     "crates/otto-server/src/skill_eval.rs::run_skill_eval_core": 446,
     "crates/otto-server/src/skill_review_static.rs::static_review": 585,
-    "crates/otto-swarm/src/runtime/engine.rs::route_result_inner": 416,
     "execute_node": 35,
     "run_review_core": 406,
     "run_workflow_with_budget": 93

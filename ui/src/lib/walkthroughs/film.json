@@ -1,8 +1,8 @@
 {
-  "file": "otto-tour-20261005.mp4",
-  "poster": "otto-tour-20261005-poster.jpg",
-  "captions": "otto-tour-20261005.vtt",
-  "duration": 140.01,
+  "file": "otto-tour-20261031.mp4",
+  "poster": "otto-tour-20261031-poster.jpg",
+  "captions": "otto-tour-20261031.vtt",
+  "duration": 132.01,
   "chapters": [
     {
       "id": "intro",
@@ -26,94 +26,87 @@
       "duration": 8
     },
     {
-      "id": "assistant",
-      "section": "assistant",
-      "title": "Assistant",
-      "start": 22,
-      "duration": 6
-    },
-    {
       "id": "agents",
       "section": "agents",
-      "title": "Agents and History",
-      "start": 28,
-      "duration": 12
+      "title": "Agents",
+      "start": 22,
+      "duration": 10
     },
     {
-      "id": "mission-control",
-      "section": "mission-control",
-      "title": "Run with Otto and Mission Control",
-      "start": 40,
-      "duration": 8
+      "id": "threads",
+      "section": "threads",
+      "title": "Threads",
+      "start": 32,
+      "duration": 10
     },
     {
-      "id": "swarm",
-      "section": "swarm",
-      "title": "Swarms and Goal Loops",
-      "start": 48,
-      "duration": 8
+      "id": "loops",
+      "section": "loops",
+      "title": "Goal Loops",
+      "start": 42,
+      "duration": 6
     },
     {
       "id": "workflows",
       "section": "workflows",
-      "title": "Workflows and schedules",
-      "start": 56,
+      "title": "Workflows and Scheduled Tasks",
+      "start": 48,
       "duration": 8
     },
     {
       "id": "git",
       "section": "git",
-      "title": "Git, reviews and proof",
-      "start": 64,
+      "title": "Git and AI review",
+      "start": 56,
       "duration": 8
+    },
+    {
+      "id": "product",
+      "section": "product",
+      "title": "Product and Design Hall",
+      "start": 64,
+      "duration": 10
     },
     {
       "id": "vault",
       "section": "vault",
-      "title": "Product and Vault",
-      "start": 72,
+      "title": "Vault and Skills Lab",
+      "start": 74,
       "duration": 6
-    },
-    {
-      "id": "design",
-      "section": "design",
-      "title": "Design Hall and Skills Lab",
-      "start": 78,
-      "duration": 10
     },
     {
       "id": "database",
       "section": "database",
       "title": "Database Explorer",
-      "start": 88,
+      "start": 80,
       "duration": 8
     },
     {
       "id": "infra",
       "section": "connections",
       "title": "Connections and cloud",
-      "start": 96,
+      "start": 88,
       "duration": 8
     },
     {
       "id": "insights",
       "section": "insights",
       "title": "Insights and Usage",
-      "start": 104,
+      "start": 96,
       "duration": 8
     },
     {
       "id": "rooms",
       "section": "rooms",
       "title": "Rooms · collaborate and recap",
-      "start": 112,
+      "start": 104,
       "duration": 16
     },
     {
       "id": "outro",
       "section": "phone-and-remote",
       "title": "Everywhere",
-      "start": 128,
+      "start": 120,
       "duration": 12
     }
   ]

@@ -1,7 +1,7 @@
 //! Workflow trigger scheduler: fires `schedule`-kind triggers on their cadence
 //! and starts a workflow run in the background.
 //!
-//! Modeled on [`otto_swarm::runtime::scheduler`]: one 60-second tick (a single
+//! Runs on one 60-second tick (a single
 //! timer, woken early by `CancelSignal`). The cursor/eligibility claim and the
 //! queued run are committed together, so a captured tick can never admit a run
 //! after its trigger was retimed or disabled.

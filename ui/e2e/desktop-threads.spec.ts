@@ -152,7 +152,7 @@ test('multi-session split canvas, pins, file viewer, and peer-to-peer message re
   await expect(canvas.getByTestId(`thread-pane-${sessionB}`)).toBeVisible();
 
   // Open README.md in PandaCode-style file tabs and inspect rendered Markdown.
-  const fileTabs = page.getByTestId('threads-file-tabs');
+  const fileTabs = page.getByTestId('inspector-files-tab');
   await expect(fileTabs).toBeVisible();
   await fileTabs.getByRole('button', { name: 'README.md' }).first().click();
   await expect(fileTabs.getByRole('heading', { name: 'Threads Workspace' })).toBeVisible();
@@ -160,9 +160,10 @@ test('multi-session split canvas, pins, file viewer, and peer-to-peer message re
   // Connections inspector tab exposes one-click side-by-side DB Explorer launch.
   const inspector = page.getByTestId('threads-inspector');
   await inspector.getByRole('tab', { name: 'Connections' }).click();
-  await expect(page.getByTestId('connections-side-by-side-btn')).toBeVisible();
+  await expect(page.getByTestId('connections-open-beside')).toBeVisible();
 
   // Peers inspector tab relays a direct session-to-session message from Alpha → Beta.
+  await canvas.getByTestId(`thread-pane-${sessionA}`).click();
   await inspector.getByRole('tab', { name: 'Peers' }).click();
   await page.getByTestId('peers-target-select').selectOption(sessionB);
   const relayMsg = 'Sync schema check from Alpha';

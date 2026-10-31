@@ -86,16 +86,25 @@
     return () => ctl.abort();
   });
 
+  function resolveFilePath(p: string): string {
+    const clean = p.trim();
+    if (!clean || clean.startsWith('/')) return clean;
+    const base = rootPath.trim().replace(/\/+$/, '');
+    if (!base) return clean;
+    return `${base}/${clean.replace(/^\.?\//, '')}`;
+  }
+
   // Load active open file content.
   $effect(() => {
-    const path = activeTab?.path ?? null;
+    const rawPath = activeTab?.path ?? null;
     void fileRetry;
-    if (!path) {
+    if (!rawPath) {
       fileRead = null;
       fileError = null;
       fileLoading = false;
       return;
     }
+    const path = resolveFilePath(rawPath);
     const kind = previewKindForPath(path);
     viewMode = kind === 'code' ? 'source' : 'preview';
     if (kind === 'image') {
@@ -144,7 +153,7 @@
 
   function rawMediaSrc(path: string): string {
     const tok = getToken();
-    const q = new URLSearchParams({ path });
+    const q = new URLSearchParams({ path: resolveFilePath(path) });
     if (tok) q.set('token', tok);
     return `${baseUrl()}/api/v1/fs/raw?${q.toString()}`;
   }
@@ -254,7 +263,7 @@
             <button
               type="button"
               class="tf-entry"
-              class:active={activeTab?.path === entry.path}
+              class:active={activeTab !== null && resolveFilePath(activeTab.path) === entry.path}
               dir="ltr"
               onclick={() => {
                 if (entry.is_dir) browseDir = entry.path;
@@ -360,7 +369,7 @@
             onclick={() => insertIntoComposer(activeTab.path)}
           >
             <Icon name="send" size={12} />
-            @file
+            <span dir="ltr">@file</span>
           </button>
         </div>
       </div>

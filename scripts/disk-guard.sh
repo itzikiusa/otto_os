@@ -66,7 +66,7 @@ case "${1:-}" in
                 echo "" >&2
                 echo "disk-guard ($label): free space fell to ${free} GB (< ${FLOOR} GB) — stopping the build." >&2
                 report
-                for c in $(pgrep -P "$pid" 2>/dev/null); do [[ "$c" == "$BASHPID" ]] || kill_tree "$c"; done
+                for c in $(pgrep -P "$pid" 2>/dev/null); do [[ "$c" == "${BASHPID:-$$}" ]] || kill_tree "$c"; done
                 exit 1
             fi
             sleep 3

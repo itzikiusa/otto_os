@@ -74,7 +74,7 @@
   // Keep paneIds clean when sessions are loaded; pick an initial thread or show NewThreadStage.
   $effect(() => {
     const known = new Set(ws.sessions.filter((s) => !s.archived).map((s) => s.id));
-    if (ws.sessionsLoading && known.size === 0) return;
+    if ((!ws.listSettled || ws.sessionsLoading) && known.size === 0) return;
     untrack(() => {
       const valid = threads.paneIds.filter((id) => known.has(id));
       if (valid.length !== threads.paneIds.length) {
@@ -179,7 +179,7 @@
           data-testid="threads-layout-single"
           onclick={() => pickLayout('single')}
         >
-          1-up
+          <span dir="ltr">1-up</span>
         </button>
         <button
           type="button"

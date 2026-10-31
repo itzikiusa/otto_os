@@ -157,16 +157,19 @@ export const SHOTS = {
     await context.close();
   },
   threads: async (c) => {
-    const [s0, s1] = c.meta.ids.sessions;
-    const { context, page } = await open(c, `threads/${s0}`, {
+    const [s0, s1, s2] = c.meta.ids.sessions;
+    const primary = s1 ?? s0;
+    const secondary = s2 ?? s1;
+    const { context, page } = await open(c, `threads/${primary}`, {
       settle: 4000,
       extra: [
+        { name: 'otto_rail_expanded', value: '0' },
         {
           name: 'otto_threads_v1',
           value: JSON.stringify({
             pinnedIds: s0 ? [s0] : [],
-            paneIds: [s0, s1].filter(Boolean),
-            focusedSessionId: s0 ?? null,
+            paneIds: [primary, secondary].filter(Boolean),
+            focusedSessionId: primary ?? null,
             layoutMode: 'split',
             sidebarOpen: true,
             inspectorOpen: true,
@@ -184,30 +187,46 @@ export const SHOTS = {
         },
       ],
     });
-    await wait(1800);
+    await wait(2000);
     await still(page, c, 'threads-split');
 
     await tryClick(page.getByTestId('threads-tab-peers'), 'peers tab');
-    await wait(1600);
+    await wait(900);
+    const peerInput = page.getByTestId('peers-message-input');
+    if (await peerInput.isVisible().catch(() => false)) {
+      await peerInput.fill('Rate-limit middleware landed on feat/rate-limit — safe to rebase cart totals and re-run.');
+      await tryClick(page.getByTestId('peers-send-btn'), 'send peer relay');
+      await wait(1400);
+    } else {
+      await wait(1200);
+    }
     await still(page, c, 'threads-peers');
-
-    await tryClick(page.getByTestId('threads-new-btn'), 'new thread stage');
-    await wait(1600);
-    await still(page, c, 'threads-stage');
     await context.close();
+
+    // New Thread stage with expanded main sidebar so Threads' sidebar entry is showcased too.
+    {
+      const { context: stageCtx, page: stagePage } = await open(c, `threads/${primary}`, {
+        settle: 3200,
+      });
+      await tryClick(stagePage.getByTestId('threads-new-btn'), 'new thread stage');
+      await wait(1600);
+      await still(stagePage, c, 'threads-stage');
+      await stageCtx.close();
+    }
 
     // Also capture Light mode + RTL stills for visual QA and README docs.
     {
-      const { context: lightCtx, page: lightPage } = await open(c, `threads/${s0}`, {
+      const { context: lightCtx, page: lightPage } = await open(c, `threads/${primary}`, {
         settle: 3500,
         scheme: 'light',
         extra: [
+          { name: 'otto_rail_expanded', value: '0' },
           {
             name: 'otto_threads_v1',
             value: JSON.stringify({
               pinnedIds: s0 ? [s0] : [],
-              paneIds: [s0, s1].filter(Boolean),
-              focusedSessionId: s0 ?? null,
+              paneIds: [primary, secondary].filter(Boolean),
+              focusedSessionId: primary ?? null,
               layoutMode: 'split',
               sidebarOpen: true,
               inspectorOpen: true,
@@ -216,21 +235,22 @@ export const SHOTS = {
           },
         ],
       });
-      await wait(1500);
+      await wait(1800);
       await still(lightPage, c, 'threads-light');
       await lightCtx.close();
     }
     {
-      const { context: rtlCtx, page: rtlPage } = await open(c, `threads/${s0}`, {
+      const { context: rtlCtx, page: rtlPage } = await open(c, `threads/${primary}`, {
         settle: 3500,
         extra: [
           { name: 'otto_dir', value: 'rtl' },
+          { name: 'otto_rail_expanded', value: '0' },
           {
             name: 'otto_threads_v1',
             value: JSON.stringify({
               pinnedIds: s0 ? [s0] : [],
-              paneIds: [s0].filter(Boolean),
-              focusedSessionId: s0 ?? null,
+              paneIds: [primary].filter(Boolean),
+              focusedSessionId: primary ?? null,
               layoutMode: 'single',
               sidebarOpen: true,
               inspectorOpen: true,
@@ -248,7 +268,7 @@ export const SHOTS = {
       await rtlPage.evaluate(() => {
         document.documentElement.setAttribute('dir', 'rtl');
       });
-      await wait(1200);
+      await wait(1400);
       await still(rtlPage, c, 'threads-rtl');
       await rtlCtx.close();
     }
@@ -349,7 +369,7 @@ export const SHOTS = {
     const having = page.locator('section[aria-labelledby="qb-having"]');
     await glide(page, having.getByRole('button', { name: 'Condition', exact: true }));
     await wait(600);
-    await having.locator('.row.cond').first().getByLabel('Value').fill('20');
+    await having.locator('.qb-row.cond').first().getByLabel('Value').fill('20');
     await wait(700);
     await glide(page, page.getByRole('button', { name: 'Sort', exact: true }));
     await wait(1400);
