@@ -6,13 +6,9 @@
 //! - `POST /room-paste/{id}`: an image pasted into a room terminal.
 //! - `POST /room-prompt/{id}`: the room composer's prompt / interrupt.
 //!
-//! The two writes are allowed only for the member who currently drives the
-//! terminal, and go in through `room_input`, which re-checks the driver grant
-//! (`x-otto-grant-epoch`) and the live process exactly like a typed key.
-//!
-//! Agent CLIs take an image as a file PATH on the host, so a guest's pasted
-//! image is stored on the host (the snip store that backs the owner's own
-//! terminal paste) and its path is typed into the PTY.
+//! The writes are the terminal driver's only (grant `x-otto-grant-epoch`,
+//! re-checked by `room_input` at each write, like a typed key). A pasted image
+//! is stored on the host (the snip store) and its PATH is typed into the PTY.
 use crate::routes::transcript::{session_image, transcript_page, TranscriptQuery};
 use crate::{ApiResult, ServerCtx};
 use axum::{
@@ -77,18 +73,19 @@ async fn driver(
     id: &str,
     headers: &HeaderMap,
 ) -> ApiResult<(String, String, String, u64)> {
+    // Authenticate before validating anything else: no credential → 401.
+    let token = token(headers)?;
     let epoch: u64 = header(headers, "x-otto-grant-epoch")
         .and_then(|v| v.parse().ok())
         .ok_or_else(|| Error::Invalid("Missing terminal control grant".into()))?;
-    let (room, session, member) = ctx.rooms.driver_session(id, token(headers)?, epoch).await?;
+    let (room, session, member) = ctx.rooms.driver_session(id, token, epoch).await?;
     Ok((room, session, member, epoch))
 }
 
 #[derive(serde::Deserialize)]
 pub struct PromptReq {
     text: String,
-    /// true: a submitted prompt (bracketed text + Enter); false: raw bytes
-    /// (the composer's Esc interrupt).
+    /// true: paste + Enter; false: raw bytes (the composer's Esc interrupt).
     #[serde(default)]
     submit: bool,
 }
@@ -97,12 +94,15 @@ pub async fn prompt(
     State(ctx): State<ServerCtx>,
     Path(id): Path<String>,
     headers: HeaderMap,
-    Json(req): Json<PromptReq>,
+    body: Bytes,
 ) -> ApiResult<Json<serde_json::Value>> {
+    // The body is parsed only after the room capability is checked.
+    let (room_id, session, member, epoch) = driver(&ctx, &id, &headers).await?;
+    let req: PromptReq = serde_json::from_slice(&body)
+        .map_err(|_| Error::Invalid("Expected {\"text\", \"submit\"}".into()))?;
     if req.text.is_empty() || req.text.len() > 256 * 1024 {
         return Err(Error::Invalid("A prompt must be 1 byte to 256 KB".into()).into());
     }
-    let (room_id, session, member, epoch) = driver(&ctx, &id, &headers).await?;
     if req.submit {
         ctx.manager
             .room_paste_text(&session, &room_id, &member, epoch, &req.text, true)
