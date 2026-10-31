@@ -38,7 +38,7 @@ env:
   # that installs the single binary: the Rust job's k8s-monitor ratchets and
   # the e2e-functional shards' usage/telemetry engine.
   CLICKHOUSE_VERSION: 26.8.34.13
-  CLICKHOUSE_SHA512: d54f83e187b19399260fa9d7f68403a7c3adf48059f211d0620216e6ea49687490898b5aa32f49d9728db58c5912cfb700148b814b8c3314f88ccfa940ffd85a
+  CLICKHOUSE_SHA512: e5c753b258679daa882747aaec10b351a85bcad1412af7957d4a4616dcf5b45663da219bd37fe0697fde2ae76dbed2ba5b414ce9a5c8044c6d1fa0142e03e4cc
 
 jobs:
   rust:
@@ -103,7 +103,7 @@ jobs:
           curl --fail --location --silent --show-error --retry 3 \
             "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-$NEXTEST_VERSION/cargo-nextest-$NEXTEST_VERSION-x86_64-unknown-linux-gnu.tar.gz" \
             --output "$archive"
-          printf '%s  %s\n' '682c21b777c333e96fd532e114d3a5a894e0729ab88d94c0a9f20f8419695428' "$archive" | sha256sum --check
+          printf '%s  %s\n' 'b0959bc64232974224cf9fb22c915845398c0e8668fa7831eb5b43fb1eef781f' "$archive" | sha256sum --check
           mkdir -p "$tool_dir"
           tar -xzf "$archive" -C "$tool_dir" cargo-nextest
           "$tool_dir/cargo-nextest" nextest --version
@@ -829,6 +829,9 @@ jobs:
         uses: EmbarkStudios/cargo-deny-action@v2.1.1
         with:
           command: check bans
+          # Matches rust-toolchain.toml (the action's image cannot install an
+          # override toolchain it was not told about).
+          rust-version: "1.99.1"
 
   # Bug-fix commits that touch the UI should carry a test (ui/unit or ui/e2e).
   # Non-blocking: prints a ::warning:: per offending commit in the PR range.
