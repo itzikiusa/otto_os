@@ -62,6 +62,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  CARGO_INCREMENTAL: '0'
   CARGO_PROFILE_DEV_DEBUG: 0
   CARGO_PROFILE_TEST_DEBUG: 0
 
@@ -132,16 +133,30 @@ jobs:
             sudo ln -sf "$(command -v ld.lld)" /usr/bin/x86_64-linux-gnu-ld
           fi
 
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2.9.3
+      - name: Cache cargo + driver targets
+        id: cargo-cache
+        uses: actions/cache@v6.1.0
         with:
-          shared-key: db-drivers
-          cache-all-crates: true
-          cache-on-failure: true
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            ~/.cargo/git/checkouts
+            target/debug/.fingerprint
+            target/debug/build
+            target/debug/deps
+            target/.ci-source-hashes.json
+          key: cargo-full-${{ runner.os }}-db-drivers-v1-${{ hashFiles('**/Cargo.toml', 'Cargo.lock', '.cargo/config.toml') }}-${{ hashFiles('crates/otto-dbviewer/**', 'crates/otto-brokers/**', 'crates/otto-ssh/**', 'crates/otto-state/**', 'crates/otto-core/**', 'crates/otto-netguard/**', 'vendor/**') }}
+          restore-keys: |
+            cargo-full-${{ runner.os }}-db-drivers-v1-${{ hashFiles('**/Cargo.toml', 'Cargo.lock', '.cargo/config.toml') }}-
+            cargo-full-${{ runner.os }}-db-drivers-v1-
+
+      - name: Restore cached source mtimes
+        run: python3 scripts/ci-cargo-cache.py restore
 
       - name: Install librdkafka build deps
         run: |
-          if ! dpkg -s cmake libcurl4-openssl-dev pkg-config libssl-dev >/dev/null 2>&1; then
+          if ! compgen -G "target/debug/build/rdkafka-sys-*/out/lib/librdkafka.a" >/dev/null && ! dpkg -s cmake libcurl4-openssl-dev pkg-config libssl-dev >/dev/null 2>&1; then
             sudo grep -lE 'dl\.google\.com|packages\.microsoft\.com' /etc/apt/sources.list.d/* 2>/dev/null | xargs -r sudo rm -f
             sudo python3 scripts/ci-apt-install.py cmake libcurl4-openssl-dev pkg-config libssl-dev
           fi
@@ -175,7 +190,11 @@ jobs:
           "$shell_dir/mongosh" --version
 
       - name: Build the driver test binaries
-        run: cargo nextest run -p otto-dbviewer -p otto-brokers --no-run
+        run: cargo nextest run -p otto-dbviewer -p otto-brokers --profile ci --no-run
+
+      - name: Prepare cargo cache manifest
+        if: steps.cargo-cache.outputs.cache-hit != 'true'
+        run: python3 scripts/ci-cargo-cache.py prepare-save
 
       # Every service has a compose healthcheck; the seed scripts run before
       # the server reports healthy. redis-seed is a one-shot that exits.

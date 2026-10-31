@@ -88,6 +88,7 @@ jobs:
             target/debug/.fingerprint
             target/debug/build
             target/debug/deps
+            target/debug/examples
             target/release/.fingerprint
             target/release/build
             target/release/deps
@@ -281,7 +282,7 @@ jobs:
             --archive-file "$RUNNER_TEMP/nextest.tar.zst" \
             --workspace-remap . \
             --profile ci --no-fail-fast \
-            --partition hash:${{ matrix.shard }}/8
+            --partition count:${{ matrix.shard }}/8
 
   ui:
     name: UI (svelte-check · tsc)

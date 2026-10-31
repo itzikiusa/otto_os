@@ -169,6 +169,7 @@ jobs:
             target/debug/.fingerprint
             target/debug/build
             target/debug/deps
+            target/debug/ottod
             target/.ci-source-hashes.json
           key: cargo-full-${{ runner.os }}-daemon-v1-${{ hashFiles('**/Cargo.toml', 'Cargo.lock', '.cargo/config.toml') }}-${{ hashFiles('crates/**', 'vendor/**') }}
           restore-keys: |

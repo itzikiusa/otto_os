@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import subprocess
 import tempfile
@@ -27,24 +28,34 @@ class CiCargoCacheTests(unittest.TestCase):
         (root / "crates" / "foo" / "migrations" / "001.sql").write_text("SELECT 1;\n")
         subprocess.run(["git", "add", "."], cwd=root, check=True)
 
-    def test_unchanged_files_and_dirs_get_stable_mtime_while_edits_get_now(self) -> None:
+    def test_cold_restore_stamps_baseline_and_warm_restore_preserves_exact_mtime_ns(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             self._init_repo(root)
-            self.assertEqual(ci_cargo_cache.cmd_prepare_save(root), 0)
 
-            # Simulate a fresh checkout stamping everything with now, plus one edit.
-            future = time.time() + 10
+            # Cold cache: no manifest yet -> stamps deterministic baseline mtime_ns.
+            self.assertEqual(ci_cargo_cache.cmd_restore(root), 0)
             lib_rs = root / "crates" / "foo" / "src" / "lib.rs"
             mig_sql = root / "crates" / "foo" / "migrations" / "001.sql"
+            self.assertEqual(lib_rs.stat().st_mtime_ns, ci_cargo_cache.STABLE_MTIME_NS)
+            self.assertEqual(mig_sql.stat().st_mtime_ns, ci_cargo_cache.STABLE_MTIME_NS)
+            self.assertEqual(mig_sql.parent.stat().st_mtime_ns, ci_cargo_cache.STABLE_MTIME_NS)
+
+            # Give lib.rs a custom mtime_ns (as after an incremental edit) and save manifest.
+            custom_ns = 1700000123_456789000
+            os.utime(lib_rs, ns=(custom_ns, custom_ns))
+            self.assertEqual(ci_cargo_cache.cmd_prepare_save(root), 0)
+
+            # Simulate a fresh checkout stamping everything with future mtime.
+            future = time.time() + 10
             os.utime(lib_rs, (future, future))
             os.utime(mig_sql, (future, future))
             os.utime(mig_sql.parent, (future, future))
 
             self.assertEqual(ci_cargo_cache.cmd_restore(root), 0)
-            self.assertEqual(int(lib_rs.stat().st_mtime), ci_cargo_cache.STABLE_MTIME)
-            self.assertEqual(int(mig_sql.stat().st_mtime), ci_cargo_cache.STABLE_MTIME)
-            self.assertEqual(int(mig_sql.parent.stat().st_mtime), ci_cargo_cache.STABLE_MTIME)
+            self.assertEqual(lib_rs.stat().st_mtime_ns, custom_ns)
+            self.assertEqual(mig_sql.stat().st_mtime_ns, ci_cargo_cache.STABLE_MTIME_NS)
+            self.assertEqual(mig_sql.parent.stat().st_mtime_ns, ci_cargo_cache.STABLE_MTIME_NS)
 
             # Adding a new migration updates both the file and the watched directory mtime.
             mig2 = root / "crates" / "foo" / "migrations" / "002.sql"
@@ -52,16 +63,33 @@ class CiCargoCacheTests(unittest.TestCase):
             subprocess.run(["git", "add", "."], cwd=root, check=True)
             before = time.time() - 2
             self.assertEqual(ci_cargo_cache.cmd_restore(root), 0)
-            self.assertEqual(int(lib_rs.stat().st_mtime), ci_cargo_cache.STABLE_MTIME)
+            self.assertEqual(lib_rs.stat().st_mtime_ns, custom_ns)
             self.assertGreaterEqual(mig2.stat().st_mtime, before)
             self.assertGreaterEqual(mig2.parent.stat().st_mtime, before)
 
-    def test_prepare_save_prunes_incremental_and_expired_deps(self) -> None:
+    def test_v1_manifest_backwards_compatibility(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._init_repo(root)
+            cur_files, cur_dirs = ci_cargo_cache.snapshot(root)
+            manifest = root / ci_cargo_cache.MANIFEST_REL
+            manifest.parent.mkdir(parents=True, exist_ok=True)
+            manifest.write_text(json.dumps({"version": 1, "files": cur_files, "dirs": cur_dirs}))
+
+            lib_rs = root / "crates" / "foo" / "src" / "lib.rs"
+            os.utime(lib_rs, (time.time() + 20, time.time() + 20))
+            self.assertEqual(ci_cargo_cache.cmd_restore(root), 0)
+            self.assertEqual(lib_rs.stat().st_mtime_ns, ci_cargo_cache.STABLE_MTIME_NS)
+
+    def test_prepare_save_prunes_incremental_and_expired_deps_but_keeps_examples(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             self._init_repo(root)
             debug = root / "target" / "debug"
             (debug / "incremental" / "foo").mkdir(parents=True)
+            (debug / "examples").mkdir(parents=True)
+            example_bin = debug / "examples" / "fold_bench"
+            example_bin.write_text("bin")
             (debug / "deps").mkdir(parents=True)
             fresh_dep = debug / "deps" / "libfoo-111.rlib"
             fresh_dep.write_text("fresh")
@@ -72,6 +100,7 @@ class CiCargoCacheTests(unittest.TestCase):
 
             self.assertEqual(ci_cargo_cache.cmd_prepare_save(root), 0)
             self.assertFalse((debug / "incremental").exists())
+            self.assertTrue(example_bin.exists())
             self.assertTrue(fresh_dep.exists())
             self.assertFalse(old_dep.exists())
 
