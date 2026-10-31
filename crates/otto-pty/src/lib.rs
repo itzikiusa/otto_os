@@ -2067,7 +2067,7 @@ mod tests {
                                 drained.fetch_add(b.len() as u64, Ordering::Relaxed);
                             }
                             Err(broadcast::error::TryRecvError::Lagged(_)) => {}
-                            Err(_) => std::thread::yield_now(),
+                            Err(_) => std::thread::sleep(Duration::from_micros(50)),
                         }
                     }
                 })

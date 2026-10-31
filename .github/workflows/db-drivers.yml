@@ -125,10 +125,19 @@ jobs:
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@1.99.1
 
+      - name: Enable fast lld linker
+        run: |
+          if command -v ld.lld >/dev/null 2>&1; then
+            sudo ln -sf "$(command -v ld.lld)" /usr/bin/ld
+            sudo ln -sf "$(command -v ld.lld)" /usr/bin/x86_64-linux-gnu-ld
+          fi
+
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2.9.3
         with:
           shared-key: db-drivers
+          cache-all-crates: true
+          cache-on-failure: true
 
       - name: Install librdkafka build deps
         run: |

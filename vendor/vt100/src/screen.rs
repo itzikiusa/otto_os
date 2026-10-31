@@ -1203,6 +1203,61 @@ impl<CB: crate::Callbacks> WrappedScreen<CB> {
     }
 
     pub fn text(&mut self, c: char) {
+        if (' '..='~').contains(&c)
+            && (self.screen.modes & (MODE_NO_AUTOWRAP | MODE_INSERT)) == 0
+        {
+            let screen = &mut self.screen;
+            let attrs = screen.attrs;
+            let is_alt = screen.mode(MODE_ALTERNATE_SCREEN);
+            let grid = if is_alt {
+                &mut screen.alternate_grid
+            } else {
+                &mut screen.grid
+            };
+            let cols = grid.size().cols();
+            if grid.pos().col >= cols {
+                let wrap = grid
+                    .drawing_cell(crate::grid::Pos {
+                        row: grid.pos().row,
+                        col: cols - 1,
+                    })
+                    .is_some_and(|last| {
+                        last.has_contents() || last.is_wide_continuation()
+                    });
+                let callbacks = &mut self.callbacks;
+                grid.col_wrap(1, wrap, |row| {
+                    callbacks
+                        .on_scroll(crate::capture::RowContents(row), is_alt);
+                });
+            }
+            let base_pos = grid.pos();
+            if let Some(row) = grid.drawing_row_mut(base_pos.row) {
+                if base_pos.col > 0 {
+                    if let Some(prev) = row.get_mut(base_pos.col - 1) {
+                        if prev.is_wide() {
+                            prev.clear(*prev.attrs());
+                        }
+                    }
+                }
+                let cell_was_wide =
+                    if let Some(cell) = row.get_mut(base_pos.col) {
+                        let was_wide = cell.is_wide();
+                        cell.set(c, attrs);
+                        was_wide
+                    } else {
+                        false
+                    };
+                if cell_was_wide {
+                    if let Some(next) = row.get_mut(base_pos.col + 1) {
+                        next.set(' ', attrs);
+                    }
+                }
+            }
+            screen.last_char = Some(c);
+            grid.col_inc(1);
+            return;
+        }
+
         let screen = &mut self.screen;
         let pos = screen.grid().pos();
         let size = screen.grid().size();

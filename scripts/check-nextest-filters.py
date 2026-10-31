@@ -21,7 +21,9 @@ so listing only re-runs `--list` on the existing binaries.
 
 from __future__ import annotations
 
+import argparse
 import json
+import re
 import subprocess
 import sys
 import tomllib
@@ -94,10 +96,16 @@ def count_matches(listing: dict) -> int:
     return n
 
 
-def list_matches(disjunct: str) -> int:
+def disjunct_packages(disjunct: str) -> set[str]:
+    """Every `package(<name>)` predicate mentioned in a disjunct."""
+    return set(re.findall(r"package\(([A-Za-z0-9_-]+)\)", disjunct))
+
+
+def list_matches(disjunct: str, extra_cargo_args: list[str] | None = None) -> int:
+    scope = extra_cargo_args if extra_cargo_args else ["--workspace"]
     proc = subprocess.run(
         [
-            "cargo", "nextest", "list", "--workspace",
+            "cargo", "nextest", "list", *scope,
             "--run-ignored", "all",
             "--message-format", "json",
             "-E", disjunct,
@@ -112,20 +120,42 @@ def list_matches(disjunct: str) -> int:
 
 
 def main(argv: list[str]) -> int:
+    ap = argparse.ArgumentParser(add_help=False)
+    ap.add_argument("--print", action="store_true")
+    ap.add_argument("--packages", nargs="+")
+    ap.add_argument("--cargo-arg", action="append", default=[])
+    ns, _ = ap.parse_known_args(argv)
+
     config = tomllib.loads(CONFIG.read_text())
     disjuncts = []
     for profile, flt in override_filters(config):
         for d in split_top_level_or(flt):
             disjuncts.append((profile, d))
-    if "--print" in argv:
+    if ns.print:
         for profile, d in disjuncts:
             print(f"[{profile}] {d}")
         return 0
-    # Build/list the workspace ONCE up front: when the tests don't compile
+
+    extra_args: list[str] = []
+    if ns.packages:
+        wanted = set(ns.packages)
+        disjuncts = [
+            (profile, d)
+            for profile, d in disjuncts
+            if disjunct_packages(d) and disjunct_packages(d) <= wanted
+        ]
+        if not disjuncts:
+            return 0
+        for pkg in sorted({p for _, d in disjuncts for p in disjunct_packages(d)}):
+            extra_args.extend(["-p", pkg])
+        extra_args.extend(ns.cargo_arg)
+
+    # Build/list the target scope ONCE up front: when the tests don't compile
     # (the nextest step already failed on that), every per-disjunct
     # `cargo nextest list` would retry the failed build — minutes of noise.
+    scope = extra_args if extra_args else ["--workspace"]
     pre = subprocess.run(
-        ["cargo", "nextest", "list", "--workspace", "--message-format", "json"],
+        ["cargo", "nextest", "list", *scope, "--message-format", "json"],
         cwd=ROOT,
         stdout=subprocess.DEVNULL,
     )
@@ -134,7 +164,7 @@ def main(argv: list[str]) -> int:
         return 1
     orphaned = []
     for profile, d in disjuncts:
-        n = list_matches(d)
+        n = list_matches(d, extra_args or None)
         print(f"{n:5d}  [{profile}] {d}")
         if n == 0:
             orphaned.append((profile, d))
