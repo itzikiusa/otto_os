@@ -94,6 +94,7 @@ jobs:
     if: needs.changes.outputs.has_languages == 'true'
     runs-on: ubuntu-latest
     permissions:
+      actions: read
       contents: read
       security-events: write
     strategy:

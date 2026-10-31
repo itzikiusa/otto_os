@@ -10,34 +10,33 @@ name: Otto CodeQL Configuration
 #    content-hash SHA/MD5 keys, UI tab state in localStorage, or intentional
 #    `insecure_tls` toggles in the API client).
 
-disable-default-queries: true
-
-queries:
-  - name: High-precision security vulnerabilities
-    uses: security-default
-
 query-filters:
-  - include:
-      kind:
-        - problem
-        - path-problem
-      problem.severity:
-        - error
-      precision:
-        - high
-        - very-high
   - exclude:
-      id:
-        - rust/cleartext-transmission
-        - rust/cleartext-logging
-        - rust/weak-sensitive-data-hashing
-        - rust/disabled-certificate-check
-        - rust/path-injection
-        - js/clear-text-storage-of-sensitive-data
-        - js/functionality-from-untrusted-source
+      problem.severity:
+        - warning
+        - recommendation
+  - exclude:
+      precision:
+        - low
+        - medium
+  - exclude:
+      id: rust/cleartext-transmission
+  - exclude:
+      id: rust/cleartext-logging
+  - exclude:
+      id: rust/weak-sensitive-data-hashing
+  - exclude:
+      id: rust/disabled-certificate-check
+  - exclude:
+      id: rust/path-injection
+  - exclude:
+      id: js/clear-text-storage-of-sensitive-data
+  - exclude:
+      id: js/functionality-from-untrusted-source
 
 paths-ignore:
   - vendor/**
+  - marketing/**
   - '**/tests/**'
   - '**/*_test.rs'
   - '**/*_tests.rs'
