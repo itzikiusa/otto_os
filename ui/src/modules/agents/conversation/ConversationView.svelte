@@ -362,14 +362,14 @@
   const sessionProvider = $derived((sessionId ? ws.getSession(sessionId)?.provider : null) ?? null);
   const effectiveProvider = $derived(t?.provider ?? sessionProvider ?? 'claude');
   const agentName = $derived(providerName(effectiveProvider));
-  const working = $derived(!!sessionId && status === 'working');
+  const rawWorking = $derived(!!sessionId && status === 'working');
   /** The shared session vocabulary (lib/status): while the events socket is
    *  down a "working" claim may be minutes old, so the foot of the chat says
    *  "Reconnecting…" — no spinner, no elapsed clock, no live pulse. */
   const sessionInfo = $derived(
     sessionState(sessionId ? ws.getSession(sessionId) : null, status, false, { stale: events.state !== 'connected' }),
   );
-  const stale = $derived(working && sessionInfo.key === 'stale');
+  const stale = $derived(rawWorking && sessionInfo.key === 'stale');
   const optPrompt = $derived(sessionId ? transcript.optimisticPrompt(sessionId) : null);
   function turnMatchesOptimistic(turn: Turn, needle: string): boolean {
     if (!needle || turn.role !== 'user') return false;
@@ -409,6 +409,10 @@
    *  or (session alive but quiet) what the agent is blocked on: a permission
    *  prompt / question on the terminal screen. */
   const pendingCall = $derived(pendingTool(lastItem));
+  const turnSettled = $derived(
+    !optPrompt && lastItem?.role === 'assistant' && lastItem.turns[lastItem.turns.length - 1]?.duration_ms != null && pendingCall == null,
+  );
+  const working = $derived(rawWorking && !turnSettled);
   const waiting = $derived(alive && !working && pendingCall != null);
   /** Your last message's time — the working line's elapsed clock. */
   const lastPromptTs = $derived.by(() => {
@@ -469,7 +473,7 @@
     }
     return '';
   });
-  const draft = $derived(sessionId && status === 'working' ? conv.liveDraft : '');
+  const draft = $derived(working ? conv.liveDraft : '');
   // Follow the tail only when the draft gains LINES — a same-height text change
   // must not scroll (it reads as a jump), and neither must it shrink away.
   let draftLines = 0;

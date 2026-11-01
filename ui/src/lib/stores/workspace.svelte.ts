@@ -22,7 +22,7 @@ import { loadErrorText } from '../loadError';
 import { flaggedIds, forget, mergeAttention, noticeIsNew, parseAttention, raise, see, serializeAttention, type Attention } from '../attention';
 
 /** Persisted raise/seen times behind the "needs you" flag (lib/attention.ts). */
-const LS_ATTENTION = 'otto_attention';
+const LS_ATTENTION = 'otto_attention_v2';
 
 /** Archived rows per "Load more" page (per scope: workspace / scratch). */
 const ARCHIVED_PAGE = 100;
@@ -195,6 +195,7 @@ class WorkspaceStore {
   /** The app window is visible and focused (App.svelte keeps it current):
    *  only then does an on-screen session count as "seen". */
   operatorPresent = $state(true);
+  activeThreadId: Id | null = $state(null);
 
   /** Sidebar filter toggle: show only sessions that need attention. */
   needsYouFilter = $state(false);
@@ -416,10 +417,11 @@ class WorkspaceStore {
     return this.buckets.foregroundActive;
   }
 
-  /** Is the operator looking at `id` right now (Agents page, focused pane,
-   *  window in front)? A raise while watching is seen at once. */
+  /** Is the operator looking at `id` right now (Agents or Threads page, focused
+   *  pane, window in front)? A raise while watching is seen at once. */
   private watching(id: Id): boolean {
-    return this.operatorPresent && id === this.activeSessionId && (router.module === '' || router.module === 'agents');
+    if (!this.operatorPresent) return false;
+    return router.module === 'threads' ? id === this.activeThreadId || router.parts[1] === id : id === this.activeSessionId && (router.module === '' || router.module === 'agents');
   }
 
   /** `write`: 'merge' folds in what other windows stored since (so a stale
@@ -1931,8 +1933,7 @@ class WorkspaceStore {
         break;
       }
       case 'session_attention': {
-        // The daemon's always-on "needs you" signal (turn end / prompt).
-        this.markNeedsYou(ev.session_id);
+        if (ev.reason === 'prompt') this.markNeedsYou(ev.session_id);
         break;
       }
       case 'session_status': {
@@ -1942,8 +1943,8 @@ class WorkspaceStore {
         if (
           prevStatus === 'working' &&
           (ev.status === 'idle' || ev.status === 'exited') &&
-          ev.session_id !== this.activeSessionId &&
-          this.openTabs.includes(ev.session_id)
+          !this.watching(ev.session_id) &&
+          (this.openTabs.includes(ev.session_id) || Boolean(this.sessionById.get(ev.session_id) && isThreadSurfaceSession(this.sessionById.get(ev.session_id)!)))
         ) {
           this.unread = { ...this.unread, [ev.session_id]: true };
         }

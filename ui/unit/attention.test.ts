@@ -132,11 +132,19 @@ test('store: a prompt in the session being watched never raises; away from the w
   assert.equal(off.needsYou.s1, true);
 });
 
-test('store: the daemon\'s session_attention event raises the flag (no notice needed)', () => {
+test('store: only prompt session_attention raises needsYou; plain turn_end stays idle', () => {
   const ws = store(new Map());
   ws.activeSessionId = 'other';
   ws.applyEvent({ type: 'session_attention', session_id: 's1', workspace_id: 'w', reason: 'turn_end' });
-  assert.equal(ws.needsYou.s1, true);
+  assert.equal(ws.needsYou.s1, undefined, 'normal turn completion is not waiting on input');
+  ws.applyEvent({ type: 'session_attention', session_id: 's1', workspace_id: 'w', reason: 'prompt' });
+  assert.equal(ws.needsYou.s1, true, 'blocked approval/question prompt raises needsYou');
+
+  // Watching a session in Threads suppresses needsYou while looking right at it.
+  const inThreads = store(new Map(), 'threads');
+  inThreads.activeThreadId = 't1';
+  inThreads.applyEvent({ type: 'session_attention', session_id: 't1', workspace_id: 'w', reason: 'prompt' });
+  assert.equal(inThreads.needsYou.t1, undefined, 'watched thread does not nag');
 });
 
 test('store: a restored flag settles once its status is known; a fresh raise while working stays', () => {

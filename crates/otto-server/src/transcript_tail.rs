@@ -873,40 +873,77 @@ pub struct ScreenParts {
     pub status: String,
 }
 
-/// Split the screen into the response draft, the input box text and the
-/// status rows. Input rows start at the last `❯`/`│ >` row and run until the
-/// closing rule (or the first status-looking row); everything after is status.
-pub fn screen_parts(rows: &[String]) -> ScreenParts {
-    fn is_rule(r: &str) -> bool {
-        let t = r.trim();
-        t.len() >= 8 && t.chars().all(|c| matches!(c, '─' | '━' | '╌' | '-' | '═'))
+fn is_screen_rule(r: &str) -> bool {
+    let t = r.trim();
+    t.len() >= 8 && t.chars().all(|c| matches!(c, '─' | '━' | '╌' | '-' | '═'))
+}
+
+/// True for Codex CLI's bottom status/shortcut bar rows below its `›` composer.
+fn is_codex_footer_row(r: &str) -> bool {
+    let t = r.trim();
+    if t.is_empty() || t.starts_with(['>', '›', '⏺', '•']) {
+        return false;
     }
-    fn is_input(r: &str) -> bool {
+    t.contains("? for shortcuts")
+        || t.contains("f2 to view")
+        || t.contains("context left")
+        || t.contains("tab to queue")
+        || t.contains("ctrl+c again")
+        || t.contains(" · ~/")
+        || t.contains(" · /")
+}
+
+/// Locate the bottom composer/input prompt row (`❯`/`│ >` for Claude, or the
+/// trailing `›` row for Codex when empty or followed by Codex's status footer).
+fn find_input_prompt(rows: &[String]) -> Option<usize> {
+    if let Some(i) = rows.iter().rposition(|r| {
         let t = r.trim_start();
         t.starts_with('❯') || t.starts_with("│ >") || t.starts_with("│ ❯")
+    }) {
+        return Some(i);
     }
+    let floor = rows.len().saturating_sub(10);
+    for i in (floor..rows.len()).rev() {
+        let t = rows[i].trim_start();
+        if (t == "›" || t.starts_with("› "))
+            && (t.trim() == "›" || rows[i + 1..].iter().any(|r| is_codex_footer_row(r)))
+        {
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// Split the screen into the response draft, the input box text and the
+/// status rows. Input rows start at the bottom prompt row and run until the
+/// closing rule (or the first status-looking row); everything after is status.
+pub fn screen_parts(rows: &[String]) -> ScreenParts {
     fn strip_prompt(r: &str) -> &str {
         let t = r.trim_start();
         t.trim_start_matches('│')
             .trim_start()
-            .trim_start_matches(['❯', '>'])
+            .trim_start_matches(['❯', '>', '›'])
             .trim_end_matches('│')
             .trim()
     }
     let draft = live_draft(rows);
-    let Some(i) = rows.iter().rposition(|r| is_input(r)) else {
+    let Some(i) = find_input_prompt(rows) else {
         return ScreenParts {
             draft,
             ..Default::default()
         };
     };
     // Input: the prompt row plus continuation rows until a rule / box edge /
-    // blank row.
+    // blank row / Codex status footer.
     let mut input_lines = vec![strip_prompt(&rows[i]).to_string()];
     let mut j = i + 1;
     while j < rows.len() {
         let r = &rows[j];
-        if is_rule(r) || r.trim().is_empty() || r.trim_start().starts_with('╰') {
+        if is_screen_rule(r)
+            || r.trim().is_empty()
+            || r.trim_start().starts_with('╰')
+            || is_codex_footer_row(r)
+        {
             break;
         }
         input_lines.push(strip_prompt(r).to_string());
@@ -916,7 +953,7 @@ pub fn screen_parts(rows: &[String]) -> ScreenParts {
     let status: Vec<String> = rows[j..]
         .iter()
         .map(|r| r.trim())
-        .filter(|r| !r.is_empty() && !is_rule(r) && !r.starts_with('╰'))
+        .filter(|r| !r.is_empty() && !is_screen_rule(r) && !r.starts_with('╰'))
         .map(|r| r.split_whitespace().collect::<Vec<_>>().join(" "))
         .collect();
     ScreenParts {
@@ -928,29 +965,30 @@ pub fn screen_parts(rows: &[String]) -> ScreenParts {
 
 /// The in-progress response as drawn on the agent's screen: everything
 /// between the last prompt echo (`> …` / `› …`) and the input box (`❯ …` /
-/// `│ > …`, with the rule above it), minus spinner rows. Returns "" when the
+/// `│ > …` / bottom `›`), minus spinner/chrome rows. Returns "" when the
 /// screen holds no such region. Tolerant by design — a TUI redesign degrades
 /// to "the whole screen above the input box", never to garbage.
 pub fn live_draft(rows: &[String]) -> String {
-    fn is_rule(r: &str) -> bool {
-        let t = r.trim();
-        t.len() >= 8 && t.chars().all(|c| matches!(c, '─' | '━' | '╌' | '-' | '═'))
-    }
-    fn is_input(r: &str) -> bool {
+    fn is_box_edge(r: &str) -> bool {
         let t = r.trim_start();
-        t.starts_with('❯')
-            || t.starts_with("│ >")
-            || t.starts_with("│ ❯")
-            || t.starts_with("╭─")
-            || t.starts_with("╰─")
+        t.starts_with("╭─") || t.starts_with("╰─")
     }
     fn is_echo(r: &str) -> bool {
-        let t = r.trim_start();
-        (t.starts_with("> ") || t.starts_with("› ")) && !t.starts_with("> >")
+        let t = r.trim();
+        ((t.starts_with("> ") && !t.starts_with("> >")) || t.starts_with("› "))
+            && !t.trim_start_matches(['>', '›']).trim().is_empty()
+    }
+    fn has_for_duration(t: &str) -> bool {
+        let Some((_, rest)) = t.split_once(" for ") else {
+            return false;
+        };
+        let mut chars = rest.trim_start().chars();
+        chars.next().is_some_and(|c| c.is_ascii_digit())
+            && rest.chars().any(|c| matches!(c, 'h' | 'm' | 's'))
     }
     // Ephemeral rows: spinners, elapsed timers ("Running… (7m 34s · timeout
-    // 10m)"), key hints and tips. They change every second and would make
-    // the draft re-render (and the chat jump) without carrying content.
+    // 10m)"), post-turn banners ("✻ Cogitated for 4s", "• Worked for 1s ───"),
+    // key hints and tips.
     fn has_timer(t: &str) -> bool {
         let b = t.as_bytes();
         let mut i = 0;
@@ -975,20 +1013,27 @@ pub fn live_draft(rows: &[String]) -> String {
             || t.contains("ctrl+b to run in background")
             || t.starts_with("Tip:")
             || t.starts_with("※ Tip:")
+            || is_codex_footer_row(r)
             || (t.contains('…') && has_timer(t))
+            || t.starts_with("• Working")
+            || (t.starts_with("• Worked for ") && has_for_duration(t))
             || t.chars()
                 .next()
                 .is_some_and(|c| "✻✶✳✢✽⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏".contains(c))
-                && t.contains('…')
+                && (t.contains('…') || has_for_duration(t))
     }
     // Input box: the LAST input row; content is everything above it (and
-    // above the rule that frames it).
-    let mut end = rows.len();
-    if let Some(i) = rows.iter().rposition(|r| is_input(r)) {
-        end = i;
-        while end > 0 && (is_rule(&rows[end - 1]) || rows[end - 1].trim().is_empty()) {
-            end -= 1;
-        }
+    // above the rule / box edge that frames it).
+    let mut end = find_input_prompt(rows)
+        .or_else(|| rows.iter().rposition(|r| is_box_edge(r)))
+        .unwrap_or(rows.len());
+    while end > 0
+        && (is_screen_rule(&rows[end - 1])
+            || is_box_edge(&rows[end - 1])
+            || is_codex_footer_row(&rows[end - 1])
+            || rows[end - 1].trim().is_empty())
+    {
+        end -= 1;
     }
     let content = &rows[..end];
     let start = content
@@ -999,7 +1044,7 @@ pub fn live_draft(rows: &[String]) -> String {
     let mut out: Vec<&str> = Vec::new();
     let mut blank_run = 0usize;
     for r in &content[start..] {
-        if is_spinner(r) || is_rule(r) {
+        if is_spinner(r) || is_screen_rule(r) {
             continue;
         }
         if r.trim().is_empty() {

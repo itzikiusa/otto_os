@@ -14,19 +14,28 @@
   }
   let { text, lastText }: Props = $props();
 
-  /** Strip a leading part already covered by the folded turn: find the last
-   *  ~48 chars of the folded text inside the draft and keep what follows. */
+  function plainFlat(s: string): string {
+    return s
+      .replace(/^\s*[⏺•]\s?/gm, '')
+      .replace(/[*_`~]+/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  /** Strip a leading part already covered by the folded turn: normalize
+   *  bullets + inline markdown so plain terminal output matches folded markdown,
+   *  and hide completely when the folded turn already covers the draft. */
   const visible = $derived.by(() => {
-    const draft = text.replace(/\r/g, '');
-    if (!draft.trim()) return '';
-    const probe = lastText.replace(/\s+/g, ' ').trim().slice(-48);
-    if (probe.length >= 16) {
-      const flat = draft.replace(/\s+/g, ' ');
-      const at = flat.lastIndexOf(probe);
+    const draft = text.replace(/\r/g, '').replace(/^\s*[⏺•]\s?/gm, '');
+    const flatDraft = plainFlat(draft);
+    if (!flatDraft) return '';
+    const flatLast = plainFlat(lastText);
+    if (flatLast && (flatLast.endsWith(flatDraft) || flatLast.includes(flatDraft))) return '';
+    const probe = flatLast.slice(-48);
+    if (probe.length >= 8) {
+      const at = flatDraft.lastIndexOf(probe);
       if (at >= 0) {
-        // Map the flattened index back approximately: drop the same share of
-        // characters from the raw draft (whitespace runs are the only delta).
-        const keepFlat = flat.slice(at + probe.length).trim();
+        const keepFlat = flatDraft.slice(at + probe.length).trim();
         if (!keepFlat) return '';
         const idx = draft.lastIndexOf(keepFlat.slice(0, 24));
         return idx >= 0 ? draft.slice(idx).trimEnd() : keepFlat;
@@ -34,9 +43,7 @@
     }
     return draft.trimEnd();
   });
-  // Claude Code prefixes each streamed block with a "⏺" bullet — terminal
-  // chrome, not content.
-  const shown = $derived(visible.replace(/^\s*⏺\s?/gm, ''));
+  const shown = $derived(visible);
 </script>
 
 <!-- Not a live region: it re-renders ~every 700 ms while text streams; the
