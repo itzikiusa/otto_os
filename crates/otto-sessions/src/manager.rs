@@ -21,133 +21,6 @@ use crate::agy::{agy_cli_root, scan_agy_conversation};
 use crate::providers::ProviderRegistry;
 use crate::titles::{parse_claude_first_prompt, parse_codex_first_prompt};
 
-/// Build `["--add-dir", path, ...]` args for providers that support `--add-dir`
-/// (claude, codex, agy — NOT shell).  Returns an empty vec for unknown/shell
-/// providers or when `meta` has no `extra_dirs` array.
-///
-/// NOTE: this is provider-agnostic on purpose (it just grants dir access). It is
-/// NOT a skill-registration mechanism: only claude first-class-loads skills from
-/// an added dir's `.claude/skills`. If you put a skill bundle in `extra_dirs`,
-/// gate it to claude at the CALL SITE (see
-/// `otto_server::review_session::review_skills_extra_dirs`) — handing a
-/// `.claude/skills` bundle to codex makes it scavenge and run the wrong skill.
-fn add_dir_args(provider: &str, meta: &serde_json::Value) -> Vec<String> {
-    if provider == "shell" {
-        return vec![];
-    }
-    let Some(arr) = meta.get("extra_dirs").and_then(|v| v.as_array()) else {
-        return vec![];
-    };
-    let mut out = Vec::with_capacity(arr.len() * 2);
-    for item in arr {
-        if let Some(dir) = item.as_str() {
-            if !dir.is_empty() {
-                out.push("--add-dir".to_string());
-                out.push(dir.to_string());
-            }
-        }
-    }
-    out
-}
-
-/// Expand a provider's model-flag TEMPLATE (its `ProviderSpec.model_args`,
-/// e.g. `["--model","{model}"]` for claude/codex/agy, `["-m","{model}"]` for a
-/// custom provider) against `meta.model`. Returns an empty vec when the
-/// provider has no template (`None` — shell, template-less custom providers;
-/// pickers hide the model control via `/meta.model_flags` so this is never a
-/// surprise drop) or when `meta.model` is absent/blank.
-fn model_args(template: Option<&[String]>, meta: &serde_json::Value) -> Vec<String> {
-    let Some(template) = template else {
-        return vec![];
-    };
-    let Some(model) = meta.get("model").and_then(|v| v.as_str()) else {
-        return vec![];
-    };
-    let model = model.trim();
-    if model.is_empty() {
-        return vec![];
-    }
-    template
-        .iter()
-        .map(|a| a.replace("{model}", model))
-        .collect()
-}
-
-/// Extra argv for a **lean turn** — a short, mechanical, user-blocking agent
-/// turn (drafting a PR title/description, a commit message) whose prompt is
-/// entirely self-contained.
-///
-/// Opted in with `meta.lean_turn = true`. Two costs dominate such a turn and
-/// neither buys anything here:
-///   * **MCP servers.** Otto injects its own `otto` server into every claude
-///     session; `--strict-mcp-config` with no `--mcp-config` loads none at all.
-///   * **Tool round trips.** The diff is already in the prompt, so `Bash`,
-///     edits and web access can only add latency. Read/Grep/Glob stay allowed
-///     as an escape hatch for a truncated diff.
-///
-/// Claude-only: codex takes neither flag.
-fn lean_turn_args(provider: &str, meta: &serde_json::Value) -> Vec<String> {
-    if provider != "claude" || meta.get("lean_turn").and_then(|v| v.as_bool()) != Some(true) {
-        return vec![];
-    }
-    vec![
-        "--strict-mcp-config".to_string(),
-        "--disallowed-tools".to_string(),
-        "Bash Edit Write NotebookEdit WebFetch WebSearch Task".to_string(),
-    ]
-}
-
-/// Extra argv for a **read-only** session (`meta.read_only = true` — a
-/// proactive personal-agent run, or a run of a read-only schedule). The CLI's
-/// own shell and sub-agents are removed so nothing can run `git push` / `gh` /
-/// `curl -X POST`; file edits stay (the agent writes its memory + report) and
-/// are confined to its folder by the forced Seatbelt profile
-/// ([`SessionManager::apply_sandbox`]). Otto's own tools are refused at the
-/// daemon (otto-server `personal_agent_policy`). Claude gets tool flags; codex
-/// gets the untrusted-checkout refinements below (and [`read_only_strip`]);
-/// other providers rely on the sandbox + the daemon-side policy.
-///
-/// Review-only refinements (code review runs against PR checkouts whose
-/// content an outsider wrote):
-/// - `meta.allow_subagents = true` keeps the sub-agent tool (an orchestrator
-///   reviewer delegates each lens to one) while the shell stays removed;
-/// - `meta.project_settings = false` marks an UNTRUSTED checkout. For claude it
-///   adds `--setting-sources user`, so the checkout's `.claude/settings*.json`
-///   (hooks, MCP servers, permission rules) never loads — a repo hook would
-///   otherwise run on SessionStart — plus `--strict-mcp-config` (no MCP server
-///   at all: a reviewer only reads files and writes its findings JSON, and a
-///   user-scope MCP is an exfiltration channel) and removes WebFetch /
-///   WebSearch (an injected "fetch https://x/?k=<secret>" is the other one).
-///   For codex it adds `-c project_doc_max_bytes=0`, so the checkout's
-///   AGENTS.md is never loaded as INSTRUCTIONS (it is still readable as code).
-fn read_only_args(provider: &str, meta: &serde_json::Value) -> Vec<String> {
-    if meta.get("read_only").and_then(|v| v.as_bool()) != Some(true) {
-        return vec![];
-    }
-    let untrusted = meta.get("project_settings").and_then(|v| v.as_bool()) == Some(false);
-    match provider {
-        "claude" => {
-            let subagents = meta.get("allow_subagents").and_then(|v| v.as_bool()) == Some(true);
-            let mut denied = vec!["Bash", "NotebookEdit"];
-            if !subagents {
-                denied.push("Task");
-            }
-            if untrusted {
-                denied.extend(["WebFetch", "WebSearch"]);
-            }
-            let mut args = vec!["--disallowed-tools".to_string(), denied.join(" ")];
-            if untrusted {
-                args.push("--setting-sources".to_string());
-                args.push("user".to_string());
-                args.push("--strict-mcp-config".to_string());
-            }
-            args
-        }
-        "codex" if untrusted => vec!["-c".to_string(), "project_doc_max_bytes=0".to_string()],
-        _ => vec![],
-    }
-}
-
 /// Removes provider flags a **read-only** session must not carry, from argv the
 /// provider registry built. Codex's `--search` (the model-side live web-search
 /// tool) is dropped: a read-only run has no business browsing, and on an
@@ -2101,6 +1974,19 @@ impl SessionManager {
         );
     }
 
+    async fn has_process_sandbox(&self, kind: SessionKind, provider: &str) -> bool {
+        if !otto_sandbox::is_supported() {
+            return false;
+        }
+        let Some(sr) = &self.settings else {
+            return false;
+        };
+        let Ok(Some(cfg)) = sr.get("process_sandbox").await else {
+            return false;
+        };
+        sandbox_decision(&cfg, kind, provider).is_some()
+    }
+
     /// The `process_sandbox` policy for a NON-PTY process the daemon runs on a
     /// user's behalf as `provider` in `cwd` — today a scheduled `shell` task's
     /// `/bin/sh -c`. Same decision and profile as a session spawn
@@ -2480,6 +2366,11 @@ impl SessionManager {
                     self.providers.model_args_template(&provider).as_deref(),
                     &meta_val,
                 ));
+                spec.args.extend(effort_args(&provider, &meta_val));
+                let external_sandbox = self
+                    .has_process_sandbox(SessionKind::Agent, &provider)
+                    .await;
+                interaction_mode_apply(&provider, &meta_val, external_sandbox, &mut spec.args);
                 spec.args.extend(lean_turn_args(&provider, &meta_val));
                 read_only_strip(&provider, &meta_val, &mut spec.args);
                 spec.args.extend(read_only_args(&provider, &meta_val));
@@ -5301,6 +5192,17 @@ impl SessionManager {
                     &session.meta,
                 ));
                 spec.args
+                    .extend(effort_args(&session.provider, &session.meta));
+                let external_sandbox = self
+                    .has_process_sandbox(SessionKind::Agent, &session.provider)
+                    .await;
+                interaction_mode_apply(
+                    &session.provider,
+                    &session.meta,
+                    external_sandbox,
+                    &mut spec.args,
+                );
+                spec.args
                     .extend(lean_turn_args(&session.provider, &session.meta));
                 // A fresh restart (e.g. a legacy row or an override-created
                 // session) must use and retain the same UUID contract as create.
@@ -6329,6 +6231,8 @@ fn missing_cwd_refusal_in(session: &Session, otto_data: &std::path::Path) -> Opt
     ))
 }
 
+#[path = "manager/cli_flags.rs"]
+mod cli_flags;
 #[path = "manager/mcp_sync.rs"]
 mod mcp_sync;
 #[path = "manager/otto_tools_env.rs"]
@@ -6341,6 +6245,9 @@ mod shutdown_guard;
 mod trail;
 #[path = "manager/transcript_roots.rs"]
 mod transcript_roots;
+use cli_flags::{
+    add_dir_args, effort_args, interaction_mode_apply, lean_turn_args, model_args, read_only_args,
+};
 use otto_tools_env::{otto_tools_env, session_mcp_profiles, write_codex_creds};
 use transcript_roots::persist_transcript_path;
 

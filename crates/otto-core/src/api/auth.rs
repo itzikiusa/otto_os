@@ -28,6 +28,11 @@ pub struct MetaResp {
     /// a provider without a template hides it (never a silent drop).
     #[serde(default)]
     pub model_flags: std::collections::HashMap<String, bool>,
+    /// Per-provider catalog of selectable models and their supported reasoning
+    /// / effort levels (discovered from each CLI's local catalog/cache with
+    /// curated fallbacks). Empty when unauthenticated after onboarding.
+    #[serde(default)]
+    pub provider_models: std::collections::HashMap<String, Vec<ProviderModelOption>>,
     /// A second LOOPBACK base for the same daemon (`http://localhost:<port>`
     /// — `ottod` holds both `127.0.0.1` and `[::1]` on the port), or `null`
     /// when it could not bind `[::1]` (IPv6 off / port taken). Browsers pool
@@ -36,6 +41,16 @@ pub struct MetaResp {
     /// Only ever a loopback address the daemon itself holds.
     #[serde(default)]
     pub alt_loopback_base: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProviderModelOption {
+    pub id: String,
+    pub label: String,
+    pub description: String,
+    pub default_effort: Option<String>,
+    #[serde(default)]
+    pub supported_efforts: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -4,20 +4,7 @@ import { api, getToken } from '../api/client';
 import { plural } from '../plural';
 import { workflowRuns, type WorkflowRunEvent } from './workflowRuns.svelte';
 import { router } from '../router.svelte';
-import type {
-  ActiveWorkflowRun,
-  AttachedIssue,
-  CreateSessionReq,
-  Id,
-  OpenAgentSessionReq,
-  OpenAgentSessionResp,
-  OttoEvent,
-  Session,
-  SessionStatus,
-  Workspace,
-  WorkspaceSettings,
-  WorkspaceWithRole,
-} from '../api/types';
+import type { ActiveWorkflowRun, AttachedIssue, CreateSessionReq, Id, OpenAgentSessionReq, OpenAgentSessionResp, OttoEvent, Session, SessionStatus, Workspace, WorkspaceSettings, WorkspaceWithRole } from '../api/types';
 import { toasts } from '../toast.svelte';
 import { confirmer } from '../confirm.svelte';
 import { ui, clientId } from './ui.svelte';
@@ -28,7 +15,7 @@ import { MAX_PANES, LS_PANES } from './splitLayout';
 import { isEmbedded } from '../desktop';
 import { SCRATCH_WORKSPACE_ID, sessionVerbsApply } from './sessionScope';
 import { applyStatusPatches, canDropExited, patchSessionIn, staleStatusIds, type StatusPatch } from './sessionPatch';
-import { bucketSessions, idChunks, isForeground, isShownKind, shownListQuery } from './sessionBuckets';
+import { bucketSessions, idChunks, isForeground, isShownKind, isThreadSurfaceSession, shownListQuery } from './sessionBuckets';
 import { whenIdle } from '../lazy-component.svelte';
 import { toastError } from '../toastError';
 import { loadErrorText } from '../loadError';
@@ -66,7 +53,7 @@ export { SCRATCH_WORKSPACE_ID };
 
 // The background-source blacklist, `isForeground` and the one-pass sidebar
 // bucketing live in the rune-free `sessionBuckets.ts` (unit-tested there).
-export { isForeground };
+export { isForeground, isThreadSurfaceSession };
 
 /** Per-device session isolation (Settings → Appearance, opt-in): with it on, a
  *  FOREGROUND session is kept only on the device that started it
@@ -268,9 +255,7 @@ class WorkspaceStore {
 
   private mainOf(active: Session[], open: Set<Id>): Session[] {
     return active.filter(
-      (s) =>
-        (isForeground(s) && (this.currentId === null || s.workspace_id !== SCRATCH_WORKSPACE_ID)) ||
-        open.has(s.id),
+      (s) => (!isThreadSurfaceSession(s) && isForeground(s) && (this.currentId === null || s.workspace_id !== SCRATCH_WORKSPACE_ID)) || open.has(s.id),
     );
   }
 
@@ -310,7 +295,7 @@ class WorkspaceStore {
       .map((w) => ({
         ws: w,
         sessions: this.otherWsSessions
-          .filter((s) => s.workspace_id === w.id && s.kind === 'agent' && isForeground(s))
+          .filter((s) => s.workspace_id === w.id && s.kind === 'agent' && isForeground(s) && !isThreadSurfaceSession(s))
           .sort((a, b) => b.last_active_at.localeCompare(a.last_active_at)),
       }))
       .filter((g) => g.sessions.length > 0),
@@ -390,6 +375,7 @@ class WorkspaceStore {
    *  {@link ARCHIVED_PAGE} at a time, the first time the section opens
    *  ({@link loadArchived}); newest first. The main list never carries them. */
   archivedSessions: Session[] = $state.raw([]);
+  archivedAgentSessions: Session[] = $derived(this.archivedSessions.filter((s) => !isThreadSurfaceSession(s)));
   /** At least one page was loaded for the current selection. */
   archivedLoaded = $state(false);
   archivedLoading = $state(false);
@@ -421,6 +407,8 @@ class WorkspaceStore {
   needsYouCount: number = $derived(
     this.buckets.foregroundActive.filter((s) => this.needsYou[s.id] === true).length,
   );
+  threadsWorkingCount: number = $derived(this.buckets.threads.filter((s) => this.statusMap[s.id] === 'working').length);
+  threadsNeedsYouCount: number = $derived(this.buckets.threads.filter((s) => this.needsYou[s.id] === true).length);
 
   /** Foreground live sessions (the scope of the badge counts) — exported for
    *  the Home "waiting" box so it doesn't re-filter the whole list. */
@@ -1880,6 +1868,16 @@ class WorkspaceStore {
     this.otherWsSessions = this.otherWsSessions.map((x) => (x.id === id ? s : x));
   }
 
+  async updateSessionConfig(id: Id, metaPatch: Record<string, unknown>, opts?: { restartIfIdle?: boolean; toastTitle?: string }): Promise<Session> {
+    const updated = await api.patch<Session>(`/sessions/${id}`, { meta: metaPatch });
+    this.patchSession(id, () => updated);
+    const st = this.statusMap[id] ?? updated.status;
+    const canRespawn = opts?.restartIfIdle !== false && !updated.archived && updated.kind === 'agent' && updated.provider !== 'shell';
+    if (canRespawn && (st === 'running' || st === 'idle')) { await this.restartSession(id, { quiet: true }); if (opts?.toastTitle) toasts.info(opts.toastTitle); return this.getSession(id) ?? updated; }
+    if (opts?.toastTitle) toasts.info(opts.toastTitle, canRespawn && st === 'working' ? 'Saved — restart session after this turn to apply new CLI flags' : undefined);
+    return updated;
+  }
+
   /** Patch one session in whichever list holds it; a list without it (or an
    *  unchanged patch) keeps its identity, so nothing downstream re-runs. */
   private patchSession(id: Id, patch: (s: Session) => Session): void {
@@ -2088,8 +2086,6 @@ class WorkspaceStore {
     const s = await api.patch<Session>(`/sessions/${sessionId}`, { meta: patch });
     this.sessions = this.sessions.map((x) => (x.id === sessionId ? s : x));
   }
-
-
 
   private settingsWrites = new Map<Id, Promise<void>>();
 

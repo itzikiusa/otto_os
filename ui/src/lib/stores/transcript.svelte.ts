@@ -726,6 +726,9 @@ class TranscriptStore {
    *  back (in-memory, mirrored to sessionStorage so a reload keeps it too). */
   private drafts: Record<string, string> = $state({});
   private pendingSends: Record<string, boolean> = $state({});
+  /** Optimistic user prompt submitted via chat/NewThreadStage before the CLI's
+   *  on-disk JSONL records it — avoids flashing "No transcript yet". */
+  private optimisticPrompts: Record<string, { text: string; ts: string }> = $state({});
   sending(sessionId: string): boolean { return this.pendingSends[sessionId] === true; }
   tryBeginSend(sessionId: string): boolean {
     if (this.sending(sessionId)) return false;
@@ -733,6 +736,19 @@ class TranscriptStore {
     return true;
   }
   finishSend(sessionId: string): void { delete this.pendingSends[sessionId]; }
+  recordOptimisticPrompt(sessionId: string, text: string): void {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    this.optimisticPrompts[sessionId] = { text: trimmed, ts: new Date().toISOString() };
+  }
+  optimisticPrompt(sessionId: string): { text: string; ts: string } | null {
+    return this.optimisticPrompts[sessionId] ?? null;
+  }
+  clearOptimisticPrompt(sessionId: string): void {
+    if (sessionId in this.optimisticPrompts) {
+      delete this.optimisticPrompts[sessionId];
+    }
+  }
   /** Uploaded inbox files stay with their session across composer remounts.
    *  Object URLs are browser-local and are released on explicit remove/send. */
   private draftImages: Record<string, { path: string; name: string; url: string }[]> = $state({});

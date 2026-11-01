@@ -1,8 +1,8 @@
 <script lang="ts">
   // Clamped completion popups anchored above the composer box: `@file`
   // workspace path typeahead and `/` slash-command completion.
-  import type { SlashCommand } from '../../../lib/api/types';
   import Icon from '../../../lib/components/Icon.svelte';
+  import type { ComposerSlashCommand } from '../../../lib/slashActions';
   import type { MentionEntry } from './fileMentions';
 
   interface Props {
@@ -17,10 +17,10 @@
     onfilehover: (idx: number) => void;
     onacceptmention: (entry: MentionEntry) => void;
     cmdOpen: boolean;
-    suggestions: SlashCommand[];
+    suggestions: ComposerSlashCommand[];
     cmdIdx: number;
     oncmdhover: (idx: number) => void;
-    onacceptcmd: (cmd: SlashCommand) => void;
+    onacceptcmd: (cmd: ComposerSlashCommand) => void;
   }
 
   let {
@@ -125,10 +125,12 @@
       >
         <span class="cmd-name mono" dir="ltr">/{c.name}</span>
         <span class="cmd-desc dim">{c.description}</span>
-        <span class="cmd-src dim">{c.source === 'builtin' ? '' : c.source}</span>
+        <span class="cmd-src" class:interactive={c.source === 'interactive'} class:dim={c.source !== 'interactive'}>
+          {c.source === 'builtin' ? '' : c.source}
+        </span>
       </div>
     {/each}
-    <div class="cmd-hint dim">↑↓ choose · Tab/⏎ complete · Esc dismiss</div>
+    <div class="cmd-hint dim">↑↓ choose · Tab/⏎ run or complete · Esc dismiss</div>
   </div>
 {/if}
 
@@ -195,6 +197,14 @@
     font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: .06em;
+  }
+  .cmd-src.interactive {
+    color: var(--accent-text);
+    background: var(--accent-faint);
+    border: 1px solid var(--accent-line);
+    border-radius: 999px;
+    padding: 1px 6px;
+    font-weight: 600;
   }
   .cmd-hint {
     font-size: var(--fs-xs);

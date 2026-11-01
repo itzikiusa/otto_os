@@ -5,10 +5,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   SIDEBAR_GROUPS,
+  SIDEBAR_MODULES,
   availableModules,
   favoriteModules,
   insertFavorite,
   moveAmong,
+  reconcileNewSidebarModules,
   reorderAmong,
   resolveGroupOrder,
   resolveOrder,
@@ -124,4 +126,52 @@ test('insertFavorite: appends, inserts before a target, never duplicates', () =>
   assert.deepEqual(insertFavorite(['agents', 'git'], 'vault', 'git'), ['agents', 'vault', 'git']);
   assert.deepEqual(insertFavorite(['agents', 'git'], 'vault', 'missing'), ['agents', 'git', 'vault']);
   assert.deepEqual(insertFavorite(['agents', 'git', 'vault'], 'vault', 'agents'), ['vault', 'agents', 'git']);
+});
+
+test('reconcileNewSidebarModules: surfaces newly shipped Threads in custom sidebars and respects later hides', () => {
+  const preThreadsOrder = SIDEBAR_MODULES.map((m) => m.id).filter((id) => id !== 'threads');
+
+  // 1. User customized order + collapsed Work + pinned Agents in Favorites before Threads shipped.
+  const firstBoot = reconcileNewSidebarModules({
+    order: preThreadsOrder,
+    hidden: ['home', 'rooms'],
+    favorites: ['agents', 'git', 'connections'],
+    collapsedGroups: ['work', 'automate'],
+    groupOrder: [],
+    knownModules: null,
+  });
+  assert.equal(firstBoot.changed, true);
+  // Placed right after 'agents' in the saved order.
+  assert.equal(firstBoot.order.indexOf('threads'), firstBoot.order.indexOf('agents') + 1);
+  // Surfaced above 'agents' in Favorites so Agents's inline session tree doesn't bury it.
+  assert.deepEqual(firstBoot.favorites, ['threads', 'agents', 'git', 'connections']);
+  // Work unfolded; Automate stays collapsed.
+  assert.deepEqual(firstBoot.collapsedGroups, ['automate']);
+  assert.deepEqual(firstBoot.knownModules, SIDEBAR_MODULES.map((m) => m.id));
+
+  // 2. Subsequent boot after user explicitly hides & unfavorites Threads: choice sticks!
+  const afterUserHid = reconcileNewSidebarModules({
+    order: firstBoot.order,
+    hidden: [...firstBoot.hidden, 'threads'],
+    favorites: ['agents', 'git', 'connections'],
+    collapsedGroups: ['work', 'automate'],
+    groupOrder: [],
+    knownModules: firstBoot.knownModules,
+  });
+  assert.equal(afterUserHid.changed, false);
+  assert.ok(afterUserHid.hidden.includes('threads'));
+  assert.ok(!afterUserHid.favorites.includes('threads'));
+  assert.deepEqual(afterUserHid.collapsedGroups, ['work', 'automate']);
+
+  // 3. User who only used Favorites + collapsed Work (empty saved order) still gets Threads surfaced.
+  const favOnlyUpgrade = reconcileNewSidebarModules({
+    order: [],
+    hidden: [],
+    favorites: ['agents', 'git'],
+    collapsedGroups: ['work'],
+    groupOrder: [],
+    knownModules: null,
+  });
+  assert.deepEqual(favOnlyUpgrade.favorites, ['threads', 'agents', 'git']);
+  assert.deepEqual(favOnlyUpgrade.collapsedGroups, []);
 });

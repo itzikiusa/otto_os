@@ -106,6 +106,7 @@ pub async fn meta(
             providers: Vec::new(),
             default_provider: None,
             model_flags: Default::default(),
+            provider_models: Default::default(),
             alt_loopback_base: None,
         }));
     }
@@ -155,7 +156,13 @@ pub async fn meta(
             configure_provider_probe(&mut tool_specs, name, program);
         }
     }
-    let tools = probe_tools_cached(tool_specs).await;
+    let tools = probe_tools_cached(tool_specs.clone()).await;
+    let agy_program = tool_specs
+        .get("agy")
+        .filter(|_| tools.iter().any(|t| t.name == "agy" && t.found))
+        .cloned();
+    let provider_models =
+        otto_sessions::provider_models::probe_provider_models_cached(&providers, agy_program).await;
 
     Ok(Json(MetaResp {
         version: ctx.version.clone(),
@@ -166,6 +173,7 @@ pub async fn meta(
         providers,
         default_provider,
         model_flags,
+        provider_models,
         alt_loopback_base: crate::transport::alt_loopback_base(),
     }))
 }

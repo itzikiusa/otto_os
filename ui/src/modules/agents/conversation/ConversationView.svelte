@@ -7,6 +7,15 @@
     readonly?: boolean;
     /** Active panes resume on mount; passive tiles only read/keep alive. */
     resumeOnOpen?: boolean;
+    /** Host surface: `'threads'` uses `ThreadPane`'s header and ready state. */
+    surface?: 'agents' | 'threads';
+    ontoggleterminal?: () => void;
+    onopeninspector?: (tab: 'changes' | 'files') => void;
+    onnewthread?: (opts: {
+      beside: boolean;
+      prompt?: string;
+      mode?: 'full' | 'accept-edits' | 'plan';
+    }) => void;
   }
   // Workspace repos (for `#123` → the GitHub PR / issue URL), fetched once per
   // workspace per app run — a light GET, never the git store's heavier load.
@@ -35,11 +44,11 @@
   // width.
   import { setContext, tick, untrack } from 'svelte';
   import Icon from '../../../lib/components/Icon.svelte';
-  import { announceShown } from '../../../lib/announce.svelte';
   import { splitter } from '../../../lib/paneResizer';
-  import ProviderIcon, { hasProviderIcon } from '../../../lib/components/ProviderIcon.svelte';
   import TurnItem from './TurnItem.svelte';
   import Composer from './Composer.svelte';
+  import ConversationHeader from './ConversationHeader.svelte';
+  import ConversationThreadChrome from './ConversationThreadChrome.svelte';
   import LiveDraft from './LiveDraft.svelte';
   import LiveStatus from './LiveStatus.svelte';
   import EmptyState from '../../../lib/components/EmptyState.svelte';
@@ -60,11 +69,26 @@
   import { groupTurns, stableGroupTurns, activeQueued, changedDiff, changedFiles, countUnread, dayKey, fmtCost, fmtDay, fmtDuration, fmtTokens, pendingTool, providerName } from './format';
   import { registerFindProvider } from '../../../lib/findProviders';
   import { appModifier, isMacPlatform, keyContext } from '../../../lib/keys';
-  import type { SessionStatus, TranscriptProvider, TranscriptUnavailableReason, Turn } from '../../../lib/api/types';
+  import type { SessionStatus, TranscriptProvider, Turn } from '../../../lib/api/types';
   import type { RenderItem } from './format';
   import { CONV_CTX, type ConvContext, type PreviewReq } from './context';
+  import { resolveSessionThreadConfig } from '../../../lib/providerModels';
+  import {
+    buildConversationMenuItems,
+    runApprovedPlanImplementation,
+    UNAVAILABLE_TRANSCRIPT_COPY,
+  } from './conversationMenu';
 
-  let { sessionId, workspaceId, readonly = false, resumeOnOpen = true }: ConversationViewProps = $props();
+  let {
+    sessionId,
+    workspaceId,
+    readonly = false,
+    resumeOnOpen = true,
+    surface = 'agents',
+    ontoggleterminal,
+    onopeninspector,
+    onnewthread,
+  }: ConversationViewProps = $props();
 
   const src = $derived<TranscriptSource>({ sessionId });
   const conv = $derived(transcript.conversation(src));
@@ -346,7 +370,41 @@
     sessionState(sessionId ? ws.getSession(sessionId) : null, status, false, { stale: events.state !== 'connected' }),
   );
   const stale = $derived(working && sessionInfo.key === 'stale');
-  const lastItem = $derived(hasLater ? undefined : items[items.length - 1]);
+  const optPrompt = $derived(sessionId ? transcript.optimisticPrompt(sessionId) : null);
+  function turnMatchesOptimistic(turn: Turn, needle: string): boolean {
+    if (!needle || turn.role !== 'user') return false;
+    return turn.blocks.some((b) => b.kind === 'text' && b.md.includes(needle));
+  }
+  $effect(() => {
+    const sid = sessionId;
+    const opt = optPrompt;
+    if (!sid || !opt) return;
+    const needle = opt.text.slice(0, 48);
+    if (needle && conv.turns.some((turn) => turnMatchesOptimistic(turn, needle))) {
+      transcript.clearOptimisticPrompt(sid);
+    }
+  });
+  const displayItems = $derived.by(() => {
+    if (!optPrompt || hasLater) return items;
+    const needle = optPrompt.text.slice(0, 48);
+    if (needle && items.some((it) => it.role === 'user' && it.turns.some((turn) => turnMatchesOptimistic(turn, needle)))) {
+      return items;
+    }
+    const synthetic = groupTurns([
+      {
+        id: 'optimistic-user',
+        role: 'user',
+        ts: optPrompt.ts,
+        blocks: [{ kind: 'text', md: optPrompt.text }],
+        duration_ms: null,
+        model: null,
+        system: [],
+        reasoning_steps: 0,
+      },
+    ]);
+    return [...items, ...synthetic];
+  });
+  const lastItem = $derived(hasLater ? undefined : displayItems[displayItems.length - 1]);
   /** The newest call still without a result — the current step while working,
    *  or (session alive but quiet) what the agent is blocked on: a permission
    *  prompt / question on the terminal screen. */
@@ -354,10 +412,14 @@
   const waiting = $derived(alive && !working && pendingCall != null);
   /** Your last message's time — the working line's elapsed clock. */
   const lastPromptTs = $derived.by(() => {
-    for (let i = items.length - 1; i >= 0; i--) if (items[i].role === 'user') return items[i].ts;
+    for (let i = displayItems.length - 1; i >= 0; i--) if (displayItems[i].role === 'user') return displayItems[i].ts;
     return null;
   });
   function openTerminal(): void {
+    if (ontoggleterminal) {
+      ontoggleterminal();
+      return;
+    }
     if (sessionId) transcript.setView(sessionId, 'terminal');
   }
   // Screen-reader announcements: only the moments that matter (working,
@@ -387,10 +449,12 @@
   // rollout not matched): nothing will push an event, so retry the read every
   // few seconds while the session is alive instead of leaving a dead page.
   const RETRY_EVERY_MS = 5_000;
+  const FAST_RETRY_EVERY_MS = 1_200;
   $effect(() => {
     if (!alive || !t?.unavailable_reason || conv.loading) return;
     const c = conv;
-    const id = setTimeout(() => c.requestRefresh(), RETRY_EVERY_MS);
+    const delay = optPrompt || working ? FAST_RETRY_EVERY_MS : RETRY_EVERY_MS;
+    const id = setTimeout(() => c.requestRefresh(), delay);
     return () => clearTimeout(id);
   });
 
@@ -433,7 +497,7 @@
     const id = setTimeout(() => (searchQ = q), SEARCH_DEBOUNCE_MS);
     return () => clearTimeout(id);
   });
-  let searchEl = $state<HTMLInputElement | null>(null);
+  let headRef = $state<ReturnType<typeof ConversationHeader> | null>(null);
   let hitIdx = $state(0);
   // Lowercased search text per Turn object. Turns are replaced (never mutated)
   // when they change, so an unchanged turn is lowercased once per session.
@@ -558,7 +622,7 @@
   function openSearch(): void {
     if (!searchOpen) searchReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     searchOpen = true;
-    void tick().then(() => searchEl?.select());
+    void tick().then(() => headRef?.selectInput());
   }
   function closeSearch(): void {
     searchOpen = false;
@@ -709,61 +773,60 @@
     }
   }
 
-  const UNAVAILABLE: Record<TranscriptUnavailableReason, { title: string; body: string }> = {
-    no_provider_session_id: {
-      title: 'No transcript yet',
-      body: 'The agent has not written a transcript for this session (it appears after the first prompt). The terminal has everything so far.',
-    },
-    transcript_missing: {
-      title: 'Transcript not found on disk',
-      body: 'The provider transcript file for this session is gone or was never created here. Use the terminal view.',
-    },
-    provider_unsupported: {
-      title: 'Chat view not available for this provider',
-      body: 'This agent does not keep a readable transcript. Use the terminal view.',
-    },
-    codex_rollout_unresolved: {
-      title: 'Codex rollout not matched',
-      body: 'Otto couldn’t match this session to a Codex rollout file yet. It usually resolves after the next turn; the terminal is complete meanwhile.',
-    },
-  };
-  const unavailable = $derived(t?.unavailable_reason ? UNAVAILABLE[t.unavailable_reason] : null);
+  const unavailable = $derived(
+    t?.unavailable_reason ? UNAVAILABLE_TRANSCRIPT_COPY[t.unavailable_reason] : null,
+  );
+  const transientUnavailable = $derived(
+    t?.unavailable_reason === 'no_provider_session_id' ||
+      t?.unavailable_reason === 'codex_rollout_unresolved',
+  );
+  const shortThreadCwd = $derived.by(() => {
+    const raw = (ctx.cwd ?? '').replace(/\/+$/, '');
+    if (!raw) return 'workspace';
+    const segs = raw.split('/').filter(Boolean);
+    return segs[segs.length - 1] ?? raw;
+  });
+  const sessionCfg = $derived(
+    resolveSessionThreadConfig(sessionId ? ws.getSession(sessionId) : null, t?.model ?? null),
+  );
+  const showPlanActionBar = $derived(
+    canCompose &&
+      !!sessionId &&
+      sessionCfg.interactionMode === 'plan' &&
+      !working &&
+      !waiting &&
+      displayItems.length > 0 &&
+      displayItems[displayItems.length - 1]?.role === 'assistant',
+  );
+  let implementingPlan = $state(false);
+  async function implementPlanHere(): Promise<void> {
+    if (!sessionId || implementingPlan) return;
+    implementingPlan = true;
+    try { await runApprovedPlanImplementation(sessionId); } finally { implementingPlan = false; }
+  }
 
-  // ── Header chrome by PANE width, not window width ────────────────────────
-  // A chat can live in a 200px tile or a full-window tab; `.conv` is the sized
-  // flex child, so its inline size is the only honest measure. The
-  // `@container` blocks at the bottom use the SAME numbers.
-  /** ≤260px: the search button folds into the ⋯ menu, and an open search box
-   *  takes the whole row. */
+  export function triggerSearch(): void { openSearch(); }
+  export function triggerOptionsMenu(e: MouseEvent | KeyboardEvent): void { openHeadMenu(e); }
+
   const narrowHead = $derived(convW > 0 && convW <= 260);
-
-  /** ⋯ — the chat's secondary controls: system notes, reload (and search when
-   *  the row is too narrow for its button). */
   function openHeadMenu(e: MouseEvent | KeyboardEvent): void {
-    ctxMenu.show(e, [
-      ...(narrowHead ? [{ label: 'Search…', icon: 'search', hint: '⌘F', action: () => openSearch() }] : []),
-      {
-        label: 'Show system notes',
-        icon: showSystem ? 'eye' : 'eyeOff',
-        checked: showSystem,
-        title: 'Reveal system reminders, hooks, attachments and injected queue items',
-        action: () => transcript.setShowSystem(!showSystem),
-      },
-      {
-        label: 'Show all work',
-        icon: 'layers',
-        checked: ctx.expandAll,
-        title: 'Open every “Worked for …” fold — tool calls, narration and plan updates',
-        action: () => (ctx.expandAll = !ctx.expandAll),
-      },
-      ...(hasChanges ? [{ label: 'All changes', icon: 'split', action: () => openAllChanges() }] : []),
-      { separator: true },
-      { label: 'Previous message of yours', icon: 'chevronUp', hint: '⌥↑', action: () => jumpPrompt(-1) },
-      { label: 'Next message of yours', icon: 'chevronDown', hint: '⌥↓', action: () => jumpPrompt(1) },
-      { label: 'Jump to latest', icon: 'arrowDown', hint: '⌘↓', action: () => scrollToBottomAll() },
-      { separator: true },
-      { label: 'Refresh transcript', icon: 'refresh', action: () => void conv.load() },
-    ]);
+    ctxMenu.show(
+      e,
+      buildConversationMenuItems({
+        includeSearch: narrowHead || surface === 'threads',
+        showSystem,
+        expandAll: Boolean(ctx.expandAll),
+        hasChanges,
+        onOpenSearch: openSearch,
+        onToggleSystem: () => transcript.setShowSystem(!showSystem),
+        onToggleExpandAll: () => (ctx.expandAll = !ctx.expandAll),
+        onOpenAllChanges: openAllChanges,
+        onPrevPrompt: () => jumpPrompt(-1),
+        onNextPrompt: () => jumpPrompt(1),
+        onJumpLatest: scrollToBottomAll,
+        onRefresh: () => void conv.load(),
+      }),
+    );
   }
   // ── All changes: every file the loaded conversation edited or wrote ────────
   const editsIn = new WeakMap<Turn, boolean>();
@@ -794,48 +857,34 @@
 </script>
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="conv" bind:clientWidth={convW} data-session={sessionId} data-ws={workspaceId} data-readonly={ctx.readonly} data-loaded={t != null} onkeydown={onConvKey} onfocusin={claimFind} onfocusout={releaseFind}>
-  <header class="conv-head" class:folded={narrowHead && searchOpen}>
-    {#if effectiveProvider && hasProviderIcon(effectiveProvider)}<ProviderIcon provider={effectiveProvider} size={13} />{/if}
-    <span class="conv-title" title={[t?.title, t?.model, statsText].filter(Boolean).join(' · ')}>{t?.title ?? (conv.loading ? 'Loading conversation…' : 'Conversation')}</span>
-    {#if statsText}
-      <span class="stats" title="turns · tool calls · cost · tokens in/out · duration">{statsText}</span>
-    {/if}
-    <span class="grow"></span>
-    {#if hasChanges && !(narrowHead && searchOpen)}
-      <button class="icon-btn" title="All changes in this conversation" aria-label="All changes in this conversation" data-all-changes onclick={openAllChanges}><Icon name="split" size={12} /></button>
-    {/if}
-    {#if searchOpen}
-      <div class="search" class:wide={narrowHead} role="search">
-        <Icon name="search" size={12} />
-        <input dir="auto"
-          bind:this={searchEl}
-          bind:value={query}
-          class="search-in"
-          placeholder={searchLabel}
-          aria-label={searchLabel}
-          aria-describedby={partialSearch ? 'conv-search-scope' : undefined}
-          onkeydown={onSearchKey}
-        />
-        <span class="search-n" data-search-hits={hits.length} aria-live="polite">{hits.length ? `${hitIdx + 1}/${hits.length}` : noMatches && !partialSearch ? 'No matches' : ''}</span>
-        <button class="icon-btn" title="Previous match" aria-keyshortcuts="Shift+Enter" aria-label="Previous match" disabled={!hits.length} onclick={() => jumpTo(hitIdx - 1)}><Icon name="chevronUp" size={12} /></button>
-        <button class="icon-btn" title="Next match" aria-keyshortcuts="Enter" aria-label="Next match" disabled={!hits.length} onclick={() => jumpTo(hitIdx + 1)}><Icon name="chevronDown" size={12} /></button>
-        <button class="icon-btn" title="Close search" aria-label="Close search" aria-keyshortcuts="Escape" onclick={closeSearch}><Icon name="x" size={12} /></button>
-      </div>
-    {:else if !narrowHead}
-      <button class="icon-btn" title="Search this conversation" aria-keyshortcuts="Meta+F" aria-label="Search this conversation" onclick={openSearch}><Icon name="search" size={12} /></button>
-    {/if}
-    <button class="icon-btn" aria-label="Conversation options" title="Conversation options" aria-haspopup="menu" data-conv-menu onclick={openHeadMenu}><Icon name="more" size={12} /></button>
-  </header>
-  {#if searchOpen && partialSearch}
-    <!-- Loaded turns only: say so (it describes the search box; “no matches” is spoken by the action) and offer the page that might hold the match. -->
-    <div class="search-scope" data-testid="conv-search-scope">
-      <span id="conv-search-scope" use:announceShown={noMatches ? 'No matches in the loaded messages.' : ''}>{noMatches ? 'No matches in the loaded messages.' : 'Only the loaded messages are searched.'}</span>
-      <button class="btn small ghost" disabled={conv.loadingEarlier} onclick={() => void loadEarlier()}>
-        {conv.loadingEarlier ? 'Loading earlier messages…' : 'Load earlier messages'}
-      </button>
-    </div>
-  {/if}
+<div class="conv" bind:clientWidth={convW} data-session={sessionId} data-ws={workspaceId} data-surface={surface} data-readonly={ctx.readonly} data-loaded={t != null} onkeydown={onConvKey} onfocusin={claimFind} onfocusout={releaseFind}>
+  <ConversationHeader
+    bind:this={headRef}
+    {surface}
+    {effectiveProvider}
+    titleText={t?.title ?? (conv.loading ? 'Loading conversation…' : 'Conversation')}
+    titleTooltip={[t?.title, t?.model, statsText].filter(Boolean).join(' · ')}
+    {statsText}
+    {narrowHead}
+    {hasChanges}
+    {searchOpen}
+    {query}
+    {searchLabel}
+    {partialSearch}
+    hitsCount={hits.length}
+    {hitIdx}
+    {noMatches}
+    loadingEarlier={conv.loadingEarlier}
+    onquerychange={(q) => (query = q)}
+    onsearchkey={onSearchKey}
+    onprevhit={() => jumpTo(hitIdx - 1)}
+    onnexthit={() => jumpTo(hitIdx + 1)}
+    onopensearch={openSearch}
+    onclosesearch={closeSearch}
+    onopenchanges={openAllChanges}
+    onopenmenu={openHeadMenu}
+    onloadearlier={() => void loadEarlier()}
+  />
 
   <div class="conv-main" class:with-panel={!!preview} class:beside={panelBeside}>
   <div class="conv-chat">
@@ -861,9 +910,9 @@
     aria-label="Conversation with {agentName}"
   >
     <div class="conv-col" bind:this={colEl}>
-    {#if conv.error && !t}
+    {#if conv.error && !t && !displayItems.length}
       <LoadState what="the conversation" error={conv.error} empty onretry={() => void conv.load()} />
-    {:else if conv.loading && !t}
+    {:else if conv.loading && !t && !displayItems.length}
       <!-- a11y-6-02: the shared Skeleton owns the (delayed) "Loading" status;
            the chat-shaped placeholder below is decoration. -->
       <Skeleton rows={0} label="the conversation" />
@@ -875,7 +924,7 @@
         <div class="sk sk-steps"></div>
         <div class="sk sk-line"></div>
       </div>
-    {:else if unavailable}
+    {:else if unavailable && !(transientUnavailable && (displayItems.length > 0 || working || surface === 'threads'))}
       <div data-unavailable={t?.unavailable_reason}>
         <EmptyState
           icon="terminal"
@@ -887,26 +936,35 @@
           onaction={sessionId ? openTerminal : undefined}
         />
       </div>
-    {:else if t && !items.length}
+    {:else if surface === 'threads' && !displayItems.length && !working && !draft}
+      <ConversationThreadChrome
+        variant="ready"
+        {effectiveProvider}
+        {agentName}
+        {shortThreadCwd}
+        {canCompose}
+        onreuseprompt={reusePrompt}
+      />
+    {:else if t && !displayItems.length && !working && !draft}
       <EmptyState icon="comment" title="No messages yet" body={canCompose ? `Send ${agentName} a message below — the conversation shows up here as it works.` : 'Nothing was recorded in this conversation.'} />
-    {:else if t}
-      {#if t.has_earlier && winStart === 0}
+    {:else if t || displayItems.length > 0 || working}
+      {#if t?.has_earlier && winStart === 0}
         <div class="earlier">
           <button class="btn small ghost" disabled={conv.loadingEarlier} onclick={() => void loadEarlier()}>
             {conv.loadingEarlier ? 'Loading earlier messages…' : 'Load earlier messages'}
           </button>
         </div>
       {/if}
-      {#each items as item, i (item.id)}
+      {#each displayItems as item, i (item.id)}
         {@const day = dayKey(item.ts)}
-        {#if day && day !== dayKey(items[i - 1]?.ts ?? null)}
+        {#if day && day !== dayKey(displayItems[i - 1]?.ts ?? null)}
           <div class="day" role="separator" aria-label={fmtDay(item.ts)} data-day={day}><span>{fmtDay(item.ts)}</span></div>
         {/if}
         <TurnItem
           {item}
-          live={working && !stale && !hasLater && i === items.length - 1 && item.role === 'assistant'}
-          active={alive && !hasLater && i === items.length - 1 && item.role === 'assistant'}
-          waiting={waiting && i === items.length - 1}
+          live={working && !stale && !hasLater && i === displayItems.length - 1 && item.role === 'assistant'}
+          active={alive && !hasLater && i === displayItems.length - 1 && item.role === 'assistant'}
+          waiting={waiting && i === displayItems.length - 1}
           hit={!!searchQ && hitSet.has(item.id)}
           current={item.id === currentHit}
         />
@@ -950,11 +1008,46 @@
   {/if}
   </div>
 
+  {#if showPlanActionBar}
+    <ConversationThreadChrome
+      variant="plan-bar"
+      {implementingPlan}
+      canSpawnThread={!!onnewthread}
+      onimplementhere={() => void implementPlanHere()}
+      onimplementbeside={() =>
+        onnewthread?.({
+          beside: true,
+          mode: 'full',
+          prompt: 'Implement the proposed plan from the sibling thread step by step.',
+        })}
+    />
+  {/if}
+
   {#if canCompose && sessionId}
     {#key sessionId}
-    <Composer {sessionId} {status} provider={effectiveProvider} {agentName} {pendingCall} {waiting}
-      onresume={() => void resume()} cwd={ws.getSession(sessionId)?.cwd ?? ''} branch={conv.liveBranch}
-      model={t?.model ?? null} termStatus={conv.liveStatus} termInput={conv.liveInput} />
+    <Composer
+      {sessionId}
+      {status}
+      provider={effectiveProvider}
+      {agentName}
+      {pendingCall}
+      {waiting}
+      onresume={() => void resume()}
+      cwd={ws.getSession(sessionId)?.cwd ?? ''}
+      branch={conv.liveBranch}
+      model={t?.model ?? null}
+      termStatus={conv.liveStatus}
+      termInput={conv.liveInput}
+      statsSummary={statsText}
+      ondiff={() => {
+        if (onopeninspector) onopeninspector('changes');
+        else if (hasChanges) openAllChanges();
+        else toasts.info('No file edits recorded in this conversation yet');
+      }}
+      onfiles={onopeninspector ? () => onopeninspector('files') : undefined}
+      ontoggleterminal={ontoggleterminal ?? openTerminal}
+      onnewthread={onnewthread ? (beside) => onnewthread({ beside }) : undefined}
+    />
     {/key}
   {/if}
   </div>
@@ -1011,101 +1104,6 @@
        and 200px wide in a tiled pane, and the window said nothing about that.
        Breakpoints mirror the `@container` blocks below + `narrowHead` above. */
     container-type: inline-size;
-  }
-  .conv-head {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    height: 30px;
-    padding-block: 0; padding-inline: 12px 6px;
-    border-bottom: 1px solid var(--border);
-    background: var(--surface);
-    flex-shrink: 0;
-    font-size: var(--fs-s);
-    min-width: 0;
-  }
-  .conv-title {
-    font-weight: 600;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    min-width: 0;
-    flex: 0 1 auto;
-  }
-  .stats {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    min-width: 0;
-    flex: 0 2 auto;
-  }
-  .grow {
-    flex: 1;
-  }
-  .search {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
-    border-radius: var(--radius-s);
-    background: var(--bg);
-    padding-block: 0; padding-inline: 6px 4px;
-    height: 22px;
-    color: var(--text-dim);
-    min-width: 0;
-  }
-  /* The field is borderless inside the pill: the pill carries the app ring. */
-  .search:focus-within {
-    border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px var(--accent-soft-strong);
-  }
-  /* Under the header while searching a partly loaded transcript. */
-  .search-scope {
-    flex: none;
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 8px;
-    padding-block: 4px;
-    padding-inline: 12px;
-    border-block-end: 1px solid var(--border);
-    background: var(--surface-2);
-    color: var(--text-dim);
-    font-size: var(--fs-xs);
-  }
-  .search-in {
-    border: 0;
-    outline: 0;
-    background: none;
-    color: var(--text);
-    font: inherit;
-    font-size: var(--fs-xs);
-    width: 180px;
-    min-width: 0;
-  }
-  .search-n {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    min-width: 28px;
-    text-align: center;
-    white-space: nowrap;
-  }
-  @container (max-width: 360px) {
-    .search-in {
-      width: 110px;
-    }
-  }
-  .search.wide {
-    flex: 1;
-  }
-  .search.wide .search-in {
-    width: 100%;
-    flex: 1;
-  }
-  .conv-head.folded .conv-title {
-    display: none;
   }
   .conv-main {
     flex: 1;
@@ -1365,11 +1363,5 @@
   .jump-pill:focus-visible {
     outline: 2px solid var(--accent-text);
     outline-offset: 2px;
-  }
-  /* ≤560px: the stats go (they live in the title's tooltip too). */
-  @container (max-width: 560px) {
-    .stats {
-      display: none;
-    }
   }
 </style>

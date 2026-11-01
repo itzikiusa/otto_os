@@ -11,6 +11,9 @@ import App from './App.svelte';
 import { mockEnabled } from './lib/api/mockGate';
 import { setToken, getToken, baseUrl } from './lib/api/client';
 import { isEmbedded } from './lib/desktop';
+import { installMacFunctionKeyGuard } from './lib/macFunctionKeyGuard';
+
+installMacFunctionKeyGuard(document);
 
 if (mockEnabled()) {
   // The fixtures load only in mock mode — and before `mount`, below.

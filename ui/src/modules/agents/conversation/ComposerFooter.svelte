@@ -3,11 +3,20 @@
   // harness/provider token, live status dot, model, git branch, CWD, and
   // unsent terminal input banner when present.
   import { plural } from '../../../lib/plural';
+  import {
+    supportsEffortSelection,
+    supportsInteractionMode,
+    supportsModelSelection,
+    type EffortLevel,
+    type InteractionMode,
+  } from '../../../lib/providerModels';
   import { activity } from '../../../lib/stores/activity.svelte';
+  import { auth } from '../../../lib/stores/auth.svelte';
   import type { sessionState } from '../../../lib/status';
   import StatusDot from '../../../lib/components/StatusDot.svelte';
   import ProviderIcon from '../../../lib/components/ProviderIcon.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
+  import ThreadModelBar from '../../../lib/components/ThreadModelBar.svelte';
 
   type SessionStateResult = ReturnType<typeof sessionState>;
 
@@ -19,6 +28,13 @@
     cwd?: string;
     branch?: string | null;
     model?: string | null;
+    pinnedModel?: string | null;
+    effort?: EffortLevel | null;
+    interactionMode?: InteractionMode;
+    configBusy?: boolean;
+    onmodelchange?: (model: string | null) => void;
+    oneffortchange?: (effort: EffortLevel | null) => void;
+    onmodechange?: (mode: InteractionMode) => void;
     termStatus?: string;
     termInput?: string;
     uploading?: number;
@@ -32,10 +48,36 @@
     cwd = '',
     branch = null,
     model = null,
+    pinnedModel = null,
+    effort = null,
+    interactionMode = 'full',
+    configBusy = false,
+    onmodelchange,
+    oneffortchange,
+    onmodechange,
     termStatus = '',
     termInput = '',
     uploading = 0,
   }: Props = $props();
+
+  let modelBar = $state<ReturnType<typeof ThreadModelBar> | null>(null);
+
+  export function openModelPicker(): void {
+    modelBar?.openModelPicker();
+  }
+  export function openEffortPicker(): void {
+    modelBar?.openEffortPicker();
+  }
+  export function openModePicker(): void {
+    modelBar?.openModePicker();
+  }
+
+  const hasInteractiveControls = $derived(
+    Boolean(onmodelchange && oneffortchange && onmodechange) &&
+      (supportsModelSelection(provider, auth.meta) ||
+        supportsEffortSelection(provider) ||
+        supportsInteractionMode(provider)),
+  );
 
   const shortCwd = $derived(cwd.replace(/^\/Users\/[^/]+/, '~').replace(/^\/home\/[^/]+/, '~'));
   const pendingNudges = $derived(activity.tasks(sessionId).filter((t) => t.nudge_pending).length);
@@ -58,7 +100,22 @@
     <StatusDot state={st} />
     <span>{statusLabel}</span>
   </span>
-  {#if model}<span class="meta-token mono model" dir="ltr" title="Model">{model}</span>{/if}
+  {#if hasInteractiveControls && onmodelchange && oneffortchange && onmodechange}
+    <ThreadModelBar
+      bind:this={modelBar}
+      {provider}
+      {pinnedModel}
+      effectiveModel={model}
+      {effort}
+      {interactionMode}
+      disabled={configBusy}
+      {onmodelchange}
+      {oneffortchange}
+      {onmodechange}
+    />
+  {:else if model}
+    <span class="meta-token mono model" dir="ltr" title="Model">{model}</span>
+  {/if}
   {#if branch}
     <span class="meta-token mono branch" dir="ltr" title="Git branch">
       <Icon name="branch" size={12} /> {branch}

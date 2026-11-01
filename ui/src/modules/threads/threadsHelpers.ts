@@ -1,5 +1,5 @@
 import type { Repo, Session } from '../../lib/api/types';
-import { isForeground } from '../../lib/stores/workspace.svelte';
+import { isThreadSurfaceSession, ws } from '../../lib/stores/workspace.svelte';
 
 export type PreviewKind = 'markdown' | 'json' | 'csv' | 'svg' | 'image' | 'code';
 
@@ -9,12 +9,19 @@ export function isPlainShellSession(s: Session | null | undefined): boolean {
   return s.provider === 'shell' && typeof (s.meta as Record<string, unknown> | undefined)?.nested_provider !== 'string';
 }
 
-/** Whether a session belongs in the Threads workspace (foreground agent & shell threads, plus delegated workers). */
-export function isThreadSession(s: Session): boolean {
+/**
+ * Whether a session belongs in the Threads workspace (`#/threads`):
+ * strictly sessions created on the `threads` surface (`meta.surface === 'threads'`),
+ * plus delegated subagent workers whose parent session is a thread.
+ * Sessions created in `#/agents` never leak into `#/threads`.
+ */
+export function isThreadSession(s: Session, pool: readonly Session[] = ws.sessions): boolean {
   if (s.kind === 'connection') return false;
-  if (isForeground(s)) return true;
-  // Delegated worker sessions spawned from another thread belong in the thread tree.
-  return delegatedParentId(s) !== null;
+  if (isThreadSurfaceSession(s)) return true;
+  const parentId = delegatedParentId(s);
+  if (!parentId || parentId === s.id) return false;
+  const parent = pool.find((p) => p.id === parentId);
+  return parent ? isThreadSurfaceSession(parent) : false;
 }
 
 /** Parent session ID when this session was delegated or handed over from another thread. */

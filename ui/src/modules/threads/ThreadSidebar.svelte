@@ -41,7 +41,8 @@
   });
 
   const homePath = $derived(ws.scratch?.root_path ?? null);
-  const allLiveThreads = $derived(ws.sessions.filter((s) => !s.archived && isThreadSession(s)));
+  const allPool = $derived([...ws.sessions, ...ws.archivedSessions]);
+  const allLiveThreads = $derived(ws.sessions.filter((s) => !s.archived && isThreadSession(s, allPool)));
 
   // Distinct project roots across workspaces, repos and threads for the filter pill.
   const projectOptions = $derived.by(() => {
@@ -89,7 +90,7 @@
   const pinnedThreads = $derived.by(() => {
     const byId = new Map<string, Session>();
     for (const s of allLiveThreads) byId.set(s.id, s);
-    for (const s of ws.archivedSessions) if (isThreadSession(s)) byId.set(s.id, s);
+    for (const s of ws.archivedSessions) if (isThreadSession(s, allPool)) byId.set(s.id, s);
     return threads.pinnedIds
       .map((id) => byId.get(id))
       .filter((s): s is Session => !!s && matchesFilters(s));
@@ -154,7 +155,7 @@
   // History combines settled threads + archived daemon threads.
   const historyItems = $derived.by(() => {
     const settled = filteredLive.filter((s) => threads.isSettled(s.id));
-    const archived = ws.archivedSessions.filter((s) => isThreadSession(s) && matchesFilters(s));
+    const archived = ws.archivedSessions.filter((s) => isThreadSession(s, allPool) && matchesFilters(s));
     const seen = new Set<string>();
     const combined: { session: Session; kind: 'settled' | 'archived' }[] = [];
     for (const s of settled) {
