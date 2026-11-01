@@ -73,10 +73,11 @@
 
   // Keep paneIds clean when sessions are loaded; pick an initial thread or show NewThreadStage.
   $effect(() => {
-    const known = new Set(ws.sessions.filter((s) => !s.archived).map((s) => s.id));
-    if ((!ws.listSettled || ws.sessionsLoading) && known.size === 0) return;
+    const knownThreads = new Set(liveThreadIds);
+    const anyLoaded = ws.sessions.some((s) => !s.archived);
+    if ((!ws.listSettled || ws.sessionsLoading) && !anyLoaded) return;
     untrack(() => {
-      const valid = threads.paneIds.filter((id) => known.has(id));
+      const valid = threads.paneIds.filter((id) => knownThreads.has(id));
       if (valid.length !== threads.paneIds.length) {
         threads.paneIds = valid;
         if (valid.length === 0) {

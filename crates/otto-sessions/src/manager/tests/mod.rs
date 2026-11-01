@@ -3737,6 +3737,80 @@ fn model_args_model_is_trimmed() {
     assert_eq!(args, vec!["--model", "opus"]);
 }
 
+#[test]
+fn effort_args_maps_per_provider_and_rejects_unknown() {
+    let high = serde_json::json!({ "effort": "high" });
+    assert_eq!(effort_args("claude", &high), vec!["--effort", "high"]);
+    assert_eq!(effort_args("agy", &high), vec!["--effort", "high"]);
+    assert_eq!(
+        effort_args("codex", &high),
+        vec!["-c", "model_reasoning_effort=\"high\""]
+    );
+    let ultra = serde_json::json!({ "effort": "ultra" });
+    assert_eq!(effort_args("claude", &ultra), vec!["--effort", "max"]);
+    assert_eq!(effort_args("agy", &ultra), vec!["--effort", "max"]);
+    assert_eq!(
+        effort_args("codex", &ultra),
+        vec!["-c", "model_reasoning_effort=\"ultra\""]
+    );
+    assert!(effort_args("shell", &high).is_empty());
+    assert!(effort_args("claude", &serde_json::json!({ "effort": "bogus" })).is_empty());
+}
+
+#[test]
+fn interaction_mode_apply_configures_plan_and_preserves_read_only() {
+    let plan = serde_json::json!({ "interaction_mode": "plan" });
+
+    let mut claude_args = vec![
+        "--dangerously-skip-permissions".to_string(),
+        "--session-id".to_string(),
+        "u1".to_string(),
+    ];
+    interaction_mode_apply("claude", &plan, false, &mut claude_args);
+    assert_eq!(
+        claude_args,
+        vec!["--session-id", "u1", "--permission-mode", "plan"]
+    );
+
+    let mut agy_args = vec!["--dangerously-skip-permissions".to_string()];
+    interaction_mode_apply("agy", &plan, false, &mut agy_args);
+    assert_eq!(agy_args, vec!["--mode", "plan"]);
+
+    let mut codex_args = vec![
+        "--dangerously-bypass-approvals-and-sandbox".to_string(),
+        "--search".to_string(),
+    ];
+    interaction_mode_apply("codex", &plan, false, &mut codex_args);
+    assert_eq!(
+        codex_args,
+        vec![
+            "--search",
+            "--sandbox",
+            "read-only",
+            "--ask-for-approval",
+            "never"
+        ]
+    );
+
+    // Outer process_sandbox keeps Codex's inner seatbelt off so Seatbelt doesn't double-nest.
+    let mut codex_outer = vec!["--dangerously-bypass-approvals-and-sandbox".to_string()];
+    interaction_mode_apply("codex", &plan, true, &mut codex_outer);
+    assert_eq!(
+        codex_outer,
+        vec![
+            "--dangerously-bypass-approvals-and-sandbox",
+            "-c",
+            "approval_policy=\"never\""
+        ]
+    );
+
+    // Read-only sessions are never altered by interaction_mode.
+    let ro = serde_json::json!({ "read_only": true, "interaction_mode": "accept-edits" });
+    let mut ro_args = vec!["--dangerously-skip-permissions".to_string()];
+    interaction_mode_apply("claude", &ro, false, &mut ro_args);
+    assert_eq!(ro_args, vec!["--dangerously-skip-permissions"]);
+}
+
 fn args_join(v: Vec<String>) -> String {
     v.join(" ")
 }

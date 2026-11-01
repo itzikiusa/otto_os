@@ -8,13 +8,15 @@
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { events } from '../../lib/events.svelte';
   import { focusOnMount } from '../../lib/focusOnMount';
+  import { resolveSessionThreadConfig, type InteractionMode } from '../../lib/providerModels';
   import { badgeTone, sessionState } from '../../lib/status';
   import { git } from '../../lib/stores/git.svelte';
-  import { ws } from '../../lib/stores/workspace.svelte';
+  import { transcript } from '../../lib/stores/transcript.svelte';
+  import { SCRATCH_WORKSPACE_ID, ws } from '../../lib/stores/workspace.svelte';
   import { toastError } from '../../lib/toastError';
   import ConversationView from '../agents/conversation/ConversationView.svelte'; // ui-guards: allow — experimental threads embeds shared ConversationView
   import ThreadTerminalDrawer from './ThreadTerminalDrawer.svelte';
-  import { delegatedParentId, isPlainShellSession, isThreadSession, sessionBranch } from './threadsHelpers';
+  import { delegatedParentId, harnessLabel, isPlainShellSession, isThreadSession, sessionBranch } from './threadsHelpers';
   import { threads } from './threadsStore.svelte';
 
   interface Props {
@@ -34,6 +36,7 @@
   const parentId = $derived(delegatedParentId(session));
   const parentSession = $derived(parentId ? (ws.getSession(parentId) ?? null) : null);
 
+  let convRef = $state<ReturnType<typeof ConversationView> | null>(null);
   let renaming = $state(false);
   let draftTitle = $state('');
   let showTerminal = $state(false);
@@ -99,11 +102,75 @@
     }
   }
 
+  async function spawnFollowupThread(opts: {
+    beside: boolean;
+    prompt?: string;
+    mode?: InteractionMode;
+  }): Promise<void> {
+    if (!session) return;
+    if (!opts.prompt && !opts.beside) {
+      threads.startNewThread({ workspaceId: session.workspace_id, cwd: session.cwd });
+      return;
+    }
+    try {
+      const cfg = resolveSessionThreadConfig(session, null);
+      const meta: Record<string, unknown> = {
+        surface: 'threads',
+        interaction_mode: opts.mode ?? cfg.interactionMode,
+        ...(cfg.pinnedModel ? { model: cfg.pinnedModel } : {}),
+        ...(cfg.effort ? { effort: cfg.effort } : {}),
+      };
+      const scratchOpts = {
+        scratch: session.workspace_id === SCRATCH_WORKSPACE_ID && ws.currentId !== SCRATCH_WORKSPACE_ID,
+      };
+      const firstMsg = opts.prompt?.trim() ?? '';
+      const created = firstMsg
+        ? await ws.openSessionWithPrompt(
+            {
+              provider: session.provider,
+              title: firstMsg.replace(/\s+/g, ' ').slice(0, 56),
+              cwd: session.cwd,
+              prompt: firstMsg,
+              meta,
+            },
+            scratchOpts,
+          )
+        : await ws.createSessionQuiet(
+            {
+              kind: 'agent',
+              provider: session.provider,
+              title: `${harnessLabel(session.provider)} thread`,
+              cwd: session.cwd,
+              meta,
+            },
+            scratchOpts,
+          );
+      if (firstMsg) {
+        transcript.recordOptimisticPrompt(created.id, firstMsg);
+      }
+      if (opts.beside) threads.openBeside(created.id);
+      else threads.selectThread(created.id);
+    } catch (e) {
+      toastError('Couldn’t start thread', e);
+    }
+  }
+
   function openPaneMenu(e: MouseEvent): void {
     if (!session) return;
     const items: MenuItem[] = [
       { label: 'Rename thread…', icon: 'edit', action: beginRename },
       { label: pinned ? 'Unpin thread' : 'Pin thread', icon: 'star', action: () => threads.togglePin(paneId) },
+      ...(!isPlainShellSession(session)
+        ? [
+            { label: 'Search conversation…', icon: 'search' as const, hint: '⌘F', action: () => convRef?.triggerSearch() },
+            {
+              label: 'Show system notes',
+              icon: (transcript.showSystem ? 'eye' : 'eyeOff') as 'eye' | 'eyeOff',
+              checked: transcript.showSystem,
+              action: () => transcript.setShowSystem(!transcript.showSystem),
+            },
+          ]
+        : []),
       { label: 'Send message to peer…', icon: 'send', action: () => (showPeerBar = !showPeerBar) },
       { label: showTerminal ? 'Hide terminal drawer' : 'Open terminal drawer', icon: 'terminal', action: () => (showTerminal = !showTerminal) },
       { label: 'Session room…', icon: 'people', action: () => onstartroom(paneId) },
@@ -247,6 +314,17 @@
         <button
           type="button"
           class="icon-btn"
+          aria-label="Search conversation"
+          title="Search conversation (⌘F)"
+          data-testid="pane-search-btn-{paneId}"
+          onclick={() => convRef?.triggerSearch()}
+        >
+          <Icon name="search" size={13} />
+        </button>
+
+        <button
+          type="button"
+          class="icon-btn"
           class:active={showTerminal}
           aria-pressed={showTerminal}
           aria-label={showTerminal ? 'Hide raw terminal drawer' : 'Show raw terminal drawer'}
@@ -364,9 +442,14 @@
       </div>
     {:else}
       <ConversationView
+        bind:this={convRef}
         sessionId={paneId}
         workspaceId={session.workspace_id}
         resumeOnOpen={focused}
+        surface="threads"
+        ontoggleterminal={() => (showTerminal = !showTerminal)}
+        onopeninspector={(tab) => threads.setInspectorTab(tab)}
+        onnewthread={(opts) => void spawnFollowupThread(opts)}
       />
     {/if}
   </div>

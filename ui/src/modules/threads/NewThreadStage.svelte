@@ -4,36 +4,35 @@
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import ProviderIcon, { hasProviderIcon } from '../../lib/components/ProviderIcon.svelte';
-  import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
+  import ThreadModelBar from '../../lib/components/ThreadModelBar.svelte';
+  import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { checkFolder } from '../../lib/folderCheck';
+  import {
+    nextInteractionModeToggle,
+    supportsInteractionMode,
+    type EffortLevel,
+    type InteractionMode,
+  } from '../../lib/providerModels';
   import { agentProviders, defaultAgentProvider, providerReadiness } from '../../lib/providers';
   import { radioKey } from '../../lib/radioKey';
-  import { onTabKey } from '../../lib/tabKeys';
+  import {
+    isImmediateSlashCommand,
+    parseInteractiveSlashInput,
+    type ComposerSlashCommand,
+  } from '../../lib/slashActions';
   import { git } from '../../lib/stores/git.svelte';
+  import { transcript } from '../../lib/stores/transcript.svelte';
   import { SCRATCH_WORKSPACE_ID, ws } from '../../lib/stores/workspace.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { toastError } from '../../lib/toastError';
-  import { compactPath, harnessLabel, projectNameFromCwd } from './threadsHelpers';
+  import {
+    buildFolderMenuItems,
+    buildWorkspaceMenuItems,
+    NEW_THREAD_STARTERS,
+    STAGE_SLASH_COMMANDS,
+  } from './newThreadMenus';
+  import { compactPath, harnessLabel } from './threadsHelpers';
   import { threads } from './threadsStore.svelte';
-
-  const STARTERS = [
-    {
-      label: 'Review uncommitted changes',
-      prompt: 'Inspect git status and uncommitted diffs in this repo, highlight any bugs or edge cases, and suggest concrete fixes.',
-    },
-    {
-      label: 'Trace a bug across the repo',
-      prompt: 'Help me trace a bug end-to-end across this codebase: locate the entry point, data flow, and root cause before proposing a minimal fix.',
-    },
-    {
-      label: 'Write tests for recent edits',
-      prompt: 'Check the most recently modified files, identify uncovered behavior and edge cases, and write clean unit or integration tests.',
-    },
-    {
-      label: 'Coordinate 2 sessions in split view',
-      prompt: 'Outline a clear plan splitting this task into two independent tracks so I can run a second worker thread beside you in Split view.',
-    },
-  ] as const;
 
   const harnesses = $derived.by(() => {
     const registered = agentProviders();
@@ -46,7 +45,9 @@
   });
 
   let provider = $state('');
-  let autonomy = $state<'standard' | 'auto'>('standard');
+  let selectedModel = $state<string | null>(null);
+  let selectedEffort = $state<EffortLevel | null>(null);
+  let interactionMode = $state<InteractionMode>('full');
   let cwd = $state('');
   let useScratch = $state(false);
   let prompt = $state('');
@@ -55,9 +56,26 @@
   let browsingFolder = $state(false);
   let openInBeside = $state(false);
   let composerEl = $state<HTMLTextAreaElement | null>(null);
+  let modelBar = $state<ReturnType<typeof ThreadModelBar> | null>(null);
 
   const homePath = $derived(ws.scratch?.root_path ?? '~');
   const scratchActive = $derived(useScratch || ws.current === null);
+  const currentBranch = $derived.by(() => {
+    const dir = cwd.trim().replace(/\/+$/, '');
+    if (!dir) return null;
+    const repo = git.repos
+      .filter((r) => dir === r.path || dir.startsWith(`${r.path.replace(/\/+$/, '')}/`))
+      .sort((a, b) => b.path.length - a.path.length)[0];
+    if (!repo) return null;
+    return git.statusById[repo.id]?.branch ?? null;
+  });
+
+  function selectProvider(next: string): void {
+    if (provider === next) return;
+    provider = next;
+    selectedModel = null;
+    selectedEffort = null;
+  }
 
   // Sync initial provider & cwd when NewThreadStage mounts or draft target changes.
   $effect(() => {
@@ -94,79 +112,90 @@
   }
 
   function openWorkspaceMenu(e: MouseEvent): void {
-    const items: MenuItem[] = [
-      ...ws.workspaces.map(
-        (w): MenuItem => ({
-          label: w.name,
-          hint: compactPath(w.root_path, homePath),
-          checked: !scratchActive && ws.currentId === w.id,
-          action: () => {
-            useScratch = false;
-            cwd = w.root_path;
-            cwdError = '';
-            void ws.select(w.id);
-          },
-        }),
-      ),
-      { separator: true },
-      {
-        label: 'No workspace (Scratch)',
-        hint: compactPath(homePath, homePath),
-        checked: scratchActive,
-        action: () => {
+    ctxMenu.show(
+      e,
+      buildWorkspaceMenuItems({
+        workspaces: ws.workspaces,
+        currentId: ws.currentId,
+        scratchActive,
+        homePath,
+        onSelectWorkspace: (w) => {
+          useScratch = false;
+          cwd = w.root_path;
+          cwdError = '';
+          void ws.select(w.id);
+        },
+        onSelectScratch: () => {
           useScratch = true;
           cwd = homePath;
           cwdError = '';
         },
-      },
-    ];
-    ctxMenu.show(e, items);
+      }),
+    );
   }
 
   function openFolderMenu(e: MouseEvent): void {
-    const candidates: { label: string; path: string }[] = [];
-    const seen = new Set<string>();
-    const add = (label: string, path: string | null | undefined) => {
-      const p = (path ?? '').trim().replace(/\/+$/, '');
-      if (!p || seen.has(p)) return;
-      seen.add(p);
-      candidates.push({ label, path: p });
-    };
-    if (!scratchActive && ws.current?.root_path) add(ws.current.name, ws.current.root_path);
-    for (const r of git.repos) add(r.name, r.path);
-    for (const s of ws.sessions) {
-      if (s.cwd) add(projectNameFromCwd(s.cwd), s.cwd);
-    }
-    const items: MenuItem[] = [
-      ...candidates.slice(0, 10).map(
-        (c): MenuItem => ({
-          label: c.label,
-          hint: compactPath(c.path, homePath),
-          checked: cwd.replace(/\/+$/, '') === c.path,
-          action: () => {
-            cwd = c.path;
-            cwdError = '';
-          },
-        }),
-      ),
-      ...(candidates.length > 0 ? [{ separator: true }] : []),
-      {
-        label: 'Browse folder…',
-        icon: 'folder',
-        action: () => (browsingFolder = true),
-      },
-    ];
-    ctxMenu.show(e, items);
+    ctxMenu.show(
+      e,
+      buildFolderMenuItems({
+        scratchActive,
+        currentWorkspace: ws.current,
+        repos: git.repos,
+        sessions: ws.sessions,
+        cwd,
+        homePath,
+        onPickPath: (path) => {
+          cwd = path;
+          cwdError = '';
+        },
+        onBrowse: () => (browsingFolder = true),
+      }),
+    );
   }
 
-  async function launch(withPrompt: boolean): Promise<void> {
+  async function launch(withPrompt: boolean, overridePrompt?: string): Promise<void> {
     if (busy) return;
     const readiness = providerReadiness(provider);
     if (!readiness.available) {
       toasts.error(`Couldn’t start ${harnessLabel(provider)}`, readiness.message);
       return;
     }
-    const firstMsg = withPrompt ? prompt.trim() : '';
+    const rawPrompt = overridePrompt ?? (withPrompt ? prompt.trim() : '');
+    if (withPrompt && overridePrompt === undefined) {
+      const slash = parseInteractiveSlashInput(rawPrompt);
+      if (slash) {
+        prompt = '';
+        switch (slash.kind) {
+          case 'open-model-picker':
+            queueMicrotask(() => modelBar?.openModelPicker());
+            return;
+          case 'set-model':
+            selectedModel = slash.model;
+            return;
+          case 'open-effort-picker':
+            queueMicrotask(() => modelBar?.openEffortPicker());
+            return;
+          case 'set-effort':
+            selectedEffort = slash.effort;
+            return;
+          case 'open-mode-picker':
+            queueMicrotask(() => modelBar?.openModePicker());
+            return;
+          case 'set-mode':
+            interactionMode = slash.mode;
+            if (slash.prompt) {
+              await launch(true, slash.prompt);
+            }
+            return;
+          case 'send-prompt':
+            await launch(true, slash.prompt);
+            return;
+          default:
+            break;
+        }
+      }
+    }
+    const firstMsg = rawPrompt.trim();
     if (withPrompt && !firstMsg) {
       composerEl?.focus();
       return;
@@ -186,8 +215,10 @@
     busy = true;
     try {
       const meta: Record<string, unknown> = {
-        autonomy_mode: autonomy,
-        ...(autonomy === 'auto' ? { auto_approve: true, permission_mode: 'auto' } : {}),
+        surface: 'threads',
+        interaction_mode: interactionMode,
+        ...(selectedModel ? { model: selectedModel } : {}),
+        ...(selectedEffort ? { effort: selectedEffort } : {}),
       };
       const derivedTitle = firstMsg
         ? firstMsg.replace(/\s+/g, ' ').slice(0, 56)
@@ -214,6 +245,9 @@
             },
             opts,
           );
+      if (firstMsg) {
+        transcript.recordOptimisticPrompt(created.id, firstMsg);
+      }
       prompt = '';
       threads.draftCwd = null;
       if (openInBeside && threads.paneIds.length > 0) {
@@ -228,8 +262,81 @@
     }
   }
 
+  let cmdIdx = $state(0);
+  let cmdDismissed = $state(false);
+  const slashPopId = $props.id();
+  const cmdPrefix = $derived.by(() => {
+    const m = /^\/([\w:-]*)$/.exec(prompt);
+    return m ? m[1].toLowerCase() : null;
+  });
+  const slashSuggestions = $derived.by(() => {
+    if (cmdPrefix == null || cmdDismissed) return [] as ComposerSlashCommand[];
+    return STAGE_SLASH_COMMANDS.filter((c) => c.name.toLowerCase().includes(cmdPrefix));
+  });
+  const cmdOpen = $derived(slashSuggestions.length > 0);
+  $effect(() => {
+    void slashSuggestions.length;
+    cmdIdx = 0;
+  });
+  $effect(() => {
+    void prompt;
+    cmdDismissed = false;
+  });
+
+  function acceptStageCmd(c: ComposerSlashCommand): void {
+    if (isImmediateSlashCommand(c.name)) {
+      prompt = `/${c.name}`;
+      cmdDismissed = true;
+      void launch(true);
+      return;
+    }
+    const next = `/${c.name} `;
+    prompt = next;
+    cmdDismissed = true;
+    queueMicrotask(() => {
+      if (composerEl) {
+        autoGrow(composerEl);
+        composerEl.focus();
+        composerEl.setSelectionRange(next.length, next.length);
+      }
+    });
+  }
+
   function onComposerKeydown(e: KeyboardEvent): void {
-    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+    if (e.isComposing) return;
+    if (e.key === 'Tab' && e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey && !cmdOpen) {
+      if (supportsInteractionMode(provider)) {
+        e.preventDefault();
+        interactionMode = nextInteractionModeToggle(interactionMode);
+        return;
+      }
+    }
+    if (cmdOpen) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        cmdIdx = (cmdIdx + 1) % slashSuggestions.length;
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        cmdIdx = (cmdIdx - 1 + slashSuggestions.length) % slashSuggestions.length;
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        cmdDismissed = true;
+        return;
+      }
+      if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey)) {
+        const pick = slashSuggestions[cmdIdx];
+        if (pick) {
+          e.preventDefault();
+          acceptStageCmd(pick);
+          return;
+        }
+      }
+    }
+    if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       void launch(true);
     }
@@ -267,7 +374,7 @@
           class:unavailable={!ready.available}
           title={ready.available ? `${harnessLabel(h)} — Ready` : ready.message}
           data-testid="harness-{h}"
-          onclick={() => (provider = h)}
+          onclick={() => selectProvider(h)}
         >
           {#if hasProviderIcon(h)}
             <ProviderIcon provider={h} size={16} />
@@ -282,14 +389,47 @@
       {/each}
     </div>
 
-    <div class="nt-composer-card">
+    <div class="nt-composer-card" class:nt-plan={interactionMode === 'plan'}>
+      {#if cmdOpen}
+        <div
+          class="nt-slash-pop"
+          id="{slashPopId}-list"
+          role="listbox"
+          aria-label="Slash commands"
+          data-slash-pop
+        >
+          {#each slashSuggestions as c, i (c.name)}
+            <div
+              id="{slashPopId}-opt-{i}"
+              class="nt-slash-row"
+              class:active={i === cmdIdx}
+              role="option"
+              tabindex="-1"
+              aria-selected={i === cmdIdx}
+              onmousedown={(ev) => {
+                ev.preventDefault();
+                acceptStageCmd(c);
+              }}
+              onmouseenter={() => (cmdIdx = i)}
+            >
+              <span class="nt-slash-name mono" dir="ltr">/{c.name}</span>
+              <span class="nt-slash-desc">{c.description}</span>
+            </div>
+          {/each}
+        </div>
+      {/if}
       <textarea
         bind:this={composerEl}
         bind:value={prompt}
         dir="auto"
         rows={3}
-        placeholder="What should {harnessLabel(provider)} build, debug, or review?"
+        placeholder={interactionMode === 'plan'
+          ? `What should ${harnessLabel(provider)} explore and plan? (/model · /effort · ⇧⇥ exit Plan)`
+          : `What should ${harnessLabel(provider)} build, debug, or review? (/model · /effort · ⇧⇥ Plan)`}
         aria-label="Opening prompt for new thread"
+        aria-autocomplete="list"
+        aria-controls={cmdOpen ? `${slashPopId}-list` : undefined}
+        aria-activedescendant={cmdOpen ? `${slashPopId}-opt-${cmdIdx}` : undefined}
         data-testid="new-thread-input"
         disabled={busy}
         oninput={(e) => autoGrow(e.currentTarget)}
@@ -302,6 +442,18 @@
 
       <div class="nt-composer-bar">
         <div class="nt-pickers">
+          <ThreadModelBar
+            bind:this={modelBar}
+            {provider}
+            pinnedModel={selectedModel}
+            effort={selectedEffort}
+            {interactionMode}
+            disabled={busy}
+            onmodelchange={(m) => (selectedModel = m)}
+            oneffortchange={(eff) => (selectedEffort = eff)}
+            onmodechange={(mode) => (interactionMode = mode)}
+          />
+
           <button
             type="button"
             class="btn small ghost"
@@ -327,28 +479,12 @@
             <Icon name="chevronDown" size={12} />
           </button>
 
-          <div class="segmented" role="group" aria-label="Permission mode">
-            <button
-              type="button"
-              class:active={autonomy === 'standard'}
-              aria-pressed={autonomy === 'standard'}
-              onkeydown={onTabKey}
-              title="Ask before risky commands or external actions"
-              onclick={() => (autonomy = 'standard')}
-            >
-              Standard
-            </button>
-            <button
-              type="button"
-              class:active={autonomy === 'auto'}
-              aria-pressed={autonomy === 'auto'}
-              onkeydown={onTabKey}
-              title="Auto-approve routine tool calls inside the sandbox"
-              onclick={() => (autonomy = 'auto')}
-            >
-              <Icon name="zap" size={12} /> Auto-approve
-            </button>
-          </div>
+          {#if currentBranch}
+            <span class="nt-branch mono ellipsis" dir="ltr" title="Git branch: {currentBranch}">
+              <Icon name="branch" size={12} />
+              {currentBranch}
+            </span>
+          {/if}
         </div>
 
         <div class="nt-submit-row">
@@ -398,7 +534,7 @@
     </div>
 
     <div class="nt-starters" aria-label="Starter prompts">
-      {#each STARTERS as s (s.label)}
+      {#each NEW_THREAD_STARTERS as s (s.label)}
         <button
           type="button"
           class="chip nt-starter-chip"
@@ -516,6 +652,7 @@
     color: var(--text-dim);
   }
   .nt-composer-card {
+    position: relative;
     display: flex;
     flex-direction: column;
     gap: 10px;
@@ -525,8 +662,56 @@
     background: var(--surface);
     box-shadow: var(--shadow-card);
   }
+  .nt-slash-pop {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    max-height: min(220px, 35vh);
+    overflow-y: auto;
+    padding: 4px;
+    border-radius: var(--radius-m);
+    border: 1px solid var(--border);
+    background: var(--surface-2);
+  }
+  .nt-slash-row {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 8px;
+    border-radius: var(--radius-s);
+    cursor: pointer;
+    font-size: var(--fs-s);
+    min-width: 0;
+  }
+  .nt-slash-row.active {
+    background: var(--accent-soft);
+  }
+  .nt-slash-name {
+    color: var(--accent-text);
+    white-space: nowrap;
+  }
+  .nt-slash-desc {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
+  }
+  .nt-composer-card.nt-plan {
+    border-color: color-mix(in srgb, var(--warning) 42%, var(--border));
+  }
   .nt-composer-card:focus-within {
     border-color: var(--accent-line-strong);
+  }
+  .nt-branch {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: var(--fs-xs);
+    color: var(--accent-text);
+    max-width: 150px;
   }
   .nt-composer-card textarea {
     width: 100%;

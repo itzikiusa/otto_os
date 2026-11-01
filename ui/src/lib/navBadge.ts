@@ -24,6 +24,9 @@ export function navBadge(id: string): NavBadge | null {
   if (id === 'agents') {
     if (ws.needsYouCount > 0) return badge(ws.needsYouCount, 'needs', 'waiting on you');
     if (ws.workingCount > 0) return badge(ws.workingCount, 'working', 'working');
+  } else if (id === 'threads') {
+    if (ws.threadsNeedsYouCount > 0) return badge(ws.threadsNeedsYouCount, 'needs', 'waiting on you');
+    if (ws.threadsWorkingCount > 0) return badge(ws.threadsWorkingCount, 'working', 'working');
   } else if (id === 'workflows') {
     const n = ws.activeWorkflowRuns.length;
     if (n > 0) return badge(n, 'working', 'running');

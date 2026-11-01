@@ -137,6 +137,14 @@ export interface ResolveWalkthroughResp {
   url: string;
 }
 
+export interface ProviderModelOption {
+  id: string;
+  label: string;
+  description: string;
+  default_effort: string | null;
+  supported_efforts: string[];
+}
+
 export interface MetaResp {
   version: string;
   api_version: number;
@@ -149,6 +157,8 @@ export interface MetaResp {
   /** Per-provider: whether the CLI accepts a model flag (its spec carries a
    *  `model_args` template). Pickers hide the model control when false. */
   model_flags: Record<string, boolean>;
+  /** Per-provider catalog of selectable models + supported effort levels. */
+  provider_models: Record<string, ProviderModelOption[]>;
   /** Second LOOPBACK base for the same daemon (`http://localhost:<port>`; the
    *  daemon holds both 127.0.0.1 and [::1]) — a separate browser socket pool
    *  for background/slow calls. `null`/absent → single-host transport. */

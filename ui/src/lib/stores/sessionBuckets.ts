@@ -50,6 +50,11 @@ export function isForeground(s: Session): boolean {
   return typeof src !== 'string' || !BACKGROUND_SOURCES.has(src);
 }
 
+/** Whether `s` belongs to the dedicated `Threads` surface (`#/threads`) rather than `#/agents`. */
+export function isThreadSurfaceSession(s: Session): boolean {
+  return (s.meta as { surface?: unknown } | null)?.surface === 'threads';
+}
+
 /** Whether the sidebar lists `s` (when live): a connection, a foreground
  *  agent, or a Slack/Telegram channel ticket — the client twin of the
  *  daemon's `foreground=true&with_sources=channel` filter. */
@@ -90,15 +95,17 @@ const byRecent = (a: Session, b: Session): number => b.last_active_at.localeComp
 export interface SessionBuckets {
   /** Non-archived rows. */
   active: Session[];
-  /** Non-archived, foreground (sidebar Agents / counts scope). */
+  /** Non-archived, foreground `#/agents` scope (excludes `#/threads` surface). */
   foregroundActive: Session[];
-  /** Non-archived agents of the current workspace (not scratch). */
+  /** Non-archived, foreground `#/threads` surface sessions. */
+  threads: Session[];
+  /** Non-archived agents of the current workspace (not scratch, not `#/threads`). */
   agent: Session[];
-  /** Foreground agents of the scratch workspace ("No workspace" group). */
+  /** Foreground `#/agents` sessions of the scratch workspace ("No workspace" group). */
   scratch: Session[];
   /** Non-archived connection sessions. */
   connection: Session[];
-  /** Foreground agents of the current workspace (sidebar "Agents"). */
+  /** Foreground `#/agents` sessions of the current workspace (sidebar "Agents"). */
   plainAgent: Session[];
   /** Telegram / Slack channel agents, newest first. */
   telegram: Session[];
@@ -111,6 +118,7 @@ export function bucketSessions(sessions: readonly Session[]): SessionBuckets {
   const b: SessionBuckets = {
     active: [],
     foregroundActive: [],
+    threads: [],
     agent: [],
     scratch: [],
     connection: [],
@@ -122,6 +130,11 @@ export function bucketSessions(sessions: readonly Session[]): SessionBuckets {
     if (s.archived) continue;
     b.active.push(s);
     const fg = isForeground(s);
+    const inThreads = isThreadSurfaceSession(s);
+    if (inThreads) {
+      if (fg && s.kind !== 'connection') b.threads.push(s);
+      continue;
+    }
     if (fg) b.foregroundActive.push(s);
     if (s.kind === 'connection') {
       b.connection.push(s);

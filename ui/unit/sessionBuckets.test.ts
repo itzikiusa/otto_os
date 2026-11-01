@@ -11,6 +11,7 @@ import {
   idChunks,
   isForeground,
   isShownKind,
+  isThreadSurfaceSession,
   shownListQuery,
 } from '../src/lib/stores/sessionBuckets.ts';
 import { SCRATCH_WORKSPACE_ID } from '../src/lib/stores/sessionScope.ts';
@@ -113,4 +114,21 @@ test('idChunks splits at the daemon cap of 64', () => {
   assert.deepEqual(chunks.map((c) => c.length), [64, 64, 2]);
   assert.deepEqual(chunks.flat(), ids);
   assert.deepEqual(idChunks([]), []);
+});
+
+test('bucketSessions strictly isolates Threads surface sessions from Agents buckets', () => {
+  const agentSess = mk({ title: 'Messi' });
+  const threadSess = mk({ title: 'Thread 1', meta: { surface: 'threads' } });
+  const scratchThread = mk({ workspace_id: SCRATCH_WORKSPACE_ID, meta: { surface: 'threads' } });
+  const archivedThread = mk({ archived: true, meta: { surface: 'threads' } });
+
+  assert.equal(isThreadSurfaceSession(agentSess), false);
+  assert.equal(isThreadSurfaceSession(threadSess), true);
+
+  const b = bucketSessions([agentSess, threadSess, scratchThread, archivedThread]);
+  assert.deepEqual(b.threads, [threadSess, scratchThread]);
+  assert.deepEqual(b.plainAgent, [agentSess]);
+  assert.deepEqual(b.agent, [agentSess]);
+  assert.deepEqual(b.foregroundActive, [agentSess]);
+  assert.deepEqual(b.scratch, []);
 });

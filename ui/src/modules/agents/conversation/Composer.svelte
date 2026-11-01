@@ -26,19 +26,17 @@
   import { toasts } from '../../../lib/toast.svelte';
   import { detectBlockDirection } from '../../../lib/textDirection';
   import type { SessionStatus, SlashCommand } from '../../../lib/api/types';
-  import { fetchSlashCommands, interruptAgent, steerAgent, submitPrompt, uploadInboxImage } from './api';
+  import { fetchSlashCommands, submitPrompt } from './api';
   import type { ToolCallBlock } from './format';
-  import {
-    detectMentionAtCaret,
-    extractMentionedFiles,
-    removeMentionFromDraft,
-    searchWorkspaceFiles,
-    type MentionEntry,
-  } from './fileMentions';
+  import { nextInteractionModeToggle, resolveSessionThreadConfig, supportsInteractionMode, type EffortLevel, type InteractionMode } from '../../../lib/providerModels';
+  import { isImmediateSlashCommand, mergeSlashCommands, parseInteractiveSlashInput, type ComposerSlashCommand, type ParsedSlashIntent } from '../../../lib/slashActions';
+  import { detectMentionAtCaret, extractMentionedFiles, removeMentionFromDraft, searchWorkspaceFiles, type MentionEntry } from './fileMentions';
   import ComposerApprovalDock from './ComposerApprovalDock.svelte';
   import ComposerAttachments, { type ComposerAttachment } from './ComposerAttachments.svelte';
   import ComposerFooter from './ComposerFooter.svelte';
   import ComposerPopups from './ComposerPopups.svelte';
+  import ComposerStatusCard from './ComposerStatusCard.svelte';
+  import { interruptComposerTurn, patchComposerEffort, patchComposerMode, patchComposerModel, runComposerSlashIntent, steerComposerTurn, uploadComposerImages } from './composerSlash';
 
   import { transcript } from '../../../lib/stores/transcript.svelte';
   import { ws } from '../../../lib/stores/workspace.svelte';
@@ -68,6 +66,13 @@
     pendingCall?: ToolCallBlock | null;
     /** True when the session needs user confirmation right now. */
     waiting?: boolean;
+    /** Formatted turn/token/cost summary for `/status`. */
+    statsSummary?: string;
+    /** Host callbacks for interactive slash commands (`/diff`, `/files`, `/terminal`, `/new`, `/fork`). */
+    ondiff?: () => void;
+    onfiles?: () => void;
+    ontoggleterminal?: () => void;
+    onnewthread?: (beside: boolean) => void;
   }
   let {
     sessionId,
@@ -82,6 +87,11 @@
     provider = '',
     pendingCall = null,
     waiting = false,
+    statsSummary = '',
+    ondiff,
+    onfiles,
+    ontoggleterminal,
+    onnewthread,
   }: Props = $props();
 
   const ownerId = untrack(() => sessionId);
@@ -93,7 +103,23 @@
   const isUploading = $derived(uploading > 0);
   $effect(() => { if (isUploading) announce('Uploading images…'); });
   let ta = $state<HTMLTextAreaElement | null>(null);
+  let footerRef = $state<ReturnType<typeof ComposerFooter> | null>(null);
   let customReplyHint = $state(false);
+  let configBusy = $state(false);
+  let showStatusCard = $state(false);
+
+  const sessionObj = $derived(ws.getSession(sessionId));
+  const threadCfg = $derived(resolveSessionThreadConfig(sessionObj, model));
+
+  async function runCfg(fn: () => Promise<void>): Promise<void> {
+    if (configBusy) return;
+    configBusy = true;
+    try { await fn(); } finally { configBusy = false; restoreComposerFocus(); }
+  }
+  const applyModelChange = (m: string | null) => runCfg(() => patchComposerModel(ownerId, provider, m));
+  const applyEffortChange = (eff: EffortLevel | null) => runCfg(() => patchComposerEffort(ownerId, eff));
+  const applyModeChange = (mode: InteractionMode) =>
+    mode === threadCfg.interactionMode ? Promise.resolve() : runCfg(() => patchComposerMode(ownerId, mode));
 
   function restoreComposerFocus(): void {
     const focused = document.activeElement;
@@ -182,15 +208,7 @@
   async function interrupt(): Promise<void> {
     if (stopping) return;
     stopping = true;
-    try {
-      await interruptAgent(ownerId);
-      toasts.info('Interrupt sent', `${agentName} stops after its current step`);
-    } catch (e) {
-      toastError('Couldn’t interrupt the agent', e);
-    } finally {
-      stopping = false;
-      restoreComposerFocus();
-    }
+    try { await interruptComposerTurn(ownerId, agentName); } finally { stopping = false; restoreComposerFocus(); }
   }
   let fileEl = $state<HTMLInputElement | null>(null);
   function pickImages(e: Event): void {
@@ -205,14 +223,15 @@
   let cmdsFor = '';
   let cmdIdx = $state(0);
   let cmdDismissed = $state(false);
+  const allSlashCmds = $derived(mergeSlashCommands(cmds));
   const cmdPrefix = $derived.by(() => {
     const m = /^\/([\w:-]*)$/.exec(text);
     return m ? m[1].toLowerCase() : null;
   });
   const suggestions = $derived.by(() => {
-    if (cmdPrefix == null || cmdDismissed || !cmds) return [] as SlashCommand[];
-    const starts = cmds.filter((c) => c.name.toLowerCase().startsWith(cmdPrefix));
-    const within = cmds.filter((c) => !c.name.toLowerCase().startsWith(cmdPrefix) && c.name.toLowerCase().includes(cmdPrefix));
+    if (cmdPrefix == null || cmdDismissed) return [] as ComposerSlashCommand[];
+    const starts = allSlashCmds.filter((c) => c.name.toLowerCase().startsWith(cmdPrefix));
+    const within = allSlashCmds.filter((c) => !c.name.toLowerCase().startsWith(cmdPrefix) && c.name.toLowerCase().includes(cmdPrefix));
     return [...starts, ...within].slice(0, 12);
   });
   const cmdOpen = $derived(suggestions.length > 0);
@@ -268,7 +287,35 @@
     mentionDismissed = false;
   });
 
-  function acceptCmd(c: SlashCommand): void {
+  async function executeSlashIntent(intent: ParsedSlashIntent): Promise<void> {
+    transcript.setDraft(ownerId, '');
+    cmdDismissed = true;
+    queueMicrotask(autosize);
+    await runComposerSlashIntent(intent, {
+      openModelPicker: () => footerRef?.openModelPicker(),
+      openEffortPicker: () => footerRef?.openEffortPicker(),
+      openModePicker: () => footerRef?.openModePicker(),
+      applyModelChange,
+      applyEffortChange,
+      applyModeChange,
+      toggleStatusCard: () => (showStatusCard = !showStatusCard),
+      sendPrompt: sendDirectPrompt,
+      restoreFocus: restoreComposerFocus,
+      ondiff,
+      onfiles,
+      ontoggleterminal,
+      onnewthread,
+    });
+  }
+
+  function acceptCmd(c: ComposerSlashCommand): void {
+    if (c.source === 'interactive' && isImmediateSlashCommand(c.name)) {
+      const intent = parseInteractiveSlashInput(`/${c.name}`);
+      if (intent) {
+        void executeSlashIntent(intent);
+        return;
+      }
+    }
     const next = `/${c.name} `;
     transcript.setDraft(ownerId, next);
     cmdDismissed = true;
@@ -311,12 +358,21 @@
     ta?.focus();
   }
 
+  async function sendDirectPrompt(promptText: string): Promise<void> {
+    if (!promptText || uploading > 0 || !transcript.tryBeginSend(ownerId)) return;
+    transcript.recordOptimisticPrompt(ownerId, promptText);
+    try { await submitPrompt(ownerId, promptText); }
+    catch (e) { transcript.clearOptimisticPrompt(ownerId); toastError('Couldn’t send the message', e); }
+    finally { transcript.finishSend(ownerId); restoreComposerFocus(); }
+  }
+
   async function send(): Promise<void> {
     const typed = text.replace(/\s+$/, '');
     const imgs = attachments.map((a) => `[Image: ${a.path}]`);
     const body = [typed, ...imgs].filter(Boolean).join('\n');
     // An upload still in flight would land in the NEXT draft: wait for it, send by hand.
     if (!body || uploading > 0 || !transcript.tryBeginSend(ownerId)) return;
+    transcript.recordOptimisticPrompt(ownerId, body);
     try {
       const submittedImages = [...attachments];
       await submitPrompt(ownerId, body);
@@ -328,6 +384,7 @@
       transcript.setAttachments(ownerId, transcript.attachments(ownerId).filter((a) => !submittedImages.includes(a)));
       queueMicrotask(autosize);
     } catch (e) {
+      transcript.clearOptimisticPrompt(ownerId);
       toastError('Couldn’t send the message', e);
     } finally {
       transcript.finishSend(ownerId);
@@ -335,24 +392,21 @@
     }
   }
 
+  async function submitOrSlash(): Promise<void> {
+    const typed = text.replace(/\s+$/, '');
+    if (attachments.length === 0) {
+      const slashIntent = parseInteractiveSlashInput(typed);
+      if (slashIntent) { await executeSlashIntent(slashIntent); return; }
+    }
+    await send();
+  }
+
   async function steer(): Promise<void> {
     const typed = text.replace(/\s+$/, '');
-    const imgs = attachments.map((a) => `[Image: ${a.path}]`);
-    const body = [typed, ...imgs].filter(Boolean).join('\n');
-    if (!body || uploading > 0 || steering || !transcript.tryBeginSend(ownerId)) return;
+    if ((!typed && !attachments.length) || uploading > 0 || steering || !transcript.tryBeginSend(ownerId)) return;
     steering = true;
     try {
-      const submittedImages = [...attachments];
-      await steerAgent(ownerId, body);
-      if (transcript.draft(ownerId).replace(/\s+$/, '') === typed) {
-        transcript.setDraft(ownerId, '');
-      }
-      for (const a of submittedImages) URL.revokeObjectURL(a.url);
-      transcript.setAttachments(ownerId, transcript.attachments(ownerId).filter((a) => !submittedImages.includes(a)));
-      queueMicrotask(autosize);
-      toasts.info('Steered', `Interrupted and redirected ${agentName}`);
-    } catch (e) {
-      toastError('Couldn’t steer the agent', e);
+      await steerComposerTurn({ sessionId: ownerId, agentName, typed, attachments, onDoneDraft: () => queueMicrotask(autosize) });
     } finally {
       steering = false;
       transcript.finishSend(ownerId);
@@ -362,6 +416,13 @@
 
   function onKeydown(e: KeyboardEvent): void {
     if (e.isComposing) return;
+    if (e.key === 'Tab' && e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey && !mentionOpen && !cmdOpen) {
+      if (supportsInteractionMode(provider)) {
+        e.preventDefault();
+        void applyModeChange(nextInteractionModeToggle(threadCfg.interactionMode));
+        return;
+      }
+    }
     if (busy && e.key === 'Enter' && e.shiftKey && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
       void steer();
@@ -384,7 +445,7 @@
         const pick = suggestions[cmdIdx];
         if (e.key === 'Enter' && pick && `/${pick.name}`.toLowerCase() === text.trim().toLowerCase()) {
           e.preventDefault();
-          void send();
+          void submitOrSlash();
           return;
         }
         e.preventDefault();
@@ -394,7 +455,7 @@
     }
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      void send();
+      void submitOrSlash();
     }
   }
 
@@ -407,20 +468,7 @@
   );
 
   async function addImages(files: File[]): Promise<void> {
-    const imgs = files.filter((f) => f.type.startsWith('image/'));
-    if (!imgs.length) return;
-    addPending(ownerId, imgs.length);
-    for (const f of imgs) {
-      try {
-        const name = f.name && f.name !== 'image.png' ? f.name : `paste-${Date.now()}.${(f.type.split('/')[1] ?? 'png').replace('jpeg', 'jpg')}`;
-        const path = await uploadInboxImage(ownerId, f, name);
-        transcript.setAttachments(ownerId, [...transcript.attachments(ownerId), { path, name, url: URL.createObjectURL(f) }]);
-      } catch (e) {
-        toastError('Couldn’t upload the image', e);
-      } finally {
-        addPending(ownerId, -1);
-      }
-    }
+    await uploadComposerImages(ownerId, files, addPending);
     restoreComposerFocus();
   }
 
@@ -449,7 +497,9 @@
       ? `Type a custom reply for ${agentName} and press ⏎…`
       : busy
         ? `Queue a follow-up (⏎) or steer ${agentName} mid-turn (⇧⌘⏎)…`
-        : `Message ${agentName} — @ files · / commands`,
+        : threadCfg.interactionMode === 'plan'
+          ? `Describe what ${agentName} should investigate and plan — @ files · / commands · ⇧⇥ exit Plan`
+          : `Message ${agentName} — @ files · / commands · ⇧⇥ Plan`,
   );
 </script>
 
@@ -460,6 +510,21 @@
       <button class="btn small primary" onclick={onresume}>Resume</button>
     </div>
   {:else}
+    {#if showStatusCard}
+      <ComposerStatusCard
+        {provider}
+        effectiveModel={threadCfg.effectiveModel}
+        effort={threadCfg.effort}
+        interactionMode={threadCfg.interactionMode}
+        {statsSummary}
+        {branch}
+        {cwd}
+        onclose={() => (showStatusCard = false)}
+        onopenmodel={() => footerRef?.openModelPicker()}
+        onopeneffort={() => footerRef?.openEffortPicker()}
+        onopenmode={() => footerRef?.openModePicker()}
+      />
+    {/if}
     <div class="box-wrap" bind:this={wrapEl}>
       <ComposerPopups
         {popId}
@@ -478,7 +543,7 @@
         oncmdhover={(i) => (cmdIdx = i)}
         onacceptcmd={acceptCmd}
       />
-      <div class="box" class:busy class:needs-approval={needsApproval}>
+      <div class="box" class:busy class:needs-approval={needsApproval} class:plan-mode={threadCfg.interactionMode === 'plan'}>
         {#if needsApproval}
           <ComposerApprovalDock sessionId={ownerId} {agentName} {pendingCall} oncustomreply={beginCustomReply} />
         {/if}
@@ -522,24 +587,32 @@
             >
               <Icon name="zap" size={12} /> Steer
             </button>
-            <button class="btn small primary queue-btn" onclick={() => void send()} disabled={!canSend} title={sendTitle}>
+            <button class="btn small primary queue-btn" onclick={() => void submitOrSlash()} disabled={!canSend} title={sendTitle}>
               <Icon name="send" size={12} /> Queue
             </button>
           {:else}
-            <button class="send" onclick={() => void send()} disabled={!canSend} title={sendTitle} aria-label={uploading > 0 ? 'Send (uploading images)' : 'Send'}><Icon name="send" size={14} /></button>
+            <button class="send" onclick={() => void submitOrSlash()} disabled={!canSend} title={sendTitle} aria-label={uploading > 0 ? 'Send (uploading images)' : 'Send'}><Icon name="send" size={14} /></button>
           {/if}
         </div>
       </div>
       <ComposerAttachments {attachments} onremoveattachment={removeAttachment} />
     </div>
     <ComposerFooter
+      bind:this={footerRef}
       {sessionId}
       {agentName}
       {provider}
       {st}
       {cwd}
       {branch}
-      {model}
+      model={threadCfg.effectiveModel}
+      pinnedModel={threadCfg.pinnedModel}
+      effort={threadCfg.effort}
+      interactionMode={threadCfg.interactionMode}
+      {configBusy}
+      onmodelchange={(m) => void applyModelChange(m)}
+      oneffortchange={(eff) => void applyEffortChange(eff)}
+      onmodechange={(mode) => void applyModeChange(mode)}
       {termStatus}
       {termInput}
       {uploading}
@@ -585,6 +658,9 @@
   }
   .box.needs-approval {
     border-color: color-mix(in srgb, var(--warning) 48%, var(--border));
+  }
+  .box.plan-mode {
+    border-color: color-mix(in srgb, var(--warning) 42%, var(--border));
   }
   .box:focus-within {
     border-color: var(--accent-line-strong);

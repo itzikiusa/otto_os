@@ -10,7 +10,7 @@ import {
   type AutoVerticalEngine,
   type AutoVerticalPrefs,
 } from '../db-view-prefs';
-import { insertFavorite } from '../sidebar';
+import { insertFavorite, loadReconciledSidebarStorage, persistKnownSidebarModules } from '../sidebar';
 
 export type ThemeName = 'native' | 'pro-dark' | 'warm';
 export type SchemePref = 'auto' | 'light' | 'dark';
@@ -407,29 +407,28 @@ class UiStore {
    *  that turns the Navigator into a reorder/show-hide list. RBAC still wins:
    *  these only ever rearrange or hide modules the user is already permitted to
    *  see — they can never reveal a feature RBAC blocks. */
-  sidebarOrder: string[] = $state(lsGetJson<string[]>(LS.sidebarOrder, []));
-  sidebarHidden: string[] = $state(lsGetJson<string[]>(LS.sidebarHidden, []));
+  sidebarOrder: string[] = $state([]);
+  sidebarHidden: string[] = $state([]);
   sidebarEditMode = $state(false);
   /** Favorites (per device): module ids pinned into the Navigator's first
    *  section, in the user's order. A favorite shows ONLY there (it leaves its
    *  own section). Ids the user can't currently see (RBAC, an uninstalled
    *  plugin) are kept but skipped at render — see sidebar.ts sidebarSections. */
-  sidebarFavorites: string[] = $state(lsGetStrings(LS.sidebarFavorites));
+  sidebarFavorites: string[] = $state([]);
   /** The user's section order (SidebarGroupId list; Favorites is always
    *  first and never listed). Empty = the shipped order; unknown ids are
    *  ignored and new sections append (sidebar.ts resolveGroupOrder). */
   sidebarGroupOrder: string[] = $state(lsGetStrings(LS.sidebarGroupOrder));
   /** Navigator sections (SidebarSectionId) the user has folded shut. Per device;
    *  the section holding the current page is re-opened on navigation. */
-  sidebarCollapsedGroups: string[] = $state(
-    ((v) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []))(
-      lsGetJson<unknown>(LS.sidebarCollapsedGroups, []),
-    ),
-  );
+  sidebarCollapsedGroups: string[] = $state([]);
   /** Phone-only: the off-canvas Navigator drawer. Deliberately NOT persisted
    *  and NOT `railExpanded` (the desktop sidebar preference) — a phone always
    *  boots onto the page, never under the drawer. */
   navDrawerOpen = $state(false);
+  constructor() {
+    ({ order: this.sidebarOrder, hidden: this.sidebarHidden, favorites: this.sidebarFavorites, collapsedGroups: this.sidebarCollapsedGroups } = loadReconciledSidebarStorage(lsGet, lsGetStrings, lsSet, this.sidebarGroupOrder));
+  }
 
   /** Fold / unfold one Navigator section. */
   toggleSidebarGroup(id: string): void {
@@ -514,6 +513,7 @@ class UiStore {
     lsSet(LS.sidebarCollapsedGroups, '[]');
     lsSet(LS.sidebarFavorites, '[]');
     lsSet(LS.sidebarGroupOrder, '[]');
+    persistKnownSidebarModules(lsSet);
   }
 
   toggleSidebarEdit(): void {

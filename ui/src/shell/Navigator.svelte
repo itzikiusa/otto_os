@@ -130,7 +130,7 @@
     await ws.killSessions(ids);
     setAgentSelMode(false);
   }
-  const archivedIds = $derived(new Set(ws.archivedSessions.map((s) => s.id)));
+  const archivedIds = $derived(new Set(ws.archivedAgentSessions.map((s) => s.id)));
   const archSelCount = $derived([...archSel].filter((id) => archivedIds.has(id)).length);
   /** Expand / fold the Archived section; the first open loads page one. */
   function toggleArchived(): void {
@@ -153,11 +153,11 @@
     archSel = next;
   }
   function archSelectAll(): void {
-    archSel = archSelCount === ws.archivedSessions.length ? new Set() : new Set(ws.archivedSessions.map((s) => s.id));
+    archSel = archSelCount === ws.archivedAgentSessions.length ? new Set() : new Set(ws.archivedAgentSessions.map((s) => s.id));
   }
   async function deleteSelectedArchived(): Promise<void> {
-    const ids = ws.archivedSessions.filter((s) => archSel.has(s.id)).map((s) => s.id);
-    if (ids.length === 0 || !(await askClose(ids, true, ws.archivedSessions))) return;
+    const ids = ws.archivedAgentSessions.filter((s) => archSel.has(s.id)).map((s) => s.id);
+    if (ids.length === 0 || !(await askClose(ids, true, ws.archivedAgentSessions))) return;
     await ws.killSessions(ids);
     archSel = new Set();
   }
@@ -1442,21 +1442,21 @@
 
     <!-- Archived sessions: parked rows under the Agents lists (restore /
          delete), folded by default. -->
-    {#if ws.hasArchived || ws.archivedSessions.length > 0}
+    {#if ws.hasArchived || ws.archivedAgentSessions.length > 0}
       <button class="nav-item nested-item arch-toggle" aria-expanded={archivedOpen} data-testid="archived-toggle" onclick={toggleArchived}>
         <Icon name="archive" size={13} />
         <span class="grow">Archived</span>
         {#if ws.archivedLoaded}
-          <span class="count-chip">{ws.archivedSessions.length}{ws.archivedHasMore ? '+' : ''}</span>
+          <span class="count-chip">{ws.archivedAgentSessions.length}{ws.archivedHasMore ? '+' : ''}</span>
         {/if}
         <Icon name={archivedOpen ? 'chevronDown' : 'chevronRight'} size={12} />
       </button>
       {#if archivedOpen}
         <div class="nested">
-          {#if ws.myRole !== 'viewer' && ws.archivedSessions.length > 1}
+          {#if ws.myRole !== 'viewer' && ws.archivedAgentSessions.length > 1}
             <div class="arch-tools">
               <label class="arch-all" title="Select all archived sessions">
-                <input type="checkbox" aria-label="Select all archived sessions" checked={archSelCount > 0 && archSelCount === ws.archivedSessions.length} indeterminate={archSelCount > 0 && archSelCount < ws.archivedSessions.length} onchange={archSelectAll} />
+                <input type="checkbox" aria-label="Select all archived sessions" checked={archSelCount > 0 && archSelCount === ws.archivedAgentSessions.length} indeterminate={archSelCount > 0 && archSelCount < ws.archivedAgentSessions.length} onchange={archSelectAll} />
                 <span>{archSelCount > 0 ? `${archSelCount} selected` : 'Select all'}</span>
               </label>
               <button class="row-action danger arch-del-sel" disabled={archSelCount === 0} title="Delete selected sessions" aria-label="Delete selected sessions" data-testid="archived-delete-selected" onclick={() => void deleteSelectedArchived()}>
@@ -1464,7 +1464,7 @@
               </button>
             </div>
           {/if}
-          {#each ws.archivedSessions as s (s.id)}
+          {#each ws.archivedAgentSessions as s (s.id)}
             <div class="nested-row" class:selected={archSel.has(s.id)}>
               {#if ws.canEditSession(s)}
                 <input type="checkbox" class="arch-check" checked={archSel.has(s.id)} onchange={() => toggleArchSel(s.id)} aria-label="Select {s.title}" />
@@ -1509,7 +1509,7 @@
             </div>
           {:else if ws.archivedLoading}
             <div class="arch-state"><Skeleton rows={2} height={22} label="archived sessions" /></div>
-          {:else if ws.archivedLoaded && ws.archivedSessions.length === 0}
+          {:else if ws.archivedLoaded && ws.archivedAgentSessions.length === 0}
             <div class="arch-state">No archived sessions.</div>
           {:else if ws.archivedHasMore}
             <button class="show-more" data-testid="archived-load-more" onclick={() => void loadArchivedPage(true)}>Load more</button>

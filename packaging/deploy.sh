@@ -528,12 +528,18 @@ lock_holder_alive() {
     [[ "$(proc_start "$1")" == "$2" ]]
 }
 lock_dir_age() {
-    local m
-    m="$(stat -f %m "$LOCK_DIR" 2>/dev/null || stat -c %Y "$LOCK_DIR" 2>/dev/null)" || { echo 0; return; }
+    local target="${1:-$LOCK_DIR}" m
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+        m="$(stat -f %m "$target" 2>/dev/null)" || { echo 0; return; }
+    else
+        m="$(stat -c %Y "$target" 2>/dev/null)" || { echo 0; return; }
+    fi
+    [[ "$m" =~ ^[0-9]+$ ]] || { echo 0; return; }
     echo $(( $(date +%s) - m ))
 }
 lock_acquire() {
-    local holder start moved stale tries=0
+    local holder start moved stale sweep_lock="$LOCK_DIR.sweep" sweep_held=0 tries=0
+    local my_stamp="$$ $(proc_start $$)"
     mkdir -p "$(dirname "$LOCK_DIR")"
     while ! mkdir "$LOCK_DIR" 2>/dev/null; do
         holder=""; start=""
@@ -541,33 +547,67 @@ lock_acquire() {
         if [[ -n "$holder" && "$holder" == "${OTTO_DEPLOY_LOCK_HANDOFF:-}" ]]; then
             break   # handed to us by the build foreground
         fi
-        if [[ -z "$holder" && "$(lock_dir_age)" -lt 10 ]]; then
+        if [[ -z "$holder" && "$(lock_dir_age "$LOCK_DIR")" -lt 10 ]]; then
+            [[ "$sweep_held" == 1 ]] && command rm -rf "$sweep_lock"
             fail_verify "another deploy is taking the lock right now — see packaging/deploy.sh --status"
             return 1
         fi
         if lock_holder_alive "$holder" "$start"; then
+            [[ "$sweep_held" == 1 ]] && command rm -rf "$sweep_lock"
             fail_verify "another deploy is running (pid $holder) — see packaging/deploy.sh --status"
             return 1
         fi
         tries=$((tries + 1))
         if [[ $tries -gt 3 ]]; then
+            [[ "$sweep_held" == 1 ]] && command rm -rf "$sweep_lock"
             fail_verify "could not take over the stale deploy lock $LOCK_DIR"; return 1
         fi
-        echo "    sweeping stale deploy lock (pid ${holder:-?} is gone)"
-        stale="$LOCK_DIR.stale.$$"
-        command rm -rf "$stale"
-        mv "$LOCK_DIR" "$stale" 2>/dev/null || continue
-        moved=""
-        read -r moved _ 2>/dev/null < "$stale/pid" || true
-        if [[ "$moved" != "$holder" ]]; then
-            # Another deploy swept it and re-locked in between: that's theirs.
-            mv "$stale" "$LOCK_DIR" 2>/dev/null || true
-            fail_verify "another deploy took the lock (pid ${moved:-?}) — see packaging/deploy.sh --status"
-            return 1
+        if [[ "$sweep_held" == 0 ]]; then
+            if ! mkdir "$sweep_lock" 2>/dev/null; then
+                if [[ "$(lock_dir_age "$sweep_lock")" -lt 10 ]]; then
+                    fail_verify "another deploy is taking the lock right now — see packaging/deploy.sh --status"
+                    return 1
+                fi
+                command rm -rf "$sweep_lock"
+                mkdir "$sweep_lock" 2>/dev/null || {
+                    fail_verify "another deploy is taking the lock right now — see packaging/deploy.sh --status"
+                    return 1
+                }
+            fi
+            sweep_held=1
+            # Re-check under the sweep mutex in case another deploy just replaced it.
+            holder=""; start=""
+            read -r holder start 2>/dev/null < "$LOCK_DIR/pid" || true
+            if [[ -z "$holder" && -d "$LOCK_DIR" && "$(lock_dir_age "$LOCK_DIR")" -lt 10 ]]; then
+                command rm -rf "$sweep_lock"
+                fail_verify "another deploy is taking the lock right now — see packaging/deploy.sh --status"
+                return 1
+            fi
+            if lock_holder_alive "$holder" "$start"; then
+                command rm -rf "$sweep_lock"
+                fail_verify "another deploy is running (pid $holder) — see packaging/deploy.sh --status"
+                return 1
+            fi
         fi
-        command rm -rf "$stale"
+        if [[ -d "$LOCK_DIR" ]]; then
+            echo "    sweeping stale deploy lock (pid ${holder:-?} is gone)"
+            stale="$LOCK_DIR.stale.$$"
+            command rm -rf "$stale"
+            if mv "$LOCK_DIR" "$stale" 2>/dev/null; then
+                moved=""
+                read -r moved _ 2>/dev/null < "$stale/pid" || true
+                if [[ "$moved" != "$holder" ]]; then
+                    mv "$stale" "$LOCK_DIR" 2>/dev/null || true
+                    command rm -rf "$sweep_lock"
+                    fail_verify "another deploy took the lock (pid ${moved:-?}) — see packaging/deploy.sh --status"
+                    return 1
+                fi
+                command rm -rf "$stale"
+            fi
+        fi
     done
-    printf '%s %s\n' "$$" "$(proc_start $$)" > "$LOCK_DIR/pid"
+    printf '%s\n' "$my_stamp" > "$LOCK_DIR/pid"
+    [[ "$sweep_held" == 1 ]] && command rm -rf "$sweep_lock"
     LOCK_HELD=1
 }
 lock_release() {

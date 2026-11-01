@@ -194,6 +194,9 @@ fn main() {
             // windows); each window's SPA restores its own tabs/route from
             // per-window (`__OTTO_WIN__`-keyed) localStorage.
             windows::restore(app.handle());
+            // Ensure WKWebView is explicitly first responder so AppKit's text
+            // input context routes arrow/function keys to navigation selectors.
+            let _ = window.set_focus();
 
             // Hidden, always-alive chrome: the assistant bar panel and the
             // menu-bar item + popover. Each is non-fatal on failure.

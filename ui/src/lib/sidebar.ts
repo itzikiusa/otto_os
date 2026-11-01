@@ -239,6 +239,143 @@ export function visibleOrder(ordered: SidebarModule[], hidden: string[]): Sideba
  *  favorited — so it is never a {@link SidebarModule.group}. */
 export const FAVORITES_ID = 'favorites';
 
+export interface ReconcileSidebarInput {
+  order: readonly string[];
+  hidden: readonly string[];
+  favorites: readonly string[];
+  collapsedGroups: readonly string[];
+  groupOrder: readonly string[];
+  /** Built-in module ids already seen on this device (`null` on first upgrade). */
+  knownModules: readonly string[] | null;
+  /** Override registry for unit tests; defaults to {@link SIDEBAR_MODULES}. */
+  registry?: readonly SidebarModuleDef[];
+}
+
+export interface ReconcileSidebarResult {
+  order: string[];
+  hidden: string[];
+  favorites: string[];
+  collapsedGroups: string[];
+  knownModules: string[];
+  changed: boolean;
+}
+
+/**
+ * Surface newly-shipped built-in modules in an already-customized sidebar once,
+ * then record `knownModules` so any later hide / unfavorite / collapse by the
+ * user sticks permanently.
+ */
+export function reconcileNewSidebarModules(input: ReconcileSidebarInput): ReconcileSidebarResult {
+  const registry = input.registry ?? SIDEBAR_MODULES;
+  const builtinIds = registry.map((m) => m.id);
+  const order = [...input.order];
+  let hidden = [...input.hidden];
+  let favorites = [...input.favorites];
+  let collapsedGroups = [...input.collapsedGroups];
+
+  const isCustomized =
+    order.length > 0 ||
+    hidden.length > 0 ||
+    favorites.length > 0 ||
+    collapsedGroups.length > 0 ||
+    input.groupOrder.length > 0;
+
+  let newIds: string[] = [];
+  if (isCustomized) {
+    if (input.knownModules !== null) {
+      const known = new Set(input.knownModules);
+      newIds = builtinIds.filter((id) => !known.has(id));
+    } else {
+      // Upgrading from before `otto_sidebar_known_modules` existed:
+      // detect modules missing from a saved `order` plus `threads` when not
+      // already explicitly placed/hidden/favorited.
+      const mentioned = new Set([...order, ...hidden, ...favorites]);
+      if (order.length > 0) {
+        newIds = builtinIds.filter((id) => !mentioned.has(id));
+      } else if (!mentioned.has('threads') && builtinIds.includes('threads')) {
+        newIds = ['threads'];
+      }
+    }
+  }
+
+  let mutated = false;
+  for (const id of newIds) {
+    const def = registry.find((m) => m.id === id);
+    if (!def) continue;
+
+    if (hidden.includes(id)) {
+      hidden = hidden.filter((x) => x !== id);
+      mutated = true;
+    }
+
+    if (collapsedGroups.includes(def.group)) {
+      collapsedGroups = collapsedGroups.filter((g) => g !== def.group);
+      mutated = true;
+    }
+
+    if (order.length > 0 && !order.includes(id)) {
+      const siblings = registry.filter((m) => m.group === def.group).map((m) => m.id);
+      const selfIdx = siblings.indexOf(id);
+      let inserted = false;
+      for (let p = selfIdx - 1; p >= 0; p--) {
+        const at = order.indexOf(siblings[p]);
+        if (at >= 0) {
+          order.splice(at + 1, 0, id);
+          inserted = true;
+          break;
+        }
+      }
+      if (!inserted) {
+        for (let s = selfIdx + 1; s < siblings.length; s++) {
+          const at = order.indexOf(siblings[s]);
+          if (at >= 0) {
+            order.splice(at, 0, id);
+            inserted = true;
+            break;
+          }
+        }
+      }
+      if (!inserted) order.push(id);
+      mutated = true;
+    }
+
+    if (favorites.length > 0 && !favorites.includes(id)) {
+      const siblings = registry.filter((m) => m.group === def.group && m.id !== id).map((m) => m.id);
+      const favOrHidden = new Set([...favorites, ...hidden]);
+      const allSiblingsMoved =
+        siblings.length > 0 &&
+        siblings.every((s) => favOrHidden.has(s)) &&
+        siblings.some((s) => favorites.includes(s));
+
+      if (id === 'threads' && favorites.includes('agents')) {
+        // Agents renders its inline session tree inside Favorites (without
+        // agentsLast), so pin Threads directly above Agents where it's visible.
+        favorites = insertFavorite(favorites, 'threads', 'agents');
+        mutated = true;
+      } else if (allSiblingsMoved) {
+        favorites = favorites.includes('agents')
+          ? insertFavorite(favorites, id, 'agents')
+          : insertFavorite(favorites, id);
+        mutated = true;
+      }
+    }
+  }
+
+  const knownSame =
+    input.knownModules !== null &&
+    input.knownModules.length === builtinIds.length &&
+    input.knownModules.every((id, i) => id === builtinIds[i]);
+
+  return {
+    order,
+    hidden,
+    favorites,
+    collapsedGroups,
+    knownModules: builtinIds,
+    changed: mutated || !knownSame,
+  };
+}
+
 /** A rendered section: one of {@link SIDEBAR_GROUPS} or Favorites. */
 export type SidebarSectionId = SidebarGroupId | typeof FAVORITES_ID;
 
@@ -488,4 +625,58 @@ export function goToEntries(mods: SidebarModule[]): GoToEntry[] {
     viaModule: false,
   }));
   return [...fromModules, ...extras];
+}
+
+const SIDEBAR_LS_KEYS = {
+  order: 'otto_sidebar_order',
+  hidden: 'otto_sidebar_hidden',
+  collapsedGroups: 'otto_sidebar_groups_collapsed',
+  favorites: 'otto_sidebar_favorites',
+  knownModules: 'otto_sidebar_known_modules',
+} as const;
+
+export function loadReconciledSidebarStorage(
+  lsGet: (k: string) => string | null,
+  lsGetStrings: (k: string) => string[],
+  lsSet: (k: string, v: string) => void,
+  groupOrder: readonly string[],
+): ReconcileSidebarResult {
+  const rawKnown = lsGet(SIDEBAR_LS_KEYS.knownModules);
+  let knownModules: string[] | null = null;
+  if (rawKnown !== null) {
+    try {
+      const parsed: unknown = JSON.parse(rawKnown);
+      if (Array.isArray(parsed)) knownModules = parsed.filter((x): x is string => typeof x === 'string');
+    } catch {
+      /* malformed JSON treated as unknown */
+    }
+  }
+  const reconciled = reconcileNewSidebarModules({
+    order: lsGetStrings(SIDEBAR_LS_KEYS.order),
+    hidden: lsGetStrings(SIDEBAR_LS_KEYS.hidden),
+    favorites: lsGetStrings(SIDEBAR_LS_KEYS.favorites),
+    collapsedGroups: lsGetStrings(SIDEBAR_LS_KEYS.collapsedGroups),
+    groupOrder,
+    knownModules,
+  });
+  if (reconciled.changed) {
+    if (reconciled.order.length > 0 || lsGet(SIDEBAR_LS_KEYS.order) !== null) {
+      lsSet(SIDEBAR_LS_KEYS.order, JSON.stringify(reconciled.order));
+    }
+    if (reconciled.hidden.length > 0 || lsGet(SIDEBAR_LS_KEYS.hidden) !== null) {
+      lsSet(SIDEBAR_LS_KEYS.hidden, JSON.stringify(reconciled.hidden));
+    }
+    if (reconciled.favorites.length > 0 || lsGet(SIDEBAR_LS_KEYS.favorites) !== null) {
+      lsSet(SIDEBAR_LS_KEYS.favorites, JSON.stringify(reconciled.favorites));
+    }
+    if (reconciled.collapsedGroups.length > 0 || lsGet(SIDEBAR_LS_KEYS.collapsedGroups) !== null) {
+      lsSet(SIDEBAR_LS_KEYS.collapsedGroups, JSON.stringify(reconciled.collapsedGroups));
+    }
+    lsSet(SIDEBAR_LS_KEYS.knownModules, JSON.stringify(reconciled.knownModules));
+  }
+  return reconciled;
+}
+
+export function persistKnownSidebarModules(lsSet: (k: string, v: string) => void): void {
+  lsSet(SIDEBAR_LS_KEYS.knownModules, JSON.stringify(SIDEBAR_MODULES.map((m) => m.id)));
 }
