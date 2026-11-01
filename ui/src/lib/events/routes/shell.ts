@@ -32,7 +32,7 @@ export const shellRoutes: EventRoutes = {
     // is blocked on the operator — raise the sticky "needs you" flag, distinct
     // from plain idle. Keyed off the stable source_key.
     const n = ev.notice;
-    if (n.source_key?.endsWith(':waiting') && n.action?.type === 'open_session') {
+    if (n.source_key?.endsWith(':waiting') && n.severity !== 'info' && n.action?.type === 'open_session') {
       const at = Date.parse(n.created_at);
       ws.markNeedsYou(n.action.session_id, { noticeAt: Number.isFinite(at) ? at : undefined });
     }

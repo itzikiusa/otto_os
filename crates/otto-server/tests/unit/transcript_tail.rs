@@ -53,6 +53,27 @@ fn screen_parts_splits_input_and_status_rows() {
 }
 
 #[test]
+fn codex_screen_strips_composer_footer_and_worked_for_banner() {
+    let screen = rows(
+        "› who was the first president of usa\n\n• George Washington.\n\n› and in israel\n\n• Worked for 1s ────────────────────────────\n\n• Israel's first president was Chaim Weizmann.\n\n\n› \n\n  GPT-6.1 Terra medium · ~/claude_ade\n  ? for shortcuts              ⚠ 4 warnings · f2 to view",
+    );
+    let p = screen_parts(&screen);
+    assert_eq!(
+        p.draft, "• Israel's first president was Chaim Weizmann.",
+        "Codex footer and Worked-for divider never leak into draft"
+    );
+    assert_eq!(p.input, "");
+    assert_eq!(
+        p.status,
+        "GPT-6.1 Terra medium · ~/claude_ade · ? for shortcuts ⚠ 4 warnings · f2 to view"
+    );
+
+    // Claude post-turn summary ("✻ Cogitated for 4s") is stripped too.
+    let claude_done = rows("> explain\n\n⏺ Done.\n\n✻ Cogitated for 4s\n\n────────────────\n❯ ");
+    assert_eq!(live_draft(&claude_done), "⏺ Done.");
+}
+
+#[test]
 fn git_branch_reads_head_and_follows_worktree_gitdir() {
     let tmp = tempfile::tempdir().unwrap();
     let repo = tmp.path().join("repo");

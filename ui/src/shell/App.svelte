@@ -262,8 +262,8 @@
   // down and answers its waiting/idle notices; it stays down until the next
   // turn end or prompt.
   $effect(() => {
-    const id = ws.activeSessionId;
-    if (!id || moduleName !== 'agents' || !ws.operatorPresent) return;
+    const id = moduleName === 'threads' ? ws.activeThreadId : moduleName === 'agents' ? ws.activeSessionId : null;
+    if (!id || !ws.operatorPresent) return;
     untrack(() => {
       ws.clearNeedsYou(id, notifications.sessionNoticeAt(id));
       void notifications.markSessionSeen(id);

@@ -125,9 +125,11 @@ class ThreadsStore {
     if (p.openFilesByWorkspace && typeof p.openFilesByWorkspace === 'object') {
       this.openFilesByWorkspace = p.openFilesByWorkspace;
     }
+    ws.activeThreadId = this.focusedSessionId;
   }
 
   private save(): void {
+    ws.activeThreadId = this.newDraftMode ? null : this.focusedSessionId;
     if (typeof localStorage === 'undefined') return;
     try {
       const payload: PersistedThreadsPrefs = {
@@ -299,7 +301,13 @@ class ThreadsStore {
   focusPane(id: string, syncRoute = true): void {
     this.focusedSessionId = id;
     this.newDraftMode = false;
+    ws.activeThreadId = id;
     ws.clearNeedsYou(id);
+    if (ws.unread[id]) {
+      const next = { ...ws.unread };
+      delete next[id];
+      ws.unread = next;
+    }
     this.save();
     if (syncRoute && router.module === 'threads' && router.parts[1] !== id) {
       router.replace(`threads/${id}`);

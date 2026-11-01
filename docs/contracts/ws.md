@@ -629,13 +629,13 @@ Session lifecycle (session-family — owner/admin/root, viewer-gated):
   provider-title auto-namer adopting the CLI's own session title
   (`meta.title_source = "provider"`).
 - `session_removed` — a session row was removed (PTY killed).
-- `session_attention` — an AGENT session needs the operator: `reason: "turn_end"` (its turn
-  finished: Working→Idle confirmed idle for `idle_notice_confirm_secs` with a quiet process
-  tree, `monitor.rs`) or `"prompt"` (claude's Notification hook: a permission or question;
-  not its generic 60 s "waiting for your input"). Sent **whatever** Settings → Notifications
-  "session events" says (that setting only gates the persisted `:waiting` notice below), so
-  the SPA's "needs you" flag (raise on this, lower when the operator enters/focuses the
-  session) never depends on notification delivery. Background sessions never send it.
+- `session_attention` — an AGENT session signal: `reason: "prompt"` (an interactive approval
+  or question prompt is blocked on the operator: Claude's Notification hook or a confirmed
+  terminal approval prompt on any agent provider — raises the SPA's sticky "needs you" flag)
+  or `"turn_end"` (its turn finished normally: Working→Idle confirmed idle for
+  `idle_notice_confirm_secs` with a quiet process tree, `monitor.rs`). Sent **whatever**
+  Settings → Notifications "session events" says (that setting only gates persisted notices).
+  Background sessions never send it.
 
 Sessions of the hidden scratch workspace (workspace-less sessions, see api.md
 #16a) carry `workspace_id: "scratch"`; delivery rules are unchanged (owner ∨
@@ -656,11 +656,12 @@ Notices & notifications:
   `user_id` is optional (`None` is omitted from the JSON via `skip_serializing_if`): when
   present the notification targets a single user and is delivered only to that user;
   when absent it is delivered per the standard workspace/broadcast scoping.
-  A notice whose `source_key` ends in `:waiting` with an `open_session` action marks the
-  session as "needs you" in the SPA (raised; lowered when the operator enters/focuses the session — see `session_attention`). Two producers:
-  claude's native Notification hook, and — for every AGENT provider — the daemon's
-  Working→Idle turn-finish transition (`session:{id}:waiting`). Shell sessions keep the
-  plain `session:{id}:idle` key and never raise the flag.
+  A `warn`/`error` notice whose `source_key` ends in `:waiting` with an `open_session` action
+  marks the session as "needs you" in the SPA (raised; lowered when the operator enters/focuses
+  the session — see `session_attention`). Two producers: Claude's native Notification hook and
+  confirmed terminal approval/question prompts on Working→Idle (`session:{id}:waiting`).
+  Normal turn completions and shell sessions keep the plain `session:{id}:idle` (`info`) key
+  and never raise the "needs you" warning.
   **Automation notices** (`kind: "system"`, `source_key` `automation:<kind>:<id>`): the
   first failed run of a streak of a scheduled task (`scheduled_task`, incl. a failed
   report delivery), personal agent (`personal_agent`) or workflow (`workflow`) posts one

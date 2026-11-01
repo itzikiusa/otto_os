@@ -616,43 +616,77 @@ async fn idle_confirm(ctx: &ServerCtx) -> Duration {
     }
 }
 
+const PROMPT_CONFIRM: Duration = Duration::from_secs(3);
+
+/// True when the bottom of an idle agent PTY screen holds an interactive
+/// permission / approval / question prompt (as opposed to an idle composer).
+pub(crate) fn screen_awaits_approval(rows: &[String]) -> bool {
+    const NEEDLES: &[&str] = &[
+        "do you want to ",
+        "would you like to run",
+        "approve and run",
+        "allow once",
+        "allow for this session",
+        "enter to confirm",
+        "esc to cancel",
+    ];
+    rows.iter()
+        .rev()
+        .filter(|r| !r.trim().is_empty())
+        .take(16)
+        .any(|r| {
+            let low = r.to_ascii_lowercase();
+            NEEDLES.iter().any(|n| low.contains(n))
+        })
+}
+
 async fn handle_session_transition(
     ctx: &ServerCtx,
     session_id: &Id,
     prev: Option<SessionStatus>,
     status: SessionStatus,
 ) {
-    // Only notify for transitions out of an active state into idle/exited.
-    let was_active = matches!(
-        prev,
-        Some(SessionStatus::Working) | Some(SessionStatus::Running)
-    );
+    // Only notify for transitions out of real Working into idle/exited — never
+    // `Running -> Idle`, which fires 2s after daemon boot re-adopts quiet held
+    // sessions that haven't run a turn in days.
+    let was_active = matches!(prev, Some(SessionStatus::Working));
 
     match status {
         SessionStatus::Idle if was_active => {
-            // Debounce: confirm the idle sticks before telling the user their
-            // agent is waiting. A session that resumes working (or exits) within
-            // the window fires nothing — the exit path has its own notice.
             let ctx = ctx.clone();
             let id = session_id.clone();
             tokio::spawn(async move {
-                tokio::time::sleep(idle_confirm(&ctx).await).await;
+                let confirm = idle_confirm(&ctx).await;
+                let first_wait = confirm.min(PROMPT_CONFIRM);
+                tokio::time::sleep(first_wait).await;
+                let Ok(s) = ctx.manager.get(&id).await else {
+                    return;
+                };
+                if s.status != SessionStatus::Idle || is_background(&s) {
+                    return;
+                }
+                if attention_wanted(&s)
+                    && ctx
+                        .manager
+                        .live_handle(&id)
+                        .is_some_and(|h| screen_awaits_approval(&h.screen_rows()))
+                    && !ctx.manager.tree_active(&id).await
+                {
+                    signal_attention(&ctx, &s, "prompt");
+                    if idle_notice_wanted(&ctx, &s).await {
+                        emit_session_notice(&ctx, &id, s, SessionStatus::Idle, true).await;
+                    }
+                    return;
+                }
+                if let Some(rem) = confirm.checked_sub(first_wait).filter(|r| !r.is_zero()) {
+                    tokio::time::sleep(rem).await;
+                }
                 let Ok(s) = ctx.manager.get(&id).await else {
                     return;
                 };
                 if s.status != SessionStatus::Idle {
                     return; // resumed / exited meanwhile — false alarm avoided
                 }
-                // Quiet PTY but a busy process tree = a command is still
-                // running under the agent (build / tests / deploy) — it does
-                // NOT need the user yet. The eventual resume produces a fresh
-                // Working→Idle transition, so the notice isn't lost, just late.
-                // Cheap gates FIRST (S9-07): a background session, or a shell
-                // session with session notices off, wants neither the notice
-                // nor the attention signal, so it must not pay `tree_active`'s
-                // two whole-machine `ps` scans + 750 ms. An AGENT session
-                // always signals attention (the "needs you" flag must not
-                // depend on notification delivery); the notice stays gated.
                 let notice = idle_notice_wanted(&ctx, &s).await;
                 if is_background(&s) || !(notice || attention_wanted(&s)) {
                     return;
@@ -660,11 +694,16 @@ async fn handle_session_transition(
                 if ctx.manager.tree_active(&id).await {
                     return;
                 }
+                let blocked = attention_wanted(&s)
+                    && ctx
+                        .manager
+                        .live_handle(&id)
+                        .is_some_and(|h| screen_awaits_approval(&h.screen_rows()));
                 if attention_wanted(&s) {
-                    signal_attention(&ctx, &s, "turn_end");
+                    signal_attention(&ctx, &s, if blocked { "prompt" } else { "turn_end" });
                 }
                 if notice {
-                    emit_session_notice(&ctx, &id, s, SessionStatus::Idle).await;
+                    emit_session_notice(&ctx, &id, s, SessionStatus::Idle, blocked).await;
                 }
             });
         }
@@ -672,16 +711,15 @@ async fn handle_session_transition(
             let Ok(s) = ctx.manager.get(session_id).await else {
                 return;
             };
-            emit_session_notice(ctx, session_id, s, SessionStatus::Exited).await;
+            emit_session_notice(ctx, session_id, s, SessionStatus::Exited, false).await;
         }
         _ => {}
     }
 }
 
-/// Whether a confirmed turn end of `s` should raise the SPA's "needs you"
-/// flag: interactive coding-agent sessions only — not a plain shell (provider
-/// `shell`) or a connection terminal finishing a command, and not background
-/// sessions (they run unattended).
+/// Whether a confirmed turn end / prompt of `s` applies to interactive agent
+/// sessions only — not a plain shell (`shell`) or connection terminal, and not
+/// background sessions (they run unattended).
 pub(crate) fn attention_wanted(s: &otto_core::domain::Session) -> bool {
     s.kind == otto_core::domain::SessionKind::Agent && s.provider != "shell" && !is_background(s)
 }
@@ -709,39 +747,26 @@ async fn idle_notice_wanted(ctx: &ServerCtx, s: &otto_core::domain::Session) -> 
     )
 }
 
-/// Build + create the idle/exited notice for a (already re-validated) session.
+/// Build + create the idle/waiting/exited notice for a validated session.
 async fn emit_session_notice(
     ctx: &ServerCtx,
     session_id: &Id,
     s: otto_core::domain::Session,
     status: SessionStatus,
+    blocked_on_prompt: bool,
 ) {
     let (severity, title, suffix) = match status {
-        SessionStatus::Idle => (NoticeSeverity::Info, "Session awaiting input", "idle"),
+        SessionStatus::Idle if blocked_on_prompt => {
+            (NoticeSeverity::Warn, "Agent needs attention", "waiting")
+        }
+        SessionStatus::Idle => (NoticeSeverity::Info, "Session finished responding", "idle"),
         _ => (NoticeSeverity::Info, "Session ended", "exited"),
     };
 
-    // Background sessions (channels, insights, workflow steps, reviews …) idle
-    // and end by design — never notify for them.
     if is_background(&s) {
         return;
     }
 
-    // Provider-agnostic "needs you": for AGENT sessions, a Working→Idle
-    // transition is the turn finishing — the agent is now awaiting input. Use
-    // the `:waiting` source_key suffix so the UI raises its sticky needs-you
-    // flag (events.svelte.ts keys off `:waiting` + open_session), exactly like
-    // claude's native Notification hook — this extends the same signal to
-    // codex/agy/custom providers. Shell sessions keep the plain `:idle` key
-    // (every command ending would otherwise light up the wall).
-    let suffix = if suffix == "idle" && s.kind == otto_core::domain::SessionKind::Agent {
-        "waiting"
-    } else {
-        suffix
-    };
-
-    // Build an informative body: "«title» (provider)" + the current task, if any.
-    // For idle, the in-progress task is the most useful "what it was on" hint.
     let label = format!("{} ({})", s.title, s.provider);
     let current_task = ctx
         .activity()
@@ -756,11 +781,12 @@ async fn emit_session_notice(
                 .map(|t| t.title)
         });
     let body = match status {
+        SessionStatus::Idle if blocked_on_prompt => {
+            format!("{label} is waiting on an approval or question prompt.")
+        }
         SessionStatus::Idle => match &current_task {
-            Some(task) => {
-                format!("{label} is idle and may be waiting for your input · was on: {task}")
-            }
-            None => format!("{label} is idle and may be waiting for your input."),
+            Some(task) => format!("{label} finished responding · task: {task}"),
+            None => format!("{label} finished responding."),
         },
         _ => match &current_task {
             Some(task) => format!("{label} has ended · last task: {task}"),
@@ -1110,5 +1136,31 @@ mod tests {
         scanner.on_session_end(&flagged);
         assert!(scanner.tails.lock().unwrap().is_empty());
         assert!(scanner.flagged.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn screen_awaits_approval_distinguishes_prompts_from_idle_composer() {
+        let idle_codex = vec![
+            "› and in israel".to_string(),
+            "• Israel's first president was Chaim Weizmann.".to_string(),
+            "› ".to_string(),
+            "  GPT-6.1 Terra medium · ~/claude_ade".to_string(),
+            "  ? for shortcuts              ⚠ 4 warnings · f2 to view".to_string(),
+        ];
+        assert!(!super::screen_awaits_approval(&idle_codex));
+
+        let codex_approval = vec![
+            "Would you like to run the following command?".to_string(),
+            "  $ rm -rf dist".to_string(),
+            "Press enter to confirm or esc to cancel".to_string(),
+        ];
+        assert!(super::screen_awaits_approval(&codex_approval));
+
+        let claude_permission = vec![
+            "Do you want to proceed?".to_string(),
+            " ❯ 1. Yes".to_string(),
+            "   2. No".to_string(),
+        ];
+        assert!(super::screen_awaits_approval(&claude_permission));
     }
 }

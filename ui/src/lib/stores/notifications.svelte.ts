@@ -382,7 +382,7 @@ class NotificationStore {
       if (!prev || Date.parse(n.created_at) > Date.parse(prev.created_at)) latest.set(parsed.id, n);
     }
     for (const [sid, n] of latest) {
-      if (n.read || !n.source_key?.endsWith(':waiting') || n.action?.type !== 'open_session') continue;
+      if (n.read || n.severity === 'info' || !n.source_key?.endsWith(':waiting') || n.action?.type !== 'open_session') continue;
       const st = ws.statusMap[sid];
       if (st === 'working' || st === 'exited') continue;
       // Only a notice newer than the last one the operator answered for this
