@@ -276,6 +276,111 @@ async fn lifecycle_native_cancel_deadline_releases_old_ownership() {
         .is_ok());
 }
 
+/// `POST …/db/close` must not wait out a stuck teardown (a pool close blocks
+/// on checked-out connections; it held the request for the 5 s phase timeout),
+/// and a reopen that races the teardown gets a fresh generation once it ends
+/// instead of the retired one's "Connection closed; retry" conflict.
+#[tokio::test]
+async fn close_returns_before_teardown_and_reopen_waits_for_it() {
+    let (mut service, conn, user) = fixture().await;
+    let driver = Arc::new(CancelFixture {
+        held: ResourceCache::default(),
+        started: Arc::new(tokio::sync::Semaphore::new(0)),
+        release: Arc::new(tokio::sync::Semaphore::new(0)),
+    });
+    service.registry.set_for_test(Engine::Mysql, driver.clone());
+    let resolved = service
+        .resolve(&conn, &user, None, "db_query")
+        .await
+        .unwrap();
+    let dropped = Arc::new(AtomicUsize::new(0));
+    driver.held.insert_ready(
+        resolved.config.cache_key(),
+        Arc::new(DropCount(dropped.clone())),
+    );
+    let token = CancelToken::new();
+    token.set(QueryHandle::MysqlConnId(7));
+    service.in_flight.lock().unwrap().insert(
+        "stuck".into(),
+        InFlightQuery {
+            conn_id: conn.clone(),
+            user_id: user.clone(),
+            resolved: Some(resolved),
+            token,
+            abort: None,
+            started: std::time::Instant::now(),
+        },
+    );
+    // The native cancel blocks until released: teardown cannot finish. The
+    // legacy-mode route closes with exactly this, without awaiting it.
+    drop(service.begin_close(&conn));
+    tokio::time::timeout(Duration::from_secs(2), driver.started.acquire())
+        .await
+        .expect("teardown reached the native cancel")
+        .unwrap()
+        .forget();
+    assert_eq!(dropped.load(Ordering::SeqCst), 0, "teardown still owns it");
+    let reopen = {
+        let (service, conn, user) = (service.clone(), conn.clone(), user.clone());
+        tokio::spawn(async move { service.resolve(&conn, &user, None, "db_query").await })
+    };
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(!reopen.is_finished(), "a reopen waits for the teardown");
+    driver.release.add_permits(1);
+    let fresh = tokio::time::timeout(Duration::from_secs(2), reopen)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        fresh.is_ok(),
+        "fresh generation after teardown: {:?}",
+        fresh.err()
+    );
+    assert_eq!(dropped.load(Ordering::SeqCst), 1);
+}
+
+/// The governed (per-user) close detaches the caller's pools and returns;
+/// closing them happens off the request path.
+#[tokio::test]
+async fn governed_close_detaches_and_closes_in_the_background() {
+    let (mut service, conn, user) = fixture().await;
+    assert!(service.is_enforced(&conn).await.unwrap());
+    let driver = Arc::new(CancelFixture {
+        held: ResourceCache::default(),
+        started: Arc::new(tokio::sync::Semaphore::new(0)),
+        release: Arc::new(tokio::sync::Semaphore::new(0)),
+    });
+    service.registry.set_for_test(Engine::Mysql, driver.clone());
+    let resolved = service
+        .resolve(&conn, &user, None, "db_query")
+        .await
+        .unwrap();
+    let dropped = Arc::new(AtomicUsize::new(0));
+    driver.held.insert_ready(
+        resolved.config.cache_key(),
+        Arc::new(DropCount(dropped.clone())),
+    );
+    service.close_for_user(&conn, &user).await.unwrap();
+    assert!(
+        driver
+            .held
+            .get_ready(&resolved.config.cache_key())
+            .is_none(),
+        "detached before the response: a reopen cannot reuse it"
+    );
+    for _ in 0..100 {
+        if dropped.load(Ordering::SeqCst) == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        dropped.load(Ordering::SeqCst),
+        1,
+        "closed in the background"
+    );
+}
+
 /// A Stop with no native handle (a mongosh script, a Mongo write, a Redis
 /// command) must really drop the detached execution and say so — never report
 /// success while the work keeps running.
