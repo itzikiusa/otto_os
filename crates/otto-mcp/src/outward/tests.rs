@@ -2040,6 +2040,39 @@ fn vault_tools_do_not_require_workspace_id() {
 }
 
 #[test]
+fn pick_vault_workspace_never_picks_an_archived_workspace() {
+    fn ws(id: &str, archived: bool) -> otto_core::domain::Workspace {
+        otto_core::domain::Workspace {
+            id: id.into(),
+            name: id.into(),
+            root_path: format!("/tmp/{id}"),
+            settings: json!({}),
+            archived,
+            created_at: chrono::Utc::now(),
+        }
+    }
+    // A removed (archived) Editor membership must not win a write over a
+    // live Viewer one, nor be the fallback.
+    let rows = vec![
+        (ws("live-view", false), WorkspaceRole::Viewer),
+        (ws("removed-edit", true), WorkspaceRole::Editor),
+    ];
+    assert_eq!(
+        pick_vault_workspace(&rows, true).as_deref(),
+        Some("live-view")
+    );
+    assert_eq!(
+        pick_vault_workspace(&rows, false).as_deref(),
+        Some("live-view")
+    );
+    // Only archived workspaces: nothing to scope to (the caller then asks for
+    // an explicit `workspace_id`).
+    let all_removed = vec![(ws("removed", true), WorkspaceRole::Admin)];
+    assert_eq!(pick_vault_workspace(&all_removed, false), None);
+    assert_eq!(pick_vault_workspace(&all_removed, true), None);
+}
+
+#[test]
 fn pick_vault_workspace_prefers_writable_for_mutating_tools() {
     fn ws(id: &str) -> otto_core::domain::Workspace {
         otto_core::domain::Workspace {

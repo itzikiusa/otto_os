@@ -362,6 +362,7 @@ pub fn match_transition(list: &Value, wanted: &str) -> Result<String, Error> {
 /// first one whose role satisfies the tool (Editor for mutating, Viewer for
 /// reads), falling back to the first membership so the self-call's native RBAC
 /// produces the honest 403 rather than an "unknown workspace" here.
+/// Archived (removed) workspaces are never picked — not even as the fallback.
 pub fn pick_vault_workspace(
     rows: &[(otto_core::domain::Workspace, WorkspaceRole)],
     mutating: bool,
@@ -371,8 +372,9 @@ pub fn pick_vault_workspace(
     } else {
         WorkspaceRole::Viewer
     };
-    rows.iter()
+    let mut live = rows.iter().filter(|(w, _)| !w.archived);
+    live.clone()
         .find(|(_, role)| *role >= need)
-        .or_else(|| rows.first())
+        .or_else(|| live.next())
         .map(|(w, _)| w.id.clone())
 }
