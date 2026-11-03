@@ -21,8 +21,8 @@ name: macOS
 #     dependents. A forward-dependency change that breaks macOS-only code is
 #     caught by the nightly run and the push to main.
 # The desktop job runs only when apps/desktop/ (or this file) changed. On a
-# PR the daemon job always runs the macOS-cfg clippy; its test run only when
-# a Darwin-behaviour crate changed (see the route step) — main + nightly
+# PR the daemon job runs the macOS-cfg clippy and tests only when a
+# Darwin-behaviour crate changed (see the route step) — main + nightly
 # always run both.
 
 on:
@@ -155,10 +155,9 @@ jobs:
             exit 0
           fi
           python3 scripts/ci-route.py < "$RUNNER_TEMP/changed.txt" | tee -a "$GITHUB_OUTPUT"
-          # The macOS TEST run (7–10 min of build on a 3-core runner) on a PR
-          # only when a crate whose Darwin behaviour it tests changed; every
-          # PR still gets the macOS-cfg clippy (a full type-check of the
-          # Darwin code), and pushes to main + the nightly run the tests.
+          # The macOS clippy + TEST run (10–25 min on a 3-core runner) on a
+          # PR only when a crate whose Darwin behaviour it covers changed;
+          # pushes to main + the nightly always run both.
           if grep -qE '^(crates/(otto-sandbox|otto-pty|otto-keychain|otto-sessions|otto-rooms|otto-ssh|otto-telemetry-collector|otto-apiclient|otto-automation|otto-brokers|otto-browser|ottod)/|Cargo\.lock$|\.config/nextest\.toml$|\.github/workflows/macos\.yml$)' "$RUNNER_TEMP/changed.txt"; then
             echo mac_tests=true | tee -a "$GITHUB_OUTPUT"
           else
@@ -190,6 +189,7 @@ jobs:
 
       - name: Restore cargo + workspace targets
         id: cargo-cache
+        if: needs.changes.outputs.mac_tests == 'true'
         uses: actions/cache/restore@v6.1.0
         with:
           path: |
@@ -220,7 +220,12 @@ jobs:
       - name: Ensure cmake
         run: command -v cmake || brew install cmake
 
+      # PR: only when a Darwin-behaviour crate changed (same route as the
+      # tests below); a cold macOS clippy is ~10 min on a 3-core runner.
+      # Pushes to main + the nightly always run it, which catches a
+      # forward-dependency change that breaks macOS-only code.
       - name: cargo clippy (macOS cfg)
+        if: needs.changes.outputs.mac_tests == 'true'
         run: >-
           cargo clippy
           -p otto-apiclient -p otto-automation -p otto-brokers -p otto-browser -p otto-keychain -p otto-pty -p otto-rooms -p otto-sandbox -p otto-server -p otto-sessions -p otto-ssh -p otto-telemetry-collector -p ottod
