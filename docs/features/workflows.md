@@ -526,8 +526,17 @@ with a non-object, non-null `input` is a **400**
 
 The review's comparison base resolves in order: node `base` param → input
 `base` → the run's ambient base → the repo's **detected default branch** — and
-a named ref that doesn't exist locally falls back through `origin/<base>` to
-the default instead of failing. The node publishes the **resolved** branch in
+a named ref that doesn't exist locally falls back through `origin/<base>` (and a
+one-branch fetch of `<base>` from `origin`) to the default instead of failing.
+
+Before any step runs, admission **syncs the run's branches**: for every declared
+repo it fetches `origin` (with the repo's git-account credential) and makes the
+entry's base and the PR's `pr_branch` resolvable by name — a branch that exists
+only on the remote gets a local tracking branch, and a stale local copy that is
+checked out nowhere is **fast-forwarded** (compare-and-swap `update-ref`). It never
+forces a ref or touches a working tree: a branch checked out behind, or diverged
+from `origin`, is left as is and the run's worktree is cut from `origin/<base>`
+instead. A failed fetch is logged and the run continues on cached refs. The node publishes the **resolved** branch in
 its output `base` (what a downstream `git_pr` targets). With multiple `repos[]`
 declared on the run and no explicit target, one review runs per entry and the
 output aggregates (`score` = min, `passed` = all, per-repo `reviews[]`).
