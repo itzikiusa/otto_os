@@ -215,6 +215,10 @@ pub fn api_router<S: AccessCtx>() -> Router<S> {
             get(get_policy::<S>).put(put_policy::<S>),
         )
         .route("/access/{kind}/{id}/subjects", get(subjects::<S>))
+        .route(
+            "/access/{kind}/capabilities/batch",
+            post(resources_capabilities::<S>),
+        )
         .route("/access/{kind}/{id}/capabilities", get(capabilities::<S>))
         .route(
             "/access/{kind}/{id}/capabilities/batch",
@@ -575,6 +579,92 @@ async fn capabilities_batch<S: AccessCtx>(
         }
     }
     Ok(Json(response))
+}
+
+#[derive(Deserialize)]
+struct ResourcesCapabilitiesRequest {
+    ids: Vec<Id>,
+}
+
+/// Bound of [`resources_capabilities`]: the same 1,000 as a child batch.
+const MAX_BATCH_RESOURCES: usize = 1000;
+
+/// The caller's own top-level decision for one resource, or `None` when it is
+/// invisible to them — the same gates, in the same order, as
+/// [`capabilities`] (page/workspace access, then the policy's `discover`).
+async fn own_capabilities(
+    pool: &DbPool,
+    user: &User,
+    groups: &[Id],
+    kind: ResourceKind,
+    id: Id,
+) -> Result<Option<EffectiveAccess>> {
+    match page_access(pool, user, kind, &id, "discover").await {
+        Ok(()) => {}
+        Err(Error::NotFound(_) | Error::Forbidden(_)) => return Ok(None),
+        Err(e) => return Err(e),
+    }
+    let policy = ResourceAccessRepo::new(pool.clone())
+        .get_live_policy(kind, &id)
+        .await?;
+    let resource = ResourceRef {
+        kind,
+        id,
+        child: None,
+    };
+    if !ResourceAccess::evaluate_policy(
+        &user.id,
+        user.is_root,
+        user.disabled,
+        groups,
+        &policy,
+        &resource,
+        "discover",
+    )?
+    .allowed
+    {
+        return Ok(None);
+    }
+    let mut entry = decisions_batch(pool, user, &policy, &[None], groups)
+        .await?
+        .remove(0);
+    for decision in entry.operations.values_mut() {
+        decision.matched_rule_ids.clear();
+    }
+    Ok(Some(entry))
+}
+
+/// `POST /access/{kind}/capabilities/batch` — the caller's own top-level
+/// capabilities for many resources of one kind in one request, in input
+/// order; `null` for a resource the caller cannot see (the single route's
+/// 403/404). The Database page re-checks every connection row on its safety
+/// net, which was one GET (and one CORS preflight) per row. Membership is
+/// loaded once; each resource keeps its own page/workspace/policy gates.
+async fn resources_capabilities<S: AccessCtx>(
+    State(ctx): State<S>,
+    CurrentAuthContext(auth): CurrentAuthContext,
+    Path(kind): Path<ResourceKind>,
+    Json(req): Json<ResourcesCapabilitiesRequest>,
+) -> ApiResult<Json<Vec<Option<EffectiveAccess>>>> {
+    if req.ids.len() > MAX_BATCH_RESOURCES {
+        return Err(Error::Invalid(format!(
+            "at most {MAX_BATCH_RESOURCES} resources per request"
+        ))
+        .into());
+    }
+    let user = &auth.effective_user;
+    if user.disabled {
+        return Err(Error::Forbidden("account disabled".into()).into());
+    }
+    let pool = ctx.access_pool();
+    let groups = ResourceAccessRepo::new(pool.clone())
+        .groups_for_user(&user.id)
+        .await?;
+    let mut out = Vec::with_capacity(req.ids.len());
+    for id in req.ids {
+        out.push(own_capabilities(&pool, user, &groups, kind, id).await?);
+    }
+    Ok(Json(out))
 }
 
 fn legacy_capability(op: &str) -> Capability {

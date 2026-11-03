@@ -5334,6 +5334,7 @@ An absent rule is inherited/no grant. Matching group and user allows combine; an
 | GET | `/access/{kind}/{id}/subjects` | Available users, groups, roles; `manage_access` |
 | GET | `/access/{kind}/{id}/capabilities?child=` | Current caller's effective decisions; visible resource |
 | POST | `/access/{kind}/{id}/capabilities/batch` | Self-scoped; same visibility/page/workspace gates as capabilities. Body `EffectiveAccessBatchRequest {children: string[]}` (at most 1,000 children, 4,096 bytes each); returns `EffectiveAccess[]` in input order, including child-specific denials. Administrative rule IDs are omitted. Invalid bounds return 400; invisible resource returns 404. No side effects. |
+| POST | `/access/{kind}/capabilities/batch` | Self-scoped top-level capabilities for many resources of one kind. Body `ResourcesCapabilitiesRequest {ids: Id[]}` (at most 1,000); returns `(EffectiveAccess \| null)[]` in input order — each entry passes the same page/workspace/`discover` gates as `GET …/{id}/capabilities`, `null` where that route would answer 403/404. Administrative rule IDs are omitted. A disabled account gets 403; over the bound 400. No side effects. The UI coalesces same-tick top-level checks (row lists, the safety-net re-check) into this. |
 | GET | `/access/{kind}/{id}/effective?user_id=&child=` | Target user's effective decisions; `manage_access` |
 | POST | `/access/{kind}/{id}/preview` | Candidate access impact; `manage_access` |
 

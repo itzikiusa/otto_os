@@ -2,7 +2,7 @@
 // again by the backend; a cached button state is never an authorization token.
 import { untrack } from 'svelte';
 import { accessApi } from '../api/access';
-import { getToken } from '../api/client';
+import { ApiError, getToken } from '../api/client';
 import { auth } from './auth.svelte';
 import { createLimiter, mapLimit } from '../poll';
 import { appLive, liveQuery, LIVE_SAFETY_MS } from '../live';
@@ -21,6 +21,11 @@ function ttl(): number {
  *  one unbounded request per resource — each a distinct URL, so each also a
  *  CORS preflight — queued ahead of the user's first click. */
 const checkGate = createLimiter(3);
+
+/** Ids per coalesced top-level request — the server's batch bound. */
+const TOP_BATCH = 1000;
+type TopWaiter = { resolve: (value: EffectiveAccess) => void; reject: (error: unknown) => void };
+type TopSlot = { background: boolean; waiters: TopWaiter[] };
 
 type Entry = {
   value: EffectiveAccess | null;
@@ -76,7 +81,9 @@ class ResourceAccessStore {
     let task!: Promise<void>;
     task = (async () => {
       try {
-        const value = await checkGate(() => accessApi.capabilities(kind, id, child, background));
+        const value = child === undefined
+          ? await this.top(kind, id, background)
+          : await checkGate(() => accessApi.capabilities(kind, id, child, background));
         if (generation !== this.generation || key !== this.key(kind, id, child)) return;
         const before = this.entries[key]?.value ?? null;
         this.entries[key] = { value, expires: Date.now() + ttl(), kind, id, child };
@@ -93,6 +100,70 @@ class ResourceAccessStore {
     })();
     this.loading.set(key, task);
     return task;
+  }
+  /** Top-level checks requested in the same task coalesce into ONE
+   *  `capabilities/batch` request per kind: the DB page asks for every
+   *  connection row and the safety net re-checks every cached one, which used
+   *  to be ~100 GETs (each its own CORS preflight) every 5 minutes. */
+  private topQueue = new Map<ResourceKind, Map<string, TopSlot>>();
+  private topScheduled = false;
+  private top(kind: ResourceKind, id: string, background: boolean): Promise<EffectiveAccess> {
+    return new Promise((resolve, reject) => {
+      let byId = this.topQueue.get(kind);
+      if (!byId) this.topQueue.set(kind, (byId = new Map()));
+      const slot = byId.get(id) ?? { background: true, waiters: [] };
+      slot.background &&= background;
+      slot.waiters.push({ resolve, reject });
+      byId.set(id, slot);
+      if (!this.topScheduled) {
+        this.topScheduled = true;
+        queueMicrotask(() => this.flushTop());
+      }
+    });
+  }
+  private flushTop() {
+    this.topScheduled = false;
+    const queue = this.topQueue;
+    this.topQueue = new Map();
+    for (const [kind, byId] of queue) {
+      const ids = [...byId.keys()];
+      for (let offset = 0; offset < ids.length; offset += TOP_BATCH) {
+        void this.fetchTop(kind, ids.slice(offset, offset + TOP_BATCH), byId);
+      }
+    }
+  }
+  private async fetchTop(kind: ResourceKind, ids: string[], byId: Map<string, TopSlot>) {
+    const settle = (id: string, value: EffectiveAccess | null, error?: unknown) => {
+      for (const w of byId.get(id)?.waiters ?? []) {
+        if (value) w.resolve(value);
+        else w.reject(error ?? new Error('resource not visible'));
+      }
+    };
+    const background = ids.every((id) => byId.get(id)?.background !== false);
+    const single = async (id: string) => {
+      try {
+        settle(id, await checkGate(() => accessApi.capabilities(kind, id, undefined, background)));
+      } catch (e) {
+        settle(id, null, e);
+      }
+    };
+    if (ids.length === 1) return single(ids[0]);
+    let values: (EffectiveAccess | null)[];
+    try {
+      values = await checkGate(() => accessApi.capabilitiesMany(kind, ids, background));
+    } catch (e) {
+      // A daemon without the batch route answers per resource.
+      if (e instanceof ApiError && (e.status === 404 || e.status === 405)) {
+        await mapLimit(ids, 2, single);
+        return;
+      }
+      for (const id of ids) settle(id, null, e);
+      return;
+    }
+    ids.forEach((id, i) => {
+      const value = values[i];
+      settle(id, value && value.resource_id === id ? value : null);
+    });
   }
   private batches = new Map<symbol, { kind: ResourceKind; id: string; children: string[]; names: Set<string> }>();
   private batchLoading = new Map<symbol, Promise<void>>();
@@ -177,7 +248,16 @@ class ResourceAccessStore {
     const entries = Object.values(this.entries).filter(
       (e) => !this.isBatched(e) && (!match?.kind || (e.kind === match.kind && (!match.resource_id || e.id === match.resource_id))),
     );
-    await mapLimit(entries, 2, (e) => this.load(e.kind, e.id, e.child, true, true).catch(() => {}));
+    await this.recheck(entries);
+  }
+  /** Top-level entries go out together (they coalesce into one request per
+   *  kind); child decisions keep the 2-at-a-time fan-out. */
+  private async recheck(entries: Entry[]) {
+    const reload = (e: Entry) => this.load(e.kind, e.id, e.child, true, true).catch(() => {});
+    await Promise.all([
+      Promise.all(entries.filter((e) => e.child === undefined).map(reload)),
+      mapLimit(entries.filter((e) => e.child !== undefined), 2, reload),
+    ]);
   }
   /** Re-check only the decisions whose TTL ran out (window focus). While the
    *  event socket is up that is ~none — `resource_access_changed` keeps them
@@ -188,7 +268,7 @@ class ResourceAccessStore {
     await mapLimit([...this.batches.entries()].filter(([, b]) => b.children.some((child) => (this.entries[this.key(b.kind, b.id, child)]?.expires ?? 0) <= now)), 2,
       ([owner]) => this.loadChildren(owner, true));
     const stale = Object.values(this.entries).filter((e) => !this.isBatched(e) && e.expires <= now);
-    await mapLimit(stale, 2, (e) => this.load(e.kind, e.id, e.child, true, true).catch(() => {}));
+    await this.recheck(stale);
   }
 }
 export const resourceAccess = new ResourceAccessStore();
