@@ -37,7 +37,10 @@
   import type { Repo } from '../../lib/api/types';
   import { buildFolderMenuItems, buildWorkspaceMenuItems, STAGE_SLASH_COMMANDS } from './newThreadMenus';
   import { openBranchMenu, openCheckoutMenu } from './threadGitMenus';
-  import { buildAgentMenu, buildEffortMenu, buildModeMenu, buildModelMenu } from './threadPickerMenus';
+  import { lazyComponent } from '../../lib/lazy-component.svelte';
+  // The model panel loads on first open (prefetched when the chip is hovered).
+  const ModelPicker = lazyComponent(() => import('../../lib/components/ModelPickerPopover.svelte'));
+  import { buildModeMenu } from './threadPickerMenus';
   import StageSlashPopup from './StageSlashPopup.svelte';
   import ThreadProjectCard from './ThreadProjectCard.svelte';
   import { harnessLabel, projectNameFromCwd, relToRoot } from './threadsHelpers';
@@ -144,51 +147,12 @@
 
   // ── Menus ────────────────────────────────────────────────────────────────
 
-  function openAgentMenu(): void {
-    if (!agentEl) return;
-    const meta = auth.meta;
-    ctxMenu.showAt(
-      agentEl,
-      buildAgentMenu({
-        harnesses,
-        provider,
-        modelLabel: formatModelLabel(provider, selectedModel, meta),
-        effort: selectedEffort,
-        meta,
-        openBeside: threads.paneIds.length > 0 ? openInBeside : null,
-        onProvider: selectProvider,
-        onOpenModel: () => queueMicrotask(openModelMenu),
-        onOpenEffort: () => queueMicrotask(openEffortMenu),
-        onToggleBeside: () => (openInBeside = !openInBeside),
-        onEmpty: () => void launch(false),
-      }),
-      { align: 'end' },
-    );
-  }
-
+  // The one model panel (T3): provider rail · models · reasoning · access.
+  let pickerOpen = $state(false);
   function openModelMenu(): void {
-    if (!agentEl) return;
-    ctxMenu.showAt(
-      agentEl,
-      buildModelMenu({ provider, pinnedModel: selectedModel, meta: auth.meta, onModel: (m) => (selectedModel = m) }),
-      { align: 'end', filter: true, filterPlaceholder: 'Filter models…' },
-    );
+    if (agentEl) pickerOpen = true;
   }
-
-  function openEffortMenu(): void {
-    if (!agentEl || !supportsEffortSelection(provider)) return;
-    ctxMenu.showAt(
-      agentEl,
-      buildEffortMenu({
-        provider,
-        model: selectedModel,
-        effort: selectedEffort,
-        meta: auth.meta,
-        onEffort: (e) => (selectedEffort = e),
-      }),
-      { align: 'end' },
-    );
-  }
+  const openEffortMenu = openModelMenu;
 
   function openModeMenu(): void {
     if (!modeEl || !supportsInteractionMode(provider)) return;
@@ -394,7 +358,8 @@
     }
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      void launch(true);
+      // ⌘↵ with nothing typed opens the session without a first prompt.
+      void launch(!((e.metaKey || e.ctrlKey) && !prompt.trim()));
     }
   }
 
@@ -483,8 +448,10 @@
           aria-label="Agent: {harnessLabel(provider)}, {agentLabel}"
           title="Harness, model and effort (/model · /effort)"
           data-testid="picker-agent"
+          onpointerenter={() => ModelPicker.prefetch()}
           disabled={busy}
-          onclick={openAgentMenu}
+          aria-expanded={pickerOpen}
+          onclick={openModelMenu}
         >
           {#if hasProviderIcon(provider)}
             <ProviderIcon {provider} size={14} />
@@ -497,7 +464,7 @@
           type="button"
           class="nt-send"
           aria-label={busy ? 'Starting thread' : 'Start thread'}
-          title="Start thread (↵)"
+          title="Start thread (↵) — ⌘↵ with no text opens an empty one"
           data-testid="new-thread-send-btn"
           disabled={busy || !prompt.trim()}
           onclick={() => void launch(true)}
@@ -541,6 +508,19 @@
         </button>
       {/if}
       <span class="nt-spacer"></span>
+      {#if threads.paneIds.length > 0}
+        <button
+          type="button"
+          class="nt-meta-btn"
+          class:on={openInBeside}
+          aria-pressed={openInBeside}
+          title="Open the new thread beside the current one (Split)"
+          onclick={() => (openInBeside = !openInBeside)}
+        >
+          <Icon name="split" size={13} />
+          <span>Beside</span>
+        </button>
+      {/if}
       {#if repo && branch}
         <button
           type="button"
@@ -575,6 +555,22 @@
     </div>
   </div>
 </div>
+
+{#if pickerOpen && agentEl && ModelPicker.component}
+  <ModelPicker.component
+    anchor={agentEl}
+    providers={harnesses}
+    {provider}
+    model={selectedModel}
+    effort={selectedEffort}
+    mode={interactionMode}
+    onprovider={selectProvider}
+    onmodel={(m) => (selectedModel = m)}
+    oneffort={(e) => (selectedEffort = e)}
+    onmode={(m) => (interactionMode = m)}
+    onclose={() => (pickerOpen = false)}
+  />
+{/if}
 
 {#if picker !== 'none'}
   <FolderPicker
@@ -756,6 +752,9 @@
   }
   .nt-meta-btn:disabled {
     cursor: default;
+  }
+  .nt-meta-btn.on {
+    color: var(--accent-text);
   }
   .nt-meta-btn.warn {
     color: var(--warning);

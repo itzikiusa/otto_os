@@ -7,6 +7,7 @@
   import { ws } from '../lib/stores/workspace.svelte';
   import { auth } from '../lib/stores/auth.svelte';
   import { events } from '../lib/events.svelte';
+  import { pageChrome } from '../lib/stores/pageChrome.svelte';
   import { git } from '../lib/stores/git.svelte';
   import { router } from '../lib/router.svelte';
   import { nowMinute } from '../lib/stores/now.svelte';
@@ -26,6 +27,8 @@
   );
 </script>
 
+<!-- A page may trim the bar (Threads); a lost connection always shows it. -->
+{#if !pageChrome.hideStatusBar || events.state !== 'connected'}
 <footer class="statusbar chrome-material">
   <div class="sb-group">
     <button
@@ -88,6 +91,7 @@
     <span class="sb-item dim">{clock}</span>
   </div>
 </footer>
+{/if}
 
 <style>
   .statusbar {

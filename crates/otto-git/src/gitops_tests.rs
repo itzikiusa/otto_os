@@ -343,3 +343,33 @@ async fn removal_never_waits_on_git_deleting_the_tree() {
     assert!(!wt.exists());
     assert!(!sh(&repo, &["worktree", "list"]).contains("wt-big"));
 }
+
+#[test]
+fn sibling_worktree_path_slugs_the_branch_next_to_the_repo() {
+    let p = sibling_worktree_path(Path::new("/w/claude_ade"), "feat/side chat");
+    assert_eq!(p, PathBuf::from("/w/claude_ade-feat-side-chat"));
+}
+
+#[tokio::test]
+async fn create_adds_a_new_branch_worktree_beside_the_repo_and_refuses_reuse() {
+    let (_tmp, repo) = fixture();
+    let git = LocalGit::new(&repo);
+
+    let w = git.worktree_create("feat/new", None).await.unwrap();
+    let expected = repo.parent().unwrap().join("repo-feat-new");
+    assert_eq!(Path::new(&w.path), expected.as_path());
+    assert_eq!(w.branch.as_deref(), Some("feat/new"));
+    assert!(!w.is_main);
+    // Same commit as main: created from HEAD.
+    assert_eq!(
+        sh(&expected, &["rev-parse", "HEAD"]),
+        sh(&repo, &["rev-parse", "HEAD"])
+    );
+
+    let err = git.worktree_create("feat/new", None).await.unwrap_err();
+    assert!(matches!(err, Error::Conflict(_)), "{err:?}");
+    let err = git.worktree_create("bad..name", None).await.unwrap_err();
+    assert!(matches!(err, Error::Invalid(_)), "{err:?}");
+    let err = git.worktree_create("--force", None).await.unwrap_err();
+    assert!(!matches!(err, Error::Conflict(_)), "{err:?}");
+}

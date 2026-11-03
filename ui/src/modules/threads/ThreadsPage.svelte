@@ -11,6 +11,7 @@
   import { loadPaneWidth } from '../../lib/paneResizer';
   import { router } from '../../lib/router.svelte';
   import { openFile } from '../../lib/stores/openfile.svelte';
+  import { pageChrome } from '../../lib/stores/pageChrome.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
@@ -44,6 +45,20 @@
 
   // Subscribe to live cross-session messages + MCP DB activity while mounted.
   onMount(() => threads.mountLive());
+
+  // Like T3, no side-panel rail and no status bar while Threads is open (the
+  // sidebar's status dots carry the working count). Not persisted: a saved
+  // open Side panel is shown closed here (transient) and comes back on
+  // leaving; opening it on purpose (shortcut / ⌘K) shows it.
+  onMount(() => {
+    const restoreChrome = pageChrome.set({ hideSideRail: true, hideStatusBar: true });
+    const hadTransient = ui.rightTransient !== null;
+    if (!hadTransient && ui.rightOpen) ui.rightTransient = { open: false, tab: ui.rightTab };
+    return () => {
+      restoreChrome();
+      if (!hadTransient && ui.rightTransient && !ui.rightTransient.open) ui.rightTransient = null;
+    };
+  });
 
   // One sidebar, like T3: while Threads is open Otto's navigator folds to its
   // icon rail (not persisted — the shell's own preference is untouched), and

@@ -131,12 +131,80 @@ pub enum WorktreeRemoval {
     Git,
 }
 
+/// Where a new worktree for `branch` goes: a sibling of the repo folder,
+/// `<repo>-<branch>` with every character outside `[A-Za-z0-9._-]` folded to
+/// `-` (so `feat/x` → `<repo>-feat-x`). The daemon picks it, never the caller.
+pub fn sibling_worktree_path(repo: &Path, branch: &str) -> PathBuf {
+    let slug: String = branch
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let slug = slug.trim_matches('-');
+    let name = repo
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "repo".into());
+    repo.with_file_name(format!("{name}-{slug}"))
+}
+
 impl LocalGit {
     async fn common_dir(&self) -> Option<PathBuf> {
         self.run_read(&["rev-parse", "--path-format=absolute", "--git-common-dir"])
             .await
             .ok()
             .map(|s| PathBuf::from(s.trim()))
+    }
+
+    /// Create a NEW branch `branch` from `base` (default `HEAD`) checked out in a
+    /// new worktree at [`sibling_worktree_path`]. Never touches an existing
+    /// branch or folder: either one is a 409, and `-b` refuses a branch created
+    /// in between. Returns the new worktree's row.
+    pub async fn worktree_create(&self, branch: &str, base: Option<&str>) -> Result<WorktreeInfo> {
+        let branch = branch.trim();
+        if branch.is_empty() {
+            return Err(Error::Invalid("branch name must not be empty".into()));
+        }
+        Self::guard_ref(branch)?;
+        let (valid, _, _, _) = self
+            .run_raw(&["check-ref-format", "--branch", branch], &[])
+            .await?;
+        if !valid {
+            return Err(Error::Invalid(format!(
+                "“{branch}” is not a valid branch name"
+            )));
+        }
+        let base = base
+            .map(str::trim)
+            .filter(|b| !b.is_empty())
+            .unwrap_or("HEAD");
+        Self::guard_ref(base)?;
+        if self.branch_exists(branch).await {
+            return Err(Error::Conflict(format!("branch {branch} already exists")));
+        }
+        let path = sibling_worktree_path(self.path(), branch);
+        if tokio::fs::try_exists(&path).await.unwrap_or(true) {
+            return Err(Error::Conflict(format!(
+                "{} already exists",
+                path.display()
+            )));
+        }
+        let path_str = path.to_string_lossy().into_owned();
+        self.run(&["worktree", "add", "-b", branch, &path_str, base])
+            .await?;
+        let want = std::fs::canonicalize(&path).unwrap_or(path);
+        self.worktree_list_detailed()
+            .await?
+            .into_iter()
+            .find(|w| std::fs::canonicalize(&w.path).ok().as_deref() == Some(want.as_path()))
+            .ok_or_else(|| {
+                Error::Internal("the new worktree is missing from git worktree list".into())
+            })
     }
 
     /// `git worktree list` + status counts + branch/commit details + risks.

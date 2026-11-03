@@ -637,6 +637,14 @@ export interface BranchDeleteResp {
   status: RepoStatusResp;
 }
 
+/** POST /repos/{id}/worktrees — a NEW branch in a new worktree beside the repo
+ *  (path picked by the daemon); returns the new `WorktreeInfo`. */
+export interface WorktreeCreateReq {
+  branch: string;
+  /** Branch / sha to start from; `HEAD` when absent. */
+  base?: string | null;
+}
+
 /** One `git worktree list --porcelain` entry (first = main worktree). Fed by
  *  GET /repos/{id}/worktrees; POST …/worktrees/remove `{path, force?}` and
  *  POST …/worktrees/prune both return the refreshed list. */

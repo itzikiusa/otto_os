@@ -137,21 +137,8 @@ export function forgeLabel(repo: Repo | null | undefined): string | null {
   return null;
 }
 
-/** Harness display name for T3/PandaCode-style cards and badges. */
-export function harnessLabel(provider: string): string {
-  switch (provider) {
-    case 'claude':
-      return 'Claude Code';
-    case 'codex':
-      return 'Codex';
-    case 'agy':
-      return 'Antigravity';
-    case 'shell':
-      return 'Shell';
-    default:
-      return provider.charAt(0).toUpperCase() + provider.slice(1);
-  }
-}
+/** Harness display name (lives in lib/providers so lib pickers share it). */
+export { harnessLabel } from '../../lib/providers';
 
 /** File basename (`src/App.svelte` -> `App.svelte`). */
 export function baseName(path: string): string {

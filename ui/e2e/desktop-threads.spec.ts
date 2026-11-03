@@ -237,10 +237,15 @@ test('custom sidebar auto-discovers Threads, stage pickers + slash menu work, an
   await expect(agentBtn).toBeVisible();
   await expect(modeBtn).toContainText('Full access');
 
+  // One panel: provider rail · models · Reasoning · access (T3).
   await agentBtn.click();
-  await expect(page.getByRole('menuitemcheckbox', { name: /Claude Code/ }).first()).toBeVisible();
-  await page.getByRole('menuitem', { name: /Reasoning effort/ }).click();
-  await page.getByRole('menuitemcheckbox', { name: /High/ }).first().click();
+  const picker = page.getByTestId('model-picker');
+  await expect(picker).toBeVisible();
+  await expect(picker.getByTestId('model-picker-provider-claude')).toBeVisible();
+  await expect(picker.getByTestId('model-picker-search')).toBeFocused();
+  await picker.getByTestId('picker-effort').getByRole('button', { name: 'High', exact: true }).click();
+  await page.keyboard.press('Escape');
+  await expect(picker).toHaveCount(0);
   await expect(agentBtn).toContainText('High');
 
   // ⇧⇥ inside the composer toggles Plan mode.
@@ -306,8 +311,10 @@ test('strict Threads vs Agents isolation, single pane header, interactive slash 
 
   // 4. Interactive Model / Effort / Mode pickers & `/` slash commands inside live ThreadPane.
   await expect(paneA.getByTestId('picker-model')).toBeVisible();
-  await expect(paneA.getByTestId('picker-effort')).toBeVisible();
   await expect(paneA.getByTestId('picker-mode')).toBeVisible();
+  await paneA.getByTestId('picker-model').click();
+  await expect(paneA.getByTestId('picker-effort')).toBeVisible();
+  await page.keyboard.press('Escape');
 
   const ta = paneA.locator('.composer textarea');
   await ta.fill('/');

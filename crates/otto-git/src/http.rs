@@ -97,7 +97,10 @@ pub fn router<S: GitCtx>() -> Router<S> {
         .route("/repos/{id}/log", get(repo_log::<S>))
         .route("/repos/{id}/stashes", get(repo_stashes::<S>))
         .route("/repos/{id}/head/remotes", get(repo_head_remotes::<S>))
-        .route("/repos/{id}/worktrees", get(repo_worktrees::<S>))
+        .route(
+            "/repos/{id}/worktrees",
+            get(repo_worktrees::<S>).post(gitops_routes::repo_worktree_create::<S>),
+        )
         .route(
             "/repos/{id}/worktrees/remove",
             post(gitops_routes::repo_worktree_remove::<S>),
