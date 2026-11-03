@@ -25,7 +25,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'ci-speed/**']
   pull_request:
 
 permissions:
@@ -70,7 +70,13 @@ jobs:
           EVENT: ${{ github.event_name }}
           PR: ${{ github.event.pull_request.number }}
           CHANGED: ${{ github.event.pull_request.changed_files }}
+          BEFORE: ${{ github.event.before }}
         run: |
+          if [ "$EVENT" = push ] && [[ "$GITHUB_REF" == refs/heads/ci-speed/* ]] && [ "${BEFORE}" != 0000000000000000000000000000000000000000 ]; then
+            gh api "repos/$GITHUB_REPOSITORY/compare/$BEFORE...$GITHUB_SHA" --jq '.files[].filename' | tee "$RUNNER_TEMP/changed.txt"
+            python3 scripts/ci-route.py < "$RUNNER_TEMP/changed.txt" | tee -a "$GITHUB_OUTPUT"
+            exit 0
+          fi
           if [ "$EVENT" != pull_request ] || [ "${CHANGED:-0}" -ge 3000 ]; then
             python3 scripts/ci-route.py --all | tee -a "$GITHUB_OUTPUT"
             exit 0
@@ -82,6 +88,64 @@ jobs:
             exit 0
           fi
           python3 scripts/ci-route.py < "$RUNNER_TEMP/changed.txt" | tee -a "$GITHUB_OUTPUT"
+
+  build-arm-probe:
+    name: PROBE arm64 build
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          filter: blob:none
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !/marketing/
+            !/docs/reviews/
+            !/docs/testing/room-games/
+      - uses: dtolnay/rust-toolchain@1.99.1
+      - run: nproc; free -g; df -h /
+      - name: Enable fast lld linker
+        run: |
+          if command -v ld.lld >/dev/null 2>&1; then
+            sudo ln -sf "$(command -v ld.lld)" /usr/bin/ld
+            sudo ln -sf "$(command -v ld.lld)" /usr/bin/aarch64-linux-gnu-ld
+          fi
+      - id: cargo-cache
+        uses: actions/cache/restore@v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            ~/.cargo/git/checkouts
+            target/debug/.fingerprint
+            target/debug/build
+            target/debug/deps
+            target/.ci-source-hashes.json
+          key: probe-arm-${{ hashFiles('**/Cargo.toml', 'Cargo.lock') }}-${{ hashFiles('crates/**', 'vendor/**') }}
+          restore-keys: probe-arm-
+      - run: python3 scripts/ci-cargo-cache.py restore
+      - run: sudo apt-get install -y cmake libcurl4-openssl-dev pkg-config libssl-dev
+      - name: Build (same units as the archive)
+        run: cargo build --workspace --tests --bins --features otto-server/test-util
+      - run: python3 scripts/ci-cargo-cache.py prepare-save
+        if: steps.cargo-cache.outputs.cache-hit != 'true'
+      - uses: actions/cache/save@v6.1.0
+        if: steps.cargo-cache.outputs.cache-hit != 'true'
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            ~/.cargo/git/checkouts
+            target/debug/.fingerprint
+            target/debug/build
+            target/debug/deps
+            target/.ci-source-hashes.json
+          key: probe-arm-${{ hashFiles('**/Cargo.toml', 'Cargo.lock') }}-${{ hashFiles('crates/**', 'vendor/**') }}
 
   rust-lint:
     name: Rust (fmt · clippy · guards)

@@ -62,7 +62,7 @@ on:
       - 'apps/desktop/**'
       - '.github/workflows/macos.yml'
   push:
-    branches: [main]
+    branches: [main, 'ci-speed/**']
     paths:
       - 'crates/otto-agent-run/**'
       - 'crates/otto-apiclient/**'
