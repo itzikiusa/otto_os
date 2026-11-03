@@ -9,19 +9,36 @@ PTY-backed sessions in `ottod`, so you can switch between `#/threads` and
 
 ## Layout & Workflows
 
-1. **Inbox & Project Rail (`ThreadSidebar`):**
-   - **Pinned:** Quick-access threads pinned locally per browser profile.
-   - **Active:** Threads currently running or waiting on human input/approval.
-   - **Projects:** Threads grouped by workspace/repository with nested
-     `delegated_by` sub-worker rows and branch badges.
-   - **History:** Completed or settled threads that remain one click away.
+0. **Top bar:** sidebar toggle, a `project / thread` breadcrumb, and on the
+   right a layout menu (single · split · grid), three panel toggles —
+   **Changes**, the focused thread's **Terminal** drawer, the **right panel** —
+   and the thread's ⋯ menu (rename, pin, search, system notes, peer relay,
+   room, settle, archive). Single view has no separate pane header.
+1. **Sidebar (`ThreadSidebar`):**
+   - One search row with **filter by project**, **Add project** (a folder that
+     shows in the rail before its first thread) and **New thread**.
+   - **Pinned**, then each **project** with its threads — threads needing
+     approval first, then working ones, then most recent; `delegated_by`
+     workers nest under their lead.
+   - **History** (settled + archived threads) folded at the bottom.
+   - Footer: Settings, Git, Usage, and Refresh (sessions + git status).
 2. **New Thread Stage (`NewThreadStage`):**
-   - Centered launch stage with harness cards (**Claude Code · Codex ·
-     Antigravity**), workspace/folder picker, git branch chip, model selector,
-     and initial prompt composer.
+   - "What should we build in *project*?" (click the project to switch folder
+     or workspace) and a single composer: attach a file (`@path`), one agent
+     chip holding the harness, model and reasoning effort (plus "Start without
+     a prompt" and "Open beside current thread"), and a round send button.
+   - Under it: **Current checkout** (or another git worktree of the repo), the
+     branch (switch or create), and the access mode (Full access · Accept
+     edits · Plan, `⇧⇥`).
+   - On wide windows a **project card** floats top-right; it also heads the
+     right panel: folder, **Open in…** (Files, Git, a terminal thread, copy
+     path), **project scripts** (saved per folder in this browser; running one
+     opens a shell thread), branch, **Create PR** (the Git Create-PR sheet,
+     which names the GitHub/Bitbucket destination before sending) and
+     **Changes +N −M** (opens the Changes tab).
 3. **Multi-Session Split & Grid Canvas (`ThreadCanvas` / `ThreadPane`):**
-   - Switch between **`1-up`**, **`Split`** (2-up side-by-side), and **`Grid`**
-     (2×2 up to 4 live threads) from the header or `⌘K`.
+   - Switch between **single**, **Split** (2-up side-by-side), and **Grid**
+     (2×2 up to 4 live threads) from the top-bar layout menu or `⌘K`.
    - Each pane renders rich folded turns (`ConversationView`: GFM Markdown,
      syntax-highlighted code blocks, inline workspace images via
      `GET /api/v1/fs/raw` with zoomable lightbox, expandable `Thinking` prose,
