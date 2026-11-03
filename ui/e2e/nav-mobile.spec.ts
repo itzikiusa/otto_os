@@ -36,7 +36,7 @@ test('phone: drawer closed on load; top-bar title uses registry labels', async (
   // Pages that draw their own PageHeader aren't titled twice: the bar's title
   // steps aside (its text is still the registry label, never the raw id).
   await expect(page.getByTestId('page-header').first()).toBeVisible();
-  await expect(title(page)).toHaveText('Scheduled Tasks');
+  await expect(title(page)).toHaveText('Personal Agents');
   await expect(title(page)).toBeHidden();
   await page.goto('/#/skills-eval');
   await expect(title(page)).toHaveText('Skills Lab');
