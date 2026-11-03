@@ -158,7 +158,7 @@ jobs:
           # The macOS clippy + TEST run (10–25 min on a 3-core runner) on a
           # PR only when a crate whose Darwin behaviour it covers changed;
           # pushes to main + the nightly always run both.
-          if grep -qE '^(crates/(otto-sandbox|otto-pty|otto-keychain|otto-sessions|otto-rooms|otto-ssh|otto-telemetry-collector|otto-apiclient|otto-automation|otto-brokers|otto-browser|ottod)/|Cargo\.lock$|\.config/nextest\.toml$|\.github/workflows/macos\.yml$)' "$RUNNER_TEMP/changed.txt"; then
+          if grep -qE '^(crates/(otto-sandbox|otto-pty|otto-keychain|otto-sessions|otto-ssh)/|Cargo\.lock$|\.config/nextest\.toml$|\.github/workflows/macos\.yml$)' "$RUNNER_TEMP/changed.txt"; then
             echo mac_tests=true | tee -a "$GITHUB_OUTPUT"
           else
             echo mac_tests=false | tee -a "$GITHUB_OUTPUT"
@@ -215,9 +215,25 @@ jobs:
         with:
           tool: cargo-nextest@0.9.150
 
+      # Scope. PR: only the low-level crates whose behaviour is Darwin-only
+      # (Seatbelt, Keychain, PTY, session spawn, SSH) — compiling otto-server,
+      # ottod and librdkafka for macOS was ~20 of the job's ~30 min, and Linux
+      # CI already tests those crates in full. Main pushes + the nightly run
+      # the full set, which catches macOS-only breakage in the upper crates.
+      - name: Pick macOS scope
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT" = pull_request ]; then
+            echo "MAC_SCOPE=-p otto-keychain -p otto-pty -p otto-sandbox -p otto-sessions -p otto-ssh --lib --bins --test holder --test ring_allocation --test seatbelt_exec --test agent_messaging --test broadcast_e2e --test folder_trust_overcome --test isolation --test persist_restart --test terminal_latency" >> "$GITHUB_ENV"
+          else
+            echo "MAC_SCOPE=-p otto-apiclient -p otto-automation -p otto-brokers -p otto-browser -p otto-keychain -p otto-pty -p otto-rooms -p otto-sandbox -p otto-server -p otto-sessions -p otto-ssh -p otto-telemetry-collector -p ottod --features otto-server/test-util --lib --bins --test holder --test ring_allocation --test seatbelt_exec --test agent_messaging --test broadcast_e2e --test folder_trust_overcome --test isolation --test persist_restart --test terminal_latency --test lightpanda --test lightpanda_login --test snips --test profile_lock" >> "$GITHUB_ENV"
+          fi
+
       # otto-server links otto-brokers → rdkafka-sys, which builds librdkafka
       # with CMake (libcurl headers ship in the macOS SDK).
       - name: Ensure cmake
+        if: github.event_name != 'pull_request'
         run: command -v cmake || brew install cmake
 
       # PR: only when a Darwin-behaviour crate changed (same route as the
@@ -228,9 +244,7 @@ jobs:
         if: needs.changes.outputs.mac_tests == 'true'
         run: >-
           cargo clippy
-          -p otto-apiclient -p otto-automation -p otto-brokers -p otto-browser -p otto-keychain -p otto-pty -p otto-rooms -p otto-sandbox -p otto-server -p otto-sessions -p otto-ssh -p otto-telemetry-collector -p ottod
-          --features otto-server/test-util
-          --lib --bins --test holder --test ring_allocation --test seatbelt_exec --test agent_messaging --test broadcast_e2e --test folder_trust_overcome --test isolation --test persist_restart --test terminal_latency --test lightpanda --test lightpanda_login --test snips --test profile_lock
+          $MAC_SCOPE
           -- -D warnings
 
       # Unit tests plus each crate's integration binaries — except
@@ -242,9 +256,7 @@ jobs:
         if: needs.changes.outputs.mac_tests == 'true'
         run: >-
           cargo nextest run --no-run
-          -p otto-apiclient -p otto-automation -p otto-brokers -p otto-browser -p otto-keychain -p otto-pty -p otto-rooms -p otto-sandbox -p otto-server -p otto-sessions -p otto-ssh -p otto-telemetry-collector -p ottod
-          --features otto-server/test-util
-          --lib --bins --test holder --test ring_allocation --test seatbelt_exec --test agent_messaging --test broadcast_e2e --test folder_trust_overcome --test isolation --test persist_restart --test terminal_latency --test lightpanda --test lightpanda_login --test snips --test profile_lock
+          $MAC_SCOPE
           --profile ci
 
       # Saved by main pushes / the nightly only (PR saves evicted main's
@@ -273,9 +285,7 @@ jobs:
         if: needs.changes.outputs.mac_tests == 'true'
         run: >-
           cargo nextest run
-          -p otto-apiclient -p otto-automation -p otto-brokers -p otto-browser -p otto-keychain -p otto-pty -p otto-rooms -p otto-sandbox -p otto-server -p otto-sessions -p otto-ssh -p otto-telemetry-collector -p ottod
-          --features otto-server/test-util
-          --lib --bins --test holder --test ring_allocation --test seatbelt_exec --test agent_messaging --test broadcast_e2e --test folder_trust_overcome --test isolation --test persist_restart --test terminal_latency --test lightpanda --test lightpanda_login --test snips --test profile_lock
+          $MAC_SCOPE
           --profile ci --no-fail-fast
 
   desktop:
