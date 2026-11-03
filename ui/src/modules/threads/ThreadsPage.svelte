@@ -1,23 +1,26 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
-  import Badge from '../../lib/components/Badge.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PaneDivider from '../../lib/components/PaneDivider.svelte';
+  import StatusDot from '../../lib/components/StatusDot.svelte';
   import { registry } from '../../lib/commands.svelte';
+  import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
+  import { events } from '../../lib/events.svelte';
   import { loadPaneWidth } from '../../lib/paneResizer';
   import { router } from '../../lib/router.svelte';
   import { openFile } from '../../lib/stores/openfile.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
-  import { onTabKey } from '../../lib/tabKeys';
+  import { sessionState } from '../../lib/status';
   import StartRoomModal from '../rooms/StartRoomModal.svelte'; // ui-guards: allow — shared session room modal
   import NewThreadStage from './NewThreadStage.svelte';
   import ThreadCanvas from './ThreadCanvas.svelte';
   import ThreadInspector from './ThreadInspector.svelte';
   import ThreadSidebar from './ThreadSidebar.svelte';
-  import { isThreadSession } from './threadsHelpers';
+  import { buildThreadMenu } from './threadMenu';
+  import { isPlainShellSession, isThreadSession, projectNameFromCwd } from './threadsHelpers';
   import { threads, type ThreadsLayoutMode } from './threadsStore.svelte';
 
   const SIDEBAR_W_KEY = 'threads.sidebarW';
@@ -26,6 +29,7 @@
   let sidebarW = $state(loadPaneWidth(SIDEBAR_W_KEY, 272, 240, 380));
   let inspectorW = $state(loadPaneWidth(INSPECTOR_W_KEY, 380, 300, 560));
   let stageWidth = $state(1280);
+  let centerWidth = $state(1000);
   let roomSessionId = $state<string | null>(null);
   let mobileDrawer = $state<'none' | 'sidebar' | 'inspector'>('none');
 
@@ -126,14 +130,67 @@
       },
       {
         id: 'threads.toggle.inspector',
-        title: 'Toggle Threads inspector',
+        title: 'Toggle Threads right panel',
         group: 'Threads',
         run: () => threads.toggleInspector(),
+      },
+      {
+        id: 'threads.toggle.changes',
+        title: 'Threads: show changes',
+        group: 'Threads',
+        keywords: 'diff summary git',
+        run: () => threads.toggleInspector('changes'),
+      },
+      {
+        id: 'threads.toggle.terminal',
+        title: 'Threads: toggle terminal drawer',
+        group: 'Threads',
+        run: () => threads.toggleTerminal(threads.newDraftMode ? null : threads.focusedSessionId),
       },
     ]),
   );
 
   const showWelcomeStage = $derived(threads.newDraftMode || threads.paneIds.length === 0);
+  const focused = $derived(
+    !showWelcomeStage && threads.focusedSessionId ? (ws.getSession(threads.focusedSessionId) ?? null) : null,
+  );
+  const focusedState = $derived(
+    focused
+      ? sessionState(focused, ws.statusMap[focused.id] ?? focused.status, ws.needsYou[focused.id] === true, {
+          stale: events.state !== 'connected',
+        })
+      : null,
+  );
+  const crumbProject = $derived.by(() => {
+    const cwd = focused?.cwd ?? (showWelcomeStage ? threads.stageCwd : null) ?? ws.current?.root_path ?? null;
+    return cwd ? projectNameFromCwd(cwd, ws.current?.name ?? 'Workspace') : (ws.current?.name ?? 'Scratch');
+  });
+  const crumbTitle = $derived(showWelcomeStage ? 'New thread' : (focused?.title ?? 'Thread'));
+  const rightOpen = $derived(compact ? mobileDrawer === 'inspector' : threads.inspectorOpen);
+  const changesOpen = $derived(rightOpen && threads.inspectorTab === 'changes');
+  const terminalId = $derived(focused && !isPlainShellSession(focused) ? focused.id : null);
+  // T3's floating project card: only where it can't crowd the composer.
+  const showStageCard = $derived(!compact && !threads.inspectorOpen && centerWidth >= 1100);
+
+  function toggleChanges(): void {
+    if (compact) {
+      threads.setInspectorTab('changes');
+      mobileDrawer = changesOpen ? 'none' : 'inspector';
+    } else threads.toggleInspector('changes');
+  }
+
+  function openLayoutMenu(e: MouseEvent): void {
+    const items: MenuItem[] = [
+      { label: 'Single thread', hint: '1-up', checked: threads.layoutMode === 'single', action: () => pickLayout('single') },
+      { label: 'Split', hint: '2-up', checked: threads.layoutMode === 'split', action: () => pickLayout('split') },
+      { label: 'Grid', hint: '4-up', checked: threads.layoutMode === 'grid', action: () => pickLayout('grid') },
+    ];
+    ctxMenu.show(e, items);
+  }
+
+  function openThreadMenu(e: MouseEvent): void {
+    if (focused) ctxMenu.show(e, buildThreadMenu(focused, { onstartroom: (sid) => (roomSessionId = sid) }));
+  }
 
   function toggleLeftBar(): void {
     if (compact) mobileDrawer = mobileDrawer === 'sidebar' ? 'none' : 'sidebar';
@@ -151,83 +208,114 @@
 </script>
 
 <div class="th-page" data-testid="threads-page">
-  <PageHeader title="Threads" icon="threads">
-    {#snippet badge()}
-      <Badge tone="info" variant="outline" label="Experimental" testid="threads-experimental-badge" />
+  <PageHeader title="Threads">
+    {#snippet leading()}
+      <button
+        type="button"
+        class="icon-btn"
+        class:th-btn-on={compact ? mobileDrawer === 'sidebar' : threads.sidebarOpen}
+        aria-pressed={compact ? mobileDrawer === 'sidebar' : threads.sidebarOpen}
+        aria-label="Toggle threads sidebar"
+        title="Toggle sidebar"
+        data-testid="threads-toggle-sidebar"
+        onclick={toggleLeftBar}
+      >
+        <Icon name="sidebar" size={14} />
+      </button>
+      {#if compact || !threads.sidebarOpen}
+        <button
+          type="button"
+          class="icon-btn"
+          aria-label="New thread"
+          title="New thread"
+          data-testid="threads-new-btn-top"
+          onclick={() => threads.startNewThread({ workspaceId: ws.currentId })}
+        >
+          <Icon name="edit" size={14} />
+        </button>
+      {/if}
+    {/snippet}
+
+    {#snippet titleContent()}
+      <span class="th-crumbs" data-testid="threads-breadcrumb">
+        <span class="th-crumb-project ellipsis" dir="auto">{crumbProject}</span>
+        <span class="th-crumb-sep" aria-hidden="true">/</span>
+        {#if focusedState}<StatusDot state={focusedState} />{/if}
+        <span class="th-crumb-title ellipsis" dir="auto">{crumbTitle}</span>
+      </span>
     {/snippet}
 
     {#snippet actions()}
       <button
         type="button"
         class="icon-btn"
-        class:th-btn-on={compact ? mobileDrawer === 'sidebar' : threads.sidebarOpen}
-        aria-pressed={compact ? mobileDrawer === 'sidebar' : threads.sidebarOpen}
-        aria-label="Toggle threads inbox sidebar"
-        title="Toggle threads inbox"
-        data-testid="threads-toggle-sidebar"
-        onclick={toggleLeftBar}
+        data-overflow="1"
+        aria-haspopup="menu"
+        aria-label="Layout: single, split or grid"
+        title="Layout (single · split · grid)"
+        data-icon="grid"
+        data-testid="threads-layout-switch"
+        onclick={openLayoutMenu}
       >
-        <Icon name="sidebar" size={14} />
+        <Icon name="grid" size={14} />
       </button>
-
-      <div class="segmented" role="group" aria-label="Multi-session layout" data-testid="threads-layout-switch">
-        <button
-          type="button"
-          class:active={threads.layoutMode === 'single' && !threads.newDraftMode}
-          aria-pressed={threads.layoutMode === 'single' && !threads.newDraftMode}
-          onkeydown={onTabKey}
-          title="Single thread view (1-up)"
-          data-testid="threads-layout-single"
-          onclick={() => pickLayout('single')}
-        >
-          <span dir="ltr">1-up</span>
-        </button>
-        <button
-          type="button"
-          class:active={threads.layoutMode === 'split' && !threads.newDraftMode}
-          aria-pressed={threads.layoutMode === 'split' && !threads.newDraftMode}
-          onkeydown={onTabKey}
-          title="Side-by-side split view (2 panes)"
-          data-testid="threads-layout-split"
-          onclick={() => pickLayout('split')}
-        >
-          Split
-        </button>
-        <button
-          type="button"
-          class:active={threads.layoutMode === 'grid' && !threads.newDraftMode}
-          aria-pressed={threads.layoutMode === 'grid' && !threads.newDraftMode}
-          onkeydown={onTabKey}
-          title="2×2 multi-session grid (up to 4 panes)"
-          data-testid="threads-layout-grid"
-          onclick={() => pickLayout('grid')}
-        >
-          Grid
-        </button>
-      </div>
-
       <button
         type="button"
         class="icon-btn"
-        class:th-btn-on={compact ? mobileDrawer === 'inspector' : threads.inspectorOpen}
-        aria-pressed={compact ? mobileDrawer === 'inspector' : threads.inspectorOpen}
-        aria-label="Toggle thread inspector"
-        title="Toggle inspector (Files, Changes, Connections, Peers)"
+        class:th-btn-on={changesOpen}
+        data-overflow="2"
+        aria-pressed={changesOpen}
+        aria-label="Toggle changes"
+        title="Changes (diff summary)"
+        data-icon="file"
+        data-testid="threads-toggle-changes"
+        onclick={toggleChanges}
+      >
+        <Icon name="file" size={14} />
+      </button>
+      <button
+        type="button"
+        class="icon-btn"
+        class:th-btn-on={threads.isTerminalOpen(terminalId)}
+        data-overflow="2"
+        aria-pressed={threads.isTerminalOpen(terminalId)}
+        aria-label="Toggle terminal drawer"
+        title={terminalId ? 'Terminal drawer' : 'Open a thread to use its terminal'}
+        data-icon="terminal"
+        data-testid="threads-toggle-terminal"
+        disabled={!terminalId}
+        onclick={() => threads.toggleTerminal(terminalId)}
+      >
+        <Icon name="terminal" size={14} />
+      </button>
+      <button
+        type="button"
+        class="icon-btn"
+        class:th-btn-on={rightOpen}
+        data-overflow="3"
+        aria-pressed={rightOpen}
+        aria-label="Toggle right panel"
+        title="Right panel (project, files, changes, peers)"
+        data-icon="panel"
         data-testid="threads-toggle-inspector"
         onclick={toggleRightBar}
       >
         <Icon name="panel" size={14} />
       </button>
-
-      <button
-        type="button"
-        class="btn small primary"
-        data-testid="threads-new-btn"
-        onclick={() => threads.startNewThread({ workspaceId: ws.currentId })}
-      >
-        <Icon name="plus" size={12} />
-        New Thread
-      </button>
+      {#if focused}
+        <button
+          type="button"
+          class="icon-btn"
+          aria-haspopup="menu"
+          aria-label="Thread actions"
+          title="Thread actions"
+          data-icon="more"
+          data-testid="threads-thread-menu"
+          onclick={openThreadMenu}
+        >
+          <Icon name="more" size={14} />
+        </button>
+      {/if}
     {/snippet}
   </PageHeader>
 
@@ -247,9 +335,9 @@
         />
       {/if}
 
-      <div class="th-center-col">
+      <div class="th-center-col" bind:clientWidth={centerWidth}>
         {#if showWelcomeStage}
-          <NewThreadStage />
+          <NewThreadStage showCard={showStageCard} />
         {:else}
           <ThreadCanvas onstartroom={(sid) => (roomSessionId = sid)} />
         {/if}
@@ -318,6 +406,26 @@
   .th-btn-on {
     background: var(--accent-soft);
     color: var(--accent-text);
+  }
+  .th-crumbs {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    font-size: var(--fs-m);
+    font-weight: 400;
+  }
+  .th-crumb-project {
+    color: var(--text-dim);
+    max-width: 200px;
+  }
+  .th-crumb-sep {
+    color: var(--text-dim);
+  }
+  .th-crumb-title {
+    color: var(--text);
+    font-weight: 500;
+    min-width: 0;
   }
   .th-workspace {
     position: relative;

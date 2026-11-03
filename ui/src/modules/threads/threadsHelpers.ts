@@ -106,6 +106,28 @@ export function matchRepoForCwd(cwd: string | null | undefined, repos: readonly 
   return best ?? repos[0] ?? null;
 }
 
+/** The repo whose folder holds `cwd` (deepest match), or null — no fallback to
+ *  an unrelated repo, so the project card never shows another repo's branch. */
+export function repoForCwd(cwd: string | null | undefined, repos: readonly Repo[]): Repo | null {
+  const clean = (cwd ?? '').trim().replace(/\/+$/, '');
+  if (!clean) return null;
+  let best: Repo | null = null;
+  for (const r of repos) {
+    const rp = r.path.replace(/\/+$/, '');
+    if ((clean === rp || clean.startsWith(`${rp}/`)) && (!best || rp.length > best.path.length)) best = r;
+  }
+  return best;
+}
+
+/** "GitHub" / "Bitbucket" / "GitLab" for a repo's forge, else null. */
+export function forgeLabel(repo: Repo | null | undefined): string | null {
+  const kind = repo?.forge && repo.forge !== 'unrecognized' ? repo.forge : repo?.provider;
+  if (kind === 'github') return 'GitHub';
+  if (kind === 'bitbucket') return 'Bitbucket';
+  if (kind === 'gitlab') return 'GitLab';
+  return null;
+}
+
 /** Harness display name for T3/PandaCode-style cards and badges. */
 export function harnessLabel(provider: string): string {
   switch (provider) {

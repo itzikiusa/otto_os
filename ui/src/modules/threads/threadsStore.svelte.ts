@@ -33,6 +33,14 @@ export interface PeerTimelineItem {
   summary: string;
 }
 
+/** A user-defined project script (T3-style "Add project script"): a shell
+ *  command saved per project folder. UI-only — persisted in localStorage with
+ *  the rest of the Threads prefs; running one opens a plain-shell thread. */
+export interface ProjectScript {
+  name: string;
+  command: string;
+}
+
 export interface McpDbActivity {
   activity_id: string;
   connection_id?: string | null;
@@ -59,6 +67,8 @@ interface PersistedThreadsPrefs {
   inspectorOpen?: boolean;
   inspectorTab?: ThreadsInspectorTab;
   openFilesByWorkspace?: Record<string, WorkspaceFileTabs>;
+  extraProjects?: string[];
+  scriptsByProject?: Record<string, ProjectScript[]>;
 }
 
 const STORAGE_KEY = 'otto_threads_v1';
@@ -92,6 +102,17 @@ class ThreadsStore {
   inspectorTab = $state<ThreadsInspectorTab>('files');
   openFilesByWorkspace = $state<Record<string, WorkspaceFileTabs>>({});
   projectFilter = $state('all');
+  /** Project folders added from the sidebar's "Add project" before they have a thread. */
+  extraProjects = $state<string[]>([]);
+  scriptsByProject = $state<Record<string, ProjectScript[]>>({});
+  /** Folder the new-thread stage targets (feeds the project card + inspector). */
+  stageCwd = $state<string | null>(null);
+  /** Pane ids whose terminal drawer is open (driven by the top bar + pane menu). */
+  terminalOpen = $state<Record<string, boolean>>({});
+  /** Pane id whose inline peer-relay bar is open. */
+  peerBarFor = $state<string | null>(null);
+  /** Bumped to ask a pane to open its conversation search. */
+  searchRequest = $state<{ id: string; n: number } | null>(null);
 
   peerEvents = $state<PeerTimelineItem[]>([]);
   mcpActivities = $state<McpDbActivity[]>([]);
@@ -125,6 +146,12 @@ class ThreadsStore {
     if (p.openFilesByWorkspace && typeof p.openFilesByWorkspace === 'object') {
       this.openFilesByWorkspace = p.openFilesByWorkspace;
     }
+    if (Array.isArray(p.extraProjects)) {
+      this.extraProjects = p.extraProjects.filter((x): x is string => typeof x === 'string');
+    }
+    if (p.scriptsByProject && typeof p.scriptsByProject === 'object') {
+      this.scriptsByProject = p.scriptsByProject;
+    }
     ws.activeThreadId = this.focusedSessionId;
   }
 
@@ -142,6 +169,8 @@ class ThreadsStore {
         inspectorOpen: this.inspectorOpen,
         inspectorTab: this.inspectorTab,
         openFilesByWorkspace: this.openFilesByWorkspace,
+        extraProjects: this.extraProjects,
+        scriptsByProject: this.scriptsByProject,
       };
       localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
     } catch {
@@ -412,6 +441,58 @@ class ThreadsStore {
     this.draftWorkspaceId = opts.workspaceId ?? null;
     this.draftCwd = opts.cwd ?? null;
     this.newDraftMode = true;
+  }
+
+  // ── Pane chrome driven from the top bar (T3-style panel toggles) ──────────
+
+  isTerminalOpen(id: string | null): boolean {
+    return !!id && this.terminalOpen[id] === true;
+  }
+
+  toggleTerminal(id: string | null): void {
+    if (!id) return;
+    this.terminalOpen = { ...this.terminalOpen, [id]: !this.terminalOpen[id] };
+  }
+
+  togglePeerBar(id: string): void {
+    this.peerBarFor = this.peerBarFor === id ? null : id;
+  }
+
+  requestSearch(id: string): void {
+    this.searchRequest = { id, n: (this.searchRequest?.n ?? 0) + 1 };
+  }
+
+  // ── Projects + project scripts (UI-only, persisted with the prefs) ────────
+
+  addProject(path: string): void {
+    const p = path.trim().replace(/\/+$/, '');
+    if (!p) return;
+    if (!this.extraProjects.includes(p)) this.extraProjects = [p, ...this.extraProjects];
+    this.save();
+  }
+
+  removeProject(path: string): void {
+    this.extraProjects = this.extraProjects.filter((x) => x !== path);
+    this.save();
+  }
+
+  scriptsFor(project: string | null): ProjectScript[] {
+    return project ? (this.scriptsByProject[project] ?? []) : [];
+  }
+
+  addScript(project: string, script: ProjectScript): void {
+    const list = this.scriptsFor(project).filter((s) => s.name !== script.name);
+    this.scriptsByProject = { ...this.scriptsByProject, [project]: [...list, script] };
+    this.save();
+  }
+
+  removeScript(project: string, name: string): void {
+    const list = this.scriptsFor(project).filter((s) => s.name !== name);
+    const next = { ...this.scriptsByProject };
+    if (list.length > 0) next[project] = list;
+    else delete next[project];
+    this.scriptsByProject = next;
+    this.save();
   }
 
   toggleSidebar(): void {
