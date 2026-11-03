@@ -200,6 +200,33 @@ export interface RunWorkflowReq {
 
 /** Lightweight summary of an in-flight run for the "Running" sidebar list.
  *  Returned by `GET /workspaces/{wid}/workflow-runs/active`. */
+/** One run-history row (`GET /workspaces/{wid}/workflow-runs`) — no bodies. */
+export interface RunListItem {
+  id: Id;
+  workflow_id: Id;
+  workflow_name: string;
+  status: WorkflowRunStatus;
+  started_at: string;
+  finished_at?: string | null;
+  duration_ms?: number | null;
+  /** `manual`, `chat` (Slack/Telegram), `schedule`, `event`, `webhook`… */
+  trigger: string;
+  /** The ask: input `msg`, else `prompt` (≤ 160 chars). */
+  message?: string | null;
+  repo?: string | null;
+  branch?: string | null;
+  pr?: string | null;
+  /** The running step's name (running runs only). */
+  current_step?: string | null;
+  error?: string | null;
+}
+
+/** A page of run history, newest first. */
+export interface RunListPage {
+  items: RunListItem[];
+  next_cursor?: string | null;
+}
+
 export interface ActiveWorkflowRun {
   run_id: Id;
   workflow_id: Id;

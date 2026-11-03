@@ -390,6 +390,51 @@ pub struct ActiveWorkflowRun {
     pub current_step: Option<String>,
 }
 
+/// One row of the run history (`GET /workspaces/{wid}/workflow-runs`): what a
+/// run was, where it worked and how it went — no node/input bodies.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RunListItem {
+    pub id: Id,
+    pub workflow_id: Id,
+    pub workflow_name: String,
+    pub status: RunStatus,
+    pub started_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    /// `manual` (no trigger recorded), `chat` (Slack/Telegram), `schedule`,
+    /// `event`, `webhook`, … — the run input's `trigger`.
+    pub trigger: String,
+    /// The ask: the input's `msg`, else `prompt` (clipped to 160 chars).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// Repo (last path segment of the working directory / first declared repo).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
+    /// The PR's source branch when named, else the run's base.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// The input's `pr` as given (`15`, `repo-a#15, repo-b#340`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr: Option<String>,
+    /// The step a running run is on (see [`ActiveWorkflowRun::current_step`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_step: Option<String>,
+    /// The run's error, clipped to 240 chars.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// A page of [`RunListItem`]s, newest first; `next_cursor` is opaque and
+/// absent on the last page.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RunListPage {
+    pub items: Vec<RunListItem>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
 /// Catalog entry describing a node kind for the editor palette. Returned by
 /// `GET /workflows/node-types` so the UI and executor stay in sync.
 #[derive(Debug, Clone, Serialize, Deserialize)]

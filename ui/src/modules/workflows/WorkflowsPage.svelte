@@ -7,6 +7,7 @@
   // on the canvas. Left = generate + list + running; center = node-graph editor + run.
   import { tick, untrack } from 'svelte';
   import RunningRuns from './RunningRuns.svelte';
+  import RunHistory from './RunHistory.svelte';
   import Icon, { asIcon } from '../../lib/components/Icon.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import Badge from '../../lib/components/Badge.svelte';
@@ -1406,6 +1407,7 @@
         </LoadState>
       {/if}
     </div>
+    <RunHistory workflowId={current?.id ?? null} workflowName={current?.name} activeRunId={run?.id ?? null} onopen={openRunById} />
   </aside>
   {#if !viewport.isPhone}
     <PaneDivider bind:width={listW} storageKey={LIST_W_KEY} label="Resize the workflows list" />
