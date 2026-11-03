@@ -124,6 +124,10 @@ struct Inner {
     /// its final flush lands before the server stops.
     writer: Option<tokio::task::JoinHandle<()>>,
     bin_path: Option<PathBuf>,
+    /// Why the last (re)initialization left the engine unavailable — the
+    /// server's own output goes to /dev/null, so this is the only record a
+    /// caller waiting on [`UsageEngine::wait_ready`] can report.
+    start_error: Option<String>,
 }
 
 pub struct UsageEngine {
@@ -415,6 +419,7 @@ impl UsageEngine {
             old.shutdown().await;
         }
 
+        let mut start_error = None;
         let (ch, tx, writer) = if config.enabled {
             match &bin_path {
                 Some(bin) => match ClickHouse::start(bin.clone(), ch_dir.clone()).await {
@@ -480,6 +485,7 @@ impl UsageEngine {
                             }
                             Err(e) => {
                                 tracing::warn!("usage: clickhouse schema init failed: {e}");
+                                start_error = Some(format!("schema init failed: {e}"));
                                 ch.shutdown().await;
                                 (None, None, None)
                             }
@@ -487,11 +493,13 @@ impl UsageEngine {
                     }
                     Err(e) => {
                         tracing::warn!("usage: clickhouse server start failed: {e}");
+                        start_error = Some(format!("server start failed ({}): {e}", bin.display()));
                         (None, None, None)
                     }
                 },
                 None => {
                     tracing::info!("usage: clickhouse binary not found — usage tracking disabled");
+                    start_error = Some("clickhouse binary not found".into());
                     (None, None, None)
                 }
             }
@@ -507,6 +515,7 @@ impl UsageEngine {
             tx,
             writer,
             bin_path,
+            start_error,
         };
 
         // One-time compaction + retention enforcement of a pre-existing bloated
@@ -584,6 +593,16 @@ impl UsageEngine {
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
+    }
+
+    /// Why the engine is unavailable after its last (re)initialization, if it
+    /// failed (`None` while starting, when ready, or when disabled).
+    pub fn start_error(&self) -> Option<String> {
+        self.inner
+            .read()
+            .expect("usage inner lock")
+            .start_error
+            .clone()
     }
 
     fn ch(&self) -> Option<Arc<ClickHouse>> {
@@ -2931,6 +2950,30 @@ mod scope_tests {
         assert_eq!(json_u64(&serde_json::json!(7)), Some(7));
         assert_eq!(json_u64(&serde_json::json!("12")), Some(12));
         assert_eq!(json_u64(&serde_json::json!(null)), None);
+    }
+
+    /// A binary that is not ClickHouse: the engine stays unavailable and says
+    /// why, so a caller's readiness timeout can report the cause.
+    #[tokio::test]
+    async fn failed_start_records_why_the_engine_is_unavailable() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = UsageEngine::start(
+            UsageConfig {
+                enabled: true,
+                clickhouse_path: Some("/usr/bin/false".into()),
+                ..Default::default()
+            },
+            dir.path().to_path_buf(),
+        )
+        .await;
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        while engine.start_error().is_none() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(!engine.available());
+        let why = engine.start_error().expect("start error recorded");
+        assert!(why.contains("server start failed"), "{why}");
+        engine.shutdown().await;
     }
 
     #[tokio::test]
