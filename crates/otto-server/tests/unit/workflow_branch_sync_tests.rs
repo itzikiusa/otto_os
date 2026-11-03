@@ -94,7 +94,7 @@ async fn run_start_sync_resolves_remote_only_pr_branches_and_fast_forwards_a_sta
         error: None,
     }];
 
-    let synced = sync_run_branches(&ctx, &entries, Some("x")).await;
+    let synced = sync_run_branches(&ctx, &entries, Some("x"), &[]).await;
     let report = &synced[&repo.id];
     assert_eq!(report.fetch_error, None);
     assert_eq!(report.resolved("y"), Some("refs/heads/y"));

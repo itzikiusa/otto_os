@@ -3906,6 +3906,7 @@ async fn reap_run_worktrees(ctx: &ServerCtx, run_id: &str) {
         .flatten()
     };
     let Some(worktrees) = listed else {
+        otto_workflows::run_refs::release_pr_heads(&ctx.data_dir, run_id).await;
         return; // nothing provisioned
     };
     if run_worktrees_in_use(ctx, run_id, &dir).await {
@@ -3915,6 +3916,7 @@ async fn reap_run_worktrees(ctx: &ServerCtx, run_id: &str) {
         );
         return;
     }
+    otto_workflows::run_refs::release_pr_heads(&ctx.data_dir, run_id).await;
     let branch = format!("otto-wf/{run_id}");
     let mut kept_any = false;
     for wt in worktrees {
@@ -4454,8 +4456,9 @@ mod nodes;
 
 mod run;
 #[cfg(test)]
+use otto_workflows::run_refs::fetchable_branch_name;
+use otto_workflows::run_refs::resolve_wf_base;
+#[cfg(test)]
 use run::identity::acting_user_id;
 use run::identity::run_identity;
-#[cfg(test)]
-use run::refs::fetchable_branch_name;
-use run::refs::{resolve_wf_base, sync_run_branches};
+use run::refs::sync_run_branches;
