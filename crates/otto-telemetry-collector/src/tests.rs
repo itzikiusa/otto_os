@@ -199,8 +199,11 @@ async fn real_collector_delivers_all_signals_and_recovers() {
     if !usage.wait_ready(Duration::from_secs(30)).await {
         let status = usage.status().await;
         panic!(
-            "isolated ClickHouse must become ready within 30 s: binary={:?} version={:?} data_dir={}",
-            status.binary, status.version, status.data_dir
+            "isolated ClickHouse must become ready within 30 s: start_error={:?} binary={:?} version={:?} data_dir={}",
+            usage.start_error(),
+            status.binary,
+            status.version,
+            status.data_dir
         );
     }
     let c = TelemetryConfig {
