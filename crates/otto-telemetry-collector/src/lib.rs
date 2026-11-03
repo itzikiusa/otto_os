@@ -228,6 +228,9 @@ pub struct TelemetryService {
     profile_setup_hook: Mutex<Option<(Arc<Notify>, Arc<Notify>)>>,
     #[cfg(test)]
     sample_publish_hook: Mutex<Option<(Arc<Notify>, Arc<Notify>)>>,
+    /// Pause after a failed export ([`FLUSH_BACKOFF`]); tests shorten it so a
+    /// recovery path is not a fixed minute of waiting.
+    flush_backoff: Mutex<Duration>,
     http: reqwest::Client,
 }
 impl TelemetryService {
@@ -292,6 +295,7 @@ impl TelemetryService {
             profile_setup_hook: Mutex::new(None),
             #[cfg(test)]
             sample_publish_hook: Mutex::new(None),
+            flush_backoff: Mutex::new(FLUSH_BACKOFF),
             http: reqwest::Client::builder()
                 .no_proxy()
                 .timeout(Duration::from_secs(5))
@@ -821,7 +825,8 @@ impl TelemetryService {
                             #[cfg(not(test))] let _ = error;
                             *self.error.write().unwrap()=Some("Local telemetry export failed; buffered data is kept and retried automatically. Check the embedded ClickHouse engine and telemetry/collector.log.".into());
                             self.ready.store(false,Ordering::Relaxed);
-                            self.runtime.lock().await.next_start=Some(Instant::now()+FLUSH_BACKOFF);
+                            let backoff=*self.flush_backoff.lock().unwrap();
+                            self.runtime.lock().await.next_start=Some(Instant::now()+backoff);
                         }
                     }
                 }
@@ -829,6 +834,10 @@ impl TelemetryService {
             tokio::select! {_=self.changed.notified()=>{},_=tokio::time::sleep(Duration::from_secs(1))=>{}}
         }
         self.runtime.lock().await.stop().await;
+    }
+    #[cfg(test)]
+    pub(crate) fn set_flush_backoff(&self, backoff: Duration) {
+        *self.flush_backoff.lock().unwrap() = backoff;
     }
     async fn tick(&self) -> Result<()> {
         let c = self.config();

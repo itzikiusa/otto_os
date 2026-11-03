@@ -14,6 +14,15 @@ retries = 0
 test-threads = "num-cpus"
 slow-timeout = { period = "30s", terminate-after = 4 }
 
+# The real-collector telemetry gate (#[ignore], nightly perf workflow) starts
+# an isolated ClickHouse, downloads/verifies the pinned 363 MB collector and
+# runs four flush cycles plus an engine replacement: ~60-70 s locally, more on
+# a cold runner. Give that one test its own ceiling instead of raising the
+# profile-wide 120 s.
+[[profile.ci.overrides]]
+filter = 'package(otto-telemetry-collector) & test(=tests::real_collector_delivers_all_signals_and_recovers)'
+slow-timeout = { period = "60s", terminate-after = 5 }
+
 [test-groups]
 # e2e.rs has an in-process SERIAL mutex around ClickHouse startup. Reproduce
 # that exclusion across processes; temp directories/ephemeral ports alone

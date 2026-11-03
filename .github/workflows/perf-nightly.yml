@@ -169,5 +169,16 @@ jobs:
       - name: Ignored 50k-revision scale gates
         run: cargo nextest run -p otto-vault -p otto-design -p otto-telemetry-collector --profile ci --run-ignored only -E 'test(/_at_50k_revisions_/)'
 
+      # The pinned OpenTelemetry collector (~100 MB archive, 363 MB binary) is
+      # fetched per run otherwise; the test re-verifies the cached copy against
+      # the pinned SHA-256 before executing it.
+      - name: Cache the pinned telemetry collector
+        uses: actions/cache@v6.1.0
+        with:
+          path: ${{ runner.temp }}/otto-collector
+          key: otelcol-${{ runner.os }}-${{ hashFiles('crates/otto-telemetry-collector/src/collector.rs') }}
+
       - name: Telemetry delivery and collector recovery
+        env:
+          OTTO_COLLECTOR_CACHE: ${{ runner.temp }}/otto-collector
         run: cargo nextest run -p otto-vault -p otto-design -p otto-telemetry-collector --profile ci --run-ignored only -E 'package(otto-telemetry-collector) & kind(lib)' --test-threads 1
