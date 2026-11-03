@@ -26,7 +26,6 @@
     database,
     effectiveViewMode,
     viewModeReason,
-    ROW_LIMIT_ALL,
     TAB_HISTORY_PREFIX,
     type QueryTab,
   } from '../../lib/stores/database.svelte';
@@ -35,8 +34,8 @@
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
+  import { settingsMenuItems, settingsSummary as querySettingsSummary, setMask } from './query-settings';
   import { clipHistory } from '../../lib/stores/clipHistory.svelte';
-  import { unpersistEditorState } from '../../lib/editor-history';
   import { parkedEditCount } from '../../lib/database/grid-tab-state';
   import { confirmer } from '../../lib/confirm.svelte';
   import type { DbCompletionKind } from '../../lib/api/types';
@@ -73,18 +72,6 @@
   });
   const viewMode = $derived(effectiveViewMode(viewInputs));
   const viewReason = $derived(viewModeReason(viewInputs));
-
-  // Default row-cap options (applied when a statement has no explicit LIMIT).
-  const ROW_LIMIT_OPTS: { label: string; value: number }[] = [
-    { label: '100', value: 100 },
-    { label: '500', value: 500 },
-    { label: '1,000', value: 1000 },
-    { label: '5,000', value: 5000 },
-    { label: '10,000', value: 10000 },
-    { label: '50,000', value: 50000 },
-    // Unbounded rows, still bounded by the daemon's 32 MB response budget.
-    { label: 'All (≤ 32 MB)', value: ROW_LIMIT_ALL },
-  ];
 
   // Editor language (drives syntax highlighting): a small Redis highlighter for
   // redis; JavaScript for Mongo — native queries are JS-like (`db.coll.find({…})`,
@@ -884,27 +871,10 @@
       },
     ]);
   }
-  function setMask(on: boolean): void {
-    database.tab.mask = on;
-    // A masked tab's undo history (every pasted string) must not stay on disk.
-    if (on) unpersistEditorState(TAB_HISTORY_PREFIX + database.tab.uid);
-  }
-  function fmtTimeout(ms: number): string {
-    return ms % 1000 === 0 ? `${ms / 1000}s` : `${ms} ms`;
-  }
-  async function editTimeout(): Promise<void> {
-    const t = database.tab;
-    const v = await confirmer.promptText('Stop a statement that runs longer than this (milliseconds). Leave blank for no limit.', {
-      title: 'Statement timeout',
-      confirmLabel: 'Set timeout',
-      initial: t.timeout_ms ? String(t.timeout_ms) : '',
-      placeholder: 'e.g. 30000',
-      validate: (raw) => (raw.trim() === '' || /^\d+$/.test(raw.trim()) ? null : 'Enter a whole number of milliseconds'),
-    });
-    if (v === null) return;
-    const n = Number(v.trim());
-    t.timeout_ms = n > 0 ? n : null;
-  }
+  // Query settings gear (query-settings.ts): a dot marks a non-default value.
+  const settingsSummary = $derived(querySettingsSummary(database.rowLimit, tab));
+  const settingsChanged = $derived(settingsSummary !== '');
+  const openSettingsMenu = (e: MouseEvent): void => ctxMenu.show(e, settingsMenuItems());
   function formatNow(): void {
     void database.formatStatement();
     editorSel = { text: '', cursor: 0 };
@@ -933,8 +903,6 @@
     }
     items.push(
       { separator: true },
-      { label: 'Mask sensitive values', checked: !!tab.mask, title: 'The server redacts emails, tokens and keys before results leave the daemon', action: () => setMask(!tab.mask) },
-      { label: 'Statement timeout…', icon: 'clock', hint: tab.timeout_ms ? fmtTimeout(tab.timeout_ms) : 'none', action: () => void editTimeout() },
       { label: 'Wrap long lines', checked: wrapLines, action: () => setWrap(!wrapLines) },
       { label: 'Paste from clipboard history…', icon: 'copy', hint: '⌥⌘V', action: () => void openClipPicker(trigger) },
       { separator: true },
@@ -1315,7 +1283,7 @@
         class="icon-btn"
         class:on={shortcutsOpen}
         onclick={openMoreMenu}
-        title="More — Run on…, query plan, masking, timeout, line wrap, clipboard history, keyboard shortcuts"
+        title="More — Run on…, query plan, line wrap, clipboard history, keyboard shortcuts"
         aria-label="More editor actions"
         aria-haspopup="menu"
         data-testid="qe-more"
@@ -1363,30 +1331,23 @@
         </select>
       </label>
     {/if}
-    <label class="qe-limit" title="Default row cap — an explicit LIMIT in your query overrides this">
-      <span>Limit</span>
-      <select
-        class="input"
-        value={database.rowLimit}
-        onchange={(e) => database.setRowLimit(Number((e.currentTarget as HTMLSelectElement).value))}
-      >
-        {#each ROW_LIMIT_OPTS as o (o.value)}
-          <option value={o.value}>{o.label}</option>
-        {/each}
-      </select>
-    </label>
-    <!-- Non-default query settings stay visible as one-click chips (the
-         toggles themselves live in ⋯): masking is a safety state, never hidden. -->
     {#if tab.mask}
       <button class="qe-chip active" type="button" onclick={() => setMask(false)} title="Masked — the server redacts sensitive values (emails, tokens, keys). Click to stop masking." aria-label="Masked results — turn masking off">
         <Icon name="lock" size={12} /><span>Masked</span>
       </button>
     {/if}
-    {#if tab.timeout_ms}
-      <button class="qe-chip" type="button" onclick={() => void editTimeout()} title="Statement timeout — the engine stops a statement past it. Click to change." aria-label="Statement timeout {fmtTimeout(tab.timeout_ms)} — change">
-        <Icon name="clock" size={12} /><span>{fmtTimeout(tab.timeout_ms)}</span>
-      </button>
-    {/if}
+    <button
+      class="icon-btn qe-settings-btn"
+      class:on={settingsChanged}
+      onclick={openSettingsMenu}
+      aria-haspopup="menu"
+      aria-label="Query settings{settingsChanged ? ` (${settingsSummary})` : ''}"
+      title="Query settings — row limit, statement timeout, masking{settingsChanged ? ` · now: ${settingsSummary}` : ''}"
+      data-testid="qe-settings"
+    >
+      <Icon name="gear" size={13} />
+      {#if settingsChanged}<span class="qe-settings-dot" aria-hidden="true"></span>{/if}
+    </button>
     </div>
   </div>
 
@@ -1977,7 +1938,6 @@
     opacity: 0.7;
     font-variant-numeric: tabular-nums;
   }
-  .qe-limit,
   .qe-db {
     display: inline-flex;
     align-items: center;
@@ -1985,7 +1945,6 @@
     font-size: var(--fs-xs);
     color: var(--text-dim);
   }
-  .qe-limit select,
   .qe-db select {
     height: 24px;
     padding: 0 4px;
@@ -1993,7 +1952,20 @@
     width: auto;
     max-width: 160px;
   }
-  /* A non-default query setting (Masked / timeout) — a small button chip. */
+  .qe-settings-btn {
+    position: relative;
+  }
+  /* A non-default query setting (limit / timeout / masking). */
+  .qe-settings-dot {
+    position: absolute;
+    top: 3px;
+    inset-inline-end: 3px;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent-solid);
+  }
+  /* The Masked state chip — a small button that turns masking off. */
   .qe-chip {
     display: inline-flex;
     align-items: center;
@@ -2125,13 +2097,11 @@
       margin-inline-start: 0;
     }
     /* Bigger tap targets / readable controls. */
-    .qe-limit select,
     .qe-db select,
     .qe-chip {
       height: 32px;
       font-size: var(--fs-m);
     }
-    .qe-limit,
     .qe-db {
       font-size: var(--fs-m);
     }

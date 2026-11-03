@@ -151,7 +151,7 @@ async function runRead(page: Page, sql: string): Promise<void> {
 /** Open the export dialog and point it at our isolated temp dir + a unique name. */
 async function openExportDialog(page: Page, fileName: string): Promise<void> {
   // "Export all rows…" lives in the results toolbar's Export menu.
-  await page.locator('.grid-toolbar').getByTitle('Download, export all rows, or import a file', { exact: true }).first().click();
+  await page.locator('.grid-toolbar').getByTitle('Copy, download, export all rows, or import a file', { exact: true }).first().click();
   await page.locator('.ctx-item', { hasText: 'Export all rows' }).click();
   await expect(page.locator('.exp-form')).toBeVisible({ timeout: 10_000 });
   // The file goes to the Otto host (root): pick that destination first.
@@ -181,7 +181,7 @@ test.describe('DB Explorer · export', () => {
     await runRead(page, 'SELECT * FROM customers ORDER BY id');
 
     // Fix #1: one clear full-export control; the misleading "Full Export" is gone.
-    await page.locator('.grid-toolbar').getByTitle('Download, export all rows, or import a file', { exact: true }).first().click();
+    await page.locator('.grid-toolbar').getByTitle('Copy, download, export all rows, or import a file', { exact: true }).first().click();
     await expect(page.locator('.ctx-menu')).toContainText('Export all rows');
     await expect(page.locator('.ctx-item', { hasText: 'Full Export' })).toHaveCount(0);
     await page.keyboard.press('Escape');

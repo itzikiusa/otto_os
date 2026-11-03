@@ -14,7 +14,7 @@ Supported engines: **MySQL**, **PostgreSQL**, **MongoDB**, **Redis** and **Click
 ## Getting started
 
 1. Open **Connections** in the sidebar (`#/database` opens the same page).
-2. Choose **New connection** in the header, or the plus button in the sidebar's Connections section. You can also **Import connections** from MySQL Workbench, DBeaver, DataGrip or NoSQLBooster.
+2. Choose **New connection** in the header, or the **+** menu next to the sidebar's connection filter (**New connection…**, **New Kafka cluster…**, **New section…**, **Import connections…** from MySQL Workbench, DBeaver, DataGrip or NoSQLBooster).
 3. Pick a kind (mysql, postgres, redis, mongodb, clickhouse), then fill in host, port, user, database and password, or a connection string for MongoDB. Set **Environment** (dev, staging, prod), and turn on **Read-only** if the connection must never write. Add TLS or an SSH tunnel if you need them.
 4. Open the connection. A green health dot next to the engine name shows it's ready (hover it for the server version and connect latency). Use **⋯ → Test connection** at the end of the view bar to check it again. A prod or read-only connection shows a **Production** / **Read-only** chip there.
 5. Expand the schema tree, right-click a table and choose **Select rows** (MongoDB: **Find rows**), or type a query in the **Query** tab and press ⌘↵.
@@ -24,14 +24,14 @@ Supported engines: **MySQL**, **PostgreSQL**, **MongoDB**, **Redis** and **Click
 **Workbench layout**
 - One tab per open connection. Each tab shows its section path, and a **PROD** or **RO** badge with a red or amber rail when the connection is guarded.
 - Views per connection: **Query**, **Builder** (SQL engines only), **Structure**, **Diagram** (not for Redis) and **Dashboards**.
-- The sidebar has **Schema**, **Saved** and **History**. Saved queries can be searched, renamed, updated in place or saved as new. History has search and **Load more**.
+- The sidebar has **Schema**, **Saved** and **History**. Saved queries can be searched, renamed or deleted (the row's **⋯** or right-click), updated in place or saved as new. History has search and **Load more**.
 - Group connections into nested sections and drag them between sections.
 - **Open beside agents (split)** from a connection's right-click menu docks the explorer next to an agent session.
 - The workbench restores itself after a reload: open connections, views, query tabs and the result view of each tab.
 
 **Schema tree**
 - Lazy, per engine. SQL engines show database or schema, then tables, then columns. MongoDB shows database, collections, fields. Redis shows database, namespaces, keys.
-- Type in the tree's search box to filter objects.
+- Type in the tree's search box to filter objects. The filter button beside it sets the search scope (**this schema** / **all schemas**) and **Show row counts**.
 - Right-click a node for: **Set as active database**, **Select rows** / **Find rows** / **Get value**, **Send to editor**, **Open structure**, **Explain with agent**, **Copy name**, **Copy create statement**, **Import into…**, **Insert row…** / **Insert document…**, **Refresh**, and for SQL tables **Truncate table…** and **Drop table…** / **Drop view…**. These only fill in a query tab, so you still review and run them yourself. **Insert row…** opens the table and its **Add row** form.
 
 **Query tabs and running queries**
@@ -39,7 +39,7 @@ Supported engines: **MySQL**, **PostgreSQL**, **MongoDB**, **Redis** and **Click
 - **Run** runs the selection, or the statement under the cursor. **Run all** runs the whole buffer as a batch and shows one result per statement (Result 1…N). The batch stops at the first error and keeps the results so far.
 - Autocomplete and syntax highlighting per engine: SQL, Redis commands, or JavaScript-style MongoDB queries.
 - **Variables**: `:name`, `{name}` or `{{name}}` placeholders get a value and type (string, number, raw) per tab. Otto asks for any missing value when you run.
-- Toolbar: **Run**, **Save**, **Ask AI** (see Agents below), **Format** (⇧⌘F), and **⋯** with **Run on…**, **Query plan (EXPLAIN)** (a plan tree with warnings on costly steps; not for Redis), **Mask sensitive values** (the daemon redacts emails, tokens and keys before results leave it), **Statement timeout…** (MySQL), **Wrap long lines**, **Paste from clipboard history…** (⌥⌘V) and **Keyboard shortcuts**. On the same row: **Active database** and **Limit** (100 to 50,000, or All; default 1,000). While masking or a timeout is on, a **Masked** / timeout chip stays visible; click it to turn masking off or change the timeout.
+- Toolbar: **Run**, **Save**, **Ask AI** (see Agents below), **Format** (⇧⌘F), and **⋯** with **Run on…**, **Query plan (EXPLAIN)** (a plan tree with warnings on costly steps; not for Redis), **Wrap long lines**, **Paste from clipboard history…** (⌥⌘V) and **Keyboard shortcuts**. On the same row: **Active database** and the **Query settings** gear — **Row limit** (100 to 50,000, or All; default 1,000), **Statement timeout…** (MySQL) and **Mask sensitive values** (the daemon redacts emails, tokens and keys before results leave it). A dot on the gear means a setting isn't the default; while masking is on, a **Masked** chip stays visible (click it to turn masking off).
 - A bare read without its own `LIMIT` gets the row cap added. When results are capped, a **‹ Prev · Next ›** pager appears. It shows an "unordered" hint when there is no `ORDER BY`.
 - **Stop** cancels on the server for MySQL, PostgreSQL, ClickHouse (HTTP and native transports) and MongoDB (subject to operation-inspection and kill privileges). For Redis, Stop closes the operation's connection; it does not issue a server kill command.
 - MongoDB accepts shell-style queries, JSON commands, a SQL subset (translated to find or aggregate), and full **mongosh scripts**. `db.collection.distinct("field")` runs natively and displays a `value` column. Unsupported shell expressions use the real `mongosh` CLI under the usual write policy; native execution errors are never retried through the shell. Scripts require `mongosh` to be installed.
@@ -49,7 +49,7 @@ Supported engines: **MySQL**, **PostgreSQL**, **MongoDB**, **Redis** and **Click
 - Default view: Vertical for MongoDB, Grid for everything else. Results wider than a per-engine column count switch to Vertical automatically. Set the count in **Settings → Appearance → Database Explorer**: on at 10 columns for MongoDB, off for the other engines. A view you pick on a tab always wins.
 - **Search rows…**, a **Filter row** under each header, click-to-sort headers, and a **Row detail** side panel.
 - Right-click a cell for **Filter** / **Exclude** by value, **Query by value** or **Add to query** (rewrites the query's `WHERE` or MongoDB filter but doesn't run it), **Go to** a foreign-key target, copy or expand the value.
-- **Copy**: TSV, CSV, JSON or column names. **Export**: download CSV or JSON, **Export all rows…**, or **Import file…**.
+- **Export** (one menu): copy as TSV, CSV, JSON or column names, open rows as INSERT statements, download CSV or JSON, **Export all rows…**, or **Import file…**.
 - The **⋯** menu has **Aggregate pipeline…** (MongoDB stage builder), **Compare two records…**, **Insert row from JSON…**, **Expand JSON cells**, **Find in results** (⌘F), **Send to running agent…** and **Examine with AI**.
 - Select rows to **Copy as INSERT**, copy a `WHERE pk IN (…)` predicate, **Compare** exactly 2 records side by side, or delete them.
 - MongoDB has a filter bar above `find` results, and Redis has a key filter.
