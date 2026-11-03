@@ -171,6 +171,63 @@ pub fn match_pr_targets(
     out
 }
 
+/// Apply the run's resolved PRs to its entries — a PR's target becomes the
+/// entry's base unless the run gave a base explicitly (`explicit_base`) or
+/// the entry declared its own `source` — and pick the run's `pr_branch`: the
+/// input's, else the head of the run's only PR. Pure.
+pub fn apply_prs(
+    entries: &mut [RepoEntry],
+    prs: &[RunPr],
+    explicit_base: bool,
+    input: &Value,
+) -> Option<String> {
+    for pr in prs {
+        if let Some(e) = entries
+            .iter_mut()
+            .find(|e| e.repo_id.as_deref() == Some(pr.repo_id.as_str()))
+        {
+            if !explicit_base && e.source.is_none() {
+                e.base = Some(pr.base.clone());
+            }
+        }
+    }
+    input
+        .get("pr_branch")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| (prs.len() == 1).then(|| prs[0].head.clone()))
+}
+
+/// Publish the run's resolved PRs: `prs.json` in the run context, and the
+/// input's `prs[]` (agents read each PR's exact head/base/ref from it) plus a
+/// derived `pr_branch` when the input had none. No PRs ⇒ input unchanged.
+pub fn publish_prs(
+    mut input: Value,
+    prs: &[RunPr],
+    pr_branch: Option<&str>,
+    files: &crate::context::RunContextFiles,
+) -> Value {
+    if prs.is_empty() {
+        return input;
+    }
+    if let Ok(js) = serde_json::to_string_pretty(prs) {
+        files.write_named(PRS_FILE, &js);
+    }
+    if let Value::Object(m) = &mut input {
+        if let Some(b) = pr_branch {
+            m.entry("pr_branch")
+                .or_insert_with(|| Value::String(b.to_string()));
+        }
+        m.insert(
+            "prs".into(),
+            serde_json::to_value(prs).unwrap_or(Value::Null),
+        );
+    }
+    input
+}
+
 /// Release the fork-head refs [`pin_pr_heads`] fetched for a run (listed in
 /// its `prs.json`). Only `refs/otto/pr-review/*` is ever deleted.
 pub async fn release_pr_heads(data_dir: &Path, run_id: &str) {
@@ -212,6 +269,33 @@ mod tests {
             base: None,
             error: None,
         }
+    }
+
+    #[test]
+    fn applied_prs_set_bases_unless_explicit_and_pick_the_pr_branch() {
+        let pr = RunPr {
+            repo_id: "id-games".into(),
+            repo_path: "/src/g".into(),
+            number: 15,
+            head: "x".into(),
+            base: "y".into(),
+            head_sha: None,
+            head_ref: None,
+        };
+        let mut es = vec![entry("games", "/src/g")];
+        es[0].base = Some("main".into());
+        let b = apply_prs(&mut es, std::slice::from_ref(&pr), false, &json!({}));
+        assert_eq!(
+            (es[0].base.as_deref(), b.as_deref()),
+            (Some("y"), Some("x"))
+        );
+        let mut es = vec![entry("games", "/src/g")];
+        es[0].base = Some("develop".into());
+        let b = apply_prs(&mut es, &[pr], true, &json!({"pr_branch": "mine"}));
+        assert_eq!(
+            (es[0].base.as_deref(), b.as_deref()),
+            (Some("develop"), Some("mine"))
+        );
     }
 
     #[test]

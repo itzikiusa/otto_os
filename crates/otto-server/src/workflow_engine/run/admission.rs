@@ -290,38 +290,11 @@ async fn isolate_repos(
     // PR's head + base from the provider: the base becomes the entry's base
     // unless one was given explicitly, and both branches are synced below.
     let mut prs = run::refs::lookup_run_prs(ctx, user, &entries, input.get("pr")).await;
-    for pr in &prs {
-        if let Some(e) = entries
-            .iter_mut()
-            .find(|e| e.repo_id.as_deref() == Some(pr.repo_id.as_str()))
-        {
-            if run_base_hint.is_none() && e.source.is_none() {
-                e.base = Some(pr.base.clone());
-            }
-        }
-    }
-    let mut input = input;
-    let pr_branch = input
-        .get("pr_branch")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .or_else(|| (prs.len() == 1).then(|| prs[0].head.clone()));
+    let pr_branch =
+        otto_workflows::run_refs::apply_prs(&mut entries, &prs, run_base_hint.is_some(), &input);
     let synced = sync_run_branches(ctx, &entries, pr_branch.as_deref(), &prs).await;
     run::refs::pin_pr_heads(ctx, &mut prs).await;
-    if !prs.is_empty() {
-        if let Ok(js) = serde_json::to_string_pretty(&prs) {
-            files.write_named(otto_workflows::run_refs::PRS_FILE, &js);
-        }
-        if let Value::Object(m) = &mut input {
-            if let Some(b) = pr_branch.as_deref() {
-                m.entry("pr_branch").or_insert_with(|| json!(b));
-            }
-            // Agents read the exact head/base/ref of every PR from here.
-            m.insert("prs".into(), json!(prs));
-        }
-    }
+    let input = otto_workflows::run_refs::publish_prs(input, &prs, pr_branch.as_deref(), files);
     let (provisioned_cwd, isolation_failures) =
         provision_wf_worktrees(ctx, run_id, &mut entries, &synced).await;
     files.set_repos(entries.clone());
