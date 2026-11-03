@@ -47,6 +47,32 @@ pub(super) async fn repo_worktree_remove<S: GitCtx>(
 }
 
 #[derive(Deserialize)]
+pub(super) struct WorktreeCreateReq {
+    /// The NEW branch to create and check out in the worktree.
+    pub(super) branch: String,
+    /// What it starts from (branch / sha); `HEAD` when absent.
+    #[serde(default)]
+    pub(super) base: Option<String>,
+}
+
+/// `POST /repos/{id}/worktrees` — new branch + new worktree beside the repo
+/// (see [`crate::LocalGit::worktree_create`]). Returns the new worktree.
+pub(super) async fn repo_worktree_create<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Json(req): Json<WorktreeCreateReq>,
+) -> ApiResult<Json<WorktreeInfo>> {
+    let lock = repo_lock(&id);
+    let _g = lock.lock().await;
+    let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
+    Ok(Json(
+        git.worktree_create(&req.branch, req.base.as_deref())
+            .await?,
+    ))
+}
+
+#[derive(Deserialize)]
 pub(super) struct WorktreeStatusQuery {
     path: String,
 }
