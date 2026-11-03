@@ -43,7 +43,9 @@
   });
 
   const homePath = $derived(ws.scratch?.root_path ?? null);
-  const allPool = $derived([...ws.sessions, ...ws.archivedSessions]);
+  // Id index over live + archived sessions: a delegated worker's parent
+  // lookup is O(1) instead of a scan of every session per row.
+  const allPool = $derived(new Map([...ws.archivedSessions, ...ws.sessions].map((s) => [s.id, s] as const)));
   const allLiveThreads = $derived(ws.sessions.filter((s) => !s.archived && isThreadSession(s, allPool)));
 
   // Distinct project roots across workspaces, repos and threads for the filter pill.
