@@ -6,7 +6,8 @@
 // in as a host (getters for state, its refresh helpers as functions); the
 // menus (graphMenus.ts) and the refs sidebar call these.
 
-import { api, isDirtyGitRefusal } from '../../../lib/api/client';
+import { api, ApiError, isDirtyGitRefusal } from '../../../lib/api/client';
+import { worktreeName, worktreeRemovePlan } from '../gitopsPlan';
 import type { CommitInfo, RebasePreview, RefBranch, Repo, RepoStatusResp, StashInfo, SubmoduleInfo, WorktreeInfo } from '../../../lib/api/types';
 import { toasts } from '../../../lib/toast.svelte';
 import { confirmer } from '../../../lib/confirm.svelte';
@@ -267,7 +268,7 @@ export function createGraphActions(h: GraphActionsHost) {
 
   /** Display name for a worktree: the last path segment. */
   function wtName(w: WorktreeInfo): string {
-    return w.path.split('/').filter(Boolean).pop() ?? w.path;
+    return worktreeName(w);
   }
 
   /** True when this worktree is a different checkout than the open repo tab. */
@@ -318,30 +319,72 @@ export function createGraphActions(h: GraphActionsHost) {
     }
   }
 
+  /**
+   * Remove a worktree. Re-reads its status first (the sidebar row may be
+   * stale, and the list probe is budgeted), then confirms with the specifics:
+   * a clean tree gets a plain confirm, anything holding work (uncommitted /
+   * untracked files, commits that exist only there, a lock) a force-remove
+   * confirm naming each item. The branch is always kept.
+   */
   async function wtRemove(w: WorktreeInfo): Promise<void> {
-    // A dirty tree needs --force and the confirm must say what that discards.
-    // Removal always KEEPS the branch (and its commits) either way.
-    const detail = !w.dirty_known
-      ? ' Its changes couldn’t be checked; removal will proceed only if Git can do so safely.'
-      : w.dirty
-      ? ' It has UNCOMMITTED changes that will be discarded.'
-      : w.locked
-        ? ` It is locked${w.lock_reason ? ` (${w.lock_reason})` : ''}.`
-        : '';
-    const ok = await confirmer.ask(
-      `Remove worktree “${wtName(w)}” at ${w.path}?${detail} The branch${w.branch ? ` “${w.branch}”` : ''} and its commits are kept.`,
-      { title: 'Remove worktree', confirmLabel: 'Remove', danger: true },
-    );
-    if (!ok) return;
+    const url = `/repos/${h.repoId}/worktrees`;
+    let fresh: WorktreeInfo;
+    h.openWtBusy = w.path;
     try {
-      h.worktrees = await api.post<WorktreeInfo[]>(`/repos/${h.repoId}/worktrees/remove`, {
-        path: w.path,
-        force: w.dirty_known === true && (w.dirty || w.locked),
-      });
-      toasts.success('Worktree removed', wtName(w));
+      fresh = await api.get<WorktreeInfo>(`${url}/status?path=${encodeURIComponent(w.path)}`);
     } catch (e) {
-      toastError('Couldn’t remove the worktree', e);
+      toastError('Couldn’t check the worktree', e);
+      return;
+    } finally {
+      h.openWtBusy = '';
     }
+    const plan = worktreeRemovePlan(fresh);
+    if (plan.blocked) {
+      toasts.error(plan.title, plan.message);
+      return;
+    }
+    if (!(await confirmer.ask(plan.message, { title: plan.title, confirmLabel: plan.confirmLabel, danger: true }))) return;
+    h.openWtBusy = w.path;
+    try {
+      h.worktrees = await api.post<WorktreeInfo[]>(`${url}/remove`, { path: w.path, force: plan.force });
+      toasts.success('Worktree removed', w.branch ? `${wtName(w)} · branch “${w.branch}” kept` : wtName(w));
+    } catch (e) {
+      // Something changed between the check and the remove (an agent wrote a
+      // file): the daemon's 409 names it — ask again, explicitly, to force.
+      if (e instanceof ApiError && e.status === 409 && !plan.force && /isn.t safe to remove/.test(e.message)) {
+        const force = await confirmer.ask(`${e.message}\n\nThis cannot be undone.`, {
+          title: 'Force-remove worktree',
+          confirmLabel: 'Force remove',
+          danger: true,
+        });
+        if (force) {
+          try {
+            h.worktrees = await api.post<WorktreeInfo[]>(`${url}/remove`, { path: w.path, force: true });
+            toasts.success('Worktree removed', wtName(w));
+          } catch (e2) {
+            toastError('Couldn’t remove the worktree', e2);
+          }
+        }
+      } else {
+        toastError('Couldn’t remove the worktree', e);
+      }
+    } finally {
+      h.openWtBusy = '';
+    }
+  }
+
+  // Dialogs the refs sidebar mounts: the stash browser (open on a stash
+  // SHA, '' = newest) and the bulk branch delete (pre-ticked names).
+  const dialogs = $state<{ stash: string | null; branches: string[] | null }>({ stash: null, branches: null });
+  function openStashBrowser(s?: StashInfo): void {
+    dialogs.stash = s?.sha ?? '';
+  }
+  function openBranchCleanup(preselect: string[] = []): void {
+    dialogs.branches = preselect;
+  }
+
+  async function stashPop(s: StashInfo): Promise<void> {
+    await mutate('/stash', { op: 'pop', sha: s.sha }, 'Stash popped', stashShortMsg(s));
   }
 
   async function wtPrune(): Promise<void> {
@@ -489,6 +532,11 @@ export function createGraphActions(h: GraphActionsHost) {
     deleteTag,
     stashApply,
     stashDrop,
+    stashPop,
+    dialogs,
+    refreshAfter,
+    openStashBrowser,
+    openBranchCleanup,
     wtName,
     isForeignWorktree,
     openWorktree,

@@ -260,12 +260,80 @@ pub struct StashInfo {
     pub message: String,
     /// Branch the stash was created on, parsed from the message (if present).
     pub branch: Option<String>,
+    /// Files the stash touches (tracked + untracked). Filled by
+    /// `GET /repos/{id}/stashes` only; `None` when not counted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files: Option<u32>,
+}
+
+/// One file inside a stash (`GET /repos/{id}/stashes/{sha}`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StashFile {
+    pub path: String,
+    /// `added` | `modified` | `deleted` | `renamed` | `untracked` | other git letter.
+    pub status: String,
+    /// Line counts (`None` for binary files).
+    pub additions: Option<u32>,
+    pub deletions: Option<u32>,
+}
+
+/// A stash's content: its files plus the unified patch (tracked changes vs
+/// the stash's base, then untracked files as additions).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StashDetail {
+    pub sha: String,
+    pub files: Vec<StashFile>,
+    /// Unified diff text, capped; `truncated` says the cap was hit.
+    pub patch: String,
+    pub truncated: bool,
+}
+
+/// One branch to delete in `POST /repos/{id}/branches/delete`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BranchDeleteItem {
+    /// Local branch name (also the remote branch name when `remote_branch`
+    /// is absent).
+    pub name: String,
+    /// Delete the local branch (default true).
+    #[serde(default)]
+    pub local: Option<bool>,
+    /// Also delete a branch on this remote (outward-facing).
+    #[serde(default)]
+    pub remote: Option<String>,
+    /// The branch name on `remote` when it differs from `name`.
+    #[serde(default)]
+    pub remote_branch: Option<String>,
+    /// `-D`: drop an unmerged local branch. Without it git's safe `-d` runs.
+    #[serde(default)]
+    pub force: Option<bool>,
+}
+
+/// Per-branch outcome of a bulk delete. Items run in order; one failure
+/// never stops the rest.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BranchDeleteResult {
+    pub name: String,
+    pub remote: Option<String>,
+    pub local_deleted: bool,
+    pub remote_deleted: bool,
+    /// Why (part of) this item failed or was skipped.
+    pub error: Option<String>,
+    /// The local delete was refused because the branch isn't fully merged;
+    /// retry with `force` after the user agrees to drop those commits.
+    #[serde(default)]
+    pub needs_force: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BranchDeleteResp {
+    pub results: Vec<BranchDeleteResult>,
+    pub status: RepoStatusResp,
 }
 
 /// One entry from `git worktree list --porcelain`. Surfaced in the graph's
 /// WORKTREES sidebar section so agent-created worktrees (swarm, Run-with-Otto,
 /// goal loops, manual `git worktree add`) are visible and reapable from the UI.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct WorktreeInfo {
     /// Absolute path of the worktree.
     pub path: String,
@@ -292,6 +360,44 @@ pub struct WorktreeInfo {
     /// Whether the bounded status probe succeeded; unknown is never force-safe.
     #[serde(default)]
     pub dirty_known: bool,
+    /// Tracked files with staged or unstaged changes (valid when `dirty_known`).
+    #[serde(default)]
+    pub changes: u32,
+    /// Untracked (not ignored) files (valid when `dirty_known`).
+    #[serde(default)]
+    pub untracked: u32,
+    /// The checked-out branch's upstream (`origin/feat`), when one is set.
+    #[serde(default)]
+    pub upstream: Option<String>,
+    /// Commits ahead of / behind the upstream (0 without a live upstream).
+    #[serde(default)]
+    pub ahead: u32,
+    #[serde(default)]
+    pub behind: u32,
+    /// An upstream is configured but its remote-tracking ref is gone.
+    #[serde(default)]
+    pub upstream_gone: bool,
+    /// The branch exists on a remote (live upstream, or a same-named
+    /// `refs/remotes/<remote>/<branch>`).
+    #[serde(default)]
+    pub on_remote: bool,
+    /// The default branch the `unmerged` count compares against.
+    #[serde(default)]
+    pub base: Option<String>,
+    /// Commits on this worktree's HEAD that `base` doesn't have. `None` when
+    /// unknown (no base, prunable entry, or the count failed).
+    #[serde(default)]
+    pub unmerged: Option<u32>,
+    /// Commits on this HEAD that exist nowhere else: not on any remote and
+    /// not in `base` (for a detached HEAD: on no branch either, so removal
+    /// orphans them). `None` when unknown.
+    #[serde(default)]
+    pub unpushed: Option<u32>,
+    /// Plain-language reasons a removal needs explicit force (uncommitted
+    /// changes, untracked files, unpushed commits, lock, unknown status…).
+    /// Empty = a plain remove is safe.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub risks: Vec<String>,
 }
 
 /// One entry from `git submodule status`, enriched with `.gitmodules` config.

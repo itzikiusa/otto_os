@@ -100,7 +100,19 @@ pub fn router<S: GitCtx>() -> Router<S> {
         .route("/repos/{id}/worktrees", get(repo_worktrees::<S>))
         .route(
             "/repos/{id}/worktrees/remove",
-            post(repo_worktree_remove::<S>),
+            post(gitops_routes::repo_worktree_remove::<S>),
+        )
+        .route(
+            "/repos/{id}/worktrees/status",
+            get(gitops_routes::repo_worktree_status::<S>),
+        )
+        .route(
+            "/repos/{id}/stashes/{sha}",
+            get(gitops_routes::repo_stash_detail::<S>),
+        )
+        .route(
+            "/repos/{id}/branches/delete",
+            post(gitops_routes::repo_branches_delete::<S>),
         )
         .route(
             "/repos/{id}/worktrees/prune",
@@ -2335,7 +2347,7 @@ async fn repo_branch_delete<S: GitCtx>(
 
 /// True when `remote`'s push URL has the same host as origin's — the only
 /// case where the repo's bound account token may be offered to it.
-async fn remote_shares_origin_host(git: &LocalGit, remote: &str) -> bool {
+pub(super) async fn remote_shares_origin_host(git: &LocalGit, remote: &str) -> bool {
     let Ok(remotes) = git.remotes().await else {
         return false;
     };
@@ -2466,7 +2478,7 @@ async fn repo_stashes<S: GitCtx>(
     Path(id): Path<Id>,
 ) -> ApiResult<Json<Vec<StashInfo>>> {
     let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Viewer).await?;
-    Ok(Json(git.stash_list().await?))
+    Ok(Json(git.stash_list_counted().await?))
 }
 
 /// `GET /repos/{id}/head/remotes` → `{remotes: string[]}`: remote-tracking
@@ -2488,81 +2500,7 @@ async fn repo_worktrees<S: GitCtx>(
     Path(id): Path<Id>,
 ) -> ApiResult<Json<Vec<WorktreeInfo>>> {
     let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Viewer).await?;
-    Ok(Json(git.worktree_list().await?))
-}
-
-#[derive(Deserialize)]
-struct WorktreeRemoveReq {
-    /// Absolute worktree path, exactly as returned by GET …/worktrees.
-    path: String,
-    /// Force-remove a dirty/locked worktree (git refuses otherwise).
-    #[serde(default)]
-    force: Option<bool>,
-}
-
-fn checked_worktree_force(wt: &WorktreeInfo, requested: bool) -> otto_core::Result<bool> {
-    if requested && !wt.dirty_known {
-        return Err(Error::Conflict(
-            "Worktree status is unknown; retry the status check before forcing removal".into(),
-        ));
-    }
-    Ok(requested)
-}
-
-#[cfg(test)]
-#[test]
-fn worktree_unknown_locked_status_never_authorizes_force() {
-    let mut rows =
-        crate::parse::parse_worktree_list("worktree /fixture\nHEAD abc\nlocked fixture\n");
-    let row = &mut rows[0];
-    assert!(row.locked);
-    assert!(matches!(
-        checked_worktree_force(row, true),
-        Err(Error::Conflict(_))
-    ));
-    assert!(!checked_worktree_force(row, false).unwrap());
-    row.dirty_known = true;
-    row.dirty = true;
-    assert!(checked_worktree_force(row, true).unwrap());
-    row.dirty_known = false;
-    assert!(
-        checked_worktree_force(row, true).is_err(),
-        "fresh unknown overrides an older known UI snapshot"
-    );
-}
-
-async fn repo_worktree_remove<S: GitCtx>(
-    State(s): State<S>,
-    Extension(user): Extension<AuthUser>,
-    Path(id): Path<Id>,
-    Json(req): Json<WorktreeRemoveReq>,
-) -> ApiResult<Json<Vec<WorktreeInfo>>> {
-    let path = req.path.trim();
-    if path.is_empty() {
-        return Err(Error::Invalid("worktree path must not be empty".into()).into());
-    }
-    let lock = repo_lock(&id);
-    let _g = lock.lock().await;
-    let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
-    // Only paths this repo actually lists are removable — the path is caller
-    // input, and `git worktree remove` on an arbitrary directory must never
-    // be reachable. The main worktree is the repo itself; git refuses it too,
-    // but rejecting up front gives a clear message instead of git's.
-    let wts = git.worktree_list().await?;
-    let Some(wt) = wts.iter().find(|w| w.path == path) else {
-        return Err(Error::Invalid(format!("'{path}' is not a worktree of this repo")).into());
-    };
-    if wt.is_main {
-        return Err(Error::Invalid("cannot remove the main worktree".into()).into());
-    }
-    if wt.prunable {
-        // The directory is already gone — remove the stale registration.
-        git.worktree_prune().await?;
-    } else {
-        let force = checked_worktree_force(wt, req.force.unwrap_or(false))?;
-        git.worktree_remove_checked(path, force).await?;
-    }
-    Ok(Json(git.worktree_list().await?))
+    Ok(Json(git.worktree_list_detailed().await?))
 }
 
 async fn repo_worktree_prune<S: GitCtx>(
@@ -2574,7 +2512,7 @@ async fn repo_worktree_prune<S: GitCtx>(
     let _g = lock.lock().await;
     let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     git.worktree_prune().await?;
-    Ok(Json(git.worktree_list().await?))
+    Ok(Json(git.worktree_list_detailed().await?))
 }
 
 async fn repo_submodules<S: GitCtx>(
@@ -2619,8 +2557,8 @@ async fn repo_submodule_update<S: GitCtx>(
 struct StashReq {
     op: String,
     /// Stash commit SHA for `apply`/`drop` (SHA-anchored so a renumbered stack
-    /// can't hit the wrong entry). Required for those ops; ignored by
-    /// `save`/`pop`, which always operate on the top of the stack.
+    /// can't hit the wrong entry). Required for those ops; optional for `pop`
+    /// (absent = top of the stack); ignored by `save`.
     #[serde(default)]
     sha: Option<String>,
 }
@@ -2638,9 +2576,16 @@ async fn repo_stash<S: GitCtx>(
         "save" => {
             git.stash_save().await?;
         }
-        "pop" => {
-            git.stash_pop().await?;
-        }
+        // `pop` with a sha pops THAT stash (the stash browser); without one
+        // it is git's positional top-of-stack pop (the toolbar button).
+        "pop" => match req.sha.as_deref() {
+            Some(sha) => {
+                git.stash_pop_sha(sha).await?;
+            }
+            None => {
+                git.stash_pop().await?;
+            }
+        },
         "apply" | "drop" => {
             let sha = req
                 .sha
@@ -3099,6 +3044,9 @@ async fn pr_commits<S: GitCtx>(
 // ---------------------------------------------------------------------------
 // Tests — S4 credential ownership on the git use-paths
 // ---------------------------------------------------------------------------
+
+#[path = "http_gitops.rs"]
+mod gitops_routes;
 
 #[cfg(test)]
 #[path = "http_tests.rs"]
