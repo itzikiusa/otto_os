@@ -64,7 +64,12 @@ interface PersistedThreadsPrefs {
   focusedSessionId?: string | null;
   layoutMode?: ThreadsLayoutMode;
   sidebarOpen?: boolean;
+  /** Legacy (pre-redesign, defaulted open) — read no more. */
   inspectorOpen?: boolean;
+  /** Right panel open (defaults closed: the stage's floating card covers arrival). */
+  rightOpen?: boolean;
+  /** Collapse Otto's navigator to its rail while Threads is open (default on). */
+  collapseNav?: boolean;
   inspectorTab?: ThreadsInspectorTab;
   openFilesByWorkspace?: Record<string, WorkspaceFileTabs>;
   extraProjects?: string[];
@@ -100,8 +105,9 @@ class ThreadsStore {
   draftWorkspaceId = $state<string | null>(null);
   draftCwd = $state<string | null>(null);
   sidebarOpen = $state(true);
-  inspectorOpen = $state(true);
-  inspectorTab = $state<ThreadsInspectorTab>('files');
+  inspectorOpen = $state(false);
+  inspectorTab = $state<ThreadsInspectorTab>('changes');
+  collapseNav = $state(true);
   openFilesByWorkspace = $state<Record<string, WorkspaceFileTabs>>({});
   /** Sidebar project filter — several at once (T3 0.1.6); empty = all projects. */
   projectFilters = $state<string[]>([]);
@@ -143,7 +149,8 @@ class ThreadsStore {
       this.layoutMode = p.layoutMode;
     }
     if (typeof p.sidebarOpen === 'boolean') this.sidebarOpen = p.sidebarOpen;
-    if (typeof p.inspectorOpen === 'boolean') this.inspectorOpen = p.inspectorOpen;
+    if (typeof p.rightOpen === 'boolean') this.inspectorOpen = p.rightOpen;
+    if (typeof p.collapseNav === 'boolean') this.collapseNav = p.collapseNav;
     if (
       p.inspectorTab === 'files' ||
       p.inspectorTab === 'changes' ||
@@ -180,7 +187,8 @@ class ThreadsStore {
         focusedSessionId: this.focusedSessionId,
         layoutMode: this.layoutMode,
         sidebarOpen: this.sidebarOpen,
-        inspectorOpen: this.inspectorOpen,
+        rightOpen: this.inspectorOpen,
+        collapseNav: this.collapseNav,
         inspectorTab: this.inspectorTab,
         openFilesByWorkspace: this.openFilesByWorkspace,
         extraProjects: this.extraProjects,
@@ -547,6 +555,12 @@ class ThreadsStore {
     if (list.length > 0) next[project] = list;
     else delete next[project];
     this.scriptsByProject = next;
+    this.save();
+  }
+
+  setCollapseNav(on: boolean): void {
+    if (this.collapseNav === on) return;
+    this.collapseNav = on;
     this.save();
   }
 

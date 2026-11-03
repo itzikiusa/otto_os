@@ -19,7 +19,8 @@
     runInShell,
     showScriptMenu,
   } from './threadGitMenus';
-  import { compactPath, forgeLabel, repoForCwd } from './threadsHelpers';
+  import { compactPath, forgeLabel } from './threadsHelpers';
+  import { threadRepos } from './threadRepos.svelte';
   import { threads } from './threadsStore.svelte';
 
   // The Create-PR sheet (outward confirm lives there) loads on first open, not with the page.
@@ -41,7 +42,8 @@
 
   const homePath = $derived(ws.scratch?.root_path ?? null);
   const project = $derived(cwd.replace(/\/+$/, ''));
-  const repo = $derived(repoForCwd(project, [...git.repos, ...git.allRepos]));
+  const repo = $derived(threadRepos.repoFor(project));
+  const repoChecked = $derived(threadRepos.checked(project));
   const status = $derived(repo ? (git.statusById[repo.id] ?? null) : null);
   const branch = $derived(status?.branch ?? null);
   const forge = $derived(forgeLabel(repo));
@@ -197,7 +199,7 @@
         {/if}
       </button>
     {:else}
-      <p class="pc-note">{project ? 'Not a git repository' : 'Pick a project folder'}</p>
+      <p class="pc-note">{!project ? 'Pick a project folder' : repoChecked ? 'Not a git repository' : 'Looking for a git repository…'}</p>
     {/if}
   </div>
 </section>

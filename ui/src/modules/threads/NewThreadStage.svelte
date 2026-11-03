@@ -40,7 +40,8 @@
   import { buildAgentMenu, buildEffortMenu, buildModeMenu, buildModelMenu } from './threadPickerMenus';
   import StageSlashPopup from './StageSlashPopup.svelte';
   import ThreadProjectCard from './ThreadProjectCard.svelte';
-  import { harnessLabel, projectNameFromCwd, relToRoot, repoForCwd } from './threadsHelpers';
+  import { harnessLabel, projectNameFromCwd, relToRoot } from './threadsHelpers';
+  import { threadRepos } from './threadRepos.svelte';
   import { threads } from './threadsStore.svelte';
 
   interface Props {
@@ -76,7 +77,7 @@
   const scratchActive = $derived(useScratch || ws.current === null);
   const cleanCwd = $derived(cwd.trim().replace(/\/+$/, ''));
   const onWorktree = $derived(worktree !== null && worktree.path.replace(/\/+$/, '') === cleanCwd);
-  const repo = $derived(onWorktree ? worktree!.repo : repoForCwd(cleanCwd, [...git.repos, ...git.allRepos]));
+  const repo = $derived(onWorktree ? worktree!.repo : threadRepos.repoFor(cleanCwd, scratchActive ? null : ws.currentId));
   const branch = $derived(onWorktree ? worktree!.branch : repo ? (git.statusById[repo.id]?.branch ?? null) : null);
   const projectName = $derived(
     !cleanCwd || cleanCwd === homePath || cleanCwd === '~' ? null : projectNameFromCwd(cleanCwd),
@@ -415,20 +416,17 @@
   <div class="nt-inner">
     <h1 class="nt-title">
       {#if projectName}
-        <span>What should we build in</span>
-        <button
+        <!-- One text run: no flex gap or block-edge whitespace around the name. -->
+        What should we build in <button
           bind:this={projectEl}
           type="button"
           class="nt-project"
           aria-haspopup="menu"
           title="Change project ({cleanCwd})"
           data-testid="new-thread-project"
-          onclick={() => projectEl && openProjectMenu(projectEl)}
-        >
-          <span class="ellipsis" dir="auto">{projectName}</span>
-        </button><span aria-hidden="true">?</span>
+          onclick={() => projectEl && openProjectMenu(projectEl)}>{projectName}</button>?
       {:else}
-        <span>What should we work on?</span>
+        What should we work on?
       {/if}
     </h1>
 
@@ -620,12 +618,8 @@
     gap: 14px;
   }
   .nt-title {
-    display: flex;
-    flex-wrap: wrap;
-    justify-content: center;
-    align-items: baseline;
-    gap: 0 8px;
     margin: 0 0 6px;
+    overflow-wrap: anywhere;
     font-size: var(--fs-hero);
     font-weight: 400;
     letter-spacing: -0.01em;
@@ -635,7 +629,7 @@
   }
   .nt-project {
     max-width: 100%;
-    padding: 0 4px;
+    padding: 0 2px;
     border: 0;
     border-radius: var(--radius-s);
     background: transparent;

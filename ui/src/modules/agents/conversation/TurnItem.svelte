@@ -47,8 +47,22 @@
     /** Matches the conversation search (soft highlight) / is the current match. */
     hit?: boolean;
     current?: boolean;
+    /** Threads' calm chrome: no agent badge, token usage only on hover/focus,
+     *  and the model only where it changed (`showModel`). Agents keeps it all. */
+    quiet?: boolean;
+    showModel?: boolean;
   }
-  let { item, live = false, active = live, waiting = false, nested = false, hit = false, current = false }: Props = $props();
+  let {
+    item,
+    live = false,
+    active = live,
+    waiting = false,
+    nested = false,
+    hit = false,
+    current = false,
+    quiet = false,
+    showModel = true,
+  }: Props = $props();
 
   // Copy: the turn's prose as markdown; tool steps as one-line summaries so a
   // pasted response still reads. Images/chips are skipped.
@@ -238,6 +252,7 @@
   class:nested
   class:hit
   class:current
+  class:quiet
   data-turn-id={item.id}
   data-role={item.role}
   aria-label={item.role === 'user' ? `You${clock ? `, ${clock}` : ''}` : `${agentName}${clock ? `, ${clock}` : ''}`}
@@ -300,8 +315,8 @@
       <header class="agent-head">
         <span class="avatar" aria-hidden="true"><ProviderIcon provider={ctx.provider} size={13} /></span>
         <span class="agent-name">{agentName}</span>
-        <AgentChip />
-        {#if item.model}<span class="agent-model mono" dir="ltr" title="Model">{item.model}</span>{/if}
+        {#if !quiet}<AgentChip />{/if}
+        {#if item.model && showModel}<span class="agent-model mono" dir="ltr" title="Model">{item.model}</span>{/if}
         {#if clock}<time class="ts" datetime={item.ts ?? undefined} title={fullTime}>{clock}</time>{/if}
       </header>
     {/if}
@@ -451,6 +466,19 @@
   }
   .agent-name {
     font-weight: 600;
+  }
+  /* Quiet (Threads): usage pills appear on hover / keyboard focus only. */
+  .turn.quiet .meta :global(.usage) {
+    display: none;
+  }
+  .turn.quiet:hover .meta :global(.usage),
+  .turn.quiet:focus-within .meta :global(.usage) {
+    display: inline-flex;
+  }
+  @media (hover: none) {
+    .turn.quiet .meta :global(.usage) {
+      display: inline-flex;
+    }
   }
   .agent-model {
     font-size: var(--fs-xs);

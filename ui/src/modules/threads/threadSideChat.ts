@@ -13,7 +13,8 @@ import { transcript } from '../../lib/stores/transcript.svelte';
 import { SCRATCH_WORKSPACE_ID, ws } from '../../lib/stores/workspace.svelte';
 import { toastError } from '../../lib/toastError';
 import { buildSideChatPrompt } from './sideChatPrompt';
-import { harnessLabel, isPlainShellSession, repoForCwd, sideChatOf } from './threadsHelpers';
+import { threadRepos } from './threadRepos.svelte';
+import { harnessLabel, isPlainShellSession, sideChatOf } from './threadsHelpers';
 import { threads } from './threadsStore.svelte';
 
 /** The live side chat of `mainId`, newest first. */
@@ -24,7 +25,7 @@ export function sideChatFor(mainId: string | null): Session | null {
 }
 
 async function mainContext(main: Session): Promise<Parameters<typeof buildSideChatPrompt>[1]> {
-  const repo = repoForCwd(main.cwd, [...git.repos, ...git.allRepos]);
+  const repo = threadRepos.repoFor(main.cwd, main.workspace_id);
   const [tx, status] = await Promise.all([
     api.get<Transcript>(`/sessions/${encodeURIComponent(main.id)}/transcript?limit=8`).catch(() => null),
     repo ? git.refreshStatus(repo.id).then(() => git.statusById[repo.id] ?? null, () => git.statusById[repo.id] ?? null) : null,

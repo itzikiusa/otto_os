@@ -11,6 +11,7 @@
   import { loadPaneWidth } from '../../lib/paneResizer';
   import { router } from '../../lib/router.svelte';
   import { openFile } from '../../lib/stores/openfile.svelte';
+  import { ui } from '../../lib/stores/ui.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { sessionState } from '../../lib/status';
@@ -43,6 +44,35 @@
 
   // Subscribe to live cross-session messages + MCP DB activity while mounted.
   onMount(() => threads.mountLive());
+
+  // One sidebar, like T3: while Threads is open Otto's navigator folds to its
+  // icon rail (not persisted — the shell's own preference is untouched), and
+  // comes back on leaving. Expanding it here is remembered as "don't fold".
+  onMount(() => {
+    if (viewport.isPhone || viewport.isTablet) return;
+    let folded = false;
+    if (threads.collapseNav && ui.railExpanded) {
+      ui.railExpanded = false;
+      folded = true;
+    }
+    const stop = $effect.root(() => {
+      $effect(() => {
+        const expanded = ui.railExpanded;
+        untrack(() => {
+          if (expanded && folded) {
+            folded = false;
+            threads.setCollapseNav(false);
+          } else if (!expanded && !folded && !threads.collapseNav) {
+            threads.setCollapseNav(true);
+          }
+        });
+      });
+    });
+    return () => {
+      stop();
+      if (folded && !ui.railExpanded) ui.railExpanded = true;
+    };
+  });
 
   // Seed recent cross-session messages from workspace trail.
   $effect(() => {
