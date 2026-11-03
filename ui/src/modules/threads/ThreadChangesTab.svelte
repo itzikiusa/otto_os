@@ -1,13 +1,17 @@
 <script lang="ts">
+  // Changes tab: the working tree, or — once the branch is ahead of its
+  // upstream — the local commits a Create PR would send (T3 0.1.6 "review
+  // local commits in the Diff pane"): all of them as one range, or one commit.
   import { api, isAbortError } from '../../lib/api/client';
   import Badge from '../../lib/components/Badge.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
+  import { plural } from '../../lib/plural';
   import { onTabKey } from '../../lib/tabKeys';
   import { git } from '../../lib/stores/git.svelte';
-  import type { DiffLine, DiffResp, FileChange, RepoStatusResp } from '../../lib/api/types';
+  import type { CommitInfo, DiffLine, DiffResp, RepoStatusResp } from '../../lib/api/types';
   import { matchRepoForCwd } from './threadsHelpers';
   import { threads } from './threadsStore.svelte';
 
@@ -18,11 +22,31 @@
   }
   let { workspaceId, sessionCwd, wsKey }: Props = $props();
 
+  /** One row of the file list, from either the working tree or a commit diff. */
+  interface ChangeRow {
+    path: string;
+    oldPath: string | null;
+    kind: string;
+    added: number | null;
+    deleted: number | null;
+  }
+
+  const MAX_COMMITS = 50;
+
   let status = $state<RepoStatusResp | null>(null);
   let summaryByPath = $state<Record<string, { added: number; deleted: number }>>({});
   let statusLoading = $state(false);
   let statusError = $state<string | null>(null);
   let statusRetry = $state(0);
+
+  let scope = $state<'working' | 'commits'>('working');
+  let commits = $state<CommitInfo[]>([]);
+  /** `range:<upstream>...HEAD` (all local commits) or `commit:<sha>`. */
+  let commitTarget = $state<string | null>(null);
+  let commitFiles = $state<ChangeRow[]>([]);
+  let commitsLoading = $state(false);
+  let commitsError = $state<string | null>(null);
+  let commitsRetry = $state(0);
 
   let selectedPath = $state<string | null>(null);
   let diffResp = $state<DiffResp | null>(null);
@@ -36,6 +60,28 @@
   });
 
   const repo = $derived(matchRepoForCwd(sessionCwd, git.repos));
+  const ahead = $derived(status?.upstream ? (status.ahead ?? 0) : 0);
+  const allRange = $derived(status?.upstream ? `range:${status.upstream}...HEAD` : null);
+  const activeScope = $derived(scope === 'commits' && ahead > 0 ? 'commits' : 'working');
+  const diffTarget = $derived(activeScope === 'commits' ? commitTarget : 'working');
+
+  const workingRows = $derived<ChangeRow[]>(
+    (status?.changes ?? []).map((c) => ({
+      path: c.path,
+      oldPath: c.orig_path,
+      kind: c.kind,
+      added: summaryByPath[c.path]?.added ?? null,
+      deleted: summaryByPath[c.path]?.deleted ?? null,
+    })),
+  );
+  const rows = $derived(activeScope === 'commits' ? commitFiles : workingRows);
+  const selectedRow = $derived(rows.find((r) => r.path === selectedPath) ?? null);
+
+  // Keep a valid selection as the list changes.
+  $effect(() => {
+    if (rows.length === 0) selectedPath = null;
+    else if (!selectedPath || !rows.some((r) => r.path === selectedPath)) selectedPath = rows[0].path;
+  });
 
   // Load working-tree status + numstat summary for the active repo.
   $effect(() => {
@@ -44,7 +90,6 @@
     if (!repoId) {
       status = null;
       summaryByPath = {};
-      selectedPath = null;
       return;
     }
     const ctl = new AbortController();
@@ -58,15 +103,8 @@
         if (ctl.signal.aborted) return;
         status = st;
         const map: Record<string, { added: number; deleted: number }> = {};
-        for (const f of sum.files) {
-          map[f.path] = { added: f.added ?? 0, deleted: f.deleted ?? 0 };
-        }
+        for (const f of sum.files) map[f.path] = { added: f.added ?? 0, deleted: f.deleted ?? 0 };
         summaryByPath = map;
-        if (st.changes.length > 0 && (!selectedPath || !st.changes.some((c) => c.path === selectedPath))) {
-          selectedPath = st.changes[0].path;
-        } else if (st.changes.length === 0) {
-          selectedPath = null;
-        }
       })
       .catch((e) => {
         if (ctl.signal.aborted || isAbortError(e)) return;
@@ -78,11 +116,75 @@
     return () => ctl.abort();
   });
 
-  // Load per-file hunks when selectedPath changes.
+  // Local commits (HEAD's newest `ahead` — what the upstream doesn't have yet).
+  $effect(() => {
+    const repoId = repo?.id ?? null;
+    const n = Math.min(ahead, MAX_COMMITS);
+    void commitsRetry;
+    if (activeScope !== 'commits' || !repoId || n === 0) {
+      commits = [];
+      return;
+    }
+    const ctl = new AbortController();
+    void api
+      .get<CommitInfo[]>(`/repos/${repoId}/log?limit=${n}`, ctl.signal)
+      .then((list) => {
+        if (!ctl.signal.aborted) commits = list.slice(0, n);
+      })
+      .catch(() => {
+        if (!ctl.signal.aborted) commits = [];
+      });
+    return () => ctl.abort();
+  });
+
+  // Default (and re-aim after a push/rebase) to "all local commits".
+  $effect(() => {
+    if (activeScope !== 'commits') return;
+    if (!commitTarget || (commitTarget.startsWith('range:') && commitTarget !== allRange)) commitTarget = allRange;
+  });
+
+  // Files touched by the chosen commit / range.
+  $effect(() => {
+    const repoId = repo?.id ?? null;
+    const target = activeScope === 'commits' ? commitTarget : null;
+    void commitsRetry;
+    if (!repoId || !target) {
+      commitFiles = [];
+      return;
+    }
+    const ctl = new AbortController();
+    commitsLoading = true;
+    commitsError = null;
+    void api
+      .get<DiffResp>(`/repos/${repoId}/diff?target=${encodeURIComponent(target)}&summary=true`, ctl.signal)
+      .then((r) => {
+        if (ctl.signal.aborted) return;
+        commitFiles = r.files.map((f) => ({
+          path: f.path,
+          oldPath: f.old_path,
+          kind: f.status ?? 'modified',
+          added: f.added ?? null,
+          deleted: f.deleted ?? null,
+        }));
+      })
+      .catch((e) => {
+        if (ctl.signal.aborted || isAbortError(e)) return;
+        commitFiles = [];
+        commitsError = loadErrorText(e);
+      })
+      .finally(() => {
+        if (!ctl.signal.aborted) commitsLoading = false;
+      });
+    return () => ctl.abort();
+  });
+
+  // Load per-file hunks when the selection or the target changes.
   $effect(() => {
     const repoId = repo?.id ?? null;
     const path = selectedPath;
-    if (!repoId || !path) {
+    const target = diffTarget;
+    const oldPath = selectedRow?.oldPath ?? null;
+    if (!repoId || !path || !target) {
       diffResp = null;
       diffError = null;
       diffLoading = false;
@@ -91,8 +193,11 @@
     const ctl = new AbortController();
     diffLoading = true;
     diffError = null;
+    const q = `target=${encodeURIComponent(target)}&path=${encodeURIComponent(path)}${
+      oldPath && oldPath !== path && target !== 'working' ? `&old_path=${encodeURIComponent(oldPath)}` : ''
+    }`;
     void api
-      .get<DiffResp>(`/repos/${repoId}/diff?target=working&path=${encodeURIComponent(path)}`, ctl.signal)
+      .get<DiffResp>(`/repos/${repoId}/diff?${q}`, ctl.signal)
       .then((res) => {
         if (!ctl.signal.aborted) diffResp = res;
       })
@@ -109,7 +214,7 @@
 
   const activeFileDiff = $derived(diffResp?.files[0] ?? null);
 
-  function kindTone(kind: FileChange['kind']): 'ok' | 'warn' | 'bad' | 'info' | 'neutral' {
+  function kindTone(kind: string): 'ok' | 'warn' | 'bad' | 'info' | 'neutral' {
     switch (kind) {
       case 'added':
       case 'untracked':
@@ -160,13 +265,40 @@
     />
   {:else}
     <div class="tch-head">
-      <div class="tch-repo-meta">
-        <Icon name="branch" size={13} />
-        <span class="mono ellipsis" dir="ltr">{status?.branch ?? repo.name}</span>
-        {#if status && status.changes.length > 0}
-          <Badge tone="info" label={`${status.changes.length}`} />
-        {/if}
-      </div>
+      {#if ahead > 0}
+        <div class="segmented" role="group" aria-label="What to review">
+          <button
+            type="button"
+            class:active={activeScope === 'working'}
+            aria-pressed={activeScope === 'working'}
+            onkeydown={onTabKey}
+            title="Uncommitted changes in the working tree"
+            data-testid="changes-scope-working"
+            onclick={() => (scope = 'working')}
+          >
+            Uncommitted{status && status.changes.length > 0 ? ` ${status.changes.length}` : ''}
+          </button>
+          <button
+            type="button"
+            class:active={activeScope === 'commits'}
+            aria-pressed={activeScope === 'commits'}
+            onkeydown={onTabKey}
+            title="Commits not on {status?.upstream ?? 'the upstream'} yet — what a push or PR would send"
+            data-testid="changes-scope-commits"
+            onclick={() => (scope = 'commits')}
+          >
+            Unpushed {ahead}
+          </button>
+        </div>
+      {:else}
+        <div class="tch-repo-meta">
+          <Icon name="branch" size={13} />
+          <span class="mono ellipsis" dir="ltr">{status?.branch ?? repo.name}</span>
+          {#if status && status.changes.length > 0}
+            <Badge tone="info" label={`${status.changes.length}`} />
+          {/if}
+        </div>
+      {/if}
       <div class="tch-head-actions">
         <div class="segmented" role="group" aria-label="Diff layout">
           <button
@@ -191,49 +323,72 @@
         <button
           type="button"
           class="icon-btn"
-          aria-label="Refresh working tree changes"
+          aria-label="Refresh changes"
           title="Refresh changes"
-          onclick={() => statusRetry++}
+          onclick={() => {
+            statusRetry++;
+            commitsRetry++;
+          }}
         >
           <Icon name="refresh" size={12} />
         </button>
       </div>
     </div>
 
+    {#if activeScope === 'commits'}
+      <div class="tch-commit-pick">
+        <select
+          class="input"
+          aria-label="Commit to review"
+          data-testid="changes-commit-select"
+          bind:value={commitTarget}
+        >
+          {#if allRange}
+            <option value={allRange}>All {plural(ahead, 'unpushed commit')}</option>
+          {/if}
+          {#each commits as c (c.sha)}
+            <option value="commit:{c.sha}">{c.short_sha} · {c.subject}</option>
+          {/each}
+        </select>
+      </div>
+    {/if}
+
     <LoadState
-      what="working-tree changes"
+      what={activeScope === 'commits' ? 'commit changes' : 'working-tree changes'}
       variant="panel"
-      loading={statusLoading}
-      error={statusError}
-      empty={!status || status.changes.length === 0}
-      onretry={() => statusRetry++}
+      loading={activeScope === 'commits' ? commitsLoading : statusLoading}
+      error={activeScope === 'commits' ? commitsError : statusError}
+      empty={rows.length === 0}
+      onretry={() => (activeScope === 'commits' ? commitsRetry++ : statusRetry++)}
     >
       {#snippet emptyView()}
         <EmptyState
           variant="panel"
           icon="check"
-          title="Working tree clean"
-          body="No uncommitted changes in {repo.name}."
+          title={activeScope === 'commits' ? 'No file changes' : 'Working tree clean'}
+          body={activeScope === 'commits'
+            ? 'The selected commits change no files.'
+            : `No uncommitted changes in ${repo?.name ?? 'this repo'}.`}
         />
       {/snippet}
 
-      {#if status}
+      {#if rows.length > 0}
         <div class="tch-files">
-          {#each status.changes as ch (ch.path)}
-            {@const stat = summaryByPath[ch.path]}
+          {#each rows as ch (ch.path)}
             <div class="tch-file-row" class:selected={selectedPath === ch.path}>
               <button
                 type="button"
                 class="tch-file-btn"
                 dir="ltr"
+                title={ch.oldPath && ch.oldPath !== ch.path ? `${ch.oldPath} → ${ch.path}` : ch.path}
                 onclick={() => (selectedPath = ch.path)}
               >
                 <Badge tone={kindTone(ch.kind)} variant="outline" label={ch.kind.slice(0, 1).toUpperCase()} />
                 <span class="mono ellipsis">{ch.path}</span>
-                {#if stat}
+                {#if ch.added || ch.deleted}
                   <span class="tch-counts mono">
-                    {#if stat.added > 0}<span class="tch-add">+{stat.added}</span>{/if}
-                    {#if stat.deleted > 0}<span class="tch-del">-{stat.deleted}</span>{/if}
+                    {#if ch.added}<span class="tch-add">+{ch.added}</span>{/if}
+                    {#if ch.deleted}<span class="tch-del">-{ch.deleted}</span>{/if}
                   </span>
                 {/if}
               </button>
@@ -242,7 +397,7 @@
                 class="icon-btn"
                 aria-label="Open {ch.path} in Files"
                 title="Open in Files tab"
-                onclick={() => threads.openFileTab(wsKey, `${repo.path.replace(/\/+$/, '')}/${ch.path}`, { pin: true })}
+                onclick={() => repo && threads.openFileTab(wsKey, `${repo.path.replace(/\/+$/, '')}/${ch.path}`, { pin: true })}
               >
                 <Icon name="file" size={12} />
               </button>
@@ -337,6 +492,15 @@
     align-items: center;
     gap: 4px;
     flex-shrink: 0;
+  }
+  .tch-commit-pick {
+    padding: 6px 8px;
+    border-block-end: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  .tch-commit-pick select {
+    inline-size: 100%;
+    font-size: var(--fs-s);
   }
   .tch-files {
     max-block-size: 192px;
