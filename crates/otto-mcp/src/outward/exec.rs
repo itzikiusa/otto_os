@@ -43,6 +43,7 @@ pub const MULTI_REQUEST_WRITES: &[&str] = &[
     "merge_pr",
     "create_pr",
     "create_issue",
+    "update_issue",
     "create_confluence_page",
     "update_confluence_page",
     "comment_confluence_page",
@@ -86,6 +87,8 @@ pub fn call_timeout(tool: &str, args: &Value) -> Duration {
         "merge_pr" => 90,
         // createmeta types + fields (paged), parent lookup, POST, verify GET.
         "create_issue" => 120,
+        // Description / editmeta / parent GETs, the PUT, then the assignee PUT.
+        "update_issue" => 120,
         // Write (+ full-width property POSTs / version GET), then a verify GET.
         "create_confluence_page" | "update_confluence_page" | "comment_confluence_page" => 90,
         // Push check + create + reviewer follow-ups.
@@ -116,6 +119,7 @@ pub fn timeout_error(tool: &str, args: &Value, budget: Duration) -> String {
             s("repo_id")
         ),
         "create_issue" => format!("issue \"{}\" in project {}", s("summary"), s("project_key")),
+        "update_issue" => format!("issue {}", s("key")),
         "create_confluence_page" => {
             format!("page \"{}\" in space {}", s("title"), s("space_key"))
         }
@@ -452,6 +456,42 @@ fn issue_route(tool: &str, args: &Value) -> Result<SelfCall, Error> {
             }
             SelfCall::post(format!("/api/v1/issue/{}/issues", seg(&acc)), body)
         }
+        "update_issue" => {
+            let acc = arg_str(args, "account_id")?;
+            let key = arg_str(args, "key")?;
+            // Forwarded as given (an omitted field stays unchanged); the route
+            // validates — including "nothing to update".
+            let mut body = json!({});
+            for k in [
+                "summary",
+                "description",
+                "priority",
+                "assignee",
+                "parent",
+                "epic",
+            ] {
+                if let Some(v) = args.get(k).and_then(Value::as_str) {
+                    body[k] = json!(v);
+                }
+            }
+            // `labels: []` clears the set, so it is forwarded even when empty.
+            if let Some(v) = args.get("labels").and_then(Value::as_array) {
+                body["labels"] = json!(v);
+            }
+            for k in ["add_labels", "remove_labels"] {
+                if let Some(v) = args
+                    .get(k)
+                    .and_then(Value::as_array)
+                    .filter(|a| !a.is_empty())
+                {
+                    body[k] = json!(v);
+                }
+            }
+            SelfCall::patch(
+                format!("/api/v1/issue/{}/issues/{}", seg(&acc), seg(&key)),
+                body,
+            )
+        }
         "transition_issue" => {
             let acc = arg_str(args, "account_id")?;
             let key = arg_str(args, "key")?;
@@ -464,6 +504,19 @@ fn issue_route(tool: &str, args: &Value) -> Result<SelfCall, Error> {
         other => return Err(Error::Invalid(format!("unknown otto tool '{other}'"))),
     })
 }
+
+/// The Jira / Linear tools [`issue_route`] maps (Confluence has its own arms).
+const ISSUE_TOOLS: &[&str] = &[
+    "search_issues",
+    "list_issue_transitions",
+    "list_issue_projects",
+    "list_issue_types",
+    "get_issue",
+    "comment_issue",
+    "create_issue",
+    "update_issue",
+    "transition_issue",
+];
 
 /// The two DB query tools' self-calls: `write = false` for
 /// `query_db_readonly`, `true` for the approval-gated `query_db`.
@@ -954,14 +1007,7 @@ pub fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
             )
         }
         // ---- Issues (Jira / Confluence) ----
-        "search_issues"
-        | "list_issue_transitions"
-        | "list_issue_projects"
-        | "list_issue_types"
-        | "get_issue"
-        | "comment_issue"
-        | "create_issue"
-        | "transition_issue" => issue_route(tool, args)?,
+        t if ISSUE_TOOLS.contains(&t) => issue_route(tool, args)?,
         "search_confluence" => {
             let acc = arg_str(args, "account_id")?;
             let mut path = format!("/api/v1/issue/confluence/search?account_id={}", seg(&acc));

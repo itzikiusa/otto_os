@@ -64,7 +64,7 @@ struct Expected {
 }
 
 /// Jira's `errorMessages` + `errors` as one line (the raw body otherwise).
-fn jira_error_text(body: &Value) -> String {
+pub(super) fn jira_error_text(body: &Value) -> String {
     let mut parts: Vec<String> = body["errorMessages"]
         .as_array()
         .map(|a| {
@@ -225,7 +225,7 @@ impl JiraClient {
 
     /// `(type name, hierarchy level)` of an existing issue, or None if it is
     /// missing / not visible.
-    async fn issue_type_of(&self, key: &str) -> Result<Option<(String, i64)>> {
+    pub(super) async fn issue_type_of(&self, key: &str) -> Result<Option<(String, i64)>> {
         let url = format!(
             "{}/rest/api/3/issue/{}?fields=issuetype",
             self.t.base,

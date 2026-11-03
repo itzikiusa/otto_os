@@ -131,6 +131,7 @@
     "otto_transition_issue",
     "otto_ui_request_control",
     "otto_update_confluence_page",
+    "otto_update_issue",
     "otto_update_scheduled_task",
     "otto_usage_summary",
     "otto_vault_backlinks",
@@ -241,6 +242,7 @@
     "otto_transition_issue",
     "otto_ui_request_control",
     "otto_update_confluence_page",
+    "otto_update_issue",
     "otto_update_scheduled_task",
     "otto_usage_summary",
     "otto_vault_backlinks",
@@ -389,6 +391,7 @@
     "otto_transition_issue",
     "otto_ui_request_control",
     "otto_update_confluence_page",
+    "otto_update_issue",
     "otto_update_scheduled_task",
     "otto_usage_summary",
     "otto_vault_backlinks",
@@ -462,6 +465,7 @@
     "otto_transition_issue",
     "otto_ui_request_control",
     "otto_update_confluence_page",
+    "otto_update_issue",
     "otto_update_scheduled_task",
     "otto_vault_backlinks",
     "otto_vault_dir",
@@ -563,6 +567,7 @@
     "otto_transition_issue",
     "otto_ui_request_control",
     "otto_update_confluence_page",
+    "otto_update_issue",
     "otto_update_scheduled_task",
     "otto_usage_summary",
     "otto_vault_backlinks",
@@ -2955,6 +2960,57 @@
         },
         "fields": {
           "type": "object"
+        }
+      }
+    },
+    "otto_update_issue": {
+      "type": "object",
+      "required": [
+        "key"
+      ],
+      "properties": {
+        "account_id": {
+          "type": "string",
+          "description": "Jira/Confluence account id, label, email or URL; omit if you have one."
+        },
+        "key": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "labels": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "add_labels": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "remove_labels": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "priority": {
+          "type": "string"
+        },
+        "assignee": {
+          "type": "string"
+        },
+        "parent": {
+          "type": "string"
+        },
+        "epic": {
+          "type": "string"
         }
       }
     },

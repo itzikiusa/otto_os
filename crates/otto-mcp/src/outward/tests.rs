@@ -1793,6 +1793,54 @@ fn create_issue_and_its_discovery_reads_route_and_are_tiered() {
     );
 }
 
+#[test]
+fn update_issue_routes_and_is_tiered_like_create_issue() {
+    assert!(spec_names().contains(&"otto.update_issue".to_string()));
+    assert!(DANGEROUS.contains(&"update_issue"));
+    assert!(!DEFAULT_ENABLED.contains(&"update_issue"));
+    assert!(tool_is_mutating("update_issue"));
+    assert!(!tool_is_irreversible("update_issue"));
+    assert_eq!(tool_category("update_issue"), tool_category("create_issue"));
+    assert!(pin_global("update_issue"));
+    assert!(MULTI_REQUEST_WRITES.contains(&"update_issue"));
+    assert!(REF_ARGS
+        .iter()
+        .any(|(t, a, k)| *t == "update_issue" && *a == "account_id" && *k == "issue_account"));
+
+    let c = route_for(
+        "update_issue",
+        &json!({"account_id":"a 1","key":"PRJ-7","summary":"New","labels":[],
+                "add_labels":[],"remove_labels":["old"],"priority":"High","note":"ignored"}),
+    )
+    .unwrap();
+    assert_eq!(
+        (c.method, c.path.as_str()),
+        (Method::Patch, "/api/v1/issue/a%201/issues/PRJ-7")
+    );
+    // `labels: []` (clear) is kept; an empty op list is dropped; unknown keys
+    // never reach the route.
+    assert_eq!(
+        c.body.unwrap(),
+        json!({"summary":"New","labels":[],"remove_labels":["old"],"priority":"High"})
+    );
+    assert!(route_for("update_issue", &json!({"account_id":"a1"})).is_err());
+
+    let d = dangerous_detail(
+        "otto.update_issue",
+        &json!({"key":"PRJ-7","summary":"x","add_labels":["a"]}),
+    );
+    assert_eq!(d, "Edit issue 'PRJ-7' (summary, add_labels)");
+    let msg = timeout_error(
+        "update_issue",
+        &json!({"key":"PRJ-7"}),
+        std::time::Duration::from_secs(120),
+    );
+    assert!(
+        msg.contains("issue PRJ-7 may already have completed"),
+        "{msg}"
+    );
+}
+
 // ----- Vault: optional workspace_id ------------------------------------
 
 #[test]

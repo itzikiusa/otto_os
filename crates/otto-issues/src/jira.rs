@@ -14,6 +14,9 @@ use crate::atlassian::AtlassianTransport;
 use crate::md_adf::markdown_to_adf;
 
 mod create;
+mod update;
+
+pub use update::build_update_issue_body;
 
 /// Issues requested per `/search/jql` call (the endpoint's max is 100).
 const JQL_PAGE: u32 = 100;
@@ -1276,19 +1279,7 @@ impl JiraClient {
     /// Update the description of an issue. The `body_md` Markdown is converted to ADF.
     pub async fn update_description(&self, key: &str, body_md: &str) -> Result<()> {
         let url = format!("{}/rest/api/3/issue/{}", self.t.base, path_seg(key));
-        // The Markdown the editor saved came from `adf_to_markdown`, which drops
-        // screenshots, mentions, smart links, dates, status lozenges and
-        // emoji; writing it back (via `markdown_to_adf`, which has no syntax
-        // for them) silently DELETED them from the issue. Refuse instead.
-        let current = self.description_adf(key).await?;
-        let lossy = crate::adf::adf_lossy_nodes(&current);
-        if !lossy.is_empty() {
-            return Err(Error::Conflict(format!(
-                "the description of {key} contains content Otto can't preserve ({}); saving would \
-                 delete it — edit the description in Jira instead",
-                lossy.join(", ")
-            )));
-        }
+        self.ensure_description_preservable(key).await?;
         let adf_body = markdown_to_adf(body_md)?;
         let payload = serde_json::json!({
             "fields": {
