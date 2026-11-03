@@ -15,7 +15,10 @@
   import { runPush } from './pushFlow';
   import { gitBridge } from './gitBridge.svelte';
   import { registry } from '../../lib/commands.svelte';
-  import StashBrowser from './StashBrowser.svelte';
+  import LazyMount from '../../lib/components/LazyMount.svelte';
+  import { lazyComponent } from '../../lib/lazy-component.svelte';
+  // Code-split: loaded on the first open, not with the toolbar.
+  const StashBrowser = lazyComponent(() => import('./StashBrowser.svelte'));
 
   interface Props {
     repoId: string;
@@ -380,12 +383,18 @@
 {/snippet}
 
 {#if stashesOpen}
-  <StashBrowser
-    {repoId}
-    onclose={() => (stashesOpen = false)}
-    onchanged={(st) => {
-      onstatus(st);
-      onrefresh?.();
+  <LazyMount
+    lazy={StashBrowser}
+    what="the stash browser"
+    quiet
+    onerror={() => (stashesOpen = false)}
+    props={{
+      repoId,
+      onclose: () => (stashesOpen = false),
+      onchanged: (st: RepoStatusResp) => {
+        onstatus(st);
+        onrefresh?.();
+      },
     }}
   />
 {/if}
