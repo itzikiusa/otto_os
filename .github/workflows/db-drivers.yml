@@ -75,6 +75,15 @@ jobs:
       NEXTEST_VERSION: 0.9.150
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          # Blobless sparse checkout: skips ~240 MB of videos / screenshots.
+          filter: blob:none
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !/marketing/
+            !/docs/reviews/
+            !/docs/testing/room-games/
 
       # Start the servers first: they seed while the workspace compiles.
       - name: Start the seeded DB stack + Redpanda
@@ -133,9 +142,9 @@ jobs:
             sudo ln -sf "$(command -v ld.lld)" /usr/bin/x86_64-linux-gnu-ld
           fi
 
-      - name: Cache cargo + driver targets
+      - name: Restore cargo + driver targets
         id: cargo-cache
-        uses: actions/cache@v6.1.0
+        uses: actions/cache/restore@v6.1.0
         with:
           path: |
             ~/.cargo/registry/index
@@ -192,9 +201,26 @@ jobs:
       - name: Build the driver test binaries
         run: cargo nextest run -p otto-dbviewer -p otto-brokers --profile ci --no-run
 
+      # Saved by main pushes / the nightly only (see ci.yml: PR saves evicted
+      # main's caches at the 10 GB repo cap).
       - name: Prepare cargo cache manifest
-        if: steps.cargo-cache.outputs.cache-hit != 'true'
+        if: github.event_name != 'pull_request' && steps.cargo-cache.outputs.cache-hit != 'true'
         run: python3 scripts/ci-cargo-cache.py prepare-save
+
+      - name: Save cargo cache
+        if: github.event_name != 'pull_request' && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            ~/.cargo/git/checkouts
+            target/debug/.fingerprint
+            target/debug/build
+            target/debug/deps
+            target/.ci-source-hashes.json
+          key: cargo-full-${{ runner.os }}-db-drivers-v1-${{ hashFiles('**/Cargo.toml', 'Cargo.lock', '.cargo/config.toml') }}-${{ hashFiles('crates/otto-dbviewer/**', 'crates/otto-brokers/**', 'crates/otto-ssh/**', 'crates/otto-state/**', 'crates/otto-core/**', 'crates/otto-netguard/**', 'vendor/**') }}
 
       # Every service has a compose healthcheck; the seed scripts run before
       # the server reports healthy. redis-seed is a one-shot that exits.
