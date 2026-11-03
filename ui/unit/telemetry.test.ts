@@ -264,3 +264,40 @@ test('actual HTTP producer conforms to the shared ingest contract without export
   assert.ok(!JSON.stringify(spans).includes('private'));
   t.configureTelemetry(false);
 });
+
+test('frame-delay probe records a stalled frame, not a throttled 30 Hz cadence', async () => {
+  let clock = 0;
+  const frames: Array<() => void> = [];
+  const doc = { hidden: false, addEventListener() {}, removeEventListener() {} };
+  const t = loadSource(new URL('../src/lib/telemetryRuntime.ts', import.meta.url), {
+    './telemetry': { installTelemetryRuntime() {} },
+    './poll': { pollWhileVisible: () => ({ stop() {} }) },
+  }, {
+    crypto: webcrypto,
+    performance: { now: () => clock, timeOrigin: 0 },
+    document: doc,
+    requestAnimationFrame: (fn: () => void) => { frames.push(fn); return frames.length; },
+    cancelAnimationFrame() {},
+    setTimeout: () => 0,
+    clearTimeout() {},
+  });
+  const batches: Array<Array<{ name: string; duration_ms: number }>> = [];
+  t.configureTelemetry(true, async (batch: Array<{ name: string; duration_ms: number }>) => { batches.push(batch); });
+  const probe = async (gaps: [number, number]) => {
+    const done = t.sampleFrameDelay(new AbortController().signal);
+    clock += gaps[0]; frames.shift()!();
+    clock += gaps[1]; frames.shift()!();
+    await done;
+  };
+  // Throttled 30 Hz: ~59 ms end to end, but every frame is on time.
+  await probe([26, 33]);
+  assert.equal(t.telemetryState().queued, 0);
+  // A 120 ms main-thread stall before the first frame is real delay.
+  await probe([120, 16]);
+  assert.equal(t.telemetryState().queued, 1);
+  await t.flushTelemetry();
+  assert.equal(batches[0][0].name, 'ui.frame_delay');
+  assert.equal(batches[0][0].duration_ms, 120);
+  assert.equal(t.worstFrameGap(0, [10, 90]), 80);
+  t.configureTelemetry(false);
+});

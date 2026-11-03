@@ -64,6 +64,23 @@ fn room_capability_route(p: &str) -> bool {
         || p.starts_with("/room-transcript/")
 }
 
+/// Per-resource access routes (`routes/resource_access.rs`). Each handler
+/// runs its own visibility/`manage_access` gates (self-scoped reads, policy
+/// writes), so the feature table does not decide them. An explicit list, not
+/// a prefix: a new `/access/{kind}/…` route must opt in here.
+fn is_resource_access_route(p: &str) -> bool {
+    matches!(
+        p,
+        "/access/{kind}/{id}"
+            | "/access/{kind}/{id}/subjects"
+            | "/access/{kind}/{id}/capabilities"
+            | "/access/{kind}/{id}/capabilities/batch"
+            | "/access/{kind}/capabilities/batch"
+            | "/access/{kind}/{id}/effective"
+            | "/access/{kind}/{id}/preview"
+    )
+}
+
 /// Map an `(method, matched_path)` pair to its feature-axis [`PolicyDecision`].
 ///
 /// `matched_path` is the Axum route **template** with `{id}`-style placeholders,
@@ -423,15 +440,7 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     ) {
         return Require(Users, Admin);
     }
-    if matches!(
-        p,
-        "/access/{kind}/{id}"
-            | "/access/{kind}/{id}/subjects"
-            | "/access/{kind}/{id}/capabilities"
-            | "/access/{kind}/{id}/capabilities/batch"
-            | "/access/{kind}/{id}/effective"
-            | "/access/{kind}/{id}/preview"
-    ) {
+    if is_resource_access_route(p) {
         return Exempt;
     }
 

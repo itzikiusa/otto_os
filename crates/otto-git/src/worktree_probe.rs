@@ -4,6 +4,9 @@ use otto_core::api::WorktreeInfo;
 use std::{future::Future, sync::Arc, time::Duration};
 use tokio::{sync::Semaphore, task::JoinHandle};
 
+/// A row index and its `(changes, untracked)` counts (`None` = unknown).
+type ProbeResult = (usize, Option<(u32, u32)>);
+
 pub(crate) async fn probe<F, Fut>(
     rows: &mut [WorktreeInfo],
     admission: Arc<Semaphore>,
@@ -11,7 +14,7 @@ pub(crate) async fn probe<F, Fut>(
     check: F,
 ) where
     F: Fn(String) -> Fut + Clone + Send + 'static,
-    Fut: Future<Output = Option<bool>> + Send + 'static,
+    Fut: Future<Output = Option<(u32, u32)>> + Send + 'static,
 {
     let pending: Vec<usize> = rows
         .iter()
@@ -19,15 +22,17 @@ pub(crate) async fn probe<F, Fut>(
         .filter_map(|(i, w)| (!w.prunable).then_some(i))
         .collect();
     let mut next = 0;
-    let mut running: FuturesUnordered<JoinHandle<(usize, Option<bool>)>> = FuturesUnordered::new();
+    let mut running: FuturesUnordered<JoinHandle<ProbeResult>> = FuturesUnordered::new();
     let deadline = tokio::time::Instant::now() + budget;
     while next < pending.len() || !running.is_empty() {
         tokio::select! {
             biased;
             _ = tokio::time::sleep_until(deadline) => break,
             result = running.next(), if !running.is_empty() => {
-                if let Some(Ok((index, Some(dirty)))) = result {
-                    rows[index].dirty = dirty;
+                if let Some(Ok((index, Some((changes, untracked))))) = result {
+                    rows[index].dirty = changes + untracked > 0;
+                    rows[index].changes = changes;
+                    rows[index].untracked = untracked;
                     rows[index].dirty_known = true;
                 }
             }
@@ -61,9 +66,7 @@ mod tests {
                 is_main: i == 0,
                 locked: false,
                 lock_reason: None,
-                prunable: false,
-                dirty: false,
-                dirty_known: false,
+                ..WorktreeInfo::default()
             })
             .collect()
     }
@@ -94,7 +97,7 @@ mod tests {
                             started.fetch_add(1, Ordering::SeqCst);
                             release.acquire().await.unwrap().forget();
                             done.fetch_add(1, Ordering::SeqCst);
-                            Some(false)
+                            Some((0, 0))
                         }
                     },
                 )
@@ -154,7 +157,7 @@ mod tests {
             |path| async move {
                 let i: usize = path.rsplit('/').next().unwrap().parse().unwrap();
                 tokio::task::yield_now().await;
-                (i != 5).then_some(i % 2 == 1)
+                (i != 5).then_some(((i % 2) as u32, 0))
             },
         )
         .await;

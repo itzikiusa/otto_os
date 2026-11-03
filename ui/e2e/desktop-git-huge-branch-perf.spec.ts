@@ -189,18 +189,18 @@ test('single click on a 100k-line branch paints the file list fast and mounts no
   // from cache when the window closes (was 380–390 ms: window + round-trip).
   expect(fileListMs, 'file list painted within 300 ms of the click').toBeLessThanOrEqual(300);
   expect(rows, 'diff rows in the DOM after the click').toBeLessThan(2000);
-  expect(blocks, 'file headers are paged, not all 400 mounted').toBeLessThanOrEqual(200);
+  expect(blocks, 'one file at a time, not all 400 mounted').toBeLessThanOrEqual(1);
   expect(maxLt, 'no main-thread task over 200 ms').toBeLessThan(200);
   // The click asked for the summary only — never the whole patch.
   expect(diffReqs.length).toBeGreaterThan(0);
   expect(diffReqs.every((u) => /summary=true|[?&]path=/.test(u)), diffReqs.join('\n')).toBe(true);
   await expect(page.locator('.diff-summary-bar')).toContainText('400 files');
 
-  // Opening one file fetches just that file and renders its rows (capped).
-  const before = diffReqs.length;
-  await page.locator('.detail-diff .df-head').first().click();
+  // The list opens on its first file: just that file is fetched and its rows
+  // render (capped).
+  await expect(page.locator('.detail-diff .df-block')).toHaveCount(1);
   await expect(page.locator('.detail-diff tr').first()).toBeVisible({ timeout: 10_000 });
-  expect(diffReqs.slice(before).some((u) => /[?&]path=/.test(u))).toBe(true);
+  expect(diffReqs.some((u) => /[?&]path=/.test(u))).toBe(true);
   expect(await page.locator('.detail-diff tr').count()).toBeLessThanOrEqual(HUGE_LINES + 10);
   expect(resizeLoops(), 'no "ResizeObserver loop" errors').toBe(0);
 });

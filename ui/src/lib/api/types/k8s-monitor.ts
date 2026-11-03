@@ -392,6 +392,10 @@ export interface AccessRule {
 export interface AccessPolicy { kind: ResourceKind; resource_id: Id; mode: AccessMode; revision: number; rules: AccessRule[] }
 export interface AccessDecision { allowed: boolean; reason: string; matched_rule_ids: Id[]; mode: AccessMode }
 export interface EffectiveAccessBatchRequest { children: string[] }
+/** `POST /access/{kind}/capabilities/batch` — the caller's own top-level
+ *  capabilities for many resources of one kind; the response is
+ *  `(EffectiveAccess | null)[]` in input order (`null` = not visible to you). */
+export interface ResourcesCapabilitiesRequest { ids: Id[] }
 export interface EffectiveAccess { kind: ResourceKind; resource_id: Id; user_id: Id; child: string | null; mode: AccessMode; operations: Record<string, AccessDecision> }
 export interface AccessGroup { id: Id; name: string; description: string | null; created_at: string; updated_at: string }
 export interface AccessRole { id: Id; name: string; description: string | null; kind: ResourceKind; operations: string[]; grantable_operations: string[]; created_at: string; updated_at: string }

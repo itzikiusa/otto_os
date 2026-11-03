@@ -15,6 +15,10 @@
   import { runPush } from './pushFlow';
   import { gitBridge } from './gitBridge.svelte';
   import { registry } from '../../lib/commands.svelte';
+  import LazyMount from '../../lib/components/LazyMount.svelte';
+  import { lazyComponent } from '../../lib/lazy-component.svelte';
+  // Code-split: loaded on the first open, not with the toolbar.
+  const StashBrowser = lazyComponent(() => import('./StashBrowser.svelte'));
 
   interface Props {
     repoId: string;
@@ -45,6 +49,8 @@
   // (the graph hasn't reported yet) keeps it enabled.
   const stashCount = $derived(gitBridge.stashCount[repoId]);
   const nothingToPop = $derived(stashCount === 0);
+  /** The stash browser is open (files + patch, Apply / Pop / Drop). */
+  let stashesOpen = $state(false);
 
   async function doFetch(): Promise<void> {
     busy = 'fetch';
@@ -196,6 +202,13 @@
         disabled: nothingToPop,
         title: nothingToPop ? 'Nothing to pop — there are no stashes' : 'Apply the latest stash and drop it',
         action: () => void doPop(),
+      },
+      {
+        label: 'Browse stashes…',
+        icon: 'eye',
+        disabled: nothingToPop,
+        title: 'See what each stash holds, then apply, pop or drop it',
+        action: () => (stashesOpen = true),
       },
     ]);
   }
@@ -352,21 +365,39 @@
   {busy === 'stash' ? 'Stashing…' : 'Stash'}
 </button>
 
-<!-- Pop -->
+<!-- Stashes: opens the browser (what each stash holds; Apply / Pop / Drop)
+     instead of a blind pop of whatever is on top. -->
 <button
   class="btn small ghost tbtn"
   data-overflow="-4"
   data-icon="archive"
-  data-label="Pop stash"
+  data-label="Stashes"
   disabled={busy !== '' || nothingToPop}
-  onclick={doPop}
-  title={nothingToPop ? 'Nothing to pop — there are no stashes' : 'Apply the latest stash and drop it'}
+  onclick={() => (stashesOpen = true)}
+  title={nothingToPop ? 'There are no stashes' : 'See what each stash holds, then apply, pop or drop it'}
 >
   <Icon name="archive" size={12} />
-  {busy === 'pop' ? 'Popping…' : 'Pop'}
+  {busy === 'pop' ? 'Popping…' : stashCount ? `Stashes (${stashCount})` : 'Stashes'}
 </button>
 {/if}
 {/snippet}
+
+{#if stashesOpen}
+  <LazyMount
+    lazy={StashBrowser}
+    what="the stash browser"
+    quiet
+    onerror={() => (stashesOpen = false)}
+    props={{
+      repoId,
+      onclose: () => (stashesOpen = false),
+      onchanged: (st: RepoStatusResp) => {
+        onstatus(st);
+        onrefresh?.();
+      },
+    }}
+  />
+{/if}
 
 {#if inHeader}
   {@render items()}

@@ -11,16 +11,17 @@
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import LazyTerminal from '../../lib/components/LazyTerminal.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
-  import type { WorkflowRun, Review, Session } from '../../lib/api/types';
+  import type { WorkflowRun, Review, ReviewAgentState, Session } from '../../lib/api/types';
   import { api, ApiError } from '../../lib/api/client';
-  import { mapLimit } from '../../lib/poll';
-  import { liveQuery, type LiveEvent } from '../../lib/live';
   import { untrack } from 'svelte';
   import { runStatus, sessionState, sentenceCase, type SessionStateInfo } from '../../lib/status';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import StatusDot from '../../lib/components/StatusDot.svelte';
   import { events } from '../../lib/events.svelte';
   import { reviewIds, reviewSessions, reviewAgentStatus } from './reviewAgents';
+  import { runReviews } from './runReviews.svelte';
+  import { repoProgress, stepProgress } from './stepProgress';
+  import { git } from '../../lib/stores/git.svelte';
   import { summaryFallback, summaryFallbackTitle } from '../git/reviewFallback';
   import { plural } from '../../lib/plural';
 
@@ -37,7 +38,6 @@
   // agent step reports its sub-agents (from the parent transcript) before its
   // own session id lands, so an activity-only step is still a group — the
   // sub-agent rows must not wait for the session.
-  let reviews = $state<Record<string, Review>>({});
   let sessionDetails = $state<Record<string, Session>>({});
   // A STRING key: the id array was rebuilt on every run merge (a WS tick), so
   // the effect below restarted — and refetched every review — per merge
@@ -45,52 +45,10 @@
   const relatedKey = $derived([...new Set((run.nodes ?? []).flatMap(reviewIds))].join(','));
   const relatedIds = $derived(relatedKey ? relatedKey.split(',') : []);
   // Reviews outlive await:false steps and may be retried after the workflow is
-  // complete. Keep their durable association active while this panel is open:
-  // running reviews every 2 s, finished ones (a retry can revive them) every
-  // 30 s, nothing while the window is hidden (shared poll helper). Each effect
-  // owns its requests, so a late response cannot enter another run.
-  const TERMINAL_RECHECK_MS = 30_000;
-  $effect(() => {
-    const runId = run.id;
-    const ids = relatedKey ? relatedKey.split(',') : [];
-    if (!ids.length) return;
-    const fetchedAt = new Map<string, number>();
-    const lastJson = new Map<string, string>();
-    // Event-fed: `review_changed` for one of these reviews re-reads the due
-    // ones (coalesced); 30 s safety net while events flow, the old 2 s
-    // cadence only while the event socket is down.
-    // An event for a TERMINAL review (a summarizer retry re-opens a done one)
-    // makes it due now instead of after TERMINAL_RECHECK_MS.
-    const onEvent = (ev: LiveEvent): boolean => {
-      const id = ev.review_id as string;
-      if (!ids.includes(id)) return false;
-      fetchedAt.delete(id);
-      return true;
-    };
-    const poller = liveQuery({ on: ['review_changed'], match: onEvent, fallbackMs: 2000, safetyMs: 30_000, run: async (signal) => {
-      const now = Date.now();
-      const due = ids.filter((id) => {
-        const r = untrack(() => reviews[id]);
-        if (!r || r.status === 'running') return true;
-        return now - (fetchedAt.get(id) ?? 0) >= TERMINAL_RECHECK_MS;
-      });
-      if (!due.length) return;
-      const results = await mapLimit(due, 3, async (id) => {
-        try { return await api.bg.get<Review>(`/reviews/${id}`, signal); } catch { return null; }
-      });
-      if (signal.aborted || run.id !== runId) return;
-      for (const review of results) {
-        if (!review) continue;
-        fetchedAt.set(review.id, Date.now());
-        // Assign only a changed review: an unchanged tick re-renders nothing.
-        const json = JSON.stringify(review);
-        if (lastJson.get(review.id) === json) continue;
-        lastJson.set(review.id, json);
-        reviews[review.id] = review;
-      }
-    } });
-    return () => poller.stop();
-  });
+  // complete: keep their association fresh while this panel is open (shared
+  // with the Steps list — one poller per id set, see runReviews).
+  $effect(() => runReviews.watch(relatedKey ? relatedKey.split(',') : []));
+  const reviews = $derived(runReviews.reviews);
   const groups = $derived(
     (run.nodes ?? [])
       .map((n) => ({
@@ -100,6 +58,8 @@
         recovery: (n.logs ?? []).filter((line) => line.includes('↻ retry') || line.startsWith('🔁 iteration') || line.includes(' — attempt ')).at(-1),
         sessions: reviewSessions(n, reviews),
         reviews: reviewIds(n).flatMap((id) => reviews[id] ? [reviews[id]] : []),
+        // Sessions no review row owns (an agent step, the goals grader…).
+        loose: (n.sessions ?? []).filter((sid) => !reviewIds(n).some((id) => reviews[id]?.agents.some((a) => a.session_id === sid))),
         activity: n.activity ?? null,
       }))
       .filter((g) => g.sessions.length > 0 || g.reviews.length > 0 || (g.activity?.subagents.length ?? 0) > 0),
@@ -208,48 +168,91 @@
   function sProvider(sid: string): string {
     return reviewAgent(sid)?.agent.provider || sessOf(sid)?.provider || '';
   }
-  function sStatus(sid: string): string {
-    const row = reviewAgent(sid);
-    if (row) return reviewAgentStatus(row.review, row.agent);
-    return ws.statusMap[sid] ?? sessOf(sid)?.status ?? 'idle';
-  }
   /** The one dot + word for a session row. Review agents report their own
    *  vocabulary (pending / running / waiting / done / error / skipped, plus
    *  cancelled / fallback) — mapped onto the shared session states so the raw
    *  engine word never reaches the screen. */
   function sState(sid: string): SessionStateInfo {
-    const stale = events.state !== 'connected';
-    const raw = sStatus(sid);
     const row = reviewAgent(sid);
+    if (row) return agentState(row.review, row.agent);
+    const st = sessionState(sessOf(sid), ws.statusMap[sid] ?? sessOf(sid)?.status ?? 'idle', ws.needsYou[sid] === true, { stale: events.state !== 'connected' });
+    // A finished step's session is suspended to free its PTY — it did its
+    // work. Say "Done" like a review agent, and keep why in the hint.
+    const group = groups.find((g) => g.sessions.includes(sid));
+    if (st.key === 'suspended' && group && !['running', 'pending'].includes(group.status)) {
+      return { ...st, key: 'ended', label: 'Done', tone: 'success', hint: 'Finished — its terminal is suspended to save memory; open it to view or resume' };
+    }
+    return st;
+  }
+  /** The one dot + word for a review agent row. Review agents report their own
+   *  vocabulary (pending / running / waiting / done / error / skipped, plus
+   *  cancelled / fallback) — mapped onto the shared session states so the raw
+   *  engine word never reaches the screen. */
+  function agentState(review: Review, agent: ReviewAgentState): SessionStateInfo {
+    const stale = events.state !== 'connected';
+    const raw = reviewAgentStatus(review, agent);
     const base = { resumable: false, inactive: true };
-    if (!row) return sessionState(sessOf(sid), raw, ws.needsYou[sid] === true, { stale });
     switch (raw) {
       case 'running':
         return sessionState(null, 'working', false, { stale });
       case 'waiting':
         return sessionState(null, 'idle', true, { stale });
-      case 'pending':
-        return { ...sessionState(null, 'idle', false, { stale }), label: 'Queued' };
+      case 'pending': {
+        const summarizer = review.agents.at(-1) === agent;
+        return { ...sessionState(null, 'idle', false, { stale }), label: 'Queued', hint: summarizer ? 'Starts when every reviewer has finished' : 'Waiting for a free reviewer slot — slots are shared by every review on this Mac' };
+      }
       case 'done':
         return { ...base, key: 'ended', label: 'Done', tone: 'success', hint: 'Finished' };
       case 'skipped':
-        return { ...base, key: 'ended', label: 'Skipped', tone: 'neutral', hint: 'Skipped' };
+        return { ...base, key: 'ended', label: 'Skipped', tone: 'neutral', hint: 'Not needed — another provider already covered this lens' };
       case 'cancelled':
         return { ...base, key: 'ended', label: 'Canceled', tone: 'neutral', hint: 'The review was canceled' };
       case 'fallback':
         // Names the summarizer that actually ran and why its output wasn't
         // used (error-handling-5-05), not a hard-coded "claude unavailable".
-        return { ...base, key: 'failed', label: 'Fallback', tone: 'warning', hint: summaryFallbackTitle(summaryFallback(row.review.agents), 'the findings') };
+        return { ...base, key: 'failed', label: 'Fallback', tone: 'warning', hint: summaryFallbackTitle(summaryFallback(review.agents), 'the findings') };
       case 'error':
         return { ...base, key: 'failed', label: 'Failed', tone: 'danger', hint: 'The agent failed' };
       default:
         return { ...base, key: 'ended', label: sentenceCase(raw), tone: 'neutral' };
     }
   }
+  function repoLabel(review: Review, i: number): string {
+    const r = git.allRepos.find((x) => x.id === review.repo_id) ?? git.repos.find((x) => x.id === review.repo_id);
+    return r?.name ?? `Repo ${i + 1}`;
+  }
+  const LEGEND = 'Queued — waiting to start (a free reviewer slot, or the summarizer waiting for the reviewers)\nWorking — running now\nNeeds you — waiting on your input\nDone — finished its work; its terminal is suspended to save memory and resumes when opened\nSuspended — a session of a step still in progress, paused until opened\nSkipped — another provider already covered that lens\nFailed — the agent errored';
   function shortId(id: string): string {
     return id.length > 6 ? id.slice(-6) : id;
   }
 </script>
+
+{#snippet sessRow(sid: string)}
+  <div class="sess" data-sess={sid}>
+    <button class="sess-h" onclick={() => toggle(sid)} aria-expanded={!!expanded[sid]} title={expanded[sid] ? 'Hide live terminal' : 'Show live terminal'}>
+      <Icon name={expanded[sid] ? 'chevronDown' : 'chevronRight'} size={12} />
+      <StatusDot state={sState(sid)} size={8} />
+      <span class="s-title">{sTitle(sid)}</span>
+      <span class="s-provider">{sProvider(sid)}</span>
+      <span class="s-status" title={sState(sid).hint}>{sState(sid).label}{#if ['working', 'running', 'needs-you'].includes(sState(sid).key)}{' ' + fmtSince(sessOf(sid)?.created_at)}{/if}</span>
+      <span class="grow"></span>
+      <code class="s-id" title={sid}>{shortId(sid)}</code>
+    </button>
+    {#if reviewAgent(sid)?.agent.fallback}
+      {@const fb = summaryFallback(reviewAgent(sid)?.review.agents)}
+      <div class="fallback" data-testid="summarizer-fallback" title={summaryFallbackTitle(fb, 'the findings')}>
+        Deterministic fallback — the {fb.provider} summarizer’s output wasn’t used{fb.cause ? ` (${fb.cause})` : ''}.
+      </div>
+    {/if}
+    {#if expanded[sid]}
+      <div class="term">
+        {#key sid}
+          <LazyTerminal sessionId={sid} resumable preferDom resumeOnOpen={false} />
+        {/key}
+      </div>
+    {/if}
+  </div>
+{/snippet}
 
 {#if groups.length === 0}
   <EmptyState
@@ -259,6 +262,10 @@
   />
 {:else}
   <div class="agents" data-testid="run-agents">
+    <div class="legend-row">
+      <span class="grow"></span>
+      <span class="legend" role="img" aria-label={LEGEND} title={LEGEND} data-testid="agent-state-legend"><Icon name="info" size={12} /> What the states mean</span>
+    </div>
     {#each groups as g (g.id)}
       <div class="grp">
         <div class="grp-h">
@@ -272,37 +279,50 @@
           <span class="grp-count" role="img" title={plural(g.sessions.length, 'session')} aria-label={plural(g.sessions.length, 'session')}>{g.sessions.length}</span>
         </div>
         {#if g.recovery}<div class="sub recovery-status" data-testid="workflow-recovery-status">{g.recovery}</div>{/if}
-        {#each g.sessions as sid (sid)}
-          <div class="sess" data-sess={sid}>
-            <button class="sess-h" onclick={() => toggle(sid)} aria-expanded={!!expanded[sid]} title={expanded[sid] ? 'Hide live terminal' : 'Show live terminal'}>
-              <Icon name={expanded[sid] ? 'chevronDown' : 'chevronRight'} size={12} />
-              <StatusDot state={sState(sid)} size={8} />
-              <span class="s-title">{sTitle(sid)}</span>
-              <span class="s-provider">{sProvider(sid)}</span>
-              <span class="s-status">{sState(sid).label}{#if ['working', 'running', 'needs-you'].includes(sState(sid).key)}{' ' + fmtSince(sessOf(sid)?.created_at)}{/if}</span>
-              <span class="grow"></span>
-              <code class="s-id" title={sid}>{shortId(sid)}</code>
-            </button>
-            {#if reviewAgent(sid)?.agent.fallback}
-              {@const fb = summaryFallback(reviewAgent(sid)?.review.agents)}
-              <div class="fallback" data-testid="summarizer-fallback" title={summaryFallbackTitle(fb, 'the findings')}>
-                Deterministic fallback — the {fb.provider} summarizer’s output wasn’t used{fb.cause ? ` (${fb.cause})` : ''}.
-              </div>
-            {/if}
-            {#if expanded[sid]}
-              <div class="term">
-                {#key sid}
-                  <LazyTerminal sessionId={sid} resumable preferDom resumeOnOpen={false} />
-                {/key}
-              </div>
-            {/if}
-          </div>
-        {/each}
-        {#each g.reviews as review (review.id)}
-          {@const summarizer = review.agents.at(-1)}
-          {#if summarizer && !summarizer.session_id}
-            <div class="sub" data-testid="summarizer-without-session">Summarizer · {summarizer.provider || 'claude'} — {sentenceCase(reviewAgentStatus(review, summarizer))}{summarizer.fallback ? ` · Deterministic fallback${summaryFallback(review.agents).cause ? ` (${summaryFallback(review.agents).cause})` : ''}` : ''}</div>
+        {#if g.status === 'running' && g.reviews.length}
+          {@const prog = stepProgress(g.reviews)}
+          {#if prog}
+            <div class="sub waiting" data-testid="step-waiting-on">
+              <span class="phase">{prog.phase}</span>
+              <span>{prog.detail}</span>
+              {#if prog.waitingOn}<span class="sub-desc">· waiting for {prog.waitingOn}</span>{/if}
+            </div>
           {/if}
+        {/if}
+        {#each g.reviews as review, ri (review.id)}
+          {@const rp = repoProgress(review)}
+          {#if g.reviews.length > 1}
+            <div class="repo-h" data-testid="review-repo-group">
+              <Icon name="branch" size={12} />
+              <span class="repo-name">{repoLabel(review, ri)}</span>
+              <span class="grow"></span>
+              <span>{rp.finished ? sentenceCase(review.status) : `${rp.done}/${rp.reviewers.length} reviewers done`}</span>
+            </div>
+          {/if}
+          {#each review.agents as agent, ai (`${review.id}:${ai}`)}
+            {#if agent.session_id}
+              {@render sessRow(agent.session_id)}
+            {:else}
+              {@const st = agentState(review, agent)}
+              <div class="sess queued" data-testid={review.agents.at(-1) === agent ? 'summarizer-without-session' : 'agent-without-session'} title={st.hint}>
+                <div class="sess-h static">
+                  <StatusDot state={st} size={8} />
+                  <span class="s-title">{review.agents.at(-1) === agent && review.agents.length > 1 ? 'Summarizer' : agent.name}</span>
+                  <span class="s-provider">{agent.provider || 'claude'}</span>
+                  <span class="s-status">{st.label}</span>
+                </div>
+                {#if agent.fallback}
+                  {@const fb = summaryFallback(review.agents)}
+                  <div class="fallback" data-testid="summarizer-fallback" title={summaryFallbackTitle(fb, 'the findings')}>
+                    Deterministic fallback — the {fb.provider} summarizer’s output wasn’t used{fb.cause ? ` (${fb.cause})` : ''}.
+                  </div>
+                {/if}
+              </div>
+            {/if}
+          {/each}
+        {/each}
+        {#each g.loose as sid (sid)}
+          {@render sessRow(sid)}
         {/each}
         <!-- Sub-agents / background tasks the step launched. Display only —
              they have no PTY of their own, so there is nothing to attach. -->
@@ -461,6 +481,47 @@
   }
   .sub[data-status='failed'] {
     color: var(--danger);
+  }
+  .waiting {
+    flex-wrap: wrap;
+    padding: 0 4px;
+  }
+  .phase {
+    color: var(--accent-text);
+    font-weight: 600;
+  }
+  .repo-h {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 4px 0;
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
+  }
+  .repo-name {
+    color: var(--text);
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .sess-h.static {
+    cursor: default;
+    padding-inline-start: 28px;
+  }
+  .sess-h.static:hover {
+    background: transparent;
+  }
+  .legend-row {
+    display: flex;
+  }
+  .legend {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
+    cursor: help;
   }
   .term {
     height: 320px;

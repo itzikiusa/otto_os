@@ -209,10 +209,15 @@ From the Git landing page, **Add Repository** offers three modes:
   across all workspaces the caller may view (root sees all; a non-root user sees
   repos in workspaces they're a member of).
 - A `#/git/:id` or `#/git/:id/:tab` deep link opens that repo as a tab.
-- Auto-fetch stays active for open tabs while you work in other modules: by default
-  every two minutes, with the selected repo refreshed every thirty seconds. Opening
-  a tab or returning focus checks immediately if its fetch is due. Hidden or
-  unfocused windows pause automatic fetching. The tab-strip toggle pauses it.
+- Auto-fetch runs while the Git page is showing: the selected repo every 60 s,
+  other tabs used in the last 15 minutes every two minutes. Opening the page,
+  opening a tab or returning focus checks immediately if a fetch is due. Hidden or
+  unfocused windows pause automatic fetching. The tab-strip toggle pauses the
+  periodic rounds (the button then reads **Auto-fetch paused**); even paused, the
+  selected repo is fetched once when the page or tab opens (at most once a minute).
+- A ref change made outside Otto (a terminal commit, an agent session, another git
+  client's fetch) reaches the open graph through the repo watcher: the status and
+  the graph's refs re-sync without waiting for the next fetch.
 - At most two fetches run at once; manual Fetch joins an existing request for that
   repo. Background errors retry quietly with backoff; manual failures still show
   an error. Fetch never checks out or pulls a branch.
@@ -234,6 +239,15 @@ The **Graph** tab renders the commit graph with **branch chips drawn on the
 graph** at each ref's tip. Right-clicking a commit, branch chip, or tag opens a
 context menu (see §[Context menus](#context-menus)). Removing a repo
 **unregisters** it only — `DELETE /repos/{id}` never touches the files on disk.
+
+Selecting a commit opens its detail: sha, refs, subject, author and time over
+a file navigator (`graph/CommitFileList.svelte`) — "N files +A −D", a
+**Path / Tree** switch (Tree by default, remembered), Expand all / Collapse
+all, folders with per-folder file counts and a status letter per file.
+Picking a file shows **only that file's diff**, beside the list when the pane
+is at least 760 px wide and below it otherwise; the first file opens on
+arrival, and ↑/↓ move through the files. **View all files** (remembered)
+stacks every file's diff instead (large commits start collapsed).
 
 Double-clicking a **remote** branch (`origin/x`, `upstream/x`) switches to the
 local `x` when it exists; otherwise it creates `x` at that remote ref with
@@ -298,7 +312,37 @@ write to the repo drops it).
   **not** run `checkout` — git refuses to check out a branch already held by
   another worktree.
 - The **WORKTREES** section lists `git worktree list` entries; click opens,
-  right-click removes/prunes.
+  right-click removes/prunes. Each row shows what the tree holds that the
+  repo may not have elsewhere: **●N** uncommitted + untracked files, **↑N**
+  commits that no remote and not the default branch hold, and **local** when
+  the branch is on no remote (hover for the full summary: upstream ahead /
+  behind, commits not in the base, lock).
+- **Remove** re-checks that one tree first (`GET …/worktrees/status`). A
+  clean tree gets a plain confirm; a tree holding work gets a **Force
+  remove** confirm listing each item (uncommitted changes, untracked files,
+  commits that exist only there — a detached HEAD's would be orphaned — a
+  lock, submodules). An unknown status or a `.git` link that doesn't point
+  back to this repo is refused even with force. The branch is always kept.
+  The folder is renamed to a hidden sibling and deleted in the background,
+  so trees full of build output (`target/`, `node_modules`) remove instantly
+  — before, `git worktree remove` deleted them under the 30 s git budget and
+  was killed mid-delete, which is why large worktrees could not be removed.
+
+**Stashes.** Clicking a stash (sidebar) or **Stashes (N)** in the toolbar opens
+the stash browser: every stash with message, branch, age and file count; the
+selected one shows its files (tracked and untracked, with +/− counts) and its
+patch, and **Apply**, **Pop** and **Drop** act on that stash by object ID
+(Pop and Drop confirm first; a conflicting Pop keeps the entry).
+
+**Deleting many branches.** The trash button on the LOCAL / REMOTE headers (or
+**Delete multiple branches…** in a branch menu) opens a checklist. The
+checked-out branch, `main` / `master` / the base branch and branches held by
+another worktree can't be ticked. Unmerged locals get an explicit force
+warning naming them; ticking **Also delete their remote branches** (or any
+remote ref) confirms the exact `remote: branch` list first. Each branch is
+deleted independently (`POST …/branches/delete`) and reported in its own
+result row; branches git refused as not fully merged can be force-deleted
+from the results.
 
 ### Merged branches ("landed" marks)
 
@@ -377,21 +421,32 @@ not redirect them.
 
 ## 5. Stage / commit / discard / diff
 
-The graph’s **WIP** panel is the working-tree view, backed by `git status`:
+The graph’s **WIP** panel ("Changes") is the working-tree view, backed by
+`git status`. It lists **Conflicts** (only when present), **Unstaged files**
+(tracked), **Untracked files** (only when present) and **Staged files**, each
+a collapsible section with a count. Rows show the status letter (M/A/D/R/U),
+the file name with its directory dimmed beside it, and `+/−` line counts (one
+`summary=true` numstat per side, skipped past 2,000 files). The folder button
+in the header switches between the folder tree (the default, ordered by
+folder) and a flat list (remembered per viewer). ↑/↓ move between rows across sections (with a diff open, the
+diff follows), ←/→ fold a folder. The selected file's diff opens **beside**
+the list when the pane is at least 760 px wide, below it otherwise.
 
 - **Stage / unstage** selected paths (`POST /repos/{id}/stage`,
   `/unstage`). Each returns the fresh `RepoStatusResp` so the UI updates. The
-  WIP panel's trees offer this at every level: a checkbox per **file**, per
-  **folder** (stages/unstages the whole subtree in one call), and per section
-  ("Stage all" / "Unstage all").
+  WIP panel offers this at every level: a checkbox per **file**, per
+  **folder** in the tree view (stages/unstages the whole subtree in one
+  call), the **+ / −** button on each section header, and **Stage all** in the
+  panel header (unstaged + untracked).
 - **Discard** changes to selected paths (`POST /repos/{id}/discard`) — this
   reverts/removes working-tree changes, so it always confirms first. Offered at
-  the same three levels as staging: the trash button (or context menu) on a
+  the same levels as staging: the trash button (or context menu) on a
   **file**, on a **folder** (the whole subtree in one confirmed call), and
-  "Discard all" per section. In the **Unstaged** list it discards only the
+  the trash button per section. In the **Unstaged** list it discards only the
   unstaged side (`keep_staged:true` — the file goes back to its staged version,
-  so hunks you staged survive); in the **Staged** list it reverts the whole
-  change to the last commit.
+  so hunks you staged survive); in **Untracked** it deletes the files (the
+  confirm says so); in the **Staged** list it reverts the whole change to the
+  last commit.
 - A **partially staged** file (some hunks staged, some not) is listed in
   **both** trees with a *partial* chip, so "Stage all" picks up its unstaged
   rest; clicking it in either list opens that side's diff.

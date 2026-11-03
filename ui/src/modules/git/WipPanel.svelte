@@ -1,12 +1,14 @@
 <script lang="ts">
   import { announce } from '../../lib/announce.svelte';
-  import { rowMenu } from '../../lib/rowMenu';
   import { plural } from '../../lib/plural';
-  // GitKraken-style WIP panel: shown in the graph's RIGHT detail pane when the
-  // WIP row is selected. Unstaged / Staged file trees (per-file + per-folder
-  // stage toggles, discard), a per-file working diff, and the commit composer.
-  // Replaces the old separate "Changes" tab — staging now lives on the graph.
+  // The working-tree "changes" panel: shown in the graph's RIGHT detail pane
+  // when the WIP row is selected. Conflicts / Unstaged / Untracked / Staged
+  // sections (wip/WipSection.svelte: list or folder tree, stage checkboxes,
+  // discard, +/− counts), the selected file's working diff — BESIDE the list
+  // when the pane is wide, below it when narrow — and the commit composer
+  // (wip/WipComposer.svelte). Replaces the old separate "Changes" tab.
   import { onDestroy, tick, untrack } from 'svelte';
+  import type { Attachment } from 'svelte/attachments';
   import { toastError } from '../../lib/toastError';
   import { api, isAbortError } from '../../lib/api/client';
   import type {
@@ -20,10 +22,14 @@
   import DiffViewer from './DiffViewer.svelte';
   import { repoDiffFileLoader } from './diff-load';
   import Icon from '../../lib/components/Icon.svelte';
-  import Badge from '../../lib/components/Badge.svelte';
-  import AgentByline from '../../lib/components/AgentByline.svelte';
   import { ListWindow } from '../../lib/listWindow.svelte';
-  import LazyTerminal from '../../lib/components/LazyTerminal.svelte';
+  import { lsGet, lsSet } from '../../lib/storage';
+  import WipSection from './wip/WipSection.svelte';
+  import WipComposer from './wip/WipComposer.svelte';
+  import {
+    AUTO_COLLAPSE_FILES, KIND_WORD, buildTree, listRows, splitPath, treeRows,
+    type LineCounts, type Row, type TFolder, type WipSection as Section,
+  } from './wip/wipTree';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
@@ -49,7 +55,10 @@
   // A partially staged path (`MM`) is ONE row with both flags and belongs in
   // BOTH lists — filtering on `!staged` hid its unstaged half, so "Stage all"
   // skipped it and the commit silently left those edits out.
-  const unstaged = $derived(status.changes.filter((c) => c.unstaged && c.kind !== 'conflicted'));
+  // Untracked files are their own section (no hunks to stage, and a discard
+  // deletes them); `unstaged` is the TRACKED worktree side.
+  const unstaged = $derived(status.changes.filter((c) => c.unstaged && c.kind !== 'conflicted' && c.kind !== 'untracked'));
+  const untracked = $derived(status.changes.filter((c) => c.kind === 'untracked'));
   const staged = $derived(status.changes.filter((c) => c.staged && c.kind !== 'conflicted'));
   // The daemon caps untracked rows (a non-ignored build dir can hold 200k):
   // say how many were left out instead of pretending the list is complete.
@@ -317,26 +326,18 @@
     }
   });
 
-  const kindBadge: Record<FileChange['kind'], string> = {
-    modified: 'M',
-    added: 'A',
-    deleted: 'D',
-    renamed: 'R',
-    untracked: 'U',
-    conflicted: '!',
-  };
-
   // ── Keyboard focus across index moves ─────────────────────────────────
   // Staging moves a path to the other list, so Svelte destroys the row —
   // and the focused checkbox with it — and focus fell to <body>. A row
   // control passes its origin; after the new status renders, focus goes to
   // the checkbox now at the same index in the same section (else the last
   // row, else the section heading), and a polite status says what happened.
-  type Origin = { section: 'unstaged' | 'staged'; key: string };
+  type Origin = { section: Section; key: string };
   let panelEl = $state<HTMLDivElement | null>(null);
   let announcement = $state('');
   const diffId = `wp-diff-${Math.random().toString(36).slice(2, 10)}`;
-  const rowsOf = (section: 'unstaged' | 'staged'): Row[] => (section === 'unstaged' ? unstagedRows : stagedRows);
+  const rowsOf = (section: Section): Row[] =>
+    section === 'unstaged' ? unstagedRows : section === 'untracked' ? untrackedRows : stagedRows;
   const indexOf = (origin: Origin | undefined): number =>
     origin ? Math.max(0, rowsOf(origin.section).findIndex((r) => r.key === origin.key)) : -1;
 
@@ -346,7 +347,10 @@
     announcement = message;
     if (!origin) return;
     const rows = rowsOf(origin.section);
-    const head = panelEl?.querySelector<HTMLElement>(`[data-wp-head="${origin.section}"]`);
+    // An emptied Untracked section unmounts: fall back to the Staged header.
+    const head =
+      panelEl?.querySelector<HTMLElement>(`[data-wp-head="${origin.section}"]`) ??
+      panelEl?.querySelector<HTMLElement>('[data-wp-head="staged"]');
     if (rows.length === 0) {
       head?.focus();
       return;
@@ -374,24 +378,31 @@
     }
   }
 
-  /** Discard `paths`. From the Unstaged list (`section: 'unstaged'`) only the
-   *  unstaged side goes (`keep_staged`): staged hunks of a partially staged
-   *  file survive. From the Staged list the whole change is reverted to HEAD. */
+  /** Discard `paths`. From the Unstaged / Untracked lists only the unstaged
+   *  side goes (`keep_staged`): staged hunks of a partially staged file
+   *  survive, untracked files are deleted. From the Staged list the whole
+   *  change is reverted to HEAD. */
   async function discardPaths(
     paths: string[],
     label: string,
-    section: 'unstaged' | 'staged' = 'staged',
+    section: Section = 'staged',
     origin?: Origin,
   ): Promise<void> {
     if (paths.length === 0) return;
     const before = indexOf(origin);
-    const keepStaged = section === 'unstaged';
+    const keepStaged = section !== 'staged';
     const them = paths.length === 1 ? 'it' : 'them';
     const ok = await confirmer.ask(
-      keepStaged
-        ? `Discard unstaged changes to ${label}? This reverts ${them} to the staged version (or the last commit) — staged changes are kept, untracked files are deleted — and cannot be undone.`
-        : `Discard changes to ${label}? This reverts ${them} to the last commit (new files are deleted) and cannot be undone.`,
-      { title: keepStaged ? 'Discard unstaged changes' : 'Discard changes', confirmLabel: 'Discard', danger: true },
+      section === 'untracked'
+        ? `Delete ${label}? Untracked files aren’t in git yet, so deleting ${them} cannot be undone.`
+        : keepStaged
+          ? `Discard unstaged changes to ${label}? This reverts ${them} to the staged version (or the last commit) — staged changes are kept — and cannot be undone.`
+          : `Discard changes to ${label}? This reverts ${them} to the last commit (new files are deleted) and cannot be undone.`,
+      {
+        title: section === 'untracked' ? 'Delete untracked files' : keepStaged ? 'Discard unstaged changes' : 'Discard changes',
+        confirmLabel: section === 'untracked' ? 'Delete' : 'Discard',
+        danger: true,
+      },
     );
     if (!ok) return;
     try {
@@ -422,7 +433,7 @@
     }
   }
 
-  function fileMenu(e: MouseEvent, c: FileChange, section: 'unstaged' | 'staged'): void {
+  function fileMenu(e: MouseEvent, c: FileChange, section: Section): void {
     e.preventDefault();
     const inStaged = section === 'staged';
     ctxMenu.show(e, [
@@ -432,7 +443,7 @@
       },
       { separator: true },
       {
-        label: inStaged ? 'Discard…' : 'Discard unstaged changes…',
+        label: inStaged ? 'Discard…' : section === 'untracked' ? 'Delete…' : 'Discard unstaged changes…',
         icon: 'trash',
         danger: true,
         action: () => void discardPaths([c.path], c.path, section),
@@ -445,7 +456,7 @@
   function folderMenu(
     e: MouseEvent,
     node: TFolder,
-    section: 'unstaged' | 'staged',
+    section: Section,
   ): void {
     e.preventDefault();
     const paths = node.files.map((f) => f.path);
@@ -453,7 +464,7 @@
     ctxMenu.show(e, [
       {
         label: `${section === 'staged' ? 'Unstage' : 'Stage'} ${node.name}/ (${n})`,
-        action: () => void stagePaths(paths, section === 'unstaged'),
+        action: () => void stagePaths(paths, section !== 'staged'),
       },
       { separator: true },
       {
@@ -465,61 +476,18 @@
     ]);
   }
 
-  // ── Folder tree (shared shape with the old Changes tab) ────────────────────
-  type TFile = { type: 'file'; name: string; change: FileChange };
-  type TFolder = {
-    type: 'folder';
-    name: string;
-    path: string;
-    children: TNode[];
-    files: FileChange[];
-  };
-  type TNode = TFile | TFolder;
-
-  // One collator for every compare: `localeCompare` re-resolves the locale
-  // per call, which dominated sorting a 20k-file tree.
-  const collator = new Intl.Collator();
-  function sortLevel(nodes: TNode[]): void {
-    nodes.sort((a, b) => {
-      if (a.type !== b.type) return a.type === 'folder' ? -1 : 1;
-      return collator.compare(a.name, b.name);
-    });
-    for (const n of nodes) if (n.type === 'folder') sortLevel(n.children);
+  // ── Rows: the folder tree (default, ordered by folder) or a flat list ─────────────────────
+  // The view is a per-viewer convenience (lib/storage swallows a blocked
+  // localStorage). Folders fold by "section:path" so the same folder can fold
+  // independently per section; one never toggled auto-collapses past
+  // AUTO_COLLAPSE_FILES (wipTree.ts). Both views window, so a 20k-file
+  // list costs what a 50-file one does.
+  const VIEW_KEY = 'otto.git.wip.view';
+  let treeView = $state(lsGet(VIEW_KEY) !== 'list');
+  function toggleView(): void {
+    treeView = !treeView;
+    lsSet(VIEW_KEY, treeView ? 'tree' : 'list');
   }
-
-  function buildTree(changes: FileChange[]): TNode[] {
-    const rootChildren: TNode[] = [];
-    const folders = new Map<string, TFolder>();
-    for (const c of changes) {
-      const parts = c.path.split('/');
-      let children = rootChildren;
-      let prefix = '';
-      for (let i = 0; i < parts.length - 1; i++) {
-        prefix = prefix ? `${prefix}/${parts[i]}` : parts[i];
-        let folder = folders.get(prefix);
-        if (!folder) {
-          folder = { type: 'folder', name: parts[i], path: prefix, children: [], files: [] };
-          folders.set(prefix, folder);
-          children.push(folder);
-        }
-        folder.files.push(c);
-        children = folder.children;
-      }
-      children.push({ type: 'file', name: parts[parts.length - 1], change: c });
-    }
-    sortLevel(rootChildren);
-    return rootChildren;
-  }
-
-  const unstagedTree = $derived.by(() => buildTree(unstaged));
-  const stagedTree = $derived.by(() => buildTree(staged));
-
-  // Folders fold by "section:path" so the same folder can fold independently
-  // in the Unstaged and Staged trees. A folder the user never toggled starts
-  // collapsed when its subtree holds more than AUTO_COLLAPSE_FILES changes —
-  // an un-ignored `node_modules/` or `dist/` lists tens of thousands of files
-  // (20k rows ≈ 200k DOM nodes ≈ 1.5 s to mount); its count stays visible.
-  const AUTO_COLLAPSE_FILES = 200;
   let folds = $state.raw<Map<string, boolean>>(new Map());
   function isCollapsed(key: string, node: TFolder): boolean {
     return folds.get(key) ?? node.files.length > AUTO_COLLAPSE_FILES;
@@ -529,50 +497,140 @@
     next.set(key, !isCollapsed(key, node));
     folds = next;
   }
-
-  /** The tree as the flat list of VISIBLE rows (collapsed subtrees skipped),
-   *  so each section mounts a bounded slice instead of recursing everything. */
-  type Row = { node: TNode; depth: number; key: string };
-  function visibleRows(nodes: TNode[], section: 'unstaged' | 'staged'): Row[] {
-    const out: Row[] = [];
-    const walk = (level: TNode[], depth: number) => {
-      for (const n of level) {
-        if (n.type === 'folder') {
-          out.push({ node: n, depth, key: `d:${n.path}` });
-          if (!isCollapsed(`${section}:${n.path}`, n)) walk(n.children, depth + 1);
-        } else {
-          out.push({ node: n, depth, key: `f:${n.change.path}` });
-        }
-      }
-    };
-    walk(nodes, 0);
-    return out;
+  function rowsFor(changes: FileChange[], section: Section): Row[] {
+    if (!treeView) return listRows(changes);
+    return treeRows(buildTree(changes), (n) => isCollapsed(`${section}:${n.path}`, n));
   }
-  const unstagedRows = $derived(visibleRows(unstagedTree, 'unstaged'));
-  const stagedRows = $derived(visibleRows(stagedTree, 'staged'));
+  const unstagedRows = $derived(rowsFor(unstaged, 'unstaged'));
+  const untrackedRows = $derived(rowsFor(untracked, 'untracked'));
+  const stagedRows = $derived(rowsFor(staged, 'staged'));
   // Each section is WINDOWED against the shared `.wp-scroll` scroller: only
-  // the rows in view (+ overscan) mount, between spacers sized to the rest, so
-  // a 20k-file folder costs what a 50-file one does; ⌘F searches every row.
+  // the rows in view (+ overscan) mount, between spacers sized to the rest;
+  // ⌘F searches every row.
   const unstagedWin = new ListWindow('.wp-file, .wp-folder');
+  const untrackedWin = new ListWindow('.wp-file, .wp-folder');
   const stagedWin = new ListWindow('.wp-file, .wp-folder');
   $effect(() => unstagedWin.findRows(() => null, () => unstagedRows, (r) => r.node.name));
+  $effect(() => untrackedWin.findRows(() => null, () => untrackedRows, (r) => r.node.name));
   $effect(() => stagedWin.findRows(() => null, () => stagedRows, (r) => r.node.name));
-  const winOf = (section: 'unstaged' | 'staged') => (section === 'unstaged' ? unstagedWin : stagedWin);
 
-  // Section collapse (GitKraken keeps both open; folding is still handy).
-  let unstagedOpen = $state(true);
-  let stagedOpen = $state(true);
+  // Section collapse (all open by default; folding is still handy).
+  let sectionOpen = $state<Record<Section, boolean>>({ unstaged: true, untracked: true, staged: true });
 
-  // The staged list sits BELOW the unstaged one: when the unstaged rows (or a
-  // section fold) change, its offset in the scroller moves without a scroll.
+  // Later sections sit BELOW earlier ones: when rows (or a fold) change, their
+  // offset in the scroller moves without a scroll.
   $effect(() => {
     void unstagedRows.length;
+    void untrackedRows.length;
     void stagedRows.length;
-    void unstagedOpen;
-    void stagedOpen;
+    void sectionOpen.unstaged;
+    void sectionOpen.untracked;
+    void sectionOpen.staged;
     unstagedWin.refresh();
+    untrackedWin.refresh();
     stagedWin.refresh();
   });
+
+  /** Highlight a row as the open diff — for a partially staged path only on
+   *  the side the diff shows. */
+  const isSelected = (section: Section) => (path: string): boolean =>
+    selectedPath === path && (!partial.has(path) || (section === 'staged') === stagedView);
+  /** A partially staged path is in both lists: open the side clicked. A
+   *  second click on the open row closes the diff. */
+  function selectFile(path: string, section: Section): void {
+    const same = isSelected(section)(path);
+    stagedView = section === 'staged';
+    selectedPath = same ? null : path;
+  }
+
+  // ── +/− line counts (one `summary=true` numstat per side, no patches) ──
+  // Refreshed (debounced) on every status / live change. Past COUNTS_MAX
+  // files the counts are skipped: the list must never wait on them, and a
+  // failed read just leaves the rows without counts.
+  const COUNTS_MAX = 2000;
+  let unstagedCounts = $state.raw<LineCounts | null>(null);
+  let stagedCounts = $state.raw<LineCounts | null>(null);
+  function countsOf(d: DiffResp): LineCounts {
+    const m: LineCounts = new Map();
+    for (const f of d.files) {
+      m.set(f.path, f.is_binary ? { added: null, deleted: null } : { added: f.added ?? 0, deleted: f.deleted ?? 0 });
+    }
+    return m;
+  }
+  $effect(() => {
+    const id = repoId;
+    const wantU = unstaged.length > 0 && unstaged.length <= COUNTS_MAX;
+    const wantS = staged.length > 0 && staged.length <= COUNTS_MAX;
+    void status.changes;
+    void git.liveRev[id];
+    const ctl = new AbortController();
+    const load = (target: 'worktree' | 'staged', set: (m: LineCounts | null) => void): void => {
+      void api
+        .get<DiffResp>(`/repos/${id}/diff?target=${target}&summary=true`, ctl.signal)
+        .then((d) => {
+          if (!ctl.signal.aborted) set(countsOf(d));
+        })
+        .catch(() => {});
+    };
+    const t = setTimeout(() => {
+      if (wantU) load('worktree', (m) => (unstagedCounts = m));
+      else unstagedCounts = null;
+      if (wantS) load('staged', (m) => (stagedCounts = m));
+      else stagedCounts = null;
+    }, 250);
+    return () => {
+      clearTimeout(t);
+      ctl.abort();
+    };
+  });
+  const totals = $derived.by(() => {
+    let added = 0;
+    let deleted = 0;
+    for (const m of [unstagedCounts, stagedCounts]) {
+      for (const v of m?.values() ?? []) {
+        added += v.added ?? 0;
+        deleted += v.deleted ?? 0;
+      }
+    }
+    return added + deleted > 0 ? { added, deleted } : null;
+  });
+
+  // ── Keyboard: ↑/↓ (Home/End) move between rows across sections, ←/→ fold
+  // a folder; with a diff open the moved-to file opens in its place (Tower /
+  // VS Code). The checkbox and discard stay one Tab away.
+  const rowNav: Attachment<HTMLElement> = (el) => {
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
+      const cur = (e.target as HTMLElement | null)?.closest?.<HTMLElement>('[data-wp-nav]');
+      if (!cur) return;
+      const all = Array.from(el.querySelectorAll<HTMLElement>('[data-wp-nav]'));
+      const i = all.indexOf(cur);
+      const rtl = getComputedStyle(el).direction === 'rtl';
+      let next: HTMLElement | undefined;
+      if (e.key === 'ArrowDown') next = all[i + 1];
+      else if (e.key === 'ArrowUp') next = all[i - 1];
+      else if (e.key === 'Home') next = all[0];
+      else if (e.key === 'End') next = all.at(-1);
+      else if ((e.key === 'ArrowRight' || e.key === 'ArrowLeft') && cur.classList.contains('wp-fold-name')) {
+        e.preventDefault();
+        const expand = (e.key === 'ArrowRight') !== rtl;
+        if (expand !== (cur.getAttribute('aria-expanded') === 'true')) cur.click();
+        return;
+      } else return;
+      e.preventDefault();
+      if (!next) return;
+      next.focus();
+      next.scrollIntoView({ block: 'nearest' });
+      const key = next.dataset.wpNav ?? '';
+      const section = next.closest<HTMLElement>('[data-wp-section]')?.dataset.wpSection as Section | undefined;
+      if (selectedPath !== null && section && key.startsWith('f:')) {
+        stagedView = section === 'staged';
+        selectedPath = key.slice(2);
+      }
+    };
+    el.addEventListener('keydown', onKey);
+    return () => el.removeEventListener('keydown', onKey);
+  };
 
   // Repo signing defaults. A failed read must not look like "this repo doesn't
   // sign": the toggle stays usable (per-commit override), but the row says the
@@ -759,442 +817,239 @@
   }
 </script>
 
-{#snippet fileRow(file: TFile, depth: number, section: 'unstaged' | 'staged')}
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div use:rowMenu
-    class="wp-file"
-    class:selected={selectedPath === file.change.path}
-    style="padding-inline-start:{8 + depth * 14}px"
-    oncontextmenu={(e) => fileMenu(e, file.change, section)}
-  >
-    <input
-      type="checkbox"
-      checked={section === 'staged'}
-      data-row-key="f:{file.change.path}"
-      onchange={() =>
-        stagePaths([file.change.path], section === 'unstaged', { section, key: `f:${file.change.path}` })}
-      title={section === 'staged' ? 'Unstage' : 'Stage'}
-      aria-label="{section === 'staged' ? 'Unstage' : 'Stage'} {file.change.path}"
-    />
-    <button
-      class="wp-name"
-      onclick={() => {
-        // A partially staged path is in both lists: open the side clicked.
-        stagedView = section === 'staged';
-        selectedPath = selectedPath === file.change.path ? null : file.change.path;
-      }}
-      title={file.change.path}
-      aria-expanded={selectedPath === file.change.path}
-      aria-controls={selectedPath === file.change.path ? diffId : undefined}
-    >
-      <span class="kind k-{file.change.kind}">{kindBadge[file.change.kind]}</span>
-      <span class="mono wp-fname">{file.name}</span>
-      {#if partial.has(file.change.path)}
-        <!-- Same path in both trees: some hunks staged, some not. -->
-        <Badge tone="accent" variant="outline" label="Partial" title="Partially staged" testid="wip-partial" />
-      {/if}
-    </button>
-    <button
-      class="wp-discard"
-      title={section === 'unstaged' ? 'Discard unstaged changes to this file' : 'Discard changes to this file'}
-      aria-label="Discard {file.change.path}"
-      onclick={() =>
-        void discardPaths([file.change.path], file.change.path, section, { section, key: `f:${file.change.path}` })}
-    >
-      <Icon name="trash" size={12} />
-    </button>
-  </div>
+{#snippet section(id: Section, title: string, changes: FileChange[], rows: Row[], lw: ListWindow, empty: string, counts: LineCounts | null)}
+  <WipSection section={id} {title} count={changes.length} {rows} {lw} {empty} tree={treeView} {partial} {counts} {diffId}
+    bind:open={() => sectionOpen[id], (v) => (sectionOpen[id] = v)}
+    all={changes.map((c) => c.path)}
+    selected={isSelected(id)}
+    collapsed={(n) => isCollapsed(`${id}:${n.path}`, n)}
+    ontoggle={(n) => toggleFolder(`${id}:${n.path}`, n)}
+    onstage={(paths, origin) => void stagePaths(paths, id !== 'staged', origin)}
+    ondiscard={(paths, label, origin) => void discardPaths(paths, label, id, origin)}
+    onselect={(path) => selectFile(path, id)}
+    onfilemenu={(e, c) => fileMenu(e, c, id)}
+    onfoldermenu={(e, n) => folderMenu(e, n, id)}
+    footer={id === 'untracked' ? untrackedCap : undefined}
+  />
 {/snippet}
 
-{#snippet folderRow(node: TFolder, depth: number, section: 'unstaged' | 'staged')}
-    {@const key = `${section}:${node.path}`}
-    {@const shut = isCollapsed(key, node)}
-    <!-- Folder row: the checkbox stages/unstages EVERY file under the folder
-         (recursively — node.files carries the whole subtree) in one call, the
-         same affordance file rows have. The name/chevron only folds — a name
-         click must never mutate the index. -->
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div use:rowMenu
-      class="wp-folder"
-      style="padding-inline-start:{8 + depth * 14}px"
-      oncontextmenu={(e) => folderMenu(e, node, section)}
-    >
-      <input
-        type="checkbox"
-        checked={section === 'staged'}
-        data-row-key="d:{node.path}"
-        onchange={() =>
-          stagePaths(
-            node.files.map((f) => f.path),
-            section === 'unstaged',
-            { section, key: `d:${node.path}` },
-          )}
-        title="{section === 'staged' ? 'Unstage' : 'Stage'} {node.path}/ ({plural(node.files.length, 'file')})"
-        aria-label="{section === 'staged' ? 'Unstage' : 'Stage'} folder {node.path}"
-      />
-      <button
-        class="wp-fold-name"
-        onclick={() => toggleFolder(key, node)}
-        title="{node.path}/ ({node.files.length})"
-        aria-expanded={!shut}
+{#snippet untrackedCap()}
+  {#if hiddenUntracked > 0}
+    <p class="wp-untracked-cap" role="note">
+      <Icon name="info" size={12} />
+      <span
+        >{hiddenUntracked.toLocaleString()} more untracked {hiddenUntracked === 1 ? 'file' : 'files'} not shown. If they’re
+        build output or dependencies, add them to <code>.gitignore</code>.</span
       >
-        <Icon name={shut ? 'chevronRight' : 'chevronDown'} size={12} />
-        <Icon name="folder" size={12} />
-        <span class="wp-fold-label">{node.name}</span>
-        <span class="wp-fold-count">{node.files.length}</span>
-      </button>
-      <!-- Discard the whole folder in one confirmed call — the counterpart to
-           the folder checkbox, which already stages/unstages the subtree. -->
-      <button
-        class="wp-discard"
-        title="Discard changes to every file under {node.path}/"
-        aria-label="Discard folder {node.path}"
-        onclick={() =>
-          void discardPaths(
-            node.files.map((f) => f.path),
-            `${node.path}/ (${plural(node.files.length, 'file')})`,
-            section,
-            { section, key: `d:${node.path}` },
-          )}
-      >
-        <Icon name="trash" size={12} />
-      </button>
-    </div>
-{/snippet}
-
-{#snippet sectionRows(rows: Row[], section: 'unstaged' | 'staged', empty: string)}
-  {@const lw = winOf(section)}
-  {@const win = lw.range(rows.length)}
-  {#if rows.length === 0}
-    <div class="dim wp-empty">{empty}</div>
+    </p>
   {/if}
-  <div class="wp-rows" data-section={section} {@attach lw.attach}>
-    {#if win.top > 0}<div class="wp-spacer" style="height:{win.top}px" aria-hidden="true"></div>{/if}
-    {#each rows.slice(win.start, win.end) as r (r.key)}
-      {#if r.node.type === 'folder'}
-        {@render folderRow(r.node, r.depth, section)}
-      {:else}
-        {@render fileRow(r.node, r.depth, section)}
-      {/if}
-    {/each}
-    {#if win.bottom > 0}<div class="wp-spacer" style="height:{win.bottom}px" aria-hidden="true"></div>{/if}
-  </div>
+{/snippet}
+
+{#snippet signError()}
+  {#if signCfgError}
+    <span class="sign-err">
+      Couldn’t read signing settings ·
+      <button class="btn small ghost" onclick={() => loadSignCfg(repoId)} disabled={signCfgLoading}>{signCfgLoading ? 'Retrying…' : 'Retry'}</button>
+    </span>
+  {/if}
 {/snippet}
 
 <div class="wip-panel" bind:this={panelEl}>
   <div class="sr-only" role="status" aria-live="polite">{announcement}</div>
   <div class="wp-head">
-    <span class="wp-title mono">// WIP</span>
+    <span class="wp-title">Changes</span>
+    <span class="wp-branch" title="On branch {status.branch}"><Icon name="branch" size={12} /><span dir="ltr">{status.branch}</span></span>
     <span class="wp-count">{plural(status.changes.length, 'file')} changed</span>
+    {#if totals}
+      <span class="wp-totals" title="{totals.added.toLocaleString()} lines added, {totals.deleted.toLocaleString()} deleted">
+        <span class="wp-add">+{totals.added.toLocaleString()}</span>
+        <span class="wp-del">−{totals.deleted.toLocaleString()}</span>
+      </span>
+    {/if}
     <span class="grow"></span>
-    <button class="icon-btn wp-close" onclick={onclose} title="Close WIP panel" aria-label="Close WIP panel"><Icon name="x" size={14} /></button>
+    {#if unstaged.length + untracked.length > 0}
+      <button
+        type="button"
+        class="btn ghost small wp-stage-all"
+        title="Stage every unstaged and untracked file"
+        onclick={() => void stagePaths([...unstaged, ...untracked].map((c) => c.path), true)}
+      >Stage all</button>
+    {/if}
+    <button
+      type="button"
+      class="icon-btn wp-view-btn"
+      aria-pressed={treeView}
+      onclick={toggleView}
+      title={treeView ? 'Show as a list' : 'Group by folder'}
+      aria-label="Group by folder"
+    ><Icon name="folder" size={14} /></button>
+    <button class="icon-btn wp-close" onclick={onclose} title="Close the changes panel" aria-label="Close the changes panel"><Icon name="x" size={14} /></button>
   </div>
 
-  <div class="wp-scroll" class:has-diff={selectedPath !== null}>
-    <!-- Conflicts (own section, resolve actions instead of stage checkboxes) -->
-    {#if conflicted.length > 0}
-      <div class="wp-section wp-conflicts">
-        <div class="wp-sec-head wp-conflict-head">
-          <Icon name="merge" size={12} />
-          <span>Conflicts</span>
-          <span class="wp-sec-count">{conflicted.length}</span>
-          <span class="grow"></span>
-          {#if onresolve}
-            <button
-              type="button"
-              class="btn ghost small wp-sec-action"
-              onclick={(e) => {
-                e.stopPropagation();
-                onresolve?.();
-              }}
-            >Open resolver</button>
-          {/if}
-        </div>
-        <div class="wp-list">
+  <div class="wp-body" class:has-diff={selectedPath !== null}>
+    <div class="wp-scroll" {@attach rowNav}>
+      <!-- Conflicts (own section, resolve actions instead of stage checkboxes) -->
+      {#if conflicted.length > 0}
+        <section class="wp-conflicts" aria-label="Conflicts">
+          <div class="wp-conflict-head">
+            <Icon name="merge" size={12} />
+            <span>Conflicts</span>
+            <span class="wp-ccount">{conflicted.length}</span>
+            <span class="grow"></span>
+            {#if onresolve}
+              <button type="button" class="btn ghost small" onclick={() => onresolve?.()}>Open resolver</button>
+            {/if}
+          </div>
           {#each conflicted as c (c.path)}
-            <div class="wp-file wp-conflict-row">
-              <span class="kind k-conflicted">!</span>
-              <button
-                class="wp-name"
-                onclick={() => onresolve?.()}
-                title="Resolve {c.path} in the conflict resolver"
-              >
-                <span class="mono wp-fname">{c.path}</span>
+            {@const parts = splitPath(c.path)}
+            <div class="wp-crow">
+              <span class="wp-ckind" title={KIND_WORD.conflicted} aria-hidden="true">!</span>
+              <button class="wp-cname" onclick={() => onresolve?.()} title="Resolve {c.path} in the conflict resolver">
+                <span class="wp-cfile" dir="ltr">{parts.name}</span>
+                {#if parts.dir}<span class="wp-cdir" dir="ltr">{parts.dir}</span>{/if}
               </button>
-              <button class="wp-side" title="Keep your version (ours)" onclick={() => void takeSide(c.path, 'ours')}>Ours</button>
-              <button class="wp-side" title="Keep their version (theirs)" onclick={() => void takeSide(c.path, 'theirs')}>Theirs</button>
+              <button class="btn small ghost" title="Keep your version (ours)" onclick={() => void takeSide(c.path, 'ours')}>Ours</button>
+              <button class="btn small ghost" title="Keep their version (theirs)" onclick={() => void takeSide(c.path, 'theirs')}>Theirs</button>
             </div>
           {/each}
+        </section>
+      {/if}
+
+      {@render section('unstaged', 'Unstaged files', unstaged, unstagedRows, unstagedWin, 'Nothing unstaged.', unstagedCounts)}
+      {#if untracked.length > 0 || hiddenUntracked > 0}
+        {@render section('untracked', 'Untracked files', untracked, untrackedRows, untrackedWin, 'No untracked files shown.', null)}
+      {/if}
+      {@render section('staged', 'Staged files', staged, stagedRows, stagedWin, 'Nothing staged yet.', stagedCounts)}
+    </div>
+
+    <!-- Per-file diff: a SIBLING of the list scroller, never its tail (inside
+         the scroller it rendered below every row — off-screen on a big
+         changeset). Narrow: its own region under the list. Wide (container
+         query): the column beside the list and composer. -->
+    {#if selectedPath !== null}
+      {@const parts = splitPath(selectedPath)}
+      <div class="wp-diff" id={diffId}>
+        <div class="wp-diff-head">
+          <Icon name="file" size={12} />
+          <span class="wp-diff-path" title={selectedPath} dir="ltr"><strong>{parts.name}</strong>{#if parts.dir}<span class="wp-diff-dir">{parts.dir}</span>{/if}</span>
+          <span class="grow"></span>
+          {#if partial.has(selectedPath)}
+            <!-- Both sides exist: pick which one the hunk actions operate on. -->
+            <div class="segmented wp-target" role="group" aria-label="Diff side">
+              <button class:active={!stagedView} aria-pressed={!stagedView} onclick={() => (stagedView = false)}>Unstaged</button>
+              <button class:active={stagedView} aria-pressed={stagedView} onclick={() => (stagedView = true)}>Staged</button>
+            </div>
+          {/if}
+          <button class="icon-btn wp-close" onclick={() => (selectedPath = null)} title="Close diff" aria-label="Close diff"><Icon name="x" size={14} /></button>
+        </div>
+        <div class="wp-diff-body">
+          {#if diffLoading && !diff}
+            <div class="wp-diff-skel"><Skeleton rows={5} height={20} /></div>
+          {:else if diff && diff.files.length > 0}
+            <DiffViewer
+              {diff}
+              {repoId}
+              loadFile={loadWipFile}
+              wip={selTarget === 'working'
+                ? undefined
+                : {
+                    target: selTarget,
+                    onapplied: (r) => {
+                      onstatus(r.status);
+                      diff = r.diff;
+                      if (r.backup_stash)
+                        toasts.info('Backup stash kept', r.backup_stash.slice(0, 8));
+                    },
+                  }}
+            />
+          {:else if diffError}
+            <LoadState variant="compact" what="this file’s diff" error={diffError} empty onretry={() => diffRetry++} />
+          {:else}
+            <div class="wp-empty">No textual diff for this file.</div>
+          {/if}
         </div>
       </div>
     {/if}
 
-    <!-- Unstaged -->
-    <div class="wp-section">
-      <div class="wp-sec-head">
-        <button type="button" class="wp-sec-toggle" data-wp-head="unstaged" onclick={() => (unstagedOpen = !unstagedOpen)} aria-expanded={unstagedOpen}>
-          <Icon name={unstagedOpen ? 'chevronDown' : 'chevronRight'} size={12} />
-          <span>Unstaged files</span>
-          <span class="wp-sec-count">{unstaged.length}</span>
-        </button>
-        {#if unstaged.length > 0}
-          <button
-            type="button"
-            class="btn ghost small wp-sec-action"
-            onclick={(e) => {
-              e.stopPropagation();
-              void stagePaths(unstaged.map((c) => c.path), true);
-            }}
-          >Stage all</button>
-          <button
-            type="button"
-            class="btn ghost small wp-sec-action danger"
-            title="Discard changes to all unstaged files"
-            onclick={(e) => {
-              e.stopPropagation();
-              void discardPaths(unstaged.map((c) => c.path), 'all unstaged files', 'unstaged');
-            }}
-          >Discard all</button>
-        {/if}
-      </div>
-      {#if unstagedOpen}
-        <div class="wp-list">
-          {@render sectionRows(unstagedRows, 'unstaged', 'Nothing unstaged.')}
-        </div>
-        {#if hiddenUntracked > 0}
-          <p class="wp-untracked-cap" role="note">
-            <Icon name="info" size={12} />
-            <span
-              >{hiddenUntracked.toLocaleString()} more untracked {hiddenUntracked === 1 ? 'file' : 'files'} not shown. If they’re
-              build output or dependencies, add them to <code>.gitignore</code>.</span
-            >
-          </p>
-        {/if}
-      {/if}
-    </div>
-
-    <!-- Staged -->
-    <div class="wp-section">
-      <div class="wp-sec-head">
-        <button type="button" class="wp-sec-toggle" data-wp-head="staged" onclick={() => (stagedOpen = !stagedOpen)} aria-expanded={stagedOpen}>
-          <Icon name={stagedOpen ? 'chevronDown' : 'chevronRight'} size={12} />
-          <span>Staged files</span>
-          <span class="wp-sec-count">{staged.length}</span>
-        </button>
-        {#if staged.length > 0}
-          <button
-            type="button"
-            class="btn ghost small wp-sec-action"
-            onclick={(e) => {
-              e.stopPropagation();
-              void stagePaths(staged.map((c) => c.path), false);
-            }}
-          >Unstage all</button>
-          <button
-            type="button"
-            class="btn ghost small wp-sec-action danger"
-            title="Discard changes to all staged files"
-            onclick={(e) => {
-              e.stopPropagation();
-              void discardPaths(staged.map((c) => c.path), 'all staged files');
-            }}
-          >Discard all</button>
-        {/if}
-      </div>
-      {#if stagedOpen}
-        <div class="wp-list">
-          {@render sectionRows(stagedRows, 'staged', 'Nothing staged yet.')}
-        </div>
-      {/if}
-    </div>
-
-  </div>
-
-  <!-- Per-file diff: a SIBLING of the tree scroller, not its tail — appended
-       inside wp-scroll it sat below every tree row, so on a large changeset
-       (hundreds of files) selecting a file loaded the diff far off-screen and
-       looked like nothing happened. As its own flex region it is visible the
-       instant a file is clicked, with its own scrollbar. -->
-  {#if selectedPath !== null}
-    <div class="wp-diff" id={diffId}>
-      <div class="wp-diff-head">
-        <Icon name="file" size={12} />
-        <span class="mono wp-diff-path" title={selectedPath}>{selectedPath}</span>
-        <span class="grow"></span>
-        {#if partial.has(selectedPath)}
-          <!-- Both sides exist: pick which one the hunk actions operate on. -->
-          <div class="segmented wp-target" role="group" aria-label="Diff side">
-            <button class:active={!stagedView} aria-pressed={!stagedView} onclick={() => (stagedView = false)}>Unstaged</button>
-            <button class:active={stagedView} aria-pressed={stagedView} onclick={() => (stagedView = true)}>Staged</button>
-          </div>
-        {/if}
-        <button class="icon-btn wp-close" onclick={() => (selectedPath = null)} title="Close diff" aria-label="Close diff"><Icon name="x" size={14} /></button>
-      </div>
-      <div class="wp-diff-body">
-        {#if diffLoading && !diff}
-          <div style="padding: 10px"><Skeleton rows={5} height={20} /></div>
-        {:else if diff && diff.files.length > 0}
-          <DiffViewer
-            {diff}
-            {repoId}
-            loadFile={loadWipFile}
-            wip={selTarget === 'working'
-              ? undefined
-              : {
-                  target: selTarget,
-                  onapplied: (r) => {
-                    onstatus(r.status);
-                    diff = r.diff;
-                    if (r.backup_stash)
-                      toasts.info('Backup stash kept', r.backup_stash.slice(0, 8));
-                  },
-                }}
-          />
-        {:else if diffError}
-          <LoadState variant="compact" what="this file’s diff" error={diffError} empty onretry={() => diffRetry++} />
-        {:else}
-          <div class="dim wp-empty">No textual diff for this file.</div>
-        {/if}
-      </div>
-    </div>
-  {/if}
-
-  <!-- Commit composer -->
-  <div class="wp-composer">
-    <div class="msg-box">
-      <input dir="auto"
-        class="input subject-input"
-        bind:value={subject}
-        placeholder={amend
-          ? amendSubject
-            ? `Keep “${amendSubject}” — or type a new message`
-            : 'Keep the previous message — or type a new one'
-          : 'Summary'}
-        aria-label="Commit summary"
-        spellcheck="false"
-        onkeydown={commitKey}
+    <div class="wp-compose">
+      <WipComposer
+        bind:subject bind:body bind:amend bind:signOn bind:showDraftTerm
+        {amendSubject} {amendPublished} {drafting} {draftElapsed} {draftable} {draftedAt} {liveDraftId}
+        {committing} {canCommit} {commitHint} stagedCount={staged.length} {signCfg} {signError}
+        onkey={commitKey} ondraft={draftMessage} oncommit={commit}
       />
-      <button
-        class="btn small ghost draft-btn"
-        disabled={drafting || committing || !draftable}
-        onclick={draftMessage}
-        title={draftable
-          ? 'Draft a summary + description from your staged changes'
-          : 'Stage a file first — drafting can’t see untracked files'}
-      >
-        {#if drafting}
-          <span class="spinner" style="--spinner-size: 10px" aria-hidden="true"></span> Drafting…{draftElapsed > 0 ? ` ${draftElapsed}s` : ''}
-        {:else}
-          <Icon name="zap" size={12} /> Draft
-        {/if}
-      </button>
-      {#if liveDraftId}
-        <button
-          class="btn small ghost draft-btn"
-          onclick={() => (showDraftTerm = !showDraftTerm)}
-          title={showDraftTerm ? 'Hide the drafting agent' : 'Watch the drafting agent live'}
-        >
-          <Icon name={showDraftTerm ? 'chevronUp' : 'terminal'} size={12} />
-          {showDraftTerm ? 'Hide agent' : 'Watch agent'}
-        </button>
-      {/if}
-    </div>
-    {#if draftedAt && (subject.trim() || body.trim())}
-      <div class="draft-by"><AgentByline label="Draft" at={draftedAt} /></div>
-    {/if}
-    {#if liveDraftId && showDraftTerm}
-      <div class="draft-term">
-        <LazyTerminal sessionId={liveDraftId} preferDom showToolbar={false} />
-      </div>
-    {/if}
-    <textarea dir="auto"
-      class="input body-input"
-      rows="2"
-      bind:value={body}
-      placeholder="Why this change, in a sentence or two"
-      aria-label="Commit description (optional)"
-      spellcheck="false"
-      onkeydown={commitKey}
-    ></textarea>
-    {#if amendPublished}
-      <div class="amend-warn" role="note">
-        <Icon name="warning" size={12} />
-        <span>This commit is already on {amendPublished}. Amending rewrites it — the next push will need a force push with lease.</span>
-      </div>
-    {/if}
-    <div class="wp-action-row">
-      <label class="checkbox-row">
-        <input type="checkbox" bind:checked={amend} />
-        Amend
-      </label>
-      <label
-        class="checkbox-row"
-        title={signCfg?.signing_key
-          ? `Sign with ${signCfg.format ?? 'gpg'} key ${signCfg.signing_key}`
-          : 'Sign this commit'}
-      >
-        <input type="checkbox" bind:checked={signOn} />
-        Sign
-      </label>
-      {#if signCfgError}
-        <span class="sign-err">
-          Couldn’t read signing settings ·
-          <button class="btn small ghost" onclick={() => loadSignCfg(repoId)} disabled={signCfgLoading}>{signCfgLoading ? 'Retrying…' : 'Retry'}</button>
-        </span>
-      {/if}
-      <span class="grow"></span>
-      {#if commitHint}<span id="wp-commit-hint" class="wp-commit-hint dim">{commitHint}</span>{/if}
-      <button
-        class="btn primary"
-        disabled={!canCommit}
-        onclick={commit}
-        title={commitHint || 'Commit (⌘↵)'}
-        aria-describedby={commitHint ? 'wp-commit-hint' : undefined}
-      >
-        {committing ? 'Committing…' : `${amend ? 'Amend' : 'Commit'}${staged.length > 0 ? ` (${staged.length})` : ''}`}
-      </button>
     </div>
   </div>
 </div>
 
 <style>
-  .wp-commit-hint {
-    font-size: var(--fs-xs);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    min-width: 0;
-  }
-  .draft-term {
-    height: 220px;
-    margin: 6px 0;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    overflow: hidden;
-    background: var(--term-bg);
-  }
   .wip-panel {
+    container: wip / inline-size;
     display: flex;
     flex-direction: column;
     height: 100%;
     min-height: 0;
+    background: var(--surface);
   }
   .wp-head {
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 10px 12px;
-    border-bottom: 1px solid var(--border);
+    min-height: 40px;
+    padding-block: 4px;
+    padding-inline: 14px 8px;
+    border-block-end: 1px solid var(--border);
     flex-shrink: 0;
+    min-width: 0;
   }
   .wp-title {
     font-size: var(--fs-m);
     font-weight: 600;
-    color: var(--accent-text);
+    color: var(--text);
+    flex-shrink: 0;
+  }
+  .wp-branch {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    min-width: 0;
+    max-width: 30%;
+    font-size: var(--fs-s);
+    color: var(--text-dim);
+  }
+  .wp-branch > span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .wp-branch :global(svg) {
+    flex-shrink: 0;
   }
   .wp-count {
-    font-size: var(--fs-xs);
+    font-size: var(--fs-s);
     color: var(--text-dim);
+    white-space: nowrap;
+  }
+  .wp-totals {
+    display: inline-flex;
+    gap: 4px;
+    font-family: var(--font-mono);
+    font-size: var(--fs-xs);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+  .wp-add {
+    color: var(--success);
+  }
+  .wp-del {
+    color: var(--danger);
+  }
+  .wp-stage-all {
+    flex-shrink: 0;
+  }
+  .wp-view-btn[aria-pressed='true'] {
+    color: var(--accent-text);
+    background: var(--accent-soft);
   }
   /* .icon-btn; only placement is local. */
   .wp-close {
@@ -1204,263 +1059,192 @@
     flex: 1;
   }
 
+  /* ── Layout: narrow = list / diff / composer stacked; wide = the diff in its
+     own column beside the list + composer (container query, not viewport). */
+  .wp-body {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
   .wp-scroll {
     flex: 1;
     min-height: 0;
     overflow-y: auto;
     overscroll-behavior: contain;
   }
-  /* With a diff open the trees yield the pane: capped (but still scrollable)
-     so the diff region below is always on-screen. */
-  .wp-scroll.has-diff {
+  /* With a diff open the list yields: capped (still scrollable) so the diff
+     region below is always on-screen. */
+  .wp-body.has-diff .wp-scroll {
     flex: 0 1 auto;
     max-height: 45%;
   }
-  .wp-section {
-    border-bottom: 1px solid var(--border);
+  .wp-compose {
+    flex-shrink: 0;
   }
-  .wp-sec-head {
+  @container wip (min-width: 760px) {
+    .wp-body.has-diff {
+      display: grid;
+      grid-template-columns: minmax(280px, 36%) minmax(0, 1fr);
+      grid-template-rows: minmax(0, 1fr) auto;
+      grid-template-areas: 'list diff' 'compose diff';
+    }
+    .wp-body.has-diff .wp-scroll {
+      grid-area: list;
+      max-height: none;
+    }
+    .wp-body.has-diff .wp-compose {
+      grid-area: compose;
+    }
+    .wp-body.has-diff .wp-diff {
+      grid-area: diff;
+      border-block-start: none;
+      border-inline-start: 1px solid var(--border);
+    }
+  }
+  @container wip (max-width: 420px) {
+    .wp-branch,
+    .wp-totals {
+      display: none;
+    }
+  }
+
+  .wp-empty {
+    padding: 8px 14px;
+    font-size: var(--fs-s);
+    color: var(--text-dim);
+  }
+
+  /* Conflicts: a warning-tinted header and side-pick buttons instead of the
+     stage checkbox (staging an unresolved file would bury its markers). */
+  .wp-conflicts {
+    padding-block-end: 4px;
+  }
+  .wp-conflict-head {
     display: flex;
     align-items: center;
     gap: 6px;
-    width: 100%;
-    padding: 6px 10px;
-    border: none;
-    background: var(--surface-2);
+    min-height: 30px;
+    padding-inline: 10px 4px;
+    background: var(--warning-soft);
     color: var(--text);
-    font-size: var(--fs-xs);
+    font-size: var(--fs-s);
     font-weight: 600;
-    letter-spacing: .06em;
   }
-  .wp-sec-toggle {
-    flex: 1;
-    min-width: 0;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 0;
-    border: none;
-    background: none;
-    color: inherit;
-    font: inherit;
-    letter-spacing: inherit;
-    cursor: pointer;
-    text-align: start;
+  .wp-conflict-head > :global(svg) {
+    color: var(--warning);
   }
-  .wp-sec-count {
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    min-width: 16px;
-    padding: 0 4px;
+  .wp-ccount {
+    padding: 0 6px;
     border-radius: 999px;
     background: var(--surface);
     color: var(--text-dim);
-    text-align: center;
-  }
-  .draft-by {
-    padding: 2px 0;
-  }
-  .wp-sec-head .wp-sec-action {
-    height: auto;
-    border: none;
-    background: transparent;
     font-size: var(--fs-xs);
-    font-weight: 600;
-    color: var(--accent-text);
-    padding: 2px 6px;
-    border-radius: var(--radius-s);
+    font-weight: 500;
+    line-height: 16px;
   }
-  .wp-sec-head .wp-sec-action:hover {
-    background: var(--accent-soft);
-  }
-  .wp-sec-head .wp-sec-action.danger {
-    color: var(--danger);
-  }
-  .wp-sec-head .wp-sec-action.danger:hover {
-    background: color-mix(in srgb, var(--danger) 14%, transparent);
-  }
-  .wp-list {
-    padding: 4px 2px;
-  }
-  .wp-empty {
-    padding: 6px 12px;
-    font-size: var(--fs-xs);
-  }
-  .wp-file {
+  .wp-crow {
     display: flex;
     align-items: center;
     gap: 6px;
-    width: 100%;
-    border-radius: var(--radius-s);
-    padding-inline-end: 6px;
-  }
-  .wp-file.selected {
-    background: var(--accent-soft);
-  }
-  .wp-name {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    flex: 1;
-    min-width: 0;
-    height: 26px;
-    border: none;
-    background: transparent;
-    cursor: pointer;
-    color: var(--text);
-    text-align: start;
-  }
-  .wp-fname {
-    font-size: var(--fs-xs);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .wp-discard {
-    flex-shrink: 0;
-    border: none;
-    background: transparent;
-    color: var(--text-dim);
-    cursor: pointer;
-    padding: 2px 4px;
-    border-radius: var(--radius-s);
-    line-height: 1;
-    opacity: 0;
-    transition: opacity var(--dur-fast) ease-out;
-  }
-  .wp-file:hover .wp-discard,
-  .wp-file:focus-within .wp-discard,
-  .wp-file.selected .wp-discard,
-  .wp-folder:hover .wp-discard,
-  .wp-folder:focus-within .wp-discard,
-  .wp-discard:focus-visible {
-    opacity: 1;
-  }
-  /* No hover on touch: the action can't stay hidden behind it. */
-  @media (hover: none) {
-    .wp-discard {
-      opacity: 1;
-    }
-  }
-  .wp-discard:hover {
-    color: var(--danger);
-    background: color-mix(in srgb, var(--danger) 12%, transparent);
-  }
-  .wp-folder {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    width: 100%;
-    height: 26px;
-    padding-inline-end: 6px;
-  }
-  .wp-folder:hover {
-    background: var(--accent-faint);
-  }
-  .wp-fold-name {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    flex: 1;
-    min-width: 0;
-    height: 26px;
-    border: none;
-    background: transparent;
-    cursor: pointer;
-    color: var(--text);
-    text-align: start;
-  }
-  .wp-fold-label {
-    font-size: var(--fs-s);
-    font-weight: 600;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .wp-fold-count {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    background: var(--surface-2);
-    border-radius: 999px;
-    padding: 0 6px;
-    line-height: 15px;
-    flex-shrink: 0;
-  }
-
-  /* Conflicts section: warn-tinted header, side-pick buttons instead of the
-     stage checkbox (staging an unresolved file would bury its markers). */
-  .wp-conflict-head {
-    background: var(--warning-soft);
-    color: var(--warning);
-    cursor: default;
-  }
-  .wp-conflict-row {
-    padding-inline-start: 8px;
-    height: 26px;
-  }
-  .wp-side {
-    flex-shrink: 0;
-    border: 1px solid var(--border);
-    background: transparent;
-    color: var(--text-dim);
-    cursor: pointer;
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    padding: 2px 6px;
+    height: 30px;
+    margin-inline: 4px;
+    padding-inline: 8px 4px;
     border-radius: var(--radius-s);
   }
-  .wp-side:hover {
-    color: var(--text);
+  .wp-crow:hover {
     background: var(--hover);
   }
-
-  .kind {
-    width: 15px;
-    height: 15px;
-    border-radius: var(--radius-s);
-    font-size: var(--fs-xs);
-    font-weight: 600;
+  .wp-ckind {
+    flex-shrink: 0;
     display: grid;
     place-items: center;
-    flex-shrink: 0;
-  }
-  .k-modified {
-    background: var(--warning-soft);
-    color: var(--warning);
-  }
-  .k-added,
-  .k-untracked {
-    background: color-mix(in srgb, var(--success) 22%, transparent);
-    color: var(--success);
-  }
-  .k-deleted {
-    background: color-mix(in srgb, var(--danger) 22%, transparent);
+    width: 16px;
+    height: 16px;
+    border-radius: var(--radius-s);
+    background: var(--danger-soft);
     color: var(--danger);
+    font-family: var(--font-mono);
+    font-size: var(--fs-xs);
+    font-weight: 600;
   }
-  .k-renamed {
-    background: var(--accent-soft-strong);
-    color: var(--accent-text);
+  .wp-cname {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: 1;
+    min-width: 0;
+    height: 100%;
+    padding: 0;
+    border: none;
+    background: transparent;
+    color: var(--text);
+    font: inherit;
+    cursor: pointer;
+    text-align: start;
   }
-  .k-conflicted {
-    background: color-mix(in srgb, var(--danger) 35%, transparent);
-    color: var(--danger);
+  .wp-cfile,
+  .wp-cdir {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    unicode-bidi: isolate;
+  }
+  .wp-cfile {
+    flex: 0 1 auto;
+    font-size: var(--fs-m);
+  }
+  .wp-cdir {
+    flex: 1 1 0;
+    font-size: var(--fs-s);
+    color: var(--text-dim);
   }
 
   .wp-diff {
     flex: 1;
     min-height: 0;
+    min-width: 0;
     display: flex;
     flex-direction: column;
-    border-top: 1px solid var(--border);
+    border-block-start: 1px solid var(--border);
   }
   .wp-diff-head {
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 6px 10px;
+    min-height: 36px;
+    padding-block: 4px;
+    padding-inline: 12px 8px;
     background: var(--surface-2);
-    border-bottom: 1px solid var(--border);
+    border-block-end: 1px solid var(--border);
     flex-shrink: 0;
+    min-width: 0;
+  }
+  .wp-diff-head > :global(svg) {
+    flex-shrink: 0;
+    color: var(--text-dim);
+  }
+  .wp-diff-path {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    font-size: var(--fs-m);
+    unicode-bidi: isolate;
+  }
+  .wp-diff-path > strong {
+    font-weight: 600;
+    flex-shrink: 0;
+  }
+  .wp-diff-dir {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-size: var(--fs-s);
+    color: var(--text-dim);
   }
   .wp-diff-body {
     flex: 1;
@@ -1468,122 +1252,21 @@
     overflow-y: auto;
     overscroll-behavior: contain;
   }
-  .wp-diff-path {
+  .wp-diff-skel {
+    padding: 10px;
+  }
+  .wp-target > button {
+    height: 20px;
+    padding: 0 6px;
     font-size: var(--fs-xs);
-    font-weight: 600;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    min-width: 0;
   }
 
-  .wp-composer {
-    border-top: 1px solid var(--border);
-    padding: 10px;
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    flex-shrink: 0;
-  }
-  .msg-box {
-    position: relative;
-  }
-  .subject-input {
-    width: 100%;
-    height: 30px;
-    padding-inline-end: 76px;
-    font-weight: 600;
-  }
-  .body-input {
-    width: 100%;
-    resize: vertical;
-  }
-  .draft-btn {
-    position: absolute;
-    top: 4px;
-    inset-inline-end: 6px;
-  }
-  
   .sign-err {
     display: inline-flex;
     align-items: center;
     gap: 4px;
     font-size: var(--fs-xs);
     color: var(--text-dim);
-  }
-  .wp-action-row {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-  .amend-warn {
-    display: flex;
-    align-items: flex-start;
-    gap: 6px;
-    padding: 6px 8px;
-    border-radius: var(--radius-s);
-    background: var(--warning-soft);
-    color: var(--warning);
-    font-size: var(--fs-s);
-  }
-  .amend-warn :global(svg) {
-    flex-shrink: 0;
-    margin-block-start: 2px;
-  }
-  .checkbox-row {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    font-size: var(--fs-s);
-    color: var(--text-dim);
-    cursor: pointer;
-  }
-  .wp-target > button {
-    height: 18px;
-    padding: 0 6px;
-    font-size: var(--fs-xs);
-  }
-  .dim {
-    color: var(--text-dim);
-  }
-  .mono {
-    font-family: var(--font-mono);
-  }
-
-  /* ≤1024px (the graph stacks as an accordion): the panel renders full-width
-     under the mobile diff header; give touch targets real height. */
-  @media (max-width: 1024px) {
-    .wp-name,
-    .wp-fold-name,
-    .wp-folder {
-      height: 34px;
-    }
-    .wp-fname,
-    .wp-fold-label {
-      font-size: var(--fs-m);
-    }
-    .wp-file input[type='checkbox'],
-    .wp-folder input[type='checkbox'] {
-      width: 17px;
-      height: 17px;
-    }
-    .wp-discard {
-      opacity: 1;
-      padding: 6px 6px;
-    }
-    .subject-input {
-      font-size: 16px; /* ui-guards: allow — 16px stops iOS zoom-on-focus */
-      height: 38px;
-    }
-    .body-input {
-      font-size: 16px; /* ui-guards: allow — 16px stops iOS zoom-on-focus */
-      line-height: 1.45;
-    }
-    .wp-composer .btn.primary {
-      height: 36px;
-      padding: 0 16px;
-      font-size: var(--fs-l);
-    }
   }
   .wp-untracked-cap {
     display: flex;
@@ -1598,4 +1281,11 @@
     line-height: 1.4;
   }
   .wp-untracked-cap code { font-size: var(--fs-xs); }
+
+  /* ≤1024px (the graph stacks as an accordion): touch-height rows. */
+  @media (max-width: 1024px) {
+    .wp-crow {
+      height: 36px;
+    }
+  }
 </style>

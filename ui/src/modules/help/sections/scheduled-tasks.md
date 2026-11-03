@@ -11,7 +11,7 @@ A scheduled task is a recurring job: "every hour, review the tickets updated in 
 
 ## Getting started
 
-1. Open **Scheduled Tasks** and choose **New task**.
+1. Open **Personal Agents** in the sidebar, switch to the **Scheduled tasks** tab and choose **New task**.
 2. Optionally pick **Start from a preset** to fill in a ready-made job.
 3. Give it a **Name** and pick a **Type**: **Run an agent** or **Hand off to a workflow**.
 4. For an agent, pick the **Provider** and model, then write the **Prompt** — what the agent should do and report.

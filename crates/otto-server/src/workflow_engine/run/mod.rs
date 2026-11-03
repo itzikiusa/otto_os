@@ -4,10 +4,12 @@
 //! progress pump); `state` is the run's mutable bookkeeping and the loop's
 //! control signal; `schedule` runs one node per step (decision, attempts,
 //! outcome); `finalize` is the post-loop phase (stop, drain, terminal write,
-//! delivery, cleanup). `identity` resolves whom a run acts as.
+//! delivery, cleanup). `identity` resolves whom a run acts as; `refs` syncs and resolves the
+//! branches a run names.
 
 pub(super) mod admission;
 pub(super) mod finalize;
 pub(super) mod identity;
+pub(super) mod refs;
 pub(super) mod schedule;
 pub(super) mod state;

@@ -677,11 +677,8 @@ pub fn protected_routes() -> Router<ServerCtx> {
             post(workflows::preview_trigger),
         )
         .route("/workflows/{id}/runs", get(workflows::list_runs))
-        // In-flight runs across a workspace (the "Running" sidebar list).
-        .route(
-            "/workspaces/{wid}/workflow-runs/active",
-            get(workflows::list_active_runs),
-        )
+        // In-flight runs + the searchable run history across a workspace.
+        .merge(workflows::workspace_run_routes())
         // Workflow versioning (history + restore).
         .route("/workflows/{id}/versions", get(workflows::list_versions))
         .route("/workflows/{id}/versions/{v}", get(workflows::get_version))

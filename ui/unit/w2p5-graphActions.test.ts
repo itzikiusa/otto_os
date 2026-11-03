@@ -1,14 +1,22 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { loadSource } from './sourceHarness.ts';
+import * as gitopsPlan from '../src/modules/git/gitopsPlan.ts';
 
 // architecture-1-09: the git graph's actions live in graph/graphActions.svelte.ts
 // behind a host (GraphView's state as getters, its refresh helpers). These run
 // the REAL handlers against a fake git client / API and a recording host.
 
 class DirtyRefusal extends Error {}
+class ApiError extends Error {
+  status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
 
-function setup(opts: { checkout?: (body: Record<string, unknown>) => Promise<unknown>; post?: (url: string, body: any) => Promise<unknown>; confirm?: boolean[]; outward?: boolean } = {}) {
+function setup(opts: { checkout?: (body: Record<string, unknown>) => Promise<unknown>; post?: (url: string, body: any) => Promise<unknown>; get?: (url: string) => Promise<unknown>; confirm?: boolean[]; outward?: boolean } = {}) {
   const log: string[] = [];
   const toasts: { kind: string; title: string; body?: string }[] = [];
   const asks: string[] = [];
@@ -16,11 +24,17 @@ function setup(opts: { checkout?: (body: Record<string, unknown>) => Promise<unk
   const checkouts: Record<string, unknown>[] = [];
   const posts: { url: string; body: any }[] = [];
   const mutations: { path: string; body: any; title: string; detail?: string }[] = [];
+  const gets: string[] = [];
   const imports: Record<string, unknown> = {
     '../../../lib/api/client': {
-      api: { post: (url: string, body: any) => { posts.push({ url, body }); return (opts.post ?? (async () => []))(url, body); } },
+      api: {
+        post: (url: string, body: any) => { posts.push({ url, body }); return (opts.post ?? (async () => []))(url, body); },
+        get: (url: string) => { gets.push(url); return (opts.get ?? (async () => ({})))(url); },
+      },
+      ApiError,
       isDirtyGitRefusal: (e: unknown) => e instanceof DirtyRefusal,
     },
+    '../gitopsPlan': gitopsPlan,
     '../../../lib/toast.svelte': {
       toasts: {
         success: (title: string, body?: string) => toasts.push({ kind: 'success', title, body }),
@@ -65,7 +79,7 @@ function setup(opts: { checkout?: (body: Record<string, unknown>) => Promise<unk
     stashShortMsg: (s: { message: string }) => s.message,
   };
   const a = mod.createGraphActions(host);
-  return { a, host, log, toasts, asks, checkouts, posts, mutations, busy };
+  return { a, host, log, toasts, asks, checkouts, posts, mutations, busy, gets };
 }
 
 test('checkout success: switches, adopts the refs bump, refreshes refs and clears the busy flag', async () => {
@@ -147,4 +161,53 @@ test('a remote-tracking checkout of a non-origin remote creates the branch AT th
   const twin = setup();
   await twin.a.checkoutRemoteRef('origin/feature-x');
   assert.deepEqual(twin.checkouts.map((b) => ({ ...b })), [{ branch: 'feature-x', create: false }]);
+});
+
+const linked = { path: '/src/repo-feat', head: 'abc', branch: 'feat', is_main: false, locked: false, lock_reason: null, prunable: false, dirty: false, dirty_known: true };
+
+test('removing a clean worktree re-checks it, confirms plainly and never forces', async () => {
+  const t = setup({ get: async () => ({ ...linked, risks: [] }), post: async () => [{ path: '/repo', is_main: true }] });
+  await t.a.wtRemove(linked);
+  assert.deepEqual(t.gets, ['/repos/r1/worktrees/status?path=%2Fsrc%2Frepo-feat']);
+  assert.match(t.asks[0], /no uncommitted changes/);
+  assert.deepEqual(t.posts.map((p) => [p.url, { ...p.body }]), [['/repos/r1/worktrees/remove', { path: '/src/repo-feat', force: false }]]);
+  assert.match(t.toasts[0].body ?? '', /branch “feat” kept/);
+  assert.equal(t.host.openWtBusy, '');
+});
+
+test('a worktree holding work lists each risk and is force-removed only on consent', async () => {
+  const risks = ['2 uncommitted changes', '1 commit not pushed to any remote and not in origin/main'];
+  const declined = setup({ get: async () => ({ ...linked, risks }), confirm: [false] });
+  await declined.a.wtRemove(linked);
+  for (const r of risks) assert.ok(declined.asks[0].includes(r), r);
+  assert.deepEqual(declined.posts, [], 'declining sends nothing');
+  const t = setup({ get: async () => ({ ...linked, risks }), post: async () => [] });
+  await t.a.wtRemove(linked);
+  assert.equal(t.posts[0].body.force, true);
+});
+
+test('an unknown worktree status is reported, not offered as a force', async () => {
+  const t = setup({ get: async () => ({ ...linked, dirty_known: false }) });
+  await t.a.wtRemove(linked);
+  assert.deepEqual(t.asks, []);
+  assert.deepEqual(t.posts, []);
+  assert.deepEqual(t.toasts.map((x) => [x.kind, x.title]), [['error', 'Can’t remove this worktree']]);
+});
+
+test('a 409 race on a plain remove asks again before forcing', async () => {
+  let n = 0;
+  const t = setup({
+    get: async () => ({ ...linked, risks: [] }),
+    post: async () => { if (n++ === 0) throw new ApiError(409, 'The worktree at /src/repo-feat isn’t safe to remove: 1 untracked file.'); return []; },
+    confirm: [true, true],
+  });
+  await t.a.wtRemove(linked);
+  assert.match(t.asks[1], /1 untracked file/);
+  assert.deepEqual(t.posts.map((p) => p.body.force), [false, true]);
+});
+
+test('stash pop from the menu is addressed by sha', async () => {
+  const t = setup();
+  await t.a.stashPop({ sha: 'deadbeef', message: 'On main: wip' });
+  assert.deepEqual(t.mutations.map((m) => [m.path, { ...m.body }]), [['/stash', { op: 'pop', sha: 'deadbeef' }]]);
 });

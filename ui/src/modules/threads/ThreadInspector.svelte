@@ -5,6 +5,12 @@
   import ThreadConnectionsTab from './ThreadConnectionsTab.svelte';
   import ThreadFileTabs from './ThreadFileTabs.svelte';
   import ThreadPeersTab from './ThreadPeersTab.svelte';
+  import ThreadProjectCard from './ThreadProjectCard.svelte';
+  import { lazyComponent } from '../../lib/lazy-component.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+
+  // The side chat loads with its first open, not with the page.
+  const SideChat = lazyComponent(() => import('./ThreadSideChat.svelte'));
   import { threads, type ThreadsInspectorTab } from './threadsStore.svelte';
 
   interface Props {
@@ -12,14 +18,17 @@
   }
   let { onstartroom }: Props = $props();
 
+  // On the new-thread stage the panel follows the draft's folder, not the
+  // last focused thread.
   const focusedSession = $derived(
-    threads.focusedSessionId ? (ws.getSession(threads.focusedSessionId) ?? null) : null,
+    !threads.newDraftMode && threads.focusedSessionId ? (ws.getSession(threads.focusedSessionId) ?? null) : null,
+  );
+  const contextCwd = $derived(
+    focusedSession?.cwd ?? (threads.newDraftMode ? threads.stageCwd : null) ?? ws.current?.root_path ?? null,
   );
   const workspaceId = $derived(focusedSession?.workspace_id ?? ws.currentId ?? null);
   const wsKey = $derived(workspaceId ?? 'scratch');
-  const rootPath = $derived(
-    focusedSession?.cwd ?? ws.current?.root_path ?? ws.scratch?.root_path ?? '',
-  );
+  const rootPath = $derived(contextCwd ?? ws.scratch?.root_path ?? '');
 
   const openFileCount = $derived(threads.fileState(wsKey).tabs.length);
   const mcpCount = $derived(threads.mcpActivities.length);
@@ -40,6 +49,12 @@
       testid: 'threads-tab-changes',
     },
     {
+      id: 'side',
+      label: 'Side chat',
+      icon: 'comment',
+      testid: 'threads-tab-side',
+    },
+    {
       id: 'connections',
       label: 'Connections',
       icon: 'plug',
@@ -57,6 +72,11 @@
 </script>
 
 <aside class="ti-inspector" aria-label="Thread inspector" data-testid="threads-inspector">
+  {#if contextCwd}
+    <div class="ti-card">
+      <ThreadProjectCard cwd={contextCwd} />
+    </div>
+  {/if}
   <Tabs
     label="Thread inspector"
     size="s"
@@ -76,7 +96,20 @@
     {#if threads.inspectorTab === 'files'}
       <ThreadFileTabs {rootPath} {wsKey} />
     {:else if threads.inspectorTab === 'changes'}
-      <ThreadChangesTab {workspaceId} sessionCwd={focusedSession?.cwd ?? null} {wsKey} />
+      <ThreadChangesTab {workspaceId} sessionCwd={contextCwd} {wsKey} />
+    {:else if threads.inspectorTab === 'side'}
+      {#if SideChat.component}
+        <SideChat.component mainId={focusedSession?.id ?? null} />
+      {:else}
+        <LoadState
+          what="the side chat"
+          variant="panel"
+          empty
+          loading={!SideChat.error}
+          error={SideChat.error}
+          onretry={() => SideChat.retry()}
+        />
+      {/if}
     {:else if threads.inspectorTab === 'connections'}
       <ThreadConnectionsTab {workspaceId} focusedSessionId={threads.focusedSessionId} />
     {:else}
@@ -94,6 +127,10 @@
     min-height: 0;
     background: var(--surface);
     border-inline-start: 1px solid var(--border);
+  }
+  .ti-card {
+    padding: 10px 10px 6px;
+    flex-shrink: 0;
   }
   .ti-panel {
     flex: 1;

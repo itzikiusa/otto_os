@@ -57,6 +57,10 @@ export interface SidebarModuleDef {
   /** Agents/Connections render a nested live-session list in the Navigator and
    *  so need bespoke markup; every other module is a plain nav row. */
   special?: boolean;
+  /** Route a click lands on when it differs from {@link id} (the entry keeps
+   *  its id so saved order/hidden/favorite prefs survive). Personal Agents
+   *  keeps the historical `scheduled-tasks` id but opens on its Agents tab. */
+  home?: string;
 }
 
 /** A resolved, currently-available module (a built-in or a runtime plugin). */
@@ -92,8 +96,9 @@ export const SIDEBAR_MODULES: SidebarModuleDef[] = [
   { id: 'workflows', icon: 'split', label: 'Workflows', group: 'automate', feature: 'workflows', keywords: 'pipeline steps runs pr review automation' },
   {
     id: 'scheduled-tasks',
-    icon: 'calendar',
-    label: 'Scheduled Tasks',
+    icon: 'user',
+    label: 'Personal Agents',
+    home: 'personal-agents',
     group: 'automate',
     feature: 'scheduled_tasks',
     keywords: 'cron recurring job report cadence hourly daily personal agents persona soul bot channels chat schedule recap',
@@ -186,8 +191,14 @@ export function routeAllowed(route: string, can: (feature: Feature) => boolean):
 /**
  * The sidebar entry a router module belongs to. Merged views highlight their
  * unified parent module: Database / Message Brokers → Connections, Design Hall
- * / Whiteboard → Product, and Personal Agents → Scheduled Tasks.
+ * / Whiteboard → Product, and Scheduled Tasks → the Personal Agents entry
+ * (whose id is still `scheduled-tasks`).
  */
+/** The route a sidebar entry opens on (its `home`, else its id). */
+export function moduleHome(id: string): string {
+  return SIDEBAR_MODULES.find((m) => m.id === id)?.home ?? id;
+}
+
 export function navIdForModule(routerModule: string): string {
   if (routerModule === 'database' || routerModule === 'brokers') return 'connections';
   if (routerModule === 'design' || routerModule === 'canvas') return 'product';

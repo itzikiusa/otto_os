@@ -38,6 +38,10 @@
     termStatus?: string;
     termInput?: string;
     uploading?: number;
+    /** Threads: a quiet meta row — branch + access mode only (the model chip
+     *  sits in the box; status is in the page breadcrumb; the folder is in the
+     *  project card). */
+    variant?: 'default' | 'threads';
   }
 
   let {
@@ -58,7 +62,9 @@
     termStatus = '',
     termInput = '',
     uploading = 0,
+    variant = 'default',
   }: Props = $props();
+  const calm = $derived(variant === 'threads');
 
   let modelBar = $state<ReturnType<typeof ThreadModelBar> | null>(null);
 
@@ -93,15 +99,23 @@
     <span class="dim">In terminal:</span> <span class="mono term-raw" dir="ltr">{termInput}</span>
   </div>
 {/if}
-<div class="status" data-status-line>
-  <span class="meta-harness">
+<div class="status" class:calm data-status-line>
+  {#if !calm}<span class="meta-harness">
     {#if provider}<ProviderIcon {provider} size={12} />{/if}
     <span class="harness-name">{agentName}</span>
     <StatusDot state={st} />
     <span>{statusLabel}</span>
-  </span>
+  </span>{/if}
+  {#if calm && branch}
+    <span class="meta-token mono branch" dir="ltr" title="Git branch">
+      <Icon name="branch" size={12} /> {branch}
+    </span>
+  {/if}
+  {#if calm}<span class="calm-grow"></span>{/if}
   {#if hasInteractiveControls && onmodelchange && oneffortchange && onmodechange}
     <ThreadModelBar
+      parts={calm ? ['mode'] : undefined}
+      quiet={calm}
       bind:this={modelBar}
       {provider}
       {pinnedModel}
@@ -113,15 +127,15 @@
       {oneffortchange}
       {onmodechange}
     />
-  {:else if model}
+  {:else if model && !calm}
     <span class="meta-token mono model" dir="ltr" title="Model">{model}</span>
   {/if}
-  {#if branch}
+  {#if branch && !calm}
     <span class="meta-token mono branch" dir="ltr" title="Git branch">
       <Icon name="branch" size={12} /> {branch}
     </span>
   {/if}
-  {#if shortCwd}
+  {#if shortCwd && !calm}
     <span class="meta-token mono cwd" dir="ltr" title={cwd}>
       <Icon name="folder" size={12} /> {shortCwd}
     </span>
@@ -134,6 +148,9 @@
 </div>
 
 <style>
+  .calm-grow {
+    flex: 1;
+  }
   .status,
   .term-input {
     width: 100%;

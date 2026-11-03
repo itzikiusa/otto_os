@@ -115,6 +115,8 @@ fn row_to_active_run(r: &sqlx::sqlite::SqliteRow) -> Result<ActiveWorkflowRun> {
     // `status` per node, logs/output stripped); the full body is the fallback.
     #[derive(serde::Deserialize)]
     struct NodeStatusOnly {
+        #[serde(default)]
+        node_id: String,
         status: NodeStatus,
     }
     let nodes: Vec<NodeStatusOnly> =
@@ -125,6 +127,25 @@ fn row_to_active_run(r: &sqlx::sqlite::SqliteRow) -> Result<ActiveWorkflowRun> {
         .filter(|n| matches!(n.status, NodeStatus::Success | NodeStatus::Skipped))
         .count() as u32;
     let waiting: i64 = r.try_get("waiting_approval").unwrap_or(0);
+    let current = nodes
+        .iter()
+        .find(|n| n.status == NodeStatus::Running)
+        .or_else(|| {
+            (nodes_done > 0)
+                .then(|| nodes.iter().find(|n| n.status == NodeStatus::Pending))
+                .flatten()
+        })
+        .map(|n| n.node_id.clone())
+        .filter(|id| !id.is_empty());
+    let current_step = current.as_ref().and_then(|id| {
+        let graph = parse_graph(&r.try_get::<String, _>("graph_json").ok()?).ok()?;
+        let node = graph.nodes.into_iter().find(|n| &n.id == id)?;
+        Some(if node.name.trim().is_empty() {
+            node.kind
+        } else {
+            node.name
+        })
+    });
     Ok(ActiveWorkflowRun {
         run_id: r.get("run_id"),
         workflow_id: r.get("workflow_id"),
@@ -136,6 +157,8 @@ fn row_to_active_run(r: &sqlx::sqlite::SqliteRow) -> Result<ActiveWorkflowRun> {
         nodes_total,
         nodes_done,
         waiting_approval: waiting != 0,
+        current_node_id: current,
+        current_step,
     })
 }
 
@@ -834,7 +857,7 @@ impl WorkflowsRepo {
         let rows = sqlx::query(
             "SELECT r.id AS run_id, r.workflow_id, r.workspace_id, r.status,
                     r.started_at, COALESCE(r.progress_json, r.nodes_json) AS nodes_json,
-                    r.waiting_approval, w.name AS workflow_name
+                    r.waiting_approval, w.name AS workflow_name, w.graph_json
              FROM workflow_runs r
              JOIN workflows w ON w.id = r.workflow_id
              WHERE r.workspace_id = ? AND r.status IN ('pending','running')
@@ -1553,6 +1576,66 @@ mod tests {
             .unwrap();
         sqlx::migrate!().run(&pool).await.unwrap();
         pool.into()
+    }
+
+    /// The sidebar's running list names the step a run is on, not just "6/12".
+    #[tokio::test]
+    async fn active_runs_name_the_current_step() {
+        let pool = mem_pool().await;
+        let repo = WorkflowsRepo::new(pool);
+        let graph: WorkflowGraph = serde_json::from_value(serde_json::json!({
+            "nodes": [
+                {"id": "a", "kind": "agent_prompt", "name": "Prepare"},
+                {"id": "b", "kind": "review_run", "name": "Multi-Agent PR Review"},
+                {"id": "c", "kind": "git_pr"}
+            ],
+            "edges": []
+        }))
+        .unwrap();
+        let wf = repo
+            .create(&"ws".into(), "PR Reviewer", "", "", &graph, &"u".into())
+            .await
+            .unwrap();
+        let run = repo
+            .create_run(&wf.id, &"ws".into(), &serde_json::json!({}), None)
+            .await
+            .unwrap();
+        let node = |id: &str, status| NodeRunState {
+            node_id: id.into(),
+            status,
+            ..serde_json::from_value(serde_json::json!({"node_id": id, "status": "pending"}))
+                .unwrap()
+        };
+        let set = |nodes: Vec<NodeRunState>| {
+            let repo = &repo;
+            let id = run.id.clone();
+            async move {
+                repo.update_run(&id, RunStatus::Running, &nodes, None, false)
+                    .await
+                    .unwrap();
+                repo.list_active_runs(&"ws".into()).await.unwrap().remove(0)
+            }
+        };
+        let r = set(vec![
+            node("a", NodeStatus::Success),
+            node("b", NodeStatus::Running),
+            node("c", NodeStatus::Pending),
+        ])
+        .await;
+        assert_eq!((r.nodes_done, r.nodes_total), (1, 3));
+        assert_eq!(r.current_node_id.as_deref(), Some("b"));
+        assert_eq!(r.current_step.as_deref(), Some("Multi-Agent PR Review"));
+        // Between steps: the next pending one; unnamed nodes show their kind.
+        let r = set(vec![
+            node("a", NodeStatus::Success),
+            node("b", NodeStatus::Success),
+            node("c", NodeStatus::Pending),
+        ])
+        .await;
+        assert_eq!(r.current_step.as_deref(), Some("git_pr"));
+        // Nothing started yet: no current step.
+        let r = set(vec![node("a", NodeStatus::Pending)]).await;
+        assert_eq!(r.current_step, None);
     }
 
     /// PC-3 (access-control-3-02): a run with no starter acts as the LATEST

@@ -128,6 +128,8 @@ export interface ComposerSlashHost {
   onfiles?: () => void;
   ontoggleterminal?: () => void;
   onnewthread?: (beside: boolean) => void;
+  /** `/btw <question>` — a side chat that doesn't interrupt this turn (Threads). */
+  onsidechat?: (question: string) => void;
 }
 
 export async function runComposerSlashIntent(
@@ -176,6 +178,14 @@ export async function runComposerSlashIntent(
       return;
     case 'new-thread':
       if (host.onnewthread) host.onnewthread(intent.beside);
+      return;
+    case 'side-chat':
+      // Without a side-chat host (Agents) the text goes to the CLI unchanged,
+      // exactly as it did before `/btw` was an interactive command.
+      if (host.onsidechat) {
+        host.onsidechat(intent.question);
+        host.restoreFocus();
+      } else await host.sendPrompt(`/btw ${intent.question}`.trim());
       return;
     case 'send-prompt':
       await host.sendPrompt(intent.prompt);

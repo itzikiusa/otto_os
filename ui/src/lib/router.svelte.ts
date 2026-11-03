@@ -11,7 +11,7 @@ import { winKey } from './win';
 import { lsGet, lsSet } from './storage';
 import { isEmbedded } from './desktop';
 import { captureRoomInvite } from './rooms/invites';
-import { activeNavId } from './sidebar';
+import { activeNavId, moduleHome } from './sidebar';
 
 // ---------------------------------------------------------------------------
 // Share-token in-memory store (Task 3.1)
@@ -523,10 +523,10 @@ class Router {
    */
   openModule(id: string): void {
     if (activeNavId(this.parts) === id) {
-      this.go(id);
+      this.go(moduleHome(id));
       return;
     }
-    this.go(this.lastByModule.get(id) ?? id);
+    this.go(this.lastByModule.get(id) ?? moduleHome(id));
   }
 
   /** Whether {@link back} has an entry to step to. `history.length` is not a

@@ -666,6 +666,60 @@ pub fn review_run_complete(
         })
 }
 
+/// Whether any agent of a review can still make progress on its own: one is
+/// `running`, or `waiting` on input. A `pending` row (a reviewer queued for a
+/// daemon-wide reviewer slot, or the summarizer awaiting the reviewers) only
+/// progresses while the review's runner task is alive.
+pub fn review_has_live_agent(agents: &[otto_core::domain::ReviewAgentState]) -> bool {
+    agents
+        .iter()
+        .any(|a| matches!(a.status.as_str(), "running" | "waiting"))
+}
+
+/// A review that reads `running` yet can never settle: its runner task is gone
+/// (`runner_live == false` — it panicked, or its terminal status write failed)
+/// and no agent is running or waiting. Nothing would ever move it again, so a
+/// workflow step awaiting it sat "Running" until its (5 h) timeout while every
+/// agent row read Done. Callers settle it after a grace period.
+pub fn review_stalled(agents: &[otto_core::domain::ReviewAgentState], runner_live: bool) -> bool {
+    !runner_live && !review_has_live_agent(agents)
+}
+
+/// How long a review may read as stalled before a waiter settles it —
+/// longer than any gap between the reviewers finishing and the summarizer
+/// claiming its row.
+pub const REVIEW_STALL_GRACE: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// The error a stalled review is settled with.
+pub const REVIEW_STALLED_MSG: &str = "review stalled: every agent finished but the review never \
+     completed (its runner is gone) — retry the summarizer or the step";
+
+/// Tracks how long a waited-on review has read as [`review_stalled`]: true
+/// from [`Self::observe`] once it has stayed stalled for the whole grace (any
+/// live sign resets it).
+#[derive(Debug, Default)]
+pub struct StallWatch {
+    since: Option<std::time::Instant>,
+}
+
+impl StallWatch {
+    pub fn observe(
+        &mut self,
+        agents: &[otto_core::domain::ReviewAgentState],
+        runner_live: bool,
+        grace: std::time::Duration,
+    ) -> bool {
+        if !review_stalled(agents, runner_live) {
+            self.since = None;
+            return false;
+        }
+        self.since
+            .get_or_insert_with(std::time::Instant::now)
+            .elapsed()
+            >= grace
+    }
+}
+
 /// Why a run may NOT resolve findings absent from it, independent of how its
 /// agents fared (see [`review_run_complete`]):
 /// - the diff the agents saw was cut (size cap / binary / too-large files are
@@ -802,6 +856,24 @@ pub fn severity_rank(severity: &str) -> u8 {
 
 #[cfg(test)]
 mod reviewer_slot_tests {
+    #[test]
+    fn a_review_is_stalled_only_without_a_runner_and_without_live_agents() {
+        let row = |status: &str| -> otto_core::domain::ReviewAgentState {
+            serde_json::from_value(serde_json::json!({
+                "name": "a", "provider": "claude", "model": "",
+                "status": status, "note": "", "comment_count": 0,
+            }))
+            .unwrap()
+        };
+        let settled = [row("done"), row("error"), row("pending")];
+        assert!(super::review_stalled(&settled, false));
+        // A live runner still owns its queued / pending rows.
+        assert!(!super::review_stalled(&settled, true));
+        for live in ["running", "waiting"] {
+            assert!(!super::review_stalled(&[row("done"), row(live)], false));
+        }
+    }
+
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 

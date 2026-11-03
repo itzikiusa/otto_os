@@ -159,10 +159,11 @@ export function beginNavigation(module: string): (status?: string) => void {
 
 
 /** Complete only foreground frame samples; background throttling is not latency. */
-function afterFrames(signal: AbortSignal | undefined, complete: (painted: boolean) => void): void {
-  if (signal?.aborted || typeof requestAnimationFrame === 'undefined' || typeof document === 'undefined' || document.hidden) { complete(false); return; }
+function afterFrames(signal: AbortSignal | undefined, complete: (painted: boolean, frames: number[]) => void): void {
+  if (signal?.aborted || typeof requestAnimationFrame === 'undefined' || typeof document === 'undefined' || document.hidden) { complete(false, []); return; }
   let frame = 0;
   let finished = false;
+  const frames: number[] = [];
   const finish = (painted: boolean) => {
     if (finished) return;
     finished = true;
@@ -170,14 +171,14 @@ function afterFrames(signal: AbortSignal | undefined, complete: (painted: boolea
     clearTimeout(timeout);
     signal?.removeEventListener('abort', canceled);
     document.removeEventListener('visibilitychange', visibility);
-    complete(painted && !document.hidden && !signal?.aborted);
+    complete(painted && !document.hidden && !signal?.aborted, frames);
   };
   const canceled = () => finish(false);
   const visibility = () => { if (document.hidden) canceled(); };
   const timeout = setTimeout(canceled, 1000);
   signal?.addEventListener('abort', canceled, { once: true });
   document.addEventListener('visibilitychange', visibility);
-  frame = requestAnimationFrame(() => { frame = requestAnimationFrame(() => finish(true)); });
+  frame = requestAnimationFrame(() => { frames.push(performance.now()); frame = requestAnimationFrame(() => { frames.push(performance.now()); finish(true); }); });
 }
 
 export function finishNavigationPaint(component: string, done: (status?: string) => void): void {
@@ -189,12 +190,32 @@ export function finishNavigationPaint(component: string, done: (status?: string)
   });
 }
 
+/** Main-thread delay worth recording: a 30 Hz frame is 33 ms, so a gap over
+ *  this is a stalled frame at any refresh rate WebKit throttles to. */
+const FRAME_DELAY_MS = 50;
+
+/** The longest single wait of a two-frame probe started at `start`: probe →
+ *  first frame, or first → second frame. Not their SUM: two frames at a
+ *  throttled 30 Hz (an unfocused window, Low Power Mode) take 33–67 ms end to
+ *  end with an idle main thread, which recorded a constant ≈59 ms "delay". */
+export function worstFrameGap(start: number, frames: number[]): number {
+  let prev = start;
+  let worst = 0;
+  for (const at of frames) {
+    worst = Math.max(worst, at - prev);
+    prev = at;
+  }
+  return worst;
+}
+
 /** One two-frame latency probe per export tick; no perpetual 60 Hz monitor. */
-function sampleFrameDelay(signal: AbortSignal): Promise<void> {
+export function sampleFrameDelay(signal: AbortSignal): Promise<void> {
   if (!enabled || signal.aborted) return Promise.resolve();
   const start = performance.now();
-  return new Promise((resolve) => afterFrames(signal, (painted) => {
-    if (painted && enabled && performance.now() - start > 50) startMeasurement('ui.frame_delay', 'shell', 'internal', start)?.finish();
+  return new Promise((resolve) => afterFrames(signal, (painted, frames) => {
+    const worst = worstFrameGap(start, frames);
+    // The span covers only the stalled gap, so its duration is the delay.
+    if (painted && enabled && worst > FRAME_DELAY_MS) startMeasurement('ui.frame_delay', 'shell', 'internal', performance.now() - worst)?.finish();
     resolve();
   }));
 }
