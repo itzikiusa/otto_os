@@ -1,6 +1,7 @@
 // Session pane header helpers (lib/paneHeader.ts): the width tiers that mirror
 // SessionView's `@container pane` rules, the retired-Split preference
 // migration, and the details rows the compact header moved off the bar.
+import * as transcriptTrim from '../src/lib/stores/transcriptTrim.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
@@ -110,7 +111,7 @@ test('the transcript store migrates a stored Split to Chat once and drops the sp
   const { transcript } = loadSource(
     new URL('../src/lib/stores/transcript.svelte.ts', import.meta.url),
     {
-      './transcriptLifecycle': { TranscriptLifecycle },
+      './transcriptLifecycle': { TranscriptLifecycle }, './transcriptTrim': transcriptTrim,
       '../paneHeader': paneHeader,
       '../win': { winKey: (key: string) => key },
       '../api/client': { api: {}, isAbortError: () => false },

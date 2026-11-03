@@ -17,6 +17,7 @@ function setup(get?: (url: string, signal?: AbortSignal) => Promise<any>) {
       if (p.endsWith('/client')) { const post = async (url: string) => {posts.push(url);}; return {api: {get: async (url: string, signal?: AbortSignal) => {gets.push(url); return get ? get(url, signal) : page();}, post, bg: {post}}}; }
       if (p.endsWith('/win')) return {winKey: (k: string) => k};
       if (p.endsWith('transcriptLifecycle')) return load(new URL('../src/lib/stores/transcriptLifecycle.ts', import.meta.url));
+      if (p.endsWith('transcriptTrim')) return load(new URL('../src/lib/stores/transcriptTrim.ts', import.meta.url));
       return strictRequire([['/paneHeader', unused('/paneHeader')], ['/loadError', loadError]])(p);
     }};
     runInNewContext(ts.transpileModule(readFileSync(file, 'utf8'), {compilerOptions: {module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022}}).outputText, context);
