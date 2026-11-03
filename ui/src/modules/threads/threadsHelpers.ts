@@ -17,11 +17,19 @@ export function isPlainShellSession(s: Session | null | undefined): boolean {
  */
 export function isThreadSession(s: Session, pool: readonly Session[] = ws.sessions): boolean {
   if (s.kind === 'connection') return false;
+  // A side chat lives in its main thread's right panel until promoted.
+  if (sideChatOf(s)) return false;
   if (isThreadSurfaceSession(s)) return true;
   const parentId = delegatedParentId(s);
   if (!parentId || parentId === s.id) return false;
   const parent = pool.find((p) => p.id === parentId);
   return parent ? isThreadSurfaceSession(parent) : false;
+}
+
+/** Main thread id when `s` is a side chat (`meta.side_of`), else null. */
+export function sideChatOf(s: Session | null | undefined): string | null {
+  const v = (s?.meta as Record<string, unknown> | undefined)?.side_of;
+  return typeof v === 'string' && v.trim() !== '' ? v : null;
 }
 
 /** Parent session ID when this session was delegated or handed over from another thread. */

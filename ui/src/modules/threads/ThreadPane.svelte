@@ -340,6 +340,7 @@
         ontoggleterminal={toggleTerminal}
         onopeninspector={(tab) => threads.setInspectorTab(tab)}
         onnewthread={(opts) => void spawnFollowupThread(opts)}
+        onsidechat={(q) => threads.openSideChat(paneId, q)}
       />
     {/if}
   </div>

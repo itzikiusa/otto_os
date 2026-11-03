@@ -29,7 +29,7 @@
   import { fetchSlashCommands, submitPrompt } from './api';
   import type { ToolCallBlock } from './format';
   import { nextInteractionModeToggle, resolveSessionThreadConfig, supportsInteractionMode, type EffortLevel, type InteractionMode } from '../../../lib/providerModels';
-  import { isImmediateSlashCommand, mergeSlashCommands, parseInteractiveSlashInput, type ComposerSlashCommand, type ParsedSlashIntent } from '../../../lib/slashActions';
+  import { HOST_ONLY_SLASH_COMMANDS, isImmediateSlashCommand, mergeSlashCommands, parseInteractiveSlashInput, type ComposerSlashCommand, type ParsedSlashIntent } from '../../../lib/slashActions';
   import { detectMentionAtCaret, extractMentionedFiles, removeMentionFromDraft, searchWorkspaceFiles, type MentionEntry } from './fileMentions';
   import ComposerApprovalDock from './ComposerApprovalDock.svelte';
   import ComposerAttachments, { type ComposerAttachment } from './ComposerAttachments.svelte';
@@ -73,6 +73,8 @@
     onfiles?: () => void;
     ontoggleterminal?: () => void;
     onnewthread?: (beside: boolean) => void;
+    /** `/btw <question>`: open a side chat (Threads only; hidden from `/` otherwise). */
+    onsidechat?: (question: string) => void;
   }
   let {
     sessionId,
@@ -92,6 +94,7 @@
     onfiles,
     ontoggleterminal,
     onnewthread,
+    onsidechat,
   }: Props = $props();
 
   const ownerId = untrack(() => sessionId);
@@ -223,7 +226,11 @@
   let cmdsFor = '';
   let cmdIdx = $state(0);
   let cmdDismissed = $state(false);
-  const allSlashCmds = $derived(mergeSlashCommands(cmds));
+  // `/btw` is interactive only where a host opens side chats (Threads); elsewhere
+  // a CLI's own command of that name (if any) shows instead.
+  const allSlashCmds = $derived(
+    mergeSlashCommands(cmds, onsidechat ? {} : { omitInteractive: HOST_ONLY_SLASH_COMMANDS }),
+  );
   const cmdPrefix = $derived.by(() => {
     const m = /^\/([\w:-]*)$/.exec(text);
     return m ? m[1].toLowerCase() : null;
@@ -305,6 +312,7 @@
       onfiles,
       ontoggleterminal,
       onnewthread,
+      onsidechat,
     });
   }
 

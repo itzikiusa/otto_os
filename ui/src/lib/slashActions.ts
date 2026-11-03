@@ -28,6 +28,7 @@ export type ParsedSlashIntent =
   | { kind: 'open-files' }
   | { kind: 'toggle-terminal' }
   | { kind: 'new-thread'; beside: boolean }
+  | { kind: 'side-chat'; question: string }
   | { kind: 'send-prompt'; prompt: string };
 
 export const INTERACTIVE_SLASH_COMMANDS: readonly ComposerSlashCommand[] = [
@@ -106,7 +107,15 @@ export const INTERACTIVE_SLASH_COMMANDS: readonly ComposerSlashCommand[] = [
     description: 'Review uncommitted git changes in this repository',
     source: 'interactive',
   },
+  {
+    name: 'btw',
+    description: 'Ask a side question without interrupting (opens a side chat)',
+    source: 'interactive',
+  },
 ];
+
+/** Interactive commands only a host that supports them should list. */
+export const HOST_ONLY_SLASH_COMMANDS: ReadonlySet<string> = new Set(['btw']);
 
 /** TUI-only built-ins that hang or make no sense inside a structured thread view. */
 const HIDDEN_TUI_BUILTINS = new Set([
@@ -136,9 +145,13 @@ const IMMEDIATE_PICKER_COMMANDS = new Set([
 ]);
 
 /** Merge client-side interactive commands ahead of server-discovered skills/commands. */
-export function mergeSlashCommands(serverCmds: readonly SlashCommand[] | null): ComposerSlashCommand[] {
+export function mergeSlashCommands(
+  serverCmds: readonly SlashCommand[] | null,
+  opts: { omitInteractive?: ReadonlySet<string> } = {},
+): ComposerSlashCommand[] {
   const byName = new Map<string, ComposerSlashCommand>();
   for (const c of INTERACTIVE_SLASH_COMMANDS) {
+    if (opts.omitInteractive?.has(c.name)) continue;
     byName.set(c.name, c);
   }
   for (const s of serverCmds ?? []) {
@@ -208,6 +221,8 @@ export function parseInteractiveSlashInput(raw: string): ParsedSlashIntent | nul
       return { kind: 'new-thread', beside: false };
     case 'fork':
       return { kind: 'new-thread', beside: true };
+    case 'btw':
+      return { kind: 'side-chat', question: arg };
     case 'review':
       return {
         kind: 'send-prompt',

@@ -6,6 +6,11 @@
   import ThreadFileTabs from './ThreadFileTabs.svelte';
   import ThreadPeersTab from './ThreadPeersTab.svelte';
   import ThreadProjectCard from './ThreadProjectCard.svelte';
+  import { lazyComponent } from '../../lib/lazy-component.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+
+  // The side chat loads with its first open, not with the page.
+  const SideChat = lazyComponent(() => import('./ThreadSideChat.svelte'));
   import { threads, type ThreadsInspectorTab } from './threadsStore.svelte';
 
   interface Props {
@@ -42,6 +47,12 @@
       label: 'Changes',
       icon: 'branch',
       testid: 'threads-tab-changes',
+    },
+    {
+      id: 'side',
+      label: 'Side chat',
+      icon: 'comment',
+      testid: 'threads-tab-side',
     },
     {
       id: 'connections',
@@ -86,6 +97,19 @@
       <ThreadFileTabs {rootPath} {wsKey} />
     {:else if threads.inspectorTab === 'changes'}
       <ThreadChangesTab {workspaceId} sessionCwd={contextCwd} {wsKey} />
+    {:else if threads.inspectorTab === 'side'}
+      {#if SideChat.component}
+        <SideChat.component mainId={focusedSession?.id ?? null} />
+      {:else}
+        <LoadState
+          what="the side chat"
+          variant="panel"
+          empty
+          loading={!SideChat.error}
+          error={SideChat.error}
+          onretry={() => SideChat.retry()}
+        />
+      {/if}
     {:else if threads.inspectorTab === 'connections'}
       <ThreadConnectionsTab {workspaceId} focusedSessionId={threads.focusedSessionId} />
     {:else}

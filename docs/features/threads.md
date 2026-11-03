@@ -56,6 +56,14 @@ PTY-backed sessions in `ottod`, so you can switch between `#/threads` and
      Unpushed N** switch reviews the local commits a push or Create PR would
      send — all of them as one range (`range:<upstream>...HEAD`) or one commit
      at a time (`commit:<sha>`), newest 50.
+   - **Side chat:** ask about the focused thread without interrupting it —
+     `/btw <question>` in its composer, the thread ⋯ menu, or this tab. The
+     side chat is a normal agent session tagged `meta.side_of = <main id>`
+     (hidden from the thread lists), started in Plan mode with the same
+     harness/model, and seeded with the main thread's last 8 turns, folder,
+     branch and uncommitted files. **Open as thread** clears the tag and opens
+     it beside the main thread; **Dismiss** archives it. In Agents, `/btw` is
+     passed to the CLI unchanged.
    - **Connections:** Workspace DB/SSH connections, live `db_mcp_activity`
      stream whenever an agent executes `otto_db_query`, and **Open
      side-by-side** to launch Database Explorer in Otto's split pane.

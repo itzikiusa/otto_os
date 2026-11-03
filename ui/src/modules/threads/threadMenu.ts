@@ -48,6 +48,7 @@ export function buildThreadMenu(s: Session, opts: { onstartroom: (id: string) =>
           },
         ]
       : []),
+    ...(!shell ? [{ label: 'Side chat…', icon: 'comment', hint: '/btw', action: () => threads.openSideChat(id) }] : []),
     { label: 'Send message to peer…', icon: 'send', action: () => threads.togglePeerBar(id) },
     { label: 'Session room…', icon: 'people', action: () => opts.onstartroom(id) },
     ...(parentId
