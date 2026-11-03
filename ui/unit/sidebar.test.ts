@@ -18,6 +18,8 @@ import {
   visibleOrder,
   type SidebarModule,
   type SidebarSection,
+  moduleHome,
+  navIdForModule,
 } from '../src/lib/sidebar.ts';
 
 const all = () => availableModules(() => true, []);
@@ -174,4 +176,12 @@ test('reconcileNewSidebarModules: surfaces newly shipped Threads in custom sideb
   });
   assert.deepEqual(favOnlyUpgrade.favorites, ['threads', 'agents', 'git']);
   assert.deepEqual(favOnlyUpgrade.collapsedGroups, []);
+});
+
+test('Personal Agents keeps the scheduled-tasks id but opens on its Agents tab', () => {
+  const m = SIDEBAR_MODULES.find((x) => x.id === 'scheduled-tasks');
+  assert.equal(m?.label, 'Personal Agents');
+  assert.equal(moduleHome('scheduled-tasks'), 'personal-agents');
+  assert.equal(moduleHome('git'), 'git');
+  assert.equal(navIdForModule('personal-agents'), 'scheduled-tasks');
 });

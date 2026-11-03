@@ -5,7 +5,7 @@
 </script>
 
 <script lang="ts">
-  // Shared 3-way segmented switcher (Tasks · Agents · Agent channels) rendered
+  // Shared 3-way segmented switcher (Agents · Scheduled tasks · Agent channels) rendered
   // in PageHeader `tabs()` across ScheduledTasksPage and PersonalAgentsPage.
   import { onMount, tick } from 'svelte';
   import { AUTOMATE_TASKS_TABS } from '../automateTasksTabs';
@@ -57,7 +57,7 @@
   });
 </script>
 
-<div bind:this={listEl} class="segmented" role="tablist" aria-label="Scheduled tasks view" tabindex="-1" onkeydown={onTabKey}>
+<div bind:this={listEl} class="segmented" role="tablist" aria-label="Personal agents view" tabindex="-1" onkeydown={onTabKey}>
   {#each AUTOMATE_TASKS_TABS as item (item.id)}
     <button
       type="button"
