@@ -1438,7 +1438,7 @@
       title="{c.name} · {c.kind}{isProdConn(c) ? ' · PRODUCTION' : c.read_only ? ' · read-only' : ''} — {isDb ? 'opens the workbench; right-click for more' : 'opens a terminal session; right-click for more'}"
     >
       <span class="conn-glyph {c.kind}"><Icon name={engineGlyph(c.kind)} size={12} /></span>
-      <span class="conn-name">{c.name}</span>
+      <span class="conn-name">{c.name}</span><span class="sr-only"> {c.kind}</span>
       {#if opening[c.id]}<span class="spinner" style="--spinner-size: 10px" aria-hidden="true" title="Opening…"></span>{/if}
       {#if envBadge(c)}<EnvBadge env={c.environment} readOnly={c.read_only} />{/if}
     </button>
@@ -1473,7 +1473,7 @@
       title="{cl.name} · kafka{isProdConn(cl) ? ' · PRODUCTION' : cl.read_only ? ' · read-only' : ''} — opens here"
     >
       <span class="conn-glyph kafka"><Icon name={engineGlyph('kafka')} size={12} /></span>
-      <span class="conn-name">{cl.name}</span>
+      <span class="conn-name">{cl.name}</span><span class="sr-only"> kafka</span>
       {#if envBadge(cl)}<EnvBadge env={cl.environment} readOnly={cl.read_only} />{/if}
     </button>
     <div class="conn-actions">
