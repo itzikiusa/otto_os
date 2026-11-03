@@ -331,8 +331,10 @@
   >
     <Icon name="fetch" size={14} />
     <!-- Paused is a lasting, per-device choice: say so in words, not only in
-         the icon's tint (it was paused for weeks without anyone noticing). -->
-    {#if !git.autoFetchEnabled}<span class="git-autofetch-off">Auto-fetch paused</span>{/if}
+         the icon's tint (it was paused for weeks without anyone noticing).
+         One short word next to the fetch icon — the full sentence is the
+         tooltip — so it doesn't eat the room the repo tabs' branches need. -->
+    {#if !git.autoFetchEnabled}<span class="git-autofetch-off">Paused</span>{/if}
   </button>
   <button class="git-tab-new" title="Open a repository" aria-label="Open a repository" onclick={openPicker}>
     <Icon name="plus" size={14} />
