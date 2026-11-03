@@ -73,7 +73,7 @@ connection library unusable for every non-root account.)
 | 8 | POST /api/v1/users | root | CreateUserReq | User (409 dup username) |
 | 9 | PATCH /api/v1/users/{id} | root | UpdateUserReq `{display_name?, password?, disabled?, current_password?}` | User. Changing your OWN password requires `current_password` (400 when missing, 403 when wrong — counted on the login throttle's username key; never 401). Root resetting another user's password does not. |
 | 10 | DELETE /api/v1/users/{id} | root | — | 204 (soft: sets disabled; root user cannot be disabled → 400) |
-| 11 | GET /api/v1/workspaces | member | — | `WorkspaceWithRole[]` (root sees all as admin) |
+| 11 | GET /api/v1/workspaces | member | optional query `?include_archived=true` | `WorkspaceWithRole[]` (root sees all as admin). **Archived workspaces are left out** unless `include_archived=true` — `DELETE /workspaces/{id}` archives, and a removed workspace must not come back on the next list |
 | 12 | POST /api/v1/workspaces | member | CreateWorkspaceReq | Workspace (creator becomes admin member) |
 | 13 | PATCH /api/v1/workspaces/{id} | ws admin | UpdateWorkspaceReq `{name?, root_path?, archived?, settings?, settings_patch?}` | Workspace. `settings_patch` is an atomic RFC 7396 object merge against persisted settings: omitted keys survive, nested objects merge, arrays replace, null members remove keys (empty strings/arrays remain values). It cannot contain `context` (use the versioned context API) or coexist with legacy `settings` (400, before any writes). Legacy `settings` retains full replacement semantics except protected `context`; UI preference writers use `settings_patch` to prevent lost updates between windows. |
 | 14 | DELETE /api/v1/workspaces/{id} | ws admin | — | 204 (archives) |

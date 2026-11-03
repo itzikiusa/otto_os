@@ -1,6 +1,6 @@
 //! Endpoints #11-16: workspaces CRUD + members.
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use otto_core::api::{
@@ -30,12 +30,20 @@ fn reject_system_workspace(id: &Id) -> ApiResult<()> {
     Ok(())
 }
 
+/// `GET /api/v1/workspaces` query.
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct ListWorkspacesQuery {
+    /// Also list archived (removed) workspaces. Default `false`.
+    pub include_archived: Option<bool>,
+}
+
 /// `GET /api/v1/workspaces` — root sees all (as admin); others their own.
 /// The system-owned scratch workspace is hidden here (user-facing lists);
 /// `GET /workspaces/scratch` is its one read route.
 pub async fn list(
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
+    Query(q): Query<ListWorkspacesQuery>,
 ) -> ApiResult<Json<Vec<WorkspaceWithRole>>> {
     let repo = repo(&ctx);
     let rows: Vec<(Workspace, WorkspaceRole)> = if user.is_root {
@@ -47,8 +55,13 @@ pub async fn list(
     } else {
         repo.list_user_for_user(&user.id).await?
     };
+    // `DELETE` archives (soft delete); the UI lists every row it gets, so an
+    // archived workspace left in the default list came straight back on the
+    // next reload. Archived rows are opt-in.
+    let include_archived = q.include_archived.unwrap_or(false);
     Ok(Json(
         rows.into_iter()
+            .filter(|(w, _)| include_archived || !w.archived)
             .map(|(workspace, my_role)| WorkspaceWithRole { workspace, my_role })
             .collect(),
     ))
@@ -238,6 +251,59 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(saved.settings["notes"], "root can save");
+    }
+
+    /// Regression: `DELETE /workspaces/{id}` archives the row, and the list
+    /// kept returning it — the sidebar shows every listed workspace, so a
+    /// removed workspace came back on the next reload. Archived rows are now
+    /// only listed on request (`?include_archived=true`), for root and for a
+    /// plain member alike.
+    #[tokio::test]
+    async fn archived_workspace_leaves_the_default_list() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let pool = crate::test_support::mem_pool().await;
+        let ctx = ServerCtx::for_tests(&pool, tmp.path().to_path_buf()).await;
+        let users = otto_state::UsersRepo::new(pool.clone());
+        let root = users.create("del-root", "x", "Root", true).await.unwrap();
+        let member = users.create("del-member", "x", "M", false).await.unwrap();
+        let kept = repo(&ctx).create("kept", "/tmp", &member.id).await.unwrap();
+        let gone = repo(&ctx).create("gone", "/tmp", &member.id).await.unwrap();
+
+        let status = archive(
+            Path(gone.id.clone()),
+            State(ctx.clone()),
+            CurrentUser(member.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        for user in [&root, &member] {
+            let ids = |include_archived| {
+                let ctx = ctx.clone();
+                let user = (*user).clone();
+                async move {
+                    let Json(rows) = list(
+                        State(ctx),
+                        CurrentUser(user),
+                        Query(ListWorkspacesQuery { include_archived }),
+                    )
+                    .await
+                    .unwrap();
+                    rows.into_iter().map(|r| r.workspace.id).collect::<Vec<_>>()
+                }
+            };
+            let listed = ids(None).await;
+            assert!(listed.contains(&kept.id), "{}: {listed:?}", user.username);
+            assert!(
+                !listed.contains(&gone.id),
+                "{}: an archived workspace must leave the default list",
+                user.username
+            );
+            assert_eq!(ids(Some(false)).await, listed);
+            // Opt-in keeps the archived row reachable (restore / audit).
+            assert!(ids(Some(true)).await.contains(&gone.id));
+        }
     }
 
     #[test]
