@@ -15,7 +15,8 @@ PTY-backed sessions in `ottod`, so you can switch between `#/threads` and
    and the thread's ⋯ menu (rename, pin, search, system notes, peer relay,
    room, settle, archive). Single view has no separate pane header.
 1. **Sidebar (`ThreadSidebar`):**
-   - One search row with **filter by project**, **Add project** (a folder that
+   - One search row with **filter by project** (several at once; a "Showing …
+     · Clear" line appears while a filter is on), **Add project** (a folder that
      shows in the rail before its first thread) and **New thread**.
    - **Pinned**, then each **project** with its threads — threads needing
      approval first, then working ones, then most recent; `delegated_by`
@@ -51,7 +52,10 @@ PTY-backed sessions in `ottod`, so you can switch between `#/threads` and
    - **Files:** Workspace file tree + multi-tab file viewer (`Preview | Source`
      for Markdown and images, line-numbered code viewer, `file:line` jump).
    - **Changes:** Working-tree staged/unstaged status + Unified/Split git diff
-     viewer.
+     viewer. When the branch is ahead of its upstream, an **Uncommitted ·
+     Unpushed N** switch reviews the local commits a push or Create PR would
+     send — all of them as one range (`range:<upstream>...HEAD`) or one commit
+     at a time (`commit:<sha>`), newest 50.
    - **Connections:** Workspace DB/SSH connections, live `db_mcp_activity`
      stream whenever an agent executes `otto_db_query`, and **Open
      side-by-side** to launch Database Explorer in Otto's split pane.

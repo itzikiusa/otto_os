@@ -103,7 +103,8 @@ class ThreadsStore {
   inspectorOpen = $state(true);
   inspectorTab = $state<ThreadsInspectorTab>('files');
   openFilesByWorkspace = $state<Record<string, WorkspaceFileTabs>>({});
-  projectFilter = $state('all');
+  /** Sidebar project filter — several at once (T3 0.1.6); empty = all projects. */
+  projectFilters = $state<string[]>([]);
   /** Project folders added from the sidebar's "Add project" before they have a thread. */
   extraProjects = $state<string[]>([]);
   scriptsByProject = $state<Record<string, ProjectScript[]>>({});
@@ -486,6 +487,19 @@ class ThreadsStore {
   removeProject(path: string): void {
     this.extraProjects = this.extraProjects.filter((x) => x !== path);
     this.save();
+  }
+
+  toggleProjectFilter(key: string): void {
+    this.projectFilters = this.projectFilters.includes(key)
+      ? this.projectFilters.filter((k) => k !== key)
+      : [...this.projectFilters, key];
+  }
+
+  /** Whether a thread folder falls under the active project filter. */
+  inProjectFilter(cwd: string | null | undefined): boolean {
+    if (this.projectFilters.length === 0) return true;
+    const c = (cwd ?? '').replace(/\/+$/, '');
+    return this.projectFilters.some((k) => c === k || c.startsWith(`${k}/`));
   }
 
   isProjectPinned(path: string): boolean {

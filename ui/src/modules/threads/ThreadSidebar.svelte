@@ -67,15 +67,14 @@
   });
 
   const activeFilterLabel = $derived.by(() => {
-    if (threads.projectFilter === 'all') return 'All projects';
-    return projectOptions.find((p) => p.key === threads.projectFilter)?.label ?? projectNameFromCwd(threads.projectFilter);
+    const keys = threads.projectFilters;
+    if (keys.length === 0) return 'All projects';
+    if (keys.length > 1) return `${keys.length} projects`;
+    return projectOptions.find((p) => p.key === keys[0])?.label ?? projectNameFromCwd(keys[0]);
   });
 
   function matchesFilters(s: Session): boolean {
-    if (threads.projectFilter !== 'all') {
-      const cwd = (s.cwd ?? '').replace(/\/+$/, '');
-      if (cwd !== threads.projectFilter && !cwd.startsWith(`${threads.projectFilter}/`)) return false;
-    }
+    if (!threads.inProjectFilter(s.cwd)) return false;
     const q = search.trim().toLowerCase();
     if (!q) return true;
     const br = sessionBranch(s, git.repos, git.statusById) ?? '';
@@ -145,7 +144,7 @@
     }
     if (!search.trim()) {
       for (const p of threads.extraProjects) {
-        if (threads.projectFilter === 'all' || p === threads.projectFilter) ensure(p);
+        if (threads.inProjectFilter(p)) ensure(p);
       }
     }
     // Pinned projects first (in pin order), the rest keep first-seen order.
@@ -174,27 +173,34 @@
     return combined;
   });
 
-  function openProjectFilterMenu(e: MouseEvent): void {
+  // Multi-select: a pick toggles that project and re-opens the menu so several
+  // can be ticked in a row; "All projects" clears the filter.
+  function openProjectFilterMenu(anchor: HTMLElement): void {
+    const reopen = (): void => queueMicrotask(() => openProjectFilterMenu(anchor));
     const items: MenuItem[] = [
       {
         label: 'All projects',
-        checked: threads.projectFilter === 'all',
+        checked: threads.projectFilters.length === 0,
         pinned: true,
-        action: () => (threads.projectFilter = 'all'),
+        action: () => (threads.projectFilters = []),
       },
       ...(projectOptions.length > 0 ? [{ separator: true, pinned: true }] : []),
       ...projectOptions.map(
         (p): MenuItem => ({
           label: p.label,
           hint: compactPath(p.cwd, homePath),
-          checked: threads.projectFilter === p.key,
-          action: () => (threads.projectFilter = p.key),
+          checked: threads.projectFilters.includes(p.key),
+          action: () => {
+            threads.toggleProjectFilter(p.key);
+            reopen();
+          },
         }),
       ),
     ];
-    ctxMenu.show(e, items, {
+    ctxMenu.showAt(anchor, items, {
       filter: projectOptions.length > 6,
       filterPlaceholder: 'Filter projects…',
+      align: 'end',
     });
   }
 
@@ -222,7 +228,11 @@
         icon: 'star',
         action: () => threads.toggleProjectPin(grp.key),
       },
-      { label: 'Filter to this project', icon: 'filter', action: () => (threads.projectFilter = grp.key) },
+      {
+        label: threads.projectFilters.includes(grp.key) ? 'Remove from filter' : 'Add to filter',
+        icon: 'filter',
+        action: () => threads.toggleProjectFilter(grp.key),
+      },
       ...(added ? [{ separator: true }, { label: 'Remove from sidebar', icon: 'x', action: () => threads.removeProject(grp.key) }] : []),
     ]);
   }
@@ -378,12 +388,12 @@
     <button
       type="button"
       class="icon-btn"
-      class:th-on={threads.projectFilter !== 'all'}
+      class:th-on={threads.projectFilters.length > 0}
       aria-haspopup="menu"
       aria-label="Filter by project: {activeFilterLabel}"
       title="Filter by project ({activeFilterLabel})"
       data-testid="threads-project-filter"
-      onclick={openProjectFilterMenu}
+      onclick={(e) => openProjectFilterMenu(e.currentTarget)}
     >
       <Icon name="filter" size={14} />
     </button>
@@ -408,6 +418,15 @@
       <Icon name="edit" size={14} />
     </button>
   </div>
+
+  {#if threads.projectFilters.length > 0}
+    <div class="th-filter-note">
+      <span class="ellipsis">Showing {activeFilterLabel}</span>
+      <button type="button" class="btn small ghost" data-testid="threads-filter-clear" onclick={() => (threads.projectFilters = [])}>
+        Clear
+      </button>
+    </div>
+  {/if}
 
   <div class="th-scroll">
     {#if pinnedThreads.length > 0}
@@ -608,6 +627,16 @@
   }
   .th-on {
     color: var(--accent-text);
+  }
+  .th-filter-note {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding-inline: 14px 8px;
+    font-size: var(--fs-s);
+    color: var(--text-dim);
+    flex-shrink: 0;
   }
   .th-scroll {
     flex: 1;
