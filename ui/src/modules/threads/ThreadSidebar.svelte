@@ -148,7 +148,14 @@
         if (threads.projectFilter === 'all' || p === threads.projectFilter) ensure(p);
       }
     }
-    return [...groups.values()].map((g) => ({ ...g, ordered: inboxOrder(g.items) }));
+    // Pinned projects first (in pin order), the rest keep first-seen order.
+    const pinRank = (k: string): number => {
+      const i = threads.pinnedProjects.indexOf(k);
+      return i < 0 ? Number.MAX_SAFE_INTEGER : i;
+    };
+    return [...groups.values()]
+      .sort((a, b) => pinRank(a.key) - pinRank(b.key))
+      .map((g) => ({ ...g, ordered: inboxOrder(g.items) }));
   });
 
   // History combines settled threads + archived daemon threads.
@@ -210,6 +217,11 @@
     const added = threads.extraProjects.includes(grp.key);
     ctxMenu.show(e, [
       { label: 'New thread here', icon: 'edit', action: () => newThreadIn(grp.cwd) },
+      {
+        label: threads.isProjectPinned(grp.key) ? 'Unpin project' : 'Pin project',
+        icon: 'star',
+        action: () => threads.toggleProjectPin(grp.key),
+      },
       { label: 'Filter to this project', icon: 'filter', action: () => (threads.projectFilter = grp.key) },
       ...(added ? [{ separator: true }, { label: 'Remove from sidebar', icon: 'x', action: () => threads.removeProject(grp.key) }] : []),
     ]);
@@ -434,6 +446,9 @@
               >
                 <Icon name={open ? 'chevronDown' : 'chevronRight'} size={12} />
                 <span class="ellipsis" dir="auto">{grp.label}</span>
+                {#if threads.isProjectPinned(grp.key)}
+                  <span class="th-pinned-mark" aria-label="Pinned" title="Pinned project"><Icon name="star" size={12} /></span>
+                {/if}
               </button>
               <button
                 type="button"
@@ -647,6 +662,10 @@
   }
   .th-proj-toggle:hover {
     background: var(--hover);
+  }
+  .th-pinned-mark {
+    display: inline-flex;
+    color: var(--text-dim);
   }
   .th-history {
     color: var(--text-dim);

@@ -201,6 +201,7 @@
     padding: 0;
   }
   .tc-single-slot {
+    animation: otto-fade-in var(--dur-enter) var(--ease-out);
     flex: 1;
     min-width: 0;
     min-height: 0;
@@ -300,6 +301,9 @@
     width: 100%;
     justify-content: flex-start;
   }
+  /* Panda 0.3.86 "calmer thread switching": the thread view fades in once
+     when it opens (not on every switch — the pane is not remounted); reduced
+     motion skips it via the app-wide override. */
   @media (max-width: 640px) {
     .tc-canvas.split {
       flex-direction: column;
