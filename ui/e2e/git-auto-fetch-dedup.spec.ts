@@ -2,7 +2,7 @@ import { test, expect, type Page } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { apiCtx, seedWorkspace } from './seed';
 
 // E2E for the two Git features:
@@ -171,8 +171,6 @@ test('dedup: registering the same path twice returns the same repo (no duplicate
   const { ctx, base } = await apiCtx();
   const dir = initRepo('otto-e2e-dedup-');
 
-  const before = (await (await ctx.get(`${base}/api/v1/git/repos`)).json()) as unknown[];
-
   const reg = async () => {
     const r = await ctx.post(`${base}/api/v1/workspaces/${workspaceId}/repos`, {
       data: { path: dir, name: 'e2e-dedup' },
@@ -193,8 +191,11 @@ test('dedup: registering the same path twice returns the same repo (no duplicate
   expect(second.id).toBe(first.id);
   expect(third.id).toBe(first.id);
 
-  const after = (await (await ctx.get(`${base}/api/v1/git/repos`)).json()) as unknown[];
-  expect(after.length, 'exactly one new repo row should be created').toBe(before.length + 1);
+  // Count rows for THIS repo's path only: other workers register repos in the
+  // same daemon concurrently, so a global before/after count races.
+  const after = (await (await ctx.get(`${base}/api/v1/git/repos`)).json()) as { path: string }[];
+  const mine = after.filter((r) => r.path.endsWith(basename(dir)) || r.path.includes(`${basename(dir)}/`));
+  expect(mine.length, 'exactly one repo row for this path').toBe(1);
   await ctx.dispose();
 });
 

@@ -54,9 +54,10 @@
   });
 
   // Open on an item: the first file in the shown order when nothing (or a
-  // file of another commit) is selected.
+  // file of another commit) is selected — except on a LARGE commit, where the
+  // list paints alone and a patch loads only when a file is picked.
   $effect(() => {
-    if (all || (selected !== null && files.some((f) => f.path === selected))) return;
+    if (all || large || (selected !== null && files.some((f) => f.path === selected))) return;
     const first = rows.find((r) => r.node.type === 'file');
     if (first && first.node.type === 'file') onselect(first.node.change.path);
   });

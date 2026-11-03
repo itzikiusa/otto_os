@@ -1022,9 +1022,7 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .wp-branch :global(svg) {
-    flex-shrink: 0;
-  }
+  .wp-branch :global(svg) { flex-shrink: 0; }
   .wp-count {
     font-size: var(--fs-s);
     color: var(--text-dim);
@@ -1038,26 +1036,16 @@
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
   }
-  .wp-add {
-    color: var(--success);
-  }
-  .wp-del {
-    color: var(--danger);
-  }
-  .wp-stage-all {
-    flex-shrink: 0;
-  }
+  .wp-add { color: var(--success); }
+  .wp-del { color: var(--danger); }
+  .wp-stage-all { flex-shrink: 0; }
   .wp-view-btn[aria-pressed='true'] {
     color: var(--accent-text);
     background: var(--accent-soft);
   }
   /* .icon-btn; only placement is local. */
-  .wp-close {
-    flex-shrink: 0;
-  }
-  .grow {
-    flex: 1;
-  }
+  .wp-close { flex-shrink: 0; }
+  .grow { flex: 1; }
 
   /* ── Layout: narrow = list / diff / composer stacked; wide = the diff in its
      own column beside the list + composer (container query, not viewport). */
@@ -1079,9 +1067,7 @@
     flex: 0 1 auto;
     max-height: 45%;
   }
-  .wp-compose {
-    flex-shrink: 0;
-  }
+  .wp-compose { flex-shrink: 0; }
   @container wip (min-width: 760px) {
     .wp-body.has-diff {
       display: grid;
@@ -1117,9 +1103,7 @@
 
   /* Conflicts: a warning-tinted header and side-pick buttons instead of the
      stage checkbox (staging an unresolved file would bury its markers). */
-  .wp-conflicts {
-    padding-block-end: 4px;
-  }
+  .wp-conflicts { padding-block-end: 4px; }
   .wp-conflict-head {
     display: flex;
     align-items: center;
@@ -1131,9 +1115,7 @@
     font-size: var(--fs-s);
     font-weight: 600;
   }
-  .wp-conflict-head > :global(svg) {
-    color: var(--warning);
-  }
+  .wp-conflict-head > :global(svg) { color: var(--warning); }
   .wp-ccount {
     padding: 0 6px;
     border-radius: 999px;
@@ -1152,9 +1134,7 @@
     padding-inline: 8px 4px;
     border-radius: var(--radius-s);
   }
-  .wp-crow:hover {
-    background: var(--hover);
-  }
+  .wp-crow:hover { background: var(--hover); }
   .wp-ckind {
     flex-shrink: 0;
     display: grid;
@@ -1252,9 +1232,7 @@
     overflow-y: auto;
     overscroll-behavior: contain;
   }
-  .wp-diff-skel {
-    padding: 10px;
-  }
+  .wp-diff-skel { padding: 10px; }
   .wp-target > button {
     height: 20px;
     padding: 0 6px;
@@ -1282,10 +1260,12 @@
   }
   .wp-untracked-cap code { font-size: var(--fs-xs); }
 
-  /* ≤1024px (the graph stacks as an accordion): touch-height rows. */
+  /* ≤1024px (accordion): touch-height rows, and the pane scrolls AS A WHOLE —
+     a fixed composer squeezed the list's scroller to nothing on a phone. */
   @media (max-width: 1024px) {
-    .wp-crow {
-      height: 36px;
-    }
+    .wp-crow { height: 36px; }
+    .wp-body { overflow-y: auto; overscroll-behavior: contain; }
+    .wp-scroll, .wp-body.has-diff .wp-scroll { flex: none; max-height: none; overflow: visible; }
+    .wp-diff { flex: none; height: min(70vh, 560px); }
   }
 </style>
