@@ -209,10 +209,15 @@ From the Git landing page, **Add Repository** offers three modes:
   across all workspaces the caller may view (root sees all; a non-root user sees
   repos in workspaces they're a member of).
 - A `#/git/:id` or `#/git/:id/:tab` deep link opens that repo as a tab.
-- Auto-fetch stays active for open tabs while you work in other modules: by default
-  every two minutes, with the selected repo refreshed every thirty seconds. Opening
-  a tab or returning focus checks immediately if its fetch is due. Hidden or
-  unfocused windows pause automatic fetching. The tab-strip toggle pauses it.
+- Auto-fetch runs while the Git page is showing: the selected repo every 60 s,
+  other tabs used in the last 15 minutes every two minutes. Opening the page,
+  opening a tab or returning focus checks immediately if a fetch is due. Hidden or
+  unfocused windows pause automatic fetching. The tab-strip toggle pauses the
+  periodic rounds (the button then reads **Auto-fetch paused**); even paused, the
+  selected repo is fetched once when the page or tab opens (at most once a minute).
+- A ref change made outside Otto (a terminal commit, an agent session, another git
+  client's fetch) reaches the open graph through the repo watcher: the status and
+  the graph's refs re-sync without waiting for the next fetch.
 - At most two fetches run at once; manual Fetch joins an existing request for that
   repo. Background errors retry quietly with backoff; manual failures still show
   an error. Fetch never checks out or pulls a branch.
@@ -234,6 +239,15 @@ The **Graph** tab renders the commit graph with **branch chips drawn on the
 graph** at each ref's tip. Right-clicking a commit, branch chip, or tag opens a
 context menu (see §[Context menus](#context-menus)). Removing a repo
 **unregisters** it only — `DELETE /repos/{id}` never touches the files on disk.
+
+Selecting a commit opens its detail: sha, refs, subject, author and time over
+a file navigator (`graph/CommitFileList.svelte`) — "N files +A −D", a
+**Path / Tree** switch (Tree by default, remembered), Expand all / Collapse
+all, folders with per-folder file counts and a status letter per file.
+Picking a file shows **only that file's diff**, beside the list when the pane
+is at least 760 px wide and below it otherwise; the first file opens on
+arrival, and ↑/↓ move through the files. **View all files** (remembered)
+stacks every file's diff instead (large commits start collapsed).
 
 Double-clicking a **remote** branch (`origin/x`, `upstream/x`) switches to the
 local `x` when it exists; otherwise it creates `x` at that remote ref with
@@ -383,8 +397,8 @@ The graph’s **WIP** panel ("Changes") is the working-tree view, backed by
 a collapsible section with a count. Rows show the status letter (M/A/D/R/U),
 the file name with its directory dimmed beside it, and `+/−` line counts (one
 `summary=true` numstat per side, skipped past 2,000 files). The folder button
-in the header switches between this flat list and a folder tree (remembered
-per viewer). ↑/↓ move between rows across sections (with a diff open, the
+in the header switches between the folder tree (the default, ordered by
+folder) and a flat list (remembered per viewer). ↑/↓ move between rows across sections (with a diff open, the
 diff follows), ←/→ fold a folder. The selected file's diff opens **beside**
 the list when the pane is at least 760 px wide, below it otherwise.
 

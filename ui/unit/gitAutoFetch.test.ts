@@ -179,3 +179,40 @@ test('background tabs unused for 15 minutes stop fetching; the selected tab and 
   f.calls[3].result.resolve(status); await flush();
   f.git.stopAutoFetch();
 });
+
+// Regression (2026-11-03): the user's window had auto-fetch persisted as
+// paused (one click on the tab strip's icon toggle), so opening Git showed
+// whatever the last manual fetch left. Paused still fetches the selected repo
+// ONCE on arrival (throttled to the active cadence); it only stops the rounds.
+test('paused auto-fetch still fetches the selected repo once when Git or a repo opens', async () => {
+  const f = fixture(); f.git.openRepoIds = ['one', 'two']; f.git.activeRepoId = 'one';
+  f.git.setAutoFetch(false);
+  f.git.startAutoFetch(); await f.advance(0);
+  assert.deepEqual(f.calls.map((c) => c.id), ['one'], 'opening the Git page fetches the selected repo');
+  f.calls[0].result.resolve(status); await flush();
+  await f.advance(10 * 60_000);
+  assert.equal(f.calls.length, 1, 'no periodic rounds while paused');
+  f.git.activateRepoTab('two'); await flush();
+  assert.deepEqual(f.calls.map((c) => c.id), ['one', 'two'], 'activating a repo fetches it');
+  f.calls[1].result.resolve(status); await flush();
+  f.git.activateRepoTab('one'); f.git.activateRepoTab('two'); await flush();
+  assert.equal(f.calls.length, 3, 'a repo fetched within the last minute is not fetched again');
+  f.calls[2].result.resolve(status); await flush();
+  f.git.stopAutoFetch(); f.git.openRepoTab('three'); await flush();
+  assert.equal(f.calls.length, 3, 'nothing fetches while the Git page is not showing');
+});
+
+// A fetch / commit / branch move made OUTSIDE Otto (a terminal, an agent's
+// session, another git client fetching on its own timer) reaches the client
+// only as a live `repo_status_changed`: a ref change (paths `[]` = remote refs
+// or tags only, `null` = HEAD / branch refs / unknown) must re-sync the graph,
+// not just the status.
+test('a live ref change bumps refsRev; a worktree-file change does not', async () => {
+  const f = fixture(); f.git.openRepoIds = ['one'];
+  f.git.applyRepoChanged('one', ['src/a.ts']); await flush();
+  assert.equal(f.git.refsRev.one ?? 0, 0);
+  f.git.applyRepoChanged('one', []); await flush();
+  assert.equal(f.git.refsRev.one, 1, 'remote refs moved (another client fetched)');
+  f.git.applyRepoChanged('one', null); await flush();
+  assert.equal(f.git.refsRev.one, 2, 'HEAD / branch refs may have moved');
+});
