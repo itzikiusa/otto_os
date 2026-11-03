@@ -241,6 +241,9 @@ must not break:
   - A new module is one `SIDEBAR_MODULES` entry (`ui/src/lib/sidebar.ts`) with
     a unique icon and a group. ⌘K "Go to" commands are generated from it.
   - No in-app windows or docks.
+- **Less is more.** One toolbar row, one primary action; rarely used controls
+  go into ⋯ / a popover; merge near-duplicate actions; calm empty/start states.
+  When in doubt, remove it.
 - **Tokens only.**
   - Colours come from `ui/src/lib/tokens.css`: semantic `--danger`,
     `--warning`, `--success`, `--info` (plus `-soft`), and `--accent-text` /

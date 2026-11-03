@@ -62,6 +62,9 @@ use `rgba(0,0,0,…)`), but each one needs a reason.
       rules.
 - [ ] There is exactly one `PageHeader` (Agents excepted) and one `<h1>`. The
       title is the module name or the selected item's name.
+- [ ] Less is more: one toolbar row above the content; anything most visits
+  don't use sits in ⋯ / a popover; no two controls do nearly the same thing;
+  start/empty states show one heading and one action or input.
 - [ ] There is at most one `.primary` per view. Destructive actions collapse
       first (`data-overflow` lowest) and don't sit next to the primary.
 - [ ] Icon-only header actions have `aria-label`, `title` and `data-icon`
