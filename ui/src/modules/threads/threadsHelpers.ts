@@ -15,7 +15,7 @@ export function isPlainShellSession(s: Session | null | undefined): boolean {
  * plus delegated subagent workers whose parent session is a thread.
  * Sessions created in `#/agents` never leak into `#/threads`.
  */
-export function isThreadSession(s: Session, pool: readonly Session[] = ws.sessions): boolean {
+export function isThreadSession(s: Session, pool: readonly Session[] | ReadonlyMap<string, Session> = ws.sessions): boolean {
   if (s.kind === 'connection') return false;
   // A side chat lives in its main thread's right panel until promoted.
   if (sideChatOf(s)) return false;
@@ -24,7 +24,8 @@ export function isThreadSession(s: Session, pool: readonly Session[] = ws.sessio
   if (isThreadSurfaceSession(s)) return true;
   const parentId = delegatedParentId(s);
   if (!parentId || parentId === s.id) return false;
-  const parent = pool.find((p) => p.id === parentId);
+  // A Map (the sidebar's id index) keeps a whole-list filter linear.
+  const parent = 'get' in pool ? pool.get(parentId) : pool.find((p) => p.id === parentId);
   return parent ? isThreadSurfaceSession(parent) : false;
 }
 

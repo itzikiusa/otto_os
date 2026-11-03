@@ -9,6 +9,9 @@ import { api } from '../api/client';
 import { loadErrorText } from '../loadError';
 import { winKey } from '../win';
 import { TranscriptLifecycle } from './transcriptLifecycle';
+import { TURN_CAP, TURN_KEEP, trimTurnHead } from './transcriptTrim';
+
+export { TURN_CAP, TURN_KEEP, trimTurnHead };
 import { parseSessionView, type SessionViewMode } from '../paneHeader';
 import type { Transcript, TranscriptTouchQuery, Turn, Artifact, OttoEvent } from '../api/types';
 
@@ -54,29 +57,14 @@ export function fetchTranscript(
   );
 }
 
+/** How long a released conversation stays current without a re-read. The
+ *  view touches the server tail every 60 s and the tail stops 2 min after the
+ *  last touch, so deltas are guaranteed for at least 60 s after a release. */
+export const WARM_MS = 45_000;
 /** First page size — the app-style "last N turns, then Load earlier". */
 export const PAGE_TURNS = 60;
 /** A WS delta above this is not trusted to be complete — re-fetch the tail. */
 const DELTA_CAP_BYTES = 64 * 1024;
-/** A chat left open on a working agent keeps appending turns. Past TURN_CAP
- *  the oldest are dropped down to TURN_KEEP ("Load earlier" pages them back),
- *  so memory and per-delta work stay bounded however long the session runs. */
-export const TURN_CAP = 600;
-export const TURN_KEEP = 500;
-
-/** Byte budget complements the turn count for tool-heavy conversations. */
-const TURN_BYTES_CAP = 8 * 1024 * 1024;
-const TURN_BYTES_KEEP = 6 * 1024 * 1024;
-const turnCharges = new WeakMap<Turn, number>();
-function turnCharge(turn: Turn): number {
-  let charge = turnCharges.get(turn);
-  if (charge === undefined) {
-    charge = JSON.stringify(turn).length * 2;
-    turnCharges.set(turn, charge);
-  }
-  return charge;
-}
-
 /** One lazily fetched subagent body (`?sub=<agent_id>`). */
 export interface SubagentBody {
   turns: Turn[];
@@ -86,43 +74,6 @@ export interface SubagentBody {
   has_later: boolean;
   cursor: string;
   retryable: boolean;
-}
-
-/**
- * Drop the head of a live turn list that outgrew `cap`. The server pages by
- * RECORD index (`before` = exclusive first-record index), which turns don't
- * carry, so the list may only be cut in front of a turn with a known `before`
- * bound (`bounds`: turn id → a cursor B such that every turn ahead of it
- * started before B). Over-estimated bounds are safe — "Load earlier" dedupes
- * by id. Returns null when nothing can be dropped; otherwise the kept turns
- * and the cursor to page earlier from. `bounds` loses the dropped ids.
- */
-export function trimTurnHead(
-  turns: Turn[],
-  bounds: Map<string, string>,
-  cap = TURN_CAP,
-  keep = TURN_KEEP,
-): { turns: Turn[]; cursor: string; dropped: number } | null {
-  const bytes = turns.reduce((total, turn) => total + turnCharge(turn), 0);
-  const byteOverflow = bytes > TURN_BYTES_CAP;
-  if (turns.length <= cap && !byteOverflow) return null;
-  let start = Math.max(1, turns.length - keep);
-  if (byteOverflow) {
-    let retained = bytes;
-    for (let i = 0; i < turns.length - 1; i++) {
-      retained -= turnCharge(turns[i]);
-      if (retained <= TURN_BYTES_KEEP) { start = Math.max(start, i + 1); break; }
-    }
-  }
-  // A byte-heavy window may need fewer turns. Always retain its newest turn.
-  const end = byteOverflow ? turns.length - 1 : turns.length - Math.ceil(keep / 2);
-  for (let j = start; j <= end; j++) {
-    const cursor = bounds.get(turns[j].id);
-    if (cursor === undefined) continue;
-    for (let i = 0; i < j; i++) bounds.delete(turns[i].id);
-    return { turns: turns.slice(j), cursor, dropped: j };
-  }
-  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -197,6 +148,20 @@ export class Conversation {
     this.parentBytes = Math.min(32 * 1024 * 1024 + 1,
       this.parentBytes + TranscriptLifecycle.payloadCharge(value));
   }
+  /** Released views stay current for a short while: `transcript_appended`
+   *  frames are session-scoped (not view-scoped) and keep arriving while the
+   *  server tail is armed, so a switch back within the window needs no tail
+   *  re-read (see `TranscriptStore.acquireView`). */
+  warmUntil = 0;
+  /** Something this conversation could not apply happened while it was not
+   *  on screen (an oversized/rewound delta, a socket gap, a hidden window). */
+  missed = true;
+  /** Current without a re-read: loaded, error-free, nothing missed, and
+   *  released less than {@link WARM_MS} ago. */
+  warm(now = Date.now()): boolean {
+    return !this.missed && now < this.warmUntil && this.transcript != null && !this.transcript.unavailable_reason && !this.error;
+  }
+
   private readEpoch = 0;
   private reads = new AbortController();
   private isActive: () => boolean;
@@ -268,6 +233,7 @@ export class Conversation {
       if (!this.holdCap) this.followLive();
       this.tailCursor = null;
       this.tailTick++;
+      this.missed = false;
       return true;
     } catch (e) {
       if (!ac.signal.aborted && this.isActive()) this.error = loadErrorText(e);
@@ -312,6 +278,13 @@ export class Conversation {
     }
   }
 
+  /** On screen: re-read the tail now. Warm in the background: remember the
+   *  gap so the next open re-reads instead of trusting the cached turns. */
+  private needRead(): void {
+    if (this.isActive()) this.requestRead();
+    else this.missed = true;
+  }
+
   /** Apply a `transcript_appended` delta. A turn whose id we already hold is
    *  REPLACED (the agent's response grew); new ids are appended. Frames the
    *  server could not fit in 64 KB (empty `turns` with a moved cursor), or a
@@ -319,13 +292,13 @@ export class Conversation {
   applyDelta(cursor: string, turns: Turn[]): void {
     if (this.transcript == null || this.transcript.unavailable_reason) {
       // First signs of life for a session that had no transcript yet.
-      this.requestRead();
+      this.needRead();
       return;
     }
     const moved = this.tailCursor == null || Number(cursor) > Number(this.tailCursor);
     const backwards = this.tailCursor != null && Number(cursor) < Number(this.tailCursor);
     if (backwards || (turns.length === 0 && moved) || JSON.stringify(turns).length > DELTA_CAP_BYTES) {
-      this.requestRead();
+      this.needRead();
       return;
     }
     if (!moved && turns.length === 0) return;
@@ -589,7 +562,17 @@ class TranscriptStore {
     c.activate();
     this.inactive.delete(c.key);
     this.lifecycle.setVisible(typeof document === 'undefined' || !document.hidden);
+    let warm = c.warm();
+    c.warmUntil = 0;
     const release = this.lifecycle.acquire(c.key, async signal => {
+      // Switching back to a thread released moments ago: its turns are
+      // current (deltas kept applying), so only re-arm the tail. A re-read of
+      // the newest page replaced every turn object and re-rendered them.
+      if (warm && !c.missed) {
+        warm = false;
+        await c.touch();
+        return;
+      }
       await c.resync(signal);
       const previous = this.retries.get(c.key);
       if (previous) clearTimeout(previous);
@@ -614,6 +597,7 @@ class TranscriptStore {
         this.retries.delete(c.key); this.retryAttempts.delete(c.key);
         // Incoming bounded pages/deltas carry the charge; navigation scans no body.
         this.inactive.set(c.key, c.retainedBytes);
+        c.warmUntil = Date.now() + WARM_MS;
         this.evictInactive();
       }
     };
@@ -635,7 +619,10 @@ class TranscriptStore {
   setVisible(visible: boolean): void {
     if (visible) for (const c of this.convs.values()) c.activate();
     else {
-      for (const c of this.convs.values()) c.dispose();
+      for (const c of this.convs.values()) {
+        c.dispose();
+        c.missed = true;
+      }
       for (const retry of this.retries.values()) clearTimeout(retry);
       this.retries.clear(); this.retryAttempts.clear();
     }
@@ -698,6 +685,8 @@ class TranscriptStore {
 
   /** Recover only mounted, document-visible conversations. */
   resyncVisible(): void {
+    // A socket gap: deltas may have been lost for every released view too.
+    for (const c of this.convs.values()) c.missed = true;
     this.setVisible(typeof document === 'undefined' || !document.hidden);
     this.lifecycle.request();
   }
@@ -706,7 +695,9 @@ class TranscriptStore {
   applyEvent(ev: OttoEvent): boolean {
     switch (ev.type) {
       case 'transcript_appended': {
-        (this.lifecycle.active(`s:${ev.session_id}`) ? this.convs.get(`s:${ev.session_id}`) : undefined)?.applyDelta(ev.cursor, ev.turns);
+        const key = `s:${ev.session_id}`;
+        const c = this.convs.get(key);
+        if (c && (this.lifecycle.active(key) || c.warm())) c.applyDelta(ev.cursor, ev.turns);
         return true;
       }
       case 'transcript_live': {

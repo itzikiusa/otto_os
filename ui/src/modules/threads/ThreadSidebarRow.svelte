@@ -32,7 +32,12 @@
   const selected = $derived(threads.focusedSessionId === s.id && !threads.newDraftMode);
   const inPane = $derived(threads.paneIds.includes(s.id) && !threads.newDraftMode);
   const history = $derived(variant === 'history');
+  // The tooltip (branch lookup over every repo's status) is only built while
+  // the row is hovered or focused: a git status change no longer re-derives it
+  // for every row of the sidebar.
+  let hot = $state(false);
   const tip = $derived.by(() => {
+    if (!hot) return s.title;
     const br = sessionBranch(s, git.repos, git.statusById);
     return [s.title, harnessLabel(s.provider), br ? `on ${br}` : null, needs ? 'needs your approval' : null]
       .filter(Boolean)
@@ -56,6 +61,10 @@
     type="button"
     class="tr-main"
     title={tip}
+    onpointerenter={() => (hot = true)}
+    onpointerleave={() => (hot = false)}
+    onfocus={() => (hot = true)}
+    onblur={() => (hot = false)}
     aria-current={selected ? 'true' : undefined}
     onclick={(e) => (history ? onreopen(s, e.metaKey || e.ctrlKey) : onrowclick(e, s))}
     oncontextmenu={(e) => onmenu(e, s)}
