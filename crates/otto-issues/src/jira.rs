@@ -1213,16 +1213,25 @@ impl JiraClient {
         Ok(users.iter().map(parse_user).collect())
     }
 
-    /// Assign an issue to a user (or unassign by passing `"-1"`).
+    /// Assign an issue to a user, or unassign with an
+    /// [`is_unassign`](crate::tracker::is_unassign) value (`"-1"`, `"none"`,
+    /// empty).
     ///
-    /// Uses `PUT /rest/api/3/issue/{key}/assignee` with `{"accountId":"..."}`
+    /// Uses `PUT /rest/api/3/issue/{key}/assignee` with `{"accountId":"..."}`;
+    /// an unassign sends `{"accountId": null}` — on Jira Cloud `"-1"` would
+    /// assign the project's DEFAULT assignee instead.
     pub async fn assign_issue(&self, key: &str, account_id: &str) -> Result<()> {
         let url = format!(
             "{}/rest/api/3/issue/{}/assignee",
             self.t.base,
             path_seg(key)
         );
-        let payload = serde_json::json!({ "accountId": account_id });
+        let account = if crate::tracker::is_unassign(account_id) {
+            serde_json::Value::Null
+        } else {
+            serde_json::json!(account_id.trim())
+        };
+        let payload = serde_json::json!({ "accountId": account });
 
         let req = self
             .t

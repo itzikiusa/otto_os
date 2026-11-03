@@ -266,7 +266,7 @@ issue-type discovery (used by the product workflow):
 | List transitions | `GET /issue/{account_id}/{key}/transitions` | `GET /rest/api/3/issue/{key}/transitions` |
 | Apply transition | `POST /issue/{account_id}/{key}/transitions` `{"transition_id":"21"}` | `POST …/transitions` `{"transition":{"id":…}}` |
 | List assignable users | `GET /issue/{account_id}/{key}/assignable` | `GET /rest/api/3/user/assignable/search?issueKey=…` |
-| Assign / unassign | `PUT /issue/{account_id}/{key}/assignee` `{"account_id":"…"}` (`"-1"` unassigns) | `PUT /rest/api/3/issue/{key}/assignee` `{"accountId":…}` |
+| Assign / unassign | `PUT /issue/{account_id}/{key}/assignee` `{"account_id":"…"}` (`null`, `"-1"` or `"none"` unassigns) | `PUT /rest/api/3/issue/{key}/assignee` `{"accountId":…}` (an unassign sends `null`; Jira's `"-1"` would pick the project default) |
 | Project issue types | `GET /issue/{account_id}/{project_key}/issue-types` | `GET /rest/api/3/project/{key}` (reads non-subtask `issueTypes[].name`) |
 | Create issue | `POST /issue/{account_id}/issues` (see *Creating an issue*) | `GET …/issue/createmeta/{project}/issuetypes[/{id}]`, `POST /rest/api/3/issue`, `GET /rest/api/3/issue/{key}?fields=…` |
 | Edit issue | `PATCH /issue/{account_id}/issues/{key}` (see *Editing an issue*) | `GET …/issue/{key}?fields=description`, `GET …/issue/{key}/editmeta`, `PUT /rest/api/3/issue/{key}`, `PUT …/issue/{key}/assignee` |
