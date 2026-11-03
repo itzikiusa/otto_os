@@ -17,6 +17,7 @@
       mode?: 'full' | 'accept-edits' | 'plan';
     }) => void;
     onsidechat?: (question: string) => void; // `/btw <question>` → a side chat (Threads)
+    branchHint?: string | null; // host-known branch when the transcript carries none
   }
   // Workspace repos (for `#123` → the GitHub PR / issue URL), fetched once per
   // workspace per app run — a light GET, never the git store's heavier load.
@@ -93,6 +94,7 @@
     onopeninspector,
     onnewthread,
     onsidechat,
+    branchHint = null,
   }: ConversationViewProps = $props();
 
   const src = $derived<TranscriptSource>({ sessionId });
@@ -1018,7 +1020,7 @@
       {waiting}
       onresume={() => void resume()}
       cwd={ws.getSession(sessionId)?.cwd ?? ''}
-      branch={conv.liveBranch}
+      branch={conv.liveBranch ?? branchHint}
       model={t?.model ?? null}
       termStatus={conv.liveStatus}
       termInput={conv.liveInput}
@@ -1065,6 +1067,10 @@
        it); the composer box matches. Prose alone keeps a reading measure. */
     --chat-measure: 1440px;
     --prose-measure: 104ch;
+  }
+  /* Threads keeps T3's readable centred column (messages + composer). */
+  .conv[data-surface='threads'] {
+    --chat-measure: 800px;
     /* Two speakers: you = blue (accent), the agent = NEUTRAL (patterns §2:
        agent identity is never a status colour — running is not success green).
        `--agent` is the neutral tint source; the agent's rule is --border-strong. */

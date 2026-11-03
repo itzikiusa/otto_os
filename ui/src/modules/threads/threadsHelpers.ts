@@ -91,7 +91,8 @@ export function sessionBranch(
   }
   const cwd = (session.cwd ?? '').replace(/\/+$/, '');
   if (!cwd) return null;
-  const repo = matchRepoForCwd(cwd, repos);
+  // Strict match: never another repo's branch for a folder no repo contains.
+  const repo = repoForCwd(cwd, repos);
   if (!repo) return null;
   return statusById[repo.id]?.branch ?? null;
 }

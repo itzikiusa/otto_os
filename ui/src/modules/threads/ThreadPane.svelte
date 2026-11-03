@@ -17,6 +17,7 @@
   import { buildThreadMenu } from './threadMenu';
   import ThreadTerminalDrawer from './ThreadTerminalDrawer.svelte';
   import { harnessLabel, isPlainShellSession, isThreadSession, sessionBranch } from './threadsHelpers';
+  import { threadRepos } from './threadRepos.svelte';
   import { threads } from './threadsStore.svelte';
 
   interface Props {
@@ -31,7 +32,17 @@
   const rawStatus = $derived(ws.statusMap[paneId] ?? session?.status ?? 'idle');
   const needsYou = $derived(ws.needsYou[paneId] === true);
   const paneState = $derived(sessionState(session, rawStatus, needsYou, { stale: events.state !== 'connected' }));
-  const branch = $derived(sessionBranch(session, git.repos, git.statusById));
+  // Branch for the composer meta row too: metadata / registered repo, else the
+  // repo detected behind the thread's folder.
+  const detectedRepo = $derived(session ? threadRepos.repoFor(session.cwd, session.workspace_id) : null);
+  $effect(() => {
+    if (detectedRepo) git.ensureStatus(detectedRepo.id);
+  });
+  const detectedBranch = $derived.by((): string | null => {
+    if (!detectedRepo) return null;
+    return git.statusById[detectedRepo.id]?.branch || null;
+  });
+  const branch = $derived(detectedBranch ?? sessionBranch(session, git.repos, git.statusById));
 
   let convRef = $state<ReturnType<typeof ConversationView> | null>(null);
   let renaming = $state(false);
@@ -341,6 +352,7 @@
         onopeninspector={(tab) => threads.setInspectorTab(tab)}
         onnewthread={(opts) => void spawnFollowupThread(opts)}
         onsidechat={(q) => threads.openSideChat(paneId, q)}
+        branchHint={branch}
       />
     {/if}
   </div>
