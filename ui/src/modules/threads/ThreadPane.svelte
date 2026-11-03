@@ -3,7 +3,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import ProviderIcon, { hasProviderIcon } from '../../lib/components/ProviderIcon.svelte';
   import StatusDot from '../../lib/components/StatusDot.svelte';
-  import Terminal from '../../lib/components/Terminal.svelte';
+  import LazyTerminal from '../../lib/components/LazyTerminal.svelte'; // xterm stays out of page:threads until a terminal shows
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { events } from '../../lib/events.svelte';
   import { focusOnMount } from '../../lib/focusOnMount';
@@ -328,7 +328,7 @@
       </EmptyState>
     {:else if isPlainShellSession(session)}
       <div class="tp-shell-wrap otto-force-dark">
-        <Terminal sessionId={paneId} forceDark autoFocus={focused} resumeOnOpen={focused} />
+        <LazyTerminal sessionId={paneId} forceDark autoFocus={focused} resumeOnOpen={focused} />
       </div>
     {:else}
       <ConversationView

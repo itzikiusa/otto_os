@@ -1,6 +1,6 @@
 <script lang="ts">
   import Icon from '../../lib/components/Icon.svelte';
-  import Terminal from '../../lib/components/Terminal.svelte';
+  import LazyTerminal from '../../lib/components/LazyTerminal.svelte'; // xterm stays out of page:threads until a terminal shows
 
   interface Props {
     sessionId: string;
@@ -46,7 +46,7 @@
     </div>
   </header>
   <div class="tt-body">
-    <Terminal {sessionId} forceDark autoFocus resumeOnOpen />
+    <LazyTerminal {sessionId} forceDark autoFocus resumeOnOpen />
   </div>
 </section>
 

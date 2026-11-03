@@ -8,9 +8,10 @@
   import type { DiffResp } from '../../lib/api/types';
   import Icon from '../../lib/components/Icon.svelte';
   import { router } from '../../lib/router.svelte';
+  import { toasts } from '../../lib/toast.svelte';
   import { git } from '../../lib/stores/git.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
-  import CreatePr from '../git/CreatePr.svelte'; // ui-guards: allow — Threads reuses the one Create-PR sheet (outward confirm lives there)
+  import { lazyComponent } from '../../lib/lazy-component.svelte';
   import {
     openBranchMenu,
     openOpenInMenu,
@@ -20,6 +21,9 @@
   } from './threadGitMenus';
   import { compactPath, forgeLabel, repoForCwd } from './threadsHelpers';
   import { threads } from './threadsStore.svelte';
+
+  // The Create-PR sheet (outward confirm lives there) loads on first open, not with the page.
+  const CreatePrLazy = lazyComponent(() => import('../git/CreatePr.svelte')); // ui-guards: allow — Threads reuses the one Create-PR sheet
 
   interface Props {
     cwd: string;
@@ -79,6 +83,15 @@
 
   // Compact past 10k (T3: "1m", not "1000k") so huge diffs keep the row calm.
   const compactFmt = new Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 });
+  // A sheet that failed to load says so instead of silently not opening.
+  $effect(() => {
+    if (prOpen && CreatePrLazy.error) {
+      toasts.error('Couldn’t open Create PR', CreatePrLazy.error);
+      prOpen = false;
+      CreatePrLazy.retry();
+    }
+  });
+
   const fmt = (n: number): string => (n >= 10_000 ? compactFmt.format(n) : n.toLocaleString());
 </script>
 
@@ -160,6 +173,7 @@
         title={forge ? `Open a pull request on ${forge} — you review it before it is sent` : 'This repo has no supported remote'}
         disabled={!forge}
         data-testid="project-card-create-pr"
+        onpointerenter={() => CreatePrLazy.prefetch()}
         onclick={() => (prOpen = true)}
       >
         <Icon name="pr" size={14} />
@@ -188,7 +202,8 @@
   </div>
 </section>
 
-{#if prOpen && repo}
+{#if prOpen && repo && CreatePrLazy.component}
+  {@const CreatePr = CreatePrLazy.component}
   <CreatePr
     repoId={repo.id}
     initialSource={branch ?? undefined}
