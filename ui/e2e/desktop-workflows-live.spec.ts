@@ -251,6 +251,10 @@ test('run rev is monotonic while running (stale-snapshot guard contract)', async
     [edge('trigger', 'w1'), edge('w1', 'l1'), edge('l1', 'w2')],
   );
   const runId = await startRun(wfId);
+  // The daemon caps concurrent runs: under parallel workers this run can sit
+  // in the FIFO queue (`pending`, rev 0) for a while. The contract is about a
+  // RUNNING run, so sample only once it has started.
+  await expect.poll(async () => (await getRun(runId)).status, { timeout: 30_000 }).not.toBe('pending');
   const revs: number[] = [];
   for (let i = 0; i < 5; i++) {
     const run = await getRun(runId);
