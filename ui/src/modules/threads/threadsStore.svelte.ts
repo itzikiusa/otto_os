@@ -9,7 +9,7 @@ import { toastError } from '../../lib/toastError';
 import type { BroadcastResp, TrailEvent } from '../../lib/api/types';
 
 export type ThreadsLayoutMode = 'single' | 'split' | 'grid';
-export type ThreadsInspectorTab = 'files' | 'changes' | 'connections' | 'peers';
+export type ThreadsInspectorTab = 'files' | 'changes' | 'side' | 'connections' | 'peers';
 
 export interface OpenFileTab {
   path: string;
@@ -118,6 +118,8 @@ class ThreadsStore {
   terminalOpen = $state<Record<string, boolean>>({});
   /** Pane id whose inline peer-relay bar is open. */
   peerBarFor = $state<string | null>(null);
+  /** A `/btw` question waiting for the side-chat panel to start it. */
+  sideAsk = $state<{ mainId: string; question: string } | null>(null);
   /** Bumped to ask a pane to open its conversation search. */
   searchRequest = $state<{ id: string; n: number } | null>(null);
 
@@ -145,6 +147,7 @@ class ThreadsStore {
     if (
       p.inspectorTab === 'files' ||
       p.inspectorTab === 'changes' ||
+      p.inspectorTab === 'side' ||
       p.inspectorTab === 'connections' ||
       p.inspectorTab === 'peers'
     ) {
@@ -469,6 +472,14 @@ class ThreadsStore {
 
   togglePeerBar(id: string): void {
     this.peerBarFor = this.peerBarFor === id ? null : id;
+  }
+
+  /** Open the right panel's side chat for `mainId`, optionally asking `question`. */
+  openSideChat(mainId: string, question = ''): void {
+    if (question.trim()) this.sideAsk = { mainId, question: question.trim() };
+    this.inspectorTab = 'side';
+    this.inspectorOpen = true;
+    this.save();
   }
 
   requestSearch(id: string): void {

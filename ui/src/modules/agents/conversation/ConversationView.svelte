@@ -16,6 +16,8 @@
       prompt?: string;
       mode?: 'full' | 'accept-edits' | 'plan';
     }) => void;
+    /** `/btw <question>` → a side chat beside this thread (Threads). */
+    onsidechat?: (question: string) => void;
   }
   // Workspace repos (for `#123` → the GitHub PR / issue URL), fetched once per
   // workspace per app run — a light GET, never the git store's heavier load.
@@ -88,6 +90,7 @@
     ontoggleterminal,
     onopeninspector,
     onnewthread,
+    onsidechat,
   }: ConversationViewProps = $props();
 
   const src = $derived<TranscriptSource>({ sessionId });
@@ -1051,6 +1054,7 @@
       onfiles={onopeninspector ? () => onopeninspector('files') : undefined}
       ontoggleterminal={ontoggleterminal ?? openTerminal}
       onnewthread={onnewthread ? (beside) => onnewthread({ beside }) : undefined}
+      {onsidechat}
     />
     {/key}
   {/if}
