@@ -586,11 +586,11 @@ live in **⋯**, and every shortcut still works. In detail:
   the tab.
 - **Active database** selector — scope queries to a DB (or a Redis keyspace) so
   you can drop the `db.` prefix.
-- **Limit** selector — the automatic row cap (below).
-- **⋯ → Statement timeout…** (ms) — per-statement wall-clock timeout (MySQL
-  applies it as a `MAX_EXECUTION_TIME(ms)` hint; blank/0 = no limit). While set,
-  a timeout chip (e.g. **30s**) stays on the toolbar; click it to change it.
-- **⋯ → Mask sensitive values** — when on, the **server** runs result cells through
+- **Query settings** (gear; a dot marks any non-default value) holds:
+- **Row limit** — the automatic row cap (below).
+- **Statement timeout…** (ms) — per-statement wall-clock timeout (MySQL
+  applies it as a `MAX_EXECUTION_TIME(ms)` hint; blank/0 = no limit).
+- **Mask sensitive values** — when on, the **server** runs result cells through
   `otto_core::redact` before they leave the daemon (emails, tokens, keys); the
   toolbar shows a **🔒 Masked** chip (click to turn it off). Raw values never
   reach the browser.
@@ -884,7 +884,7 @@ the final frame — toolbar, header band, row skeletons, status bar — at the
 loaded geometry); and the asynchronous editability probe widened the row-number
 column for the selection checkbox and added toolbar buttons that re-wrapped the
 strip (the checkbox slot is always reserved; the toolbar is one fixed row whose
-rarer verbs live in **Copy ▾ / Export ▾ / ⋯** menus; the edit verdict lands in
+rarer verbs live in the **Export ▾ / ⋯** menus; the edit verdict lands in
 the status bar). `desktop-db-layout-stability.spec.ts` pins the grid frame and
 first row from the loading frame through the probe.
 
@@ -1151,9 +1151,10 @@ first (see §13).
 
 ### Copy & export from the grid
 
-Toolbar actions reflect the **current filtered + sorted view**. **Copy ▾**:
-TSV / CSV / JSON to the clipboard, the column names, and (for a single-table
-result) *Open as INSERT statements* in a new tab. **Export ▾**: Download CSV /
+Toolbar actions reflect the **current filtered + sorted view**. **Export ▾** (one
+menu; Copy used to be a second dropdown): TSV / CSV / JSON to the clipboard, the
+column names, and (for a single-table result) *Open as INSERT statements* in a
+new tab, then Download CSV /
 JSON (browser downloads of the in-memory rows), **Export all rows…** (the
 streaming, uncapped local-file export — §10; flagged when the result is
 capped) and **Import file…** (§10b). **⋯**: Aggregate pipeline (Mongo),

@@ -1209,10 +1209,10 @@
   }
 
   // ── Toolbar menus ────────────────────────────────────────────────────────────
-  // One row, fixed height: the rarely-used verbs live in three menus instead of
-  // a wrapping strip of a dozen buttons (which also re-flowed — and pushed the
-  // grid down — when the editability probe added its items after first paint).
-  function copyMenu(e: MouseEvent): void {
+  // One row, fixed height: the rarely-used verbs live in two menus (Export:
+  // copy + download + export + import; ⋯) instead of a wrapping strip of
+  // buttons that re-flowed when the editability probe added items. 
+  function copyItems(): MenuItem[] {
     const items: MenuItem[] = [
       { label: 'Copy as TSV', icon: 'copy', action: () => void copyTsv() },
       { label: 'Copy as CSV', icon: 'copy', action: () => void copyAs('csv') },
@@ -1232,10 +1232,12 @@
         },
       );
     }
-    showMenu(e, items);
+    return items;
   }
   function exportMenu(e: MouseEvent): void {
     const items: MenuItem[] = [
+      ...copyItems(),
+      { separator: true },
       { label: `Download CSV${exportScope}`, icon: 'download', disabled: !canExport, action: exportCsv },
       { label: `Download JSON${exportScope}`, icon: 'download', disabled: !canExport, action: exportJson },
     ];
@@ -1535,10 +1537,7 @@
         {/if}
         <span class="grow"></span>
         <AddRowButton {flow} variant="toolbar" />
-        <button class="btn small" onclick={copyMenu} title="Copy the result{exportScope}" aria-haspopup="menu">
-          <Icon name="copy" size={12} /><span class="tb-label">Copy</span><Icon name="chevronDown" size={12} />
-        </button>
-        <button class="btn small" class:export-nudge={result?.truncated} onclick={exportMenu} title="Download, export all rows, or import a file" aria-haspopup="menu">
+        <button class="btn small" class:export-nudge={result?.truncated} onclick={exportMenu} title="Copy, download, export all rows, or import a file" aria-haspopup="menu">
           <Icon name="download" size={12} /><span class="tb-label">Export</span><Icon name="chevronDown" size={12} />
         </button>
         <button class="icon-btn" onclick={moreMenu} aria-label="More result actions" title="More — find, pipeline, compare, insert, expand JSON, send to agent, examine with AI" aria-haspopup="menu">

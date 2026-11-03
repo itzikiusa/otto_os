@@ -103,9 +103,9 @@ test('the editor keeps its own height per query tab', async ({ page }) => {
 test('scoped search finds a table without expanding its schema', async ({ page }) => {
   await openWorkbench(page);
 
-  const scope = page.locator('.scope-pick');
-  await expect(scope).toBeVisible();
-  await scope.selectOption('all');
+  // Scope lives in the search box's options menu (no second row).
+  await page.getByTestId('schema-tree-options').click();
+  await page.getByRole('menuitemcheckbox', { name: 'Search all schemas' }).click();
 
   // `shopdb` is the seeded Docker database; nothing has been expanded yet, so
   // this can only succeed via the server-side catalog lookup.
@@ -122,11 +122,12 @@ test('scoped search finds a table without expanding its schema', async ({ page }
   await expect(page.locator('.hit')).toHaveCount(0);
 });
 
-test('the tree option row stays inside the viewport', async ({ page }) => {
+test('the tree options menu stays inside the viewport', async ({ page }) => {
   await openWorkbench(page);
-  const opts = page.locator('.tree-opts');
-  await expect(opts).toBeVisible();
-  await expectFullyInViewport(page, opts, 'schema tree options row');
+  await page.getByTestId('schema-tree-options').click();
+  const menu = page.locator('.ctx-menu');
+  await expect(menu).toBeVisible();
+  await expectFullyInViewport(page, menu, 'schema tree options menu');
 });
 
 test('api: search-objects is scoped, capped and honest about cost', async () => {
