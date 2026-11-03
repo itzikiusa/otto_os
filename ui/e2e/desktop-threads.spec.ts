@@ -225,24 +225,23 @@ test('custom sidebar auto-discovers Threads, stage pickers + slash menu work, an
   await threadsNav.click();
 
   await expect(page.getByTestId('threads-page')).toBeVisible({ timeout: 15_000 });
-  await expect(page.getByTestId('threads-experimental-badge')).toContainText('Experimental');
-
   await page.getByTestId('threads-new-btn').click();
   const stage = page.getByTestId('new-thread-stage');
   await expect(stage).toBeVisible();
-  await expect(stage.getByTestId('harness-claude')).toBeVisible();
+  await expect(page.getByTestId('threads-breadcrumb')).toContainText('New thread');
+  await expect(stage.locator('h1')).toContainText(/What should we (build|work on)/);
 
-  // Interactive Model, Effort, and Mode pickers on NewThreadStage.
-  const modelBtn = stage.getByTestId('picker-model');
-  const effortBtn = stage.getByTestId('picker-effort');
+  // One agent chip holds harness · model · effort; access mode sits in the meta row.
+  const agentBtn = stage.getByTestId('picker-agent');
   const modeBtn = stage.getByTestId('picker-mode');
-  await expect(modelBtn).toBeVisible();
-  await expect(effortBtn).toBeVisible();
+  await expect(agentBtn).toBeVisible();
   await expect(modeBtn).toContainText('Full access');
 
-  await effortBtn.click();
+  await agentBtn.click();
+  await expect(page.getByRole('menuitemcheckbox', { name: /Claude Code/ }).first()).toBeVisible();
+  await page.getByRole('menuitem', { name: /Reasoning effort/ }).click();
   await page.getByRole('menuitemcheckbox', { name: /High/ }).first().click();
-  await expect(effortBtn).toContainText('High');
+  await expect(agentBtn).toContainText('High');
 
   // ⇧⇥ inside the composer toggles Plan mode.
   const input = stage.getByTestId('new-thread-input');
@@ -295,9 +294,12 @@ test('strict Threads vs Agents isolation, single pane header, interactive slash 
   await expect(tSidebar.getByText('Alpha Architect').first()).toBeVisible();
   await expect(tSidebar.getByText('Classic Agent Session')).toHaveCount(0);
 
-  // 3. Single unified header in ThreadPane (no duplicate .conv-head inside ConversationView).
-  await expect(paneA.locator('.tp-head')).toHaveCount(1);
+  // 3. Single view: the page top bar is the only header (breadcrumb names the
+  //    thread); no pane header and no duplicate .conv-head inside ConversationView.
+  await expect(page.getByTestId('threads-breadcrumb')).toContainText('Alpha Architect');
+  await expect(paneA.locator('.tp-head')).toHaveCount(0);
   await expect(paneA.locator('.conv-head')).toHaveCount(0);
+  await expect(page.getByTestId('threads-inspector').getByTestId('threads-project-card')).toBeVisible();
 
   // 4. Interactive Model / Effort / Mode pickers & `/` slash commands inside live ThreadPane.
   await expect(paneA.getByTestId('picker-model')).toBeVisible();

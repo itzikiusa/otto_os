@@ -21,7 +21,7 @@
   <header class="tt-bar">
     <div class="tt-title">
       <Icon name="terminal" size={12} />
-      <span>Raw PTY Terminal</span>
+      <span>Terminal</span>
       <span class="tt-sub ellipsis" dir="auto">{title}</span>
     </div>
     <div class="tt-actions">
