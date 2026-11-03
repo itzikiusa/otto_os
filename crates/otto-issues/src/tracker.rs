@@ -21,6 +21,15 @@ use crate::jira::{
 };
 use crate::linear::LinearClient;
 
+/// Whether an assignee id means "unassign": `"-1"`, `"none"` (any case) or
+/// empty. Jira Cloud unassigns on `accountId: null` — sending `"-1"` itself
+/// would assign the project's DEFAULT assignee — so every provider maps these
+/// to its own null.
+pub fn is_unassign(id: &str) -> bool {
+    let id = id.trim();
+    id.is_empty() || id == "-1" || id.eq_ignore_ascii_case("none")
+}
+
 /// A provider-dispatching issue client for one account.
 pub enum Tracker {
     Jira(JiraClient),
@@ -187,7 +196,8 @@ impl Tracker {
         }
     }
 
-    /// Assign to a user id; `"-1"` unassigns.
+    /// Assign to a user id; [`is_unassign`] values (`"-1"`, `"none"`, empty)
+    /// unassign.
     pub async fn assign_issue(&self, key: &str, user_id: &str) -> Result<()> {
         match self {
             Self::Jira(c) => c.assign_issue(key, user_id).await,

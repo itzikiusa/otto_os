@@ -1768,7 +1768,7 @@ Jira-only operations on a Linear account answer **400** naming the provider
 | GET /issue/{account_id}/{key}/transitions | member | — | available transitions (Linear: the team's other workflow states, board order) |
 | POST /issue/{account_id}/{key}/transitions | member | `{transition_id}` (from the GET above) | `204` — apply a transition |
 | GET /issue/{account_id}/{key}/assignable | member | — | assignable users |
-| PUT /issue/{account_id}/{key}/assignee | member | `{account_id}` (the tracker's assignee id; `"-1"` unassigns) | `204` — assign the issue |
+| PUT /issue/{account_id}/{key}/assignee | member | `{account_id}` (the tracker's assignee id; `null`, `"-1"`, `"none"` or `""` unassigns — sent to Jira as `accountId: null`, since Jira Cloud's own `"-1"` assigns the project's default assignee; a missing or non-string, non-null `account_id` → 400) | `204` — assign the issue |
 | GET /issue/{account_id}/{key}/attachment/{attachment_id} | member | — | attachment bytes |
 | POST /issue/{account_id}/{key}/comment | member | `{body}` — Markdown; Jira converts it to validated ADF with the same converter as issue creation | `CommentRef {id, url?}` — add a comment |
 | GET /issue/{account_id}/{key}/editmeta | member | — | editable fields (`EditableField[]`) |

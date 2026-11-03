@@ -499,11 +499,13 @@ impl LinearClient {
             .unwrap_or_default())
     }
 
-    /// Assign to a user id; `"-1"` or empty unassigns (the Jira convention).
+    /// Assign to a user id; [`is_unassign`](crate::tracker::is_unassign)
+    /// values (`"-1"`, `"none"`, empty) unassign.
     pub async fn assign_issue(&self, key: &str, user_id: &str) -> Result<()> {
-        let assignee = match user_id.trim() {
-            "" | "-1" => Value::Null,
-            id => json!(id),
+        let assignee = if crate::tracker::is_unassign(user_id) {
+            Value::Null
+        } else {
+            json!(user_id.trim())
         };
         self.update_issue(key, json!({ "assigneeId": assignee }))
             .await

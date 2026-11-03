@@ -88,28 +88,14 @@ fn written(req: &UpdateIssueReq) -> Vec<String> {
 }
 
 impl JiraClient {
-    /// `PUT /rest/api/3/issue/{key}/assignee`. Jira Cloud unassigns on
-    /// `accountId: null` — `"-1"` would pick the project's DEFAULT assignee.
+    /// The assignee write: [`JiraClient::assign_issue`] (an unassign goes
+    /// out as `accountId: null`).
     async fn put_assignee(&self, key: &str, change: AssigneeChange<'_>) -> Result<()> {
-        let account = match change {
-            AssigneeChange::Unassign => Value::Null,
-            AssigneeChange::To(id) => json!(id),
+        let id = match change {
+            AssigneeChange::Unassign => "none",
+            AssigneeChange::To(id) => id,
         };
-        let req = self
-            .t
-            .http()?
-            .put(format!(
-                "{}/rest/api/3/issue/{}/assignee",
-                self.t.base,
-                path_seg(key)
-            ))
-            .header("Authorization", &self.t.auth_header)
-            .header("Accept", "application/json")
-            .json(&json!({ "accountId": account }));
-        self.t
-            .send(req, &format!("jira update_issue assignee {key}"))
-            .await?;
-        Ok(())
+        self.assign_issue(key, id).await
     }
 
     /// Refuse to overwrite a description holding content Otto's Markdown
@@ -403,6 +389,29 @@ mod tests {
                 seen[0]
             );
             assert!(seen[0].ends_with(r#"{"accountId":null}"#), "{}", seen[0]);
+        }
+    }
+
+    /// `assign_issue` (`PUT …/{key}/assignee`) maps every unassign spelling
+    /// to `accountId: null` — `"-1"` itself is Jira Cloud's DEFAULT assignee.
+    #[tokio::test]
+    async fn assign_issue_unassigns_with_a_null_account_id_never_minus_one() {
+        for (given, sent) in [
+            ("-1", r#"{"accountId":null}"#),
+            ("none", r#"{"accountId":null}"#),
+            (" NONE ", r#"{"accountId":null}"#),
+            ("", r#"{"accountId":null}"#),
+            (" acc-1 ", r#"{"accountId":"acc-1"}"#),
+        ] {
+            let (base, seen) = scripted(vec![NO_CONTENT]).await;
+            JiraClient::new(&base, "e", "t")
+                .assign_issue("PRJ-7", given)
+                .await
+                .unwrap();
+            let seen = seen.lock().unwrap();
+            assert_eq!(seen.len(), 1, "{given:?}");
+            assert!(seen[0].starts_with("PUT /rest/api/3/issue/PRJ-7/assignee "));
+            assert!(seen[0].ends_with(sent), "{given:?}: {}", seen[0]);
         }
     }
 

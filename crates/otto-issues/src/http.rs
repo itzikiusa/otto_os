@@ -838,8 +838,9 @@ async fn list_assignable<S: IssuesCtx>(
 
 /// `PUT /issue/{account_id}/{key}/assignee`
 ///
-/// Body: `{"account_id": "..."}` — assign the issue to a user.
-/// Pass `"-1"` as the account_id value to unassign.
+/// Body: `{"account_id": "..."}` — assign the issue to a user. `null`,
+/// `"-1"` or `"none"` unassigns (sent to Jira as `accountId: null`; Jira's own
+/// `"-1"` would assign the project's default assignee).
 /// Returns `204 No Content` on success.
 async fn assign_issue<S: IssuesCtx>(
     State(s): State<S>,
@@ -847,11 +848,16 @@ async fn assign_issue<S: IssuesCtx>(
     Path((account_id, key)): Path<(Id, String)>,
     Json(body): Json<serde_json::Value>,
 ) -> ApiResult<StatusCode> {
-    let assignee_account_id = body
-        .get("account_id")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| Error::Invalid("account_id is required".into()))?
-        .to_string();
+    let assignee_account_id = match body.get("account_id") {
+        Some(serde_json::Value::Null) => "none".to_string(),
+        Some(serde_json::Value::String(id)) => id.clone(),
+        _ => {
+            return Err(Error::Invalid(
+                "account_id is required (a user id, or null / \"none\" to unassign)".into(),
+            )
+            .into())
+        }
+    };
     let account = load_authorized_account(&s, &account_id, &user).await?;
     let token = otto_core::secrets::get_async(s.secrets(), &account.token_ref)
         .await?
