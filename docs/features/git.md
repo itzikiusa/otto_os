@@ -377,21 +377,32 @@ not redirect them.
 
 ## 5. Stage / commit / discard / diff
 
-The graph’s **WIP** panel is the working-tree view, backed by `git status`:
+The graph’s **WIP** panel ("Changes") is the working-tree view, backed by
+`git status`. It lists **Conflicts** (only when present), **Unstaged files**
+(tracked), **Untracked files** (only when present) and **Staged files**, each
+a collapsible section with a count. Rows show the status letter (M/A/D/R/U),
+the file name with its directory dimmed beside it, and `+/−` line counts (one
+`summary=true` numstat per side, skipped past 2,000 files). The folder button
+in the header switches between this flat list and a folder tree (remembered
+per viewer). ↑/↓ move between rows across sections (with a diff open, the
+diff follows), ←/→ fold a folder. The selected file's diff opens **beside**
+the list when the pane is at least 760 px wide, below it otherwise.
 
 - **Stage / unstage** selected paths (`POST /repos/{id}/stage`,
   `/unstage`). Each returns the fresh `RepoStatusResp` so the UI updates. The
-  WIP panel's trees offer this at every level: a checkbox per **file**, per
-  **folder** (stages/unstages the whole subtree in one call), and per section
-  ("Stage all" / "Unstage all").
+  WIP panel offers this at every level: a checkbox per **file**, per
+  **folder** in the tree view (stages/unstages the whole subtree in one
+  call), the **+ / −** button on each section header, and **Stage all** in the
+  panel header (unstaged + untracked).
 - **Discard** changes to selected paths (`POST /repos/{id}/discard`) — this
   reverts/removes working-tree changes, so it always confirms first. Offered at
-  the same three levels as staging: the trash button (or context menu) on a
+  the same levels as staging: the trash button (or context menu) on a
   **file**, on a **folder** (the whole subtree in one confirmed call), and
-  "Discard all" per section. In the **Unstaged** list it discards only the
+  the trash button per section. In the **Unstaged** list it discards only the
   unstaged side (`keep_staged:true` — the file goes back to its staged version,
-  so hunks you staged survive); in the **Staged** list it reverts the whole
-  change to the last commit.
+  so hunks you staged survive); in **Untracked** it deletes the files (the
+  confirm says so); in the **Staged** list it reverts the whole change to the
+  last commit.
 - A **partially staged** file (some hunks staged, some not) is listed in
   **both** trees with a *partial* chip, so "Stage all" picks up its unstaged
   rest; clicking it in either list opens that side's diff.
