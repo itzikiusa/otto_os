@@ -884,6 +884,27 @@
       },
     ]);
   }
+  function setMask(on: boolean): void {
+    database.tab.mask = on;
+    // A masked tab's undo history (every pasted string) must not stay on disk.
+    if (on) unpersistEditorState(TAB_HISTORY_PREFIX + database.tab.uid);
+  }
+  function fmtTimeout(ms: number): string {
+    return ms % 1000 === 0 ? `${ms / 1000}s` : `${ms} ms`;
+  }
+  async function editTimeout(): Promise<void> {
+    const t = database.tab;
+    const v = await confirmer.promptText('Stop a statement that runs longer than this (milliseconds). Leave blank for no limit.', {
+      title: 'Statement timeout',
+      confirmLabel: 'Set timeout',
+      initial: t.timeout_ms ? String(t.timeout_ms) : '',
+      placeholder: 'e.g. 30000',
+      validate: (raw) => (raw.trim() === '' || /^\d+$/.test(raw.trim()) ? null : 'Enter a whole number of milliseconds'),
+    });
+    if (v === null) return;
+    const n = Number(v.trim());
+    t.timeout_ms = n > 0 ? n : null;
+  }
   function formatNow(): void {
     void database.formatStatement();
     editorSel = { text: '', cursor: 0 };
@@ -912,6 +933,8 @@
     }
     items.push(
       { separator: true },
+      { label: 'Mask sensitive values', checked: !!tab.mask, title: 'The server redacts emails, tokens and keys before results leave the daemon', action: () => setMask(!tab.mask) },
+      { label: 'Statement timeout…', icon: 'clock', hint: tab.timeout_ms ? fmtTimeout(tab.timeout_ms) : 'none', action: () => void editTimeout() },
       { label: 'Wrap long lines', checked: wrapLines, action: () => setWrap(!wrapLines) },
       { label: 'Paste from clipboard history…', icon: 'copy', hint: '⌥⌘V', action: () => void openClipPicker(trigger) },
       { separator: true },
@@ -1292,7 +1315,7 @@
         class="icon-btn"
         class:on={shortcutsOpen}
         onclick={openMoreMenu}
-        title="More — Run on…, query plan, line wrap, clipboard history, keyboard shortcuts"
+        title="More — Run on…, query plan, masking, timeout, line wrap, clipboard history, keyboard shortcuts"
         aria-label="More editor actions"
         aria-haspopup="menu"
         data-testid="qe-more"
@@ -1352,41 +1375,18 @@
         {/each}
       </select>
     </label>
-    <label class="qe-timeout" title="Per-statement timeout (ms) — the engine stops the statement past it; 0 or blank = no limit">
-      <span>Timeout</span>
-      <input
-        class="input qe-timeout-input"
-        type="number"
-        min="0"
-        step="1000"
-        placeholder="ms"
-        value={tab.timeout_ms ?? ''}
-        oninput={(e) => {
-          const v = Number((e.currentTarget as HTMLInputElement).value);
-          database.tab.timeout_ms = v > 0 ? v : null;
-        }}
-      />
-    </label>
-    <label
-      class="qe-mask"
-      class:active={tab.mask}
-      title="Mask PII/prod — server redacts sensitive values (emails, tokens, keys) before returning results"
-    >
-      <input
-        type="checkbox"
-        class="sr-only"
-        checked={tab.mask}
-        onchange={(e) => {
-          const on = (e.currentTarget as HTMLInputElement).checked;
-          database.tab.mask = on;
-          // A masked tab's undo history (every pasted string) must not stay on disk.
-          if (on) unpersistEditorState(TAB_HISTORY_PREFIX + database.tab.uid);
-        }}
-      />
-      <Icon name="lock" size={12} />
-      {#if tab.mask}<strong>Masked</strong>{:else}<span>Mask</span>{/if}
-    </label>
-    <span class="qe-lang mono" title="Query language">{database.queryLanguage}</span>
+    <!-- Non-default query settings stay visible as one-click chips (the
+         toggles themselves live in ⋯): masking is a safety state, never hidden. -->
+    {#if tab.mask}
+      <button class="qe-chip active" type="button" onclick={() => setMask(false)} title="Masked — the server redacts sensitive values (emails, tokens, keys). Click to stop masking." aria-label="Masked results — turn masking off">
+        <Icon name="lock" size={12} /><span>Masked</span>
+      </button>
+    {/if}
+    {#if tab.timeout_ms}
+      <button class="qe-chip" type="button" onclick={() => void editTimeout()} title="Statement timeout — the engine stops a statement past it. Click to change." aria-label="Statement timeout {fmtTimeout(tab.timeout_ms)} — change">
+        <Icon name="clock" size={12} /><span>{fmtTimeout(tab.timeout_ms)}</span>
+      </button>
+    {/if}
     </div>
   </div>
 
@@ -1977,20 +1977,8 @@
     opacity: 0.7;
     font-variant-numeric: tabular-nums;
   }
-  .qe-lang {
-    font-size: var(--fs-xs);
-    text-transform: uppercase;
-    letter-spacing: .06em;
-    color: var(--text-dim);
-    padding: 0 6px;
-    height: 18px;
-    line-height: 18px;
-    border-radius: 999px;
-    background: var(--surface-2);
-  }
   .qe-limit,
-  .qe-db,
-  .qe-timeout {
+  .qe-db {
     display: inline-flex;
     align-items: center;
     gap: 4px;
@@ -2005,14 +1993,8 @@
     width: auto;
     max-width: 160px;
   }
-  .qe-timeout-input {
-    height: 24px;
-    padding: 0 4px;
-    font-size: var(--fs-xs);
-    width: 72px;
-  }
-  /* Mask PII/prod toggle — styled like a small button, highlights when active. */
-  .qe-mask {
+  /* A non-default query setting (Masked / timeout) — a small button chip. */
+  .qe-chip {
     display: inline-flex;
     align-items: center;
     gap: 4px;
@@ -2024,27 +2006,19 @@
     border-radius: var(--radius-s);
     cursor: pointer;
     user-select: none;
+    background: transparent;
+    font: inherit;
+    font-size: var(--fs-xs);
     transition: background var(--dur-fast), color var(--dur-fast), border-color var(--dur-fast);
   }
-  .qe-mask:hover {
+  .qe-chip:hover {
     color: var(--text);
     border-color: var(--accent);
   }
-  .qe-mask.active {
+  .qe-chip.active {
     background: var(--accent-soft);
     border-color: var(--accent);
     color: var(--accent-text);
-  }
-  .sr-only {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    padding: 0;
-    margin: -1px;
-    overflow: hidden;
-    clip: rect(0, 0, 0, 0);
-    white-space: nowrap;
-    border: 0;
   }
   .save-bar {
     display: flex;
@@ -2153,14 +2127,12 @@
     /* Bigger tap targets / readable controls. */
     .qe-limit select,
     .qe-db select,
-    .qe-timeout-input,
-    .qe-mask {
+    .qe-chip {
       height: 32px;
       font-size: var(--fs-m);
     }
     .qe-limit,
-    .qe-db,
-    .qe-timeout {
+    .qe-db {
       font-size: var(--fs-m);
     }
     .qe-tab {

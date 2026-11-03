@@ -1283,7 +1283,7 @@
         action: () => (expandJson = !expandJson),
       });
     }
-    if (items.length) items.push({ separator: true });
+    items.push({ label: 'Find in results', icon: 'search', hint: '⌘F', action: () => findInPage.show() }, { separator: true });
     items.push({ label: 'Send to running agent…', icon: 'send', action: sendToRunningAgent });
     // Same gate as the editor's Ask AI buttons: the DB Assistant runs an agent.
     if (connectionId && canAssist) items.push({ label: 'Examine with AI', icon: 'sparkle', action: examineWithAi });
@@ -1535,16 +1535,13 @@
         {/if}
         <span class="grow"></span>
         <AddRowButton {flow} variant="toolbar" />
-        <button class="icon-btn" onclick={() => findInPage.show()} aria-label="Find in results" title="Find (⌘F)">
-          <Icon name="search" size={13} />
-        </button>
         <button class="btn small" onclick={copyMenu} title="Copy the result{exportScope}" aria-haspopup="menu">
           <Icon name="copy" size={12} /><span class="tb-label">Copy</span><Icon name="chevronDown" size={12} />
         </button>
         <button class="btn small" class:export-nudge={result?.truncated} onclick={exportMenu} title="Download, export all rows, or import a file" aria-haspopup="menu">
           <Icon name="download" size={12} /><span class="tb-label">Export</span><Icon name="chevronDown" size={12} />
         </button>
-        <button class="icon-btn" onclick={moreMenu} aria-label="More result actions" title="More — pipeline, compare, insert, expand JSON, send to agent, examine with AI" aria-haspopup="menu">
+        <button class="icon-btn" onclick={moreMenu} aria-label="More result actions" title="More — find, pipeline, compare, insert, expand JSON, send to agent, examine with AI" aria-haspopup="menu">
           <Icon name="more" size={14} />
         </button>
       </div>

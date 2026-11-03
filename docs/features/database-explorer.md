@@ -182,8 +182,9 @@ an opaque `secret_ref`. The driver receives a fully `ResolvedConfig` — the
 service has already fetched the secret and, if configured, opened the tunnel and
 rewritten `host`/`port`.
 
-**Test the connection** with the **Test** button next to the engine chip in the
-connection's status row (shows "Testing…" then a green/red dot). It runs a cheap
+**Test the connection** with **⋯ → Test connection** at the end of the view bar,
+next to the health dot and engine name (shows "Testing…" then a green/red dot;
+the version and latency are in the dot's tooltip). It runs a cheap
 probe (`SELECT 1` / `PING`) and reports latency and the server version.
 
 **Opening and closing.** A "+" New-connection button sits in the sidebar's
@@ -586,11 +587,13 @@ live in **⋯**, and every shortcut still works. In detail:
 - **Active database** selector — scope queries to a DB (or a Redis keyspace) so
   you can drop the `db.` prefix.
 - **Limit** selector — the automatic row cap (below).
-- **Timeout** (ms) — per-statement wall-clock timeout (MySQL applies it as a
-  `MAX_EXECUTION_TIME(ms)` hint; blank/0 = no limit).
-- **Mask** toggle — when on, the **server** runs result cells through
+- **⋯ → Statement timeout…** (ms) — per-statement wall-clock timeout (MySQL
+  applies it as a `MAX_EXECUTION_TIME(ms)` hint; blank/0 = no limit). While set,
+  a timeout chip (e.g. **30s**) stays on the toolbar; click it to change it.
+- **⋯ → Mask sensitive values** — when on, the **server** runs result cells through
   `otto_core::redact` before they leave the daemon (emails, tokens, keys); the
-  grid shows a **🔒 Masked** badge. Raw values never reach the browser.
+  toolbar shows a **🔒 Masked** chip (click to turn it off). Raw values never
+  reach the browser.
 
 **Syntax highlighting.** The editor colours your query by engine: **SQL** for
 MySQL/ClickHouse, a small **Redis** highlighter for Redis, and **JavaScript** for
@@ -1676,7 +1679,8 @@ parses (and which read fine as plain text in history rows and MCP results):
   UI prompts for a **typed confirmation** (type the connection name). Confirmed
   writes on a guarded connection are **audited** (`db.write_confirmed`). The UI also
   shows danger styling — a red rail / **PROD** badge for production, an amber rail /
-  **RO** badge for read-only — and a banner.
+  **RO** badge for read-only — and a **Production** / **Read-only** chip in the
+  view bar (the full rule in its tooltip).
 - **Agent writes (`otto.query_db`) meet the same guard.** The approval-gated MCP
   writer runs through this `…/db/query` path with the agent's credential and never
   sends `confirm_write` (an agent's would not count, S6-304), so a guarded
