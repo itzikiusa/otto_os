@@ -476,14 +476,14 @@
     ]);
   }
 
-  // ── Rows: a flat list (default) or the folder tree ─────────────────────
+  // ── Rows: the folder tree (default, ordered by folder) or a flat list ─────────────────────
   // The view is a per-viewer convenience (lib/storage swallows a blocked
   // localStorage). Folders fold by "section:path" so the same folder can fold
   // independently per section; one never toggled auto-collapses past
   // AUTO_COLLAPSE_FILES (wipTree.ts). Both views window, so a 20k-file
   // list costs what a 50-file one does.
   const VIEW_KEY = 'otto.git.wip.view';
-  let treeView = $state(lsGet(VIEW_KEY) === 'tree');
+  let treeView = $state(lsGet(VIEW_KEY) !== 'list');
   function toggleView(): void {
     treeView = !treeView;
     lsSet(VIEW_KEY, treeView ? 'tree' : 'list');

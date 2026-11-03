@@ -235,6 +235,15 @@ graph** at each ref's tip. Right-clicking a commit, branch chip, or tag opens a
 context menu (see §[Context menus](#context-menus)). Removing a repo
 **unregisters** it only — `DELETE /repos/{id}` never touches the files on disk.
 
+Selecting a commit opens its detail: sha, refs, subject, author and time over
+a file navigator (`graph/CommitFileList.svelte`) — "N files +A −D", a
+**Path / Tree** switch (Tree by default, remembered), Expand all / Collapse
+all, folders with per-folder file counts and a status letter per file.
+Picking a file shows **only that file's diff**, beside the list when the pane
+is at least 760 px wide and below it otherwise; the first file opens on
+arrival, and ↑/↓ move through the files. **View all files** (remembered)
+stacks every file's diff instead (large commits start collapsed).
+
 Double-clicking a **remote** branch (`origin/x`, `upstream/x`) switches to the
 local `x` when it exists; otherwise it creates `x` at that remote ref with
 tracking (any remote, not just `origin`).
@@ -383,8 +392,8 @@ The graph’s **WIP** panel ("Changes") is the working-tree view, backed by
 a collapsible section with a count. Rows show the status letter (M/A/D/R/U),
 the file name with its directory dimmed beside it, and `+/−` line counts (one
 `summary=true` numstat per side, skipped past 2,000 files). The folder button
-in the header switches between this flat list and a folder tree (remembered
-per viewer). ↑/↓ move between rows across sections (with a diff open, the
+in the header switches between the folder tree (the default, ordered by
+folder) and a flat list (remembered per viewer). ↑/↓ move between rows across sections (with a diff open, the
 diff follows), ←/→ fold a folder. The selected file's diff opens **beside**
 the list when the pane is at least 760 px wide, below it otherwise.
 

@@ -1,60 +1,5 @@
 <script lang="ts" module>
-  import type { DiffResp, FileDiff, Hunk as H } from '../../lib/api/types';
-  import { loadErrorText } from '../../lib/loadError';
-  import { WeightedLru, diffKey } from './graph-diff-cache';
-  import { api } from '../../lib/api/client';
-
-  // The diff contract's summary-mode fields (`hunks_omitted`, `too_large`,
-  // `total_*`) are all optional, so an older daemon's full response fits too.
-  type SumFile = FileDiff;
-  type SumResp = DiffResp;
-
-  type Body =
-    | { kind: 'loading' }
-    | { kind: 'ready'; hunks: H[]; rows: number }
-    | { kind: 'too_large'; lines: number; hard: boolean }
-    | { kind: 'error'; message: string };
-
-  // Module scope = one cache for every graph instance / tab (a commit's diff is
-  // immutable per sha). Summaries weigh their file count plus any inline lines
-  // (an old daemon that ignores `summary=true`); file patches weigh their rows.
-  const summaryCache = new WeightedLru<SumResp>(20_000, (r) => {
-    let w = r.files.length;
-    for (const f of r.files) for (const h of f.hunks) w += h.lines.length;
-    return w;
-  });
-  const bodyCache = new WeightedLru<Body>(60_000, (b) => (b.kind === 'ready' ? b.rows : 0) + 1);
-
-  /** Summary requests started by `prefetchCommitSummary`, joined by the pane
-   *  when it mounts for the same commit. */
-  const summaryFlights = new Map<string, Promise<SumResp>>();
-
-  function summaryUrl(repoId: string, sha: string): string {
-    return `/repos/${repoId}/diff?target=${encodeURIComponent(`commit:${sha}`)}&summary=true`;
-  }
-
-  /** Warm the file list of `sha` while the pane is still held back (the
-   *  graph's branch click waits out the double-click window before mounting
-   *  the diff): the summary is one small `--numstat` read, so by the time the
-   *  window closes it has usually landed and the list paints from cache in
-   *  the same frame. Returns an abort for the double-click (= checkout) case. */
-  export function prefetchCommitSummary(repoId: string, sha: string): () => void {
-    const key = diffKey(repoId, sha);
-    if (summaryCache.get(key) || summaryFlights.has(key)) return () => {};
-    const ctl = new AbortController();
-    const p = api
-      .get<SumResp>(summaryUrl(repoId, sha), ctl.signal)
-      .then((r) => {
-        summaryCache.set(key, r);
-        return r;
-      })
-      .finally(() => {
-        if (summaryFlights.get(key) === p) summaryFlights.delete(key);
-      });
-    summaryFlights.set(key, p);
-    p.catch(() => {}); // a joiner handles failures; an unjoined abort is expected
-    return () => ctl.abort();
-  }
+  export { prefetchCommitSummary } from './graph/commitDiffCache';
 </script>
 
 <script lang="ts">
@@ -88,6 +33,12 @@
   import LoadState from '../../lib/components/LoadState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { fileFor } from './diff-load';
+  import { lsGet, lsSet } from '../../lib/storage';
+  import CommitFileList from './graph/CommitFileList.svelte';
+  import { loadErrorText } from '../../lib/loadError';
+  import { api } from '../../lib/api/client';
+  import { diffKey } from './graph-diff-cache';
+  import { bodyCache, summaryCache, summaryFlights, summaryUrl, type Body, type SumFile, type SumResp } from './graph/commitDiffCache';
 
   interface Props {
     repoId: string;
@@ -120,6 +71,21 @@
   let error = $state<string | null>(null);
   let reloadTick = $state(0);
   let filePage = $state(FILE_PAGE);
+  // One file at a time (picked in CommitFileList) unless "View all files";
+  // both choices, and Path / Tree, are per-viewer conveniences.
+  let view = $state<'tree' | 'path'>(lsGet('otto.git.commit.view') === 'path' ? 'path' : 'tree');
+  let showAll = $state(lsGet('otto.git.commit.all') === '1');
+  let selected = $state<string | null>(null);
+  $effect(() => lsSet('otto.git.commit.view', view));
+  $effect(() => lsSet('otto.git.commit.all', showAll ? '1' : '0'));
+  const selFile = $derived(summary?.files.find((f) => f.path === selected) ?? null);
+  function select(path: string): void {
+    selected = path;
+    const f = summary?.files.find((x) => x.path === path);
+    if (!f) return;
+    openOverride.set(path, true);
+    if (needsFetch(f)) enqueue(f);
+  }
   // Keyed per file path. SvelteMap values are NOT deep-proxied — a Body's
   // hunks stay plain objects.
   const bodies = new SvelteMap<string, Body>();
@@ -159,6 +125,7 @@
     error = null;
     loading = false;
     filePage = FILE_PAGE;
+    selected = null;
     bodies.clear();
     openOverride.clear();
     rowLimit.clear();
@@ -444,6 +411,86 @@
   }
 </script>
 
+{#snippet fileBlock(file: SumFile)}
+  {@const st = stats.get(file.path) ?? { add: 0, del: 0 }}
+  {@const open = isOpen(file)}
+  {@const body = open ? bodyOf(file) : undefined}
+  <div class="df-block" class:open use:nearView={file}>
+    <div class="df-head-row">
+      <button class="df-head" onclick={() => toggle(file)} title={file.path} aria-expanded={open}>
+        <span class="df-chevron dim" aria-hidden="true"><Icon name={open ? 'chevronDown' : 'chevronRight'} size={12} /></span>
+        <span class="mono df-path" dir="ltr">
+          {#if file.old_path}<span class="df-rename-from">{file.old_path}</span><span class="df-rename-arrow"> → </span>{/if}{file.path}
+        </span>
+        <span class="grow"></span>
+        <span class="ds-add">+{st.add}</span>
+        <span class="ds-del">−{st.del}</span>
+      </button>
+      <button
+        class="df-tools"
+        title="File actions"
+        aria-label="File actions"
+        onclick={(e) => { e.stopPropagation(); onfiletools?.(e, file.path); }}
+      ><Icon name="more" size={13} /></button>
+    </div>
+
+    {#if open}
+      {#if file.is_binary}
+        <div class="df-note dim">Binary file — no text diff.</div>
+      {:else if body?.kind === 'ready'}
+        {@const limit = rowLimit.get(file.path) ?? ROW_CAP}
+        {#if body.rows === 0}
+          <div class="df-note dim">No text changes.</div>
+        {:else}
+          <div class="df-hunks" dir="ltr">
+            {#each capHunks(body.hunks, limit) as hunk, hi (hi)}
+              <div class="hunk-header mono">{hunk.header}</div>
+              <table class="dl-table">
+                <tbody>
+                  {#each hunk.lines as line, li (li)}
+                    <tr class="dl-row {lineClass(line.origin)}">
+                      <td class="dl-gut dl-old">{line.old_line ?? ''}</td>
+                      <td class="dl-gut dl-new">{line.new_line ?? ''}</td>
+                      <td class="dl-sign">{lineSign(line.origin)}</td>
+                      <td class="dl-code mono">{line.content}</td>
+                    </tr>
+                  {/each}
+                </tbody>
+              </table>
+            {/each}
+          </div>
+          {#if body.rows > limit}
+            <div class="df-note df-more">
+              <span class="dim">{(body.rows - limit).toLocaleString()} more lines hidden</span>
+              <button class="btn small" onclick={() => rowLimit.set(file.path, limit + ROW_STEP)}>
+                Show {Math.min(ROW_STEP, body.rows - limit).toLocaleString()} more
+              </button>
+            </div>
+          {/if}
+        {/if}
+      {:else if body?.kind === 'too_large'}
+        <div class="df-note df-more">
+          {#if body.hard}
+            <span class="dim">Too large to show here — {body.lines.toLocaleString()} changed lines.</span>
+          {:else}
+            <span class="dim">Large file — {body.lines.toLocaleString()} changed lines.</span>
+            <button class="btn small" onclick={() => enqueue(file, true)}>Load anyway</button>
+          {/if}
+        </div>
+      {:else if body?.kind === 'error'}
+        <div class="df-note df-more">
+          <span class="dd-err">Couldn’t load this file’s changes: {body.message}</span>
+          <button class="btn small" onclick={() => retryFile(file)}>Retry</button>
+        </div>
+      {:else}
+        <div class="df-pending" style:min-height="{placeholderPx(file)}px">
+          <Skeleton rows={2} height={16} announce={false} />
+        </div>
+      {/if}
+    {/if}
+  </div>
+{/snippet}
+
 <div class="detail-diff">
   <span class="sr-only" role="status">{filesLoading ? 'Loading file changes' : ''}</span>
   {#if held}
@@ -462,96 +509,15 @@
       {#if summary.files.length === 0}
         <div class="dim dd-empty">No file changes.</div>
       {:else}
-        <div class="diff-summary-bar">
-          <span class="dim">{plural(summary.files.length, 'file')}</span>
-          <span class="ds-add">+{totals.add}</span>
-          <span class="ds-del">−{totals.del}</span>
-          {#if collapseAll}
-            <span class="dim dd-hint" title="Large commit — open a file to load its changes">collapsed · large commit</span>
+        <div class="cd-split" class:single={!showAll}>
+          <CommitFileList files={summary.files} {stats} {totals} {selected} onselect={select} bind:view bind:all={showAll} large={collapseAll} />
+          {#if showAll}
+            {#each shownFiles as file (file.path)}{@render fileBlock(file)}{/each}
+          {:else if selFile}
+            <div class="cd-one">{@render fileBlock(selFile)}</div>
           {/if}
         </div>
-
-        {#each shownFiles as file (file.path)}
-          {@const st = stats.get(file.path) ?? { add: 0, del: 0 }}
-          {@const open = isOpen(file)}
-          {@const body = open ? bodyOf(file) : undefined}
-          <div class="df-block" class:open use:nearView={file}>
-            <div class="df-head-row">
-              <button class="df-head" onclick={() => toggle(file)} title={file.path} aria-expanded={open}>
-                <span class="df-chevron dim" aria-hidden="true"><Icon name={open ? 'chevronDown' : 'chevronRight'} size={12} /></span>
-                <span class="mono df-path" dir="ltr">
-                  {#if file.old_path}<span class="df-rename-from">{file.old_path}</span><span class="df-rename-arrow"> → </span>{/if}{file.path}
-                </span>
-                <span class="grow"></span>
-                <span class="ds-add">+{st.add}</span>
-                <span class="ds-del">−{st.del}</span>
-              </button>
-              <button
-                class="df-tools"
-                title="File actions"
-                aria-label="File actions"
-                onclick={(e) => { e.stopPropagation(); onfiletools?.(e, file.path); }}
-              ><Icon name="more" size={13} /></button>
-            </div>
-
-            {#if open}
-              {#if file.is_binary}
-                <div class="df-note dim">Binary file — no text diff.</div>
-              {:else if body?.kind === 'ready'}
-                {@const limit = rowLimit.get(file.path) ?? ROW_CAP}
-                {#if body.rows === 0}
-                  <div class="df-note dim">No text changes.</div>
-                {:else}
-                  <div class="df-hunks" dir="ltr">
-                    {#each capHunks(body.hunks, limit) as hunk, hi (hi)}
-                      <div class="hunk-header mono">{hunk.header}</div>
-                      <table class="dl-table">
-                        <tbody>
-                          {#each hunk.lines as line, li (li)}
-                            <tr class="dl-row {lineClass(line.origin)}">
-                              <td class="dl-gut dl-old">{line.old_line ?? ''}</td>
-                              <td class="dl-gut dl-new">{line.new_line ?? ''}</td>
-                              <td class="dl-sign">{lineSign(line.origin)}</td>
-                              <td class="dl-code mono">{line.content}</td>
-                            </tr>
-                          {/each}
-                        </tbody>
-                      </table>
-                    {/each}
-                  </div>
-                  {#if body.rows > limit}
-                    <div class="df-note df-more">
-                      <span class="dim">{(body.rows - limit).toLocaleString()} more lines hidden</span>
-                      <button class="btn small" onclick={() => rowLimit.set(file.path, limit + ROW_STEP)}>
-                        Show {Math.min(ROW_STEP, body.rows - limit).toLocaleString()} more
-                      </button>
-                    </div>
-                  {/if}
-                {/if}
-              {:else if body?.kind === 'too_large'}
-                <div class="df-note df-more">
-                  {#if body.hard}
-                    <span class="dim">Too large to show here — {body.lines.toLocaleString()} changed lines.</span>
-                  {:else}
-                    <span class="dim">Large file — {body.lines.toLocaleString()} changed lines.</span>
-                    <button class="btn small" onclick={() => enqueue(file, true)}>Load anyway</button>
-                  {/if}
-                </div>
-              {:else if body?.kind === 'error'}
-                <div class="df-note df-more">
-                  <span class="dd-err">Couldn’t load this file’s changes: {body.message}</span>
-                  <button class="btn small" onclick={() => retryFile(file)}>Retry</button>
-                </div>
-              {:else}
-                <div class="df-pending" style:min-height="{placeholderPx(file)}px">
-                  <Skeleton rows={2} height={16} announce={false} />
-                </div>
-              {/if}
-            {/if}
-          </div>
-        {/each}
-
-        {#if summary.files.length > filePage}
+        {#if showAll && summary.files.length > filePage}
           <div class="df-note df-more dd-files-more">
             <span class="dim">{(summary.files.length - filePage).toLocaleString()} more files</span>
             <button class="btn small" onclick={() => (filePage += FILE_PAGE)}>Show {Math.min(FILE_PAGE, summary.files.length - filePage)} more files</button>
@@ -565,10 +531,29 @@
 <style>
   /* Diff area (the pane's own scroll container). */
   .detail-diff {
+    container: cdiff / inline-size;
     flex: 1;
     min-height: 0;
     overflow-y: auto;
     overflow-x: hidden;
+  }
+  /* One file at a time: narrow = list over the file's diff (one scroller);
+     wide = the diff in its own column beside the list. */
+  .cd-one {
+    border-block-start: 1px solid var(--border);
+  }
+  @container cdiff (min-width: 760px) {
+    .cd-split.single {
+      display: grid;
+      grid-template-columns: minmax(240px, 34%) minmax(0, 1fr);
+      height: 100%;
+    }
+    .cd-one {
+      min-height: 0;
+      overflow-y: auto;
+      border-block-start: none;
+      border-inline-start: 1px solid var(--border);
+    }
   }
   .detail-diff-loading,
   .dd-held {
@@ -578,21 +563,6 @@
     padding: 18px;
     font-size: var(--fs-s);
     text-align: center;
-  }
-  .diff-summary-bar {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 6px 12px;
-    border-bottom: 1px solid var(--border);
-    background: var(--surface-2);
-    font-size: var(--fs-xs);
-    position: sticky;
-    top: 0;
-    z-index: 1;
-  }
-  .dd-hint {
-    margin-inline-start: auto;
   }
   .ds-add {
     color: var(--success);
@@ -783,7 +753,6 @@
   /* Phone / tablet (the graph's stacked accordion, see GraphView `.mobile`). */
   @media (max-width: 1024px) {
     :global(.mobile) .detail-diff { -webkit-overflow-scrolling: touch; overscroll-behavior: contain; }
-    :global(.mobile) .diff-summary-bar { font-size: var(--fs-m); padding: 8px 12px; }
     :global(.mobile) .ds-add,
     :global(.mobile) .ds-del { font-size: var(--fs-m); }
     :global(.mobile) .df-head { font-size: var(--fs-m); padding: 8px 12px; }

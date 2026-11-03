@@ -107,12 +107,36 @@ export function treeRows(nodes: TNode[], collapsed: (n: TFolder) => boolean): Ro
 }
 
 /** List view: every file at depth 0, sorted by file name, then directory —
- *  the filename is what the eye scans for; the directory reads dimmed. */
-export function listRows(changes: FileChange[]): Row[] {
+ *  the filename is what the eye scans for; the directory reads dimmed.
+ *  `byPath` sorts by the whole path instead (a commit's "Path" view). */
+export function listRows(changes: FileChange[], byPath = false): Row[] {
   const files: TFile[] = changes.map((c) => ({ type: 'file', ...splitPath(c.path), change: c }));
-  files.sort((a, b) => collator.compare(a.name, b.name) || collator.compare(a.dir, b.dir));
+  files.sort((a, b) =>
+    byPath
+      ? collator.compare(a.change.path, b.change.path)
+      : collator.compare(a.name, b.name) || collator.compare(a.dir, b.dir),
+  );
   return files.map((f) => ({ node: f, depth: 0, key: `f:${f.change.path}` }));
 }
 
 /** `+12 −3` line counts per path, from a `summary=true` diff. */
 export type LineCounts = Map<string, { added: number | null; deleted: number | null }>;
+
+/** Every folder path in a tree (Expand all / Collapse all). */
+export function folderPaths(nodes: TNode[], out: string[] = []): string[] {
+  for (const n of nodes) {
+    if (n.type === 'folder') {
+      out.push(n.path);
+      folderPaths(n.children, out);
+    }
+  }
+  return out;
+}
+
+/** A commit diff's file status as the working-tree kind, so commit files
+ *  reuse the same rows and status letters. */
+export function kindOfStatus(status: string | null | undefined): FileChange['kind'] {
+  if (status === 'added' || status === 'deleted') return status;
+  if (status === 'renamed' || status === 'copied') return 'renamed';
+  return 'modified';
+}

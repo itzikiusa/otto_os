@@ -153,7 +153,14 @@ test('graph: commit drill shows a multi-file diff that scrolls and fits', async 
     page.locator('.detail-panel.mob-visible, .detail-panel.detail-visible'),
   ).toBeVisible({ timeout: 15_000 });
 
-  // The diff renders multiple changed files.
+  // The file list shows every changed file and opens the first one's diff.
+  const fileRows = page.locator('.detail-diff .cf-row[data-path]');
+  await expect(fileRows.first()).toBeVisible({ timeout: 15_000 });
+  expect(await fileRows.count(), 'the list should show multiple changed files').toBeGreaterThan(1);
+  await expect(page.locator('.detail-diff .df-block')).toHaveCount(1);
+
+  // "View all files" stacks every file's diff.
+  await page.locator('.detail-diff').getByLabel('View all files').check();
   const fileBlocks = page.locator('.detail-diff .df-block');
   await expect(fileBlocks.first()).toBeVisible({ timeout: 15_000 });
   expect(await fileBlocks.count(), 'diff should list multiple changed files').toBeGreaterThan(1);
