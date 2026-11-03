@@ -155,7 +155,7 @@ test('auto-fetch: paused → one fetch on arrival, then no background rounds', a
   await page.goto(`/#/git/${upstreamRepoId}/graph`);
   await expect(page.locator('.gitpage')).toBeVisible({ timeout: 30_000 });
   await expect(page.locator('.git-autofetch')).not.toHaveClass(/\bon\b/);
-  await expect(page.locator('.git-autofetch')).toContainText('Auto-fetch paused');
+  await expect(page.locator('.git-autofetch')).toContainText('Paused');
   // Paused stops the rounds, not the arrival fetch: opening the page fetches
   // the selected repo once, and the five-second loop ticks add nothing.
   await expect.poll(() => fetches, { timeout: 15_000 }).toBe(1);
