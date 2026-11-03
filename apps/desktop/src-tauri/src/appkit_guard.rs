@@ -132,8 +132,60 @@ fn call_guarded(
             "=== contained: Objective-C exception in {what} (#{}, event dropped)\n{detail}\n\n",
             n + 1
         ));
+        crate::lifecycle::event(&format!(
+            "contained Objective-C exception in {what} (#{}, event dropped)",
+            n + 1
+        ));
     }
     true
+}
+
+type UncaughtHandler = unsafe extern "C" fn(*mut AnyObject);
+
+#[link(name = "Foundation", kind = "framework")]
+extern "C" {
+    fn NSGetUncaughtExceptionHandler() -> Option<UncaughtHandler>;
+    fn NSSetUncaughtExceptionHandler(handler: Option<UncaughtHandler>);
+}
+
+static PREVIOUS_UNCAUGHT: OnceLock<Option<UncaughtHandler>> = OnceLock::new();
+
+/// Log an Objective-C exception nothing caught (the process is about to
+/// abort) to both logs, fsynced, then chain the handler that was installed
+/// before ours. Call once, on the main thread, before the event loop.
+pub fn install_uncaught_exception_logger() {
+    if PREVIOUS_UNCAUGHT.get().is_some() {
+        return;
+    }
+    // SAFETY: plain Foundation getters/setters of a process-wide C function
+    // pointer, called before any other thread touches them.
+    let previous = unsafe { NSGetUncaughtExceptionHandler() };
+    if PREVIOUS_UNCAUGHT.set(previous).is_ok() {
+        unsafe { NSSetUncaughtExceptionHandler(Some(on_uncaught)) };
+    }
+}
+
+unsafe extern "C" fn on_uncaught(exception: *mut AnyObject) {
+    // Never unwind out of here (a C callback): contain anything below.
+    let _ = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let detail = if exception.is_null() {
+            "nil exception".to_string()
+        } else {
+            // SAFETY: Foundation hands us an NSException; `Exception` is a
+            // `repr(transparent)` wrapper of the object (its Debug prints
+            // name + reason).
+            let e = unsafe { &*(exception as *const objc2::exception::Exception) };
+            format!("{e:?}")
+        };
+        panic_guard::append(&format!("=== uncaught Objective-C exception\n{detail}\n\n"));
+        let first = detail.lines().next().unwrap_or_default();
+        let short: String = first.chars().take(300).collect();
+        crate::lifecycle::durable(&format!("uncaught Objective-C exception: {short}"));
+    }));
+    if let Some(Some(previous)) = PREVIOUS_UNCAUGHT.get() {
+        // SAFETY: the handler Foundation had before ours, same signature.
+        unsafe { previous(exception) };
+    }
 }
 
 #[cfg(test)]
