@@ -5,10 +5,12 @@
   // Every row is a door into an existing Otto surface (git store, Create-PR
   // sheet, Changes tab); nothing here owns state beyond the diff totals.
   import { api, isAbortError } from '../../lib/api/client';
-  import type { DiffResp } from '../../lib/api/types';
+  import type { DiffResp, Repo } from '../../lib/api/types';
   import Icon from '../../lib/components/Icon.svelte';
   import { router } from '../../lib/router.svelte';
   import { toasts } from '../../lib/toast.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
+  import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { git } from '../../lib/stores/git.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
@@ -38,6 +40,7 @@
   let openInEl = $state<HTMLButtonElement | null>(null);
   let branchEl = $state<HTMLButtonElement | null>(null);
   let prOpen = $state(false);
+  let gitMenuEl = $state<HTMLButtonElement | null>(null);
   let totals = $state<{ added: number; deleted: number } | null>(null);
 
   const homePath = $derived(ws.scratch?.root_path ?? null);
@@ -93,6 +96,60 @@
       CreatePrLazy.retry();
     }
   });
+
+  // Create PR's chevron: Commit (the Git page's commit composer), Push (asks
+  // where it goes first), Create PR. Rows that can't apply are disabled.
+  function openGitMenu(): void {
+    if (!gitMenuEl || !repo) return;
+    const r = repo;
+    const dirty = (status?.changes.length ?? 0) > 0;
+    const br = status?.branch ?? null;
+    const canPush = !!br && (!status?.upstream || (status?.ahead ?? 0) > 0);
+    const items: MenuItem[] = [
+      {
+        label: 'Commit…',
+        icon: 'commit',
+        disabled: !dirty,
+        title: dirty ? 'Open the commit composer in Git' : 'Nothing to commit',
+        action: () => {
+          git.requestWip(r.id);
+          router.go(`git/${encodeURIComponent(r.id)}`);
+        },
+      },
+      {
+        label: status?.upstream ? 'Push…' : 'Publish branch…',
+        icon: 'arrowUp',
+        hint: status?.upstream && status.ahead ? `↑${status.ahead}` : undefined,
+        disabled: !canPush,
+        title: canPush ? undefined : br ? 'Nothing to push' : 'Check out a branch first',
+        action: () => void pushBranch(r),
+      },
+      {
+        label: 'Create PR…',
+        icon: 'pr',
+        disabled: !forge,
+        title: forge ? undefined : 'This repo has no supported remote',
+        action: () => (prOpen = true),
+      },
+    ];
+    ctxMenu.showAt(gitMenuEl, items, { align: 'end' });
+  }
+
+  async function pushBranch(r: Repo): Promise<void> {
+    const st = git.statusById[r.id];
+    if (!st?.branch) return;
+    const dest = st.upstream ?? `origin/${st.branch}`;
+    const n = st.ahead ?? 0;
+    const ok = await confirmer.ask(
+      st.upstream
+        ? `Push ${n === 1 ? '1 commit' : `${n} commits`} on ${st.branch} to ${dest}${forge ? ` (${forge})` : ''}? Everyone with access to the remote can see them.`
+        : `Publish ${st.branch} to ${dest}${forge ? ` (${forge})` : ''}? Everyone with access to the remote can see it.`,
+      { title: st.upstream ? 'Push to remote' : 'Publish branch', confirmLabel: st.upstream ? 'Push' : 'Publish', danger: false },
+    );
+    if (!ok) return;
+    const { runPush } = await import('../git/pushFlow'); // ui-guards: allow — the Git page's one push flow (rejected-push handling)
+    await runPush(r.id, st, () => {});
+  }
 
   const fmt = (n: number): string => (n >= 10_000 ? compactFmt.format(n) : n.toLocaleString());
 </script>
@@ -169,19 +226,33 @@
         <span class="pc-label mono ellipsis" dir="ltr">{branch ?? 'Detached HEAD'}</span>
         <Icon name="chevronDown" size={12} />
       </button>
-      <button
-        type="button"
-        class="pc-row"
-        title={forge ? `Open a pull request on ${forge} — you review it before it is sent` : 'This repo has no supported remote'}
-        disabled={!forge}
-        data-testid="project-card-create-pr"
-        onpointerenter={() => CreatePrLazy.prefetch()}
-        onclick={() => (prOpen = true)}
-      >
-        <Icon name="pr" size={14} />
-        <span class="pc-label">Create PR</span>
-        {#if forge}<span class="pc-hint">{forge}</span>{/if}
-      </button>
+      <div class="pc-split">
+        <button
+          type="button"
+          class="pc-row"
+          title={forge ? `Open a pull request on ${forge} — you review it before it is sent` : 'This repo has no supported remote'}
+          disabled={!forge}
+          data-testid="project-card-create-pr"
+          onpointerenter={() => CreatePrLazy.prefetch()}
+          onclick={() => (prOpen = true)}
+        >
+          <Icon name="pr" size={14} />
+          <span class="pc-label">Create PR</span>
+          {#if forge}<span class="pc-hint">{forge}</span>{/if}
+        </button>
+        <button
+          bind:this={gitMenuEl}
+          type="button"
+          class="icon-btn pc-split-more"
+          aria-haspopup="menu"
+          aria-label="Commit, push or create a pull request"
+          title="Commit · Push · Create PR"
+          data-testid="project-card-git-menu"
+          onclick={openGitMenu}
+        >
+          <Icon name="chevronDown" size={12} />
+        </button>
+      </div>
       <button
         type="button"
         class="pc-row"
@@ -290,6 +361,17 @@
   }
   .pc-del {
     color: var(--danger);
+  }
+  .pc-split {
+    display: flex;
+    align-items: center;
+  }
+  .pc-split .pc-row {
+    flex: 1;
+  }
+  .pc-split-more {
+    flex-shrink: 0;
+    color: var(--text-dim);
   }
   .pc-note {
     margin: 0;

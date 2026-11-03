@@ -88,3 +88,19 @@ export function providerSupportsModel(provider: string): boolean {
   if (flags && provider in flags) return flags[provider];
   return provider === 'claude' || provider === 'codex' || provider === 'agy';
 }
+
+/** Harness display name for pickers, cards and badges. */
+export function harnessLabel(provider: string): string {
+  switch (provider) {
+    case 'claude':
+      return 'Claude Code';
+    case 'codex':
+      return 'Codex';
+    case 'agy':
+      return 'Antigravity';
+    case 'shell':
+      return 'Shell';
+    default:
+      return provider.charAt(0).toUpperCase() + provider.slice(1);
+  }
+}

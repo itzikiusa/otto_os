@@ -2,8 +2,20 @@
   // The end of the composer's tool row: (Threads) the quiet model · effort
   // chip, then Send — or, while the agent works, Stop / Steer / Queue.
   import Icon from '../../../lib/components/Icon.svelte';
-  import ThreadModelBar from '../../../lib/components/ThreadModelBar.svelte';
-  import type { EffortLevel, InteractionMode, SessionThreadConfig } from '../../../lib/providerModels';
+  import { lazyComponent } from '../../../lib/lazy-component.svelte';
+  // The model panel loads on first open (prefetched when the chip is hovered).
+  const ModelPicker = lazyComponent(() => import('../../../lib/components/ModelPickerPopover.svelte'));
+  import ProviderIcon from '../../../lib/components/ProviderIcon.svelte';
+  import {
+    formatEffortShort,
+    formatModelLabel,
+    supportsModelSelection,
+    type EffortLevel,
+    type InteractionMode,
+    type SessionThreadConfig,
+  } from '../../../lib/providerModels';
+  import { agentProviders, harnessLabel } from '../../../lib/providers';
+  import { auth } from '../../../lib/stores/auth.svelte';
 
   interface Props {
     /** Show the model · effort chip in the box (Threads). */
@@ -43,29 +55,54 @@
     onsend,
   }: Props = $props();
 
-  let bar = $state<ReturnType<typeof ThreadModelBar> | null>(null);
+  // Threads: one chip → one panel (models · reasoning · access), harness locked
+  // to the session's own.
+  let chipEl = $state<HTMLButtonElement | null>(null);
+  let open = $state(false);
   export function openModelPicker(): void {
-    bar?.openModelPicker();
+    if (chipEl) open = true;
   }
   export function openEffortPicker(): void {
-    bar?.openEffortPicker();
+    openModelPicker();
   }
+  const chipLabel = $derived.by(() => {
+    const m = cfg.effectiveModel ? formatModelLabel(provider, cfg.effectiveModel, auth.meta) : harnessLabel(provider);
+    return cfg.effort ? `${m} · ${formatEffortShort(cfg.effort)}` : m;
+  });
 </script>
 
-{#if chip && !busy}
-  <ThreadModelBar
-    bind:this={bar}
+{#if chip && !busy && supportsModelSelection(provider, auth.meta)}
+  <button
+    bind:this={chipEl}
+    type="button"
+    class="csc-chip"
+    aria-haspopup="dialog"
+    aria-expanded={open}
+    aria-label="Model and reasoning: {chipLabel}"
+    title="Model, reasoning and access (/model · /effort)"
+    data-testid="picker-model"
+    onpointerenter={() => ModelPicker.prefetch()}
+    disabled={configBusy}
+    onclick={openModelPicker}
+  >
+    <ProviderIcon {provider} size={13} />
+    <span class="ellipsis">{chipLabel}</span>
+  </button>
+{/if}
+{#if open && chipEl && ModelPicker.component}
+  <ModelPicker.component
+    anchor={chipEl}
+    providers={agentProviders().includes(provider) ? agentProviders() : [provider, ...agentProviders()]}
     {provider}
-    parts={['model', 'effort']}
-    quiet
-    pinnedModel={cfg.pinnedModel}
+    lockProvider
+    model={cfg.pinnedModel}
     effectiveModel={cfg.effectiveModel}
     effort={cfg.effort}
-    interactionMode={cfg.interactionMode}
-    disabled={configBusy}
-    {onmodelchange}
-    {oneffortchange}
-    {onmodechange}
+    mode={cfg.interactionMode}
+    onmodel={onmodelchange}
+    oneffort={oneffortchange}
+    onmode={onmodechange}
+    onclose={() => (open = false)}
   />
 {/if}
 {#if uploading > 0}<span class="uploading">Uploading…</span>{/if}
@@ -87,6 +124,30 @@
 {/if}
 
 <style>
+  .csc-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    max-width: 240px;
+    block-size: 28px;
+    padding-inline: 8px;
+    border: 0;
+    border-radius: var(--radius-m);
+    background: transparent;
+    color: var(--text-dim);
+    font: inherit;
+    font-size: var(--fs-s);
+    cursor: pointer;
+  }
+  .csc-chip:hover:not(:disabled) {
+    background: var(--hover);
+    color: var(--text);
+  }
+  .csc-chip:disabled {
+    opacity: var(--disabled-opacity);
+    cursor: default;
+  }
   .stop,
   .steer-btn,
   .queue-btn {
