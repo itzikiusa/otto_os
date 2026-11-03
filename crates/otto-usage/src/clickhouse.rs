@@ -621,7 +621,7 @@ impl ClickHouse {
     pub(crate) fn for_tests(base_url: &str, parked: bool) -> Self {
         Self {
             bin: PathBuf::new(),
-            data_dir: PathBuf::new(),
+            data_dir: test_data_dir(),
             http: reqwest::Client::new(),
             proc: Mutex::new(Proc {
                 child: None,
@@ -899,6 +899,14 @@ fn parse_rows(body: &str) -> Result<Vec<serde_json::Value>> {
 /// idle threads 70 → 58, idle CPU 0.47 % → 0.40 %, restart to `/ping` ~0.5 s.
 /// Idle-stop ([`ClickHouse::maybe_park`]) takes it to 0 when nothing reads.
 fn write_server_config(data_dir: &Path, port: u16) -> Result<PathBuf> {
+    // A relative (or empty) dir resolves against the test process's cwd —
+    // the crate directory — and leaked `server/config.xml` into the source
+    // tree on every run. Every fixture must own a temp dir.
+    #[cfg(test)]
+    assert!(
+        data_dir.is_absolute(),
+        "test fixture resolved a relative ClickHouse data dir: {data_dir:?}"
+    );
     let server_dir = data_dir.join("server");
     std::fs::create_dir_all(&server_dir)
         .map_err(|e| Error::Internal(format!("create server dir: {e}")))?;
@@ -965,6 +973,17 @@ fn write_server_config(data_dir: &Path, port: u16) -> Result<PathBuf> {
     let cfg = server_dir.join("config.xml");
     std::fs::write(&cfg, xml).map_err(|e| Error::Internal(format!("write config: {e}")))?;
     Ok(cfg)
+}
+
+/// A fresh, absolute, process-temp data dir for a fixture handle (a wake
+/// writes `server/config.xml` under it before the empty binary fails).
+#[cfg(test)]
+pub(crate) fn test_data_dir() -> PathBuf {
+    tempfile::Builder::new()
+        .prefix("otto-ch-fixture-")
+        .tempdir()
+        .expect("fixture temp dir")
+        .keep()
 }
 
 /// `clickhouse local` creates the default database as a symlink under
@@ -1096,7 +1115,7 @@ mod tests {
         });
         let ch = ClickHouse {
             bin: PathBuf::new(),
-            data_dir: PathBuf::new(),
+            data_dir: test_data_dir(),
             http: reqwest::Client::new(),
             proc: Mutex::new(Proc {
                 child: None,
