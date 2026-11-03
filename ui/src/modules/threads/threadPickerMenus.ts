@@ -37,10 +37,12 @@ export function buildAgentMenu(opts: {
 }): MenuItem[] {
   const items: MenuItem[] = opts.harnesses.map((h): MenuItem => {
     const ready = providerReadiness(h);
+    // Panda 0.3.84: a harness that can't run is dimmed with the reason, not pickable.
     return {
       label: harnessLabel(h),
       hint: ready.available ? undefined : 'Not installed',
       title: ready.available ? undefined : ready.message,
+      disabled: !ready.available && opts.provider !== h,
       checked: opts.provider === h,
       action: () => opts.onProvider(h),
     };

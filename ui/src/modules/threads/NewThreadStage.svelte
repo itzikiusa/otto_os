@@ -101,7 +101,8 @@
       cwd = seeded;
       useScratch = false;
     } else if (!cwd) {
-      cwd = scratchActive ? homePath : (ws.current?.root_path ?? homePath);
+      // T3's "use last project": a fresh draft opens where the last thread started.
+      cwd = threads.lastProject ?? (scratchActive ? homePath : (ws.current?.root_path ?? homePath));
     }
   });
 
@@ -310,6 +311,7 @@
       if (firstMsg) transcript.recordOptimisticPrompt(created.id, firstMsg);
       prompt = '';
       threads.draftCwd = null;
+      threads.rememberProject(dir || null);
       if (openInBeside && threads.paneIds.length > 0) threads.openBeside(created.id);
       else threads.selectThread(created.id);
     } catch (e) {

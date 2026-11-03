@@ -77,7 +77,9 @@
     return () => ctl.abort();
   });
 
-  const fmt = (n: number): string => n.toLocaleString();
+  // Compact past 10k (T3: "1m", not "1000k") so huge diffs keep the row calm.
+  const compactFmt = new Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 });
+  const fmt = (n: number): string => (n >= 10_000 ? compactFmt.format(n) : n.toLocaleString());
 </script>
 
 <section class="pc-card" class:floating aria-label="Project" data-testid="threads-project-card">
@@ -174,7 +176,7 @@
         <Icon name="file" size={14} />
         <span class="pc-label">Changes</span>
         {#if totals}
-          <span class="pc-stat mono" dir="ltr">
+          <span class="pc-stat mono" dir="ltr" title="{totals.added.toLocaleString()} added, {totals.deleted.toLocaleString()} deleted">
             <span class="pc-add">+{fmt(totals.added)}</span>
             <span class="pc-del">−{fmt(totals.deleted)}</span>
           </span>

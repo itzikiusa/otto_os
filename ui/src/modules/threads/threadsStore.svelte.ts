@@ -68,6 +68,8 @@ interface PersistedThreadsPrefs {
   inspectorTab?: ThreadsInspectorTab;
   openFilesByWorkspace?: Record<string, WorkspaceFileTabs>;
   extraProjects?: string[];
+  pinnedProjects?: string[];
+  lastProject?: string | null;
   scriptsByProject?: Record<string, ProjectScript[]>;
 }
 
@@ -105,6 +107,10 @@ class ThreadsStore {
   /** Project folders added from the sidebar's "Add project" before they have a thread. */
   extraProjects = $state<string[]>([]);
   scriptsByProject = $state<Record<string, ProjectScript[]>>({});
+  /** Projects pinned to the top of the sidebar (T3 0.1.6 "pin favorite projects"). */
+  pinnedProjects = $state<string[]>([]);
+  /** Folder of the last thread started here — the next draft opens on it. */
+  lastProject = $state<string | null>(null);
   /** Folder the new-thread stage targets (feeds the project card + inspector). */
   stageCwd = $state<string | null>(null);
   /** Pane ids whose terminal drawer is open (driven by the top bar + pane menu). */
@@ -149,6 +155,10 @@ class ThreadsStore {
     if (Array.isArray(p.extraProjects)) {
       this.extraProjects = p.extraProjects.filter((x): x is string => typeof x === 'string');
     }
+    if (Array.isArray(p.pinnedProjects)) {
+      this.pinnedProjects = p.pinnedProjects.filter((x): x is string => typeof x === 'string');
+    }
+    if (typeof p.lastProject === 'string') this.lastProject = p.lastProject;
     if (p.scriptsByProject && typeof p.scriptsByProject === 'object') {
       this.scriptsByProject = p.scriptsByProject;
     }
@@ -171,6 +181,8 @@ class ThreadsStore {
         openFilesByWorkspace: this.openFilesByWorkspace,
         extraProjects: this.extraProjects,
         scriptsByProject: this.scriptsByProject,
+        pinnedProjects: this.pinnedProjects,
+        lastProject: this.lastProject,
       };
       localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
     } catch {
@@ -473,6 +485,24 @@ class ThreadsStore {
 
   removeProject(path: string): void {
     this.extraProjects = this.extraProjects.filter((x) => x !== path);
+    this.save();
+  }
+
+  isProjectPinned(path: string): boolean {
+    return this.pinnedProjects.includes(path);
+  }
+
+  toggleProjectPin(path: string): void {
+    this.pinnedProjects = this.pinnedProjects.includes(path)
+      ? this.pinnedProjects.filter((x) => x !== path)
+      : [...this.pinnedProjects, path];
+    this.save();
+  }
+
+  rememberProject(path: string | null): void {
+    const p = (path ?? '').trim().replace(/\/+$/, '') || null;
+    if (p === this.lastProject) return;
+    this.lastProject = p;
     this.save();
   }
 
