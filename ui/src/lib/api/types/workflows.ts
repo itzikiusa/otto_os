@@ -212,6 +212,10 @@ export interface ActiveWorkflowRun {
   nodes_done: number;
   /** Paused on a human-approval node. */
   waiting_approval?: boolean;
+  /** The step the run is on (first running node, else the next pending one
+   *  once something ran) and its display name. Absent before the first step. */
+  current_node_id?: string | null;
+  current_step?: string | null;
 }
 
 // ---------------------------------------------------------------------------

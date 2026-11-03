@@ -212,6 +212,38 @@ impl LocalGit {
         }
     }
 
+    /// The ref a PR's HEAD commit can be read from, for a run that knows the
+    /// PR only by number (the provider supplied `head` branch + `head_sha`):
+    /// `refs/remotes/origin/<head>` when it IS the PR head (same-repo PR, run
+    /// after [`Self::fetch_and_sync_branches`]), else the host's PR head ref
+    /// via [`Self::fetch_pr_head`] — a fork PR's branch never exists on
+    /// `origin`, and a same-named origin branch is not the PR. A
+    /// `refs/otto/pr-review/*` result must be released with
+    /// [`Self::delete_pr_review_ref`] once the run is done with it.
+    pub async fn pr_head_ref(
+        &self,
+        number: u64,
+        head: Option<&str>,
+        head_sha: Option<&str>,
+        token: Option<TransportCredential>,
+    ) -> otto_core::Result<String> {
+        let head_sha = head_sha.map(str::trim).filter(|s| !s.is_empty());
+        if let Some(h) = head.map(str::trim).filter(|h| is_syncable_branch_name(h)) {
+            let remote = format!("refs/remotes/origin/{h}");
+            if let Some(c) = self.commit_of(&remote).await {
+                let is_head = head_sha.is_none_or(|want| {
+                    want.len() >= 7
+                        && c.to_ascii_lowercase()
+                            .starts_with(&want.to_ascii_lowercase())
+                });
+                if is_head {
+                    return Ok(remote);
+                }
+            }
+        }
+        self.fetch_pr_head(number, head_sha, token).await
+    }
+
     /// Bring local `branch` in line with `refs/remotes/origin/<branch>` without
     /// any network access (see the module docs for the safety rules). Never
     /// errors: every failure degrades to an outcome with the best ref to use.

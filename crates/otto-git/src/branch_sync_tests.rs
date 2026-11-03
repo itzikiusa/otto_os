@@ -261,3 +261,37 @@ async fn resolve_base_fetches_a_base_that_only_exists_on_the_remote() {
     assert_eq!(rb.branch, "main");
     assert!(looks_like_sha("0123abc") && !looks_like_sha("develop"));
 }
+
+/// A fork PR: its head commit lives only under the host's `refs/pull/N/head`
+/// (no branch on origin carries it), and a same-named origin branch is NOT
+/// the PR head.
+#[tokio::test]
+async fn pr_head_ref_uses_origin_branch_when_it_is_the_head_else_the_pull_ref() {
+    let fx = fixture();
+    let same = push_from_other(&fx, "x", "x.txt");
+    // Fork head: a commit pushed only as refs/pull/7/head.
+    let o = &fx.other;
+    sh(o, &["checkout", "-q", "-b", "fork", "origin/main"]);
+    let fork = commit(o, "fork.txt", "fork work");
+    sh(o, &["push", "-q", "origin", "HEAD:refs/pull/7/head"]);
+    let git = LocalGit::new(&fx.work);
+    git.fetch_and_sync_branches(&["x"], None).await;
+
+    // Same-repo PR: origin/x is the head → used directly, nothing fetched.
+    let r = git
+        .pr_head_ref(3, Some("x"), Some(&same[..12]), None)
+        .await
+        .unwrap();
+    assert_eq!(r, "refs/remotes/origin/x");
+    // Fork PR named like an origin branch: origin/x is not its head → pull ref.
+    let r = git
+        .pr_head_ref(7, Some("x"), Some(&fork), None)
+        .await
+        .unwrap();
+    assert!(r.starts_with("refs/otto/pr-review/7-"), "{r}");
+    assert_eq!(head_of(&fx.work, &r), fork);
+    git.delete_pr_review_ref(&r).await.unwrap();
+    // No branch at all (head unknown): still the pull ref.
+    let r = git.pr_head_ref(7, None, None, None).await.unwrap();
+    assert_eq!(head_of(&fx.work, &r), fork);
+}

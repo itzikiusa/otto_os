@@ -66,7 +66,18 @@ pub(in crate::workflow_engine) async fn admit(
         &ctx.data_dir,
         run_id,
     ));
-    let input = isolate_repos(ctx, repo, workflow, run_id, input, &files, &rs, prior_nodes).await?;
+    let input = isolate_repos(
+        ctx,
+        repo,
+        workflow,
+        run_id,
+        &user,
+        input,
+        &files,
+        &rs,
+        prior_nodes,
+    )
+    .await?;
     let prepared = prepare_input(ctx, ws, workflow, input, &files).await;
     write_brief(
         workflow,
@@ -209,6 +220,7 @@ async fn isolate_repos(
     repo: &WorkflowsRepo,
     workflow: &Workflow,
     run_id: &Id,
+    user: &User,
     input: Value,
     files: &crate::workflow_context::RunContextFiles,
     rs: &RunState,
@@ -274,13 +286,15 @@ async fn isolate_repos(
     // Fetch + fast-forward (where safe) every branch the run names BEFORE
     // cutting worktrees: a PR base/head that exists only on the remote must
     // resolve, and a stale local base must not seed the worktree.
-    let pr_branch = input
-        .get("pr_branch")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
-    let synced = sync_run_branches(ctx, &entries, pr_branch.as_deref()).await;
+    // A run that names its PR only by number (Slack `PR: 15`) learns the
+    // PR's head + base from the provider: the base becomes the entry's base
+    // unless one was given explicitly, and both branches are synced below.
+    let mut prs = run::refs::lookup_run_prs(ctx, user, &entries, input.get("pr")).await;
+    let pr_branch =
+        otto_workflows::run_refs::apply_prs(&mut entries, &prs, run_base_hint.is_some(), &input);
+    let synced = sync_run_branches(ctx, &entries, pr_branch.as_deref(), &prs).await;
+    run::refs::pin_pr_heads(ctx, &mut prs).await;
+    let input = otto_workflows::run_refs::publish_prs(input, &prs, pr_branch.as_deref(), files);
     let (provisioned_cwd, isolation_failures) =
         provision_wf_worktrees(ctx, run_id, &mut entries, &synced).await;
     files.set_repos(entries.clone());

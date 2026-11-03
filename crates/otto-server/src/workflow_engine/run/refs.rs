@@ -1,46 +1,9 @@
-//! Run-start ref resolution: sync the branches a run names with `origin`
-//! (fetch + safe fast-forward) and resolve a declared base to a commit.
+//! Run-start ref resolution that needs the daemon (credentials, providers):
+//! sync the branches a run names with `origin` and resolve PRs named only by
+//! number. The pure parts live in [`otto_workflows::run_refs`].
 
 use super::super::*;
-
-/// Resolve a run's declared base to a commit: the ref as given (a local
-/// branch, tag or sha), else the remote-tracking `origin/<base>`. Read-only.
-pub(in crate::workflow_engine) async fn resolve_wf_base(
-    git: &otto_git::LocalGit,
-    base: &str,
-) -> Option<String> {
-    if let Ok(c) = git.rev_parse(base).await {
-        return Some(c);
-    }
-    let remote = format!("origin/{base}");
-    if let Ok(c) = git.rev_parse(&remote).await {
-        return Some(c);
-    }
-    // Neither ref exists yet — typically a branch created on the remote after
-    // the clone last fetched (a PR targeting a fresh `hotfix/*`) and the
-    // run-start sync's fetch failed or didn't cover it. Fetch THAT ONE branch
-    // into its remote-tracking ref and retry. Safe: it writes only
-    // `refs/remotes/origin/<base>` — never the user's branches, HEAD or tree —
-    // and runs non-interactively (BatchMode SSH), so it can't prompt.
-    if !fetchable_branch_name(base) {
-        return None;
-    }
-    match git.fetch_origin_branch(base, None).await {
-        Ok(()) => tracing::info!("wf worktree: fetched missing base '{base}' from origin"),
-        Err(err) => {
-            tracing::warn!("wf worktree: fetching base '{base}' from origin failed: {err}");
-            return None;
-        }
-    }
-    git.rev_parse(&remote).await.ok()
-}
-
-/// A base name that is safe to splice into a fetch refspec: no option-like
-/// prefix, no refspec/glob metacharacters, no whitespace or control chars.
-/// `git` itself still validates the full ref name.
-pub(in crate::workflow_engine) fn fetchable_branch_name(base: &str) -> bool {
-    otto_git::branch_sync::is_syncable_branch_name(base)
-}
+use otto_workflows::run_refs::RunPr;
 
 /// Run-start ref sync: for every repo a run declares, fetch `origin` and make
 /// each branch the run names — the entry's base and the PR's source branch
@@ -56,23 +19,9 @@ pub(in crate::workflow_engine) async fn sync_run_branches(
     ctx: &ServerCtx,
     entries: &[crate::workflow_context::RepoEntry],
     pr_branch: Option<&str>,
+    prs: &[RunPr],
 ) -> HashMap<String, otto_git::branch_sync::SyncReport> {
-    let mut wanted: Vec<(String, Vec<String>)> = Vec::new();
-    for e in entries.iter().filter(|e| e.error.is_none()) {
-        let Some(rid) = e.repo_id.clone() else {
-            continue;
-        };
-        let names = [e.base.as_deref(), e.source.as_deref(), pr_branch]
-            .into_iter()
-            .flatten()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string);
-        match wanted.iter_mut().find(|(r, _)| *r == rid) {
-            Some((_, v)) => v.extend(names),
-            None => wanted.push((rid, names.collect())),
-        }
-    }
+    let wanted = otto_workflows::run_refs::branches_by_repo(entries, pr_branch, prs);
     let mut out = HashMap::new();
     for (rid, branches) in wanted {
         let Ok(repo) = ctx.git_store.get_repo(&rid).await else {
@@ -95,4 +44,72 @@ pub(in crate::workflow_engine) async fn sync_run_branches(
         out.insert(rid, report);
     }
     out
+}
+
+/// Look up each PR the run names (by number) through its repo's provider,
+/// acting as `user` (whose ownership of the repo's git account is enforced
+/// by `resolve_provider_remote`). A failed lookup is logged and skipped — the
+/// run proceeds without that PR's branches, as before.
+pub(in crate::workflow_engine) async fn lookup_run_prs(
+    ctx: &ServerCtx,
+    user: &User,
+    entries: &[crate::workflow_context::RepoEntry],
+    pr_input: Option<&Value>,
+) -> Vec<RunPr> {
+    let spec = otto_workflows::run_refs::parse_pr_spec(pr_input);
+    let mut out = Vec::new();
+    for (i, number) in otto_workflows::run_refs::match_pr_targets(&spec, entries) {
+        let Some(rid) = entries[i].repo_id.clone() else {
+            continue;
+        };
+        let Ok(repo) = ctx.git_store.get_repo(&rid).await else {
+            continue;
+        };
+        let detail = match crate::modules::resolve_provider_remote(ctx, user, &repo).await {
+            Ok((provider, remote)) => provider.get_pr(&remote, number).await,
+            Err(e) => Err(e),
+        };
+        match detail {
+            Ok(d) => {
+                tracing::info!(
+                    repo = %repo.name,
+                    "wf PR #{number}: {} → {}",
+                    d.summary.source_branch,
+                    d.summary.target_branch
+                );
+                out.push(RunPr {
+                    repo_id: rid,
+                    repo_path: repo.path.clone(),
+                    number,
+                    head: d.summary.source_branch,
+                    base: d.summary.target_branch,
+                    head_sha: d.summary.head_sha,
+                    head_ref: None,
+                })
+            }
+            Err(e) => tracing::warn!(repo = %repo.name, "wf PR #{number}: lookup failed: {e}"),
+        }
+    }
+    out
+}
+
+/// Resolve each PR's head commit to a local ref (after the run's branch
+/// sync): `origin/<head>` when it is the PR head, else the host's PR head ref
+/// fetched into `refs/otto/pr-review/*` (fork PRs). Best-effort per PR.
+pub(in crate::workflow_engine) async fn pin_pr_heads(ctx: &ServerCtx, prs: &mut [RunPr]) {
+    for pr in prs.iter_mut() {
+        let Ok(repo) = ctx.git_store.get_repo(&pr.repo_id).await else {
+            continue;
+        };
+        let token = crate::modules::review::service::repo_transport_credential(ctx, &repo).await;
+        match otto_git::LocalGit::new(&pr.repo_path)
+            .pr_head_ref(pr.number, Some(&pr.head), pr.head_sha.as_deref(), token)
+            .await
+        {
+            Ok(r) => pr.head_ref = Some(r),
+            Err(e) => {
+                tracing::warn!(repo = %repo.name, "wf PR #{}: head unavailable: {e}", pr.number)
+            }
+        }
+    }
 }

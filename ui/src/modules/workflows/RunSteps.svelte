@@ -19,6 +19,10 @@
   import { workflowNodeDetail, workflowCheckpointDetail, workflowCheckpointPage, retryRunNode } from '../../lib/api/workflows';
   import type { WorkflowRun, NodeRunState, WorkflowCheckpoint, WorkflowCheckpointPage } from '../../lib/api/types';
   import { copyTextOrThrow } from '../../lib/clipboard';
+  import { recoverStuckStep } from './stepRecovery';
+  import { reviewIds } from './reviewAgents';
+  import { runReviews } from './runReviews.svelte';
+  import { stepProgress, settledSince, isStuck, STUCK_AFTER_MS, type StepProgress } from './stepProgress';
 
   interface Props {
     run: WorkflowRun;
@@ -168,6 +172,39 @@
       retryingId = null;
     }
   }
+
+  // What each RUNNING step is waiting on (review steps: per-repo agents,
+  // queue, summarizer) — from the same shared review cache the Agents tab uses.
+  const runningReviewKey = $derived(
+    [...new Set(run.nodes.filter((n) => n.status === 'running').flatMap(reviewIds))].join(','),
+  );
+  $effect(() => runReviews.watch(runningReviewKey ? runningReviewKey.split(',') : []));
+  function progressOf(ns: NodeRunState): StepProgress | null {
+    if (ns.status !== 'running') return null;
+    return stepProgress(reviewIds(ns).flatMap((id) => runReviews.reviews[id] ? [runReviews.reviews[id]] : []));
+  }
+  // "Stuck?": a running step whose every child has settled, for longer than
+  // STUCK_AFTER_MS (the engine settles a stalled review on its own after 2 min;
+  // this is the backstop the user can act on).
+  let settledAt = $state<Record<string, number | null>>({});
+  $effect(() => {
+    const t = now;
+    for (const n of run.nodes) {
+      const prev = untrack(() => settledAt[n.node_id] ?? null);
+      const next = settledSince(prev, progressOf(n)?.settled ?? false, t);
+      if (next !== prev) settledAt[n.node_id] = next;
+    }
+  });
+  function stuck(ns: NodeRunState): boolean {
+    return isStuck(settledAt[ns.node_id] ?? null, now);
+  }
+  let recovering = $state<string | null>(null);
+  async function recoverStuck(ns: NodeRunState, retry: boolean): Promise<void> {
+    if (recovering) return;
+    recovering = ns.node_id;
+    try { await recoverStuckStep(run.id, ns.node_id, nodeName(ns.node_id), retry, onRunUpdated); } finally { recovering = null; }
+  }
+  const STUCK_MIN = STUCK_AFTER_MS / 60_000;
 
   // "Zoom in on a specific step" (R6): open the step's full logs + work product
   // in a large modal, so a big JSON config/output is actually readable.
@@ -348,7 +385,13 @@
             label={subParts.join(' · ')}
           />
         {/if}
-        {#if ns.status === 'running' && ns.activity?.phase}
+        {#if stuck(ns)}
+          <Badge tone="warn" testid="step-stuck" title={`Every agent of this step finished over ${STUCK_MIN} minutes ago, but the step hasn’t moved on`} label="Stuck?" />
+        {/if}
+        {#if progressOf(ns)}
+          {@const p = progressOf(ns)}
+          <div class="phase" data-testid="step-waiting-on"><strong>{p?.phase}</strong> · {p?.detail}{p?.waitingOn ? ` · waiting for ${p.waitingOn}` : ''}</div>
+        {:else if ns.status === 'running' && ns.activity?.phase}
           <!-- What the engine is waiting for right now; `hold_reason` wins when
                the step LOOKS idle but is deliberately being held. It belongs to
                the CARD, not the body (design §4 "muted line under the title") —
@@ -363,6 +406,17 @@
           <div class="err">{ns.error}</div>
         {/if}
 
+        {#if stuck(ns)}
+          <div class="links" data-testid="stuck-actions">
+            <span class="stuck-note">Every agent finished, but this step hasn’t moved on for {STUCK_MIN}+ minutes.</span>
+            <button class="link-btn" disabled={recovering === ns.node_id} onclick={() => void recoverStuck(ns, true)}>
+              <Icon name="refresh" size={12} /> Restart step
+            </button>
+            <button class="link-btn" disabled={recovering === ns.node_id} onclick={() => void recoverStuck(ns, false)}>
+              <Icon name="warning" size={12} /> Mark failed
+            </button>
+          </div>
+        {/if}
         {#if ns.sessions?.length || reviewIdOf(ns.output) || canRetry(ns) || canRerunFrom(ns)}
           <div class="links">
             {#if canRetry(ns)}
@@ -709,6 +763,10 @@
   .muted {
     font-size: var(--fs-s);
     color: var(--text-dim);
+  }
+  .stuck-note {
+    font-size: var(--fs-xs);
+    color: var(--warning);
   }
   /* Leading step dot — the shared run vocabulary (lib/status.ts): running is
      info-blue, never the succeeded green. */
