@@ -6,6 +6,9 @@ import { api } from '../api/client';
 import { latestOnly } from '../latest';
 import { loadErrorText } from '../loadError';
 import { mergeTouched, touches, type TouchedPaths } from '../gitLivePaths';
+import {
+  ACTIVE_AUTO_FETCH_SEC, RECENT_USE_MS, autoFetchAllowed, readAutoFetchConfig, writeAutoFetchConfig,
+} from '../gitAutoFetchConfig';
 import { gitApi, statusEq, type RefsRead } from '../api/git';
 import type {
   CheckoutReq,
@@ -46,56 +49,11 @@ interface GitOpenTabsState {
  *  repo tabs. Survives Tauri restarts; deliberately NOT keyed by workspace so
  *  the Git page is decoupled from the active workspace. */
 const OPEN_TABS_KEY = 'otto_git_open_tabs';
-/** localStorage key for the auto-fetch toggle/interval (per-device). */
-const AUTO_FETCH_KEY = 'otto_git_auto_fetch';
-const DEFAULT_AUTO_FETCH_SEC = 120;
-/** The selected repo's cadence. 30 s made `POST /repos/{id}/fetch` the app's
- *  biggest wall-time consumer (~6/min, p95 3 s, telemetry 2026-10-05). */
-const ACTIVE_AUTO_FETCH_SEC = 60;
-/** Background tabs are swept only while recently used (opened, selected or
- *  manually fetched); an idle tab resumes on its next activation. */
-const RECENT_USE_MS = 15 * 60_000;
 /** A fetch's own status answers a status read this soon after it. */
 const FETCH_STATUS_REUSE_MS = 2000;
 /** A status read younger than this is shared by a new caller (same burst). */
 const STATUS_SHARE_MS = 300;
 const DEFAULT_SUB: GitSubTab = 'graph';
-
-/** May an auto-fetch round run right now?
- *
- *  `document.hidden` alone is not enough: Otto is multi-window, and a BACKGROUND
- *  window is fully "visible" to the browser, so a second window parked on the
- *  Git page kept firing a fetch per open repo every 10 s forever — each one a
- *  `git fetch --prune` + `status` spawn plus a synchronous Keychain read on the
- *  daemon's runtime, which is load the window in front pays for (investigation
- *  H4/WP3). So we also require FOCUS: exactly the window the user is looking at
- *  polls. `hasFocus` is absent in SSR/jsdom — treat that as "allowed" so tests
- *  and headless renders behave as before. */
-export function autoFetchAllowed(): boolean {
-  if (typeof document === 'undefined') return true;
-  if (document.hidden) return false;
-  return typeof document.hasFocus === 'function' ? document.hasFocus() : true;
-}
-
-/** Read the persisted auto-fetch config, guarded for SSR/test environments with
- *  no localStorage. Defaults: enabled, every two minutes (selected repo every 30s). */
-function readAutoFetchConfig(): { enabled: boolean; intervalSec: number } {
-  const def = { enabled: true, intervalSec: DEFAULT_AUTO_FETCH_SEC };
-  if (typeof localStorage === 'undefined') return def;
-  try {
-    const raw = localStorage.getItem(AUTO_FETCH_KEY);
-    if (!raw) return def;
-    const p = JSON.parse(raw) as Partial<{ enabled: boolean; intervalSec: number }>;
-    return {
-      enabled: typeof p.enabled === 'boolean' ? p.enabled : def.enabled,
-      intervalSec:
-        typeof p.intervalSec === 'number' && Number.isFinite(p.intervalSec)
-          ? Math.max(30, p.intervalSec) : def.intervalSec,
-    };
-  } catch {
-    return def;
-  }
-}
 
 const INITIAL_AUTO_FETCH = readAutoFetchConfig();
 
@@ -253,7 +211,7 @@ class GitStore {
     this.activeRepoId = repoId;
     this.repoUsedAt[repoId] = Date.now();
     this.persistOpenTabs();
-    this.requestAutoFetch();
+    this.fetchOnArrival();
   }
 
   /** Close a repo tab; pick a sensible neighbour as the new active tab. */
@@ -277,7 +235,7 @@ class GitStore {
     this.activeRepoId = repoId;
     this.repoUsedAt[repoId] = Date.now();
     this.persistOpenTabs();
-    this.requestAutoFetch();
+    this.fetchOnArrival();
   }
 
   /** Move `repoId` to the position currently held by `targetIdx` (drag-reorder). */
@@ -554,10 +512,17 @@ class GitStore {
     this.liveInFlight.add(repoId);
     // Taken BEFORE the read: a change landing during it stays pending for the
     // dirty re-run (whose diff read then comes after it).
-    const taken = this.livePending.has(repoId) ? this.livePending.get(repoId) : new Set<string>();
+    const had = this.livePending.has(repoId);
+    const taken = had ? this.livePending.get(repoId) : new Set<string>();
     this.livePending.delete(repoId);
     try {
       await this.refreshStatus(repoId);
+      // A ref change made OUTSIDE Otto (a terminal commit, an agent's session,
+      // another git client fetching on its own timer) arrives only here:
+      // `[]` = remote refs / tags only, `null` = HEAD / branch refs / unknown.
+      // Re-sync the graph too — graphSync reads the cheap `/refs` first and
+      // re-reads history only when something actually moved.
+      if (had && (taken == null || taken.size === 0)) this.bumpRefs(repoId);
       this.liveChanged = { ...this.liveChanged, [repoId]: taken == null ? null : [...taken] };
       this.liveRev = { ...this.liveRev, [repoId]: (this.liveRev[repoId] ?? 0) + 1 };
     } finally {
@@ -639,7 +604,27 @@ class GitStore {
   startAutoFetch(): void {
     if (this.autoFetchRunning) return;
     this.autoFetchRunning = true;
-    this.requestAutoFetch();
+    this.fetchOnArrival();
+  }
+
+  /** Opening the Git page or a repo tab: with auto-fetch on, wake the loop
+   *  (it fetches what is due). PAUSED only stops the periodic rounds — the
+   *  selected repo is still fetched once on arrival, throttled to the active
+   *  cadence and the failure backoff, so the page never opens on stale refs.
+   *  A paused toggle persisted per device used to leave the Git page showing
+   *  whatever the last manual fetch saw (2026-11-03). */
+  private fetchOnArrival(): void {
+    if (this.autoFetchEnabled) {
+      this.requestAutoFetch();
+      return;
+    }
+    const id = this.activeRepoId;
+    if (!this.autoFetchRunning || !id || !autoFetchAllowed()) return;
+    const now = Date.now();
+    if (this.fetches.has(id) || now < (this.retryFetchAt[id] ?? 0)) return;
+    if (now - (this.lastFetchAt[id] ?? 0) < ACTIVE_AUTO_FETCH_SEC * 1000) return;
+    // Explicit (manual-path) work: a paused loop would cancel a background one.
+    this.fetchRepo(id).catch(() => {});
   }
 
   stopAutoFetch(): void {
@@ -702,15 +687,7 @@ class GitStore {
   }
 
   private persistAutoFetch(): void {
-    if (typeof localStorage === 'undefined') return;
-    try {
-      localStorage.setItem(
-        AUTO_FETCH_KEY,
-        JSON.stringify({ enabled: this.autoFetchEnabled, intervalSec: this.autoFetchIntervalSec }),
-      );
-    } catch {
-      /* storage full / unavailable — non-fatal */
-    }
+    writeAutoFetchConfig(this.autoFetchEnabled, this.autoFetchIntervalSec);
   }
 
   // ── Local merge + conflict resolution ─────────────────────────────────────

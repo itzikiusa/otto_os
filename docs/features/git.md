@@ -209,10 +209,15 @@ From the Git landing page, **Add Repository** offers three modes:
   across all workspaces the caller may view (root sees all; a non-root user sees
   repos in workspaces they're a member of).
 - A `#/git/:id` or `#/git/:id/:tab` deep link opens that repo as a tab.
-- Auto-fetch stays active for open tabs while you work in other modules: by default
-  every two minutes, with the selected repo refreshed every thirty seconds. Opening
-  a tab or returning focus checks immediately if its fetch is due. Hidden or
-  unfocused windows pause automatic fetching. The tab-strip toggle pauses it.
+- Auto-fetch runs while the Git page is showing: the selected repo every 60 s,
+  other tabs used in the last 15 minutes every two minutes. Opening the page,
+  opening a tab or returning focus checks immediately if a fetch is due. Hidden or
+  unfocused windows pause automatic fetching. The tab-strip toggle pauses the
+  periodic rounds (the button then reads **Auto-fetch paused**); even paused, the
+  selected repo is fetched once when the page or tab opens (at most once a minute).
+- A ref change made outside Otto (a terminal commit, an agent session, another git
+  client's fetch) reaches the open graph through the repo watcher: the status and
+  the graph's refs re-sync without waiting for the next fetch.
 - At most two fetches run at once; manual Fetch joins an existing request for that
   repo. Background errors retry quietly with backoff; manual failures still show
   an error. Fetch never checks out or pulls a branch.
