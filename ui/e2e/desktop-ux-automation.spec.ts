@@ -27,13 +27,16 @@ test('personal agents: keyboard tab selection moves focus to the selected tab', 
   const agents = page.getByRole('tab', { name: 'Agents', exact: true });
   const rooms = page.getByRole('tab', { name: 'Agent channels', exact: true });
   await agents.focus();
-  await page.keyboard.press('ArrowRight');
+  await page.keyboard.press('End');
   await expect(rooms).toHaveAttribute('aria-selected', 'true');
   await expect(rooms).toBeFocused();
-  await page.keyboard.press('Home');
-  const tasks = page.getByRole('tab', { name: 'Tasks', exact: true });
+  await page.keyboard.press('ArrowLeft');
+  const tasks = page.getByRole('tab', { name: 'Scheduled tasks', exact: true });
   await expect(tasks).toHaveAttribute('aria-selected', 'true');
   await expect(tasks).toBeFocused();
+  await page.keyboard.press('Home');
+  await expect(agents).toHaveAttribute('aria-selected', 'true');
+  await expect(agents).toBeFocused();
 });
 
 

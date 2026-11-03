@@ -201,7 +201,7 @@ test('customize: moves stay in-section, hidden stays hidden, empty sections vani
   const order = await group(page, 'automate')
     .locator('.nav-item')
     .evaluateAll((els) => els.map((e) => e.textContent!.trim()));
-  expect(order.slice(0, 3)).toEqual(['Workflows', 'Goal Loops', 'Scheduled Tasks']);
+  expect(order.slice(0, 3)).toEqual(['Workflows', 'Goal Loops', 'Personal Agents']);
   await page.locator('.navigator').getByRole('button', { name: 'Collapse sidebar' }).click();
   await expect(page.locator('.rail')).toBeVisible();
   await expect(page.locator('.rail').getByRole('button', { name: 'Usage', exact: true })).toHaveCount(0);

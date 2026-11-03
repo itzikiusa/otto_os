@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { loadSource } from './sourceHarness.ts';
 import { captureRoomInvite, roomInvite, forgetRoom } from '../src/modules/rooms/room-access.ts';
-import { activeNavId } from '../src/lib/sidebar.ts';
+import { activeNavId, moduleHome } from '../src/lib/sidebar.ts';
 import { dropShareToken, storeShareToken, storedShareToken, type TokenStorage } from '../src/lib/shareTokenStore.ts';
 
 const flush = async () => {
@@ -63,7 +63,7 @@ function fixture(initialHash = '#/home', shareStore = bindShareStore(fakeSession
       './storage': { lsGet: () => null, lsSet: () => {} },
       './desktop': { isEmbedded: false },
       './rooms/invites': { captureRoomInvite },
-      './sidebar': { activeNavId },
+      './sidebar': { activeNavId, moduleHome },
       './shareTokenStore': shareStore,
     },
     { window, history },
@@ -215,7 +215,7 @@ function loadReloaded(hash: string, tab: TokenStorage) {
       './storage': { lsGet: () => null, lsSet: () => {} },
       './desktop': { isEmbedded: false },
       './rooms/invites': { captureRoomInvite },
-      './sidebar': { activeNavId },
+      './sidebar': { activeNavId, moduleHome },
       './shareTokenStore': bindShareStore(tab),
     },
     { window: { location, addEventListener: () => {}, removeEventListener: () => {} }, history: { replaceState: () => {} } },

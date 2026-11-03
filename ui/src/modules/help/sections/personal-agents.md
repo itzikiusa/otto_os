@@ -11,7 +11,7 @@ A personal agent is a standing helper with a personality and a job: a daily reca
 
 ## Getting started
 
-1. Open **Scheduled Tasks** in the sidebar and switch to **Agents**. The first visit adds 4 example agents, all paused: Personal Assistant, Daily Recap, Casino Reviewer and Casino Reviewer Player. Open one to see how it is set up.
+1. Open **Personal Agents** in the sidebar. It opens on the **Agents** tab. The first visit adds 4 example agents, all paused: Personal Assistant, Daily Recap, Casino Reviewer and Casino Reviewer Player. Open one to see how it is set up.
 2. Choose **New agent**. Optionally **Start from a template** (for example **Kubernetes watchdog**), or start blank.
 3. Set a **Name**, an **Avatar (emoji)** and the **Persona** — who this agent is.
 4. Pick the **Provider** and model, and a **Delivery** destination. Turn on **Browser use** if it needs to read web pages. Tick **Enabled** and save.

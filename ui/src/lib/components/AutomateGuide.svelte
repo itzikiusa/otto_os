@@ -6,7 +6,7 @@
   export const AUTOMATE_GUIDE: readonly { id: AutomateGuideId; route: string; label: string; when: string }[] = [
     { id: 'workflows', route: 'workflows', label: 'Workflows', when: 'A fixed sequence of steps you can draw — run on demand, from a trigger, or on a schedule.' },
     { id: 'loops', route: 'loops', label: 'Goal Loops', when: 'One measurable goal: an agent iterates on a branch until it is met or the budget runs out.' },
-    { id: 'scheduled-tasks', route: 'scheduled-tasks', label: 'Scheduled Tasks & Personal Agents', when: 'Recurring prompts that deliver reports on a cadence, plus named agents with memory, schedules and shared channels.' },
+    { id: 'scheduled-tasks', route: 'scheduled-tasks', label: 'Personal Agents & Scheduled Tasks', when: 'Recurring prompts that deliver reports on a cadence, plus named agents with memory, schedules and shared channels.' },
   ];
 </script>
 
