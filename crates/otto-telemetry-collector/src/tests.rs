@@ -183,16 +183,26 @@ async fn dismissed_suggestions_and_daily_schedule_survive_restart() {
 #[tokio::test]
 #[ignore = "downloads pinned collector and starts an isolated ClickHouse; run serially"]
 async fn real_collector_delivers_all_signals_and_recovers() {
+    // Fail in milliseconds, naming the cause, instead of timing out 30 s later:
+    // without a `clickhouse` binary the usage engine can never become ready.
+    assert!(
+        otto_usage::ClickHouse::locate(None).is_some(),
+        "no `clickhouse` binary on PATH or in the known install locations; \
+         this test needs one (CI installs the pinned LTS release)"
+    );
     let temp = tempfile::tempdir().unwrap();
     let usage = UsageEngine::start(
         otto_usage::UsageConfig::default(),
         temp.path().join("usage"),
     )
     .await;
-    assert!(
-        usage.wait_ready(Duration::from_secs(30)).await,
-        "isolated ClickHouse must become ready"
-    );
+    if !usage.wait_ready(Duration::from_secs(30)).await {
+        let status = usage.status().await;
+        panic!(
+            "isolated ClickHouse must become ready within 30 s: binary={:?} version={:?} data_dir={}",
+            status.binary, status.version, status.data_dir
+        );
+    }
     let c = TelemetryConfig {
         enabled: true,
         sample_interval_secs: 2,
