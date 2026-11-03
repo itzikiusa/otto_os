@@ -78,6 +78,8 @@
     scanFor,
   } from './grid-view-cache';
   import RowDetail from './RowDetail.svelte';
+  import AddRowButton from './AddRowButton.svelte';
+  import InsertRowHost from './InsertRowHost.svelte';
   import type { MenuItem } from '../../lib/contextmenu.svelte';
 
   // Menu actions capture cell values. Destroying this result (source switch,
@@ -1273,13 +1275,7 @@
         action: () => (compare = [...flow.selected] as [number, number]),
       });
     }
-    if (flow.editable) {
-      items.push({
-        label: `Insert ${engine === 'mongodb' ? 'document' : 'row'} from JSON…`,
-        icon: 'plus',
-        action: () => flow.openDocEditor(-1),
-      });
-    }
+    if (flow.insert.target && engine !== 'mongodb') items.push({ label: 'Insert row from JSON…', icon: 'plus', action: () => flow.openDocEditor(-1) });
     if (mode === 'grid') {
       items.push({
         label: expandJson ? 'Collapse JSON cells' : 'Expand JSON cells',
@@ -1290,7 +1286,7 @@
     if (items.length) items.push({ separator: true });
     items.push({ label: 'Send to running agent…', icon: 'send', action: sendToRunningAgent });
     // Same gate as the editor's Ask AI buttons: the DB Assistant runs an agent.
-    if (connectionId && canAssist) items.push({ label: 'Examine with Otto', icon: 'sparkle', action: examineWithAi });
+    if (connectionId && canAssist) items.push({ label: 'Examine with AI', icon: 'sparkle', action: examineWithAi });
     showMenu(e, items);
   }
 
@@ -1478,6 +1474,7 @@
       {#if !mini && result}
         <span class="ge-meta">{result.stats.duration_ms} ms{#if result.rows_affected != null} · {result.rows_affected} affected{/if}</span>
       {/if}
+      {#if !mini && result?.rows_affected == null}<AddRowButton {flow} variant="empty" />{/if}
     </div>
   {/if}
 {:else}
@@ -1537,6 +1534,7 @@
           ><Icon name="panel" size={13} /></button>
         {/if}
         <span class="grow"></span>
+        <AddRowButton {flow} variant="toolbar" />
         <button class="icon-btn" onclick={() => findInPage.show()} aria-label="Find in results" title="Find (⌘F)">
           <Icon name="search" size={13} />
         </button>
@@ -1627,6 +1625,7 @@
       </div>
     {/if}
 
+    {#if !mini && liveRows.length === 0 && !running}<AddRowButton {flow} variant="cta" />{/if}
     <!-- WP4: filter bar -->
     {#if engine === 'mongodb' && !mini && statement}
       <MongoFilterBar
@@ -1815,6 +1814,7 @@
   <LazyMount lazy={DocEditorLazy} what="the document editor" quiet props={{ flow }} onerror={() => (flow.docEditor = null)} />
 {/if}
 
+<InsertRowHost {flow} active={hosted && !mini} {running} result={resultProp ?? null} failed={!!error} {canModify} />
 {#if flow.rawDoc}
   <LazyMount lazy={RawDocViewerLazy} what="the document viewer" quiet props={{ flow }} onerror={() => (flow.rawDoc = null)} />
 {/if}

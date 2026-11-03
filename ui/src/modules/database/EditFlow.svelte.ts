@@ -36,6 +36,7 @@ import {
 } from './edit-types';
 import { parseSimpleSelect, qid, scopeDatabase, typedCellDraft, valueLiteral, whereByPk } from './edit-sql';
 import { mongoCollectionForEdit } from './edit-mongo';
+import { InsertFlow } from './insert-flow.svelte';
 import { applyPatchAtPath, flattenPaths, valueKind } from '../../lib/jsonTree/expansion-plan';
 import { toastError } from '../../lib/toastError';
 import { batchFailure, completedRows, reviewBatchSql, type BatchFailure } from './review-batch';
@@ -136,6 +137,8 @@ export class EditFlow {
     return { db, table: parsed.table };
   });
 
+  /** "Add row": the insert target + schema form (insert-flow.svelte.ts). */
+  readonly insert: InsertFlow = new InsertFlow(this);
   /** The node every write and refresh of this result runs with: the scope it
    *  RAN with (the tab's `ran_node`, `null` included). Only without a query
    *  tab (`ranNode` undefined) is the selector's current value used. */
@@ -143,7 +146,7 @@ export class EditFlow {
     return this.ranNode === undefined ? database.activeDb || null : this.ranNode;
   }
   /** The database/schema the result ran against, if it ran scoped. */
-  private ranDb(): string | null {
+  ranDb(): string | null {
     return scopeDatabase(this.scopeNode());
   }
   /** The database an UNQUALIFIED SQL table resolved in: the ran scope, else
@@ -151,7 +154,7 @@ export class EditFlow {
    *  sent. Not for Postgres: its node is a schema and its default is the
    *  search_path, which the UI cannot know. `null` = unknown, so the caller
    *  refuses to edit rather than guess. */
-  private defaultSqlDb(): string | null {
+  defaultSqlDb(): string | null {
     const ran = this.ranDb();
     if (ran) return ran;
     if (this.engine === 'postgres') return null;
@@ -262,7 +265,7 @@ export class EditFlow {
   }
 
   /** Adapter context over the given target and the current columns/rows. */
-  private ctx(target: EditTarget): EditCtx {
+  ctx(target: EditTarget): EditCtx {
     return {
       engine: this.engine,
       columns: this.result?.columns ?? [],
@@ -1035,20 +1038,16 @@ export class EditFlow {
   }
 
   // ── Whole-document editor (JSON / Vertical views) ──────────────────────────
-  // Edits the full row as one JSON object; Save builds a Mongo updateOne (or
-  // a per-changed-column SQL UPDATE) and opens the normal review modal. With
-  // `rowIdx === -1` it is the INSERT editor: the draft starts as `{}` (SQL: a
-  // template of the columns, a single key omitted so it regenerates) and Save
-  // builds an insertOne / INSERT instead.
+  // The full row as one JSON object; Save builds a Mongo updateOne / per-column
+  // SQL UPDATE for review. `rowIdx === -1` is the INSERT editor (insertOne / INSERT).
   docEditor: { rowIdx: number; draft: string; err: string | null } | null = $state(null);
 
   openDocEditor(rowIdx: number): void {
-    if (!this.editable || !this.result) return;
+    if (!this.result || (rowIdx < 0 ? !this.insert.target : !this.editable)) return;
     const o: Record<string, unknown> = rowIdx < 0 ? {} : this.rowObject(rowIdx);
-    if (rowIdx < 0 && this.engine !== 'mongodb') {
-      const omitPk = this.editPkCols.length === 1;
-      for (const c of this.result.columns) if (!(omitPk && this.editPkCols.includes(c.name))) o[c.name] = null;
-    }
+    // Template of the shown columns; a single key / Mongo `_id` regenerates.
+    const omit = this.engine === 'mongodb' ? ['_id'] : this.editPkCols.length === 1 ? this.editPkCols : [];
+    if (rowIdx < 0) for (const c of this.result.columns) if (!omit.includes(c.name)) o[c.name] = null;
     this.docEditor = { rowIdx, draft: prettyJson(o), err: null };
   }
 
@@ -1076,8 +1075,9 @@ export class EditFlow {
   }
 
   saveDocEdit(): void {
-    if (!this.docEditor || !this.result || !this.editTable) return;
+    if (!this.docEditor || !this.result) return;
     const { rowIdx } = this.docEditor;
+    const ins = this.insert.target;
     let doc: Record<string, unknown>;
     try {
       const parsed: unknown = JSON.parse(this.docEditor.draft);
@@ -1090,7 +1090,7 @@ export class EditFlow {
       this.docEditor.err = `Invalid JSON: ${e instanceof Error ? e.message : String(e)}`;
       return;
     }
-    const ctx = this.editCtx();
+    const ctx = rowIdx < 0 ? ins && this.ctx({ ...ins, pkCols: [] }) : this.editCtx();
     if (!ctx) return;
     if (rowIdx < 0) {
       const sql = adapterFor(this.engine).buildInsertDoc?.(doc, ctx) ?? null;

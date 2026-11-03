@@ -37,7 +37,9 @@ test('the grid delete flow cannot open or execute a Redis list mutation', async 
     '../../lib/stores/database.svelte': { database: { runManagedStatement: () => { writes++; } } },
     './results-format': { SET_NULL, SET_EMPTY },
     './edit-types': { adapterFor: () => adapter },
-    './edit-sql': {}, './edit-mongo': {}, '../../lib/jsonTree/expansion-plan': {}, './review-batch': {},
+    './edit-sql': {}, './edit-mongo': {}, '../../lib/jsonTree/expansion-plan': {},
+    // "Add row" (InsertFlow) is covered by dbInsertForm.test.ts.
+    './insert-flow.svelte': { InsertFlow: class { target = null; form = null; } }, './review-batch': {},
     '../../lib/toastError': {}, '../../lib/plural': plural,
   });
   const flow = new EditFlow();
