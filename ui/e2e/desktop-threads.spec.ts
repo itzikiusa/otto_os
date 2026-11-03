@@ -304,10 +304,11 @@ test('strict Threads vs Agents isolation, single pane header, interactive slash 
   await expect(page.getByTestId('threads-breadcrumb')).toContainText('Alpha Architect');
   await expect(paneA.locator('.tp-head')).toHaveCount(0);
   await expect(paneA.locator('.conv-head')).toHaveCount(0);
-  // The right panel starts closed (T3); its toggle opens it with the project card on top.
+  // The right panel starts closed (T3); its toggle opens the surface launcher.
   await expect(page.getByTestId('threads-inspector')).toHaveCount(0);
   await page.getByTestId('threads-toggle-inspector').click();
-  await expect(page.getByTestId('threads-inspector').getByTestId('threads-project-card')).toBeVisible();
+  await expect(page.getByTestId('threads-surface-launcher')).toBeVisible();
+  await expect(page.getByTestId('threads-surface-files')).toBeEnabled();
 
   // 4. Interactive Model / Effort / Mode pickers & `/` slash commands inside live ThreadPane.
   await expect(paneA.getByTestId('picker-model')).toBeVisible();
@@ -327,7 +328,7 @@ test('strict Threads vs Agents isolation, single pane header, interactive slash 
   await ta.fill('/diff');
   await ta.press('Enter');
   await expect(
-    page.getByTestId('threads-inspector').getByRole('tab', { name: 'Changes' }),
+    page.getByTestId('threads-inspector').getByRole('tab', { name: 'Diff' }),
   ).toHaveAttribute('aria-selected', 'true');
 
   // 5. Plan-mode thread displays the Plan approval bar with both implementation actions.
@@ -357,7 +358,8 @@ test('multi-session split canvas, pins, file viewer, and peer-to-peer message re
   if ((await page.getByTestId('threads-inspector').count()) === 0) {
     await page.getByTestId('threads-toggle-inspector').click();
   }
-  await page.getByTestId('threads-inspector').getByRole('tab', { name: 'Files' }).click();
+  await page.getByTestId('threads-surface-add').click();
+  await page.getByRole('menuitem', { name: /^Files/ }).click();
   const fileTabs = page.getByTestId('inspector-files-tab');
   await expect(fileTabs).toBeVisible();
   await fileTabs.getByRole('button', { name: 'README.md' }).first().click();
@@ -365,12 +367,14 @@ test('multi-session split canvas, pins, file viewer, and peer-to-peer message re
 
   // Connections inspector tab exposes one-click side-by-side DB Explorer launch.
   const inspector = page.getByTestId('threads-inspector');
-  await inspector.getByRole('tab', { name: 'Connections' }).click();
+  await inspector.getByTestId('threads-surface-add').click();
+  await page.getByRole('menuitem', { name: /Connections/ }).click();
   await expect(page.getByTestId('connections-open-beside')).toBeVisible();
 
   // Peers inspector tab relays a direct session-to-session message from Alpha → Beta.
   await canvas.getByTestId(`thread-pane-${sessionA}`).click();
-  await inspector.getByRole('tab', { name: 'Peers' }).click();
+  await inspector.getByTestId('threads-surface-add').click();
+  await page.getByRole('menuitem', { name: /Peers/ }).click();
   await page.getByTestId('peers-target-select').selectOption(sessionB);
   const relayMsg = 'Sync schema check from Alpha';
   await page.getByTestId('peers-message-input').fill(relayMsg);

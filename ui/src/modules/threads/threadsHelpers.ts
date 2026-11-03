@@ -19,6 +19,8 @@ export function isThreadSession(s: Session, pool: readonly Session[] = ws.sessio
   if (s.kind === 'connection') return false;
   // A side chat lives in its main thread's right panel until promoted.
   if (sideChatOf(s)) return false;
+  // The bottom terminal drawer's shells are not threads.
+  if ((s.meta as Record<string, unknown> | undefined)?.threads_terminal === true) return false;
   if (isThreadSurfaceSession(s)) return true;
   const parentId = delegatedParentId(s);
   if (!parentId || parentId === s.id) return false;

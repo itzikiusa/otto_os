@@ -7,9 +7,10 @@ import { ws } from '../../lib/stores/workspace.svelte';
 import { toasts } from '../../lib/toast.svelte';
 import { toastError } from '../../lib/toastError';
 import type { BroadcastResp, TrailEvent } from '../../lib/api/types';
+import { threadsChrome } from './threadsChrome.svelte';
 
 export type ThreadsLayoutMode = 'single' | 'split' | 'grid';
-export type ThreadsInspectorTab = 'files' | 'changes' | 'side' | 'connections' | 'peers';
+export type ThreadsInspectorTab = 'files' | 'changes' | 'pr' | 'side' | 'connections' | 'peers';
 
 export interface OpenFileTab {
   path: string;
@@ -155,6 +156,7 @@ class ThreadsStore {
       p.inspectorTab === 'files' ||
       p.inspectorTab === 'changes' ||
       p.inspectorTab === 'side' ||
+      p.inspectorTab === 'pr' ||
       p.inspectorTab === 'connections' ||
       p.inspectorTab === 'peers'
     ) {
@@ -352,6 +354,7 @@ class ThreadsStore {
   }
 
   focusPane(id: string, syncRoute = true): void {
+    threadsChrome.stageView = null; // picking a thread leaves the PR view
     this.focusedSessionId = id;
     this.newDraftMode = false;
     ws.activeThreadId = id;
@@ -462,6 +465,7 @@ class ThreadsStore {
   }
 
   startNewThread(opts: { workspaceId?: string | null; cwd?: string | null } = {}): void {
+    threadsChrome.stageView = null;
     this.draftWorkspaceId = opts.workspaceId ?? null;
     this.draftCwd = opts.cwd ?? null;
     this.newDraftMode = true;
@@ -487,6 +491,7 @@ class ThreadsStore {
     if (question.trim()) this.sideAsk = { mainId, question: question.trim() };
     this.inspectorTab = 'side';
     this.inspectorOpen = true;
+    threadsChrome.addSurface('side');
     this.save();
   }
 
@@ -576,6 +581,7 @@ class ThreadsStore {
       } else {
         this.inspectorTab = tab;
         this.inspectorOpen = true;
+        threadsChrome.addSurface(tab);
       }
     } else {
       this.inspectorOpen = !this.inspectorOpen;
@@ -586,6 +592,7 @@ class ThreadsStore {
   setInspectorTab(tab: ThreadsInspectorTab): void {
     this.inspectorTab = tab;
     this.inspectorOpen = true;
+    threadsChrome.addSurface(tab);
     this.save();
   }
 
@@ -593,6 +600,7 @@ class ThreadsStore {
     this.peerRelayTarget = targetSessionId;
     this.inspectorTab = 'peers';
     this.inspectorOpen = true;
+    threadsChrome.addSurface('peers');
     this.save();
   }
 
@@ -626,6 +634,7 @@ class ThreadsStore {
     };
     this.inspectorTab = 'files';
     this.inspectorOpen = true;
+    threadsChrome.addSurface('files');
     this.save();
   }
 

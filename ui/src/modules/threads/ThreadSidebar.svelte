@@ -7,20 +7,21 @@
   import Icon from '../../lib/components/Icon.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
-  import { router } from '../../lib/router.svelte';
   import { git } from '../../lib/stores/git.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { toastError } from '../../lib/toastError';
   import type { Session } from '../../lib/api/types';
   import ThreadSidebarRow from './ThreadSidebarRow.svelte';
   import {
-    compactPath,
     delegatedParentId,
     isThreadSession,
     projectNameFromCwd,
     sessionBranch,
   } from './threadsHelpers';
   import { threadRepos } from './threadRepos.svelte';
+  import { FilterPopover, PullRequestsView, SettingsView, UsageView } from './threadLazy.svelte';
+  import { threadsChrome } from './threadsChrome.svelte';
+  import { promptNewScript } from './threadGitMenus';
   import { threads } from './threadsStore.svelte';
 
   interface Props {
@@ -174,36 +175,8 @@
     return combined;
   });
 
-  // Multi-select: a pick toggles that project and re-opens the menu so several
-  // can be ticked in a row; "All projects" clears the filter.
-  function openProjectFilterMenu(anchor: HTMLElement): void {
-    const reopen = (): void => queueMicrotask(() => openProjectFilterMenu(anchor));
-    const items: MenuItem[] = [
-      {
-        label: 'All projects',
-        checked: threads.projectFilters.length === 0,
-        pinned: true,
-        action: () => (threads.projectFilters = []),
-      },
-      ...(projectOptions.length > 0 ? [{ separator: true, pinned: true }] : []),
-      ...projectOptions.map(
-        (p): MenuItem => ({
-          label: p.label,
-          hint: compactPath(p.cwd, homePath),
-          checked: threads.projectFilters.includes(p.key),
-          action: () => {
-            threads.toggleProjectFilter(p.key);
-            reopen();
-          },
-        }),
-      ),
-    ];
-    ctxMenu.showAt(anchor, items, {
-      filter: projectOptions.length > 6,
-      filterPlaceholder: 'Filter projects…',
-      align: 'end',
-    });
-  }
+  // The filter popover (lazy; multi-select, pin, per-project options).
+  let filterAnchor = $state<HTMLElement | null>(null);
 
   async function sync(): Promise<void> {
     if (syncing) return;
@@ -235,6 +208,7 @@
         icon: 'filter',
         action: () => threads.toggleProjectFilter(grp.key),
       },
+      { label: 'Add project script…', icon: 'play', action: () => void promptNewScript(grp.cwd) },
       ...(added ? [{ separator: true }, { label: 'Remove from sidebar', icon: 'x', action: () => threads.removeProject(grp.key) }] : []),
     ]);
   }
@@ -395,7 +369,9 @@
       aria-label="Filter by project: {activeFilterLabel}"
       title="Filter by project ({activeFilterLabel})"
       data-testid="threads-project-filter"
-      onclick={(e) => openProjectFilterMenu(e.currentTarget)}
+      aria-expanded={!!filterAnchor}
+      onpointerenter={() => FilterPopover.prefetch()}
+      onclick={(e) => (filterAnchor = filterAnchor ? null : e.currentTarget)}
     >
       <Icon name="filter" size={14} />
     </button>
@@ -546,29 +522,72 @@
   </div>
 
   <footer class="th-foot">
-    <button type="button" class="icon-btn" aria-label="Settings" title="Settings" onclick={() => router.go('settings')}>
-      <Icon name="gear" size={14} />
-    </button>
-    <button type="button" class="icon-btn" aria-label="Git" title="Git" onclick={() => router.go('git')}>
-      <Icon name="branch" size={14} />
-    </button>
-    <button type="button" class="icon-btn" aria-label="Usage statistics" title="Usage statistics" onclick={() => router.go('usage')}>
-      <Icon name="chart" size={14} />
-    </button>
-    <span class="th-spacer"></span>
-    <button
-      type="button"
-      class="icon-btn"
-      aria-label="Refresh threads and git status"
-      title="Refresh threads and git status"
-      aria-busy={syncing}
-      disabled={syncing}
-      onclick={() => void sync()}
-    >
-      <Icon name="refresh" size={14} />
-    </button>
+    {#if threadsChrome.stageView}
+      <button type="button" class="btn small ghost" data-testid="threads-stage-back" onclick={() => (threadsChrome.stageView = null)}>
+        <Icon name="chevronLeft" size={12} /> Back
+      </button>
+    {:else}
+      <button
+        type="button"
+        class="icon-btn"
+        aria-label="Settings"
+        title="Settings"
+        data-testid="threads-open-settings"
+        onpointerenter={() => SettingsView.prefetch()}
+        onclick={() => (threadsChrome.sheet = 'settings')}
+      >
+        <Icon name="gear" size={14} />
+      </button>
+      <button
+        type="button"
+        class="icon-btn"
+        aria-label="Pull requests"
+        title="Pull requests"
+        data-testid="threads-open-prs"
+        onpointerenter={() => PullRequestsView.prefetch()}
+        onclick={() => {
+          threadsChrome.stageView = 'prs';
+          onselect?.();
+        }}
+      >
+        <Icon name="branch" size={14} />
+      </button>
+      <button
+        type="button"
+        class="icon-btn"
+        aria-label="Usage statistics"
+        title="Usage statistics"
+        data-testid="threads-open-usage"
+        onpointerenter={() => UsageView.prefetch()}
+        onclick={() => (threadsChrome.sheet = 'usage')}
+      >
+        <Icon name="chart" size={14} />
+      </button>
+      <span class="th-spacer"></span>
+      <button
+        type="button"
+        class="icon-btn"
+        aria-label="Refresh threads and git status"
+        title="Refresh threads and git status"
+        aria-busy={syncing}
+        disabled={syncing}
+        onclick={() => void sync()}
+      >
+        <Icon name="refresh" size={14} />
+      </button>
+    {/if}
   </footer>
 </aside>
+
+{#if filterAnchor && FilterPopover.component}
+  <FilterPopover.component
+    anchor={filterAnchor}
+    projects={projectOptions}
+    {homePath}
+    onclose={() => (filterAnchor = null)}
+    onsettings={(e: MouseEvent, p: { key: string; label: string; cwd: string }) => showProjectMenu(e, p)}
+  />
+{/if}
 
 {#if addingProject}
   <FolderPicker
