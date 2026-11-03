@@ -298,7 +298,37 @@ write to the repo drops it).
   **not** run `checkout` — git refuses to check out a branch already held by
   another worktree.
 - The **WORKTREES** section lists `git worktree list` entries; click opens,
-  right-click removes/prunes.
+  right-click removes/prunes. Each row shows what the tree holds that the
+  repo may not have elsewhere: **●N** uncommitted + untracked files, **↑N**
+  commits that no remote and not the default branch hold, and **local** when
+  the branch is on no remote (hover for the full summary: upstream ahead /
+  behind, commits not in the base, lock).
+- **Remove** re-checks that one tree first (`GET …/worktrees/status`). A
+  clean tree gets a plain confirm; a tree holding work gets a **Force
+  remove** confirm listing each item (uncommitted changes, untracked files,
+  commits that exist only there — a detached HEAD's would be orphaned — a
+  lock, submodules). An unknown status or a `.git` link that doesn't point
+  back to this repo is refused even with force. The branch is always kept.
+  The folder is renamed to a hidden sibling and deleted in the background,
+  so trees full of build output (`target/`, `node_modules`) remove instantly
+  — before, `git worktree remove` deleted them under the 30 s git budget and
+  was killed mid-delete, which is why large worktrees could not be removed.
+
+**Stashes.** Clicking a stash (sidebar) or **Stashes (N)** in the toolbar opens
+the stash browser: every stash with message, branch, age and file count; the
+selected one shows its files (tracked and untracked, with +/− counts) and its
+patch, and **Apply**, **Pop** and **Drop** act on that stash by object ID
+(Pop and Drop confirm first; a conflicting Pop keeps the entry).
+
+**Deleting many branches.** The trash button on the LOCAL / REMOTE headers (or
+**Delete multiple branches…** in a branch menu) opens a checklist. The
+checked-out branch, `main` / `master` / the base branch and branches held by
+another worktree can't be ticked. Unmerged locals get an explicit force
+warning naming them; ticking **Also delete their remote branches** (or any
+remote ref) confirms the exact `remote: branch` list first. Each branch is
+deleted independently (`POST …/branches/delete`) and reported in its own
+result row; branches git refused as not fully merged can be force-deleted
+from the results.
 
 ### Merged branches ("landed" marks)
 

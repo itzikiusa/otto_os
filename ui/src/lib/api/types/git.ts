@@ -587,6 +587,54 @@ export interface StashInfo {
   date: string;
   message: string;
   branch: string | null;
+  /** Files the stash touches (tracked + untracked); absent when not counted. */
+  files?: number | null;
+}
+
+/** One file of a stash — GET /repos/{id}/stashes/{sha}. */
+export interface StashFile {
+  path: string;
+  /** "added" | "modified" | "deleted" | "untracked" | other git status word. */
+  status: string;
+  /** Line counts; null for binary files. */
+  additions: number | null;
+  deletions: number | null;
+}
+
+/** A stash's files + unified patch (capped; `truncated` when cut). */
+export interface StashDetail {
+  sha: string;
+  files: StashFile[];
+  patch: string;
+  truncated: boolean;
+}
+
+/** One branch in POST /repos/{id}/branches/delete. */
+export interface BranchDeleteItem {
+  name: string;
+  /** Delete the local branch (default true). */
+  local?: boolean | null;
+  /** Also delete it on this remote (outward-facing). */
+  remote?: string | null;
+  /** Branch name on `remote` when it differs from `name`. */
+  remote_branch?: string | null;
+  /** `-D` — drop an unmerged local branch. */
+  force?: boolean | null;
+}
+
+export interface BranchDeleteResult {
+  name: string;
+  remote: string | null;
+  local_deleted: boolean;
+  remote_deleted: boolean;
+  error: string | null;
+  /** Refused as not fully merged — retry with `force` after consent. */
+  needs_force: boolean;
+}
+
+export interface BranchDeleteResp {
+  results: BranchDeleteResult[];
+  status: RepoStatusResp;
 }
 
 /** One `git worktree list --porcelain` entry (first = main worktree). Fed by
@@ -609,6 +657,24 @@ export interface WorktreeInfo {
   dirty: boolean;
   /** False/absent when status could not be determined; never force-safe. */
   dirty_known?: boolean;
+  /** Tracked files with changes / untracked files (valid when `dirty_known`). */
+  changes?: number;
+  untracked?: number;
+  /** The branch's upstream and the commits ahead of / behind it. */
+  upstream?: string | null;
+  ahead?: number;
+  behind?: number;
+  upstream_gone?: boolean;
+  /** The branch exists on a remote. */
+  on_remote?: boolean;
+  /** Branch `unmerged` compares against (e.g. `origin/main`). */
+  base?: string | null;
+  /** Commits on HEAD not in `base`; null when unknown. */
+  unmerged?: number | null;
+  /** Commits on HEAD that no remote (and not `base`) holds; null when unknown. */
+  unpushed?: number | null;
+  /** Why a removal needs explicit force; absent/empty = safe to remove. */
+  risks?: string[];
 }
 
 /** One `git submodule status` entry + `.gitmodules` config. Fed by

@@ -46,6 +46,9 @@ export function createGraphMenus(h: GraphMenusHost, a: GraphActions) {
     deleteTag,
     stashApply,
     stashDrop,
+    stashPop,
+    openStashBrowser,
+    openBranchCleanup,
     isForeignWorktree,
     openWorktree,
     wtRemove,
@@ -234,6 +237,7 @@ export function createGraphMenus(h: GraphMenusHost, a: GraphActions) {
           action: () => void deleteLocalBranch(localName, true, remoteName),
         });
       }
+      items.push({ label: 'Delete multiple branches…', icon: 'trash', action: () => openBranchCleanup([b.name]) });
       items.push({ separator: true });
       items.push({ label: 'Copy branch name', icon: 'note', action: () => void clip(localName, localName) });
     } else {
@@ -322,6 +326,11 @@ export function createGraphMenus(h: GraphMenusHost, a: GraphActions) {
           });
         }
       }
+      items.push({
+        label: 'Delete multiple branches…',
+        icon: 'trash',
+        action: () => openBranchCleanup(isCurrent ? [] : [b.name]),
+      });
       items.push({ separator: true });
       items.push({ label: 'Copy branch name', icon: 'note', action: () => void clip(b.name, b.name) });
       if (b.upstream) {
@@ -382,7 +391,10 @@ export function createGraphMenus(h: GraphMenusHost, a: GraphActions) {
 
   function stashMenu(e: MouseEvent | KeyboardEvent, s: StashInfo): void {
     const items: MenuItem[] = [
+      { label: 'View contents…', icon: 'eye', action: () => openStashBrowser(s) },
+      { separator: true },
       { label: 'Apply stash', icon: 'stash', action: () => void stashApply(s) },
+      { label: 'Pop stash', icon: 'archive', action: () => void stashPop(s) },
       { separator: true },
       { label: 'Drop stash…', icon: 'trash', danger: true, action: () => void stashDrop(s) },
       { separator: true },

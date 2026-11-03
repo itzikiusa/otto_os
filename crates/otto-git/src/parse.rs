@@ -450,6 +450,7 @@ pub fn parse_stash_list(out: &str) -> Vec<StashInfo> {
             date: fields[3].trim().to_string(),
             message,
             branch,
+            files: None,
         });
     }
     stashes
@@ -481,9 +482,7 @@ pub fn parse_worktree_list(out: &str) -> Vec<WorktreeInfo> {
                 is_main: wts.is_empty(),
                 locked: false,
                 lock_reason: None,
-                prunable: false,
-                dirty: false,
-                dirty_known: false,
+                ..WorktreeInfo::default()
             });
             continue;
         }

@@ -10,6 +10,7 @@ mod config_hardening_tests;
 mod diff_cache;
 #[cfg(test)]
 mod diff_tests;
+pub mod gitops;
 pub mod history;
 mod hooks;
 pub mod http;
