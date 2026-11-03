@@ -12,7 +12,7 @@
   import { onTabKey } from '../../lib/tabKeys';
   import { git } from '../../lib/stores/git.svelte';
   import type { CommitInfo, DiffLine, DiffResp, RepoStatusResp } from '../../lib/api/types';
-  import { matchRepoForCwd } from './threadsHelpers';
+  import { threadRepos } from './threadRepos.svelte';
   import { threads } from './threadsStore.svelte';
 
   interface Props {
@@ -59,7 +59,7 @@
     if (workspaceId) void git.loadRepos(workspaceId);
   });
 
-  const repo = $derived(matchRepoForCwd(sessionCwd, git.repos));
+  const repo = $derived(threadRepos.repoFor(sessionCwd, workspaceId));
   const ahead = $derived(status?.upstream ? (status.ahead ?? 0) : 0);
   const allRange = $derived(status?.upstream ? `range:${status.upstream}...HEAD` : null);
   const activeScope = $derived(scope === 'commits' && ahead > 0 ? 'commits' : 'working');

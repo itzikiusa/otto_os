@@ -20,6 +20,7 @@
     projectNameFromCwd,
     sessionBranch,
   } from './threadsHelpers';
+  import { threadRepos } from './threadRepos.svelte';
   import { threads } from './threadsStore.svelte';
 
   interface Props {
@@ -208,6 +209,7 @@
     if (syncing) return;
     syncing = true;
     try {
+      threadRepos.reset();
       await ws.refreshSessions();
       if (ws.currentId) await git.loadRepos(ws.currentId, true);
       for (const id of Object.keys(git.statusById)) void git.refreshStatus(id);

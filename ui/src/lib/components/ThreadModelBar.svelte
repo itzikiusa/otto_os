@@ -28,6 +28,11 @@
     effort: EffortLevel | null;
     interactionMode: InteractionMode;
     disabled?: boolean;
+    /** Which pickers to show (Threads splits model/effort into the composer box
+     *  and the access mode into the meta row). Default: all three. */
+    parts?: readonly ('model' | 'effort' | 'mode')[];
+    /** Borderless chips for use inside a composer box. */
+    quiet?: boolean;
     onmodelchange: (model: string | null) => void;
     oneffortchange: (effort: EffortLevel | null) => void;
     onmodechange: (mode: InteractionMode) => void;
@@ -40,6 +45,8 @@
     effort,
     interactionMode,
     disabled = false,
+    parts = ['model', 'effort', 'mode'],
+    quiet = false,
     onmodelchange,
     oneffortchange,
     onmodechange,
@@ -50,9 +57,9 @@
   let modeBtnEl = $state<HTMLButtonElement | null>(null);
 
   const meta = $derived(auth.meta);
-  const canPickModel = $derived(supportsModelSelection(provider, meta));
-  const canPickEffort = $derived(supportsEffortSelection(provider));
-  const canPickMode = $derived(supportsInteractionMode(provider));
+  const canPickModel = $derived(parts.includes('model') && supportsModelSelection(provider, meta));
+  const canPickEffort = $derived(parts.includes('effort') && supportsEffortSelection(provider));
+  const canPickMode = $derived(parts.includes('mode') && supportsInteractionMode(provider));
 
   const catalog = $derived(modelsForProvider(provider, meta));
   const shownModelId = $derived(pinnedModel ?? effectiveModel ?? null);
@@ -154,7 +161,7 @@
   }
 </script>
 
-<div class="tmb-bar" role="group" aria-label="Model, reasoning effort, and execution mode">
+<div class="tmb-bar" class:quiet role="group" aria-label="Model, reasoning effort, and execution mode">
   {#if canPickModel}
     <button
       bind:this={modelBtnEl}
@@ -269,6 +276,17 @@
     border-color: var(--accent-line);
     background: var(--accent-faint);
     color: var(--accent-text);
+  }
+  .tmb-bar.quiet .tmb-ctl {
+    border-color: transparent;
+    background: transparent;
+    color: var(--text-dim);
+    font-size: var(--fs-s);
+  }
+  .tmb-bar.quiet .tmb-ctl:hover:not(:disabled) {
+    background: var(--hover);
+    border-color: transparent;
+    color: var(--text);
   }
   .tmb-label {
     min-width: 0;

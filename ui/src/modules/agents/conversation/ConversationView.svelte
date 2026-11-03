@@ -16,8 +16,7 @@
       prompt?: string;
       mode?: 'full' | 'accept-edits' | 'plan';
     }) => void;
-    /** `/btw <question>` → a side chat beside this thread (Threads). */
-    onsidechat?: (question: string) => void;
+    onsidechat?: (question: string) => void; // `/btw <question>` → a side chat (Threads)
   }
   // Workspace repos (for `#123` → the GitHub PR / issue URL), fetched once per
   // workspace per app run — a light GET, never the git store's heavier load.
@@ -48,6 +47,7 @@
   import Icon from '../../../lib/components/Icon.svelte';
   import { splitter } from '../../../lib/paneResizer';
   import TurnItem from './TurnItem.svelte';
+  import { modelChangeFlags, turnEdits, turnMatchesOptimistic, turnText } from './turnQueries';
   import Composer from './Composer.svelte';
   import ConversationHeader from './ConversationHeader.svelte';
   import ConversationThreadChrome from './ConversationThreadChrome.svelte';
@@ -94,6 +94,7 @@
   }: ConversationViewProps = $props();
 
   const src = $derived<TranscriptSource>({ sessionId });
+
   const conv = $derived(transcript.conversation(src));
 
   // Context for the tree (images, file opens, lazy subagents). Kept as one
@@ -374,10 +375,6 @@
   );
   const stale = $derived(rawWorking && sessionInfo.key === 'stale');
   const optPrompt = $derived(sessionId ? transcript.optimisticPrompt(sessionId) : null);
-  function turnMatchesOptimistic(turn: Turn, needle: string): boolean {
-    if (!needle || turn.role !== 'user') return false;
-    return turn.blocks.some((b) => b.kind === 'text' && b.md.includes(needle));
-  }
   $effect(() => {
     const sid = sessionId;
     const opt = optPrompt;
@@ -407,6 +404,8 @@
     ]);
     return [...items, ...synthetic];
   });
+  // Threads shows an assistant turn's model only where it changed (T3 nightly).
+  const modelShownAt = $derived(modelChangeFlags(displayItems));
   const lastItem = $derived(hasLater ? undefined : displayItems[displayItems.length - 1]);
   /** The newest call still without a result — the current step while working,
    *  or (session alive but quiet) what the agent is blocked on: a permission
@@ -506,22 +505,6 @@
   });
   let headRef = $state<ReturnType<typeof ConversationHeader> | null>(null);
   let hitIdx = $state(0);
-  // Lowercased search text per Turn object. Turns are replaced (never mutated)
-  // when they change, so an unchanged turn is lowercased once per session.
-  const turnTextCache = new WeakMap<Turn, string>();
-  function turnText(turn: Turn): string {
-    const hit = turnTextCache.get(turn);
-    if (hit !== undefined) return hit;
-    const parts: string[] = [];
-    for (const b of turn.blocks) {
-      if (b.kind === 'text') parts.push(b.md);
-      else if (b.kind === 'tool_call') parts.push(b.title, b.name, b.result?.text ?? '');
-      else if (b.kind === 'queued') parts.push(b.text);
-    }
-    const text = parts.join('\n').toLowerCase();
-    turnTextCache.set(turn, text);
-    return text;
-  }
   /** Earlier pages are not loaded, so search covers only what is (the
    *  conversation's loaded turns) — the UI says so instead of a bare "No
    *  matches" that reads as "not in this conversation". */
@@ -836,15 +819,6 @@
     );
   }
   // ── All changes: every file the loaded conversation edited or wrote ────────
-  const editsIn = new WeakMap<Turn, boolean>();
-  function turnEdits(turn: Turn): boolean {
-    let v = editsIn.get(turn);
-    if (v === undefined) {
-      v = turn.blocks.some((b) => b.kind === 'tool_call' && (b.tool === 'edit' || b.tool === 'write'));
-      editsIn.set(turn, v);
-    }
-    return v;
-  }
   const hasChanges = $derived(conv.turns.some(turnEdits));
   function openAllChanges(): void {
     const files = changedFiles(conv.turns.filter(turnEdits).flatMap((t) => t.blocks));
@@ -974,6 +948,7 @@
           waiting={waiting && i === displayItems.length - 1}
           hit={!!searchQ && hitSet.has(item.id)}
           current={item.id === currentHit}
+          quiet={surface === 'threads'} showModel={surface !== 'threads' || modelShownAt[i]}
         />
       {/each}
       {#if draft && !hasLater}
@@ -1054,7 +1029,7 @@
       onfiles={onopeninspector ? () => onopeninspector('files') : undefined}
       ontoggleterminal={ontoggleterminal ?? openTerminal}
       onnewthread={onnewthread ? (beside) => onnewthread({ beside }) : undefined}
-      {onsidechat}
+      {onsidechat} variant={surface === 'threads' ? 'threads' : 'default'}
     />
     {/key}
   {/if}

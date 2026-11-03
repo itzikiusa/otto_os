@@ -299,6 +299,9 @@ test('strict Threads vs Agents isolation, single pane header, interactive slash 
   await expect(page.getByTestId('threads-breadcrumb')).toContainText('Alpha Architect');
   await expect(paneA.locator('.tp-head')).toHaveCount(0);
   await expect(paneA.locator('.conv-head')).toHaveCount(0);
+  // The right panel starts closed (T3); its toggle opens it with the project card on top.
+  await expect(page.getByTestId('threads-inspector')).toHaveCount(0);
+  await page.getByTestId('threads-toggle-inspector').click();
   await expect(page.getByTestId('threads-inspector').getByTestId('threads-project-card')).toBeVisible();
 
   // 4. Interactive Model / Effort / Mode pickers & `/` slash commands inside live ThreadPane.
@@ -344,6 +347,10 @@ test('multi-session split canvas, pins, file viewer, and peer-to-peer message re
   await expect(canvas.getByTestId(`thread-pane-${sessionB}`)).toBeVisible();
 
   // Open README.md in PandaCode-style file tabs and inspect rendered Markdown.
+  if ((await page.getByTestId('threads-inspector').count()) === 0) {
+    await page.getByTestId('threads-toggle-inspector').click();
+  }
+  await page.getByTestId('threads-inspector').getByRole('tab', { name: 'Files' }).click();
   const fileTabs = page.getByTestId('inspector-files-tab');
   await expect(fileTabs).toBeVisible();
   await fileTabs.getByRole('button', { name: 'README.md' }).first().click();

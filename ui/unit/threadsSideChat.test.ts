@@ -35,3 +35,19 @@ describe('side chat prompt', () => {
     assert.ok(p.endsWith('Question: why does CI fail?'));
   });
 });
+
+import { modelChangeFlags } from '../src/modules/agents/conversation/turnQueries.ts';
+
+describe('conversation model markers (Threads)', () => {
+  it('flags only assistant turns whose model changed', () => {
+    const flags = modelChangeFlags([
+      { role: 'user', model: null },
+      { role: 'assistant', model: 'sonnet' },
+      { role: 'user', model: null },
+      { role: 'assistant', model: 'sonnet' },
+      { role: 'assistant', model: 'opus' },
+      { role: 'assistant', model: null },
+    ]);
+    assert.deepEqual(flags, [false, true, false, false, true, false]);
+  });
+});
