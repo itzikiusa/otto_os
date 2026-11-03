@@ -1016,7 +1016,7 @@ fn issue_tool_specs() -> Vec<Value> {
                 "summary":{"type":"string"},"description":{"type":"string"},"labels":{"type":"array","items":{"type":"string"}},
                 "priority":{"type":"string"},"parent":{"type":"string"},"epic":{"type":"string"},"fields":{"type":"object"}}}}),
         json!({"name":"otto.update_issue","mutating":true,"category":"Issues",
-            "description":"Edit a Jira issue; omitted fields stay unchanged. `description` is Markdown (as in otto.create_issue). `labels` replaces the set; `add_labels` / `remove_labels` edit it. `priority` name or id, `assignee` accountId, `parent` or `epic` issue key. Returns `{key, url, updated}`. DANGEROUS: outward-facing — approval-gated.",
+            "description":"Edit a Jira issue; omitted fields stay unchanged. `description` is Markdown (as in otto.create_issue). `labels` replaces the set; `add_labels` / `remove_labels` edit it. `priority` name or id, `assignee` accountId (`\"none\"` unassigns), `parent` or `epic` issue key. Returns `{key, url, updated}`. DANGEROUS: outward-facing — approval-gated.",
             "inputSchema":{"type":"object","required":["key"],"properties":{
                 "account_id":{"type":"string","description":ISSUE_ACCOUNT_REF_DESC},"key":{"type":"string"},
                 "summary":{"type":"string"},"description":{"type":"string"},"labels":{"type":"array","items":{"type":"string"}},
@@ -1262,7 +1262,8 @@ pub fn dangerous_detail(tool: &str, args: &Value) -> String {
                 "epic",
             ]
             .into_iter()
-            .filter(|k| args.get(*k).is_some_and(|v| !v.is_null()))
+            // A null `assignee` is an unassign — still an edit the card names.
+            .filter(|k| args.get(*k).is_some_and(|v| !v.is_null() || *k == "assignee"))
             .collect();
             format!(
                 "Edit issue '{}' ({})",

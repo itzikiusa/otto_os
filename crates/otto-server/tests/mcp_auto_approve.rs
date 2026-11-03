@@ -2108,3 +2108,93 @@ async fn an_auto_approved_create_issue_returns_the_jira_verification() {
         "{structure}"
     );
 }
+
+/// A minimal Jira Cloud stand-in for `otto.update_issue` on PRJ-7: the field
+/// PUT and the assignee PUT (both 204), each recorded as `(path, body)`.
+async fn fake_jira_edit_site() -> (String, Arc<std::sync::Mutex<Vec<(String, Value)>>>) {
+    use axum::routing::put;
+    let seen: Arc<std::sync::Mutex<Vec<(String, Value)>>> = Arc::default();
+    let record = |path: &'static str, seen: &Arc<std::sync::Mutex<Vec<(String, Value)>>>| {
+        let seen = Arc::clone(seen);
+        put(move |axum::Json(body): axum::Json<Value>| {
+            let seen = Arc::clone(&seen);
+            async move {
+                seen.lock().unwrap().push((path.to_string(), body));
+                axum::http::StatusCode::NO_CONTENT
+            }
+        })
+    };
+    let app = axum::Router::new()
+        .route("/rest/api/3/issue/PRJ-7", record("/issue/PRJ-7", &seen))
+        .route(
+            "/rest/api/3/issue/PRJ-7/assignee",
+            record("/issue/PRJ-7/assignee", &seen),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let site = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (site, seen)
+}
+
+/// `otto_update_issue` from an agent session: gated until a rule covers it,
+/// then the governed self-call edits the issue — summary + a label op in ONE
+/// field PUT, then the unassign (`assignee: "none"`) as Jira's
+/// `accountId: null` — and the envelope carries `{key, url, updated}`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_auto_approved_update_issue_edits_and_unassigns() {
+    let d = boot().await;
+    let (site, seen) = fake_jira_edit_site().await;
+    let (st, acct) = d
+        .send(
+            "POST",
+            &d.human.clone(),
+            "/issue/accounts",
+            Some(
+                json!({"provider": "jira", "label": "work", "email": "a@example.com",
+                        "base_url": site, "token": "jira-token"}),
+            ),
+        )
+        .await;
+    assert_eq!(st, 200, "{acct}");
+    enable_tools(&d, &["update_issue"]).await;
+    let args = json!({"key": "PRJ-7", "summary": "Renamed by an agent",
+                      "add_labels": ["triaged"], "assignee": "none"});
+    let env = d.agent_invoke("update_issue", args.clone()).await;
+    assert_eq!(env["decision"], "pending_approval", "{env}");
+    assert!(
+        seen.lock().unwrap().is_empty(),
+        "nothing is written before approval"
+    );
+    let (st, rule) = d
+        .rule(json!({"scope": "global", "target_kind": "tool", "target": "update_issue"}))
+        .await;
+    assert_eq!(st, 201, "{rule}");
+
+    let env = d.agent_invoke("update_issue", args).await;
+    assert_eq!(env["executed"], true, "{env}");
+    let out = &env["content"];
+    assert_eq!(out["key"], "PRJ-7", "{env}");
+    assert_eq!(out["url"], format!("{site}/browse/PRJ-7"));
+    assert_eq!(
+        out["updated"],
+        json!(["summary", "labels", "assignee"]),
+        "{env}"
+    );
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(
+        seen,
+        vec![
+            (
+                "/issue/PRJ-7".to_string(),
+                json!({"fields": {"summary": "Renamed by an agent"},
+                       "update": {"labels": [{"add": "triaged"}]}})
+            ),
+            (
+                "/issue/PRJ-7/assignee".to_string(),
+                json!({"accountId": null})
+            ),
+        ]
+    );
+}

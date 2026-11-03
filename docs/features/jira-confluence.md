@@ -277,7 +277,8 @@ issue-type discovery (used by the product workflow):
 sessions: `otto_update_issue`; approval-gated like create) edits any of
 `summary`, `description` (Markdown → ADF, as on create), `labels` (replace the
 set; `[]` clears) or `add_labels` / `remove_labels` (edit it in place — not
-together with `labels`), `priority` (name or id), `assignee` (Jira accountId),
+together with `labels`), `priority` (name or id), `assignee` (Jira accountId; `null` or `"none"`
+unassigns),
 and `parent` / `epic` (issue key). Omitted fields stay unchanged; an empty
 request, a blank value, a multi-line or over-long summary, labels with spaces,
 an unknown priority (the valid ones are listed) or a missing parent / non-Epic

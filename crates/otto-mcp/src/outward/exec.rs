@@ -474,6 +474,10 @@ fn issue_route(tool: &str, args: &Value) -> Result<SelfCall, Error> {
                     body[k] = json!(v);
                 }
             }
+            // An explicit `assignee: null` unassigns (as `"none"` does).
+            if args.get("assignee").is_some_and(Value::is_null) {
+                body["assignee"] = Value::Null;
+            }
             // `labels: []` clears the set, so it is forwarded even when empty.
             if let Some(v) = args.get("labels").and_then(Value::as_array) {
                 body["labels"] = json!(v);
