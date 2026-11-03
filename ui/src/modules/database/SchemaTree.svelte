@@ -424,11 +424,9 @@
       // Import a local file (CSV/TSV/NDJSON/JSON) into this table, prefilling its
       // name. Routes through the same guarded write path as a query.
       if (node.kind === 'table') {
-        items.push({
-          label: 'Import into…',
-          icon: 'arrowDown',
-          action: () => database.openImportDialog(node),
-        });
+        items.push({ label: 'Import into…', icon: 'arrowDown', action: () => database.openImportDialog(node) });
+        // Opens the table and its "Add row" form (fields from the schema).
+        items.push({ label: 'Insert row…', icon: 'plus', action: () => void database.objects.insertRowInto(node) });
       }
       items.push({ separator: true });
     }
@@ -447,11 +445,8 @@
       });
       // Import a local file into this collection (insertMany batches through the
       // same guarded write path), prefilling its name — parity with SQL tables.
-      items.push({
-        label: 'Import into…',
-        icon: 'arrowDown',
-        action: () => database.openImportDialog(node),
-      });
+      items.push({ label: 'Import into…', icon: 'arrowDown', action: () => database.openImportDialog(node) });
+      items.push({ label: 'Insert document…', icon: 'plus', action: () => void database.objects.insertRowInto(node) });
       items.push({ separator: true });
     }
 

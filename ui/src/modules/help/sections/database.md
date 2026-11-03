@@ -16,7 +16,7 @@ Supported engines: **MySQL**, **PostgreSQL**, **MongoDB**, **Redis** and **Click
 1. Open **Connections** in the sidebar (`#/database` opens the same page).
 2. Choose **New connection** in the header, or the plus button in the sidebar's Connections section. You can also **Import connections** from MySQL Workbench, DBeaver, DataGrip or NoSQLBooster.
 3. Pick a kind (mysql, postgres, redis, mongodb, clickhouse), then fill in host, port, user, database and password, or a connection string for MongoDB. Set **Environment** (dev, staging, prod), and turn on **Read-only** if the connection must never write. Add TLS or an SSH tunnel if you need them.
-4. Open the connection. A green health dot shows the server version and connect latency once it's ready. Use **Test** in the toolbar to check it again.
+4. Open the connection. A green health dot next to the engine name shows it's ready (hover it for the server version and connect latency). Use **⋯ → Test connection** at the end of the view bar to check it again. A prod or read-only connection shows a **Production** / **Read-only** chip there.
 5. Expand the schema tree, right-click a table and choose **Select rows** (MongoDB: **Find rows**), or type a query in the **Query** tab and press ⌘↵.
 
 ## Everything it can do
@@ -32,14 +32,14 @@ Supported engines: **MySQL**, **PostgreSQL**, **MongoDB**, **Redis** and **Click
 **Schema tree**
 - Lazy, per engine. SQL engines show database or schema, then tables, then columns. MongoDB shows database, collections, fields. Redis shows database, namespaces, keys.
 - Type in the tree's search box to filter objects.
-- Right-click a node for: **Set as active database**, **Select rows** / **Find rows** / **Get value**, **Send to editor**, **Open structure**, **Explain with agent**, **Copy name**, **Copy create statement**, **Import into…**, **Refresh**, and for SQL tables **Truncate table…** and **Drop table…** / **Drop view…**. These only fill in a query tab, so you still review and run them yourself.
+- Right-click a node for: **Set as active database**, **Select rows** / **Find rows** / **Get value**, **Send to editor**, **Open structure**, **Explain with agent**, **Copy name**, **Copy create statement**, **Import into…**, **Insert row…** / **Insert document…**, **Refresh**, and for SQL tables **Truncate table…** and **Drop table…** / **Drop view…**. These only fill in a query tab, so you still review and run them yourself. **Insert row…** opens the table and its **Add row** form.
 
 **Query tabs and running queries**
 - Several query tabs per connection. Double-click to rename. Right-click for **Pin tab**, **Rename**, **Close others**, **Close all** and **Open in Builder**. Pinned tabs survive bulk closes and restarts.
 - **Run** runs the selection, or the statement under the cursor. **Run all** runs the whole buffer as a batch and shows one result per statement (Result 1…N). The batch stops at the first error and keeps the results so far.
 - Autocomplete and syntax highlighting per engine: SQL, Redis commands, or JavaScript-style MongoDB queries.
 - **Variables**: `:name`, `{name}` or `{{name}}` placeholders get a value and type (string, number, raw) per tab. Otto asks for any missing value when you run.
-- Toolbar: **Save**, **Explain** (a query-plan tree with warnings on costly steps; not for Redis), **Format**, **Ask Otto**, **Ask in English**, **Active database**, **Limit** (100 to 50,000, or All; default 1,000), **Timeout** (MySQL), and **Mask** (the daemon redacts emails, tokens and keys before results leave it).
+- Toolbar: **Run**, **Save**, **Ask AI** (see Agents below), **Format** (⇧⌘F), and **⋯** with **Run on…**, **Query plan (EXPLAIN)** (a plan tree with warnings on costly steps; not for Redis), **Mask sensitive values** (the daemon redacts emails, tokens and keys before results leave it), **Statement timeout…** (MySQL), **Wrap long lines**, **Paste from clipboard history…** (⌥⌘V) and **Keyboard shortcuts**. On the same row: **Active database** and **Limit** (100 to 50,000, or All; default 1,000). While masking or a timeout is on, a **Masked** / timeout chip stays visible; click it to turn masking off or change the timeout.
 - A bare read without its own `LIMIT` gets the row cap added. When results are capped, a **‹ Prev · Next ›** pager appears. It shows an "unordered" hint when there is no `ORDER BY`.
 - **Stop** cancels on the server for MySQL, PostgreSQL, ClickHouse (HTTP and native transports) and MongoDB (subject to operation-inspection and kill privileges). For Redis, Stop closes the operation's connection; it does not issue a server kill command.
 - MongoDB accepts shell-style queries, JSON commands, a SQL subset (translated to find or aggregate), and full **mongosh scripts**. `db.collection.distinct("field")` runs natively and displays a `value` column. Unsupported shell expressions use the real `mongosh` CLI under the usual write policy; native execution errors are never retried through the shell. Scripts require `mongosh` to be installed.
@@ -50,12 +50,13 @@ Supported engines: **MySQL**, **PostgreSQL**, **MongoDB**, **Redis** and **Click
 - **Search rows…**, a **Filter row** under each header, click-to-sort headers, and a **Row detail** side panel.
 - Right-click a cell for **Filter** / **Exclude** by value, **Query by value** or **Add to query** (rewrites the query's `WHERE` or MongoDB filter but doesn't run it), **Go to** a foreign-key target, copy or expand the value.
 - **Copy**: TSV, CSV, JSON or column names. **Export**: download CSV or JSON, **Export all rows…**, or **Import file…**.
-- The **⋯** menu has **Aggregate pipeline…** (MongoDB stage builder), **Compare two records…**, **Insert row from JSON…**, **Expand JSON cells**, **Send to running agent…** and **Examine with Otto**.
+- The **⋯** menu has **Aggregate pipeline…** (MongoDB stage builder), **Compare two records…**, **Insert row from JSON…**, **Expand JSON cells**, **Find in results** (⌘F), **Send to running agent…** and **Examine with AI**.
 - Select rows to **Copy as INSERT**, copy a `WHERE pk IN (…)` predicate, **Compare** exactly 2 records side by side, or delete them.
 - MongoDB has a filter bar above `find` results, and Redis has a key filter.
 
 **Editing, always reviewed**
 - Double-click a cell to edit it (Vertical view reaches nested fields). Edits wait as pending changes. You can also duplicate, insert or delete rows.
+- **Add row** (results toolbar, and in an empty result) opens a form with one field per column of the table, taken from its schema, so an empty table works too. Each field is a value, **NULL** or **Default** (left out so the database fills in its default or auto-increment value). Generated columns are skipped. MongoDB opens **Insert document** (a JSON editor). Adding rows needs edit access and a plain single-table `SELECT` or `find`, but no primary key, so it also works on ClickHouse.
 - **Review & apply** builds the statements (`UPDATE`, MongoDB `updateOne` with dotted paths, Redis `SET`/`HSET`/…, ClickHouse `ALTER … UPDATE`) and shows a before-and-after diff. Nothing runs until you press **Run** in the review.
 - Editing needs a result Otto can target exactly: a single-table SQL `SELECT` that includes the primary key, a single-collection MongoDB `find` that includes `_id`, or the result of one Redis `GET`, `HGETALL`, `HGET`, `LRANGE`, `SMEMBERS` or `ZRANGE`. The status bar says why when a result isn't editable.
 
@@ -73,15 +74,15 @@ Supported engines: **MySQL**, **PostgreSQL**, **MongoDB**, **Redis** and **Click
 - **Dashboards**: widgets (table, number, line, bar, area, pie) built from saved statements, with auto-refresh Off, 10s, 30s, 1m or 5m.
 
 **Agents**
-- **Ask Otto** and **Ask in English** open the **DB Assistant** beside the editor. It's a live agent session that reads the database read-only. Pick the agent before the first question. Proposed queries appear with **Insert** and **Run**. **Summarize** downloads the investigation as Markdown.
-- **Examine with Otto** (results) and **Explain with agent** (schema tree, Structure) hand the current context to an agent.
+- **Ask AI** opens the **DB Assistant** beside the editor. Pick what it should do: **Write a query from plain English…**, **Ask about this database…**, **Explain this query** or **Optimize this query** (both use the selection, else the whole editor). It's a live agent session that reads the database read-only. Pick the agent before the first question. Proposed queries appear with **Insert** and **Run**. **Summarize** downloads the investigation as Markdown.
+- **Examine with AI** (results) and **Explain with agent** (schema tree, Structure) hand the current context to an agent.
 
 **Export and import**
 - **Export all rows…** streams the full, uncapped result to a folder on the Mac as CSV, TSV (with or without a header), JSON array or NDJSON.
 - **Import file…** loads CSV, TSV, JSON or NDJSON into an existing table or collection in batches. It works for the SQL engines and MongoDB, not Redis.
 
 **Reviewed database changes (MySQL, PostgreSQL)**
-- The **Changes** button opens a review workflow. Draft a script with its targets, validate it for an executor, and submit it. A different person approves it. The executor then runs the exact approved revision. Every attempt and outcome is audited.
+- **⋯ → Schema changes** (MySQL and PostgreSQL, at the end of the view bar) opens a review workflow. Draft a script with its targets, validate it for an executor, and submit it. A different person approves it. The executor then runs the exact approved revision. Every attempt and outcome is audited.
 
 ## Keyboard shortcuts
 

@@ -598,7 +598,8 @@ test('multi-run sheet with 200 runs polls without long frames', async ({ page },
   await content.click();
   await page.keyboard.press('ControlOrMeta+A');
   await page.keyboard.insertText('SELECT * FROM orders WHERE brand_id = :brand');
-  await page.getByTestId('multi-run-open').click();
+  await page.getByTestId('qe-more').click();
+  await page.getByRole('menuitem', { name: 'Run on…' }).click();
   const sheet = page.getByTestId('multi-run');
   await expect(sheet).toBeVisible();
   await sheet.locator('.mr-conn', { hasText: CONN }).locator('.mr-scope', { hasText: 'shop' }).locator('input').check();

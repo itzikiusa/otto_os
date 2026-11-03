@@ -37,6 +37,8 @@ function setup(
     '../../lib/stores/database.svelte': { database },
     './results-format': {}, './edit-types': { adapterFor: () => adapter },
     './edit-sql': { scopeDatabase: (n: string | null) => n }, './edit-mongo': {}, '../../lib/jsonTree/expansion-plan': {},
+    // "Add row" (InsertFlow) is covered by dbInsertForm.test.ts.
+    './insert-flow.svelte': { InsertFlow: class { target = null; form = null; } },
     '../../lib/toastError': { toastError: (t: string) => toasts.push(`error:${t}`) }, '../../lib/plural': plural,
   });
   const flow = new EditFlow();

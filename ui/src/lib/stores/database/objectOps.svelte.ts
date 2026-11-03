@@ -75,6 +75,11 @@ export class DbObjectOpsStore {
     }
   }
 
+  /** Schema tree "Insert row…": the uid of the query tab whose grid should
+   *  open its insert UI once that tab's result arrives (one-shot; the grid
+   *  clears it — see InsertRowHost). */
+  pendingInsert: string | null = $state(null);
+
   /** Monotonic openObject sequence — the latest call owns `objectLoading`. */
   private objectOpenSeq = 0;
 
@@ -142,10 +147,13 @@ export class DbObjectOpsStore {
    *  scopes execution (e.g. a Redis keyspace `kdb:N` so the right DB is SELECTed). */
   async openInNewTab(
     sql: string,
-    opts?: { run?: boolean; name?: string; node?: string },
+    opts?: { run?: boolean; name?: string; node?: string; insert?: boolean },
   ): Promise<void> {
     this.db.newTab(sql);
     if (opts?.name) this.db.tab.name = opts.name;
+    // Claimed by the NEW tab before it runs, so switching tabs mid-run can't
+    // hand the insert form to another tab.
+    if (opts?.insert) this.pendingInsert = this.db.tab.uid;
     if (opts?.run) await this.db.runs.runQuery(undefined, opts.node);
   }
 
@@ -232,6 +240,21 @@ export class DbObjectOpsStore {
     if (!r) return;
     if (r.db) this.db.setActiveDb(r.db);
     await this.openInNewTab(`db.${r.coll}.find({})`, { run: true, name: r.coll });
+  }
+
+  /** Schema tree "Insert row…" / "Insert document…": open the table (or
+   *  collection) in a new tab like Select / Find Rows, then ask that tab's
+   *  grid to open its insert form once the result is in — the form derives
+   *  its fields from the table's schema, so an empty table works too. */
+  async insertRowInto(node: SchemaNode): Promise<void> {
+    const coll = this.collectionRefFromNode(node);
+    if (coll) {
+      if (coll.db) this.db.setActiveDb(coll.db);
+      await this.openInNewTab(`db.${coll.coll}.find({})`, { run: true, name: coll.coll, insert: true });
+      return;
+    }
+    const r = this.tableRefFromNode(node);
+    if (r) await this.openInNewTab(`SELECT * FROM ${r.ref}`, { run: true, name: r.table, insert: true });
   }
 
   /** New tab: `db.<coll>.find({})` without running (Send to editor). */
