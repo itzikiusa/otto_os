@@ -36,17 +36,17 @@
   // Mode → the panel's title, empty-state hint, and the Ask placeholder.
   const MODE: Record<DbAssistMode, { title: string; hint: string; placeholder: string }> = {
     nl: {
-      title: 'Ask in English',
+      title: 'Write a query',
       hint: 'Describe the query you want in plain English. The agent reads the full schema, can sample real data read-only, and proposes a runnable query below.',
       placeholder: 'e.g. top 10 customers by total order value last month',
     },
     ask: {
-      title: 'Ask Otto',
+      title: 'Ask about this database',
       hint: 'Ask anything about this database — its schema, the data, or how to write a query. The agent inspects the live DB read-only and answers in its shell.',
       placeholder: 'Ask about the schema or the data…',
     },
     investigate: {
-      title: 'Examine with Otto',
+      title: 'Examine with AI',
       hint: 'The agent is seeded with the current query and a sample of its result. Ask it to explain, dig in, or find an issue — it can sample more data read-only.',
       placeholder: 'What should the agent look into?',
     },

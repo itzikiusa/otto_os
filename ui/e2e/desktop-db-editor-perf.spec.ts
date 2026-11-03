@@ -233,13 +233,17 @@ test('Wrap toggle turns wrapping off live and is remembered', async ({ page }) =
   await openEditor(page, seen);
   const wrapped = page.locator('.qe-edit .cm-content.cm-lineWrapping');
   await expect(wrapped).toHaveCount(1);
-  const toggle = page.locator('label.qe-wrap');
-  await toggle.click();
+  // Wrap lives in the editor's ⋯ menu (a checkable row).
+  const toggleWrap = async () => {
+    await page.getByTestId('qe-more').click();
+    await page.getByRole('menuitemcheckbox', { name: 'Wrap long lines' }).click();
+  };
+  await toggleWrap();
   await expect(wrapped).toHaveCount(0);
   await page.reload();
   await expect(page.locator('.qe-edit .cm-content')).toBeVisible({ timeout: 30_000 });
   await expect(wrapped).toHaveCount(0);
-  await page.locator('label.qe-wrap').click();
+  await toggleWrap();
   await expect(wrapped).toHaveCount(1);
 });
 

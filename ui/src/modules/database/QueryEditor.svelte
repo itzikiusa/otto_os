@@ -3,7 +3,7 @@
   import { focusOnMount } from '../../lib/focusOnMount';
   // SQL / Redis / Mongo editor. Wraps the shared CodeEditor with a server-backed
   // completion source (debounced /db/completion). Cmd/Ctrl+Enter runs; toolbar
-  // has Run / Save / Explain-with-agent. Results render in the ResultsGrid below.
+  // has Run / Save / Ask AI / Format + ⋯. Results render in the ResultsGrid below.
   import { onDestroy, tick, untrack } from 'svelte';
   import { plural } from '../../lib/plural';
   import type { Completion, CompletionContext, CompletionResult } from '@codemirror/autocomplete';
@@ -34,7 +34,7 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { toasts } from '../../lib/toast.svelte';
-  import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { clipHistory } from '../../lib/stores/clipHistory.svelte';
   import { unpersistEditorState } from '../../lib/editor-history';
   import { parkedEditCount } from '../../lib/database/grid-tab-state';
@@ -844,12 +844,81 @@
 
   const canEdit = $derived(ws.myRole !== 'viewer');
 
-  // ── DB Assistant entry points ────────────────────────────────────────────────
-  // "Ask AI" (free-form) and "Ask in English" (draft a query) both OPEN the
-  // embedded DB Assistant panel beside the editor — a real, file-backed agent that
-  // runs read-only against the DB in its own live shell (see DbAssistantPanel).
-  // This replaces the old inline NL→SQL drafter (which hung on a folder-trust
-  // dialog and got no schema context).
+  // ── DB Assistant entry point ─────────────────────────────────────────────────
+  // ONE "Ask AI" button. Its menu picks the assistant's task — draft a query
+  // from English (`nl`), a free-form question (`ask`), or explain / optimize
+  // the query in the editor (`investigate`, seeded with that statement). Each
+  // opens the same embedded DB Assistant panel beside the editor: a real,
+  // file-backed agent that runs read-only against the DB in its own live shell
+  // (see DbAssistantPanel). Explain (the EXPLAIN query plan) is not AI — it
+  // lives in ⋯ as "Query plan".
+  const canAssist = $derived(canQuery && auth.can('agents', 'edit'));
+  /** The selection, else the whole buffer — what "explain this query" means. */
+  function editorQuery(): string {
+    return (editorSel.text.trim() ? editorSel.text : tab.statement).trim();
+  }
+  function assistOnQuery(task: string): void {
+    const q = editorQuery();
+    if (!q) return;
+    database.openAssist('investigate', `Statement:\n${q}\n\n${task}`);
+  }
+  function openAiMenu(e: MouseEvent): void {
+    const noQuery = !editorQuery();
+    ctxMenu.show(e, [
+      { label: 'Write a query from plain English…', icon: 'comment', action: () => database.openAssist('nl') },
+      { label: 'Ask about this database…', icon: 'sparkle', action: () => database.openAssist('ask') },
+      { separator: true },
+      {
+        label: 'Explain this query',
+        icon: 'info',
+        disabled: noQuery,
+        title: noQuery ? 'Write a query first' : 'What the query does, step by step, and anything surprising in it',
+        action: () => assistOnQuery('Explain what this query does, step by step, and point out anything surprising or risky.'),
+      },
+      {
+        label: 'Optimize this query',
+        icon: 'zap',
+        disabled: noQuery,
+        title: noQuery ? 'Write a query first' : 'Check the plan and indexes and propose a faster equivalent',
+        action: () => assistOnQuery('Find why this query could be slow (check its plan and the indexes) and propose a faster equivalent query.'),
+      },
+    ]);
+  }
+  function formatNow(): void {
+    void database.formatStatement();
+    editorSel = { text: '', cursor: 0 };
+  }
+  /** ⋯ — the editor's less frequent actions (each keeps its shortcut). */
+  function openMoreMenu(e: MouseEvent): void {
+    const trigger = e.currentTarget as HTMLElement | null;
+    const runOnTitle = !canQuery ? noQueryReason : !hasStatement ? 'Write a query first' : undefined;
+    const items: MenuItem[] = [
+      {
+        label: 'Run on…',
+        icon: 'layers',
+        disabled: !canQuery || !hasStatement || tab.running,
+        title: runOnTitle ?? 'The same script on several connections / databases, or once per parameter value (preview every final statement first)',
+        action: openMultiRun,
+      },
+    ];
+    if (database.capabilities?.explain !== false) {
+      items.push({
+        label: 'Query plan (EXPLAIN)',
+        icon: 'eye',
+        disabled: !hasStatement || tab.running,
+        title: 'Show the query plan (EXPLAIN) — a normalized tree with cost warnings',
+        action: () => void database.explainPlan(),
+      });
+    }
+    items.push(
+      { separator: true },
+      { label: 'Wrap long lines', checked: wrapLines, action: () => setWrap(!wrapLines) },
+      { label: 'Paste from clipboard history…', icon: 'copy', hint: '⌥⌘V', action: () => void openClipPicker(trigger) },
+      { separator: true },
+      { label: 'Keyboard shortcuts', icon: 'command', action: () => (shortcutsOpen = true) },
+    );
+    ctxMenu.show(e, items);
+  }
 
   // ── Phone accordion ────────────────────────────────────────────────────────
   // On a phone the editor and the results are each collapsible, independently
@@ -926,10 +995,7 @@
     // breaks ASI statement boundaries — so Format is gated off for scripts.
     if (cmd && e.shiftKey && !e.altKey && e.code === 'KeyF') {
       e.preventDefault();
-      if (database.queryLanguage !== 'redis' && !isScriptNow() && hasStatement && !tab.running) {
-        void database.formatStatement();
-        editorSel = { text: '', cursor: 0 };
-      }
+      if (database.queryLanguage !== 'redis' && !isScriptNow() && hasStatement && !tab.running) formatNow();
       return;
     }
     // ⌘B — collapse/restore the schema sidebar (the biggest single win in
@@ -1183,18 +1249,6 @@
           Run all
         </button>
       {/if}
-      <button
-        class="btn small ghost"
-        onclick={openMultiRun}
-        disabled={!canQuery || !hasStatement}
-        title={!canQuery
-          ? noQueryReason
-          : 'Run on… — the same script on several connections / databases, or once per parameter value (preview every final statement first)'}
-        aria-label="Run on multiple targets"
-        data-testid="multi-run-open"
-      >
-        <Icon name="layers" size={12} /><span class="btn-label">Run on…</span>
-      </button>
     {/if}
     <span class="qe-sep" aria-hidden="true"></span>
     {#if canEdit}
@@ -1207,67 +1261,42 @@
         <Icon name="check" size={12} />{savedLinked ? 'Update' : 'Save'}
       </button>
     {/if}
-    {#if database.capabilities?.explain !== false}
-      <button
-        class="btn small ghost"
-        class:on={database.planOpen}
-        aria-expanded={database.planOpen}
-        onclick={() => void database.explainPlan()}
-        disabled={!hasStatement || tab.running}
-        title="Show the query plan (EXPLAIN) — a normalized tree with cost warnings"
-        aria-label="Explain"
-      >
-        <Icon name="zap" size={12} /><span class="btn-label">Explain</span>
-      </button>
-    {/if}
     <button
       class="btn small ghost"
-      class:on={database.assistOpen && database.assistMode === 'ask'}
-      aria-expanded={database.assistOpen && database.assistMode === 'ask'}
-      onclick={() => database.openAssist('ask')}
-      disabled={!canQuery || !auth.can('agents','edit')}
-      title={!canQuery || !auth.can('agents','edit') ? 'Needs agent access and query permission on this connection' : 'Ask the DB Assistant about this connection — it opens beside the editor'}
-      aria-label="Ask Otto"
+      class:on={database.assistOpen}
+      aria-expanded={database.assistOpen}
+      aria-haspopup="menu"
+      onclick={openAiMenu}
+      disabled={!canAssist}
+      title={canAssist ? 'Ask AI — write a query from plain English, ask about the schema or data, or explain / optimize this query. The DB Assistant opens beside the editor.' : 'Needs agent access and query permission on this connection'}
+      aria-label="Ask AI"
+      data-testid="db-ask-ai"
     >
-      <Icon name="sparkle" size={12} /><span class="btn-label">Ask Otto</span>
-    </button>
-    <button
-      class="btn small ghost"
-      class:on={database.assistOpen && database.assistMode === 'nl'}
-      aria-expanded={database.assistOpen && database.assistMode === 'nl'}
-      onclick={() => database.openAssist('nl')}
-      disabled={!canQuery || !auth.can('agents','edit')}
-      title={!canQuery || !auth.can('agents','edit') ? 'Needs agent access and query permission on this connection' : 'Describe what you want in plain English — the DB Assistant drafts a query you can insert or run'}
-      aria-label="Ask in English"
-    >
-      <Icon name="comment" size={12} /><span class="btn-label">Ask in English</span>
+      <Icon name="sparkle" size={12} /><span class="btn-label">Ask AI</span><Icon name="chevronDown" size={12} />
     </button>
     {#if database.queryLanguage !== 'redis'}
       <button
-        class="btn small ghost"
-        onclick={() => {
-          void database.formatStatement();
-          editorSel = { text: '', cursor: 0 };
-        }}
+        class="icon-btn"
+        onclick={formatNow}
         disabled={!hasStatement || tab.running || isMongoshScript}
         title={isMongoshScript
           ? 'Format is disabled for mongosh scripts — reflowing real JavaScript breaks its statement boundaries'
-          : 'Format / beautify the SQL'}
+          : 'Format / beautify the SQL (⇧⌘F)'}
         aria-label="Format"
       >
-        <Icon name="format" size={12} /><span class="btn-label">Format</span>
+        <Icon name="format" size={13} />
       </button>
     {/if}
     <div class="qe-kbd" bind:this={kbdWrapEl}>
       <button
         class="icon-btn"
         class:on={shortcutsOpen}
-        onclick={() => (shortcutsOpen = !shortcutsOpen)}
-        title="Keyboard shortcuts"
-        aria-label="Keyboard shortcuts"
-        aria-expanded={shortcutsOpen}
-        aria-haspopup="dialog"
-      ><Icon name="command" size={13} /></button>
+        onclick={openMoreMenu}
+        title="More — Run on…, query plan, line wrap, clipboard history, keyboard shortcuts"
+        aria-label="More editor actions"
+        aria-haspopup="menu"
+        data-testid="qe-more"
+      ><Icon name="more" size={14} /></button>
       {#if shortcutsOpen}
         <!-- A reference card, not a menu (no actionable items): a non-modal dialog. -->
         <div class="qe-kbd-pop" role="dialog" aria-labelledby="qe-kbd-title" bind:this={kbdPopEl}>
@@ -1357,32 +1386,6 @@
       <Icon name="lock" size={12} />
       {#if tab.mask}<strong>Masked</strong>{:else}<span>Mask</span>{/if}
     </label>
-    <label
-      class="qe-mask qe-wrap"
-      class:active={wrapLines}
-      title={wrapLines
-        ? 'Long lines wrap (fast with big pasted scripts) — turn off to scroll long lines horizontally'
-        : 'Long lines scroll horizontally — wrapping keeps typing fast in big pasted scripts'}
-    >
-      <input
-        type="checkbox"
-        class="sr-only"
-        checked={wrapLines}
-        onchange={(e) => setWrap((e.currentTarget as HTMLInputElement).checked)}
-      />
-      <Icon name="text" size={12} />
-      <span>Wrap</span>
-    </label>
-    <button
-      class="qe-mask qe-clip"
-      type="button"
-      onclick={(e) => void openClipPicker(e.currentTarget)}
-      aria-label="Paste from clipboard history"
-      title="Paste from clipboard history — copies made in Otto (⌥⌘V)"
-      data-testid="qe-clip-history"
-    >
-      <Icon name="copy" size={12} />
-    </button>
     <span class="qe-lang mono" title="Query language">{database.queryLanguage}</span>
     </div>
   </div>
@@ -1906,7 +1909,7 @@
     letter-spacing: .06em;
     cursor: pointer;
   }
-  /* Toggle highlight for a toolbar button (Ask AI / Ask in English) when its DB
+  /* Toggle highlight for a toolbar button (Ask AI) when its DB
      Assistant panel is open in that mode. */
   .btn.small.ghost.on {
     color: var(--accent-text);
@@ -2009,10 +2012,6 @@
     width: 72px;
   }
   /* Mask PII/prod toggle — styled like a small button, highlights when active. */
-  .qe-clip {
-    background: transparent;
-    font: inherit;
-  }
   .qe-mask {
     display: inline-flex;
     align-items: center;
