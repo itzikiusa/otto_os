@@ -4,8 +4,18 @@
   import Toasts from './lib/components/Toasts.svelte';
   import Announcer from './lib/components/Announcer.svelte';
   import { announce } from './lib/announce.svelte';
-  import BarHost from './modules/desktop/BarHost.svelte';
-  import TrayPage from './modules/desktop/TrayPage.svelte';
+  // The tray / bar pages are their own chunks (below); the stores they share
+  // with the main window stay in this boot chunk, so moving their UI out
+  // shrinks first paint without reshuffling what the shell loads.
+  import './lib/stores/workspace.svelte';
+  import './lib/topicSocket';
+  import './lib/status';
+  import './lib/live';
+  import './lib/components/Icon.svelte';
+  import './lib/components/Skeleton.svelte';
+  import './lib/components/StatusDot.svelte';
+  import './lib/components/Badge.svelte';
+  import './lib/components/LoadState.svelte';
   import { auth } from './lib/stores/auth.svelte';
   import { appLive } from './lib/live';
   import { router } from './lib/router.svelte';
@@ -33,6 +43,8 @@
   let roomChunk: Promise<typeof import('./modules/rooms/RoomGuest.svelte')> | null = null;
   let hostRoomChunk: Promise<typeof import('./modules/rooms/RoomHost.svelte')> | null = null;
   let shareChunk: Promise<typeof import('./modules/share/SharePage.svelte')> | null = null;
+  let barChunk: Promise<typeof import('./modules/desktop/BarHost.svelte')> | null = null;
+  let trayChunk: Promise<typeof import('./modules/desktop/TrayPage.svelte')> | null = null;
   // The shell resolves together with the page its route shows (each page is
   // its own chunk, shell/pages.svelte.ts), so the first shell paint has its
   // page. `untrack`: the template's `{#await shell()}` must not depend on the
@@ -44,6 +56,8 @@
   const room = () => (roomChunk ??= import('./modules/rooms/RoomGuest.svelte'));
   const hostRoom = () => (hostRoomChunk ??= import('./modules/rooms/RoomHost.svelte'));
   const share = () => (shareChunk ??= import('./modules/share/SharePage.svelte'));
+  const barHost = () => (barChunk ??= import('./modules/desktop/BarHost.svelte'));
+  const trayPage = () => (trayChunk ??= import('./modules/desktop/TrayPage.svelte'));
   // The main window fetches the shell chunk while /meta is still in flight.
   if (!['bar', 'tray', 's', 'room', 'room-host'].includes(router.module)) void shell().catch(() => {});
 
@@ -180,10 +194,10 @@
   <!-- Desktop shell's assistant bar panel (`otto-bar`): a transparent
        chromeless window, so it never renders the boot screens or the Shell —
        the bar handles signed-out/offline states itself. -->
-  <BarHost />
+  {#await barHost() then m}<m.default />{:catch}{@render chunkError()}{/await}
 {:else if router.module === 'tray'}
   <!-- Desktop shell's menu-bar popover (`otto-tray`); same rules as the bar. -->
-  <TrayPage />
+  {#await trayPage() then m}<m.default />{:catch}{@render chunkError()}{/await}
 {:else if auth.phase === 'loading' && isEmbedded}
   <!-- The side-by-side pane boots under its host's loading cover: no second
        "Otto" splash inside the pane. -->
