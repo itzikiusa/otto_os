@@ -3781,6 +3781,7 @@ async fn provision_wf_worktrees(
     ctx: &ServerCtx,
     run_id: &Id,
     entries: &mut [crate::workflow_context::RepoEntry],
+    synced: &HashMap<String, otto_git::branch_sync::SyncReport>,
 ) -> (Option<String>, Vec<String>) {
     let mut primary: Option<String> = None;
     let mut failures: Vec<String> = Vec::new();
@@ -3807,8 +3808,18 @@ async fn provision_wf_worktrees(
             continue;
         }
         let git = otto_git::LocalGit::new(&repo.path);
-        // READ-ONLY: resolve the base branch to a commit in the user's repo.
-        let Some(base_commit) = resolve_wf_base(&git, &base).await else {
+        // READ-ONLY: resolve the base branch to a commit in the user's repo —
+        // the run-start sync's ref first (the fast-forwarded local branch, or
+        // `origin/<base>` when the local copy is checked out behind / diverged).
+        let synced = match synced.get(&repo_id).and_then(|r| r.resolved(&base)) {
+            Some(r) => git.rev_parse(r).await.ok(),
+            None => None,
+        };
+        let resolved = match synced {
+            Some(c) => Some(c),
+            None => resolve_wf_base(&git, &base).await,
+        };
+        let Some(base_commit) = resolved else {
             tracing::warn!(
                 "wf worktree: base '{base}' not found in {} (locally or as origin/{base}) — refusing to run in the user's checkout",
                 repo.path
@@ -3850,51 +3861,6 @@ async fn provision_wf_worktrees(
         }
     }
     (primary, failures)
-}
-
-/// Resolve a run's declared base to a commit: the ref as given (a local
-/// branch, tag or sha), else the remote-tracking `origin/<base>`. Read-only.
-async fn resolve_wf_base(git: &otto_git::LocalGit, base: &str) -> Option<String> {
-    if let Ok(c) = git.rev_parse(base).await {
-        return Some(c);
-    }
-    let remote = format!("origin/{base}");
-    if let Ok(c) = git.rev_parse(&remote).await {
-        return Some(c);
-    }
-    // Neither ref exists yet — typically a branch created on the remote after
-    // the clone last fetched (a PR targeting a fresh `hotfix/*`). Fetch THAT
-    // ONE branch into its remote-tracking ref and retry. Safe: it writes only
-    // `refs/remotes/origin/<base>` — never the user's branches, HEAD or tree —
-    // and runs non-interactively (BatchMode SSH), so it can't prompt.
-    if !fetchable_branch_name(base) {
-        return None;
-    }
-    let refspec = format!("+refs/heads/{base}:refs/remotes/origin/{base}");
-    match git
-        .run_automation(&["fetch", "--no-tags", "origin", &refspec], true)
-        .await
-    {
-        Ok(_) => tracing::info!("wf worktree: fetched missing base '{base}' from origin"),
-        Err(err) => {
-            tracing::warn!("wf worktree: fetching base '{base}' from origin failed: {err}");
-            return None;
-        }
-    }
-    git.rev_parse(&remote).await.ok()
-}
-
-/// A base name that is safe to splice into a fetch refspec: no option-like
-/// prefix, no refspec/glob metacharacters, no whitespace or control chars.
-/// `git` itself still validates the full ref name.
-fn fetchable_branch_name(base: &str) -> bool {
-    !base.is_empty()
-        && !base.starts_with('-')
-        && !base.starts_with('/')
-        && !base.contains("..")
-        && !base
-            .chars()
-            .any(|c| c.is_whitespace() || c.is_control() || ":^~?*[\\+".contains(c))
 }
 
 /// Reap the worktrees a run provisioned under
@@ -4464,6 +4430,10 @@ mod canvas_rel_tests;
 mod tests;
 
 #[cfg(test)]
+#[path = "../tests/unit/workflow_branch_sync_tests.rs"]
+mod branch_sync_tests;
+
+#[cfg(test)]
 #[path = "../tests/unit/workflow_product_publish_tests.rs"]
 mod product_publish_tests;
 
@@ -4486,3 +4456,6 @@ mod run;
 #[cfg(test)]
 use run::identity::acting_user_id;
 use run::identity::run_identity;
+#[cfg(test)]
+use run::refs::fetchable_branch_name;
+use run::refs::{resolve_wf_base, sync_run_branches};

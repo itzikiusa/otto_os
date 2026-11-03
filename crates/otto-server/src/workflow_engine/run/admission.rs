@@ -271,8 +271,18 @@ async fn isolate_repos(
     // happens to be on. Best-effort + SAFE (only creates a new worktree under
     // data_dir; never touches the user's checkout). Returns the primary
     // provisioned worktree to adopt as the run's working directory.
+    // Fetch + fast-forward (where safe) every branch the run names BEFORE
+    // cutting worktrees: a PR base/head that exists only on the remote must
+    // resolve, and a stale local base must not seed the worktree.
+    let pr_branch = input
+        .get("pr_branch")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let synced = sync_run_branches(ctx, &entries, pr_branch.as_deref()).await;
     let (provisioned_cwd, isolation_failures) =
-        provision_wf_worktrees(ctx, run_id, &mut entries).await;
+        provision_wf_worktrees(ctx, run_id, &mut entries, &synced).await;
     files.set_repos(entries.clone());
     if !isolation_failures.is_empty() {
         // Fail LOUDLY before any step runs: never let agents work in the
