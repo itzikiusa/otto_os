@@ -2360,10 +2360,16 @@ resumes are bounded by the resume cap above. Backed by migration
 
 **Running list.** `GET /workspaces/{wid}/workflow-runs/active` returns
 `ActiveWorkflowRun = {run_id, workflow_id, workspace_id, workflow_name, status,
-started_at, nodes_total, nodes_done, waiting_approval}` for every in-flight run
+started_at, nodes_total, nodes_done, waiting_approval, current_node_id?,
+current_step?}` for every in-flight run
 (`pending`/`running`) in the workspace — a lightweight join (run × workflow name)
 with step progress precomputed, so the "Running" sidebar list + the Workflows nav
 count refresh on each `workflow_run_updated` WS event without per-run fetches.
+`current_node_id` / `current_step` name the step the run is on — the first
+`running` node, else the next `pending` one once a step has finished — with the
+node's display name (its `name`, else its `kind`); both are omitted before the
+first step starts. Clients refetch the list when an event's `node` starts a
+different step or settles the current one.
 
 **Node kinds (catalog).** `GET /workflows/node-types` returns each kind's
 `NodeTypeSpec`, now including `output_schema` (declared output shape; drives UI

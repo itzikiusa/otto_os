@@ -381,6 +381,13 @@ pub struct ActiveWorkflowRun {
     /// The run is paused on a human-approval node (surfaced as a ⏸ in the list).
     #[serde(default)]
     pub waiting_approval: bool,
+    /// The step the run is on: the first `running` node (else the first
+    /// `pending` one once something ran) — its id and display name (the node's
+    /// name, else its kind). `None` before the first step starts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_node_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_step: Option<String>,
 }
 
 /// Catalog entry describing a node kind for the editor palette. Returned by

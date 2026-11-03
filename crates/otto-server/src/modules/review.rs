@@ -20,7 +20,7 @@ pub(crate) use self::summarize::*;
 /// here (or the matching `crate::modules::…` re-export), not from the
 /// engine's internals.
 pub(crate) mod service {
-    pub(crate) use super::lifecycle::cancel_running_review;
+    pub(crate) use super::lifecycle::{cancel_running_review, transition};
     pub(crate) use super::run::{
         default_review_provider, effective_review_mode, repo_transport_credential,
         review_finding_briefs, review_findings_counts, review_open_counts_by_severity,

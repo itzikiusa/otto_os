@@ -281,6 +281,7 @@ pub(in crate::workflow_engine) async fn execute(
             &plan.env.run_id,
             &launched.review_id,
             plan.await_done.then_some(plan.timeout_s),
+            otto_review::engine::REVIEW_STALL_GRACE,
             plan.session_tx,
             &launched.tag,
             &mut logs,
@@ -1127,7 +1128,9 @@ async fn resolve_targets(
 /// step as it appears. `timeout_s: None` is a fire-and-forget review: only
 /// the sessions already spawned are surfaced. Returns the review's settled
 /// status (`done` / `error` / `cancelled` / `timeout`, or `running` when not
-/// awaited); a run cancel stops the wait with an error.
+/// awaited); a run cancel stops the wait with an error. A review that stalls
+/// (see [`otto_review::engine::review_stalled`]) for `stall_grace` is settled
+/// as an error.
 #[allow(clippy::too_many_arguments)]
 async fn await_review(
     ctx: &ServerCtx,
@@ -1135,6 +1138,7 @@ async fn await_review(
     run_id: &Id,
     review_id: &Id,
     timeout_s: Option<u64>,
+    stall_grace: Duration,
     session_tx: &tokio::sync::mpsc::UnboundedSender<AgentAssociation>,
     tag: &str,
     logs: &mut Vec<String>,
@@ -1157,8 +1161,10 @@ async fn await_review(
         let mut review_events = ctx.events.subscribe();
         let mut run_cancels = otto_state::workflows::subscribe_cancels();
         let runs = WorkflowsRepo::new(ctx.pool.clone());
+        let mut stall = otto_review::engine::StallWatch::default();
         loop {
             if let Ok((review_status, agents)) = ctx.reviews_store.review_agents(review_id).await {
+                use otto_core::cancel::CancelRegistryExt;
                 use otto_core::domain::ReviewStatus as RS;
                 for a in &agents {
                     if let Some(sid) = &a.session_id {
@@ -1178,6 +1184,29 @@ async fn await_review(
                     }
                     RS::Cancelled => {
                         status = "cancelled".into();
+                        break;
+                    }
+                    // Settled agents + no runner = nothing will ever finish
+                    // this review: settle it after a grace instead of holding
+                    // the step Running for hours.
+                    RS::Running
+                        if stall.observe(
+                            &agents,
+                            ctx.review_cancels.is_live(review_id),
+                            stall_grace,
+                        ) =>
+                    {
+                        let msg = otto_review::engine::REVIEW_STALLED_MSG;
+                        logs.push(format!("review_run{tag}: {msg}"));
+                        let _ = crate::modules::review::service::transition(
+                            ctx,
+                            &ws.id,
+                            review_id,
+                            RS::Error,
+                            Some(msg),
+                        )
+                        .await;
+                        status = "error".into();
                         break;
                     }
                     RS::Running => {}
@@ -1229,3 +1258,7 @@ async fn await_review(
     }
     Ok(status)
 }
+
+#[cfg(test)]
+#[path = "../../../tests/unit/review_run_stall.rs"]
+mod stall_tests;
