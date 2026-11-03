@@ -10,6 +10,8 @@ const helpers = loadSource(new URL('../src/modules/threads/threadsHelpers.ts', i
     ws: { sessions: [] },
     isThreadSurfaceSession: (s: { meta?: Record<string, unknown> }) => s.meta?.surface === 'threads',
   },
+  // threadsHelpers re-exports harnessLabel from here; membership never calls it.
+  '../../lib/providers': { harnessLabel: (p: string) => p },
 });
 
 const s = (id: string, meta: Record<string, unknown> = {}) => ({ id, kind: 'agent', meta });
