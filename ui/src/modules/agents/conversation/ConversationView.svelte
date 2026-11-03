@@ -61,7 +61,9 @@
   import { ctxMenu } from '../../../lib/contextmenu.svelte';
   import { activity } from '../../../lib/stores/activity.svelte';
   import { toasts } from '../../../lib/toast.svelte';
-  import PreviewPanel from './PreviewPanel.svelte';
+  import { lazyComponent } from '../../../lib/lazy-component.svelte';
+  // The file / diff preview (with its renderers) loads on first open, not with the chat.
+  const PreviewPanel = lazyComponent(() => import('./PreviewPanel.svelte'));
   import { api } from '../../../lib/api/client';
   import { openExternal } from '../../../lib/external';
   import { browser } from '../../../lib/stores/browser.svelte';
@@ -1046,7 +1048,11 @@
       ></div>
     {/if}
     <div class="pv-slot" style:inline-size={panelBeside ? `${panelPx}px` : null}>
-      <PreviewPanel req={preview} onclose={closePreview} />
+      {#if PreviewPanel.component}
+        <PreviewPanel.component req={preview} onclose={closePreview} />
+      {:else}
+        <LoadState what="the preview" variant="panel" empty loading={!PreviewPanel.error} error={PreviewPanel.error} onretry={() => PreviewPanel.retry()} />
+      {/if}
     </div>
   {/if}
   </div>
