@@ -26,6 +26,12 @@ pub async fn health() -> Json<Value> {
 /// How long a `/meta` tool probe is reused (S8-04).
 const TOOLS_TTL: Duration = Duration::from_secs(60);
 
+/// Past [`TOOLS_TTL`] a probe is still SERVED (and refreshed in the
+/// background) for this long. `/meta` is on the app's boot path and a cold
+/// probe forks `which` + `<tool> --version` for Node-based CLIs (a day of
+/// real telemetry: both app launches waited 1.4 s and 2.7 s for `/meta`).
+const TOOLS_MAX_STALE: Duration = Duration::from_secs(24 * 3600);
+
 /// The last tool probe: when, for which `name → program` specs, and the result.
 type ToolsCache = Option<(
     std::time::Instant,
@@ -33,27 +39,83 @@ type ToolsCache = Option<(
     Vec<ToolStatus>,
 )>;
 
-/// Probe every tool at most once per [`TOOLS_TTL`] (S8-04). The async mutex is
-/// held across the probe, so concurrent callers single-flight onto one run
-/// instead of each forking `which` + `<tool> --version` (claude/codex are Node
-/// boots). A changed spec map — a provider added or its command overridden —
-/// misses the cache, so a `providers` settings change is picked up at once.
-async fn probe_tools_cached(specs: std::collections::BTreeMap<String, String>) -> Vec<ToolStatus> {
-    static CACHE: tokio::sync::Mutex<ToolsCache> = tokio::sync::Mutex::const_new(None);
-    let mut slot = CACHE.lock().await;
-    if let Some((at, cached_specs, tools)) = slot.as_ref() {
-        if at.elapsed() < TOOLS_TTL && *cached_specs == specs {
-            return tools.clone();
-        }
+static TOOLS_CACHE: tokio::sync::Mutex<ToolsCache> = tokio::sync::Mutex::const_new(None);
+/// One background refresh at a time.
+static TOOLS_REFRESHING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// What a cached probe of `age` may be used for.
+#[derive(Debug, PartialEq, Eq)]
+enum Freshness {
+    Fresh,
+    /// Serve it, refresh behind the response.
+    Stale,
+    /// Probe inline.
+    Expired,
+}
+
+/// A probe that found no agent CLI is never served stale: the first-run
+/// coach's "Re-check" after installing one must see it on that click.
+fn freshness(age: Duration, tools: &[ToolStatus]) -> Freshness {
+    let has_agent = tools
+        .iter()
+        .any(|t| t.found && t.name != "git" && t.name != "clickhouse");
+    if age < TOOLS_TTL {
+        Freshness::Fresh
+    } else if age < TOOLS_MAX_STALE && has_agent {
+        Freshness::Stale
+    } else {
+        Freshness::Expired
     }
+}
+
+async fn run_tool_probe(specs: &std::collections::BTreeMap<String, String>) -> Vec<ToolStatus> {
     #[cfg(test)]
     PROBE_RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let tools = futures_util::future::join_all(
+    futures_util::future::join_all(
         specs
             .iter()
             .map(|(name, program)| detect_tool(name, program)),
     )
-    .await;
+    .await
+}
+
+/// Probe every tool at most once per [`TOOLS_TTL`] (S8-04). The async mutex is
+/// held across an inline probe, so concurrent callers single-flight onto one
+/// run instead of each forking `which` + `<tool> --version` (claude/codex are
+/// Node boots). A changed spec map — a provider added or its command
+/// overridden — misses the cache, so a `providers` settings change is picked
+/// up at once. A stale probe of the same specs is served while one background
+/// refresh replaces it (see [`freshness`]).
+async fn probe_tools_cached(specs: std::collections::BTreeMap<String, String>) -> Vec<ToolStatus> {
+    use std::sync::atomic::Ordering;
+    let mut slot = TOOLS_CACHE.lock().await;
+    if let Some((at, cached_specs, tools)) = slot.as_ref() {
+        if *cached_specs == specs {
+            match freshness(at.elapsed(), tools) {
+                Freshness::Fresh => return tools.clone(),
+                Freshness::Stale => {
+                    if !TOOLS_REFRESHING.swap(true, Ordering::AcqRel) {
+                        tokio::spawn(async move {
+                            // Cleared even if the probe panics.
+                            struct Done;
+                            impl Drop for Done {
+                                fn drop(&mut self) {
+                                    TOOLS_REFRESHING.store(false, Ordering::Release);
+                                }
+                            }
+                            let _done = Done;
+                            let tools = run_tool_probe(&specs).await;
+                            *TOOLS_CACHE.lock().await =
+                                Some((std::time::Instant::now(), specs, tools));
+                        });
+                    }
+                    return tools.clone();
+                }
+                Freshness::Expired => {}
+            }
+        }
+    }
+    let tools = run_tool_probe(&specs).await;
     *slot = Some((std::time::Instant::now(), specs, tools.clone()));
     tools
 }
@@ -405,9 +467,64 @@ mod walkthrough_tests {
 
     /// S8-04: 50 concurrent `/meta` probes run the tool detection ONCE per
     /// TTL (single-flight + cache); a changed spec map misses the cache.
+    /// Both cache tests share the process-wide probe cache.
+    static CACHE_TESTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    #[test]
+    fn stale_probes_are_served_only_while_an_agent_cli_was_found() {
+        let tool = |name: &str, found| ToolStatus {
+            name: name.into(),
+            found,
+            version: None,
+        };
+        let agent = [tool("git", true), tool("claude", true)];
+        let none = [
+            tool("git", true),
+            tool("clickhouse", true),
+            tool("claude", false),
+        ];
+        let min = Duration::from_secs(60);
+        assert_eq!(freshness(Duration::from_secs(5), &none), Freshness::Fresh);
+        assert_eq!(freshness(min * 10, &agent), Freshness::Stale);
+        assert_eq!(freshness(min * 10, &none), Freshness::Expired);
+        assert_eq!(freshness(TOOLS_MAX_STALE, &agent), Freshness::Expired);
+    }
+
+    /// A stale probe answers at once; the refresh runs behind the response.
+    #[tokio::test]
+    async fn stale_probe_is_served_and_refreshed_in_the_background() {
+        use std::sync::atomic::Ordering;
+        let _serial = CACHE_TESTS.lock().await;
+        let specs =
+            std::collections::BTreeMap::from([("stale-agent".to_string(), "/bin/sh".to_string())]);
+        let old = vec![ToolStatus {
+            name: "stale-agent".into(),
+            found: true,
+            version: Some("old".into()),
+        }];
+        let aged = std::time::Instant::now()
+            .checked_sub(Duration::from_secs(600))
+            .unwrap();
+        *TOOLS_CACHE.lock().await = Some((aged, specs.clone(), old.clone()));
+        let before = PROBE_RUNS.load(Ordering::Relaxed);
+        let served = probe_tools_cached(specs.clone()).await;
+        assert_eq!(served[0].version.as_deref(), Some("old"), "served stale");
+        for _ in 0..200 {
+            if !TOOLS_REFRESHING.load(Ordering::Acquire) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(PROBE_RUNS.load(Ordering::Relaxed) - before, 1);
+        let refreshed = probe_tools_cached(specs).await;
+        assert_eq!(refreshed[0].version, None, "the refresh replaced it");
+        assert_eq!(PROBE_RUNS.load(Ordering::Relaxed) - before, 1, "now fresh");
+    }
+
     #[tokio::test]
     async fn tool_probe_is_single_flight_and_cached() {
         use std::sync::atomic::Ordering;
+        let _serial = CACHE_TESTS.lock().await;
         let specs = std::collections::BTreeMap::from([(
             "probe-cache-test".to_string(),
             "/bin/sh".to_string(),
