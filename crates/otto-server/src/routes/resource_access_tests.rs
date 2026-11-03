@@ -437,3 +437,56 @@ async fn capabilities_batch_preserves_child_denials_and_bounds() {
         403
     );
 }
+
+/// One request answers a whole page of top-level rows, each entry identical
+/// to its single GET; a resource the caller cannot see is `null`, not an error
+/// for the whole batch.
+#[tokio::test]
+async fn resources_capabilities_batch_matches_single_checks() {
+    let (ctx, root, viewer, id) = setup().await;
+    let url = "/access/connection/capabilities/batch";
+    let (status, rows) = request(
+        &ctx,
+        &root,
+        "POST",
+        url,
+        json!({"ids":[id, "missing-connection", id]}),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let (single_status, single) = request(
+        &ctx,
+        &root,
+        "GET",
+        &format!("/access/connection/{id}/capabilities"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(single_status, 200);
+    assert_eq!(rows[0], single, "same decision as the single route");
+    assert_eq!(rows[1], Value::Null, "invisible resource");
+    assert_eq!(rows[2], single, "input order");
+    // Where the single route hides a resource (404), the batch says null.
+    let hidden = request(
+        &ctx,
+        &viewer,
+        "GET",
+        &format!("/access/connection/{id}/capabilities"),
+        Value::Null,
+    )
+    .await
+    .0;
+    let (_, viewer_rows) = request(&ctx, &viewer, "POST", url, json!({ "ids": [id] })).await;
+    assert_eq!(hidden, 404);
+    assert_eq!(viewer_rows, json!([null]));
+    let (status, _) = request(&ctx, &viewer, "POST", url, json!({"ids": vec!["x"; 1001]})).await;
+    assert_eq!(status, 400);
+    let mut disabled = viewer.clone();
+    disabled.disabled = true;
+    assert_eq!(
+        request(&ctx, &disabled, "POST", url, json!({"ids":[id]}))
+            .await
+            .0,
+        403
+    );
+}
