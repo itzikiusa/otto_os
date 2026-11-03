@@ -14,8 +14,9 @@ use crate::issue_create::{non_empty, SUMMARY_MAX};
 /// `description` is Markdown (converted to ADF exactly as on create).
 /// `labels` REPLACES the label set; `add_labels` / `remove_labels` edit it in
 /// place (Jira `update` ops) and cannot be combined with `labels`. `priority`
-/// is a name or id, `assignee` a Jira accountId, `parent` / `epic` an issue
-/// key (in Jira Cloud the epic IS the parent).
+/// is a name or id, `assignee` a Jira accountId — `null` or `"none"`
+/// unassigns — and `parent` / `epic` an issue key (in Jira Cloud the epic IS
+/// the parent).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UpdateIssueReq {
     #[serde(default)]
@@ -30,12 +31,46 @@ pub struct UpdateIssueReq {
     pub remove_labels: Vec<String>,
     #[serde(default)]
     pub priority: Option<String>,
-    #[serde(default)]
-    pub assignee: Option<String>,
+    /// Absent: unchanged; `null`: unassign; a string: accountId (`"none"`
+    /// unassigns too). Read through [`UpdateIssueReq::assignee_change`].
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub assignee: Option<Option<String>>,
     #[serde(default)]
     pub parent: Option<String>,
     #[serde(default)]
     pub epic: Option<String>,
+}
+
+/// Tells an explicit `null` (`Some(None)`) from an absent field (`None`,
+/// via `#[serde(default)]`).
+fn present<'de, D>(d: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(d).map(Some)
+}
+
+/// What an assignee argument asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssigneeChange<'a> {
+    Unassign,
+    To(&'a str),
+}
+
+impl UpdateIssueReq {
+    /// `None` when the assignee is left alone. Blank strings are a local
+    /// problem ([`update_problems`]), never an unassign.
+    pub fn assignee_change(&self) -> Option<AssigneeChange<'_>> {
+        match self.assignee.as_ref()? {
+            None => Some(AssigneeChange::Unassign),
+            Some(s) if s.trim().eq_ignore_ascii_case("none") => Some(AssigneeChange::Unassign),
+            Some(s) => Some(AssigneeChange::To(s.trim())),
+        }
+    }
 }
 
 /// Response of `PATCH /issue/{account_id}/issues/{key}`: `updated` names the
@@ -59,7 +94,6 @@ pub fn update_problems(req: &UpdateIssueReq) -> Vec<String> {
         ("summary", &req.summary),
         ("description", &req.description),
         ("priority", &req.priority),
-        ("assignee", &req.assignee),
         ("parent", &req.parent),
         ("epic", &req.epic),
     ] {
@@ -68,6 +102,13 @@ pub fn update_problems(req: &UpdateIssueReq) -> Vec<String> {
                 "{name} must not be empty (omit it to leave it unchanged)"
             ));
         }
+    }
+    if matches!(&req.assignee, Some(Some(s)) if s.trim().is_empty()) {
+        p.push(
+            "assignee must not be empty (omit it to leave it unchanged; null or \"none\" \
+             unassigns)"
+                .into(),
+        );
     }
     if let Some(summary) = non_empty(&req.summary) {
         if summary.contains(['\n', '\r']) {
@@ -141,6 +182,28 @@ pub fn update_problems_error(key: &str, problems: &[String]) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn assignee_absent_null_none_and_an_id_are_told_apart() {
+        let parse = |v: serde_json::Value| serde_json::from_value::<UpdateIssueReq>(v).unwrap();
+        assert_eq!(
+            parse(serde_json::json!({"summary": "s"})).assignee_change(),
+            None
+        );
+        let null = parse(serde_json::json!({"assignee": null}));
+        assert_eq!(null.assignee_change(), Some(AssigneeChange::Unassign));
+        assert!(update_problems(&null).is_empty(), "an unassign is a change");
+        assert_eq!(
+            parse(serde_json::json!({"assignee": "None"})).assignee_change(),
+            Some(AssigneeChange::Unassign)
+        );
+        assert_eq!(
+            parse(serde_json::json!({"assignee": " acc-1 "})).assignee_change(),
+            Some(AssigneeChange::To("acc-1"))
+        );
+        let blank = parse(serde_json::json!({"assignee": " "}));
+        assert!(update_problems(&blank)[0].contains("null or \"none\" unassigns"));
+    }
 
     #[test]
     fn an_empty_request_is_refused() {

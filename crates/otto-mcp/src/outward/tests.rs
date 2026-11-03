@@ -1824,12 +1824,23 @@ fn update_issue_routes_and_is_tiered_like_create_issue() {
         json!({"summary":"New","labels":[],"remove_labels":["old"],"priority":"High"})
     );
     assert!(route_for("update_issue", &json!({"account_id":"a1"})).is_err());
+    // Unassign: an explicit null is forwarded; "none" passes through as given.
+    for (given, sent) in [(json!(null), json!(null)), (json!("none"), json!("none"))] {
+        let c = route_for(
+            "update_issue",
+            &json!({"account_id":"a1","key":"PRJ-7","assignee":given}),
+        )
+        .unwrap();
+        assert_eq!(c.body.unwrap(), json!({ "assignee": sent }));
+    }
 
     let d = dangerous_detail(
         "otto.update_issue",
         &json!({"key":"PRJ-7","summary":"x","add_labels":["a"]}),
     );
     assert_eq!(d, "Edit issue 'PRJ-7' (summary, add_labels)");
+    let d = dangerous_detail("otto.update_issue", &json!({"key":"PRJ-7","assignee":null}));
+    assert_eq!(d, "Edit issue 'PRJ-7' (assignee)");
     let msg = timeout_error(
         "update_issue",
         &json!({"key":"PRJ-7"}),

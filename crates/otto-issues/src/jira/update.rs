@@ -16,7 +16,7 @@ use super::create::jira_error_text;
 use super::{path_seg, JiraClient};
 use crate::issue_create::non_empty;
 use crate::issue_update::{
-    update_problems, update_problems_error, UpdateIssueReq, UpdateIssueResp,
+    update_problems, update_problems_error, AssigneeChange, UpdateIssueReq, UpdateIssueResp,
 };
 use crate::md_adf::markdown_to_adf;
 
@@ -88,6 +88,30 @@ fn written(req: &UpdateIssueReq) -> Vec<String> {
 }
 
 impl JiraClient {
+    /// `PUT /rest/api/3/issue/{key}/assignee`. Jira Cloud unassigns on
+    /// `accountId: null` — `"-1"` would pick the project's DEFAULT assignee.
+    async fn put_assignee(&self, key: &str, change: AssigneeChange<'_>) -> Result<()> {
+        let account = match change {
+            AssigneeChange::Unassign => Value::Null,
+            AssigneeChange::To(id) => json!(id),
+        };
+        let req = self
+            .t
+            .http()?
+            .put(format!(
+                "{}/rest/api/3/issue/{}/assignee",
+                self.t.base,
+                path_seg(key)
+            ))
+            .header("Authorization", &self.t.auth_header)
+            .header("Accept", "application/json")
+            .json(&json!({ "accountId": account }));
+        self.t
+            .send(req, &format!("jira update_issue assignee {key}"))
+            .await?;
+        Ok(())
+    }
+
     /// Refuse to overwrite a description holding content Otto's Markdown
     /// can't carry: it came from `adf_to_markdown`, which drops screenshots,
     /// mentions, smart links, dates, status lozenges and emoji, and writing it
@@ -202,8 +226,8 @@ impl JiraClient {
                 return Err(self.t.fail(resp, &what).await);
             }
         }
-        if let Some(account) = non_empty(&req.assignee) {
-            self.assign_issue(key, account).await.map_err(|e| {
+        if let Some(change) = req.assignee_change() {
+            self.put_assignee(key, change).await.map_err(|e| {
                 if body.as_object().is_some_and(|o| !o.is_empty()) {
                     Error::Upstream(format!(
                         "{key}: the other fields were saved, but setting the assignee failed: {e}"
@@ -278,7 +302,7 @@ mod tests {
         );
         // An assignee-only edit writes no PUT body (it has its own endpoint).
         let assign = UpdateIssueReq {
-            assignee: Some("acc-1".into()),
+            assignee: Some(Some("acc-1".into())),
             ..req()
         };
         assert_eq!(
@@ -354,6 +378,32 @@ mod tests {
         );
         assert!(seen[0].contains(r#""summary":"Renamed""#), "{}", seen[0]);
         assert!(seen[0].contains(r#""update":{"labels":[{"add":"triaged"}]}"#));
+    }
+
+    /// `null` / `"none"` unassign with Jira's `accountId: null` (never
+    /// `"-1"`, the project's default assignee) and write no field PUT.
+    #[tokio::test]
+    async fn an_unassign_sends_a_null_account_id_to_the_assignee_endpoint() {
+        for assignee in [None, Some("none".to_string())] {
+            let (base, seen) = scripted(vec![NO_CONTENT]).await;
+            let r = UpdateIssueReq {
+                assignee: Some(assignee),
+                ..req()
+            };
+            let resp = JiraClient::new(&base, "e", "t")
+                .update_issue_checked("PRJ-7", &r)
+                .await
+                .unwrap();
+            assert_eq!(resp.updated, vec!["assignee"]);
+            let seen = seen.lock().unwrap();
+            assert_eq!(seen.len(), 1, "{seen:?}");
+            assert!(
+                seen[0].starts_with("PUT /rest/api/3/issue/PRJ-7/assignee "),
+                "{}",
+                seen[0]
+            );
+            assert!(seen[0].ends_with(r#"{"accountId":null}"#), "{}", seen[0]);
+        }
     }
 
     #[tokio::test]

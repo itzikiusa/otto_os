@@ -15,8 +15,8 @@ export interface UpdateIssueReq {
   remove_labels?: string[];
   /** A priority name or id. */
   priority?: string;
-  /** A Jira accountId. */
-  assignee?: string;
+  /** A Jira accountId; `null` or `"none"` unassigns. Omit to leave it unchanged. */
+  assignee?: string | null;
   /** The parent issue key. */
   parent?: string;
   /** An Epic's key (becomes the parent). */
