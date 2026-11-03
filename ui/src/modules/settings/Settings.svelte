@@ -27,11 +27,21 @@
     type SettingsSectionId,
   } from './sections';
 
+  // As a sheet over another page (Threads' footer ⚙), Settings keeps its own
+  // section instead of routing, and ✕ closes the sheet.
+  let { sheet = null }: { sheet?: { onclose: () => void } | null } = $props();
+  let sheetPage = $state('appearance');
+
   // Explicit exit: go back to where you were, or home (Agents) if there's no
   // history — so you don't have to click another module to leave Settings.
   function exit(): void {
-    if (router.canBack) router.back();
+    if (sheet) sheet.onclose();
+    else if (router.canBack) router.back();
     else router.go('agents');
+  }
+  function goPage(id: string): void {
+    if (sheet) sheetPage = id;
+    else router.go(`settings/${id}`);
   }
 
   // The section components, keyed by registry id — the only per-section thing
@@ -70,7 +80,7 @@
     sessions: lazyComponent(() => import('./AdminSessions.svelte')),
   };
 
-  const pageId = $derived(router.parts[1] || 'appearance');
+  const pageId = $derived(sheet ? sheetPage : router.parts[1] || 'appearance');
   const section = $derived(findSection(pageId));
   // A routed section is openable, known-but-forbidden (a stale link or a role
   // change) or unknown — the last two get an explicit empty state instead of
@@ -96,7 +106,7 @@
   const results = $derived(query.trim() ? filterSections(sections, query) : null);
 
   function open(s: SettingsSection): void {
-    router.go(`settings/${s.id}`);
+    goPage(s.id);
   }
 
   function navItems(): HTMLButtonElement[] {
@@ -211,7 +221,17 @@
   </button>
 {/snippet}
 
-<div class="settings">
+<svelte:window
+  onkeydown={(e) => {
+    if (!sheet || e.key !== '/' || e.metaKey || e.ctrlKey || e.altKey) return;
+    const t = e.target as HTMLElement | null;
+    if (t?.closest('input, textarea, [contenteditable="true"]')) return;
+    e.preventDefault();
+    filterEl?.focus();
+  }}
+/>
+
+<div class="settings" class:sheet>
   <nav class="settings-nav" aria-label="Settings sections">
     <div class="settings-nav-title">
       <span>Settings</span>
@@ -226,7 +246,7 @@
         bind:value={query}
         class="settings-filter-input"
         type="search"
-        placeholder="Filter settings…"
+        placeholder={sheet ? 'Search settings  /' : 'Filter settings…'}
         aria-label="Filter settings"
         aria-controls="settings-nav-list"
         autocomplete="off"
@@ -268,9 +288,9 @@
           title={`You don’t have access to ${section.label}`}
           body={gateHint(section)}
           actionLabel="Open Appearance"
-          onaction={() => router.go('settings/appearance')}
+          onaction={() => goPage('appearance')}
         >
-          {#if router.canBack}
+          {#if router.canBack && !sheet}
             <button class="btn ghost" onclick={() => router.back()}>Go back</button>
           {/if}
         </EmptyState>
@@ -284,7 +304,7 @@
           title={`No settings section called “${pageId}”`}
           body="The link may be out of date. Pick a section from the list, or filter it by name."
           actionLabel="Open Appearance"
-          onaction={() => router.go('settings/appearance')}
+          onaction={() => goPage('appearance')}
         />
       </PageBody>
     {/if}

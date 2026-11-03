@@ -5,6 +5,7 @@
   // footer. Anchored to its chip, preferring above it, and clamped into the
   // viewport with a capped, scrollable height (AGENTS.md floating-UI rule).
   import { onMount, tick, untrack } from 'svelte';
+  import { placeAnchored } from '../anchorPlace';
   import { confirmer } from '../confirm.svelte';
   import {
     effortsForModel,
@@ -114,23 +115,7 @@
   }
 
   function place(): void {
-    if (!panelEl) return;
-    const a = anchor.getBoundingClientRect();
-    const vw = window.innerWidth;
-    const vh = window.innerHeight;
-    const w = panelEl.offsetWidth;
-    const h = panelEl.scrollHeight;
-    const above = a.top - 8;
-    const below = vh - a.bottom - 8;
-    const goAbove = above >= Math.min(h, 360) || above > below;
-    const maxH = Math.max(160, (goAbove ? above : below) - 8);
-    const height = Math.min(h, maxH);
-    let top = goAbove ? a.top - 6 - height : a.bottom + 6;
-    top = Math.max(8, Math.min(top, vh - 8 - height));
-    const rtl = getComputedStyle(anchor).direction === 'rtl';
-    let left = rtl ? a.left : a.right - w;
-    left = Math.max(8, Math.min(left, vw - 8 - w));
-    pos = { top, left, maxH };
+    if (panelEl) pos = placeAnchored(anchor, panelEl, { prefer: 'above', align: 'end' });
   }
 
   onMount(() => {

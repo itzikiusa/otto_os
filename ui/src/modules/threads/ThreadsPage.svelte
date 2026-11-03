@@ -20,9 +20,15 @@
   import NewThreadStage from './NewThreadStage.svelte';
   import ThreadCanvas from './ThreadCanvas.svelte';
   import ThreadInspector from './ThreadInspector.svelte';
+  import LazyMount from '../../lib/components/LazyMount.svelte';
+  import ThreadProjectCard from './ThreadProjectCard.svelte';
+  import ThreadSheets from './ThreadSheets.svelte';
+  import { PullRequestsView, TerminalDock } from './threadLazy.svelte';
+  import { threadRepos } from './threadRepos.svelte';
+  import { threadsChrome } from './threadsChrome.svelte';
   import ThreadSidebar from './ThreadSidebar.svelte';
   import { buildThreadMenu } from './threadMenu';
-  import { isPlainShellSession, isThreadSession, projectNameFromCwd } from './threadsHelpers';
+  import { isThreadSession, projectNameFromCwd } from './threadsHelpers';
   import { threads, type ThreadsLayoutMode } from './threadsStore.svelte';
 
   const SIDEBAR_W_KEY = 'threads.sidebarW';
@@ -190,7 +196,7 @@
         id: 'threads.toggle.terminal',
         title: 'Threads: toggle terminal drawer',
         group: 'Threads',
-        run: () => threads.toggleTerminal(threads.newDraftMode ? null : threads.focusedSessionId),
+        run: () => threadsChrome.setTerminal(!threadsChrome.terminalOpen),
       },
     ]),
   );
@@ -212,17 +218,17 @@
   });
   const crumbTitle = $derived(showWelcomeStage ? 'New thread' : (focused?.title ?? 'Thread'));
   const rightOpen = $derived(compact ? mobileDrawer === 'inspector' : threads.inspectorOpen);
-  const changesOpen = $derived(rightOpen && threads.inspectorTab === 'changes');
-  const terminalId = $derived(focused && !isPlainShellSession(focused) ? focused.id : null);
-  // T3's floating project card: only where it can't crowd the composer.
-  const showStageCard = $derived(!compact && !threads.inspectorOpen && centerWidth >= 1100);
-
-  function toggleChanges(): void {
-    if (compact) {
-      threads.setInspectorTab('changes');
-      mobileDrawer = changesOpen ? 'none' : 'inspector';
-    } else threads.toggleInspector('changes');
-  }
+  const contextCwd = $derived(
+    focused?.cwd ?? (showWelcomeStage ? threads.stageCwd : null) ?? ws.current?.root_path ?? null,
+  );
+  const contextRepo = $derived(threadRepos.repoFor(contextCwd, focused?.workspace_id ?? ws.currentId));
+  const maximized = $derived(!compact && threads.inspectorOpen && threadsChrome.maximized);
+  // T3's floating project card: remembered toggle, only where it can't crowd
+  // the column, and out of the way of the terminal drawer and the right panel.
+  const cardRoom = $derived(
+    !compact && !threads.inspectorOpen && !threadsChrome.terminalOpen && !threadsChrome.stageView && centerWidth >= 1100,
+  );
+  const showStageCard = $derived(cardRoom && threadsChrome.cardVisible);
 
   function openLayoutMenu(e: MouseEvent): void {
     const items: MenuItem[] = [
@@ -267,6 +273,30 @@
       >
         <Icon name="sidebar" size={14} />
       </button>
+      {#if !viewport.isPhone}
+        <button
+          type="button"
+          class="icon-btn"
+          aria-label="Back"
+          title="Back (⌘[)"
+          disabled={!router.canBack}
+          data-testid="threads-back"
+          onclick={() => router.back()}
+        >
+          <Icon name="chevronLeft" size={14} />
+        </button>
+        <button
+          type="button"
+          class="icon-btn"
+          aria-label="Forward"
+          title="Forward (⌘])"
+          disabled={!router.canForward}
+          data-testid="threads-forward"
+          onclick={() => router.forward()}
+        >
+          <Icon name="chevronRight" size={14} />
+        </button>
+      {/if}
       {#if compact || !threads.sidebarOpen}
         <button
           type="button"
@@ -291,6 +321,22 @@
     {/snippet}
 
     {#snippet actions()}
+      {#if !compact}
+        <button
+          type="button"
+          class="icon-btn"
+          class:th-btn-on={threadsChrome.cardVisible}
+          data-overflow="2"
+          aria-pressed={threadsChrome.cardVisible}
+          aria-label="Toggle project card"
+          title="Project card (folder, branch, PR, changes)"
+          data-icon="note"
+          data-testid="threads-toggle-card"
+          onclick={() => threadsChrome.toggleCard()}
+        >
+          <Icon name="note" size={14} />
+        </button>
+      {/if}
       <button
         type="button"
         class="icon-btn"
@@ -307,29 +353,15 @@
       <button
         type="button"
         class="icon-btn"
-        class:th-btn-on={changesOpen}
+        class:th-btn-on={threadsChrome.terminalOpen}
         data-overflow="2"
-        aria-pressed={changesOpen}
-        aria-label="Toggle changes"
-        title="Changes (diff summary)"
-        data-icon="file"
-        data-testid="threads-toggle-changes"
-        onclick={toggleChanges}
-      >
-        <Icon name="file" size={14} />
-      </button>
-      <button
-        type="button"
-        class="icon-btn"
-        class:th-btn-on={threads.isTerminalOpen(terminalId)}
-        data-overflow="2"
-        aria-pressed={threads.isTerminalOpen(terminalId)}
+        aria-pressed={threadsChrome.terminalOpen}
         aria-label="Toggle terminal drawer"
-        title={terminalId ? 'Terminal drawer' : 'Open a thread to use its terminal'}
+        title="Terminal (project shell under the stage)"
         data-icon="terminal"
         data-testid="threads-toggle-terminal"
-        disabled={!terminalId}
-        onclick={() => threads.toggleTerminal(terminalId)}
+        onpointerenter={() => TerminalDock.prefetch()}
+        onclick={() => threadsChrome.setTerminal(!threadsChrome.terminalOpen)}
       >
         <Icon name="terminal" size={14} />
       </button>
@@ -380,11 +412,21 @@
         />
       {/if}
 
-      <div class="th-center-col" bind:clientWidth={centerWidth}>
-        {#if showWelcomeStage}
-          <NewThreadStage showCard={showStageCard} />
-        {:else}
-          <ThreadCanvas onstartroom={(sid) => (roomSessionId = sid)} />
+      <div class="th-center-col" class:th-hidden={maximized} bind:clientWidth={centerWidth}>
+        <div class="th-stage">
+          {#if threadsChrome.stageView === 'prs'}
+            <LazyMount lazy={PullRequestsView} what="pull requests" variant="panel" props={{ repo: contextRepo }} />
+          {:else if showWelcomeStage}
+            <NewThreadStage showCard={showStageCard} />
+          {:else}
+            <ThreadCanvas onstartroom={(sid) => (roomSessionId = sid)} />
+            {#if showStageCard && contextCwd && threads.layoutMode === 'single'}
+              <div class="th-card-float"><ThreadProjectCard floating cwd={contextCwd} /></div>
+            {/if}
+          {/if}
+        </div>
+        {#if threadsChrome.terminalOpen}
+          <LazyMount lazy={TerminalDock} what="the terminal" variant="compact" props={{ cwd: contextCwd }} />
         {/if}
       </div>
 
@@ -398,7 +440,7 @@
           invert
           label="Resize thread inspector"
         />
-        <div class="th-right-col" style:inline-size="{inspectorW}px">
+        <div class="th-right-col" class:th-max={maximized} style:inline-size={maximized ? null : `${inspectorW}px`}>
           <ThreadInspector onstartroom={(sid) => (roomSessionId = sid)} />
         </div>
       {/if}
@@ -424,6 +466,7 @@
         {:else if mobileDrawer === 'inspector'}
           <div class="th-drawer end">
             <ThreadInspector
+              showCard
               onstartroom={(sid) => {
                 mobileDrawer = 'none';
                 roomSessionId = sid;
@@ -435,6 +478,8 @@
     </div>
   </PageBody>
 </div>
+
+<ThreadSheets />
 
 {#if roomSessionId}
   <StartRoomModal sessionId={roomSessionId} onclose={() => (roomSessionId = null)} />
@@ -488,6 +533,26 @@
     min-height: 0;
     display: flex;
     flex-direction: column;
+  }
+  .th-stage {
+    position: relative;
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  .th-card-float {
+    position: absolute;
+    inset-block-start: 16px;
+    inset-inline-end: 16px;
+    inline-size: 300px;
+    z-index: var(--z-sticky);
+  }
+  .th-center-col.th-hidden {
+    display: none;
+  }
+  .th-right-col.th-max {
+    flex: 1;
   }
   .th-center-col {
     flex: 1;
