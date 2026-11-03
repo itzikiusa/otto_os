@@ -90,7 +90,7 @@ fn validate_delegation(
 }
 
 #[cfg(test)]
-#[path = "resource_access_tests.rs"]
+#[path = "../../tests/unit/resource_access.rs"]
 mod tests;
 
 use super::access_groups;
