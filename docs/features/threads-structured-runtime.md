@@ -443,9 +443,26 @@ None of the four drivers passes a skip-permissions flag. Claude:
   and take the view's slash commands (`/btw` side chat — itself a PTY
   thread — `/diff`, `/files`, `/terminal`, `/new`, `/fork`, `/review`);
   any other `/command` goes to the agent as typed (T3 Code's provider
-  commands). Not yet: image attachments (the prompt contract is text only;
-  the Claude and Codex drivers would need image content), model / effort
-  switching mid-thread, and the per-thread terminal drawer.
+  commands). The thread's terminal drawer is a plain shell in its folder
+  (`meta.terminal_of`). The composer's model / effort pick and attached
+  images ride `POST …/prompt` (`model`, `effort`, `images`).
+- **Pending driver work** for those prompt fields (the runtime ignores them
+  today): the prompt handler passes them to `StructuredDriver::prompt`, and
+  the drivers apply them as T3 Code does —
+  - **model / effort:** Codex `turn/start {model, effort}` (per turn,
+    `CodexAdapterV2.ts:744-818`); Claude a `control_request {subtype:
+    "set_model", model}` before the user message when the model changed
+    (`ClaudeAdapterV2.ts:1224-1236`), an effort change respawning the CLI
+    with `--resume` (`:1440-1455`, "thinking requires a new process"); ACP
+    respawn with `--model` + `session/load`. The session row's `model`
+    follows.
+  - **images:** Claude `{type:"image", source:{type:"base64", media_type,
+    data}}` content blocks beside the text block in the `user` message;
+    Codex `turn/start input` `{type:"image", url:"data:<media_type>;base64,<data>"}`
+    items; ACP `ContentBlock::Image {data, mimeType}` when the agent's
+    `promptCapabilities.image` is set (else refuse with 400). The prompt
+    route needs a larger body limit (`DefaultBodyLimit`, ~48 MiB for four
+    10 MB images) and the `user_message` item could carry an image count.
 - **`ottod` teardown** calling `AgentRuntime::shutdown()`, and eviction of
   idle live entries.
 - **Runtime modes.** auto-accept-edits and full-access are unported; they

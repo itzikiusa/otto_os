@@ -136,6 +136,38 @@ test('a Codex runtime thread streams, asks inline, queues a follow-up and stops'
   await expect(thread.getByText('echo: after the stop')).toBeVisible({ timeout: 15_000 });
   await expect(thread.getByText('echo: hello runtime')).toBeVisible();
 
+  // Model + effort for the next turn and an attached image ride the prompt.
+  await thread.getByTestId('runtime-model').click();
+  const mp = page.getByTestId('model-picker');
+  const pick = mp.locator('.mp-row:not(.cur)').filter({ hasNotText: 'Default model' }).first();
+  const pickedLabel = (await pick.locator('.mp-name').innerText()).trim();
+  await pick.click();
+  await mp.getByTestId('picker-effort').getByRole('button', { name: 'High', exact: true }).click();
+  await page.keyboard.press('Escape');
+  await expect(thread.getByTestId('runtime-model')).toContainText(pickedLabel);
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64');
+  await thread.locator('input[type=file]').setInputFiles({ name: 'dot.png', mimeType: 'image/png', buffer: png });
+  await expect(thread.getByTestId('runtime-images')).toContainText('dot.png');
+  await page.screenshot({ path: info.outputPath('runtime-composer-light.png'), animations: 'disabled' });
+  await page.emulateMedia({ colorScheme: 'dark' });
+  await page.screenshot({ path: info.outputPath('runtime-composer-dark.png'), animations: 'disabled' });
+  await page.emulateMedia({ colorScheme: 'light' });
+  const sent = page.waitForRequest((r) => r.method() === 'POST' && r.url().endsWith('/prompt'));
+  await composer.fill('with a picture');
+  await composer.press('Enter');
+  const body = (await sent).postDataJSON() as { model?: string; effort?: string; images?: { media_type: string }[] };
+  expect(body.model).toBeTruthy();
+  expect(body.effort).toBe('high');
+  expect(body.images?.map((i) => i.media_type)).toEqual(['image/png']);
+  await expect(thread.getByTestId('runtime-images')).toHaveCount(0);
+  await expect(thread.getByText('echo: with a picture')).toBeVisible({ timeout: 15_000 });
+
+  // The thread's terminal drawer: a shell in the thread's folder.
+  await page.getByTestId('threads-thread-menu').click();
+  await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Open terminal drawer' }).click();
+  await expect(page.locator('[data-testid^="thread-terminal-drawer-"]')).toBeVisible({ timeout: 15_000 });
+  await page.screenshot({ path: info.outputPath('runtime-terminal-light.png'), animations: 'disabled' });
+
   // Rename, then close: the thread moves to History and opens read-only.
   await page.getByTestId('threads-thread-menu').click();
   await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Rename…' }).click();
@@ -150,6 +182,21 @@ test('a Codex runtime thread streams, asks inline, queues a follow-up and stops'
   await sidebar.locator('[data-testid^="thread-history-"]', { hasText: 'Renamed runtime' }).getByRole('button').first().click();
   await expect(thread.getByTestId('runtime-composer')).toBeDisabled({ timeout: 15_000 });
   await expect(thread.getByText('echo: hello runtime')).toBeVisible();
+
+  // A runtime approval raises the Threads "needs you" badge while you're
+  // elsewhere, and the count survives a reload before Threads is opened.
+  await page.goto('/#/home');
+  const created = await ctx.post(`${base}/api/v1/workspaces/${wsId}/runtime-sessions`, {
+    data: { provider: 'codex', cwd: fixtureDir, title: 'Background ask' },
+  });
+  expect(created.ok(), await created.text()).toBeTruthy();
+  const bgId = (await created.json()).id as string;
+  expect((await ctx.post(`${base}/api/v1/runtime-sessions/${bgId}/prompt`, { data: { text: 'ask' } })).ok()).toBeTruthy();
+  const threadsNav = page.getByRole('button', { name: /^Threads ?, 1 waiting on you/ }).first();
+  await expect(threadsNav).toBeVisible({ timeout: 15_000 });
+  await page.reload();
+  await expect(threadsNav).toBeVisible({ timeout: 30_000 });
+  await page.goto('/#/threads');
 
   // Phone width: the timeline and composer fit.
   await page.setViewportSize({ width: 390, height: 844 });

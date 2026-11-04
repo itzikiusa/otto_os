@@ -5,11 +5,12 @@
 
 import { api } from '../../../lib/api/client';
 import { onLive } from '../../../lib/live';
-import { noteRuntimeSession } from '../../../lib/stores/runtimeAttention.svelte';
+import { noteRuntimeWaiting } from '../../../lib/stores/runtimeAttention.svelte';
 import type {
   ApprovalDecision,
   ProviderSessionStatus,
   RuntimeEvent,
+  RuntimePromptReq,
   RuntimePromptResp,
   RuntimeProvider,
   RuntimeSession,
@@ -93,7 +94,7 @@ class RuntimeThreads {
       for (const id of Object.keys(next)) if (next[id].workspace_id === workspaceId) delete next[id];
       for (const r of rows) {
         next[r.id] = r;
-        noteRuntimeSession(r.id);
+        noteRuntimeWaiting(r.id, r.status === 'awaiting_permission');
       }
       this.byId = next;
     } finally {
@@ -125,7 +126,7 @@ class RuntimeThreads {
    *  the opening prompt, if any. */
   async start(
     workspaceId: string,
-    req: { provider: RuntimeProvider; cwd: string | null; title: string; model: string | null; prompt: string },
+    req: { provider: RuntimeProvider; cwd: string | null; title: string; model: string | null; effort?: string; prompt: string },
   ): Promise<RuntimeSession> {
     const created = await api.post<RuntimeSession>(`/workspaces/${workspaceId}/runtime-sessions`, {
       provider: req.provider,
@@ -134,12 +135,12 @@ class RuntimeThreads {
       model: req.model,
     });
     this.byId[created.id] = created;
-    if (req.prompt) await this.prompt(created.id, req.prompt);
+    if (req.prompt) await this.prompt(created.id, { text: req.prompt, ...(req.effort ? { effort: req.effort } : {}) });
     return created;
   }
 
-  prompt(id: string, text: string): Promise<RuntimePromptResp> {
-    return api.post<RuntimePromptResp>(`/runtime-sessions/${id}/prompt`, { text });
+  prompt(id: string, req: RuntimePromptReq): Promise<RuntimePromptResp> {
+    return api.post<RuntimePromptResp>(`/runtime-sessions/${id}/prompt`, req);
   }
 
   async interrupt(id: string): Promise<void> {

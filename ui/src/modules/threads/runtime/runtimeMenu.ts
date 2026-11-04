@@ -1,5 +1,5 @@
 // The ⋯ menu of a runtime-backed thread (sidebar row, top bar, pane header).
-// PTY-only actions (archive, rooms, terminal, hand-over) don't apply; a
+// PTY-only actions (archive, rooms, hand-over) don't apply; a
 // closed thread lives in History and can still be renamed.
 import { confirmer } from '../../../lib/confirm.svelte';
 import type { MenuItem } from '../../../lib/contextmenu.svelte';
@@ -12,6 +12,12 @@ export function runtimeThreadMenu(id: string): MenuItem[] {
     { label: threads.isPinned(id) ? 'Unpin thread' : 'Pin thread', icon: 'pin', action: () => threads.togglePin(id) },
     { label: 'Open beside', icon: 'split', action: () => threads.openBeside(id) },
     { label: 'Rename…', icon: 'edit', action: () => void renameThread(id) },
+    {
+      label: threads.isTerminalOpen(id) ? 'Hide terminal drawer' : 'Open terminal drawer',
+      icon: 'terminal',
+      hint: '/terminal',
+      action: () => threads.toggleTerminal(id),
+    },
     { separator: true },
     {
       label: 'Close thread…',

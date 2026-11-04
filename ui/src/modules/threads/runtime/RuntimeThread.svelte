@@ -10,6 +10,9 @@
   // ComposerPrimaryActions.tsx (send ↔ stop), QueuedRunsControl.tsx (one
   // queued follow-up), ThreadStatusLine.tsx ("Working for 12s"),
   // ThreadErrorBanner.tsx, and apps/web/src/session-logic.ts (`derivePhase`).
+  // The composer's model / effort pick applies to the next turn and the ones
+  // after it (ComposerModelEffort.tsx → the turn's model selection); pasted or
+  // attached images go with the message (composerAttachmentFiles.ts).
   // Slash commands as in composerSlashCommandSearch.ts: the client's own
   // commands act on the view; any other `/command` goes to the agent as typed.
   import { tick, untrack } from 'svelte';
@@ -20,6 +23,10 @@
   import LoadState from '../../../lib/components/LoadState.svelte';
   import ProviderIcon, { hasProviderIcon } from '../../../lib/components/ProviderIcon.svelte';
   import { harnessLabel } from '../../../lib/providers';
+  import { lazyComponent } from '../../../lib/lazy-component.svelte';
+  import { formatEffortShort, formatModelLabel, supportsEffortSelection, type EffortLevel } from '../../../lib/providerModels';
+  import { auth } from '../../../lib/stores/auth.svelte';
+  import type { PromptImage } from '../../../lib/api/types';
   import {
     INTERACTIVE_SLASH_COMMANDS,
     isImmediateSlashCommand,
@@ -28,7 +35,6 @@
     type ParsedSlashIntent,
   } from '../../../lib/slashActions';
   import StageSlashPopup from '../StageSlashPopup.svelte';
-  import { threadsChrome } from '../threadsChrome.svelte';
   import { threads } from '../threadsStore.svelte';
   import { now } from '../../../lib/stores/now.svelte';
   import { toastError } from '../../../lib/toastError';
@@ -88,15 +94,62 @@
     return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
   });
 
+  // ── Model / effort for the next turn ──────────────────────────────────
+  const ModelPicker = lazyComponent(() => import('../../../lib/components/ModelPickerPopover.svelte'));
+  let model = $state<string | null>(null);
+  let effort = $state<EffortLevel | null>(null);
+  let pickerOpen = $state(false);
+  let agentEl = $state<HTMLButtonElement | null>(null);
+  const provider = $derived(session?.provider ?? '');
+  const agentLabel = $derived.by(() => {
+    const m = model ?? session?.model ?? null;
+    const label = m ? formatModelLabel(provider, m, auth.meta) : harnessLabel(provider);
+    return effort ? `${label} · ${formatEffortShort(effort)}` : label;
+  });
+
+  // ── Images (paste or attach; sent inline with the next message) ──────
+  const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+  let images = $state<(PromptImage & { name: string })[]>([]);
+  let fileEl = $state<HTMLInputElement | null>(null);
+  async function addImages(files: Iterable<File>): Promise<void> {
+    for (const f of files) {
+      if (!f.type.startsWith('image/')) continue;
+      if (f.size > MAX_IMAGE_BYTES) {
+        toastError('Image too large', new Error(`${f.name} is over 10 MB`));
+        continue;
+      }
+      const data = new Uint8Array(await f.arrayBuffer());
+      let bin = '';
+      for (let i = 0; i < data.length; i += 0x8000) bin += String.fromCharCode(...data.subarray(i, i + 0x8000));
+      images = [...images, { name: f.name || 'pasted image', media_type: f.type, data_b64: btoa(bin) }];
+    }
+  }
+  function onPaste(e: ClipboardEvent): void {
+    const files = [...(e.clipboardData?.files ?? [])].filter((f) => f.type.startsWith('image/'));
+    if (files.length === 0) return;
+    e.preventDefault();
+    void addImages(files);
+  }
+
   async function send(t: string): Promise<void> {
     sending = true;
+    const sentImages = images;
+    images = [];
     try {
-      awaitSeq = (await runtimeThreads.prompt(sessionId, t)).sequence;
+      awaitSeq = (
+        await runtimeThreads.prompt(sessionId, {
+          text: t,
+          ...(model ? { model } : {}),
+          ...(effort ? { effort } : {}),
+          ...(sentImages.length ? { images: sentImages.map(({ media_type, data_b64 }) => ({ media_type, data_b64 })) } : {}),
+        })
+      ).sequence;
       startError = null;
     } catch (e) {
       if (e instanceof ApiError && e.status === 400) startError = e.message;
       else toastError('Couldn’t send message', e);
       if (!text) text = t;
+      if (images.length === 0) images = sentImages;
     } finally {
       sending = false;
     }
@@ -144,7 +197,7 @@
         threads.setInspectorTab('files');
         return true;
       case 'toggle-terminal':
-        threadsChrome.setTerminal(!threadsChrome.terminalOpen);
+        threads.toggleTerminal(sessionId);
         return true;
       case 'new-thread':
         void newThread(intent.beside);
@@ -336,11 +389,60 @@
         aria-activedescendant={suggestions.length > 0 ? `${popId}-opt-${cmdIdx}` : undefined}
         data-testid="runtime-composer"
         onkeydown={onKeydown}
+        onpaste={onPaste}
       ></textarea>
+      {#if images.length > 0}
+        <div class="rt-images" data-testid="runtime-images">
+          {#each images as img, i (i)}
+            <span class="rt-image">
+              <Icon name="image" size={12} /><span class="ellipsis" dir="auto">{img.name}</span>
+              <button type="button" class="icon-btn" aria-label="Remove {img.name}" title="Remove" onclick={() => (images = images.filter((_, j) => j !== i))}>
+                <Icon name="x" size={12} />
+              </button>
+            </span>
+          {/each}
+        </div>
+      {/if}
       <div class="rt-foot">
-        <span class="rt-agent">
-          {#if session && hasProviderIcon(session.provider)}<ProviderIcon provider={session.provider} size={13} />{/if}
-          <span class="ellipsis">{session ? harnessLabel(session.provider) : ''}{session?.model ? ` · ${session.model}` : ''}</span>
+        <button
+          type="button"
+          class="icon-btn"
+          aria-label="Attach an image"
+          title="Attach an image (or paste one)"
+          data-testid="runtime-attach"
+          disabled={closed}
+          onclick={() => fileEl?.click()}
+        >
+          <Icon name="image" size={14} />
+        </button>
+        <input
+          bind:this={fileEl}
+          type="file"
+          accept="image/*"
+          multiple
+          hidden
+          onchange={(e) => {
+            void addImages(e.currentTarget.files ?? []);
+            e.currentTarget.value = '';
+          }}
+        />
+        <span class="rt-grow">
+          <button
+            bind:this={agentEl}
+            type="button"
+            class="rt-agent"
+            aria-haspopup="dialog"
+            aria-expanded={pickerOpen}
+            aria-label="Model for the next turn: {agentLabel}"
+            title="Model and effort for the next turn"
+            data-testid="runtime-model"
+            disabled={closed || !session}
+            onpointerenter={() => ModelPicker.prefetch()}
+            onclick={() => (pickerOpen = true)}
+          >
+            {#if session && hasProviderIcon(session.provider)}<ProviderIcon provider={session.provider} size={13} />{/if}
+            <span class="ellipsis">{agentLabel}</span>
+          </button>
         </span>
         {#if running && !text.trim()}
           <button
@@ -371,6 +473,21 @@
     </div>
   </div>
 </section>
+
+{#if pickerOpen && agentEl && ModelPicker.component}
+  <ModelPicker.component
+    anchor={agentEl}
+    providers={[provider]}
+    {provider}
+    lockProvider
+    model={model ?? session?.model ?? null}
+    {effort}
+    mode="full"
+    onmodel={(m) => (model = m)}
+    oneffort={supportsEffortSelection(provider) ? (e) => (effort = e) : undefined}
+    onclose={() => (pickerOpen = false)}
+  />
+{/if}
 
 <style>
   .rt {
@@ -534,14 +651,45 @@
     gap: 8px;
     min-width: 0;
   }
+  .rt-grow {
+    flex: 1;
+    min-width: 0;
+  }
+  .rt-images {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .rt-image {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    max-inline-size: 220px;
+    padding-inline: 8px 2px;
+    border-radius: var(--radius-s);
+    background: var(--surface-2);
+    color: var(--text-dim);
+    font-size: var(--fs-xs);
+  }
   .rt-agent {
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    flex: 1;
+    max-inline-size: 100%;
     min-width: 0;
+    block-size: 28px;
+    padding-inline: 6px;
+    border: 0;
+    border-radius: var(--radius-m);
+    background: transparent;
+    font: inherit;
+    cursor: pointer;
     color: var(--text-dim);
     font-size: var(--fs-s);
+  }
+  .rt-agent:hover:not(:disabled) {
+    background: var(--hover);
+    color: var(--text);
   }
   .rt-send {
     display: grid;

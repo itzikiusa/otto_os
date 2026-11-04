@@ -407,7 +407,7 @@ class WorkspaceStore {
   /** Foreground agent sessions currently flagged "needs you" — the sidebar
    *  "Needs you" badge/count (mirrors {@link workingCount}'s scoping). */
   needsYouCount: number = $derived(
-    this.buckets.foregroundActive.filter((s) => this.needsYou[s.id] === true).length + runtimeFlagged(this.needsYou),
+    this.buckets.foregroundActive.filter((s) => this.needsYou[s.id] === true).length,
   );
   threadsWorkingCount: number = $derived(this.buckets.threads.filter((s) => this.statusMap[s.id] === 'working').length);
   threadsNeedsYouCount: number = $derived(this.buckets.threads.filter((s) => this.needsYou[s.id] === true).length + runtimeFlagged(this.needsYou));

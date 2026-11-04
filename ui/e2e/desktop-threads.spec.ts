@@ -232,8 +232,8 @@ test('custom sidebar auto-discovers Threads, stage pickers + slash menu work, an
   await expect(stage.locator('h1')).toContainText(/What should we (build|work on)/);
 
   // One agent chip holds harness · model · effort; access mode sits in the meta row.
-  // Claude runs on the structured runtime (always asks first, no effort), so
-  // the effort / access-mode controls are shown for a PTY harness (Antigravity).
+  // Claude runs on the structured runtime (always asks first), so the access
+  // mode is shown for a PTY harness (Antigravity).
   const agentBtn = stage.getByTestId('picker-agent');
   const modeBtn = stage.getByTestId('picker-mode');
   await expect(agentBtn).toBeVisible();
@@ -245,7 +245,6 @@ test('custom sidebar auto-discovers Threads, stage pickers + slash menu work, an
   await expect(picker).toBeVisible();
   await expect(picker.getByTestId('model-picker-provider-claude')).toBeVisible();
   await expect(picker.getByTestId('model-picker-search')).toBeFocused();
-  await expect(picker.getByTestId('picker-effort')).toHaveCount(0);
   await picker.getByTestId('model-picker-provider-agy').click();
   await expect(modeBtn).toContainText('Full access');
   await picker.getByTestId('picker-effort').getByRole('button', { name: 'High', exact: true }).click();

@@ -81,7 +81,7 @@
   const scratchActive = $derived(useScratch || ws.current === null);
   const targetWs = $derived(scratchActive ? SCRATCH_WORKSPACE_ID : (ws.currentId ?? SCRATCH_WORKSPACE_ID));
   // Claude / Codex / Gemini / Grok threads run on the structured runtime:
-  // they always ask before acting and take no effort level.
+  // they always ask before acting (no access-mode switch).
   const runtime = $derived(isRuntimeProvider(provider));
   const modeSupported = $derived(supportsInteractionMode(provider) && !runtime);
   const cleanCwd = $derived(cwd.trim().replace(/\/+$/, ''));
@@ -94,7 +94,7 @@
   const agentLabel = $derived.by(() => {
     const meta = auth.meta;
     const model = selectedModel ? formatModelLabel(provider, selectedModel, meta) : harnessLabel(provider);
-    return supportsEffortSelection(provider) && !runtime && selectedEffort ? `${model} · ${formatEffortShort(selectedEffort)}` : model;
+    return supportsEffortSelection(provider) && selectedEffort ? `${model} · ${formatEffortShort(selectedEffort)}` : model;
   });
 
   $effect(() => {
@@ -277,7 +277,9 @@
       const title = firstMsg ? firstMsg.replace(/\s+/g, ' ').slice(0, 56) : `${harnessLabel(provider)} thread`;
       const opts = { scratch: scratchActive && ws.currentId !== SCRATCH_WORKSPACE_ID };
       const created = runtime && isRuntimeProvider(provider)
-        ? await runtimeThreads.start(targetWs, { provider, title, cwd: dir || null, model: selectedModel, prompt: firstMsg })
+        ? await runtimeThreads.start(targetWs, {
+            provider, title, cwd: dir || null, model: selectedModel, effort: selectedEffort ?? undefined, prompt: firstMsg,
+          })
         : firstMsg
           ? await ws.openSessionWithPrompt({ provider, title, cwd: dir || null, prompt: firstMsg, meta }, opts)
           : await ws.createSessionQuiet({ kind: 'agent', provider, title, cwd: dir || null, meta }, opts);
@@ -574,7 +576,7 @@
     mode={interactionMode}
     onprovider={selectProvider}
     onmodel={(m) => (selectedModel = m)}
-    oneffort={runtime ? undefined : (e) => (selectedEffort = e)}
+    oneffort={(e) => (selectedEffort = e)}
     onmode={modeSupported ? (m) => (interactionMode = m) : undefined}
     onclose={() => (pickerOpen = false)}
   />
