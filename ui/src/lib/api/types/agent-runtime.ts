@@ -221,6 +221,17 @@ export interface UpdateRuntimeSessionReq {
 
 export interface RuntimePromptReq {
   text: string;
+  /** Model for this turn and later ones; omitted = the session's model. */
+  model?: string;
+  /** Reasoning effort for this turn and later ones (`low` … `max`). */
+  effort?: string;
+  /** Images sent with the text, inline (`image/*`, base64). */
+  images?: PromptImage[];
+}
+
+export interface PromptImage {
+  media_type: string;
+  data_b64: string;
 }
 
 export interface RuntimePromptResp {
