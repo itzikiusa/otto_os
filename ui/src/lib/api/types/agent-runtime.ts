@@ -12,7 +12,7 @@
 
 import type { Id } from './core';
 
-export type RuntimeProvider = 'claude' | 'codex' | 'gemini';
+export type RuntimeProvider = 'claude' | 'codex' | 'gemini' | 'grok';
 
 export type ProviderSessionStatus = 'starting' | 'ready' | 'running' | 'waiting' | 'stopped' | 'error';
 
@@ -94,11 +94,15 @@ export type TurnItemKind =
   | { type: 'file_change'; file_name: string; diff_str?: string; old_str?: string; new_str?: string }
   | { type: 'command_execution'; input: string; output?: string; exit_code?: number }
   | { type: 'dynamic_tool'; tool_name: string; input: unknown; output?: string }
+  /** Web search / fetch tools; `patterns` are the queries or URLs. */
+  | { type: 'web_search'; patterns?: string[] }
   | {
       type: 'approval_request';
       request_id: Id;
       request_kind: RequestKind;
       prompt?: string;
+      /** The provider's own justification (Codex `reason`). */
+      reason?: string;
       options: ApprovalOption[];
     }
   | { type: 'system_notice'; message: string }

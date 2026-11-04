@@ -2,7 +2,10 @@ otto-agent-protocol ports the provider-runtime design of T3 Code
 (https://github.com/pingdotgg/t3code — the clone studied was at commit
 cefb544af3c98224874419198c0359b652ca3c94). Ported parts: the provider runtime
 event model and entities, the ACP session lifecycle and update mapping, the
-replay/snapshot limits and the restart reconciliation. Its licence:
+Claude Agent SDK transport and decision mapping (ClaudeAdapterV2), the Codex
+app-server lifecycle, item and approval mapping (CodexAdapterV2), the Grok
+ACP launch flavour, the 50 ms streaming coalescing, the replay/snapshot
+limits and the restart reconciliation. Its licence:
 
 MIT License
 

@@ -1,224 +1,431 @@
 # Threads — structured agent runtime (how T3 Code does it → how Otto mirrors it)
 
-Status: **phase 1** — event model, contracts, runtime plumbing, the ACP
-driver (Gemini) and a fake ACP agent. Claude and Codex drivers are phase 2.
-PTY sessions are unchanged.
+Status: the daemon side is done: the event model, contracts, runtime, and
+drivers for Claude, Codex, Gemini and Grok. Tests use a fake ACP agent and a
+fake `codex app-server`. The Threads UI still renders PTY sessions; moving it
+onto `/runtime-sessions` is the next step (§9). PTY sessions are unchanged.
 
-**Attribution.** The design is ported from [T3 Code](https://github.com/pingdotgg/t3code)
-(MIT, Copyright (c) 2026 T3 Tools Inc.); the licence is reproduced in
-`crates/otto-agent-protocol/NOTICE`. Citations below are `path:line` in the
-clone studied (commit `cefb544af3`). Ported modules say so in their headers.
+**Attribution.** Ported from [T3 Code](https://github.com/pingdotgg/t3code)
+(MIT, Copyright (c) 2026 T3 Tools Inc.). The licence is reproduced in
+`crates/otto-agent-protocol/NOTICE`, and every ported module says so in its
+header. Citations are `path:line` in the clone studied (commit `cefb544af3`,
+2026-11-02).
 
 ## Why
 
 Threads runs the agent CLI in a PTY, types the prompt into it, and rebuilds
-the chat by tailing the CLI's transcript (`transcript_tail.rs` →
-`transcript_appended`). The transcript is written when a block *completes*:
-no token streaming, tool calls / approvals / "working" inferred after the
-fact. T3 Code drives the same CLIs over their structured stdio protocols and
-renders a live timeline from a normalized event stream. Otto ports that.
+the chat by tailing the CLI's transcript file (`transcript_tail.rs` →
+`transcript_appended`). The CLI writes a transcript line only after a block
+*completes*. The result is no token streaming, and tool calls, approvals and
+"working" state are inferred after the fact.
 
-## 1. What T3 Code runs, per provider
+T3 Code does not scrape a terminal. It drives each CLI over its structured
+stdio protocol and renders a live timeline from one normalized event stream.
+Otto ports that design rather than inventing its own.
 
-| Provider | What T3 Code runs | What Otto runs |
+## 1. Providers: what T3 Code runs → what Otto runs
+
+| Provider | T3 Code runs | Otto runs |
 |---|---|---|
-| Claude | **Claude Agent SDK** (`@anthropic-ai/claude-agent-sdk ^0.3.284`, `apps/server/package.json:37`) in the first-class `claudeAgent` adapter (`apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts:37,221`); the SDK spawns the `claude` CLI itself (or `pathToClaudeCodeExecutable` when set, `:1649-1651`) and speaks its stream-json + control protocol. An ACP path via the `@agentclientprotocol/claude-agent-acp` registry package exists but is hidden for Claude (`packages/provider-acp-registry/src/server/adapter.ts:195-208`, `docs/user/providers-acp.md:8-10`) | **Phase 2, decision needed** (below): either a Rust port of the SDK's transport against `claude -p --input-format stream-json --output-format stream-json …` (no new dependency), or the ACP adapter (npm package, needs approval) |
-| Codex | `codex app-server` with `["app-server", …launchArgs]` (`apps/server/src/provider/codexLaunchArgs.ts:12-15`), env `CODEX_HOME` (shadow home) + `CODEX_INTERNAL_ORIGINATOR_OVERRIDE` (`CodexAdapterV2.ts:1556-1559`, `CodexProvider.ts:452-457`), typed client `packages/effect-codex-app-server` | **Phase 2**: `codex app-server`, same lifecycle; wire types from the installed CLI's own `codex app-server generate-json-schema` (see §6) |
-| Gemini | No dedicated adapter: the ACP registry entry `gemini` (npx `@google/gemini-cli@<exact>`, `packages/provider-acp-registry/src/server/AcpRegistrySupport.test.ts:1693-1720`), launched with the registry's argv/env (`AcpRegistrySupport.ts:1906-1915`) into the generic ACP runtime | **Phase 1**: `gemini --acp` (the installed CLI; `--model <m>` when set) into Otto's ACP driver (`crates/otto-agent-protocol/src/acp.rs`) |
-| Grok (reference) | `grok agent stdio`, `--permission-mode auto|default` or `agent --always-approve stdio` per runtime mode (`packages/provider-grok/src/server/acpSupport.ts:47-58`), env `GROK_OAUTH2_REFERRER` (`:66-74`) | Not planned; fits the ACP driver unchanged |
+| **Claude** | The **Claude Agent SDK** (`@anthropic-ai/claude-agent-sdk ^0.3.284`, `apps/server/package.json:37`), in-process: `query()` (`apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts:1090`). The SDK spawns the `claude` CLI (`binaryPath` setting, default `claude`, `packages/contracts/src/settings.ts:715`, passed as `pathToClaudeCodeExecutable`, `ClaudeAdapterV2.ts:1651-1653`) and speaks its stream-json control protocol. Options: `permissionMode` from the runtime mode (`:2573-2620`), `includePartialMessages: true` (`:1617`), the `claude_code` system-prompt preset (`:1660`), `sessionId` on the first run and `resume` afterwards (`:1578-1580`). The ACP adapter `claude-agent-acp` is used only as a Registry agent (`packages/provider-acp-registry/src/server/adapter.ts:195-210`); T3 Code bundles no npm ACP adapter (`packages/provider-acp-registry/package.json:35-42`) | **The same SDK transport, ported to Rust** (`crates/otto-agent-protocol/src/claude.rs`). It runs the installed `claude` directly with the SDK's argv (`sdk.mjs` `ProcessTransport.initialize`): `--output-format stream-json --verbose --input-format stream-json --permission-prompt-tool stdio --permission-mode default --include-partial-messages [--model m] (--session-id <uuid> \| --resume <id>)`, env `CLAUDE_CODE_ENTRYPOINT=sdk-ts`. No Node, and **no npm package is needed** |
+| **Codex** | `codex app-server` (`["app-server", …launchArgs]`, `apps/server/src/provider/codexLaunchArgs.ts:12-15`). The binary is the `binaryPath` setting (default `codex`, `CodexAdapterV2.ts:1561`) or an optional managed install of 0.156.1 (`apps/server/src/provider/CodexInstallation.ts:61-98`). Env: `CODEX_HOME` (a shadow home that overlays `auth.json`, `Drivers/CodexHomeLayout.ts:11-77`) and `CODEX_INTERNAL_ORIGINATOR_OVERRIDE` (`CodexProvider.ts:452-457`). Typed client: `packages/effect-codex-app-server`, generated from `openai/codex` `687a119f` (`scripts/generate.ts:16-19`) | `codex app-server` (`src/codex.rs`). The context hook adds `-c developer_instructions=…` and `CODEX_HOME` (the Otto context bundle's shadow home), exactly as for a PTY codex session. No originator override. Wire shapes were checked against `codex app-server generate-json-schema` of the installed **0.166.0** |
+| **Gemini** | No first-party adapter. It is the ACP Registry entry `gemini` (npm `@google/gemini-cli`, `AcpRegistrySupport.test.ts:1693-1720`). The registry is fetched from `cdn.agentclientprotocol.com` (`AcpRegistrySupport.ts:51`), npm-installed into T3's own prefix (`:1252-1294`), and launched with the registry's argv/env (`:1877-1917`). The exact flag comes from the live registry JSON and is not in the repo | `gemini --acp` (the installed CLI's own flag) plus `--model m`, into the ACP driver (`src/acp.rs`, `AcpDriver::gemini`) |
+| **Grok** | `grok` from `binaryPath` (`packages/provider-grok/src/server/acpSupport.ts:67`). Argv per runtime mode (`:47-58`): `agent stdio`; `--permission-mode auto agent stdio`; `agent --always-approve stdio`; for approval-required, `--permission-mode default agent stdio`. Env `GROK_OAUTH2_REFERRER=t3code` (`:66-74`). `_meta` `{clientType:"extension"}` on initialize and `{cancelTrigger:"ctrl_c"}` on cancel (`:98-101`). Auth method `xai.api_key` when `XAI_API_KEY` is set, else `cached_token` (`:21-25`, `:77-81`) | `grok --permission-mode default [-m model] [--rules=<context>] agent stdio` (`AcpDriver::grok`). The context flags must come before `agent`: the subcommand rejects a trailing `--rules` (verified against grok 1.0.70). Same `_meta` and auth preference. Otto omits the T3-specific referrer and never launches the `auto` / `--always-approve` variants |
+
+Installed CLIs it was built against: claude 2.1.318, codex-cli 0.166.0,
+gemini (with `--acp`), grok 1.0.70 (`agent stdio`, ACP protocol v1).
+
+**Claude, ACP or SDK?** T3 Code's own Claude provider is the SDK path. The
+ACP adapter (`@agentclientprotocol/claude-agent-acp`) is only a Registry
+agent, and it would need an npm install. Otto therefore mirrors the SDK path.
+The SDK is a thin TypeScript layer over `claude`'s stdio protocol, so the
+Rust port speaks that protocol to the CLI already on the machine. Otto
+installs nothing.
 
 ## 2. Session lifecycle
 
-**ACP (T3 Code `packages/provider-acp/src/server/AcpSessionRuntime.ts`)** —
-mirrored 1:1 in `acp.rs`:
+### Claude (SDK control protocol; `claude.rs`)
 
-1. `initialize` with protocol v1 and **no fs, no terminal** client
-   capabilities (`:1789-1803`; the registry flavour enables terminals only
-   for Devin, `provider-acp-registry/src/server/adapter.ts:299-306`). Otto
-   answers any `fs/*` / `terminal/*` request with JSON-RPC `-32601`.
-2. `authenticate` only after an auth-required error (`:2164-2209`). Otto
-   phase 1 surfaces the error as an `error` item (sign in with the CLI once).
-3. Resume: `session/load` when a native session id is known and the agent
-   advertised `loadSession`, else `session/new` (`:2217-2260`); a failed load
-   starts a fresh session (`adapter.ts:6997-7019`). History the agent
-   replays during `session/load` is dropped (Otto keeps its own).
-4. `session/prompt`; its **response** carries `stopReason`
-   (`AcpSessionRuntime.ts:2619-2621`).
-5. Cancel: `session/cancel`, and every open `session/request_permission` is
-   answered `cancelled` (ACP rule; `:2366-2405`).
-6. Permission round-trip (`adapter.ts:6353-6440`, `1255-1276`): the request
-   becomes a pending runtime request + an `approval_request` item; a person's
-   decision maps to exactly one option kind — accept → `allow_once`,
-   accept-for-session → `allow_always`, decline → `reject_once`; no matching
-   option or `cancel` → `{outcome: "cancelled"}`. Never a wider grant than
-   asked for.
+1. **Spawn and initialize.** Spawn with the argv above. Send
+   `{type:"control_request", request_id, request:{subtype:"initialize"}}`
+   (the SDK's `Query.initialize`). The prompt is queued until the
+   `control_response` arrives. `system/init` reports the session id and
+   model (`ClaudeAdapterV2.ts:3000`).
+2. **Prompt.** Send `{type:"user", message:{role:"user", content:[{type:"text"}]},
+   parent_tool_use_id:null}` (the SDK's `send`).
+3. **Stream.** The CLI emits `stream_event`s. Text and thinking deltas grow
+   one item per content block. The full `assistant` frame adds the
+   `tool_use` blocks (text that was already streamed is not re-emitted), and
+   the `user` frame's `tool_result` settles the tool.
+4. **Permission round-trip.** The CLI sends
+   `control_request {subtype:"can_use_tool", tool_name, input,
+   permission_suggestions, tool_use_id}`, which becomes a pending runtime
+   request plus an `approval_request` item. The answer is a
+   `control_response {subtype:"success", response: PermissionResult}`,
+   built by `permissionResultFromDecision` (`ClaudeAdapterV2.ts:3502-3545`):
 
-T3 Code also auto-answers some requests by runtime-mode policy
-(`clientPolicy.ts:76-192`: reads always allowed, full-access allows all).
-**Otto does not**: every request reaches a person (see Safety).
+   | Decision | Answer |
+   |---|---|
+   | accept | `allow` + the original input |
+   | accept for session | `allow` + `updatedPermissions`: the suggestions re-targeted to `session`, else an `addRules` allow rule for the tool |
+   | decline | `deny` |
+   | cancel | `deny` + `interrupt:true` |
 
-**Codex (`CodexAdapterV2.ts`)**, for phase 2: one `initialize` per process
-(`clientInfo`, `capabilities.experimentalApi`, `:1765-1803`, `:233-237`) →
-`thread/start {cwd, model, config}` / `thread/resume {threadId,
-excludeTurns:true, …}` (`:7061-7108`) → `turn/start {threadId, input, cwd,
-model, approvalPolicy, sandboxPolicy, …}` (`:744-818`) → `turn/interrupt
-{threadId, turnId}` (`:7567`). Runtime mode → `approvalPolicy` /
-`sandboxPolicy` (`:703-742`: approval-required = `untrusted` + read-only,
-auto-accept-edits = `on-request` + workspace-write, full-access = `never` +
-danger-full-access). Server→client `item/commandExecution/requestApproval`
-and `item/fileChange/requestApproval` are answered `{decision: accept |
-acceptForSession | decline | cancel}` (`:5277-5418`).
+   Otto drops `setMode` suggestions, because a session-wide mode switch is a
+   wider grant than the one tool approved. T3 Code drops them under a
+   managed ceiling. A `control_cancel_request` (the CLI withdrew the
+   question) closes the request `cancelled`.
+5. **Interrupt.** Every open question is answered `cancel`, then
+   `control_request {subtype:"interrupt"}` is sent (T3 Code:
+   `queryRuntime.interrupt()`, `:1298-1300`).
+6. **Turn end.** The `result` message, mapped by `terminalStatusFromResult`
+   (`:3708-3738`):
 
-**Claude (SDK)**, for phase 2: `resume: nativeThreadId` or `sessionId`,
-`includePartialMessages: true`, the `claude_code` system-prompt preset,
-`permissionMode` from the runtime mode (`ClaudeAdapterV2.ts:1526-1660`,
-`:2573-2620`), approvals through the SDK's `canUseTool` callback (`:10136`).
+   | `result` | Turn status |
+   |---|---|
+   | `terminal_reason` `aborted_*` | interrupted |
+   | `success` without `is_error` | completed |
+   | errors mentioning interrupt / cancel | interrupted / cancelled |
+   | anything else | failed |
+
+   Usage: input is `input` + cache read + cache creation, and output is
+   `output` tokens.
+7. **Tool → item.** `CLAUDE_KNOWN_TOOL_CLASSIFICATIONS` (`:2819-2860`):
+
+   | Claude tool | Item type |
+   |---|---|
+   | Bash | `command_execution` |
+   | Edit, MultiEdit, Write, NotebookEdit | `file_change` |
+   | WebFetch, WebSearch | `web_search` |
+   | anything else | `dynamic_tool` |
+   | a root `TodoWrite` | the plan (`:9313`) |
+
+   Subagent frames (`parent_tool_use_id` set) are not projected. T3 Code
+   builds a subagent tree that Otto does not port. Subagent permission
+   questions still reach a person.
+
+### Codex (`codex app-server`; `codex.rs`)
+
+The framing is newline-delimited JSON-RPC **without** a `"jsonrpc"` member:
+`{id, method, params}` (`packages/effect-codex-app-server/src/protocol.ts:106-110`,
+`:517-537`).
+
+1. **Initialize.** `initialize {clientInfo, capabilities:{experimentalApi:true,
+   optOutNotificationMethods:["turn/diff/updated"]}}`, then the
+   `initialized` notification (`CodexAdapterV2.ts:1763-1801`, `:233-237`).
+2. **Thread.** Send `thread/start {cwd, model?, approvalPolicy, sandbox}`.
+   With a known thread, send
+   `thread/resume {threadId, excludeTurns:true, …}` instead (`:7061-7108`).
+   If the resume fails, Otto starts a fresh thread. T3 Code unarchives an
+   archived thread and retries (`:6725-6741`); Otto does not.
+3. **Prompt.** `turn/start {threadId, input:[{type:"text", text}],
+   approvalPolicy, sandboxPolicy}` (`buildCodexTurnStartParams`, `:744-818`).
+4. **Runtime mode.** T3 Code's approval-required mode is
+   `approvalPolicy:"untrusted"` + `sandboxPolicy:{type:"readOnly"}`
+   (`:703-742`). When Otto's Seatbelt confines the process, the inner
+   sandbox becomes `{type:"externalSandbox"}`, with thread-level
+   `danger-full-access` inside the outer jail. A nested Seatbelt fails, and
+   PTY codex drops its own sandbox under Otto's in the same way
+   (`otto-sessions` `interaction_mode_apply`). Approvals still go to a
+   person.
+5. **Stream** (`:4364-4955`).
+
+   | Codex notification | Result |
+   |---|---|
+   | `item/started`, `item/completed` | Upsert one item per Codex item: `agentMessage`, `reasoning`, `commandExecution`, `fileChange`, `mcpToolCall` / `dynamicToolCall`, `webSearch`, `contextCompaction` |
+   | `item/agentMessage/delta`, `item/reasoning/summaryTextDelta`, `item/reasoning/textDelta` | Grow the text |
+   | `item/commandExecution/outputDelta` | `command_output.delta` |
+   | `turn/plan/updated` | The plan |
+   | `thread/tokenUsage/updated` | Usage (`last` → turn, `total` + `modelContextWindow` → context) |
+   | `error` with `willRetry:false` | Kept as the failure |
+   | `turn/completed` | `completed`, `interrupted` or `failed` (`mapCodexTurnStatus`, `:359-372`) |
+
+   Item status follows `codexItemStatus` (`:392-414`): `inProgress` →
+   running, `declined` → cancelled.
+6. **Approvals** (`:5277-5640`).
+
+   | Codex request | Kind | Answer |
+   |---|---|---|
+   | `item/commandExecution/requestApproval` | command | `{decision: accept \| acceptForSession \| decline \| cancel}` |
+   | `item/fileChange/requestApproval` | file-change | same as above |
+   | `execCommandApproval`, `applyPatchApproval` (legacy) | command, file-change | `approved \| approved_for_session \| denied \| abort` (`:576-590`) |
+   | `item/permissions/requestApproval` | permission | the requested profile with scope `turn` / `session`, or an empty profile (`:609-621`) |
+
+   `serverRequest/resolved` closes a request that Codex settled itself.
+   `requestUserInput`, elicitations, dynamic tool calls and auth refresh get
+   JSON-RPC `-32601`; Otto's client does not offer them.
+7. **Interrupt.** Open requests are answered `cancel` / `abort`. Then Otto
+   sends `turn/interrupt {threadId, turnId}` (`:7567`); if the Codex turn id
+   is not known yet, it is sent once `turn/start` answers.
+
+### ACP: Gemini and Grok (`acp.rs`)
+
+T3 Code's ACP runtime is `packages/provider-acp/src/server/AcpSessionRuntime.ts`
+plus `adapter.ts`.
+
+1. **Initialize.** Send `initialize` with **no fs and no terminal**
+   capabilities. T3 Code advertises none for Claude-ACP, Gemini or Grok
+   (`AcpSessionRuntime.ts:1789-1803`, `adapter.ts:2297-2306`). Otto answers
+   any `fs/*` / `terminal/*` request with `-32601`. T3 Code prefers the ACP
+   v2 preview and falls back to v1 (`packages/effect-acp/src/client.ts:679-703`).
+   Otto speaks **v1**, which both installed agents answer.
+2. **Session.** With a known id, send `session/load` if the agent advertised
+   `loadSession`; otherwise send `session/new {cwd, mcpServers:[]}`
+   (`AcpSessionRuntime.ts:2217-2260`). A failed load starts a fresh session
+   (`adapter.ts:6997-7019`). Otto drops the history the agent replays
+   during `session/load` (`AcpSessionRuntime.ts:1736-1765`).
+3. **Auth.** Authentication is **lazy**. Only after `session/new|load` fails
+   with `-32000` does Otto send `authenticate {methodId}`, with the
+   flavour's preferred advertised method or else the first `agent`-type
+   method, and then retry once (`:1065-1078`, `:2164-2208`). Terminal and
+   env-var methods are never sent. A second failure is reported, and the
+   person signs in with the CLI.
+4. **Prompt.** `session/prompt`; the response carries `stopReason`.
+
+   | `stopReason` | Turn status |
+   |---|---|
+   | `cancelled` | interrupted |
+   | `end_turn`, `max_tokens`, `max_turn_requests`, `refusal` | completed (the last three also as `reason`) |
+
+   T3 Code: `adapter.ts:8181-8230`.
+5. **Permission round-trip** (`adapter.ts:6353-6527`).
+   `session/request_permission` becomes a pending request plus an
+   `approval_request` item. The answer uses `selectPermissionOptionId`
+   (`adapter.ts:1255-1266`):
+
+   | Decision | ACP option kind |
+   |---|---|
+   | accept | `allow_once` |
+   | accept for session | `allow_always` |
+   | decline | `reject_once` |
+   | cancel, or no matching option | `{outcome:"cancelled"}` |
+
+   The answer is never a wider grant than asked for.
+6. **Interrupt.** Every open permission is answered `cancelled`, then
+   `session/cancel` is sent (`AcpSessionRuntime.ts:2366-2405`;
+   `adapter.ts:5754-5790`).
+
+### What Otto does NOT port: policy auto-approval
+
+T3 Code auto-answers by runtime mode. Reads are always allowed and
+full-access allows everything (`clientPolicy.ts:143-200`, `adapter.ts:1268-1276`).
+Codex and Claude get `on-request` / `never` / `bypassPermissions` in the
+wider modes. Otto runs **only the approval-required mode**: every question
+reaches a person. Only a provider's own config allow-rules (for example
+`~/.claude/settings.json` `permissions.allow`) apply, exactly as in a PTY
+session.
 
 ## 3. The normalized event model
 
 T3 Code's adapters emit `ProviderAdapterV2Event`
-(`packages/provider-core/src/server/ProviderAdapter.ts:83-183`) — **entity
-upserts**, not deltas: an item is re-sent whole with its accumulated text and
-a `streaming` flag. Otto's `otto_core::agent_runtime` is that model, renamed
-only to snake_case fields (event `type` tags unchanged):
+(`packages/provider-core/src/server/ProviderAdapter.ts:84-182`). These are
+**entity upserts**, not deltas: an item is re-sent whole, with its
+accumulated text and a `streaming` flag. The ingestor sequences and persists
+them as domain events (`apps/server/src/orchestration-v2/ProviderEventIngestor.ts:464-640`).
 
-| T3 Code event | Otto `type` | Payload |
-|---|---|---|
-| `provider_session.updated` | same | `provider_session {status: starting\|ready\|running\|waiting\|stopped\|error, cwd, model, updated_at, last_error}` (`orchestrationV2.ts:946`) |
-| `provider_thread.updated` | same | `provider_thread {native_thread_id, context_usage?, updated_at}` |
-| `provider_turn.updated` | same | `provider_turn {id, ordinal, status: pending\|running\|completed\|interrupted\|failed\|cancelled, started_at, completed_at, turn_token_usage?}` (`:1168-1188`) |
-| `turn_item.updated` | same | `turn_item {id, turn_id, ordinal, status, title, started_at, completed_at, updated_at, type, …}` with `type` ∈ `user_message`, `assistant_message {message_id, text, streaming}`, `reasoning {text, streaming}`, `todo_list`, `file_change`, `command_execution {input, output?, exit_code?}`, `dynamic_tool`, `approval_request {request_id, request_kind, prompt?, options[{decision,label}]}`, `system_notice`, `error {failure}` (`:1495-1760`) |
-| `runtime_request.updated` | same | `runtime_request {id, turn_id, kind, status: pending\|resolved\|expired\|cancelled, response_capability, created_at, resolved_at, decision?}` (`:1205-1236`) |
-| `plan.updated` | same | `plan {id, turn_id, steps[{id,text,status}], explanation?}` (`:1320-1370`) |
-| `command_output.delta` | same | `{item_id, chunk}` — the only delta, never persisted |
-| `turn.terminal` | same | `{turn_id, status: completed\|interrupted\|cancelled\|failed, failure?, reason?}` |
+`otto_core::agent_runtime` is that model. Event `type` tags are T3 Code's;
+fields are snake_case (Otto's wire convention):
 
-Envelope: `{session_id, sequence, ts}` flattened beside the payload. Not
-ported (no Otto use yet): `app_thread.created`, `node.updated`,
-`subagent.updated`, `message.updated` (redundant with the
-`assistant_message` item), `background_work.updated`, and the item types for
-checkpoints, handoffs, compaction, web/file search.
+| T3 Code event | Otto payload |
+|---|---|
+| `provider_session.updated` | `provider_session {status: starting\|ready\|running\|waiting\|stopped\|error, cwd, model, updated_at, last_error}` (`orchestrationV2.ts:950`) |
+| `provider_thread.updated` | `provider_thread {native_thread_id, context_usage?, updated_at}` (`:1074-1083`) |
+| `provider_turn.updated` | `provider_turn {id, ordinal, status: pending\|running\|completed\|interrupted\|failed\|cancelled, started_at, completed_at, turn_token_usage?}` (`:1168-1189`) |
+| `turn_item.updated` | `turn_item {id, turn_id, ordinal, status, title, started_at, completed_at, updated_at, type, …}`; `type` is one of the item types below (`:1495-1819`) |
+| `runtime_request.updated` | `runtime_request {id, turn_id, kind: command\|file_read\|file_change\|mcp_elicitation\|permission, status: pending\|resolved\|expired\|cancelled, response_capability: live\|not_resumable, created_at, resolved_at, decision?}` (`:1205-1231`) |
+| `plan.updated` | `plan {id, turn_id, steps[{id, text, status: pending\|running\|completed}], explanation?}` (`:1320-1370`) |
+| `command_output.delta` | `{item_id, chunk}`. The only delta, never persisted |
+| `turn.terminal` | `{turn_id, status: completed\|interrupted\|cancelled\|failed, failure?, reason?}` |
 
-**ACP mapping** (T3 Code `runtimeModel.ts:1363-1620` + `adapter.ts`), as in
-`acp.rs`: `agent_message_chunk` / `agent_thought_chunk` accumulate into one
-`assistant_message` / `reasoning` item (`emitTextSegment`,
-`adapter.ts:2593-2700`), any non-text update closes the segment; `tool_call`
-/ `tool_call_update` merge into one item (`emitTool`, `:3711`, `:4041-4197`):
-`execute` → `command_execution`, `edit|delete|move` → `file_change`, other →
-`dynamic_tool`; `plan` → `plan.updated` + a `todo_list` item (`:4238-4345`);
-prompt end → `turn.terminal` (`:7547-7602`; `cancelled` → interrupted).
+Turn item types:
 
-**Who owns what.** In T3 Code adapters own their processes; the
-orchestration layer (`ProviderEventIngestor.ts:458-640`) sequences, persists
-and turns a failed terminal into an `error` item. Otto splits the same way
-but keeps drivers **sans-IO** (`StructuredDriver`, `driver.rs`): the runtime
-owns the child (so every spawn passes Otto's safety pipeline), turns
-(ids, ordinals, status), item ordinals, sequencing, request resolution /
-cancellation, and the process-death terminal (`transport_error`, as T3 Code,
-`adapter.ts:2245-2277`). A driver returns `DriverStep {events: DriverEvent[],
-writes, signal}`.
+| Item type | Fields |
+|---|---|
+| `user_message` | |
+| `assistant_message` | `message_id`, `text`, `streaming` |
+| `reasoning` | `text`, `streaming` |
+| `todo_list` | |
+| `file_change` | `file_name`, `diff_str?`, `old_str?`, `new_str?` |
+| `command_execution` | `input`, `output?`, `exit_code?` |
+| `dynamic_tool` | |
+| `web_search` | `patterns` |
+| `approval_request` | `request_id`, `request_kind`, `prompt?`, `reason?`, `options[{decision, label}]` |
+| `system_notice` | |
+| `error` | `failure` |
+
+Approval decisions (`ProviderApprovalDecision`, `providerPolicy.ts:58-64`)
+are `accept | accept_for_session | accept_always | decline | cancel`.
+
+**Envelope.** Each event carries `{session_id, sequence, ts}` flattened
+beside the payload.
+
+**Not ported** (no Otto consumer yet): `app_thread.created`,
+`node.updated`, `subagent.updated`, `background_work.updated`, and the item
+types for checkpoints, handoffs, forks, user-input requests and
+file_search. `message.updated` is also not ported, because the
+`assistant_message` item carries the same text.
+
+**Who owns what.** In T3 Code, adapters own their processes and the
+orchestration layer sequences, persists, and turns a failed terminal into an
+`error` item. Otto splits the work the same way, but its drivers are
+**sans-IO** (`StructuredDriver`, `driver.rs`). The runtime owns the child,
+so every spawn passes Otto's safety pipeline. It also owns turns (ids,
+ordinals, status), item ordinals, sequencing, request resolution and
+cancellation, and the process-death terminal. A dead process fails the turn
+as `transport_error`, as in T3 Code (`adapter.ts:2245-2277`). A driver
+returns `DriverStep {events, writes, signal}`.
+
+**Coalescing.** T3 Code flushes Codex deltas every 50 ms
+(`CodexAdapterV2.ts:212`) and coalesces live thread events over a 50 ms
+window (`ThreadLiveEventCoalescer.ts:18`). Otto's runtime coalesces every
+streaming upsert of an item to one per `RuntimeConfig::stream_coalesce`
+(50 ms):
+
+- the first chunk goes out at once;
+- the latest held text is flushed when the window ends, or before any other
+  event;
+- text only grows.
 
 ## 4. History, replay and restarts
 
-* T3 Code stores every domain event with a global sequence
-  (`persistence/OrchestrationEventStore.ts:468-490`) plus projection tables
-  (`Migrations/055_OrchestrationV2.ts:55-298`); a client subscribes with
-  `afterSequence` and gets the events since, or — past 128 events / 1 MiB or
-  an unknown sequence — a snapshot then live (`apps/server/src/ws.ts:916-1000`,
-  `ThreadStream.ts:18-20`).
-* **Otto**: per-session `sequence` (strictly increasing, never reused); an
-  in-memory ring (4096 events / 8 MiB) and an entity projection kept in
-  memory and persisted (`agent_runtime_entities`, migration 0197: latest JSON
-  per entity; streaming text written once it settles).
+- **T3 Code.** Every domain event is stored with a sequence
+  (`OrchestrationV2StoredEvent`, `orchestrationV2.ts:2264-2269`). A client
+  subscribes with `afterSequence` and gets the events since. Past 128 events
+  or 1 MiB, or for an unknown sequence, it gets a snapshot and then live
+  events (`apps/server/src/orchestration-v2/ThreadStream.ts:18-20`, `:91-118`).
+- **Otto.** Each session has its own `sequence`, strictly increasing and
+  never reused. An in-memory ring holds 4096 events / 8 MiB, and an entity
+  projection is persisted in `agent_runtime_entities` (migration 0197):
+  the latest JSON per entity, with streaming text written once it settles.
   `GET /runtime-sessions/{id}/events?after_sequence=` returns
-  `{kind:"events"}` within the ring and T3 Code's 128 / 1 MiB limits, else
-  `{kind:"snapshot"}` — the same contract.
-* Sequence floor: each session row keeps `seq_reserved`; before a child is
-  used 65 536 sequences are durably reserved (again whenever one reaches the
-  reservation), and a restarted daemon resumes above
-  `max(last_seq, seq_reserved)`, so no sequence a client saw is reused.
-* **Restart** — T3 Code `ProviderRuntimeRecoveryService.reconcileProjection`
-  (`:199`, `:369-450`): pending requests expire as `not_resumable`,
-  non-terminal turns / items become `cancelled`. Otto does exactly that at
-  boot (`AgentRuntime::recover`, called from `recover_before_serve`) and marks
-  the provider session `stopped`. The next prompt respawns the CLI and
-  resumes the provider's own session (`session/load`; Codex
-  `thread/resume`; Claude `resume`). T3 Code can additionally auto-continue
-  a restarted run (`RestartContinuation.ts:33-86`); Otto does not (yet).
-* Weaker than PTY sessions, stated plainly: a PTY agent with
-  `session_persistence` keeps running in its PTY holder across a daemon
-  restart. A structured child is a direct child of `ottod` with piped stdio;
-  when the daemon exits its stdin closes and the CLI exits, so an in-flight
-  turn always ends `cancelled`. Surviving would need a stdio-proxy holder.
+  `{kind:"events"}` within the ring and T3 Code's 128 / 1 MiB limits, and
+  `{kind:"snapshot"}` otherwise. That is the same contract.
+- **Sequence floor.** Each session row keeps `seq_reserved`. Before a child
+  is used, 65 536 sequences are durably reserved, and again whenever the
+  count reaches the reservation. A restarted daemon resumes above
+  `max(last_seq, seq_reserved)`.
+- **What is resumed.** The provider's own id is persisted as
+  `native_thread_id`:
 
-## 5. How the web client consumes it (T3 Code → Otto Threads, phase 2 UI)
+  | Provider | Resume key | How Otto resumes |
+  |---|---|---|
+  | Claude | session id | `--resume` |
+  | Codex | thread id | `thread/resume` |
+  | ACP | session id | `session/load` |
 
-T3 Code subscribes per thread with `afterSequence` and folds every event
-into a projection (`packages/client-runtime/src/state/threads.ts:482-614`,
-`orchestrationV2Projection.ts:259-373`):
+  T3 Code persists the same `nativeThreadRef` (`adapter.ts:861-903`,
+  `orchestrationV2.ts:145-151`).
+- **Daemon restart, stated plainly.** A structured child is a direct child
+  of `ottod` with piped stdio, so it dies with the daemon. A PTY agent with
+  `session_persistence` survives in its PTY holder; a structured child does
+  not. At boot (`AgentRuntime::recover`, from `recover_before_serve`):
+  - every in-flight turn ends **`interrupted`**, and so do its open items;
+  - every pending request becomes `expired` / `not_resumable`;
+  - the provider session becomes `stopped`.
 
-* streaming text — `turn_item.updated` with `streaming: true`, replaced by
-  id (`apps/web/src/components/chat/TimelineAssistantRows.tsx:29-53`);
-* tool cards — `command_execution` / `file_change` items
-  (`session-logic.ts:349-567`, `TimelineWorkEntryRow.tsx`) plus live
-  `command_output.delta`;
-* approvals — pending `runtime_request`s paired with their item
-  (`threadRequests.ts:229`, `ComposerPendingApprovalActions.tsx:20-120`),
-  answered with `runtime-request.respond` → Otto
-  `POST /runtime-sessions/{id}/requests/{request_id} {decision}`;
-* plan — `plan.updated` / `todo_list` (`ProposedPlanCard.tsx`);
-* stop — enabled while a turn runs (`session-logic.ts:1137`) → Otto
-  `POST …/interrupt`;
-* working — the run / provider-session status (`session-logic.ts:1124-1134`).
+  T3 Code's `ProviderRuntimeRecoveryService` does the same, except that it
+  marks runs `cancelled` (`:271`, `:369-396`). Otto says `interrupted`
+  because the daemon stopped the turn. The next prompt respawns the CLI and
+  resumes the provider's own session id. The interrupted turn's partial work
+  is whatever the provider itself saved. T3 Code can also auto-continue
+  (`RestartContinuation.ts:33-36`); Otto does not.
+
+## 5. How the web client consumes it (T3 Code → Otto Threads)
+
+T3 Code loads a snapshot, then subscribes with `afterSequence`, and folds
+each event into a projection (`packages/client-runtime/src/state/threads.ts:937-1027`,
+`orchestrationV2Projection.ts:270-420`).
+
+| Element | T3 Code | Otto |
+|---|---|---|
+| Streaming text | `turn_item.updated` with `streaming: true`, replaced by id (`apps/web/src/session-logic.ts:635-669`, `:867-895`) | same |
+| Tool and work-log cards | `command_execution` / `file_change` / `web_search` / `dynamic_tool` items (`session-logic.ts:400-545`) plus live command output (`orchestration.subscribeCommandOutput`) | the same items plus `command_output.delta` |
+| Approvals | Pending `runtimeRequests` paired with their `approval_request` item (`packages/client-runtime/src/state/threadRequests.ts:229-284`), answerable only while `responseCapability` is `live`; answered by `runtime-request.respond {requestId, decision}` (`operations/commands.ts:879-890`) | `POST /runtime-sessions/{id}/requests/{request_id} {decision}` |
+| Plan | `todo_list` / `plan.updated` (`session-logic.ts:517`, `:672-690`) | same |
+| Stop | `thread.stop` / `run.interrupt` (`commands.ts:784-876`), shown while the phase is running (`session-logic.ts:1124-1146`) | `POST …/interrupt` |
+| Working | provider-session / run status (`session-logic.ts:1124-1134`) | provider-session status |
 
 ## 6. Official crates
 
-* ACP: `agent-client-protocol` **5.0.0** (schema 1.15.1) — Otto uses its v1
-  wire types for every message it sends and parses; it does not use the
-  crate's connection runtime, because the runtime (not the SDK) must own the
-  process for the safety pipeline and the driver stays sans-IO and testable.
-* Codex: crates.io `codex-app-server-protocol` is **0.63.0**, published from
-  a fork (`namastexlabs/codex`), against an installed codex-cli **0.166.0** —
-  it lags and is not OpenAI's. Phase 2 uses the installed CLI's own
-  `codex app-server generate-json-schema` output (T3 Code generates its
-  types the same way from an upstream commit,
-  `packages/effect-codex-app-server/scripts/generate.ts:16-19`).
+- **ACP.** `agent-client-protocol` **5.0.0** (schema 1.15.1). Every message
+  Otto sends or parses uses its v1 wire types (`InitializeRequest`,
+  `AuthenticateRequest`, `NewSessionRequest`, `LoadSessionRequest`,
+  `PromptRequest`, `CancelNotification`, `SessionNotification`,
+  `RequestPermissionRequest/Response`, …). Otto does not use the crate's
+  connection runtime: Otto's runtime must own the process (for the safety
+  pipeline), and the driver stays sans-IO and unit-testable. Otto's own
+  code is only the JSON-RPC envelope and id correlation.
+- **Codex.** crates.io `codex-app-server-protocol` is **0.63.0**, published
+  from a fork (`namastexlabs/codex`). It lags the installed codex-cli
+  **0.166.0** by about a hundred releases (`thread/*`, `turn/*` and `item/*`
+  are not in it), so it is not used. T3 Code generates its own client from
+  an upstream commit (`scripts/generate.ts:16-19`). Otto keeps a minimal
+  typed surface in `codex.rs`, checked against
+  `codex app-server generate-json-schema` of 0.166.0. When upstream
+  publishes a current crate, swap it in.
+- **Claude.** There is no official Rust SDK. `claude.rs` ports the
+  TypeScript SDK's transport: its argv and the control-protocol messages
+  `initialize`, `can_use_tool`, `interrupt` and `control_cancel_request`.
 
-## 7. Safety — identical to PTY agent sessions
+## 7. Safety: identical to PTY agent sessions
 
 Every spawn goes through `SessionManager::prepare_runtime_spawn`
-(`crates/otto-sessions/src/manager/runtime_spawn.rs`), which calls the same
-private helpers, in the same order, as `SessionManager::create`:
-`refuse_while_shutting_down` → `check_session_cwd` (refuses `/`, `$HOME`
-while confined, its parents, Otto's data dir) → `trust::ensure_trusted_async`
-→ the pre-spawn context hook → `apply_sandbox` **last** (the
-`process_sandbox` Seatbelt profile, same `sandbox_decision`; `gemini` is not
-a built-in name, so it is confined whenever the setting is on and is never
-exempt by omission). A named provider account or a workspace network
-profile is **refused**, not skipped.
+(`crates/otto-sessions/src/manager/runtime_spawn.rs`). It calls the same
+private helpers as `SessionManager::create`, in the same order:
 
-The PTY prompt guard types keystrokes to accept folder-trust / "press
+1. `refuse_while_shutting_down`;
+2. `check_session_cwd`, which refuses `/`, `$HOME` while confined, its
+   parents, and Otto's data dir;
+3. `trust::ensure_trusted_async` (claude, codex and grok pre-trust);
+4. the context hook (`--add-dir` / `--append-system-prompt-file` /
+   `--settings` for claude, `developer_instructions` + `CODEX_HOME` for
+   codex, `--rules` for grok);
+5. a driver's `tail_args` (grok's `agent stdio`);
+6. `apply_sandbox`, **last**, over the fully built argv: the
+   `process_sandbox` Seatbelt profile, same `sandbox_decision`.
+
+A named provider account or a workspace network profile is **refused**, not
+skipped.
+
+The PTY prompt guard types keystrokes to accept folder-trust or "press
 Enter" dialogs on a terminal screen. A structured child has no terminal:
 trust is pre-seeded as above, and every approval arrives as a pending
-runtime request **only a person can answer** — Otto does not port T3 Code's
-policy auto-approval. The answer route is person-only and an `Admin`-class
-approval gate in `policy::route_class`; every other write is person-only
-too; reads need workspace `viewer` + owner-or-admin; WS delivery is
-session-family (owner, workspace admin, root).
+runtime request **that only a person can answer**. Access rules:
 
-## 8. Phase 2 decisions and gaps
+- the answer route is person-only and is an `Admin`-class approval gate in
+  `policy::route_class`;
+- every other write is person-only too;
+- reads need workspace `viewer` + owner-or-admin;
+- WS delivery is session-family (owner, workspace admin, root).
 
-* **Claude** — mirror T3 Code's live path (the Agent SDK) by porting its
-  transport to Rust against the `claude` binary already installed (no new
-  dependency), or use `@agentclientprotocol/claude-agent-acp` (an npm
-  install, which needs the user's approval; T3 Code installs registry npm
-  agents with `npm install --global` into its own prefix,
-  `AcpRegistrySupport.ts:1251-1288`).
-* **Codex** driver (above). Runtime modes (approval-required / auto-accept-edits /
-  full-access) mapped like T3 Code, defaulting to approval-required.
-* Text coalescing (T3 Code flushes Codex deltas every 50 ms,
-  `CodexAdapterV2.ts:212`); Otto re-emits per chunk today.
-* Threads UI on `/runtime-sessions`; `ottod` teardown calling
-  `AgentRuntime::shutdown()`; eviction of idle live entries; accounts,
-  network profiles, Otto MCP tools for structured sessions; restart
-  continuation; images in prompts.
+None of the four drivers passes a skip-permissions flag. Claude:
+`--permission-mode default`. Codex: `untrusted`. Grok:
+`--permission-mode default`. Gemini: its default.
+
+## 8. Code map
+
+| Path | What |
+|---|---|
+| `crates/otto-core/src/agent_runtime.rs` | event model + REST DTOs |
+| `crates/otto-agent-protocol/src/driver.rs` | `StructuredDriver` contract (sans-IO) |
+| `crates/otto-agent-protocol/src/{claude,codex,acp}.rs` | the drivers |
+| `crates/otto-agent-protocol/src/runtime.rs` | processes, turns, sequencing, coalescing, replay, persistence, recovery |
+| `crates/otto-agent-protocol/src/{host,process,ring,http}.rs` | safety host, child I/O, replay ring, `/runtime-sessions` router |
+| `crates/otto-agent-protocol/src/bin/otto-fake-{agent,codex}.rs` | test doubles (ACP agent, `codex app-server`) |
+| `crates/otto-state/src/agent_runtime.rs`, migration `0197_agent_runtime.sql` | persistence |
+| `ui/src/lib/api/types/agent-runtime.ts` | TS mirror |
+
+## 9. Gaps and next steps
+
+- **Threads UI** on `/runtime-sessions`: the work in §5.
+- **`ottod` teardown** calling `AgentRuntime::shutdown()`, and eviction of
+  idle live entries.
+- **Runtime modes.** auto-accept-edits and full-access are unported; they
+  would need an admin setting, as `agent_skip_permissions` is for PTY
+  sessions.
+- **Features T3 Code has that Otto does not yet:** restart continuation,
+  images and attachments in prompts, steering a running turn
+  (`turn/steer`), Codex `thread/unarchive`, Claude thinking summaries and
+  the subagent tree, ACP v2.
+- **Named provider accounts and network profiles** (refused today).
+- **Otto MCP tools** for structured sessions.

@@ -764,9 +764,14 @@ not `sessions`: no PTY route, terminal socket or idle sweep touches them.
 Every spawn passes the PTY sessions' safety pipeline
 (`SessionManager::prepare_runtime_spawn`: cwd refusal, folder trust, context
 provisioning, Seatbelt); a named provider account or a workspace network
-profile is refused (400) rather than bypassed. Drivers: `gemini` (ACP,
-`gemini --acp`). `claude` / `codex` answer **400** `no structured driver …`
-until their drivers land.
+profile is refused (400) rather than bypassed. Drivers (what T3 Code runs,
+see the design doc's provider table): `claude` — the Agent SDK's stream-json
+control protocol against the `claude` CLI (`--permission-mode default`);
+`codex` — `codex app-server` (`approvalPolicy: untrusted`); `gemini` — ACP
+via `gemini --acp`; `grok` — ACP via `grok --permission-mode default agent
+stdio`. Every tool approval reaches a person; no auto-approval mode exists.
+Streaming upserts of one item are coalesced to at most one per **50 ms**
+(the latest text always follows; nothing is dropped).
 
 RBAC: `Agents` View for every GET, `Agents` Edit for every POST
 (`policy.rs`); every session route additionally requires workspace `viewer`
@@ -775,11 +780,13 @@ and owner-or-admin (root passes); listing returns the caller's own sessions
 credential** — an agent session's, MCP or share credential gets **403**; the
 request answer is also an `Admin`-class approval gate (above).
 
-`RuntimeSession`: `{id, workspace_id, provider: "claude"|"codex"|"gemini",
+`RuntimeSession`: `{id, workspace_id, provider: "claude"|"codex"|"gemini"|"grok",
 title, cwd, model?, native_thread_id?, status, created_by, created_at,
 last_active_at, last_sequence}`; `status` ∈ `starting | idle | working |
 awaiting_permission | dormant | closed` (`dormant` = no process; the next
-prompt respawns it and resumes `native_thread_id` — ACP `session/load`).
+prompt respawns it and resumes `native_thread_id` — Claude `--resume`, Codex
+`thread/resume`, ACP `session/load`; a provider that cannot resume it starts
+a fresh conversation).
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
@@ -805,10 +812,12 @@ everything and continue after `snapshot_sequence`. Live delivery is the
 
 **Persistence and restart.** Every entity's latest state is stored
 (`agent_runtime_entities`), streaming text once it settles; a fresh daemon
-serves snapshots from it. On boot every open turn becomes `cancelled`, its
-open items `cancelled`, every pending request `expired` with
-`response_capability: {type:"not_resumable"}`, the provider session
-`stopped` (T3 Code `reconcileProjection`).
+serves snapshots from it. Structured children do not survive a daemon
+restart (their stdio dies with `ottod`). On boot every open turn becomes
+`interrupted`, its open items `interrupted`, every pending request `expired`
+with `response_capability: {type:"not_resumable"}`, the provider session
+`stopped` (T3 Code `reconcileProjection`, which says `cancelled`); the next
+prompt respawns the CLI and resumes its own session id.
 
 ## Connection sections (sidebar grouping)
 

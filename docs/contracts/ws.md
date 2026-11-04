@@ -1527,11 +1527,13 @@ published on the streaming path, never through the internal bus.
   completed|interrupted|cancelled|failed, failure?, reason?}`. Entities are
   sent WHOLE (replace by id); `turn_item.type` ∈ `user_message |
   assistant_message | reasoning | todo_list | file_change |
-  command_execution | dynamic_tool | approval_request | system_notice |
-  error`. Shapes: `ui/src/lib/api/types/agent-runtime.ts`.
+  command_execution | dynamic_tool | web_search | approval_request |
+  system_notice | error`. Streaming upserts of one item arrive at most once
+  per 50 ms (always the latest text). Shapes:
+  `ui/src/lib/api/types/agent-runtime.ts`.
 - What drives the UI (as in T3 Code's web client): streaming text =
   `assistant_message` / `reasoning` items with `streaming: true`; tool cards
-  = `command_execution` / `file_change` / `dynamic_tool` items (+ live
+  = `command_execution` / `file_change` / `dynamic_tool` / `web_search` items (+ live
   `command_output.delta`); approvals = `runtime_request.updated` with
   `status: pending` paired with its `approval_request` item (answer via
   `POST /runtime-sessions/{id}/requests/{request_id}`); plan =
