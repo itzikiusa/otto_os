@@ -3,8 +3,8 @@
 Status: the daemon side is done: the event model, contracts, runtime, and
 drivers for Claude, Codex, Gemini and Grok. Tests use a fake ACP agent and a
 fake `codex app-server`. New Claude / Codex / Gemini / Grok threads in a
-workspace run on `/runtime-sessions` (§5); Scratch threads, other harnesses
-and existing threads stay on the PTY view, which is unchanged.
+workspace (Scratch included) run on `/runtime-sessions` (§5); other
+harnesses and existing threads stay on the PTY view, which is unchanged.
 
 **Attribution.** Ported from [T3 Code](https://github.com/pingdotgg/t3code)
 (MIT, Copyright (c) 2026 T3 Tools Inc.). The licence is reproduced in
@@ -437,11 +437,14 @@ None of the four drivers passes a skip-permissions flag. Claude:
 
 ## 9. Gaps and next steps
 
-- **Scratch.** The scratch workspace only serves the PTY session family
-  (`routes/mod.rs` scratch gate), so Scratch threads stay PTY threads.
-- **Threads UI gaps:** closed runtime threads are hidden (no History
-  entry, no rename); no attachments, slash commands or side chat; the
-  terminal drawer and Changes/PR panels are the PTY thread's.
+- **Threads UI.** Runtime threads raise the shared "needs you" flag while
+  an approval waits, sit in History once closed (read-only, renamable),
+  and take the view's slash commands (`/btw` side chat — itself a PTY
+  thread — `/diff`, `/files`, `/terminal`, `/new`, `/fork`, `/review`);
+  any other `/command` goes to the agent as typed (T3 Code's provider
+  commands). Not yet: image attachments (the prompt contract is text only;
+  the Claude and Codex drivers would need image content), model / effort
+  switching mid-thread, and the per-thread terminal drawer.
 - **`ottod` teardown** calling `AgentRuntime::shutdown()`, and eviction of
   idle live entries.
 - **Runtime modes.** auto-accept-edits and full-access are unported; they

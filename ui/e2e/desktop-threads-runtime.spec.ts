@@ -119,7 +119,9 @@ test('a Codex runtime thread streams, asks inline, queues a follow-up and stops'
   await expect(thread.locator('[data-slash-pop]')).toContainText('/btw');
   await composer.fill('/btw what changed so far?');
   await composer.press('Enter');
-  await expect(page.getByTestId('threads-side-chat')).toBeVisible({ timeout: 15_000 });
+  // (The side chat itself is a PTY thread — its agent never starts against
+  // the e2e stand-in CLI, so this checks that it is asked about this thread.)
+  await expect(page.getByTestId('threads-side-chat')).toContainText('Ask about hello runtime', { timeout: 15_000 });
   await expect(composer).toHaveValue('');
 
   await expectNoHorizontalOverflow(page);

@@ -19,6 +19,7 @@
   import { threadsChrome } from './threadsChrome.svelte';
   import { isPlainShellSession } from './threadsHelpers';
   import { threads, type ThreadsInspectorTab } from './threadsStore.svelte';
+  import { asThreadSession, runtimeThreads } from './runtime/runtimeThreads.svelte';
 
   const FilesView = lazyComponent(() => import('./ThreadFileTabs.svelte'));
   const ChangesView = lazyComponent(() => import('./ThreadChangesTab.svelte'));
@@ -33,9 +34,11 @@
   let { onstartroom, showCard = false }: Props = $props();
 
   // On the new-thread stage the panel follows the draft's folder.
-  const focusedSession = $derived(
-    !threads.newDraftMode && threads.focusedSessionId ? (ws.getSession(threads.focusedSessionId) ?? null) : null,
-  );
+  const focusedSession = $derived.by(() => {
+    const id = threads.newDraftMode ? null : threads.focusedSessionId;
+    const rt = runtimeThreads.get(id);
+    return id ? (ws.getSession(id) ?? (rt ? asThreadSession(rt) : null)) : null;
+  });
   const contextCwd = $derived(
     focusedSession?.cwd ?? (threads.newDraftMode ? threads.stageCwd : null) ?? ws.current?.root_path ?? null,
   );
