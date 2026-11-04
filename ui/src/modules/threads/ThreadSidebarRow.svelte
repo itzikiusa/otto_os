@@ -195,13 +195,23 @@
     /* Opaque so the title never shows through the revealed actions. */
     background: linear-gradient(var(--tr-tint), var(--tr-tint)), var(--surface);
   }
+  /* The revealed actions overlay the row's end. Reserve their width instead
+     of painting over the title: an RTL title STARTS at that end, so the
+     overlay hid its first letters. */
   .tr-row:hover .tr-time,
   .tr-row:focus-within .tr-time {
-    visibility: hidden;
+    display: none;
+  }
+  .tr-row:hover .tr-main,
+  .tr-row:focus-within .tr-main {
+    padding-inline-end: 80px;
   }
   @media (hover: none) {
     .tr-time {
-      visibility: hidden;
+      display: none;
+    }
+    .tr-main {
+      padding-inline-end: 80px;
     }
   }
   .tr-pin-on {
