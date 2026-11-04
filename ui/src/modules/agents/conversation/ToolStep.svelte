@@ -17,7 +17,7 @@
   import { loadErrorText } from '../../../lib/loadError';
   import VirtualList from '../../../lib/components/VirtualList.svelte';
   import ImageBlock from './ImageBlock.svelte';
-  import InlineDiff from './InlineDiff.svelte';
+  import { inlineDiff } from './inlineDiffLazy';
   import CodeView from './CodeView.svelte';
   import Markdown from './Markdown.svelte';
   import McpToolCard from './McpToolCard.svelte';
@@ -281,7 +281,7 @@
         </div>
       {/if}
       {#if hasDiff && diff}
-        <InlineDiff {diff} />
+        {#if inlineDiff.component}{@const InlineDiff = inlineDiff.component}<InlineDiff {diff} />{/if}
       {:else if writtenContent}
         <div class="code-frame"><CodeView text={writtenContent} lang={hlReady && filePath ? langFromPath(filePath) : null} /></div>
       {:else if result == null}

@@ -29,7 +29,7 @@
   import { loadErrorText } from '../../../lib/loadError';
   import Markdown from './Markdown.svelte';
   import CodeView from './CodeView.svelte';
-  import InlineDiff from './InlineDiff.svelte';
+  import { inlineDiff } from './inlineDiffLazy';
   import { htmlDoc, parseDelimited, prettyJson, requestKind } from './preview';
   import { resolvePath } from './format';
   import { CONV_CTX, type ConvContext, type PreviewReq } from './context';
@@ -182,10 +182,11 @@
 
 <div class="pb" data-preview-mode={mode} data-preview-kind={kind}>
   {#if mode === 'diff'}
+    {@const InlineDiff = inlineDiff.component}
     {#if req.kind === 'diff'}
-      <InlineDiff diff={req.diff} full {wrap} focus={req.focus ?? null} {cwd} />
+      {#if InlineDiff}<InlineDiff diff={req.diff} full {wrap} focus={req.focus ?? null} {cwd} />{/if}
     {:else if req.kind === 'file' && req.diff}
-      <InlineDiff diff={req.diff} full {wrap} {cwd} />
+      {#if InlineDiff}<InlineDiff diff={req.diff} full {wrap} {cwd} />{/if}
     {:else}
       <EmptyState icon="split" title="No change recorded" body="This conversation has no edit to this file." />
     {/if}

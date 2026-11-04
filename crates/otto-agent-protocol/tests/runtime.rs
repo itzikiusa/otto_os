@@ -24,9 +24,15 @@ use otto_core::domain::Workspace;
 use otto_core::{Error, Id, Result};
 use otto_state::{AgentRuntimeRepo, DbPool};
 
-const FAKE: &str = env!("CARGO_BIN_EXE_otto-fake-agent");
-const FAKE_CODEX: &str = env!("CARGO_BIN_EXE_otto-fake-codex");
-const FAKE_AGY: &str = env!("CARGO_BIN_EXE_otto-fake-agy");
+/// A fake binary's path. `CARGO_BIN_EXE_*` is the BUILD machine's path, frozen
+/// at compile time; a nextest archive run (CI shards) unpacks the binaries
+/// elsewhere and exports the real location as `NEXTEST_BIN_EXE_*`.
+macro_rules! fake_bin {
+    ($name:literal) => {
+        std::env::var(concat!("NEXTEST_BIN_EXE_", $name))
+            .unwrap_or_else(|_| env!(concat!("CARGO_BIN_EXE_", $name)).to_string())
+    };
+}
 const WAIT: Duration = Duration::from_secs(15);
 
 struct TestHost {
@@ -131,13 +137,17 @@ impl TestHost {
 fn drivers() -> Arc<dyn DriverFactory> {
     Arc::new(|p: RuntimeProvider| -> Option<Box<dyn StructuredDriver>> {
         Some(match p {
-            RuntimeProvider::Codex => Box::new(CodexDriver::with_program(FAKE_CODEX)),
-            RuntimeProvider::Agy => Box::new(AgyDriver::with_program(FAKE_AGY)),
-            // A signed-out ACP agent.
-            RuntimeProvider::Grok => {
-                Box::new(AcpDriver::new(p, FAKE, vec!["--refuse-session".into()]))
+            RuntimeProvider::Codex => {
+                Box::new(CodexDriver::with_program(fake_bin!("otto-fake-codex")))
             }
-            _ => Box::new(AcpDriver::new(p, FAKE, Vec::new())),
+            RuntimeProvider::Agy => Box::new(AgyDriver::with_program(&fake_bin!("otto-fake-agy"))),
+            // A signed-out ACP agent.
+            RuntimeProvider::Grok => Box::new(AcpDriver::new(
+                p,
+                fake_bin!("otto-fake-agent"),
+                vec!["--refuse-session".into()],
+            )),
+            _ => Box::new(AcpDriver::new(p, fake_bin!("otto-fake-agent"), Vec::new())),
         })
     })
 }
