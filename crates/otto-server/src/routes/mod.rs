@@ -750,8 +750,8 @@ pub fn protected_routes() -> Router<ServerCtx> {
 // writable store keyed on a workspace whose root is the daemon's `$HOME`.
 //
 // The gate is a path check, not a role change: only the routes contract #16a
-// actually promises under `scratch` — the session family, the broadcast relay
-// and the activity summary — exist there; everything else answers `404`, as if
+// actually promises under `scratch` — the session family (PTY and structured
+// runtime sessions), the broadcast relay and the activity summary — exist there; everything else answers `404`, as if
 // the route had never been mounted for that id.
 
 /// Whether `path` may reach a handler. True for every path that is not under
@@ -779,6 +779,9 @@ fn scratch_path_allowed(path: &str) -> bool {
     }
     tail == "sessions"
         || tail.starts_with("sessions/")
+        // Structured runtime sessions (Threads): owner-scoped like `sessions`
+        // (the implicit scratch Editor is never Admin, so a list is own rows).
+        || tail == "runtime-sessions"
         || tail == "broadcast"
         || tail == "activity/summary"
         // Not a session route, but the one the contract promises answers `409`
@@ -840,6 +843,7 @@ mod scratch_guard_tests {
             "/api/v1/workspaces/scratch/sessions/01X/transcript",
             "/api/v1/workspaces/scratch/broadcast",
             "/api/v1/workspaces/scratch/activity/summary",
+            "/api/v1/workspaces/scratch/runtime-sessions",
             // Kept reachable so the system-workspace guard still answers 409.
             "/api/v1/workspaces/scratch/members",
             // The same paths as the nested router sees them.
@@ -861,6 +865,7 @@ mod scratch_guard_tests {
             "/workspaces/scratch/api-client/cookies",
             // A near-miss that must not slip through the prefix test.
             "/api/v1/workspaces/scratch/sessions-export",
+            "/api/v1/workspaces/scratch/runtime-sessions-x",
             "/api/v1/workspaces/scratch/",
             // Percent-encoded id: axum would still route it to `wid = scratch`.
             "/api/v1/workspaces/scr%61tch/workflows",
