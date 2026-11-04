@@ -37,7 +37,7 @@
   const runtime = $derived(runtimeThreads.get(paneId));
   const session = $derived(ws.getSession(paneId) ?? (runtime ? asThreadSession(runtime) : null));
   const rawStatus = $derived(ws.statusMap[paneId] ?? session?.status ?? 'idle');
-  const needsYou = $derived(ws.needsYou[paneId] === true || runtimeThreads.awaiting(paneId));
+  const needsYou = $derived(ws.needsYou[paneId] === true);
   const paneState = $derived(sessionState(session, rawStatus, needsYou, { stale: events.state !== 'connected' }));
   // Branch for the composer meta row too: metadata / registered repo, else the
   // repo detected behind the thread's folder.
@@ -90,7 +90,7 @@
   });
 
   function beginRename(): void {
-    if (!session || runtime) return;
+    if (!session) return;
     draftTitle = session.title;
     renaming = true;
   }
@@ -101,7 +101,8 @@
     const next = draftTitle.trim();
     if (!session || !next || next === session.title) return;
     try {
-      await ws.renameSession(paneId, next);
+      if (runtime) await runtimeThreads.rename(paneId, next);
+      else await ws.renameSession(paneId, next);
     } catch (e) {
       toastError('Couldn’t rename thread', e);
     }

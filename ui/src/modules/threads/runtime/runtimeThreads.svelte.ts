@@ -12,6 +12,7 @@
 import { api } from '../../../lib/api/client';
 import { appLive, onLive } from '../../../lib/live';
 import { loadErrorText } from '../../../lib/loadError';
+import { noteRuntimeSession } from '../../../lib/stores/runtimeAttention.svelte';
 import type {
   ApprovalDecision,
   ProviderSessionStatus,
@@ -92,21 +93,16 @@ class RuntimeThreads {
     return id ? (this.byId[id] ?? null) : null;
   }
 
-  /** Live (not closed) sessions, newest activity first. */
-  live(): RuntimeSession[] {
+  /** Live (or, with `closed`, closed) sessions, newest activity first. */
+  live(closed = false): RuntimeSession[] {
     return Object.values(this.byId)
-      .filter((s) => s.status !== 'closed')
+      .filter((s) => (s.status === 'closed') === closed)
       .sort((a, b) => b.last_active_at.localeCompare(a.last_active_at));
   }
 
-  /** Waiting on a person's approval (the row's "needs you"). */
-  awaiting(id: string): boolean {
-    return this.byId[id]?.status === 'awaiting_permission';
-  }
-
-  /** The live sessions as Threads rows. */
-  rows(): Session[] {
-    return this.live().map(asThreadSession);
+  /** The live (or closed) sessions as Threads rows. */
+  rows(closed = false): Session[] {
+    return this.live(closed).map(asThreadSession);
   }
 
   /** (Re)load a workspace's sessions. `loaded` is set even on failure, so
@@ -116,7 +112,10 @@ class RuntimeThreads {
       const rows = await api.get<RuntimeSession[]>(`/workspaces/${workspaceId}/runtime-sessions`);
       const next = { ...this.byId };
       for (const id of Object.keys(next)) if (next[id].workspace_id === workspaceId) delete next[id];
-      for (const r of rows) next[r.id] = r;
+      for (const r of rows) {
+        next[r.id] = r;
+        noteRuntimeSession(r.id);
+      }
       this.byId = next;
     } finally {
       this.loaded = { ...this.loaded, [workspaceId]: true };
@@ -232,6 +231,10 @@ class RuntimeThreads {
 
   async respond(id: string, requestId: string, decision: ApprovalDecision): Promise<void> {
     await api.post(`/runtime-sessions/${id}/requests/${requestId}`, { decision });
+  }
+
+  async rename(id: string, title: string): Promise<void> {
+    this.byId[id] = await api.patch<RuntimeSession>(`/runtime-sessions/${id}`, { title });
   }
 
   async close(id: string): Promise<void> {

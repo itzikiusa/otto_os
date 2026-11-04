@@ -58,10 +58,8 @@
   // Structured runtime threads: their rows, and live events for open ones.
   onMount(() => runtimeThreads.mount());
   $effect(() => {
-    // Scratch serves no runtime sessions (its routes are the PTY family only).
-    const wid = ws.currentId;
-    if (wid && wid !== SCRATCH_WORKSPACE_ID) {
-      untrack(() => runtimeThreads.load(wid)).catch((e: unknown) => toastError('Couldn’t load threads', e));
+    for (const wid of new Set([ws.currentId, ws.scratch ? SCRATCH_WORKSPACE_ID : null])) {
+      if (wid) untrack(() => runtimeThreads.load(wid)).catch((e: unknown) => toastError('Couldn’t load threads', e));
     }
   });
 
@@ -142,10 +140,11 @@
 
   // Keep paneIds clean when sessions are loaded; pick an initial thread or show NewThreadStage.
   $effect(() => {
-    const knownThreads = new Set(liveThreadIds);
+    // Closed runtime threads stay open read-only (their History row opens them).
+    const knownThreads = new Set([...liveThreadIds, ...Object.keys(runtimeThreads.byId)]);
     const anyLoaded = ws.sessions.some((s) => !s.archived);
     if ((!ws.listSettled || ws.sessionsLoading) && !anyLoaded) return;
-    if (ws.currentId && ws.currentId !== SCRATCH_WORKSPACE_ID && !runtimeThreads.loaded[ws.currentId]) return;
+    if (ws.currentId && !runtimeThreads.loaded[ws.currentId]) return;
     untrack(() => {
       const valid = threads.paneIds.filter((id) => knownThreads.has(id));
       if (valid.length !== threads.paneIds.length) {
@@ -225,7 +224,7 @@
   });
   const focusedState = $derived(
     focused
-      ? sessionState(focused, ws.statusMap[focused.id] ?? focused.status, ws.needsYou[focused.id] === true || runtimeThreads.awaiting(focused.id), {
+      ? sessionState(focused, ws.statusMap[focused.id] ?? focused.status, ws.needsYou[focused.id] === true, {
           stale: events.state !== 'connected',
         })
       : null,

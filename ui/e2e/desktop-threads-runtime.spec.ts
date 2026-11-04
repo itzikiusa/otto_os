@@ -4,6 +4,15 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { apiCtx } from './seed';
 import { expectNoHorizontalOverflow } from './helpers';
+import type { Locator } from '@playwright/test';
+
+/** Relative luminance (0 dark … 1 light) of an element's computed background. */
+async function bgLuminance(el: Locator): Promise<number> {
+  return el.evaluate((node) => {
+    const [r, g, b] = (getComputedStyle(node).backgroundColor.match(/[\d.]+/g) ?? ['0', '0', '0']).map(Number);
+    return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+  });
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Threads on the structured agent runtime (docs/features/threads-structured-runtime.md):
@@ -78,9 +87,12 @@ test('a Codex runtime thread streams, asks inline, queues a follow-up and stops'
   const approval = thread.locator('[data-testid^="runtime-approval-"]');
   await expect(approval).toBeVisible({ timeout: 15_000 });
   await expect(approval.getByText('Waiting for approval')).toBeVisible();
-  await page.screenshot({ path: info.outputPath('runtime-approval-light.png') });
+  await page.screenshot({ path: info.outputPath('runtime-approval-light.png'), animations: 'disabled' });
+  // Dark: the secondary actions are dark buttons (once the theme transition settles).
   await page.emulateMedia({ colorScheme: 'dark' });
-  await page.screenshot({ path: info.outputPath('runtime-approval-dark.png') });
+  const decline = approval.getByRole('button', { name: 'Decline', exact: true });
+  await expect.poll(() => bgLuminance(decline)).toBeLessThan(0.35);
+  await page.screenshot({ path: info.outputPath('runtime-approval-dark.png'), animations: 'disabled' });
   await page.emulateMedia({ colorScheme: 'light' });
   await approval.getByRole('button', { name: 'Approve', exact: true }).click();
   await expect(approval).toHaveCount(0);
@@ -101,15 +113,40 @@ test('a Codex runtime thread streams, asks inline, queues a follow-up and stops'
   await expect(thread.getByText('echo: after the stop')).toBeVisible({ timeout: 20_000 });
   await expect(thread.getByTestId('runtime-queued')).toHaveCount(0);
 
+  // Slash commands: the popup lists the view's commands; /btw opens a side
+  // chat about this thread without interrupting it.
+  await composer.fill('/');
+  await expect(thread.locator('[data-slash-pop]')).toContainText('/btw');
+  await composer.fill('/btw what changed so far?');
+  await composer.press('Enter');
+  await expect(page.getByTestId('threads-side-chat')).toBeVisible({ timeout: 15_000 });
+  await expect(composer).toHaveValue('');
+
   await expectNoHorizontalOverflow(page);
-  await page.screenshot({ path: info.outputPath('runtime-thread-light.png') });
+  await page.screenshot({ path: info.outputPath('runtime-thread-light.png'), animations: 'disabled' });
   await page.emulateMedia({ colorScheme: 'dark' });
-  await page.screenshot({ path: info.outputPath('runtime-thread-dark.png') });
+  await page.screenshot({ path: info.outputPath('runtime-thread-dark.png'), animations: 'disabled' });
+  await page.emulateMedia({ colorScheme: 'light' });
 
   // A reload replays the conversation from the daemon (snapshot / events).
   await page.reload();
   await expect(thread).toBeVisible({ timeout: 30_000 });
   await expect(thread.getByText('echo: after the stop')).toBeVisible({ timeout: 15_000 });
+  await expect(thread.getByText('echo: hello runtime')).toBeVisible();
+
+  // Rename, then close: the thread moves to History and opens read-only.
+  await page.getByTestId('threads-thread-menu').click();
+  await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Rename…' }).click();
+  await page.locator('[role="dialog"] input').first().fill('Renamed runtime');
+  await page.getByRole('button', { name: 'Rename', exact: true }).last().click();
+  await expect(page.getByTestId('threads-breadcrumb')).toContainText('Renamed runtime');
+  await page.getByTestId('threads-thread-menu').click();
+  await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Close thread…' }).click();
+  await page.getByRole('dialog').getByRole('button', { name: 'Close thread', exact: true }).click();
+  const sidebar = page.getByTestId('threads-sidebar');
+  await sidebar.locator('.th-history').click();
+  await sidebar.locator('[data-testid^="thread-history-"]', { hasText: 'Renamed runtime' }).getByRole('button').first().click();
+  await expect(thread.getByTestId('runtime-composer')).toBeDisabled({ timeout: 15_000 });
   await expect(thread.getByText('echo: hello runtime')).toBeVisible();
 
   // Phone width: the timeline and composer fit.

@@ -8,7 +8,7 @@
   import { confirmer } from '../../lib/confirm.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { git } from '../../lib/stores/git.svelte';
-  import { SCRATCH_WORKSPACE_ID, ws } from '../../lib/stores/workspace.svelte';
+  import { ws } from '../../lib/stores/workspace.svelte';
   import { toastError } from '../../lib/toastError';
   import type { Session } from '../../lib/api/types';
   import ThreadSidebarRow from './ThreadSidebarRow.svelte';
@@ -169,7 +169,10 @@
   // History combines settled threads + archived daemon threads.
   const historyItems = $derived.by(() => {
     const settled = filteredLive.filter((s) => threads.isSettled(s.id));
-    const archived = ws.archivedSessions.filter((s) => isThreadSession(s, allPool) && matchesFilters(s));
+    const archived = [
+      ...ws.archivedSessions.filter((s) => isThreadSession(s, allPool)),
+      ...runtimeThreads.rows(true),
+    ].filter(matchesFilters);
     const seen = new Set<string>();
     const combined: { session: Session; kind: 'settled' | 'archived' }[] = [];
     for (const s of settled) {
@@ -191,7 +194,7 @@
     try {
       threadRepos.reset();
       await ws.refreshSessions();
-      if (ws.currentId && ws.currentId !== SCRATCH_WORKSPACE_ID) await runtimeThreads.load(ws.currentId);
+      if (ws.currentId) await runtimeThreads.load(ws.currentId);
       if (ws.currentId) await git.loadRepos(ws.currentId, true);
       for (const id of Object.keys(git.statusById)) void git.refreshStatus(id);
     } catch (e) {
@@ -243,7 +246,8 @@
 
   async function reopenArchived(s: Session, beside = false): Promise<void> {
     threads.unsettle(s.id);
-    if (s.archived) {
+    // A closed runtime thread opens read-only; it has nothing to unarchive.
+    if (s.archived && !isRuntimeThread(s)) {
       try {
         await ws.unarchiveSession(s.id);
       } catch (e) {

@@ -30,7 +30,7 @@ function workspace(mayChangeWorkspace: () => boolean | Promise<boolean> = () => 
     './ui.svelte': { ui: { sessionIsolation: false }, clientId: () => 'test' },
     '../win': { winKey: (key: string) => key }, './splitLayout.svelte': { layout }, './splitLayout': { MAX_PANES: 15, LS_PANES: 'otto_panes_' },
     '../storage': { lsGet: () => null, lsSet() {}, lsRemove() {} },
-    '../desktop': { isEmbedded: false }, './sessionScope': sessionScope, './sessionPatch': sessionPatch, './sessionBuckets': sessionBuckets, '../lazy-component.svelte': lazyComponent,
+    '../desktop': { isEmbedded: false }, './runtimeAttention.svelte': { runtimeFlagged: () => 0 }, './sessionScope': sessionScope, './sessionPatch': sessionPatch, './sessionBuckets': sessionBuckets, '../lazy-component.svelte': lazyComponent,
   });
   ws.refreshOtherSessions = async () => {};
   return { ws, requests, restored, deleted, api };
@@ -62,7 +62,7 @@ function bootWorkspace(saved: string, list: { id: string }[], archivedIn: string
     './ui.svelte': { ui: { sessionIsolation: false }, clientId: () => 'test' },
     '../win': { winKey: (key: string) => key }, './splitLayout.svelte': { layout }, './splitLayout': { MAX_PANES: 15, LS_PANES: 'otto_panes_' },
     '../storage': { lsGet: (k: string) => (k === 'otto_workspace' ? saved : null), lsSet() {}, lsRemove() {} },
-    '../desktop': { isEmbedded: false }, './sessionScope': sessionScope, './sessionPatch': sessionPatch, './sessionBuckets': sessionBuckets, '../lazy-component.svelte': lazyComponent,
+    '../desktop': { isEmbedded: false }, './runtimeAttention.svelte': { runtimeFlagged: () => 0 }, './sessionScope': sessionScope, './sessionPatch': sessionPatch, './sessionBuckets': sessionBuckets, '../lazy-component.svelte': lazyComponent,
   });
   ws.refreshOtherSessions = async () => {};
   ws.refreshActiveWorkflowRuns = async () => {};

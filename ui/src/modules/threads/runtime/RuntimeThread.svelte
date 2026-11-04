@@ -10,6 +10,8 @@
   // ComposerPrimaryActions.tsx (send ↔ stop), QueuedRunsControl.tsx (one
   // queued follow-up), ThreadStatusLine.tsx ("Working for 12s"),
   // ThreadErrorBanner.tsx, and apps/web/src/session-logic.ts (`derivePhase`).
+  // Slash commands as in composerSlashCommandSearch.ts: the client's own
+  // commands act on the view; any other `/command` goes to the agent as typed.
   import { tick, untrack } from 'svelte';
   import { announceShown } from '../../../lib/announce.svelte';
   import EmptyState from '../../../lib/components/EmptyState.svelte';
@@ -17,6 +19,16 @@
   import LoadState from '../../../lib/components/LoadState.svelte';
   import ProviderIcon, { hasProviderIcon } from '../../../lib/components/ProviderIcon.svelte';
   import { harnessLabel } from '../../../lib/providers';
+  import {
+    INTERACTIVE_SLASH_COMMANDS,
+    isImmediateSlashCommand,
+    parseInteractiveSlashInput,
+    type ComposerSlashCommand,
+    type ParsedSlashIntent,
+  } from '../../../lib/slashActions';
+  import StageSlashPopup from '../StageSlashPopup.svelte';
+  import { threadsChrome } from '../threadsChrome.svelte';
+  import { threads } from '../threadsStore.svelte';
   import { now } from '../../../lib/stores/now.svelte';
   import { toastError } from '../../../lib/toastError';
   import type { ApprovalDecision } from '../../../lib/api/types';
@@ -81,11 +93,87 @@
   }
 
   function submit(): void {
-    const t = text.trim();
+    let t = text.trim();
     if (!t || closed) return;
+    const intent = parseInteractiveSlashInput(t);
+    if (intent?.kind === 'send-prompt') t = intent.prompt;
+    else if (intent && runSlash(intent)) {
+      text = '';
+      return;
+    }
     text = '';
     if (running) queued = t;
     else void send(t);
+  }
+
+  // ── Slash commands: the ones that act on this view ─────────────────────
+  const SLASH_NAMES = new Set(['diff', 'files', 'terminal', 'new', 'fork', 'review', 'btw']);
+  const SLASH = INTERACTIVE_SLASH_COMMANDS.filter((c) => SLASH_NAMES.has(c.name));
+  const popId = $props.id();
+  let cmdIdx = $state(0);
+  let cmdDismissed = $state(false);
+  const suggestions = $derived.by(() => {
+    const prefix = /^\/([\w:-]*)$/.exec(text)?.[1].toLowerCase();
+    return prefix === undefined || cmdDismissed ? [] : SLASH.filter((c) => c.name.includes(prefix));
+  });
+  $effect(() => {
+    void suggestions.length;
+    cmdIdx = 0;
+  });
+  $effect(() => {
+    void text;
+    cmdDismissed = false;
+  });
+
+  function runSlash(intent: ParsedSlashIntent): boolean {
+    switch (intent.kind) {
+      case 'open-diff':
+        threads.setInspectorTab('changes');
+        return true;
+      case 'open-files':
+        threads.setInspectorTab('files');
+        return true;
+      case 'toggle-terminal':
+        threadsChrome.setTerminal(!threadsChrome.terminalOpen);
+        return true;
+      case 'new-thread':
+        void newThread(intent.beside);
+        return true;
+      case 'side-chat':
+        threads.openSideChat(sessionId, intent.question);
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  async function newThread(beside: boolean): Promise<void> {
+    if (!session) return;
+    if (!beside) return threads.startNewThread({ workspaceId: session.workspace_id, cwd: session.cwd });
+    try {
+      const { provider, cwd, model } = session;
+      const created = await runtimeThreads.start(session.workspace_id, {
+        provider,
+        cwd,
+        title: `${harnessLabel(provider)} thread`,
+        model: model ?? null,
+        prompt: '',
+      });
+      threads.openBeside(created.id);
+    } catch (e) {
+      toastError('Couldn’t start thread', e);
+    }
+  }
+
+  function acceptCmd(c: ComposerSlashCommand): void {
+    if (isImmediateSlashCommand(c.name)) {
+      text = `/${c.name}`;
+      submit();
+    } else {
+      text = `/${c.name} `;
+      cmdDismissed = true;
+      composerEl?.focus();
+    }
   }
 
   // The queued follow-up goes out once the turn has ended.
@@ -118,7 +206,25 @@
   }
 
   function onKeydown(e: KeyboardEvent): void {
-    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+    if (e.isComposing) return;
+    if (suggestions.length > 0) {
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        cmdIdx = (cmdIdx + (e.key === 'ArrowDown' ? 1 : suggestions.length - 1)) % suggestions.length;
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        cmdDismissed = true;
+        return;
+      }
+      if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey)) {
+        e.preventDefault();
+        acceptCmd(suggestions[cmdIdx]);
+        return;
+      }
+    }
+    if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       submit();
     }
@@ -198,6 +304,9 @@
       </div>
     {/if}
     <div class="rt-composer">
+      {#if suggestions.length > 0}
+        <StageSlashPopup id={popId} items={suggestions} active={cmdIdx} onaccept={acceptCmd} onhover={(i) => (cmdIdx = i)} />
+      {/if}
       <textarea
         bind:this={composerEl}
         bind:value={text}
@@ -210,8 +319,11 @@
             ? 'Waiting for your approval above'
             : running
               ? 'Queue a follow-up for when this turn ends'
-              : 'Ask anything'}
+              : 'Ask anything. / commands'}
         aria-label="Message"
+        aria-autocomplete="list"
+        aria-controls={suggestions.length > 0 ? `${popId}-list` : undefined}
+        aria-activedescendant={suggestions.length > 0 ? `${popId}-opt-${cmdIdx}` : undefined}
         data-testid="runtime-composer"
         onkeydown={onKeydown}
       ></textarea>

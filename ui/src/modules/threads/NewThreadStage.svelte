@@ -80,10 +80,9 @@
   const homePath = $derived(ws.scratch?.root_path ?? '~');
   const scratchActive = $derived(useScratch || ws.current === null);
   const targetWs = $derived(scratchActive ? SCRATCH_WORKSPACE_ID : (ws.currentId ?? SCRATCH_WORKSPACE_ID));
-  // Claude / Codex / Gemini / Grok threads run on the structured runtime (not
-  // served in Scratch, which keeps PTY threads). They always ask before
-  // acting and take no effort level.
-  const runtime = $derived(isRuntimeProvider(provider) && targetWs !== SCRATCH_WORKSPACE_ID);
+  // Claude / Codex / Gemini / Grok threads run on the structured runtime:
+  // they always ask before acting and take no effort level.
+  const runtime = $derived(isRuntimeProvider(provider));
   const modeSupported = $derived(supportsInteractionMode(provider) && !runtime);
   const cleanCwd = $derived(cwd.trim().replace(/\/+$/, ''));
   const onWorktree = $derived(worktree !== null && worktree.path.replace(/\/+$/, '') === cleanCwd);

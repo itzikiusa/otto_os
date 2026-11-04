@@ -27,7 +27,7 @@ function fixture(get: (path: string) => Promise<unknown>) {
     './splitLayout.svelte': { layout: { panes, focusedIndex: 0, retain: (keep: (t: string) => boolean) => retained.push(panes.filter(keep)), setFocusedSession() {} } },
     './splitLayout': { MAX_PANES: 15, LS_PANES: 'panes' },
     '../storage': { lsGet: () => null, lsSet() {} }, '../desktop': { isEmbedded: false },
-    './sessionScope': sessionScope, './sessionPatch': sessionPatch, './sessionBuckets': sessionBuckets,
+    './runtimeAttention.svelte': { runtimeFlagged: () => 0 }, './sessionScope': sessionScope, './sessionPatch': sessionPatch, './sessionBuckets': sessionBuckets,
     '../lazy-component.svelte': { whenIdle: () => () => {} },
   });
   ws.currentId = 'w';
