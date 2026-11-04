@@ -15,10 +15,11 @@ use otto_agent_protocol::{
     AgentRuntime, DriverFactory, LaunchSpec, RuntimeConfig, RuntimeHost, StructuredDriver,
 };
 use otto_core::agent_runtime::{
-    ApprovalDecision, CreateRuntimeSessionReq, PromptImage, ProviderSessionStatus,
-    ProviderTurnStatus, RuntimeEvent, RuntimeEventBody, RuntimePromptReq, RuntimeProvider,
-    RuntimeReplay, RuntimeRequestStatus, RuntimeSession, RuntimeSessionStatus, TurnItem,
-    TurnItemKind, TurnItemStatus, TurnTerminalStatus,
+    ApprovalDecision, Attachment, AttachmentKind, CancelReason, CreateRuntimeSessionReq,
+    PromptFile, PromptImage, ProviderSessionStatus, ProviderTurnStatus, RuntimeAccessMode,
+    RuntimeEvent, RuntimeEventBody, RuntimePromptReq, RuntimeProvider, RuntimeReplay,
+    RuntimeRequestStatus, RuntimeSession, RuntimeSessionStatus, TurnItem, TurnItemKind,
+    TurnItemStatus, TurnTerminalStatus,
 };
 use otto_core::domain::Workspace;
 use otto_core::{Error, Id, Result};
@@ -141,6 +142,7 @@ fn drivers() -> Arc<dyn DriverFactory> {
                 Box::new(CodexDriver::with_program(fake_bin!("otto-fake-codex")))
             }
             RuntimeProvider::Agy => Box::new(AgyDriver::with_program(&fake_bin!("otto-fake-agy"))),
+            RuntimeProvider::Gemini => Box::new(AcpDriver::gemini(&fake_bin!("otto-fake-agent"))),
             // A signed-out ACP agent.
             RuntimeProvider::Grok => Box::new(AcpDriver::new(
                 p,
@@ -185,6 +187,10 @@ async fn pool() -> DbPool {
 }
 
 fn runtime(pool: &DbPool, host: &Arc<TestHost>, config: RuntimeConfig) -> AgentRuntime {
+    let config = RuntimeConfig {
+        attachments_dir: std::path::Path::new(&host.root).join("attachments"),
+        ..config
+    };
     AgentRuntime::new(
         AgentRuntimeRepo::new(pool.clone()),
         Arc::clone(host) as Arc<dyn RuntimeHost>,
@@ -206,6 +212,7 @@ async fn create_as(rt: &AgentRuntime, cwd: &str, provider: RuntimeProvider) -> R
             cwd: Some(cwd.into()),
             title: None,
             model: None,
+            access_mode: None,
         },
     )
     .await
@@ -665,6 +672,7 @@ async fn codex_takes_model_effort_and_images_per_turn_without_a_respawn() {
             mime: "image/png".into(),
             data_base64: "iVBORw0KGgo=".into(),
         }],
+        ..RuntimePromptReq::default()
     };
     rt.prompt_with(&s.id, &req).await.unwrap();
     let fin = host.wait(is_terminal).await;
@@ -1040,4 +1048,297 @@ async fn rename_updates_the_live_entry_and_the_row_also_when_closed() {
         RuntimeConfig::default(),
     );
     assert_eq!(rt2.get(&s.id).await.unwrap().title, "Closed one");
+}
+
+// ---- access modes, parallel approvals, cancel reasons, attachments ------
+
+fn requests(host: &TestHost) -> Vec<otto_core::agent_runtime::RuntimeRequest> {
+    let mut by_id = std::collections::BTreeMap::new();
+    for e in host.all() {
+        if let RuntimeEventBody::RuntimeRequestUpdated { runtime_request } = e.body {
+            by_id.insert(runtime_request.id.clone(), runtime_request);
+        }
+    }
+    by_id.into_values().collect()
+}
+
+fn is_pending_request(e: &RuntimeEvent) -> bool {
+    matches!(&e.body, RuntimeEventBody::RuntimeRequestUpdated { runtime_request }
+        if runtime_request.status == RuntimeRequestStatus::Pending)
+}
+
+#[tokio::test]
+async fn parallel_approvals_are_live_together_and_answer_out_of_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(dir.path().to_str().unwrap(), false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create(&rt, dir.path().to_str().unwrap()).await;
+    let turn = rt.prompt(&s.id, "ask2").await.unwrap().turn_id;
+    host.wait_n(is_pending_request, 2).await;
+    let pending: Vec<_> = requests(&host)
+        .into_iter()
+        .filter(|r| r.status == RuntimeRequestStatus::Pending)
+        .map(|r| r.id)
+        .collect();
+    assert_eq!(pending, ["acp-p-c1", "acp-p-c2"], "both live at once");
+    for c in ["c1", "c2"] {
+        let want = format!("{turn}:tool:{c}");
+        assert!(host.items().iter().any(|i| matches!(&i.kind,
+            TurnItemKind::ApprovalRequest { tool_item_id: Some(t), .. } if *t == want)));
+    }
+    // The second first: nothing serializes them.
+    rt.respond(&s.id, "acp-p-c2", ApprovalDecision::Accept)
+        .await
+        .unwrap();
+    assert_eq!(
+        rt.get(&s.id).await.unwrap().status,
+        RuntimeSessionStatus::AwaitingPermission,
+        "c1 still waits"
+    );
+    rt.respond(&s.id, "acp-p-c1", ApprovalDecision::Decline)
+        .await
+        .unwrap();
+    let fin = host.wait(is_terminal).await;
+    assert_eq!(terminal(&fin), Some(TurnTerminalStatus::Completed));
+    let items = host.items();
+    let tool = |c: &str| {
+        let id = format!("{turn}:tool:{c}");
+        items.iter().find(|i| i.id == id).unwrap().clone()
+    };
+    assert_eq!(
+        (tool("c2").status, tool("c2").error),
+        (TurnItemStatus::Completed, None)
+    );
+    assert_eq!(
+        (tool("c1").status, tool("c1").error.as_deref()),
+        (TurnItemStatus::Failed, Some("denied by the user"))
+    );
+    rt.close(&s.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn cancelled_requests_say_why() {
+    let dir = tempfile::tempdir().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(dir.path().to_str().unwrap(), false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create(&rt, dir.path().to_str().unwrap()).await;
+    for (n, reason) in [(1, CancelReason::Interrupt), (2, CancelReason::Closed)] {
+        rt.prompt(&s.id, "ask").await.unwrap();
+        host.wait_n(is_pending_request, n).await;
+        if reason == CancelReason::Interrupt {
+            rt.interrupt(&s.id).await.unwrap();
+            host.wait(is_terminal).await;
+        } else {
+            rt.close(&s.id).await.unwrap();
+        }
+        let id = format!("acp-perm-{n}");
+        let req = requests(&host).into_iter().find(|r| r.id == id).unwrap();
+        assert_eq!(
+            (req.status, req.cancel_reason),
+            (RuntimeRequestStatus::Cancelled, Some(reason))
+        );
+        assert!(host.items().iter().any(|i| matches!(&i.kind,
+            TurnItemKind::ApprovalRequest { request_id, cancel_reason: Some(r), .. }
+                if *request_id == id && *r == reason)
+            && i.status == TurnItemStatus::Cancelled));
+    }
+}
+
+#[tokio::test]
+async fn access_mode_sticks_and_switches_live_or_by_respawn() {
+    let dir = tempfile::tempdir().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(dir.path().to_str().unwrap(), false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create(&rt, dir.path().to_str().unwrap()).await;
+    assert_eq!(s.access_mode, RuntimeAccessMode::ApprovalRequired);
+    let mode = |m| RuntimePromptReq {
+        access_mode: m,
+        ..RuntimePromptReq::of("mode")
+    };
+    // Advertised by the agent: `session/set_mode` on the live process.
+    host.wait(is_ready).await;
+    rt.prompt_with(&s.id, &mode(Some(RuntimeAccessMode::AutoAcceptEdits)))
+        .await
+        .unwrap();
+    host.wait(is_terminal).await;
+    assert_eq!(last_assistant_text(&host), "mode: autoEdit");
+    assert_eq!(host.prepared.lock().unwrap().len(), 1, "switched live");
+    // It sticks.
+    rt.prompt_with(&s.id, &mode(None)).await.unwrap();
+    host.wait_n(is_terminal, 2).await;
+    assert_eq!(last_assistant_text(&host), "mode: autoEdit");
+    // Not advertised: a respawn in the new mode that loads the session.
+    rt.prompt_with(&s.id, &mode(Some(RuntimeAccessMode::FullAccess)))
+        .await
+        .unwrap();
+    host.wait_n(is_terminal, 3).await;
+    assert_eq!(last_assistant_text(&host), "mode: yolo");
+    let spawns = host.prepared.lock().unwrap().clone();
+    assert_eq!(spawns.len(), 2);
+    assert!(spawns[1]
+        .args
+        .windows(2)
+        .any(|w| w == ["--approval-mode", "yolo"]));
+    assert_eq!(
+        rt.get(&s.id).await.unwrap().access_mode,
+        RuntimeAccessMode::FullAccess
+    );
+    rt.flush(&s.id).await;
+    let row = AgentRuntimeRepo::new(pool.clone())
+        .get(&s.id)
+        .await
+        .unwrap();
+    assert_eq!(row.session.access_mode, RuntimeAccessMode::FullAccess);
+    rt.close(&s.id).await.unwrap();
+
+    // Created in a mode: agy launches with its `--mode`.
+    let agy = rt
+        .create(
+            &"u1".into(),
+            &"w1".into(),
+            CreateRuntimeSessionReq {
+                provider: Some(RuntimeProvider::Agy),
+                cwd: Some(dir.path().to_str().unwrap().into()),
+                access_mode: Some(RuntimeAccessMode::AutoAcceptEdits),
+                ..CreateRuntimeSessionReq::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(agy.access_mode, RuntimeAccessMode::AutoAcceptEdits);
+    let spawn = host.prepared.lock().unwrap().last().unwrap().clone();
+    assert!(spawn
+        .args
+        .windows(2)
+        .any(|w| w == ["--mode", "accept-edits"]));
+    rt.close(&agy.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn attachments_are_stored_served_and_refused_where_unsupported() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("attachments");
+    let pool = pool().await;
+    let host = TestHost::new(dir.path().to_str().unwrap(), false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let png = PromptImage {
+        mime: "image/png".into(),
+        data_base64: "iVBORw0KGgo=".into(),
+    };
+    let pdf = PromptFile {
+        mime: "application/pdf".into(),
+        name: "spec.pdf".into(),
+        data_base64: "JVBERi0=".into(),
+    };
+    let user_attachments = |host: &TestHost| -> Vec<Attachment> {
+        host.items()
+            .iter()
+            .rev()
+            .find_map(|i| match &i.kind {
+                TurnItemKind::UserMessage { attachments, .. } => Some(attachments.clone()),
+                _ => None,
+            })
+            .unwrap()
+    };
+
+    // Gemini (the fake) takes embedded PDFs but no images.
+    let g = create(&rt, dir.path().to_str().unwrap()).await;
+    let with_pdf = RuntimePromptReq {
+        files: vec![pdf.clone()],
+        ..RuntimePromptReq::of("read")
+    };
+    rt.prompt_with(&g.id, &with_pdf).await.unwrap();
+    host.wait(is_terminal).await;
+    let a = user_attachments(&host);
+    assert_eq!(a.len(), 1);
+    assert_eq!(
+        (a[0].kind, a[0].name.as_deref()),
+        (AttachmentKind::File, Some("spec.pdf"))
+    );
+    let (mime, bytes) = rt.attachment(&g.id, &a[0].id).await.unwrap();
+    assert_eq!(
+        (mime.as_str(), bytes.as_slice()),
+        ("application/pdf", &b"%PDF-"[..])
+    );
+    let refused = RuntimePromptReq {
+        images: vec![png.clone()],
+        ..RuntimePromptReq::of("look")
+    };
+    assert!(matches!(
+        rt.prompt_with(&g.id, &refused).await,
+        Err(Error::Invalid(_))
+    ));
+    let mut stored = tokio::fs::read_dir(store.join(&g.id)).await.unwrap();
+    assert!(stored.next_entry().await.unwrap().is_some());
+    assert!(
+        stored.next_entry().await.unwrap().is_none(),
+        "a refused prompt leaves no file"
+    );
+    for bad in ["nope", "../../etc/hosts"] {
+        assert!(matches!(
+            rt.attachment(&g.id, bad).await,
+            Err(Error::NotFound(_))
+        ));
+    }
+    let not_b64 = RuntimePromptReq {
+        files: vec![PromptFile {
+            data_base64: "!!".into(),
+            ..pdf.clone()
+        }],
+        ..RuntimePromptReq::of("x")
+    };
+    assert!(matches!(
+        rt.prompt_with(&g.id, &not_b64).await,
+        Err(Error::Invalid(_))
+    ));
+    let not_pdf = RuntimePromptReq {
+        files: vec![PromptFile {
+            mime: "text/plain".into(),
+            ..pdf.clone()
+        }],
+        ..RuntimePromptReq::of("x")
+    };
+    assert!(matches!(
+        rt.prompt_with(&g.id, &not_pdf).await,
+        Err(Error::Invalid(_))
+    ));
+    rt.close(&g.id).await.unwrap();
+
+    // Codex: an image is served back for its thumbnail; a PDF is refused;
+    // a failed command carries its output as the error.
+    let c = create_as(&rt, dir.path().to_str().unwrap(), RuntimeProvider::Codex).await;
+    rt.prompt_with(&c.id, &refused).await.unwrap();
+    host.wait_n(is_terminal, 2).await;
+    let a = user_attachments(&host);
+    assert_eq!(a[0].kind, AttachmentKind::Image);
+    let (mime, bytes) = rt.attachment(&c.id, &a[0].id).await.unwrap();
+    assert_eq!((mime.as_str(), &bytes[..4]), ("image/png", &b"\x89PNG"[..]));
+    match rt.prompt_with(&c.id, &with_pdf).await {
+        Err(Error::Invalid(m)) => assert!(m.contains("Codex"), "{m}"),
+        other => panic!("{other:?}"),
+    }
+    rt.prompt(&c.id, "fail").await.unwrap();
+    host.wait_n(is_terminal, 3).await;
+    assert!(host
+        .items()
+        .iter()
+        .any(|i| i.status == TurnItemStatus::Failed
+            && i.error.as_deref() == Some("boom")
+            && matches!(
+                &i.kind,
+                TurnItemKind::CommandExecution {
+                    exit_code: Some(1),
+                    ..
+                }
+            )));
+    rt.close(&c.id).await.unwrap();
+
+    // Boot recovery drops the folders of sessions that no longer exist.
+    std::fs::create_dir_all(store.join("ghost")).unwrap();
+    rt.recover().await.unwrap();
+    assert!(!store.join("ghost").exists());
+    assert!(store.join(&g.id).exists());
 }

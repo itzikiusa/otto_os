@@ -8,6 +8,7 @@
 //!   turn.
 //! * `hang`  — one delta, then waits for `turn/interrupt` → `interrupted`.
 //! * `crash` — exit 3 at once (mid-turn).
+//! * `fail`  — a `commandExecution` that fails (exit 1, output `boom`).
 //! * anything else — `echo: <text>` as `item/agentMessage/delta`s, plus
 //!   ` [<model> <effort> <image count>]` when the turn sets any of them.
 //!
@@ -138,6 +139,17 @@ fn main() {
                             "params": {"threadId": thread, "turnId": tid, "itemId": "cmd-1",
                                        "startedAtMs": 0, "command": "make clean", "reason": "clean the build"}}),
                         );
+                    }
+                    "fail" => {
+                        notify("item/started", command(&thread, &tid, "inProgress", None));
+                        let mut done = command(&thread, &tid, "failed", Some("boom\n"));
+                        done["item"]["exitCode"] = json!(1);
+                        notify("item/completed", done);
+                        notify(
+                            "turn/completed",
+                            json!({"threadId": thread, "turn": turn(&tid, "completed")}),
+                        );
+                        current = None;
                     }
                     "hang" => {
                         notify(

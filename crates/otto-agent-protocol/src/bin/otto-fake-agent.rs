@@ -5,6 +5,10 @@
 //! * `crash`      — exit 3 at once (mid-turn), after a line on stderr.
 //! * `garbage`    — print a non-JSON line, then answer like echo.
 //! * `ask`        — a `tool_call`, then `session/request_permission`; waits.
+//! * `ask2`       — two `tool_call`s and both permission requests at once;
+//!   each answer settles its tool (allowed → `completed`, else `failed` with
+//!   content), the turn ends when both are answered.
+//! * `mode`       — `mode: <current mode id>`.
 //! * `hang`       — one chunk, then waits for `session/cancel` → `cancelled`.
 //! * `hang-hard`  — like `hang` but ignores `session/cancel`.
 //! * `plan`       — a `plan` update, then `end_turn`.
@@ -13,7 +17,10 @@
 //! * anything else — a thought chunk + `echo: <text>` in two chunks.
 //!
 //! With `--refuse-session` every `session/new` fails with `-32000` (signed
-//! out, no auth method to offer).
+//! out, no auth method to offer). `--approval-mode <m>` sets the starting
+//! mode; `session/new|load` advertise the modes `default` and `autoEdit`
+//! (not `yolo`), which `session/set_mode` switches between.
+//! `initialize` advertises `promptCapabilities.embeddedContext` (no images).
 //!
 //! `session/load` replays one history chunk before answering (clients must
 //! not show it). stdin EOF ends the process (exit 0), like the real CLIs.
@@ -62,31 +69,44 @@ fn main() {
     let stdin = std::io::stdin();
     let mut lines = stdin.lock().lines();
     let mut asks = 0u32;
-    let refuse = std::env::args().any(|a| a == "--refuse-session");
+    let args: Vec<String> = std::env::args().collect();
+    let refuse = args.iter().any(|a| a == "--refuse-session");
+    let mut mode = args
+        .windows(2)
+        .find(|w| w[0] == "--approval-mode")
+        .map_or("default".to_string(), |w| w[1].clone());
+    let modes = json!({"currentModeId": "default", "availableModes": [
+        {"id": "default", "name": "Default"}, {"id": "autoEdit", "name": "Auto edit"}]});
     while let Some(msg) = next(&mut lines) {
         let id = msg.get("id").cloned().unwrap_or(Value::Null);
         let params = msg.get("params").cloned().unwrap_or(Value::Null);
         match method(&msg) {
             "initialize" => reply(
                 &id,
-                json!({"protocolVersion":1,"agentCapabilities":{"loadSession":true}}),
+                json!({"protocolVersion":1,"agentCapabilities":{"loadSession":true,
+                    "promptCapabilities":{"embeddedContext":true}}}),
             ),
             "session/new" if refuse => out(
                 json!({"jsonrpc":"2.0","id":id,"error":{"code":-32000,"message":"Authentication required"}}),
             ),
             "session/new" => reply(
                 &id,
-                json!({"sessionId": format!("fake-{}", std::process::id())}),
+                json!({"sessionId": format!("fake-{}", std::process::id()), "modes": modes}),
             ),
+            "session/set_mode" => {
+                mode = params["modeId"].as_str().unwrap_or_default().to_string();
+                reply(&id, json!({}));
+            }
             "session/load" => {
                 let sid = params["sessionId"].as_str().unwrap_or_default().to_string();
                 chunk(&sid, "agent_message_chunk", "(history)");
-                reply(&id, json!({}));
+                reply(&id, json!({"modes": modes}));
             }
             "session/prompt" => {
                 let sid = params["sessionId"].as_str().unwrap_or_default().to_string();
-                let text = params["prompt"][0]["text"]
-                    .as_str()
+                let text = params["prompt"]
+                    .as_array()
+                    .and_then(|b| b.iter().find_map(|b| b["text"].as_str()))
                     .unwrap_or_default()
                     .to_string();
                 let done = |stop: &str| reply(&id, json!({"stopReason":stop}));
@@ -137,6 +157,49 @@ fn main() {
                             }
                             break;
                         }
+                    }
+                    "mode" => {
+                        chunk(&sid, "agent_message_chunk", &format!("mode: {mode}"));
+                        done("end_turn");
+                    }
+                    "ask2" => {
+                        for c in ["c1", "c2"] {
+                            update(
+                                &sid,
+                                json!({"sessionUpdate":"tool_call","toolCallId":c,"title":c,"kind":"fetch","status":"pending"}),
+                            );
+                        }
+                        for c in ["c1", "c2"] {
+                            out(
+                                json!({"jsonrpc":"2.0","id":format!("p-{c}"),"method":"session/request_permission","params":{
+                                "sessionId":sid,
+                                "toolCall":{"toolCallId":c,"kind":"fetch","title":c},
+                                "options":[
+                                    {"optionId":"a1","name":"Allow","kind":"allow_once"},
+                                    {"optionId":"r1","name":"Deny","kind":"reject_once"}]}}),
+                            );
+                        }
+                        let mut open = 2;
+                        while open > 0 {
+                            let Some(m) = next(&mut lines) else { return };
+                            let Some(c) = m["id"].as_str().and_then(|i| i.strip_prefix("p-"))
+                            else {
+                                continue;
+                            };
+                            open -= 1;
+                            let allowed = m["result"]["outcome"]["optionId"] == "a1";
+                            let (status, text) = if allowed {
+                                ("completed", "ok")
+                            } else {
+                                ("failed", "denied by the user")
+                            };
+                            update(
+                                &sid,
+                                json!({"sessionUpdate":"tool_call_update","toolCallId":c,"status":status,
+                                "content":[{"type":"content","content":{"type":"text","text":text}}]}),
+                            );
+                        }
+                        done("end_turn");
                     }
                     "hang" | "hang-hard" => {
                         chunk(&sid, "agent_message_chunk", "working");

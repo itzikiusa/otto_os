@@ -13,9 +13,9 @@
 //! resolution and cancellation, and the process-death terminal.
 
 use otto_core::agent_runtime::{
-    ApprovalDecision, ApprovalOption, PlanStep, ProviderFailure, RequestKind, RuntimePromptReq,
-    RuntimeProvider, RuntimeRequestStatus, ThreadTokenUsage, TurnItem, TurnItemKind,
-    TurnItemStatus, TurnTerminalStatus, TurnTokenUsage,
+    ApprovalDecision, ApprovalOption, PlanStep, ProviderFailure, RequestKind, RuntimeAccessMode,
+    RuntimePromptReq, RuntimeProvider, RuntimeRequestStatus, ThreadTokenUsage, TurnItem,
+    TurnItemKind, TurnItemStatus, TurnTerminalStatus, TurnTokenUsage,
 };
 
 #[derive(Debug, Clone)]
@@ -28,6 +28,7 @@ pub struct LaunchContext {
     pub resume: Option<String>,
     /// The child will run under Otto's Seatbelt profile.
     pub sandboxed: bool,
+    pub access_mode: RuntimeAccessMode,
 }
 
 /// The child's command line, before the safety pipeline wraps it.
@@ -79,6 +80,8 @@ pub enum DriverEvent {
         prompt: Option<String>,
         reason: Option<String>,
         options: Vec<ApprovalOption>,
+        /// The turn item id of the tool call it gates, when known.
+        tool_item_id: Option<String>,
     },
     /// The provider withdrew or settled an open request itself (Claude
     /// `control_cancel_request`, Codex `serverRequest/resolved`).
@@ -137,8 +140,20 @@ pub fn item(
         started_at: Some(now),
         completed_at: (!status.is_open()).then_some(now),
         updated_at: now,
+        error: None,
         kind,
     }
+}
+
+/// A failed tool's error text for [`TurnItem::error`]: trimmed, at most
+/// ~2 KB (cut on a char boundary), `None` when empty.
+pub fn tool_error(text: &str) -> Option<String> {
+    let t = text.trim();
+    let mut end = t.len().min(2048);
+    while !t.is_char_boundary(end) {
+        end -= 1;
+    }
+    (!t.is_empty()).then(|| t[..end].to_string())
 }
 
 /// A JSON-RPC id as a map key.
@@ -189,6 +204,13 @@ pub trait StructuredDriver: Send + 'static {
     /// Whether `req.model` switches on the running process. Otherwise the
     /// runtime restarts the child with the new model, resuming its thread.
     fn switches_model_live(&self) -> bool {
+        false
+    }
+
+    /// Whether the running process can switch to access mode `to` (its next
+    /// `prompt` carries it). Otherwise the runtime restarts the child in the
+    /// new mode, resuming its thread.
+    fn switches_access_live(&self, _to: RuntimeAccessMode) -> bool {
         false
     }
 

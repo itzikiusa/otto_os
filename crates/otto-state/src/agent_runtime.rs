@@ -1,11 +1,13 @@
-//! Persistence for the structured agent runtime (migration 0197): runtime
+//! Persistence for the structured agent runtime (migrations 0197, 0198): runtime
 //! session rows and the entity projection (the latest JSON state of every
 //! provider session / thread, turn, turn item, runtime request and plan —
 //! the T3 Code projection model). The live event ring lives in memory
 //! (`otto-agent-protocol`); this is what survives a daemon restart.
 
 use chrono::Utc;
-use otto_core::agent_runtime::{RuntimeProvider, RuntimeSession, RuntimeSessionStatus};
+use otto_core::agent_runtime::{
+    RuntimeAccessMode, RuntimeProvider, RuntimeSession, RuntimeSessionStatus,
+};
 use otto_core::{Error, Id, Result};
 use sqlx::Row;
 
@@ -24,6 +26,7 @@ pub struct NewRuntimeSession {
     pub title: String,
     pub cwd: String,
     pub model: Option<String>,
+    pub access_mode: RuntimeAccessMode,
     pub created_by: Id,
 }
 
@@ -50,7 +53,7 @@ pub struct RuntimeEntityRow {
 macro_rules! session_cols {
     () => {
         "id, workspace_id, provider, title, cwd, model, native_thread_id, closed, \
-         created_by, created_at, last_active_at, last_seq, seq_reserved"
+         created_by, created_at, last_active_at, last_seq, seq_reserved, access_mode"
     };
 }
 
@@ -81,6 +84,8 @@ fn row_to_session(r: &sqlx::sqlite::SqliteRow) -> Result<RuntimeSessionRecord> {
             } else {
                 RuntimeSessionStatus::Dormant
             },
+            access_mode: RuntimeAccessMode::parse(&r.get::<String, _>("access_mode"))
+                .unwrap_or_default(),
             created_by: r.get("created_by"),
             created_at: ts(&r.get::<String, _>("created_at"))?,
             last_active_at: ts(&r.get::<String, _>("last_active_at"))?,
@@ -100,7 +105,8 @@ impl AgentRuntimeRepo {
         let now = fmt(Utc::now());
         sqlx::query(
             "INSERT INTO agent_runtime_sessions (id, workspace_id, provider, title, cwd, model, \
-             created_by, created_at, last_active_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             access_mode, created_by, created_at, last_active_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&new.id)
         .bind(&new.workspace_id)
@@ -108,6 +114,7 @@ impl AgentRuntimeRepo {
         .bind(&new.title)
         .bind(&new.cwd)
         .bind(&new.model)
+        .bind(new.access_mode.as_str())
         .bind(&new.created_by)
         .bind(&now)
         .bind(&now)
@@ -188,6 +195,16 @@ impl AgentRuntimeRepo {
             .execute(&self.pool)
             .await
             .map_err(dberr("set runtime session model"))?;
+        Ok(())
+    }
+
+    pub async fn set_access_mode(&self, id: &Id, mode: RuntimeAccessMode) -> Result<()> {
+        sqlx::query("UPDATE agent_runtime_sessions SET access_mode = ? WHERE id = ?")
+            .bind(mode.as_str())
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("set runtime session access mode"))?;
         Ok(())
     }
 
@@ -347,12 +364,21 @@ mod tests {
                 title: "t".into(),
                 cwd: "/tmp".into(),
                 model: None,
+                access_mode: RuntimeAccessMode::AutoAcceptEdits,
                 created_by: "u1".into(),
             })
             .await
             .unwrap();
         assert_eq!(rec.session.status, RuntimeSessionStatus::Dormant);
+        assert_eq!(rec.session.access_mode, RuntimeAccessMode::AutoAcceptEdits);
         let id: Id = "r1".into();
+        repo.set_access_mode(&id, RuntimeAccessMode::FullAccess)
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.get(&id).await.unwrap().session.access_mode,
+            RuntimeAccessMode::FullAccess
+        );
         repo.upsert_entities(&id, &[row("turn", "t1", 2, json!({"v":1}))])
             .await
             .unwrap();

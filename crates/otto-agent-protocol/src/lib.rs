@@ -65,7 +65,7 @@ pub fn default_drivers() -> Arc<dyn DriverFactory> {
             Some(match provider {
                 RuntimeProvider::Claude => Box::new(claude::ClaudeDriver::new()),
                 RuntimeProvider::Codex => Box::new(codex::CodexDriver::with_program("codex")),
-                RuntimeProvider::Gemini => Box::new(acp::AcpDriver::gemini()),
+                RuntimeProvider::Gemini => Box::new(acp::AcpDriver::gemini("gemini")),
                 RuntimeProvider::Grok => Box::new(acp::AcpDriver::grok()),
                 RuntimeProvider::Agy => Box::new(agy::AgyDriver::with_program("agy")),
             })
@@ -75,9 +75,11 @@ pub fn default_drivers() -> Arc<dyn DriverFactory> {
 
 /// The daemon's runtime: SessionManager safety, `publish` for WS delivery
 /// (otto-server passes its streaming-path `publish_stream`).
+/// Attachments live under `<data_dir>/runtime-attachments`.
 pub fn daemon_runtime(
     pool: otto_state::DbPool,
     manager: Arc<otto_sessions::SessionManager>,
+    data_dir: &std::path::Path,
     publish: impl Fn(otto_core::event::Event) + Send + Sync + 'static,
 ) -> AgentRuntime {
     let host = SessionManagerHost {
@@ -89,6 +91,9 @@ pub fn daemon_runtime(
         otto_state::AgentRuntimeRepo::new(pool),
         Arc::new(host),
         default_drivers(),
-        RuntimeConfig::default(),
+        RuntimeConfig {
+            attachments_dir: data_dir.join("runtime-attachments"),
+            ..RuntimeConfig::default()
+        },
     )
 }

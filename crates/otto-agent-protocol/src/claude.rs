@@ -11,8 +11,11 @@
 //! * argv — the SDK's (`sdk.mjs` `ProcessTransport.initialize`):
 //!   `--output-format stream-json --verbose --input-format stream-json`,
 //!   `--permission-prompt-tool stdio` (the SDK's `canUseTool` callback),
-//!   `--permission-mode default` (T3 Code's approval-required mode,
-//!   `ClaudeAdapterV2.ts:2573-2620`), `--include-partial-messages`
+//!   `--permission-mode` per access mode (`permissionModeForClaudeRuntimePolicy`,
+//!   `ClaudeAdapterV2.ts:2573-2620`: approval-required → `default`,
+//!   auto-accept-edits → `acceptEdits`, full-access → `bypassPermissions`
+//!   plus the SDK's `allowDangerouslySkipPermissions` →
+//!   `--allow-dangerously-skip-permissions`, `:2681`), `--include-partial-messages`
 //!   (`:1617`), `--model`, and `--session-id <uuid>` on a fresh thread /
 //!   `--resume <id>` after (`threadIdentity`, `:1578-1580`). Env
 //!   `CLAUDE_CODE_ENTRYPOINT=sdk-ts`, as the SDK sets it.
@@ -20,8 +23,13 @@
 //!   {subtype:"initialize"}}` first; `can_use_tool` requests from the CLI
 //!   answered with `{type:"control_response", response:{subtype:"success",
 //!   request_id, response: PermissionResult}}`; `{subtype:"interrupt"}` to
-//!   stop; `control_cancel_request` withdraws a pending question. Like the
-//!   SDK, the prompt is written right away; the CLI reads stdin in order.
+//!   stop; `control_cancel_request` withdraws a pending question;
+//!   `{subtype:"set_permission_mode", mode}` switches the access mode live
+//!   (the SDK's `setPermissionMode`) — into `bypassPermissions` only when
+//!   the process was launched with the allow flag, else the runtime
+//!   respawns with `--resume`. Like the SDK, the prompt is written right
+//!   away; the CLI reads stdin in order. Images go as `image` blocks, PDFs as
+//!   base64 `document` blocks.
 //! * decisions — `permissionResultFromDecision` (`ClaudeAdapterV2.ts:
 //!   3502-3545`): accept → `allow` + the original input; accept-for-session →
 //!   `allow` + `updatedPermissions` (the CLI's suggestions re-targeted at
@@ -46,14 +54,24 @@ use std::collections::HashMap;
 
 use otto_core::agent_runtime::{
     ApprovalDecision, ApprovalOption, PlanStep, PlanStepStatus, ProviderFailure, RequestKind,
-    RuntimePromptReq, RuntimeProvider, RuntimeRequestStatus, TurnItem, TurnItemKind,
-    TurnItemStatus, TurnTerminalStatus, TurnTokenUsage,
+    RuntimeAccessMode, RuntimePromptReq, RuntimeProvider, RuntimeRequestStatus, TurnItem,
+    TurnItemKind, TurnItemStatus, TurnTerminalStatus, TurnTokenUsage,
 };
 use serde_json::{json, Value};
 
 use crate::driver::{
-    item, DriverError, DriverEvent, DriverStep, LaunchContext, LaunchSpec, StructuredDriver,
+    item, tool_error, DriverError, DriverEvent, DriverStep, LaunchContext, LaunchSpec,
+    StructuredDriver,
 };
+
+/// `permissionModeForClaudeRuntimePolicy` (`ClaudeAdapterV2.ts:2573-2620`).
+fn permission_mode(mode: RuntimeAccessMode) -> &'static str {
+    match mode {
+        RuntimeAccessMode::ApprovalRequired => "default",
+        RuntimeAccessMode::AutoAcceptEdits => "acceptEdits",
+        RuntimeAccessMode::FullAccess => "bypassPermissions",
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ToolType {
@@ -98,6 +116,7 @@ struct Tool {
     name: String,
     input: Value,
     output: Option<String>,
+    error: Option<String>,
     status: TurnItemStatus,
 }
 
@@ -129,7 +148,11 @@ pub struct ClaudeDriver {
     /// `setModel` / `applyFlagSettings`).
     model: Option<String>,
     effort: Option<String>,
-    /// Ids of in-flight `set_model` / `apply_flag_settings` requests.
+    access: RuntimeAccessMode,
+    /// Launched with `--allow-dangerously-skip-permissions` (full access).
+    bypass_allowed: bool,
+    /// Ids of in-flight `set_model` / `apply_flag_settings` /
+    /// `set_permission_mode` requests.
     switches: Vec<String>,
 }
 
@@ -155,6 +178,8 @@ impl ClaudeDriver {
             pending: HashMap::new(),
             model: None,
             effort: None,
+            access: RuntimeAccessMode::default(),
+            bypass_allowed: false,
             switches: Vec::new(),
         }
     }
@@ -181,6 +206,9 @@ impl ClaudeDriver {
             .iter()
             .map(|i| json!({"type": "image", "source": {"type": "base64", "media_type": i.mime, "data": i.data_base64}}))
             .collect();
+        content.extend(req.files.iter().map(|f| {
+            json!({"type": "document", "title": f.name, "source": {"type": "base64", "media_type": f.mime, "data": f.data_base64}})
+        }));
         if !req.text.is_empty() {
             content.push(json!({"type": "text", "text": req.text}));
         }
@@ -314,12 +342,13 @@ impl ClaudeDriver {
                 output: t.output.clone(),
             },
         };
-        item(
-            format!("{}:tool:{id}", self.turn()),
-            t.status,
-            Some(t.name.clone()),
-            kind,
-        )
+        let mut it = item(self.tool_item_id(id), t.status, Some(t.name.clone()), kind);
+        it.error = t.error.clone();
+        it
+    }
+
+    fn tool_item_id(&self, tool_use_id: &str) -> String {
+        format!("{}:tool:{tool_use_id}", self.turn())
     }
 
     fn on_todo_write(&self, step: &mut DriverStep, input: &Value) {
@@ -403,6 +432,7 @@ impl ClaudeDriver {
                         name,
                         input,
                         output: None,
+                        error: None,
                         status: TurnItemStatus::Running,
                     };
                     step.push(DriverEvent::TurnItem(self.tool_item(&id, &t)));
@@ -431,12 +461,14 @@ impl ClaudeDriver {
             let Some(mut t) = self.tools.remove(&id) else {
                 continue;
             };
-            t.output = Some(result_text(block.get("content")));
-            t.status = if block.get("is_error").and_then(Value::as_bool) == Some(true) {
-                TurnItemStatus::Failed
+            let text = result_text(block.get("content"));
+            if block.get("is_error").and_then(Value::as_bool) == Some(true) {
+                t.status = TurnItemStatus::Failed;
+                t.error = tool_error(&text);
             } else {
-                TurnItemStatus::Completed
-            };
+                t.status = TurnItemStatus::Completed;
+            }
+            t.output = Some(text);
             step.push(DriverEvent::TurnItem(self.tool_item(&id, &t)));
         }
     }
@@ -490,16 +522,18 @@ impl ClaudeDriver {
                 label: "Deny".into(),
             },
         ];
+        let tool_use_id = req
+            .get("tool_use_id")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let tool_item_id = tool_use_id.as_deref().map(|id| self.tool_item_id(id));
         self.pending.insert(
             request_id.clone(),
             Pending {
                 cli_request_id: cli_request_id.to_string(),
                 tool_name,
                 input,
-                tool_use_id: req
-                    .get("tool_use_id")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
+                tool_use_id,
                 suggestions: req
                     .get("permission_suggestions")
                     .and_then(Value::as_array)
@@ -514,6 +548,7 @@ impl ClaudeDriver {
             prompt: Some(prompt),
             reason,
             options,
+            tool_item_id,
         });
     }
 
@@ -602,7 +637,7 @@ impl ClaudeDriver {
                     message: resp
                         .get("error")
                         .and_then(Value::as_str)
-                        .unwrap_or("the model switch was refused")
+                        .unwrap_or("the switch was refused")
                         .to_string(),
                     code: None,
                     retryable: None,
@@ -719,11 +754,14 @@ impl StructuredDriver for ClaudeDriver {
             "--permission-prompt-tool",
             "stdio",
             "--permission-mode",
-            "default",
+            permission_mode(ctx.access_mode),
             "--include-partial-messages",
         ]
         .map(String::from)
         .to_vec();
+        if ctx.access_mode == RuntimeAccessMode::FullAccess {
+            args.push("--allow-dangerously-skip-permissions".into());
+        }
         if let Some(m) = &ctx.model {
             args.extend(["--model".into(), m.clone()]);
         }
@@ -741,6 +779,8 @@ impl StructuredDriver for ClaudeDriver {
 
     fn start(&mut self, ctx: &LaunchContext) -> DriverStep {
         self.model = ctx.model.clone();
+        self.access = ctx.access_mode;
+        self.bypass_allowed = ctx.access_mode == RuntimeAccessMode::FullAccess;
         self.session_id = Some(
             ctx.resume
                 .clone()
@@ -776,12 +816,24 @@ impl StructuredDriver for ClaudeDriver {
             self.switches.push(id);
             step.write(line);
         }
+        if let Some(mode) = req.access_mode.filter(|m| *m != self.access) {
+            self.access = mode;
+            let (id, line) = self.control_request(
+                json!({"subtype": "set_permission_mode", "mode": permission_mode(mode)}),
+            );
+            self.switches.push(id);
+            step.write(line);
+        }
         self.send_user(&mut step, req);
         Ok(step)
     }
 
     fn switches_model_live(&self) -> bool {
         true
+    }
+
+    fn switches_access_live(&self, to: RuntimeAccessMode) -> bool {
+        to != RuntimeAccessMode::FullAccess || self.bypass_allowed
     }
 
     fn interrupt(&mut self) -> DriverStep {
@@ -902,6 +954,7 @@ mod tests {
             model: Some("haiku".into()),
             resume: resume.map(str::to_string),
             sandboxed: false,
+            access_mode: RuntimeAccessMode::default(),
         }
     }
 
@@ -1167,5 +1220,108 @@ mod tests {
             json!({"type":"assistant","message":{"id":"m3","content":[{"type":"text","text":"sub"}]},"parent_tool_use_id":"tu-agent"}),
         );
         assert!(s.events.is_empty());
+    }
+
+    #[test]
+    fn access_modes_map_to_permission_modes_and_switch_live() {
+        let at = |access_mode| LaunchContext {
+            access_mode,
+            ..ctx(None)
+        };
+        let mode_of = |spec: &LaunchSpec| {
+            let pm = spec
+                .args
+                .iter()
+                .position(|a| a == "--permission-mode")
+                .unwrap();
+            spec.args[pm + 1].clone()
+        };
+        let d = ClaudeDriver::new();
+        let edits = d.launch(&at(RuntimeAccessMode::AutoAcceptEdits));
+        assert_eq!(mode_of(&edits), "acceptEdits");
+        assert!(!edits.args.iter().any(|a| a.contains("dangerously")));
+        let full = d.launch(&at(RuntimeAccessMode::FullAccess));
+        assert_eq!(mode_of(&full), "bypassPermissions");
+        assert!(full
+            .args
+            .contains(&"--allow-dangerously-skip-permissions".to_string()));
+        assert!(!full
+            .args
+            .contains(&"--dangerously-skip-permissions".to_string()));
+
+        // Launched in approval-required: edits switch live, bypass respawns.
+        let mut d = ClaudeDriver::new();
+        ready(&mut d);
+        assert!(d.switches_access_live(RuntimeAccessMode::AutoAcceptEdits));
+        assert!(!d.switches_access_live(RuntimeAccessMode::FullAccess));
+        let req = RuntimePromptReq {
+            access_mode: Some(RuntimeAccessMode::AutoAcceptEdits),
+            ..RuntimePromptReq::of("go")
+        };
+        let s = d.prompt("t1", &req).unwrap();
+        let w: Value = serde_json::from_str(&s.writes[0]).unwrap();
+        assert_eq!(
+            w["request"],
+            json!({"subtype":"set_permission_mode","mode":"acceptEdits"})
+        );
+        feed(&mut d, json!({"type":"result","subtype":"success"}));
+        assert_eq!(d.prompt("t2", &req).unwrap().writes.len(), 1, "unchanged");
+        // Launched in full access: every mode switches live.
+        let mut d = ClaudeDriver::new();
+        d.start(&at(RuntimeAccessMode::FullAccess));
+        assert!(d.switches_access_live(RuntimeAccessMode::FullAccess));
+    }
+
+    #[test]
+    fn parallel_questions_are_all_live_and_answer_out_of_order() {
+        let mut d = ClaudeDriver::new();
+        ready(&mut d);
+        let pdf = RuntimePromptReq {
+            files: vec![otto_core::agent_runtime::PromptFile {
+                mime: "application/pdf".into(),
+                name: "spec.pdf".into(),
+                data_base64: "JVBERg==".into(),
+            }],
+            ..RuntimePromptReq::of("fetch both")
+        };
+        let s = d.prompt("t1", &pdf).unwrap();
+        let user: Value = serde_json::from_str(&s.writes[0]).unwrap();
+        assert_eq!(
+            user["message"]["content"][0],
+            json!({"type":"document","title":"spec.pdf","source":{"type":"base64","media_type":"application/pdf","data":"JVBERg=="}})
+        );
+        feed(
+            &mut d,
+            json!({"type":"assistant","message":{"id":"m1","content":[
+                {"type":"tool_use","id":"tu1","name":"WebFetch","input":{"url":"https://a"}},
+                {"type":"tool_use","id":"tu2","name":"WebFetch","input":{"url":"https://b"}}]},"parent_tool_use_id":null}),
+        );
+        for (r, tu) in [("r1", "tu1"), ("r2", "tu2")] {
+            let s = feed(
+                &mut d,
+                json!({"type":"control_request","request_id":r,"request":{"subtype":"can_use_tool","tool_name":"WebFetch","input":{"url":"x"},"tool_use_id":tu}}),
+            );
+            let want = format!("t1:tool:{tu}");
+            assert!(
+                matches!(&s.events[0], DriverEvent::Request { tool_item_id: Some(t), .. } if *t == want)
+            );
+        }
+        let second = d.respond("claude-r2", ApprovalDecision::Decline).unwrap();
+        let first = d.respond("claude-r1", ApprovalDecision::Accept).unwrap();
+        let rid =
+            |s: &DriverStep| -> Value { serde_json::from_str::<Value>(&s.writes[0]).unwrap() };
+        assert_eq!(rid(&second)["response"]["request_id"], "r2");
+        assert_eq!(rid(&first)["response"]["request_id"], "r1");
+        // The declined fetch fails with the CLI's text as its error.
+        let s = feed(
+            &mut d,
+            json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tu2","content":[{"type":"text","text":"  User declined tool execution.  "}],"is_error":true}]},"parent_tool_use_id":null}),
+        );
+        let DriverEvent::TurnItem(i) = &s.events[0] else {
+            panic!()
+        };
+        assert_eq!(i.status, TurnItemStatus::Failed);
+        assert_eq!(i.error.as_deref(), Some("User declined tool execution."));
+        assert!(matches!(&i.kind, TurnItemKind::WebSearch { .. }));
     }
 }

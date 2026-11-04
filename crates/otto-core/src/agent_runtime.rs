@@ -245,6 +245,10 @@ pub struct ProviderFailure {
 pub enum TurnItemKind {
     UserMessage {
         text: String,
+        /// The images and files sent with the prompt (bytes at
+        /// `GET /runtime-sessions/{id}/attachments/{attachment_id}`).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<Attachment>,
     },
     AssistantMessage {
         message_id: String,
@@ -299,6 +303,11 @@ pub enum TurnItemKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
         options: Vec<ApprovalOption>,
+        /// The turn item id of the tool call this request gates.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_item_id: Option<Id>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cancel_reason: Option<CancelReason>,
     },
     SystemNotice {
         message: String,
@@ -320,6 +329,9 @@ pub struct TurnItem {
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
     pub updated_at: DateTime<Utc>,
+    /// A failed tool's error text (about 2 KB at most).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
     #[serde(flatten)]
     pub kind: TurnItemKind,
 }
@@ -374,6 +386,19 @@ pub struct RuntimeRequest {
     pub resolved_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decision: Option<ApprovalDecision>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancel_reason: Option<CancelReason>,
+}
+
+/// Why a request was cancelled: the provider withdrew it (`agent` — Claude
+/// does when a parallel sibling ends), a person interrupted the turn, or the
+/// session was closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CancelReason {
+    Agent,
+    Interrupt,
+    Closed,
 }
 
 /// `OrchestrationV2PlanArtifact` (`todo_list` form).
@@ -530,6 +555,7 @@ pub struct RuntimeSession {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_thread_id: Option<String>,
     pub status: RuntimeSessionStatus,
+    pub access_mode: RuntimeAccessMode,
     pub created_by: Id,
     pub created_at: DateTime<Utc>,
     pub last_active_at: DateTime<Utc>,
@@ -545,6 +571,40 @@ pub struct CreateRuntimeSessionReq {
     pub title: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
+    #[serde(default)]
+    pub access_mode: Option<RuntimeAccessMode>,
+}
+
+/// T3 Code's `RuntimeMode` (its `auto` mode is not offered): what the agent
+/// may do without asking. Otto's Seatbelt, folder trust and prompt guard
+/// apply in every mode.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RuntimeAccessMode {
+    #[default]
+    ApprovalRequired,
+    AutoAcceptEdits,
+    FullAccess,
+}
+
+impl RuntimeAccessMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ApprovalRequired => "approval-required",
+            Self::AutoAcceptEdits => "auto-accept-edits",
+            Self::FullAccess => "full-access",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        [
+            Self::ApprovalRequired,
+            Self::AutoAcceptEdits,
+            Self::FullAccess,
+        ]
+        .into_iter()
+        .find(|m| m.as_str() == s)
+    }
 }
 
 /// `PATCH /runtime-sessions/{id}` (rename; T3 Code `thread.metadata-updated`).
@@ -555,6 +615,7 @@ pub struct UpdateRuntimeSessionReq {
 
 /// `POST /runtime-sessions/{id}/prompt`. `model` / `effort` select this
 /// turn's model (it sticks for later turns); `effort` is Claude / Codex only.
+/// `access_mode` applies from this turn on and sticks, like `model`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RuntimePromptReq {
     #[serde(default)]
@@ -565,6 +626,11 @@ pub struct RuntimePromptReq {
     pub effort: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<PromptImage>,
+    /// Non-image files (only `application/pdf`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<PromptFile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access_mode: Option<RuntimeAccessMode>,
 }
 
 impl RuntimePromptReq {
@@ -582,6 +648,31 @@ impl RuntimePromptReq {
 pub struct PromptImage {
     pub mime: String,
     pub data_base64: String,
+}
+
+/// A file attachment (`mime` is `application/pdf`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PromptFile {
+    pub mime: String,
+    pub name: String,
+    pub data_base64: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttachmentKind {
+    Image,
+    File,
+}
+
+/// A stored prompt attachment, referenced from its `user_message` item.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Attachment {
+    pub id: Id,
+    pub kind: AttachmentKind,
+    pub mime: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -620,6 +711,7 @@ mod tests {
             started_at: None,
             completed_at: None,
             updated_at: ts(),
+            error: None,
             kind: TurnItemKind::AssistantMessage {
                 message_id: "m1".into(),
                 text: "Hel".into(),
@@ -685,6 +777,7 @@ mod tests {
                     created_at: ts(),
                     resolved_at: None,
                     decision: Some(ApprovalDecision::AcceptForSession),
+                    cancel_reason: Some(CancelReason::Interrupt),
                 },
             },
             RuntimeEventBody::PlanUpdated {
@@ -742,5 +835,17 @@ mod tests {
             serde_json::to_value(ApprovalDecision::AcceptForSession).unwrap(),
             json!("accept_for_session")
         );
+        assert_eq!(
+            serde_json::to_value(RuntimeAccessMode::AutoAcceptEdits).unwrap(),
+            json!("auto-accept-edits")
+        );
+        for m in [
+            RuntimeAccessMode::ApprovalRequired,
+            RuntimeAccessMode::AutoAcceptEdits,
+            RuntimeAccessMode::FullAccess,
+        ] {
+            assert_eq!(RuntimeAccessMode::parse(m.as_str()), Some(m));
+            assert_eq!(serde_json::to_value(m).unwrap(), json!(m.as_str()));
+        }
     }
 }

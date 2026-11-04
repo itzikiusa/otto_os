@@ -99,9 +99,10 @@ impl ServerCtx {
         };
 
         let bus = events.clone();
-        let agent_runtime = otto_agent_protocol::daemon_runtime(pool.clone(), manager.clone(), {
-            move |ev| crate::ws_fanout::publish_stream(&bus, ev)
-        });
+        let agent_runtime =
+            otto_agent_protocol::daemon_runtime(pool.clone(), manager.clone(), &data_dir, {
+                move |ev| crate::ws_fanout::publish_stream(&bus, ev)
+            });
         ServerCtx {
             authenticator: Arc::new(authenticator),
             roles: Arc::new(otto_rbac::RbacRoleChecker::new(pool.clone())),

@@ -80,6 +80,10 @@ pub fn api_router<S: RuntimeCtx>() -> Router<S> {
         )
         .route("/runtime-sessions/{id}/close", post(close::<S>))
         .route("/runtime-sessions/{id}/events", get(events::<S>))
+        .route(
+            "/runtime-sessions/{id}/attachments/{attachment_id}",
+            get(attachment::<S>),
+        )
 }
 
 fn require_human<S: RuntimeCtx>(ctx: &S, auth: &AuthContext) -> ApiResult<()> {
@@ -217,6 +221,25 @@ async fn close<S: RuntimeCtx>(
     require_human(&ctx, &auth)?;
     authorized(&ctx, &user, &id).await?;
     Ok(Json(ctx.agent_runtime().close(&id).await?))
+}
+
+/// GET /runtime-sessions/{id}/attachments/{attachment_id} — the raw bytes.
+async fn attachment<S: RuntimeCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path((id, attachment_id)): Path<(Id, String)>,
+) -> ApiResult<Response> {
+    authorized(&ctx, &user, &id).await?;
+    let (mime, bytes) = ctx.agent_runtime().attachment(&id, &attachment_id).await?;
+    use axum::http::header;
+    // The mime is the uploader's (`image/svg+xml` can carry script): never
+    // run it on the daemon's origin.
+    let headers = [
+        (header::CONTENT_TYPE, mime),
+        (header::CONTENT_SECURITY_POLICY, "sandbox".into()),
+        (header::X_CONTENT_TYPE_OPTIONS, "nosniff".into()),
+    ];
+    Ok((headers, bytes).into_response())
 }
 
 #[derive(Deserialize)]

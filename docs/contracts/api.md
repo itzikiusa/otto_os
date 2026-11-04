@@ -766,14 +766,28 @@ Every spawn passes the PTY sessions' safety pipeline
 provisioning, Seatbelt); a named provider account or a workspace network
 profile is refused (400) rather than bypassed. Drivers (what T3 Code runs,
 see the design doc's provider table): `claude` — the Agent SDK's stream-json
-control protocol against the `claude` CLI (`--permission-mode default`);
-`codex` — `codex app-server` (`approvalPolicy: untrusted`); `gemini` — ACP
-via `gemini --acp`; `grok` — ACP via `grok --permission-mode default agent
-stdio`; `agy` — Antigravity's print-mode stream-json (`agy --print=
---input-format stream-json --output-format stream-json`). Every tool approval
-reaches a person; no auto-approval mode exists. Headless `agy` cannot ask: a
+control protocol against the `claude` CLI; `codex` — `codex app-server`;
+`gemini` — ACP via `gemini --acp`; `grok` — ACP via `grok … agent stdio`;
+`agy` — Antigravity's print-mode stream-json (`agy --print= --input-format
+stream-json --output-format stream-json`). Headless `agy` cannot ask: a
 tool it needs approval for is denied (a `system_notice` item names it) unless
-the user's own agy `permissions.allow` rules cover it.
+the user's own agy `permissions.allow` rules or its `--mode` cover it.
+
+**Access mode** (T3 Code's `RuntimeMode`): `RuntimeAccessMode` ∈
+`approval-required` (default: every tool approval reaches a person) |
+`auto-accept-edits` | `full-access`. Set on create, changed by a prompt's
+`access_mode` (it sticks, persisted on the session). Per provider:
+
+| Provider | approval-required | auto-accept-edits | full-access | Switch |
+|---|---|---|---|---|
+| claude | `--permission-mode default` | `acceptEdits` | `bypassPermissions` + `--allow-dangerously-skip-permissions` | live (`set_permission_mode`); into full access only if launched in it, else respawn + `--resume` |
+| codex | `approvalPolicy: untrusted`, `sandboxPolicy: readOnly` | `on-request`, `workspaceWrite` | `never`, `dangerFullAccess` | per `turn/start`; under Otto's Seatbelt the sandbox is always `externalSandbox` |
+| gemini | `--approval-mode default` | `auto_edit` | `yolo` | live `session/set_mode` (`default` / `autoEdit` / `yolo`) when advertised, else respawn + `session/load` |
+| grok | `--permission-mode default agent stdio` | same as approval-required (grok has no such mode) | `agent --always-approve stdio` | respawn + `session/load` |
+| agy | (no flag) | `--mode accept-edits` | `--mode auto` | respawn + `--conversation` |
+
+Otto's Seatbelt sandbox, folder trust and prompt guard apply in every mode;
+`--dangerously-skip-permissions` is never passed.
 Streaming upserts of one item are coalesced to at most one per **50 ms**
 (the latest text always follows; nothing is dropped).
 
@@ -785,7 +799,7 @@ credential** — an agent session's, MCP or share credential gets **403**; the
 request answer is also an `Admin`-class approval gate (above).
 
 `RuntimeSession`: `{id, workspace_id, provider: "claude"|"codex"|"gemini"|"grok"|"agy",
-title, cwd, model?, native_thread_id?, status, created_by, created_at,
+title, cwd, model?, native_thread_id?, status, access_mode, created_by, created_at,
 last_active_at, last_sequence}`; `status` ∈ `starting | idle | working |
 awaiting_permission | dormant | closed` (`dormant` = no process; the next
 prompt respawns it and resumes `native_thread_id` — Claude `--resume`, Codex
@@ -795,13 +809,14 @@ a fresh conversation).
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
 | GET /workspaces/{id}/runtime-sessions | ws viewer | — | `RuntimeSession[]`, newest activity first (own; all for admin/root), max 500 |
-| POST /workspaces/{id}/runtime-sessions | ws editor, person | `{provider, cwd?, title?, model?}` (`cwd` absolute, default the workspace root) | **201** `RuntimeSession`. The child is spawned (and its handshake started) before the response: a refused folder, a missing CLI or a provider without a driver fails the create (**400**) and leaves no row |
+| POST /workspaces/{id}/runtime-sessions | ws editor, person | `{provider, cwd?, title?, model?, access_mode?}` (`cwd` absolute, default the workspace root; `access_mode` default `approval-required`) | **201** `RuntimeSession`. The child is spawned (and its handshake started) before the response: a refused folder, a missing CLI or a provider without a driver fails the create (**400**) and leaves no row |
 | GET /runtime-sessions/{id} | ws viewer + owner-or-admin | — | `RuntimeSession` with its live `status` |
 | PATCH /runtime-sessions/{id} | owner-or-admin, person | `UpdateRuntimeSessionReq {title}` (trimmed, non-empty) | `RuntimeSession` with the new title. Allowed on a `closed` session too (it stays listed as history). **400** empty title |
-| POST /runtime-sessions/{id}/prompt | owner-or-admin, person | `{text, model?, effort?, images?: [{mime, data_base64}]}` — `text` non-empty unless `images` is; body ≤ 32 MiB | **202** `{turn_id, sequence}` (`sequence` of the turn's first `provider_turn.updated`). Respawns a `dormant` session first. `model` sticks (it becomes the session's `model`): Claude switches live (`set_model`), Codex passes it on `turn/start`, ACP and agy restart the CLI with the new model and resume the thread. `effort` (Claude `apply_flag_settings` `effortLevel`, Codex `turn/start` `effort`) and `images` (Claude image blocks, Codex `image` data-URL inputs, ACP `image` blocks when the agent advertises `promptCapabilities.image`) are refused with **400** where unsupported; agy takes text only. **409** while a turn runs (one turn at a time) or after `close`. A CLI that refuses its handshake (signed out, unsupported account) fails the running turn with that failure, or — when it refused before the prompt reached it — answers **400** `the agent could not start: <reason>`; either way the session goes `dormant` with `provider_session.last_error`, and the next prompt respawns it |
-| POST /runtime-sessions/{id}/interrupt | owner-or-admin, person | — | `{interrupted}` — `false` when no turn was running. Pending requests → `cancelled`; the provider ends the turn (`turn.terminal` `interrupted`); if it has not within 10 s its process group is killed and the turn ends `interrupted` anyway |
+| POST /runtime-sessions/{id}/prompt | owner-or-admin, person | `{text, model?, effort?, access_mode?, images?: [{mime, data_base64}], files?: [{mime, name, data_base64}]}` — `text` non-empty unless `images` / `files` are; `files` only `application/pdf`; body ≤ 32 MiB | **202** `{turn_id, sequence}` (`sequence` of the turn's first `provider_turn.updated`). Respawns a `dormant` session first. `model` sticks (it becomes the session's `model`): Claude switches live (`set_model`), Codex passes it on `turn/start`, ACP and agy restart the CLI with the new model and resume the thread. `effort` (Claude `apply_flag_settings` `effortLevel`, Codex `turn/start` `effort`) and `images` (Claude image blocks, Codex `image` data-URL inputs, ACP `image` blocks when the agent advertises `promptCapabilities.image`) and `files` (Claude base64 `document` blocks, ACP `resource` blobs when the agent advertises `promptCapabilities.embeddedContext`; Codex 0.166.0 has no file input) are refused with **400** where unsupported, with a readable reason; agy takes text only. `access_mode` applies from this turn on (table above). Images and files are stored under the daemon data dir (`runtime-attachments/<session>/`, removed with the session) and listed on the turn's `user_message` item as `attachments: [{id, kind: "image"\|"file", mime, name?}]`. **409** while a turn runs (one turn at a time) or after `close`. A CLI that refuses its handshake (signed out, unsupported account) fails the running turn with that failure, or — when it refused before the prompt reached it — answers **400** `the agent could not start: <reason>`; either way the session goes `dormant` with `provider_session.last_error`, and the next prompt respawns it |
+| POST /runtime-sessions/{id}/interrupt | owner-or-admin, person | — | `{interrupted}` — `false` when no turn was running. Pending requests → `cancelled` (`cancel_reason: "interrupt"`); the provider ends the turn (`turn.terminal` `interrupted`); if it has not within 10 s its process group is killed and the turn ends `interrupted` anyway |
 | POST /runtime-sessions/{id}/requests/{request_id} | owner-or-admin, person (`Admin` class) | `{decision}` ∈ `accept \| accept_for_session \| accept_always \| decline \| cancel` — one of the request's `approval_request` item `options[].decision` (`cancel` always allowed) | **204**; the request → `resolved` with the decision. **404** unknown / no longer pending, **400** a decision that was not offered |
-| POST /runtime-sessions/{id}/close | owner-or-admin, person | — | `RuntimeSession` (`status: closed`). Ends a running turn `interrupted`, closes the child's stdin (SIGTERM / SIGKILL to its group after 3 s each). Idempotent; later prompts **409** |
+| POST /runtime-sessions/{id}/close | owner-or-admin, person | — | `RuntimeSession` (`status: closed`). Pending requests → `cancelled` (`cancel_reason: "closed"`). Ends a running turn `interrupted`, closes the child's stdin (SIGTERM / SIGKILL to its group after 3 s each). Idempotent; later prompts **409** |
+| GET /runtime-sessions/{id}/attachments/{attachment_id} | ws viewer + owner-or-admin | — | the raw bytes, `Content-Type: <mime>` (`Content-Security-Policy: sandbox`, `nosniff`). **404** an id that is not one of the session's `user_message` attachments |
 | GET /runtime-sessions/{id}/events?after_sequence= | ws viewer + owner-or-admin | `after_sequence` (default 0) | `RuntimeReplay` — `{kind:"events", events, last_sequence}` or `{kind:"snapshot", snapshot_sequence, snapshot}` |
 
 **Replay** (T3 Code `subscribeThread`). `sequence` is per session, strictly
