@@ -19,6 +19,12 @@
   import { harnessLabel, isPlainShellSession, isThreadSession, sessionBranch } from './threadsHelpers';
   import { threadRepos } from './threadRepos.svelte';
   import { threads } from './threadsStore.svelte';
+  import { lazyComponent } from '../../lib/lazy-component.svelte';
+  import LazyMount from '../../lib/components/LazyMount.svelte';
+  import { runtimeThreadMenu } from './runtime/runtimeMenu';
+  import { asThreadSession, runtimeThreads } from './runtime/runtimeThreads.svelte';
+  // The structured-runtime conversation loads with the first runtime thread.
+  const RuntimeThread = lazyComponent(() => import('./runtime/RuntimeThread.svelte'));
 
   interface Props {
     paneId: string;
@@ -28,9 +34,10 @@
   }
   let { paneId, focused, multiPane, onstartroom }: Props = $props();
 
-  const session = $derived(ws.getSession(paneId) ?? null);
+  const runtime = $derived(runtimeThreads.get(paneId));
+  const session = $derived(ws.getSession(paneId) ?? (runtime ? asThreadSession(runtime) : null));
   const rawStatus = $derived(ws.statusMap[paneId] ?? session?.status ?? 'idle');
-  const needsYou = $derived(ws.needsYou[paneId] === true);
+  const needsYou = $derived(ws.needsYou[paneId] === true || runtimeThreads.awaiting(paneId));
   const paneState = $derived(sessionState(session, rawStatus, needsYou, { stale: events.state !== 'connected' }));
   // Branch for the composer meta row too: metadata / registered repo, else the
   // repo detected behind the thread's folder.
@@ -83,7 +90,7 @@
   });
 
   function beginRename(): void {
-    if (!session) return;
+    if (!session || runtime) return;
     draftTitle = session.title;
     renaming = true;
   }
@@ -183,7 +190,8 @@
   }
 
   function openPaneMenu(e: MouseEvent): void {
-    if (session) ctxMenu.show(e, buildThreadMenu(session, { onstartroom }));
+    if (runtime) ctxMenu.show(e, runtimeThreadMenu(paneId));
+    else if (session) ctxMenu.show(e, buildThreadMenu(session, { onstartroom }));
   }
   function paneFocus(node: HTMLElement): { destroy(): void } {
     const mark = (): void => {
@@ -237,7 +245,7 @@
         {/if}
       </div>
       <div class="tp-actions">
-        {#if !isPlainShellSession(session)}
+        {#if !isPlainShellSession(session) && !runtime}
           <button
             type="button"
             class="icon-btn"
@@ -337,6 +345,8 @@
           Close pane
         </button>
       </EmptyState>
+    {:else if runtime}
+      <LazyMount lazy={RuntimeThread} what="conversation" variant="panel" props={{ sessionId: paneId, focused }} />
     {:else if isPlainShellSession(session)}
       <div class="tp-shell-wrap otto-force-dark">
         <LazyTerminal sessionId={paneId} forceDark autoFocus={focused} resumeOnOpen={focused} />
@@ -357,7 +367,7 @@
     {/if}
   </div>
 
-  {#if showTerminal && session && !isPlainShellSession(session)}
+  {#if showTerminal && session && !runtime && !isPlainShellSession(session)}
     <ThreadTerminalDrawer
       sessionId={paneId}
       title={session.title}

@@ -12,6 +12,7 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import type { Session } from '../../lib/api/types';
   import { harnessLabel, sessionBranch } from './threadsHelpers';
+  import { runtimeThreads } from './runtime/runtimeThreads.svelte';
   import { threads } from './threadsStore.svelte';
 
   interface Props {
@@ -26,7 +27,7 @@
 
   let { session: s, variant, child = false, onrowclick, onreopen, onmenu, onselect }: Props = $props();
 
-  const needs = $derived(ws.needsYou[s.id] === true);
+  const needs = $derived(ws.needsYou[s.id] === true || runtimeThreads.awaiting(s.id));
   const st = $derived(sessionState(s, ws.statusMap[s.id] ?? s.status, needs, { stale: events.state !== 'connected' }));
   const pinned = $derived(threads.isPinned(s.id));
   const selected = $derived(threads.focusedSessionId === s.id && !threads.newDraftMode);

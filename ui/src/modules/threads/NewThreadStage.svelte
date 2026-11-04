@@ -46,6 +46,7 @@
   import { harnessLabel, projectNameFromCwd, relToRoot } from './threadsHelpers';
   import { threadRepos } from './threadRepos.svelte';
   import { threads } from './threadsStore.svelte';
+  import { isRuntimeProvider, runtimeThreads } from './runtime/runtimeThreads.svelte';
 
   interface Props {
     /** Float the project card top-right (wide screen, right panel closed). */
@@ -60,6 +61,8 @@
   });
 
   let provider = $state('');
+  // Runtime threads always ask before acting (no access-mode switch).
+  const modeSupported = $derived(supportsInteractionMode(provider) && !isRuntimeProvider(provider));
   let selectedModel = $state<string | null>(null);
   let selectedEffort = $state<EffortLevel | null>(null);
   let interactionMode = $state<InteractionMode>('full');
@@ -155,7 +158,7 @@
   const openEffortMenu = openModelMenu;
 
   function openModeMenu(): void {
-    if (!modeEl || !supportsInteractionMode(provider)) return;
+    if (!modeEl || !modeSupported) return;
     ctxMenu.showAt(modeEl, buildModeMenu(interactionMode, (m) => (interactionMode = m)), { align: 'end' });
   }
 
@@ -270,10 +273,14 @@
       };
       const title = firstMsg ? firstMsg.replace(/\s+/g, ' ').slice(0, 56) : `${harnessLabel(provider)} thread`;
       const opts = { scratch: scratchActive && ws.currentId !== SCRATCH_WORKSPACE_ID };
-      const created = firstMsg
-        ? await ws.openSessionWithPrompt({ provider, title, cwd: dir || null, prompt: firstMsg, meta }, opts)
-        : await ws.createSessionQuiet({ kind: 'agent', provider, title, cwd: dir || null, meta }, opts);
-      if (firstMsg) transcript.recordOptimisticPrompt(created.id, firstMsg);
+      const created = isRuntimeProvider(provider)
+        ? await runtimeThreads.start(scratchActive ? SCRATCH_WORKSPACE_ID : (ws.currentId ?? SCRATCH_WORKSPACE_ID), {
+            provider, title, cwd: dir || null, model: selectedModel, prompt: firstMsg,
+          })
+        : firstMsg
+          ? await ws.openSessionWithPrompt({ provider, title, cwd: dir || null, prompt: firstMsg, meta }, opts)
+          : await ws.createSessionQuiet({ kind: 'agent', provider, title, cwd: dir || null, meta }, opts);
+      if (firstMsg && !isRuntimeProvider(provider)) transcript.recordOptimisticPrompt(created.id, firstMsg);
       prompt = '';
       threads.draftCwd = null;
       threads.rememberProject(dir || null);
@@ -324,7 +331,7 @@
   function onComposerKeydown(e: KeyboardEvent): void {
     if (e.isComposing) return;
     if (e.key === 'Tab' && e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey && !cmdOpen) {
-      if (supportsInteractionMode(provider)) {
+      if (modeSupported) {
         e.preventDefault();
         interactionMode = nextInteractionModeToggle(interactionMode);
         return;
@@ -536,7 +543,7 @@
           <span class="ellipsis">{branch}</span>
         </button>
       {/if}
-      {#if supportsInteractionMode(provider)}
+      {#if modeSupported}
         <button
           bind:this={modeEl}
           type="button"
