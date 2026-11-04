@@ -553,9 +553,35 @@ pub struct UpdateRuntimeSessionReq {
     pub title: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// `POST /runtime-sessions/{id}/prompt`. `model` / `effort` select this
+/// turn's model (it sticks for later turns); `effort` is Claude / Codex only.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RuntimePromptReq {
+    #[serde(default)]
     pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<PromptImage>,
+}
+
+impl RuntimePromptReq {
+    /// A text-only prompt.
+    pub fn of(text: &str) -> Self {
+        Self {
+            text: text.into(),
+            ..Self::default()
+        }
+    }
+}
+
+/// An inline image attachment (`mime` is `image/*`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PromptImage {
+    pub mime: String,
+    pub data_base64: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

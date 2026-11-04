@@ -37,16 +37,16 @@ use std::collections::HashMap;
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::v1::schema::{
-    AuthenticateRequest, CancelNotification, ContentBlock, InitializeRequest, InitializeResponse,
-    LoadSessionRequest, NewSessionRequest, NewSessionResponse, PermissionOption,
-    PermissionOptionKind, Plan, PlanEntryStatus, PromptRequest, PromptResponse,
+    AuthenticateRequest, CancelNotification, ContentBlock, ImageContent, InitializeRequest,
+    InitializeResponse, LoadSessionRequest, NewSessionRequest, NewSessionResponse,
+    PermissionOption, PermissionOptionKind, Plan, PlanEntryStatus, PromptRequest, PromptResponse,
     RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
     SelectedPermissionOutcome, SessionNotification, SessionUpdate, StopReason, TextContent,
     ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolKind,
 };
 use otto_core::agent_runtime::{
     ApprovalDecision, ApprovalOption, PlanStep, PlanStepStatus, ProviderFailure, RequestKind,
-    RuntimeProvider, TurnItem, TurnItemKind, TurnItemStatus, TurnTerminalStatus,
+    RuntimePromptReq, RuntimeProvider, TurnItem, TurnItemKind, TurnItemStatus, TurnTerminalStatus,
 };
 use serde_json::{json, Value};
 
@@ -135,7 +135,9 @@ pub struct AcpDriver {
     auth_methods: Vec<(String, Option<String>)>,
     authenticated: bool,
     session_id: Option<String>,
-    queued: Option<(String, String)>,
+    /// `promptCapabilities.image` from `initialize`.
+    images: bool,
+    queued: Option<(String, RuntimePromptReq)>,
     prompt_id: Option<u64>,
     turn_id: Option<String>,
     segment: Option<Segment>,
@@ -172,6 +174,7 @@ impl AcpDriver {
             auth_methods: Vec::new(),
             authenticated: false,
             session_id: None,
+            images: false,
             queued: None,
             prompt_id: None,
             turn_id: None,
@@ -245,12 +248,17 @@ impl AcpDriver {
         step.write(line);
     }
 
-    fn send_prompt(&mut self, step: &mut DriverStep, turn_id: String, text: String) {
+    fn send_prompt(&mut self, step: &mut DriverStep, turn_id: String, req: &RuntimePromptReq) {
         let sid = self.session_id.clone().unwrap_or_default();
-        let (id, line) = self.request(
-            M_SESSION_PROMPT,
-            PromptRequest::new(sid, vec![ContentBlock::Text(TextContent::new(text))]),
-        );
+        let mut blocks: Vec<ContentBlock> = req
+            .images
+            .iter()
+            .map(|i| ContentBlock::Image(ImageContent::new(&i.data_base64, &i.mime)))
+            .collect();
+        if !req.text.is_empty() {
+            blocks.push(ContentBlock::Text(TextContent::new(&req.text)));
+        }
+        let (id, line) = self.request(M_SESSION_PROMPT, PromptRequest::new(sid, blocks));
         self.prompt_id = Some(id);
         self.turn_id = Some(turn_id);
         self.segments = 0;
@@ -560,9 +568,11 @@ impl AcpDriver {
                         .collect()
                 })
                 .unwrap_or_default();
-            let load = result
+            let caps = result
                 .and_then(|r| serde_json::from_value::<InitializeResponse>(r).ok())
-                .is_some_and(|r| r.agent_capabilities.load_session);
+                .map(|r| r.agent_capabilities);
+            let load = caps.as_ref().is_some_and(|c| c.load_session);
+            self.images = caps.is_some_and(|c| c.prompt_capabilities.image);
             if let Some(e) = error {
                 step.push(DriverEvent::Fatal(rpc_failure("handshake_error", &e)));
                 return;
@@ -605,8 +615,10 @@ impl AcpDriver {
                 native_thread_id: self.session_id.clone(),
                 model: None,
             });
-            if let Some((turn, text)) = self.queued.take() {
-                self.send_prompt(step, turn, text);
+            // A prompt queued before `initialize` answered goes as is; the
+            // agent refuses images it cannot take.
+            if let Some((turn, req)) = self.queued.take() {
+                self.send_prompt(step, turn, &req);
             }
         } else if Some(id) == self.prompt_id {
             self.prompt_id = None;
@@ -699,16 +711,26 @@ impl StructuredDriver for AcpDriver {
         step
     }
 
-    fn prompt(&mut self, turn_id: &str, text: &str) -> Result<DriverStep, DriverError> {
+    fn prompt(&mut self, turn_id: &str, req: &RuntimePromptReq) -> Result<DriverStep, DriverError> {
         if self.prompt_id.is_some() || self.queued.is_some() {
             return Err(DriverError("a prompt is already running".into()));
         }
+        let name = self.provider.as_str();
+        if req.effort.is_some() {
+            return Err(DriverError(format!(
+                "{name} does not take a reasoning effort"
+            )));
+        }
+        let ready = self.phase == Phase::Ready;
+        if ready && !req.images.is_empty() && !self.images {
+            return Err(DriverError(format!("{name} does not accept images")));
+        }
         let mut step = DriverStep::default();
-        if self.phase == Phase::Ready {
-            self.send_prompt(&mut step, turn_id.to_string(), text.to_string());
+        if ready {
+            self.send_prompt(&mut step, turn_id.to_string(), req);
         } else {
             self.turn_id = Some(turn_id.to_string());
-            self.queued = Some((turn_id.to_string(), text.to_string()));
+            self.queued = Some((turn_id.to_string(), req.clone()));
         }
         Ok(step)
     }
@@ -864,7 +886,7 @@ mod tests {
             sent(&s, 0)["params"]["clientCapabilities"]["terminal"],
             false
         );
-        let q = d.prompt("t1", "hi").unwrap();
+        let q = d.prompt("t1", &RuntimePromptReq::of("hi")).unwrap();
         assert!(q.writes.is_empty(), "queued until the session exists");
         let s = d.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}}"#);
         assert_eq!(sent(&s, 0)["method"], "session/load");
@@ -878,6 +900,36 @@ mod tests {
         );
         assert_eq!(sent(&s, 0)["method"], "session/prompt");
         assert_eq!(sent(&s, 0)["params"]["prompt"][0]["text"], "hi");
+    }
+
+    #[test]
+    fn images_go_as_image_blocks_only_where_advertised() {
+        let image = RuntimePromptReq {
+            images: vec![otto_core::agent_runtime::PromptImage {
+                mime: "image/png".into(),
+                data_base64: "AAAA".into(),
+            }],
+            ..RuntimePromptReq::of("look")
+        };
+        for advertised in [false, true] {
+            let mut d = AcpDriver::gemini();
+            d.start(&ctx(None));
+            let caps = json!({"protocolVersion":1,"agentCapabilities":{"promptCapabilities":{"image":advertised}}});
+            d.on_line(&json!({"jsonrpc":"2.0","id":1,"result":caps}).to_string());
+            d.on_line(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"s1"}}"#);
+            match d.prompt("t1", &image) {
+                Err(e) => assert!(!advertised && e.0 == "gemini does not accept images"),
+                Ok(s) => {
+                    assert!(advertised);
+                    let p = &sent(&s, 0)["params"]["prompt"];
+                    assert_eq!(
+                        p[0],
+                        json!({"type":"image","data":"AAAA","mimeType":"image/png"})
+                    );
+                    assert_eq!(p[1]["text"], "look");
+                }
+            }
+        }
     }
 
     #[test]
@@ -917,7 +969,7 @@ mod tests {
         d.start(&ctx(None));
         d.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}"#);
         d.on_line(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"g1"}}"#);
-        d.prompt("t1", "go").unwrap();
+        d.prompt("t1", &RuntimePromptReq::of("go")).unwrap();
         let s = d.interrupt();
         assert_eq!(sent(&s, 0)["params"]["_meta"]["cancelTrigger"], "ctrl_c");
     }
@@ -943,7 +995,7 @@ mod tests {
         d.start(&ctx(None));
         d.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}"#);
         d.on_line(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"s1"}}"#);
-        d.prompt("t1", "go").unwrap();
+        d.prompt("t1", &RuntimePromptReq::of("go")).unwrap();
         let s = d.on_line(r#"{"jsonrpc":"2.0","id":"p7","method":"session/request_permission","params":{"sessionId":"s1","toolCall":{"toolCallId":"c1","kind":"execute","title":"ls"},"options":[{"optionId":"a1","name":"Allow","kind":"allow_once"},{"optionId":"a2","name":"Always","kind":"allow_always"},{"optionId":"r1","name":"Deny","kind":"reject_once"}]}}"#);
         let DriverEvent::Request {
             id, kind, options, ..
@@ -978,7 +1030,7 @@ mod tests {
         d.start(&ctx(None));
         d.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}"#);
         d.on_line(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"s1"}}"#);
-        d.prompt("t1", "go").unwrap();
+        d.prompt("t1", &RuntimePromptReq::of("go")).unwrap();
         let chunk = |t: &str| {
             format!(
                 r#"{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":"s1","update":{{"sessionUpdate":"agent_message_chunk","content":{{"type":"text","text":"{t}"}}}}}}}}"#

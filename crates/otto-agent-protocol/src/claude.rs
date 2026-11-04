@@ -46,8 +46,8 @@ use std::collections::HashMap;
 
 use otto_core::agent_runtime::{
     ApprovalDecision, ApprovalOption, PlanStep, PlanStepStatus, ProviderFailure, RequestKind,
-    RuntimeProvider, RuntimeRequestStatus, TurnItem, TurnItemKind, TurnItemStatus,
-    TurnTerminalStatus, TurnTokenUsage,
+    RuntimePromptReq, RuntimeProvider, RuntimeRequestStatus, TurnItem, TurnItemKind,
+    TurnItemStatus, TurnTerminalStatus, TurnTokenUsage,
 };
 use serde_json::{json, Value};
 
@@ -125,6 +125,12 @@ pub struct ClaudeDriver {
     streamed: Vec<String>,
     tools: HashMap<String, Tool>,
     pending: HashMap<String, Pending>,
+    /// The model / effort this process runs (switched live, as the SDK's
+    /// `setModel` / `applyFlagSettings`).
+    model: Option<String>,
+    effort: Option<String>,
+    /// Ids of in-flight `set_model` / `apply_flag_settings` requests.
+    switches: Vec<String>,
 }
 
 impl Default for ClaudeDriver {
@@ -147,6 +153,9 @@ impl ClaudeDriver {
             streamed: Vec::new(),
             tools: HashMap::new(),
             pending: HashMap::new(),
+            model: None,
+            effort: None,
+            switches: Vec::new(),
         }
     }
 
@@ -166,12 +175,20 @@ impl ClaudeDriver {
         self.turn_id.clone().unwrap_or_default()
     }
 
-    fn send_user(&mut self, step: &mut DriverStep, text: String) {
+    fn send_user(&mut self, step: &mut DriverStep, req: &RuntimePromptReq) {
+        let mut content: Vec<Value> = req
+            .images
+            .iter()
+            .map(|i| json!({"type": "image", "source": {"type": "base64", "media_type": i.mime, "data": i.data_base64}}))
+            .collect();
+        if !req.text.is_empty() {
+            content.push(json!({"type": "text", "text": req.text}));
+        }
         step.write(
             json!({
                 "type": "user",
                 "session_id": "",
-                "message": {"role": "user", "content": [{"type": "text", "text": text}]},
+                "message": {"role": "user", "content": content},
                 "parent_tool_use_id": null,
             })
             .to_string(),
@@ -576,11 +593,28 @@ impl ClaudeDriver {
 
     fn on_control_response(&mut self, step: &mut DriverStep, resp: &Value) {
         let id = resp.get("request_id").and_then(Value::as_str);
+        let error = resp.get("subtype").and_then(Value::as_str) == Some("error");
+        if let Some(n) = self.switches.iter().position(|s| Some(s.as_str()) == id) {
+            self.switches.remove(n);
+            if error {
+                step.push(DriverEvent::Error(ProviderFailure {
+                    class: "provider_error".into(),
+                    message: resp
+                        .get("error")
+                        .and_then(Value::as_str)
+                        .unwrap_or("the model switch was refused")
+                        .to_string(),
+                    code: None,
+                    retryable: None,
+                }));
+            }
+            return;
+        }
         if id.is_none() || id != self.init_req.as_deref() {
             return; // interrupt acks
         }
         self.init_req = None;
-        if resp.get("subtype").and_then(Value::as_str) == Some("error") {
+        if error {
             step.push(DriverEvent::Fatal(ProviderFailure {
                 class: "handshake_error".into(),
                 message: resp
@@ -706,6 +740,7 @@ impl StructuredDriver for ClaudeDriver {
     }
 
     fn start(&mut self, ctx: &LaunchContext) -> DriverStep {
+        self.model = ctx.model.clone();
         self.session_id = Some(
             ctx.resume
                 .clone()
@@ -718,16 +753,35 @@ impl StructuredDriver for ClaudeDriver {
         step
     }
 
-    fn prompt(&mut self, turn_id: &str, text: &str) -> Result<DriverStep, DriverError> {
+    fn prompt(&mut self, turn_id: &str, req: &RuntimePromptReq) -> Result<DriverStep, DriverError> {
         if self.turn_id.is_some() {
             return Err(DriverError("a prompt is already running".into()));
         }
         self.turn_id = Some(turn_id.to_string());
-        // The CLI reads stdin in order: the prompt may follow `initialize`
-        // before its answer (as the SDK streams it).
+        // The CLI reads stdin in order: switches and the prompt may follow
+        // `initialize` before its answer (as the SDK streams them).
         let mut step = DriverStep::default();
-        self.send_user(&mut step, text.to_string());
+        if req.model.is_some() && req.model != self.model {
+            self.model = req.model.clone();
+            let (id, line) =
+                self.control_request(json!({"subtype": "set_model", "model": req.model}));
+            self.switches.push(id);
+            step.write(line);
+        }
+        if req.effort.is_some() && req.effort != self.effort {
+            self.effort = req.effort.clone();
+            let settings = json!({"effortLevel": req.effort});
+            let (id, line) = self
+                .control_request(json!({"subtype": "apply_flag_settings", "settings": settings}));
+            self.switches.push(id);
+            step.write(line);
+        }
+        self.send_user(&mut step, req);
         Ok(step)
+    }
+
+    fn switches_model_live(&self) -> bool {
+        true
     }
 
     fn interrupt(&mut self) -> DriverStep {
@@ -894,10 +948,57 @@ mod tests {
     }
 
     #[test]
+    fn model_and_effort_switch_live_before_an_image_prompt() {
+        let mut d = ClaudeDriver::new();
+        d.start(&ctx(None)); // launched on `haiku`
+        let req = RuntimePromptReq {
+            model: Some("sonnet".into()),
+            effort: Some("high".into()),
+            images: vec![otto_core::agent_runtime::PromptImage {
+                mime: "image/png".into(),
+                data_base64: "AAAA".into(),
+            }],
+            ..RuntimePromptReq::of("what is this?")
+        };
+        let s = d.prompt("t1", &req).unwrap();
+        let w: Vec<Value> = s
+            .writes
+            .iter()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(
+            w[0]["request"],
+            json!({"subtype":"set_model","model":"sonnet"})
+        );
+        assert_eq!(w[1]["request"]["settings"], json!({"effortLevel":"high"}));
+        let content = &w[2]["message"]["content"];
+        assert_eq!(
+            content[0]["source"],
+            json!({"type":"base64","media_type":"image/png","data":"AAAA"})
+        );
+        assert_eq!(content[1]["text"], "what is this?");
+        // A refused switch is reported; the session goes on.
+        let rid = w[0]["request_id"].as_str().unwrap();
+        let e = feed(
+            &mut d,
+            json!({"type":"control_response","response":{"subtype":"error","request_id":rid,"error":"no such model"}}),
+        );
+        assert!(matches!(&e.events[0], DriverEvent::Error(f) if f.message == "no such model"));
+        // The same selection next turn sends nothing extra.
+        feed(
+            &mut d,
+            json!({"type":"result","subtype":"success","is_error":false}),
+        );
+        let s = d.prompt("t2", &req).unwrap();
+        assert_eq!(s.writes.len(), 1);
+        assert!(d.switches_model_live());
+    }
+
+    #[test]
     fn prompt_streams_text_and_completes() {
         let mut d = ClaudeDriver::new();
         ready(&mut d);
-        let s = d.prompt("t1", "hi").unwrap();
+        let s = d.prompt("t1", &RuntimePromptReq::of("hi")).unwrap();
         let user: Value = serde_json::from_str(&s.writes[0]).unwrap();
         assert_eq!(user["message"]["content"][0]["text"], "hi");
         feed(
@@ -958,7 +1059,7 @@ mod tests {
     fn permission_round_trip_maps_decisions_like_t3code() {
         let mut d = ClaudeDriver::new();
         ready(&mut d);
-        d.prompt("t1", "write").unwrap();
+        d.prompt("t1", &RuntimePromptReq::of("write")).unwrap();
         let s = feed(
             &mut d,
             json!({"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"tu1","name":"Write","input":{"file_path":"/w/a.txt","content":"x"}}]},"parent_tool_use_id":null}),
@@ -1011,7 +1112,7 @@ mod tests {
     fn interrupt_cancels_open_questions_then_sends_the_interrupt_request() {
         let mut d = ClaudeDriver::new();
         ready(&mut d);
-        d.prompt("t1", "x").unwrap();
+        d.prompt("t1", &RuntimePromptReq::of("x")).unwrap();
         feed(
             &mut d,
             json!({"type":"control_request","request_id":"r9","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"ls"}}}),
@@ -1038,7 +1139,7 @@ mod tests {
     fn cli_withdrawn_question_closes_the_request_and_todowrite_is_the_plan() {
         let mut d = ClaudeDriver::new();
         ready(&mut d);
-        d.prompt("t1", "x").unwrap();
+        d.prompt("t1", &RuntimePromptReq::of("x")).unwrap();
         feed(
             &mut d,
             json!({"type":"control_request","request_id":"r2","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"ls"}}}),

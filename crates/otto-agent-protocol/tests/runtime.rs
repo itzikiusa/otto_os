@@ -15,10 +15,10 @@ use otto_agent_protocol::{
     AgentRuntime, DriverFactory, LaunchSpec, RuntimeConfig, RuntimeHost, StructuredDriver,
 };
 use otto_core::agent_runtime::{
-    ApprovalDecision, CreateRuntimeSessionReq, ProviderSessionStatus, ProviderTurnStatus,
-    RuntimeEvent, RuntimeEventBody, RuntimeProvider, RuntimeReplay, RuntimeRequestStatus,
-    RuntimeSession, RuntimeSessionStatus, TurnItem, TurnItemKind, TurnItemStatus,
-    TurnTerminalStatus,
+    ApprovalDecision, CreateRuntimeSessionReq, PromptImage, ProviderSessionStatus,
+    ProviderTurnStatus, RuntimeEvent, RuntimeEventBody, RuntimePromptReq, RuntimeProvider,
+    RuntimeReplay, RuntimeRequestStatus, RuntimeSession, RuntimeSessionStatus, TurnItem,
+    TurnItemKind, TurnItemStatus, TurnTerminalStatus,
 };
 use otto_core::domain::Workspace;
 use otto_core::{Error, Id, Result};
@@ -625,6 +625,108 @@ async fn snapshot_past_replay_limits_and_recovery_after_a_restart() {
     host2.wait(is_terminal).await;
     assert!(host2.all()[0].sequence > snapshot_sequence);
     rt2.close(&s.id).await.unwrap();
+}
+
+// ---- per-turn model / effort / images ----------------------------------
+
+fn last_assistant_text(host: &TestHost) -> String {
+    host.items()
+        .iter()
+        .rev()
+        .find_map(|i| match &i.kind {
+            TurnItemKind::AssistantMessage { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+#[tokio::test]
+async fn codex_takes_model_effort_and_images_per_turn_without_a_respawn() {
+    let dir = tempfile::tempdir().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(dir.path().to_str().unwrap(), false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create_as(&rt, dir.path().to_str().unwrap(), RuntimeProvider::Codex).await;
+    let req = RuntimePromptReq {
+        text: "look".into(),
+        model: Some("m2".into()),
+        effort: Some("high".into()),
+        images: vec![PromptImage {
+            mime: "image/png".into(),
+            data_base64: "iVBORw0KGgo=".into(),
+        }],
+    };
+    rt.prompt_with(&s.id, &req).await.unwrap();
+    let fin = host.wait(is_terminal).await;
+    assert_eq!(terminal(&fin), Some(TurnTerminalStatus::Completed));
+    assert_eq!(last_assistant_text(&host), "echo: look [m2 high 1]");
+    assert_eq!(host.prepared.lock().unwrap().len(), 1, "switched live");
+    assert_eq!(rt.get(&s.id).await.unwrap().model.as_deref(), Some("m2"));
+    let bad = RuntimePromptReq {
+        images: vec![PromptImage {
+            mime: "text/plain".into(),
+            data_base64: "eA==".into(),
+        }],
+        ..RuntimePromptReq::of("x")
+    };
+    assert!(matches!(
+        rt.prompt_with(&s.id, &bad).await,
+        Err(Error::Invalid(_))
+    ));
+    rt.close(&s.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn acp_model_switch_respawns_and_resumes_and_unsupported_input_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(dir.path().to_str().unwrap(), false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create(&rt, dir.path().to_str().unwrap()).await;
+    rt.prompt(&s.id, "hi").await.unwrap();
+    host.wait(is_terminal).await;
+    let native = rt.get(&s.id).await.unwrap().native_thread_id;
+
+    let switch = RuntimePromptReq {
+        model: Some("m2".into()),
+        ..RuntimePromptReq::of("again")
+    };
+    rt.prompt_with(&s.id, &switch).await.unwrap();
+    let fin = host.wait_n(is_terminal, 2).await;
+    assert_eq!(terminal(&fin), Some(TurnTerminalStatus::Completed));
+    let spawns = host.prepared.lock().unwrap().clone();
+    assert_eq!(spawns.len(), 2, "no live switch: a respawn");
+    assert!(spawns[1].args.windows(2).any(|w| w == ["--model", "m2"]));
+    let now = rt.get(&s.id).await.unwrap();
+    assert_eq!(now.model.as_deref(), Some("m2"));
+    assert_eq!(
+        now.native_thread_id, native,
+        "the session was loaded, not replaced"
+    );
+
+    // the same model again: no respawn
+    rt.prompt_with(&s.id, &switch).await.unwrap();
+    host.wait_n(is_terminal, 3).await;
+    assert_eq!(host.prepared.lock().unwrap().len(), 2);
+
+    let image = RuntimePromptReq {
+        images: vec![PromptImage {
+            mime: "image/png".into(),
+            data_base64: "iVBORw0KGgo=".into(),
+        }],
+        ..RuntimePromptReq::of("look")
+    };
+    let effort = RuntimePromptReq {
+        effort: Some("high".into()),
+        ..RuntimePromptReq::of("think")
+    };
+    for req in [image, effort] {
+        match rt.prompt_with(&s.id, &req).await {
+            Err(Error::Invalid(m)) => assert!(m.starts_with("gemini does not"), "{m}"),
+            other => panic!("{other:?}"),
+        }
+    }
+    rt.close(&s.id).await.unwrap();
 }
 
 // ---- Antigravity (fake agy) ------------------------------------------

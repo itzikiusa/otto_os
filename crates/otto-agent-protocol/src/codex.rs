@@ -51,8 +51,8 @@ use std::collections::HashMap;
 
 use otto_core::agent_runtime::{
     ApprovalDecision, ApprovalOption, PlanStep, PlanStepStatus, ProviderFailure, RequestKind,
-    RuntimeProvider, RuntimeRequestStatus, ThreadTokenUsage, TurnItem, TurnItemKind,
-    TurnItemStatus, TurnTerminalStatus, TurnTokenUsage,
+    RuntimePromptReq, RuntimeProvider, RuntimeRequestStatus, ThreadTokenUsage, TurnItem,
+    TurnItemKind, TurnItemStatus, TurnTerminalStatus, TurnTokenUsage,
 };
 use serde_json::{json, Value};
 
@@ -95,7 +95,7 @@ pub struct CodexDriver {
     sandboxed: bool,
     thread_id: Option<String>,
     turn_id: Option<String>,
-    queued: Option<String>,
+    queued: Option<RuntimePromptReq>,
     codex_turn: Option<String>,
     interrupt_when_started: bool,
     items: HashMap<String, Item>,
@@ -180,13 +180,28 @@ impl CodexDriver {
         step.write(line);
     }
 
-    fn send_turn(&mut self, step: &mut DriverStep, text: String) {
-        let params = json!({
+    /// `model` / `effort` apply to this turn and the ones after it.
+    fn send_turn(&mut self, step: &mut DriverStep, req: &RuntimePromptReq) {
+        let mut input: Vec<Value> = req
+            .images
+            .iter()
+            .map(|i| json!({"type": "image", "url": format!("data:{};base64,{}", i.mime, i.data_base64)}))
+            .collect();
+        if !req.text.is_empty() {
+            input.push(json!({"type": "text", "text": req.text}));
+        }
+        let mut params = json!({
             "threadId": self.thread_id,
-            "input": [{"type": "text", "text": text}],
+            "input": input,
             "approvalPolicy": "untrusted",
             "sandboxPolicy": self.sandbox_policy(),
         });
+        if let Some(m) = &req.model {
+            params["model"] = json!(m);
+        }
+        if let Some(e) = &req.effort {
+            params["effort"] = json!(e);
+        }
         let (id, line) = self.request("turn/start", params);
         self.turn_req = Some(id);
         step.write(line);
@@ -608,8 +623,8 @@ impl CodexDriver {
                 native_thread_id: self.thread_id.clone(),
                 model: r.get("model").and_then(Value::as_str).map(str::to_string),
             });
-            if let Some(text) = self.queued.take() {
-                self.send_turn(step, text);
+            if let Some(req) = self.queued.take() {
+                self.send_turn(step, &req);
             }
         } else if Some(id) == self.turn_req {
             if let Some(e) = error {
@@ -684,7 +699,7 @@ impl StructuredDriver for CodexDriver {
         step
     }
 
-    fn prompt(&mut self, turn_id: &str, text: &str) -> Result<DriverStep, DriverError> {
+    fn prompt(&mut self, turn_id: &str, req: &RuntimePromptReq) -> Result<DriverStep, DriverError> {
         if self.turn_id.is_some() {
             return Err(DriverError("a prompt is already running".into()));
         }
@@ -692,11 +707,15 @@ impl StructuredDriver for CodexDriver {
         self.failure = None;
         let mut step = DriverStep::default();
         if self.ready {
-            self.send_turn(&mut step, text.to_string());
+            self.send_turn(&mut step, req);
         } else {
-            self.queued = Some(text.to_string());
+            self.queued = Some(req.clone());
         }
         Ok(step)
+    }
+
+    fn switches_model_live(&self) -> bool {
+        true
     }
 
     fn interrupt(&mut self) -> DriverStep {
@@ -887,12 +906,12 @@ mod tests {
     fn sandbox_policy_follows_otto_seatbelt() {
         let mut d = CodexDriver::with_program("codex");
         ready(&mut d, true);
-        let s = d.prompt("t1", "hi").unwrap();
+        let s = d.prompt("t1", &RuntimePromptReq::of("hi")).unwrap();
         let turn = parse(&s.writes[0]);
         assert_eq!(turn["params"]["sandboxPolicy"]["type"], "externalSandbox");
         let mut d = CodexDriver::with_program("codex");
         ready(&mut d, false);
-        let s = d.prompt("t1", "hi").unwrap();
+        let s = d.prompt("t1", &RuntimePromptReq::of("hi")).unwrap();
         assert_eq!(
             parse(&s.writes[0])["params"]["sandboxPolicy"]["type"],
             "readOnly"
@@ -919,7 +938,7 @@ mod tests {
     fn deltas_items_approval_and_turn_end() {
         let mut d = CodexDriver::with_program("codex");
         ready(&mut d, false);
-        let s = d.prompt("t1", "go").unwrap();
+        let s = d.prompt("t1", &RuntimePromptReq::of("go")).unwrap();
         let turn_req = parse(&s.writes[0]);
         feed(
             &mut d,
@@ -1007,7 +1026,7 @@ mod tests {
     fn interrupt_cancels_requests_and_waits_for_the_codex_turn_id() {
         let mut d = CodexDriver::with_program("codex");
         ready(&mut d, false);
-        let s = d.prompt("t1", "go").unwrap();
+        let s = d.prompt("t1", &RuntimePromptReq::of("go")).unwrap();
         let turn_req = parse(&s.writes[0]);
         // Interrupt before turn/start answered: deferred until the id is known.
         let s = d.interrupt();

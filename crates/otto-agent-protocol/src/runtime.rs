@@ -23,9 +23,9 @@ use dashmap::DashMap;
 use otto_core::agent_runtime::{
     ApprovalDecision, CreateRuntimeSessionReq, PlanArtifact, ProviderFailure, ProviderSession,
     ProviderSessionStatus, ProviderThread, ProviderTurn, ProviderTurnStatus, ResponseCapability,
-    RuntimeEvent, RuntimeEventBody, RuntimePromptResp, RuntimeReplay, RuntimeRequest,
-    RuntimeRequestStatus, RuntimeSession, RuntimeSessionStatus, RuntimeSnapshot, TurnItem,
-    TurnItemKind, TurnItemStatus, TurnTerminalStatus,
+    RuntimeEvent, RuntimeEventBody, RuntimePromptReq, RuntimePromptResp, RuntimeReplay,
+    RuntimeRequest, RuntimeRequestStatus, RuntimeSession, RuntimeSessionStatus, RuntimeSnapshot,
+    TurnItem, TurnItemKind, TurnItemStatus, TurnTerminalStatus,
 };
 use otto_core::{new_id, Error, Id, Result};
 use otto_state::{AgentRuntimeRepo, NewRuntimeSession, RuntimeEntityRow};
@@ -610,11 +610,45 @@ impl AgentRuntime {
     // ---- turn control ---------------------------------------------------
 
     pub async fn prompt(&self, id: &Id, text: &str) -> Result<RuntimePromptResp> {
-        if text.trim().is_empty() {
+        self.prompt_with(id, &RuntimePromptReq::of(text)).await
+    }
+
+    /// A prompt with an optional model / effort and inline images.
+    pub async fn prompt_with(&self, id: &Id, req: &RuntimePromptReq) -> Result<RuntimePromptResp> {
+        if req.text.trim().is_empty() && req.images.is_empty() {
             return Err(Error::Invalid("prompt text is empty".into()));
+        }
+        if let Some(bad) = req.images.iter().find(|i| !i.mime.starts_with("image/")) {
+            return Err(Error::Invalid(format!(
+                "'{}' is not an image type",
+                bad.mime
+            )));
         }
         let live = self.live(id).await?;
         check_can_prompt(&live.lock())?;
+        if let Some(model) = req.model.as_ref().filter(|m| !m.trim().is_empty()) {
+            let _spawning = live.spawn_lock.lock().await;
+            let stale = {
+                let mut st = live.lock();
+                check_can_prompt(&st)?;
+                if st.session.model.as_ref() == Some(model) {
+                    None
+                } else {
+                    st.session.model = Some(model.clone());
+                    // A driver that cannot switch live restarts on the new
+                    // model and resumes its thread.
+                    let live_switch = st
+                        .proc
+                        .as_ref()
+                        .is_some_and(|p| p.driver.switches_model_live());
+                    (!live_switch).then(|| st.proc.take()).flatten()
+                }
+            };
+            if let Some(p) = stale {
+                stop_child(p, self.inner.config.interrupt_grace);
+            }
+            self.inner.repo.set_model(id, model).await?;
+        }
         self.ensure_process(&live).await?;
         let mut st = live.lock();
         check_can_prompt(&st)?;
@@ -630,8 +664,8 @@ impl AgentRuntime {
         };
         let step = proc
             .driver
-            .prompt(&turn_id, text)
-            .map_err(|e| Error::Conflict(e.0))?;
+            .prompt(&turn_id, req)
+            .map_err(|e| Error::Invalid(e.0))?;
         let now = Utc::now();
         st.proj.next_turn_ordinal += 1;
         let turn = ProviderTurn {
@@ -659,7 +693,7 @@ impl AgentRuntime {
             TurnItemStatus::Completed,
             None,
             TurnItemKind::UserMessage {
-                text: text.to_string(),
+                text: req.text.clone(),
             },
         );
         user.turn_id = Some(turn_id.clone());

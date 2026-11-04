@@ -340,6 +340,31 @@ streaming upsert of an item to one per `RuntimeConfig::stream_coalesce`
   event;
 - text only grows.
 
+### Per-turn model, effort and images
+
+`POST …/prompt` takes `{text, model?, effort?, images?: [{mime,
+data_base64}]}`. T3 Code sends its model selection with every turn
+(`ClaudeAdapterV2.ts:1224-1260`, `CodexAdapterV2.ts` `turn/start`, ACP
+`session/set_model` / `set_config_option`, `AcpSessionRuntime.ts:2698-2715`);
+Otto takes the cheapest correct path per provider:
+
+| Provider | Model switch | Effort | Images |
+|---|---|---|---|
+| Claude | live: `control_request {subtype:"set_model"}` (the SDK's `setModel`) | live: `apply_flag_settings {effortLevel}` | `image` blocks, `source: {type:"base64"}` (`ClaudeAdapterV2.ts:2410-2414`) |
+| Codex | `turn/start {model}` (this turn and later ones) | `turn/start {effort}` | `{type:"image", url:"data:<mime>;base64,…"}` inputs (`CodexAdapterV2.ts:3268-3269`) |
+| Gemini, Grok (ACP) | restart with `--model` / `-m`, then `session/load` | 400 | `image` blocks when `promptCapabilities.image`, else 400 (`adapter.ts:7035`, `:7777`) |
+| Antigravity | restart with `--model`, `--conversation` | 400 | 400 (text only) |
+
+The model sticks: it becomes the session's `model`, so a later respawn
+launches on it. A refused Claude switch arrives as an `error` event; the turn
+still runs.
+
+Live check (same isolated daemon): a 16 px red PNG, then a switch, then a
+follow-up. Claude (haiku → `sonnet` + `low`) and Codex (`gpt-6.1-sol` →
+`gpt-6-luna` + `low`) both answered "Red", switched (the Claude transcript
+and the Codex rollout show the new model on the second and third turns)
+and still remembered the image.
+
 ## 4. History, replay and restarts
 
 - **T3 Code.** Every domain event is stored with a sequence
@@ -480,7 +505,8 @@ in which headless agy denies what it would have asked about.
   would need an admin setting, as `agent_skip_permissions` is for PTY
   sessions.
 - **Features T3 Code has that Otto does not yet:** restart continuation,
-  images and attachments in prompts, steering a running turn
+  non-image attachments (T3 Code sends Claude PDFs), images shown back in
+  the user item (they are sent, not persisted), steering a running turn
   (`turn/steer`), Codex `thread/unarchive`, Claude thinking summaries and
   the subagent tree, ACP v2.
 - **Named provider accounts and network profiles** (refused today).

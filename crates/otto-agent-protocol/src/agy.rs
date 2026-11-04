@@ -30,8 +30,8 @@
 use std::collections::HashMap;
 
 use otto_core::agent_runtime::{
-    ApprovalDecision, ProviderFailure, RuntimeProvider, TurnItemKind, TurnItemStatus,
-    TurnTerminalStatus, TurnTokenUsage,
+    ApprovalDecision, ProviderFailure, RuntimePromptReq, RuntimeProvider, TurnItemKind,
+    TurnItemStatus, TurnTerminalStatus, TurnTokenUsage,
 };
 use serde_json::{json, Value};
 
@@ -225,10 +225,18 @@ impl StructuredDriver for AgyDriver {
         step
     }
 
-    fn prompt(&mut self, turn_id: &str, text: &str) -> Result<DriverStep, DriverError> {
+    /// Text only; a model switch restarts agy with `--model` (the default
+    /// `switches_model_live`).
+    fn prompt(&mut self, turn_id: &str, req: &RuntimePromptReq) -> Result<DriverStep, DriverError> {
         if self.turn_id.is_some() {
             return Err(DriverError("a prompt is already running".into()));
         }
+        if !req.images.is_empty() || req.effort.is_some() {
+            return Err(DriverError(
+                "Antigravity takes text only here (no images or effort)".into(),
+            ));
+        }
+        let text = &req.text;
         self.turn_id = Some(turn_id.to_string());
         let mut step = DriverStep::default();
         step.write(json!({"event": "user", "message": {"content": text}}).to_string());
@@ -321,7 +329,7 @@ mod tests {
     #[test]
     fn streams_text_and_tools_then_sums_step_usage() {
         let mut d = AgyDriver::with_program("agy");
-        let w = d.prompt("t1", "hi").unwrap().writes;
+        let w = d.prompt("t1", &RuntimePromptReq::of("hi")).unwrap().writes;
         assert_eq!(w, [r#"{"event":"user","message":{"content":"hi"}}"#]);
         let ev = feed(
             &mut d,
@@ -380,7 +388,7 @@ mod tests {
     #[test]
     fn error_interrupt_and_denied_results() {
         let mut d = AgyDriver::with_program("agy");
-        d.prompt("t1", "x").unwrap();
+        d.prompt("t1", &RuntimePromptReq::of("x")).unwrap();
         let ev = feed(
             &mut d,
             json!({"event":"result","result":{"status":"ERROR","error":"quota exhausted"}}),
@@ -390,7 +398,7 @@ mod tests {
             if f.message == "quota exhausted")
         );
 
-        d.prompt("t2", "x").unwrap();
+        d.prompt("t2", &RuntimePromptReq::of("x")).unwrap();
         assert_eq!(d.interrupt().signal, Some(ChildSignal::Interrupt));
         let ev = feed(
             &mut d,
@@ -405,14 +413,14 @@ mod tests {
             }
         ));
 
-        d.prompt("t3", "x").unwrap();
+        d.prompt("t3", &RuntimePromptReq::of("x")).unwrap();
         let ev = feed(
             &mut d,
             json!({"event":"result","result":{"status":"SUCCESS","denied_actions":[{"action":"command","display_name":"RunCommand"}]}}),
         );
         assert!(matches!(&ev[0], DriverEvent::TurnItem(i)
             if matches!(&i.kind, TurnItemKind::SystemNotice { message } if message.contains("RunCommand"))));
-        d.prompt("t4", "x").unwrap();
+        d.prompt("t4", &RuntimePromptReq::of("x")).unwrap();
         let ev = feed(
             &mut d,
             json!({"event":"result","result":{"status":"SUCCESS","denied_actions":[{"action":"command","display_name":"RunCommand"}]}}),
@@ -422,5 +430,10 @@ mod tests {
             "denials are cumulative: only new ones are reported"
         );
         assert!(d.respond("x", ApprovalDecision::Accept).is_err());
+        let effort = RuntimePromptReq {
+            effort: Some("high".into()),
+            ..RuntimePromptReq::of("x")
+        };
+        assert!(d.prompt("t5", &effort).is_err(), "text only");
     }
 }

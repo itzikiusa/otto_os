@@ -13,9 +13,9 @@
 //! resolution and cancellation, and the process-death terminal.
 
 use otto_core::agent_runtime::{
-    ApprovalDecision, ApprovalOption, PlanStep, ProviderFailure, RequestKind, RuntimeProvider,
-    RuntimeRequestStatus, ThreadTokenUsage, TurnItem, TurnItemKind, TurnItemStatus,
-    TurnTerminalStatus, TurnTokenUsage,
+    ApprovalDecision, ApprovalOption, PlanStep, ProviderFailure, RequestKind, RuntimePromptReq,
+    RuntimeProvider, RuntimeRequestStatus, ThreadTokenUsage, TurnItem, TurnItemKind,
+    TurnItemStatus, TurnTerminalStatus, TurnTokenUsage,
 };
 
 #[derive(Debug, Clone)]
@@ -182,8 +182,15 @@ pub trait StructuredDriver: Send + 'static {
     fn start(&mut self, ctx: &LaunchContext) -> DriverStep;
 
     /// Send the prompt of turn `turn_id` (one turn at a time). A driver whose
-    /// handshake is still in flight queues it.
-    fn prompt(&mut self, turn_id: &str, text: &str) -> Result<DriverStep, DriverError>;
+    /// handshake is still in flight queues it. An error refuses the prompt
+    /// (400): the provider cannot take it (images, effort).
+    fn prompt(&mut self, turn_id: &str, req: &RuntimePromptReq) -> Result<DriverStep, DriverError>;
+
+    /// Whether `req.model` switches on the running process. Otherwise the
+    /// runtime restarts the child with the new model, resuming its thread.
+    fn switches_model_live(&self) -> bool {
+        false
+    }
 
     /// Cancel the running turn; the driver still reports the terminal when the
     /// provider acknowledges. Open protocol requests are answered here.

@@ -8,7 +8,8 @@
 //!   turn.
 //! * `hang`  — one delta, then waits for `turn/interrupt` → `interrupted`.
 //! * `crash` — exit 3 at once (mid-turn).
-//! * anything else — `echo: <text>` as two `item/agentMessage/delta`s.
+//! * anything else — `echo: <text>` as `item/agentMessage/delta`s, plus
+//!   ` [<model> <effort> <image count>]` when the turn sets any of them.
 //!
 //! `thread/resume` succeeds for ids this binary minted (`fake-th-*`) and
 //! fails otherwise. stdin EOF ends the process.
@@ -111,10 +112,18 @@ fn main() {
                     "turn/started",
                     json!({"threadId": thread, "turn": turn(&tid, "inProgress")}),
                 );
-                let text = params["input"][0]["text"]
-                    .as_str()
+                let input = params["input"].as_array().cloned().unwrap_or_default();
+                let text = input
+                    .iter()
+                    .find_map(|i| i["text"].as_str())
                     .unwrap_or_default()
                     .to_string();
+                // `model` / `effort` / image inputs are echoed back.
+                let images = input.iter().filter(|i| i["type"] == "image").count();
+                let extras = match (params["model"].as_str(), params["effort"].as_str()) {
+                    (None, None) if images == 0 => String::new(),
+                    (m, e) => format!(" [{} {} {images}]", m.unwrap_or("-"), e.unwrap_or("-")),
+                };
                 match text.as_str() {
                     "crash" => {
                         eprintln!("fake codex: crashing on purpose");
@@ -137,7 +146,11 @@ fn main() {
                         );
                     }
                     other => {
-                        agent_message(&thread, &tid, "msg-1", &["echo: ", other]);
+                        let parts: Vec<&str> = ["echo: ", other, &extras]
+                            .into_iter()
+                            .filter(|p| !p.is_empty())
+                            .collect();
+                        agent_message(&thread, &tid, "msg-1", &parts);
                         notify(
                             "thread/tokenUsage/updated",
                             json!({"threadId": thread, "turnId": tid,

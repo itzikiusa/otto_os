@@ -9,7 +9,7 @@
 //!   permission prompts (an agent approving its own tool call is exactly
 //!   what the prompt exists to prevent).
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -68,7 +68,11 @@ pub fn api_router<S: RuntimeCtx>() -> Router<S> {
             "/runtime-sessions/{id}",
             get(get_one::<S>).patch(rename::<S>),
         )
-        .route("/runtime-sessions/{id}/prompt", post(prompt::<S>))
+        // Inline base64 images ride in the body (axum's default cap is 2 MB).
+        .route(
+            "/runtime-sessions/{id}/prompt",
+            post(prompt::<S>).layer(DefaultBodyLimit::max(32 * 1024 * 1024)),
+        )
         .route("/runtime-sessions/{id}/interrupt", post(interrupt::<S>))
         .route(
             "/runtime-sessions/{id}/requests/{request_id}",
@@ -156,7 +160,7 @@ async fn prompt<S: RuntimeCtx>(
 ) -> ApiResult<(StatusCode, Json<RuntimePromptResp>)> {
     require_human(&ctx, &auth)?;
     authorized(&ctx, &user, &id).await?;
-    let r = ctx.agent_runtime().prompt(&id, &req.text).await?;
+    let r = ctx.agent_runtime().prompt_with(&id, &req).await?;
     Ok((StatusCode::ACCEPTED, Json(r)))
 }
 

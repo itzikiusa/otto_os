@@ -219,8 +219,21 @@ export interface UpdateRuntimeSessionReq {
   title: string;
 }
 
+/** `text` may be empty when `images` is not. `model` / `effort` apply to this
+ *  turn and stick for later ones; `effort` is Claude / Codex only. Images:
+ *  Claude, Codex, and ACP agents that advertise them; Antigravity is text
+ *  only. Unsupported input is a 400. */
 export interface RuntimePromptReq {
   text: string;
+  model?: string;
+  effort?: string;
+  images?: PromptImage[];
+}
+
+/** An inline image (`mime` is `image/*`, base64 without a `data:` prefix). */
+export interface PromptImage {
+  mime: string;
+  data_base64: string;
 }
 
 export interface RuntimePromptResp {
