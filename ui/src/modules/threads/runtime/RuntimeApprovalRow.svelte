@@ -8,7 +8,7 @@
   import Icon from '../../../lib/components/Icon.svelte';
   import { ctxMenu } from '../../../lib/contextmenu.svelte';
   import type { ApprovalDecision, ApprovalOption, RequestKind } from '../../../lib/api/types';
-  import type { PendingApproval } from './projection';
+  import type { PendingApproval } from './timeline';
 
   interface Props {
     approval: PendingApproval;

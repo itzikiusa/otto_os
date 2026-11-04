@@ -13,7 +13,8 @@ import { transcript } from '../../lib/stores/transcript.svelte';
 import { SCRATCH_WORKSPACE_ID, ws } from '../../lib/stores/workspace.svelte';
 import { toastError } from '../../lib/toastError';
 import { buildSideChatPrompt } from './sideChatPrompt';
-import { isRuntimeThread, runtimeThreads } from './runtime/runtimeThreads.svelte';
+import { isRuntimeThread } from './runtime/runtimeThreads.svelte';
+import { runtimeViews } from './runtime/runtimeView.svelte';
 import { threadRepos } from './threadRepos.svelte';
 import { harnessLabel, isPlainShellSession, sideChatOf } from './threadsHelpers';
 import { threads } from './threadsStore.svelte';
@@ -27,7 +28,7 @@ export function sideChatFor(mainId: string | null): Session | null {
 
 /** A runtime thread's messages as transcript turns (the prompt reads prose only). */
 function runtimeTurns(id: string): Turn[] {
-  return (runtimeThreads.projections[id]?.items ?? []).flatMap((i) =>
+  return (runtimeViews.projections[id]?.items ?? []).flatMap((i) =>
     i.type === 'user_message' || i.type === 'assistant_message'
       ? [{ id: i.id, role: i.type === 'user_message' ? 'user' : 'assistant', ts: i.started_at, blocks: [{ kind: 'text', md: i.text }], duration_ms: null, model: null, system: [], reasoning_steps: 0 } satisfies Turn]
       : [],

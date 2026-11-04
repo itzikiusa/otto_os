@@ -3,16 +3,8 @@
 // (events and snapshot), the approval lifecycle and interrupt.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import {
-  applyEvents,
-  applyReplay,
-  emptyProjection,
-  isRunning,
-  pendingApprovals,
-  timelineRows,
-  workLabel,
-  type RuntimeProjection,
-} from '../src/modules/threads/runtime/projection.ts';
+import { applyEvents, applyReplay, emptyProjection, type RuntimeProjection } from '../src/modules/threads/runtime/projection.ts';
+import { isRunning, pendingApprovals, timelineRows, workLabel } from '../src/modules/threads/runtime/timeline.ts';
 import type { RuntimeEvent, RuntimeEventBody, RuntimeRequest, TurnItem } from '../src/lib/api/types';
 
 const TS = '2026-11-04T10:00:00Z';

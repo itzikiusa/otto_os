@@ -33,10 +33,11 @@
   import { toastError } from '../../../lib/toastError';
   import type { ApprovalDecision } from '../../../lib/api/types';
   import Markdown from '../../agents/conversation/Markdown.svelte'; // ui-guards: allow — shared chat markdown
-  import { isRunning, latestTurn, pendingApprovals, timelineRows } from './projection';
+  import { isRunning, latestTurn, pendingApprovals, timelineRows } from './timeline';
   import RuntimeApprovalRow from './RuntimeApprovalRow.svelte';
   import RuntimeWorkRow from './RuntimeWorkRow.svelte';
   import { runtimeThreads } from './runtimeThreads.svelte';
+  import { runtimeViews } from './runtimeView.svelte';
 
   interface Props {
     sessionId: string;
@@ -46,12 +47,12 @@
 
   $effect(() => {
     const id = sessionId;
-    return untrack(() => runtimeThreads.open(id));
+    return untrack(() => runtimeViews.open(id));
   });
 
   const session = $derived(runtimeThreads.get(sessionId));
-  const p = $derived(runtimeThreads.projections[sessionId] ?? null);
-  const loadError = $derived(runtimeThreads.loadError[sessionId] ?? null);
+  const p = $derived(runtimeViews.projections[sessionId] ?? null);
+  const loadError = $derived(runtimeViews.loadError[sessionId] ?? null);
   const rows = $derived(p ? timelineRows(p.items) : []);
   const approvals = $derived(new Map((p ? pendingApprovals(p) : []).map((a) => [a.requestId, a] as const)));
   const turn = $derived(p ? latestTurn(p) : null);
@@ -249,7 +250,7 @@
 <section class="rt" aria-label="Conversation" data-testid="runtime-thread-{sessionId}">
   <div class="rt-scroll" bind:this={scroller} onscroll={onScroll}>
     <div class="rt-col">
-      <LoadState what="conversation" loading={!p && !loadError} error={p ? null : loadError} empty={!p} onretry={() => runtimeThreads.retry(sessionId)}>
+      <LoadState what="conversation" loading={!p && !loadError} error={p ? null : loadError} empty={!p} onretry={() => runtimeViews.retry(sessionId)}>
         {#if rows.length === 0}
           <EmptyState
             icon="threads"

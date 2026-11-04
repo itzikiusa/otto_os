@@ -430,8 +430,9 @@ None of the four drivers passes a skip-permissions flag. Claude:
 | `crates/otto-agent-protocol/src/bin/otto-fake-{agent,codex}.rs` | test doubles (ACP agent, `codex app-server`) |
 | `crates/otto-state/src/agent_runtime.rs`, migration `0197_agent_runtime.sql` | persistence |
 | `ui/src/lib/api/types/agent-runtime.ts` | TS mirror |
-| `ui/src/modules/threads/runtime/projection.ts` | event fold + derivations (T3 Code's projection reducer, pending requests, phase) |
-| `ui/src/modules/threads/runtime/runtimeThreads.svelte.ts` | session rows, live subscription, replay after a gap / reconnect |
+| `ui/src/modules/threads/runtime/projection.ts`, `timeline.ts` | event fold (T3 Code's projection reducer); what the view derives (pending requests, phase, rows) |
+| `ui/src/modules/threads/runtime/runtimeThreads.svelte.ts` | session rows (live status) and actions |
+| `ui/src/modules/threads/runtime/runtimeView.svelte.ts` | an open thread's projection: live events, replay after a gap / reconnect (loads with the view) |
 | `ui/src/modules/threads/runtime/Runtime{Thread,WorkRow,ApprovalRow}.svelte` | timeline, work-log rows, inline approvals, composer with Stop and a queued follow-up |
 | `ui/e2e/desktop-threads-runtime.spec.ts` | E2E against `otto-fake-codex` (global-setup's codex shim execs it for `app-server`) |
 

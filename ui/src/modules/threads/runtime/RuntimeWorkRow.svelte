@@ -12,7 +12,7 @@
   import InlineDiff from '../../agents/conversation/InlineDiff.svelte'; // ui-guards: allow — shared chat diff
   import Markdown from '../../agents/conversation/Markdown.svelte'; // ui-guards: allow — shared chat markdown
   import { lastLine, patchToDiff } from '../../agents/conversation/format'; // ui-guards: allow — shared chat helpers
-  import { workLabel } from './projection';
+  import { workLabel } from './timeline';
 
   interface Props {
     item: TurnItem;

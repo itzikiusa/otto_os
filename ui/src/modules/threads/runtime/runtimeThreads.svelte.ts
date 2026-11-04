@@ -1,17 +1,10 @@
 // Structured runtime sessions in Threads (docs/features/threads-structured-runtime.md):
-// the session rows per workspace, and — for each open thread — its folded
-// projection (projection.ts) kept live from `agent_runtime_event`.
-//
-// Sync follows T3 Code's thread subscription (MIT, Copyright (c) 2026 T3
-// Tools Inc.; packages/client-runtime/src/state/threads.ts): load, then fold
-// live events above the applied sequence; after a reconnect or a sequence
-// gap, replay `after_sequence=<applied>` (events, or a snapshot when the
-// daemon's ring no longer covers it). Live events that land while a replay
-// is in flight are held and folded after it.
+// the session rows per workspace (status kept live from `agent_runtime_event`)
+// and the session actions. An open thread's conversation is runtimeView.svelte.ts,
+// loaded with the view.
 
 import { api } from '../../../lib/api/client';
-import { appLive, onLive } from '../../../lib/live';
-import { loadErrorText } from '../../../lib/loadError';
+import { onLive } from '../../../lib/live';
 import { noteRuntimeSession } from '../../../lib/stores/runtimeAttention.svelte';
 import type {
   ApprovalDecision,
@@ -19,12 +12,10 @@ import type {
   RuntimeEvent,
   RuntimePromptResp,
   RuntimeProvider,
-  RuntimeReplay,
   RuntimeSession,
   RuntimeSessionStatus,
   Session,
 } from '../../../lib/api/types';
-import { applyEvents, applyReplay, emptyProjection, type RuntimeProjection } from './projection';
 
 const RUNTIME_PROVIDERS: readonly string[] = ['claude', 'codex', 'gemini', 'grok'];
 
@@ -69,23 +60,11 @@ export function isRuntimeThread(s: Session | null | undefined): boolean {
   return s?.meta?.runtime === 'structured';
 }
 
-interface View {
-  refs: number;
-  /** Live events held while a replay is in flight; null when none is. */
-  held: RuntimeEvent[] | null;
-}
-
 class RuntimeThreads {
   /** Every loaded runtime session, by id. */
   byId = $state<Record<string, RuntimeSession>>({});
   /** Workspaces whose list has loaded once. */
   loaded = $state<Record<string, boolean>>({});
-  /** Open threads' projections, by session id. */
-  projections = $state<Record<string, RuntimeProjection>>({});
-  /** A failed first load of an open thread, by session id. */
-  loadError = $state<Record<string, string>>({});
-
-  private views = new Map<string, View>();
   private liveRefs = 0;
   private stopLive: (() => void) | null = null;
 
@@ -124,38 +103,11 @@ class RuntimeThreads {
 
   /** Listen while Threads is mounted; returns the unsubscribe. */
   mount(): () => void {
-    if (this.liveRefs++ === 0) {
-      const offEvent = onLive(['agent_runtime_event'], (ev) => this.onEvent(ev.event as RuntimeEvent));
-      const offResync = appLive.onResync(() => {
-        for (const id of this.views.keys()) void this.replay(id);
-      });
-      this.stopLive = () => {
-        offEvent();
-        offResync();
-      };
-    }
+    if (this.liveRefs++ === 0) this.stopLive = onLive(['agent_runtime_event'], (ev) => this.onEvent(ev.event as RuntimeEvent));
     return () => {
       if (--this.liveRefs === 0) {
         this.stopLive?.();
         this.stopLive = null;
-      }
-    };
-  }
-
-  /** Keep `id`'s projection live while open; returns the release. */
-  open(id: string): () => void {
-    const view = this.views.get(id);
-    if (view) view.refs++;
-    else {
-      this.views.set(id, { refs: 1, held: null });
-      void this.replay(id);
-    }
-    return () => {
-      const v = this.views.get(id);
-      if (v && --v.refs === 0) {
-        this.views.delete(id);
-        const { [id]: _drop, ...rest } = this.projections;
-        this.projections = rest;
       }
     };
   }
@@ -167,41 +119,6 @@ class RuntimeThreads {
       const status = ev.type === 'provider_session.updated' ? SESSION_STATUS[ev.provider_session.status] : row.status;
       this.byId[ev.session_id] = { ...row, status, last_active_at: ev.ts };
     }
-    const view = this.views.get(ev.session_id);
-    if (!view) return;
-    if (view.held) {
-      view.held.push(ev);
-      return;
-    }
-    const { projection, gap } = applyEvents(this.projections[ev.session_id] ?? emptyProjection(), [ev]);
-    this.projections[ev.session_id] = projection;
-    if (gap) void this.replay(ev.session_id);
-  }
-
-  private async replay(id: string): Promise<void> {
-    const view = this.views.get(id);
-    if (!view || view.held) return;
-    view.held = [];
-    const after = this.projections[id]?.lastSequence ?? 0;
-    try {
-      const replay = await api.get<RuntimeReplay>(`/runtime-sessions/${id}/events?after_sequence=${after}`);
-      if (this.views.get(id) !== view) return;
-      const base = applyReplay(this.projections[id] ?? emptyProjection(), replay);
-      const { projection, gap } = applyEvents(base, view.held);
-      this.projections[id] = projection;
-      const { [id]: _ok, ...rest } = this.loadError;
-      this.loadError = rest;
-      view.held = null;
-      if (gap) void this.replay(id);
-    } catch (e) {
-      view.held = null;
-      if (!this.projections[id]) this.loadError = { ...this.loadError, [id]: loadErrorText(e) };
-    }
-  }
-
-  /** Reload a thread whose first load failed. */
-  retry(id: string): void {
-    void this.replay(id);
   }
 
   /** Create a session (the CLI is spawned before this resolves) and send
