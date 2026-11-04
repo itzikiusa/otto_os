@@ -14,7 +14,7 @@
 
 use otto_core::agent_runtime::{
     ApprovalDecision, PlanArtifact, ProviderFailure, RuntimeProvider, RuntimeRequest,
-    ThreadTokenUsage, TurnItem, TurnTerminalStatus, TurnTokenUsage,
+    RuntimeRequestStatus, ThreadTokenUsage, TurnItem, TurnTerminalStatus, TurnTokenUsage,
 };
 
 #[derive(Debug, Clone)]
@@ -30,10 +30,15 @@ pub struct LaunchContext {
 }
 
 /// The child's command line, before the safety pipeline wraps it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LaunchSpec {
     pub program: String,
     pub args: Vec<String>,
+    /// Argv that must come AFTER the context hook's injected flags — a
+    /// subcommand whose parser rejects top-level flags after it (`grok …
+    /// agent stdio` refuses a trailing `--rules=`). The safety pipeline
+    /// appends these after its injection and before the Seatbelt wrap.
+    pub tail_args: Vec<String>,
     pub env: Vec<(String, String)>,
 }
 
@@ -64,6 +69,12 @@ pub enum DriverEvent {
     Request {
         request: RuntimeRequest,
         item: TurnItem,
+    },
+    /// The provider withdrew or settled an open request itself (Claude
+    /// `control_cancel_request`, Codex `serverRequest/resolved`).
+    RequestClosed {
+        request_id: String,
+        status: RuntimeRequestStatus,
     },
     Usage(TurnTokenUsage),
     ContextUsage(ThreadTokenUsage),

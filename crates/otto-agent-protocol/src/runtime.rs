@@ -285,10 +285,14 @@ impl AgentRuntime {
         &self.inner.repo
     }
 
-    /// Boot recovery (T3 Code `reconcileProjection`): every turn a previous
-    /// life left open is `cancelled`, its open items too, every pending
-    /// request `expired` / not resumable, the provider session `stopped`.
-    /// Written above the persisted sequence floor. Returns sessions touched.
+    /// Boot recovery (T3 Code `reconcileProjection`,
+    /// `ProviderRuntimeRecoveryService.ts:369-396`): every turn a previous
+    /// life left open ends `interrupted` (T3 Code says `cancelled`; Otto
+    /// reports what happened to the person — the daemon stopped it), its open
+    /// items too, every pending request `expired` / not resumable, the
+    /// provider session `stopped`. Written above the persisted sequence
+    /// floor. The next prompt respawns the CLI and resumes the provider's own
+    /// session id. Returns sessions touched.
     pub async fn recover(&self) -> Result<usize> {
         let mut touched = 0;
         for sid in self.inner.repo.session_ids().await? {
@@ -302,7 +306,7 @@ impl AgentRuntime {
                         .ok()
                         .filter(|t| !t.status.is_terminal())
                         .map(|mut t| {
-                            t.status = ProviderTurnStatus::Cancelled;
+                            t.status = ProviderTurnStatus::Interrupted;
                             t.completed_at = Some(now);
                             serde_json::to_value(t)
                         }),
@@ -310,7 +314,7 @@ impl AgentRuntime {
                         .ok()
                         .filter(|i| i.status.is_open() || i.is_streaming())
                         .map(|mut i| {
-                            settle_item(&mut i, TurnItemStatus::Cancelled, now);
+                            settle_item(&mut i, TurnItemStatus::Interrupted, now);
                             serde_json::to_value(i)
                         }),
                     K_REQUEST => serde_json::from_value::<RuntimeRequest>(r.payload.clone())
@@ -499,9 +503,12 @@ impl AgentRuntime {
             .host
             .prepare_spawn(&ws, &session, &mut spec)
             .await?;
+        // A host that left the tail in place (tests) still gets it last.
+        let mut args = spec.args;
+        args.append(&mut spec.tail_args);
         let child = spawn_child(&ChildCommand {
             program: spec.program.clone(),
-            args: spec.args,
+            args,
             cwd: session.cwd.clone(),
             env: spec.env,
         })
@@ -1127,6 +1134,19 @@ fn apply_step(inner: &Inner, live: &Live, st: &mut State, step: DriverStep) {
                 );
                 upsert_item(inner, live, st, item);
                 set_session_status(inner, live, st, ProviderSessionStatus::Waiting, None);
+            }
+            DriverEvent::RequestClosed { request_id, status } => {
+                let open = st
+                    .proj
+                    .requests
+                    .get(&request_id)
+                    .is_some_and(|r| r.status == RuntimeRequestStatus::Pending);
+                if open {
+                    resolve_request(inner, live, st, &request_id, status, None);
+                    if !has_pending(st) && st.turn.is_some() {
+                        set_session_status(inner, live, st, ProviderSessionStatus::Running, None);
+                    }
+                }
             }
             DriverEvent::Usage(usage) => {
                 let turn = st

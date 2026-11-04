@@ -23,7 +23,8 @@ pub trait RuntimeHost: Send + Sync + 'static {
 
     /// Apply the PTY sessions' safety pipeline to `spec` in place: cwd
     /// refusal, folder trust, context provisioning, Seatbelt wrap. An error
-    /// refuses the spawn.
+    /// refuses the spawn. Must move `spec.tail_args` behind the injected
+    /// context flags (and leave `tail_args` empty).
     async fn prepare_spawn(
         &self,
         ws: &Workspace,
@@ -88,9 +89,10 @@ impl RuntimeHost for SessionManagerHost {
             cwd: Some(session.cwd.clone()),
             env: std::mem::take(&mut spec.env),
         };
+        let tail = std::mem::take(&mut spec.tail_args);
         let res = self
             .manager
-            .prepare_runtime_spawn(ws, &as_agent_session(session), &mut cmd)
+            .prepare_runtime_spawn(ws, &as_agent_session(session), &mut cmd, tail)
             .await;
         spec.program = cmd.program;
         spec.args = cmd.args;

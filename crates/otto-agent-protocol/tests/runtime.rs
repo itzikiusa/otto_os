@@ -1,11 +1,14 @@
-//! End to end: the real `AgentRuntime` + the real ACP driver driving the
-//! `otto-fake-agent` ACP agent over stdio, with a real (in-memory) SQLite store.
+//! End to end: the real `AgentRuntime` + the real drivers over stdio — the
+//! ACP driver against `otto-fake-agent`, the Codex driver against
+//! `otto-fake-codex` (a fake `codex app-server`) — with a real (in-memory)
+//! SQLite store.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use chrono::Utc;
 use otto_agent_protocol::acp::AcpDriver;
+use otto_agent_protocol::codex::CodexDriver;
 use otto_agent_protocol::ring::RingLimits;
 use otto_agent_protocol::{
     AgentRuntime, DriverFactory, LaunchSpec, RuntimeConfig, RuntimeHost, StructuredDriver,
@@ -21,6 +24,7 @@ use otto_core::{Error, Id, Result};
 use otto_state::{AgentRuntimeRepo, DbPool};
 
 const FAKE: &str = env!("CARGO_BIN_EXE_otto-fake-agent");
+const FAKE_CODEX: &str = env!("CARGO_BIN_EXE_otto-fake-codex");
 const WAIT: Duration = Duration::from_secs(15);
 
 struct TestHost {
@@ -124,7 +128,10 @@ impl TestHost {
 
 fn drivers() -> Arc<dyn DriverFactory> {
     Arc::new(|p: RuntimeProvider| -> Option<Box<dyn StructuredDriver>> {
-        Some(Box::new(AcpDriver::new(p, FAKE, Vec::new(), Vec::new())))
+        Some(match p {
+            RuntimeProvider::Codex => Box::new(CodexDriver::with_program(FAKE_CODEX)),
+            _ => Box::new(AcpDriver::new(p, FAKE, Vec::new(), Vec::new())),
+        })
     })
 }
 
@@ -170,11 +177,15 @@ fn runtime(pool: &DbPool, host: &Arc<TestHost>, config: RuntimeConfig) -> AgentR
 }
 
 async fn create(rt: &AgentRuntime, cwd: &str) -> RuntimeSession {
+    create_as(rt, cwd, RuntimeProvider::Gemini).await
+}
+
+async fn create_as(rt: &AgentRuntime, cwd: &str, provider: RuntimeProvider) -> RuntimeSession {
     rt.create(
         &"u1".into(),
         &"w1".into(),
         CreateRuntimeSessionReq {
-            provider: Some(RuntimeProvider::Gemini),
+            provider: Some(provider),
             cwd: Some(cwd.into()),
             title: None,
             model: None,
@@ -583,7 +594,10 @@ async fn snapshot_past_replay_limits_and_recovery_after_a_restart() {
     let statuses: Vec<ProviderTurnStatus> = snapshot.turns.iter().map(|t| t.status).collect();
     assert_eq!(
         statuses,
-        vec![ProviderTurnStatus::Completed, ProviderTurnStatus::Cancelled]
+        vec![
+            ProviderTurnStatus::Completed,
+            ProviderTurnStatus::Interrupted
+        ]
     );
     assert!(snapshot
         .runtime_requests
@@ -603,5 +617,145 @@ async fn snapshot_past_replay_limits_and_recovery_after_a_restart() {
     rt2.prompt(&s.id, "hi").await.unwrap();
     host2.wait(is_terminal).await;
     assert!(host2.all()[0].sequence > snapshot_sequence);
+    rt2.close(&s.id).await.unwrap();
+}
+
+// ---- Codex app-server (fake) ------------------------------------------
+
+#[tokio::test]
+async fn codex_streams_deltas_runs_an_approved_command_and_ends_the_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(dir.path().to_str().unwrap(), false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create_as(&rt, dir.path().to_str().unwrap(), RuntimeProvider::Codex).await;
+    host.wait(is_ready).await;
+    let s = rt.get(&s.id).await.unwrap();
+    assert!(s
+        .native_thread_id
+        .as_deref()
+        .unwrap()
+        .starts_with("fake-th-"));
+    assert_eq!(s.model.as_deref(), Some("fake-model"));
+    let spec = host.prepared.lock().unwrap()[0].clone();
+    assert_eq!(spec.args, ["app-server"]);
+
+    // prompt → streamed deltas → turn end
+    rt.prompt(&s.id, "hello").await.unwrap();
+    let fin = host.wait(is_terminal).await;
+    assert_eq!(terminal(&fin), Some(TurnTerminalStatus::Completed));
+    let texts: Vec<(String, bool)> = host
+        .all()
+        .iter()
+        .filter_map(|e| match &e.body {
+            RuntimeEventBody::TurnItemUpdated { turn_item } => match &turn_item.kind {
+                TurnItemKind::AssistantMessage {
+                    text, streaming, ..
+                } => Some((text.clone(), *streaming)),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        texts.last().unwrap(),
+        &("echo: hello".to_string(), false),
+        "{texts:?}"
+    );
+    assert!(texts.contains(&("echo: ".to_string(), true)), "{texts:?}");
+    assert!(host.all().iter().any(|e| matches!(&e.body,
+        RuntimeEventBody::ProviderTurnUpdated { provider_turn }
+            if provider_turn.turn_token_usage.as_ref().is_some_and(|u| u.input_tokens == 5))));
+
+    // tool call → permission round-trip → command output → turn end
+    rt.prompt(&s.id, "ask").await.unwrap();
+    let req = host.wait(is_type("runtime_request.updated")).await;
+    let RuntimeEventBody::RuntimeRequestUpdated { runtime_request } = req.body else {
+        unreachable!()
+    };
+    assert_eq!(
+        rt.get(&s.id).await.unwrap().status,
+        RuntimeSessionStatus::AwaitingPermission
+    );
+    rt.respond(&s.id, &runtime_request.id, ApprovalDecision::Accept)
+        .await
+        .unwrap();
+    let fin = host.wait_n(is_terminal, 2).await;
+    assert_eq!(terminal(&fin), Some(TurnTerminalStatus::Completed));
+    assert!(host.all().iter().any(|e| matches!(&e.body,
+        RuntimeEventBody::CommandOutputDelta { chunk, .. } if chunk == "cleaned\n")));
+    let items = host.items();
+    assert!(items.iter().any(|i| matches!(&i.kind,
+        TurnItemKind::CommandExecution { input, exit_code: Some(0), .. } if input == "make clean")
+        && i.status == TurnItemStatus::Completed));
+    assert!(items.iter().any(|i| matches!(&i.kind,
+        TurnItemKind::ApprovalRequest { reason: Some(r), .. } if r == "clean the build")
+        && i.status == TurnItemStatus::Completed));
+    rt.close(&s.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn codex_interrupt_cancels_the_pending_approval_and_ends_interrupted() {
+    let dir = tempfile::tempdir().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(dir.path().to_str().unwrap(), false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create_as(&rt, dir.path().to_str().unwrap(), RuntimeProvider::Codex).await;
+
+    rt.prompt(&s.id, "hang").await.unwrap();
+    host.wait_n(is_type("turn_item.updated"), 2).await; // user + delta
+    assert!(rt.interrupt(&s.id).await.unwrap());
+    let fin = host.wait(is_terminal).await;
+    assert_eq!(terminal(&fin), Some(TurnTerminalStatus::Interrupted));
+    assert!(host
+        .items()
+        .iter()
+        .all(|i| !i.status.is_open() && !i.is_streaming()));
+
+    rt.prompt(&s.id, "ask").await.unwrap();
+    host.wait(is_type("runtime_request.updated")).await;
+    rt.interrupt(&s.id).await.unwrap();
+    let fin = host.wait_n(is_terminal, 2).await;
+    assert_eq!(terminal(&fin), Some(TurnTerminalStatus::Interrupted));
+    assert!(host.all().iter().any(|e| matches!(&e.body,
+        RuntimeEventBody::RuntimeRequestUpdated { runtime_request }
+            if runtime_request.status == RuntimeRequestStatus::Cancelled)));
+    rt.close(&s.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn codex_resumes_its_thread_after_a_daemon_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(dir.path().to_str().unwrap(), false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create_as(&rt, dir.path().to_str().unwrap(), RuntimeProvider::Codex).await;
+    host.wait(is_ready).await;
+    let native = rt.get(&s.id).await.unwrap().native_thread_id.unwrap();
+    // A turn in flight when the daemon goes away.
+    rt.prompt(&s.id, "hang").await.unwrap();
+    host.wait_n(is_type("turn_item.updated"), 2).await;
+    rt.flush(&s.id).await;
+    rt.shutdown();
+
+    let host2 = TestHost::new(dir.path().to_str().unwrap(), false);
+    let rt2 = runtime(&pool, &host2, RuntimeConfig::default());
+    assert_eq!(rt2.recover().await.unwrap(), 1);
+    let RuntimeReplay::Snapshot { snapshot, .. } = rt2.replay(&s.id, 0).await.unwrap() else {
+        panic!("snapshot")
+    };
+    assert_eq!(
+        snapshot.turns.iter().map(|t| t.status).collect::<Vec<_>>(),
+        vec![ProviderTurnStatus::Interrupted],
+        "the in-flight turn ends interrupted"
+    );
+    // The next prompt respawns `codex app-server` and resumes the same thread.
+    rt2.prompt(&s.id, "again").await.unwrap();
+    let fin = host2.wait(is_terminal).await;
+    assert_eq!(terminal(&fin), Some(TurnTerminalStatus::Completed));
+    assert_eq!(
+        rt2.get(&s.id).await.unwrap().native_thread_id.unwrap(),
+        native
+    );
     rt2.close(&s.id).await.unwrap();
 }

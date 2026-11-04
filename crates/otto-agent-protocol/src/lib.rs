@@ -12,10 +12,14 @@
 //! context, Seatbelt) via [`RuntimeHost`].
 //!
 //! Design ported from T3 Code (MIT, Copyright (c) 2026 T3 Tools Inc.); see
-//! the design doc for the file-by-file mapping. Drivers: ACP ([`acp`], used
-//! for Gemini); Claude and Codex plug into [`DriverFactory`] next.
+//! the design doc for the file-by-file mapping. Drivers: [`claude`] (the
+//! Agent SDK's stream-json control protocol against `claude`), [`codex`]
+//! (`codex app-server`) and [`acp`] (Gemini `gemini --acp`, Grok `grok …
+//! agent stdio`).
 
 pub mod acp;
+pub mod claude;
+pub mod codex;
 pub mod driver;
 pub mod host;
 mod http;
@@ -49,16 +53,19 @@ pub fn api_router<S: RuntimeCtx>() -> Router<S> {
     http::api_router::<S>()
 }
 
-/// The production driver set: Gemini over ACP (`gemini --acp`). Claude and
-/// Codex have no driver yet — creating one is refused with 400.
+/// The production driver set — the providers T3 Code drives over a
+/// structured protocol: Claude (Agent SDK transport), Codex (app-server),
+/// Gemini and Grok (ACP). A missing CLI fails the spawn, not the create.
 pub fn default_drivers() -> Arc<dyn DriverFactory> {
     use otto_core::agent_runtime::RuntimeProvider;
     Arc::new(
         |provider: RuntimeProvider| -> Option<Box<dyn StructuredDriver>> {
-            match provider {
-                RuntimeProvider::Gemini => Some(Box::new(acp::AcpDriver::gemini())),
-                RuntimeProvider::Claude | RuntimeProvider::Codex => None,
-            }
+            Some(match provider {
+                RuntimeProvider::Claude => Box::new(claude::ClaudeDriver::new()),
+                RuntimeProvider::Codex => Box::new(codex::CodexDriver::new()),
+                RuntimeProvider::Gemini => Box::new(acp::AcpDriver::gemini()),
+                RuntimeProvider::Grok => Box::new(acp::AcpDriver::grok()),
+            })
         },
     )
 }

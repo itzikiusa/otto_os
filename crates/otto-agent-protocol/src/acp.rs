@@ -1,5 +1,8 @@
 //! ACP (Agent Client Protocol, v1) client driver — used for Gemini
-//! (`gemini --acp`) and by the tests' fake ACP agent.
+//! (`gemini --acp`), Grok (`grok … agent stdio`) and by the tests' fake ACP
+//! agent. Per-agent differences live in an [`AcpFlavor`] (T3 Code: the
+//! `AcpFlavor` hooks of `packages/provider-acp/src/server/adapter.ts`, Grok's
+//! in `packages/provider-grok/src/server/acpSupport.ts`).
 //!
 //! Wire types are the official SDK's (`agent-client-protocol` 5.0.0, schema
 //! 1.15.1); this module only does JSON-RPC framing + request correlation,
@@ -12,7 +15,11 @@
 //!   with no fs / terminal client capabilities (Otto offers neither, like T3
 //!   Code for Claude/Gemini), then `session/load` when resuming and the agent
 //!   advertises `loadSession`, else `session/new`; a failed load falls back
-//!   to a fresh session; `session/cancel` on interrupt.
+//!   to a fresh session; `session/cancel` on interrupt. `authenticate` is
+//!   lazy: only after `session/new|load` fails with `-32000` (auth
+//!   required), with the flavour's preferred method if advertised, else the
+//!   first `agent`-type method, then the session call is retried once
+//!   (`AcpSessionRuntime.ts:1065-1078`, `:2164-2208`).
 //! * `packages/provider-acp/src/server/runtimeModel.ts` + `adapter.ts` —
 //!   `agent_message_chunk` / `agent_thought_chunk` accumulate into one
 //!   `assistant_message` / `reasoning` item re-emitted whole with
@@ -30,12 +37,12 @@ use std::collections::HashMap;
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::v1::schema::{
-    CancelNotification, ContentBlock, InitializeRequest, InitializeResponse, LoadSessionRequest,
-    NewSessionRequest, NewSessionResponse, PermissionOption, PermissionOptionKind, Plan,
-    PlanEntryStatus, PromptRequest, PromptResponse, RequestPermissionOutcome,
-    RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
-    SessionNotification, SessionUpdate, StopReason, TextContent, ToolCall, ToolCallContent,
-    ToolCallStatus, ToolCallUpdate, ToolKind,
+    AuthenticateRequest, CancelNotification, ContentBlock, InitializeRequest, InitializeResponse,
+    LoadSessionRequest, NewSessionRequest, NewSessionResponse, PermissionOption,
+    PermissionOptionKind, Plan, PlanEntryStatus, PromptRequest, PromptResponse,
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    SelectedPermissionOutcome, SessionNotification, SessionUpdate, StopReason, TextContent,
+    ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolKind,
 };
 use chrono::Utc;
 use otto_core::agent_runtime::{
@@ -50,6 +57,10 @@ use crate::driver::{
 };
 
 const M_INITIALIZE: &str = "initialize";
+const M_AUTHENTICATE: &str = "authenticate";
+/// JSON-RPC error ACP agents return from `session/new|load` when the user
+/// must authenticate first.
+const AUTH_REQUIRED: i64 = -32000;
 const M_SESSION_NEW: &str = "session/new";
 const M_SESSION_LOAD: &str = "session/load";
 const M_SESSION_PROMPT: &str = "session/prompt";
@@ -61,7 +72,26 @@ const M_REQUEST_PERMISSION: &str = "session/request_permission";
 enum Phase {
     Initializing,
     Creating { loading: bool },
+    Authenticating { load: bool },
     Ready,
+}
+
+/// What differs between ACP agents. The launch is
+/// `program head_args… [model_flag <model>] [context flags] tail_args…`.
+#[derive(Debug, Clone, Default)]
+pub struct AcpFlavor {
+    pub program: String,
+    pub head_args: Vec<String>,
+    /// Args after the context hook's injected flags (a subcommand).
+    pub tail_args: Vec<String>,
+    /// The flag that selects a model (`--model`), placed in the head.
+    pub model_flag: Option<String>,
+    pub env: Vec<(String, String)>,
+    /// `authenticate` method ids to prefer, in order.
+    pub auth_preference: Vec<String>,
+    /// `_meta` for `initialize` / `session/cancel`.
+    pub initialize_meta: Option<Value>,
+    pub cancel_meta: Option<Value>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,15 +125,17 @@ struct Pending {
 
 pub struct AcpDriver {
     provider: RuntimeProvider,
-    program: String,
-    args: Vec<String>,
-    env: Vec<(String, String)>,
+    flavor: AcpFlavor,
     cwd: String,
     resume: Option<String>,
     next_id: u64,
     phase: Phase,
     init_id: u64,
     create_id: u64,
+    auth_id: u64,
+    /// `authMethods` from `initialize`: `(id, type)`.
+    auth_methods: Vec<(String, Option<String>)>,
+    authenticated: bool,
     session_id: Option<String>,
     queued: Option<(String, String)>,
     prompt_id: Option<u64>,
@@ -122,17 +154,31 @@ impl AcpDriver {
         args: Vec<String>,
         env: Vec<(String, String)>,
     ) -> Self {
+        Self::with_flavor(
+            provider,
+            AcpFlavor {
+                program: program.into(),
+                head_args: args,
+                model_flag: Some("--model".into()),
+                env,
+                ..AcpFlavor::default()
+            },
+        )
+    }
+
+    pub fn with_flavor(provider: RuntimeProvider, flavor: AcpFlavor) -> Self {
         Self {
             provider,
-            program: program.into(),
-            args,
-            env,
+            flavor,
             cwd: String::new(),
             resume: None,
             next_id: 0,
             phase: Phase::Initializing,
             init_id: 0,
             create_id: 0,
+            auth_id: 0,
+            auth_methods: Vec::new(),
+            authenticated: false,
             session_id: None,
             queued: None,
             prompt_id: None,
@@ -145,13 +191,44 @@ impl AcpDriver {
     }
 
     /// The Gemini CLI in ACP mode (T3 Code runs it from the ACP registry's
-    /// `@google/gemini-cli` entry; the installed CLI's own flag is `--acp`).
+    /// `@google/gemini-cli` entry with the registry's argv; the installed
+    /// CLI's own flag is `--acp`).
     pub fn gemini() -> Self {
         Self::new(
             RuntimeProvider::Gemini,
             "gemini",
             vec!["--acp".into()],
             Vec::new(),
+        )
+    }
+
+    /// Grok over ACP, as T3 Code launches it (`acpSupport.ts:47-58`): the
+    /// approval-required runtime mode is `--permission-mode default agent
+    /// stdio` — every tool call asks. Otto never launches the `auto` /
+    /// `--always-approve` variants (approvals always reach a person).
+    /// `-m` is grok's top-level model flag; context flags (`--rules=`) must
+    /// precede `agent`, hence the tail. Auth: `xai.api_key` when
+    /// `XAI_API_KEY` is set, else `cached_token` (`acpSupport.ts:21-25,
+    /// 77-81`); `_meta` on initialize / cancel (`:98-101`). T3 Code also sets
+    /// `GROK_OAUTH2_REFERRER=t3code` — a T3-specific attribution Otto omits.
+    pub fn grok() -> Self {
+        let auth = if std::env::var_os("XAI_API_KEY").is_some() {
+            "xai.api_key"
+        } else {
+            "cached_token"
+        };
+        Self::with_flavor(
+            RuntimeProvider::Grok,
+            AcpFlavor {
+                program: "grok".into(),
+                head_args: vec!["--permission-mode".into(), "default".into()],
+                tail_args: vec!["agent".into(), "stdio".into()],
+                model_flag: Some("-m".into()),
+                env: Vec::new(),
+                auth_preference: vec![auth.into()],
+                initialize_meta: Some(json!({"clientType": "extension"})),
+                cancel_meta: Some(json!({"cancelTrigger": "ctrl_c"})),
+            },
         )
     }
 
@@ -192,6 +269,24 @@ impl AcpDriver {
         self.turn_id = Some(turn_id);
         self.segments = 0;
         step.write(line);
+    }
+
+    /// T3 Code's choice (`AcpSessionRuntime.ts:1065-1074`): a preferred
+    /// method the agent advertised, else the first `agent`-type (or untyped)
+    /// one. `terminal` / `env_var` methods are never sent to `authenticate`.
+    fn auth_method(&self) -> Option<String> {
+        let advertised = |id: &str| self.auth_methods.iter().any(|(m, _)| m == id);
+        self.flavor
+            .auth_preference
+            .iter()
+            .find(|p| advertised(p))
+            .cloned()
+            .or_else(|| {
+                self.auth_methods
+                    .iter()
+                    .find(|(_, ty)| ty.as_deref().is_none_or(|t| t == "agent"))
+                    .map(|(id, _)| id.clone())
+            })
     }
 
     fn turn(&self) -> String {
@@ -483,6 +578,7 @@ impl AcpDriver {
                 request_id: request_id.clone(),
                 request_kind: kind,
                 prompt: title,
+                reason: None,
                 options,
             },
         );
@@ -503,7 +599,38 @@ impl AcpDriver {
         result: Option<Value>,
         error: Option<Value>,
     ) {
+        if let Phase::Authenticating { load } = self.phase {
+            if id == self.auth_id {
+                if let Some(e) = error {
+                    step.push(DriverEvent::Error(failure("auth_required", &e)));
+                    if self.queued.take().is_some() {
+                        step.push(DriverEvent::Terminal {
+                            status: TurnTerminalStatus::Failed,
+                            failure: Some(failure("auth_required", &e)),
+                            reason: None,
+                        });
+                    }
+                    return;
+                }
+                self.create_session(step, load);
+                return;
+            }
+        }
         if id == self.init_id && self.phase == Phase::Initializing {
+            self.auth_methods = result
+                .as_ref()
+                .and_then(|r| r.get("authMethods"))
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|m| {
+                            let id = m.get("id")?.as_str()?.to_string();
+                            let ty = m.get("type").and_then(Value::as_str).map(str::to_string);
+                            Some((id, ty))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
             let load = result
                 .and_then(|r| serde_json::from_value::<InitializeResponse>(r).ok())
                 .is_some_and(|r| r.agent_capabilities.load_session);
@@ -515,6 +642,19 @@ impl AcpDriver {
         } else if id == self.create_id && matches!(self.phase, Phase::Creating { .. }) {
             let loading = matches!(self.phase, Phase::Creating { loading: true });
             if let Some(e) = error {
+                if e.get("code").and_then(Value::as_i64) == Some(AUTH_REQUIRED)
+                    && !self.authenticated
+                {
+                    if let Some(method) = self.auth_method() {
+                        let (id, line) =
+                            self.request(M_AUTHENTICATE, AuthenticateRequest::new(method));
+                        self.auth_id = id;
+                        self.authenticated = true;
+                        self.phase = Phase::Authenticating { load: loading };
+                        step.write(line);
+                        return;
+                    }
+                }
                 if loading {
                     // T3 Code: a failed load / resume starts a fresh session.
                     self.resume = None;
@@ -631,14 +771,15 @@ impl StructuredDriver for AcpDriver {
     }
 
     fn launch(&self, ctx: &LaunchContext) -> LaunchSpec {
-        let mut args = self.args.clone();
-        if let Some(m) = &ctx.model {
-            args.extend(["--model".to_string(), m.clone()]);
+        let mut args = self.flavor.head_args.clone();
+        if let (Some(m), Some(flag)) = (&ctx.model, &self.flavor.model_flag) {
+            args.extend([flag.clone(), m.clone()]);
         }
         LaunchSpec {
-            program: self.program.clone(),
+            program: self.flavor.program.clone(),
             args,
-            env: self.env.clone(),
+            tail_args: self.flavor.tail_args.clone(),
+            env: self.flavor.env.clone(),
         }
     }
 
@@ -646,7 +787,11 @@ impl StructuredDriver for AcpDriver {
         self.cwd = ctx.cwd.clone();
         self.resume = ctx.resume.clone();
         let mut step = DriverStep::default();
-        let (id, line) = self.request(M_INITIALIZE, InitializeRequest::new(ProtocolVersion::V1));
+        let mut init = InitializeRequest::new(ProtocolVersion::V1);
+        if let Some(Value::Object(meta)) = &self.flavor.initialize_meta {
+            init.meta = Some(meta.clone());
+        }
+        let (id, line) = self.request(M_INITIALIZE, init);
         self.init_id = id;
         step.write(line);
         step
@@ -682,7 +827,10 @@ impl StructuredDriver for AcpDriver {
                 reason: None,
             });
         } else if let Some(sid) = &self.session_id {
-            let n = CancelNotification::new(sid.clone());
+            let mut n = CancelNotification::new(sid.clone());
+            if let Some(Value::Object(meta)) = &self.flavor.cancel_meta {
+                n.meta = Some(meta.clone());
+            }
             step.write(json!({"jsonrpc":"2.0","method":M_SESSION_CANCEL,"params":n}).to_string());
         }
         step
@@ -828,6 +976,48 @@ mod tests {
         );
         assert_eq!(sent(&s, 0)["method"], "session/prompt");
         assert_eq!(sent(&s, 0)["params"]["prompt"][0]["text"], "hi");
+    }
+
+    #[test]
+    fn grok_launch_order_and_lazy_authenticate_then_retry() {
+        let mut d = AcpDriver::grok();
+        let spec = d.launch(&LaunchContext {
+            model: Some("grok-4.6".into()),
+            ..ctx(None)
+        });
+        assert_eq!(spec.program, "grok");
+        assert_eq!(
+            spec.args,
+            ["--permission-mode", "default", "-m", "grok-4.6"]
+        );
+        assert_eq!(spec.tail_args, ["agent", "stdio"]);
+        let s = d.start(&ctx(None));
+        assert_eq!(sent(&s, 0)["params"]["_meta"]["clientType"], "extension");
+        d.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"authMethods":[{"id":"grok.com","name":"Grok"},{"id":"cached_token","name":"cached"}]}}"#);
+        // session/new refused: auth required → authenticate with the
+        // preferred advertised method, then session/new again.
+        let s = d.on_line(r#"{"jsonrpc":"2.0","id":2,"error":{"code":-32000,"message":"Authentication required"}}"#);
+        assert_eq!(sent(&s, 0)["method"], "authenticate");
+        let want = if std::env::var_os("XAI_API_KEY").is_some() {
+            "grok.com" // xai.api_key not advertised → first agent method
+        } else {
+            "cached_token"
+        };
+        assert_eq!(sent(&s, 0)["params"]["methodId"], want);
+        let s = d.on_line(r#"{"jsonrpc":"2.0","id":3,"result":{}}"#);
+        assert_eq!(sent(&s, 0)["method"], "session/new");
+        // A second auth failure is reported, not looped.
+        let s = d.on_line(r#"{"jsonrpc":"2.0","id":4,"error":{"code":-32000,"message":"Authentication required"}}"#);
+        assert!(s.writes.is_empty());
+        assert!(matches!(&s.events[0], DriverEvent::Error(f) if f.class == "handshake_error"));
+        // Cancel carries Grok's _meta.
+        let mut d = AcpDriver::grok();
+        d.start(&ctx(None));
+        d.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}"#);
+        d.on_line(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"g1"}}"#);
+        d.prompt("t1", "go").unwrap();
+        let s = d.interrupt();
+        assert_eq!(sent(&s, 0)["params"]["_meta"]["cancelTrigger"], "ctrl_c");
     }
 
     #[test]

@@ -20,6 +20,8 @@ chrono = { workspace = true }
 dashmap = { workspace = true }
 tracing = { workspace = true }
 async-trait = { workspace = true }
+# `--session-id` for a fresh Claude thread (the CLI requires a UUID).
+uuid = { workspace = true }
 # ACP wire types (the official SDK's schema; protocol v1). Only the types: the
 # runtime owns the process and the JSON-RPC framing (see src/acp.rs).
 agent-client-protocol = { version = "5.0.0", default-features = false }
@@ -30,10 +32,17 @@ libc = "0.2.191"
 sqlx = { workspace = true }
 tempfile = { workspace = true }
 
-# Test double: a tiny agent speaking the fake line protocol (`src/fake.rs`).
-# Integration tests reach it via `CARGO_BIN_EXE_otto-fake-agent`.
+# Test doubles: an ACP agent and a Codex app-server over stdio. Integration
+# tests reach them via `CARGO_BIN_EXE_otto-fake-agent` /
+# `CARGO_BIN_EXE_otto-fake-codex`.
 [[bin]]
 name = "otto-fake-agent"
 path = "src/bin/otto-fake-agent.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "otto-fake-codex"
+path = "src/bin/otto-fake-codex.rs"
 test = false
 doc = false

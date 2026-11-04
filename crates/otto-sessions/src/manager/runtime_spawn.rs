@@ -9,7 +9,8 @@ use super::*;
 
 impl SessionManager {
     /// Prepare `spec` (the runtime driver's launch command) for spawning as
-    /// agent session `session` in `ws`. `session` is a synthetic, never
+    /// agent session `session` in `ws`. `tail_args` go after the context
+    /// hook's injected flags (e.g. `agent stdio` for `grok`). `session` is a synthetic, never
     /// persisted [`Session`] (`kind = Agent`) carrying the runtime session's
     /// id, provider, cwd, owner and meta — exactly the fields the PTY path's
     /// helpers read.
@@ -24,6 +25,7 @@ impl SessionManager {
         ws: &Workspace,
         session: &Session,
         spec: &mut CommandSpec,
+        tail_args: Vec<String>,
     ) -> Result<()> {
         self.refuse_while_shutting_down()?;
         if session.kind != SessionKind::Agent {
@@ -58,6 +60,8 @@ impl SessionManager {
             spec.args.extend(injection.args);
             spec.env.extend(injection.env);
         }
+        // A subcommand that must follow the injected top-level flags.
+        spec.args.extend(tail_args);
         // Last, over the fully-built spec — as `create` does.
         self.apply_sandbox(spec, session).await;
         Ok(())

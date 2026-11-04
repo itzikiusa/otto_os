@@ -29,13 +29,16 @@ use serde_json::Value;
 use crate::Id;
 
 /// The agent CLIs the structured runtime can drive (distinct from the PTY
-/// provider registry: `gemini` speaks ACP via `gemini --acp`).
+/// provider registry): `claude` over the Agent SDK's stream-json control
+/// protocol, `codex` over `codex app-server`, `gemini` (`gemini --acp`) and
+/// `grok` (`grok agent stdio`) over ACP.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeProvider {
     Claude,
     Codex,
     Gemini,
+    Grok,
 }
 
 impl RuntimeProvider {
@@ -44,6 +47,7 @@ impl RuntimeProvider {
             Self::Claude => "claude",
             Self::Codex => "codex",
             Self::Gemini => "gemini",
+            Self::Grok => "grok",
         }
     }
 
@@ -52,6 +56,7 @@ impl RuntimeProvider {
             "claude" => Some(Self::Claude),
             "codex" => Some(Self::Codex),
             "gemini" => Some(Self::Gemini),
+            "grok" => Some(Self::Grok),
             _ => None,
         }
     }
@@ -275,11 +280,20 @@ pub enum TurnItemKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         output: Option<String>,
     },
+    /// Web search / fetch tools (Claude `WebSearch` / `WebFetch`, Codex
+    /// `webSearch`); `patterns` are the queries or URLs.
+    WebSearch {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        patterns: Vec<String>,
+    },
     ApprovalRequest {
         request_id: Id,
         request_kind: RequestKind,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         prompt: Option<String>,
+        /// The provider's own justification (Codex `reason`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
         options: Vec<ApprovalOption>,
     },
     SystemNotice {
