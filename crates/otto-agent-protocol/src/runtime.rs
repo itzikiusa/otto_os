@@ -478,6 +478,19 @@ impl AgentRuntime {
             .collect())
     }
 
+    /// Rename (closed sessions too — they stay listed as history).
+    pub async fn rename(&self, id: &Id, title: &str) -> Result<RuntimeSession> {
+        let title = title.trim();
+        if title.is_empty() {
+            return Err(Error::Invalid("title is empty".into()));
+        }
+        let live = self.live(id).await?;
+        self.inner.repo.set_title(id, title).await?;
+        let mut st = live.lock();
+        st.session.title = title.to_string();
+        Ok(st.session.clone())
+    }
+
     /// The session's live entry, loaded from the DB on first use in this
     /// daemon life (its sequence resumes above the persisted floor).
     async fn live(&self, id: &Id) -> Result<Arc<Live>> {

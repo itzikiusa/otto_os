@@ -171,6 +171,16 @@ impl AgentRuntimeRepo {
         Ok(())
     }
 
+    pub async fn set_title(&self, id: &Id, title: &str) -> Result<()> {
+        sqlx::query("UPDATE agent_runtime_sessions SET title = ? WHERE id = ?")
+            .bind(title)
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("rename runtime session"))?;
+        Ok(())
+    }
+
     pub async fn set_closed(&self, id: &Id) -> Result<()> {
         sqlx::query("UPDATE agent_runtime_sessions SET closed = 1 WHERE id = ?")
             .bind(id)

@@ -834,3 +834,31 @@ async fn refused_handshake_fails_the_turn_stops_the_child_and_retries_on_the_nex
     );
     rt.close(&s.id).await.unwrap();
 }
+
+#[tokio::test]
+async fn rename_updates_the_live_entry_and_the_row_also_when_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(dir.path().to_str().unwrap(), false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create(&rt, dir.path().to_str().unwrap()).await;
+    assert!(matches!(
+        rt.rename(&s.id, "  ").await,
+        Err(Error::Invalid(_))
+    ));
+    assert_eq!(
+        rt.rename(&s.id, " Fix the build ").await.unwrap().title,
+        "Fix the build"
+    );
+    rt.close(&s.id).await.unwrap();
+    rt.rename(&s.id, "Closed one").await.unwrap();
+    let listed = rt.list(&"w1".into(), None).await.unwrap();
+    assert_eq!(listed[0].title, "Closed one");
+    // A fresh daemon life reads it from the row.
+    let rt2 = runtime(
+        &pool,
+        &TestHost::new(dir.path().to_str().unwrap(), false),
+        RuntimeConfig::default(),
+    );
+    assert_eq!(rt2.get(&s.id).await.unwrap().title, "Closed one");
+}
