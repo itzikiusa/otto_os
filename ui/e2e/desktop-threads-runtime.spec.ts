@@ -291,6 +291,14 @@ test('runtime polish: RTL, project card, grouped tools, folded approvals, access
   const thread = page.getByTestId(`runtime-thread-${id}`);
   await expect(thread).toBeVisible({ timeout: 30_000 });
 
+  // A hovered sidebar row's actions sit beside the title, never over it: an
+  // RTL title starts at the row's end, where the actions are revealed.
+  const rowTitle = page.getByTestId('threads-sidebar').locator('.tr-title', { hasText: 'שיחה בעברית' }).first();
+  await rowTitle.hover();
+  const actions = rowTitle.locator('xpath=ancestor::*[contains(@class,"tr-row")][1]//*[contains(@class,"tr-actions")]');
+  const [tb, ab] = [(await rowTitle.boundingBox())!, (await actions.boundingBox())!];
+  expect(tb.x + tb.width <= ab.x || ab.x + ab.width <= tb.x, 'row actions overlap the title').toBeTruthy();
+
   // RTL: the bubble and the answer resolve right-to-left; code / #130 stay isolated LTR.
   const bubble = thread.locator('.rt-bubble');
   const answer = thread.locator('.rt-assistant');
