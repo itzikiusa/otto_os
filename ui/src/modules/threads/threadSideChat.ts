@@ -5,7 +5,7 @@
 // until promoted, which just clears the tag. Plan mode by default: it reads,
 // it doesn't edit the files the main thread is working on.
 import { api } from '../../lib/api/client';
-import type { Session, Transcript } from '../../lib/api/types';
+import type { Session, Transcript, Turn } from '../../lib/api/types';
 import { resolveSessionThreadConfig, supportsInteractionMode } from '../../lib/providerModels';
 import { defaultAgentProvider } from '../../lib/providers';
 import { git } from '../../lib/stores/git.svelte';
@@ -13,6 +13,8 @@ import { transcript } from '../../lib/stores/transcript.svelte';
 import { SCRATCH_WORKSPACE_ID, ws } from '../../lib/stores/workspace.svelte';
 import { toastError } from '../../lib/toastError';
 import { buildSideChatPrompt } from './sideChatPrompt';
+import { isRuntimeThread } from './runtime/runtimeThreads.svelte';
+import { runtimeViews } from './runtime/runtimeView.svelte';
 import { threadRepos } from './threadRepos.svelte';
 import { harnessLabel, isPlainShellSession, sideChatOf } from './threadsHelpers';
 import { threads } from './threadsStore.svelte';
@@ -24,10 +26,20 @@ export function sideChatFor(mainId: string | null): Session | null {
   return list.sort((a, b) => b.created_at.localeCompare(a.created_at))[0] ?? null;
 }
 
+/** A runtime thread's messages as transcript turns (the prompt reads prose only). */
+function runtimeTurns(id: string): Turn[] {
+  return (runtimeViews.projections[id]?.items ?? []).flatMap((i) =>
+    i.type === 'user_message' || i.type === 'assistant_message'
+      ? [{ id: i.id, role: i.type === 'user_message' ? 'user' : 'assistant', ts: i.started_at, blocks: [{ kind: 'text', md: i.text }], duration_ms: null, model: null, system: [], reasoning_steps: 0 } satisfies Turn]
+      : [],
+  );
+}
+
 async function mainContext(main: Session): Promise<Parameters<typeof buildSideChatPrompt>[1]> {
   const repo = threadRepos.repoFor(main.cwd, main.workspace_id);
+  const runtime = isRuntimeThread(main);
   const [tx, status] = await Promise.all([
-    api.get<Transcript>(`/sessions/${encodeURIComponent(main.id)}/transcript?limit=8`).catch(() => null),
+    runtime ? null : api.get<Transcript>(`/sessions/${encodeURIComponent(main.id)}/transcript?limit=8`).catch(() => null),
     repo ? git.refreshStatus(repo.id).then(() => git.statusById[repo.id] ?? null, () => git.statusById[repo.id] ?? null) : null,
   ]);
   return {
@@ -36,7 +48,7 @@ async function mainContext(main: Session): Promise<Parameters<typeof buildSideCh
     cwd: main.cwd,
     branch: status?.branch ?? null,
     changedFiles: (status?.changes ?? []).map((c) => c.path),
-    turns: tx?.turns ?? [],
+    turns: runtime ? runtimeTurns(main.id) : (tx?.turns ?? []),
   };
 }
 

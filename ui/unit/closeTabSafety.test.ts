@@ -53,7 +53,7 @@ function store(module: string, pref: '' | 'archive' | 'delete', confirmAnswer = 
     './ui.svelte': { ui: { sessionIsolation: false, closeTabPref: pref, setCloseTabPref() {} }, clientId: () => 'test' },
     '../win': { winKey: (key: string) => key }, './splitLayout.svelte': { layout }, './splitLayout': { MAX_PANES: 15, LS_PANES: 'otto_panes_' },
     '../storage': { lsGet: () => null, lsSet() {}, lsRemove() {} },
-    '../desktop': { isEmbedded: false }, './sessionScope': sessionScope, './sessionPatch': sessionPatch, './sessionBuckets': sessionBuckets,
+    '../desktop': { isEmbedded: false }, './runtimeAttention.svelte': { runtimeFlagged: () => 0 }, './sessionScope': sessionScope, './sessionPatch': sessionPatch, './sessionBuckets': sessionBuckets,
     '../lazy-component.svelte': { whenIdle: () => () => {} },
   });
   ws.sessions = [{ id: 's1', workspace_id: 'w', kind: 'agent', status: 'idle', title: 'Agent one', archived: false }];

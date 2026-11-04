@@ -22,6 +22,8 @@
   import { FilterPopover, PullRequestsView, SettingsView, UsageView } from './threadLazy.svelte';
   import { threadsChrome } from './threadsChrome.svelte';
   import { promptNewScript } from './threadGitMenus';
+  import { runtimeThreadMenu } from './runtime/runtimeMenu';
+  import { isRuntimeThread, runtimeThreads } from './runtime/runtimeThreads.svelte';
   import { threads } from './threadsStore.svelte';
 
   interface Props {
@@ -47,7 +49,10 @@
   // Id index over live + archived sessions: a delegated worker's parent
   // lookup is O(1) instead of a scan of every session per row.
   const allPool = $derived(new Map([...ws.archivedSessions, ...ws.sessions].map((s) => [s.id, s] as const)));
-  const allLiveThreads = $derived(ws.sessions.filter((s) => !s.archived && isThreadSession(s, allPool)));
+  const allLiveThreads = $derived([
+    ...ws.sessions.filter((s) => !s.archived && isThreadSession(s, allPool)),
+    ...runtimeThreads.rows(),
+  ]);
 
   // Distinct project roots across workspaces, repos and threads for the filter pill.
   const projectOptions = $derived.by(() => {
@@ -164,7 +169,10 @@
   // History combines settled threads + archived daemon threads.
   const historyItems = $derived.by(() => {
     const settled = filteredLive.filter((s) => threads.isSettled(s.id));
-    const archived = ws.archivedSessions.filter((s) => isThreadSession(s, allPool) && matchesFilters(s));
+    const archived = [
+      ...ws.archivedSessions.filter((s) => isThreadSession(s, allPool)),
+      ...runtimeThreads.rows(true),
+    ].filter(matchesFilters);
     const seen = new Set<string>();
     const combined: { session: Session; kind: 'settled' | 'archived' }[] = [];
     for (const s of settled) {
@@ -186,6 +194,7 @@
     try {
       threadRepos.reset();
       await ws.refreshSessions();
+      if (ws.currentId) await runtimeThreads.load(ws.currentId);
       if (ws.currentId) await git.loadRepos(ws.currentId, true);
       for (const id of Object.keys(git.statusById)) void git.refreshStatus(id);
     } catch (e) {
@@ -237,7 +246,8 @@
 
   async function reopenArchived(s: Session, beside = false): Promise<void> {
     threads.unsettle(s.id);
-    if (s.archived) {
+    // A closed runtime thread opens read-only; it has nothing to unarchive.
+    if (s.archived && !isRuntimeThread(s)) {
       try {
         await ws.unarchiveSession(s.id);
       } catch (e) {
@@ -253,6 +263,10 @@
   function showThreadMenu(e: MouseEvent, s: Session): void {
     e.preventDefault();
     e.stopPropagation();
+    if (isRuntimeThread(s)) {
+      ctxMenu.show(e, runtimeThreadMenu(s.id));
+      return;
+    }
     const pinned = threads.isPinned(s.id);
     const settled = threads.isSettled(s.id);
     const canSendFromFocused =

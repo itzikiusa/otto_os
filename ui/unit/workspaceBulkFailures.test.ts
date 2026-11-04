@@ -33,7 +33,7 @@ function load(fail: Record<string, unknown>) {
     './ui.svelte': { ui: { sessionIsolation: false, closeTabPref: '', setCloseTabPref() {} }, clientId: () => 'test' },
     '../win': { winKey: (key: string) => key }, './splitLayout.svelte': { layout }, './splitLayout': { MAX_PANES: 15, LS_PANES: 'otto_panes_' },
     '../storage': { lsGet: () => null, lsSet() {}, lsRemove() {} }, '../loadError': { loadErrorText },
-    '../desktop': { isEmbedded: false }, './sessionScope': sessionScope, './sessionPatch': sessionPatch, './sessionBuckets': sessionBuckets,
+    '../desktop': { isEmbedded: false }, './runtimeAttention.svelte': { runtimeFlagged: () => 0 }, './sessionScope': sessionScope, './sessionPatch': sessionPatch, './sessionBuckets': sessionBuckets,
     '../lazy-component.svelte': { whenIdle: () => () => {} },
   });
   const { ws } = mod;

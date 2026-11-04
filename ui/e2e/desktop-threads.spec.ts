@@ -232,10 +232,12 @@ test('custom sidebar auto-discovers Threads, stage pickers + slash menu work, an
   await expect(stage.locator('h1')).toContainText(/What should we (build|work on)/);
 
   // One agent chip holds harness · model · effort; access mode sits in the meta row.
+  // Claude runs on the structured runtime (always asks first), so the access
+  // mode is shown for a PTY harness (Antigravity).
   const agentBtn = stage.getByTestId('picker-agent');
   const modeBtn = stage.getByTestId('picker-mode');
   await expect(agentBtn).toBeVisible();
-  await expect(modeBtn).toContainText('Full access');
+  await expect(modeBtn).toHaveCount(0);
 
   // One panel: provider rail · models · Reasoning · access (T3).
   await agentBtn.click();
@@ -243,6 +245,8 @@ test('custom sidebar auto-discovers Threads, stage pickers + slash menu work, an
   await expect(picker).toBeVisible();
   await expect(picker.getByTestId('model-picker-provider-claude')).toBeVisible();
   await expect(picker.getByTestId('model-picker-search')).toBeFocused();
+  await picker.getByTestId('model-picker-provider-agy').click();
+  await expect(modeBtn).toContainText('Full access');
   await picker.getByTestId('picker-effort').getByRole('button', { name: 'High', exact: true }).click();
   await page.keyboard.press('Escape');
   await expect(picker).toHaveCount(0);

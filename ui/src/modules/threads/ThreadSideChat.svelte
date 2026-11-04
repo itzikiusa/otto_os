@@ -10,13 +10,17 @@
   import { dismissSideChat, promoteSideChat, sideChatFor, startSideChat } from './threadSideChat';
   import { isPlainShellSession } from './threadsHelpers';
   import { threads } from './threadsStore.svelte';
+  import { asThreadSession, runtimeThreads } from './runtime/runtimeThreads.svelte';
 
   interface Props {
     mainId: string | null;
   }
   let { mainId }: Props = $props();
 
-  const main = $derived(mainId ? ws.getSession(mainId) : null);
+  const main = $derived.by(() => {
+    const rt = runtimeThreads.get(mainId);
+    return (mainId ? ws.getSession(mainId) : null) ?? (rt ? asThreadSession(rt) : null);
+  });
   const side = $derived(sideChatFor(mainId));
   let question = $state('');
   let busy = $state(false);

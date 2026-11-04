@@ -2,7 +2,7 @@ import { request, type FullConfig } from '@playwright/test';
 import { execFileSync, execSync, spawn } from 'node:child_process';
 import { chmodSync, existsSync, mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import type { TelemetryConfig, TelemetryStatus } from '../src/lib/api/types';
 import globalTeardown from './global-teardown.ts';
 
@@ -53,11 +53,20 @@ export default async function globalSetup(_config: FullConfig): Promise<void> {
   // echoes input, so a session still looks alive to the UI.
   const fakeBin = join(dataDir, 'fake-agent-bin');
   mkdirSync(fakeBin, { recursive: true });
+  // A structured-runtime codex thread (`codex … app-server`) gets the
+  // daemon build's fake app-server instead (otto-agent-protocol's
+  // `otto-fake-codex`, built next to ottod), so Threads specs can drive a
+  // real runtime session: echo, `ask` (an approval) and `hang` (Stop).
+  const fakeCodex = join(dirname(OTTOD), 'otto-fake-codex');
   for (const cli of ['claude', 'codex', 'agy', 'gemini', 'grok']) {
     const shim = join(fakeBin, cli);
+    const runtime =
+      cli === 'codex' && existsSync(fakeCodex)
+        ? `for a in "$@"; do [ "$a" = app-server ] && exec '${fakeCodex}' "$@"; done\n`
+        : '';
     writeFileSync(
       shim,
-      `#!/bin/sh\necho "otto e2e: the real ${cli} CLI is disabled in tests"\nexec cat\n`,
+      `#!/bin/sh\n${runtime}echo "otto e2e: the real ${cli} CLI is disabled in tests"\nexec cat\n`,
     );
     chmodSync(shim, 0o755);
   }

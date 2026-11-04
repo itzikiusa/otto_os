@@ -2,8 +2,10 @@
 
 Status: the daemon side is done: the event model, contracts, runtime, and
 drivers for Claude, Codex, Gemini, Grok and Antigravity (`agy`). Tests use a
-fake ACP agent, a fake `codex app-server` and a fake `agy`. The Threads UI still renders PTY sessions; moving it
-onto `/runtime-sessions` is the next step (§9). PTY sessions are unchanged.
+fake ACP agent, a fake `codex app-server` and a fake `agy`. New Claude / Codex /
+Gemini / Grok threads in a workspace (Scratch included) run on
+`/runtime-sessions` (§5); Antigravity (headless `agy` cannot ask for approval),
+other harnesses and existing threads stay on the PTY view, which is unchanged.
 
 **Attribution.** Ported from [T3 Code](https://github.com/pingdotgg/t3code)
 (MIT, Copyright (c) 2026 T3 Tools Inc.). The licence is reproduced in
@@ -495,10 +497,39 @@ in which headless agy denies what it would have asked about.
 | `crates/otto-agent-protocol/src/bin/otto-fake-{agent,codex,agy}.rs` | test doubles (ACP agent, `codex app-server`, agy stream-json) |
 | `crates/otto-state/src/agent_runtime.rs`, migration `0197_agent_runtime.sql` | persistence |
 | `ui/src/lib/api/types/agent-runtime.ts` | TS mirror |
+| `ui/src/modules/threads/runtime/projection.ts`, `timeline.ts` | event fold (T3 Code's projection reducer); what the view derives (pending requests, phase, rows) |
+| `ui/src/modules/threads/runtime/runtimeThreads.svelte.ts` | session rows (live status) and actions |
+| `ui/src/modules/threads/runtime/runtimeView.svelte.ts` | an open thread's projection: live events, replay after a gap / reconnect (loads with the view) |
+| `ui/src/modules/threads/runtime/Runtime{Thread,WorkRow,ApprovalRow}.svelte` | timeline, work-log rows, inline approvals, composer with Stop and a queued follow-up |
+| `ui/e2e/desktop-threads-runtime.spec.ts` | E2E against `otto-fake-codex` (global-setup's codex shim execs it for `app-server`) |
 
 ## 9. Gaps and next steps
 
-- **Threads UI** on `/runtime-sessions`: the work in §5.
+- **Threads UI.** Runtime threads raise the shared "needs you" flag while
+  an approval waits, sit in History once closed (read-only, renamable),
+  and take the view's slash commands (`/btw` side chat — itself a PTY
+  thread — `/diff`, `/files`, `/terminal`, `/new`, `/fork`, `/review`);
+  any other `/command` goes to the agent as typed (T3 Code's provider
+  commands). The thread's terminal drawer is a plain shell in its folder
+  (`meta.terminal_of`). The composer's model / effort pick and attached
+  images ride `POST …/prompt` (`model`, `effort`, `images`).
+- **Pending driver work** for those prompt fields (the runtime ignores them
+  today): the prompt handler passes them to `StructuredDriver::prompt`, and
+  the drivers apply them as T3 Code does —
+  - **model / effort:** Codex `turn/start {model, effort}` (per turn,
+    `CodexAdapterV2.ts:744-818`); Claude a `control_request {subtype:
+    "set_model", model}` before the user message when the model changed
+    (`ClaudeAdapterV2.ts:1224-1236`), an effort change respawning the CLI
+    with `--resume` (`:1440-1455`, "thinking requires a new process"); ACP
+    respawn with `--model` + `session/load`. The session row's `model`
+    follows.
+  - **images:** Claude `{type:"image", source:{type:"base64", media_type,
+    data}}` content blocks beside the text block in the `user` message;
+    Codex `turn/start input` `{type:"image", url:"data:<media_type>;base64,<data>"}`
+    items; ACP `ContentBlock::Image {data, mimeType}` when the agent's
+    `promptCapabilities.image` is set (else refuse with 400). The prompt
+    route needs a larger body limit (`DefaultBodyLimit`, ~48 MiB for four
+    10 MB images) and the `user_message` item could carry an image count.
 - **`ottod` teardown** calling `AgentRuntime::shutdown()`, and eviction of
   idle live entries.
 - **Runtime modes.** auto-accept-edits and full-access are unported; they

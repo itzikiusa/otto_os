@@ -507,7 +507,7 @@ export type OttoEvent =
   | {
       /** One normalized structured-runtime event (token deltas included).
        *  Scope::Session with the owner inline (`owner_id`). Replay gaps via
-       *  `GET /runtime-sessions/{id}/events?after_seq=`. */
+       *  `GET /runtime-sessions/{id}/events?after_sequence=`. */
       type: 'agent_runtime_event';
       workspace_id: Id;
       session_id: Id;

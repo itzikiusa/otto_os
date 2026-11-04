@@ -46,6 +46,7 @@
   import { harnessLabel, projectNameFromCwd, relToRoot } from './threadsHelpers';
   import { threadRepos } from './threadRepos.svelte';
   import { threads } from './threadsStore.svelte';
+  import { isRuntimeProvider, runtimeThreads } from './runtime/runtimeThreads.svelte';
 
   interface Props {
     /** Float the project card top-right (wide screen, right panel closed). */
@@ -78,6 +79,11 @@
 
   const homePath = $derived(ws.scratch?.root_path ?? '~');
   const scratchActive = $derived(useScratch || ws.current === null);
+  const targetWs = $derived(scratchActive ? SCRATCH_WORKSPACE_ID : (ws.currentId ?? SCRATCH_WORKSPACE_ID));
+  // Claude / Codex / Gemini / Grok threads run on the structured runtime:
+  // they always ask before acting (no access-mode switch).
+  const runtime = $derived(isRuntimeProvider(provider));
+  const modeSupported = $derived(supportsInteractionMode(provider) && !runtime);
   const cleanCwd = $derived(cwd.trim().replace(/\/+$/, ''));
   const onWorktree = $derived(worktree !== null && worktree.path.replace(/\/+$/, '') === cleanCwd);
   const repo = $derived(onWorktree ? worktree!.repo : threadRepos.repoFor(cleanCwd, scratchActive ? null : ws.currentId));
@@ -155,7 +161,7 @@
   const openEffortMenu = openModelMenu;
 
   function openModeMenu(): void {
-    if (!modeEl || !supportsInteractionMode(provider)) return;
+    if (!modeEl || !modeSupported) return;
     ctxMenu.showAt(modeEl, buildModeMenu(interactionMode, (m) => (interactionMode = m)), { align: 'end' });
   }
 
@@ -270,10 +276,14 @@
       };
       const title = firstMsg ? firstMsg.replace(/\s+/g, ' ').slice(0, 56) : `${harnessLabel(provider)} thread`;
       const opts = { scratch: scratchActive && ws.currentId !== SCRATCH_WORKSPACE_ID };
-      const created = firstMsg
-        ? await ws.openSessionWithPrompt({ provider, title, cwd: dir || null, prompt: firstMsg, meta }, opts)
-        : await ws.createSessionQuiet({ kind: 'agent', provider, title, cwd: dir || null, meta }, opts);
-      if (firstMsg) transcript.recordOptimisticPrompt(created.id, firstMsg);
+      const created = runtime && isRuntimeProvider(provider)
+        ? await runtimeThreads.start(targetWs, {
+            provider, title, cwd: dir || null, model: selectedModel, effort: selectedEffort ?? undefined, prompt: firstMsg,
+          })
+        : firstMsg
+          ? await ws.openSessionWithPrompt({ provider, title, cwd: dir || null, prompt: firstMsg, meta }, opts)
+          : await ws.createSessionQuiet({ kind: 'agent', provider, title, cwd: dir || null, meta }, opts);
+      if (firstMsg && !runtime) transcript.recordOptimisticPrompt(created.id, firstMsg);
       prompt = '';
       threads.draftCwd = null;
       threads.rememberProject(dir || null);
@@ -324,7 +334,7 @@
   function onComposerKeydown(e: KeyboardEvent): void {
     if (e.isComposing) return;
     if (e.key === 'Tab' && e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey && !cmdOpen) {
-      if (supportsInteractionMode(provider)) {
+      if (modeSupported) {
         e.preventDefault();
         interactionMode = nextInteractionModeToggle(interactionMode);
         return;
@@ -536,7 +546,7 @@
           <span class="ellipsis">{branch}</span>
         </button>
       {/if}
-      {#if supportsInteractionMode(provider)}
+      {#if modeSupported}
         <button
           bind:this={modeEl}
           type="button"
@@ -567,7 +577,7 @@
     onprovider={selectProvider}
     onmodel={(m) => (selectedModel = m)}
     oneffort={(e) => (selectedEffort = e)}
-    onmode={(m) => (interactionMode = m)}
+    onmode={modeSupported ? (m) => (interactionMode = m) : undefined}
     onclose={() => (pickerOpen = false)}
   />
 {/if}

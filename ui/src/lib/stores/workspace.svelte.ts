@@ -14,6 +14,7 @@ import { layout, type Axis } from './splitLayout.svelte';
 import { MAX_PANES, LS_PANES } from './splitLayout';
 import { isEmbedded } from '../desktop';
 import { SCRATCH_WORKSPACE_ID, sessionVerbsApply } from './sessionScope';
+import { runtimeFlagged } from './runtimeAttention.svelte';
 import { applyStatusPatches, canDropExited, patchSessionIn, staleStatusIds, type StatusPatch } from './sessionPatch';
 import { bucketSessions, idChunks, isForeground, isShownKind, isThreadSurfaceSession, shownListQuery } from './sessionBuckets';
 import { whenIdle } from '../lazy-component.svelte';
@@ -409,7 +410,7 @@ class WorkspaceStore {
     this.buckets.foregroundActive.filter((s) => this.needsYou[s.id] === true).length,
   );
   threadsWorkingCount: number = $derived(this.buckets.threads.filter((s) => this.statusMap[s.id] === 'working').length);
-  threadsNeedsYouCount: number = $derived(this.buckets.threads.filter((s) => this.needsYou[s.id] === true).length);
+  threadsNeedsYouCount: number = $derived(this.buckets.threads.filter((s) => this.needsYou[s.id] === true).length + runtimeFlagged(this.needsYou));
 
   /** Foreground live sessions (the scope of the badge counts) — exported for
    *  the Home "waiting" box so it doesn't re-filter the whole list. */

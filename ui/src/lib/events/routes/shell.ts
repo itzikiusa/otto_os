@@ -1,6 +1,7 @@
 // Shell-owned stores: imported statically (the sidebar, status bar and session
 // view read them from the first frame), so these routes never lazy-load.
 import { ws } from '../../stores/workspace.svelte';
+import { noteRuntimeWaiting } from '../../stores/runtimeAttention.svelte';
 import { notifications } from '../../stores/notifications.svelte';
 import { activity } from '../../stores/activity.svelte';
 import { transcript } from '../../stores/transcript.svelte';
@@ -42,6 +43,14 @@ export const shellRoutes: EventRoutes = {
   session_archive_changed: toWorkspace,
   session_renamed: toWorkspace,
   session_attention: toWorkspace,
+  // Runtime threads raise / lower "needs you" like a PTY session's prompt.
+  agent_runtime_event: ({ event: e }) => {
+    if (e.type !== 'provider_session.updated') return;
+    const waiting = e.provider_session.status === 'waiting';
+    noteRuntimeWaiting(e.session_id, waiting);
+    if (waiting) ws.markNeedsYou(e.session_id);
+    else if (ws.needsYou[e.session_id]) ws.clearNeedsYou(e.session_id);
+  },
   notice: toWorkspace,
   // The UI-control grant lives in session meta; a removed session drops its prompt.
   session_meta_updated: (ev) => {
