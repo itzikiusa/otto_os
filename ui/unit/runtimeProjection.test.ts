@@ -13,7 +13,7 @@ import {
   workLabel,
   type RuntimeProjection,
 } from '../src/modules/threads/runtime/projection.ts';
-import type { RuntimeEvent, RuntimeEventBody, TurnItem } from '../src/lib/api/types';
+import type { RuntimeEvent, RuntimeEventBody, RuntimeRequest, TurnItem } from '../src/lib/api/types';
 
 const TS = '2026-11-04T10:00:00Z';
 const ev = (sequence: number, body: RuntimeEventBody): RuntimeEvent => ({ session_id: 's1', sequence, ts: TS, ...body }) as RuntimeEvent;
@@ -105,8 +105,7 @@ test('a snapshot replaces the projection unless it is older than what is applied
 });
 
 test('approval lifecycle: pending pairs with its item, resolves away, not_resumable cannot answer', () => {
-  const request = (status: 'pending' | 'resolved', live = true) =>
-    ({
+  const request = (status: 'pending' | 'resolved', live = true): RuntimeRequest => ({
       id: 'r1',
       turn_id: 't1',
       kind: 'command',
@@ -114,7 +113,7 @@ test('approval lifecycle: pending pairs with its item, resolves away, not_resuma
       response_capability: live ? { type: 'live' } : { type: 'not_resumable', reason: 'daemon restarted' },
       created_at: TS,
       resolved_at: null,
-    }) as const;
+    });
   const item: TurnItem = {
     ...base,
     id: 'ap1',

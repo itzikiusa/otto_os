@@ -208,7 +208,7 @@ export function workLabel(item: TurnItem): string {
     case 'reasoning':
       return title ?? 'Thinking';
     case 'command_execution':
-      return title ?? item.input;
+      return item.input || title || 'Ran command';
     case 'file_change':
       return title ?? `Changed ${item.file_name}`;
     case 'web_search':

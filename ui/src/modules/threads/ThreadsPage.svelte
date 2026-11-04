@@ -58,7 +58,9 @@
   // Structured runtime threads: their rows, and live events for open ones.
   onMount(() => runtimeThreads.mount());
   $effect(() => {
-    for (const wid of new Set([ws.currentId ?? SCRATCH_WORKSPACE_ID, SCRATCH_WORKSPACE_ID])) {
+    // Scratch serves no runtime sessions (its routes are the PTY family only).
+    const wid = ws.currentId;
+    if (wid && wid !== SCRATCH_WORKSPACE_ID) {
       untrack(() => runtimeThreads.load(wid)).catch((e: unknown) => toastError('Couldn’t load threads', e));
     }
   });
@@ -143,7 +145,7 @@
     const knownThreads = new Set(liveThreadIds);
     const anyLoaded = ws.sessions.some((s) => !s.archived);
     if ((!ws.listSettled || ws.sessionsLoading) && !anyLoaded) return;
-    if (!runtimeThreads.loaded[ws.currentId ?? SCRATCH_WORKSPACE_ID]) return;
+    if (ws.currentId && ws.currentId !== SCRATCH_WORKSPACE_ID && !runtimeThreads.loaded[ws.currentId]) return;
     untrack(() => {
       const valid = threads.paneIds.filter((id) => knownThreads.has(id));
       if (valid.length !== threads.paneIds.length) {

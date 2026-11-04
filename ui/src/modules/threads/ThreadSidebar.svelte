@@ -8,7 +8,7 @@
   import { confirmer } from '../../lib/confirm.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { git } from '../../lib/stores/git.svelte';
-  import { ws } from '../../lib/stores/workspace.svelte';
+  import { SCRATCH_WORKSPACE_ID, ws } from '../../lib/stores/workspace.svelte';
   import { toastError } from '../../lib/toastError';
   import type { Session } from '../../lib/api/types';
   import ThreadSidebarRow from './ThreadSidebarRow.svelte';
@@ -191,7 +191,7 @@
     try {
       threadRepos.reset();
       await ws.refreshSessions();
-      if (ws.currentId) await runtimeThreads.load(ws.currentId);
+      if (ws.currentId && ws.currentId !== SCRATCH_WORKSPACE_ID) await runtimeThreads.load(ws.currentId);
       if (ws.currentId) await git.loadRepos(ws.currentId, true);
       for (const id of Object.keys(git.statusById)) void git.refreshStatus(id);
     } catch (e) {

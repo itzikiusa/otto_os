@@ -10,7 +10,7 @@
   // ComposerPrimaryActions.tsx (send ↔ stop), QueuedRunsControl.tsx (one
   // queued follow-up), ThreadStatusLine.tsx ("Working for 12s"),
   // ThreadErrorBanner.tsx, and apps/web/src/session-logic.ts (`derivePhase`).
-  import { tick } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import { announceShown } from '../../../lib/announce.svelte';
   import EmptyState from '../../../lib/components/EmptyState.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
@@ -32,7 +32,10 @@
   }
   let { sessionId, focused }: Props = $props();
 
-  $effect(() => runtimeThreads.open(sessionId));
+  $effect(() => {
+    const id = sessionId;
+    return untrack(() => runtimeThreads.open(id));
+  });
 
   const session = $derived(runtimeThreads.get(sessionId));
   const p = $derived(runtimeThreads.projections[sessionId] ?? null);

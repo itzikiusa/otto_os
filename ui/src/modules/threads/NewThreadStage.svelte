@@ -61,8 +61,6 @@
   });
 
   let provider = $state('');
-  // Runtime threads always ask before acting (no access-mode switch).
-  const modeSupported = $derived(supportsInteractionMode(provider) && !isRuntimeProvider(provider));
   let selectedModel = $state<string | null>(null);
   let selectedEffort = $state<EffortLevel | null>(null);
   let interactionMode = $state<InteractionMode>('full');
@@ -81,6 +79,12 @@
 
   const homePath = $derived(ws.scratch?.root_path ?? '~');
   const scratchActive = $derived(useScratch || ws.current === null);
+  const targetWs = $derived(scratchActive ? SCRATCH_WORKSPACE_ID : (ws.currentId ?? SCRATCH_WORKSPACE_ID));
+  // Claude / Codex / Gemini / Grok threads run on the structured runtime (not
+  // served in Scratch, which keeps PTY threads). They always ask before
+  // acting and take no effort level.
+  const runtime = $derived(isRuntimeProvider(provider) && targetWs !== SCRATCH_WORKSPACE_ID);
+  const modeSupported = $derived(supportsInteractionMode(provider) && !runtime);
   const cleanCwd = $derived(cwd.trim().replace(/\/+$/, ''));
   const onWorktree = $derived(worktree !== null && worktree.path.replace(/\/+$/, '') === cleanCwd);
   const repo = $derived(onWorktree ? worktree!.repo : threadRepos.repoFor(cleanCwd, scratchActive ? null : ws.currentId));
@@ -91,7 +95,7 @@
   const agentLabel = $derived.by(() => {
     const meta = auth.meta;
     const model = selectedModel ? formatModelLabel(provider, selectedModel, meta) : harnessLabel(provider);
-    return supportsEffortSelection(provider) && selectedEffort ? `${model} · ${formatEffortShort(selectedEffort)}` : model;
+    return supportsEffortSelection(provider) && !runtime && selectedEffort ? `${model} · ${formatEffortShort(selectedEffort)}` : model;
   });
 
   $effect(() => {
@@ -273,14 +277,12 @@
       };
       const title = firstMsg ? firstMsg.replace(/\s+/g, ' ').slice(0, 56) : `${harnessLabel(provider)} thread`;
       const opts = { scratch: scratchActive && ws.currentId !== SCRATCH_WORKSPACE_ID };
-      const created = isRuntimeProvider(provider)
-        ? await runtimeThreads.start(scratchActive ? SCRATCH_WORKSPACE_ID : (ws.currentId ?? SCRATCH_WORKSPACE_ID), {
-            provider, title, cwd: dir || null, model: selectedModel, prompt: firstMsg,
-          })
+      const created = runtime && isRuntimeProvider(provider)
+        ? await runtimeThreads.start(targetWs, { provider, title, cwd: dir || null, model: selectedModel, prompt: firstMsg })
         : firstMsg
           ? await ws.openSessionWithPrompt({ provider, title, cwd: dir || null, prompt: firstMsg, meta }, opts)
           : await ws.createSessionQuiet({ kind: 'agent', provider, title, cwd: dir || null, meta }, opts);
-      if (firstMsg && !isRuntimeProvider(provider)) transcript.recordOptimisticPrompt(created.id, firstMsg);
+      if (firstMsg && !runtime) transcript.recordOptimisticPrompt(created.id, firstMsg);
       prompt = '';
       threads.draftCwd = null;
       threads.rememberProject(dir || null);
@@ -573,8 +575,8 @@
     mode={interactionMode}
     onprovider={selectProvider}
     onmodel={(m) => (selectedModel = m)}
-    oneffort={(e) => (selectedEffort = e)}
-    onmode={(m) => (interactionMode = m)}
+    oneffort={runtime ? undefined : (e) => (selectedEffort = e)}
+    onmode={modeSupported ? (m) => (interactionMode = m) : undefined}
     onclose={() => (pickerOpen = false)}
   />
 {/if}

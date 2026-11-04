@@ -35,8 +35,9 @@
     mode: InteractionMode;
     onprovider?: (p: string) => void;
     onmodel: (m: string | null) => void;
-    oneffort: (e: EffortLevel | null) => void;
-    onmode: (m: InteractionMode) => void;
+    /** Omitted: the target takes no effort / access mode (no control shown). */
+    oneffort?: (e: EffortLevel | null) => void;
+    onmode?: (m: InteractionMode) => void;
     onclose: () => void;
   }
   let {
@@ -100,7 +101,7 @@
     return q ? list.filter(({ m }) => `${m.label} ${m.id}`.toLowerCase().includes(q)) : list;
   });
   const shown = $derived(showAll || query.trim() ? rows : rows.slice(0, PAGE));
-  const efforts = $derived(supportsEffortSelection(provider) ? effortsForModel(provider, current, meta) : []);
+  const efforts = $derived(oneffort && supportsEffortSelection(provider) ? effortsForModel(provider, current, meta) : []);
 
   function pickable(p: string): boolean {
     return providerReadiness(p).available && (!lockProvider || p === provider);
@@ -286,12 +287,12 @@
       {#if efforts.length > 0}
         <section class="mp-effort" aria-label="Reasoning" data-testid="picker-effort">
           <h3 class="mp-head">Reasoning</h3>
-          <button type="button" class="mp-row" class:cur={effort === null} onclick={() => oneffort(null)}>
+          <button type="button" class="mp-row" class:cur={effort === null} onclick={() => oneffort?.(null)}>
             <span class="mp-check">{#if effort === null}<Icon name="check" size={12} />{/if}</span>
             <span class="mp-name">Default</span>
           </button>
           {#each efforts as lvl (lvl)}
-            <button type="button" class="mp-row" class:cur={effort === lvl} onclick={() => oneffort(lvl)}>
+            <button type="button" class="mp-row" class:cur={effort === lvl} onclick={() => oneffort?.(lvl)}>
               <span class="mp-check">{#if effort === lvl}<Icon name="check" size={12} />{/if}</span>
               <span class="mp-name">{formatEffortLabel(lvl)}</span>
             </button>
@@ -300,12 +301,12 @@
       {/if}
     </div>
 
-    {#if supportsInteractionMode(provider)}
+    {#if onmode && supportsInteractionMode(provider)}
       <footer class="mp-foot">
         <span class="mp-foot-label">Access</span>
         <div class="segmented" role="group" aria-label="Access mode" data-testid="picker-mode-pop">
           {#each INTERACTION_MODES as m (m.id)}
-            <button type="button" class:active={mode === m.id} aria-pressed={mode === m.id} title={m.hint} onclick={() => onmode(m.id)}>
+            <button type="button" class:active={mode === m.id} aria-pressed={mode === m.id} title={m.hint} onclick={() => onmode?.(m.id)}>
               {m.shortLabel}
             </button>
           {/each}
