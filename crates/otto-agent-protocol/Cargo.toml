@@ -32,9 +32,9 @@ libc = "0.2.191"
 sqlx = { workspace = true }
 tempfile = { workspace = true }
 
-# Test doubles: an ACP agent and a Codex app-server over stdio. Integration
-# tests reach them via `CARGO_BIN_EXE_otto-fake-agent` /
-# `CARGO_BIN_EXE_otto-fake-codex`.
+# Test doubles: an ACP agent, a Codex app-server and agy's print-mode
+# stream-json over stdio. Integration tests reach them via
+# `CARGO_BIN_EXE_otto-fake-{agent,codex,agy}`.
 [[bin]]
 name = "otto-fake-agent"
 path = "src/bin/otto-fake-agent.rs"
@@ -44,5 +44,11 @@ doc = false
 [[bin]]
 name = "otto-fake-codex"
 path = "src/bin/otto-fake-codex.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "otto-fake-agy"
+path = "src/bin/otto-fake-agy.rs"
 test = false
 doc = false

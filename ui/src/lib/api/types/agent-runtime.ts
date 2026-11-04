@@ -12,7 +12,7 @@
 
 import type { Id } from './core';
 
-export type RuntimeProvider = 'claude' | 'codex' | 'gemini' | 'grok';
+export type RuntimeProvider = 'claude' | 'codex' | 'gemini' | 'grok' | 'agy';
 
 export type ProviderSessionStatus = 'starting' | 'ready' | 'running' | 'waiting' | 'stopped' | 'error';
 

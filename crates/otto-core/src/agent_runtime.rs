@@ -31,7 +31,8 @@ use crate::Id;
 /// The agent CLIs the structured runtime can drive (distinct from the PTY
 /// provider registry): `claude` over the Agent SDK's stream-json control
 /// protocol, `codex` over `codex app-server`, `gemini` (`gemini --acp`) and
-/// `grok` (`grok agent stdio`) over ACP.
+/// `grok` (`grok agent stdio`) over ACP, `agy` (Antigravity) over its
+/// print-mode stream-json.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeProvider {
@@ -39,6 +40,7 @@ pub enum RuntimeProvider {
     Codex,
     Gemini,
     Grok,
+    Agy,
 }
 
 impl RuntimeProvider {
@@ -48,6 +50,7 @@ impl RuntimeProvider {
             Self::Codex => "codex",
             Self::Gemini => "gemini",
             Self::Grok => "grok",
+            Self::Agy => "agy",
         }
     }
 
@@ -57,6 +60,7 @@ impl RuntimeProvider {
             "codex" => Some(Self::Codex),
             "gemini" => Some(Self::Gemini),
             "grok" => Some(Self::Grok),
+            "agy" => Some(Self::Agy),
             _ => None,
         }
     }

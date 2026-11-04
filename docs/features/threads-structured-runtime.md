@@ -1,8 +1,8 @@
 # Threads — structured agent runtime (how T3 Code does it → how Otto mirrors it)
 
 Status: the daemon side is done: the event model, contracts, runtime, and
-drivers for Claude, Codex, Gemini and Grok. Tests use a fake ACP agent and a
-fake `codex app-server`. The Threads UI still renders PTY sessions; moving it
+drivers for Claude, Codex, Gemini, Grok and Antigravity (`agy`). Tests use a
+fake ACP agent, a fake `codex app-server` and a fake `agy`. The Threads UI still renders PTY sessions; moving it
 onto `/runtime-sessions` is the next step (§9). PTY sessions are unchanged.
 
 **Attribution.** Ported from [T3 Code](https://github.com/pingdotgg/t3code)
@@ -31,9 +31,11 @@ Otto ports that design rather than inventing its own.
 | **Codex** | `codex app-server` (`["app-server", …launchArgs]`, `apps/server/src/provider/codexLaunchArgs.ts:12-15`). The binary is the `binaryPath` setting (default `codex`, `CodexAdapterV2.ts:1561`) or an optional managed install of 0.156.1 (`apps/server/src/provider/CodexInstallation.ts:61-98`). Env: `CODEX_HOME` (a shadow home that overlays `auth.json`, `Drivers/CodexHomeLayout.ts:11-77`) and `CODEX_INTERNAL_ORIGINATOR_OVERRIDE` (`CodexProvider.ts:452-457`). Typed client: `packages/effect-codex-app-server`, generated from `openai/codex` `687a119f` (`scripts/generate.ts:16-19`) | `codex [context flags] app-server` (`src/codex.rs`). The context hook adds `--add-dir=…`, `-c developer_instructions=…` (top-level options `app-server` rejects after it) and `CODEX_HOME` (the Otto context bundle's shadow home), exactly as for a PTY codex session. No originator override. Wire shapes were checked against `codex app-server generate-json-schema` of the installed **0.166.0** |
 | **Gemini** | No first-party adapter. It is the ACP Registry entry `gemini` (npm `@google/gemini-cli`, `AcpRegistrySupport.test.ts:1693-1720`). The registry is fetched from `cdn.agentclientprotocol.com` (`AcpRegistrySupport.ts:51`), npm-installed into T3's own prefix (`:1252-1294`), and launched with the registry's argv/env (`:1877-1917`). The exact flag comes from the live registry JSON and is not in the repo | `gemini --acp` (the installed CLI's own flag) plus `--model m`, into the ACP driver (`src/acp.rs`, `AcpDriver::gemini`) |
 | **Grok** | `grok` from `binaryPath` (`packages/provider-grok/src/server/acpSupport.ts:67`). Argv per runtime mode (`:47-58`): `agent stdio`; `--permission-mode auto agent stdio`; `agent --always-approve stdio`; for approval-required, `--permission-mode default agent stdio`. Env `GROK_OAUTH2_REFERRER=t3code` (`:66-74`). `_meta` `{clientType:"extension"}` on initialize and `{cancelTrigger:"ctrl_c"}` on cancel (`:98-101`). Auth method `xai.api_key` when `XAI_API_KEY` is set, else `cached_token` (`:21-25`, `:77-81`) | `grok --permission-mode default [-m model] [--rules=<context>] agent stdio` (`AcpDriver::grok`). The context flags must come before `agent`: the subcommand rejects a trailing `--rules` (verified against grok 1.0.70). Same `_meta` and auth preference. Otto omits the T3-specific referrer and never launches the `auto` / `--always-approve` variants |
+| **Antigravity** | Only as the ACP Registry agent `antigravity-acp`, an npm adapter (`packages/client-runtime/src/providerClients.ts:39-43`) | **agy's own print-mode stream-json** (`src/agy.rs`): `agy --print= --input-format stream-json --output-format stream-json [--model m] [--conversation <id>]`, plus the context hook's `--add-dir=`. `--print` takes a value; the empty `=` stops it eating the next flag. No npm adapter. Never `--dangerously-skip-permissions` |
 
 Installed CLIs it was built against: claude 2.1.318, codex-cli 0.166.0,
-gemini (with `--acp`), grok 1.0.70 (`agent stdio`, ACP protocol v1).
+gemini (with `--acp`), grok 1.0.70 (`agent stdio`, ACP protocol v1), agy
+1.4.12.
 
 **Claude, ACP or SDK?** T3 Code's own Claude provider is the SDK path. The
 ACP adapter (`@agentclientprotocol/claude-agent-acp`) is only a Registry
@@ -54,6 +56,7 @@ count that was interrupted after the first delta, then `close`.
 | Claude (`haiku`) | all three turns as expected; the Bash approval arrived and was answered; interrupt ended the turn `interrupted` in ~0.1 s | 1.9–2.9 s (cold start included) |
 | Codex | the same. The first run failed: the context hook's `--add-dir=` must precede `app-server`, so the subcommand is now a `tail_arg` | 1.8–5.3 s |
 | Grok | text, reasoning, the tool and the interrupt all worked, but **no approval was asked**: with the user's own `~/.grok/config.toml` `[ui] permission_mode = "always-approve"`, `grok agent stdio` ignores `--permission-mode default` and `_meta.yoloMode: false`. It follows the user's grok config, as a PTY grok session does (T3 Code passes the same argv) | 2.1–4.8 s |
+| Antigravity (default model) | ok, interrupt (SIGINT → `interrupted` in ~0.05 s, then agy exits and the session goes `dormant`) and resume (the respawn with `--conversation` remembered the earlier turn) all worked. **No approval can be asked**: headless agy denied the shell command (`denied_actions`), which shows as a `system_notice`; nothing ran. The first run also showed that `denied_actions` is cumulative per process (fixed) | 6.9–31 s; agy's backend varied a lot between runs (a direct probe once took 70 s to `init`) |
 | Gemini | not run: the account is refused at `session/new` (`-32000`, "This client is no longer supported for Gemini Code Assist for individuals … migrate to Antigravity"). Each prompt fails with that message, and the next prompt respawns the CLI | — |
 
 ## 2. Session lifecycle
@@ -220,6 +223,42 @@ plus `adapter.ts`.
    `session/cancel` is sent (`AcpSessionRuntime.ts:2366-2405`;
    `adapter.ts:5754-5790`).
 
+### Antigravity (`agy` print-mode stream-json; `agy.rs`)
+
+Probed against agy 1.4.12 in a scratch repo.
+
+1. **Spawn.** The argv above. agy reads stdin at once, so the session is
+   ready on spawn; `init {conversation_id, init:{cwd, tools,
+   permission_mode}}` arrives after the first prompt, and `conversation_id`
+   is the resume key.
+2. **Prompt.** `{"event":"user","message":{"content":"<text>"}}`, one per
+   line and one turn each. agy ignores any other input event (`warning:
+   ignoring unsupported stream input message event`).
+3. **Stream.** `step_update {step_index, state: ACTIVE|DONE, step_type}`:
+
+   | `step_type` | Result |
+   |---|---|
+   | `user_input` | ignored (Otto has the user item) |
+   | `agent_response` | one `assistant_message` per step, grown by `text_delta`; the DONE step carries that model call's `usage` |
+   | `tool` | `tool_info {name, parameters, output?}`: `run_command` → `command_execution` (`parameters.CommandLine`), anything else → `dynamic_tool` |
+
+   No reasoning text is streamed (only `thinking_tokens`).
+4. **Turn end.** `result {status, response, error?, finished_reason?,
+   usage, denied_actions?}`: `SUCCESS` → completed, `finished_reason:
+   "interrupted"` → interrupted, any other `ERROR` → failed with `error`.
+   `result.usage` and `denied_actions` are **cumulative** over the process,
+   so the turn's usage is the sum of its DONE steps (input = `input_tokens` +
+   `cache_read_tokens`) and only new denials are reported.
+5. **Permissions.** Headless agy cannot ask. A tool that needs approval is
+   **denied** and listed in `denied_actions`; Otto shows a `system_notice`
+   naming it. Only the user's own agy settings (`permissions.allow` in
+   `~/.gemini/antigravity-cli/settings.json`) and `--mode` apply, as in a PTY
+   agy session. This is the same posture as Grok, but agy fails closed.
+6. **Interrupt.** SIGINT to the process group: agy emits the interrupted
+   `result` and exits 1, so the session goes `dormant` and the next prompt
+   respawns with `--conversation`. Closing stdin does **not** stop a turn:
+   agy finishes it and then exits 0.
+
 ### What Otto does NOT port: policy auto-approval
 
 T3 Code auto-answers by runtime mode. Reads are always allowed and
@@ -327,6 +366,7 @@ streaming upsert of an item to one per `RuntimeConfig::stream_coalesce`
   | Claude | session id | `--resume` |
   | Codex | thread id | `thread/resume` |
   | ACP | session id | `session/load` |
+  | Antigravity | conversation id | `--conversation` |
 
   T3 Code persists the same `nativeThreadRef` (`adapter.ts:861-903`,
   `orchestrationV2.ts:145-151`).
@@ -394,7 +434,7 @@ private helpers as `SessionManager::create`, in the same order:
 3. `trust::ensure_trusted_async` (claude, codex and grok pre-trust);
 4. the context hook (`--add-dir` / `--append-system-prompt-file` /
    `--settings` for claude, `developer_instructions` + `CODEX_HOME` for
-   codex, `--rules` for grok);
+   codex, `--rules` for grok, `--add-dir` for agy);
 5. a driver's `tail_args` (grok's `agent stdio`);
 6. `apply_sandbox`, **last**, over the fully built argv: the
    `process_sandbox` Seatbelt profile, same `sandbox_decision`.
@@ -413,9 +453,10 @@ runtime request **that only a person can answer**. Access rules:
 - reads need workspace `viewer` + owner-or-admin;
 - WS delivery is session-family (owner, workspace admin, root).
 
-None of the four drivers passes a skip-permissions flag. Claude:
+None of the five drivers passes a skip-permissions flag. Claude:
 `--permission-mode default`. Codex: `untrusted`. Grok:
-`--permission-mode default`. Gemini: its default.
+`--permission-mode default`. Gemini: its default. Antigravity: its default,
+in which headless agy denies what it would have asked about.
 
 ## 8. Code map
 
@@ -423,10 +464,10 @@ None of the four drivers passes a skip-permissions flag. Claude:
 |---|---|
 | `crates/otto-core/src/agent_runtime.rs` | event model + REST DTOs |
 | `crates/otto-agent-protocol/src/driver.rs` | `StructuredDriver` contract (sans-IO) |
-| `crates/otto-agent-protocol/src/{claude,codex,acp}.rs` | the drivers |
+| `crates/otto-agent-protocol/src/{claude,codex,acp,agy}.rs` | the drivers |
 | `crates/otto-agent-protocol/src/runtime.rs` | processes, turns, sequencing, coalescing, replay, persistence, recovery |
 | `crates/otto-agent-protocol/src/{host,process,ring,http}.rs` | safety host, child I/O, replay ring, `/runtime-sessions` router |
-| `crates/otto-agent-protocol/src/bin/otto-fake-{agent,codex}.rs` | test doubles (ACP agent, `codex app-server`) |
+| `crates/otto-agent-protocol/src/bin/otto-fake-{agent,codex,agy}.rs` | test doubles (ACP agent, `codex app-server`, agy stream-json) |
 | `crates/otto-state/src/agent_runtime.rs`, migration `0197_agent_runtime.sql` | persistence |
 | `ui/src/lib/api/types/agent-runtime.ts` | TS mirror |
 

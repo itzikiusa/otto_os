@@ -15,9 +15,10 @@
 //! the design doc for the file-by-file mapping. Drivers: [`claude`] (the
 //! Agent SDK's stream-json control protocol against `claude`), [`codex`]
 //! (`codex app-server`) and [`acp`] (Gemini `gemini --acp`, Grok `grok …
-//! agent stdio`).
+//! agent stdio`) and [`agy`] (Antigravity's print-mode stream-json).
 
 pub mod acp;
+pub mod agy;
 pub mod claude;
 pub mod codex;
 pub mod driver;
@@ -55,7 +56,8 @@ pub fn api_router<S: RuntimeCtx>() -> Router<S> {
 
 /// The production driver set — the providers T3 Code drives over a
 /// structured protocol: Claude (Agent SDK transport), Codex (app-server),
-/// Gemini and Grok (ACP). A missing CLI fails the spawn, not the create.
+/// Gemini and Grok (ACP) — plus Antigravity (`agy`'s own stream-json,
+/// where T3 Code needs an npm ACP adapter). A missing CLI fails the spawn, not the create.
 pub fn default_drivers() -> Arc<dyn DriverFactory> {
     use otto_core::agent_runtime::RuntimeProvider;
     Arc::new(
@@ -65,6 +67,7 @@ pub fn default_drivers() -> Arc<dyn DriverFactory> {
                 RuntimeProvider::Codex => Box::new(codex::CodexDriver::with_program("codex")),
                 RuntimeProvider::Gemini => Box::new(acp::AcpDriver::gemini()),
                 RuntimeProvider::Grok => Box::new(acp::AcpDriver::grok()),
+                RuntimeProvider::Agy => Box::new(agy::AgyDriver::with_program("agy")),
             })
         },
     )

@@ -769,7 +769,11 @@ see the design doc's provider table): `claude` — the Agent SDK's stream-json
 control protocol against the `claude` CLI (`--permission-mode default`);
 `codex` — `codex app-server` (`approvalPolicy: untrusted`); `gemini` — ACP
 via `gemini --acp`; `grok` — ACP via `grok --permission-mode default agent
-stdio`. Every tool approval reaches a person; no auto-approval mode exists.
+stdio`; `agy` — Antigravity's print-mode stream-json (`agy --print=
+--input-format stream-json --output-format stream-json`). Every tool approval
+reaches a person; no auto-approval mode exists. Headless `agy` cannot ask: a
+tool it needs approval for is denied (a `system_notice` item names it) unless
+the user's own agy `permissions.allow` rules cover it.
 Streaming upserts of one item are coalesced to at most one per **50 ms**
 (the latest text always follows; nothing is dropped).
 
@@ -780,12 +784,12 @@ and owner-or-admin (root passes); listing returns the caller's own sessions
 credential** — an agent session's, MCP or share credential gets **403**; the
 request answer is also an `Admin`-class approval gate (above).
 
-`RuntimeSession`: `{id, workspace_id, provider: "claude"|"codex"|"gemini"|"grok",
+`RuntimeSession`: `{id, workspace_id, provider: "claude"|"codex"|"gemini"|"grok"|"agy",
 title, cwd, model?, native_thread_id?, status, created_by, created_at,
 last_active_at, last_sequence}`; `status` ∈ `starting | idle | working |
 awaiting_permission | dormant | closed` (`dormant` = no process; the next
 prompt respawns it and resumes `native_thread_id` — Claude `--resume`, Codex
-`thread/resume`, ACP `session/load`; a provider that cannot resume it starts
+`thread/resume`, ACP `session/load`, agy `--conversation`; a provider that cannot resume it starts
 a fresh conversation).
 
 | Method & path | Auth | Request | Response |

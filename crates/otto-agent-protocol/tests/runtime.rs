@@ -1,13 +1,14 @@
 //! End to end: the real `AgentRuntime` + the real drivers over stdio — the
 //! ACP driver against `otto-fake-agent`, the Codex driver against
-//! `otto-fake-codex` (a fake `codex app-server`) — with a real (in-memory)
-//! SQLite store.
+//! `otto-fake-codex` (a fake `codex app-server`), the agy driver against
+//! `otto-fake-agy` — with a real (in-memory) SQLite store.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use chrono::Utc;
 use otto_agent_protocol::acp::AcpDriver;
+use otto_agent_protocol::agy::AgyDriver;
 use otto_agent_protocol::codex::CodexDriver;
 use otto_agent_protocol::ring::RingLimits;
 use otto_agent_protocol::{
@@ -25,6 +26,7 @@ use otto_state::{AgentRuntimeRepo, DbPool};
 
 const FAKE: &str = env!("CARGO_BIN_EXE_otto-fake-agent");
 const FAKE_CODEX: &str = env!("CARGO_BIN_EXE_otto-fake-codex");
+const FAKE_AGY: &str = env!("CARGO_BIN_EXE_otto-fake-agy");
 const WAIT: Duration = Duration::from_secs(15);
 
 struct TestHost {
@@ -130,6 +132,7 @@ fn drivers() -> Arc<dyn DriverFactory> {
     Arc::new(|p: RuntimeProvider| -> Option<Box<dyn StructuredDriver>> {
         Some(match p {
             RuntimeProvider::Codex => Box::new(CodexDriver::with_program(FAKE_CODEX)),
+            RuntimeProvider::Agy => Box::new(AgyDriver::with_program(FAKE_AGY)),
             // A signed-out ACP agent.
             RuntimeProvider::Grok => {
                 Box::new(AcpDriver::new(p, FAKE, vec!["--refuse-session".into()]))
@@ -622,6 +625,70 @@ async fn snapshot_past_replay_limits_and_recovery_after_a_restart() {
     host2.wait(is_terminal).await;
     assert!(host2.all()[0].sequence > snapshot_sequence);
     rt2.close(&s.id).await.unwrap();
+}
+
+// ---- Antigravity (fake agy) ------------------------------------------
+
+#[tokio::test]
+async fn agy_streams_reports_denials_and_resumes_after_an_interrupt() {
+    let dir = tempfile::tempdir().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(dir.path().to_str().unwrap(), false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create_as(&rt, dir.path().to_str().unwrap(), RuntimeProvider::Agy).await;
+
+    rt.prompt(&s.id, "hello").await.unwrap();
+    let fin = host.wait(is_terminal).await;
+    assert_eq!(terminal(&fin), Some(TurnTerminalStatus::Completed));
+    assert!(host.items().iter().any(|i| matches!(&i.kind,
+        TurnItemKind::AssistantMessage { text, streaming: false, .. } if text == "echo: hello")));
+    assert!(host.all().iter().any(|e| matches!(&e.body,
+        RuntimeEventBody::ProviderTurnUpdated { provider_turn }
+            if provider_turn.turn_token_usage.as_ref().is_some_and(|u| u.input_tokens == 5))));
+    let native = rt.get(&s.id).await.unwrap().native_thread_id.unwrap();
+    assert!(native.starts_with("fake-conv-"), "{native}");
+
+    // headless agy denies what needs approval: the tool + a notice, no request
+    rt.prompt(&s.id, "deny").await.unwrap();
+    let fin = host.wait_n(is_terminal, 2).await;
+    assert_eq!(terminal(&fin), Some(TurnTerminalStatus::Completed));
+    let items = host.items();
+    assert!(items.iter().any(|i| matches!(&i.kind,
+        TurnItemKind::CommandExecution { input, .. } if input == "echo hi > x.txt")));
+    assert!(items.iter().any(|i| matches!(&i.kind,
+        TurnItemKind::SystemNotice { message } if message.contains("RunCommand"))));
+    assert!(!host.all().iter().any(is_type("runtime_request.updated")));
+
+    rt.prompt(&s.id, "fail").await.unwrap();
+    let fin = host.wait_n(is_terminal, 3).await;
+    assert_eq!(terminal(&fin), Some(TurnTerminalStatus::Failed));
+
+    // SIGINT ends the turn interrupted and agy exits; the next prompt
+    // respawns it on the same conversation.
+    rt.prompt(&s.id, "hang").await.unwrap();
+    host.wait(|e| {
+        matches!(&e.body, RuntimeEventBody::TurnItemUpdated { turn_item }
+        if matches!(&turn_item.kind, TurnItemKind::AssistantMessage { text, .. } if text == "1\n"))
+    })
+    .await;
+    assert!(rt.interrupt(&s.id).await.unwrap());
+    let fin = host.wait_n(is_terminal, 4).await;
+    assert_eq!(terminal(&fin), Some(TurnTerminalStatus::Interrupted));
+    host.wait(|e| {
+        matches!(&e.body, RuntimeEventBody::ProviderSessionUpdated { provider_session }
+        if provider_session.status == ProviderSessionStatus::Stopped)
+    })
+    .await;
+    rt.prompt(&s.id, "again").await.unwrap();
+    let fin = host.wait_n(is_terminal, 5).await;
+    assert_eq!(terminal(&fin), Some(TurnTerminalStatus::Completed));
+    let respawn = host.prepared.lock().unwrap()[1].clone();
+    assert!(respawn
+        .args
+        .windows(2)
+        .any(|w| w == ["--conversation", native.as_str()]));
+    assert_eq!(rt.get(&s.id).await.unwrap().native_thread_id, Some(native));
+    rt.close(&s.id).await.unwrap();
 }
 
 // ---- Codex app-server (fake) ------------------------------------------
