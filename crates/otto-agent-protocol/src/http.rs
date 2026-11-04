@@ -7,7 +7,12 @@
 //! * every write requires a PERSON's credential — an agent session's token,
 //!   an MCP or share credential may not open sessions, drive them, or answer
 //!   permission prompts (an agent approving its own tool call is exactly
-//!   what the prompt exists to prevent).
+//!   what the prompt exists to prevent);
+//! * the ONE agent-writable surface is linked threads (`/peers`): a thread's
+//!   own agent (its session-bound credential, `managed_session_id == {id}`)
+//!   or its owner may open threads linked to it and message / read them —
+//!   same owner, same workspace, never a wider access mode than the
+//!   opener's, every message visible in the receiving thread.
 
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::StatusCode;
@@ -15,8 +20,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use otto_core::agent_runtime::{
-    CreateRuntimeSessionReq, RuntimePromptReq, RuntimePromptResp, RuntimeReplay,
-    RuntimeRequestRespondReq, RuntimeSession, UpdateRuntimeSessionReq,
+    CreateRuntimeSessionReq, OpenPeerReq, PeerInfo, PeerMessageReq, PeerReply, RuntimePromptReq,
+    RuntimePromptResp, RuntimeReplay, RuntimeRequestRespondReq, RuntimeSession,
+    UpdateRuntimeSessionReq,
 };
 use otto_core::api::Problem;
 use otto_core::auth::{AuthContext, AuthUser};
@@ -84,6 +90,100 @@ pub fn api_router<S: RuntimeCtx>() -> Router<S> {
             "/runtime-sessions/{id}/attachments/{attachment_id}",
             get(attachment::<S>),
         )
+        .route(
+            "/runtime-sessions/{id}/peers",
+            get(peers::<S>).post(open_peer::<S>),
+        )
+        .route(
+            "/runtime-sessions/{id}/peers/{peer}/message",
+            post(message_peer::<S>),
+        )
+        .route(
+            "/runtime-sessions/{id}/peers/{peer}/reply",
+            get(peer_reply::<S>),
+        )
+}
+
+/// A linked-thread call AS thread `id`: its owner (a person) or that
+/// thread's own agent — never another session's credential, an external MCP
+/// or a share token.
+async fn as_thread<S: RuntimeCtx>(
+    ctx: &S,
+    user: &User,
+    auth: &AuthContext,
+    id: &Id,
+) -> ApiResult<RuntimeSession> {
+    let own_agent = auth.managed_session_id.as_ref() == Some(id) && !auth.is_scoped();
+    if !own_agent {
+        require_human(ctx, auth)?;
+    }
+    let s = authorized(ctx, user, id).await?;
+    ctx.roles()
+        .check(user, &s.workspace_id, WorkspaceRole::Editor)
+        .await?;
+    Ok(s)
+}
+
+/// GET /runtime-sessions/{id}/peers — the linked group.
+async fn peers<S: RuntimeCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<Id>,
+) -> ApiResult<Json<Vec<PeerInfo>>> {
+    as_thread(&ctx, &user, &auth, &id).await?;
+    Ok(Json(ctx.agent_runtime().peers(&id).await?))
+}
+
+/// POST /runtime-sessions/{id}/peers — open a linked thread.
+async fn open_peer<S: RuntimeCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<Id>,
+    Json(req): Json<OpenPeerReq>,
+) -> ApiResult<(StatusCode, Json<RuntimeSession>)> {
+    as_thread(&ctx, &user, &auth, &id).await?;
+    let s = ctx.agent_runtime().open_peer(&id, req).await?;
+    Ok((StatusCode::CREATED, Json(s)))
+}
+
+/// POST /runtime-sessions/{id}/peers/{peer}/message — the peer's next turn.
+async fn message_peer<S: RuntimeCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Extension(auth): Extension<AuthContext>,
+    Path((id, peer)): Path<(Id, Id)>,
+    Json(req): Json<PeerMessageReq>,
+) -> ApiResult<(StatusCode, Json<RuntimePromptResp>)> {
+    as_thread(&ctx, &user, &auth, &id).await?;
+    let r = ctx
+        .agent_runtime()
+        .message_peer(&id, &peer, &req.text)
+        .await?;
+    Ok((StatusCode::ACCEPTED, Json(r)))
+}
+
+#[derive(Deserialize)]
+struct ReplyQuery {
+    /// Seconds to wait for a running turn to settle, 0..=25 (default 20).
+    #[serde(default)]
+    wait_secs: Option<u64>,
+}
+
+/// GET /runtime-sessions/{id}/peers/{peer}/reply?wait_secs= — its last reply.
+async fn peer_reply<S: RuntimeCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Extension(auth): Extension<AuthContext>,
+    Path((id, peer)): Path<(Id, Id)>,
+    Query(q): Query<ReplyQuery>,
+) -> ApiResult<Json<PeerReply>> {
+    as_thread(&ctx, &user, &auth, &id).await?;
+    let wait = std::time::Duration::from_secs(q.wait_secs.unwrap_or(20).min(25));
+    Ok(Json(
+        ctx.agent_runtime().peer_reply(&id, &peer, wait).await?,
+    ))
 }
 
 fn require_human<S: RuntimeCtx>(ctx: &S, auth: &AuthContext) -> ApiResult<()> {

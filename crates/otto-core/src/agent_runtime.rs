@@ -41,6 +41,8 @@ pub enum RuntimeProvider {
     Gemini,
     Grok,
     Agy,
+    Opencode,
+    Pi,
 }
 
 impl RuntimeProvider {
@@ -51,6 +53,8 @@ impl RuntimeProvider {
             Self::Gemini => "gemini",
             Self::Grok => "grok",
             Self::Agy => "agy",
+            Self::Opencode => "opencode",
+            Self::Pi => "pi",
         }
     }
 
@@ -61,6 +65,8 @@ impl RuntimeProvider {
             "gemini" => Some(Self::Gemini),
             "grok" => Some(Self::Grok),
             "agy" => Some(Self::Agy),
+            "opencode" => Some(Self::Opencode),
+            "pi" => Some(Self::Pi),
             _ => None,
         }
     }
@@ -560,6 +566,10 @@ pub struct RuntimeSession {
     pub created_at: DateTime<Utc>,
     pub last_active_at: DateTime<Utc>,
     pub last_sequence: u64,
+    /// The ROOT thread of this thread's linked group (set when an agent
+    /// opened it from another thread); `None` for a root / unlinked thread.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<Id>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -573,6 +583,57 @@ pub struct CreateRuntimeSessionReq {
     pub model: Option<String>,
     #[serde(default)]
     pub access_mode: Option<RuntimeAccessMode>,
+}
+
+/// `POST /runtime-sessions/{id}/peers` — an agent (or its owner) opens a
+/// linked thread: same workspace, cwd and access mode as `{id}`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpenPeerReq {
+    pub provider: RuntimeProvider,
+    /// The new thread's opening message (framed with who sent it).
+    #[serde(default)]
+    pub prompt: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    /// Omitted = the provider's default model.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Reasoning effort for the opening turn (`low` … `max`); omitted = the
+    /// model's default.
+    #[serde(default)]
+    pub effort: Option<String>,
+}
+
+/// `POST /runtime-sessions/{id}/peers/{peer}/message`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PeerMessageReq {
+    pub text: String,
+}
+
+/// One member of a linked group, as an agent sees it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PeerInfo {
+    pub id: Id,
+    pub provider: RuntimeProvider,
+    pub title: String,
+    pub status: RuntimeSessionStatus,
+    /// The caller itself.
+    #[serde(default)]
+    pub is_self: bool,
+}
+
+/// `GET /runtime-sessions/{id}/peers/{peer}/reply` — the peer's latest
+/// assistant text (its last turn), after an optional wait for it to settle.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PeerReply {
+    pub peer: PeerInfo,
+    /// True while the peer is still working its turn (the wait timed out).
+    pub busy: bool,
+    /// The last turn's final status (`completed` / `failed` / …), if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_status: Option<String>,
+    /// Its assistant messages, joined.
+    pub text: String,
 }
 
 /// T3 Code's `RuntimeMode` (its `auto` mode is not offered): what the agent

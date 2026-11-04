@@ -949,6 +949,7 @@ mod tests {
 
     fn ctx(resume: Option<&str>) -> LaunchContext {
         LaunchContext {
+            mcp_servers: Vec::new(),
             session_id: "s".into(),
             cwd: "/w".into(),
             model: Some("haiku".into()),
@@ -1225,6 +1226,7 @@ mod tests {
     #[test]
     fn access_modes_map_to_permission_modes_and_switch_live() {
         let at = |access_mode| LaunchContext {
+            mcp_servers: Vec::new(),
             access_mode,
             ..ctx(None)
         };

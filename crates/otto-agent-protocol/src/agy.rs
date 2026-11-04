@@ -296,6 +296,7 @@ mod tests {
 
     fn ctx(resume: Option<&str>) -> LaunchContext {
         LaunchContext {
+            mcp_servers: Vec::new(),
             session_id: "s".into(),
             cwd: "/w".into(),
             model: None,
@@ -452,6 +453,7 @@ mod tests {
         let d = AgyDriver::with_program("agy");
         let at = |access_mode| {
             d.launch(&LaunchContext {
+                mcp_servers: Vec::new(),
                 access_mode,
                 ..ctx(None)
             })

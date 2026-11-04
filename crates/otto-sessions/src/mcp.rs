@@ -1023,6 +1023,38 @@ fn write_grok_doc(dir: &Path, path: &Path, doc: &toml_edit::DocumentMut) -> Resu
 /// UTF-16 save, an I/O error) is propagated exactly like a parse error, so the
 /// reconcile is skipped and logged instead of atomically writing a fresh
 /// document over the user's hand-added servers.
+/// Only the Otto-MANAGED entries of the workspace `.mcp.json` (the
+/// `ottoManagedServers` marker), as a standalone `{"mcpServers": …}` document
+/// for `claude --mcp-config`: a structured (SDK-mode) Claude session gets
+/// exactly what Otto manages for this cwd, deterministically, without
+/// force-loading servers the user hand-added (those keep Claude's own
+/// project-approval flow). `None` when nothing is managed.
+pub fn managed_servers_document(workspace_root: &str) -> Result<Option<String>, String> {
+    let path = mcp_path(workspace_root);
+    let doc = {
+        let lock = cwd_lock(workspace_root);
+        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        read_doc(&path)?
+    };
+    let managed: Vec<&str> = doc
+        .get(MANAGED_KEY)
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let Some(servers) = doc.get("mcpServers").and_then(Value::as_object) else {
+        return Ok(None);
+    };
+    let picked: Map<String, Value> = servers
+        .iter()
+        .filter(|(name, _)| managed.contains(&name.as_str()))
+        .map(|(n, v)| (n.clone(), v.clone()))
+        .collect();
+    if picked.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(json!({ "mcpServers": picked }).to_string()))
+}
+
 fn read_doc(path: &Path) -> Result<Map<String, Value>, String> {
     match read_launcher(path)? {
         Some(s) => serde_json::from_str(&s).map_err(|e| format!("parse {}: {e}", path.display())),

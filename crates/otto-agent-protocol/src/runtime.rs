@@ -23,11 +23,11 @@ use chrono::Utc;
 use dashmap::DashMap;
 use otto_core::agent_runtime::{
     ApprovalDecision, Attachment, AttachmentKind, CancelReason, CreateRuntimeSessionReq,
-    PlanArtifact, ProviderFailure, ProviderSession, ProviderSessionStatus, ProviderThread,
-    ProviderTurn, ProviderTurnStatus, ResponseCapability, RuntimeEvent, RuntimeEventBody,
-    RuntimePromptReq, RuntimePromptResp, RuntimeReplay, RuntimeRequest, RuntimeRequestStatus,
-    RuntimeSession, RuntimeSessionStatus, RuntimeSnapshot, TurnItem, TurnItemKind, TurnItemStatus,
-    TurnTerminalStatus,
+    OpenPeerReq, PeerInfo, PeerReply, PlanArtifact, ProviderFailure, ProviderSession,
+    ProviderSessionStatus, ProviderThread, ProviderTurn, ProviderTurnStatus, ResponseCapability,
+    RuntimeEvent, RuntimeEventBody, RuntimePromptReq, RuntimePromptResp, RuntimeReplay,
+    RuntimeRequest, RuntimeRequestStatus, RuntimeSession, RuntimeSessionStatus, RuntimeSnapshot,
+    TurnItem, TurnItemKind, TurnItemStatus, TurnTerminalStatus,
 };
 use otto_core::{new_id, Error, Id, Result};
 use otto_state::{AgentRuntimeRepo, NewRuntimeSession, RuntimeEntityRow};
@@ -422,6 +422,16 @@ impl AgentRuntime {
         ws_id: &Id,
         req: CreateRuntimeSessionReq,
     ) -> Result<RuntimeSession> {
+        self.create_linked(user, ws_id, req, None).await
+    }
+
+    async fn create_linked(
+        &self,
+        user: &Id,
+        ws_id: &Id,
+        req: CreateRuntimeSessionReq,
+        parent_id: Option<Id>,
+    ) -> Result<RuntimeSession> {
         let provider = req
             .provider
             .ok_or_else(|| Error::Invalid("provider is required".into()))?;
@@ -459,8 +469,11 @@ impl AgentRuntime {
                 title,
                 cwd,
                 model,
-                access_mode: req.access_mode.unwrap_or_default(),
+                access_mode: req
+                    .access_mode
+                    .unwrap_or_else(|| self.inner.host.default_access_mode()),
                 created_by: user.clone(),
+                parent_id,
             })
             .await?;
         let id = rec.session.id.clone();
@@ -474,6 +487,174 @@ impl AgentRuntime {
         }
         let s = live.lock().session.clone();
         Ok(s)
+    }
+
+    // ---- linked threads (agent ↔ agent) ----------------------------------
+
+    /// The linked group `caller` belongs to: its root and every thread opened
+    /// under it, same owner, not closed — `caller` first-class among them.
+    async fn group(&self, caller: &RuntimeSession) -> Result<Vec<RuntimeSession>> {
+        let root = caller
+            .parent_id
+            .clone()
+            .unwrap_or_else(|| caller.id.clone());
+        Ok(self
+            .list(&caller.workspace_id, Some(&caller.created_by))
+            .await?
+            .into_iter()
+            .filter(|s| s.status != RuntimeSessionStatus::Closed)
+            .filter(|s| s.id == root || s.parent_id.as_ref() == Some(&root))
+            .collect())
+    }
+
+    fn peer_info(s: &RuntimeSession, caller: &Id) -> PeerInfo {
+        PeerInfo {
+            id: s.id.clone(),
+            provider: s.provider,
+            title: s.title.clone(),
+            status: s.status,
+            is_self: &s.id == caller,
+        }
+    }
+
+    /// `peer` when it is in `caller`'s group (and not `caller` itself).
+    async fn group_member(&self, caller: &RuntimeSession, peer: &Id) -> Result<RuntimeSession> {
+        if peer == &caller.id {
+            return Err(Error::Invalid("that is this thread itself".into()));
+        }
+        self.group(caller)
+            .await?
+            .into_iter()
+            .find(|s| &s.id == peer)
+            .ok_or_else(|| {
+                Error::NotFound(format!(
+                    "no linked thread '{peer}' (list them with otto_thread_list)"
+                ))
+            })
+    }
+
+    /// The header a peer's message arrives under, so the receiving agent
+    /// knows who wrote it and how to answer.
+    fn peer_header(from: &RuntimeSession, verb: &str) -> String {
+        format!(
+            "[{verb} thread \"{}\" ({}, id {}). Answer it with the otto_thread_message tool \
+             (session_id {}); see every linked thread with otto_thread_list.]",
+            from.title,
+            from.provider.as_str(),
+            from.id,
+            from.id
+        )
+    }
+
+    /// Open a linked thread from `caller`: same owner, workspace, cwd and
+    /// access mode (never wider than the opener's), grouped under the
+    /// caller's root; the opening prompt (if any) is sent framed.
+    pub async fn open_peer(&self, caller: &Id, req: OpenPeerReq) -> Result<RuntimeSession> {
+        let c = self.get(caller).await?;
+        if c.status == RuntimeSessionStatus::Closed {
+            return Err(Error::Conflict("the session is closed".into()));
+        }
+        let root = c.parent_id.clone().unwrap_or_else(|| c.id.clone());
+        let created = self
+            .create_linked(
+                &c.created_by,
+                &c.workspace_id,
+                CreateRuntimeSessionReq {
+                    provider: Some(req.provider),
+                    cwd: Some(c.cwd.clone()),
+                    title: req.title,
+                    model: req.model,
+                    access_mode: Some(c.access_mode),
+                },
+                Some(root),
+            )
+            .await?;
+        if let Some(p) = req.prompt.filter(|p| !p.trim().is_empty()) {
+            let text = format!("{}\n\n{p}", Self::peer_header(&c, "Opened by"));
+            let mut prompt = RuntimePromptReq::of(&text);
+            prompt.effort = req.effort.filter(|e| !e.trim().is_empty());
+            self.prompt_with(&created.id, &prompt).await?;
+        }
+        self.get(&created.id).await
+    }
+
+    /// Every thread in `caller`'s linked group.
+    pub async fn peers(&self, caller: &Id) -> Result<Vec<PeerInfo>> {
+        let c = self.get(caller).await?;
+        Ok(self
+            .group(&c)
+            .await?
+            .iter()
+            .map(|s| Self::peer_info(s, caller))
+            .collect())
+    }
+
+    /// Send `text` to linked thread `peer` as its next turn. A peer still
+    /// working its turn refuses (409) — read it with [`Self::peer_reply`]
+    /// and send again.
+    pub async fn message_peer(
+        &self,
+        caller: &Id,
+        peer: &Id,
+        text: &str,
+    ) -> Result<RuntimePromptResp> {
+        if text.trim().is_empty() {
+            return Err(Error::Invalid("message text is empty".into()));
+        }
+        let c = self.get(caller).await?;
+        let p = self.group_member(&c, peer).await?;
+        let framed = format!("{}\n\n{text}", Self::peer_header(&c, "Message from"));
+        self.prompt(&p.id, &framed).await.map_err(|e| match e {
+            Error::Conflict(m) if m.contains("turn is already running") => Error::Conflict(format!(
+                "thread \"{}\" is busy with a turn — wait for it with otto_thread_read, then send again",
+                p.title
+            )),
+            other => other,
+        })
+    }
+
+    /// Linked thread `peer`'s latest reply: waits up to `wait` for its
+    /// running turn to settle, then returns that turn's assistant text.
+    pub async fn peer_reply(&self, caller: &Id, peer: &Id, wait: Duration) -> Result<PeerReply> {
+        let c = self.get(caller).await?;
+        let p = self.group_member(&c, peer).await?;
+        let deadline = Instant::now() + wait;
+        let live = self.live(&p.id).await?;
+        loop {
+            let busy = live.lock().turn.is_some();
+            if !busy || Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        let st = live.lock();
+        let busy = st.turn.is_some();
+        let snap = st.proj.snapshot();
+        let session = st.session.clone();
+        drop(st);
+        let last = snap.turns.iter().max_by_key(|t| t.ordinal);
+        let text = last
+            .map(|t| {
+                snap.turn_items
+                    .iter()
+                    .filter(|i| i.turn_id.as_ref() == Some(&t.id))
+                    .filter_map(|i| match &i.kind {
+                        TurnItemKind::AssistantMessage { text, .. } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n\n")
+            })
+            .unwrap_or_default();
+        Ok(PeerReply {
+            peer: Self::peer_info(&session, caller),
+            busy,
+            turn_status: last
+                .filter(|t| t.status.is_terminal())
+                .and_then(|t| serde_json::to_value(t.status).ok())
+                .and_then(|v| v.as_str().map(str::to_string)),
+            text,
+        })
     }
 
     pub async fn get(&self, id: &Id) -> Result<RuntimeSession> {
@@ -559,18 +740,20 @@ impl AgentRuntime {
             ))
         })?;
         let ws = self.inner.host.workspace(&session.workspace_id).await?;
-        let ctx = LaunchContext {
+        let mut ctx = LaunchContext {
             session_id: session.id.clone(),
             cwd: session.cwd.clone(),
             model: session.model.clone(),
             resume: session.native_thread_id.clone(),
             sandboxed: self.inner.host.sandboxed(&session).await,
             access_mode: session.access_mode,
+            mcp_servers: Vec::new(),
         };
         let mut spec = driver.launch(&ctx);
-        self.inner
+        ctx.mcp_servers = self
+            .inner
             .host
-            .prepare_spawn(&ws, &session, &mut spec)
+            .prepare_spawn(&ws, &session, &mut spec, driver.mcp_delivery())
             .await?;
         // A host that left the tail in place (tests) still gets it last.
         let mut args = spec.args;
@@ -943,6 +1126,7 @@ impl AgentRuntime {
         if let Some(p) = st.proc.take() {
             stop_child(p, self.inner.config.close_grace);
         }
+        retire(&self.inner, &st.session);
         set_session_status(
             &self.inner,
             &live,
@@ -1589,6 +1773,7 @@ async fn pump(inner: Arc<Inner>, live: Arc<Live>, epoch: u64, mut rx: mpsc::Rece
             }
             ChildMsg::Exited { code, stderr_tail } => {
                 let mut proc = st.proc.take().expect("checked above");
+                retire(&inner, &st.session);
                 let step = proc.driver.on_exit(code);
                 apply_step(&inner, &live, &mut st, step);
                 let detail = stderr_tail
@@ -1649,4 +1834,11 @@ async fn persister(repo: AgentRuntimeRepo, id: Id, mut rx: mpsc::UnboundedReceiv
             tracing::warn!(session = %id, "agent runtime persistence failed: {e}");
         }
     }
+}
+
+/// Revoke what the session's spawn minted, off the session lock.
+fn retire(inner: &Arc<Inner>, session: &RuntimeSession) {
+    let host = Arc::clone(&inner.host);
+    let session = session.clone();
+    tokio::spawn(async move { host.retire(&session).await });
 }

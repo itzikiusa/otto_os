@@ -633,6 +633,24 @@ impl CodexDriver {
         } else if let Some((_, resuming)) = self.thread_req.filter(|(t, _)| *t == id) {
             self.thread_req = None;
             if let Some(e) = error {
+                if resuming && thread_in_use(&e) {
+                    // The thread is open in another Codex client (the CLI):
+                    // a fresh thread would silently fork the conversation —
+                    // refuse with a readable reason instead (T3 Code
+                    // `ThreadInUseError`, a445272c78). The next prompt retries.
+                    step.push(DriverEvent::Fatal(
+                        otto_core::agent_runtime::ProviderFailure {
+                            class: "thread_in_use".into(),
+                            message:
+                                "this Codex thread is open in another Codex client — close it \
+                                  there, then send again"
+                                    .into(),
+                            code: e.get("code").map(|c| c.to_string()),
+                            retryable: Some(true),
+                        },
+                    ));
+                    return;
+                }
                 if resuming {
                     // A thread Codex cannot resume: start a fresh one.
                     self.resume = None;
@@ -689,6 +707,15 @@ impl CodexDriver {
             self.interrupt_when_started = false;
         }
     }
+}
+
+/// Codex's "another client owns this thread" resume refusal (`-32600`,
+/// "… already has an active writer").
+fn thread_in_use(e: &Value) -> bool {
+    e.get("code").and_then(Value::as_i64) == Some(-32600)
+        && e.get("message")
+            .and_then(Value::as_str)
+            .is_some_and(|m| m.contains("active writer"))
 }
 
 impl StructuredDriver for CodexDriver {
@@ -904,6 +931,7 @@ mod tests {
 
     fn ctx(resume: Option<&str>, sandboxed: bool) -> LaunchContext {
         LaunchContext {
+            mcp_servers: Vec::new(),
             session_id: "s".into(),
             cwd: "/w".into(),
             model: None,
@@ -958,6 +986,21 @@ mod tests {
             parse(&s.writes[0])["params"]["sandboxPolicy"]["type"],
             "readOnly"
         );
+    }
+
+    /// A thread another Codex client is writing is refused, not forked.
+    #[test]
+    fn resume_of_a_thread_in_use_is_refused_not_forked() {
+        let mut d = CodexDriver::with_program("codex");
+        let _ = d.start(&ctx(Some("old"), false));
+        let s = feed(&mut d, json!({"id": 1, "result": {}}));
+        let resume = parse(&s.writes[1]);
+        let s = feed(
+            &mut d,
+            json!({"id": resume["id"], "error": {"code": -32600, "message": "thread old already has an active writer"}}),
+        );
+        assert!(s.writes.is_empty(), "no fresh thread/start");
+        assert!(matches!(&s.events[0], DriverEvent::Fatal(f) if f.class == "thread_in_use"));
     }
 
     #[test]

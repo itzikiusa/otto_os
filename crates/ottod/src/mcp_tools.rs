@@ -4206,10 +4206,11 @@ mod tests {
     /// the native twins (id-or-name vault_id, PR `number` alias, room refs —
     /// missing text, not padding); 85_412 with otto_create_issue and its
     /// discovery reads (list_issue_projects / _types); 84_834 with
-    /// otto_query_db; 77_821 after slim-app cleanup (review sessions: 52_595).
-    const TOOLS_LIST_BYTE_BUDGET: usize = 79_500;
+    /// otto_query_db; 77_821 after slim-app cleanup (review sessions: 52_595);
+    /// 80_081 with the four linked-thread tools (otto_thread_*).
+    const TOOLS_LIST_BYTE_BUDGET: usize = 81_000;
     /// A review-type session (R2 per-source scoping): 52_595 after slim-app cleanup.
-    const NARROW_TOOLS_LIST_BYTE_BUDGET: usize = 54_500;
+    const NARROW_TOOLS_LIST_BYTE_BUDGET: usize = 55_200; // +otto_thread_*
 
     /// A Ctx pointing at an unreachable base; used by the no-upstream tests above
     /// (which never actually call out). Audit disabled.

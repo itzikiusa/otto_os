@@ -4,14 +4,14 @@
 
 use std::sync::Arc;
 
-use otto_core::agent_runtime::{RuntimeEvent, RuntimeSession};
+use otto_core::agent_runtime::{RuntimeAccessMode, RuntimeEvent, RuntimeSession};
 use otto_core::domain::{Session, SessionKind, SessionStatus, Workspace};
 use otto_core::event::Event;
 use otto_core::{Id, Result};
 use otto_sessions::SessionManager;
 use otto_state::WorkspacesRepo;
 
-use crate::driver::LaunchSpec;
+use crate::driver::{LaunchSpec, McpDelivery, McpServerDef};
 
 #[async_trait::async_trait]
 pub trait RuntimeHost: Send + Sync + 'static {
@@ -22,15 +22,28 @@ pub trait RuntimeHost: Send + Sync + 'static {
     async fn sandboxed(&self, session: &RuntimeSession) -> bool;
 
     /// Apply the PTY sessions' safety pipeline to `spec` in place: cwd
-    /// refusal, folder trust, context provisioning, Seatbelt wrap. An error
-    /// refuses the spawn. Must move `spec.tail_args` behind the injected
-    /// context flags (and leave `tail_args` empty).
+    /// refusal, folder trust, MCP, context provisioning, Seatbelt wrap. An
+    /// error refuses the spawn. Must move `spec.tail_args` behind the injected
+    /// context flags (and leave `tail_args` empty). MCP follows `mcp`:
+    /// `Launcher` applies it to `spec`; `Protocol` returns the servers for
+    /// the driver's handshake.
     async fn prepare_spawn(
         &self,
         ws: &Workspace,
         session: &RuntimeSession,
         spec: &mut LaunchSpec,
-    ) -> Result<()>;
+        mcp: McpDelivery,
+    ) -> Result<Vec<McpServerDef>>;
+
+    /// The child of `session` is gone (exited, stopped, closed): revoke what
+    /// its spawn minted (the `otto` MCP credential). Best-effort.
+    async fn retire(&self, _session: &RuntimeSession) {}
+
+    /// The access mode a new session starts in when the request names none —
+    /// the default terminal sessions follow.
+    fn default_access_mode(&self) -> RuntimeAccessMode {
+        RuntimeAccessMode::ApprovalRequired
+    }
 
     /// Deliver one event to WebSocket clients (owner / admin / root).
     fn publish(&self, session: &RuntimeSession, event: Arc<RuntimeEvent>);
@@ -82,7 +95,8 @@ impl RuntimeHost for SessionManagerHost {
         ws: &Workspace,
         session: &RuntimeSession,
         spec: &mut LaunchSpec,
-    ) -> Result<()> {
+        mcp: McpDelivery,
+    ) -> Result<Vec<McpServerDef>> {
         let mut cmd = otto_pty::CommandSpec {
             program: std::mem::take(&mut spec.program),
             args: std::mem::take(&mut spec.args),
@@ -90,14 +104,44 @@ impl RuntimeHost for SessionManagerHost {
             env: std::mem::take(&mut spec.env),
         };
         let tail = std::mem::take(&mut spec.tail_args);
+        let delivery = match mcp {
+            McpDelivery::Launcher => otto_sessions::manager::RuntimeMcpDelivery::Launcher,
+            McpDelivery::Protocol => otto_sessions::manager::RuntimeMcpDelivery::Protocol,
+        };
         let res = self
             .manager
-            .prepare_runtime_spawn(ws, &as_agent_session(session), &mut cmd, tail)
+            .prepare_runtime_spawn(ws, &as_agent_session(session), &mut cmd, tail, delivery)
             .await;
         spec.program = cmd.program;
         spec.args = cmd.args;
         spec.env = cmd.env;
-        res
+        res.map(|servers| {
+            servers
+                .into_iter()
+                .map(|s| McpServerDef {
+                    name: s.name,
+                    command: s.command,
+                    args: s.args,
+                    env: s.env,
+                })
+                .collect()
+        })
+    }
+
+    async fn retire(&self, session: &RuntimeSession) {
+        self.manager
+            .retire_runtime_credentials(&as_agent_session(session))
+            .await;
+    }
+
+    /// Full access while Settings › Providers skips permission prompts (the
+    /// default) — what a terminal session launches with.
+    fn default_access_mode(&self) -> RuntimeAccessMode {
+        if self.manager.providers().skip_permissions() {
+            RuntimeAccessMode::FullAccess
+        } else {
+            RuntimeAccessMode::ApprovalRequired
+        }
     }
 
     fn publish(&self, session: &RuntimeSession, event: Arc<RuntimeEvent>) {

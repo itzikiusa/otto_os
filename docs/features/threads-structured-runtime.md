@@ -547,4 +547,16 @@ in which headless agy denies what it would have asked about.
   (`turn/steer`), Codex `thread/unarchive`, Claude thinking summaries and
   the subagent tree, ACP v2.
 - **Named provider accounts and network profiles** (refused today).
-- **Otto MCP tools** for structured sessions.
+- ~~Otto MCP tools for structured sessions~~ — done: `prepare_runtime_spawn`
+  mints the per-session `otto` credential and applies the workspace's enabled
+  MCP servers. Claude / Codex / agy get them as a terminal session does
+  (`.mcp.json` + `claude --mcp-config` with Otto's managed entries, codex
+  `-c`, `.agents/mcp_config.json`); ACP agents (Gemini, Grok, opencode) get
+  them in `session/new|load.mcpServers` with each server's env. pi (0.75) has
+  no MCP. The credential is revoked when the process exits or the thread
+  closes.
+- **Linked threads** (`/runtime-sessions/{id}/peers`, `otto.thread_open` /
+  `_list` / `_message` / `_read`): a thread's agent opens other threads
+  (`parent_id` = the group's root), messages them and reads their replies —
+  an orchestrator driving codex / gemini / grok workers. The Threads sidebar
+  nests the group; the thread header shows the group as switchable chips.

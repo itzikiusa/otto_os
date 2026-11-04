@@ -27,6 +27,12 @@ pub struct ProviderSpec {
     /// `None` ⇒ the CLI takes no model flag; pickers hide the model control
     /// and a pinned model is dropped (`model_args` in manager.rs).
     pub model_args: Option<Vec<String>>,
+    /// The built-in CLI family whose model catalog this provider lists
+    /// (`claude` / `codex` / `agy` / `grok`): a built-in's own name, else the
+    /// override's explicit `model_family`, else inferred from the command /
+    /// name (`claude-work`, `claude --settings …` → `claude`). `None` ⇒ no
+    /// catalog — the picker offers no models.
+    pub model_family: Option<String>,
     /// True when the provider MINTS ITS OWN session id (so Otto can't pass it at
     /// launch and must capture it from disk after spawn — `codex`). False when
     /// Otto assigns the id via a launch flag (`claude --session-id {sid}`), or the
@@ -55,6 +61,40 @@ struct ProviderOverride {
     update_command: Option<String>,
     #[serde(default)]
     model_args: Option<Vec<String>>,
+    #[serde(default)]
+    model_family: Option<String>,
+}
+
+/// Families with a model catalog (`provider_models`) and a `--model` flag.
+pub const MODEL_FAMILIES: [&str; 6] = ["claude", "codex", "agy", "grok", "opencode", "pi"];
+
+/// The catalog family a custom provider belongs to: its explicit
+/// `model_family` when that names a known family, else the first known family
+/// that its command's basename or its own name starts with (`claude-work`,
+/// `/opt/bin/claude`, `claude-advisor` → `claude`).
+fn infer_model_family(explicit: Option<&str>, cmd: &str, name: &str) -> Option<String> {
+    let known = |s: &str| {
+        MODEL_FAMILIES
+            .iter()
+            .find(|f| s == **f)
+            .map(|f| f.to_string())
+    };
+    if let Some(f) = explicit.map(str::trim).filter(|s| !s.is_empty()) {
+        return known(f);
+    }
+    let base = cmd
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .rsplit('/')
+        .next()
+        .unwrap_or("");
+    [base, name].into_iter().find_map(|s| {
+        MODEL_FAMILIES
+            .iter()
+            .find(|f| s.to_ascii_lowercase().starts_with(**f))
+            .map(|f| f.to_string())
+    })
 }
 
 /// Registry of available agent providers. Interior-mutable so the settings
@@ -261,6 +301,7 @@ impl ProviderRegistry {
                 }),
                 update_command: Some("claude update".into()),
                 model_args: Some(vec!["--model".into(), "{model}".into()]),
+                model_family: Some("claude".into()),
                 // Otto assigns the id via `--session-id {sid}`.
                 captures_session_id: false,
                 shell_fallback: false,
@@ -291,6 +332,7 @@ impl ProviderRegistry {
                 }),
                 update_command: Some("codex update".into()),
                 model_args: Some(vec!["--model".into(), "{model}".into()]),
+                model_family: Some("codex".into()),
                 captures_session_id: true,
                 shell_fallback: false,
             },
@@ -324,7 +366,50 @@ impl ProviderRegistry {
                 // Verified against the installed agy CLI: `agy --help` lists
                 // `--model  Model for the current CLI session`.
                 model_args: Some(vec!["--model".into(), "{model}".into()]),
+                model_family: Some("agy".into()),
                 captures_session_id: true,
+                shell_fallback: false,
+            },
+        );
+        // opencode (opencode.ai): `--session ses_<id>` both creates and
+        // resumes (ids must start with `ses`), so Otto assigns it like
+        // claude's; `--standalone` keeps the TUI off a shared background
+        // service; `--auto` skips permission prompts. The TUI takes no model
+        // flag (v2), so no picker here — Threads sets it over ACP.
+        let opencode_args: Vec<String> = {
+            let mut a = vec!["--standalone".into()];
+            if skip_permissions {
+                a.push("--auto".into());
+            }
+            a.extend(["--session".into(), "ses_{sid}".into()]);
+            a
+        };
+        map.insert(
+            "opencode".to_string(),
+            ProviderSpec {
+                cmd: "opencode".into(),
+                args: opencode_args.clone(),
+                resume_args: Some(opencode_args),
+                update_command: Some("opencode upgrade".into()),
+                model_args: None,
+                model_family: Some("opencode".into()),
+                captures_session_id: false,
+                shell_fallback: false,
+            },
+        );
+        // pi (pi.dev): no permission system (tools run unprompted). Resume by
+        // id needs `--session-id` (pi ≥ 0.76), so terminal pi sessions start
+        // fresh; Threads resumes pi through its RPC mode.
+        map.insert(
+            "pi".to_string(),
+            ProviderSpec {
+                cmd: "pi".into(),
+                args: Vec::new(),
+                resume_args: None,
+                update_command: Some("pi update".into()),
+                model_args: Some(vec!["--model".into(), "{model}".into()]),
+                model_family: Some("pi".into()),
+                captures_session_id: false,
                 shell_fallback: false,
             },
         );
@@ -336,6 +421,7 @@ impl ProviderRegistry {
                 resume_args: None,
                 update_command: None,
                 model_args: None,
+                model_family: None,
                 captures_session_id: false,
                 shell_fallback: false,
             },
@@ -348,8 +434,17 @@ impl ProviderRegistry {
                 for (name, o) in parsed {
                     // Only keep a non-empty update_command string.
                     let update_command = o.update_command.filter(|s| !s.trim().is_empty());
-                    // An empty template means "no model flag" — same as unset.
-                    let model_args = o.model_args.filter(|v| !v.is_empty());
+                    let model_family = infer_model_family(o.model_family.as_deref(), &o.cmd, &name);
+                    // An explicit EMPTY template means "no model flag"; an
+                    // unset one defaults to `--model {model}` for a provider of
+                    // a known family (every one of them takes it — grok too).
+                    let model_args = match o.model_args {
+                        Some(v) if v.is_empty() => None,
+                        Some(v) => Some(v),
+                        None => model_family
+                            .as_ref()
+                            .map(|_| vec!["--model".into(), "{model}".into()]),
+                    };
                     map.insert(
                         name,
                         ProviderSpec {
@@ -358,6 +453,7 @@ impl ProviderRegistry {
                             resume_args: o.resume_args,
                             update_command,
                             model_args,
+                            model_family,
                             // Custom providers use Otto-assigned ids (the `{sid}`
                             // template); rollout-style capture is built-in only.
                             captures_session_id: false,
@@ -399,6 +495,22 @@ impl ProviderRegistry {
             .expect("provider registry lock")
             .get(name)
             .and_then(|p| p.model_args.clone())
+    }
+
+    /// The catalog family of every ENABLED provider that has one, as
+    /// `(provider, family)` pairs sorted by provider (drives
+    /// `/meta.provider_models`).
+    pub fn model_families(&self) -> Vec<(String, String)> {
+        // `names()` takes its own read lock: call it first, never re-entrantly.
+        let names = self.names();
+        let map = self.map.read().expect("provider registry lock");
+        names
+            .into_iter()
+            .filter_map(|n| {
+                let fam = map.get(&n)?.model_family.clone()?;
+                Some((n, fam))
+            })
+            .collect()
     }
 
     /// True when `name` exists and carries a model-flag template — drives the
@@ -506,6 +618,33 @@ mod tests {
         reg.build_spec(provider, "SID", "/tmp/cwd", resume)
             .expect("build_spec")
             .args
+    }
+
+    /// Custom providers wrapping a known CLI (an alias, a `--settings` variant,
+    /// grok) list that CLI's models and take `--model`; an explicit empty
+    /// template still opts out, and an unknown CLI gets no catalog.
+    #[test]
+    fn custom_providers_inherit_their_cli_family() {
+        let reg = ProviderRegistry::new(Some(&serde_json::json!({
+            "claude-advisor": {"cmd": "claude", "args": ["--settings", "x.json"]},
+            "claudework": {"cmd": "claude-work"},
+            "grok": {"cmd": "grok"},
+            "mine": {"cmd": "/opt/bin/aider"},
+            "pinned": {"cmd": "my-wrapper", "model_family": "codex"},
+            "noflag": {"cmd": "claude", "model_args": []}
+        })));
+        let fams: HashMap<_, _> = reg.model_families().into_iter().collect();
+        assert_eq!(fams["claude-advisor"], "claude");
+        assert_eq!(fams["claudework"], "claude");
+        assert_eq!(fams["grok"], "grok");
+        assert_eq!(fams["pinned"], "codex");
+        assert_eq!(fams["claude"], "claude");
+        assert!(!fams.contains_key("mine"));
+        assert!(!fams.contains_key("shell"));
+        assert!(reg.supports_model("claudework"));
+        assert!(reg.supports_model("grok"));
+        assert!(!reg.supports_model("mine"));
+        assert!(!reg.supports_model("noflag"));
     }
 
     #[test]
@@ -676,13 +815,20 @@ mod tests {
         assert_eq!(reg.model_args_template("opencode"), None);
     }
 
-    /// Overriding a BUILT-IN replaces its whole spec: an override without
-    /// `model_args` drops the built-in template too (spec-replacement, not
-    /// merge — same behavior as resume_args/update_command).
+    /// A built-in override without a template keeps its family's `--model`
+    /// flag; an explicit empty template opts out.
     #[test]
-    fn builtin_override_without_template_drops_it() {
-        let overrides = serde_json::json!({ "claude": { "cmd": "my-claude" } });
-        let reg = ProviderRegistry::new(Some(&overrides));
+    fn builtin_override_keeps_family_model_flag_unless_emptied() {
+        let reg = ProviderRegistry::new(Some(
+            &serde_json::json!({ "claude": { "cmd": "my-claude" } }),
+        ));
+        assert_eq!(
+            reg.model_args_template("claude"),
+            Some(vec!["--model".to_string(), "{model}".to_string()])
+        );
+        let reg = ProviderRegistry::new(Some(
+            &serde_json::json!({ "claude": { "cmd": "my-claude", "model_args": [] } }),
+        ));
         assert_eq!(reg.model_args_template("claude"), None);
     }
 

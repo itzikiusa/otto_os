@@ -29,6 +29,27 @@ pub struct LaunchContext {
     /// The child will run under Otto's Seatbelt profile.
     pub sandboxed: bool,
     pub access_mode: RuntimeAccessMode,
+    /// MCP servers for a [`McpDelivery::Protocol`] driver's handshake
+    /// (filled by the host's spawn preparation; empty at `launch`).
+    pub mcp_servers: Vec<McpServerDef>,
+}
+
+/// How a driver's agent receives MCP servers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpDelivery {
+    /// The CLI's own launcher config / flags (what its terminal session gets).
+    Launcher,
+    /// In the protocol handshake ([`LaunchContext::mcp_servers`]).
+    Protocol,
+}
+
+/// One stdio MCP server handed over the protocol. `command` is absolute.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct McpServerDef {
+    pub name: String,
+    pub command: String,
+    pub args: Vec<String>,
+    pub env: Vec<(String, String)>,
 }
 
 /// The child's command line, before the safety pipeline wraps it.
@@ -192,6 +213,11 @@ pub trait StructuredDriver: Send + 'static {
     fn provider(&self) -> RuntimeProvider;
 
     fn launch(&self, ctx: &LaunchContext) -> LaunchSpec;
+
+    /// Where this driver's agent takes its MCP servers from.
+    fn mcp_delivery(&self) -> McpDelivery {
+        McpDelivery::Launcher
+    }
 
     /// Called once right after spawn: the handshake lines.
     fn start(&mut self, ctx: &LaunchContext) -> DriverStep;

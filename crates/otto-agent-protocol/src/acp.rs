@@ -28,7 +28,8 @@
 //!   `dynamic_tool` item; `plan` → `plan.updated` + a `todo_list` item;
 //!   `session/request_permission` → a pending runtime request + an
 //!   `approval_request` item; answers pick `allow_once` for accept,
-//!   `allow_always` for accept-for-session, `reject_once` for decline, and
+//!   `allow_always` for accept-for-session (narrowed to `allow_once` when
+//!   the agent offers no session grant), `reject_once` for decline, and
 //!   `{outcome: cancelled}` for cancel or a missing option
 //!   (`adapter.ts:1255-1266`). Updates replayed by `session/load` are history
 //!   the agent re-sends; Otto keeps its own, so they are dropped.
@@ -45,9 +46,9 @@ use std::collections::HashMap;
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::v1::schema::{
     AuthenticateRequest, BlobResourceContents, CancelNotification, ContentBlock, EmbeddedResource,
-    EmbeddedResourceResource, ImageContent, InitializeRequest, InitializeResponse,
-    LoadSessionRequest, NewSessionRequest, NewSessionResponse, PermissionOption,
-    PermissionOptionKind, Plan, PlanEntryStatus, PromptRequest, PromptResponse,
+    EmbeddedResourceResource, EnvVariable, ImageContent, InitializeRequest, InitializeResponse,
+    LoadSessionRequest, McpServer, McpServerStdio, NewSessionRequest, NewSessionResponse,
+    PermissionOption, PermissionOptionKind, Plan, PlanEntryStatus, PromptRequest, PromptResponse,
     RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
     SelectedPermissionOutcome, SessionNotification, SessionUpdate, SetSessionModeRequest,
     StopReason, TextContent, ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolKind,
@@ -61,7 +62,7 @@ use serde_json::{json, Value};
 
 use crate::driver::{
     item, rpc_failure, rpc_key, tool_error, DriverError, DriverEvent, DriverStep, LaunchContext,
-    LaunchSpec, StructuredDriver,
+    LaunchSpec, McpDelivery, McpServerDef, StructuredDriver,
 };
 
 const M_INITIALIZE: &str = "initialize";
@@ -70,6 +71,7 @@ const M_AUTHENTICATE: &str = "authenticate";
 /// must authenticate first.
 const AUTH_REQUIRED: i64 = -32000;
 const M_SESSION_NEW: &str = "session/new";
+const M_SET_CONFIG_OPTION: &str = "session/set_config_option";
 const M_SESSION_LOAD: &str = "session/load";
 const M_SESSION_PROMPT: &str = "session/prompt";
 const M_SESSION_CANCEL: &str = "session/cancel";
@@ -87,6 +89,9 @@ enum Phase {
 
 /// An access mode's extra `(head, tail)` argv.
 pub type AccessArgs = fn(RuntimeAccessMode) -> (Vec<String>, Vec<String>);
+
+/// An access mode's extra environment.
+pub type AccessEnv = fn(RuntimeAccessMode) -> Vec<(String, String)>;
 
 /// What differs between ACP agents. The launch is
 /// `program head_args… [model_flag <model>] [context flags] tail_args…`.
@@ -107,6 +112,12 @@ pub struct AcpFlavor {
     pub access_args: Option<AccessArgs>,
     /// The `session/set_mode` id of each access mode (live switching).
     pub mode_id: Option<fn(RuntimeAccessMode) -> &'static str>,
+    /// Environment per access mode (opencode's `OPENCODE_PERMISSION`).
+    pub access_env: Option<AccessEnv>,
+    /// When the agent takes its model as a session config option instead of
+    /// a launch flag (opencode: `session/set_config_option {configId:
+    /// "model"}`), that option's id; `model_flag` is then unused.
+    pub model_config_id: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,6 +142,43 @@ struct Tool {
     output: String,
     file: Option<String>,
     diff: Option<(Option<String>, String)>,
+    /// Every `(path, old, new)` diff of the call — a multi-file edit renders
+    /// as one patch (T3 Code `acpToolCallDiffPatch`, ddd36a53a5).
+    diffs: Vec<(String, Option<String>, String)>,
+}
+
+/// A whole-file unified patch over `diffs`, one `diff --git` section each.
+fn multi_file_patch(diffs: &[(String, Option<String>, String)]) -> String {
+    let mut out = String::new();
+    for (path, old, new) in diffs {
+        let p = path.trim_start_matches('/');
+        out.push_str(&format!("diff --git a/{p} b/{p}\n"));
+        let old_lines: Vec<&str> = old
+            .as_deref()
+            .map(|o| o.lines().collect())
+            .unwrap_or_default();
+        let new_lines: Vec<&str> = new.lines().collect();
+        if old.is_none() {
+            out.push_str("--- /dev/null\n");
+        } else {
+            out.push_str(&format!("--- a/{p}\n"));
+        }
+        out.push_str(&format!("+++ b/{p}\n"));
+        out.push_str(&format!(
+            "@@ -{},{} +{},{} @@\n",
+            usize::from(!old_lines.is_empty()),
+            old_lines.len(),
+            usize::from(!new_lines.is_empty()),
+            new_lines.len()
+        ));
+        for l in old_lines {
+            out.push_str(&format!("-{l}\n"));
+        }
+        for l in new_lines {
+            out.push_str(&format!("+{l}\n"));
+        }
+    }
+    out
 }
 
 struct Pending {
@@ -143,6 +191,12 @@ pub struct AcpDriver {
     flavor: AcpFlavor,
     cwd: String,
     resume: Option<String>,
+    /// Handed over in `session/new|load` (Otto's `otto` tools + the user's
+    /// enabled servers — the set a terminal session gets).
+    mcp_servers: Vec<McpServerDef>,
+    /// The model to apply through `flavor.model_config_id` once ready.
+    model: Option<String>,
+    config_req: Option<u64>,
     next_id: u64,
     phase: Phase,
     init_id: u64,
@@ -188,6 +242,9 @@ impl AcpDriver {
             flavor,
             cwd: String::new(),
             resume: None,
+            mcp_servers: Vec::new(),
+            model: None,
+            config_req: None,
             next_id: 0,
             phase: Phase::Initializing,
             init_id: 0,
@@ -270,6 +327,47 @@ impl AcpDriver {
         )
     }
 
+    /// opencode over ACP (`opencode acp`; opencode `packages/cli/src/acp`):
+    /// no model flag — the model is the `model` session config option; its
+    /// ACP modes are agents (build / plan), not permission levels, so the
+    /// access mode rides `OPENCODE_PERMISSION` (full access = `"allow"`),
+    /// otherwise opencode asks through `session/request_permission`.
+    pub fn opencode() -> Self {
+        Self::with_flavor(
+            RuntimeProvider::Opencode,
+            AcpFlavor {
+                program: "opencode".into(),
+                tail_args: vec!["acp".into()],
+                access_env: Some(|m| match m {
+                    RuntimeAccessMode::FullAccess => {
+                        vec![("OPENCODE_PERMISSION".into(), "\"allow\"".into())]
+                    }
+                    _ => Vec::new(),
+                }),
+                model_config_id: Some("model"),
+                ..AcpFlavor::default()
+            },
+        )
+    }
+
+    fn acp_mcp_servers(&self) -> Vec<McpServer> {
+        self.mcp_servers
+            .iter()
+            .map(|s| {
+                McpServer::Stdio(
+                    McpServerStdio::new(s.name.clone(), s.command.clone())
+                        .args(s.args.clone())
+                        .env(
+                            s.env
+                                .iter()
+                                .map(|(k, v)| EnvVariable::new(k.clone(), v.clone()))
+                                .collect(),
+                        ),
+                )
+            })
+            .collect()
+    }
+
     fn request(&mut self, method: &str, params: impl serde::Serialize) -> (u64, String) {
         self.next_id += 1;
         let id = self.next_id;
@@ -282,13 +380,17 @@ impl AcpDriver {
             (Some(sid), true) => {
                 let (id, l) = self.request(
                     M_SESSION_LOAD,
-                    LoadSessionRequest::new(sid.clone(), self.cwd.clone()),
+                    LoadSessionRequest::new(sid.clone(), self.cwd.clone())
+                        .mcp_servers(self.acp_mcp_servers()),
                 );
                 self.create_id = id;
                 l
             }
             _ => {
-                let (id, l) = self.request(M_SESSION_NEW, NewSessionRequest::new(self.cwd.clone()));
+                let (id, l) = self.request(
+                    M_SESSION_NEW,
+                    NewSessionRequest::new(self.cwd.clone()).mcp_servers(self.acp_mcp_servers()),
+                );
                 self.create_id = id;
                 l
             }
@@ -430,7 +532,7 @@ impl AcpDriver {
             },
             ToolKind::Edit | ToolKind::Delete | ToolKind::Move => TurnItemKind::FileChange {
                 file_name: t.file.clone().unwrap_or_else(|| t.title.clone()),
-                diff_str: None,
+                diff_str: (t.diffs.len() > 1).then(|| multi_file_patch(&t.diffs)),
                 old_str: t.diff.as_ref().and_then(|d| d.0.clone()),
                 new_str: t.diff.as_ref().map(|d| d.1.clone()),
             },
@@ -459,8 +561,12 @@ impl AcpDriver {
                     }
                 }
                 ToolCallContent::Diff(d) => {
-                    t.file = Some(d.path.display().to_string());
+                    let path = d.path.display().to_string();
+                    t.file = Some(path.clone());
                     t.diff = Some((d.old_text.clone(), d.new_text.clone()));
+                    // An update re-sends the same file: replace, don't repeat.
+                    t.diffs.retain(|(p, _, _)| *p != path);
+                    t.diffs.push((path, d.old_text.clone(), d.new_text.clone()));
                 }
                 _ => {}
             }
@@ -700,10 +806,27 @@ impl AcpDriver {
                 native_thread_id: self.session_id.clone(),
                 model: None,
             });
+            if let (Some(config_id), Some(model), Some(sid)) = (
+                self.flavor.model_config_id,
+                self.model.clone(),
+                self.session_id.clone(),
+            ) {
+                let (id, line) = self.request(
+                    M_SET_CONFIG_OPTION,
+                    json!({"sessionId": sid, "configId": config_id, "value": model}),
+                );
+                self.config_req = Some(id);
+                step.write(line);
+            }
             // A prompt queued before `initialize` answered goes as is; the
             // agent refuses images it cannot take.
             if let Some((turn, req)) = self.queued.take() {
                 self.send_prompt(step, turn, &req);
+            }
+        } else if Some(id) == self.config_req {
+            self.config_req = None;
+            if let Some(e) = error {
+                step.push(DriverEvent::Error(rpc_failure("provider_error", &e)));
             }
         } else if Some(id) == self.mode_req {
             self.mode_req = None;
@@ -782,20 +905,34 @@ impl StructuredDriver for AcpDriver {
             args.extend(head);
             tail_args.extend(tail);
         }
-        if let Some(m) = &ctx.model {
+        if let Some(m) = ctx
+            .model
+            .as_ref()
+            .filter(|_| self.flavor.model_config_id.is_none())
+        {
             args.extend([self.flavor.model_flag.clone(), m.clone()]);
         }
         LaunchSpec {
             program: self.flavor.program.clone(),
             args,
             tail_args,
-            env: Vec::new(),
+            env: self
+                .flavor
+                .access_env
+                .map(|f| f(ctx.access_mode))
+                .unwrap_or_default(),
         }
+    }
+
+    fn mcp_delivery(&self) -> McpDelivery {
+        McpDelivery::Protocol
     }
 
     fn start(&mut self, ctx: &LaunchContext) -> DriverStep {
         self.cwd = ctx.cwd.clone();
         self.resume = ctx.resume.clone();
+        self.mcp_servers = ctx.mcp_servers.clone();
+        self.model = ctx.model.clone();
         self.access = ctx.access_mode;
         let mut step = DriverStep::default();
         let mut init = InitializeRequest::new(ProtocolVersion::V1);
@@ -878,21 +1015,24 @@ impl StructuredDriver for AcpDriver {
             .pending
             .remove(request_id)
             .ok_or_else(|| DriverError(format!("unknown request {request_id}")))?;
-        // Exactly T3 Code's `selectPermissionOptionId` (adapter.ts:1255-1266):
-        // one option kind per decision, never a wider grant than asked for
-        // (accept never falls back to allow_always); none → cancelled.
-        let kind = match decision {
-            ApprovalDecision::Accept => Some(PermissionOptionKind::AllowOnce),
-            ApprovalDecision::AcceptForSession | ApprovalDecision::AcceptAlways => {
-                Some(PermissionOptionKind::AllowAlways)
-            }
-            ApprovalDecision::Decline => Some(PermissionOptionKind::RejectOnce),
-            ApprovalDecision::Cancel => None,
+        // T3 Code's `selectPermissionOptionId` (adapter.ts:1255-1266, plus
+        // 21e4f980ca): one option kind per decision, never a WIDER grant than
+        // asked for (accept never falls back to allow_always) — but a session
+        // grant the agent doesn't offer narrows to allow_once instead of
+        // cancelling the turn; none → cancelled.
+        let kinds: &[PermissionOptionKind] = match decision {
+            ApprovalDecision::Accept => &[PermissionOptionKind::AllowOnce],
+            ApprovalDecision::AcceptForSession | ApprovalDecision::AcceptAlways => &[
+                PermissionOptionKind::AllowAlways,
+                PermissionOptionKind::AllowOnce,
+            ],
+            ApprovalDecision::Decline => &[PermissionOptionKind::RejectOnce],
+            ApprovalDecision::Cancel => &[],
         };
-        let option = kind.and_then(|k| {
+        let option = kinds.iter().find_map(|k| {
             p.options
                 .iter()
-                .find(|o| o.kind == k)
+                .find(|o| o.kind == *k)
                 .map(|o| o.option_id.clone())
         });
         let outcome = match option {
@@ -974,6 +1114,7 @@ mod tests {
 
     fn ctx(resume: Option<&str>) -> LaunchContext {
         LaunchContext {
+            mcp_servers: Vec::new(),
             session_id: "s".into(),
             cwd: "/w".into(),
             model: None,
@@ -985,6 +1126,60 @@ mod tests {
 
     fn sent(step: &DriverStep, i: usize) -> Value {
         serde_json::from_str(&step.writes[i]).unwrap()
+    }
+
+    /// The host's MCP servers (Otto's `otto` tools + the user's) ride
+    /// `session/new` as stdio entries, each with its own env.
+    #[test]
+    fn session_new_carries_the_mcp_servers() {
+        let mut d = AcpDriver::gemini("gemini");
+        assert_eq!(d.mcp_delivery(), McpDelivery::Protocol);
+        let c = LaunchContext {
+            mcp_servers: vec![McpServerDef {
+                name: "otto".into(),
+                command: "/bin/ottod".into(),
+                args: vec!["mcp-tools".into()],
+                env: vec![("OTTO_MCP_TOKEN".into(), "t".into())],
+            }],
+            ..ctx(None)
+        };
+        d.start(&c);
+        let s = d.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}"#);
+        let req = sent(&s, 0);
+        assert_eq!(req["method"], "session/new");
+        let m = &req["params"]["mcpServers"][0];
+        assert_eq!(m["name"], "otto");
+        assert_eq!(m["command"], "/bin/ottod");
+        assert_eq!(m["args"][0], "mcp-tools");
+        assert_eq!(m["env"][0]["name"], "OTTO_MCP_TOKEN");
+        assert_eq!(m["env"][0]["value"], "t");
+    }
+
+    #[test]
+    fn opencode_takes_its_model_as_a_config_option_and_access_as_env() {
+        let mut d = AcpDriver::opencode();
+        let c = LaunchContext {
+            model: Some("anthropic/claude-sonnet".into()),
+            access_mode: RuntimeAccessMode::FullAccess,
+            ..ctx(None)
+        };
+        let spec = d.launch(&c);
+        assert_eq!(
+            (spec.program.as_str(), spec.tail_args.as_slice()),
+            ("opencode", &["acp".to_string()][..])
+        );
+        assert!(spec.args.is_empty(), "no model flag: {:?}", spec.args);
+        assert_eq!(
+            spec.env,
+            [("OPENCODE_PERMISSION".to_string(), "\"allow\"".to_string())]
+        );
+        d.start(&c);
+        d.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}"#);
+        let s = d.on_line(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"ses_1"}}"#);
+        let set = sent(&s, 0);
+        assert_eq!(set["method"], "session/set_config_option");
+        assert_eq!(set["params"]["configId"], "model");
+        assert_eq!(set["params"]["value"], "anthropic/claude-sonnet");
     }
 
     #[test]
@@ -1046,6 +1241,7 @@ mod tests {
     fn grok_launch_order_and_lazy_authenticate_then_retry() {
         let mut d = AcpDriver::grok();
         let spec = d.launch(&LaunchContext {
+            mcp_servers: Vec::new(),
             model: Some("grok-4.6".into()),
             ..ctx(None)
         });
@@ -1132,6 +1328,27 @@ mod tests {
             d.respond("acp-p7", ApprovalDecision::Accept).is_err(),
             "answered once"
         );
+        // No session grant offered: accept-for-session narrows to allow_once
+        // instead of cancelling the turn.
+        d.on_line(r#"{"jsonrpc":"2.0","id":"p8","method":"session/request_permission","params":{"sessionId":"s1","toolCall":{"toolCallId":"c2","kind":"execute","title":"ls"},"options":[{"optionId":"a1","name":"Allow","kind":"allow_once"},{"optionId":"r1","name":"Deny","kind":"reject_once"}]}}"#);
+        let r = d
+            .respond("acp-p8", ApprovalDecision::AcceptForSession)
+            .unwrap();
+        assert_eq!(sent(&r, 0)["result"]["outcome"]["optionId"], "a1");
+    }
+
+    #[test]
+    fn a_multi_file_edit_renders_one_patch() {
+        let patch = multi_file_patch(&[
+            ("/w/a.rs".into(), Some("x".into()), "y".into()),
+            ("/w/b.rs".into(), None, "new".into()),
+        ]);
+        assert!(patch.contains(
+            "diff --git a/w/a.rs b/w/a.rs\n--- a/w/a.rs\n+++ b/w/a.rs\n@@ -1,1 +1,1 @@\n-x\n+y\n"
+        ));
+        assert!(patch.contains(
+            "diff --git a/w/b.rs b/w/b.rs\n--- /dev/null\n+++ b/w/b.rs\n@@ -0,0 +1,1 @@\n+new\n"
+        ));
     }
 
     #[test]
@@ -1170,6 +1387,7 @@ mod tests {
     #[test]
     fn access_modes_pick_t3_argv_and_gemini_switches_live_when_advertised() {
         let at = |access_mode| LaunchContext {
+            mcp_servers: Vec::new(),
             access_mode,
             ..ctx(None)
         };

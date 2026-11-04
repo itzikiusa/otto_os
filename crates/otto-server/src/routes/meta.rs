@@ -110,12 +110,25 @@ pub async fn meta(
             .map(|name| (name.as_str(), ctx.manager.providers().program_for(name))),
     );
     let tools = otto_sessions::tool_probe::probe_tools_cached(tool_specs.clone()).await;
-    let agy_program = tool_specs
-        .get("agy")
-        .filter(|_| tools.iter().any(|t| t.name == "agy" && t.found))
-        .cloned();
+    // A family's `models` subcommand runs through the first INSTALLED
+    // provider of that family (a custom `grok` provider is the grok CLI).
+    let families = ctx.manager.providers().model_families();
+    let program_of = |family: &str| {
+        families
+            .iter()
+            .filter(|(_, f)| f == family)
+            .find(|(p, _)| tools.iter().any(|t| &t.name == p && t.found))
+            .and_then(|(p, _)| tool_specs.get(p).cloned())
+    };
+    let probe = otto_sessions::provider_models::ModelProbe {
+        agy_program: program_of("agy"),
+        grok_program: program_of("grok"),
+        opencode_program: program_of("opencode"),
+        pi_program: program_of("pi"),
+        families,
+    };
     let provider_models =
-        otto_sessions::provider_models::probe_provider_models_cached(&providers, agy_program).await;
+        otto_sessions::provider_models::probe_provider_models_cached(&probe).await;
 
     Ok(Json(MetaResp {
         version: ctx.version.clone(),

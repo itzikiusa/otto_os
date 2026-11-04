@@ -23,6 +23,14 @@ pub const DEFAULT_ENABLED: &[&str] = &[
     "room_post",
     "room_read",
     "list_agent_rooms",
+    // Linked Threads (structured runtime): same rationale as rooms — a thread
+    // opens/messages only threads of ITS OWN linked group (same owner and
+    // workspace, never a wider access mode than its own), and every message
+    // lands as a visible turn in the receiving thread.
+    "thread_open",
+    "thread_list",
+    "thread_message",
+    "thread_read",
     // Discovery — where every id an agent needs comes from (workspaces, issue
     // accounts, goal loops, …); metadata only.
     "list_workspaces",
@@ -692,6 +700,24 @@ pub fn otto_tool_specs() -> Vec<Value> {
             "description":"Send one text message to ONE live agent session by id, as if typed + Enter. DANGEROUS: drives a running agent — approval-gated.",
             "inputSchema":{"type":"object","required":["session_id","text"],"properties":{
                 "session_id":{"type":"string"},"text":{"type":"string"}}}}),
+        json!({"name":"otto.thread_open","mutating":false,"category":"Sessions",
+            "description":"Open a linked agent thread from this Threads thread (same workspace, folder, access mode); shown beside yours. `prompt` = its first message (your role + task). Model/effort default when omitted. Returns its `id`.",
+            "inputSchema":{"type":"object","required":["provider"],"properties":{
+                "provider":{"type":"string","description":"claude|codex|gemini|grok|opencode|pi"},
+                "prompt":{"type":"string"},"title":{"type":"string"},"model":{"type":"string"},
+                "effort":{"type":"string","description":"low|medium|high|xhigh|max"},
+                "session_id":{"type":"string","description":"caller (auto)"}}}}),
+        json!({"name":"otto.thread_list","mutating":false,"category":"Sessions",
+            "description":"This thread's linked group: id, provider, title, status, is_self.",
+            "inputSchema":{"type":"object","properties":{"session_id":{"type":"string","description":"caller (auto)"}}}}),
+        json!({"name":"otto.thread_message","mutating":false,"category":"Sessions",
+            "description":"Send a linked thread its next turn (it sees the sender). Refused while it works — otto.thread_read first.",
+            "inputSchema":{"type":"object","required":["to_session_id","text"],"properties":{
+                "to_session_id":{"type":"string"},"text":{"type":"string"},"session_id":{"type":"string","description":"caller (auto)"}}}}),
+        json!({"name":"otto.thread_read","mutating":false,"category":"Sessions",
+            "description":"A linked thread's latest reply, waiting up to wait_secs (≤25, default 20) for its turn: {peer, busy, turn_status, text}.",
+            "inputSchema":{"type":"object","required":["peer_session_id"],"properties":{
+                "peer_session_id":{"type":"string"},"wait_secs":{"type":"integer"},"session_id":{"type":"string","description":"caller (auto)"}}}}),
         json!({"name":"otto.wait_session","mutating":false,"category":"Sessions",
             "description":"Block (up to 25 s) until a session's status is one of the awaited set (default idle,exited), then return it with `reached`. Loop it for longer waits. Read-only.",
             "inputSchema":{"type":"object","required":["session_id"],"properties":{

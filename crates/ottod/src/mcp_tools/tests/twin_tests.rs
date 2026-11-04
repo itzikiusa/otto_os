@@ -246,6 +246,19 @@ fn twin_cases() -> Vec<(&'static str, Value)> {
             json!({"room_id": ID, "after": "m1", "limit": 10}),
         ),
         ("otto_room_read", json!({"room_id": ID, "before": "m9"})),
+        (
+            "otto_thread_open",
+            json!({"provider": "codex", "prompt": "hi"}),
+        ),
+        ("otto_thread_list", json!({})),
+        (
+            "otto_thread_message",
+            json!({"to_session_id": ID, "text": "hi"}),
+        ),
+        (
+            "otto_thread_read",
+            json!({"peer_session_id": ID, "wait_secs": 5}),
+        ),
         ("otto_api_list", json!({})),
         ("otto_api_list", json!({"q": "x", "kind": "requests"})),
         ("otto_api_get_request", json!({"request_id": ID})),
@@ -269,7 +282,7 @@ fn every_twin_has_a_dispatch_case() {
         .map(governed_stdio_name)
         .filter(|n| NATIVE_TOOL_NAMES.contains(n))
         .collect();
-    assert_eq!(twins.len(), 45, "{twins:?}");
+    assert_eq!(twins.len(), 49, "{twins:?}");
     let missing: Vec<&String> = twins
         .iter()
         .filter(|n| !cased.contains(n.as_str()))

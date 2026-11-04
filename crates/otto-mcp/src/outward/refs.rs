@@ -181,6 +181,10 @@ pub fn pin_global(tool: &str) -> bool {
     // UI-control tools act on the CALLING SESSION, whose workspace the bridge
     // checks against the pin itself (`ui_bridge::run`).
     ui_commands::is_ui_tool(tool)
+        // Linked Threads act AS the calling thread (its session binding
+        // overrides `session_id`); the route keeps the group to that thread's
+        // own owner + workspace.
+        || tool.starts_with("thread_")
         || tool.starts_with("aws_")
         || tool.starts_with("k8s_")
         || DIRECTORY_TOOLS.iter().any(|(t, _)| *t == tool)
