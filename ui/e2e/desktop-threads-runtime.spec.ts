@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { apiCtx } from './seed';
-import { expectNoHorizontalOverflow } from './helpers';
+import { expectFullyInViewport, expectNoHorizontalOverflow } from './helpers';
 import type { Locator } from '@playwright/test';
 
 /** Relative luminance (0 dark … 1 light) of an element's computed background. */
@@ -201,5 +201,234 @@ test('a Codex runtime thread streams, asks inline, queues a follow-up and stops'
   // Phone width: the timeline and composer fit.
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(thread.getByTestId('runtime-composer')).toBeVisible();
+  await expectNoHorizontalOverflow(page);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Runtime polish (mocked replay — the fake CLIs don't emit these fields yet):
+// a Hebrew conversation reads right-to-left with code / chips isolated, the
+// project card opens from the toolbar without covering any message and
+// closes on an outside click, parallel tool calls group under one summary,
+// an approval folds into its tool's row (pending: inline Approve / Decline;
+// withdrawn: "Withdrawn by Claude"), a failed tool shows its error, the user
+// message shows its attachments, and the access chip rides the next prompt.
+// ─────────────────────────────────────────────────────────────────────────────
+test('runtime polish: RTL, project card, grouped tools, folded approvals, access mode', async ({ page }, info) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const created = await ctx.post(`${base}/api/v1/workspaces/${wsId}/runtime-sessions`, {
+    data: { provider: 'codex', cwd: fixtureDir, title: 'שיחה בעברית' },
+  });
+  expect(created.ok(), await created.text()).toBeTruthy();
+  const id = (await created.json()).id as string;
+
+  const T0 = Date.parse('2026-11-04T10:00:00Z');
+  const at = (s: number) => new Date(T0 + s * 1000).toISOString();
+  const item = (o: Record<string, unknown>) => ({
+    turn_id: 't1',
+    status: 'completed',
+    title: null,
+    started_at: at(0),
+    completed_at: at(1),
+    updated_at: at(1),
+    ...o,
+  });
+  const fetchTool = (n: number, o: Record<string, unknown> = {}) =>
+    item({ id: `f${n}`, ordinal: 10 + n, type: 'web_search', title: 'WebFetch', patterns: [`https://example.com/${n}`], started_at: at(2), completed_at: at(6), ...o });
+  const snapshot = {
+    provider_session: { status: 'ready', cwd: fixtureDir, model: null, updated_at: at(0), last_error: null },
+    provider_thread: null,
+    turns: [{ id: 't1', ordinal: 1, status: 'completed', started_at: at(0), completed_at: at(20) }],
+    turn_items: [
+      item({
+        id: 'u1',
+        ordinal: 1,
+        type: 'user_message',
+        text: 'היי, מה קורה וזה? תבדוק בבקשה את הענף',
+        attachments: [
+          { id: 'img1', kind: 'image', mime: 'image/png', name: 'screen.png' },
+          { id: 'doc1', kind: 'file', mime: 'application/pdf', name: 'spec.pdf' },
+        ],
+      }),
+      item({
+        id: 'a1',
+        ordinal: 2,
+        type: 'assistant_message',
+        message_id: 'm1',
+        streaming: false,
+        text: 'אני ב-repo של Otto, על `main` בלי שינויים מקומיים. הקומיט האחרון הוא #130 (תיקון של badges).\n\nהתחלנו את המעבר של Threads ל-runtime מובנה בענף `feat/threads-structured-runtime`. מה בא לך לעשות?',
+      }),
+      fetchTool(1),
+      fetchTool(2, { started_at: at(3), status: 'failed', error: 'HTTP 403 Forbidden: https://example.com/2' }),
+      fetchTool(3, { started_at: at(4), status: 'cancelled' }),
+      item({ id: 'ap3', ordinal: 14, type: 'approval_request', status: 'cancelled', cancel_reason: 'agent', tool_item_id: 'f3', request_id: 'r3', request_kind: 'permission', title: 'WebFetch', options: [] }),
+      item({ id: 'c1', ordinal: 15, type: 'command_execution', input: 'git status', status: 'waiting', started_at: at(10), completed_at: null }),
+      item({ id: 'ap4', ordinal: 16, type: 'approval_request', status: 'pending', tool_item_id: 'c1', request_id: 'r4', request_kind: 'command', prompt: 'git status', options: [] }),
+      item({ id: 'c2', ordinal: 17, type: 'command_execution', input: 'git log -1', status: 'waiting', started_at: at(11), completed_at: null }),
+      item({ id: 'ap5', ordinal: 18, type: 'approval_request', status: 'pending', tool_item_id: 'c2', request_id: 'r5', request_kind: 'command', prompt: 'git log -1', options: [] }),
+    ],
+    runtime_requests: [
+      { id: 'r3', turn_id: 't1', kind: 'permission', status: 'cancelled', response_capability: { type: 'live' }, created_at: at(4), resolved_at: at(6), cancel_reason: 'agent' },
+      { id: 'r4', turn_id: 't1', kind: 'command', status: 'pending', response_capability: { type: 'live' }, created_at: at(10), resolved_at: null },
+      { id: 'r5', turn_id: 't1', kind: 'command', status: 'pending', response_capability: { type: 'live' }, created_at: at(11), resolved_at: null },
+    ],
+    plans: [],
+  };
+  await page.route(`**/api/v1/runtime-sessions/${id}/events**`, (r) =>
+    r.fulfill({ json: { kind: 'snapshot', snapshot_sequence: 100_000, snapshot } }),
+  );
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64');
+  await page.route(`**/api/v1/runtime-sessions/${id}/attachments/**`, (r) =>
+    r.fulfill({ body: png, contentType: 'image/png' }),
+  );
+  const answered: string[] = [];
+  await page.route(`**/api/v1/runtime-sessions/${id}/requests/**`, (r) => {
+    answered.push(r.request().url().split('/').pop() ?? '');
+    return r.fulfill({ status: 204 });
+  });
+
+  await page.goto('/#/threads');
+  await page.getByTestId('threads-sidebar').getByText('שיחה בעברית').first().click();
+  const thread = page.getByTestId(`runtime-thread-${id}`);
+  await expect(thread).toBeVisible({ timeout: 30_000 });
+
+  // RTL: the bubble and the answer resolve right-to-left; code / #130 stay isolated LTR.
+  const bubble = thread.locator('.rt-bubble');
+  const answer = thread.locator('.rt-assistant');
+  await expect(bubble).toBeVisible();
+  expect(await bubble.evaluate((el) => getComputedStyle(el).direction)).toBe('rtl');
+  expect(await answer.locator('p').first().evaluate((el) => getComputedStyle(el).direction)).toBe('rtl');
+  const code = answer.locator('code', { hasText: 'feat/threads-structured-runtime' });
+  expect(await code.evaluate((el) => [getComputedStyle(el).direction, getComputedStyle(el).unicodeBidi])).toEqual(['ltr', 'isolate']);
+  // The bubble hugs the inline-end (right) edge of the column.
+  const col = (await thread.locator('.rt-col').boundingBox())!;
+  const bb = (await bubble.boundingBox())!;
+  expect(col.x + col.width - (bb.x + bb.width)).toBeLessThan(24);
+
+  // Attachments: a lazy thumbnail and a file chip; the thumbnail opens full.
+  const atts = thread.getByTestId('runtime-attachments');
+  await expect(atts.locator('img')).toBeVisible();
+  await expect(atts.getByText('spec.pdf')).toBeVisible();
+  await atts.getByRole('button', { name: 'Open screen.png' }).click();
+  await expect(page.getByRole('dialog').locator('img')).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+
+  // The project card opens from the toolbar and covers no message.
+  await page.getByTestId('threads-toggle-card').click();
+  const card = page.getByTestId('threads-project-card');
+  await expectFullyInViewport(page, card, 'project card');
+  const cardBox = (await card.boundingBox())!;
+  for (const el of [bubble, answer, thread.getByTestId('runtime-composer')]) {
+    const b = (await el.boundingBox())!;
+    const overlaps = b.x < cardBox.x + cardBox.width && cardBox.x < b.x + b.width && b.y < cardBox.y + cardBox.height && cardBox.y < b.y + b.height;
+    expect(overlaps, 'a message runs under the project card').toBe(false);
+  }
+  await page.screenshot({ path: info.outputPath('runtime-rtl-card-light.png'), animations: 'disabled' });
+  await page.emulateMedia({ colorScheme: 'dark' });
+  await page.screenshot({ path: info.outputPath('runtime-rtl-card-dark.png'), animations: 'disabled' });
+  await page.emulateMedia({ colorScheme: 'light' });
+  // A right-to-left UI mirrors the card to the inline end; it still covers nothing.
+  await page.evaluate(() => localStorage.setItem('otto_direction', 'rtl'));
+  await page.reload();
+  await expect.poll(() => page.evaluate(() => document.documentElement.dir)).toBe('rtl');
+  await expect(bubble).toBeVisible({ timeout: 30_000 });
+  await page.getByTestId('threads-toggle-card').click();
+  await expectFullyInViewport(page, card, 'project card (RTL)');
+  const rtlCard = (await card.boundingBox())!;
+  const rtlBubble = (await bubble.boundingBox())!;
+  expect(rtlCard.x + rtlCard.width <= rtlBubble.x || rtlBubble.x + rtlBubble.width <= rtlCard.x).toBe(true);
+  // An LTR label keeps its order in an RTL UI ("git log -1", not "1- git log").
+  expect(await thread.getByTestId('runtime-item-c2').locator('.rw-label').evaluate((el) => getComputedStyle(el).direction)).toBe('ltr');
+  await expectNoHorizontalOverflow(page);
+  await page.screenshot({ path: info.outputPath('runtime-rtl-card-rtl-ui.png'), animations: 'disabled' });
+  await page.evaluate(() => localStorage.removeItem('otto_direction'));
+  await page.reload();
+  await expect(bubble).toBeVisible({ timeout: 30_000 });
+  await page.getByTestId('threads-toggle-card').click();
+  await expect(card).toBeVisible();
+  // The user's window: a ~810 px centre column can't spare the card's width,
+  // so the card docks above the timeline instead of covering it (LTR + RTL).
+  await page.setViewportSize({ width: 1130, height: 900 });
+  for (const dir of ['ltr', 'rtl'] as const) {
+    if (dir === 'rtl') {
+      await page.evaluate(() => localStorage.setItem('otto_direction', 'rtl'));
+      await page.reload();
+      await expect(bubble).toBeVisible({ timeout: 30_000 });
+      await page.getByTestId('threads-toggle-card').click();
+    }
+    const centre = (await page.locator('.th-center-col').boundingBox())!;
+    expect(centre.width, 'centre column width').toBeGreaterThanOrEqual(800);
+    expect(centre.width, 'centre column width').toBeLessThanOrEqual(830);
+    await expectFullyInViewport(page, card, `project card (${dir}, narrow)`);
+    const c = (await card.boundingBox())!;
+    for (const el of [bubble, answer, thread.locator('.rt-work').first(), thread.getByTestId('runtime-composer')]) {
+      const b = (await el.boundingBox())!;
+      const overlaps = b.x < c.x + c.width && c.x < b.x + b.width && b.y < c.y + c.height && c.y < b.y + b.height;
+      expect(overlaps, `a message runs under the project card (${dir}, narrow)`).toBe(false);
+    }
+    await page.screenshot({ path: info.outputPath(`runtime-card-narrow-${dir}.png`), animations: 'disabled' });
+  }
+  await page.evaluate(() => localStorage.removeItem('otto_direction'));
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.reload();
+  await expect(bubble).toBeVisible({ timeout: 30_000 });
+  await page.getByTestId('threads-toggle-card').click();
+  await expect(card).toBeVisible();
+  // Outside click closes it (and Esc after reopening).
+  await thread.locator('.rt-col').click({ position: { x: 10, y: 10 } });
+  await expect(card).toHaveCount(0);
+  await page.getByTestId('threads-toggle-card').click();
+  await expect(card).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(card).toHaveCount(0);
+
+  // Parallel fetches group under one summary; the failed one shows its error;
+  // the withdrawn approval reads as such on its tool's row (no shield row).
+  const group = thread.getByTestId('runtime-group-group:f1');
+  await expect(group.locator('summary')).toContainText('Fetched 3 web pages');
+  await group.locator('summary').click();
+  await expect(thread.getByTestId('runtime-item-f3').getByTestId('runtime-approval-note')).toHaveText('Withdrawn by Codex');
+  await expect(thread.locator('[data-item-type="approval_request"]')).toHaveCount(0);
+  await thread.getByTestId('runtime-item-f2').locator('.rw-line').click();
+  await expect(thread.getByTestId('runtime-item-f2').getByTestId('runtime-item-error')).toHaveText(/HTTP 403 Forbidden/);
+
+  // Two pending approvals at once (parallel commands: their group opens by
+  // itself), each inline on its command and each answerable.
+  await expect(thread.getByTestId('runtime-group-group:c1')).toHaveAttribute('open', '');
+  for (const [tool, req] of [
+    ['c1', 'r4'],
+    ['c2', 'r5'],
+  ]) {
+    const row = thread.getByTestId(`runtime-item-${tool}`);
+    await expect(row.getByTestId(`runtime-approval-${req}`)).toBeVisible();
+  }
+  await thread.getByTestId('runtime-item-c2').getByRole('button', { name: 'Approve', exact: true }).click();
+  await thread.getByTestId('runtime-item-c1').getByRole('button', { name: 'Decline', exact: true }).click();
+  await expect.poll(() => answered.sort()).toEqual(['r4', 'r5']);
+  await page.screenshot({ path: info.outputPath('runtime-polish-work-light.png'), animations: 'disabled' });
+  await page.emulateMedia({ colorScheme: 'dark' });
+  await page.screenshot({ path: info.outputPath('runtime-polish-work-dark.png'), animations: 'disabled' });
+  await page.emulateMedia({ colorScheme: 'light' });
+
+  // Access chip: Full access asks once, warns, and rides the next prompt.
+  const chip = thread.getByTestId('runtime-access');
+  await expect(chip).toContainText('Supervised');
+  await chip.click();
+  await page.locator('.ctx-menu').getByRole('menuitemcheckbox', { name: 'Full access' }).click();
+  const dlg = page.getByRole('dialog');
+  await expect(dlg).toContainText('without asking');
+  await dlg.getByRole('button', { name: 'Allow full access' }).click();
+  await expect(chip).toContainText('Full access');
+  await expect(chip).toHaveClass(/full/);
+  const sent = page.waitForRequest((r) => r.method() === 'POST' && r.url().endsWith(`/runtime-sessions/${id}/prompt`));
+  await page.route(`**/api/v1/runtime-sessions/${id}/prompt`, (r) => r.fulfill({ json: { turn_id: 't2', sequence: 1 } }));
+  const composer = thread.getByTestId('runtime-composer');
+  await composer.fill('שלום');
+  await composer.press('Enter');
+  expect(((await sent).postDataJSON() as { access_mode?: string }).access_mode).toBe('full-access');
+  // The next switch back needs no confirm.
+  await chip.click();
+  await page.locator('.ctx-menu').getByRole('menuitemcheckbox', { name: 'Supervised' }).click();
+  await expect(chip).toContainText('Supervised');
   await expectNoHorizontalOverflow(page);
 });

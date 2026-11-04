@@ -6,20 +6,28 @@
   // Ported from T3 Code (MIT, Copyright (c) 2026 T3 Tools Inc.):
   // apps/web/src/components/chat/TimelineWorkEntryRow.tsx (row + expand),
   // WorkLog.tsx (the quiet line) and CommandOutputPanel.tsx (output that
-  // follows the bottom while you do).
+  // follows the bottom while you do). An approval that gated the call folds
+  // into its row: Approve / Decline inline while pending, the outcome after
+  // (ComposerPendingApprovalActions.tsx).
   import Icon, { type IconName } from '../../../lib/components/Icon.svelte';
-  import type { TurnItem } from '../../../lib/api/types';
+  import type { ApprovalDecision, TurnItem } from '../../../lib/api/types';
   import InlineDiff from '../../agents/conversation/InlineDiff.svelte'; // ui-guards: allow — shared chat diff
   import Markdown from '../../agents/conversation/Markdown.svelte'; // ui-guards: allow — shared chat markdown
   import { lastLine, patchToDiff } from '../../agents/conversation/format'; // ui-guards: allow — shared chat helpers
-  import { workLabel } from './timeline';
+  import RuntimeApprovalRow from './RuntimeApprovalRow.svelte';
+  import { toolError, workLabel, type PendingApproval } from './timeline';
 
   interface Props {
     item: TurnItem;
     /** Live `command_output.delta` text (command items). */
     output?: string;
+    /** The pending approval gating this call (answered inline). */
+    pending?: PendingApproval;
+    /** What became of its approval ("Withdrawn by Claude", "Declined"). */
+    note?: string | null;
+    onrespond?: (requestId: string, decision: ApprovalDecision) => Promise<void>;
   }
-  let { item, output = '' }: Props = $props();
+  let { item, output = '', pending, note = null, onrespond }: Props = $props();
 
   let open = $state(false);
   let outEl = $state<HTMLPreElement | null>(null);
@@ -41,6 +49,7 @@
   const failed = $derived(item.status === 'failed' || item.type === 'error');
   const stopped = $derived(item.status === 'cancelled' || item.status === 'interrupted');
   const label = $derived(workLabel(item));
+  const error = $derived(toolError(item));
   const commandOut = $derived(item.type === 'command_execution' ? (item.output ?? output) : '');
   const tail = $derived(running && commandOut ? lastLine(commandOut) : '');
   const patch = $derived.by(() => {
@@ -53,7 +62,9 @@
     return [`--- a/${p}`, `+++ b/${p}`, `@@ -1,${oldL.length} +1,${newL.length} @@`, ...oldL.map((l) => `-${l}`), ...newL.map((l) => `+${l}`)].join('\n');
   });
   const hasDetail = $derived(
-    item.type === 'reasoning'
+    error
+      ? true
+      : item.type === 'reasoning'
       ? !!item.text
       : item.type === 'command_execution' || item.type === 'dynamic_tool' || item.type === 'todo_list'
         ? true
@@ -77,7 +88,7 @@
   const json = (v: unknown): string => (typeof v === 'string' ? v : JSON.stringify(v, null, 2));
 </script>
 
-<div class="rw" class:failed class:stopped data-item-type={item.type} data-testid="runtime-item-{item.id}">
+<div class="rw" class:failed class:stopped={stopped && !note} data-item-type={item.type} data-testid="runtime-item-{item.id}">
   {#if hasDetail}
     <button type="button" class="rw-line" aria-expanded={open} onclick={() => (open = !open)}>
       <Icon name={icon} size={13} />
@@ -95,11 +106,23 @@
   {#if item.type === 'error'}
     <p class="rw-error" dir="auto">{item.failure.message}</p>
   {/if}
+  {#if note}
+    <p class="rw-note" dir="auto" data-testid="runtime-approval-note">{note}</p>
+  {/if}
+  {#if pending && onrespond}
+    <RuntimeApprovalRow approval={pending} {onrespond} inline />
+  {/if}
+  {#if error && !open}
+    <p class="rw-error ellipsis mono" dir="auto">{error}</p>
+  {/if}
   {#if tail && !open}
     <p class="rw-tail ellipsis mono" dir="auto">{tail}</p>
   {/if}
   {#if open}
     <div class="rw-detail">
+      {#if error}
+        <pre class="rw-pre rw-failure" data-testid="runtime-item-error">{error}</pre>
+      {/if}
       {#if item.type === 'command_execution'}
         <pre class="rw-pre" bind:this={outEl} onscroll={onOutScroll}><span class="rw-cmd">$ {item.input}</span>
 {commandOut || (running ? '' : 'No output.')}</pre>
@@ -212,6 +235,10 @@
     line-height: 1.5;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
+  }
+  .rw-failure {
+    color: var(--danger);
+    user-select: text;
   }
   .rw-cmd {
     color: var(--text-dim);

@@ -4,7 +4,8 @@
   // Ported from T3 Code (MIT, Copyright (c) 2026 T3 Tools Inc.):
   // apps/web/src/components/chat/TimelinePendingApprovalRow.tsx and
   // ComposerPendingApprovalActions.tsx (accept / decline as buttons, every
-  // other offered decision under "More").
+  // other offered decision under "More"). `inline`: folded into the tool's
+  // own row (TimelineWorkEntryRow), which already says what it runs.
   import Icon from '../../../lib/components/Icon.svelte';
   import { ctxMenu } from '../../../lib/contextmenu.svelte';
   import type { ApprovalDecision, ApprovalOption, RequestKind } from '../../../lib/api/types';
@@ -13,8 +14,9 @@
   interface Props {
     approval: PendingApproval;
     onrespond: (requestId: string, decision: ApprovalDecision) => Promise<void>;
+    inline?: boolean;
   }
-  let { approval, onrespond }: Props = $props();
+  let { approval, onrespond, inline = false }: Props = $props();
 
   const LABELS: Record<RequestKind, string> = {
     command: 'Command approval',
@@ -51,11 +53,13 @@
   }
 </script>
 
-<div class="ra" role="group" aria-label={LABELS[approval.kind]} data-testid="runtime-approval-{approval.requestId}">
-  <div class="ra-head">
-    <Icon name="shield" size={13} />
-    <code class="ra-detail" dir="auto">{approval.prompt || LABELS[approval.kind]}</code>
-  </div>
+<div class="ra" class:inline role="group" aria-label={LABELS[approval.kind]} data-testid="runtime-approval-{approval.requestId}">
+  {#if !inline}
+    <div class="ra-head">
+      <Icon name="shield" size={13} />
+      <code class="ra-detail" dir="auto">{approval.prompt || LABELS[approval.kind]}</code>
+    </div>
+  {/if}
   {#if approval.reason}<p class="ra-reason" dir="auto">{approval.reason}</p>{/if}
   <div class="ra-actions">
     {#if approval.canRespond}
@@ -101,6 +105,14 @@
     border-radius: var(--radius-m);
     background: var(--warning-soft);
     font-size: var(--fs-s);
+  }
+  .ra.inline {
+    margin-block: 2px 6px;
+    margin-inline-start: 22px;
+    padding: 6px 8px;
+  }
+  .ra.inline :is(.ra-reason, .ra-actions) {
+    padding-inline-start: 0;
   }
   .ra-head {
     display: flex;

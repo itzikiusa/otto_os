@@ -246,6 +246,32 @@
     !compact && !threads.inspectorOpen && !threadsChrome.terminalOpen && !threadsChrome.stageView && centerWidth >= 1100,
   );
   const showStageCard = $derived(cardRoom && threadsChrome.cardVisible);
+  // Over a conversation the card is T3's header popover (ThreadDetailsCard's
+  // popover mode): opened from the toolbar, closed by an outside click or
+  // Esc, never left pinned over the timeline.
+  let cardOpen = $state(false);
+  const cardPopover = $derived(cardOpen && !compact && !threads.inspectorOpen && !showWelcomeStage && !threadsChrome.stageView);
+  // T3's inline placement: where the column can spare it, the conversation
+  // makes room beside the open card; where it can't, the card docks above
+  // the timeline and pushes it down. It never runs over a message.
+  const cardReserve = $derived(cardPopover && centerWidth >= 840);
+  $effect(() => {
+    if (!cardPopover) return;
+    const onDown = (e: PointerEvent): void => {
+      const t = e.target as Element | null;
+      // Menus and sheets the card opens live outside it.
+      if (!t?.closest('.th-card-pop, [data-testid="threads-toggle-card"], .ctx-menu, [role="dialog"]')) cardOpen = false;
+    };
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape' && !document.querySelector('.ctx-menu, [role="dialog"]')) cardOpen = false;
+    };
+    window.addEventListener('pointerdown', onDown, true);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('pointerdown', onDown, true);
+      window.removeEventListener('keydown', onKey);
+    };
+  });
 
   function openLayoutMenu(e: MouseEvent): void {
     const items: MenuItem[] = [
@@ -343,14 +369,15 @@
         <button
           type="button"
           class="icon-btn"
-          class:th-btn-on={threadsChrome.cardVisible}
+          class:th-btn-on={showWelcomeStage ? threadsChrome.cardVisible : cardPopover}
           data-overflow="2"
-          aria-pressed={threadsChrome.cardVisible}
+          aria-pressed={showWelcomeStage ? threadsChrome.cardVisible : undefined}
+          aria-expanded={showWelcomeStage ? undefined : cardPopover}
           aria-label="Toggle project card"
           title="Project card (folder, branch, PR, changes)"
           data-icon="note"
           data-testid="threads-toggle-card"
-          onclick={() => threadsChrome.toggleCard()}
+          onclick={() => (showWelcomeStage ? threadsChrome.toggleCard() : (cardOpen = !cardPopover))}
         >
           <Icon name="note" size={14} />
         </button>
@@ -431,15 +458,15 @@
       {/if}
 
       <div class="th-center-col" class:th-hidden={maximized} bind:clientWidth={centerWidth}>
-        <div class="th-stage">
+        <div class="th-stage" class:th-card-reserve={cardReserve}>
           {#if threadsChrome.stageView === 'prs'}
             <LazyMount lazy={PullRequestsView} what="pull requests" variant="panel" props={{ repo: contextRepo }} />
           {:else if showWelcomeStage}
             <NewThreadStage showCard={showStageCard} />
           {:else}
             <ThreadCanvas onstartroom={(sid) => (roomSessionId = sid)} />
-            {#if showStageCard && contextCwd && threads.layoutMode === 'single'}
-              <div class="th-card-float"><ThreadProjectCard floating cwd={contextCwd} /></div>
+            {#if cardPopover && contextCwd}
+              <div class="th-card-pop" class:docked={!cardReserve}><ThreadProjectCard floating cwd={contextCwd} /></div>
             {/if}
           {/if}
         </div>
@@ -559,11 +586,25 @@
     display: flex;
     flex-direction: column;
   }
-  .th-card-float {
+  .th-card-pop.docked {
+    position: static;
+    order: -1;
+    flex-shrink: 0;
+    max-block-size: 50%;
+    margin-block: 8px 0;
+    margin-inline: auto 12px;
+  }
+  .th-stage.th-card-reserve {
+    padding-inline-end: 324px;
+  }
+  .th-card-pop {
     position: absolute;
-    inset-block-start: 16px;
-    inset-inline-end: 16px;
-    inline-size: 300px;
+    inset-block-start: 8px;
+    inset-inline-end: 12px;
+    inline-size: min(300px, calc(100% - 24px));
+    max-block-size: calc(100% - 16px);
+    overflow-y: auto;
+    border-radius: var(--radius-l);
     z-index: var(--z-sticky);
   }
   .th-center-col.th-hidden {
