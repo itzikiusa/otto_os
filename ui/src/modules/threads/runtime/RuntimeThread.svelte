@@ -133,8 +133,10 @@
     if (!atBottom) return;
     void tick().then(() => scroller?.scrollTo({ top: scroller.scrollHeight }));
   });
+  // Focus the composer when the pane becomes the focused one (not per event).
   $effect(() => {
-    if (focused && p) composerEl?.focus({ preventScroll: true });
+    const el = composerEl;
+    if (focused && el) untrack(() => el.focus({ preventScroll: true }));
   });
 </script>
 

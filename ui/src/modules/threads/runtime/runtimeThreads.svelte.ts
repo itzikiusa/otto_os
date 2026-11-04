@@ -162,10 +162,11 @@ class RuntimeThreads {
   }
 
   private onEvent(ev: RuntimeEvent): void {
+    // The row follows status / turn changes only — not every streamed chunk.
     const row = this.byId[ev.session_id];
-    if (row) {
+    if (row && row.status !== 'closed' && (ev.type === 'provider_session.updated' || ev.type === 'provider_turn.updated')) {
       const status = ev.type === 'provider_session.updated' ? SESSION_STATUS[ev.provider_session.status] : row.status;
-      this.byId[ev.session_id] = { ...row, status: row.status === 'closed' ? 'closed' : status, last_active_at: ev.ts };
+      this.byId[ev.session_id] = { ...row, status, last_active_at: ev.ts };
     }
     const view = this.views.get(ev.session_id);
     if (!view) return;
