@@ -346,6 +346,34 @@ test('runtime polish: RTL, project card, grouped tools, folded approvals, access
   await expect(bubble).toBeVisible({ timeout: 30_000 });
   await page.getByTestId('threads-toggle-card').click();
   await expect(card).toBeVisible();
+  // The user's window: a ~810 px centre column can't spare the card's width,
+  // so the card docks above the timeline instead of covering it (LTR + RTL).
+  await page.setViewportSize({ width: 1130, height: 900 });
+  for (const dir of ['ltr', 'rtl'] as const) {
+    if (dir === 'rtl') {
+      await page.evaluate(() => localStorage.setItem('otto_direction', 'rtl'));
+      await page.reload();
+      await expect(bubble).toBeVisible({ timeout: 30_000 });
+      await page.getByTestId('threads-toggle-card').click();
+    }
+    const centre = (await page.locator('.th-center-col').boundingBox())!;
+    expect(centre.width, 'centre column width').toBeGreaterThanOrEqual(800);
+    expect(centre.width, 'centre column width').toBeLessThanOrEqual(830);
+    await expectFullyInViewport(page, card, `project card (${dir}, narrow)`);
+    const c = (await card.boundingBox())!;
+    for (const el of [bubble, answer, thread.locator('.rt-work').first(), thread.getByTestId('runtime-composer')]) {
+      const b = (await el.boundingBox())!;
+      const overlaps = b.x < c.x + c.width && c.x < b.x + b.width && b.y < c.y + c.height && c.y < b.y + b.height;
+      expect(overlaps, `a message runs under the project card (${dir}, narrow)`).toBe(false);
+    }
+    await page.screenshot({ path: info.outputPath(`runtime-card-narrow-${dir}.png`), animations: 'disabled' });
+  }
+  await page.evaluate(() => localStorage.removeItem('otto_direction'));
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.reload();
+  await expect(bubble).toBeVisible({ timeout: 30_000 });
+  await page.getByTestId('threads-toggle-card').click();
+  await expect(card).toBeVisible();
   // Outside click closes it (and Esc after reopening).
   await thread.locator('.rt-col').click({ position: { x: 10, y: 10 } });
   await expect(card).toHaveCount(0);

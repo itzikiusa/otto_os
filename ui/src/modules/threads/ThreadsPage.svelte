@@ -252,7 +252,8 @@
   let cardOpen = $state(false);
   const cardPopover = $derived(cardOpen && !compact && !threads.inspectorOpen && !showWelcomeStage && !threadsChrome.stageView);
   // T3's inline placement: where the column can spare it, the conversation
-  // makes room for the open card instead of running under it.
+  // makes room beside the open card; where it can't, the card docks above
+  // the timeline and pushes it down. It never runs over a message.
   const cardReserve = $derived(cardPopover && centerWidth >= 840);
   $effect(() => {
     if (!cardPopover) return;
@@ -465,7 +466,7 @@
           {:else}
             <ThreadCanvas onstartroom={(sid) => (roomSessionId = sid)} />
             {#if cardPopover && contextCwd}
-              <div class="th-card-pop"><ThreadProjectCard floating cwd={contextCwd} /></div>
+              <div class="th-card-pop" class:docked={!cardReserve}><ThreadProjectCard floating cwd={contextCwd} /></div>
             {/if}
           {/if}
         </div>
@@ -584,6 +585,14 @@
     min-height: 0;
     display: flex;
     flex-direction: column;
+  }
+  .th-card-pop.docked {
+    position: static;
+    order: -1;
+    flex-shrink: 0;
+    max-block-size: 50%;
+    margin-block: 8px 0;
+    margin-inline: auto 12px;
   }
   .th-stage.th-card-reserve {
     padding-inline-end: 324px;
