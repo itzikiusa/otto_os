@@ -2,8 +2,9 @@
 
 Status: the daemon side is done: the event model, contracts, runtime, and
 drivers for Claude, Codex, Gemini and Grok. Tests use a fake ACP agent and a
-fake `codex app-server`. The Threads UI still renders PTY sessions; moving it
-onto `/runtime-sessions` is the next step (§9). PTY sessions are unchanged.
+fake `codex app-server`. New Claude / Codex / Gemini / Grok threads in a
+workspace run on `/runtime-sessions` (§5); Scratch threads, other harnesses
+and existing threads stay on the PTY view, which is unchanged.
 
 **Attribution.** Ported from [T3 Code](https://github.com/pingdotgg/t3code)
 (MIT, Copyright (c) 2026 T3 Tools Inc.). The licence is reproduced in
@@ -414,10 +415,18 @@ None of the four drivers passes a skip-permissions flag. Claude:
 | `crates/otto-agent-protocol/src/bin/otto-fake-{agent,codex}.rs` | test doubles (ACP agent, `codex app-server`) |
 | `crates/otto-state/src/agent_runtime.rs`, migration `0197_agent_runtime.sql` | persistence |
 | `ui/src/lib/api/types/agent-runtime.ts` | TS mirror |
+| `ui/src/modules/threads/runtime/projection.ts` | event fold + derivations (T3 Code's projection reducer, pending requests, phase) |
+| `ui/src/modules/threads/runtime/runtimeThreads.svelte.ts` | session rows, live subscription, replay after a gap / reconnect |
+| `ui/src/modules/threads/runtime/Runtime{Thread,WorkRow,ApprovalRow}.svelte` | timeline, work-log rows, inline approvals, composer with Stop and a queued follow-up |
+| `ui/e2e/desktop-threads-runtime.spec.ts` | E2E against `otto-fake-codex` (global-setup's codex shim execs it for `app-server`) |
 
 ## 9. Gaps and next steps
 
-- **Threads UI** on `/runtime-sessions`: the work in §5.
+- **Scratch.** The scratch workspace only serves the PTY session family
+  (`routes/mod.rs` scratch gate), so Scratch threads stay PTY threads.
+- **Threads UI gaps:** closed runtime threads are hidden (no History
+  entry, no rename); no attachments, slash commands or side chat; the
+  terminal drawer and Changes/PR panels are the PTY thread's.
 - **`ottod` teardown** calling `AgentRuntime::shutdown()`, and eviction of
   idle live entries.
 - **Runtime modes.** auto-accept-edits and full-access are unported; they
