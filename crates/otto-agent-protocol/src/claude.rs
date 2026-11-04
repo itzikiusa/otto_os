@@ -20,7 +20,8 @@
 //!   {subtype:"initialize"}}` first; `can_use_tool` requests from the CLI
 //!   answered with `{type:"control_response", response:{subtype:"success",
 //!   request_id, response: PermissionResult}}`; `{subtype:"interrupt"}` to
-//!   stop; `control_cancel_request` withdraws a pending question.
+//!   stop; `control_cancel_request` withdraws a pending question. Like the
+//!   SDK, the prompt is written right away; the CLI reads stdin in order.
 //! * decisions — `permissionResultFromDecision` (`ClaudeAdapterV2.ts:
 //!   3502-3545`): accept → `allow` + the original input; accept-for-session →
 //!   `allow` + `updatedPermissions` (the CLI's suggestions re-targeted at
@@ -43,16 +44,15 @@
 
 use std::collections::HashMap;
 
-use chrono::Utc;
 use otto_core::agent_runtime::{
-    ApprovalDecision, ApprovalOption, PlanArtifact, PlanStep, PlanStepStatus, ProviderFailure,
-    RequestKind, ResponseCapability, RuntimeProvider, RuntimeRequest, RuntimeRequestStatus,
-    TurnItem, TurnItemKind, TurnItemStatus, TurnTerminalStatus, TurnTokenUsage,
+    ApprovalDecision, ApprovalOption, PlanStep, PlanStepStatus, ProviderFailure, RequestKind,
+    RuntimeProvider, RuntimeRequestStatus, TurnItem, TurnItemKind, TurnItemStatus,
+    TurnTerminalStatus, TurnTokenUsage,
 };
 use serde_json::{json, Value};
 
 use crate::driver::{
-    DriverError, DriverEvent, DriverStep, LaunchContext, LaunchSpec, StructuredDriver,
+    item, DriverError, DriverEvent, DriverStep, LaunchContext, LaunchSpec, StructuredDriver,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,9 +116,7 @@ pub struct ClaudeDriver {
     session_id: Option<String>,
     next_req: u64,
     init_req: Option<String>,
-    ready: bool,
     turn_id: Option<String>,
-    queued: Option<String>,
     /// Streamed content blocks of the current message, by block index.
     blocks: HashMap<u64, Block>,
     message_id: Option<String>,
@@ -137,19 +135,13 @@ impl Default for ClaudeDriver {
 
 impl ClaudeDriver {
     pub fn new() -> Self {
-        Self::with_program("claude")
-    }
-
-    pub fn with_program(program: impl Into<String>) -> Self {
         Self {
-            program: program.into(),
+            program: "claude".into(),
             fresh_session_id: uuid::Uuid::new_v4().to_string(),
             session_id: None,
             next_req: 0,
             init_req: None,
-            ready: false,
             turn_id: None,
-            queued: None,
             blocks: HashMap::new(),
             message_id: None,
             streamed: Vec::new(),
@@ -172,27 +164,6 @@ impl ClaudeDriver {
 
     fn turn(&self) -> String {
         self.turn_id.clone().unwrap_or_default()
-    }
-
-    fn item(
-        &self,
-        id: String,
-        status: TurnItemStatus,
-        title: Option<String>,
-        kind: TurnItemKind,
-    ) -> TurnItem {
-        let now = Utc::now();
-        TurnItem {
-            id,
-            turn_id: self.turn_id.clone(),
-            ordinal: 0,
-            status,
-            title,
-            started_at: Some(now),
-            completed_at: (!status.is_open()).then_some(now),
-            updated_at: now,
-            kind,
-        }
     }
 
     fn send_user(&mut self, step: &mut DriverStep, text: String) {
@@ -224,7 +195,7 @@ impl ClaudeDriver {
                 streaming,
             },
         };
-        self.item(b.item_id.clone(), status, None, kind)
+        item(b.item_id.clone(), status, None, kind)
     }
 
     fn close_blocks(&mut self, step: &mut DriverStep) {
@@ -326,7 +297,7 @@ impl ClaudeDriver {
                 output: t.output.clone(),
             },
         };
-        self.item(
+        item(
             format!("{}:tool:{id}", self.turn()),
             t.status,
             Some(t.name.clone()),
@@ -358,23 +329,10 @@ impl ClaudeDriver {
                     .collect()
             })
             .unwrap_or_default();
-        let plan_id = format!("{}:plan", self.turn());
-        step.push(DriverEvent::Plan(PlanArtifact {
-            id: plan_id.clone(),
-            turn_id: self.turn_id.clone(),
-            steps: steps.clone(),
+        step.push(DriverEvent::Plan {
+            steps,
             explanation: None,
-        }));
-        step.push(DriverEvent::TurnItem(self.item(
-            plan_id.clone(),
-            TurnItemStatus::Running,
-            None,
-            TurnItemKind::TodoList {
-                plan_id,
-                steps,
-                explanation: None,
-            },
-        )));
+        });
     }
 
     fn on_assistant(&mut self, step: &mut DriverStep, msg: &Value) {
@@ -501,17 +459,6 @@ impl ClaudeDriver {
             .get("decision_reason")
             .and_then(Value::as_str)
             .map(str::to_string);
-        let now = Utc::now();
-        let request = RuntimeRequest {
-            id: request_id.clone(),
-            turn_id: self.turn_id.clone(),
-            kind,
-            status: RuntimeRequestStatus::Pending,
-            response_capability: ResponseCapability::Live,
-            created_at: now,
-            resolved_at: None,
-            decision: None,
-        };
         let options = vec![
             ApprovalOption {
                 decision: ApprovalDecision::Accept,
@@ -526,20 +473,8 @@ impl ClaudeDriver {
                 label: "Deny".into(),
             },
         ];
-        let item = self.item(
-            format!("{}:approval:{request_id}", self.turn()),
-            TurnItemStatus::Waiting,
-            Some(title),
-            TurnItemKind::ApprovalRequest {
-                request_id: request_id.clone(),
-                request_kind: kind,
-                prompt: Some(prompt),
-                reason,
-                options,
-            },
-        );
         self.pending.insert(
-            request_id,
+            request_id.clone(),
             Pending {
                 cli_request_id: cli_request_id.to_string(),
                 tool_name,
@@ -555,7 +490,14 @@ impl ClaudeDriver {
                     .unwrap_or_default(),
             },
         );
-        step.push(DriverEvent::Request { request, item });
+        step.push(DriverEvent::Request {
+            id: request_id,
+            kind,
+            title: Some(title),
+            prompt: Some(prompt),
+            reason,
+            options,
+        });
     }
 
     /// `permissionResultFromDecision` (`ClaudeAdapterV2.ts:3502-3545`).
@@ -608,8 +550,7 @@ impl ClaudeDriver {
 
     fn on_result(&mut self, step: &mut DriverStep, msg: &Value) {
         self.close_blocks(step);
-        let now_open: Vec<(String, Tool)> = self.tools.drain().collect();
-        drop(now_open);
+        self.tools.clear();
         if let Some(u) = msg.get("usage") {
             let n = |k: &str| u.get(k).and_then(Value::as_u64).unwrap_or(0);
             let cached = n("cache_read_input_tokens");
@@ -640,7 +581,7 @@ impl ClaudeDriver {
         }
         self.init_req = None;
         if resp.get("subtype").and_then(Value::as_str) == Some("error") {
-            let f = ProviderFailure {
+            step.push(DriverEvent::Error(ProviderFailure {
                 class: "handshake_error".into(),
                 message: resp
                     .get("error")
@@ -649,25 +590,13 @@ impl ClaudeDriver {
                     .to_string(),
                 code: None,
                 retryable: None,
-            };
-            step.push(DriverEvent::Error(f.clone()));
-            if self.queued.take().is_some() {
-                step.push(DriverEvent::Terminal {
-                    status: TurnTerminalStatus::Failed,
-                    failure: Some(f),
-                    reason: None,
-                });
-            }
+            }));
             return;
         }
-        self.ready = true;
         step.push(DriverEvent::Ready {
             native_thread_id: self.session_id.clone(),
             model: None,
         });
-        if let Some(text) = self.queued.take() {
-            self.send_user(step, text);
-        }
     }
 }
 
@@ -794,12 +723,10 @@ impl StructuredDriver for ClaudeDriver {
             return Err(DriverError("a prompt is already running".into()));
         }
         self.turn_id = Some(turn_id.to_string());
+        // The CLI reads stdin in order: the prompt may follow `initialize`
+        // before its answer (as the SDK streams it).
         let mut step = DriverStep::default();
-        if self.ready {
-            self.send_user(&mut step, text.to_string());
-        } else {
-            self.queued = Some(text.to_string());
-        }
+        self.send_user(&mut step, text.to_string());
         Ok(step)
     }
 
@@ -812,15 +739,6 @@ impl StructuredDriver for ClaudeDriver {
         for (_, p) in open {
             let r = Self::permission_result(&p, ApprovalDecision::Cancel);
             step.write(Self::control_success(&p.cli_request_id, r));
-        }
-        if self.queued.take().is_some() {
-            self.turn_id = None;
-            step.push(DriverEvent::Terminal {
-                status: TurnTerminalStatus::Interrupted,
-                failure: None,
-                reason: None,
-            });
-            return step;
         }
         let (_, line) = self.control_request(json!({"subtype": "interrupt"}));
         step.write(line);
@@ -976,16 +894,10 @@ mod tests {
     }
 
     #[test]
-    fn prompt_waits_for_initialize_then_streams_text_and_completes() {
+    fn prompt_streams_text_and_completes() {
         let mut d = ClaudeDriver::new();
-        let _ = d.start(&ctx(None));
+        ready(&mut d);
         let s = d.prompt("t1", "hi").unwrap();
-        assert!(s.writes.is_empty(), "queued until initialize answers");
-        let rid = format!("otto-{}", d.next_req);
-        let s = feed(
-            &mut d,
-            json!({"type":"control_response","response":{"subtype":"success","request_id":rid,"response":{}}}),
-        );
         let user: Value = serde_json::from_str(&s.writes[0]).unwrap();
         assert_eq!(user["message"]["content"][0]["text"], "hi");
         feed(
@@ -1059,12 +971,11 @@ mod tests {
         );
         let ask = json!({"type":"control_request","request_id":"r1","request":{"subtype":"can_use_tool","tool_name":"Write","input":{"file_path":"/w/a.txt","content":"x"},"permission_suggestions":[{"type":"setMode","mode":"acceptEdits","destination":"session"}],"tool_use_id":"tu1"}});
         let s = feed(&mut d, ask.clone());
-        let DriverEvent::Request { request, item } = &s.events[0] else {
+        let DriverEvent::Request { id, kind, .. } = &s.events[0] else {
             panic!()
         };
-        assert_eq!(request.kind, RequestKind::FileChange);
-        assert_eq!(request.id, "claude-r1");
-        assert_eq!(item.status, TurnItemStatus::Waiting);
+        assert_eq!(*kind, RequestKind::FileChange);
+        assert_eq!(id, "claude-r1");
         // accept-for-session never forwards the setMode suggestion.
         let s = d
             .respond("claude-r1", ApprovalDecision::AcceptForSession)
@@ -1144,11 +1055,11 @@ mod tests {
             &mut d,
             json!({"type":"assistant","message":{"id":"m2","content":[{"type":"tool_use","id":"tu2","name":"TodoWrite","input":{"todos":[{"content":"a","status":"in_progress"},{"content":"b","status":"pending"}]}}]},"parent_tool_use_id":null}),
         );
-        let DriverEvent::Plan(p) = &s.events[0] else {
+        let DriverEvent::Plan { steps, .. } = &s.events[0] else {
             panic!()
         };
-        assert_eq!(p.steps.len(), 2);
-        assert_eq!(p.steps[0].status, PlanStepStatus::Running);
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[0].status, PlanStepStatus::Running);
         // Subagent frames are not projected.
         let s = feed(
             &mut d,

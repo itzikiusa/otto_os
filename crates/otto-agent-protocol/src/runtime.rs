@@ -32,7 +32,7 @@ use otto_state::{AgentRuntimeRepo, NewRuntimeSession, RuntimeEntityRow};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::driver::{
-    ChildSignal, DriverEvent, DriverFactory, DriverStep, LaunchContext, StructuredDriver,
+    item, ChildSignal, DriverEvent, DriverFactory, DriverStep, LaunchContext, StructuredDriver,
 };
 use crate::host::RuntimeHost;
 use crate::process::{signal_group, spawn_child, ChildCommand, ChildMsg};
@@ -620,24 +620,16 @@ impl AgentRuntime {
                 provider_turn: turn,
             },
         );
-        upsert_item(
-            &self.inner,
-            &live,
-            &mut st,
-            TurnItem {
-                id: format!("{turn_id}:user"),
-                turn_id: Some(turn_id.clone()),
-                ordinal: 0,
-                status: TurnItemStatus::Completed,
-                title: None,
-                started_at: Some(now),
-                completed_at: Some(now),
-                updated_at: now,
-                kind: TurnItemKind::UserMessage {
-                    text: text.to_string(),
-                },
+        let mut user = item(
+            format!("{turn_id}:user"),
+            TurnItemStatus::Completed,
+            None,
+            TurnItemKind::UserMessage {
+                text: text.to_string(),
             },
         );
+        user.turn_id = Some(turn_id.clone());
+        upsert_item(&self.inner, &live, &mut st, user);
         set_session_status(
             &self.inner,
             &live,
@@ -1167,11 +1159,28 @@ fn apply_step(inner: &Inner, live: &Live, st: &mut State, step: DriverStep) {
                 }
                 upsert_item(inner, live, st, item);
             }
-            DriverEvent::Plan(mut plan) => {
-                if plan.turn_id.is_none() {
-                    plan.turn_id = st.turn.as_ref().map(|t| t.id.clone());
-                }
+            DriverEvent::Plan { steps, explanation } => {
+                let turn_id = st.turn.as_ref().map(|t| t.id.clone());
+                let id = format!("{}:plan", turn_id.as_deref().unwrap_or_default());
+                let plan = PlanArtifact {
+                    id: id.clone(),
+                    turn_id: turn_id.clone(),
+                    steps: steps.clone(),
+                    explanation: explanation.clone(),
+                };
                 emit(inner, live, st, RuntimeEventBody::PlanUpdated { plan });
+                let mut todo = item(
+                    id.clone(),
+                    TurnItemStatus::Running,
+                    None,
+                    TurnItemKind::TodoList {
+                        plan_id: id,
+                        steps,
+                        explanation,
+                    },
+                );
+                todo.turn_id = turn_id;
+                upsert_item(inner, live, st, todo);
             }
             DriverEvent::CommandOutput { item_id, chunk } => {
                 emit(
@@ -1182,12 +1191,37 @@ fn apply_step(inner: &Inner, live: &Live, st: &mut State, step: DriverStep) {
                 );
             }
             DriverEvent::Request {
-                mut request,
-                mut item,
+                id,
+                kind,
+                title,
+                prompt,
+                reason,
+                options,
             } => {
                 let turn_id = st.turn.as_ref().map(|t| t.id.clone());
-                request.turn_id = request.turn_id.or(turn_id.clone());
-                item.turn_id = item.turn_id.or(turn_id);
+                let request = RuntimeRequest {
+                    id: id.clone(),
+                    turn_id: turn_id.clone(),
+                    kind,
+                    status: RuntimeRequestStatus::Pending,
+                    response_capability: ResponseCapability::Live,
+                    created_at: Utc::now(),
+                    resolved_at: None,
+                    decision: None,
+                };
+                let mut item = item(
+                    format!("{}:approval:{id}", turn_id.as_deref().unwrap_or_default()),
+                    TurnItemStatus::Waiting,
+                    title.clone(),
+                    TurnItemKind::ApprovalRequest {
+                        request_id: id,
+                        request_kind: kind,
+                        prompt: prompt.or(title),
+                        reason,
+                        options,
+                    },
+                );
+                item.turn_id = turn_id;
                 emit(
                     inner,
                     live,
@@ -1262,23 +1296,14 @@ fn apply_step(inner: &Inner, live: &Live, st: &mut State, step: DriverStep) {
                 finish_turn(inner, live, st, status, failure, reason);
             }
             DriverEvent::Error(failure) => {
-                let now = Utc::now();
-                upsert_item(
-                    inner,
-                    live,
-                    st,
-                    TurnItem {
-                        id: new_id(),
-                        turn_id: st.turn.as_ref().map(|t| t.id.clone()),
-                        ordinal: 0,
-                        status: TurnItemStatus::Failed,
-                        title: None,
-                        started_at: Some(now),
-                        completed_at: Some(now),
-                        updated_at: now,
-                        kind: TurnItemKind::Error { failure },
-                    },
+                let mut e = item(
+                    new_id(),
+                    TurnItemStatus::Failed,
+                    None,
+                    TurnItemKind::Error { failure },
                 );
+                e.turn_id = st.turn.as_ref().map(|t| t.id.clone());
+                upsert_item(inner, live, st, e);
             }
         }
     }

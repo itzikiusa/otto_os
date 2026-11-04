@@ -13,8 +13,9 @@
 //! resolution and cancellation, and the process-death terminal.
 
 use otto_core::agent_runtime::{
-    ApprovalDecision, PlanArtifact, ProviderFailure, RuntimeProvider, RuntimeRequest,
-    RuntimeRequestStatus, ThreadTokenUsage, TurnItem, TurnTerminalStatus, TurnTokenUsage,
+    ApprovalDecision, ApprovalOption, PlanStep, ProviderFailure, RequestKind, RuntimeProvider,
+    RuntimeRequestStatus, ThreadTokenUsage, TurnItem, TurnItemKind, TurnItemStatus,
+    TurnTerminalStatus, TurnTokenUsage,
 };
 
 #[derive(Debug, Clone)]
@@ -58,17 +59,26 @@ pub enum DriverEvent {
         native_thread_id: Option<String>,
         model: Option<String>,
     },
-    /// Upsert a timeline item. `ordinal` is ignored (the runtime assigns it).
+    /// Upsert a timeline item. `ordinal` and a missing `turn_id` are filled
+    /// in by the runtime.
     TurnItem(TurnItem),
-    Plan(PlanArtifact),
+    /// The turn's plan: `plan.updated` plus its `todo_list` item.
+    Plan {
+        steps: Vec<PlanStep>,
+        explanation: Option<String>,
+    },
     CommandOutput {
         item_id: String,
         chunk: String,
     },
-    /// A new pending request plus its `approval_request` item.
+    /// A new pending request; the runtime adds its `approval_request` item.
     Request {
-        request: RuntimeRequest,
-        item: TurnItem,
+        id: String,
+        kind: RequestKind,
+        title: Option<String>,
+        prompt: Option<String>,
+        reason: Option<String>,
+        options: Vec<ApprovalOption>,
     },
     /// The provider withdrew or settled an open request itself (Claude
     /// `control_cancel_request`, Codex `serverRequest/resolved`).
@@ -103,6 +113,49 @@ impl DriverStep {
 
     pub fn write(&mut self, line: String) {
         self.writes.push(line);
+    }
+}
+
+/// A timeline item as drivers build it (the runtime sets ordinal + turn).
+pub fn item(
+    id: String,
+    status: TurnItemStatus,
+    title: Option<String>,
+    kind: TurnItemKind,
+) -> TurnItem {
+    let now = chrono::Utc::now();
+    TurnItem {
+        id,
+        turn_id: None,
+        ordinal: 0,
+        status,
+        title,
+        started_at: Some(now),
+        completed_at: (!status.is_open()).then_some(now),
+        updated_at: now,
+        kind,
+    }
+}
+
+/// A JSON-RPC id as a map key.
+pub fn rpc_key(id: &serde_json::Value) -> String {
+    match id {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// A JSON-RPC `error` object as a failure.
+pub fn rpc_failure(class: &str, e: &serde_json::Value) -> ProviderFailure {
+    ProviderFailure {
+        class: class.into(),
+        message: e
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("agent error")
+            .to_string(),
+        code: e.get("code").map(|c| c.to_string()),
+        retryable: None,
     }
 }
 

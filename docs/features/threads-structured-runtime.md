@@ -148,13 +148,14 @@ The framing is newline-delimited JSON-RPC **without** a `"jsonrpc"` member:
    |---|---|---|
    | `item/commandExecution/requestApproval` | command | `{decision: accept \| acceptForSession \| decline \| cancel}` |
    | `item/fileChange/requestApproval` | file-change | same as above |
-   | `execCommandApproval`, `applyPatchApproval` (legacy) | command, file-change | `approved \| approved_for_session \| denied \| abort` (`:576-590`) |
    | `item/permissions/requestApproval` | permission | the requested profile with scope `turn` / `session`, or an empty profile (`:609-621`) |
 
    `serverRequest/resolved` closes a request that Codex settled itself.
    `requestUserInput`, elicitations, dynamic tool calls and auth refresh get
    JSON-RPC `-32601`; Otto's client does not offer them.
-7. **Interrupt.** Open requests are answered `cancel` / `abort`. Then Otto
+   The v1 `execCommandApproval` / `applyPatchApproval` (`:576-590`) belong
+   to the conversation API that Otto does not use.
+7. **Interrupt.** Open requests are answered `cancel`. Then Otto
    sends `turn/interrupt {threadId, turnId}` (`:7567`); if the Codex turn id
    is not known yet, it is sent once `turn/start` answers.
 

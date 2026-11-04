@@ -130,7 +130,7 @@ fn drivers() -> Arc<dyn DriverFactory> {
     Arc::new(|p: RuntimeProvider| -> Option<Box<dyn StructuredDriver>> {
         Some(match p {
             RuntimeProvider::Codex => Box::new(CodexDriver::with_program(FAKE_CODEX)),
-            _ => Box::new(AcpDriver::new(p, FAKE, Vec::new(), Vec::new())),
+            _ => Box::new(AcpDriver::new(p, FAKE, Vec::new())),
         })
     })
 }
