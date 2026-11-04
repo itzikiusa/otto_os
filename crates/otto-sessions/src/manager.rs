@@ -2051,57 +2051,10 @@ impl SessionManager {
     /// files remain identity-neutral; every provider's MCP child inherits this
     /// session's own credential from its parent process.
     async fn maybe_enable_otto_tools(&self, session: &Session) -> OttoToolsInjection {
-        if !self.otto_mcp_enabled(&session.workspace_id).await {
+        let Some((token, server)) = self.mint_otto_tools(session).await else {
             return OttoToolsInjection::default();
-        }
-        let Some(auth) = &self.auth else {
-            return OttoToolsInjection::default(); // feature wired off (no token minter)
         };
-        // Durable session ownership survives daemon restarts. Do not mint a
-        // replacement if revocation failed, or credentials would accumulate.
-        if let Err(e) = self
-            .revoke_mcp_token(&session.created_by, &session.id)
-            .await
-        {
-            tracing::warn!(session = %session.id, "otto MCP token rotation failed: {e}");
-            return OttoToolsInjection::default();
-        }
-        // Mint a per-session token for the owner. Labeled so it is identifiable
-        // in the token list and revoked on session removal.
-        let label = format!("otto-mcp:{}", session.id);
-        let reviewer = session
-            .meta
-            .get("source")
-            .and_then(serde_json::Value::as_str)
-            == Some("vault-docs-review");
-        let issued = if reviewer {
-            auth.issue_vault_reviewer_token(
-                &session.created_by,
-                Some(&label),
-                &session.id,
-                &session.workspace_id,
-            )
-            .await
-        } else {
-            auth.issue_session_api_token(&session.created_by, &session.id)
-                .await
-                .map(|(token, info)| (token, info.id))
-        };
-        let (token, token_id) = match issued {
-            Ok(pair) => pair,
-            Err(e) => {
-                tracing::warn!("otto MCP tools: mint token failed: {e}");
-                return OttoToolsInjection::default();
-            }
-        };
-        self.mcp_tokens.insert(session.id.clone(), token_id);
-
-        let env = otto_tools_env(session, &token, &self.ingest_base);
-        let server = crate::mcp::OttoToolsServer {
-            command: self.mcp_tools_bin.clone(),
-            args: vec!["mcp-tools".to_string()],
-            env: env.clone(),
-        };
+        let env = server.env.clone();
         // Claude reads the identity-neutral workspace `.mcp.json`, agy its
         // `.agents/mcp_config.json`; both entries are written by the caller's
         // single per-spawn reconcile (`sync_workspace_mcp`, which receives
@@ -2147,6 +2100,67 @@ impl SessionManager {
             env,
             server: Some(server),
         }
+    }
+
+    /// Mint (rotating) this session's `otto` tool-server credential when the
+    /// workspace has Otto MCP on: the token plus the server launch spec whose
+    /// `env` carries it. `None` when the feature is off or minting failed
+    /// (logged). Provider-agnostic — no launcher file is touched.
+    async fn mint_otto_tools(
+        &self,
+        session: &Session,
+    ) -> Option<(String, crate::mcp::OttoToolsServer)> {
+        if !self.otto_mcp_enabled(&session.workspace_id).await {
+            return None;
+        }
+        let Some(auth) = &self.auth else {
+            return None; // feature wired off (no token minter)
+        };
+        // Durable session ownership survives daemon restarts. Do not mint a
+        // replacement if revocation failed, or credentials would accumulate.
+        if let Err(e) = self
+            .revoke_mcp_token(&session.created_by, &session.id)
+            .await
+        {
+            tracing::warn!(session = %session.id, "otto MCP token rotation failed: {e}");
+            return None;
+        }
+        // Mint a per-session token for the owner. Labeled so it is identifiable
+        // in the token list and revoked on session removal.
+        let label = format!("otto-mcp:{}", session.id);
+        let reviewer = session
+            .meta
+            .get("source")
+            .and_then(serde_json::Value::as_str)
+            == Some("vault-docs-review");
+        let issued = if reviewer {
+            auth.issue_vault_reviewer_token(
+                &session.created_by,
+                Some(&label),
+                &session.id,
+                &session.workspace_id,
+            )
+            .await
+        } else {
+            auth.issue_session_api_token(&session.created_by, &session.id)
+                .await
+                .map(|(token, info)| (token, info.id))
+        };
+        let (token, token_id) = match issued {
+            Ok(pair) => pair,
+            Err(e) => {
+                tracing::warn!("otto MCP tools: mint token failed: {e}");
+                return None;
+            }
+        };
+        self.mcp_tokens.insert(session.id.clone(), token_id);
+
+        let server = crate::mcp::OttoToolsServer {
+            command: self.mcp_tools_bin.clone(),
+            args: vec!["mcp-tools".to_string()],
+            env: otto_tools_env(session, &token, &self.ingest_base),
+        };
+        Some((token, server))
     }
 
     /// Revoke the per-session MCP token minted for `session_id` (if any), and
@@ -6239,6 +6253,7 @@ mod mcp_sync;
 mod otto_tools_env;
 #[path = "manager/runtime_spawn.rs"]
 mod runtime_spawn;
+pub use runtime_spawn::{RuntimeMcpDelivery, RuntimeMcpServer};
 #[path = "manager/session_files.rs"]
 mod session_files;
 #[path = "manager/shutdown_guard.rs"]

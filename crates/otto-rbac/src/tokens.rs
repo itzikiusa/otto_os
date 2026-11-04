@@ -40,6 +40,12 @@ use sqlx::Row;
 
 use crate::cache::AuthCache;
 
+/// A managed (agent-session) credential is only as alive as its session: a
+/// PTY session row, or an open structured runtime session (Threads) — both
+/// owned by the token's user. Binds `(id, owner, id, owner)`.
+const MANAGED_SESSION_EXISTS: &str = "SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ? AND created_by = ?) \
+     OR EXISTS(SELECT 1 FROM agent_runtime_sessions WHERE id = ? AND created_by = ? AND closed = 0)";
+
 /// Sliding expiry window for interactive (`kind='session'`) login tokens.
 const TOKEN_TTL_DAYS: i64 = 30;
 /// Fixed lifetime for `kind='api'` personal access tokens (~10 years). Long
@@ -305,14 +311,15 @@ impl AuthRepo {
             None
         };
         if let Some(sid) = &managed_session {
-            let exists: bool = sqlx::query_scalar(
-                "SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ? AND created_by = ?)",
-            )
-            .bind(sid)
-            .bind(row.get::<String, _>("id"))
-            .fetch_one(&self.pool)
-            .await
-            .map_err(|e| Error::Internal(format!("managed token session: {e}")))?;
+            let owner = row.get::<String, _>("id");
+            let exists: bool = sqlx::query_scalar(MANAGED_SESSION_EXISTS)
+                .bind(sid)
+                .bind(&owner)
+                .bind(sid)
+                .bind(&owner)
+                .fetch_one(&self.pool)
+                .await
+                .map_err(|e| Error::Internal(format!("managed token session: {e}")))?;
             if !exists {
                 return Err(Error::Unauthorized);
             }
@@ -625,14 +632,14 @@ impl AuthRepo {
         session_id: &Id,
         label: &str,
     ) -> Result<(String, ApiTokenInfo)> {
-        let exists: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ? AND created_by = ?)",
-        )
-        .bind(session_id)
-        .bind(user_id)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(|e| Error::Internal(format!("issue session token: {e}")))?;
+        let exists: bool = sqlx::query_scalar(MANAGED_SESSION_EXISTS)
+            .bind(session_id)
+            .bind(user_id)
+            .bind(session_id)
+            .bind(user_id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| Error::Internal(format!("issue session token: {e}")))?;
         if !exists {
             return Err(Error::Unauthorized);
         }

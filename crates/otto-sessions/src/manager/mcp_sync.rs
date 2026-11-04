@@ -28,43 +28,7 @@ impl SessionManager {
         otto_tools: Option<crate::mcp::OttoToolsServer>,
         codex_otto: bool,
     ) -> Vec<String> {
-        let (user_servers, lookup_error) = match &self.mcp_servers {
-            Some(provider) => {
-                // The provider is sync (its Db impl blocks on a bridge thread
-                // for the query + Keychain reads) — run it on the blocking pool
-                // so a spawn/restart never parks a tokio worker.
-                let provider = Arc::clone(provider);
-                let ws = session.workspace_id.clone();
-                let resolved = tokio::task::spawn_blocking(move || provider.enabled_servers(&ws))
-                    .await
-                    .unwrap_or_else(|e| Err(format!("mcp server lookup task failed: {e}")));
-                match resolved {
-                    Ok(specs) => (
-                        Some(
-                            specs
-                                .into_iter()
-                                .map(|s| crate::mcp::UserMcpServer {
-                                    name: s.name,
-                                    command: s.command,
-                                    args: s.args,
-                                    env: s.env,
-                                })
-                                .collect::<Vec<_>>(),
-                        ),
-                        None,
-                    ),
-                    Err(e) => {
-                        tracing::warn!(
-                            session = %session.id,
-                            workspace = %session.workspace_id,
-                            "enabled MCP servers unavailable; keeping the previously managed user entries: {e}"
-                        );
-                        (None, Some(e))
-                    }
-                }
-            }
-            None => (Some(Vec::new()), None),
-        };
+        let (user_servers, lookup_error) = self.resolve_user_mcp_servers(session).await;
         let session_browser = session
             .meta
             .get("browser")
@@ -217,6 +181,11 @@ impl SessionManager {
         // Snapshot-at-spawn: what this provider was actually given, what it
         // was not, plus the lookup fault if any (json_patch: a null clears a
         // stale error / skip list).
+        // A structured runtime session has no `sessions` row to snapshot into.
+        let structured = session.meta.get("runtime").and_then(|v| v.as_str()) == Some("structured");
+        if structured {
+            return codex_args;
+        }
         if let Err(e) = self
             .repo
             .merge_meta(
@@ -232,5 +201,52 @@ impl SessionManager {
             tracing::warn!(session = %session.id, "record MCP server snapshot: {e}");
         }
         codex_args
+    }
+
+    /// The workspace's ENABLED user MCP servers for `session` (Keychain
+    /// secrets resolved), or `(None, Some(error))` when the lookup failed —
+    /// "unknown", never "nothing enabled". Runs the sync resolver on the
+    /// blocking pool.
+    pub(super) async fn resolve_user_mcp_servers(
+        &self,
+        session: &Session,
+    ) -> (Option<Vec<crate::mcp::UserMcpServer>>, Option<String>) {
+        match &self.mcp_servers {
+            Some(provider) => {
+                // The provider is sync (its Db impl blocks on a bridge thread
+                // for the query + Keychain reads) — run it on the blocking pool
+                // so a spawn/restart never parks a tokio worker.
+                let provider = Arc::clone(provider);
+                let ws = session.workspace_id.clone();
+                let resolved = tokio::task::spawn_blocking(move || provider.enabled_servers(&ws))
+                    .await
+                    .unwrap_or_else(|e| Err(format!("mcp server lookup task failed: {e}")));
+                match resolved {
+                    Ok(specs) => (
+                        Some(
+                            specs
+                                .into_iter()
+                                .map(|s| crate::mcp::UserMcpServer {
+                                    name: s.name,
+                                    command: s.command,
+                                    args: s.args,
+                                    env: s.env,
+                                })
+                                .collect::<Vec<_>>(),
+                        ),
+                        None,
+                    ),
+                    Err(e) => {
+                        tracing::warn!(
+                            session = %session.id,
+                            workspace = %session.workspace_id,
+                            "enabled MCP servers unavailable; keeping the previously managed user entries: {e}"
+                        );
+                        (None, Some(e))
+                    }
+                }
+            }
+            None => (Some(Vec::new()), None),
+        }
     }
 }

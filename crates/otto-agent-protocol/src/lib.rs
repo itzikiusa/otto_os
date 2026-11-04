@@ -24,6 +24,7 @@ pub mod codex;
 pub mod driver;
 pub mod host;
 mod http;
+pub mod pi;
 pub mod process;
 pub mod ring;
 pub mod runtime;
@@ -35,7 +36,7 @@ use otto_core::auth::{AuthContext, RoleChecker};
 
 pub use driver::{
     ChildSignal, DriverError, DriverEvent, DriverFactory, DriverStep, LaunchContext, LaunchSpec,
-    StructuredDriver,
+    McpDelivery, McpServerDef, StructuredDriver,
 };
 pub use host::{RuntimeHost, SessionManagerHost};
 pub use runtime::{AgentRuntime, RuntimeConfig};
@@ -56,8 +57,8 @@ pub fn api_router<S: RuntimeCtx>() -> Router<S> {
 
 /// The production driver set — the providers T3 Code drives over a
 /// structured protocol: Claude (Agent SDK transport), Codex (app-server),
-/// Gemini and Grok (ACP) — plus Antigravity (`agy`'s own stream-json,
-/// where T3 Code needs an npm ACP adapter). A missing CLI fails the spawn, not the create.
+/// Gemini, Grok and opencode (ACP), pi (its RPC mode) — plus Antigravity
+/// (`agy`'s own stream-json, where T3 Code needs an npm ACP adapter). A missing CLI fails the spawn, not the create.
 pub fn default_drivers() -> Arc<dyn DriverFactory> {
     use otto_core::agent_runtime::RuntimeProvider;
     Arc::new(
@@ -68,6 +69,8 @@ pub fn default_drivers() -> Arc<dyn DriverFactory> {
                 RuntimeProvider::Gemini => Box::new(acp::AcpDriver::gemini("gemini")),
                 RuntimeProvider::Grok => Box::new(acp::AcpDriver::grok()),
                 RuntimeProvider::Agy => Box::new(agy::AgyDriver::with_program("agy")),
+                RuntimeProvider::Opencode => Box::new(acp::AcpDriver::opencode()),
+                RuntimeProvider::Pi => Box::new(pi::PiDriver::with_program("pi")),
             })
         },
     )

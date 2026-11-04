@@ -47,6 +47,7 @@
   import RuntimeAccessChip from './RuntimeAccessChip.svelte';
   import RuntimeApprovalRow from './RuntimeApprovalRow.svelte';
   import RuntimeAttachments from './RuntimeAttachments.svelte';
+  import RuntimeLinkedThreads from './RuntimeLinkedThreads.svelte';
   import RuntimeWorkGroup from './RuntimeWorkGroup.svelte';
   import RuntimeWorkRow from './RuntimeWorkRow.svelte';
   import { runtimeThreads } from './runtimeThreads.svelte';
@@ -118,7 +119,7 @@
 
   // ── Access mode for the next turn: sticky per thread ────────────────
   let pickedMode = $state<RuntimeAccessMode | null>(null);
-  const accessMode = $derived(pickedMode ?? session?.access_mode ?? runtimeThreads.lastAccessMode);
+  const accessMode = $derived(pickedMode ?? session?.access_mode ?? 'approval-required');
 
   // ── Images and PDFs (paste or attach; sent with the next message) ─────
   const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
@@ -163,7 +164,8 @@
           ...(effort ? { effort } : {}),
           ...(pics.length ? { images: pics.map(({ mime, data_base64 }) => ({ mime, data_base64 })) } : {}),
           ...(docs.length ? { files: docs } : {}),
-          access_mode: accessMode,
+          // Only a person's pick changes the mode; otherwise the session keeps its own.
+          ...(pickedMode ? { access_mode: pickedMode } : {}),
         })
       ).sequence;
       startError = null;
@@ -349,6 +351,7 @@
 {/snippet}
 
 <section class="rt" aria-label="Conversation" data-testid="runtime-thread-{sessionId}">
+  <RuntimeLinkedThreads {sessionId} />
   <div class="rt-scroll" bind:this={scroller} onscroll={onScroll}>
     <div class="rt-col">
       <LoadState what="conversation" loading={!p && !loadError} error={p ? null : loadError} empty={!p} onretry={() => runtimeViews.retry(sessionId)}>

@@ -23,6 +23,14 @@ pub const DEFAULT_ENABLED: &[&str] = &[
     "room_post",
     "room_read",
     "list_agent_rooms",
+    // Linked Threads (structured runtime): same rationale as rooms — a thread
+    // opens/messages only threads of ITS OWN linked group (same owner and
+    // workspace, never a wider access mode than its own), and every message
+    // lands as a visible turn in the receiving thread.
+    "thread_open",
+    "thread_list",
+    "thread_message",
+    "thread_read",
     // Discovery — where every id an agent needs comes from (workspaces, issue
     // accounts, goal loops, …); metadata only.
     "list_workspaces",
@@ -558,10 +566,10 @@ pub fn otto_tool_specs() -> Vec<Value> {
                 "pr_number":{"type":"integer","description":"Alias of `number`."},
                 "strategy":{"type":"string","enum":["merge","squash","rebase"]},"delete_source_branch":{"type":"boolean"}}}}),
     ];
-    // The DB query pair sits just before `open_pr_draft`, as it always has.
-    let at = specs.iter().position(|s| s["name"] == "otto.open_pr_draft");
-    let at = at.unwrap_or(specs.len());
-    specs.splice(at..at, database_query_specs());
+    // The DB query pair sits just before `open_pr_draft`, as it always has;
+    // Linked Threads just before `wait_session`.
+    splice_before(&mut specs, "otto.open_pr_draft", database_query_specs());
+    splice_before(&mut specs, "otto.wait_session", thread_tool_specs());
     specs.extend(issue_tool_specs());
     specs.extend([
         // ================= Vault (docs home) =================
@@ -947,6 +955,39 @@ pub fn otto_tool_specs() -> Vec<Value> {
     // entry (`otto.ui_*`, category "UI control") — see `crate::ui_commands`.
     specs.extend(ui_commands::specs());
     specs
+}
+
+/// Insert `slice` just before the spec named `name` (at the end if absent).
+fn splice_before<const N: usize>(specs: &mut Vec<Value>, name: &str, slice: [Value; N]) {
+    let at = specs.iter().position(|s| s["name"] == name);
+    let at = at.unwrap_or(specs.len());
+    specs.splice(at..at, slice);
+}
+
+/// The Linked Threads slice of [`otto_tool_specs`] (split out to keep that
+/// function under the size ratchet): an agent in a Threads (structured)
+/// session opening, listing, messaging and reading its linked threads.
+fn thread_tool_specs() -> [Value; 4] {
+    [
+        json!({"name":"otto.thread_open","mutating":false,"category":"Sessions",
+            "description":"Open a linked agent thread from this Threads thread (same workspace, folder, access mode); shown beside yours. `prompt` = its first message (your role + task). Model/effort default when omitted. Returns its `id`.",
+            "inputSchema":{"type":"object","required":["provider"],"properties":{
+                "provider":{"type":"string","description":"claude|codex|gemini|grok|opencode|pi"},
+                "prompt":{"type":"string"},"title":{"type":"string"},"model":{"type":"string"},
+                "effort":{"type":"string","description":"low|medium|high|xhigh|max"},
+                "session_id":{"type":"string","description":"caller (auto)"}}}}),
+        json!({"name":"otto.thread_list","mutating":false,"category":"Sessions",
+            "description":"This thread's linked group: id, provider, title, status, is_self.",
+            "inputSchema":{"type":"object","properties":{"session_id":{"type":"string","description":"caller (auto)"}}}}),
+        json!({"name":"otto.thread_message","mutating":false,"category":"Sessions",
+            "description":"Send a linked thread its next turn (it sees the sender). Refused while it works — otto.thread_read first.",
+            "inputSchema":{"type":"object","required":["to_session_id","text"],"properties":{
+                "to_session_id":{"type":"string"},"text":{"type":"string"},"session_id":{"type":"string","description":"caller (auto)"}}}}),
+        json!({"name":"otto.thread_read","mutating":false,"category":"Sessions",
+            "description":"A linked thread's latest reply, waiting up to wait_secs (≤25, default 20) for its turn: {peer, busy, turn_status, text}.",
+            "inputSchema":{"type":"object","required":["peer_session_id"],"properties":{
+                "peer_session_id":{"type":"string"},"wait_secs":{"type":"integer"},"session_id":{"type":"string","description":"caller (auto)"}}}}),
+    ]
 }
 
 /// The Database query slice of [`otto_tool_specs`] — the read-only query and

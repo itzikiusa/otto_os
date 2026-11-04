@@ -28,6 +28,8 @@ pub struct NewRuntimeSession {
     pub model: Option<String>,
     pub access_mode: RuntimeAccessMode,
     pub created_by: Id,
+    /// The linked group's root thread (see `RuntimeSession::parent_id`).
+    pub parent_id: Option<Id>,
 }
 
 /// A stored session plus the sequence floor a restarted runtime resumes above.
@@ -53,7 +55,7 @@ pub struct RuntimeEntityRow {
 macro_rules! session_cols {
     () => {
         "id, workspace_id, provider, title, cwd, model, native_thread_id, closed, \
-         created_by, created_at, last_active_at, last_seq, seq_reserved, access_mode"
+         created_by, created_at, last_active_at, last_seq, seq_reserved, access_mode, parent_id"
     };
 }
 
@@ -90,6 +92,7 @@ fn row_to_session(r: &sqlx::sqlite::SqliteRow) -> Result<RuntimeSessionRecord> {
             created_at: ts(&r.get::<String, _>("created_at"))?,
             last_active_at: ts(&r.get::<String, _>("last_active_at"))?,
             last_sequence: u(r.get("last_seq")),
+            parent_id: r.get("parent_id"),
         },
         closed,
         seq_reserved: u(r.get("seq_reserved")),
@@ -105,8 +108,8 @@ impl AgentRuntimeRepo {
         let now = fmt(Utc::now());
         sqlx::query(
             "INSERT INTO agent_runtime_sessions (id, workspace_id, provider, title, cwd, model, \
-             access_mode, created_by, created_at, last_active_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             access_mode, created_by, created_at, last_active_at, parent_id) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&new.id)
         .bind(&new.workspace_id)
@@ -118,6 +121,7 @@ impl AgentRuntimeRepo {
         .bind(&new.created_by)
         .bind(&now)
         .bind(&now)
+        .bind(&new.parent_id)
         .execute(&self.pool)
         .await
         .map_err(dberr("create runtime session"))?;
@@ -365,6 +369,7 @@ mod tests {
                 cwd: "/tmp".into(),
                 model: None,
                 access_mode: RuntimeAccessMode::AutoAcceptEdits,
+                parent_id: None,
                 created_by: "u1".into(),
             })
             .await

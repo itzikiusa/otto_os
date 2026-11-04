@@ -184,6 +184,26 @@ pub(super) const ROUTED_TWINS: &[(&str, TwinScope, TwinReply)] = &[
         TwinReply::Wrap("messages"),
     ),
     ("otto_open_session", TwinScope::Workspace, TwinReply::Raw),
+    (
+        "otto_thread_open",
+        TwinScope::CallingSession,
+        TwinReply::Raw,
+    ),
+    (
+        "otto_thread_list",
+        TwinScope::CallingSession,
+        TwinReply::Wrap("threads"),
+    ),
+    (
+        "otto_thread_message",
+        TwinScope::CallingSession,
+        TwinReply::Raw,
+    ),
+    (
+        "otto_thread_read",
+        TwinScope::CallingSession,
+        TwinReply::Raw,
+    ),
     ("otto_send_message", TwinScope::Plain, TwinReply::Raw),
     // PR comment — the one git WRITE on this surface. It lives here rather
     // than behind the gateway because the review workflow's whole product is

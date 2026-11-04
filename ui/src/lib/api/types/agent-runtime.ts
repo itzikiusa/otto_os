@@ -12,7 +12,7 @@
 
 import type { Id } from './core';
 
-export type RuntimeProvider = 'claude' | 'codex' | 'gemini' | 'grok' | 'agy';
+export type RuntimeProvider = 'claude' | 'codex' | 'gemini' | 'grok' | 'agy' | 'opencode' | 'pi';
 
 export type ProviderSessionStatus = 'starting' | 'ready' | 'running' | 'waiting' | 'stopped' | 'error';
 
@@ -223,6 +223,37 @@ export interface RuntimeSession {
   created_at: string;
   last_active_at: string;
   last_sequence: number;
+  /** The linked group's ROOT thread, when an agent opened this thread from
+   *  another one (`otto.thread_open`); absent on a root / unlinked thread. */
+  parent_id?: Id | null;
+}
+
+/** Body of `POST /runtime-sessions/{id}/peers` — open a linked thread. */
+export interface OpenPeerReq {
+  provider: RuntimeProvider;
+  prompt?: string;
+  title?: string;
+  /** Omitted = the provider's default model. */
+  model?: string;
+  /** Opening-turn effort; omitted = the model's default. */
+  effort?: string;
+}
+
+/** One member of a linked group (`GET /runtime-sessions/{id}/peers`). */
+export interface PeerInfo {
+  id: Id;
+  provider: RuntimeProvider;
+  title: string;
+  status: RuntimeSessionStatus;
+  is_self: boolean;
+}
+
+/** `GET /runtime-sessions/{id}/peers/{peer}/reply?wait_secs=`. */
+export interface PeerReply {
+  peer: PeerInfo;
+  busy: boolean;
+  turn_status?: string;
+  text: string;
 }
 
 /** T3 Code's RuntimeMode names; sticky per session like `model`. */

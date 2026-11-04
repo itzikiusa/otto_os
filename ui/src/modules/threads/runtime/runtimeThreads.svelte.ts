@@ -9,7 +9,6 @@ import { noteRuntimeWaiting } from '../../../lib/stores/runtimeAttention.svelte'
 import type {
   ApprovalDecision,
   ProviderSessionStatus,
-  RuntimeAccessMode,
   RuntimeEvent,
   RuntimePromptReq,
   RuntimePromptResp,
@@ -19,7 +18,7 @@ import type {
   Session,
 } from '../../../lib/api/types';
 
-const RUNTIME_PROVIDERS: readonly string[] = ['claude', 'codex', 'gemini', 'grok'];
+const RUNTIME_PROVIDERS: readonly string[] = ['claude', 'codex', 'gemini', 'grok', 'opencode', 'pi'];
 
 /** Providers a new thread runs on the structured runtime (the rest stay PTY). */
 export function isRuntimeProvider(provider: string): provider is RuntimeProvider {
@@ -53,7 +52,9 @@ export function asThreadSession(r: RuntimeSession): Session {
     created_at: r.created_at,
     last_active_at: r.last_active_at,
     archived: r.status === 'closed',
-    meta: { surface: 'threads', runtime: 'structured' },
+    // `parent_session_id` nests a linked thread under its group's root in
+    // the sidebar (the delegated-worker rule, `delegatedParentId`).
+    meta: { surface: 'threads', runtime: 'structured', ...(r.parent_id ? { parent_session_id: r.parent_id } : {}) },
   };
 }
 
@@ -62,12 +63,7 @@ export function isRuntimeThread(s: Session | null | undefined): boolean {
   return s?.meta?.runtime === 'structured';
 }
 
-const ACCESS_KEY = 'otto_runtime_access_mode';
-
 class RuntimeThreads {
-  /** The access mode last picked anywhere: what a new thread starts in. */
-  lastAccessMode = $state<RuntimeAccessMode>(readAccessMode());
-
   /** Every loaded runtime session, by id. */
   byId = $state<Record<string, RuntimeSession>>({});
   /** Workspaces whose list has loaded once. */
@@ -119,7 +115,38 @@ class RuntimeThreads {
     };
   }
 
+  /** Ids being fetched because an event named a thread we don't hold yet. */
+  private fetching = new Set<string>();
+
+  /** A thread an AGENT opened (`otto.thread_open`) is first seen through its
+   *  events: fetch the row once so it appears in the sidebar and the group. */
+  private adopt(id: string): void {
+    if (this.fetching.has(id)) return;
+    this.fetching.add(id);
+    void api
+      .get<RuntimeSession>(`/runtime-sessions/${id}`)
+      .then((r) => {
+        this.byId[r.id] = r;
+      })
+      .catch(() => {
+        /* not ours to see (another user's thread) */
+      })
+      .finally(() => this.fetching.delete(id));
+  }
+
+  /** `id`'s linked group — its root first, then the threads opened in it
+   *  (oldest first). Just `[id]` for an unlinked thread. */
+  group(id: string | null | undefined): RuntimeSession[] {
+    const s = this.get(id);
+    if (!s) return [];
+    const root = s.parent_id ?? s.id;
+    return Object.values(this.byId)
+      .filter((r) => r.status !== 'closed' && (r.id === root || r.parent_id === root))
+      .sort((a, b) => (a.id === root ? -1 : b.id === root ? 1 : a.created_at.localeCompare(b.created_at)));
+  }
+
   private onEvent(ev: RuntimeEvent): void {
+    if (!this.byId[ev.session_id]) this.adopt(ev.session_id);
     // The row follows status / turn changes only — not every streamed chunk.
     const row = this.byId[ev.session_id];
     if (row && row.status !== 'closed' && (ev.type === 'provider_session.updated' || ev.type === 'provider_turn.updated')) {
@@ -139,7 +166,9 @@ class RuntimeThreads {
       cwd: req.cwd,
       title: req.title,
       model: req.model,
-      access_mode: this.lastAccessMode,
+      // No access mode: a new thread starts in the daemon's default — Full
+      // access while Settings › Providers skips permission prompts (the same
+      // rule terminal sessions follow), else Approval required.
     });
     this.byId[created.id] = created;
     if (req.prompt) await this.prompt(created.id, { text: req.prompt, ...(req.effort ? { effort: req.effort } : {}) });
@@ -150,15 +179,9 @@ class RuntimeThreads {
     const resp = await api.post<RuntimePromptResp>(`/runtime-sessions/${id}/prompt`, req);
     const mode = req.access_mode;
     if (mode) {
-      // Sticky on the session, and the default for the next new thread.
+      // Sticky on the session (new threads start in the daemon default).
       const row = this.byId[id];
       if (row && row.access_mode !== mode) this.byId[id] = { ...row, access_mode: mode };
-      this.lastAccessMode = mode;
-      try {
-        localStorage.setItem(ACCESS_KEY, mode);
-      } catch {
-        /* per-viewer convenience only */
-      }
     }
     return resp;
   }
@@ -182,12 +205,3 @@ class RuntimeThreads {
 
 export const runtimeThreads = new RuntimeThreads();
 
-function readAccessMode(): RuntimeAccessMode {
-  try {
-    const v = localStorage.getItem(ACCESS_KEY);
-    if (v === 'auto-accept-edits' || v === 'full-access') return v;
-  } catch {
-    /* no storage */
-  }
-  return 'approval-required';
-}

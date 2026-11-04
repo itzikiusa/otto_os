@@ -125,7 +125,7 @@ pub const GROUPS: &[ToolGroup] = &[
     ToolGroup {
         id: "sessions",
         label: "Sessions & agents",
-        description: "Open, message and wait on agent sessions; agent rooms.",
+        description: "Open, message and wait on agent sessions; linked threads; agent rooms.",
         prefixes: &[],
         exact: &[
             "list_sessions",
@@ -134,6 +134,10 @@ pub const GROUPS: &[ToolGroup] = &[
             "send_message",
             "broadcast_message",
             "wait_session",
+            "thread_open",
+            "thread_list",
+            "thread_message",
+            "thread_read",
             "list_agent_rooms",
             "room_post",
             "room_read",

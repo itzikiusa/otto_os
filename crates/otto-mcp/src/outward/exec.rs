@@ -82,7 +82,13 @@ pub fn call_timeout(tool: &str, args: &Value) -> Duration {
         "k8s_logs" | "k8s_action" | "aws_athena_query" | "aws_athena_get_query" => 75,
         // ≤30 s per pod request + a pod list + proxy start-up.
         "k8s_pod_http" => 90,
-        "consume_broker_messages" | "run_workflow" | "start_pr_review" | "open_session" => 60,
+        "consume_broker_messages"
+        | "run_workflow"
+        | "start_pr_review"
+        | "open_session"
+        | "thread_open" => 60,
+        // A peer's reply long-polls up to 25 s.
+        "thread_read" => 35,
         // Merge PUT (+ GitLab rebase PUT) around a ≤ 60 s provider poll.
         "merge_pr" => 90,
         // createmeta types + fields (paged), parent lookup, POST, verify GET.
@@ -572,11 +578,71 @@ fn db_query_call(args: &Value, write: bool) -> Result<SelfCall, Error> {
     ))
 }
 
+/// The Linked Threads slice of [`route_for`] (split out to keep it under the
+/// size ratchet). `None` = not a thread tool.
+fn thread_route(tool: &str, args: &Value) -> Option<Result<SelfCall, Error>> {
+    let call = || -> Result<SelfCall, Error> {
+        Ok(match tool {
+            // Linked Threads — always AS the calling thread (`session_id`, filled
+            // from the caller's own session by the MCP bridge).
+            "thread_open" => {
+                let id = arg_str(args, "session_id")?;
+                let mut body = json!({ "provider": arg_str(args, "provider")? });
+                for k in ["prompt", "title", "model", "effort"] {
+                    if let Some(v) = args
+                        .get(k)
+                        .and_then(Value::as_str)
+                        .filter(|v| !v.trim().is_empty())
+                    {
+                        body[k] = json!(v);
+                    }
+                }
+                SelfCall::post(format!("/api/v1/runtime-sessions/{}/peers", seg(&id)), body)
+            }
+            "thread_list" => {
+                let id = arg_str(args, "session_id")?;
+                SelfCall::get(format!("/api/v1/runtime-sessions/{}/peers", seg(&id)))
+            }
+            "thread_message" => {
+                let id = arg_str(args, "session_id")?;
+                let to = arg_str(args, "to_session_id")?;
+                SelfCall::post(
+                    format!(
+                        "/api/v1/runtime-sessions/{}/peers/{}/message",
+                        seg(&id),
+                        seg(&to)
+                    ),
+                    json!({ "text": arg_str(args, "text")? }),
+                )
+            }
+            "thread_read" => {
+                let id = arg_str(args, "session_id")?;
+                let peer = arg_str(args, "peer_session_id")?;
+                let wait = args
+                    .get("wait_secs")
+                    .and_then(i64_lenient)
+                    .unwrap_or(20)
+                    .clamp(0, 25);
+                SelfCall::get(format!(
+                    "/api/v1/runtime-sessions/{}/peers/{}/reply?wait_secs={wait}",
+                    seg(&id),
+                    seg(&peer)
+                ))
+            }
+            _ => unreachable!("guarded by the prefix check"),
+        })
+    };
+    tool.starts_with("thread_").then(call)
+}
+
 /// Map an outward tool + its (validated) arguments to the exact self-call against
 /// the daemon's own REST API. Pure: no I/O, no token — every tool reuses its
 /// endpoint's native RBAC when the call is later executed as the user. `ask_human_approval`
 /// is handled earlier (in `execute_otto_tool`) and never reaches here.
 pub fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
+    if let Some(call) = thread_route(tool, args) {
+        return call;
+    }
     Ok(match tool {
         // ---- Code & context ----
         "search_codebase" => {

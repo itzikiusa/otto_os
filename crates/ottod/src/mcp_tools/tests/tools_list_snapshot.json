@@ -128,6 +128,10 @@
     "otto_set_scheduled_task_enabled",
     "otto_start_pr_review",
     "otto_test_integration",
+    "otto_thread_list",
+    "otto_thread_message",
+    "otto_thread_open",
+    "otto_thread_read",
     "otto_transition_issue",
     "otto_ui_request_control",
     "otto_update_confluence_page",
@@ -239,6 +243,10 @@
     "otto_set_scheduled_task_enabled",
     "otto_start_pr_review",
     "otto_test_integration",
+    "otto_thread_list",
+    "otto_thread_message",
+    "otto_thread_open",
+    "otto_thread_read",
     "otto_transition_issue",
     "otto_ui_request_control",
     "otto_update_confluence_page",
@@ -388,6 +396,10 @@
     "otto_set_scheduled_task_enabled",
     "otto_start_pr_review",
     "otto_test_integration",
+    "otto_thread_list",
+    "otto_thread_message",
+    "otto_thread_open",
+    "otto_thread_read",
     "otto_transition_issue",
     "otto_ui_request_control",
     "otto_update_confluence_page",
@@ -564,6 +576,10 @@
     "otto_set_scheduled_task_enabled",
     "otto_start_pr_review",
     "otto_test_integration",
+    "otto_thread_list",
+    "otto_thread_message",
+    "otto_thread_open",
+    "otto_thread_read",
     "otto_transition_issue",
     "otto_ui_request_control",
     "otto_update_confluence_page",
@@ -2201,6 +2217,64 @@
           "type": "string"
         },
         "limit": {
+          "type": "integer"
+        }
+      }
+    },
+    "otto_thread_open": {
+      "type": "object",
+      "required": [
+        "provider"
+      ],
+      "properties": {
+        "provider": {
+          "type": "string",
+          "description": "claude|codex|gemini|grok|opencode|pi"
+        },
+        "prompt": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "effort": {
+          "type": "string",
+          "description": "low|medium|high|xhigh|max"
+        }
+      }
+    },
+    "otto_thread_list": {
+      "type": "object",
+      "properties": {}
+    },
+    "otto_thread_message": {
+      "type": "object",
+      "required": [
+        "to_session_id",
+        "text"
+      ],
+      "properties": {
+        "to_session_id": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        }
+      }
+    },
+    "otto_thread_read": {
+      "type": "object",
+      "required": [
+        "peer_session_id"
+      ],
+      "properties": {
+        "peer_session_id": {
+          "type": "string"
+        },
+        "wait_secs": {
           "type": "integer"
         }
       }

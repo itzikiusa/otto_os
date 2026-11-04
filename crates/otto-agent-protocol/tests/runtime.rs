@@ -12,7 +12,8 @@ use otto_agent_protocol::agy::AgyDriver;
 use otto_agent_protocol::codex::CodexDriver;
 use otto_agent_protocol::ring::RingLimits;
 use otto_agent_protocol::{
-    AgentRuntime, DriverFactory, LaunchSpec, RuntimeConfig, RuntimeHost, StructuredDriver,
+    AgentRuntime, DriverFactory, LaunchSpec, McpDelivery, McpServerDef, RuntimeConfig, RuntimeHost,
+    StructuredDriver,
 };
 use otto_core::agent_runtime::{
     ApprovalDecision, Attachment, AttachmentKind, CancelReason, CreateRuntimeSessionReq,
@@ -64,7 +65,8 @@ impl RuntimeHost for TestHost {
         _ws: &Workspace,
         _s: &RuntimeSession,
         spec: &mut LaunchSpec,
-    ) -> Result<()> {
+        _mcp: McpDelivery,
+    ) -> Result<Vec<McpServerDef>> {
         if self.refuse {
             return Err(Error::Invalid(
                 "refusing to start an agent session here".into(),
@@ -73,7 +75,7 @@ impl RuntimeHost for TestHost {
         // Prove the runtime spawns the PREPARED spec (the safety pipeline's).
         spec.env.push(("OTTO_PREPARED".into(), "1".into()));
         self.prepared.lock().unwrap().push(spec.clone());
-        Ok(())
+        Ok(Vec::new())
     }
     fn publish(&self, _s: &RuntimeSession, event: Arc<RuntimeEvent>) {
         self.events.lock().unwrap().push(event);
@@ -1341,4 +1343,68 @@ async fn attachments_are_stored_served_and_refused_where_unsupported() {
     rt.recover().await.unwrap();
     assert!(!store.join("ghost").exists());
     assert!(store.join(&g.id).exists());
+}
+
+/// Linked threads: a thread opens another (same owner/workspace/cwd/access,
+/// grouped under the root), messages it with a framed prompt, and reads its
+/// reply; an unrelated thread is not reachable.
+#[tokio::test]
+async fn linked_threads_open_message_and_read_within_their_group() {
+    use otto_core::agent_runtime::OpenPeerReq;
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let lead = create(&rt, cwd).await;
+    let other = create(&rt, cwd).await;
+    let worker = rt
+        .open_peer(
+            &lead.id,
+            OpenPeerReq {
+                provider: RuntimeProvider::Gemini,
+                prompt: Some("you are my worker".into()),
+                title: Some("worker".into()),
+                model: None,
+                effort: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(worker.parent_id.as_ref(), Some(&lead.id));
+    assert_eq!(worker.access_mode, lead.access_mode);
+    // The opening prompt ran, framed with the opener.
+    let first = rt.peer_reply(&lead.id, &worker.id, WAIT).await.unwrap();
+    assert!(!first.busy);
+    assert!(first.text.contains("Opened by thread"), "{}", first.text);
+    assert!(first.text.contains("you are my worker"), "{}", first.text);
+
+    let ids = |v: Vec<otto_core::agent_runtime::PeerInfo>| {
+        let mut v: Vec<String> = v.into_iter().map(|p| p.id.to_string()).collect();
+        v.sort();
+        v
+    };
+    let mut want = vec![lead.id.to_string(), worker.id.to_string()];
+    want.sort();
+    assert_eq!(ids(rt.peers(&lead.id).await.unwrap()), want);
+    assert_eq!(
+        ids(rt.peers(&worker.id).await.unwrap()),
+        want,
+        "same group from either side"
+    );
+
+    // The worker answers the lead.
+    rt.message_peer(&worker.id, &lead.id, "done").await.unwrap();
+    let back = rt.peer_reply(&worker.id, &lead.id, WAIT).await.unwrap();
+    assert!(back.text.contains("Message from thread"), "{}", back.text);
+    assert!(back.text.contains("done"), "{}", back.text);
+
+    assert!(matches!(
+        rt.message_peer(&lead.id, &other.id, "x").await,
+        Err(Error::NotFound(_))
+    ));
+    assert!(matches!(
+        rt.message_peer(&lead.id, &lead.id, "x").await,
+        Err(Error::Invalid(_))
+    ));
 }

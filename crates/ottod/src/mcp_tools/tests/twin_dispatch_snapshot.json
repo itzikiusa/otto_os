@@ -1000,6 +1000,86 @@
       "rows": 0
     }
   },
+  "otto_thread_open {\"provider\":\"codex\",\"prompt\":\"hi\"}": {
+    "args": {
+      "provider": "codex",
+      "prompt": "hi"
+    },
+    "requests": [
+      [
+        "POST",
+        "/runtime-sessions/sess-test/peers",
+        {
+          "provider": "codex",
+          "prompt": "hi"
+        }
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true
+      },
+      "rows": 0
+    }
+  },
+  "otto_thread_list {}": {
+    "args": {},
+    "requests": [
+      [
+        "GET",
+        "/runtime-sessions/sess-test/peers",
+        null
+      ]
+    ],
+    "result": {
+      "ok": {
+        "threads": {
+          "ok": true
+        }
+      },
+      "rows": 0
+    }
+  },
+  "otto_thread_message {\"to_session_id\":\"01ARZ3NDEKTSV4RRFFQ69G5FAV\",\"text\":\"hi\"}": {
+    "args": {
+      "to_session_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      "text": "hi"
+    },
+    "requests": [
+      [
+        "POST",
+        "/runtime-sessions/sess-test/peers/01ARZ3NDEKTSV4RRFFQ69G5FAV/message",
+        {
+          "text": "hi"
+        }
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true
+      },
+      "rows": 0
+    }
+  },
+  "otto_thread_read {\"peer_session_id\":\"01ARZ3NDEKTSV4RRFFQ69G5FAV\",\"wait_secs\":5}": {
+    "args": {
+      "peer_session_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      "wait_secs": 5
+    },
+    "requests": [
+      [
+        "GET",
+        "/runtime-sessions/sess-test/peers/01ARZ3NDEKTSV4RRFFQ69G5FAV/reply?wait_secs=5",
+        null
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true
+      },
+      "rows": 0
+    }
+  },
   "otto_api_list {}": {
     "args": {},
     "requests": [
