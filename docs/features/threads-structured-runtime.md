@@ -29,7 +29,7 @@ Otto ports that design rather than inventing its own.
 | Provider | T3 Code runs | Otto runs |
 |---|---|---|
 | **Claude** | The **Claude Agent SDK** (`@anthropic-ai/claude-agent-sdk ^0.3.284`, `apps/server/package.json:37`), in-process: `query()` (`apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts:1090`). The SDK spawns the `claude` CLI (`binaryPath` setting, default `claude`, `packages/contracts/src/settings.ts:715`, passed as `pathToClaudeCodeExecutable`, `ClaudeAdapterV2.ts:1651-1653`) and speaks its stream-json control protocol. Options: `permissionMode` from the runtime mode (`:2573-2620`), `includePartialMessages: true` (`:1617`), the `claude_code` system-prompt preset (`:1660`), `sessionId` on the first run and `resume` afterwards (`:1578-1580`). The ACP adapter `claude-agent-acp` is used only as a Registry agent (`packages/provider-acp-registry/src/server/adapter.ts:195-210`); T3 Code bundles no npm ACP adapter (`packages/provider-acp-registry/package.json:35-42`) | **The same SDK transport, ported to Rust** (`crates/otto-agent-protocol/src/claude.rs`). It runs the installed `claude` directly with the SDK's argv (`sdk.mjs` `ProcessTransport.initialize`): `--output-format stream-json --verbose --input-format stream-json --permission-prompt-tool stdio --permission-mode default --include-partial-messages [--model m] (--session-id <uuid> \| --resume <id>)`, env `CLAUDE_CODE_ENTRYPOINT=sdk-ts`. No Node, and **no npm package is needed** |
-| **Codex** | `codex app-server` (`["app-server", …launchArgs]`, `apps/server/src/provider/codexLaunchArgs.ts:12-15`). The binary is the `binaryPath` setting (default `codex`, `CodexAdapterV2.ts:1561`) or an optional managed install of 0.156.1 (`apps/server/src/provider/CodexInstallation.ts:61-98`). Env: `CODEX_HOME` (a shadow home that overlays `auth.json`, `Drivers/CodexHomeLayout.ts:11-77`) and `CODEX_INTERNAL_ORIGINATOR_OVERRIDE` (`CodexProvider.ts:452-457`). Typed client: `packages/effect-codex-app-server`, generated from `openai/codex` `687a119f` (`scripts/generate.ts:16-19`) | `codex app-server` (`src/codex.rs`). The context hook adds `-c developer_instructions=…` and `CODEX_HOME` (the Otto context bundle's shadow home), exactly as for a PTY codex session. No originator override. Wire shapes were checked against `codex app-server generate-json-schema` of the installed **0.166.0** |
+| **Codex** | `codex app-server` (`["app-server", …launchArgs]`, `apps/server/src/provider/codexLaunchArgs.ts:12-15`). The binary is the `binaryPath` setting (default `codex`, `CodexAdapterV2.ts:1561`) or an optional managed install of 0.156.1 (`apps/server/src/provider/CodexInstallation.ts:61-98`). Env: `CODEX_HOME` (a shadow home that overlays `auth.json`, `Drivers/CodexHomeLayout.ts:11-77`) and `CODEX_INTERNAL_ORIGINATOR_OVERRIDE` (`CodexProvider.ts:452-457`). Typed client: `packages/effect-codex-app-server`, generated from `openai/codex` `687a119f` (`scripts/generate.ts:16-19`) | `codex [context flags] app-server` (`src/codex.rs`). The context hook adds `--add-dir=…`, `-c developer_instructions=…` (top-level options `app-server` rejects after it) and `CODEX_HOME` (the Otto context bundle's shadow home), exactly as for a PTY codex session. No originator override. Wire shapes were checked against `codex app-server generate-json-schema` of the installed **0.166.0** |
 | **Gemini** | No first-party adapter. It is the ACP Registry entry `gemini` (npm `@google/gemini-cli`, `AcpRegistrySupport.test.ts:1693-1720`). The registry is fetched from `cdn.agentclientprotocol.com` (`AcpRegistrySupport.ts:51`), npm-installed into T3's own prefix (`:1252-1294`), and launched with the registry's argv/env (`:1877-1917`). The exact flag comes from the live registry JSON and is not in the repo | `gemini --acp` (the installed CLI's own flag) plus `--model m`, into the ACP driver (`src/acp.rs`, `AcpDriver::gemini`) |
 | **Grok** | `grok` from `binaryPath` (`packages/provider-grok/src/server/acpSupport.ts:67`). Argv per runtime mode (`:47-58`): `agent stdio`; `--permission-mode auto agent stdio`; `agent --always-approve stdio`; for approval-required, `--permission-mode default agent stdio`. Env `GROK_OAUTH2_REFERRER=t3code` (`:66-74`). `_meta` `{clientType:"extension"}` on initialize and `{cancelTrigger:"ctrl_c"}` on cancel (`:98-101`). Auth method `xai.api_key` when `XAI_API_KEY` is set, else `cached_token` (`:21-25`, `:77-81`) | `grok --permission-mode default [-m model] [--rules=<context>] agent stdio` (`AcpDriver::grok`). The context flags must come before `agent`: the subcommand rejects a trailing `--rules` (verified against grok 1.0.70). Same `_meta` and auth preference. Otto omits the T3-specific referrer and never launches the `auto` / `--always-approve` variants |
 
@@ -42,6 +42,20 @@ agent, and it would need an npm install. Otto therefore mirrors the SDK path.
 The SDK is a thin TypeScript layer over `claude`'s stdio protocol, so the
 Rust port speaks that protocol to the CLI already on the machine. Otto
 installs nothing.
+
+### Live check (2026-11-04)
+
+Each provider was run once through the full runtime: an isolated `ottod`
+(temp data dir, port 7813), a scratch git repo, the prompts "reply with ok",
+"create a file with a shell command" (answering the approval) and a long
+count that was interrupted after the first delta, then `close`.
+
+| Provider | Result | First delta |
+|---|---|---|
+| Claude (`haiku`) | all three turns as expected; the Bash approval arrived and was answered; interrupt ended the turn `interrupted` in ~0.1 s | 1.9–2.9 s (cold start included) |
+| Codex | the same. The first run failed: the context hook's `--add-dir=` must precede `app-server`, so the subcommand is now a `tail_arg` | 1.8–5.3 s |
+| Grok | text, reasoning, the tool and the interrupt all worked, but **no approval was asked**: with the user's own `~/.grok/config.toml` `[ui] permission_mode = "always-approve"`, `grok agent stdio` ignores `--permission-mode default` and `_meta.yoloMode: false`. It follows the user's grok config, as a PTY grok session does (T3 Code passes the same argv) | 2.1–4.8 s |
+| Gemini | not run: the account is refused at `session/new` (`-32000`, "This client is no longer supported for Gemini Code Assist for individuals … migrate to Antigravity"). Each prompt fails with that message, and the next prompt respawns the CLI | — |
 
 ## 2. Session lifecycle
 
@@ -149,13 +163,14 @@ The framing is newline-delimited JSON-RPC **without** a `"jsonrpc"` member:
    |---|---|---|
    | `item/commandExecution/requestApproval` | command | `{decision: accept \| acceptForSession \| decline \| cancel}` |
    | `item/fileChange/requestApproval` | file-change | same as above |
-   | `execCommandApproval`, `applyPatchApproval` (legacy) | command, file-change | `approved \| approved_for_session \| denied \| abort` (`:576-590`) |
    | `item/permissions/requestApproval` | permission | the requested profile with scope `turn` / `session`, or an empty profile (`:609-621`) |
 
    `serverRequest/resolved` closes a request that Codex settled itself.
    `requestUserInput`, elicitations, dynamic tool calls and auth refresh get
    JSON-RPC `-32601`; Otto's client does not offer them.
-7. **Interrupt.** Open requests are answered `cancel` / `abort`. Then Otto
+   The v1 `execCommandApproval` / `applyPatchApproval` (`:576-590`) belong
+   to the conversation API that Otto does not use.
+7. **Interrupt.** Open requests are answered `cancel`. Then Otto
    sends `turn/interrupt {threadId, turnId}` (`:7567`); if the Codex turn id
    is not known yet, it is sent once `turn/start` answers.
 

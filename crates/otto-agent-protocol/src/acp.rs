@@ -44,16 +44,15 @@ use agent_client_protocol::v1::schema::{
     SelectedPermissionOutcome, SessionNotification, SessionUpdate, StopReason, TextContent,
     ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolKind,
 };
-use chrono::Utc;
 use otto_core::agent_runtime::{
-    ApprovalDecision, ApprovalOption, PlanArtifact, PlanStep, PlanStepStatus, ProviderFailure,
-    RequestKind, ResponseCapability, RuntimeProvider, RuntimeRequest, RuntimeRequestStatus,
-    TurnItem, TurnItemKind, TurnItemStatus, TurnTerminalStatus,
+    ApprovalDecision, ApprovalOption, PlanStep, PlanStepStatus, ProviderFailure, RequestKind,
+    RuntimeProvider, TurnItem, TurnItemKind, TurnItemStatus, TurnTerminalStatus,
 };
 use serde_json::{json, Value};
 
 use crate::driver::{
-    DriverError, DriverEvent, DriverStep, LaunchContext, LaunchSpec, StructuredDriver,
+    item, rpc_failure, rpc_key, DriverError, DriverEvent, DriverStep, LaunchContext, LaunchSpec,
+    StructuredDriver,
 };
 
 const M_INITIALIZE: &str = "initialize";
@@ -85,10 +84,9 @@ pub struct AcpFlavor {
     /// Args after the context hook's injected flags (a subcommand).
     pub tail_args: Vec<String>,
     /// The flag that selects a model (`--model`), placed in the head.
-    pub model_flag: Option<String>,
-    pub env: Vec<(String, String)>,
-    /// `authenticate` method ids to prefer, in order.
-    pub auth_preference: Vec<String>,
+    pub model_flag: String,
+    /// The `authenticate` method to prefer when the agent advertises it.
+    pub auth_preference: Option<String>,
     /// `_meta` for `initialize` / `session/cancel`.
     pub initialize_meta: Option<Value>,
     pub cancel_meta: Option<Value>,
@@ -148,19 +146,13 @@ pub struct AcpDriver {
 
 impl AcpDriver {
     /// `program args…` is the ACP agent command (e.g. `gemini --acp`).
-    pub fn new(
-        provider: RuntimeProvider,
-        program: impl Into<String>,
-        args: Vec<String>,
-        env: Vec<(String, String)>,
-    ) -> Self {
+    pub fn new(provider: RuntimeProvider, program: impl Into<String>, args: Vec<String>) -> Self {
         Self::with_flavor(
             provider,
             AcpFlavor {
                 program: program.into(),
                 head_args: args,
-                model_flag: Some("--model".into()),
-                env,
+                model_flag: "--model".into(),
                 ..AcpFlavor::default()
             },
         )
@@ -194,12 +186,7 @@ impl AcpDriver {
     /// `@google/gemini-cli` entry with the registry's argv; the installed
     /// CLI's own flag is `--acp`).
     pub fn gemini() -> Self {
-        Self::new(
-            RuntimeProvider::Gemini,
-            "gemini",
-            vec!["--acp".into()],
-            Vec::new(),
-        )
+        Self::new(RuntimeProvider::Gemini, "gemini", vec!["--acp".into()])
     }
 
     /// Grok over ACP, as T3 Code launches it (`acpSupport.ts:47-58`): the
@@ -223,9 +210,8 @@ impl AcpDriver {
                 program: "grok".into(),
                 head_args: vec!["--permission-mode".into(), "default".into()],
                 tail_args: vec!["agent".into(), "stdio".into()],
-                model_flag: Some("-m".into()),
-                env: Vec::new(),
-                auth_preference: vec![auth.into()],
+                model_flag: "-m".into(),
+                auth_preference: Some(auth.into()),
                 initialize_meta: Some(json!({"clientType": "extension"})),
                 cancel_meta: Some(json!({"cancelTrigger": "ctrl_c"})),
             },
@@ -293,27 +279,6 @@ impl AcpDriver {
         self.turn_id.clone().unwrap_or_default()
     }
 
-    fn item(
-        &self,
-        id: String,
-        status: TurnItemStatus,
-        title: Option<String>,
-        kind: TurnItemKind,
-    ) -> TurnItem {
-        let now = Utc::now();
-        TurnItem {
-            id,
-            turn_id: self.turn_id.clone(),
-            ordinal: 0,
-            status,
-            title,
-            started_at: Some(now),
-            completed_at: (!status.is_open()).then_some(now),
-            updated_at: now,
-            kind,
-        }
-    }
-
     fn segment_item(&self, seg: &Segment, streaming: bool) -> TurnItem {
         let status = if streaming {
             TurnItemStatus::Running
@@ -331,7 +296,7 @@ impl AcpDriver {
                 streaming,
             },
         };
-        self.item(seg.item_id.clone(), status, None, kind)
+        item(seg.item_id.clone(), status, None, kind)
     }
 
     fn close_segment(&mut self, step: &mut DriverStep) {
@@ -397,7 +362,7 @@ impl AcpDriver {
                 output,
             },
         };
-        self.item(
+        item(
             format!("{}:tool:{id}", self.turn()),
             status,
             Some(t.title.clone()),
@@ -485,23 +450,10 @@ impl AcpDriver {
                 },
             })
             .collect();
-        let plan_id = format!("{}:plan", self.turn());
-        step.push(DriverEvent::Plan(PlanArtifact {
-            id: plan_id.clone(),
-            turn_id: self.turn_id.clone(),
-            steps: steps.clone(),
+        step.push(DriverEvent::Plan {
+            steps,
             explanation: None,
-        }));
-        step.push(DriverEvent::TurnItem(self.item(
-            plan_id.clone(),
-            TurnItemStatus::Running,
-            None,
-            TurnItemKind::TodoList {
-                plan_id,
-                steps,
-                explanation: None,
-            },
-        )));
+        });
     }
 
     fn on_update(&mut self, step: &mut DriverStep, n: SessionNotification) {
@@ -559,37 +511,21 @@ impl AcpDriver {
             }
         }
         let title = req.tool_call.fields.title.clone();
-        let now = Utc::now();
-        let request = RuntimeRequest {
-            id: request_id.clone(),
-            turn_id: self.turn_id.clone(),
-            kind,
-            status: RuntimeRequestStatus::Pending,
-            response_capability: ResponseCapability::Live,
-            created_at: now,
-            resolved_at: None,
-            decision: None,
-        };
-        let item = self.item(
-            format!("{}:approval:{request_id}", self.turn()),
-            TurnItemStatus::Waiting,
-            title.clone(),
-            TurnItemKind::ApprovalRequest {
-                request_id: request_id.clone(),
-                request_kind: kind,
-                prompt: title,
-                reason: None,
-                options,
-            },
-        );
         self.pending.insert(
-            request_id,
+            request_id.clone(),
             Pending {
                 rpc_id,
                 options: req.options,
             },
         );
-        step.push(DriverEvent::Request { request, item });
+        step.push(DriverEvent::Request {
+            id: request_id,
+            kind,
+            title: title.clone(),
+            prompt: title,
+            reason: None,
+            options,
+        });
     }
 
     fn on_response(
@@ -602,14 +538,7 @@ impl AcpDriver {
         if let Phase::Authenticating { load } = self.phase {
             if id == self.auth_id {
                 if let Some(e) = error {
-                    step.push(DriverEvent::Error(failure("auth_required", &e)));
-                    if self.queued.take().is_some() {
-                        step.push(DriverEvent::Terminal {
-                            status: TurnTerminalStatus::Failed,
-                            failure: Some(failure("auth_required", &e)),
-                            reason: None,
-                        });
-                    }
+                    step.push(DriverEvent::Fatal(rpc_failure("auth_required", &e)));
                     return;
                 }
                 self.create_session(step, load);
@@ -635,7 +564,7 @@ impl AcpDriver {
                 .and_then(|r| serde_json::from_value::<InitializeResponse>(r).ok())
                 .is_some_and(|r| r.agent_capabilities.load_session);
             if let Some(e) = error {
-                step.push(DriverEvent::Error(failure("handshake_error", &e)));
+                step.push(DriverEvent::Fatal(rpc_failure("handshake_error", &e)));
                 return;
             }
             self.create_session(step, load && self.resume.is_some());
@@ -661,14 +590,7 @@ impl AcpDriver {
                     self.create_session(step, false);
                     return;
                 }
-                step.push(DriverEvent::Error(failure("handshake_error", &e)));
-                if self.queued.take().is_some() {
-                    step.push(DriverEvent::Terminal {
-                        status: TurnTerminalStatus::Failed,
-                        failure: Some(failure("handshake_error", &e)),
-                        reason: None,
-                    });
-                }
+                step.push(DriverEvent::Fatal(rpc_failure("handshake_error", &e)));
                 return;
             }
             self.session_id = if loading {
@@ -695,7 +617,7 @@ impl AcpDriver {
             let ev = match (result, error) {
                 (_, Some(e)) => DriverEvent::Terminal {
                     status: TurnTerminalStatus::Failed,
-                    failure: Some(failure("provider_error", &e)),
+                    failure: Some(rpc_failure("provider_error", &e)),
                     reason: None,
                 },
                 (Some(r), None) => {
@@ -731,26 +653,6 @@ impl AcpDriver {
     }
 }
 
-fn rpc_key(id: &Value) -> String {
-    match id {
-        Value::String(s) => s.clone(),
-        other => other.to_string(),
-    }
-}
-
-fn failure(class: &str, e: &Value) -> ProviderFailure {
-    ProviderFailure {
-        class: class.into(),
-        message: e
-            .get("message")
-            .and_then(Value::as_str)
-            .unwrap_or("agent error")
-            .to_string(),
-        code: e.get("code").map(|c| c.to_string()),
-        retryable: None,
-    }
-}
-
 /// `raw_input.command` as a display string (a string or an argv array).
 fn command_text(raw: Option<&Value>) -> Option<String> {
     match raw?.get("command")? {
@@ -772,14 +674,14 @@ impl StructuredDriver for AcpDriver {
 
     fn launch(&self, ctx: &LaunchContext) -> LaunchSpec {
         let mut args = self.flavor.head_args.clone();
-        if let (Some(m), Some(flag)) = (&ctx.model, &self.flavor.model_flag) {
-            args.extend([flag.clone(), m.clone()]);
+        if let Some(m) = &ctx.model {
+            args.extend([self.flavor.model_flag.clone(), m.clone()]);
         }
         LaunchSpec {
             program: self.flavor.program.clone(),
             args,
             tail_args: self.flavor.tail_args.clone(),
-            env: self.flavor.env.clone(),
+            env: Vec::new(),
         }
     }
 
@@ -1009,7 +911,7 @@ mod tests {
         // A second auth failure is reported, not looped.
         let s = d.on_line(r#"{"jsonrpc":"2.0","id":4,"error":{"code":-32000,"message":"Authentication required"}}"#);
         assert!(s.writes.is_empty());
-        assert!(matches!(&s.events[0], DriverEvent::Error(f) if f.class == "handshake_error"));
+        assert!(matches!(&s.events[0], DriverEvent::Fatal(f) if f.class == "handshake_error"));
         // Cancel carries Grok's _meta.
         let mut d = AcpDriver::grok();
         d.start(&ctx(None));
@@ -1043,16 +945,13 @@ mod tests {
         d.on_line(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"s1"}}"#);
         d.prompt("t1", "go").unwrap();
         let s = d.on_line(r#"{"jsonrpc":"2.0","id":"p7","method":"session/request_permission","params":{"sessionId":"s1","toolCall":{"toolCallId":"c1","kind":"execute","title":"ls"},"options":[{"optionId":"a1","name":"Allow","kind":"allow_once"},{"optionId":"a2","name":"Always","kind":"allow_always"},{"optionId":"r1","name":"Deny","kind":"reject_once"}]}}"#);
-        let DriverEvent::Request { request, item } = &s.events[0] else {
+        let DriverEvent::Request {
+            id, kind, options, ..
+        } = &s.events[0]
+        else {
             panic!("{s:?}")
         };
-        assert_eq!(
-            (request.id.as_str(), request.kind),
-            ("acp-p7", RequestKind::Command)
-        );
-        let TurnItemKind::ApprovalRequest { options, .. } = &item.kind else {
-            panic!()
-        };
+        assert_eq!((id.as_str(), *kind), ("acp-p7", RequestKind::Command));
         let decisions: Vec<ApprovalDecision> = options.iter().map(|o| o.decision).collect();
         assert_eq!(
             decisions,

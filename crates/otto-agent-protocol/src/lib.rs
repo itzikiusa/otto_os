@@ -62,7 +62,7 @@ pub fn default_drivers() -> Arc<dyn DriverFactory> {
         |provider: RuntimeProvider| -> Option<Box<dyn StructuredDriver>> {
             Some(match provider {
                 RuntimeProvider::Claude => Box::new(claude::ClaudeDriver::new()),
-                RuntimeProvider::Codex => Box::new(codex::CodexDriver::new()),
+                RuntimeProvider::Codex => Box::new(codex::CodexDriver::with_program("codex")),
                 RuntimeProvider::Gemini => Box::new(acp::AcpDriver::gemini()),
                 RuntimeProvider::Grok => Box::new(acp::AcpDriver::grok()),
             })

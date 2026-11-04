@@ -11,8 +11,8 @@
 //! against `codex app-server generate-json-schema` of 0.166.0:
 //!
 //! * spawn `codex app-server` (`codexLaunchArgs.ts:12-15`); Otto's context
-//!   hook adds `-c developer_instructions=…` and `CODEX_HOME` exactly as for
-//!   a PTY codex session.
+//!   hook adds `--add-dir=…`, `-c developer_instructions=…` (before the
+//!   subcommand) and `CODEX_HOME`, exactly as for a PTY codex session.
 //! * `initialize {clientInfo, capabilities: {experimentalApi,
 //!   optOutNotificationMethods: ["turn/diff/updated"]}}` then the
 //!   `initialized` notification (`CodexAdapterV2.ts:1763-1801`, `:233-237`).
@@ -39,34 +39,32 @@
 //!   `thread/tokenUsage/updated` → usage; `turn/completed` → terminal
 //!   (`mapCodexTurnStatus`, `:359-372`); item status `codexItemStatus`
 //!   (`:392-414`).
-//! * approvals (`:5277-5640`): `item/commandExecution/requestApproval`,
+//! * approvals (`:5277-5420`): `item/commandExecution/requestApproval`,
 //!   `item/fileChange/requestApproval` answer `{decision: accept |
-//!   acceptForSession | decline | cancel}`; the legacy `execCommandApproval`
-//!   / `applyPatchApproval` answer `approved | approved_for_session | denied
-//!   | abort` (`:576-590`); `item/permissions/requestApproval` answers the
-//!   requested profile with scope turn / session, or an empty profile
-//!   (`:609-621`). `serverRequest/resolved` closes a request Codex settled.
+//!   acceptForSession | decline | cancel}`; `item/permissions/requestApproval`
+//!   answers the requested profile with scope turn / session, or an empty
+//!   profile (`:609-621`). `serverRequest/resolved` closes a request Codex
+//!   settled. The v1 `execCommandApproval` / `applyPatchApproval` belong to
+//!   the conversation API Otto does not use.
 
 use std::collections::HashMap;
 
-use chrono::Utc;
 use otto_core::agent_runtime::{
-    ApprovalDecision, ApprovalOption, PlanArtifact, PlanStep, PlanStepStatus, ProviderFailure,
-    RequestKind, ResponseCapability, RuntimeProvider, RuntimeRequest, RuntimeRequestStatus,
-    ThreadTokenUsage, TurnItem, TurnItemKind, TurnItemStatus, TurnTerminalStatus, TurnTokenUsage,
+    ApprovalDecision, ApprovalOption, PlanStep, PlanStepStatus, ProviderFailure, RequestKind,
+    RuntimeProvider, RuntimeRequestStatus, ThreadTokenUsage, TurnItem, TurnItemKind,
+    TurnItemStatus, TurnTerminalStatus, TurnTokenUsage,
 };
 use serde_json::{json, Value};
 
 use crate::driver::{
-    DriverError, DriverEvent, DriverStep, LaunchContext, LaunchSpec, StructuredDriver,
+    item, rpc_failure, rpc_key, DriverError, DriverEvent, DriverStep, LaunchContext, LaunchSpec,
+    StructuredDriver,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReqProto {
     /// `item/*/requestApproval` — `{decision}` in v2 spelling.
     V2Decision,
-    /// `execCommandApproval` / `applyPatchApproval` — `ReviewDecision`.
-    Legacy,
     /// `item/permissions/requestApproval`.
     Permissions,
 }
@@ -105,17 +103,7 @@ pub struct CodexDriver {
     failure: Option<ProviderFailure>,
 }
 
-impl Default for CodexDriver {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl CodexDriver {
-    pub fn new() -> Self {
-        Self::with_program("codex")
-    }
-
     pub fn with_program(program: impl Into<String>) -> Self {
         Self {
             program: program.into(),
@@ -204,41 +192,20 @@ impl CodexDriver {
         step.write(line);
     }
 
-    fn item(
-        &self,
-        id: String,
-        status: TurnItemStatus,
-        title: Option<String>,
-        kind: TurnItemKind,
-    ) -> TurnItem {
-        let now = Utc::now();
-        TurnItem {
-            id,
-            turn_id: self.turn_id.clone(),
-            ordinal: 0,
-            status,
-            title,
-            started_at: Some(now),
-            completed_at: (!status.is_open()).then_some(now),
-            updated_at: now,
-            kind,
-        }
-    }
-
     fn item_id(&self, codex_id: &str) -> String {
         format!("{}:codex:{codex_id}", self.turn())
     }
 
     /// A Codex `ThreadItem` → an Otto item (`None` = not projected).
-    fn project(&mut self, item: &Value, completed: bool) -> Option<TurnItem> {
-        let cid = item.get("id").and_then(Value::as_str)?.to_string();
-        let ty = item.get("type").and_then(Value::as_str)?;
-        let empty_text = item
+    fn project(&mut self, it: &Value, completed: bool) -> Option<TurnItem> {
+        let cid = it.get("id").and_then(Value::as_str)?.to_string();
+        let ty = it.get("type").and_then(Value::as_str)?;
+        let empty_text = it
             .get("text")
             .and_then(Value::as_str)
             .is_none_or(str::is_empty);
         let streamed = self.items.get(&cid).is_some_and(|i| !i.text.is_empty());
-        let summary = item
+        let summary = it
             .get("summary")
             .and_then(Value::as_array)
             .is_some_and(|a| !a.is_empty());
@@ -250,8 +217,8 @@ impl CodexDriver {
             return None;
         }
         let st = self.items.entry(cid.clone()).or_default();
-        let s = |k: &str| item.get(k).and_then(Value::as_str).map(str::to_string);
-        let status = match item.get("status").and_then(Value::as_str) {
+        let s = |k: &str| it.get(k).and_then(Value::as_str).map(str::to_string);
+        let status = match it.get("status").and_then(Value::as_str) {
             Some("inProgress") => TurnItemStatus::Running,
             Some("completed") => TurnItemStatus::Completed,
             Some("failed") => TurnItemStatus::Failed,
@@ -275,7 +242,7 @@ impl CodexDriver {
             }
             "reasoning" => {
                 let joined = |k: &str| {
-                    item.get(k)
+                    it.get(k)
                         .and_then(Value::as_array)
                         .map(|a| {
                             a.iter()
@@ -304,16 +271,13 @@ impl CodexDriver {
                     TurnItemKind::CommandExecution {
                         input: s("command").unwrap_or_default(),
                         output: (!st.output.is_empty()).then(|| st.output.clone()),
-                        exit_code: item
-                            .get("exitCode")
-                            .and_then(Value::as_i64)
-                            .map(|c| c as i32),
+                        exit_code: it.get("exitCode").and_then(Value::as_i64).map(|c| c as i32),
                     },
                     Some("Command".to_string()),
                 )
             }
             "fileChange" => {
-                let changes = item
+                let changes = it
                     .get("changes")
                     .and_then(Value::as_array)
                     .cloned()
@@ -347,10 +311,10 @@ impl CodexDriver {
                     Some(server) => format!("{server}.{tool}"),
                     None => tool,
                 };
-                let output = item
+                let output = it
                     .get("result")
                     .filter(|v| !v.is_null())
-                    .or_else(|| item.get("error").filter(|v| !v.is_null()))
+                    .or_else(|| it.get("error").filter(|v| !v.is_null()))
                     .map(|v| match v {
                         Value::String(s) => s.clone(),
                         other => other.to_string(),
@@ -358,7 +322,7 @@ impl CodexDriver {
                 (
                     TurnItemKind::DynamicTool {
                         tool_name: name.clone(),
-                        input: item.get("arguments").cloned().unwrap_or(Value::Null),
+                        input: it.get("arguments").cloned().unwrap_or(Value::Null),
                         output,
                     },
                     Some(name),
@@ -391,7 +355,7 @@ impl CodexDriver {
         if completed {
             self.items.remove(&cid);
         }
-        Some(self.item(self.item_id(&cid), status, title, kind))
+        Some(item(self.item_id(&cid), status, title, kind))
     }
 
     /// Grow a streamed text item by `delta`.
@@ -418,7 +382,7 @@ impl CodexDriver {
                 streaming: true,
             }
         };
-        let item = self.item(self.item_id(cid), TurnItemStatus::Running, None, kind);
+        let item = item(self.item_id(cid), TurnItemStatus::Running, None, kind);
         step.push(DriverEvent::TurnItem(item));
     }
 
@@ -449,23 +413,7 @@ impl CodexDriver {
             .get("explanation")
             .and_then(Value::as_str)
             .map(str::to_string);
-        let plan_id = format!("{}:plan", self.turn());
-        step.push(DriverEvent::Plan(PlanArtifact {
-            id: plan_id.clone(),
-            turn_id: self.turn_id.clone(),
-            steps: steps.clone(),
-            explanation: explanation.clone(),
-        }));
-        step.push(DriverEvent::TurnItem(self.item(
-            plan_id.clone(),
-            TurnItemStatus::Running,
-            None,
-            TurnItemKind::TodoList {
-                plan_id,
-                steps,
-                explanation,
-            },
-        )));
+        step.push(DriverEvent::Plan { steps, explanation });
     }
 
     fn on_usage(&self, step: &mut DriverStep, params: &Value) {
@@ -541,8 +489,6 @@ impl CodexDriver {
         let (proto, kind) = match method {
             "item/commandExecution/requestApproval" => (ReqProto::V2Decision, RequestKind::Command),
             "item/fileChange/requestApproval" => (ReqProto::V2Decision, RequestKind::FileChange),
-            "execCommandApproval" => (ReqProto::Legacy, RequestKind::Command),
-            "applyPatchApproval" => (ReqProto::Legacy, RequestKind::FileChange),
             "item/permissions/requestApproval" => (ReqProto::Permissions, RequestKind::Permission),
             _ => {
                 // requestUserInput, elicitations, dynamic tool calls, auth
@@ -586,38 +532,22 @@ impl CodexDriver {
             decision: ApprovalDecision::Decline,
             label: "Decline".into(),
         });
-        let now = Utc::now();
-        let request = RuntimeRequest {
-            id: request_id.clone(),
-            turn_id: self.turn_id.clone(),
-            kind,
-            status: RuntimeRequestStatus::Pending,
-            response_capability: ResponseCapability::Live,
-            created_at: now,
-            resolved_at: None,
-            decision: None,
-        };
-        let item = self.item(
-            format!("{}:approval:{request_id}", self.turn()),
-            TurnItemStatus::Waiting,
-            Some(title.clone()),
-            TurnItemKind::ApprovalRequest {
-                request_id: request_id.clone(),
-                request_kind: kind,
-                prompt: prompt.or(Some(title)),
-                reason: s("reason"),
-                options,
-            },
-        );
         self.pending.insert(
-            request_id,
+            request_id.clone(),
             Pending {
                 rpc_id,
                 proto,
                 permissions: params.get("permissions").cloned().unwrap_or(json!({})),
             },
         );
-        step.push(DriverEvent::Request { request, item });
+        step.push(DriverEvent::Request {
+            id: request_id,
+            kind,
+            title: Some(title),
+            prompt,
+            reason: s("reason"),
+            options,
+        });
     }
 
     fn answer(p: &Pending, decision: ApprovalDecision) -> String {
@@ -627,12 +557,6 @@ impl CodexDriver {
                 ApprovalDecision::AcceptForSession | ApprovalDecision::AcceptAlways => "acceptForSession",
                 ApprovalDecision::Decline => "decline",
                 ApprovalDecision::Cancel => "cancel",
-            }}),
-            ReqProto::Legacy => json!({"decision": match decision {
-                ApprovalDecision::Accept => "approved",
-                ApprovalDecision::AcceptForSession | ApprovalDecision::AcceptAlways => "approved_for_session",
-                ApprovalDecision::Decline => "denied",
-                ApprovalDecision::Cancel => "abort",
             }}),
             ReqProto::Permissions => match decision {
                 ApprovalDecision::Accept => json!({"permissions": p.permissions, "scope": "turn"}),
@@ -656,19 +580,12 @@ impl CodexDriver {
     ) {
         if id == self.init_id && !self.ready && self.thread_req.is_none() {
             if let Some(e) = error {
-                // T3 Code treats "Already initialized" as success (:1779-1784).
-                let already = e
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .is_some_and(|m| m.contains("Already initialized"));
-                if !already {
-                    self.handshake_failed(step, &e);
-                    return;
-                }
+                step.push(DriverEvent::Fatal(rpc_failure("handshake_error", &e)));
+                return;
             }
             step.write(json!({"method": "initialized"}).to_string());
             self.start_thread(step, true);
-        } else if let Some((tid, resuming)) = self.thread_req.filter(|(t, _)| *t == id) {
+        } else if let Some((_, resuming)) = self.thread_req.filter(|(t, _)| *t == id) {
             self.thread_req = None;
             if let Some(e) = error {
                 if resuming {
@@ -677,10 +594,9 @@ impl CodexDriver {
                     self.start_thread(step, false);
                     return;
                 }
-                self.handshake_failed(step, &e);
+                step.push(DriverEvent::Fatal(rpc_failure("handshake_error", &e)));
                 return;
             }
-            let _ = tid;
             let r = result.unwrap_or(Value::Null);
             self.thread_id = r
                 .pointer("/thread/id")
@@ -700,7 +616,7 @@ impl CodexDriver {
                 self.turn_req = None;
                 step.push(DriverEvent::Terminal {
                     status: TurnTerminalStatus::Failed,
-                    failure: Some(failure("provider_error", &e)),
+                    failure: Some(rpc_failure("provider_error", &e)),
                     reason: None,
                 });
                 self.turn_id = None;
@@ -717,17 +633,6 @@ impl CodexDriver {
         }
     }
 
-    fn handshake_failed(&mut self, step: &mut DriverStep, e: &Value) {
-        step.push(DriverEvent::Error(failure("handshake_error", e)));
-        if self.queued.take().is_some() {
-            step.push(DriverEvent::Terminal {
-                status: TurnTerminalStatus::Failed,
-                failure: Some(failure("handshake_error", e)),
-                reason: None,
-            });
-        }
-    }
-
     fn maybe_interrupt(&mut self, step: &mut DriverStep) {
         if !self.interrupt_when_started {
             return;
@@ -741,37 +646,19 @@ impl CodexDriver {
     }
 }
 
-fn rpc_key(id: &Value) -> String {
-    match id {
-        Value::String(s) => s.clone(),
-        other => other.to_string(),
-    }
-}
-
-fn failure(class: &str, e: &Value) -> ProviderFailure {
-    ProviderFailure {
-        class: class.into(),
-        message: e
-            .get("message")
-            .and_then(Value::as_str)
-            .unwrap_or("codex error")
-            .to_string(),
-        code: e.get("code").map(|c| c.to_string()),
-        retryable: None,
-    }
-}
-
 impl StructuredDriver for CodexDriver {
     fn provider(&self) -> RuntimeProvider {
         RuntimeProvider::Codex
     }
 
     fn launch(&self, _ctx: &LaunchContext) -> LaunchSpec {
-        // The model goes in `thread/start` (`codexThreadRuntimeParams`).
+        // The model goes in `thread/start` (`codexThreadRuntimeParams`). The
+        // context hook's flags (`--add-dir=`, `-c …`) are top-level codex
+        // options `app-server` rejects after it, so the subcommand is the tail.
         LaunchSpec {
             program: self.program.clone(),
-            args: vec!["app-server".into()],
-            tail_args: Vec::new(),
+            args: Vec::new(),
+            tail_args: vec!["app-server".into()],
             env: Vec::new(),
         }
     }
@@ -876,83 +763,69 @@ impl StructuredDriver for CodexDriver {
                     self.on_response(&mut step, n, result, error);
                 }
             }
-            (Some(m), None) => {
-                // Notifications for another thread on a shared server are
-                // not ours (one app-server per Otto session today).
-                if let (Some(t), Some(mine)) = (
-                    params.get("threadId").and_then(Value::as_str),
-                    self.thread_id.as_deref(),
-                ) {
-                    if t != mine {
-                        return step;
+            (Some(m), None) => match m.as_str() {
+                "turn/started" => {
+                    if let Some(t) = params.pointer("/turn/id").and_then(Value::as_str) {
+                        self.codex_turn = Some(t.to_string());
+                    }
+                    self.maybe_interrupt(&mut step);
+                }
+                "item/started" | "item/completed" if self.turn_id.is_some() => {
+                    if let Some(item) = params.get("item") {
+                        if let Some(i) = self.project(item, m == "item/completed") {
+                            step.push(DriverEvent::TurnItem(i));
+                        }
                     }
                 }
-                match m.as_str() {
-                    "turn/started" => {
-                        if let Some(t) = params.pointer("/turn/id").and_then(Value::as_str) {
-                            self.codex_turn = Some(t.to_string());
+                "item/agentMessage/delta" if self.turn_id.is_some() => {
+                    self.on_text_delta(&mut step, &params, false)
+                }
+                "item/reasoning/summaryTextDelta" | "item/reasoning/textDelta"
+                    if self.turn_id.is_some() =>
+                {
+                    self.on_text_delta(&mut step, &params, true)
+                }
+                "item/commandExecution/outputDelta" if self.turn_id.is_some() => {
+                    if let (Some(cid), Some(d)) = (
+                        params.get("itemId").and_then(Value::as_str),
+                        params.get("delta").and_then(Value::as_str),
+                    ) {
+                        self.items
+                            .entry(cid.to_string())
+                            .or_default()
+                            .output
+                            .push_str(d);
+                        step.push(DriverEvent::CommandOutput {
+                            item_id: self.item_id(cid),
+                            chunk: d.to_string(),
+                        });
+                    }
+                }
+                "turn/plan/updated" if self.turn_id.is_some() => self.on_plan(&mut step, &params),
+                "thread/tokenUsage/updated" => self.on_usage(&mut step, &params),
+                "error" => {
+                    if params.get("willRetry").and_then(Value::as_bool) != Some(true) {
+                        if let Some(e) = params.get("error") {
+                            self.failure = Some(rpc_failure("provider_error", e));
                         }
-                        self.maybe_interrupt(&mut step);
                     }
-                    "item/started" | "item/completed" if self.turn_id.is_some() => {
-                        if let Some(item) = params.get("item") {
-                            if let Some(i) = self.project(item, m == "item/completed") {
-                                step.push(DriverEvent::TurnItem(i));
-                            }
-                        }
-                    }
-                    "item/agentMessage/delta" if self.turn_id.is_some() => {
-                        self.on_text_delta(&mut step, &params, false)
-                    }
-                    "item/reasoning/summaryTextDelta" | "item/reasoning/textDelta"
-                        if self.turn_id.is_some() =>
-                    {
-                        self.on_text_delta(&mut step, &params, true)
-                    }
-                    "item/commandExecution/outputDelta" if self.turn_id.is_some() => {
-                        if let (Some(cid), Some(d)) = (
-                            params.get("itemId").and_then(Value::as_str),
-                            params.get("delta").and_then(Value::as_str),
-                        ) {
-                            self.items
-                                .entry(cid.to_string())
-                                .or_default()
-                                .output
-                                .push_str(d);
-                            step.push(DriverEvent::CommandOutput {
-                                item_id: self.item_id(cid),
-                                chunk: d.to_string(),
+                }
+                "serverRequest/resolved" => {
+                    if let Some(rid) = params.get("requestId") {
+                        let request_id = format!("codex-{}", rpc_key(rid));
+                        if self.pending.remove(&request_id).is_some() {
+                            step.push(DriverEvent::RequestClosed {
+                                request_id,
+                                status: RuntimeRequestStatus::Cancelled,
                             });
                         }
                     }
-                    "turn/plan/updated" if self.turn_id.is_some() => {
-                        self.on_plan(&mut step, &params)
-                    }
-                    "thread/tokenUsage/updated" => self.on_usage(&mut step, &params),
-                    "error" => {
-                        if params.get("willRetry").and_then(Value::as_bool) != Some(true) {
-                            if let Some(e) = params.get("error") {
-                                self.failure = Some(failure("provider_error", e));
-                            }
-                        }
-                    }
-                    "serverRequest/resolved" => {
-                        if let Some(rid) = params.get("requestId") {
-                            let request_id = format!("codex-{}", rpc_key(rid));
-                            if self.pending.remove(&request_id).is_some() {
-                                step.push(DriverEvent::RequestClosed {
-                                    request_id,
-                                    status: RuntimeRequestStatus::Cancelled,
-                                });
-                            }
-                        }
-                    }
-                    "turn/completed" if self.turn_id.is_some() => {
-                        self.on_turn_completed(&mut step, &params)
-                    }
-                    _ => {}
                 }
-            }
+                "turn/completed" if self.turn_id.is_some() => {
+                    self.on_turn_completed(&mut step, &params)
+                }
+                _ => {}
+            },
             (None, None) => {}
         }
         step
@@ -1012,12 +885,12 @@ mod tests {
 
     #[test]
     fn sandbox_policy_follows_otto_seatbelt() {
-        let mut d = CodexDriver::new();
+        let mut d = CodexDriver::with_program("codex");
         ready(&mut d, true);
         let s = d.prompt("t1", "hi").unwrap();
         let turn = parse(&s.writes[0]);
         assert_eq!(turn["params"]["sandboxPolicy"]["type"], "externalSandbox");
-        let mut d = CodexDriver::new();
+        let mut d = CodexDriver::with_program("codex");
         ready(&mut d, false);
         let s = d.prompt("t1", "hi").unwrap();
         assert_eq!(
@@ -1028,7 +901,7 @@ mod tests {
 
     #[test]
     fn resume_falls_back_to_a_fresh_thread() {
-        let mut d = CodexDriver::new();
+        let mut d = CodexDriver::with_program("codex");
         let _ = d.start(&ctx(Some("old"), false));
         let s = feed(&mut d, json!({"id": 1, "result": {}}));
         let resume = parse(&s.writes[1]);
@@ -1044,7 +917,7 @@ mod tests {
 
     #[test]
     fn deltas_items_approval_and_turn_end() {
-        let mut d = CodexDriver::new();
+        let mut d = CodexDriver::with_program("codex");
         ready(&mut d, false);
         let s = d.prompt("t1", "go").unwrap();
         let turn_req = parse(&s.writes[0]);
@@ -1076,13 +949,15 @@ mod tests {
             &mut d,
             json!({"id": 7, "method": "item/commandExecution/requestApproval", "params": {"threadId": "th1", "turnId": "ct1", "itemId": "c1", "startedAtMs": 0, "command": "rm -rf build", "reason": "cleanup"}}),
         );
-        let DriverEvent::Request { request, item } = &s.events[0] else {
+        let DriverEvent::Request {
+            id, prompt, reason, ..
+        } = &s.events[0]
+        else {
             panic!()
         };
-        assert_eq!(request.id, "codex-7");
-        assert!(
-            matches!(&item.kind, TurnItemKind::ApprovalRequest { prompt: Some(p), reason: Some(r), .. } if p == "rm -rf build" && r == "cleanup")
-        );
+        assert_eq!(id, "codex-7");
+        assert_eq!(prompt.as_deref(), Some("rm -rf build"));
+        assert_eq!(reason.as_deref(), Some("cleanup"));
         let s = d
             .respond("codex-7", ApprovalDecision::AcceptForSession)
             .unwrap();
@@ -1130,7 +1005,7 @@ mod tests {
 
     #[test]
     fn interrupt_cancels_requests_and_waits_for_the_codex_turn_id() {
-        let mut d = CodexDriver::new();
+        let mut d = CodexDriver::with_program("codex");
         ready(&mut d, false);
         let s = d.prompt("t1", "go").unwrap();
         let turn_req = parse(&s.writes[0]);
@@ -1144,13 +1019,13 @@ mod tests {
         let int = parse(&s.writes[0]);
         assert_eq!(int["method"], "turn/interrupt");
         assert_eq!(int["params"]["turnId"], "ct9");
-        // Legacy approvals answer `abort` on cancel.
+        // Open approvals answer `cancel`.
         feed(
             &mut d,
-            json!({"id": "x1", "method": "execCommandApproval", "params": {"callId": "c", "command": ["ls"], "conversationId": "th1", "cwd": "/w", "parsedCmd": []}}),
+            json!({"id": 8, "method": "item/fileChange/requestApproval", "params": {"threadId": "th1", "turnId": "ct9", "itemId": "f1", "startedAtMs": 0}}),
         );
         let s = d.interrupt();
-        assert_eq!(parse(&s.writes[0])["result"]["decision"], "abort");
+        assert_eq!(parse(&s.writes[0])["result"]["decision"], "cancel");
         let s = feed(
             &mut d,
             json!({"method": "turn/completed", "params": {"threadId": "th1", "turn": {"id": "ct9", "items": [], "status": "interrupted"}}}),
@@ -1166,7 +1041,7 @@ mod tests {
 
     #[test]
     fn unsupported_server_requests_get_method_not_found() {
-        let mut d = CodexDriver::new();
+        let mut d = CodexDriver::with_program("codex");
         ready(&mut d, false);
         let s = feed(
             &mut d,

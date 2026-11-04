@@ -16,7 +16,7 @@ use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use otto_core::agent_runtime::{
     CreateRuntimeSessionReq, RuntimePromptReq, RuntimePromptResp, RuntimeReplay,
-    RuntimeRequestRespondReq, RuntimeSession,
+    RuntimeRequestRespondReq, RuntimeSession, UpdateRuntimeSessionReq,
 };
 use otto_core::api::Problem;
 use otto_core::auth::{AuthContext, AuthUser};
@@ -64,7 +64,10 @@ pub fn api_router<S: RuntimeCtx>() -> Router<S> {
             "/workspaces/{id}/runtime-sessions",
             get(list::<S>).post(create::<S>),
         )
-        .route("/runtime-sessions/{id}", get(get_one::<S>))
+        .route(
+            "/runtime-sessions/{id}",
+            get(get_one::<S>).patch(rename::<S>),
+        )
         .route("/runtime-sessions/{id}/prompt", post(prompt::<S>))
         .route("/runtime-sessions/{id}/interrupt", post(interrupt::<S>))
         .route(
@@ -187,6 +190,18 @@ async fn answer<S: RuntimeCtx>(
         .respond(&id, &request_id, req.decision)
         .await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn rename<S: RuntimeCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<Id>,
+    Json(req): Json<UpdateRuntimeSessionReq>,
+) -> ApiResult<Json<RuntimeSession>> {
+    require_human(&ctx, &auth)?;
+    authorized(&ctx, &user, &id).await?;
+    Ok(Json(ctx.agent_runtime().rename(&id, &req.title).await?))
 }
 
 async fn close<S: RuntimeCtx>(

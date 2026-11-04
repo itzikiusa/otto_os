@@ -214,6 +214,11 @@ export interface CreateRuntimeSessionReq {
 }
 
 /** Body of POST /runtime-sessions/{id}/prompt. */
+/** `PATCH /runtime-sessions/{id}` — rename. */
+export interface UpdateRuntimeSessionReq {
+  title: string;
+}
+
 export interface RuntimePromptReq {
   text: string;
 }

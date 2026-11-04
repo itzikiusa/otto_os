@@ -422,6 +422,8 @@ async fn run(cfg: Config) -> Result<(), String> {
     let telemetry = ctx.telemetry.clone();
     // Shutdown stops the remote live browser's Chromium processes.
     let browser_handle = ctx.browser.clone();
+    // …and the structured agent runtime's children (no PTY holder keeps them).
+    let agent_runtime = ctx.agent_runtime.clone();
     let (api_extras, root_extras) = module_routers(&ctx);
     #[cfg(feature = "embed-ui")]
     let assets: Option<otto_server::spa::AssetLoader> = Some(ui_assets::load);
@@ -464,6 +466,12 @@ async fn run(cfg: Config) -> Result<(), String> {
     }
 
     let signal_at = *shutdown_rx.borrow();
+    if tokio::time::timeout(std::time::Duration::from_secs(2), agent_runtime.shutdown())
+        .await
+        .is_err()
+    {
+        tracing::warn!("agent runtime shutdown exceeded 2 s — continuing teardown");
+    }
     teardown(
         &manager,
         &browser_handle,

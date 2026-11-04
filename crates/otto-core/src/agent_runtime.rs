@@ -543,6 +543,12 @@ pub struct CreateRuntimeSessionReq {
     pub model: Option<String>,
 }
 
+/// `PATCH /runtime-sessions/{id}` (rename; T3 Code `thread.metadata-updated`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateRuntimeSessionReq {
+    pub title: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimePromptReq {
     pub text: String,
