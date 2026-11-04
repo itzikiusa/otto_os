@@ -14,6 +14,7 @@
   // commands act on the view; any other `/command` goes to the agent as typed.
   import { tick, untrack } from 'svelte';
   import { announceShown } from '../../../lib/announce.svelte';
+  import { ApiError } from '../../../lib/api/client';
   import EmptyState from '../../../lib/components/EmptyState.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import LoadState from '../../../lib/components/LoadState.svelte';
@@ -57,7 +58,13 @@
   const approvals = $derived(new Map((p ? pendingApprovals(p) : []).map((a) => [a.requestId, a] as const)));
   const turn = $derived(p ? latestTurn(p) : null);
   const closed = $derived(session?.status === 'closed');
-  const sessionError = $derived(p?.session?.status === 'error' ? p.session.last_error : null);
+  /** The agent couldn't start (a refused handshake answers the prompt 400;
+   *  the session goes dormant with `last_error`) — shown inline, T3 Code's
+   *  ThreadErrorBanner, until the next prompt starts it. */
+  let startError = $state<string | null>(null);
+  const sessionError = $derived(
+    startError ?? (p?.session && (p.session.status === 'stopped' || p.session.status === 'error') ? p.session.last_error : null),
+  );
   const plan = $derived.by(() => {
     if (!p || !turn) return null;
     const pl = p.plans.findLast((x) => x.turn_id === turn.id);
@@ -85,8 +92,10 @@
     sending = true;
     try {
       awaitSeq = (await runtimeThreads.prompt(sessionId, t)).sequence;
+      startError = null;
     } catch (e) {
-      toastError('Couldn’t send message', e);
+      if (e instanceof ApiError && e.status === 400) startError = e.message;
+      else toastError('Couldn’t send message', e);
       if (!text) text = t;
     } finally {
       sending = false;
