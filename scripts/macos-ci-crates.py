@@ -17,8 +17,9 @@ macOS workflow, so a sandbox regression passed every CI run.
     scripts/macos-ci-crates.py            # print both lists
     scripts/macos-ci-crates.py --check    # fail when macos.yml drifts from them
 
-`--check` asserts macos.yml's clippy and nextest `-p` lists equal the MACOS
-crates and its pull_request `crates/<dir>/**` paths equal the TRIGGER set.
+`--check` asserts the full branch of macos.yml's `Pick macOS scope` step
+names exactly the MACOS crates (clippy + nextest run `$MAC_SCOPE`; PRs use a
+Darwin-only subset) and its pull_request `crates/<dir>/**` paths equal the TRIGGER set.
 It runs in ci.yml's Rust job and in scripts/test_macos_ci_crates.py.
 """
 
@@ -121,15 +122,43 @@ def workflow_crate_paths(text: str, event: str = "pull_request") -> set[str]:
     return set(re.findall(r"'crates/([A-Za-z0-9_-]+)/\*\*'", section))
 
 
+SCOPE_STEP = "- name: Pick macOS scope"
+
+
+def full_scope_packages(text: str) -> set[str]:
+    """The `-p` crates of the FULL (main / nightly) branch of the scope step.
+
+    PRs run a Darwin-only subset; the `else` branch is what pushes to main
+    and the nightly run, and it must name every macOS crate."""
+    i = text.find(SCOPE_STEP)
+    if i == -1:
+        raise ValueError(f"missing step marker: {SCOPE_STEP}")
+    j = text.find("- name:", i + len(SCOPE_STEP))
+    block = text[i : j if j != -1 else len(text)]
+    k = block.find("else")
+    if k == -1:
+        raise ValueError("scope step has no full (else) branch")
+    full = block[k:].split("fi", 1)[0]
+    return set(re.findall(r"-p\s+([A-Za-z0-9_-]+)", full))
+
+
 def check(text: str, macos: set[str], trigger: set[str], dirs: dict[str, Path]) -> list[str]:
     errors = []
+    got = full_scope_packages(text)
+    if got != macos:
+        if missing := sorted(macos - got):
+            errors.append(f"macos.yml `Pick macOS scope` (full) is missing -p {' -p '.join(missing)}")
+        if extra := sorted(got - macos):
+            errors.append(f"macos.yml `Pick macOS scope` (full) names crates with no macOS code: {', '.join(extra)}")
     for step in ("cargo clippy (macOS cfg)", "cargo nextest"):
-        got = workflow_packages(text, f"- name: {step}")
-        if got != macos:
-            if missing := sorted(macos - got):
-                errors.append(f"macos.yml `{step}` is missing -p {' -p '.join(missing)}")
-            if extra := sorted(got - macos):
-                errors.append(f"macos.yml `{step}` names crates with no macOS code: {', '.join(extra)}")
+        marker = f"- name: {step}"
+        i = text.find(marker)
+        if i == -1:
+            errors.append(f"macos.yml has no `{step}` step")
+            continue
+        j = text.find("- name:", i + len(marker))
+        if "$MAC_SCOPE" not in text[i : j if j != -1 else len(text)]:
+            errors.append(f"macos.yml `{step}` does not run the picked $MAC_SCOPE")
     want_paths = {dirs[n].name for n in trigger}
     got_paths = workflow_crate_paths(text)
     if missing := sorted(want_paths - got_paths):
