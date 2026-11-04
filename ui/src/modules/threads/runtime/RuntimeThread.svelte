@@ -109,6 +109,8 @@
 
   // ── Images (paste or attach; sent inline with the next message) ──────
   const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+  // The drivers that take image input (Claude content blocks, Codex image items).
+  const canImages = $derived(provider === 'claude' || provider === 'codex');
   let images = $state<(PromptImage & { name: string })[]>([]);
   let fileEl = $state<HTMLInputElement | null>(null);
   async function addImages(files: Iterable<File>): Promise<void> {
@@ -126,7 +128,7 @@
   }
   function onPaste(e: ClipboardEvent): void {
     const files = [...(e.clipboardData?.files ?? [])].filter((f) => f.type.startsWith('image/'));
-    if (files.length === 0) return;
+    if (!canImages || files.length === 0) return;
     e.preventDefault();
     void addImages(files);
   }
@@ -404,6 +406,7 @@
         </div>
       {/if}
       <div class="rt-foot">
+        {#if canImages}
         <button
           type="button"
           class="icon-btn"
@@ -426,6 +429,7 @@
             e.currentTarget.value = '';
           }}
         />
+        {/if}
         <span class="rt-grow">
           <button
             bind:this={agentEl}
