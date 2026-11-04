@@ -1587,11 +1587,18 @@ fn pick_account_never_guesses_between_two_accounts() {
         acct("g2", Gitlab, Some("else")),
     ];
     assert_eq!(pick(gl, Gitlab, Some("grp/sub")).as_deref(), Some("g1"));
-    let dup = vec![
-        acct("x", Github, Some("acme")),
-        acct("y", Github, Some("acme")),
-    ];
-    assert_eq!(pick(dup, Github, Some("acme")), None);
+    // Two tokens of ONE login on the owning namespace → the oldest (first).
+    let dup = || {
+        vec![
+            acct("x", Github, Some("acme")),
+            acct("y", Github, Some("acme")),
+        ]
+    };
+    assert_eq!(pick(dup(), Github, Some("acme")).as_deref(), Some("x"));
+    // Two different logins owning one remote → none.
+    let mut other = dup();
+    other[1].username = "someone-else".into();
+    assert_eq!(pick(other, Github, Some("acme")), None);
 }
 
 /// Bulk branch delete: each item runs independently — a merged branch goes

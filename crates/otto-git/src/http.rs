@@ -1411,10 +1411,13 @@ fn pick_account(
             !ns.is_empty() && (owner == ns || owner.starts_with(&format!("{ns}/")))
         })
     });
-    match (owning.next(), owning.next()) {
-        (Some(a), None) => Some(a),
-        _ => None,
-    }
+    // Several owning accounts under ONE login (e.g. a re-added token) are the
+    // same identity, not an ambiguity: take the oldest (`list_accounts` order).
+    // Different logins on one namespace are still never guessed.
+    let first = owning.next()?;
+    owning
+        .all(|a| a.username.eq_ignore_ascii_case(&first.username))
+        .then_some(first)
 }
 
 fn derive_repo_name(url: &str) -> Option<String> {
