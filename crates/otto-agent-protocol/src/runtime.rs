@@ -16,7 +16,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use dashmap::DashMap;
@@ -52,6 +52,12 @@ pub struct RuntimeConfig {
     pub interrupt_grace: Duration,
     /// After `close` (stdin EOF), how long before SIGTERM / SIGKILL.
     pub close_grace: Duration,
+    /// Streaming upserts of one item are coalesced to at most one per window
+    /// (T3 Code: `CODEX_ASSISTANT_DELTA_FLUSH_INTERVAL_MS` = 50 in
+    /// `CodexAdapterV2.ts:212`, `ThreadLiveEventCoalescer.ts:18`). The first
+    /// chunk goes out at once; the latest text of a held item is flushed
+    /// when the window ends or before any other event. Zero disables.
+    pub stream_coalesce: Duration,
 }
 
 impl Default for RuntimeConfig {
@@ -61,6 +67,7 @@ impl Default for RuntimeConfig {
             seq_reserve: 65_536,
             interrupt_grace: Duration::from_secs(10),
             close_grace: Duration::from_secs(3),
+            stream_coalesce: Duration::from_millis(50),
         }
     }
 }
@@ -235,6 +242,21 @@ struct State {
     proj: Projection,
     turn: Option<ActiveTurn>,
     proc: Option<Proc>,
+    /// Streaming upserts waiting out their coalescing window (latest per id).
+    held: Vec<TurnItem>,
+    /// When each streaming item was last emitted.
+    stream_emitted: HashMap<Id, Instant>,
+}
+
+impl State {
+    /// When the oldest held streaming upsert is due.
+    fn held_deadline(&self, window: Duration) -> Option<Instant> {
+        self.held
+            .iter()
+            .filter_map(|i| self.stream_emitted.get(&i.id))
+            .min()
+            .map(|t| *t + window)
+    }
 }
 
 struct Live {
@@ -462,6 +484,8 @@ impl AgentRuntime {
                 proj,
                 turn: None,
                 proc: None,
+                held: Vec::new(),
+                stream_emitted: HashMap::new(),
             }),
             persist: tx,
         });
@@ -830,6 +854,8 @@ fn stop_child(p: Proc, grace: Duration) {
 
 /// Sequence, project, record and publish one event. Returns its sequence.
 fn emit(inner: &Inner, live: &Live, st: &mut State, body: RuntimeEventBody) -> u64 {
+    // Held streaming text goes out before anything that follows it.
+    flush_held(inner, live, st);
     let seq = st.next_seq;
     st.next_seq += 1;
     if seq >= st.reserved {
@@ -893,7 +919,43 @@ fn set_session_status(
 }
 
 /// Upsert a turn item: new items get the next ordinal, known ones keep theirs.
+/// Emit every held streaming upsert now (in the order first held).
+fn flush_held(inner: &Inner, live: &Live, st: &mut State) {
+    if st.held.is_empty() {
+        return;
+    }
+    let now = Instant::now();
+    for item in std::mem::take(&mut st.held) {
+        st.stream_emitted.insert(item.id.clone(), now);
+        emit(
+            inner,
+            live,
+            st,
+            RuntimeEventBody::TurnItemUpdated { turn_item: item },
+        );
+    }
+}
+
 fn upsert_item(inner: &Inner, live: &Live, st: &mut State, mut item: TurnItem) {
+    // Superseded: the newer state of a held item replaces it.
+    st.held.retain(|h| h.id != item.id);
+    let window = inner.config.stream_coalesce;
+    if item.is_streaming() && !window.is_zero() {
+        let now = Instant::now();
+        let recent = st
+            .stream_emitted
+            .get(&item.id)
+            .is_some_and(|t| now.duration_since(*t) < window);
+        if recent && st.proj.items.contains_key(&item.id) {
+            item.ordinal = st.proj.items[&item.id].ordinal;
+            item.updated_at = Utc::now();
+            st.held.push(item);
+            return;
+        }
+        st.stream_emitted.insert(item.id.clone(), now);
+    } else {
+        st.stream_emitted.remove(&item.id);
+    }
     item.ordinal = match st.proj.items.get(&item.id) {
         Some(existing) => existing.ordinal,
         None => {
@@ -992,6 +1054,8 @@ fn finish_turn(
     let Some(active) = st.turn.take() else {
         return;
     };
+    // Settle what the client saw last: the held text first.
+    flush_held(inner, live, st);
     cancel_pending(inner, live, st, RuntimeRequestStatus::Cancelled);
     let now = Utc::now();
     let mut open: Vec<TurnItem> = st
@@ -1230,7 +1294,24 @@ fn apply_step(inner: &Inner, live: &Live, st: &mut State, step: DriverStep) {
 
 /// Feed one child's messages to its driver until it exits.
 async fn pump(inner: Arc<Inner>, live: Arc<Live>, epoch: u64, mut rx: mpsc::Receiver<ChildMsg>) {
-    while let Some(msg) = rx.recv().await {
+    let window = inner.config.stream_coalesce;
+    loop {
+        let due = live.lock().held_deadline(window);
+        let msg = match due {
+            Some(at) => match tokio::time::timeout_at(at.into(), rx.recv()).await {
+                Ok(m) => m,
+                Err(_) => {
+                    let mut st = live.lock();
+                    if st.proc.as_ref().map(|p| p.epoch) != Some(epoch) {
+                        return; // closed or superseded
+                    }
+                    flush_held(&inner, &live, &mut st);
+                    continue;
+                }
+            },
+            None => rx.recv().await,
+        };
+        let Some(msg) = msg else { break };
         let mut st = live.lock();
         if st.proc.as_ref().map(|p| p.epoch) != Some(epoch) {
             return; // closed or superseded

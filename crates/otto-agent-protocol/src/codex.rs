@@ -233,6 +233,22 @@ impl CodexDriver {
     fn project(&mut self, item: &Value, completed: bool) -> Option<TurnItem> {
         let cid = item.get("id").and_then(Value::as_str)?.to_string();
         let ty = item.get("type").and_then(Value::as_str)?;
+        let empty_text = item
+            .get("text")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty);
+        let streamed = self.items.get(&cid).is_some_and(|i| !i.text.is_empty());
+        let summary = item
+            .get("summary")
+            .and_then(Value::as_array)
+            .is_some_and(|a| !a.is_empty());
+        if matches!(ty, "agentMessage" | "reasoning") && empty_text && !streamed && !summary {
+            // Shown from its first delta, never as an empty bubble.
+            if completed {
+                self.items.remove(&cid);
+            }
+            return None;
+        }
         let st = self.items.entry(cid.clone()).or_default();
         let s = |k: &str| item.get(k).and_then(Value::as_str).map(str::to_string);
         let status = match item.get("status").and_then(Value::as_str) {

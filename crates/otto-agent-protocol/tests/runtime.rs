@@ -245,7 +245,9 @@ async fn echo_turn_streams_entity_upserts_in_sequence_order() {
         "dense, increasing"
     );
     // Streaming: the assistant item is re-emitted whole with growing text,
-    // `streaming: true`, then settled.
+    // `streaming: true`, then settled. The first chunk goes out at once; the
+    // second lands inside the 50 ms coalescing window and is superseded by
+    // the settled item (T3 Code coalesces the same way).
     let texts: Vec<(String, bool)> = evs
         .iter()
         .filter_map(|e| match &e.body {
@@ -260,11 +262,7 @@ async fn echo_turn_streams_entity_upserts_in_sequence_order() {
         .collect();
     assert_eq!(
         texts,
-        vec![
-            ("echo: ".into(), true),
-            ("echo: hello".into(), true),
-            ("echo: hello".into(), false)
-        ]
+        vec![("echo: ".into(), true), ("echo: hello".into(), false)]
     );
     let items = host.items();
     let kinds: Vec<&str> = items
@@ -550,6 +548,8 @@ async fn snapshot_past_replay_limits_and_recovery_after_a_restart() {
             max_events: 8,
             max_bytes: usize::MAX,
         },
+        // Every chunk its own event, to overflow the ring.
+        stream_coalesce: Duration::ZERO,
         ..RuntimeConfig::default()
     };
     let rt = runtime(&pool, &host, small.clone());
@@ -758,4 +758,35 @@ async fn codex_resumes_its_thread_after_a_daemon_restart() {
         native
     );
     rt2.close(&s.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn streaming_chunks_coalesce_inside_the_window_and_flush_after_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(dir.path().to_str().unwrap(), false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create(&rt, dir.path().to_str().unwrap()).await;
+    rt.prompt(&s.id, "big:200").await.unwrap();
+    host.wait(is_terminal).await;
+    let streamed: Vec<String> = host
+        .all()
+        .iter()
+        .filter_map(|e| match &e.body {
+            RuntimeEventBody::TurnItemUpdated { turn_item } => match &turn_item.kind {
+                TurnItemKind::AssistantMessage { text, .. } => Some(text.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert!(
+        streamed.len() < 200,
+        "coalesced: {} upserts",
+        streamed.len()
+    );
+    assert_eq!(streamed.last().unwrap(), &"x".repeat(200));
+    // Text only grows: no held update is lost or reordered.
+    assert!(streamed.windows(2).all(|w| w[1].starts_with(w[0].as_str())));
+    rt.close(&s.id).await.unwrap();
 }
