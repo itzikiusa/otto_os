@@ -6237,6 +6237,8 @@ mod cli_flags;
 mod mcp_sync;
 #[path = "manager/otto_tools_env.rs"]
 mod otto_tools_env;
+#[path = "manager/runtime_spawn.rs"]
+mod runtime_spawn;
 #[path = "manager/session_files.rs"]
 mod session_files;
 #[path = "manager/shutdown_guard.rs"]

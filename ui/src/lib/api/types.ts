@@ -5,6 +5,7 @@
 // `lib/api/types` as before; every name resolves through these re-exports.
 
 export * from './types/activity';
+export * from './types/agent-runtime';
 export * from './types/api-client';
 export * from './types/auth';
 export * from './types/automation';

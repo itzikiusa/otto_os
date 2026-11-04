@@ -581,6 +581,10 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p == "/workspaces/{id}/sessions" {
         return Require(Agents, if get { View } else { Edit });
     }
+    // Structured agent runtime: the handlers add owner-or-admin + person-only writes.
+    if p == "/workspaces/{id}/runtime-sessions" || p.starts_with("/runtime-sessions/") {
+        return Require(Agents, if get { View } else { Edit });
+    }
     if p == "/sessions" {
         // Cross-workspace live session list (tray / all-workspaces sidebar);
         // the handler owner-scopes each workspace exactly like the one above.
@@ -1475,6 +1479,7 @@ pub fn route_class(method: &Method, matched_path: &str) -> Option<RouteClass> {
                     | "/mcp/approvals/{id}/decide"
                     | "/workflow-runs/{id}/approve"
                     | "/database-changes/{id}/approve"
+                    | "/runtime-sessions/{id}/requests/{request_id}"
             )
             || p.starts_with("/state/git/")
             // MCP control-plane registry (S11-301): a server row names the

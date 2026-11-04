@@ -1,0 +1,94 @@
+//! otto-agent-protocol — the structured agent runtime (design
+//! `docs/features/threads-structured-runtime.md`).
+//!
+//! Agent CLIs run as child processes speaking a structured stdio protocol
+//! (Claude Code stream-json, Codex app-server, ACP) instead of inside a PTY.
+//! One sans-IO [`StructuredDriver`] per provider translates that protocol into
+//! Otto's normalized event stream (`otto_core::agent_runtime`); the
+//! [`AgentRuntime`] owns the processes, sequences events into a per-session
+//! replay ring, persists finished turns, and enforces one turn at a time.
+//! Spawns go through the PTY sessions' own safety pipeline
+//! (`SessionManager::prepare_runtime_spawn`: cwd refusal, folder trust,
+//! context, Seatbelt) via [`RuntimeHost`].
+//!
+//! Design ported from T3 Code (MIT, Copyright (c) 2026 T3 Tools Inc.); see
+//! the design doc for the file-by-file mapping. Drivers: [`claude`] (the
+//! Agent SDK's stream-json control protocol against `claude`), [`codex`]
+//! (`codex app-server`) and [`acp`] (Gemini `gemini --acp`, Grok `grok …
+//! agent stdio`) and [`agy`] (Antigravity's print-mode stream-json).
+
+pub mod acp;
+pub mod agy;
+pub mod claude;
+pub mod codex;
+pub mod driver;
+pub mod host;
+mod http;
+pub mod process;
+pub mod ring;
+pub mod runtime;
+
+use std::sync::Arc;
+
+use axum::Router;
+use otto_core::auth::{AuthContext, RoleChecker};
+
+pub use driver::{
+    ChildSignal, DriverError, DriverEvent, DriverFactory, DriverStep, LaunchContext, LaunchSpec,
+    StructuredDriver,
+};
+pub use host::{RuntimeHost, SessionManagerHost};
+pub use runtime::{AgentRuntime, RuntimeConfig};
+
+/// The daemon surface the `/runtime-sessions` router runs against
+/// (otto-server's impl: `modules/ctx_impls.rs`).
+pub trait RuntimeCtx: Clone + Send + Sync + 'static {
+    fn agent_runtime(&self) -> &AgentRuntime;
+    fn roles(&self) -> &Arc<dyn RoleChecker>;
+    /// A person's own credential (not an agent session's, MCP or share token).
+    fn is_human(&self, auth: &AuthContext) -> bool;
+}
+
+/// All `/runtime-sessions` routes (handler-relative; nested under `/api/v1`).
+pub fn api_router<S: RuntimeCtx>() -> Router<S> {
+    http::api_router::<S>()
+}
+
+/// The production driver set — the providers T3 Code drives over a
+/// structured protocol: Claude (Agent SDK transport), Codex (app-server),
+/// Gemini and Grok (ACP) — plus Antigravity (`agy`'s own stream-json,
+/// where T3 Code needs an npm ACP adapter). A missing CLI fails the spawn, not the create.
+pub fn default_drivers() -> Arc<dyn DriverFactory> {
+    use otto_core::agent_runtime::RuntimeProvider;
+    Arc::new(
+        |provider: RuntimeProvider| -> Option<Box<dyn StructuredDriver>> {
+            Some(match provider {
+                RuntimeProvider::Claude => Box::new(claude::ClaudeDriver::new()),
+                RuntimeProvider::Codex => Box::new(codex::CodexDriver::with_program("codex")),
+                RuntimeProvider::Gemini => Box::new(acp::AcpDriver::gemini()),
+                RuntimeProvider::Grok => Box::new(acp::AcpDriver::grok()),
+                RuntimeProvider::Agy => Box::new(agy::AgyDriver::with_program("agy")),
+            })
+        },
+    )
+}
+
+/// The daemon's runtime: SessionManager safety, `publish` for WS delivery
+/// (otto-server passes its streaming-path `publish_stream`).
+pub fn daemon_runtime(
+    pool: otto_state::DbPool,
+    manager: Arc<otto_sessions::SessionManager>,
+    publish: impl Fn(otto_core::event::Event) + Send + Sync + 'static,
+) -> AgentRuntime {
+    let host = SessionManagerHost {
+        manager,
+        workspaces: otto_state::WorkspacesRepo::new(pool.clone()),
+        publish: Box::new(publish),
+    };
+    AgentRuntime::new(
+        otto_state::AgentRuntimeRepo::new(pool),
+        Arc::new(host),
+        default_drivers(),
+        RuntimeConfig::default(),
+    )
+}

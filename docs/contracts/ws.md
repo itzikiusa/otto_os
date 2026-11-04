@@ -587,7 +587,7 @@ Every variant of `otto_core::event::Event` (`crates/otto-core/src/event.rs`). Th
 the `type` field (snake_case of the variant name); the remaining keys are the payload.
 Delivery scope: **session-family events** (`session_status`, `session_created`,
 `session_meta_updated`, `session_renamed`, `session_archive_changed`, `session_removed`, `session_attention`, `trail_appended`,
-`tasks_updated`, `transcript_appended`, `transcript_live`, `artifact_added`) reach only the session's owner (`created_by`), a workspace
+`tasks_updated`, `transcript_appended`, `transcript_live`, `artifact_added`, `agent_runtime_event`) reach only the session's owner (`created_by`), a workspace
 `admin`, or root — and only after the `viewer`+ membership gate on the event's
 `workspace_id`; other **workspace-scoped events** (improvement,
 `api_history_appended`) reach
@@ -1506,6 +1506,46 @@ poll).
 - `artifact_added` — the fold found a new artifact (written file, PR link, image).
   Carries the full `Artifact`. Session-family scoped.
 - TypeScript types live in `ui/src/lib/api/types.ts` (`// ── Transcript`).
+
+### `agent_runtime_event`
+
+Structured agent runtime (`docs/features/threads-structured-runtime.md`,
+REST: api.md "Structured agent runtime"). One sequenced provider-runtime
+event of a runtime session (T3 Code's `ProviderAdapterV2Event` model, MIT),
+published on the streaming path, never through the internal bus.
+
+```json
+{"type":"agent_runtime_event","workspace_id":"…","session_id":"…","owner_id":"…","event":{"session_id":"…","sequence":42,"ts":"2026-11-04T10:00:00Z","type":"turn_item.updated","turn_item":{"id":"…","turn_id":"…","ordinal":3,"status":"running","title":null,"started_at":"…","completed_at":null,"updated_at":"…",…assistant_message fields: message_id, text "Hel", streaming true…}}}
+```
+
+- `event` is a `RuntimeEvent`: `session_id`, `sequence`, `ts` plus one of
+  (`type` tag → payload): `provider_session.updated {provider_session}`,
+  `provider_thread.updated {provider_thread}`, `provider_turn.updated
+  {provider_turn}`, `turn_item.updated {turn_item}`,
+  `runtime_request.updated {runtime_request}`, `plan.updated {plan}`,
+  `command_output.delta {item_id, chunk}`, `turn.terminal {turn_id, status:
+  completed|interrupted|cancelled|failed, failure?, reason?}`. Entities are
+  sent WHOLE (replace by id); `turn_item.type` ∈ `user_message |
+  assistant_message | reasoning | todo_list | file_change |
+  command_execution | dynamic_tool | web_search | approval_request |
+  system_notice | error`. Streaming upserts of one item arrive at most once
+  per 50 ms (always the latest text). Shapes:
+  `ui/src/lib/api/types/agent-runtime.ts`.
+- What drives the UI (as in T3 Code's web client): streaming text =
+  `assistant_message` / `reasoning` items with `streaming: true`; tool cards
+  = `command_execution` / `file_change` / `dynamic_tool` / `web_search` items (+ live
+  `command_output.delta`); approvals = `runtime_request.updated` with
+  `status: pending` paired with its `approval_request` item (answer via
+  `POST /runtime-sessions/{id}/requests/{request_id}`); plan =
+  `plan.updated` / `todo_list`; working = `provider_session.status`
+  `running` / `waiting`, stop enabled while a turn is `running`.
+- Session-family scoped, owner inline: delivered to `owner_id` (the
+  session's creator), a workspace admin, or root — after the `viewer`
+  membership gate. Runtime sessions are not `sessions` rows, so the owner
+  rides the event instead of being looked up.
+- A client that missed events (socket `resync`, reconnect, a `sequence`
+  gap) calls `GET /runtime-sessions/{id}/events?after_sequence=<last seen>`
+  and drops WS events whose `sequence` it already holds.
 
 ### `browser_tab_updated` / `browser_annotation_added`
 

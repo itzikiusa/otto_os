@@ -77,6 +77,18 @@ impl otto_aws::AwsCtx for ServerCtx {
     }
 }
 
+impl otto_agent_protocol::RuntimeCtx for ServerCtx {
+    fn agent_runtime(&self) -> &otto_agent_protocol::AgentRuntime {
+        &self.agent_runtime
+    }
+    fn roles(&self) -> &Arc<dyn RoleChecker> {
+        &self.roles
+    }
+    fn is_human(&self, auth: &otto_core::auth::AuthContext) -> bool {
+        crate::ui_bridge::is_human(auth)
+    }
+}
+
 impl otto_k8s::K8sCtx for ServerCtx {
     fn pool(&self) -> otto_state::DbPool {
         self.pool.clone()

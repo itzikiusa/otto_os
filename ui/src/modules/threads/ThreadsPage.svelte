@@ -14,7 +14,8 @@
   import { pageChrome } from '../../lib/stores/pageChrome.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
-  import { ws } from '../../lib/stores/workspace.svelte';
+  import { SCRATCH_WORKSPACE_ID, ws } from '../../lib/stores/workspace.svelte';
+  import { toastError } from '../../lib/toastError';
   import { sessionState } from '../../lib/status';
   import StartRoomModal from '../rooms/StartRoomModal.svelte'; // ui-guards: allow — shared session room modal
   import NewThreadStage from './NewThreadStage.svelte';
@@ -28,6 +29,8 @@
   import { threadsChrome } from './threadsChrome.svelte';
   import ThreadSidebar from './ThreadSidebar.svelte';
   import { buildThreadMenu } from './threadMenu';
+  import { runtimeThreadMenu } from './runtime/runtimeMenu';
+  import { asThreadSession, isRuntimeThread, runtimeThreads } from './runtime/runtimeThreads.svelte';
   import { isThreadSession, projectNameFromCwd } from './threadsHelpers';
   import { threads, type ThreadsLayoutMode } from './threadsStore.svelte';
 
@@ -45,12 +48,20 @@
     viewport.isPhone || viewport.isTablet || (stageWidth > 0 && stageWidth < 860),
   );
 
-  const liveThreadIds = $derived(
-    ws.sessions.filter((s) => !s.archived && isThreadSession(s)).map((s) => s.id),
-  );
+  const liveThreadIds = $derived([
+    ...ws.sessions.filter((s) => !s.archived && isThreadSession(s)).map((s) => s.id),
+    ...runtimeThreads.live().map((s) => s.id),
+  ]);
 
   // Subscribe to live cross-session messages + MCP DB activity while mounted.
   onMount(() => threads.mountLive());
+  // Structured runtime threads: their rows, and live events for open ones.
+  onMount(() => runtimeThreads.mount());
+  $effect(() => {
+    for (const wid of new Set([ws.currentId, ws.scratch ? SCRATCH_WORKSPACE_ID : null])) {
+      if (wid) untrack(() => runtimeThreads.load(wid)).catch((e: unknown) => toastError('Couldn’t load threads', e));
+    }
+  });
 
   // Like T3, no side-panel rail and no status bar while Threads is open (the
   // sidebar's status dots carry the working count). Not persisted: a saved
@@ -118,7 +129,8 @@
       lastRoutedId = routeSessionId;
       untrack(() => {
         void ws.ensureSession(routeSessionId).then((s) => {
-          if (s) threads.selectThread(s.id, { syncRoute: false });
+          const id = s?.id ?? runtimeThreads.get(routeSessionId)?.id;
+          if (id) threads.selectThread(id, { syncRoute: false });
         });
       });
     } else if (!routeSessionId) {
@@ -128,9 +140,11 @@
 
   // Keep paneIds clean when sessions are loaded; pick an initial thread or show NewThreadStage.
   $effect(() => {
-    const knownThreads = new Set(liveThreadIds);
+    // Closed runtime threads stay open read-only (their History row opens them).
+    const knownThreads = new Set([...liveThreadIds, ...Object.keys(runtimeThreads.byId)]);
     const anyLoaded = ws.sessions.some((s) => !s.archived);
     if ((!ws.listSettled || ws.sessionsLoading) && !anyLoaded) return;
+    if (ws.currentId && !runtimeThreads.loaded[ws.currentId]) return;
     untrack(() => {
       const valid = threads.paneIds.filter((id) => knownThreads.has(id));
       if (valid.length !== threads.paneIds.length) {
@@ -202,9 +216,12 @@
   );
 
   const showWelcomeStage = $derived(threads.newDraftMode || threads.paneIds.length === 0);
-  const focused = $derived(
-    !showWelcomeStage && threads.focusedSessionId ? (ws.getSession(threads.focusedSessionId) ?? null) : null,
-  );
+  const focused = $derived.by(() => {
+    const id = showWelcomeStage ? null : threads.focusedSessionId;
+    if (!id) return null;
+    const rt = runtimeThreads.get(id);
+    return ws.getSession(id) ?? (rt ? asThreadSession(rt) : null);
+  });
   const focusedState = $derived(
     focused
       ? sessionState(focused, ws.statusMap[focused.id] ?? focused.status, ws.needsYou[focused.id] === true, {
@@ -240,7 +257,8 @@
   }
 
   function openThreadMenu(e: MouseEvent): void {
-    if (focused) ctxMenu.show(e, buildThreadMenu(focused, { onstartroom: (sid) => (roomSessionId = sid) }));
+    if (focused && isRuntimeThread(focused)) ctxMenu.show(e, runtimeThreadMenu(focused.id));
+    else if (focused) ctxMenu.show(e, buildThreadMenu(focused, { onstartroom: (sid) => (roomSessionId = sid) }));
   }
 
   function toggleLeftBar(): void {

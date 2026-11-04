@@ -18,7 +18,7 @@ function fixture() {
     './ui.svelte': { ui: {}, clientId: () => 'test' }, '../win': { winKey: (k: string) => k },
     './splitLayout.svelte': { layout: { panes: [], focusedIndex: 0 } }, './splitLayout': { MAX_PANES: 15, LS_PANES: 'panes' },
     '../storage': { lsGet: () => null, lsSet() {} }, '../desktop': { isEmbedded: false },
-    './sessionScope': sessionScope, './sessionPatch': sessionPatch, './sessionBuckets': sessionBuckets,
+    './runtimeAttention.svelte': { runtimeFlagged: () => 0 }, './sessionScope': sessionScope, './sessionPatch': sessionPatch, './sessionBuckets': sessionBuckets,
     '../lazy-component.svelte': { whenIdle: () => () => {} },
   });
   ws.currentId = 'w';

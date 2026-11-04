@@ -19,6 +19,12 @@
   import { harnessLabel, isPlainShellSession, isThreadSession, sessionBranch } from './threadsHelpers';
   import { threadRepos } from './threadRepos.svelte';
   import { threads } from './threadsStore.svelte';
+  import { lazyComponent } from '../../lib/lazy-component.svelte';
+  import LazyMount from '../../lib/components/LazyMount.svelte';
+  import { runtimeThreadMenu } from './runtime/runtimeMenu';
+  import { asThreadSession, runtimeThreads } from './runtime/runtimeThreads.svelte';
+  // The structured-runtime conversation loads with the first runtime thread.
+  const RuntimeThread = lazyComponent(() => import('./runtime/RuntimeThread.svelte'));
 
   interface Props {
     paneId: string;
@@ -28,7 +34,8 @@
   }
   let { paneId, focused, multiPane, onstartroom }: Props = $props();
 
-  const session = $derived(ws.getSession(paneId) ?? null);
+  const runtime = $derived(runtimeThreads.get(paneId));
+  const session = $derived(ws.getSession(paneId) ?? (runtime ? asThreadSession(runtime) : null));
   const rawStatus = $derived(ws.statusMap[paneId] ?? session?.status ?? 'idle');
   const needsYou = $derived(ws.needsYou[paneId] === true);
   const paneState = $derived(sessionState(session, rawStatus, needsYou, { stale: events.state !== 'connected' }));
@@ -50,6 +57,19 @@
   // Terminal drawer + peer bar live in the store so the page's top bar can
   // drive the focused pane (single view has no pane header of its own).
   const showTerminal = $derived(threads.isTerminalOpen(paneId));
+  // A runtime thread has no terminal of its own: its drawer is a plain shell in
+  // the thread's folder (`meta.terminal_of`, out of the thread lists like the
+  // dock's shells), started on first open — once; a failure toasts.
+  const runtimeShell = $derived(runtime ? (ws.sessions.find((s) => !s.archived && s.meta?.terminal_of === paneId) ?? null) : null);
+  let shellTried = false;
+  $effect(() => {
+    if (!showTerminal || !runtime || runtimeShell || shellTried || !ws.listSettled) return;
+    shellTried = true;
+    const scratch = runtime.workspace_id === SCRATCH_WORKSPACE_ID && ws.currentId !== SCRATCH_WORKSPACE_ID;
+    const meta = { surface: 'threads', threads_terminal: true, terminal_of: paneId };
+    ws.createSessionQuiet({ kind: 'agent', provider: 'shell', title: `Terminal · ${runtime.title}`, cwd: runtime.cwd, meta }, { scratch })
+      .catch((e: unknown) => toastError('Couldn’t open a terminal', e));
+  });
   const showPeerBar = $derived(threads.peerBarFor === paneId);
   const toggleTerminal = (): void => threads.toggleTerminal(paneId);
   let peerTarget = $state('broadcast');
@@ -94,7 +114,8 @@
     const next = draftTitle.trim();
     if (!session || !next || next === session.title) return;
     try {
-      await ws.renameSession(paneId, next);
+      if (runtime) await runtimeThreads.rename(paneId, next);
+      else await ws.renameSession(paneId, next);
     } catch (e) {
       toastError('Couldn’t rename thread', e);
     }
@@ -183,7 +204,8 @@
   }
 
   function openPaneMenu(e: MouseEvent): void {
-    if (session) ctxMenu.show(e, buildThreadMenu(session, { onstartroom }));
+    if (runtime) ctxMenu.show(e, runtimeThreadMenu(paneId));
+    else if (session) ctxMenu.show(e, buildThreadMenu(session, { onstartroom }));
   }
   function paneFocus(node: HTMLElement): { destroy(): void } {
     const mark = (): void => {
@@ -337,6 +359,8 @@
           Close pane
         </button>
       </EmptyState>
+    {:else if runtime}
+      <LazyMount lazy={RuntimeThread} what="conversation" variant="panel" props={{ sessionId: paneId, focused }} />
     {:else if isPlainShellSession(session)}
       <div class="tp-shell-wrap otto-force-dark">
         <LazyTerminal sessionId={paneId} forceDark autoFocus={focused} resumeOnOpen={focused} />
@@ -357,7 +381,9 @@
     {/if}
   </div>
 
-  {#if showTerminal && session && !isPlainShellSession(session)}
+  {#if showTerminal && runtime}
+    {#if runtimeShell}<ThreadTerminalDrawer sessionId={runtimeShell.id} title={runtime.title} onclose={toggleTerminal} />{/if}
+  {:else if showTerminal && session && !isPlainShellSession(session)}
     <ThreadTerminalDrawer
       sessionId={paneId}
       title={session.title}

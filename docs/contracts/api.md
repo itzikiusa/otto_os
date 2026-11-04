@@ -79,7 +79,7 @@ connection library unusable for every non-root account.)
 | 14 | DELETE /api/v1/workspaces/{id} | ws admin | — | 204 (archives) |
 | 15 | GET /api/v1/workspaces/{id}/members | ws admin | — | `MemberEntry[]` |
 | 16 | PUT /api/v1/workspaces/{id}/members | ws admin | SetMembersReq | `MemberEntry[]` — atomic full replacement; invalid or duplicate users return 400 without changing existing membership |
-| 16a | GET /api/v1/workspaces/scratch | Agents:View | — | `Workspace` — the daemon's system-owned **scratch** workspace (`id: "scratch"`, `root_path` = daemon `$HOME`). Hidden from `GET /workspaces`; every authenticated user holds Editor there implicitly, so `POST /workspaces/scratch/sessions` starts a **workspace-less session** and `GET /workspaces/scratch/sessions` lists the caller's own (root: all). `PATCH`/`DELETE /workspaces/scratch` and member edits → 409. **Only the session routes exist under `scratch`** (`…/sessions…`, plus `…/broadcast`, `…/activity/summary` and `…/members` for the 409 above), **plus Workbench** (`…/workbench…`, owner-scoped — every query binds the caller, so the implicit Editor shares nothing; see the Workbench section): every other `/workspaces/scratch/…` route family answers **404**, so the implicit Editor never reaches another workspace-scoped API. |
+| 16a | GET /api/v1/workspaces/scratch | Agents:View | — | `Workspace` — the daemon's system-owned **scratch** workspace (`id: "scratch"`, `root_path` = daemon `$HOME`). Hidden from `GET /workspaces`; every authenticated user holds Editor there implicitly, so `POST /workspaces/scratch/sessions` starts a **workspace-less session** and `GET /workspaces/scratch/sessions` lists the caller's own (root: all). `PATCH`/`DELETE /workspaces/scratch` and member edits → 409. **Only the session routes exist under `scratch`** (`…/sessions…` and `…/runtime-sessions` — structured runtime sessions, owner-scoped the same way — plus `…/broadcast`, `…/activity/summary` and `…/members` for the 409 above), **plus Workbench** (`…/workbench…`, owner-scoped — every query binds the caller, so the implicit Editor shares nothing; see the Workbench section): every other `/workspaces/scratch/…` route family answers **404**, so the implicit Editor never reaches another workspace-scoped API. |
 | 16b | PATCH\|DELETE /api/v1/workspaces/scratch | Agents:View | — | always **409** `the scratch workspace is system-owned` — the scratch workspace cannot be renamed or deleted |
 | 17 | GET /api/v1/workspaces/{id}/sessions | ws viewer, **owner-scoped** (non-admins see only their own sessions; root/ws-admin get the full list) | optional query `?archived=&kind=&source=&status=&limit=&before=&foreground=&with_sources=&ids=` (all narrowing and all applied **in SQL**; `source=none` = sessions with no string `meta.source`; `foreground=true` = the rows the sidebar lists — every connection session plus the agents `Session::is_foreground_agent` accepts (no string `meta.source` in `BACKGROUND_SESSION_SOURCES`), plus agents whose source is in the comma list `with_sources` (≤ 64; e.g. `channel` for the Slack/Telegram groups); `foreground=false` = background agents only; `ids` = comma list of session ids (≤ 64, more → 400) — fetch-by-id for open tabs; `limit` (1–1000) keeps the **newest** N matching rows, still returned oldest-first; `before` = RFC 3339 cursor — only rows created strictly before it, pass the oldest row's `created_at` to page back; a malformed `before` → 400) | `Session[]` oldest-first — each row carries transient `live: bool` + `viewers: number` + `held: bool` (the live PTY runs in a PTY holder AND `session_persistence` is on, so a daemon restart leaves it running; `false` otherwise). Callers that only need live rows should pass `archived=false` (the archived history is the bulk of the table). The Agents sidebar asks for `?archived=false&foreground=true&with_sources=channel` (+ sources a mounted panel needs, e.g. `swarm`), pages the Archived section with `?archived=true&limit=100&before=…` and probes it with `?archived=true&limit=1` — a workspace's background review agents (~99 % of its rows) are never shipped to it |
 | 17b | GET /api/v1/sessions | Agents:View; each workspace **owner-scoped** exactly as #17 (root: every workspace, full rows; otherwise every workspace the caller is a member of — full rows where they are ws-admin, their own rows elsewhere — plus their own `scratch` sessions) | same query as #17; **`archived` defaults to `false`** here unless `ids` is given (a fetch-by-id returns the rows whatever their archived state — the UI's `ensureSession` / open-tab path) | `Session[]` (same shape as #17) across all of the caller's workspaces in ONE query — the tray / all-workspaces sidebar feed, replacing one #17 call per workspace |
@@ -371,7 +371,8 @@ therefore also reads a **credential class** for each `(method, route)`
   and the approval decisions `/mcp/approvals/{id}/decide`,
   `/workflow-runs/{id}/approve`, `/runs/{id}/approve`,
   `/database-changes/{id}/approve`,
-  `/workspaces/{wid}/workgraph/approvals/{aid}/decide` — and, structurally,
+  `/workspaces/{wid}/workgraph/approvals/{aid}/decide`,
+  `/runtime-sessions/{id}/requests/{request_id}` — and, structurally,
   EVERY write whose last segment is `approve` / `decide` / `reject` /
   `rollback` except the Outward `/repos/{id}/prs/{number}/approve`
   (S11-308, S8-304: e.g. `/improvement/edits/{eid}/{approve,reject,rollback}`,
@@ -749,6 +750,79 @@ and keeps unmatched `user` rows after the plan — ids never regenerate. Claude
 (`tool_response.task.id` / `tool_input.taskId`). `GET …/activity/summary` counts
 ALL rows, so board-added tasks show in `done/total`. Codex publishes no plan:
 its list holds only user-added tasks.
+
+## Structured agent runtime (`/runtime-sessions`)
+
+Design: `docs/features/threads-structured-runtime.md` (a port of T3 Code's
+provider runtime, MIT). A **runtime session** drives an agent CLI over a
+structured stdio protocol instead of a PTY; its events are T3 Code's
+provider-runtime **entity upserts** (`otto_core::agent_runtime`, mirrored in
+`ui/src/lib/api/types/agent-runtime.ts`): a turn item is re-sent whole with
+its accumulated text and a `streaming` flag; `command_output.delta` is the
+only delta. Runtime sessions are their own rows (`agent_runtime_sessions`),
+not `sessions`: no PTY route, terminal socket or idle sweep touches them.
+Every spawn passes the PTY sessions' safety pipeline
+(`SessionManager::prepare_runtime_spawn`: cwd refusal, folder trust, context
+provisioning, Seatbelt); a named provider account or a workspace network
+profile is refused (400) rather than bypassed. Drivers (what T3 Code runs,
+see the design doc's provider table): `claude` — the Agent SDK's stream-json
+control protocol against the `claude` CLI (`--permission-mode default`);
+`codex` — `codex app-server` (`approvalPolicy: untrusted`); `gemini` — ACP
+via `gemini --acp`; `grok` — ACP via `grok --permission-mode default agent
+stdio`; `agy` — Antigravity's print-mode stream-json (`agy --print=
+--input-format stream-json --output-format stream-json`). Every tool approval
+reaches a person; no auto-approval mode exists. Headless `agy` cannot ask: a
+tool it needs approval for is denied (a `system_notice` item names it) unless
+the user's own agy `permissions.allow` rules cover it.
+Streaming upserts of one item are coalesced to at most one per **50 ms**
+(the latest text always follows; nothing is dropped).
+
+RBAC: `Agents` View for every GET, `Agents` Edit for every POST
+(`policy.rs`); every session route additionally requires workspace `viewer`
+and owner-or-admin (root passes); listing returns the caller's own sessions
+(all of them for a workspace admin / root). Every write requires a **person's
+credential** — an agent session's, MCP or share credential gets **403**; the
+request answer is also an `Admin`-class approval gate (above).
+
+`RuntimeSession`: `{id, workspace_id, provider: "claude"|"codex"|"gemini"|"grok"|"agy",
+title, cwd, model?, native_thread_id?, status, created_by, created_at,
+last_active_at, last_sequence}`; `status` ∈ `starting | idle | working |
+awaiting_permission | dormant | closed` (`dormant` = no process; the next
+prompt respawns it and resumes `native_thread_id` — Claude `--resume`, Codex
+`thread/resume`, ACP `session/load`, agy `--conversation`; a provider that cannot resume it starts
+a fresh conversation).
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| GET /workspaces/{id}/runtime-sessions | ws viewer | — | `RuntimeSession[]`, newest activity first (own; all for admin/root), max 500 |
+| POST /workspaces/{id}/runtime-sessions | ws editor, person | `{provider, cwd?, title?, model?}` (`cwd` absolute, default the workspace root) | **201** `RuntimeSession`. The child is spawned (and its handshake started) before the response: a refused folder, a missing CLI or a provider without a driver fails the create (**400**) and leaves no row |
+| GET /runtime-sessions/{id} | ws viewer + owner-or-admin | — | `RuntimeSession` with its live `status` |
+| PATCH /runtime-sessions/{id} | owner-or-admin, person | `UpdateRuntimeSessionReq {title}` (trimmed, non-empty) | `RuntimeSession` with the new title. Allowed on a `closed` session too (it stays listed as history). **400** empty title |
+| POST /runtime-sessions/{id}/prompt | owner-or-admin, person | `{text, model?, effort?, images?: [{mime, data_base64}]}` — `text` non-empty unless `images` is; body ≤ 32 MiB | **202** `{turn_id, sequence}` (`sequence` of the turn's first `provider_turn.updated`). Respawns a `dormant` session first. `model` sticks (it becomes the session's `model`): Claude switches live (`set_model`), Codex passes it on `turn/start`, ACP and agy restart the CLI with the new model and resume the thread. `effort` (Claude `apply_flag_settings` `effortLevel`, Codex `turn/start` `effort`) and `images` (Claude image blocks, Codex `image` data-URL inputs, ACP `image` blocks when the agent advertises `promptCapabilities.image`) are refused with **400** where unsupported; agy takes text only. **409** while a turn runs (one turn at a time) or after `close`. A CLI that refuses its handshake (signed out, unsupported account) fails the running turn with that failure, or — when it refused before the prompt reached it — answers **400** `the agent could not start: <reason>`; either way the session goes `dormant` with `provider_session.last_error`, and the next prompt respawns it |
+| POST /runtime-sessions/{id}/interrupt | owner-or-admin, person | — | `{interrupted}` — `false` when no turn was running. Pending requests → `cancelled`; the provider ends the turn (`turn.terminal` `interrupted`); if it has not within 10 s its process group is killed and the turn ends `interrupted` anyway |
+| POST /runtime-sessions/{id}/requests/{request_id} | owner-or-admin, person (`Admin` class) | `{decision}` ∈ `accept \| accept_for_session \| accept_always \| decline \| cancel` — one of the request's `approval_request` item `options[].decision` (`cancel` always allowed) | **204**; the request → `resolved` with the decision. **404** unknown / no longer pending, **400** a decision that was not offered |
+| POST /runtime-sessions/{id}/close | owner-or-admin, person | — | `RuntimeSession` (`status: closed`). Ends a running turn `interrupted`, closes the child's stdin (SIGTERM / SIGKILL to its group after 3 s each). Idempotent; later prompts **409** |
+| GET /runtime-sessions/{id}/events?after_sequence= | ws viewer + owner-or-admin | `after_sequence` (default 0) | `RuntimeReplay` — `{kind:"events", events, last_sequence}` or `{kind:"snapshot", snapshot_sequence, snapshot}` |
+
+**Replay** (T3 Code `subscribeThread`). `sequence` is per session, strictly
+increasing and never reused, also across daemon restarts. With
+`after_sequence = N`: `N` ≥ the latest → `events: []`; the in-memory ring
+(4096 events / 8 MiB) still holds every event after `N` and they are at most
+**128 events / 1 MiB** → exactly those (`kind: "events"`); otherwise
+`kind: "snapshot"`: `RuntimeSnapshot {provider_session, provider_thread,
+turns[], turn_items[] (by ordinal), runtime_requests[], plans[]}` — replace
+everything and continue after `snapshot_sequence`. Live delivery is the
+`agent_runtime_event` WS event (`docs/contracts/ws.md`); apply events whose
+`sequence` is above the one you hold, replay on any gap.
+
+**Persistence and restart.** Every entity's latest state is stored
+(`agent_runtime_entities`), streaming text once it settles; a fresh daemon
+serves snapshots from it. Structured children do not survive a daemon
+restart (their stdio dies with `ottod`). On boot every open turn becomes
+`interrupted`, its open items `interrupted`, every pending request `expired`
+with `response_capability: {type:"not_resumable"}`, the provider session
+`stopped` (T3 Code `reconcileProjection`, which says `cancelled`); the next
+prompt respawns the CLI and resumes its own session id.
 
 ## Connection sections (sidebar grouping)
 

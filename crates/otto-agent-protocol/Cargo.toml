@@ -1,0 +1,54 @@
+[package]
+name = "otto-agent-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Structured agent runtime: agent CLIs driven over stdio protocols (stream-json / app-server / ACP) behind one driver trait, the normalized event stream + replay ring, and the /runtime-sessions router"
+
+[dependencies]
+otto-core = { workspace = true }
+otto-state = { workspace = true }
+# The PTY spawn's safety pipeline (cwd refusal, trust, context, Seatbelt) via
+# `SessionManager::prepare_runtime_spawn`; `CommandSpec` is its spec type.
+otto-sessions = { workspace = true }
+otto-pty = { workspace = true }
+tokio = { workspace = true }
+axum = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+dashmap = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+# `--session-id` for a fresh Claude thread (the CLI requires a UUID).
+uuid = { workspace = true }
+# ACP wire types (the official SDK's schema; protocol v1). Only the types: the
+# runtime owns the process and the JSON-RPC framing (see src/acp.rs).
+agent-client-protocol = { version = "5.0.0", default-features = false }
+# killpg: interrupt / kill the child's whole process group.
+libc = "0.2.191"
+
+[dev-dependencies]
+sqlx = { workspace = true }
+tempfile = { workspace = true }
+
+# Test doubles: an ACP agent, a Codex app-server and agy's print-mode
+# stream-json over stdio. Integration tests reach them via
+# `CARGO_BIN_EXE_otto-fake-{agent,codex,agy}`.
+[[bin]]
+name = "otto-fake-agent"
+path = "src/bin/otto-fake-agent.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "otto-fake-codex"
+path = "src/bin/otto-fake-codex.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "otto-fake-agy"
+path = "src/bin/otto-fake-agy.rs"
+test = false
+doc = false

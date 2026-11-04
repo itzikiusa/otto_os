@@ -28,6 +28,7 @@ name: macOS
 on:
   pull_request:
     paths:
+      - 'crates/otto-agent-protocol/**'
       - 'crates/otto-agent-run/**'
       - 'crates/otto-apiclient/**'
       - 'crates/otto-assistant/**'
@@ -64,6 +65,7 @@ on:
   push:
     branches: [main]
     paths:
+      - 'crates/otto-agent-protocol/**'
       - 'crates/otto-agent-run/**'
       - 'crates/otto-apiclient/**'
       - 'crates/otto-assistant/**'

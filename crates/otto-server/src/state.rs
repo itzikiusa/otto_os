@@ -162,6 +162,8 @@ pub struct ServerCtx {
     /// the in-flight `otto.ui_*` commands routed to them. In-memory by design:
     /// a daemon restart drops every window registration and pending command.
     pub ui_bridge: Arc<crate::ui_bridge::UiBridge>,
+    /// Structured agent runtime (`/runtime-sessions`, otto-agent-protocol).
+    pub agent_runtime: otto_agent_protocol::AgentRuntime,
 }
 
 impl ServerCtx {

@@ -79,7 +79,8 @@ test-group = 'timing'
 threads-required = 'num-test-threads'
 
 # Crates whose tests spawn real shells / PTYs / git children (goal-loop
-# verification commands, agent-run session drives).
+# verification commands, agent-run session drives, the structured runtime's
+# fake agent).
 [[profile.default.overrides]]
-filter = 'package(otto-pty) | package(otto-sessions) | package(otto-sandbox) | package(otto-automation) | package(otto-agent-run)'
+filter = 'package(otto-pty) | package(otto-sessions) | package(otto-sandbox) | package(otto-automation) | package(otto-agent-run) | package(otto-agent-protocol)'
 test-group = 'processes'
